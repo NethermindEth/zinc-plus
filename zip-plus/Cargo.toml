@@ -9,5 +9,21 @@ license.workspace = true
 [dependencies]
 crypto-primitives = { workspace = true }
 
+ark-std = "0.5"
+ark-ff = "0.5"
+ark-serialize = "0.5"
+
+itertools = "0.14"
+thiserror = "2.0"
+crypto-bigint = "0.6"
+displaydoc = "0.2"
+sha3 = "0.10"
+num-traits = "0.2"
+num-integer = "0.1"
+rand = "0.9"
+zeroize = "1.8"
+num-bigint = "0.4"
+crypto-primes = "0.6"
+
 [lints]
 workspace = true
