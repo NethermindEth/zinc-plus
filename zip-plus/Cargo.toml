@@ -1,5 +1,5 @@
 [package]
-name = "examples"
+name = "zip-plus"
 publish = false
 version.workspace = true
 edition.workspace = true
@@ -7,5 +7,7 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
-# TODO(template) update the crate name
-template_crate = { path = "../template_crate" }
+crypto-primitives = { workspace = true }
+
+[lints]
+workspace = true

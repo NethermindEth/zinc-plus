@@ -30,8 +30,8 @@ After cloning the repository, follow the instructions below to run the documenta
 cargo doc
 ```
 
-Docs for `TODO(template) template_crate`:
+Docs for `zip-plus`:
 
 ```sh
-RUSTDOCFLAGS="--html-in-header katex-header.html" cargo doc --no-deps -p template_crate --open
+RUSTDOCFLAGS="--html-in-header katex-header.html" cargo doc --no-deps -p zip-plus --open
 ```

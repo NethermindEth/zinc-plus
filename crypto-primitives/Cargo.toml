@@ -1,0 +1,12 @@
+[package]
+name = "crypto-primitives"
+publish = false
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

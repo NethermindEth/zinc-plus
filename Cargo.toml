@@ -1,26 +1,20 @@
-
-# TODO(template) update for the crate name
 [workspace]
-members = ["examples", "template_crate"]
+members = ["crypto-primitives", "zip-plus"]
 resolver = "2"
-default-members = ["template_crate"]
+default-members = ["crypto-primitives", "zip-plus"]
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
-# TODO(template) update for your repository
-repository = "https://github.com/NethermindEth/rust-template"
-license = "Apache-2.0" # TODO(template) update license if needed
+edition = "2024"
+repository = "https://github.com/NethermindEth/zinc-plus"
+license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+crypto-primitives = { path = "crypto-primitives" }
 
 [workspace.lints.rust]
-missing_docs = "deny"
-# TODO(template) if you use any unsafe code, then running miri in CI is a must
-# if for a crate in the workspace you need an unsafe code
-# prefer to preserve forbid for the workspace
-# and allowing only at a specific crate level 
+missing_docs = "allow"  # TODO(alex): replace with "deny" once code has been more-or-less stabilized
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
