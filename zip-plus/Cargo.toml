@@ -24,6 +24,11 @@ rand = "0.9"
 zeroize = "1.8"
 num-bigint = "0.4"
 crypto-primes = "0.6"
+rayon = { version = "1.10", optional = true }
 
 [lints]
 workspace = true
+
+
+[features]
+parallel = ["dep:rayon"]

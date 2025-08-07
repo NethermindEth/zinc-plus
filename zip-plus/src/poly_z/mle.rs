@@ -65,7 +65,6 @@ pub(crate) fn swap_bits(x: usize, a: usize, b: usize, n: usize) -> usize {
     x ^ global_xor_mask
 }
 
-pub use dense::build_eq_x_r;
 /// Exports
 pub use dense::DenseMultilinearExtension;
 

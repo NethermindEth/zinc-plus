@@ -11,13 +11,9 @@ use ark_std::{
 #[cfg(feature = "parallel")]
 use rayon::iter::*;
 
-use super::{swap_bits, MultilinearExtension};
-use crate::{
-    poly::ArithErrors,
-    // poly_f::mle::DenseMultilinearExtension as DenseMultilinearExtensionF,
-    traits::{Field, FieldMap, Integer},
-};
-use crypto_primitives::{Matrix, SparseMatrix};
+use super::{MultilinearExtension, swap_bits};
+use crate::traits::Integer;
+use crypto_primitives::Matrix;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DenseMultilinearExtension<I> {
@@ -44,7 +40,8 @@ impl<I: Integer> DenseMultilinearExtension<I> {
         // assert that the number of variables matches the size of evaluations
         assert!(
             evaluations.len() <= 1 << num_vars,
-            "The size of evaluations should not exceed 2^num_vars. \n eval len: {:?}. num vars: {num_vars}", evaluations.len()
+            "The size of evaluations should not exceed 2^num_vars. \n eval len: {:?}. num vars: {num_vars}",
+            evaluations.len()
         );
 
         if evaluations.len() != 1 << num_vars {
@@ -63,12 +60,12 @@ impl<I: Integer> DenseMultilinearExtension<I> {
     }
 
     /// Returns the dense MLE from the given matrix, without modifying the original matrix.
-    pub fn from_matrix(matrix: &SparseMatrix<I>) -> Self {
-        let n_vars: usize = (log2(matrix.num_rows) + log2(matrix.num_cols)) as usize; // n_vars = s + s'
+    pub fn from_matrix<M: Matrix<I>>(matrix: &M) -> Self {
+        let n_vars: usize = (log2(matrix.num_rows()) + log2(matrix.num_cols())) as usize; // n_vars = s + s'
 
         // Matrices might need to get padded before turned into an MLE
-        let padded_rows = matrix.num_rows.next_power_of_two();
-        let padded_cols = matrix.num_cols.next_power_of_two();
+        let padded_rows = matrix.num_rows().next_power_of_two();
+        let padded_cols = matrix.num_cols().next_power_of_two();
 
         // build dense vector representing the sparse padded matrix
         let mut v = vec![I::ZERO; padded_rows * padded_cols];
@@ -405,82 +402,3 @@ impl<I: Integer> IndexMut<usize> for DenseMultilinearExtension<I> {
 unsafe impl<I> Send for DenseMultilinearExtension<I> {}
 
 unsafe impl<I> Sync for DenseMultilinearExtension<I> {}
-
-/// This function build the eq(x, r) polynomial for any given r.
-///
-/// Evaluate
-///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
-/// over r, which is
-///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r<I: Integer>(r: &[I]) -> Result<DenseMultilinearExtension<I>, ArithErrors> {
-    let evals = build_eq_x_r_vec(r)?;
-    let mle = DenseMultilinearExtension::from_evaluations_vec(r.len(), evals);
-
-    Ok(mle)
-}
-
-/// This function build the eq(x, r) polynomial for any given r, and output the
-/// evaluation of eq(x, r) in its vector form.
-///
-/// Evaluate
-///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
-/// over r, which is
-///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r_vec<I: Integer>(r: &[I]) -> Result<Vec<I>, ArithErrors> {
-    // we build eq(x,r) from its evaluations
-    // we want to evaluate eq(x,r) over x \in {0, 1}^num_vars
-    // for example, with num_vars = 4, x is a binary vector of 4, then
-    //  0 0 0 0 -> (1-r0)   * (1-r1)    * (1-r2)    * (1-r3)
-    //  1 0 0 0 -> r0       * (1-r1)    * (1-r2)    * (1-r3)
-    //  0 1 0 0 -> (1-r0)   * r1        * (1-r2)    * (1-r3)
-    //  1 1 0 0 -> r0       * r1        * (1-r2)    * (1-r3)
-    //  ....
-    //  1 1 1 1 -> r0       * r1        * r2        * r3
-    // we will need 2^num_var evaluations
-
-    let mut eval = Vec::new();
-    build_eq_x_r_helper(r, &mut eval)?;
-
-    Ok(eval)
-}
-
-/// A helper function to build eq(x, r) recursively.
-/// This function takes `r.len()` steps, and for each step it requires a maximum
-/// `r.len()-1` multiplications.
-fn build_eq_x_r_helper<I: Integer>(r: &[I], buf: &mut Vec<I>) -> Result<(), ArithErrors> {
-    if r.is_empty() {
-        return Err(ArithErrors::InvalidParameters("r length is 0".into()));
-    } else if r.len() == 1 {
-        // initializing the buffer with [1-r_0, r_0]
-        buf.push(I::one() - &r[0]);
-        buf.push(r[0].clone());
-    } else {
-        build_eq_x_r_helper(&r[1..], buf)?;
-
-        // suppose at the previous step we received [b_1, ..., b_k]
-        // for the current step we will need
-        // if x_0 = 0:   (1-r0) * [b_1, ..., b_k]
-        // if x_0 = 1:   r0 * [b_1, ..., b_k]
-        // let mut res = vec![];
-        // for &b_i in buf.iter() {
-        //     let tmp = r[0] * b_i;
-        //     res.push(b_i - tmp);
-        //     res.push(tmp);
-        // }
-        // *buf = res;
-
-        let mut res = vec![Zero::zero(); buf.len() << 1];
-        cfg_iter_mut!(res).enumerate().for_each(|(i, val)| {
-            let bi = buf[i >> 1].clone();
-            let tmp = r[0].clone() * &bi;
-            if (i & 1) == 0 {
-                *val = bi - &tmp;
-            } else {
-                *val = tmp;
-            }
-        });
-        *buf = res;
-    }
-
-    Ok(())
-}

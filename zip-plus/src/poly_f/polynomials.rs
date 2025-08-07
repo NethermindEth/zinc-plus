@@ -1,12 +1,5 @@
 mod multilinear_polynomial;
 
-//TODO add exports
-pub use multilinear_polynomial::{
-    evaluate_no_par, evaluate_opt, fix_last_variables, fix_last_variables_no_par, fix_variables,
-    identity_permutation, identity_permutation_mles, merge_polynomials, random_mle_list,
-    random_permutation, random_permutation_mles, random_zero_mle_list, DenseMultilinearExtension,
-};
-
 extern crate alloc;
 
 // ark-std v0.5 should re-export alloc/std::sync.

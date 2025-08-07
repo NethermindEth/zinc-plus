@@ -5,6 +5,10 @@ pub trait Matrix<T> {
 
     /// Number of columns in this matrix
     fn num_cols(&self) -> usize;
+
+    fn rows<'a>(&'a self) -> impl Iterator<Item = &'a [(usize, T)]>
+    where
+        T: 'a;
 }
 
 /// Sparse matrix is a matrix with a fixed number non-zero of elements per row
@@ -24,14 +28,6 @@ pub struct SparseMatrix<T> {
     pub cells: Vec<(usize, T)>,
 }
 
-impl<T> SparseMatrix<T> {
-    /// Iterate over slices, where each slice corresponds to a row
-    #[inline]
-    pub fn rows(&self) -> impl Iterator<Item = &[(usize, T)]> {
-        self.cells.chunks(self.density)
-    }
-}
-
 impl<T> Matrix<T> for SparseMatrix<T> {
     /// Number of rows
     #[inline]
@@ -43,6 +39,13 @@ impl<T> Matrix<T> for SparseMatrix<T> {
     #[inline]
     fn num_cols(&self) -> usize {
         self.num_cols
+    }
+
+    fn rows<'a>(&'a self) -> impl Iterator<Item = &'a [(usize, T)]>
+    where
+        T: 'a,
+    {
+        self.cells.chunks(self.density)
     }
 }
 

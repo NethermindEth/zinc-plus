@@ -12,10 +12,8 @@ use ark_std::{
 use rayon::iter::*;
 
 use super::{swap_bits, MultilinearExtension};
-use crate::{
-    traits::{ConfigReference, Field},
-};
-use crypto_primitives::{Matrix, SparseMatrix};
+use crate::traits::{ConfigReference, Field};
+use crypto_primitives::Matrix;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DenseMultilinearExtension<F: Field> {
@@ -65,12 +63,12 @@ impl<F: Field> DenseMultilinearExtension<F> {
     }
 
     /// Returns the dense MLE from the given matrix, without modifying the original matrix.
-    pub fn from_matrix(matrix: &SparseMatrix<F>, config: F::R) -> Self {
-        let n_vars: usize = (log2(matrix.num_rows) + log2(matrix.num_cols)) as usize; // n_vars = s + s'
+    pub fn from_matrix<M: Matrix<F>>(matrix: &M, config: F::R) -> Self {
+        let n_vars: usize = (log2(matrix.num_rows()) + log2(matrix.num_cols())) as usize; // n_vars = s + s'
 
         // Matrices might need to get padded before turned into an MLE
-        let padded_rows = matrix.num_rows.next_power_of_two();
-        let padded_cols = matrix.num_cols.next_power_of_two();
+        let padded_rows = matrix.num_rows().next_power_of_two();
+        let padded_cols = matrix.num_cols().next_power_of_two();
 
         // build dense vector representing the sparse padded matrix
         let mut v = vec![F::zero(); padded_rows * padded_cols];
