@@ -1,3 +1,4 @@
+use num_traits::Zero;
 use crate::{
     field::BigInt,
     traits::{Config, ConfigReference},
@@ -311,6 +312,7 @@ unsafe impl<const N: usize> Send for ConfigRef<'_, N> {}
 
 #[cfg(test)]
 mod tests {
+    use num_traits::ConstZero;
     use super::FieldConfig;
     use crate::{big_int, field::BigInteger128, field_config, traits::Config};
     //BIGINTS ARE LITTLE ENDIAN!!
@@ -335,7 +337,7 @@ mod tests {
         let mut a = BigInteger128::new([2, 0]);
         let b = BigInteger128::new([2, 0]);
         field.sub_assign(&mut a, &b);
-        assert_eq!(a, BigInteger128::zero());
+        assert_eq!(a, BigInteger128::ZERO);
     }
 
     #[test]

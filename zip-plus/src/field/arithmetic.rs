@@ -63,6 +63,15 @@ impl_ops!(impl('cfg, const N: usize) for RandomField<'cfg, N>, Sub, sub, SubAssi
 impl_ops!(impl('cfg, const N: usize) for RandomField<'cfg, N>, Mul, mul, MulAssign, mul_assign);
 impl_ops!(impl('cfg, const N: usize) for RandomField<'cfg, N>, Div, div, DivAssign, div_assign);
 
+impl<const N: usize> Add<u32> for RandomField<'_, N> {
+    type Output = Self;
+
+    fn add(mut self, rhs: u32) -> Self::Output {
+        self.add_assign(rhs);
+        self
+    }
+}
+
 impl<const N: usize> AddAssign<&Self> for RandomField<'_, N> {
     fn add_assign(&mut self, rhs: &Self) {
         self.with_aligned_config_mut(
@@ -74,6 +83,21 @@ impl<const N: usize> AddAssign<&Self> for RandomField<'_, N> {
                 lhs.add_with_carry(rhs);
             },
         );
+    }
+}
+
+impl<const N: usize> AddAssign<u32> for RandomField<'_, N> {
+    fn add_assign(&mut self, rhs: u32) {
+        todo!()
+        // self.with_aligned_config_mut(
+        //     rhs.into(),
+        //     |lhs, rhs, config| {
+        //         config.add_assign(lhs, rhs);
+        //     },
+        //     |lhs, rhs| {
+        //         panic!();
+        //     },
+        // );
     }
 }
 
@@ -231,8 +255,9 @@ mod test {
 
         assert_eq!(
             lhs + rhs,
-            RandomField::Raw {
-                value: BigInt::from(2u32)
+            RandomField {
+                value: BigInt::from(2u32),
+                config: None,
             }
         );
     }

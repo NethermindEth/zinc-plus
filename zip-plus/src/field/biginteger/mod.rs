@@ -1,3 +1,4 @@
+use std::ops::{Add, Mul};
 #[allow(unused)]
 use ark_ff::ark_ff_macros::unroll_for_loops;
 use ark_ff::const_for;
@@ -23,8 +24,9 @@ use ark_std::{
     Zero,
 };
 use num_bigint::BigUint;
+use num_traits::{CheckedAdd, ConstZero};
 use zeroize::Zeroize;
-
+use crypto_primitives::{IntRing, Ring};
 use crate::{
     adc,
     const_helpers::SerBuffer,
@@ -157,12 +159,8 @@ impl<const N: usize> BigInt<N> {
         Self(value)
     }
 
-    pub const fn zero() -> Self {
-        Self([0u64; N])
-    }
-
     pub const fn one() -> Self {
-        let mut one = Self::zero();
+        let mut one = Self::ZERO;
         one.0[0] = 1;
         one
     }
@@ -513,11 +511,6 @@ impl<const N: usize> BigInt<N> {
     }
 
     #[inline]
-    pub fn is_zero(&self) -> bool {
-        self.0.iter().all(Zero::is_zero)
-    }
-
-    #[inline]
     pub fn get_bit(&self, i: usize) -> bool {
         if i >= 64 * N {
             false
@@ -583,6 +576,47 @@ impl<const N: usize> BigInt<N> {
         &mut self.0[N - 1]
     }
 }
+
+impl<const N: usize> Zero for BigInt<N> {
+    #[inline]
+    fn zero() -> Self {
+        Self::ZERO
+    }
+
+    #[inline]
+    fn is_zero(&self) -> bool {
+        self.const_is_zero()
+    }
+}
+
+impl<const N: usize> ConstZero for BigInt<N> {
+    const ZERO: Self = BigInt([0u64; N]);
+}
+
+impl<const N: usize> Add for BigInt<N> {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        let mut lhs = self;
+        lhs.add_with_carry(&rhs);
+        lhs
+    }
+}
+
+impl<const N: usize> CheckedAdd for BigInt<N> {
+    fn checked_add(&self, v: &Self) -> Option<Self> {
+        let mut res = *self;
+        if res.add_with_carry(v) {
+            None
+        } else {
+            Some(res)
+        }
+    }
+}
+
+// impl<const N: usize> Ring for BigInt<N> {}
+//
+// impl<const N: usize> IntRing for BigInt<N> {}
 
 impl<const N: usize> BigInteger for BigInt<N> {
     type W = Words<N>;

@@ -3,7 +3,6 @@ use ark_ff::{One, Zero};
 use crate::{
     field::{
         RandomField,
-        RandomField::{Initialized, Raw},
     },
     traits::Field,
 };
@@ -17,10 +16,10 @@ impl<const N: usize> PartialEq for RandomField<'_, N> {
             return true;
         }
 
-        match (self, other) {
-            (Initialized { .. }, Raw { .. }) | (Raw { .. }, Initialized { .. }) => false,
-            (Raw { .. }, Raw { .. }) => self.value() == other.value(),
-            (Initialized { .. }, Initialized { .. }) => {
+        match (self.config, other.config) {
+            (Some(_), None) | (None, Some(_)) => false,
+            (None, None) => self.value() == other.value(),
+            (Some(_), Some(_)) => {
                 self.value() == other.value() && self.config_ptr() == other.config_ptr()
             }
         }

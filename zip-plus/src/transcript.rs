@@ -96,7 +96,6 @@ impl KeccakTranscript {
             let truncated_lo = lo as u64 & lo_mask;
 
             let mut challenge: F = truncated_lo.map_to_field(config_ref);
-            challenge.set_config(config_ref);
             return challenge;
         }
         if challenge_num_bits < 128 {
@@ -105,7 +104,6 @@ impl KeccakTranscript {
             let truncated_lo = lo & lo_mask;
 
             let mut challenge: F = truncated_lo.map_to_field(config_ref);
-            challenge.set_config(config_ref);
             challenge
         } else if challenge_num_bits >= 256 {
             let two_to_128 = F::B::from_bits_le(&(0..196).map(|i| i == 128).collect::<Vec<bool>>())
@@ -113,7 +111,6 @@ impl KeccakTranscript {
 
             let mut challenge: F = <u128 as FieldMap<F>>::map_to_field(&lo, config_ref)
                 + two_to_128 * <u128 as FieldMap<F>>::map_to_field(&hi, config_ref);
-            challenge.set_config(config_ref);
             challenge
         } else {
             let hi_bits_to_keep = challenge_num_bits - 128;
@@ -126,7 +123,6 @@ impl KeccakTranscript {
 
             let mut ret: F = <u128 as FieldMap<F>>::map_to_field(&lo, config_ref)
                 + two_to_128 * <u128 as FieldMap<F>>::map_to_field(&truncated_hi, config_ref);
-            ret.set_config(config_ref);
             ret
         }
     }

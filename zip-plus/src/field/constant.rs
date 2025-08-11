@@ -2,14 +2,15 @@ use ark_ff::{One, Zero};
 use zeroize::Zeroize;
 
 use crate::{
-    field::{biginteger::BigInt, RandomField, RandomField::Raw},
+    field::{biginteger::BigInt, RandomField},
     traits::Field,
 };
 
 impl<const N: usize> Zero for RandomField<'_, N> {
     fn zero() -> Self {
-        Raw {
+        RandomField {
             value: BigInt::zero(),
+            config: None,
         }
     }
 
@@ -24,8 +25,9 @@ impl<const N: usize> Zero for RandomField<'_, N> {
 
 impl<const N: usize> One for RandomField<'_, N> {
     fn one() -> Self {
-        Raw {
+        RandomField {
             value: BigInt::one(),
+            config: None,
         }
     }
 

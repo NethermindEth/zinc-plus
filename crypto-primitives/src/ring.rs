@@ -1,11 +1,10 @@
 use crate::{Limb, PrimeField};
-use core::ops::{Rem, RemAssign};
 use core::{
     fmt::{Debug, Display},
     iter::{Product, Sum},
-    ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
+    ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign, Rem, RemAssign},
 };
-use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedShl, CheckedShr, CheckedSub, ConstOne, ConstZero, Pow};
+use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedShl, CheckedShr, CheckedSub, ConstOne, ConstZero, Pow};
 
 /// A ring is like a field without a multiplicative inverse or division.
 pub trait Ring:
@@ -47,8 +46,10 @@ pub trait Ring:
 /// Ring of integers, usually denoted as `Z`.
 pub trait IntRing:
 Ring
+    + PartialOrd
+    + Ord
     // Arithmetic operations consuming rhs
-    + Rem
+    + CheckedRem
     + RemAssign
     // Arithmetic operations with rhs reference
     + for<'a> Rem<&'a Self>

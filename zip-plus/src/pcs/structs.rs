@@ -15,7 +15,7 @@ pub struct MultilinearZipParams<ZT: ZipTypes, LC: LinearCode<ZT>> {
     pub num_vars: usize,
     pub num_rows: usize,
     pub linear_code: LC,
-    phantom_data_zt: PhantomData<ZT>,
+    pub(crate) phantom_data_zt: PhantomData<ZT>,
 }
 
 /// Representantation of a zip commitment to a multilinear polynomial

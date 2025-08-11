@@ -16,7 +16,7 @@
 ///
 /// ## Example
 /// ```rust
-/// use zinc::big_int;
+/// use zip_plus::big_int;
 /// let a = big_int!(123, 1);
 /// let b = big_int!(4567890123456789, 4, "failed to parse b");
 /// ```
@@ -60,8 +60,8 @@ macro_rules! big_int {
 /// - Useful when the generic parameter `N` is inferred or fixed elsewhere.
 ///
 /// ```rust
-/// use zinc::field::{ConfigRef, RandomField};
-/// use zinc::{field_config, random_field};
+/// use zip_plus::field::{ConfigRef, RandomField};
+/// use zip_plus::{field_config, random_field};
 /// let config = field_config!(19);
 /// let config_ref = ConfigRef::from(&config);
 /// let f: RandomField<1> = random_field!(1u32, config_ref);
@@ -72,7 +72,7 @@ macro_rules! big_int {
 /// - Uses `big_int!(value, N)` internally to construct the modulus.
 ///
 /// ```rust
-/// use zinc::field_config;
+/// use zip_plus::field_config;
 /// let config = field_config!(123456789, 3);
 /// ```
 ///
@@ -109,28 +109,15 @@ macro_rules! field_config {
 ///
 /// ## Variants
 ///
-/// ### 1. `random_field!(value)`
-/// Constructs a `RandomField::Raw` element directly from an integer literal.
-///
-/// - The input is parsed into a `BigInt` using `BigInt::from`.
-/// - Requires no configuration or context.
-/// - Useful for testing or constructing raw field elements.
-///
-/// ```rust
-/// use zinc::field::RandomField;
-/// use zinc::random_field;
-/// let x: RandomField<1> = random_field!(42u32);
-/// ```
-///
-/// ### 2. `random_field!(value, config)`
+/// ### 1. `random_field!(value, config)`
 /// Converts a numeric literal into a `RandomField` element using a provided field configuration.
 ///
 /// - This leverages the `FieldMap` trait’s `.map_to_field()` method.
 /// - The `config` argument must be a valid configuration object of type `F::R`.
 ///
 /// ```rust
-/// use zinc::field::{ConfigRef, RandomField};
-/// use zinc::{big_int, field_config, random_field};
+/// use zip_plus::field::{ConfigRef, RandomField};
+/// use zip_plus::{big_int, field_config, random_field};
 ///
 /// let config = field_config!(19);
 /// let config_ref = ConfigRef::from(&config);
@@ -144,31 +131,10 @@ macro_rules! field_config {
 ///
 #[macro_export]
 macro_rules! random_field {
-    ($v:literal) => {
-        (|| {
-            use $crate::field::{BigInt, RandomField};
-            RandomField::Raw {
-                value: BigInt::from($v),
-            }
-        })()
-    };
-
     ($v:literal, $config:expr) => {
         (|| {
             use $crate::traits::FieldMap;
             $v.map_to_field($config)
-        })()
-    };
-
-    ($v:literal, $n:literal) => {
-        (|| {
-            use $crate::{
-                big_int,
-                field::{BigInt, RandomField},
-            };
-            RandomField::Raw {
-                value: big_int!($v),
-            }
         })()
     };
 

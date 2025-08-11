@@ -128,7 +128,7 @@ impl<F: Field, T: FieldMap<F>> FieldMap<F> for &[T] {
 #[cfg(test)]
 mod tests {
     use ark_std::{fmt::Debug, format, str::FromStr};
-
+    use num_traits::ConstZero;
     use crate::{
         big_int,
         field::{BigInt, ConfigRef, FieldConfig, RandomField},
@@ -231,9 +231,9 @@ mod tests {
         let config = ConfigRef::from(&config);
 
         let bytes = [0x00; 8]; // All zeros
-        let expected = RandomField::Initialized {
-            config,
-            value: BigInt::<1>::zero(),
+        let expected = RandomField {
+            value: BigInt::<1>::ZERO,
+            config: Some(config),
         };
 
         let result = RandomField::<1>::from_bytes_le_with_config(config, &bytes);
@@ -246,9 +246,9 @@ mod tests {
         let config = ConfigRef::from(&config);
 
         let bytes = [0x00; 8]; // All zeros
-        let expected = RandomField::Initialized {
-            config,
-            value: BigInt::<1>::zero(),
+        let expected = RandomField {
+            value: BigInt::<1>::ZERO,
+            config: Some(config),
         };
 
         let result = RandomField::<1>::from_bytes_be_with_config(config, &bytes);
@@ -354,7 +354,7 @@ mod tests {
             let zero_result: RandomField<$N> = zero.map_to_field($config);
             assert_eq!(
                 zero_result.into_bigint(),
-                BigInt::<$N>::zero(),
+                BigInt::<$N>::ZERO,
                 "Zero value should map to field zero"
             );
 
@@ -396,7 +396,7 @@ mod tests {
             let ref_zero: RandomField<$N> = (&zero).map_to_field($config);
             assert_eq!(
                 ref_zero.into_bigint(),
-                BigInt::<$N>::zero(),
+                BigInt::<$N>::ZERO,
                 "Reference to zero should map to field zero"
             );
 
@@ -460,7 +460,7 @@ mod tests {
             let zero_result: RandomField<$N> = zero.map_to_field($config);
             assert_eq!(
                 zero_result.into_bigint(),
-                BigInt::<$N>::zero(),
+                BigInt::<$N>::ZERO,
                 "Zero value should map to field zero"
             );
 
@@ -485,7 +485,7 @@ mod tests {
             let ref_zero: RandomField<$N> = (&zero).map_to_field($config);
             assert_eq!(
                 ref_zero.into_bigint(),
-                BigInt::<$N>::zero(),
+                BigInt::<$N>::ZERO,
                 "Reference to zero should map to field zero"
             );
 
@@ -529,6 +529,7 @@ mod tests {
 
 #[cfg(test)]
 mod bigint_field_map_tests {
+    use num_traits::ConstZero;
     use super::*;
     use crate::{
         big_int,
@@ -594,7 +595,7 @@ mod bigint_field_map_tests {
         let config = FieldConfig::new(modulus);
         let config_ptr = ConfigRef::from(&config);
 
-        let zero = BigInt::<2>::zero();
+        let zero = BigInt::<2>::ZERO;
         let result: RandomField<2> = zero.map_to_field(config_ptr);
 
         assert!(
