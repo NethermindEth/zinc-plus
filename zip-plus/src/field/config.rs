@@ -284,7 +284,7 @@ impl<'cfg, const N: usize> ConfigReference for ConfigRef<'cfg, N> {
     }
 
     unsafe fn new(config_ptr: *mut FieldConfig<N>) -> Self {
-        Self(Option::from(config_ptr.as_ref().unwrap()))
+        Self(Option::from(unsafe { config_ptr.as_ref() }.unwrap()))
     }
 
     fn pointer(&self) -> Option<*mut FieldConfig<N>> {

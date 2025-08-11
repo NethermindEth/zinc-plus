@@ -5,7 +5,7 @@ use ark_std::{
     borrow::ToOwned,
     cfg_iter, cfg_iter_mut, log2,
     ops::{Add, AddAssign, Index, Mul, MulAssign, Neg, Sub, SubAssign},
-    rand, vec,
+    vec,
     vec::Vec,
 };
 #[cfg(feature = "parallel")]
@@ -118,24 +118,6 @@ impl<F: Field> DenseMultilinearExtension<F> {
 }
 
 impl<F: Field> MultilinearExtension<F> for DenseMultilinearExtension<F> {
-    fn num_vars(&self) -> usize {
-        self.num_vars
-    }
-
-    fn rand<Rn: rand::Rng>(num_vars: usize, config: F::R, rng: &mut Rn) -> Self {
-        Self::from_evaluations_vec(
-            num_vars,
-            (0..1 << num_vars).map(|_| F::random(rng)).collect(),
-            config,
-        )
-    }
-
-    fn relabel(&self, a: usize, b: usize, k: usize) -> Self {
-        let mut copy = self.clone();
-        copy.relabel_in_place(a, b, k);
-        copy
-    }
-
     fn fix_variables(&mut self, partial_point: &[F], _config: F::R) {
         assert!(
             partial_point.len() <= self.num_vars,
@@ -168,10 +150,6 @@ impl<F: Field> MultilinearExtension<F> for DenseMultilinearExtension<F> {
         let mut res = self.clone();
         res.fix_variables(partial_point, config);
         res
-    }
-
-    fn to_evaluations(&self) -> Vec<F> {
-        self.evaluations.to_vec()
     }
 }
 

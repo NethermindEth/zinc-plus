@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use ark_std::{fmt::Debug, iter, vec::Vec};
+use ark_std::{fmt::Debug, vec::Vec};
 
 use crate::traits::{Field, FieldMap, Integer, ZipTypes};
 
@@ -87,12 +87,4 @@ impl LinearCodeSpec for DefaultLinearCodeSpec {
     fn num_proximity_testing(&self, _log2_q: usize, _n: usize, _n_0: usize) -> usize {
         1
     }
-}
-
-pub fn steps(start: i64) -> impl Iterator<Item = i64> {
-    steps_by(start, 1i64)
-}
-
-pub fn steps_by(start: i64, step: i64) -> impl Iterator<Item = i64> {
-    iter::successors(Some(start), move |state| Some(step + *state))
 }

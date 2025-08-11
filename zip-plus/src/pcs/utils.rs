@@ -1,7 +1,6 @@
 use ark_ff::Zero;
 use ark_std::{
     cfg_iter_mut, format,
-    rand::{Rng, RngCore},
     iterable::Iterable,
     vec,
     vec::Vec,

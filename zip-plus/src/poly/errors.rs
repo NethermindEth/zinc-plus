@@ -5,17 +5,13 @@
 
 //! Error module.
 
-use ark_std::string::String;
+
 use displaydoc::Display;
 use thiserror::Error;
 
 /// A `enum` specifying the possible failure modes of the arithmetics.
 #[derive(Display, Debug, Error)]
 pub enum ArithErrors {
-    /// Invalid parameters: {0}
-    InvalidParameters(String),
-    /// Should not arrive to this point
-    ShouldNotArrive,
     /// An error during (de)serialization: {0}
     SerializationErrors(ark_serialize::SerializationError),
 }

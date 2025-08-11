@@ -5,4 +5,4 @@ pub mod structs;
 pub(crate) mod utils;
 mod verify_z;
 
-pub use utils::MerkleTree;
+
