@@ -1,66 +1,73 @@
-// use crypto_bigint::Random;
-// use num_traits::{ConstOne, ConstZero, One, Zero};
 use crate::{Limb, PrimeField};
-use std::ops::{Rem, RemAssign};
-use std::{
-    // UniformRand,
-    fmt::Debug,
+use core::ops::{Rem, RemAssign};
+use core::{
+    fmt::{Debug, Display},
     iter::{Product, Sum},
-    ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, Sub, SubAssign},
+    ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
 };
+use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedShl, CheckedShr, CheckedSub, ConstOne, ConstZero, Pow};
 
 /// A ring is like a field without a multiplicative inverse or division.
 pub trait Ring:
     // Core traits
     Sized
     + Debug
+    + Display
     + Clone
     + PartialEq
     + Eq
     + Default
     + Sync
     + Send
-    // + Zero
-    // + One
+    + ConstZero
+    + ConstOne
     // Arithmetic operations consuming rhs
-    + Neg<Output = Self>
-    + Add<Self, Output = Self>
-    + Sub<Self, Output = Self>
-    + Mul<Self, Output = Self>
-    + Div<Self, Output = Self> // TODO: ???
+    + CheckedNeg
+    + CheckedAdd
+    + CheckedSub
+    + CheckedMul
+    + CheckedShl
+    + CheckedShr
+    + Pow<u32>
     + AddAssign
     + MulAssign
     + SubAssign
     + Sum
     + Product
     // Arithmetic operations with rhs reference
-    + for<'a> Add<&'a Self, Output = Self>
-    + for<'a> Sub<&'a Self, Output = Self>
-    + for<'a> Mul<&'a Self, Output = Self>
-    + for<'a> Div<&'a Self, Output = Self>
+    + for<'a> Add<&'a Self, Output=Self>
+    + for<'a> Sub<&'a Self, Output=Self>
+    + for<'a> Mul<&'a Self, Output=Self>
     + for<'a> AddAssign<&'a Self>
     + for<'a> MulAssign<&'a Self>
     + for<'a> Sum<&'a Self>
     + for<'a> Product<&'a Self>
-    + for<'a> From<&'a Self>
-    // + Random
-    // + UniformRand
     {}
 
 /// Ring of integers, usually denoted as `Z`.
 pub trait IntRing:
 Ring
-    + From<Limb>
-    + for<'a> TryFrom<&'a [Limb]>
     // Arithmetic operations consuming rhs
     + Rem
-    + Rem<u64>
     + RemAssign
-    + RemAssign<u64>
     // Arithmetic operations with rhs reference
     + for<'a> Rem<&'a Self>
     + for<'a> RemAssign<&'a Self>
-{
+    {}
+
+macro_rules! primitive_int_ring {
+    ($t:ident) => {
+        impl Ring for $t {}
+        impl IntRing for $t {}
+    };
+}
+
+primitive_int_ring!(u32);
+primitive_int_ring!(u64);
+primitive_int_ring!(u128);
+
+/// Ring of integers stored as u64 limbs.
+pub trait LimbedIntRing: IntRing + From<Limb> + for<'a> TryFrom<&'a [Limb]> {
     /// Number of u64 limbs used to represent this integer type
     fn num_limbs() -> usize;
 

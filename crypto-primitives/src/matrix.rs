@@ -1,3 +1,5 @@
+use alloc::vec::Vec;
+
 /// A matrix, rectangular table of values
 pub trait Matrix<T> {
     /// Number of rows in this matrix

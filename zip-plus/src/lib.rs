@@ -1,20 +1,20 @@
 use crypto_primitives::IntRing;
 
-mod code;
-mod code_raa;
-mod pcs;
-mod pcs_transcript;
+pub mod code;
+pub mod code_raa;
+pub mod pcs;
+pub mod pcs_transcript;
 pub mod utils;
-mod traits;
+pub mod traits;
 mod macros;
 
 #[cfg(test)]
 mod tests;
-mod poly_z;
+pub mod poly_z;
 mod poly;
-mod transcript;
+pub mod transcript;
 mod conversion;
-mod field;
+pub mod field;
 mod const_helpers;
 mod poly_f;
 

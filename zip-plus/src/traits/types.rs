@@ -30,6 +30,7 @@ pub trait Field:
     + One
     + Neg<Output = Self>
     + Add<Self, Output = Self>
+    + Add<u32, Output = Self>
     + Sub<Self, Output = Self>
     + for<'a> Mul<&'a Self, Output = Self>
     + AddAssign
@@ -63,8 +64,8 @@ pub trait Field:
     fn without_config(value: Self::B) -> Self;
     /// Generates a random field element with the given config.
     fn rand_with_config<R: ark_std::rand::Rng + ?Sized>(rng: &mut R, config: Self::R) -> Self;
-    /// Sets the field configuration.
-    fn set_config(&mut self, config: Self::R);
+    /// Sets the field configuration on the returned value.
+    fn with_config(self, config: Self::R) -> Self;
     /// Returns a reference to the integer value.
     fn value(&self) -> &Self::B;
     /// Returns a mutable reference to the integer value.

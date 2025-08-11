@@ -3,6 +3,7 @@ mod error;
 mod open_z;
 pub mod structs;
 pub(crate) mod utils;
+pub(crate) mod tests;
 mod verify_z;
 
-
+pub use utils::MerkleTree;

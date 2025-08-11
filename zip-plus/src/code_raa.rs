@@ -56,7 +56,7 @@ impl<ZT: ZipTypes> RaaCode<ZT> {
                 .ilog2()
                 .try_into()
                 .expect("Repetition factor logarithm is too large");
-            let num_vars_even = if num_vars % 2 == 0 {
+            let num_vars_even = if num_vars.is_multiple_of(2) {
                 num_vars
             } else {
                 num_vars + 1
@@ -165,5 +165,175 @@ where
 {
     for i in 1..input.len() {
         input[i] += input[i - 1].clone();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ark_std::{vec, vec::Vec};
+    use num_traits::Zero;
+
+    use crate::{
+        define_random_field_zip_types,
+        field::Int,
+        implement_random_field_zip_types,
+        traits::ZipTypes,
+        code::{DefaultLinearCodeSpec, LinearCode},
+        code_raa::{RaaCode, accumulate, repeat},
+        pcs::tests::MockTranscript,
+        utils::shuffle_seeded,
+    };
+
+    // Define common types for testing
+    const INT_LIMBS: usize = 1;
+    define_random_field_zip_types!();
+    implement_random_field_zip_types!(INT_LIMBS);
+    type ZT = RandomFieldZipTypes<INT_LIMBS>;
+    type I = Int<INT_LIMBS>;
+
+    #[test]
+    fn repeat_function_duplicates_row_correctly() {
+        let input = vec![Int::<INT_LIMBS>::from(10), Int::<INT_LIMBS>::from(20)];
+
+        let repetition_factor = 3;
+
+        let repeated_output = repeat::<_, I>(&input, repetition_factor);
+
+        let expected_output: Vec<_> = [10, 20, 10, 20, 10, 20]
+            .into_iter()
+            .map(Int::<INT_LIMBS>::from)
+            .collect();
+        assert_eq!(
+            repeated_output, expected_output,
+            "Failed on repetition factor > 1"
+        );
+
+        let empty_input: Vec<I> = vec![];
+        let repeated_empty = repeat::<_, I>(&empty_input, 5);
+        assert!(repeated_empty.is_empty(), "Failed on empty input vector");
+
+        let repeated_once = repeat::<_, I>(&input, 1);
+        assert_eq!(repeated_once, input, "Failed on repetition factor of 1");
+    }
+
+    #[test]
+    fn accumulate_function_computes_cumulative_sum() {
+        let mut input1: Vec<I> = [1, 2, 3, 4].into_iter().map(I::from).collect();
+        let expected1: Vec<I> = [1, 3, 6, 10].into_iter().map(I::from).collect();
+        accumulate(&mut input1);
+        assert_eq!(input1, expected1, "Failed on positive integers");
+
+        let mut input2: Vec<I> = [5, 0, 2, 0].into_iter().map(I::from).collect();
+        let expected2: Vec<I> = [5, 5, 7, 7].into_iter().map(I::from).collect();
+        accumulate(&mut input2);
+        assert_eq!(input2, expected2, "Failed on vector with zeros");
+
+        let mut input3: Vec<I> = [-1, 5, -10, 2].into_iter().map(I::from).collect();
+        let expected3: Vec<I> = [-1, 4, -6, -4].into_iter().map(I::from).collect();
+        accumulate(&mut input3);
+        assert_eq!(input3, expected3, "Failed on vector with negative numbers");
+
+        let mut empty_input: Vec<I> = vec![];
+        let expected_empty: Vec<I> = vec![];
+        accumulate(&mut empty_input);
+        assert_eq!(empty_input, expected_empty, "Failed on empty vector");
+    }
+
+    #[test]
+    fn shuffle_is_deterministic_for_a_given_seed() {
+        let original: Vec<I> = (1..=10).map(I::from).collect();
+        let mut vec1 = original.clone();
+        let mut vec2 = original.clone();
+        let mut vec3 = original.clone();
+
+        let seed1 = 12345;
+        let seed2 = 54321;
+
+        shuffle_seeded(&mut vec1, seed1);
+        shuffle_seeded(&mut vec2, seed1);
+        shuffle_seeded(&mut vec3, seed2);
+
+        assert_eq!(
+            vec1, vec2,
+            "Shuffling with the same seed should produce the same result"
+        );
+        assert_ne!(
+            vec1, vec3,
+            "Shuffling with different seeds should produce different results"
+        );
+        assert_ne!(
+            vec1, original,
+            "Shuffled vector should not be the same as the original"
+        );
+        assert_ne!(
+            vec3, original,
+            "Shuffled vector should not be the same as the original"
+        );
+    }
+
+    #[test]
+    fn encoding_preserves_linearity() {
+        let mut transcript = MockTranscript::default();
+        let code = RaaCode::<ZT>::new(&DefaultLinearCodeSpec, 16, &mut transcript);
+
+        let a: Vec<I> = (1..=4).map(I::from).collect();
+        let b: Vec<I> = (5..=8).map(I::from).collect();
+        let sum_ab: Vec<I> = a.iter().zip(b.iter()).map(|(x, y)| *x + y).collect();
+
+        let encode_a: Vec<<ZT as ZipTypes>::M> = code.encode(&a);
+        let encode_b: Vec<<ZT as ZipTypes>::M> = code.encode(&b);
+        let encode_sum_ab: Vec<<ZT as ZipTypes>::M> = code.encode(&sum_ab);
+
+        let sum_encode_ab: Vec<<ZT as ZipTypes>::M> = encode_a
+            .iter()
+            .zip(encode_b.iter())
+            .map(|(x, y)| *x + y)
+            .collect();
+
+        assert_eq!(encode_sum_ab, sum_encode_ab);
+    }
+
+    #[test]
+    fn encoding_zero_vector_results_in_zero_codeword() {
+        let mut transcript = MockTranscript::default();
+        let code = RaaCode::<ZT>::new(&DefaultLinearCodeSpec, 16, &mut transcript);
+
+        let zero_vector: Vec<I> = vec![I::zero(); code.row_len()];
+        let encoded_vector: Vec<<ZT as ZipTypes>::M> = code.encode(&zero_vector);
+
+        let expected_codeword: Vec<<ZT as ZipTypes>::M> =
+            vec![<ZT as ZipTypes>::M::zero(); code.codeword_len()];
+
+        assert_eq!(
+            encoded_vector, expected_codeword,
+            "Encoding a zero vector should result in a zero codeword"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot fit 96-bit wide codeword entries in 64 bits integers")]
+    fn constructor_panics_on_insufficient_codeword_width() {
+        #[derive(Debug, Clone)]
+        struct MismatchedZipTypes;
+        impl ZipTypes for MismatchedZipTypes {
+            type N = Int<1>; // 64 bits
+            type L = Int<2>; // 128 bits
+            type K = Int<1>; // 64 bits - INSUFFICIENT
+            type M = Int<4>; // 256 bits
+        }
+
+        let mut transcript = MockTranscript::default();
+        let _code =
+            RaaCode::<MismatchedZipTypes>::new(&DefaultLinearCodeSpec, 1 << 30, &mut transcript);
+    }
+
+    #[test]
+    #[should_panic(expected = "Row length must match the code's row length")]
+    #[cfg(debug_assertions)]
+    fn encode_panics_on_mismatched_row_length() {
+        let mut transcript = MockTranscript::default();
+        let code = RaaCode::<ZT>::new(&DefaultLinearCodeSpec, 16, &mut transcript);
+        let incorrect_row = vec![I::from(1), I::from(2), I::from(3)];
+        let _: Vec<<ZT as ZipTypes>::M> = code.encode(&incorrect_row);
     }
 }

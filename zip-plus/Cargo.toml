@@ -26,9 +26,18 @@ num-bigint = "0.4"
 crypto-primes = "0.6"
 rayon = { version = "1.10", optional = true }
 
+criterion = "0.7"
+
 [lints]
 workspace = true
 
-
 [features]
 parallel = ["dep:rayon"]
+
+[[bench]]
+name = "random_field_benches"
+harness = false
+
+[[bench]]
+name = "zip_benches"
+harness = false
