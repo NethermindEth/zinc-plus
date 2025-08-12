@@ -29,9 +29,7 @@ pub fn mac_with_carry(a: u64, b: u64, c: u64, carry: &mut u64) -> u64 {
 pub trait FieldConfigBase<T> {
     /// The modulus of the field.
     fn modulus() -> T;
-}
 
-pub trait FieldConfigOps<T> {
     /// Let `M` be the power of 2^64 nearest to `Self::MODULUS_BITS`. Then
     /// `R = M % Self::MODULUS`.
     fn r() -> T;
@@ -47,7 +45,73 @@ pub trait FieldConfigOps<T> {
 
     /// INV = -MODULUS^{-1} mod 2^64
     fn inv() -> u64;
+}
 
+pub trait ConstFieldConfigBase1<T> {
+    /// The modulus of the field.
+    const MODULUS: T;
+}
+
+
+pub trait ConstFieldConfigBase2<T> {
+    /// Let `M` be the power of 2^64 nearest to `Self::MODULUS_BITS`. Then
+    /// `R = M % Self::MODULUS`.
+    const R: T;
+
+    /// `R^2 = R * R mod MODULUS`
+    const R_SQUARED: T;
+
+    /// Does the modulus have a spare unused bit
+    ///
+    /// This condition applies if
+    /// (a) `Self::MODULUS[N-1] >> 63 == 0`
+    const MODULUS_HAS_SPARE_BIT: bool;
+
+    /// INV = -MODULUS^{-1} mod 2^64
+    const INV: u64;
+}
+
+impl<T, C> FieldConfigBase<T> for C
+where
+    C: ConstFieldConfigBase1<T> + ConstFieldConfigBase2<T>,
+{
+    #[inline(always)]
+    fn modulus() -> T {
+        C::MODULUS
+    }
+
+    #[inline(always)]
+    fn r() -> T {
+        C::R
+    }
+
+    #[inline(always)]
+    fn r_squared() -> T {
+        C::R_SQUARED
+    }
+
+    #[inline(always)]
+    fn modulus_has_spare_bit() -> bool {
+        C::MODULUS_HAS_SPARE_BIT
+    }
+
+    #[inline(always)]
+    fn inv() -> u64 {
+        C::INV
+    }
+}
+
+impl<const N: usize, C> ConstFieldConfigBase2<BigInt<N>> for C
+where
+    C: ConstFieldConfigBase1<BigInt<N>>,
+{
+    const R: BigInt<N> = C::MODULUS.montgomery_r();
+    const R_SQUARED: BigInt<N> = C::MODULUS.montgomery_r2();
+    const MODULUS_HAS_SPARE_BIT: bool = C::MODULUS.has_spare_bit();
+    const INV: u64 = inv(C::MODULUS);
+}
+
+pub trait FieldConfigOps<T> {
     fn add_assign(a: &mut T, b: &T);
 
     fn sub_assign(a: &mut T, b: &T);
@@ -59,31 +123,10 @@ pub trait FieldConfigOps<T> {
     fn mul_assign(a: &mut T, b: &T);
 }
 
-
 impl<const N: usize, T> FieldConfigOps<BigInt<N>> for T
 where
     T: FieldConfigBase<BigInt<N>>,
 {
-    #[inline(always)]
-    fn r() -> BigInt<N> {
-        Self::modulus().montgomery_r()
-    }
-
-    #[inline(always)]
-    fn r_squared() -> BigInt<N> {
-        Self::modulus().montgomery_r2()
-    }
-
-    #[inline(always)]
-    fn modulus_has_spare_bit() -> bool {
-        Self::modulus().has_spare_bit()
-    }
-
-    #[inline(always)]
-    fn inv() -> u64 {
-        inv(Self::modulus())
-    }
-
     fn add_assign(a: &mut BigInt<N>, b: &BigInt<N>) {
         // This cannot exceed the backing capacity.
         let c = a.add_with_carry(b);
@@ -181,6 +224,7 @@ where
         }
     }
 
+    #[inline(always)]
     fn mul_assign(a: &mut BigInt<N>, b: &BigInt<N>) {
         let (mut lo, mut hi) = a.mul_naive(b);
 
@@ -193,7 +237,7 @@ where
 
 pub trait FieldConfig<T>: FieldConfigBase<T> + FieldConfigOps<T> + Clone {}
 
-impl<T> FieldConfig<T> for T where T: FieldConfigBase<T> + FieldConfigOps<T> + Clone {}
+impl<T, C> FieldConfig<T> for C where C: FieldConfigBase<T> + FieldConfigOps<T> + Clone {}
 
 #[macro_export]
 macro_rules! define_field_config {
@@ -201,16 +245,9 @@ macro_rules! define_field_config {
         #[derive(Clone, Debug)]
         struct $name<const N: usize>;
 
-        impl<const N: usize> $crate::field::config::FieldConfigBase<$crate::field::BigInt<N>> for $name<N> {
-            //const MODULUS: $crate::field::BigInt<N> = $crate::BigInt!($modulus);
-            #[inline(always)]
-            fn modulus() -> $crate::field::BigInt<N> {
-                $crate::BigInt!($modulus)
-            }
+        impl<const N: usize> $crate::field::config::ConstFieldConfigBase1<$crate::field::BigInt<N>> for $name<N> {
+            const MODULUS: $crate::field::BigInt<N> = $crate::BigInt!($modulus);
         }
-
-        // TODO: Why is this not covered by the blanket impl above?
-        impl<const N: usize> $crate::field::config::FieldConfig<$crate::field::BigInt<N>> for $name<N> {}
     };
 }
 
@@ -242,7 +279,7 @@ fn widening_mul(a: u64, b: u64) -> u128 {
 #[cfg(test)]
 mod tests {
     use num_traits::ConstZero;
-    use super::{FieldConfig, FieldConfigBase, FieldConfigOps};
+    use super::{FieldConfig, ConstFieldConfigBase1, FieldConfigOps};
     use crate::{big_int, field::BigInteger128};
     use crate::field::BigInt;
 
@@ -252,10 +289,10 @@ mod tests {
         #[derive(Clone, Debug)]
         struct Fc;
 
-        impl FieldConfigBase<BigInt<2>> for Fc {
-            fn modulus() -> BigInteger128 {
+        impl ConstFieldConfigBase1<BigInt<2>> for Fc {
+            const MODULUS: BigInteger128 = {
                 BigInteger128::new([9307119299070690521, 9320126393725433252])
-            }
+            };
         }
 
         let mut a = BigInteger128::new([2, 0]);
@@ -269,10 +306,10 @@ mod tests {
         #[derive(Clone, Debug)]
         struct Fc;
 
-        impl FieldConfigBase<BigInt<2>> for Fc {
-            fn modulus() -> BigInteger128 {
+        impl ConstFieldConfigBase1<BigInt<2>> for Fc {
+            const MODULUS: BigInteger128 = {
                 BigInteger128::new([9307119299070690521, 9320126393725433252])
-            }
+            };
         }
 
         let mut a = BigInteger128::new([2, 0]);

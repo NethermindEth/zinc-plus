@@ -17,6 +17,7 @@ macro_rules! impl_ops {
         impl<$($gen)*> $trait<Self> for $type {
             type Output = Self;
 
+            #[inline(always)]
             fn $op(mut self, rhs: Self) -> Self::Output {
                 self.$op_assign(&rhs);
                 self
@@ -26,6 +27,7 @@ macro_rules! impl_ops {
         impl<$($gen)*> $trait<&Self> for $type {
             type Output = Self;
 
+            #[inline(always)]
             fn $op(mut self, rhs: &Self) -> Self::Output {
                 self.$op_assign(rhs);
                 self
@@ -35,6 +37,7 @@ macro_rules! impl_ops {
         impl<$($gen)*> $trait<Self> for &$type {
             type Output = $type;
 
+            #[inline(always)]
             fn $op(self, rhs: Self) -> Self::Output {
                 let mut res = self.clone();
                 res.$op_assign(rhs);
@@ -45,6 +48,7 @@ macro_rules! impl_ops {
         impl<$($gen)*> $trait<$type> for &$type {
             type Output = $type;
 
+            #[inline(always)]
             fn $op(self, rhs: $type) -> Self::Output {
                 let mut res = self.clone();
                 res.$op_assign(&rhs);
@@ -53,6 +57,7 @@ macro_rules! impl_ops {
         }
 
         impl<$($gen)*> $trait_assign<Self> for $type {
+            #[inline(always)]
             fn $op_assign(&mut self, rhs: Self) {
                 self.$op_assign(&rhs);
             }
@@ -82,16 +87,7 @@ impl<const N: usize, FC: FieldConfig<BigInt<N>>> AddAssign<&Self> for RandomFiel
 
 impl<const N: usize, FC: FieldConfig<BigInt<N>>> AddAssign<u32> for RandomField<N, FC> {
     fn add_assign(&mut self, rhs: u32) {
-        todo!()
-        // self.with_aligned_config_mut(
-        //     rhs.into(),
-        //     |lhs, rhs, config| {
-        //         config.add_assign(lhs, rhs);
-        //     },
-        //     |lhs, rhs| {
-        //         panic!();
-        //     },
-        // );
+        FC::add_assign(&mut self.value, &rhs.into());
     }
 }
 
@@ -102,6 +98,7 @@ impl<const N: usize, FC: FieldConfig<BigInt<N>>> SubAssign<&Self> for RandomFiel
 }
 
 impl<const N: usize, FC: FieldConfig<BigInt<N>>> MulAssign<&Self> for RandomField<N, FC> {
+    #[inline(always)]
     fn mul_assign(&mut self, rhs: &Self) {
         FC::mul_assign(&mut self.value, &rhs.value);
     }
