@@ -77,10 +77,6 @@ impl<const N: usize, FC: FieldConfig<BigInt<N>>> Field for RandomField<N, FC> {
     type I = Int<N>;
     type U = Uint<N>;
 
-    fn modulus() -> Self::B {
-        FC::modulus()
-    }
-
     fn new_unchecked(value: BigInt<N>) -> Self {
         Self {
             value,

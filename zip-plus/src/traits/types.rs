@@ -56,8 +56,6 @@ pub trait Field:
     /// Cryptographic unsigned integer type.
     type U: Uinteger<W = Self::W, Int = Self::I>;
 
-    fn modulus() -> Self::B;
-
     /// Creates a new field element from config and value, without checking.
     fn new_unchecked(value: Self::B) -> Self;
 

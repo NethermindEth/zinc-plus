@@ -1,4 +1,4 @@
-use std::ops::{Add, Mul};
+use std::ops::{Add};
 #[allow(unused)]
 use ark_ff::ark_ff_macros::unroll_for_loops;
 use ark_ff::const_for;
@@ -26,7 +26,6 @@ use ark_std::{
 use num_bigint::BigUint;
 use num_traits::{CheckedAdd, ConstZero};
 use zeroize::Zeroize;
-use crypto_primitives::{IntRing, Ring};
 use crate::{
     adc,
     const_helpers::SerBuffer,

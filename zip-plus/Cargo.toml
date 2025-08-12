@@ -36,6 +36,7 @@ workspace = true
 
 [features]
 parallel = ["dep:rayon"]
+asm = ["ark-ff/asm", "sha3/asm"]
 
 [[bench]]
 name = "random_field_benches"

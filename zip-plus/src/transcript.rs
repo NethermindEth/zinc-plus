@@ -8,7 +8,7 @@ use crate::{
     },
     pcs::structs::ZipTranscript,
 };
-use crate::field::FieldConfig;
+use crate::field::config::FieldConfigBase;
 
 /// A cryptographic transcript implementation using the Keccak-256 hash function.
 /// Used for Fiat-Shamir transformations in zero-knowledge proof systems.
@@ -88,7 +88,7 @@ impl KeccakTranscript {
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn get_challenge<F: Field>(&mut self) -> F {
         let (lo, hi) = self.get_challenge_limbs();
-        let modulus = F::modulus();
+        let modulus = F::C::modulus();
         let challenge_num_bits = modulus.num_bits() - 1;
         if F::W::num_words() == 1 {
             let lo_mask = (1u64 << challenge_num_bits) - 1;
@@ -103,13 +103,13 @@ impl KeccakTranscript {
 
             let truncated_lo = lo & lo_mask;
 
-            let mut challenge: F = truncated_lo.map_to_field();
+            let challenge: F = truncated_lo.map_to_field();
             challenge
         } else if challenge_num_bits >= 256 {
             let two_to_128 = F::B::from_bits_le(&(0..196).map(|i| i == 128).collect::<Vec<bool>>())
                 .map_to_field();
 
-            let mut challenge: F = <u128 as FieldMap<F>>::map_to_field(&lo)
+            let challenge: F = <u128 as FieldMap<F>>::map_to_field(&lo)
                 + two_to_128 * <u128 as FieldMap<F>>::map_to_field(&hi);
             challenge
         } else {
@@ -121,7 +121,7 @@ impl KeccakTranscript {
             let two_to_128 = F::B::from_bits_le(&(0..196).map(|i| i == 128).collect::<Vec<bool>>())
                 .map_to_field();
 
-            let mut ret: F = <u128 as FieldMap<F>>::map_to_field(&lo)
+            let ret: F = <u128 as FieldMap<F>>::map_to_field(&lo)
                 + two_to_128 * <u128 as FieldMap<F>>::map_to_field(&truncated_hi);
             ret
         }
@@ -201,7 +201,7 @@ mod tests {
     use ark_std::str::FromStr;
 
     use super::KeccakTranscript;
-    use crate::{define_field_config, field::{BigInt, FieldConfig, RandomField}, traits::{FieldMap}};
+    use crate::{define_field_config, field::{BigInt, RandomField}, traits::{FieldMap}};
 
     define_field_config!(FC, "3618502788666131213697322783095070105623107215331596699973092056135872020481");
 
