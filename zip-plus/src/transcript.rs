@@ -201,24 +201,19 @@ mod tests {
     use ark_std::str::FromStr;
 
     use super::KeccakTranscript;
-    use crate::{
-        field::{BigInt, ConfigRef, FieldConfig, RandomField},
-        traits::{Config, FieldMap},
-    };
+    use crate::{define_field_config, field::{BigInt, ConfigRef, FieldConfig, RandomField}, traits::{Config, FieldMap}};
+    use crate::field::config::ConstFieldConfig;
+
+    define_field_config!(FC, "3618502788666131213697322783095070105623107215331596699973092056135872020481");
 
     #[test]
     fn test_keccak_transcript() {
         let mut transcript = KeccakTranscript::new();
-        let config = FieldConfig::new(
-            BigInt::<32>::from_str(
-                "3618502788666131213697322783095070105623107215331596699973092056135872020481",
-            )
-            .unwrap(),
-        );
+        let config = FieldConfig::new(FC::<32>::MODULUS);
         let field_config = ConfigRef::from(&config);
 
         transcript.absorb(b"This is a test string!");
-        let challenge: RandomField<32> = transcript.get_challenge(field_config);
+        let challenge: RandomField<32, FC<32>> = transcript.get_challenge(field_config);
 
         let expected_bigint = BigInt::<32>::from_str(
             "693058076479703886486101269644733982722902192016595549603371045888466087870",

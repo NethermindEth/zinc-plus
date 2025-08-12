@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 
+use std::marker::PhantomData;
 use ark_ff::UniformRand;
 use crypto_bigint::Random;
 use num_traits::ConstZero;
@@ -8,7 +9,7 @@ use crate::traits::{Config, ConfigReference, FieldMap, FromBytes, Words as Words
 mod arithmetic;
 mod biginteger;
 mod comparison;
-mod config;
+pub(crate) mod config;
 mod constant;
 mod int;
 mod uint;
@@ -21,17 +22,19 @@ pub use config::{ConfigRef, DebugFieldConfig, FieldConfig};
 pub use int::Int;
 pub use uint::Uint;
 #[derive(Copy, Clone)]
-pub struct RandomField<'cfg, const N: usize> {
+pub struct RandomField<'cfg, const N: usize, FC: ConstFieldConfig<N>> {
     pub value: BigInt<N>,
     pub config: Option<ConfigRef<'cfg, N>>,
+    phantom_data: PhantomData<FC>
 }
 
 use crate::{
     traits::{BigInteger, Field},
     transcript::KeccakTranscript,
 };
+use crate::field::config::ConstFieldConfig;
 
-impl<'cfg, const N: usize> RandomField<'cfg, N> {
+impl<'cfg, const N: usize, FC: ConstFieldConfig<N>> RandomField<'cfg, N, FC> {
     pub fn with_either<R, I, A>(&self, raw_fn: R, init_fn: I) -> A
     where
         I: Fn(&FieldConfig<N>, &BigInt<N>) -> A,
@@ -92,7 +95,7 @@ impl<'cfg, const N: usize> RandomField<'cfg, N> {
                 config.reference().expect("Field config cannot be none"),
             ),
             (Some(config), None) => {
-                let rhs = rhs.with_config(config);
+                let rhs = rhs.clone().with_config(config);
                 fn_with_config(
                     &mut self.value,
                     &rhs.value,
@@ -100,7 +103,7 @@ impl<'cfg, const N: usize> RandomField<'cfg, N> {
                 )
             }
             (None, Some(config)) => {
-                *self = self.with_config(config);
+                *self = self.clone().with_config(config);
                 fn_with_config(
                     &mut self.value,
                     &rhs.value,
@@ -114,6 +117,7 @@ impl<'cfg, const N: usize> RandomField<'cfg, N> {
         Self {
             config: Some(config),
             value: BigInt::ZERO,
+            phantom_data: PhantomData,
         }
     }
 
@@ -128,13 +132,13 @@ impl<'cfg, const N: usize> RandomField<'cfg, N> {
     /// Convert from `BigInteger` to `RandomField`
     ///
     /// If `BigInteger` is greater then field modulus return `None`
-    pub fn from_bigint<'a>(config: ConfigRef<'a, N>, value: BigInt<N>) -> Option<RandomField<'a, N>>
+    pub fn from_bigint<'a>(config: ConfigRef<'a, N>, value: BigInt<N>) -> Option<RandomField<'a, N, FC>>
     where
         'cfg: 'a,
     {
         let config_ref = match config.reference() {
             Some(config) => config,
-            None => return Some(Self { value, config: None }),
+            None => return Some(Self { value, config: None, phantom_data: PhantomData }),
         };
 
         if value >= *config_ref.modulus() {
@@ -147,7 +151,7 @@ impl<'cfg, const N: usize> RandomField<'cfg, N> {
         }
     }
 
-    pub fn from_i64(value: i64, config: ConfigRef<'cfg, N>) -> Option<RandomField<'cfg, N>> {
+    pub fn from_i64(value: i64, config: ConfigRef<'cfg, N>) -> Option<RandomField<'cfg, N, FC>> {
         let config_ref = match config.reference() {
             Some(config) => config,
             None => {
@@ -180,7 +184,7 @@ impl<'cfg, const N: usize> RandomField<'cfg, N> {
     }
 }
 
-impl<'cfg, const N: usize> Field for RandomField<'cfg, N> {
+impl<'cfg, const N: usize, FC: ConstFieldConfig<N>> Field for RandomField<'cfg, N, FC> {
     type B = BigInt<N>;
     type C = FieldConfig<N>;
     type R = ConfigRef<'cfg, N>;
@@ -190,11 +194,11 @@ impl<'cfg, const N: usize> Field for RandomField<'cfg, N> {
     type DebugField = DebugRandomField;
 
     fn new_unchecked(config: ConfigRef<'cfg, N>, value: BigInt<N>) -> Self {
-        Self { config: Some(config), value }
+        Self { config: Some(config), value, phantom_data: PhantomData }
     }
 
     fn without_config(value: Self::B) -> Self {
-        Self { value, config: None }
+        Self { value, config: None, phantom_data: PhantomData }
     }
 
     fn rand_with_config<R: ark_std::rand::Rng + ?Sized>(rng: &mut R, config: Self::R) -> Self {
@@ -244,7 +248,7 @@ impl<'cfg, const N: usize> Field for RandomField<'cfg, N> {
             Some(_) => { panic!("Cannot convert initialized field to raw field without a value") },
         };
 
-        Self { config: Some(config), value }
+        Self { config: Some(config), value, phantom_data: PhantomData }
     }
 
     #[inline(always)]
@@ -272,37 +276,37 @@ impl<'cfg, const N: usize> Field for RandomField<'cfg, N> {
     }
 }
 
-impl<const N: usize> UniformRand for RandomField<'_, N> {
+impl<const N: usize, FC: ConstFieldConfig<N>> UniformRand for RandomField<'_, N, FC> {
     fn rand<R: ark_std::rand::Rng + ?Sized>(rng: &mut R) -> Self {
         let value = BigInt::rand(rng);
 
-        Self { value, config: None }
+        Self { value, config: None, phantom_data: PhantomData }
     }
 }
 
-impl<const N: usize> Random for RandomField<'_, N> {
+impl<const N: usize, FC: ConstFieldConfig<N>> Random for RandomField<'_, N, FC> {
     fn random(rng: &mut (impl ark_std::rand::RngCore + ?Sized)) -> Self {
         let value = BigInt::rand(rng);
 
-        Self { value, config: None }
+        Self { value, config: None, phantom_data: PhantomData }
     }
 }
 
-impl<const N: usize> ark_std::fmt::Debug for RandomField<'_, N> {
+impl<const N: usize, FC: ConstFieldConfig<N>> ark_std::fmt::Debug for RandomField<'_, N, FC> {
     fn fmt(&self, f: &mut ark_std::fmt::Formatter<'_>) -> ark_std::fmt::Result {
         match self.config {
             None => write!(f, "{}, no config", self.value),
             Some(_) => write!(
                 f,
                 "{} in Z_{}",
-                self.into_bigint(),
+                self.clone().into_bigint(),
                 self.config_ptr().reference().unwrap().modulus()
             ),
         }
     }
 }
 
-impl<const N: usize> ark_std::fmt::Display for RandomField<'_, N> {
+impl<const N: usize, FC: ConstFieldConfig<N>> ark_std::fmt::Display for RandomField<'_, N, FC> {
     fn fmt(&self, f: &mut ark_std::fmt::Formatter<'_>) -> ark_std::fmt::Result {
         // TODO: we should go back from Montgomery here.
         match self.config {
@@ -310,23 +314,24 @@ impl<const N: usize> ark_std::fmt::Display for RandomField<'_, N> {
                 write!(f, "{}", self.value)
             }
             Some(_) => {
-                write!(f, "{}", self.into_bigint())
+                write!(f, "{}", self.clone().into_bigint())
             }
         }
     }
 }
 
-impl<const N: usize> Default for RandomField<'_, N> {
+impl<const N: usize, FC: ConstFieldConfig<N>> Default for RandomField<'_, N, FC> {
     fn default() -> Self {
         Self {
             value: BigInt::ZERO,
             config: None,
+            phantom_data: PhantomData
         }
     }
 }
 
-unsafe impl<const N: usize> Send for RandomField<'_, N> {}
-unsafe impl<const N: usize> Sync for RandomField<'_, N> {}
+unsafe impl<const N: usize, FC: ConstFieldConfig<N>> Send for RandomField<'_, N, FC> {}
+unsafe impl<const N: usize, FC: ConstFieldConfig<N>> Sync for RandomField<'_, N, FC> {}
 
 #[derive(Debug)]
 pub enum DebugRandomField {
@@ -340,8 +345,8 @@ pub enum DebugRandomField {
     },
 }
 
-impl<const N: usize> From<RandomField<'_, N>> for DebugRandomField {
-    fn from(value: RandomField<'_, N>) -> Self {
+impl<const N: usize, FC: ConstFieldConfig<N>> From<RandomField<'_, N, FC>> for DebugRandomField {
+    fn from(value: RandomField<'_, N, FC>) -> Self {
         match value.config {
             None => Self::Raw {
                 value: value.value.into(),
@@ -367,20 +372,20 @@ impl ark_std::fmt::Display for DebugRandomField {
     }
 }
 
-impl<const N: usize> From<u128> for RandomField<'_, N> {
+impl<const N: usize, FC: ConstFieldConfig<N>> From<u128> for RandomField<'_, N, FC> {
     fn from(value: u128) -> Self {
         let value = BigInt::from(value);
 
-        RandomField { value, config: None }
+        RandomField { value, config: None, phantom_data: PhantomData }
     }
 }
 
 macro_rules! impl_from_uint {
     ($type:ty) => {
-        impl<const N: usize> From<$type> for RandomField<'_, N> {
+        impl<const N: usize, FC: ConstFieldConfig<N>> From<$type> for RandomField<'_, N, FC> {
             fn from(value: $type) -> Self {
                 let value = BigInt::from(value);
-                RandomField { value, config: None }
+                RandomField { value, config: None, phantom_data: PhantomData }
             }
         }
     };
@@ -391,18 +396,19 @@ impl_from_uint!(u32);
 impl_from_uint!(u16);
 impl_from_uint!(u8);
 
-impl<const N: usize> From<bool> for RandomField<'_, N> {
+impl<const N: usize, FC: ConstFieldConfig<N>> From<bool> for RandomField<'_, N, FC> {
     fn from(value: bool) -> Self {
         let value = BigInt::from(value as u8);
-        RandomField { value, config: None }
+        RandomField { value, config: None, phantom_data: PhantomData }
     }
 }
 
-impl<const N: usize> FromBytes for RandomField<'_, N> {
+impl<const N: usize, FC: ConstFieldConfig<N>> FromBytes for RandomField<'_, N, FC> {
     fn from_bytes_le(bytes: &[u8]) -> Option<Self> {
         Some(RandomField {
             value: BigInt::<N>::from_bytes_le(bytes)?,
             config: None,
+            phantom_data: PhantomData
         })
     }
 
@@ -410,11 +416,12 @@ impl<const N: usize> FromBytes for RandomField<'_, N> {
         Some(RandomField {
             value: BigInt::<N>::from_bytes_be(bytes)?,
             config: None,
+            phantom_data: PhantomData
         })
     }
 }
 
-impl<'cfg, const N: usize> RandomField<'cfg, N> {
+impl<'cfg, const N: usize, FC: ConstFieldConfig<N>> RandomField<'cfg, N, FC> {
     pub fn from_bytes_le_with_config(config: ConfigRef<'cfg, N>, bytes: &[u8]) -> Option<Self> {
         let value = BigInt::<N>::from_bytes_le(bytes);
 

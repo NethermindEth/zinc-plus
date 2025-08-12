@@ -7,11 +7,11 @@ use num_traits::Inv;
 /// respective inverse operations.
 pub trait Field:
 Ring
-    // Arithmetic operations consuming rhs
-    + Div<Self, Output=Self>
-    // Arithmetic operations with rhs reference
-    + for<'a> Div<&'a Self, Output=Self>
-    {}
+// Arithmetic operations consuming rhs
++ Div<Self, Output=Self>
+// Arithmetic operations with rhs reference
++ for<'a> Div<&'a Self, Output=Self>
+{}
 
 /// Element of an integer field modulo prime number (F_p).
 pub trait PrimeField: Field + IntRing + for<'a> From<&'a [Limb]> + Inv {
@@ -29,5 +29,16 @@ pub trait PrimeField: Field + IntRing + for<'a> From<&'a [Limb]> + Inv {
 /// Element of a prime field in its Montgomery representation of - encoded in a way so that modular
 /// multiplication can be done without performing an explicit division by pp after each product.
 pub trait MontgomeryField: PrimeField {
-    // FIXME
+    /// Let `M` be the power of 2^64 nearest to `Self::MODULUS_BITS`. Then
+    /// `R = M % Self::MODULUS`.
+    const R: Self::Inner;
+
+    /// `R^2 = R * R mod MODULUS`
+    const R_SQUARED: Self::Inner;
+
+    /// Does the modulus have a spare unused bit
+    ///
+    /// This condition applies if
+    /// (a) `Self::MODULUS[N-1] >> 63 == 0`
+    const MODULUS_HAS_SPARE_BIT: bool;
 }

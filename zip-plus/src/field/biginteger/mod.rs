@@ -38,7 +38,7 @@ use crate::{
 pub mod arithmetic;
 mod bits;
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Zeroize)]
-pub struct BigInt<const N: usize>([u64; N]);
+pub struct BigInt<const N: usize>(pub [u64; N]);
 
 impl<const N: usize> From<[u64; N]> for BigInt<N> {
     #[inline]
@@ -119,9 +119,9 @@ impl<const N: usize> CanonicalDeserialize for BigInt<N> {
 #[macro_export]
 macro_rules! BigInt {
     ($c0:expr) => {{
-        let (is_positive, limbs) = $crate::ark_ff_macros::to_sign_and_limbs!($c0);
+        let (is_positive, limbs) = ark_ff::ark_ff_macros::to_sign_and_limbs!($c0);
         assert!(is_positive);
-        let mut integer = $crate::BigInt::zero();
+        let mut integer = <$crate::field::BigInt<_> as num_traits::ConstZero>::ZERO;
         assert!(integer.0.len() >= limbs.len());
         $crate::const_for!((i in 0..(limbs.len())) {
             integer.0[i] = limbs[i];

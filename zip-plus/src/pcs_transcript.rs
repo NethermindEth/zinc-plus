@@ -8,7 +8,7 @@ use ark_std::{
 };
 use sha3::{digest::Output, Keccak256};
 
-use super::{pcs::utils::MerkleProof, Error};
+use super::{define_field_config, pcs::utils::MerkleProof, Error};
 use crate::{
     poly::alloc::string::ToString,
     traits::{BigInteger, Field, FromBytes, Integer, PrimitiveConversion, Words},
@@ -219,17 +219,19 @@ impl<F: Field> PcsTranscript<F> {
     }
 }
 
+define_field_config!(FC, "57316695564490278656402085503");
+
 #[allow(unused_macros)]
 macro_rules! test_read_write {
     // TODO: N is magic
     ($write_fn:ident, $read_fn:ident, $original_value:expr, $assert_msg:expr) => {{
         use ark_std::format;
-        let mut transcript = PcsTranscript::<RandomField<N>>::new();
+        let mut transcript = PcsTranscript::<RandomField<N, FC<N>>>::new();
         transcript
             .$write_fn(&$original_value)
             .expect(&format!("Failed to write {}", $assert_msg));
         let proof = transcript.into_proof();
-        let mut transcript = PcsTranscript::<RandomField<N>>::from_proof(&proof);
+        let mut transcript = PcsTranscript::<RandomField<N, FC<N>>>::from_proof(&proof);
         let read_value = transcript
             .$read_fn()
             .expect(&format!("Failed to read {}", $assert_msg));
@@ -246,12 +248,12 @@ macro_rules! test_read_write_vec {
     // TODO: N is magic
     ($write_fn:ident, $read_fn:ident, $original_values:expr, $assert_msg:expr) => {{
         use ark_std::format;
-        let mut transcript = PcsTranscript::<RandomField<N>>::new();
+        let mut transcript = PcsTranscript::<RandomField<N, FC<N>>>::new();
         transcript
             .$write_fn(&$original_values)
             .expect(&format!("Failed to write {}", $assert_msg));
         let proof = transcript.into_proof();
-        let mut transcript = PcsTranscript::<RandomField<N>>::from_proof(&proof);
+        let mut transcript = PcsTranscript::<RandomField<N, FC<N>>>::from_proof(&proof);
         let read_values = transcript
             .$read_fn($original_values.len())
             .expect(&format!("Failed to read {}", $assert_msg));

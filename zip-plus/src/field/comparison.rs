@@ -6,8 +6,9 @@ use crate::{
     },
     traits::Field,
 };
+use crate::field::config::ConstFieldConfig;
 
-impl<const N: usize> PartialEq for RandomField<'_, N> {
+impl<const N: usize, FC: ConstFieldConfig<N>> PartialEq for RandomField<'_, N, FC> {
     fn eq(&self, other: &Self) -> bool {
         if self.is_one() & other.is_one() {
             return true;
@@ -26,4 +27,4 @@ impl<const N: usize> PartialEq for RandomField<'_, N> {
     }
 }
 
-impl<const N: usize> Eq for RandomField<'_, N> {} // Eq requires PartialEq and ensures reflexivity.
+impl<const N: usize, FC: ConstFieldConfig<N>> Eq for RandomField<'_, N, FC> {} // Eq requires PartialEq and ensures reflexivity.
