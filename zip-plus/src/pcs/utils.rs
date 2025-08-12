@@ -253,19 +253,18 @@ impl ColumnOpening {
 pub(super) fn point_to_tensor<F: Field>(
     num_rows: usize,
     point: &[F],
-    config: F::R,
 ) -> Result<(Vec<F>, Vec<F>), Error> {
     assert!(num_rows.is_power_of_two());
     let (hi, lo) = point.split_at(point.len() - num_rows.ilog2() as usize);
     // TODO: get rid of these unwraps.
     let q_0 = if !lo.is_empty() {
-        build_eq_x_r_f(lo, config).unwrap()
+        build_eq_x_r_f(lo).unwrap()
     } else {
         MLE_F::zero()
     };
 
     let q_1 = if !hi.is_empty() {
-        build_eq_x_r_f(hi, config).unwrap()
+        build_eq_x_r_f(hi).unwrap()
     } else {
         MLE_F::zero()
     };
@@ -281,10 +280,9 @@ pub(super) fn point_to_tensor<F: Field>(
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
 pub fn build_eq_x_r_f<F: Field>(
     r: &[F],
-    config: F::R,
 ) -> Result<MLE_F<F>, ArithErrors> {
     let evals = build_eq_x_r_vec(r)?;
-    let mle = MLE_F::from_evaluations_vec(r.len(), evals, config);
+    let mle = MLE_F::from_evaluations_vec(r.len(), evals);
 
     Ok(mle)
 }
@@ -361,12 +359,11 @@ fn build_eq_x_r_helper<F: Field>(r: &[F], buf: &mut Vec<F>) -> Result<(), ArithE
 pub(super) fn left_point_to_tensor<F: Field>(
     num_rows: usize,
     point: &[F],
-    config: F::R,
 ) -> Result<Vec<F>, Error> {
     let (_, lo) = point.split_at(point.len() - num_rows.ilog2() as usize);
     // TODO: get rid of these unwraps.
     let q_0 = if !lo.is_empty() {
-        build_eq_x_r_f(lo, config).unwrap()
+        build_eq_x_r_f(lo).unwrap()
     } else {
         MLE_F::<F>::zero()
     };

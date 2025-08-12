@@ -3,6 +3,6 @@ pub(crate) mod types;
 
 pub use conversion::{FieldMap, FromBytes};
 pub use types::{
-    BigInteger, Config, ConfigReference, Field, Integer, PrimitiveConversion,
+    BigInteger, Field, Integer, PrimitiveConversion,
     Uinteger, Words, ZipTypes,
 };

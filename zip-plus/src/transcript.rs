@@ -4,10 +4,11 @@ use sha3::{Digest, Keccak256};
 use crate::{
     field::Int,
     traits::{
-        BigInteger, Config, ConfigReference, Field, FieldMap, Integer, PrimitiveConversion, Words,
+        BigInteger, Field, FieldMap, Integer, PrimitiveConversion, Words,
     },
     pcs::structs::ZipTranscript,
 };
+use crate::field::FieldConfig;
 
 /// A cryptographic transcript implementation using the Keccak-256 hash function.
 /// Used for Fiat-Shamir transformations in zero-knowledge proof systems.
@@ -85,17 +86,16 @@ impl KeccakTranscript {
 
     /// Generates a pseudorandom field element as a challenge based on the current transcript state.
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
-    pub fn get_challenge<F: Field>(&mut self, config_ref: F::R) -> F {
+    pub fn get_challenge<F: Field>(&mut self) -> F {
         let (lo, hi) = self.get_challenge_limbs();
-        let config = config_ref.reference().expect("Field config cannot be none");
-        let modulus = config.modulus();
+        let modulus = F::modulus();
         let challenge_num_bits = modulus.num_bits() - 1;
         if F::W::num_words() == 1 {
             let lo_mask = (1u64 << challenge_num_bits) - 1;
 
             let truncated_lo = lo as u64 & lo_mask;
 
-            let mut challenge: F = truncated_lo.map_to_field(config_ref);
+            let challenge: F = truncated_lo.map_to_field();
             return challenge;
         }
         if challenge_num_bits < 128 {
@@ -103,14 +103,14 @@ impl KeccakTranscript {
 
             let truncated_lo = lo & lo_mask;
 
-            let mut challenge: F = truncated_lo.map_to_field(config_ref);
+            let mut challenge: F = truncated_lo.map_to_field();
             challenge
         } else if challenge_num_bits >= 256 {
             let two_to_128 = F::B::from_bits_le(&(0..196).map(|i| i == 128).collect::<Vec<bool>>())
-                .map_to_field(config_ref);
+                .map_to_field();
 
-            let mut challenge: F = <u128 as FieldMap<F>>::map_to_field(&lo, config_ref)
-                + two_to_128 * <u128 as FieldMap<F>>::map_to_field(&hi, config_ref);
+            let mut challenge: F = <u128 as FieldMap<F>>::map_to_field(&lo)
+                + two_to_128 * <u128 as FieldMap<F>>::map_to_field(&hi);
             challenge
         } else {
             let hi_bits_to_keep = challenge_num_bits - 128;
@@ -119,18 +119,18 @@ impl KeccakTranscript {
             let truncated_hi = hi & hi_mask;
 
             let two_to_128 = F::B::from_bits_le(&(0..196).map(|i| i == 128).collect::<Vec<bool>>())
-                .map_to_field(config_ref);
+                .map_to_field();
 
-            let mut ret: F = <u128 as FieldMap<F>>::map_to_field(&lo, config_ref)
-                + two_to_128 * <u128 as FieldMap<F>>::map_to_field(&truncated_hi, config_ref);
+            let mut ret: F = <u128 as FieldMap<F>>::map_to_field(&lo)
+                + two_to_128 * <u128 as FieldMap<F>>::map_to_field(&truncated_hi);
             ret
         }
     }
 
     /// Generates pseudorandom field elements as challenges based on the current transcript state.
-    pub fn get_challenges<F: Field>(&mut self, n: usize, config: F::R) -> Vec<F> {
+    pub fn get_challenges<F: Field>(&mut self, n: usize) -> Vec<F> {
         let mut challenges = Vec::with_capacity(n);
-        challenges.extend((0..n).map(|_| self.get_challenge::<F>(config)));
+        challenges.extend((0..n).map(|_| self.get_challenge::<F>()));
         challenges
     }
 
@@ -201,25 +201,22 @@ mod tests {
     use ark_std::str::FromStr;
 
     use super::KeccakTranscript;
-    use crate::{define_field_config, field::{BigInt, ConfigRef, FieldConfig, RandomField}, traits::{Config, FieldMap}};
-    use crate::field::config::ConstFieldConfig;
+    use crate::{define_field_config, field::{BigInt, FieldConfig, RandomField}, traits::{FieldMap}};
 
     define_field_config!(FC, "3618502788666131213697322783095070105623107215331596699973092056135872020481");
 
     #[test]
     fn test_keccak_transcript() {
         let mut transcript = KeccakTranscript::new();
-        let config = FieldConfig::new(FC::<32>::modulus());
-        let field_config = ConfigRef::from(&config);
 
         transcript.absorb(b"This is a test string!");
-        let challenge: RandomField<32, FC<32>> = transcript.get_challenge(field_config);
+        let challenge: RandomField<32, FC<32>> = transcript.get_challenge();
 
         let expected_bigint = BigInt::<32>::from_str(
             "693058076479703886486101269644733982722902192016595549603371045888466087870",
         )
         .unwrap();
-        let expected_field = expected_bigint.map_to_field(field_config);
+        let expected_field = expected_bigint.map_to_field();
 
         assert_eq!(challenge, expected_field);
     }

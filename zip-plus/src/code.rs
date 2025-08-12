@@ -57,7 +57,7 @@ pub trait LinearCode<ZT: ZipTypes>: Sync + Send {
     ///
     /// # Returns
     /// A vector of field elements representing the encoded row
-    fn encode_f<F: Field>(&self, row: &[F], field: F::R) -> Vec<F>
+    fn encode_f<F: Field>(&self, row: &[F]) -> Vec<F>
     where
         ZT::L: FieldMap<F, Output = F>;
 }

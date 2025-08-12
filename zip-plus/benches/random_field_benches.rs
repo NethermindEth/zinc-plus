@@ -10,16 +10,13 @@ use criterion::{
     criterion_group, criterion_main, AxisScale, BenchmarkId, Criterion,
     PlotConfiguration,
 };
-use zip_plus::{big_int, define_field_config, field::{ConfigRef, RandomField}, field_config, random_field};
-use zip_plus::field::config::ConstFieldConfig;
-use zip_plus::traits::{ConfigReference, FieldMap};
+use zip_plus::{big_int, define_field_config, field::{RandomField, config::FieldConfig}, random_field};
+use zip_plus::traits::{FieldMap};
 
 define_field_config!(Fc, "695962179703626800597079116051991347");
 
 fn bench_random_field(group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>) {
-    let field_config = unsafe { ConfigRef::new(Box::leak(Box::new(Fc::<4>::field_config()))) };
-
-    let field_elem: RandomField<4, Fc<4>> = 695962179703_u64.map_to_field(field_config);
+    let field_elem: RandomField<4, Fc<4>> = 695962179703_u64.map_to_field();
     group.bench_with_input(
         BenchmarkId::new("Multiply", "Random128BitFieldElement"),
         &field_elem,

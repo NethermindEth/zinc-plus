@@ -128,7 +128,7 @@ impl<ZT: ZipTypes> LinearCode<ZT> for RaaCode<ZT> {
         self.encode_inner(row)
     }
 
-    fn encode_f<F: Field>(&self, row: &[F], _field: F::R) -> Vec<F>
+    fn encode_f<F: Field>(&self, row: &[F]) -> Vec<F>
     where
         ZT::L: FieldMap<F, Output = F>,
     {

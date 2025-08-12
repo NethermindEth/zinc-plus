@@ -11,5 +11,5 @@ pub trait FromBytes: Sized {
 
 pub trait FieldMap<F: Field> {
     type Output;
-    fn map_to_field(&self, config_ref: F::R) -> Self::Output;
+    fn map_to_field(&self) -> Self::Output;
 }

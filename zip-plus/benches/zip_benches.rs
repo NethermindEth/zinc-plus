@@ -1,10 +1,9 @@
 #![allow(non_local_definitions)]
 #![allow(clippy::eq_op)]
 
-use zip_plus::field::config::ConstFieldConfig;
+use zip_plus::field::config::{FieldConfigBase};
 use std::hint::black_box;
 use ark_std::{
-    str::FromStr,
     test_rng,
     time::{Duration, Instant},
 };
@@ -13,7 +12,7 @@ use criterion::{
 };
 use crypto_bigint::Random;
 use itertools::Itertools;
-use zip_plus::{define_random_field_zip_types, field::{BigInt, ConfigRef, FieldConfig, RandomField}, implement_random_field_zip_types, poly_z::mle::{DenseMultilinearExtension, MultilinearExtension}, traits::{Config, ConfigReference, FieldMap, ZipTypes}, transcript::KeccakTranscript, code::{DefaultLinearCodeSpec, LinearCode}, code_raa::RaaCode, pcs::{structs::MultilinearZip, MerkleTree}, pcs_transcript::PcsTranscript, define_field_config};
+use zip_plus::{define_random_field_zip_types, field::{RandomField}, implement_random_field_zip_types, poly_z::mle::{DenseMultilinearExtension, MultilinearExtension}, traits::{FieldMap, ZipTypes}, transcript::KeccakTranscript, code::{DefaultLinearCodeSpec, LinearCode}, code_raa::RaaCode, pcs::{structs::MultilinearZip, MerkleTree}, pcs_transcript::PcsTranscript, define_field_config};
 
 const INT_LIMBS: usize = 1;
 const FIELD_LIMBS: usize = 4;
@@ -119,7 +118,6 @@ fn commit<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
 
 fn open<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
     let mut rng = test_rng();
-    let field_config = unsafe { ConfigRef::new(Box::leak(Box::new(FC::field_config()))) };
 
     type T = KeccakTranscript;
     let mut keccak_transcript = T::new();
@@ -143,8 +141,7 @@ fn open<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
                         &params,
                         &poly,
                         &data,
-                        &point.map_to_field(field_config),
-                        field_config,
+                        &point.map_to_field(),
                         &mut transcript,
                     )
                     .expect("Failed to make opening");
@@ -157,7 +154,6 @@ fn open<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
 }
 fn verify<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
     let mut rng = test_rng();
-    let field_config =  unsafe { ConfigRef::new(Box::leak(Box::new(FC::field_config()))) };
 
     type T = KeccakTranscript;
     let mut keccak_transcript = T::new();
@@ -175,16 +171,12 @@ fn verify<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
         &params,
         &poly,
         &data,
-        &point.map_to_field(field_config),
-        field_config,
+        &point.map_to_field(),
         &mut transcript,
     )
     .unwrap();
 
     let proof = transcript.into_proof();
-    field_config
-        .reference()
-        .expect("Field config cannot be none");
     group.bench_function(
         format!("Verify: RandomField<{FIELD_LIMBS}>, poly_size = 2^{P}(Int limbs = {INT_LIMBS}), ZipSpec{spec}, modulus={}", FC::modulus()),
         |b| {
@@ -196,10 +188,9 @@ fn verify<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
                     BenchZip::verify(
                         &params,
                         &commitment,
-                        &point.map_to_field(field_config),
-                        eval.map_to_field(field_config),
+                        &point.map_to_field(),
+                        eval.map_to_field(),
                         &mut transcript,
-                        field_config,
                     )
                     .expect("Failed to verify");
                     total_duration += timer.elapsed();

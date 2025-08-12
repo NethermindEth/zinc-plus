@@ -6,15 +6,13 @@ use crate::{
     field::{biginteger::BigInt, RandomField},
     traits::Field,
 };
-use crate::field::config::ConstFieldConfig;
-use crate::field::ConfigRef;
-use crate::traits::{ConfigReference, FieldMap};
+use crate::field::config::FieldConfig;
+use crate::traits::{FieldMap};
 
-impl<const N: usize, FC: ConstFieldConfig<N>> Zero for RandomField<'_, N, FC> {
+impl<const N: usize, FC: FieldConfig<BigInt<N>>> Zero for RandomField<N, FC> {
     fn zero() -> Self {
         RandomField {
             value: BigInt::zero(),
-            config: unsafe { ConfigRef::new(Box::leak(Box::new(FC::field_config()))) },
             phantom_data: PhantomData,
         }
     }
@@ -28,21 +26,21 @@ impl<const N: usize, FC: ConstFieldConfig<N>> Zero for RandomField<'_, N, FC> {
     }
 }
 
-impl<const N: usize, FC: ConstFieldConfig<N>> One for RandomField<'_, N, FC> {
+impl<const N: usize, FC: FieldConfig<BigInt<N>>> One for RandomField<N, FC> {
     fn one() -> Self {
-        BigInt::<N>::one().map_to_field(unsafe { ConfigRef::new(Box::leak(Box::new(FC::field_config()))) })
+        BigInt::<N>::one().map_to_field()
     }
 
     fn set_one(&mut self) {
-        *self.value_mut() = *self.config().r();
+        *self.value_mut() = FC::r();
     }
 
     fn is_one(&self) -> bool {
-        self.value == *self.config().r()
+        self.value == FC::r()
     }
 }
 
-impl<const N: usize, FC: ConstFieldConfig<N>> Zeroize for RandomField<'_, N, FC> {
+impl<const N: usize, FC: FieldConfig<BigInt<N>>> Zeroize for RandomField<N, FC> {
     fn zeroize(&mut self) {
         unsafe { *self = ark_std::mem::zeroed() }
     }
@@ -53,7 +51,7 @@ mod tests {
     use ark_ff::{One, Zero};
     use zeroize::Zeroize;
 
-    use crate::{big_int, define_field_config, field::{config::ConfigRef, RandomField}, field_config, random_field};
+    use crate::{big_int, define_field_config, field::{RandomField}, random_field};
 
     define_field_config!(FC, "23");
 
@@ -65,9 +63,7 @@ mod tests {
 
     #[test]
     fn test_set_zero() {
-        let config = field_config!(23, 1);
-        let config = ConfigRef::from(&config);
-        let mut elem: RandomField<1, FC<1>> = random_field!(7u32, config);
+        let mut elem: RandomField<1, FC<1>> = random_field!(7u32);
         elem.set_zero();
         assert!(elem.is_zero());
     }
@@ -80,9 +76,7 @@ mod tests {
 
     #[test]
     fn test_set_one() {
-        let config = field_config!(23, 1);
-        let config = ConfigRef::from(&config);
-        let mut elem: RandomField<1, FC<1>> = random_field!(5u32, config);
+        let mut elem: RandomField<1, FC<1>> = random_field!(5u32);
         elem.set_one();
         assert!(elem.is_one());
     }
@@ -123,9 +117,7 @@ mod tests {
 
     #[test]
     fn test_zeroize() {
-        let config = field_config!(23, 1);
-        let config = ConfigRef::from(&config);
-        let mut elem: RandomField<1, FC<1>> = random_field!(12, config);
+        let mut elem: RandomField<1, FC<1>> = random_field!(12);
         elem.zeroize();
         assert!(elem.is_zero());
     }

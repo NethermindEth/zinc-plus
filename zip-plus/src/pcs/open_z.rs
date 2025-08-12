@@ -22,7 +22,6 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
         poly: &DenseMultilinearExtension<ZT::N>,
         commit_data: &MultilinearZipData<ZT::K>,
         point: &[F],
-        field: F::R,
         transcript: &mut PcsTranscript<F>,
     ) -> Result<(), Error>
     where
@@ -30,9 +29,9 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
     {
         validate_input("open", pp.num_vars, [poly], [point])?;
 
-        Self::prove_testing_phase(pp, poly, commit_data, transcript, field)?;
+        Self::prove_testing_phase(pp, poly, commit_data, transcript)?;
 
-        Self::prove_evaluation_phase(pp, transcript, point, poly, field)?;
+        Self::prove_evaluation_phase(pp, transcript, point, poly)?;
 
         Ok(())
     }
@@ -44,13 +43,12 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
         comms: &[MultilinearZipData<ZT::K>],
         points: &[Vec<F>],
         transcript: &mut PcsTranscript<F>,
-        field: F::R,
     ) -> Result<(), Error>
     where
         ZT::N: FieldMap<F, Output = F>,
     {
         for (poly, comm, point) in izip!(polys.iter(), comms.iter(), points.iter()) {
-            Self::open(pp, poly, comm, point, field, transcript)?;
+            Self::open(pp, poly, comm, point, transcript)?;
         }
         Ok(())
     }
@@ -62,7 +60,6 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
         transcript: &mut PcsTranscript<F>,
         point: &[F],
         poly: &DenseMultilinearExtension<ZT::N>,
-        field: F::R,
     ) -> Result<(), Error>
     where
         ZT::N: FieldMap<F, Output = F>,
@@ -71,9 +68,9 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
         let row_len = pp.linear_code.row_len();
 
         // We prove evaluations over the field, so integers need to be mapped to field elements first
-        let q_0 = left_point_to_tensor(num_rows, point, field)?;
+        let q_0 = left_point_to_tensor(num_rows, point)?;
 
-        let evaluations = poly.evaluations.map_to_field(field);
+        let evaluations = poly.evaluations.map_to_field();
 
         let q_0_combined_row = if num_rows > 1 {
             // Return the evaluation row combination
@@ -93,7 +90,6 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
         poly: &DenseMultilinearExtension<ZT::N>,
         commit_data: &MultilinearZipData<ZT::K>,
         transcript: &mut PcsTranscript<F>,
-        field: F::R, // This is only needed to call the transcript, but we are getting integers not fields
     ) -> Result<(), Error> {
         if pp.num_rows > 1 {
             // If we can take linear combinations
@@ -113,7 +109,7 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
 
         // Open merkle tree for each column drawn
         for _ in 0..pp.linear_code.num_column_opening() {
-            let column = transcript.squeeze_challenge_idx(field, pp.linear_code.codeword_len());
+            let column = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
             Self::open_merkle_trees_for_column(pp, commit_data, column, transcript)?;
         }
         Ok(())

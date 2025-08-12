@@ -15,6 +15,7 @@ use crate::{
     transcript::KeccakTranscript,
     pcs::utils::ToBytes,
 };
+use crate::field::FieldConfig;
 
 /// Trait for field elements, requiring arithmetic, assignment, random generation, and conversion traits.
 /// Used as a bound for generic code over finite fields.
@@ -47,25 +48,28 @@ pub trait Field:
     /// Integer representation type for the field element.
     type B: BigInteger<W = Self::W> + From<Self::I> + FieldMap<Self, Output = Self>;
     /// Field configuration type.
-    type C: Config<B = Self::B>;
-    /// Reference to field configuration.
-    type R: ConfigReference<C = Self::C>;
+    type C: FieldConfig<Self::B>;
     /// Word representation type.
     type W: Words;
     /// Cryptographic integer type.
     type I: Integer<W = Self::W, Uint = Self::U> + for<'a> From<&'a Self::B>;
     /// Cryptographic unsigned integer type.
     type U: Uinteger<W = Self::W, Int = Self::I>;
-    /// Debug representation for the field.
-    type DebugField: Debug + From<Self> + Send + Sync;
+
+    fn modulus() -> Self::B;
+
     /// Creates a new field element from config and value, without checking.
-    fn new_unchecked(config: Self::R, value: Self::B) -> Self;
+    fn new_unchecked(value: Self::B) -> Self;
+
     /// Generates a random field element with the given config.
-    fn rand_with_config<R: ark_std::rand::Rng + ?Sized>(rng: &mut R, config: Self::R) -> Self;
+    fn rand<R: ark_std::rand::Rng + ?Sized>(rng: &mut R) -> Self;
+
     /// Returns a reference to the integer value.
     fn value(&self) -> &Self::B;
+
     /// Returns a mutable reference to the integer value.
     fn value_mut(&mut self) -> &mut Self::B;
+
     /// Absorbs the field element into a Keccak transcript.
     fn absorb_into_transcript(&self, transcript: &mut KeccakTranscript);
 }
@@ -89,33 +93,6 @@ pub trait BigInteger: From<u64> + From<u32> + Debug + FromBytes + Clone {
     fn to_bytes_be(self) -> Vec<u8>;
     /// Converts to little-endian bytes.
     fn to_bytes_le(self) -> Vec<u8>;
-}
-
-/// Trait for field configuration types.
-pub trait Config: PartialEq + Eq {
-    type B: BigInteger;
-    /// Returns the modulus for the field.
-    fn modulus(&self) -> &Self::B;
-    /// Multiplies two integers in the field.
-    fn mul_assign(&self, a: &mut Self::B, b: &Self::B);
-    /// Returns the R^2 value for Montgomery reduction.
-    fn r2(&self) -> &Self::B;
-    /// Constructs a new config from a modulus.
-    fn new(modulus: Self::B) -> Self;
-}
-
-/// Trait for references to field configuration.
-pub trait ConfigReference: Copy + Clone + PartialEq + Eq + Debug + Send + Sync {
-    type C: Config;
-    /// Returns a reference to the config, if available.
-    fn reference(&self) -> Option<&Self::C>;
-    /// Creates a new config reference from a pointer.
-    #[allow(clippy::missing_safety_doc)] // TODO Should be documented.
-    unsafe fn new(config_ptr: *mut Self::C) -> Self;
-    /// Returns a pointer to the config, if available.
-    fn pointer(&self) -> Option<*mut Self::C>;
-    /// Constant representing no config reference.
-    const NONE: Self;
 }
 
 /// Trait for word-based representations of integers.

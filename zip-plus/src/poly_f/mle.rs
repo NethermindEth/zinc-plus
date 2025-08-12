@@ -29,11 +29,11 @@ pub trait MultilinearExtension<F: Field>:
 {
     /// Reduce the number of variables of `self` by fixing the
     /// `partial_point.len()` variables at `partial_point`.
-    fn fix_variables(&mut self, partial_point: &[F], config: F::R);
+    fn fix_variables(&mut self, partial_point: &[F]);
 
     /// Creates a new object with the number of variables of `self` reduced by fixing the
     /// `partial_point.len()` variables at `partial_point`.
-    fn fixed_variables(&self, partial_point: &[F], config: F::R) -> Self;
+    fn fixed_variables(&self, partial_point: &[F]) -> Self;
 }
 /// swap the bits of `x` from position `a..a+n` to `b..b+n` and from `b..b+n` to `a..a+n` in little endian order
 pub(crate) fn swap_bits(x: usize, a: usize, b: usize, n: usize) -> usize {

@@ -82,22 +82,22 @@ impl<F: Field> PcsTranscript<F> {
         Ok(())
     }
 
-    pub fn read_field_elements(&mut self, n: usize, config: F::R) -> Result<Vec<F>, Error> {
+    pub fn read_field_elements(&mut self, n: usize) -> Result<Vec<F>, Error> {
         (0..n)
-            .map(|_| self.read_field_element(config))
+            .map(|_| self.read_field_element())
             .collect::<Result<Vec<_>, _>>()
     }
 
     /// Reads a field element from the proof stream and absorbs it into the transcript.
     /// Used during proof verification to retrieve and process field elements.
-    pub fn read_field_element(&mut self, config: F::R) -> Result<F, Error> {
+    pub fn read_field_element(&mut self) -> Result<F, Error> {
         let mut bytes: Vec<u8> = vec![0; F::W::num_words() * 8];
 
         self.stream
             .read_exact(&mut bytes)
             .map_err(|err| Error::Transcript(err.kind(), err.to_string()))?;
 
-        let fe = F::new_unchecked(config, F::B::from_bytes_be(&bytes).unwrap());
+        let fe = F::new_unchecked(F::B::from_bytes_be(&bytes).unwrap());
 
         self.common_field_element(&fe);
         Ok(fe)
@@ -179,8 +179,8 @@ impl<F: Field> PcsTranscript<F> {
     /// Generates a pseudorandom index based on the current transcript state.
     /// Used to create deterministic challenges for zero-knowledge protocols.
     /// Returns an index between 0 and cap-1.
-    pub fn squeeze_challenge_idx(&mut self, config: F::R, cap: usize) -> usize {
-        let challenge: F = self.fs_transcript.get_challenge(config);
+    pub fn squeeze_challenge_idx(&mut self, cap: usize) -> usize {
+        let challenge: F = self.fs_transcript.get_challenge();
         let bytes = challenge.value().clone().to_bytes_le();
         let num = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
         num % cap
