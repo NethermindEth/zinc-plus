@@ -206,6 +206,7 @@ mod test {
 
     use crate::{big_int, define_field_config, field::{biginteger::BigInt, config::ConfigRef, RandomField}, field_config, random_field};
     use crate::field::config::ConstFieldConfig;
+    use crate::traits::ConfigReference;
 
     define_field_config!(Fc23, "23");
 
@@ -249,7 +250,7 @@ mod test {
     fn test_add_two_ones() {
         let lhs: RandomField<1, Fc23<1>> = RandomField::one();
         let rhs = RandomField::one();
-        let config = ConfigRef::from(&Fc23::<1>::FIELD_CONFIG);
+        let config = unsafe { ConfigRef::new(Box::leak(Box::new(Fc23::<1>::field_config()))) };
         let expected = RandomField::from_bigint(config, BigInt::from(2_u32)).unwrap();
         let zz = expected.clone().into_bigint();
 

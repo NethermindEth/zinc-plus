@@ -1,6 +1,3 @@
-#![feature(adt_const_params)]
-#![feature(const_trait_impl)]
-
 use crypto_primitives::IntRing;
 
 pub mod code;

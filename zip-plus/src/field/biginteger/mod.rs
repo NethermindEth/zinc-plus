@@ -119,9 +119,10 @@ impl<const N: usize> CanonicalDeserialize for BigInt<N> {
 #[macro_export]
 macro_rules! BigInt {
     ($c0:expr) => {{
+        use num_traits::ConstZero;
         let (is_positive, limbs) = ark_ff::ark_ff_macros::to_sign_and_limbs!($c0);
         assert!(is_positive);
-        let mut integer = <$crate::field::BigInt<_> as num_traits::ConstZero>::ZERO;
+        let mut integer = $crate::field::BigInt::ZERO;
         assert!(integer.0.len() >= limbs.len());
         $crate::const_for!((i in 0..(limbs.len())) {
             integer.0[i] = limbs[i];

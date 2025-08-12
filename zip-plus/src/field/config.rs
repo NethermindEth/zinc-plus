@@ -52,28 +52,52 @@ pub struct FieldConfig<const N: usize> {
 
 pub trait ConstFieldConfig<const N: usize>: Clone {
     /// The modulus of the field.
-    const MODULUS: BigInt<N>;
+    // const MODULUS: BigInt<N>;
+
+    fn modulus() -> BigInt<N>;
 
     /// Let `M` be the power of 2^64 nearest to `Self::MODULUS_BITS`. Then
     /// `R = M % Self::MODULUS`.
-    const R: BigInt<N> = Self::MODULUS.montgomery_r();
+    // const R: BigInt<N> = Self::MODULUS.montgomery_r();
+
+    fn r() -> BigInt<N> {
+        Self::modulus().montgomery_r()
+    }
 
     /// `R^2 = R * R mod MODULUS`
-    const R_SQUARED: BigInt<N> = Self::MODULUS.montgomery_r2();
+    // const R_SQUARED: BigInt<N> = Self::MODULUS.montgomery_r2();
+
+    fn r_squared() -> BigInt<N> {
+        Self::modulus().montgomery_r2()
+    }
 
     /// Does the modulus have a spare unused bit
     ///
     /// This condition applies if
     /// (a) `Self::MODULUS[N-1] >> 63 == 0`
-    const MODULUS_HAS_SPARE_BIT: bool = Self::MODULUS.has_spare_bit();
+    // const MODULUS_HAS_SPARE_BIT: bool = Self::MODULUS.has_spare_bit();
 
-    const FIELD_CONFIG: FieldConfig<N> = FieldConfig {
-        modulus: Self::MODULUS,
-        r: Self::R,
-        r2: Self::R_SQUARED,
-        inv: inv(Self::MODULUS),
-        modulus_has_spare_bit: Self::MODULUS_HAS_SPARE_BIT,
-    };
+    fn modulus_has_spare_bit() -> bool {
+        Self::modulus().has_spare_bit()
+    }
+
+    // const FIELD_CONFIG: FieldConfig<N> = FieldConfig {
+    //     modulus: Self::MODULUS,
+    //     r: Self::R,
+    //     r2: Self::R_SQUARED,
+    //     inv: inv(Self::MODULUS),
+    //     modulus_has_spare_bit: Self::MODULUS_HAS_SPARE_BIT,
+    // };
+
+    fn field_config() -> FieldConfig<N> {
+        FieldConfig {
+            modulus: Self::modulus(),
+            r: Self::r(),
+            r2: Self::r_squared(),
+            inv: inv(Self::modulus()),
+            modulus_has_spare_bit: Self::modulus_has_spare_bit(),
+        }
+    }
 }
 
 #[macro_export]
@@ -83,7 +107,10 @@ macro_rules! define_field_config {
         struct $name<const N: usize>;
 
         impl<const N: usize> $crate::field::config::ConstFieldConfig<N> for $name<N> {
-            const MODULUS: $crate::field::BigInt<N> = $crate::BigInt!($modulus);
+            //const MODULUS: $crate::field::BigInt<N> = $crate::BigInt!($modulus);
+            fn modulus() -> $crate::field::BigInt<N> {
+                $crate::BigInt!($modulus)
+            }
         }
     };
 }

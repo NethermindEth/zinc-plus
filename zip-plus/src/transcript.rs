@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn test_keccak_transcript() {
         let mut transcript = KeccakTranscript::new();
-        let config = FieldConfig::new(FC::<32>::MODULUS);
+        let config = FieldConfig::new(FC::<32>::modulus());
         let field_config = ConfigRef::from(&config);
 
         transcript.absorb(b"This is a test string!");

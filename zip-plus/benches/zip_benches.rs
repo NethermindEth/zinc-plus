@@ -119,7 +119,7 @@ fn commit<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
 
 fn open<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
     let mut rng = test_rng();
-    let field_config = ConfigRef::from(&FC::FIELD_CONFIG);
+    let field_config = unsafe { ConfigRef::new(Box::leak(Box::new(FC::field_config()))) };
 
     type T = KeccakTranscript;
     let mut keccak_transcript = T::new();
@@ -132,7 +132,7 @@ fn open<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
     let point = vec![1i64; P];
 
     group.bench_function(
-        format!("Open: RandomField<{FIELD_LIMBS}>, poly_size = 2^{P}(Int limbs = {INT_LIMBS}), ZipSpec{spec}, modulus={}", FC::MODULUS),
+        format!("Open: RandomField<{FIELD_LIMBS}>, poly_size = 2^{P}(Int limbs = {INT_LIMBS}), ZipSpec{spec}, modulus={}", FC::modulus()),
         |b| {
             b.iter_custom(|iters| {
                 let mut total_duration = Duration::ZERO;
@@ -157,7 +157,7 @@ fn open<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
 }
 fn verify<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
     let mut rng = test_rng();
-    let field_config = ConfigRef::from(&FC::FIELD_CONFIG);
+    let field_config =  unsafe { ConfigRef::new(Box::leak(Box::new(FC::field_config()))) };
 
     type T = KeccakTranscript;
     let mut keccak_transcript = T::new();
@@ -186,7 +186,7 @@ fn verify<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
         .reference()
         .expect("Field config cannot be none");
     group.bench_function(
-        format!("Verify: RandomField<{FIELD_LIMBS}>, poly_size = 2^{P}(Int limbs = {INT_LIMBS}), ZipSpec{spec}, modulus={}", FC::MODULUS),
+        format!("Verify: RandomField<{FIELD_LIMBS}>, poly_size = 2^{P}(Int limbs = {INT_LIMBS}), ZipSpec{spec}, modulus={}", FC::modulus()),
         |b| {
             b.iter_custom(|iters| {
                 let mut total_duration = Duration::ZERO;

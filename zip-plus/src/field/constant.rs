@@ -14,7 +14,7 @@ impl<const N: usize, FC: ConstFieldConfig<N>> Zero for RandomField<'_, N, FC> {
     fn zero() -> Self {
         RandomField {
             value: BigInt::zero(),
-            config: ConfigRef::from(&FC::FIELD_CONFIG),
+            config: unsafe { ConfigRef::new(Box::leak(Box::new(FC::field_config()))) },
             phantom_data: PhantomData,
         }
     }
@@ -30,7 +30,7 @@ impl<const N: usize, FC: ConstFieldConfig<N>> Zero for RandomField<'_, N, FC> {
 
 impl<const N: usize, FC: ConstFieldConfig<N>> One for RandomField<'_, N, FC> {
     fn one() -> Self {
-        BigInt::<N>::one().map_to_field(ConfigRef::from(&FC::FIELD_CONFIG))
+        BigInt::<N>::one().map_to_field(unsafe { ConfigRef::new(Box::leak(Box::new(FC::field_config()))) })
     }
 
     fn set_one(&mut self) {

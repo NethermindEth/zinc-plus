@@ -143,7 +143,7 @@ mod tests {
         let raw_element = RandomField::<N, FC>::from(value);
         assert_eq!(
             raw_element,
-            BigInt::<N>::from_str(value_str).unwrap().map_to_field(ConfigRef::from(&FC::FIELD_CONFIG))
+            BigInt::<N>::from_str(value_str).unwrap().map_to_field(unsafe { ConfigRef::new(Box::leak(Box::new(FC::field_config()))) })
         )
     }
 
@@ -505,7 +505,7 @@ mod bigint_field_map_tests {
     #[test]
     fn test_bigint_smaller_than_field() {
         // Using a 2-limb field config with 1-limb BigInt
-        let config = FieldConfig::new(FC::<2>::MODULUS);
+        let config = FieldConfig::new(FC::<2>::modulus());
         let config_ptr = ConfigRef::from(&config);
 
         let small_bigint = BigInt::<1>::from(12345u64);
@@ -520,7 +520,7 @@ mod bigint_field_map_tests {
 
     #[test]
     fn test_bigint_equal_size() {
-        let config = FieldConfig::new(FC::<2>::MODULUS);
+        let config = FieldConfig::new(FC::<2>::modulus());
         let config_ptr = ConfigRef::from(&config);
 
         let value = big_int!(12345678901234567890, 2);
@@ -538,7 +538,7 @@ mod bigint_field_map_tests {
     #[test]
     fn test_bigint_larger_than_field() {
         // Using a 1-limb field config with 2-limb BigInt
-        let config = FieldConfig::new(FC::<1>::MODULUS);
+        let config = FieldConfig::new(FC::<1>::modulus());
         let config_ptr = ConfigRef::from(&config);
 
         let large_value = big_int!(123456789012345678901, 2);
@@ -554,7 +554,7 @@ mod bigint_field_map_tests {
 
     #[test]
     fn test_bigint_zero() {
-        let config = FieldConfig::new(FC::<2>::MODULUS);
+        let config = FieldConfig::new(FC::<2>::modulus());
         let config_ptr = ConfigRef::from(&config);
 
         let zero = BigInt::<2>::ZERO;
@@ -568,7 +568,7 @@ mod bigint_field_map_tests {
 
     #[test]
     fn test_bigint_reference() {
-        let config = FieldConfig::new(FC::<2>::MODULUS);
+        let config = FieldConfig::new(FC::<2>::modulus());
         let config_ptr = ConfigRef::from(&config);
 
         let value = big_int!(12345, 2);
@@ -584,7 +584,7 @@ mod bigint_field_map_tests {
 
     #[test]
     fn test_bigint_max_value() {
-        let config = FieldConfig::new(FC::<2>::MODULUS);
+        let config = FieldConfig::new(FC::<2>::modulus());
         let config_ptr = ConfigRef::from(&config);
 
         // Create a BigInt with all bits set to 1

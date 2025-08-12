@@ -178,7 +178,7 @@ impl<const N: usize, FC: ConstFieldConfig<N>> UniformRand for RandomField<'_, N,
     fn rand<R: ark_std::rand::Rng + ?Sized>(rng: &mut R) -> Self {
         let value = BigInt::rand(rng);
 
-        Self { value, config: ConfigRef::from(&FC::FIELD_CONFIG), phantom_data: PhantomData }
+        Self { value, config: unsafe { ConfigRef::new(Box::leak(Box::new(FC::field_config()))) }, phantom_data: PhantomData }
     }
 }
 
@@ -186,7 +186,7 @@ impl<const N: usize, FC: ConstFieldConfig<N>> Random for RandomField<'_, N, FC> 
     fn random(rng: &mut (impl ark_std::rand::RngCore + ?Sized)) -> Self {
         let value = BigInt::rand(rng);
 
-        Self { value, config: ConfigRef::from(&FC::FIELD_CONFIG), phantom_data: PhantomData }
+        Self { value, config: unsafe { ConfigRef::new(Box::leak(Box::new(FC::field_config()))) }, phantom_data: PhantomData }
     }
 }
 
@@ -211,7 +211,7 @@ impl<const N: usize, FC: ConstFieldConfig<N>> Default for RandomField<'_, N, FC>
     fn default() -> Self {
         Self {
             value: BigInt::ZERO,
-            config: ConfigRef::from(&FC::FIELD_CONFIG),
+            config: unsafe { ConfigRef::new(Box::leak(Box::new(FC::field_config()))) },
             phantom_data: PhantomData
         }
     }
@@ -256,7 +256,7 @@ impl ark_std::fmt::Display for DebugRandomField {
 
 impl<const N: usize, FC: ConstFieldConfig<N>> From<u128> for RandomField<'_, N, FC> {
     fn from(value: u128) -> Self {
-        value.map_to_field(ConfigRef::from(&FC::FIELD_CONFIG))
+        value.map_to_field(unsafe { ConfigRef::new(Box::leak(Box::new(FC::field_config()))) })
     }
 }
 
@@ -264,7 +264,7 @@ macro_rules! impl_from_uint {
     ($type:ty) => {
         impl<const N: usize, FC: ConstFieldConfig<N>> From<$type> for RandomField<'_, N, FC> {
             fn from(value: $type) -> Self {
-                value.map_to_field(ConfigRef::from(&FC::FIELD_CONFIG))
+                value.map_to_field(unsafe { ConfigRef::new(Box::leak(Box::new(FC::field_config()))) })
             }
         }
     };
@@ -277,7 +277,7 @@ impl_from_uint!(u8);
 
 impl<const N: usize, FC: ConstFieldConfig<N>> From<bool> for RandomField<'_, N, FC> {
     fn from(value: bool) -> Self {
-        value.map_to_field(ConfigRef::from(&FC::FIELD_CONFIG))
+        value.map_to_field(unsafe { ConfigRef::new(Box::leak(Box::new(FC::field_config()))) })
     }
 }
 
@@ -285,7 +285,7 @@ impl<const N: usize, FC: ConstFieldConfig<N>> FromBytes for RandomField<'_, N, F
     fn from_bytes_le(bytes: &[u8]) -> Option<Self> {
         Some(RandomField {
             value: BigInt::<N>::from_bytes_le(bytes)?,
-            config: ConfigRef::from(&FC::FIELD_CONFIG),
+            config: unsafe { ConfigRef::new(Box::leak(Box::new(FC::field_config()))) },
             phantom_data: PhantomData
         })
     }
@@ -293,7 +293,7 @@ impl<const N: usize, FC: ConstFieldConfig<N>> FromBytes for RandomField<'_, N, F
     fn from_bytes_be(bytes: &[u8]) -> Option<Self> {
         Some(RandomField {
             value: BigInt::<N>::from_bytes_be(bytes)?,
-            config: ConfigRef::from(&FC::FIELD_CONFIG),
+            config: unsafe { ConfigRef::new(Box::leak(Box::new(FC::field_config()))) },
             phantom_data: PhantomData
         })
     }
