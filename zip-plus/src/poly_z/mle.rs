@@ -1,11 +1,11 @@
 mod dense;
 
 use ark_std::{
+    Zero,
     fmt::Debug,
     ops::{Add, AddAssign, Index, Neg, SubAssign},
     rand::Rng,
     vec::Vec,
-    Zero,
 };
 
 /// This trait describes an interface for the multilinear extension
@@ -40,23 +40,25 @@ pub trait MultilinearExtension<I: Integer>:
     /// positions `b..b+k`, and from position `b..b+k` to position `a..a+k`
     /// in vector.
     ///
-    /// This function turns `P(x_1,...,x_a,...,x_{a+k - 1},...,x_b,...,x_{b+k - 1},...,x_n)`
-    /// to `P(x_1,...,x_b,...,x_{b+k - 1},...,x_a,...,x_{a+k - 1},...,x_n)`
+    /// This function turns `P(x_1,...,x_a,...,x_{a+k - 1},...,x_b,...,x_{b+k -
+    /// 1},...,x_n)` to `P(x_1,...,x_b,...,x_{b+k - 1},...,x_a,...,x_{a+k -
+    /// 1},...,x_n)`
     fn relabel(&self, a: usize, b: usize, k: usize) -> Self;
 
     /// Reduce the number of variables of `self` by fixing the
     /// `partial_point.len()` variables at `partial_point`.
     fn fix_variables(&mut self, partial_point: &[I]);
 
-    /// Creates a new object with the number of variables of `self` reduced by fixing the
-    /// `partial_point.len()` variables at `partial_point`.
+    /// Creates a new object with the number of variables of `self` reduced by
+    /// fixing the `partial_point.len()` variables at `partial_point`.
     fn fixed_variables(&self, partial_point: &[I]) -> Self;
 
     /// Returns a list of evaluations over the domain, which is the boolean
     /// hypercube. The evaluations are in little-endian order.
     fn to_evaluations(&self) -> Vec<I>;
 }
-/// swap the bits of `x` from position `a..a+n` to `b..b+n` and from `b..b+n` to `a..a+n` in little endian order
+/// swap the bits of `x` from position `a..a+n` to `b..b+n` and from `b..b+n` to
+/// `a..a+n` in little endian order
 pub(crate) fn swap_bits(x: usize, a: usize, b: usize, n: usize) -> usize {
     let a_bits = (x >> a) & ((1usize << n) - 1);
     let b_bits = (x >> b) & ((1usize << n) - 1);

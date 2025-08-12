@@ -1,7 +1,5 @@
+use crate::field::BigInt;
 use num_traits::Zero;
-use crate::{
-    field::BigInt,
-};
 
 #[macro_export]
 macro_rules! mac_with_carry {
@@ -51,7 +49,6 @@ pub trait ConstFieldConfigBase1<T> {
     /// The modulus of the field.
     const MODULUS: T;
 }
-
 
 pub trait ConstFieldConfigBase2<T> {
     /// Let `M` be the power of 2^64 nearest to `Self::MODULUS_BITS`. Then
@@ -105,10 +102,10 @@ impl<const N: usize, C> ConstFieldConfigBase2<BigInt<N>> for C
 where
     C: ConstFieldConfigBase1<BigInt<N>>,
 {
+    const INV: u64 = inv(C::MODULUS);
+    const MODULUS_HAS_SPARE_BIT: bool = C::MODULUS.has_spare_bit();
     const R: BigInt<N> = C::MODULUS.montgomery_r();
     const R_SQUARED: BigInt<N> = C::MODULUS.montgomery_r2();
-    const MODULUS_HAS_SPARE_BIT: bool = C::MODULUS.has_spare_bit();
-    const INV: u64 = inv(C::MODULUS);
 }
 
 pub trait FieldConfigOps<T> {
@@ -217,11 +214,7 @@ where
             }
         }
 
-        if u == one {
-            Some(b)
-        } else {
-            Some(c)
-        }
+        if u == one { Some(b) } else { Some(c) }
     }
 
     #[inline(always)]
@@ -245,7 +238,9 @@ macro_rules! define_field_config {
         #[derive(Clone, Debug)]
         struct $name<const N: usize>;
 
-        impl<const N: usize> $crate::field::config::ConstFieldConfigBase1<$crate::field::BigInt<N>> for $name<N> {
+        impl<const N: usize> $crate::field::config::ConstFieldConfigBase1<$crate::field::BigInt<N>>
+            for $name<N>
+        {
             const MODULUS: $crate::field::BigInt<N> = $crate::BigInt!($modulus);
         }
     };
@@ -278,10 +273,12 @@ fn widening_mul(a: u64, b: u64) -> u128 {
 
 #[cfg(test)]
 mod tests {
+    use super::{ConstFieldConfigBase1, FieldConfig, FieldConfigOps};
+    use crate::{
+        big_int,
+        field::{BigInt, BigInteger128},
+    };
     use num_traits::ConstZero;
-    use super::{FieldConfig, ConstFieldConfigBase1, FieldConfigOps};
-    use crate::{big_int, field::BigInteger128};
-    use crate::field::BigInt;
 
     //BIGINTS ARE LITTLE ENDIAN!!
     #[test]
@@ -290,9 +287,8 @@ mod tests {
         struct Fc;
 
         impl ConstFieldConfigBase1<BigInt<2>> for Fc {
-            const MODULUS: BigInteger128 = {
-                BigInteger128::new([9307119299070690521, 9320126393725433252])
-            };
+            const MODULUS: BigInteger128 =
+                { BigInteger128::new([9307119299070690521, 9320126393725433252]) };
         }
 
         let mut a = BigInteger128::new([2, 0]);
@@ -307,9 +303,8 @@ mod tests {
         struct Fc;
 
         impl ConstFieldConfigBase1<BigInt<2>> for Fc {
-            const MODULUS: BigInteger128 = {
-                BigInteger128::new([9307119299070690521, 9320126393725433252])
-            };
+            const MODULUS: BigInteger128 =
+                { BigInteger128::new([9307119299070690521, 9320126393725433252]) };
         }
 
         let mut a = BigInteger128::new([2, 0]);

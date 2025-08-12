@@ -5,7 +5,6 @@
 
 //! Error module.
 
-
 use displaydoc::Display;
 use thiserror::Error;
 

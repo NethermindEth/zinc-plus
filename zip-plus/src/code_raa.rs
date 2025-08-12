@@ -2,14 +2,14 @@ use ark_std::{fmt::Debug, marker::PhantomData, ops::AddAssign, vec::Vec};
 use num_traits::Zero;
 
 use crate::{
-    traits::{Field, FieldMap, Integer, Words, ZipTypes},
     code::{LinearCode, LinearCodeSpec},
     pcs::structs::ZipTranscript,
+    traits::{Field, FieldMap, Integer, Words, ZipTypes},
     utils::shuffle_seeded,
 };
 
-/// Implementation of a repeat-accumulate-accumulate (RAA) codes over the binary field,
-/// as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
+/// Implementation of a repeat-accumulate-accumulate (RAA) codes over the binary
+/// field, as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
 #[derive(Debug, Clone)]
 pub struct RaaCode<ZT: ZipTypes> {
     row_len: usize,
@@ -149,9 +149,9 @@ fn repeat<In, Out: for<'a> From<&'a In> + Clone>(
         .collect()
 }
 
-/// Perform an operation equivalent to multiplying the slice in-place by the accumulation matrix
-/// from the RAA code - a lower triangular matrix of the appropriate size, i.e. a matrix looking
-/// like this:
+/// Perform an operation equivalent to multiplying the slice in-place by the
+/// accumulation matrix from the RAA code - a lower triangular matrix of the
+/// appropriate size, i.e. a matrix looking like this:
 ///
 /// ```text
 /// 1 0 0 0
@@ -174,13 +174,13 @@ mod tests {
     use num_traits::Zero;
 
     use crate::{
+        code::{DefaultLinearCodeSpec, LinearCode},
+        code_raa::{RaaCode, accumulate, repeat},
         define_random_field_zip_types,
         field::Int,
         implement_random_field_zip_types,
-        traits::ZipTypes,
-        code::{DefaultLinearCodeSpec, LinearCode},
-        code_raa::{RaaCode, accumulate, repeat},
         pcs::tests::MockTranscript,
+        traits::ZipTypes,
         utils::shuffle_seeded,
     };
 
@@ -316,10 +316,13 @@ mod tests {
         #[derive(Debug, Clone)]
         struct MismatchedZipTypes;
         impl ZipTypes for MismatchedZipTypes {
-            type N = Int<1>; // 64 bits
-            type L = Int<2>; // 128 bits
-            type K = Int<1>; // 64 bits - INSUFFICIENT
-            type M = Int<4>; // 256 bits
+            // 128 bits
+            type K = Int<1>;
+            // 64 bits
+            type L = Int<2>;
+            // 64 bits - INSUFFICIENT
+            type M = Int<4>;
+            type N = Int<1>; // 256 bits
         }
 
         let mut transcript = MockTranscript::default();

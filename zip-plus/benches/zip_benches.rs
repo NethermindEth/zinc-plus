@@ -1,18 +1,28 @@
 #![allow(non_local_definitions)]
 #![allow(clippy::eq_op)]
 
-use zip_plus::field::config::{FieldConfigBase};
-use std::hint::black_box;
 use ark_std::{
     test_rng,
     time::{Duration, Instant},
 };
 use criterion::{
-    criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, Criterion,
+    BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime,
 };
 use crypto_bigint::Random;
 use itertools::Itertools;
-use zip_plus::{define_random_field_zip_types, field::{RandomField}, implement_random_field_zip_types, poly_z::mle::{DenseMultilinearExtension, MultilinearExtension}, traits::{FieldMap, ZipTypes}, transcript::KeccakTranscript, code::{DefaultLinearCodeSpec, LinearCode}, code_raa::RaaCode, pcs::{structs::MultilinearZip, MerkleTree}, pcs_transcript::PcsTranscript, define_field_config};
+use std::hint::black_box;
+use zip_plus::{
+    code::{DefaultLinearCodeSpec, LinearCode},
+    code_raa::RaaCode,
+    define_field_config, define_random_field_zip_types,
+    field::{RandomField, config::FieldConfigBase},
+    implement_random_field_zip_types,
+    pcs::{MerkleTree, structs::MultilinearZip},
+    pcs_transcript::PcsTranscript,
+    poly_z::mle::{DenseMultilinearExtension, MultilinearExtension},
+    traits::{FieldMap, ZipTypes},
+    transcript::KeccakTranscript,
+};
 
 const INT_LIMBS: usize = 1;
 const FIELD_LIMBS: usize = 4;
@@ -24,7 +34,10 @@ type ZT = RandomFieldZipTypes<INT_LIMBS>;
 type LC = RaaCode<ZT>;
 type BenchZip = MultilinearZip<ZT, LC>;
 
-define_field_config!(Fc, "106319353542452952636349991594949358997917625194731877894581586278529202198383");
+define_field_config!(
+    Fc,
+    "106319353542452952636349991594949358997917625194731877894581586278529202198383"
+);
 type FC = Fc<FIELD_LIMBS>;
 
 fn encode_rows<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
@@ -162,7 +175,8 @@ fn verify<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
     let params = BenchZip::setup(poly_size, linear_code);
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
-    let (data, commitment) = BenchZip::commit::<RandomField<FIELD_LIMBS, FC>>(&params, &poly).unwrap();
+    let (data, commitment) =
+        BenchZip::commit::<RandomField<FIELD_LIMBS, FC>>(&params, &poly).unwrap();
     let point = vec![1i64; P];
     let eval = poly.evaluations.last().unwrap();
     let mut transcript = PcsTranscript::<RandomField<FIELD_LIMBS, FC>>::new();

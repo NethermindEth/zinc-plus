@@ -1,17 +1,17 @@
 use ark_std::{iterable::Iterable, vec::Vec};
-use sha3::{digest::Output, Keccak256};
+use sha3::{Keccak256, digest::Output};
 
 use super::{
     structs::{MultilinearZip, MultilinearZipCommitment},
-    utils::{point_to_tensor, validate_input, ColumnOpening},
+    utils::{ColumnOpening, point_to_tensor, validate_input},
 };
 use crate::{
-    traits::{Field, FieldMap, ZipTypes},
+    Error,
     code::LinearCode,
     pcs::structs::MultilinearZipParams,
     pcs_transcript::PcsTranscript,
+    traits::{Field, FieldMap, ZipTypes},
     utils::{expand, inner_product},
-    Error,
 };
 
 impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {

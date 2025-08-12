@@ -4,7 +4,7 @@ use ark_std::{
     vec::Vec,
 };
 use num_integer::Integer as NumInteger;
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 
 use crate::traits::{Integer, Words};
 
@@ -72,15 +72,18 @@ where
     f((v, 0));
 }
 
-/// Computes a linear combination of multiple evaluation rows into a single combined row.
+/// Computes a linear combination of multiple evaluation rows into a single
+/// combined row.
 ///
-/// Given a flat `evaluations` vector, interpreted as a matrix with `row_len` columns,
-/// this function treats each consecutive `row_len` values as one row. The output is a single row,
-/// computed by multiplying each input row by the corresponding coefficient from `coeffs`,
-/// and summing these scaled rows column-wise.
+/// Given a flat `evaluations` vector, interpreted as a matrix with `row_len`
+/// columns, this function treats each consecutive `row_len` values as one row.
+/// The output is a single row, computed by multiplying each input row by the
+/// corresponding coefficient from `coeffs`, and summing these scaled rows
+/// column-wise.
 ///
-/// This is equivalent to performing a matrix-vector multiplication where the matrix is formed by
-/// the evaluations and the vector is formed by the coefficients.
+/// This is equivalent to performing a matrix-vector multiplication where the
+/// matrix is formed by the evaluations and the vector is formed by the
+/// coefficients.
 ///
 /// # Arguments
 ///

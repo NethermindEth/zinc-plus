@@ -28,8 +28,8 @@ pub struct RandomField<const N: usize, FC: FieldConfig<BigInt<N>>> {
     phantom_data: PhantomData<FC>,
 }
 
-use crate::field::config::{FieldConfigBase, FieldConfigOps};
 use crate::{
+    field::config::{FieldConfigBase, FieldConfigOps},
     traits::{BigInteger, Field},
     transcript::KeccakTranscript,
 };
@@ -73,9 +73,9 @@ impl<const N: usize, FC: FieldConfig<BigInt<N>>> RandomField<N, FC> {
 impl<const N: usize, FC: FieldConfig<BigInt<N>>> Field for RandomField<N, FC> {
     type B = BigInt<N>;
     type C = FC;
-    type W = Words<N>;
     type I = Int<N>;
     type U = Uint<N>;
+    type W = Words<N>;
 
     fn new_unchecked(value: BigInt<N>) -> Self {
         Self {
@@ -246,6 +246,7 @@ where
     BigInt<M>: FieldMap<F, Output = F>,
 {
     type Output = F;
+
     fn map_to_field(&self) -> Self::Output {
         (*self).map_to_field()
     }

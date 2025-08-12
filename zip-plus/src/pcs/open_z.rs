@@ -4,16 +4,16 @@ use itertools::izip;
 
 use super::{
     structs::{MultilinearZip, MultilinearZipData},
-    utils::{left_point_to_tensor, validate_input, ColumnOpening},
+    utils::{ColumnOpening, left_point_to_tensor, validate_input},
 };
 use crate::{
-    poly_z::mle::DenseMultilinearExtension,
-    traits::{Field, FieldMap, ZipTypes},
+    Error,
     code::LinearCode,
     pcs::structs::MultilinearZipParams,
     pcs_transcript::PcsTranscript,
+    poly_z::mle::DenseMultilinearExtension,
+    traits::{Field, FieldMap, ZipTypes},
     utils::{combine_rows, expand},
-    Error,
 };
 
 impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
@@ -67,7 +67,8 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
         let num_rows = pp.num_rows;
         let row_len = pp.linear_code.row_len();
 
-        // We prove evaluations over the field, so integers need to be mapped to field elements first
+        // We prove evaluations over the field, so integers need to be mapped to field
+        // elements first
         let q_0 = left_point_to_tensor(num_rows, point)?;
 
         let evaluations = poly.evaluations.map_to_field();

@@ -1,30 +1,22 @@
 use ark_ff::Zero;
-use ark_std::{
-    cfg_iter_mut, format,
-    iterable::Iterable,
-    vec,
-    vec::Vec,
-};
+use ark_std::{cfg_iter_mut, format, iterable::Iterable, vec, vec::Vec};
 use displaydoc::Display;
-use sha3::{digest::Output, Digest, Keccak256};
+use sha3::{Digest, Keccak256, digest::Output};
 
 use super::{error::MerkleError, structs::MultilinearZipData};
 use crate::{
+    Error,
+    pcs_transcript::PcsTranscript,
     poly_f::mle::DenseMultilinearExtension as MLE_F,
     poly_z::mle::DenseMultilinearExtension as MLE_Z,
     traits::{Field, Integer},
-
-    pcs_transcript::PcsTranscript,
     utils::{div_ceil, num_threads, parallelize, parallelize_iter},
-    Error,
 };
 
 fn err_too_many_variates(function: &str, upto: usize, got: usize) -> Error {
-    Error::InvalidPcsParam(
-        format!(
-            "Too many variates of poly to {function} (param supports variates up to {upto} but got {got})"
-        )
-    )
+    Error::InvalidPcsParam(format!(
+        "Too many variates of poly to {function} (param supports variates up to {upto} but got {got})"
+    ))
 }
 
 // Ensures that polynomials and evaluation points are of appropriate size
@@ -69,7 +61,8 @@ pub trait ToBytes {
     fn to_bytes(&self) -> Vec<u8>;
 }
 
-/// A merkle tree in which its layers are concatenated together in a single vector
+/// A merkle tree in which its layers are concatenated together in a single
+/// vector
 #[derive(Clone, Debug, Default)]
 pub struct MerkleTree {
     pub root: Output<Keccak256>,
@@ -211,9 +204,10 @@ impl MerkleProof {
 }
 
 /// This is a helper struct to open a column in a multilinear polynomial
-/// Opening a column `j` in an `n x m` matrix `u_hat` requires opening `m` Merkle trees,
-/// one for each row at position j
-/// Note that the proof is written to the transcript and the order of the proofs is the same as the order of the columns
+/// Opening a column `j` in an `n x m` matrix `u_hat` requires opening `m`
+/// Merkle trees, one for each row at position j
+/// Note that the proof is written to the transcript and the order of the proofs
+/// is the same as the order of the columns
 #[derive(Clone)]
 pub struct ColumnOpening {}
 
@@ -248,8 +242,9 @@ impl ColumnOpening {
     }
 }
 
-/// For a polynomial arranged in matrix form, this splits the evaluation point into
-/// two vectors, `q_0` multiplying on the left and `q_1` multiplying on the right
+/// For a polynomial arranged in matrix form, this splits the evaluation point
+/// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
+/// right
 pub(super) fn point_to_tensor<F: Field>(
     num_rows: usize,
     point: &[F],
@@ -278,9 +273,7 @@ pub(super) fn point_to_tensor<F: Field>(
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r_f<F: Field>(
-    r: &[F],
-) -> Result<MLE_F<F>, ArithErrors> {
+pub fn build_eq_x_r_f<F: Field>(r: &[F]) -> Result<MLE_F<F>, ArithErrors> {
     let evals = build_eq_x_r_vec(r)?;
     let mle = MLE_F::from_evaluations_vec(r.len(), evals);
 
@@ -353,9 +346,9 @@ fn build_eq_x_r_helper<F: Field>(r: &[F], buf: &mut Vec<F>) -> Result<(), ArithE
     Ok(())
 }
 
-/// For a polynomial arranged in matrix form, this splits the evaluation point into
-/// two vectors, `q_0` multiplying on the left and `q_1` multiplying on the right
-/// and returns the left vector only
+/// For a polynomial arranged in matrix form, this splits the evaluation point
+/// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
+/// right and returns the left vector only
 pub(super) fn left_point_to_tensor<F: Field>(
     num_rows: usize,
     point: &[F],

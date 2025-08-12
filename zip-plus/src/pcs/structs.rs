@@ -1,10 +1,10 @@
 use ark_std::{collections::BTreeSet, marker::PhantomData, vec::Vec};
-use sha3::{digest::Output, Keccak256};
+use sha3::{Keccak256, digest::Output};
 
 use super::utils::MerkleTree;
 use crate::{
-    traits::{Integer, ZipTypes},
     code::LinearCode,
+    traits::{Integer, ZipTypes},
 };
 
 pub struct MultilinearZip<ZT: ZipTypes, LC: LinearCode<ZT>>(PhantomData<(ZT, LC)>);
@@ -21,7 +21,8 @@ pub struct MultilinearZipParams<ZT: ZipTypes, LC: LinearCode<ZT>> {
 /// Representantation of a zip commitment to a multilinear polynomial
 #[derive(Clone, Debug, Default)]
 pub struct MultilinearZipData<K: Integer> {
-    /// The encoded rows of the polynomial matrix representation, referred to as "u-hat" in the Zinc paper
+    /// The encoded rows of the polynomial matrix representation, referred to as
+    /// "u-hat" in the Zinc paper
     pub rows: Vec<K>,
     /// Merkle trees of each row
     pub rows_merkle_trees: Vec<MerkleTree>,

@@ -6,9 +6,9 @@ use ark_std::{
     vec,
     vec::Vec,
 };
-use sha3::{digest::Output, Keccak256};
+use sha3::{Keccak256, digest::Output};
 
-use super::{define_field_config, pcs::utils::MerkleProof, Error};
+use super::{Error, define_field_config, pcs::utils::MerkleProof};
 use crate::{
     poly::alloc::string::ToString,
     traits::{BigInteger, Field, FromBytes, Integer, PrimitiveConversion, Words},
@@ -16,14 +16,17 @@ use crate::{
 };
 
 /// A transcript for Polynomial Commitment Scheme (PCS) operations.
-/// Manages both Fiat-Shamir transformations and serialization/deserialization of proof data.
+/// Manages both Fiat-Shamir transformations and serialization/deserialization
+/// of proof data.
 #[derive(Default, Clone)]
 pub struct PcsTranscript<F: Field> {
-    /// Handles Fiat-Shamir transformations for non-interactive zero-knowledge proofs.
-    /// Used to absorb field elements and generate cryptographic challenges.
+    /// Handles Fiat-Shamir transformations for non-interactive zero-knowledge
+    /// proofs. Used to absorb field elements and generate cryptographic
+    /// challenges.
     pub fs_transcript: KeccakTranscript,
 
-    /// Manages serialization and deserialization of proof data as a byte stream.
+    /// Manages serialization and deserialization of proof data as a byte
+    /// stream.
     pub stream: Cursor<Vec<u8>>,
 
     _phantom: PhantomData<F>,
@@ -49,7 +52,8 @@ impl<F: Field> PcsTranscript<F> {
     }
 
     /// Absorbs a field element into the Fiat-Shamir transcript.
-    /// This is used to incorporate public values into the transcript for challenge generation.
+    /// This is used to incorporate public values into the transcript for
+    /// challenge generation.
     pub fn common_field_element(&mut self, fe: &F) {
         self.fs_transcript.absorb_random_field(fe);
     }
@@ -65,7 +69,8 @@ impl<F: Field> PcsTranscript<F> {
     }
 
     /// Writes a cryptographic commitment to the proof stream.
-    /// Used during proof generation to store commitments for later verification.
+    /// Used during proof generation to store commitments for later
+    /// verification.
     pub fn write_commitment(&mut self, comm: &Output<Keccak256>) -> Result<(), Error> {
         self.stream
             .write_all(comm)
@@ -88,8 +93,9 @@ impl<F: Field> PcsTranscript<F> {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    /// Reads a field element from the proof stream and absorbs it into the transcript.
-    /// Used during proof verification to retrieve and process field elements.
+    /// Reads a field element from the proof stream and absorbs it into the
+    /// transcript. Used during proof verification to retrieve and process
+    /// field elements.
     pub fn read_field_element(&mut self) -> Result<F, Error> {
         let mut bytes: Vec<u8> = vec![0; F::W::num_words() * 8];
 
@@ -103,8 +109,9 @@ impl<F: Field> PcsTranscript<F> {
         Ok(fe)
     }
 
-    /// Writes a field element to the proof stream and absorbs it into the transcript.
-    /// Used during proof generation to store field elements for later verification.
+    /// Writes a field element to the proof stream and absorbs it into the
+    /// transcript. Used during proof generation to store field elements for
+    /// later verification.
     pub fn write_field_element(&mut self, fe: &F) -> Result<(), Error> {
         self.common_field_element(fe);
         let repr = fe.value().clone().to_bytes_be();
@@ -123,8 +130,8 @@ impl<F: Field> PcsTranscript<F> {
         Ok(())
     }
 
-    // pub fn write_integers<M: CryptoInt>(&mut self, ints: &[M]) -> Result<(), Error> {
-    //     for int in ints {
+    // pub fn write_integers<M: CryptoInt>(&mut self, ints: &[M]) -> Result<(),
+    // Error> {     for int in ints {
     //         self.write_integer(int)?;
     //     }
     //     Ok(())

@@ -1,13 +1,11 @@
-use std::marker::PhantomData;
 use ark_ff::{One, Zero};
+use std::marker::PhantomData;
 use zeroize::Zeroize;
 
 use crate::{
-    field::{biginteger::BigInt, RandomField},
-    traits::Field,
+    field::{RandomField, biginteger::BigInt, config::FieldConfig},
+    traits::{Field, FieldMap},
 };
-use crate::field::config::FieldConfig;
-use crate::traits::{FieldMap};
 
 impl<const N: usize, FC: FieldConfig<BigInt<N>>> Zero for RandomField<N, FC> {
     fn zero() -> Self {
@@ -51,7 +49,7 @@ mod tests {
     use ark_ff::{One, Zero};
     use zeroize::Zeroize;
 
-    use crate::{big_int, define_field_config, field::{RandomField}, random_field};
+    use crate::{big_int, define_field_config, field::RandomField, random_field};
 
     define_field_config!(FC, "23");
 

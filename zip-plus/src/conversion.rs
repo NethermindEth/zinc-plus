@@ -1,9 +1,8 @@
-use ark_std::{vec::Vec, Zero};
-use crate::field::config::{FieldConfigBase, FieldConfigOps};
-use crate::traits::{
-    BigInteger, Field, FieldMap, Integer, PrimitiveConversion, Uinteger,
-    Words,
+use crate::{
+    field::config::{FieldConfigBase, FieldConfigOps},
+    traits::{BigInteger, Field, FieldMap, Integer, PrimitiveConversion, Uinteger, Words},
 };
+use ark_std::{Zero, vec::Vec};
 
 // Implementation of FieldMap for signed integers
 macro_rules! impl_field_map_for_int {
@@ -66,6 +65,7 @@ impl<F: Field> FieldMap<F> for bool {
 
 impl<F: Field> FieldMap<F> for &bool {
     type Output = F;
+
     fn map_to_field(&self) -> Self::Output {
         (*self).map_to_field()
     }
@@ -116,13 +116,20 @@ impl<F: Field, T: FieldMap<F>> FieldMap<F> for &[T] {
 
 #[cfg(test)]
 mod tests {
+    use crate::{
+        big_int, define_field_config,
+        field::{BigInt, FieldConfig, RandomField},
+        traits::{FieldMap, FromBytes},
+    };
     use ark_std::{fmt::Debug, format, str::FromStr};
     use num_traits::{ConstZero, Zero};
-    use crate::{big_int, define_field_config, field::{BigInt, FieldConfig, RandomField}, traits::{FieldMap, FromBytes}};
 
     define_field_config!(Fc23, "23");
     define_field_config!(FcSmall, "243043087159742188419721163456177567");
-    define_field_config!(FcBig, "3618502788666131213697322783095070105623107215331596699973092056135872020481");
+    define_field_config!(
+        FcBig,
+        "3618502788666131213697322783095070105623107215331596699973092056135872020481"
+    );
 
     fn test_from<const N: usize, FC: FieldConfig<BigInt<N>>, T: Clone>(value: T, value_str: &str)
     where
@@ -178,7 +185,7 @@ mod tests {
         let bytes = [0x05, 0, 0, 0, 0, 0, 0, 0];
         let expected = big_int!(5);
 
-        let result = <RandomField::<1, Fc23<1>> as FromBytes>::from_bytes_le(&bytes).unwrap();
+        let result = <RandomField<1, Fc23<1>> as FromBytes>::from_bytes_le(&bytes).unwrap();
         assert_eq!(result.into_bigint(), expected);
     }
 
@@ -238,9 +245,7 @@ mod tests {
     #[test]
     fn converts_from_bytes_le_with_config_leading_zeros() {
         let bytes = [0b0000_0001]; // Value: 1 with leading zeros
-        let expected = BigInt::<1>::from_bytes_le(&bytes)
-            .unwrap()
-            .map_to_field();
+        let expected = BigInt::<1>::from_bytes_le(&bytes).unwrap().map_to_field();
 
         let result = RandomField::<1, Fc23<1>>::from_bytes_le(&bytes);
         assert_eq!(result, Some(expected));
@@ -302,7 +307,7 @@ mod tests {
 
             // Test minimum value
             let min = -<$type>::from_str(&format!("{}", <$type>::MAX)).unwrap();
-            let min_f = <$type as FieldMap<RandomField<$N, $FC>>>::map_to_field(&min, );
+            let min_f = <$type as FieldMap<RandomField<$N, $FC>>>::map_to_field(&min);
             assert!(
                 min_f.into_bigint() < BigInt::<$N>::from($field),
                 "Minimum value should wrap to valid field element"
@@ -447,9 +452,12 @@ mod tests {
 
 #[cfg(test)]
 mod bigint_field_map_tests {
-    use num_traits::ConstZero;
     use super::*;
-    use crate::{big_int, define_field_config, field::{BigInt, FieldConfig, RandomField}};
+    use crate::{
+        big_int, define_field_config,
+        field::{BigInt, FieldConfig, RandomField},
+    };
+    use num_traits::ConstZero;
 
     define_field_config!(FC, "18446744069414584321");
 
@@ -508,8 +516,8 @@ mod bigint_field_map_tests {
     #[test]
     fn test_bigint_reference() {
         let value = big_int!(12345, 2);
-        let result: RandomField<2, FC::<2>> = value.map_to_field();
-        let direct_result: RandomField<2, FC::<2>> = value.map_to_field();
+        let result: RandomField<2, FC<2>> = value.map_to_field();
+        let direct_result: RandomField<2, FC<2>> = value.map_to_field();
 
         assert_eq!(
             result.into_bigint(),

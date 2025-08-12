@@ -1,6 +1,17 @@
-use ark_std::{vec, vec::Vec, UniformRand};
+use ark_std::{UniformRand, vec, vec::Vec};
 
-use crate::{define_random_field_zip_types, field::{Int, RandomField}, implement_random_field_zip_types, poly_z::mle::DenseMultilinearExtension, traits::{FieldMap}, transcript::KeccakTranscript, code::DefaultLinearCodeSpec, code_raa::RaaCode, pcs::structs::MultilinearZip, pcs_transcript::PcsTranscript, define_field_config};
+use crate::{
+    code::DefaultLinearCodeSpec,
+    code_raa::RaaCode,
+    define_field_config, define_random_field_zip_types,
+    field::{Int, RandomField},
+    implement_random_field_zip_types,
+    pcs::structs::MultilinearZip,
+    pcs_transcript::PcsTranscript,
+    poly_z::mle::DenseMultilinearExtension,
+    traits::FieldMap,
+    transcript::KeccakTranscript,
+};
 
 const I: usize = 1;
 const N: usize = 2;
@@ -123,8 +134,7 @@ fn test_zip_evaluation() {
 
     let proof = transcript.into_proof();
     let mut transcript = PcsTranscript::from_proof(&proof);
-    TestZip::verify(&param, &comm, &point, eval, &mut transcript)
-        .expect("Failed to verify");
+    TestZip::verify(&param, &comm, &point, eval, &mut transcript).expect("Failed to verify");
 }
 #[test]
 fn test_zip_batch_evaluation() {
@@ -151,7 +161,8 @@ fn test_zip_batch_evaluation() {
         .map(|evaluations| DenseMultilinearExtension::from_evaluations_slice(n, evaluations))
         .collect();
 
-    let commitments: Vec<_> = TestZip::batch_commit::<RandomField<N, FC<N>>>(&param, &mles).unwrap();
+    let commitments: Vec<_> =
+        TestZip::batch_commit::<RandomField<N, FC<N>>>(&param, &mles).unwrap();
     let (data, commitments): (Vec<_>, Vec<_>) = commitments.into_iter().unzip();
     let point: Vec<_> = (0..n).map(|_| Int::<I>::from(i8::rand(&mut rng))).collect();
     let eval: Vec<_> = mles
@@ -166,12 +177,6 @@ fn test_zip_batch_evaluation() {
 
     let proof = transcript.into_proof();
     let mut transcript = PcsTranscript::from_proof(&proof);
-    TestZip::batch_verify_z(
-        &param,
-        &commitments,
-        &points,
-        &eval,
-        &mut transcript,
-    )
-    .expect("Failed to verify");
+    TestZip::batch_verify_z(&param, &commitments, &points, &eval, &mut transcript)
+        .expect("Failed to verify");
 }

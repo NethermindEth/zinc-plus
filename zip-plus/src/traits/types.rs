@@ -11,14 +11,15 @@ use crypto_bigint::Random;
 use num_traits::{ConstOne, ConstZero, One, Zero};
 
 use crate::{
+    field::FieldConfig,
+    pcs::utils::ToBytes,
     traits::{FieldMap, FromBytes},
     transcript::KeccakTranscript,
-    pcs::utils::ToBytes,
 };
-use crate::field::FieldConfig;
 
-/// Trait for field elements, requiring arithmetic, assignment, random generation, and conversion traits.
-/// Used as a bound for generic code over finite fields.
+/// Trait for field elements, requiring arithmetic, assignment, random
+/// generation, and conversion traits. Used as a bound for generic code over
+/// finite fields.
 pub trait Field:
     Debug
     + Clone

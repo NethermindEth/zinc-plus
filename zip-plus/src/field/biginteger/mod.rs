@@ -1,4 +1,9 @@
-use std::ops::{Add};
+use crate::{
+    adc,
+    const_helpers::SerBuffer,
+    field::{Int, config},
+    traits::{BigInteger, FromBytes, Integer, Uinteger},
+};
 #[allow(unused)]
 use ark_ff::ark_ff_macros::unroll_for_loops;
 use ark_ff::const_for;
@@ -7,6 +12,7 @@ use ark_serialize::{
 };
 use ark_std::ops::{Index, IndexMut, Range, RangeTo};
 use ark_std::{
+    Zero,
     borrow::Borrow,
     // convert::TryFrom,
     fmt::{Debug, Display, UpperHex},
@@ -16,22 +22,16 @@ use ark_std::{
         ShrAssign,
     },
     rand::{
-        distributions::{Distribution, Standard},
         Rng,
+        distributions::{Distribution, Standard},
     },
     str::FromStr,
     vec::Vec,
-    Zero,
 };
 use num_bigint::BigUint;
 use num_traits::{CheckedAdd, ConstZero};
+use std::ops::Add;
 use zeroize::Zeroize;
-use crate::{
-    adc,
-    const_helpers::SerBuffer,
-    field::{config, Int},
-    traits::{BigInteger, FromBytes, Integer, Uinteger},
-};
 
 #[macro_use]
 pub mod arithmetic;
@@ -211,7 +211,8 @@ impl<const N: usize> BigInt<N> {
         true
     }
 
-    /// Compute the largest integer `s` such that `self = 2**s * t + 1` for odd `t`.
+    /// Compute the largest integer `s` such that `self = 2**s * t + 1` for odd
+    /// `t`.
     #[doc(hidden)]
     pub const fn two_adic_valuation(mut self) -> u32 {
         assert!(self.const_is_odd());
@@ -226,8 +227,8 @@ impl<const N: usize> BigInt<N> {
         two_adicity
     }
 
-    /// Compute the smallest odd integer `t` such that `self = 2**s * t + 1` for some
-    /// integer `s = self.two_adic_valuation()`.
+    /// Compute the smallest odd integer `t` such that `self = 2**s * t + 1` for
+    /// some integer `s = self.two_adic_valuation()`.
     #[doc(hidden)]
     pub const fn two_adic_coefficient(mut self) -> Self {
         assert!(self.const_is_odd());
@@ -620,6 +621,7 @@ impl<const N: usize> CheckedAdd for BigInt<N> {
 
 impl<const N: usize> BigInteger for BigInt<N> {
     type W = Words<N>;
+
     fn to_words(&self) -> Words<N> {
         Words(self.0)
     }
@@ -1136,8 +1138,8 @@ impl<const N: usize> FromBytes for BigInt<N> {
     }
 }
 
-/// Compute the signed modulo operation on a u64 representation, returning the result.
-/// If n % modulus > modulus / 2, return modulus - n
+/// Compute the signed modulo operation on a u64 representation, returning the
+/// result. If n % modulus > modulus / 2, return modulus - n
 /// # Example
 /// ```
 /// use ark_ff::signed_mod_reduction;

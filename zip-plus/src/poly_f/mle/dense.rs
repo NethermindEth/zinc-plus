@@ -11,8 +11,8 @@ use ark_std::{
 #[cfg(feature = "parallel")]
 use rayon::iter::*;
 
-use super::{swap_bits, MultilinearExtension};
-use crate::traits::{Field};
+use super::{MultilinearExtension, swap_bits};
+use crate::traits::Field;
 use crypto_primitives::Matrix;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +40,8 @@ impl<F: Field> DenseMultilinearExtension<F> {
         // assert that the number of variables matches the size of evaluations
         assert!(
             evaluations.len() <= 1 << num_vars,
-            "The size of evaluations should not exceed 2^num_vars. \n eval len: {:?}. num vars: {num_vars}", evaluations.len()
+            "The size of evaluations should not exceed 2^num_vars. \n eval len: {:?}. num vars: {num_vars}",
+            evaluations.len()
         );
 
         if evaluations.len() != 1 << num_vars {
@@ -58,7 +59,8 @@ impl<F: Field> DenseMultilinearExtension<F> {
         }
     }
 
-    /// Returns the dense MLE from the given matrix, without modifying the original matrix.
+    /// Returns the dense MLE from the given matrix, without modifying the
+    /// original matrix.
     pub fn from_matrix<M: Matrix<F>>(matrix: &M) -> Self {
         let n_vars: usize = (log2(matrix.num_rows()) + log2(matrix.num_cols())) as usize; // n_vars = s + s'
 

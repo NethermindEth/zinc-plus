@@ -4,9 +4,7 @@ use ark_std::{
     ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
-use crate::{field::RandomField};
-use crate::field::BigInt;
-use crate::field::config::FieldConfig;
+use crate::field::{BigInt, RandomField, config::FieldConfig};
 
 macro_rules! impl_ops {
     (
@@ -153,7 +151,9 @@ impl<const N: usize, FC: FieldConfig<BigInt<N>>> Sum for RandomField<N, FC> {
     }
 }
 
-impl<'a, const N: usize, FC: FieldConfig<BigInt<N>>> core::iter::Product<&'a Self> for RandomField<N, FC> {
+impl<'a, const N: usize, FC: FieldConfig<BigInt<N>>> core::iter::Product<&'a Self>
+    for RandomField<N, FC>
+{
     fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
         iter.fold(Self::one(), core::ops::Mul::mul)
     }
@@ -169,8 +169,11 @@ impl<'a, const N: usize, FC: FieldConfig<BigInt<N>>> From<&'a Self> for RandomFi
 mod test {
     use ark_ff::{One, Zero};
 
-    use crate::{big_int, define_field_config, field::{biginteger::BigInt, RandomField}, random_field};
-    use crate::field::config::FieldConfig;
+    use crate::{
+        big_int, define_field_config,
+        field::{RandomField, biginteger::BigInt, config::FieldConfig},
+        random_field,
+    };
 
     define_field_config!(Fc23, "23");
 
@@ -525,11 +528,7 @@ mod test {
 
     #[test]
     fn test_product_with_one() {
-        let values = [
-            RandomField::one(),
-            random_field!(5u32),
-            random_field!(7u32),
-        ];
+        let values = [RandomField::one(), random_field!(5u32), random_field!(7u32)];
 
         let product: RandomField<1, Fc23<1>> = values.iter().product();
 
@@ -564,7 +563,8 @@ mod test {
 
     #[test]
     fn test_product_empty_iterator() {
-        let product: RandomField<1, Fc23<1>> = ark_std::iter::empty::<&RandomField<1, Fc23<1>>>().product();
+        let product: RandomField<1, Fc23<1>> =
+            ark_std::iter::empty::<&RandomField<1, Fc23<1>>>().product();
         assert!(product.is_one()); // Empty product should return one
     }
 

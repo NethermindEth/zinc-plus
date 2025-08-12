@@ -2,15 +2,15 @@ use ark_std::{vec, vec::Vec};
 
 use super::{
     structs::{MultilinearZip, MultilinearZipCommitment, MultilinearZipData},
-    utils::{validate_input, MerkleTree},
+    utils::{MerkleTree, validate_input},
 };
 use crate::{
-    poly_z::mle::DenseMultilinearExtension,
-    traits::{Field, ZipTypes},
+    Error,
     code::LinearCode,
     pcs::structs::MultilinearZipParams,
+    poly_z::mle::DenseMultilinearExtension,
+    traits::{Field, ZipTypes},
     utils::{div_ceil, num_threads, parallelize_iter},
-    Error,
 };
 
 impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {

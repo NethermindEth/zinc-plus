@@ -17,10 +17,12 @@ pub trait LinearCode<ZT: ZipTypes>: Sync + Send {
     /// Number of proximity tests to perform (security parameter)
     fn num_proximity_testing(&self) -> usize;
 
-    /// Encodes a row of cryptographic integers using this linear encoding scheme.
+    /// Encodes a row of cryptographic integers using this linear encoding
+    /// scheme.
     ///
-    /// This function is optimized for the prover's context where we work with cryptographic integers.
-    /// It's more efficient than `encode_f` as it avoids field conversions.
+    /// This function is optimized for the prover's context where we work with
+    /// cryptographic integers. It's more efficient than `encode_f` as it
+    /// avoids field conversions.
     ///
     /// # Parameters
     /// - `row`: Slice of cryptographic integers to encode
@@ -31,10 +33,12 @@ pub trait LinearCode<ZT: ZipTypes>: Sync + Send {
         self.encode_wide(row)
     }
 
-    /// Encodes a row of cryptographic integers using this linear encoding scheme.
+    /// Encodes a row of cryptographic integers using this linear encoding
+    /// scheme.
     ///
-    /// This function is optimized for the prover's context where we work with cryptographic integers.
-    /// It's more efficient than `encode_f` as it avoids field conversions.
+    /// This function is optimized for the prover's context where we work with
+    /// cryptographic integers. It's more efficient than `encode_f` as it
+    /// avoids field conversions.
     ///
     /// # Parameters
     /// - `row`: Slice of cryptographic integers to encode
@@ -48,8 +52,9 @@ pub trait LinearCode<ZT: ZipTypes>: Sync + Send {
 
     /// Encodes a row of field elements using this linear encoding scheme.
     ///
-    /// This function is used when working with field elements directly and performs the encoding
-    /// by first converting the sparse matrices to field elements.
+    /// This function is used when working with field elements directly and
+    /// performs the encoding by first converting the sparse matrices to
+    /// field elements.
     ///
     /// # Parameters
     /// - `row`: Slice of field elements to encode

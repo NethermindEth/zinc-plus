@@ -4,8 +4,8 @@ use crypto_primes::hazmat::MillerRabin;
 use num_traits::One;
 
 use crate::{
-    field::{biginteger::Words, Int},
-    traits::{types::PrimalityTest, FromBytes, Uinteger},
+    field::{Int, biginteger::Words},
+    traits::{FromBytes, Uinteger, types::PrimalityTest},
 };
 
 #[derive(Clone)]
@@ -32,9 +32,9 @@ impl<'a, const N: usize> SubAssign<&'a Self> for Uint<N> {
 }
 
 impl<const N: usize> Uinteger for Uint<N> {
-    type W = Words<N>;
     type Int = Int<N>;
     type PrimalityTest = MillerRabin<CryptoUint<N>>;
+    type W = Words<N>;
 
     fn from_words(words: Words<N>) -> Self {
         Self(CryptoUint::from_words(words.0))

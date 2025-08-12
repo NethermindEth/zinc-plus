@@ -2,16 +2,14 @@ use ark_std::vec::Vec;
 use sha3::{Digest, Keccak256};
 
 use crate::{
-    field::Int,
-    traits::{
-        BigInteger, Field, FieldMap, Integer, PrimitiveConversion, Words,
-    },
+    field::{Int, config::FieldConfigBase},
     pcs::structs::ZipTranscript,
+    traits::{BigInteger, Field, FieldMap, Integer, PrimitiveConversion, Words},
 };
-use crate::field::config::FieldConfigBase;
 
-/// A cryptographic transcript implementation using the Keccak-256 hash function.
-/// Used for Fiat-Shamir transformations in zero-knowledge proof systems.
+/// A cryptographic transcript implementation using the Keccak-256 hash
+/// function. Used for Fiat-Shamir transformations in zero-knowledge proof
+/// systems.
 #[derive(Clone)]
 pub struct KeccakTranscript {
     /// The underlying Keccak-256 hasher that maintains the transcript state.
@@ -37,8 +35,9 @@ impl KeccakTranscript {
         self.hasher.update(v);
     }
 
-    /// Generates a specified number of pseudorandom bytes based on the current transcript state.
-    /// Uses a counter-based approach to generate enough bytes from the hasher.
+    /// Generates a specified number of pseudorandom bytes based on the current
+    /// transcript state. Uses a counter-based approach to generate enough
+    /// bytes from the hasher.
     pub fn get_random_bytes(&mut self, length: usize) -> Vec<u8> {
         let mut result = Vec::with_capacity(length);
         let mut counter = 0;
@@ -56,7 +55,8 @@ impl KeccakTranscript {
     }
 
     /// Absorbs a field element into the transcript.
-    /// Delegates to the field element's implementation of absorb_into_transcript.
+    /// Delegates to the field element's implementation of
+    /// absorb_into_transcript.
     pub fn absorb_random_field<F: Field>(&mut self, v: &F) {
         v.absorb_into_transcript(self)
     }
@@ -69,8 +69,8 @@ impl KeccakTranscript {
         }
     }
 
-    /// Internal helper that generates two 128-bit limbs from the current transcript state.
-    /// Updates the transcript state.
+    /// Internal helper that generates two 128-bit limbs from the current
+    /// transcript state. Updates the transcript state.
     fn get_challenge_limbs(&mut self) -> (u128, u128) {
         let challenge = self.hasher.clone().finalize();
 
@@ -84,7 +84,8 @@ impl KeccakTranscript {
         (lo, hi)
     }
 
-    /// Generates a pseudorandom field element as a challenge based on the current transcript state.
+    /// Generates a pseudorandom field element as a challenge based on the
+    /// current transcript state.
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn get_challenge<F: Field>(&mut self) -> F {
         let (lo, hi) = self.get_challenge_limbs();
@@ -127,14 +128,16 @@ impl KeccakTranscript {
         }
     }
 
-    /// Generates pseudorandom field elements as challenges based on the current transcript state.
+    /// Generates pseudorandom field elements as challenges based on the current
+    /// transcript state.
     pub fn get_challenges<F: Field>(&mut self, n: usize) -> Vec<F> {
         let mut challenges = Vec::with_capacity(n);
         challenges.extend((0..n).map(|_| self.get_challenge::<F>()));
         challenges
     }
 
-    /// Generates a pseudorandom [Integer] as a challenge based on the current transcript state.
+    /// Generates a pseudorandom [Integer] as a challenge based on the current
+    /// transcript state.
     pub fn get_integer_challenge<I: Integer>(&mut self) -> I {
         let mut words = I::W::default();
 
@@ -150,12 +153,14 @@ impl KeccakTranscript {
         I::from_words(words)
     }
 
-    /// Generates pseudorandom [CryptoInt]s as challenges based on the current transcript state.
+    /// Generates pseudorandom [CryptoInt]s as challenges based on the current
+    /// transcript state.
     pub fn get_integer_challenges<I: Integer>(&mut self, n: usize) -> Vec<I> {
         (0..n).map(|_| self.get_integer_challenge()).collect()
     }
 
-    /// Generates a pseudorandom `usize` within the given range bounds based on the current transcript state.
+    /// Generates a pseudorandom `usize` within the given range bounds based on
+    /// the current transcript state.
     fn get_usize_in_range(&mut self, range: &ark_std::ops::Range<usize>) -> usize {
         let challenge = self.hasher.clone().finalize();
 
@@ -201,9 +206,16 @@ mod tests {
     use ark_std::str::FromStr;
 
     use super::KeccakTranscript;
-    use crate::{define_field_config, field::{BigInt, RandomField}, traits::{FieldMap}};
+    use crate::{
+        define_field_config,
+        field::{BigInt, RandomField},
+        traits::FieldMap,
+    };
 
-    define_field_config!(FC, "3618502788666131213697322783095070105623107215331596699973092056135872020481");
+    define_field_config!(
+        FC,
+        "3618502788666131213697322783095070105623107215331596699973092056135872020481"
+    );
 
     #[test]
     fn test_keccak_transcript() {

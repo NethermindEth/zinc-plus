@@ -5,13 +5,28 @@ use ark_std::{
     test_rng,
     time::{Duration, Instant},
 };
-use criterion::{criterion_group, criterion_main, measurement::WallTime, AxisScale, BenchmarkGroup, BenchmarkId, Criterion, PlotConfiguration};
+use criterion::{
+    AxisScale, BenchmarkGroup, BenchmarkId, Criterion, PlotConfiguration, criterion_group,
+    criterion_main, measurement::WallTime,
+};
 use crypto_bigint::Random;
 use itertools::Itertools;
-use std::hint::black_box;
-use std::iter::{Product, Sum};
-use zip_plus::field::config::FieldConfigBase;
-use zip_plus::{code::{DefaultLinearCodeSpec, LinearCode}, code_raa::RaaCode, define_field_config, define_random_field_zip_types, field::RandomField, implement_random_field_zip_types, pcs::{structs::MultilinearZip, MerkleTree}, pcs_transcript::PcsTranscript, poly_z::mle::{DenseMultilinearExtension, MultilinearExtension}, traits::{FieldMap, ZipTypes}, transcript::KeccakTranscript};
+use std::{
+    hint::black_box,
+    iter::{Product, Sum},
+};
+use zip_plus::{
+    code::{DefaultLinearCodeSpec, LinearCode},
+    code_raa::RaaCode,
+    define_field_config, define_random_field_zip_types,
+    field::{RandomField, config::FieldConfigBase},
+    implement_random_field_zip_types,
+    pcs::{MerkleTree, structs::MultilinearZip},
+    pcs_transcript::PcsTranscript,
+    poly_z::mle::{DenseMultilinearExtension, MultilinearExtension},
+    traits::{FieldMap, ZipTypes},
+    transcript::KeccakTranscript,
+};
 
 define_field_config!(Fc, "695962179703626800597079116051991347");
 

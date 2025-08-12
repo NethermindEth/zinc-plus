@@ -1,10 +1,12 @@
-/// A macro to construct a `BigInt<N>` from a numeric literal or string literal at compile time.
+/// A macro to construct a `BigInt<N>` from a numeric literal or string literal
+/// at compile time.
 ///
 /// ## Variants
 ///
 /// ### 1. `big_int!(value)`
 /// - Parses a numeric literal using the crate's default `BigInt` type.
-/// - Requires the user to have `use crate::field::BigInt` in scope with a fixed `N`.
+/// - Requires the user to have `use crate::field::BigInt` in scope with a fixed
+///   `N`.
 ///
 /// ### 2. `big_int!(value, N)`
 /// - Parses a numeric literal into a specific `BigInt<N>`.
@@ -54,14 +56,14 @@ macro_rules! big_int {
 /// ## Variants
 ///
 /// ### 1. `random_field!(value, config)`
-/// Converts a numeric literal into a `RandomField` element using a provided field configuration.
+/// Converts a numeric literal into a `RandomField` element using a provided
+/// field configuration.
 ///
 /// - This leverages the `FieldMap` trait’s `.map_to_field()` method.
 /// - The `config` argument must be a valid configuration object of type `F::R`.
 ///
 /// ```rust
-/// use zip_plus::field::{RandomField};
-/// use zip_plus::{big_int, define_field_config, random_field};
+/// use zip_plus::{big_int, define_field_config, field::RandomField, random_field};
 ///
 /// define_field_config!(Fc, 19);
 ///
@@ -69,10 +71,12 @@ macro_rules! big_int {
 /// ```
 ///
 /// ## Notes
-/// - In both cases, the macro uses a closure internally to maintain hygiene and isolate `use` statements.
-/// - The first form (`random_field!(value)`) uses `$crate::field::{BigInt, RandomField}`.
-/// - The second form (`random_field!(value, config)`) uses `$crate::traits::FieldMap`.
-///
+/// - In both cases, the macro uses a closure internally to maintain hygiene and
+///   isolate `use` statements.
+/// - The first form (`random_field!(value)`) uses `$crate::field::{BigInt,
+///   RandomField}`.
+/// - The second form (`random_field!(value, config)`) uses
+///   `$crate::traits::FieldMap`.
 #[macro_export]
 macro_rules! random_field {
     ($v:literal) => {
