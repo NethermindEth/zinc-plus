@@ -368,10 +368,6 @@ pub(super) fn left_point_to_tensor<F: Field>(
 pub enum ArithErrors {
     /// Invalid parameters: {0}
     InvalidParameters(String),
-    /// Should not arrive to this point
-    ShouldNotArrive,
-    /// An error during (de)serialization: {0}
-    SerializationErrors(ark_serialize::SerializationError),
 }
 
 #[cfg(test)]

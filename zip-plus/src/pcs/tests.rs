@@ -1,24 +1,14 @@
-use ark_std::{collections::BTreeSet, ops::Range, vec::Vec};
-use std::marker::PhantomData;
+use ark_std::{collections::BTreeSet, ops::Range};
 
 use crate::{
-    code::DefaultLinearCodeSpec,
-    code_raa::RaaCode,
-    define_random_field_zip_types,
-    field::Int,
-    implement_random_field_zip_types,
-    pcs::structs::{MultilinearZipParams, ZipTranscript},
-    poly_z::mle::DenseMultilinearExtension,
+    define_random_field_zip_types, implement_random_field_zip_types, pcs::structs::ZipTranscript,
     traits::Integer,
-    utils::div_ceil,
 };
 
 const INT_LIMBS: usize = 1;
 
 define_random_field_zip_types!();
 implement_random_field_zip_types!(INT_LIMBS);
-
-type ZT = RandomFieldZipTypes<INT_LIMBS>;
 
 #[derive(Default)]
 pub struct MockTranscript {
@@ -54,28 +44,4 @@ impl<L: Integer> ZipTranscript<L> for MockTranscript {
         }
         inserted
     }
-}
-
-pub fn setup_test_params(
-    num_vars: usize,
-) -> (
-    MultilinearZipParams<ZT, RaaCode<ZT>>,
-    DenseMultilinearExtension<Int<INT_LIMBS>>,
-) {
-    let poly_size = 1 << num_vars;
-    let num_rows = 1 << div_ceil(num_vars, 2);
-
-    let mut transcript = MockTranscript::default();
-    let linear_code = RaaCode::<ZT>::new(&DefaultLinearCodeSpec, poly_size, &mut transcript);
-    let pp = MultilinearZipParams {
-        num_vars,
-        num_rows,
-        linear_code,
-        phantom_data_zt: PhantomData,
-    };
-
-    let evaluations: Vec<_> = (1..=poly_size).map(|v| Int::from(v as i32)).collect();
-    let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations);
-
-    (pp, poly)
 }

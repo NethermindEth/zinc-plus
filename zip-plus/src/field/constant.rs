@@ -49,7 +49,7 @@ mod tests {
     use ark_ff::{One, Zero};
     use zeroize::Zeroize;
 
-    use crate::{big_int, define_field_config, field::RandomField, random_field};
+    use crate::{define_field_config, field::RandomField, random_field};
 
     define_field_config!(FC, "23");
 

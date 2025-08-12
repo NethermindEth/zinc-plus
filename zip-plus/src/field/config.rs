@@ -236,6 +236,7 @@ impl<T, C> FieldConfig<T> for C where C: FieldConfigBase<T> + FieldConfigOps<T> 
 macro_rules! define_field_config {
     ($name:ident, $modulus:expr) => {
         #[derive(Clone, Debug)]
+        #[allow(dead_code)]
         struct $name<const N: usize>;
 
         impl<const N: usize> $crate::field::config::ConstFieldConfigBase1<$crate::field::BigInt<N>>
@@ -273,7 +274,7 @@ fn widening_mul(a: u64, b: u64) -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConstFieldConfigBase1, FieldConfig, FieldConfigOps};
+    use super::{ConstFieldConfigBase1, FieldConfigOps};
     use crate::{
         big_int,
         field::{BigInt, BigInteger128},

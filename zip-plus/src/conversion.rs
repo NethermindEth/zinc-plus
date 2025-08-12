@@ -455,7 +455,7 @@ mod bigint_field_map_tests {
     use super::*;
     use crate::{
         big_int, define_field_config,
-        field::{BigInt, FieldConfig, RandomField},
+        field::{BigInt, RandomField},
     };
     use num_traits::ConstZero;
 

@@ -162,7 +162,6 @@ pub trait Integer:
 pub trait Uinteger: Clone + FromBytes + One + for<'a> SubAssign<&'a Self> {
     type W: Words;
     type Int: Integer<W = Self::W>;
-    type PrimalityTest: PrimalityTest<Self>;
     /// Constructs from words.
     fn from_words(words: Self::W) -> Self;
     /// Converts to the signed integer type.
@@ -187,12 +186,6 @@ pub trait ZipTypes: Send + Sync {
         + for<'a> From<&'a Self::N>
         + for<'a> From<&'a Self::L>
         + for<'a> From<&'a Self::K>;
-}
-
-pub trait PrimalityTest<U: Uinteger> {
-    type Inner;
-    fn new(candidate: U) -> Self;
-    fn is_probably_prime(&self) -> bool;
 }
 
 pub trait PrimitiveConversion<T> {

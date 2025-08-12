@@ -1,11 +1,10 @@
 use ark_std::ops::{Mul, SubAssign};
-use crypto_bigint::{Integer, Odd, Uint as CryptoUint};
-use crypto_primes::hazmat::MillerRabin;
+use crypto_bigint::{Integer, Uint as CryptoUint};
 use num_traits::One;
 
 use crate::{
     field::{Int, biginteger::Words},
-    traits::{FromBytes, Uinteger, types::PrimalityTest},
+    traits::{FromBytes, Uinteger},
 };
 
 #[derive(Clone)]
@@ -33,7 +32,6 @@ impl<'a, const N: usize> SubAssign<&'a Self> for Uint<N> {
 
 impl<const N: usize> Uinteger for Uint<N> {
     type Int = Int<N>;
-    type PrimalityTest = MillerRabin<CryptoUint<N>>;
     type W = Words<N>;
 
     fn from_words(words: Words<N>) -> Self {
@@ -60,17 +58,5 @@ impl<const N: usize> FromBytes for Uint<N> {
 
     fn from_bytes_be(bytes: &[u8]) -> Option<Self> {
         Some(Self(CryptoUint::from_be_slice(bytes)))
-    }
-}
-
-impl<const N: usize> PrimalityTest<Uint<N>> for MillerRabin<CryptoUint<N>> {
-    type Inner = CryptoUint<N>;
-
-    fn new(candidate: Uint<N>) -> Self {
-        Self::new(Odd::new(candidate.0).unwrap())
-    }
-
-    fn is_probably_prime(&self) -> bool {
-        self.test_base_two().is_probably_prime()
     }
 }

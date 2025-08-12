@@ -171,7 +171,7 @@ mod test {
 
     use crate::{
         big_int, define_field_config,
-        field::{RandomField, biginteger::BigInt, config::FieldConfig},
+        field::{RandomField, biginteger::BigInt},
         random_field,
     };
 
