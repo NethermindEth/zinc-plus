@@ -6,6 +6,9 @@ edition.workspace = true
 repository.workspace = true
 license.workspace = true
 
+[lib]
+bench = false
+
 [dependencies]
 crypto-primitives = { workspace = true }
 

@@ -34,12 +34,11 @@ impl<const N: usize, FC: ConstFieldConfig<N>> One for RandomField<'_, N, FC> {
     }
 
     fn set_one(&mut self) {
-        let config = self.config.reference().expect("Field config cannot be none");
-        *self.value_mut() = *config.r();
+        *self.value_mut() = *self.config().r();
     }
 
     fn is_one(&self) -> bool {
-        self.value == *self.config.reference().unwrap().r()
+        self.value == *self.config().r()
     }
 }
 

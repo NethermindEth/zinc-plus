@@ -76,15 +76,7 @@ impl<const N: usize, FC: ConstFieldConfig<N>> Add<u32> for RandomField<'_, N, FC
 
 impl<const N: usize, FC: ConstFieldConfig<N>> AddAssign<&Self> for RandomField<'_, N, FC> {
     fn add_assign(&mut self, rhs: &Self) {
-        self.with_aligned_config_mut(
-            rhs,
-            |lhs, rhs, config| {
-                config.add_assign(lhs, rhs);
-            },
-            |lhs, rhs| {
-                lhs.add_with_carry(rhs);
-            },
-        );
+        self.config.reference().unwrap().add_assign(&mut self.value, &rhs.value);
     }
 }
 
@@ -105,29 +97,13 @@ impl<const N: usize, FC: ConstFieldConfig<N>> AddAssign<u32> for RandomField<'_,
 
 impl<const N: usize, FC: ConstFieldConfig<N>> SubAssign<&Self> for RandomField<'_, N, FC> {
     fn sub_assign(&mut self, rhs: &Self) {
-        self.with_aligned_config_mut(
-            rhs,
-            |lhs, rhs, config| {
-                config.sub_assign(lhs, rhs);
-            },
-            |lhs, rhs| {
-                lhs.sub_with_borrow(rhs);
-            },
-        );
+        self.config.reference().unwrap().sub_assign(&mut self.value, &rhs.value);
     }
 }
 
 impl<const N: usize, FC: ConstFieldConfig<N>> MulAssign<&Self> for RandomField<'_, N, FC> {
     fn mul_assign(&mut self, rhs: &Self) {
-        self.with_aligned_config_mut(
-            rhs,
-            |lhs, rhs, config| {
-                config.mul_assign(lhs, rhs);
-            },
-            |lhs, rhs| {
-                lhs.mul(rhs);
-            },
-        );
+        self.config.reference().unwrap().mul_assign(&mut self.value, &rhs.value);
     }
 }
 
@@ -136,14 +112,9 @@ impl<const N: usize, FC: ConstFieldConfig<N>> DivAssign<&Self> for RandomField<'
         if rhs.is_zero() {
             panic!("Attempt to divide by zero");
         }
+        let config = self.config.reference().unwrap();
 
-        self.with_aligned_config_mut(
-            rhs,
-            |lhs, rhs, config| {
-                config.mul_assign(lhs, &config.inverse(rhs).unwrap());
-            },
-            |_, _| panic!("Cannot divide without a field config"),
-        );
+        config.mul_assign(&mut self.value, &config.inverse(&rhs.value).unwrap());
     }
 }
 
@@ -161,9 +132,8 @@ impl<const N: usize, FC: ConstFieldConfig<N>> Neg for RandomField<'_, N, FC> {
             return self;
         }
 
-        let config = self.config.reference().expect("Field config cannot be none");
         let tmp = self.value;
-        self.value = *config.modulus();
+        self.value = *self.config().modulus();
         self.value.sub_with_borrow(&tmp);
 
         self
@@ -252,7 +222,6 @@ mod test {
         let rhs = RandomField::one();
         let config = unsafe { ConfigRef::new(Box::leak(Box::new(Fc23::<1>::field_config()))) };
         let expected = RandomField::from_bigint(config, BigInt::from(2_u32)).unwrap();
-        let zz = expected.clone().into_bigint();
 
         assert_eq!(lhs + rhs, expected);
     }

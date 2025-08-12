@@ -36,21 +36,8 @@ use crate::field::config::ConstFieldConfig;
 
 impl<'cfg, const N: usize, FC: ConstFieldConfig<N>> RandomField<'cfg, N, FC> {
 
-    pub fn with_aligned_config_mut<F, G, A>(
-        &mut self,
-        rhs: &Self,
-        fn_with_config: F,
-        fn_without_config: G,
-    ) -> A
-    where
-        F: Fn(&mut BigInt<N>, &BigInt<N>, &FieldConfig<N>) -> A,
-        G: Fn(&mut BigInt<N>, &BigInt<N>) -> A,
-    {
-        fn_with_config(
-            &mut self.value,
-            &rhs.value,
-            self.config.reference().expect("Field config cannot be none"),
-        )
+    pub fn config(&self) -> &FieldConfig<N>  {
+        self.config.reference().expect("Field config cannot be none")
     }
 
     pub fn zero_with_config(config: ConfigRef<'cfg, N>) -> Self {
@@ -104,7 +91,7 @@ impl<'cfg, const N: usize, FC: ConstFieldConfig<N>> RandomField<'cfg, N, FC> {
 
     #[inline]
     pub fn into_bigint(self) -> BigInt<N> {
-        Self::demontgomery(self.config.reference().expect("Field config cannot be none"), self.value)
+        Self::demontgomery(self.config(), self.value)
     }
 
     #[inline]
@@ -162,7 +149,7 @@ impl<'cfg, const N: usize, FC: ConstFieldConfig<N>> Field for RandomField<'cfg, 
     }
 
     fn absorb_into_transcript(&self, transcript: &mut KeccakTranscript) {
-        let config = self.config.reference().expect("Field config cannot be none");
+        let config = self.config();
 
         transcript.absorb(&[0x3]);
         transcript.absorb(&config.modulus().to_bytes_be());
