@@ -10,24 +10,23 @@ use criterion::{
     criterion_group, criterion_main, AxisScale, BenchmarkId, Criterion,
     PlotConfiguration,
 };
-use zip_plus::{
-    big_int,
-    field::{ConfigRef, RandomField},
-    field_config, random_field,
-};
+use zip_plus::{big_int, define_field_config, field::{ConfigRef, RandomField}, field_config, random_field};
+use zip_plus::field::config::ConstFieldConfig;
+use zip_plus::traits::FieldMap;
+
+define_field_config!(Fc, "695962179703626800597079116051991347");
 
 fn bench_random_field(group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>) {
-    let config = field_config!(695962179703626800597079116051991347);
-    let field_config = ConfigRef::from(&config);
+    let field_config = ConfigRef::from(&Fc::<4>::FIELD_CONFIG);
 
-    let field_elem = random_field!(695962179703, 4, field_config);
+    let field_elem: RandomField<4, Fc<4>> = 695962179703.map_to_field(field_config);
     group.bench_with_input(
         BenchmarkId::new("Multiply", "Random128BitFieldElement"),
         &field_elem,
         |b, unop_elem| {
             b.iter(|| {
                 for _ in 0..10000 {
-                    let _ = black_box(*unop_elem * *unop_elem);
+                    let _ = black_box(unop_elem.clone() * unop_elem.clone());
                 }
             });
         },
@@ -39,7 +38,7 @@ fn bench_random_field(group: &mut criterion::BenchmarkGroup<criterion::measureme
         |b, unop_elem| {
             b.iter(|| {
                 for _ in 0..10000 {
-                    let _ = black_box(*unop_elem + *unop_elem);
+                    let _ = black_box(unop_elem.clone() + unop_elem.clone());
                 }
             });
         },
@@ -51,7 +50,7 @@ fn bench_random_field(group: &mut criterion::BenchmarkGroup<criterion::measureme
         |b, unop_elem| {
             b.iter(|| {
                 for _ in 0..10000 {
-                    let _ = black_box(*unop_elem / *unop_elem);
+                    let _ = black_box(unop_elem.clone() / unop_elem.clone());
                 }
             });
         },
@@ -63,7 +62,7 @@ fn bench_random_field(group: &mut criterion::BenchmarkGroup<criterion::measureme
         |b, unop_elem| {
             b.iter(|| {
                 for _ in 0..10000 {
-                    let _ = black_box(-*unop_elem);
+                    let _ = black_box(-unop_elem.clone());
                 }
             });
         },

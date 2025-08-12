@@ -8,13 +8,13 @@ use crate::{
 };
 use crate::field::config::ConstFieldConfig;
 use crate::field::ConfigRef;
-use crate::traits::FieldMap;
+use crate::traits::{ConfigReference, FieldMap};
 
 impl<const N: usize, FC: ConstFieldConfig<N>> Zero for RandomField<'_, N, FC> {
     fn zero() -> Self {
         RandomField {
             value: BigInt::zero(),
-            config: None,
+            config: ConfigRef::from(&FC::FIELD_CONFIG),
             phantom_data: PhantomData,
         }
     }
@@ -34,21 +34,12 @@ impl<const N: usize, FC: ConstFieldConfig<N>> One for RandomField<'_, N, FC> {
     }
 
     fn set_one(&mut self) {
-        self.with_either_mut(
-            |value| {
-                *value = BigInt::one();
-            },
-            |config, value| {
-                *value = *config.r();
-            },
-        );
+        let config = self.config.reference().expect("Field config cannot be none");
+        *self.value_mut() = *config.r();
     }
 
     fn is_one(&self) -> bool {
-        self.with_either(
-            |value| *value == BigInt::one(),
-            |config, value| *value == *config.r(),
-        )
+        self.value == *self.config.reference().unwrap().r()
     }
 }
 

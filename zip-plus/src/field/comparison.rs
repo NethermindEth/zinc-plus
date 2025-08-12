@@ -17,13 +17,7 @@ impl<const N: usize, FC: ConstFieldConfig<N>> PartialEq for RandomField<'_, N, F
             return true;
         }
 
-        match (self.config, other.config) {
-            (Some(_), None) | (None, Some(_)) => false,
-            (None, None) => self.value() == other.value(),
-            (Some(_), Some(_)) => {
-                self.value() == other.value() && self.config_ptr() == other.config_ptr()
-            }
-        }
+        self.value == other.value && self.config_ptr() == other.config_ptr()
     }
 }
 

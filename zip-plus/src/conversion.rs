@@ -130,66 +130,59 @@ mod tests {
     use ark_std::{fmt::Debug, format, str::FromStr};
     use num_traits::{ConstZero, Zero};
     use crate::{big_int, define_field_config, field::{BigInt, ConfigRef, FieldConfig, RandomField}, field_config, traits::{Config, ConfigReference, Field, FieldMap, FromBytes}};
-
+    use crate::field::config::ConstFieldConfig;
 
     define_field_config!(Fc23, "23");
     define_field_config!(FcSmall, "243043087159742188419721163456177567");
     define_field_config!(FcBig, "3618502788666131213697322783095070105623107215331596699973092056135872020481");
 
-    fn test_from<F: Field + From<T>, T: Clone>(value: T, value_str: &str)
+    fn test_from<const N: usize, FC: ConstFieldConfig<N>, T: Clone>(value: T, value_str: &str)
     where
-        F::B: FromStr,
-        <F::B as FromStr>::Err: Debug,
+        for <'a> RandomField<'a, N, FC>: From<T>,
     {
-        let raw_element = F::from(value);
+        let raw_element = RandomField::<N, FC>::from(value);
         assert_eq!(
             raw_element,
-            F::without_config(F::B::from_str(value_str).unwrap())
+            BigInt::<N>::from_str(value_str).unwrap().map_to_field(ConfigRef::from(&FC::FIELD_CONFIG))
         )
     }
 
     #[test]
     fn converts_u128_to_random_field() {
-        test_from::<RandomField<2, FcSmall<2>>, u128>(
+        test_from::<2, FcSmall<2>, u128>(
             243043087159742188419721163456177516,
             "243043087159742188419721163456177516",
         );
     }
 
     #[test]
-    #[should_panic(expected = "Integer is 128 bits but field is 64 bits")]
-    fn panics_when_u128_does_not_fit_in_n1() {
-        test_from::<RandomField<1, FcSmall<1>>, u128>(243043087159742188419721163456177516, "");
-    }
-
-    #[test]
     fn converts_u64_to_random_field() {
-        test_from::<RandomField<1, FcSmall<1>>, u64>(23, "23");
+        test_from::<2, FcSmall<2>, u64>(23, "23");
     }
 
     #[test]
     fn converts_u32_to_random_field() {
-        test_from::<RandomField<1, FcSmall<1>>, u32>(23, "23");
+        test_from::<2, FcSmall<2>, u32>(23, "23");
     }
 
     #[test]
     fn converts_u16_to_random_field() {
-        test_from::<RandomField<1, FcSmall<1>>, u16>(23, "23");
+        test_from::<2, FcSmall<2>, u16>(23, "23");
     }
 
     #[test]
     fn converts_u8_to_random_field() {
-        test_from::<RandomField<1, FcSmall<1>>, u8>(23, "23");
+        test_from::<2, FcSmall<2>, u8>(23, "23");
     }
 
     #[test]
     fn converts_false_to_zero() {
-        test_from::<RandomField<1, FcSmall<1>>, bool>(false, "0");
+        test_from::<2, FcSmall<2>, bool>(false, "0");
     }
 
     #[test]
     fn converts_true_to_one() {
-        test_from::<RandomField<1, FcSmall<1>>, bool>(true, "1");
+        test_from::<2, FcSmall<2>, bool>(true, "1");
     }
 
     #[test]

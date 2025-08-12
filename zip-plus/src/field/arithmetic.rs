@@ -6,6 +6,7 @@ use ark_std::{
 
 use crate::{field::RandomField, traits::Config};
 use crate::field::config::ConstFieldConfig;
+use crate::traits::ConfigReference;
 
 macro_rules! impl_ops {
     (
@@ -160,14 +161,10 @@ impl<const N: usize, FC: ConstFieldConfig<N>> Neg for RandomField<'_, N, FC> {
             return self;
         }
 
-        self.with_either_mut(
-            |_| panic!("Cannot negate without a field config"),
-            |config, value| {
-                let tmp = *value;
-                *value = *config.modulus();
-                value.sub_with_borrow(&tmp);
-            },
-        );
+        let config = self.config.reference().expect("Field config cannot be none");
+        let tmp = self.value;
+        self.value = *config.modulus();
+        self.value.sub_with_borrow(&tmp);
 
         self
     }

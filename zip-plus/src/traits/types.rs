@@ -60,12 +60,8 @@ pub trait Field:
     type DebugField: Debug + From<Self> + Send + Sync;
     /// Creates a new field element from config and value, without checking.
     fn new_unchecked(config: Self::R, value: Self::B) -> Self;
-    /// Creates a new field element from value, without config.
-    fn without_config(value: Self::B) -> Self;
     /// Generates a random field element with the given config.
     fn rand_with_config<R: ark_std::rand::Rng + ?Sized>(rng: &mut R, config: Self::R) -> Self;
-    /// Sets the field configuration on the returned value.
-    fn with_config(self, config: Self::R) -> Self;
     /// Returns a reference to the integer value.
     fn value(&self) -> &Self::B;
     /// Returns a mutable reference to the integer value.
