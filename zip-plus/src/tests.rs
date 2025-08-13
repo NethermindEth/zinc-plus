@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use ark_std::{UniformRand, vec, vec::Vec};
 
 use crate::{

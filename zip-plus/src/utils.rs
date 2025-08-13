@@ -58,7 +58,7 @@ where
 {
     #[cfg(feature = "parallel")]
     {
-        use crate::zip::utils::div_ceil;
+        use crate::utils::div_ceil;
         let num_threads = num_threads();
         let chunk_size = div_ceil(v.len(), num_threads);
         if chunk_size < num_threads {

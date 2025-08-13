@@ -13,6 +13,9 @@ use crate::{
     utils::{div_ceil, num_threads, parallelize, parallelize_iter},
 };
 
+#[cfg(feature = "parallel")]
+use rayon::iter::*;
+
 fn err_too_many_variates(function: &str, upto: usize, got: usize) -> Error {
     Error::InvalidPcsParam(format!(
         "Too many variates of poly to {function} (param supports variates up to {upto} but got {got})"

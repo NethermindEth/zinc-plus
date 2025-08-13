@@ -4,7 +4,7 @@ use zeroize::Zeroize;
 
 use crate::{
     field::{RandomField, biginteger::BigInt, config::FieldConfig},
-    traits::{Field, FieldMap},
+    traits::Field,
 };
 
 impl<const N: usize, FC: FieldConfig<BigInt<N>>> Zero for RandomField<N, FC> {

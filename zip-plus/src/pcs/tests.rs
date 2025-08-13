@@ -1,3 +1,9 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_lossless,
+    clippy::cast_sign_loss
+)]
+
 use ark_std::{collections::BTreeSet, ops::Range};
 
 use crate::{

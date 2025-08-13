@@ -38,7 +38,11 @@ impl<ZT: ZipTypes> RaaCode<ZT> {
         // Taken from original Zip codes
 
         let num_vars = poly_size.ilog2() as usize;
-        let row_len = ((1 << num_vars) as u64).isqrt().next_power_of_two() as usize;
+        let row_len: usize = (1_u64 << num_vars)
+            .isqrt()
+            .next_power_of_two()
+            .try_into()
+            .expect("row_len overflow");
         let repetition_factor = spec.repetition_factor();
 
         let num_column_opening = spec.num_column_opening();
