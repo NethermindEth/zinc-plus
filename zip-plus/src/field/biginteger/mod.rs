@@ -462,7 +462,7 @@ impl<const N: usize> BigInt<N> {
         (lo, hi)
     }
 
-    #[inline]
+    // #[inline]
     pub fn div2(&mut self) {
         let mut t = 0;
         for a in self.0.iter_mut().rev() {

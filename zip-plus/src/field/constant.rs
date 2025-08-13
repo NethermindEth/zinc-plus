@@ -26,7 +26,7 @@ impl<const N: usize, FC: FieldConfig<BigInt<N>>> Zero for RandomField<N, FC> {
 
 impl<const N: usize, FC: FieldConfig<BigInt<N>>> One for RandomField<N, FC> {
     fn one() -> Self {
-        BigInt::<N>::one().map_to_field()
+        RandomField::new_unchecked(FC::r())
     }
 
     fn set_one(&mut self) {
