@@ -2,12 +2,9 @@ use crate::{Limb, PrimeField};
 use core::{
     fmt::{Debug, Display},
     iter::{Product, Sum},
-    ops::{Add, AddAssign, Mul, MulAssign, Rem, RemAssign, Sub, SubAssign},
+    ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign, Rem, RemAssign},
 };
-use num_traits::{
-    CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedShl, CheckedShr, CheckedSub, ConstOne,
-    ConstZero, Pow,
-};
+use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedShl, CheckedShr, CheckedSub, ConstOne, ConstZero, Pow};
 
 /// A ring is like a field without a multiplicative inverse or division.
 pub trait Ring:
@@ -77,8 +74,7 @@ pub trait LimbedIntRing: IntRing + From<Limb> + for<'a> TryFrom<&'a [Limb]> {
 
     fn limbs(&self) -> &[Limb];
 
-    // Cannot implement it as From trait since both participants are of non-local
-    // types
+    // Cannot implement it as From trait since both participants are of non-local types
     fn to_field<F: PrimeField>(&self) -> F {
         F::from(self.limbs())
     }

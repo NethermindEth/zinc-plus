@@ -320,12 +320,9 @@ mod tests {
         #[derive(Debug, Clone)]
         struct MismatchedZipTypes;
         impl ZipTypes for MismatchedZipTypes {
-            // 128 bits
-            type K = Int<1>;
-            // 64 bits
-            type L = Int<2>;
-            // 64 bits - INSUFFICIENT
-            type M = Int<4>;
+            type K = Int<1>; // 128 bits
+            type L = Int<2>; // 64 bits
+            type M = Int<4>; // 64 bits - INSUFFICIENT
             type N = Int<1>; // 256 bits
         }
 
