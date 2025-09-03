@@ -1,7 +1,10 @@
+use ark_std::fmt::{Display, Result as FmtResult, Formatter};
+use ark_std::io::Write;
 use ark_ff::Zero;
 use ark_std::{cfg_iter_mut, format, iterable::Iterable, vec, vec::Vec};
-use displaydoc::Display;
-use sha3::{Digest, Keccak256, digest::Output};
+use crypto_bigint::Word;
+use itertools::Itertools;
+use uninit::AsMaybeUninit;
 
 use super::{error::MerkleError, structs::MultilinearZipData};
 use crate::{
@@ -10,8 +13,13 @@ use crate::{
     poly_f::mle::DenseMultilinearExtension as MLE_F,
     poly_z::mle::DenseMultilinearExtension as MLE_Z,
     traits::{Field, Integer},
-    utils::{div_ceil, num_threads, parallelize, parallelize_iter},
 };
+
+use p3_commit::{BatchOpeningRef, Mmcs};
+use p3_field::Packable;
+use p3_matrix::{Dimensions, Matrix as P3Matrix, dense::RowMajorMatrix};
+use p3_merkle_tree::MerkleTreeMmcs;
+use p3_symmetric::{CryptographicHasher, PseudoCompressionFunction};
 
 #[cfg(feature = "parallel")]
 use rayon::iter::*;
@@ -23,11 +31,11 @@ fn err_too_many_variates(function: &str, upto: usize, got: usize) -> Error {
 }
 
 // Ensures that polynomials and evaluation points are of appropriate size
-pub(super) fn validate_input<'a, I: Integer + 'a, F: Field + 'a>(
+pub(super) fn validate_input<'a, I: Integer + 'a, PT: 'a>(
     function: &str,
     param_num_vars: usize,
     polys: impl Iterable<Item = &'a MLE_Z<I>>,
-    points: impl Iterable<Item = &'a [F]>,
+    points: impl Iterable<Item = &'a [PT]>,
 ) -> Result<(), Error> {
     // Ensure all the number of variables in the polynomials don't exceed the limit
     for poly in polys.iter() {
@@ -59,158 +67,193 @@ pub(super) fn validate_input<'a, I: Integer + 'a, F: Field + 'a>(
     Ok(())
 }
 
-// Define a new trait for converting to bytes
-pub trait ToBytes {
-    fn to_bytes(&self) -> Vec<u8>;
+pub trait AsWords {
+    /// View the underlying byte array as a slice of `Word`s.
+    fn as_words(&self) -> &[Word];
 }
 
-/// A merkle tree in which its layers are concatenated together in a single
-/// vector
-#[derive(Clone, Debug, Default)]
-pub struct MerkleTree {
-    pub root: Output<Keccak256>,
-    pub depth: usize,
-    pub layers: Vec<Output<Keccak256>>,
-}
+/// Cannot reference blake3::OUT_LEN directly in some of the contexts below.
+const BLAKE3_OUT_LEN: usize = blake3::OUT_LEN;
 
-impl MerkleTree {
-    pub fn new<T: ToBytes + Send + Sync>(depth: usize, leaves: &[T]) -> Self {
-        assert!(leaves.len().is_power_of_two());
-        assert_eq!(leaves.len(), 1 << depth);
-        let mut layers = vec![Output::<Keccak256>::default(); (2 << depth) - 1];
-        Self::compute_leaves_hashes(&mut layers[..leaves.len()], leaves);
-        Self::merklize_leaves_hashes(depth, &mut layers);
-        Self {
-            root: layers.pop().unwrap(),
-            depth,
-            layers,
-        }
-    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct MtHash(pub(crate) [u8; BLAKE3_OUT_LEN]);
 
-    fn compute_leaves_hashes<T: ToBytes + Send + Sync>(
-        hashes: &mut [Output<Keccak256>],
-        leaves: &[T],
-    ) {
-        parallelize(hashes, |(hashes, start)| {
-            let mut hasher = Keccak256::new();
-            for (hash, row) in hashes.iter_mut().zip(start..) {
-                let bytes = leaves[row].to_bytes();
-                <Keccak256 as sha3::digest::Update>::update(&mut hasher, &bytes);
-                hasher.finalize_into_reset(hash);
-            }
-        });
-    }
-
-    fn merklize_leaves_hashes(depth: usize, hashes: &mut [Output<Keccak256>]) {
-        assert_eq!(hashes.len(), (2 << depth) - 1);
-        let mut offset = 0;
-        for width in (1..=depth).rev().map(|depth| 1 << depth) {
-            let (current_layer, next_layer) = hashes[offset..].split_at_mut(width);
-
-            let chunk_size = div_ceil(next_layer.len(), num_threads());
-            parallelize_iter(
-                current_layer
-                    .chunks(2 * chunk_size)
-                    .zip(next_layer.chunks_mut(chunk_size)),
-                |(input, output)| {
-                    let mut hasher = Keccak256::new();
-                    for (input, output) in input.chunks_exact(2).zip(output.iter_mut()) {
-                        hasher.update(input[0]);
-                        hasher.update(input[1]);
-                        hasher.finalize_into_reset(output);
-                    }
-                },
-            );
-            offset += width;
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct MerkleProof {
-    pub merkle_path: Vec<Output<Keccak256>>,
-}
-
-impl ark_std::fmt::Display for MerkleProof {
-    fn fmt(&self, f: &mut ark_std::fmt::Formatter<'_>) -> ark_std::fmt::Result {
-        writeln!(f, "Merkle Path:")?;
-        for (i, hash) in self.merkle_path.iter().enumerate() {
-            writeln!(f, "Level {i}: {hash:?}")?;
-        }
-        Ok(())
-    }
-}
-
-impl Default for MerkleProof {
+impl Default for MtHash {
     fn default() -> Self {
-        Self::new()
+        MtHash([0; BLAKE3_OUT_LEN])
     }
+}
+
+impl Display for MtHash {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let blake3_hash: blake3::Hash = self.0.into();
+        <blake3::Hash as Display>::fmt(&blake3_hash, f)
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct MtHasher;
+
+impl<T: AsWords + Clone> CryptographicHasher<T, [u8; BLAKE3_OUT_LEN]> for MtHasher {
+    fn hash_iter<I>(&self, input: I) -> [u8; BLAKE3_OUT_LEN]
+    where
+        I: IntoIterator<Item = T>,
+    {
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = [0_u8; size_of::<Word>()];
+        for item in input {
+            for word in item.as_words() {
+                // Performance: reuse buffer and help compiler optimize away materializing word bytes
+                buf.copy_from_slice(&word.to_be_bytes());
+                hasher.write_all(&buf).expect("Failed to write to hasher");
+            }
+        }
+        hasher.finalize().into()
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct MtPerm;
+
+impl PseudoCompressionFunction<[u8; BLAKE3_OUT_LEN], 2> for MtPerm {
+    fn compress(&self, input: [[u8; BLAKE3_OUT_LEN]; 2]) -> [u8; BLAKE3_OUT_LEN] {
+        let mut hasher = blake3::Hasher::new();
+        for ref item in input {
+            hasher.write_all(item).expect("Failed to write to hasher");
+        }
+        hasher.finalize().into()
+    }
+}
+
+type Matrix<T> = RowMajorMatrix<T>;
+type MtMmcs<T> = MerkleTreeMmcs<T, u8, MtHasher, MtPerm, BLAKE3_OUT_LEN>;
+type P3MerkleTree<T> = p3_merkle_tree::MerkleTree<T, u8, Matrix<T>, BLAKE3_OUT_LEN>;
+
+#[derive(Debug, Default)]
+pub struct MerkleTree<T>
+where
+    T: Packable + AsWords + Clone + Send + Sync,
+{
+    inner: Option<MerkleTreeInner<T>>,
+}
+
+#[derive(Debug)]
+struct MerkleTreeInner<T> {
+    prover_data: P3MerkleTree<T>,
+    matrix_dims: Dimensions,
+}
+
+impl<T> MerkleTree<T>
+where
+    T: Packable + AsWords + Clone + Send + Sync,
+{
+    pub fn new(rows: &[T], row_width: usize) -> Self {
+        assert!(rows.len().is_power_of_two());
+        assert!(rows.len().is_multiple_of(row_width));
+        assert!(row_width > 0);
+
+        // Each matrix row is hashed together to form a leaf in the Merkle tree.
+        // Thus, we need to transpose a matrix to have original columns as leaves.
+        let matrix = {
+            let mut columns: Vec<T> = Vec::with_capacity(rows.len());
+            let column_height = rows.len() / row_width;
+            transpose::transpose(
+                rows.as_ref_uninit(),
+                columns.spare_capacity_mut(),
+                row_width,
+                column_height,
+            );
+            // Safe because we just initialized all elements of `columns`, and MaybeUninit<T> is #[repr(transparent)].
+            unsafe {
+                columns.set_len(rows.len());
+            }
+            Matrix::new(columns, column_height)
+        };
+
+        let matrix_dims = matrix.dimensions();
+        let prover_data = P3MerkleTree::new::<T, _, _, _>(&MtHasher, &MtPerm, vec![matrix]);
+
+        Self {
+            inner: Some(MerkleTreeInner {
+                prover_data,
+                matrix_dims,
+            }),
+        }
+    }
+
+    pub fn root(&self) -> MtHash {
+        MtHash(
+            *self
+                .inner
+                .as_ref()
+                .expect("Merkle tree not initialized")
+                .prover_data
+                .root()
+                .as_ref(),
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MerkleProof {
+    pub path: Vec<MtHash>,
+    pub matrix_dims: Dimensions,
 }
 
 impl MerkleProof {
-    pub fn new() -> Self {
-        Self {
-            merkle_path: vec![],
-        }
+    pub fn new(path: Vec<MtHash>, matrix_dims: Dimensions) -> Self {
+        MerkleProof { path, matrix_dims }
     }
 
-    pub fn from_vec(vec: Vec<Output<Keccak256>>) -> Self {
-        Self { merkle_path: vec }
+    pub fn create_proof<T>(merkle_tree: &MerkleTree<T>, leaf: usize) -> Result<Self, MerkleError>
+    where
+        T: Packable + AsWords + Clone,
+    {
+        let mt = merkle_tree
+            .inner
+            .as_ref()
+            .ok_or(MerkleError::InvalidRootHash)?;
+        let prover = MtMmcs::<T>::new(MtHasher, MtPerm);
+        let opening = prover.open_batch(leaf, &mt.prover_data);
+        let path = opening.opening_proof.into_iter().map(MtHash).collect();
+        Ok(Self::new(path, mt.matrix_dims))
     }
 
-    pub fn create_proof(merkle_tree: &MerkleTree, leaf: usize) -> Result<Self, MerkleError> {
-        let mut offset = 0;
-        let path: Vec<Output<Keccak256>> = (1..=merkle_tree.depth)
-            .rev()
-            .map(|depth| {
-                let width = 1 << depth;
-                let idx = (leaf >> (merkle_tree.depth - depth)) ^ 1;
-                let hash = merkle_tree.layers[offset + idx];
-                offset += width;
-                hash
-            })
-            .collect();
-        Ok(MerkleProof::from_vec(path))
-    }
-
-    pub fn verify<T: ToBytes>(
+    pub fn verify<T>(
         &self,
-        root: Output<Keccak256>,
-        leaf_value: &T,
+        root: &MtHash,
+        leaf_values: Vec<T>,
         leaf_index: usize,
-    ) -> Result<(), MerkleError> {
-        let mut hasher = Keccak256::new();
-        let bytes = leaf_value.to_bytes();
-        hasher.update(&bytes);
-        let mut current = hasher.finalize_reset();
+    ) -> Result<(), MerkleError>
+    where
+        T: Packable + AsWords + Clone,
+    {
+        let prover = MtMmcs::<T>::new(MtHasher, MtPerm);
 
-        let mut index = leaf_index;
-        for path_hash in &self.merkle_path {
-            if (index & 1) == 0 {
-                <Keccak256 as sha3::digest::Update>::update(&mut hasher, &current);
-                <Keccak256 as sha3::digest::Update>::update(&mut hasher, path_hash);
-            } else {
-                <Keccak256 as sha3::digest::Update>::update(&mut hasher, path_hash);
-                <Keccak256 as sha3::digest::Update>::update(&mut hasher, &current);
-            }
+        let values = vec![leaf_values];
+        let proof = self.path.iter().map(|h| h.0).collect_vec();
+        let proof = BatchOpeningRef::new(&values, &proof);
+        prover
+            .verify_batch(&root.0.into(), &[self.matrix_dims], leaf_index, proof)
+            .map_err(|e| {
+                MerkleError::InvalidMerkleProof(format!("Failed to validate Merkle proof: {:?}", e))
+            })
+    }
+}
 
-            hasher.finalize_into_reset(&mut current);
-            index /= 2;
-        }
-        if current != root {
-            return Err(MerkleError::InvalidMerkleProof(
-                "Merkle proof verification failed".into(),
-            ));
-        }
+impl Display for MerkleProof {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        writeln!(f, "Merkle Path: {}", self.path.iter().join(", "))?;
+        writeln!(f, "Matrix Dimensions: {}", self.matrix_dims)?;
         Ok(())
     }
 }
 
 /// This is a helper struct to open a column in a multilinear polynomial
-/// Opening a column `j` in an `n x m` matrix `u_hat` requires opening `m`
-/// Merkle trees, one for each row at position j
-/// Note that the proof is written to the transcript and the order of the proofs
-/// is the same as the order of the columns
+/// Opening a column `j` in an `n x m` matrix `u_hat` requires opening `m` Merkle trees,
+/// one for each row at position j
+/// Note that the proof is written to the transcript and the order of the proofs is the same as the order of the columns
 #[derive(Clone)]
 pub struct ColumnOpening {}
 
@@ -220,34 +263,29 @@ impl ColumnOpening {
         commit_data: &MultilinearZipData<M>,
         transcript: &mut PcsTranscript<F>,
     ) -> Result<(), MerkleError> {
-        for row_merkle_tree in commit_data.rows_merkle_trees.iter() {
-            let merkle_path = MerkleProof::create_proof(row_merkle_tree, column)?;
-            transcript
-                .write_merkle_proof(&merkle_path)
-                .map_err(|_| MerkleError::FailedMerkleProofWriting)?;
-        }
+        let merkle_path = MerkleProof::create_proof(&commit_data.merkle_tree, column)?;
+        transcript
+            .write_merkle_proof(&merkle_path)
+            .map_err(|_| MerkleError::FailedMerkleProofWriting)?;
         Ok(())
     }
 
-    pub fn verify_column<F: Field, T: ToBytes>(
-        rows_roots: &[Output<Keccak256>],
+    pub fn verify_column<F: Field, T: Packable + AsWords + Clone>(
+        root: &MtHash,
         column: &[T],
         column_index: usize,
         transcript: &mut PcsTranscript<F>,
     ) -> Result<(), MerkleError> {
-        for (root, leaf) in rows_roots.iter().zip(column) {
-            let proof = transcript
-                .read_merkle_proof()
-                .map_err(|_| MerkleError::FailedMerkleProofReading)?;
-            proof.verify(*root, leaf, column_index)?;
-        }
+        let proof = transcript
+            .read_merkle_proof()
+            .map_err(|_| MerkleError::FailedMerkleProofReading)?;
+        proof.verify(root, column.to_vec(), column_index)?;
         Ok(())
     }
 }
 
-/// For a polynomial arranged in matrix form, this splits the evaluation point
-/// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
-/// right
+/// For a polynomial arranged in matrix form, this splits the evaluation point into
+/// two vectors, `q_0` multiplying on the left and `q_1` multiplying on the right
 pub(super) fn point_to_tensor<F: Field>(
     num_rows: usize,
     point: &[F],
@@ -349,9 +387,9 @@ fn build_eq_x_r_helper<F: Field>(r: &[F], buf: &mut Vec<F>) -> Result<(), ArithE
     Ok(())
 }
 
-/// For a polynomial arranged in matrix form, this splits the evaluation point
-/// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
-/// right and returns the left vector only
+/// For a polynomial arranged in matrix form, this splits the evaluation point into
+/// two vectors, `q_0` multiplying on the left and `q_1` multiplying on the right
+/// and returns the left vector only
 pub(super) fn left_point_to_tensor<F: Field>(
     num_rows: usize,
     point: &[F],
@@ -367,7 +405,7 @@ pub(super) fn left_point_to_tensor<F: Field>(
 }
 
 /// A `enum` specifying the possible failure modes of the arithmetics.
-#[derive(Display, Debug, Error)]
+#[derive(displaydoc::Display, Debug, Error)]
 pub enum ArithErrors {
     /// Invalid parameters: {0}
     InvalidParameters(String),
@@ -427,11 +465,10 @@ mod tests {
             .map(|_| Int::random(&mut rng))
             .collect::<Vec<Int<N>>>();
 
-        let merkle_depth = leaves_data.len().next_power_of_two().ilog2() as usize;
-        let merkle_tree = MerkleTree::new(merkle_depth, &leaves_data);
+        let merkle_tree = MerkleTree::new(&leaves_data, leaves_data.len());
 
         // Print tree structure after merklizing
-        let root = merkle_tree.root;
+        let root = merkle_tree.root();
         // Create a proof for the first leaf
         for (i, leaf) in leaves_data.iter().enumerate() {
             let proof =
@@ -439,7 +476,7 @@ mod tests {
 
             // Verify the proof
             proof
-                .verify(root, leaf, i)
+                .verify(&root, vec![*leaf], i)
                 .expect("Merkle proof verification failed");
         }
     }

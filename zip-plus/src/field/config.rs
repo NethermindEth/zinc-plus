@@ -237,8 +237,8 @@ impl<T, C> FieldConfig<T> for C where C: FieldConfigBase<T> + FieldConfigOps<T> 
 #[macro_export]
 macro_rules! define_field_config {
     ($name:ident, $modulus:expr) => {
-        #[derive(Clone, Debug)]
         #[allow(dead_code)]
+        #[derive(Clone, Debug)]
         struct $name<const N: usize>;
 
         impl<const N: usize> $crate::field::config::ConstFieldConfigBase1<$crate::field::BigInt<N>>

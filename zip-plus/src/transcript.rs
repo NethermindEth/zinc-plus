@@ -6,6 +6,7 @@ use crate::{
     pcs::structs::ZipTranscript,
     traits::{BigInteger, Field, FieldMap, Integer, PrimitiveConversion, Words},
 };
+use crate::pcs::utils::AsWords;
 
 /// A cryptographic transcript implementation using the Keccak-256 hash
 /// function. Used for Fiat-Shamir transformations in zero-knowledge proof

@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use crate::traits::{FieldMap, FromBytes, Words as WordsTrait};
+use crate::traits::{FieldMap, Words as WordsTrait};
 use ark_ff::UniformRand;
 use crypto_bigint::Random;
 use num_traits::ConstZero;

@@ -56,7 +56,7 @@ macro_rules! big_int {
 /// ```rust
 /// use zip_plus::{big_int, define_field_config, field::RandomField, random_field};
 ///
-/// define_field_config!(Fc, 19);
+/// define_field_config!(Fc, "19");
 ///
 /// let x: RandomField<1, Fc<1>> = random_field!(123);
 /// ```

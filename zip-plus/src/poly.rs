@@ -1,5 +1,3 @@
-pub mod errors;
-
 pub(crate) extern crate alloc;
 
 // ark-std v0.5 should re-export alloc/std::sync.

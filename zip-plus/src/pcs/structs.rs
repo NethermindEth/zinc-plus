@@ -1,7 +1,6 @@
 use ark_std::{collections::BTreeSet, marker::PhantomData, vec::Vec};
-use sha3::{Keccak256, digest::Output};
 
-use super::utils::MerkleTree;
+use super::utils::{MerkleTree, MtHash};
 use crate::{
     code::LinearCode,
     traits::{Integer, ZipTypes},
@@ -15,43 +14,43 @@ pub struct MultilinearZipParams<ZT: ZipTypes, LC: LinearCode<ZT>> {
     pub num_vars: usize,
     pub num_rows: usize,
     pub linear_code: LC,
-    pub(crate) phantom_data_zt: PhantomData<ZT>,
+    phantom_data_zt: PhantomData<ZT>,
+}
+
+impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZipParams<ZT, LC> {
+    pub fn new(num_vars: usize, num_rows: usize, linear_code: LC) -> MultilinearZipParams<ZT, LC> {
+        Self {
+            num_vars,
+            num_rows,
+            linear_code,
+            phantom_data_zt: PhantomData,
+        }
+    }
 }
 
 /// Representantation of a zip commitment to a multilinear polynomial
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct MultilinearZipData<K: Integer> {
-    /// The encoded rows of the polynomial matrix representation, referred to as
-    /// "u-hat" in the Zinc paper
+    /// The encoded rows of the polynomial matrix representation, referred to as "u-hat" in the Zinc paper
     pub rows: Vec<K>,
-    /// Merkle trees of each row
-    pub rows_merkle_trees: Vec<MerkleTree>,
+    /// Merkle trees of entire matrix
+    pub merkle_tree: MerkleTree<K>,
 }
 
 /// Representantation of a zip commitment to a multilinear polynomial
 #[derive(Clone, Debug, Default)]
 pub struct MultilinearZipCommitment {
-    /// Roots of the merkle tree of each row
-    pub roots: Vec<Output<Keccak256>>,
+    /// Roots of the merkle tree of entire matrix
+    pub root: MtHash,
 }
 
 impl<K: Integer> MultilinearZipData<K> {
-    pub fn new(rows: Vec<K>, rows_merkle_trees: Vec<MerkleTree>) -> MultilinearZipData<K> {
-        MultilinearZipData {
-            rows,
-            rows_merkle_trees,
-        }
+    pub fn new(rows: Vec<K>, merkle_tree: MerkleTree<K>) -> MultilinearZipData<K> {
+        MultilinearZipData { rows, merkle_tree }
     }
 
-    pub fn roots(&self) -> Vec<Output<Keccak256>> {
-        self.rows_merkle_trees
-            .iter()
-            .map(|tree| tree.root)
-            .collect::<Vec<_>>()
-    }
-
-    pub fn root_at_index(&self, index: usize) -> Output<Keccak256> {
-        self.rows_merkle_trees[index].root
+    pub fn root(&self) -> MtHash {
+        self.merkle_tree.root()
     }
 }
 

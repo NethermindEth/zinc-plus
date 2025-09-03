@@ -155,6 +155,7 @@ mod test {
         traits::Integer,
         utils::{expand, inner_product},
     };
+    use crate::pcs::utils::AsWords;
 
     #[test]
     fn test_inner_product_basic() {

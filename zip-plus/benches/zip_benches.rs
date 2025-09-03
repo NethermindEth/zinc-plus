@@ -2,6 +2,8 @@
 #![allow(clippy::eq_op)]
 
 use ark_std::{
+    hint::black_box,
+    str::FromStr,
     test_rng,
     time::{Duration, Instant},
 };
@@ -10,7 +12,6 @@ use criterion::{
 };
 use crypto_bigint::Random;
 use itertools::Itertools;
-use std::hint::black_box;
 use zip_plus::{
     code::{DefaultLinearCodeSpec, LinearCode},
     code_raa::RaaCode,
@@ -23,12 +24,19 @@ use zip_plus::{
     traits::{FieldMap, ZipTypes},
     transcript::KeccakTranscript,
 };
+use zip_plus::field::Int;
 
 const INT_LIMBS: usize = 1;
 const FIELD_LIMBS: usize = 4;
 
 define_random_field_zip_types!();
-implement_random_field_zip_types!(INT_LIMBS);
+
+impl ZipTypes for RandomFieldZipTypes<INT_LIMBS> {
+    type N = Int<INT_LIMBS>;
+    type L = Int<{ 1 * INT_LIMBS }>;
+    type K = Int<{ 2 * INT_LIMBS }>;
+    type M = Int<{ 4 * INT_LIMBS }>;
+}
 
 type ZT = RandomFieldZipTypes<INT_LIMBS>;
 type LC = RaaCode<ZT>;
@@ -93,8 +101,8 @@ fn merkle_root<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize
         format!("MerkleRoot: Int<{INT_LIMBS}>, leaves=2^{P}, spec={spec}"),
         |b| {
             b.iter(|| {
-                let tree = MerkleTree::new(P, &leaves);
-                black_box(tree.root);
+                let tree = MerkleTree::new(&leaves, num_leaves);
+                black_box(tree.root());
             })
         },
     );
@@ -118,12 +126,13 @@ fn commit<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
                 for _ in 0..iters {
                     let poly = DenseMultilinearExtension::rand(P, &mut rng);
                     let timer = Instant::now();
-                    let _ = BenchZip::commit::<RandomField<FIELD_LIMBS, FC>>(&params, &poly)
+                    let res = BenchZip::commit(&params, &poly)
                         .expect("Failed to commit");
-                    total_duration += timer.elapsed()
+                    black_box(res);
+                    total_duration += timer.elapsed();
                 }
 
-                total_duration / iters as u32
+                total_duration
             })
         },
     );
@@ -139,7 +148,7 @@ fn open<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
     let params = BenchZip::setup(poly_size, linear_code);
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
-    let (data, _) = BenchZip::commit::<RandomField<FIELD_LIMBS, FC>>(&params, &poly).unwrap();
+    let (data, _) = BenchZip::commit(&params, &poly).unwrap();
     let point = vec![1i64; P];
     let field_point = point.map_to_field();
 
@@ -161,7 +170,7 @@ fn open<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
                     .expect("Failed to make opening");
                     total_duration += timer.elapsed();
                 }
-                total_duration / iters as u32
+                total_duration
             })
         },
     );
@@ -176,17 +185,18 @@ fn verify<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
     let params = BenchZip::setup(poly_size, linear_code);
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
-    let (data, commitment) =
-        BenchZip::commit::<RandomField<FIELD_LIMBS, FC>>(&params, &poly).unwrap();
+    let (data, commitment) = BenchZip::commit(&params, &poly).unwrap();
     let point = vec![1i64; P];
+    let field_point = point.map_to_field();
     let eval = poly.evaluations.last().unwrap();
+    let eval_field = eval.map_to_field();
     let mut transcript = PcsTranscript::<RandomField<FIELD_LIMBS, FC>>::new();
 
     BenchZip::open(
         &params,
         &poly,
         &data,
-        &point.map_to_field(),
+        &field_point,
         &mut transcript,
     )
     .unwrap();
@@ -203,14 +213,14 @@ fn verify<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
                     BenchZip::verify(
                         &params,
                         &commitment,
-                        &point.map_to_field(),
-                        eval.map_to_field(),
+                        &field_point,
+                        &eval_field,
                         &mut transcript,
                     )
                     .expect("Failed to verify");
                     total_duration += timer.elapsed();
                 }
-                total_duration / iters as u32
+                total_duration
             })
         },
     );
@@ -220,6 +230,9 @@ fn zip_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip");
 
     encode_rows::<12>(&mut group, 1);
+    encode_rows::<13>(&mut group, 1);
+    encode_rows::<14>(&mut group, 1);
+    encode_rows::<15>(&mut group, 1);
     encode_rows::<16>(&mut group, 1);
 
     encode_single_row::<128>(&mut group, 1);
@@ -230,16 +243,27 @@ fn zip_benchmarks(c: &mut Criterion) {
     encode_single_row::<4096>(&mut group, 1);
 
     merkle_root::<12>(&mut group, 1);
+    merkle_root::<13>(&mut group, 1);
+    merkle_root::<14>(&mut group, 1);
+    merkle_root::<15>(&mut group, 1);
     merkle_root::<16>(&mut group, 1);
-    merkle_root::<22>(&mut group, 1);
 
     commit::<12>(&mut group, 1);
+    commit::<13>(&mut group, 1);
+    commit::<14>(&mut group, 1);
+    commit::<15>(&mut group, 1);
     commit::<16>(&mut group, 1);
 
     open::<12>(&mut group, 1);
+    open::<13>(&mut group, 1);
+    open::<14>(&mut group, 1);
+    open::<15>(&mut group, 1);
     open::<16>(&mut group, 1);
 
     verify::<12>(&mut group, 1);
+    verify::<13>(&mut group, 1);
+    verify::<14>(&mut group, 1);
+    verify::<15>(&mut group, 1);
     verify::<16>(&mut group, 1);
 
     group.finish();

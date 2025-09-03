@@ -1,32 +1,31 @@
 #![allow(non_snake_case)]
 
+use ark_std::io::ErrorKind;
 use ark_std::{
     io::{Cursor, Read, Write},
     marker::PhantomData,
     vec,
     vec::Vec,
 };
-use sha3::{Keccak256, digest::Output};
+use p3_matrix::Dimensions;
 
-use super::{Error, define_field_config, pcs::utils::MerkleProof};
+use super::{Error, pcs::utils::MerkleProof};
 use crate::{
     poly::alloc::string::ToString,
     traits::{BigInteger, Field, FromBytes, Integer, PrimitiveConversion, Words},
     transcript::KeccakTranscript,
+    pcs::utils::MtHash,
 };
 
 /// A transcript for Polynomial Commitment Scheme (PCS) operations.
-/// Manages both Fiat-Shamir transformations and serialization/deserialization
-/// of proof data.
+/// Manages both Fiat-Shamir transformations and serialization/deserialization of proof data.
 #[derive(Default, Clone)]
 pub struct PcsTranscript<F: Field> {
-    /// Handles Fiat-Shamir transformations for non-interactive zero-knowledge
-    /// proofs. Used to absorb field elements and generate cryptographic
-    /// challenges.
+    /// Handles Fiat-Shamir transformations for non-interactive zero-knowledge proofs.
+    /// Used to absorb field elements and generate cryptographic challenges.
     pub fs_transcript: KeccakTranscript,
 
-    /// Manages serialization and deserialization of proof data as a byte
-    /// stream.
+    /// Manages serialization and deserialization of proof data as a byte stream.
     pub stream: Cursor<Vec<u8>>,
 
     _phantom: PhantomData<F>,
@@ -52,28 +51,26 @@ impl<F: Field> PcsTranscript<F> {
     }
 
     /// Absorbs a field element into the Fiat-Shamir transcript.
-    /// This is used to incorporate public values into the transcript for
-    /// challenge generation.
+    /// This is used to incorporate public values into the transcript for challenge generation.
     pub fn common_field_element(&mut self, fe: &F) {
         self.fs_transcript.absorb_random_field(fe);
     }
 
     /// Reads a cryptographic commitment from the proof stream.
     /// Used during proof verification to retrieve previously committed values.
-    pub fn read_commitment(&mut self) -> Result<Output<Keccak256>, Error> {
-        let mut buf = Output::<Keccak256>::default();
+    pub fn read_commitment(&mut self) -> Result<MtHash, Error> {
+        let mut buf = [0; blake3::OUT_LEN];
         self.stream
             .read_exact(&mut buf)
             .map_err(|err| Error::Transcript(err.kind(), err.to_string()))?;
-        Ok(*Output::<Keccak256>::from_slice(&buf))
+        Ok(MtHash(blake3::Hash::from_bytes(buf).into()))
     }
 
     /// Writes a cryptographic commitment to the proof stream.
-    /// Used during proof generation to store commitments for later
-    /// verification.
-    pub fn write_commitment(&mut self, comm: &Output<Keccak256>) -> Result<(), Error> {
+    /// Used during proof generation to store commitments for later verification.
+    pub fn write_commitment(&mut self, comm: &MtHash) -> Result<(), Error> {
         self.stream
-            .write_all(comm)
+            .write_all(&comm.0)
             .map_err(|err| Error::Transcript(err.kind(), err.to_string()))?;
         Ok(())
     }
@@ -109,9 +106,8 @@ impl<F: Field> PcsTranscript<F> {
         Ok(fe)
     }
 
-    /// Writes a field element to the proof stream and absorbs it into the
-    /// transcript. Used during proof generation to store field elements for
-    /// later verification.
+    /// Writes a field element to the proof stream and absorbs it into the transcript.
+    /// Used during proof generation to store field elements for later verification.
     pub fn write_field_element(&mut self, fe: &F) -> Result<(), Error> {
         self.common_field_element(fe);
         let repr = fe.value().clone().to_bytes_be();
@@ -129,13 +125,6 @@ impl<F: Field> PcsTranscript<F> {
         }
         Ok(())
     }
-
-    // pub fn write_integers<M: CryptoInt>(&mut self, ints: &[M]) -> Result<(),
-    // Error> {     for int in ints {
-    //         self.write_integer(int)?;
-    //     }
-    //     Ok(())
-    // }
 
     pub fn write_integers<'a, M, I>(&mut self, ints: I) -> Result<(), Error>
     where
@@ -169,13 +158,46 @@ impl<F: Field> PcsTranscript<F> {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    pub fn read_commitments(&mut self, n: usize) -> Result<Vec<Output<Keccak256>>, Error> {
+    pub fn read_commitments(&mut self, n: usize) -> Result<Vec<MtHash>, Error> {
         (0..n).map(|_| self.read_commitment()).collect()
+    }
+
+    fn write_u64(&mut self, value: u64) -> Result<(), Error> {
+        self.stream
+            .write_all(&value.to_be_bytes())
+            .map_err(|err| Error::Transcript(err.kind(), err.to_string()))
+    }
+
+    fn read_u64(&mut self) -> Result<u64, Error> {
+        let mut buf = [0u8; 8];
+        self.stream
+            .read_exact(&mut buf)
+            .map_err(|err| Error::Transcript(err.kind(), err.to_string()))?;
+        Ok(u64::from_be_bytes(buf))
+    }
+
+    fn write_usize(&mut self, value: usize) -> Result<(), Error> {
+        let value_u64: u64 = value.try_into().map_err(|_| {
+            Error::Transcript(
+                ErrorKind::Unsupported,
+                "Failed to convert usize to u64".to_string(),
+            )
+        })?;
+        self.write_u64(value_u64)
+    }
+
+    fn read_usize(&mut self) -> Result<usize, Error> {
+        self.read_u64()?.try_into().map_err(|_| {
+            Error::Transcript(
+                ErrorKind::Unsupported,
+                "Failed to convert u64 to usize".to_string(),
+            )
+        })
     }
 
     pub fn write_commitments<'a>(
         &mut self,
-        comms: impl IntoIterator<Item = &'a Output<Keccak256>>,
+        comms: impl IntoIterator<Item = &'a MtHash>,
     ) -> Result<(), Error> {
         for comm in comms.into_iter() {
             self.write_commitment(comm)?;
@@ -194,104 +216,113 @@ impl<F: Field> PcsTranscript<F> {
     }
 
     pub fn read_merkle_proof(&mut self) -> Result<MerkleProof, Error> {
-        // Read the length of the merkle_path first
-        let mut length_bytes = [0u8; 8];
-        self.stream
-            .read_exact(&mut length_bytes)
-            .map_err(|err| Error::Transcript(err.kind(), err.to_string()))?;
-        let path_length = u64::from_be_bytes(length_bytes);
+        // Read the dimensions of matrix used to construct the Merkle tree
+        let width = self.read_usize()?;
+        let height = self.read_usize()?;
+        let dimensions = Dimensions { width, height };
 
-        // Read each element of the merkle_path
-        let mut merkle_path = Vec::with_capacity(path_length as usize);
+        // Read the length of the merkle path first
+        let path_length = self.read_usize()?;
+
+        // Read each element of the merkle path
+        let mut merkle_path = Vec::with_capacity(path_length);
         for _ in 0..path_length {
             merkle_path.push(self.read_commitment()?);
         }
 
-        Ok(MerkleProof { merkle_path })
+        Ok(MerkleProof::new(merkle_path, dimensions))
     }
 
     pub fn write_merkle_proof(&mut self, proof: &MerkleProof) -> Result<(), Error> {
-        // Write the length of the merkle_path first
-        let path_length = proof.merkle_path.len() as u64;
-        self.stream
-            .write_all(&path_length.to_be_bytes())
-            .map_err(|err| Error::Transcript(err.kind(), err.to_string()))?;
+        // Write the dimensions of matrix used to construct the Merkle tree
+        self.write_usize(proof.matrix_dims.width)?;
+        self.write_usize(proof.matrix_dims.height)?;
 
-        // Write each element of the merkle_path
-        for hash in &proof.merkle_path {
-            self.write_commitment(hash)?;
+        // Write the length of the merkle path first
+        self.write_usize(proof.path.len())?;
+
+        // Write each element of the merkle path
+        for path_elem in proof.path.iter() {
+            self.write_commitment(path_elem)?;
         }
-
         Ok(())
     }
 }
 
-define_field_config!(FC, "57316695564490278656402085503");
-
-#[allow(unused_macros)]
-macro_rules! test_read_write {
-    // TODO: N is magic
-    ($write_fn:ident, $read_fn:ident, $original_value:expr, $assert_msg:expr) => {{
-        use ark_std::format;
-        let mut transcript = PcsTranscript::<RandomField<N, FC<N>>>::new();
-        transcript
-            .$write_fn(&$original_value)
-            .expect(&format!("Failed to write {}", $assert_msg));
-        let proof = transcript.into_proof();
-        let mut transcript = PcsTranscript::<RandomField<N, FC<N>>>::from_proof(&proof);
-        let read_value = transcript
-            .$read_fn()
-            .expect(&format!("Failed to read {}", $assert_msg));
-        assert_eq!(
-            $original_value, read_value,
-            "{} read does not match original",
-            $assert_msg
-        );
-    }};
-}
-
-#[allow(unused_macros)]
-macro_rules! test_read_write_vec {
-    // TODO: N is magic
-    ($write_fn:ident, $read_fn:ident, $original_values:expr, $assert_msg:expr) => {{
-        use ark_std::format;
-        let mut transcript = PcsTranscript::<RandomField<N, FC<N>>>::new();
-        transcript
-            .$write_fn(&$original_values)
-            .expect(&format!("Failed to write {}", $assert_msg));
-        let proof = transcript.into_proof();
-        let mut transcript = PcsTranscript::<RandomField<N, FC<N>>>::from_proof(&proof);
-        let read_values = transcript
-            .$read_fn($original_values.len())
-            .expect(&format!("Failed to read {}", $assert_msg));
-        assert_eq!(
-            $original_values, read_values,
-            "{} read does not match original",
-            $assert_msg
-        );
-    }};
-}
-
-#[test]
-fn test_pcs_transcript_read_write() {
+#[cfg(test)]
+mod tests {
+    use crate::define_field_config;
     use crate::field::RandomField;
-    const N: usize = 4;
+    use crate::pcs_transcript::PcsTranscript;
+    use crate::pcs_transcript::MtHash;
 
-    // Test commitment
-    let original_commitment = Output::<Keccak256>::default();
-    test_read_write!(
-        write_commitment,
-        read_commitment,
-        original_commitment,
-        "commitment"
-    );
-    //TODO put the tests back in for Int<N> types
-    // Test vector of commitments
-    let original_commitments = vec![Output::<Keccak256>::default(); 1024];
-    test_read_write_vec!(
-        write_commitments,
-        read_commitments,
-        original_commitments,
-        "commitments vector"
-    );
+    define_field_config!(Fc, "57316695564490278656402085503");
+    const N: usize = 4;
+    type F = RandomField<N, Fc<N>>;
+
+    #[allow(unused_macros)]
+    macro_rules! test_read_write {
+        // TODO: N is magic
+        ($write_fn:ident, $read_fn:ident, $original_value:expr, $assert_msg:expr) => {{
+            use ark_std::format;
+            let mut transcript = PcsTranscript::<F>::new();
+            transcript
+                .$write_fn(&$original_value)
+                .expect(&format!("Failed to write {}", $assert_msg));
+            let proof = transcript.into_proof();
+            let mut transcript = PcsTranscript::<F>::from_proof(&proof);
+            let read_value = transcript
+                .$read_fn()
+                .expect(&format!("Failed to read {}", $assert_msg));
+            assert_eq!(
+                $original_value, read_value,
+                "{} read does not match original",
+                $assert_msg
+            );
+        }};
+    }
+
+    #[allow(unused_macros)]
+    macro_rules! test_read_write_vec {
+        // TODO: N is magic
+        ($write_fn:ident, $read_fn:ident, $original_values:expr, $assert_msg:expr) => {{
+            use ark_std::format;
+            let mut transcript = PcsTranscript::<F>::new();
+            transcript
+                .$write_fn(&$original_values)
+                .expect(&format!("Failed to write {}", $assert_msg));
+            let proof = transcript.into_proof();
+            let mut transcript = PcsTranscript::<F>::from_proof(&proof);
+            let read_values = transcript
+                .$read_fn($original_values.len())
+                .expect(&format!("Failed to read {}", $assert_msg));
+            assert_eq!(
+                $original_values, read_values,
+                "{} read does not match original",
+                $assert_msg
+            );
+        }};
+    }
+
+
+    #[test]
+    fn test_pcs_transcript_read_write() {
+        // Test commitment
+        let original_commitment = MtHash::default();
+        test_read_write!(
+            write_commitment,
+            read_commitment,
+            original_commitment,
+            "commitment"
+        );
+        //TODO put the tests back in for Int<N> types
+        // Test vector of commitments
+        let original_commitments = vec![MtHash::default(); 1024];
+        test_read_write_vec!(
+            write_commitments,
+            read_commitments,
+            original_commitments,
+            "commitments vector"
+        );
+    }
 }

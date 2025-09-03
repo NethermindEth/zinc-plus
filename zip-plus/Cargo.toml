@@ -28,8 +28,19 @@ zeroize = "1.8"
 num-bigint = "0.4"
 crypto-primes = "0.6"
 rayon = { version = "1.10", optional = true }
-
 criterion = "0.7"
+blake3 = "1.8.2"
+transpose = "0.2.3"
+
+# P3
+p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3.git", rev = "5ebf8e4" }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3.git", rev = "5ebf8e4" }
+p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "5ebf8e4" }
+p3-commit = { git = "https://github.com/Plonky3/Plonky3.git", rev = "5ebf8e4" }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3.git", rev = "5ebf8e4" }
+p3-util = { git = "https://github.com/Plonky3/Plonky3.git", rev = "5ebf8e4" }
+p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3.git", rev = "5ebf8e4", features = [] }
+uninit = "0.6.2"
 
 [lints]
 workspace = true

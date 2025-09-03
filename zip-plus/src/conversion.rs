@@ -275,17 +275,17 @@ mod tests {
 
     #[test]
     fn test_signed_integers_field_map() {
-        define_field_config!(FC, "18446744069414584321");
+        define_field_config!(Fc, "18446744069414584321");
         let field = 18446744069414584321_u64;
 
         // Test primitive types with full range
-        test_signed_type_full_range!(i8, field, 1, FC<1>);
-        test_signed_type_full_range!(i16, field, 1, FC<1>);
+        test_signed_type_full_range!(i8, field, 1, Fc<1>);
+        test_signed_type_full_range!(i16, field, 1, Fc<1>);
 
         // Test larger primitive types with edge cases only
-        test_signed_type_edge_cases!(i32, field, 1, FC<1>);
-        test_signed_type_edge_cases!(i64, field, 1, FC<1>);
-        test_signed_type_edge_cases!(i128, field, 1, FC<1>);
+        test_signed_type_edge_cases!(i32, field, 1, Fc<1>);
+        test_signed_type_edge_cases!(i64, field, 1, Fc<1>);
+        test_signed_type_edge_cases!(i128, field, 1, Fc<1>);
     }
 
     macro_rules! test_unsigned_type_full_range {
@@ -357,16 +357,16 @@ mod tests {
 
     #[test]
     fn test_unsigned_integers_field_map() {
-        define_field_config!(FC, "18446744069414584321");
+        define_field_config!(Fc, "18446744069414584321");
         let field_1 = 18446744069414584321_u64;
         // Test small types with full range
-        test_unsigned_type_full_range!(u8, field_1, 1, FC<1>);
-        test_unsigned_type_full_range!(u16, field_1, 1, FC<1>);
+        test_unsigned_type_full_range!(u8, field_1, 1, Fc<1>);
+        test_unsigned_type_full_range!(u16, field_1, 1, Fc<1>);
 
         // Test larger types with edge cases only
-        test_unsigned_type_edge_cases!(u32, field_1, 1, FC<1>);
-        test_unsigned_type_edge_cases!(u64, field_1, 1, FC<1>);
-        test_unsigned_type_edge_cases!(u128, field_1, 1, FC<1>);
+        test_unsigned_type_edge_cases!(u32, field_1, 1, Fc<1>);
+        test_unsigned_type_edge_cases!(u64, field_1, 1, Fc<1>);
+        test_unsigned_type_edge_cases!(u128, field_1, 1, Fc<1>);
     }
 }
 
@@ -379,13 +379,13 @@ mod bigint_field_map_tests {
     };
     use num_traits::ConstZero;
 
-    define_field_config!(FC, "18446744069414584321");
+    define_field_config!(Fc, "18446744069414584321");
 
     #[test]
     fn test_bigint_smaller_than_field() {
         // Using a 2-limb field config with 1-limb BigInt
         let small_bigint = BigInt::<1>::from(12345u64);
-        let result: RandomField<2, FC<2>> = small_bigint.map_to_field();
+        let result: RandomField<2, Fc<2>> = small_bigint.map_to_field();
 
         assert_eq!(
             result.into_bigint().first(),
@@ -397,7 +397,7 @@ mod bigint_field_map_tests {
     #[test]
     fn test_bigint_equal_size() {
         let value = big_int!(12345678901234567890, 2);
-        let result: RandomField<2, FC<2>> = value.map_to_field();
+        let result: RandomField<2, Fc<2>> = value.map_to_field();
 
         // The result should be the value modulo the field modulus
         let expected = big_int!(12345678901234567890);
@@ -412,7 +412,7 @@ mod bigint_field_map_tests {
     fn test_bigint_larger_than_field() {
         // Using a 1-limb field config with 2-limb BigInt
         let large_value = big_int!(123456789012345678901, 2);
-        let result: RandomField<1, FC<1>> = large_value.map_to_field();
+        let result: RandomField<1, Fc<1>> = large_value.map_to_field();
 
         let expected = BigInt::<1>::from(12776324595858172975u64);
         assert_eq!(
@@ -425,7 +425,7 @@ mod bigint_field_map_tests {
     #[test]
     fn test_bigint_zero() {
         let zero = BigInt::<2>::ZERO;
-        let result: RandomField<2, FC<2>> = zero.map_to_field();
+        let result: RandomField<2, Fc<2>> = zero.map_to_field();
 
         assert!(
             result.into_bigint().is_zero(),
@@ -438,10 +438,10 @@ mod bigint_field_map_tests {
         // Create a BigInt with all bits set to 1
         let max_value = BigInt::from([u64::MAX, u64::MAX]);
 
-        let result: RandomField<2, FC<2>> = max_value.map_to_field();
+        let result: RandomField<2, Fc<2>> = max_value.map_to_field();
 
         assert!(
-            result.into_bigint() < FC::modulus(),
+            result.into_bigint() < Fc::modulus(),
             "Result should be properly reduced modulo field modulus"
         );
     }
