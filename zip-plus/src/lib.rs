@@ -2,21 +2,21 @@ use crypto_primitives::IntRing;
 
 pub mod code;
 pub mod code_raa;
+mod macros;
 pub mod pcs;
 pub mod pcs_transcript;
-pub mod utils;
 pub mod traits;
-mod macros;
+pub mod utils;
 
-#[cfg(test)]
-mod tests;
-pub mod poly_z;
-mod poly;
-pub mod transcript;
+mod const_helpers;
 mod conversion;
 pub mod field;
-mod const_helpers;
+mod poly;
 mod poly_f;
+pub mod poly_z;
+#[cfg(test)]
+mod tests;
+pub mod transcript;
 
 use ark_std::string::String;
 use thiserror::Error;

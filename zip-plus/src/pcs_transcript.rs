@@ -6,9 +6,9 @@ use ark_std::{
     vec,
     vec::Vec,
 };
-use sha3::{digest::Output, Keccak256};
+use sha3::{Keccak256, digest::Output};
 
-use super::{pcs::utils::MerkleProof, Error};
+use super::{Error, define_field_config, pcs::utils::MerkleProof};
 use crate::{
     poly::alloc::string::ToString,
     traits::{BigInteger, Field, FromBytes, Integer, PrimitiveConversion, Words},
@@ -16,14 +16,17 @@ use crate::{
 };
 
 /// A transcript for Polynomial Commitment Scheme (PCS) operations.
-/// Manages both Fiat-Shamir transformations and serialization/deserialization of proof data.
+/// Manages both Fiat-Shamir transformations and serialization/deserialization
+/// of proof data.
 #[derive(Default, Clone)]
 pub struct PcsTranscript<F: Field> {
-    /// Handles Fiat-Shamir transformations for non-interactive zero-knowledge proofs.
-    /// Used to absorb field elements and generate cryptographic challenges.
+    /// Handles Fiat-Shamir transformations for non-interactive zero-knowledge
+    /// proofs. Used to absorb field elements and generate cryptographic
+    /// challenges.
     pub fs_transcript: KeccakTranscript,
 
-    /// Manages serialization and deserialization of proof data as a byte stream.
+    /// Manages serialization and deserialization of proof data as a byte
+    /// stream.
     pub stream: Cursor<Vec<u8>>,
 
     _phantom: PhantomData<F>,
@@ -49,7 +52,8 @@ impl<F: Field> PcsTranscript<F> {
     }
 
     /// Absorbs a field element into the Fiat-Shamir transcript.
-    /// This is used to incorporate public values into the transcript for challenge generation.
+    /// This is used to incorporate public values into the transcript for
+    /// challenge generation.
     pub fn common_field_element(&mut self, fe: &F) {
         self.fs_transcript.absorb_random_field(fe);
     }
@@ -65,7 +69,8 @@ impl<F: Field> PcsTranscript<F> {
     }
 
     /// Writes a cryptographic commitment to the proof stream.
-    /// Used during proof generation to store commitments for later verification.
+    /// Used during proof generation to store commitments for later
+    /// verification.
     pub fn write_commitment(&mut self, comm: &Output<Keccak256>) -> Result<(), Error> {
         self.stream
             .write_all(comm)
@@ -82,29 +87,31 @@ impl<F: Field> PcsTranscript<F> {
         Ok(())
     }
 
-    pub fn read_field_elements(&mut self, n: usize, config: F::R) -> Result<Vec<F>, Error> {
+    pub fn read_field_elements(&mut self, n: usize) -> Result<Vec<F>, Error> {
         (0..n)
-            .map(|_| self.read_field_element(config))
+            .map(|_| self.read_field_element())
             .collect::<Result<Vec<_>, _>>()
     }
 
-    /// Reads a field element from the proof stream and absorbs it into the transcript.
-    /// Used during proof verification to retrieve and process field elements.
-    pub fn read_field_element(&mut self, config: F::R) -> Result<F, Error> {
+    /// Reads a field element from the proof stream and absorbs it into the
+    /// transcript. Used during proof verification to retrieve and process
+    /// field elements.
+    pub fn read_field_element(&mut self) -> Result<F, Error> {
         let mut bytes: Vec<u8> = vec![0; F::W::num_words() * 8];
 
         self.stream
             .read_exact(&mut bytes)
             .map_err(|err| Error::Transcript(err.kind(), err.to_string()))?;
 
-        let fe = F::new_unchecked(config, F::B::from_bytes_be(&bytes).unwrap());
+        let fe = F::new_unchecked(F::B::from_bytes_be(&bytes).unwrap());
 
         self.common_field_element(&fe);
         Ok(fe)
     }
 
-    /// Writes a field element to the proof stream and absorbs it into the transcript.
-    /// Used during proof generation to store field elements for later verification.
+    /// Writes a field element to the proof stream and absorbs it into the
+    /// transcript. Used during proof generation to store field elements for
+    /// later verification.
     pub fn write_field_element(&mut self, fe: &F) -> Result<(), Error> {
         self.common_field_element(fe);
         let repr = fe.value().clone().to_bytes_be();
@@ -123,8 +130,8 @@ impl<F: Field> PcsTranscript<F> {
         Ok(())
     }
 
-    // pub fn write_integers<M: CryptoInt>(&mut self, ints: &[M]) -> Result<(), Error> {
-    //     for int in ints {
+    // pub fn write_integers<M: CryptoInt>(&mut self, ints: &[M]) -> Result<(),
+    // Error> {     for int in ints {
     //         self.write_integer(int)?;
     //     }
     //     Ok(())
@@ -179,8 +186,8 @@ impl<F: Field> PcsTranscript<F> {
     /// Generates a pseudorandom index based on the current transcript state.
     /// Used to create deterministic challenges for zero-knowledge protocols.
     /// Returns an index between 0 and cap-1.
-    pub fn squeeze_challenge_idx(&mut self, config: F::R, cap: usize) -> usize {
-        let challenge: F = self.fs_transcript.get_challenge(config);
+    pub fn squeeze_challenge_idx(&mut self, cap: usize) -> usize {
+        let challenge: F = self.fs_transcript.get_challenge();
         let bytes = challenge.value().clone().to_bytes_le();
         let num = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
         num % cap
@@ -219,17 +226,19 @@ impl<F: Field> PcsTranscript<F> {
     }
 }
 
+define_field_config!(FC, "57316695564490278656402085503");
+
 #[allow(unused_macros)]
 macro_rules! test_read_write {
     // TODO: N is magic
     ($write_fn:ident, $read_fn:ident, $original_value:expr, $assert_msg:expr) => {{
         use ark_std::format;
-        let mut transcript = PcsTranscript::<RandomField<N>>::new();
+        let mut transcript = PcsTranscript::<RandomField<N, FC<N>>>::new();
         transcript
             .$write_fn(&$original_value)
             .expect(&format!("Failed to write {}", $assert_msg));
         let proof = transcript.into_proof();
-        let mut transcript = PcsTranscript::<RandomField<N>>::from_proof(&proof);
+        let mut transcript = PcsTranscript::<RandomField<N, FC<N>>>::from_proof(&proof);
         let read_value = transcript
             .$read_fn()
             .expect(&format!("Failed to read {}", $assert_msg));
@@ -246,12 +255,12 @@ macro_rules! test_read_write_vec {
     // TODO: N is magic
     ($write_fn:ident, $read_fn:ident, $original_values:expr, $assert_msg:expr) => {{
         use ark_std::format;
-        let mut transcript = PcsTranscript::<RandomField<N>>::new();
+        let mut transcript = PcsTranscript::<RandomField<N, FC<N>>>::new();
         transcript
             .$write_fn(&$original_values)
             .expect(&format!("Failed to write {}", $assert_msg));
         let proof = transcript.into_proof();
-        let mut transcript = PcsTranscript::<RandomField<N>>::from_proof(&proof);
+        let mut transcript = PcsTranscript::<RandomField<N, FC<N>>>::from_proof(&proof);
         let read_values = transcript
             .$read_fn($original_values.len())
             .expect(&format!("Failed to read {}", $assert_msg));

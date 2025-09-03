@@ -1,4 +1,9 @@
-use std::ops::{Add, Mul};
+use crate::{
+    adc,
+    const_helpers::SerBuffer,
+    field::{Int, config},
+    traits::{BigInteger, FromBytes, Integer, Uinteger},
+};
 #[allow(unused)]
 use ark_ff::ark_ff_macros::unroll_for_loops;
 use ark_ff::const_for;
@@ -7,6 +12,7 @@ use ark_serialize::{
 };
 use ark_std::ops::{Index, IndexMut, Range, RangeTo};
 use ark_std::{
+    Zero,
     borrow::Borrow,
     // convert::TryFrom,
     fmt::{Debug, Display, UpperHex},
@@ -16,29 +22,22 @@ use ark_std::{
         ShrAssign,
     },
     rand::{
-        distributions::{Distribution, Standard},
         Rng,
+        distributions::{Distribution, Standard},
     },
     str::FromStr,
     vec::Vec,
-    Zero,
 };
 use num_bigint::BigUint;
 use num_traits::{CheckedAdd, ConstZero};
+use std::ops::Add;
 use zeroize::Zeroize;
-use crypto_primitives::{IntRing, Ring};
-use crate::{
-    adc,
-    const_helpers::SerBuffer,
-    field::{config, Int},
-    traits::{BigInteger, FromBytes, Integer, Uinteger},
-};
 
 #[macro_use]
 pub mod arithmetic;
 mod bits;
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Zeroize)]
-pub struct BigInt<const N: usize>([u64; N]);
+pub struct BigInt<const N: usize>(pub [u64; N]);
 
 impl<const N: usize> From<[u64; N]> for BigInt<N> {
     #[inline]
@@ -119,9 +118,10 @@ impl<const N: usize> CanonicalDeserialize for BigInt<N> {
 #[macro_export]
 macro_rules! BigInt {
     ($c0:expr) => {{
-        let (is_positive, limbs) = $crate::ark_ff_macros::to_sign_and_limbs!($c0);
+        use num_traits::ConstZero;
+        let (is_positive, limbs) = ark_ff::ark_ff_macros::to_sign_and_limbs!($c0);
         assert!(is_positive);
-        let mut integer = $crate::BigInt::zero();
+        let mut integer = $crate::field::BigInt::ZERO;
         assert!(integer.0.len() >= limbs.len());
         $crate::const_for!((i in 0..(limbs.len())) {
             integer.0[i] = limbs[i];
@@ -211,7 +211,8 @@ impl<const N: usize> BigInt<N> {
         true
     }
 
-    /// Compute the largest integer `s` such that `self = 2**s * t + 1` for odd `t`.
+    /// Compute the largest integer `s` such that `self = 2**s * t + 1` for odd
+    /// `t`.
     #[doc(hidden)]
     pub const fn two_adic_valuation(mut self) -> u32 {
         assert!(self.const_is_odd());
@@ -226,8 +227,8 @@ impl<const N: usize> BigInt<N> {
         two_adicity
     }
 
-    /// Compute the smallest odd integer `t` such that `self = 2**s * t + 1` for some
-    /// integer `s = self.two_adic_valuation()`.
+    /// Compute the smallest odd integer `t` such that `self = 2**s * t + 1` for
+    /// some integer `s = self.two_adic_valuation()`.
     #[doc(hidden)]
     pub const fn two_adic_coefficient(mut self) -> Self {
         assert!(self.const_is_odd());
@@ -461,7 +462,7 @@ impl<const N: usize> BigInt<N> {
         (lo, hi)
     }
 
-    #[inline]
+    // #[inline]
     pub fn div2(&mut self) {
         let mut t = 0;
         for a in self.0.iter_mut().rev() {
@@ -620,6 +621,7 @@ impl<const N: usize> CheckedAdd for BigInt<N> {
 
 impl<const N: usize> BigInteger for BigInt<N> {
     type W = Words<N>;
+
     fn to_words(&self) -> Words<N> {
         Words(self.0)
     }
@@ -1136,8 +1138,8 @@ impl<const N: usize> FromBytes for BigInt<N> {
     }
 }
 
-/// Compute the signed modulo operation on a u64 representation, returning the result.
-/// If n % modulus > modulus / 2, return modulus - n
+/// Compute the signed modulo operation on a u64 representation, returning the
+/// result. If n % modulus > modulus / 2, return modulus - n
 /// # Example
 /// ```
 /// use ark_ff::signed_mod_reduction;

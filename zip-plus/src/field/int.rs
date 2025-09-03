@@ -6,8 +6,8 @@ use ark_std::{
     vec::Vec,
 };
 use crypto_bigint::{
-    subtle::{Choice, ConstantTimeEq},
     Int as CryptoInt, NonZero, Random,
+    subtle::{Choice, ConstantTimeEq},
 };
 use num_traits::{ConstOne, ConstZero, One, Zero};
 
@@ -16,8 +16,8 @@ use crate::{
         biginteger::{BigInt, Words},
         uint::Uint,
     },
-    traits::Integer,
     pcs::utils::ToBytes,
+    traits::Integer,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -219,9 +219,9 @@ impl<const N: usize> Sum for Int<N> {
 }
 
 impl<const N: usize> Integer for Int<N> {
-    type W = Words<N>;
-    type Uint = Uint<N>;
     type I = BigInt<N>;
+    type Uint = Uint<N>;
+    type W = Words<N>;
 
     fn from_words(words: Words<N>) -> Self {
         Self(CryptoInt::from_words(words.0))
@@ -240,16 +240,18 @@ impl<const N: usize> Integer for Int<N> {
     }
 }
 
-/// Defines a wrapper type suitable for implementing the `ZipTypes` trait with const generics.
+/// Defines a wrapper type suitable for implementing the `ZipTypes` trait with
+/// const generics.
 ///
 /// # Usage
-/// - `define_random_field_zip_types!();`
-///   Expands to `pub struct RandomFieldZipTypes<const N: usize>();`
+/// - `define_random_field_zip_types!();` Expands to `pub struct
+///   RandomFieldZipTypes<const N: usize>();`
 ///
-/// - `define_random_field_zip_types!(CustomName);`
-///   Expands to `pub struct CustomName<const N: usize>();`
+/// - `define_random_field_zip_types!(CustomName);` Expands to `pub struct
+///   CustomName<const N: usize>();`
 ///
-/// This macro allows downstream crates to define their own local wrapper types for implementing traits, in compliance with Rust's orphan rule.
+/// This macro allows downstream crates to define their own local wrapper types
+/// for implementing traits, in compliance with Rust's orphan rule.
 #[macro_export]
 macro_rules! define_random_field_zip_types {
     () => {
@@ -262,16 +264,18 @@ macro_rules! define_random_field_zip_types {
     };
 }
 
-/// Implements the `ZipTypes` trait for a wrapper type and a specific const parameter.
+/// Implements the `ZipTypes` trait for a wrapper type and a specific const
+/// parameter.
 ///
 /// # Usage
-/// - `implement_random_field_zip_types!(N);`
-///   Implements `ZipTypes` for `RandomFieldZipTypes<N>`.
+/// - `implement_random_field_zip_types!(N);` Implements `ZipTypes` for
+///   `RandomFieldZipTypes<N>`.
 ///
-/// - `implement_random_field_zip_types!(TypeName, N);`
-///   Implements `ZipTypes` for `TypeName<N>`.
+/// - `implement_random_field_zip_types!(TypeName, N);` Implements `ZipTypes`
+///   for `TypeName<N>`.
 ///
-/// This macro reduces boilerplate and ensures consistent associated type definitions for each implementation.
+/// This macro reduces boilerplate and ensures consistent associated type
+/// definitions for each implementation.
 #[macro_export]
 macro_rules! implement_random_field_zip_types {
     ($N:expr) => {
@@ -280,10 +284,10 @@ macro_rules! implement_random_field_zip_types {
 
     ($name:ident, $N:expr) => {
         impl $crate::traits::ZipTypes for $name<$N> {
-            type N = $crate::field::Int<$N>;
-            type L = $crate::field::Int<{ 2 * $N }>;
             type K = $crate::field::Int<{ 4 * $N }>;
+            type L = $crate::field::Int<{ 2 * $N }>;
             type M = $crate::field::Int<{ 8 * $N }>;
+            type N = $crate::field::Int<$N>;
         }
     };
 }

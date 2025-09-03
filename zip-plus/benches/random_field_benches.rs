@@ -1,33 +1,44 @@
 #![allow(non_local_definitions)]
 #![allow(clippy::eq_op)]
 
-use std::hint::black_box;
 use ark_std::{
-    iter::{Product, Sum},
-    iterable::Iterable,
+    test_rng,
+    time::{Duration, Instant},
 };
 use criterion::{
-    criterion_group, criterion_main, AxisScale, BenchmarkId, Criterion,
-    PlotConfiguration,
+    AxisScale, BenchmarkGroup, BenchmarkId, Criterion, PlotConfiguration, criterion_group,
+    criterion_main, measurement::WallTime,
+};
+use crypto_bigint::Random;
+use itertools::Itertools;
+use std::{
+    hint::black_box,
+    iter::{Product, Sum},
 };
 use zip_plus::{
-    big_int,
-    field::{ConfigRef, RandomField},
-    field_config, random_field,
+    code::{DefaultLinearCodeSpec, LinearCode},
+    code_raa::RaaCode,
+    define_field_config, define_random_field_zip_types,
+    field::{RandomField, config::FieldConfigBase},
+    implement_random_field_zip_types,
+    pcs::{MerkleTree, structs::MultilinearZip},
+    pcs_transcript::PcsTranscript,
+    poly_z::mle::{DenseMultilinearExtension, MultilinearExtension},
+    traits::{FieldMap, ZipTypes},
+    transcript::KeccakTranscript,
 };
 
-fn bench_random_field(group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>) {
-    let config = field_config!(695962179703626800597079116051991347);
-    let field_config = ConfigRef::from(&config);
+define_field_config!(Fc, "695962179703626800597079116051991347");
 
-    let field_elem = random_field!(695962179703, 4, field_config);
+fn bench_random_field(group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>) {
+    let field_elem: RandomField<4, Fc<4>> = 695962179703_u64.map_to_field();
     group.bench_with_input(
         BenchmarkId::new("Multiply", "Random128BitFieldElement"),
         &field_elem,
         |b, unop_elem| {
             b.iter(|| {
                 for _ in 0..10000 {
-                    let _ = black_box(*unop_elem * *unop_elem);
+                    let _ = black_box(unop_elem.clone() * unop_elem.clone());
                 }
             });
         },
@@ -39,7 +50,7 @@ fn bench_random_field(group: &mut criterion::BenchmarkGroup<criterion::measureme
         |b, unop_elem| {
             b.iter(|| {
                 for _ in 0..10000 {
-                    let _ = black_box(*unop_elem + *unop_elem);
+                    let _ = black_box(unop_elem.clone() + unop_elem.clone());
                 }
             });
         },
@@ -51,7 +62,7 @@ fn bench_random_field(group: &mut criterion::BenchmarkGroup<criterion::measureme
         |b, unop_elem| {
             b.iter(|| {
                 for _ in 0..10000 {
-                    let _ = black_box(*unop_elem / *unop_elem);
+                    let _ = black_box(unop_elem.clone() / unop_elem.clone());
                 }
             });
         },
@@ -63,7 +74,7 @@ fn bench_random_field(group: &mut criterion::BenchmarkGroup<criterion::measureme
         |b, unop_elem| {
             b.iter(|| {
                 for _ in 0..10000 {
-                    let _ = black_box(-*unop_elem);
+                    let _ = black_box(-unop_elem.clone());
                 }
             });
         },

@@ -11,8 +11,8 @@ use ark_std::{
 #[cfg(feature = "parallel")]
 use rayon::iter::*;
 
-use super::{swap_bits, MultilinearExtension};
-use crate::traits::{ConfigReference, Field};
+use super::{MultilinearExtension, swap_bits};
+use crate::traits::Field;
 use crypto_primitives::Matrix;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,49 +21,47 @@ pub struct DenseMultilinearExtension<F: Field> {
     pub evaluations: Vec<F>,
     /// Number of variables
     pub num_vars: usize,
-    /// Field in which the MLE is operating
-    pub config: F::R,
 }
 
 impl<F: Field> DenseMultilinearExtension<F> {
-    pub fn from_evaluations_slice(num_vars: usize, evaluations: &[F], config: F::R) -> Self {
-        Self::from_evaluations_vec(num_vars, evaluations.to_vec(), config)
+    pub fn from_evaluations_slice(num_vars: usize, evaluations: &[F]) -> Self {
+        Self::from_evaluations_vec(num_vars, evaluations.to_vec())
     }
 
-    pub fn evaluate(&self, point: &[F], config: F::R) -> Option<F> {
+    pub fn evaluate(&self, point: &[F]) -> Option<F> {
         if point.len() == self.num_vars {
-            Some(self.fixed_variables(point, config)[0].clone())
+            Some(self.fixed_variables(point)[0].clone())
         } else {
             None
         }
     }
 
-    pub fn from_evaluations_vec(num_vars: usize, evaluations: Vec<F>, config: F::R) -> Self {
+    pub fn from_evaluations_vec(num_vars: usize, evaluations: Vec<F>) -> Self {
         // assert that the number of variables matches the size of evaluations
         assert!(
             evaluations.len() <= 1 << num_vars,
-            "The size of evaluations should not exceed 2^num_vars. \n eval len: {:?}. num vars: {num_vars}", evaluations.len()
+            "The size of evaluations should not exceed 2^num_vars. \n eval len: {:?}. num vars: {num_vars}",
+            evaluations.len()
         );
 
         if evaluations.len() != 1 << num_vars {
             let mut evaluations = evaluations;
-            evaluations.resize(1 << num_vars, F::new_unchecked(config, 0u32.into()));
+            evaluations.resize(1 << num_vars, F::zero());
             return Self {
                 num_vars,
                 evaluations,
-                config,
             };
         }
 
         Self {
             num_vars,
             evaluations,
-            config,
         }
     }
 
-    /// Returns the dense MLE from the given matrix, without modifying the original matrix.
-    pub fn from_matrix<M: Matrix<F>>(matrix: &M, config: F::R) -> Self {
+    /// Returns the dense MLE from the given matrix, without modifying the
+    /// original matrix.
+    pub fn from_matrix<M: Matrix<F>>(matrix: &M) -> Self {
         let n_vars: usize = (log2(matrix.num_rows()) + log2(matrix.num_cols())) as usize; // n_vars = s + s'
 
         // Matrices might need to get padded before turned into an MLE
@@ -80,11 +78,11 @@ impl<F: Field> DenseMultilinearExtension<F> {
         }
 
         // convert the dense vector into a mle
-        Self::from_slice(n_vars, &v, config)
+        Self::from_slice(n_vars, &v)
     }
 
     /// Takes n_vars and a dense slice and returns its dense MLE.
-    pub fn from_slice(n_vars: usize, v: &[F], config: F::R) -> Self {
+    pub fn from_slice(n_vars: usize, v: &[F]) -> Self {
         let v_padded: Vec<F> = if v.len() != (1 << n_vars) {
             // pad to 2^n_vars
             [
@@ -95,7 +93,7 @@ impl<F: Field> DenseMultilinearExtension<F> {
         } else {
             v.to_owned()
         };
-        Self::from_evaluations_vec(n_vars, v_padded, config)
+        Self::from_evaluations_vec(n_vars, v_padded)
     }
 
     pub fn relabel_in_place(&mut self, mut a: usize, mut b: usize, k: usize) {
@@ -118,7 +116,7 @@ impl<F: Field> DenseMultilinearExtension<F> {
 }
 
 impl<F: Field> MultilinearExtension<F> for DenseMultilinearExtension<F> {
-    fn fix_variables(&mut self, partial_point: &[F], _config: F::R) {
+    fn fix_variables(&mut self, partial_point: &[F]) {
         assert!(
             partial_point.len() <= self.num_vars,
             "too many partial points"
@@ -146,9 +144,9 @@ impl<F: Field> MultilinearExtension<F> for DenseMultilinearExtension<F> {
         self.num_vars = nv - dim;
     }
 
-    fn fixed_variables(&self, partial_point: &[F], config: F::R) -> Self {
+    fn fixed_variables(&self, partial_point: &[F]) -> Self {
         let mut res = self.clone();
-        res.fix_variables(partial_point, config);
+        res.fix_variables(partial_point);
         res
     }
 }
@@ -158,7 +156,6 @@ impl<F: Field> Zero for DenseMultilinearExtension<F> {
         Self {
             num_vars: 0,
             evaluations: vec![F::zero()],
-            config: F::R::NONE,
         }
     }
 
@@ -191,17 +188,13 @@ impl<F: Field> Add for &DenseMultilinearExtension<F> {
             self.num_vars, rhs.num_vars,
             "trying to add two dense MLEs with different numbers of variables"
         );
-        assert_eq!(
-            self.config, rhs.config,
-            "trying to add two dense MLEs in different fields"
-        );
 
         let result = cfg_iter!(self.evaluations)
             .zip(cfg_iter!(rhs.evaluations))
             .map(|(a, b)| a.clone() + b.clone())
             .collect();
 
-        Self::Output::from_evaluations_vec(self.num_vars, result, self.config)
+        Self::Output::from_evaluations_vec(self.num_vars, result)
     }
 }
 
@@ -225,10 +218,6 @@ impl<F: Field> AddAssign<&Self> for DenseMultilinearExtension<F> {
         assert_eq!(
             self.num_vars, other.num_vars,
             "trying to add two dense MLEs with different numbers of variables"
-        );
-        assert_eq!(
-            self.config, other.config,
-            "trying to add two dense MLEs in different fields"
         );
 
         cfg_iter_mut!(self.evaluations)
@@ -254,11 +243,6 @@ impl<F: Field> AddAssign<(F, &Self)> for DenseMultilinearExtension<F> {
         assert_eq!(
             self.num_vars, other.num_vars,
             "trying to add two dense MLEs with different numbers of variables"
-        );
-
-        assert_eq!(
-            self.config, other.config,
-            "trying to add two dense MLEs in different fields"
         );
 
         cfg_iter_mut!(self.evaluations)
@@ -301,16 +285,12 @@ impl<F: Field> Sub for &DenseMultilinearExtension<F> {
             self.num_vars, rhs.num_vars,
             "trying to subtract two dense MLEs with different numbers of variables"
         );
-        assert_eq!(
-            self.config, rhs.config,
-            "trying to add two dense MLEs in different fields"
-        );
         let result = cfg_iter!(self.evaluations)
             .zip(cfg_iter!(rhs.evaluations))
             .map(|(a, b)| a.clone() - b.clone())
             .collect();
 
-        Self::Output::from_evaluations_vec(self.num_vars, result, self.config)
+        Self::Output::from_evaluations_vec(self.num_vars, result)
     }
 }
 

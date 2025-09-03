@@ -59,7 +59,8 @@ impl<I: Integer> DenseMultilinearExtension<I> {
         }
     }
 
-    /// Returns the dense MLE from the given matrix, without modifying the original matrix.
+    /// Returns the dense MLE from the given matrix, without modifying the
+    /// original matrix.
     pub fn from_matrix<M: Matrix<I>>(matrix: &M) -> Self {
         let n_vars: usize = (log2(matrix.num_rows()) + log2(matrix.num_cols())) as usize; // n_vars = s + s'
 

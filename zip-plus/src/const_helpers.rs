@@ -69,6 +69,7 @@ impl<const N: usize> MulBuffer<N> {
 
 impl<const N: usize> Index<usize> for MulBuffer<N> {
     type Output = u64;
+
     #[inline(always)]
     fn index(&self, index: usize) -> &Self::Output {
         self.get(index)
@@ -209,6 +210,7 @@ impl<const N: usize> SerBuffer<N> {
 
 impl<const N: usize> Index<usize> for SerBuffer<N> {
     type Output = u8;
+
     #[inline(always)]
     fn index(&self, index: usize) -> &Self::Output {
         self.get(index)

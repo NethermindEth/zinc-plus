@@ -2,14 +2,14 @@ use ark_std::{fmt::Debug, marker::PhantomData, ops::AddAssign, vec::Vec};
 use num_traits::Zero;
 
 use crate::{
-    traits::{Field, FieldMap, Integer, Words, ZipTypes},
     code::{LinearCode, LinearCodeSpec},
     pcs::structs::ZipTranscript,
+    traits::{Field, FieldMap, Integer, Words, ZipTypes},
     utils::shuffle_seeded,
 };
 
-/// Implementation of a repeat-accumulate-accumulate (RAA) codes over the binary field,
-/// as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
+/// Implementation of a repeat-accumulate-accumulate (RAA) codes over the binary
+/// field, as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
 #[derive(Debug, Clone)]
 pub struct RaaCode<ZT: ZipTypes> {
     row_len: usize,
@@ -38,7 +38,11 @@ impl<ZT: ZipTypes> RaaCode<ZT> {
         // Taken from original Zip codes
 
         let num_vars = poly_size.ilog2() as usize;
-        let row_len = ((1 << num_vars) as u64).isqrt().next_power_of_two() as usize;
+        let row_len: usize = (1_u64 << num_vars)
+            .isqrt()
+            .next_power_of_two()
+            .try_into()
+            .expect("row_len overflow");
         let repetition_factor = spec.repetition_factor();
 
         let num_column_opening = spec.num_column_opening();
@@ -128,7 +132,7 @@ impl<ZT: ZipTypes> LinearCode<ZT> for RaaCode<ZT> {
         self.encode_inner(row)
     }
 
-    fn encode_f<F: Field>(&self, row: &[F], _field: F::R) -> Vec<F>
+    fn encode_f<F: Field>(&self, row: &[F]) -> Vec<F>
     where
         ZT::L: FieldMap<F, Output = F>,
     {
@@ -149,9 +153,9 @@ fn repeat<In, Out: for<'a> From<&'a In> + Clone>(
         .collect()
 }
 
-/// Perform an operation equivalent to multiplying the slice in-place by the accumulation matrix
-/// from the RAA code - a lower triangular matrix of the appropriate size, i.e. a matrix looking
-/// like this:
+/// Perform an operation equivalent to multiplying the slice in-place by the
+/// accumulation matrix from the RAA code - a lower triangular matrix of the
+/// appropriate size, i.e. a matrix looking like this:
 ///
 /// ```text
 /// 1 0 0 0
@@ -174,13 +178,13 @@ mod tests {
     use num_traits::Zero;
 
     use crate::{
+        code::{DefaultLinearCodeSpec, LinearCode},
+        code_raa::{RaaCode, accumulate, repeat},
         define_random_field_zip_types,
         field::Int,
         implement_random_field_zip_types,
-        traits::ZipTypes,
-        code::{DefaultLinearCodeSpec, LinearCode},
-        code_raa::{RaaCode, accumulate, repeat},
         pcs::tests::MockTranscript,
+        traits::ZipTypes,
         utils::shuffle_seeded,
     };
 

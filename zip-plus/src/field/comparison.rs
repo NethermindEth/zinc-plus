@@ -1,13 +1,8 @@
 use ark_ff::{One, Zero};
 
-use crate::{
-    field::{
-        RandomField,
-    },
-    traits::Field,
-};
+use crate::field::{BigInt, RandomField, config::FieldConfig};
 
-impl<const N: usize> PartialEq for RandomField<'_, N> {
+impl<const N: usize, FC: FieldConfig<BigInt<N>>> PartialEq for RandomField<N, FC> {
     fn eq(&self, other: &Self) -> bool {
         if self.is_one() & other.is_one() {
             return true;
@@ -16,14 +11,8 @@ impl<const N: usize> PartialEq for RandomField<'_, N> {
             return true;
         }
 
-        match (self.config, other.config) {
-            (Some(_), None) | (None, Some(_)) => false,
-            (None, None) => self.value() == other.value(),
-            (Some(_), Some(_)) => {
-                self.value() == other.value() && self.config_ptr() == other.config_ptr()
-            }
-        }
+        self.value == other.value
     }
 }
 
-impl<const N: usize> Eq for RandomField<'_, N> {} // Eq requires PartialEq and ensures reflexivity.
+impl<const N: usize, FC: FieldConfig<BigInt<N>>> Eq for RandomField<N, FC> {} // Eq requires PartialEq and ensures reflexivity.
