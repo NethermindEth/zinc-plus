@@ -35,35 +35,6 @@ use crate::{
 };
 
 impl<const N: usize, FC: FieldConfig<BigInt<N>>> RandomField<N, FC> {
-    /// Convert from `BigInteger` to `RandomField`
-    ///
-    /// If `BigInteger` is greater then field modulus return `None`
-    pub fn from_bigint(value: BigInt<N>) -> Option<RandomField<N, FC>> {
-        if value >= FC::modulus() {
-            None
-        } else {
-            let mut r = value;
-            FC::mul_assign(&mut r, &FC::r_squared());
-
-            Some(RandomField::new_unchecked(r))
-        }
-    }
-
-    pub fn from_i64(value: i64) -> Option<RandomField<N, FC>> {
-        if BigInt::from(value.unsigned_abs()) >= FC::modulus() {
-            None
-        } else {
-            let mut r = value.unsigned_abs().into();
-            FC::mul_assign(&mut r, &FC::r_squared());
-
-            let mut elem = RandomField::new_unchecked(r);
-            if value.is_negative() {
-                elem = -elem;
-            }
-            Some(elem)
-        }
-    }
-
     #[inline]
     pub fn into_bigint(self) -> BigInt<N> {
         self.value.demontgomery(&FC::modulus(), FC::inv())
@@ -81,28 +52,6 @@ impl<const N: usize, FC: FieldConfig<BigInt<N>>> Field for RandomField<N, FC> {
         Self {
             value,
             phantom_data: PhantomData,
-        }
-    }
-
-    fn rand<R: ark_std::rand::Rng + ?Sized>(rng: &mut R) -> Self {
-        loop {
-            let mut value = BigInt::rand(rng);
-            let modulus = FC::modulus();
-            let shave_bits = 64 * N - modulus.num_bits() as usize;
-            // Mask away the unused bits at the beginning.
-            assert!(shave_bits <= 64);
-            let mask = if shave_bits == 64 {
-                0
-            } else {
-                u64::MAX >> shave_bits
-            };
-
-            let val = value.last_mut();
-            *val &= mask;
-
-            if value < modulus {
-                return value.map_to_field();
-            }
         }
     }
 
@@ -127,24 +76,26 @@ impl<const N: usize, FC: FieldConfig<BigInt<N>>> Field for RandomField<N, FC> {
     }
 }
 
-impl<const N: usize, FC: FieldConfig<BigInt<N>>> UniformRand for RandomField<N, FC> {
-    fn rand<R: ark_std::rand::Rng + ?Sized>(rng: &mut R) -> Self {
-        let value = BigInt::rand(rng);
-
-        Self {
-            value,
-            phantom_data: PhantomData,
-        }
-    }
-}
-
 impl<const N: usize, FC: FieldConfig<BigInt<N>>> Random for RandomField<N, FC> {
     fn random(rng: &mut (impl ark_std::rand::RngCore + ?Sized)) -> Self {
-        let value = BigInt::rand(rng);
+        loop {
+            let mut value = BigInt::rand(rng);
+            let modulus = FC::modulus();
+            let shave_bits = 64 * N - modulus.num_bits() as usize;
+            // Mask away the unused bits at the beginning.
+            assert!(shave_bits <= 64);
+            let mask = if shave_bits == 64 {
+                0
+            } else {
+                u64::MAX >> shave_bits
+            };
 
-        Self {
-            value,
-            phantom_data: PhantomData,
+            let val = value.last_mut();
+            *val &= mask;
+
+            if value < modulus {
+                return value.map_to_field();
+            }
         }
     }
 }
@@ -197,16 +148,6 @@ impl_from_uint!(u8);
 impl<const N: usize, FC: FieldConfig<BigInt<N>>> From<bool> for RandomField<N, FC> {
     fn from(value: bool) -> Self {
         value.map_to_field()
-    }
-}
-
-impl<const N: usize, FC: FieldConfig<BigInt<N>>> FromBytes for RandomField<N, FC> {
-    fn from_bytes_le(bytes: &[u8]) -> Option<Self> {
-        Self::from_bigint(BigInt::<N>::from_bytes_le(bytes)?)
-    }
-
-    fn from_bytes_be(bytes: &[u8]) -> Option<Self> {
-        Self::from_bigint(BigInt::<N>::from_bytes_be(bytes)?)
     }
 }
 

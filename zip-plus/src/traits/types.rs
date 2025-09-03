@@ -60,9 +60,6 @@ pub trait Field:
     /// Creates a new field element from config and value, without checking.
     fn new_unchecked(value: Self::B) -> Self;
 
-    /// Generates a random field element with the given config.
-    fn rand<R: ark_std::rand::Rng + ?Sized>(rng: &mut R) -> Self;
-
     /// Returns a reference to the integer value.
     fn value(&self) -> &Self::B;
 

@@ -4,7 +4,6 @@ use crate::{
 };
 use ark_std::{Zero, vec::Vec};
 
-// Implementation of FieldMap for signed integers
 macro_rules! impl_field_map_for_int {
     ($t:ty) => {
         impl<F: Field> FieldMap<F> for $t {
@@ -178,85 +177,6 @@ mod tests {
     #[test]
     fn converts_true_to_one() {
         test_from::<2, FcSmall<2>, bool>(true, "1");
-    }
-
-    #[test]
-    fn converts_from_bytes_le_with_config_valid() {
-        let bytes = [0x05, 0, 0, 0, 0, 0, 0, 0];
-        let expected = big_int!(5);
-
-        let result = <RandomField<1, Fc23<1>> as FromBytes>::from_bytes_le(&bytes).unwrap();
-        assert_eq!(result.into_bigint(), expected);
-    }
-
-    #[test]
-    fn converts_from_bytes_be_with_config_valid() {
-        let bytes = [
-            0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00,
-        ]; // Value: 5 (big-endian)
-        let expected = BigInt::<32>::from_bytes_be(&bytes).unwrap();
-
-        let result = RandomField::<32, FcBig<32>>::from_bytes_be(&bytes);
-        assert_eq!(result.map(|x| x.into_bigint()), Some(expected));
-    }
-
-    #[test]
-    fn converts_from_bytes_with_config_zero() {
-        let bytes = [0x00; 8]; // All zeros
-        let expected = RandomField::<1, Fc23<1>>::zero();
-
-        let result = RandomField::<1, _>::from_bytes_le(&bytes);
-        assert_eq!(result, Some(expected.clone()));
-        let result = RandomField::<1, _>::from_bytes_be(&bytes);
-        assert_eq!(result, Some(expected.clone()));
-    }
-
-    #[test]
-    fn converts_from_bytes_le_with_config_out_of_range() {
-        let bytes = [0x65, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]; // Value: 101 (modulus is 23)
-        let result = RandomField::<1, Fc23<1>>::from_bytes_le(&bytes);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn converts_from_bytes_be_with_config_out_of_range() {
-        define_field_config!(Fc37129241769965749, "37129241769965749");
-        let bytes = [0x65, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]; // Value: 101
-        let result = RandomField::<32, Fc37129241769965749<32>>::from_bytes_be(&bytes);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn converts_from_bytes_le_with_config_exact_modulus() {
-        let bytes = [0x17, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]; // Value: 23 (modulus)
-        let result = RandomField::<1, Fc23<1>>::from_bytes_le(&bytes);
-        assert!(result.is_none()); // Must be strictly less than modulus
-    }
-
-    #[test]
-    fn converts_from_bytes_be_with_config_exact_modulus() {
-        let bytes = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x17]; // Value: 23 (big-endian)
-        let result = RandomField::<1, Fc23<1>>::from_bytes_be(&bytes);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn converts_from_bytes_le_with_config_leading_zeros() {
-        let bytes = [0b0000_0001]; // Value: 1 with leading zeros
-        let expected = BigInt::<1>::from_bytes_le(&bytes).unwrap().map_to_field();
-
-        let result = RandomField::<1, Fc23<1>>::from_bytes_le(&bytes);
-        assert_eq!(result, Some(expected));
-    }
-
-    #[test]
-    fn converts_from_bytes_be_with_config_leading_zeros() {
-        let bytes = [0x01]; //1 with leading zeros (big-endian);
-
-        let result = RandomField::<1, Fc23<1>>::from_bytes_be(&bytes).unwrap();
-        assert_eq!(result.into_bigint(), BigInt::one());
     }
 
     macro_rules! test_signed_type_full_range {

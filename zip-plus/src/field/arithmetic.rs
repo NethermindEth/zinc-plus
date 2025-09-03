@@ -5,6 +5,7 @@ use ark_std::{
 };
 
 use crate::field::{BigInt, RandomField, config::FieldConfig};
+use crate::traits::FieldMap;
 
 macro_rules! impl_ops {
     (
@@ -63,10 +64,10 @@ macro_rules! impl_ops {
     };
 }
 
-impl_ops!(impl('cfg, const N: usize, FC: FieldConfig<BigInt<N>>) for RandomField<N, FC>, Add, add, AddAssign, add_assign);
-impl_ops!(impl('cfg, const N: usize, FC: FieldConfig<BigInt<N>>) for RandomField<N, FC>, Sub, sub, SubAssign, sub_assign);
-impl_ops!(impl('cfg, const N: usize, FC: FieldConfig<BigInt<N>>) for RandomField<N, FC>, Mul, mul, MulAssign, mul_assign);
-impl_ops!(impl('cfg, const N: usize, FC: FieldConfig<BigInt<N>>) for RandomField<N, FC>, Div, div, DivAssign, div_assign);
+impl_ops!(impl(const N: usize, FC: FieldConfig<BigInt<N>>) for RandomField<N, FC>, Add, add, AddAssign, add_assign);
+impl_ops!(impl(const N: usize, FC: FieldConfig<BigInt<N>>) for RandomField<N, FC>, Sub, sub, SubAssign, sub_assign);
+impl_ops!(impl(const N: usize, FC: FieldConfig<BigInt<N>>) for RandomField<N, FC>, Mul, mul, MulAssign, mul_assign);
+impl_ops!(impl(const N: usize, FC: FieldConfig<BigInt<N>>) for RandomField<N, FC>, Div, div, DivAssign, div_assign);
 
 impl<const N: usize, FC: FieldConfig<BigInt<N>>> Add<u32> for RandomField<N, FC> {
     type Output = Self;
@@ -85,7 +86,8 @@ impl<const N: usize, FC: FieldConfig<BigInt<N>>> AddAssign<&Self> for RandomFiel
 
 impl<const N: usize, FC: FieldConfig<BigInt<N>>> AddAssign<u32> for RandomField<N, FC> {
     fn add_assign(&mut self, rhs: u32) {
-        FC::add_assign(&mut self.value, &rhs.into());
+        let rhs_f: RandomField<N, FC> = rhs.map_to_field();
+        FC::add_assign(&mut self.value, &rhs_f.value);
     }
 }
 
@@ -202,15 +204,6 @@ mod test {
 
         let sum = lhs + rhs;
         assert_eq!(sum.into_bigint(), BigInt::zero());
-    }
-
-    #[test]
-    fn test_add_two_ones() {
-        let lhs: RandomField<1, Fc23<1>> = RandomField::one();
-        let rhs = RandomField::one();
-        let expected = RandomField::<1, Fc23<1>>::from_bigint(BigInt::from(2_u32)).unwrap();
-
-        assert_eq!(lhs + rhs, expected);
     }
 
     #[test]

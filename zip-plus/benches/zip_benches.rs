@@ -141,6 +141,7 @@ fn open<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
     let (data, _) = BenchZip::commit::<RandomField<FIELD_LIMBS, FC>>(&params, &poly).unwrap();
     let point = vec![1i64; P];
+    let field_point = point.map_to_field();
 
     group.bench_function(
         format!("Open: RandomField<{FIELD_LIMBS}>, poly_size = 2^{P}(Int limbs = {INT_LIMBS}), ZipSpec{spec}, modulus={}", FC::modulus()),
@@ -154,7 +155,7 @@ fn open<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
                         &params,
                         &poly,
                         &data,
-                        &point.map_to_field(),
+                        &field_point,
                         &mut transcript,
                     )
                     .expect("Failed to make opening");
