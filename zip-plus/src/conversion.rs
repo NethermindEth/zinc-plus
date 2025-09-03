@@ -434,19 +434,6 @@ mod bigint_field_map_tests {
     }
 
     #[test]
-    fn test_bigint_reference() {
-        let value = big_int!(12345, 2);
-        let result: RandomField<2, FC<2>> = value.map_to_field();
-        let direct_result: RandomField<2, FC<2>> = value.map_to_field();
-
-        assert_eq!(
-            result.into_bigint(),
-            direct_result.into_bigint(),
-            "Reference implementation should match direct implementation"
-        );
-    }
-
-    #[test]
     fn test_bigint_max_value() {
         // Create a BigInt with all bits set to 1
         let max_value = BigInt::from([u64::MAX, u64::MAX]);
