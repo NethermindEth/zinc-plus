@@ -153,7 +153,6 @@ mod test {
     use crate::{
         field::Int,
         pcs::utils::AsWords,
-        traits::Integer,
         utils::{expand, inner_product},
     };
 

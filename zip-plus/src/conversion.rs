@@ -116,12 +116,12 @@ impl<F: Field, T: FieldMap<F>> FieldMap<F> for &[T] {
 #[cfg(test)]
 mod tests {
     use crate::{
-        big_int, define_field_config,
+        define_field_config,
         field::{BigInt, FieldConfig, RandomField},
-        traits::{FieldMap, FromBytes},
+        traits::FieldMap,
     };
     use ark_std::{fmt::Debug, format, str::FromStr};
-    use num_traits::{ConstZero, Zero};
+    use num_traits::ConstZero;
 
     define_field_config!(Fc23, "23");
     define_field_config!(FcSmall, "243043087159742188419721163456177567");

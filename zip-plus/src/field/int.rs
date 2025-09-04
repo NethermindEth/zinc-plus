@@ -251,6 +251,7 @@ macro_rules! define_random_field_zip_types {
     };
 
     ($name:ident) => {
+        #[allow(dead_code)]
         #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct $name<const N: usize>();
     };

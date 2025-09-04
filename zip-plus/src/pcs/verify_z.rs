@@ -184,16 +184,13 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
 
 #[cfg(test)]
 mod tests {
-    use ark_std::{boxed::Box, vec, vec::Vec};
-
+    use ark_std::{vec, vec::Vec, UniformRand};
+    use crypto_bigint::Random;
     use super::*;
     use crate::{
         code::DefaultLinearCodeSpec,
         code_raa::RaaCode,
-        field::{
-            BigInt, BigInteger128, BigInteger256, Int, RandomField, config::ConstFieldConfigBase1,
-        },
-        pcs,
+        field::{BigInt, BigInteger256, Int, RandomField, config::ConstFieldConfigBase1},
         pcs::{
             structs::{MultilinearZip, MultilinearZipParams},
             tests::{MockTranscript, RandomFieldZipTypes},
@@ -201,6 +198,7 @@ mod tests {
         poly_z::mle::DenseMultilinearExtension,
         traits::{Integer, Words, ZipTypes},
     };
+    use crate::transcript::KeccakTranscript;
 
     const INT_LIMBS: usize = 1;
     const FIELD_LIMBS: usize = 4;
@@ -381,6 +379,55 @@ mod tests {
             Ok(()) => panic!("verification unexpectedly succeeded"),
             Err(e) => panic!("unexpected error: {e:?}"),
         }
+    }
+
+    #[test]
+    fn verification_fails_if_proximity_check_is_invalid_2() {
+        fn evaluate_in_field(evaluations: &[Int<INT_LIMBS>], point: &[F]) -> F {
+            let num_vars = point.len();
+            assert_eq!(evaluations.len(), 1 << num_vars);
+            let mut current_evals: Vec<F> = evaluations.map_to_field();
+            for p in point.iter().take(num_vars) {
+                let one_minus_p_i = FieldMap::<F>::map_to_field(&1i32) - p;
+                let mut next_evals = Vec::with_capacity(current_evals.len() / 2);
+                for j in (0..current_evals.len()).step_by(2) {
+                    let val = current_evals[j].clone() * one_minus_p_i.clone()
+                        + current_evals[j + 1].clone() * p;
+                    next_evals.push(val);
+                }
+                current_evals = next_evals;
+            }
+            current_evals[0].clone()
+        }
+
+        let mut rng = ark_std::test_rng();
+        let n = 3;
+        let poly_size = 1 << n;
+        let mut keccak_transcript = KeccakTranscript::new();
+        let linear_code: LC = LC::new(&DefaultLinearCodeSpec, poly_size, &mut keccak_transcript);
+        let param = TestZip::setup(poly_size, linear_code);
+        let evaluations: Vec<_> = (0..poly_size)
+            .map(|_| Int::<INT_LIMBS>::from(i8::rand(&mut rng)))
+            .collect();
+        let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations);
+        let point_int: Vec<_> = (0..n).map(|_| Int::<INT_LIMBS>::random(&mut rng)).collect();
+        let point_f = point_int.map_to_field();
+
+        let (mut data, comm) = TestZip::commit(&param, &mle).unwrap();
+        if !data.rows.is_empty() {
+            data.rows[0] += Int::<{ 4 * INT_LIMBS }>::from(1);
+        }
+
+        let mut prover_transcript = PcsTranscript::new();
+        TestZip::open(&param, &mle, &data, &point_f, &mut prover_transcript).unwrap();
+        let proof = prover_transcript.into_proof();
+
+        let mut verifier_transcript = PcsTranscript::from_proof(&proof);
+        let eval = evaluate_in_field(&mle.evaluations, &point_f);
+        let verification_result =
+            TestZip::verify(&param, &comm, &point_f, &eval, &mut verifier_transcript);
+
+        assert!(verification_result.is_err());
     }
 
     #[test]
