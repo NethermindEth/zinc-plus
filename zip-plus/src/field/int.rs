@@ -1,12 +1,3 @@
-use ark_std::{
-    cmp::Ordering,
-    iter::Sum,
-    ops::{Add, AddAssign, Mul, Neg, RemAssign, Sub},
-    rand::RngCore,
-};
-use crypto_bigint::{Int as CryptoInt, NonZero, Random, subtle::{Choice, ConstantTimeEq}, Word};
-use num_traits::{ConstOne, ConstZero, One, Zero};
-use p3_field::Packable;
 use crate::{
     field::{
         biginteger::{BigInt, Words},
@@ -15,6 +6,18 @@ use crate::{
     pcs::utils::AsWords,
     traits::Integer,
 };
+use ark_std::{
+    cmp::Ordering,
+    iter::Sum,
+    ops::{Add, AddAssign, Mul, Neg, RemAssign, Sub},
+    rand::RngCore,
+};
+use crypto_bigint::{
+    Int as CryptoInt, NonZero, Random, Word,
+    subtle::{Choice, ConstantTimeEq},
+};
+use num_traits::{ConstOne, ConstZero, One, Zero};
+use p3_field::Packable;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(transparent)]

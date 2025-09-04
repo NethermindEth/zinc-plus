@@ -1,8 +1,7 @@
 #![allow(non_snake_case)]
 
-use ark_std::io::ErrorKind;
 use ark_std::{
-    io::{Cursor, Read, Write},
+    io::{Cursor, ErrorKind, Read, Write},
     marker::PhantomData,
     vec,
     vec::Vec,
@@ -11,21 +10,24 @@ use p3_matrix::Dimensions;
 
 use super::{Error, pcs::utils::MerkleProof};
 use crate::{
+    pcs::utils::MtHash,
     poly::alloc::string::ToString,
     traits::{BigInteger, Field, FromBytes, Integer, PrimitiveConversion, Words},
     transcript::KeccakTranscript,
-    pcs::utils::MtHash,
 };
 
 /// A transcript for Polynomial Commitment Scheme (PCS) operations.
-/// Manages both Fiat-Shamir transformations and serialization/deserialization of proof data.
+/// Manages both Fiat-Shamir transformations and serialization/deserialization
+/// of proof data.
 #[derive(Default, Clone)]
 pub struct PcsTranscript<F: Field> {
-    /// Handles Fiat-Shamir transformations for non-interactive zero-knowledge proofs.
-    /// Used to absorb field elements and generate cryptographic challenges.
+    /// Handles Fiat-Shamir transformations for non-interactive zero-knowledge
+    /// proofs. Used to absorb field elements and generate cryptographic
+    /// challenges.
     pub fs_transcript: KeccakTranscript,
 
-    /// Manages serialization and deserialization of proof data as a byte stream.
+    /// Manages serialization and deserialization of proof data as a byte
+    /// stream.
     pub stream: Cursor<Vec<u8>>,
 
     _phantom: PhantomData<F>,
@@ -51,7 +53,8 @@ impl<F: Field> PcsTranscript<F> {
     }
 
     /// Absorbs a field element into the Fiat-Shamir transcript.
-    /// This is used to incorporate public values into the transcript for challenge generation.
+    /// This is used to incorporate public values into the transcript for
+    /// challenge generation.
     pub fn common_field_element(&mut self, fe: &F) {
         self.fs_transcript.absorb_random_field(fe);
     }
@@ -67,7 +70,8 @@ impl<F: Field> PcsTranscript<F> {
     }
 
     /// Writes a cryptographic commitment to the proof stream.
-    /// Used during proof generation to store commitments for later verification.
+    /// Used during proof generation to store commitments for later
+    /// verification.
     pub fn write_commitment(&mut self, comm: &MtHash) -> Result<(), Error> {
         self.stream
             .write_all(&comm.0)
@@ -106,8 +110,9 @@ impl<F: Field> PcsTranscript<F> {
         Ok(fe)
     }
 
-    /// Writes a field element to the proof stream and absorbs it into the transcript.
-    /// Used during proof generation to store field elements for later verification.
+    /// Writes a field element to the proof stream and absorbs it into the
+    /// transcript. Used during proof generation to store field elements for
+    /// later verification.
     pub fn write_field_element(&mut self, fe: &F) -> Result<(), Error> {
         self.common_field_element(fe);
         let repr = fe.value().clone().to_bytes_be();
@@ -251,10 +256,11 @@ impl<F: Field> PcsTranscript<F> {
 
 #[cfg(test)]
 mod tests {
-    use crate::define_field_config;
-    use crate::field::RandomField;
-    use crate::pcs_transcript::PcsTranscript;
-    use crate::pcs_transcript::MtHash;
+    use crate::{
+        define_field_config,
+        field::RandomField,
+        pcs_transcript::{MtHash, PcsTranscript},
+    };
 
     define_field_config!(Fc, "57316695564490278656402085503");
     const N: usize = 4;
@@ -303,7 +309,6 @@ mod tests {
             );
         }};
     }
-
 
     #[test]
     fn test_pcs_transcript_read_write() {

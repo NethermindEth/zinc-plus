@@ -4,8 +4,10 @@ use ark_std::{
     ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
-use crate::field::{BigInt, RandomField, config::FieldConfig};
-use crate::traits::FieldMap;
+use crate::{
+    field::{BigInt, RandomField, config::FieldConfig},
+    traits::FieldMap,
+};
 
 macro_rules! impl_ops {
     (

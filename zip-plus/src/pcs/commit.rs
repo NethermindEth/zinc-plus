@@ -10,42 +10,57 @@ use crate::{
     code::LinearCode,
     pcs::structs::MultilinearZipParams,
     poly_z::mle::DenseMultilinearExtension,
-    traits::{ZipTypes},
+    traits::ZipTypes,
     utils::{div_ceil, num_threads, parallelize_iter},
 };
 
 impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
-    /// Creates a commitment to a multilinear polynomial using the ZIP PCS scheme.
+    /// Creates a commitment to a multilinear polynomial using the ZIP PCS
+    /// scheme.
     ///
-    /// This function implements the commitment phase of the ZIP polynomial commitment scheme.
-    /// It encodes the polynomial's evaluations using a linear error-correcting code and
-    /// then creates Merkle tree commitments to the encoded rows.
+    /// This function implements the commitment phase of the ZIP polynomial
+    /// commitment scheme. It encodes the polynomial's evaluations using a
+    /// linear error-correcting code and then creates Merkle tree
+    /// commitments to the encoded rows.
     ///
     /// # Algorithm
-    /// 1.  Validates that the polynomial's number of variables matches the parameters.
-    /// 2.  Arranges the polynomial's evaluations into a matrix with `pp.num_rows` rows.
-    /// 3.  Encodes each row using the specified linear code, expanding its length from `row_len` to `codeword_len`.
-    /// 4.  Constructs a Merkle tree for each encoded row to produce a root hash.
-    /// 5.  Returns the full commitment data (for the prover) and a compact commitment (for the verifier).
+    /// 1. Validates that the polynomial's number of variables matches the
+    ///    parameters.
+    /// 2. Arranges the polynomial's evaluations into a matrix with
+    ///    `pp.num_rows` rows.
+    /// 3. Encodes each row using the specified linear code, expanding its
+    ///    length from `row_len` to `codeword_len`.
+    /// 4. Constructs a Merkle tree for each encoded row to produce a root hash.
+    /// 5. Returns the full commitment data (for the prover) and a compact
+    ///    commitment (for the verifier).
     ///
     /// # Type Parameters
-    /// - `F`: A generic [`Field`] type used for validation purposes, though not for the commitment itself, which operates on integers.
+    /// - `F`: A generic [`Field`] type used for validation purposes, though not
+    ///   for the commitment itself, which operates on integers.
     ///
     /// # Parameters
-    /// - `pp`: Public parameters (`MultilinearZipParams`) containing the configuration for the commitment scheme.
-    /// - `poly`: The multilinear polynomial (`DenseMultilinearExtension`) to be committed to.
+    /// - `pp`: Public parameters (`MultilinearZipParams`) containing the
+    ///   configuration for the commitment scheme.
+    /// - `poly`: The multilinear polynomial (`DenseMultilinearExtension`) to be
+    ///   committed to.
     ///
     /// # Returns
     /// A `Result` containing a tuple of:
-    /// - `MultilinearZipData`: Full data including encoded rows and Merkle trees, kept by the prover for the opening phase.
-    /// - `MultilinearZipCommitment`: The compact commitment, consisting of only the Merkle roots, to be sent to the verifier.
+    /// - `MultilinearZipData`: Full data including encoded rows and Merkle
+    ///   trees, kept by the prover for the opening phase.
+    /// - `MultilinearZipCommitment`: The compact commitment, consisting of only
+    ///   the Merkle roots, to be sent to the verifier.
     ///
     /// # Errors
-    /// - Returns `Error::InvalidPcsParam` if the polynomial has more variables than the parameters support.
+    /// - Returns `Error::InvalidPcsParam` if the polynomial has more variables
+    ///   than the parameters support.
     ///
     /// # Panics
-    /// - Panics if the number of polynomial evaluations does not perfectly match the expected matrix size (`pp.num_rows * pp.linear_code.row_len()`).
-    /// - Panics if the number of generated Merkle trees does not match `pp.num_rows`, indicating an internal logic error.
+    /// - Panics if the number of polynomial evaluations does not perfectly
+    ///   match the expected matrix size (`pp.num_rows *
+    ///   pp.linear_code.row_len()`).
+    /// - Panics if the number of generated Merkle trees does not match
+    ///   `pp.num_rows`, indicating an internal logic error.
     pub fn commit(
         pp: &MultilinearZipParams<ZT, LC>,
         poly: &DenseMultilinearExtension<ZT::N>,
@@ -77,18 +92,19 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
 
     /// Creates a commitment without constructing Merkle trees.
     ///
-    /// This function performs the encoding step of the commitment phase but deliberately
-    /// skips the computationally intensive step of building Merkle trees. It is intended
-    /// **for testing and benchmarking purposes only**, where the full commitment
-    /// structure is not required.
+    /// This function performs the encoding step of the commitment phase but
+    /// deliberately skips the computationally intensive step of building
+    /// Merkle trees. It is intended **for testing and benchmarking purposes
+    /// only**, where the full commitment structure is not required.
     ///
     /// # Parameters
     /// - `pp`: Public parameters (`MultilinearZipParams`).
     /// - `poly`: The multilinear polynomial to commit to.
     ///
     /// # Returns
-    /// A `Result` containing `MultilinearZipData` with the encoded rows but empty Merkle trees,
-    /// and a `MultilinearZipCommitment` with an empty vector of roots.
+    /// A `Result` containing `MultilinearZipData` with the encoded rows but
+    /// empty Merkle trees, and a `MultilinearZipCommitment` with an empty
+    /// vector of roots.
     #[allow(dead_code)]
     pub fn commit_no_merkle(
         pp: &MultilinearZipParams<ZT, LC>,
@@ -106,35 +122,37 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
 
     /// Commits to a batch of multilinear polynomials.
     ///
-    /// This function iterates through a slice of polynomials and calls [`commit`] on each one,
-    /// collecting the results into a vector.
+    /// This function iterates through a slice of polynomials and calls
+    /// [`commit`] on each one, collecting the results into a vector.
     ///
     /// # Parameters
-    /// - `pp`: Public parameters (`MultilinearZipParams`) shared across all commitments.
-    /// - `polys`: A slice of `DenseMultilinearExtension` polynomials to commit to.
+    /// - `pp`: Public parameters (`MultilinearZipParams`) shared across all
+    ///   commitments.
+    /// - `polys`: A slice of `DenseMultilinearExtension` polynomials to commit
+    ///   to.
     ///
     /// # Returns
-    /// A `Result` containing a `Vec` of commitment tuples, where each tuple corresponds
-    /// to a polynomial in the input slice.
+    /// A `Result` containing a `Vec` of commitment tuples, where each tuple
+    /// corresponds to a polynomial in the input slice.
     #[allow(clippy::type_complexity)]
     pub fn batch_commit(
         pp: &MultilinearZipParams<ZT, LC>,
         polys: &[DenseMultilinearExtension<ZT::N>],
     ) -> Result<Vec<(MultilinearZipData<ZT::K>, MultilinearZipCommitment)>, Error> {
-        polys
-            .iter()
-            .map(|poly| Self::commit(pp, poly))
-            .collect()
+        polys.iter().map(|poly| Self::commit(pp, poly)).collect()
     }
 
-    /// Encodes the evaluations of a polynomial by arranging them into rows and applying a linear code.
+    /// Encodes the evaluations of a polynomial by arranging them into rows and
+    /// applying a linear code.
     ///
-    /// This function treats the polynomial's flat evaluation vector as a matrix with `pp.num_rows`
-    /// and encodes each row individually. The resulting encoded rows are concatenated into a
-    /// single flat vector. This operation can be parallelized if the `parallel` feature is enabled.
+    /// This function treats the polynomial's flat evaluation vector as a matrix
+    /// with `pp.num_rows` and encodes each row individually. The resulting
+    /// encoded rows are concatenated into a single flat vector. This
+    /// operation can be parallelized if the `parallel` feature is enabled.
     ///
     /// # Parameters
-    /// - `pp`: Public parameters containing matrix dimensions and the linear code.
+    /// - `pp`: Public parameters containing matrix dimensions and the linear
+    ///   code.
     /// - `codeword_len`: The length of an encoded row.
     /// - `row_len`: The length of a row before encoding.
     /// - `poly`: The polynomial whose evaluations are to be encoded.
@@ -180,12 +198,23 @@ mod tests {
     use ark_std::{UniformRand, mem::size_of, slice::from_ref, vec, vec::Vec};
     use crypto_bigint::Random;
 
-    use crate::{field::{BigInt, Int, RandomField}, poly_z::mle::DenseMultilinearExtension, traits::{FieldMap, ZipTypes}, transcript::KeccakTranscript, code::{DefaultLinearCodeSpec, LinearCode}, code_raa::RaaCode, pcs::{
-        MerkleTree,
-        structs::{MultilinearZip, MultilinearZipParams},
-        tests::{MockTranscript, RandomFieldZipTypes},
-        utils::MtHash,
-    }, pcs_transcript::PcsTranscript, utils::div_ceil, define_field_config};
+    use crate::{
+        code::{DefaultLinearCodeSpec, LinearCode},
+        code_raa::RaaCode,
+        define_field_config,
+        field::{BigInt, Int, RandomField},
+        pcs::{
+            MerkleTree,
+            structs::{MultilinearZip, MultilinearZipParams},
+            tests::{MockTranscript, RandomFieldZipTypes},
+            utils::MtHash,
+        },
+        pcs_transcript::PcsTranscript,
+        poly_z::mle::DenseMultilinearExtension,
+        traits::{FieldMap, ZipTypes},
+        transcript::KeccakTranscript,
+        utils::div_ceil,
+    };
 
     const INT_LIMBS: usize = 1;
     const FIELD_LIMBS: usize = 4;
@@ -336,7 +365,8 @@ mod tests {
         }
     }
 
-    /// Verifies that corrupting the encoded data after commitment results in a different Merkle root.
+    /// Verifies that corrupting the encoded data after commitment results in a
+    /// different Merkle root.
     #[test]
     fn corrupted_encoding_changes_merkle_root() {
         let (pp, poly) = setup_test_params(3);
@@ -407,8 +437,7 @@ mod tests {
             .into_par_iter()
             .map(|_| {
                 let mut transcript = MockTranscript::default();
-                let code =
-                    LC::new(&DefaultLinearCodeSpec, poly_size, &mut transcript);
+                let code = LC::new(&DefaultLinearCodeSpec, poly_size, &mut transcript);
                 let pp = MultilinearZipParams::new(num_vars, 8, code);
 
                 MultilinearZip::<ZT, _>::encode_rows(
@@ -571,10 +600,7 @@ mod tests {
 
     #[test]
     fn verifier_rejects_commitment_with_bad_proximity() {
-        fn evaluate_in_field(
-            evaluations: &[Int<INT_LIMBS>],
-            point: &[F],
-        ) -> F {
+        fn evaluate_in_field(evaluations: &[Int<INT_LIMBS>], point: &[F]) -> F {
             let num_vars = point.len();
             assert_eq!(evaluations.len(), 1 << num_vars);
             let mut current_evals: Vec<F> = evaluations.map_to_field();
@@ -582,7 +608,8 @@ mod tests {
                 let one_minus_p_i = FieldMap::<F>::map_to_field(&1i32) - p;
                 let mut next_evals = Vec::with_capacity(current_evals.len() / 2);
                 for j in (0..current_evals.len()).step_by(2) {
-                    let val = current_evals[j].clone() * one_minus_p_i.clone() + current_evals[j + 1].clone() * p;
+                    let val = current_evals[j].clone() * one_minus_p_i.clone()
+                        + current_evals[j + 1].clone() * p;
                     next_evals.push(val);
                 }
                 current_evals = next_evals;
@@ -609,25 +636,13 @@ mod tests {
         }
 
         let mut prover_transcript = PcsTranscript::new();
-        TestZip::open(
-            &param,
-            &mle,
-            &data,
-            &point_f,
-            &mut prover_transcript,
-        )
-        .unwrap();
+        TestZip::open(&param, &mle, &data, &point_f, &mut prover_transcript).unwrap();
         let proof = prover_transcript.into_proof();
 
         let mut verifier_transcript = PcsTranscript::from_proof(&proof);
         let eval = evaluate_in_field(&mle.evaluations, &point_f);
-        let verification_result = TestZip::verify(
-            &param,
-            &comm,
-            &point_f,
-            &eval,
-            &mut verifier_transcript,
-        );
+        let verification_result =
+            TestZip::verify(&param, &comm, &point_f, &eval, &mut verifier_transcript);
 
         assert!(verification_result.is_err());
     }
@@ -679,14 +694,7 @@ mod tests {
 
         let (data, _) = TestZip::commit(&param, &mle).unwrap();
         let mut prover_transcript = PcsTranscript::new();
-        TestZip::open(
-            &param,
-            &mle,
-            &data,
-            &point_f,
-            &mut prover_transcript,
-        )
-        .unwrap();
+        TestZip::open(&param, &mle, &data, &point_f, &mut prover_transcript).unwrap();
         let proof = prover_transcript.into_proof();
 
         let actual_proof_size_bytes = proof.len();

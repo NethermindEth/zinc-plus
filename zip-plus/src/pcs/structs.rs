@@ -31,7 +31,8 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZipParams<ZT, LC> {
 /// Representantation of a zip commitment to a multilinear polynomial
 #[derive(Debug, Default)]
 pub struct MultilinearZipData<K: Integer> {
-    /// The encoded rows of the polynomial matrix representation, referred to as "u-hat" in the Zinc paper
+    /// The encoded rows of the polynomial matrix representation, referred to as
+    /// "u-hat" in the Zinc paper
     pub rows: Vec<K>,
     /// Merkle trees of entire matrix
     pub merkle_tree: MerkleTree<K>,

@@ -152,10 +152,10 @@ mod test {
 
     use crate::{
         field::Int,
+        pcs::utils::AsWords,
         traits::Integer,
         utils::{expand, inner_product},
     };
-    use crate::pcs::utils::AsWords;
 
     #[test]
     fn test_inner_product_basic() {

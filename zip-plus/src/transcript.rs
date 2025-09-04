@@ -3,10 +3,9 @@ use sha3::{Digest, Keccak256};
 
 use crate::{
     field::{Int, config::FieldConfigBase},
-    pcs::structs::ZipTranscript,
+    pcs::{structs::ZipTranscript, utils::AsWords},
     traits::{BigInteger, Field, FieldMap, Integer, PrimitiveConversion, Words},
 };
-use crate::pcs::utils::AsWords;
 
 /// A cryptographic transcript implementation using the Keccak-256 hash
 /// function. Used for Fiat-Shamir transformations in zero-knowledge proof

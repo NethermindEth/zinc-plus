@@ -163,8 +163,7 @@ fn test_zip_batch_evaluation() {
         .map(|evaluations| DenseMultilinearExtension::from_evaluations_slice(n, evaluations))
         .collect();
 
-    let commitments: Vec<_> =
-        TestZip::batch_commit(&param, &mles).unwrap();
+    let commitments: Vec<_> = TestZip::batch_commit(&param, &mles).unwrap();
     let (data, commitments): (Vec<_>, Vec<_>) = commitments.into_iter().unzip();
     let point: Vec<_> = (0..n).map(|_| Int::<I>::from(i8::rand(&mut rng))).collect();
     let eval: Vec<_> = mles

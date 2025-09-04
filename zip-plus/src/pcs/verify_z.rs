@@ -4,11 +4,10 @@ use super::{
     structs::{MultilinearZip, MultilinearZipCommitment},
     utils::{ColumnOpening, point_to_tensor, validate_input},
 };
-use crate::pcs::utils::MtHash;
 use crate::{
     Error,
     code::LinearCode,
-    pcs::structs::MultilinearZipParams,
+    pcs::{structs::MultilinearZipParams, utils::MtHash},
     pcs_transcript::PcsTranscript,
     traits::{Field, FieldMap, ZipTypes},
     utils::{expand, inner_product},
@@ -188,17 +187,16 @@ mod tests {
     use ark_std::{boxed::Box, vec, vec::Vec};
 
     use super::*;
-    use crate::field::config::ConstFieldConfigBase1;
-    use crate::field::{BigInt, BigInteger128, BigInteger256};
-    use crate::pcs::tests::RandomFieldZipTypes;
     use crate::{
         code::DefaultLinearCodeSpec,
         code_raa::RaaCode,
-        field::{Int, RandomField},
+        field::{
+            BigInt, BigInteger128, BigInteger256, Int, RandomField, config::ConstFieldConfigBase1,
+        },
         pcs,
         pcs::{
             structs::{MultilinearZip, MultilinearZipParams},
-            tests::MockTranscript,
+            tests::{MockTranscript, RandomFieldZipTypes},
         },
         poly_z::mle::DenseMultilinearExtension,
         traits::{Integer, Words, ZipTypes},
@@ -209,8 +207,9 @@ mod tests {
 
     // define_field_config!(FC, "57316695564490278656402085503");
     // ^
-    // This macro gives "could not parse" on ark_ff::ark_ff_macros::to_sign_and_limbs!
-    // for unknown reasons, so we define the field config manually here.
+    // This macro gives "could not parse" on
+    // ark_ff::ark_ff_macros::to_sign_and_limbs! for unknown reasons, so we
+    // define the field config manually here.
 
     #[derive(Clone, Debug)]
     struct Fc;

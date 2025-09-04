@@ -134,8 +134,9 @@ where
     fn sub_assign(a: &mut BigInt<N>, b: &BigInt<N>) {
         // If `other` is larger than `self`, add the modulus to self first.
         if b > a {
-            // Add modulus first so the subtraction doesn't underflow; carry is intentionally
-            // ignored (we operate modulo 2^(64*N) here and the subsequent subtraction pulls it back).
+            // Add modulus first so the subtraction doesn't underflow; carry is
+            // intentionally ignored (we operate modulo 2^(64*N) here and the
+            // subsequent subtraction pulls it back).
             a.add_with_carry(&Self::modulus());
         }
         a.sub_with_borrow(b);

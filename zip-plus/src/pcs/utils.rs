@@ -1,7 +1,13 @@
-use ark_std::fmt::{Display, Result as FmtResult, Formatter};
-use ark_std::io::Write;
 use ark_ff::Zero;
-use ark_std::{cfg_iter_mut, format, iterable::Iterable, vec, vec::Vec};
+use ark_std::{
+    cfg_iter_mut,
+    fmt::{Display, Formatter, Result as FmtResult},
+    format,
+    io::Write,
+    iterable::Iterable,
+    vec,
+    vec::Vec,
+};
 use crypto_bigint::Word;
 use itertools::Itertools;
 use uninit::AsMaybeUninit;
@@ -104,7 +110,8 @@ impl<T: AsWords + Clone> CryptographicHasher<T, [u8; BLAKE3_OUT_LEN]> for MtHash
         let mut buf = [0_u8; size_of::<Word>()];
         for item in input {
             for word in item.as_words() {
-                // Performance: reuse buffer and help compiler optimize away materializing word bytes
+                // Performance: reuse buffer and help compiler optimize away materializing word
+                // bytes
                 buf.copy_from_slice(&word.to_be_bytes());
                 hasher.write_all(&buf).expect("Failed to write to hasher");
             }
@@ -164,7 +171,8 @@ where
                 row_width,
                 column_height,
             );
-            // Safe because we just initialized all elements of `columns`, and MaybeUninit<T> is #[repr(transparent)].
+            // Safe because we just initialized all elements of `columns`, and
+            // MaybeUninit<T> is #[repr(transparent)].
             unsafe {
                 columns.set_len(rows.len());
             }
@@ -251,9 +259,10 @@ impl Display for MerkleProof {
 }
 
 /// This is a helper struct to open a column in a multilinear polynomial
-/// Opening a column `j` in an `n x m` matrix `u_hat` requires opening `m` Merkle trees,
-/// one for each row at position j
-/// Note that the proof is written to the transcript and the order of the proofs is the same as the order of the columns
+/// Opening a column `j` in an `n x m` matrix `u_hat` requires opening `m`
+/// Merkle trees, one for each row at position j
+/// Note that the proof is written to the transcript and the order of the proofs
+/// is the same as the order of the columns
 #[derive(Clone)]
 pub struct ColumnOpening {}
 
@@ -284,8 +293,9 @@ impl ColumnOpening {
     }
 }
 
-/// For a polynomial arranged in matrix form, this splits the evaluation point into
-/// two vectors, `q_0` multiplying on the left and `q_1` multiplying on the right
+/// For a polynomial arranged in matrix form, this splits the evaluation point
+/// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
+/// right
 pub(super) fn point_to_tensor<F: Field>(
     num_rows: usize,
     point: &[F],
@@ -387,9 +397,9 @@ fn build_eq_x_r_helper<F: Field>(r: &[F], buf: &mut Vec<F>) -> Result<(), ArithE
     Ok(())
 }
 
-/// For a polynomial arranged in matrix form, this splits the evaluation point into
-/// two vectors, `q_0` multiplying on the left and `q_1` multiplying on the right
-/// and returns the left vector only
+/// For a polynomial arranged in matrix form, this splits the evaluation point
+/// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
+/// right and returns the left vector only
 pub(super) fn left_point_to_tensor<F: Field>(
     num_rows: usize,
     point: &[F],

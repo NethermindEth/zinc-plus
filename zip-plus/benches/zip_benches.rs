@@ -16,7 +16,7 @@ use zip_plus::{
     code::{DefaultLinearCodeSpec, LinearCode},
     code_raa::RaaCode,
     define_field_config, define_random_field_zip_types,
-    field::{RandomField, config::FieldConfigBase},
+    field::{Int, RandomField, config::FieldConfigBase},
     implement_random_field_zip_types,
     pcs::{MerkleTree, structs::MultilinearZip},
     pcs_transcript::PcsTranscript,
@@ -24,7 +24,6 @@ use zip_plus::{
     traits::{FieldMap, ZipTypes},
     transcript::KeccakTranscript,
 };
-use zip_plus::field::Int;
 
 const INT_LIMBS: usize = 1;
 const FIELD_LIMBS: usize = 4;
@@ -126,8 +125,7 @@ fn commit<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
                 for _ in 0..iters {
                     let poly = DenseMultilinearExtension::rand(P, &mut rng);
                     let timer = Instant::now();
-                    let res = BenchZip::commit(&params, &poly)
-                        .expect("Failed to commit");
+                    let res = BenchZip::commit(&params, &poly).expect("Failed to commit");
                     black_box(res);
                     total_duration += timer.elapsed();
                 }
@@ -192,14 +190,7 @@ fn verify<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
     let eval_field = eval.map_to_field();
     let mut transcript = PcsTranscript::<RandomField<FIELD_LIMBS, FC>>::new();
 
-    BenchZip::open(
-        &params,
-        &poly,
-        &data,
-        &field_point,
-        &mut transcript,
-    )
-    .unwrap();
+    BenchZip::open(&params, &poly, &data, &field_point, &mut transcript).unwrap();
 
     let proof = transcript.into_proof();
     group.bench_function(

@@ -1,3 +1,9 @@
+use crate::{
+    field::FieldConfig,
+    pcs::utils::AsWords,
+    traits::{FieldMap, FromBytes},
+    transcript::KeccakTranscript,
+};
 use ark_std::{
     fmt::Debug,
     iter::{Product, Sum},
@@ -10,12 +16,6 @@ use ark_std::{
 use crypto_bigint::Random;
 use num_traits::{ConstOne, ConstZero, One, Zero};
 use p3_field::Packable;
-use crate::{
-    field::FieldConfig,
-    traits::{FieldMap, FromBytes},
-    transcript::KeccakTranscript,
-};
-use crate::pcs::utils::AsWords;
 
 /// Trait for field elements, requiring arithmetic, assignment, random
 /// generation, and conversion traits. Used as a bound for generic code over
