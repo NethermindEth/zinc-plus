@@ -39,39 +39,3 @@ macro_rules! big_int {
         $crate::field::BigInt::<$n>::from_str(stringify!($v)).expect($msg)
     }};
 }
-
-/// Constructs a `RandomField` element from a literal value.
-///
-/// This macro provides two modes:
-///
-/// ## Variants
-///
-/// ### 1. `random_field!(value, config)`
-/// Converts a numeric literal into a `RandomField` element using a provided
-/// field configuration.
-///
-/// - This leverages the `FieldMap` trait’s `.map_to_field()` method.
-/// - The `config` argument must be a valid configuration object of type `F::R`.
-///
-/// ```rust
-/// use zip_plus::{big_int, define_field_config, field::RandomField, random_field};
-///
-/// define_field_config!(Fc, "19");
-///
-/// let x: RandomField<1, Fc<1>> = random_field!(123);
-/// ```
-///
-/// ## Notes
-/// - In both cases, the macro uses a closure internally to maintain hygiene and
-///   isolate `use` statements.
-/// - The first form (`random_field!(value)`) uses `$crate::field::{BigInt,
-///   RandomField}`.
-/// - The second form (`random_field!(value, config)`) uses
-///   `$crate::traits::FieldMap`.
-#[macro_export]
-macro_rules! random_field {
-    ($v:literal) => {{
-        use $crate::traits::FieldMap;
-        $v.map_to_field()
-    }};
-}

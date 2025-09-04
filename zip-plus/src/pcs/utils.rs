@@ -18,7 +18,7 @@ use crate::{
     pcs_transcript::PcsTranscript,
     poly_f::mle::DenseMultilinearExtension as MLE_F,
     poly_z::mle::DenseMultilinearExtension as MLE_Z,
-    traits::{Field, Integer},
+    traits::{Integer},
 };
 
 use p3_commit::{BatchOpeningRef, Mmcs};
@@ -29,6 +29,8 @@ use p3_symmetric::{CryptographicHasher, PseudoCompressionFunction};
 
 #[cfg(feature = "parallel")]
 use rayon::iter::*;
+use crypto_primitives::PrimeField;
+use crate::traits::BigInteger;
 
 fn err_too_many_variates(function: &str, upto: usize, got: usize) -> Error {
     Error::InvalidPcsParam(format!(
@@ -267,11 +269,16 @@ impl Display for MerkleProof {
 pub struct ColumnOpening {}
 
 impl ColumnOpening {
-    pub fn open_at_column<F: Field, M: Integer>(
+    pub fn open_at_column<F, M>(
         column: usize,
         commit_data: &MultilinearZipData<M>,
         transcript: &mut PcsTranscript<F>,
-    ) -> Result<(), MerkleError> {
+    ) -> Result<(), MerkleError>
+    where
+        F: PrimeField,
+        F::Inner: BigInteger,
+        M: Integer
+    {
         let merkle_path = MerkleProof::create_proof(&commit_data.merkle_tree, column)?;
         transcript
             .write_merkle_proof(&merkle_path)
@@ -279,12 +286,17 @@ impl ColumnOpening {
         Ok(())
     }
 
-    pub fn verify_column<F: Field, T: Packable + AsWords + Clone>(
+    pub fn verify_column<F, T>(
         root: &MtHash,
         column: &[T],
         column_index: usize,
         transcript: &mut PcsTranscript<F>,
-    ) -> Result<(), MerkleError> {
+    ) -> Result<(), MerkleError>
+    where
+        F: PrimeField,
+        F::Inner: BigInteger,
+        T: Packable + AsWords + Clone
+    {
         let proof = transcript
             .read_merkle_proof()
             .map_err(|_| MerkleError::FailedMerkleProofReading)?;
@@ -296,10 +308,13 @@ impl ColumnOpening {
 /// For a polynomial arranged in matrix form, this splits the evaluation point
 /// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
 /// right
-pub(super) fn point_to_tensor<F: Field>(
+pub(super) fn point_to_tensor<F>(
     num_rows: usize,
     point: &[F],
-) -> Result<(Vec<F>, Vec<F>), Error> {
+) -> Result<(Vec<F>, Vec<F>), Error>
+where
+    F: PrimeField,
+{
     assert!(num_rows.is_power_of_two());
     let (hi, lo) = point.split_at(point.len() - num_rows.ilog2() as usize);
     // TODO: get rid of these unwraps.
@@ -324,7 +339,10 @@ pub(super) fn point_to_tensor<F: Field>(
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r_f<F: Field>(r: &[F]) -> Result<MLE_F<F>, ArithErrors> {
+pub fn build_eq_x_r_f<F>(r: &[F]) -> Result<MLE_F<F>, ArithErrors>
+where
+    F: PrimeField,
+{
     let evals = build_eq_x_r_vec(r)?;
     let mle = MLE_F::from_evaluations_vec(r.len(), evals);
 
@@ -338,7 +356,10 @@ pub fn build_eq_x_r_f<F: Field>(r: &[F]) -> Result<MLE_F<F>, ArithErrors> {
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r_vec<F: Field>(r: &[F]) -> Result<Vec<F>, ArithErrors> {
+pub fn build_eq_x_r_vec<F>(r: &[F]) -> Result<Vec<F>, ArithErrors>
+where
+    F: PrimeField,
+{
     // we build eq(x,r) from its evaluations
     // we want to evaluate eq(x,r) over x \in {0, 1}^num_vars
     // for example, with num_vars = 4, x is a binary vector of 4, then
@@ -359,7 +380,10 @@ pub fn build_eq_x_r_vec<F: Field>(r: &[F]) -> Result<Vec<F>, ArithErrors> {
 /// A helper function to build eq(x, r) recursively.
 /// This function takes `r.len()` steps, and for each step it requires a maximum
 /// `r.len()-1` multiplications.
-fn build_eq_x_r_helper<F: Field>(r: &[F], buf: &mut Vec<F>) -> Result<(), ArithErrors> {
+fn build_eq_x_r_helper<F>(r: &[F], buf: &mut Vec<F>) -> Result<(), ArithErrors>
+where
+    F: PrimeField,
+{
     if r.is_empty() {
         return Err(ArithErrors::InvalidParameters("r length is 0".into()));
     } else if r.len() == 1 {
@@ -400,10 +424,12 @@ fn build_eq_x_r_helper<F: Field>(r: &[F], buf: &mut Vec<F>) -> Result<(), ArithE
 /// For a polynomial arranged in matrix form, this splits the evaluation point
 /// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
 /// right and returns the left vector only
-pub(super) fn left_point_to_tensor<F: Field>(
+pub(super) fn left_point_to_tensor<F>(
     num_rows: usize,
     point: &[F],
-) -> Result<Vec<F>, Error> {
+) -> Result<Vec<F>, Error> where
+    F: PrimeField,
+{
     let (_, lo) = point.split_at(point.len() - num_rows.ilog2() as usize);
     // TODO: get rid of these unwraps.
     let q_0 = if !lo.is_empty() {

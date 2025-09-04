@@ -9,7 +9,6 @@ pub mod traits;
 pub mod utils;
 
 mod const_helpers;
-mod conversion;
 pub mod field;
 mod poly;
 mod poly_f;

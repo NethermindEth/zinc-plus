@@ -1,10 +1,10 @@
 use ark_std::{fmt::Debug, marker::PhantomData, ops::AddAssign, vec::Vec};
 use num_traits::Zero;
-
+use crypto_primitives::PrimeField;
 use crate::{
     code::{LinearCode, LinearCodeSpec},
     pcs::structs::ZipTranscript,
-    traits::{Field, FieldMap, Integer, Words, ZipTypes},
+    traits::{Integer, Words, ZipTypes},
     utils::shuffle_seeded,
 };
 
@@ -132,9 +132,9 @@ impl<ZT: ZipTypes> LinearCode<ZT> for RaaCode<ZT> {
         self.encode_inner(row)
     }
 
-    fn encode_f<F: Field>(&self, row: &[F]) -> Vec<F>
+    fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        ZT::L: FieldMap<F, Output = F>,
+        F: PrimeField + for<'a> From<&'a ZT::L>
     {
         self.encode_inner(row)
     }

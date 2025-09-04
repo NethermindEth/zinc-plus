@@ -3,10 +3,10 @@ use ark_std::{
     iter::Sum,
     ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
-
+use num_traits::Inv;
+use crypto_primitives::PrimeField;
 use crate::{
     field::{BigInt, RandomField, config::FieldConfig},
-    traits::FieldMap,
 };
 
 macro_rules! impl_ops {
@@ -71,6 +71,14 @@ impl_ops!(impl(const N: usize, FC: FieldConfig<BigInt<N>>) for RandomField<N, FC
 impl_ops!(impl(const N: usize, FC: FieldConfig<BigInt<N>>) for RandomField<N, FC>, Mul, mul, MulAssign, mul_assign);
 impl_ops!(impl(const N: usize, FC: FieldConfig<BigInt<N>>) for RandomField<N, FC>, Div, div, DivAssign, div_assign);
 
+impl<const N: usize, FC: FieldConfig<BigInt<N>>> Inv for RandomField<N, FC> {
+    type Output = Option<Self>;
+
+    fn inv(self) -> Self::Output {
+        FC::inverse(&self.value).map(Self::new_unchecked)
+    }
+}
+
 impl<const N: usize, FC: FieldConfig<BigInt<N>>> Add<u32> for RandomField<N, FC> {
     type Output = Self;
 
@@ -88,7 +96,7 @@ impl<const N: usize, FC: FieldConfig<BigInt<N>>> AddAssign<&Self> for RandomFiel
 
 impl<const N: usize, FC: FieldConfig<BigInt<N>>> AddAssign<u32> for RandomField<N, FC> {
     fn add_assign(&mut self, rhs: u32) {
-        let rhs_f: RandomField<N, FC> = rhs.map_to_field();
+        let rhs_f: RandomField<N, FC> = rhs.into();
         FC::add_assign(&mut self.value, &rhs_f.value);
     }
 }
@@ -149,7 +157,7 @@ impl<'a, const N: usize, FC: FieldConfig<BigInt<N>>> Sum<&'a Self> for RandomFie
 impl<const N: usize, FC: FieldConfig<BigInt<N>>> Sum for RandomField<N, FC> {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         iter.fold(Self::zero(), |mut acc, x| {
-            acc.add_assign(&x);
+            acc.add_assign(x);
             acc
         })
     }
@@ -176,15 +184,14 @@ mod test {
     use crate::{
         big_int, define_field_config,
         field::{RandomField, biginteger::BigInt},
-        random_field,
     };
 
     define_field_config!(Fc23, "23");
 
     #[test]
     fn test_add_wrapping_around_modulus() {
-        let lhs: RandomField<1, Fc23<1>> = random_field!(22u32);
-        let rhs: RandomField<1, Fc23<1>> = random_field!(2u32);
+        let lhs: RandomField<1, Fc23<1>> = 22u32.into();
+        let rhs: RandomField<1, Fc23<1>> = 2u32.into();
 
         let sum = lhs + rhs;
         assert_eq!(sum.into_bigint(), BigInt::one());
@@ -192,8 +199,8 @@ mod test {
 
     #[test]
     fn test_add_without_wrapping() {
-        let lhs: RandomField<1, Fc23<1>> = random_field!(20u32);
-        let rhs: RandomField<1, Fc23<1>> = random_field!(20u32);
+        let lhs: RandomField<1, Fc23<1>> = 20u32.into();
+        let rhs: RandomField<1, Fc23<1>> = 20u32.into();
 
         let sum = lhs + rhs;
         assert_eq!(sum.into_bigint(), big_int!(17));
@@ -201,7 +208,7 @@ mod test {
 
     #[test]
     fn test_add_one() {
-        let lhs: RandomField<1, Fc23<1>> = random_field!(22u32);
+        let lhs: RandomField<1, Fc23<1>> = 22u32.into();
         let rhs: RandomField<1, Fc23<1>> = RandomField::one();
 
         let sum = lhs + rhs;
@@ -210,8 +217,8 @@ mod test {
 
     #[test]
     fn test_sub_wrapping_around_modulus() {
-        let lhs: RandomField<1, Fc23<1>> = random_field!(2u32);
-        let rhs: RandomField<1, Fc23<1>> = random_field!(22u32);
+        let lhs: RandomField<1, Fc23<1>> = 2u32.into();
+        let rhs: RandomField<1, Fc23<1>> = 22u32.into();
 
         let difference = lhs - rhs;
         assert_eq!(difference.into_bigint(), big_int!(3));
@@ -219,8 +226,8 @@ mod test {
 
     #[test]
     fn test_sub_identical_values_results_in_zero() {
-        let lhs: RandomField<1, Fc23<1>> = random_field!(20u32);
-        let rhs: RandomField<1, Fc23<1>> = random_field!(20u32);
+        let lhs: RandomField<1, Fc23<1>> = 20u32.into();
+        let rhs: RandomField<1, Fc23<1>> = 20u32.into();
 
         let difference = lhs - rhs;
         assert_eq!(difference.into_bigint(), BigInt::zero());
@@ -228,7 +235,7 @@ mod test {
 
     #[test]
     fn test_init_sub_raw() {
-        let lhs: RandomField<1, Fc23<1>> = random_field!(2u32);
+        let lhs: RandomField<1, Fc23<1>> = 2u32.into();
         let rhs = RandomField::one();
         let res = lhs.clone() - rhs;
         let mut expected = lhs;
@@ -238,8 +245,8 @@ mod test {
 
     #[test]
     fn test_sub_assign_works() {
-        let mut lhs: RandomField<1, Fc23<1>> = random_field!(10u32);
-        let rhs: RandomField<1, Fc23<1>> = random_field!(7u32);
+        let mut lhs: RandomField<1, Fc23<1>> = 10u32.into();
+        let rhs: RandomField<1, Fc23<1>> = 7u32.into();
 
         lhs -= rhs;
 
@@ -248,8 +255,8 @@ mod test {
 
     #[test]
     fn test_sub_assign_wraps_modulus() {
-        let mut lhs: RandomField<1, Fc23<1>> = random_field!(3u32);
-        let rhs: RandomField<1, Fc23<1>> = random_field!(7u32);
+        let mut lhs: RandomField<1, Fc23<1>> = 3u32.into();
+        let rhs: RandomField<1, Fc23<1>> = 7u32.into();
 
         lhs -= rhs;
 
@@ -258,8 +265,8 @@ mod test {
 
     #[test]
     fn test_mul_wraps_modulus() {
-        let lhs: RandomField<1, Fc23<1>> = random_field!(22u32);
-        let rhs: RandomField<1, Fc23<1>> = random_field!(2u32);
+        let lhs: RandomField<1, Fc23<1>> = 22u32.into();
+        let rhs: RandomField<1, Fc23<1>> = 2u32.into();
 
         let product = lhs * rhs;
         assert_eq!(product.into_bigint(), big_int!(21));
@@ -267,8 +274,8 @@ mod test {
 
     #[test]
     fn test_mul_without_wrapping() {
-        let lhs: RandomField<1, Fc23<1>> = random_field!(20u32);
-        let rhs: RandomField<1, Fc23<1>> = random_field!(20u32);
+        let lhs: RandomField<1, Fc23<1>> = 20u32.into();
+        let rhs: RandomField<1, Fc23<1>> = 20u32.into();
 
         let product = lhs * rhs;
         assert_eq!(product.into_bigint(), big_int!(9));
@@ -276,7 +283,7 @@ mod test {
 
     #[test]
     fn test_left_mul_by_zero() {
-        let lhs: RandomField<1, Fc23<1>> = random_field!(22u32);
+        let lhs: RandomField<1, Fc23<1>> = 22u32.into();
         let rhs = RandomField::zero();
 
         let product = lhs * rhs;
@@ -286,7 +293,7 @@ mod test {
     #[test]
     fn test_right_mul_by_zero() {
         let lhs: RandomField<1, Fc23<1>> = RandomField::zero();
-        let rhs: RandomField<1, Fc23<1>> = random_field!(22u32);
+        let rhs: RandomField<1, Fc23<1>> = 22u32.into();
 
         let product = lhs * rhs;
         assert!(product.is_zero());
@@ -294,8 +301,8 @@ mod test {
 
     #[test]
     fn test_mul_assign_works() {
-        let mut lhs: RandomField<1, Fc23<1>> = random_field!(5u32);
-        let rhs: RandomField<1, Fc23<1>> = random_field!(4u32);
+        let mut lhs: RandomField<1, Fc23<1>> = 5u32.into();
+        let rhs: RandomField<1, Fc23<1>> = 4u32.into();
 
         lhs *= rhs;
 
@@ -304,8 +311,8 @@ mod test {
 
     #[test]
     fn test_mul_assign_wraps_modulus() {
-        let mut lhs: RandomField<1, Fc23<1>> = random_field!(6u32);
-        let rhs: RandomField<1, Fc23<1>> = random_field!(4u32);
+        let mut lhs: RandomField<1, Fc23<1>> = 6u32.into();
+        let rhs: RandomField<1, Fc23<1>> = 4u32.into();
 
         lhs *= rhs;
 
@@ -314,8 +321,8 @@ mod test {
 
     #[test]
     fn test_div_wraps_modulus() {
-        let lhs: RandomField<1, Fc23<1>> = random_field!(22u32);
-        let rhs: RandomField<1, Fc23<1>> = random_field!(2u32);
+        let lhs: RandomField<1, Fc23<1>> = 22u32.into();
+        let rhs: RandomField<1, Fc23<1>> = 2u32.into();
 
         let quotient = lhs / rhs;
         assert_eq!(quotient.into_bigint(), big_int!(11));
@@ -323,8 +330,8 @@ mod test {
 
     #[test]
     fn test_div_identical_values_results_in_one() {
-        let lhs: RandomField<1, Fc23<1>> = random_field!(20u32);
-        let rhs: RandomField<1, Fc23<1>> = random_field!(20u32);
+        let lhs: RandomField<1, Fc23<1>> = 20u32.into();
+        let rhs: RandomField<1, Fc23<1>> = 20u32.into();
 
         let quotient = lhs / rhs;
         assert_eq!(quotient.into_bigint(), big_int!(1));
@@ -332,8 +339,8 @@ mod test {
 
     #[test]
     fn test_div_without_wrapping() {
-        let lhs: RandomField<1, Fc23<1>> = random_field!(17u32);
-        let rhs: RandomField<1, Fc23<1>> = random_field!(4u32);
+        let lhs: RandomField<1, Fc23<1>> = 17u32.into();
+        let rhs: RandomField<1, Fc23<1>> = 4u32.into();
 
         let quotient = lhs / rhs;
         assert_eq!(quotient.into_bigint(), big_int!(10));
@@ -342,8 +349,8 @@ mod test {
     #[test]
     #[should_panic]
     fn test_div_by_zero_should_panic() {
-        let lhs: RandomField<1, Fc23<1>> = random_field!(17u32);
-        let rhs: RandomField<1, Fc23<1>> = random_field!(0u32);
+        let lhs: RandomField<1, Fc23<1>> = 17u32.into();
+        let rhs: RandomField<1, Fc23<1>> = 0u32.into();
 
         let _sum = lhs / rhs;
     }
@@ -352,7 +359,7 @@ mod test {
     fn test_div_bigint256() {
         define_field_config!(Fc, "695962179703626800597079116051991347");
 
-        let a: RandomField<4, Fc<4>> = random_field!(3u32);
+        let a: RandomField<4, Fc<4>> = 3u32.into();
         let mut b = RandomField::one();
         b /= a;
         assert_eq!(
@@ -360,9 +367,9 @@ mod test {
             big_int!(231987393234542266865693038683997116)
         );
 
-        let a: RandomField<4, Fc<4>> = random_field!(19382769832175u64);
+        let a: RandomField<4, Fc<4>> = 19382769832175u64.into();
 
-        let b: RandomField<4, Fc<4>> = random_field!(97133987132135u64);
+        let b: RandomField<4, Fc<4>> = 97133987132135u64.into();
 
         assert_eq!(
             big_int!(243043087159742188419721163456177516),
@@ -372,8 +379,8 @@ mod test {
 
     #[test]
     fn test_div_by_reference_works() {
-        let lhs: RandomField<1, Fc23<1>> = random_field!(15u32);
-        let rhs = random_field!(3u32);
+        let lhs: RandomField<1, Fc23<1>> = 15u32.into();
+        let rhs = 3u32.into();
 
         #[allow(clippy::op_ref)] // This implementation could be removed?
         let quotient = lhs / &rhs;
@@ -383,8 +390,8 @@ mod test {
 
     #[test]
     fn test_div_by_mutable_reference_works() {
-        let lhs: RandomField<1, Fc23<1>> = random_field!(9u32);
-        let rhs = random_field!(3u32);
+        let lhs: RandomField<1, Fc23<1>> = 9u32.into();
+        let rhs = 3u32.into();
 
         #[allow(clippy::op_ref)] // This implementation could be removed?
         let quotient = lhs / &rhs;
@@ -394,8 +401,8 @@ mod test {
 
     #[test]
     fn test_div_assign_works() {
-        let mut lhs: RandomField<1, Fc23<1>> = random_field!(15u32);
-        let rhs: RandomField<1, Fc23<1>> = random_field!(3u32);
+        let mut lhs: RandomField<1, Fc23<1>> = 15u32.into();
+        let rhs: RandomField<1, Fc23<1>> = 3u32.into();
 
         lhs /= rhs;
 
@@ -405,7 +412,7 @@ mod test {
     #[test]
     #[should_panic(expected = "Attempt to divide by zero")]
     fn test_div_assign_by_zero_should_panic() {
-        let mut lhs: RandomField<1, Fc23<1>> = random_field!(15u32);
+        let mut lhs: RandomField<1, Fc23<1>> = 15u32.into();
         let rhs = RandomField::zero();
 
         lhs /= rhs;
@@ -413,8 +420,8 @@ mod test {
 
     #[test]
     fn test_div_assign_by_mutable_reference() {
-        let mut lhs: RandomField<1, Fc23<1>> = random_field!(18u32);
-        let mut rhs = random_field!(3u32);
+        let mut lhs: RandomField<1, Fc23<1>> = 18u32.into();
+        let mut rhs = 3u32.into();
 
         lhs /= &mut rhs;
 
@@ -423,7 +430,7 @@ mod test {
 
     #[test]
     fn test_neg_large_value() {
-        let operand: RandomField<1, Fc23<1>> = random_field!(22u32);
+        let operand: RandomField<1, Fc23<1>> = 22u32.into();
         let negated = -operand;
 
         assert_eq!(negated.into_bigint(), big_int!(1));
@@ -431,7 +438,7 @@ mod test {
 
     #[test]
     fn test_neg_mid_value() {
-        let operand: RandomField<1, Fc23<1>> = random_field!(17u32);
+        let operand: RandomField<1, Fc23<1>> = 17u32.into();
         let negated = -operand;
 
         assert_eq!(negated.into_bigint(), big_int!(6));
@@ -439,7 +446,7 @@ mod test {
 
     #[test]
     fn test_neg_zero() {
-        let operand: RandomField<1, Fc23<1>> = random_field!(0u32);
+        let operand: RandomField<1, Fc23<1>> = 0u32.into();
         let negated = -operand;
 
         assert_eq!(negated.into_bigint(), BigInt::zero());
@@ -448,9 +455,9 @@ mod test {
     #[test]
     fn test_sum_of_multiple_values() {
         let values = [
-            random_field!(2u32),
-            random_field!(4u32),
-            random_field!(6u32),
+            2u32.into(),
+            4u32.into(),
+            6u32.into(),
         ];
 
         let sum: RandomField<1, Fc23<1>> = values.iter().sum();
@@ -462,8 +469,8 @@ mod test {
     fn test_sum_with_zero() {
         let values = [
             RandomField::zero(),
-            random_field!(5u32),
-            random_field!(7u32),
+            5u32.into(),
+            7u32.into(),
         ];
 
         let sum: RandomField<1, Fc23<1>> = values.iter().sum();
@@ -474,9 +481,9 @@ mod test {
     #[test]
     fn test_sum_wraps_modulus() {
         let values = [
-            random_field!(10u32),
-            random_field!(15u32),
-            random_field!(21u32),
+            10u32.into(),
+            15u32.into(),
+            21u32.into(),
         ];
 
         let sum: RandomField<1, Fc23<1>> = values.iter().sum();
@@ -492,7 +499,7 @@ mod test {
 
     #[test]
     fn test_sum_single_element() {
-        let values = [random_field!(9u32)];
+        let values = [9u32.into()];
 
         let sum: RandomField<1, Fc23<1>> = values.iter().sum();
 
@@ -501,7 +508,7 @@ mod test {
 
     #[test]
     fn test_sum_with_modulus_wrapping() {
-        let values = [random_field!(12u32), random_field!(15u32)];
+        let values = [12u32.into(), 15u32.into()];
 
         let sum: RandomField<1, Fc23<1>> = values.iter().sum();
 
@@ -511,9 +518,9 @@ mod test {
     #[test]
     fn test_product_of_multiple_values() {
         let values = [
-            random_field!(2u32),
-            random_field!(4u32),
-            random_field!(6u32),
+            2u32.into(),
+            4u32.into(),
+            6u32.into(),
         ];
 
         let product: RandomField<1, Fc23<1>> = values.iter().product();
@@ -523,7 +530,7 @@ mod test {
 
     #[test]
     fn test_product_with_one() {
-        let values = [RandomField::one(), random_field!(5u32), random_field!(7u32)];
+        let values = [RandomField::one(), 5u32.into(), 7u32.into()];
 
         let product: RandomField<1, Fc23<1>> = values.iter().product();
 
@@ -533,9 +540,9 @@ mod test {
     #[test]
     fn test_product_with_zero() {
         let values = [
-            random_field!(3u32),
+            3u32.into(),
             RandomField::zero(),
-            random_field!(9u32),
+            9u32.into(),
         ];
 
         let product: RandomField<1, Fc23<1>> = values.iter().product();
@@ -546,9 +553,9 @@ mod test {
     #[test]
     fn test_product_negative_modular_complements() {
         let values = [
-            random_field!(10u32),
-            random_field!(15u32),
-            random_field!(21u32),
+            10u32.into(),
+            15u32.into(),
+            21u32.into(),
         ];
 
         let product: RandomField<1, Fc23<1>> = values.iter().product();
@@ -565,7 +572,7 @@ mod test {
 
     #[test]
     fn test_product_single_element() {
-        let values = [random_field!(9u32)];
+        let values = [9u32.into()];
 
         let product: RandomField<1, Fc23<1>> = values.iter().product();
 
@@ -574,7 +581,7 @@ mod test {
 
     #[test]
     fn test_product_with_modulus_wrapping() {
-        let values = [random_field!(12u32), random_field!(15u32)];
+        let values = [12u32.into(), 15u32.into()];
 
         let product: RandomField<1, Fc23<1>> = values.iter().product();
 

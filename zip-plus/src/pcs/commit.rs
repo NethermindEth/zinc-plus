@@ -197,7 +197,7 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
 mod tests {
     use ark_std::{UniformRand, mem::size_of, slice::from_ref, vec, vec::Vec};
     use crypto_bigint::Random;
-
+    use itertools::Itertools;
     use crate::{
         code::{DefaultLinearCodeSpec, LinearCode},
         code_raa::RaaCode,
@@ -211,7 +211,7 @@ mod tests {
         },
         pcs_transcript::PcsTranscript,
         poly_z::mle::DenseMultilinearExtension,
-        traits::{FieldMap, ZipTypes},
+        traits::{ZipTypes},
         transcript::KeccakTranscript,
         utils::div_ceil,
     };
@@ -627,7 +627,7 @@ mod tests {
 
         define_field_config!(Fc, "57316695564490278656402085503");
         type F = RandomField<FIELD_LIMBS, Fc<FIELD_LIMBS>>;
-        
+
         let mut rng = ark_std::test_rng();
         let num_vars = 4;
         let poly_size = 1 << num_vars;
@@ -641,7 +641,7 @@ mod tests {
         let point_int: Vec<_> = (0..num_vars)
             .map(|_| Int::<INT_LIMBS>::random(&mut rng))
             .collect();
-        let point_f: Vec<F> = point_int.map_to_field();
+        let point_f: Vec<F> = point_int.into_iter().map(F::from).collect_vec();
 
         let (data, _) = TestZip::commit(&param, &mle).unwrap();
         let mut prover_transcript = PcsTranscript::new();

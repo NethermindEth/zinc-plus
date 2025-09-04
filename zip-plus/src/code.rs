@@ -1,8 +1,8 @@
 #![allow(non_snake_case)]
 
 use ark_std::{fmt::Debug, vec::Vec};
-
-use crate::traits::{Field, FieldMap, Integer, ZipTypes};
+use crypto_primitives::PrimeField;
+use crate::traits::{Integer, ZipTypes};
 
 pub trait LinearCode<ZT: ZipTypes>: Sync + Send {
     /// Length of each input row before encoding
@@ -62,9 +62,9 @@ pub trait LinearCode<ZT: ZipTypes>: Sync + Send {
     ///
     /// # Returns
     /// A vector of field elements representing the encoded row
-    fn encode_f<F: Field>(&self, row: &[F]) -> Vec<F>
+    fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        ZT::L: FieldMap<F, Output = F>;
+        F: PrimeField + for<'a> From<&'a ZT::L>;
 }
 
 pub trait LinearCodeSpec: Debug {

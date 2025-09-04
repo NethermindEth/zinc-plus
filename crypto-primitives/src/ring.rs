@@ -1,13 +1,10 @@
-use crate::{Limb, PrimeField};
+use crate::{Limb};
 use core::{
     fmt::{Debug, Display},
     iter::{Product, Sum},
     ops::{Add, AddAssign, Mul, MulAssign, Rem, RemAssign, Sub, SubAssign},
 };
-use num_traits::{
-    CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedShl, CheckedShr, CheckedSub, ConstOne,
-    ConstZero, Pow,
-};
+use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedShl, CheckedShr, CheckedSub, ConstOne, ConstZero, One, Pow, Zero};
 
 /// A ring is like a field without a multiplicative inverse or division.
 pub trait Ring:
@@ -21,8 +18,8 @@ pub trait Ring:
     + Default
     + Sync
     + Send
-    + ConstZero
-    + ConstOne
+    + Zero
+    + One
     // Arithmetic operations consuming rhs
     + CheckedNeg
     + CheckedAdd
@@ -46,9 +43,15 @@ pub trait Ring:
     + for<'a> Product<&'a Self>
     {}
 
+pub trait ConstRing:
+    Ring
+    + ConstZero
+    + ConstOne
+    {}
+
 /// Ring of integers, usually denoted as `Z`.
 pub trait IntRing:
-Ring
+    ConstRing
     + PartialOrd
     + Ord
     // Arithmetic operations consuming rhs
@@ -62,13 +65,14 @@ Ring
 macro_rules! primitive_int_ring {
     ($t:ident) => {
         impl Ring for $t {}
+        impl ConstRing for $t {}
         impl IntRing for $t {}
     };
 }
 
-primitive_int_ring!(u32);
-primitive_int_ring!(u64);
-primitive_int_ring!(u128);
+primitive_int_ring!(i32);
+primitive_int_ring!(i64);
+primitive_int_ring!(i128);
 
 /// Ring of integers stored as u64 limbs.
 pub trait LimbedIntRing: IntRing + From<Limb> + for<'a> TryFrom<&'a [Limb]> {
@@ -77,9 +81,9 @@ pub trait LimbedIntRing: IntRing + From<Limb> + for<'a> TryFrom<&'a [Limb]> {
 
     fn limbs(&self) -> &[Limb];
 
-    // Cannot implement it as From trait since both participants are of non-local
-    // types
-    fn to_field<F: PrimeField>(&self) -> F {
-        F::from(self.limbs())
-    }
+    // // Cannot implement it as From trait since both participants are of non-local
+    // // types
+    // fn to_field<F: PrimeField>(&self) -> F {
+    //     F::from(self.limbs())
+    // }
 }

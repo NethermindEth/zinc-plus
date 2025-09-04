@@ -1,10 +1,9 @@
 use ark_ff::{One, Zero};
 use std::marker::PhantomData;
 use zeroize::Zeroize;
-
+use crypto_primitives::PrimeField;
 use crate::{
     field::{RandomField, biginteger::BigInt, config::FieldConfig},
-    traits::Field,
 };
 
 impl<const N: usize, FC: FieldConfig<BigInt<N>>> Zero for RandomField<N, FC> {
@@ -16,11 +15,11 @@ impl<const N: usize, FC: FieldConfig<BigInt<N>>> Zero for RandomField<N, FC> {
     }
 
     fn set_zero(&mut self) {
-        *self.value_mut() = BigInt::zero()
+        self.value = BigInt::zero()
     }
 
     fn is_zero(&self) -> bool {
-        self.value().is_zero()
+        self.inner().is_zero()
     }
 }
 
@@ -30,7 +29,7 @@ impl<const N: usize, FC: FieldConfig<BigInt<N>>> One for RandomField<N, FC> {
     }
 
     fn set_one(&mut self) {
-        *self.value_mut() = FC::r();
+        self.value = FC::r();
     }
 
     fn is_one(&self) -> bool {
@@ -49,7 +48,7 @@ mod tests {
     use ark_ff::{One, Zero};
     use zeroize::Zeroize;
 
-    use crate::{define_field_config, field::RandomField, random_field};
+    use crate::{define_field_config, field::RandomField};
 
     define_field_config!(Fc, "23");
 
@@ -61,7 +60,7 @@ mod tests {
 
     #[test]
     fn test_set_zero() {
-        let mut elem: RandomField<1, Fc<1>> = random_field!(7u32);
+        let mut elem: RandomField<1, Fc<1>> = 7u32.into();
         elem.set_zero();
         assert!(elem.is_zero());
     }
@@ -74,7 +73,7 @@ mod tests {
 
     #[test]
     fn test_set_one() {
-        let mut elem: RandomField<1, Fc<1>> = random_field!(5u32);
+        let mut elem: RandomField<1, Fc<1>> = 5u32.into();
         elem.set_one();
         assert!(elem.is_one());
     }
@@ -115,7 +114,7 @@ mod tests {
 
     #[test]
     fn test_zeroize() {
-        let mut elem: RandomField<1, Fc<1>> = random_field!(12);
+        let mut elem: RandomField<1, Fc<1>> = 12.into();
         elem.zeroize();
         assert!(elem.is_zero());
     }

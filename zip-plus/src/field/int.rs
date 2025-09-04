@@ -212,6 +212,21 @@ impl<const N: usize> Sum for Int<N> {
     }
 }
 
+impl<const N: usize> TryFrom<&[Word]> for Int<N> {
+    type Error = ();
+
+    fn try_from(value: &[Word]) -> Result<Self, Self::Error> {
+        if N <= value.len() {
+            let mut words = [Word::zero(); N];
+            words[0..value.len()].copy_from_slice(value);
+            Ok(Self::from_words(Words(words)))
+        } else {
+            Err(())
+        }
+    }
+}
+
+
 impl<const N: usize> Packable for Int<N> {}
 
 impl<const N: usize> Integer for Int<N> {

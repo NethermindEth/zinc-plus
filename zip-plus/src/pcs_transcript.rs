@@ -7,12 +7,12 @@ use ark_std::{
     vec::Vec,
 };
 use p3_matrix::Dimensions;
-
+use crypto_primitives::PrimeField;
 use super::{Error, pcs::utils::MerkleProof};
 use crate::{
     pcs::utils::MtHash,
     poly::alloc::string::ToString,
-    traits::{BigInteger, Field, FromBytes, Integer, PrimitiveConversion, Words},
+    traits::{BigInteger, FromBytes, Integer, PrimitiveConversion, Words},
     transcript::KeccakTranscript,
 };
 
@@ -20,7 +20,7 @@ use crate::{
 /// Manages both Fiat-Shamir transformations and serialization/deserialization
 /// of proof data.
 #[derive(Default, Clone)]
-pub struct PcsTranscript<F: Field> {
+pub struct PcsTranscript<F: PrimeField> {
     /// Handles Fiat-Shamir transformations for non-interactive zero-knowledge
     /// proofs. Used to absorb field elements and generate cryptographic
     /// challenges.
@@ -33,7 +33,11 @@ pub struct PcsTranscript<F: Field> {
     _phantom: PhantomData<F>,
 }
 
-impl<F: Field> PcsTranscript<F> {
+impl<F> PcsTranscript<F>
+where
+    F: PrimeField,
+    F::Inner: BigInteger,
+{
     pub fn new() -> Self {
         Self::default()
     }
@@ -98,13 +102,13 @@ impl<F: Field> PcsTranscript<F> {
     /// transcript. Used during proof verification to retrieve and process
     /// field elements.
     pub fn read_field_element(&mut self) -> Result<F, Error> {
-        let mut bytes: Vec<u8> = vec![0; F::W::num_words() * 8];
+        let mut bytes: Vec<u8> = vec![0; <F::Inner as BigInteger>::W::num_words() * 8];
 
         self.stream
             .read_exact(&mut bytes)
             .map_err(|err| Error::Transcript(err.kind(), err.to_string()))?;
 
-        let fe = F::new_unchecked(F::B::from_bytes_be(&bytes).unwrap());
+        let fe = F::new_unchecked(F::Inner::from_bytes_be(&bytes).unwrap());
 
         self.common_field_element(&fe);
         Ok(fe)
@@ -115,7 +119,7 @@ impl<F: Field> PcsTranscript<F> {
     /// later verification.
     pub fn write_field_element(&mut self, fe: &F) -> Result<(), Error> {
         self.common_field_element(fe);
-        let repr = fe.value().clone().to_bytes_be();
+        let repr = fe.inner().to_bytes_be();
         self.stream
             .write_all(repr.as_ref())
             .map_err(|err| Error::Transcript(err.kind(), err.to_string()))
@@ -215,7 +219,7 @@ impl<F: Field> PcsTranscript<F> {
     /// Returns an index between 0 and cap-1.
     pub fn squeeze_challenge_idx(&mut self, cap: usize) -> usize {
         let challenge: F = self.fs_transcript.get_challenge();
-        let bytes = challenge.value().clone().to_bytes_le();
+        let bytes = challenge.inner().to_bytes_le();
         let num = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
         num % cap
     }

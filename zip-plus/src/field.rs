@@ -1,15 +1,18 @@
 #![allow(non_snake_case)]
 
-use crate::traits::{FieldMap, Words as WordsTrait};
+use std::iter::{Product, Sum};
+use crate::traits::{Words as WordsTrait};
 use ark_ff::UniformRand;
 use crypto_bigint::Random;
-use num_traits::ConstZero;
+use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedShl, CheckedShr, CheckedSub, ConstOne, ConstZero, Pow};
 use std::marker::PhantomData;
+use std::ops::{Add, AddAssign, Div, Mul, MulAssign, Shl, Shr, Sub, SubAssign};
 
 mod arithmetic;
 mod biginteger;
 mod comparison;
 pub mod config;
+mod conversion;
 mod constant;
 mod int;
 mod uint;
@@ -19,8 +22,15 @@ pub use biginteger::{
     BigInteger448, BigInteger768, BigInteger832, Words, signed_mod_reduction,
 };
 pub use config::FieldConfig;
+use crypto_primitives::{ConstRing, Field, IntRing, PrimeField, Ring};
 pub use int::Int;
 pub use uint::Uint;
+
+use crate::{
+    field::config::{FieldConfigBase, FieldConfigOps},
+    traits::{BigInteger},
+    transcript::KeccakTranscript,
+};
 
 #[derive(Copy, Clone)]
 pub struct RandomField<const N: usize, FC: FieldConfig<BigInt<N>>> {
@@ -28,27 +38,20 @@ pub struct RandomField<const N: usize, FC: FieldConfig<BigInt<N>>> {
     phantom_data: PhantomData<FC>,
 }
 
-use crate::{
-    field::config::{FieldConfigBase, FieldConfigOps},
-    traits::{BigInteger, Field},
-    transcript::KeccakTranscript,
-};
+impl<const N: usize, FC: FieldConfig<BigInt<N>>> Ring for RandomField<N, FC> {}
 
-impl<const N: usize, FC: FieldConfig<BigInt<N>>> RandomField<N, FC> {
-    #[inline]
-    pub fn into_bigint(self) -> BigInt<N> {
-        self.value.demontgomery(&FC::modulus(), FC::inv())
-    }
-}
+impl<const N: usize, FC: FieldConfig<BigInt<N>>> ConstRing for RandomField<N, FC> {}
 
-impl<const N: usize, FC: FieldConfig<BigInt<N>>> Field for RandomField<N, FC> {
-    type B = BigInt<N>;
-    type C = FC;
-    type I = Int<N>;
-    type U = Uint<N>;
-    type W = Words<N>;
+impl<const N: usize, FC: FieldConfig<BigInt<N>>> IntRing for RandomField<N, FC> {}
 
-    fn new_unchecked(value: BigInt<N>) -> Self {
+impl<const N: usize, FC: FieldConfig<BigInt<N>>> Field for RandomField<N, FC> {}
+
+impl<const N: usize, FC: FieldConfig<BigInt<N>>> PrimeField for RandomField<N, FC> {
+    type Inner = BigInt<N>;
+    const MODULUS: Self::Inner = FC::modulus();
+
+    #[inline(always)]
+    fn new_unchecked(value: Self::Inner) -> Self {
         Self {
             value,
             phantom_data: PhantomData,
@@ -56,23 +59,15 @@ impl<const N: usize, FC: FieldConfig<BigInt<N>>> Field for RandomField<N, FC> {
     }
 
     #[inline(always)]
-    fn value(&self) -> &BigInt<N> {
+    fn inner(&self) -> &Self::Inner {
         &self.value
     }
+}
 
-    #[inline(always)]
-    fn value_mut(&mut self) -> &mut BigInt<N> {
-        &mut self.value
-    }
-
-    fn absorb_into_transcript(&self, transcript: &mut KeccakTranscript) {
-        transcript.absorb(&[0x3]);
-        transcript.absorb(&FC::modulus().to_bytes_be());
-        transcript.absorb(&[0x5]);
-
-        transcript.absorb(&[0x1]);
-        transcript.absorb(&self.value.to_bytes_be());
-        transcript.absorb(&[0x3])
+impl<const N: usize, FC: FieldConfig<BigInt<N>>> RandomField<N, FC> {
+    #[inline]
+    pub fn into_bigint(self) -> BigInt<N> {
+        self.value.demontgomery(&FC::modulus(), FC::inv())
     }
 }
 
@@ -94,7 +89,7 @@ impl<const N: usize, FC: FieldConfig<BigInt<N>>> Random for RandomField<N, FC> {
             *val &= mask;
 
             if value < modulus {
-                return value.map_to_field();
+                return Self::from(value);
             }
         }
     }
@@ -123,72 +118,3 @@ impl<const N: usize, FC: FieldConfig<BigInt<N>>> Default for RandomField<N, FC> 
 
 unsafe impl<const N: usize, FC: FieldConfig<BigInt<N>>> Send for RandomField<N, FC> {}
 unsafe impl<const N: usize, FC: FieldConfig<BigInt<N>>> Sync for RandomField<N, FC> {}
-
-impl<const N: usize, FC: FieldConfig<BigInt<N>>> From<u128> for RandomField<N, FC> {
-    fn from(value: u128) -> Self {
-        value.map_to_field()
-    }
-}
-
-macro_rules! impl_from_uint {
-    ($type:ty) => {
-        impl<const N: usize, FC: FieldConfig<BigInt<N>>> From<$type> for RandomField<N, FC> {
-            fn from(value: $type) -> Self {
-                value.map_to_field()
-            }
-        }
-    };
-}
-
-impl_from_uint!(u64);
-impl_from_uint!(u32);
-impl_from_uint!(u16);
-impl_from_uint!(u8);
-
-impl<const N: usize, FC: FieldConfig<BigInt<N>>> From<bool> for RandomField<N, FC> {
-    fn from(value: bool) -> Self {
-        value.map_to_field()
-    }
-}
-
-// Implementation of FieldMap for BigInt<N>
-impl<F: Field, const M: usize> FieldMap<F> for BigInt<M>
-where
-    for<'a> Int<M>: From<&'a F::B>,
-    F::B: From<Int<M>>,
-    for<'a> F::I: From<&'a BigInt<M>>,
-{
-    type Output = F;
-
-    fn map_to_field(&self) -> Self::Output {
-        let mut value = if M > F::W::num_words() {
-            let modulus: Int<M> = (&F::C::modulus()).into();
-            let mut value: Int<M> = self.into();
-            value %= modulus;
-
-            F::B::from(value)
-        } else {
-            let modulus: F::I = (&F::C::modulus()).into();
-            let mut value: F::I = self.into();
-            value %= modulus;
-
-            value.into()
-        };
-
-        F::C::mul_assign(&mut value, &F::C::r_squared());
-
-        F::new_unchecked(value)
-    }
-}
-
-// Implementation of FieldMap for reference to BigInt<N>
-impl<F: Field, const M: usize> FieldMap<F> for &BigInt<M>
-where
-    BigInt<M>: FieldMap<F, Output = F>,
-{
-    type Output = F;
-
-    fn map_to_field(&self) -> Self::Output {
-        (*self).map_to_field()
-    }
-}

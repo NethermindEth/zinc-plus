@@ -12,18 +12,23 @@ use ark_std::{
 use rayon::iter::*;
 
 use super::{MultilinearExtension, swap_bits};
-use crate::traits::Field;
-use crypto_primitives::Matrix;
+use crypto_primitives::{Matrix, PrimeField};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DenseMultilinearExtension<F: Field> {
+pub struct DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     /// The evaluation over {0,1}^`num_vars`
     pub evaluations: Vec<F>,
     /// Number of variables
     pub num_vars: usize,
 }
 
-impl<F: Field> DenseMultilinearExtension<F> {
+impl<F> DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     pub fn from_evaluations_slice(num_vars: usize, evaluations: &[F]) -> Self {
         Self::from_evaluations_vec(num_vars, evaluations.to_vec())
     }
@@ -115,7 +120,10 @@ impl<F: Field> DenseMultilinearExtension<F> {
     }
 }
 
-impl<F: Field> MultilinearExtension<F> for DenseMultilinearExtension<F> {
+impl<F> MultilinearExtension<F> for DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     fn fix_variables(&mut self, partial_point: &[F]) {
         assert!(
             partial_point.len() <= self.num_vars,
@@ -151,7 +159,10 @@ impl<F: Field> MultilinearExtension<F> for DenseMultilinearExtension<F> {
     }
 }
 
-impl<F: Field> Zero for DenseMultilinearExtension<F> {
+impl<F> Zero for DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     fn zero() -> Self {
         Self {
             num_vars: 0,
@@ -164,7 +175,10 @@ impl<F: Field> Zero for DenseMultilinearExtension<F> {
     }
 }
 
-impl<F: Field> Add for DenseMultilinearExtension<F> {
+impl<F> Add for DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     type Output = Self;
 
     fn add(self, other: Self) -> Self::Output {
@@ -172,7 +186,10 @@ impl<F: Field> Add for DenseMultilinearExtension<F> {
     }
 }
 
-impl<F: Field> Add for &DenseMultilinearExtension<F> {
+impl<F> Add for &DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     type Output = DenseMultilinearExtension<F>;
 
     fn add(self, rhs: Self) -> Self::Output {
@@ -198,13 +215,19 @@ impl<F: Field> Add for &DenseMultilinearExtension<F> {
     }
 }
 
-impl<F: Field> AddAssign for DenseMultilinearExtension<F> {
+impl<F> AddAssign for DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     fn add_assign(&mut self, rhs: Self) {
         self.add_assign(&rhs);
     }
 }
 
-impl<F: Field> AddAssign<&Self> for DenseMultilinearExtension<F> {
+impl<F> AddAssign<&Self> for DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     fn add_assign(&mut self, other: &Self) {
         if self.is_zero() {
             *self = other.clone();
@@ -226,7 +249,10 @@ impl<F: Field> AddAssign<&Self> for DenseMultilinearExtension<F> {
     }
 }
 
-impl<F: Field> AddAssign<(F, &Self)> for DenseMultilinearExtension<F> {
+impl<F> AddAssign<(F, &Self)> for DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     fn add_assign(&mut self, (r, other): (F, &Self)) {
         if self.is_zero() {
             *self = other.clone();
@@ -251,17 +277,22 @@ impl<F: Field> AddAssign<(F, &Self)> for DenseMultilinearExtension<F> {
     }
 }
 
-impl<F: Field> Neg for DenseMultilinearExtension<F> {
+impl<F> Neg for DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     type Output = Self;
 
     fn neg(mut self) -> Self::Output {
         cfg_iter_mut!(self.evaluations).for_each(|a| *a = a.clone().neg());
-
         self
     }
 }
 
-impl<F: Field> Sub for DenseMultilinearExtension<F> {
+impl<F> Sub for DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     type Output = Self;
 
     fn sub(self, other: Self) -> Self {
@@ -269,7 +300,10 @@ impl<F: Field> Sub for DenseMultilinearExtension<F> {
     }
 }
 
-impl<F: Field> Sub for &DenseMultilinearExtension<F> {
+impl<F> Sub for &DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     type Output = DenseMultilinearExtension<F>;
 
     fn sub(self, rhs: Self) -> Self::Output {
@@ -294,13 +328,19 @@ impl<F: Field> Sub for &DenseMultilinearExtension<F> {
     }
 }
 
-impl<F: Field> SubAssign for DenseMultilinearExtension<F> {
+impl<F> SubAssign for DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     fn sub_assign(&mut self, other: Self) {
         self.sub_assign(&other);
     }
 }
 
-impl<F: Field> SubAssign<&Self> for DenseMultilinearExtension<F> {
+impl<F> SubAssign<&Self> for DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     fn sub_assign(&mut self, rhs: &Self) {
         if self.is_zero() {
             *self = rhs.clone().neg();
@@ -322,7 +362,10 @@ impl<F: Field> SubAssign<&Self> for DenseMultilinearExtension<F> {
     }
 }
 
-impl<F: Field> Mul<F> for DenseMultilinearExtension<F> {
+impl<F> Mul<F> for DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     type Output = Self;
 
     fn mul(mut self, rhs: F) -> Self::Output {
@@ -332,13 +375,19 @@ impl<F: Field> Mul<F> for DenseMultilinearExtension<F> {
     }
 }
 
-impl<F: Field> MulAssign<F> for DenseMultilinearExtension<F> {
+impl<F> MulAssign<F> for DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     fn mul_assign(&mut self, rhs: F) {
         self.evaluations.iter_mut().for_each(|x| *x *= &rhs);
     }
 }
 
-impl<F: Field> Sub<F> for DenseMultilinearExtension<F> {
+impl<F> Sub<F> for DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     type Output = Self;
 
     fn sub(mut self, rhs: F) -> Self::Output {
@@ -348,7 +397,10 @@ impl<F: Field> Sub<F> for DenseMultilinearExtension<F> {
     }
 }
 
-impl<F: Field> Add<F> for DenseMultilinearExtension<F> {
+impl<F> Add<F> for DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     type Output = Self;
 
     fn add(mut self, rhs: F) -> Self::Output {
@@ -358,7 +410,10 @@ impl<F: Field> Add<F> for DenseMultilinearExtension<F> {
     }
 }
 
-impl<F: Field> Index<usize> for DenseMultilinearExtension<F> {
+impl<F> Index<usize> for DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     type Output = F;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -366,12 +421,21 @@ impl<F: Field> Index<usize> for DenseMultilinearExtension<F> {
     }
 }
 
-impl<F: Field> IndexMut<usize> for DenseMultilinearExtension<F> {
+impl<F> IndexMut<usize> for DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         &mut self.evaluations[index]
     }
 }
 
-unsafe impl<F: Field> Send for DenseMultilinearExtension<F> {}
+unsafe impl<F> Send for DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{}
 
-unsafe impl<F: Field> Sync for DenseMultilinearExtension<F> {}
+unsafe impl<F> Sync for DenseMultilinearExtension<F>
+where
+    F: PrimeField,
+{}

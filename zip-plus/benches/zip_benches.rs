@@ -21,7 +21,7 @@ use zip_plus::{
     pcs::{MerkleTree, structs::MultilinearZip},
     pcs_transcript::PcsTranscript,
     poly_z::mle::{DenseMultilinearExtension, MultilinearExtension},
-    traits::{FieldMap, ZipTypes},
+    traits::{ZipTypes},
     transcript::KeccakTranscript,
 };
 
@@ -148,7 +148,7 @@ fn open<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
     let (data, _) = BenchZip::commit(&params, &poly).unwrap();
     let point = vec![1i64; P];
-    let field_point = point.map_to_field();
+    let field_point = point.iter().map(|f| f.into()).collect_array::<P>().unwrap();
 
     group.bench_function(
         format!("Open: RandomField<{FIELD_LIMBS}>, poly_size = 2^{P}(Int limbs = {INT_LIMBS}), ZipSpec{spec}, modulus={}", FC::modulus()),
@@ -185,7 +185,7 @@ fn verify<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
     let (data, commitment) = BenchZip::commit(&params, &poly).unwrap();
     let point = vec![1i64; P];
-    let field_point = point.map_to_field();
+    let field_point = point.into();
     let eval = poly.evaluations.last().unwrap();
     let eval_field = eval.map_to_field();
     let mut transcript = PcsTranscript::<RandomField<FIELD_LIMBS, FC>>::new();

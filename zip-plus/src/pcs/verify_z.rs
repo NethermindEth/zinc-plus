@@ -1,5 +1,6 @@
 use ark_std::{iterable::Iterable, vec::Vec};
-
+use itertools::Itertools;
+use crypto_primitives::PrimeField;
 use super::{
     structs::{MultilinearZip, MultilinearZipCommitment},
     utils::{ColumnOpening, point_to_tensor, validate_input},
@@ -9,12 +10,13 @@ use crate::{
     code::LinearCode,
     pcs::{structs::MultilinearZipParams, utils::MtHash},
     pcs_transcript::PcsTranscript,
-    traits::{Field, FieldMap, ZipTypes},
+    traits::{ZipTypes},
     utils::{expand, inner_product},
 };
+use crate::traits::BigInteger;
 
 impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
-    pub fn verify<F: Field>(
+    pub fn verify<F>(
         vp: &MultilinearZipParams<ZT, LC>,
         comm: &MultilinearZipCommitment,
         point: &[F],
@@ -22,8 +24,8 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
         transcript: &mut PcsTranscript<F>,
     ) -> Result<(), Error>
     where
-        ZT::L: FieldMap<F, Output = F>,
-        ZT::K: FieldMap<F, Output = F>,
+        F: PrimeField + for<'a> From<&'a ZT::L> + for<'a> From<&'a ZT::K>,
+        F::Inner: BigInteger,
     {
         validate_input::<ZT::N, F>("verify", vp.num_vars, [], [point])?;
 
@@ -34,7 +36,7 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
         Ok(())
     }
 
-    pub fn batch_verify_z<'a, F: Field>(
+    pub fn batch_verify_z<'a, F>(
         vp: &MultilinearZipParams<ZT, LC>,
         comms: impl Iterable<Item = &'a MultilinearZipCommitment>,
         points: &[Vec<F>],
@@ -42,8 +44,8 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
         transcript: &mut PcsTranscript<F>,
     ) -> Result<(), Error>
     where
-        ZT::L: FieldMap<F, Output = F>,
-        ZT::K: FieldMap<F, Output = F>,
+        F: PrimeField + for<'b> From<&'b ZT::L> + for<'b> From<&'b ZT::K>,
+        F::Inner: BigInteger,
         ZT::N: 'a,
     {
         for (i, (eval, comm)) in evals.iter().zip(comms.iter()).enumerate() {
@@ -53,11 +55,15 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
     }
 
     #[allow(clippy::type_complexity)]
-    pub(super) fn verify_testing<F: Field>(
+    pub(super) fn verify_testing<F>(
         vp: &MultilinearZipParams<ZT, LC>,
         root: &MtHash,
         transcript: &mut PcsTranscript<F>,
-    ) -> Result<Vec<(usize, Vec<ZT::K>)>, Error> {
+    ) -> Result<Vec<(usize, Vec<ZT::K>)>, Error>
+    where
+        F: PrimeField,
+        F::Inner: BigInteger,
+    {
         // Gather the coeffs and encoded combined rows per proximity test
         let mut encoded_combined_rows: Vec<(Vec<ZT::N>, Vec<ZT::M>)> =
             Vec::with_capacity(vp.linear_code.num_proximity_testing());
@@ -123,7 +129,7 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
         Ok(())
     }
 
-    fn verify_evaluation_z<F: Field>(
+    fn verify_evaluation_z<F>(
         vp: &MultilinearZipParams<ZT, LC>,
         point: &[F],
         eval: &F,
@@ -131,8 +137,8 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
         transcript: &mut PcsTranscript<F>,
     ) -> Result<(), Error>
     where
-        ZT::L: FieldMap<F, Output = F>,
-        ZT::K: FieldMap<F, Output = F>,
+        F: PrimeField + for<'b> From<&'b ZT::L> + for<'b> From<&'b ZT::K>,
+        F::Inner: BigInteger,
     {
         let q_0_combined_row = transcript.read_field_elements(vp.linear_code.row_len())?;
         let encoded_combined_row = vp.linear_code.encode_f(&q_0_combined_row);
@@ -157,7 +163,7 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
         Ok(())
     }
 
-    fn verify_proximity_q_0<F: Field>(
+    fn verify_proximity_q_0<F>(
         q_0: &Vec<F>,
         encoded_q_0_combined_row: &[F],
         column_entries: &[ZT::K],
@@ -165,14 +171,15 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
         num_rows: usize,
     ) -> Result<(), Error>
     where
-        ZT::K: FieldMap<F, Output = F>,
+        F: PrimeField + for<'b> From<&'b ZT::K>,
+        F::Inner: BigInteger,
     {
         let column_entries_comb = if num_rows > 1 {
-            let column_entries = column_entries.map_to_field();
+            let column_entries = column_entries.iter().map(F::from).collect_vec();
             inner_product(q_0, &column_entries)
             // TODO: this inner product is taking a long time.
         } else {
-            column_entries.first().unwrap().map_to_field()
+            F::from(column_entries.first().unwrap())
         };
         if column_entries_comb != encoded_q_0_combined_row[column] {
             return Err(Error::InvalidPcsOpen("Proximity failure".into()));
@@ -244,7 +251,7 @@ mod tests {
 
         let point_int: Vec<Int<INT_LIMBS>> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
-        let point_f: Vec<F> = point_int.map_to_field();
+        let point_f: Vec<F> = point_int.iter().map(F::from).collect_vec();
 
         let mut prover_transcript = PcsTranscript::new();
         TestZip::open(&pp, &poly, &data, &point_f, &mut prover_transcript).unwrap();
@@ -254,7 +261,7 @@ mod tests {
             None => panic!("failed to evaluate polynomial"),
             Some(p) => p,
         }
-        .map_to_field();
+        .into();
 
         (pp, comm, point_f, eval, proof)
     }
@@ -275,7 +282,7 @@ mod tests {
         let num_vars = 4;
         let (pp, comm, point_f, eval, proof) = setup_full_protocol(num_vars);
 
-        let one: F = 1i32.map_to_field();
+        let one: F = 1i32.into();
 
         let incorrect_eval = eval + one;
         let mut verifier_transcript = PcsTranscript::from_proof(&proof);
@@ -325,7 +332,7 @@ mod tests {
         let (pp, comm, _point_f, eval, proof) = setup_full_protocol(num_vars);
         let mut invalid_point = vec![];
         for i in 0..=num_vars {
-            invalid_point.push((100 + i as i32).map_to_field());
+            invalid_point.push((100 + i as i32).into());
         }
 
         let mut transcript = PcsTranscript::from_proof(&proof);
@@ -351,8 +358,8 @@ mod tests {
             .into_iter()
             .map(Int::from)
             .collect::<Vec<_>>();
-        let point: Vec<F> = point_int.map_to_field();
-        let eval = mle.evaluate(&point_int).unwrap().map_to_field();
+        let point: Vec<F> = point_int.iter().map(F::from).collect_vec();
+        let eval = mle.evaluate(&point_int).unwrap().into();
 
         let mut prover_tr = PcsTranscript::<F>::new();
         TestZip::open(&pp, &mle, &data, &point, &mut prover_tr).expect("open should succeed");
@@ -386,7 +393,7 @@ mod tests {
         fn evaluate_in_field(evaluations: &[Int<INT_LIMBS>], point: &[F]) -> F {
             let num_vars = point.len();
             assert_eq!(evaluations.len(), 1 << num_vars);
-            let mut current_evals: Vec<F> = evaluations.map_to_field();
+            let mut current_evals: Vec<F> = evaluations.iter().map(F::from).collect_vec();
             for p in point.iter().take(num_vars) {
                 let one_minus_p_i = FieldMap::<F>::map_to_field(&1i32) - p;
                 let mut next_evals = Vec::with_capacity(current_evals.len() / 2);
@@ -411,7 +418,7 @@ mod tests {
             .collect();
         let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations);
         let point_int: Vec<_> = (0..n).map(|_| Int::<INT_LIMBS>::random(&mut rng)).collect();
-        let point_f = point_int.map_to_field();
+        let point_f = point_int.into_iter().map(F::from).collect_vec();
 
         let (mut data, comm) = TestZip::commit(&param, &mle).unwrap();
         if !data.rows.is_empty() {
@@ -447,15 +454,15 @@ mod tests {
             .into_iter()
             .map(Int::from)
             .collect::<Vec<_>>();
-        let point: Vec<F> = point_int.map_to_field();
-        let eval = mle.evaluate(&point_int).unwrap().map_to_field();
+        let point: Vec<F> = point_int.iter().map(F::from).collect_vec();
+        let eval = mle.evaluate(&point_int).unwrap().into();
 
         let mut prover_tr = PcsTranscript::<F>::new();
         TestZip::open(&pp, &mle, &data, &point, &mut prover_tr).expect("open should succeed");
         let mut proof = prover_tr.into_proof();
 
         let row_len = pp.linear_code.row_len();
-        let bytes_per_field = <F as Field>::W::num_words() * 8;
+        let bytes_per_field = <<F as PrimeField>::Inner as BigInteger>::W::num_words() * 8;
         let q0_bytes = row_len * bytes_per_field;
         assert!(
             proof.len() >= q0_bytes,
@@ -495,8 +502,8 @@ mod tests {
             .into_iter()
             .map(Int::from)
             .collect::<Vec<_>>();
-        let point: Vec<F> = point_int.map_to_field();
-        let eval = mle.evaluate(&point_int).unwrap().map_to_field();
+        let point: Vec<F> = point_int.iter().map(F::from).collect_vec();
+        let eval = mle.evaluate(&point_int).unwrap().into();
         let mut prover_tr = PcsTranscript::<F>::new();
         TestZip::open(&pp, &mle, &data, &point, &mut prover_tr).expect("open should succeed");
         let proof = prover_tr.into_proof();
@@ -520,9 +527,9 @@ mod tests {
         let (data, comm) = TestZip::commit(&pp, &mle).expect("commit should succeed");
 
         let point_int = vec![Int::from(0i64); n];
-        let point: Vec<F> = point_int.map_to_field();
+        let point: Vec<F> = point_int.iter().map(F::from).collect_vec();
 
-        let eval = mle.evaluate(&point_int).unwrap().map_to_field();
+        let eval = mle.evaluate(&point_int).unwrap().into();
 
         let mut prover_tr = PcsTranscript::<F>::new();
         TestZip::open(&pp, &mle, &data, &point, &mut prover_tr).expect("open should succeed");
@@ -550,8 +557,8 @@ mod tests {
             .into_iter()
             .map(Int::from)
             .collect::<Vec<_>>();
-        let point: Vec<F> = point_int.map_to_field();
-        let eval = mle.evaluate(&point_int).unwrap().map_to_field();
+        let point: Vec<F> = point_int.iter().map(F::from).collect_vec();
+        let eval = mle.evaluate(&point_int).unwrap().into();
 
         let mut prover_tr = PcsTranscript::<F>::new();
         TestZip::open(&pp, &mle, &data, &point, &mut prover_tr).expect("open should succeed");

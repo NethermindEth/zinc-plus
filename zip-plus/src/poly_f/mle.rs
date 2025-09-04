@@ -5,6 +5,10 @@ use ark_std::{
     fmt::Debug,
     ops::{Add, AddAssign, Index, Neg, SubAssign},
 };
+use crypto_primitives::PrimeField;
+
+/// Exports
+pub use dense::DenseMultilinearExtension;
 
 /// This trait describes an interface for the multilinear extension
 /// of an array.
@@ -13,7 +17,7 @@ use ark_std::{
 ///
 /// Index represents a point, which is a vector in {0,1}^`num_vars` in little
 /// endian form. For example, `0b1011` represents `P(1,1,0,1)`
-pub trait MultilinearExtension<F: Field>:
+pub trait MultilinearExtension<F>:
     Sized
     + Clone
     + Debug
@@ -26,6 +30,8 @@ pub trait MultilinearExtension<F: Field>:
     + for<'a> AddAssign<(F, &'a Self)>
     + for<'a> SubAssign<&'a Self>
     + Index<usize>
+where
+    F: PrimeField,
 {
     /// Reduce the number of variables of `self` by fixing the
     /// `partial_point.len()` variables at `partial_point`.
@@ -35,6 +41,7 @@ pub trait MultilinearExtension<F: Field>:
     /// fixing the `partial_point.len()` variables at `partial_point`.
     fn fixed_variables(&self, partial_point: &[F]) -> Self;
 }
+
 /// swap the bits of `x` from position `a..a+n` to `b..b+n` and from `b..b+n` to
 /// `a..a+n` in little endian order
 pub(crate) fn swap_bits(x: usize, a: usize, b: usize, n: usize) -> usize {
@@ -44,8 +51,3 @@ pub(crate) fn swap_bits(x: usize, a: usize, b: usize, n: usize) -> usize {
     let global_xor_mask = (local_xor_mask << a) | (local_xor_mask << b);
     x ^ global_xor_mask
 }
-
-/// Exports
-pub use dense::DenseMultilinearExtension;
-
-use crate::traits::Field;

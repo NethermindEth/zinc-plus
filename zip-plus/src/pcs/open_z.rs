@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 use ark_std::{borrow::Cow, vec::Vec};
-use itertools::izip;
-
+use itertools::{izip, Itertools};
+use crypto_primitives::PrimeField;
 use super::{
     structs::{MultilinearZip, MultilinearZipData},
     utils::{ColumnOpening, left_point_to_tensor, validate_input},
@@ -12,12 +12,13 @@ use crate::{
     pcs::structs::MultilinearZipParams,
     pcs_transcript::PcsTranscript,
     poly_z::mle::DenseMultilinearExtension,
-    traits::{Field, FieldMap, ZipTypes},
+    traits::{ZipTypes},
     utils::{combine_rows, expand},
 };
+use crate::traits::BigInteger;
 
 impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
-    pub fn open<F: Field>(
+    pub fn open<F>(
         pp: &MultilinearZipParams<ZT, LC>,
         poly: &DenseMultilinearExtension<ZT::N>,
         commit_data: &MultilinearZipData<ZT::K>,
@@ -25,7 +26,8 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
         transcript: &mut PcsTranscript<F>,
     ) -> Result<(), Error>
     where
-        ZT::N: FieldMap<F, Output = F>,
+        F: PrimeField + for<'a> From<&'a ZT::N>,
+        F::Inner: BigInteger,
     {
         validate_input("open", pp.num_vars, [poly], [point])?;
 
@@ -37,7 +39,7 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
     }
 
     // TODO Apply 2022/1355 https://eprint.iacr.org/2022/1355.pdf#page=30
-    pub fn batch_open<F: Field>(
+    pub fn batch_open<F>(
         pp: &MultilinearZipParams<ZT, LC>,
         polys: &[DenseMultilinearExtension<ZT::N>],
         comms: &[MultilinearZipData<ZT::K>],
@@ -45,7 +47,8 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
         transcript: &mut PcsTranscript<F>,
     ) -> Result<(), Error>
     where
-        ZT::N: FieldMap<F, Output = F>,
+        F: PrimeField + for<'a> From<&'a ZT::N>,
+        F::Inner: BigInteger,
     {
         for (poly, comm, point) in izip!(polys.iter(), comms.iter(), points.iter()) {
             Self::open(pp, poly, comm, point, transcript)?;
@@ -55,14 +58,15 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
 
     // Subprotocol functions
 
-    fn prove_evaluation_phase<F: Field>(
+    fn prove_evaluation_phase<F>(
         pp: &MultilinearZipParams<ZT, LC>,
         transcript: &mut PcsTranscript<F>,
         point: &[F],
         poly: &DenseMultilinearExtension<ZT::N>,
     ) -> Result<(), Error>
     where
-        ZT::N: FieldMap<F, Output = F>,
+        F: PrimeField + for<'a> From<&'a ZT::N>,
+        F::Inner: BigInteger,
     {
         let num_rows = pp.num_rows;
         let row_len = pp.linear_code.row_len();
@@ -71,7 +75,7 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
         // elements first
         let q_0 = left_point_to_tensor(num_rows, point)?;
 
-        let evaluations = poly.evaluations.map_to_field();
+        let evaluations = poly.evaluations.iter().map(F::from).collect_vec();
 
         let q_0_combined_row = if num_rows > 1 {
             // Return the evaluation row combination
@@ -86,12 +90,16 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
         transcript.write_field_elements(&q_0_combined_row)
     }
 
-    pub(super) fn prove_testing_phase<F: Field>(
+    pub(super) fn prove_testing_phase<F>(
         pp: &MultilinearZipParams<ZT, LC>,
         poly: &DenseMultilinearExtension<ZT::N>,
         commit_data: &MultilinearZipData<ZT::K>,
         transcript: &mut PcsTranscript<F>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error>
+    where
+        F: PrimeField + for<'a> From<&'a ZT::N>,
+        F::Inner: BigInteger,
+    {
         if pp.num_rows > 1 {
             // If we can take linear combinations
             // perform the proximity test an arbitrary number of times
@@ -116,12 +124,16 @@ impl<ZT: ZipTypes, LC: LinearCode<ZT>> MultilinearZip<ZT, LC> {
         Ok(())
     }
 
-    pub(super) fn open_merkle_trees_for_column<F: Field>(
+    pub(super) fn open_merkle_trees_for_column<F>(
         pp: &MultilinearZipParams<ZT, LC>,
         commit_data: &MultilinearZipData<ZT::K>,
         column: usize,
         transcript: &mut PcsTranscript<F>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error>
+    where
+        F: PrimeField,
+        F::Inner: BigInteger,
+    {
         let column_values = commit_data
             .rows
             .iter()

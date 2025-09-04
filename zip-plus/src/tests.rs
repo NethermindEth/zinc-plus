@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use ark_std::{UniformRand, vec, vec::Vec};
-
+use itertools::Itertools;
 use crate::{
     code::DefaultLinearCodeSpec,
     code_raa::RaaCode,
@@ -11,7 +11,6 @@ use crate::{
     pcs::structs::MultilinearZip,
     pcs_transcript::PcsTranscript,
     poly_z::mle::DenseMultilinearExtension,
-    traits::FieldMap,
     transcript::KeccakTranscript,
 };
 
@@ -75,7 +74,7 @@ fn test_zip_opening() {
 
     let (data, _) = TestZip::commit(&param, &mle).unwrap();
 
-    let point = vec![0i64, 0i64, 0i64].map_to_field();
+    let point = vec![0i64, 0i64, 0i64].into_iter().map(|v| v.into()).collect_vec();
 
     let res = TestZip::open(&param, &mle, &data, &point, &mut transcript);
 
@@ -97,8 +96,8 @@ fn test_failing_zip_evaluation() {
 
     let (data, comm) = TestZip::commit(&param, &mle).unwrap();
 
-    let point = vec![0i64, 0i64, 0i64].map_to_field();
-    let eval: F = 7i64.map_to_field();
+    let point = vec![0i64, 0i64, 0i64].into_iter().map(|v| v.into()).collect_vec();
+    let eval: F = 7i64.into();
 
     let mut transcript = PcsTranscript::new();
     let _ = TestZip::open(&param, &mle, &data, &point, &mut transcript);
@@ -128,9 +127,9 @@ fn test_zip_evaluation() {
     let (data, comm) = TestZip::commit(&param, &mle).unwrap();
 
     let point: Vec<_> = (0..n).map(|_| Int::<I>::from(i8::rand(&mut rng))).collect();
-    let eval: F = mle.evaluate(&point).unwrap().map_to_field();
+    let eval: F = mle.evaluate(&point).unwrap().into();
 
-    let point = point.map_to_field();
+    let point = point.into_iter().map(|p| p.into()).collect_vec();
     let mut transcript = PcsTranscript::new();
     let _ = TestZip::open(&param, &mle, &data, &point, &mut transcript);
 
@@ -168,10 +167,10 @@ fn test_zip_batch_evaluation() {
     let point: Vec<_> = (0..n).map(|_| Int::<I>::from(i8::rand(&mut rng))).collect();
     let eval: Vec<_> = mles
         .iter()
-        .map(|mle| mle.evaluate(&point).unwrap().map_to_field())
+        .map(|mle| mle.evaluate(&point).unwrap().into())
         .collect();
 
-    let point: Vec<F> = point.map_to_field();
+    let point: Vec<F> = point.iter().map(|v| v.into()).collect_vec();
     let points: Vec<_> = (0..m).map(|_| point.clone()).collect();
     let mut transcript = PcsTranscript::new();
     let _ = TestZip::batch_open(&param, &mles, &data, &points, &mut transcript);

@@ -1,10 +1,10 @@
 use ark_std::vec::Vec;
 use sha3::{Digest, Keccak256};
-
+use crypto_primitives::PrimeField;
 use crate::{
-    field::{Int, config::FieldConfigBase},
+    field::{Int},
     pcs::{structs::ZipTranscript, utils::AsWords},
-    traits::{BigInteger, Field, FieldMap, Integer, PrimitiveConversion, Words},
+    traits::{BigInteger, Integer, PrimitiveConversion, Words},
 };
 
 /// A cryptographic transcript implementation using the Keccak-256 hash
@@ -57,13 +57,27 @@ impl KeccakTranscript {
     /// Absorbs a field element into the transcript.
     /// Delegates to the field element's implementation of
     /// absorb_into_transcript.
-    pub fn absorb_random_field<F: Field>(&mut self, v: &F) {
-        v.absorb_into_transcript(self)
+    pub fn absorb_random_field<F>(&mut self, v: &F)
+    where
+        F: PrimeField,
+        F::Inner: BigInteger,
+    {
+        self.absorb(&[0x3]);
+        self.absorb(&F::MODULUS.to_bytes_be());
+        self.absorb(&[0x5]);
+
+        self.absorb(&[0x1]);
+        self.absorb(&v.inner().to_bytes_be());
+        self.absorb(&[0x3])
     }
 
     /// Absorbs a slice of field elements into the transcript.
     /// Processes each field element in the slice sequentially.
-    pub fn absorb_slice<F: Field>(&mut self, slice: &[F]) {
+    pub fn absorb_slice<F>(&mut self, slice: &[F])
+    where
+        F: PrimeField,
+        F::Inner: BigInteger,
+    {
         for field_element in slice.iter() {
             self.absorb_random_field(field_element);
         }
@@ -87,16 +101,20 @@ impl KeccakTranscript {
     /// Generates a pseudorandom field element as a challenge based on the
     /// current transcript state.
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
-    pub fn get_challenge<F: Field>(&mut self) -> F {
+    pub fn get_challenge<F>(&mut self) -> F
+    where
+        F: PrimeField,
+        F::Inner: BigInteger,
+    {
         let (lo, hi) = self.get_challenge_limbs();
-        let modulus = F::C::modulus();
+        let modulus = F::MODULUS;
         let challenge_num_bits = modulus.num_bits() - 1;
-        if F::W::num_words() == 1 {
+        if <F::Inner as BigInteger>::W::num_words() == 1 {
             let lo_mask = (1u64 << challenge_num_bits) - 1;
 
             let truncated_lo = lo as u64 & lo_mask;
 
-            let challenge: F = truncated_lo.map_to_field();
+            let challenge = F::from(truncated_lo);
             return challenge;
         }
         if challenge_num_bits < 128 {
@@ -104,14 +122,12 @@ impl KeccakTranscript {
 
             let truncated_lo = lo & lo_mask;
 
-            let challenge: F = truncated_lo.map_to_field();
+            let challenge: F = F::from(truncated_lo);
             challenge
         } else if challenge_num_bits >= 256 {
-            let two_to_128 = F::B::from_bits_le(&(0..196).map(|i| i == 128).collect::<Vec<bool>>())
-                .map_to_field();
+            let two_to_128 = F::from(F::Inner::from_bits_le(&(0..196).map(|i| i == 128).collect::<Vec<bool>>()));
 
-            let challenge: F = <u128 as FieldMap<F>>::map_to_field(&lo)
-                + two_to_128 * <u128 as FieldMap<F>>::map_to_field(&hi);
+            let challenge: F = F::from(lo) + two_to_128 * F::from(hi);
             challenge
         } else {
             let hi_bits_to_keep = challenge_num_bits - 128;
@@ -119,18 +135,20 @@ impl KeccakTranscript {
 
             let truncated_hi = hi & hi_mask;
 
-            let two_to_128 = F::B::from_bits_le(&(0..196).map(|i| i == 128).collect::<Vec<bool>>())
-                .map_to_field();
+            let two_to_128 = F::from(F::Inner::from_bits_le(&(0..196).map(|i| i == 128).collect::<Vec<bool>>()));
 
-            let ret: F = <u128 as FieldMap<F>>::map_to_field(&lo)
-                + two_to_128 * <u128 as FieldMap<F>>::map_to_field(&truncated_hi);
+            let ret: F = F::from(lo) + two_to_128 * F::from(truncated_hi);
             ret
         }
     }
 
     /// Generates pseudorandom field elements as challenges based on the current
     /// transcript state.
-    pub fn get_challenges<F: Field>(&mut self, n: usize) -> Vec<F> {
+    pub fn get_challenges<F>(&mut self, n: usize) -> Vec<F>
+    where
+        F: PrimeField,
+        F::Inner: BigInteger
+    {
         let mut challenges = Vec::with_capacity(n);
         challenges.extend((0..n).map(|_| self.get_challenge::<F>()));
         challenges
@@ -209,7 +227,6 @@ mod tests {
     use crate::{
         define_field_config,
         field::{BigInt, RandomField},
-        traits::FieldMap,
     };
 
     define_field_config!(
@@ -228,7 +245,7 @@ mod tests {
             "693058076479703886486101269644733982722902192016595549603371045888466087870",
         )
         .unwrap();
-        let expected_field = expected_bigint.map_to_field();
+        let expected_field = expected_bigint.into();
 
         assert_eq!(challenge, expected_field);
     }
