@@ -1,120 +1,104 @@
 #![allow(non_snake_case)]
 
-use std::iter::{Product, Sum};
-use crate::traits::{Words as WordsTrait};
-use ark_ff::UniformRand;
+pub mod arithmetic;
+pub mod comparison;
+pub mod conversion;
+pub mod numeric;
+mod utils;
+
+use std::fmt;
+use crypto_bigint::modular::{ConstMontyForm, ConstMontyParams};
+use crypto_bigint::rand_core::TryRngCore;
 use crypto_bigint::Random;
-use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedShl, CheckedShr, CheckedSub, ConstOne, ConstZero, Pow};
-use std::marker::PhantomData;
+use std::fmt::{Display, Formatter};
 use std::ops::{Add, AddAssign, Div, Mul, MulAssign, Shl, Shr, Sub, SubAssign};
 
-mod arithmetic;
-mod biginteger;
-mod comparison;
-pub mod config;
-mod conversion;
-mod constant;
-mod int;
-mod uint;
-
-pub use biginteger::{
-    BigInt, BigInteger64, BigInteger128, BigInteger256, BigInteger320, BigInteger384,
-    BigInteger448, BigInteger768, BigInteger832, Words, signed_mod_reduction,
-};
-pub use config::FieldConfig;
+use crate::traits::ConstNumBytes;
 use crypto_primitives::{ConstRing, Field, IntRing, PrimeField, Ring};
-pub use int::Int;
-pub use uint::Uint;
+use crate::utils::WORD_FACTOR;
 
-use crate::{
-    field::config::{FieldConfigBase, FieldConfigOps},
-    traits::{BigInteger},
-    transcript::KeccakTranscript,
-};
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct ConstMontyField<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize>(pub ConstMontyForm<Mod, LIMBS>);
 
-#[derive(Copy, Clone)]
-pub struct RandomField<const N: usize, FC: FieldConfig<BigInt<N>>> {
-    pub value: BigInt<N>,
-    phantom_data: PhantomData<FC>,
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> Display for ConstMontyField<Mod, LIMBS> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{} (mod {})", self.0.retrieve(), Mod::PARAMS.modulus())
+    }
 }
 
-impl<const N: usize, FC: FieldConfig<BigInt<N>>> Ring for RandomField<N, FC> {}
+impl<MOD: ConstMontyParams<LIMBS>, const LIMBS: usize> Random for ConstMontyField<MOD, LIMBS> {
+    fn try_random<R: TryRngCore + ?Sized>(rng: &mut R) -> Result<Self, R::Error> {
+        Ok(Self(ConstMontyForm::try_random(rng)?))
+    }
+}
 
-impl<const N: usize, FC: FieldConfig<BigInt<N>>> ConstRing for RandomField<N, FC> {}
+impl<MOD: ConstMontyParams<LIMBS>, const LIMBS: usize> Ring for ConstMontyField<MOD, LIMBS> {}
 
-impl<const N: usize, FC: FieldConfig<BigInt<N>>> IntRing for RandomField<N, FC> {}
+impl<MOD: ConstMontyParams<LIMBS>, const LIMBS: usize> ConstRing for ConstMontyField<MOD, LIMBS> {}
 
-impl<const N: usize, FC: FieldConfig<BigInt<N>>> Field for RandomField<N, FC> {}
+impl<MOD: ConstMontyParams<LIMBS>, const LIMBS: usize> IntRing for ConstMontyField<MOD, LIMBS> {}
 
-impl<const N: usize, FC: FieldConfig<BigInt<N>>> PrimeField for RandomField<N, FC> {
-    type Inner = BigInt<N>;
-    const MODULUS: Self::Inner = FC::modulus();
+impl<MOD: ConstMontyParams<LIMBS>, const LIMBS: usize> Field for ConstMontyField<MOD, LIMBS> {}
+
+impl<MOD: ConstMontyParams<LIMBS>, const LIMBS: usize> PrimeField for ConstMontyField<MOD, LIMBS> {
+    type Inner = ConstMontyForm<MOD, LIMBS>;
+    const MODULUS: Self::Inner = ConstMontyForm::<MOD, LIMBS>::new(MOD::PARAMS.modulus().as_ref());
 
     #[inline(always)]
     fn new_unchecked(value: Self::Inner) -> Self {
-        Self {
-            value,
-            phantom_data: PhantomData,
-        }
+        Self(value)
     }
 
     #[inline(always)]
     fn inner(&self) -> &Self::Inner {
-        &self.value
+        &self.0
     }
 }
 
-impl<const N: usize, FC: FieldConfig<BigInt<N>>> RandomField<N, FC> {
-    #[inline]
-    pub fn into_bigint(self) -> BigInt<N> {
-        self.value.demontgomery(&FC::modulus(), FC::inv())
+pub type F64<MOD> = ConstMontyField<MOD, { WORD_FACTOR }>;
+pub type F128<MOD> = ConstMontyField<MOD, { 2 * WORD_FACTOR }>;
+pub type F192<MOD> = ConstMontyField<MOD, { 3 * WORD_FACTOR }>;
+pub type F256<MOD> = ConstMontyField<MOD, { 4 * WORD_FACTOR }>;
+pub type F320<MOD> = ConstMontyField<MOD, { 5 * WORD_FACTOR }>;
+pub type F384<MOD> = ConstMontyField<MOD, { 6 * WORD_FACTOR }>;
+pub type F448<MOD> = ConstMontyField<MOD, { 7 * WORD_FACTOR }>;
+pub type F512<MOD> = ConstMontyField<MOD, { 8 * WORD_FACTOR }>;
+pub type F576<MOD> = ConstMontyField<MOD, { 9 * WORD_FACTOR }>;
+pub type F640<MOD> = ConstMontyField<MOD, { 10 * WORD_FACTOR }>;
+pub type F704<MOD> = ConstMontyField<MOD, { 11 * WORD_FACTOR }>;
+pub type F768<MOD> = ConstMontyField<MOD, { 12 * WORD_FACTOR }>;
+pub type F832<MOD> = ConstMontyField<MOD, { 13 * WORD_FACTOR }>;
+pub type F896<MOD> = ConstMontyField<MOD, { 14 * WORD_FACTOR }>;
+pub type F960<MOD> = ConstMontyField<MOD, { 15 * WORD_FACTOR }>;
+pub type F1024<MOD> = ConstMontyField<MOD, { 16 * WORD_FACTOR }>;
+pub type F1280<MOD> = ConstMontyField<MOD, { 20 * WORD_FACTOR }>;
+pub type F1536<MOD> = ConstMontyField<MOD, { 24 * WORD_FACTOR }>;
+pub type F1792<MOD> = ConstMontyField<MOD, { 28 * WORD_FACTOR }>;
+pub type F2048<MOD> = ConstMontyField<MOD, { 32 * WORD_FACTOR }>;
+pub type F3072<MOD> = ConstMontyField<MOD, { 48 * WORD_FACTOR }>;
+pub type F3584<MOD> = ConstMontyField<MOD, { 56 * WORD_FACTOR }>;
+pub type F4096<MOD> = ConstMontyField<MOD, { 64 * WORD_FACTOR }>;
+pub type F4224<MOD> = ConstMontyField<MOD, { 66 * WORD_FACTOR }>;
+pub type F4352<MOD> = ConstMontyField<MOD, { 68 * WORD_FACTOR }>;
+pub type F6144<MOD> = ConstMontyField<MOD, { 96 * WORD_FACTOR }>;
+pub type F8192<MOD> = ConstMontyField<MOD, { 128 * WORD_FACTOR }>;
+pub type F16384<MOD> = ConstMontyField<MOD, { 256 * WORD_FACTOR }>;
+pub type F32768<MOD> = ConstMontyField<MOD, { 512 * WORD_FACTOR }>;
+
+#[cfg(test)]
+mod tests {
+    use crypto_bigint::{const_monty_params, U128};
+
+    use super::*;
+
+    const_monty_params!(ModP, U128, "7fffffffffffffffffffffffffffffff");
+
+    type F = ConstMontyField<ModP, { U128::LIMBS }>;
+
+    #[test]
+    fn basic_add_smoke() {
+        let a: F = 123u64.into();
+        let b: F = 456u64.into();
+        assert_eq!(a + b, F::from(579u64));
     }
 }
-
-impl<const N: usize, FC: FieldConfig<BigInt<N>>> Random for RandomField<N, FC> {
-    fn random(rng: &mut (impl ark_std::rand::RngCore + ?Sized)) -> Self {
-        loop {
-            let mut value = BigInt::rand(rng);
-            let modulus = FC::modulus();
-            let shave_bits = 64 * N - modulus.num_bits() as usize;
-            // Mask away the unused bits at the beginning.
-            assert!(shave_bits <= 64);
-            let mask = if shave_bits == 64 {
-                0
-            } else {
-                u64::MAX >> shave_bits
-            };
-
-            let val = value.last_mut();
-            *val &= mask;
-
-            if value < modulus {
-                return Self::from(value);
-            }
-        }
-    }
-}
-
-impl<const N: usize, FC: FieldConfig<BigInt<N>>> ark_std::fmt::Debug for RandomField<N, FC> {
-    fn fmt(&self, f: &mut ark_std::fmt::Formatter<'_>) -> ark_std::fmt::Result {
-        write!(f, "{} in Z_{}", self.clone().into_bigint(), FC::modulus())
-    }
-}
-
-impl<const N: usize, FC: FieldConfig<BigInt<N>>> ark_std::fmt::Display for RandomField<N, FC> {
-    fn fmt(&self, f: &mut ark_std::fmt::Formatter<'_>) -> ark_std::fmt::Result {
-        write!(f, "{}", self.clone().into_bigint())
-    }
-}
-
-impl<const N: usize, FC: FieldConfig<BigInt<N>>> Default for RandomField<N, FC> {
-    fn default() -> Self {
-        Self {
-            value: BigInt::ZERO,
-            phantom_data: PhantomData,
-        }
-    }
-}
-
-unsafe impl<const N: usize, FC: FieldConfig<BigInt<N>>> Send for RandomField<N, FC> {}
-unsafe impl<const N: usize, FC: FieldConfig<BigInt<N>>> Sync for RandomField<N, FC> {}

@@ -1,35 +1,29 @@
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::cast_lossless,
-    clippy::cast_sign_loss
-)]
+use std::{collections::BTreeSet, ops::Range};
+use crypto_bigint::{Int, Word};
 
-use ark_std::{collections::BTreeSet, ops::Range};
-
-use crate::{
-    define_random_field_zip_types, implement_random_field_zip_types, pcs::structs::ZipTranscript,
-    traits::Integer,
-};
+use crate::traits::Transcript;
 
 const INT_LIMBS: usize = 1;
 
-define_random_field_zip_types!();
-implement_random_field_zip_types!(INT_LIMBS);
+const N: usize = INT_LIMBS;
+const L: usize = INT_LIMBS * 2;
+const K: usize = INT_LIMBS * 4;
+const M: usize = INT_LIMBS * 8;
 
 #[derive(Default)]
 pub struct MockTranscript {
     pub counter: i64,
 }
 
-impl<L: Integer> ZipTranscript<L> for MockTranscript {
-    fn get_encoding_element(&mut self) -> L {
+impl Transcript for MockTranscript {
+    fn get_encoding_element<const L: usize>(&mut self) -> Int<L> {
         self.counter += 1;
-        L::from(self.counter)
+        Int::from(self.counter)
     }
 
     fn get_u64(&mut self) -> u64 {
         self.counter += 1;
-        self.counter as u64
+        self.counter as Word
     }
 
     fn sample_unique_columns(

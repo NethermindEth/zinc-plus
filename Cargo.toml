@@ -12,6 +12,8 @@ publish = false
 
 [workspace.dependencies]
 crypto-primitives = { path = "crypto-primitives" }
+criterion = "0.7.0"
+proptest = "1.7.0"
 
 [workspace.lints.rust]
 missing_docs = "allow"  # TODO(alex): replace with "deny" once code has been more-or-less stabilized

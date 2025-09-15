@@ -1,36 +1,28 @@
-use ark_ff::Zero;
-use ark_std::{
-    cfg_iter_mut,
-    fmt::{Display, Formatter, Result as FmtResult},
-    format,
+use std::{
+    fmt,
+    fmt::{Display, Formatter},
     io::Write,
-    iterable::Iterable,
-    vec,
-    vec::Vec,
 };
-use crypto_bigint::Word;
+use ark_std::cfg_iter_mut;
+use ark_std::iterable::Iterable;
+use crypto_bigint::{Int, Word};
 use itertools::Itertools;
-use uninit::AsMaybeUninit;
-
-use super::{error::MerkleError, structs::MultilinearZipData};
-use crate::{
-    Error,
-    pcs_transcript::PcsTranscript,
-    poly_f::mle::DenseMultilinearExtension as MLE_F,
-    poly_z::mle::DenseMultilinearExtension as MLE_Z,
-    traits::{Integer},
-};
-
+use num_traits::{FromBytes, ToBytes, Zero};
 use p3_commit::{BatchOpeningRef, Mmcs};
 use p3_field::Packable;
 use p3_matrix::{Dimensions, Matrix as P3Matrix, dense::RowMajorMatrix};
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{CryptographicHasher, PseudoCompressionFunction};
-
-#[cfg(feature = "parallel")]
-use rayon::iter::*;
+use uninit::AsMaybeUninit;
 use crypto_primitives::PrimeField;
-use crate::traits::BigInteger;
+
+use super::{error::MerkleError, structs::MultilinearZipData};
+use crate::{
+    Error,
+    pcs_transcript::PcsTranscript,
+    poly::dense::DenseMultilinearExtension,
+};
+use crate::utils::ReinterpretVector;
 
 fn err_too_many_variates(function: &str, upto: usize, got: usize) -> Error {
     Error::InvalidPcsParam(format!(
@@ -39,11 +31,11 @@ fn err_too_many_variates(function: &str, upto: usize, got: usize) -> Error {
 }
 
 // Ensures that polynomials and evaluation points are of appropriate size
-pub(super) fn validate_input<'a, I: Integer + 'a, PT: 'a>(
+pub(super) fn validate_input<'a, T: 'a, F: 'a>(
     function: &str,
     param_num_vars: usize,
-    polys: impl Iterable<Item = &'a MLE_Z<I>>,
-    points: impl Iterable<Item = &'a [PT]>,
+    polys: impl Iterable<Item = &'a DenseMultilinearExtension<T>>,
+    points: impl Iterable<Item = &'a [F]>,
 ) -> Result<(), Error> {
     // Ensure all the number of variables in the polynomials don't exceed the limit
     for poly in polys.iter() {
@@ -94,7 +86,7 @@ impl Default for MtHash {
 }
 
 impl Display for MtHash {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let blake3_hash: blake3::Hash = self.0.into();
         <blake3::Hash as Display>::fmt(&blake3_hash, f)
     }
@@ -157,7 +149,11 @@ impl<T> MerkleTree<T>
 where
     T: Packable + AsWords + Clone + Send + Sync,
 {
-    pub fn new(rows: &[T], row_width: usize) -> Self {
+    pub fn new<S>(rows: &[S], row_width: usize) -> Self
+    where
+        S: ReinterpretVector<T>,
+        T: ReinterpretVector<S>,
+    {
         assert!(rows.len().is_power_of_two());
         assert!(rows.len().is_multiple_of(row_width));
         assert!(row_width > 0);
@@ -167,6 +163,7 @@ where
         let matrix = {
             let mut columns: Vec<T> = Vec::with_capacity(rows.len());
             let column_height = rows.len() / row_width;
+            let rows = unsafe { ReinterpretVector::reinterpret_slice(rows) };
             transpose::transpose(
                 rows.as_ref_uninit(),
                 columns.spare_capacity_mut(),
@@ -230,16 +227,19 @@ impl MerkleProof {
         Ok(Self::new(path, mt.matrix_dims))
     }
 
-    pub fn verify<T>(
+    pub fn verify<S, T>(
         &self,
         root: &MtHash,
-        leaf_values: Vec<T>,
+        leaf_values: Vec<S>,
         leaf_index: usize,
     ) -> Result<(), MerkleError>
     where
+        S: ReinterpretVector<T>,
         T: Packable + AsWords + Clone,
     {
         let prover = MtMmcs::<T>::new(MtHasher, MtPerm);
+
+        let leaf_values = unsafe { ReinterpretVector::reinterpret_vector(leaf_values) };
 
         let values = vec![leaf_values];
         let proof = self.path.iter().map(|h| h.0).collect_vec();
@@ -253,7 +253,7 @@ impl MerkleProof {
 }
 
 impl Display for MerkleProof {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         writeln!(f, "Merkle Path: {}", self.path.iter().join(", "))?;
         writeln!(f, "Matrix Dimensions: {}", self.matrix_dims)?;
         Ok(())
@@ -269,16 +269,11 @@ impl Display for MerkleProof {
 pub struct ColumnOpening {}
 
 impl ColumnOpening {
-    pub fn open_at_column<F, M>(
+    pub fn open_at_column<const K: usize>(
         column: usize,
-        commit_data: &MultilinearZipData<M>,
-        transcript: &mut PcsTranscript<F>,
-    ) -> Result<(), MerkleError>
-    where
-        F: PrimeField,
-        F::Inner: BigInteger,
-        M: Integer
-    {
+        commit_data: &MultilinearZipData<K>,
+        transcript: &mut PcsTranscript,
+    ) -> Result<(), MerkleError> {
         let merkle_path = MerkleProof::create_proof(&commit_data.merkle_tree, column)?;
         transcript
             .write_merkle_proof(&merkle_path)
@@ -286,17 +281,12 @@ impl ColumnOpening {
         Ok(())
     }
 
-    pub fn verify_column<F, T>(
+    pub fn verify_column<const N: usize>(
         root: &MtHash,
-        column: &[T],
+        column: &[Int<N>],
         column_index: usize,
-        transcript: &mut PcsTranscript<F>,
-    ) -> Result<(), MerkleError>
-    where
-        F: PrimeField,
-        F::Inner: BigInteger,
-        T: Packable + AsWords + Clone
-    {
+        transcript: &mut PcsTranscript,
+    ) -> Result<(), MerkleError> {
         let proof = transcript
             .read_merkle_proof()
             .map_err(|_| MerkleError::FailedMerkleProofReading)?;
@@ -319,15 +309,15 @@ where
     let (hi, lo) = point.split_at(point.len() - num_rows.ilog2() as usize);
     // TODO: get rid of these unwraps.
     let q_0 = if !lo.is_empty() {
-        build_eq_x_r_f(lo).unwrap()
+        build_eq_x_r(lo).unwrap()
     } else {
-        MLE_F::zero()
+        DenseMultilinearExtension::zero()
     };
 
     let q_1 = if !hi.is_empty() {
-        build_eq_x_r_f(hi).unwrap()
+        build_eq_x_r(hi).unwrap()
     } else {
-        MLE_F::zero()
+        DenseMultilinearExtension::zero()
     };
 
     Ok((q_0.evaluations, q_1.evaluations))
@@ -339,12 +329,12 @@ where
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r_f<F>(r: &[F]) -> Result<MLE_F<F>, ArithErrors>
+pub fn build_eq_x_r<F>(r: &[F]) -> Result<DenseMultilinearExtension<F>, ArithErrors>
 where
     F: PrimeField,
 {
     let evals = build_eq_x_r_vec(r)?;
-    let mle = MLE_F::from_evaluations_vec(r.len(), evals);
+    let mle = DenseMultilinearExtension::from_evaluations_vec(r.len(), evals);
 
     Ok(mle)
 }
@@ -433,9 +423,9 @@ pub(super) fn left_point_to_tensor<F>(
     let (_, lo) = point.split_at(point.len() - num_rows.ilog2() as usize);
     // TODO: get rid of these unwraps.
     let q_0 = if !lo.is_empty() {
-        build_eq_x_r_f(lo).unwrap()
+        build_eq_x_r(lo).unwrap()
     } else {
-        MLE_F::<F>::zero()
+        DenseMultilinearExtension::zero()
     };
     Ok(q_0.evaluations)
 }
@@ -449,10 +439,13 @@ pub enum ArithErrors {
 
 #[cfg(test)]
 mod tests {
-    use crypto_bigint::Random;
+    use crypto_bigint::{Int, Random};
+    use rand::rng;
 
-    use super::*;
-    use crate::{field::Int, utils::combine_rows};
+    use crate::{
+        pcs::{MerkleTree, utils::MerkleProof},
+        utils::combine_rows,
+    };
 
     #[test]
     fn test_basic_combination() {
@@ -496,7 +489,7 @@ mod tests {
     fn test_merkle_proof() {
         const N: usize = 3;
         let leaves_len = 1024;
-        let mut rng = ark_std::test_rng();
+        let mut rng = rng();
         let leaves_data = (0..leaves_len)
             .map(|_| Int::random(&mut rng))
             .collect::<Vec<Int<N>>>();

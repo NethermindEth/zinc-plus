@@ -18,7 +18,7 @@ pub trait Field:
 // TODO: FROM<uX>
 pub trait PrimeField: Field + IntRing + From<u64> + From<u128> + From<Self::Inner> + Inv<Output = Option<Self>> {
     /// Underlying representation of an element
-    type Inner: IntRing;
+    type Inner;
 
     const MODULUS: Self::Inner;
 

@@ -29,8 +29,8 @@ pub trait Ring:
     + CheckedShr
     + Pow<u32>
     + AddAssign
-    + MulAssign
     + SubAssign
+    + MulAssign
     + Sum
     + Product
     // Arithmetic operations with rhs reference
@@ -38,6 +38,7 @@ pub trait Ring:
     + for<'a> Sub<&'a Self, Output=Self>
     + for<'a> Mul<&'a Self, Output=Self>
     + for<'a> AddAssign<&'a Self>
+    + for<'a> SubAssign<&'a Self>
     + for<'a> MulAssign<&'a Self>
     + for<'a> Sum<&'a Self>
     + for<'a> Product<&'a Self>
@@ -53,7 +54,6 @@ pub trait ConstRing:
 pub trait IntRing:
     ConstRing
     + PartialOrd
-    + Ord
     // Arithmetic operations consuming rhs
     + CheckedRem
     + RemAssign

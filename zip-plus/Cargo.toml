@@ -18,17 +18,17 @@ ark-serialize = "0.5"
 
 itertools = "0.14"
 thiserror = "2.0"
-crypto-bigint = "0.6"
+crypto-bigint = { version = "0.7.0-rc.2", features = ["zeroize"] }
 displaydoc = "0.2"
 sha3 = "0.10"
 num-traits = "0.2"
 num-integer = "0.1"
 rand = "0.9"
+rand_core = "0.9"
 zeroize = "1.8"
 num-bigint = "0.4"
 crypto-primes = "0.6"
 rayon = { version = "1.10", optional = true }
-criterion = "0.7"
 blake3 = "1.8.2"
 transpose = "0.2.3"
 
@@ -41,6 +41,10 @@ p3-matrix = { git = "https://github.com/Plonky3/Plonky3.git", rev = "5ebf8e4" }
 p3-util = { git = "https://github.com/Plonky3/Plonky3.git", rev = "5ebf8e4" }
 p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3.git", rev = "5ebf8e4", features = [] }
 uninit = "0.6.2"
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
 
 [lints]
 workspace = true

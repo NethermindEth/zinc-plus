@@ -1,17 +1,19 @@
-use ark_std::{fmt::Debug, marker::PhantomData, ops::AddAssign, vec::Vec};
+use std::ops::AddAssign;
+
+use crypto_bigint::{Int};
 use num_traits::Zero;
 use crypto_primitives::PrimeField;
+
 use crate::{
     code::{LinearCode, LinearCodeSpec},
-    pcs::structs::ZipTranscript,
-    traits::{Integer, Words, ZipTypes},
     utils::shuffle_seeded,
 };
+use crate::traits::Transcript;
 
-/// Implementation of a repeat-accumulate-accumulate (RAA) codes over the binary
-/// field, as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
+/// Implementation of a repeat-accumulate-accumulate (RAA) codes over the binary field,
+/// as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
 #[derive(Debug, Clone)]
-pub struct RaaCode<ZT: ZipTypes> {
+pub struct RaaCode<const N: usize, const L: usize, const K: usize, const M: usize> {
     row_len: usize,
 
     repetition_factor: usize,
@@ -25,12 +27,10 @@ pub struct RaaCode<ZT: ZipTypes> {
 
     /// Randomness seed for the second permutation
     perm_2_seed: u64,
-
-    phantom: PhantomData<ZT>,
 }
 
-impl<ZT: ZipTypes> RaaCode<ZT> {
-    pub fn new<S: LinearCodeSpec, T: ZipTranscript<ZT::L>>(
+impl<const N: usize, const L: usize, const K: usize, const M: usize> RaaCode<N, L, K, M> {
+    pub fn new<S: LinearCodeSpec, T: Transcript>(
         spec: &S,
         poly_size: usize,
         transcript: &mut T,
@@ -46,14 +46,14 @@ impl<ZT: ZipTypes> RaaCode<ZT> {
         let repetition_factor = spec.repetition_factor();
 
         let num_column_opening = spec.num_column_opening();
-        let log2_q = <ZT::N as Integer>::W::num_words();
+        let log2_q = N;
         let n_0 = 20.min((1 << num_vars) - 1);
         let num_proximity_testing = spec.num_proximity_testing(log2_q, row_len, n_0);
 
         // Width of each entry in codeword vector, in bits.
         // For RAA it's initial_bits + 2*log(repetition_factor) + num_variables
         let codeword_width_bits = {
-            let initial_bits = ZT::N::num_bits();
+            let initial_bits = Int::<N>::BITS;
             let rep_factor_log: usize = repetition_factor
                 .checked_next_power_of_two()
                 .expect("Repetition factor is too large")
@@ -65,12 +65,12 @@ impl<ZT: ZipTypes> RaaCode<ZT> {
             } else {
                 num_vars + 1
             };
-            initial_bits + num_vars_even + (2 * rep_factor_log)
+            initial_bits + num_vars_even as u32 + (2 * rep_factor_log as u32)
         };
         assert!(
-            ZT::K::num_bits() >= codeword_width_bits,
+            Int::<K>::BITS >= codeword_width_bits,
             "Cannot fit {codeword_width_bits}-bit wide codeword entries in {} bits integers",
-            ZT::K::num_bits()
+            Int::<K>::BITS
         );
 
         let perm_1_seed = transcript.get_u64();
@@ -83,7 +83,6 @@ impl<ZT: ZipTypes> RaaCode<ZT> {
             num_proximity_testing,
             perm_1_seed,
             perm_2_seed,
-            phantom: PhantomData,
         }
     }
 
@@ -107,7 +106,9 @@ impl<ZT: ZipTypes> RaaCode<ZT> {
     }
 }
 
-impl<ZT: ZipTypes> LinearCode<ZT> for RaaCode<ZT> {
+impl<const N: usize, const L: usize, const K: usize, const M: usize> LinearCode<N, L, K, M>
+    for RaaCode<N, L, K, M>
+{
     fn row_len(&self) -> usize {
         self.row_len
     }
@@ -124,17 +125,13 @@ impl<ZT: ZipTypes> LinearCode<ZT> for RaaCode<ZT> {
         self.num_proximity_testing
     }
 
-    fn encode_wide<In, Out>(&self, row: &[In]) -> Vec<Out>
-    where
-        In: Integer,
-        Out: Integer + for<'a> From<&'a In> + for<'a> From<&'a ZT::L>,
-    {
+    fn encode_wide<const IN: usize, const OUT: usize>(&self, row: &[Int<IN>]) -> Vec<Int<OUT>> {
         self.encode_inner(row)
     }
 
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        F: PrimeField + for<'a> From<&'a ZT::L>
+        F: PrimeField + for<'a> From<&'a Int<L>>
     {
         self.encode_inner(row)
     }
@@ -153,9 +150,9 @@ fn repeat<In, Out: for<'a> From<&'a In> + Clone>(
         .collect()
 }
 
-/// Perform an operation equivalent to multiplying the slice in-place by the
-/// accumulation matrix from the RAA code - a lower triangular matrix of the
-/// appropriate size, i.e. a matrix looking like this:
+/// Perform an operation equivalent to multiplying the slice in-place by the accumulation matrix
+/// from the RAA code - a lower triangular matrix of the appropriate size, i.e. a matrix looking
+/// like this:
 ///
 /// ```text
 /// 1 0 0 0
@@ -174,30 +171,28 @@ where
 
 #[cfg(test)]
 mod tests {
-    use ark_std::{vec, vec::Vec};
+    use crypto_bigint::Int;
     use num_traits::Zero;
 
     use crate::{
         code::{DefaultLinearCodeSpec, LinearCode},
         code_raa::{RaaCode, accumulate, repeat},
-        define_random_field_zip_types,
-        field::Int,
-        implement_random_field_zip_types,
         pcs::tests::MockTranscript,
-        traits::ZipTypes,
         utils::shuffle_seeded,
     };
 
     // Define common types for testing
     const INT_LIMBS: usize = 1;
-    define_random_field_zip_types!();
-    implement_random_field_zip_types!(INT_LIMBS);
-    type ZT = RandomFieldZipTypes<INT_LIMBS>;
     type I = Int<INT_LIMBS>;
+
+    const N: usize = INT_LIMBS;
+    const L: usize = INT_LIMBS * 2;
+    const K: usize = INT_LIMBS * 4;
+    const M: usize = INT_LIMBS * 8;
 
     #[test]
     fn repeat_function_duplicates_row_correctly() {
-        let input = vec![Int::<INT_LIMBS>::from(10), Int::<INT_LIMBS>::from(20)];
+        let input = vec![I::from(10), I::from(20)];
 
         let repetition_factor = 3;
 
@@ -205,7 +200,7 @@ mod tests {
 
         let expected_output: Vec<_> = [10, 20, 10, 20, 10, 20]
             .into_iter()
-            .map(Int::<INT_LIMBS>::from)
+            .map(I::from)
             .collect();
         assert_eq!(
             repeated_output, expected_output,
@@ -278,17 +273,17 @@ mod tests {
     #[test]
     fn encoding_preserves_linearity() {
         let mut transcript = MockTranscript::default();
-        let code = RaaCode::<ZT>::new(&DefaultLinearCodeSpec, 16, &mut transcript);
+        let code = RaaCode::<N, L, K, M>::new(&DefaultLinearCodeSpec, 16, &mut transcript);
 
         let a: Vec<I> = (1..=4).map(I::from).collect();
         let b: Vec<I> = (5..=8).map(I::from).collect();
         let sum_ab: Vec<I> = a.iter().zip(b.iter()).map(|(x, y)| *x + y).collect();
 
-        let encode_a: Vec<<ZT as ZipTypes>::M> = code.encode(&a);
-        let encode_b: Vec<<ZT as ZipTypes>::M> = code.encode(&b);
-        let encode_sum_ab: Vec<<ZT as ZipTypes>::M> = code.encode(&sum_ab);
+        let encode_a: Vec<Int<M>> = code.encode(&a);
+        let encode_b: Vec<Int<M>> = code.encode(&b);
+        let encode_sum_ab: Vec<Int<M>> = code.encode(&sum_ab);
 
-        let sum_encode_ab: Vec<<ZT as ZipTypes>::M> = encode_a
+        let sum_encode_ab: Vec<Int<M>> = encode_a
             .iter()
             .zip(encode_b.iter())
             .map(|(x, y)| *x + y)
@@ -300,13 +295,12 @@ mod tests {
     #[test]
     fn encoding_zero_vector_results_in_zero_codeword() {
         let mut transcript = MockTranscript::default();
-        let code = RaaCode::<ZT>::new(&DefaultLinearCodeSpec, 16, &mut transcript);
+        let code = RaaCode::<N, L, K, M>::new(&DefaultLinearCodeSpec, 16, &mut transcript);
 
-        let zero_vector: Vec<I> = vec![I::zero(); code.row_len()];
-        let encoded_vector: Vec<<ZT as ZipTypes>::M> = code.encode(&zero_vector);
+        let zero_vector: Vec<I> = vec![Int::<N>::zero(); code.row_len()];
+        let encoded_vector: Vec<Int<M>> = code.encode(&zero_vector);
 
-        let expected_codeword: Vec<<ZT as ZipTypes>::M> =
-            vec![<ZT as ZipTypes>::M::zero(); code.codeword_len()];
+        let expected_codeword: Vec<Int<M>> = vec![Int::<M>::zero(); code.codeword_len()];
 
         assert_eq!(
             encoded_vector, expected_codeword,
@@ -315,20 +309,15 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Cannot fit 96-bit wide codeword entries in 64 bits integers")]
+    #[should_panic]
     fn constructor_panics_on_insufficient_codeword_width() {
-        #[derive(Debug, Clone)]
-        struct MismatchedZipTypes;
-        impl ZipTypes for MismatchedZipTypes {
-            type N = Int<1>; // 64 bits
-            type L = Int<2>; // 128 bits
-            type K = Int<1>; // 64 bits - INSUFFICIENT
-            type M = Int<4>; // 256 bits
-        }
+        const N: usize = 1;
+        const L: usize = 2;
+        const K: usize = 1;
+        const M: usize = 4;
 
         let mut transcript = MockTranscript::default();
-        let _code =
-            RaaCode::<MismatchedZipTypes>::new(&DefaultLinearCodeSpec, 1 << 30, &mut transcript);
+        let _code = RaaCode::<N, L, K, M>::new(&DefaultLinearCodeSpec, 1 << 30, &mut transcript);
     }
 
     #[test]
@@ -336,8 +325,8 @@ mod tests {
     #[cfg(debug_assertions)]
     fn encode_panics_on_mismatched_row_length() {
         let mut transcript = MockTranscript::default();
-        let code = RaaCode::<ZT>::new(&DefaultLinearCodeSpec, 16, &mut transcript);
+        let code = RaaCode::<N, L, K, M>::new(&DefaultLinearCodeSpec, 16, &mut transcript);
         let incorrect_row = vec![I::from(1), I::from(2), I::from(3)];
-        let _: Vec<<ZT as ZipTypes>::M> = code.encode(&incorrect_row);
+        let _: Vec<Int<M>> = code.encode(&incorrect_row);
     }
 }

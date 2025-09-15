@@ -1,10 +1,14 @@
 #![allow(non_snake_case)]
 
-use ark_std::{fmt::Debug, vec::Vec};
-use crypto_primitives::PrimeField;
-use crate::traits::{Integer, ZipTypes};
+use std::fmt::Debug;
 
-pub trait LinearCode<ZT: ZipTypes>: Sync + Send {
+use crypto_bigint::Int;
+
+use crypto_primitives::PrimeField;
+
+pub trait LinearCode<const N: usize, const L: usize, const K: usize, const M: usize>:
+    Sync + Send
+{
     /// Length of each input row before encoding
     fn row_len(&self) -> usize;
 
@@ -17,44 +21,36 @@ pub trait LinearCode<ZT: ZipTypes>: Sync + Send {
     /// Number of proximity tests to perform (security parameter)
     fn num_proximity_testing(&self) -> usize;
 
-    /// Encodes a row of cryptographic integers using this linear encoding
-    /// scheme.
+    /// Encodes a row of cryptographic integers using this linear encoding scheme.
     ///
-    /// This function is optimized for the prover's context where we work with
-    /// cryptographic integers. It's more efficient than `encode_f` as it
-    /// avoids field conversions.
+    /// This function is optimized for the prover's context where we work with cryptographic integers.
+    /// It's more efficient than `encode_f` as it avoids field conversions.
     ///
     /// # Parameters
     /// - `row`: Slice of cryptographic integers to encode
     ///
     /// # Returns
     /// A vector of cryptographic integers representing the encoded row
-    fn encode(&self, row: &[ZT::N]) -> Vec<ZT::M> {
+    fn encode(&self, row: &[Int<N>]) -> Vec<Int<M>> {
         self.encode_wide(row)
     }
 
-    /// Encodes a row of cryptographic integers using this linear encoding
-    /// scheme.
+    /// Encodes a row of cryptographic integers using this linear encoding scheme.
     ///
-    /// This function is optimized for the prover's context where we work with
-    /// cryptographic integers. It's more efficient than `encode_f` as it
-    /// avoids field conversions.
+    /// This function is optimized for the prover's context where we work with cryptographic integers.
+    /// It's more efficient than `encode_f` as it avoids field conversions.
     ///
     /// # Parameters
     /// - `row`: Slice of cryptographic integers to encode
     ///
     /// # Returns
     /// A vector of cryptographic integers representing the encoded row
-    fn encode_wide<In, Out>(&self, row: &[In]) -> Vec<Out>
-    where
-        In: Integer,
-        Out: Integer + for<'a> From<&'a In> + for<'a> From<&'a ZT::L>;
+    fn encode_wide<const IN: usize, const OUT: usize>(&self, row: &[Int<IN>]) -> Vec<Int<OUT>>;
 
     /// Encodes a row of field elements using this linear encoding scheme.
     ///
-    /// This function is used when working with field elements directly and
-    /// performs the encoding by first converting the sparse matrices to
-    /// field elements.
+    /// This function is used when working with field elements directly and performs the encoding
+    /// by first converting the sparse matrices to field elements.
     ///
     /// # Parameters
     /// - `row`: Slice of field elements to encode
@@ -64,7 +60,7 @@ pub trait LinearCode<ZT: ZipTypes>: Sync + Send {
     /// A vector of field elements representing the encoded row
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        F: PrimeField + for<'a> From<&'a ZT::L>;
+        F: PrimeField + for<'a> From<&'a Int<L>>;
 }
 
 pub trait LinearCodeSpec: Debug {
