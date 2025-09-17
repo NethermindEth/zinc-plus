@@ -10,7 +10,7 @@ license.workspace = true
 bench = false
 
 [dependencies]
-crypto-primitives = { workspace = true }
+crypto-primitives = { workspace = true, features = ["std", "crypto_bigint", "rand_core"] }
 
 ark-std = "0.5"
 ark-ff = "0.5"

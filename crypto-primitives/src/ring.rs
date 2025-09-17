@@ -1,4 +1,6 @@
-use crate::{Limb};
+#[cfg(feature = "crypto-bigint")]
+pub mod crypto_bigint_int;
+
 use core::{
     fmt::{Debug, Display},
     iter::{Product, Sum},
@@ -73,17 +75,3 @@ macro_rules! primitive_int_ring {
 primitive_int_ring!(i32);
 primitive_int_ring!(i64);
 primitive_int_ring!(i128);
-
-/// Ring of integers stored as u64 limbs.
-pub trait LimbedIntRing: IntRing + From<Limb> + for<'a> TryFrom<&'a [Limb]> {
-    /// Number of u64 limbs used to represent this integer type
-    fn num_limbs() -> usize;
-
-    fn limbs(&self) -> &[Limb];
-
-    // // Cannot implement it as From trait since both participants are of non-local
-    // // types
-    // fn to_field<F: PrimeField>(&self) -> F {
-    //     F::from(self.limbs())
-    // }
-}
