@@ -1,11 +1,11 @@
-use crypto_bigint::{Int, Uint, Word, Zero};
+use crypto_bigint::{Uint, Word, Zero};
 use crypto_bigint::modular::{ConstMontyForm, ConstMontyParams};
-use itertools::Itertools;
 use num_traits::{ConstOne, ConstZero};
+use crypto_primitives::crypto_bigint_int::Int;
 
 use crate::{
     field::{ConstMontyField},
-    traits::{FromBits, MapIterable},
+    traits::{FromBits},
 };
 use crate::traits::{ConstNumBytes};
 
@@ -86,7 +86,7 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize> From
 {
     fn from(value: Int<LIMBS2>) -> Self {
         assert!(LIMBS >= LIMBS2, "Cannot convert Int with more limbs than ConstMontyField");
-        let value = value.resize();
+        let value = value.resize().into_inner();
         let result = Self(ConstMontyForm::new(&value.abs()));
 
         if value.is_negative().into() {
@@ -124,17 +124,6 @@ impl<const N: usize> FromBits for Uint<N> {
             }
         }
         res
-    }
-}
-
-impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> MapIterable for ConstMontyField<Mod, LIMBS> {
-    fn map_iterable<'a, const M: usize, I: IntoIterator<Item = &'a Int<M>>>(
-        iterable: I,
-    ) -> Vec<Self> {
-        iterable
-            .into_iter()
-            .map(Self::from)
-            .collect()
     }
 }
 

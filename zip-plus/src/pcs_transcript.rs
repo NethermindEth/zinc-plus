@@ -2,9 +2,10 @@ use std::{
     io::{Cursor, ErrorKind, Read, Write},
 };
 
-use crypto_bigint::{Int, Word};
+use crypto_bigint::{Word};
 use crypto_primitives::PrimeField;
 use p3_matrix::Dimensions;
+use crypto_primitives::crypto_bigint_int::Int;
 
 use crate::{
     transcript::KeccakTranscript,
@@ -133,13 +134,13 @@ impl PcsTranscript {
         self.common_field_element(fe);
         let repr = fe.inner().to_be_bytes();
         self.stream
-            .write_all(repr.as_ref())
+            .write_all(repr.as_slice())
             .map_err(|err| Error::Transcript(err.kind(), err.to_string()))
     }
 
     pub fn write_integer<const M: usize>(&mut self, int: &Int<M>) -> Result<(), Error> {
-        for &word in int.as_words().iter() {
-            let bytes = word.to_le_bytes();
+        for &word in int.inner().as_words().iter() {
+            let bytes = word.to_be_bytes();
             self.stream
                 .write_all(&bytes)
                 .map_err(|err| Error::Transcript(err.kind(), err.to_string()))?;
@@ -159,7 +160,7 @@ impl PcsTranscript {
     }
 
     pub fn read_integer<const M: usize>(&mut self) -> Result<Int<M>, Error> {
-        let mut result = Int::default();
+        let mut result = Int::default().into_inner();
 
         for word in result.as_mut_words() {
             let mut buf = [0u8; size_of::<Word>()];
@@ -167,9 +168,9 @@ impl PcsTranscript {
                 .read_exact(&mut buf)
                 .map_err(|err| Error::Transcript(err.kind(), err.to_string()))?;
 
-            *word = Word::from_le_bytes(buf);
+            *word = Word::from_be_bytes(buf);
         }
-        Ok(result)
+        Ok(result.into())
     }
 
     pub fn read_integers<const M: usize>(&mut self, n: usize) -> Result<Vec<Int<M>>, Error> {
@@ -230,7 +231,7 @@ impl PcsTranscript {
     /// Returns an index between 0 and cap-1.
     pub fn squeeze_challenge_idx(&mut self, cap: usize) -> usize {
         let challenge: Int<1> = self.fs_transcript.get_integer_challenge();
-        let bytes = challenge.as_words()[0].to_be_bytes();
+        let bytes = challenge.inner().as_words()[0].to_be_bytes();
         let num = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
         num % cap
     }
@@ -275,8 +276,6 @@ mod tests {
         pcs_transcript::{MtHash, PcsTranscript},
     };
     use crypto_bigint::{U256, const_monty_params};
-    use crate::field::{ConstMontyField};
-    use crate::utils::WORD_FACTOR;
 
     #[allow(unused_macros)]
     macro_rules! test_read_write {
@@ -324,8 +323,6 @@ mod tests {
 
     #[test]
     fn test_pcs_transcript_read_write() {
-        const N: usize = 4 * WORD_FACTOR;
-
         const_monty_params!(
             ModP,
             U256,

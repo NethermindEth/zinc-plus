@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 
-use crypto_bigint::{Int, Word};
+use crypto_bigint::{Word};
+use crypto_primitives::crypto_bigint_int::Int;
 use p3_field::Packable;
 
 use crate::{
@@ -50,7 +51,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
 
 #[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
 #[repr(transparent)]
-pub(crate) struct PackedInt<const LIMBS: usize>(pub(crate) Int<LIMBS>);
+pub struct PackedInt<const LIMBS: usize>(pub(crate) Int<LIMBS>);
 
 unsafe impl<const N: usize> ReinterpretVector<PackedInt<N>> for Int<N> {}
 unsafe impl<const N: usize> ReinterpretVector<Int<N>> for PackedInt<N> {}
@@ -59,7 +60,7 @@ impl<const LIMBS: usize> Packable for PackedInt<LIMBS> {}
 
 impl<const LIMBS: usize> AsWords for PackedInt<LIMBS> {
     fn as_words(&self) -> &[Word] {
-        self.0.as_words()
+        self.0.inner().as_words()
     }
 }
 

@@ -3,7 +3,7 @@ use core::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use core::ops::{Add, AddAssign, Mul, MulAssign, Rem, RemAssign, Shl, Shr, Sub, SubAssign};
 use core::iter::{Product, Sum};
 use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedShl, CheckedShr, CheckedSub, ConstOne, ConstZero, One, Pow, Zero};
-use crypto_bigint::{CheckedSub as CryptoCheckedSub, CheckedMul as CryptoCheckedMul, Word, Uint};
+use crypto_bigint::{CheckedSub as CryptoCheckedSub, CheckedMul as CryptoCheckedMul, Word};
 use paste::paste;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -388,7 +388,7 @@ impl<const LIMBS: usize> crypto_bigint::Random for Int<LIMBS> {
     }
 
     fn try_random<R: rand_core::TryRngCore + ?Sized>(rng: &mut R) -> Result<Self, R::Error> {
-        Ok(Self(crypto_bigint::Int::try_random(rng)?))
+        crypto_bigint::Int::try_random(rng).map(Self)
     }
 }
 

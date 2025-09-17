@@ -1,14 +1,8 @@
 use std::{collections::BTreeSet, ops::Range};
-use crypto_bigint::{Int, Word};
+use crypto_bigint::{Word};
+use crypto_primitives::crypto_bigint_int::Int;
 
 use crate::traits::Transcript;
-
-const INT_LIMBS: usize = 1;
-
-const N: usize = INT_LIMBS;
-const L: usize = INT_LIMBS * 2;
-const K: usize = INT_LIMBS * 4;
-const M: usize = INT_LIMBS * 8;
 
 #[derive(Default)]
 pub struct MockTranscript {

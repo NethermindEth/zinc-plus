@@ -5,9 +5,9 @@ use std::{
 };
 use ark_std::cfg_iter_mut;
 use ark_std::iterable::Iterable;
-use crypto_bigint::{Int, Word};
+use crypto_bigint::{Word};
 use itertools::Itertools;
-use num_traits::{FromBytes, ToBytes, Zero};
+use num_traits::{ToBytes, Zero};
 use p3_commit::{BatchOpeningRef, Mmcs};
 use p3_field::Packable;
 use p3_matrix::{Dimensions, Matrix as P3Matrix, dense::RowMajorMatrix};
@@ -15,6 +15,7 @@ use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{CryptographicHasher, PseudoCompressionFunction};
 use uninit::AsMaybeUninit;
 use crypto_primitives::PrimeField;
+use crypto_primitives::crypto_bigint_int::Int;
 
 use super::{error::MerkleError, structs::MultilinearZipData};
 use crate::{
@@ -439,7 +440,8 @@ pub enum ArithErrors {
 
 #[cfg(test)]
 mod tests {
-    use crypto_bigint::{Int, Random};
+    use crypto_bigint::{Random};
+    use crypto_primitives::crypto_bigint_int::Int;
     use rand::rng;
 
     use crate::{

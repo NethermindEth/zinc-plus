@@ -1,4 +1,4 @@
-#[cfg(feature = "crypto-bigint")]
+#[cfg(feature = "crypto_bigint")]
 pub mod crypto_bigint_int;
 
 use core::{

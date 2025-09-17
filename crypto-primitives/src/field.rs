@@ -1,3 +1,4 @@
+use core::fmt::Debug;
 use crate::{IntRing, ring::Ring};
 use core::ops::{Div, Neg};
 use num_traits::{Inv};
@@ -18,7 +19,7 @@ pub trait Field:
 // TODO: FROM<uX>
 pub trait PrimeField: Field + IntRing + From<u64> + From<u128> + From<Self::Inner> + Inv<Output = Option<Self>> {
     /// Underlying representation of an element
-    type Inner;
+    type Inner: Debug;
 
     const MODULUS: Self::Inner;
 

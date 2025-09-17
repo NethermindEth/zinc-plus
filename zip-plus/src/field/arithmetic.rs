@@ -4,7 +4,7 @@ use std::{
 };
 use std::iter::Product;
 use std::ops::{DivAssign, Rem, RemAssign, Shl, Shr};
-use crypto_bigint::{Invert, NonZero, subtle::{Choice, CtOption}, Uint};
+use crypto_bigint::{Uint};
 use crypto_bigint::modular::{ConstMontyForm, ConstMontyParams};
 use num_traits::{CheckedAdd, CheckedDiv, CheckedMul, CheckedNeg, CheckedRem, CheckedShl, CheckedShr, CheckedSub, ConstOne, ConstZero, Inv, Pow, Zero};
 

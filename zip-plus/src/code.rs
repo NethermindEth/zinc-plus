@@ -2,7 +2,7 @@
 
 use std::fmt::Debug;
 
-use crypto_bigint::Int;
+use crypto_primitives::crypto_bigint_int::Int;
 
 use crypto_primitives::PrimeField;
 

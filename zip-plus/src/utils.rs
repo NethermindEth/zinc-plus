@@ -1,6 +1,6 @@
 use std::ops::{Add, AddAssign, Mul};
 
-use crypto_bigint::{Int, Word};
+use crypto_primitives::crypto_bigint_int::Int;
 use rand::{rngs::StdRng, seq::SliceRandom};
 use rand_core::SeedableRng;
 
@@ -276,7 +276,7 @@ pub(super) fn shuffle_seeded<T>(slice: &mut [T], seed: u64) {
 /// byte level.
 ///
 /// ---
-pub(crate) unsafe trait ReinterpretVector<Target: Sized>: Sized {
+pub unsafe trait ReinterpretVector<Target: Sized>: Sized {
     /// Reinterpret a `Vec<Self>` as a `Vec<Target>` **without copying**.
     ///
     /// See the trait-level documentation for full safety requirements and examples.
@@ -336,8 +336,10 @@ pub(crate) unsafe trait ReinterpretVector<Target: Sized>: Sized {
 
 #[cfg(test)]
 mod test {
-    use crypto_bigint::{Int, Random, Word};
+    use crypto_bigint::{Random, Word};
+    use num_traits::{ConstOne, ConstZero};
     use rand::rng;
+    use crypto_primitives::crypto_bigint_int::Int;
 
     use crate::{
         utils::{expand, inner_product},
@@ -357,7 +359,7 @@ mod test {
         let expanded = expand::<2, 4>(&input);
 
         let expected_words = [1, 2, 0, 0];
-        assert_eq!(expanded.to_words(), expected_words);
+        assert_eq!(expanded.inner().to_words(), expected_words);
     }
 
     #[test]
@@ -367,7 +369,7 @@ mod test {
         let expanded = expand::<2, 2>(&input);
 
         let expected_words = [42, 99];
-        assert_eq!(expanded.to_words(), expected_words);
+        assert_eq!(expanded.inner().to_words(), expected_words);
     }
 
     #[test]
@@ -384,7 +386,7 @@ mod test {
         let expanded = expand::<1, 3>(&input);
 
         let expected_words = [123 as Word, 0, 0];
-        assert_eq!(expanded.to_words(), expected_words);
+        assert_eq!(expanded.inner().to_words(), expected_words);
     }
 
     #[test]
@@ -393,7 +395,7 @@ mod test {
         let expanded = expand::<2, 4>(&input);
 
         let expected_words = [0 as Word, 0, 0, 0];
-        assert_eq!(expanded.to_words(), expected_words);
+        assert_eq!(expanded.inner().to_words(), expected_words);
     }
     #[test]
     fn test_expand_negative_number_identity() {

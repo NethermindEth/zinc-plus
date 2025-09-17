@@ -1,6 +1,6 @@
 use std::ops::AddAssign;
 
-use crypto_bigint::{Int};
+use crypto_primitives::crypto_bigint_int::Int;
 use num_traits::Zero;
 use crypto_primitives::PrimeField;
 
@@ -53,7 +53,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize> RaaCode<N, 
         // Width of each entry in codeword vector, in bits.
         // For RAA it's initial_bits + 2*log(repetition_factor) + num_variables
         let codeword_width_bits = {
-            let initial_bits = Int::<N>::BITS;
+            let initial_bits = crypto_bigint::Int::<N>::BITS;
             let rep_factor_log: usize = repetition_factor
                 .checked_next_power_of_two()
                 .expect("Repetition factor is too large")
@@ -171,8 +171,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crypto_bigint::Int;
     use num_traits::Zero;
+    use crypto_primitives::crypto_bigint_int::Int;
 
     use crate::{
         code::{DefaultLinearCodeSpec, LinearCode},

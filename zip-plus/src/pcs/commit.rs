@@ -1,4 +1,4 @@
-use crypto_bigint::Int;
+use crypto_primitives::crypto_bigint_int::Int;
 use uninit::out_ref::Out;
 
 use crate::{
@@ -199,10 +199,10 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
 mod tests {
     use std::slice::from_ref;
 
-    use crypto_bigint::{Int, Random, U256, Word, const_monty_params};
+    use crypto_bigint::{Random, U256, Word, const_monty_params};
     use itertools::Itertools;
-    use num_traits::ConstOne;
     use rand::{Rng, rng};
+    use crypto_primitives::crypto_bigint_int::Int;
 
     use crate::{
         field::{F256},
@@ -541,7 +541,7 @@ mod tests {
         let a = Int::from(3);
         let b = Int::<4>::from(5);
         let combined_evals: Vec<_> = (0..row_len)
-            .map(|i| a * row1_evals[i] + b * row2_evals[i])
+            .map(|i| a * row1_evals[i].resize() + b * row2_evals[i].resize())
             .collect();
         let combined_encoded = pp.linear_code.encode_wide(&combined_evals);
         let row1_encoded = &encoded[0..codeword_len];

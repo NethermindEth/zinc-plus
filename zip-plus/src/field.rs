@@ -11,9 +11,7 @@ use crypto_bigint::modular::{ConstMontyForm, ConstMontyParams};
 use crypto_bigint::rand_core::TryRngCore;
 use crypto_bigint::Random;
 use std::fmt::{Display, Formatter};
-use std::ops::{Add, AddAssign, Div, Mul, MulAssign, Shl, Shr, Sub, SubAssign};
 
-use crate::traits::ConstNumBytes;
 use crypto_primitives::{ConstRing, Field, IntRing, PrimeField, Ring};
 use crate::utils::WORD_FACTOR;
 

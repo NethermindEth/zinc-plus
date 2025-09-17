@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use crypto_bigint::Int;
+use crypto_primitives::crypto_bigint_int::Int;
 
 pub trait FromBits {
     fn from_be_bits(bits: &[bool]) -> Self;
@@ -9,12 +9,6 @@ pub trait FromBits {
 pub trait ConstNumBytes {
     /// Number of bytes required to represent this type.
     const NUM_BYTES: usize;
-}
-
-pub trait MapIterable: Sized {
-    fn map_iterable<'a, const M: usize, I: IntoIterator<Item = &'a Int<M>>>(
-        iterable: I,
-    ) -> Vec<Self>;
 }
 
 // Out own version of FromBytes and ToBytes traits, allowing us to implement them for types

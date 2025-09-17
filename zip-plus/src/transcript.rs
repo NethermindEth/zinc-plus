@@ -1,9 +1,10 @@
 use ark_std::vec::Vec;
-use crypto_bigint::{Int, Uint, Word, modular::ConstMontyParams};
+use crypto_bigint::{Word};
+use crypto_primitives::crypto_bigint_int::Int;
 use num_traits::{Zero};
 use sha3::{Digest, Keccak256};
 use crypto_primitives::PrimeField;
-use crate::traits::{FromBits, ToBytes, Transcribable, Transcript};
+use crate::traits::{ToBytes, Transcript};
 use crate::utils::WORD_FACTOR;
 
 /// A cryptographic transcript implementation using the Keccak-256 hash
@@ -82,23 +83,6 @@ impl KeccakTranscript {
         }
     }
 
-    /// Internal helper that generates two 128-bit limbs from the current
-    /// transcript state. Updates the transcript state.
-    fn get_challenge_limbs(&mut self) -> (u128, u128) {
-        let challenge = self.hasher.clone().finalize();
-
-        // Interpret the digest as big-endian halves but keep the original ordering used by this protocol:
-        // lo = first 16 bytes, hi = last 16 bytes.
-        let lo = u128::from_be_bytes(challenge[0..16].try_into().unwrap());
-        let hi = u128::from_be_bytes(challenge[16..32].try_into().unwrap());
-
-        self.hasher.update([0x00]);
-        self.hasher.update(challenge);
-        self.hasher.update([0x01]);
-
-        (lo, hi)
-    }
-
     /// Generates a pseudorandom [Integer] as a challenge based on the current transcript state.
     pub fn get_integer_challenge<const LIMBS: usize>(&mut self) -> Int<LIMBS> {
         let mut words: [Word; LIMBS] = [Word::zero(); LIMBS];
@@ -109,10 +93,10 @@ impl KeccakTranscript {
             self.hasher.update([0x12]);
             self.hasher.update(challenge);
             self.hasher.update([0x34]);
-            *word = Word::from_le_bytes(challenge);
+            *word = Word::from_be_bytes(challenge);
         }
 
-        Int::from_words(words)
+        Int::from_words(words).into()
     }
 
     /// Generates pseudorandom [CryptoInt]s as challenges based on the current transcript state.
@@ -128,7 +112,7 @@ impl KeccakTranscript {
         self.hasher.update(challenge);
         self.hasher.update([0x11]);
 
-        let num = usize::from_le_bytes(challenge[..size_of::<usize>()].try_into().unwrap());
+        let num = usize::from_be_bytes(challenge[..size_of::<usize>()].try_into().unwrap());
         range.start + (num % (range.end - range.start))
     }
 }
@@ -138,11 +122,11 @@ impl Transcript for KeccakTranscript {
         let byte = self.get_random_bytes(1)[0];
         // cancels all bits and depends only on whether the random byte LSB is 0 or 1
         let bit = byte & 1;
-        Int::from(bit as i8)
+        crypto_bigint::Int::from(bit as i8).into()
     }
 
     fn get_u64(&mut self) -> u64 {
-        self.get_integer_challenge::<{ 1 * WORD_FACTOR }>().as_words()[0]
+        self.get_integer_challenge::<{ 1 * WORD_FACTOR }>().inner().as_words()[0]
     }
 
     fn sample_unique_columns(

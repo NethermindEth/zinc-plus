@@ -1,8 +1,7 @@
 use crypto_bigint::modular::{ConstMontyForm, ConstMontyParams};
 use crypto_bigint::{Uint, Word};
 use itertools::Itertools;
-use crate::field::ConstMontyField;
-use crate::traits::{ConstNumBytes, FromBytes, ToBytes, Transcribable};
+use crate::traits::{ConstNumBytes, FromBytes, ToBytes};
 use crate::utils::WORD_FACTOR;
 
 
@@ -25,7 +24,7 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> FromBytes for ConstMontyF
         let words = chunked.into_iter().flat_map(|chunk| {
             let (chunked, rem) = chunk.as_chunks::<{ 8 / WORD_FACTOR }>();
             assert!(rem.is_empty(), "Invalid byte slice length for ConstMontyForm");
-            chunked.into_iter().rev().map(|chunk| Word::from_le_bytes(*chunk))
+            chunked.into_iter().rev().map(|chunk| Word::from_be_bytes(*chunk))
         })
             .collect_array::<LIMBS>()
             .expect("Invalid length for ConstMontyForm");
@@ -74,7 +73,7 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> ToBytes for ConstMontyFor
 pub struct ZeroBytesIterator;
 
 impl Iterator for ZeroBytesIterator {
-    type Item = [u8; {8 / WORD_FACTOR}];
+    type Item = [u8; 8 / WORD_FACTOR];
 
     fn next(&mut self) -> Option<Self::Item> {
         Some([0; {8 / WORD_FACTOR}])

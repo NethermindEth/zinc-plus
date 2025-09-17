@@ -8,19 +8,21 @@ use ark_std::{
 use criterion::{
     BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime,
 };
-use crypto_bigint::{Int, Random, U256, const_monty_params, modular::ConstMontyParams};
+use crypto_bigint::{Random, U256, const_monty_params, modular::ConstMontyParams};
+use crypto_primitives::crypto_bigint_int::Int;
 use itertools::Itertools;
 use rand::rng;
 use zip_plus::{
     utils::WORD_FACTOR,
     field::{F256},
-    poly::{dense::DenseMultilinearExtension, mle::MultilinearExtension},
+    poly::{dense::DenseMultilinearExtension},
     transcript::KeccakTranscript,
     code::{DefaultLinearCodeSpec, LinearCode},
     code_raa::RaaCode,
     pcs::{MerkleTree, structs::MultilinearZip},
     pcs_transcript::PcsTranscript,
 };
+use zip_plus::poly::mle::MultilinearExtensionRand;
 
 const INT_LIMBS: usize = WORD_FACTOR;
 
@@ -179,7 +181,7 @@ fn verify<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
     let point = vec![1i64; P];
     let field_point: Vec<F> = point.iter().map(F::from).collect();
     let eval = poly.evaluations.last().unwrap();
-    let eval_resized = eval.resize();
+    let eval_field = eval.into();
     let mut transcript = PcsTranscript::new();
 
     BenchZip::open(&params, &poly, &data, &field_point, &mut transcript).unwrap();
@@ -198,7 +200,7 @@ fn verify<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
                         &params,
                         &commitment,
                         &field_point,
-                        &eval_resized,
+                        &eval_field,
                         &mut transcript,
                     )
                     .expect("Failed to verify");

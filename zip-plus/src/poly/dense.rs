@@ -5,7 +5,7 @@ use crypto_bigint::Random;
 use num_traits::Zero;
 use rand_core::RngCore;
 use crate::poly::mle::{MultilinearExtension, MultilinearExtensionRand};
-use crypto_primitives::{Matrix, PrimeField, Ring};
+use crypto_primitives::{Matrix, Ring};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -68,7 +68,7 @@ impl<R: Ring> DenseMultilinearExtension<R> {
 
         for (row_i, row) in matrix.rows().enumerate() {
             for (col_i, val) in row {
-                v[(padded_rows * col_i) + row_i] = val.clone();
+                v[(padded_cols * row_i) + col_i] = val.clone();
             }
         }
 

@@ -1,5 +1,5 @@
 use ark_std::iterable::Iterable;
-use crypto_bigint::Int;
+use crypto_primitives::crypto_bigint_int::Int;
 use itertools::Itertools;
 use crypto_primitives::PrimeField;
 use crate::{
@@ -188,14 +188,17 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
 
 #[cfg(test)]
 mod tests {
-    use crypto_bigint::{Int, U256, const_monty_params};
+    use crypto_bigint::{U256, const_monty_params, Random};
     use itertools::Itertools;
     use num_traits::{ConstOne, One};
+    use rand::Rng;
+    use crypto_primitives::crypto_bigint_int::Int;
 
-    use crate::{field::{F256}, poly::dense::DenseMultilinearExtension, traits::MapIterable, code::{DefaultLinearCodeSpec, LinearCode}, code_raa::RaaCode, pcs::{
+    use crate::{field::{F256}, poly::dense::DenseMultilinearExtension, code::{DefaultLinearCodeSpec, LinearCode}, code_raa::RaaCode, pcs::{
         structs::{MultilinearZip, MultilinearZipCommitment, MultilinearZipParams},
         tests::MockTranscript,
     }, pcs_transcript::PcsTranscript, Error};
+    use crate::poly::mle::MultilinearExtensionRand;
     use crate::transcript::KeccakTranscript;
     use crate::utils::WORD_FACTOR;
 
@@ -249,7 +252,6 @@ mod tests {
             None => panic!("failed to evaluate polynomial"),
             Some(p) => p,
         }
-        .resize()
         .into();
 
         (pp, comm, point_f, eval, proof)
@@ -348,7 +350,7 @@ mod tests {
             .map(Int::from)
             .collect::<Vec<_>>();
         let point: Vec<F> = point_int.iter().map(F::from).collect_vec();
-        let eval = mle.evaluate(&point_int).unwrap().resize().into();
+        let eval = mle.evaluate(&point_int).unwrap().into();
 
         let mut prover_tr = PcsTranscript::new();
         TestZip::open(&pp, &mle, &data, &point, &mut prover_tr).expect("open should succeed");
@@ -366,7 +368,7 @@ mod tests {
         proof[flip_at] ^= 0x01;
 
         let mut ver_tr = PcsTranscript::from_proof(&proof);
-        let res = TestZip::verify(&pp, &comm, &point, eval, &mut ver_tr);
+        let res = TestZip::verify(&pp, &comm, &point, &eval, &mut ver_tr);
 
         match res {
             Err(Error::InvalidPcsOpen(msg)) => {
@@ -396,14 +398,15 @@ mod tests {
             current_evals[0].clone()
         }
 
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rng();
+
         let n = 3;
         let poly_size = 1 << n;
         let mut keccak_transcript = KeccakTranscript::new();
         let linear_code: LC = LC::new(&DefaultLinearCodeSpec, poly_size, &mut keccak_transcript);
         let param = TestZip::setup(poly_size, linear_code);
         let evaluations: Vec<_> = (0..poly_size)
-            .map(|_| Int::<INT_LIMBS>::from(i8::rand(&mut rng)))
+            .map(|_| Int::<INT_LIMBS>::from(rng.random::<i8>()))
             .collect();
         let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations);
         let point_int: Vec<_> = (0..n).map(|_| Int::<INT_LIMBS>::random(&mut rng)).collect();
@@ -444,7 +447,7 @@ mod tests {
             .map(Int::from)
             .collect::<Vec<_>>();
         let point: Vec<F> = point_int.iter().map(F::from).collect_vec();
-        let eval = mle.evaluate(&point_int).unwrap().resize().into();
+        let eval = mle.evaluate(&point_int).unwrap().into();
 
         let mut prover_tr = PcsTranscript::new();
         TestZip::open(&pp, &mle, &data, &point, &mut prover_tr).expect("open should succeed");
@@ -492,7 +495,7 @@ mod tests {
             .map(Int::from)
             .collect::<Vec<_>>();
         let point: Vec<F> = point_int.iter().map(F::from).collect_vec();
-        let eval = mle.evaluate(&point_int).unwrap().resize().into();
+        let eval = mle.evaluate(&point_int).unwrap().into();
         let mut prover_tr = PcsTranscript::new();
         TestZip::open(&pp, &mle, &data, &point, &mut prover_tr).expect("open should succeed");
         let proof = prover_tr.into_proof();
@@ -518,7 +521,7 @@ mod tests {
         let point_int = vec![Int::from(0i64); n];
         let point: Vec<F> = point_int.iter().map(F::from).collect_vec();
 
-        let eval = mle.evaluate(&point_int).unwrap().resize().into();
+        let eval = mle.evaluate(&point_int).unwrap().into();
 
         let mut prover_tr = PcsTranscript::new();
         TestZip::open(&pp, &mle, &data, &point, &mut prover_tr).expect("open should succeed");
@@ -547,7 +550,7 @@ mod tests {
             .map(Int::from)
             .collect::<Vec<_>>();
         let point: Vec<F> = point_int.iter().map(F::from).collect_vec();
-        let eval = mle.evaluate(&point_int).unwrap().resize().into();
+        let eval = mle.evaluate(&point_int).unwrap().into();
 
         let mut prover_tr = PcsTranscript::new();
         TestZip::open(&pp, &mle, &data, &point, &mut prover_tr).expect("open should succeed");
@@ -606,7 +609,7 @@ mod tests {
                 &params,
                 &commitment,
                 &point.iter().map(F::from).collect::<Vec<_>>(),
-                eval.resize().into(),
+                &eval.into(),
                 &mut verifier_tx,
             )
             .expect("verify");
