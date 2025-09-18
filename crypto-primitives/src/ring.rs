@@ -1,12 +1,13 @@
-use crate::{Limb, PrimeField};
+#[cfg(feature = "crypto_bigint")]
+pub mod crypto_bigint_int;
+
 use core::{
     fmt::{Debug, Display},
     iter::{Product, Sum},
-    ops::{Add, AddAssign, Mul, MulAssign, Rem, RemAssign, Sub, SubAssign},
+    ops::{Add, AddAssign, Mul, MulAssign, Rem, RemAssign, Shl, Shr, Sub, SubAssign},
 };
 use num_traits::{
-    CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedShl, CheckedShr, CheckedSub, ConstOne,
-    ConstZero, Pow,
+    CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedSub, ConstOne, ConstZero, One, Pow, Zero,
 };
 
 /// A ring is like a field without a multiplicative inverse or division.
@@ -21,19 +22,16 @@ pub trait Ring:
     + Default
     + Sync
     + Send
-    + ConstZero
-    + ConstOne
+    + Zero
+    + One
     // Arithmetic operations consuming rhs
     + CheckedNeg
     + CheckedAdd
     + CheckedSub
     + CheckedMul
-    + CheckedShl
-    + CheckedShr
-    + Pow<u32>
     + AddAssign
-    + MulAssign
     + SubAssign
+    + MulAssign
     + Sum
     + Product
     // Arithmetic operations with rhs reference
@@ -41,18 +39,23 @@ pub trait Ring:
     + for<'a> Sub<&'a Self, Output=Self>
     + for<'a> Mul<&'a Self, Output=Self>
     + for<'a> AddAssign<&'a Self>
+    + for<'a> SubAssign<&'a Self>
     + for<'a> MulAssign<&'a Self>
     + for<'a> Sum<&'a Self>
     + for<'a> Product<&'a Self>
     {}
 
+pub trait ConstRing: Ring + ConstZero + ConstOne {}
+
 /// Ring of integers, usually denoted as `Z`.
 pub trait IntRing:
-Ring
+    ConstRing
     + PartialOrd
-    + Ord
     // Arithmetic operations consuming rhs
     + CheckedRem
+    + Shl<u32>
+    + Shr<u32>
+    + Pow<u32>
     + RemAssign
     // Arithmetic operations with rhs reference
     + for<'a> Rem<&'a Self>
@@ -62,24 +65,11 @@ Ring
 macro_rules! primitive_int_ring {
     ($t:ident) => {
         impl Ring for $t {}
+        impl ConstRing for $t {}
         impl IntRing for $t {}
     };
 }
 
-primitive_int_ring!(u32);
-primitive_int_ring!(u64);
-primitive_int_ring!(u128);
-
-/// Ring of integers stored as u64 limbs.
-pub trait LimbedIntRing: IntRing + From<Limb> + for<'a> TryFrom<&'a [Limb]> {
-    /// Number of u64 limbs used to represent this integer type
-    fn num_limbs() -> usize;
-
-    fn limbs(&self) -> &[Limb];
-
-    // Cannot implement it as From trait since both participants are of non-local
-    // types
-    fn to_field<F: PrimeField>(&self) -> F {
-        F::from(self.limbs())
-    }
-}
+primitive_int_ring!(i32);
+primitive_int_ring!(i64);
+primitive_int_ring!(i128);

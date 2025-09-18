@@ -1,10 +1,10 @@
-mod dense;
-
-use ark_std::{
-    Zero,
+use std::{
     fmt::Debug,
     ops::{Add, AddAssign, Index, Neg, SubAssign},
 };
+
+use num_traits::Zero;
+use rand_core::RngCore;
 
 /// This trait describes an interface for the multilinear extension
 /// of an array.
@@ -13,7 +13,7 @@ use ark_std::{
 ///
 /// Index represents a point, which is a vector in {0,1}^`num_vars` in little
 /// endian form. For example, `0b1011` represents `P(1,1,0,1)`
-pub trait MultilinearExtension<F: Field>:
+pub trait MultilinearExtension<T>:
     Sized
     + Clone
     + Debug
@@ -23,29 +23,21 @@ pub trait MultilinearExtension<F: Field>:
     + Neg
     + Zero
     + for<'a> AddAssign<&'a Self>
-    + for<'a> AddAssign<(F, &'a Self)>
+    + for<'a> AddAssign<(T, &'a Self)>
     + for<'a> SubAssign<&'a Self>
     + Index<usize>
 {
     /// Reduce the number of variables of `self` by fixing the
     /// `partial_point.len()` variables at `partial_point`.
-    fn fix_variables(&mut self, partial_point: &[F]);
+    fn fix_variables(&mut self, partial_point: &[T]);
 
     /// Creates a new object with the number of variables of `self` reduced by
     /// fixing the `partial_point.len()` variables at `partial_point`.
-    fn fixed_variables(&self, partial_point: &[F]) -> Self;
-}
-/// swap the bits of `x` from position `a..a+n` to `b..b+n` and from `b..b+n` to
-/// `a..a+n` in little endian order
-pub(crate) fn swap_bits(x: usize, a: usize, b: usize, n: usize) -> usize {
-    let a_bits = (x >> a) & ((1usize << n) - 1);
-    let b_bits = (x >> b) & ((1usize << n) - 1);
-    let local_xor_mask = a_bits ^ b_bits;
-    let global_xor_mask = (local_xor_mask << a) | (local_xor_mask << b);
-    x ^ global_xor_mask
+    fn fixed_variables(&self, partial_point: &[T]) -> Self;
 }
 
-/// Exports
-pub use dense::DenseMultilinearExtension;
-
-use crate::traits::Field;
+pub trait MultilinearExtensionRand<T>: MultilinearExtension<T> {
+    /// Outputs an `l`-variate multilinear extension where value of evaluations
+    /// are sampled uniformly at random.
+    fn rand<R: RngCore + ?Sized>(num_vars: usize, rng: &mut R) -> Self;
+}

@@ -1,10 +1,14 @@
 #![allow(non_snake_case)]
 
-use ark_std::{fmt::Debug, vec::Vec};
+use std::fmt::Debug;
 
-use crate::traits::{Field, FieldMap, Integer, ZipTypes};
+use crypto_primitives::crypto_bigint_int::Int;
 
-pub trait LinearCode<ZT: ZipTypes>: Sync + Send {
+use crypto_primitives::PrimeField;
+
+pub trait LinearCode<const N: usize, const L: usize, const K: usize, const M: usize>:
+    Sync + Send
+{
     /// Length of each input row before encoding
     fn row_len(&self) -> usize;
 
@@ -29,7 +33,7 @@ pub trait LinearCode<ZT: ZipTypes>: Sync + Send {
     ///
     /// # Returns
     /// A vector of cryptographic integers representing the encoded row
-    fn encode(&self, row: &[ZT::N]) -> Vec<ZT::M> {
+    fn encode(&self, row: &[Int<N>]) -> Vec<Int<M>> {
         self.encode_wide(row)
     }
 
@@ -45,10 +49,7 @@ pub trait LinearCode<ZT: ZipTypes>: Sync + Send {
     ///
     /// # Returns
     /// A vector of cryptographic integers representing the encoded row
-    fn encode_wide<In, Out>(&self, row: &[In]) -> Vec<Out>
-    where
-        In: Integer,
-        Out: Integer + for<'a> From<&'a In> + for<'a> From<&'a ZT::L>;
+    fn encode_wide<const IN: usize, const OUT: usize>(&self, row: &[Int<IN>]) -> Vec<Int<OUT>>;
 
     /// Encodes a row of field elements using this linear encoding scheme.
     ///
@@ -62,9 +63,9 @@ pub trait LinearCode<ZT: ZipTypes>: Sync + Send {
     ///
     /// # Returns
     /// A vector of field elements representing the encoded row
-    fn encode_f<F: Field>(&self, row: &[F]) -> Vec<F>
+    fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        ZT::L: FieldMap<F, Output = F>;
+        F: PrimeField + for<'a> From<&'a Int<L>>;
 }
 
 pub trait LinearCodeSpec: Debug {
