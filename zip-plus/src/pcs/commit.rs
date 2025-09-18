@@ -68,7 +68,7 @@ impl<const N: usize, const K: usize, const M: usize, C: LinearCode<Int<N>, Int<K
     pub fn commit(
         pp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
         poly: &DenseMultilinearExtension<Int<N>>,
-    ) -> Result<(MultilinearZipData<K>, MultilinearZipCommitment), ZipError> {
+    ) -> Result<(MultilinearZipData<Int<K>>, MultilinearZipCommitment), ZipError> {
         validate_input("commit", pp.num_vars, [poly], None::<&[bool]>)?;
 
         let expected_num_evals = pp.num_rows * pp.linear_code.row_len();
@@ -142,7 +142,7 @@ impl<const N: usize, const K: usize, const M: usize, C: LinearCode<Int<N>, Int<K
     pub fn batch_commit(
         pp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
         polys: &[DenseMultilinearExtension<Int<N>>],
-    ) -> Result<Vec<(MultilinearZipData<K>, MultilinearZipCommitment)>, ZipError> {
+    ) -> Result<Vec<(MultilinearZipData<Int<K>>, MultilinearZipCommitment)>, ZipError> {
         polys.iter().map(|poly| Self::commit(pp, poly)).collect()
     }
 

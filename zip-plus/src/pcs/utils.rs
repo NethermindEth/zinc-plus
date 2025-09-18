@@ -1,6 +1,6 @@
 use ark_std::{cfg_iter_mut, iterable::Iterable};
 use crypto_bigint::Word;
-use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
+use crypto_primitives::PrimeField;
 use itertools::Itertools;
 use num_traits::{ToBytes, Zero};
 use p3_commit::{BatchOpeningRef, Mmcs};
@@ -22,6 +22,7 @@ use crate::{
     utils::ReinterpretVector,
 };
 
+use crate::pcs::structs::AsPackable;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -269,9 +270,9 @@ impl Display for MerkleProof {
 pub struct ColumnOpening {}
 
 impl ColumnOpening {
-    pub fn open_at_column<const K: usize>(
+    pub fn open_at_column<T: AsPackable>(
         column: usize,
-        commit_data: &MultilinearZipData<K>,
+        commit_data: &MultilinearZipData<T>,
         transcript: &mut PcsTranscript,
     ) -> Result<(), MerkleError> {
         let merkle_path = MerkleProof::create_proof(&commit_data.merkle_tree, column)?;
@@ -281,9 +282,9 @@ impl ColumnOpening {
         Ok(())
     }
 
-    pub fn verify_column<const N: usize>(
+    pub fn verify_column<T: AsPackable>(
         root: &MtHash,
-        column: &[Int<N>],
+        column: &[T],
         column_index: usize,
         transcript: &mut PcsTranscript,
     ) -> Result<(), MerkleError> {

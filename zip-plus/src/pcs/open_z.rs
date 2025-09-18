@@ -21,7 +21,7 @@ impl<const N: usize, const K: usize, const M: usize, C: LinearCode<Int<N>, Int<K
     pub fn open<F>(
         pp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
         poly: &DenseMultilinearExtension<Int<N>>,
-        commit_data: &MultilinearZipData<K>,
+        commit_data: &MultilinearZipData<Int<K>>,
         point: &[F],
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
@@ -42,7 +42,7 @@ impl<const N: usize, const K: usize, const M: usize, C: LinearCode<Int<N>, Int<K
     pub fn batch_open<F>(
         pp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
         polys: &[DenseMultilinearExtension<Int<N>>],
-        comms: &[MultilinearZipData<K>],
+        comms: &[MultilinearZipData<Int<K>>],
         points: &[Vec<F>],
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
@@ -93,7 +93,7 @@ impl<const N: usize, const K: usize, const M: usize, C: LinearCode<Int<N>, Int<K
     pub(super) fn prove_testing_phase(
         pp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
         poly: &DenseMultilinearExtension<Int<N>>,
-        commit_data: &MultilinearZipData<K>,
+        commit_data: &MultilinearZipData<Int<K>>,
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError> {
         if pp.num_rows > 1 {
@@ -122,7 +122,7 @@ impl<const N: usize, const K: usize, const M: usize, C: LinearCode<Int<N>, Int<K
 
     pub(super) fn open_merkle_trees_for_column(
         pp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
-        commit_data: &MultilinearZipData<K>,
+        commit_data: &MultilinearZipData<Int<K>>,
         column: usize,
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError> {

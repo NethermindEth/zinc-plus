@@ -77,16 +77,16 @@ where
 
 /// Representantation of a zip commitment to a multilinear polynomial
 #[derive(Debug, Default)]
-pub struct MultilinearZipData<const K: usize> {
+pub struct MultilinearZipData<R: AsPackable> {
     /// The encoded rows of the polynomial matrix representation, referred to as
     /// "u-hat" in the Zinc paper
-    pub rows: Vec<Int<K>>,
+    pub rows: Vec<R>,
     /// Merkle trees of entire matrix
-    pub merkle_tree: MerkleTree<PackedInt<K>>,
+    pub merkle_tree: MerkleTree<R::Packable>,
 }
 
-impl<const K: usize> MultilinearZipData<K> {
-    pub fn new(rows: Vec<Int<K>>, merkle_tree: MerkleTree<PackedInt<K>>) -> MultilinearZipData<K> {
+impl<R: AsPackable> MultilinearZipData<R> {
+    pub fn new(rows: Vec<R>, merkle_tree: MerkleTree<R::Packable>) -> MultilinearZipData<R> {
         MultilinearZipData { rows, merkle_tree }
     }
 
@@ -100,6 +100,14 @@ impl<const K: usize> MultilinearZipData<K> {
 pub struct MultilinearZipCommitment {
     /// Roots of the merkle tree of entire matrix
     pub root: MtHash,
+}
+
+pub trait AsPackable: Clone + ReinterpretVector<Self::Packable> {
+    type Packable: Packable + AsWords + Clone + Send + Sync;
+}
+
+impl<const LIMBS: usize> AsPackable for Int<LIMBS> {
+    type Packable = PackedInt<LIMBS>;
 }
 
 #[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
