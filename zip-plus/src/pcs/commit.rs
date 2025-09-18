@@ -174,8 +174,8 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
         parallelize_iter(
             encoded_rows
                 .spare_capacity_mut()
-                .chunks_exact_mut(rows_per_thread * codeword_len)
-                .zip(evals.chunks_exact(rows_per_thread * row_len)),
+                .chunks_mut(rows_per_thread * codeword_len)
+                .zip(evals.chunks(rows_per_thread * row_len)),
             |(encoded_chunk, evals)| {
                 for (row, evals) in encoded_chunk
                     .chunks_exact_mut(codeword_len)
