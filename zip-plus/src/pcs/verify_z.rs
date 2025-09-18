@@ -174,7 +174,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
             inner_product(q_0, &column_entries)
             // TODO: this inner product is taking a long time.
         } else {
-            F::from(&column_entries.first().unwrap().resize())
+            F::from(&column_entries.first().expect("No column entries").resize())
         };
         if column_entries_comb != encoded_q_0_combined_row[column] {
             return Err(ZipError::InvalidPcsOpen("Proximity failure".into()));
@@ -185,6 +185,11 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
 mod tests {
     use crypto_bigint::{Random, U256, const_monty_params};
     use crypto_primitives::crypto_bigint_int::Int;
@@ -393,13 +398,12 @@ mod tests {
                 let one_minus_p_i = F::ONE - p;
                 let mut next_evals = Vec::with_capacity(current_evals.len() / 2);
                 for j in (0..current_evals.len()).step_by(2) {
-                    let val = current_evals[j].clone() * one_minus_p_i.clone()
-                        + current_evals[j + 1].clone() * p;
+                    let val = current_evals[j] * one_minus_p_i + current_evals[j + 1] * p;
                     next_evals.push(val);
                 }
                 current_evals = next_evals;
             }
-            current_evals[0].clone()
+            current_evals[0]
         }
 
         let mut rng = rand::rng();

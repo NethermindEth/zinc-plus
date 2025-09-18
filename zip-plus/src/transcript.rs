@@ -1,4 +1,5 @@
 use crate::{
+    add, rem, sub,
     traits::{ToBytes, Transcript},
     utils::WORD_FACTOR,
 };
@@ -39,6 +40,7 @@ impl KeccakTranscript {
     /// Generates a specified number of pseudorandom bytes based on the current
     /// transcript state. Uses a counter-based approach to generate enough
     /// bytes from the hasher.
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn get_random_bytes(&mut self, length: usize) -> Vec<u8> {
         let mut result = Vec::with_capacity(length);
         let mut counter = 0;
@@ -98,7 +100,7 @@ impl KeccakTranscript {
             *word = Word::from_be_bytes(challenge);
         }
 
-        Int::from_words(words).into()
+        Int::from_words(words)
     }
 
     /// Generates pseudorandom [CryptoInt]s as challenges based on the current
@@ -109,6 +111,7 @@ impl KeccakTranscript {
 
     /// Generates a pseudorandom `usize` within the given range bounds based on
     /// the current transcript state.
+    #[allow(clippy::unwrap_used)]
     fn get_usize_in_range(&mut self, range: &ark_std::ops::Range<usize>) -> usize {
         let challenge = self.hasher.clone().finalize();
 
@@ -117,11 +120,12 @@ impl KeccakTranscript {
         self.hasher.update([0x11]);
 
         let num = usize::from_be_bytes(challenge[..size_of::<usize>()].try_into().unwrap());
-        range.start + (num % (range.end - range.start))
+        add!(range.start, rem!(num, sub!(range.end, range.start)))
     }
 }
 
 impl Transcript for KeccakTranscript {
+    #[allow(clippy::cast_possible_wrap)]
     fn get_encoding_element<const LIMBS: usize>(&mut self) -> Int<LIMBS> {
         let byte = self.get_random_bytes(1)[0];
         // cancels all bits and depends only on whether the random byte LSB is 0 or 1
@@ -130,11 +134,12 @@ impl Transcript for KeccakTranscript {
     }
 
     fn get_u64(&mut self) -> u64 {
-        self.get_integer_challenge::<{ 1 * WORD_FACTOR }>()
+        self.get_integer_challenge::<{ WORD_FACTOR }>()
             .inner()
             .as_words()[0]
     }
 
+    #[allow(clippy::arithmetic_side_effects)]
     fn sample_unique_columns(
         &mut self,
         range: ark_std::ops::Range<usize>,

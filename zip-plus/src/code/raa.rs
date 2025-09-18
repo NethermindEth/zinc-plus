@@ -1,9 +1,8 @@
-use std::ops::AddAssign;
-
 use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
-use num_traits::Zero;
+use num_traits::{CheckedAdd, Zero};
 
 use crate::{
+    add,
     code::{LinearCode, LinearCodeSpec},
     traits::Transcript,
     utils::shuffle_seeded,
@@ -29,6 +28,7 @@ pub struct RaaCode<const N: usize, const L: usize, const K: usize, const M: usiz
 }
 
 impl<const N: usize, const L: usize, const K: usize, const M: usize> RaaCode<N, L, K, M> {
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn new<S: LinearCodeSpec, T: Transcript>(
         spec: &S,
         poly_size: usize,
@@ -36,7 +36,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize> RaaCode<N, 
     ) -> Self {
         // Taken from original Zip codes
 
-        let num_vars = poly_size.ilog2() as usize;
+        let num_vars = poly_size.ilog2();
         let row_len: usize = (1_u64 << num_vars)
             .isqrt()
             .next_power_of_two()
@@ -53,18 +53,16 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize> RaaCode<N, 
         // For RAA it's initial_bits + 2*log(repetition_factor) + num_variables
         let codeword_width_bits = {
             let initial_bits = crypto_bigint::Int::<N>::BITS;
-            let rep_factor_log: usize = repetition_factor
+            let rep_factor_log = repetition_factor
                 .checked_next_power_of_two()
                 .expect("Repetition factor is too large")
-                .ilog2()
-                .try_into()
-                .expect("Repetition factor logarithm is too large");
+                .ilog2();
             let num_vars_even = if num_vars.is_multiple_of(2) {
                 num_vars
             } else {
                 num_vars + 1
             };
-            initial_bits + num_vars_even as u32 + (2 * rep_factor_log as u32)
+            initial_bits + num_vars_even + (2 * rep_factor_log)
         };
         assert!(
             Int::<K>::BITS >= codeword_width_bits,
@@ -88,7 +86,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize> RaaCode<N, 
     /// Do the actual encoding, as per RAA spec
     fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
     where
-        Out: Zero + AddAssign<Out> + for<'a> From<&'a In> + Clone,
+        Out: Zero + CheckedAdd + for<'a> From<&'a In> + Clone,
     {
         debug_assert_eq!(
             row.len(),
@@ -112,6 +110,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize> LinearCode<
         self.row_len
     }
 
+    #[allow(clippy::arithmetic_side_effects)]
     fn codeword_len(&self) -> usize {
         self.row_len * self.repetition_factor
     }
@@ -137,6 +136,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize> LinearCode<
 }
 
 /// Repeat the given slice N times, e.g `[1,2,3] => [1,2,3,1,2,3]`
+#[allow(clippy::arithmetic_side_effects)]
 fn repeat<In, Out: for<'a> From<&'a In> + Clone>(
     input: &[In],
     repetition_factor: usize,
@@ -159,12 +159,13 @@ fn repeat<In, Out: for<'a> From<&'a In> + Clone>(
 /// 1 1 1 0
 /// 1 1 1 1
 /// ```
+#[allow(clippy::arithmetic_side_effects)] // Clippy is too dumb to realize `i - 1` is safe here
 fn accumulate<I>(input: &mut [I])
 where
-    I: Zero + AddAssign<I> + Clone,
+    I: Zero + CheckedAdd + Clone,
 {
     for i in 1..input.len() {
-        input[i] += input[i - 1].clone();
+        input[i] = add!(input[i], &input[i - 1], "Accumulation overflow");
     }
 }
 

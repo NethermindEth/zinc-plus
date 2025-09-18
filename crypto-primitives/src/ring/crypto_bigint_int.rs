@@ -179,21 +179,23 @@ impl<const LIMBS: usize> Pow<u32> for Int<LIMBS> {
             return Self::one();
         }
 
-        let mut base = self;
-        let mut result = Self::one();
+        let mut base = self.into_inner();
+        let mut result = Self::one().into_inner();
         let mut exp = rhs;
 
         while exp > 0 {
             if exp & 1 == 1 {
-                result = result * base;
+                result = result
+                    .checked_mul(&base)
+                    .expect("overflow in exponentiation");
             }
             exp >>= 1;
             if exp > 0 {
-                base = base.clone() * base;
+                base = base.checked_mul(&base).expect("overflow in exponentiation");
             }
         }
 
-        result
+        Self(result)
     }
 }
 
@@ -269,6 +271,7 @@ impl<const LIMBS: usize> RemAssign for Int<LIMBS> {
 }
 
 impl<'a, const LIMBS: usize> RemAssign<&'a Self> for Int<LIMBS> {
+    #![allow(clippy::arithmetic_side_effects)]
     fn rem_assign(&mut self, rhs: &'a Self) {
         let non_zero = crypto_bigint::NonZero::new(rhs.0).expect("division by zero");
         self.0 %= non_zero;
@@ -281,25 +284,33 @@ impl<'a, const LIMBS: usize> RemAssign<&'a Self> for Int<LIMBS> {
 
 impl<const LIMBS: usize> Sum for Int<LIMBS> {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        iter.fold(Self::zero(), |acc, x| acc + x)
+        iter.fold(Self::zero(), |acc, x| {
+            acc.checked_add(&x).expect("overflow in sum")
+        })
     }
 }
 
 impl<'a, const LIMBS: usize> Sum<&'a Self> for Int<LIMBS> {
     fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
-        iter.fold(Self::zero(), |acc, x| acc + x)
+        iter.fold(Self::zero(), |acc, x| {
+            acc.checked_add(x).expect("overflow in sum")
+        })
     }
 }
 
 impl<const LIMBS: usize> Product for Int<LIMBS> {
     fn product<I: Iterator<Item = Self>>(iter: I) -> Self {
-        iter.fold(Self::one(), |acc, x| acc * x)
+        iter.fold(Self::one(), |acc, x| {
+            acc.checked_mul(&x).expect("overflow in product")
+        })
     }
 }
 
 impl<'a, const LIMBS: usize> Product<&'a Self> for Int<LIMBS> {
     fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
-        iter.fold(Self::one(), |acc, x| acc * x)
+        iter.fold(Self::one(), |acc, x| {
+            acc.checked_mul(x).expect("overflow in product")
+        })
     }
 }
 
@@ -381,6 +392,7 @@ impl<const LIMBS: usize> crypto_bigint::Random for Int<LIMBS> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn test_int_basic_operations() {
@@ -455,25 +467,26 @@ mod tests {
         assert!(a.checked_rem(&zero).is_none());
     }
 
+    #[allow(clippy::op_ref)]
     #[test]
     fn test_int_reference_operations() {
         let a = Int::<4>::from(10i64);
         let b = Int::<4>::from(5i64);
 
         // Test reference-based addition
-        let c = a.clone() + &b;
+        let c = a + &b;
         assert_eq!(c, Int::<4>::from(15i64));
 
         // Test reference-based subtraction
-        let d = a.clone() - &b;
+        let d = a - &b;
         assert_eq!(d, Int::<4>::from(5i64));
 
         // Test reference-based multiplication
-        let e = a.clone() * &b;
+        let e = a * &b;
         assert_eq!(e, Int::<4>::from(50i64));
 
         // Test reference-based remainder
-        let f = a.clone() % &b;
+        let f = a % &b;
         assert_eq!(f, Int::<4>::ZERO);
     }
 
@@ -481,7 +494,7 @@ mod tests {
     fn test_int_conversions() {
         // Test From<crypto_bigint::Int> for Int
         let original = crypto_bigint::Int::<4>::from(123i64);
-        let wrapped: Int<4> = original.clone().into();
+        let wrapped: Int<4> = original.into();
         assert_eq!(wrapped.0, original);
 
         // Test From<Int> for crypto_bigint::Int
@@ -491,8 +504,255 @@ mod tests {
 
         // Test conversion methods
         let value = crypto_bigint::Int::<4>::from(789i64);
-        let wrapped = Int::new(value.clone());
+        let wrapped = Int::new(value);
         assert_eq!(wrapped.inner(), &value);
         assert_eq!(wrapped.into_inner(), value);
+    }
+
+    #[test]
+    fn test_pow_operation() {
+        // Test basic exponentiation
+        let base = Int::<4>::from(2_i64);
+
+        // 2^0 = 1
+        assert_eq!(base.pow(0), Int::<4>::one());
+
+        // 2^1 = 2
+        assert_eq!(base.pow(1), base);
+
+        // 2^3 = 8
+        assert_eq!(base.pow(3), Int::<4>::from(8_i64));
+
+        // 2^10 = 1024
+        assert_eq!(base.pow(10), Int::<4>::from(1024_i64));
+
+        // Test with different base
+        let base = Int::<4>::from(3_i64);
+
+        // 3^4 = 81
+        assert_eq!(base.pow(4), Int::<4>::from(81_i64));
+
+        // Test with base 1
+        let base = Int::<4>::from(1_i64);
+        assert_eq!(base.pow(1000), Int::<4>::from(1_i64));
+
+        // Test with base 0
+        let base = Int::<4>::from(0_i64);
+        assert_eq!(base.pow(0), Int::<4>::one()); // 0^0 = 1 by convention
+        assert_eq!(base.pow(10), Int::<4>::zero()); // 0^n = 0 for n > 0
+    }
+
+    #[test]
+    fn test_checked_neg() {
+        // Test with positive number
+        let a = Int::<4>::from(10_i64);
+        let neg_a = a.checked_neg().unwrap();
+        assert_eq!(neg_a, Int::<4>::from(-10_i64));
+
+        // Test with negative number
+        let b = Int::<4>::from(-5_i64);
+        let neg_b = b.checked_neg().unwrap();
+        assert_eq!(neg_b, Int::<4>::from(5_i64));
+
+        // Test with zero
+        let zero = Int::<4>::zero();
+        let neg_zero = zero.checked_neg().unwrap();
+        assert_eq!(neg_zero, zero);
+
+        // Test with MIN value (should return None as -MIN would overflow)
+        let min = Int::<4>::MIN;
+        assert!(min.checked_neg().is_none());
+    }
+
+    #[test]
+    fn test_rem_assign_operations() {
+        // Test RemAssign with owned value
+        let mut a = Int::<4>::from(17_i64);
+        let b = Int::<4>::from(5_i64);
+        a %= b;
+        assert_eq!(a, Int::<4>::from(2_i64));
+
+        // Test RemAssign with reference
+        let mut c = Int::<4>::from(19_i64);
+        let d = Int::<4>::from(6_i64);
+        c %= &d;
+        assert_eq!(c, Int::<4>::from(1_i64));
+
+        // Test with divisor 1
+        let mut e = Int::<4>::from(42_i64);
+        let one = Int::<4>::one();
+        e %= &one;
+        assert_eq!(e, Int::<4>::zero());
+    }
+
+    #[test]
+    #[should_panic(expected = "division by zero")]
+    fn test_rem_assign_panics_on_zero_divisor() {
+        let mut a = Int::<4>::from(10_i64);
+        let zero = Int::<4>::zero();
+        a %= zero;
+    }
+
+    #[test]
+    fn test_resize_method() {
+        // Test resizing to same size
+        let a = Int::<4>::from(0x12345678_i64);
+        let resized_same = a.resize::<4>();
+        assert_eq!(resized_same, a);
+
+        // Test resizing to larger size
+        let b = Int::<2>::from(0x9ABCDEF0_i64);
+        let resized_larger = b.resize::<4>();
+        assert_eq!(
+            resized_larger.into_inner().to_words()[0],
+            b.into_inner().to_words()[0]
+        );
+        assert_eq!(
+            resized_larger.into_inner().to_words()[1],
+            b.into_inner().to_words()[1]
+        );
+        assert_eq!(resized_larger.into_inner().to_words()[2], 0);
+        assert_eq!(resized_larger.into_inner().to_words()[3], 0);
+
+        // Test resizing to smaller size (truncation)
+        let c = Int::<4>::from(0x1234567890ABCDEF_i64);
+        let resized_smaller = c.resize::<2>();
+        assert_eq!(
+            resized_smaller.into_inner().to_words()[0],
+            c.into_inner().to_words()[0]
+        );
+        assert_eq!(
+            resized_smaller.into_inner().to_words()[1],
+            c.into_inner().to_words()[1]
+        );
+    }
+
+    #[test]
+    fn test_from_words() {
+        // Test with single limb
+        let words = [0x1234567890ABCDEF];
+        let a = Int::<1>::from_words(words);
+        assert_eq!(a.into_inner().to_words()[0], words[0]);
+
+        // Test with multiple limbs
+        let words = [
+            0x1234567890ABCDEF,
+            0xFEDCBA9876543210,
+            0x0F0F0F0F0F0F0F0F,
+            0xF0F0F0F0F0F0F0F0,
+        ];
+        let b = Int::<4>::from_words(words);
+        let b_words = b.into_inner().to_words();
+        for i in 0..4 {
+            assert_eq!(b_words[i], words[i]);
+        }
+    }
+
+    #[test]
+    fn test_aggregate_operations() {
+        // Test Sum trait
+        let values: Vec<Int<4>> = [1_i64, 2_i64, 3_i64].into_iter().map(Int::from).collect();
+        let sum: Int<4> = values.iter().sum();
+        assert_eq!(sum, Int::<4>::from(6_i64));
+
+        let sum2: Int<4> = values.into_iter().sum();
+        assert_eq!(sum2, Int::<4>::from(6_i64));
+
+        // Test Product trait
+        let values: Vec<Int<4>> = [2_i64, 3_i64, 4_i64].into_iter().map(Int::from).collect();
+        let product: Int<4> = values.iter().product();
+        assert_eq!(product, Int::<4>::from(24_i64));
+
+        let product2: Int<4> = values.into_iter().product();
+        assert_eq!(product2, Int::<4>::from(24_i64));
+
+        // Test empty collections
+        let empty_vec: Vec<Int<4>> = Vec::new();
+        let empty_sum: Int<4> = empty_vec.iter().sum();
+        assert_eq!(empty_sum, Int::<4>::zero());
+
+        let empty_product: Int<4> = empty_vec.iter().product();
+        assert_eq!(empty_product, Int::<4>::one());
+    }
+
+    #[test]
+    fn test_from_primitive() {
+        // Test from_i8
+        let a = Int::<4>::from_i8(42);
+        assert_eq!(a, Int::<4>::from(42_i64));
+        let b = Int::<4>::from_i8(-42);
+        assert_eq!(b, Int::<4>::from(-42_i64));
+
+        // Test from_i16
+        let c = Int::<4>::from_i16(12345);
+        assert_eq!(c, Int::<4>::from(12345_i64));
+        let d = Int::<4>::from_i16(-12345);
+        assert_eq!(d, Int::<4>::from(-12345_i64));
+
+        // Test from_i32
+        let e = Int::<4>::from_i32(1234567890);
+        assert_eq!(e, Int::<4>::from(1234567890_i64));
+        let f = Int::<4>::from_i32(-1234567890);
+        assert_eq!(f, Int::<4>::from(-1234567890_i64));
+
+        // Test from_i64
+        let g = Int::<4>::from_i64(1234567890123456789);
+        assert_eq!(g, Int::<4>::from(1234567890123456789_i64));
+        let h = Int::<4>::from_i64(-1234567890123456789);
+        assert_eq!(h, Int::<4>::from(-1234567890123456789_i64));
+
+        // Test from_i128
+        let i = Int::<4>::from_i128(1234567890123456789012345678901234567);
+        assert_eq!(
+            i.into_inner(),
+            crypto_bigint::Int::<4>::from(1234567890123456789012345678901234567_i128)
+        );
+        let j = Int::<4>::from_i128(-1234567890123456789012345678901234567);
+        assert_eq!(
+            j.into_inner(),
+            crypto_bigint::Int::<4>::from(-1234567890123456789012345678901234567_i128)
+        );
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        // Test operations with MAX values
+        let max = Int::<4>::MAX;
+        let one = Int::<4>::one();
+
+        // MAX + 1 should overflow in checked_add
+        assert!(max.checked_add(&one).is_none());
+
+        // MAX - MAX = 0
+        assert_eq!(max.checked_sub(&max).unwrap(), Int::<4>::zero());
+
+        // Test operations with MIN values
+        let min = Int::<4>::MIN;
+
+        // MIN - 1 should overflow in checked_sub
+        assert!(min.checked_sub(&one).is_none());
+
+        // Test operations with large shifts
+        let x = Int::<4>::from(1_i64);
+
+        // Shift left by almost the bit limit
+        let shifted = x << (Int::<4>::BITS - 1);
+        assert_eq!(shifted, Int::<4>::from_words([0, 0, 0, 0x8000000000000000]));
+
+        // Test with large powers that don't overflow
+        let two = Int::<4>::from(2_i64);
+        let large_power = two.pow(100); // 2^100 is large but fits in 256 bits
+
+        // Verify result: 2^100 = 1267650600228229401496703205376
+        // The actual representation depends on the endianness and word order in
+        // crypto_bigint Instead of hardcoding the expected value, let's verify
+        // the numerical properties
+
+        // 2^100 should be divisible by 2^10 = 1024 with no remainder
+        assert_eq!(large_power % Int::<4>::from(1024_i64), Int::<4>::zero());
+
+        // 2^100 / 2 = 2^99
+        let half_power = large_power >> 1;
+        assert_eq!(half_power << 1, large_power);
     }
 }

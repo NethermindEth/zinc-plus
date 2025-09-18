@@ -1,3 +1,5 @@
+#![allow(clippy::arithmetic_side_effects)]
+
 use crypto_bigint::{
     Uint,
     modular::{ConstMontyForm, ConstMontyParams},
@@ -14,7 +16,7 @@ use std::{
     },
 };
 
-use crate::{field::ConstMontyField, utils::WORD_FACTOR};
+use crate::{field::ConstMontyField, rem, utils::WORD_FACTOR};
 
 // Macro to implement arithmetic traits for Field in all ref/value combinations
 // Uses the same method name for both the trait method and the inner explicit
@@ -74,7 +76,7 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> Inv for ConstMontyField<M
     fn inv(self) -> Self::Output {
         let result = self.0.invert_vartime();
         if result.is_some().into() {
-            Some(Self(result.unwrap().into()))
+            Some(Self(result.unwrap()))
         } else {
             None
         }
@@ -84,6 +86,7 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> Inv for ConstMontyField<M
 impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> Div for ConstMontyField<Mod, LIMBS> {
     type Output = Self;
 
+    #[allow(clippy::op_ref)]
     fn div(self, rhs: Self) -> Self::Output {
         self / &rhs
     }
@@ -101,10 +104,10 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> Rem for ConstMontyField<M
     type Output = Self;
 
     fn rem(self, rhs: Self) -> Self::Output {
-        if rhs.is_zero() {
-            panic!("Division by zero");
-        }
-        Self(ConstMontyForm::new(&(self.0.retrieve() % rhs.0.retrieve())))
+        Self(ConstMontyForm::new(&rem!(
+            self.0.retrieve(),
+            &rhs.0.retrieve()
+        )))
     }
 }
 

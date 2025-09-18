@@ -64,6 +64,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
     ///   pp.linear_code.row_len()`).
     /// - Panics if the number of generated Merkle trees does not match
     ///   `pp.num_rows`, indicating an internal logic error.
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn commit(
         pp: &MultilinearZipParams<N, L, K, M, LC>,
         poly: &DenseMultilinearExtension<Int<N>>,
@@ -162,6 +163,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
     ///
     /// # Returns
     /// A `Vec<Int<K>>` containing all the encoded rows concatenated together.
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn encode_rows(
         pp: &MultilinearZipParams<N, L, K, M, LC>,
         codeword_len: usize,
@@ -197,6 +199,11 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
 mod tests {
     use std::slice::from_ref;
 

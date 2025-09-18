@@ -1,6 +1,10 @@
 use std::ops::{Add, AddAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign};
 
-use crate::poly::mle::{MultilinearExtension, MultilinearExtensionRand};
+use crate::{
+    add, mul,
+    poly::mle::{MultilinearExtension, MultilinearExtensionRand},
+    sub,
+};
 use ark_std::log2;
 use crypto_bigint::Random;
 use crypto_primitives::{Matrix, Ring};
@@ -53,6 +57,7 @@ impl<R: Ring> DenseMultilinearExtension<R> {
 
     /// Returns the dense MLE from the given matrix, without modifying the
     /// original matrix.
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn from_matrix<M: Matrix<R>>(matrix: &M) -> Self {
         let n_vars: usize = (log2(matrix.num_rows()) + log2(matrix.num_cols())) as usize; // n_vars = s + s'
 
@@ -74,6 +79,7 @@ impl<R: Ring> DenseMultilinearExtension<R> {
     }
 
     /// Takes n_vars and a dense slice and returns its dense MLE.
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn from_slice(n_vars: usize, v: &[R]) -> Self {
         let v_padded: Vec<R> = if v.len() != (1 << n_vars) {
             // pad to 2^n_vars
@@ -110,6 +116,7 @@ impl<R> MultilinearExtension<R> for DenseMultilinearExtension<R>
 where
     R: Ring,
 {
+    #[allow(clippy::arithmetic_side_effects)]
     fn fix_variables(&mut self, partial_point: &[R]) {
         assert!(
             partial_point.len() <= self.num_vars,
@@ -125,9 +132,9 @@ where
             for b in 0..1 << (nv - i) {
                 let left = poly[b << 1].clone();
                 let right = poly[(b << 1) + 1].clone();
-                let a = right - left.clone();
+                let a = sub!(right, &left);
                 if !a.is_zero() {
-                    poly[b] = left + r.clone() * a;
+                    poly[b] = add!(left, &mul!(r, &a));
                 } else {
                     poly[b] = left;
                 };
@@ -135,7 +142,7 @@ where
         }
 
         self.evaluations.truncate(1 << (nv - dim));
-        self.num_vars = nv - dim;
+        self.num_vars = sub!(nv, dim);
     }
 
     fn fixed_variables(&self, partial_point: &[R]) -> Self {
@@ -171,84 +178,6 @@ impl<T> IndexMut<usize> for DenseMultilinearExtension<T> {
     }
 }
 
-impl<R: Ring> Add for DenseMultilinearExtension<R> {
-    type Output = Self;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        self + &rhs
-    }
-}
-
-impl<R: Ring> Add<&Self> for DenseMultilinearExtension<R> {
-    type Output = Self;
-
-    fn add(mut self, rhs: &Self) -> Self::Output {
-        self.binary(rhs, |a, b| *a += b);
-        self
-    }
-}
-
-impl<R: Ring> Mul<&Self> for DenseMultilinearExtension<R> {
-    type Output = Self;
-
-    fn mul(mut self, rhs: &Self) -> Self::Output {
-        self.binary(rhs, |a, b| *a *= b);
-        self
-    }
-}
-
-impl<R: Ring> Sub<&Self> for DenseMultilinearExtension<R> {
-    type Output = Self;
-
-    fn sub(mut self, rhs: &Self) -> Self::Output {
-        self.binary(rhs, |a, b| *a -= b);
-        self
-    }
-}
-
-impl<R: Ring> Neg for DenseMultilinearExtension<R> {
-    type Output = Self;
-
-    fn neg(mut self) -> Self::Output {
-        self.unary(|v| *v = v.checked_neg().expect("Negation overflow"));
-        self
-    }
-}
-
-impl<R: Ring> Mul<R> for DenseMultilinearExtension<R> {
-    type Output = Self;
-
-    fn mul(mut self, rhs: R) -> Self::Output {
-        self.unary(|v| *v *= &rhs);
-        self
-    }
-}
-
-impl<R: Ring> AddAssign<&Self> for DenseMultilinearExtension<R> {
-    fn add_assign(&mut self, rhs: &Self) {
-        self.binary(rhs, |a, b| *a += b);
-    }
-}
-
-impl<R: Ring> SubAssign<&Self> for DenseMultilinearExtension<R> {
-    fn sub_assign(&mut self, rhs: &Self) {
-        self.binary(rhs, |a, b| *a -= b);
-    }
-}
-
-impl<R: Ring> MulAssign<&Self> for DenseMultilinearExtension<R> {
-    fn mul_assign(&mut self, rhs: &Self) {
-        self.binary(rhs, |a, b| *a *= b);
-    }
-}
-
-impl<R: Ring> AddAssign<(R, &Self)> for DenseMultilinearExtension<R> {
-    fn add_assign(&mut self, rhs: (R, &Self)) {
-        let coeff = rhs.0;
-        self.binary(rhs.1, |a, b| *a += b.clone() * &coeff);
-    }
-}
-
 impl<R: Ring> Zero for DenseMultilinearExtension<R> {
     fn zero() -> Self {
         Self {
@@ -262,7 +191,100 @@ impl<R: Ring> Zero for DenseMultilinearExtension<R> {
     }
 }
 
+impl<R: Ring> Neg for DenseMultilinearExtension<R> {
+    type Output = Self;
+
+    fn neg(mut self) -> Self::Output {
+        self.unary(|v| *v = v.checked_neg().expect("Negation overflow"));
+        self
+    }
+}
+
+impl<R: Ring> Add for DenseMultilinearExtension<R> {
+    type Output = Self;
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn add(self, rhs: Self) -> Self::Output {
+        self + &rhs
+    }
+}
+
+impl<R: Ring> Add<&Self> for DenseMultilinearExtension<R> {
+    type Output = Self;
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn add(mut self, rhs: &Self) -> Self::Output {
+        self.binary(rhs, |a, b| *a += b);
+        self
+    }
+}
+
+impl<R: Ring> Sub<&Self> for DenseMultilinearExtension<R> {
+    type Output = Self;
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn sub(mut self, rhs: &Self) -> Self::Output {
+        self.binary(rhs, |a, b| *a -= b);
+        self
+    }
+}
+
+impl<R: Ring> Mul<&Self> for DenseMultilinearExtension<R> {
+    type Output = Self;
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn mul(mut self, rhs: &Self) -> Self::Output {
+        self.binary(rhs, |a, b| *a *= b);
+        self
+    }
+}
+
+impl<R: Ring> Mul<R> for DenseMultilinearExtension<R> {
+    type Output = Self;
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn mul(mut self, rhs: R) -> Self::Output {
+        self.unary(|v| *v *= &rhs);
+        self
+    }
+}
+
+impl<R: Ring> AddAssign<&Self> for DenseMultilinearExtension<R> {
+    #[allow(clippy::arithmetic_side_effects)]
+    fn add_assign(&mut self, rhs: &Self) {
+        self.binary(rhs, |a, b| *a += b);
+    }
+}
+
+impl<R: Ring> SubAssign<&Self> for DenseMultilinearExtension<R> {
+    #[allow(clippy::arithmetic_side_effects)]
+    fn sub_assign(&mut self, rhs: &Self) {
+        self.binary(rhs, |a, b| *a -= b);
+    }
+}
+
+impl<R: Ring> MulAssign<&Self> for DenseMultilinearExtension<R> {
+    #[allow(clippy::arithmetic_side_effects)]
+    fn mul_assign(&mut self, rhs: &Self) {
+        self.binary(rhs, |a, b| *a *= b);
+    }
+}
+
+impl<R: Ring> AddAssign<(R, &Self)> for DenseMultilinearExtension<R> {
+    #[allow(clippy::arithmetic_side_effects)]
+    fn add_assign(&mut self, rhs: (R, &Self)) {
+        let coeff = rhs.0;
+        self.binary(rhs.1, |a, b| *a += b.clone() * &coeff);
+    }
+}
+
 #[cfg(test)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 mod tests {
     use super::*;
     use crate::{
@@ -383,7 +405,7 @@ mod tests {
         assert!(evals.iter().enumerate().all(|(i, v)| if i == 0 || i == 5 {
             true
         } else {
-            v.is_zero().into()
+            v.is_zero()
         }));
     }
 

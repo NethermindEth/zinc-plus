@@ -1,3 +1,10 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
+
 use crypto_bigint::Word;
 use crypto_primitives::crypto_bigint_int::Int;
 use std::{collections::BTreeSet, ops::Range};

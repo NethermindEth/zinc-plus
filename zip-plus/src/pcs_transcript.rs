@@ -7,6 +7,7 @@ use p3_matrix::Dimensions;
 use crate::{
     ZipError,
     pcs::utils::{HASH_OUT_LEN, MerkleProof, MtHash},
+    rem,
     traits::{ConstNumBytes, FromBytes, ToBytes, Transcribable},
     transcript::KeccakTranscript,
 };
@@ -224,11 +225,12 @@ impl PcsTranscript {
     /// Generates a pseudorandom index based on the current transcript state.
     /// Used to create deterministic challenges for zero-knowledge protocols.
     /// Returns an index between 0 and cap-1.
+    #[allow(clippy::unwrap_used)]
     pub fn squeeze_challenge_idx(&mut self, cap: usize) -> usize {
         let challenge: Int<1> = self.fs_transcript.get_integer_challenge();
         let bytes = challenge.inner().as_words()[0].to_be_bytes();
         let num = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
-        num % cap
+        rem!(num, cap, "Challenge cap is zero")
     }
 
     pub fn read_merkle_proof(&mut self) -> Result<MerkleProof, ZipError> {

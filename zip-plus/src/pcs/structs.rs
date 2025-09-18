@@ -96,6 +96,7 @@ impl<const K: usize> MultilinearZipData<K> {
 impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearCode<N, L, K, M>>
     MultilinearZip<N, L, K, M, LC>
 {
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn setup(poly_size: usize, linear_code: LC) -> MultilinearZipParams<N, L, K, M, LC> {
         assert!(poly_size.is_power_of_two());
         let num_vars = poly_size.ilog2() as usize;

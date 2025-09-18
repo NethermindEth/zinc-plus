@@ -1,5 +1,5 @@
 #![allow(non_local_definitions)]
-#![allow(clippy::eq_op)]
+#![allow(clippy::eq_op, clippy::arithmetic_side_effects, clippy::unwrap_used)]
 
 use ark_std::{
     hint::black_box,

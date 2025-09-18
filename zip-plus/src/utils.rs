@@ -1,6 +1,5 @@
-use std::ops::{Add, AddAssign, Mul};
-
 use crypto_primitives::crypto_bigint_int::Int;
+use num_traits::{CheckedAdd, CheckedMul};
 use rand::{rngs::StdRng, seq::SliceRandom};
 use rand_core::SeedableRng;
 
@@ -9,16 +8,66 @@ pub const WORD_FACTOR: usize = 1;
 #[cfg(target_pointer_width = "32")]
 pub const WORD_FACTOR: usize = 2;
 
+#[macro_export]
+macro_rules! add {
+    ($a:expr, $b:expr) => {
+        add!($a, $b, "Addition overflow")
+    };
+    ($a:expr, $b:expr, $msg:expr) => {
+        $a.checked_add($b).expect($msg)
+    };
+}
+
+#[macro_export]
+macro_rules! sub {
+    ($a:expr, $b:expr) => {
+        sub!($a, $b, "Subtraction overflow")
+    };
+    ($a:expr, $b:expr, $msg:expr) => {
+        $a.checked_sub($b).expect($msg)
+    };
+}
+
+#[macro_export]
+macro_rules! mul {
+    ($a:expr, $b:expr) => {
+        mul!($a, $b, "Multiplication overflow")
+    };
+    ($a:expr, $b:expr, $msg:expr) => {
+        $a.checked_mul($b).expect($msg)
+    };
+}
+
+#[macro_export]
+macro_rules! div {
+    ($a:expr, $b:expr) => {
+        div!($a, $b, "Division by zero")
+    };
+    ($a:expr, $b:expr, $msg:expr) => {
+        $a.checked_div($b).expect($msg)
+    };
+}
+
+#[macro_export]
+macro_rules! rem {
+    ($a:expr, $b:expr) => {
+        rem!($a, $b, "Division by zero")
+    };
+    ($a:expr, $b:expr, $msg:expr) => {
+        $a.checked_rem($b).expect($msg)
+    };
+}
+
 pub(crate) fn inner_product<'a, 'b, T, L, R>(lhs: L, rhs: R) -> T
 where
-    T: Clone + Mul<Output = T> + Add<Output = T> + Default + 'a + 'b,
+    T: Clone + CheckedMul + CheckedAdd + Default + 'a + 'b,
     L: IntoIterator<Item = &'a T>,
     R: IntoIterator<Item = &'b T>,
 {
     lhs.into_iter()
         .zip(rhs)
-        .map(|(lhs, rhs)| lhs.clone() * rhs.clone())
-        .reduce(|acc, product| acc + product)
+        .map(|(lhs, rhs)| mul!(lhs, rhs))
+        .reduce(|acc, product| add!(acc, &product))
         .unwrap_or_default()
 }
 
@@ -90,9 +139,9 @@ where
 /// # Returns
 ///
 /// A vector of length `row_len` representing the combined row.
-pub(super) fn combine_rows<'a, F, C, E>(coeffs: C, evaluations: E, row_len: usize) -> Vec<F>
+pub(super) fn combine_rows<F, C, E>(coeffs: C, evaluations: E, row_len: usize) -> Vec<F>
 where
-    F: Clone + Default + Send + Sync + for<'b> AddAssign<&'b F> + for<'b> Mul<&'b F, Output = F>,
+    F: Clone + Default + Send + Sync + CheckedAdd + CheckedMul,
     C: IntoIterator<Item = F> + Sync,
     E: IntoIterator<Item = F> + Sync,
     C::IntoIter: Clone + Send + Sync,
@@ -112,7 +161,7 @@ where
                     .clone()
                     .zip(evaluations_iter.clone().skip(column).step_by(row_len))
                     .for_each(|(coeff, eval)| {
-                        *combined += &(coeff * &eval);
+                        *combined = add!(combined, &mul!(coeff, &eval));
                     });
             })
     });

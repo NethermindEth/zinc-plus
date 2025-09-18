@@ -18,7 +18,7 @@ use uninit::AsMaybeUninit;
 
 use super::{error::MerkleError, structs::MultilinearZipData};
 use crate::{
-    ZipError, pcs_transcript::PcsTranscript, poly::dense::DenseMultilinearExtension,
+    ZipError, div, pcs_transcript::PcsTranscript, poly::dense::DenseMultilinearExtension, sub,
     utils::ReinterpretVector,
 };
 
@@ -162,7 +162,7 @@ where
         // Thus, we need to transpose a matrix to have original columns as leaves.
         let matrix = {
             let mut columns: Vec<T> = Vec::with_capacity(rows.len());
-            let column_height = rows.len() / row_width;
+            let column_height = div!(rows.len(), row_width);
             let rows = unsafe { ReinterpretVector::reinterpret_slice(rows) };
             transpose::transpose(
                 rows.as_ref_uninit(),
@@ -298,12 +298,13 @@ impl ColumnOpening {
 /// For a polynomial arranged in matrix form, this splits the evaluation point
 /// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
 /// right
+#[allow(clippy::unwrap_used)]
 pub(super) fn point_to_tensor<F>(num_rows: usize, point: &[F]) -> Result<(Vec<F>, Vec<F>), ZipError>
 where
     F: PrimeField,
 {
     assert!(num_rows.is_power_of_two());
-    let (hi, lo) = point.split_at(point.len() - num_rows.ilog2() as usize);
+    let (hi, lo) = point.split_at(sub!(point.len(), num_rows.ilog2() as usize));
     // TODO: get rid of these unwraps.
     let q_0 = if !lo.is_empty() {
         build_eq_x_r(lo).unwrap()
@@ -411,11 +412,12 @@ where
 /// For a polynomial arranged in matrix form, this splits the evaluation point
 /// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
 /// right and returns the left vector only
+#[allow(clippy::unwrap_used)]
 pub(super) fn left_point_to_tensor<F>(num_rows: usize, point: &[F]) -> Result<Vec<F>, ZipError>
 where
     F: PrimeField,
 {
-    let (_, lo) = point.split_at(point.len() - num_rows.ilog2() as usize);
+    let (_, lo) = point.split_at(sub!(point.len(), num_rows.ilog2() as usize));
     // TODO: get rid of these unwraps.
     let q_0 = if !lo.is_empty() {
         build_eq_x_r(lo).unwrap()

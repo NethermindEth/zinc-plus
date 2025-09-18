@@ -1,4 +1,5 @@
 use crate::{
+    sub,
     traits::{ConstNumBytes, FromBytes, ToBytes},
     utils::WORD_FACTOR,
 };
@@ -31,7 +32,7 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> FromBytes for ConstMontyF
             "Invalid byte slice length for ConstMontyForm"
         );
         let words = chunked
-            .into_iter()
+            .iter()
             .flat_map(|chunk| {
                 let (chunked, rem) = chunk.as_chunks::<{ 8 / WORD_FACTOR }>();
                 assert!(
@@ -39,7 +40,7 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> FromBytes for ConstMontyF
                     "Invalid byte slice length for ConstMontyForm"
                 );
                 chunked
-                    .into_iter()
+                    .iter()
                     .rev()
                     .map(|chunk| Word::from_be_bytes(*chunk))
             })
@@ -59,7 +60,7 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> FromBytes for ConstMontyF
             "Invalid byte slice length for ConstMontyForm"
         );
         let words = chunked
-            .into_iter()
+            .iter()
             .map(|chunk| Word::from_le_bytes(*chunk))
             .collect_array::<LIMBS>()
             .expect("Invalid length for ConstMontyForm");
@@ -79,8 +80,8 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> ToBytes for ConstMontyFor
                 // Reverse the order of bytes in each limb, also saturating the output with
                 // zeroes if necessary
                 ZeroBytesIterator
-                    .take(chunk.len() - WORD_FACTOR)
-                    .chain(chunk.into_iter().rev().cloned())
+                    .take(sub!(chunk.len(), WORD_FACTOR))
+                    .chain(chunk.iter().rev().cloned())
                     .flatten()
             })
             .collect_vec()

@@ -9,7 +9,7 @@ use std::{
 use criterion::{
     AxisScale, BenchmarkId, Criterion, PlotConfiguration, criterion_group, criterion_main,
 };
-use crypto_bigint::{NonZero, U256, const_monty_params};
+use crypto_bigint::{U256, const_monty_params};
 use zip_plus::{field::ConstMontyField, utils::WORD_FACTOR};
 
 const_monty_params!(
@@ -20,6 +20,7 @@ const_monty_params!(
 
 type F = ConstMontyField<Params, { 4 * WORD_FACTOR }>;
 
+#[allow(clippy::arithmetic_side_effects)]
 fn bench_random_field(group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>) {
     let field_elem = F::from(695962179703_u64);
 
