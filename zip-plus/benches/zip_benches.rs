@@ -27,12 +27,11 @@ const INT_LIMBS: usize = WORD_FACTOR;
 const FIELD_LIMBS: usize = 4 * WORD_FACTOR;
 
 const N: usize = INT_LIMBS;
-const L: usize = INT_LIMBS * 2;
 const K: usize = INT_LIMBS * 4;
 const M: usize = INT_LIMBS * 8;
 
-type LC = RaaCode<N, L, K, M>;
-type BenchZip = MultilinearZip<N, L, K, M, LC>;
+type LC = RaaCode<Int<N>, Int<K>, Int<M>>;
+type BenchZip = MultilinearZip<Int<N>, Int<K>, Int<M>, LC>;
 
 const_monty_params!(
     ModP,
@@ -74,7 +73,7 @@ fn encode_single_row<const ROW_LEN: usize>(group: &mut BenchmarkGroup<WallTime>,
             assert_eq!(linear_code.row_len(), ROW_LEN, "Unexpected row_len");
             let message: Vec<_> = (0..ROW_LEN).map(|_i| Int::<N>::random(&mut rng)).collect();
             b.iter(|| {
-                let encoded_row: Vec<Int<K>> = linear_code.encode_wide(&message);
+                let encoded_row: Vec<Int<K>> = linear_code.encode(&message);
                 black_box(encoded_row);
             })
         },

@@ -15,11 +15,11 @@ use crate::{
 use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
 use itertools::{Itertools, izip};
 
-impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearCode<N, L, K, M>>
-    MultilinearZip<N, L, K, M, LC>
+impl<const N: usize, const K: usize, const M: usize, C: LinearCode<Int<N>, Int<K>, Int<M>>>
+    MultilinearZip<Int<N>, Int<K>, Int<M>, C>
 {
     pub fn open<F>(
-        pp: &MultilinearZipParams<N, L, K, M, LC>,
+        pp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
         poly: &DenseMultilinearExtension<Int<N>>,
         commit_data: &MultilinearZipData<K>,
         point: &[F],
@@ -40,7 +40,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
 
     // TODO Apply 2022/1355 https://eprint.iacr.org/2022/1355.pdf#page=30
     pub fn batch_open<F>(
-        pp: &MultilinearZipParams<N, L, K, M, LC>,
+        pp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
         polys: &[DenseMultilinearExtension<Int<N>>],
         comms: &[MultilinearZipData<K>],
         points: &[Vec<F>],
@@ -59,7 +59,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
     // Subprotocol functions
 
     fn prove_evaluation_phase<F>(
-        pp: &MultilinearZipParams<N, L, K, M, LC>,
+        pp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
         transcript: &mut PcsTranscript,
         point: &[F],
         poly: &DenseMultilinearExtension<Int<N>>,
@@ -91,7 +91,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
     }
 
     pub(super) fn prove_testing_phase(
-        pp: &MultilinearZipParams<N, L, K, M, LC>,
+        pp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
         poly: &DenseMultilinearExtension<Int<N>>,
         commit_data: &MultilinearZipData<K>,
         transcript: &mut PcsTranscript,
@@ -121,7 +121,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
     }
 
     pub(super) fn open_merkle_trees_for_column(
-        pp: &MultilinearZipParams<N, L, K, M, LC>,
+        pp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
         commit_data: &MultilinearZipData<K>,
         column: usize,
         transcript: &mut PcsTranscript,
@@ -172,11 +172,10 @@ mod tests {
     const FIELD_LIMBS: usize = 4 * WORD_FACTOR;
 
     const N: usize = INT_LIMBS;
-    const L: usize = INT_LIMBS * 2;
     const K: usize = INT_LIMBS * 4;
     const M: usize = INT_LIMBS * 8;
 
-    type LC = RaaCode<N, L, K, M>;
+    type C = RaaCode<Int<N>, Int<K>, Int<M>>;
 
     const_monty_params!(
         ModP,
@@ -185,20 +184,20 @@ mod tests {
     );
 
     type F = ConstMontyField<ModP, FIELD_LIMBS>;
-    type TestZip = MultilinearZip<N, L, K, M, LC>;
+    type TestZip = MultilinearZip<Int<N>, Int<K>, Int<M>, C>;
 
     /// Helper function to set up common parameters for tests.
     fn setup_test_params(
         num_vars: usize,
     ) -> (
-        MultilinearZipParams<N, L, K, M, RaaCode<N, L, K, M>>,
+        MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
         DenseMultilinearExtension<Int<INT_LIMBS>>,
     ) {
         let poly_size = 1 << num_vars;
         let num_rows = 1 << num_vars.div_ceil(2);
 
         let mut transcript = MockTranscript::default();
-        let code = LC::new(&DefaultLinearCodeSpec, poly_size, &mut transcript);
+        let code = C::new(&DefaultLinearCodeSpec, poly_size, &mut transcript);
         let pp = MultilinearZipParams::new(num_vars, num_rows, code);
 
         let evaluations: Vec<_> = (1..=poly_size as i32).map(Int::from).collect();
