@@ -7,9 +7,6 @@ use crypto_primitives::{Matrix, Ring};
 use num_traits::Zero;
 use rand_core::RngCore;
 
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DenseMultilinearExtension<F> {
     /// The evaluation over {0,1}^`num_vars`

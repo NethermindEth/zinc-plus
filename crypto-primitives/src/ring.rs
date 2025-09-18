@@ -4,11 +4,10 @@ pub mod crypto_bigint_int;
 use core::{
     fmt::{Debug, Display},
     iter::{Product, Sum},
-    ops::{Add, AddAssign, Mul, MulAssign, Rem, RemAssign, Sub, SubAssign},
+    ops::{Add, AddAssign, Mul, MulAssign, Rem, RemAssign, Shl, Shr, Sub, SubAssign},
 };
 use num_traits::{
-    CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedShl, CheckedShr, CheckedSub, ConstOne,
-    ConstZero, One, Pow, Zero,
+    CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedSub, ConstOne, ConstZero, One, Pow, Zero,
 };
 
 /// A ring is like a field without a multiplicative inverse or division.
@@ -30,9 +29,6 @@ pub trait Ring:
     + CheckedAdd
     + CheckedSub
     + CheckedMul
-    + CheckedShl
-    + CheckedShr
-    + Pow<u32>
     + AddAssign
     + SubAssign
     + MulAssign
@@ -57,6 +53,9 @@ pub trait IntRing:
     + PartialOrd
     // Arithmetic operations consuming rhs
     + CheckedRem
+    + Shl<u32>
+    + Shr<u32>
+    + Pow<u32>
     + RemAssign
     // Arithmetic operations with rhs reference
     + for<'a> Rem<&'a Self>

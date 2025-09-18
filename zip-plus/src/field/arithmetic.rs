@@ -3,8 +3,8 @@ use crypto_bigint::{
     modular::{ConstMontyForm, ConstMontyParams},
 };
 use num_traits::{
-    CheckedAdd, CheckedDiv, CheckedMul, CheckedNeg, CheckedRem, CheckedShl, CheckedShr, CheckedSub,
-    ConstOne, ConstZero, Inv, Pow, Zero,
+    CheckedAdd, CheckedDiv, CheckedMul, CheckedNeg, CheckedRem, CheckedSub, ConstOne, ConstZero,
+    Inv, Pow, Zero,
 };
 use std::{
     iter::{Product, Sum},
@@ -128,10 +128,9 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> Shl<u32> for ConstMontyFi
     type Output = Self;
 
     fn shl(mut self, rhs: u32) -> Self::Output {
-        // Not very efficient, but it works
-        for _ in 0..rhs {
-            self.0 = self.0.div_by_2();
-        }
+        let mut value = self.0.retrieve();
+        value <<= rhs;
+        self.0 = ConstMontyForm::new(&value);
         self
     }
 }
@@ -140,11 +139,9 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> Shr<u32> for ConstMontyFi
     type Output = Self;
 
     fn shr(mut self, rhs: u32) -> Self::Output {
-        // Not very efficient, but it works
-        let two = ConstMontyForm::ONE.double();
-        for _ in 0..rhs {
-            self.0 *= &two;
-        }
+        let mut value = self.0.retrieve();
+        value >>= rhs;
+        self.0 = ConstMontyForm::new(&value);
         self
     }
 }
@@ -186,18 +183,6 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> CheckedDiv for ConstMonty
         // Safe to unwrap since we checked for None above
         let inv = inv.unwrap();
         Some(Self(self.0 * inv))
-    }
-}
-
-impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> CheckedShl for ConstMontyField<Mod, LIMBS> {
-    fn checked_shl(&self, rhs: u32) -> Option<Self> {
-        Some(*self << rhs)
-    }
-}
-
-impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> CheckedShr for ConstMontyField<Mod, LIMBS> {
-    fn checked_shr(&self, rhs: u32) -> Option<Self> {
-        Some(*self >> rhs)
     }
 }
 

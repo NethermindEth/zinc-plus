@@ -6,8 +6,7 @@ use core::{
 };
 use crypto_bigint::{CheckedMul as CryptoCheckedMul, CheckedSub as CryptoCheckedSub, Word};
 use num_traits::{
-    CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedShl, CheckedShr, CheckedSub, ConstOne,
-    ConstZero, One, Pow, Zero,
+    CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedSub, ConstOne, ConstZero, One, Pow, Zero,
 };
 use paste::paste;
 
@@ -239,22 +238,6 @@ impl<const LIMBS: usize> CheckedRem for Int<LIMBS> {
     }
 }
 
-impl<const LIMBS: usize> CheckedShl for Int<LIMBS> {
-    fn checked_shl(&self, rhs: u32) -> Option<Self> {
-        // crypto_bigint::Int implements Shl<u32>
-        // Always succeeds for u32 shift amounts
-        Some(Self(self.0.shl(rhs)))
-    }
-}
-
-impl<const LIMBS: usize> CheckedShr for Int<LIMBS> {
-    fn checked_shr(&self, rhs: u32) -> Option<Self> {
-        // crypto_bigint::Int implements Shr<u32>
-        // Always succeeds for u32 shift amounts
-        Some(Self(self.0.shr(rhs)))
-    }
-}
-
 //
 // Arithmetic assign operations
 //
@@ -402,47 +385,71 @@ mod tests {
     #[test]
     fn test_int_basic_operations() {
         // Test with 4 limbs (256-bit integers)
-        let a = Int::<4>(crypto_bigint::Int::from(10i64));
-        let b = Int::<4>(crypto_bigint::Int::from(5i64));
+        let a = Int::<4>::from(10_i64);
+        let b = Int::<4>::from(5_i64);
 
         // Test addition
         let c = a + b;
-        assert_eq!(c, Int::<4>(crypto_bigint::Int::from(15i64)));
+        assert_eq!(c, Int::<4>::from(15_i64));
 
         // Test subtraction
         let d = a - b;
-        assert_eq!(d, Int::<4>(crypto_bigint::Int::from(5i64)));
+        assert_eq!(d, Int::<4>::from(5_i64));
 
         // Test multiplication
         let e = a * b;
-        assert_eq!(e, Int::<4>(crypto_bigint::Int::from(50i64)));
+        assert_eq!(e, Int::<4>::from(50_i64));
 
         // Test remainder
         let f = a % b;
-        assert_eq!(f, Int::<4>(crypto_bigint::Int::from(0i64)));
+        assert_eq!(f, Int::<4>::from(0_i64));
+
+        // Test shl
+        let x = Int::<1>::from(0x0001_i64);
+
+        assert_eq!(x << 0, x);
+        assert_eq!(x << 1, 0x0002.into());
+        assert_eq!(x << 15, 0x8000.into());
+        assert_eq!(x << 63, (-0x8000000000000000_i64).into());
+        // x << 64 panics, it's tested separately
+
+        // Test shr
+        let x = Int::<4>::from(0x8000_i32);
+
+        assert_eq!(x >> 0, x);
+        assert_eq!(x >> 1, 0x4000.into());
+        assert_eq!(x >> 15, 0x0001.into());
+        assert_eq!(x >> 16, Int::ZERO);
+    }
+
+    #[test]
+    #[should_panic(expected = "`shift` within the bit size of the integer")]
+    fn test_shl_panics_on_overflow() {
+        let x = Int::<1>::from(0x0001_i64);
+        let _ = x << 64;
     }
 
     #[test]
     fn test_int_checked_operations() {
-        let a = Int::<4>(crypto_bigint::Int::from(10i64));
-        let b = Int::<4>(crypto_bigint::Int::from(5i64));
-        let zero = Int::<4>(crypto_bigint::Int::ZERO);
+        let a = Int::<4>::from(10_i64);
+        let b = Int::<4>::from(5_i64);
+        let zero = Int::<4>::ZERO;
 
         // Test checked_add
         let c = a.checked_add(&b).unwrap();
-        assert_eq!(c, Int::<4>(crypto_bigint::Int::from(15i64)));
+        assert_eq!(c, Int::<4>::from(15i64));
 
         // Test checked_sub
         let d = a.checked_sub(&b).unwrap();
-        assert_eq!(d, Int::<4>(crypto_bigint::Int::from(5i64)));
+        assert_eq!(d, Int::<4>::from(5i64));
 
         // Test checked_mul
         let e = a.checked_mul(&b).unwrap();
-        assert_eq!(e, Int::<4>(crypto_bigint::Int::from(50i64)));
+        assert_eq!(e, Int::<4>::from(50i64));
 
         // Test checked_rem
         let f = a.checked_rem(&b).unwrap();
-        assert_eq!(f, Int::<4>(crypto_bigint::Int::ZERO));
+        assert_eq!(f, Int::<4>::ZERO);
 
         // Test checked_rem with zero divisor
         assert!(a.checked_rem(&zero).is_none());
@@ -450,24 +457,24 @@ mod tests {
 
     #[test]
     fn test_int_reference_operations() {
-        let a = Int::<4>(crypto_bigint::Int::from(10i64));
-        let b = Int::<4>(crypto_bigint::Int::from(5i64));
+        let a = Int::<4>::from(10i64);
+        let b = Int::<4>::from(5i64);
 
         // Test reference-based addition
         let c = a.clone() + &b;
-        assert_eq!(c, Int::<4>(crypto_bigint::Int::from(15i64)));
+        assert_eq!(c, Int::<4>::from(15i64));
 
         // Test reference-based subtraction
         let d = a.clone() - &b;
-        assert_eq!(d, Int::<4>(crypto_bigint::Int::from(5i64)));
+        assert_eq!(d, Int::<4>::from(5i64));
 
         // Test reference-based multiplication
         let e = a.clone() * &b;
-        assert_eq!(e, Int::<4>(crypto_bigint::Int::from(50i64)));
+        assert_eq!(e, Int::<4>::from(50i64));
 
         // Test reference-based remainder
         let f = a.clone() % &b;
-        assert_eq!(f, Int::<4>(crypto_bigint::Int::ZERO));
+        assert_eq!(f, Int::<4>::ZERO);
     }
 
     #[test]
@@ -478,7 +485,7 @@ mod tests {
         assert_eq!(wrapped.0, original);
 
         // Test From<Int> for crypto_bigint::Int
-        let wrapped = Int::<4>(crypto_bigint::Int::from(456i64));
+        let wrapped = Int::<4>::from(456i64);
         let unwrapped: crypto_bigint::Int<4> = wrapped.into();
         assert_eq!(unwrapped, crypto_bigint::Int::from(456i64));
 
