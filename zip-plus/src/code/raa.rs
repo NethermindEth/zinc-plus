@@ -173,9 +173,9 @@ mod tests {
     use crypto_primitives::crypto_bigint_int::Int;
     use num_traits::Zero;
 
+    use super::*;
     use crate::{
         code::{DefaultLinearCodeSpec, LinearCode},
-        code_raa::{RaaCode, accumulate, repeat},
         pcs::tests::MockTranscript,
         utils::shuffle_seeded,
     };

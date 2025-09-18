@@ -151,8 +151,7 @@ mod tests {
     use rand_core::RngCore;
 
     use crate::{
-        code::{DefaultLinearCodeSpec, LinearCode},
-        code_raa::RaaCode,
+        code::{DefaultLinearCodeSpec, LinearCode, raa::RaaCode},
         field::ConstMontyField,
         pcs::{
             MerkleTree,

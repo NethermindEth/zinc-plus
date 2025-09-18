@@ -13,8 +13,7 @@ use crypto_primitives::crypto_bigint_int::Int;
 use itertools::Itertools;
 use rand::rng;
 use zip_plus::{
-    code::{DefaultLinearCodeSpec, LinearCode},
-    code_raa::RaaCode,
+    code::{DefaultLinearCodeSpec, LinearCode, raa::RaaCode},
     field::F256,
     pcs::{MerkleTree, structs::MultilinearZip},
     pcs_transcript::PcsTranscript,

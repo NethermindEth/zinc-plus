@@ -206,8 +206,7 @@ mod tests {
     use rand::{Rng, rng};
 
     use crate::{
-        code::{DefaultLinearCodeSpec, LinearCode},
-        code_raa::RaaCode,
+        code::{DefaultLinearCodeSpec, LinearCode, raa::RaaCode},
         field::F256,
         pcs::{
             MerkleTree,

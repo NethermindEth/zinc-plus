@@ -1,7 +1,6 @@
 use crypto_primitives::IntRing;
 
 pub mod code;
-pub mod code_raa;
 pub mod pcs;
 pub mod pcs_transcript;
 pub mod traits;

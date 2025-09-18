@@ -194,8 +194,7 @@ mod tests {
 
     use crate::{
         Error,
-        code::{DefaultLinearCodeSpec, LinearCode},
-        code_raa::RaaCode,
+        code::{DefaultLinearCodeSpec, LinearCode, raa::RaaCode},
         field::F256,
         pcs::{
             structs::{MultilinearZip, MultilinearZipCommitment, MultilinearZipParams},
