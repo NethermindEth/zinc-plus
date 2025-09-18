@@ -9,7 +9,7 @@ use crate::{
         },
         utils::validate_input,
     },
-    poly::dense::DenseMultilinearExtension,
+    poly::mle::DenseMultilinearExtension,
     utils::{num_threads, parallelize_iter},
 };
 use uninit::out_ref::Out;
@@ -225,7 +225,7 @@ mod tests {
             utils::MtHash,
         },
         pcs_transcript::PcsTranscript,
-        poly::dense::DenseMultilinearExtension,
+        poly::mle::DenseMultilinearExtension,
         transcript::KeccakTranscript,
         utils::WORD_FACTOR,
     };

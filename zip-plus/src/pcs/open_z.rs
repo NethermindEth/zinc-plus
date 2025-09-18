@@ -11,7 +11,7 @@ use crate::{
         utils::{ColumnOpening, left_point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
-    poly::dense::DenseMultilinearExtension,
+    poly::mle::DenseMultilinearExtension,
     traits::Transcribable,
     utils::combine_rows,
 };
@@ -171,7 +171,7 @@ mod tests {
             tests::MockTranscript,
         },
         pcs_transcript::PcsTranscript,
-        poly::dense::DenseMultilinearExtension,
+        poly::mle::DenseMultilinearExtension,
         utils::WORD_FACTOR,
     };
 

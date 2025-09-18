@@ -9,7 +9,7 @@ use crate::{
         utils::{ColumnOpening, MtHash, point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
-    poly::dense::DenseMultilinearExtension,
+    poly::mle::DenseMultilinearExtension,
     traits::Transcribable,
     utils::inner_product,
 };
@@ -212,7 +212,7 @@ mod tests {
             tests::MockTranscript,
         },
         pcs_transcript::PcsTranscript,
-        poly::{dense::DenseMultilinearExtension, mle::MultilinearExtensionRand},
+        poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand},
         transcript::KeccakTranscript,
         utils::WORD_FACTOR,
     };

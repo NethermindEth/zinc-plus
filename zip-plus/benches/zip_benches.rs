@@ -17,7 +17,7 @@ use zip_plus::{
     field::F256,
     pcs::{MerkleTree, structs::MultilinearZip},
     pcs_transcript::PcsTranscript,
-    poly::{dense::DenseMultilinearExtension, mle::MultilinearExtensionRand},
+    poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand},
     transcript::KeccakTranscript,
     utils::WORD_FACTOR,
 };

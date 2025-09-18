@@ -18,7 +18,7 @@ use uninit::AsMaybeUninit;
 use super::{error::MerkleError, structs::MultilinearZipData};
 use crate::{
     ZipError, div, pcs::structs::AsPackable, pcs_transcript::PcsTranscript,
-    poly::dense::DenseMultilinearExtension, sub, traits::Transcribable, utils::ReinterpretVector,
+    poly::mle::DenseMultilinearExtension, sub, traits::Transcribable, utils::ReinterpretVector,
 };
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
