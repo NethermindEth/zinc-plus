@@ -12,10 +12,12 @@ publish = false
 
 [workspace.dependencies]
 crypto-primitives = { path = "crypto-primitives" }
+criterion = "0.7.0"
+proptest = "1.7.0"
 
 [workspace.lints.rust]
 missing_docs = "allow"  # TODO(alex): replace with "deny" once code has been more-or-less stabilized
-unsafe_code = "forbid"
+unsafe_code = "allow" # TODO(alex): replace with "forbid"
 
 [workspace.lints.clippy]
 arithmetic_side_effects = "deny"

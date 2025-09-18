@@ -66,13 +66,13 @@ ignore = false
 registries = []
 
 [bans]
-wildcards = "deny"
+wildcards = "warn" # Allow Merkle Tree dependency for Plonky3, maybe review that later
 allow-wildcard-paths = true
 multiple-versions = "warn"
 highlight = "all"
 
 [bans.workspace-dependencies]
-duplicates = 'deny'
+duplicates = "allow" # This is to keep crypto-primitives relatively separated, should be changed once it becomes a separate repo
 # TODO(template) you should provide an example with the lib usage
 unused = 'deny'
 
@@ -82,6 +82,6 @@ unknown-git = "deny"
 allow-git = []
 
 [sources.allow-org]
-github = ["NethermindEth"]
+github = ["NethermindEth", "Plonky3"]
 gitlab = []
 bitbucket = []

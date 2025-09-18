@@ -6,7 +6,19 @@ edition.workspace = true
 repository.workspace = true
 license.workspace = true
 
-[dependencies]
-
 [lints]
 workspace = true
+
+[dependencies]
+num-traits = { version = "0.2", default-features = false }
+crypto-bigint = { version = "0.7.0-rc.2", default-features = false, optional = true }
+ark-std = { version = "0.5", optional = true }
+rand_core = { version = "0.9.3", default-features = false, optional = true }
+pastey = "0.1.1"
+
+[features]
+default = ["std"]
+std = ["num-traits/std"]
+ark_std = ["dep:ark-std"]
+crypto_bigint = ["dep:crypto-bigint"]
+rand_core = ["dep:rand_core", "crypto-bigint/rand_core"]

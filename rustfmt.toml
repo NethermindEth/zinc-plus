@@ -19,7 +19,8 @@ use_field_init_shorthand   = true          # `{ x, y }` instead of `{ x: x, y: y
 trailing_comma             = "Vertical"    # Comma-terminate every multi-line list
 
 # ---------- Implementation order -------------------------------------------
-reorder_impl_items         = true          # Deterministic ordering inside impl blocks
+reorder_impl_items         = false         # Deterministic ordering inside impl blocks
+                                           # Disabled because it currently sorts types alphabetically (unstable)
 
 # --- Misc -------------------------------------------------------------------
 edition                    = "2024"        # Controls the edition of the Rust Style Guide

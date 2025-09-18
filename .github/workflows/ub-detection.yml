@@ -19,4 +19,6 @@ jobs:
       - run: |
           rustup +nightly component add miri
           cargo +nightly miri setup
-          MIRIFLAGS="-Zmiri-strict-provenance" cargo +nightly miri test --lib
+          PROPTEST_DISABLE_FAILURE_PERSISTENCE=true \
+            MIRIFLAGS="-Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE -Zmiri-strict-provenance" \
+            cargo +nightly miri test --lib

@@ -1,12 +1,26 @@
-#[allow(dead_code)]
-fn hello_world() -> u32 {
-    2 + 2
-}
+pub mod code;
+pub mod pcs;
+pub mod pcs_transcript;
+pub mod traits;
+pub mod utils;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(super::hello_world(), 4);
-    }
+pub mod field;
+pub mod poly;
+pub mod transcript;
+
+use ark_std::string::String;
+use thiserror::Error;
+
+#[derive(Clone, Debug, PartialEq, Error)]
+pub enum ZipError {
+    #[error("Invalid PCS param: {0}")]
+    InvalidPcsParam(String),
+    #[error("Invalid commitment opening: {0}")]
+    InvalidPcsOpen(String),
+    #[error("Bad Snark: {0}")]
+    InvalidSnark(String),
+    #[error("Serialization Error: {0}")]
+    Serialization(String),
+    #[error("Transcript failure: {1}")]
+    Transcript(ark_std::io::ErrorKind, String),
 }
