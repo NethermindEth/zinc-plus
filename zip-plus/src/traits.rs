@@ -1,11 +1,6 @@
 use crypto_primitives::crypto_bigint_int::Int;
 use std::collections::BTreeSet;
 
-pub trait FromBits {
-    fn from_be_bits(bits: &[bool]) -> Self;
-    fn from_le_bits(bits: &[bool]) -> Self;
-}
-
 pub trait ConstNumBytes {
     /// Number of bytes required to represent this type.
     const NUM_BYTES: usize;

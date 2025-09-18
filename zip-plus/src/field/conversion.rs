@@ -1,14 +1,11 @@
 use crypto_bigint::{
-    Uint, Word, Zero,
+    Uint,
     modular::{ConstMontyForm, ConstMontyParams},
 };
 use crypto_primitives::crypto_bigint_int::Int;
 use num_traits::{ConstOne, ConstZero};
 
-use crate::{
-    field::ConstMontyField,
-    traits::{ConstNumBytes, FromBits},
-};
+use crate::{field::ConstMontyField, traits::ConstNumBytes};
 
 impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> ConstNumBytes
     for ConstMontyField<Mod, LIMBS>
@@ -114,27 +111,6 @@ where
 {
     fn from(value: &T) -> Self {
         Self::from(value.clone())
-    }
-}
-
-impl<const N: usize> FromBits for Uint<N> {
-    #[inline]
-    fn from_be_bits(bits: &[bool]) -> Self {
-        let mut bits = bits.to_vec();
-        bits.reverse();
-        Self::from_le_bits(&bits)
-    }
-
-    fn from_le_bits(bits: &[bool]) -> Self {
-        let mut res = Self::zero();
-        let limb_bits = Word::BITS as usize;
-        for (bit_chunk, res_i) in bits.chunks(limb_bits).zip(res.as_mut_words()) {
-            for (i, bit) in bit_chunk.iter().enumerate() {
-                // i is always < limb_bits here, so shifting is safe on both 32- and 64-bit
-                *res_i |= (*bit as Word) << i;
-            }
-        }
-        res
     }
 }
 
