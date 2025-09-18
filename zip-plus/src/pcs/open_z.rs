@@ -4,7 +4,10 @@ use crate::{
     ZipError,
     code::LinearCode,
     pcs::{
-        structs::{AsPackable, MultilinearZip, MultilinearZipData, MultilinearZipParams},
+        structs::{
+            CodewordRing, EvaluationRing, LinearCombinationRing, MultilinearZip,
+            MultilinearZipData, MultilinearZipParams,
+        },
         utils::{ColumnOpening, left_point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
@@ -12,13 +15,13 @@ use crate::{
     traits::Transcribable,
     utils::combine_rows,
 };
-use crypto_primitives::{PrimeField, Ring};
+use crypto_primitives::PrimeField;
 use itertools::{Itertools, izip};
 
 impl<
-    Eval: Ring + Transcribable,
-    Cw: Ring + AsPackable + Transcribable + Copy,
-    Comb: Ring + Transcribable + for<'a> From<&'a Eval> + for<'a> From<&'a Cw>,
+    Eval: EvaluationRing,
+    Cw: CodewordRing,
+    Comb: LinearCombinationRing<Eval, Cw>,
     C: LinearCode<Eval, Cw, Comb>,
 > MultilinearZip<Eval, Cw, Comb, C>
 {

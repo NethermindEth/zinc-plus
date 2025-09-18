@@ -4,22 +4,20 @@ use crate::{
     pcs::{
         MerkleTree,
         structs::{
-            AsPackable, MultilinearZip, MultilinearZipCommitment, MultilinearZipData,
-            MultilinearZipParams,
+            CodewordRing, EvaluationRing, LinearCombinationRing, MultilinearZip,
+            MultilinearZipCommitment, MultilinearZipData, MultilinearZipParams,
         },
         utils::validate_input,
     },
     poly::dense::DenseMultilinearExtension,
-    traits::Transcribable,
     utils::{num_threads, parallelize_iter},
 };
-use crypto_primitives::Ring;
 use uninit::out_ref::Out;
 
 impl<
-    Eval: Ring + Transcribable,
-    Cw: Ring + AsPackable + Transcribable + Copy,
-    Comb: Ring + Transcribable + for<'a> From<&'a Eval> + for<'a> From<&'a Cw>,
+    Eval: EvaluationRing,
+    Cw: CodewordRing,
+    Comb: LinearCombinationRing<Eval, Cw>,
     C: LinearCode<Eval, Cw, Comb>,
 > MultilinearZip<Eval, Cw, Comb, C>
 {

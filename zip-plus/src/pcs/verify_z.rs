@@ -2,7 +2,10 @@ use crate::{
     ZipError,
     code::LinearCode,
     pcs::{
-        structs::{AsPackable, MultilinearZip, MultilinearZipCommitment, MultilinearZipParams},
+        structs::{
+            CodewordRing, EvaluationRing, LinearCombinationRing, MultilinearZip,
+            MultilinearZipCommitment, MultilinearZipParams,
+        },
         utils::{ColumnOpening, MtHash, point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
@@ -11,13 +14,13 @@ use crate::{
     utils::inner_product,
 };
 use ark_std::iterable::Iterable;
-use crypto_primitives::{PrimeField, Ring};
+use crypto_primitives::PrimeField;
 use itertools::Itertools;
 
 impl<
-    Eval: Ring + Transcribable,
-    Cw: Ring + AsPackable + Transcribable + Copy,
-    Comb: Ring + Transcribable + for<'a> From<&'a Eval> + for<'a> From<&'a Cw>,
+    Eval: EvaluationRing,
+    Cw: CodewordRing,
+    Comb: LinearCombinationRing<Eval, Cw>,
     C: LinearCode<Eval, Cw, Comb>,
 > MultilinearZip<Eval, Cw, Comb, C>
 {

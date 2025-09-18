@@ -127,3 +127,21 @@ impl<const LIMBS: usize> Transcribable for PackedInt<LIMBS> {
         self.0.to_transcription_bytes(buf)
     }
 }
+
+//
+// Trait aliases for various Rings used in the Zip PCS
+//
+
+pub trait EvaluationRing: Ring + Transcribable {}
+pub trait CodewordRing: Ring + Transcribable + AsPackable + Copy {}
+pub trait LinearCombinationRing<E, C>:
+    Ring + Transcribable + for<'a> From<&'a E> + for<'a> From<&'a C>
+{
+}
+
+impl<Eval> EvaluationRing for Eval where Eval: Ring + Transcribable {}
+impl<Cw> CodewordRing for Cw where Cw: Ring + Transcribable + AsPackable + Copy {}
+impl<Eval, Cw, Comb> LinearCombinationRing<Eval, Cw> for Comb where
+    Comb: Ring + Transcribable + for<'a> From<&'a Eval> + for<'a> From<&'a Cw>
+{
+}
