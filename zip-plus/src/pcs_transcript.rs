@@ -1,6 +1,5 @@
 use std::io::{Cursor, ErrorKind, Read, Write};
 
-use crypto_bigint::Word;
 use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
 use p3_matrix::Dimensions;
 
@@ -8,7 +7,7 @@ use crate::{
     ZipError,
     pcs::utils::{HASH_OUT_LEN, MerkleProof, MtHash},
     rem,
-    traits::{ConstNumBytes, FromBytes, ToBytes, Transcribable},
+    traits::{ToBytes, Transcribable},
     transcript::KeccakTranscript,
 };
 
@@ -107,14 +106,8 @@ impl PcsTranscript {
         F: PrimeField,
         F::Inner: Transcribable,
     {
-        let mut bytes: Vec<u8> = vec![0; <F::Inner as ConstNumBytes>::NUM_BYTES];
-
-        self.stream
-            .read_exact(&mut bytes)
-            .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))?;
-
-        let fe = F::new_unchecked(F::Inner::from_be_bytes(&bytes));
-
+        let inner = self.read()?;
+        let fe = F::new_unchecked(inner);
         self.common_field_element(&fe);
         Ok(fe)
     }
@@ -128,51 +121,38 @@ impl PcsTranscript {
         F::Inner: Transcribable,
     {
         self.common_field_element(fe);
-        let repr = fe.inner().to_be_bytes();
+        self.write(fe.inner())
+    }
+
+    pub fn write<T: Transcribable>(&mut self, v: &T) -> Result<(), ZipError> {
+        let bytes = v.to_be_bytes();
         self.stream
-            .write_all(repr.as_slice())
-            .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))
-    }
-
-    pub fn write_integer<const M: usize>(&mut self, int: &Int<M>) -> Result<(), ZipError> {
-        for &word in int.inner().as_words().iter() {
-            let bytes = word.to_be_bytes();
-            self.stream
-                .write_all(&bytes)
-                .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))?;
-        }
+            .write_all(&bytes)
+            .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))?;
         Ok(())
     }
 
-    pub fn write_integers<'a, const M: usize, I>(&mut self, ints: I) -> Result<(), ZipError>
+    pub fn write_many<'a, T: Transcribable + 'a, I>(&mut self, vs: I) -> Result<(), ZipError>
     where
-        I: Iterator<Item = &'a Int<M>>,
+        I: Iterator<Item = &'a T>,
     {
-        for i in ints {
-            self.write_integer(i)?;
+        for v in vs {
+            self.write(v)?;
         }
 
         Ok(())
     }
 
-    pub fn read_integer<const M: usize>(&mut self) -> Result<Int<M>, ZipError> {
-        let mut result = Int::default().into_inner();
-
-        for word in result.as_mut_words() {
-            let mut buf = [0u8; size_of::<Word>()];
-            self.stream
-                .read_exact(&mut buf)
-                .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))?;
-
-            *word = Word::from_be_bytes(buf);
-        }
-        Ok(result.into())
+    pub fn read<T: Transcribable>(&mut self) -> Result<T, ZipError> {
+        let mut buf = vec![0u8; T::NUM_BYTES];
+        self.stream
+            .read_exact(&mut buf)
+            .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))?;
+        Ok(T::from_be_bytes(&buf))
     }
 
-    pub fn read_integers<const M: usize>(&mut self, n: usize) -> Result<Vec<Int<M>>, ZipError> {
-        (0..n)
-            .map(|_| self.read_integer())
-            .collect::<Result<Vec<_>, _>>()
+    pub fn read_many<T: Transcribable>(&mut self, n: usize) -> Result<Vec<T>, ZipError> {
+        (0..n).map(|_| self.read()).collect::<Result<Vec<_>, _>>()
     }
 
     pub fn read_commitments(&mut self, n: usize) -> Result<Vec<MtHash>, ZipError> {
@@ -227,7 +207,7 @@ impl PcsTranscript {
     /// Returns an index between 0 and cap-1.
     #[allow(clippy::unwrap_used)]
     pub fn squeeze_challenge_idx(&mut self, cap: usize) -> usize {
-        let challenge: Int<1> = self.fs_transcript.get_integer_challenge();
+        let challenge: Int<1> = self.fs_transcript.get_challenge();
         let bytes = challenge.inner().as_words()[0].to_be_bytes();
         let num = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
         rem!(num, cap, "Challenge cap is zero")
@@ -332,7 +312,7 @@ mod tests {
             original_commitment,
             "commitment"
         );
-        //TODO put the tests back in for Int<N> types
+
         // Test vector of commitments
         let original_commitments = vec![MtHash::default(); 1024];
         test_read_write_vec!(

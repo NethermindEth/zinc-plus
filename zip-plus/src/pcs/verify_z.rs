@@ -2,30 +2,34 @@ use crate::{
     ZipError,
     code::LinearCode,
     pcs::{
-        structs::{MultilinearZip, MultilinearZipCommitment, MultilinearZipParams},
+        structs::{AsPackable, MultilinearZip, MultilinearZipCommitment, MultilinearZipParams},
         utils::{ColumnOpening, MtHash, point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
     poly::dense::DenseMultilinearExtension,
     traits::Transcribable,
-    utils::{expand, inner_product},
+    utils::inner_product,
 };
 use ark_std::iterable::Iterable;
-use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
+use crypto_primitives::{PrimeField, Ring};
 use itertools::Itertools;
 
-impl<const N: usize, const K: usize, const M: usize, C: LinearCode<Int<N>, Int<K>, Int<M>>>
-    MultilinearZip<Int<N>, Int<K>, Int<M>, C>
+impl<
+    Eval: Ring + Transcribable,
+    Cw: Ring + AsPackable + Transcribable + Copy,
+    Comb: Ring + Transcribable + for<'a> From<&'a Eval> + for<'a> From<&'a Cw>,
+    C: LinearCode<Eval, Cw, Comb>,
+> MultilinearZip<Eval, Cw, Comb, C>
 {
     pub fn verify<F>(
-        vp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
+        vp: &MultilinearZipParams<Eval, Cw, Comb, C>,
         comm: &MultilinearZipCommitment,
         point: &[F],
         eval: &F,
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'a> From<&'a C::Inner> + for<'a> From<&'a Int<K>>,
+        F: PrimeField + for<'a> From<&'a C::Inner> + for<'a> From<&'a Cw>,
         F::Inner: Transcribable,
     {
         let no_polys = Vec::<DenseMultilinearExtension<bool>>::new();
@@ -39,14 +43,14 @@ impl<const N: usize, const K: usize, const M: usize, C: LinearCode<Int<N>, Int<K
     }
 
     pub fn batch_verify_z<'a, F>(
-        vp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
+        vp: &MultilinearZipParams<Eval, Cw, Comb, C>,
         comms: impl Iterable<Item = &'a MultilinearZipCommitment>,
         points: &[Vec<F>],
         evals: &[F],
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'b> From<&'b C::Inner> + for<'b> From<&'b Int<K>>,
+        F: PrimeField + for<'b> From<&'b C::Inner> + for<'b> From<&'b Cw>,
         F::Inner: Transcribable,
     {
         for (i, (eval, comm)) in evals.iter().zip(comms.iter()).enumerate() {
@@ -57,32 +61,31 @@ impl<const N: usize, const K: usize, const M: usize, C: LinearCode<Int<N>, Int<K
 
     #[allow(clippy::type_complexity)]
     pub(super) fn verify_testing(
-        vp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
+        vp: &MultilinearZipParams<Eval, Cw, Comb, C>,
         root: &MtHash,
         transcript: &mut PcsTranscript,
-    ) -> Result<Vec<(usize, Vec<Int<K>>)>, ZipError> {
+    ) -> Result<Vec<(usize, Vec<Cw>)>, ZipError> {
         // Gather the coeffs and encoded combined rows per proximity test
-        let mut encoded_combined_rows: Vec<(Vec<Int<N>>, Vec<Int<M>>)> =
+        let mut encoded_combined_rows: Vec<(Vec<Eval>, Vec<Comb>)> =
             Vec::with_capacity(vp.linear_code.num_proximity_testing());
 
         if vp.num_rows > 1 {
             for _ in 0..vp.linear_code.num_proximity_testing() {
-                let coeffs = transcript.fs_transcript.get_integer_challenges(vp.num_rows);
+                let coeffs = transcript.fs_transcript.get_challenges(vp.num_rows);
 
-                let combined_row: Vec<Int<M>> =
-                    transcript.read_integers(vp.linear_code.row_len())?;
+                let combined_row: Vec<Comb> = transcript.read_many(vp.linear_code.row_len())?;
 
-                let encoded_combined_row: Vec<Int<M>> = vp.linear_code.encode_wide(&combined_row);
+                let encoded_combined_row: Vec<Comb> = vp.linear_code.encode_wide(&combined_row);
                 encoded_combined_rows.push((coeffs, encoded_combined_row));
             }
         }
 
-        let mut columns_opened: Vec<(usize, Vec<Int<K>>)> =
+        let mut columns_opened: Vec<(usize, Vec<Cw>)> =
             Vec::with_capacity(vp.linear_code.num_column_opening());
 
         for _ in 0..vp.linear_code.num_column_opening() {
             let column_idx = transcript.squeeze_challenge_idx(vp.linear_code.codeword_len());
-            let column_values = transcript.read_integers(vp.num_rows)?;
+            let column_values = transcript.read_many(vp.num_rows)?;
 
             for (coeffs, encoded_combined_row) in encoded_combined_rows.iter() {
                 Self::verify_column_testing(
@@ -105,18 +108,18 @@ impl<const N: usize, const K: usize, const M: usize, C: LinearCode<Int<N>, Int<K
     }
 
     pub(super) fn verify_column_testing(
-        coeffs: &[Int<N>],
-        encoded_combined_row: &[Int<M>],
-        column_entries: &[Int<K>],
+        coeffs: &[Eval],
+        encoded_combined_row: &[Comb],
+        column_entries: &[Cw],
         column: usize,
         num_rows: usize,
     ) -> Result<(), ZipError> {
-        let column_entries_comb: Int<M> = if num_rows > 1 {
-            let coeffs: Vec<Int<M>> = coeffs.iter().map(expand::<N, M>).collect();
-            let column_entries: Vec<Int<M>> = column_entries.iter().map(expand::<K, M>).collect();
+        let column_entries_comb: Comb = if num_rows > 1 {
+            let coeffs: Vec<Comb> = coeffs.iter().map(Comb::from).collect();
+            let column_entries: Vec<Comb> = column_entries.iter().map(Comb::from).collect();
             inner_product(coeffs.iter(), column_entries.iter())
         } else {
-            expand(&column_entries[0])
+            Comb::from(&column_entries[0])
         };
 
         if column_entries_comb != encoded_combined_row[column] {
@@ -126,14 +129,14 @@ impl<const N: usize, const K: usize, const M: usize, C: LinearCode<Int<N>, Int<K
     }
 
     fn verify_evaluation_z<F>(
-        vp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
+        vp: &MultilinearZipParams<Eval, Cw, Comb, C>,
         point: &[F],
         eval: &F,
-        columns_opened: &[(usize, Vec<Int<K>>)],
+        columns_opened: &[(usize, Vec<Cw>)],
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'a> From<&'a C::Inner> + for<'a> From<&'a Int<K>>,
+        F: PrimeField + for<'a> From<&'a C::Inner> + for<'a> From<&'a Cw>,
         F::Inner: Transcribable,
     {
         let q_0_combined_row = transcript.read_field_elements(vp.linear_code.row_len())?;
@@ -162,19 +165,19 @@ impl<const N: usize, const K: usize, const M: usize, C: LinearCode<Int<N>, Int<K
     fn verify_proximity_q_0<F>(
         q_0: &Vec<F>,
         encoded_q_0_combined_row: &[F],
-        column_entries: &[Int<K>],
+        column_entries: &[Cw],
         column: usize,
         num_rows: usize,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'b> From<&'b Int<K>>,
+        F: PrimeField + for<'b> From<&'b Cw>,
     {
         let column_entries_comb = if num_rows > 1 {
             let column_entries = column_entries.iter().map(F::from).collect_vec();
             inner_product(q_0, &column_entries)
             // TODO: this inner product is taking a long time.
         } else {
-            F::from(&column_entries.first().expect("No column entries").resize())
+            F::from(column_entries.first().expect("No column entries"))
         };
         if column_entries_comb != encoded_q_0_combined_row[column] {
             return Err(ZipError::InvalidPcsOpen("Proximity failure".into()));

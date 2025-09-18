@@ -153,7 +153,6 @@ where
     pub fn new<S>(rows: &[S], row_width: usize) -> Self
     where
         S: ReinterpretVector<T>,
-        T: ReinterpretVector<S>,
     {
         assert!(rows.len().is_power_of_two());
         assert!(rows.len().is_multiple_of(row_width));

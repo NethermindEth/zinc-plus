@@ -1,12 +1,10 @@
 use crate::{
     add, rem, sub,
-    traits::{ToBytes, Transcript},
+    traits::{ToBytes, Transcribable, Transcript},
     utils::WORD_FACTOR,
 };
 use ark_std::vec::Vec;
-use crypto_bigint::Word;
 use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
-use num_traits::Zero;
 use sha3::{Digest, Keccak256};
 
 /// A cryptographic transcript implementation using the Keccak-256 hash
@@ -88,25 +86,18 @@ impl KeccakTranscript {
 
     /// Generates a pseudorandom [Integer] as a challenge based on the current
     /// transcript state.
-    pub fn get_integer_challenge<const LIMBS: usize>(&mut self) -> Int<LIMBS> {
-        let mut words: [Word; LIMBS] = [Word::zero(); LIMBS];
-        for word in words.iter_mut().take(LIMBS) {
-            let mut challenge = [0u8; size_of::<Word>()];
-            let rand_bytes = self.get_random_bytes(size_of::<Word>());
-            challenge.copy_from_slice(&rand_bytes);
-            self.hasher.update([0x12]);
-            self.hasher.update(challenge);
-            self.hasher.update([0x34]);
-            *word = Word::from_be_bytes(challenge);
-        }
-
-        Int::from_words(words)
+    pub fn get_challenge<T: Transcribable>(&mut self) -> T {
+        let challenge = self.get_random_bytes(T::NUM_BYTES);
+        self.hasher.update([0x12]);
+        self.hasher.update(&challenge);
+        self.hasher.update([0x34]);
+        T::from_be_bytes(&challenge)
     }
 
     /// Generates pseudorandom [CryptoInt]s as challenges based on the current
     /// transcript state.
-    pub fn get_integer_challenges<const LIMBS: usize>(&mut self, n: usize) -> Vec<Int<LIMBS>> {
-        (0..n).map(|_| self.get_integer_challenge()).collect()
+    pub fn get_challenges<T: Transcribable>(&mut self, n: usize) -> Vec<T> {
+        (0..n).map(|_| self.get_challenge()).collect()
     }
 
     /// Generates a pseudorandom `usize` within the given range bounds based on
@@ -133,10 +124,16 @@ impl Transcript for KeccakTranscript {
         crypto_bigint::Int::from(bit as i8).into()
     }
 
+    #[allow(clippy::unwrap_used)]
     fn get_u64(&mut self) -> u64 {
-        self.get_integer_challenge::<{ WORD_FACTOR }>()
-            .inner()
-            .as_words()[0]
+        let bytes = self.get_challenge::<Int<WORD_FACTOR>>().to_be_bytes();
+        assert_eq!(
+            bytes.len(),
+            size_of::<u64>(),
+            "Expected 8 bytes for u64, got {} bytes",
+            bytes.len()
+        );
+        u64::from_be_bytes(bytes.try_into().unwrap())
     }
 
     #[allow(clippy::arithmetic_side_effects)]

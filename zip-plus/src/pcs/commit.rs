@@ -1,22 +1,27 @@
-use crypto_primitives::crypto_bigint_int::Int;
-use uninit::out_ref::Out;
-
 use crate::{
     ZipError,
     code::LinearCode,
     pcs::{
         MerkleTree,
         structs::{
-            MultilinearZip, MultilinearZipCommitment, MultilinearZipData, MultilinearZipParams,
+            AsPackable, MultilinearZip, MultilinearZipCommitment, MultilinearZipData,
+            MultilinearZipParams,
         },
         utils::validate_input,
     },
     poly::dense::DenseMultilinearExtension,
+    traits::Transcribable,
     utils::{num_threads, parallelize_iter},
 };
+use crypto_primitives::Ring;
+use uninit::out_ref::Out;
 
-impl<const N: usize, const K: usize, const M: usize, C: LinearCode<Int<N>, Int<K>, Int<M>>>
-    MultilinearZip<Int<N>, Int<K>, Int<M>, C>
+impl<
+    Eval: Ring + Transcribable,
+    Cw: Ring + AsPackable + Transcribable + Copy,
+    Comb: Ring + Transcribable + for<'a> From<&'a Eval> + for<'a> From<&'a Cw>,
+    C: LinearCode<Eval, Cw, Comb>,
+> MultilinearZip<Eval, Cw, Comb, C>
 {
     /// Creates a commitment to a multilinear polynomial using the ZIP PCS
     /// scheme.
@@ -66,9 +71,9 @@ impl<const N: usize, const K: usize, const M: usize, C: LinearCode<Int<N>, Int<K
     ///   `pp.num_rows`, indicating an internal logic error.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn commit(
-        pp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
-        poly: &DenseMultilinearExtension<Int<N>>,
-    ) -> Result<(MultilinearZipData<Int<K>>, MultilinearZipCommitment), ZipError> {
+        pp: &MultilinearZipParams<Eval, Cw, Comb, C>,
+        poly: &DenseMultilinearExtension<Eval>,
+    ) -> Result<(MultilinearZipData<Cw>, MultilinearZipCommitment), ZipError> {
         validate_input("commit", pp.num_vars, [poly], None::<&[bool]>)?;
 
         let expected_num_evals = pp.num_rows * pp.linear_code.row_len();
@@ -111,9 +116,9 @@ impl<const N: usize, const K: usize, const M: usize, C: LinearCode<Int<N>, Int<K
     /// vector of roots.
     #[allow(dead_code)]
     pub fn commit_no_merkle(
-        pp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
-        poly: &DenseMultilinearExtension<Int<N>>,
-    ) -> Result<Vec<Int<K>>, ZipError> {
+        pp: &MultilinearZipParams<Eval, Cw, Comb, C>,
+        poly: &DenseMultilinearExtension<Eval>,
+    ) -> Result<Vec<Cw>, ZipError> {
         validate_input("commit", pp.num_vars, [poly], None::<&[bool]>)?;
 
         let row_len = pp.linear_code.row_len();
@@ -140,9 +145,9 @@ impl<const N: usize, const K: usize, const M: usize, C: LinearCode<Int<N>, Int<K
     /// corresponds to a polynomial in the input slice.
     #[allow(clippy::type_complexity)]
     pub fn batch_commit(
-        pp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
-        polys: &[DenseMultilinearExtension<Int<N>>],
-    ) -> Result<Vec<(MultilinearZipData<Int<K>>, MultilinearZipCommitment)>, ZipError> {
+        pp: &MultilinearZipParams<Eval, Cw, Comb, C>,
+        polys: &[DenseMultilinearExtension<Eval>],
+    ) -> Result<Vec<(MultilinearZipData<Cw>, MultilinearZipCommitment)>, ZipError> {
         polys.iter().map(|poly| Self::commit(pp, poly)).collect()
     }
 
@@ -165,13 +170,13 @@ impl<const N: usize, const K: usize, const M: usize, C: LinearCode<Int<N>, Int<K
     /// A `Vec<Int<K>>` containing all the encoded rows concatenated together.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn encode_rows(
-        pp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
+        pp: &MultilinearZipParams<Eval, Cw, Comb, C>,
         codeword_len: usize,
         row_len: usize,
-        evals: &[Int<N>],
-    ) -> Vec<Int<K>> {
+        evals: &[Eval],
+    ) -> Vec<Cw> {
         let rows_per_thread = pp.num_rows.div_ceil(num_threads());
-        let mut encoded_rows: Vec<Int<K>> = Vec::with_capacity(pp.num_rows * codeword_len);
+        let mut encoded_rows: Vec<Cw> = Vec::with_capacity(pp.num_rows * codeword_len);
 
         parallelize_iter(
             encoded_rows
@@ -183,7 +188,7 @@ impl<const N: usize, const K: usize, const M: usize, C: LinearCode<Int<N>, Int<K
                     .chunks_exact_mut(codeword_len)
                     .zip(evals.chunks_exact(row_len))
                 {
-                    let encoded: Vec<Int<K>> = pp.linear_code.encode(evals);
+                    let encoded: Vec<Cw> = pp.linear_code.encode(evals);
                     Out::from(row).copy_from_slice(encoded.as_slice());
                 }
             },
