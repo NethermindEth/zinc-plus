@@ -21,7 +21,7 @@ const_monty_params!(
 type F = ConstMontyField<Params, { 4 * WORD_FACTOR }>;
 
 fn bench_random_field(group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>) {
-    let field_elem = F::from(695962179703u64);
+    let field_elem = F::from(695962179703_u64);
 
     group.bench_with_input(
         BenchmarkId::new("Multiply", "Random128BitFieldElement"),

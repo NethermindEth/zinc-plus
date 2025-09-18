@@ -13,19 +13,20 @@ use std::{
     fmt::{Display, Formatter},
     io::Write,
 };
+use thiserror::Error;
 use uninit::AsMaybeUninit;
 
 use super::{error::MerkleError, structs::MultilinearZipData};
 use crate::{
-    Error, pcs_transcript::PcsTranscript, poly::dense::DenseMultilinearExtension,
+    ZipError, pcs_transcript::PcsTranscript, poly::dense::DenseMultilinearExtension,
     utils::ReinterpretVector,
 };
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-fn err_too_many_variates(function: &str, upto: usize, got: usize) -> Error {
-    Error::InvalidPcsParam(format!(
+fn err_too_many_variates(function: &str, upto: usize, got: usize) -> ZipError {
+    ZipError::InvalidPcsParam(format!(
         "Too many variates of poly to {function} (param supports variates up to {upto} but got {got})"
     ))
 }
@@ -36,7 +37,7 @@ pub(super) fn validate_input<'a, T: 'a, F: 'a>(
     param_num_vars: usize,
     polys: impl Iterable<Item = &'a DenseMultilinearExtension<T>>,
     points: impl Iterable<Item = &'a [F]>,
-) -> Result<(), Error> {
+) -> Result<(), ZipError> {
     // Ensure all the number of variables in the polynomials don't exceed the limit
     for poly in polys.iter() {
         if param_num_vars < poly.num_vars {
@@ -58,7 +59,7 @@ pub(super) fn validate_input<'a, T: 'a, F: 'a>(
 
     for point in points.iter() {
         if point.len() != input_num_vars {
-            return Err(Error::InvalidPcsParam(format!(
+            return Err(ZipError::InvalidPcsParam(format!(
                 "Invalid point (expect point to have {input_num_vars} variates but got {})",
                 point.len()
             )));
@@ -72,16 +73,15 @@ pub trait AsWords {
     fn as_words(&self) -> &[Word];
 }
 
-/// Cannot reference blake3::OUT_LEN directly in some of the contexts below.
-const BLAKE3_OUT_LEN: usize = blake3::OUT_LEN;
+pub const HASH_OUT_LEN: usize = blake3::OUT_LEN;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct MtHash(pub(crate) [u8; BLAKE3_OUT_LEN]);
+pub struct MtHash(pub(crate) [u8; HASH_OUT_LEN]);
 
 impl Default for MtHash {
     fn default() -> Self {
-        MtHash([0; BLAKE3_OUT_LEN])
+        MtHash([0; HASH_OUT_LEN])
     }
 }
 
@@ -95,8 +95,8 @@ impl Display for MtHash {
 #[derive(Debug, Default, Clone)]
 pub struct MtHasher;
 
-impl<T: AsWords + Clone> CryptographicHasher<T, [u8; BLAKE3_OUT_LEN]> for MtHasher {
-    fn hash_iter<I>(&self, input: I) -> [u8; BLAKE3_OUT_LEN]
+impl<T: AsWords + Clone> CryptographicHasher<T, [u8; HASH_OUT_LEN]> for MtHasher {
+    fn hash_iter<I>(&self, input: I) -> [u8; HASH_OUT_LEN]
     where
         I: IntoIterator<Item = T>,
     {
@@ -117,8 +117,8 @@ impl<T: AsWords + Clone> CryptographicHasher<T, [u8; BLAKE3_OUT_LEN]> for MtHash
 #[derive(Debug, Default, Clone)]
 pub struct MtPerm;
 
-impl PseudoCompressionFunction<[u8; BLAKE3_OUT_LEN], 2> for MtPerm {
-    fn compress(&self, input: [[u8; BLAKE3_OUT_LEN]; 2]) -> [u8; BLAKE3_OUT_LEN] {
+impl PseudoCompressionFunction<[u8; HASH_OUT_LEN], 2> for MtPerm {
+    fn compress(&self, input: [[u8; HASH_OUT_LEN]; 2]) -> [u8; HASH_OUT_LEN] {
         let mut hasher = blake3::Hasher::new();
         for ref item in input {
             hasher.write_all(item).expect("Failed to write to hasher");
@@ -128,8 +128,8 @@ impl PseudoCompressionFunction<[u8; BLAKE3_OUT_LEN], 2> for MtPerm {
 }
 
 type Matrix<T> = RowMajorMatrix<T>;
-type MtMmcs<T> = MerkleTreeMmcs<T, u8, MtHasher, MtPerm, BLAKE3_OUT_LEN>;
-type P3MerkleTree<T> = p3_merkle_tree::MerkleTree<T, u8, Matrix<T>, BLAKE3_OUT_LEN>;
+type MtMmcs<T> = MerkleTreeMmcs<T, u8, MtHasher, MtPerm, HASH_OUT_LEN>;
+type P3MerkleTree<T> = p3_merkle_tree::MerkleTree<T, u8, Matrix<T>, HASH_OUT_LEN>;
 
 #[derive(Debug, Default)]
 pub struct MerkleTree<T>
@@ -298,7 +298,7 @@ impl ColumnOpening {
 /// For a polynomial arranged in matrix form, this splits the evaluation point
 /// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
 /// right
-pub(super) fn point_to_tensor<F>(num_rows: usize, point: &[F]) -> Result<(Vec<F>, Vec<F>), Error>
+pub(super) fn point_to_tensor<F>(num_rows: usize, point: &[F]) -> Result<(Vec<F>, Vec<F>), ZipError>
 where
     F: PrimeField,
 {
@@ -411,7 +411,7 @@ where
 /// For a polynomial arranged in matrix form, this splits the evaluation point
 /// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
 /// right and returns the left vector only
-pub(super) fn left_point_to_tensor<F>(num_rows: usize, point: &[F]) -> Result<Vec<F>, Error>
+pub(super) fn left_point_to_tensor<F>(num_rows: usize, point: &[F]) -> Result<Vec<F>, ZipError>
 where
     F: PrimeField,
 {

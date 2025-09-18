@@ -2,7 +2,7 @@ use crypto_primitives::crypto_bigint_int::Int;
 use uninit::out_ref::Out;
 
 use crate::{
-    Error,
+    ZipError,
     code::LinearCode,
     pcs::{
         MerkleTree,
@@ -67,7 +67,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
     pub fn commit(
         pp: &MultilinearZipParams<N, L, K, M, LC>,
         poly: &DenseMultilinearExtension<Int<N>>,
-    ) -> Result<(MultilinearZipData<K>, MultilinearZipCommitment), Error> {
+    ) -> Result<(MultilinearZipData<K>, MultilinearZipCommitment), ZipError> {
         validate_input("commit", pp.num_vars, [poly], None::<&[bool]>)?;
 
         let expected_num_evals = pp.num_rows * pp.linear_code.row_len();
@@ -112,7 +112,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
     pub fn commit_no_merkle(
         pp: &MultilinearZipParams<N, L, K, M, LC>,
         poly: &DenseMultilinearExtension<Int<N>>,
-    ) -> Result<Vec<Int<K>>, Error> {
+    ) -> Result<Vec<Int<K>>, ZipError> {
         validate_input("commit", pp.num_vars, [poly], None::<&[bool]>)?;
 
         let row_len = pp.linear_code.row_len();
@@ -141,7 +141,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
     pub fn batch_commit(
         pp: &MultilinearZipParams<N, L, K, M, LC>,
         polys: &[DenseMultilinearExtension<Int<N>>],
-    ) -> Result<Vec<(MultilinearZipData<K>, MultilinearZipCommitment)>, Error> {
+    ) -> Result<Vec<(MultilinearZipData<K>, MultilinearZipCommitment)>, ZipError> {
         polys.iter().map(|poly| Self::commit(pp, poly)).collect()
     }
 

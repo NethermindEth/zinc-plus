@@ -1,5 +1,5 @@
 use crate::{
-    Error,
+    ZipError,
     code::LinearCode,
     pcs::{
         structs::{MultilinearZip, MultilinearZipCommitment, MultilinearZipParams},
@@ -23,7 +23,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
         point: &[F],
         eval: &F,
         transcript: &mut PcsTranscript,
-    ) -> Result<(), Error>
+    ) -> Result<(), ZipError>
     where
         F: PrimeField + for<'a> From<&'a Int<L>> + for<'a> From<&'a Int<K>>,
         F::Inner: Transcribable,
@@ -44,7 +44,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
         points: &[Vec<F>],
         evals: &[F],
         transcript: &mut PcsTranscript,
-    ) -> Result<(), Error>
+    ) -> Result<(), ZipError>
     where
         F: PrimeField + for<'b> From<&'b Int<L>> + for<'b> From<&'b Int<K>>,
         F::Inner: Transcribable,
@@ -60,7 +60,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
         vp: &MultilinearZipParams<N, L, K, M, LC>,
         root: &MtHash,
         transcript: &mut PcsTranscript,
-    ) -> Result<Vec<(usize, Vec<Int<K>>)>, Error> {
+    ) -> Result<Vec<(usize, Vec<Int<K>>)>, ZipError> {
         // Gather the coeffs and encoded combined rows per proximity test
         let mut encoded_combined_rows: Vec<(Vec<Int<N>>, Vec<Int<M>>)> =
             Vec::with_capacity(vp.linear_code.num_proximity_testing());
@@ -95,7 +95,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
             }
 
             ColumnOpening::verify_column(root, &column_values, column_idx, transcript).map_err(
-                |e| Error::InvalidPcsOpen(format!("Column opening verification failed: {e}")),
+                |e| ZipError::InvalidPcsOpen(format!("Column opening verification failed: {e}")),
             )?;
             // TODO: Verify column opening is taking a long time.
             columns_opened.push((column_idx, column_values));
@@ -110,7 +110,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
         column_entries: &[Int<K>],
         column: usize,
         num_rows: usize,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ZipError> {
         let column_entries_comb: Int<M> = if num_rows > 1 {
             let coeffs: Vec<Int<M>> = coeffs.iter().map(expand::<N, M>).collect();
             let column_entries: Vec<Int<M>> = column_entries.iter().map(expand::<K, M>).collect();
@@ -120,7 +120,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
         };
 
         if column_entries_comb != encoded_combined_row[column] {
-            return Err(Error::InvalidPcsOpen("Proximity failure".into()));
+            return Err(ZipError::InvalidPcsOpen("Proximity failure".into()));
         }
         Ok(())
     }
@@ -131,7 +131,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
         eval: &F,
         columns_opened: &[(usize, Vec<Int<K>>)],
         transcript: &mut PcsTranscript,
-    ) -> Result<(), Error>
+    ) -> Result<(), ZipError>
     where
         F: PrimeField + for<'a> From<&'a Int<L>> + for<'a> From<&'a Int<K>>,
         F::Inner: Transcribable,
@@ -142,7 +142,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
         let (q_0, q_1) = point_to_tensor(vp.num_rows, point)?;
 
         if inner_product(&q_0_combined_row, &q_1) != *eval {
-            return Err(Error::InvalidPcsOpen(
+            return Err(ZipError::InvalidPcsOpen(
                 "Evaluation consistency failure".into(),
             ));
         }
@@ -165,7 +165,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
         column_entries: &[Int<K>],
         column: usize,
         num_rows: usize,
-    ) -> Result<(), Error>
+    ) -> Result<(), ZipError>
     where
         F: PrimeField + for<'b> From<&'b Int<K>>,
     {
@@ -177,7 +177,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
             F::from(&column_entries.first().unwrap().resize())
         };
         if column_entries_comb != encoded_q_0_combined_row[column] {
-            return Err(Error::InvalidPcsOpen("Proximity failure".into()));
+            return Err(ZipError::InvalidPcsOpen("Proximity failure".into()));
         }
 
         Ok(())
@@ -193,7 +193,7 @@ mod tests {
     use rand::Rng;
 
     use crate::{
-        Error,
+        ZipError,
         code::{DefaultLinearCodeSpec, LinearCode, raa::RaaCode},
         field::F256,
         pcs::{
@@ -375,7 +375,7 @@ mod tests {
         let res = TestZip::verify(&pp, &comm, &point, &eval, &mut ver_tr);
 
         match res {
-            Err(Error::InvalidPcsOpen(msg)) => {
+            Err(ZipError::InvalidPcsOpen(msg)) => {
                 assert_eq!(msg, "Proximity failure");
             }
             Ok(()) => panic!("verification unexpectedly succeeded"),
@@ -473,7 +473,7 @@ mod tests {
         let res = TestZip::verify(&pp, &comm, &point, &eval, &mut ver_tr);
 
         match res {
-            Err(Error::InvalidPcsOpen(msg)) => {
+            Err(ZipError::InvalidPcsOpen(msg)) => {
                 assert_eq!(msg, "Evaluation consistency failure");
             }
             Ok(()) => panic!("verification unexpectedly succeeded"),

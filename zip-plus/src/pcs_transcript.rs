@@ -5,8 +5,8 @@ use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
 use p3_matrix::Dimensions;
 
 use crate::{
-    Error,
-    pcs::utils::{MerkleProof, MtHash},
+    ZipError,
+    pcs::utils::{HASH_OUT_LEN, MerkleProof, MtHash},
     traits::{ConstNumBytes, FromBytes, ToBytes, Transcribable},
     transcript::KeccakTranscript,
 };
@@ -57,26 +57,26 @@ impl PcsTranscript {
 
     /// Reads a cryptographic commitment from the proof stream.
     /// Used during proof verification to retrieve previously committed values.
-    pub fn read_commitment(&mut self) -> Result<MtHash, Error> {
-        let mut buf = [0; blake3::OUT_LEN];
+    pub fn read_commitment(&mut self) -> Result<MtHash, ZipError> {
+        let mut buf = [0; HASH_OUT_LEN];
         self.stream
             .read_exact(&mut buf)
-            .map_err(|err| Error::Transcript(err.kind(), err.to_string()))?;
-        Ok(MtHash(blake3::Hash::from_bytes(buf).into()))
+            .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))?;
+        Ok(MtHash(buf))
     }
 
     /// Writes a cryptographic commitment to the proof stream.
     /// Used during proof generation to store commitments for later
     /// verification.
-    pub fn write_commitment(&mut self, comm: &MtHash) -> Result<(), Error> {
+    pub fn write_commitment(&mut self, comm: &MtHash) -> Result<(), ZipError> {
         self.stream
             .write_all(&comm.0)
-            .map_err(|err| Error::Transcript(err.kind(), err.to_string()))?;
+            .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))?;
         Ok(())
     }
 
     // TODO if we change this to an iterator we may be able to save some memory
-    pub fn write_field_elements<F>(&mut self, elems: &[F]) -> Result<(), Error>
+    pub fn write_field_elements<F>(&mut self, elems: &[F]) -> Result<(), ZipError>
     where
         F: PrimeField,
         F::Inner: Transcribable,
@@ -88,7 +88,7 @@ impl PcsTranscript {
         Ok(())
     }
 
-    pub fn read_field_elements<F>(&mut self, n: usize) -> Result<Vec<F>, Error>
+    pub fn read_field_elements<F>(&mut self, n: usize) -> Result<Vec<F>, ZipError>
     where
         F: PrimeField,
         F::Inner: Transcribable,
@@ -101,7 +101,7 @@ impl PcsTranscript {
     /// Reads a field element from the proof stream and absorbs it into the
     /// transcript. Used during proof verification to retrieve and process
     /// field elements.
-    pub fn read_field_element<F>(&mut self) -> Result<F, Error>
+    pub fn read_field_element<F>(&mut self) -> Result<F, ZipError>
     where
         F: PrimeField,
         F::Inner: Transcribable,
@@ -110,7 +110,7 @@ impl PcsTranscript {
 
         self.stream
             .read_exact(&mut bytes)
-            .map_err(|err| Error::Transcript(err.kind(), err.to_string()))?;
+            .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))?;
 
         let fe = F::new_unchecked(F::Inner::from_be_bytes(&bytes));
 
@@ -121,7 +121,7 @@ impl PcsTranscript {
     /// Writes a field element to the proof stream and absorbs it into the
     /// transcript. Used during proof generation to store field elements for
     /// later verification.
-    pub fn write_field_element<F>(&mut self, fe: &F) -> Result<(), Error>
+    pub fn write_field_element<F>(&mut self, fe: &F) -> Result<(), ZipError>
     where
         F: PrimeField,
         F::Inner: Transcribable,
@@ -130,20 +130,20 @@ impl PcsTranscript {
         let repr = fe.inner().to_be_bytes();
         self.stream
             .write_all(repr.as_slice())
-            .map_err(|err| Error::Transcript(err.kind(), err.to_string()))
+            .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))
     }
 
-    pub fn write_integer<const M: usize>(&mut self, int: &Int<M>) -> Result<(), Error> {
+    pub fn write_integer<const M: usize>(&mut self, int: &Int<M>) -> Result<(), ZipError> {
         for &word in int.inner().as_words().iter() {
             let bytes = word.to_be_bytes();
             self.stream
                 .write_all(&bytes)
-                .map_err(|err| Error::Transcript(err.kind(), err.to_string()))?;
+                .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))?;
         }
         Ok(())
     }
 
-    pub fn write_integers<'a, const M: usize, I>(&mut self, ints: I) -> Result<(), Error>
+    pub fn write_integers<'a, const M: usize, I>(&mut self, ints: I) -> Result<(), ZipError>
     where
         I: Iterator<Item = &'a Int<M>>,
     {
@@ -154,47 +154,47 @@ impl PcsTranscript {
         Ok(())
     }
 
-    pub fn read_integer<const M: usize>(&mut self) -> Result<Int<M>, Error> {
+    pub fn read_integer<const M: usize>(&mut self) -> Result<Int<M>, ZipError> {
         let mut result = Int::default().into_inner();
 
         for word in result.as_mut_words() {
             let mut buf = [0u8; size_of::<Word>()];
             self.stream
                 .read_exact(&mut buf)
-                .map_err(|err| Error::Transcript(err.kind(), err.to_string()))?;
+                .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))?;
 
             *word = Word::from_be_bytes(buf);
         }
         Ok(result.into())
     }
 
-    pub fn read_integers<const M: usize>(&mut self, n: usize) -> Result<Vec<Int<M>>, Error> {
+    pub fn read_integers<const M: usize>(&mut self, n: usize) -> Result<Vec<Int<M>>, ZipError> {
         (0..n)
             .map(|_| self.read_integer())
             .collect::<Result<Vec<_>, _>>()
     }
 
-    pub fn read_commitments(&mut self, n: usize) -> Result<Vec<MtHash>, Error> {
+    pub fn read_commitments(&mut self, n: usize) -> Result<Vec<MtHash>, ZipError> {
         (0..n).map(|_| self.read_commitment()).collect()
     }
 
-    fn write_u64(&mut self, value: u64) -> Result<(), Error> {
+    fn write_u64(&mut self, value: u64) -> Result<(), ZipError> {
         self.stream
             .write_all(&value.to_be_bytes())
-            .map_err(|err| Error::Transcript(err.kind(), err.to_string()))
+            .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))
     }
 
-    fn read_u64(&mut self) -> Result<u64, Error> {
+    fn read_u64(&mut self) -> Result<u64, ZipError> {
         let mut buf = [0u8; 8];
         self.stream
             .read_exact(&mut buf)
-            .map_err(|err| Error::Transcript(err.kind(), err.to_string()))?;
+            .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))?;
         Ok(u64::from_be_bytes(buf))
     }
 
-    fn write_usize(&mut self, value: usize) -> Result<(), Error> {
+    fn write_usize(&mut self, value: usize) -> Result<(), ZipError> {
         let value_u64: u64 = value.try_into().map_err(|_| {
-            Error::Transcript(
+            ZipError::Transcript(
                 ErrorKind::Unsupported,
                 "Failed to convert usize to u64".to_string(),
             )
@@ -202,9 +202,9 @@ impl PcsTranscript {
         self.write_u64(value_u64)
     }
 
-    fn read_usize(&mut self) -> Result<usize, Error> {
+    fn read_usize(&mut self) -> Result<usize, ZipError> {
         self.read_u64()?.try_into().map_err(|_| {
-            Error::Transcript(
+            ZipError::Transcript(
                 ErrorKind::Unsupported,
                 "Failed to convert u64 to usize".to_string(),
             )
@@ -214,7 +214,7 @@ impl PcsTranscript {
     pub fn write_commitments<'a>(
         &mut self,
         comms: impl IntoIterator<Item = &'a MtHash>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ZipError> {
         for comm in comms.into_iter() {
             self.write_commitment(comm)?;
         }
@@ -231,7 +231,7 @@ impl PcsTranscript {
         num % cap
     }
 
-    pub fn read_merkle_proof(&mut self) -> Result<MerkleProof, Error> {
+    pub fn read_merkle_proof(&mut self) -> Result<MerkleProof, ZipError> {
         // Read the dimensions of matrix used to construct the Merkle tree
         let width = self.read_usize()?;
         let height = self.read_usize()?;
@@ -249,7 +249,7 @@ impl PcsTranscript {
         Ok(MerkleProof::new(merkle_path, dimensions))
     }
 
-    pub fn write_merkle_proof(&mut self, proof: &MerkleProof) -> Result<(), Error> {
+    pub fn write_merkle_proof(&mut self, proof: &MerkleProof) -> Result<(), ZipError> {
         // Write the dimensions of matrix used to construct the Merkle tree
         self.write_usize(proof.matrix_dims.width)?;
         self.write_usize(proof.matrix_dims.height)?;

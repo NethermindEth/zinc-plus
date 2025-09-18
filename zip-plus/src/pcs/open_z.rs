@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use crate::{
-    Error,
+    ZipError,
     code::LinearCode,
     pcs::{
         structs::{MultilinearZip, MultilinearZipData, MultilinearZipParams},
@@ -24,7 +24,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
         commit_data: &MultilinearZipData<K>,
         point: &[F],
         transcript: &mut PcsTranscript,
-    ) -> Result<(), Error>
+    ) -> Result<(), ZipError>
     where
         F: PrimeField + for<'a> From<&'a Int<N>>,
         F::Inner: Transcribable,
@@ -45,7 +45,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
         comms: &[MultilinearZipData<K>],
         points: &[Vec<F>],
         transcript: &mut PcsTranscript,
-    ) -> Result<(), Error>
+    ) -> Result<(), ZipError>
     where
         F: PrimeField + for<'a> From<&'a Int<N>>,
         F::Inner: Transcribable,
@@ -63,7 +63,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
         transcript: &mut PcsTranscript,
         point: &[F],
         poly: &DenseMultilinearExtension<Int<N>>,
-    ) -> Result<(), Error>
+    ) -> Result<(), ZipError>
     where
         F: PrimeField + for<'a> From<&'a Int<N>>,
         F::Inner: Transcribable,
@@ -95,7 +95,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
         poly: &DenseMultilinearExtension<Int<N>>,
         commit_data: &MultilinearZipData<K>,
         transcript: &mut PcsTranscript,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ZipError> {
         if pp.num_rows > 1 {
             // If we can take linear combinations
             // perform the proximity test an arbitrary number of times
@@ -125,7 +125,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
         commit_data: &MultilinearZipData<K>,
         column: usize,
         transcript: &mut PcsTranscript,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ZipError> {
         let column_values = commit_data
             .rows
             .iter()
@@ -136,7 +136,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
         transcript.write_integers(column_values)?;
 
         ColumnOpening::open_at_column(column, commit_data, transcript)
-            .map_err(|_| Error::InvalidPcsOpen("Failed to open merkle tree".into()))?;
+            .map_err(|_| ZipError::InvalidPcsOpen("Failed to open merkle tree".into()))?;
 
         Ok(())
     }

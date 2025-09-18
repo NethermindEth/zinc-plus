@@ -1,13 +1,8 @@
 pub mod dense;
 pub mod mle;
 
-use ark_std::string::String;
 use displaydoc::Display;
 use thiserror::Error;
-
-extern crate alloc;
-
-pub type RefCounter<T> = alloc::sync::Arc<T>;
 
 /// A `enum` specifying the possible failure modes of the arithmetics.
 #[derive(Display, Debug, Error)]
