@@ -8,7 +8,7 @@ use crypto_bigint::{CheckedMul as CryptoCheckedMul, CheckedSub as CryptoCheckedS
 use num_traits::{
     CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedSub, ConstOne, ConstZero, One, Pow, Zero,
 };
-use paste::paste;
+use pastey::paste;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]

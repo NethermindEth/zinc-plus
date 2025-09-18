@@ -14,7 +14,7 @@ num-traits = { version = "0.2", default-features = false }
 crypto-bigint = { version = "0.7.0-rc.2", default-features = false, optional = true }
 ark-std = { version = "0.5", optional = true }
 rand_core = { version = "0.9.3", default-features = false, optional = true }
-paste = "1.0"
+pastey = "0.1.1"
 
 [features]
 default = ["std"]
