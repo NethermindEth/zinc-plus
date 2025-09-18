@@ -1,9 +1,14 @@
 use super::*;
-use core::fmt::{Debug, Display, Formatter, Result as FmtResult};
-use core::ops::{Add, AddAssign, Mul, MulAssign, Rem, RemAssign, Shl, Shr, Sub, SubAssign};
-use core::iter::{Product, Sum};
-use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedShl, CheckedShr, CheckedSub, ConstOne, ConstZero, One, Pow, Zero};
-use crypto_bigint::{CheckedSub as CryptoCheckedSub, CheckedMul as CryptoCheckedMul, Word};
+use core::{
+    fmt::{Debug, Display, Formatter, Result as FmtResult},
+    iter::{Product, Sum},
+    ops::{Add, AddAssign, Mul, MulAssign, Rem, RemAssign, Shl, Shr, Sub, SubAssign},
+};
+use crypto_bigint::{CheckedMul as CryptoCheckedMul, CheckedSub as CryptoCheckedSub, Word};
+use num_traits::{
+    CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedShl, CheckedShr, CheckedSub, ConstOne,
+    ConstZero, One, Pow, Zero,
+};
 use paste::paste;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -16,13 +21,13 @@ impl<const LIMBS: usize> Int<LIMBS> {
     pub fn new(value: crypto_bigint::Int<LIMBS>) -> Self {
         Self(value)
     }
-    
+
     /// Get the inner crypto_bigint::Int value
     #[inline(always)]
     pub fn inner(&self) -> &crypto_bigint::Int<LIMBS> {
         &self.0
     }
-    
+
     /// Get the inner crypto_bigint::Int value, consuming self
     #[inline(always)]
     pub fn into_inner(self) -> crypto_bigint::Int<LIMBS> {
@@ -59,7 +64,6 @@ impl<const LIMBS: usize> Int<LIMBS> {
 
     /// The number of limbs used on this platform.
     pub const LIMBS: usize = LIMBS;
-
 }
 
 //
@@ -141,7 +145,6 @@ impl<const LIMBS: usize> Rem for Int<LIMBS> {
         self.rem(&rhs)
     }
 }
-
 
 impl<'a, const LIMBS: usize> Rem<&'a Self> for Int<LIMBS> {
     type Output = Self;
@@ -401,84 +404,84 @@ mod tests {
         // Test with 4 limbs (256-bit integers)
         let a = Int::<4>(crypto_bigint::Int::from(10i64));
         let b = Int::<4>(crypto_bigint::Int::from(5i64));
-        
+
         // Test addition
         let c = a + b;
         assert_eq!(c, Int::<4>(crypto_bigint::Int::from(15i64)));
-        
+
         // Test subtraction
         let d = a - b;
         assert_eq!(d, Int::<4>(crypto_bigint::Int::from(5i64)));
-        
+
         // Test multiplication
         let e = a * b;
         assert_eq!(e, Int::<4>(crypto_bigint::Int::from(50i64)));
-        
+
         // Test remainder
         let f = a % b;
         assert_eq!(f, Int::<4>(crypto_bigint::Int::from(0i64)));
     }
-    
+
     #[test]
     fn test_int_checked_operations() {
         let a = Int::<4>(crypto_bigint::Int::from(10i64));
         let b = Int::<4>(crypto_bigint::Int::from(5i64));
         let zero = Int::<4>(crypto_bigint::Int::ZERO);
-        
+
         // Test checked_add
         let c = a.checked_add(&b).unwrap();
         assert_eq!(c, Int::<4>(crypto_bigint::Int::from(15i64)));
-        
+
         // Test checked_sub
         let d = a.checked_sub(&b).unwrap();
         assert_eq!(d, Int::<4>(crypto_bigint::Int::from(5i64)));
-        
+
         // Test checked_mul
         let e = a.checked_mul(&b).unwrap();
         assert_eq!(e, Int::<4>(crypto_bigint::Int::from(50i64)));
-        
+
         // Test checked_rem
         let f = a.checked_rem(&b).unwrap();
         assert_eq!(f, Int::<4>(crypto_bigint::Int::ZERO));
-        
+
         // Test checked_rem with zero divisor
         assert!(a.checked_rem(&zero).is_none());
     }
-    
+
     #[test]
     fn test_int_reference_operations() {
         let a = Int::<4>(crypto_bigint::Int::from(10i64));
         let b = Int::<4>(crypto_bigint::Int::from(5i64));
-        
+
         // Test reference-based addition
         let c = a.clone() + &b;
         assert_eq!(c, Int::<4>(crypto_bigint::Int::from(15i64)));
-        
+
         // Test reference-based subtraction
         let d = a.clone() - &b;
         assert_eq!(d, Int::<4>(crypto_bigint::Int::from(5i64)));
-        
+
         // Test reference-based multiplication
         let e = a.clone() * &b;
         assert_eq!(e, Int::<4>(crypto_bigint::Int::from(50i64)));
-        
+
         // Test reference-based remainder
         let f = a.clone() % &b;
         assert_eq!(f, Int::<4>(crypto_bigint::Int::ZERO));
     }
-    
+
     #[test]
     fn test_int_conversions() {
         // Test From<crypto_bigint::Int> for Int
         let original = crypto_bigint::Int::<4>::from(123i64);
         let wrapped: Int<4> = original.clone().into();
         assert_eq!(wrapped.0, original);
-        
+
         // Test From<Int> for crypto_bigint::Int
         let wrapped = Int::<4>(crypto_bigint::Int::from(456i64));
         let unwrapped: crypto_bigint::Int<4> = wrapped.into();
         assert_eq!(unwrapped, crypto_bigint::Int::from(456i64));
-        
+
         // Test conversion methods
         let value = crypto_bigint::Int::<4>::from(789i64);
         let wrapped = Int::new(value.clone());

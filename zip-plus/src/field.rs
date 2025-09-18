@@ -6,17 +6,23 @@ pub mod conversion;
 pub mod numeric;
 mod utils;
 
-use std::fmt;
-use crypto_bigint::modular::{ConstMontyForm, ConstMontyParams};
-use crypto_bigint::rand_core::TryRngCore;
-use crypto_bigint::Random;
-use std::fmt::{Display, Formatter};
+use crypto_bigint::{
+    Random,
+    modular::{ConstMontyForm, ConstMontyParams},
+    rand_core::TryRngCore,
+};
+use std::{
+    fmt,
+    fmt::{Display, Formatter},
+};
 
-use crypto_primitives::{ConstRing, Field, IntRing, PrimeField, Ring};
 use crate::utils::WORD_FACTOR;
+use crypto_primitives::{ConstRing, Field, IntRing, PrimeField, Ring};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct ConstMontyField<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize>(pub ConstMontyForm<Mod, LIMBS>);
+pub struct ConstMontyField<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize>(
+    pub ConstMontyForm<Mod, LIMBS>,
+);
 
 impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> Display for ConstMontyField<Mod, LIMBS> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -85,7 +91,7 @@ pub type F32768<MOD> = ConstMontyField<MOD, { 512 * WORD_FACTOR }>;
 
 #[cfg(test)]
 mod tests {
-    use crypto_bigint::{const_monty_params, U128};
+    use crypto_bigint::{U128, const_monty_params};
 
     use super::*;
 

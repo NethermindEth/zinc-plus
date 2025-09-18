@@ -1,7 +1,9 @@
-use core::fmt::Debug;
 use crate::{IntRing, ring::Ring};
-use core::ops::{Div, Neg};
-use num_traits::{Inv};
+use core::{
+    fmt::Debug,
+    ops::{Div, Neg},
+};
+use num_traits::Inv;
 
 /// Element of a field (F) - a group where addition and multiplication are
 /// defined with their respective inverse operations.
@@ -17,7 +19,9 @@ pub trait Field:
 
 /// Element of an integer field modulo prime number (F_p).
 // TODO: FROM<uX>
-pub trait PrimeField: Field + IntRing + From<u64> + From<u128> + From<Self::Inner> + Inv<Output = Option<Self>> {
+pub trait PrimeField:
+    Field + IntRing + From<u64> + From<u128> + From<Self::Inner> + Inv<Output = Option<Self>>
+{
     /// Underlying representation of an element
     type Inner: Debug;
 

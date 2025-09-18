@@ -1,17 +1,16 @@
 use std::ops::AddAssign;
 
-use crypto_primitives::crypto_bigint_int::Int;
+use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
 use num_traits::Zero;
-use crypto_primitives::PrimeField;
 
 use crate::{
     code::{LinearCode, LinearCodeSpec},
+    traits::Transcript,
     utils::shuffle_seeded,
 };
-use crate::traits::Transcript;
 
-/// Implementation of a repeat-accumulate-accumulate (RAA) codes over the binary field,
-/// as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
+/// Implementation of a repeat-accumulate-accumulate (RAA) codes over the binary
+/// field, as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
 #[derive(Debug, Clone)]
 pub struct RaaCode<const N: usize, const L: usize, const K: usize, const M: usize> {
     row_len: usize,
@@ -131,7 +130,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize> LinearCode<
 
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        F: PrimeField + for<'a> From<&'a Int<L>>
+        F: PrimeField + for<'a> From<&'a Int<L>>,
     {
         self.encode_inner(row)
     }
@@ -150,9 +149,9 @@ fn repeat<In, Out: for<'a> From<&'a In> + Clone>(
         .collect()
 }
 
-/// Perform an operation equivalent to multiplying the slice in-place by the accumulation matrix
-/// from the RAA code - a lower triangular matrix of the appropriate size, i.e. a matrix looking
-/// like this:
+/// Perform an operation equivalent to multiplying the slice in-place by the
+/// accumulation matrix from the RAA code - a lower triangular matrix of the
+/// appropriate size, i.e. a matrix looking like this:
 ///
 /// ```text
 /// 1 0 0 0
@@ -171,8 +170,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use num_traits::Zero;
     use crypto_primitives::crypto_bigint_int::Int;
+    use num_traits::Zero;
 
     use crate::{
         code::{DefaultLinearCodeSpec, LinearCode},
@@ -198,10 +197,7 @@ mod tests {
 
         let repeated_output = repeat::<_, I>(&input, repetition_factor);
 
-        let expected_output: Vec<_> = [10, 20, 10, 20, 10, 20]
-            .into_iter()
-            .map(I::from)
-            .collect();
+        let expected_output: Vec<_> = [10, 20, 10, 20, 10, 20].into_iter().map(I::from).collect();
         assert_eq!(
             repeated_output, expected_output,
             "Failed on repetition factor > 1"

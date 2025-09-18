@@ -1,15 +1,18 @@
-use crypto_bigint::{Uint, Word, Zero};
-use crypto_bigint::modular::{ConstMontyForm, ConstMontyParams};
-use num_traits::{ConstOne, ConstZero};
+use crypto_bigint::{
+    Uint, Word, Zero,
+    modular::{ConstMontyForm, ConstMontyParams},
+};
 use crypto_primitives::crypto_bigint_int::Int;
+use num_traits::{ConstOne, ConstZero};
 
 use crate::{
-    field::{ConstMontyField},
-    traits::{FromBits},
+    field::ConstMontyField,
+    traits::{ConstNumBytes, FromBits},
 };
-use crate::traits::{ConstNumBytes};
 
-impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> ConstNumBytes for ConstMontyField<Mod, LIMBS> {
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> ConstNumBytes
+    for ConstMontyField<Mod, LIMBS>
+{
     const NUM_BYTES: usize = ConstMontyForm::<Mod, LIMBS>::NUM_BYTES;
 }
 
@@ -69,13 +72,17 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> From<bool> for ConstMonty
     }
 }
 
-impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> From<Uint<LIMBS>> for ConstMontyField<Mod, LIMBS> {
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> From<Uint<LIMBS>>
+    for ConstMontyField<Mod, LIMBS>
+{
     fn from(value: Uint<LIMBS>) -> Self {
         Self(ConstMontyForm::new(&value))
     }
 }
 
-impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> From<ConstMontyForm<Mod, LIMBS>> for ConstMontyField<Mod, LIMBS> {
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> From<ConstMontyForm<Mod, LIMBS>>
+    for ConstMontyField<Mod, LIMBS>
+{
     fn from(value: ConstMontyForm<Mod, LIMBS>) -> Self {
         Self(value)
     }
@@ -85,7 +92,10 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize> From
     for ConstMontyField<Mod, LIMBS>
 {
     fn from(value: Int<LIMBS2>) -> Self {
-        assert!(LIMBS >= LIMBS2, "Cannot convert Int with more limbs than ConstMontyField");
+        assert!(
+            LIMBS >= LIMBS2,
+            "Cannot convert Int with more limbs than ConstMontyField"
+        );
         let value = value.resize().into_inner();
         let result = Self(ConstMontyForm::new(&value.abs()));
 
@@ -97,7 +107,8 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize> From
     }
 }
 
-impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, T: Clone> From<&T> for ConstMontyField<Mod, LIMBS>
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, T: Clone> From<&T>
+    for ConstMontyField<Mod, LIMBS>
 where
     Self: From<T>,
 {

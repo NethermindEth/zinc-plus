@@ -12,9 +12,9 @@ pub use ring::*;
 pub type Limb = u64;
 
 // FIXME
-/// Implements CheckedNeg, CheckedAdd, CheckedSub, CheckedMul, CheckedShl, and CheckedShr traits
-/// for the given type under the assumption that the type implements the corresponding operations
-/// without overflow.
+/// Implements CheckedNeg, CheckedAdd, CheckedSub, CheckedMul, CheckedShl, and
+/// CheckedShr traits for the given type under the assumption that the type
+/// implements the corresponding operations without overflow.
 #[macro_export]
 macro_rules! trivial_checked_ops {
     (

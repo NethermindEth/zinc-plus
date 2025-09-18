@@ -1,10 +1,6 @@
 use std::borrow::Cow;
 
-use crypto_primitives::crypto_bigint_int::Int;
-use itertools::{izip, Itertools};
-use crypto_primitives::PrimeField;
 use crate::{
-    poly::dense::DenseMultilinearExtension,
     Error,
     code::LinearCode,
     pcs::{
@@ -12,9 +8,12 @@ use crate::{
         utils::{ColumnOpening, left_point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
+    poly::dense::DenseMultilinearExtension,
+    traits::Transcribable,
     utils::{combine_rows, expand},
 };
-use crate::traits::Transcribable;
+use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
+use itertools::{Itertools, izip};
 
 impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearCode<N, L, K, M>>
     MultilinearZip<N, L, K, M, LC>
@@ -146,24 +145,24 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
 #[cfg(test)]
 mod tests {
     use crypto_bigint::{Random, U256, const_monty_params};
+    use crypto_primitives::crypto_bigint_int::Int;
     use num_traits::{ConstOne, ConstZero, One};
     use rand::rng;
     use rand_core::RngCore;
-    use crypto_primitives::crypto_bigint_int::Int;
 
     use crate::{
-        field::{ConstMontyField},
-        poly::dense::DenseMultilinearExtension,
         code::{DefaultLinearCodeSpec, LinearCode},
         code_raa::RaaCode,
+        field::ConstMontyField,
         pcs::{
             MerkleTree,
             structs::{MultilinearZip, MultilinearZipData, MultilinearZipParams},
             tests::MockTranscript,
         },
         pcs_transcript::PcsTranscript,
+        poly::dense::DenseMultilinearExtension,
+        utils::WORD_FACTOR,
     };
-    use crate::utils::WORD_FACTOR;
 
     const INT_LIMBS: usize = WORD_FACTOR;
     const FIELD_LIMBS: usize = 4 * WORD_FACTOR;
@@ -345,8 +344,7 @@ mod tests {
             DenseMultilinearExtension::from_evaluations_vec(oversized_num_vars, oversized_evals);
 
         // This data is for a 4-variable poly, but we need it as a placeholder.
-        let (data, _) =
-            TestZip::commit(&pp, &setup_test_params(num_vars).1).unwrap();
+        let (data, _) = TestZip::commit(&pp, &setup_test_params(num_vars).1).unwrap();
 
         let mut rng = rng();
         let point_int = random_point::<INT_LIMBS>(oversized_num_vars, &mut rng);
@@ -515,7 +513,10 @@ mod tests {
         let verification_result =
             TestZip::verify(&pp, &comm, &point_f, &eval, &mut verifier_transcript);
 
-        assert!(verification_result.is_ok(), "Verification failed: {verification_result:?}");
+        assert!(
+            verification_result.is_ok(),
+            "Verification failed: {verification_result:?}"
+        );
     }
 
     #[test]

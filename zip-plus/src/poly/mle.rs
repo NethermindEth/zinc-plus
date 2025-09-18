@@ -27,7 +27,6 @@ pub trait MultilinearExtension<T>:
     + for<'a> SubAssign<&'a Self>
     + Index<usize>
 {
-
     /// Reduce the number of variables of `self` by fixing the
     /// `partial_point.len()` variables at `partial_point`.
     fn fix_variables(&mut self, partial_point: &[T]);

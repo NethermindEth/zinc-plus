@@ -1,11 +1,11 @@
 use std::ops::{Add, AddAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign};
 
+use crate::poly::mle::{MultilinearExtension, MultilinearExtensionRand};
 use ark_std::log2;
 use crypto_bigint::Random;
+use crypto_primitives::{Matrix, Ring};
 use num_traits::Zero;
 use rand_core::RngCore;
-use crate::poly::mle::{MultilinearExtension, MultilinearExtensionRand};
-use crypto_primitives::{Matrix, Ring};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -150,7 +150,7 @@ where
 
 impl<R> MultilinearExtensionRand<R> for DenseMultilinearExtension<R>
 where
-    R: Ring + Random
+    R: Ring + Random,
 {
     fn rand<Rng: RngCore + ?Sized>(num_vars: usize, rng: &mut Rng) -> Self {
         Self::from_evaluations_vec(
@@ -268,9 +268,12 @@ impl<R: Ring> Zero for DenseMultilinearExtension<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pcs::utils::{build_eq_x_r, build_eq_x_r_vec};
-    use crate::{field::ConstMontyField, poly::mle::MultilinearExtension};
-    use crypto_bigint::{const_monty_params, U128};
+    use crate::{
+        field::ConstMontyField,
+        pcs::utils::{build_eq_x_r, build_eq_x_r_vec},
+        poly::mle::MultilinearExtension,
+    };
+    use crypto_bigint::{U128, const_monty_params};
     use crypto_primitives::DenseRowMatrix;
     use num_traits::{ConstZero, One, Zero};
     use proptest::prelude::*;

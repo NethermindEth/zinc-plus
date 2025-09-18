@@ -30,12 +30,13 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> One for ConstMontyField<M
 
 #[cfg(test)]
 mod tests {
-    use crypto_bigint::{const_monty_params, U128};
+    use crypto_bigint::{U128, const_monty_params};
     use num_traits::{One, Zero};
 
     use super::*;
 
-    // Define a small prime modulus for tests (copying style from Zinc tests where modulus ~ 128-bit)
+    // Define a small prime modulus for tests (copying style from Zinc tests where
+    // modulus ~ 128-bit)
     const_monty_params!(ModP, U128, "7fffffffffffffffffffffffffffffff");
 
     type F = ConstMontyField<ModP, { U128::LIMBS }>;

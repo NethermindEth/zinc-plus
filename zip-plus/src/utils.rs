@@ -92,12 +92,7 @@ where
 /// A vector of length `row_len` representing the combined row.
 pub(super) fn combine_rows<'a, F, C, E>(coeffs: C, evaluations: E, row_len: usize) -> Vec<F>
 where
-    F: Clone
-        + Default
-        + Send
-        + Sync
-        + for<'b> AddAssign<&'b F>
-        + for<'b> Mul<&'b F, Output = F>,
+    F: Clone + Default + Send + Sync + for<'b> AddAssign<&'b F> + for<'b> Mul<&'b F, Output = F>,
     C: IntoIterator<Item = F> + Sync,
     E: IntoIterator<Item = F> + Sync,
     C::IntoIter: Clone + Send + Sync,
@@ -176,40 +171,39 @@ pub(super) fn shuffle_seeded<T>(slice: &mut [T], seed: u64) {
 ///
 /// You must uphold all of the following at the call site:
 ///
-/// 1. **Layout equivalence**
-///    `size_of::<Self>() == size_of::<Target>()` and
-///    `align_of::<Self>() == align_of::<Target>()`.
-///    This implementation *asserts* these at compile time, failing the build
-///    if they do not hold. (Do not remove those checks.)
+/// 1. **Layout equivalence** `size_of::<Self>() == size_of::<Target>()` and
+///    `align_of::<Self>() == align_of::<Target>()`. This implementation
+///    *asserts* these at compile time, failing the build if they do not hold.
+///    (Do not remove those checks.)
 ///
-/// 2. **Validity subset**
-///    Every bit-pattern that is a valid `Self` value must also be a valid
-///    `Target` value. In other words, `Target` must **not** impose stricter
-///    validity or niche invariants than `Self`.
+/// 2. **Validity subset** Every bit-pattern that is a valid `Self` value must
+///    also be a valid `Target` value. In other words, `Target` must **not**
+///    impose stricter validity or niche invariants than `Self`.
 ///
 ///    **Counterexamples (do NOT reinterpret into these):**
-///    - `*mut T` → `NonNull<T>` (null is valid for `*mut T` but **invalid** for `NonNull<T>`).
+///    - `*mut T` → `NonNull<T>` (null is valid for `*mut T` but **invalid** for
+///      `NonNull<T>`).
 ///    - `u64` → `core::num::NonZeroU64`.
-///    - `Option<NonNull<T>>` has niche optimization differences compared to raw pointers.
+///    - `Option<NonNull<T>>` has niche optimization differences compared to raw
+///      pointers.
 ///
-/// 3. **Drop semantics remain sound**
-///    Dropping `Vec<Target>` must be sound for all elements coming from
-///    `Vec<Self>`. If `Target` has a custom `Drop` impl that relies on
-///    invariants not guaranteed by `Self`, the conversion is unsound.
+/// 3. **Drop semantics remain sound** Dropping `Vec<Target>` must be sound for
+///    all elements coming from `Vec<Self>`. If `Target` has a custom `Drop`
+///    impl that relies on invariants not guaranteed by `Self`, the conversion
+///    is unsound.
 ///
-/// 4. **Ownership/uniqueness is preserved**
-///    After calling this function, the original `Vec<Self>` **must not** be
-///    used again. (The function takes it by value and places it in
-///    `ManuallyDrop` to prevent double-free.)
+/// 4. **Ownership/uniqueness is preserved** After calling this function, the
+///    original `Vec<Self>` **must not** be used again. (The function takes it
+///    by value and places it in `ManuallyDrop` to prevent double-free.)
 ///
 /// ## Implementor requirements (for each `unsafe impl`)
 ///
 /// When you write `unsafe impl ReinterpretVector<Target> for Self`, you are
 /// promising that for **any** `Vec<Self>`:
 ///
-/// - `Self` and `Target` are layout-identical (same size and alignment) —
-///   e.g. `Target` is `#[repr(transparent)]` over `Self`, or is otherwise
-///   guaranteed to share ABI with `Self`.
+/// - `Self` and `Target` are layout-identical (same size and alignment) — e.g.
+///   `Target` is `#[repr(transparent)]` over `Self`, or is otherwise guaranteed
+///   to share ABI with `Self`.
 /// - The set of valid `Self` values is a subset of the valid `Target` values.
 ///   No stricter validity or niche invariants are introduced by `Target`.
 /// - Dropping a `Target` produced from arbitrary valid `Self` bytes is sound
@@ -234,20 +228,17 @@ pub(super) fn shuffle_seeded<T>(slice: &mut [T], seed: u64) {
 ///   asserts still gate the conversion.
 /// - **Uninhabited types (`!`):** `Vec<!>` cannot exist; do not attempt.
 /// - **Provenance / aliasing:** We preserve the original allocation, pointer,
-///   length, and capacity. Only the *type* of the element pointer changes
-///   (with equal alignment), which is allowed under Rust’s aliasing rules for
+///   length, and capacity. Only the *type* of the element pointer changes (with
+///   equal alignment), which is allowed under Rust’s aliasing rules for
 ///   layout-identical types when validity is preserved.
 /// - **Send/Sync auto-traits:** `Vec<Target>` may have different `Send`/`Sync`
 ///   auto-trait behavior than `Vec<Self>`. That is a *type-system* effect at
 ///   compile time; the runtime conversion does not change the buffer contents.
-/// - **Alternative (borrowed view):** If you only need a temporary view,
-///   prefer reinterpreting slices to avoid ownership transfer:
-///   ```ignore
-///   // SAFETY: same layout + lifetime/aliasing upheld
-///   let view: &[Target] = unsafe {
-///       core::slice::from_raw_parts(vec_self.as_ptr().cast::<Target>(), vec_self.len())
-///   };
-///   ```
+/// - **Alternative (borrowed view):** If you only need a temporary view, prefer
+///   reinterpreting slices to avoid ownership transfer: ```ignore // SAFETY:
+///   same layout + lifetime/aliasing upheld let view: &[Target] = unsafe {
+///   core::slice::from_raw_parts(vec_self.as_ptr().cast::<Target>(),
+///   vec_self.len()) }; ```
 ///
 /// # Examples
 ///
@@ -261,8 +252,9 @@ pub(super) fn shuffle_seeded<T>(slice: &mut [T], seed: u64) {
 /// - The method uses `ManuallyDrop` to avoid dropping `source` before we
 ///   reconstruct a `Vec<Target>` from its raw parts. This prevents double-free.
 /// - `Vec::from_raw_parts` is used in an `unsafe` block because we must
-///   guarantee that `(ptr, len, cap)` originated from a `Vec<Target>`-compatible
-///   allocation. The trait’s contract + layout asserts provide that guarantee.
+///   guarantee that `(ptr, len, cap)` originated from a
+///   `Vec<Target>`-compatible allocation. The trait’s contract + layout asserts
+///   provide that guarantee.
 /// - Consider enabling `#![deny(unsafe_op_in_unsafe_fn)]` at the crate root so
 ///   that all unsafe operations within this `unsafe fn` remain explicitly
 ///   marked and audited.
@@ -271,15 +263,16 @@ pub(super) fn shuffle_seeded<T>(slice: &mut [T], seed: u64) {
 ///
 /// If `Target` applies *any* additional invariants (non-zero, non-null, range
 /// restrictions, encoding constraints, etc.), use a per-element conversion
-/// (`map(Into::into)` or `try_map`) that can validate or fail gracefully. Zero-copy
-/// reinterprets are only appropriate when the types are truly the same at the
-/// byte level.
+/// (`map(Into::into)` or `try_map`) that can validate or fail gracefully.
+/// Zero-copy reinterprets are only appropriate when the types are truly the
+/// same at the byte level.
 ///
 /// ---
 pub unsafe trait ReinterpretVector<Target: Sized>: Sized {
     /// Reinterpret a `Vec<Self>` as a `Vec<Target>` **without copying**.
     ///
-    /// See the trait-level documentation for full safety requirements and examples.
+    /// See the trait-level documentation for full safety requirements and
+    /// examples.
     ///
     /// # Safety
     ///
@@ -303,7 +296,8 @@ pub unsafe trait ReinterpretVector<Target: Sized>: Sized {
         unsafe { Vec::from_raw_parts(ptr.cast::<Target>(), len, cap) }
     }
 
-    /// Reinterpret a borrowed slice `&[Self]` as `&[Target]` **without copying**.
+    /// Reinterpret a borrowed slice `&[Self]` as `&[Target]` **without
+    /// copying**.
     ///
     /// This is an O(1) borrowed view that preserves the original lifetime and
     /// does not take ownership of the buffer.
@@ -311,16 +305,19 @@ pub unsafe trait ReinterpretVector<Target: Sized>: Sized {
     /// # Safety
     ///
     /// The caller must ensure:
-    /// 1. **Layout equivalence**: `size_of::<Self>() == size_of::<Target>()` and
-    ///    `align_of::<Self>() == align_of::<Target>()`. (Enforced via compile-time asserts.)
-    /// 2. **Validity subset**: Every valid `Self` bit-pattern is also a valid `Target`.
-    ///    (No stricter validity or niche invariants are introduced by `Target`.)
-    /// 3. **Aliasing rules**: The returned `&[Target]` must not be used to violate Rust’s
-    ///    aliasing model (e.g., you must not concurrently mutate the same memory via `Self`
-    ///    references while holding this `&[Target]`).
+    /// 1. **Layout equivalence**: `size_of::<Self>() == size_of::<Target>()`
+    ///    and `align_of::<Self>() == align_of::<Target>()`. (Enforced via
+    ///    compile-time asserts.)
+    /// 2. **Validity subset**: Every valid `Self` bit-pattern is also a valid
+    ///    `Target`. (No stricter validity or niche invariants are introduced by
+    ///    `Target`.)
+    /// 3. **Aliasing rules**: The returned `&[Target]` must not be used to
+    ///    violate Rust’s aliasing model (e.g., you must not concurrently mutate
+    ///    the same memory via `Self` references while holding this
+    ///    `&[Target]`).
     ///
-    /// Unlike the vector method, there are no drop-semantics concerns here because no
-    /// ownership is transferred; this is a view only.
+    /// Unlike the vector method, there are no drop-semantics concerns here
+    /// because no ownership is transferred; this is a view only.
     unsafe fn reinterpret_slice(source: &[Self]) -> &[Target] {
         const {
             assert!(std::mem::size_of::<Self>() == std::mem::size_of::<Target>());
@@ -337,13 +334,11 @@ pub unsafe trait ReinterpretVector<Target: Sized>: Sized {
 #[cfg(test)]
 mod test {
     use crypto_bigint::{Random, Word};
+    use crypto_primitives::crypto_bigint_int::Int;
     use num_traits::{ConstOne, ConstZero};
     use rand::rng;
-    use crypto_primitives::crypto_bigint_int::Int;
 
-    use crate::{
-        utils::{expand, inner_product},
-    };
+    use crate::utils::{expand, inner_product};
 
     #[test]
     fn test_inner_product_basic() {

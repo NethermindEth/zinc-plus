@@ -1,15 +1,17 @@
 use std::marker::PhantomData;
 
-use crypto_bigint::{Word};
+use crypto_bigint::Word;
 use crypto_primitives::crypto_bigint_int::Int;
 use p3_field::Packable;
 
 use crate::{
     code::LinearCode,
-    pcs::{MerkleTree, utils::MtHash},
+    pcs::{
+        MerkleTree,
+        utils::{AsWords, MtHash},
+    },
+    utils::ReinterpretVector,
 };
-use crate::pcs::utils::AsWords;
-use crate::utils::ReinterpretVector;
 
 pub struct MultilinearZip<
     const N: usize,
@@ -67,7 +69,8 @@ impl<const LIMBS: usize> AsWords for PackedInt<LIMBS> {
 /// Representantation of a zip commitment to a multilinear polynomial
 #[derive(Debug, Default)]
 pub struct MultilinearZipData<const K: usize> {
-    /// The encoded rows of the polynomial matrix representation, referred to as "u-hat" in the Zinc paper
+    /// The encoded rows of the polynomial matrix representation, referred to as
+    /// "u-hat" in the Zinc paper
     pub rows: Vec<Int<K>>,
     /// Merkle trees of entire matrix
     pub merkle_tree: MerkleTree<PackedInt<K>>,

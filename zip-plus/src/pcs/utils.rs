@@ -1,11 +1,6 @@
-use std::{
-    fmt,
-    fmt::{Display, Formatter},
-    io::Write,
-};
-use ark_std::cfg_iter_mut;
-use ark_std::iterable::Iterable;
-use crypto_bigint::{Word};
+use ark_std::{cfg_iter_mut, iterable::Iterable};
+use crypto_bigint::Word;
+use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
 use itertools::Itertools;
 use num_traits::{ToBytes, Zero};
 use p3_commit::{BatchOpeningRef, Mmcs};
@@ -13,17 +8,18 @@ use p3_field::Packable;
 use p3_matrix::{Dimensions, Matrix as P3Matrix, dense::RowMajorMatrix};
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{CryptographicHasher, PseudoCompressionFunction};
+use std::{
+    fmt,
+    fmt::{Display, Formatter},
+    io::Write,
+};
 use uninit::AsMaybeUninit;
-use crypto_primitives::PrimeField;
-use crypto_primitives::crypto_bigint_int::Int;
 
 use super::{error::MerkleError, structs::MultilinearZipData};
 use crate::{
-    Error,
-    pcs_transcript::PcsTranscript,
-    poly::dense::DenseMultilinearExtension,
+    Error, pcs_transcript::PcsTranscript, poly::dense::DenseMultilinearExtension,
+    utils::ReinterpretVector,
 };
-use crate::utils::ReinterpretVector;
 
 fn err_too_many_variates(function: &str, upto: usize, got: usize) -> Error {
     Error::InvalidPcsParam(format!(
@@ -299,10 +295,7 @@ impl ColumnOpening {
 /// For a polynomial arranged in matrix form, this splits the evaluation point
 /// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
 /// right
-pub(super) fn point_to_tensor<F>(
-    num_rows: usize,
-    point: &[F],
-) -> Result<(Vec<F>, Vec<F>), Error>
+pub(super) fn point_to_tensor<F>(num_rows: usize, point: &[F]) -> Result<(Vec<F>, Vec<F>), Error>
 where
     F: PrimeField,
 {
@@ -415,10 +408,8 @@ where
 /// For a polynomial arranged in matrix form, this splits the evaluation point
 /// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
 /// right and returns the left vector only
-pub(super) fn left_point_to_tensor<F>(
-    num_rows: usize,
-    point: &[F],
-) -> Result<Vec<F>, Error> where
+pub(super) fn left_point_to_tensor<F>(num_rows: usize, point: &[F]) -> Result<Vec<F>, Error>
+where
     F: PrimeField,
 {
     let (_, lo) = point.split_at(point.len() - num_rows.ilog2() as usize);
@@ -440,7 +431,7 @@ pub enum ArithErrors {
 
 #[cfg(test)]
 mod tests {
-    use crypto_bigint::{Random};
+    use crypto_bigint::Random;
     use crypto_primitives::crypto_bigint_int::Int;
     use rand::rng;
 

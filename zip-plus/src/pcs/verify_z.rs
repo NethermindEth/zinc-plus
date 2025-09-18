@@ -1,7 +1,3 @@
-use ark_std::iterable::Iterable;
-use crypto_primitives::crypto_bigint_int::Int;
-use itertools::Itertools;
-use crypto_primitives::PrimeField;
 use crate::{
     Error,
     code::LinearCode,
@@ -10,10 +6,13 @@ use crate::{
         utils::{ColumnOpening, MtHash, point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
+    poly::dense::DenseMultilinearExtension,
+    traits::Transcribable,
     utils::{expand, inner_product},
 };
-use crate::poly::dense::DenseMultilinearExtension;
-use crate::traits::Transcribable;
+use ark_std::iterable::Iterable;
+use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
+use itertools::Itertools;
 
 impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearCode<N, L, K, M>>
     MultilinearZip<N, L, K, M, LC>
@@ -114,8 +113,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
     ) -> Result<(), Error> {
         let column_entries_comb: Int<M> = if num_rows > 1 {
             let coeffs: Vec<Int<M>> = coeffs.iter().map(expand::<N, M>).collect();
-            let column_entries: Vec<Int<M>> =
-                column_entries.iter().map(expand::<K, M>).collect();
+            let column_entries: Vec<Int<M>> = column_entries.iter().map(expand::<K, M>).collect();
             inner_product(coeffs.iter(), column_entries.iter())
         } else {
             expand(&column_entries[0])
@@ -188,19 +186,26 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
 
 #[cfg(test)]
 mod tests {
-    use crypto_bigint::{U256, const_monty_params, Random};
+    use crypto_bigint::{Random, U256, const_monty_params};
+    use crypto_primitives::crypto_bigint_int::Int;
     use itertools::Itertools;
     use num_traits::{ConstOne, One};
     use rand::Rng;
-    use crypto_primitives::crypto_bigint_int::Int;
 
-    use crate::{field::{F256}, poly::dense::DenseMultilinearExtension, code::{DefaultLinearCodeSpec, LinearCode}, code_raa::RaaCode, pcs::{
-        structs::{MultilinearZip, MultilinearZipCommitment, MultilinearZipParams},
-        tests::MockTranscript,
-    }, pcs_transcript::PcsTranscript, Error};
-    use crate::poly::mle::MultilinearExtensionRand;
-    use crate::transcript::KeccakTranscript;
-    use crate::utils::WORD_FACTOR;
+    use crate::{
+        Error,
+        code::{DefaultLinearCodeSpec, LinearCode},
+        code_raa::RaaCode,
+        field::F256,
+        pcs::{
+            structs::{MultilinearZip, MultilinearZipCommitment, MultilinearZipParams},
+            tests::MockTranscript,
+        },
+        pcs_transcript::PcsTranscript,
+        poly::{dense::DenseMultilinearExtension, mle::MultilinearExtensionRand},
+        transcript::KeccakTranscript,
+        utils::WORD_FACTOR,
+    };
 
     const INT_LIMBS: usize = WORD_FACTOR;
     const FIELD_LIMBS: usize = 4 * WORD_FACTOR;

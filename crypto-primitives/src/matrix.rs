@@ -8,7 +8,7 @@ pub trait Matrix<T> {
     /// Number of columns in this matrix
     fn num_cols(&self) -> usize;
 
-    fn rows<'a>(&'a self) -> impl Iterator<Item=impl Iterator<Item=(usize, &'a T)>>
+    fn rows<'a>(&'a self) -> impl Iterator<Item = impl Iterator<Item = (usize, &'a T)>>
     where
         T: 'a;
 }
@@ -43,11 +43,13 @@ impl<T> Matrix<T> for SparseMatrix<T> {
         self.num_cols
     }
 
-    fn rows<'a>(&'a self) -> impl Iterator<Item=impl Iterator<Item=(usize, &'a T)>>
+    fn rows<'a>(&'a self) -> impl Iterator<Item = impl Iterator<Item = (usize, &'a T)>>
     where
         T: 'a,
     {
-        self.cells.chunks(self.density).map(|chunk| chunk.iter().map(|v| (v.0, &v.1)))
+        self.cells
+            .chunks(self.density)
+            .map(|chunk| chunk.iter().map(|v| (v.0, &v.1)))
     }
 }
 
@@ -89,7 +91,7 @@ impl<T> Matrix<T> for DenseRowMatrix<T> {
         self.num_cols
     }
 
-    fn rows<'a>(&'a self) -> impl Iterator<Item=impl Iterator<Item=(usize, &'a T)>>
+    fn rows<'a>(&'a self) -> impl Iterator<Item = impl Iterator<Item = (usize, &'a T)>>
     where
         T: 'a,
     {

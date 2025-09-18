@@ -1,35 +1,45 @@
+use crypto_bigint::{
+    Uint,
+    modular::{ConstMontyForm, ConstMontyParams},
+};
+use num_traits::{
+    CheckedAdd, CheckedDiv, CheckedMul, CheckedNeg, CheckedRem, CheckedShl, CheckedShr, CheckedSub,
+    ConstOne, ConstZero, Inv, Pow, Zero,
+};
 use std::{
-    iter::Sum,
-    ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, Sub, SubAssign},
+    iter::{Product, Sum},
+    ops::{
+        Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Rem, RemAssign, Shl, Shr, Sub,
+        SubAssign,
+    },
 };
-use std::iter::Product;
-use std::ops::{DivAssign, Rem, RemAssign, Shl, Shr};
-use crypto_bigint::{Uint};
-use crypto_bigint::modular::{ConstMontyForm, ConstMontyParams};
-use num_traits::{CheckedAdd, CheckedDiv, CheckedMul, CheckedNeg, CheckedRem, CheckedShl, CheckedShr, CheckedSub, ConstOne, ConstZero, Inv, Pow, Zero};
 
-use crate::{
-    field::{ConstMontyField},
-    utils::WORD_FACTOR
-};
+use crate::{field::ConstMontyField, utils::WORD_FACTOR};
 
 // Macro to implement arithmetic traits for Field in all ref/value combinations
-// Uses the same method name for both the trait method and the inner explicit call.
+// Uses the same method name for both the trait method and the inner explicit
+// call.
 macro_rules! impl_field_op {
     ($trait:ident, $method:ident) => {
-        impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> $trait for ConstMontyField<Mod, LIMBS> {
+        impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> $trait
+            for ConstMontyField<Mod, LIMBS>
+        {
             type Output = Self;
             fn $method(self, rhs: Self) -> Self::Output {
                 Self(self.0.$method(rhs.0))
             }
         }
-        impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> $trait<&Self> for ConstMontyField<Mod, LIMBS> {
+        impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> $trait<&Self>
+            for ConstMontyField<Mod, LIMBS>
+        {
             type Output = Self;
             fn $method(self, rhs: &Self) -> Self::Output {
                 Self(self.0.$method(&rhs.0))
             }
         }
-        impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> $trait for &ConstMontyField<Mod, LIMBS> {
+        impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> $trait
+            for &ConstMontyField<Mod, LIMBS>
+        {
             type Output = ConstMontyField<Mod, LIMBS>;
             fn $method(self, rhs: Self) -> Self::Output {
                 ConstMontyField(self.0.$method(rhs.0))
@@ -193,11 +203,7 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> CheckedShr for ConstMonty
 
 impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> CheckedRem for ConstMontyField<Mod, LIMBS> {
     fn checked_rem(&self, v: &Self) -> Option<Self> {
-        if v.is_zero() {
-            None
-        } else {
-            Some(*self % v)
-        }
+        if v.is_zero() { None } else { Some(*self % v) }
     }
 }
 
@@ -206,16 +212,21 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> CheckedRem for ConstMonty
 //
 
 // Macro to implement assignment arithmetic traits (e.g., AddAssign) for Field
-// Implements both rhs: Self and rhs: &Self, using an explicit inner method on ConstConstMontyParamsForm
+// Implements both rhs: Self and rhs: &Self, using an explicit inner method on
+// ConstConstMontyParamsForm
 macro_rules! impl_field_op_assign {
     ($trait:ident, $method:ident, $inner:ident) => {
-        impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> $trait for ConstMontyField<Mod, LIMBS> {
+        impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> $trait
+            for ConstMontyField<Mod, LIMBS>
+        {
             fn $method(&mut self, rhs: Self) {
                 // Use reference for inner call to avoid moves of rhs.0 where not needed
                 *self = self.$inner(&rhs);
             }
         }
-        impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> $trait<&Self> for ConstMontyField<Mod, LIMBS> {
+        impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> $trait<&Self>
+            for ConstMontyField<Mod, LIMBS>
+        {
             fn $method(&mut self, rhs: &Self) {
                 *self = self.$inner(rhs);
             }
@@ -234,25 +245,29 @@ impl_field_op_assign!(RemAssign, rem_assign, rem);
 //
 
 impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> Sum for ConstMontyField<Mod, LIMBS> {
-    fn sum<I: Iterator<Item=Self>>(iter: I) -> Self {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         iter.fold(Self::ZERO, |acc, x| acc + x)
     }
 }
 
 impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> Product for ConstMontyField<Mod, LIMBS> {
-    fn product<I: Iterator<Item=Self>>(iter: I) -> Self {
+    fn product<I: Iterator<Item = Self>>(iter: I) -> Self {
         iter.fold(Self::ONE, |acc, x| acc * x)
     }
 }
 
-impl<'a, Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> Sum<&'a Self> for ConstMontyField<Mod, LIMBS> {
-    fn sum<I: Iterator<Item=&'a Self>>(iter: I) -> Self {
+impl<'a, Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> Sum<&'a Self>
+    for ConstMontyField<Mod, LIMBS>
+{
+    fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
         iter.fold(Self::ZERO, |acc, x| acc + x)
     }
 }
 
-impl<'a, Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> Product<&'a Self> for ConstMontyField<Mod, LIMBS> {
-    fn product<I: Iterator<Item=&'a Self>>(iter: I) -> Self {
+impl<'a, Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> Product<&'a Self>
+    for ConstMontyField<Mod, LIMBS>
+{
+    fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
         iter.fold(Self::ONE, |acc, x| acc * x)
     }
 }

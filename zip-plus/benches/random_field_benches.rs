@@ -10,8 +10,7 @@ use criterion::{
     AxisScale, BenchmarkId, Criterion, PlotConfiguration, criterion_group, criterion_main,
 };
 use crypto_bigint::{NonZero, U256, const_monty_params};
-use zip_plus::field::{ConstMontyField};
-use zip_plus::utils::WORD_FACTOR;
+use zip_plus::{field::ConstMontyField, utils::WORD_FACTOR};
 
 const_monty_params!(
     Params,

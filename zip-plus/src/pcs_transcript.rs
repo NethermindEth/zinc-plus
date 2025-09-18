@@ -1,20 +1,15 @@
-use std::{
-    io::{Cursor, ErrorKind, Read, Write},
-};
+use std::io::{Cursor, ErrorKind, Read, Write};
 
-use crypto_bigint::{Word};
-use crypto_primitives::PrimeField;
+use crypto_bigint::Word;
+use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
 use p3_matrix::Dimensions;
-use crypto_primitives::crypto_bigint_int::Int;
 
 use crate::{
-    transcript::KeccakTranscript,
     Error,
     pcs::utils::{MerkleProof, MtHash},
+    traits::{ConstNumBytes, FromBytes, ToBytes, Transcribable},
+    transcript::KeccakTranscript,
 };
-use crate::traits::{ConstNumBytes, Transcribable};
-use crate::traits::{FromBytes, ToBytes};
-
 
 /// A transcript for Polynomial Commitment Scheme (PCS) operations.
 /// Manages both Fiat-Shamir transformations and serialization/deserialization
@@ -272,9 +267,7 @@ impl PcsTranscript {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        pcs_transcript::{MtHash, PcsTranscript},
-    };
+    use crate::pcs_transcript::{MtHash, PcsTranscript};
     use crypto_bigint::{U256, const_monty_params};
 
     #[allow(unused_macros)]

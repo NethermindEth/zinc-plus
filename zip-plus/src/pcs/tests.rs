@@ -1,6 +1,6 @@
-use std::{collections::BTreeSet, ops::Range};
-use crypto_bigint::{Word};
+use crypto_bigint::Word;
 use crypto_primitives::crypto_bigint_int::Int;
+use std::{collections::BTreeSet, ops::Range};
 
 use crate::traits::Transcript;
 

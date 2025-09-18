@@ -2,7 +2,6 @@ use crypto_primitives::crypto_bigint_int::Int;
 use uninit::out_ref::Out;
 
 use crate::{
-    poly::dense::DenseMultilinearExtension,
     Error,
     code::LinearCode,
     pcs::{
@@ -12,13 +11,15 @@ use crate::{
         },
         utils::validate_input,
     },
+    poly::dense::DenseMultilinearExtension,
     utils::{num_threads, parallelize_iter},
 };
 
 impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearCode<N, L, K, M>>
     MultilinearZip<N, L, K, M, LC>
 {
-    /// Creates a commitment to a multilinear polynomial using the ZIP PCS scheme.
+    /// Creates a commitment to a multilinear polynomial using the ZIP PCS
+    /// scheme.
     ///
     /// This function implements the commitment phase of the ZIP polynomial
     /// commitment scheme. It encodes the polynomial's evaluations using a
@@ -200,16 +201,14 @@ mod tests {
     use std::slice::from_ref;
 
     use crypto_bigint::{Random, U256, Word, const_monty_params};
+    use crypto_primitives::crypto_bigint_int::Int;
     use itertools::Itertools;
     use rand::{Rng, rng};
-    use crypto_primitives::crypto_bigint_int::Int;
 
     use crate::{
-        field::{F256},
-        poly::dense::DenseMultilinearExtension,
-        transcript::KeccakTranscript,
         code::{DefaultLinearCodeSpec, LinearCode},
         code_raa::RaaCode,
+        field::F256,
         pcs::{
             MerkleTree,
             structs::{MultilinearZip, MultilinearZipParams},
@@ -217,8 +216,10 @@ mod tests {
             utils::MtHash,
         },
         pcs_transcript::PcsTranscript,
+        poly::dense::DenseMultilinearExtension,
+        transcript::KeccakTranscript,
+        utils::WORD_FACTOR,
     };
-    use crate::utils::WORD_FACTOR;
 
     const INT_LIMBS: usize = WORD_FACTOR;
     const FIELD_LIMBS: usize = 4 * WORD_FACTOR;
@@ -371,7 +372,8 @@ mod tests {
         }
     }
 
-    /// Verifies that corrupting the encoded data after commitment results in a different Merkle root.
+    /// Verifies that corrupting the encoded data after commitment results in a
+    /// different Merkle root.
     #[test]
     fn corrupted_encoding_changes_merkle_root() {
         let (pp, poly) = setup_test_params(3);

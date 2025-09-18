@@ -1,10 +1,14 @@
+use crypto_bigint::{
+    modular::ConstMontyParams,
+    subtle::{Choice, ConstantTimeEq},
+};
 use std::cmp::Ordering;
-use crypto_bigint::modular::ConstMontyParams;
-use crypto_bigint::subtle::{Choice, ConstantTimeEq};
 
-use crate::field::{ConstMontyField};
+use crate::field::ConstMontyField;
 
-impl<MOD: ConstMontyParams<LIMBS>, const LIMBS: usize> ConstantTimeEq for ConstMontyField<MOD, LIMBS> {
+impl<MOD: ConstMontyParams<LIMBS>, const LIMBS: usize> ConstantTimeEq
+    for ConstMontyField<MOD, LIMBS>
+{
     fn ct_eq(&self, other: &Self) -> Choice {
         self.0.ct_eq(&other.0)
     }

@@ -13,16 +13,15 @@ use crypto_primitives::crypto_bigint_int::Int;
 use itertools::Itertools;
 use rand::rng;
 use zip_plus::{
-    utils::WORD_FACTOR,
-    field::{F256},
-    poly::{dense::DenseMultilinearExtension},
-    transcript::KeccakTranscript,
     code::{DefaultLinearCodeSpec, LinearCode},
     code_raa::RaaCode,
+    field::F256,
     pcs::{MerkleTree, structs::MultilinearZip},
     pcs_transcript::PcsTranscript,
+    poly::{dense::DenseMultilinearExtension, mle::MultilinearExtensionRand},
+    transcript::KeccakTranscript,
+    utils::WORD_FACTOR,
 };
-use zip_plus::poly::mle::MultilinearExtensionRand;
 
 const INT_LIMBS: usize = WORD_FACTOR;
 

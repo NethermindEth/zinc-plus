@@ -1,11 +1,12 @@
+use crate::{
+    traits::{ToBytes, Transcript},
+    utils::WORD_FACTOR,
+};
 use ark_std::vec::Vec;
-use crypto_bigint::{Word};
-use crypto_primitives::crypto_bigint_int::Int;
-use num_traits::{Zero};
+use crypto_bigint::Word;
+use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
+use num_traits::Zero;
 use sha3::{Digest, Keccak256};
-use crypto_primitives::PrimeField;
-use crate::traits::{ToBytes, Transcript};
-use crate::utils::WORD_FACTOR;
 
 /// A cryptographic transcript implementation using the Keccak-256 hash
 /// function. Used for Fiat-Shamir transformations in zero-knowledge proof
@@ -83,7 +84,8 @@ impl KeccakTranscript {
         }
     }
 
-    /// Generates a pseudorandom [Integer] as a challenge based on the current transcript state.
+    /// Generates a pseudorandom [Integer] as a challenge based on the current
+    /// transcript state.
     pub fn get_integer_challenge<const LIMBS: usize>(&mut self) -> Int<LIMBS> {
         let mut words: [Word; LIMBS] = [Word::zero(); LIMBS];
         for word in words.iter_mut().take(LIMBS) {
@@ -99,12 +101,14 @@ impl KeccakTranscript {
         Int::from_words(words).into()
     }
 
-    /// Generates pseudorandom [CryptoInt]s as challenges based on the current transcript state.
+    /// Generates pseudorandom [CryptoInt]s as challenges based on the current
+    /// transcript state.
     pub fn get_integer_challenges<const LIMBS: usize>(&mut self, n: usize) -> Vec<Int<LIMBS>> {
         (0..n).map(|_| self.get_integer_challenge()).collect()
     }
 
-    /// Generates a pseudorandom `usize` within the given range bounds based on the current transcript state.
+    /// Generates a pseudorandom `usize` within the given range bounds based on
+    /// the current transcript state.
     fn get_usize_in_range(&mut self, range: &ark_std::ops::Range<usize>) -> usize {
         let challenge = self.hasher.clone().finalize();
 
@@ -126,7 +130,9 @@ impl Transcript for KeccakTranscript {
     }
 
     fn get_u64(&mut self) -> u64 {
-        self.get_integer_challenge::<{ 1 * WORD_FACTOR }>().inner().as_words()[0]
+        self.get_integer_challenge::<{ 1 * WORD_FACTOR }>()
+            .inner()
+            .as_words()[0]
     }
 
     fn sample_unique_columns(
