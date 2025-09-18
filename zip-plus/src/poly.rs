@@ -1,4 +1,5 @@
 pub mod mle;
+pub mod dense;
 
 use displaydoc::Display;
 use thiserror::Error;
