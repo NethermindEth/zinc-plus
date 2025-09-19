@@ -5,8 +5,8 @@ use crate::{
     code::LinearCode,
     pcs::{
         structs::{
-            CodewordRing, EvaluationRing, LinearCombinationRing, MultilinearZip,
-            MultilinearZipData, MultilinearZipParams,
+            ChallengeRing, CodewordRing, EvaluationRing, LinearCombinationRing, MulByScalar,
+            MultilinearZip, MultilinearZipData, MultilinearZipParams,
         },
         utils::{ColumnOpening, left_point_to_tensor, validate_input},
     },
@@ -21,9 +21,10 @@ use itertools::{Itertools, izip};
 impl<
     Eval: EvaluationRing,
     Cw: CodewordRing,
-    Comb: LinearCombinationRing<Eval, Cw>,
+    Chal: ChallengeRing,
+    Comb: LinearCombinationRing<Eval, Cw, Chal> + for<'z> MulByScalar<&'z Chal>,
     C: LinearCode<Eval, Cw, Comb>,
-> MultilinearZip<Eval, Cw, Comb, C>
+> MultilinearZip<Eval, Cw, Chal, Comb, C>
 {
     pub fn open<F>(
         pp: &MultilinearZipParams<Eval, Cw, Comb, C>,
@@ -33,7 +34,7 @@ impl<
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'a> From<&'a Eval>,
+        F: PrimeField + for<'a> From<&'a Eval> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         validate_input("open", pp.num_vars, [poly], [point])?;
@@ -54,7 +55,7 @@ impl<
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'a> From<&'a Eval>,
+        F: PrimeField + for<'a> From<&'a Eval> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         for (poly, comm, point) in izip!(polys.iter(), comms.iter(), points.iter()) {
@@ -72,7 +73,7 @@ impl<
         poly: &DenseMultilinearExtension<Eval>,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'a> From<&'a Eval>,
+        F: PrimeField + for<'a> From<&'a Eval> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         let num_rows = pp.num_rows;
@@ -107,13 +108,13 @@ impl<
             // If we can take linear combinations
             // perform the proximity test an arbitrary number of times
             for _ in 0..pp.linear_code.num_proximity_testing() {
-                let coeffs = transcript.fs_transcript.get_challenges::<Eval>(pp.num_rows);
-                let coeffs = coeffs.iter().map(Comb::from);
+                let coeffs = transcript.fs_transcript.get_challenges::<Chal>(pp.num_rows);
 
                 let evals = poly.evaluations.iter().map(Comb::from);
 
                 // u' in the Zinc paper
-                let combined_row = combine_rows(coeffs, evals, pp.linear_code.row_len());
+                let combined_row =
+                    combine_rows(coeffs.into_iter(), evals, pp.linear_code.row_len());
 
                 transcript.write_many(combined_row.iter())?;
             }
@@ -157,8 +158,8 @@ impl<
 )]
 mod tests {
     use crypto_bigint::{Random, U256, const_monty_params};
-    use itertools::Itertools;
     use crypto_primitives::crypto_bigint_int::Int;
+    use itertools::Itertools;
     use num_traits::{ConstOne, ConstZero, One};
     use rand::rng;
     use rand_core::RngCore;
@@ -172,10 +173,9 @@ mod tests {
             tests::MockTranscript,
         },
         pcs_transcript::PcsTranscript,
-        poly::mle::DenseMultilinearExtension,
+        poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
         utils::WORD_FACTOR,
     };
-    use crate::poly::dense::DensePolynomial;
 
     const INT_LIMBS: usize = WORD_FACTOR;
     const FIELD_LIMBS: usize = 4 * WORD_FACTOR;
@@ -193,12 +193,13 @@ mod tests {
         U256,
         "0000000000000000000000000000000000000000B933426489189CB5B47D567F"
     );
-
     type F = ConstMontyField<ModP, FIELD_LIMBS>;
-    type TestZip = MultilinearZip<Int<N>, Int<K>, Int<M>, C>;
+
+    type TestZip = MultilinearZip<Int<N>, Int<K>, Int<N>, Int<M>, C>;
     type TestPolyZip = MultilinearZip<
         DensePolynomial<Int<N>, 2>,
         DensePolynomial<Int<K>, 2>,
+        Int<N>,
         DensePolynomial<Int<M>, 2>,
         PolyC,
     >;
@@ -226,7 +227,12 @@ mod tests {
     fn setup_poly_test_params(
         num_vars: usize,
     ) -> (
-        MultilinearZipParams<DensePolynomial<Int<N>, 2>, DensePolynomial<Int<K>, 2>, DensePolynomial<Int<M>, 2>, PolyC>,
+        MultilinearZipParams<
+            DensePolynomial<Int<N>, 2>,
+            DensePolynomial<Int<K>, 2>,
+            DensePolynomial<Int<M>, 2>,
+            PolyC,
+        >,
         DenseMultilinearExtension<DensePolynomial<Int<INT_LIMBS>, 2>>,
     ) {
         let poly_size = 1 << num_vars;
@@ -237,7 +243,10 @@ mod tests {
         let pp = MultilinearZipParams::new(num_vars, num_rows, code);
 
         let eval_coeffs: Vec<_> = (1..=(poly_size * 2) as i32).map(Int::from).collect_vec();
-        let evaluations = eval_coeffs.chunks_exact(2).map(|coeffs| DensePolynomial::new(coeffs)).collect_vec();
+        let evaluations = eval_coeffs
+            .chunks_exact(2)
+            .map(|coeffs| DensePolynomial::new(coeffs))
+            .collect_vec();
         let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations);
 
         (pp, poly)

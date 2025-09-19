@@ -5,7 +5,7 @@ use crypto_bigint::{
 use crypto_primitives::crypto_bigint_int::Int;
 use num_traits::{ConstOne, ConstZero};
 
-use crate::field::ConstMontyField;
+use crate::{field::ConstMontyField, poly::dense::DensePolynomial};
 
 // Macro to implement From for unsigned integer primitives
 macro_rules! impl_from_unsigned {
@@ -98,6 +98,14 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize> From
         } else {
             result
         }
+    }
+}
+
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize, const DEGREE: usize>
+    From<DensePolynomial<Int<LIMBS2>, DEGREE>> for ConstMontyField<Mod, LIMBS>
+{
+    fn from(_value: DensePolynomial<Int<LIMBS2>, DEGREE>) -> Self {
+        todo!("How to map a polynomial to a field element?")
     }
 }
 

@@ -4,7 +4,7 @@ use crate::{
     pcs::{
         MerkleTree,
         structs::{
-            CodewordRing, EvaluationRing, LinearCombinationRing, MultilinearZip,
+            ChallengeRing, CodewordRing, EvaluationRing, LinearCombinationRing, MultilinearZip,
             MultilinearZipCommitment, MultilinearZipData, MultilinearZipParams,
         },
         utils::validate_input,
@@ -17,9 +17,10 @@ use uninit::out_ref::Out;
 impl<
     Eval: EvaluationRing,
     Cw: CodewordRing,
-    Comb: LinearCombinationRing<Eval, Cw>,
+    Chal: ChallengeRing,
+    Comb: LinearCombinationRing<Eval, Cw, Chal>,
     C: LinearCode<Eval, Cw, Comb>,
-> MultilinearZip<Eval, Cw, Comb, C>
+> MultilinearZip<Eval, Cw, Chal, Comb, C>
 {
     /// Creates a commitment to a multilinear polynomial using the ZIP PCS
     /// scheme.
@@ -240,10 +241,11 @@ mod tests {
     type C = RaaCode<Int<N>, Int<K>, Int<M>>;
     type PolyC =
         RaaCode<DensePolynomial<Int<N>, 2>, DensePolynomial<Int<K>, 2>, DensePolynomial<Int<M>, 2>>;
-    type TestZip = MultilinearZip<Int<N>, Int<K>, Int<M>, C>;
+    type TestZip = MultilinearZip<Int<N>, Int<K>, Int<N>, Int<M>, C>;
     type TestPolyZip = MultilinearZip<
         DensePolynomial<Int<N>, 2>,
         DensePolynomial<Int<K>, 2>,
+        Int<N>,
         DensePolynomial<Int<M>, 2>,
         PolyC,
     >;

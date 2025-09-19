@@ -3,8 +3,8 @@ use crate::{
     code::LinearCode,
     pcs::{
         structs::{
-            CodewordRing, EvaluationRing, LinearCombinationRing, MultilinearZip,
-            MultilinearZipCommitment, MultilinearZipParams,
+            ChallengeRing, CodewordRing, EvaluationRing, LinearCombinationRing, MulByScalar,
+            MultilinearZip, MultilinearZipCommitment, MultilinearZipParams,
         },
         utils::{ColumnOpening, MtHash, point_to_tensor, validate_input},
     },
@@ -20,9 +20,10 @@ use itertools::Itertools;
 impl<
     Eval: EvaluationRing,
     Cw: CodewordRing,
-    Comb: LinearCombinationRing<Eval, Cw>,
+    Chal: ChallengeRing,
+    Comb: LinearCombinationRing<Eval, Cw, Chal>,
     C: LinearCode<Eval, Cw, Comb>,
-> MultilinearZip<Eval, Cw, Comb, C>
+> MultilinearZip<Eval, Cw, Chal, Comb, C>
 {
     pub fn verify<F>(
         vp: &MultilinearZipParams<Eval, Cw, Comb, C>,
@@ -32,7 +33,10 @@ impl<
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'a> From<&'a C::Inner> + for<'a> From<&'a Cw>,
+        F: PrimeField
+            + for<'a> From<&'a C::Inner>
+            + for<'a> From<&'a Cw>
+            + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         let no_polys = Vec::<DenseMultilinearExtension<bool>>::new();
@@ -53,7 +57,10 @@ impl<
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'b> From<&'b C::Inner> + for<'b> From<&'b Cw>,
+        F: PrimeField
+            + for<'b> From<&'b C::Inner>
+            + for<'b> From<&'b Cw>
+            + for<'b> MulByScalar<&'b F>,
         F::Inner: Transcribable,
     {
         for (i, (eval, comm)) in evals.iter().zip(comms.iter()).enumerate() {
@@ -69,7 +76,7 @@ impl<
         transcript: &mut PcsTranscript,
     ) -> Result<Vec<(usize, Vec<Cw>)>, ZipError> {
         // Gather the coeffs and encoded combined rows per proximity test
-        let mut encoded_combined_rows: Vec<(Vec<Eval>, Vec<Comb>)> =
+        let mut encoded_combined_rows: Vec<(Vec<Chal>, Vec<Comb>)> =
             Vec::with_capacity(vp.linear_code.num_proximity_testing());
 
         if vp.num_rows > 1 {
@@ -111,14 +118,13 @@ impl<
     }
 
     pub(super) fn verify_column_testing(
-        coeffs: &[Eval],
+        coeffs: &[Chal],
         encoded_combined_row: &[Comb],
         column_entries: &[Cw],
         column: usize,
         num_rows: usize,
     ) -> Result<(), ZipError> {
         let column_entries_comb: Comb = if num_rows > 1 {
-            let coeffs: Vec<Comb> = coeffs.iter().map(Comb::from).collect();
             let column_entries: Vec<Comb> = column_entries.iter().map(Comb::from).collect();
             inner_product(coeffs.iter(), column_entries.iter())
         } else {
@@ -139,7 +145,10 @@ impl<
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'a> From<&'a C::Inner> + for<'a> From<&'a Cw>,
+        F: PrimeField
+            + for<'a> From<&'a C::Inner>
+            + for<'a> From<&'a Cw>
+            + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         let q_0_combined_row = transcript.read_field_elements(vp.linear_code.row_len())?;
@@ -173,7 +182,7 @@ impl<
         num_rows: usize,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'b> From<&'b Cw>,
+        F: PrimeField + for<'b> From<&'b Cw> + for<'a> MulByScalar<&'a F>,
     {
         let column_entries_comb = if num_rows > 1 {
             let column_entries = column_entries.iter().map(F::from).collect_vec();
@@ -212,7 +221,10 @@ mod tests {
             tests::MockTranscript,
         },
         pcs_transcript::PcsTranscript,
-        poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand},
+        poly::{
+            dense::DensePolynomial,
+            mle::{DenseMultilinearExtension, MultilinearExtensionRand},
+        },
         transcript::KeccakTranscript,
         utils::WORD_FACTOR,
     };
@@ -232,7 +244,16 @@ mod tests {
 
     type F = F256<ModP>;
     type C = RaaCode<Int<N>, Int<K>, Int<M>>;
-    type TestZip = MultilinearZip<Int<N>, Int<K>, Int<M>, C>;
+    type PolyC =
+        RaaCode<DensePolynomial<Int<N>, 2>, DensePolynomial<Int<K>, 2>, DensePolynomial<Int<M>, 2>>;
+    type TestZip = MultilinearZip<Int<N>, Int<K>, Int<N>, Int<M>, C>;
+    type TestPolyZip = MultilinearZip<
+        DensePolynomial<Int<N>, 2>,
+        DensePolynomial<Int<K>, 2>,
+        Int<N>,
+        DensePolynomial<Int<M>, 2>,
+        PolyC,
+    >;
 
     #[allow(clippy::type_complexity)]
     fn setup_full_protocol(

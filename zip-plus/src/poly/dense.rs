@@ -1,19 +1,25 @@
 use crate::{
-    pcs::structs::{AsPackable, PackedInt},
+    pcs::structs::{AsPackable, MulByScalar, PackedInt},
     traits::Transcribable,
     utils::ReinterpretVector,
 };
 use crypto_primitives::{Ring, crypto_bigint_int::Int};
 use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, One, Zero};
 use p3_field::Packable;
-use std::{array, fmt::Display, iter, iter::{Product, Sum}, ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign}};
+use std::{
+    array,
+    fmt::Display,
+    iter,
+    iter::{Product, Sum},
+    ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
+};
 
 pub trait Polynomial<R: Ring> {
     /// Returns the degree of the polynomial - a number of coefficients.
     fn degree(&self) -> usize;
 
     /// Coefficients of the polynomial, lowest degree first.
-    fn coeffs<'a>(&'a self) -> impl Iterator<Item=&'a R>
+    fn coeffs<'a>(&'a self) -> impl Iterator<Item = &'a R>
     where
         R: 'a;
 }
@@ -64,7 +70,7 @@ impl<R: Ring, const DEGREE: usize> Polynomial<R> for DensePolynomial<R, DEGREE> 
         DEGREE
     }
 
-    fn coeffs<'a>(&'a self) -> impl Iterator<Item=&'a R>
+    fn coeffs<'a>(&'a self) -> impl Iterator<Item = &'a R>
     where
         R: 'a,
     {
@@ -365,6 +371,24 @@ impl<'a, const LIMBS: usize, const LIMBS2: usize, const DEGREE: usize>
                 *coeff = other_coeff.resize();
             });
         DensePolynomial { coeff_0, coeffs }
+    }
+}
+
+impl<'a, const LIMBS: usize, const LIMBS2: usize, const DEGREE: usize> MulByScalar<&'a Int<LIMBS2>>
+    for DensePolynomial<Int<LIMBS>, DEGREE>
+{
+    fn mul_by_scalar(&self, rhs: &'a Int<LIMBS2>) -> Option<Self> {
+        if LIMBS < LIMBS2 {
+            return None;
+        }
+        let coeff_0 = self.coeff_0.mul_by_scalar(rhs)?;
+        let coeffs: Option<Vec<Int<LIMBS>>> =
+            self.coeffs.iter().map(|c| c.mul_by_scalar(rhs)).collect();
+
+        Some(Self {
+            coeff_0,
+            coeffs: coeffs?.try_into().ok()?,
+        })
     }
 }
 

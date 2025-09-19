@@ -1,5 +1,3 @@
-use std::marker::PhantomData;
-
 use crate::{
     code::LinearCode,
     pcs::{MerkleTree, utils::MtHash},
@@ -7,28 +5,26 @@ use crate::{
     utils::ReinterpretVector,
 };
 use crypto_primitives::{Ring, crypto_bigint_int::Int};
+use num_traits::CheckedMul;
 use p3_field::Packable;
+use std::marker::PhantomData;
 
 /// Zip is a Polynomial Commitment Scheme (PCS) that supports committing to
 /// multilinear polynomials.
-///
-/// Params:
-/// - `Eval`: Ring for elements in witness/polynomial evaluations on hypercube.
-/// - `Cw`: Ring for codeword elements.
-/// - `Comb`: Ring for elements in the linear combination of codewords.
-/// - `C`: The linear code used for encoding the polynomial.
-pub struct MultilinearZip<Eval, Cw, Comb, C>(PhantomData<(Eval, Cw, Comb, C)>)
+pub struct MultilinearZip<Eval, Cw, Chal, Comb, C>(PhantomData<(Eval, Cw, Chal, Comb, C)>)
 where
-    Eval: Ring,
-    Cw: Ring,
-    Comb: Ring,
+    Eval: EvaluationRing,
+    Cw: CodewordRing,
+    Chal: ChallengeRing,
+    Comb: LinearCombinationRing<Eval, Cw, Chal>,
     C: LinearCode<Eval, Cw, Comb>;
 
-impl<Eval, Cw, Comb, C> MultilinearZip<Eval, Cw, Comb, C>
+impl<Eval, Cw, Chal, Comb, C> MultilinearZip<Eval, Cw, Chal, Comb, C>
 where
-    Eval: Ring,
-    Cw: Ring,
-    Comb: Ring,
+    Eval: EvaluationRing,
+    Cw: CodewordRing,
+    Chal: ChallengeRing,
+    Comb: LinearCombinationRing<Eval, Cw, Chal>,
     C: LinearCode<Eval, Cw, Comb>,
 {
     #[allow(clippy::arithmetic_side_effects)]
@@ -132,16 +128,58 @@ impl<const LIMBS: usize> Transcribable for PackedInt<LIMBS> {
 // Trait aliases for various Rings used in the Zip PCS
 //
 
-pub trait EvaluationRing: Ring + Transcribable {}
-pub trait CodewordRing: Ring + Transcribable + AsPackable + Copy {}
-pub trait LinearCombinationRing<E, C>:
-    Ring + Transcribable + for<'a> From<&'a E> + for<'a> From<&'a C>
-{
+pub trait MulByScalar<Rhs>: Sized {
+    /// Multiplies the current element by a scalar from the right (usually - a
+    /// coefficient to obtain a linear combination).
+    fn mul_by_scalar(&self, rhs: Rhs) -> Option<Self>;
 }
 
-impl<Eval> EvaluationRing for Eval where Eval: Ring + Transcribable {}
+macro_rules! impl_simple_mul_by_scalar {
+    ($($t:ty),*) => {
+        $(
+            impl MulByScalar<&$t> for $t {
+                fn mul_by_scalar(&self, rhs: &$t) -> Option<Self> {
+                    self.checked_mul(rhs)
+                }
+            }
+        )*
+    };
+}
+
+impl_simple_mul_by_scalar!(i8, i16, i32, i64, i128);
+
+impl<const LIMBS: usize, const LIMBS2: usize> MulByScalar<&Int<LIMBS2>> for Int<LIMBS> {
+    fn mul_by_scalar(&self, rhs: &Int<LIMBS2>) -> Option<Self> {
+        if LIMBS < LIMBS2 {
+            return None; // Cannot multiply if the left operand has fewer limbs than the right
+        }
+        self.checked_mul(&rhs.resize())
+    }
+}
+
+/// Ring of witness/polynomial evaluations on boolean hypercube
+pub trait EvaluationRing: Ring {}
+impl<Eval> EvaluationRing for Eval where Eval: Ring {}
+
+/// Ring of codeword elements
+pub trait CodewordRing: Ring + Transcribable + AsPackable + Copy {}
 impl<Cw> CodewordRing for Cw where Cw: Ring + Transcribable + AsPackable + Copy {}
-impl<Eval, Cw, Comb> LinearCombinationRing<Eval, Cw> for Comb where
-    Comb: Ring + Transcribable + for<'a> From<&'a Eval> + for<'a> From<&'a Cw>
+
+/// Ring of challenge elements (coefficients) to perform a random linear
+/// combination of codewords
+pub trait ChallengeRing: Ring + Transcribable {}
+impl<Chal> ChallengeRing for Chal where Chal: Ring + Transcribable {}
+
+/// Ring of elements in the linear combination of codewords
+pub trait LinearCombinationRing<Eval, Cw, Chal>:
+    Ring + Transcribable + for<'a> From<&'a Eval> + for<'a> From<&'a Cw> + for<'a> MulByScalar<&'a Chal>
+{
+}
+impl<Eval, Cw, Chal, Comb> LinearCombinationRing<Eval, Cw, Chal> for Comb where
+    Comb: Ring
+        + Transcribable
+        + for<'a> From<&'a Eval>
+        + for<'a> From<&'a Cw>
+        + for<'a> MulByScalar<&'a Chal>
 {
 }

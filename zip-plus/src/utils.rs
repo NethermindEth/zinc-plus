@@ -1,8 +1,8 @@
-use crate::traits::Transcribable;
+use crate::{pcs::structs::MulByScalar, traits::Transcribable};
 use crypto_bigint::{Uint, Word};
 use crypto_primitives::crypto_bigint_int::Int;
 use itertools::Itertools;
-use num_traits::{CheckedAdd, CheckedMul};
+use num_traits::CheckedAdd;
 use rand::{rngs::StdRng, seq::SliceRandom};
 use rand_core::SeedableRng;
 
@@ -61,15 +61,19 @@ macro_rules! rem {
     };
 }
 
-pub(crate) fn inner_product<'a, 'b, T, L, R>(lhs: L, rhs: R) -> T
+pub(crate) fn inner_product<'a, 'b, Coeff, El, L, R>(lhs: L, rhs: R) -> El
 where
-    T: Clone + CheckedMul + CheckedAdd + Default + 'a + 'b,
-    L: IntoIterator<Item = &'a T>,
-    R: IntoIterator<Item = &'b T>,
+    Coeff: Clone + Default + 'a + 'b,
+    El: Clone + CheckedAdd + for<'z> MulByScalar<&'z Coeff> + Default + 'a + 'b,
+    L: IntoIterator<Item = &'a Coeff>,
+    R: IntoIterator<Item = &'b El>,
 {
     lhs.into_iter()
         .zip(rhs)
-        .map(|(lhs, rhs)| mul!(lhs, rhs))
+        .map(|(lhs, rhs)| {
+            rhs.mul_by_scalar(lhs)
+                .expect("Cannot multiply a codeword element by a coefficient")
+        })
         .reduce(|acc, product| add!(acc, &product))
         .unwrap_or_default()
 }
@@ -142,29 +146,35 @@ where
 /// # Returns
 ///
 /// A vector of length `row_len` representing the combined row.
-pub(super) fn combine_rows<F, C, E>(coeffs: C, evaluations: E, row_len: usize) -> Vec<F>
+pub(super) fn combine_rows<Coeff, El, C, E>(coeffs: C, evaluations: E, row_len: usize) -> Vec<El>
 where
-    F: Clone + Default + Send + Sync + CheckedAdd + CheckedMul,
-    C: IntoIterator<Item = F> + Sync,
-    E: IntoIterator<Item = F> + Sync,
+    Coeff: Send + Sync,
+    El: Clone + Default + CheckedAdd + for<'z> MulByScalar<&'z Coeff> + Send + Sync,
+    C: IntoIterator<Item = Coeff> + Sync,
+    E: IntoIterator<Item = El> + Sync,
     C::IntoIter: Clone + Send + Sync,
     E::IntoIter: Clone + Send + Sync,
 {
     let coeffs_iter = coeffs.into_iter();
     let evaluations_iter = evaluations.into_iter();
 
-    let mut combined_row = vec![F::default(); row_len];
+    let mut combined_row = vec![El::default(); row_len];
     parallelize(&mut combined_row, |(combined_row, offset)| {
         combined_row
             .iter_mut()
             .zip(offset..)
             .for_each(|(combined, column)| {
-                *combined = F::default();
+                *combined = El::default();
                 coeffs_iter
                     .clone()
                     .zip(evaluations_iter.clone().skip(column).step_by(row_len))
                     .for_each(|(coeff, eval)| {
-                        *combined = add!(combined, &mul!(coeff, &eval));
+                        *combined = add!(
+                            combined,
+                            &eval
+                                .mul_by_scalar(&coeff)
+                                .expect("Cannot multiply evaluation by coefficient")
+                        );
                     });
             })
     });
