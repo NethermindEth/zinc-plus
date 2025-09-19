@@ -370,8 +370,6 @@ impl_from_primitive!(i8, i16, i32, i64, i128);
 
 impl<const LIMBS: usize> Ring for Int<LIMBS> {}
 
-impl<const LIMBS: usize> ConstRing for Int<LIMBS> {}
-
 impl<const LIMBS: usize> IntRing for Int<LIMBS> {}
 
 //
