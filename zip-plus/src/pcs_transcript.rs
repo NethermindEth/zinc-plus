@@ -7,7 +7,7 @@ use crate::{
     ZipError,
     pcs::utils::{HASH_OUT_LEN, MerkleProof, MtHash},
     rem,
-    traits::{ToBytes, Transcribable},
+    traits::Transcribable,
     transcript::KeccakTranscript,
 };
 
@@ -50,7 +50,7 @@ impl PcsTranscript {
     pub fn common_field_element<F>(&mut self, fe: &F)
     where
         F: PrimeField,
-        F::Inner: ToBytes,
+        F::Inner: Transcribable,
     {
         self.fs_transcript.absorb_random_field(fe);
     }
@@ -81,8 +81,9 @@ impl PcsTranscript {
         F: PrimeField,
         F::Inner: Transcribable,
     {
+        let mut buf = vec![0; F::Inner::NUM_BYTES];
         for elem in elems {
-            self.write_field_element(elem)?;
+            self.write_field_element(elem, &mut buf)?;
         }
 
         Ok(())
@@ -115,19 +116,19 @@ impl PcsTranscript {
     /// Writes a field element to the proof stream and absorbs it into the
     /// transcript. Used during proof generation to store field elements for
     /// later verification.
-    pub fn write_field_element<F>(&mut self, fe: &F) -> Result<(), ZipError>
+    pub fn write_field_element<F>(&mut self, fe: &F, buf: &mut [u8]) -> Result<(), ZipError>
     where
         F: PrimeField,
         F::Inner: Transcribable,
     {
         self.common_field_element(fe);
-        self.write(fe.inner())
+        self.write(fe.inner(), buf)
     }
 
-    pub fn write<T: Transcribable>(&mut self, v: &T) -> Result<(), ZipError> {
-        let bytes = v.to_be_bytes();
+    pub fn write<T: Transcribable>(&mut self, v: &T, buf: &mut [u8]) -> Result<(), ZipError> {
+        v.to_transcription_bytes(buf);
         self.stream
-            .write_all(&bytes)
+            .write_all(buf)
             .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))?;
         Ok(())
     }
@@ -136,8 +137,9 @@ impl PcsTranscript {
     where
         I: Iterator<Item = &'a T>,
     {
+        let mut buf = vec![0; T::NUM_BYTES];
         for v in vs {
-            self.write(v)?;
+            self.write(v, &mut buf)?;
         }
 
         Ok(())
@@ -148,7 +150,7 @@ impl PcsTranscript {
         self.stream
             .read_exact(&mut buf)
             .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))?;
-        Ok(T::from_be_bytes(&buf))
+        Ok(T::from_transcription_bytes(&buf))
     }
 
     pub fn read_many<T: Transcribable>(&mut self, n: usize) -> Result<Vec<T>, ZipError> {
@@ -161,7 +163,7 @@ impl PcsTranscript {
 
     fn write_u64(&mut self, value: u64) -> Result<(), ZipError> {
         self.stream
-            .write_all(&value.to_be_bytes())
+            .write_all(&value.to_le_bytes())
             .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))
     }
 
@@ -170,7 +172,7 @@ impl PcsTranscript {
         self.stream
             .read_exact(&mut buf)
             .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))?;
-        Ok(u64::from_be_bytes(buf))
+        Ok(u64::from_le_bytes(buf))
     }
 
     fn write_usize(&mut self, value: usize) -> Result<(), ZipError> {
@@ -208,8 +210,8 @@ impl PcsTranscript {
     #[allow(clippy::unwrap_used)]
     pub fn squeeze_challenge_idx(&mut self, cap: usize) -> usize {
         let challenge: Int<1> = self.fs_transcript.get_challenge();
-        let bytes = challenge.inner().as_words()[0].to_be_bytes();
-        let num = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+        let bytes = challenge.inner().as_words()[0].to_le_bytes();
+        let num = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
         rem!(num, cap, "Challenge cap is zero")
     }
 

@@ -5,13 +5,7 @@ use crypto_bigint::{
 use crypto_primitives::crypto_bigint_int::Int;
 use num_traits::{ConstOne, ConstZero};
 
-use crate::{field::ConstMontyField, traits::ConstNumBytes};
-
-impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> ConstNumBytes
-    for ConstMontyField<Mod, LIMBS>
-{
-    const NUM_BYTES: usize = ConstMontyForm::<Mod, LIMBS>::NUM_BYTES;
-}
+use crate::field::ConstMontyField;
 
 // Macro to implement From for unsigned integer primitives
 macro_rules! impl_from_unsigned {

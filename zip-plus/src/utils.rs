@@ -1,4 +1,4 @@
-use crate::traits::{ConstNumBytes, FromBytes, ToBytes};
+use crate::traits::Transcribable;
 use crypto_bigint::{Uint, Word};
 use crypto_primitives::crypto_bigint_int::Int;
 use itertools::Itertools;
@@ -374,125 +374,49 @@ pub unsafe trait ReinterpretVector<Target: Sized>: Sized {
     }
 }
 
-impl<const LIMBS: usize> ConstNumBytes for Uint<LIMBS> {
+impl<const LIMBS: usize> Transcribable for Uint<LIMBS> {
     const NUM_BYTES: usize = 8 * LIMBS / WORD_FACTOR;
-}
 
-impl<const LIMBS: usize> FromBytes for Uint<LIMBS> {
-    fn from_be_bytes(bytes: &[u8]) -> Self {
-        // crypto_bigint::Uint stores limbs in least-to-most significant order.
-        // However, we're encoding each limb in big-endian order.
-        let (chunked, rem) = bytes.as_chunks::<8>();
-        assert!(
-            rem.is_empty(),
-            "Invalid byte slice length for ConstMontyForm"
-        );
-        let words = chunked
-            .iter()
-            .flat_map(|chunk| {
-                let (chunked, rem) = chunk.as_chunks::<{ 8 / WORD_FACTOR }>();
-                assert!(
-                    rem.is_empty(),
-                    "Invalid byte slice length for ConstMontyForm"
-                );
-                chunked
-                    .iter()
-                    .rev()
-                    .map(|chunk| Word::from_be_bytes(*chunk))
-            })
-            .collect_array::<LIMBS>()
-            .expect("Invalid length for ConstMontyForm");
-        Uint::<LIMBS>::from_words(words)
-    }
-
-    fn from_le_bytes(bytes: &[u8]) -> Self {
+    fn from_transcription_bytes(bytes: &[u8]) -> Self {
         // crypto_bigint::Uint stores limbs in least-to-most significant order.
         // It matches little-endian order ef limbs encoding, so platform pointer width
         // does not matter.
         let (chunked, rem) = bytes.as_chunks::<{ 8 / WORD_FACTOR }>();
-        assert!(
-            rem.is_empty(),
-            "Invalid byte slice length for ConstMontyForm"
-        );
+        assert!(rem.is_empty(), "Invalid byte slice length for Uint");
         let words = chunked
             .iter()
             .map(|chunk| Word::from_le_bytes(*chunk))
             .collect_array::<LIMBS>()
-            .expect("Invalid length for ConstMontyForm");
+            .expect("Invalid length for Uint");
         Uint::<LIMBS>::from_words(words)
     }
-}
 
-impl<const LIMBS: usize> ToBytes for Uint<LIMBS> {
-    fn to_be_bytes(&self) -> Vec<u8> {
-        // crypto_bigint::Uint stores limbs in least-to-most significant order.
-        // However, we're encoding each limb in big-endian order.
-        // TODO: Test if this really works cross-platform
-        let be = self.as_words().map(|w| w.to_be_bytes());
-        be.chunks(WORD_FACTOR)
-            .flat_map(|chunk| {
-                // Reverse the order of bytes in each limb, also saturating the output with
-                // zeroes if necessary
-                ZeroBytesIterator
-                    .take(sub!(chunk.len(), WORD_FACTOR))
-                    .chain(chunk.iter().rev().cloned())
-                    .flatten()
-            })
-            .collect_vec()
-    }
-
-    fn to_le_bytes(&self) -> Vec<u8> {
+    #[allow(clippy::arithmetic_side_effects)]
+    fn to_transcription_bytes(&self, buf: &mut [u8]) {
         // crypto_bigint::Uint stores limbs in least-to-most significant order.
         // It matches little-endian order ef limbs encoding, so platform pointer width
         // does not matter.
-        self.as_words()
-            .iter()
-            .flat_map(|w| w.to_le_bytes())
-            .collect_vec()
+        assert_eq!(buf.len(), Self::NUM_BYTES, "Buffer size mismatch for Uint");
+        const W_SIZE: usize = size_of::<Word>();
+        for (i, w) in self.as_words().iter().enumerate() {
+            // Performance: reuse buffer and help compiler optimize away materializing
+            // vector
+            buf[(i * W_SIZE)..(i * W_SIZE + W_SIZE)].copy_from_slice(w.to_le_bytes().as_ref());
+        }
     }
 }
 
-impl<const LIMBS: usize> ConstNumBytes for Int<LIMBS> {
+impl<const LIMBS: usize> Transcribable for Int<LIMBS> {
     const NUM_BYTES: usize = Uint::<LIMBS>::NUM_BYTES;
-}
 
-impl<const LIMBS: usize> FromBytes for Int<LIMBS> {
-    fn from_be_bytes(bytes: &[u8]) -> Self {
-        Uint::<LIMBS>::from_be_bytes(bytes).as_int().into()
+    fn from_transcription_bytes(bytes: &[u8]) -> Self {
+        Uint::<LIMBS>::from_transcription_bytes(bytes)
+            .as_int()
+            .into()
     }
 
-    fn from_le_bytes(bytes: &[u8]) -> Self {
-        Uint::<LIMBS>::from_le_bytes(bytes).as_int().into()
-    }
-}
-
-impl<const LIMBS: usize> ToBytes for Int<LIMBS> {
-    fn to_be_bytes(&self) -> Vec<u8> {
-        self.inner().as_uint().to_be_bytes()
-    }
-
-    fn to_le_bytes(&self) -> Vec<u8> {
-        self.inner().as_uint().to_le_bytes()
-    }
-}
-
-/// An iterator that yields zero bytes, used for padding in `to_be_bytes` and
-/// `to_le_bytes`. Each element is zero bytes chunk equivalent to encoding a
-/// zero limb in the `ConstMontyForm` representation.
-#[derive(Debug, Clone, Copy)]
-struct ZeroBytesIterator;
-
-impl Iterator for ZeroBytesIterator {
-    type Item = [u8; 8 / WORD_FACTOR];
-
-    fn next(&mut self) -> Option<Self::Item> {
-        Some([0; { 8 / WORD_FACTOR }])
-    }
-}
-
-impl DoubleEndedIterator for ZeroBytesIterator {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        self.next()
+    fn to_transcription_bytes(&self, buf: &mut [u8]) {
+        self.inner().as_uint().to_transcription_bytes(buf)
     }
 }
 

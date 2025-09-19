@@ -1,7 +1,6 @@
 use crate::{
     add, rem, sub,
-    traits::{ToBytes, Transcribable, Transcript},
-    utils::WORD_FACTOR,
+    traits::{Transcribable, Transcript},
 };
 use ark_std::vec::Vec;
 use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
@@ -44,7 +43,7 @@ impl KeccakTranscript {
         let mut counter = 0;
         while result.len() < length {
             let mut temp_hasher = self.hasher.clone();
-            temp_hasher.update(i32::to_be_bytes(counter));
+            temp_hasher.update(i32::to_le_bytes(counter));
             let hash = temp_hasher.finalize();
             result.extend_from_slice(&hash);
 
@@ -61,14 +60,17 @@ impl KeccakTranscript {
     pub fn absorb_random_field<F>(&mut self, v: &F)
     where
         F: PrimeField,
-        F::Inner: ToBytes,
+        F::Inner: Transcribable,
     {
+        let mut buf = vec![0; F::Inner::NUM_BYTES];
         self.absorb(&[0x3]);
-        self.absorb(&F::MODULUS.to_be_bytes());
+        F::MODULUS.to_transcription_bytes(&mut buf);
+        self.absorb(&buf);
         self.absorb(&[0x5]);
 
         self.absorb(&[0x1]);
-        self.absorb(&v.inner().to_be_bytes());
+        v.inner().to_transcription_bytes(&mut buf);
+        self.absorb(&buf);
         self.absorb(&[0x3])
     }
 
@@ -77,7 +79,7 @@ impl KeccakTranscript {
     pub fn absorb_slice<F>(&mut self, slice: &[F])
     where
         F: PrimeField,
-        F::Inner: ToBytes,
+        F::Inner: Transcribable,
     {
         for field_element in slice.iter() {
             self.absorb_random_field(field_element);
@@ -91,7 +93,7 @@ impl KeccakTranscript {
         self.hasher.update([0x12]);
         self.hasher.update(&challenge);
         self.hasher.update([0x34]);
-        T::from_be_bytes(&challenge)
+        T::from_transcription_bytes(&challenge)
     }
 
     /// Generates pseudorandom [CryptoInt]s as challenges based on the current
@@ -110,7 +112,7 @@ impl KeccakTranscript {
         self.hasher.update(challenge);
         self.hasher.update([0x11]);
 
-        let num = usize::from_be_bytes(challenge[..size_of::<usize>()].try_into().unwrap());
+        let num = usize::from_le_bytes(challenge[..size_of::<usize>()].try_into().unwrap());
         add!(range.start, rem!(num, sub!(range.end, range.start)))
     }
 }
@@ -126,14 +128,8 @@ impl Transcript for KeccakTranscript {
 
     #[allow(clippy::unwrap_used)]
     fn get_u64(&mut self) -> u64 {
-        let bytes = self.get_challenge::<Int<WORD_FACTOR>>().to_be_bytes();
-        assert_eq!(
-            bytes.len(),
-            size_of::<u64>(),
-            "Expected 8 bytes for u64, got {} bytes",
-            bytes.len()
-        );
-        u64::from_be_bytes(bytes.try_into().unwrap())
+        let bytes = self.get_random_bytes(size_of::<u64>());
+        u64::from_le_bytes(bytes.try_into().unwrap())
     }
 
     #[allow(clippy::arithmetic_side_effects)]

@@ -2,13 +2,10 @@ use std::marker::PhantomData;
 
 use crate::{
     code::LinearCode,
-    pcs::{
-        MerkleTree,
-        utils::{AsWords, MtHash},
-    },
+    pcs::{MerkleTree, utils::MtHash},
+    traits::Transcribable,
     utils::ReinterpretVector,
 };
-use crypto_bigint::Word;
 use crypto_primitives::{Ring, crypto_bigint_int::Int};
 use p3_field::Packable;
 
@@ -103,7 +100,7 @@ pub struct MultilinearZipCommitment {
 }
 
 pub trait AsPackable: Clone + ReinterpretVector<Self::Packable> {
-    type Packable: Packable + AsWords + Clone + Send + Sync;
+    type Packable: Packable + Transcribable + Clone + Send + Sync;
 }
 
 impl<const LIMBS: usize> AsPackable for Int<LIMBS> {
@@ -119,8 +116,14 @@ unsafe impl<const N: usize> ReinterpretVector<Int<N>> for PackedInt<N> {}
 
 impl<const LIMBS: usize> Packable for PackedInt<LIMBS> {}
 
-impl<const LIMBS: usize> AsWords for PackedInt<LIMBS> {
-    fn as_words(&self) -> &[Word] {
-        self.0.inner().as_words()
+impl<const LIMBS: usize> Transcribable for PackedInt<LIMBS> {
+    const NUM_BYTES: usize = Int::<LIMBS>::NUM_BYTES;
+
+    fn from_transcription_bytes(bytes: &[u8]) -> Self {
+        Self(Int::from_transcription_bytes(bytes))
+    }
+
+    fn to_transcription_bytes(&self, buf: &mut [u8]) {
+        self.0.to_transcription_bytes(buf)
     }
 }
