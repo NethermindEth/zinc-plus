@@ -269,7 +269,7 @@ mod tests {
         let evaluations = (1..=16).map(Int::from).collect();
         let poly = DenseMultilinearExtension::from_evaluations_vec(4, evaluations);
 
-        let result = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::commit(&pp, &poly);
+        let result = TestZip::commit(&pp, &poly);
         assert!(result.is_err());
     }
 
@@ -277,8 +277,8 @@ mod tests {
     fn commit_is_deterministic() {
         let (pp, poly) = setup_test_params(3);
 
-        let result1 = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::commit(&pp, &poly).unwrap();
-        let result2 = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::commit(&pp, &poly).unwrap();
+        let result1 = TestZip::commit(&pp, &poly).unwrap();
+        let result2 = TestZip::commit(&pp, &poly).unwrap();
 
         assert_eq!(result1.1.root, result2.1.root);
     }
@@ -290,10 +290,8 @@ mod tests {
         let poly1 = DenseMultilinearExtension::from_evaluations_vec(3, vec![Int::from(1); 8]);
         let poly2 = DenseMultilinearExtension::from_evaluations_vec(3, vec![Int::from(2); 8]);
 
-        let (_, commitment1) =
-            MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::commit(&pp, &poly1).unwrap();
-        let (_, commitment2) =
-            MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::commit(&pp, &poly2).unwrap();
+        let (_, commitment1) = TestZip::commit(&pp, &poly1).unwrap();
+        let (_, commitment2) = TestZip::commit(&pp, &poly2).unwrap();
 
         assert_ne!(commitment1.root, commitment2.root);
     }
@@ -307,7 +305,7 @@ mod tests {
         let evaluations = vec![Int::from(42); 16];
         let poly = DenseMultilinearExtension::from_evaluations_vec(4, evaluations);
 
-        let result = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::commit(&pp, &poly);
+        let result = TestZip::commit(&pp, &poly);
         assert!(result.is_ok());
     }
 
@@ -320,7 +318,7 @@ mod tests {
         let evaluations = vec![Int::from(1), Int::from(2), Int::from(3), Int::from(4)];
         let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations);
 
-        let result = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::commit(&pp, &poly);
+        let result = TestZip::commit(&pp, &poly);
         assert!(result.is_ok());
     }
 
@@ -333,7 +331,7 @@ mod tests {
             DenseMultilinearExtension::from_evaluations_vec(3, (9..=16).map(Int::from).collect()),
         ];
 
-        let results = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::batch_commit(&pp, &polys);
+        let results = TestZip::batch_commit(&pp, &polys);
         assert!(results.is_ok());
 
         let outputs = results.unwrap();
@@ -344,7 +342,7 @@ mod tests {
     #[test]
     fn encode_rows_produces_correct_size() {
         let (pp, poly) = setup_test_params(3);
-        let encoded = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::encode_rows(
+        let encoded = TestZip::encode_rows(
             &pp,
             pp.linear_code.codeword_len(),
             pp.linear_code.row_len(),
@@ -359,7 +357,7 @@ mod tests {
     #[test]
     fn encoded_rows_match_linear_code_definition() {
         let (pp, poly) = setup_test_params(3);
-        let encoded = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::encode_rows(
+        let encoded = TestZip::encode_rows(
             &pp,
             pp.linear_code.codeword_len(),
             pp.linear_code.row_len(),
@@ -387,8 +385,7 @@ mod tests {
     #[test]
     fn corrupted_encoding_changes_merkle_root() {
         let (pp, poly) = setup_test_params(3);
-        let (mut data, commitment) =
-            MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::commit(&pp, &poly).unwrap();
+        let (mut data, commitment) = TestZip::commit(&pp, &poly).unwrap();
 
         if !data.rows.is_empty() {
             data.rows[0] = Int::from(999999);
@@ -407,12 +404,11 @@ mod tests {
     fn batch_commit_with_single_polynomial_is_consistent() {
         let (pp, poly) = setup_test_params(3);
 
-        let batch_result =
-            MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::batch_commit(&pp, from_ref(&poly));
+        let batch_result = TestZip::batch_commit(&pp, from_ref(&poly));
         let mut batch_outputs = batch_result.unwrap();
         let (batch_data, batch_commitment) = batch_outputs.remove(0);
 
-        let single_result = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::commit(&pp, &poly);
+        let single_result = TestZip::commit(&pp, &poly);
         let (single_data, single_commitment) = single_result.unwrap();
 
         assert_eq!(batch_commitment.root, single_commitment.root);
@@ -422,7 +418,7 @@ mod tests {
     #[test]
     fn encoded_rows_are_nonzero_for_nonzero_input() {
         let (pp, poly) = setup_test_params(3);
-        let encoded = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::encode_rows(
+        let encoded = TestZip::encode_rows(
             &pp,
             pp.linear_code.codeword_len(),
             pp.linear_code.row_len(),
@@ -437,7 +433,7 @@ mod tests {
     #[test]
     fn commit_produces_correct_merkle_tree_count() {
         let (pp, poly) = setup_test_params(3);
-        let (data, _) = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::commit(&pp, &poly).unwrap();
+        let (data, _) = TestZip::commit(&pp, &poly).unwrap();
 
         assert_eq!(data.rows.len(), pp.num_rows * pp.linear_code.codeword_len());
     }
@@ -459,7 +455,7 @@ mod tests {
                 let code = C::new(&DefaultLinearCodeSpec, poly_size, &mut transcript);
                 let pp = MultilinearZipParams::new(num_vars, 8, code);
 
-                MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::encode_rows(
+                TestZip::encode_rows(
                     &pp,
                     pp.linear_code.codeword_len(),
                     pp.linear_code.row_len(),
@@ -478,7 +474,7 @@ mod tests {
     fn commit_succeeds_for_zero_polynomial() {
         let (pp, _) = setup_test_params(3);
         let zero_poly = DenseMultilinearExtension::from_evaluations_vec(3, vec![Int::from(0); 8]);
-        let result = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::commit(&pp, &zero_poly);
+        let result = TestZip::commit(&pp, &zero_poly);
         assert!(result.is_ok());
     }
 
@@ -489,7 +485,7 @@ mod tests {
             .map(|i| Int::from(if i % 2 == 0 { 1 } else { -1 }))
             .collect();
         let poly = DenseMultilinearExtension::from_evaluations_vec(3, alternating);
-        let result = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::commit(&pp, &poly);
+        let result = TestZip::commit(&pp, &poly);
         assert!(result.is_ok());
     }
 
@@ -497,7 +493,7 @@ mod tests {
     fn batch_commit_on_empty_slice_is_ok() {
         let (pp, _) = setup_test_params(3);
         let empty_polys: Vec<DenseMultilinearExtension<Int<INT_LIMBS>>> = vec![];
-        let results = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::batch_commit(&pp, &empty_polys);
+        let results = TestZip::batch_commit(&pp, &empty_polys);
         assert!(results.is_ok());
         assert!(results.unwrap().is_empty());
     }
@@ -508,8 +504,10 @@ mod tests {
         let code = C::new(&DefaultLinearCodeSpec, 4, &mut transcript);
         let pp = MultilinearZipParams::new(2, 1, code);
 
-        let poly = DenseMultilinearExtension::from_evaluations_vec(2, vec![Int::from(5); 4]);
-        let encoded = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::encode_rows(
+        // Create a polynomial with 2 variables and 4 evaluations
+        let evaluations = vec![Int::from(5); 4];
+        let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations);
+        let encoded = TestZip::encode_rows(
             &pp,
             pp.linear_code.codeword_len(),
             pp.linear_code.row_len(),
@@ -526,7 +524,7 @@ mod tests {
 
             let (pp, poly) = setup_test_params(num_vars);
             assert_eq!(pp.num_rows, expected_rows);
-            let result = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::commit(&pp, &poly);
+            let result = TestZip::commit(&pp, &poly);
             assert!(result.is_ok());
         }
     }
@@ -536,13 +534,13 @@ mod tests {
     fn reject_incompatible_dimensions() {
         let (pp, poly) = setup_test_params(3);
         let incompatible_pp = MultilinearZipParams::new(3, 3, pp.linear_code);
-        let _ = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::commit(&incompatible_pp, &poly);
+        let _ = TestZip::commit(&incompatible_pp, &poly);
     }
 
     #[test]
     fn linear_code_preserves_linearity() {
         let (pp, poly) = setup_test_params(4);
-        let encoded = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::encode_rows(
+        let encoded = TestZip::encode_rows(
             &pp,
             pp.linear_code.codeword_len(),
             pp.linear_code.row_len(),
@@ -572,7 +570,7 @@ mod tests {
         let (pp, mut poly) = setup_test_params(4);
         poly.evaluations.truncate(15);
         assert_eq!(poly.evaluations.len(), 15);
-        let _ = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::commit(&pp, &poly);
+        let _ = TestZip::commit(&pp, &poly);
     }
 
     #[test]
@@ -580,7 +578,7 @@ mod tests {
         let num_vars = 16;
         let (pp, poly) = setup_test_params(num_vars);
         assert_eq!(pp.num_vars, num_vars);
-        let result = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::commit(&pp, &poly);
+        let result = TestZip::commit(&pp, &poly);
         assert!(result.is_ok());
     }
 
@@ -589,7 +587,7 @@ mod tests {
         let (pp, poly) = setup_test_params(2);
         assert_eq!(pp.num_rows, 2);
         assert_eq!(pp.linear_code.row_len(), 2);
-        let result = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::commit(&pp, &poly);
+        let result = TestZip::commit(&pp, &poly);
         assert!(result.is_ok());
     }
 
@@ -598,7 +596,7 @@ mod tests {
         let (pp, _) = setup_test_params(3);
         let max_val = Int::<INT_LIMBS>::from(i64::MAX);
         let poly = DenseMultilinearExtension::from_evaluations_vec(3, vec![max_val; 8]);
-        let encoded_rows = MultilinearZip::<Int<N>, Int<K>, Int<M>, _>::encode_rows(
+        let encoded_rows = TestZip::encode_rows(
             &pp,
             pp.linear_code.codeword_len(),
             pp.linear_code.row_len(),
