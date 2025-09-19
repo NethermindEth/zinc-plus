@@ -226,7 +226,7 @@ mod tests {
             utils::MtHash,
         },
         pcs_transcript::PcsTranscript,
-        poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
+        poly::mle::DenseMultilinearExtension,
         transcript::KeccakTranscript,
         utils::WORD_FACTOR,
     };
@@ -239,16 +239,7 @@ mod tests {
     const M: usize = INT_LIMBS * 8;
 
     type C = RaaCode<Int<N>, Int<K>, Int<M>>;
-    type PolyC =
-        RaaCode<DensePolynomial<Int<N>, 2>, DensePolynomial<Int<K>, 2>, DensePolynomial<Int<M>, 2>>;
     type TestZip = MultilinearZip<Int<N>, Int<K>, Int<N>, Int<M>, C>;
-    type TestPolyZip = MultilinearZip<
-        DensePolynomial<Int<N>, 2>,
-        DensePolynomial<Int<K>, 2>,
-        Int<N>,
-        DensePolynomial<Int<M>, 2>,
-        PolyC,
-    >;
 
     /// Helper function to set up common parameters for tests.
     fn setup_test_params(
@@ -518,28 +509,6 @@ mod tests {
         let evaluations = vec![Int::from(5); 4];
         let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations);
         let encoded = TestZip::encode_rows(
-            &pp,
-            pp.linear_code.codeword_len(),
-            pp.linear_code.row_len(),
-            &poly.evaluations,
-        );
-        assert_eq!(encoded.len(), pp.linear_code.codeword_len());
-    }
-
-    #[test]
-    fn encode_rows_succeeds_for_single_poly_row() {
-        let mut transcript = MockTranscript::default();
-        let code = PolyC::new(&DefaultLinearCodeSpec, 4, &mut transcript);
-        let pp = MultilinearZipParams::new(2, 1, code);
-
-        // Create a polynomial with 2 variables and 4 evaluations
-        let evaluations = vec![
-            DensePolynomial::new(vec![Int::from(1), Int::from(2)]),
-            DensePolynomial::new(vec![Int::from(3), Int::from(4)]),
-            DensePolynomial::new(vec![Int::from(5), Int::from(6)]),
-        ];
-        let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations);
-        let encoded = TestPolyZip::encode_rows(
             &pp,
             pp.linear_code.codeword_len(),
             pp.linear_code.row_len(),

@@ -221,10 +221,7 @@ mod tests {
             tests::MockTranscript,
         },
         pcs_transcript::PcsTranscript,
-        poly::{
-            dense::DensePolynomial,
-            mle::{DenseMultilinearExtension, MultilinearExtensionRand},
-        },
+        poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand},
         transcript::KeccakTranscript,
         utils::WORD_FACTOR,
     };
@@ -244,16 +241,7 @@ mod tests {
 
     type F = F256<ModP>;
     type C = RaaCode<Int<N>, Int<K>, Int<M>>;
-    type PolyC =
-        RaaCode<DensePolynomial<Int<N>, 2>, DensePolynomial<Int<K>, 2>, DensePolynomial<Int<M>, 2>>;
     type TestZip = MultilinearZip<Int<N>, Int<K>, Int<N>, Int<M>, C>;
-    type TestPolyZip = MultilinearZip<
-        DensePolynomial<Int<N>, 2>,
-        DensePolynomial<Int<K>, 2>,
-        Int<N>,
-        DensePolynomial<Int<M>, 2>,
-        PolyC,
-    >;
 
     #[allow(clippy::type_complexity)]
     fn setup_full_protocol(

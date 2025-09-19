@@ -1,4 +1,3 @@
-pub mod dense;
 pub mod mle;
 
 use displaydoc::Display;
