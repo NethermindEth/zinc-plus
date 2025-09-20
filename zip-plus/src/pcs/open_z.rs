@@ -205,7 +205,7 @@ mod tests {
         let num_rows = 1 << num_vars.div_ceil(2);
 
         let mut transcript = MockTranscript::default();
-        let code = C::new(&DefaultLinearCodeSpec, poly_size, &mut transcript);
+        let code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut transcript);
         let pp = MultilinearZipParams::new(num_vars, num_rows, code);
 
         let evaluations: Vec<_> = (1..=poly_size as i32).map(Int::from).collect();

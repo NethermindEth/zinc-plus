@@ -1,6 +1,6 @@
 use crypto_primitives::{PrimeField, Ring};
 use num_traits::{CheckedAdd, Zero};
-use std::marker::PhantomData;
+use std::{marker::PhantomData, ops::AddAssign};
 
 use crate::{
     add,
@@ -13,6 +13,9 @@ use crate::{
 /// field, as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
 #[derive(Debug, Clone)]
 pub struct RaaCode<Eval: Ring, Cw: Ring, Comb: Ring> {
+    /// Whether to check for overflows during encoding
+    check_for_overflows: bool,
+
     row_len: usize,
 
     repetition_factor: usize,
@@ -40,6 +43,7 @@ where
     pub fn new<S: LinearCodeSpec, T: Transcript>(
         spec: &S,
         poly_size: usize,
+        check_for_overflows: bool,
         transcript: &mut T,
     ) -> Self {
         // Taken from original Zip codes
@@ -84,6 +88,7 @@ where
         let perm_2_seed = transcript.get_challenge();
 
         Self {
+            check_for_overflows,
             row_len,
             repetition_factor,
             num_column_opening,
@@ -97,7 +102,7 @@ where
     /// Do the actual encoding, as per RAA spec
     fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
     where
-        Out: Zero + CheckedAdd + for<'a> From<&'a In> + Clone,
+        Out: Zero + CheckedAdd + for<'a> AddAssign<&'a Out> + for<'a> From<&'a In> + Clone,
     {
         debug_assert_eq!(
             row.len(),
@@ -106,9 +111,17 @@ where
         );
         let mut result: Vec<Out> = repeat(row, self.repetition_factor);
         shuffle_seeded(&mut result, self.perm_1_seed);
-        accumulate(&mut result);
+        if self.check_for_overflows {
+            accumulate(&mut result);
+        } else {
+            accumulate_unchecked(&mut result);
+        }
         shuffle_seeded(&mut result, self.perm_2_seed);
-        accumulate(&mut result);
+        if self.check_for_overflows {
+            accumulate(&mut result);
+        } else {
+            accumulate_unchecked(&mut result);
+        }
         debug_assert_eq!(result.len(), self.codeword_len());
         result
     }
@@ -189,6 +202,25 @@ where
     }
 }
 
+#[allow(clippy::arithmetic_side_effects)]
+fn accumulate_unchecked<I>(input: &mut [I])
+where
+    I: Zero + for<'a> AddAssign<&'a I> + Clone,
+{
+    for i in 1..input.len() {
+        // This allows us to circumvent Rust bounds checking
+        let input_i: &mut I = unsafe {
+            let input_i: *mut I = &mut input[i];
+            &mut *input_i
+        };
+        // Note:
+        // For Int ring, this still results in a panic, but that's more efficient than
+        // doing a checked_add and converting ConstCtOption into Option and
+        // panicking later.
+        *input_i += &input[i - 1];
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crypto_primitives::crypto_bigint_int::Int;
@@ -208,6 +240,25 @@ mod tests {
     const N: usize = INT_LIMBS;
     const K: usize = INT_LIMBS * 4;
     const M: usize = INT_LIMBS * 8;
+
+    fn test_raa<Eval, Cw, Comb, F>(poly_size: usize, f: F)
+    where
+        Eval: Ring,
+        Cw: Ring + for<'a> From<&'a Eval>,
+        Comb: Ring + for<'a> From<&'a Comb>,
+        F: Fn(&RaaCode<Eval, Cw, Comb>),
+    {
+        for check_for_overflows in [true, false] {
+            let mut transcript = MockTranscript::default();
+            let code = RaaCode::<Eval, Cw, Comb>::new(
+                &DefaultLinearCodeSpec,
+                poly_size,
+                check_for_overflows,
+                &mut transcript,
+            );
+            f(&code)
+        }
+    }
 
     #[test]
     fn repeat_function_duplicates_row_correctly() {
@@ -236,6 +287,10 @@ mod tests {
         let mut input1: Vec<I> = [1, 2, 3, 4].into_iter().map(I::from).collect();
         let expected1: Vec<I> = [1, 3, 6, 10].into_iter().map(I::from).collect();
         accumulate(&mut input1);
+        assert_eq!(input1, expected1, "Failed on positive integers");
+
+        let mut input1: Vec<I> = [1, 2, 3, 4].into_iter().map(I::from).collect();
+        accumulate_unchecked(&mut input1);
         assert_eq!(input1, expected1, "Failed on positive integers");
 
         let mut input2: Vec<I> = [5, 0, 2, 0].into_iter().map(I::from).collect();
@@ -288,42 +343,38 @@ mod tests {
 
     #[test]
     fn encoding_preserves_linearity() {
-        let mut transcript = MockTranscript::default();
-        let code =
-            RaaCode::<Int<N>, Int<K>, Int<M>>::new(&DefaultLinearCodeSpec, 16, &mut transcript);
+        test_raa::<Int<N>, Int<K>, Int<M>, _>(16, |code| {
+            let a: Vec<Int<N>> = (1..=4).map(I::from).collect();
+            let b: Vec<Int<N>> = (5..=8).map(I::from).collect();
+            let sum_ab: Vec<Int<N>> = a.iter().zip(b.iter()).map(|(x, y)| *x + y).collect();
 
-        let a: Vec<I> = (1..=4).map(I::from).collect();
-        let b: Vec<I> = (5..=8).map(I::from).collect();
-        let sum_ab: Vec<I> = a.iter().zip(b.iter()).map(|(x, y)| *x + y).collect();
+            let encode_a: Vec<Int<K>> = code.encode(&a);
+            let encode_b: Vec<Int<K>> = code.encode(&b);
+            let encode_sum_ab: Vec<Int<K>> = code.encode(&sum_ab);
 
-        let encode_a: Vec<Int<K>> = code.encode(&a);
-        let encode_b: Vec<Int<K>> = code.encode(&b);
-        let encode_sum_ab: Vec<Int<K>> = code.encode(&sum_ab);
+            let sum_encode_ab: Vec<Int<K>> = encode_a
+                .iter()
+                .zip(encode_b.iter())
+                .map(|(x, y)| *x + y)
+                .collect();
 
-        let sum_encode_ab: Vec<Int<K>> = encode_a
-            .iter()
-            .zip(encode_b.iter())
-            .map(|(x, y)| *x + y)
-            .collect();
-
-        assert_eq!(encode_sum_ab, sum_encode_ab);
+            assert_eq!(encode_sum_ab, sum_encode_ab);
+        })
     }
 
     #[test]
     fn encoding_zero_vector_results_in_zero_codeword() {
-        let mut transcript = MockTranscript::default();
-        let code =
-            RaaCode::<Int<N>, Int<K>, Int<M>>::new(&DefaultLinearCodeSpec, 16, &mut transcript);
+        test_raa::<Int<N>, Int<K>, Int<M>, _>(16, |code| {
+            let zero_vector: Vec<I> = vec![Int::<N>::zero(); code.row_len()];
+            let encoded_vector: Vec<Int<K>> = code.encode(&zero_vector);
 
-        let zero_vector: Vec<I> = vec![Int::<N>::zero(); code.row_len()];
-        let encoded_vector: Vec<Int<K>> = code.encode(&zero_vector);
+            let expected_codeword: Vec<Int<K>> = vec![Int::zero(); code.codeword_len()];
 
-        let expected_codeword: Vec<Int<K>> = vec![Int::zero(); code.codeword_len()];
-
-        assert_eq!(
-            encoded_vector, expected_codeword,
-            "Encoding a zero vector should result in a zero codeword"
-        );
+            assert_eq!(
+                encoded_vector, expected_codeword,
+                "Encoding a zero vector should result in a zero codeword"
+            );
+        })
     }
 
     #[test]
@@ -336,6 +387,7 @@ mod tests {
         let _code = RaaCode::<Int<N>, Int<K>, Int<M>>::new(
             &DefaultLinearCodeSpec,
             1 << 30,
+            true,
             &mut transcript,
         );
     }
@@ -344,10 +396,9 @@ mod tests {
     #[should_panic(expected = "Row length must match the code's row length")]
     #[cfg(debug_assertions)]
     fn encode_panics_on_mismatched_row_length() {
-        let mut transcript = MockTranscript::default();
-        let code =
-            RaaCode::<Int<N>, Int<K>, Int<M>>::new(&DefaultLinearCodeSpec, 16, &mut transcript);
-        let incorrect_row = vec![I::from(1), I::from(2), I::from(3)];
-        let _: Vec<Int<K>> = code.encode(&incorrect_row);
+        test_raa::<Int<N>, Int<K>, Int<M>, _>(16, |code| {
+            let incorrect_row = vec![Int::<N>::from(1), Int::<N>::from(2), Int::<N>::from(3)];
+            let _: Vec<Int<K>> = code.encode(&incorrect_row);
+        })
     }
 }

@@ -253,7 +253,7 @@ mod tests {
         let num_rows = 1 << num_vars.div_ceil(2);
 
         let mut transcript = MockTranscript::default();
-        let code = C::new(&DefaultLinearCodeSpec, poly_size, &mut transcript);
+        let code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut transcript);
         let pp = MultilinearZipParams::new(num_vars, num_rows, code);
 
         let evaluations: Vec<_> = (1..=poly_size).map(|v| Int::from(v as i32)).collect();
@@ -300,7 +300,7 @@ mod tests {
     #[test]
     fn commit_succeeds_for_small_polynomial() {
         let mut transcript = MockTranscript::default();
-        let code = C::new(&DefaultLinearCodeSpec, 16, &mut transcript);
+        let code = C::new(&DefaultLinearCodeSpec, 16, true, &mut transcript);
         let pp = MultilinearZipParams::new(4, 4, code);
 
         let evaluations = vec![Int::from(42); 16];
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn commit_succeeds_for_two_variables() {
         let mut transcript = MockTranscript::default();
-        let code = C::new(&DefaultLinearCodeSpec, 4, &mut transcript);
+        let code = C::new(&DefaultLinearCodeSpec, 4, true, &mut transcript);
         let pp = MultilinearZipParams::new(2, 2, code);
 
         let evaluations = vec![Int::from(1), Int::from(2), Int::from(3), Int::from(4)];
@@ -453,7 +453,7 @@ mod tests {
             .into_par_iter()
             .map(|_| {
                 let mut transcript = MockTranscript::default();
-                let code = C::new(&DefaultLinearCodeSpec, poly_size, &mut transcript);
+                let code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut transcript);
                 let pp = MultilinearZipParams::new(num_vars, 8, code);
 
                 TestZip::encode_rows(
@@ -502,7 +502,7 @@ mod tests {
     #[test]
     fn encode_rows_succeeds_for_single_row() {
         let mut transcript = MockTranscript::default();
-        let code = C::new(&DefaultLinearCodeSpec, 4, &mut transcript);
+        let code = C::new(&DefaultLinearCodeSpec, 4, true, &mut transcript);
         let pp = MultilinearZipParams::new(2, 1, code);
 
         // Create a polynomial with 2 variables and 4 evaluations
@@ -656,7 +656,12 @@ mod tests {
         let num_vars = 4;
         let poly_size = 1 << num_vars;
         let mut keccak_transcript = KeccakTranscript::new();
-        let linear_code = C::new(&DefaultLinearCodeSpec, poly_size, &mut keccak_transcript);
+        let linear_code = C::new(
+            &DefaultLinearCodeSpec,
+            poly_size,
+            true,
+            &mut keccak_transcript,
+        );
         let param = TestZip::setup(poly_size, linear_code);
         let evaluations: Vec<_> = (0..poly_size)
             .map(|_| Int::<INT_LIMBS>::from(rng.random::<i8>()))
