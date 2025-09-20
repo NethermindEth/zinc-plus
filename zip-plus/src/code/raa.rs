@@ -80,8 +80,8 @@ where
             size_of::<Cw>() * 8
         );
 
-        let perm_1_seed = transcript.get_u64();
-        let perm_2_seed = transcript.get_u64();
+        let perm_1_seed = transcript.get_challenge();
+        let perm_2_seed = transcript.get_challenge();
 
         Self {
             row_len,

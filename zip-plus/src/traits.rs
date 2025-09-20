@@ -1,6 +1,3 @@
-use crypto_primitives::crypto_bigint_int::Int;
-use std::collections::BTreeSet;
-
 /// Trait for types that can be transcribed to and from a byte representation.
 /// Byte order is not specified, but it must be portable across platforms.
 pub trait Transcribable {
@@ -16,15 +13,37 @@ pub trait Transcribable {
     fn to_transcription_bytes(&self, buf: &mut [u8]);
 }
 
+macro_rules! impl_transcribable_for_primitive {
+    ($type:ty, $num_bytes:expr) => {
+        impl Transcribable for $type {
+            const NUM_BYTES: usize = $num_bytes;
+
+            fn from_transcription_bytes(bytes: &[u8]) -> Self {
+                assert_eq!(bytes.len(), Self::NUM_BYTES);
+                let mut arr = [0u8; Self::NUM_BYTES];
+                arr.copy_from_slice(bytes);
+                Self::from_le_bytes(arr)
+            }
+
+            fn to_transcription_bytes(&self, buf: &mut [u8]) {
+                assert_eq!(buf.len(), Self::NUM_BYTES);
+                buf.copy_from_slice(&self.to_le_bytes());
+            }
+        }
+    };
+}
+
+impl_transcribable_for_primitive!(u32, 4);
+impl_transcribable_for_primitive!(u64, 8);
+
 pub trait Transcript {
-    fn get_encoding_element<const LIMBS: usize>(&mut self) -> Int<LIMBS>;
+    /// Generates a pseudorandom transcribable value as a challenge based on the
+    /// current transcript state, updating it.
+    fn get_challenge<T: Transcribable>(&mut self) -> T;
 
-    fn get_u64(&mut self) -> u64;
-
-    fn sample_unique_columns(
-        &mut self,
-        range: ark_std::ops::Range<usize>,
-        columns: &mut BTreeSet<usize>,
-        count: usize,
-    ) -> usize;
+    /// Generates a pseudorandom transcribable values as challenges based on the
+    /// current transcript state, updating it.
+    fn get_challenges<T: Transcribable>(&mut self, n: usize) -> Vec<T> {
+        (0..n).map(|_| self.get_challenge()).collect()
+    }
 }

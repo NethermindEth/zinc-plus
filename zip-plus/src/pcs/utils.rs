@@ -86,6 +86,20 @@ impl Display for MtHash {
     }
 }
 
+impl Transcribable for MtHash {
+    const NUM_BYTES: usize = HASH_OUT_LEN;
+
+    fn from_transcription_bytes(buf: &[u8]) -> Self {
+        assert_eq!(buf.len(), HASH_OUT_LEN);
+        MtHash(buf.try_into().expect("Invalid buffer length for MtHash"))
+    }
+
+    fn to_transcription_bytes(&self, buf: &mut [u8]) {
+        assert_eq!(buf.len(), HASH_OUT_LEN);
+        buf.copy_from_slice(&self.0);
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct MtHasher;
 

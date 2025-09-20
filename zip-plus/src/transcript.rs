@@ -1,9 +1,6 @@
-use crate::{
-    add, rem, sub,
-    traits::{Transcribable, Transcript},
-};
+use crate::traits::{Transcribable, Transcript};
 use ark_std::vec::Vec;
-use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
+use crypto_primitives::PrimeField;
 use sha3::{Digest, Keccak256};
 
 /// A cryptographic transcript implementation using the Keccak-256 hash
@@ -28,17 +25,13 @@ impl KeccakTranscript {
         }
     }
 
-    /// Absorbs arbitrary bytes into the transcript.
-    /// This updates the internal state of the hasher with the provided data.
-    pub fn absorb(&mut self, v: &[u8]) {
-        self.hasher.update(v);
-    }
-
     /// Generates a specified number of pseudorandom bytes based on the current
     /// transcript state. Uses a counter-based approach to generate enough
     /// bytes from the hasher.
+    ///
+    /// Note that this does NOT update the internal state of the hasher
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn get_random_bytes(&mut self, length: usize) -> Vec<u8> {
+    fn get_random_bytes(&mut self, length: usize) -> Vec<u8> {
         let mut result = Vec::with_capacity(length);
         let mut counter = 0;
         while result.len() < length {
@@ -52,6 +45,12 @@ impl KeccakTranscript {
 
         result.truncate(length);
         result
+    }
+
+    /// Absorbs arbitrary bytes into the transcript.
+    /// This updates the internal state of the hasher with the provided data.
+    pub fn absorb(&mut self, v: &[u8]) {
+        self.hasher.update(v);
     }
 
     /// Absorbs a field element into the transcript.
@@ -85,67 +84,14 @@ impl KeccakTranscript {
             self.absorb_random_field(field_element);
         }
     }
+}
 
-    /// Generates a pseudorandom [Integer] as a challenge based on the current
-    /// transcript state.
-    pub fn get_challenge<T: Transcribable>(&mut self) -> T {
+impl Transcript for KeccakTranscript {
+    fn get_challenge<T: Transcribable>(&mut self) -> T {
         let challenge = self.get_random_bytes(T::NUM_BYTES);
         self.hasher.update([0x12]);
         self.hasher.update(&challenge);
         self.hasher.update([0x34]);
         T::from_transcription_bytes(&challenge)
-    }
-
-    /// Generates pseudorandom [CryptoInt]s as challenges based on the current
-    /// transcript state.
-    pub fn get_challenges<T: Transcribable>(&mut self, n: usize) -> Vec<T> {
-        (0..n).map(|_| self.get_challenge()).collect()
-    }
-
-    /// Generates a pseudorandom `usize` within the given range bounds based on
-    /// the current transcript state.
-    #[allow(clippy::unwrap_used)]
-    fn get_usize_in_range(&mut self, range: &ark_std::ops::Range<usize>) -> usize {
-        let challenge = self.hasher.clone().finalize();
-
-        self.hasher.update([0x88]);
-        self.hasher.update(challenge);
-        self.hasher.update([0x11]);
-
-        let num = usize::from_le_bytes(challenge[..size_of::<usize>()].try_into().unwrap());
-        add!(range.start, rem!(num, sub!(range.end, range.start)))
-    }
-}
-
-impl Transcript for KeccakTranscript {
-    #[allow(clippy::cast_possible_wrap)]
-    fn get_encoding_element<const LIMBS: usize>(&mut self) -> Int<LIMBS> {
-        let byte = self.get_random_bytes(1)[0];
-        // cancels all bits and depends only on whether the random byte LSB is 0 or 1
-        let bit = byte & 1;
-        crypto_bigint::Int::from(bit as i8).into()
-    }
-
-    #[allow(clippy::unwrap_used)]
-    fn get_u64(&mut self) -> u64 {
-        let bytes = self.get_random_bytes(size_of::<u64>());
-        u64::from_le_bytes(bytes.try_into().unwrap())
-    }
-
-    #[allow(clippy::arithmetic_side_effects)]
-    fn sample_unique_columns(
-        &mut self,
-        range: ark_std::ops::Range<usize>,
-        columns: &mut ark_std::collections::BTreeSet<usize>,
-        count: usize,
-    ) -> usize {
-        let mut added = 0;
-        while added < count {
-            let candidate = self.get_usize_in_range(&range);
-            if columns.insert(candidate) {
-                added += 1;
-            }
-        }
-        added
     }
 }

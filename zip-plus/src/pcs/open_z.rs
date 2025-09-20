@@ -12,7 +12,7 @@ use crate::{
     },
     pcs_transcript::PcsTranscript,
     poly::mle::DenseMultilinearExtension,
-    traits::Transcribable,
+    traits::{Transcribable, Transcript},
     utils::combine_rows,
 };
 use crypto_primitives::PrimeField;
@@ -116,7 +116,7 @@ impl<
                 let combined_row =
                     combine_rows(coeffs.into_iter(), evals, pp.linear_code.row_len());
 
-                transcript.write_many(combined_row.iter())?;
+                transcript.write_many(&combined_row)?;
             }
         }
 

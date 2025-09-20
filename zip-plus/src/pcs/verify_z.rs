@@ -10,7 +10,7 @@ use crate::{
     },
     pcs_transcript::PcsTranscript,
     poly::mle::DenseMultilinearExtension,
-    traits::Transcribable,
+    traits::{Transcribable, Transcript},
     utils::inner_product,
 };
 use ark_std::iterable::Iterable;
