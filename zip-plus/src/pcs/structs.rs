@@ -128,9 +128,38 @@ impl<const LIMBS: usize> Transcribable for PackedInt<LIMBS> {
 // Trait aliases for various Rings used in the Zip PCS
 //
 
+/// Ring of witness/polynomial evaluations on boolean hypercube
+pub trait EvaluationRing: Ring {}
+impl<Eval> EvaluationRing for Eval where Eval: Ring {}
+
+/// Ring of codeword elements, at least as wide as the evaluation ring
+pub trait CodewordRing: Ring + Transcribable + AsPackable + Copy {}
+impl<Cw> CodewordRing for Cw where Cw: Ring + Transcribable + AsPackable + Copy {}
+
+/// Ring of challenge elements (coefficients) to perform a random linear
+/// combination of codewords
+pub trait ChallengeRing: Ring + Transcribable {}
+impl<Chal> ChallengeRing for Chal where Chal: Ring + Transcribable {}
+
+/// Ring of elements in the linear combination of codewords, at least as wide as
+/// the evaluation, codeword, and challenge rings.
+pub trait LinearCombinationRing<Eval, Cw, Chal>:
+    Ring + Transcribable + for<'a> From<&'a Eval> + for<'a> From<&'a Cw> + for<'a> MulByScalar<&'a Chal>
+{
+}
+impl<Eval, Cw, Chal, Comb> LinearCombinationRing<Eval, Cw, Chal> for Comb where
+    Comb: Ring
+        + Transcribable
+        + for<'a> From<&'a Eval>
+        + for<'a> From<&'a Cw>
+        + for<'a> MulByScalar<&'a Chal>
+{
+}
+
 pub trait MulByScalar<Rhs>: Sized {
     /// Multiplies the current element by a scalar from the right (usually - a
     /// coefficient to obtain a linear combination).
+    /// Returns `None` if the multiplication would overflow.
     fn mul_by_scalar(&self, rhs: Rhs) -> Option<Self>;
 }
 
@@ -155,31 +184,4 @@ impl<const LIMBS: usize, const LIMBS2: usize> MulByScalar<&Int<LIMBS2>> for Int<
         }
         self.checked_mul(&rhs.resize())
     }
-}
-
-/// Ring of witness/polynomial evaluations on boolean hypercube
-pub trait EvaluationRing: Ring {}
-impl<Eval> EvaluationRing for Eval where Eval: Ring {}
-
-/// Ring of codeword elements
-pub trait CodewordRing: Ring + Transcribable + AsPackable + Copy {}
-impl<Cw> CodewordRing for Cw where Cw: Ring + Transcribable + AsPackable + Copy {}
-
-/// Ring of challenge elements (coefficients) to perform a random linear
-/// combination of codewords
-pub trait ChallengeRing: Ring + Transcribable {}
-impl<Chal> ChallengeRing for Chal where Chal: Ring + Transcribable {}
-
-/// Ring of elements in the linear combination of codewords
-pub trait LinearCombinationRing<Eval, Cw, Chal>:
-    Ring + Transcribable + for<'a> From<&'a Eval> + for<'a> From<&'a Cw> + for<'a> MulByScalar<&'a Chal>
-{
-}
-impl<Eval, Cw, Chal, Comb> LinearCombinationRing<Eval, Cw, Chal> for Comb where
-    Comb: Ring
-        + Transcribable
-        + for<'a> From<&'a Eval>
-        + for<'a> From<&'a Cw>
-        + for<'a> MulByScalar<&'a Chal>
-{
 }
