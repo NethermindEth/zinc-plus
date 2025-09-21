@@ -159,6 +159,7 @@ impl<
 mod tests {
     use crypto_bigint::{Random, U256, const_monty_params};
     use crypto_primitives::crypto_bigint_int::Int;
+    use itertools::Itertools;
     use num_traits::{ConstOne, ConstZero, One};
     use rand::prelude::*;
 
@@ -171,7 +172,7 @@ mod tests {
             tests::MockTranscript,
         },
         pcs_transcript::PcsTranscript,
-        poly::mle::DenseMultilinearExtension,
+        poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
         utils::WORD_FACTOR,
     };
 
@@ -181,8 +182,14 @@ mod tests {
     const N: usize = INT_LIMBS;
     const K: usize = INT_LIMBS * 4;
     const M: usize = INT_LIMBS * 8;
+    const DEGREE: usize = 2;
 
     type C = RaaCode<Int<N>, Int<K>, Int<M>>;
+    type PolyC = RaaCode<
+        DensePolynomial<Int<N>, DEGREE>,
+        DensePolynomial<Int<K>, DEGREE>,
+        DensePolynomial<Int<M>, DEGREE>,
+    >;
 
     const_monty_params!(
         ModP,
@@ -192,6 +199,13 @@ mod tests {
     type F = ConstMontyField<ModP, FIELD_LIMBS>;
 
     type TestZip = MultilinearZip<Int<N>, Int<K>, Int<N>, Int<M>, C>;
+    type TestPolyZip = MultilinearZip<
+        DensePolynomial<Int<N>, DEGREE>,
+        DensePolynomial<Int<K>, DEGREE>,
+        Int<N>,
+        DensePolynomial<Int<M>, DEGREE>,
+        PolyC,
+    >;
 
     /// Helper function to set up common parameters for tests.
     fn setup_test_params(
@@ -208,6 +222,37 @@ mod tests {
         let pp = MultilinearZipParams::new(num_vars, num_rows, code);
 
         let evaluations: Vec<_> = (1..=poly_size as i32).map(Int::from).collect();
+        let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations);
+
+        (pp, poly)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn setup_poly_test_params(
+        num_vars: usize,
+    ) -> (
+        MultilinearZipParams<
+            DensePolynomial<Int<N>, DEGREE>,
+            DensePolynomial<Int<K>, DEGREE>,
+            DensePolynomial<Int<M>, DEGREE>,
+            PolyC,
+        >,
+        DenseMultilinearExtension<DensePolynomial<Int<INT_LIMBS>, DEGREE>>,
+    ) {
+        let poly_size = 1 << num_vars;
+        let num_rows = 1 << num_vars.div_ceil(2);
+
+        let mut transcript = MockTranscript::default();
+        let code = PolyC::new(&DefaultLinearCodeSpec, poly_size, true, &mut transcript);
+        let pp = MultilinearZipParams::new(num_vars, num_rows, code);
+
+        let eval_coeffs: Vec<_> = (1..=(poly_size * DEGREE) as i32)
+            .map(Int::from)
+            .collect_vec();
+        let evaluations = eval_coeffs
+            .chunks_exact(DEGREE)
+            .map(DensePolynomial::new)
+            .collect_vec();
         let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations);
 
         (pp, poly)
@@ -230,6 +275,23 @@ mod tests {
         let mut prover_transcript = PcsTranscript::new();
 
         let result = TestZip::open(&pp, &poly, &data, &point_f, &mut prover_transcript);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn successful_opening_with_correct_polynomial_and_hint_poly() {
+        let num_vars = 4;
+        let (pp, poly) = setup_poly_test_params(num_vars);
+
+        let (data, _) = TestPolyZip::commit(&pp, &poly).unwrap();
+
+        let mut rng = ThreadRng::default();
+        let point_int = random_point::<INT_LIMBS>(num_vars, &mut rng);
+        let point_f: Vec<F> = point_int.iter().map(F::from).collect();
+        let mut prover_transcript = PcsTranscript::new();
+
+        let result = TestPolyZip::open(&pp, &poly, &data, &point_f, &mut prover_transcript);
 
         assert!(result.is_ok());
     }
