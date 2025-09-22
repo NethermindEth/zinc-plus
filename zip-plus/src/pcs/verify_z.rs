@@ -1,12 +1,13 @@
 use crate::{
     ZipError,
     code::LinearCode,
+    merkle::MtHash,
     pcs::{
         structs::{
             ChallengeRing, CodewordRing, EvaluationRing, LinearCombinationRing, MulByScalar,
             MultilinearZip, MultilinearZipCommitment, MultilinearZipParams,
         },
-        utils::{ColumnOpening, MtHash, point_to_tensor, validate_input},
+        utils::{ColumnOpening, point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
     poly::mle::DenseMultilinearExtension,

@@ -5,7 +5,7 @@ use p3_matrix::Dimensions;
 
 use crate::{
     ZipError,
-    pcs::utils::MerkleProof,
+    merkle::MerkleProof,
     rem,
     traits::{Transcribable, Transcript},
     transcript::KeccakTranscript,
@@ -203,7 +203,7 @@ impl PcsTranscript {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pcs::utils::MtHash;
+    use crate::merkle::MtHash;
     use crypto_bigint::{U256, const_monty_params};
 
     #[allow(unused_macros)]

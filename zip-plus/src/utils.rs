@@ -442,4 +442,42 @@ mod test {
         let rhs = [4, 5, 6];
         assert_eq!(inner_product(lhs.iter(), rhs.iter()), 4 + 2 * 5 + 3 * 6);
     }
+
+    #[test]
+    fn test_basic_combination() {
+        let coeffs = vec![1, 2];
+        let evaluations = vec![3, 4, 5, 6];
+        let row_len = 2;
+
+        let result = combine_rows(coeffs, evaluations, row_len);
+
+        assert_eq!(result, vec![(3 + 2 * 5), (4 + 2 * 6)]);
+    }
+
+    #[test]
+    fn test_second_combination() {
+        let coeffs = vec![3, 4];
+        let evaluations = vec![2, 4, 6, 8];
+        let row_len = 2;
+
+        let result = combine_rows(coeffs, evaluations, row_len);
+
+        assert_eq!(result, vec![(3 * 2 + 4 * 6), (3 * 4 + 4 * 8)]);
+    }
+    #[test]
+    fn test_large_values() {
+        let coeffs = vec![1000, -500];
+        let evaluations = vec![2000, -3000, 4000, -5000];
+        let row_len = 2;
+
+        let result = combine_rows(coeffs, evaluations, row_len);
+
+        assert_eq!(
+            result,
+            vec![
+                (1000 * 2000 + (-500) * 4000),
+                (1000 * -3000 + (-500) * -5000)
+            ]
+        );
+    }
 }

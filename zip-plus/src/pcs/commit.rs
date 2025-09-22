@@ -1,8 +1,8 @@
 use crate::{
     ZipError,
     code::LinearCode,
+    merkle::MerkleTree,
     pcs::{
-        MerkleTree,
         structs::{
             ChallengeRing, CodewordRing, EvaluationRing, LinearCombinationRing, MultilinearZip,
             MultilinearZipCommitment, MultilinearZipData, MultilinearZipParams,
@@ -219,11 +219,10 @@ mod tests {
     use crate::{
         code::{DefaultLinearCodeSpec, LinearCode, raa::RaaCode},
         field::F256,
+        merkle::{MerkleTree, MtHash},
         pcs::{
-            MerkleTree,
             structs::{MultilinearZip, MultilinearZipParams},
             tests::MockTranscript,
-            utils::MtHash,
         },
         pcs_transcript::PcsTranscript,
         poly::mle::DenseMultilinearExtension,

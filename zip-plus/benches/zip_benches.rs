@@ -15,7 +15,8 @@ use rand::prelude::*;
 use zip_plus::{
     code::{DefaultLinearCodeSpec, LinearCode, raa::RaaCode},
     field::F256,
-    pcs::{MerkleTree, structs::MultilinearZip},
+    merkle::MerkleTree,
+    pcs::structs::MultilinearZip,
     pcs_transcript::PcsTranscript,
     poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand},
     transcript::KeccakTranscript,

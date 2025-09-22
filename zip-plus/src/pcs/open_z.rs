@@ -165,8 +165,8 @@ mod tests {
     use crate::{
         code::{DefaultLinearCodeSpec, LinearCode, raa::RaaCode},
         field::ConstMontyField,
+        merkle::MerkleTree,
         pcs::{
-            MerkleTree,
             structs::{MultilinearZip, MultilinearZipData, MultilinearZipParams},
             tests::MockTranscript,
         },

@@ -1,6 +1,6 @@
 use crate::{
     code::LinearCode,
-    pcs::{MerkleTree, utils::MtHash},
+    merkle::{MerkleTree, MtHash},
     traits::{FromRef, Transcribable},
     utils::ReinterpretVector,
 };

@@ -5,6 +5,7 @@ pub mod traits;
 pub mod utils;
 
 pub mod field;
+pub mod merkle;
 pub mod poly;
 pub mod transcript;
 
