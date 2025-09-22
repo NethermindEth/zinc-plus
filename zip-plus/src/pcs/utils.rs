@@ -89,12 +89,12 @@ impl Display for MtHash {
 impl Transcribable for MtHash {
     const NUM_BYTES: usize = HASH_OUT_LEN;
 
-    fn from_transcription_bytes(buf: &[u8]) -> Self {
+    fn read_transcription_bytes(buf: &[u8]) -> Self {
         assert_eq!(buf.len(), HASH_OUT_LEN);
         MtHash(buf.try_into().expect("Invalid buffer length for MtHash"))
     }
 
-    fn to_transcription_bytes(&self, buf: &mut [u8]) {
+    fn write_transcription_bytes(&self, buf: &mut [u8]) {
         assert_eq!(buf.len(), HASH_OUT_LEN);
         buf.copy_from_slice(&self.0);
     }
@@ -111,7 +111,7 @@ impl<T: Transcribable + Clone> CryptographicHasher<T, [u8; HASH_OUT_LEN]> for Mt
         let mut hasher = blake3::Hasher::new();
         let mut buf = vec![0_u8; T::NUM_BYTES];
         for item in input {
-            item.to_transcription_bytes(&mut buf);
+            item.write_transcription_bytes(&mut buf);
             hasher.write_all(&buf).expect("Failed to write to hasher");
         }
         hasher.finalize().into()

@@ -115,12 +115,12 @@ impl<const LIMBS: usize> Packable for PackedInt<LIMBS> {}
 impl<const LIMBS: usize> Transcribable for PackedInt<LIMBS> {
     const NUM_BYTES: usize = Int::<LIMBS>::NUM_BYTES;
 
-    fn from_transcription_bytes(bytes: &[u8]) -> Self {
-        Self(Int::from_transcription_bytes(bytes))
+    fn read_transcription_bytes(bytes: &[u8]) -> Self {
+        Self(Int::read_transcription_bytes(bytes))
     }
 
-    fn to_transcription_bytes(&self, buf: &mut [u8]) {
-        self.0.to_transcription_bytes(buf)
+    fn write_transcription_bytes(&self, buf: &mut [u8]) {
+        self.0.write_transcription_bytes(buf)
     }
 }
 

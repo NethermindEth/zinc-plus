@@ -18,6 +18,6 @@ impl Transcript for MockTranscript {
         let mut bytes = vec![0u8; T::NUM_BYTES];
         let counter_bytes = self.counter.to_be_bytes();
         bytes[..counter_bytes.len()].copy_from_slice(&counter_bytes);
-        T::from_transcription_bytes(&bytes)
+        T::read_transcription_bytes(&bytes)
     }
 }

@@ -6,11 +6,11 @@ pub trait Transcribable {
 
     /// Creates a new instance from a byte buffer.
     /// The buffer must be exactly `NUM_BYTES` long.
-    fn from_transcription_bytes(bytes: &[u8]) -> Self;
+    fn read_transcription_bytes(bytes: &[u8]) -> Self;
 
     /// Transcribes the current instance into a byte buffer.
     /// Buffer must be exactly `NUM_BYTES` long.
-    fn to_transcription_bytes(&self, buf: &mut [u8]);
+    fn write_transcription_bytes(&self, buf: &mut [u8]);
 }
 
 macro_rules! impl_transcribable_for_primitive {
@@ -18,14 +18,14 @@ macro_rules! impl_transcribable_for_primitive {
         impl Transcribable for $type {
             const NUM_BYTES: usize = $num_bytes;
 
-            fn from_transcription_bytes(bytes: &[u8]) -> Self {
+            fn read_transcription_bytes(bytes: &[u8]) -> Self {
                 assert_eq!(bytes.len(), Self::NUM_BYTES);
                 let mut arr = [0u8; Self::NUM_BYTES];
                 arr.copy_from_slice(bytes);
                 Self::from_le_bytes(arr)
             }
 
-            fn to_transcription_bytes(&self, buf: &mut [u8]) {
+            fn write_transcription_bytes(&self, buf: &mut [u8]) {
                 assert_eq!(buf.len(), Self::NUM_BYTES);
                 buf.copy_from_slice(&self.to_le_bytes());
             }

@@ -63,12 +63,12 @@ impl KeccakTranscript {
     {
         let mut buf = vec![0; F::Inner::NUM_BYTES];
         self.absorb(&[0x3]);
-        F::MODULUS.to_transcription_bytes(&mut buf);
+        F::MODULUS.write_transcription_bytes(&mut buf);
         self.absorb(&buf);
         self.absorb(&[0x5]);
 
         self.absorb(&[0x1]);
-        v.inner().to_transcription_bytes(&mut buf);
+        v.inner().write_transcription_bytes(&mut buf);
         self.absorb(&buf);
         self.absorb(&[0x3])
     }
@@ -92,6 +92,6 @@ impl Transcript for KeccakTranscript {
         self.hasher.update([0x12]);
         self.hasher.update(&challenge);
         self.hasher.update([0x34]);
-        T::from_transcription_bytes(&challenge)
+        T::read_transcription_bytes(&challenge)
     }
 }

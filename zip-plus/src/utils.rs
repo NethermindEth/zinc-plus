@@ -387,7 +387,7 @@ pub unsafe trait ReinterpretVector<Target: Sized>: Sized {
 impl<const LIMBS: usize> Transcribable for Uint<LIMBS> {
     const NUM_BYTES: usize = 8 * LIMBS / WORD_FACTOR;
 
-    fn from_transcription_bytes(bytes: &[u8]) -> Self {
+    fn read_transcription_bytes(bytes: &[u8]) -> Self {
         // crypto_bigint::Uint stores limbs in least-to-most significant order.
         // It matches little-endian order ef limbs encoding, so platform pointer width
         // does not matter.
@@ -402,7 +402,7 @@ impl<const LIMBS: usize> Transcribable for Uint<LIMBS> {
     }
 
     #[allow(clippy::arithmetic_side_effects)]
-    fn to_transcription_bytes(&self, buf: &mut [u8]) {
+    fn write_transcription_bytes(&self, buf: &mut [u8]) {
         // crypto_bigint::Uint stores limbs in least-to-most significant order.
         // It matches little-endian order ef limbs encoding, so platform pointer width
         // does not matter.
@@ -419,14 +419,14 @@ impl<const LIMBS: usize> Transcribable for Uint<LIMBS> {
 impl<const LIMBS: usize> Transcribable for Int<LIMBS> {
     const NUM_BYTES: usize = Uint::<LIMBS>::NUM_BYTES;
 
-    fn from_transcription_bytes(bytes: &[u8]) -> Self {
-        Uint::<LIMBS>::from_transcription_bytes(bytes)
+    fn read_transcription_bytes(bytes: &[u8]) -> Self {
+        Uint::<LIMBS>::read_transcription_bytes(bytes)
             .as_int()
             .into()
     }
 
-    fn to_transcription_bytes(&self, buf: &mut [u8]) {
-        self.inner().as_uint().to_transcription_bytes(buf)
+    fn write_transcription_bytes(&self, buf: &mut [u8]) {
+        self.inner().as_uint().write_transcription_bytes(buf)
     }
 }
 

@@ -106,7 +106,7 @@ impl PcsTranscript {
     }
 
     pub fn write<T: Transcribable>(&mut self, v: &T, buf: &mut [u8]) -> Result<(), ZipError> {
-        v.to_transcription_bytes(buf);
+        v.write_transcription_bytes(buf);
         self.stream
             .write_all(buf)
             .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))?;
@@ -130,7 +130,7 @@ impl PcsTranscript {
         self.stream
             .read_exact(&mut buf)
             .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))?;
-        Ok(T::from_transcription_bytes(&buf))
+        Ok(T::read_transcription_bytes(&buf))
     }
 
     pub fn read_many<T: Transcribable>(&mut self, n: usize) -> Result<Vec<T>, ZipError> {
