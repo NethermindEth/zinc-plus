@@ -340,30 +340,35 @@ impl<'a, const LIMBS: usize> Product<&'a Self> for Int<LIMBS> {
 //
 
 impl<const LIMBS: usize> From<crypto_bigint::Int<LIMBS>> for Int<LIMBS> {
+    #[inline(always)]
     fn from(value: crypto_bigint::Int<LIMBS>) -> Self {
         Self(value)
     }
 }
 
 impl<const LIMBS: usize> From<Int<LIMBS>> for crypto_bigint::Int<LIMBS> {
+    #[inline(always)]
     fn from(value: Int<LIMBS>) -> Self {
         value.0
     }
 }
 
 impl<const LIMBS: usize, const LIMBS2: usize> From<&Int<LIMBS>> for Int<LIMBS2> {
+    #[inline(always)]
     fn from(num: &Int<LIMBS>) -> Int<LIMBS2> {
         Int::<LIMBS2>::from_ref(num)
     }
 }
 
 impl<const LIMBS: usize, const LIMBS2: usize> FromRef<Int<LIMBS>> for Int<LIMBS2> {
+    #[inline(always)]
     fn from_ref(num: &Int<LIMBS>) -> Int<LIMBS2> {
         num.resize()
     }
 }
 
 impl<const LIMBS: usize, const LIMBS2: usize> From<&crypto_bigint::Int<LIMBS>> for Int<LIMBS2> {
+    #[inline(always)]
     fn from(num: &crypto_bigint::Int<LIMBS>) -> Int<LIMBS2> {
         Self(num.resize())
     }
@@ -373,7 +378,6 @@ macro_rules! impl_from_primitive {
     ($($t:ty),+) => {
         $(
             impl<const LIMBS: usize> From<$t> for Int<LIMBS> {
-                #[inline(always)]
                 fn from(value: $t) -> Self {
                     assert!(core::mem::size_of::<$t>() <= crypto_bigint::Int::<LIMBS>::BYTES,
                             "`{}` is too large to fit into `Int<{LIMBS}>`", stringify!($t));
