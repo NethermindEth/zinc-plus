@@ -14,7 +14,6 @@ pub trait Field:
     + Div<Self, Output=Self>
     // Arithmetic operations with rhs reference
     + for<'a> Div<&'a Self, Output=Self>
-    + for<'a> From<&'a Self>
     {}
 
 /// Element of an integer field modulo prime number (F_p).

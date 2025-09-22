@@ -8,10 +8,10 @@ use ark_std::{
 use criterion::{
     BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime,
 };
-use crypto_bigint::{Random, U256, const_monty_params, modular::ConstMontyParams};
+use crypto_bigint::{U256, const_monty_params, modular::ConstMontyParams};
 use crypto_primitives::crypto_bigint_int::Int;
 use itertools::Itertools;
-use rand::rng;
+use rand::prelude::*;
 use zip_plus::{
     code::{DefaultLinearCodeSpec, LinearCode, raa::RaaCode},
     field::F256,
@@ -26,13 +26,13 @@ const INT_LIMBS: usize = WORD_FACTOR;
 
 const FIELD_LIMBS: usize = 4 * WORD_FACTOR;
 
-type Elem = Int<INT_LIMBS>;
+type Eval = Int<{ INT_LIMBS }>;
 type Cw = Int<{ INT_LIMBS * 4 }>;
 type Chal = Int<{ INT_LIMBS }>;
 type Comb = Int<{ INT_LIMBS * 8 }>;
 
-type LC = RaaCode<Elem, Cw, Comb>;
-type BenchZip = MultilinearZip<Elem, Cw, Chal, Comb, LC>;
+type LC = RaaCode<Eval, Cw, Comb>;
+type BenchZip = MultilinearZip<Eval, Cw, Chal, Comb, LC>;
 
 const_monty_params!(
     ModP,
@@ -45,7 +45,7 @@ fn encode_rows<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize
     group.bench_function(
         format!("EncodeRows: Int<{FIELD_LIMBS}>, poly_size = 2^{P}(Int limbs = {INT_LIMBS}), ZipSpec{spec}"),
         |b| {
-            let mut rng = rng();
+            let mut rng = rand::rng();
             type T = KeccakTranscript;
             let mut keccak_transcript = T::new();
             let poly_size = 1 << P;
@@ -66,13 +66,13 @@ fn encode_single_row<const ROW_LEN: usize>(group: &mut BenchmarkGroup<WallTime>,
     group.bench_function(
         format!("EncodeMessage: Int<{FIELD_LIMBS}>, row_len = {ROW_LEN}(Int limbs = {INT_LIMBS}), ZipSpec{spec}"),
         |b| {
-            let mut rng = rng();
+            let mut rng = ThreadRng::default();
             let mut keccak_transcript = KeccakTranscript::new();
             let poly_size = ROW_LEN * ROW_LEN;
             let linear_code =
                 LC::new(&DefaultLinearCodeSpec, poly_size, false, &mut keccak_transcript);
             assert_eq!(linear_code.row_len(), ROW_LEN, "Unexpected row_len");
-            let message: Vec<_> = (0..ROW_LEN).map(|_i| Elem::random(&mut rng)).collect();
+            let message: Vec<Eval> = (0..ROW_LEN).map(|_i| rng.random()).collect();
             b.iter(|| {
                 let encoded_row: Vec<Cw> = linear_code.encode(&message);
                 black_box(encoded_row);
@@ -82,10 +82,10 @@ fn encode_single_row<const ROW_LEN: usize>(group: &mut BenchmarkGroup<WallTime>,
 }
 
 fn merkle_root<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
-    let mut rng = rng();
+    let mut rng = ThreadRng::default();
 
     let num_leaves = 1 << P;
-    let leaves = (0..num_leaves).map(|_| Cw::random(&mut rng)).collect_vec();
+    let leaves = (0..num_leaves).map(|_| rng.random::<Cw>()).collect_vec();
 
     group.bench_function(
         format!("MerkleRoot: Int<{INT_LIMBS}>, leaves=2^{P}, spec={spec}"),
@@ -99,7 +99,7 @@ fn merkle_root<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize
 }
 
 fn commit<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
-    let mut rng = rng();
+    let mut rng = ThreadRng::default();
     type T = KeccakTranscript;
     let mut keccak_transcript = T::new();
     let poly_size = 1 << P;
@@ -133,7 +133,7 @@ fn commit<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
 }
 
 fn open<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
-    let mut rng = rng();
+    let mut rng = ThreadRng::default();
 
     type T = KeccakTranscript;
     let mut keccak_transcript = T::new();
@@ -175,7 +175,7 @@ fn open<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
     );
 }
 fn verify<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
-    let mut rng = rng();
+    let mut rng = ThreadRng::default();
     type T = KeccakTranscript;
     let mut keccak_transcript = T::new();
     let poly_size = 1 << P;

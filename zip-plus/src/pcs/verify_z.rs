@@ -14,7 +14,7 @@ use crate::{
     utils::inner_product,
 };
 use ark_std::iterable::Iterable;
-use crypto_primitives::PrimeField;
+use crypto_primitives::{FromRef, PrimeField};
 use itertools::Itertools;
 
 impl<
@@ -33,10 +33,7 @@ impl<
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField
-            + for<'a> From<&'a C::Inner>
-            + for<'a> From<&'a Cw>
-            + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<C::Inner> + FromRef<Cw> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         let no_polys = Vec::<DenseMultilinearExtension<bool>>::new();
@@ -57,10 +54,7 @@ impl<
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField
-            + for<'b> From<&'b C::Inner>
-            + for<'b> From<&'b Cw>
-            + for<'b> MulByScalar<&'b F>,
+        F: PrimeField + FromRef<C::Inner> + FromRef<Cw> + for<'b> MulByScalar<&'b F>,
         F::Inner: Transcribable,
     {
         for (i, (eval, comm)) in evals.iter().zip(comms.iter()).enumerate() {
@@ -145,10 +139,7 @@ impl<
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField
-            + for<'a> From<&'a C::Inner>
-            + for<'a> From<&'a Cw>
-            + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<C::Inner> + FromRef<Cw> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         let q_0_combined_row = transcript.read_field_elements(vp.linear_code.row_len())?;
@@ -182,14 +173,14 @@ impl<
         num_rows: usize,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'b> From<&'b Cw> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<Cw> + for<'a> MulByScalar<&'a F>,
     {
         let column_entries_comb = if num_rows > 1 {
-            let column_entries = column_entries.iter().map(F::from).collect_vec();
+            let column_entries = column_entries.iter().map(F::from_ref).collect_vec();
             inner_product(q_0, &column_entries)
             // TODO: this inner product is taking a long time.
         } else {
-            F::from(column_entries.first().expect("No column entries"))
+            F::from_ref(column_entries.first().expect("No column entries"))
         };
         if column_entries_comb != encoded_q_0_combined_row[column] {
             return Err(ZipError::InvalidPcsOpen("Proximity failure".into()));

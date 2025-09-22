@@ -10,6 +10,9 @@ use num_traits::{
 };
 use pastey::paste;
 
+#[cfg(feature = "rand")]
+use rand::{distr::StandardUniform, prelude::*, rand_core::TryRngCore};
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct Int<const LIMBS: usize>(crypto_bigint::Int<LIMBS>);
@@ -350,6 +353,12 @@ impl<const LIMBS: usize> From<Int<LIMBS>> for crypto_bigint::Int<LIMBS> {
 
 impl<const LIMBS: usize, const LIMBS2: usize> From<&Int<LIMBS>> for Int<LIMBS2> {
     fn from(num: &Int<LIMBS>) -> Int<LIMBS2> {
+        Int::<LIMBS2>::from_ref(num)
+    }
+}
+
+impl<const LIMBS: usize, const LIMBS2: usize> FromRef<Int<LIMBS>> for Int<LIMBS2> {
+    fn from_ref(num: &Int<LIMBS>) -> Int<LIMBS2> {
         num.resize()
     }
 }
@@ -364,8 +373,23 @@ macro_rules! impl_from_primitive {
     ($($t:ty),+) => {
         $(
             impl<const LIMBS: usize> From<$t> for Int<LIMBS> {
+                #[inline(always)]
                 fn from(value: $t) -> Self {
                     Self(crypto_bigint::Int::<LIMBS>::from(value))
+                }
+            }
+
+            impl<'a, const LIMBS: usize> From<&'a $t> for Int<LIMBS> {
+                #[inline(always)]
+                fn from(value: &$t) -> Self {
+                    Self::from(*value)
+                }
+            }
+
+            impl<const LIMBS: usize> FromRef<$t> for Int<LIMBS> {
+                #[inline(always)]
+                fn from_ref(value: &$t) -> Self {
+                    Self::from(*value)
                 }
             }
 
@@ -394,13 +418,20 @@ impl<const LIMBS: usize> IntRing for Int<LIMBS> {}
 // Traits from crypto_bigint
 //
 
-#[cfg(feature = "rand_core")]
+#[cfg(feature = "rand")]
+impl<const LIMBS: usize> Distribution<Int<LIMBS>> for StandardUniform {
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Int<LIMBS> {
+        crypto_bigint::Random::random(rng)
+    }
+}
+
+#[cfg(feature = "rand")]
 impl<const LIMBS: usize> crypto_bigint::Random for Int<LIMBS> {
-    fn random<R: rand_core::RngCore + ?Sized>(rng: &mut R) -> Self {
+    fn random<R: RngCore + ?Sized>(rng: &mut R) -> Self {
         Self(crypto_bigint::Int::random(rng))
     }
 
-    fn try_random<R: rand_core::TryRngCore + ?Sized>(rng: &mut R) -> Result<Self, R::Error> {
+    fn try_random<R: TryRngCore + ?Sized>(rng: &mut R) -> Result<Self, R::Error> {
         crypto_bigint::Int::try_random(rng).map(Self)
     }
 }

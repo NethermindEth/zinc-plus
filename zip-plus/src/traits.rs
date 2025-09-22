@@ -13,28 +13,27 @@ pub trait Transcribable {
     fn write_transcription_bytes(&self, buf: &mut [u8]);
 }
 
-macro_rules! impl_transcribable_for_primitive {
-    ($type:ty, $num_bytes:expr) => {
-        impl Transcribable for $type {
-            const NUM_BYTES: usize = $num_bytes;
+macro_rules! impl_transcribable_for_primitives {
+    ($($type:ty),+) => {
+        $(
+            impl Transcribable for $type {
+                const NUM_BYTES: usize = std::mem::size_of::<$type>();
 
-            fn read_transcription_bytes(bytes: &[u8]) -> Self {
-                assert_eq!(bytes.len(), Self::NUM_BYTES);
-                let mut arr = [0u8; Self::NUM_BYTES];
-                arr.copy_from_slice(bytes);
-                Self::from_le_bytes(arr)
-            }
+                fn read_transcription_bytes(bytes: &[u8]) -> Self {
+                    Self::from_le_bytes(bytes.try_into().expect("Invalid byte slice length"))
+                }
 
-            fn write_transcription_bytes(&self, buf: &mut [u8]) {
-                assert_eq!(buf.len(), Self::NUM_BYTES);
-                buf.copy_from_slice(&self.to_le_bytes());
+                fn write_transcription_bytes(&self, buf: &mut [u8]) {
+                    assert_eq!(buf.len(), Self::NUM_BYTES);
+                    buf.copy_from_slice(&self.to_le_bytes());
+                }
             }
-        }
+        )+
     };
 }
 
-impl_transcribable_for_primitive!(u32, 4);
-impl_transcribable_for_primitive!(u64, 8);
+impl_transcribable_for_primitives!(u8, u16, u32, u64, u128);
+impl_transcribable_for_primitives!(i8, i16, i32, i64, i128);
 
 pub trait Transcript {
     /// Generates a pseudorandom transcribable value as a challenge based on the

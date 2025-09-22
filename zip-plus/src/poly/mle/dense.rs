@@ -6,9 +6,9 @@ use crate::{
     sub,
 };
 use ark_std::log2;
-use crypto_bigint::Random;
 use crypto_primitives::{Matrix, Ring};
 use num_traits::Zero;
+use rand::{distr::StandardUniform, prelude::*};
 use rand_core::RngCore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,12 +154,13 @@ where
 
 impl<R> MultilinearExtensionRand<R> for DenseMultilinearExtension<R>
 where
-    R: Ring + Random,
+    R: Ring,
+    StandardUniform: Distribution<R>,
 {
     fn rand<Rng: RngCore + ?Sized>(num_vars: usize, rng: &mut Rng) -> Self {
         Self::from_evaluations_vec(
             num_vars,
-            (0..1 << num_vars).map(|_| R::random(rng)).collect(),
+            (0..1 << num_vars).map(|_| rng.random::<R>()).collect(),
         )
     }
 }

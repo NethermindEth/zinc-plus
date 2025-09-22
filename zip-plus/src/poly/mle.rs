@@ -6,7 +6,7 @@ use std::{
 };
 
 use num_traits::Zero;
-use rand_core::RngCore;
+use rand::prelude::*;
 
 pub use dense::DenseMultilinearExtension;
 

@@ -155,7 +155,7 @@ where
 {
     pub fn new<S>(rows: &[S], row_width: usize) -> Self
     where
-        S: ReinterpretVector<T>,
+        S: AsPackable<Packable = T>,
     {
         assert!(rows.len().is_power_of_two());
         assert!(rows.len().is_multiple_of(row_width));
@@ -237,7 +237,7 @@ impl MerkleProof {
         leaf_index: usize,
     ) -> Result<(), MerkleError>
     where
-        S: ReinterpretVector<T>,
+        S: AsPackable<Packable = T>,
         T: Packable + Transcribable + Clone,
     {
         let prover = MtMmcs::<T>::new(MtHasher, MtPerm);

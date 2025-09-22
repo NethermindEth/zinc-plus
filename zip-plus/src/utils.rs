@@ -384,6 +384,8 @@ pub unsafe trait ReinterpretVector<Target: Sized>: Sized {
     }
 }
 
+unsafe impl<T> ReinterpretVector<T> for T {}
+
 impl<const LIMBS: usize> Transcribable for Uint<LIMBS> {
     const NUM_BYTES: usize = 8 * LIMBS / WORD_FACTOR;
 

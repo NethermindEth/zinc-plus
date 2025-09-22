@@ -2,7 +2,7 @@ use crypto_bigint::{
     Uint,
     modular::{ConstMontyForm, ConstMontyParams},
 };
-use crypto_primitives::crypto_bigint_int::Int;
+use crypto_primitives::{FromRef, crypto_bigint_int::Int};
 use num_traits::{ConstOne, ConstZero};
 
 use crate::field::ConstMontyField;
@@ -107,6 +107,16 @@ where
     Self: From<T>,
 {
     fn from(value: &T) -> Self {
+        Self::from_ref(value)
+    }
+}
+
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, T: Clone> FromRef<T>
+    for ConstMontyField<Mod, LIMBS>
+where
+    Self: From<T>,
+{
+    fn from_ref(value: &T) -> Self {
         Self::from(value.clone())
     }
 }

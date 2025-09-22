@@ -2,7 +2,7 @@ pub mod raa;
 
 use std::fmt::Debug;
 
-use crypto_primitives::{PrimeField, Ring};
+use crypto_primitives::{FromRef, PrimeField, Ring};
 
 pub trait LinearCode<Eval: Ring, Cw: Ring, Comb: Ring>: Sync + Send {
     type Inner;
@@ -61,7 +61,7 @@ pub trait LinearCode<Eval: Ring, Cw: Ring, Comb: Ring>: Sync + Send {
     /// A vector of field elements representing the encoded row
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        F: PrimeField + for<'a> From<&'a Self::Inner>;
+        F: PrimeField + FromRef<Self::Inner>;
 }
 
 pub trait LinearCodeSpec: Debug {
