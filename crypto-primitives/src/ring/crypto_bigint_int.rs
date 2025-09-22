@@ -375,6 +375,8 @@ macro_rules! impl_from_primitive {
             impl<const LIMBS: usize> From<$t> for Int<LIMBS> {
                 #[inline(always)]
                 fn from(value: $t) -> Self {
+                    assert!(core::mem::size_of::<$t>() <= crypto_bigint::Int::<LIMBS>::BYTES,
+                            "`{}` is too large to fit into `Int<{LIMBS}>`", stringify!($t));
                     Self(crypto_bigint::Int::<LIMBS>::from(value))
                 }
             }
@@ -395,7 +397,10 @@ macro_rules! impl_from_primitive {
 
             impl<const LIMBS: usize> Int<LIMBS> {
             paste! {
-                pub const fn  [<from_ $t>] (n: $t) -> Self {
+                /// Create an Int from a primitive type.
+                /// It does NOT check for overflow - this behaviour is
+                /// consistent with the `crypto_bigint::Int` methods.
+                pub const fn [<from_ $t>](n: $t) -> Self {
                     Self(crypto_bigint::Int::<LIMBS>::[<from_ $t>](n))
                 }
             }
@@ -759,6 +764,34 @@ mod tests {
             j.into_inner(),
             crypto_bigint::Int::<4>::from(-1234567890123456789012345678901234567_i128)
         );
+    }
+
+    #[test]
+    fn test_from_primitive_edge_cases() {
+        for value in [i32::MIN, i32::MAX] {
+            let i = Int::<1>::from(value);
+            let j = Int::<2>::from(value);
+            assert_eq!(i.resize(), j);
+        }
+
+        for value in [i64::MIN, i64::MAX] {
+            let i = Int::<1>::from(value);
+            let j = Int::<2>::from(value);
+            assert_eq!(i.resize(), j);
+        }
+
+        for value in [i128::MIN, i128::MAX] {
+            let i = Int::<2>::from(value);
+            let j = Int::<3>::from(value);
+            assert_eq!(i.resize(), j);
+        }
+    }
+
+    #[should_panic]
+    #[test]
+    fn test_from_too_large_primitive() {
+        // Test from_i128
+        let _ = Int::<1>::from(i128::MAX);
     }
 
     #[test]
