@@ -119,10 +119,10 @@ impl<
         num_rows: usize,
     ) -> Result<(), ZipError> {
         let column_entries_comb: Comb = if num_rows > 1 {
-            let column_entries: Vec<Comb> = column_entries.iter().map(Comb::from).collect();
+            let column_entries: Vec<Comb> = column_entries.iter().map(Comb::from_ref).collect();
             inner_product(coeffs.iter(), column_entries.iter())
         } else {
-            Comb::from(&column_entries[0])
+            Comb::from_ref(&column_entries[0])
         };
 
         if column_entries_comb != encoded_combined_row[column] {

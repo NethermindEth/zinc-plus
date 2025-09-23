@@ -12,7 +12,7 @@ use crate::{
     },
     pcs_transcript::PcsTranscript,
     poly::mle::DenseMultilinearExtension,
-    traits::{Transcribable, Transcript},
+    traits::{FromRef, Transcribable, Transcript},
     utils::combine_rows,
 };
 use crypto_primitives::PrimeField;
@@ -34,7 +34,7 @@ impl<
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'a> From<&'a Eval> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<Eval> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         validate_input("open", pp.num_vars, [poly], [point])?;
@@ -55,7 +55,7 @@ impl<
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'a> From<&'a Eval> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<Eval> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         for (poly, comm, point) in izip!(polys.iter(), comms.iter(), points.iter()) {
@@ -73,7 +73,7 @@ impl<
         poly: &DenseMultilinearExtension<Eval>,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'a> From<&'a Eval> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<Eval> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         let num_rows = pp.num_rows;
@@ -83,7 +83,7 @@ impl<
         // elements first
         let q_0 = left_point_to_tensor(num_rows, point)?;
 
-        let evaluations = poly.evaluations.iter().map(F::from).collect_vec();
+        let evaluations = poly.evaluations.iter().map(F::from_ref).collect_vec();
 
         let q_0_combined_row = if num_rows > 1 {
             // Return the evaluation row combination
@@ -110,7 +110,7 @@ impl<
             for _ in 0..pp.linear_code.num_proximity_testing() {
                 let coeffs = transcript.fs_transcript.get_challenges::<Chal>(pp.num_rows);
 
-                let evals = poly.evaluations.iter().map(Comb::from);
+                let evals = poly.evaluations.iter().map(Comb::from_ref);
 
                 // u' in the Zinc paper
                 let combined_row =

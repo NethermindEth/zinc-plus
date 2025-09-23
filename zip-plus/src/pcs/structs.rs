@@ -157,15 +157,11 @@ impl<Chal> ChallengeRing for Chal where Chal: Ring + Transcribable {}
 /// Ring of elements in the linear combination of codewords, at least as wide as
 /// the evaluation, codeword, and challenge rings.
 pub trait LinearCombinationRing<Eval, Cw, Chal>:
-    Ring + Transcribable + for<'a> From<&'a Eval> + for<'a> From<&'a Cw> + for<'a> MulByScalar<&'a Chal>
+    Ring + Transcribable + FromRef<Eval> + FromRef<Cw> + for<'a> MulByScalar<&'a Chal>
 {
 }
 impl<Eval, Cw, Chal, Comb> LinearCombinationRing<Eval, Cw, Chal> for Comb where
-    Comb: Ring
-        + Transcribable
-        + for<'a> From<&'a Eval>
-        + for<'a> From<&'a Cw>
-        + for<'a> MulByScalar<&'a Chal>
+    Comb: Ring + Transcribable + FromRef<Eval> + FromRef<Cw> + for<'a> MulByScalar<&'a Chal>
 {
 }
 
