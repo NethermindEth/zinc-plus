@@ -45,7 +45,7 @@ fn encode_rows<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize
     group.bench_function(
         format!("EncodeRows: Int<{FIELD_LIMBS}>, poly_size = 2^{P}(Int limbs = {INT_LIMBS}), ZipSpec{spec}"),
         |b| {
-            let mut rng = rand::rng();
+            let mut rng = ThreadRng::default();
             type T = KeccakTranscript;
             let mut keccak_transcript = T::new();
             let poly_size = 1 << P;

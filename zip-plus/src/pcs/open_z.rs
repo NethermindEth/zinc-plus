@@ -160,8 +160,7 @@ mod tests {
     use crypto_bigint::{Random, U256, const_monty_params};
     use crypto_primitives::crypto_bigint_int::Int;
     use num_traits::{ConstOne, ConstZero, One};
-    use rand::rng;
-    use rand_core::RngCore;
+    use rand::prelude::*;
 
     use crate::{
         code::{DefaultLinearCodeSpec, LinearCode, raa::RaaCode},
@@ -225,7 +224,7 @@ mod tests {
 
         let (data, _) = TestZip::commit(&pp, &poly).unwrap();
 
-        let mut rng = rng();
+        let mut rng = ThreadRng::default();
         let point_int = random_point::<INT_LIMBS>(num_vars, &mut rng);
         let point_f: Vec<F> = point_int.iter().map(F::from).collect();
         let mut prover_transcript = PcsTranscript::new();
@@ -251,7 +250,7 @@ mod tests {
         let corrupted_merkle_tree = MerkleTree::new(&corrupted_rows, codeword_len);
         let corrupted_data = MultilinearZipData::new(corrupted_rows, corrupted_merkle_tree);
 
-        let mut rng = rng();
+        let mut rng = ThreadRng::default();
         let point_int = random_point::<INT_LIMBS>(num_vars, &mut rng);
         let point_f: Vec<F> = point_int.iter().map(F::from).collect();
         let mut prover_transcript = PcsTranscript::new();
@@ -357,7 +356,7 @@ mod tests {
         // This data is for a 4-variable poly, but we need it as a placeholder.
         let (data, _) = TestZip::commit(&pp, &setup_test_params(num_vars).1).unwrap();
 
-        let mut rng = rng();
+        let mut rng = ThreadRng::default();
         let point_int = random_point::<INT_LIMBS>(oversized_num_vars, &mut rng);
         let point_f: Vec<F> = point_int.iter().map(F::from).collect();
         let mut prover_transcript = PcsTranscript::new();

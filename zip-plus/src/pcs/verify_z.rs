@@ -201,7 +201,7 @@ mod tests {
     use crypto_primitives::crypto_bigint_int::Int;
     use itertools::Itertools;
     use num_traits::{ConstOne, One};
-    use rand::Rng;
+    use rand::prelude::*;
 
     use crate::{
         ZipError,
@@ -411,7 +411,7 @@ mod tests {
             current_evals[0]
         }
 
-        let mut rng = rand::rng();
+        let mut rng = ThreadRng::default();
 
         let n = 3;
         let poly_size = 1 << n;
@@ -595,7 +595,7 @@ mod tests {
     #[test]
     fn bench_p12_verify() {
         fn inner<const P: usize>() {
-            let mut rng = rand::rng();
+            let mut rng = ThreadRng::default();
             // Match the benchmark’s transcript usage for linear code construction
             let mut keccak_transcript = KeccakTranscript::new();
             let poly_size = 1 << P;
