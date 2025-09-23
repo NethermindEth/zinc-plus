@@ -26,7 +26,7 @@ impl<R: Ring> DenseMultilinearExtension<R> {
 
     pub fn evaluate(&self, point: &[R]) -> Option<R> {
         if point.len() == self.num_vars {
-            Some(self.fixed_variables(point)[0].clone())
+            Some(self.fixed_variables(point)[0])
         } else {
             None
         }
@@ -70,7 +70,7 @@ impl<R: Ring> DenseMultilinearExtension<R> {
 
         for (row_i, row) in matrix.rows().enumerate() {
             for (col_i, val) in row {
-                v[(padded_cols * row_i) + col_i] = val.clone();
+                v[(padded_cols * row_i) + col_i] = *val;
             }
         }
 
@@ -128,10 +128,10 @@ where
         let dim = partial_point.len();
 
         for i in 1..dim + 1 {
-            let r = partial_point[i - 1].clone();
+            let r = partial_point[i - 1];
             for b in 0..1 << (nv - i) {
-                let left = poly[b << 1].clone();
-                let right = poly[(b << 1) + 1].clone();
+                let left = poly[b << 1];
+                let right = poly[(b << 1) + 1];
                 let a = sub!(right, &left);
                 if !a.is_zero() {
                     poly[b] = add!(left, &mul!(r, &a));
@@ -275,7 +275,7 @@ impl<R: Ring> AddAssign<(R, &Self)> for DenseMultilinearExtension<R> {
     #[allow(clippy::arithmetic_side_effects)]
     fn add_assign(&mut self, rhs: (R, &Self)) {
         let coeff = rhs.0;
-        self.binary(rhs.1, |a, b| *a += b.clone() * &coeff);
+        self.binary(rhs.1, |a, b| *a += b.mul(&coeff));
     }
 }
 

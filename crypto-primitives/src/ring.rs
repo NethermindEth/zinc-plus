@@ -1,7 +1,6 @@
 #[cfg(feature = "crypto_bigint")]
 pub mod crypto_bigint_int;
 
-use crate::FromRef;
 use core::{
     fmt::{Debug, Display},
     iter::{Product, Sum},
@@ -17,7 +16,7 @@ pub trait Ring:
     Sized
     + Debug
     + Display
-    + Clone
+    + Copy
     + PartialEq
     + Eq
     + Default
@@ -44,8 +43,6 @@ pub trait Ring:
     + for<'a> MulAssign<&'a Self>
     + for<'a> Sum<&'a Self>
     + for<'a> Product<&'a Self>
-    // Conversion
-    + FromRef<Self>
     {}
 
 pub trait ConstRing: Ring + ConstZero + ConstOne {}
@@ -68,11 +65,6 @@ pub trait IntRing:
 
 macro_rules! primitive_int_ring {
     ($t:ident) => {
-        impl FromRef<$t> for $t {
-            fn from_ref(value: &$t) -> Self {
-                *value
-            }
-        }
         impl Ring for $t {}
         impl IntRing for $t {}
     };

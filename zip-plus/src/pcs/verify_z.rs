@@ -10,11 +10,11 @@ use crate::{
     },
     pcs_transcript::PcsTranscript,
     poly::mle::DenseMultilinearExtension,
-    traits::{Transcribable, Transcript},
+    traits::{FromRef, Transcribable, Transcript},
     utils::inner_product,
 };
 use ark_std::iterable::Iterable;
-use crypto_primitives::{FromRef, PrimeField};
+use crypto_primitives::PrimeField;
 use itertools::Itertools;
 
 impl<
@@ -33,7 +33,7 @@ impl<
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + FromRef<C::Inner> + FromRef<Cw> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<F> + FromRef<C::Inner> + FromRef<Cw> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         let no_polys = Vec::<DenseMultilinearExtension<bool>>::new();
@@ -54,7 +54,7 @@ impl<
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + FromRef<C::Inner> + FromRef<Cw> + for<'b> MulByScalar<&'b F>,
+        F: PrimeField + FromRef<F> + FromRef<C::Inner> + FromRef<Cw> + for<'b> MulByScalar<&'b F>,
         F::Inner: Transcribable,
     {
         for (i, (eval, comm)) in evals.iter().zip(comms.iter()).enumerate() {
@@ -139,7 +139,7 @@ impl<
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + FromRef<C::Inner> + FromRef<Cw> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<F> + FromRef<C::Inner> + FromRef<Cw> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         let q_0_combined_row = transcript.read_field_elements(vp.linear_code.row_len())?;

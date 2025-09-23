@@ -2,10 +2,10 @@ use crypto_bigint::{
     Uint,
     modular::{ConstMontyForm, ConstMontyParams},
 };
-use crypto_primitives::{FromRef, crypto_bigint_int::Int};
+use crypto_primitives::crypto_bigint_int::Int;
 use num_traits::{ConstOne, ConstZero};
 
-use crate::field::ConstMontyField;
+use crate::{field::ConstMontyField, traits::FromRef};
 
 // Macro to implement From for unsigned integer primitives
 macro_rules! impl_from_unsigned {
@@ -107,7 +107,7 @@ where
     Self: From<T>,
 {
     fn from(value: &T) -> Self {
-        Self::from_ref(value)
+        Self::from(value.clone())
     }
 }
 

@@ -356,13 +356,6 @@ impl<const LIMBS: usize> From<Int<LIMBS>> for crypto_bigint::Int<LIMBS> {
 impl<const LIMBS: usize, const LIMBS2: usize> From<&Int<LIMBS>> for Int<LIMBS2> {
     #[inline(always)]
     fn from(num: &Int<LIMBS>) -> Int<LIMBS2> {
-        Int::<LIMBS2>::from_ref(num)
-    }
-}
-
-impl<const LIMBS: usize, const LIMBS2: usize> FromRef<Int<LIMBS>> for Int<LIMBS2> {
-    #[inline(always)]
-    fn from_ref(num: &Int<LIMBS>) -> Int<LIMBS2> {
         num.resize()
     }
 }
@@ -388,13 +381,6 @@ macro_rules! impl_from_primitive {
             impl<'a, const LIMBS: usize> From<&'a $t> for Int<LIMBS> {
                 #[inline(always)]
                 fn from(value: &$t) -> Self {
-                    Self::from(*value)
-                }
-            }
-
-            impl<const LIMBS: usize> FromRef<$t> for Int<LIMBS> {
-                #[inline(always)]
-                fn from_ref(value: &$t) -> Self {
                     Self::from(*value)
                 }
             }

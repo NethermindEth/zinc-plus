@@ -1,10 +1,10 @@
 use crate::{
     code::LinearCode,
     pcs::{MerkleTree, utils::MtHash},
-    traits::Transcribable,
+    traits::{FromRef, Transcribable},
     utils::ReinterpretVector,
 };
-use crypto_primitives::{FromRef, Ring, crypto_bigint_int::Int};
+use crypto_primitives::{Ring, crypto_bigint_int::Int};
 use num_traits::CheckedMul;
 use p3_field::Packable;
 use std::marker::PhantomData;

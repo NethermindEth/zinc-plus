@@ -4,12 +4,10 @@ extern crate alloc;
 pub mod field;
 pub mod matrix;
 pub mod ring;
-pub mod traits;
 
 pub use field::*;
 pub use matrix::*;
 pub use ring::*;
-pub use traits::*;
 
 // FIXME
 /// Implements CheckedNeg, CheckedAdd, CheckedSub, CheckedMul, CheckedShl, and

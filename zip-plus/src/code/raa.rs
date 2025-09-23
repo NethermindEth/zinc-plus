@@ -1,4 +1,4 @@
-use crypto_primitives::{FromRef, PrimeField, Ring};
+use crypto_primitives::{PrimeField, Ring};
 use num_traits::{CheckedAdd, Zero};
 use std::{marker::PhantomData, ops::AddAssign};
 
@@ -6,7 +6,7 @@ use crate::{
     add,
     code::{LinearCode, LinearCodeSpec},
     mul, sub,
-    traits::Transcript,
+    traits::{FromRef, Transcript},
     utils::shuffle_seeded,
 };
 
@@ -171,7 +171,7 @@ where
 
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        F: PrimeField + FromRef<Self::Inner>,
+        F: PrimeField + FromRef<F> + FromRef<Self::Inner>,
     {
         self.encode_inner(row)
     }
