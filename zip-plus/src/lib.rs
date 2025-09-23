@@ -24,4 +24,6 @@ pub enum ZipError {
     Serialization(String),
     #[error("Transcript failure: {1}")]
     Transcript(ark_std::io::ErrorKind, String),
+    #[error("Error during polynomial evaluation: {0}")]
+    PolynomialEvaluationError(poly::EvaluationError),
 }

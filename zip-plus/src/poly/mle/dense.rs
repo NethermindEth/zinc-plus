@@ -2,7 +2,10 @@ use std::ops::{Add, AddAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAss
 
 use crate::{
     add, mul,
-    poly::mle::{MultilinearExtension, MultilinearExtensionRand},
+    poly::{
+        EvaluationError,
+        mle::{MultilinearExtension, MultilinearExtensionRand},
+    },
     sub,
 };
 use ark_std::log2;
@@ -24,11 +27,19 @@ impl<R: Ring> DenseMultilinearExtension<R> {
         Self::from_evaluations_vec(num_vars, evaluations.to_vec())
     }
 
-    pub fn evaluate(&self, point: &[R]) -> Option<R> {
+    pub fn evaluate(&self, point: &[R]) -> Result<R, EvaluationError> {
         if point.len() == self.num_vars {
-            self.fixed_variables(point).evaluations.into_iter().next()
+            Ok(self
+                .fixed_variables(point)
+                .evaluations
+                .into_iter()
+                .next()
+                .expect("Evaluations should not be empty"))
         } else {
-            None
+            Err(EvaluationError::WrongPointWidth {
+                expected: self.num_vars,
+                actual: point.len(),
+            })
         }
     }
 
@@ -445,13 +456,13 @@ mod tests {
     }
 
     #[test]
-    fn test_evaluate_length_mismatch_returns_none() {
+    fn test_evaluate_length_mismatch_returns_error() {
         let d = DenseMultilinearExtension::from_evaluations_vec(
             2,
             vec![F::from(1), F::from(2), F::from(3), F::from(4)],
         );
-        assert!(d.evaluate(&[F::one()]).is_none());
-        assert!(d.evaluate(&[F::one(), F::one(), F::zero()]).is_none());
+        assert!(d.evaluate(&[F::one()]).is_err());
+        assert!(d.evaluate(&[F::one(), F::one(), F::zero()]).is_err());
     }
 
     #[test]

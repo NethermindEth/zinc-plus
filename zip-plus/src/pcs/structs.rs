@@ -1,6 +1,7 @@
 use crate::{
     code::LinearCode,
     merkle::{MerkleTree, MtHash},
+    poly::Polynomial,
     traits::{FromRef, Transcribable},
     utils::ReinterpretVector,
 };
@@ -9,26 +10,31 @@ use num_traits::CheckedMul;
 use p3_field::Packable;
 use std::marker::PhantomData;
 
+pub trait ZipTypes: Send + Sync {
+    type EvalR: Ring;
+    type Eval: EvaluationPolynomial<Self::EvalR>;
+
+    type CwR: Ring;
+    type Cw: CodewordPolynomial<Self::CwR>;
+
+    type Chal: ChallengeRing;
+
+    type CombR: Ring;
+    type Comb: LinearCombinationPolynomial<Self::CombR, Self::Eval, Self::Cw, Self::Chal>;
+
+    type Code: LinearCode<Self::Eval, Self::Cw, Self::Comb>;
+}
+
 /// Zip is a Polynomial Commitment Scheme (PCS) that supports committing to
 /// multilinear polynomials.
-pub struct MultilinearZip<Eval, Cw, Chal, Comb, C>(PhantomData<(Eval, Cw, Chal, Comb, C)>)
-where
-    Eval: EvaluationRing,
-    Cw: CodewordRing,
-    Chal: ChallengeRing,
-    Comb: LinearCombinationRing<Eval, Cw, Chal>,
-    C: LinearCode<Eval, Cw, Comb>;
+pub struct ZipPlus<Zt: ZipTypes>(PhantomData<Zt>);
 
-impl<Eval, Cw, Chal, Comb, C> MultilinearZip<Eval, Cw, Chal, Comb, C>
+impl<Zt> ZipPlus<Zt>
 where
-    Eval: EvaluationRing,
-    Cw: CodewordRing,
-    Chal: ChallengeRing,
-    Comb: LinearCombinationRing<Eval, Cw, Chal>,
-    C: LinearCode<Eval, Cw, Comb>,
+    Zt: ZipTypes,
 {
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn setup(poly_size: usize, linear_code: C) -> MultilinearZipParams<Eval, Cw, Comb, C> {
+    pub fn setup(poly_size: usize, linear_code: Zt::Code) -> MultilinearZipParams<Zt> {
         assert!(poly_size.is_power_of_two());
         let num_vars = poly_size.ilog2() as usize;
         let num_rows = ((1 << num_vars) / linear_code.row_len()).next_power_of_two();
@@ -38,27 +44,15 @@ where
 
 /// Parameters for the Zip PCS.
 #[derive(Clone, Debug)]
-pub struct MultilinearZipParams<Eval, Cw, Comb, C>
-where
-    Eval: Ring,
-    Cw: Ring,
-    Comb: Ring,
-    C: LinearCode<Eval, Cw, Comb>,
-{
+pub struct MultilinearZipParams<Zt: ZipTypes> {
     pub num_vars: usize,
     pub num_rows: usize,
-    pub linear_code: C,
-    phantom_data: PhantomData<(Eval, Cw, Comb)>,
+    pub linear_code: Zt::Code,
+    phantom_data: PhantomData<Zt>,
 }
 
-impl<Eval, Cw, Comb, C> MultilinearZipParams<Eval, Cw, Comb, C>
-where
-    Eval: Ring,
-    Cw: Ring,
-    Comb: Ring,
-    C: LinearCode<Eval, Cw, Comb>,
-{
-    pub fn new(num_vars: usize, num_rows: usize, linear_code: C) -> Self {
+impl<Zt: ZipTypes> MultilinearZipParams<Zt> {
+    pub fn new(num_vars: usize, num_rows: usize, linear_code: Zt::Code) -> Self {
         Self {
             num_vars,
             num_rows,
@@ -142,12 +136,25 @@ impl<const LIMBS: usize> Transcribable for PackedInt<LIMBS> {
 //
 
 /// Ring of witness/polynomial evaluations on boolean hypercube
-pub trait EvaluationRing: Ring {}
-impl<Eval> EvaluationRing for Eval where Eval: Ring {}
+pub trait EvaluationPolynomial<R: Ring>: Ring + Polynomial<R> {}
+impl<R, Eval> EvaluationPolynomial<R> for Eval
+where
+    R: Ring,
+    Eval: Ring + Polynomial<R>,
+{
+}
 
 /// Ring of codeword elements, at least as wide as the evaluation ring
-pub trait CodewordRing: Ring + Transcribable + AsPackable + Copy {}
-impl<Cw> CodewordRing for Cw where Cw: Ring + Transcribable + AsPackable + Copy {}
+pub trait CodewordPolynomial<R: Ring>:
+    Ring + Polynomial<R> + Transcribable + AsPackable + Copy
+{
+}
+impl<R, Cw> CodewordPolynomial<R> for Cw
+where
+    R: Ring,
+    Cw: Ring + Polynomial<R> + Transcribable + AsPackable + Copy,
+{
+}
 
 /// Ring of challenge elements (coefficients) to perform a random linear
 /// combination of codewords
@@ -156,12 +163,19 @@ impl<Chal> ChallengeRing for Chal where Chal: Ring + Transcribable {}
 
 /// Ring of elements in the linear combination of codewords, at least as wide as
 /// the evaluation, codeword, and challenge rings.
-pub trait LinearCombinationRing<Eval, Cw, Chal>:
-    Ring + Transcribable + FromRef<Eval> + FromRef<Cw> + for<'a> MulByScalar<&'a Chal>
+pub trait LinearCombinationPolynomial<R: Ring, Eval, Cw, Chal>:
+    Ring + Polynomial<R> + Transcribable + FromRef<Eval> + FromRef<Cw> + for<'a> MulByScalar<&'a Chal>
 {
 }
-impl<Eval, Cw, Chal, Comb> LinearCombinationRing<Eval, Cw, Chal> for Comb where
-    Comb: Ring + Transcribable + FromRef<Eval> + FromRef<Cw> + for<'a> MulByScalar<&'a Chal>
+impl<R, Eval, Cw, Chal, Comb> LinearCombinationPolynomial<R, Eval, Cw, Chal> for Comb
+where
+    R: Ring,
+    Comb: Ring
+        + Polynomial<R>
+        + Transcribable
+        + FromRef<Eval>
+        + FromRef<Cw>
+        + for<'a> MulByScalar<&'a Chal>,
 {
 }
 

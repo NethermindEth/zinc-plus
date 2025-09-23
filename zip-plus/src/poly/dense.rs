@@ -1,3 +1,4 @@
+use super::{EvaluationError, Polynomial};
 use crate::{
     pcs::structs::{AsPackable, MulByScalar, PackedInt},
     traits::{FromRef, Transcribable},
@@ -13,16 +14,6 @@ use std::{
     iter::{Product, Sum},
     ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
 };
-
-pub trait Polynomial<R: Ring> {
-    /// Returns the degree of the polynomial - a number of coefficients.
-    fn degree(&self) -> usize;
-
-    /// Coefficients of the polynomial, lowest degree first.
-    fn coeffs<'a>(&'a self) -> impl Iterator<Item = &'a R>
-    where
-        R: 'a;
-}
 
 // Sadly, we cannot use [R; DEGREE + 1] in stable Rust yet, so we use separate
 // coeff_0.
@@ -70,11 +61,11 @@ impl<R: Ring, const DEGREE: usize> Polynomial<R> for DensePolynomial<R, DEGREE> 
         DEGREE
     }
 
-    fn coeffs<'a>(&'a self) -> impl Iterator<Item = &'a R>
+    fn evaluate<C>(&self, _point: &[C]) -> Result<R, EvaluationError>
     where
-        R: 'a,
+        R: MulByScalar<C>,
     {
-        iter::once(&self.coeff_0).chain(self.coeffs.iter())
+        todo!("Can't evaluate DensePolynomial yet");
     }
 }
 

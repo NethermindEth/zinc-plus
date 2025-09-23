@@ -4,10 +4,7 @@ use crate::{
     ZipError,
     code::LinearCode,
     pcs::{
-        structs::{
-            ChallengeRing, CodewordRing, EvaluationRing, LinearCombinationRing, MulByScalar,
-            MultilinearZip, MultilinearZipData, MultilinearZipParams,
-        },
+        structs::{MulByScalar, MultilinearZipData, MultilinearZipParams, ZipPlus, ZipTypes},
         utils::{ColumnOpening, left_point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
@@ -18,23 +15,16 @@ use crate::{
 use crypto_primitives::PrimeField;
 use itertools::{Itertools, izip};
 
-impl<
-    Eval: EvaluationRing,
-    Cw: CodewordRing,
-    Chal: ChallengeRing,
-    Comb: LinearCombinationRing<Eval, Cw, Chal> + for<'z> MulByScalar<&'z Chal>,
-    C: LinearCode<Eval, Cw, Comb>,
-> MultilinearZip<Eval, Cw, Chal, Comb, C>
-{
+impl<Zt: ZipTypes> ZipPlus<Zt> {
     pub fn open<F>(
-        pp: &MultilinearZipParams<Eval, Cw, Comb, C>,
-        poly: &DenseMultilinearExtension<Eval>,
-        commit_data: &MultilinearZipData<Cw>,
+        pp: &MultilinearZipParams<Zt>,
+        poly: &DenseMultilinearExtension<Zt::Eval>,
+        commit_data: &MultilinearZipData<Zt::Cw>,
         point: &[F],
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + FromRef<Eval> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<Zt::Eval> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         validate_input("open", pp.num_vars, [poly], [point])?;
@@ -48,14 +38,14 @@ impl<
 
     // TODO Apply 2022/1355 https://eprint.iacr.org/2022/1355.pdf#page=30
     pub fn batch_open<F>(
-        pp: &MultilinearZipParams<Eval, Cw, Comb, C>,
-        polys: &[DenseMultilinearExtension<Eval>],
-        comms: &[MultilinearZipData<Cw>],
+        pp: &MultilinearZipParams<Zt>,
+        polys: &[DenseMultilinearExtension<Zt::Eval>],
+        comms: &[MultilinearZipData<Zt::Cw>],
         points: &[Vec<F>],
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + FromRef<Eval> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<Zt::Eval> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         for (poly, comm, point) in izip!(polys.iter(), comms.iter(), points.iter()) {
@@ -67,13 +57,13 @@ impl<
     // Subprotocol functions
 
     fn prove_evaluation_phase<F>(
-        pp: &MultilinearZipParams<Eval, Cw, Comb, C>,
+        pp: &MultilinearZipParams<Zt>,
         transcript: &mut PcsTranscript,
         point: &[F],
-        poly: &DenseMultilinearExtension<Eval>,
+        poly: &DenseMultilinearExtension<Zt::Eval>,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + FromRef<Eval> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<Zt::Eval> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         let num_rows = pp.num_rows;
@@ -99,18 +89,20 @@ impl<
     }
 
     pub(super) fn prove_testing_phase(
-        pp: &MultilinearZipParams<Eval, Cw, Comb, C>,
-        poly: &DenseMultilinearExtension<Eval>,
-        commit_data: &MultilinearZipData<Cw>,
+        pp: &MultilinearZipParams<Zt>,
+        poly: &DenseMultilinearExtension<Zt::Eval>,
+        commit_data: &MultilinearZipData<Zt::Cw>,
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError> {
         if pp.num_rows > 1 {
             // If we can take linear combinations
             // perform the proximity test an arbitrary number of times
             for _ in 0..pp.linear_code.num_proximity_testing() {
-                let coeffs = transcript.fs_transcript.get_challenges::<Chal>(pp.num_rows);
+                let coeffs = transcript
+                    .fs_transcript
+                    .get_challenges::<Zt::Chal>(pp.num_rows);
 
-                let evals = poly.evaluations.iter().map(Comb::from_ref);
+                let evals = poly.evaluations.iter().map(Zt::Comb::from_ref);
 
                 // u' in the Zinc paper
                 let combined_row =
@@ -129,8 +121,8 @@ impl<
     }
 
     pub(super) fn open_merkle_trees_for_column(
-        pp: &MultilinearZipParams<Eval, Cw, Comb, C>,
-        commit_data: &MultilinearZipData<Cw>,
+        pp: &MultilinearZipParams<Zt>,
+        commit_data: &MultilinearZipData<Zt::Cw>,
         column: usize,
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError> {
@@ -163,15 +155,15 @@ mod tests {
     use rand::prelude::*;
 
     use crate::{
-        code::{LinearCode, raa::RaaCode},
+        code::LinearCode,
         field::ConstMontyField,
         merkle::MerkleTree,
         pcs::{
-            structs::{MultilinearZip, MultilinearZipData},
+            structs::{MultilinearZipData, ZipPlus},
             test_utils::*,
         },
         pcs_transcript::PcsTranscript,
-        poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
+        poly::mle::DenseMultilinearExtension,
         utils::WORD_FACTOR,
     };
 
@@ -183,13 +175,6 @@ mod tests {
     const M: usize = INT_LIMBS * 8;
     const DEGREE: usize = 2;
 
-    type C = RaaCode<Int<N>, Int<K>, Int<M>>;
-    type PolyC = RaaCode<
-        DensePolynomial<Int<N>, DEGREE>,
-        DensePolynomial<Int<K>, DEGREE>,
-        DensePolynomial<Int<M>, DEGREE>,
-    >;
-
     const_monty_params!(
         ModP,
         U256,
@@ -197,14 +182,11 @@ mod tests {
     );
     type F = ConstMontyField<ModP, FIELD_LIMBS>;
 
-    type TestZip = MultilinearZip<Int<N>, Int<K>, Int<N>, Int<M>, C>;
-    type TestPolyZip = MultilinearZip<
-        DensePolynomial<Int<N>, DEGREE>,
-        DensePolynomial<Int<K>, DEGREE>,
-        Int<N>,
-        DensePolynomial<Int<M>, DEGREE>,
-        PolyC,
-    >;
+    type Zt = TestZipTypes<N, K, M>;
+    type PolyZt = TestPolyZipTypes<N, K, M, DEGREE>;
+
+    type TestZip = ZipPlus<Zt>;
+    type TestPolyZip = ZipPlus<PolyZt>;
 
     fn random_point<const I: usize>(num_vars: usize, rng: &mut impl RngCore) -> Vec<Int<I>> {
         (0..num_vars).map(|_| Int::random(rng)).collect()

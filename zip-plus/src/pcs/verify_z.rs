@@ -3,10 +3,7 @@ use crate::{
     code::LinearCode,
     merkle::MtHash,
     pcs::{
-        structs::{
-            ChallengeRing, CodewordRing, EvaluationRing, LinearCombinationRing, MulByScalar,
-            MultilinearZip, MultilinearZipCommitment, MultilinearZipParams,
-        },
+        structs::{MulByScalar, MultilinearZipCommitment, MultilinearZipParams, ZipPlus, ZipTypes},
         utils::{ColumnOpening, point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
@@ -18,23 +15,20 @@ use ark_std::iterable::Iterable;
 use crypto_primitives::PrimeField;
 use itertools::Itertools;
 
-impl<
-    Eval: EvaluationRing,
-    Cw: CodewordRing,
-    Chal: ChallengeRing,
-    Comb: LinearCombinationRing<Eval, Cw, Chal>,
-    C: LinearCode<Eval, Cw, Comb>,
-> MultilinearZip<Eval, Cw, Chal, Comb, C>
-{
+impl<Zt: ZipTypes> ZipPlus<Zt> {
     pub fn verify<F>(
-        vp: &MultilinearZipParams<Eval, Cw, Comb, C>,
+        vp: &MultilinearZipParams<Zt>,
         comm: &MultilinearZipCommitment,
         point: &[F],
         eval: &F,
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + FromRef<F> + FromRef<C::Inner> + FromRef<Cw> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField
+            + FromRef<F>
+            + FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::Comb>>::Inner>
+            + FromRef<Zt::Cw>
+            + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         let no_polys = Vec::<DenseMultilinearExtension<bool>>::new();
@@ -48,14 +42,18 @@ impl<
     }
 
     pub fn batch_verify_z<'a, F>(
-        vp: &MultilinearZipParams<Eval, Cw, Comb, C>,
+        vp: &MultilinearZipParams<Zt>,
         comms: impl Iterable<Item = &'a MultilinearZipCommitment>,
         points: &[Vec<F>],
         evals: &[F],
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + FromRef<F> + FromRef<C::Inner> + FromRef<Cw> + for<'b> MulByScalar<&'b F>,
+        F: PrimeField
+            + FromRef<F>
+            + FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::Comb>>::Inner>
+            + FromRef<Zt::Cw>
+            + for<'b> MulByScalar<&'b F>,
         F::Inner: Transcribable,
     {
         for (i, (eval, comm)) in evals.iter().zip(comms.iter()).enumerate() {
@@ -66,26 +64,26 @@ impl<
 
     #[allow(clippy::type_complexity)]
     pub(super) fn verify_testing(
-        vp: &MultilinearZipParams<Eval, Cw, Comb, C>,
+        vp: &MultilinearZipParams<Zt>,
         root: &MtHash,
         transcript: &mut PcsTranscript,
-    ) -> Result<Vec<(usize, Vec<Cw>)>, ZipError> {
+    ) -> Result<Vec<(usize, Vec<Zt::Cw>)>, ZipError> {
         // Gather the coeffs and encoded combined rows per proximity test
-        let mut encoded_combined_rows: Vec<(Vec<Chal>, Vec<Comb>)> =
+        let mut encoded_combined_rows: Vec<(Vec<Zt::Chal>, Vec<Zt::Comb>)> =
             Vec::with_capacity(vp.linear_code.num_proximity_testing());
 
         if vp.num_rows > 1 {
             for _ in 0..vp.linear_code.num_proximity_testing() {
                 let coeffs = transcript.fs_transcript.get_challenges(vp.num_rows);
 
-                let combined_row: Vec<Comb> = transcript.read_many(vp.linear_code.row_len())?;
+                let combined_row: Vec<Zt::Comb> = transcript.read_many(vp.linear_code.row_len())?;
 
-                let encoded_combined_row: Vec<Comb> = vp.linear_code.encode_wide(&combined_row);
+                let encoded_combined_row: Vec<Zt::Comb> = vp.linear_code.encode_wide(&combined_row);
                 encoded_combined_rows.push((coeffs, encoded_combined_row));
             }
         }
 
-        let mut columns_opened: Vec<(usize, Vec<Cw>)> =
+        let mut columns_opened: Vec<(usize, Vec<Zt::Cw>)> =
             Vec::with_capacity(vp.linear_code.num_column_opening());
 
         for _ in 0..vp.linear_code.num_column_opening() {
@@ -113,17 +111,18 @@ impl<
     }
 
     pub(super) fn verify_column_testing(
-        coeffs: &[Chal],
-        encoded_combined_row: &[Comb],
-        column_entries: &[Cw],
+        coeffs: &[Zt::Chal],
+        encoded_combined_row: &[Zt::Comb],
+        column_entries: &[Zt::Cw],
         column: usize,
         num_rows: usize,
     ) -> Result<(), ZipError> {
-        let column_entries_comb: Comb = if num_rows > 1 {
-            let column_entries: Vec<Comb> = column_entries.iter().map(Comb::from_ref).collect();
+        let column_entries_comb: Zt::Comb = if num_rows > 1 {
+            let column_entries: Vec<Zt::Comb> =
+                column_entries.iter().map(Zt::Comb::from_ref).collect();
             inner_product(coeffs.iter(), column_entries.iter())
         } else {
-            Comb::from_ref(&column_entries[0])
+            Zt::Comb::from_ref(&column_entries[0])
         };
 
         if column_entries_comb != encoded_combined_row[column] {
@@ -133,14 +132,18 @@ impl<
     }
 
     fn verify_evaluation_z<F>(
-        vp: &MultilinearZipParams<Eval, Cw, Comb, C>,
+        vp: &MultilinearZipParams<Zt>,
         point: &[F],
         eval: &F,
-        columns_opened: &[(usize, Vec<Cw>)],
+        columns_opened: &[(usize, Vec<Zt::Cw>)],
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + FromRef<F> + FromRef<C::Inner> + FromRef<Cw> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField
+            + FromRef<F>
+            + FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::Comb>>::Inner>
+            + FromRef<Zt::Cw>
+            + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         let q_0_combined_row = transcript.read_field_elements(vp.linear_code.row_len())?;
@@ -169,12 +172,12 @@ impl<
     fn verify_proximity_q_0<F>(
         q_0: &Vec<F>,
         encoded_q_0_combined_row: &[F],
-        column_entries: &[Cw],
+        column_entries: &[Zt::Cw],
         column: usize,
         num_rows: usize,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + FromRef<Cw> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<Zt::Cw> + for<'a> MulByScalar<&'a F>,
     {
         let column_entries_comb = if num_rows > 1 {
             let column_entries = column_entries.iter().map(F::from_ref).collect_vec();
@@ -206,14 +209,14 @@ mod tests {
 
     use crate::{
         ZipError,
-        code::{DefaultLinearCodeSpec, LinearCode, raa::RaaCode},
+        code::{DefaultLinearCodeSpec, LinearCode},
         field::F256,
-        pcs::{structs::MultilinearZip, test_utils::*},
-        pcs_transcript::PcsTranscript,
-        poly::{
-            dense::DensePolynomial,
-            mle::{DenseMultilinearExtension, MultilinearExtensionRand},
+        pcs::{
+            structs::{ZipPlus, ZipTypes},
+            test_utils::*,
         },
+        pcs_transcript::PcsTranscript,
+        poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand},
         transcript::KeccakTranscript,
         utils::WORD_FACTOR,
     };
@@ -233,20 +236,15 @@ mod tests {
     );
 
     type F = F256<ModP>;
-    type C = RaaCode<Int<N>, Int<K>, Int<M>>;
-    type PolyC = RaaCode<
-        DensePolynomial<Int<N>, DEGREE>,
-        DensePolynomial<Int<K>, DEGREE>,
-        DensePolynomial<Int<M>, DEGREE>,
-    >;
-    type TestZip = MultilinearZip<Int<N>, Int<K>, Int<N>, Int<M>, C>;
-    type TestPolyZip = MultilinearZip<
-        DensePolynomial<Int<N>, DEGREE>,
-        DensePolynomial<Int<K>, DEGREE>,
-        Int<N>,
-        DensePolynomial<Int<M>, DEGREE>,
-        PolyC,
-    >;
+
+    type Zt = TestZipTypes<N, K, M>;
+    type C = <Zt as ZipTypes>::Code;
+
+    type PolyZt = TestPolyZipTypes<N, K, M, DEGREE>;
+    type PolyC = <PolyZt as ZipTypes>::Code;
+
+    type TestZip = ZipPlus<Zt>;
+    type TestPolyZip = ZipPlus<PolyZt>;
 
     #[test]
     fn successful_verification_of_valid_proof() {

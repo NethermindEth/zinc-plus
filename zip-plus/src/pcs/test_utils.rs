@@ -9,8 +9,7 @@
 use crate::{
     code::{DefaultLinearCodeSpec, raa::RaaCode},
     pcs::structs::{
-        CodewordRing, EvaluationRing, LinearCombinationRing, MulByScalar, MultilinearZip,
-        MultilinearZipCommitment, MultilinearZipParams,
+        AsPackable, MulByScalar, MultilinearZipCommitment, MultilinearZipParams, ZipPlus, ZipTypes,
     },
     pcs_transcript::PcsTranscript,
     poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
@@ -19,13 +18,42 @@ use crate::{
 use crypto_primitives::{PrimeField, Ring, crypto_bigint_int::Int};
 use itertools::Itertools;
 
-type Zip<const N: usize, Eval, Cw, Comb, C> = MultilinearZip<Eval, Cw, Int<N>, Comb, C>;
+pub struct TestZipTypes<const N: usize, const K: usize, const M: usize> {}
+impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N, K, M> {
+    type EvalR = Int<N>;
+    type Eval = Int<N>;
+    type CwR = Int<K>;
+    type Cw = Int<K>;
+    type Chal = Int<N>;
+    type CombR = Int<M>;
+    type Comb = Int<M>;
+    type Code = RaaCode<Int<N>, Int<K>, Int<M>>;
+}
+
+pub struct TestPolyZipTypes<const N: usize, const K: usize, const M: usize, const DEGREE: usize> {
+}
+impl<const N: usize, const K: usize, const M: usize, const DEGREE: usize> ZipTypes
+    for TestPolyZipTypes<N, K, M, DEGREE>
+{
+    type EvalR = Int<N>;
+    type Eval = DensePolynomial<Int<N>, DEGREE>;
+    type CwR = Int<K>;
+    type Cw = DensePolynomial<Int<K>, DEGREE>;
+    type Chal = Int<N>;
+    type CombR = Int<M>;
+    type Comb = DensePolynomial<Int<M>, DEGREE>;
+    type Code = RaaCode<
+        DensePolynomial<Int<N>, DEGREE>,
+        DensePolynomial<Int<K>, DEGREE>,
+        DensePolynomial<Int<M>, DEGREE>,
+    >;
+}
 
 /// Helper function to set up common parameters for tests.
 pub fn setup_test_params<const N: usize, const K: usize, const M: usize>(
     num_vars: usize,
 ) -> (
-    MultilinearZipParams<Int<N>, Int<K>, Int<M>, RaaCode<Int<N>, Int<K>, Int<M>>>,
+    MultilinearZipParams<TestZipTypes<N, K, M>>,
     DenseMultilinearExtension<Int<N>>,
 ) {
     setup_test_params_inner(num_vars, |poly_size| {
@@ -42,16 +70,7 @@ pub fn setup_poly_test_params<
 >(
     num_vars: usize,
 ) -> (
-    MultilinearZipParams<
-        DensePolynomial<Int<N>, DEGREE>,
-        DensePolynomial<Int<K>, DEGREE>,
-        DensePolynomial<Int<M>, DEGREE>,
-        RaaCode<
-            DensePolynomial<Int<N>, DEGREE>,
-            DensePolynomial<Int<K>, DEGREE>,
-            DensePolynomial<Int<M>, DEGREE>,
-        >,
-    >,
+    MultilinearZipParams<TestPolyZipTypes<N, K, M, DEGREE>>,
     DenseMultilinearExtension<DensePolynomial<Int<N>, DEGREE>>,
 ) {
     setup_test_params_inner(num_vars, |poly_size| {
@@ -65,17 +84,18 @@ pub fn setup_poly_test_params<
     })
 }
 
-fn setup_test_params_inner<Eval, Cw, Comb>(
+fn setup_test_params_inner<Eval, Cw, Comb, Zt>(
     num_vars: usize,
-    prepare_evaluations: impl FnOnce(usize) -> Vec<Eval>,
+    prepare_evaluations: impl FnOnce(usize) -> Vec<Zt::Eval>,
 ) -> (
-    MultilinearZipParams<Eval, Cw, Comb, RaaCode<Eval, Cw, Comb>>,
-    DenseMultilinearExtension<Eval>,
+    MultilinearZipParams<Zt>,
+    DenseMultilinearExtension<Zt::Eval>,
 )
 where
     Eval: Ring,
     Cw: Ring + FromRef<Eval>,
     Comb: Ring + FromRef<Comb>,
+    Zt: ZipTypes<Eval = Eval, Cw = Cw, Comb = Comb, Code = RaaCode<Eval, Cw, Comb>>,
 {
     let poly_size = 1 << num_vars;
     let num_rows = 1 << num_vars.div_ceil(2);
@@ -93,7 +113,7 @@ where
 pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
     num_vars: usize,
 ) -> (
-    MultilinearZipParams<Int<N>, Int<K>, Int<M>, RaaCode<Int<N>, Int<K>, Int<M>>>,
+    MultilinearZipParams<TestZipTypes<N, K, M>>,
     MultilinearZipCommitment,
     Vec<F>,
     F,
@@ -103,7 +123,7 @@ where
     F: PrimeField + FromRef<Int<N>> + for<'a> MulByScalar<&'a F>,
     F::Inner: Transcribable,
 {
-    setup_full_protocol_inner::<_, _, _, _, N>(num_vars, setup_test_params, || {
+    setup_full_protocol_inner::<_, _, _, _, _, N>(num_vars, setup_test_params, || {
         (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect()
     })
 }
@@ -117,16 +137,7 @@ pub fn setup_full_protocol_poly<
 >(
     num_vars: usize,
 ) -> (
-    MultilinearZipParams<
-        DensePolynomial<Int<N>, DEGREE>,
-        DensePolynomial<Int<K>, DEGREE>,
-        DensePolynomial<Int<M>, DEGREE>,
-        RaaCode<
-            DensePolynomial<Int<N>, DEGREE>,
-            DensePolynomial<Int<K>, DEGREE>,
-            DensePolynomial<Int<M>, DEGREE>,
-        >,
-    >,
+    MultilinearZipParams<TestPolyZipTypes<N, K, M, DEGREE>>,
     MultilinearZipCommitment,
     Vec<F>,
     F,
@@ -136,7 +147,7 @@ where
     F: PrimeField + FromRef<DensePolynomial<Int<N>, DEGREE>> + for<'a> MulByScalar<&'a F>,
     F::Inner: Transcribable,
 {
-    setup_full_protocol_inner::<_, _, _, _, N>(num_vars, setup_poly_test_params, || {
+    setup_full_protocol_inner::<_, _, _, _, _, N>(num_vars, setup_poly_test_params, || {
         (0..num_vars)
             .map(|i| {
                 let start = i as i32 + 2;
@@ -149,38 +160,34 @@ where
     })
 }
 
-fn setup_full_protocol_inner<Eval, Cw, Comb, F, const N: usize>(
+fn setup_full_protocol_inner<Eval, Cw, Comb, Zt, F, const N: usize>(
     num_vars: usize,
-    setup: impl FnOnce(
-        usize,
-    ) -> (
-        MultilinearZipParams<Eval, Cw, Comb, RaaCode<Eval, Cw, Comb>>,
-        DenseMultilinearExtension<Eval>,
-    ),
+    setup: impl FnOnce(usize) -> (MultilinearZipParams<Zt>, DenseMultilinearExtension<Eval>),
     prepare_evaluation_point: impl FnOnce() -> Vec<Eval>,
 ) -> (
-    MultilinearZipParams<Eval, Cw, Comb, RaaCode<Eval, Cw, Comb>>,
+    MultilinearZipParams<Zt>,
     MultilinearZipCommitment,
     Vec<F>,
     F,
     Vec<u8>,
 )
 where
-    Eval: EvaluationRing,
-    Cw: CodewordRing + FromRef<Eval>,
-    Comb: LinearCombinationRing<Eval, Cw, Int<N>> + FromRef<Comb>,
+    Eval: Ring,
+    Cw: Ring + FromRef<Eval> + AsPackable,
+    Comb: Ring + FromRef<Comb>,
+    Zt: ZipTypes<Eval = Eval, Cw = Cw, Comb = Comb, Code = RaaCode<Eval, Cw, Comb>>,
     F: PrimeField + FromRef<Eval> + for<'a> MulByScalar<&'a F>,
     F::Inner: Transcribable,
 {
     let (pp, poly) = setup(num_vars);
 
-    let (data, comm) = Zip::<N, _, _, _, _>::commit(&pp, &poly).unwrap();
+    let (data, comm) = ZipPlus::commit(&pp, &poly).unwrap();
 
     let point: Vec<Eval> = prepare_evaluation_point();
     let point_f: Vec<F> = point.iter().map(F::from_ref).collect_vec();
 
     let mut prover_transcript = PcsTranscript::new();
-    Zip::<N, _, _, _, _>::open(&pp, &poly, &data, &point_f, &mut prover_transcript).unwrap();
+    ZipPlus::open(&pp, &poly, &data, &point_f, &mut prover_transcript).unwrap();
     let proof = prover_transcript.into_proof();
 
     let eval = F::from_ref(
