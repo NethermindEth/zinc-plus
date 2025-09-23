@@ -208,10 +208,7 @@ mod tests {
         ZipError,
         code::{DefaultLinearCodeSpec, LinearCode, raa::RaaCode},
         field::F256,
-        pcs::{
-            structs::{MultilinearZip, MultilinearZipCommitment, MultilinearZipParams},
-            tests::MockTranscript,
-        },
+        pcs::{structs::MultilinearZip, test_utils::*},
         pcs_transcript::PcsTranscript,
         poly::{
             dense::DensePolynomial,
@@ -251,99 +248,10 @@ mod tests {
         PolyC,
     >;
 
-    #[allow(clippy::type_complexity)]
-    fn setup_full_protocol(
-        num_vars: usize,
-    ) -> (
-        MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
-        MultilinearZipCommitment,
-        Vec<F>,
-        F,
-        Vec<u8>,
-    ) {
-        let poly_size = 1 << num_vars;
-        let evaluations: Vec<_> = (0..poly_size as i32).map(Int::<N>::from).collect();
-        let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations);
-
-        let mut keccak = MockTranscript::default();
-        let linear_code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut keccak);
-        let pp = TestZip::setup(poly_size, linear_code);
-
-        let (data, comm) = TestZip::commit(&pp, &poly).unwrap();
-
-        let point_int: Vec<Int<N>> = (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
-        let point_f: Vec<F> = point_int.iter().map(F::from).collect_vec();
-
-        let mut prover_transcript = PcsTranscript::new();
-        TestZip::open(&pp, &poly, &data, &point_f, &mut prover_transcript).unwrap();
-        let proof = prover_transcript.into_proof();
-
-        let eval: F = match poly.evaluate(&point_int) {
-            None => panic!("failed to evaluate polynomial"),
-            Some(p) => p,
-        }
-        .into();
-
-        (pp, comm, point_f, eval, proof)
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn setup_full_protocol_poly(
-        num_vars: usize,
-    ) -> (
-        MultilinearZipParams<
-            DensePolynomial<Int<N>, DEGREE>,
-            DensePolynomial<Int<K>, DEGREE>,
-            DensePolynomial<Int<M>, DEGREE>,
-            PolyC,
-        >,
-        MultilinearZipCommitment,
-        Vec<F>,
-        F,
-        Vec<u8>,
-    ) {
-        let poly_size = 1 << num_vars;
-        let eval_coeffs: Vec<_> = (0..poly_size as i32).map(Int::<N>::from).collect_vec();
-        let evaluations = eval_coeffs
-            .windows(DEGREE + 1)
-            .map(DensePolynomial::new)
-            .collect_vec();
-        let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations);
-
-        let mut keccak = MockTranscript::default();
-        let linear_code = PolyC::new(&DefaultLinearCodeSpec, poly_size, true, &mut keccak);
-        let pp = TestPolyZip::setup(poly_size, linear_code);
-
-        let (data, comm) = TestPolyZip::commit(&pp, &poly).unwrap();
-
-        let point_poly: Vec<DensePolynomial<Int<N>, DEGREE>> = (0..num_vars)
-            .map(|i| {
-                let start = i as i32 + 2;
-                let vec = (start..=(start + DEGREE as i32))
-                    .map(Int::<N>::from)
-                    .collect_vec();
-                DensePolynomial::new(vec)
-            })
-            .collect();
-        let point_f: Vec<F> = point_poly.iter().map(F::from).collect_vec();
-
-        let mut prover_transcript = PcsTranscript::new();
-        TestPolyZip::open(&pp, &poly, &data, &point_f, &mut prover_transcript).unwrap();
-        let proof = prover_transcript.into_proof();
-
-        let eval: F = match poly.evaluate(&point_poly) {
-            None => panic!("failed to evaluate polynomial"),
-            Some(p) => p,
-        }
-        .into();
-
-        (pp, comm, point_f, eval, proof)
-    }
-
     #[test]
     fn successful_verification_of_valid_proof() {
         let num_vars = 4;
-        let (pp, comm, point_f, eval, proof) = setup_full_protocol(num_vars);
+        let (pp, comm, point_f, eval, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
 
         let mut verifier_transcript = PcsTranscript::from_proof(&proof);
         let result = TestZip::verify(&pp, &comm, &point_f, &eval, &mut verifier_transcript);
@@ -354,7 +262,8 @@ mod tests {
     #[test]
     fn successful_verification_of_valid_proof_poly() {
         let num_vars = 4;
-        let (pp, comm, point_f, eval, proof) = setup_full_protocol_poly(num_vars);
+        let (pp, comm, point_f, eval, proof) =
+            setup_full_protocol_poly::<F, N, K, M, DEGREE>(num_vars);
 
         let mut verifier_transcript = PcsTranscript::from_proof(&proof);
         let result = TestPolyZip::verify(&pp, &comm, &point_f, &eval, &mut verifier_transcript);
@@ -365,7 +274,7 @@ mod tests {
     #[test]
     fn verification_fails_with_incorrect_evaluation() {
         let num_vars = 4;
-        let (pp, comm, point_f, eval, proof) = setup_full_protocol(num_vars);
+        let (pp, comm, point_f, eval, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
 
         let one = F::one();
 
@@ -385,7 +294,7 @@ mod tests {
     #[test]
     fn verification_fails_with_tampered_proof() {
         let num_vars = 4;
-        let (pp, comm, point_f, eval, proof) = setup_full_protocol(num_vars);
+        let (pp, comm, point_f, eval, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
 
         let mut tampered = proof.clone();
         tampered[0] ^= 0x01;
@@ -399,7 +308,8 @@ mod tests {
     #[test]
     fn verification_fails_with_wrong_commitment() {
         let num_vars = 4;
-        let (pp, _comm_poly1, point_f, eval, proof_poly1) = setup_full_protocol(num_vars);
+        let (pp, _comm_poly1, point_f, eval, proof_poly1) =
+            setup_full_protocol::<F, N, K, M>(num_vars);
 
         let different_evals: Vec<_> = (20..(20 + (1 << num_vars))).map(Int::from).collect();
         let poly2 = DenseMultilinearExtension::from_evaluations_vec(num_vars, different_evals);
@@ -414,7 +324,7 @@ mod tests {
     #[test]
     fn verification_fails_with_invalid_point_size() {
         let num_vars = 4;
-        let (pp, comm, _point_f, eval, proof) = setup_full_protocol(num_vars);
+        let (pp, comm, _point_f, eval, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
         let mut invalid_point = vec![];
         for i in 0..=num_vars {
             invalid_point.push(F::from(100 + i as i32));

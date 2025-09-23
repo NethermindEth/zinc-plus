@@ -222,7 +222,7 @@ mod tests {
         merkle::{MerkleTree, MtHash},
         pcs::{
             structs::{MultilinearZip, MultilinearZipParams},
-            tests::MockTranscript,
+            test_utils::*,
         },
         pcs_transcript::PcsTranscript,
         poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
@@ -252,27 +252,6 @@ mod tests {
         DensePolynomial<Int<M>, DEGREE>,
         PolyC,
     >;
-
-    /// Helper function to set up common parameters for tests.
-    fn setup_test_params(
-        num_vars: usize,
-    ) -> (
-        MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
-        DenseMultilinearExtension<Int<INT_LIMBS>>,
-    ) {
-        let poly_size = 1 << num_vars;
-        // Correctly calculate num_rows for both even and odd num_vars
-        let num_rows = 1 << num_vars.div_ceil(2);
-
-        let mut transcript = MockTranscript::default();
-        let code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut transcript);
-        let pp = MultilinearZipParams::new(num_vars, num_rows, code);
-
-        let evaluations: Vec<_> = (1..=poly_size).map(|v| Int::from(v as i32)).collect();
-        let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations);
-
-        (pp, poly)
-    }
 
     #[test]
     fn commit_rejects_too_many_variables() {

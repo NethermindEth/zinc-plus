@@ -235,7 +235,7 @@ mod tests {
     use super::*;
     use crate::{
         code::{DefaultLinearCodeSpec, LinearCode},
-        pcs::tests::MockTranscript,
+        pcs::test_utils::MockTranscript,
         utils::shuffle_seeded,
     };
 

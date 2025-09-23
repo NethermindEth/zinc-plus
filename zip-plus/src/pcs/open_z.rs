@@ -159,17 +159,16 @@ impl<
 mod tests {
     use crypto_bigint::{Random, U256, const_monty_params};
     use crypto_primitives::crypto_bigint_int::Int;
-    use itertools::Itertools;
     use num_traits::{ConstOne, ConstZero, One};
     use rand::prelude::*;
 
     use crate::{
-        code::{DefaultLinearCodeSpec, LinearCode, raa::RaaCode},
+        code::{LinearCode, raa::RaaCode},
         field::ConstMontyField,
         merkle::MerkleTree,
         pcs::{
-            structs::{MultilinearZip, MultilinearZipData, MultilinearZipParams},
-            tests::MockTranscript,
+            structs::{MultilinearZip, MultilinearZipData},
+            test_utils::*,
         },
         pcs_transcript::PcsTranscript,
         poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
@@ -206,57 +205,6 @@ mod tests {
         DensePolynomial<Int<M>, DEGREE>,
         PolyC,
     >;
-
-    /// Helper function to set up common parameters for tests.
-    fn setup_test_params(
-        num_vars: usize,
-    ) -> (
-        MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
-        DenseMultilinearExtension<Int<INT_LIMBS>>,
-    ) {
-        let poly_size = 1 << num_vars;
-        let num_rows = 1 << num_vars.div_ceil(2);
-
-        let mut transcript = MockTranscript::default();
-        let code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut transcript);
-        let pp = MultilinearZipParams::new(num_vars, num_rows, code);
-
-        let evaluations: Vec<_> = (1..=poly_size as i32).map(Int::from).collect();
-        let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations);
-
-        (pp, poly)
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn setup_poly_test_params(
-        num_vars: usize,
-    ) -> (
-        MultilinearZipParams<
-            DensePolynomial<Int<N>, DEGREE>,
-            DensePolynomial<Int<K>, DEGREE>,
-            DensePolynomial<Int<M>, DEGREE>,
-            PolyC,
-        >,
-        DenseMultilinearExtension<DensePolynomial<Int<INT_LIMBS>, DEGREE>>,
-    ) {
-        let poly_size = 1 << num_vars;
-        let num_rows = 1 << num_vars.div_ceil(2);
-
-        let mut transcript = MockTranscript::default();
-        let code = PolyC::new(&DefaultLinearCodeSpec, poly_size, true, &mut transcript);
-        let pp = MultilinearZipParams::new(num_vars, num_rows, code);
-
-        let eval_coeffs: Vec<_> = (1..=(poly_size * DEGREE) as i32)
-            .map(Int::from)
-            .collect_vec();
-        let evaluations = eval_coeffs
-            .chunks_exact(DEGREE)
-            .map(DensePolynomial::new)
-            .collect_vec();
-        let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations);
-
-        (pp, poly)
-    }
 
     fn random_point<const I: usize>(num_vars: usize, rng: &mut impl RngCore) -> Vec<Int<I>> {
         (0..num_vars).map(|_| Int::random(rng)).collect()
@@ -416,7 +364,7 @@ mod tests {
             DenseMultilinearExtension::from_evaluations_vec(oversized_num_vars, oversized_evals);
 
         // This data is for a 4-variable poly, but we need it as a placeholder.
-        let (data, _) = TestZip::commit(&pp, &setup_test_params(num_vars).1).unwrap();
+        let (data, _) = TestZip::commit(&pp, &setup_test_params::<N, K, M>(num_vars).1).unwrap();
 
         let mut rng = ThreadRng::default();
         let point_int = random_point::<INT_LIMBS>(oversized_num_vars, &mut rng);
