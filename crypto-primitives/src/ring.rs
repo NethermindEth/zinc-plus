@@ -16,7 +16,7 @@ pub trait Ring:
     Sized
     + Debug
     + Display
-    + Copy
+    + Clone
     + PartialEq
     + Eq
     + Default
