@@ -7,9 +7,12 @@ use crypto_primitives::Ring;
 use thiserror::Error;
 
 pub trait Polynomial<R: Ring> {
-    /// Returns the degree of the polynomial - a number of coefficients.
-    fn degree(&self) -> usize;
+    /// The (max) degree of the polynomial - one less than a number of
+    /// coefficients.
+    const DEGREE_BOUND: usize;
 
+    // Note: we can't reference Self::DEGREE_BOUND here type parameters may not be
+    // used in const expressions
     fn evaluate<C>(&self, point: &[C]) -> Result<R, EvaluationError>
     where
         R: MulByScalar<C>;

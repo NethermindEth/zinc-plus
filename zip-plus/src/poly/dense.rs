@@ -1,12 +1,13 @@
 use super::{EvaluationError, Polynomial};
 use crate::{
-    pcs::structs::{AsPackable, MulByScalar, PackedInt},
+    pcs::structs::{AsPackable, MulByScalar},
     traits::{FromRef, Transcribable},
     utils::ReinterpretVector,
 };
-use crypto_primitives::{Ring, crypto_bigint_int::Int};
+use crypto_primitives::Ring;
 use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, One, Zero};
 use p3_field::Packable;
+use rand::{distr::StandardUniform, prelude::*};
 use std::{
     array,
     fmt::Display,
@@ -17,7 +18,6 @@ use std::{
 
 // Sadly, we cannot use [R; DEGREE + 1] in stable Rust yet, so we use separate
 // coeff_0.
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DensePolynomial<R, const DEGREE: usize> {
     /// Coefficient of the polynomial of degree 0.
@@ -57,9 +57,7 @@ impl<R: Ring, const DEGREE: usize> DensePolynomial<R, DEGREE> {
 }
 
 impl<R: Ring, const DEGREE: usize> Polynomial<R> for DensePolynomial<R, DEGREE> {
-    fn degree(&self) -> usize {
-        DEGREE
-    }
+    const DEGREE_BOUND: usize = DEGREE;
 
     fn evaluate<C>(&self, _point: &[C]) -> Result<R, EvaluationError>
     where
@@ -188,7 +186,7 @@ impl<'a, R: Ring, const DEGREE: usize> AddAssign<&'a Self> for DensePolynomial<R
     #[inline(always)]
     fn add_assign(&mut self, rhs: &'a Self) {
         self.coeff_0 += &rhs.coeff_0;
-        for i in 0..=DEGREE {
+        for i in 0..DEGREE {
             self.coeffs[i] += &rhs.coeffs[i];
         }
     }
@@ -207,7 +205,7 @@ impl<'a, R: Ring, const DEGREE: usize> SubAssign<&'a Self> for DensePolynomial<R
     #[inline(always)]
     fn sub_assign(&mut self, rhs: &'a Self) {
         self.coeff_0 -= &rhs.coeff_0;
-        for i in 0..=DEGREE {
+        for i in 0..DEGREE {
             self.coeffs[i] -= &rhs.coeffs[i];
         }
     }
@@ -307,6 +305,18 @@ impl<'a, R: Ring, const DEGREE: usize> Product<&'a Self> for DensePolynomial<R, 
 
 impl<R: Ring, const DEGREE: usize> Ring for DensePolynomial<R, DEGREE> {}
 
+impl<R: Ring, const DEGREE: usize> Distribution<DensePolynomial<R, DEGREE>> for StandardUniform
+where
+    StandardUniform: Distribution<R>,
+    StandardUniform: Distribution<[R; DEGREE]>, // This one we get for free
+{
+    fn sample<Gen: Rng + ?Sized>(&self, rng: &mut Gen) -> DensePolynomial<R, DEGREE> {
+        let coeff_0: R = rng.random();
+        let coeffs: [R; DEGREE] = rng.random();
+        DensePolynomial { coeff_0, coeffs }
+    }
+}
+
 //
 // Zip-specific traits
 //
@@ -346,43 +356,39 @@ impl<R: Transcribable + Default, const DEGREE: usize> Transcribable for DensePol
     }
 }
 
-impl<const LIMBS: usize, const LIMBS2: usize, const DEGREE: usize>
-    FromRef<DensePolynomial<Int<LIMBS2>, DEGREE>> for DensePolynomial<Int<LIMBS>, DEGREE>
+impl<R, S, const DEGREE: usize> FromRef<DensePolynomial<S, DEGREE>> for DensePolynomial<R, DEGREE>
+where
+    R: Ring + FromRef<S>,
 {
-    fn from_ref(value: &DensePolynomial<Int<LIMBS2>, DEGREE>) -> Self {
-        if LIMBS < LIMBS2 {
-            panic!("Cannot convert polynomial of Int<{LIMBS}> to smaller Int<{LIMBS2}>");
-        }
-        let coeff_0 = value.coeff_0.resize();
-        let mut coeffs = [Int::<LIMBS>::default(); DEGREE];
+    fn from_ref(value: &DensePolynomial<S, DEGREE>) -> Self {
+        let coeff_0 = R::from_ref(&value.coeff_0);
+        let mut coeffs = array::from_fn::<_, DEGREE, _>(|_| R::default());
         coeffs
             .iter_mut()
             .zip(value.coeffs.iter())
             .for_each(|(coeff, other_coeff)| {
-                *coeff = other_coeff.resize();
+                *coeff = R::from_ref(other_coeff);
             });
         DensePolynomial { coeff_0, coeffs }
     }
 }
 
-impl<const LIMBS: usize, const LIMBS2: usize, const DEGREE: usize>
-    From<&DensePolynomial<Int<LIMBS2>, DEGREE>> for DensePolynomial<Int<LIMBS>, DEGREE>
+impl<R, S, const DEGREE: usize> From<&DensePolynomial<S, DEGREE>> for DensePolynomial<R, DEGREE>
+where
+    R: Ring + FromRef<S>,
 {
-    fn from(value: &DensePolynomial<Int<LIMBS2>, DEGREE>) -> Self {
+    fn from(value: &DensePolynomial<S, DEGREE>) -> Self {
         Self::from_ref(value)
     }
 }
 
-impl<'a, const LIMBS: usize, const LIMBS2: usize, const DEGREE: usize> MulByScalar<&'a Int<LIMBS2>>
-    for DensePolynomial<Int<LIMBS>, DEGREE>
+impl<'a, R, S, const DEGREE: usize> MulByScalar<&'a S> for DensePolynomial<R, DEGREE>
+where
+    R: Ring + MulByScalar<&'a S>,
 {
-    fn mul_by_scalar(&self, rhs: &'a Int<LIMBS2>) -> Option<Self> {
-        if LIMBS < LIMBS2 {
-            return None;
-        }
+    fn mul_by_scalar(&self, rhs: &'a S) -> Option<Self> {
         let coeff_0 = self.coeff_0.mul_by_scalar(rhs)?;
-        let coeffs: Option<Vec<Int<LIMBS>>> =
-            self.coeffs.iter().map(|c| c.mul_by_scalar(rhs)).collect();
+        let coeffs: Option<Vec<R>> = self.coeffs.iter().map(|c| c.mul_by_scalar(rhs)).collect();
 
         Some(Self {
             coeff_0,
@@ -395,8 +401,8 @@ impl<'a, const LIMBS: usize, const LIMBS2: usize, const DEGREE: usize> MulByScal
 // PackableDensePolynomial
 //
 
-impl<const LIMBS: usize, const DEGREE: usize> AsPackable for DensePolynomial<Int<LIMBS>, DEGREE> {
-    type Packable = PackableDensePolynomial<PackedInt<LIMBS>, DEGREE>;
+impl<R: AsPackable, const DEGREE: usize> AsPackable for DensePolynomial<R, DEGREE> {
+    type Packable = PackableDensePolynomial<R::Packable, DEGREE>;
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -3,9 +3,7 @@ use crate::pcs::structs::MulByScalar;
 use crypto_primitives::crypto_bigint_int::Int;
 
 impl<const LIMBS: usize> Polynomial<Self> for Int<LIMBS> {
-    fn degree(&self) -> usize {
-        0
-    }
+    const DEGREE_BOUND: usize = 0;
 
     fn evaluate<C>(&self, point: &[C]) -> Result<Int<LIMBS>, EvaluationError>
     where
@@ -25,9 +23,7 @@ macro_rules! impl_zero_degree_for_primitives {
     ($($t:ty),*) => {
         $(
             impl Polynomial<$t> for $t {
-                fn degree(&self) -> usize {
-                    0
-                }
+                const DEGREE_BOUND: usize = 0;
 
                 fn evaluate<C>(&self, point: &[C]) -> Result<$t, EvaluationError>
                 where
