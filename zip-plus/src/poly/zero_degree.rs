@@ -7,7 +7,7 @@ impl<const LIMBS: usize> Polynomial<Self> for Int<LIMBS> {
 
     fn evaluate<C>(&self, point: &[C]) -> Result<Int<LIMBS>, EvaluationError>
     where
-        Self: MulByScalar<C>,
+        Self: for<'a> MulByScalar<&'a C>,
     {
         if !point.is_empty() {
             return Err(EvaluationError::WrongPointWidth {
@@ -27,7 +27,7 @@ macro_rules! impl_zero_degree_for_primitives {
 
                 fn evaluate<C>(&self, point: &[C]) -> Result<$t, EvaluationError>
                 where
-                    Self: MulByScalar<C>,
+                    Self: for<'a> MulByScalar<&'a C>,
                 {
                     if !point.is_empty() {
                         return Err(EvaluationError::WrongPointWidth {

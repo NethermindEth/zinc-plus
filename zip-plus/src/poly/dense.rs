@@ -61,7 +61,7 @@ impl<R: Ring, const DEGREE: usize> Polynomial<R> for DensePolynomial<R, DEGREE> 
 
     fn evaluate<C>(&self, _point: &[C]) -> Result<R, EvaluationError>
     where
-        R: MulByScalar<C>,
+        R: for<'a> MulByScalar<&'a C>,
     {
         todo!("Can't evaluate DensePolynomial yet");
     }

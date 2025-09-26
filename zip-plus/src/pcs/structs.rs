@@ -11,17 +11,32 @@ use p3_field::Packable;
 use std::marker::PhantomData;
 
 pub trait ZipTypes: Send + Sync {
+    /// Coefficient ring of evaluation polynomial [Self::Eval]
     type EvalR: Ring;
-    type Eval: EvaluationPolynomial<Self::EvalR>;
+    /// Ring of witness/polynomial evaluations on boolean hypercube
+    type Eval: Ring + Polynomial<Self::EvalR>;
 
+    /// Coefficient ring of codeword polynomial [Self::Cw]
     type CwR: Ring;
-    type Cw: CodewordPolynomial<Self::CwR>;
+    /// Ring of codeword elements, at least as wide as the evaluation ring
+    type Cw: Ring + Polynomial<Self::CwR> + Transcribable + AsPackable + Copy;
 
-    type Chal: ChallengeRing;
+    /// Ring of challenge elements (coefficients) to perform a random linear
+    /// combination of codewords
+    type Chal: Ring + Transcribable;
 
+    /// Coefficient ring of linear combination polynomial [Self::Comb]
     type CombR: Ring;
-    type Comb: LinearCombinationPolynomial<Self::CombR, Self::Eval, Self::Cw, Self::Chal>;
+    /// Ring of elements in the linear combination of codewords, at least as
+    /// wide as the evaluation, codeword, and challenge rings.
+    type Comb: Ring
+        + Polynomial<Self::CombR>
+        + Transcribable
+        + FromRef<Self::Eval>
+        + FromRef<Self::Cw>
+        + for<'a> MulByScalar<&'a Self::Chal>;
 
+    /// Linear code used to encode the polynomial matrix representation
     type Code: LinearCode<Self::Eval, Self::Cw, Self::Comb>;
 }
 
@@ -129,54 +144,6 @@ impl<const LIMBS: usize> Transcribable for PackedInt<LIMBS> {
     fn write_transcription_bytes(&self, buf: &mut [u8]) {
         self.0.write_transcription_bytes(buf)
     }
-}
-
-//
-// Trait aliases for various Rings used in the Zip PCS
-//
-
-/// Ring of witness/polynomial evaluations on boolean hypercube
-pub trait EvaluationPolynomial<R: Ring>: Ring + Polynomial<R> {}
-impl<R, Eval> EvaluationPolynomial<R> for Eval
-where
-    R: Ring,
-    Eval: Ring + Polynomial<R>,
-{
-}
-
-/// Ring of codeword elements, at least as wide as the evaluation ring
-pub trait CodewordPolynomial<R: Ring>:
-    Ring + Polynomial<R> + Transcribable + AsPackable + Copy
-{
-}
-impl<R, Cw> CodewordPolynomial<R> for Cw
-where
-    R: Ring,
-    Cw: Ring + Polynomial<R> + Transcribable + AsPackable + Copy,
-{
-}
-
-/// Ring of challenge elements (coefficients) to perform a random linear
-/// combination of codewords
-pub trait ChallengeRing: Ring + Transcribable {}
-impl<Chal> ChallengeRing for Chal where Chal: Ring + Transcribable {}
-
-/// Ring of elements in the linear combination of codewords, at least as wide as
-/// the evaluation, codeword, and challenge rings.
-pub trait LinearCombinationPolynomial<R: Ring, Eval, Cw, Chal>:
-    Ring + Polynomial<R> + Transcribable + FromRef<Eval> + FromRef<Cw> + for<'a> MulByScalar<&'a Chal>
-{
-}
-impl<R, Eval, Cw, Chal, Comb> LinearCombinationPolynomial<R, Eval, Cw, Chal> for Comb
-where
-    R: Ring,
-    Comb: Ring
-        + Polynomial<R>
-        + Transcribable
-        + FromRef<Eval>
-        + FromRef<Cw>
-        + for<'a> MulByScalar<&'a Chal>,
-{
 }
 
 pub trait MulByScalar<Rhs>: Sized {

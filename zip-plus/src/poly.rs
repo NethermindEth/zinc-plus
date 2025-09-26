@@ -15,7 +15,7 @@ pub trait Polynomial<R: Ring> {
     // used in const expressions
     fn evaluate<C>(&self, point: &[C]) -> Result<R, EvaluationError>
     where
-        R: MulByScalar<C>;
+        R: for<'a> MulByScalar<&'a C>;
 }
 
 #[derive(Clone, Debug, PartialEq, Error)]
