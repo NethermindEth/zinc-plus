@@ -575,6 +575,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))] // This test is very slow in Miri
     fn commit_with_many_variables() {
         let num_vars = 16;
         let (pp, poly) = setup_test_params(num_vars);

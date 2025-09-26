@@ -575,6 +575,7 @@ mod tests {
         prop::collection::vec(any_f(), n)
     }
 
+    #[cfg(not(miri))] // proptest tests are insanely slow in Miri
     proptest! {
         #[test]
         fn prop_eval_add_is_linear((p1, p2, r) in any_aligned_pair_with_point()) {

@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn test_merkle_proof() {
         const N: usize = 3;
-        let leaves_len = 1024;
+        let leaves_len = if cfg!(miri) { 16 } else { 1024 };
         let mut rng = rng();
         let leaves_data = (0..leaves_len)
             .map(|_| Int::random(&mut rng))

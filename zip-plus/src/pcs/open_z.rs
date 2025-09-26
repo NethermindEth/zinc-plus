@@ -479,7 +479,7 @@ mod tests {
         let num_vars = 4;
         let (pp, _) = setup_test_params(num_vars);
 
-        let zero_evals: Vec<_> = (0..1 << num_vars).map(|_| Int::from(0)).collect();
+        let zero_evals: Vec<_> = (0..1 << num_vars).map(|_| Int::ZERO).collect();
         let zero_poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, zero_evals);
 
         let (data, comm) = TestZip::commit(&pp, &zero_poly).unwrap();
@@ -502,12 +502,12 @@ mod tests {
 
     #[test]
     fn evaluation_at_the_zero_point() {
-        let num_vars = 4;
+        let num_vars = if cfg!(miri) { 2 } else { 4 };
         let (pp, poly) = setup_test_params(num_vars);
 
         let (data, comm) = TestZip::commit(&pp, &poly).unwrap();
 
-        let point_int: Vec<Int<INT_LIMBS>> = (0..num_vars).map(|_| Int::from(0)).collect();
+        let point_int: Vec<Int<INT_LIMBS>> = (0..num_vars).map(|_| Int::ZERO).collect();
         let point_f: Vec<F> = point_int.iter().map(F::from).collect();
 
         let mut prover_transcript = PcsTranscript::new();
@@ -542,8 +542,8 @@ mod tests {
         let (data, comm) = TestZip::commit(&pp, &poly).unwrap();
 
         // A point of [1, 0, 0, 0] will evaluate to poly.evaluations[1].
-        let mut point_coords = vec![Int::from(0); num_vars];
-        point_coords[0] = Int::from(1);
+        let mut point_coords = vec![Int::ZERO; num_vars];
+        point_coords[0] = Int::ONE;
         let point_int = point_coords;
         let point_f: Vec<F> = point_int.iter().map(F::from).collect();
 

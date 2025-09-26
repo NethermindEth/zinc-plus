@@ -183,6 +183,7 @@ mod prop_tests {
         any::<bool>()
     }
 
+    #[cfg(not(miri))] // proptest tests are insanely slow in Miri
     proptest! {
         #[test]
         fn prop_from_unsigned_matches_sum_of_bits(x in any_u128()) {

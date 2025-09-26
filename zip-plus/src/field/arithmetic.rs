@@ -518,6 +518,7 @@ mod prop_tests {
         any_f().prop_filter("non-zero", |x| !x.is_zero())
     }
 
+    #[cfg(not(miri))] // proptest tests are insanely slow in Miri
     proptest! {
         #[test]
         fn prop_sum_over_concat_equals_sum_over_parts(a in proptest::collection::vec(any_f(), 0..20), b in proptest::collection::vec(any_f(), 0..20)) {
