@@ -244,7 +244,6 @@ mod tests {
 
     // Define common types for testing
     const INT_LIMBS: usize = 1;
-    type I = Int<INT_LIMBS>;
 
     const N: usize = INT_LIMBS;
     const K: usize = INT_LIMBS * 4;
@@ -271,7 +270,8 @@ mod tests {
 
     #[test]
     fn repeat_function_duplicates_row_correctly() {
-        let input = vec![I::from(10), I::from(20)];
+        type I = Int<N>;
+        let input = [10, 20].map(I::from);
 
         let repetition_factor = 3;
 
@@ -293,6 +293,7 @@ mod tests {
 
     #[test]
     fn accumulate_function_computes_cumulative_sum() {
+        type I = Int<N>;
         let mut input1: Vec<I> = [1, 2, 3, 4].into_iter().map(I::from).collect();
         let expected1: Vec<I> = [1, 3, 6, 10].into_iter().map(I::from).collect();
         accumulate(&mut input1);
@@ -320,6 +321,7 @@ mod tests {
 
     #[test]
     fn shuffle_is_deterministic_for_a_given_seed() {
+        type I = Int<N>;
         let original: Vec<I> = (1..=10).map(I::from).collect();
         let mut vec1 = original.clone();
         let mut vec2 = original.clone();
@@ -353,8 +355,8 @@ mod tests {
     #[test]
     fn encoding_preserves_linearity() {
         test_raa::<Int<N>, Int<K>, Int<M>, _>(16, |code| {
-            let a: Vec<Int<N>> = (1..=4).map(I::from).collect();
-            let b: Vec<Int<N>> = (5..=8).map(I::from).collect();
+            let a: Vec<Int<N>> = (1..=4).map(Int::<N>::from).collect();
+            let b: Vec<Int<N>> = (5..=8).map(Int::<N>::from).collect();
             let sum_ab: Vec<Int<N>> = a.iter().zip(b.iter()).map(|(x, y)| *x + y).collect();
 
             let encode_a: Vec<Int<K>> = code.encode(&a);
@@ -371,10 +373,26 @@ mod tests {
         })
     }
 
+    /// Since our shuffle seeds are fixed, we can test the encoding
+    /// against a known output.
+    #[test]
+    fn encoding_produces_predictable_results() {
+        test_raa::<Int<N>, Int<K>, Int<M>, _>(16, |code| {
+            let a: Vec<Int<N>> = (1..=4).map(Int::<N>::from).collect();
+
+            let encode_a: Vec<Int<K>> = code.encode(&a);
+
+            assert_eq!(
+                encode_a,
+                [0x11, 0x1C, 0x21, 0x28, 0x3C, 0x48, 0x49, 0x58].map(Int::<K>::from)
+            );
+        })
+    }
+
     #[test]
     fn encoding_zero_vector_results_in_zero_codeword() {
         test_raa::<Int<N>, Int<K>, Int<M>, _>(16, |code| {
-            let zero_vector: Vec<I> = vec![Int::<N>::zero(); code.row_len()];
+            let zero_vector: Vec<_> = vec![Int::<N>::zero(); code.row_len()];
             let encoded_vector: Vec<Int<K>> = code.encode(&zero_vector);
 
             let expected_codeword: Vec<Int<K>> = vec![Int::zero(); code.codeword_len()];
