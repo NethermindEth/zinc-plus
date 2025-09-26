@@ -5,6 +5,7 @@ use std::{marker::PhantomData, ops::AddAssign};
 use crate::{
     add,
     code::{LinearCode, LinearCodeSpec},
+    mul, sub,
     traits::Transcript,
     utils::shuffle_seeded,
 };
@@ -39,7 +40,6 @@ where
     Cw: Ring + for<'a> From<&'a Eval>,
     Comb: Ring + for<'a> From<&'a Comb>,
 {
-    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     pub fn new<S: LinearCodeSpec, T: Transcript>(
         spec: &S,
         poly_size: usize,
@@ -49,15 +49,17 @@ where
         // Taken from original Zip codes
 
         let num_vars = poly_size.ilog2();
-        let row_len: usize = (1_u64 << num_vars)
+        let two_pow_num_vars = 1_usize
+            .checked_shl(num_vars)
+            .expect("2 ** num_vars overflows");
+        let row_len: usize = two_pow_num_vars
             .isqrt()
-            .next_power_of_two()
-            .try_into()
+            .checked_next_power_of_two()
             .expect("row_len overflow");
         let repetition_factor = spec.repetition_factor();
 
         let num_column_opening = spec.num_column_opening();
-        let n_0 = 20.min((1 << num_vars) - 1);
+        let n_0 = sub!(two_pow_num_vars, 1).min(20);
         let num_proximity_testing = spec.num_proximity_testing(row_len, n_0);
 
         // Width of each entry in codeword vector, in bits.
@@ -65,7 +67,10 @@ where
         let codeword_width_bits = {
             // let initial_bits = crypto_bigint::Int::<N>::BITS;
 
-            let initial_bits = size_of::<Eval>() as u32 * 8;
+            let initial_bits = u32::try_from(size_of::<Eval>())
+                .ok()
+                .and_then(|b| b.checked_mul(8))
+                .expect("Size of Eval type is too large");
 
             let rep_factor_log = repetition_factor
                 .checked_next_power_of_two()
@@ -74,14 +79,18 @@ where
             let num_vars_even = if num_vars.is_multiple_of(2) {
                 num_vars
             } else {
-                num_vars + 1
+                add!(num_vars, 1)
             };
-            initial_bits + num_vars_even + (2 * rep_factor_log)
+            add!(initial_bits, add!(num_vars_even, mul!(rep_factor_log, 2)))
         };
+        let codeword_type_bits = u32::try_from(size_of::<Cw>())
+            .ok()
+            .and_then(|b| b.checked_mul(8))
+            .expect("Size of Cw type is too large");
         assert!(
-            size_of::<Cw>() as u32 * 8 >= codeword_width_bits,
+            codeword_type_bits >= codeword_width_bits,
             "Cannot fit {codeword_width_bits}-bit wide codeword entries in {} bits entries",
-            size_of::<Cw>() * 8
+            codeword_type_bits
         );
 
         let perm_1_seed = transcript.get_challenge();
@@ -209,15 +218,15 @@ where
 {
     for i in 1..input.len() {
         // This allows us to circumvent Rust bounds checking
-        let input_i: &mut I = unsafe {
-            let input_i: *mut I = &mut input[i];
-            &mut *input_i
+        unsafe {
+            let input_i: *mut I = input.get_unchecked_mut(i);
+            let input_i: &mut I = &mut *input_i;
+            // Note:
+            // For Int ring, AddAssign here still results in a panic, but that's more
+            // efficient than doing a checked_add and converting ConstCtOption
+            // into Option and panicking later.
+            *input_i += input.get_unchecked(i - 1);
         };
-        // Note:
-        // For Int ring, this still results in a panic, but that's more efficient than
-        // doing a checked_add and converting ConstCtOption into Option and
-        // panicking later.
-        *input_i += &input[i - 1];
     }
 }
 
