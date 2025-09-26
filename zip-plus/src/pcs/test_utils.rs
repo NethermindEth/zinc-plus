@@ -42,11 +42,7 @@ impl<const N: usize, const K: usize, const M: usize, const DEGREE: usize> ZipTyp
     type Chal = Int<N>;
     type CombR = Int<M>;
     type Comb = DensePolynomial<Int<M>, DEGREE>;
-    type Code = RaaCode<
-        DensePolynomial<Int<N>, DEGREE>,
-        DensePolynomial<Int<K>, DEGREE>,
-        DensePolynomial<Int<M>, DEGREE>,
-    >;
+    type Code = RaaCode<DensePolynomial<Int<N>, DEGREE>, DensePolynomial<Int<K>, DEGREE>, Int<M>>;
 }
 
 /// Helper function to set up common parameters for tests.
@@ -155,7 +151,7 @@ where
     })
 }
 
-fn setup_full_protocol_inner<Eval, Cw, Comb, Zt, F, const N: usize>(
+fn setup_full_protocol_inner<Eval, Cw, CombR, Zt, F, const N: usize>(
     num_vars: usize,
     setup: impl FnOnce(usize) -> (MultilinearZipParams<Zt>, DenseMultilinearExtension<Eval>),
     prepare_evaluation_point: impl FnOnce() -> Vec<Eval>,
@@ -169,8 +165,8 @@ fn setup_full_protocol_inner<Eval, Cw, Comb, Zt, F, const N: usize>(
 where
     Eval: Ring,
     Cw: Ring + FromRef<Eval> + AsPackable,
-    Comb: Ring + FromRef<Comb>,
-    Zt: ZipTypes<Eval = Eval, Cw = Cw, Comb = Comb, Code = RaaCode<Eval, Cw, Comb>>,
+    CombR: Ring + FromRef<CombR>,
+    Zt: ZipTypes<Eval = Eval, Cw = Cw, CombR = CombR, Code = RaaCode<Eval, Cw, CombR>>,
     F: PrimeField + FromRef<Eval> + for<'a> MulByScalar<&'a F>,
     F::Inner: Transcribable,
 {

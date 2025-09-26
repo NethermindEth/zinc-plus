@@ -59,11 +59,26 @@ impl<R: Ring, const DEGREE: usize> DensePolynomial<R, DEGREE> {
 impl<R: Ring, const DEGREE: usize> Polynomial<R> for DensePolynomial<R, DEGREE> {
     const DEGREE_BOUND: usize = DEGREE;
 
-    fn evaluate<C>(&self, _point: &[C]) -> Result<R, EvaluationError>
+    fn evaluate<C>(&self, point: &[C]) -> Result<R, EvaluationError>
     where
         R: for<'a> MulByScalar<&'a C>,
     {
-        todo!("Can't evaluate DensePolynomial yet");
+        if point.len() != DEGREE {
+            return Err(EvaluationError::WrongPointWidth {
+                expected: DEGREE,
+                actual: point.len(),
+            });
+        }
+
+        // A trivial implementation of a polynomial evaluation at a given point.
+        let mut result = self.coeff_0.clone();
+        for (coeff, scalar) in self.coeffs.iter().zip(point.iter()) {
+            let term = coeff
+                .mul_by_scalar(scalar)
+                .ok_or(EvaluationError::Overflow)?;
+            result = result.checked_add(&term).ok_or(EvaluationError::Overflow)?;
+        }
+        Ok(result)
     }
 }
 

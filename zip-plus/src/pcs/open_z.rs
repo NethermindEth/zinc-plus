@@ -8,7 +8,7 @@ use crate::{
         utils::{ColumnOpening, left_point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
-    poly::mle::DenseMultilinearExtension,
+    poly::{Polynomial, mle::DenseMultilinearExtension},
     traits::{FromRef, Transcribable, Transcript},
     utils::combine_rows,
 };
@@ -98,15 +98,30 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
             // If we can take linear combinations
             // perform the proximity test an arbitrary number of times
             for _ in 0..pp.linear_code.num_proximity_testing() {
+                // Values to evaluate the coefficients at
+                let alphas = transcript
+                    .fs_transcript
+                    .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND);
+
+                // Coefficients for the linear combination of polynomial with evaluated
+                // coefficients
                 let coeffs = transcript
                     .fs_transcript
                     .get_challenges::<Zt::Chal>(pp.num_rows);
 
-                let evals = poly.evaluations.iter().map(Zt::Comb::from_ref);
+                let evals = poly
+                    .evaluations
+                    .iter()
+                    .map(Zt::Comb::from_ref)
+                    .map(|p| p.evaluate(&alphas).expect("Failed to evaluate polynomial"))
+                    .collect_vec();
 
                 // u' in the Zinc paper
-                let combined_row =
-                    combine_rows(coeffs.into_iter(), evals, pp.linear_code.row_len());
+                let combined_row = combine_rows(
+                    coeffs.into_iter(),
+                    evals.into_iter(),
+                    pp.linear_code.row_len(),
+                );
 
                 transcript.write_many(&combined_row)?;
             }

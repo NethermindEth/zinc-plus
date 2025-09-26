@@ -27,3 +27,9 @@ pub enum ZipError {
     #[error("Error during polynomial evaluation: {0}")]
     PolynomialEvaluationError(poly::EvaluationError),
 }
+
+impl From<poly::EvaluationError> for ZipError {
+    fn from(err: poly::EvaluationError) -> Self {
+        ZipError::PolynomialEvaluationError(err)
+    }
+}

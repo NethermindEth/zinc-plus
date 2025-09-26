@@ -7,7 +7,7 @@ use crate::{
         utils::{ColumnOpening, point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
-    poly::mle::DenseMultilinearExtension,
+    poly::{Polynomial, mle::DenseMultilinearExtension},
     traits::{FromRef, Transcribable, Transcript},
     utils::inner_product,
 };
@@ -26,7 +26,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     where
         F: PrimeField
             + FromRef<F>
-            + FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::Comb>>::Inner>
+            + FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::CombR>>::Inner>
             + FromRef<Zt::Cw>
             + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
@@ -51,7 +51,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     where
         F: PrimeField
             + FromRef<F>
-            + FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::Comb>>::Inner>
+            + FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::CombR>>::Inner>
             + FromRef<Zt::Cw>
             + for<'b> MulByScalar<&'b F>,
         F::Inner: Transcribable,
@@ -69,17 +69,26 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         transcript: &mut PcsTranscript,
     ) -> Result<Vec<(usize, Vec<Zt::Cw>)>, ZipError> {
         // Gather the coeffs and encoded combined rows per proximity test
-        let mut encoded_combined_rows: Vec<(Vec<Zt::Chal>, Vec<Zt::Comb>)> =
+        let mut encoded_combined_rows: Vec<(Vec<Zt::Chal>, Vec<Zt::Chal>, Vec<Zt::CombR>)> =
             Vec::with_capacity(vp.linear_code.num_proximity_testing());
 
         if vp.num_rows > 1 {
             for _ in 0..vp.linear_code.num_proximity_testing() {
+                // Values to evaluate the coefficients at
+                let alphas = transcript
+                    .fs_transcript
+                    .get_challenges(Zt::Comb::DEGREE_BOUND);
+
+                // Coefficients for the linear combination of polynomial with evaluated
+                // coefficients
                 let coeffs = transcript.fs_transcript.get_challenges(vp.num_rows);
 
-                let combined_row: Vec<Zt::Comb> = transcript.read_many(vp.linear_code.row_len())?;
+                let combined_row: Vec<Zt::CombR> =
+                    transcript.read_many(vp.linear_code.row_len())?;
 
-                let encoded_combined_row: Vec<Zt::Comb> = vp.linear_code.encode_wide(&combined_row);
-                encoded_combined_rows.push((coeffs, encoded_combined_row));
+                let encoded_combined_row: Vec<Zt::CombR> =
+                    vp.linear_code.encode_wide(&combined_row);
+                encoded_combined_rows.push((alphas, coeffs, encoded_combined_row));
             }
         }
 
@@ -90,8 +99,9 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
             let column_idx = transcript.squeeze_challenge_idx(vp.linear_code.codeword_len());
             let column_values = transcript.read_many(vp.num_rows)?;
 
-            for (coeffs, encoded_combined_row) in encoded_combined_rows.iter() {
+            for (alphas, coeffs, encoded_combined_row) in encoded_combined_rows.iter() {
                 Self::verify_column_testing(
+                    alphas,
                     coeffs,
                     encoded_combined_row,
                     &column_values,
@@ -111,18 +121,22 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     }
 
     pub(super) fn verify_column_testing(
+        alphas: &[Zt::Chal],
         coeffs: &[Zt::Chal],
-        encoded_combined_row: &[Zt::Comb],
+        encoded_combined_row: &[Zt::CombR],
         column_entries: &[Zt::Cw],
         column: usize,
         num_rows: usize,
     ) -> Result<(), ZipError> {
-        let column_entries_comb: Zt::Comb = if num_rows > 1 {
-            let column_entries: Vec<Zt::Comb> =
-                column_entries.iter().map(Zt::Comb::from_ref).collect();
-            inner_product(coeffs.iter(), column_entries.iter())
+        let column_entries_comb: Zt::CombR = if num_rows > 1 {
+            let column_entries: Result<Vec<Zt::CombR>, _> = column_entries
+                .iter()
+                .map(Zt::Comb::from_ref)
+                .map(|p| p.evaluate(alphas))
+                .collect();
+            inner_product(coeffs.iter(), column_entries?.iter())
         } else {
-            Zt::Comb::from_ref(&column_entries[0])
+            Zt::Comb::from_ref(&column_entries[0]).evaluate(alphas)?
         };
 
         if column_entries_comb != encoded_combined_row[column] {
@@ -141,7 +155,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     where
         F: PrimeField
             + FromRef<F>
-            + FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::Comb>>::Inner>
+            + FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::CombR>>::Inner>
             + FromRef<Zt::Cw>
             + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
@@ -241,7 +255,6 @@ mod tests {
     type C = <Zt as ZipTypes>::Code;
 
     type PolyZt = TestPolyZipTypes<N, K, M, DEGREE>;
-    type PolyC = <PolyZt as ZipTypes>::Code;
 
     type TestZip = ZipPlus<Zt>;
     type TestPolyZip = ZipPlus<PolyZt>;

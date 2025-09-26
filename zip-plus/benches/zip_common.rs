@@ -207,7 +207,7 @@ where
     StandardUniform: Distribution<Zt::Eval>,
     F: FromRef<Zt::Eval>,
     F: FromRef<Zt::Cw>,
-    F: FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::Comb>>::Inner>,
+    F: FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::CombR>>::Inner>,
 {
     let mut rng = ThreadRng::default();
     type T = KeccakTranscript;

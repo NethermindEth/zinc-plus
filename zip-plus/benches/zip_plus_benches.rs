@@ -24,7 +24,7 @@ impl ZipTypes for BenchZipPlusTypes {
     type Chal = Int<{ INT_LIMBS }>;
     type CombR = Int<{ INT_LIMBS * 8 }>;
     type Comb = DensePolynomial<Self::CombR, DEGREE_BOUND>;
-    type Code = RaaCode<Self::Eval, Self::Cw, Self::Comb>;
+    type Code = RaaCode<Self::Eval, Self::Cw, Self::CombR>;
 }
 
 fn zip_plus_benchmarks(c: &mut Criterion) {

@@ -11,6 +11,8 @@ pub trait Polynomial<R: Ring> {
     /// coefficients.
     const DEGREE_BOUND: usize;
 
+    /// Evaluates the polynomial at the given point, treating point as.
+    /// [x, x^2, x^3, ..., x^DEGREE_BOUND].
     // Note: we can't reference Self::DEGREE_BOUND here type parameters may not be
     // used in const expressions
     fn evaluate<C>(&self, point: &[C]) -> Result<R, EvaluationError>
@@ -22,4 +24,6 @@ pub trait Polynomial<R: Ring> {
 pub enum EvaluationError {
     #[error("Wrong number of points provided for evaluation: expected {expected}, got {actual}")]
     WrongPointWidth { expected: usize, actual: usize },
+    #[error("Evaluation failed due to overflow")]
+    Overflow,
 }

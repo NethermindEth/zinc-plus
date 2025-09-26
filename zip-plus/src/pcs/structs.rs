@@ -26,19 +26,13 @@ pub trait ZipTypes: Send + Sync {
     type Chal: Ring + Named + Transcribable;
 
     /// Coefficient ring of linear combination polynomial [Self::Comb]
-    type CombR: Ring;
+    type CombR: Ring + Transcribable + for<'a> MulByScalar<&'a Self::Chal>;
     /// Ring of elements in the linear combination of codewords, at least as
     /// wide as the evaluation, codeword, and challenge rings.
-    type Comb: Ring
-        + Named
-        + Polynomial<Self::CombR>
-        + Transcribable
-        + FromRef<Self::Eval>
-        + FromRef<Self::Cw>
-        + for<'a> MulByScalar<&'a Self::Chal>;
+    type Comb: Ring + Named + Polynomial<Self::CombR> + FromRef<Self::Eval> + FromRef<Self::Cw>;
 
     /// Linear code used to encode the polynomial matrix representation
-    type Code: LinearCode<Self::Eval, Self::Cw, Self::Comb>;
+    type Code: LinearCode<Self::Eval, Self::Cw, Self::CombR>;
 }
 
 /// Zip is a Polynomial Commitment Scheme (PCS) that supports committing to
