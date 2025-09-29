@@ -4,7 +4,7 @@ use crate::{
     ZipError,
     code::LinearCode,
     pcs::{
-        structs::{MulByScalar, MultilinearZipData, MultilinearZipParams, ZipPlus, ZipTypes},
+        structs::{MulByScalar, ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
         utils::{ColumnOpening, left_point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
@@ -17,9 +17,9 @@ use itertools::{Itertools, izip};
 
 impl<Zt: ZipTypes> ZipPlus<Zt> {
     pub fn open<F>(
-        pp: &MultilinearZipParams<Zt>,
+        pp: &ZipPlusParams<Zt>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
-        commit_data: &MultilinearZipData<Zt::Cw>,
+        commit_hint: &ZipPlusHint<Zt::Cw>,
         point: &[F],
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
@@ -29,7 +29,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     {
         validate_input("open", pp.num_vars, [poly], [point])?;
 
-        Self::prove_testing_phase(pp, poly, commit_data, transcript)?;
+        Self::prove_testing_phase(pp, poly, commit_hint, transcript)?;
 
         Self::prove_evaluation_phase(pp, transcript, point, poly)?;
 
@@ -38,9 +38,9 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
 
     // TODO Apply 2022/1355 https://eprint.iacr.org/2022/1355.pdf#page=30
     pub fn batch_open<F>(
-        pp: &MultilinearZipParams<Zt>,
+        pp: &ZipPlusParams<Zt>,
         polys: &[DenseMultilinearExtension<Zt::Eval>],
-        comms: &[MultilinearZipData<Zt::Cw>],
+        comms: &[ZipPlusHint<Zt::Cw>],
         points: &[Vec<F>],
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
@@ -57,7 +57,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     // Subprotocol functions
 
     fn prove_evaluation_phase<F>(
-        pp: &MultilinearZipParams<Zt>,
+        pp: &ZipPlusParams<Zt>,
         transcript: &mut PcsTranscript,
         point: &[F],
         poly: &DenseMultilinearExtension<Zt::Eval>,
@@ -89,9 +89,9 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     }
 
     pub(super) fn prove_testing_phase(
-        pp: &MultilinearZipParams<Zt>,
+        pp: &ZipPlusParams<Zt>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
-        commit_data: &MultilinearZipData<Zt::Cw>,
+        commit_hint: &ZipPlusHint<Zt::Cw>,
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError> {
         if pp.num_rows > 1 {
@@ -130,18 +130,18 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         // Open merkle tree for each column drawn
         for _ in 0..pp.linear_code.num_column_opening() {
             let column = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
-            Self::open_merkle_trees_for_column(pp, commit_data, column, transcript)?;
+            Self::open_merkle_trees_for_column(pp, commit_hint, column, transcript)?;
         }
         Ok(())
     }
 
     pub(super) fn open_merkle_trees_for_column(
-        pp: &MultilinearZipParams<Zt>,
-        commit_data: &MultilinearZipData<Zt::Cw>,
+        pp: &ZipPlusParams<Zt>,
+        commit_hint: &ZipPlusHint<Zt::Cw>,
         column: usize,
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError> {
-        let column_values = commit_data
+        let column_values = commit_hint
             .rows
             .iter()
             .skip(column)
@@ -150,7 +150,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         // Write the elements in the squeezed column to the shared transcript
         transcript.write_many(column_values)?;
 
-        ColumnOpening::open_at_column(column, commit_data, transcript)
+        ColumnOpening::open_at_column(column, commit_hint, transcript)
             .map_err(|_| ZipError::InvalidPcsOpen("Failed to open merkle tree".into()))?;
 
         Ok(())
@@ -174,7 +174,7 @@ mod tests {
         field::ConstMontyField,
         merkle::MerkleTree,
         pcs::{
-            structs::{MultilinearZipData, ZipPlus},
+            structs::{ZipPlus, ZipPlusHint},
             test_utils::*,
         },
         pcs_transcript::PcsTranscript,
@@ -255,7 +255,7 @@ mod tests {
 
         let codeword_len = pp.linear_code.codeword_len();
         let corrupted_merkle_tree = MerkleTree::new(&corrupted_rows, codeword_len);
-        let corrupted_data = MultilinearZipData::new(corrupted_rows, corrupted_merkle_tree);
+        let corrupted_data = ZipPlusHint::new(corrupted_rows, corrupted_merkle_tree);
 
         let mut rng = ThreadRng::default();
         let point_int = random_point::<INT_LIMBS>(num_vars, &mut rng);
@@ -322,7 +322,7 @@ mod tests {
         }
 
         let corrupted_merkle_tree = MerkleTree::new(&corrupted_rows, codeword_len);
-        let corrupted_data = MultilinearZipData::new(corrupted_rows, corrupted_merkle_tree);
+        let corrupted_data = ZipPlusHint::new(corrupted_rows, corrupted_merkle_tree);
 
         let point_int: Vec<Int<INT_LIMBS>> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();

@@ -7,7 +7,7 @@ use crate::{ZipError, poly::mle::DenseMultilinearExtension, sub};
 
 use crate::{
     merkle::{MerkleError, MerkleProof, MtHash},
-    pcs::structs::{AsPackable, MultilinearZipData},
+    pcs::structs::{AsPackable, ZipPlusHint},
     pcs_transcript::PcsTranscript,
 };
 #[cfg(feature = "parallel")]
@@ -199,10 +199,10 @@ pub struct ColumnOpening {}
 impl ColumnOpening {
     pub fn open_at_column<T: AsPackable>(
         column: usize,
-        commit_data: &MultilinearZipData<T>,
+        commit_hint: &ZipPlusHint<T>,
         transcript: &mut PcsTranscript,
     ) -> Result<(), MerkleError> {
-        let merkle_path = MerkleProof::create_proof(&commit_data.merkle_tree, column)?;
+        let merkle_path = MerkleProof::create_proof(&commit_hint.merkle_tree, column)?;
         transcript
             .write_merkle_proof(&merkle_path)
             .map_err(|_| MerkleError::FailedMerkleProofWriting)?;

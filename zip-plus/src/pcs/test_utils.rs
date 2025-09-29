@@ -8,9 +8,7 @@
 
 use crate::{
     code::{DefaultLinearCodeSpec, LinearCode, raa::RaaCode},
-    pcs::structs::{
-        AsPackable, MulByScalar, MultilinearZipCommitment, MultilinearZipParams, ZipPlus, ZipTypes,
-    },
+    pcs::structs::{AsPackable, MulByScalar, ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
     pcs_transcript::PcsTranscript,
     poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
     traits::{FromRef, Transcribable, Transcript},
@@ -49,7 +47,7 @@ impl<const N: usize, const K: usize, const M: usize, const DEGREE: usize> ZipTyp
 pub fn setup_test_params<const N: usize, const K: usize, const M: usize>(
     num_vars: usize,
 ) -> (
-    MultilinearZipParams<TestZipTypes<N, K, M>>,
+    ZipPlusParams<TestZipTypes<N, K, M>>,
     DenseMultilinearExtension<Int<N>>,
 ) {
     setup_test_params_inner(num_vars, |poly_size| {
@@ -66,7 +64,7 @@ pub fn setup_poly_test_params<
 >(
     num_vars: usize,
 ) -> (
-    MultilinearZipParams<TestPolyZipTypes<N, K, M, DEGREE>>,
+    ZipPlusParams<TestPolyZipTypes<N, K, M, DEGREE>>,
     DenseMultilinearExtension<DensePolynomial<Int<N>, DEGREE>>,
 ) {
     setup_test_params_inner(num_vars, |poly_size| {
@@ -83,17 +81,14 @@ pub fn setup_poly_test_params<
 fn setup_test_params_inner<Zt: ZipTypes>(
     num_vars: usize,
     prepare_evaluations: impl FnOnce(usize) -> Vec<Zt::Eval>,
-) -> (
-    MultilinearZipParams<Zt>,
-    DenseMultilinearExtension<Zt::Eval>,
-) {
+) -> (ZipPlusParams<Zt>, DenseMultilinearExtension<Zt::Eval>) {
     let poly_size = 1 << num_vars;
     let num_rows = 1 << num_vars.div_ceil(2);
 
     let mut transcript = MockTranscript::default();
     let code =
         <Zt as ZipTypes>::Code::new(&DefaultLinearCodeSpec, poly_size, true, &mut transcript);
-    let pp = MultilinearZipParams::new(num_vars, num_rows, code);
+    let pp = ZipPlusParams::new(num_vars, num_rows, code);
 
     let evaluations = prepare_evaluations(poly_size);
     let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations);
@@ -104,8 +99,8 @@ fn setup_test_params_inner<Zt: ZipTypes>(
 pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
     num_vars: usize,
 ) -> (
-    MultilinearZipParams<TestZipTypes<N, K, M>>,
-    MultilinearZipCommitment,
+    ZipPlusParams<TestZipTypes<N, K, M>>,
+    ZipPlusCommitment,
     Vec<F>,
     F,
     Vec<u8>,
@@ -128,8 +123,8 @@ pub fn setup_full_protocol_poly<
 >(
     num_vars: usize,
 ) -> (
-    MultilinearZipParams<TestPolyZipTypes<N, K, M, DEGREE>>,
-    MultilinearZipCommitment,
+    ZipPlusParams<TestPolyZipTypes<N, K, M, DEGREE>>,
+    ZipPlusCommitment,
     Vec<F>,
     F,
     Vec<u8>,
@@ -153,15 +148,9 @@ where
 
 fn setup_full_protocol_inner<Eval, Cw, CombR, Zt, F, const N: usize>(
     num_vars: usize,
-    setup: impl FnOnce(usize) -> (MultilinearZipParams<Zt>, DenseMultilinearExtension<Eval>),
+    setup: impl FnOnce(usize) -> (ZipPlusParams<Zt>, DenseMultilinearExtension<Eval>),
     prepare_evaluation_point: impl FnOnce() -> Vec<Eval>,
-) -> (
-    MultilinearZipParams<Zt>,
-    MultilinearZipCommitment,
-    Vec<F>,
-    F,
-    Vec<u8>,
-)
+) -> (ZipPlusParams<Zt>, ZipPlusCommitment, Vec<F>, F, Vec<u8>)
 where
     Eval: Ring,
     Cw: Ring + FromRef<Eval> + AsPackable,

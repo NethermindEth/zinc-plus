@@ -3,7 +3,7 @@ use crate::{
     code::LinearCode,
     merkle::MtHash,
     pcs::{
-        structs::{MulByScalar, MultilinearZipCommitment, MultilinearZipParams, ZipPlus, ZipTypes},
+        structs::{MulByScalar, ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
         utils::{ColumnOpening, point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
@@ -17,8 +17,8 @@ use itertools::Itertools;
 
 impl<Zt: ZipTypes> ZipPlus<Zt> {
     pub fn verify<F>(
-        vp: &MultilinearZipParams<Zt>,
-        comm: &MultilinearZipCommitment,
+        vp: &ZipPlusParams<Zt>,
+        comm: &ZipPlusCommitment,
         point: &[F],
         eval: &F,
         transcript: &mut PcsTranscript,
@@ -42,8 +42,8 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     }
 
     pub fn batch_verify_z<'a, F>(
-        vp: &MultilinearZipParams<Zt>,
-        comms: impl Iterable<Item = &'a MultilinearZipCommitment>,
+        vp: &ZipPlusParams<Zt>,
+        comms: impl Iterable<Item = &'a ZipPlusCommitment>,
         points: &[Vec<F>],
         evals: &[F],
         transcript: &mut PcsTranscript,
@@ -64,7 +64,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
 
     #[allow(clippy::type_complexity)]
     pub(super) fn verify_testing(
-        vp: &MultilinearZipParams<Zt>,
+        vp: &ZipPlusParams<Zt>,
         root: &MtHash,
         transcript: &mut PcsTranscript,
     ) -> Result<Vec<(usize, Vec<Zt::Cw>)>, ZipError> {
@@ -146,7 +146,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     }
 
     fn verify_evaluation_z<F>(
-        vp: &MultilinearZipParams<Zt>,
+        vp: &ZipPlusParams<Zt>,
         point: &[F],
         eval: &F,
         columns_opened: &[(usize, Vec<Zt::Cw>)],

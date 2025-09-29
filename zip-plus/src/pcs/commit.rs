@@ -3,9 +3,7 @@ use crate::{
     code::LinearCode,
     merkle::MerkleTree,
     pcs::{
-        structs::{
-            MultilinearZipCommitment, MultilinearZipData, MultilinearZipParams, ZipPlus, ZipTypes,
-        },
+        structs::{ZipPlus, ZipPlusCommitment, ZipPlusHint, ZipPlusParams, ZipTypes},
         utils::validate_input,
     },
     poly::mle::DenseMultilinearExtension,
@@ -38,17 +36,17 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     ///   for the commitment itself, which operates on integers.
     ///
     /// # Parameters
-    /// - `pp`: Public parameters (`MultilinearZipParams`) containing the
-    ///   configuration for the commitment scheme.
+    /// - `pp`: Public parameters (`ZipPlusParams`) containing the configuration
+    ///   for the commitment scheme.
     /// - `poly`: The multilinear polynomial (`DenseMultilinearExtension`) to be
     ///   committed to.
     ///
     /// # Returns
     /// A `Result` containing a tuple of:
-    /// - `MultilinearZipData`: Full data including encoded rows and Merkle
-    ///   trees, kept by the prover for the opening phase.
-    /// - `MultilinearZipCommitment`: The compact commitment, consisting of only
-    ///   the Merkle roots, to be sent to the verifier.
+    /// - `ZipPlusHint`: Full data including encoded rows and Merkle tree, kept
+    ///   by the prover for the opening phase.
+    /// - `ZipPlusCommitment`: The compact commitment, consisting of only the
+    ///   Merkle roots, to be sent to the verifier.
     ///
     /// # Errors
     /// - Returns `Error::InvalidPcsParam` if the polynomial has more variables
@@ -62,9 +60,9 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     ///   `pp.num_rows`, indicating an internal logic error.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn commit(
-        pp: &MultilinearZipParams<Zt>,
+        pp: &ZipPlusParams<Zt>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
-    ) -> Result<(MultilinearZipData<Zt::Cw>, MultilinearZipCommitment), ZipError> {
+    ) -> Result<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment), ZipError> {
         validate_input("commit", pp.num_vars, [poly], None::<&[bool]>)?;
 
         let expected_num_evals = pp.num_rows * pp.linear_code.row_len();
@@ -85,8 +83,8 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         let root = merkle_tree.root();
 
         Ok((
-            MultilinearZipData::new(rows, merkle_tree),
-            MultilinearZipCommitment { root },
+            ZipPlusHint::new(rows, merkle_tree),
+            ZipPlusCommitment { root },
         ))
     }
 
@@ -98,16 +96,16 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     /// only**, where the full commitment structure is not required.
     ///
     /// # Parameters
-    /// - `pp`: Public parameters (`MultilinearZipParams`).
+    /// - `pp`: Public parameters (`ZipPlusParams`).
     /// - `poly`: The multilinear polynomial to commit to.
     ///
     /// # Returns
-    /// A `Result` containing `MultilinearZipData` with the encoded rows but
-    /// empty Merkle trees, and a `MultilinearZipCommitment` with an empty
+    /// A `Result` containing `ZipPlusHint` with the encoded rows but
+    /// empty Merkle trees, and a `ZipPlusCommitment` with an empty
     /// vector of roots.
     #[allow(dead_code)]
     pub fn commit_no_merkle(
-        pp: &MultilinearZipParams<Zt>,
+        pp: &ZipPlusParams<Zt>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
     ) -> Result<Vec<Zt::Cw>, ZipError> {
         validate_input("commit", pp.num_vars, [poly], None::<&[bool]>)?;
@@ -126,7 +124,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     /// [`commit`] on each one, collecting the results into a vector.
     ///
     /// # Parameters
-    /// - `pp`: Public parameters (`MultilinearZipParams`) shared across all
+    /// - `pp`: Public parameters (`ZipPlusParams`) shared across all
     ///   commitments.
     /// - `polys`: A slice of `DenseMultilinearExtension` polynomials to commit
     ///   to.
@@ -136,9 +134,9 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     /// corresponds to a polynomial in the input slice.
     #[allow(clippy::type_complexity)]
     pub fn batch_commit(
-        pp: &MultilinearZipParams<Zt>,
+        pp: &ZipPlusParams<Zt>,
         polys: &[DenseMultilinearExtension<Zt::Eval>],
-    ) -> Result<Vec<(MultilinearZipData<Zt::Cw>, MultilinearZipCommitment)>, ZipError> {
+    ) -> Result<Vec<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment)>, ZipError> {
         polys.iter().map(|poly| Self::commit(pp, poly)).collect()
     }
 
@@ -161,7 +159,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     /// A `Vec<Int<K>>` containing all the encoded rows concatenated together.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn encode_rows(
-        pp: &MultilinearZipParams<Zt>,
+        pp: &ZipPlusParams<Zt>,
         codeword_len: usize,
         row_len: usize,
         evals: &[Zt::Eval],
@@ -213,7 +211,7 @@ mod tests {
         field::F256,
         merkle::{MerkleTree, MtHash},
         pcs::{
-            structs::{MultilinearZipParams, ZipPlus, ZipTypes},
+            structs::{ZipPlus, ZipPlusParams, ZipTypes},
             test_utils::*,
         },
         pcs_transcript::PcsTranscript,
@@ -278,7 +276,7 @@ mod tests {
     fn commit_succeeds_for_small_polynomial() {
         let mut transcript = MockTranscript::default();
         let code = C::new(&DefaultLinearCodeSpec, 16, true, &mut transcript);
-        let pp = MultilinearZipParams::new(4, 4, code);
+        let pp = ZipPlusParams::new(4, 4, code);
 
         let evaluations = vec![Int::from(42); 16];
         let poly = DenseMultilinearExtension::from_evaluations_vec(4, evaluations);
@@ -291,7 +289,7 @@ mod tests {
     fn commit_succeeds_for_two_variables() {
         let mut transcript = MockTranscript::default();
         let code = C::new(&DefaultLinearCodeSpec, 4, true, &mut transcript);
-        let pp = MultilinearZipParams::new(2, 2, code);
+        let pp = ZipPlusParams::new(2, 2, code);
 
         let evaluations = vec![Int::from(1), Int::from(2), Int::from(3), Int::from(4)];
         let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations);
@@ -431,7 +429,7 @@ mod tests {
             .map(|_| {
                 let mut transcript = MockTranscript::default();
                 let code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut transcript);
-                let pp = MultilinearZipParams::new(num_vars, 8, code);
+                let pp = ZipPlusParams::new(num_vars, 8, code);
 
                 TestZip::encode_rows(
                     &pp,
@@ -480,7 +478,7 @@ mod tests {
     fn encode_rows_succeeds_for_single_row() {
         let mut transcript = MockTranscript::default();
         let code = C::new(&DefaultLinearCodeSpec, 4, true, &mut transcript);
-        let pp = MultilinearZipParams::new(2, 1, code);
+        let pp = ZipPlusParams::new(2, 1, code);
 
         // Create a polynomial with 2 variables and 4 evaluations
         let evaluations = vec![Int::from(5); 4];
@@ -498,7 +496,7 @@ mod tests {
     fn encode_rows_succeeds_for_single_poly_row() {
         let mut transcript = MockTranscript::default();
         let code = PolyC::new(&DefaultLinearCodeSpec, 4, true, &mut transcript);
-        let pp = MultilinearZipParams::new(2, 1, code);
+        let pp = ZipPlusParams::new(2, 1, code);
 
         // Create a polynomial with 2 variables and 4 evaluations
         let evaluations = vec![
@@ -533,7 +531,7 @@ mod tests {
     #[should_panic]
     fn reject_incompatible_dimensions() {
         let (pp, poly) = setup_test_params(3);
-        let incompatible_pp = MultilinearZipParams::new(3, 3, pp.linear_code);
+        let incompatible_pp = ZipPlusParams::new(3, 3, pp.linear_code);
         let _ = TestZip::commit(&incompatible_pp, &poly);
     }
 
@@ -617,7 +615,7 @@ mod tests {
 
     #[test]
     fn proof_size_is_correct_for_parameters() {
-        fn calculate_expected_proof_size_bytes(pp: &MultilinearZipParams<Zt>) -> usize {
+        fn calculate_expected_proof_size_bytes(pp: &ZipPlusParams<Zt>) -> usize {
             let size_of_zt_k = K * size_of::<Word>();
             let size_of_zt_m = M * size_of::<Word>();
             let size_of_f_b = FIELD_LIMBS * size_of::<Word>();

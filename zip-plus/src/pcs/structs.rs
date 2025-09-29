@@ -44,24 +44,24 @@ where
     Zt: ZipTypes,
 {
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn setup(poly_size: usize, linear_code: Zt::Code) -> MultilinearZipParams<Zt> {
+    pub fn setup(poly_size: usize, linear_code: Zt::Code) -> ZipPlusParams<Zt> {
         assert!(poly_size.is_power_of_two());
         let num_vars = poly_size.ilog2() as usize;
         let num_rows = ((1 << num_vars) / linear_code.row_len()).next_power_of_two();
-        MultilinearZipParams::new(num_vars, num_rows, linear_code)
+        ZipPlusParams::new(num_vars, num_rows, linear_code)
     }
 }
 
-/// Parameters for the Zip PCS.
+/// Parameters for the Zip+ PCS.
 #[derive(Clone, Debug)]
-pub struct MultilinearZipParams<Zt: ZipTypes> {
+pub struct ZipPlusParams<Zt: ZipTypes> {
     pub num_vars: usize,
     pub num_rows: usize,
     pub linear_code: Zt::Code,
     phantom_data: PhantomData<Zt>,
 }
 
-impl<Zt: ZipTypes> MultilinearZipParams<Zt> {
+impl<Zt: ZipTypes> ZipPlusParams<Zt> {
     pub fn new(num_vars: usize, num_rows: usize, linear_code: Zt::Code) -> Self {
         Self {
             num_vars,
@@ -72,9 +72,10 @@ impl<Zt: ZipTypes> MultilinearZipParams<Zt> {
     }
 }
 
-/// Representantation of a zip commitment to a multilinear polynomial
+/// Full data of zip commitment to a multilinear polynomial, including encoded
+/// rows and Merkle tree, kept by the prover for the opening phase.
 #[derive(Debug, Default)]
-pub struct MultilinearZipData<R: AsPackable> {
+pub struct ZipPlusHint<R: AsPackable> {
     /// The encoded rows of the polynomial matrix representation, referred to as
     /// "u-hat" in the Zinc paper
     pub rows: Vec<R>,
@@ -82,9 +83,9 @@ pub struct MultilinearZipData<R: AsPackable> {
     pub merkle_tree: MerkleTree<R::Packable>,
 }
 
-impl<R: AsPackable> MultilinearZipData<R> {
-    pub fn new(rows: Vec<R>, merkle_tree: MerkleTree<R::Packable>) -> MultilinearZipData<R> {
-        MultilinearZipData { rows, merkle_tree }
+impl<R: AsPackable> ZipPlusHint<R> {
+    pub fn new(rows: Vec<R>, merkle_tree: MerkleTree<R::Packable>) -> ZipPlusHint<R> {
+        ZipPlusHint { rows, merkle_tree }
     }
 
     pub fn root(&self) -> MtHash {
@@ -92,9 +93,10 @@ impl<R: AsPackable> MultilinearZipData<R> {
     }
 }
 
-/// Representantation of a zip commitment to a multilinear polynomial
+/// The compact commitment to a multilinear polynomial, consisting of only the
+/// Merkle roots, to be sent to the verifier.
 #[derive(Clone, Debug, Default)]
-pub struct MultilinearZipCommitment {
+pub struct ZipPlusCommitment {
     /// Roots of the merkle tree of entire matrix
     pub root: MtHash,
 }
