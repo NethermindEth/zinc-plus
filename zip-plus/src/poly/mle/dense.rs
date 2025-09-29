@@ -1,7 +1,8 @@
 use std::ops::{Add, AddAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign};
 
 use crate::{
-    add, mul,
+    add,
+    pcs::structs::MulByScalar,
     poly::{
         EvaluationError,
         mle::{MultilinearExtension, MultilinearExtensionRand},
@@ -27,7 +28,10 @@ impl<R: Ring> DenseMultilinearExtension<R> {
         Self::from_evaluations_vec(num_vars, evaluations.to_vec())
     }
 
-    pub fn evaluate(&self, point: &[R]) -> Result<R, EvaluationError> {
+    pub fn evaluate<S>(&self, point: &[S]) -> Result<R, EvaluationError>
+    where
+        R: for<'a> MulByScalar<&'a S>,
+    {
         if point.len() == self.num_vars {
             Ok(self
                 .fixed_variables(point)
@@ -128,7 +132,10 @@ where
     R: Ring,
 {
     #[allow(clippy::arithmetic_side_effects)]
-    fn fix_variables(&mut self, partial_point: &[R]) {
+    fn fix_variables<S>(&mut self, partial_point: &[S])
+    where
+        R: for<'a> MulByScalar<&'a S>,
+    {
         assert!(
             partial_point.len() <= self.num_vars,
             "too many partial points"
@@ -141,11 +148,14 @@ where
         for i in 1..dim + 1 {
             let r = &partial_point[i - 1];
             for b in 0..1 << (nv - i) {
-                let left = &poly[b << 1];
-                let right = &poly[(b << 1) + 1];
+                let left = &poly[2 * b];
+                let right = &poly[2 * b + 1];
+                // a = f(1) - f(0)
                 let a = sub!(right, &left);
                 if !a.is_zero() {
-                    poly[b] = add!(left, &mul!(r, &a));
+                    // poly[b] = f(0) + r * a
+                    let ar = a.mul_by_scalar(r).expect("Multiplication overflow");
+                    poly[b] = add!(left, &ar);
                 } else {
                     poly[b] = left.clone();
                 };
@@ -156,7 +166,10 @@ where
         self.num_vars = sub!(nv, dim);
     }
 
-    fn fixed_variables(&self, partial_point: &[R]) -> Self {
+    fn fixed_variables<S>(&self, partial_point: &[S]) -> Self
+    where
+        R: for<'a> MulByScalar<&'a S>,
+    {
         let mut res = self.clone();
         res.fix_variables(partial_point);
         res

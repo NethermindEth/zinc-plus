@@ -59,7 +59,19 @@ impl<R: Ring, const DEGREE: usize> DensePolynomial<R, DEGREE> {
 impl<R: Ring, const DEGREE: usize> Polynomial<R> for DensePolynomial<R, DEGREE> {
     const DEGREE_BOUND: usize = DEGREE;
 
-    fn evaluate<C>(&self, point: &[C]) -> Result<R, EvaluationError>
+    fn map<R2: Ring>(&self, f: impl Fn(&R) -> R2) -> impl Polynomial<R2> {
+        let coeff_0 = f(&self.coeff_0);
+        let coeffs: [R2; DEGREE] = self
+            .coeffs
+            .iter()
+            .map(f)
+            .collect::<Vec<R2>>()
+            .try_into()
+            .expect("unreachable");
+        DensePolynomial { coeff_0, coeffs }
+    }
+
+    fn evaluate_at_point<C>(&self, point: &[C]) -> Result<R, EvaluationError>
     where
         R: for<'a> MulByScalar<&'a C>,
     {

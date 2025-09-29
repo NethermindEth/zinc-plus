@@ -1,11 +1,15 @@
 use super::{EvaluationError, Polynomial};
 use crate::pcs::structs::MulByScalar;
-use crypto_primitives::crypto_bigint_int::Int;
+use crypto_primitives::Ring;
 
-impl<const LIMBS: usize> Polynomial<Self> for Int<LIMBS> {
+impl<R: Ring> Polynomial<Self> for R {
     const DEGREE_BOUND: usize = 0;
 
-    fn evaluate<C>(&self, point: &[C]) -> Result<Int<LIMBS>, EvaluationError>
+    fn map<R2: Ring>(&self, f: impl Fn(&Self) -> R2) -> impl Polynomial<R2> {
+        f(self)
+    }
+
+    fn evaluate_at_point<C>(&self, point: &[C]) -> Result<R, EvaluationError>
     where
         Self: for<'a> MulByScalar<&'a C>,
     {
@@ -15,31 +19,6 @@ impl<const LIMBS: usize> Polynomial<Self> for Int<LIMBS> {
                 actual: point.len(),
             });
         }
-        Ok(*self)
+        Ok(self.clone())
     }
 }
-
-macro_rules! impl_zero_degree_for_primitives {
-    ($($t:ty),*) => {
-        $(
-            impl Polynomial<$t> for $t {
-                const DEGREE_BOUND: usize = 0;
-
-                fn evaluate<C>(&self, point: &[C]) -> Result<$t, EvaluationError>
-                where
-                    Self: for<'a> MulByScalar<&'a C>,
-                {
-                    if !point.is_empty() {
-                        return Err(EvaluationError::WrongPointWidth {
-                            expected: 0,
-                            actual: point.len(),
-                        });
-                    }
-                    Ok(*self)
-                }
-            }
-        )*
-    };
-}
-
-impl_zero_degree_for_primitives!(i8, i16, i32, i64, i128);

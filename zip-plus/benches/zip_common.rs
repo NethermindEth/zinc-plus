@@ -16,7 +16,7 @@ use zip_plus::{
     code::{DefaultLinearCodeSpec, LinearCode},
     field::F256,
     merkle::MerkleTree,
-    pcs::structs::{ZipPlus, ZipTypes},
+    pcs::structs::{ProjectableToField, ZipPlus, ZipTypes},
     pcs_transcript::PcsTranscript,
     poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand},
     traits::{FromRef, Named},
@@ -158,7 +158,7 @@ where
 pub fn open<Zt: ZipTypes, const P: usize>(group: &mut BenchmarkGroup<WallTime>)
 where
     StandardUniform: Distribution<Zt::Eval>,
-    F: FromRef<Zt::Eval>,
+    Zt::Eval: ProjectableToField<F>,
 {
     let mut rng = ThreadRng::default();
 
@@ -205,9 +205,9 @@ where
 pub fn verify<Zt: ZipTypes, const P: usize>(group: &mut BenchmarkGroup<WallTime>)
 where
     StandardUniform: Distribution<Zt::Eval>,
-    F: FromRef<Zt::Eval>,
-    F: FromRef<Zt::Cw>,
     F: FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::CombR>>::Inner>,
+    Zt::Eval: ProjectableToField<F>,
+    Zt::Cw: ProjectableToField<F>,
 {
     let mut rng = ThreadRng::default();
     type T = KeccakTranscript;
@@ -219,17 +219,24 @@ where
         false,
         &mut keccak_transcript,
     );
+    let code_row_len = linear_code.row_len();
     let params = ZipPlus::<Zt>::setup(poly_size, linear_code);
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
     let (data, commitment) = ZipPlus::commit(&params, &poly).unwrap();
     let point = vec![1i64; P];
     let field_point: Vec<F> = point.iter().map(F::from).collect();
-    let eval = poly.evaluations.last().unwrap();
-    let eval_field = F::from_ref(eval);
     let mut transcript = PcsTranscript::new();
 
     ZipPlus::open(&params, &poly, &data, &field_point, &mut transcript).unwrap();
+
+    let project = {
+        let mut transcript = transcript.clone();
+        let _ = transcript.read_field_elements::<F>(code_row_len);
+        Zt::Eval::read_projection(&mut transcript)
+    };
+    let eval = poly.evaluations.last().unwrap();
+    let eval_field: F = project(eval);
 
     let proof = transcript.into_proof();
 

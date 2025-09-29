@@ -5,7 +5,7 @@ use crate::{
     traits::{FromRef, Named, Transcribable},
     utils::ReinterpretVector,
 };
-use crypto_primitives::{Ring, crypto_bigint_int::Int};
+use crypto_primitives::{PrimeField, Ring, crypto_bigint_int::Int};
 use num_traits::CheckedMul;
 use p3_field::Packable;
 use std::marker::PhantomData;
@@ -186,3 +186,11 @@ macro_rules! impl_mul_int_by_primitive_scalar {
 }
 
 impl_mul_int_by_primitive_scalar!(i8, i16, i32, i64, i128);
+
+/// Trait for preparing a projection function to a field element from a current
+/// type.
+pub trait ProjectableToField<F: PrimeField> {
+    /// Prepare a projection function that will project the current type
+    /// ony to a prime field using the given sampled value.
+    fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static;
+}

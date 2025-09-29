@@ -1,14 +1,14 @@
 pub mod dense;
 
+pub use dense::DenseMultilinearExtension;
+
+use crate::pcs::structs::MulByScalar;
+use num_traits::Zero;
+use rand::prelude::*;
 use std::{
     fmt::Debug,
     ops::{Add, AddAssign, Index, Neg, SubAssign},
 };
-
-use num_traits::Zero;
-use rand::prelude::*;
-
-pub use dense::DenseMultilinearExtension;
 
 /// This trait describes an interface for the multilinear extension
 /// of an array.
@@ -33,11 +33,15 @@ pub trait MultilinearExtension<T>:
 {
     /// Reduce the number of variables of `self` by fixing the
     /// `partial_point.len()` variables at `partial_point`.
-    fn fix_variables(&mut self, partial_point: &[T]);
+    fn fix_variables<S>(&mut self, partial_point: &[S])
+    where
+        T: for<'a> MulByScalar<&'a S>;
 
     /// Creates a new object with the number of variables of `self` reduced by
     /// fixing the `partial_point.len()` variables at `partial_point`.
-    fn fixed_variables(&self, partial_point: &[T]) -> Self;
+    fn fixed_variables<S>(&self, partial_point: &[S]) -> Self
+    where
+        T: for<'a> MulByScalar<&'a S>;
 }
 
 pub trait MultilinearExtensionRand<T>: MultilinearExtension<T> {

@@ -4,7 +4,7 @@ use crate::{
     ZipError,
     code::LinearCode,
     pcs::{
-        structs::{MulByScalar, ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
+        structs::{MulByScalar, ProjectableToField, ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
         utils::{ColumnOpening, left_point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
@@ -24,14 +24,18 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + FromRef<Zt::Eval> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<Zt::Chal> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
+        Zt::Eval: ProjectableToField<F>,
     {
         validate_input("open", pp.num_vars, [poly], [point])?;
 
+        let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
+        let projecting_element: F = F::from_ref(&projecting_element);
+
         Self::prove_testing_phase(pp, poly, commit_hint, transcript)?;
 
-        Self::prove_evaluation_phase(pp, transcript, point, poly)?;
+        Self::prove_evaluation_phase(pp, transcript, point, poly, projecting_element)?;
 
         Ok(())
     }
@@ -45,8 +49,9 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + FromRef<Zt::Eval> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<Zt::Chal> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
+        Zt::Eval: ProjectableToField<F>,
     {
         for (poly, comm, point) in izip!(polys.iter(), comms.iter(), points.iter()) {
             Self::open(pp, poly, comm, point, transcript)?;
@@ -61,10 +66,12 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         transcript: &mut PcsTranscript,
         point: &[F],
         poly: &DenseMultilinearExtension<Zt::Eval>,
+        projecting_element: F,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + FromRef<Zt::Eval> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
+        Zt::Eval: ProjectableToField<F>,
     {
         let num_rows = pp.num_rows;
         let row_len = pp.linear_code.row_len();
@@ -73,7 +80,8 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         // elements first
         let q_0 = left_point_to_tensor(num_rows, point)?;
 
-        let evaluations = poly.evaluations.iter().map(F::from_ref).collect_vec();
+        let project = Zt::Eval::prepare_projection(&projecting_element);
+        let evaluations: Vec<F> = poly.evaluations.iter().map(project).collect_vec();
 
         let q_0_combined_row = if num_rows > 1 {
             // Return the evaluation row combination
@@ -113,7 +121,10 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
                     .evaluations
                     .iter()
                     .map(Zt::Comb::from_ref)
-                    .map(|p| p.evaluate(&alphas).expect("Failed to evaluate polynomial"))
+                    .map(|p| {
+                        p.evaluate_at_point(&alphas)
+                            .expect("Failed to evaluate polynomial")
+                    })
                     .collect_vec();
 
                 // u' in the Zinc paper
@@ -441,7 +452,16 @@ mod tests {
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
         let point_f: Vec<F> = point_int.iter().map(F::from).collect();
 
-        let result = TestZip::prove_evaluation_phase(&pp, &mut prover_transcript, &point_f, &poly);
+        // Not really used
+        let projecting_element: F = F::ZERO;
+
+        let result = TestZip::prove_evaluation_phase(
+            &pp,
+            &mut prover_transcript,
+            &point_f,
+            &poly,
+            projecting_element,
+        );
 
         assert!(result.is_ok());
     }
@@ -548,7 +568,7 @@ mod tests {
         let (data, comm) = TestZip::commit(&pp, &poly).unwrap();
 
         // A point of [1, 0, 0, 0] will evaluate to poly.evaluations[1].
-        let mut point_coords = vec![Int::from(0); num_vars];
+        let mut point_coords = vec![Int::<INT_LIMBS>::ZERO; num_vars];
         point_coords[0] = Int::from(1);
         let point_int = point_coords;
         let point_f: Vec<F> = point_int.iter().map(F::from).collect();

@@ -8,7 +8,10 @@
 
 use crate::{
     code::{DefaultLinearCodeSpec, LinearCode, raa::RaaCode},
-    pcs::structs::{AsPackable, MulByScalar, ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
+    pcs::structs::{
+        AsPackable, MulByScalar, ProjectableToField, ZipPlus, ZipPlusCommitment, ZipPlusParams,
+        ZipTypes,
+    },
     pcs_transcript::PcsTranscript,
     poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
     traits::{FromRef, Transcribable, Transcript},
@@ -108,8 +111,9 @@ pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
 where
     F: PrimeField + FromRef<Int<N>> + for<'a> MulByScalar<&'a F>,
     F::Inner: Transcribable,
+    Int<N>: ProjectableToField<F>,
 {
-    setup_full_protocol_inner::<_, _, _, _, _, N>(num_vars, setup_test_params, || {
+    setup_full_protocol_inner::<_, _, _, _, _, _, N>(num_vars, setup_test_params, || {
         (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect()
     })
 }
@@ -130,53 +134,61 @@ pub fn setup_full_protocol_poly<
     Vec<u8>,
 )
 where
-    F: PrimeField + FromRef<DensePolynomial<Int<N>, DEGREE>> + for<'a> MulByScalar<&'a F>,
+    F: PrimeField + FromRef<Int<N>> + for<'a> MulByScalar<&'a F>,
     F::Inner: Transcribable,
+    DensePolynomial<Int<N>, DEGREE>: ProjectableToField<F>,
 {
-    setup_full_protocol_inner::<_, _, _, _, _, N>(num_vars, setup_poly_test_params, || {
-        (0..num_vars)
-            .map(|i| {
-                let start = i as i32 + 2;
-                let vec = (start..=(start + DEGREE as i32))
-                    .map(Int::<N>::from)
-                    .collect_vec();
-                DensePolynomial::new(vec)
-            })
-            .collect()
+    setup_full_protocol_inner::<_, _, _, _, _, _, N>(num_vars, setup_poly_test_params, || {
+        (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect()
     })
 }
 
-fn setup_full_protocol_inner<Eval, Cw, CombR, Zt, F, const N: usize>(
+fn setup_full_protocol_inner<EvalR, Eval, Cw, CombR, Zt, F, const N: usize>(
     num_vars: usize,
     setup: impl FnOnce(usize) -> (ZipPlusParams<Zt>, DenseMultilinearExtension<Eval>),
-    prepare_evaluation_point: impl FnOnce() -> Vec<Eval>,
+    prepare_evaluation_point: impl FnOnce() -> Vec<EvalR>,
 ) -> (ZipPlusParams<Zt>, ZipPlusCommitment, Vec<F>, F, Vec<u8>)
 where
-    Eval: Ring,
+    EvalR: Ring,
+    Eval: Ring + for<'a> MulByScalar<&'a EvalR>,
     Cw: Ring + FromRef<Eval> + AsPackable,
     CombR: Ring + FromRef<CombR>,
-    Zt: ZipTypes<Eval = Eval, Cw = Cw, CombR = CombR, Code = RaaCode<Eval, Cw, CombR>>,
-    F: PrimeField + FromRef<Eval> + for<'a> MulByScalar<&'a F>,
+    Zt: ZipTypes<
+            EvalR = EvalR,
+            Eval = Eval,
+            Cw = Cw,
+            CombR = CombR,
+            Code = RaaCode<Eval, Cw, CombR>,
+        >,
+    F: PrimeField + FromRef<Zt::EvalR> + FromRef<Zt::Chal> + for<'a> MulByScalar<&'a F>,
     F::Inner: Transcribable,
+    Eval: ProjectableToField<F>,
 {
     let (pp, poly) = setup(num_vars);
 
     let (data, comm) = ZipPlus::commit(&pp, &poly).unwrap();
 
-    let point: Vec<Eval> = prepare_evaluation_point();
+    let point: Vec<EvalR> = prepare_evaluation_point();
     let point_f: Vec<F> = point.iter().map(F::from_ref).collect_vec();
 
     let mut prover_transcript = PcsTranscript::new();
     ZipPlus::open(&pp, &poly, &data, &point_f, &mut prover_transcript).unwrap();
+
+    let project = {
+        let mut transcript = prover_transcript.clone();
+        let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
+        let projecting_element = F::from_ref(&projecting_element);
+        Eval::prepare_projection(&projecting_element)
+    };
+
     let proof = prover_transcript.into_proof();
 
-    let eval = F::from_ref(
-        &poly
-            .evaluate(&point)
-            .expect("failed to evaluate polynomial"),
-    );
+    let eval = poly
+        .evaluate(&point)
+        .expect("failed to evaluate polynomial");
+    let eval_field = project(&eval);
 
-    (pp, comm, point_f, eval, proof)
+    (pp, comm, point_f, eval_field, proof)
 }
 
 #[derive(Default)]

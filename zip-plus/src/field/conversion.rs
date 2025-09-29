@@ -1,11 +1,15 @@
+use crate::{
+    field::ConstMontyField,
+    pcs::structs::ProjectableToField,
+    poly::{Polynomial, dense::DensePolynomial},
+    traits::{FromRef, Transcribable},
+};
 use crypto_bigint::{
     Uint,
     modular::{ConstMontyForm, ConstMontyParams},
 };
-use crypto_primitives::crypto_bigint_int::Int;
-use num_traits::{ConstOne, ConstZero};
-
-use crate::{field::ConstMontyField, poly::dense::DensePolynomial, traits::FromRef};
+use crypto_primitives::{Ring, crypto_bigint_int::Int};
+use num_traits::{ConstOne, ConstZero, Pow};
 
 // Macro to implement From for unsigned integer primitives
 macro_rules! impl_from_unsigned {
@@ -15,6 +19,13 @@ macro_rules! impl_from_unsigned {
                 fn from(value: $t) -> Self {
                     let value = Uint::from(value);
                     Self(ConstMontyForm::new(&value))
+                }
+            }
+
+            impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> FromRef<$t> for ConstMontyField<Mod, LIMBS> {
+                #![allow(clippy::arithmetic_side_effects)]
+                fn from_ref(value: &$t) -> Self {
+                    Self::from(value)
                 }
             }
         )*
@@ -31,6 +42,13 @@ macro_rules! impl_from_signed {
                     let magnitude = Uint::from(value.abs_diff(0));
                     let form = ConstMontyForm::new(&magnitude);
                     Self(if value.is_negative() { -form } else { form })
+                }
+            }
+
+            impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> FromRef<$t> for ConstMontyField<Mod, LIMBS> {
+                #![allow(clippy::arithmetic_side_effects)]
+                fn from_ref(value: &$t) -> Self {
+                    Self::from(value)
                 }
             }
         )*
@@ -86,6 +104,15 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize> From
 {
     #![allow(clippy::arithmetic_side_effects)]
     fn from(value: Int<LIMBS2>) -> Self {
+        Self::from_ref(&value)
+    }
+}
+
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize> FromRef<Int<LIMBS2>>
+    for ConstMontyField<Mod, LIMBS>
+{
+    #![allow(clippy::arithmetic_side_effects)]
+    fn from_ref(value: &Int<LIMBS2>) -> Self {
         assert!(
             LIMBS >= LIMBS2,
             "Cannot convert Int with more limbs than ConstMontyField"
@@ -101,14 +128,6 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize> From
     }
 }
 
-impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize, const DEGREE: usize>
-    From<DensePolynomial<Int<LIMBS2>, DEGREE>> for ConstMontyField<Mod, LIMBS>
-{
-    fn from(_value: DensePolynomial<Int<LIMBS2>, DEGREE>) -> Self {
-        todo!("How to map a polynomial to a field element?")
-    }
-}
-
 impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, T: Clone> From<&T>
     for ConstMontyField<Mod, LIMBS>
 where
@@ -119,13 +138,44 @@ where
     }
 }
 
-impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, T: Clone> FromRef<T>
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> FromRef<Self>
     for ConstMontyField<Mod, LIMBS>
-where
-    Self: From<T>,
 {
-    fn from_ref(value: &T) -> Self {
-        Self::from(value.clone())
+    fn from_ref(value: &Self) -> Self {
+        *value
+    }
+}
+
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize>
+    ProjectableToField<ConstMontyField<Mod, LIMBS>> for Int<LIMBS2>
+{
+    fn prepare_projection(
+        _sampled_value: &ConstMontyField<Mod, LIMBS>,
+    ) -> impl Fn(&Self) -> ConstMontyField<Mod, LIMBS> + 'static {
+        // No need to read anything
+        |value: &Int<LIMBS2>| ConstMontyField::<Mod, LIMBS>::from_ref(value)
+    }
+}
+
+impl<Mod: ConstMontyParams<LIMBS>, R, const LIMBS: usize, const DEGREE: usize>
+    ProjectableToField<ConstMontyField<Mod, LIMBS>> for DensePolynomial<R, DEGREE>
+where
+    R: Ring + Transcribable,
+    ConstMontyField<Mod, LIMBS>: FromRef<R>,
+{
+    fn prepare_projection(
+        sampled_value: &ConstMontyField<Mod, LIMBS>,
+    ) -> impl Fn(&Self) -> ConstMontyField<Mod, LIMBS> + 'static {
+        let degree_bound: u32 = DEGREE.try_into().expect("Degree bound must fit into u32");
+        let r_powers = (1..=degree_bound)
+            .map(|i| sampled_value.pow(i))
+            .collect::<Vec<_>>();
+
+        move |poly: &Self| {
+            poly.map(ConstMontyField::<Mod, LIMBS>::from_ref)
+                .evaluate_at_point(&r_powers)
+                .expect("Failed to evaluate polynomial at point")
+        }
     }
 }
 
