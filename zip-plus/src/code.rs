@@ -2,13 +2,11 @@ pub mod raa;
 
 use std::fmt::Debug;
 
-use crypto_primitives::crypto_bigint_int::Int;
+use crypto_primitives::{PrimeField, Ring};
 
-use crypto_primitives::PrimeField;
+pub trait LinearCode<Eval: Ring, Cw: Ring, Comb: Ring>: Sync + Send {
+    type Inner;
 
-pub trait LinearCode<const N: usize, const L: usize, const K: usize, const M: usize>:
-    Sync + Send
-{
     /// Length of each input row before encoding
     fn row_len(&self) -> usize;
 
@@ -33,9 +31,7 @@ pub trait LinearCode<const N: usize, const L: usize, const K: usize, const M: us
     ///
     /// # Returns
     /// A vector of cryptographic integers representing the encoded row
-    fn encode(&self, row: &[Int<N>]) -> Vec<Int<M>> {
-        self.encode_wide(row)
-    }
+    fn encode(&self, row: &[Eval]) -> Vec<Cw>;
 
     /// Encodes a row of cryptographic integers using this linear encoding
     /// scheme.
@@ -49,7 +45,7 @@ pub trait LinearCode<const N: usize, const L: usize, const K: usize, const M: us
     ///
     /// # Returns
     /// A vector of cryptographic integers representing the encoded row
-    fn encode_wide<const IN: usize, const OUT: usize>(&self, row: &[Int<IN>]) -> Vec<Int<OUT>>;
+    fn encode_wide(&self, row: &[Comb]) -> Vec<Comb>;
 
     /// Encodes a row of field elements using this linear encoding scheme.
     ///
@@ -65,7 +61,7 @@ pub trait LinearCode<const N: usize, const L: usize, const K: usize, const M: us
     /// A vector of field elements representing the encoded row
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        F: PrimeField + for<'a> From<&'a Int<L>>;
+        F: PrimeField + for<'a> From<&'a Self::Inner>;
 }
 
 pub trait LinearCodeSpec: Debug {
@@ -75,7 +71,7 @@ pub trait LinearCodeSpec: Debug {
     /// Has to be at a power of 2.
     fn repetition_factor(&self) -> usize;
 
-    fn num_proximity_testing(&self, _log2_q: usize, _n: usize, _n_0: usize) -> usize;
+    fn num_proximity_testing(&self, _n: usize, _n_0: usize) -> usize;
 }
 
 // Figure 2 in [GLSTW21](https://eprint.iacr.org/2021/1043.pdf).
@@ -90,7 +86,7 @@ impl LinearCodeSpec for DefaultLinearCodeSpec {
         2
     }
 
-    fn num_proximity_testing(&self, _log2_q: usize, _n: usize, _n_0: usize) -> usize {
+    fn num_proximity_testing(&self, _n: usize, _n_0: usize) -> usize {
         1
     }
 }

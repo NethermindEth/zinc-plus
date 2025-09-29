@@ -4,29 +4,37 @@ use crate::{
     ZipError,
     code::LinearCode,
     pcs::{
-        structs::{MultilinearZip, MultilinearZipData, MultilinearZipParams},
+        structs::{
+            ChallengeRing, CodewordRing, EvaluationRing, LinearCombinationRing, MulByScalar,
+            MultilinearZip, MultilinearZipData, MultilinearZipParams,
+        },
         utils::{ColumnOpening, left_point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
-    poly::dense::DenseMultilinearExtension,
-    traits::Transcribable,
-    utils::{combine_rows, expand},
+    poly::mle::DenseMultilinearExtension,
+    traits::{Transcribable, Transcript},
+    utils::combine_rows,
 };
-use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
+use crypto_primitives::PrimeField;
 use itertools::{Itertools, izip};
 
-impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearCode<N, L, K, M>>
-    MultilinearZip<N, L, K, M, LC>
+impl<
+    Eval: EvaluationRing,
+    Cw: CodewordRing,
+    Chal: ChallengeRing,
+    Comb: LinearCombinationRing<Eval, Cw, Chal> + for<'z> MulByScalar<&'z Chal>,
+    C: LinearCode<Eval, Cw, Comb>,
+> MultilinearZip<Eval, Cw, Chal, Comb, C>
 {
     pub fn open<F>(
-        pp: &MultilinearZipParams<N, L, K, M, LC>,
-        poly: &DenseMultilinearExtension<Int<N>>,
-        commit_data: &MultilinearZipData<K>,
+        pp: &MultilinearZipParams<Eval, Cw, Comb, C>,
+        poly: &DenseMultilinearExtension<Eval>,
+        commit_data: &MultilinearZipData<Cw>,
         point: &[F],
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'a> From<&'a Int<N>>,
+        F: PrimeField + for<'a> From<&'a Eval> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         validate_input("open", pp.num_vars, [poly], [point])?;
@@ -40,14 +48,14 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
 
     // TODO Apply 2022/1355 https://eprint.iacr.org/2022/1355.pdf#page=30
     pub fn batch_open<F>(
-        pp: &MultilinearZipParams<N, L, K, M, LC>,
-        polys: &[DenseMultilinearExtension<Int<N>>],
-        comms: &[MultilinearZipData<K>],
+        pp: &MultilinearZipParams<Eval, Cw, Comb, C>,
+        polys: &[DenseMultilinearExtension<Eval>],
+        comms: &[MultilinearZipData<Cw>],
         points: &[Vec<F>],
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'a> From<&'a Int<N>>,
+        F: PrimeField + for<'a> From<&'a Eval> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         for (poly, comm, point) in izip!(polys.iter(), comms.iter(), points.iter()) {
@@ -59,13 +67,13 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
     // Subprotocol functions
 
     fn prove_evaluation_phase<F>(
-        pp: &MultilinearZipParams<N, L, K, M, LC>,
+        pp: &MultilinearZipParams<Eval, Cw, Comb, C>,
         transcript: &mut PcsTranscript,
         point: &[F],
-        poly: &DenseMultilinearExtension<Int<N>>,
+        poly: &DenseMultilinearExtension<Eval>,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'a> From<&'a Int<N>>,
+        F: PrimeField + for<'a> From<&'a Eval> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         let num_rows = pp.num_rows;
@@ -91,24 +99,24 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
     }
 
     pub(super) fn prove_testing_phase(
-        pp: &MultilinearZipParams<N, L, K, M, LC>,
-        poly: &DenseMultilinearExtension<Int<N>>,
-        commit_data: &MultilinearZipData<K>,
+        pp: &MultilinearZipParams<Eval, Cw, Comb, C>,
+        poly: &DenseMultilinearExtension<Eval>,
+        commit_data: &MultilinearZipData<Cw>,
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError> {
         if pp.num_rows > 1 {
             // If we can take linear combinations
             // perform the proximity test an arbitrary number of times
             for _ in 0..pp.linear_code.num_proximity_testing() {
-                let coeffs = transcript.fs_transcript.get_integer_challenges(pp.num_rows);
-                let coeffs = coeffs.iter().map(expand::<N, M>);
+                let coeffs = transcript.fs_transcript.get_challenges::<Chal>(pp.num_rows);
 
-                let evals = poly.evaluations.iter().map(expand::<N, M>);
+                let evals = poly.evaluations.iter().map(Comb::from);
 
                 // u' in the Zinc paper
-                let combined_row = combine_rows(coeffs, evals, pp.linear_code.row_len());
+                let combined_row =
+                    combine_rows(coeffs.into_iter(), evals, pp.linear_code.row_len());
 
-                transcript.write_integers(combined_row.iter())?;
+                transcript.write_many(&combined_row)?;
             }
         }
 
@@ -121,8 +129,8 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
     }
 
     pub(super) fn open_merkle_trees_for_column(
-        pp: &MultilinearZipParams<N, L, K, M, LC>,
-        commit_data: &MultilinearZipData<K>,
+        pp: &MultilinearZipParams<Eval, Cw, Comb, C>,
+        commit_data: &MultilinearZipData<Cw>,
         column: usize,
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError> {
@@ -133,7 +141,7 @@ impl<const N: usize, const L: usize, const K: usize, const M: usize, LC: LinearC
             .step_by(pp.linear_code.codeword_len());
 
         // Write the elements in the squeezed column to the shared transcript
-        transcript.write_integers(column_values)?;
+        transcript.write_many(column_values)?;
 
         ColumnOpening::open_at_column(column, commit_data, transcript)
             .map_err(|_| ZipError::InvalidPcsOpen("Failed to open merkle tree".into()))?;
@@ -164,7 +172,7 @@ mod tests {
             tests::MockTranscript,
         },
         pcs_transcript::PcsTranscript,
-        poly::dense::DenseMultilinearExtension,
+        poly::mle::DenseMultilinearExtension,
         utils::WORD_FACTOR,
     };
 
@@ -172,33 +180,32 @@ mod tests {
     const FIELD_LIMBS: usize = 4 * WORD_FACTOR;
 
     const N: usize = INT_LIMBS;
-    const L: usize = INT_LIMBS * 2;
     const K: usize = INT_LIMBS * 4;
     const M: usize = INT_LIMBS * 8;
 
-    type LC = RaaCode<N, L, K, M>;
+    type C = RaaCode<Int<N>, Int<K>, Int<M>>;
 
     const_monty_params!(
         ModP,
         U256,
         "0000000000000000000000000000000000000000B933426489189CB5B47D567F"
     );
-
     type F = ConstMontyField<ModP, FIELD_LIMBS>;
-    type TestZip = MultilinearZip<N, L, K, M, LC>;
+
+    type TestZip = MultilinearZip<Int<N>, Int<K>, Int<N>, Int<M>, C>;
 
     /// Helper function to set up common parameters for tests.
     fn setup_test_params(
         num_vars: usize,
     ) -> (
-        MultilinearZipParams<N, L, K, M, RaaCode<N, L, K, M>>,
+        MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
         DenseMultilinearExtension<Int<INT_LIMBS>>,
     ) {
         let poly_size = 1 << num_vars;
         let num_rows = 1 << num_vars.div_ceil(2);
 
         let mut transcript = MockTranscript::default();
-        let code = LC::new(&DefaultLinearCodeSpec, poly_size, &mut transcript);
+        let code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut transcript);
         let pp = MultilinearZipParams::new(num_vars, num_rows, code);
 
         let evaluations: Vec<_> = (1..=poly_size as i32).map(Int::from).collect();

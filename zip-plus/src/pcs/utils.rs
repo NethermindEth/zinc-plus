@@ -1,8 +1,7 @@
 use ark_std::{cfg_iter_mut, iterable::Iterable};
-use crypto_bigint::Word;
-use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
+use crypto_primitives::PrimeField;
 use itertools::Itertools;
-use num_traits::{ToBytes, Zero};
+use num_traits::Zero;
 use p3_commit::{BatchOpeningRef, Mmcs};
 use p3_field::Packable;
 use p3_matrix::{Dimensions, Matrix as P3Matrix, dense::RowMajorMatrix};
@@ -18,8 +17,8 @@ use uninit::AsMaybeUninit;
 
 use super::{error::MerkleError, structs::MultilinearZipData};
 use crate::{
-    ZipError, div, pcs_transcript::PcsTranscript, poly::dense::DenseMultilinearExtension, sub,
-    utils::ReinterpretVector,
+    ZipError, div, pcs::structs::AsPackable, pcs_transcript::PcsTranscript,
+    poly::mle::DenseMultilinearExtension, sub, traits::Transcribable, utils::ReinterpretVector,
 };
 
 #[cfg(feature = "parallel")]
@@ -68,11 +67,6 @@ pub(super) fn validate_input<'a, T: 'a, F: 'a>(
     Ok(())
 }
 
-pub trait AsWords {
-    /// View the underlying byte array as a slice of `Word`s.
-    fn as_words(&self) -> &[Word];
-}
-
 pub const HASH_OUT_LEN: usize = blake3::OUT_LEN;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,23 +86,33 @@ impl Display for MtHash {
     }
 }
 
+impl Transcribable for MtHash {
+    const NUM_BYTES: usize = HASH_OUT_LEN;
+
+    fn read_transcription_bytes(buf: &[u8]) -> Self {
+        assert_eq!(buf.len(), HASH_OUT_LEN);
+        MtHash(buf.try_into().expect("Invalid buffer length for MtHash"))
+    }
+
+    fn write_transcription_bytes(&self, buf: &mut [u8]) {
+        assert_eq!(buf.len(), HASH_OUT_LEN);
+        buf.copy_from_slice(&self.0);
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct MtHasher;
 
-impl<T: AsWords + Clone> CryptographicHasher<T, [u8; HASH_OUT_LEN]> for MtHasher {
+impl<T: Transcribable + Clone> CryptographicHasher<T, [u8; HASH_OUT_LEN]> for MtHasher {
     fn hash_iter<I>(&self, input: I) -> [u8; HASH_OUT_LEN]
     where
         I: IntoIterator<Item = T>,
     {
         let mut hasher = blake3::Hasher::new();
-        let mut buf = [0_u8; size_of::<Word>()];
+        let mut buf = vec![0_u8; T::NUM_BYTES];
         for item in input {
-            for word in item.as_words() {
-                // Performance: reuse buffer and help compiler optimize away materializing word
-                // bytes
-                buf.copy_from_slice(&word.to_be_bytes());
-                hasher.write_all(&buf).expect("Failed to write to hasher");
-            }
+            item.write_transcription_bytes(&mut buf);
+            hasher.write_all(&buf).expect("Failed to write to hasher");
         }
         hasher.finalize().into()
     }
@@ -134,7 +138,7 @@ type P3MerkleTree<T> = p3_merkle_tree::MerkleTree<T, u8, Matrix<T>, HASH_OUT_LEN
 #[derive(Debug, Default)]
 pub struct MerkleTree<T>
 where
-    T: Packable + AsWords + Clone + Send + Sync,
+    T: Packable + Transcribable + Clone + Send + Sync,
 {
     inner: Option<MerkleTreeInner<T>>,
 }
@@ -147,12 +151,11 @@ struct MerkleTreeInner<T> {
 
 impl<T> MerkleTree<T>
 where
-    T: Packable + AsWords + Clone + Send + Sync,
+    T: Packable + Transcribable + Clone + Send + Sync,
 {
     pub fn new<S>(rows: &[S], row_width: usize) -> Self
     where
         S: ReinterpretVector<T>,
-        T: ReinterpretVector<S>,
     {
         assert!(rows.len().is_power_of_two());
         assert!(rows.len().is_multiple_of(row_width));
@@ -215,7 +218,7 @@ impl MerkleProof {
 
     pub fn create_proof<T>(merkle_tree: &MerkleTree<T>, leaf: usize) -> Result<Self, MerkleError>
     where
-        T: Packable + AsWords + Clone,
+        T: Packable + Transcribable + Clone,
     {
         let mt = merkle_tree
             .inner
@@ -235,7 +238,7 @@ impl MerkleProof {
     ) -> Result<(), MerkleError>
     where
         S: ReinterpretVector<T>,
-        T: Packable + AsWords + Clone,
+        T: Packable + Transcribable + Clone,
     {
         let prover = MtMmcs::<T>::new(MtHasher, MtPerm);
 
@@ -269,9 +272,9 @@ impl Display for MerkleProof {
 pub struct ColumnOpening {}
 
 impl ColumnOpening {
-    pub fn open_at_column<const K: usize>(
+    pub fn open_at_column<T: AsPackable>(
         column: usize,
-        commit_data: &MultilinearZipData<K>,
+        commit_data: &MultilinearZipData<T>,
         transcript: &mut PcsTranscript,
     ) -> Result<(), MerkleError> {
         let merkle_path = MerkleProof::create_proof(&commit_data.merkle_tree, column)?;
@@ -281,9 +284,9 @@ impl ColumnOpening {
         Ok(())
     }
 
-    pub fn verify_column<const N: usize>(
+    pub fn verify_column<T: AsPackable>(
         root: &MtHash,
-        column: &[Int<N>],
+        column: &[T],
         column_index: usize,
         transcript: &mut PcsTranscript,
     ) -> Result<(), MerkleError> {

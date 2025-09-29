@@ -10,7 +10,7 @@ use num_traits::{
 };
 use pastey::paste;
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct Int<const LIMBS: usize>(crypto_bigint::Int<LIMBS>);
 
@@ -81,21 +81,31 @@ impl<const LIMBS: usize> Display for Int<LIMBS> {
     }
 }
 
+impl<const LIMBS: usize> Default for Int<LIMBS> {
+    #[inline(always)]
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
+
 //
 // Zero and One traits
 //
 
 impl<const LIMBS: usize> Zero for Int<LIMBS> {
+    #[inline(always)]
     fn zero() -> Self {
         Self::ZERO
     }
 
+    #[inline(always)]
     fn is_zero(&self) -> bool {
         self.0.is_zero()
     }
 }
 
 impl<const LIMBS: usize> One for Int<LIMBS> {
+    #[inline(always)]
     fn one() -> Self {
         Self::ONE
     }
@@ -118,6 +128,7 @@ macro_rules! impl_basic_op {
         impl<const LIMBS: usize> $trait_name for Int<LIMBS> {
             type Output = Self;
 
+            #[inline(always)]
             fn $trait_op(self, rhs: Self) -> Self::Output {
                 Self(self.0.$trait_op(&rhs.0))
             }
@@ -126,6 +137,7 @@ macro_rules! impl_basic_op {
         impl<'a, const LIMBS: usize> $trait_name<&'a Self> for Int<LIMBS> {
             type Output = Self;
 
+            #[inline(always)]
             fn $trait_op(self, rhs: &'a Self) -> Self::Output {
                 Self(self.0.$trait_op(&rhs.0))
             }
@@ -140,6 +152,7 @@ impl_basic_op!(Mul, mul);
 impl<const LIMBS: usize> Rem for Int<LIMBS> {
     type Output = Self;
 
+    #[inline(always)]
     fn rem(self, rhs: Self) -> Self::Output {
         self.rem(&rhs)
     }
@@ -148,6 +161,7 @@ impl<const LIMBS: usize> Rem for Int<LIMBS> {
 impl<'a, const LIMBS: usize> Rem<&'a Self> for Int<LIMBS> {
     type Output = Self;
 
+    #[inline(always)]
     fn rem(self, rhs: &'a Self) -> Self::Output {
         let non_zero = crypto_bigint::NonZero::new(rhs.0).expect("division by zero");
         Self(self.0.rem(&non_zero))
@@ -157,6 +171,7 @@ impl<'a, const LIMBS: usize> Rem<&'a Self> for Int<LIMBS> {
 impl<const LIMBS: usize> Shl<u32> for Int<LIMBS> {
     type Output = Self;
 
+    #[inline(always)]
     fn shl(self, rhs: u32) -> Self::Output {
         Self(self.0.shl(rhs))
     }
@@ -165,6 +180,7 @@ impl<const LIMBS: usize> Shl<u32> for Int<LIMBS> {
 impl<const LIMBS: usize> Shr<u32> for Int<LIMBS> {
     type Output = Self;
 
+    #[inline(always)]
     fn shr(self, rhs: u32) -> Self::Output {
         Self(self.0.shr(rhs))
     }
@@ -206,13 +222,10 @@ impl<const LIMBS: usize> Pow<u32> for Int<LIMBS> {
 macro_rules! impl_checked_op {
     ($trait_name:tt, $trait_op:tt) => {
         impl<const LIMBS: usize> $trait_name for Int<LIMBS> {
+            #[inline(always)]
             fn $trait_op(&self, other: &Self) -> Option<Self> {
-                let result = self.0.$trait_op(&other.0);
-                if result.is_some().into() {
-                    Some(Self(result.unwrap()))
-                } else {
-                    None
-                }
+                let value: Option<crypto_bigint::Int<LIMBS>> = self.0.$trait_op(&other.0).into();
+                value.map(Self)
             }
         }
     };
@@ -234,6 +247,7 @@ impl<const LIMBS: usize> CheckedNeg for Int<LIMBS> {
 }
 
 impl<const LIMBS: usize> CheckedRem for Int<LIMBS> {
+    #[inline(always)]
     fn checked_rem(&self, other: &Self) -> Option<Self> {
         let non_zero = crypto_bigint::NonZero::new(other.0).into_option()?;
         Some(Self(self.0.rem(&non_zero)))
@@ -247,12 +261,14 @@ impl<const LIMBS: usize> CheckedRem for Int<LIMBS> {
 macro_rules! impl_assign_op {
     ($trait_name:tt, $trait_op:tt) => {
         impl<const LIMBS: usize> $trait_name<Self> for Int<LIMBS> {
+            #[inline(always)]
             fn $trait_op(&mut self, rhs: Self) {
                 self.0.$trait_op(&rhs.0);
             }
         }
 
         impl<'a, const LIMBS: usize> $trait_name<&'a Self> for Int<LIMBS> {
+            #[inline(always)]
             fn $trait_op(&mut self, rhs: &'a Self) {
                 self.0.$trait_op(&rhs.0);
             }
@@ -265,6 +281,7 @@ impl_assign_op!(SubAssign, sub_assign);
 impl_assign_op!(MulAssign, mul_assign);
 
 impl<const LIMBS: usize> RemAssign for Int<LIMBS> {
+    #[inline(always)]
     fn rem_assign(&mut self, rhs: Self) {
         self.rem_assign(&rhs);
     }
@@ -272,6 +289,7 @@ impl<const LIMBS: usize> RemAssign for Int<LIMBS> {
 
 impl<'a, const LIMBS: usize> RemAssign<&'a Self> for Int<LIMBS> {
     #![allow(clippy::arithmetic_side_effects)]
+    #[inline(always)]
     fn rem_assign(&mut self, rhs: &'a Self) {
         let non_zero = crypto_bigint::NonZero::new(rhs.0).expect("division by zero");
         self.0 %= non_zero;
@@ -369,8 +387,6 @@ impl_from_primitive!(i8, i16, i32, i64, i128);
 //
 
 impl<const LIMBS: usize> Ring for Int<LIMBS> {}
-
-impl<const LIMBS: usize> ConstRing for Int<LIMBS> {}
 
 impl<const LIMBS: usize> IntRing for Int<LIMBS> {}
 

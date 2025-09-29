@@ -46,6 +46,7 @@ pub trait Ring:
     {}
 
 pub trait ConstRing: Ring + ConstZero + ConstOne {}
+impl<T> ConstRing for T where T: Ring + ConstZero + ConstOne {}
 
 /// Ring of integers, usually denoted as `Z`.
 pub trait IntRing:
@@ -65,7 +66,6 @@ pub trait IntRing:
 macro_rules! primitive_int_ring {
     ($t:ident) => {
         impl Ring for $t {}
-        impl ConstRing for $t {}
         impl IntRing for $t {}
     };
 }

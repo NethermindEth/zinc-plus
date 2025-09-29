@@ -17,7 +17,7 @@ use zip_plus::{
     field::F256,
     pcs::{MerkleTree, structs::MultilinearZip},
     pcs_transcript::PcsTranscript,
-    poly::{dense::DenseMultilinearExtension, mle::MultilinearExtensionRand},
+    poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand},
     transcript::KeccakTranscript,
     utils::WORD_FACTOR,
 };
@@ -26,13 +26,13 @@ const INT_LIMBS: usize = WORD_FACTOR;
 
 const FIELD_LIMBS: usize = 4 * WORD_FACTOR;
 
-const N: usize = INT_LIMBS;
-const L: usize = INT_LIMBS * 2;
-const K: usize = INT_LIMBS * 4;
-const M: usize = INT_LIMBS * 8;
+type Elem = Int<INT_LIMBS>;
+type Cw = Int<{ INT_LIMBS * 4 }>;
+type Chal = Int<{ INT_LIMBS }>;
+type Comb = Int<{ INT_LIMBS * 8 }>;
 
-type LC = RaaCode<N, L, K, M>;
-type BenchZip = MultilinearZip<N, L, K, M, LC>;
+type LC = RaaCode<Elem, Cw, Comb>;
+type BenchZip = MultilinearZip<Elem, Cw, Chal, Comb, LC>;
 
 const_monty_params!(
     ModP,
@@ -50,7 +50,7 @@ fn encode_rows<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize
             let mut keccak_transcript = T::new();
             let poly_size = 1 << P;
             let linear_code =
-                LC::new(&DefaultLinearCodeSpec, poly_size, &mut keccak_transcript);
+                LC::new(&DefaultLinearCodeSpec, poly_size, false, &mut keccak_transcript);
             let params = BenchZip::setup(poly_size, linear_code);
             let row_len = params.linear_code.row_len();
             let codeword_len = params.linear_code.codeword_len();
@@ -70,11 +70,11 @@ fn encode_single_row<const ROW_LEN: usize>(group: &mut BenchmarkGroup<WallTime>,
             let mut keccak_transcript = KeccakTranscript::new();
             let poly_size = ROW_LEN * ROW_LEN;
             let linear_code =
-                LC::new(&DefaultLinearCodeSpec, poly_size, &mut keccak_transcript);
+                LC::new(&DefaultLinearCodeSpec, poly_size, false, &mut keccak_transcript);
             assert_eq!(linear_code.row_len(), ROW_LEN, "Unexpected row_len");
-            let message: Vec<_> = (0..ROW_LEN).map(|_i| Int::<N>::random(&mut rng)).collect();
+            let message: Vec<_> = (0..ROW_LEN).map(|_i| Elem::random(&mut rng)).collect();
             b.iter(|| {
-                let encoded_row: Vec<Int<K>> = linear_code.encode_wide(&message);
+                let encoded_row: Vec<Cw> = linear_code.encode(&message);
                 black_box(encoded_row);
             })
         },
@@ -85,9 +85,7 @@ fn merkle_root<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize
     let mut rng = rng();
 
     let num_leaves = 1 << P;
-    let leaves = (0..num_leaves)
-        .map(|_| Int::<K>::random(&mut rng))
-        .collect_vec();
+    let leaves = (0..num_leaves).map(|_| Cw::random(&mut rng)).collect_vec();
 
     group.bench_function(
         format!("MerkleRoot: Int<{INT_LIMBS}>, leaves=2^{P}, spec={spec}"),
@@ -105,7 +103,12 @@ fn commit<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
     type T = KeccakTranscript;
     let mut keccak_transcript = T::new();
     let poly_size = 1 << P;
-    let linear_code = LC::new(&DefaultLinearCodeSpec, poly_size, &mut keccak_transcript);
+    let linear_code = LC::new(
+        &DefaultLinearCodeSpec,
+        poly_size,
+        false,
+        &mut keccak_transcript,
+    );
     let params = BenchZip::setup(poly_size, linear_code);
 
     group.bench_function(
@@ -135,7 +138,12 @@ fn open<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
     type T = KeccakTranscript;
     let mut keccak_transcript = T::new();
     let poly_size = 1 << P;
-    let linear_code = LC::new(&DefaultLinearCodeSpec, poly_size, &mut keccak_transcript);
+    let linear_code = LC::new(
+        &DefaultLinearCodeSpec,
+        poly_size,
+        false,
+        &mut keccak_transcript,
+    );
     let params = BenchZip::setup(poly_size, linear_code);
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
@@ -171,7 +179,12 @@ fn verify<const P: usize>(group: &mut BenchmarkGroup<WallTime>, spec: usize) {
     type T = KeccakTranscript;
     let mut keccak_transcript = T::new();
     let poly_size = 1 << P;
-    let linear_code = LC::new(&DefaultLinearCodeSpec, poly_size, &mut keccak_transcript);
+    let linear_code = LC::new(
+        &DefaultLinearCodeSpec,
+        poly_size,
+        false,
+        &mut keccak_transcript,
+    );
     let params = BenchZip::setup(poly_size, linear_code);
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);

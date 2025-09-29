@@ -1,37 +1,49 @@
-use crypto_primitives::crypto_bigint_int::Int;
-use std::collections::BTreeSet;
-
-pub trait ConstNumBytes {
+/// Trait for types that can be transcribed to and from a byte representation.
+/// Byte order is not specified, but it must be portable across platforms.
+pub trait Transcribable {
     /// Number of bytes required to represent this type.
     const NUM_BYTES: usize;
+
+    /// Creates a new instance from a byte buffer.
+    /// The buffer must be exactly `NUM_BYTES` long.
+    fn read_transcription_bytes(bytes: &[u8]) -> Self;
+
+    /// Transcribes the current instance into a byte buffer.
+    /// Buffer must be exactly `NUM_BYTES` long.
+    fn write_transcription_bytes(&self, buf: &mut [u8]);
 }
 
-// Out own version of FromBytes and ToBytes traits, allowing us to implement
-// them for types that do not implement the num_traits versions directly, but
-// have a compatible interface.
+macro_rules! impl_transcribable_for_primitive {
+    ($type:ty, $num_bytes:expr) => {
+        impl Transcribable for $type {
+            const NUM_BYTES: usize = $num_bytes;
 
-pub trait FromBytes {
-    fn from_be_bytes(bytes: &[u8]) -> Self;
-    fn from_le_bytes(bytes: &[u8]) -> Self;
+            fn read_transcription_bytes(bytes: &[u8]) -> Self {
+                assert_eq!(bytes.len(), Self::NUM_BYTES);
+                let mut arr = [0u8; Self::NUM_BYTES];
+                arr.copy_from_slice(bytes);
+                Self::from_le_bytes(arr)
+            }
+
+            fn write_transcription_bytes(&self, buf: &mut [u8]) {
+                assert_eq!(buf.len(), Self::NUM_BYTES);
+                buf.copy_from_slice(&self.to_le_bytes());
+            }
+        }
+    };
 }
 
-pub trait ToBytes {
-    fn to_be_bytes(&self) -> Vec<u8>;
-    fn to_le_bytes(&self) -> Vec<u8>;
-}
-
-pub trait Transcribable: FromBytes + ToBytes + ConstNumBytes {}
-impl<T: FromBytes + ToBytes + ConstNumBytes> Transcribable for T {}
+impl_transcribable_for_primitive!(u32, 4);
+impl_transcribable_for_primitive!(u64, 8);
 
 pub trait Transcript {
-    fn get_encoding_element<const LIMBS: usize>(&mut self) -> Int<LIMBS>;
+    /// Generates a pseudorandom transcribable value as a challenge based on the
+    /// current transcript state, updating it.
+    fn get_challenge<T: Transcribable>(&mut self) -> T;
 
-    fn get_u64(&mut self) -> u64;
-
-    fn sample_unique_columns(
-        &mut self,
-        range: ark_std::ops::Range<usize>,
-        columns: &mut BTreeSet<usize>,
-        count: usize,
-    ) -> usize;
+    /// Generates a pseudorandom transcribable values as challenges based on the
+    /// current transcript state, updating it.
+    fn get_challenges<T: Transcribable>(&mut self, n: usize) -> Vec<T> {
+        (0..n).map(|_| self.get_challenge()).collect()
+    }
 }

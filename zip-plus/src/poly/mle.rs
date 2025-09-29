@@ -1,3 +1,5 @@
+pub mod dense;
+
 use std::{
     fmt::Debug,
     ops::{Add, AddAssign, Index, Neg, SubAssign},
@@ -5,6 +7,8 @@ use std::{
 
 use num_traits::Zero;
 use rand_core::RngCore;
+
+pub use dense::DenseMultilinearExtension;
 
 /// This trait describes an interface for the multilinear extension
 /// of an array.

@@ -1,12 +1,6 @@
-use crate::{
-    add, rem, sub,
-    traits::{ToBytes, Transcript},
-    utils::WORD_FACTOR,
-};
+use crate::traits::{Transcribable, Transcript};
 use ark_std::vec::Vec;
-use crypto_bigint::Word;
-use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
-use num_traits::Zero;
+use crypto_primitives::PrimeField;
 use sha3::{Digest, Keccak256};
 
 /// A cryptographic transcript implementation using the Keccak-256 hash
@@ -31,22 +25,18 @@ impl KeccakTranscript {
         }
     }
 
-    /// Absorbs arbitrary bytes into the transcript.
-    /// This updates the internal state of the hasher with the provided data.
-    pub fn absorb(&mut self, v: &[u8]) {
-        self.hasher.update(v);
-    }
-
     /// Generates a specified number of pseudorandom bytes based on the current
     /// transcript state. Uses a counter-based approach to generate enough
     /// bytes from the hasher.
+    ///
+    /// Note that this does NOT update the internal state of the hasher
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn get_random_bytes(&mut self, length: usize) -> Vec<u8> {
+    fn get_random_bytes(&mut self, length: usize) -> Vec<u8> {
         let mut result = Vec::with_capacity(length);
         let mut counter = 0;
         while result.len() < length {
             let mut temp_hasher = self.hasher.clone();
-            temp_hasher.update(i32::to_be_bytes(counter));
+            temp_hasher.update(i32::to_le_bytes(counter));
             let hash = temp_hasher.finalize();
             result.extend_from_slice(&hash);
 
@@ -57,20 +47,29 @@ impl KeccakTranscript {
         result
     }
 
+    /// Absorbs arbitrary bytes into the transcript.
+    /// This updates the internal state of the hasher with the provided data.
+    pub fn absorb(&mut self, v: &[u8]) {
+        self.hasher.update(v);
+    }
+
     /// Absorbs a field element into the transcript.
     /// Delegates to the field element's implementation of
     /// absorb_into_transcript.
     pub fn absorb_random_field<F>(&mut self, v: &F)
     where
         F: PrimeField,
-        F::Inner: ToBytes,
+        F::Inner: Transcribable,
     {
+        let mut buf = vec![0; F::Inner::NUM_BYTES];
         self.absorb(&[0x3]);
-        self.absorb(&F::MODULUS.to_be_bytes());
+        F::MODULUS.write_transcription_bytes(&mut buf);
+        self.absorb(&buf);
         self.absorb(&[0x5]);
 
         self.absorb(&[0x1]);
-        self.absorb(&v.inner().to_be_bytes());
+        v.inner().write_transcription_bytes(&mut buf);
+        self.absorb(&buf);
         self.absorb(&[0x3])
     }
 
@@ -79,80 +78,20 @@ impl KeccakTranscript {
     pub fn absorb_slice<F>(&mut self, slice: &[F])
     where
         F: PrimeField,
-        F::Inner: ToBytes,
+        F::Inner: Transcribable,
     {
         for field_element in slice.iter() {
             self.absorb_random_field(field_element);
         }
     }
-
-    /// Generates a pseudorandom [Integer] as a challenge based on the current
-    /// transcript state.
-    pub fn get_integer_challenge<const LIMBS: usize>(&mut self) -> Int<LIMBS> {
-        let mut words: [Word; LIMBS] = [Word::zero(); LIMBS];
-        for word in words.iter_mut().take(LIMBS) {
-            let mut challenge = [0u8; size_of::<Word>()];
-            let rand_bytes = self.get_random_bytes(size_of::<Word>());
-            challenge.copy_from_slice(&rand_bytes);
-            self.hasher.update([0x12]);
-            self.hasher.update(challenge);
-            self.hasher.update([0x34]);
-            *word = Word::from_be_bytes(challenge);
-        }
-
-        Int::from_words(words)
-    }
-
-    /// Generates pseudorandom [CryptoInt]s as challenges based on the current
-    /// transcript state.
-    pub fn get_integer_challenges<const LIMBS: usize>(&mut self, n: usize) -> Vec<Int<LIMBS>> {
-        (0..n).map(|_| self.get_integer_challenge()).collect()
-    }
-
-    /// Generates a pseudorandom `usize` within the given range bounds based on
-    /// the current transcript state.
-    #[allow(clippy::unwrap_used)]
-    fn get_usize_in_range(&mut self, range: &ark_std::ops::Range<usize>) -> usize {
-        let challenge = self.hasher.clone().finalize();
-
-        self.hasher.update([0x88]);
-        self.hasher.update(challenge);
-        self.hasher.update([0x11]);
-
-        let num = usize::from_be_bytes(challenge[..size_of::<usize>()].try_into().unwrap());
-        add!(range.start, rem!(num, sub!(range.end, range.start)))
-    }
 }
 
 impl Transcript for KeccakTranscript {
-    #[allow(clippy::cast_possible_wrap)]
-    fn get_encoding_element<const LIMBS: usize>(&mut self) -> Int<LIMBS> {
-        let byte = self.get_random_bytes(1)[0];
-        // cancels all bits and depends only on whether the random byte LSB is 0 or 1
-        let bit = byte & 1;
-        crypto_bigint::Int::from(bit as i8).into()
-    }
-
-    fn get_u64(&mut self) -> u64 {
-        self.get_integer_challenge::<{ WORD_FACTOR }>()
-            .inner()
-            .as_words()[0]
-    }
-
-    #[allow(clippy::arithmetic_side_effects)]
-    fn sample_unique_columns(
-        &mut self,
-        range: ark_std::ops::Range<usize>,
-        columns: &mut ark_std::collections::BTreeSet<usize>,
-        count: usize,
-    ) -> usize {
-        let mut added = 0;
-        while added < count {
-            let candidate = self.get_usize_in_range(&range);
-            if columns.insert(candidate) {
-                added += 1;
-            }
-        }
-        added
+    fn get_challenge<T: Transcribable>(&mut self) -> T {
+        let challenge = self.get_random_bytes(T::NUM_BYTES);
+        self.hasher.update([0x12]);
+        self.hasher.update(&challenge);
+        self.hasher.update([0x34]);
+        T::read_transcription_bytes(&challenge)
     }
 }

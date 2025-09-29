@@ -5,11 +5,7 @@
     clippy::cast_sign_loss
 )]
 
-use crypto_bigint::Word;
-use crypto_primitives::crypto_bigint_int::Int;
-use std::{collections::BTreeSet, ops::Range};
-
-use crate::traits::Transcript;
+use crate::traits::{Transcribable, Transcript};
 
 #[derive(Default)]
 pub struct MockTranscript {
@@ -17,32 +13,11 @@ pub struct MockTranscript {
 }
 
 impl Transcript for MockTranscript {
-    fn get_encoding_element<const L: usize>(&mut self) -> Int<L> {
+    fn get_challenge<T: Transcribable>(&mut self) -> T {
         self.counter += 1;
-        Int::from(self.counter)
-    }
-
-    fn get_u64(&mut self) -> u64 {
-        self.counter += 1;
-        self.counter as Word
-    }
-
-    fn sample_unique_columns(
-        &mut self,
-        range: Range<usize>,
-        columns: &mut BTreeSet<usize>,
-        count: usize,
-    ) -> usize {
-        self.counter += 1;
-        let mut inserted = 0;
-        for i in range.clone() {
-            if columns.insert(i) {
-                inserted += 1;
-                if inserted == count {
-                    break;
-                }
-            }
-        }
-        inserted
+        let mut bytes = vec![0u8; T::NUM_BYTES];
+        let counter_bytes = self.counter.to_le_bytes();
+        bytes[..counter_bytes.len()].copy_from_slice(&counter_bytes);
+        T::read_transcription_bytes(&bytes)
     }
 }

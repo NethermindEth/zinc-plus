@@ -1,5 +1,6 @@
 #![allow(clippy::arithmetic_side_effects)]
 
+use crate::{field::ConstMontyField, pcs::structs::MulByScalar, rem, utils::WORD_FACTOR};
 use crypto_bigint::{
     Uint,
     modular::{ConstMontyForm, ConstMontyParams},
@@ -15,8 +16,6 @@ use std::{
         SubAssign,
     },
 };
-
-use crate::{field::ConstMontyField, rem, utils::WORD_FACTOR};
 
 // Macro to implement arithmetic traits for Field in all ref/value combinations
 // Uses the same method name for both the trait method and the inner explicit
@@ -257,6 +256,18 @@ impl<'a, Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> Product<&'a Self>
 {
     fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
         iter.fold(Self::ONE, |acc, x| acc * x)
+    }
+}
+
+//
+// Zip-specific
+//
+
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> MulByScalar<&Self>
+    for ConstMontyField<Mod, LIMBS>
+{
+    fn mul_by_scalar(&self, rhs: &Self) -> Option<Self> {
+        self.checked_mul(rhs)
     }
 }
 

@@ -17,7 +17,7 @@ use std::{
 };
 
 use crate::utils::WORD_FACTOR;
-use crypto_primitives::{ConstRing, Field, IntRing, PrimeField, Ring};
+use crypto_primitives::{Field, IntRing, PrimeField, Ring};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct ConstMontyField<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize>(
@@ -37,8 +37,6 @@ impl<MOD: ConstMontyParams<LIMBS>, const LIMBS: usize> Random for ConstMontyFiel
 }
 
 impl<MOD: ConstMontyParams<LIMBS>, const LIMBS: usize> Ring for ConstMontyField<MOD, LIMBS> {}
-
-impl<MOD: ConstMontyParams<LIMBS>, const LIMBS: usize> ConstRing for ConstMontyField<MOD, LIMBS> {}
 
 impl<MOD: ConstMontyParams<LIMBS>, const LIMBS: usize> IntRing for ConstMontyField<MOD, LIMBS> {}
 

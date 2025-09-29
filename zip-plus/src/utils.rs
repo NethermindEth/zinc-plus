@@ -1,5 +1,8 @@
+use crate::{pcs::structs::MulByScalar, traits::Transcribable};
+use crypto_bigint::{Uint, Word};
 use crypto_primitives::crypto_bigint_int::Int;
-use num_traits::{CheckedAdd, CheckedMul};
+use itertools::Itertools;
+use num_traits::CheckedAdd;
 use rand::{rngs::StdRng, seq::SliceRandom};
 use rand_core::SeedableRng;
 
@@ -58,15 +61,19 @@ macro_rules! rem {
     };
 }
 
-pub(crate) fn inner_product<'a, 'b, T, L, R>(lhs: L, rhs: R) -> T
+pub(crate) fn inner_product<'a, 'b, Coeff, El, L, R>(lhs: L, rhs: R) -> El
 where
-    T: Clone + CheckedMul + CheckedAdd + Default + 'a + 'b,
-    L: IntoIterator<Item = &'a T>,
-    R: IntoIterator<Item = &'b T>,
+    Coeff: Clone + Default + 'a + 'b,
+    El: Clone + CheckedAdd + for<'z> MulByScalar<&'z Coeff> + Default + 'a + 'b,
+    L: IntoIterator<Item = &'a Coeff>,
+    R: IntoIterator<Item = &'b El>,
 {
     lhs.into_iter()
         .zip(rhs)
-        .map(|(lhs, rhs)| mul!(lhs, rhs))
+        .map(|(lhs, rhs)| {
+            rhs.mul_by_scalar(lhs)
+                .expect("Cannot multiply a codeword element by a coefficient")
+        })
         .reduce(|acc, product| add!(acc, &product))
         .unwrap_or_default()
 }
@@ -139,43 +146,40 @@ where
 /// # Returns
 ///
 /// A vector of length `row_len` representing the combined row.
-pub(super) fn combine_rows<F, C, E>(coeffs: C, evaluations: E, row_len: usize) -> Vec<F>
+pub(super) fn combine_rows<Coeff, El, C, E>(coeffs: C, evaluations: E, row_len: usize) -> Vec<El>
 where
-    F: Clone + Default + Send + Sync + CheckedAdd + CheckedMul,
-    C: IntoIterator<Item = F> + Sync,
-    E: IntoIterator<Item = F> + Sync,
+    Coeff: Send + Sync,
+    El: Clone + Default + CheckedAdd + for<'z> MulByScalar<&'z Coeff> + Send + Sync,
+    C: IntoIterator<Item = Coeff> + Sync,
+    E: IntoIterator<Item = El> + Sync,
     C::IntoIter: Clone + Send + Sync,
     E::IntoIter: Clone + Send + Sync,
 {
     let coeffs_iter = coeffs.into_iter();
     let evaluations_iter = evaluations.into_iter();
 
-    let mut combined_row = vec![F::default(); row_len];
+    let mut combined_row = vec![El::default(); row_len];
     parallelize(&mut combined_row, |(combined_row, offset)| {
         combined_row
             .iter_mut()
             .zip(offset..)
             .for_each(|(combined, column)| {
-                *combined = F::default();
+                *combined = El::default();
                 coeffs_iter
                     .clone()
                     .zip(evaluations_iter.clone().skip(column).step_by(row_len))
                     .for_each(|(coeff, eval)| {
-                        *combined = add!(combined, &mul!(coeff, &eval));
+                        *combined = add!(
+                            combined,
+                            &eval
+                                .mul_by_scalar(&coeff)
+                                .expect("Cannot multiply evaluation by coefficient")
+                        );
                     });
             })
     });
 
     combined_row
-}
-
-pub(super) fn expand<const N: usize, const M: usize>(narrow_int: &Int<N>) -> Int<M> {
-    assert!(
-        N <= M,
-        "Cannot squeeze a wide integer into a narrow integer."
-    );
-
-    narrow_int.resize()
 }
 
 /// Reorder the elements in slice using the given randomness seed
@@ -380,92 +384,60 @@ pub unsafe trait ReinterpretVector<Target: Sized>: Sized {
     }
 }
 
+impl<const LIMBS: usize> Transcribable for Uint<LIMBS> {
+    const NUM_BYTES: usize = 8 * LIMBS / WORD_FACTOR;
+
+    fn read_transcription_bytes(bytes: &[u8]) -> Self {
+        // crypto_bigint::Uint stores limbs in least-to-most significant order.
+        // It matches little-endian order ef limbs encoding, so platform pointer width
+        // does not matter.
+        let (chunked, rem) = bytes.as_chunks::<{ 8 / WORD_FACTOR }>();
+        assert!(rem.is_empty(), "Invalid byte slice length for Uint");
+        let words = chunked
+            .iter()
+            .map(|chunk| Word::from_le_bytes(*chunk))
+            .collect_array::<LIMBS>()
+            .expect("Invalid length for Uint");
+        Uint::<LIMBS>::from_words(words)
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn write_transcription_bytes(&self, buf: &mut [u8]) {
+        // crypto_bigint::Uint stores limbs in least-to-most significant order.
+        // It matches little-endian order ef limbs encoding, so platform pointer width
+        // does not matter.
+        assert_eq!(buf.len(), Self::NUM_BYTES, "Buffer size mismatch for Uint");
+        const W_SIZE: usize = size_of::<Word>();
+        for (i, w) in self.as_words().iter().enumerate() {
+            // Performance: reuse buffer and help compiler optimize away materializing
+            // vector
+            buf[(i * W_SIZE)..(i * W_SIZE + W_SIZE)].copy_from_slice(w.to_le_bytes().as_ref());
+        }
+    }
+}
+
+impl<const LIMBS: usize> Transcribable for Int<LIMBS> {
+    const NUM_BYTES: usize = Uint::<LIMBS>::NUM_BYTES;
+
+    fn read_transcription_bytes(bytes: &[u8]) -> Self {
+        Uint::<LIMBS>::read_transcription_bytes(bytes)
+            .as_int()
+            .into()
+    }
+
+    fn write_transcription_bytes(&self, buf: &mut [u8]) {
+        self.inner().as_uint().write_transcription_bytes(buf)
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use crypto_bigint::{Random, Word};
-    use crypto_primitives::crypto_bigint_int::Int;
-    use num_traits::{ConstOne, ConstZero};
-    use rand::rng;
-
-    use crate::utils::{expand, inner_product};
+    use super::*;
 
     #[test]
     fn test_inner_product_basic() {
         let lhs = [1, 2, 3];
         let rhs = [4, 5, 6];
         assert_eq!(inner_product(lhs.iter(), rhs.iter()), 4 + 2 * 5 + 3 * 6);
-    }
-
-    #[test]
-    fn test_expand_normal() {
-        let input_words = [1, 2];
-        let input = Int::<2>::from_words(input_words);
-        let expanded = expand::<2, 4>(&input);
-
-        let expected_words = [1, 2, 0, 0];
-        assert_eq!(expanded.inner().to_words(), expected_words);
-    }
-
-    #[test]
-    fn test_expand_identity() {
-        let input_words = [42, 99];
-        let input = Int::<2>::from_words(input_words);
-        let expanded = expand::<2, 2>(&input);
-
-        let expected_words = [42, 99];
-        assert_eq!(expanded.inner().to_words(), expected_words);
-    }
-
-    #[test]
-    #[should_panic(expected = "Cannot squeeze a wide integer into a narrow integer.")]
-    fn test_expand_invalid() {
-        let input = Int::<4>::from_words([1, 2, 3, 4]);
-        // N = 4, M = 2 → should panic
-        let _ = expand::<4, 2>(&input);
-    }
-
-    #[test]
-    fn test_expand_zero_padding() {
-        let input = Int::<1>::from_words([123]);
-        let expanded = expand::<1, 3>(&input);
-
-        let expected_words = [123 as Word, 0, 0];
-        assert_eq!(expanded.inner().to_words(), expected_words);
-    }
-
-    #[test]
-    fn test_expand_all_zeros() {
-        let input = Int::<2>::from_words([0, 0]);
-        let expanded = expand::<2, 4>(&input);
-
-        let expected_words = [0 as Word, 0, 0, 0];
-        assert_eq!(expanded.inner().to_words(), expected_words);
-    }
-    #[test]
-    fn test_expand_negative_number_identity() {
-        // Example negative number in two's complement for 2 words
-        let negative_val = Int::<2>::from_words([!0, !0]); // -1
-        let expanded = expand::<2, 2>(&negative_val);
-
-        assert_eq!(expanded, Int::ZERO - Int::ONE);
-    }
-
-    #[test]
-    fn test_expand_negative_number_wider() {
-        let mut rg = rng();
-
-        let mut positive_val = Int::<2>::random(&mut rg);
-        if positive_val < Int::ZERO {
-            positive_val = Int::ZERO - positive_val;
-        }
-
-        let expanded_positive = expand::<2, 4>(&positive_val);
-
-        let negative_val = Int::ZERO - positive_val;
-        let expanded_negative = expand::<2, 4>(&negative_val);
-
-        let expected_negative = Int::ZERO - expanded_positive;
-
-        assert_eq!(expanded_negative, expected_negative);
     }
 }
