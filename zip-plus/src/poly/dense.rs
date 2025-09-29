@@ -1,7 +1,7 @@
 use super::{EvaluationError, Polynomial};
 use crate::{
     pcs::structs::{AsPackable, MulByScalar},
-    traits::{FromRef, Transcribable},
+    traits::{FromRef, Named, Transcribable},
     utils::ReinterpretVector,
 };
 use crypto_primitives::Ring;
@@ -320,6 +320,12 @@ where
 //
 // Zip-specific traits
 //
+
+impl<R: Ring + Named, const DEGREE: usize> Named for DensePolynomial<R, DEGREE> {
+    fn type_name() -> String {
+        format!("DensePolynomial<{}, {DEGREE}>", R::type_name())
+    }
+}
 
 impl<R: Transcribable + Default, const DEGREE: usize> Transcribable for DensePolynomial<R, DEGREE> {
     const NUM_BYTES: usize = R::NUM_BYTES * (DEGREE + 1);

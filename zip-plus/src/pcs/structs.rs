@@ -2,7 +2,7 @@ use crate::{
     code::LinearCode,
     merkle::{MerkleTree, MtHash},
     poly::Polynomial,
-    traits::{FromRef, Transcribable},
+    traits::{FromRef, Named, Transcribable},
     utils::ReinterpretVector,
 };
 use crypto_primitives::{Ring, crypto_bigint_int::Int};
@@ -12,24 +12,25 @@ use std::marker::PhantomData;
 
 pub trait ZipTypes: Send + Sync {
     /// Coefficient ring of evaluation polynomial [Self::Eval]
-    type EvalR: Ring;
+    type EvalR: Ring + Named;
     /// Ring of witness/polynomial evaluations on boolean hypercube
-    type Eval: Ring + Polynomial<Self::EvalR>;
+    type Eval: Ring + Named + Polynomial<Self::EvalR>;
 
     /// Coefficient ring of codeword polynomial [Self::Cw]
-    type CwR: Ring;
+    type CwR: Ring + Named;
     /// Ring of codeword elements, at least as wide as the evaluation ring
-    type Cw: Ring + Polynomial<Self::CwR> + Transcribable + AsPackable + Copy;
+    type Cw: Ring + Named + Polynomial<Self::CwR> + Transcribable + AsPackable + Copy;
 
     /// Ring of challenge elements (coefficients) to perform a random linear
     /// combination of codewords
-    type Chal: Ring + Transcribable;
+    type Chal: Ring + Named + Transcribable;
 
     /// Coefficient ring of linear combination polynomial [Self::Comb]
     type CombR: Ring;
     /// Ring of elements in the linear combination of codewords, at least as
     /// wide as the evaluation, codeword, and challenge rings.
     type Comb: Ring
+        + Named
         + Polynomial<Self::CombR>
         + Transcribable
         + FromRef<Self::Eval>

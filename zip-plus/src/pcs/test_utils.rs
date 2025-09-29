@@ -7,7 +7,7 @@
 )]
 
 use crate::{
-    code::{DefaultLinearCodeSpec, raa::RaaCode},
+    code::{DefaultLinearCodeSpec, LinearCode, raa::RaaCode},
     pcs::structs::{
         AsPackable, MulByScalar, MultilinearZipCommitment, MultilinearZipParams, ZipPlus, ZipTypes,
     },
@@ -84,24 +84,19 @@ pub fn setup_poly_test_params<
     })
 }
 
-fn setup_test_params_inner<Eval, Cw, Comb, Zt>(
+fn setup_test_params_inner<Zt: ZipTypes>(
     num_vars: usize,
     prepare_evaluations: impl FnOnce(usize) -> Vec<Zt::Eval>,
 ) -> (
     MultilinearZipParams<Zt>,
     DenseMultilinearExtension<Zt::Eval>,
-)
-where
-    Eval: Ring,
-    Cw: Ring + FromRef<Eval>,
-    Comb: Ring + FromRef<Comb>,
-    Zt: ZipTypes<Eval = Eval, Cw = Cw, Comb = Comb, Code = RaaCode<Eval, Cw, Comb>>,
-{
+) {
     let poly_size = 1 << num_vars;
     let num_rows = 1 << num_vars.div_ceil(2);
 
     let mut transcript = MockTranscript::default();
-    let code = RaaCode::new(&DefaultLinearCodeSpec, poly_size, true, &mut transcript);
+    let code =
+        <Zt as ZipTypes>::Code::new(&DefaultLinearCodeSpec, poly_size, true, &mut transcript);
     let pp = MultilinearZipParams::new(num_vars, num_rows, code);
 
     let evaluations = prepare_evaluations(poly_size);

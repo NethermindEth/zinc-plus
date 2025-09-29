@@ -56,3 +56,7 @@ harness = false
 [[bench]]
 name = "zip_benches"
 harness = false
+
+[[bench]]
+name = "zip_plus_benches"
+harness = false
