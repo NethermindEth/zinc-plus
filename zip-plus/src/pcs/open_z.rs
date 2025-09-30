@@ -85,7 +85,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
 
         let q_0_combined_row = if num_rows > 1 {
             // Return the evaluation row combination
-            let combined_row = combine_rows(q_0, evaluations, row_len);
+            let combined_row = combine_rows(&q_0, &evaluations, row_len);
             Cow::<Vec<F>>::Owned(combined_row)
         } else {
             // If there is only one row, we have no need to take linear combinations
@@ -129,11 +129,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
                     .collect_vec();
 
                 // u' in the Zinc paper
-                let combined_row = combine_rows(
-                    coeffs.into_iter(),
-                    evals.into_iter(),
-                    pp.linear_code.row_len(),
-                );
+                let combined_row = combine_rows(&coeffs, &evals, pp.linear_code.row_len());
 
                 transcript.write_many(&combined_row)?;
             }

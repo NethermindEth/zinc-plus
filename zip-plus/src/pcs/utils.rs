@@ -170,24 +170,6 @@ where
     Ok(())
 }
 
-/// For a polynomial arranged in matrix form, this splits the evaluation point
-/// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
-/// right and returns the left vector only
-#[allow(clippy::unwrap_used)]
-pub(super) fn left_point_to_tensor<F>(num_rows: usize, point: &[F]) -> Result<Vec<F>, ZipError>
-where
-    F: PrimeField,
-{
-    let (_, lo) = point.split_at(sub!(point.len(), num_rows.ilog2() as usize));
-    // TODO: get rid of these unwraps.
-    let q_0 = if !lo.is_empty() {
-        build_eq_x_r(lo).unwrap()
-    } else {
-        DenseMultilinearExtension::zero()
-    };
-    Ok(q_0.evaluations)
-}
-
 /// This is a helper struct to open a column in a multilinear polynomial
 /// Opening a column `j` in an `n x m` matrix `u_hat` requires opening `m`
 /// Merkle trees, one for each row at position j
