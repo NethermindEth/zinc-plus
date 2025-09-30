@@ -213,7 +213,6 @@ mod tests {
             structs::{ZipPlus, ZipPlusParams, ZipTypes},
             test_utils::*,
         },
-        pcs_transcript::PcsTranscript,
         poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
         transcript::KeccakTranscript,
         utils::WORD_FACTOR,
@@ -408,9 +407,9 @@ mod tests {
     #[test]
     fn commit_produces_correct_merkle_tree_count() {
         let (pp, poly) = setup_test_params(3);
-        let (data, _) = TestZip::commit(&pp, &poly).unwrap();
+        let (hint, _) = TestZip::commit(&pp, &poly).unwrap();
 
-        assert_eq!(data.rows.len(), pp.num_rows * pp.linear_code.codeword_len());
+        assert_eq!(hint.rows.len(), pp.num_rows * pp.linear_code.codeword_len());
     }
 
     #[test]
@@ -614,10 +613,9 @@ mod tests {
 
     #[test]
     fn proof_size_is_correct_for_parameters() {
-        fn calculate_expected_proof_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
+        fn calculate_expected_test_proof_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
             let size_of_zt_k = K * size_of::<Word>();
             let size_of_zt_m = M * size_of::<Word>();
-            let size_of_f_b = FIELD_LIMBS * size_of::<Word>();
             let size_of_path_len = size_of::<u64>();
             let size_of_path_elem = size_of::<MtHash>();
             let size_of_dimension = size_of::<u64>();
@@ -633,9 +631,16 @@ mod tests {
             let column_opening_phase_size =
                 Zt::NUM_COLUMN_OPENINGS * (column_values_size + single_merkle_proof_size);
 
+            proximity_phase_size + column_opening_phase_size
+        }
+
+        fn calculate_expected_eval_proof_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
+            let size_of_f_b = FIELD_LIMBS * size_of::<Word>();
             let evaluation_phase_size = pp.linear_code.row_len() * size_of_f_b;
 
-            proximity_phase_size + column_opening_phase_size + evaluation_phase_size
+            // let ra
+
+            calculate_expected_test_proof_size_bytes(pp) + evaluation_phase_size
         }
 
         const_monty_params!(
@@ -655,18 +660,20 @@ mod tests {
             .map(|_| <Zt as ZipTypes>::Eval::from(rng.random::<i8>()))
             .collect();
         let mle = DenseMultilinearExtension::from_evaluations_slice(num_vars, &evaluations);
-        let point_int: Vec<_> = (0..num_vars)
+        let point: Vec<_> = (0..num_vars)
             .map(|_| <Zt as ZipTypes>::Pt::random(&mut rng))
             .collect();
 
-        let (data, _) = TestZip::commit(&param, &mle).unwrap();
-        let mut prover_transcript = PcsTranscript::new();
-        TestZip::open::<F>(&param, &mle, &data, &point_int, &mut prover_transcript).unwrap();
-        let proof = prover_transcript.into_proof();
+        let (hint, _) = TestZip::commit(&param, &mle).unwrap();
 
-        let actual_proof_size_bytes = proof.len();
-        let expected_proof_size_bytes = calculate_expected_proof_size_bytes(&param);
+        let test_proof = TestZip::test(&param, &mle, &hint).unwrap();
+        let actual_test_proof_size_bytes = test_proof.0.len();
+        let expected_test_proof_size_bytes = calculate_expected_test_proof_size_bytes(&param);
+        assert_eq!(actual_test_proof_size_bytes, expected_test_proof_size_bytes);
 
-        assert_eq!(actual_proof_size_bytes, expected_proof_size_bytes);
+        let (_, eval_proof) = TestZip::evaluate::<F>(&param, &mle, &point, test_proof).unwrap();
+        let actual_eval_proof_size_bytes = eval_proof.0.len();
+        let expected_eval_proof_size_bytes = calculate_expected_eval_proof_size_bytes(&param);
+        assert_eq!(actual_eval_proof_size_bytes, expected_eval_proof_size_bytes);
     }
 }

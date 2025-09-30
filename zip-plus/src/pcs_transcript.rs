@@ -31,16 +31,11 @@ impl PcsTranscript {
         Self::default()
     }
 
-    /// Converts the transcript into a serialized proof as a byte vector.
-    pub fn into_proof(self) -> Vec<u8> {
-        self.stream.into_inner()
-    }
-
     /// Creates a transcript from an existing serialized proof.
-    pub fn from_proof(proof: &[u8]) -> Self {
+    fn from_proof(proof: Vec<u8>) -> Self {
         Self {
             fs_transcript: KeccakTranscript::default(),
-            stream: Cursor::new(proof.to_vec()),
+            stream: Cursor::new(proof),
         }
     }
 
@@ -200,6 +195,40 @@ impl PcsTranscript {
     }
 }
 
+/// Proof obtained by the verifier after the testing phase, which is essentially
+/// a serialized prover transcript.
+#[derive(Clone, Debug)]
+pub struct ZipPlusTestProof(pub Vec<u8>);
+
+impl From<PcsTranscript> for ZipPlusTestProof {
+    fn from(transcript: PcsTranscript) -> Self {
+        ZipPlusTestProof(transcript.stream.into_inner())
+    }
+}
+
+impl From<ZipPlusTestProof> for PcsTranscript {
+    fn from(value: ZipPlusTestProof) -> Self {
+        PcsTranscript::from_proof(value.0)
+    }
+}
+
+/// Proof obtained by the verifier after the evaluation phase, which is
+/// essentially a serialized prover transcript.
+#[derive(Clone, Debug)]
+pub struct ZipPlusEvaluationProof(pub Vec<u8>);
+
+impl From<PcsTranscript> for ZipPlusEvaluationProof {
+    fn from(transcript: PcsTranscript) -> Self {
+        ZipPlusEvaluationProof(transcript.stream.into_inner())
+    }
+}
+
+impl From<ZipPlusEvaluationProof> for PcsTranscript {
+    fn from(val: ZipPlusEvaluationProof) -> Self {
+        PcsTranscript::from_proof(val.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,8 +245,8 @@ mod tests {
             transcript
                 .$write_fn(&$original_value, &mut buf)
                 .expect(&format!("Failed to write {}", $assert_msg));
-            let proof = transcript.into_proof();
-            let mut transcript = PcsTranscript::from_proof(&proof);
+            let proof = transcript.stream.into_inner();
+            let mut transcript = PcsTranscript::from_proof(proof);
             let read_value = transcript
                 .$read_fn()
                 .expect(&format!("Failed to read {}", $assert_msg));
@@ -238,8 +267,8 @@ mod tests {
             transcript
                 .$write_fn(&$original_values)
                 .expect(&format!("Failed to write {}", $assert_msg));
-            let proof = transcript.into_proof();
-            let mut transcript = PcsTranscript::from_proof(&proof);
+            let proof = transcript.stream.into_inner();
+            let mut transcript = PcsTranscript::from_proof(proof);
             let read_values = transcript
                 .$read_fn($original_values.len())
                 .expect(&format!("Failed to read {}", $assert_msg));
