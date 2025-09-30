@@ -16,6 +16,8 @@ use std::{
     ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
 };
 
+// TODO: rename rename to univariate
+
 // Sadly, we cannot use [R; DEGREE + 1] in stable Rust yet, so we use separate
 // coeff_0.
 #[derive(Debug, Clone, PartialEq, Eq)]

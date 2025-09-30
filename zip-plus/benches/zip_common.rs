@@ -11,6 +11,7 @@ use ark_std::{
 use criterion::{BenchmarkGroup, measurement::WallTime};
 use crypto_bigint::{U256, const_monty_params, modular::ConstMontyParams};
 use itertools::Itertools;
+use num_traits::ConstOne;
 use rand::{distr::StandardUniform, prelude::*};
 use zip_plus::{
     code::{DefaultLinearCodeSpec, LinearCode},
@@ -159,6 +160,7 @@ pub fn open<Zt: ZipTypes, const P: usize>(group: &mut BenchmarkGroup<WallTime>)
 where
     StandardUniform: Distribution<Zt::Eval>,
     Zt::Eval: ProjectableToField<F>,
+    F: FromRef<Zt::Chal> + FromRef<Zt::Pt>,
 {
     let mut rng = ThreadRng::default();
 
@@ -175,8 +177,7 @@ where
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
     let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
-    let point = vec![1i64; P];
-    let field_point: Vec<F> = point.iter().map(F::from).collect();
+    let point = vec![Zt::Pt::ONE; P];
 
     group.bench_function(
         format!(
@@ -192,9 +193,10 @@ where
                 for _ in 0..iters {
                     let mut transcript = PcsTranscript::new();
                     let timer = Instant::now();
-                    ZipPlus::open(&params, &poly, &data, &field_point, &mut transcript)
+                    let eval_f: F = ZipPlus::open(&params, &poly, &data, &point, &mut transcript)
                         .expect("Failed to make opening");
                     total_duration += timer.elapsed();
+                    black_box(eval_f);
                 }
                 total_duration
             })
@@ -205,7 +207,9 @@ where
 pub fn verify<Zt: ZipTypes, const P: usize>(group: &mut BenchmarkGroup<WallTime>)
 where
     StandardUniform: Distribution<Zt::Eval>,
-    F: FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::CombR>>::Inner>,
+    F: FromRef<Zt::Chal>
+        + FromRef<Zt::Pt>
+        + FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::CombR>>::Inner>,
     Zt::Eval: ProjectableToField<F>,
     Zt::Cw: ProjectableToField<F>,
 {
@@ -219,24 +223,15 @@ where
         false,
         &mut keccak_transcript,
     );
-    let code_row_len = linear_code.row_len();
     let params = ZipPlus::<Zt>::setup(poly_size, linear_code);
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
     let (data, commitment) = ZipPlus::commit(&params, &poly).unwrap();
-    let point = vec![1i64; P];
-    let field_point: Vec<F> = point.iter().map(F::from).collect();
+    let point = vec![Zt::Pt::ONE; P];
+    let point_f: Vec<F> = point.iter().map(F::from_ref).collect();
     let mut transcript = PcsTranscript::new();
 
-    ZipPlus::open(&params, &poly, &data, &field_point, &mut transcript).unwrap();
-
-    let project = {
-        let mut transcript = transcript.clone();
-        let _ = transcript.read_field_elements::<F>(code_row_len);
-        Zt::Eval::read_projection(&mut transcript)
-    };
-    let eval = poly.evaluations.last().unwrap();
-    let eval_field: F = project(eval);
+    let eval_f = ZipPlus::open(&params, &poly, &data, &point, &mut transcript).unwrap();
 
     let proof = transcript.into_proof();
 
@@ -254,14 +249,8 @@ where
                 for _ in 0..iters {
                     let mut transcript = PcsTranscript::from_proof(&proof);
                     let timer = Instant::now();
-                    ZipPlus::verify(
-                        &params,
-                        &commitment,
-                        &field_point,
-                        &eval_field,
-                        &mut transcript,
-                    )
-                    .expect("Failed to verify");
+                    ZipPlus::verify(&params, &commitment, &point_f, &eval_f, &mut transcript)
+                        .expect("Failed to verify");
                     total_duration += timer.elapsed();
                 }
                 total_duration

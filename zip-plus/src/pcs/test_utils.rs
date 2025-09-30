@@ -13,7 +13,7 @@ use crate::{
         ZipTypes,
     },
     pcs_transcript::PcsTranscript,
-    poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
+    poly::{Polynomial, dense::DensePolynomial, mle::DenseMultilinearExtension},
     traits::{FromRef, Transcribable, Transcript},
 };
 use crypto_primitives::{PrimeField, Ring, crypto_bigint_int::Int};
@@ -26,6 +26,7 @@ impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N
     type CwR = Int<K>;
     type Cw = Int<K>;
     type Chal = Int<N>;
+    type Pt = Int<N>;
     type CombR = Int<M>;
     type Comb = Int<M>;
     type Code = RaaCode<Int<N>, Int<K>, Int<M>>;
@@ -41,6 +42,7 @@ impl<const N: usize, const K: usize, const M: usize, const DEGREE: usize> ZipTyp
     type CwR = Int<K>;
     type Cw = DensePolynomial<Int<K>, DEGREE>;
     type Chal = Int<N>;
+    type Pt = Int<N>;
     type CombR = Int<M>;
     type Comb = DensePolynomial<Int<M>, DEGREE>;
     type Code = RaaCode<DensePolynomial<Int<N>, DEGREE>, DensePolynomial<Int<K>, DEGREE>, Int<M>>;
@@ -143,24 +145,17 @@ where
     })
 }
 
-fn setup_full_protocol_inner<EvalR, Eval, Cw, CombR, Zt, F, const N: usize>(
+fn setup_full_protocol_inner<Eval, Cw, Pt, CombR, Zt, F, const N: usize>(
     num_vars: usize,
     setup: impl FnOnce(usize) -> (ZipPlusParams<Zt>, DenseMultilinearExtension<Eval>),
-    prepare_evaluation_point: impl FnOnce() -> Vec<EvalR>,
+    prepare_evaluation_point: impl FnOnce() -> Vec<Pt>,
 ) -> (ZipPlusParams<Zt>, ZipPlusCommitment, Vec<F>, F, Vec<u8>)
 where
-    EvalR: Ring,
-    Eval: Ring + for<'a> MulByScalar<&'a EvalR>,
-    Cw: Ring + FromRef<Eval> + AsPackable,
-    CombR: Ring + FromRef<CombR>,
-    Zt: ZipTypes<
-            EvalR = EvalR,
-            Eval = Eval,
-            Cw = Cw,
-            CombR = CombR,
-            Code = RaaCode<Eval, Cw, CombR>,
-        >,
-    F: PrimeField + FromRef<Zt::EvalR> + FromRef<Zt::Chal> + for<'a> MulByScalar<&'a F>,
+    Eval: Ring + for<'a> MulByScalar<&'a Pt>,
+    Cw: Ring + FromRef<Eval> + AsPackable + Transcribable,
+    CombR: Ring + FromRef<CombR> + Transcribable,
+    Zt: ZipTypes<Eval = Eval, Cw = Cw, Pt = Pt, CombR = CombR, Code = RaaCode<Eval, Cw, CombR>>,
+    F: PrimeField + FromRef<Zt::Chal> + FromRef<Zt::Pt> + for<'a> MulByScalar<&'a F>,
     F::Inner: Transcribable,
     Eval: ProjectableToField<F>,
 {
@@ -168,27 +163,57 @@ where
 
     let (data, comm) = ZipPlus::commit(&pp, &poly).unwrap();
 
-    let point: Vec<EvalR> = prepare_evaluation_point();
-    let point_f: Vec<F> = point.iter().map(F::from_ref).collect_vec();
+    let point: Vec<Pt> = prepare_evaluation_point();
 
     let mut prover_transcript = PcsTranscript::new();
-    ZipPlus::open(&pp, &poly, &data, &point_f, &mut prover_transcript).unwrap();
-
-    let project = {
-        let mut transcript = prover_transcript.clone();
-        let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
-        let projecting_element = F::from_ref(&projecting_element);
-        Eval::prepare_projection(&projecting_element)
-    };
+    let eval_f = ZipPlus::open(&pp, &poly, &data, &point, &mut prover_transcript).unwrap();
 
     let proof = prover_transcript.into_proof();
 
-    let eval = poly
-        .evaluate(&point)
-        .expect("failed to evaluate polynomial");
-    let eval_field = project(&eval);
+    // Verify the evaluation is done correctly
+    {
+        let expected_eval = poly
+            .evaluate(&point)
+            .expect("failed to evaluate polynomial");
+        let project = Eval::prepare_projection(&read_field_projecting_element(&pp, &proof));
+        assert_eq!(eval_f, project(&expected_eval));
+    }
 
-    (pp, comm, point_f, eval_field, proof)
+    let point_f = point.iter().map(F::from_ref).collect_vec();
+
+    (pp, comm, point_f, eval_f, proof)
+}
+
+pub fn read_field_projecting_element<Zt, F>(pp: &ZipPlusParams<Zt>, proof: &[u8]) -> F
+where
+    Zt: ZipTypes,
+    Zt::Eval: ProjectableToField<F>,
+    F: PrimeField + FromRef<Zt::Chal>,
+{
+    let mut transcript = PcsTranscript::from_proof(proof);
+    // Advance the transcript to the point where we can get the projecting element
+    // TODO: This shouldn't be necessary after we split testing and evaluation
+    // phases
+    if pp.num_rows > 1 {
+        for _ in 0..pp.linear_code.num_proximity_testing() {
+            let _ = transcript
+                .read_many::<Zt::CombR>(pp.linear_code.row_len())
+                .unwrap();
+            let _ = transcript
+                .fs_transcript
+                .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND);
+            let _ = transcript
+                .fs_transcript
+                .get_challenges::<Zt::Chal>(pp.num_rows);
+        }
+    }
+    for _ in 0..pp.linear_code.num_column_opening() {
+        let _ = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
+        let _ = transcript.read_many::<Zt::Cw>(pp.num_rows).unwrap();
+        let _ = transcript.read_merkle_proof().unwrap();
+    }
+    let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
+    F::from_ref(&projecting_element)
 }
 
 #[derive(Default)]

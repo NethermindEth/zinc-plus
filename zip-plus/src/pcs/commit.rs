@@ -203,7 +203,6 @@ mod tests {
 
     use crypto_bigint::{Random, U256, Word, const_monty_params};
     use crypto_primitives::crypto_bigint_int::Int;
-    use itertools::Itertools;
     use rand::{Rng, rng};
 
     use crate::{
@@ -659,17 +658,16 @@ mod tests {
         );
         let param = TestZip::setup(poly_size, linear_code);
         let evaluations: Vec<_> = (0..poly_size)
-            .map(|_| Int::<INT_LIMBS>::from(rng.random::<i8>()))
+            .map(|_| <Zt as ZipTypes>::Eval::from(rng.random::<i8>()))
             .collect();
         let mle = DenseMultilinearExtension::from_evaluations_slice(num_vars, &evaluations);
         let point_int: Vec<_> = (0..num_vars)
-            .map(|_| Int::<INT_LIMBS>::random(&mut rng))
+            .map(|_| <Zt as ZipTypes>::Pt::random(&mut rng))
             .collect();
-        let point_f: Vec<F> = point_int.into_iter().map(F::from).collect_vec();
 
         let (data, _) = TestZip::commit(&param, &mle).unwrap();
         let mut prover_transcript = PcsTranscript::new();
-        TestZip::open(&param, &mle, &data, &point_f, &mut prover_transcript).unwrap();
+        TestZip::open::<F>(&param, &mle, &data, &point_int, &mut prover_transcript).unwrap();
         let proof = prover_transcript.into_proof();
 
         let actual_proof_size_bytes = proof.len();

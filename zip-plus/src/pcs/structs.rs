@@ -5,7 +5,7 @@ use crate::{
     traits::{FromRef, Named, Transcribable},
     utils::ReinterpretVector,
 };
-use crypto_primitives::{PrimeField, Ring, crypto_bigint_int::Int};
+use crypto_primitives::{IntRing, PrimeField, Ring, crypto_bigint_int::Int};
 use num_traits::CheckedMul;
 use p3_field::Packable;
 use std::marker::PhantomData;
@@ -23,7 +23,10 @@ pub trait ZipTypes: Send + Sync {
 
     /// Ring of challenge elements (coefficients) to perform a random linear
     /// combination of codewords
-    type Chal: Ring + Named + Transcribable;
+    type Chal: IntRing + Named + Transcribable;
+
+    /// Ring of point coordinates to evaluate the multilinear polynomial
+    type Pt: IntRing;
 
     /// Coefficient ring of linear combination polynomial [Self::Comb]
     type CombR: Ring + Transcribable + for<'a> MulByScalar<&'a Self::Chal>;

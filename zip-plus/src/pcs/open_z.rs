@@ -5,39 +5,38 @@ use crate::{
     code::LinearCode,
     pcs::{
         structs::{MulByScalar, ProjectableToField, ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
-        utils::{ColumnOpening, left_point_to_tensor, validate_input},
+        utils::{ColumnOpening, point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
     poly::{Polynomial, mle::DenseMultilinearExtension},
     traits::{FromRef, Transcribable, Transcript},
-    utils::combine_rows,
+    utils::{combine_rows, inner_product},
 };
 use crypto_primitives::PrimeField;
 use itertools::{Itertools, izip};
 
+// TODO: Split onto test and open(aka eval)
 impl<Zt: ZipTypes> ZipPlus<Zt> {
     pub fn open<F>(
         pp: &ZipPlusParams<Zt>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
         commit_hint: &ZipPlusHint<Zt::Cw>,
-        point: &[F],
+        point: &[Zt::Pt],
         transcript: &mut PcsTranscript,
-    ) -> Result<(), ZipError>
+    ) -> Result<F, ZipError>
     where
-        F: PrimeField + FromRef<Zt::Chal> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<Zt::Chal> + FromRef<Zt::Pt> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
         Zt::Eval: ProjectableToField<F>,
     {
         validate_input("open", pp.num_vars, [poly], [point])?;
 
+        Self::prove_testing_phase(pp, poly, commit_hint, transcript)?;
+
         let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
         let projecting_element: F = F::from_ref(&projecting_element);
 
-        Self::prove_testing_phase(pp, poly, commit_hint, transcript)?;
-
-        Self::prove_evaluation_phase(pp, transcript, point, poly, projecting_element)?;
-
-        Ok(())
+        Self::prove_evaluation_phase(pp, transcript, point, poly, projecting_element)
     }
 
     // TODO Apply 2022/1355 https://eprint.iacr.org/2022/1355.pdf#page=30
@@ -45,11 +44,11 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         pp: &ZipPlusParams<Zt>,
         polys: &[DenseMultilinearExtension<Zt::Eval>],
         comms: &[ZipPlusHint<Zt::Cw>],
-        points: &[Vec<F>],
+        points: &[Vec<Zt::Pt>],
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + FromRef<Zt::Chal> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<Zt::Chal> + FromRef<Zt::Pt> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
         Zt::Eval: ProjectableToField<F>,
     {
@@ -64,12 +63,12 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     fn prove_evaluation_phase<F>(
         pp: &ZipPlusParams<Zt>,
         transcript: &mut PcsTranscript,
-        point: &[F],
+        point: &[Zt::Pt],
         poly: &DenseMultilinearExtension<Zt::Eval>,
         projecting_element: F,
-    ) -> Result<(), ZipError>
+    ) -> Result<F, ZipError>
     where
-        F: PrimeField + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<Zt::Pt> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
         Zt::Eval: ProjectableToField<F>,
     {
@@ -78,7 +77,8 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
 
         // We prove evaluations over the field, so integers need to be mapped to field
         // elements first
-        let q_0 = left_point_to_tensor(num_rows, point)?;
+        let point = point.iter().map(F::from_ref).collect_vec();
+        let (q_0, q_1) = point_to_tensor(num_rows, &point)?;
 
         let project = Zt::Eval::prepare_projection(&projecting_element);
         let evaluations: Vec<F> = poly.evaluations.iter().map(project).collect_vec();
@@ -93,7 +93,8 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
             Cow::Borrowed(&evaluations)
         };
 
-        transcript.write_field_elements(&q_0_combined_row)
+        transcript.write_field_elements(&q_0_combined_row)?;
+        Ok(inner_product(&q_0_combined_row[..], &q_1))
     }
 
     pub(super) fn prove_testing_phase(
@@ -175,23 +176,22 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     clippy::cast_possible_wrap
 )]
 mod tests {
-    use crypto_bigint::{Random, U256, const_monty_params};
-    use crypto_primitives::crypto_bigint_int::Int;
-    use num_traits::{ConstOne, ConstZero, One};
-    use rand::prelude::*;
-
     use crate::{
         code::LinearCode,
         field::ConstMontyField,
         merkle::MerkleTree,
         pcs::{
-            structs::{ZipPlus, ZipPlusHint},
+            structs::{ZipPlus, ZipPlusHint, ZipTypes},
             test_utils::*,
         },
         pcs_transcript::PcsTranscript,
         poly::mle::DenseMultilinearExtension,
         utils::WORD_FACTOR,
     };
+    use crypto_bigint::{U256, const_monty_params};
+    use crypto_primitives::{Ring, crypto_bigint_int::Int};
+    use num_traits::{ConstOne, ConstZero};
+    use rand::{distr::StandardUniform, prelude::*};
 
     const INT_LIMBS: usize = WORD_FACTOR;
     const FIELD_LIMBS: usize = 4 * WORD_FACTOR;
@@ -214,8 +214,11 @@ mod tests {
     type TestZip = ZipPlus<Zt>;
     type TestPolyZip = ZipPlus<PolyZt>;
 
-    fn random_point<const I: usize>(num_vars: usize, rng: &mut impl RngCore) -> Vec<Int<I>> {
-        (0..num_vars).map(|_| Int::random(rng)).collect()
+    fn random_point<R: Ring>(num_vars: usize, rng: &mut impl RngCore) -> Vec<R>
+    where
+        StandardUniform: Distribution<R>,
+    {
+        (0..num_vars).map(|_| rng.random()).collect()
     }
 
     #[test]
@@ -226,11 +229,10 @@ mod tests {
         let (data, _) = TestZip::commit(&pp, &poly).unwrap();
 
         let mut rng = ThreadRng::default();
-        let point_int = random_point::<INT_LIMBS>(num_vars, &mut rng);
-        let point_f: Vec<F> = point_int.iter().map(F::from).collect();
+        let point = random_point(num_vars, &mut rng);
         let mut prover_transcript = PcsTranscript::new();
 
-        let result = TestZip::open(&pp, &poly, &data, &point_f, &mut prover_transcript);
+        let result = TestZip::open::<F>(&pp, &poly, &data, &point, &mut prover_transcript);
 
         assert!(result.is_ok());
     }
@@ -243,11 +245,10 @@ mod tests {
         let (data, _) = TestPolyZip::commit(&pp, &poly).unwrap();
 
         let mut rng = ThreadRng::default();
-        let point_int = random_point::<INT_LIMBS>(num_vars, &mut rng);
-        let point_f: Vec<F> = point_int.iter().map(F::from).collect();
+        let point = random_point(num_vars, &mut rng);
         let mut prover_transcript = PcsTranscript::new();
 
-        let result = TestPolyZip::open(&pp, &poly, &data, &point_f, &mut prover_transcript);
+        let result = TestPolyZip::open::<F>(&pp, &poly, &data, &point, &mut prover_transcript);
 
         assert!(result.is_ok());
     }
@@ -269,17 +270,11 @@ mod tests {
         let corrupted_data = ZipPlusHint::new(corrupted_rows, corrupted_merkle_tree);
 
         let mut rng = ThreadRng::default();
-        let point_int = random_point::<INT_LIMBS>(num_vars, &mut rng);
-        let point_f: Vec<F> = point_int.iter().map(F::from).collect();
+        let point = random_point(num_vars, &mut rng);
         let mut prover_transcript = PcsTranscript::new();
 
-        let result = TestZip::open(
-            &pp,
-            &poly,
-            &corrupted_data,
-            &point_f,
-            &mut prover_transcript,
-        );
+        let result =
+            TestZip::open::<F>(&pp, &poly, &corrupted_data, &point, &mut prover_transcript);
 
         assert!(result.is_ok());
     }
@@ -294,22 +289,21 @@ mod tests {
         let different_evals: Vec<_> = (20..=35).map(Int::from).collect();
         let poly2 = DenseMultilinearExtension::from_evaluations_vec(num_vars, different_evals);
 
-        let point_int: Vec<Int<INT_LIMBS>> =
+        let point: Vec<<Zt as ZipTypes>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
-        let point_f: Vec<F> = point_int.iter().map(F::from).collect();
+        let point_f: Vec<F> = point.iter().map(F::from).collect();
         let mut prover_transcript = PcsTranscript::new();
-        let open_result = TestZip::open(&pp, &poly2, &data, &point_f, &mut prover_transcript);
+        let open_result = TestZip::open::<F>(&pp, &poly2, &data, &point, &mut prover_transcript);
         assert!(open_result.is_ok());
         let proof = prover_transcript.into_proof();
 
         let mut verifier_transcript = PcsTranscript::from_proof(&proof);
         let eval = poly1
-            .evaluate(&point_int)
-            .expect("Failed to evaluate polynomial")
-            .into();
+            .evaluate(&point)
+            .expect("Failed to evaluate polynomial");
 
         let verification_result =
-            TestZip::verify(&pp, &comm, &point_f, &eval, &mut verifier_transcript);
+            TestZip::verify(&pp, &comm, &point_f, &eval.into(), &mut verifier_transcript);
 
         assert!(verification_result.is_err());
     }
@@ -335,28 +329,24 @@ mod tests {
         let corrupted_merkle_tree = MerkleTree::new(&corrupted_rows, codeword_len);
         let corrupted_data = ZipPlusHint::new(corrupted_rows, corrupted_merkle_tree);
 
-        let point_int: Vec<Int<INT_LIMBS>> =
+        let point: Vec<<Zt as ZipTypes>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
-        let point_f: Vec<F> = point_int.iter().map(F::from).collect();
+        let point_f: Vec<F> = point.iter().map(F::from).collect();
         let mut prover_transcript = PcsTranscript::new();
-        let open_result = TestZip::open(
-            &pp,
-            &poly,
-            &corrupted_data,
-            &point_f,
-            &mut prover_transcript,
-        );
+        let open_result =
+            TestZip::open::<F>(&pp, &poly, &corrupted_data, &point, &mut prover_transcript);
         assert!(open_result.is_ok());
         let proof = prover_transcript.into_proof();
 
+        let eval_f = open_result.unwrap();
         let mut verifier_transcript = PcsTranscript::from_proof(&proof);
-        let eval = poly
-            .evaluate(&point_int)
-            .expect("Failed to evaluate polynomial")
-            .into();
+        let expected_eval = poly
+            .evaluate(&point)
+            .expect("Failed to evaluate polynomial");
+        assert_eq!(eval_f, expected_eval.into());
 
         let verification_result =
-            TestZip::verify(&pp, &comm, &point_f, &eval, &mut verifier_transcript);
+            TestZip::verify(&pp, &comm, &point_f, &eval_f, &mut verifier_transcript);
 
         assert!(verification_result.is_err());
     }
@@ -375,17 +365,11 @@ mod tests {
         let (data, _) = TestZip::commit(&pp, &setup_test_params::<N, K, M>(num_vars).1).unwrap();
 
         let mut rng = ThreadRng::default();
-        let point_int = random_point::<INT_LIMBS>(oversized_num_vars, &mut rng);
-        let point_f: Vec<F> = point_int.iter().map(F::from).collect();
+        let point = random_point(oversized_num_vars, &mut rng);
         let mut prover_transcript = PcsTranscript::new();
 
-        let result = TestZip::open(
-            &pp,
-            &oversized_poly,
-            &data,
-            &point_f,
-            &mut prover_transcript,
-        );
+        let result =
+            TestZip::open::<F>(&pp, &oversized_poly, &data, &point, &mut prover_transcript);
 
         assert!(result.is_err());
     }
@@ -415,29 +399,30 @@ mod tests {
         let poly2 = DenseMultilinearExtension::from_evaluations_vec(num_vars, different_evals);
         let (inconsistent_data, _) = TestZip::commit(&pp, &poly2).unwrap();
 
-        let point_int: Vec<Int<INT_LIMBS>> =
+        let point: Vec<<Zt as ZipTypes>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
-        let point_f: Vec<F> = point_int.iter().map(F::from).collect();
+        let point_f: Vec<F> = point.iter().map(F::from).collect();
         let mut prover_transcript = PcsTranscript::new();
-        let open_result = TestZip::open(
+        let open_result = TestZip::open::<F>(
             &pp,
             &poly1,
             &inconsistent_data,
-            &point_f,
+            &point,
             &mut prover_transcript,
         );
         assert!(open_result.is_ok());
         let proof = prover_transcript.into_proof();
+        let eval_f = open_result.unwrap();
 
-        //    will not match the roots in the original public commitment.
+        // will not match the roots in the original public commitment.
         let mut verifier_transcript = PcsTranscript::from_proof(&proof);
-        let eval = poly1
-            .evaluate(&point_int)
-            .expect("Failed to evaluate polynomial")
-            .into();
+        let expected_eval = poly1
+            .evaluate(&point)
+            .expect("Failed to evaluate polynomial");
+        assert_eq!(eval_f, expected_eval.into());
 
         let verification_result =
-            TestZip::verify(&pp, &comm, &point_f, &eval, &mut verifier_transcript);
+            TestZip::verify(&pp, &comm, &point_f, &eval_f, &mut verifier_transcript);
 
         assert!(verification_result.is_err());
     }
@@ -448,9 +433,8 @@ mod tests {
         let (pp, poly) = setup_test_params(num_vars);
 
         let mut prover_transcript = PcsTranscript::new();
-        let point_int: Vec<Int<INT_LIMBS>> =
+        let point: Vec<<Zt as ZipTypes>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
-        let point_f: Vec<F> = point_int.iter().map(F::from).collect();
 
         // Not really used
         let projecting_element: F = F::ZERO;
@@ -458,12 +442,19 @@ mod tests {
         let result = TestZip::prove_evaluation_phase(
             &pp,
             &mut prover_transcript,
-            &point_f,
+            &point,
             &poly,
             projecting_element,
         );
 
         assert!(result.is_ok());
+
+        let eval_f = result.unwrap();
+
+        let expected_eval = poly
+            .evaluate(&point)
+            .expect("Failed to evaluate polynomial");
+        assert_eq!(eval_f, expected_eval.into());
     }
 
     #[test]
@@ -473,27 +464,23 @@ mod tests {
 
         let (data, comm) = TestZip::commit(&pp, &poly).unwrap();
 
-        let point_int: Vec<Int<INT_LIMBS>> =
+        let point: Vec<<Zt as ZipTypes>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
-        let point_f: Vec<F> = point_int.iter().map(F::from).collect();
+        let point_f: Vec<F> = point.iter().map(F::from).collect();
         let mut prover_transcript = PcsTranscript::new();
-        let open_result = TestZip::open(&pp, &poly, &data, &point_f, &mut prover_transcript);
+        let open_result = TestZip::open::<F>(&pp, &poly, &data, &point, &mut prover_transcript);
         assert!(open_result.is_ok());
         let proof = prover_transcript.into_proof();
 
-        let correct_eval: F = poly
-            .evaluate(&point_int)
-            .expect("Failed to evaluate polynomial")
-            .into();
-
-        let incorrect_eval = correct_eval + F::one();
+        let correct_eval_f: F = open_result.unwrap();
+        let incorrect_eval_f = correct_eval_f + F::ONE;
 
         let mut verifier_transcript = PcsTranscript::from_proof(&proof);
         let verification_result = TestZip::verify(
             &pp,
             &comm,
             &point_f,
-            &incorrect_eval, // Use the wrong evaluation here
+            &incorrect_eval_f, // Use the wrong evaluation here
             &mut verifier_transcript,
         );
 
@@ -510,18 +497,19 @@ mod tests {
 
         let (data, comm) = TestZip::commit(&pp, &zero_poly).unwrap();
 
-        let point_int: Vec<Int<INT_LIMBS>> =
+        let point: Vec<<Zt as ZipTypes>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
-        let point_f: Vec<F> = point_int.iter().map(F::from).collect();
+        let point_f: Vec<F> = point.iter().map(F::from).collect();
         let mut prover_transcript = PcsTranscript::new();
-        let open_result = TestZip::open(&pp, &zero_poly, &data, &point_f, &mut prover_transcript);
+        let open_result =
+            TestZip::open::<F>(&pp, &zero_poly, &data, &point, &mut prover_transcript);
         assert!(open_result.is_ok());
         let proof = prover_transcript.into_proof();
+        let eval_f = F::ZERO;
 
         let mut verifier_transcript = PcsTranscript::from_proof(&proof);
-        let eval = F::ZERO;
         let verification_result =
-            TestZip::verify(&pp, &comm, &point_f, &eval, &mut verifier_transcript);
+            TestZip::verify(&pp, &comm, &point_f, &eval_f, &mut verifier_transcript);
 
         assert!(verification_result.is_ok());
     }
@@ -533,22 +521,19 @@ mod tests {
 
         let (data, comm) = TestZip::commit(&pp, &poly).unwrap();
 
-        let point_int: Vec<Int<INT_LIMBS>> = (0..num_vars).map(|_| Int::from(0)).collect();
-        let point_f: Vec<F> = point_int.iter().map(F::from).collect();
+        let point: Vec<<Zt as ZipTypes>::Pt> = (0..num_vars).map(|_| Int::from(0)).collect();
+        let point_f: Vec<F> = point.iter().map(F::from).collect();
 
         let mut prover_transcript = PcsTranscript::new();
-        let open_result = TestZip::open(&pp, &poly, &data, &point_f, &mut prover_transcript);
+        let open_result = TestZip::open::<F>(&pp, &poly, &data, &point, &mut prover_transcript);
         assert!(open_result.is_ok());
         let proof = prover_transcript.into_proof();
+        let eval_f: F = open_result.unwrap();
 
         let mut verifier_transcript = PcsTranscript::from_proof(&proof);
-        let eval: F = poly
-            .evaluate(&point_int)
-            .expect("Failed to evaluate polynomial")
-            .into();
 
         let verification_result =
-            TestZip::verify(&pp, &comm, &point_f, &eval, &mut verifier_transcript);
+            TestZip::verify(&pp, &comm, &point_f, &eval_f, &mut verifier_transcript);
 
         assert!(
             verification_result.is_ok(),
@@ -561,31 +546,32 @@ mod tests {
         let num_vars = 4;
         let (pp, _) = setup_test_params(num_vars);
 
-        let mut evals: Vec<Int<INT_LIMBS>> = (0..1 << num_vars as i32).map(Int::from).collect();
+        let mut evals: Vec<<Zt as ZipTypes>::Eval> =
+            (0..1 << num_vars as i32).map(Int::from).collect();
         evals[1] = Int::from(i64::MAX);
         let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evals);
 
         let (data, comm) = TestZip::commit(&pp, &poly).unwrap();
 
         // A point of [1, 0, 0, 0] will evaluate to poly.evaluations[1].
-        let mut point_coords = vec![Int::<INT_LIMBS>::ZERO; num_vars];
-        point_coords[0] = Int::from(1);
-        let point_int = point_coords;
-        let point_f: Vec<F> = point_int.iter().map(F::from).collect();
+        let mut point = vec![<Zt as ZipTypes>::Pt::ZERO; num_vars];
+        point[0] = <Zt as ZipTypes>::Pt::ONE;
+        let point_f: Vec<F> = point.iter().map(F::from).collect();
 
         let mut prover_transcript = PcsTranscript::new();
-        let open_result = TestZip::open(&pp, &poly, &data, &point_f, &mut prover_transcript);
+        let open_result = TestZip::open::<F>(&pp, &poly, &data, &point, &mut prover_transcript);
         assert!(open_result.is_ok());
         let proof = prover_transcript.into_proof();
+        let eval_f: F = open_result.unwrap();
 
         let mut verifier_transcript = PcsTranscript::from_proof(&proof);
-        let eval: F = poly
-            .evaluate(&point_int)
-            .expect("failed to evaluate polynomial")
-            .into();
+        let expected_eval = poly
+            .evaluate(&point)
+            .expect("failed to evaluate polynomial");
+        assert_eq!(eval_f, expected_eval.into());
 
         let verification_result =
-            TestZip::verify(&pp, &comm, &point_f, &eval, &mut verifier_transcript);
+            TestZip::verify(&pp, &comm, &point_f, &eval_f, &mut verifier_transcript);
 
         assert!(
             verification_result.is_ok(),
@@ -600,21 +586,22 @@ mod tests {
 
         let (data, comm) = TestZip::commit(&pp, &poly).unwrap();
 
-        let point_int: Vec<Int<INT_LIMBS>> = vec![Int::from(1), Int::from(2)];
-        let point_f: Vec<F> = point_int.iter().map(F::from).collect();
+        let point: Vec<<Zt as ZipTypes>::Pt> = vec![Int::from(1), Int::from(2)];
+        let point_f: Vec<F> = point.iter().map(F::from).collect();
         let mut prover_transcript = PcsTranscript::new();
-        let open_result = TestZip::open(&pp, &poly, &data, &point_f, &mut prover_transcript);
+        let open_result = TestZip::open::<F>(&pp, &poly, &data, &point, &mut prover_transcript);
         assert!(open_result.is_ok());
         let proof = prover_transcript.into_proof();
+        let eval_f: F = open_result.unwrap();
 
         let mut verifier_transcript = PcsTranscript::from_proof(&proof);
-        let eval: F = poly
-            .evaluate(&point_int)
-            .expect("failed to evaluate polynomial")
-            .into();
+        let expected_eval = poly
+            .evaluate(&point)
+            .expect("failed to evaluate polynomial");
+        assert_eq!(eval_f, expected_eval.into());
 
         let verification_result =
-            TestZip::verify(&pp, &comm, &point_f, &eval, &mut verifier_transcript);
+            TestZip::verify(&pp, &comm, &point_f, &eval_f, &mut verifier_transcript);
 
         assert!(verification_result.is_ok());
     }

@@ -22,6 +22,7 @@ impl ZipTypes for BenchZipPlusTypes {
     type CwR = Int<{ INT_LIMBS * 4 }>;
     type Cw = DensePolynomial<Self::CwR, DEGREE_BOUND>;
     type Chal = Int<{ INT_LIMBS }>;
+    type Pt = Int<{ INT_LIMBS }>;
     type CombR = Int<{ INT_LIMBS * 8 }>;
     type Comb = DensePolynomial<Self::CombR, DEGREE_BOUND>;
     type Code = RaaCode<Self::Eval, Self::Cw, Self::CombR>;
