@@ -1,0 +1,65 @@
+use std::borrow::Cow;
+
+use crate::{
+    ZipError,
+    code::LinearCode,
+    pcs::{
+        structs::{MulByScalar, ProjectableToField, ZipPlus, ZipPlusParams, ZipTypes},
+        utils::{point_to_tensor, validate_input},
+    },
+    pcs_transcript::{PcsTranscript, ZipPlusEvaluationProof, ZipPlusTestProof},
+    poly::mle::DenseMultilinearExtension,
+    traits::{FromRef, Transcribable, Transcript},
+    utils::{combine_rows, inner_product},
+};
+use crypto_primitives::PrimeField;
+use itertools::Itertools;
+
+impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
+    pub fn evaluate<F>(
+        pp: &ZipPlusParams<Zt, Lc>,
+        poly: &DenseMultilinearExtension<Zt::Eval>,
+        point: &[Zt::Pt],
+        test_proof: ZipPlusTestProof,
+    ) -> Result<(F, ZipPlusEvaluationProof), ZipError>
+    where
+        F: PrimeField + FromRef<Zt::Chal> + FromRef<Zt::Pt> + for<'a> MulByScalar<&'a F>,
+        F::Inner: Transcribable,
+        Zt::Eval: ProjectableToField<F>,
+    {
+        validate_input::<Zt, Lc, _>("evaluate", pp.num_vars, [poly], [point])?;
+
+        let mut transcript: PcsTranscript = test_proof.into();
+
+        let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
+        let projecting_element: F = F::from_ref(&projecting_element);
+
+        let num_rows = pp.num_rows;
+        let row_len = pp.linear_code.row_len();
+
+        // We prove evaluations over the field, so integers need to be mapped to field
+        // elements first
+        let point = point.iter().map(F::from_ref).collect_vec();
+        let (q_0, q_1) = point_to_tensor(num_rows, &point)?;
+
+        let project = Zt::Eval::prepare_projection(&projecting_element);
+        let evaluations: Vec<F> = poly.evaluations.iter().map(project).collect_vec();
+
+        let q_0_combined_row = if num_rows > 1 {
+            // Return the evaluation row combination
+            let combined_row = combine_rows(&q_0, &evaluations, row_len);
+            Cow::<Vec<F>>::Owned(combined_row)
+        } else {
+            // If there is only one row, we have no need to take linear combinations
+            // We just return the evaluation row combination
+            Cow::Borrowed(&evaluations)
+        };
+
+        transcript.write_field_elements(&q_0_combined_row)?;
+        let eval_f = inner_product(&q_0_combined_row[..], &q_1);
+        Ok((eval_f, transcript.into()))
+    }
+}
+
+// There's no point in testing evaluation phase in isolation, so it's covered by
+// full (verification) tests

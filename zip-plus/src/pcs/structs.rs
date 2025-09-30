@@ -82,7 +82,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlusParams<Zt, Lc> {
 }
 
 /// Full data of zip commitment to a multilinear polynomial, including encoded
-/// rows and Merkle tree, kept by the prover for the opening phase.
+/// rows and Merkle tree, kept by the prover for the testing phase.
 #[derive(Debug, Default)]
 pub struct ZipPlusHint<R: AsPackable> {
     /// The encoded rows of the polynomial matrix representation, referred to as
