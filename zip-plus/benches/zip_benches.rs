@@ -26,44 +26,7 @@ impl ZipTypes for BenchZipTypes {
 
 fn zip_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip");
-
-    encode_rows::<BenchZipTypes, 12>(&mut group);
-    encode_rows::<BenchZipTypes, 13>(&mut group);
-    encode_rows::<BenchZipTypes, 14>(&mut group);
-    encode_rows::<BenchZipTypes, 15>(&mut group);
-    encode_rows::<BenchZipTypes, 16>(&mut group);
-
-    encode_single_row::<BenchZipTypes, 128>(&mut group);
-    encode_single_row::<BenchZipTypes, 256>(&mut group);
-    encode_single_row::<BenchZipTypes, 512>(&mut group);
-    encode_single_row::<BenchZipTypes, 1024>(&mut group);
-    encode_single_row::<BenchZipTypes, 2048>(&mut group);
-    encode_single_row::<BenchZipTypes, 4096>(&mut group);
-
-    merkle_root::<BenchZipTypes, 12>(&mut group);
-    merkle_root::<BenchZipTypes, 13>(&mut group);
-    merkle_root::<BenchZipTypes, 14>(&mut group);
-    merkle_root::<BenchZipTypes, 15>(&mut group);
-    merkle_root::<BenchZipTypes, 16>(&mut group);
-
-    commit::<BenchZipTypes, 12>(&mut group);
-    commit::<BenchZipTypes, 13>(&mut group);
-    commit::<BenchZipTypes, 14>(&mut group);
-    commit::<BenchZipTypes, 15>(&mut group);
-    commit::<BenchZipTypes, 16>(&mut group);
-
-    open::<BenchZipTypes, 12>(&mut group);
-    open::<BenchZipTypes, 13>(&mut group);
-    open::<BenchZipTypes, 14>(&mut group);
-    open::<BenchZipTypes, 15>(&mut group);
-    open::<BenchZipTypes, 16>(&mut group);
-
-    verify::<BenchZipTypes, 12>(&mut group);
-    verify::<BenchZipTypes, 13>(&mut group);
-    verify::<BenchZipTypes, 14>(&mut group);
-    verify::<BenchZipTypes, 15>(&mut group);
-    verify::<BenchZipTypes, 16>(&mut group);
-
+    do_bench::<BenchZipTypes>(&mut group);
     group.finish();
 }
 

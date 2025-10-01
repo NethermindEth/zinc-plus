@@ -13,60 +13,24 @@ use zip_plus::{
 
 const INT_LIMBS: usize = WORD_FACTOR;
 
-const DEGREE_BOUND: usize = 31;
-
-struct BenchZipPlusTypes {}
-impl ZipTypes for BenchZipPlusTypes {
+struct BenchZipPlusTypes<const D: usize> {}
+impl<const D: usize> ZipTypes for BenchZipPlusTypes<D> {
     type EvalR = Int<{ INT_LIMBS }>;
-    type Eval = DensePolynomial<Self::EvalR, DEGREE_BOUND>;
+    type Eval = DensePolynomial<Self::EvalR, D>;
     type CwR = Int<{ INT_LIMBS * 4 }>;
-    type Cw = DensePolynomial<Self::CwR, DEGREE_BOUND>;
+    type Cw = DensePolynomial<Self::CwR, D>;
     type Chal = Int<{ INT_LIMBS }>;
     type Pt = Int<{ INT_LIMBS }>;
     type CombR = Int<{ INT_LIMBS * 8 }>;
-    type Comb = DensePolynomial<Self::CombR, DEGREE_BOUND>;
+    type Comb = DensePolynomial<Self::CombR, D>;
     type Code = RaaCode<Self::Eval, Self::Cw, Self::CombR>;
 }
 
 fn zip_plus_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip");
 
-    encode_rows::<BenchZipPlusTypes, 12>(&mut group);
-    encode_rows::<BenchZipPlusTypes, 13>(&mut group);
-    encode_rows::<BenchZipPlusTypes, 14>(&mut group);
-    encode_rows::<BenchZipPlusTypes, 15>(&mut group);
-    encode_rows::<BenchZipPlusTypes, 16>(&mut group);
-
-    encode_single_row::<BenchZipPlusTypes, 128>(&mut group);
-    encode_single_row::<BenchZipPlusTypes, 256>(&mut group);
-    encode_single_row::<BenchZipPlusTypes, 512>(&mut group);
-    encode_single_row::<BenchZipPlusTypes, 1024>(&mut group);
-    encode_single_row::<BenchZipPlusTypes, 2048>(&mut group);
-    encode_single_row::<BenchZipPlusTypes, 4096>(&mut group);
-
-    merkle_root::<BenchZipPlusTypes, 12>(&mut group);
-    merkle_root::<BenchZipPlusTypes, 13>(&mut group);
-    merkle_root::<BenchZipPlusTypes, 14>(&mut group);
-    merkle_root::<BenchZipPlusTypes, 15>(&mut group);
-    merkle_root::<BenchZipPlusTypes, 16>(&mut group);
-
-    commit::<BenchZipPlusTypes, 12>(&mut group);
-    commit::<BenchZipPlusTypes, 13>(&mut group);
-    commit::<BenchZipPlusTypes, 14>(&mut group);
-    commit::<BenchZipPlusTypes, 15>(&mut group);
-    commit::<BenchZipPlusTypes, 16>(&mut group);
-
-    open::<BenchZipPlusTypes, 12>(&mut group);
-    open::<BenchZipPlusTypes, 13>(&mut group);
-    open::<BenchZipPlusTypes, 14>(&mut group);
-    open::<BenchZipPlusTypes, 15>(&mut group);
-    open::<BenchZipPlusTypes, 16>(&mut group);
-
-    verify::<BenchZipPlusTypes, 12>(&mut group);
-    verify::<BenchZipPlusTypes, 13>(&mut group);
-    verify::<BenchZipPlusTypes, 14>(&mut group);
-    verify::<BenchZipPlusTypes, 15>(&mut group);
-    verify::<BenchZipPlusTypes, 16>(&mut group);
+    do_bench::<BenchZipPlusTypes<31>>(&mut group);
+    do_bench::<BenchZipPlusTypes<63>>(&mut group);
 
     group.finish();
 }

@@ -31,6 +31,53 @@ const_monty_params!(
 );
 type F = F256<ModP>;
 
+pub fn do_bench<Zt: ZipTypes>(group: &mut BenchmarkGroup<WallTime>)
+where
+    StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
+    F: FromRef<Zt::Chal>
+        + FromRef<Zt::Pt>
+        + FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::CombR>>::Inner>,
+    Zt::Eval: ProjectableToField<F>,
+    Zt::Cw: ProjectableToField<F>,
+{
+    encode_rows::<Zt, 12>(group);
+    encode_rows::<Zt, 13>(group);
+    encode_rows::<Zt, 14>(group);
+    encode_rows::<Zt, 15>(group);
+    encode_rows::<Zt, 16>(group);
+
+    encode_single_row::<Zt, 128>(group);
+    encode_single_row::<Zt, 256>(group);
+    encode_single_row::<Zt, 512>(group);
+    encode_single_row::<Zt, 1024>(group);
+    encode_single_row::<Zt, 2048>(group);
+    encode_single_row::<Zt, 4096>(group);
+
+    merkle_root::<Zt, 12>(group);
+    merkle_root::<Zt, 13>(group);
+    merkle_root::<Zt, 14>(group);
+    merkle_root::<Zt, 15>(group);
+    merkle_root::<Zt, 16>(group);
+
+    commit::<Zt, 12>(group);
+    commit::<Zt, 13>(group);
+    commit::<Zt, 14>(group);
+    commit::<Zt, 15>(group);
+    commit::<Zt, 16>(group);
+
+    open::<Zt, 12>(group);
+    open::<Zt, 13>(group);
+    open::<Zt, 14>(group);
+    open::<Zt, 15>(group);
+    open::<Zt, 16>(group);
+
+    verify::<Zt, 12>(group);
+    verify::<Zt, 13>(group);
+    verify::<Zt, 14>(group);
+    verify::<Zt, 15>(group);
+    verify::<Zt, 16>(group);
+}
+
 pub fn encode_rows<Zt: ZipTypes, const P: usize>(group: &mut BenchmarkGroup<WallTime>)
 where
     StandardUniform: Distribution<Zt::Eval>,
