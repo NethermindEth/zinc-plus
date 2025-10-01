@@ -29,7 +29,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         F::Inner: Transcribable,
         Zt::Eval: ProjectableToField<F>,
     {
-        validate_input("open", pp.num_vars, [poly], [point])?;
+        validate_input::<Zt, _>("open", pp.num_vars, [poly], [point])?;
 
         Self::prove_testing_phase(pp, poly, commit_hint, transcript)?;
 
@@ -103,36 +103,33 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         commit_hint: &ZipPlusHint<Zt::Cw>,
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError> {
+        // If we can take linear combinations, perform the proximity test
         if pp.num_rows > 1 {
-            // If we can take linear combinations
-            // perform the proximity test an arbitrary number of times
-            for _ in 0..pp.linear_code.num_proximity_testing() {
-                // Values to evaluate the coefficients at
-                let alphas = transcript
-                    .fs_transcript
-                    .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND);
+            // Values to evaluate the coefficients at
+            let alphas = transcript
+                .fs_transcript
+                .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND);
 
-                // Coefficients for the linear combination of polynomial with evaluated
-                // coefficients
-                let coeffs = transcript
-                    .fs_transcript
-                    .get_challenges::<Zt::Chal>(pp.num_rows);
+            // Coefficients for the linear combination of polynomial with evaluated
+            // coefficients
+            let coeffs = transcript
+                .fs_transcript
+                .get_challenges::<Zt::Chal>(pp.num_rows);
 
-                let evals = poly
-                    .evaluations
-                    .iter()
-                    .map(Zt::Comb::from_ref)
-                    .map(|p| {
-                        p.evaluate_at_point(&alphas)
-                            .expect("Failed to evaluate polynomial")
-                    })
-                    .collect_vec();
+            let evals = poly
+                .evaluations
+                .iter()
+                .map(Zt::Comb::from_ref)
+                .map(|p| {
+                    p.evaluate_at_point(&alphas)
+                        .expect("Failed to evaluate polynomial")
+                })
+                .collect_vec();
 
-                // u' in the Zinc paper
-                let combined_row = combine_rows(&coeffs, &evals, pp.linear_code.row_len());
+            // u' in the Zinc paper
+            let combined_row = combine_rows(&coeffs, &evals, pp.linear_code.row_len());
 
-                transcript.write_many(&combined_row)?;
-            }
+            transcript.write_many(&combined_row)?;
         }
 
         // Open merkle tree for each column drawn

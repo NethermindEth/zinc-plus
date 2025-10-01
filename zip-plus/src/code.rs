@@ -24,9 +24,6 @@ pub trait LinearCode<Eval: Ring, Cw: Ring, Comb: Ring>: Sync + Send {
     /// Number of columns to open during verification (security parameter)
     fn num_column_opening(&self) -> usize;
 
-    /// Number of proximity tests to perform (security parameter)
-    fn num_proximity_testing(&self) -> usize;
-
     /// Encodes a row of cryptographic integers using this linear encoding
     /// scheme.
     ///
@@ -78,8 +75,6 @@ pub trait LinearCodeSpec: Debug {
     /// A.k.a. inverse rate, the ratio of codeword length to input row length.
     /// Has to be at a power of 2.
     fn repetition_factor(&self) -> usize;
-
-    fn num_proximity_testing(&self, _n: usize, _n_0: usize) -> usize;
 }
 
 // Figure 2 in [GLSTW21](https://eprint.iacr.org/2021/1043.pdf).
@@ -87,14 +82,10 @@ pub trait LinearCodeSpec: Debug {
 pub struct DefaultLinearCodeSpec;
 impl LinearCodeSpec for DefaultLinearCodeSpec {
     fn num_column_opening(&self) -> usize {
-        1000
+        650
     }
 
     fn repetition_factor(&self) -> usize {
-        2
-    }
-
-    fn num_proximity_testing(&self, _n: usize, _n_0: usize) -> usize {
-        1
+        4
     }
 }

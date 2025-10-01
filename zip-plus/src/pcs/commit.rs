@@ -63,7 +63,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         pp: &ZipPlusParams<Zt>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
     ) -> Result<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment), ZipError> {
-        validate_input("commit", pp.num_vars, [poly], None::<&[bool]>)?;
+        validate_input::<Zt, bool>("commit", pp.num_vars, [poly], None)?;
 
         let expected_num_evals = pp.num_rows * pp.linear_code.row_len();
         assert_eq!(
@@ -108,7 +108,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         pp: &ZipPlusParams<Zt>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
     ) -> Result<Vec<Zt::Cw>, ZipError> {
-        validate_input("commit", pp.num_vars, [poly], None::<&[bool]>)?;
+        validate_input::<Zt, bool>("commit", pp.num_vars, [poly], None)?;
 
         let row_len = pp.linear_code.row_len();
         let codeword_len = pp.linear_code.codeword_len();
@@ -625,8 +625,7 @@ mod tests {
             let codeword_len = pp.linear_code.codeword_len();
             let merkle_depth = codeword_len.next_power_of_two().ilog2() as usize;
 
-            let proximity_phase_size =
-                pp.linear_code.num_proximity_testing() * pp.linear_code.row_len() * size_of_zt_m;
+            let proximity_phase_size = pp.linear_code.row_len() * size_of_zt_m;
 
             let column_values_size = pp.num_rows * size_of_zt_k;
             let single_merkle_proof_size =

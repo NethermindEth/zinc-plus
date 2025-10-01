@@ -23,10 +23,11 @@ macro_rules! impl_from_ref_for_primitive {
     };
 }
 
-impl_from_ref_for_primitive!(i128, [i64, i32, i16, i8]);
-impl_from_ref_for_primitive!(i64, [i32, i16, i8]);
-impl_from_ref_for_primitive!(i32, [i16, i8]);
-impl_from_ref_for_primitive!(i16, [i8]);
+impl_from_ref_for_primitive!(i128, [i128, i64, i32, i16, i8]);
+impl_from_ref_for_primitive!(i64, [i64, i32, i16, i8]);
+impl_from_ref_for_primitive!(i32, [i32, i16, i8]);
+impl_from_ref_for_primitive!(i16, [i16, i8]);
+impl_from_ref_for_primitive!(i8, [i8]);
 
 macro_rules! impl_int_from_primitive_ref {
     ($($t:ty),+) => {

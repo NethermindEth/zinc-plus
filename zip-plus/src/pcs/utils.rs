@@ -3,12 +3,14 @@ use crypto_primitives::PrimeField;
 use num_traits::Zero;
 use thiserror::Error;
 
-use crate::{ZipError, poly::mle::DenseMultilinearExtension, sub};
+use crate::{ZipError, add, div, ilog_round_up, mul, poly::mle::DenseMultilinearExtension, sub};
 
 use crate::{
+    code::LinearCode,
     merkle::{MerkleError, MerkleProof, MtHash},
-    pcs::structs::{AsPackable, ZipPlusHint},
+    pcs::structs::{AsPackable, ZipPlusHint, ZipTypes},
     pcs_transcript::PcsTranscript,
+    traits::Transcribable,
 };
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -20,11 +22,11 @@ fn err_too_many_variates(function: &str, upto: usize, got: usize) -> ZipError {
 }
 
 // Ensures that polynomials and evaluation points are of appropriate size
-pub(super) fn validate_input<'a, T: 'a, F: 'a>(
+pub(super) fn validate_input<'a, Zt: ZipTypes + 'a, Pt: 'a>(
     function: &str,
     param_num_vars: usize,
-    polys: impl Iterable<Item = &'a DenseMultilinearExtension<T>>,
-    points: impl Iterable<Item = &'a [F]>,
+    polys: impl Iterable<Item = &'a DenseMultilinearExtension<Zt::Eval>>,
+    points: impl Iterable<Item = &'a [Pt]>,
 ) -> Result<(), ZipError> {
     // Ensure all the number of variables in the polynomials don't exceed the limit
     for poly in polys.iter() {

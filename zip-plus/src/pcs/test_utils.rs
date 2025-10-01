@@ -195,17 +195,15 @@ where
     // TODO: This shouldn't be necessary after we split testing and evaluation
     // phases
     if pp.num_rows > 1 {
-        for _ in 0..pp.linear_code.num_proximity_testing() {
-            let _ = transcript
-                .read_many::<Zt::CombR>(pp.linear_code.row_len())
-                .unwrap();
-            let _ = transcript
-                .fs_transcript
-                .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND);
-            let _ = transcript
-                .fs_transcript
-                .get_challenges::<Zt::Chal>(pp.num_rows);
-        }
+        let _ = transcript
+            .read_many::<Zt::CombR>(pp.linear_code.row_len())
+            .unwrap();
+        let _ = transcript
+            .fs_transcript
+            .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND);
+        let _ = transcript
+            .fs_transcript
+            .get_challenges::<Zt::Chal>(pp.num_rows);
     }
     for _ in 0..pp.linear_code.num_column_opening() {
         let _ = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());

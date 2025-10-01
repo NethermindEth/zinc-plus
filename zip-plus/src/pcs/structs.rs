@@ -12,12 +12,12 @@ use std::marker::PhantomData;
 
 pub trait ZipTypes: Send + Sync {
     /// Coefficient ring of evaluation polynomial [Self::Eval]
-    type EvalR: Ring + Named;
+    type EvalR: IntRing + Named + Transcribable;
     /// Ring of witness/polynomial evaluations on boolean hypercube
     type Eval: Ring + Named + Polynomial<Self::EvalR>;
 
     /// Coefficient ring of codeword polynomial [Self::Cw]
-    type CwR: Ring + Named;
+    type CwR: IntRing + Named;
     /// Ring of codeword elements, at least as wide as the evaluation ring
     type Cw: Ring + Named + Polynomial<Self::CwR> + Transcribable + AsPackable + Copy;
 
@@ -197,3 +197,17 @@ pub trait ProjectableToField<F: PrimeField> {
     /// to a prime field using the given sampled value.
     fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static;
 }
+
+macro_rules! impl_projectable_to_field_for_primitives {
+    ($($t:ty),*) => {
+        $(
+            impl<F: PrimeField + From<$t>> ProjectableToField<F> for $t {
+                fn prepare_projection(_sampled_value: &F) -> impl Fn(&Self) -> F + 'static {
+                    move |x: &Self| F::from(*x)
+                }
+            }
+        )*
+    };
+}
+
+impl_projectable_to_field_for_primitives!(i8, i16, i32, i64, i128);

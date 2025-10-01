@@ -5,7 +5,7 @@ use std::{marker::PhantomData, ops::AddAssign};
 use crate::{
     add,
     code::{LinearCode, LinearCodeSpec},
-    mul, sub,
+    mul,
     traits::{FromRef, Transcript},
     utils::shuffle_seeded,
 };
@@ -22,8 +22,6 @@ pub struct RaaCode<Eval: Ring, Cw: Ring, Comb: Ring> {
     repetition_factor: usize,
 
     num_column_opening: usize,
-
-    num_proximity_testing: usize,
 
     /// Randomness seed for the first permutation
     perm_1_seed: u64,
@@ -95,8 +93,6 @@ where
         let repetition_factor = spec.repetition_factor();
 
         let num_column_opening = spec.num_column_opening();
-        let n_0 = sub!(two_pow_num_vars, 1).min(20);
-        let num_proximity_testing = spec.num_proximity_testing(row_len, n_0);
 
         // Width of each entry in codeword vector, in bits.
         // For RAA it's initial_bits + 2*log(repetition_factor) + num_variables
@@ -137,7 +133,6 @@ where
             row_len,
             repetition_factor,
             num_column_opening,
-            num_proximity_testing,
             perm_1_seed,
             perm_2_seed,
             phantom: PhantomData,
@@ -155,10 +150,6 @@ where
 
     fn num_column_opening(&self) -> usize {
         self.num_column_opening
-    }
-
-    fn num_proximity_testing(&self) -> usize {
-        self.num_proximity_testing
     }
 
     fn encode(&self, row: &[Eval]) -> Vec<Cw> {

@@ -13,13 +13,13 @@ const INT_LIMBS: usize = WORD_FACTOR;
 
 struct BenchZipTypes {}
 impl ZipTypes for BenchZipTypes {
-    type EvalR = Int<{ INT_LIMBS }>;
+    type EvalR = i32;
     type Eval = Self::EvalR;
-    type CwR = Int<{ INT_LIMBS * 4 }>;
+    type CwR = i64;
     type Cw = Self::CwR;
-    type Chal = Int<{ INT_LIMBS }>;
-    type Pt = Int<{ INT_LIMBS }>;
-    type CombR = Int<{ INT_LIMBS * 8 }>;
+    type Chal = i128;
+    type Pt = i128;
+    type CombR = Int<{ INT_LIMBS * 4 }>;
     type Comb = Self::CombR;
     type Code = RaaCode<Self::Eval, Self::Cw, Self::Comb>;
 }
