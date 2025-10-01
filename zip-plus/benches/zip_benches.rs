@@ -6,10 +6,11 @@ mod zip_common;
 use zip_common::*;
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use crypto_bigint::U64;
 use crypto_primitives::crypto_bigint_int::Int;
-use zip_plus::{code::raa::RaaCode, pcs::structs::ZipTypes, utils::WORD_FACTOR};
+use zip_plus::{code::raa::RaaCode, pcs::structs::ZipTypes};
 
-const INT_LIMBS: usize = WORD_FACTOR;
+const INT_LIMBS: usize = U64::LIMBS;
 
 struct BenchZipTypes {}
 impl ZipTypes for BenchZipTypes {

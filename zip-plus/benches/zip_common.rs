@@ -10,12 +10,12 @@ use ark_std::{
 };
 use criterion::{BenchmarkGroup, measurement::WallTime};
 use crypto_bigint::{U256, const_monty_params, modular::ConstMontyParams};
+use crypto_primitives::crypto_bigint_const_monty::F256;
 use itertools::Itertools;
 use num_traits::ConstOne;
 use rand::{distr::StandardUniform, prelude::*};
 use zip_plus::{
     code::LinearCode,
-    field::F256,
     merkle::MerkleTree,
     pcs::structs::{ProjectableToField, ZipPlus, ZipTypes},
     poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand},

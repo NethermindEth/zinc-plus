@@ -201,24 +201,20 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 mod tests {
     use std::slice::from_ref;
 
-    use crypto_bigint::{Random, U256, Word, const_monty_params};
-    use crypto_primitives::crypto_bigint_int::Int;
-    use rand::{Rng, rng};
-
     use crate::{
         code::{LinearCode, raa::RaaCode},
-        field::F256,
         merkle::{MerkleTree, MtHash},
         pcs::{
             structs::{ZipPlus, ZipPlusParams, ZipTypes},
             test_utils::*,
         },
         poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
-        utils::WORD_FACTOR,
     };
+    use crypto_bigint::{Random, U64, U256, Word, const_monty_params};
+    use crypto_primitives::{crypto_bigint_const_monty::F256, crypto_bigint_int::Int};
+    use rand::{Rng, rng};
 
-    const INT_LIMBS: usize = WORD_FACTOR;
-    const FIELD_LIMBS: usize = 4 * WORD_FACTOR;
+    const INT_LIMBS: usize = U64::LIMBS;
 
     const N: usize = INT_LIMBS;
     const K: usize = INT_LIMBS * 4;
@@ -629,7 +625,7 @@ mod tests {
         }
 
         fn calculate_expected_proof_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
-            let size_of_f_b = FIELD_LIMBS * size_of::<Word>();
+            let size_of_f_b = U256::LIMBS * size_of::<Word>();
             let evaluation_phase_size = pp.linear_code.row_len() * size_of_f_b;
 
             calculate_expected_test_transcript_size_bytes(pp) + evaluation_phase_size

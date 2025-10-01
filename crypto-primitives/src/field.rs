@@ -1,7 +1,10 @@
+#[cfg(feature = "crypto_bigint")]
+pub mod crypto_bigint_const_monty;
+
 use crate::{IntRing, ring::Ring};
 use core::{
     fmt::Debug,
-    ops::{Div, Neg},
+    ops::{Div, DivAssign, Neg},
 };
 use num_traits::Inv;
 
@@ -11,9 +14,11 @@ pub trait Field:
     Ring
     + Neg<Output=Self>
     // Arithmetic operations consuming rhs
-    + Div<Self, Output=Self>
+    + Div<Output=Self>
+    + DivAssign
     // Arithmetic operations with rhs reference
     + for<'a> Div<&'a Self, Output=Self>
+    + for<'a> DivAssign<&'a Self>
     {}
 
 /// Element of an integer field modulo prime number (F_p).
