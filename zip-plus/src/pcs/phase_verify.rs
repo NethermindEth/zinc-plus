@@ -209,7 +209,6 @@ mod tests {
     use crate::{
         ZipError,
         code::{LinearCode, raa::RaaCode},
-        field::F256,
         merkle::MerkleTree,
         pcs::{
             ZipPlusProof,
@@ -221,16 +220,14 @@ mod tests {
             mle::{DenseMultilinearExtension, MultilinearExtensionRand},
         },
         traits::FromRef,
-        utils::WORD_FACTOR,
     };
-    use crypto_bigint::{Random, U256, const_monty_params};
-    use crypto_primitives::{Ring, crypto_bigint_int::Int};
+    use crypto_bigint::{Random, U64, U256, const_monty_params};
+    use crypto_primitives::{Ring, crypto_bigint_const_monty::F256, crypto_bigint_int::Int};
     use itertools::Itertools;
     use num_traits::{ConstOne, ConstZero};
     use rand::prelude::*;
 
-    const INT_LIMBS: usize = WORD_FACTOR;
-    const FIELD_LIMBS: usize = 4 * WORD_FACTOR;
+    const INT_LIMBS: usize = U64::LIMBS;
 
     const N: usize = INT_LIMBS;
     const K: usize = INT_LIMBS * 4;
@@ -604,7 +601,7 @@ mod tests {
         let (_, mut proof) = TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();
 
         let row_len = pp.linear_code.row_len();
-        let bytes_per_field = FIELD_LIMBS * size_of::<crypto_bigint::Word>();
+        let bytes_per_field = F::BITS as usize / 8;
         let q0_bytes = row_len * bytes_per_field;
         assert!(
             proof.0.len() >= q0_bytes,

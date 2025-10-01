@@ -313,12 +313,11 @@ impl<R: Ring> AddAssign<(R, &Self)> for DenseMultilinearExtension<R> {
 mod tests {
     use super::*;
     use crate::{
-        field::ConstMontyField,
         pcs::utils::{build_eq_x_r, build_eq_x_r_vec},
         poly::mle::MultilinearExtension,
     };
     use crypto_bigint::{U128, const_monty_params};
-    use crypto_primitives::DenseRowMatrix;
+    use crypto_primitives::{DenseRowMatrix, crypto_bigint_const_monty::ConstMontyField};
     use num_traits::{ConstZero, One, Zero};
     use proptest::prelude::*;
 
