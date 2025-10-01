@@ -25,7 +25,7 @@ impl ZipTypes for BenchZipTypes {
 }
 
 fn zip_benchmarks(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Zip");
+    let mut group = c.benchmark_group("Zip+");
     do_bench::<BenchZipTypes>(&mut group);
     group.finish();
 }

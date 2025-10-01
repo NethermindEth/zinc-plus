@@ -27,7 +27,7 @@ impl<const D: usize> ZipTypes for BenchZipPlusTypes<D> {
 }
 
 fn zip_plus_benchmarks(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Zip");
+    let mut group = c.benchmark_group("Zip+");
 
     do_bench::<BenchZipPlusTypes<31>>(&mut group);
     do_bench::<BenchZipPlusTypes<63>>(&mut group);
