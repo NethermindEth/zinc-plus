@@ -9,7 +9,7 @@ use crate::{
         utils::{ColumnOpening, point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
-    poly::{Polynomial, mle::DenseMultilinearExtension},
+    poly::Polynomial,
     traits::{FromRef, Transcribable, Transcript},
     utils::inner_product,
 };
@@ -104,9 +104,9 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         };
 
         let mut columns_opened: Vec<(usize, Vec<Zt::Cw>)> =
-            Vec::with_capacity(vp.linear_code.num_column_opening());
+            Vec::with_capacity(Zt::NUM_COLUMN_OPENINGS);
 
-        for _ in 0..vp.linear_code.num_column_opening() {
+        for _ in 0..Zt::NUM_COLUMN_OPENINGS {
             let column_idx = transcript.squeeze_challenge_idx(vp.linear_code.codeword_len());
             let column_values = transcript.read_many(vp.num_rows)?;
 
@@ -234,7 +234,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
 mod tests {
     use crate::{
         ZipError,
-        code::{DefaultLinearCodeSpec, LinearCode},
+        code::LinearCode,
         field::F256,
         pcs::{
             structs::{ZipPlus, ZipTypes},
@@ -440,7 +440,7 @@ mod tests {
         let poly_size = 8; // row_len=4, num_rows=2 -> proximity checks are active
         let n = 3;
 
-        let linear_code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut keccak);
+        let linear_code = C::new(poly_size, true, &mut keccak);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let evaluations: Vec<_> = (0..poly_size as i32)
@@ -517,12 +517,7 @@ mod tests {
         let n = 3;
         let poly_size = 1 << n;
         let mut keccak_transcript = KeccakTranscript::new();
-        let linear_code: C = C::new(
-            &DefaultLinearCodeSpec,
-            poly_size,
-            true,
-            &mut keccak_transcript,
-        );
+        let linear_code: C = C::new(poly_size, true, &mut keccak_transcript);
         let param = TestZip::setup(poly_size, linear_code);
         let evaluations: Vec<_> = (0..poly_size)
             .map(|_| <Zt as ZipTypes>::Eval::from(rng.random::<i8>()))
@@ -554,7 +549,7 @@ mod tests {
     fn verification_fails_if_evaluation_consistency_check_is_invalid() {
         let mut keccak = MockTranscript::default();
         let poly_size = 8;
-        let linear_code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut keccak);
+        let linear_code = C::new(poly_size, true, &mut keccak);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let evaluations: Vec<_> = (0..poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
@@ -601,7 +596,7 @@ mod tests {
     fn verification_succeeds_for_zero_polynomial() {
         let mut keccak = MockTranscript::default();
         let poly_size = 8;
-        let linear_code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut keccak);
+        let linear_code = C::new(poly_size, true, &mut keccak);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let evaluations: Vec<_> = vec![Int::<INT_LIMBS>::from(0); poly_size];
@@ -628,7 +623,7 @@ mod tests {
     fn verification_succeeds_at_zero_point() {
         let mut keccak = MockTranscript::default();
         let poly_size = 8;
-        let linear_code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut keccak);
+        let linear_code = C::new(poly_size, true, &mut keccak);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let evaluations: Vec<_> = (1..=poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
@@ -656,7 +651,7 @@ mod tests {
     fn verification_fails_if_proximity_values_are_too_large() {
         let mut keccak = MockTranscript::default();
         let poly_size = 8;
-        let linear_code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut keccak);
+        let linear_code = C::new(poly_size, true, &mut keccak);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let evaluations: Vec<_> = (1..=poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
@@ -700,12 +695,7 @@ mod tests {
             // Match the benchmark’s transcript usage for linear code construction
             let mut keccak_transcript = KeccakTranscript::new();
             let poly_size = 1 << P;
-            let linear_code = C::new(
-                &DefaultLinearCodeSpec,
-                poly_size,
-                true,
-                &mut keccak_transcript,
-            );
+            let linear_code = C::new(poly_size, true, &mut keccak_transcript);
             let params = TestZip::setup(poly_size, linear_code);
 
             let poly = DenseMultilinearExtension::rand(P, &mut rng);

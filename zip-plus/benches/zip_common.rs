@@ -14,7 +14,7 @@ use itertools::Itertools;
 use num_traits::ConstOne;
 use rand::{distr::StandardUniform, prelude::*};
 use zip_plus::{
-    code::{DefaultLinearCodeSpec, LinearCode},
+    code::LinearCode,
     field::F256,
     merkle::MerkleTree,
     pcs::structs::{ProjectableToField, ZipPlus, ZipTypes},
@@ -93,12 +93,7 @@ where
             type T = KeccakTranscript;
             let mut keccak_transcript = T::new();
             let poly_size = 1 << P;
-            let linear_code = Zt::Code::new(
-                &DefaultLinearCodeSpec,
-                poly_size,
-                false,
-                &mut keccak_transcript,
-            );
+            let linear_code = Zt::Code::new(poly_size, false, &mut keccak_transcript);
             let params = ZipPlus::<Zt>::setup(poly_size, linear_code);
             let row_len = params.linear_code.row_len();
             let codeword_len = params.linear_code.codeword_len();
@@ -124,12 +119,7 @@ where
             let mut rng = ThreadRng::default();
             let mut keccak_transcript = KeccakTranscript::new();
             let poly_size = ROW_LEN * ROW_LEN;
-            let linear_code = <Zt as ZipTypes>::Code::new(
-                &DefaultLinearCodeSpec,
-                poly_size,
-                false,
-                &mut keccak_transcript,
-            );
+            let linear_code = <Zt as ZipTypes>::Code::new(poly_size, false, &mut keccak_transcript);
             assert_eq!(linear_code.row_len(), ROW_LEN, "Unexpected row_len");
             let message: Vec<<Zt as ZipTypes>::Eval> =
                 (0..ROW_LEN).map(|_i| rng.random()).collect();
@@ -171,12 +161,7 @@ where
     type T = KeccakTranscript;
     let mut keccak_transcript = T::new();
     let poly_size = 1 << P;
-    let linear_code = <Zt as ZipTypes>::Code::new(
-        &DefaultLinearCodeSpec,
-        poly_size,
-        false,
-        &mut keccak_transcript,
-    );
+    let linear_code = <Zt as ZipTypes>::Code::new(poly_size, false, &mut keccak_transcript);
     let params = ZipPlus::<Zt>::setup(poly_size, linear_code);
 
     group.bench_function(
@@ -214,12 +199,7 @@ where
     type T = KeccakTranscript;
     let mut keccak_transcript = T::new();
     let poly_size = 1 << P;
-    let linear_code = <Zt as ZipTypes>::Code::new(
-        &DefaultLinearCodeSpec,
-        poly_size,
-        false,
-        &mut keccak_transcript,
-    );
+    let linear_code = <Zt as ZipTypes>::Code::new(poly_size, false, &mut keccak_transcript);
     let params = ZipPlus::<Zt>::setup(poly_size, linear_code);
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
@@ -264,12 +244,7 @@ where
     type T = KeccakTranscript;
     let mut keccak_transcript = T::new();
     let poly_size = 1 << P;
-    let linear_code = <Zt as ZipTypes>::Code::new(
-        &DefaultLinearCodeSpec,
-        poly_size,
-        false,
-        &mut keccak_transcript,
-    );
+    let linear_code = <Zt as ZipTypes>::Code::new(poly_size, false, &mut keccak_transcript);
     let params = ZipPlus::<Zt>::setup(poly_size, linear_code);
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);

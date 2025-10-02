@@ -206,7 +206,7 @@ mod tests {
     use rand::{Rng, rng};
 
     use crate::{
-        code::{DefaultLinearCodeSpec, LinearCode},
+        code::LinearCode,
         field::F256,
         merkle::{MerkleTree, MtHash},
         pcs::{
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn commit_succeeds_for_small_polynomial() {
         let mut transcript = MockTranscript::default();
-        let code = C::new(&DefaultLinearCodeSpec, 16, true, &mut transcript);
+        let code = C::new(16, true, &mut transcript);
         let pp = ZipPlusParams::new(4, 4, code);
 
         let evaluations = vec![Int::from(42); 16];
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn commit_succeeds_for_two_variables() {
         let mut transcript = MockTranscript::default();
-        let code = C::new(&DefaultLinearCodeSpec, 4, true, &mut transcript);
+        let code = C::new(4, true, &mut transcript);
         let pp = ZipPlusParams::new(2, 2, code);
 
         let evaluations = vec![Int::from(1), Int::from(2), Int::from(3), Int::from(4)];
@@ -427,7 +427,7 @@ mod tests {
             .into_par_iter()
             .map(|_| {
                 let mut transcript = MockTranscript::default();
-                let code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut transcript);
+                let code = C::new(poly_size, true, &mut transcript);
                 let pp = ZipPlusParams::new(num_vars, 8, code);
 
                 TestZip::encode_rows(
@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn encode_rows_succeeds_for_single_row() {
         let mut transcript = MockTranscript::default();
-        let code = C::new(&DefaultLinearCodeSpec, 4, true, &mut transcript);
+        let code = C::new(4, true, &mut transcript);
         let pp = ZipPlusParams::new(2, 1, code);
 
         // Create a polynomial with 2 variables and 4 evaluations
@@ -494,7 +494,7 @@ mod tests {
     #[test]
     fn encode_rows_succeeds_for_single_poly_row() {
         let mut transcript = MockTranscript::default();
-        let code = PolyC::new(&DefaultLinearCodeSpec, 4, true, &mut transcript);
+        let code = PolyC::new(4, true, &mut transcript);
         let pp = ZipPlusParams::new(2, 1, code);
 
         // Create a polynomial with 2 variables and 4 evaluations
@@ -630,8 +630,8 @@ mod tests {
             let column_values_size = pp.num_rows * size_of_zt_k;
             let single_merkle_proof_size =
                 size_of_dimension * 2 + size_of_path_len + merkle_depth * size_of_path_elem;
-            let column_opening_phase_size = pp.linear_code.num_column_opening()
-                * (column_values_size + single_merkle_proof_size);
+            let column_opening_phase_size =
+                Zt::NUM_COLUMN_OPENINGS * (column_values_size + single_merkle_proof_size);
 
             let evaluation_phase_size = pp.linear_code.row_len() * size_of_f_b;
 
@@ -649,12 +649,7 @@ mod tests {
         let num_vars = 4;
         let poly_size = 1 << num_vars;
         let mut keccak_transcript = KeccakTranscript::new();
-        let linear_code = C::new(
-            &DefaultLinearCodeSpec,
-            poly_size,
-            true,
-            &mut keccak_transcript,
-        );
+        let linear_code = C::new(poly_size, true, &mut keccak_transcript);
         let param = TestZip::setup(poly_size, linear_code);
         let evaluations: Vec<_> = (0..poly_size)
             .map(|_| <Zt as ZipTypes>::Eval::from(rng.random::<i8>()))

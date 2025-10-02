@@ -15,15 +15,16 @@ const INT_LIMBS: usize = WORD_FACTOR;
 
 struct BenchZipPlusTypes<const D: usize> {}
 impl<const D: usize> ZipTypes for BenchZipPlusTypes<D> {
-    type EvalR = i32;
+    const NUM_COLUMN_OPENINGS: usize = 650;
+    type EvalR = i8; // TODO: Use binary polynomials for evaluations
     type Eval = DensePolynomial<Self::EvalR, D>;
-    type CwR = i64;
+    type CwR = i16;
     type Cw = DensePolynomial<Self::CwR, D>;
     type Chal = i128;
     type Pt = i128;
-    type CombR = Int<{ INT_LIMBS * 4 }>;
+    type CombR = Int<{ INT_LIMBS * 5 }>;
     type Comb = DensePolynomial<Self::CombR, D>;
-    type Code = RaaCode<Self::Eval, Self::Cw, Self::CombR>;
+    type Code = RaaCode<Self::Eval, Self::Cw, Self::CombR, 4>;
 }
 
 fn zip_plus_benchmarks(c: &mut Criterion) {

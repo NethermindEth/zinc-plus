@@ -11,6 +11,8 @@ use p3_field::Packable;
 use std::marker::PhantomData;
 
 pub trait ZipTypes: Send + Sync {
+    const NUM_COLUMN_OPENINGS: usize;
+
     /// Coefficient ring of evaluation polynomial [Self::Eval]
     type EvalR: IntRing + Named + Transcribable;
     /// Ring of witness/polynomial evaluations on boolean hypercube

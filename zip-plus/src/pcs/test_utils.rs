@@ -7,7 +7,7 @@
 )]
 
 use crate::{
-    code::{DefaultLinearCodeSpec, LinearCode, raa::RaaCode},
+    code::{LinearCode, raa::RaaCode},
     pcs::structs::{
         AsPackable, MulByScalar, ProjectableToField, ZipPlus, ZipPlusCommitment, ZipPlusParams,
         ZipTypes,
@@ -19,8 +19,11 @@ use crate::{
 use crypto_primitives::{PrimeField, Ring, crypto_bigint_int::Int};
 use itertools::Itertools;
 
+const REPETITION_FACTOR: usize = 4;
+
 pub struct TestZipTypes<const N: usize, const K: usize, const M: usize> {}
 impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N, K, M> {
+    const NUM_COLUMN_OPENINGS: usize = 650;
     type EvalR = Int<N>;
     type Eval = Int<N>;
     type CwR = Int<K>;
@@ -29,7 +32,7 @@ impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N
     type Pt = Int<N>;
     type CombR = Int<M>;
     type Comb = Int<M>;
-    type Code = RaaCode<Int<N>, Int<K>, Int<M>>;
+    type Code = RaaCode<Int<N>, Int<K>, Int<M>, REPETITION_FACTOR>;
 }
 
 pub struct TestPolyZipTypes<const N: usize, const K: usize, const M: usize, const DEGREE: usize> {
@@ -37,6 +40,7 @@ pub struct TestPolyZipTypes<const N: usize, const K: usize, const M: usize, cons
 impl<const N: usize, const K: usize, const M: usize, const DEGREE: usize> ZipTypes
     for TestPolyZipTypes<N, K, M, DEGREE>
 {
+    const NUM_COLUMN_OPENINGS: usize = 650;
     type EvalR = Int<N>;
     type Eval = DensePolynomial<Int<N>, DEGREE>;
     type CwR = Int<K>;
@@ -45,7 +49,12 @@ impl<const N: usize, const K: usize, const M: usize, const DEGREE: usize> ZipTyp
     type Pt = Int<N>;
     type CombR = Int<M>;
     type Comb = DensePolynomial<Int<M>, DEGREE>;
-    type Code = RaaCode<DensePolynomial<Int<N>, DEGREE>, DensePolynomial<Int<K>, DEGREE>, Int<M>>;
+    type Code = RaaCode<
+        DensePolynomial<Int<N>, DEGREE>,
+        DensePolynomial<Int<K>, DEGREE>,
+        Int<M>,
+        REPETITION_FACTOR,
+    >;
 }
 
 /// Helper function to set up common parameters for tests.
@@ -91,8 +100,7 @@ fn setup_test_params_inner<Zt: ZipTypes>(
     let num_rows = 1 << num_vars.div_ceil(2);
 
     let mut transcript = MockTranscript::default();
-    let code =
-        <Zt as ZipTypes>::Code::new(&DefaultLinearCodeSpec, poly_size, true, &mut transcript);
+    let code = <Zt as ZipTypes>::Code::new(poly_size, true, &mut transcript);
     let pp = ZipPlusParams::new(num_vars, num_rows, code);
 
     let evaluations = prepare_evaluations(poly_size);
@@ -154,7 +162,13 @@ where
     Eval: Ring + for<'a> MulByScalar<&'a Pt>,
     Cw: Ring + FromRef<Eval> + AsPackable + Transcribable,
     CombR: Ring + FromRef<CombR> + Transcribable,
-    Zt: ZipTypes<Eval = Eval, Cw = Cw, Pt = Pt, CombR = CombR, Code = RaaCode<Eval, Cw, CombR>>,
+    Zt: ZipTypes<
+            Eval = Eval,
+            Cw = Cw,
+            Pt = Pt,
+            CombR = CombR,
+            Code = RaaCode<Eval, Cw, CombR, REPETITION_FACTOR>,
+        >,
     F: PrimeField + FromRef<Zt::Chal> + FromRef<Zt::Pt> + for<'a> MulByScalar<&'a F>,
     F::Inner: Transcribable,
     Eval: ProjectableToField<F>,
@@ -205,7 +219,7 @@ where
             .fs_transcript
             .get_challenges::<Zt::Chal>(pp.num_rows);
     }
-    for _ in 0..pp.linear_code.num_column_opening() {
+    for _ in 0..Zt::NUM_COLUMN_OPENINGS {
         let _ = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
         let _ = transcript.read_many::<Zt::Cw>(pp.num_rows).unwrap();
         let _ = transcript.read_merkle_proof().unwrap();

@@ -4,7 +4,7 @@ use std::{marker::PhantomData, ops::AddAssign};
 
 use crate::{
     add,
-    code::{LinearCode, LinearCodeSpec},
+    code::LinearCode,
     mul,
     traits::{FromRef, Transcript},
     utils::shuffle_seeded,
@@ -13,15 +13,11 @@ use crate::{
 /// Implementation of a repeat-accumulate-accumulate (RAA) codes over the binary
 /// field, as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
 #[derive(Debug, Clone)]
-pub struct RaaCode<Eval: Ring, Cw: Ring, Comb: Ring> {
+pub struct RaaCode<Eval: Ring, Cw: Ring, Comb: Ring, const REP: usize> {
     /// Whether to check for overflows during encoding
     check_for_overflows: bool,
 
     row_len: usize,
-
-    repetition_factor: usize,
-
-    num_column_opening: usize,
 
     /// Randomness seed for the first permutation
     perm_1_seed: u64,
@@ -32,7 +28,7 @@ pub struct RaaCode<Eval: Ring, Cw: Ring, Comb: Ring> {
     phantom: PhantomData<(Eval, Cw, Comb)>,
 }
 
-impl<Eval, Cw, Comb> RaaCode<Eval, Cw, Comb>
+impl<Eval, Cw, Comb, const REP: usize> RaaCode<Eval, Cw, Comb, REP>
 where
     Eval: Ring,
     Cw: Ring + FromRef<Eval>,
@@ -48,7 +44,7 @@ where
             self.row_len,
             "Row length must match the code's row length"
         );
-        let mut result: Vec<Out> = repeat(row, self.repetition_factor);
+        let mut result: Vec<Out> = repeat(row, REP);
         shuffle_seeded(&mut result, self.perm_1_seed);
         if self.check_for_overflows {
             accumulate(&mut result);
@@ -66,22 +62,23 @@ where
     }
 }
 
-impl<Eval, Cw, Comb> LinearCode<Eval, Cw, Comb> for RaaCode<Eval, Cw, Comb>
+impl<Eval, Cw, Comb, const REP: usize> LinearCode<Eval, Cw, Comb> for RaaCode<Eval, Cw, Comb, REP>
 where
     Eval: Ring,
     Cw: Ring + FromRef<Eval>,
     Comb: Ring + FromRef<Comb>,
 {
+    const REPETITION_FACTOR: usize = REP;
+
     type Inner = u64; // Doesn't really matter, we don't use it
 
-    fn new<S: LinearCodeSpec, T: Transcript>(
-        spec: &S,
-        poly_size: usize,
-        check_for_overflows: bool,
-        transcript: &mut T,
-    ) -> Self {
-        // Taken from original Zip codes
+    fn new<T: Transcript>(poly_size: usize, check_for_overflows: bool, transcript: &mut T) -> Self {
+        assert!(
+            REP.is_power_of_two(),
+            "Repetition factor must be a power of two"
+        );
 
+        // Taken from original Zip codes
         let num_vars = poly_size.ilog2();
         let two_pow_num_vars = 1_usize
             .checked_shl(num_vars)
@@ -90,9 +87,6 @@ where
             .isqrt()
             .checked_next_power_of_two()
             .expect("row_len overflow");
-        let repetition_factor = spec.repetition_factor();
-
-        let num_column_opening = spec.num_column_opening();
 
         // Width of each entry in codeword vector, in bits.
         // For RAA it's initial_bits + 2*log(repetition_factor) + num_variables
@@ -104,10 +98,7 @@ where
                 .and_then(|b| b.checked_mul(8))
                 .expect("Size of Eval type is too large");
 
-            let rep_factor_log = repetition_factor
-                .checked_next_power_of_two()
-                .expect("Repetition factor is too large")
-                .ilog2();
+            let rep_factor_log = REP.ilog2();
             let num_vars_even = if num_vars.is_multiple_of(2) {
                 num_vars
             } else {
@@ -131,8 +122,6 @@ where
         Self {
             check_for_overflows,
             row_len,
-            repetition_factor,
-            num_column_opening,
             perm_1_seed,
             perm_2_seed,
             phantom: PhantomData,
@@ -145,11 +134,7 @@ where
 
     #[allow(clippy::arithmetic_side_effects)]
     fn codeword_len(&self) -> usize {
-        self.row_len * self.repetition_factor
-    }
-
-    fn num_column_opening(&self) -> usize {
-        self.num_column_opening
+        self.row_len * REP
     }
 
     fn encode(&self, row: &[Eval]) -> Vec<Cw> {
@@ -224,11 +209,9 @@ mod tests {
     use num_traits::Zero;
 
     use super::*;
-    use crate::{
-        code::{DefaultLinearCodeSpec, LinearCode},
-        pcs::test_utils::MockTranscript,
-        utils::shuffle_seeded,
-    };
+    use crate::{code::LinearCode, pcs::test_utils::MockTranscript, utils::shuffle_seeded};
+
+    const REPETITION_FACTOR: usize = 4;
 
     // Define common types for testing
     const INT_LIMBS: usize = 1;
@@ -242,12 +225,11 @@ mod tests {
         Eval: Ring,
         Cw: Ring + FromRef<Eval>,
         Comb: Ring + FromRef<Comb>,
-        F: Fn(&RaaCode<Eval, Cw, Comb>),
+        F: Fn(&RaaCode<Eval, Cw, Comb, 4>),
     {
         for check_for_overflows in [true, false] {
             let mut transcript = MockTranscript::default();
-            let code = RaaCode::<Eval, Cw, Comb>::new(
-                &DefaultLinearCodeSpec,
+            let code = RaaCode::<Eval, Cw, Comb, REPETITION_FACTOR>::new(
                 poly_size,
                 check_for_overflows,
                 &mut transcript,
@@ -369,10 +351,13 @@ mod tests {
             let a: Vec<Int<N>> = (1..=4).map(Int::<N>::from).collect();
 
             let encode_a: Vec<Int<K>> = code.encode(&a);
-
             assert_eq!(
                 encode_a,
-                [0x11, 0x1C, 0x21, 0x28, 0x3C, 0x48, 0x49, 0x58].map(Int::<K>::from)
+                [
+                    0x1E, 0x36, 0x39, 0x5A, 0x70, 0x7E, 0xA5, 0xC1, 0xCB, 0xDC, 0xF9, 0x11E, 0x124,
+                    0x14C, 0x14D, 0x160
+                ]
+                .map(Int::<K>::from)
             );
         })
     }
@@ -399,8 +384,7 @@ mod tests {
         const K: usize = 1;
 
         let mut transcript = MockTranscript::default();
-        let _code = RaaCode::<Int<N>, Int<K>, Int<M>>::new(
-            &DefaultLinearCodeSpec,
+        let _code = RaaCode::<Int<N>, Int<K>, Int<M>, REPETITION_FACTOR>::new(
             1 << 30,
             true,
             &mut transcript,

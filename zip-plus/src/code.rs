@@ -1,28 +1,26 @@
 pub mod raa;
 
-use std::fmt::Debug;
-
 use crate::traits::{FromRef, Transcript};
 use crypto_primitives::{PrimeField, Ring};
 
 pub trait LinearCode<Eval: Ring, Cw: Ring, Comb: Ring>: Sync + Send {
+    /// Repetition factor, a.k.a. inverse rate, the ratio of codeword length to
+    /// input row length. Has to be at a power of 2.
+    ///
+    /// Note: Ideally, this should be a generic constant, but due to the fact
+    /// that generic parameters may not be used in const operations, this
+    /// makes using it too much of a hassle.
+    const REPETITION_FACTOR: usize;
+
     type Inner;
 
-    fn new<S: LinearCodeSpec, T: Transcript>(
-        spec: &S,
-        poly_size: usize,
-        check_for_overflows: bool,
-        transcript: &mut T,
-    ) -> Self;
+    fn new<T: Transcript>(poly_size: usize, check_for_overflows: bool, transcript: &mut T) -> Self;
 
     /// Length of each input row before encoding
     fn row_len(&self) -> usize;
 
     /// Length of each encoded codeword (output length after encoding)
     fn codeword_len(&self) -> usize;
-
-    /// Number of columns to open during verification (security parameter)
-    fn num_column_opening(&self) -> usize;
 
     /// Encodes a row of cryptographic integers using this linear encoding
     /// scheme.
@@ -67,25 +65,4 @@ pub trait LinearCode<Eval: Ring, Cw: Ring, Comb: Ring>: Sync + Send {
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
         F: PrimeField + FromRef<F> + FromRef<Self::Inner>;
-}
-
-pub trait LinearCodeSpec: Debug {
-    fn num_column_opening(&self) -> usize;
-
-    /// A.k.a. inverse rate, the ratio of codeword length to input row length.
-    /// Has to be at a power of 2.
-    fn repetition_factor(&self) -> usize;
-}
-
-// Figure 2 in [GLSTW21](https://eprint.iacr.org/2021/1043.pdf).
-#[derive(Debug)]
-pub struct DefaultLinearCodeSpec;
-impl LinearCodeSpec for DefaultLinearCodeSpec {
-    fn num_column_opening(&self) -> usize {
-        650
-    }
-
-    fn repetition_factor(&self) -> usize {
-        4
-    }
 }

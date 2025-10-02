@@ -133,7 +133,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         }
 
         // Open merkle tree for each column drawn
-        for _ in 0..pp.linear_code.num_column_opening() {
+        for _ in 0..Zt::NUM_COLUMN_OPENINGS {
             let column = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
             Self::open_merkle_trees_for_column(pp, commit_hint, column, transcript)?;
         }
