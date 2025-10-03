@@ -214,7 +214,6 @@ mod tests {
             test_utils::*,
         },
         poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
-        transcript::KeccakTranscript,
         utils::WORD_FACTOR,
     };
 
@@ -272,8 +271,7 @@ mod tests {
 
     #[test]
     fn commit_succeeds_for_small_polynomial() {
-        let mut transcript = MockTranscript::default();
-        let code = C::new(16, true, &mut transcript);
+        let code = C::new(16, true);
         let pp = ZipPlusParams::new(4, 4, code);
 
         let evaluations = vec![Int::from(42); 16];
@@ -285,8 +283,7 @@ mod tests {
 
     #[test]
     fn commit_succeeds_for_two_variables() {
-        let mut transcript = MockTranscript::default();
-        let code = C::new(4, true, &mut transcript);
+        let code = C::new(4, true);
         let pp = ZipPlusParams::new(2, 2, code);
 
         let evaluations = vec![Int::from(1), Int::from(2), Int::from(3), Int::from(4)];
@@ -425,8 +422,7 @@ mod tests {
         let results: Vec<Vec<Int<4>>> = (0..10)
             .into_par_iter()
             .map(|_| {
-                let mut transcript = MockTranscript::default();
-                let code = C::new(poly_size, true, &mut transcript);
+                let code = C::new(poly_size, true);
                 let pp = ZipPlusParams::new(num_vars, 8, code);
 
                 TestZip::encode_rows(
@@ -474,8 +470,7 @@ mod tests {
 
     #[test]
     fn encode_rows_succeeds_for_single_row() {
-        let mut transcript = MockTranscript::default();
-        let code = C::new(4, true, &mut transcript);
+        let code = C::new(4, true);
         let pp = ZipPlusParams::new(2, 1, code);
 
         // Create a polynomial with 2 variables and 4 evaluations
@@ -492,8 +487,7 @@ mod tests {
 
     #[test]
     fn encode_rows_succeeds_for_single_poly_row() {
-        let mut transcript = MockTranscript::default();
-        let code = PolyC::new(4, true, &mut transcript);
+        let code = PolyC::new(4, true);
         let pp = ZipPlusParams::new(2, 1, code);
 
         // Create a polynomial with 2 variables and 4 evaluations
@@ -653,8 +647,7 @@ mod tests {
         let mut rng = rng();
         let num_vars = 4;
         let poly_size = 1 << num_vars;
-        let mut keccak_transcript = KeccakTranscript::new();
-        let linear_code = C::new(poly_size, true, &mut keccak_transcript);
+        let linear_code = C::new(poly_size, true);
         let param = TestZip::setup(poly_size, linear_code);
         let evaluations: Vec<_> = (0..poly_size)
             .map(|_| <Zt as ZipTypes>::Eval::from(rng.random::<i8>()))

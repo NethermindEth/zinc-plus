@@ -7,7 +7,7 @@ use crate::{
     code::LinearCode,
     mul,
     pcs::structs::ZipTypes,
-    traits::{FromRef, Transcribable, Transcript},
+    traits::{FromRef, Transcribable},
     utils::shuffle_seeded,
 };
 
@@ -61,7 +61,7 @@ impl<Zt: ZipTypes, const REP: usize> RaaCode<Zt, REP> {
 impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for RaaCode<Zt, REP> {
     const REPETITION_FACTOR: usize = REP;
 
-    fn new<T: Transcript>(poly_size: usize, check_for_overflows: bool, transcript: &mut T) -> Self {
+    fn new(poly_size: usize, check_for_overflows: bool) -> Self {
         assert!(
             REP.is_power_of_two(),
             "Repetition factor must be a power of two"
@@ -105,8 +105,9 @@ impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for RaaCode<Zt, REP> {
             codeword_type_bits
         );
 
-        let perm_1_seed = transcript.get_challenge();
-        let perm_2_seed = transcript.get_challenge();
+        // We don't need a secure/unpredictable randomness here, so we use fixed seeds
+        let perm_1_seed = 1;
+        let perm_2_seed = 2;
 
         Self {
             check_for_overflows,
@@ -200,7 +201,7 @@ mod tests {
     use super::*;
     use crate::{
         code::LinearCode,
-        pcs::test_utils::{MockTranscript, TestZipTypes},
+        pcs::test_utils::{TestZipTypes},
         utils::shuffle_seeded,
     };
 
@@ -219,12 +220,8 @@ mod tests {
         F: Fn(&RaaCode<Zt, REPETITION_FACTOR>),
     {
         for check_for_overflows in [true, false] {
-            let mut transcript = MockTranscript::default();
-            let code = RaaCode::<Zt, REPETITION_FACTOR>::new(
-                poly_size,
-                check_for_overflows,
-                &mut transcript,
-            );
+            let code =
+                RaaCode::<Zt, REPETITION_FACTOR>::new(poly_size, check_for_overflows);
             f(&code)
         }
     }
@@ -374,12 +371,7 @@ mod tests {
         const N: usize = 1;
         const K: usize = 1;
 
-        let mut transcript = MockTranscript::default();
-        let _code = RaaCode::<TestZipTypes<N, K, N>, REPETITION_FACTOR>::new(
-            1 << 30,
-            true,
-            &mut transcript,
-        );
+        let _code = RaaCode::<TestZipTypes<N, K, N>, REPETITION_FACTOR>::new(1 << 30, true);
     }
 
     #[test]

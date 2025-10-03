@@ -20,7 +20,6 @@ use zip_plus::{
     pcs::structs::{ProjectableToField, ZipPlus, ZipTypes},
     poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand},
     traits::{FromRef, Named},
-    transcript::KeccakTranscript,
 };
 
 const_monty_params!(
@@ -29,7 +28,6 @@ const_monty_params!(
     "EB0E9F20F7BFC231327A11792F585AC6C20C74ACCCAB538BE6B0C3AB2E3D176F"
 );
 type F = F256<ModP>;
-type T = KeccakTranscript;
 
 pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>>(group: &mut BenchmarkGroup<WallTime>)
 where
@@ -95,9 +93,8 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
         ),
         |b| {
             let mut rng = ThreadRng::default();
-            let mut transcript = T::new();
             let poly_size = 1 << P;
-            let linear_code = Lc::new(poly_size, false, &mut transcript);
+            let linear_code = Lc::new(poly_size, false);
             let params = ZipPlus::setup(poly_size, linear_code);
             let row_len = params.linear_code.row_len();
             let codeword_len = params.linear_code.codeword_len();
@@ -123,9 +120,8 @@ pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>, const ROW_LEN: usize>
         ),
         |b| {
             let mut rng = ThreadRng::default();
-            let mut transcript = T::new();
             let poly_size = ROW_LEN * ROW_LEN;
-            let linear_code = Lc::new(poly_size, false, &mut transcript);
+            let linear_code = Lc::new(poly_size, false);
             assert_eq!(linear_code.row_len(), ROW_LEN, "Unexpected row_len");
             let message: Vec<<Zt as ZipTypes>::Eval> =
                 (0..ROW_LEN).map(|_i| rng.random()).collect();
@@ -165,9 +161,8 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     StandardUniform: Distribution<Zt::Eval>,
 {
     let mut rng = ThreadRng::default();
-    let mut transcript = T::new();
     let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size, false, &mut transcript);
+    let linear_code = Lc::new(poly_size, false);
     let params = ZipPlus::setup(poly_size, linear_code);
 
     group.bench_function(
@@ -200,9 +195,8 @@ where
 {
     let mut rng = ThreadRng::default();
 
-    let mut transcript = T::new();
     let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size, false, &mut transcript);
+    let linear_code = Lc::new(poly_size, false);
     let params = ZipPlus::setup(poly_size, linear_code);
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
@@ -233,9 +227,8 @@ where
 {
     let mut rng = ThreadRng::default();
 
-    let mut transcript = T::new();
     let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size, false, &mut transcript);
+    let linear_code = Lc::new(poly_size, false);
     let params = ZipPlus::setup(poly_size, linear_code);
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
@@ -279,9 +272,8 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     Zt::Cw: ProjectableToField<F>,
 {
     let mut rng = ThreadRng::default();
-    let mut transcript = T::new();
     let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size, false, &mut keccak_transcript);
+    let linear_code = Lc::new(poly_size, false);
     let params = ZipPlus::setup(poly_size, linear_code);
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
