@@ -4,10 +4,11 @@ use crate::{
     ZipError,
     code::LinearCode,
     pcs::{
+        ZipPlusProof, ZipPlusTestTranscript,
         structs::{MulByScalar, ProjectableToField, ZipPlus, ZipPlusParams, ZipTypes},
         utils::{point_to_tensor, validate_input},
     },
-    pcs_transcript::{PcsTranscript, ZipPlusEvaluationProof, ZipPlusTestProof},
+    pcs_transcript::PcsTranscript,
     poly::mle::DenseMultilinearExtension,
     traits::{FromRef, Transcribable, Transcript},
     utils::{combine_rows, inner_product},
@@ -20,8 +21,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
         point: &[Zt::Pt],
-        test_proof: ZipPlusTestProof,
-    ) -> Result<(F, ZipPlusEvaluationProof), ZipError>
+        test_transcript: ZipPlusTestTranscript,
+    ) -> Result<(F, ZipPlusProof), ZipError>
     where
         F: PrimeField + FromRef<Zt::Chal> + FromRef<Zt::Pt> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
@@ -29,7 +30,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     {
         validate_input::<Zt, Lc, _>("evaluate", pp.num_vars, [poly], [point])?;
 
-        let mut transcript: PcsTranscript = test_proof.into();
+        let mut transcript: PcsTranscript = test_transcript.into();
 
         let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
         let projecting_element: F = F::from_ref(&projecting_element);

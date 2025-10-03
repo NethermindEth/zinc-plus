@@ -14,7 +14,7 @@ use crate::{
 /// A transcript for Polynomial Commitment Scheme (PCS) operations.
 /// Manages both Fiat-Shamir transformations and serialization/deserialization
 /// of proof data.
-#[derive(Default, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PcsTranscript {
     /// Handles Fiat-Shamir transformations for non-interactive zero-knowledge
     /// proofs. Used to absorb field elements and generate cryptographic
@@ -29,14 +29,6 @@ pub struct PcsTranscript {
 impl PcsTranscript {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Creates a transcript from an existing serialized proof.
-    fn from_proof(proof: Vec<u8>) -> Self {
-        Self {
-            fs_transcript: KeccakTranscript::default(),
-            stream: Cursor::new(proof),
-        }
     }
 
     /// Absorbs a field element into the Fiat-Shamir transcript.
@@ -195,44 +187,10 @@ impl PcsTranscript {
     }
 }
 
-/// Proof obtained by the verifier after the testing phase, which is essentially
-/// a serialized prover transcript.
-#[derive(Clone, Debug)]
-pub struct ZipPlusTestProof(pub Vec<u8>);
-
-impl From<PcsTranscript> for ZipPlusTestProof {
-    fn from(transcript: PcsTranscript) -> Self {
-        ZipPlusTestProof(transcript.stream.into_inner())
-    }
-}
-
-impl From<ZipPlusTestProof> for PcsTranscript {
-    fn from(value: ZipPlusTestProof) -> Self {
-        PcsTranscript::from_proof(value.0)
-    }
-}
-
-/// Proof obtained by the verifier after the evaluation phase, which is
-/// essentially a serialized prover transcript.
-#[derive(Clone, Debug)]
-pub struct ZipPlusEvaluationProof(pub Vec<u8>);
-
-impl From<PcsTranscript> for ZipPlusEvaluationProof {
-    fn from(transcript: PcsTranscript) -> Self {
-        ZipPlusEvaluationProof(transcript.stream.into_inner())
-    }
-}
-
-impl From<ZipPlusEvaluationProof> for PcsTranscript {
-    fn from(val: ZipPlusEvaluationProof) -> Self {
-        PcsTranscript::from_proof(val.0)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::MtHash;
+    use crate::{merkle::MtHash, pcs::ZipPlusProof};
     use crypto_bigint::{U256, const_monty_params};
 
     #[allow(unused_macros)]
@@ -245,8 +203,8 @@ mod tests {
             transcript
                 .$write_fn(&$original_value, &mut buf)
                 .expect(&format!("Failed to write {}", $assert_msg));
-            let proof = transcript.stream.into_inner();
-            let mut transcript = PcsTranscript::from_proof(proof);
+            let proof: ZipPlusProof = transcript.into();
+            let mut transcript: PcsTranscript = proof.into();
             let read_value = transcript
                 .$read_fn()
                 .expect(&format!("Failed to read {}", $assert_msg));
@@ -267,8 +225,8 @@ mod tests {
             transcript
                 .$write_fn(&$original_values)
                 .expect(&format!("Failed to write {}", $assert_msg));
-            let proof = transcript.stream.into_inner();
-            let mut transcript = PcsTranscript::from_proof(proof);
+            let proof: ZipPlusProof = transcript.into();
+            let mut transcript: PcsTranscript = proof.into();
             let read_values = transcript
                 .$read_fn($original_values.len())
                 .expect(&format!("Failed to read {}", $assert_msg));

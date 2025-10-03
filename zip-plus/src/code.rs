@@ -1,10 +1,7 @@
 pub mod raa;
 
-use crate::{
-    pcs::structs::ZipTypes,
-    traits::{FromRef},
-};
-use crypto_primitives::{PrimeField, Ring};
+use crate::{pcs::structs::ZipTypes, traits::FromRef};
+use crypto_primitives::PrimeField;
 
 pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
     /// Repetition factor, a.k.a. inverse rate, the ratio of codeword length to

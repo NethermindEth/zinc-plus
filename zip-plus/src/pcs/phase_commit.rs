@@ -607,7 +607,7 @@ mod tests {
 
     #[test]
     fn proof_size_is_correct_for_parameters() {
-        fn calculate_expected_test_proof_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
+        fn calculate_expected_test_transcript_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
             let size_of_zt_k = K * size_of::<Word>();
             let size_of_zt_m = M * size_of::<Word>();
             let size_of_path_len = size_of::<u64>();
@@ -628,13 +628,11 @@ mod tests {
             proximity_phase_size + column_opening_phase_size
         }
 
-        fn calculate_expected_eval_proof_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
+        fn calculate_expected_proof_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
             let size_of_f_b = FIELD_LIMBS * size_of::<Word>();
             let evaluation_phase_size = pp.linear_code.row_len() * size_of_f_b;
 
-            // let ra
-
-            calculate_expected_test_proof_size_bytes(pp) + evaluation_phase_size
+            calculate_expected_test_transcript_size_bytes(pp) + evaluation_phase_size
         }
 
         const_monty_params!(
@@ -659,14 +657,18 @@ mod tests {
 
         let (hint, _) = TestZip::commit(&param, &mle).unwrap();
 
-        let test_proof = TestZip::test(&param, &mle, &hint).unwrap();
-        let actual_test_proof_size_bytes = test_proof.0.len();
-        let expected_test_proof_size_bytes = calculate_expected_test_proof_size_bytes(&param);
-        assert_eq!(actual_test_proof_size_bytes, expected_test_proof_size_bytes);
+        let test_transcript = TestZip::test(&param, &mle, &hint).unwrap();
+        let actual_test_transcript_size_bytes = test_transcript.0.stream.get_ref().len();
+        let expected_test_transcript_size_bytes =
+            calculate_expected_test_transcript_size_bytes(&param);
+        assert_eq!(
+            actual_test_transcript_size_bytes,
+            expected_test_transcript_size_bytes
+        );
 
-        let (_, eval_proof) = TestZip::evaluate::<F>(&param, &mle, &point, test_proof).unwrap();
-        let actual_eval_proof_size_bytes = eval_proof.0.len();
-        let expected_eval_proof_size_bytes = calculate_expected_eval_proof_size_bytes(&param);
-        assert_eq!(actual_eval_proof_size_bytes, expected_eval_proof_size_bytes);
+        let (_, proof) = TestZip::evaluate::<F>(&param, &mle, &point, test_transcript).unwrap();
+        let actual_proof_size_bytes = proof.0.len();
+        let expected_proof_size_bytes = calculate_expected_proof_size_bytes(&param);
+        assert_eq!(actual_proof_size_bytes, expected_proof_size_bytes);
     }
 }

@@ -210,15 +210,17 @@ where
         ),
         |b| {
             b.iter(|| {
-                let test_proof = ZipPlus::test(&params, &poly, &data).expect("Test phase failed");
-                black_box(test_proof);
+                let test_transcript =
+                    ZipPlus::test(&params, &poly, &data).expect("Test phase failed");
+                black_box(test_transcript);
             })
         },
     );
 }
 
-pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(group: &mut BenchmarkGroup<WallTime>)
-where
+pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
     StandardUniform: Distribution<Zt::Eval>,
     Zt::Eval: ProjectableToField<F>,
     F: FromRef<Zt::Chal> + FromRef<Zt::Pt>,
@@ -233,7 +235,7 @@ where
     let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
     let point = vec![Zt::Pt::ONE; P];
 
-    let test_proof = ZipPlus::test(&params, &poly, &data).expect("Test phase failed");
+    let test_transcript = ZipPlus::test(&params, &poly, &data).expect("Test phase failed");
 
     group.bench_function(
         format!(
@@ -247,13 +249,12 @@ where
             b.iter_custom(|iters| {
                 let mut total_duration = Duration::ZERO;
                 for _ in 0..iters {
-                    let proof = test_proof.clone();
+                    let proof = test_transcript.clone();
                     let timer = Instant::now();
-                    let (eval_f, eval_proof) =
-                        ZipPlus::evaluate::<F>(&params, &poly, &point, proof)
-                            .expect("Evaluation phase failed");
+                    let (eval_f, proof) = ZipPlus::evaluate::<F>(&params, &poly, &point, proof)
+                        .expect("Evaluation phase failed");
                     total_duration += timer.elapsed();
-                    black_box((eval_f, eval_proof));
+                    black_box((eval_f, proof));
                 }
                 total_duration
             })
@@ -279,8 +280,8 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     let point = vec![Zt::Pt::ONE; P];
     let point_f: Vec<F> = point.iter().map(F::from_ref).collect();
 
-    let test_proof = ZipPlus::test(&params, &poly, &data).expect("Test phase failed");
-    let (eval_f, eval_proof) = ZipPlus::evaluate::<F>(&params, &poly, &point, test_proof)
+    let test_transcript = ZipPlus::test(&params, &poly, &data).expect("Test phase failed");
+    let (eval_f, proof) = ZipPlus::evaluate::<F>(&params, &poly, &point, test_transcript)
         .expect("Evaluation phase failed");
 
     group.bench_function(
@@ -293,7 +294,7 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
         ),
         |b| {
             b.iter(|| {
-                ZipPlus::verify(&params, &commitment, &point_f, &eval_f, &eval_proof)
+                ZipPlus::verify(&params, &commitment, &point_f, &eval_f, &proof)
                     .expect("Verification failed");
             })
         },

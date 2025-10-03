@@ -193,11 +193,7 @@ mod tests {
     use num_traits::Zero;
 
     use super::*;
-    use crate::{
-        code::LinearCode,
-        pcs::test_utils::{TestZipTypes},
-        utils::shuffle_seeded,
-    };
+    use crate::{code::LinearCode, pcs::test_utils::TestZipTypes, utils::shuffle_seeded};
 
     const REPETITION_FACTOR: usize = 4;
 
@@ -214,8 +210,7 @@ mod tests {
         F: Fn(&RaaCode<Zt, REPETITION_FACTOR>),
     {
         for check_for_overflows in [true, false] {
-            let code =
-                RaaCode::<Zt, REPETITION_FACTOR>::new(poly_size, check_for_overflows);
+            let code = RaaCode::<Zt, REPETITION_FACTOR>::new(poly_size, check_for_overflows);
             f(&code)
         }
     }
