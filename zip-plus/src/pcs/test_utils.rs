@@ -94,8 +94,7 @@ fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     let poly_size = 1 << num_vars;
     let num_rows = 1 << num_vars.div_ceil(2);
 
-    let mut transcript = MockTranscript::default();
-    let code = Lc::new(poly_size, true, &mut transcript);
+    let code = Lc::new(poly_size, true);
     let pp = ZipPlusParams::new(num_vars, num_rows, code);
 
     let evaluations = prepare_evaluations(poly_size);
@@ -198,19 +197,4 @@ where
     let point_f = point.iter().map(F::from_ref).collect_vec();
 
     (pp, comm, point_f, eval_f, eval_proof)
-}
-
-#[derive(Default)]
-pub struct MockTranscript {
-    pub counter: i64,
-}
-
-impl Transcript for MockTranscript {
-    fn get_challenge<T: Transcribable>(&mut self) -> T {
-        self.counter += 1;
-        let mut bytes = vec![0u8; T::NUM_BYTES];
-        let counter_bytes = self.counter.to_le_bytes();
-        bytes[..counter_bytes.len()].copy_from_slice(&counter_bytes);
-        T::read_transcription_bytes(&bytes)
-    }
 }
