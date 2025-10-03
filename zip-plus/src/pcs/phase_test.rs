@@ -2,10 +2,11 @@ use crate::{
     ZipError,
     code::LinearCode,
     pcs::{
+        ZipPlusTestTranscript,
         structs::{ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
         utils::{ColumnOpening, validate_input},
     },
-    pcs_transcript::{PcsTranscript, ZipPlusTestProof},
+    pcs_transcript::PcsTranscript,
     poly::{Polynomial, mle::DenseMultilinearExtension},
     traits::{FromRef, Transcript},
     utils::combine_rows,
@@ -17,7 +18,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
         commit_hint: &ZipPlusHint<Zt::Cw>,
-    ) -> Result<ZipPlusTestProof, ZipError> {
+    ) -> Result<ZipPlusTestTranscript, ZipError> {
         validate_input::<Zt, Lc, bool>("test", pp.num_vars, [poly], None)?;
 
         let mut transcript = PcsTranscript::new();
@@ -90,7 +91,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 )]
 mod tests {
     use crate::{
-        code::LinearCode,
+        code::{LinearCode, raa::RaaCode},
         merkle::MerkleTree,
         pcs::{
             structs::{ZipPlus, ZipPlusHint},
@@ -101,7 +102,6 @@ mod tests {
     };
     use crypto_primitives::crypto_bigint_int::Int;
     use num_traits::ConstOne;
-    use crate::code::raa::RaaCode;
 
     const INT_LIMBS: usize = WORD_FACTOR;
 

@@ -8,10 +8,13 @@
 
 use crate::{
     code::{LinearCode, raa::RaaCode},
-    pcs::structs::{
-        MulByScalar, ProjectableToField, ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes,
+    pcs::{
+        ZipPlusProof,
+        structs::{
+            MulByScalar, ProjectableToField, ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes,
+        },
     },
-    pcs_transcript::{PcsTranscript, ZipPlusEvaluationProof},
+    pcs_transcript::PcsTranscript,
     poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
     traits::{FromRef, Transcribable, Transcript},
 };
@@ -110,7 +113,7 @@ pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
     ZipPlusCommitment,
     Vec<F>,
     F,
-    ZipPlusEvaluationProof,
+    ZipPlusProof,
 )
 where
     F: PrimeField + FromRef<Int<N>> + for<'a> MulByScalar<&'a F>,
@@ -138,7 +141,7 @@ pub fn setup_full_protocol_poly<
     ZipPlusCommitment,
     Vec<F>,
     F,
-    ZipPlusEvaluationProof,
+    ZipPlusProof,
 )
 where
     F: PrimeField + FromRef<Int<N>> + for<'a> MulByScalar<&'a F>,
@@ -159,7 +162,7 @@ fn setup_full_protocol_inner<Zt, Lc, F, const N: usize>(
     ZipPlusCommitment,
     Vec<F>,
     F,
-    ZipPlusEvaluationProof,
+    ZipPlusProof,
 )
 where
     Zt: ZipTypes,
@@ -175,15 +178,15 @@ where
 
     let point: Vec<Zt::Pt> = prepare_evaluation_point();
 
-    let test_proof = ZipPlus::test(&pp, &poly, &data).unwrap();
+    let transcript = ZipPlus::test(&pp, &poly, &data).unwrap();
 
     let projecting_element: F = {
-        let mut transcript: PcsTranscript = test_proof.clone().into();
+        let mut transcript: PcsTranscript = transcript.clone().into();
         let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
         F::from_ref(&projecting_element)
     };
 
-    let (eval_f, eval_proof) = ZipPlus::evaluate(&pp, &poly, &point, test_proof).unwrap();
+    let (eval_f, proof) = ZipPlus::evaluate(&pp, &poly, &point, transcript).unwrap();
 
     // Verify the evaluation is done correctly
     {
@@ -196,5 +199,5 @@ where
 
     let point_f = point.iter().map(F::from_ref).collect_vec();
 
-    (pp, comm, point_f, eval_f, eval_proof)
+    (pp, comm, point_f, eval_f, proof)
 }
