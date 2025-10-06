@@ -7,6 +7,7 @@ use core::{
     iter::{Product, Sum},
     ops::{Add, AddAssign, DivAssign, Mul, MulAssign, Rem, RemAssign, Shl, Shr, Sub, SubAssign},
 };
+use core::hash::{Hash, Hasher};
 use crypto_bigint::{
     Limb, Uint,
     modular::{ConstMontyForm, ConstMontyParams as Params, Retrieve},
@@ -129,6 +130,12 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> PartialOrd for ConstMontyField<Mod,
 impl<Mod: Params<LIMBS>, const LIMBS: usize> Ord for ConstMontyField<Mod, LIMBS> {
     fn cmp(&self, other: &Self) -> Ordering {
         Ord::cmp(self.0.as_montgomery(), other.0.as_montgomery())
+    }
+}
+
+impl<Mod: Params<LIMBS>, const LIMBS: usize> Hash for ConstMontyField<Mod, LIMBS> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.as_montgomery().hash(state)
     }
 }
 
