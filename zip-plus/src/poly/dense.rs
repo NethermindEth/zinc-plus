@@ -11,11 +11,11 @@ use rand::{distr::StandardUniform, prelude::*};
 use std::{
     array,
     fmt::Display,
+    hash::Hash,
     iter,
     iter::{Product, Sum},
     ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
 };
-use std::hash::Hash;
 // TODO: rename rename to univariate
 
 // Sadly, we cannot use [R; DEGREE + 1] in stable Rust yet, so we use separate
