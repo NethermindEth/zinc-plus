@@ -5,6 +5,7 @@ use core::{
     iter::{Product, Sum},
     ops::{Add, AddAssign, Mul, MulAssign, Rem, RemAssign, Shl, Shr, Sub, SubAssign},
 };
+use core::hash::Hasher;
 use crypto_bigint::{
     CheckedMul as CryptoCheckedMul, CheckedSub as CryptoCheckedSub, Word,
     subtle::{
@@ -111,6 +112,12 @@ impl<const LIMBS: usize> LowerHex for Int<LIMBS> {
 impl<const LIMBS: usize> UpperHex for Int<LIMBS> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         UpperHex::fmt(&self.0, f)
+    }
+}
+
+impl<const LIMBS: usize> Hash for Int<LIMBS> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state)
     }
 }
 

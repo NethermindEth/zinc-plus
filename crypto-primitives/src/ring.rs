@@ -6,6 +6,7 @@ use core::{
     iter::{Product, Sum},
     ops::{Add, AddAssign, Mul, MulAssign, Rem, RemAssign, Shl, Shr, Sub, SubAssign},
 };
+use core::hash::Hash;
 use num_traits::{
     CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedSub, ConstOne, ConstZero, One, Pow, Zero,
 };
@@ -24,6 +25,7 @@ pub trait Ring:
     + Send
     + Zero
     + One
+    + Hash
     // Arithmetic operations consuming rhs
     + CheckedNeg
     + CheckedAdd
