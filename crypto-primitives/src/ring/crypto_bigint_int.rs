@@ -2,10 +2,10 @@ use super::*;
 use core::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter, LowerHex, Result as FmtResult, UpperHex},
+    hash::Hasher,
     iter::{Product, Sum},
     ops::{Add, AddAssign, Mul, MulAssign, Rem, RemAssign, Shl, Shr, Sub, SubAssign},
 };
-use core::hash::Hasher;
 use crypto_bigint::{
     CheckedMul as CryptoCheckedMul, CheckedSub as CryptoCheckedSub, Word,
     subtle::{
@@ -17,6 +17,7 @@ use num_traits::{
 };
 use pastey::paste;
 
+use crate::impl_pow_via_repeated_squaring;
 #[cfg(feature = "rand")]
 use rand::{distr::StandardUniform, prelude::*, rand_core::TryRngCore};
 
@@ -25,21 +26,21 @@ use rand::{distr::StandardUniform, prelude::*, rand_core::TryRngCore};
 pub struct Int<const LIMBS: usize>(crypto_bigint::Int<LIMBS>);
 
 impl<const LIMBS: usize> Int<LIMBS> {
-    /// Create a new Int from a crypto_bigint::Int
+    /// Wraps a given value into this wrapper type
     #[inline(always)]
-    pub fn new(value: crypto_bigint::Int<LIMBS>) -> Self {
+    pub const fn new(value: crypto_bigint::Int<LIMBS>) -> Self {
         Self(value)
     }
 
-    /// Get the inner crypto_bigint::Int value
+    /// Get the reference to the wrapped value
     #[inline(always)]
-    pub fn inner(&self) -> &crypto_bigint::Int<LIMBS> {
+    pub const fn inner(&self) -> &crypto_bigint::Int<LIMBS> {
         &self.0
     }
 
-    /// Get the inner crypto_bigint::Int value, consuming self
+    /// Get the wrapped value, consuming self
     #[inline(always)]
-    pub fn into_inner(self) -> crypto_bigint::Int<LIMBS> {
+    pub const fn into_inner(self) -> crypto_bigint::Int<LIMBS> {
         self.0
     }
 
@@ -163,7 +164,7 @@ macro_rules! impl_basic_op {
 
             #[inline(always)]
             fn $trait_op(self, rhs: Self) -> Self::Output {
-                Self(self.0.$trait_op(&rhs.0))
+                self.$trait_op(&rhs)
             }
         }
 
@@ -222,30 +223,7 @@ impl<const LIMBS: usize> Shr<u32> for Int<LIMBS> {
 impl<const LIMBS: usize> Pow<u32> for Int<LIMBS> {
     type Output = Self;
 
-    fn pow(self, rhs: u32) -> Self::Output {
-        // Implement exponentiation using repeated squaring
-        if rhs == 0 {
-            return Self::one();
-        }
-
-        let mut base = self.into_inner();
-        let mut result = Self::one().into_inner();
-        let mut exp = rhs;
-
-        while exp > 0 {
-            if exp & 1 == 1 {
-                result = result
-                    .checked_mul(&base)
-                    .expect("overflow in exponentiation");
-            }
-            exp >>= 1;
-            if exp > 0 {
-                base = base.checked_mul(&base).expect("overflow in exponentiation");
-            }
-        }
-
-        Self(result)
-    }
+    impl_pow_via_repeated_squaring!();
 }
 
 //
@@ -296,7 +274,7 @@ macro_rules! impl_assign_op {
         impl<const LIMBS: usize> $trait_name<Self> for Int<LIMBS> {
             #[inline(always)]
             fn $trait_op(&mut self, rhs: Self) {
-                self.0.$trait_op(&rhs.0);
+                self.$trait_op(&rhs);
             }
         }
 

@@ -1,13 +1,14 @@
 use super::*;
-use crate::crypto_bigint_int::Int;
-use alloc::fmt;
+use crate::{
+    crypto_bigint_int::Int, impl_infallible_checked_binary_op, impl_infallible_checked_unary_op,
+};
 use core::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
+    hash::{Hash, Hasher},
     iter::{Product, Sum},
     ops::{Add, AddAssign, DivAssign, Mul, MulAssign, Rem, RemAssign, Shl, Shr, Sub, SubAssign},
 };
-use core::hash::{Hash, Hasher};
 use crypto_bigint::{
     Limb, Uint,
     modular::{ConstMontyForm, ConstMontyParams as Params, Retrieve},
@@ -17,7 +18,6 @@ use num_traits::{
     CheckedAdd, CheckedDiv, CheckedMul, CheckedNeg, CheckedRem, CheckedSub, ConstOne, ConstZero,
     One, Pow, Zero,
 };
-use pastey::paste;
 
 #[cfg(feature = "rand")]
 use rand::{distr::StandardUniform, prelude::*, rand_core::TryRngCore};
@@ -29,7 +29,7 @@ const WORD_FACTOR: usize = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct ConstMontyField<Mod: Params<LIMBS>, const LIMBS: usize>(pub ConstMontyForm<Mod, LIMBS>);
+pub struct ConstMontyField<Mod: Params<LIMBS>, const LIMBS: usize>(ConstMontyForm<Mod, LIMBS>);
 
 impl<Mod: Params<LIMBS>, const LIMBS: usize> ConstMontyField<Mod, LIMBS> {
     pub const LIMBS: usize = Mod::LIMBS;
@@ -38,17 +38,17 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> ConstMontyField<Mod, LIMBS> {
     pub const BITS: u32 = LIMBS as u32 * Limb::BITS;
 
     #[inline(always)]
-    pub fn new(value: ConstMontyForm<Mod, LIMBS>) -> Self {
+    pub const fn new(value: ConstMontyForm<Mod, LIMBS>) -> Self {
         Self(value)
     }
 
     #[inline(always)]
-    pub fn inner(&self) -> &ConstMontyForm<Mod, LIMBS> {
+    pub const fn inner(&self) -> &ConstMontyForm<Mod, LIMBS> {
         &self.0
     }
 
     #[inline(always)]
-    pub fn into_inner(self) -> ConstMontyForm<Mod, LIMBS> {
+    pub const fn into_inner(self) -> ConstMontyForm<Mod, LIMBS> {
         self.0
     }
 
@@ -109,7 +109,7 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> Debug for ConstMontyField<Mod, LIMB
 }
 
 impl<Mod: Params<LIMBS>, const LIMBS: usize> Display for ConstMontyField<Mod, LIMBS> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{} (mod {})", self.0.retrieve(), Mod::PARAMS.modulus())
     }
 }
@@ -315,28 +315,10 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> Inv for ConstMontyField<Mod, LIMBS>
 // (Note: Field operations do not overflow)
 //
 
-impl<Mod: Params<LIMBS>, const LIMBS: usize> CheckedNeg for ConstMontyField<Mod, LIMBS> {
-    fn checked_neg(&self) -> Option<Self> {
-        Some(Self(self.0.neg()))
-    }
-}
-
-macro_rules! impl_checked_op {
-    ($trait_name:tt, $trait_op:tt) => {
-        impl<Mod: Params<LIMBS>, const LIMBS: usize> $trait_name for ConstMontyField<Mod, LIMBS> {
-            paste! {
-            #[inline(always)]
-            fn [<checked_ $trait_op>](&self, other: &Self) -> Option<Self> {
-                Some(Self(self.0.$trait_op(&other.0)))
-            }
-            }
-        }
-    };
-}
-
-impl_checked_op!(CheckedAdd, add);
-impl_checked_op!(CheckedSub, sub);
-impl_checked_op!(CheckedMul, mul);
+impl_infallible_checked_unary_op!((ConstMontyField<Mod, LIMBS>), (<Mod: Params<LIMBS>, const LIMBS: usize>), CheckedNeg, neg);
+impl_infallible_checked_binary_op!((ConstMontyField<Mod, LIMBS>), (<Mod: Params<LIMBS>, const LIMBS: usize>), CheckedAdd, add);
+impl_infallible_checked_binary_op!((ConstMontyField<Mod, LIMBS>), (<Mod: Params<LIMBS>, const LIMBS: usize>), CheckedSub, sub);
+impl_infallible_checked_binary_op!((ConstMontyField<Mod, LIMBS>), (<Mod: Params<LIMBS>, const LIMBS: usize>), CheckedMul, mul);
 
 impl<Mod: Params<LIMBS>, const LIMBS: usize> CheckedDiv for ConstMontyField<Mod, LIMBS> {
     #[allow(clippy::arithmetic_side_effects)] // False alert
@@ -683,9 +665,10 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> Retrieve for ConstMontyField<Mod, L
 }
 
 #[cfg(feature = "zeroize")]
-impl<Mod: Params<LIMBS>, const LIMBS: usize> zeroize::DefaultIsZeroes
-    for ConstMontyField<Mod, LIMBS>
-{
+impl<Mod: Params<LIMBS>, const LIMBS: usize> zeroize::Zeroize for ConstMontyField<Mod, LIMBS> {
+    fn zeroize(&mut self) {
+        self.0.zeroize()
+    }
 }
 
 //
