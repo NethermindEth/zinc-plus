@@ -1,7 +1,5 @@
 use super::*;
-use crate::{
-    crypto_bigint_int::Int, impl_infallible_checked_binary_op, impl_infallible_checked_unary_op,
-};
+use crate::crypto_bigint_int::Int;
 use core::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
@@ -14,6 +12,7 @@ use crypto_bigint::{
     modular::{ConstMontyForm, ConstMontyParams as Params, Retrieve},
     subtle::{Choice, ConditionallySelectable, ConstantTimeEq},
 };
+use crypto_primitives_proc_macros::InfallibleCheckedOp;
 use num_traits::{
     CheckedAdd, CheckedDiv, CheckedMul, CheckedNeg, CheckedRem, CheckedSub, ConstOne, ConstZero,
     One, Pow, Zero,
@@ -27,7 +26,9 @@ const WORD_FACTOR: usize = 1;
 #[cfg(target_pointer_width = "32")]
 const WORD_FACTOR: usize = 2;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, InfallibleCheckedOp)]
+#[infallible_checked_unary_op((CheckedNeg, neg))]
+#[infallible_checked_binary_op((CheckedAdd, add), (CheckedSub, sub), (CheckedMul, mul))]
 #[repr(transparent)]
 pub struct ConstMontyField<Mod: Params<LIMBS>, const LIMBS: usize>(ConstMontyForm<Mod, LIMBS>);
 
@@ -314,11 +315,6 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> Inv for ConstMontyField<Mod, LIMBS>
 // Checked arithmetic operations
 // (Note: Field operations do not overflow)
 //
-
-impl_infallible_checked_unary_op!((ConstMontyField<Mod, LIMBS>), (<Mod: Params<LIMBS>, const LIMBS: usize>), CheckedNeg, neg);
-impl_infallible_checked_binary_op!((ConstMontyField<Mod, LIMBS>), (<Mod: Params<LIMBS>, const LIMBS: usize>), CheckedAdd, add);
-impl_infallible_checked_binary_op!((ConstMontyField<Mod, LIMBS>), (<Mod: Params<LIMBS>, const LIMBS: usize>), CheckedSub, sub);
-impl_infallible_checked_binary_op!((ConstMontyField<Mod, LIMBS>), (<Mod: Params<LIMBS>, const LIMBS: usize>), CheckedMul, mul);
 
 impl<Mod: Params<LIMBS>, const LIMBS: usize> CheckedDiv for ConstMontyField<Mod, LIMBS> {
     #[allow(clippy::arithmetic_side_effects)] // False alert
