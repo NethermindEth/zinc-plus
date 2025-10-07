@@ -1,3 +1,5 @@
+//! Note that this is not a real ring as it does not have an additive inverse.
+
 use super::*;
 use crate::impl_pow_via_repeated_squaring;
 use alloc::vec::Vec;
@@ -403,6 +405,12 @@ macro_rules! impl_from_primitive {
 }
 
 impl_from_primitive!(u8, u16, u32, u64);
+
+impl<B: InnerBigInteger> From<bool> for BigInteger<B> {
+    fn from(value: bool) -> Self {
+        Self(B::from(u64::from(value)))
+    }
+}
 
 impl<B: InnerBigInteger> TryFrom<BigUint> for BigInteger<B> {
     type Error = <B as TryFrom<BigUint>>::Error;
