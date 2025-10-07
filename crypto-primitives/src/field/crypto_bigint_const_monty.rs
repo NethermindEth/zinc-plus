@@ -661,10 +661,9 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> Retrieve for ConstMontyField<Mod, L
 }
 
 #[cfg(feature = "zeroize")]
-impl<Mod: Params<LIMBS>, const LIMBS: usize> zeroize::Zeroize for ConstMontyField<Mod, LIMBS> {
-    fn zeroize(&mut self) {
-        self.0.zeroize()
-    }
+impl<Mod: Params<LIMBS>, const LIMBS: usize> zeroize::DefaultIsZeroes
+    for ConstMontyField<Mod, LIMBS>
+{
 }
 
 //
