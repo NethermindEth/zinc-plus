@@ -535,3 +535,532 @@ impl<F: ArkWrappedField> ArkWrappedField for ArkField<F> {
         Self(self.0.mul_by_base_prime_field(elem))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::{format, vec::Vec};
+    use ark_ff::{Fp256, MontBackend, MontConfig};
+    use num_traits::{One, Zero};
+
+    // Define a test prime field for testing
+    // Using a 256-bit prime for testing: 2^256 - 2^32 - 977 (secp256k1 field prime)
+    #[derive(MontConfig)]
+    #[modulus = "115792089237316195423570985008687907853269984665640564039457584007908834671663"]
+    #[generator = "3"]
+    pub struct TestFieldConfig;
+    type TestArkFp = Fp256<MontBackend<TestFieldConfig, 4>>;
+    type TestField = ArkField<TestArkFp>;
+
+    #[test]
+    fn zero_one_basics() {
+        let z = TestField::zero();
+        assert!(z.is_zero());
+        let o = TestField::one();
+        assert!(!o.is_zero());
+        assert_ne!(z, o);
+    }
+
+    #[test]
+    fn basic_operations() {
+        let a = TestField::from(10_u64);
+        let b = TestField::from(5_u64);
+
+        // Test addition
+        let c = a + b;
+        assert_eq!(c, TestField::from(15_u64));
+
+        // Test subtraction
+        let d = a - b;
+        assert_eq!(d, TestField::from(5_u64));
+
+        // Test multiplication
+        let e = a * b;
+        assert_eq!(e, TestField::from(50_u64));
+    }
+
+    #[allow(clippy::op_ref)]
+    #[test]
+    fn reference_operations() {
+        let a = TestField::from(10_u64);
+        let b = TestField::from(5_u64);
+
+        // Test reference-based addition
+        let c = a + &b;
+        assert_eq!(c, TestField::from(15_u64));
+
+        // Test reference-based subtraction
+        let d = a - &b;
+        assert_eq!(d, TestField::from(5_u64));
+
+        // Test reference-based multiplication
+        let e = a * &b;
+        assert_eq!(e, TestField::from(50_u64));
+    }
+
+    #[test]
+    fn from_unsigned_and_signed() {
+        assert_eq!(TestField::from(0_u64), TestField::zero());
+        assert_eq!(TestField::from(1_u32), TestField::one());
+        assert_eq!(
+            TestField::from(-1_i32) + TestField::one(),
+            TestField::zero()
+        );
+        assert_eq!(
+            TestField::from(-5_i64) + TestField::from(5_u64),
+            TestField::zero()
+        );
+    }
+
+    #[test]
+    fn from_bool() {
+        assert_eq!(TestField::from(true), TestField::one());
+        assert_eq!(TestField::from(false), TestField::zero());
+
+        let t: TestField = true.into();
+        let f: TestField = false.into();
+        assert_eq!(t, TestField::one());
+        assert_eq!(f, TestField::zero());
+    }
+
+    #[test]
+    fn basic_add_smoke() {
+        let a: TestField = 123_u64.into();
+        let b: TestField = 456_u64.into();
+        assert_eq!(a + b, TestField::from(579_u64));
+    }
+
+    #[test]
+    fn add_wrapping_and_basic() {
+        let a: TestField = (-100_i64).into();
+        let b: TestField = 105_u64.into();
+        let c = a + b;
+        let d: TestField = 5_u64.into();
+        assert_eq!(c, d);
+    }
+
+    #[test]
+    fn sub_basic() {
+        let a: TestField = 100_u64.into();
+        let b: TestField = 7_u64.into();
+        assert_eq!(a - b, 93_u64.into());
+    }
+
+    #[test]
+    fn mul_basic() {
+        let a: TestField = 100_u64.into();
+        let b: TestField = 7_u64.into();
+        assert_eq!(a * b, 700_u64.into());
+    }
+
+    #[test]
+    fn add_assign_basic() {
+        let mut a: TestField = 5_u64.into();
+        a += TestField::from(6_u64);
+        assert_eq!(a, 11_u64.into());
+    }
+
+    #[test]
+    fn sub_assign_basic() {
+        let mut a: TestField = 20_u64.into();
+        a -= TestField::from(7_u64);
+        assert_eq!(a, 13_u64.into());
+    }
+
+    #[test]
+    fn mul_assign_basic() {
+        let mut a: TestField = 11_u64.into();
+        a *= TestField::from(3_u64);
+        assert_eq!(a, 33_u64.into());
+    }
+
+    #[test]
+    fn neg_basic() {
+        let a: TestField = 9_u64.into();
+        let neg_a = -a;
+
+        assert_eq!(a + neg_a, TestField::zero());
+    }
+
+    #[test]
+    fn div_basic() {
+        let num: TestField = 11_u64.into();
+        let den: TestField = 5_u64.into();
+        let q = num / den;
+        assert_eq!(q * den, num);
+    }
+
+    #[test]
+    #[should_panic(expected = "Division by zero")]
+    fn div_by_zero_panics() {
+        let a: TestField = 7_u64.into();
+        let zero = TestField::zero();
+        let _ = a / zero;
+    }
+
+    #[test]
+    fn div_assign_basic() {
+        let mut a: TestField = 20_u64.into();
+        let b: TestField = 4_u64.into();
+        a /= b;
+        assert_eq!(a * b, 20_u64.into());
+    }
+
+    #[test]
+    fn pow_operation() {
+        // Test basic exponentiation
+        let base = TestField::from(2_u64);
+
+        // 2^0 = 1
+        assert_eq!(base.pow(0), TestField::one());
+
+        // 2^1 = 2
+        assert_eq!(base.pow(1), base);
+
+        // 2^3 = 8
+        assert_eq!(base.pow(3), TestField::from(8_u64));
+
+        // 2^10 = 1024
+        assert_eq!(base.pow(10), TestField::from(1024_u64));
+
+        // Test with different base
+        let base = TestField::from(3_u64);
+
+        // 3^4 = 81
+        assert_eq!(base.pow(4), TestField::from(81_u64));
+
+        // Test with base 1
+        let base = TestField::from(1_u64);
+        assert_eq!(base.pow(1000), TestField::from(1_u64));
+
+        // Test with base 0
+        let base = TestField::from(0_u64);
+        assert_eq!(base.pow(0), TestField::one()); // 0^0 = 1 by convention
+        assert_eq!(base.pow(10), TestField::zero()); // 0^n = 0 for n > 0
+    }
+
+    #[test]
+    fn inv_operation() {
+        let a = TestField::from(5_u64);
+        let inv_a = a.inv().unwrap();
+        assert_eq!(a * inv_a, TestField::one());
+
+        // Test that zero has no inverse
+        let zero = TestField::zero();
+        assert!(zero.inv().is_none());
+    }
+
+    #[test]
+    fn checked_neg() {
+        // Test with positive number
+        let a = TestField::from(10_u64);
+        let neg_a = a.checked_neg().unwrap();
+        assert_eq!(neg_a, TestField::from(-10_i64));
+
+        // Test with negative number
+        let b = TestField::from(-5_i64);
+        let neg_b = b.checked_neg().unwrap();
+        assert_eq!(neg_b, TestField::from(5_u64));
+
+        // Test with zero
+        let zero = TestField::zero();
+        let neg_zero = zero.checked_neg().unwrap();
+        assert_eq!(neg_zero, zero);
+    }
+
+    #[test]
+    fn checked_add() {
+        let a = TestField::from(10_u64);
+        let b = TestField::from(5_u64);
+
+        let c = a.checked_add(&b).unwrap();
+        assert_eq!(c, TestField::from(15_u64));
+    }
+
+    #[test]
+    fn checked_sub() {
+        let a = TestField::from(10_u64);
+        let b = TestField::from(5_u64);
+
+        let d = a.checked_sub(&b).unwrap();
+        assert_eq!(d, TestField::from(5_u64));
+    }
+
+    #[test]
+    fn checked_mul() {
+        let a = TestField::from(10_u64);
+        let b = TestField::from(5_u64);
+
+        let e = a.checked_mul(&b).unwrap();
+        assert_eq!(e, TestField::from(50_u64));
+    }
+
+    #[test]
+    fn checked_div() {
+        let a = TestField::from(10_u64);
+        let b = TestField::from(5_u64);
+        let zero = TestField::zero();
+
+        // Normal division
+        let c = a.checked_div(&b).unwrap();
+        assert_eq!(c * b, a);
+
+        // Division by zero
+        assert!(a.checked_div(&zero).is_none());
+    }
+
+    #[allow(clippy::op_ref)]
+    #[test]
+    fn ref_and_value_combinations_add_sub_mul() {
+        let a: TestField = 42_u64.into();
+        let b: TestField = 123_u64.into();
+
+        let r1 = a + b;
+        let a1: TestField = 42_u64.into();
+        let b1: TestField = 123_u64.into();
+        let r2 = a1 + b1;
+        let r3 = a1 + &b1;
+        let a2: TestField = 42_u64.into();
+        let b2: TestField = 123_u64.into();
+        let r4 = &a2 + b2;
+        assert_eq!(r1, r2);
+        assert_eq!(r1, r3);
+        assert_eq!(r1, r4);
+
+        let a: TestField = 88_u64.into();
+        let b: TestField = 59_u64.into();
+        let s1 = a - b;
+        let a1: TestField = 88_u64.into();
+        let b1: TestField = 59_u64.into();
+        let s2 = a1 - b1;
+        let s3 = a1 - &b1;
+        let a2: TestField = 88_u64.into();
+        let b2: TestField = 59_u64.into();
+        let s4 = &a2 - b2;
+        assert_eq!(s1, s2);
+        assert_eq!(s1, s3);
+        assert_eq!(s1, s4);
+
+        let a: TestField = 9_u64.into();
+        let b: TestField = 14_u64.into();
+        let m1 = a * b;
+        let a1: TestField = 9_u64.into();
+        let b1: TestField = 14_u64.into();
+        let m2 = a1 * b1;
+        let m3 = a1 * &b1;
+        let a2: TestField = 9_u64.into();
+        let b2: TestField = 14_u64.into();
+        let m4 = &a2 * b2;
+        assert_eq!(m1, m2);
+        assert_eq!(m1, m3);
+        assert_eq!(m1, m4);
+    }
+
+    #[test]
+    fn assign_ops_with_refs_and_val() {
+        let mut a: TestField = 100_u64.into();
+        let b: TestField = 50_u64.into();
+        a += b;
+        assert_eq!(a, 150_u64.into());
+
+        let mut c: TestField = 100_u64.into();
+        let d: TestField = 50_u64.into();
+        c += &d;
+        assert_eq!(c, 150_u64.into());
+
+        let mut e: TestField = 100_u64.into();
+        let f: TestField = 30_u64.into();
+        e -= f;
+        assert_eq!(e, 70_u64.into());
+
+        let mut g: TestField = 100_u64.into();
+        let h: TestField = 30_u64.into();
+        g -= &h;
+        assert_eq!(g, 70_u64.into());
+
+        let mut i: TestField = 10_u64.into();
+        let j: TestField = 5_u64.into();
+        i *= j;
+        assert_eq!(i, 50_u64.into());
+
+        let mut k: TestField = 10_u64.into();
+        let l: TestField = 5_u64.into();
+        k *= &l;
+        assert_eq!(k, 50_u64.into());
+    }
+
+    #[test]
+    fn aggregate_operations() {
+        // Test Sum trait
+        let values: Vec<TestField> = [1_u64, 2_u64, 3_u64]
+            .into_iter()
+            .map(TestField::from)
+            .collect();
+        let sum: TestField = values.iter().sum();
+        assert_eq!(sum, TestField::from(6_u64));
+
+        let sum2: TestField = values.into_iter().sum();
+        assert_eq!(sum2, TestField::from(6_u64));
+
+        // Test Product trait
+        let values: Vec<TestField> = [2_u64, 3_u64, 4_u64]
+            .into_iter()
+            .map(TestField::from)
+            .collect();
+        let product: TestField = values.iter().product();
+        assert_eq!(product, TestField::from(24_u64));
+
+        let product2: TestField = values.into_iter().product();
+        assert_eq!(product2, TestField::from(24_u64));
+
+        // Test empty collections
+        let empty_vec: Vec<TestField> = Vec::new();
+        let empty_sum: TestField = empty_vec.iter().sum();
+        assert_eq!(empty_sum, TestField::zero());
+
+        let empty_product: TestField = empty_vec.iter().product();
+        assert_eq!(empty_product, TestField::one());
+    }
+
+    #[test]
+    fn conversions() {
+        // Test From<ArkWrappedField> for ArkField (via new)
+        let inner = TestArkFp::from(123_u64);
+        let wrapped = TestField::new(inner);
+        assert_eq!(wrapped, TestField::from(123_u64));
+
+        // Test inner() and into_inner()
+        let value = TestField::from(456_u64);
+        let inner_ref = value.inner();
+        assert_eq!(*inner_ref, TestArkFp::from(456_u64));
+        assert_eq!(value.into_inner(), TestArkFp::from(456_u64));
+    }
+
+    #[test]
+    fn from_primitive() {
+        // Test from_u8
+        let a = TestField::from(42_u8);
+        assert_eq!(a, TestField::from(42_u64));
+
+        // Test from_u16
+        let b = TestField::from(12345_u16);
+        assert_eq!(b, TestField::from(12345_u64));
+
+        // Test from_u32
+        let c = TestField::from(1234567890_u32);
+        assert_eq!(c, TestField::from(1234567890_u64));
+
+        // Test from_u64
+        let d = TestField::from(1234567890123456789_u64);
+        assert_eq!(d, TestField::from(1234567890123456789_u64));
+
+        // Test from_i8
+        let e = TestField::from(-42_i8);
+        assert_eq!(e, TestField::from(-42_i64));
+
+        // Test from_i16
+        let f = TestField::from(-12345_i16);
+        assert_eq!(f, TestField::from(-12345_i64));
+
+        // Test from_i32
+        let g = TestField::from(-1234567890_i32);
+        assert_eq!(g, TestField::from(-1234567890_i64));
+
+        // Test from_i64
+        let h = TestField::from(-1234567890123456789_i64);
+        assert_eq!(h, TestField::from(-1234567890123456789_i64));
+    }
+
+    #[allow(clippy::clone_on_copy)]
+    #[test]
+    fn clone_and_copy() {
+        let a = TestField::from(42_u64);
+        let b = a; // Copy
+        let c = a.clone(); // Clone
+
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+        assert_eq!(b, c);
+    }
+
+    #[test]
+    fn equality_and_ordering() {
+        let a = TestField::from(10_u64);
+        let b = TestField::from(10_u64);
+        let c = TestField::from(20_u64);
+
+        // Test equality
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+
+        // Test ordering
+        assert!(a < c);
+        assert!(c > a);
+        assert!(a <= b);
+        assert!(a >= b);
+    }
+
+    #[test]
+    fn hash_trait() {
+        use core::hash::{Hash, Hasher};
+
+        // Simple hasher for testing
+        struct TestHasher {
+            state: u64,
+        }
+
+        impl Hasher for TestHasher {
+            fn finish(&self) -> u64 {
+                self.state
+            }
+
+            fn write(&mut self, bytes: &[u8]) {
+                for &byte in bytes {
+                    self.state = self.state.wrapping_mul(31).wrapping_add(u64::from(byte));
+                }
+            }
+        }
+
+        let a = TestField::from(42_u64);
+        let b = TestField::from(42_u64);
+
+        let mut hasher_a = TestHasher { state: 0 };
+        a.hash(&mut hasher_a);
+        let hash_a = hasher_a.finish();
+
+        let mut hasher_b = TestHasher { state: 0 };
+        b.hash(&mut hasher_b);
+        let hash_b = hasher_b.finish();
+
+        // Equal values should have equal hashes
+        assert_eq!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn default_is_zero() {
+        let default_field = TestField::default();
+        assert_eq!(default_field, TestField::zero());
+        assert!(default_field.is_zero());
+    }
+
+    #[test]
+    fn display_and_debug() {
+        let a = TestField::from(42_u64);
+
+        // Test that Display and Debug don't panic
+        let _display = format!("{}", a);
+        let _debug = format!("{:?}", a);
+
+        // Both should produce non-empty strings
+        assert!(!_display.is_empty());
+        assert!(!_debug.is_empty());
+    }
+
+    #[test]
+    fn deref_access() {
+        let a = TestField::from(42_u64);
+        // Test that we can access inner methods via Deref
+        let _ = a.is_zero();
+        let _ = a.inverse();
+    }
+}
