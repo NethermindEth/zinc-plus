@@ -385,7 +385,13 @@ impl<F: ArkWrappedField> Ring for ArkField<F> {}
 
 impl<F: ArkWrappedField> IntRing for ArkField<F> {}
 
-impl<F: ArkWrappedField> Field for ArkField<F> {}
+impl<F: ArkWrappedField> Field for ArkField<F> {
+    type Inner = F;
+
+    fn inner(&self) -> &Self::Inner {
+        &self.0
+    }
+}
 
 //
 // RNG

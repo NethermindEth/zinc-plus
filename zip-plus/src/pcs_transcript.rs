@@ -75,7 +75,13 @@ impl PcsTranscript {
         F::Inner: Transcribable,
     {
         let inner = self.read()?;
-        let fe = F::new_unchecked(inner);
+        let modulus = self.read()?;
+        let fe = F::new_with_modulus(inner, &modulus).map_err(|_err| {
+            ZipError::InvalidSnark(format!(
+                "Cannot instantiate a field with modulus {:?}",
+                modulus
+            ))
+        })?;
         self.common_field_element(&fe);
         Ok(fe)
     }
@@ -89,7 +95,8 @@ impl PcsTranscript {
         F::Inner: Transcribable,
     {
         self.common_field_element(fe);
-        self.write(fe.inner(), buf)
+        self.write(fe.inner(), buf)?;
+        self.write(&fe.modulus(), buf)
     }
 
     pub fn write<T: Transcribable>(&mut self, v: &T, buf: &mut [u8]) -> Result<(), ZipError> {

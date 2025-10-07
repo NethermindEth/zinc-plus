@@ -63,7 +63,7 @@ impl KeccakTranscript {
     {
         let mut buf = vec![0; F::Inner::NUM_BYTES];
         self.absorb(&[0x3]);
-        F::MODULUS.write_transcription_bytes(&mut buf);
+        v.modulus().write_transcription_bytes(&mut buf);
         self.absorb(&buf);
         self.absorb(&[0x5]);
 

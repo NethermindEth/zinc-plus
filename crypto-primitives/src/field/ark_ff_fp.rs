@@ -88,7 +88,7 @@ impl<P: FpConfig<N>, const N: usize> Display for Fp<P, N> {
 impl<P: FpConfig<N>, const N: usize> Default for Fp<P, N> {
     #[inline(always)]
     fn default() -> Self {
-        Self::zero()
+        <Self as ConstZero>::ZERO
     }
 }
 
@@ -335,28 +335,28 @@ impl_field_op_assign!(DivAssign, div_assign, div);
 impl<P: FpConfig<N>, const N: usize> Sum for Fp<P, N> {
     #[allow(clippy::arithmetic_side_effects)] // False alert
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        iter.fold(Self::zero(), |acc, x| acc + x)
+        iter.fold(<Self as ConstZero>::ZERO, |acc, x| acc + x)
     }
 }
 
 impl<'a, P: FpConfig<N>, const N: usize> Sum<&'a Self> for Fp<P, N> {
     #[allow(clippy::arithmetic_side_effects)] // False alert
     fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
-        iter.fold(Self::zero(), |acc, x| acc + x)
+        iter.fold(<Self as ConstZero>::ZERO, |acc, x| acc + x)
     }
 }
 
 impl<P: FpConfig<N>, const N: usize> Product for Fp<P, N> {
     #[allow(clippy::arithmetic_side_effects)] // False alert
     fn product<I: Iterator<Item = Self>>(iter: I) -> Self {
-        iter.fold(Self::one(), |acc, x| acc * x)
+        iter.fold(<Self as ConstOne>::ONE, |acc, x| acc * x)
     }
 }
 
 impl<'a, P: FpConfig<N>, const N: usize> Product<&'a Self> for Fp<P, N> {
     #[allow(clippy::arithmetic_side_effects)] // False alert
     fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
-        iter.fold(Self::one(), |acc, x| acc * x)
+        iter.fold(<Self as ConstOne>::ONE, |acc, x| acc * x)
     }
 }
 
@@ -393,7 +393,11 @@ impl_from_delegate!(i8, i16, i32, i64, i128);
 
 impl<P: FpConfig<N>, const N: usize> From<bool> for Fp<P, N> {
     fn from(value: bool) -> Self {
-        if value { Self::one() } else { Self::zero() }
+        if value {
+            <Self as ConstOne>::ONE
+        } else {
+            <Self as ConstZero>::ZERO
+        }
     }
 }
 
@@ -429,18 +433,25 @@ impl<P: FpConfig<N>, const N: usize> Ring for Fp<P, N> {}
 
 impl<P: FpConfig<N>, const N: usize> IntRing for Fp<P, N> {}
 
-impl<P: FpConfig<N>, const N: usize> Field for Fp<P, N> {}
-
-impl<P: FpConfig<N>, const N: usize> PrimeField for Fp<P, N> {
+impl<P: FpConfig<N>, const N: usize> Field for Fp<P, N> {
     type Inner = BigInt<N>;
-    const MODULUS: Self::Inner = P::MODULUS;
-
-    fn new_unchecked(inner: Self::Inner) -> Self {
-        Self(ArkWrappedFp(inner, PhantomData))
-    }
 
     fn inner(&self) -> &Self::Inner {
         &self.0.0
+    }
+}
+
+impl<P: FpConfig<N>, const N: usize> ConstPrimeField for Fp<P, N> {
+    const MODULUS: Self::Inner = P::MODULUS;
+    const MODULUS_MINUS_ONE_DIV_TWO: Self::Inner =
+        <ArkWrappedFp<P, N> as ArkPrimeField>::MODULUS_MINUS_ONE_DIV_TWO;
+
+    fn new(inner: Self::Inner) -> Self {
+        Self(ArkWrappedFp(inner, PhantomData))
+    }
+
+    fn new_unchecked(inner: Self::Inner) -> Self {
+        ConstPrimeField::new(inner)
     }
 }
 

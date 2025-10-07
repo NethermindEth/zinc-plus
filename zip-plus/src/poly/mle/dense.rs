@@ -11,7 +11,6 @@ use crate::{
 };
 use ark_std::log2;
 use crypto_primitives::{Matrix, Ring};
-use num_traits::Zero;
 use rand::{distr::StandardUniform, prelude::*};
 use rand_core::RngCore;
 
@@ -24,17 +23,24 @@ pub struct DenseMultilinearExtension<F> {
 }
 
 impl<R: Ring> DenseMultilinearExtension<R> {
-    pub fn from_evaluations_slice(num_vars: usize, evaluations: &[R]) -> Self {
-        Self::from_evaluations_vec(num_vars, evaluations.to_vec())
+    pub fn zero_vars(evaluation: R) -> Self {
+        Self {
+            evaluations: vec![evaluation],
+            num_vars: 0,
+        }
     }
 
-    pub fn evaluate<S>(&self, point: &[S]) -> Result<R, EvaluationError>
+    pub fn from_evaluations_slice(num_vars: usize, evaluations: &[R], zero: R) -> Self {
+        Self::from_evaluations_vec(num_vars, evaluations.to_vec(), zero)
+    }
+
+    pub fn evaluate<S>(&self, point: &[S], zero: R) -> Result<R, EvaluationError>
     where
         R: for<'a> MulByScalar<&'a S>,
     {
         if point.len() == self.num_vars {
             Ok(self
-                .fixed_variables(point)
+                .fixed_variables(point, zero)
                 .evaluations
                 .into_iter()
                 .next()
@@ -47,7 +53,7 @@ impl<R: Ring> DenseMultilinearExtension<R> {
         }
     }
 
-    pub fn from_evaluations_vec(num_vars: usize, evaluations: Vec<R>) -> Self {
+    pub fn from_evaluations_vec(num_vars: usize, evaluations: Vec<R>, zero: R) -> Self {
         // assert that the number of variables matches the size of evaluations
         assert!(
             evaluations.len() <= 1 << num_vars,
@@ -57,7 +63,7 @@ impl<R: Ring> DenseMultilinearExtension<R> {
 
         if evaluations.len() != 1 << num_vars {
             let mut evaluations = evaluations;
-            evaluations.resize(1 << num_vars, R::zero());
+            evaluations.resize(1 << num_vars, zero);
             return Self {
                 num_vars,
                 evaluations,
@@ -73,7 +79,7 @@ impl<R: Ring> DenseMultilinearExtension<R> {
     /// Returns the dense MLE from the given matrix, without modifying the
     /// original matrix.
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn from_matrix<M: Matrix<R>>(matrix: &M) -> Self {
+    pub fn from_matrix<M: Matrix<R>>(matrix: &M, zero: R) -> Self {
         let n_vars: usize = (log2(matrix.num_rows()) + log2(matrix.num_cols())) as usize; // n_vars = s + s'
 
         // Matrices might need to get padded before turned into an MLE
@@ -81,7 +87,7 @@ impl<R: Ring> DenseMultilinearExtension<R> {
         let padded_cols = matrix.num_cols().next_power_of_two();
 
         // build dense vector representing the sparse padded matrix
-        let mut v = vec![R::zero(); padded_rows * padded_cols];
+        let mut v = vec![zero.clone(); padded_rows * padded_cols];
 
         for (row_i, row) in matrix.rows().enumerate() {
             for (col_i, val) in row {
@@ -90,23 +96,23 @@ impl<R: Ring> DenseMultilinearExtension<R> {
         }
 
         // convert the dense vector into a mle
-        Self::from_slice(n_vars, &v)
+        Self::from_slice(n_vars, &v, zero)
     }
 
     /// Takes n_vars and a dense slice and returns its dense MLE.
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn from_slice(n_vars: usize, v: &[R]) -> Self {
+    pub fn from_slice(n_vars: usize, v: &[R], zero: R) -> Self {
         let v_padded: Vec<R> = if v.len() != (1 << n_vars) {
             // pad to 2^n_vars
             [
                 v.to_owned(),
-                ark_std::iter::repeat_n(R::zero(), (1 << n_vars) - v.len()).collect(),
+                ark_std::iter::repeat_n(zero.clone(), (1 << n_vars) - v.len()).collect(),
             ]
             .concat()
         } else {
             v.to_owned()
         };
-        DenseMultilinearExtension::from_evaluations_vec(n_vars, v_padded)
+        DenseMultilinearExtension::from_evaluations_vec(n_vars, v_padded, zero)
     }
 
     fn unary<G>(&mut self, f: G)
@@ -132,7 +138,7 @@ where
     R: Ring,
 {
     #[allow(clippy::arithmetic_side_effects)]
-    fn fix_variables<S>(&mut self, partial_point: &[S])
+    fn fix_variables<S>(&mut self, partial_point: &[S], zero: R)
     where
         R: for<'a> MulByScalar<&'a S>,
     {
@@ -152,7 +158,7 @@ where
                 let right = &poly[2 * b + 1];
                 // a = f(1) - f(0)
                 let a = sub!(right, &left);
-                if !a.is_zero() {
+                if a != zero {
                     // poly[b] = f(0) + r * a
                     let ar = a.mul_by_scalar(r).expect("Multiplication overflow");
                     poly[b] = add!(left, &ar);
@@ -166,12 +172,12 @@ where
         self.num_vars = sub!(nv, dim);
     }
 
-    fn fixed_variables<S>(&self, partial_point: &[S]) -> Self
+    fn fixed_variables<S>(&self, partial_point: &[S], zero: R) -> Self
     where
         R: for<'a> MulByScalar<&'a S>,
     {
         let mut res = self.clone();
-        res.fix_variables(partial_point);
+        res.fix_variables(partial_point, zero);
         res
     }
 }
@@ -181,10 +187,11 @@ where
     R: Ring,
     StandardUniform: Distribution<R>,
 {
-    fn rand<Rng: RngCore + ?Sized>(num_vars: usize, rng: &mut Rng) -> Self {
+    fn rand<Rng: RngCore + ?Sized>(num_vars: usize, rng: &mut Rng, zero: R) -> Self {
         Self::from_evaluations_vec(
             num_vars,
             (0..1 << num_vars).map(|_| rng.random::<R>()).collect(),
+            zero,
         )
     }
 }
@@ -200,19 +207,6 @@ impl<T> Index<usize> for DenseMultilinearExtension<T> {
 impl<T> IndexMut<usize> for DenseMultilinearExtension<T> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         &mut self.evaluations[index]
-    }
-}
-
-impl<R: Ring> Zero for DenseMultilinearExtension<R> {
-    fn zero() -> Self {
-        Self {
-            num_vars: 0,
-            evaluations: vec![R::zero()],
-        }
-    }
-
-    fn is_zero(&self) -> bool {
-        self.num_vars == 0 && self.evaluations[0].is_zero()
     }
 }
 
@@ -317,12 +311,15 @@ mod tests {
         poly::mle::MultilinearExtension,
     };
     use crypto_bigint::{U128, const_monty_params};
-    use crypto_primitives::{DenseRowMatrix, crypto_bigint_const_monty::ConstMontyField};
-    use num_traits::{ConstZero, One, Zero};
+    use crypto_primitives::{
+        DenseRowMatrix, PrimeField, crypto_bigint_const_monty::ConstMontyField,
+    };
+    use num_traits::{ConstOne, ConstZero, Zero};
     use proptest::prelude::*;
 
     const_monty_params!(ModP, U128, "0076F668F4274572E39A3EA8285319B5");
     type F = ConstMontyField<ModP, { U128::LIMBS }>;
+    const F_CFG: <F as PrimeField>::Config = ();
 
     fn any_f() -> impl Strategy<Value = F> {
         any::<u128>().prop_map(F::from)
@@ -331,25 +328,26 @@ mod tests {
     fn any_dme() -> impl Strategy<Value = DenseMultilinearExtension<F>> {
         (0usize..=5).prop_flat_map(|n| {
             let len = 1usize << n;
-            prop::collection::vec(any_f(), len)
-                .prop_map(move |evals| DenseMultilinearExtension::from_evaluations_vec(n, evals))
+            prop::collection::vec(any_f(), len).prop_map(move |evals| {
+                DenseMultilinearExtension::from_evaluations_vec(n, evals, F::ZERO)
+            })
         })
     }
 
     #[test]
     fn test_build_eq_x_r_vec_basic() {
         let r = [F::from(3u64)];
-        let evals = build_eq_x_r_vec(&r).unwrap();
-        assert_eq!(evals, vec![F::one() - r[0], r[0]]);
+        let evals = build_eq_x_r_vec(&r, &F_CFG).unwrap();
+        assert_eq!(evals, vec![F::ONE - r[0], r[0]]);
     }
 
     #[test]
     fn test_build_eq_x_r_vec_two_vars() {
         let r = [F::from(2u64), F::from(5u64)];
-        let evals = build_eq_x_r_vec(&r).unwrap();
-        let e00 = (F::one() - r[0]) * (F::one() - r[1]);
-        let e01 = r[0] * (F::one() - r[1]);
-        let e10 = (F::one() - r[0]) * r[1];
+        let evals = build_eq_x_r_vec(&r, &F_CFG).unwrap();
+        let e00 = (F::ONE - r[0]) * (F::ONE - r[1]);
+        let e01 = r[0] * (F::ONE - r[1]);
+        let e10 = (F::ONE - r[0]) * r[1];
         let e11 = r[0] * r[1];
         assert_eq!(evals, vec![e00, e01, e10, e11]);
     }
@@ -357,7 +355,7 @@ mod tests {
     #[test]
     fn test_build_eq_x_r_error_on_empty() {
         let r: [F; 0] = [];
-        let err = build_eq_x_r_vec(&r).unwrap_err();
+        let err = build_eq_x_r_vec(&r, &F_CFG).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("Invalid parameters"));
     }
@@ -365,10 +363,10 @@ mod tests {
     #[test]
     fn test_build_eq_x_r_mle_properties() {
         let r = [F::from(7u64), F::from(11u64), F::from(13u64)];
-        let mle = build_eq_x_r(&r).unwrap();
+        let mle = build_eq_x_r(&r, &F_CFG).unwrap();
         assert_eq!(mle.num_vars, r.len());
         let evals = mle.evaluations;
-        let direct = build_eq_x_r_vec(&r).unwrap();
+        let direct = build_eq_x_r_vec(&r, &F_CFG).unwrap();
         assert_eq!(evals, direct);
     }
 
@@ -376,10 +374,10 @@ mod tests {
     fn test_dense_from_slice_and_indexing() {
         let n_vars = 3usize;
         let v = vec![F::from(1u64), F::from(2u64), F::from(3u64)];
-        let dense = DenseMultilinearExtension::from_slice(n_vars, &v);
+        let dense = DenseMultilinearExtension::from_slice(n_vars, &v, F::ZERO);
         assert_eq!(dense.num_vars, n_vars);
         let mut expected = v.clone();
-        expected.resize(1 << n_vars, F::zero());
+        expected.resize(1 << n_vars, F::ZERO);
         assert_eq!(dense.evaluations, expected);
         assert_eq!(dense[0], F::from(1u64));
         let mut d2 = dense.clone();
@@ -395,21 +393,21 @@ mod tests {
             F::from(30u64),
             F::from(40u64),
         ];
-        let mle = DenseMultilinearExtension::from_evaluations_vec(2, evals.clone());
+        let mle = DenseMultilinearExtension::from_evaluations_vec(2, evals.clone(), F::ZERO);
         for (idx, &(x0, x1)) in [
-            (F::zero(), F::zero()),
-            (F::one(), F::zero()),
-            (F::zero(), F::one()),
-            (F::one(), F::one()),
+            (F::ZERO, F::ZERO),
+            (F::ONE, F::ZERO),
+            (F::ZERO, F::ONE),
+            (F::ONE, F::ONE),
         ]
         .iter()
         .enumerate()
         {
-            let val = mle.evaluate(&[x0, x1]).unwrap();
+            let val = mle.evaluate(&[x0, x1], F::ZERO).unwrap();
             assert_eq!(val, evals[idx]);
         }
         let mut m2 = mle.clone();
-        m2.fix_variables(&[F::one()]);
+        m2.fix_variables(&[F::ONE], F::ZERO);
         assert_eq!(m2.num_vars, 1);
         assert_eq!(m2.evaluations, vec![F::from(20u64), F::from(40u64)]);
     }
@@ -417,11 +415,11 @@ mod tests {
     #[test]
     fn test_from_matrix_padding_and_conversion() {
         let m: DenseRowMatrix<F> = DenseRowMatrix::from(vec![
-            vec![F::from(5u64), F::zero()],
-            vec![F::zero(), F::zero()],
-            vec![F::zero(), F::from(7u64)],
+            vec![F::from(5u64), F::ZERO],
+            vec![F::ZERO, F::ZERO],
+            vec![F::ZERO, F::from(7u64)],
         ]);
-        let dense = DenseMultilinearExtension::from_matrix(&m);
+        let dense = DenseMultilinearExtension::from_matrix(&m, F::ZERO);
         assert_eq!(dense.num_vars, 3);
         let evals = dense.evaluations;
         assert_eq!(evals[0], F::from(5u64));
@@ -438,11 +436,11 @@ mod tests {
         // len < 2^n triggers padding branch
         let evals = vec![F::from(1u64), F::from(2u64)];
         let n = 2usize; // 4 expected
-        let d1 = DenseMultilinearExtension::from_evaluations_vec(n, evals.clone());
+        let d1 = DenseMultilinearExtension::from_evaluations_vec(n, evals.clone(), F::ZERO);
         let mut expected = evals.clone();
         expected.resize(1 << n, F::ZERO);
         assert_eq!(d1.evaluations, expected);
-        let d2 = DenseMultilinearExtension::from_evaluations_slice(n, &evals);
+        let d2 = DenseMultilinearExtension::from_evaluations_slice(n, &evals, F::ZERO);
         assert_eq!(d2.evaluations, expected);
     }
 
@@ -451,8 +449,9 @@ mod tests {
         let d = DenseMultilinearExtension::from_evaluations_vec(
             2,
             vec![F::from(1), F::from(2), F::from(3), F::from(4)],
+            F::ZERO,
         );
-        let d_fixed = d.fixed_variables(&[]);
+        let d_fixed = d.fixed_variables(&[], F::ZERO);
         assert_eq!(d_fixed.num_vars, 2);
         assert_eq!(
             d_fixed.evaluations,
@@ -461,8 +460,9 @@ mod tests {
         let mut d2 = DenseMultilinearExtension::from_evaluations_vec(
             2,
             vec![F::from(10), F::from(20), F::from(30), F::from(40)],
+            F::ZERO,
         );
-        d2.fix_variables(&[F::one(), F::zero()]);
+        d2.fix_variables(&[F::ONE, F::ZERO], F::ZERO);
         assert_eq!(d2.num_vars, 0);
         assert_eq!(d2.evaluations, vec![F::from(20)]);
     }
@@ -472,17 +472,17 @@ mod tests {
         let d = DenseMultilinearExtension::from_evaluations_vec(
             2,
             vec![F::from(1), F::from(2), F::from(3), F::from(4)],
+            F::ZERO,
         );
-        assert!(d.evaluate(&[F::one()]).is_err());
-        assert!(d.evaluate(&[F::one(), F::one(), F::zero()]).is_err());
+        assert!(d.evaluate(&[F::ONE], F::ZERO).is_err());
+        assert!(d.evaluate(&[F::ONE, F::ONE, F::ZERO], F::ZERO).is_err());
     }
 
     #[test]
     fn test_zero_impl_for_dense_mle() {
-        let z: DenseMultilinearExtension<F> = Zero::zero();
+        let z: DenseMultilinearExtension<F> = DenseMultilinearExtension::zero_vars(F::ZERO);
         assert_eq!(z.num_vars, 0);
         assert_eq!(z.evaluations, vec![F::ZERO]);
-        assert!(z.is_zero());
     }
 
     #[test]
@@ -490,10 +490,12 @@ mod tests {
         let a = DenseMultilinearExtension::from_evaluations_vec(
             2,
             vec![F::from(1), F::from(2), F::from(3), F::from(4)],
+            F::ZERO,
         );
         let b = DenseMultilinearExtension::from_evaluations_vec(
             2,
             vec![F::from(5), F::from(6), F::from(7), F::from(8)],
+            F::ZERO,
         );
 
         let sum = a.clone() + &b;
@@ -528,10 +530,12 @@ mod tests {
         let a = DenseMultilinearExtension::from_evaluations_vec(
             2,
             vec![F::from(1), F::from(2), F::from(3), F::from(4)],
+            F::ZERO,
         );
         let b = DenseMultilinearExtension::from_evaluations_vec(
             2,
             vec![F::from(10), F::from(20), F::from(30), F::from(40)],
+            F::ZERO,
         );
 
         let three = F::from(3u64);
@@ -585,8 +589,16 @@ mod tests {
                         let e2v = e2.clone();
                         move |r| {
                             (
-                                DenseMultilinearExtension::from_evaluations_vec(n3, e1v.clone()),
-                                DenseMultilinearExtension::from_evaluations_vec(n3, e2v.clone()),
+                                DenseMultilinearExtension::from_evaluations_vec(
+                                    n3,
+                                    e1v.clone(),
+                                    F::ZERO,
+                                ),
+                                DenseMultilinearExtension::from_evaluations_vec(
+                                    n3,
+                                    e2v.clone(),
+                                    F::ZERO,
+                                ),
                                 r,
                             )
                         }
@@ -602,8 +614,8 @@ mod tests {
     proptest! {
         #[test]
         fn prop_eval_add_is_linear((p1, p2, r) in any_aligned_pair_with_point()) {
-            let lhs = (p1.clone() + &p2).evaluate(&r).unwrap();
-            let rhs = p1.evaluate(&r).unwrap() + p2.evaluate(&r).unwrap();
+            let lhs = (p1.clone() + &p2).evaluate(&r, F::ZERO).unwrap();
+            let rhs = p1.evaluate(&r, F::ZERO).unwrap() + p2.evaluate(&r, F::ZERO).unwrap();
             prop_assert_eq!(lhs, rhs);
         }
 
@@ -615,9 +627,9 @@ mod tests {
             (Just(p), point, ks)
         })) {
             let mut pfixed = p.clone();
-            pfixed.fix_variables(&r[..k]);
-            let lhs = pfixed.evaluate(&r[k..]).unwrap();
-            let rhs = p.evaluate(&r).unwrap();
+            pfixed.fix_variables(&r[..k], F::ZERO);
+            let lhs = pfixed.evaluate(&r[k..], F::ZERO).unwrap();
+            let rhs = p.evaluate(&r, F::ZERO).unwrap();
             prop_assert_eq!(lhs, rhs);
         }
 
@@ -631,13 +643,13 @@ mod tests {
             })
         }), r1 in prop::collection::vec(any_f(), 0..=8usize), r2 in prop::collection::vec(any_f(), 0..=8usize)) {
             let mut p_step = p.clone();
-            p_step.fix_variables(&r1[..k1.min(r1.len())]);
-            p_step.fix_variables(&r2[..k2.min(r2.len())]);
+            p_step.fix_variables(&r1[..k1.min(r1.len())], F::ZERO);
+            p_step.fix_variables(&r2[..k2.min(r2.len())], F::ZERO);
 
             let mut p_once = p.clone();
             let mut concat = r1[..k1.min(r1.len())].to_vec();
             concat.extend_from_slice(&r2[..k2.min(r2.len())]);
-            p_once.fix_variables(&concat);
+            p_once.fix_variables(&concat, F::ZERO);
 
             prop_assert_eq!(p_step.evaluations, p_once.evaluations);
             prop_assert_eq!(p_step.num_vars, p_once.num_vars);

@@ -529,20 +529,30 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> Ring for ConstMontyField<Mod, LIMBS
 
 impl<Mod: Params<LIMBS>, const LIMBS: usize> IntRing for ConstMontyField<Mod, LIMBS> {}
 
-impl<Mod: Params<LIMBS>, const LIMBS: usize> Field for ConstMontyField<Mod, LIMBS> {}
-
-impl<Mod: Params<LIMBS>, const LIMBS: usize> PrimeField for ConstMontyField<Mod, LIMBS> {
+impl<Mod: Params<LIMBS>, const LIMBS: usize> Field for ConstMontyField<Mod, LIMBS> {
     type Inner = ConstMontyForm<Mod, LIMBS>;
-    const MODULUS: Self::Inner = ConstMontyForm::<Mod, LIMBS>::new(Mod::PARAMS.modulus().as_ref());
-
-    #[inline(always)]
-    fn new_unchecked(value: Self::Inner) -> Self {
-        Self(value)
-    }
 
     #[inline(always)]
     fn inner(&self) -> &Self::Inner {
         &self.0
+    }
+}
+
+impl<Mod: Params<LIMBS>, const LIMBS: usize> ConstPrimeField for ConstMontyField<Mod, LIMBS> {
+    const MODULUS: Self::Inner = ConstMontyForm::<Mod, LIMBS>::new(Mod::PARAMS.modulus().as_ref());
+    const MODULUS_MINUS_ONE_DIV_TWO: Self::Inner = {
+        let m_minus_one = ConstMontyForm::sub(&Self::MODULUS, &ConstMontyForm::ONE);
+        m_minus_one.div_by_2()
+    };
+
+    #[inline(always)]
+    fn new(inner: Self::Inner) -> Self {
+        Self(inner)
+    }
+
+    #[inline(always)]
+    fn new_unchecked(inner: Self::Inner) -> Self {
+        ConstPrimeField::new(inner)
     }
 }
 

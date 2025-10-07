@@ -212,6 +212,7 @@ mod tests {
     };
     use crypto_bigint::{Random, U64, U256, Word, const_monty_params};
     use crypto_primitives::{crypto_bigint_const_monty::F256, crypto_bigint_int::Int};
+    use num_traits::Zero;
     use rand::{Rng, rng};
 
     const INT_LIMBS: usize = U64::LIMBS;
@@ -236,7 +237,7 @@ mod tests {
 
         // Create polynomial with 4 variables (which is > 3)
         let evaluations = (1..=16).map(Int::from).collect();
-        let poly = DenseMultilinearExtension::from_evaluations_vec(4, evaluations);
+        let poly = DenseMultilinearExtension::from_evaluations_vec(4, evaluations, Zero::zero());
 
         let result = TestZip::commit(&pp, &poly);
         assert!(result.is_err());
@@ -256,8 +257,10 @@ mod tests {
     fn different_polynomials_produce_different_commitments() {
         let (pp, _) = setup_test_params(3);
 
-        let poly1 = DenseMultilinearExtension::from_evaluations_vec(3, vec![Int::from(1); 8]);
-        let poly2 = DenseMultilinearExtension::from_evaluations_vec(3, vec![Int::from(2); 8]);
+        let poly1 =
+            DenseMultilinearExtension::from_evaluations_vec(3, vec![Int::from(1); 8], Zero::zero());
+        let poly2 =
+            DenseMultilinearExtension::from_evaluations_vec(3, vec![Int::from(2); 8], Zero::zero());
 
         let (_, commitment1) = TestZip::commit(&pp, &poly1).unwrap();
         let (_, commitment2) = TestZip::commit(&pp, &poly2).unwrap();
@@ -271,7 +274,7 @@ mod tests {
         let pp = ZipPlusParams::new(4, 4, code);
 
         let evaluations = vec![Int::from(42); 16];
-        let poly = DenseMultilinearExtension::from_evaluations_vec(4, evaluations);
+        let poly = DenseMultilinearExtension::from_evaluations_vec(4, evaluations, Zero::zero());
 
         let result = TestZip::commit(&pp, &poly);
         assert!(result.is_ok());
@@ -283,7 +286,7 @@ mod tests {
         let pp = ZipPlusParams::new(2, 2, code);
 
         let evaluations = vec![Int::from(1), Int::from(2), Int::from(3), Int::from(4)];
-        let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations);
+        let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations, Zero::zero());
 
         let result = TestZip::commit(&pp, &poly);
         assert!(result.is_ok());
@@ -294,8 +297,16 @@ mod tests {
         let (pp, _) = setup_test_params(3);
 
         let polys = vec![
-            DenseMultilinearExtension::from_evaluations_vec(3, (1..=8).map(Int::from).collect()),
-            DenseMultilinearExtension::from_evaluations_vec(3, (9..=16).map(Int::from).collect()),
+            DenseMultilinearExtension::from_evaluations_vec(
+                3,
+                (1..=8).map(Int::from).collect(),
+                Zero::zero(),
+            ),
+            DenseMultilinearExtension::from_evaluations_vec(
+                3,
+                (9..=16).map(Int::from).collect(),
+                Zero::zero(),
+            ),
         ];
 
         let results = TestZip::batch_commit(&pp, &polys);
@@ -413,7 +424,8 @@ mod tests {
         let num_vars = 6;
         let poly_size = 1 << num_vars;
         let evaluations = (1..=poly_size).map(|v| Int::from(v as i32)).collect();
-        let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations);
+        let poly =
+            DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations, Zero::zero());
 
         let results: Vec<Vec<Int<4>>> = (0..10)
             .into_par_iter()
@@ -439,7 +451,8 @@ mod tests {
     #[test]
     fn commit_succeeds_for_zero_polynomial() {
         let (pp, _) = setup_test_params(3);
-        let zero_poly = DenseMultilinearExtension::from_evaluations_vec(3, vec![Int::from(0); 8]);
+        let zero_poly =
+            DenseMultilinearExtension::from_evaluations_vec(3, vec![Int::from(0); 8], Zero::zero());
         let result = TestZip::commit(&pp, &zero_poly);
         assert!(result.is_ok());
     }
@@ -450,7 +463,7 @@ mod tests {
         let alternating = (0..8)
             .map(|i| Int::from(if i % 2 == 0 { 1 } else { -1 }))
             .collect();
-        let poly = DenseMultilinearExtension::from_evaluations_vec(3, alternating);
+        let poly = DenseMultilinearExtension::from_evaluations_vec(3, alternating, Zero::zero());
         let result = TestZip::commit(&pp, &poly);
         assert!(result.is_ok());
     }
@@ -471,7 +484,7 @@ mod tests {
 
         // Create a polynomial with 2 variables and 4 evaluations
         let evaluations = vec![Int::from(5); 4];
-        let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations);
+        let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations, Zero::zero());
         let encoded = TestZip::encode_rows(
             &pp,
             pp.linear_code.codeword_len(),
@@ -492,7 +505,7 @@ mod tests {
             DensePolynomial::new(vec![Int::from(3), Int::from(4)]),
             DensePolynomial::new(vec![Int::from(5), Int::from(6)]),
         ];
-        let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations);
+        let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations, Zero::zero());
         let encoded = TestPolyZip::encode_rows(
             &pp,
             pp.linear_code.codeword_len(),
@@ -581,7 +594,8 @@ mod tests {
     fn encode_rows_handles_large_integer_values() {
         let (pp, _) = setup_test_params(3);
         let max_val = Int::<INT_LIMBS>::from(i64::MAX);
-        let poly = DenseMultilinearExtension::from_evaluations_vec(3, vec![max_val; 8]);
+        let poly =
+            DenseMultilinearExtension::from_evaluations_vec(3, vec![max_val; 8], Zero::zero());
         let encoded_rows = TestZip::encode_rows(
             &pp,
             pp.linear_code.codeword_len(),
@@ -625,8 +639,9 @@ mod tests {
         }
 
         fn calculate_expected_proof_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
-            let size_of_f_b = U256::LIMBS * size_of::<Word>();
-            let evaluation_phase_size = pp.linear_code.row_len() * size_of_f_b;
+            // F stored as value followed by modulus
+            let size_of_f = 2 * U256::LIMBS * size_of::<Word>();
+            let evaluation_phase_size = pp.linear_code.row_len() * size_of_f;
 
             calculate_expected_test_transcript_size_bytes(pp) + evaluation_phase_size
         }
@@ -637,6 +652,7 @@ mod tests {
             "0000000000000000000000000000000000000000B933426489189CB5B47D567F"
         );
         type F = F256<ModP>;
+        let field_cfg = ();
 
         let mut rng = rng();
         let num_vars = 4;
@@ -646,7 +662,8 @@ mod tests {
         let evaluations: Vec<_> = (0..poly_size)
             .map(|_| <Zt as ZipTypes>::Eval::from(rng.random::<i8>()))
             .collect();
-        let mle = DenseMultilinearExtension::from_evaluations_slice(num_vars, &evaluations);
+        let mle =
+            DenseMultilinearExtension::from_evaluations_slice(num_vars, &evaluations, Zero::zero());
         let point: Vec<_> = (0..num_vars)
             .map(|_| <Zt as ZipTypes>::Pt::random(&mut rng))
             .collect();
@@ -662,7 +679,8 @@ mod tests {
             expected_test_transcript_size_bytes
         );
 
-        let (_, proof) = TestZip::evaluate::<F>(&param, &mle, &point, test_transcript).unwrap();
+        let (_, proof) =
+            TestZip::evaluate::<F>(&param, &mle, &point, test_transcript, &field_cfg).unwrap();
         let actual_proof_size_bytes = proof.0.len();
         let expected_proof_size_bytes = calculate_expected_proof_size_bytes(&param);
         assert_eq!(actual_proof_size_bytes, expected_proof_size_bytes);

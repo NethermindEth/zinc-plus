@@ -10,9 +10,9 @@ use ark_std::{
 };
 use criterion::{BenchmarkGroup, measurement::WallTime};
 use crypto_bigint::{U256, const_monty_params, modular::ConstMontyParams};
-use crypto_primitives::crypto_bigint_const_monty::F256;
+use crypto_primitives::{PrimeField, crypto_bigint_const_monty::F256};
 use itertools::Itertools;
-use num_traits::ConstOne;
+use num_traits::{ConstOne, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use zip_plus::{
     code::LinearCode,
@@ -28,6 +28,7 @@ const_monty_params!(
     "EB0E9F20F7BFC231327A11792F585AC6C20C74ACCCAB538BE6B0C3AB2E3D176F"
 );
 type F = F256<ModP>;
+const F_CFG: <F as PrimeField>::Config = ();
 
 pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>>(group: &mut BenchmarkGroup<WallTime>)
 where
@@ -96,7 +97,11 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
             let params = ZipPlus::setup(poly_size, linear_code);
             let row_len = params.linear_code.row_len();
             let codeword_len = params.linear_code.codeword_len();
-            let poly = DenseMultilinearExtension::<<Zt as ZipTypes>::Eval>::rand(P, &mut rng);
+            let poly = DenseMultilinearExtension::<<Zt as ZipTypes>::Eval>::rand(
+                P,
+                &mut rng,
+                Zero::zero(),
+            );
             b.iter(|| {
                 let cw = ZipPlus::encode_rows(&params, codeword_len, row_len, &poly.evaluations);
                 black_box(cw)
@@ -174,7 +179,7 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
             b.iter_custom(|iters| {
                 let mut total_duration = Duration::ZERO;
                 for _ in 0..iters {
-                    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+                    let poly = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
                     let timer = Instant::now();
                     let res = ZipPlus::commit(&params, &poly).expect("Failed to commit");
                     black_box(res);
@@ -197,7 +202,7 @@ where
     let linear_code = Lc::new(poly_size, false);
     let params = ZipPlus::setup(poly_size, linear_code);
 
-    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+    let poly = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
     let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
 
     group.bench_function(
@@ -231,7 +236,7 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     let linear_code = Lc::new(poly_size, false);
     let params = ZipPlus::setup(poly_size, linear_code);
 
-    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+    let poly = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
     let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
     let point = vec![Zt::Pt::ONE; P];
 
@@ -251,8 +256,9 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
                 for _ in 0..iters {
                     let proof = test_transcript.clone();
                     let timer = Instant::now();
-                    let (eval_f, proof) = ZipPlus::evaluate::<F>(&params, &poly, &point, proof)
-                        .expect("Evaluation phase failed");
+                    let (eval_f, proof) =
+                        ZipPlus::evaluate::<F>(&params, &poly, &point, proof, &F_CFG)
+                            .expect("Evaluation phase failed");
                     total_duration += timer.elapsed();
                     black_box((eval_f, proof));
                 }
@@ -275,13 +281,13 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     let linear_code = Lc::new(poly_size, false);
     let params = ZipPlus::setup(poly_size, linear_code);
 
-    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+    let poly = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
     let (data, commitment) = ZipPlus::commit(&params, &poly).unwrap();
     let point = vec![Zt::Pt::ONE; P];
     let point_f: Vec<F> = point.iter().map(F::from_ref).collect();
 
     let test_transcript = ZipPlus::test(&params, &poly, &data).expect("Test phase failed");
-    let (eval_f, proof) = ZipPlus::evaluate::<F>(&params, &poly, &point, test_transcript)
+    let (eval_f, proof) = ZipPlus::evaluate::<F>(&params, &poly, &point, test_transcript, &F_CFG)
         .expect("Evaluation phase failed");
 
     group.bench_function(
@@ -294,7 +300,7 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
         ),
         |b| {
             b.iter(|| {
-                ZipPlus::verify(&params, &commitment, &point_f, &eval_f, &proof)
+                ZipPlus::verify(&params, &commitment, &point_f, &eval_f, &proof, &F_CFG)
                     .expect("Verification failed");
             })
         },

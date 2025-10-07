@@ -20,6 +20,7 @@ use crate::{
 };
 use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
 use itertools::Itertools;
+use num_traits::Zero;
 
 const REPETITION_FACTOR: usize = 4;
 
@@ -101,13 +102,14 @@ fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     let pp = ZipPlusParams::new(num_vars, num_rows, code);
 
     let evaluations = prepare_evaluations(poly_size);
-    let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations);
+    let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations, Zero::zero());
 
     (pp, poly)
 }
 
 pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
     num_vars: usize,
+    field_cfg: &F::Config,
 ) -> (
     ZipPlusParams<TestZipTypes<N, K, M>, RaaCode<TestZipTypes<N, K, M>, REPETITION_FACTOR>>,
     ZipPlusCommitment,
@@ -120,7 +122,7 @@ where
     F::Inner: Transcribable,
     Int<N>: ProjectableToField<F>,
 {
-    setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_test_params, || {
+    setup_full_protocol_inner::<_, _, _, N>(num_vars, field_cfg, setup_test_params, || {
         (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect()
     })
 }
@@ -133,6 +135,7 @@ pub fn setup_full_protocol_poly<
     const DEGREE: usize,
 >(
     num_vars: usize,
+    field_cfg: &F::Config,
 ) -> (
     ZipPlusParams<
         TestPolyZipTypes<N, K, M, DEGREE>,
@@ -148,13 +151,14 @@ where
     F::Inner: Transcribable,
     DensePolynomial<Int<N>, DEGREE>: ProjectableToField<F>,
 {
-    setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_poly_test_params, || {
+    setup_full_protocol_inner::<_, _, _, N>(num_vars, field_cfg, setup_poly_test_params, || {
         (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect()
     })
 }
 
 fn setup_full_protocol_inner<Zt, Lc, F, const N: usize>(
     num_vars: usize,
+    field_cfg: &F::Config,
     setup: impl FnOnce(usize) -> (ZipPlusParams<Zt, Lc>, DenseMultilinearExtension<Zt::Eval>),
     prepare_evaluation_point: impl FnOnce() -> Vec<Zt::Pt>,
 ) -> (
@@ -186,12 +190,12 @@ where
         F::from_ref(&projecting_element)
     };
 
-    let (eval_f, proof) = ZipPlus::evaluate(&pp, &poly, &point, transcript).unwrap();
+    let (eval_f, proof) = ZipPlus::evaluate(&pp, &poly, &point, transcript, field_cfg).unwrap();
 
     // Verify the evaluation is done correctly
     {
         let expected_eval = poly
-            .evaluate(&point)
+            .evaluate(&point, Zero::zero())
             .expect("failed to evaluate polynomial");
         let project = Zt::Eval::prepare_projection(&projecting_element);
         assert_eq!(eval_f, project(&expected_eval));

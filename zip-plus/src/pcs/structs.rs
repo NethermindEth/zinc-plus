@@ -5,7 +5,7 @@ use crate::{
     traits::{FromRef, Named, Transcribable},
     utils::ReinterpretVector,
 };
-use crypto_primitives::{ConstIntRing, PrimeField, Ring, crypto_bigint_int::Int};
+use crypto_primitives::{ConstIntRing, FixedRing, PrimeField, crypto_bigint_int::Int};
 use num_traits::CheckedMul;
 use p3_field::Packable;
 use std::marker::PhantomData;
@@ -16,12 +16,12 @@ pub trait ZipTypes: Send + Sync {
     /// Coefficient ring of evaluation polynomial [Self::Eval]
     type EvalR: ConstIntRing + Transcribable + Named;
     /// Ring of witness/polynomial evaluations on boolean hypercube
-    type Eval: Ring + Named + Polynomial<Self::EvalR>;
+    type Eval: FixedRing + Named + Polynomial<Self::EvalR>;
 
     /// Coefficient ring of codeword polynomial [Self::Cw]
     type CwR: ConstIntRing + Transcribable + Named;
     /// Ring of codeword elements, at least as wide as the evaluation ring
-    type Cw: Ring
+    type Cw: FixedRing
         + Polynomial<Self::CwR>
         + FromRef<Self::Eval>
         + Transcribable
@@ -37,10 +37,13 @@ pub trait ZipTypes: Send + Sync {
     type Pt: ConstIntRing;
 
     /// Coefficient ring of linear combination polynomial [Self::Comb]
-    type CombR: Ring + FromRef<Self::CombR> + Transcribable + for<'a> MulByScalar<&'a Self::Chal>;
+    type CombR: ConstIntRing
+        + FromRef<Self::CombR>
+        + Transcribable
+        + for<'a> MulByScalar<&'a Self::Chal>;
     /// Ring of elements in the linear combination of codewords, at least as
     /// wide as the evaluation, codeword, and challenge rings.
-    type Comb: Ring + Polynomial<Self::CombR> + FromRef<Self::Eval> + FromRef<Self::Cw> + Named;
+    type Comb: FixedRing + Polynomial<Self::CombR> + FromRef<Self::Eval> + FromRef<Self::Cw> + Named;
 }
 
 /// Zip is a Polynomial Commitment Scheme (PCS) that supports committing to

@@ -16,6 +16,7 @@ use crate::{
 };
 use crypto_primitives::PrimeField;
 use itertools::Itertools;
+use num_traits::ConstZero;
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     pub fn verify<F>(
@@ -24,6 +25,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         point_f: &[F],
         eval_f: &F,
         proof: &ZipPlusProof,
+        field_cfg: &F::Config,
     ) -> Result<(), ZipError>
     where
         F: PrimeField + FromRef<F> + FromRef<Zt::Chal> + for<'a> MulByScalar<&'a F>,
@@ -46,6 +48,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             &columns_opened,
             &mut transcript,
             projecting_element,
+            field_cfg,
         )?;
 
         Ok(())
@@ -123,7 +126,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 .map(Zt::Comb::from_ref)
                 .map(|p| p.evaluate_at_point(alphas))
                 .collect();
-            inner_product(coeffs.iter(), column_entries?.iter())
+            inner_product(coeffs.iter(), column_entries?.iter(), Zt::CombR::ZERO)
         } else {
             Zt::Comb::from_ref(&column_entries[0]).evaluate_at_point(alphas)?
         };
@@ -141,6 +144,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         columns_opened: &[(usize, Vec<Zt::Cw>)],
         transcript: &mut PcsTranscript,
         projecting_element: F,
+        field_cfg: &F::Config,
     ) -> Result<(), ZipError>
     where
         F: PrimeField + FromRef<F> + for<'a> MulByScalar<&'a F>,
@@ -150,9 +154,9 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let q_0_combined_row = transcript.read_field_elements(vp.linear_code.row_len())?;
         let encoded_combined_row = vp.linear_code.encode_f(&q_0_combined_row);
 
-        let (q_0, q_1) = point_to_tensor(vp.num_rows, point_f)?;
+        let (q_0, q_1) = point_to_tensor(vp.num_rows, point_f, field_cfg)?;
 
-        if inner_product(&q_0_combined_row, &q_1) != *eval_f {
+        if inner_product(&q_0_combined_row, &q_1, F::zero_with_cfg(field_cfg)) != *eval_f {
             return Err(ZipError::InvalidPcsOpen(
                 "Evaluation consistency failure".into(),
             ));
@@ -166,6 +170,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 *column_idx,
                 vp.num_rows,
                 &project,
+                field_cfg,
             )?;
         }
 
@@ -179,6 +184,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         column: usize,
         num_rows: usize,
         project: &impl Fn(&<Zt as ZipTypes>::Cw) -> F,
+        field_cfg: &F::Config,
     ) -> Result<(), ZipError>
     where
         F: PrimeField + for<'a> MulByScalar<&'a F>,
@@ -186,7 +192,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     {
         let column_entries_comb = if num_rows > 1 {
             let column_entries = column_entries.iter().map(project).collect_vec();
-            inner_product(q_0, &column_entries)
+            inner_product(q_0, &column_entries, F::zero_with_cfg(field_cfg))
             // TODO: this inner product is taking a long time.
         } else {
             project(column_entries.first().expect("No column entries"))
@@ -222,9 +228,11 @@ mod tests {
         traits::FromRef,
     };
     use crypto_bigint::{Random, U64, U256, const_monty_params};
-    use crypto_primitives::{Ring, crypto_bigint_const_monty::F256, crypto_bigint_int::Int};
+    use crypto_primitives::{
+        PrimeField, Ring, crypto_bigint_const_monty::F256, crypto_bigint_int::Int,
+    };
     use itertools::Itertools;
-    use num_traits::{ConstOne, ConstZero};
+    use num_traits::{ConstOne, ConstZero, Zero};
     use rand::prelude::*;
 
     const INT_LIMBS: usize = U64::LIMBS;
@@ -241,6 +249,7 @@ mod tests {
     );
 
     type F = F256<ModP>;
+    const F_CFG: <F as PrimeField>::Config = ();
 
     type Zt = TestZipTypes<N, K, M>;
     type C = RaaCode<Zt, 4>;
@@ -255,16 +264,17 @@ mod tests {
     fn successful_verification_of_valid_proof() {
         let num_vars = 4;
         {
-            let (pp, comm, point_f, eval_f, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
+            let (pp, comm, point_f, eval_f, proof) =
+                setup_full_protocol::<F, N, K, M>(num_vars, &F_CFG);
 
-            let result = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
+            let result = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof, &F_CFG);
             assert!(result.is_ok(), "Verification failed: {result:?}")
         };
         {
             let (pp, comm, point_f, eval_f, proof) =
-                setup_full_protocol_poly::<F, N, K, M, DEGREE>(num_vars);
+                setup_full_protocol_poly::<F, N, K, M, DEGREE>(num_vars, &F_CFG);
 
-            let result = TestPolyZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
+            let result = TestPolyZip::verify(&pp, &comm, &point_f, &eval_f, &proof, &F_CFG);
 
             assert!(result.is_ok(), "Verification failed: {result:?}");
         }
@@ -275,18 +285,20 @@ mod tests {
         let num_vars = 4;
 
         {
-            let (pp, comm, point_f, eval_f, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
+            let (pp, comm, point_f, eval_f, proof) =
+                setup_full_protocol::<F, N, K, M>(num_vars, &F_CFG);
 
-            let result = TestZip::verify(&pp, &comm, &point_f, &(eval_f + F::ONE), &proof);
+            let result = TestZip::verify(&pp, &comm, &point_f, &(eval_f + F::ONE), &proof, &F_CFG);
 
             assert!(result.is_err());
         }
 
         {
             let (pp, comm, point_f, eval_f, proof) =
-                setup_full_protocol_poly::<F, N, K, M, DEGREE>(num_vars);
+                setup_full_protocol_poly::<F, N, K, M, DEGREE>(num_vars, &F_CFG);
 
-            let result = TestPolyZip::verify(&pp, &comm, &point_f, &(eval_f + F::ONE), &proof);
+            let result =
+                TestPolyZip::verify(&pp, &comm, &point_f, &(eval_f + F::ONE), &proof, &F_CFG);
 
             assert!(result.is_err());
         }
@@ -302,17 +314,18 @@ mod tests {
         let num_vars = 4;
 
         {
-            let (pp, comm, point_f, eval, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
+            let (pp, comm, point_f, eval, proof) =
+                setup_full_protocol::<F, N, K, M>(num_vars, &F_CFG);
             let tampered = tamper(proof);
-            let result = TestZip::verify(&pp, &comm, &point_f, &eval, &tampered);
+            let result = TestZip::verify(&pp, &comm, &point_f, &eval, &tampered, &F_CFG);
             assert!(result.is_err());
         }
 
         {
             let (pp, comm, point_f, eval_f, proof) =
-                setup_full_protocol_poly::<F, N, K, M, DEGREE>(num_vars);
+                setup_full_protocol_poly::<F, N, K, M, DEGREE>(num_vars, &F_CFG);
             let tampered = tamper(proof);
-            let result = TestPolyZip::verify(&pp, &comm, &point_f, &eval_f, &tampered);
+            let result = TestPolyZip::verify(&pp, &comm, &point_f, &eval_f, &tampered, &F_CFG);
             assert!(result.is_err());
         }
     }
@@ -322,20 +335,24 @@ mod tests {
         let num_vars = 4;
         {
             let (pp, _comm_poly1, point_f, eval_f, proof_poly1) =
-                setup_full_protocol::<F, N, K, M>(num_vars);
+                setup_full_protocol::<F, N, K, M>(num_vars, &F_CFG);
 
             let different_evals: Vec<_> = (20..(20 + (1 << num_vars))).map(Int::from).collect();
-            let poly2 = DenseMultilinearExtension::from_evaluations_vec(num_vars, different_evals);
+            let poly2 = DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                different_evals,
+                Zero::zero(),
+            );
             let (_, comm_poly2) = TestZip::commit(&pp, &poly2).unwrap();
 
-            let result = TestZip::verify(&pp, &comm_poly2, &point_f, &eval_f, &proof_poly1);
+            let result = TestZip::verify(&pp, &comm_poly2, &point_f, &eval_f, &proof_poly1, &F_CFG);
 
             assert!(result.is_err());
         }
 
         {
             let (pp, _comm_poly1, point_f, eval_f, proof_poly1) =
-                setup_full_protocol_poly::<F, N, K, M, DEGREE>(num_vars);
+                setup_full_protocol_poly::<F, N, K, M, DEGREE>(num_vars, &F_CFG);
 
             let different_evals = {
                 let different_eval_coeffs: Vec<_> = (1..=((1 << num_vars) * DEGREE as i32))
@@ -347,10 +364,15 @@ mod tests {
                     .collect_vec()
             };
 
-            let poly2 = DenseMultilinearExtension::from_evaluations_vec(num_vars, different_evals);
+            let poly2 = DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                different_evals,
+                Zero::zero(),
+            );
             let (_, comm_poly2) = TestPolyZip::commit(&pp, &poly2).unwrap();
 
-            let result = TestPolyZip::verify(&pp, &comm_poly2, &point_f, &eval_f, &proof_poly1);
+            let result =
+                TestPolyZip::verify(&pp, &comm_poly2, &point_f, &eval_f, &proof_poly1, &F_CFG);
 
             assert!(result.is_err());
         }
@@ -366,17 +388,18 @@ mod tests {
 
         {
             let (pp, comm, _point_f, eval_f, proof) =
-                setup_full_protocol_poly::<F, N, K, M, DEGREE>(num_vars);
+                setup_full_protocol_poly::<F, N, K, M, DEGREE>(num_vars, &F_CFG);
 
-            let result = TestPolyZip::verify(&pp, &comm, &invalid_point, &eval_f, &proof);
+            let result = TestPolyZip::verify(&pp, &comm, &invalid_point, &eval_f, &proof, &F_CFG);
 
             assert!(matches!(result, Err(..)));
         }
 
         {
-            let (pp, comm, _point_f, eval, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
+            let (pp, comm, _point_f, eval, proof) =
+                setup_full_protocol::<F, N, K, M>(num_vars, &F_CFG);
 
-            let result = TestZip::verify(&pp, &comm, &invalid_point, &eval, &proof);
+            let result = TestZip::verify(&pp, &comm, &invalid_point, &eval, &proof, &F_CFG);
 
             assert!(matches!(result, Err(..)));
         }
@@ -390,22 +413,33 @@ mod tests {
         let (data, comm) = TestZip::commit(&pp, &mle1).unwrap();
 
         let different_evals: Vec<_> = (20..=35).map(Int::from).collect();
-        let mle2 = DenseMultilinearExtension::from_evaluations_vec(num_vars, different_evals);
+        let mle2 = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            different_evals,
+            Zero::zero(),
+        );
 
         let point: Vec<<Zt as ZipTypes>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
         let point_f: Vec<F> = point.iter().map(F::from).collect();
 
         let test_mle2_proof = TestZip::test(&pp, &mle2, &data).expect("test phase should succeed");
-        let (_, eval_mle2_proof) = TestZip::evaluate::<F>(&pp, &mle2, &point, test_mle2_proof)
-            .expect("evaluation phase should succeed");
+        let (_, eval_mle2_proof) =
+            TestZip::evaluate::<F>(&pp, &mle2, &point, test_mle2_proof, &F_CFG)
+                .expect("evaluation phase should succeed");
 
         let eval_mle1 = mle1
-            .evaluate(&point)
+            .evaluate(&point, Zero::zero())
             .expect("Failed to evaluate polynomial");
 
-        let verification_result =
-            TestZip::verify(&pp, &comm, &point_f, &eval_mle1.into(), &eval_mle2_proof);
+        let verification_result = TestZip::verify(
+            &pp,
+            &comm,
+            &point_f,
+            &eval_mle1.into(),
+            &eval_mle2_proof,
+            &F_CFG,
+        );
 
         assert!(verification_result.is_err());
     }
@@ -437,13 +471,15 @@ mod tests {
 
         let test_transcript =
             TestZip::test(&pp, &mle, &corrupted_data).expect("test phase should succeed");
-        let (eval_f, proof) = TestZip::evaluate(&pp, &mle, &point, test_transcript)
+        let (eval_f, proof) = TestZip::evaluate(&pp, &mle, &point, test_transcript, &F_CFG)
             .expect("evaluation phase should succeed");
 
-        let expected_eval = mle.evaluate(&point).expect("Failed to evaluate polynomial");
+        let expected_eval = mle
+            .evaluate(&point, Zero::zero())
+            .expect("Failed to evaluate polynomial");
         assert_eq!(eval_f, expected_eval.into());
 
-        let verification_result = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
+        let verification_result = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof, &F_CFG);
 
         assert!(verification_result.is_err());
     }
@@ -460,7 +496,7 @@ mod tests {
         let point_f: Vec<F> = point.iter().map(F::from).collect();
 
         let test_transcript = TestZip::test(&pp, &mle, &data).expect("test phase should succeed");
-        let (correct_eval_f, proof) = TestZip::evaluate(&pp, &mle, &point, test_transcript)
+        let (correct_eval_f, proof) = TestZip::evaluate(&pp, &mle, &point, test_transcript, &F_CFG)
             .expect("evaluation phase should succeed");
 
         let incorrect_eval_f = correct_eval_f + F::ONE;
@@ -471,6 +507,7 @@ mod tests {
             &point_f,
             &incorrect_eval_f, // Use the wrong evaluation here
             &proof,
+            &F_CFG,
         );
 
         assert!(verification_result.is_err());
@@ -487,7 +524,7 @@ mod tests {
         let evaluations: Vec<_> = (0..poly_size as i32)
             .map(<Zt as ZipTypes>::Eval::from)
             .collect();
-        let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations);
+        let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations, Zero::zero());
 
         let (data, comm) = TestZip::commit(&pp, &mle).expect("commit should succeed");
 
@@ -496,10 +533,10 @@ mod tests {
             .map(Int::<1>::from)
             .collect::<Vec<_>>();
         let point_f: Vec<F> = point.iter().map(F::from).collect_vec();
-        let eval = mle.evaluate(&point).unwrap();
+        let eval = mle.evaluate(&point, Zero::zero()).unwrap();
 
         let test_transcript = TestZip::test(&pp, &mle, &data).expect("test phase should succeed");
-        let (eval_f, mut proof) = TestZip::evaluate(&pp, &mle, &point, test_transcript)
+        let (eval_f, mut proof) = TestZip::evaluate(&pp, &mle, &point, test_transcript, &F_CFG)
             .expect("evaluation phase should succeed");
         assert_eq!(
             eval_f,
@@ -518,7 +555,7 @@ mod tests {
         let flip_at = bytes_per_int * (row_len / 2);
         proof.0[flip_at] ^= 0x01;
 
-        let res = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
+        let res = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof, &F_CFG);
 
         match res {
             Err(ZipError::InvalidPcsOpen(msg)) => {
@@ -560,7 +597,7 @@ mod tests {
         let evaluations: Vec<_> = (0..poly_size)
             .map(|_| <Zt as ZipTypes>::Eval::from(rng.random::<i8>()))
             .collect();
-        let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations);
+        let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations, Zero::zero());
         let point: Vec<_> = (0..n)
             .map(|_| <Zt as ZipTypes>::Pt::random(&mut rng))
             .collect();
@@ -572,10 +609,11 @@ mod tests {
         }
 
         let test_transcript = TestZip::test(&pp, &mle, &data).unwrap();
-        let (_, proof) = TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();
+        let (_, proof) =
+            TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript, &F_CFG).unwrap();
 
         let eval_f = evaluate_in_field(&mle.evaluations, &point_f);
-        let verification_result = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
+        let verification_result = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof, &F_CFG);
 
         assert!(verification_result.is_err());
     }
@@ -588,20 +626,22 @@ mod tests {
 
         let evaluations: Vec<_> = (0..poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
         let n = 3;
-        let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations);
+        let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations, Zero::zero());
 
         let (data, comm) = TestZip::commit(&pp, &mle).expect("commit should succeed");
 
         let point: Vec<<Zt as ZipTypes>::Pt> =
             [0i64, 0i64, 0i64].into_iter().map(Int::from).collect_vec();
         let point_f: Vec<F> = point.iter().map(F::from).collect_vec();
-        let eval_f = mle.evaluate(&point).unwrap().into();
+        let eval_f = mle.evaluate(&point, Zero::zero()).unwrap().into();
 
         let test_transcript = TestZip::test(&pp, &mle, &data).unwrap();
-        let (_, mut proof) = TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();
+        let (_, mut proof) =
+            TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript, &F_CFG).unwrap();
 
         let row_len = pp.linear_code.row_len();
-        let bytes_per_field = F::BITS as usize / 8;
+        // Two elements: one for value and one for module
+        let bytes_per_field = F::BITS as usize * 2 / 8;
         let q0_bytes = row_len * bytes_per_field;
         assert!(
             proof.0.len() >= q0_bytes,
@@ -609,10 +649,10 @@ mod tests {
         );
 
         let tail_start = proof.0.len() - q0_bytes;
-        let flip_at = tail_start + (bytes_per_field / 2);
+        let flip_at = tail_start + (bytes_per_field / 4);
         proof.0[flip_at] ^= 0x01;
 
-        let res = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
+        let res = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof, &F_CFG);
 
         match res {
             Err(ZipError::InvalidPcsOpen(msg)) => {
@@ -631,19 +671,20 @@ mod tests {
 
         let evaluations: Vec<_> = vec![Int::<INT_LIMBS>::from(0); poly_size];
         let n = 3;
-        let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations);
+        let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations, Zero::zero());
 
         let (data, comm) = TestZip::commit(&pp, &mle).expect("commit should succeed");
 
         let point: Vec<<Zt as ZipTypes>::Pt> =
             [0i64, 0i64, 0i64].into_iter().map(Int::from).collect_vec();
         let point_f: Vec<F> = point.iter().map(F::from).collect_vec();
-        let eval_f = mle.evaluate(&point).unwrap().into();
+        let eval_f = mle.evaluate(&point, Zero::zero()).unwrap().into();
 
         let test_transcript = TestZip::test(&pp, &mle, &data).unwrap();
-        let (_, proof) = TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();
+        let (_, proof) =
+            TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript, &F_CFG).unwrap();
 
-        let res = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
+        let res = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof, &F_CFG);
         assert!(res.is_ok());
     }
 
@@ -655,19 +696,21 @@ mod tests {
         let pp = TestZip::setup(poly_size, linear_code);
 
         let evaluations: Vec<_> = (1..=poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
-        let mle = DenseMultilinearExtension::from_evaluations_slice(num_vars, &evaluations);
+        let mle =
+            DenseMultilinearExtension::from_evaluations_slice(num_vars, &evaluations, Zero::zero());
 
         let (data, comm) = TestZip::commit(&pp, &mle).expect("commit should succeed");
 
         let point: Vec<<Zt as ZipTypes>::Pt> = vec![Int::ZERO; num_vars];
         let point_f: Vec<F> = point.iter().map(F::from).collect_vec();
 
-        let eval_f = mle.evaluate(&point).unwrap().into();
+        let eval_f = mle.evaluate(&point, Zero::zero()).unwrap().into();
 
         let test_transcript = TestZip::test(&pp, &mle, &data).unwrap();
-        let (_, proof) = TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();
+        let (_, proof) =
+            TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript, &F_CFG).unwrap();
 
-        let res = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
+        let res = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof, &F_CFG);
         assert!(res.is_ok());
     }
 
@@ -679,7 +722,7 @@ mod tests {
         let mut evals: Vec<<Zt as ZipTypes>::Eval> =
             (0..1 << num_vars as i32).map(Int::from).collect();
         evals[1] = Int::from(i64::MAX);
-        let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evals);
+        let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, Zero::zero());
 
         let (data, comm) = TestZip::commit(&pp, &poly).unwrap();
 
@@ -689,14 +732,15 @@ mod tests {
         let point_f: Vec<F> = point.iter().map(F::from).collect();
 
         let test_transcript = TestZip::test(&pp, &poly, &data).unwrap();
-        let (eval_f, proof) = TestZip::evaluate::<F>(&pp, &poly, &point, test_transcript).unwrap();
+        let (eval_f, proof) =
+            TestZip::evaluate::<F>(&pp, &poly, &point, test_transcript, &F_CFG).unwrap();
 
         let expected_eval = poly
-            .evaluate(&point)
+            .evaluate(&point, Zero::zero())
             .expect("failed to evaluate polynomial");
         assert_eq!(eval_f, expected_eval.into());
 
-        let verification_result = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
+        let verification_result = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof, &F_CFG);
 
         assert!(
             verification_result.is_ok(),
@@ -714,14 +758,15 @@ mod tests {
         let point: Vec<<Zt as ZipTypes>::Pt> = vec![Int::from(1), Int::from(2)];
         let point_f: Vec<F> = point.iter().map(F::from).collect();
         let test_transcript = TestZip::test(&pp, &poly, &hint).unwrap();
-        let (eval_f, proof) = TestZip::evaluate::<F>(&pp, &poly, &point, test_transcript).unwrap();
+        let (eval_f, proof) =
+            TestZip::evaluate::<F>(&pp, &poly, &point, test_transcript, &F_CFG).unwrap();
 
         let expected_eval = poly
-            .evaluate(&point)
+            .evaluate(&point, Zero::zero())
             .expect("failed to evaluate polynomial");
         assert_eq!(eval_f, expected_eval.into());
 
-        let verification_result = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
+        let verification_result = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof, &F_CFG);
 
         assert!(verification_result.is_ok());
     }
@@ -734,17 +779,18 @@ mod tests {
 
         let evaluations: Vec<_> = (1..=poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
         let n = 3;
-        let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations);
+        let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations, Zero::zero());
 
         let (data, comm) = TestZip::commit(&pp, &mle).expect("commit should succeed");
 
         let point: Vec<<Zt as ZipTypes>::Pt> =
             [0i64, 0i64, 0i64].into_iter().map(Int::from).collect_vec();
         let point_f: Vec<F> = point.iter().map(F::from).collect_vec();
-        let eval_f = mle.evaluate(&point).unwrap().into();
+        let eval_f = mle.evaluate(&point, Zero::zero()).unwrap().into();
 
         let test_transcript = TestZip::test(&pp, &mle, &data).unwrap();
-        let (_, mut proof) = TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();
+        let (_, mut proof) =
+            TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript, &F_CFG).unwrap();
 
         let row_len = pp.linear_code.row_len();
         let bytes_per_int = M * 8;
@@ -758,7 +804,7 @@ mod tests {
             *b = 0xFF;
         }
 
-        let res = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
+        let res = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof, &F_CFG);
         assert!(res.is_err());
     }
 
@@ -772,7 +818,7 @@ mod tests {
             let linear_code = C::new(poly_size, true);
             let pp = TestZip::setup(poly_size, linear_code);
 
-            let mle = DenseMultilinearExtension::rand(P, &mut rng);
+            let mle = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
             let (data, commitment) = TestZip::commit(&pp, &mle).expect("commit");
 
             // Same point choice as the bench
@@ -782,7 +828,7 @@ mod tests {
             // Prover produces a proof once (exactly as in the bench)
             let test_transcript = TestZip::test(&pp, &mle, &data).unwrap();
             let (eval_f, proof) =
-                TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();
+                TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript, &F_CFG).unwrap();
             assert_eq!(eval_f, eval.into(), "Evaluation mismatch after opening");
 
             // Verifier replays verification from the same proof (also like the bench)
@@ -792,6 +838,7 @@ mod tests {
                 &point.iter().map(F::from).collect::<Vec<_>>(),
                 &eval_f,
                 &proof,
+                &F_CFG,
             )
             .expect("verify");
         }
@@ -809,7 +856,7 @@ mod tests {
             let linear_code = PolyC::new(poly_size, true);
             let pp = TestPolyZip::setup(poly_size, linear_code);
 
-            let mle = DenseMultilinearExtension::rand(P, &mut rng);
+            let mle = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
             let (data, commitment) = TestPolyZip::commit(&pp, &mle).expect("commit");
 
             // Same point choice as the bench
@@ -818,7 +865,7 @@ mod tests {
             // Prover produces a proof once (exactly as in the bench)
             let test_proof = TestPolyZip::test(&pp, &mle, &data).unwrap();
             let (eval_f, eval_proof) =
-                TestPolyZip::evaluate::<F>(&pp, &mle, &point, test_proof).unwrap();
+                TestPolyZip::evaluate::<F>(&pp, &mle, &point, test_proof, &F_CFG).unwrap();
 
             // Verifier replays verification from the same proof (also like the bench)
             TestPolyZip::verify(
@@ -827,6 +874,7 @@ mod tests {
                 &point.iter().map(F::from).collect::<Vec<_>>(),
                 &eval_f,
                 &eval_proof,
+                &F_CFG,
             )
             .expect("verify");
         }

@@ -1,6 +1,5 @@
 use ark_std::{cfg_iter_mut, iterable::Iterable};
 use crypto_primitives::PrimeField;
-use num_traits::Zero;
 use thiserror::Error;
 
 use crate::{ZipError, add, div, ilog_round_up, mul, poly::mle::DenseMultilinearExtension, sub};
@@ -90,7 +89,11 @@ pub(super) fn validate_input<'a, Zt: ZipTypes + 'a, Lc: LinearCode<Zt>, Pt: 'a>(
 /// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
 /// right
 #[allow(clippy::unwrap_used)]
-pub(super) fn point_to_tensor<F>(num_rows: usize, point: &[F]) -> Result<(Vec<F>, Vec<F>), ZipError>
+pub(super) fn point_to_tensor<F>(
+    num_rows: usize,
+    point: &[F],
+    cfg: &F::Config,
+) -> Result<(Vec<F>, Vec<F>), ZipError>
 where
     F: PrimeField,
 {
@@ -98,15 +101,15 @@ where
     let (hi, lo) = point.split_at(sub!(point.len(), num_rows.ilog2() as usize));
     // TODO: get rid of these unwraps.
     let q_0 = if !lo.is_empty() {
-        build_eq_x_r(lo).unwrap()
+        build_eq_x_r(lo, cfg).unwrap()
     } else {
-        DenseMultilinearExtension::zero()
+        DenseMultilinearExtension::zero_vars(F::zero_with_cfg(cfg))
     };
 
     let q_1 = if !hi.is_empty() {
-        build_eq_x_r(hi).unwrap()
+        build_eq_x_r(hi, cfg).unwrap()
     } else {
-        DenseMultilinearExtension::zero()
+        DenseMultilinearExtension::zero_vars(F::zero_with_cfg(cfg))
     };
 
     Ok((q_0.evaluations, q_1.evaluations))
@@ -118,12 +121,16 @@ where
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r<F>(r: &[F]) -> Result<DenseMultilinearExtension<F>, ArithErrors>
+pub fn build_eq_x_r<F>(
+    r: &[F],
+    cfg: &F::Config,
+) -> Result<DenseMultilinearExtension<F>, ArithErrors>
 where
     F: PrimeField,
 {
-    let evals = build_eq_x_r_vec(r)?;
-    let mle = DenseMultilinearExtension::from_evaluations_vec(r.len(), evals);
+    let evals = build_eq_x_r_vec(r, cfg)?;
+    let mle =
+        DenseMultilinearExtension::from_evaluations_vec(r.len(), evals, F::zero_with_cfg(cfg));
 
     Ok(mle)
 }
@@ -135,7 +142,7 @@ where
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r_vec<F>(r: &[F]) -> Result<Vec<F>, ArithErrors>
+pub fn build_eq_x_r_vec<F>(r: &[F], cfg: &F::Config) -> Result<Vec<F>, ArithErrors>
 where
     F: PrimeField,
 {
@@ -151,7 +158,7 @@ where
     // we will need 2^num_var evaluations
 
     let mut eval = Vec::new();
-    build_eq_x_r_helper(r, &mut eval)?;
+    build_eq_x_r_helper(r, &mut eval, cfg)?;
 
     Ok(eval)
 }
@@ -159,7 +166,7 @@ where
 /// A helper function to build eq(x, r) recursively.
 /// This function takes `r.len()` steps, and for each step it requires a maximum
 /// `r.len()-1` multiplications.
-fn build_eq_x_r_helper<F>(r: &[F], buf: &mut Vec<F>) -> Result<(), ArithErrors>
+fn build_eq_x_r_helper<F>(r: &[F], buf: &mut Vec<F>, cfg: &F::Config) -> Result<(), ArithErrors>
 where
     F: PrimeField,
 {
@@ -167,10 +174,10 @@ where
         return Err(ArithErrors::InvalidParameters("r length is 0".into()));
     } else if r.len() == 1 {
         // initializing the buffer with [1-r_0, r_0]
-        buf.push(F::one() - &r[0]);
+        buf.push(F::one_with_cfg(cfg) - &r[0]);
         buf.push(r[0].clone());
     } else {
-        build_eq_x_r_helper(&r[1..], buf)?;
+        build_eq_x_r_helper(&r[1..], buf, cfg)?;
 
         // suppose at the previous step we received [b_1, ..., b_k]
         // for the current step we will need
@@ -184,7 +191,7 @@ where
         // }
         // *buf = res;
 
-        let mut res = vec![F::zero(); buf.len() << 1];
+        let mut res = vec![F::zero_with_cfg(cfg); buf.len() << 1];
         cfg_iter_mut!(res).enumerate().for_each(|(i, val)| {
             let bi = buf[i >> 1].clone();
             let tmp = r[0].clone() * &bi;

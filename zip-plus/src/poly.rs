@@ -3,15 +3,15 @@ pub mod mle;
 mod zero_degree;
 
 use crate::pcs::structs::MulByScalar;
-use crypto_primitives::Ring;
+use crypto_primitives::FixedRing;
 use thiserror::Error;
 
-pub trait Polynomial<R: Ring> {
+pub trait Polynomial<R: FixedRing> {
     /// The (max) degree of the polynomial - one less than a number of
     /// coefficients.
     const DEGREE_BOUND: usize;
 
-    fn map<R2: Ring>(&self, f: impl Fn(&R) -> R2) -> impl Polynomial<R2>;
+    fn map<R2: FixedRing>(&self, f: impl Fn(&R) -> R2) -> impl Polynomial<R2>;
 
     /// Evaluates the polynomial at the given point, treating point `[p_0, p_1,
     /// p_2, ...]` as `[x, x^2, x^3, ..., x^DEGREE_BOUND]`, thus it returns

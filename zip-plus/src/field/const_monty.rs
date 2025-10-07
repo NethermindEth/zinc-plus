@@ -7,7 +7,9 @@ use crypto_bigint::{
     Uint,
     modular::{ConstMontyForm, ConstMontyParams},
 };
-use crypto_primitives::{Ring, crypto_bigint_const_monty::ConstMontyField, crypto_bigint_int::Int};
+use crypto_primitives::{
+    FixedRing, crypto_bigint_const_monty::ConstMontyField, crypto_bigint_int::Int,
+};
 use num_traits::CheckedMul;
 
 impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> MulByScalar<&Self>
@@ -63,7 +65,7 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize>
 impl<Mod: ConstMontyParams<LIMBS>, R, const LIMBS: usize, const DEGREE: usize>
     ProjectableToField<ConstMontyField<Mod, LIMBS>> for DensePolynomial<R, DEGREE>
 where
-    R: Ring + Transcribable,
+    R: FixedRing + Transcribable,
     ConstMontyField<Mod, LIMBS>: FromRef<R>,
 {
     #![allow(clippy::arithmetic_side_effects)] // False alert, field operations are safe

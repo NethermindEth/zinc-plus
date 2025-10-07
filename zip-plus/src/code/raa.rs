@@ -1,5 +1,5 @@
 use crypto_primitives::PrimeField;
-use num_traits::{CheckedAdd, Zero};
+use num_traits::CheckedAdd;
 use std::{marker::PhantomData, ops::AddAssign};
 
 use crate::{
@@ -27,7 +27,7 @@ impl<Zt: ZipTypes, const REP: usize> RaaCode<Zt, REP> {
     /// Do the actual encoding, as per RAA spec
     fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
     where
-        Out: Zero + CheckedAdd + for<'a> AddAssign<&'a Out> + FromRef<In> + Clone,
+        Out: CheckedAdd + for<'a> AddAssign<&'a Out> + FromRef<In> + Clone,
     {
         debug_assert_eq!(
             row.len(),
@@ -154,7 +154,7 @@ fn repeat<In, Out: FromRef<In> + Clone>(input: &[In], repetition_factor: usize) 
 #[allow(clippy::arithmetic_side_effects)] // Clippy is too dumb to realize `i - 1` is safe here
 fn accumulate<I>(input: &mut [I])
 where
-    I: Zero + CheckedAdd + Clone,
+    I: CheckedAdd + Clone,
 {
     for i in 1..input.len() {
         input[i] = add!(input[i], &input[i - 1], "Accumulation overflow");
@@ -164,7 +164,7 @@ where
 #[allow(clippy::arithmetic_side_effects)]
 fn accumulate_unchecked<I>(input: &mut [I])
 where
-    I: Zero + for<'a> AddAssign<&'a I> + Clone,
+    I: for<'a> AddAssign<&'a I> + Clone,
 {
     for i in 1..input.len() {
         // This allows us to circumvent Rust bounds checking

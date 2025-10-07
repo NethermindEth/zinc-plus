@@ -73,10 +73,10 @@ macro_rules! ilog_round_up {
     }};
 }
 
-pub(crate) fn inner_product<'a, 'b, Coeff, El, L, R>(lhs: L, rhs: R) -> El
+pub(crate) fn inner_product<'a, 'b, Coeff, El, L, R>(lhs: L, rhs: R, zero: El) -> El
 where
-    Coeff: Clone + Default + 'a + 'b,
-    El: Clone + CheckedAdd + for<'z> MulByScalar<&'z Coeff> + Default + 'a + 'b,
+    Coeff: Clone + 'a + 'b,
+    El: Clone + CheckedAdd + for<'z> MulByScalar<&'z Coeff> + 'a + 'b,
     L: IntoIterator<Item = &'a Coeff>,
     R: IntoIterator<Item = &'b El>,
 {
@@ -87,7 +87,7 @@ where
                 .expect("Cannot multiply a codeword element by a coefficient")
         })
         .reduce(|acc, product| add!(acc, &product))
-        .unwrap_or_default()
+        .unwrap_or(zero)
 }
 
 pub(crate) fn num_threads() -> usize {
@@ -162,12 +162,13 @@ pub(super) fn combine_rows<Coeff, El>(
     coeffs: &[Coeff],
     evaluations: &[El],
     row_len: usize,
+    zero: El,
 ) -> Vec<El>
 where
     Coeff: Send + Sync,
-    El: Clone + Default + CheckedAdd + for<'z> MulByScalar<&'z Coeff> + Send + Sync,
+    El: Clone + CheckedAdd + for<'z> MulByScalar<&'z Coeff> + Send + Sync,
 {
-    let mut combined_row = vec![El::default(); row_len];
+    let mut combined_row = vec![zero; row_len];
     parallelize(&mut combined_row, |(combined_row, offset)| {
         combined_row
             .iter_mut()
@@ -446,7 +447,7 @@ mod test {
     fn test_inner_product_basic() {
         let lhs = [1, 2, 3];
         let rhs = [4, 5, 6];
-        assert_eq!(inner_product(lhs.iter(), rhs.iter()), 4 + 2 * 5 + 3 * 6);
+        assert_eq!(inner_product(lhs.iter(), rhs.iter(), 0), 4 + 2 * 5 + 3 * 6);
     }
 
     #[test]
@@ -455,7 +456,7 @@ mod test {
         let evaluations = vec![3, 4, 5, 6];
         let row_len = 2;
 
-        let result = combine_rows(&coeffs, &evaluations, row_len);
+        let result = combine_rows(&coeffs, &evaluations, row_len, 0);
 
         assert_eq!(result, vec![(3 + 2 * 5), (4 + 2 * 6)]);
     }
@@ -466,7 +467,7 @@ mod test {
         let evaluations = vec![2, 4, 6, 8];
         let row_len = 2;
 
-        let result = combine_rows(&coeffs, &evaluations, row_len);
+        let result = combine_rows(&coeffs, &evaluations, row_len, 0);
 
         assert_eq!(result, vec![(3 * 2 + 4 * 6), (3 * 4 + 4 * 8)]);
     }
@@ -476,7 +477,7 @@ mod test {
         let evaluations = vec![2000, -3000, 4000, -5000];
         let row_len = 2;
 
-        let result = combine_rows(&coeffs, &evaluations, row_len);
+        let result = combine_rows(&coeffs, &evaluations, row_len, 0);
 
         assert_eq!(
             result,

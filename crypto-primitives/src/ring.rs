@@ -24,11 +24,8 @@ pub trait Ring:
     + Clone
     + PartialEq
     + Eq
-    + Default
     + Sync
     + Send
-    + Zero
-    + One
     + Hash
     // Arithmetic operations consuming rhs
     + CheckedNeg
@@ -51,11 +48,15 @@ pub trait Ring:
     + for<'a> Product<&'a Self>
     {}
 
-pub trait ConstRing: Ring + ConstZero + ConstOne {}
-impl<T> ConstRing for T where T: Ring + ConstZero + ConstOne {}
+/// Ring whose zero and one elements can be constructed from the type alone.
+pub trait FixedRing: Ring + Default + Zero + One {}
+impl<T> FixedRing for T where T: Ring + Default + Zero + One {}
+
+pub trait ConstRing: FixedRing + ConstZero + ConstOne + From<bool> + From<i8> {}
+impl<T> ConstRing for T where T: FixedRing + ConstZero + ConstOne + From<bool> + From<i8> {}
 
 /// Ring of integers, usually denoted as `Z`.
-pub trait IntRing: Ring + Ord + Pow<u32> + From<bool> + From<i8> {}
+pub trait IntRing: Ring + Ord + Pow<u32> {}
 
 pub trait IntRingWithRem:
     IntRing + CheckedRem + RemAssign + for<'a> Rem<&'a Self> + for<'a> RemAssign<&'a Self>
