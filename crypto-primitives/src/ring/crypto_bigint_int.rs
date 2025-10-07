@@ -375,6 +375,12 @@ impl<const LIMBS: usize, const LIMBS2: usize> From<&crypto_bigint::Int<LIMBS>> f
     }
 }
 
+impl<const LIMBS: usize> From<bool> for Int<LIMBS> {
+    fn from(value: bool) -> Self {
+        Self(crypto_bigint::Int::<LIMBS>::from(i8::from(value)))
+    }
+}
+
 macro_rules! impl_from_primitive {
     ($($t:ty),+) => {
         $(

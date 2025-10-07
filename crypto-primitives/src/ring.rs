@@ -56,7 +56,7 @@ pub trait ConstRing: Ring + ConstZero + ConstOne {}
 impl<T> ConstRing for T where T: Ring + ConstZero + ConstOne {}
 
 /// Ring of integers, usually denoted as `Z`.
-pub trait IntRing: Ring + Ord + Pow<u32> {}
+pub trait IntRing: Ring + Ord + Pow<u32> + From<bool> {}
 
 pub trait IntRingWithRem:
     IntRing + CheckedRem + RemAssign + for<'a> Rem<&'a Self> + for<'a> RemAssign<&'a Self>
