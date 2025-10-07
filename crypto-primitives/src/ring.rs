@@ -1,5 +1,3 @@
-#[cfg(feature = "ark_ff")]
-pub mod ark_ff_big_integer;
 #[cfg(feature = "crypto_bigint")]
 pub mod crypto_bigint_int;
 
@@ -56,7 +54,7 @@ pub trait ConstRing: Ring + ConstZero + ConstOne {}
 impl<T> ConstRing for T where T: Ring + ConstZero + ConstOne {}
 
 /// Ring of integers, usually denoted as `Z`.
-pub trait IntRing: Ring + Ord + Pow<u32> + From<bool> {}
+pub trait IntRing: Ring + Ord + Pow<u32> + From<bool> + From<i8> {}
 
 pub trait IntRingWithRem:
     IntRing + CheckedRem + RemAssign + for<'a> Rem<&'a Self> + for<'a> RemAssign<&'a Self>
