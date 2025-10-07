@@ -9,7 +9,7 @@ use core::{
     str::FromStr,
 };
 use crypto_bigint::{
-    Limb, Uint,
+    Integer, Limb, Uint,
     modular::{ConstMontyForm, ConstMontyParams as Params, Retrieve},
     subtle::{Choice, ConditionallySelectable, ConstantTimeEq},
 };
@@ -527,7 +527,29 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize, const LIMBS2: usize> From<&crypto_b
 
 impl<Mod: Params<LIMBS>, const LIMBS: usize> Ring for ConstMontyField<Mod, LIMBS> {}
 
-impl<Mod: Params<LIMBS>, const LIMBS: usize> IntRing for ConstMontyField<Mod, LIMBS> {}
+impl<Mod: Params<LIMBS>, const LIMBS: usize> IntRing for ConstMontyField<Mod, LIMBS> {
+    fn is_odd(&self) -> bool {
+        // Sadly there's no efficient way to implement this for Montgomery form
+        self.0.retrieve().is_odd().into()
+    }
+
+    fn is_even(&self) -> bool {
+        // Sadly there's no efficient way to implement this for Montgomery form
+        self.0.retrieve().is_even().into()
+    }
+
+    fn checked_abs(&self) -> Option<Self> {
+        Some(*self)
+    }
+
+    fn is_positive(&self) -> bool {
+        !self.is_zero()
+    }
+
+    fn is_negative(&self) -> bool {
+        false
+    }
+}
 
 impl<Mod: Params<LIMBS>, const LIMBS: usize> Field for ConstMontyField<Mod, LIMBS> {
     type Inner = ConstMontyForm<Mod, LIMBS>;
@@ -546,13 +568,9 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> ConstPrimeField for ConstMontyField
     };
 
     #[inline(always)]
-    fn new(inner: Self::Inner) -> Self {
-        Self(inner)
-    }
-
-    #[inline(always)]
     fn new_unchecked(inner: Self::Inner) -> Self {
-        ConstPrimeField::new(inner)
+        // Inner value is a ConstMontyForm so it's guaranteed to be valid
+        Self(inner)
     }
 }
 

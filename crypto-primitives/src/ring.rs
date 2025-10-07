@@ -56,7 +56,19 @@ pub trait ConstRing: FixedRing + ConstZero + ConstOne + From<bool> + From<i8> {}
 impl<T> ConstRing for T where T: FixedRing + ConstZero + ConstOne + From<bool> + From<i8> {}
 
 /// Ring of integers, usually denoted as `Z`.
-pub trait IntRing: Ring + Ord + Pow<u32> {}
+pub trait IntRing: Ring + Ord + Pow<u32> {
+    fn is_odd(&self) -> bool;
+
+    fn is_even(&self) -> bool;
+
+    /// Checked absolute value. Computes `self.abs()`, returning `None` if `self
+    /// == MIN`.
+    fn checked_abs(&self) -> Option<Self>;
+
+    fn is_positive(&self) -> bool;
+
+    fn is_negative(&self) -> bool;
+}
 
 pub trait IntRingWithRem:
     IntRing + CheckedRem + RemAssign + for<'a> Rem<&'a Self> + for<'a> RemAssign<&'a Self>
@@ -82,7 +94,27 @@ impl<T> ConstIntRing for T where T: IntRing + ConstRing + FromStr {}
 macro_rules! primitive_int_ring {
     ($t:ident) => {
         impl Ring for $t {}
-        impl IntRing for $t {}
+        impl IntRing for $t {
+            fn is_odd(&self) -> bool {
+                *self & 1 == 1
+            }
+
+            fn is_even(&self) -> bool {
+                *self & 1 == 0
+            }
+
+            fn checked_abs(&self) -> Option<Self> {
+                $t::checked_abs(*self)
+            }
+
+            fn is_positive(&self) -> bool {
+                *self > 0
+            }
+
+            fn is_negative(&self) -> bool {
+                *self < 0
+            }
+        }
     };
 }
 

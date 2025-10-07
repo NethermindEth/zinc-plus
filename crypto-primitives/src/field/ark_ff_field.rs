@@ -383,8 +383,6 @@ impl<F: ArkWrappedField> From<bool> for ArkField<F> {
 
 impl<F: ArkWrappedField> Ring for ArkField<F> {}
 
-impl<F: ArkWrappedField> IntRing for ArkField<F> {}
-
 impl<F: ArkWrappedField> Field for ArkField<F> {
     type Inner = F;
 
@@ -563,7 +561,7 @@ impl<F: ArkWrappedField> ArkWrappedField for ArkField<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ConstIntRing, ensure_type_implements_trait};
+    use crate::{ConstRing, ensure_type_implements_trait};
     use alloc::vec::Vec;
     use ark_ff::{Fp256, MontBackend, MontConfig};
     use num_traits::{One, Zero};
@@ -579,7 +577,7 @@ mod tests {
 
     #[test]
     fn ensure_blanket_traits() {
-        ensure_type_implements_trait!(F, ConstIntRing);
+        ensure_type_implements_trait!(F, ConstRing);
     }
 
     #[test]

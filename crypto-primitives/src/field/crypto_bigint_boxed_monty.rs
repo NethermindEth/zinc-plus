@@ -1,4 +1,5 @@
 use super::*;
+use crate::crypto_bigint_int::Int;
 use core::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
@@ -7,7 +8,7 @@ use core::{
     ops::{Add, AddAssign, DivAssign, Mul, MulAssign, Rem, RemAssign, Sub, SubAssign},
 };
 use crypto_bigint::{
-    BoxedUint, NonZero, Odd,
+    BoxedUint, Integer, NonZero, Odd, Resize,
     modular::{BoxedMontyForm, BoxedMontyParams},
 };
 use crypto_primitives_proc_macros::InfallibleCheckedOp;
@@ -21,7 +22,7 @@ pub struct BoxedMontyField(BoxedMontyForm);
 
 impl BoxedMontyField {
     /// Creates a new `BoxedMontyField` from a `BoxedMontyForm`.
-    pub fn new(form: BoxedMontyForm) -> Self {
+    pub const fn new(form: BoxedMontyForm) -> Self {
         Self(form)
     }
 }
@@ -314,13 +315,132 @@ impl From<&BoxedMontyField> for BoxedMontyField {
     }
 }
 
+macro_rules! impl_from_unsigned {
+    ($($t:ty),* $(,)?) => {
+        $(
+            impl FromWithConfig<$t> for BoxedMontyField {
+                fn from_with_cfg(value: $t, cfg: &Self::Config) -> Self {
+                    let abs: BoxedUint = value.into();
+                    let abs = abs.resize(cfg.modulus().bits_precision());
+                    Self(BoxedMontyForm::new(abs, cfg.clone()))
+                }
+            }
+
+            impl FromWithConfig<&$t> for BoxedMontyField {
+                fn from_with_cfg(value: &$t, cfg: &Self::Config) -> Self {
+                    Self::from_with_cfg(*value, cfg)
+                }
+            }
+        )*
+    };
+}
+
+macro_rules! impl_from_signed {
+    ($($t:ty),* $(,)?) => {
+        $(
+            #[allow(clippy::arithmetic_side_effects)] // False alert
+            impl FromWithConfig<$t> for BoxedMontyField {
+                fn from_with_cfg(value: $t, cfg: &Self::Config) -> Self {
+                    let abs: u128 = value.abs().try_into().expect("unreachable");
+                    let abs: BoxedUint = abs.into();
+                    let abs = abs.resize(cfg.modulus().bits_precision());
+                    let result = Self(BoxedMontyForm::new(abs, cfg.clone()));
+                    if value.is_negative() { -result } else { result }
+                }
+            }
+
+            impl FromWithConfig<&$t> for BoxedMontyField {
+                fn from_with_cfg(value: &$t, cfg: &Self::Config) -> Self {
+                    Self::from_with_cfg(*value, cfg)
+                }
+            }
+        )*
+    };
+}
+
+impl_from_unsigned!(u8, u16, u32, u64, u128);
+impl_from_signed!(i8, i16, i32, i64, i128);
+
+impl FromWithConfig<bool> for BoxedMontyField {
+    fn from_with_cfg(value: bool, cfg: &Self::Config) -> Self {
+        let abs: BoxedUint = if value {
+            BoxedUint::one()
+        } else {
+            BoxedUint::zero()
+        };
+        let abs = abs.resize(cfg.modulus().bits_precision());
+        Self(BoxedMontyForm::new(abs, cfg.clone()))
+    }
+}
+
+impl FromWithConfig<&bool> for BoxedMontyField {
+    fn from_with_cfg(value: &bool, cfg: &Self::Config) -> Self {
+        Self::from_with_cfg(*value, cfg)
+    }
+}
+
+impl<const LIMBS: usize> FromWithConfig<Int<LIMBS>> for BoxedMontyField {
+    fn from_with_cfg(value: Int<LIMBS>, cfg: &Self::Config) -> Self {
+        Self::from_with_cfg(&value, cfg)
+    }
+}
+
+impl<const LIMBS: usize> FromWithConfig<&Int<LIMBS>> for BoxedMontyField {
+    #[allow(clippy::arithmetic_side_effects)] // False alert
+    fn from_with_cfg(value: &Int<LIMBS>, cfg: &Self::Config) -> Self {
+        let abs: BoxedUint = value.inner().abs().into();
+        let abs = abs.resize(cfg.modulus().bits_precision());
+
+        let result = Self(BoxedMontyForm::new(abs, cfg.clone()));
+
+        if value.is_negative() { -result } else { result }
+    }
+}
+
+impl<const LIMBS: usize> FromWithConfig<crypto_bigint::Uint<LIMBS>> for BoxedMontyField {
+    fn from_with_cfg(value: crypto_bigint::Uint<LIMBS>, cfg: &Self::Config) -> Self {
+        Self::from_with_cfg(&value, cfg)
+    }
+}
+
+impl<const LIMBS: usize> FromWithConfig<&crypto_bigint::Uint<LIMBS>> for BoxedMontyField {
+    #[allow(clippy::arithmetic_side_effects)] // False alert
+    fn from_with_cfg(value: &crypto_bigint::Uint<LIMBS>, cfg: &Self::Config) -> Self {
+        let value: BoxedUint = value.into();
+        let value = value.resize(cfg.modulus().bits_precision());
+        Self(BoxedMontyForm::new(value, cfg.clone()))
+    }
+}
+
 //
 // Ring and Field
 //
 
 impl Ring for BoxedMontyField {}
 
-impl IntRing for BoxedMontyField {}
+impl IntRing for BoxedMontyField {
+    fn is_odd(&self) -> bool {
+        // Sadly there's no efficient way to implement this for Montgomery form
+        self.0.retrieve().is_odd().into()
+    }
+
+    fn is_even(&self) -> bool {
+        // Sadly there's no efficient way to implement this for Montgomery form
+        self.0.retrieve().is_even().into()
+    }
+
+    fn checked_abs(&self) -> Option<Self> {
+        Some(self.clone())
+    }
+
+    fn is_positive(&self) -> bool {
+        self.0.is_nonzero().into()
+    }
+
+    fn is_negative(&self) -> bool {
+        false
+    }
+}
 
 impl Field for BoxedMontyField {
     type Inner = BoxedUint;
@@ -334,6 +454,10 @@ impl Field for BoxedMontyField {
 impl PrimeField for BoxedMontyField {
     type Config = BoxedMontyParams;
 
+    fn cfg(&self) -> &Self::Config {
+        self.0.params()
+    }
+
     fn modulus(&self) -> BoxedUint {
         self.0.params().modulus().clone().get()
     }
@@ -344,16 +468,15 @@ impl PrimeField for BoxedMontyField {
         (value - BoxedUint::one()) / NonZero::new(BoxedUint::from(2_u8)).unwrap()
     }
 
-    fn new_with_modulus(inner: Self::Inner, modulus: &Self::Inner) -> Result<Self, FieldError> {
+    fn make_cfg(modulus: &Self::Inner) -> Result<Self::Config, FieldError> {
         let Some(modulus) = Odd::new(modulus.clone()).into_option() else {
             return Err(FieldError::InvalidModulus);
         };
-        let params = BoxedMontyParams::new(modulus);
-        Ok(Self(BoxedMontyForm::new(inner, params)))
+        Ok(BoxedMontyParams::new(modulus))
     }
 
-    fn new_with_cfg(inner: Self::Inner, cfg: Self::Config) -> Self {
-        Self(BoxedMontyForm::new(inner, cfg))
+    fn new_unchecked_with_cfg(inner: Self::Inner, cfg: &Self::Config) -> Self {
+        Self(BoxedMontyForm::from_montgomery(inner, cfg.clone()))
     }
 
     fn zero_with_cfg(cfg: &Self::Config) -> Self {
@@ -365,6 +488,6 @@ impl PrimeField for BoxedMontyField {
     }
 
     fn one_with_cfg(cfg: &Self::Config) -> Self {
-        Self(BoxedMontyForm::zero(cfg.clone()))
+        Self(BoxedMontyForm::one(cfg.clone()))
     }
 }

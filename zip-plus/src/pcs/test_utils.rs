@@ -17,8 +17,14 @@ use crate::{
     pcs_transcript::PcsTranscript,
     poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
     traits::{FromRef, Transcribable, Transcript},
+    utils::UintSemiring,
 };
-use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
+use crypto_bigint::{BoxedUint, Uint};
+use crypto_primes::hazmat::MillerRabin;
+use crypto_primitives::{
+    FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
+    crypto_bigint_int::Int,
+};
 use itertools::Itertools;
 use num_traits::Zero;
 
@@ -31,6 +37,8 @@ impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N
     type Eval = Int<N>;
     type CwR = Int<K>;
     type Cw = Int<K>;
+    type Fmod = UintSemiring<K>;
+    type PrimeTest = MillerRabin<Uint<K>>;
     type Chal = Int<N>;
     type Pt = Int<N>;
     type CombR = Int<M>;
@@ -47,6 +55,8 @@ impl<const N: usize, const K: usize, const M: usize, const DEGREE: usize> ZipTyp
     type Eval = DensePolynomial<Int<N>, DEGREE>;
     type CwR = Int<K>;
     type Cw = DensePolynomial<Int<K>, DEGREE>;
+    type Fmod = UintSemiring<K>;
+    type PrimeTest = MillerRabin<Uint<K>>;
     type Chal = Int<N>;
     type Pt = Int<N>;
     type CombR = Int<M>;
@@ -109,7 +119,6 @@ fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt>>(
 
 pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
     num_vars: usize,
-    field_cfg: &F::Config,
 ) -> (
     ZipPlusParams<TestZipTypes<N, K, M>, RaaCode<TestZipTypes<N, K, M>, REPETITION_FACTOR>>,
     ZipPlusCommitment,
@@ -118,11 +127,11 @@ pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
     ZipPlusProof,
 )
 where
-    F: PrimeField + FromRef<Int<N>> + for<'a> MulByScalar<&'a F>,
-    F::Inner: Transcribable,
+    F: PrimeField + for<'a> FromWithConfig<&'a Int<N>> + for<'a> MulByScalar<&'a F>,
+    F::Inner: FromRef<UintSemiring<K>> + Transcribable,
     Int<N>: ProjectableToField<F>,
 {
-    setup_full_protocol_inner::<_, _, _, N>(num_vars, field_cfg, setup_test_params, || {
+    setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_test_params, || {
         (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect()
     })
 }
@@ -135,7 +144,6 @@ pub fn setup_full_protocol_poly<
     const DEGREE: usize,
 >(
     num_vars: usize,
-    field_cfg: &F::Config,
 ) -> (
     ZipPlusParams<
         TestPolyZipTypes<N, K, M, DEGREE>,
@@ -147,18 +155,17 @@ pub fn setup_full_protocol_poly<
     ZipPlusProof,
 )
 where
-    F: PrimeField + FromRef<Int<N>> + for<'a> MulByScalar<&'a F>,
-    F::Inner: Transcribable,
+    F: PrimeField + for<'a> FromWithConfig<&'a Int<N>> + for<'a> MulByScalar<&'a F>,
+    F::Inner: FromRef<UintSemiring<K>> + Transcribable,
     DensePolynomial<Int<N>, DEGREE>: ProjectableToField<F>,
 {
-    setup_full_protocol_inner::<_, _, _, N>(num_vars, field_cfg, setup_poly_test_params, || {
+    setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_poly_test_params, || {
         (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect()
     })
 }
 
 fn setup_full_protocol_inner<Zt, Lc, F, const N: usize>(
     num_vars: usize,
-    field_cfg: &F::Config,
     setup: impl FnOnce(usize) -> (ZipPlusParams<Zt, Lc>, DenseMultilinearExtension<Zt::Eval>),
     prepare_evaluation_point: impl FnOnce() -> Vec<Zt::Pt>,
 ) -> (
@@ -172,8 +179,11 @@ where
     Zt: ZipTypes,
     Zt::Eval: for<'a> MulByScalar<&'a Zt::Pt>,
     Lc: LinearCode<Zt>,
-    F: PrimeField + FromRef<Zt::Chal> + FromRef<Zt::Pt> + for<'a> MulByScalar<&'a F>,
-    F::Inner: Transcribable,
+    F: PrimeField
+        + for<'a> FromWithConfig<&'a Zt::Chal>
+        + for<'a> FromWithConfig<&'a Zt::Pt>
+        + for<'a> MulByScalar<&'a F>,
+    F::Inner: FromRef<Zt::Fmod> + Transcribable,
     Zt::Eval: ProjectableToField<F>,
 {
     let (pp, poly) = setup(num_vars);
@@ -184,13 +194,20 @@ where
 
     let transcript = ZipPlus::test(&pp, &poly, &data).unwrap();
 
-    let projecting_element: F = {
+    let (field_cfg, projecting_element) = {
         let mut transcript: PcsTranscript = transcript.clone().into();
+        let field_modulus = F::Inner::from_ref(
+            &transcript
+                .fs_transcript
+                .get_prime::<Zt::Fmod, Zt::PrimeTest>(),
+        );
+        let field_cfg = F::make_cfg(&field_modulus).unwrap();
         let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
-        F::from_ref(&projecting_element)
+        let projecting_element: F = (&projecting_element).into_with_cfg(&field_cfg);
+        (field_cfg, projecting_element)
     };
 
-    let (eval_f, proof) = ZipPlus::evaluate(&pp, &poly, &point, transcript, field_cfg).unwrap();
+    let (eval_f, proof) = ZipPlus::evaluate(&pp, &poly, &point, transcript).unwrap();
 
     // Verify the evaluation is done correctly
     {
@@ -201,7 +218,16 @@ where
         assert_eq!(eval_f, project(&expected_eval));
     }
 
-    let point_f = point.iter().map(F::from_ref).collect_vec();
+    let point_f = point
+        .iter()
+        .map(|v| v.into_with_cfg(&field_cfg))
+        .collect_vec();
 
     (pp, comm, point_f, eval_f, proof)
+}
+
+pub fn get_dyn_config(hex_modulus: &str) -> <BoxedMontyField as PrimeField>::Config {
+    let modulus =
+        BoxedUint::from_str_radix_vartime(hex_modulus, 16).expect("Invalid modulus hex string");
+    BoxedMontyField::make_cfg(&modulus).expect("Failed to create field config")
 }

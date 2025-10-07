@@ -2,10 +2,13 @@ use crate::{
     code::LinearCode,
     merkle::{MerkleTree, MtHash},
     poly::Polynomial,
-    traits::{FromRef, Named, Transcribable},
+    primality::PrimalityTest,
+    traits::{ConstTranscribable, FromRef, Named, SimpleSemiring},
     utils::ReinterpretVector,
 };
-use crypto_primitives::{ConstIntRing, FixedRing, PrimeField, crypto_bigint_int::Int};
+use crypto_primitives::{
+    ConstIntRing, FixedRing, FromWithConfig, PrimeField, crypto_bigint_int::Int,
+};
 use num_traits::CheckedMul;
 use p3_field::Packable;
 use std::marker::PhantomData;
@@ -14,32 +17,36 @@ pub trait ZipTypes: Send + Sync {
     const NUM_COLUMN_OPENINGS: usize;
 
     /// Coefficient ring of evaluation polynomial [Self::Eval]
-    type EvalR: ConstIntRing + Transcribable + Named;
+    type EvalR: ConstIntRing + ConstTranscribable + Named;
     /// Ring of witness/polynomial evaluations on boolean hypercube
     type Eval: FixedRing + Named + Polynomial<Self::EvalR>;
 
     /// Coefficient ring of codeword polynomial [Self::Cw]
-    type CwR: ConstIntRing + Transcribable + Named;
+    type CwR: ConstIntRing + ConstTranscribable + Named;
     /// Ring of codeword elements, at least as wide as the evaluation ring
     type Cw: FixedRing
         + Polynomial<Self::CwR>
-        + FromRef<Self::Eval>
-        + Transcribable
+        + ConstTranscribable
         + AsPackable
+        + FromRef<Self::Eval>
         + Named
         + Copy;
 
+    /// Semiring type used to draft field modulus elements, natural numbers
+    type Fmod: SimpleSemiring + ConstTranscribable + Named;
+    type PrimeTest: PrimalityTest<Self::Fmod>;
+
     /// Ring of challenge elements (coefficients) to perform a random linear
     /// combination of codewords
-    type Chal: ConstIntRing + Transcribable + Named;
+    type Chal: ConstIntRing + ConstTranscribable + Named;
 
     /// Ring of point coordinates to evaluate the multilinear polynomial
     type Pt: ConstIntRing;
 
     /// Coefficient ring of linear combination polynomial [Self::Comb]
     type CombR: ConstIntRing
+        + ConstTranscribable
         + FromRef<Self::CombR>
-        + Transcribable
         + for<'a> MulByScalar<&'a Self::Chal>;
     /// Ring of elements in the linear combination of codewords, at least as
     /// wide as the evaluation, codeword, and challenge rings.
@@ -114,7 +121,7 @@ pub struct ZipPlusCommitment {
 }
 
 pub trait AsPackable: Clone + ReinterpretVector<Self::Packable> {
-    type Packable: Packable + Transcribable + Clone + Send + Sync;
+    type Packable: Packable + ConstTranscribable + Clone + Send + Sync;
 }
 
 macro_rules! impl_as_packable_for_primitives {
@@ -143,15 +150,15 @@ unsafe impl<const N: usize> ReinterpretVector<PackedInt<N>> for Int<N> {}
 
 impl<const LIMBS: usize> Packable for PackedInt<LIMBS> {}
 
-impl<const LIMBS: usize> Transcribable for PackedInt<LIMBS> {
+impl<const LIMBS: usize> ConstTranscribable for PackedInt<LIMBS> {
     const NUM_BYTES: usize = Int::<LIMBS>::NUM_BYTES;
 
     fn read_transcription_bytes(bytes: &[u8]) -> Self {
-        Self(Int::read_transcription_bytes(bytes))
+        Self(<Int<LIMBS> as ConstTranscribable>::read_transcription_bytes(bytes))
     }
 
     fn write_transcription_bytes(&self, buf: &mut [u8]) {
-        self.0.write_transcription_bytes(buf)
+        ConstTranscribable::write_transcription_bytes(&self.0, buf)
     }
 }
 
@@ -210,9 +217,13 @@ pub trait ProjectableToField<F: PrimeField> {
 macro_rules! impl_projectable_to_field_for_primitives {
     ($($t:ty),*) => {
         $(
-            impl<F: PrimeField + From<$t>> ProjectableToField<F> for $t {
-                fn prepare_projection(_sampled_value: &F) -> impl Fn(&Self) -> F + 'static {
-                    move |x: &Self| F::from(*x)
+            impl<F> ProjectableToField<F> for $t
+            where
+                F: PrimeField + FromWithConfig<$t>,
+            {
+                fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static {
+                    let cfg = sampled_value.cfg().clone();
+                    move |x: &Self| F::from_with_cfg(*x, &cfg)
                 }
             }
         )*

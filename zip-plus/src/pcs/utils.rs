@@ -10,7 +10,7 @@ use crate::{
     pcs::structs::{AsPackable, ZipPlusHint, ZipTypes},
     pcs_transcript::PcsTranscript,
     poly::Polynomial,
-    traits::Transcribable,
+    traits::ConstTranscribable,
 };
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;

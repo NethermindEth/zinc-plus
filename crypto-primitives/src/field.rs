@@ -12,13 +12,15 @@ use core::{
     fmt::Debug,
     ops::{Div, DivAssign, Neg},
 };
-use num_traits::{Inv, Zero};
+use num_traits::{Inv, Pow, Zero};
+use thiserror::Error;
 
 /// Element of a field (F) - a group where addition and multiplication are
 /// defined with their respective inverse operations.
 pub trait Field:
     Ring
     + Neg<Output=Self>
+    + Pow<u32, Output=Self>
     // Arithmetic operations consuming rhs
     + Div<Output=Self>
     + DivAssign
@@ -43,15 +45,22 @@ pub trait PrimeField: Field {
     /// Runtime configuration for the prime field, empty for constant prime
     /// fields. For dynamic prime fields, it could be just modulus or more
     /// complex structure.
-    type Config: Debug + Clone;
+    type Config: Debug + Clone + 'static;
+
+    fn cfg(&self) -> &Self::Config;
 
     fn modulus(&self) -> Self::Inner;
 
     fn modulus_minus_one_div_two(&self) -> Self::Inner;
 
-    fn new_with_modulus(inner: Self::Inner, modulus: &Self::Inner) -> Result<Self, FieldError>;
+    fn make_cfg(modulus: &Self::Inner) -> Result<Self::Config, FieldError>;
 
-    fn new_with_cfg(inner: Self::Inner, cfg: Self::Config) -> Self;
+    /// Creates a new instance of the prime field element from a representation
+    /// known to be valid - should consume exactly the value returned by
+    /// `inner()`. Ideally, this should not check the validity of the
+    /// element, but it's acceptable to perform a check if it can't be
+    /// avoided.
+    fn new_unchecked_with_cfg(inner: Self::Inner, cfg: &Self::Config) -> Self;
 
     fn zero_with_cfg(cfg: &Self::Config) -> Self;
 
@@ -62,16 +71,16 @@ pub trait PrimeField: Field {
 
 /// Prime field whose modulus is a constant value known at compile time.
 pub trait ConstPrimeField:
-    PrimeField + ConstIntRing + Inv<Output = Option<Self>> + From<u64> + From<u128> + From<Self::Inner>
+    Field + ConstIntRing + Inv<Output = Option<Self>> + From<u64> + From<u128> + From<Self::Inner>
 {
     const MODULUS: Self::Inner;
     const MODULUS_MINUS_ONE_DIV_TWO: Self::Inner;
 
-    fn new(inner: Self::Inner) -> Self;
-
-    /// Creates a new instance of the prime field element known to be valid.
-    /// Ideally, this should not check the validity of the element, but it's
-    /// acceptable to perform a check if it can't be avoided.
+    /// Creates a new instance of the prime field element from a representation
+    /// known to be valid - should consume exactly the value returned by
+    /// `inner()`. Ideally, this should not check the validity of the
+    /// element, but it's acceptable to perform a check if it can't be
+    /// avoided.
     fn new_unchecked(inner: Self::Inner) -> Self;
 }
 
@@ -79,26 +88,30 @@ impl<T: ConstPrimeField> PrimeField for T {
     /// For constant prime fields, the configuration is empty.
     type Config = ();
 
+    fn cfg(&self) -> &Self::Config {
+        &()
+    }
+
     #[inline(always)]
-    fn modulus(&self) -> T::Inner {
-        T::MODULUS
+    fn modulus(&self) -> Self::Inner {
+        Self::MODULUS
     }
 
     #[inline(always)]
     fn modulus_minus_one_div_two(&self) -> T::Inner {
-        T::MODULUS_MINUS_ONE_DIV_TWO
+        Self::MODULUS_MINUS_ONE_DIV_TWO
     }
 
-    fn new_with_modulus(inner: Self::Inner, modulus: &Self::Inner) -> Result<Self, FieldError> {
-        if *modulus == T::MODULUS {
-            Ok(Self::new(inner))
+    fn make_cfg(modulus: &Self::Inner) -> Result<Self::Config, FieldError> {
+        if *modulus == Self::MODULUS {
+            Ok(())
         } else {
             Err(FieldError::InvalidModulus)
         }
     }
 
-    fn new_with_cfg(inner: T::Inner, _cfg: Self::Config) -> Self {
-        ConstPrimeField::new(inner)
+    fn new_unchecked_with_cfg(inner: Self::Inner, _cfg: &Self::Config) -> Self {
+        ConstPrimeField::new_unchecked(inner)
     }
 
     fn zero_with_cfg(_cfg: &Self::Config) -> Self {
@@ -124,6 +137,38 @@ pub trait MontgomeryField: PrimeField {
     const INV: Self::Inner;
 }
 
+/// Analogous to `From` trait, but with a prime field configuration parameter.
+pub trait FromWithConfig<T>: PrimeField {
+    fn from_with_cfg(value: T, cfg: &Self::Config) -> Self;
+}
+
+/// Trivial implementation for types that implement `From<T>`.
+impl<F, T> FromWithConfig<T> for F
+where
+    F: PrimeField + From<T>,
+{
+    fn from_with_cfg(value: T, _cfg: &Self::Config) -> Self {
+        Self::from(value)
+    }
+}
+
+/// Analogous to `Into` trait, but with a prime field configuration parameter.
+/// Preferribly should not be implemented directly.
+pub trait IntoWithConfig<F: PrimeField> {
+    fn into_with_cfg(self, cfg: &F::Config) -> F;
+}
+
+impl<F, T> IntoWithConfig<F> for T
+where
+    F: PrimeField + FromWithConfig<T>,
+{
+    fn into_with_cfg(self, cfg: &F::Config) -> F {
+        F::from_with_cfg(self, cfg)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum FieldError {
+    #[error("Invalid field modulus")]
     InvalidModulus,
 }

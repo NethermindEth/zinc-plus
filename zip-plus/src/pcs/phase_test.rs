@@ -51,7 +51,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             let combined_row =
                 combine_rows(&coeffs, &evals, pp.linear_code.row_len(), Zt::CombR::ZERO);
 
-            transcript.write_many(&combined_row)?;
+            transcript.write_const_many(&combined_row)?;
         }
 
         // Open merkle tree for each column drawn
@@ -76,7 +76,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             .step_by(pp.linear_code.codeword_len());
 
         // Write the elements in the squeezed column to the shared transcript
-        transcript.write_many(column_values)?;
+        transcript.write_const_many(column_values)?;
 
         ColumnOpening::open_at_column(column, commit_hint, transcript)
             .map_err(|_| ZipError::InvalidPcsOpen("Failed to open merkle tree".into()))?;

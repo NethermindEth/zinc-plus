@@ -7,9 +7,11 @@ pub mod utils;
 pub mod field;
 pub mod merkle;
 pub mod poly;
+pub mod primality;
 pub mod transcript;
 
 use ark_std::string::String;
+use crypto_primitives::FieldError;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Error)]
@@ -31,5 +33,11 @@ pub enum ZipError {
 impl From<poly::EvaluationError> for ZipError {
     fn from(err: poly::EvaluationError) -> Self {
         ZipError::PolynomialEvaluationError(err)
+    }
+}
+
+impl From<FieldError> for ZipError {
+    fn from(err: FieldError) -> Self {
+        ZipError::InvalidSnark(format!("Field error: {err}"))
     }
 }

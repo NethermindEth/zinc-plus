@@ -1,13 +1,13 @@
-use std::io::{Cursor, ErrorKind, Read, Write};
-
 use crypto_primitives::PrimeField;
+use itertools::Itertools;
 use p3_matrix::Dimensions;
+use std::io::{Cursor, ErrorKind, Read, Write};
 
 use crate::{
     ZipError,
     merkle::MerkleProof,
     rem,
-    traits::{Transcribable, Transcript},
+    traits::{ConstTranscribable, Transcribable, Transcript},
     transcript::KeccakTranscript,
 };
 
@@ -31,26 +31,25 @@ impl PcsTranscript {
         Self::default()
     }
 
-    /// Absorbs a field element into the Fiat-Shamir transcript.
-    /// This is used to incorporate public values into the transcript for
-    /// challenge generation.
-    pub fn common_field_element<F>(&mut self, fe: &F)
-    where
-        F: PrimeField,
-        F::Inner: Transcribable,
-    {
-        self.fs_transcript.absorb_random_field(fe);
-    }
-
     // TODO if we change this to an iterator we may be able to save some memory
     pub fn write_field_elements<F>(&mut self, elems: &[F]) -> Result<(), ZipError>
     where
         F: PrimeField,
         F::Inner: Transcribable,
     {
-        let mut buf = vec![0; F::Inner::NUM_BYTES];
-        for elem in elems {
-            self.write_field_element(elem, &mut buf)?;
+        if !elems.is_empty() {
+            let num_bytes = F::Inner::get_num_bytes(elems[0].inner());
+            let num_bytes_arr = num_bytes
+                .to_le_bytes()
+                .into_iter()
+                .take(F::Inner::LENGTH_NUM_BYTES)
+                .collect_vec();
+            self.stream.write_all(&num_bytes_arr)?;
+
+            let mut buf = vec![0; num_bytes];
+            for elem in elems {
+                self.write_field_element_no_length(elem, &mut buf)?;
+            }
         }
 
         Ok(())
@@ -61,74 +60,93 @@ impl PcsTranscript {
         F: PrimeField,
         F::Inner: Transcribable,
     {
-        (0..n)
-            .map(|_| self.read_field_element())
-            .collect::<Result<Vec<_>, _>>()
+        if n > 0 {
+            let mut buf = vec![0; F::Inner::LENGTH_NUM_BYTES];
+            self.stream.read_exact(&mut buf)?;
+            let num_bytes = F::Inner::read_num_bytes(&buf);
+
+            let mut buf = vec![0; num_bytes];
+            (0..n)
+                .map(|_| self.read_field_element_no_length(&mut buf))
+                .collect::<Result<Vec<_>, _>>()
+        } else {
+            Ok(vec![])
+        }
     }
 
     /// Reads a field element from the proof stream and absorbs it into the
     /// transcript. Used during proof verification to retrieve and process
     /// field elements.
-    pub fn read_field_element<F>(&mut self) -> Result<F, ZipError>
+    ///
+    /// Provided buffer must be of exact size of the field element.
+    fn read_field_element_no_length<F>(&mut self, buf: &mut [u8]) -> Result<F, ZipError>
     where
         F: PrimeField,
         F::Inner: Transcribable,
     {
-        let inner = self.read()?;
-        let modulus = self.read()?;
-        let fe = F::new_with_modulus(inner, &modulus).map_err(|_err| {
-            ZipError::InvalidSnark(format!(
-                "Cannot instantiate a field with modulus {:?}",
-                modulus
-            ))
-        })?;
-        self.common_field_element(&fe);
+        self.stream.read_exact(buf)?;
+        let inner = F::Inner::read_transcription_bytes(buf);
+        self.stream.read_exact(buf)?;
+        let modulus = F::Inner::read_transcription_bytes(buf);
+        let field_cfg = F::make_cfg(&modulus)?;
+        let fe = F::new_unchecked_with_cfg(inner, &field_cfg);
+        self.fs_transcript.absorb_random_field(&fe, buf);
         Ok(fe)
     }
 
     /// Writes a field element to the proof stream and absorbs it into the
     /// transcript. Used during proof generation to store field elements for
     /// later verification.
-    pub fn write_field_element<F>(&mut self, fe: &F, buf: &mut [u8]) -> Result<(), ZipError>
+    ///
+    /// Field element length must've been written before calling this method.
+    fn write_field_element_no_length<F>(&mut self, fe: &F, buf: &mut [u8]) -> Result<(), ZipError>
     where
         F: PrimeField,
         F::Inner: Transcribable,
     {
-        self.common_field_element(fe);
-        self.write(fe.inner(), buf)?;
-        self.write(&fe.modulus(), buf)
-    }
-
-    pub fn write<T: Transcribable>(&mut self, v: &T, buf: &mut [u8]) -> Result<(), ZipError> {
-        v.write_transcription_bytes(buf);
-        self.stream
-            .write_all(buf)
-            .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))?;
+        self.fs_transcript.absorb_random_field(fe, buf);
+        fe.inner().write_transcription_bytes(buf);
+        self.stream.write_all(buf)?;
+        fe.modulus().write_transcription_bytes(buf);
+        self.stream.write_all(buf)?;
         Ok(())
     }
 
-    pub fn write_many<'a, T: Transcribable + 'a, I>(&mut self, vs: I) -> Result<(), ZipError>
+    pub fn write_const<T: ConstTranscribable>(
+        &mut self,
+        v: &T,
+        buf: &mut [u8],
+    ) -> Result<(), ZipError> {
+        v.write_transcription_bytes(buf);
+        self.stream.write_all(buf)?;
+        Ok(())
+    }
+
+    pub fn write_const_many<'a, T: ConstTranscribable + 'a, I>(
+        &mut self,
+        vs: I,
+    ) -> Result<(), ZipError>
     where
         I: IntoIterator<Item = &'a T>,
     {
         let mut buf = vec![0; T::NUM_BYTES];
         for v in vs {
-            self.write(v, &mut buf)?;
+            self.write_const(v, &mut buf)?;
         }
 
         Ok(())
     }
 
-    pub fn read<T: Transcribable>(&mut self) -> Result<T, ZipError> {
+    pub fn read_const<T: ConstTranscribable>(&mut self) -> Result<T, ZipError> {
         let mut buf = vec![0u8; T::NUM_BYTES];
-        self.stream
-            .read_exact(&mut buf)
-            .map_err(|err| ZipError::Transcript(err.kind(), err.to_string()))?;
+        self.stream.read_exact(&mut buf)?;
         Ok(T::read_transcription_bytes(&buf))
     }
 
-    pub fn read_many<T: Transcribable>(&mut self, n: usize) -> Result<Vec<T>, ZipError> {
-        (0..n).map(|_| self.read()).collect::<Result<Vec<_>, _>>()
+    pub fn read_const_many<T: ConstTranscribable>(&mut self, n: usize) -> Result<Vec<T>, ZipError> {
+        (0..n)
+            .map(|_| self.read_const())
+            .collect::<Result<Vec<_>, _>>()
     }
 
     fn write_usize(
@@ -136,17 +154,17 @@ impl PcsTranscript {
         value: usize,
         buf: &mut [u8; size_of::<u64>()],
     ) -> Result<(), ZipError> {
-        let value_u64: u64 = value.try_into().map_err(|_| {
+        let value_u64: u64 = value.try_into().map_err(|_err| {
             ZipError::Transcript(
                 ErrorKind::Unsupported,
                 "Failed to convert usize to u64".to_string(),
             )
         })?;
-        self.write(&value_u64, buf)
+        self.write_const(&value_u64, buf)
     }
 
     fn read_usize(&mut self) -> Result<usize, ZipError> {
-        self.read::<u64>()?.try_into().map_err(|_| {
+        self.read_const::<u64>()?.try_into().map_err(|_| {
             ZipError::Transcript(
                 ErrorKind::Unsupported,
                 "Failed to convert u64 to usize".to_string(),
@@ -173,7 +191,7 @@ impl PcsTranscript {
         let path_length = self.read_usize()?;
 
         // Read each element of the merkle path
-        let merkle_path = self.read_many(path_length)?;
+        let merkle_path = self.read_const_many(path_length)?;
 
         Ok(MerkleProof::new(merkle_path, dimensions))
     }
@@ -189,8 +207,15 @@ impl PcsTranscript {
         self.write_usize(proof.path.len(), &mut buf)?;
 
         // Write each element of the merkle path
-        self.write_many(&proof.path)?;
+        self.write_const_many(&proof.path)?;
         Ok(())
+    }
+}
+
+// Do not expose this outside
+impl From<std::io::Error> for ZipError {
+    fn from(err: std::io::Error) -> Self {
+        ZipError::Transcript(err.kind(), err.to_string())
     }
 }
 
@@ -198,7 +223,6 @@ impl PcsTranscript {
 mod tests {
     use super::*;
     use crate::{merkle::MtHash, pcs::ZipPlusProof};
-    use crypto_bigint::{U256, const_monty_params};
 
     #[allow(unused_macros)]
     macro_rules! test_read_write {
@@ -247,21 +271,15 @@ mod tests {
 
     #[test]
     fn test_pcs_transcript_read_write() {
-        const_monty_params!(
-            ModP,
-            U256,
-            "0000000000000000000000000000000000000000000000000000000000000091"
-        );
-
         // Test commitment
         let original_commitment = MtHash::default();
-        test_read_write!(write, read, original_commitment, "commitment");
+        test_read_write!(write_const, read_const, original_commitment, "commitment");
 
         // Test vector of commitments
         let original_commitments = vec![MtHash::default(); 1024];
         test_read_write_vec!(
-            write_many,
-            read_many,
+            write_const_many,
+            read_const_many,
             original_commitments,
             "commitments vector"
         );

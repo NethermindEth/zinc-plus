@@ -210,8 +210,8 @@ mod tests {
         },
         poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
     };
-    use crypto_bigint::{Random, U64, U256, Word, const_monty_params};
-    use crypto_primitives::{crypto_bigint_const_monty::F256, crypto_bigint_int::Int};
+    use crypto_bigint::{Random, U64, U256, Word};
+    use crypto_primitives::{crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int};
     use num_traits::Zero;
     use rand::{Rng, rng};
 
@@ -639,20 +639,17 @@ mod tests {
         }
 
         fn calculate_expected_proof_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
-            // F stored as value followed by modulus
+            // F stored as `(value, modulus)` where both `value` and `modulus` are of
+            // length `len`.
+            // `len` itself is stored only once at the beginning of the F list.
+            // For BoxedMontyField, length of `len` itself is 1 byte.
             let size_of_f = 2 * U256::LIMBS * size_of::<Word>();
-            let evaluation_phase_size = pp.linear_code.row_len() * size_of_f;
+            let evaluation_phase_size = 1 + pp.linear_code.row_len() * size_of_f;
 
             calculate_expected_test_transcript_size_bytes(pp) + evaluation_phase_size
         }
 
-        const_monty_params!(
-            ModP,
-            U256,
-            "0000000000000000000000000000000000000000B933426489189CB5B47D567F"
-        );
-        type F = F256<ModP>;
-        let field_cfg = ();
+        type F = BoxedMontyField;
 
         let mut rng = rng();
         let num_vars = 4;
@@ -679,8 +676,7 @@ mod tests {
             expected_test_transcript_size_bytes
         );
 
-        let (_, proof) =
-            TestZip::evaluate::<F>(&param, &mle, &point, test_transcript, &field_cfg).unwrap();
+        let (_, proof) = TestZip::evaluate::<F>(&param, &mle, &point, test_transcript).unwrap();
         let actual_proof_size_bytes = proof.0.len();
         let expected_proof_size_bytes = calculate_expected_proof_size_bytes(&param);
         assert_eq!(actual_proof_size_bytes, expected_proof_size_bytes);

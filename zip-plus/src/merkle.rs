@@ -1,4 +1,9 @@
-use crate::{div, pcs::structs::AsPackable, traits::Transcribable, utils::ReinterpretVector};
+use crate::{
+    div,
+    pcs::structs::AsPackable,
+    traits::{ConstTranscribable, Transcribable},
+    utils::ReinterpretVector,
+};
 use itertools::Itertools;
 use p3_commit::{BatchOpeningRef, Mmcs};
 use p3_field::Packable;
@@ -32,7 +37,7 @@ impl Display for MtHash {
     }
 }
 
-impl Transcribable for MtHash {
+impl ConstTranscribable for MtHash {
     const NUM_BYTES: usize = HASH_OUT_LEN;
 
     fn read_transcription_bytes(buf: &[u8]) -> Self {
@@ -49,7 +54,7 @@ impl Transcribable for MtHash {
 #[derive(Debug, Default, Clone)]
 struct MtHasher;
 
-impl<T: Transcribable + Clone> CryptographicHasher<T, [u8; HASH_OUT_LEN]> for MtHasher {
+impl<T: ConstTranscribable + Clone> CryptographicHasher<T, [u8; HASH_OUT_LEN]> for MtHasher {
     fn hash_iter<I>(&self, input: I) -> [u8; HASH_OUT_LEN]
     where
         I: IntoIterator<Item = T>,
@@ -97,7 +102,7 @@ struct MerkleTreeInner<T> {
 
 impl<T> MerkleTree<T>
 where
-    T: Packable + Transcribable + Clone + Send + Sync,
+    T: Packable + ConstTranscribable + Clone + Send + Sync,
 {
     pub fn new<S>(rows: &[S], row_width: usize) -> Self
     where
@@ -164,7 +169,7 @@ impl MerkleProof {
 
     pub fn create_proof<T>(merkle_tree: &MerkleTree<T>, leaf: usize) -> Result<Self, MerkleError>
     where
-        T: Packable + Transcribable + Clone,
+        T: Packable + ConstTranscribable + Clone,
     {
         let mt = merkle_tree
             .inner
@@ -184,7 +189,7 @@ impl MerkleProof {
     ) -> Result<(), MerkleError>
     where
         S: AsPackable<Packable = T>,
-        T: Packable + Transcribable + Clone,
+        T: Packable + ConstTranscribable + Clone,
     {
         let prover = MtMmcs::<T>::new(MtHasher, MtPerm);
 

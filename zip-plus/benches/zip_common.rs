@@ -9,31 +9,27 @@ use ark_std::{
     time::{Duration, Instant},
 };
 use criterion::{BenchmarkGroup, measurement::WallTime};
-use crypto_bigint::{U256, const_monty_params, modular::ConstMontyParams};
-use crypto_primitives::{PrimeField, crypto_bigint_const_monty::F256};
+use crypto_primitives::{
+    Field, FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
+};
 use itertools::Itertools;
-use num_traits::{ConstOne, Zero};
+use num_traits::{One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use zip_plus::{
     code::LinearCode,
     merkle::MerkleTree,
     pcs::structs::{ProjectableToField, ZipPlus, ZipTypes},
     poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand},
-    traits::{FromRef, Named},
+    traits::{ConstTranscribable, FromRef, Named},
 };
 
-const_monty_params!(
-    ModP,
-    U256,
-    "EB0E9F20F7BFC231327A11792F585AC6C20C74ACCCAB538BE6B0C3AB2E3D176F"
-);
-type F = F256<ModP>;
-const F_CFG: <F as PrimeField>::Config = ();
+type F = BoxedMontyField;
 
 pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>>(group: &mut BenchmarkGroup<WallTime>)
 where
     StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
-    F: FromRef<Zt::Chal> + FromRef<Zt::Pt>,
+    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
+    <F as Field>::Inner: FromRef<Zt::Fmod>,
     Zt::Eval: ProjectableToField<F>,
     Zt::Cw: ProjectableToField<F>,
 {
@@ -207,11 +203,10 @@ where
 
     group.bench_function(
         format!(
-            "Test: Eval={}, Cw={}, Comb={}, poly_size=2^{P}, modulus={}",
+            "Test: Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
             Zt::Comb::type_name(),
-            ModP::PARAMS.modulus()
         ),
         |b| {
             b.iter(|| {
@@ -227,8 +222,9 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
+    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
+    <F as Field>::Inner: FromRef<Zt::Fmod>,
     Zt::Eval: ProjectableToField<F>,
-    F: FromRef<Zt::Chal> + FromRef<Zt::Pt>,
 {
     let mut rng = ThreadRng::default();
 
@@ -238,17 +234,17 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
     let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
-    let point = vec![Zt::Pt::ONE; P];
+    let point = vec![Zt::Pt::one(); P];
 
     let test_transcript = ZipPlus::test(&params, &poly, &data).expect("Test phase failed");
 
     group.bench_function(
         format!(
-            "Evaluate: Eval={}, Cw={}, Comb={}, poly_size=2^{P}, modulus={}",
+            "Evaluate: Eval={}, Cw={}, Comb={}, poly_size=2^{P}, modulus=({} bits)",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
             Zt::Comb::type_name(),
-            ModP::PARAMS.modulus()
+            Zt::Fmod::NUM_BYTES * 8
         ),
         |b| {
             b.iter_custom(|iters| {
@@ -256,9 +252,8 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
                 for _ in 0..iters {
                     let proof = test_transcript.clone();
                     let timer = Instant::now();
-                    let (eval_f, proof) =
-                        ZipPlus::evaluate::<F>(&params, &poly, &point, proof, &F_CFG)
-                            .expect("Evaluation phase failed");
+                    let (eval_f, proof) = ZipPlus::evaluate::<F>(&params, &poly, &point, proof)
+                        .expect("Evaluation phase failed");
                     total_duration += timer.elapsed();
                     black_box((eval_f, proof));
                 }
@@ -272,7 +267,8 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
-    F: FromRef<Zt::Chal> + FromRef<Zt::Pt>,
+    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
+    <F as Field>::Inner: FromRef<Zt::Fmod>,
     Zt::Eval: ProjectableToField<F>,
     Zt::Cw: ProjectableToField<F>,
 {
@@ -283,24 +279,25 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
     let (data, commitment) = ZipPlus::commit(&params, &poly).unwrap();
-    let point = vec![Zt::Pt::ONE; P];
-    let point_f: Vec<F> = point.iter().map(F::from_ref).collect();
+    let point = vec![Zt::Pt::one(); P];
 
     let test_transcript = ZipPlus::test(&params, &poly, &data).expect("Test phase failed");
-    let (eval_f, proof) = ZipPlus::evaluate::<F>(&params, &poly, &point, test_transcript, &F_CFG)
+    let (eval_f, proof) = ZipPlus::evaluate::<F>(&params, &poly, &point, test_transcript)
         .expect("Evaluation phase failed");
+    let field_cfg = eval_f.cfg().clone();
+    let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
     group.bench_function(
         format!(
-            "Verify: Eval={}, Cw={}, Comb={}, poly_size=2^{P}, modulus={}",
+            "Verify: Eval={}, Cw={}, Comb={}, poly_size=2^{P}, modulus=({} bits)",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
             Zt::Comb::type_name(),
-            ModP::PARAMS.modulus()
+            Zt::Fmod::NUM_BYTES * 8
         ),
         |b| {
             b.iter(|| {
-                ZipPlus::verify(&params, &commitment, &point_f, &eval_f, &proof, &F_CFG)
+                ZipPlus::verify(&params, &commitment, &point_f, &eval_f, &proof)
                     .expect("Verification failed");
             })
         },

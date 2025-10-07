@@ -1,6 +1,6 @@
 use super::*;
 use ark_ff::{
-    AdditiveGroup, BigInt, FftField, FpConfig, LegendreSymbol, MontBackend, MontConfig,
+    AdditiveGroup, BigInt, BigInteger, FftField, FpConfig, LegendreSymbol, MontBackend, MontConfig,
     SqrtPrecomputation,
     fields::{Field as ArkWrappedField, Fp as ArkWrappedFp, PrimeField as ArkPrimeField},
 };
@@ -13,7 +13,6 @@ use core::{
     fmt::{Display, Formatter, Result as FmtResult},
     hash::{Hash, Hasher},
     iter::{Product, Sum},
-    marker::PhantomData,
     ops::{Add, AddAssign, Deref, Mul, MulAssign, Sub, SubAssign},
     str::FromStr,
 };
@@ -431,7 +430,27 @@ impl<P: FpConfig<N>, const N: usize> From<Fp<P, N>> for BigUint {
 
 impl<P: FpConfig<N>, const N: usize> Ring for Fp<P, N> {}
 
-impl<P: FpConfig<N>, const N: usize> IntRing for Fp<P, N> {}
+impl<P: FpConfig<N>, const N: usize> IntRing for Fp<P, N> {
+    fn is_odd(&self) -> bool {
+        self.0.into_bigint().is_odd()
+    }
+
+    fn is_even(&self) -> bool {
+        self.0.into_bigint().is_even()
+    }
+
+    fn checked_abs(&self) -> Option<Self> {
+        Some(*self)
+    }
+
+    fn is_positive(&self) -> bool {
+        !self.is_zero()
+    }
+
+    fn is_negative(&self) -> bool {
+        false
+    }
+}
 
 impl<P: FpConfig<N>, const N: usize> Field for Fp<P, N> {
     type Inner = BigInt<N>;
@@ -441,17 +460,14 @@ impl<P: FpConfig<N>, const N: usize> Field for Fp<P, N> {
     }
 }
 
-impl<P: FpConfig<N>, const N: usize> ConstPrimeField for Fp<P, N> {
-    const MODULUS: Self::Inner = P::MODULUS;
+/// ConstPrimeField is only implemented for MontConfig and MontBackend
+impl<M: MontConfig<N>, const N: usize> ConstPrimeField for Fp<MontBackend<M, N>, N> {
+    const MODULUS: Self::Inner = M::MODULUS;
     const MODULUS_MINUS_ONE_DIV_TWO: Self::Inner =
-        <ArkWrappedFp<P, N> as ArkPrimeField>::MODULUS_MINUS_ONE_DIV_TWO;
-
-    fn new(inner: Self::Inner) -> Self {
-        Self(ArkWrappedFp(inner, PhantomData))
-    }
+        <ArkWrappedFp<MontBackend<M, N>, N> as ArkPrimeField>::MODULUS_MINUS_ONE_DIV_TWO;
 
     fn new_unchecked(inner: Self::Inner) -> Self {
-        ConstPrimeField::new(inner)
+        Self(ArkWrappedFp::new_unchecked(inner))
     }
 }
 

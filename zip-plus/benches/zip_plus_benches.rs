@@ -6,9 +6,12 @@ mod zip_common;
 use zip_common::*;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use crypto_bigint::U64;
+use crypto_bigint::{U64, Uint};
+use crypto_primes::hazmat::MillerRabin;
 use crypto_primitives::crypto_bigint_int::Int;
-use zip_plus::{code::raa::RaaCode, pcs::structs::ZipTypes, poly::dense::DensePolynomial};
+use zip_plus::{
+    code::raa::RaaCode, pcs::structs::ZipTypes, poly::dense::DensePolynomial, utils::UintSemiring,
+};
 
 const INT_LIMBS: usize = U64::LIMBS;
 
@@ -19,6 +22,8 @@ impl<const D: usize> ZipTypes for BenchZipPlusTypes<D> {
     type Eval = DensePolynomial<Self::EvalR, D>;
     type CwR = i32;
     type Cw = DensePolynomial<Self::CwR, D>;
+    type Fmod = UintSemiring<{ INT_LIMBS * 4 }>;
+    type PrimeTest = MillerRabin<Uint<{ INT_LIMBS * 4 }>>;
     type Chal = i128;
     type Pt = i128;
     type CombR = Int<{ INT_LIMBS * 5 }>;

@@ -7,7 +7,7 @@ use crate::{
     code::LinearCode,
     mul,
     pcs::structs::ZipTypes,
-    traits::{FromRef, Transcribable},
+    traits::{ConstTranscribable, FromRef},
     utils::shuffle_seeded,
 };
 
