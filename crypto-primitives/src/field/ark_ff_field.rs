@@ -1,5 +1,4 @@
 use super::*;
-use crate::{impl_infallible_checked_binary_op, impl_infallible_checked_unary_op};
 use ark_ff::{
     AdditiveGroup, CubicExtConfig, CubicExtField, LegendreSymbol, QuadExtConfig, QuadExtField,
     SqrtPrecomputation, fields::Field as ArkWrappedField,
@@ -15,6 +14,7 @@ use core::{
     iter::{Product, Sum},
     ops::{Add, AddAssign, Deref, Mul, MulAssign, Sub, SubAssign},
 };
+use crypto_primitives_proc_macros::InfallibleCheckedOp;
 use num_traits::{
     CheckedAdd, CheckedDiv, CheckedMul, CheckedNeg, CheckedSub, ConstOne, ConstZero, One, Pow, Zero,
 };
@@ -24,7 +24,10 @@ use ark_std::{UniformRand, rand::prelude::*};
 #[cfg(feature = "rand")]
 use rand::distr::StandardUniform;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, InfallibleCheckedOp)]
+#[infallible_checked_unary_op((CheckedNeg, neg))]
+#[infallible_checked_binary_op((CheckedAdd, add), (CheckedSub, sub), (CheckedMul, mul))]
+#[repr(transparent)]
 pub struct ArkField<F: ArkWrappedField>(F);
 
 impl<F: ArkWrappedField> ArkField<F> {
@@ -248,11 +251,6 @@ impl<F: ArkWrappedField> Inv for ArkField<F> {
 // Checked arithmetic operations
 // (Note: Field operations do not overflow)
 //
-
-impl_infallible_checked_unary_op!(ArkField<F: ArkWrappedField>, CheckedNeg, neg);
-impl_infallible_checked_binary_op!(ArkField<F: ArkWrappedField>, CheckedAdd, add);
-impl_infallible_checked_binary_op!(ArkField<F: ArkWrappedField>, CheckedSub, sub);
-impl_infallible_checked_binary_op!(ArkField<F: ArkWrappedField>, CheckedMul, mul);
 
 impl<F: ArkWrappedField> CheckedDiv for ArkField<F> {
     #[allow(clippy::arithmetic_side_effects)] // False alert

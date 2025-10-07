@@ -1,5 +1,4 @@
 use super::*;
-use crate::{impl_infallible_checked_binary_op, impl_infallible_checked_unary_op};
 use ark_ff::{
     AdditiveGroup, BigInt, FftField, FpConfig, LegendreSymbol, MontBackend, MontConfig,
     SqrtPrecomputation,
@@ -18,6 +17,7 @@ use core::{
     ops::{Add, AddAssign, Deref, Mul, MulAssign, Sub, SubAssign},
     str::FromStr,
 };
+use crypto_primitives_proc_macros::InfallibleCheckedOp;
 use num_bigint::BigUint;
 use num_traits::{
     CheckedAdd, CheckedDiv, CheckedMul, CheckedNeg, CheckedSub, ConstOne, ConstZero, One, Pow, Zero,
@@ -29,6 +29,9 @@ use ark_std::{UniformRand, rand::prelude::*};
 use rand::distr::StandardUniform;
 
 // Can't derive core traits because of the generic parameters
+#[derive(InfallibleCheckedOp)]
+#[infallible_checked_unary_op((CheckedNeg, neg))]
+#[infallible_checked_binary_op((CheckedAdd, add), (CheckedSub, sub), (CheckedMul, mul))]
 #[repr(transparent)]
 pub struct Fp<P: FpConfig<N>, const N: usize>(ArkWrappedFp<P, N>);
 
@@ -280,11 +283,6 @@ impl<P: FpConfig<N>, const N: usize> Inv for Fp<P, N> {
 // Checked arithmetic operations
 // (Note: Field operations do not overflow)
 //
-
-impl_infallible_checked_unary_op!((Fp<P, N>), (<P: FpConfig<N>, const N: usize>), CheckedNeg, neg);
-impl_infallible_checked_binary_op!((Fp<P, N>), (<P: FpConfig<N>, const N: usize>), CheckedAdd, add);
-impl_infallible_checked_binary_op!((Fp<P, N>), (<P: FpConfig<N>, const N: usize>), CheckedSub, sub);
-impl_infallible_checked_binary_op!((Fp<P, N>), (<P: FpConfig<N>, const N: usize>), CheckedMul, mul);
 
 impl<P: FpConfig<N>, const N: usize> CheckedDiv for Fp<P, N> {
     #[allow(clippy::arithmetic_side_effects)] // False alert
