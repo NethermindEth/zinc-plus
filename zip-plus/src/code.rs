@@ -1,9 +1,12 @@
 pub mod raa;
 
-use crate::traits::{FromRef, Transcript};
-use crypto_primitives::{PrimeField, Ring};
+use crate::{
+    pcs::structs::ZipTypes,
+    traits::{FromRef, Transcript},
+};
+use crypto_primitives::PrimeField;
 
-pub trait LinearCode<Eval: Ring, Cw: Ring, Comb: Ring>: Sync + Send {
+pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
     /// Repetition factor, a.k.a. inverse rate, the ratio of codeword length to
     /// input row length. Has to be at a power of 2.
     ///
@@ -34,7 +37,7 @@ pub trait LinearCode<Eval: Ring, Cw: Ring, Comb: Ring>: Sync + Send {
     ///
     /// # Returns
     /// A vector of cryptographic integers representing the encoded row
-    fn encode(&self, row: &[Eval]) -> Vec<Cw>;
+    fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw>;
 
     /// Encodes a row of cryptographic integers using this linear encoding
     /// scheme.
@@ -48,7 +51,7 @@ pub trait LinearCode<Eval: Ring, Cw: Ring, Comb: Ring>: Sync + Send {
     ///
     /// # Returns
     /// A vector of cryptographic integers representing the encoded row
-    fn encode_wide(&self, row: &[Comb]) -> Vec<Comb>;
+    fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR>;
 
     /// Encodes a row of field elements using this linear encoding scheme.
     ///

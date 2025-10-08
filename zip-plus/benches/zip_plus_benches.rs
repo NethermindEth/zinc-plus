@@ -18,20 +18,20 @@ impl<const D: usize> ZipTypes for BenchZipPlusTypes<D> {
     const NUM_COLUMN_OPENINGS: usize = 650;
     type EvalR = i8; // TODO: Use binary polynomials for evaluations
     type Eval = DensePolynomial<Self::EvalR, D>;
-    type CwR = i16;
+    type CwR = i32;
     type Cw = DensePolynomial<Self::CwR, D>;
     type Chal = i128;
     type Pt = i128;
     type CombR = Int<{ INT_LIMBS * 5 }>;
     type Comb = DensePolynomial<Self::CombR, D>;
-    type Code = RaaCode<Self::Eval, Self::Cw, Self::CombR, 4>;
 }
+type Code<const D: usize> = RaaCode<BenchZipPlusTypes<D>, 4>;
 
 fn zip_plus_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");
 
-    do_bench::<BenchZipPlusTypes<31>>(&mut group);
-    do_bench::<BenchZipPlusTypes<63>>(&mut group);
+    do_bench::<BenchZipPlusTypes<31>, Code<31>>(&mut group);
+    do_bench::<BenchZipPlusTypes<63>, Code<63>>(&mut group);
 
     group.finish();
 }

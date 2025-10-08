@@ -16,9 +16,9 @@ use crypto_primitives::PrimeField;
 use itertools::{Itertools, izip};
 
 // TODO: Split onto test and open(aka eval)
-impl<Zt: ZipTypes> ZipPlus<Zt> {
+impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     pub fn open<F>(
-        pp: &ZipPlusParams<Zt>,
+        pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
         commit_hint: &ZipPlusHint<Zt::Cw>,
         point: &[Zt::Pt],
@@ -29,7 +29,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         F::Inner: Transcribable,
         Zt::Eval: ProjectableToField<F>,
     {
-        validate_input::<Zt, _>("open", pp.num_vars, [poly], [point])?;
+        validate_input::<Zt, Lc, _>("open", pp.num_vars, [poly], [point])?;
 
         Self::prove_testing_phase(pp, poly, commit_hint, transcript)?;
 
@@ -41,7 +41,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
 
     // TODO Apply 2022/1355 https://eprint.iacr.org/2022/1355.pdf#page=30
     pub fn batch_open<F>(
-        pp: &ZipPlusParams<Zt>,
+        pp: &ZipPlusParams<Zt, Lc>,
         polys: &[DenseMultilinearExtension<Zt::Eval>],
         comms: &[ZipPlusHint<Zt::Cw>],
         points: &[Vec<Zt::Pt>],
@@ -61,7 +61,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     // Subprotocol functions
 
     fn prove_evaluation_phase<F>(
-        pp: &ZipPlusParams<Zt>,
+        pp: &ZipPlusParams<Zt, Lc>,
         transcript: &mut PcsTranscript,
         point: &[Zt::Pt],
         poly: &DenseMultilinearExtension<Zt::Eval>,
@@ -98,7 +98,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     }
 
     pub(super) fn prove_testing_phase(
-        pp: &ZipPlusParams<Zt>,
+        pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
         commit_hint: &ZipPlusHint<Zt::Cw>,
         transcript: &mut PcsTranscript,
@@ -141,7 +141,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     }
 
     pub(super) fn open_merkle_trees_for_column(
-        pp: &ZipPlusParams<Zt>,
+        pp: &ZipPlusParams<Zt, Lc>,
         commit_hint: &ZipPlusHint<Zt::Cw>,
         column: usize,
         transcript: &mut PcsTranscript,
@@ -170,7 +170,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
 )]
 mod tests {
     use crate::{
-        code::LinearCode,
+        code::{LinearCode, raa::RaaCode},
         field::ConstMontyField,
         merkle::MerkleTree,
         pcs::{
@@ -202,10 +202,13 @@ mod tests {
     type F = ConstMontyField<ModP, FIELD_LIMBS>;
 
     type Zt = TestZipTypes<N, K, M>;
-    type PolyZt = TestPolyZipTypes<N, K, M, DEGREE>;
+    type C = RaaCode<Zt, 4>;
 
-    type TestZip = ZipPlus<Zt>;
-    type TestPolyZip = ZipPlus<PolyZt>;
+    type PolyZt = TestPolyZipTypes<N, K, M, DEGREE>;
+    type PolyC = RaaCode<PolyZt, 4>;
+
+    type TestZip = ZipPlus<Zt, C>;
+    type TestPolyZip = ZipPlus<PolyZt, PolyC>;
 
     fn random_point<R: Ring>(num_vars: usize, rng: &mut impl RngCore) -> Vec<R>
     where

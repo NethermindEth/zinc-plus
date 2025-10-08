@@ -22,12 +22,12 @@ impl ZipTypes for BenchZipTypes {
     type Pt = i128;
     type CombR = Int<{ INT_LIMBS * 3 }>;
     type Comb = Self::CombR;
-    type Code = RaaCode<Self::Eval, Self::Cw, Self::Comb, 4>;
 }
+type Code = RaaCode<BenchZipTypes, 4>;
 
 fn zip_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");
-    do_bench::<BenchZipTypes>(&mut group);
+    do_bench::<BenchZipTypes, Code>(&mut group);
     group.finish();
 }
 

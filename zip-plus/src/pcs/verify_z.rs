@@ -17,9 +17,9 @@ use ark_std::iterable::Iterable;
 use crypto_primitives::PrimeField;
 use itertools::Itertools;
 
-impl<Zt: ZipTypes> ZipPlus<Zt> {
+impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     pub fn verify<F>(
-        vp: &ZipPlusParams<Zt>,
+        vp: &ZipPlusParams<Zt, Lc>,
         comm: &ZipPlusCommitment,
         point_f: &[F],
         eval_f: &F,
@@ -29,12 +29,12 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         F: PrimeField
             + FromRef<F>
             + FromRef<Zt::Chal>
-            + FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::CombR>>::Inner>
+            + FromRef<Lc::Inner>
             + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
         Zt::Cw: ProjectableToField<F>,
     {
-        validate_input::<Zt, _>("verify", vp.num_vars, &[], [point_f])?;
+        validate_input::<Zt, Lc, _>("verify", vp.num_vars, &[], [point_f])?;
 
         let columns_opened = Self::verify_testing(vp, &comm.root, transcript)?;
 
@@ -54,7 +54,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     }
 
     pub fn batch_verify<'a, F>(
-        vp: &ZipPlusParams<Zt>,
+        vp: &ZipPlusParams<Zt, Lc>,
         comms: impl Iterable<Item = &'a ZipPlusCommitment>,
         points: &[Vec<F>],
         evals: &[F],
@@ -64,7 +64,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         F: PrimeField
             + FromRef<F>
             + FromRef<Zt::Chal>
-            + FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::CombR>>::Inner>
+            + FromRef<Lc::Inner>
             + for<'b> MulByScalar<&'b F>,
         F::Inner: Transcribable,
         Zt::Cw: ProjectableToField<F>,
@@ -77,7 +77,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
 
     #[allow(clippy::type_complexity)]
     pub(super) fn verify_testing(
-        vp: &ZipPlusParams<Zt>,
+        vp: &ZipPlusParams<Zt, Lc>,
         root: &MtHash,
         transcript: &mut PcsTranscript,
     ) -> Result<Vec<(usize, Vec<Zt::Cw>)>, ZipError> {
@@ -158,7 +158,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     }
 
     fn verify_evaluation<F>(
-        vp: &ZipPlusParams<Zt>,
+        vp: &ZipPlusParams<Zt, Lc>,
         point_f: &[F],
         eval_f: &F,
         columns_opened: &[(usize, Vec<Zt::Cw>)],
@@ -166,10 +166,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         projecting_element: F,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField
-            + FromRef<F>
-            + FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::CombR>>::Inner>
-            + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<F> + FromRef<Lc::Inner> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
         Zt::Cw: ProjectableToField<F>,
     {
@@ -234,7 +231,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
 mod tests {
     use crate::{
         ZipError,
-        code::LinearCode,
+        code::{LinearCode, raa::RaaCode},
         field::F256,
         pcs::{
             structs::{ZipPlus, ZipTypes},
@@ -272,12 +269,13 @@ mod tests {
     type F = F256<ModP>;
 
     type Zt = TestZipTypes<N, K, M>;
-    type C = <Zt as ZipTypes>::Code;
+    type C = RaaCode<Zt, 4>;
 
     type PolyZt = TestPolyZipTypes<N, K, M, DEGREE>;
+    type PolyC = RaaCode<PolyZt, 4>;
 
-    type TestZip = ZipPlus<Zt>;
-    type TestPolyZip = ZipPlus<PolyZt>;
+    type TestZip = ZipPlus<Zt, C>;
+    type TestPolyZip = ZipPlus<PolyZt, PolyC>;
 
     #[test]
     fn successful_verification_of_valid_proof() {
@@ -715,6 +713,44 @@ mod tests {
             // Verifier replays verification from the same proof (also like the bench)
             let mut verifier_tx = PcsTranscript::from_proof(&proof);
             TestZip::verify(
+                &params,
+                &commitment,
+                &point.iter().map(F::from).collect::<Vec<_>>(),
+                &eval_f,
+                &mut verifier_tx,
+            )
+            .expect("verify");
+        }
+
+        inner::<12>();
+    }
+
+    /// Mirrors: `Zip+/Verify` for `poly_size=2^12`
+    #[test]
+    fn bench_p12_verify_poly() {
+        fn inner<const P: usize>() {
+            let mut rng = ThreadRng::default();
+            // Match the benchmark’s transcript usage for linear code construction
+            let mut keccak_transcript = KeccakTranscript::new();
+            let poly_size = 1 << P;
+            let linear_code = PolyC::new(poly_size, true, &mut keccak_transcript);
+            let params = TestPolyZip::setup(poly_size, linear_code);
+
+            let poly = DenseMultilinearExtension::rand(P, &mut rng);
+            let (data, commitment) = TestPolyZip::commit(&params, &poly).expect("commit");
+
+            // Same point choice as the bench
+            let point = vec![1i64; P].iter().map(|v| v.into()).collect_vec();
+
+            // Prover produces a proof once (exactly as in the bench)
+            let mut prover_tx = PcsTranscript::new();
+            let eval_f: F =
+                TestPolyZip::open(&params, &poly, &data, &point, &mut prover_tx).expect("open");
+            let proof = prover_tx.into_proof();
+
+            // Verifier replays verification from the same proof (also like the bench)
+            let mut verifier_tx = PcsTranscript::from_proof(&proof);
+            TestPolyZip::verify(
                 &params,
                 &commitment,
                 &point.iter().map(F::from).collect::<Vec<_>>(),

@@ -23,7 +23,7 @@ fn err_too_many_variates(function: &str, upto: usize, got: usize) -> ZipError {
 }
 
 // Ensures that polynomials and evaluation points are of appropriate size
-pub(super) fn validate_input<'a, Zt: ZipTypes + 'a, Pt: 'a>(
+pub(super) fn validate_input<'a, Zt: ZipTypes + 'a, Lc: LinearCode<Zt>, Pt: 'a>(
     function: &str,
     param_num_vars: usize,
     polys: impl Iterable<Item = &'a DenseMultilinearExtension<Zt::Eval>>,
@@ -35,7 +35,7 @@ pub(super) fn validate_input<'a, Zt: ZipTypes + 'a, Pt: 'a>(
         // challenge_bits + eval_elem_bits - 1, where d is the size of the messages
         // being encoded - so num_vars / 2
         let d = div!(param_num_vars, 2);
-        let codeword_bits = ilog_round_up!(mul!(Zt::Code::REPETITION_FACTOR, d), usize);
+        let codeword_bits = ilog_round_up!(mul!(Lc::REPETITION_FACTOR, d), usize);
         let mut challenge_bits = mul!(Zt::Chal::NUM_BYTES, 8);
         if Zt::Comb::DEGREE_BOUND > 0 {
             // This means we also draft alphas (multiplied with coeffs), which

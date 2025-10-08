@@ -11,7 +11,7 @@ use crate::{
 };
 use uninit::out_ref::Out;
 
-impl<Zt: ZipTypes> ZipPlus<Zt> {
+impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     /// Creates a commitment to a multilinear polynomial using the ZIP PCS
     /// scheme.
     ///
@@ -60,10 +60,10 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     ///   `pp.num_rows`, indicating an internal logic error.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn commit(
-        pp: &ZipPlusParams<Zt>,
+        pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
     ) -> Result<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment), ZipError> {
-        validate_input::<Zt, bool>("commit", pp.num_vars, [poly], None)?;
+        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, [poly], None)?;
 
         let expected_num_evals = pp.num_rows * pp.linear_code.row_len();
         assert_eq!(
@@ -105,10 +105,10 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     /// vector of roots.
     #[allow(dead_code)]
     pub fn commit_no_merkle(
-        pp: &ZipPlusParams<Zt>,
+        pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
     ) -> Result<Vec<Zt::Cw>, ZipError> {
-        validate_input::<Zt, bool>("commit", pp.num_vars, [poly], None)?;
+        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, [poly], None)?;
 
         let row_len = pp.linear_code.row_len();
         let codeword_len = pp.linear_code.codeword_len();
@@ -134,7 +134,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     /// corresponds to a polynomial in the input slice.
     #[allow(clippy::type_complexity)]
     pub fn batch_commit(
-        pp: &ZipPlusParams<Zt>,
+        pp: &ZipPlusParams<Zt, Lc>,
         polys: &[DenseMultilinearExtension<Zt::Eval>],
     ) -> Result<Vec<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment)>, ZipError> {
         polys.iter().map(|poly| Self::commit(pp, poly)).collect()
@@ -159,7 +159,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     /// A `Vec<Int<K>>` containing all the encoded rows concatenated together.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn encode_rows(
-        pp: &ZipPlusParams<Zt>,
+        pp: &ZipPlusParams<Zt, Lc>,
         codeword_len: usize,
         row_len: usize,
         evals: &[Zt::Eval],
@@ -206,7 +206,7 @@ mod tests {
     use rand::{Rng, rng};
 
     use crate::{
-        code::LinearCode,
+        code::{LinearCode, raa::RaaCode},
         field::F256,
         merkle::{MerkleTree, MtHash},
         pcs::{
@@ -228,13 +228,13 @@ mod tests {
     const DEGREE: usize = 2;
 
     type Zt = TestZipTypes<N, K, M>;
-    type C = <Zt as ZipTypes>::Code;
+    type C = RaaCode<Zt, 4>;
 
     type PolyZt = TestPolyZipTypes<N, K, M, DEGREE>;
-    type PolyC = <PolyZt as ZipTypes>::Code;
+    type PolyC = RaaCode<PolyZt, 4>;
 
-    type TestZip = ZipPlus<Zt>;
-    type TestPolyZip = ZipPlus<PolyZt>;
+    type TestZip = ZipPlus<Zt, C>;
+    type TestPolyZip = ZipPlus<PolyZt, PolyC>;
 
     #[test]
     fn commit_rejects_too_many_variables() {
@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn proof_size_is_correct_for_parameters() {
-        fn calculate_expected_proof_size_bytes(pp: &ZipPlusParams<Zt>) -> usize {
+        fn calculate_expected_proof_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
             let size_of_zt_k = K * size_of::<Word>();
             let size_of_zt_m = M * size_of::<Word>();
             let size_of_f_b = FIELD_LIMBS * size_of::<Word>();
