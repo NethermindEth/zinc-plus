@@ -40,7 +40,43 @@ where
     Cw: Ring + FromRef<Eval>,
     Comb: Ring + FromRef<Comb>,
 {
-    pub fn new<S: LinearCodeSpec, T: Transcript>(
+    /// Do the actual encoding, as per RAA spec
+    fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
+    where
+        Out: Zero + CheckedAdd + for<'a> AddAssign<&'a Out> + FromRef<In> + Clone,
+    {
+        debug_assert_eq!(
+            row.len(),
+            self.row_len,
+            "Row length must match the code's row length"
+        );
+        let mut result: Vec<Out> = repeat(row, self.repetition_factor);
+        shuffle_seeded(&mut result, self.perm_1_seed);
+        if self.check_for_overflows {
+            accumulate(&mut result);
+        } else {
+            accumulate_unchecked(&mut result);
+        }
+        shuffle_seeded(&mut result, self.perm_2_seed);
+        if self.check_for_overflows {
+            accumulate(&mut result);
+        } else {
+            accumulate_unchecked(&mut result);
+        }
+        debug_assert_eq!(result.len(), self.codeword_len());
+        result
+    }
+}
+
+impl<Eval, Cw, Comb> LinearCode<Eval, Cw, Comb> for RaaCode<Eval, Cw, Comb>
+where
+    Eval: Ring,
+    Cw: Ring + FromRef<Eval>,
+    Comb: Ring + FromRef<Comb>,
+{
+    type Inner = u64; // Doesn't really matter, we don't use it
+
+    fn new<S: LinearCodeSpec, T: Transcript>(
         spec: &S,
         poly_size: usize,
         check_for_overflows: bool,
@@ -107,42 +143,6 @@ where
             phantom: PhantomData,
         }
     }
-
-    /// Do the actual encoding, as per RAA spec
-    fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
-    where
-        Out: Zero + CheckedAdd + for<'a> AddAssign<&'a Out> + FromRef<In> + Clone,
-    {
-        debug_assert_eq!(
-            row.len(),
-            self.row_len,
-            "Row length must match the code's row length"
-        );
-        let mut result: Vec<Out> = repeat(row, self.repetition_factor);
-        shuffle_seeded(&mut result, self.perm_1_seed);
-        if self.check_for_overflows {
-            accumulate(&mut result);
-        } else {
-            accumulate_unchecked(&mut result);
-        }
-        shuffle_seeded(&mut result, self.perm_2_seed);
-        if self.check_for_overflows {
-            accumulate(&mut result);
-        } else {
-            accumulate_unchecked(&mut result);
-        }
-        debug_assert_eq!(result.len(), self.codeword_len());
-        result
-    }
-}
-
-impl<Eval, Cw, Comb> LinearCode<Eval, Cw, Comb> for RaaCode<Eval, Cw, Comb>
-where
-    Eval: Ring,
-    Cw: Ring + FromRef<Eval>,
-    Comb: Ring + FromRef<Comb>,
-{
-    type Inner = u64; // Doesn't really matter, we don't use it
 
     fn row_len(&self) -> usize {
         self.row_len
@@ -235,7 +235,7 @@ mod tests {
     use super::*;
     use crate::{
         code::{DefaultLinearCodeSpec, LinearCode},
-        pcs::tests::MockTranscript,
+        pcs::test_utils::MockTranscript,
         utils::shuffle_seeded,
     };
 

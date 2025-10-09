@@ -2,11 +2,18 @@ pub mod raa;
 
 use std::fmt::Debug;
 
-use crate::traits::FromRef;
+use crate::traits::{FromRef, Transcript};
 use crypto_primitives::{PrimeField, Ring};
 
 pub trait LinearCode<Eval: Ring, Cw: Ring, Comb: Ring>: Sync + Send {
     type Inner;
+
+    fn new<S: LinearCodeSpec, T: Transcript>(
+        spec: &S,
+        poly_size: usize,
+        check_for_overflows: bool,
+        transcript: &mut T,
+    ) -> Self;
 
     /// Length of each input row before encoding
     fn row_len(&self) -> usize;

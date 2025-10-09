@@ -1,64 +1,71 @@
 use crate::{
     code::LinearCode,
     merkle::{MerkleTree, MtHash},
-    traits::{FromRef, Transcribable},
+    poly::Polynomial,
+    traits::{FromRef, Named, Transcribable},
     utils::ReinterpretVector,
 };
-use crypto_primitives::{Ring, crypto_bigint_int::Int};
+use crypto_primitives::{IntRing, PrimeField, Ring, crypto_bigint_int::Int};
 use num_traits::CheckedMul;
 use p3_field::Packable;
 use std::marker::PhantomData;
 
+pub trait ZipTypes: Send + Sync {
+    /// Coefficient ring of evaluation polynomial [Self::Eval]
+    type EvalR: Ring + Named;
+    /// Ring of witness/polynomial evaluations on boolean hypercube
+    type Eval: Ring + Named + Polynomial<Self::EvalR>;
+
+    /// Coefficient ring of codeword polynomial [Self::Cw]
+    type CwR: Ring + Named;
+    /// Ring of codeword elements, at least as wide as the evaluation ring
+    type Cw: Ring + Named + Polynomial<Self::CwR> + Transcribable + AsPackable + Copy;
+
+    /// Ring of challenge elements (coefficients) to perform a random linear
+    /// combination of codewords
+    type Chal: IntRing + Named + Transcribable;
+
+    /// Ring of point coordinates to evaluate the multilinear polynomial
+    type Pt: IntRing;
+
+    /// Coefficient ring of linear combination polynomial [Self::Comb]
+    type CombR: Ring + Transcribable + for<'a> MulByScalar<&'a Self::Chal>;
+    /// Ring of elements in the linear combination of codewords, at least as
+    /// wide as the evaluation, codeword, and challenge rings.
+    type Comb: Ring + Named + Polynomial<Self::CombR> + FromRef<Self::Eval> + FromRef<Self::Cw>;
+
+    /// Linear code used to encode the polynomial matrix representation
+    type Code: LinearCode<Self::Eval, Self::Cw, Self::CombR>;
+}
+
 /// Zip is a Polynomial Commitment Scheme (PCS) that supports committing to
 /// multilinear polynomials.
-pub struct MultilinearZip<Eval, Cw, Chal, Comb, C>(PhantomData<(Eval, Cw, Chal, Comb, C)>)
-where
-    Eval: EvaluationRing,
-    Cw: CodewordRing,
-    Chal: ChallengeRing,
-    Comb: LinearCombinationRing<Eval, Cw, Chal>,
-    C: LinearCode<Eval, Cw, Comb>;
+pub struct ZipPlus<Zt: ZipTypes>(PhantomData<Zt>);
 
-impl<Eval, Cw, Chal, Comb, C> MultilinearZip<Eval, Cw, Chal, Comb, C>
+impl<Zt> ZipPlus<Zt>
 where
-    Eval: EvaluationRing,
-    Cw: CodewordRing,
-    Chal: ChallengeRing,
-    Comb: LinearCombinationRing<Eval, Cw, Chal>,
-    C: LinearCode<Eval, Cw, Comb>,
+    Zt: ZipTypes,
 {
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn setup(poly_size: usize, linear_code: C) -> MultilinearZipParams<Eval, Cw, Comb, C> {
+    pub fn setup(poly_size: usize, linear_code: Zt::Code) -> ZipPlusParams<Zt> {
         assert!(poly_size.is_power_of_two());
         let num_vars = poly_size.ilog2() as usize;
         let num_rows = ((1 << num_vars) / linear_code.row_len()).next_power_of_two();
-        MultilinearZipParams::new(num_vars, num_rows, linear_code)
+        ZipPlusParams::new(num_vars, num_rows, linear_code)
     }
 }
 
-/// Parameters for the Zip PCS.
+/// Parameters for the Zip+ PCS.
 #[derive(Clone, Debug)]
-pub struct MultilinearZipParams<Eval, Cw, Comb, C>
-where
-    Eval: Ring,
-    Cw: Ring,
-    Comb: Ring,
-    C: LinearCode<Eval, Cw, Comb>,
-{
+pub struct ZipPlusParams<Zt: ZipTypes> {
     pub num_vars: usize,
     pub num_rows: usize,
-    pub linear_code: C,
-    phantom_data: PhantomData<(Eval, Cw, Comb)>,
+    pub linear_code: Zt::Code,
+    phantom_data: PhantomData<Zt>,
 }
 
-impl<Eval, Cw, Comb, C> MultilinearZipParams<Eval, Cw, Comb, C>
-where
-    Eval: Ring,
-    Cw: Ring,
-    Comb: Ring,
-    C: LinearCode<Eval, Cw, Comb>,
-{
-    pub fn new(num_vars: usize, num_rows: usize, linear_code: C) -> Self {
+impl<Zt: ZipTypes> ZipPlusParams<Zt> {
+    pub fn new(num_vars: usize, num_rows: usize, linear_code: Zt::Code) -> Self {
         Self {
             num_vars,
             num_rows,
@@ -68,9 +75,10 @@ where
     }
 }
 
-/// Representantation of a zip commitment to a multilinear polynomial
+/// Full data of zip commitment to a multilinear polynomial, including encoded
+/// rows and Merkle tree, kept by the prover for the opening phase.
 #[derive(Debug, Default)]
-pub struct MultilinearZipData<R: AsPackable> {
+pub struct ZipPlusHint<R: AsPackable> {
     /// The encoded rows of the polynomial matrix representation, referred to as
     /// "u-hat" in the Zinc paper
     pub rows: Vec<R>,
@@ -78,9 +86,9 @@ pub struct MultilinearZipData<R: AsPackable> {
     pub merkle_tree: MerkleTree<R::Packable>,
 }
 
-impl<R: AsPackable> MultilinearZipData<R> {
-    pub fn new(rows: Vec<R>, merkle_tree: MerkleTree<R::Packable>) -> MultilinearZipData<R> {
-        MultilinearZipData { rows, merkle_tree }
+impl<R: AsPackable> ZipPlusHint<R> {
+    pub fn new(rows: Vec<R>, merkle_tree: MerkleTree<R::Packable>) -> ZipPlusHint<R> {
+        ZipPlusHint { rows, merkle_tree }
     }
 
     pub fn root(&self) -> MtHash {
@@ -88,9 +96,10 @@ impl<R: AsPackable> MultilinearZipData<R> {
     }
 }
 
-/// Representantation of a zip commitment to a multilinear polynomial
+/// The compact commitment to a multilinear polynomial, consisting of only the
+/// Merkle roots, to be sent to the verifier.
 #[derive(Clone, Debug, Default)]
-pub struct MultilinearZipCommitment {
+pub struct ZipPlusCommitment {
     /// Roots of the merkle tree of entire matrix
     pub root: MtHash,
 }
@@ -137,34 +146,6 @@ impl<const LIMBS: usize> Transcribable for PackedInt<LIMBS> {
     }
 }
 
-//
-// Trait aliases for various Rings used in the Zip PCS
-//
-
-/// Ring of witness/polynomial evaluations on boolean hypercube
-pub trait EvaluationRing: Ring {}
-impl<Eval> EvaluationRing for Eval where Eval: Ring {}
-
-/// Ring of codeword elements, at least as wide as the evaluation ring
-pub trait CodewordRing: Ring + Transcribable + AsPackable + Copy {}
-impl<Cw> CodewordRing for Cw where Cw: Ring + Transcribable + AsPackable + Copy {}
-
-/// Ring of challenge elements (coefficients) to perform a random linear
-/// combination of codewords
-pub trait ChallengeRing: Ring + Transcribable {}
-impl<Chal> ChallengeRing for Chal where Chal: Ring + Transcribable {}
-
-/// Ring of elements in the linear combination of codewords, at least as wide as
-/// the evaluation, codeword, and challenge rings.
-pub trait LinearCombinationRing<Eval, Cw, Chal>:
-    Ring + Transcribable + FromRef<Eval> + FromRef<Cw> + for<'a> MulByScalar<&'a Chal>
-{
-}
-impl<Eval, Cw, Chal, Comb> LinearCombinationRing<Eval, Cw, Chal> for Comb where
-    Comb: Ring + Transcribable + FromRef<Eval> + FromRef<Cw> + for<'a> MulByScalar<&'a Chal>
-{
-}
-
 pub trait MulByScalar<Rhs>: Sized {
     /// Multiplies the current element by a scalar from the right (usually - a
     /// coefficient to obtain a linear combination).
@@ -208,3 +189,11 @@ macro_rules! impl_mul_int_by_primitive_scalar {
 }
 
 impl_mul_int_by_primitive_scalar!(i8, i16, i32, i64, i128);
+
+/// Trait for preparing a projection function to a field element from a current
+/// type.
+pub trait ProjectableToField<F: PrimeField> {
+    /// Prepare a projection function that will project the current type
+    /// to a prime field using the given sampled value.
+    fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static;
+}

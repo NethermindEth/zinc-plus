@@ -1,5 +1,9 @@
 use crypto_primitives::crypto_bigint_int::Int;
 
+//
+// FromRef
+//
+
 /// This trait is essentially equivalent to `From<&T>`, other than it allows us
 /// to implement it for external types that don't implement it out of the box,
 /// most notably primitive types.
@@ -45,6 +49,41 @@ impl<const LIMBS: usize, const LIMBS2: usize> FromRef<Int<LIMBS2>> for Int<LIMBS
         Self::from(value)
     }
 }
+
+//
+// Named
+//
+
+pub trait Named {
+    /// Returns the name of the type as a string, used in benchmarks for nicer
+    /// output.
+    fn type_name() -> String;
+}
+
+macro_rules! impl_named_for_primitives {
+    ($($type:ty),+) => {
+        $(
+            impl Named for $type {
+                fn type_name() -> String {
+                    stringify!($type).to_string()
+                }
+            }
+        )+
+    };
+}
+
+impl_named_for_primitives!(i8, i16, i32, i64, i128);
+impl_named_for_primitives!(u8, u16, u32, u64, u128);
+
+impl<const LIMBS: usize> Named for Int<LIMBS> {
+    fn type_name() -> String {
+        format!("Int<{}>", LIMBS)
+    }
+}
+
+//
+// Transcribable and Transcript
+//
 
 /// Trait for types that can be transcribed to and from a byte representation.
 /// Byte order is not specified, but it must be portable across platforms.

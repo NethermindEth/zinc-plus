@@ -70,6 +70,8 @@ macro_rules! primitive_int_ring {
     };
 }
 
+primitive_int_ring!(i8);
+primitive_int_ring!(i16);
 primitive_int_ring!(i32);
 primitive_int_ring!(i64);
 primitive_int_ring!(i128);

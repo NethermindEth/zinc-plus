@@ -3,10 +3,7 @@ use crate::{
     code::LinearCode,
     merkle::MerkleTree,
     pcs::{
-        structs::{
-            ChallengeRing, CodewordRing, EvaluationRing, LinearCombinationRing, MultilinearZip,
-            MultilinearZipCommitment, MultilinearZipData, MultilinearZipParams,
-        },
+        structs::{ZipPlus, ZipPlusCommitment, ZipPlusHint, ZipPlusParams, ZipTypes},
         utils::validate_input,
     },
     poly::mle::DenseMultilinearExtension,
@@ -14,14 +11,7 @@ use crate::{
 };
 use uninit::out_ref::Out;
 
-impl<
-    Eval: EvaluationRing,
-    Cw: CodewordRing,
-    Chal: ChallengeRing,
-    Comb: LinearCombinationRing<Eval, Cw, Chal>,
-    C: LinearCode<Eval, Cw, Comb>,
-> MultilinearZip<Eval, Cw, Chal, Comb, C>
-{
+impl<Zt: ZipTypes> ZipPlus<Zt> {
     /// Creates a commitment to a multilinear polynomial using the ZIP PCS
     /// scheme.
     ///
@@ -46,17 +36,17 @@ impl<
     ///   for the commitment itself, which operates on integers.
     ///
     /// # Parameters
-    /// - `pp`: Public parameters (`MultilinearZipParams`) containing the
-    ///   configuration for the commitment scheme.
+    /// - `pp`: Public parameters (`ZipPlusParams`) containing the configuration
+    ///   for the commitment scheme.
     /// - `poly`: The multilinear polynomial (`DenseMultilinearExtension`) to be
     ///   committed to.
     ///
     /// # Returns
     /// A `Result` containing a tuple of:
-    /// - `MultilinearZipData`: Full data including encoded rows and Merkle
-    ///   trees, kept by the prover for the opening phase.
-    /// - `MultilinearZipCommitment`: The compact commitment, consisting of only
-    ///   the Merkle roots, to be sent to the verifier.
+    /// - `ZipPlusHint`: Full data including encoded rows and Merkle tree, kept
+    ///   by the prover for the opening phase.
+    /// - `ZipPlusCommitment`: The compact commitment, consisting of only the
+    ///   Merkle roots, to be sent to the verifier.
     ///
     /// # Errors
     /// - Returns `Error::InvalidPcsParam` if the polynomial has more variables
@@ -70,9 +60,9 @@ impl<
     ///   `pp.num_rows`, indicating an internal logic error.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn commit(
-        pp: &MultilinearZipParams<Eval, Cw, Comb, C>,
-        poly: &DenseMultilinearExtension<Eval>,
-    ) -> Result<(MultilinearZipData<Cw>, MultilinearZipCommitment), ZipError> {
+        pp: &ZipPlusParams<Zt>,
+        poly: &DenseMultilinearExtension<Zt::Eval>,
+    ) -> Result<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment), ZipError> {
         validate_input("commit", pp.num_vars, [poly], None::<&[bool]>)?;
 
         let expected_num_evals = pp.num_rows * pp.linear_code.row_len();
@@ -93,8 +83,8 @@ impl<
         let root = merkle_tree.root();
 
         Ok((
-            MultilinearZipData::new(rows, merkle_tree),
-            MultilinearZipCommitment { root },
+            ZipPlusHint::new(rows, merkle_tree),
+            ZipPlusCommitment { root },
         ))
     }
 
@@ -106,18 +96,18 @@ impl<
     /// only**, where the full commitment structure is not required.
     ///
     /// # Parameters
-    /// - `pp`: Public parameters (`MultilinearZipParams`).
+    /// - `pp`: Public parameters (`ZipPlusParams`).
     /// - `poly`: The multilinear polynomial to commit to.
     ///
     /// # Returns
-    /// A `Result` containing `MultilinearZipData` with the encoded rows but
-    /// empty Merkle trees, and a `MultilinearZipCommitment` with an empty
+    /// A `Result` containing `ZipPlusHint` with the encoded rows but
+    /// empty Merkle trees, and a `ZipPlusCommitment` with an empty
     /// vector of roots.
     #[allow(dead_code)]
     pub fn commit_no_merkle(
-        pp: &MultilinearZipParams<Eval, Cw, Comb, C>,
-        poly: &DenseMultilinearExtension<Eval>,
-    ) -> Result<Vec<Cw>, ZipError> {
+        pp: &ZipPlusParams<Zt>,
+        poly: &DenseMultilinearExtension<Zt::Eval>,
+    ) -> Result<Vec<Zt::Cw>, ZipError> {
         validate_input("commit", pp.num_vars, [poly], None::<&[bool]>)?;
 
         let row_len = pp.linear_code.row_len();
@@ -134,7 +124,7 @@ impl<
     /// [`commit`] on each one, collecting the results into a vector.
     ///
     /// # Parameters
-    /// - `pp`: Public parameters (`MultilinearZipParams`) shared across all
+    /// - `pp`: Public parameters (`ZipPlusParams`) shared across all
     ///   commitments.
     /// - `polys`: A slice of `DenseMultilinearExtension` polynomials to commit
     ///   to.
@@ -144,9 +134,9 @@ impl<
     /// corresponds to a polynomial in the input slice.
     #[allow(clippy::type_complexity)]
     pub fn batch_commit(
-        pp: &MultilinearZipParams<Eval, Cw, Comb, C>,
-        polys: &[DenseMultilinearExtension<Eval>],
-    ) -> Result<Vec<(MultilinearZipData<Cw>, MultilinearZipCommitment)>, ZipError> {
+        pp: &ZipPlusParams<Zt>,
+        polys: &[DenseMultilinearExtension<Zt::Eval>],
+    ) -> Result<Vec<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment)>, ZipError> {
         polys.iter().map(|poly| Self::commit(pp, poly)).collect()
     }
 
@@ -169,13 +159,13 @@ impl<
     /// A `Vec<Int<K>>` containing all the encoded rows concatenated together.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn encode_rows(
-        pp: &MultilinearZipParams<Eval, Cw, Comb, C>,
+        pp: &ZipPlusParams<Zt>,
         codeword_len: usize,
         row_len: usize,
-        evals: &[Eval],
-    ) -> Vec<Cw> {
+        evals: &[Zt::Eval],
+    ) -> Vec<Zt::Cw> {
         let rows_per_thread = pp.num_rows.div_ceil(num_threads());
-        let mut encoded_rows: Vec<Cw> = Vec::with_capacity(pp.num_rows * codeword_len);
+        let mut encoded_rows: Vec<Zt::Cw> = Vec::with_capacity(pp.num_rows * codeword_len);
 
         parallelize_iter(
             encoded_rows
@@ -187,7 +177,7 @@ impl<
                     .chunks_exact_mut(codeword_len)
                     .zip(evals.chunks_exact(row_len))
                 {
-                    let encoded: Vec<Cw> = pp.linear_code.encode(evals);
+                    let encoded: Vec<Zt::Cw> = pp.linear_code.encode(evals);
                     Out::from(row).copy_from_slice(encoded.as_slice());
                 }
             },
@@ -213,19 +203,18 @@ mod tests {
 
     use crypto_bigint::{Random, U256, Word, const_monty_params};
     use crypto_primitives::crypto_bigint_int::Int;
-    use itertools::Itertools;
     use rand::{Rng, rng};
 
     use crate::{
-        code::{DefaultLinearCodeSpec, LinearCode, raa::RaaCode},
+        code::{DefaultLinearCodeSpec, LinearCode},
         field::F256,
         merkle::{MerkleTree, MtHash},
         pcs::{
-            structs::{MultilinearZip, MultilinearZipParams},
-            tests::MockTranscript,
+            structs::{ZipPlus, ZipPlusParams, ZipTypes},
+            test_utils::*,
         },
         pcs_transcript::PcsTranscript,
-        poly::mle::DenseMultilinearExtension,
+        poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
         transcript::KeccakTranscript,
         utils::WORD_FACTOR,
     };
@@ -236,30 +225,16 @@ mod tests {
     const N: usize = INT_LIMBS;
     const K: usize = INT_LIMBS * 4;
     const M: usize = INT_LIMBS * 8;
+    const DEGREE: usize = 2;
 
-    type C = RaaCode<Int<N>, Int<K>, Int<M>>;
-    type TestZip = MultilinearZip<Int<N>, Int<K>, Int<N>, Int<M>, C>;
+    type Zt = TestZipTypes<N, K, M>;
+    type C = <Zt as ZipTypes>::Code;
 
-    /// Helper function to set up common parameters for tests.
-    fn setup_test_params(
-        num_vars: usize,
-    ) -> (
-        MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
-        DenseMultilinearExtension<Int<INT_LIMBS>>,
-    ) {
-        let poly_size = 1 << num_vars;
-        // Correctly calculate num_rows for both even and odd num_vars
-        let num_rows = 1 << num_vars.div_ceil(2);
+    type PolyZt = TestPolyZipTypes<N, K, M, DEGREE>;
+    type PolyC = <PolyZt as ZipTypes>::Code;
 
-        let mut transcript = MockTranscript::default();
-        let code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut transcript);
-        let pp = MultilinearZipParams::new(num_vars, num_rows, code);
-
-        let evaluations: Vec<_> = (1..=poly_size).map(|v| Int::from(v as i32)).collect();
-        let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations);
-
-        (pp, poly)
-    }
+    type TestZip = ZipPlus<Zt>;
+    type TestPolyZip = ZipPlus<PolyZt>;
 
     #[test]
     fn commit_rejects_too_many_variables() {
@@ -300,7 +275,7 @@ mod tests {
     fn commit_succeeds_for_small_polynomial() {
         let mut transcript = MockTranscript::default();
         let code = C::new(&DefaultLinearCodeSpec, 16, true, &mut transcript);
-        let pp = MultilinearZipParams::new(4, 4, code);
+        let pp = ZipPlusParams::new(4, 4, code);
 
         let evaluations = vec![Int::from(42); 16];
         let poly = DenseMultilinearExtension::from_evaluations_vec(4, evaluations);
@@ -313,7 +288,7 @@ mod tests {
     fn commit_succeeds_for_two_variables() {
         let mut transcript = MockTranscript::default();
         let code = C::new(&DefaultLinearCodeSpec, 4, true, &mut transcript);
-        let pp = MultilinearZipParams::new(2, 2, code);
+        let pp = ZipPlusParams::new(2, 2, code);
 
         let evaluations = vec![Int::from(1), Int::from(2), Int::from(3), Int::from(4)];
         let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations);
@@ -453,7 +428,7 @@ mod tests {
             .map(|_| {
                 let mut transcript = MockTranscript::default();
                 let code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut transcript);
-                let pp = MultilinearZipParams::new(num_vars, 8, code);
+                let pp = ZipPlusParams::new(num_vars, 8, code);
 
                 TestZip::encode_rows(
                     &pp,
@@ -502,12 +477,34 @@ mod tests {
     fn encode_rows_succeeds_for_single_row() {
         let mut transcript = MockTranscript::default();
         let code = C::new(&DefaultLinearCodeSpec, 4, true, &mut transcript);
-        let pp = MultilinearZipParams::new(2, 1, code);
+        let pp = ZipPlusParams::new(2, 1, code);
 
         // Create a polynomial with 2 variables and 4 evaluations
         let evaluations = vec![Int::from(5); 4];
         let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations);
         let encoded = TestZip::encode_rows(
+            &pp,
+            pp.linear_code.codeword_len(),
+            pp.linear_code.row_len(),
+            &poly.evaluations,
+        );
+        assert_eq!(encoded.len(), pp.linear_code.codeword_len());
+    }
+
+    #[test]
+    fn encode_rows_succeeds_for_single_poly_row() {
+        let mut transcript = MockTranscript::default();
+        let code = PolyC::new(&DefaultLinearCodeSpec, 4, true, &mut transcript);
+        let pp = ZipPlusParams::new(2, 1, code);
+
+        // Create a polynomial with 2 variables and 4 evaluations
+        let evaluations = vec![
+            DensePolynomial::new(vec![Int::from(1), Int::from(2)]),
+            DensePolynomial::new(vec![Int::from(3), Int::from(4)]),
+            DensePolynomial::new(vec![Int::from(5), Int::from(6)]),
+        ];
+        let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations);
+        let encoded = TestPolyZip::encode_rows(
             &pp,
             pp.linear_code.codeword_len(),
             pp.linear_code.row_len(),
@@ -533,7 +530,7 @@ mod tests {
     #[should_panic]
     fn reject_incompatible_dimensions() {
         let (pp, poly) = setup_test_params(3);
-        let incompatible_pp = MultilinearZipParams::new(3, 3, pp.linear_code);
+        let incompatible_pp = ZipPlusParams::new(3, 3, pp.linear_code);
         let _ = TestZip::commit(&incompatible_pp, &poly);
     }
 
@@ -617,9 +614,7 @@ mod tests {
 
     #[test]
     fn proof_size_is_correct_for_parameters() {
-        fn calculate_expected_proof_size_bytes<C: LinearCode<Int<N>, Int<K>, Int<M>>>(
-            pp: &MultilinearZipParams<Int<N>, Int<K>, Int<M>, C>,
-        ) -> usize {
+        fn calculate_expected_proof_size_bytes(pp: &ZipPlusParams<Zt>) -> usize {
             let size_of_zt_k = K * size_of::<Word>();
             let size_of_zt_m = M * size_of::<Word>();
             let size_of_f_b = FIELD_LIMBS * size_of::<Word>();
@@ -663,17 +658,16 @@ mod tests {
         );
         let param = TestZip::setup(poly_size, linear_code);
         let evaluations: Vec<_> = (0..poly_size)
-            .map(|_| Int::<INT_LIMBS>::from(rng.random::<i8>()))
+            .map(|_| <Zt as ZipTypes>::Eval::from(rng.random::<i8>()))
             .collect();
         let mle = DenseMultilinearExtension::from_evaluations_slice(num_vars, &evaluations);
         let point_int: Vec<_> = (0..num_vars)
-            .map(|_| Int::<INT_LIMBS>::random(&mut rng))
+            .map(|_| <Zt as ZipTypes>::Pt::random(&mut rng))
             .collect();
-        let point_f: Vec<F> = point_int.into_iter().map(F::from).collect_vec();
 
         let (data, _) = TestZip::commit(&param, &mle).unwrap();
         let mut prover_transcript = PcsTranscript::new();
-        TestZip::open(&param, &mle, &data, &point_f, &mut prover_transcript).unwrap();
+        TestZip::open::<F>(&param, &mle, &data, &point_int, &mut prover_transcript).unwrap();
         let proof = prover_transcript.into_proof();
 
         let actual_proof_size_bytes = proof.len();

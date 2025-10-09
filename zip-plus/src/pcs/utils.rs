@@ -7,7 +7,7 @@ use crate::{ZipError, poly::mle::DenseMultilinearExtension, sub};
 
 use crate::{
     merkle::{MerkleError, MerkleProof, MtHash},
-    pcs::structs::{AsPackable, MultilinearZipData},
+    pcs::structs::{AsPackable, ZipPlusHint},
     pcs_transcript::PcsTranscript,
 };
 #[cfg(feature = "parallel")]
@@ -170,24 +170,6 @@ where
     Ok(())
 }
 
-/// For a polynomial arranged in matrix form, this splits the evaluation point
-/// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
-/// right and returns the left vector only
-#[allow(clippy::unwrap_used)]
-pub(super) fn left_point_to_tensor<F>(num_rows: usize, point: &[F]) -> Result<Vec<F>, ZipError>
-where
-    F: PrimeField,
-{
-    let (_, lo) = point.split_at(sub!(point.len(), num_rows.ilog2() as usize));
-    // TODO: get rid of these unwraps.
-    let q_0 = if !lo.is_empty() {
-        build_eq_x_r(lo).unwrap()
-    } else {
-        DenseMultilinearExtension::zero()
-    };
-    Ok(q_0.evaluations)
-}
-
 /// This is a helper struct to open a column in a multilinear polynomial
 /// Opening a column `j` in an `n x m` matrix `u_hat` requires opening `m`
 /// Merkle trees, one for each row at position j
@@ -199,10 +181,10 @@ pub struct ColumnOpening {}
 impl ColumnOpening {
     pub fn open_at_column<T: AsPackable>(
         column: usize,
-        commit_data: &MultilinearZipData<T>,
+        commit_hint: &ZipPlusHint<T>,
         transcript: &mut PcsTranscript,
     ) -> Result<(), MerkleError> {
-        let merkle_path = MerkleProof::create_proof(&commit_data.merkle_tree, column)?;
+        let merkle_path = MerkleProof::create_proof(&commit_hint.merkle_tree, column)?;
         transcript
             .write_merkle_proof(&merkle_path)
             .map_err(|_| MerkleError::FailedMerkleProofWriting)?;
