@@ -12,7 +12,7 @@ use criterion::{BenchmarkGroup, measurement::WallTime};
 use crypto_bigint::{U256, const_monty_params, modular::ConstMontyParams};
 use crypto_primitives::crypto_bigint_const_monty::F256;
 use itertools::Itertools;
-use num_traits::One;
+use num_traits::ConstOne;
 use rand::{distr::StandardUniform, prelude::*};
 use zip_plus::{
     code::LinearCode,
@@ -233,7 +233,7 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
     let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
-    let point = vec![Zt::Pt::one(); P];
+    let point = vec![Zt::Pt::ONE; P];
 
     let test_transcript = ZipPlus::test(&params, &poly, &data).expect("Test phase failed");
 
@@ -277,7 +277,7 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
     let (data, commitment) = ZipPlus::commit(&params, &poly).unwrap();
-    let point = vec![Zt::Pt::one(); P];
+    let point = vec![Zt::Pt::ONE; P];
     let point_f: Vec<F> = point.iter().map(F::from_ref).collect();
 
     let test_transcript = ZipPlus::test(&params, &poly, &data).expect("Test phase failed");
