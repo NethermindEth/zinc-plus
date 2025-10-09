@@ -74,25 +74,26 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         transcript: &mut PcsTranscript,
     ) -> Result<Vec<(usize, Vec<Zt::Cw>)>, ZipError> {
         // Gather the coeffs and encoded combined rows per proximity test
-        let encoded_combined_rows: Option<(Vec<Zt::Chal>, Vec<Zt::Chal>, Vec<Zt::CombR>)> = if vp
-            .num_rows
-            > 1
-        {
-            // Values to evaluate the coefficients at
-            let alphas = transcript
-                .fs_transcript
-                .get_challenges(Zt::Comb::DEGREE_BOUND);
+        let encoded_combined_rows: Option<(Vec<Zt::Chal>, Vec<Zt::Chal>, Vec<Zt::CombR>)> = {
+            if vp.num_rows > 1 {
+                // Values to evaluate the coefficients at
+                let alphas = transcript
+                    .fs_transcript
+                    .get_challenges(Zt::Comb::DEGREE_BOUND);
 
-            // Coefficients for the linear combination of polynomial with evaluated
-            // coefficients
-            let coeffs = transcript.fs_transcript.get_challenges(vp.num_rows);
+                // Coefficients for the linear combination of polynomial with evaluated
+                // coefficients
+                let coeffs = transcript.fs_transcript.get_challenges(vp.num_rows);
 
-            let combined_row: Vec<Zt::CombR> = transcript.read_many(vp.linear_code.row_len())?;
+                let combined_row: Vec<Zt::CombR> =
+                    transcript.read_many(vp.linear_code.row_len())?;
 
-            let encoded_combined_row: Vec<Zt::CombR> = vp.linear_code.encode_wide(&combined_row);
-            Some((alphas, coeffs, encoded_combined_row))
-        } else {
-            None
+                let encoded_combined_row: Vec<Zt::CombR> =
+                    vp.linear_code.encode_wide(&combined_row);
+                Some((alphas, coeffs, encoded_combined_row))
+            } else {
+                None
+            }
         };
 
         let mut columns_opened: Vec<(usize, Vec<Zt::Cw>)> =
