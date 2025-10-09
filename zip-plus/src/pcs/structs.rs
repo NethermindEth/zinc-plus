@@ -14,12 +14,12 @@ pub trait ZipTypes: Send + Sync {
     const NUM_COLUMN_OPENINGS: usize;
 
     /// Coefficient ring of evaluation polynomial [Self::Eval]
-    type EvalR: IntRing + Named + Transcribable;
+    type EvalR: IntRing + Transcribable + Named;
     /// Ring of witness/polynomial evaluations on boolean hypercube
     type Eval: Ring + Named + Polynomial<Self::EvalR>;
 
     /// Coefficient ring of codeword polynomial [Self::Cw]
-    type CwR: IntRing + Named;
+    type CwR: IntRing + Transcribable + Named;
     /// Ring of codeword elements, at least as wide as the evaluation ring
     type Cw: Ring
         + Polynomial<Self::CwR>

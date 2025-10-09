@@ -7,7 +7,7 @@ use crate::{
     code::LinearCode,
     mul,
     pcs::structs::ZipTypes,
-    traits::{FromRef, Transcript},
+    traits::{FromRef, Transcribable, Transcript},
     utils::shuffle_seeded,
 };
 
@@ -82,10 +82,10 @@ impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for RaaCode<Zt, REP> {
         let codeword_width_bits = {
             // let initial_bits = crypto_bigint::Int::<N>::BITS;
 
-            let initial_bits = u32::try_from(size_of::<Zt::EvalR>())
+            let initial_bits = u32::try_from(Zt::EvalR::NUM_BYTES)
                 .ok()
                 .and_then(|b| b.checked_mul(8))
-                .expect("Size of Eval type is too large");
+                .expect("Size of EvalR type is too large");
 
             let rep_factor_log = REP.ilog2();
             let num_vars_even = if num_vars.is_multiple_of(2) {
@@ -95,10 +95,10 @@ impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for RaaCode<Zt, REP> {
             };
             add!(initial_bits, add!(num_vars_even, mul!(rep_factor_log, 2)))
         };
-        let codeword_type_bits = u32::try_from(size_of::<Zt::CwR>())
+        let codeword_type_bits = u32::try_from(Zt::CwR::NUM_BYTES)
             .ok()
             .and_then(|b| b.checked_mul(8))
-            .expect("Size of Cw type is too large");
+            .expect("Size of CwR type is too large");
         assert!(
             codeword_type_bits >= codeword_width_bits,
             "Cannot fit {codeword_width_bits}-bit wide codeword entries in {} bits entries",
