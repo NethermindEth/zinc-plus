@@ -129,7 +129,7 @@ impl<R: Ring, const DEGREE: usize> Zero for DensePolynomial<R, DEGREE> {
     }
 
     fn is_zero(&self) -> bool {
-        self.coeffs.iter().all(|c| c.is_zero())
+        self.coeff_0.is_zero() && self.coeffs.iter().all(|c| c.is_zero())
     }
 }
 
