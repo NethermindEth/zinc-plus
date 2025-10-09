@@ -20,12 +20,6 @@ pub struct RaaCode<Zt: ZipTypes, const REP: usize> {
 
     row_len: usize,
 
-    /// Randomness seed for the first permutation
-    perm_1_seed: u64,
-
-    /// Randomness seed for the second permutation
-    perm_2_seed: u64,
-
     phantom: PhantomData<Zt>,
 }
 
@@ -40,14 +34,19 @@ impl<Zt: ZipTypes, const REP: usize> RaaCode<Zt, REP> {
             self.row_len,
             "Row length must match the code's row length"
         );
+
+        // We don't need a secure/unpredictable randomness here, so use fixed seeds
+        const PERM_1_SEED: u64 = 1;
+        const PERM_2_SEED: u64 = 2;
+
         let mut result: Vec<Out> = repeat(row, REP);
-        shuffle_seeded(&mut result, self.perm_1_seed);
+        shuffle_seeded(&mut result, PERM_1_SEED);
         if self.check_for_overflows {
             accumulate(&mut result);
         } else {
             accumulate_unchecked(&mut result);
         }
-        shuffle_seeded(&mut result, self.perm_2_seed);
+        shuffle_seeded(&mut result, PERM_2_SEED);
         if self.check_for_overflows {
             accumulate(&mut result);
         } else {
@@ -105,15 +104,9 @@ impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for RaaCode<Zt, REP> {
             codeword_type_bits
         );
 
-        // We don't need a secure/unpredictable randomness here, so we use fixed seeds
-        let perm_1_seed = 1;
-        let perm_2_seed = 2;
-
         Self {
             check_for_overflows,
             row_len,
-            perm_1_seed,
-            perm_2_seed,
             phantom: PhantomData,
         }
     }
