@@ -15,8 +15,6 @@ pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
     /// makes using it too much of a hassle.
     const REPETITION_FACTOR: usize;
 
-    type Inner;
-
     fn new<T: Transcript>(poly_size: usize, check_for_overflows: bool, transcript: &mut T) -> Self;
 
     /// Length of each input row before encoding
@@ -67,5 +65,5 @@ pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
     /// A vector of field elements representing the encoded row
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        F: PrimeField + FromRef<F> + FromRef<Self::Inner>;
+        F: PrimeField + FromRef<F>;
 }

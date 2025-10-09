@@ -26,11 +26,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField
-            + FromRef<F>
-            + FromRef<Zt::Chal>
-            + FromRef<Lc::Inner>
-            + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<F> + FromRef<Zt::Chal> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
         Zt::Cw: ProjectableToField<F>,
     {
@@ -61,11 +57,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField
-            + FromRef<F>
-            + FromRef<Zt::Chal>
-            + FromRef<Lc::Inner>
-            + for<'b> MulByScalar<&'b F>,
+        F: PrimeField + FromRef<F> + FromRef<Zt::Chal> + for<'b> MulByScalar<&'b F>,
         F::Inner: Transcribable,
         Zt::Cw: ProjectableToField<F>,
     {
@@ -166,7 +158,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         projecting_element: F,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + FromRef<F> + FromRef<Lc::Inner> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<F> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
         Zt::Cw: ProjectableToField<F>,
     {

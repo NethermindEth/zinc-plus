@@ -34,7 +34,7 @@ type F = F256<ModP>;
 pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>>(group: &mut BenchmarkGroup<WallTime>)
 where
     StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
-    F: FromRef<Zt::Chal> + FromRef<Zt::Pt> + FromRef<Lc::Inner>,
+    F: FromRef<Zt::Chal> + FromRef<Zt::Pt>,
     Zt::Eval: ProjectableToField<F>,
     Zt::Cw: ProjectableToField<F>,
 {
@@ -236,7 +236,7 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
-    F: FromRef<Zt::Chal> + FromRef<Zt::Pt> + FromRef<Lc::Inner>,
+    F: FromRef<Zt::Chal> + FromRef<Zt::Pt>,
     Zt::Eval: ProjectableToField<F>,
     Zt::Cw: ProjectableToField<F>,
 {

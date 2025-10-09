@@ -61,8 +61,6 @@ impl<Zt: ZipTypes, const REP: usize> RaaCode<Zt, REP> {
 impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for RaaCode<Zt, REP> {
     const REPETITION_FACTOR: usize = REP;
 
-    type Inner = u64; // Doesn't really matter, we don't use it
-
     fn new<T: Transcript>(poly_size: usize, check_for_overflows: bool, transcript: &mut T) -> Self {
         assert!(
             REP.is_power_of_two(),
@@ -138,7 +136,7 @@ impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for RaaCode<Zt, REP> {
 
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        F: PrimeField + FromRef<F> + FromRef<Self::Inner>,
+        F: PrimeField + FromRef<F>,
     {
         self.encode_inner(row)
     }
