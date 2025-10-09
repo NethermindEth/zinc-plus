@@ -1,7 +1,7 @@
 use crate::{
     code::LinearCode,
     pcs::{MerkleTree, utils::MtHash},
-    traits::Transcribable,
+    traits::{FromRef, Transcribable},
     utils::ReinterpretVector,
 };
 use crypto_primitives::{Ring, crypto_bigint_int::Int};
@@ -99,6 +99,20 @@ pub trait AsPackable: Clone + ReinterpretVector<Self::Packable> {
     type Packable: Packable + Transcribable + Clone + Send + Sync;
 }
 
+macro_rules! impl_as_packable_for_primitives {
+    ($($source:ty as $packable:ty),+) => {
+        $(
+            unsafe impl ReinterpretVector<$packable> for $source {}
+
+            impl AsPackable for $source {
+                type Packable = $packable;
+            }
+        )+
+    };
+}
+
+impl_as_packable_for_primitives!(i8 as u8, i16 as u16, i32 as u32, i64 as u64, i128 as u128);
+
 impl<const LIMBS: usize> AsPackable for Int<LIMBS> {
     type Packable = PackedInt<LIMBS>;
 }
@@ -108,7 +122,6 @@ impl<const LIMBS: usize> AsPackable for Int<LIMBS> {
 pub struct PackedInt<const LIMBS: usize>(pub(crate) Int<LIMBS>);
 
 unsafe impl<const N: usize> ReinterpretVector<PackedInt<N>> for Int<N> {}
-unsafe impl<const N: usize> ReinterpretVector<Int<N>> for PackedInt<N> {}
 
 impl<const LIMBS: usize> Packable for PackedInt<LIMBS> {}
 
@@ -144,15 +157,11 @@ impl<Chal> ChallengeRing for Chal where Chal: Ring + Transcribable {}
 /// Ring of elements in the linear combination of codewords, at least as wide as
 /// the evaluation, codeword, and challenge rings.
 pub trait LinearCombinationRing<Eval, Cw, Chal>:
-    Ring + Transcribable + for<'a> From<&'a Eval> + for<'a> From<&'a Cw> + for<'a> MulByScalar<&'a Chal>
+    Ring + Transcribable + FromRef<Eval> + FromRef<Cw> + for<'a> MulByScalar<&'a Chal>
 {
 }
 impl<Eval, Cw, Chal, Comb> LinearCombinationRing<Eval, Cw, Chal> for Comb where
-    Comb: Ring
-        + Transcribable
-        + for<'a> From<&'a Eval>
-        + for<'a> From<&'a Cw>
-        + for<'a> MulByScalar<&'a Chal>
+    Comb: Ring + Transcribable + FromRef<Eval> + FromRef<Cw> + for<'a> MulByScalar<&'a Chal>
 {
 }
 
@@ -163,7 +172,7 @@ pub trait MulByScalar<Rhs>: Sized {
     fn mul_by_scalar(&self, rhs: Rhs) -> Option<Self>;
 }
 
-macro_rules! impl_simple_mul_by_scalar {
+macro_rules! impl_mul_by_scalar_for_primitives {
     ($($t:ty),*) => {
         $(
             impl MulByScalar<&$t> for $t {
@@ -175,7 +184,7 @@ macro_rules! impl_simple_mul_by_scalar {
     };
 }
 
-impl_simple_mul_by_scalar!(i8, i16, i32, i64, i128);
+impl_mul_by_scalar_for_primitives!(i8, i16, i32, i64, i128);
 
 impl<const LIMBS: usize, const LIMBS2: usize> MulByScalar<&Int<LIMBS2>> for Int<LIMBS> {
     fn mul_by_scalar(&self, rhs: &Int<LIMBS2>) -> Option<Self> {
@@ -185,3 +194,17 @@ impl<const LIMBS: usize, const LIMBS2: usize> MulByScalar<&Int<LIMBS2>> for Int<
         self.checked_mul(&rhs.resize())
     }
 }
+
+macro_rules! impl_mul_int_by_primitive_scalar {
+    ($($t:ty),*) => {
+        $(
+            impl<const LIMBS: usize> MulByScalar<&$t> for Int<LIMBS> {
+                fn mul_by_scalar(&self, rhs: &$t) -> Option<Self> {
+                    self.checked_mul(&Self::from_ref(rhs))
+                }
+            }
+        )*
+    };
+}
+
+impl_mul_int_by_primitive_scalar!(i8, i16, i32, i64, i128);

@@ -10,7 +10,7 @@ use crate::{
     },
     pcs_transcript::PcsTranscript,
     poly::mle::DenseMultilinearExtension,
-    traits::{Transcribable, Transcript},
+    traits::{FromRef, Transcribable, Transcript},
     utils::inner_product,
 };
 use ark_std::iterable::Iterable;
@@ -33,10 +33,7 @@ impl<
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField
-            + for<'a> From<&'a C::Inner>
-            + for<'a> From<&'a Cw>
-            + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<F> + FromRef<C::Inner> + FromRef<Cw> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         let no_polys = Vec::<DenseMultilinearExtension<bool>>::new();
@@ -57,10 +54,7 @@ impl<
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField
-            + for<'b> From<&'b C::Inner>
-            + for<'b> From<&'b Cw>
-            + for<'b> MulByScalar<&'b F>,
+        F: PrimeField + FromRef<F> + FromRef<C::Inner> + FromRef<Cw> + for<'b> MulByScalar<&'b F>,
         F::Inner: Transcribable,
     {
         for (i, (eval, comm)) in evals.iter().zip(comms.iter()).enumerate() {
@@ -125,10 +119,10 @@ impl<
         num_rows: usize,
     ) -> Result<(), ZipError> {
         let column_entries_comb: Comb = if num_rows > 1 {
-            let column_entries: Vec<Comb> = column_entries.iter().map(Comb::from).collect();
+            let column_entries: Vec<Comb> = column_entries.iter().map(Comb::from_ref).collect();
             inner_product(coeffs.iter(), column_entries.iter())
         } else {
-            Comb::from(&column_entries[0])
+            Comb::from_ref(&column_entries[0])
         };
 
         if column_entries_comb != encoded_combined_row[column] {
@@ -145,10 +139,7 @@ impl<
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField
-            + for<'a> From<&'a C::Inner>
-            + for<'a> From<&'a Cw>
-            + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<F> + FromRef<C::Inner> + FromRef<Cw> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         let q_0_combined_row = transcript.read_field_elements(vp.linear_code.row_len())?;
@@ -182,14 +173,14 @@ impl<
         num_rows: usize,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'b> From<&'b Cw> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<Cw> + for<'a> MulByScalar<&'a F>,
     {
         let column_entries_comb = if num_rows > 1 {
-            let column_entries = column_entries.iter().map(F::from).collect_vec();
+            let column_entries = column_entries.iter().map(F::from_ref).collect_vec();
             inner_product(q_0, &column_entries)
             // TODO: this inner product is taking a long time.
         } else {
-            F::from(column_entries.first().expect("No column entries"))
+            F::from_ref(column_entries.first().expect("No column entries"))
         };
         if column_entries_comb != encoded_q_0_combined_row[column] {
             return Err(ZipError::InvalidPcsOpen("Proximity failure".into()));
@@ -210,7 +201,7 @@ mod tests {
     use crypto_primitives::crypto_bigint_int::Int;
     use itertools::Itertools;
     use num_traits::{ConstOne, One};
-    use rand::Rng;
+    use rand::prelude::*;
 
     use crate::{
         ZipError,
@@ -420,7 +411,7 @@ mod tests {
             current_evals[0]
         }
 
-        let mut rng = rand::rng();
+        let mut rng = ThreadRng::default();
 
         let n = 3;
         let poly_size = 1 << n;
@@ -604,7 +595,7 @@ mod tests {
     #[test]
     fn bench_p12_verify() {
         fn inner<const P: usize>() {
-            let mut rng = rand::rng();
+            let mut rng = ThreadRng::default();
             // Match the benchmark’s transcript usage for linear code construction
             let mut keccak_transcript = KeccakTranscript::new();
             let poly_size = 1 << P;

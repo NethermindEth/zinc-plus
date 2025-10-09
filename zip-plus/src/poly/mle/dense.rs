@@ -6,9 +6,9 @@ use crate::{
     sub,
 };
 use ark_std::log2;
-use crypto_bigint::Random;
 use crypto_primitives::{Matrix, Ring};
 use num_traits::Zero;
+use rand::{distr::StandardUniform, prelude::*};
 use rand_core::RngCore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +26,7 @@ impl<R: Ring> DenseMultilinearExtension<R> {
 
     pub fn evaluate(&self, point: &[R]) -> Option<R> {
         if point.len() == self.num_vars {
-            Some(self.fixed_variables(point)[0].clone())
+            self.fixed_variables(point).evaluations.into_iter().next()
         } else {
             None
         }
@@ -128,15 +128,15 @@ where
         let dim = partial_point.len();
 
         for i in 1..dim + 1 {
-            let r = partial_point[i - 1].clone();
+            let r = &partial_point[i - 1];
             for b in 0..1 << (nv - i) {
-                let left = poly[b << 1].clone();
-                let right = poly[(b << 1) + 1].clone();
+                let left = &poly[b << 1];
+                let right = &poly[(b << 1) + 1];
                 let a = sub!(right, &left);
                 if !a.is_zero() {
                     poly[b] = add!(left, &mul!(r, &a));
                 } else {
-                    poly[b] = left;
+                    poly[b] = left.clone();
                 };
             }
         }
@@ -154,12 +154,13 @@ where
 
 impl<R> MultilinearExtensionRand<R> for DenseMultilinearExtension<R>
 where
-    R: Ring + Random,
+    R: Ring,
+    StandardUniform: Distribution<R>,
 {
     fn rand<Rng: RngCore + ?Sized>(num_vars: usize, rng: &mut Rng) -> Self {
         Self::from_evaluations_vec(
             num_vars,
-            (0..1 << num_vars).map(|_| R::random(rng)).collect(),
+            (0..1 << num_vars).map(|_| rng.random::<R>()).collect(),
         )
     }
 }

@@ -10,6 +10,9 @@ use num_traits::{
 };
 use pastey::paste;
 
+#[cfg(feature = "rand")]
+use rand::{distr::StandardUniform, prelude::*, rand_core::TryRngCore};
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct Int<const LIMBS: usize>(crypto_bigint::Int<LIMBS>);
@@ -337,24 +340,28 @@ impl<'a, const LIMBS: usize> Product<&'a Self> for Int<LIMBS> {
 //
 
 impl<const LIMBS: usize> From<crypto_bigint::Int<LIMBS>> for Int<LIMBS> {
+    #[inline(always)]
     fn from(value: crypto_bigint::Int<LIMBS>) -> Self {
         Self(value)
     }
 }
 
 impl<const LIMBS: usize> From<Int<LIMBS>> for crypto_bigint::Int<LIMBS> {
+    #[inline(always)]
     fn from(value: Int<LIMBS>) -> Self {
         value.0
     }
 }
 
 impl<const LIMBS: usize, const LIMBS2: usize> From<&Int<LIMBS>> for Int<LIMBS2> {
+    #[inline(always)]
     fn from(num: &Int<LIMBS>) -> Int<LIMBS2> {
         num.resize()
     }
 }
 
 impl<const LIMBS: usize, const LIMBS2: usize> From<&crypto_bigint::Int<LIMBS>> for Int<LIMBS2> {
+    #[inline(always)]
     fn from(num: &crypto_bigint::Int<LIMBS>) -> Int<LIMBS2> {
         Self(num.resize())
     }
@@ -365,13 +372,25 @@ macro_rules! impl_from_primitive {
         $(
             impl<const LIMBS: usize> From<$t> for Int<LIMBS> {
                 fn from(value: $t) -> Self {
+                    assert!(core::mem::size_of::<$t>() <= crypto_bigint::Int::<LIMBS>::BYTES,
+                            "`{}` is too large to fit into `Int<{LIMBS}>`", stringify!($t));
                     Self(crypto_bigint::Int::<LIMBS>::from(value))
+                }
+            }
+
+            impl<'a, const LIMBS: usize> From<&'a $t> for Int<LIMBS> {
+                #[inline(always)]
+                fn from(value: &$t) -> Self {
+                    Self::from(*value)
                 }
             }
 
             impl<const LIMBS: usize> Int<LIMBS> {
             paste! {
-                pub const fn  [<from_ $t>] (n: $t) -> Self {
+                /// Create an Int from a primitive type.
+                /// It does NOT check for overflow - this behaviour is
+                /// consistent with the `crypto_bigint::Int` methods.
+                pub const fn [<from_ $t>](n: $t) -> Self {
                     Self(crypto_bigint::Int::<LIMBS>::[<from_ $t>](n))
                 }
             }
@@ -394,13 +413,20 @@ impl<const LIMBS: usize> IntRing for Int<LIMBS> {}
 // Traits from crypto_bigint
 //
 
-#[cfg(feature = "rand_core")]
+#[cfg(feature = "rand")]
+impl<const LIMBS: usize> Distribution<Int<LIMBS>> for StandardUniform {
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Int<LIMBS> {
+        crypto_bigint::Random::random(rng)
+    }
+}
+
+#[cfg(feature = "rand")]
 impl<const LIMBS: usize> crypto_bigint::Random for Int<LIMBS> {
-    fn random<R: rand_core::RngCore + ?Sized>(rng: &mut R) -> Self {
+    fn random<R: RngCore + ?Sized>(rng: &mut R) -> Self {
         Self(crypto_bigint::Int::random(rng))
     }
 
-    fn try_random<R: rand_core::TryRngCore + ?Sized>(rng: &mut R) -> Result<Self, R::Error> {
+    fn try_random<R: TryRngCore + ?Sized>(rng: &mut R) -> Result<Self, R::Error> {
         crypto_bigint::Int::try_random(rng).map(Self)
     }
 }
@@ -728,6 +754,34 @@ mod tests {
             j.into_inner(),
             crypto_bigint::Int::<4>::from(-1234567890123456789012345678901234567_i128)
         );
+    }
+
+    #[test]
+    fn test_from_primitive_edge_cases() {
+        for value in [i32::MIN, i32::MAX] {
+            let i = Int::<1>::from(value);
+            let j = Int::<2>::from(value);
+            assert_eq!(i.resize(), j);
+        }
+
+        for value in [i64::MIN, i64::MAX] {
+            let i = Int::<1>::from(value);
+            let j = Int::<2>::from(value);
+            assert_eq!(i.resize(), j);
+        }
+
+        for value in [i128::MIN, i128::MAX] {
+            let i = Int::<2>::from(value);
+            let j = Int::<3>::from(value);
+            assert_eq!(i.resize(), j);
+        }
+    }
+
+    #[should_panic]
+    #[test]
+    fn test_from_too_large_primitive() {
+        // Test from_i128
+        let _ = Int::<1>::from(i128::MAX);
     }
 
     #[test]

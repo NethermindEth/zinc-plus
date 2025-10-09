@@ -12,7 +12,7 @@ use crate::{
     },
     pcs_transcript::PcsTranscript,
     poly::mle::DenseMultilinearExtension,
-    traits::{Transcribable, Transcript},
+    traits::{FromRef, Transcribable, Transcript},
     utils::combine_rows,
 };
 use crypto_primitives::PrimeField;
@@ -34,7 +34,7 @@ impl<
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'a> From<&'a Eval> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<Eval> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         validate_input("open", pp.num_vars, [poly], [point])?;
@@ -55,7 +55,7 @@ impl<
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'a> From<&'a Eval> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<Eval> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         for (poly, comm, point) in izip!(polys.iter(), comms.iter(), points.iter()) {
@@ -73,7 +73,7 @@ impl<
         poly: &DenseMultilinearExtension<Eval>,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'a> From<&'a Eval> + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<Eval> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
     {
         let num_rows = pp.num_rows;
@@ -83,7 +83,7 @@ impl<
         // elements first
         let q_0 = left_point_to_tensor(num_rows, point)?;
 
-        let evaluations = poly.evaluations.iter().map(F::from).collect_vec();
+        let evaluations = poly.evaluations.iter().map(F::from_ref).collect_vec();
 
         let q_0_combined_row = if num_rows > 1 {
             // Return the evaluation row combination
@@ -110,7 +110,7 @@ impl<
             for _ in 0..pp.linear_code.num_proximity_testing() {
                 let coeffs = transcript.fs_transcript.get_challenges::<Chal>(pp.num_rows);
 
-                let evals = poly.evaluations.iter().map(Comb::from);
+                let evals = poly.evaluations.iter().map(Comb::from_ref);
 
                 // u' in the Zinc paper
                 let combined_row =
@@ -160,8 +160,7 @@ mod tests {
     use crypto_bigint::{Random, U256, const_monty_params};
     use crypto_primitives::crypto_bigint_int::Int;
     use num_traits::{ConstOne, ConstZero, One};
-    use rand::rng;
-    use rand_core::RngCore;
+    use rand::prelude::*;
 
     use crate::{
         code::{DefaultLinearCodeSpec, LinearCode, raa::RaaCode},
@@ -225,7 +224,7 @@ mod tests {
 
         let (data, _) = TestZip::commit(&pp, &poly).unwrap();
 
-        let mut rng = rng();
+        let mut rng = ThreadRng::default();
         let point_int = random_point::<INT_LIMBS>(num_vars, &mut rng);
         let point_f: Vec<F> = point_int.iter().map(F::from).collect();
         let mut prover_transcript = PcsTranscript::new();
@@ -251,7 +250,7 @@ mod tests {
         let corrupted_merkle_tree = MerkleTree::new(&corrupted_rows, codeword_len);
         let corrupted_data = MultilinearZipData::new(corrupted_rows, corrupted_merkle_tree);
 
-        let mut rng = rng();
+        let mut rng = ThreadRng::default();
         let point_int = random_point::<INT_LIMBS>(num_vars, &mut rng);
         let point_f: Vec<F> = point_int.iter().map(F::from).collect();
         let mut prover_transcript = PcsTranscript::new();
@@ -357,7 +356,7 @@ mod tests {
         // This data is for a 4-variable poly, but we need it as a placeholder.
         let (data, _) = TestZip::commit(&pp, &setup_test_params(num_vars).1).unwrap();
 
-        let mut rng = rng();
+        let mut rng = ThreadRng::default();
         let point_int = random_point::<INT_LIMBS>(oversized_num_vars, &mut rng);
         let point_f: Vec<F> = point_int.iter().map(F::from).collect();
         let mut prover_transcript = PcsTranscript::new();

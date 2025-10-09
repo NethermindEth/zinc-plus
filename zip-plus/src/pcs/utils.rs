@@ -155,7 +155,7 @@ where
 {
     pub fn new<S>(rows: &[S], row_width: usize) -> Self
     where
-        S: ReinterpretVector<T>,
+        S: AsPackable<Packable = T>,
     {
         assert!(rows.len().is_power_of_two());
         assert!(rows.len().is_multiple_of(row_width));
@@ -237,7 +237,7 @@ impl MerkleProof {
         leaf_index: usize,
     ) -> Result<(), MerkleError>
     where
-        S: ReinterpretVector<T>,
+        S: AsPackable<Packable = T>,
         T: Packable + Transcribable + Clone,
     {
         let prover = MtMmcs::<T>::new(MtHasher, MtPerm);
@@ -379,7 +379,7 @@ where
         return Err(ArithErrors::InvalidParameters("r length is 0".into()));
     } else if r.len() == 1 {
         // initializing the buffer with [1-r_0, r_0]
-        buf.push(F::one() - r[0].clone());
+        buf.push(F::one() - &r[0]);
         buf.push(r[0].clone());
     } else {
         build_eq_x_r_helper(&r[1..], buf)?;
@@ -399,7 +399,7 @@ where
         let mut res = vec![F::zero(); buf.len() << 1];
         cfg_iter_mut!(res).enumerate().for_each(|(i, val)| {
             let bi = buf[i >> 1].clone();
-            let tmp = r[0].clone() * bi.clone();
+            let tmp = r[0].clone() * &bi;
             if (i & 1) == 0 {
                 *val = bi - tmp;
             } else {

@@ -6,7 +6,7 @@ use crate::{
     add,
     code::{LinearCode, LinearCodeSpec},
     mul, sub,
-    traits::Transcript,
+    traits::{FromRef, Transcript},
     utils::shuffle_seeded,
 };
 
@@ -37,8 +37,8 @@ pub struct RaaCode<Eval: Ring, Cw: Ring, Comb: Ring> {
 impl<Eval, Cw, Comb> RaaCode<Eval, Cw, Comb>
 where
     Eval: Ring,
-    Cw: Ring + for<'a> From<&'a Eval>,
-    Comb: Ring + for<'a> From<&'a Comb>,
+    Cw: Ring + FromRef<Eval>,
+    Comb: Ring + FromRef<Comb>,
 {
     pub fn new<S: LinearCodeSpec, T: Transcript>(
         spec: &S,
@@ -111,7 +111,7 @@ where
     /// Do the actual encoding, as per RAA spec
     fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
     where
-        Out: Zero + CheckedAdd + for<'a> AddAssign<&'a Out> + for<'a> From<&'a In> + Clone,
+        Out: Zero + CheckedAdd + for<'a> AddAssign<&'a Out> + FromRef<In> + Clone,
     {
         debug_assert_eq!(
             row.len(),
@@ -139,8 +139,8 @@ where
 impl<Eval, Cw, Comb> LinearCode<Eval, Cw, Comb> for RaaCode<Eval, Cw, Comb>
 where
     Eval: Ring,
-    Cw: Ring + for<'a> From<&'a Eval>,
-    Comb: Ring + for<'a> From<&'a Comb>,
+    Cw: Ring + FromRef<Eval>,
+    Comb: Ring + FromRef<Comb>,
 {
     type Inner = u64; // Doesn't really matter, we don't use it
 
@@ -171,7 +171,7 @@ where
 
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        F: PrimeField + for<'a> From<&'a Self::Inner>,
+        F: PrimeField + FromRef<F> + FromRef<Self::Inner>,
     {
         self.encode_inner(row)
     }
@@ -179,13 +179,10 @@ where
 
 /// Repeat the given slice N times, e.g `[1,2,3] => [1,2,3,1,2,3]`
 #[allow(clippy::arithmetic_side_effects)]
-fn repeat<In, Out: for<'a> From<&'a In> + Clone>(
-    input: &[In],
-    repetition_factor: usize,
-) -> Vec<Out> {
+fn repeat<In, Out: FromRef<In> + Clone>(input: &[In], repetition_factor: usize) -> Vec<Out> {
     input
         .iter()
-        .map(|i| Out::from(i))
+        .map(Out::from_ref)
         .cycle()
         .take(input.len() * repetition_factor)
         .collect()
@@ -252,8 +249,8 @@ mod tests {
     fn test_raa<Eval, Cw, Comb, F>(poly_size: usize, f: F)
     where
         Eval: Ring,
-        Cw: Ring + for<'a> From<&'a Eval>,
-        Comb: Ring + for<'a> From<&'a Comb>,
+        Cw: Ring + FromRef<Eval>,
+        Comb: Ring + FromRef<Comb>,
         F: Fn(&RaaCode<Eval, Cw, Comb>),
     {
         for check_for_overflows in [true, false] {
