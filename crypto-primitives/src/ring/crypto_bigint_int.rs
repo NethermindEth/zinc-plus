@@ -353,6 +353,20 @@ impl<'a, const LIMBS: usize> RemAssign<&'a Self> for Int<LIMBS> {
     }
 }
 
+impl<const LIMBS: usize> ShlAssign<u32> for Int<LIMBS> {
+    #[inline(always)]
+    fn shl_assign(&mut self, rhs: u32) {
+        self.0.shl_assign(rhs);
+    }
+}
+
+impl<const LIMBS: usize> ShrAssign<u32> for Int<LIMBS> {
+    #[inline(always)]
+    fn shr_assign(&mut self, rhs: u32) {
+        self.0.shr_assign(rhs);
+    }
+}
+
 //
 // Aggregate operations
 //
@@ -596,6 +610,8 @@ mod tests {
     #[test]
     fn ensure_blanket_traits() {
         ensure_type_implements_trait!(Int4, ConstIntRing);
+        ensure_type_implements_trait!(Int4, IntRingWithRem);
+        ensure_type_implements_trait!(Int4, IntRingWithShifts);
     }
 
     #[test]
@@ -1016,6 +1032,18 @@ mod tests {
         let mut f = Int4::from(3_i64);
         f *= &Int4::from(4_i64);
         assert_eq!(f, Int4::from(12_i64));
+
+        let mut f = Int1::from(2_i64);
+        f <<= 2;
+        assert_eq!(f, Int1::from(8_i64)); // 2 << 2 = 8
+        f <<= 61;
+        assert_eq!(f, Int1::ZERO);
+
+        let mut f = Int1::from(3_i64);
+        f >>= 1;
+        assert_eq!(f, Int1::from(1_i64)); // 3 >> 1 = 1
+        f >>= 1;
+        assert_eq!(f, Int1::ZERO);
     }
 
     #[test]

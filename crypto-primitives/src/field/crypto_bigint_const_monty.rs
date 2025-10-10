@@ -5,7 +5,10 @@ use core::{
     fmt::{Debug, Display, Formatter, Result as FmtResult},
     hash::{Hash, Hasher},
     iter::{Product, Sum},
-    ops::{Add, AddAssign, DivAssign, Mul, MulAssign, Rem, RemAssign, Shl, Shr, Sub, SubAssign},
+    ops::{
+        Add, AddAssign, DivAssign, Mul, MulAssign, Rem, RemAssign, Shl, ShlAssign, Shr, ShrAssign,
+        Sub, SubAssign,
+    },
     str::FromStr,
 };
 use crypto_bigint::{
@@ -376,6 +379,18 @@ impl_field_op_assign!(MulAssign, mul_assign, mul);
 impl_field_op_assign!(DivAssign, div_assign, div);
 impl_field_op_assign!(RemAssign, rem_assign, rem);
 
+impl<Mod: Params<LIMBS>, const LIMBS: usize> ShlAssign<u32> for ConstMontyField<Mod, LIMBS> {
+    fn shl_assign(&mut self, rhs: u32) {
+        *self = self.shl(rhs);
+    }
+}
+
+impl<Mod: Params<LIMBS>, const LIMBS: usize> ShrAssign<u32> for ConstMontyField<Mod, LIMBS> {
+    fn shr_assign(&mut self, rhs: u32) {
+        *self = self.shr(rhs);
+    }
+}
+
 //
 // Aggregate operations
 //
@@ -714,7 +729,7 @@ pub type F32768<Mod> = ConstMontyField<Mod, { 512 * WORD_FACTOR }>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ConstIntRing, ensure_type_implements_trait};
+    use crate::{ConstIntRing, IntRingWithRem, IntRingWithShifts, ensure_type_implements_trait};
     use crypto_bigint::{Square, U256, const_monty_params};
     use num_traits::{One, Zero};
 
@@ -728,6 +743,8 @@ mod tests {
     #[test]
     fn ensure_blanket_traits() {
         ensure_type_implements_trait!(F, ConstIntRing);
+        ensure_type_implements_trait!(F, IntRingWithRem);
+        ensure_type_implements_trait!(F, IntRingWithShifts);
     }
 
     #[test]
@@ -766,63 +783,34 @@ mod tests {
     }
 
     #[test]
-    fn basic_add_smoke() {
+    fn basic_ops() {
+        let a: F = 9_u64.into();
+        let neg_a = -a;
+        assert_eq!(a + neg_a, F::zero());
+
         let a: F = 123_u64.into();
         let b: F = 456_u64.into();
         assert_eq!(a + b, F::from(579_u64));
-    }
 
-    #[test]
-    fn add_wrapping_and_basic() {
-        let a: F = (-100_i64).into();
-        let b: F = 105_u64.into();
-        let c = a + b;
-        let d: F = 5_u64.into();
-        assert_eq!(c, d);
-    }
-
-    #[test]
-    fn sub_basic() {
         let a: F = 100_u64.into();
         let b: F = 7_u64.into();
         assert_eq!(a - b, 93_u64.into());
-    }
 
-    #[test]
-    fn mul_basic() {
         let a: F = 100_u64.into();
         let b: F = 7_u64.into();
         assert_eq!(a * b, 700_u64.into());
-    }
 
-    #[test]
-    fn add_assign_basic() {
-        let mut a: F = 5_u64.into();
-        a += F::from(6_u64);
-        assert_eq!(a, 11_u64.into());
-    }
-
-    #[test]
-    fn mul_assign_basic() {
-        let mut a: F = 11_u64.into();
-        a *= F::from(3_u64);
-        assert_eq!(a, 33_u64.into());
-    }
-
-    #[test]
-    fn neg_basic() {
-        let a: F = 9_u64.into();
-        let neg_a = -a;
-
-        assert_eq!(a + neg_a, F::zero());
-    }
-
-    #[test]
-    fn div_basic() {
         let num: F = 11_u64.into();
         let den: F = 5_u64.into();
         let q = num / den;
         assert_eq!(q * den, num);
+    }
+
+    #[test]
+    fn add_wrapping() {
+        let a: F = (-100_i64).into();
+        let b: F = 105_u64.into();
+        assert_eq!(a + b, F::from(5_u64));
     }
 
     #[test]
@@ -831,6 +819,51 @@ mod tests {
         let a: F = 7_u64.into();
         let zero = F::zero();
         let _ = a / zero;
+    }
+
+    #[test]
+    fn assign_ops_with_refs_and_values() {
+        let mut x: F = 7_u64.into();
+        let y: F = 8_u64.into();
+        x += y;
+        assert_eq!(x, 15_u64.into());
+
+        let mut x: F = 7_u64.into();
+        let y: F = 8_u64.into();
+        x += &y;
+        assert_eq!(x, 15_u64.into());
+
+        let mut x: F = 20_u64.into();
+        let y: F = 6_u64.into();
+        x -= y;
+        assert_eq!(x, 14_u64.into());
+
+        let mut x: F = 20_u64.into();
+        let y: F = 6_u64.into();
+        x -= &y;
+        assert_eq!(x, 14_u64.into());
+
+        let mut x: F = 5_u64.into();
+        let y: F = 9_u64.into();
+        x *= y;
+        assert_eq!(x, 45_u64.into());
+
+        let mut x: F = 5_u64.into();
+        let y: F = 9_u64.into();
+        x *= &y;
+        assert_eq!(x, 45_u64.into());
+
+        let mut x = F::from(2_i64);
+        x <<= 2;
+        assert_eq!(x, F::from(8_i64)); // 2 << 2 = 8
+        x <<= 253;
+        assert_eq!(x, F::ZERO);
+
+        let mut x = F::from(3_i64);
+        x >>= 1;
+        assert_eq!(x, F::from(1_i64)); // 3 >> 1 = 1
+        x >>= 1;
+        assert_eq!(x, F::ZERO);
     }
 
     #[test]
@@ -877,34 +910,6 @@ mod tests {
         assert_eq!(m1, m2);
         assert_eq!(m1, m3);
         assert_eq!(m1, m4);
-    }
-
-    #[test]
-    fn assign_ops_with_refs_and_values() {
-        let mut x: F = 7_u64.into();
-        let y: F = 8_u64.into();
-        x += y;
-        assert_eq!(x, 15_u64.into());
-        let mut x: F = 7_u64.into();
-        let y: F = 8_u64.into();
-        x.add_assign(&y);
-        assert_eq!(x, 15_u64.into());
-        let mut x: F = 20_u64.into();
-        let y: F = 6_u64.into();
-        x -= y;
-        assert_eq!(x, 14_u64.into());
-        let mut x: F = 20_u64.into();
-        let y: F = 6_u64.into();
-        x.sub_assign(&y);
-        assert_eq!(x, 14_u64.into());
-        let mut x: F = 5_u64.into();
-        let y: F = 9_u64.into();
-        x *= y;
-        assert_eq!(x, 45_u64.into());
-        let mut x: F = 5_u64.into();
-        let y: F = 9_u64.into();
-        x.mul_assign(&y);
-        assert_eq!(x, 45_u64.into());
     }
 
     #[test]
