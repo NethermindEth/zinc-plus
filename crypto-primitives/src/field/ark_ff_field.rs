@@ -40,6 +40,7 @@ impl<F: ArkWrappedField> ArkField<F> {
 
     /// Get the reference to the wrapped value
     #[inline(always)]
+    #[must_use]
     pub const fn inner(&self) -> &F {
         &self.0
     }
@@ -89,18 +90,21 @@ impl<F: ArkWrappedField> Default for ArkField<F> {
 impl<F: ArkWrappedField> Deref for ArkField<F> {
     type Target = F;
 
+    #[inline(always)]
     fn deref(&self) -> &Self::Target {
         self.inner()
     }
 }
 
 impl<F: ArkWrappedField> PartialOrd for ArkField<F> {
+    #[inline(always)]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl<F: ArkWrappedField> Ord for ArkField<F> {
+    #[inline(always)]
     fn cmp(&self, other: &Self) -> Ordering {
         Ord::cmp(&self.0, &other.0)
     }
@@ -137,6 +141,7 @@ impl<F: ArkWrappedField> Zero for ArkField<F> {
 }
 
 impl<F: ArkWrappedField> One for ArkField<F> {
+    #[inline(always)]
     fn one() -> Self {
         Self(F::one())
     }
@@ -157,6 +162,7 @@ impl<F: ArkWrappedField> ConstOne for ArkField<F> {
 impl<F: ArkWrappedField> Neg for ArkField<F> {
     type Output = Self;
 
+    #[inline(always)]
     fn neg(self) -> Self::Output {
         Self(self.0.neg())
     }
@@ -218,6 +224,7 @@ impl_basic_op!(Mul, mul);
 impl<F: ArkWrappedField> Div for ArkField<F> {
     type Output = Self;
 
+    #[inline(always)]
     fn div(self, rhs: Self) -> Self::Output {
         self.div(&rhs)
     }
@@ -234,6 +241,7 @@ impl<F: ArkWrappedField> Div<&Self> for ArkField<F> {
 impl<F: ArkWrappedField> Div<&mut Self> for ArkField<F> {
     type Output = Self;
 
+    #[inline(always)]
     fn div(self, rhs: &mut Self) -> Self::Output {
         self.div(&*rhs)
     }
@@ -467,6 +475,7 @@ impl<F: ArkWrappedField> zeroize::Zeroize for ArkField<F> {
 impl<F: ArkWrappedField> ArkWrappedField for ArkField<F> {
     type BasePrimeField = F::BasePrimeField;
     const SQRT_PRECOMP: Option<SqrtPrecomputation<Self>> = {
+        // Pretty much copy the value of `SqrtPrecomputation`
         match F::SQRT_PRECOMP {
             None => None,
             Some(p) => Some(match p {

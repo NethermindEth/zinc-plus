@@ -63,7 +63,7 @@ impl<T: MontConfig<N>, const N: usize> Fp<MontBackend<T, N>, N> {
     #[doc(hidden)]
     pub const INV: u64 = T::INV;
 
-    #[inline]
+    #[inline(always)]
     pub const fn new_from_bigint(element: BigInt<N>) -> Self {
         Self(ArkWrappedFp::<MontBackend<T, N>, N>::new(element))
     }
@@ -95,6 +95,7 @@ impl<P: FpConfig<N>, const N: usize> Default for Fp<P, N> {
 impl<P: FpConfig<N>, const N: usize> Deref for Fp<P, N> {
     type Target = ArkWrappedFp<P, N>;
 
+    #[inline(always)]
     fn deref(&self) -> &Self::Target {
         self.inner()
     }
@@ -148,18 +149,19 @@ impl<P: FpConfig<N>, const N: usize> FromStr for Fp<P, N> {
 //
 
 impl<P: FpConfig<N>, const N: usize> Zero for Fp<P, N> {
-    #[inline]
+    #[inline(always)]
     fn zero() -> Self {
         <Self as ConstZero>::ZERO
     }
 
-    #[inline]
+    #[inline(always)]
     fn is_zero(&self) -> bool {
         self.0.is_zero()
     }
 }
 
 impl<P: FpConfig<N>, const N: usize> One for Fp<P, N> {
+    #[inline(always)]
     fn one() -> Self {
         <Self as ConstOne>::ONE
     }
@@ -180,6 +182,7 @@ impl<P: FpConfig<N>, const N: usize> ConstOne for Fp<P, N> {
 impl<P: FpConfig<N>, const N: usize> Neg for Fp<P, N> {
     type Output = Self;
 
+    #[inline(always)]
     fn neg(self) -> Self::Output {
         Self(self.0.neg())
     }
@@ -241,6 +244,7 @@ impl_basic_op!(Mul, mul);
 impl<P: FpConfig<N>, const N: usize> Div for Fp<P, N> {
     type Output = Self;
 
+    #[inline(always)]
     fn div(self, rhs: Self) -> Self::Output {
         self.div(&rhs)
     }
@@ -257,6 +261,7 @@ impl<P: FpConfig<N>, const N: usize> Div<&Self> for Fp<P, N> {
 impl<P: FpConfig<N>, const N: usize> Div<&mut Self> for Fp<P, N> {
     type Output = Self;
 
+    #[inline(always)]
     fn div(self, rhs: &mut Self) -> Self::Output {
         self.div(&*rhs)
     }

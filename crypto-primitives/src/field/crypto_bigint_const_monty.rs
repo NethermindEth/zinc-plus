@@ -155,18 +155,19 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> FromStr for ConstMontyField<Mod, LI
 //
 
 impl<Mod: Params<LIMBS>, const LIMBS: usize> Zero for ConstMontyField<Mod, LIMBS> {
-    #[inline]
+    #[inline(always)]
     fn zero() -> Self {
         Self::ZERO
     }
 
-    #[inline]
+    #[inline(always)]
     fn is_zero(&self) -> bool {
         self == &Self::ZERO
     }
 }
 
 impl<Mod: Params<LIMBS>, const LIMBS: usize> One for ConstMontyField<Mod, LIMBS> {
+    #[inline(always)]
     fn one() -> Self {
         Self::ONE
     }
@@ -187,6 +188,7 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> ConstOne for ConstMontyField<Mod, L
 impl<Mod: Params<LIMBS>, const LIMBS: usize> Neg for ConstMontyField<Mod, LIMBS> {
     type Output = Self;
 
+    #[inline(always)]
     fn neg(self) -> Self::Output {
         Self(self.0.neg())
     }
@@ -241,6 +243,7 @@ impl_basic_op!(Mul, mul);
 impl<Mod: Params<LIMBS>, const LIMBS: usize> Div for ConstMontyField<Mod, LIMBS> {
     type Output = Self;
 
+    #[inline(always)]
     fn div(self, rhs: Self) -> Self::Output {
         self.div(&rhs)
     }
@@ -271,6 +274,7 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> Rem for ConstMontyField<Mod, LIMBS>
 impl<Mod: Params<LIMBS>, const LIMBS: usize> Rem<&Self> for ConstMontyField<Mod, LIMBS> {
     type Output = Self;
 
+    #[inline(always)]
     fn rem(self, rhs: &Self) -> Self::Output {
         self.rem(*rhs)
     }

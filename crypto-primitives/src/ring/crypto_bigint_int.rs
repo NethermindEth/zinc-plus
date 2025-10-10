@@ -244,7 +244,6 @@ impl<const LIMBS: usize> Rem for Int<LIMBS> {
 impl<'a, const LIMBS: usize> Rem<&'a Self> for Int<LIMBS> {
     type Output = Self;
 
-    #[inline(always)]
     fn rem(self, rhs: &'a Self) -> Self::Output {
         let non_zero = crypto_bigint::NonZero::new(rhs.0).expect("division by zero");
         Self(self.0.rem(&non_zero))
@@ -307,7 +306,6 @@ impl_checked_op!(CheckedSub, checked_sub);
 impl_checked_op!(CheckedMul, checked_mul);
 
 impl<const LIMBS: usize> CheckedRem for Int<LIMBS> {
-    #[inline(always)]
     fn checked_rem(&self, other: &Self) -> Option<Self> {
         let non_zero = crypto_bigint::NonZero::new(other.0).into_option()?;
         Some(Self(self.0.rem(&non_zero)))
@@ -349,7 +347,6 @@ impl<const LIMBS: usize> RemAssign for Int<LIMBS> {
 
 impl<'a, const LIMBS: usize> RemAssign<&'a Self> for Int<LIMBS> {
     #![allow(clippy::arithmetic_side_effects)]
-    #[inline(always)]
     fn rem_assign(&mut self, rhs: &'a Self) {
         let non_zero = crypto_bigint::NonZero::new(rhs.0).expect("division by zero");
         self.0 %= non_zero;
@@ -411,6 +408,7 @@ impl<const LIMBS: usize> From<Int<LIMBS>> for crypto_bigint::Int<LIMBS> {
 }
 
 impl<const LIMBS: usize> From<bool> for Int<LIMBS> {
+    #[inline(always)]
     fn from(value: bool) -> Self {
         Self(crypto_bigint::Int::<LIMBS>::from(i8::from(value)))
     }
@@ -518,7 +516,6 @@ impl<'de, const LIMBS: usize> serde::Deserialize<'de> for Int<LIMBS>
 where
     crypto_bigint::Int<LIMBS>: crypto_bigint::Encoding,
 {
-    #[inline(always)]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -532,7 +529,6 @@ impl<const LIMBS: usize> serde::Serialize for Int<LIMBS>
 where
     crypto_bigint::Int<LIMBS>: crypto_bigint::Encoding,
 {
-    #[inline(always)]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
