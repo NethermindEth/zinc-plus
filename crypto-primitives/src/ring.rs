@@ -9,6 +9,7 @@ use core::{
         Add, AddAssign, Mul, MulAssign, Rem, RemAssign, Shl, ShlAssign, Shr, ShrAssign, Sub,
         SubAssign,
     },
+    str::FromStr,
 };
 use num_traits::{
     CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedSub, ConstOne, ConstZero, One, Pow, Zero,
@@ -74,8 +75,8 @@ impl<T> IntRingWithShifts for T where
 {
 }
 
-pub trait ConstIntRing: IntRing + ConstRing {}
-impl<T> ConstIntRing for T where T: IntRing + ConstRing {}
+pub trait ConstIntRing: IntRing + ConstRing + FromStr {}
+impl<T> ConstIntRing for T where T: IntRing + ConstRing + FromStr {}
 
 macro_rules! primitive_int_ring {
     ($t:ident) => {

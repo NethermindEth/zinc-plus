@@ -545,7 +545,7 @@ mod tests {
         let row1_encoded = &encoded[0..codeword_len];
         let row2_encoded = &encoded[codeword_len..2 * codeword_len];
         let expected_combined: Vec<_> = (0..codeword_len)
-            .map(|i| Int::<4>::from(&a) * row1_encoded[i] + Int::<4>::from(&b) * row2_encoded[i])
+            .map(|i| a.resize() * row1_encoded[i] + b.resize() * row2_encoded[i])
             .collect();
         assert_eq!(combined_encoded, expected_combined);
     }

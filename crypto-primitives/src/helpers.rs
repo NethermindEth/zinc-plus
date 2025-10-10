@@ -30,3 +30,13 @@ macro_rules! impl_pow_via_repeated_squaring {
         }
     };
 }
+
+/// Will fail compilation if trait is not implemented for the type.
+#[cfg(test)]
+#[macro_export]
+macro_rules! ensure_type_implements_trait {
+    ($type_name:ty, $trait_name:ident) => {{
+        fn _assert_impl<T: $trait_name>() {}
+        _assert_impl::<$type_name>();
+    }};
+}

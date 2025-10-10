@@ -430,9 +430,7 @@ impl<const LIMBS: usize> Transcribable for Int<LIMBS> {
     const NUM_BYTES: usize = Uint::<LIMBS>::NUM_BYTES;
 
     fn read_transcription_bytes(bytes: &[u8]) -> Self {
-        Uint::<LIMBS>::read_transcription_bytes(bytes)
-            .as_int()
-            .into()
+        (*Uint::<LIMBS>::read_transcription_bytes(bytes).as_int()).into()
     }
 
     fn write_transcription_bytes(&self, buf: &mut [u8]) {

@@ -6,6 +6,7 @@ use core::{
     hash::{Hash, Hasher},
     iter::{Product, Sum},
     ops::{Add, AddAssign, DivAssign, Mul, MulAssign, Rem, RemAssign, Shl, Shr, Sub, SubAssign},
+    str::FromStr,
 };
 use crypto_bigint::{
     Limb, Uint,
@@ -137,6 +138,15 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> Ord for ConstMontyField<Mod, LIMBS>
 impl<Mod: Params<LIMBS>, const LIMBS: usize> Hash for ConstMontyField<Mod, LIMBS> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.0.as_montgomery().hash(state)
+    }
+}
+
+impl<Mod: Params<LIMBS>, const LIMBS: usize> FromStr for ConstMontyField<Mod, LIMBS> {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let uint = Uint::<LIMBS>::from_str_radix_vartime(s, 10).map_err(|_| ())?;
+        Ok(Self(ConstMontyForm::new(&uint)))
     }
 }
 
@@ -699,10 +709,10 @@ pub type F32768<Mod> = ConstMontyField<Mod, { 512 * WORD_FACTOR }>;
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::{ConstIntRing, ensure_type_implements_trait};
     use crypto_bigint::{Square, U256, const_monty_params};
     use num_traits::{One, Zero};
-
-    use super::*;
 
     const_monty_params!(
         ModP,
@@ -710,6 +720,11 @@ mod tests {
         "00dca94d8a1ecce3b6e8755d8999787d0524d8ca1ea755e7af84fb646fa31f27"
     );
     type F = ConstMontyField<ModP, { U256::LIMBS }>;
+
+    #[test]
+    fn ensure_blanket_traits() {
+        ensure_type_implements_trait!(F, ConstIntRing);
+    }
 
     #[test]
     fn zero_one_basics() {
@@ -1263,6 +1278,26 @@ mod tests {
     #[test]
     fn constants() {
         assert_eq!(F::LIMBS, U256::LIMBS);
+    }
+
+    #[test]
+    fn from_str() {
+        // Test parsing from string
+        let a: F = "123".parse().unwrap();
+        assert_eq!(a, F::from(123_u64));
+
+        let b: F = "0".parse().unwrap();
+        assert_eq!(b, F::zero());
+
+        let c: F = "1".parse().unwrap();
+        assert_eq!(c, F::one());
+
+        // Test invalid cases
+        assert!("-123".parse::<F>().is_err()); // Negative not supported
+        assert!("0x123".parse::<F>().is_err()); // Hex not supported
+        assert!("abc".parse::<F>().is_err());
+        assert!("12.34".parse::<F>().is_err());
+        assert!("".parse::<F>().is_err());
     }
 
     #[cfg(feature = "rand")]
