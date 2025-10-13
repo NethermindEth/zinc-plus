@@ -242,7 +242,7 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     type T = KeccakTranscript;
     let mut keccak_transcript = T::new();
     let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size, true, &mut keccak_transcript);
+    let linear_code = Lc::new(poly_size, false, &mut keccak_transcript);
     let params = ZipPlus::setup(poly_size, linear_code);
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
