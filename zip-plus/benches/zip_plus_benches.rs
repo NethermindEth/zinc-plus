@@ -10,7 +10,10 @@ use crypto_bigint::{U64, Uint};
 use crypto_primes::hazmat::MillerRabin;
 use crypto_primitives::crypto_bigint_int::Int;
 use zip_plus::{
-    code::raa::RaaCode, pcs::structs::ZipTypes, poly::dense::DensePolynomial, utils::UintSemiring,
+    code::raa::{RaaCode, RaaConfig},
+    pcs::structs::ZipTypes,
+    poly::dense::DensePolynomial,
+    utils::UintSemiring,
 };
 
 const INT_LIMBS: usize = U64::LIMBS;
@@ -31,11 +34,16 @@ impl<const D: usize> ZipTypes for BenchZipPlusTypes<D> {
 }
 type Code<const D: usize> = RaaCode<BenchZipPlusTypes<D>, 4>;
 
+const RAA_CONFIG: RaaConfig = RaaConfig {
+    check_for_overflows: false,
+    permute_in_place: false,
+};
+
 fn zip_plus_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");
 
-    do_bench::<BenchZipPlusTypes<31>, Code<31>>(&mut group);
-    do_bench::<BenchZipPlusTypes<63>, Code<63>>(&mut group);
+    do_bench::<BenchZipPlusTypes<31>, Code<31>>(&mut group, RAA_CONFIG);
+    do_bench::<BenchZipPlusTypes<63>, Code<63>>(&mut group, RAA_CONFIG);
 
     group.finish();
 }
