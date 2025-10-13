@@ -36,6 +36,7 @@ type Code = RaaCode<BenchZipTypes, 4>;
 const RAA_CONFIG: RaaConfig = RaaConfig {
     check_for_overflows: false,
     permute_in_place: false,
+    flip_signs: true,
 };
 
 fn zip_benchmarks(c: &mut Criterion) {

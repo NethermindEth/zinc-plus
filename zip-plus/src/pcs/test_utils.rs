@@ -36,6 +36,7 @@ pub const REPETITION_FACTOR: usize = 4;
 pub const RAA_CFG: RaaConfig = RaaConfig {
     check_for_overflows: true,
     permute_in_place: false,
+    flip_signs: true,
 };
 
 pub struct TestZipTypes<const N: usize, const K: usize, const M: usize> {}

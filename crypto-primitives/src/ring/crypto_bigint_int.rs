@@ -4,7 +4,7 @@ use core::{
     fmt::{Debug, Display, Formatter, LowerHex, Result as FmtResult, UpperHex},
     hash::Hasher,
     iter::{Product, Sum},
-    ops::{Add, AddAssign, Mul, MulAssign, Rem, RemAssign, Shl, Shr, Sub, SubAssign},
+    ops::{Add, AddAssign, Mul, MulAssign, Neg, Rem, RemAssign, Shl, Shr, Sub, SubAssign},
 };
 use crypto_bigint::{
     CheckedMul as CryptoCheckedMul, CheckedSub as CryptoCheckedSub, Integer, Word,
@@ -205,6 +205,15 @@ impl<const LIMBS: usize> ConstOne for Int<LIMBS> {
 //
 // Basic arithmetic operations
 //
+
+impl<const LIMBS: usize> Neg for Int<LIMBS> {
+    type Output = Self;
+
+    fn neg(mut self) -> Self {
+        self.0 = self.0.wrapping_neg();
+        self
+    }
+}
 
 macro_rules! impl_basic_op {
     ($trait_name:tt, $trait_op:tt) => {

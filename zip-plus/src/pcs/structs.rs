@@ -11,7 +11,7 @@ use crypto_primitives::{
 };
 use num_traits::CheckedMul;
 use p3_field::Packable;
-use std::marker::PhantomData;
+use std::{marker::PhantomData, ops::Neg};
 
 pub trait ZipTypes: Send + Sync {
     const NUM_COLUMN_OPENINGS: usize;
@@ -26,6 +26,7 @@ pub trait ZipTypes: Send + Sync {
     /// Ring of codeword elements, at least as wide as the evaluation ring
     type Cw: FixedRing
         + Polynomial<Self::CwR>
+        + Neg<Output = Self::Cw>
         + ConstTranscribable
         + AsPackable
         + FromRef<Self::Eval>
@@ -45,6 +46,7 @@ pub trait ZipTypes: Send + Sync {
 
     /// Coefficient ring of linear combination polynomial [Self::Comb]
     type CombR: ConstIntRing
+        + Neg<Output = Self::CombR>
         + ConstTranscribable
         + FromRef<Self::CombR>
         + for<'a> MulByScalar<&'a Self::Chal>;
