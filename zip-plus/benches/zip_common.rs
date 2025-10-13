@@ -167,7 +167,7 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
 
     group.bench_function(
         format!(
-            "Commit: Eval={}, Codeword={}, Combination={}, poly_size=2^{P}",
+            "Commit: Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
             Zt::Comb::type_name()
@@ -209,7 +209,7 @@ where
 
     group.bench_function(
         format!(
-            "Open: Eval={}, Codeword={}, Combination={}, poly_size=2^{P}, modulus={}",
+            "Open: Eval={}, Cw={}, Comb={}, poly_size=2^{P}, modulus={}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
             Zt::Comb::type_name(),
@@ -259,7 +259,7 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
 
     group.bench_function(
         format!(
-            "Verify: Eval={}, Codeword={}, Combination={}, poly_size=2^{P}, modulus={}",
+            "Verify: Eval={}, Cw={}, Comb={}, poly_size=2^{P}, modulus={}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
             Zt::Comb::type_name(),
