@@ -690,20 +690,40 @@ mod tests {
 
     #[test]
     fn basic_operations() {
+        // Negation
+        let a: F = 9_u64.into();
+        let neg_a = -a;
+        assert_eq!(a + neg_a, F::zero());
+
         let a = F::from(10_u64);
         let b = F::from(5_u64);
 
-        // Test addition
+        // Addition
         let c = a + b;
         assert_eq!(c, F::from(15_u64));
 
-        // Test subtraction
+        // Subtraction
         let d = a - b;
         assert_eq!(d, F::from(5_u64));
 
-        // Test multiplication
+        // Multiplication
         let e = a * b;
         assert_eq!(e, F::from(50_u64));
+
+        // Division
+        let num: F = 11_u64.into();
+        let den: F = 5_u64.into();
+        let q = num / den;
+        assert_eq!(q * den, num);
+    }
+
+    #[test]
+    fn add_wrapping() {
+        let a: F = (-100_i64).into();
+        let b: F = 105_u64.into();
+        let c = a + b;
+        let d: F = 5_u64.into();
+        assert_eq!(c, d);
     }
 
     #[allow(clippy::op_ref)]
@@ -712,17 +732,23 @@ mod tests {
         let a = F::from(10_u64);
         let b = F::from(5_u64);
 
-        // Test reference-based addition
+        // Addition
         let c = a + &b;
         assert_eq!(c, F::from(15_u64));
 
-        // Test reference-based subtraction
+        // Subtraction
         let d = a - &b;
         assert_eq!(d, F::from(5_u64));
 
-        // Test reference-based multiplication
+        // Multiplication
         let e = a * &b;
         assert_eq!(e, F::from(50_u64));
+
+        // Division
+        let num: F = 11_u64.into();
+        let den: F = 5_u64.into();
+        let q = num / &den;
+        assert_eq!(q * &den, num);
     }
 
     #[test]
@@ -745,70 +771,27 @@ mod tests {
     }
 
     #[test]
-    fn basic_add_smoke() {
-        let a: F = 123_u64.into();
-        let b: F = 456_u64.into();
-        assert_eq!(a + b, F::from(579_u64));
-    }
-
-    #[test]
-    fn add_wrapping_and_basic() {
-        let a: F = (-100_i64).into();
-        let b: F = 105_u64.into();
-        let c = a + b;
-        let d: F = 5_u64.into();
-        assert_eq!(c, d);
-    }
-
-    #[test]
-    fn sub_basic() {
-        let a: F = 100_u64.into();
-        let b: F = 7_u64.into();
-        assert_eq!(a - b, 93_u64.into());
-    }
-
-    #[test]
-    fn mul_basic() {
-        let a: F = 100_u64.into();
-        let b: F = 7_u64.into();
-        assert_eq!(a * b, 700_u64.into());
-    }
-
-    #[test]
-    fn add_assign_basic() {
+    fn assign_operations() {
+        // Addition
         let mut a: F = 5_u64.into();
         a += F::from(6_u64);
         assert_eq!(a, 11_u64.into());
-    }
 
-    #[test]
-    fn sub_assign_basic() {
+        // Subtraction
         let mut a: F = 20_u64.into();
         a -= F::from(7_u64);
         assert_eq!(a, 13_u64.into());
-    }
 
-    #[test]
-    fn mul_assign_basic() {
+        // Multiplication
         let mut a: F = 11_u64.into();
         a *= F::from(3_u64);
         assert_eq!(a, 33_u64.into());
-    }
 
-    #[test]
-    fn neg_basic() {
-        let a: F = 9_u64.into();
-        let neg_a = -a;
-
-        assert_eq!(a + neg_a, F::zero());
-    }
-
-    #[test]
-    fn div_basic() {
-        let num: F = 11_u64.into();
-        let den: F = 5_u64.into();
-        let q = num / den;
-        assert_eq!(q * den, num);
+        // Division
+        let mut a: F = 20_u64.into();
+        let b: F = 4_u64.into();
+        a /= b;
+        assert_eq!(a * b, 20_u64.into());
     }
 
     #[test]
@@ -817,14 +800,6 @@ mod tests {
         let a: F = 7_u64.into();
         let zero = F::zero();
         let _ = a / zero;
-    }
-
-    #[test]
-    fn div_assign_basic() {
-        let mut a: F = 20_u64.into();
-        let b: F = 4_u64.into();
-        a /= b;
-        assert_eq!(a * b, 20_u64.into());
     }
 
     #[test]
