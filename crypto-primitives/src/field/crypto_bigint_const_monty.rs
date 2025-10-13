@@ -5,10 +5,7 @@ use core::{
     fmt::{Debug, Display, Formatter, Result as FmtResult},
     hash::{Hash, Hasher},
     iter::{Product, Sum},
-    ops::{
-        Add, AddAssign, DivAssign, Mul, MulAssign, Rem, RemAssign, Shl, ShlAssign, Shr, ShrAssign,
-        Sub, SubAssign,
-    },
+    ops::{Add, AddAssign, DivAssign, Mul, MulAssign, Rem, RemAssign, Sub, SubAssign},
     str::FromStr,
 };
 use crypto_bigint::{
@@ -283,30 +280,6 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> Rem<&Self> for ConstMontyField<Mod,
     }
 }
 
-impl<Mod: Params<LIMBS>, const LIMBS: usize> Shl<u32> for ConstMontyField<Mod, LIMBS> {
-    type Output = Self;
-
-    #[allow(clippy::arithmetic_side_effects)]
-    fn shl(mut self, rhs: u32) -> Self::Output {
-        let mut value = self.0.retrieve();
-        value <<= rhs;
-        self.0 = ConstMontyForm::new(&value);
-        self
-    }
-}
-
-impl<Mod: Params<LIMBS>, const LIMBS: usize> Shr<u32> for ConstMontyField<Mod, LIMBS> {
-    type Output = Self;
-
-    #[allow(clippy::arithmetic_side_effects)]
-    fn shr(mut self, rhs: u32) -> Self::Output {
-        let mut value = self.0.retrieve();
-        value >>= rhs;
-        self.0 = ConstMontyForm::new(&value);
-        self
-    }
-}
-
 impl<Mod: Params<LIMBS>, const LIMBS: usize> Pow<u32> for ConstMontyField<Mod, LIMBS> {
     type Output = Self;
 
@@ -378,18 +351,6 @@ impl_field_op_assign!(SubAssign, sub_assign, sub);
 impl_field_op_assign!(MulAssign, mul_assign, mul);
 impl_field_op_assign!(DivAssign, div_assign, div);
 impl_field_op_assign!(RemAssign, rem_assign, rem);
-
-impl<Mod: Params<LIMBS>, const LIMBS: usize> ShlAssign<u32> for ConstMontyField<Mod, LIMBS> {
-    fn shl_assign(&mut self, rhs: u32) {
-        *self = self.shl(rhs);
-    }
-}
-
-impl<Mod: Params<LIMBS>, const LIMBS: usize> ShrAssign<u32> for ConstMontyField<Mod, LIMBS> {
-    fn shr_assign(&mut self, rhs: u32) {
-        *self = self.shr(rhs);
-    }
-}
 
 //
 // Aggregate operations
@@ -729,7 +690,7 @@ pub type F32768<Mod> = ConstMontyField<Mod, { 512 * WORD_FACTOR }>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ConstIntRing, IntRingWithRem, IntRingWithShifts, ensure_type_implements_trait};
+    use crate::{ConstIntRing, IntRingWithRem, ensure_type_implements_trait};
     use crypto_bigint::{Square, U256, const_monty_params};
     use num_traits::{One, Zero};
 
@@ -744,7 +705,6 @@ mod tests {
     fn ensure_blanket_traits() {
         ensure_type_implements_trait!(F, ConstIntRing);
         ensure_type_implements_trait!(F, IntRingWithRem);
-        ensure_type_implements_trait!(F, IntRingWithShifts);
     }
 
     #[test]
@@ -852,18 +812,6 @@ mod tests {
         let y: F = 9_u64.into();
         x *= &y;
         assert_eq!(x, 45_u64.into());
-
-        let mut x = F::from(2_i64);
-        x <<= 2;
-        assert_eq!(x, F::from(8_i64)); // 2 << 2 = 8
-        x <<= 253;
-        assert_eq!(x, F::ZERO);
-
-        let mut x = F::from(3_i64);
-        x >>= 1;
-        assert_eq!(x, F::from(1_i64)); // 3 >> 1 = 1
-        x >>= 1;
-        assert_eq!(x, F::ZERO);
     }
 
     #[test]
@@ -1130,20 +1078,6 @@ mod tests {
     fn rem_by_zero_panics() {
         let a: F = 10_u64.into();
         let _ = a % F::zero();
-    }
-
-    #[test]
-    fn shift_operations() {
-        let a: F = 5_u64.into();
-
-        // Test Shl
-        let shifted_left = a << 2;
-        assert_eq!(shifted_left, F::from(20_u64));
-
-        // Test Shr
-        let b: F = 20_u64.into();
-        let shifted_right = b >> 2;
-        assert_eq!(shifted_right, F::from(5_u64));
     }
 
     #[test]
