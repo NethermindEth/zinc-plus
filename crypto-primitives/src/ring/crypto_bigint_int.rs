@@ -172,7 +172,7 @@ impl<const LIMBS: usize> FromStr for Int<LIMBS> {
 }
 
 //
-// Zero, One and Signed traits
+// Zero and One traits
 //
 
 impl<const LIMBS: usize> Zero for Int<LIMBS> {

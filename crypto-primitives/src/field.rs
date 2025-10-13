@@ -110,18 +110,22 @@ impl<T: ConstPrimeField> PrimeField for T {
         }
     }
 
+    #[inline(always)]
     fn new_unchecked_with_cfg(inner: Self::Inner, _cfg: &Self::Config) -> Self {
         ConstPrimeField::new_unchecked(inner)
     }
 
+    #[inline(always)]
     fn zero_with_cfg(_cfg: &Self::Config) -> Self {
         Self::ZERO
     }
 
+    #[inline(always)]
     fn is_zero_with_cfg(&self, _cfg: &Self::Config) -> bool {
         Zero::is_zero(self)
     }
 
+    #[inline(always)]
     fn one_with_cfg(_cfg: &Self::Config) -> Self {
         Self::ONE
     }

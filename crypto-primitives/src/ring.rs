@@ -56,7 +56,7 @@ pub trait ConstRing: FixedRing + ConstZero + ConstOne + From<bool> + From<i8> {}
 impl<T> ConstRing for T where T: FixedRing + ConstZero + ConstOne + From<bool> + From<i8> {}
 
 /// Ring of integers, usually denoted as `Z`.
-pub trait IntRing: Ring + Ord + Pow<u32> {
+pub trait IntRing: Ring + PartialOrd + Pow<u32> {
     fn is_odd(&self) -> bool;
 
     fn is_even(&self) -> bool;
