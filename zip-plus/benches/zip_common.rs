@@ -48,8 +48,6 @@ where
     encode_single_row::<Zt, Lc, 256>(group);
     encode_single_row::<Zt, Lc, 512>(group);
     encode_single_row::<Zt, Lc, 1024>(group);
-    encode_single_row::<Zt, Lc, 2048>(group);
-    encode_single_row::<Zt, Lc, 4096>(group);
 
     merkle_root::<Zt, 12>(group);
     merkle_root::<Zt, 13>(group);

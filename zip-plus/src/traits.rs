@@ -91,6 +91,7 @@ impl<const LIMBS: usize> Named for Int<LIMBS> {
 pub trait Transcribable {
     /// Number of bytes required to represent this type.
     const NUM_BYTES: usize;
+    const NUM_BITS: usize = Self::NUM_BYTES * 8;
 
     /// Creates a new instance from a byte buffer.
     /// The buffer must be exactly `NUM_BYTES` long.
