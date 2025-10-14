@@ -1,6 +1,5 @@
 use crypto_primitives::PrimeField;
 use itertools::Itertools;
-use p3_matrix::Dimensions;
 use std::io::{Cursor, ErrorKind, Read, Write};
 
 use crate::{
@@ -183,9 +182,8 @@ impl PcsTranscript {
 
     pub fn read_merkle_proof(&mut self) -> Result<MerkleProof, ZipError> {
         // Read the dimensions of matrix used to construct the Merkle tree
-        let width = self.read_usize()?;
-        let height = self.read_usize()?;
-        let dimensions = Dimensions { width, height };
+        let leaf_index = self.read_usize()?;
+        let tree_size = self.read_usize()?;
 
         // Read the length of the merkle path first
         let path_length = self.read_usize()?;
@@ -193,21 +191,21 @@ impl PcsTranscript {
         // Read each element of the merkle path
         let merkle_path = self.read_const_many(path_length)?;
 
-        Ok(MerkleProof::new(merkle_path, dimensions))
+        Ok(MerkleProof::new(merkle_path, leaf_index, tree_size))
     }
 
     pub fn write_merkle_proof(&mut self, proof: &MerkleProof) -> Result<(), ZipError> {
         let mut buf = [0u8; size_of::<u64>()];
 
         // Write the dimensions of matrix used to construct the Merkle tree
-        self.write_usize(proof.matrix_dims.width, &mut buf)?;
-        self.write_usize(proof.matrix_dims.height, &mut buf)?;
+        self.write_usize(proof.leaf_index, &mut buf)?;
+        self.write_usize(proof.tree_size, &mut buf)?;
 
         // Write the length of the merkle path first
-        self.write_usize(proof.path.len(), &mut buf)?;
+        self.write_usize(proof.siblings.len(), &mut buf)?;
 
         // Write each element of the merkle path
-        self.write_const_many(&proof.path)?;
+        self.write_const_many(&proof.siblings)?;
         Ok(())
     }
 }

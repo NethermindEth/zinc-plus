@@ -139,15 +139,14 @@ mod tests {
         let num_vars = 4;
         let (pp, poly) = setup_test_params(num_vars);
 
-        let (original_hint, _) = TestZip::commit(&pp, &poly).unwrap();
+        let (mut original_hint, _) = TestZip::commit(&pp, &poly).unwrap();
 
-        let mut corrupted_rows = original_hint.cw_matrix.to_rows();
-        if !corrupted_rows.is_empty() {
-            corrupted_rows[0][0] += Int::ONE;
-        }
+        let mut corrupted_rows = original_hint.cw_matrix.to_rows_slices_mut();
+        assert!(!corrupted_rows.is_empty());
+        corrupted_rows[0][0] += Int::ONE;
 
-        let corrupted_merkle_tree = MerkleTree::new(corrupted_rows.clone());
-        let corrupted_rows_hint = ZipPlusHint::new(corrupted_rows.into(), corrupted_merkle_tree);
+        let corrupted_merkle_tree = MerkleTree::new(&original_hint.cw_matrix.to_rows_slices());
+        let corrupted_rows_hint = ZipPlusHint::new(original_hint.cw_matrix, corrupted_merkle_tree);
 
         let result = TestZip::test(&pp, &poly, &corrupted_rows_hint);
 

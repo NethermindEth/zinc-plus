@@ -463,17 +463,20 @@ mod tests {
 
         let (original_data, comm) = TestZip::commit(&pp, &mle).unwrap();
 
-        let mut corrupted_rows = original_data.cw_matrix.to_rows();
-        let codeword_len = pp.linear_code.codeword_len();
-        // Proximity distance is half the codeword length for the default spec.
-        // We corrupt more than half of the first row to ensure it's not close.
-        let corruption_count = codeword_len / 2 + 1;
-        for i in 0..corruption_count {
-            corrupted_rows[0][i] += Int::ONE;
+        let mut corrupted_data = original_data.cw_matrix.clone();
+        {
+            let mut corrupted_rows = corrupted_data.to_rows_slices_mut();
+            let codeword_len = pp.linear_code.codeword_len();
+            // Proximity distance is half the codeword length for the default spec.
+            // We corrupt more than half of the first row to ensure it's not close.
+            let corruption_count = codeword_len / 2 + 1;
+            for i in 0..corruption_count {
+                corrupted_rows[0][i] += Int::ONE;
+            }
         }
 
-        let corrupted_merkle_tree = MerkleTree::new(corrupted_rows.clone());
-        let corrupted_data = ZipPlusHint::new(corrupted_rows.into(), corrupted_merkle_tree);
+        let corrupted_merkle_tree = MerkleTree::new(&corrupted_data.to_rows_slices());
+        let corrupted_data = ZipPlusHint::new(corrupted_data, corrupted_merkle_tree);
 
         let point: Vec<<Zt as ZipTypes>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();

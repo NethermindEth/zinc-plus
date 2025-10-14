@@ -10,7 +10,8 @@ use ark_std::{
 };
 use criterion::{BenchmarkGroup, measurement::WallTime};
 use crypto_primitives::{
-    Field, FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
+    DenseRowMatrix, Field, FromWithConfig, IntoWithConfig, PrimeField,
+    crypto_bigint_boxed_monty::BoxedMontyField,
 };
 use itertools::Itertools;
 use num_traits::{One, Zero};
@@ -145,20 +146,15 @@ where
     let leaves = (0..num_leaves)
         .map(|_| rng.random::<<Zt as ZipTypes>::Cw>())
         .collect_vec();
+    let matrix: DenseRowMatrix<_> = vec![leaves.clone()].into();
+    let rows = matrix.to_rows_slices();
 
     group.bench_function(
         format!("MerkleRoot: {}, leaves=2^{P}", Zt::Cw::type_name()),
         |b| {
-            b.iter_custom(|iters| {
-                let mut total_duration = Duration::ZERO;
-                for _ in 0..iters {
-                    let rows = vec![leaves.clone()];
-                    let timer = Instant::now();
-                    let tree = MerkleTree::new(rows);
-                    black_box(tree.root());
-                    total_duration += timer.elapsed();
-                }
-                total_duration
+            b.iter(|| {
+                let tree = MerkleTree::new(&rows);
+                black_box(tree.root());
             })
         },
     );

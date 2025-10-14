@@ -7,7 +7,7 @@ use crate::{ZipError, add, div, ilog_round_up, mul, poly::mle::DenseMultilinearE
 use crate::{
     code::LinearCode,
     merkle::{MerkleError, MerkleProof, MtHash},
-    pcs::structs::{AsPackable, ZipPlusHint, ZipTypes},
+    pcs::structs::{ZipPlusHint, ZipTypes},
     pcs_transcript::PcsTranscript,
     poly::Polynomial,
     traits::ConstTranscribable,
@@ -216,7 +216,7 @@ where
 pub struct ColumnOpening {}
 
 impl ColumnOpening {
-    pub fn open_at_column<T: AsPackable>(
+    pub fn open_at_column<T: ConstTranscribable>(
         column: usize,
         commit_hint: &ZipPlusHint<T>,
         transcript: &mut PcsTranscript,
@@ -228,7 +228,7 @@ impl ColumnOpening {
         Ok(())
     }
 
-    pub fn verify_column<T: AsPackable>(
+    pub fn verify_column<T: ConstTranscribable>(
         root: &MtHash,
         column: &[T],
         column_index: usize,
@@ -237,7 +237,7 @@ impl ColumnOpening {
         let proof = transcript
             .read_merkle_proof()
             .map_err(|_| MerkleError::FailedMerkleProofReading)?;
-        proof.verify(root, column.to_vec(), column_index)?;
+        proof.verify(root, column, column_index)?;
         Ok(())
     }
 }

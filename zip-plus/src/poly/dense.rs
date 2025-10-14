@@ -1,12 +1,10 @@
 use super::{EvaluationError, Polynomial};
 use crate::{
-    pcs::structs::{AsPackable, MulByScalar, ProjectableToField},
+    pcs::structs::{MulByScalar, ProjectableToField},
     traits::{ConstTranscribable, FromRef, Named},
-    utils::ReinterpretVector,
 };
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField, Ring};
 use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, One, Zero};
-use p3_field::Packable;
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
     array,
@@ -484,40 +482,5 @@ where
                 .evaluate_at_point(&r_powers)
                 .expect("Failed to evaluate polynomial at point")
         }
-    }
-}
-
-//
-// PackableDensePolynomial
-//
-
-impl<R: AsPackable, const DEGREE: usize> AsPackable for DensePolynomial<R, DEGREE> {
-    type Packable = PackableDensePolynomial<R::Packable, DEGREE>;
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct PackableDensePolynomial<R, const DEGREE: usize>(DensePolynomial<R, DEGREE>);
-
-impl<R: Copy, const DEGREE: usize> Copy for PackableDensePolynomial<R, DEGREE> {}
-
-impl<R: Packable, const DEGREE: usize> Packable for PackableDensePolynomial<R, DEGREE> {}
-
-unsafe impl<R: AsPackable, const DEGREE: usize>
-    ReinterpretVector<PackableDensePolynomial<R::Packable, DEGREE>> for DensePolynomial<R, DEGREE>
-{
-}
-
-impl<R: ConstTranscribable + Default, const DEGREE: usize> ConstTranscribable
-    for PackableDensePolynomial<R, DEGREE>
-{
-    const NUM_BYTES: usize = DensePolynomial::<R, DEGREE>::NUM_BYTES;
-
-    fn read_transcription_bytes(bytes: &[u8]) -> Self {
-        Self(DensePolynomial::read_transcription_bytes(bytes))
-    }
-
-    fn write_transcription_bytes(&self, buf: &mut [u8]) {
-        self.0.write_transcription_bytes(buf)
     }
 }

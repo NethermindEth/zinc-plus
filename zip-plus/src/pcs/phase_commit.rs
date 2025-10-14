@@ -1,4 +1,3 @@
-use itertools::Itertools;
 use crate::{
     ZipError,
     code::LinearCode,
@@ -10,8 +9,8 @@ use crate::{
     poly::mle::DenseMultilinearExtension,
     utils::{num_threads, parallelize_for_each},
 };
-use uninit::out_ref::Out;
 use crypto_primitives::DenseRowMatrix;
+use uninit::out_ref::Out;
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     /// Creates a commitment to a multilinear polynomial using the ZIP PCS
@@ -80,8 +79,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
         let cw_matrix = Self::encode_rows(pp, row_len, &poly.evaluations);
 
-        let rows = cw_matrix.as_rows().map(|v| v.to_vec()).collect_vec();
-        let merkle_tree = MerkleTree::new(rows);
+        let merkle_tree = MerkleTree::new(&cw_matrix.to_rows_slices());
         let root = merkle_tree.root();
 
         Ok((
@@ -186,9 +184,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         );
 
         // Safe because we have just initialized all elements.
-        unsafe {
-            encoded_matrix.init()
-        }
+        unsafe { encoded_matrix.init() }
     }
 }
 
@@ -211,8 +207,10 @@ mod tests {
         poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
     };
     use crypto_bigint::{Random, U64, U256, Word};
+    use crypto_primitives::{
+        Matrix, crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int,
+    };
     use itertools::Itertools;
-    use crypto_primitives::{crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int, Matrix};
     use num_traits::Zero;
     use rand::{Rng, rng};
 
@@ -358,7 +356,7 @@ mod tests {
         let mut cw_matrix = data.cw_matrix.to_rows();
         cw_matrix[0][0] = Int::from(999999);
         let corrupted_row = cw_matrix[0].clone();
-        let new_tree = MerkleTree::new(vec![corrupted_row.to_vec()]);
+        let new_tree = MerkleTree::new(&[corrupted_row.as_slice()]);
         assert_ne!(
             new_tree.root(),
             commitment.root,
@@ -584,7 +582,7 @@ mod tests {
     #[should_panic(expected = "row_width.is_power_of_two()")]
     fn merkle_tree_new_panics_on_non_power_of_two_leaves() {
         let leaves_data: Vec<Int<INT_LIMBS>> = (0..7).map(Int::from).collect();
-        let _ = MerkleTree::new(vec![leaves_data]);
+        let _ = MerkleTree::new(&[leaves_data.as_slice()]);
     }
 
     #[test]
