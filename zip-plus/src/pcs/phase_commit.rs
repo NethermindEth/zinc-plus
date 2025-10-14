@@ -7,9 +7,8 @@ use crate::{
         utils::validate_input,
     },
     poly::mle::DenseMultilinearExtension,
-    utils::{num_threads, parallelize_iter},
+    utils::{num_threads, parallelize_for_each},
 };
-use uninit::out_ref::Out;
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     /// Creates a commitment to a multilinear polynomial using the ZIP PCS
@@ -75,11 +74,10 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         );
 
         let row_len = pp.linear_code.row_len();
-        let codeword_len = pp.linear_code.codeword_len();
 
-        let rows = Self::encode_rows(pp, codeword_len, row_len, &poly.evaluations);
+        let rows = Self::encode_rows(pp, row_len, &poly.evaluations);
 
-        let merkle_tree = MerkleTree::new(&rows, codeword_len);
+        let merkle_tree = MerkleTree::new(rows.clone());
         let root = merkle_tree.root();
 
         Ok((
@@ -107,13 +105,12 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     pub fn commit_no_merkle(
         pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
-    ) -> Result<Vec<Zt::Cw>, ZipError> {
+    ) -> Result<Vec<Vec<Zt::Cw>>, ZipError> {
         validate_input::<Zt, Lc, bool>("commit", pp.num_vars, [poly], None)?;
 
         let row_len = pp.linear_code.row_len();
-        let codeword_len = pp.linear_code.codeword_len();
 
-        let rows = Self::encode_rows(pp, codeword_len, row_len, &poly.evaluations);
+        let rows = Self::encode_rows(pp, row_len, &poly.evaluations);
 
         Ok(rows)
     }
@@ -160,33 +157,25 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     #[allow(clippy::arithmetic_side_effects)]
     pub fn encode_rows(
         pp: &ZipPlusParams<Zt, Lc>,
-        codeword_len: usize,
         row_len: usize,
         evals: &[Zt::Eval],
-    ) -> Vec<Zt::Cw> {
+    ) -> Vec<Vec<Zt::Cw>> {
         let rows_per_thread = pp.num_rows.div_ceil(num_threads());
-        let mut encoded_rows: Vec<Zt::Cw> = Vec::with_capacity(pp.num_rows * codeword_len);
+        let mut encoded_rows: Vec<Vec<Zt::Cw>> = vec![vec![]; pp.num_rows];
 
-        parallelize_iter(
+        parallelize_for_each(
             encoded_rows
-                .spare_capacity_mut()
-                .chunks_mut(rows_per_thread * codeword_len)
+                .chunks_mut(rows_per_thread)
                 .zip(evals.chunks(rows_per_thread * row_len)),
-            |(encoded_chunk, evals)| {
-                for (row, evals) in encoded_chunk
-                    .chunks_exact_mut(codeword_len)
+            |(encoded_rows_chunk, evals)| {
+                for (row, evals) in encoded_rows_chunk
+                    .iter_mut()
                     .zip(evals.chunks_exact(row_len))
                 {
-                    let encoded: Vec<Zt::Cw> = pp.linear_code.encode(evals);
-                    Out::from(row).copy_from_slice(encoded.as_slice());
+                    *row = pp.linear_code.encode(evals);
                 }
             },
         );
-
-        // Safe because we have just initialized all elements.
-        unsafe {
-            encoded_rows.set_len(pp.num_rows * codeword_len);
-        }
 
         encoded_rows
     }
@@ -320,14 +309,12 @@ mod tests {
     #[test]
     fn encode_rows_produces_correct_size() {
         let (pp, poly) = setup_test_params(3);
-        let encoded = TestZip::encode_rows(
-            &pp,
-            pp.linear_code.codeword_len(),
-            pp.linear_code.row_len(),
-            &poly.evaluations,
-        );
+        let encoded = TestZip::encode_rows(&pp, pp.linear_code.row_len(), &poly.evaluations);
 
-        assert_eq!(encoded.len(), pp.num_rows * pp.linear_code.codeword_len());
+        assert_eq!(encoded.len(), pp.num_rows);
+        for row in &encoded {
+            assert_eq!(row.len(), pp.linear_code.codeword_len());
+        }
     }
 
     /// Verifies that the output of `encode_rows` is semantically correct by
@@ -335,17 +322,9 @@ mod tests {
     #[test]
     fn encoded_rows_match_linear_code_definition() {
         let (pp, poly) = setup_test_params(3);
-        let encoded = TestZip::encode_rows(
-            &pp,
-            pp.linear_code.codeword_len(),
-            pp.linear_code.row_len(),
-            &poly.evaluations,
-        );
+        let encoded = TestZip::encode_rows(&pp, pp.linear_code.row_len(), &poly.evaluations);
 
-        for (i, row_chunk) in encoded
-            .chunks_exact(pp.linear_code.codeword_len())
-            .enumerate()
-        {
+        for (i, row_chunk) in encoded.iter().enumerate() {
             let start = i * pp.linear_code.row_len();
             let end = start + pp.linear_code.row_len();
             let row_evals = &poly.evaluations[start..end];
@@ -366,10 +345,10 @@ mod tests {
         let (mut data, commitment) = TestZip::commit(&pp, &poly).unwrap();
 
         if !data.rows.is_empty() {
-            data.rows[0] = Int::from(999999);
+            data.rows[0][0] = Int::from(999999);
             let codeword_len = pp.linear_code.codeword_len();
-            let corrupted_row = &data.rows[0..codeword_len];
-            let new_tree = MerkleTree::new(corrupted_row, corrupted_row.len());
+            let corrupted_row = &data.rows[0][0..codeword_len];
+            let new_tree = MerkleTree::new(vec![corrupted_row.to_vec()]);
             assert_ne!(
                 new_tree.root(),
                 commitment.root,
@@ -396,15 +375,18 @@ mod tests {
     #[test]
     fn encoded_rows_are_nonzero_for_nonzero_input() {
         let (pp, poly) = setup_test_params(3);
-        let encoded = TestZip::encode_rows(
-            &pp,
-            pp.linear_code.codeword_len(),
-            pp.linear_code.row_len(),
-            &poly.evaluations,
-        );
+        let encoded = TestZip::encode_rows(&pp, pp.linear_code.row_len(), &poly.evaluations);
 
-        assert_eq!(encoded.len(), pp.num_rows * pp.linear_code.codeword_len());
-        let non_zero_count = encoded.iter().filter(|&&x| x != Int::from(0)).count();
+        assert_eq!(encoded.len(), pp.num_rows);
+        for row in &encoded {
+            assert_eq!(row.len(), pp.linear_code.codeword_len());
+        }
+
+        let non_zero_count = encoded
+            .iter()
+            .flatten()
+            .filter(|&&x| x != Int::from(0))
+            .count();
         assert!(non_zero_count > 0);
     }
 
@@ -413,7 +395,10 @@ mod tests {
         let (pp, poly) = setup_test_params(3);
         let (hint, _) = TestZip::commit(&pp, &poly).unwrap();
 
-        assert_eq!(hint.rows.len(), pp.num_rows * pp.linear_code.codeword_len());
+        assert_eq!(hint.rows.len(), pp.num_rows);
+        for row in &hint.rows {
+            assert_eq!(row.len(), pp.linear_code.codeword_len());
+        }
     }
 
     #[test]
@@ -427,18 +412,13 @@ mod tests {
         let poly =
             DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations, Zero::zero());
 
-        let results: Vec<Vec<Int<4>>> = (0..10)
+        let results: Vec<Vec<Vec<Int<4>>>> = (0..10)
             .into_par_iter()
             .map(|_| {
                 let code = C::new(poly_size, RAA_CFG);
                 let pp = ZipPlusParams::new(num_vars, 8, code);
 
-                TestZip::encode_rows(
-                    &pp,
-                    pp.linear_code.codeword_len(),
-                    pp.linear_code.row_len(),
-                    &poly.evaluations,
-                )
+                TestZip::encode_rows(&pp, pp.linear_code.row_len(), &poly.evaluations)
             })
             .collect();
 
@@ -485,13 +465,9 @@ mod tests {
         // Create a polynomial with 2 variables and 4 evaluations
         let evaluations = vec![Int::from(5); 4];
         let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations, Zero::zero());
-        let encoded = TestZip::encode_rows(
-            &pp,
-            pp.linear_code.codeword_len(),
-            pp.linear_code.row_len(),
-            &poly.evaluations,
-        );
-        assert_eq!(encoded.len(), pp.linear_code.codeword_len());
+        let encoded = TestZip::encode_rows(&pp, pp.linear_code.row_len(), &poly.evaluations);
+        assert_eq!(encoded.len(), 1);
+        assert_eq!(encoded[0].len(), pp.linear_code.codeword_len());
     }
 
     #[test]
@@ -506,13 +482,9 @@ mod tests {
             DensePolynomial::new(vec![Int::from(5), Int::from(6)]),
         ];
         let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations, Zero::zero());
-        let encoded = TestPolyZip::encode_rows(
-            &pp,
-            pp.linear_code.codeword_len(),
-            pp.linear_code.row_len(),
-            &poly.evaluations,
-        );
-        assert_eq!(encoded.len(), pp.linear_code.codeword_len());
+        let encoded = TestPolyZip::encode_rows(&pp, pp.linear_code.row_len(), &poly.evaluations);
+        assert_eq!(encoded.len(), 1);
+        assert_eq!(encoded[0].len(), pp.linear_code.codeword_len());
     }
 
     #[test]
@@ -539,12 +511,7 @@ mod tests {
     #[test]
     fn linear_code_preserves_linearity() {
         let (pp, poly) = setup_test_params(4);
-        let encoded = TestZip::encode_rows(
-            &pp,
-            pp.linear_code.codeword_len(),
-            pp.linear_code.row_len(),
-            &poly.evaluations,
-        );
+        let encoded = TestZip::encode_rows(&pp, pp.linear_code.row_len(), &poly.evaluations);
         let row_len = pp.linear_code.row_len();
         let codeword_len = pp.linear_code.codeword_len();
         let row1_evals = &poly.evaluations[0..row_len];
@@ -555,8 +522,8 @@ mod tests {
             .map(|i| a * row1_evals[i] + b.resize() * row2_evals[i])
             .collect();
         let combined_encoded = pp.linear_code.encode(&combined_evals);
-        let row1_encoded = &encoded[0..codeword_len];
-        let row2_encoded = &encoded[codeword_len..2 * codeword_len];
+        let row1_encoded = &encoded[0];
+        let row2_encoded = &encoded[1];
         let expected_combined: Vec<_> = (0..codeword_len)
             .map(|i| a.resize() * row1_encoded[i] + b.resize() * row2_encoded[i])
             .collect();
@@ -596,23 +563,18 @@ mod tests {
         let max_val = Int::<INT_LIMBS>::from(i64::MAX);
         let poly =
             DenseMultilinearExtension::from_evaluations_vec(3, vec![max_val; 8], Zero::zero());
-        let encoded_rows = TestZip::encode_rows(
-            &pp,
-            pp.linear_code.codeword_len(),
-            pp.linear_code.row_len(),
-            &poly.evaluations,
-        );
-        assert_eq!(
-            encoded_rows.len(),
-            pp.num_rows * pp.linear_code.codeword_len()
-        );
+        let encoded_rows = TestZip::encode_rows(&pp, pp.linear_code.row_len(), &poly.evaluations);
+        assert_eq!(encoded_rows.len(), pp.num_rows);
+        for row in &encoded_rows {
+            assert_eq!(row.len(), pp.linear_code.codeword_len());
+        }
     }
 
     #[test]
-    #[should_panic(expected = "rows.len().is_power_of_two()")]
+    #[should_panic(expected = "row_width.is_power_of_two()")]
     fn merkle_tree_new_panics_on_non_power_of_two_leaves() {
         let leaves_data: Vec<Int<INT_LIMBS>> = (0..7).map(Int::from).collect();
-        let _ = MerkleTree::new(&leaves_data, leaves_data.len());
+        let _ = MerkleTree::new(vec![leaves_data]);
     }
 
     #[test]

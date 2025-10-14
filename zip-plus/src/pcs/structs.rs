@@ -99,13 +99,13 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlusParams<Zt, Lc> {
 pub struct ZipPlusHint<R: AsPackable> {
     /// The encoded rows of the polynomial matrix representation, referred to as
     /// "u-hat" in the Zinc paper
-    pub rows: Vec<R>,
+    pub rows: Vec<Vec<R>>,
     /// Merkle trees of entire matrix
     pub merkle_tree: MerkleTree<R::Packable>,
 }
 
 impl<R: AsPackable> ZipPlusHint<R> {
-    pub fn new(rows: Vec<R>, merkle_tree: MerkleTree<R::Packable>) -> ZipPlusHint<R> {
+    pub fn new(rows: Vec<Vec<R>>, merkle_tree: MerkleTree<R::Packable>) -> ZipPlusHint<R> {
         ZipPlusHint { rows, merkle_tree }
     }
 

@@ -469,12 +469,10 @@ mod tests {
         // We corrupt more than half of the first row to ensure it's not close.
         let corruption_count = codeword_len / 2 + 1;
         for i in 0..corruption_count {
-            if i < corrupted_rows.len() {
-                corrupted_rows[i] += Int::ONE;
-            }
+            corrupted_rows[0][i] += Int::ONE;
         }
 
-        let corrupted_merkle_tree = MerkleTree::new(&corrupted_rows, codeword_len);
+        let corrupted_merkle_tree = MerkleTree::new(corrupted_rows.clone());
         let corrupted_data = ZipPlusHint::new(corrupted_rows, corrupted_merkle_tree);
 
         let point: Vec<<Zt as ZipTypes>::Pt> =
@@ -626,9 +624,7 @@ mod tests {
             .collect();
 
         let (mut data, comm) = TestZip::commit(&pp, &mle).unwrap();
-        if !data.rows.is_empty() {
-            data.rows[0] += Int::ONE;
-        }
+        data.rows[0][0] += Int::ONE;
 
         let test_transcript = TestZip::test(&pp, &mle, &data).unwrap();
         let (eval_f, proof) = TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();

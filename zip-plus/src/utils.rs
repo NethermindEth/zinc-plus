@@ -112,7 +112,7 @@ pub(crate) fn num_threads() -> usize {
     return 1;
 }
 
-pub(crate) fn parallelize_iter<I, T, F>(iter: I, f: F)
+pub(crate) fn parallelize_for_each<I, T, F>(iter: I, f: F)
 where
     I: Send + Iterator<Item = T>,
     T: Send,
@@ -142,7 +142,7 @@ where
         if chunk_size < num_threads {
             f((v, 0));
         } else {
-            parallelize_iter(v.chunks_mut(chunk_size).zip((0..).step_by(chunk_size)), f);
+            parallelize_for_each(v.chunks_mut(chunk_size).zip((0..).step_by(chunk_size)), f);
         }
     }
 
@@ -407,7 +407,8 @@ pub unsafe trait ReinterpretVector<Target: Sized>: Sized {
     }
 }
 
-unsafe impl<T> ReinterpretVector<T> for T {}
+// unsafe impl<T> ReinterpretVector<T> for T {}
+unsafe impl<S, T> ReinterpretVector<Vec<T>> for Vec<S> where S: ReinterpretVector<T> {}
 
 //
 // Semiring wrapper for Uint

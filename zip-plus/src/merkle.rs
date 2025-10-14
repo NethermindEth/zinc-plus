@@ -1,5 +1,4 @@
 use crate::{
-    div,
     pcs::structs::AsPackable,
     traits::{ConstTranscribable, Transcribable},
     utils::ReinterpretVector,
@@ -7,16 +6,14 @@ use crate::{
 use itertools::Itertools;
 use p3_commit::{BatchOpeningRef, Mmcs};
 use p3_field::Packable;
-use p3_matrix::{Dimensions, Matrix as P3Matrix, dense::RowMajorMatrix};
+use p3_matrix::{Dimensions, Matrix as P3Matrix};
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{CryptographicHasher, PseudoCompressionFunction};
 use std::{
     fmt,
     fmt::{Display, Formatter},
-    io::Write,
 };
 use thiserror::Error;
-use uninit::AsMaybeUninit;
 
 pub const HASH_OUT_LEN: usize = blake3::OUT_LEN;
 
@@ -51,6 +48,15 @@ impl ConstTranscribable for MtHash {
     }
 }
 
+impl<B> From<B> for MtHash
+where
+    B: Into<[u8; HASH_OUT_LEN]>,
+{
+    fn from(b: B) -> Self {
+        MtHash(b.into())
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 struct MtHasher;
 
@@ -63,7 +69,7 @@ impl<T: ConstTranscribable + Clone> CryptographicHasher<T, [u8; HASH_OUT_LEN]> f
         let mut buf = vec![0_u8; T::NUM_BYTES];
         for item in input {
             item.write_transcription_bytes(&mut buf);
-            hasher.write_all(&buf).expect("Failed to write to hasher");
+            hasher.update(&buf);
         }
         hasher.finalize().into()
     }
@@ -76,13 +82,13 @@ impl PseudoCompressionFunction<[u8; HASH_OUT_LEN], 2> for MtPerm {
     fn compress(&self, input: [[u8; HASH_OUT_LEN]; 2]) -> [u8; HASH_OUT_LEN] {
         let mut hasher = blake3::Hasher::new();
         for ref item in input {
-            hasher.write_all(item).expect("Failed to write to hasher");
+            hasher.update(item);
         }
         hasher.finalize().into()
     }
 }
 
-type Matrix<T> = RowMajorMatrix<T>;
+type Matrix<T> = TransposedMatrix<T>;
 type MtMmcs<T> = MerkleTreeMmcs<T, u8, MtHasher, MtPerm, HASH_OUT_LEN>;
 type P3MerkleTree<T> = p3_merkle_tree::MerkleTree<T, u8, Matrix<T>, HASH_OUT_LEN>;
 
@@ -104,32 +110,26 @@ impl<T> MerkleTree<T>
 where
     T: Packable + ConstTranscribable + Clone + Send + Sync,
 {
-    pub fn new<S>(rows: &[S], row_width: usize) -> Self
+    pub fn new<S>(rows: Vec<Vec<S>>) -> Self
     where
         S: AsPackable<Packable = T>,
     {
-        assert!(rows.len().is_power_of_two());
-        assert!(rows.len().is_multiple_of(row_width));
+        assert!(!rows.is_empty());
+        let row_width = rows[0].len();
         assert!(row_width > 0);
+        assert!(
+            rows.iter().all(|row| row.len() == row_width),
+            "All rows must have the same width"
+        );
+        assert!(row_width.is_power_of_two());
 
         // Each matrix row is hashed together to form a leaf in the Merkle tree.
-        // Thus, we need to transpose a matrix to have original columns as leaves.
+        // Thus, we need to use a transposed matrix to have original columns as leaves.
         let matrix = {
-            let mut columns: Vec<T> = Vec::with_capacity(rows.len());
-            let column_height = div!(rows.len(), row_width);
-            let rows = unsafe { ReinterpretVector::reinterpret_slice(rows) };
-            transpose::transpose(
-                rows.as_ref_uninit(),
-                columns.spare_capacity_mut(),
-                row_width,
-                column_height,
-            );
+            let rows = unsafe { ReinterpretVector::reinterpret_vector(rows) };
             // Safe because we just initialized all elements of `columns`, and
             // MaybeUninit<T> is #[repr(transparent)].
-            unsafe {
-                columns.set_len(rows.len());
-            }
-            Matrix::new(columns, column_height)
+            Matrix::new(rows)
         };
 
         let matrix_dims = matrix.dimensions();
@@ -238,6 +238,46 @@ pub enum MerkleError {
     FailedMerkleProofWriting,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransposedMatrix<T> {
+    columns: Vec<Vec<T>>,
+    column_len: usize,
+}
+
+impl<T> TransposedMatrix<T> {
+    pub fn new(columns: Vec<Vec<T>>) -> Self {
+        let column_len = columns.first().map_or(0, Vec::len);
+        Self {
+            columns,
+            column_len,
+        }
+    }
+}
+
+impl<T> p3_matrix::Matrix<T> for TransposedMatrix<T>
+where
+    T: Packable + ConstTranscribable + Clone + Send + Sync,
+{
+    fn width(&self) -> usize {
+        self.columns.len()
+    }
+
+    fn height(&self) -> usize {
+        self.column_len
+    }
+
+    unsafe fn get_unchecked(&self, r: usize, c: usize) -> T {
+        unsafe { *self.columns.get_unchecked(c).get_unchecked(r) }
+    }
+
+    unsafe fn row_unchecked(
+        &self,
+        r: usize,
+    ) -> impl IntoIterator<Item = T, IntoIter = impl Iterator<Item = T> + Send + Sync> {
+        unsafe { self.columns.iter().map(move |col| *col.get_unchecked(r)) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,7 +294,7 @@ mod tests {
             .map(|_| Int::random(&mut rng))
             .collect::<Vec<Int<N>>>();
 
-        let merkle_tree = MerkleTree::new(&leaves_data, leaves_data.len());
+        let merkle_tree = MerkleTree::new(vec![leaves_data.clone()]);
 
         // Print tree structure after merklizing
         let root = merkle_tree.root();

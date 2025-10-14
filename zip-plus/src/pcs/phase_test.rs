@@ -57,23 +57,18 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         // Open merkle tree for each column drawn
         for _ in 0..Zt::NUM_COLUMN_OPENINGS {
             let column = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
-            Self::open_merkle_trees_for_column(pp, commit_hint, column, &mut transcript)?;
+            Self::open_merkle_trees_for_column(commit_hint, column, &mut transcript)?;
         }
 
         Ok(transcript.into())
     }
 
     pub(super) fn open_merkle_trees_for_column(
-        pp: &ZipPlusParams<Zt, Lc>,
         commit_hint: &ZipPlusHint<Zt::Cw>,
         column: usize,
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError> {
-        let column_values = commit_hint
-            .rows
-            .iter()
-            .skip(column)
-            .step_by(pp.linear_code.codeword_len());
+        let column_values = commit_hint.rows.iter().map(|row| &row[column]);
 
         // Write the elements in the squeezed column to the shared transcript
         transcript.write_const_many(column_values)?;
@@ -93,7 +88,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 )]
 mod tests {
     use crate::{
-        code::{LinearCode, raa::RaaCode},
+        code::raa::RaaCode,
         merkle::MerkleTree,
         pcs::{
             structs::{ZipPlus, ZipPlusHint},
@@ -148,11 +143,10 @@ mod tests {
 
         let mut corrupted_rows = original_hint.rows.clone();
         if !corrupted_rows.is_empty() {
-            corrupted_rows[0] += Int::ONE;
+            corrupted_rows[0][0] += Int::ONE;
         }
 
-        let codeword_len = pp.linear_code.codeword_len();
-        let corrupted_merkle_tree = MerkleTree::new(&corrupted_rows, codeword_len);
+        let corrupted_merkle_tree = MerkleTree::new(corrupted_rows.clone());
         let corrupted_rows_hint = ZipPlusHint::new(corrupted_rows, corrupted_merkle_tree);
 
         let result = TestZip::test(&pp, &poly, &corrupted_rows_hint);

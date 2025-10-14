@@ -95,14 +95,13 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
             let linear_code = Lc::new(poly_size, code_config);
             let params = ZipPlus::setup(poly_size, linear_code);
             let row_len = params.linear_code.row_len();
-            let codeword_len = params.linear_code.codeword_len();
             let poly = DenseMultilinearExtension::<<Zt as ZipTypes>::Eval>::rand(
                 P,
                 &mut rng,
                 Zero::zero(),
             );
             b.iter(|| {
-                let cw = ZipPlus::encode_rows(&params, codeword_len, row_len, &poly.evaluations);
+                let cw = ZipPlus::encode_rows(&params, row_len, &poly.evaluations);
                 black_box(cw)
             })
         },
@@ -150,9 +149,16 @@ where
     group.bench_function(
         format!("MerkleRoot: {}, leaves=2^{P}", Zt::Cw::type_name()),
         |b| {
-            b.iter(|| {
-                let tree = MerkleTree::new(&leaves, num_leaves);
-                black_box(tree.root());
+            b.iter_custom(|iters| {
+                let mut total_duration = Duration::ZERO;
+                for _ in 0..iters {
+                    let rows = vec![leaves.clone()];
+                    let timer = Instant::now();
+                    let tree = MerkleTree::new(rows);
+                    black_box(tree.root());
+                    total_duration += timer.elapsed();
+                }
+                total_duration
             })
         },
     );
