@@ -23,9 +23,8 @@ pub trait ZipTypes: Send + Sync {
     /// Coefficient semiring of codeword polynomial [Self::Cw]
     type CwR: ConstIntSemiring + ConstTranscribable + Named;
     /// Semiring of codeword elements, at least as wide as the evaluation ring
-    type Cw: FixedRing
+    type Cw: FixedSemiring
         + Polynomial<Self::CwR>
-        + Neg<Output = Self::Cw>
         + ConstTranscribable
         + FromRef<Self::Eval>
         + Named

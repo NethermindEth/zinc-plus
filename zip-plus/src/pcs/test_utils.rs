@@ -10,6 +10,7 @@ use crate::{
     code::{
         LinearCode,
         raa::{RaaCode, RaaConfig},
+        raa_sign_flip::RaaSignFlippingCode,
     },
     pcs::{
         ZipPlusProof,
@@ -35,7 +36,6 @@ const REPETITION_FACTOR: usize = 4;
 pub const RAA_CFG: RaaConfig = RaaConfig {
     check_for_overflows: true,
     permute_in_place: false,
-    flip_signs: true,
 };
 
 pub struct TestZipTypes<const N: usize, const K: usize, const M: usize> {}
@@ -75,7 +75,10 @@ impl<const N: usize, const K: usize, const M: usize, const DEGREE: usize> ZipTyp
 pub fn setup_test_params<const N: usize, const K: usize, const M: usize>(
     num_vars: usize,
 ) -> (
-    ZipPlusParams<TestZipTypes<N, K, M>, RaaCode<TestZipTypes<N, K, M>, REPETITION_FACTOR>>,
+    ZipPlusParams<
+        TestZipTypes<N, K, M>,
+        RaaSignFlippingCode<TestZipTypes<N, K, M>, REPETITION_FACTOR>,
+    >,
     DenseMultilinearExtension<Int<N>>,
 ) {
     setup_test_params_inner(num_vars, |poly_size| {
@@ -128,7 +131,10 @@ fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt, Config = RaaConfig>>
 pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
     num_vars: usize,
 ) -> (
-    ZipPlusParams<TestZipTypes<N, K, M>, RaaCode<TestZipTypes<N, K, M>, REPETITION_FACTOR>>,
+    ZipPlusParams<
+        TestZipTypes<N, K, M>,
+        RaaSignFlippingCode<TestZipTypes<N, K, M>, REPETITION_FACTOR>,
+    >,
     ZipPlusCommitment,
     Vec<F>,
     F,
