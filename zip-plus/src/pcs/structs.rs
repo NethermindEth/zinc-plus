@@ -6,8 +6,8 @@ use crate::{
     traits::{ConstTranscribable, FromRef, Named},
 };
 use crypto_primitives::{
-    ConstIntRing, ConstIntSemiring, DenseRowMatrix, FixedRing, FromWithConfig, PrimeField,
-    crypto_bigint_int::Int,
+    ConstIntRing, ConstIntSemiring, DenseRowMatrix, FixedRing, FixedSemiring, FromWithConfig,
+    PrimeField, crypto_bigint_int::Int,
 };
 use num_traits::CheckedMul;
 use std::{marker::PhantomData, ops::Neg};
@@ -16,13 +16,13 @@ pub trait ZipTypes: Send + Sync {
     const NUM_COLUMN_OPENINGS: usize;
 
     /// Coefficient ring of evaluation polynomial [Self::Eval]
-    type EvalR: ConstIntRing + ConstTranscribable + Named;
-    /// Ring of witness/polynomial evaluations on boolean hypercube
-    type Eval: FixedRing + Named + Polynomial<Self::EvalR>;
+    type EvalR: ConstIntSemiring + ConstTranscribable + Named;
+    /// Semiring of witness/polynomial evaluations on boolean hypercube
+    type Eval: FixedSemiring + Named + Polynomial<Self::EvalR>;
 
-    /// Coefficient ring of codeword polynomial [Self::Cw]
-    type CwR: ConstIntRing + ConstTranscribable + Named;
-    /// Ring of codeword elements, at least as wide as the evaluation ring
+    /// Coefficient semiring of codeword polynomial [Self::Cw]
+    type CwR: ConstIntSemiring + ConstTranscribable + Named;
+    /// Semiring of codeword elements, at least as wide as the evaluation ring
     type Cw: FixedRing
         + Polynomial<Self::CwR>
         + Neg<Output = Self::Cw>

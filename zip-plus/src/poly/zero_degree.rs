@@ -1,11 +1,11 @@
 use super::{EvaluationError, Polynomial};
 use crate::pcs::structs::MulByScalar;
-use crypto_primitives::Ring;
+use crypto_primitives::Semiring;
 
-impl<R: Ring> Polynomial<Self> for R {
+impl<R: Semiring> Polynomial<Self> for R {
     const DEGREE_BOUND: usize = 0;
 
-    fn map<R2: Ring>(&self, f: impl Fn(&Self) -> R2) -> impl Polynomial<R2> {
+    fn map<R2: Semiring>(&self, f: impl Fn(&Self) -> R2) -> impl Polynomial<R2> {
         f(self)
     }
 

@@ -6,7 +6,7 @@ use crate::pcs::structs::MulByScalar;
 use rand::prelude::*;
 use std::{
     fmt::Debug,
-    ops::{Add, AddAssign, Index, Neg, SubAssign},
+    ops::{Add, AddAssign, Index, SubAssign},
 };
 
 /// This trait describes an interface for the multilinear extension
@@ -23,7 +23,6 @@ pub trait MultilinearExtension<T>:
     + PartialEq
     + Eq
     + Add
-    + Neg
     + for<'a> AddAssign<&'a Self>
     + for<'a> AddAssign<(T, &'a Self)>
     + for<'a> SubAssign<&'a Self>
