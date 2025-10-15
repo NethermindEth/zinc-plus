@@ -81,7 +81,7 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
 {
     group.bench_function(
         format!(
-            "EncodeRows: {} -> {}, poly_size = 2^{P})",
+            "EncodeRows: {} -> {}, poly_size = 2^{P}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name()
         ),
