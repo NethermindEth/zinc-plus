@@ -1,3 +1,5 @@
+pub mod boolean;
+
 use core::{
     fmt::{Debug, Display},
     hash::Hash,
