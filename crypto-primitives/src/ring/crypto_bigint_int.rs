@@ -2,9 +2,13 @@ use super::*;
 use core::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter, LowerHex, Result as FmtResult, UpperHex},
-    hash::Hasher,
+    hash::{Hash, Hasher},
     iter::{Product, Sum},
-    ops::{Add, AddAssign, Mul, MulAssign, Neg, Rem, RemAssign, Shl, Shr, Sub, SubAssign},
+    ops::{
+        Add, AddAssign, Mul, MulAssign, Neg, Rem, RemAssign, Shl, ShlAssign, Shr, ShrAssign, Sub,
+        SubAssign,
+    },
+    str::FromStr,
 };
 use crypto_bigint::{
     CheckedMul as CryptoCheckedMul, CheckedSub as CryptoCheckedSub, Integer, Word,
@@ -511,9 +515,11 @@ impl<const LIMBS: usize, const LIMBS2: usize> TryFrom<&crypto_bigint::Uint<LIMBS
 // Ring and IntRing
 //
 
+impl<const LIMBS: usize> Semiring for Int<LIMBS> {}
+
 impl<const LIMBS: usize> Ring for Int<LIMBS> {}
 
-impl<const LIMBS: usize> IntRing for Int<LIMBS> {
+impl<const LIMBS: usize> IntSemiring for Int<LIMBS> {
     fn is_odd(&self) -> bool {
         self.0.is_odd().into()
     }
@@ -521,7 +527,9 @@ impl<const LIMBS: usize> IntRing for Int<LIMBS> {
     fn is_even(&self) -> bool {
         self.0.is_even().into()
     }
+}
 
+impl<const LIMBS: usize> IntRing for Int<LIMBS> {
     fn is_positive(&self) -> bool {
         self.0.is_positive().into()
     }

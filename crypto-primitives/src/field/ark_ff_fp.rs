@@ -1,4 +1,5 @@
 use super::*;
+use crate::{IntRing, IntSemiring, Semiring};
 use ark_ff::{
     AdditiveGroup, BigInt, BigInteger, FftField, FpConfig, LegendreSymbol, MontBackend, MontConfig,
     SqrtPrecomputation,
@@ -428,9 +429,11 @@ impl<P: FpConfig<N>, const N: usize> From<Fp<P, N>> for BigUint {
 // Ring and Field
 //
 
+impl<P: FpConfig<N>, const N: usize> Semiring for Fp<P, N> {}
+
 impl<P: FpConfig<N>, const N: usize> Ring for Fp<P, N> {}
 
-impl<P: FpConfig<N>, const N: usize> IntRing for Fp<P, N> {
+impl<P: FpConfig<N>, const N: usize> IntSemiring for Fp<P, N> {
     fn is_odd(&self) -> bool {
         self.0.into_bigint().is_odd()
     }
@@ -438,7 +441,9 @@ impl<P: FpConfig<N>, const N: usize> IntRing for Fp<P, N> {
     fn is_even(&self) -> bool {
         self.0.into_bigint().is_even()
     }
+}
 
+impl<P: FpConfig<N>, const N: usize> IntRing for Fp<P, N> {
     fn checked_abs(&self) -> Option<Self> {
         Some(*self)
     }

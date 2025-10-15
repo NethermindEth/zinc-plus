@@ -1,4 +1,5 @@
 use super::*;
+use crate::Semiring;
 use ark_ff::{
     AdditiveGroup, CubicExtConfig, CubicExtField, LegendreSymbol, QuadExtConfig, QuadExtField,
     SqrtPrecomputation, fields::Field as ArkWrappedField,
@@ -380,6 +381,8 @@ impl<F: ArkWrappedField> From<bool> for ArkField<F> {
 //
 // Ring and Field
 //
+
+impl<F: ArkWrappedField> Semiring for ArkField<F> {}
 
 impl<F: ArkWrappedField> Ring for ArkField<F> {}
 

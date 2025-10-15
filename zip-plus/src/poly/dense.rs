@@ -3,7 +3,7 @@ use crate::{
     pcs::structs::{MulByScalar, ProjectableToField},
     traits::{ConstTranscribable, FromRef, Named},
 };
-use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField, Ring};
+use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring};
 use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
@@ -361,6 +361,8 @@ impl<'a, R: Ring, const DEGREE: usize> Product<&'a Self> for DensePolynomial<R, 
         })
     }
 }
+
+impl<R: Ring, const DEGREE: usize> Semiring for DensePolynomial<R, DEGREE> {}
 
 impl<R: Ring, const DEGREE: usize> Ring for DensePolynomial<R, DEGREE> {}
 

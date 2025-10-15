@@ -1,5 +1,5 @@
 use super::*;
-use crate::crypto_bigint_int::Int;
+use crate::{IntRing, IntSemiring, Semiring, crypto_bigint_int::Int};
 use core::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
@@ -525,9 +525,11 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize, const LIMBS2: usize> From<&crypto_b
 // Ring and Field
 //
 
+impl<Mod: Params<LIMBS>, const LIMBS: usize> Semiring for ConstMontyField<Mod, LIMBS> {}
+
 impl<Mod: Params<LIMBS>, const LIMBS: usize> Ring for ConstMontyField<Mod, LIMBS> {}
 
-impl<Mod: Params<LIMBS>, const LIMBS: usize> IntRing for ConstMontyField<Mod, LIMBS> {
+impl<Mod: Params<LIMBS>, const LIMBS: usize> IntSemiring for ConstMontyField<Mod, LIMBS> {
     fn is_odd(&self) -> bool {
         // Sadly there's no efficient way to implement this for Montgomery form
         self.0.retrieve().is_odd().into()
@@ -537,7 +539,9 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> IntRing for ConstMontyField<Mod, LI
         // Sadly there's no efficient way to implement this for Montgomery form
         self.0.retrieve().is_even().into()
     }
+}
 
+impl<Mod: Params<LIMBS>, const LIMBS: usize> IntRing for ConstMontyField<Mod, LIMBS> {
     fn checked_abs(&self) -> Option<Self> {
         Some(*self)
     }
