@@ -370,7 +370,11 @@ macro_rules! impl_from_signed {
             #[allow(clippy::arithmetic_side_effects)] // False alert
             impl FromWithConfig<$t> for BoxedMontyField {
                 fn from_with_cfg(value: $t, cfg: &Self::Config) -> Self {
-                    let abs: u128 = value.abs().try_into().expect("unreachable");
+                    let abs: u128 = if value == <$t>::MIN {
+                        <u128 as TryFrom<$t>>::try_from(<$t>::MAX).expect("unreachable") + 1
+                    } else {
+                        value.abs().try_into().expect("unreachable")
+                    };
                     let abs: BoxedUint = abs.into();
                     let abs = abs.resize(cfg.modulus().bits_precision());
                     let result = Self(BoxedMontyForm::new(abs, cfg.clone()));
