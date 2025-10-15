@@ -15,9 +15,9 @@ use rand::{distr::StandardUniform, prelude::*};
 use rand_core::RngCore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DenseMultilinearExtension<F> {
+pub struct DenseMultilinearExtension<T> {
     /// The evaluation over {0,1}^`num_vars`
-    pub evaluations: Vec<F>,
+    pub evaluations: Vec<T>,
     /// Number of variables
     pub num_vars: usize,
 }

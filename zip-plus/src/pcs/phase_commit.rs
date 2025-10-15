@@ -224,7 +224,7 @@ mod tests {
     type Zt = TestZipTypes<N, K, M>;
     type C = RaaSignFlippingCode<Zt, 4>;
 
-    type PolyZt = TestPolyZipTypes<N, K, M, DEGREE>;
+    type PolyZt = TestPolyZipTypes<K, M, DEGREE>;
     type PolyC = RaaCode<PolyZt, 4>;
 
     type TestZip = ZipPlus<Zt, C>;
@@ -486,9 +486,9 @@ mod tests {
 
         // Create a polynomial with 2 variables and 4 evaluations
         let evaluations = vec![
-            DensePolynomial::new(vec![Int::from(1), Int::from(2)]),
-            DensePolynomial::new(vec![Int::from(3), Int::from(4)]),
-            DensePolynomial::new(vec![Int::from(5), Int::from(6)]),
+            DensePolynomial::new(vec![1, 2]),
+            DensePolynomial::new(vec![3, 4]),
+            DensePolynomial::new(vec![5, 6]),
         ];
         let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations, Zero::zero());
         let encoded = TestPolyZip::encode_rows(&pp, pp.linear_code.row_len(), &poly.evaluations);

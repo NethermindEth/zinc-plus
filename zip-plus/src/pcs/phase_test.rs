@@ -110,7 +110,7 @@ mod tests {
     type Zt = TestZipTypes<N, K, M>;
     type C = RaaSignFlippingCode<Zt, 4>;
 
-    type PolyZt = TestPolyZipTypes<N, K, M, DEGREE>;
+    type PolyZt = TestPolyZipTypes<K, M, DEGREE>;
     type PolyC = RaaCode<PolyZt, 4>;
 
     type TestZip = ZipPlus<Zt, C>;
