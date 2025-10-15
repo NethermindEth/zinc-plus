@@ -321,7 +321,7 @@ impl Pow<u32> for Boolean {
 }
 
 //
-// Trait implementations for Semiring hierarchy
+// Semiring
 //
 
 impl Semiring for Boolean {}
@@ -349,13 +349,12 @@ impl IntSemiring for Boolean {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ensure_type_implements_trait;
+    use crate::{ConstIntSemiring, ensure_type_implements_trait};
     use alloc::{vec, vec::Vec};
 
     #[test]
     fn ensure_blanket_traits() {
-        ensure_type_implements_trait!(Boolean, Semiring);
-        ensure_type_implements_trait!(Boolean, IntSemiring);
+        ensure_type_implements_trait!(Boolean, ConstIntSemiring);
     }
 
     #[test]

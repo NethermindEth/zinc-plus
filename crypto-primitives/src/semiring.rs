@@ -1,4 +1,6 @@
 pub mod boolean;
+#[cfg(feature = "crypto_bigint")]
+pub mod crypto_bigint_uint;
 
 use core::{
     fmt::{Debug, Display},
@@ -52,8 +54,8 @@ pub trait Semiring:
 pub trait FixedSemiring: Semiring + Default + Zero + One {}
 impl<T> FixedSemiring for T where T: Semiring + Default + Zero + One {}
 
-pub trait ConstSemiring: FixedSemiring + ConstZero + ConstOne + From<bool> + From<i8> {}
-impl<T> ConstSemiring for T where T: FixedSemiring + ConstZero + ConstOne + From<bool> + From<i8> {}
+pub trait ConstSemiring: FixedSemiring + ConstZero + ConstOne + From<bool> {}
+impl<T> ConstSemiring for T where T: FixedSemiring + ConstZero + ConstOne + From<bool> {}
 
 /// Semiring of integers
 pub trait IntSemiring: Semiring + PartialOrd + Pow<u32> {

@@ -1,8 +1,8 @@
 use crate::{
     primality::PrimalityTest,
-    traits::{ConstTranscribable, SimpleSemiring, Transcribable, Transcript},
+    traits::{ConstTranscribable, Transcribable, Transcript},
 };
-use crypto_primitives::PrimeField;
+use crypto_primitives::{ConstIntSemiring, PrimeField};
 use sha3::{Digest, Keccak256};
 
 /// A cryptographic transcript implementation using the Keccak-256 hash
@@ -92,7 +92,7 @@ impl Transcript for KeccakTranscript {
     }
 
     #[allow(clippy::arithmetic_side_effects)]
-    fn get_prime<R: SimpleSemiring + ConstTranscribable, T: PrimalityTest<R>>(&mut self) -> R {
+    fn get_prime<R: ConstIntSemiring + ConstTranscribable, T: PrimalityTest<R>>(&mut self) -> R {
         let buf = &mut vec![0u8; R::NUM_BYTES];
         loop {
             let mut prime_candidate: R = self.gen_random(buf);

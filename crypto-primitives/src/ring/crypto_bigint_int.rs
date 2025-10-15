@@ -1,4 +1,5 @@
 use super::*;
+use crate::{crypto_bigint_uint::Uint, impl_pow_via_repeated_squaring};
 use core::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter, LowerHex, Result as FmtResult, UpperHex},
@@ -12,16 +13,12 @@ use core::{
 };
 use crypto_bigint::{
     CheckedMul as CryptoCheckedMul, CheckedSub as CryptoCheckedSub, Integer, Word,
-    subtle::{
-        Choice, ConditionallySelectable, ConstantTimeEq, ConstantTimeGreater, ConstantTimeLess,
-    },
 };
 use num_traits::{
     CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedSub, ConstOne, ConstZero, One, Pow, Zero,
 };
 use pastey::paste;
 
-use crate::impl_pow_via_repeated_squaring;
 #[cfg(feature = "rand")]
 use rand::{distr::StandardUniform, prelude::*, rand_core::TryRngCore};
 
@@ -34,6 +31,20 @@ impl<const LIMBS: usize> Int<LIMBS> {
     #[inline(always)]
     pub const fn new(value: crypto_bigint::Int<LIMBS>) -> Self {
         Self(value)
+    }
+
+    #[inline(always)]
+    pub const fn new_ref(value: &crypto_bigint::Int<LIMBS>) -> &Self {
+        // Safety: Int<LIMBS> is #[repr(transparent)] and is guaranteed to have the
+        // same memory layout as crypto_bigint::Int
+        unsafe { &*(value as *const crypto_bigint::Int<LIMBS> as *const Self) }
+    }
+
+    #[inline(always)]
+    pub const fn new_ref_mut(value: &mut crypto_bigint::Int<LIMBS>) -> &mut Self {
+        // Safety: Int<LIMBS> is #[repr(transparent)] and is guaranteed to have the
+        // same memory layout as crypto_bigint::Int
+        unsafe { &mut *(value as *mut crypto_bigint::Int<LIMBS> as *mut Self) }
     }
 
     /// Get the reference to the wrapped value
@@ -70,6 +81,10 @@ impl<const LIMBS: usize> Int<LIMBS> {
     /// See [crypto_bigint::Int::cmp_vartime]
     pub const fn cmp_vartime(&self, rhs: &Self) -> Ordering {
         self.0.cmp_vartime(&rhs.0)
+    }
+
+    pub const fn as_uint(&self) -> &Uint<LIMBS> {
+        Uint::new_ref(self.0.as_uint())
     }
 }
 
@@ -512,7 +527,7 @@ impl<const LIMBS: usize, const LIMBS2: usize> TryFrom<&crypto_bigint::Uint<LIMBS
     }
 }
 //
-// Ring and IntRing
+// Semiring and Ring
 //
 
 impl<const LIMBS: usize> Semiring for Int<LIMBS> {}
@@ -596,30 +611,31 @@ where
 // Traits from crypto_bigint
 //
 
-impl<const LIMBS: usize> ConstantTimeEq for Int<LIMBS> {
+impl<const LIMBS: usize> crypto_bigint::subtle::ConstantTimeEq for Int<LIMBS> {
     #[inline]
-    fn ct_eq(&self, other: &Self) -> Choice {
-        ConstantTimeEq::ct_eq(&self.0, &other.0)
+    fn ct_eq(&self, other: &Self) -> crypto_bigint::subtle::Choice {
+        crypto_bigint::subtle::ConstantTimeEq::ct_eq(&self.0, &other.0)
     }
 }
 
-impl<const LIMBS: usize> ConstantTimeGreater for Int<LIMBS> {
+impl<const LIMBS: usize> crypto_bigint::subtle::ConstantTimeGreater for Int<LIMBS> {
     #[inline]
-    fn ct_gt(&self, other: &Self) -> Choice {
-        ConstantTimeGreater::ct_gt(&self.0, &other.0)
+    fn ct_gt(&self, other: &Self) -> crypto_bigint::subtle::Choice {
+        crypto_bigint::subtle::ConstantTimeGreater::ct_gt(&self.0, &other.0)
     }
 }
 
-impl<const LIMBS: usize> ConstantTimeLess for Int<LIMBS> {
+impl<const LIMBS: usize> crypto_bigint::subtle::ConstantTimeLess for Int<LIMBS> {
     #[inline]
-    fn ct_lt(&self, other: &Self) -> Choice {
-        ConstantTimeLess::ct_lt(&self.0, &other.0)
+    fn ct_lt(&self, other: &Self) -> crypto_bigint::subtle::Choice {
+        crypto_bigint::subtle::ConstantTimeLess::ct_lt(&self.0, &other.0)
     }
 }
 
-impl<const LIMBS: usize> ConditionallySelectable for Int<LIMBS> {
-    fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
-        ConditionallySelectable::conditional_select(&a.0, &b.0, choice).into()
+impl<const LIMBS: usize> crypto_bigint::subtle::ConditionallySelectable for Int<LIMBS> {
+    fn conditional_select(a: &Self, b: &Self, choice: crypto_bigint::subtle::Choice) -> Self {
+        crypto_bigint::subtle::ConditionallySelectable::conditional_select(&a.0, &b.0, choice)
+            .into()
     }
 }
 
@@ -706,26 +722,11 @@ mod tests {
     fn checked_operations() {
         let a = Int4::from(10_i64);
         let b = Int4::from(5_i64);
-        let zero = Int4::ZERO;
 
-        // Test checked_add
-        let c = a.checked_add(&b).unwrap();
-        assert_eq!(c, Int4::from(15_i64));
-
-        // Test checked_sub
-        let d = a.checked_sub(&b).unwrap();
-        assert_eq!(d, Int4::from(5_i64));
-
-        // Test checked_mul
-        let e = a.checked_mul(&b).unwrap();
-        assert_eq!(e, Int4::from(50_i64));
-
-        // Test checked_rem
-        let f = a.checked_rem(&b).unwrap();
-        assert_eq!(f, Int4::ZERO);
-
-        // Test checked_rem with zero divisor
-        assert!(a.checked_rem(&zero).is_none());
+        assert_eq!(a.checked_add(&b), Some(Int4::from(15_i64)));
+        assert_eq!(a.checked_sub(&b), Some(Int4::from(5_i64)));
+        assert_eq!(a.checked_mul(&b), Some(Int4::from(50_i64)));
+        assert_eq!(a.checked_rem(&b), Some(Int4::ZERO));
     }
 
     #[allow(clippy::op_ref)]
@@ -911,7 +912,6 @@ mod tests {
 
     #[test]
     fn aggregate_operations() {
-        // Test Sum trait
         let values: Vec<Int4> = [1_i64, 2_i64, 3_i64].into_iter().map(Int::from).collect();
         let sum: Int4 = values.iter().sum();
         assert_eq!(sum, Int4::from(6_i64));
@@ -1020,6 +1020,9 @@ mod tests {
 
         // MIN - 1 should overflow in checked_sub
         assert!(min.checked_sub(&one).is_none());
+
+        // checked_rem with zero divisor
+        assert!(max.checked_rem(&Int4::ZERO).is_none());
 
         // Test operations with large shifts
         let x = Int4::from(1_i64);
@@ -1175,7 +1178,9 @@ mod tests {
 
     #[test]
     fn constant_time_traits() {
-        use crypto_bigint::subtle::Choice;
+        use crypto_bigint::subtle::{
+            Choice, ConditionallySelectable, ConstantTimeEq, ConstantTimeGreater, ConstantTimeLess,
+        };
 
         let a = Int4::from(10_i64);
         let b = Int4::from(20_i64);

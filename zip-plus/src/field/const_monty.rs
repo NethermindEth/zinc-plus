@@ -1,13 +1,11 @@
 use crate::{
     pcs::structs::{MulByScalar, ProjectableToField},
     traits::{ConstTranscribable, FromRef},
-    utils::UintSemiring,
 };
-use crypto_bigint::{
-    Uint,
-    modular::{ConstMontyForm, ConstMontyParams},
+use crypto_bigint::modular::{ConstMontyForm, ConstMontyParams};
+use crypto_primitives::{
+    crypto_bigint_const_monty::ConstMontyField, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
 };
-use crypto_primitives::{crypto_bigint_const_monty::ConstMontyField, crypto_bigint_int::Int};
 use num_traits::CheckedMul;
 
 impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> MulByScalar<&Self>
@@ -32,11 +30,11 @@ macro_rules! impl_from_primitive_ref {
 }
 impl_from_primitive_ref!(u8, u16, u32, u64, u128);
 
-impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> FromRef<UintSemiring<LIMBS>>
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> FromRef<Uint<LIMBS>>
     for ConstMontyForm<Mod, LIMBS>
 {
-    fn from_ref(value: &UintSemiring<LIMBS>) -> Self {
-        ConstMontyForm::new(&value.0)
+    fn from_ref(value: &Uint<LIMBS>) -> Self {
+        ConstMontyForm::new(value.inner())
     }
 }
 
@@ -65,11 +63,11 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> ConstTranscribable
     const NUM_BYTES: usize = Uint::<LIMBS>::NUM_BYTES;
 
     fn read_transcription_bytes(bytes: &[u8]) -> Self {
-        ConstMontyForm::from_montgomery(Uint::read_transcription_bytes(bytes))
+        ConstMontyForm::from_montgomery(Uint::read_transcription_bytes(bytes).into_inner())
     }
 
     fn write_transcription_bytes(&self, buf: &mut [u8]) {
-        self.as_montgomery().write_transcription_bytes(buf)
+        Uint::new_ref(self.as_montgomery()).write_transcription_bytes(buf)
     }
 }
 
@@ -151,7 +149,7 @@ mod tests {
             for i in 0..128 {
                 if (x >> i) & 1 == 1 { acc += F::from(1u64) * F::from(1u64 << i.min(63)); }
             }
-            let u = crypto_bigint::Uint::<{ U256::LIMBS }>::from(x);
+            let u = Uint::<{ U256::LIMBS }>::from(x);
             let g2: F = F::from(u);
             prop_assert_eq!(f, g2);
         }
@@ -176,7 +174,7 @@ mod tests {
 
         #[test]
         fn prop_from_uint_roundtrip_through_uint(x in any_u128()) {
-            let u: crypto_bigint::Uint<{ U256::LIMBS }> = crypto_bigint::Uint::from(x);
+            let u: Uint<{ U256::LIMBS }> = Uint::from(x);
             let g_from_uint: F = u.into();
             let g_direct: F = F::from(x);
             prop_assert_eq!(g_from_uint, g_direct);

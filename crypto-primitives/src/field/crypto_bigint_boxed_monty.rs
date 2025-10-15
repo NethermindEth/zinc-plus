@@ -459,7 +459,7 @@ impl<const LIMBS: usize> FromWithConfig<&crypto_bigint::Uint<LIMBS>> for BoxedMo
 }
 
 //
-// Ring and Field
+// Semiring, Ring and Field
 //
 
 impl Semiring for BoxedMontyField {}

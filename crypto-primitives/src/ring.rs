@@ -39,8 +39,8 @@ impl<T> IntRingWithRem for T where
 pub trait IntRingWithShifts: IntRing + IntSemiringWithShifts {}
 impl<T> IntRingWithShifts for T where T: IntRing + IntSemiringWithShifts {}
 
-pub trait ConstIntRing: IntRing + ConstIntSemiring {}
-impl<T> ConstIntRing for T where T: IntRing + ConstIntSemiring {}
+pub trait ConstIntRing: IntRing + ConstIntSemiring + From<i8> {}
+impl<T> ConstIntRing for T where T: IntRing + ConstIntSemiring + From<i8> {}
 
 macro_rules! primitive_int_ring {
     ($t:ident) => {

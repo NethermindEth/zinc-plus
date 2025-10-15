@@ -426,7 +426,7 @@ impl<P: FpConfig<N>, const N: usize> From<Fp<P, N>> for BigUint {
 }
 
 //
-// Ring and Field
+// Semiring, Ring and Field
 //
 
 impl<P: FpConfig<N>, const N: usize> Semiring for Fp<P, N> {}

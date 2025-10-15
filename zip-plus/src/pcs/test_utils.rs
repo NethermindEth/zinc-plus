@@ -19,14 +19,13 @@ use crate::{
     },
     pcs_transcript::PcsTranscript,
     poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
+    primality::MillerRabin,
     traits::{FromRef, Transcribable, Transcript},
-    utils::UintSemiring,
 };
-use crypto_bigint::{BoxedUint, Uint};
-use crypto_primes::hazmat::MillerRabin;
+use crypto_bigint::BoxedUint;
 use crypto_primitives::{
     FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
-    crypto_bigint_int::Int,
+    crypto_bigint_int::Int, crypto_bigint_uint::Uint,
 };
 use itertools::Itertools;
 use num_traits::Zero;
@@ -46,8 +45,8 @@ impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N
     type Eval = Int<N>;
     type CwR = Int<K>;
     type Cw = Int<K>;
-    type Fmod = UintSemiring<K>;
-    type PrimeTest = MillerRabin<Uint<K>>;
+    type Fmod = Uint<K>;
+    type PrimeTest = MillerRabin;
     type Chal = Int<N>;
     type Pt = Int<N>;
     type CombR = Int<M>;
@@ -64,8 +63,8 @@ impl<const N: usize, const K: usize, const M: usize, const DEGREE: usize> ZipTyp
     type Eval = DensePolynomial<Int<N>, DEGREE>;
     type CwR = Int<K>;
     type Cw = DensePolynomial<Int<K>, DEGREE>;
-    type Fmod = UintSemiring<K>;
-    type PrimeTest = MillerRabin<Uint<K>>;
+    type Fmod = Uint<K>;
+    type PrimeTest = MillerRabin;
     type Chal = Int<N>;
     type Pt = Int<N>;
     type CombR = Int<M>;
@@ -137,7 +136,7 @@ pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
 )
 where
     F: PrimeField + for<'a> FromWithConfig<&'a Int<N>> + for<'a> MulByScalar<&'a F>,
-    F::Inner: FromRef<UintSemiring<K>> + Transcribable,
+    F::Inner: FromRef<Uint<K>> + Transcribable,
     Int<N>: ProjectableToField<F>,
 {
     setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_test_params, || {
@@ -165,7 +164,7 @@ pub fn setup_full_protocol_poly<
 )
 where
     F: PrimeField + for<'a> FromWithConfig<&'a Int<N>> + for<'a> MulByScalar<&'a F>,
-    F::Inner: FromRef<UintSemiring<K>> + Transcribable,
+    F::Inner: FromRef<Uint<K>> + Transcribable,
     DensePolynomial<Int<N>, DEGREE>: ProjectableToField<F>,
 {
     setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_poly_test_params, || {

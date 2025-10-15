@@ -379,7 +379,7 @@ impl<F: ArkWrappedField> From<bool> for ArkField<F> {
 }
 
 //
-// Ring and Field
+// Semiring, Ring and Field
 //
 
 impl<F: ArkWrappedField> Semiring for ArkField<F> {}

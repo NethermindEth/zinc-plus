@@ -1,11 +1,11 @@
 use crate::{
     pcs::structs::{MulByScalar, ProjectableToField},
     traits::FromRef,
-    utils::UintSemiring,
 };
 use crypto_bigint::BoxedUint;
 use crypto_primitives::{
     IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int,
+    crypto_bigint_uint::Uint,
 };
 use num_traits::CheckedMul;
 
@@ -21,10 +21,10 @@ impl FromRef<Self> for BoxedMontyField {
     }
 }
 
-impl<const LIMBS: usize> FromRef<UintSemiring<LIMBS>> for BoxedUint {
+impl<const LIMBS: usize> FromRef<Uint<LIMBS>> for BoxedUint {
     #[inline]
-    fn from_ref(value: &UintSemiring<LIMBS>) -> Self {
-        value.0.into()
+    fn from_ref(value: &Uint<LIMBS>) -> Self {
+        value.inner().into()
     }
 }
 
