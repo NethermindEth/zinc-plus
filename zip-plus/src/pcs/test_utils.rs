@@ -25,8 +25,8 @@ use crate::{
 };
 use crypto_bigint::BoxedUint;
 use crypto_primitives::{
-    FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
-    crypto_bigint_int::Int, crypto_bigint_uint::Uint,
+    FromWithConfig, IntSemiring, IntoWithConfig, PrimeField, boolean::Boolean,
+    crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
 };
 use itertools::Itertools;
 use num_traits::Zero;
@@ -53,13 +53,12 @@ impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N
     type Comb = Self::CombR;
 }
 
-pub struct TestPolyZipTypes<const K: usize, const M: usize, const DEGREE: usize> {
-}
+pub struct TestPolyZipTypes<const K: usize, const M: usize, const DEGREE: usize> {}
 impl<const K: usize, const M: usize, const DEGREE: usize> ZipTypes
     for TestPolyZipTypes<K, M, DEGREE>
 {
     const NUM_COLUMN_OPENINGS: usize = 650;
-    type EvalR = i8;
+    type EvalR = Boolean;
     type Eval = DensePolynomial<Self::EvalR, DEGREE>;
     type CwR = i32;
     type Cw = DensePolynomial<Self::CwR, DEGREE>;
@@ -87,11 +86,7 @@ pub fn setup_test_params<const N: usize, const K: usize, const M: usize>(
 }
 
 /// Helper function to set up common parameters for tests.
-pub fn setup_poly_test_params<
-    const K: usize,
-    const M: usize,
-    const DEGREE: usize,
->(
+pub fn setup_poly_test_params<const K: usize, const M: usize, const DEGREE: usize>(
     num_vars: usize,
 ) -> (
     ZipPlusParams<
@@ -101,7 +96,9 @@ pub fn setup_poly_test_params<
     DenseMultilinearExtension<<TestPolyZipTypes<K, M, DEGREE> as ZipTypes>::Eval>,
 ) {
     setup_test_params_inner(num_vars, |poly_size| {
-        let eval_coeffs: Vec<_> = (1..=(poly_size * DEGREE) as i8).collect_vec();
+        let eval_coeffs: Vec<_> = (1..=(poly_size * DEGREE) as i8)
+            .map(|v| v.is_odd().into())
+            .collect_vec();
         eval_coeffs
             .chunks_exact(DEGREE)
             .map(DensePolynomial::new)

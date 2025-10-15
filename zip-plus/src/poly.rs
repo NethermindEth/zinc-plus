@@ -11,8 +11,6 @@ pub trait Polynomial<R: Semiring> {
     /// coefficients.
     const DEGREE_BOUND: usize;
 
-    fn map<R2: Semiring>(&self, f: impl Fn(&R) -> R2) -> impl Polynomial<R2>;
-
     /// Evaluates the polynomial at the given point, treating point `[p_0, p_1,
     /// p_2, ...]` as `[x, x^2, x^3, ..., x^DEGREE_BOUND]`, thus it returns
     /// `a_0 + (a_1 * p_0) + (a_2 * p_1) + ... + (a_DEGREE_BOUND *

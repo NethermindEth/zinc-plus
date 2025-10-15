@@ -368,7 +368,7 @@ mod tests {
 
             let different_evals = {
                 let different_eval_coeffs: Vec<_> = (1..=((1 << num_vars) * DEGREE as i8))
-                    .map(|x| x + 20)
+                    .map(|x| (x % 3 == 0).into())
                     .collect_vec();
                 different_eval_coeffs
                     .chunks_exact(DEGREE)

@@ -4,7 +4,7 @@ use crate::{
 };
 use crypto_bigint::BoxedUint;
 use crypto_primitives::{
-    IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int,
+    FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
     crypto_bigint_uint::Uint,
 };
 use num_traits::CheckedMul;
@@ -28,12 +28,15 @@ impl<const LIMBS: usize> FromRef<Uint<LIMBS>> for BoxedUint {
     }
 }
 
-impl<const LIMBS: usize> ProjectableToField<BoxedMontyField> for Int<LIMBS> {
+impl<T> ProjectableToField<BoxedMontyField> for T
+where
+    BoxedMontyField: for<'a> FromWithConfig<&'a T>,
+{
     fn prepare_projection(
         sampled_value: &BoxedMontyField,
     ) -> impl Fn(&Self) -> BoxedMontyField + 'static {
         let config = sampled_value.cfg().clone();
-        move |value: &Int<LIMBS>| value.into_with_cfg(&config)
+        move |value: &T| value.into_with_cfg(&config)
     }
 }
 

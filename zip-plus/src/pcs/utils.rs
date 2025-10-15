@@ -35,19 +35,19 @@ pub(super) fn validate_input<'a, Zt: ZipTypes + 'a, Lc: LinearCode<Zt>, Pt: 'a>(
         // being encoded - so num_vars / 2
         let d = div!(param_num_vars, 2);
         let codeword_bits = ilog_round_up!(mul!(Lc::REPETITION_FACTOR, d), usize);
-        let mut challenge_bits = mul!(Zt::Chal::NUM_BYTES, 8);
+        let mut challenge_bits = Zt::Chal::NUM_BITS;
         if Zt::Comb::DEGREE_BOUND > 0 {
             // This means we also draft alphas (multiplied with coeffs), which
             // doubles the number of challenge bits
             challenge_bits = mul!(challenge_bits, 2);
         }
-        let max_lc_bits = mul!(Zt::CombR::NUM_BYTES, 8);
+        let max_lc_bits = Zt::CombR::NUM_BITS;
         let actual_lc_bits: usize = add!(
             add!(
                 add!(mul!(codeword_bits, 2), ilog_round_up!(d, usize)),
                 challenge_bits
             ),
-            sub!(mul!(Zt::EvalR::NUM_BYTES, 8), 1)
+            sub!(Zt::EvalR::NUM_BITS, 1)
         );
         assert!(
             actual_lc_bits <= max_lc_bits,

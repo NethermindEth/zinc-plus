@@ -4,6 +4,7 @@ use crate::{
     traits::{ConstTranscribable, FromRef, Named},
 };
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring};
+use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
@@ -14,7 +15,7 @@ use std::{
     iter::{Product, Sum},
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
-// TODO: rename rename to univariate
+// TODO: rename to univariate?
 
 // Sadly, we cannot use [R; DEGREE + 1] in stable Rust yet, so we use separate
 // coeff_0.
@@ -58,18 +59,6 @@ impl<R: Semiring + Zero, const DEGREE: usize> DensePolynomial<R, DEGREE> {
 
 impl<R: Semiring, const DEGREE: usize> Polynomial<R> for DensePolynomial<R, DEGREE> {
     const DEGREE_BOUND: usize = DEGREE;
-
-    fn map<R2: Semiring>(&self, f: impl Fn(&R) -> R2) -> impl Polynomial<R2> {
-        let coeff_0 = f(&self.coeff_0);
-        let coeffs: [R2; DEGREE] = self
-            .coeffs
-            .iter()
-            .map(f)
-            .collect::<Vec<R2>>()
-            .try_into()
-            .expect("unreachable");
-        DensePolynomial { coeff_0, coeffs }
-    }
 
     fn evaluate_at_point<C>(&self, point: &[C]) -> Result<R, EvaluationError>
     where
@@ -480,7 +469,16 @@ where
         let field_cfg = sampled_value.cfg().clone();
 
         move |poly: &Self| {
-            poly.map(|v: &R| v.into_with_cfg(&field_cfg))
+            let coeff_0 = (&poly.coeff_0).into_with_cfg(&field_cfg);
+            let coeffs: [F; DEGREE] = poly
+                .coeffs
+                .iter()
+                .map(|v| v.into_with_cfg(&field_cfg))
+                .collect_array()
+                .expect("unreachable");
+
+            let poly2 = DensePolynomial { coeff_0, coeffs };
+            poly2
                 .evaluate_at_point(&r_powers)
                 .expect("Failed to evaluate polynomial at point")
         }

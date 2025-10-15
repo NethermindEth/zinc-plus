@@ -10,6 +10,7 @@ use rand::{rngs::StdRng, seq::SliceRandom};
 use rand_core::SeedableRng;
 use std::iter::Iterator;
 
+use crypto_primitives::boolean::Boolean;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -269,6 +270,12 @@ impl<const LIMBS: usize> Named for Uint<LIMBS> {
     }
 }
 
+impl Named for Boolean {
+    fn type_name() -> String {
+        "b".to_owned()
+    }
+}
+
 //
 // Transcribable implementations
 //
@@ -294,6 +301,19 @@ macro_rules! impl_transcribable_for_primitives {
 
 impl_transcribable_for_primitives!(u8, u16, u32, u64, u128);
 impl_transcribable_for_primitives!(i8, i16, i32, i64, i128);
+
+impl ConstTranscribable for Boolean {
+    const NUM_BYTES: usize = 1;
+    const NUM_BITS: usize = 1;
+
+    fn read_transcription_bytes(bytes: &[u8]) -> Self {
+        (bytes[0] != 0).into()
+    }
+
+    fn write_transcription_bytes(&self, buf: &mut [u8]) {
+        buf[0] = self.to_u8();
+    }
+}
 
 impl<const LIMBS: usize> ConstTranscribable for Uint<LIMBS> {
     const NUM_BYTES: usize = 8 * LIMBS / WORD_FACTOR;

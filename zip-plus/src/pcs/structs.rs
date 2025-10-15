@@ -6,8 +6,8 @@ use crate::{
     traits::{ConstTranscribable, FromRef, Named},
 };
 use crypto_primitives::{
-    ConstIntRing, ConstIntSemiring, DenseRowMatrix, FixedRing, FixedSemiring, FromWithConfig,
-    PrimeField, crypto_bigint_int::Int,
+    ConstIntRing, ConstIntSemiring, DenseRowMatrix, FixedRing, FixedSemiring, PrimeField,
+    crypto_bigint_int::Int,
 };
 use num_traits::CheckedMul;
 use std::{marker::PhantomData, ops::Neg};
@@ -173,21 +173,3 @@ pub trait ProjectableToField<F: PrimeField> {
     /// to a prime field using the given sampled value.
     fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static;
 }
-
-macro_rules! impl_projectable_to_field_for_primitives {
-    ($($t:ty),*) => {
-        $(
-            impl<F> ProjectableToField<F> for $t
-            where
-                F: PrimeField + FromWithConfig<$t>,
-            {
-                fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static {
-                    let cfg = sampled_value.cfg().clone();
-                    move |x: &Self| F::from_with_cfg(*x, &cfg)
-                }
-            }
-        )*
-    };
-}
-
-impl_projectable_to_field_for_primitives!(i8, i16, i32, i64, i128);
