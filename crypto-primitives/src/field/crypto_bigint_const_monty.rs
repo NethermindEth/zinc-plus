@@ -1,5 +1,8 @@
 use super::*;
-use crate::{IntRing, IntSemiring, Semiring, crypto_bigint_int::Int, crypto_bigint_uint::Uint};
+use crate::{
+    IntRing, IntSemiring, Semiring, boolean::Boolean, crypto_bigint_int::Int,
+    crypto_bigint_uint::Uint,
+};
 use core::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
@@ -462,6 +465,18 @@ impl_from_signed!(i8, i16, i32, i64, i128);
 impl<Mod: Params<LIMBS>, const LIMBS: usize> From<bool> for ConstMontyField<Mod, LIMBS> {
     fn from(value: bool) -> Self {
         if value { Self::ONE } else { Self::ZERO }
+    }
+}
+
+impl<Mod: Params<LIMBS>, const LIMBS: usize> From<Boolean> for ConstMontyField<Mod, LIMBS> {
+    fn from(value: Boolean) -> Self {
+        Self::from(*value)
+    }
+}
+
+impl<Mod: Params<LIMBS>, const LIMBS: usize> From<&Boolean> for ConstMontyField<Mod, LIMBS> {
+    fn from(value: &Boolean) -> Self {
+        Self::from(**value)
     }
 }
 

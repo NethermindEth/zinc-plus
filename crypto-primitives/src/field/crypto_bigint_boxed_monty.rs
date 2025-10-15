@@ -1,5 +1,5 @@
 use super::*;
-use crate::{IntRing, IntSemiring, Semiring, crypto_bigint_int::Int};
+use crate::{IntRing, IntSemiring, Semiring, boolean::Boolean, crypto_bigint_int::Int};
 use core::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
@@ -408,6 +408,18 @@ impl FromWithConfig<bool> for BoxedMontyField {
 
 impl FromWithConfig<&bool> for BoxedMontyField {
     fn from_with_cfg(value: &bool, cfg: &Self::Config) -> Self {
+        Self::from_with_cfg(*value, cfg)
+    }
+}
+
+impl FromWithConfig<Boolean> for BoxedMontyField {
+    fn from_with_cfg(value: Boolean, cfg: &Self::Config) -> Self {
+        Self::from_with_cfg(*value, cfg)
+    }
+}
+
+impl FromWithConfig<&Boolean> for BoxedMontyField {
+    fn from_with_cfg(value: &Boolean, cfg: &Self::Config) -> Self {
         Self::from_with_cfg(*value, cfg)
     }
 }

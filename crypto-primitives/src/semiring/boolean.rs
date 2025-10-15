@@ -3,10 +3,13 @@ use core::{
     fmt::{Debug, Display, Formatter, Result as FmtResult},
     hash::{Hash, Hasher},
     iter::{Product, Sum},
-    ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
+    ops::{Add, AddAssign, Deref, Mul, MulAssign, Sub, SubAssign},
     str::{FromStr, ParseBoolError},
 };
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, ConstOne, ConstZero, One, Pow, Zero};
+
+#[cfg(feature = "rand")]
+use rand::{distr::StandardUniform, prelude::*};
 
 /// A boolean semiring where true represents 1 and false represents 0.
 /// Arithmetic operations behave like modulo-2 arithmetic:
@@ -71,6 +74,15 @@ impl Default for Boolean {
     #[inline(always)]
     fn default() -> Self {
         Self::FALSE
+    }
+}
+
+impl Deref for Boolean {
+    type Target = bool;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -333,6 +345,17 @@ impl IntSemiring for Boolean {
 
     fn is_even(&self) -> bool {
         !self.0
+    }
+}
+
+//
+// RNG
+//
+
+#[cfg(feature = "rand")]
+impl Distribution<Boolean> for StandardUniform {
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Boolean {
+        Boolean::new(rng.random())
     }
 }
 

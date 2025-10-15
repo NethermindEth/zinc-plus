@@ -1,5 +1,5 @@
 use super::*;
-use crate::Semiring;
+use crate::{Semiring, boolean::Boolean};
 use ark_ff::{
     AdditiveGroup, CubicExtConfig, CubicExtField, LegendreSymbol, QuadExtConfig, QuadExtField,
     SqrtPrecomputation, fields::Field as ArkWrappedField,
@@ -375,6 +375,18 @@ impl_from_delegate!(i8, i16, i32, i64, i128);
 impl<F: ArkWrappedField> From<bool> for ArkField<F> {
     fn from(value: bool) -> Self {
         if value { Self::one() } else { Self::zero() }
+    }
+}
+
+impl<F: ArkWrappedField> From<Boolean> for ArkField<F> {
+    fn from(value: Boolean) -> Self {
+        Self::from(*value)
+    }
+}
+
+impl<F: ArkWrappedField> From<&Boolean> for ArkField<F> {
+    fn from(value: &Boolean) -> Self {
+        Self::from(**value)
     }
 }
 

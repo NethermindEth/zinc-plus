@@ -1,5 +1,5 @@
 use super::*;
-use crate::{IntRing, IntSemiring, Semiring};
+use crate::{IntRing, IntSemiring, Semiring, boolean::Boolean};
 use ark_ff::{
     AdditiveGroup, BigInt, BigInteger, FftField, FpConfig, LegendreSymbol, MontBackend, MontConfig,
     SqrtPrecomputation,
@@ -398,6 +398,18 @@ impl<P: FpConfig<N>, const N: usize> From<bool> for Fp<P, N> {
         } else {
             <Self as ConstZero>::ZERO
         }
+    }
+}
+
+impl<P: FpConfig<N>, const N: usize> From<Boolean> for Fp<P, N> {
+    fn from(value: Boolean) -> Self {
+        Self::from(*value)
+    }
+}
+
+impl<P: FpConfig<N>, const N: usize> From<&Boolean> for Fp<P, N> {
+    fn from(value: &Boolean) -> Self {
+        Self::from(**value)
     }
 }
 
