@@ -222,7 +222,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 mod tests {
     use crate::{
         ZipError,
-        code::{LinearCode, raa::RaaCode},
+        code::{LinearCode, raa::RaaCode, raa_sign_flip::RaaSignFlippingCode},
         merkle::MerkleTree,
         pcs::{
             ZipPlusProof,
@@ -254,9 +254,9 @@ mod tests {
     type F = BoxedMontyField;
 
     type Zt = TestZipTypes<N, K, M>;
-    type C = RaaCode<Zt, 4>;
+    type C = RaaSignFlippingCode<Zt, 4>;
 
-    type PolyZt = TestPolyZipTypes<N, K, M, DEGREE>;
+    type PolyZt = TestPolyZipTypes<K, M, DEGREE>;
     type PolyC = RaaCode<PolyZt, 4>;
 
     type TestZip = ZipPlus<Zt, C>;
@@ -367,8 +367,8 @@ mod tests {
                 setup_full_protocol_poly::<F, N, K, M, DEGREE>(num_vars);
 
             let different_evals = {
-                let different_eval_coeffs: Vec<_> = (1..=((1 << num_vars) * DEGREE as i32))
-                    .map(|x| Int::from_i32(x + 20))
+                let different_eval_coeffs: Vec<_> = (1..=((1 << num_vars) * DEGREE as i8))
+                    .map(|x| (x % 3 == 0).into())
                     .collect_vec();
                 different_eval_coeffs
                     .chunks_exact(DEGREE)
@@ -903,7 +903,7 @@ mod tests {
             let (data, commitment) = TestPolyZip::commit(&pp, &mle).expect("commit");
 
             // Same point choice as the bench
-            let point = vec![1i64; P].iter().map(|v| v.into()).collect_vec();
+            let point = vec![1i64; P].iter().map(|v| (*v).into()).collect_vec();
 
             // Prover produces a proof once (exactly as in the bench)
             let test_proof = TestPolyZip::test(&pp, &mle, &data).unwrap();

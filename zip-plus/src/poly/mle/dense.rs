@@ -10,19 +10,19 @@ use crate::{
     sub,
 };
 use ark_std::log2;
-use crypto_primitives::{Matrix, Ring};
+use crypto_primitives::{Matrix, Ring, Semiring};
 use rand::{distr::StandardUniform, prelude::*};
 use rand_core::RngCore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DenseMultilinearExtension<F> {
+pub struct DenseMultilinearExtension<T> {
     /// The evaluation over {0,1}^`num_vars`
-    pub evaluations: Vec<F>,
+    pub evaluations: Vec<T>,
     /// Number of variables
     pub num_vars: usize,
 }
 
-impl<R: Ring> DenseMultilinearExtension<R> {
+impl<R: Semiring> DenseMultilinearExtension<R> {
     pub fn zero_vars(evaluation: R) -> Self {
         Self {
             evaluations: vec![evaluation],
@@ -135,7 +135,7 @@ impl<R: Ring> DenseMultilinearExtension<R> {
 
 impl<R> MultilinearExtension<R> for DenseMultilinearExtension<R>
 where
-    R: Ring,
+    R: Semiring,
 {
     #[allow(clippy::arithmetic_side_effects)]
     fn fix_variables<S>(&mut self, partial_point: &[S], zero: R)
@@ -184,7 +184,7 @@ where
 
 impl<R> MultilinearExtensionRand<R> for DenseMultilinearExtension<R>
 where
-    R: Ring,
+    R: Semiring,
     StandardUniform: Distribution<R>,
 {
     fn rand<Rng: RngCore + ?Sized>(num_vars: usize, rng: &mut Rng, zero: R) -> Self {
@@ -219,7 +219,7 @@ impl<R: Ring> Neg for DenseMultilinearExtension<R> {
     }
 }
 
-impl<R: Ring> Add for DenseMultilinearExtension<R> {
+impl<R: Semiring> Add for DenseMultilinearExtension<R> {
     type Output = Self;
 
     #[allow(clippy::arithmetic_side_effects)]
@@ -228,7 +228,7 @@ impl<R: Ring> Add for DenseMultilinearExtension<R> {
     }
 }
 
-impl<R: Ring> Add<&Self> for DenseMultilinearExtension<R> {
+impl<R: Semiring> Add<&Self> for DenseMultilinearExtension<R> {
     type Output = Self;
 
     #[allow(clippy::arithmetic_side_effects)]
@@ -238,7 +238,7 @@ impl<R: Ring> Add<&Self> for DenseMultilinearExtension<R> {
     }
 }
 
-impl<R: Ring> Sub<&Self> for DenseMultilinearExtension<R> {
+impl<R: Semiring> Sub<&Self> for DenseMultilinearExtension<R> {
     type Output = Self;
 
     #[allow(clippy::arithmetic_side_effects)]
@@ -248,7 +248,7 @@ impl<R: Ring> Sub<&Self> for DenseMultilinearExtension<R> {
     }
 }
 
-impl<R: Ring> Mul<&Self> for DenseMultilinearExtension<R> {
+impl<R: Semiring> Mul<&Self> for DenseMultilinearExtension<R> {
     type Output = Self;
 
     #[allow(clippy::arithmetic_side_effects)]
@@ -258,7 +258,7 @@ impl<R: Ring> Mul<&Self> for DenseMultilinearExtension<R> {
     }
 }
 
-impl<R: Ring> Mul<R> for DenseMultilinearExtension<R> {
+impl<R: Semiring> Mul<R> for DenseMultilinearExtension<R> {
     type Output = Self;
 
     #[allow(clippy::arithmetic_side_effects)]
@@ -268,28 +268,28 @@ impl<R: Ring> Mul<R> for DenseMultilinearExtension<R> {
     }
 }
 
-impl<R: Ring> AddAssign<&Self> for DenseMultilinearExtension<R> {
+impl<R: Semiring> AddAssign<&Self> for DenseMultilinearExtension<R> {
     #[allow(clippy::arithmetic_side_effects)]
     fn add_assign(&mut self, rhs: &Self) {
         self.binary(rhs, |a, b| *a += b);
     }
 }
 
-impl<R: Ring> SubAssign<&Self> for DenseMultilinearExtension<R> {
+impl<R: Semiring> SubAssign<&Self> for DenseMultilinearExtension<R> {
     #[allow(clippy::arithmetic_side_effects)]
     fn sub_assign(&mut self, rhs: &Self) {
         self.binary(rhs, |a, b| *a -= b);
     }
 }
 
-impl<R: Ring> MulAssign<&Self> for DenseMultilinearExtension<R> {
+impl<R: Semiring> MulAssign<&Self> for DenseMultilinearExtension<R> {
     #[allow(clippy::arithmetic_side_effects)]
     fn mul_assign(&mut self, rhs: &Self) {
         self.binary(rhs, |a, b| *a *= b);
     }
 }
 
-impl<R: Ring> AddAssign<(R, &Self)> for DenseMultilinearExtension<R> {
+impl<R: Semiring> AddAssign<(R, &Self)> for DenseMultilinearExtension<R> {
     #[allow(clippy::arithmetic_side_effects)]
     fn add_assign(&mut self, rhs: (R, &Self)) {
         let coeff = rhs.0;

@@ -198,7 +198,7 @@ mod tests {
     use std::slice::from_ref;
 
     use crate::{
-        code::{LinearCode, raa::RaaCode},
+        code::{LinearCode, raa::RaaCode, raa_sign_flip::RaaSignFlippingCode},
         merkle::{MerkleTree, MtHash},
         pcs::{
             structs::{ZipPlus, ZipPlusParams, ZipTypes},
@@ -208,7 +208,8 @@ mod tests {
     };
     use crypto_bigint::{Random, U64, U256, Word};
     use crypto_primitives::{
-        Matrix, crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int,
+        Matrix, boolean::Boolean, crypto_bigint_boxed_monty::BoxedMontyField,
+        crypto_bigint_int::Int,
     };
     use itertools::Itertools;
     use num_traits::Zero;
@@ -222,9 +223,9 @@ mod tests {
     const DEGREE: usize = 2;
 
     type Zt = TestZipTypes<N, K, M>;
-    type C = RaaCode<Zt, 4>;
+    type C = RaaSignFlippingCode<Zt, 4>;
 
-    type PolyZt = TestPolyZipTypes<N, K, M, DEGREE>;
+    type PolyZt = TestPolyZipTypes<K, M, DEGREE>;
     type PolyC = RaaCode<PolyZt, 4>;
 
     type TestZip = ZipPlus<Zt, C>;
@@ -486,9 +487,9 @@ mod tests {
 
         // Create a polynomial with 2 variables and 4 evaluations
         let evaluations = vec![
-            DensePolynomial::new(vec![Int::from(1), Int::from(2)]),
-            DensePolynomial::new(vec![Int::from(3), Int::from(4)]),
-            DensePolynomial::new(vec![Int::from(5), Int::from(6)]),
+            DensePolynomial::new(vec![Boolean::FALSE, Boolean::FALSE]),
+            DensePolynomial::new(vec![Boolean::FALSE, Boolean::TRUE]),
+            DensePolynomial::new(vec![Boolean::TRUE, Boolean::FALSE]),
         ];
         let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations, Zero::zero());
         let encoded = TestPolyZip::encode_rows(&pp, pp.linear_code.row_len(), &poly.evaluations);

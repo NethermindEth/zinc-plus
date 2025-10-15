@@ -1,39 +1,35 @@
 use crate::{
     add,
     code::LinearCode,
-    mul, neg,
+    mul,
     pcs::structs::ZipTypes,
     traits::{ConstTranscribable, FromRef},
     utils::shuffle_seeded,
 };
 use crypto_primitives::PrimeField;
-use num_traits::{CheckedAdd, CheckedNeg};
-use std::{
-    marker::PhantomData,
-    ops::{AddAssign, Neg},
-};
+use num_traits::CheckedAdd;
+use std::{marker::PhantomData, ops::AddAssign};
 
 /// Implementation of a repeat-accumulate-accumulate (RAA) codes over the binary
 /// field, as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
 #[derive(Debug, Clone)]
 pub struct RaaCode<Zt: ZipTypes, const REP: usize> {
-    cfg: RaaConfig,
+    pub(crate) cfg: RaaConfig,
 
-    row_len: usize,
-
-    phantom: PhantomData<Zt>,
-
+    pub(crate) row_len: usize,
     /// Randomness seed for the first permutation
-    perm_1_seed: u64,
+    pub(crate) perm_1_seed: u64,
 
     /// Randomness seed for the second permutation
-    perm_2_seed: u64,
+    pub(crate) perm_2_seed: u64,
 
     /// First permutation
-    perm_1: Vec<usize>,
+    pub(crate) perm_1: Vec<usize>,
 
     /// Second permutation
-    perm_2: Vec<usize>,
+    pub(crate) perm_2: Vec<usize>,
+
+    phantom: PhantomData<Zt>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -44,22 +40,13 @@ pub struct RaaConfig {
     /// Whether to permute the codeword in place, instead of copying it using a
     /// precomputed permutation.
     pub permute_in_place: bool,
-
-    /// Whether to flip the signs of every other codeword entry, leading to
-    /// smaller codewords.
-    pub flip_signs: bool,
 }
 
 impl<Zt: ZipTypes, const REP: usize> RaaCode<Zt, REP> {
     /// Do the actual encoding, as per RAA spec
     fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
     where
-        Out: Neg<Output = Out>
-            + CheckedNeg
-            + CheckedAdd
-            + for<'a> AddAssign<&'a Out>
-            + FromRef<In>
-            + Clone,
+        Out: CheckedAdd + for<'a> AddAssign<&'a Out> + FromRef<In> + Clone,
     {
         debug_assert_eq!(
             row.len(),
@@ -68,9 +55,6 @@ impl<Zt: ZipTypes, const REP: usize> RaaCode<Zt, REP> {
         );
 
         let mut result: Vec<Out> = repeat(row, REP);
-        if self.cfg.flip_signs {
-            flip_even_signs(&mut result, self.cfg.check_for_overflows);
-        }
         if self.cfg.permute_in_place {
             shuffle_seeded(&mut result, self.perm_1_seed);
         } else {
@@ -80,9 +64,6 @@ impl<Zt: ZipTypes, const REP: usize> RaaCode<Zt, REP> {
             accumulate(&mut result);
         } else {
             accumulate_unchecked(&mut result);
-        }
-        if self.cfg.flip_signs {
-            flip_even_signs(&mut result, self.cfg.check_for_overflows);
         }
         if self.cfg.permute_in_place {
             shuffle_seeded(&mut result, self.perm_2_seed);
@@ -191,7 +172,10 @@ impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for RaaCode<Zt, REP> {
 
 /// Repeat the given slice N times, e.g `[1,2,3] => [1,2,3,1,2,3]`
 #[allow(clippy::arithmetic_side_effects)]
-fn repeat<In, Out: FromRef<In> + Clone>(input: &[In], repetition_factor: usize) -> Vec<Out> {
+pub(crate) fn repeat<In, Out: FromRef<In> + Clone>(
+    input: &[In],
+    repetition_factor: usize,
+) -> Vec<Out> {
     input
         .iter()
         .map(Out::from_ref)
@@ -211,7 +195,7 @@ fn repeat<In, Out: FromRef<In> + Clone>(input: &[In], repetition_factor: usize) 
 /// 1 1 1 1
 /// ```
 #[allow(clippy::arithmetic_side_effects)] // Clippy is too dumb to realize `i - 1` is safe here
-fn accumulate<I>(input: &mut [I])
+pub(crate) fn accumulate<I>(input: &mut [I])
 where
     I: CheckedAdd + Clone,
 {
@@ -225,7 +209,7 @@ where
 }
 
 #[allow(clippy::arithmetic_side_effects)]
-fn accumulate_unchecked<I>(input: &mut [I])
+pub(crate) fn accumulate_unchecked<I>(input: &mut [I])
 where
     I: for<'a> AddAssign<&'a I> + Clone,
 {
@@ -242,44 +226,11 @@ where
 }
 
 /// Clone the data using a precomputed permutation.
-fn clone_shuffled<T>(data: &[T], perm: &[usize]) -> Vec<T>
+pub(crate) fn clone_shuffled<T>(data: &[T], perm: &[usize]) -> Vec<T>
 where
     T: Clone,
 {
     perm.iter().map(|&i| data[i].clone()).collect()
-}
-
-/// Flip every other entry in the codeword, starting from the second one.
-fn flip_even_signs<Out>(result: &mut [Out], check_for_overflows: bool)
-where
-    Out: Neg<Output = Out> + CheckedNeg + Clone,
-{
-    if check_for_overflows {
-        flip_even_signs_checked(result);
-    } else {
-        flip_even_signs_unchecked(result);
-    }
-}
-
-fn flip_even_signs_checked<Out>(result: &mut [Out])
-where
-    Out: CheckedNeg + Clone,
-{
-    // Flip every other entry in the codeword
-    for i in (1..result.len()).step_by(2) {
-        result[i] = neg!(result[i]);
-    }
-}
-
-/// Flip every other entry in the codeword, starting from the second one.
-fn flip_even_signs_unchecked<Out>(result: &mut [Out])
-where
-    Out: Neg<Output = Out> + Clone,
-{
-    // Flip every other entry in the codeword
-    for i in (1..result.len()).step_by(2) {
-        result[i] = result[i].clone().neg();
-    }
 }
 
 #[cfg(test)]
@@ -307,17 +258,14 @@ mod tests {
     {
         for check_for_overflows in [true, false] {
             for permute_in_place in [true, false] {
-                for flip_signs in [true, false] {
-                    let code = RaaCode::<Zt, REPETITION_FACTOR>::new(
-                        poly_size,
-                        RaaConfig {
-                            check_for_overflows,
-                            permute_in_place,
-                            flip_signs,
-                        },
-                    );
-                    f(&code)
-                }
+                let code = RaaCode::<Zt, REPETITION_FACTOR>::new(
+                    poly_size,
+                    RaaConfig {
+                        check_for_overflows,
+                        permute_in_place,
+                    },
+                );
+                f(&code)
             }
         }
     }
@@ -440,7 +388,6 @@ mod tests {
                     RaaConfig {
                         check_for_overflows,
                         permute_in_place,
-                        flip_signs: false,
                     },
                 );
 
@@ -482,7 +429,6 @@ mod tests {
                 RaaConfig {
                     check_for_overflows: true,
                     permute_in_place: true,
-                    flip_signs: false,
                 },
             );
             code_in_place.encode(&data)
@@ -494,7 +440,6 @@ mod tests {
                 RaaConfig {
                     check_for_overflows: true,
                     permute_in_place: false,
-                    flip_signs: false,
                 },
             );
             code_cloning.encode(&data)
@@ -516,7 +461,6 @@ mod tests {
             RaaConfig {
                 check_for_overflows: true,
                 permute_in_place: false,
-                flip_signs: false,
             },
         );
     }

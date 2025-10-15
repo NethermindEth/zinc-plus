@@ -1,4 +1,5 @@
 pub mod raa;
+pub mod raa_sign_flip;
 
 use crate::{pcs::structs::ZipTypes, traits::FromRef};
 use crypto_primitives::PrimeField;
