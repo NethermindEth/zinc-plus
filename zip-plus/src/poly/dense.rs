@@ -22,11 +22,11 @@ use std::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DensePolynomial<R, const DEGREE: usize> {
     /// Coefficient of the polynomial of degree 0.
-    coeff_0: R,
+    pub(super) coeff_0: R,
 
     /// Coefficients of the polynomial, lowest degree first, starting with
     /// degree 1.
-    coeffs: [R; DEGREE],
+    pub(super) coeffs: [R; DEGREE],
 }
 
 impl<R: Semiring + Zero, const DEGREE: usize> DensePolynomial<R, DEGREE> {

@@ -7,11 +7,11 @@ use zip_common::*;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use crypto_bigint::U64;
-use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint};
+use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_uint::Uint};
 use zip_plus::{
     code::raa::{RaaCode, RaaConfig},
     pcs::structs::ZipTypes,
-    poly::dense::DensePolynomial,
+    poly::{bit_decomposed::BitDecomposedPolynomial, dense::DensePolynomial},
     primality::MillerRabin,
 };
 
@@ -20,8 +20,8 @@ const INT_LIMBS: usize = U64::LIMBS;
 struct BenchZipPlusTypes<const D: usize> {}
 impl<const D: usize> ZipTypes<D> for BenchZipPlusTypes<D> {
     const NUM_COLUMN_OPENINGS: usize = 650;
-    type Eval = DensePolynomial<Boolean, D>;
-    type Cw = DensePolynomial<i32, D>;
+    type Eval = BitDecomposedPolynomial<1, D>;
+    type Cw = BitDecomposedPolynomial<25, D>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
     type PrimeTest = MillerRabin;
     type Chal = i128;

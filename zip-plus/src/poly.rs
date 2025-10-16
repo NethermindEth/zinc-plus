@@ -1,3 +1,4 @@
+pub mod bit_decomposed;
 pub mod dense;
 pub mod mle;
 pub mod zero_degree;

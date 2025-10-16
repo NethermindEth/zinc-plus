@@ -230,6 +230,7 @@ mod tests {
             test_utils::*,
         },
         poly::{
+            bit_decomposed::BitDecomposedPolynomial,
             dense::DensePolynomial,
             mle::{DenseMultilinearExtension, MultilinearExtensionRand},
         },
@@ -237,7 +238,7 @@ mod tests {
     };
     use crypto_bigint::{Random, U64};
     use crypto_primitives::{
-        Field, FromWithConfig, IntoWithConfig, PrimeField,
+        Field, FromWithConfig, IntoWithConfig, PrimeField, boolean::Boolean,
         crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int,
     };
     use itertools::Itertools;
@@ -372,7 +373,8 @@ mod tests {
                     .collect_vec();
                 different_eval_coeffs
                     .chunks_exact(DEGREE)
-                    .map(DensePolynomial::new)
+                    .map(DensePolynomial::<Boolean, DEGREE>::new)
+                    .map(BitDecomposedPolynomial::from)
                     .collect_vec()
             };
 

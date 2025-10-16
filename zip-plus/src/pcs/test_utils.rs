@@ -19,7 +19,10 @@ use crate::{
         },
     },
     pcs_transcript::PcsTranscript,
-    poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
+    poly::{
+        bit_decomposed::BitDecomposedPolynomial, dense::DensePolynomial,
+        mle::DenseMultilinearExtension,
+    },
     primality::MillerRabin,
     traits::{FromRef, Transcribable, Transcript},
 };
@@ -56,8 +59,8 @@ impl<const K: usize, const M: usize, const DEGREE: usize> ZipTypes<DEGREE>
     for TestPolyZipTypes<K, M, DEGREE>
 {
     const NUM_COLUMN_OPENINGS: usize = 650;
-    type Eval = DensePolynomial<Boolean, DEGREE>;
-    type Cw = DensePolynomial<i32, DEGREE>;
+    type Eval = BitDecomposedPolynomial<1, DEGREE>;
+    type Cw = BitDecomposedPolynomial<17, DEGREE>;
     type Fmod = Uint<K>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
@@ -99,7 +102,8 @@ pub fn setup_poly_test_params<const K: usize, const M: usize, const DEGREE: usiz
             .collect_vec();
         eval_coeffs
             .chunks_exact(DEGREE)
-            .map(DensePolynomial::new)
+            .map(DensePolynomial::<Boolean, DEGREE>::new)
+            .map(BitDecomposedPolynomial::from)
             .collect_vec()
     })
 }

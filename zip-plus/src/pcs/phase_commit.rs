@@ -483,9 +483,9 @@ mod tests {
 
         // Create a polynomial with 2 variables and 4 evaluations
         let evaluations = vec![
-            DensePolynomial::new(vec![Boolean::FALSE, Boolean::FALSE]),
-            DensePolynomial::new(vec![Boolean::FALSE, Boolean::TRUE]),
-            DensePolynomial::new(vec![Boolean::TRUE, Boolean::FALSE]),
+            DensePolynomial::new(vec![Boolean::FALSE, Boolean::FALSE]).into(),
+            DensePolynomial::new(vec![Boolean::FALSE, Boolean::TRUE]).into(),
+            DensePolynomial::new(vec![Boolean::TRUE, Boolean::FALSE]).into(),
         ];
         let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations, Zero::zero());
         let encoded = TestPolyZip::encode_rows(&pp, pp.linear_code.row_len(), &poly.evaluations);
