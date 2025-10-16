@@ -215,8 +215,12 @@ fn accumulate<I>(input: &mut [I])
 where
     I: CheckedAdd + Clone,
 {
-    for i in 1..input.len() {
-        input[i] = add!(input[i], &input[i - 1], "Accumulation overflow");
+    if let Some(first) = input.first().cloned() {
+        let mut acc = first;
+        for curr in input.iter_mut().skip(1) {
+            acc = add!(curr, &acc, "Accumulation overflow");
+            *curr = acc.clone();
+        }
     }
 }
 
@@ -225,17 +229,15 @@ fn accumulate_unchecked<I>(input: &mut [I])
 where
     I: for<'a> AddAssign<&'a I> + Clone,
 {
-    for i in 1..input.len() {
-        // This allows us to circumvent Rust bounds checking
-        unsafe {
-            let input_i: *mut I = input.get_unchecked_mut(i);
-            let input_i: &mut I = &mut *input_i;
-            // Note:
-            // For Int ring, AddAssign here still results in a panic, but that's more
-            // efficient than doing a checked_add and converting ConstCtOption
-            // into Option and panicking later.
-            *input_i += input.get_unchecked(i - 1);
-        };
+    if let Some(first) = input.first().cloned() {
+        let mut acc = first;
+        for i in 1..input.len() {
+            // Avoid bound checking
+            unsafe {
+                acc += input.get_unchecked(i);
+                *input.get_unchecked_mut(i) = acc.clone();
+            };
+        }
     }
 }
 
