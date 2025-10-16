@@ -68,7 +68,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         column: usize,
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError> {
-        let column_values = commit_hint.rows.iter().map(|row| &row[column]);
+        let column_values = commit_hint.cw_matrix.as_rows().map(|row| &row[column]);
 
         // Write the elements in the squeezed column to the shared transcript
         transcript.write_const_many(column_values)?;
@@ -141,13 +141,13 @@ mod tests {
 
         let (original_hint, _) = TestZip::commit(&pp, &poly).unwrap();
 
-        let mut corrupted_rows = original_hint.rows.clone();
+        let mut corrupted_rows = original_hint.cw_matrix.to_rows();
         if !corrupted_rows.is_empty() {
             corrupted_rows[0][0] += Int::ONE;
         }
 
         let corrupted_merkle_tree = MerkleTree::new(corrupted_rows.clone());
-        let corrupted_rows_hint = ZipPlusHint::new(corrupted_rows, corrupted_merkle_tree);
+        let corrupted_rows_hint = ZipPlusHint::new(corrupted_rows.into(), corrupted_merkle_tree);
 
         let result = TestZip::test(&pp, &poly, &corrupted_rows_hint);
 

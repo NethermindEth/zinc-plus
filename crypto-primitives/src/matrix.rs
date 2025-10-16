@@ -1,4 +1,5 @@
 use alloc::vec::Vec;
+use core::mem::{ManuallyDrop, MaybeUninit};
 
 /// A matrix, rectangular table of values
 pub trait Matrix<T> {
@@ -8,13 +9,17 @@ pub trait Matrix<T> {
     /// Number of columns in this matrix
     fn num_cols(&self) -> usize;
 
-    fn rows<'a>(&'a self) -> impl Iterator<Item = impl Iterator<Item = (usize, &'a T)>>
+    fn cells<'a>(&'a self) -> impl Iterator<Item = impl Iterator<Item = (usize, &'a T)>>
     where
         T: 'a;
+
+    fn is_empty(&self) -> bool {
+        self.num_rows() == 0 || self.num_cols() == 0
+    }
 }
 
 /// Sparse matrix is a matrix with a fixed number non-zero of elements per row
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SparseMatrix<T> {
     /// Number of rows
     pub num_rows: usize,
@@ -43,7 +48,7 @@ impl<T> Matrix<T> for SparseMatrix<T> {
         self.num_cols
     }
 
-    fn rows<'a>(&'a self) -> impl Iterator<Item = impl Iterator<Item = (usize, &'a T)>>
+    fn cells<'a>(&'a self) -> impl Iterator<Item = impl Iterator<Item = (usize, &'a T)>>
     where
         T: 'a,
     {
@@ -71,19 +76,82 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DenseRowMatrix<T> {
+    /// Number of rows
+    pub num_rows: usize,
+
     /// Number of columns
     pub num_cols: usize,
 
-    /// Rows of dense matrix
-    pub rows: Vec<Vec<T>>,
+    /// Linearized rows of dense matrix
+    pub data: Vec<T>,
+}
+
+impl<T: Clone> DenseRowMatrix<T> {
+    pub fn uninit(num_rows: usize, num_cols: usize) -> DenseRowMatrix<MaybeUninit<T>> {
+        let full_capacity = num_rows
+            .checked_mul(num_cols)
+            .expect("Overflow in matrix size calculation");
+        let mut data = Vec::with_capacity(full_capacity);
+        // Safety: It's safe to create an uninitialized vector of `MaybeUninit<T>`
+        unsafe { data.set_len(full_capacity) };
+        DenseRowMatrix {
+            num_rows,
+            num_cols,
+            data,
+        }
+    }
+
+    pub fn as_rows(&self) -> impl Iterator<Item = &[T]> {
+        self.data.chunks_exact(self.num_cols)
+    }
+
+    pub fn as_rows_mut(&mut self) -> impl Iterator<Item = &mut [T]> {
+        self.data.chunks_exact_mut(self.num_cols)
+    }
+
+    pub fn to_rows_slices(&self) -> Vec<&[T]> {
+        self.as_rows().collect()
+    }
+
+    pub fn to_rows_slices_mut(&mut self) -> Vec<&mut [T]> {
+        self.as_rows_mut().collect()
+    }
+
+    pub fn to_rows(&self) -> Vec<Vec<T>> {
+        self.data
+            .chunks_exact(self.num_cols)
+            .map(|row| row.to_vec())
+            .collect()
+    }
+}
+
+impl<T> DenseRowMatrix<MaybeUninit<T>> {
+    /// Mark the matrix as initialized, converting it to a `DenseRowMatrix<T>`.
+    /// Attempts to do so in place without copying the data.
+    ///
+    /// # Safety
+    /// The caller must ensure that all elements in `self.data` are initialized.
+    pub unsafe fn init(self) -> DenseRowMatrix<T> {
+        // Prevent `source` from being dropped while we steal its parts.
+        let mut v = ManuallyDrop::new(self.data);
+        let (ptr, len, cap) = (v.as_mut_ptr(), v.len(), v.capacity());
+        // Safety: MaybeUninit<T> can be safely converted to T if all elements are
+        // initialized.
+        let data = unsafe { Vec::from_raw_parts(ptr.cast::<T>(), len, cap) };
+        DenseRowMatrix {
+            num_rows: self.num_rows,
+            num_cols: self.num_cols,
+            data,
+        }
+    }
 }
 
 impl<T> Matrix<T> for DenseRowMatrix<T> {
     #[inline]
     fn num_rows(&self) -> usize {
-        self.rows.len()
+        self.num_rows
     }
 
     #[inline]
@@ -91,11 +159,13 @@ impl<T> Matrix<T> for DenseRowMatrix<T> {
         self.num_cols
     }
 
-    fn rows<'a>(&'a self) -> impl Iterator<Item = impl Iterator<Item = (usize, &'a T)>>
+    fn cells<'a>(&'a self) -> impl Iterator<Item = impl Iterator<Item = (usize, &'a T)>>
     where
         T: 'a,
     {
-        self.rows.iter().map(|row| row.iter().enumerate())
+        self.data
+            .chunks_exact(self.num_cols)
+            .map(|row| row.iter().enumerate())
     }
 }
 
@@ -103,8 +173,9 @@ impl<T> From<Vec<Vec<T>>> for DenseRowMatrix<T> {
     fn from(value: Vec<Vec<T>>) -> Self {
         let num_cols = value.iter().map(|row| row.len()).max().unwrap_or(0);
         DenseRowMatrix {
+            num_rows: value.len(),
             num_cols,
-            rows: value,
+            data: value.into_iter().flatten().collect(),
         }
     }
 }

@@ -89,7 +89,7 @@ impl<R: Ring> DenseMultilinearExtension<R> {
         // build dense vector representing the sparse padded matrix
         let mut v = vec![zero.clone(); padded_rows * padded_cols];
 
-        for (row_i, row) in matrix.rows().enumerate() {
+        for (row_i, row) in matrix.cells().enumerate() {
             for (col_i, val) in row {
                 v[(padded_cols * row_i) + col_i] = val.clone();
             }

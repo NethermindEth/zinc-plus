@@ -6,9 +6,7 @@ use crate::{
     traits::{ConstTranscribable, FromRef, Named, SimpleSemiring},
     utils::ReinterpretVector,
 };
-use crypto_primitives::{
-    ConstIntRing, FixedRing, FromWithConfig, PrimeField, crypto_bigint_int::Int,
-};
+use crypto_primitives::{ConstIntRing, FixedRing, FromWithConfig, PrimeField, crypto_bigint_int::Int, DenseRowMatrix};
 use num_traits::CheckedMul;
 use p3_field::Packable;
 use std::{marker::PhantomData, ops::Neg};
@@ -99,14 +97,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlusParams<Zt, Lc> {
 pub struct ZipPlusHint<R: AsPackable> {
     /// The encoded rows of the polynomial matrix representation, referred to as
     /// "u-hat" in the Zinc paper
-    pub rows: Vec<Vec<R>>,
+    pub cw_matrix: DenseRowMatrix<R>,
     /// Merkle trees of entire matrix
     pub merkle_tree: MerkleTree<R::Packable>,
 }
 
 impl<R: AsPackable> ZipPlusHint<R> {
-    pub fn new(rows: Vec<Vec<R>>, merkle_tree: MerkleTree<R::Packable>) -> ZipPlusHint<R> {
-        ZipPlusHint { rows, merkle_tree }
+    pub fn new(cw_matrix: DenseRowMatrix<R>, merkle_tree: MerkleTree<R::Packable>) -> ZipPlusHint<R> {
+        ZipPlusHint { cw_matrix, merkle_tree }
     }
 
     pub fn root(&self) -> MtHash {
