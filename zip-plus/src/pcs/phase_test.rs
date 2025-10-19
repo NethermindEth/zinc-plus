@@ -7,29 +7,29 @@ use crate::{
         utils::{ColumnOpening, validate_input},
     },
     pcs_transcript::PcsTranscript,
-    poly::{Polynomial, mle::DenseMultilinearExtension},
+    poly::{EvaluatablePolynomial, mle::DenseMultilinearExtension},
     traits::{FromRef, Transcript},
     utils::combine_rows,
 };
 use itertools::Itertools;
 use num_traits::ConstZero;
 
-impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
+impl<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize>
+    ZipPlus<Zt, Lc, DEGREE>
+{
     pub fn test(
-        pp: &ZipPlusParams<Zt, Lc>,
+        pp: &ZipPlusParams<Zt, Lc, DEGREE>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
         commit_hint: &ZipPlusHint<Zt::Cw>,
     ) -> Result<ZipPlusTestTranscript, ZipError> {
-        validate_input::<Zt, Lc, bool>("test", pp.num_vars, [poly], None)?;
+        validate_input::<Zt, Lc, bool, DEGREE>("test", pp.num_vars, [poly], None)?;
 
         let mut transcript = PcsTranscript::new();
 
         // If we can take linear combinations, perform the proximity test
         if pp.num_rows > 1 {
             // Values to evaluate the coefficients at
-            let alphas = transcript
-                .fs_transcript
-                .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND);
+            let alphas = transcript.fs_transcript.get_challenges::<Zt::Chal>(DEGREE);
 
             // Coefficients for the linear combination of polynomial with evaluated
             // coefficients
@@ -108,13 +108,13 @@ mod tests {
     const DEGREE: usize = 2;
 
     type Zt = TestZipTypes<N, K, M>;
-    type C = RaaSignFlippingCode<Zt, 4>;
+    type C = RaaSignFlippingCode<Zt, 4, 0>;
 
     type PolyZt = TestPolyZipTypes<K, M, DEGREE>;
-    type PolyC = RaaCode<PolyZt, 4>;
+    type PolyC = RaaCode<PolyZt, 4, DEGREE>;
 
-    type TestZip = ZipPlus<Zt, C>;
-    type TestPolyZip = ZipPlus<PolyZt, PolyC>;
+    type TestZip = ZipPlus<Zt, C, 0>;
+    type TestPolyZip = ZipPlus<PolyZt, PolyC, DEGREE>;
 
     #[test]
     fn successful_testing_with_correct_polynomial_and_hint() {

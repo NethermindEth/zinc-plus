@@ -1,4 +1,4 @@
-use super::{EvaluationError, Polynomial};
+use super::{EvaluatablePolynomial, EvaluationError, Polynomial};
 use crate::{
     pcs::structs::{MulByScalar, ProjectableToField},
     traits::{ConstTranscribable, FromRef, Named},
@@ -55,12 +55,28 @@ impl<R: Semiring + Zero, const DEGREE: usize> DensePolynomial<R, DEGREE> {
 
         DensePolynomial { coeff_0, coeffs }
     }
+
+    /// Return all coefficients as a vector.
+    /// The result contains DEGREE+1 elements: [coeff_0, coeffs[0], ...,
+    /// coeffs[DEGREE-1]].
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn to_coeffs(&self) -> Vec<R> {
+        let mut result = Vec::with_capacity(DEGREE + 1);
+        result.push(self.coeff_0.clone());
+        result.extend_from_slice(&self.coeffs);
+        result
+    }
 }
 
-impl<R: Semiring, const DEGREE: usize> Polynomial<R> for DensePolynomial<R, DEGREE> {
-    const DEGREE_BOUND: usize = DEGREE;
+impl<R: Semiring, const DEGREE: usize> Polynomial<DEGREE> for DensePolynomial<R, DEGREE> {}
 
-    fn evaluate_at_point<C>(&self, point: &[C]) -> Result<R, EvaluationError>
+impl<R: Semiring, C, const DEGREE: usize> EvaluatablePolynomial<C> for DensePolynomial<R, DEGREE>
+where
+    R: for<'a> MulByScalar<&'a C>,
+{
+    type Output = R;
+
+    fn evaluate_at_point(&self, point: &[C]) -> Result<R, EvaluationError>
     where
         R: for<'a> MulByScalar<&'a C>,
     {

@@ -39,12 +39,10 @@ pub const RAA_CFG: RaaConfig = RaaConfig {
 };
 
 pub struct TestZipTypes<const N: usize, const K: usize, const M: usize> {}
-impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N, K, M> {
+impl<const N: usize, const K: usize, const M: usize> ZipTypes<0> for TestZipTypes<N, K, M> {
     const NUM_COLUMN_OPENINGS: usize = 650;
-    type EvalR = Int<N>;
-    type Eval = Self::EvalR;
-    type CwR = Int<K>;
-    type Cw = Self::CwR;
+    type Eval = Int<N>;
+    type Cw = Int<K>;
     type Fmod = Uint<K>;
     type PrimeTest = MillerRabin;
     type Chal = Int<N>;
@@ -54,14 +52,12 @@ impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N
 }
 
 pub struct TestPolyZipTypes<const K: usize, const M: usize, const DEGREE: usize> {}
-impl<const K: usize, const M: usize, const DEGREE: usize> ZipTypes
+impl<const K: usize, const M: usize, const DEGREE: usize> ZipTypes<DEGREE>
     for TestPolyZipTypes<K, M, DEGREE>
 {
     const NUM_COLUMN_OPENINGS: usize = 650;
-    type EvalR = Boolean;
-    type Eval = DensePolynomial<Self::EvalR, DEGREE>;
-    type CwR = i32;
-    type Cw = DensePolynomial<Self::CwR, DEGREE>;
+    type Eval = DensePolynomial<Boolean, DEGREE>;
+    type Cw = DensePolynomial<i32, DEGREE>;
     type Fmod = Uint<K>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
@@ -76,9 +72,10 @@ pub fn setup_test_params<const N: usize, const K: usize, const M: usize>(
 ) -> (
     ZipPlusParams<
         TestZipTypes<N, K, M>,
-        RaaSignFlippingCode<TestZipTypes<N, K, M>, REPETITION_FACTOR>,
+        RaaSignFlippingCode<TestZipTypes<N, K, M>, REPETITION_FACTOR, 0>,
+        0,
     >,
-    DenseMultilinearExtension<<TestZipTypes<N, K, M> as ZipTypes>::Eval>,
+    DenseMultilinearExtension<<TestZipTypes<N, K, M> as ZipTypes<0>>::Eval>,
 ) {
     setup_test_params_inner(num_vars, |poly_size| {
         (1..=poly_size as i32).map(Int::from).collect()
@@ -91,9 +88,10 @@ pub fn setup_poly_test_params<const K: usize, const M: usize, const DEGREE: usiz
 ) -> (
     ZipPlusParams<
         TestPolyZipTypes<K, M, DEGREE>,
-        RaaCode<TestPolyZipTypes<K, M, DEGREE>, REPETITION_FACTOR>,
+        RaaCode<TestPolyZipTypes<K, M, DEGREE>, REPETITION_FACTOR, DEGREE>,
+        DEGREE,
     >,
-    DenseMultilinearExtension<<TestPolyZipTypes<K, M, DEGREE> as ZipTypes>::Eval>,
+    DenseMultilinearExtension<<TestPolyZipTypes<K, M, DEGREE> as ZipTypes<DEGREE>>::Eval>,
 ) {
     setup_test_params_inner(num_vars, |poly_size| {
         let eval_coeffs: Vec<_> = (1..=(poly_size * DEGREE) as i8)
@@ -106,10 +104,17 @@ pub fn setup_poly_test_params<const K: usize, const M: usize, const DEGREE: usiz
     })
 }
 
-fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt, Config = RaaConfig>>(
+fn setup_test_params_inner<
+    Zt: ZipTypes<DEGREE>,
+    Lc: LinearCode<Zt, DEGREE, Config = RaaConfig>,
+    const DEGREE: usize,
+>(
     num_vars: usize,
     prepare_evaluations: impl FnOnce(usize) -> Vec<Zt::Eval>,
-) -> (ZipPlusParams<Zt, Lc>, DenseMultilinearExtension<Zt::Eval>) {
+) -> (
+    ZipPlusParams<Zt, Lc, DEGREE>,
+    DenseMultilinearExtension<Zt::Eval>,
+) {
     let poly_size = 1 << num_vars;
     let num_rows = 1 << num_vars.div_ceil(2);
 
@@ -127,7 +132,8 @@ pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
 ) -> (
     ZipPlusParams<
         TestZipTypes<N, K, M>,
-        RaaSignFlippingCode<TestZipTypes<N, K, M>, REPETITION_FACTOR>,
+        RaaSignFlippingCode<TestZipTypes<N, K, M>, REPETITION_FACTOR, 0>,
+        0,
     >,
     ZipPlusCommitment,
     Vec<F>,
@@ -136,13 +142,13 @@ pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
 )
 where
     F: PrimeField
-        + for<'a> FromWithConfig<&'a <TestZipTypes<N, K, M> as ZipTypes>::Chal>
+        + for<'a> FromWithConfig<&'a <TestZipTypes<N, K, M> as ZipTypes<0>>::Chal>
         + for<'a> MulByScalar<&'a F>,
-    F::Inner: FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod> + Transcribable,
-    <TestZipTypes<N, K, M> as ZipTypes>::Eval: ProjectableToField<F>,
-    <TestZipTypes<N, K, M> as ZipTypes>::Comb: ProjectableToField<F>,
+    F::Inner: FromRef<<TestZipTypes<N, K, M> as ZipTypes<0>>::Fmod> + Transcribable,
+    <TestZipTypes<N, K, M> as ZipTypes<0>>::Eval: ProjectableToField<F>,
+    <TestZipTypes<N, K, M> as ZipTypes<0>>::Comb: ProjectableToField<F>,
 {
-    setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_test_params, || {
+    setup_full_protocol_inner::<_, _, _, N, 0>(num_vars, setup_test_params, || {
         (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect()
     })
 }
@@ -158,7 +164,8 @@ pub fn setup_full_protocol_poly<
 ) -> (
     ZipPlusParams<
         TestPolyZipTypes<K, M, DEGREE>,
-        RaaCode<TestPolyZipTypes<K, M, DEGREE>, REPETITION_FACTOR>,
+        RaaCode<TestPolyZipTypes<K, M, DEGREE>, REPETITION_FACTOR, DEGREE>,
+        DEGREE,
     >,
     ZipPlusCommitment,
     Vec<F>,
@@ -167,31 +174,36 @@ pub fn setup_full_protocol_poly<
 )
 where
     F: PrimeField
-        + for<'a> FromWithConfig<&'a <TestPolyZipTypes<K, M, DEGREE> as ZipTypes>::Chal>
+        + for<'a> FromWithConfig<&'a <TestPolyZipTypes<K, M, DEGREE> as ZipTypes<DEGREE>>::Chal>
         + for<'a> MulByScalar<&'a F>,
-    F::Inner: FromRef<<TestPolyZipTypes<K, M, DEGREE> as ZipTypes>::Fmod> + Transcribable,
-    <TestPolyZipTypes<K, M, DEGREE> as ZipTypes>::Eval: ProjectableToField<F>,
-    <TestPolyZipTypes<K, M, DEGREE> as ZipTypes>::Comb: ProjectableToField<F>,
+    F::Inner: FromRef<<TestPolyZipTypes<K, M, DEGREE> as ZipTypes<DEGREE>>::Fmod> + Transcribable,
+    <TestPolyZipTypes<K, M, DEGREE> as ZipTypes<DEGREE>>::Eval: ProjectableToField<F>,
+    <TestPolyZipTypes<K, M, DEGREE> as ZipTypes<DEGREE>>::Comb: ProjectableToField<F>,
 {
-    setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_poly_test_params, || {
+    setup_full_protocol_inner::<_, _, _, N, DEGREE>(num_vars, setup_poly_test_params, || {
         (0..num_vars).map(|i| i as i128 + 2).collect()
     })
 }
 
-fn setup_full_protocol_inner<Zt, Lc, F, const N: usize>(
+fn setup_full_protocol_inner<Zt, Lc, F, const N: usize, const DEGREE: usize>(
     num_vars: usize,
-    setup: impl FnOnce(usize) -> (ZipPlusParams<Zt, Lc>, DenseMultilinearExtension<Zt::Eval>),
+    setup: impl FnOnce(
+        usize,
+    ) -> (
+        ZipPlusParams<Zt, Lc, DEGREE>,
+        DenseMultilinearExtension<Zt::Eval>,
+    ),
     prepare_evaluation_point: impl FnOnce() -> Vec<Zt::Pt>,
 ) -> (
-    ZipPlusParams<Zt, Lc>,
+    ZipPlusParams<Zt, Lc, DEGREE>,
     ZipPlusCommitment,
     Vec<F>,
     F,
     ZipPlusProof,
 )
 where
-    Zt: ZipTypes,
-    Lc: LinearCode<Zt>,
+    Zt: ZipTypes<DEGREE>,
+    Lc: LinearCode<Zt, DEGREE>,
     F: PrimeField
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> FromWithConfig<&'a Zt::Pt>

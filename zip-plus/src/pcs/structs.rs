@@ -1,7 +1,7 @@
 use crate::{
     code::LinearCode,
     merkle::{MerkleTree, MtHash},
-    poly::Polynomial,
+    poly::{ConstCoeffBitWidth, EvaluatablePolynomial, Polynomial},
     primality::PrimalityTest,
     traits::{ConstTranscribable, FromRef, Named},
 };
@@ -12,19 +12,16 @@ use crypto_primitives::{
 use num_traits::CheckedMul;
 use std::{marker::PhantomData, ops::Neg};
 
-pub trait ZipTypes: Send + Sync {
+pub trait ZipTypes<const DEGREE: usize>: Send + Sync {
     const NUM_COLUMN_OPENINGS: usize;
 
-    /// Coefficient ring of evaluation polynomial [Self::Eval]
-    type EvalR: ConstIntSemiring + ConstTranscribable + Named;
     /// Semiring of witness/polynomial evaluations on boolean hypercube
-    type Eval: FixedSemiring + Named + Polynomial<Self::EvalR>;
+    type Eval: FixedSemiring + Named + Polynomial<DEGREE> + ConstCoeffBitWidth;
 
-    /// Coefficient semiring of codeword polynomial [Self::Cw]
-    type CwR: ConstIntSemiring + ConstTranscribable + Named;
     /// Semiring of codeword elements, at least as wide as the evaluation ring
     type Cw: FixedSemiring
-        + Polynomial<Self::CwR>
+        + Polynomial<DEGREE>
+        + ConstCoeffBitWidth
         + ConstTranscribable
         + FromRef<Self::Eval>
         + Named
@@ -49,20 +46,27 @@ pub trait ZipTypes: Send + Sync {
         + for<'a> MulByScalar<&'a Self::Chal>;
     /// Ring of elements in the linear combination of codewords, at least as
     /// wide as the evaluation, codeword, and challenge rings.
-    type Comb: FixedRing + Polynomial<Self::CombR> + FromRef<Self::Eval> + FromRef<Self::Cw> + Named;
+    type Comb: FixedRing
+        + Polynomial<DEGREE>
+        + EvaluatablePolynomial<Self::Chal, Output = Self::CombR>
+        + FromRef<Self::Eval>
+        + FromRef<Self::Cw>
+        + Named;
 }
 
 /// Zip is a Polynomial Commitment Scheme (PCS) that supports committing to
 /// multilinear polynomials.
-pub struct ZipPlus<Zt: ZipTypes, Lc: LinearCode<Zt>>(PhantomData<(Zt, Lc)>);
+pub struct ZipPlus<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize>(
+    PhantomData<(Zt, Lc)>,
+);
 
-impl<Zt, Lc> ZipPlus<Zt, Lc>
+impl<Zt, Lc, const DEGREE: usize> ZipPlus<Zt, Lc, DEGREE>
 where
-    Zt: ZipTypes,
-    Lc: LinearCode<Zt>,
+    Zt: ZipTypes<DEGREE>,
+    Lc: LinearCode<Zt, DEGREE>,
 {
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn setup(poly_size: usize, linear_code: Lc) -> ZipPlusParams<Zt, Lc> {
+    pub fn setup(poly_size: usize, linear_code: Lc) -> ZipPlusParams<Zt, Lc, DEGREE> {
         assert!(poly_size.is_power_of_two());
         let num_vars = poly_size.ilog2() as usize;
         let num_rows = ((1 << num_vars) / linear_code.row_len()).next_power_of_two();
@@ -72,14 +76,16 @@ where
 
 /// Parameters for the Zip+ PCS.
 #[derive(Clone, Debug)]
-pub struct ZipPlusParams<Zt: ZipTypes, Lc: LinearCode<Zt>> {
+pub struct ZipPlusParams<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize> {
     pub num_vars: usize,
     pub num_rows: usize,
     pub linear_code: Lc,
     phantom_data: PhantomData<Zt>,
 }
 
-impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlusParams<Zt, Lc> {
+impl<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize>
+    ZipPlusParams<Zt, Lc, DEGREE>
+{
     pub fn new(num_vars: usize, num_rows: usize, linear_code: Lc) -> Self {
         Self {
             num_vars,
