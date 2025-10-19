@@ -6,7 +6,7 @@ use crate::{
     traits::{ConstTranscribable, FromRef, Named},
 };
 use crypto_primitives::{
-    ConstIntRing, ConstIntSemiring, DenseRowMatrix, FixedRing, FixedSemiring, PrimeField,
+    ConstIntRing, ConstIntSemiring, DenseRowMatrix, FixedSemiring, PrimeField,
     crypto_bigint_int::Int,
 };
 use num_traits::CheckedMul;
@@ -45,8 +45,8 @@ pub trait ZipTypes<const DEGREE: usize>: Send + Sync {
         + for<'a> MulByScalar<&'a Self::Chal>;
     /// Ring of elements in the linear combination of codewords, at least as
     /// wide as the evaluation, codeword, and challenge rings.
-    type Comb: FixedRing
-        + EvaluatablePolynomial<Self::Chal, Output = Self::CombR>
+    type Comb: FixedSemiring
+        + EvaluatablePolynomial<Self::Chal, Self::CombR>
         + FromRef<Self::Eval>
         + FromRef<Self::Cw>
         + Named;

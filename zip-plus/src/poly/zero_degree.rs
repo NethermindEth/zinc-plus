@@ -5,9 +5,7 @@ use crypto_primitives::crypto_bigint_int::Int;
 macro_rules! impl_zero_degree {
     ($($t:ty),+) => {
         $(
-            impl<T> EvaluatablePolynomial<T> for $t {
-                type Output = Self;
-
+            impl<T> EvaluatablePolynomial<T, Self> for $t {
                 fn evaluate_at_point(&self, point: &[T]) -> Result<Self, EvaluationError> {
                     if !point.is_empty() {
                         return Err(EvaluationError::WrongPointWidth {
@@ -29,9 +27,7 @@ macro_rules! impl_zero_degree {
 impl_zero_degree!(i8, i16, i32, i64, i128);
 impl_zero_degree!(u8, u16, u32, u64, u128);
 
-impl<T, const LIMBS: usize> EvaluatablePolynomial<T> for Int<LIMBS> {
-    type Output = Self;
-
+impl<T, const LIMBS: usize> EvaluatablePolynomial<T, Self> for Int<LIMBS> {
     fn evaluate_at_point(&self, point: &[T]) -> Result<Self, EvaluationError> {
         if !point.is_empty() {
             return Err(EvaluationError::WrongPointWidth {

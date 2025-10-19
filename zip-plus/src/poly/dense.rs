@@ -356,12 +356,10 @@ where
 // Zip-specific traits
 //
 
-impl<R: Semiring, C, const DEGREE: usize> EvaluatablePolynomial<C> for DensePolynomial<R, DEGREE>
+impl<R: Semiring, C, const DEGREE: usize> EvaluatablePolynomial<C, R> for DensePolynomial<R, DEGREE>
 where
     R: for<'a> MulByScalar<&'a C>,
 {
-    type Output = R;
-
     fn evaluate_at_point(&self, point: &[C]) -> Result<R, EvaluationError>
     where
         R: for<'a> MulByScalar<&'a C>,
