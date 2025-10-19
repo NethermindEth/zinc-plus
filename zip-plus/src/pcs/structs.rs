@@ -1,7 +1,7 @@
 use crate::{
     code::LinearCode,
     merkle::{MerkleTree, MtHash},
-    poly::{ConstCoeffBitWidth, EvaluatablePolynomial, Polynomial},
+    poly::{ConstCoeffBitWidth, EvaluatablePolynomial},
     primality::PrimalityTest,
     traits::{ConstTranscribable, FromRef, Named},
 };
@@ -16,11 +16,10 @@ pub trait ZipTypes<const DEGREE: usize>: Send + Sync {
     const NUM_COLUMN_OPENINGS: usize;
 
     /// Semiring of witness/polynomial evaluations on boolean hypercube
-    type Eval: FixedSemiring + Named + Polynomial<DEGREE> + ConstCoeffBitWidth;
+    type Eval: FixedSemiring + Named + ConstCoeffBitWidth;
 
     /// Semiring of codeword elements, at least as wide as the evaluation ring
     type Cw: FixedSemiring
-        + Polynomial<DEGREE>
         + ConstCoeffBitWidth
         + ConstTranscribable
         + FromRef<Self::Eval>
@@ -47,7 +46,6 @@ pub trait ZipTypes<const DEGREE: usize>: Send + Sync {
     /// Ring of elements in the linear combination of codewords, at least as
     /// wide as the evaluation, codeword, and challenge rings.
     type Comb: FixedRing
-        + Polynomial<DEGREE>
         + EvaluatablePolynomial<Self::Chal, Output = Self::CombR>
         + FromRef<Self::Eval>
         + FromRef<Self::Cw>

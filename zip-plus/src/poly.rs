@@ -4,10 +4,6 @@ pub mod zero_degree;
 
 use thiserror::Error;
 
-/// * `DEGREE_BOUND`: The (max) degree of the polynomial - one less than a
-///   number of coefficients.
-pub trait Polynomial<const DEGREE_BOUND: usize> {}
-
 pub trait EvaluatablePolynomial<S> {
     type Output;
 

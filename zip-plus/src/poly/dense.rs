@@ -1,4 +1,4 @@
-use super::{EvaluatablePolynomial, EvaluationError, Polynomial};
+use super::{EvaluatablePolynomial, EvaluationError};
 use crate::{
     pcs::structs::{MulByScalar, ProjectableToField},
     traits::{ConstTranscribable, FromRef, Named},
@@ -67,8 +67,6 @@ impl<R: Semiring + Zero, const DEGREE: usize> DensePolynomial<R, DEGREE> {
         result
     }
 }
-
-impl<R: Semiring, const DEGREE: usize> Polynomial<DEGREE> for DensePolynomial<R, DEGREE> {}
 
 impl<R: Semiring, C, const DEGREE: usize> EvaluatablePolynomial<C> for DensePolynomial<R, DEGREE>
 where

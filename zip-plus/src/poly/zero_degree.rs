@@ -1,12 +1,10 @@
-use super::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial};
+use super::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError};
 use crate::traits::ConstTranscribable;
 use crypto_primitives::{Semiring, crypto_bigint_int::Int};
 
 macro_rules! impl_zero_degree {
     ($($t:ty),+) => {
         $(
-            impl Polynomial<0> for $t {}
-
             impl<T> EvaluatablePolynomial<T> for $t {
                 type Output = Self;
 
@@ -26,8 +24,6 @@ macro_rules! impl_zero_degree {
 
 impl_zero_degree!(i8, i16, i32, i64, i128);
 impl_zero_degree!(u8, u16, u32, u64, u128);
-
-impl<const LIMBS: usize> Polynomial<0> for Int<LIMBS> {}
 
 impl<T, const LIMBS: usize> EvaluatablePolynomial<T> for Int<LIMBS> {
     type Output = Self;
