@@ -1,4 +1,4 @@
-use super::{EvaluatablePolynomial, EvaluationError};
+use super::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError};
 use crate::{
     pcs::structs::{MulByScalar, ProjectableToField},
     traits::{ConstTranscribable, FromRef, Named},
@@ -65,35 +65,6 @@ impl<R: Semiring + Zero, const DEGREE: usize> DensePolynomial<R, DEGREE> {
         result.push(self.coeff_0.clone());
         result.extend_from_slice(&self.coeffs);
         result
-    }
-}
-
-impl<R: Semiring, C, const DEGREE: usize> EvaluatablePolynomial<C> for DensePolynomial<R, DEGREE>
-where
-    R: for<'a> MulByScalar<&'a C>,
-{
-    type Output = R;
-
-    fn evaluate_at_point(&self, point: &[C]) -> Result<R, EvaluationError>
-    where
-        R: for<'a> MulByScalar<&'a C>,
-    {
-        if point.len() != DEGREE {
-            return Err(EvaluationError::WrongPointWidth {
-                expected: DEGREE,
-                actual: point.len(),
-            });
-        }
-
-        // A trivial implementation of a polynomial evaluation at a given point.
-        let mut result = self.coeff_0.clone();
-        for (coeff, scalar) in self.coeffs.iter().zip(point.iter()) {
-            let term = coeff
-                .mul_by_scalar(scalar)
-                .ok_or(EvaluationError::Overflow)?;
-            result = result.checked_add(&term).ok_or(EvaluationError::Overflow)?;
-        }
-        Ok(result)
     }
 }
 
@@ -384,6 +355,41 @@ where
 //
 // Zip-specific traits
 //
+
+impl<R: Semiring, C, const DEGREE: usize> EvaluatablePolynomial<C> for DensePolynomial<R, DEGREE>
+where
+    R: for<'a> MulByScalar<&'a C>,
+{
+    type Output = R;
+
+    fn evaluate_at_point(&self, point: &[C]) -> Result<R, EvaluationError>
+    where
+        R: for<'a> MulByScalar<&'a C>,
+    {
+        if point.len() != DEGREE {
+            return Err(EvaluationError::WrongPointWidth {
+                expected: DEGREE,
+                actual: point.len(),
+            });
+        }
+
+        // A trivial implementation of a polynomial evaluation at a given point.
+        let mut result = self.coeff_0.clone();
+        for (coeff, scalar) in self.coeffs.iter().zip(point.iter()) {
+            let term = coeff
+                .mul_by_scalar(scalar)
+                .ok_or(EvaluationError::Overflow)?;
+            result = result.checked_add(&term).ok_or(EvaluationError::Overflow)?;
+        }
+        Ok(result)
+    }
+}
+
+impl<R: Semiring + ConstTranscribable, const DEGREE: usize> ConstCoeffBitWidth
+    for DensePolynomial<R, DEGREE>
+{
+    const COEFF_BIT_WIDTH: usize = R::NUM_BITS;
+}
 
 impl<R: Semiring + Named, const DEGREE: usize> Named for DensePolynomial<R, DEGREE> {
     fn type_name() -> String {

@@ -1,6 +1,6 @@
 use super::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError};
 use crate::traits::ConstTranscribable;
-use crypto_primitives::{Semiring, crypto_bigint_int::Int};
+use crypto_primitives::crypto_bigint_int::Int;
 
 macro_rules! impl_zero_degree {
     ($($t:ty),+) => {
@@ -17,6 +17,10 @@ macro_rules! impl_zero_degree {
                     }
                     Ok(self.clone())
                 }
+            }
+
+            impl ConstCoeffBitWidth for $t {
+                const COEFF_BIT_WIDTH: usize = <$t>::BITS as usize;
             }
         )*
     };
@@ -39,6 +43,6 @@ impl<T, const LIMBS: usize> EvaluatablePolynomial<T> for Int<LIMBS> {
     }
 }
 
-impl<R: Semiring + ConstTranscribable> ConstCoeffBitWidth for R {
-    const COEFF_BIT_WIDTH: usize = R::NUM_BITS;
+impl<const LIMBS: usize> ConstCoeffBitWidth for Int<LIMBS> {
+    const COEFF_BIT_WIDTH: usize = Self::NUM_BITS;
 }
