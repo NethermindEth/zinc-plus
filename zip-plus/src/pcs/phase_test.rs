@@ -98,12 +98,12 @@ mod tests {
             test_utils::*,
         },
         poly::mle::DenseMultilinearExtension,
-        utils::WORD_FACTOR,
     };
+    use crypto_bigint::U64;
     use crypto_primitives::crypto_bigint_int::Int;
     use num_traits::ConstOne;
 
-    const INT_LIMBS: usize = WORD_FACTOR;
+    const INT_LIMBS: usize = U64::LIMBS;
 
     const N: usize = INT_LIMBS;
     const K: usize = INT_LIMBS * 4;

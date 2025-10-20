@@ -182,6 +182,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crypto_bigint::U64;
     use crypto_primitives::crypto_bigint_int::Int;
     use num_traits::Zero;
 
@@ -191,7 +192,7 @@ mod tests {
     const REPETITION_FACTOR: usize = 4;
 
     // Define common types for testing
-    const INT_LIMBS: usize = 1;
+    const INT_LIMBS: usize = U64::LIMBS;
 
     const N: usize = INT_LIMBS;
     const K: usize = INT_LIMBS * 4;

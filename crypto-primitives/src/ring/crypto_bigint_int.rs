@@ -1,10 +1,16 @@
 use super::*;
 use core::{
-    fmt::{Debug, Display, Formatter, Result as FmtResult},
+    cmp::Ordering,
+    fmt::{Debug, Display, Formatter, LowerHex, Result as FmtResult, UpperHex},
     iter::{Product, Sum},
     ops::{Add, AddAssign, Mul, MulAssign, Rem, RemAssign, Shl, Shr, Sub, SubAssign},
 };
-use crypto_bigint::{CheckedMul as CryptoCheckedMul, CheckedSub as CryptoCheckedSub, Word};
+use crypto_bigint::{
+    CheckedMul as CryptoCheckedMul, CheckedSub as CryptoCheckedSub, Word,
+    subtle::{
+        Choice, ConditionallySelectable, ConstantTimeEq, ConstantTimeGreater, ConstantTimeLess,
+    },
+};
 use num_traits::{
     CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedSub, ConstOne, ConstZero, One, Pow, Zero,
 };
@@ -47,6 +53,11 @@ impl<const LIMBS: usize> Int<LIMBS> {
     pub const fn resize<const T: usize>(&self) -> Int<T> {
         Int::<T>(self.0.resize())
     }
+
+    /// See [crypto_bigint::Int::cmp_vartime]
+    pub const fn cmp_vartime(&self, rhs: &Self) -> Ordering {
+        self.0.cmp_vartime(&rhs.0)
+    }
 }
 
 macro_rules! define_consts {
@@ -88,6 +99,18 @@ impl<const LIMBS: usize> Default for Int<LIMBS> {
     #[inline(always)]
     fn default() -> Self {
         Self::ZERO
+    }
+}
+
+impl<const LIMBS: usize> LowerHex for Int<LIMBS> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        LowerHex::fmt(&self.0, f)
+    }
+}
+
+impl<const LIMBS: usize> UpperHex for Int<LIMBS> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        UpperHex::fmt(&self.0, f)
     }
 }
 
@@ -222,6 +245,17 @@ impl<const LIMBS: usize> Pow<u32> for Int<LIMBS> {
 // Checked arithmetic operations
 //
 
+impl<const LIMBS: usize> CheckedNeg for Int<LIMBS> {
+    fn checked_neg(&self) -> Option<Self> {
+        let result = self.0.checked_neg();
+        if result.is_some().into() {
+            Some(Self(result.unwrap()))
+        } else {
+            None
+        }
+    }
+}
+
 macro_rules! impl_checked_op {
     ($trait_name:tt, $trait_op:tt) => {
         impl<const LIMBS: usize> $trait_name for Int<LIMBS> {
@@ -237,17 +271,6 @@ macro_rules! impl_checked_op {
 impl_checked_op!(CheckedAdd, checked_add);
 impl_checked_op!(CheckedSub, checked_sub);
 impl_checked_op!(CheckedMul, checked_mul);
-
-impl<const LIMBS: usize> CheckedNeg for Int<LIMBS> {
-    fn checked_neg(&self) -> Option<Self> {
-        let result = self.0.checked_neg();
-        if result.is_some().into() {
-            Some(Self(result.unwrap()))
-        } else {
-            None
-        }
-    }
-}
 
 impl<const LIMBS: usize> CheckedRem for Int<LIMBS> {
     #[inline(always)]
@@ -410,7 +433,7 @@ impl<const LIMBS: usize> Ring for Int<LIMBS> {}
 impl<const LIMBS: usize> IntRing for Int<LIMBS> {}
 
 //
-// Traits from crypto_bigint
+// RNG
 //
 
 #[cfg(feature = "rand")]
@@ -422,22 +445,90 @@ impl<const LIMBS: usize> Distribution<Int<LIMBS>> for StandardUniform {
 
 #[cfg(feature = "rand")]
 impl<const LIMBS: usize> crypto_bigint::Random for Int<LIMBS> {
-    fn random<R: RngCore + ?Sized>(rng: &mut R) -> Self {
-        Self(crypto_bigint::Int::random(rng))
-    }
-
     fn try_random<R: TryRngCore + ?Sized>(rng: &mut R) -> Result<Self, R::Error> {
         crypto_bigint::Int::try_random(rng).map(Self)
     }
 }
 
+//
+// Serialization and Deserialization
+//
+
+#[cfg(feature = "serde")]
+impl<'de, const LIMBS: usize> serde::Deserialize<'de> for Int<LIMBS>
+where
+    crypto_bigint::Int<LIMBS>: crypto_bigint::Encoding,
+{
+    #[inline(always)]
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        crypto_bigint::Int::<LIMBS>::deserialize(deserializer).map(Self)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<const LIMBS: usize> serde::Serialize for Int<LIMBS>
+where
+    crypto_bigint::Int<LIMBS>: crypto_bigint::Encoding,
+{
+    #[inline(always)]
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+//
+// Traits from crypto_bigint
+//
+
+impl<const LIMBS: usize> ConstantTimeEq for Int<LIMBS> {
+    #[inline]
+    fn ct_eq(&self, other: &Self) -> Choice {
+        ConstantTimeEq::ct_eq(&self.0, &other.0)
+    }
+}
+
+impl<const LIMBS: usize> ConstantTimeGreater for Int<LIMBS> {
+    #[inline]
+    fn ct_gt(&self, other: &Self) -> Choice {
+        ConstantTimeGreater::ct_gt(&self.0, &other.0)
+    }
+}
+
+impl<const LIMBS: usize> ConstantTimeLess for Int<LIMBS> {
+    #[inline]
+    fn ct_lt(&self, other: &Self) -> Choice {
+        ConstantTimeLess::ct_lt(&self.0, &other.0)
+    }
+}
+
+impl<const LIMBS: usize> ConditionallySelectable for Int<LIMBS> {
+    fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
+        ConditionallySelectable::conditional_select(&a.0, &b.0, choice).into()
+    }
+}
+
+impl<const LIMBS: usize> crypto_bigint::Bounded for Int<LIMBS> {
+    const BITS: u32 = Self::BITS;
+    const BYTES: usize = Self::BYTES;
+}
+
+impl<const LIMBS: usize> crypto_bigint::Constants for Int<LIMBS> {
+    const MAX: Self = Self::MAX;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
+    use alloc::{format, vec::Vec};
 
     #[test]
-    fn test_int_basic_operations() {
+    fn basic_operations() {
         // Test with 4 limbs (256-bit integers)
         let a = Int::<4>::from(10_i64);
         let b = Int::<4>::from(5_i64);
@@ -478,28 +569,28 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "`shift` within the bit size of the integer")]
-    fn test_shl_panics_on_overflow() {
+    fn shl_panics_on_overflow() {
         let x = Int::<1>::from(0x0001_i64);
         let _ = x << 64;
     }
 
     #[test]
-    fn test_int_checked_operations() {
+    fn checked_operations() {
         let a = Int::<4>::from(10_i64);
         let b = Int::<4>::from(5_i64);
         let zero = Int::<4>::ZERO;
 
         // Test checked_add
         let c = a.checked_add(&b).unwrap();
-        assert_eq!(c, Int::<4>::from(15i64));
+        assert_eq!(c, Int::<4>::from(15_i64));
 
         // Test checked_sub
         let d = a.checked_sub(&b).unwrap();
-        assert_eq!(d, Int::<4>::from(5i64));
+        assert_eq!(d, Int::<4>::from(5_i64));
 
         // Test checked_mul
         let e = a.checked_mul(&b).unwrap();
-        assert_eq!(e, Int::<4>::from(50i64));
+        assert_eq!(e, Int::<4>::from(50_i64));
 
         // Test checked_rem
         let f = a.checked_rem(&b).unwrap();
@@ -511,21 +602,21 @@ mod tests {
 
     #[allow(clippy::op_ref)]
     #[test]
-    fn test_int_reference_operations() {
-        let a = Int::<4>::from(10i64);
-        let b = Int::<4>::from(5i64);
+    fn reference_operations() {
+        let a = Int::<4>::from(10_i64);
+        let b = Int::<4>::from(5_i64);
 
         // Test reference-based addition
         let c = a + &b;
-        assert_eq!(c, Int::<4>::from(15i64));
+        assert_eq!(c, Int::<4>::from(15_i64));
 
         // Test reference-based subtraction
         let d = a - &b;
-        assert_eq!(d, Int::<4>::from(5i64));
+        assert_eq!(d, Int::<4>::from(5_i64));
 
         // Test reference-based multiplication
         let e = a * &b;
-        assert_eq!(e, Int::<4>::from(50i64));
+        assert_eq!(e, Int::<4>::from(50_i64));
 
         // Test reference-based remainder
         let f = a % &b;
@@ -533,26 +624,26 @@ mod tests {
     }
 
     #[test]
-    fn test_int_conversions() {
+    fn conversions() {
         // Test From<crypto_bigint::Int> for Int
-        let original = crypto_bigint::Int::<4>::from(123i64);
+        let original = crypto_bigint::Int::<4>::from(123_i64);
         let wrapped: Int<4> = original.into();
         assert_eq!(wrapped.0, original);
 
         // Test From<Int> for crypto_bigint::Int
-        let wrapped = Int::<4>::from(456i64);
+        let wrapped = Int::<4>::from(456_i64);
         let unwrapped: crypto_bigint::Int<4> = wrapped.into();
-        assert_eq!(unwrapped, crypto_bigint::Int::from(456i64));
+        assert_eq!(unwrapped, crypto_bigint::Int::from(456_i64));
 
         // Test conversion methods
-        let value = crypto_bigint::Int::<4>::from(789i64);
+        let value = crypto_bigint::Int::<4>::from(789_i64);
         let wrapped = Int::new(value);
         assert_eq!(wrapped.inner(), &value);
         assert_eq!(wrapped.into_inner(), value);
     }
 
     #[test]
-    fn test_pow_operation() {
+    fn pow_operation() {
         // Test basic exponentiation
         let base = Int::<4>::from(2_i64);
 
@@ -585,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn test_checked_neg() {
+    fn checked_neg() {
         // Test with positive number
         let a = Int::<4>::from(10_i64);
         let neg_a = a.checked_neg().unwrap();
@@ -607,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rem_assign_operations() {
+    fn rem_assign_operations() {
         // Test RemAssign with owned value
         let mut a = Int::<4>::from(17_i64);
         let b = Int::<4>::from(5_i64);
@@ -629,14 +720,14 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "division by zero")]
-    fn test_rem_assign_panics_on_zero_divisor() {
+    fn rem_assign_panics_on_zero_divisor() {
         let mut a = Int::<4>::from(10_i64);
         let zero = Int::<4>::zero();
         a %= zero;
     }
 
     #[test]
-    fn test_resize_method() {
+    fn resize_method() {
         // Test resizing to same size
         let a = Int::<4>::from(0x12345678_i64);
         let resized_same = a.resize::<4>();
@@ -670,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_words() {
+    fn from_words() {
         // Test with single limb
         let words = [0x1234567890ABCDEF];
         let a = Int::<1>::from_words(words);
@@ -691,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregate_operations() {
+    fn aggregate_operations() {
         // Test Sum trait
         let values: Vec<Int<4>> = [1_i64, 2_i64, 3_i64].into_iter().map(Int::from).collect();
         let sum: Int<4> = values.iter().sum();
@@ -718,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_primitive() {
+    fn from_primitive() {
         // Test from_i8
         let a = Int::<4>::from_i8(42);
         assert_eq!(a, Int::<4>::from(42_i64));
@@ -757,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_primitive_edge_cases() {
+    fn from_primitive_edge_cases() {
         for value in [i32::MIN, i32::MAX] {
             let i = Int::<1>::from(value);
             let j = Int::<2>::from(value);
@@ -779,13 +870,13 @@ mod tests {
 
     #[should_panic]
     #[test]
-    fn test_from_too_large_primitive() {
+    fn from_too_large_primitive() {
         // Test from_i128
         let _ = Int::<1>::from(i128::MAX);
     }
 
     #[test]
-    fn test_edge_cases() {
+    fn edge_cases() {
         // Test operations with MAX values
         let max = Int::<4>::MAX;
         let one = Int::<4>::one();
@@ -824,5 +915,180 @@ mod tests {
         // 2^100 / 2 = 2^99
         let half_power = large_power >> 1;
         assert_eq!(half_power << 1, large_power);
+    }
+
+    #[test]
+    fn assign_operations() {
+        // Test AddAssign
+        let mut a = Int::<4>::from(10_i64);
+        a += Int::<4>::from(5_i64);
+        assert_eq!(a, Int::<4>::from(15_i64));
+
+        let mut b = Int::<4>::from(20_i64);
+        b += &Int::<4>::from(3_i64);
+        assert_eq!(b, Int::<4>::from(23_i64));
+
+        // Test SubAssign
+        let mut c = Int::<4>::from(10_i64);
+        c -= Int::<4>::from(3_i64);
+        assert_eq!(c, Int::<4>::from(7_i64));
+
+        let mut d = Int::<4>::from(50_i64);
+        d -= &Int::<4>::from(25_i64);
+        assert_eq!(d, Int::<4>::from(25_i64));
+
+        // Test MulAssign
+        let mut e = Int::<4>::from(7_i64);
+        e *= Int::<4>::from(6_i64);
+        assert_eq!(e, Int::<4>::from(42_i64));
+
+        let mut f = Int::<4>::from(3_i64);
+        f *= &Int::<4>::from(4_i64);
+        assert_eq!(f, Int::<4>::from(12_i64));
+    }
+
+    #[test]
+    fn formatting() {
+        #[cfg(target_pointer_width = "64")]
+        const WORD_FACTOR: usize = 1;
+        #[cfg(target_pointer_width = "32")]
+        const WORD_FACTOR: usize = 2;
+
+        let a = Int::<WORD_FACTOR>::from(255_i64);
+        let b = Int::<WORD_FACTOR>::from(-1_i64);
+
+        // Test Debug
+        assert_eq!(format!("{:?}", a), "Int(0x00000000000000FF)");
+        assert_eq!(format!("{:?}", b), "Int(0xFFFFFFFFFFFFFFFF)");
+
+        // Test Display
+        assert_eq!(format!("{}", a), "00000000000000FF");
+        assert_eq!(format!("{}", b), "FFFFFFFFFFFFFFFF");
+
+        // Test LowerHex
+        assert_eq!(format!("{:x}", a), "00000000000000ff");
+        assert_eq!(format!("{:x}", b), "ffffffffffffffff");
+
+        // Test UpperHex
+        assert_eq!(format!("{:X}", a), "00000000000000FF");
+        assert_eq!(format!("{:X}", b), "FFFFFFFFFFFFFFFF");
+    }
+
+    #[test]
+    fn default_trait() {
+        let default_val: Int<4> = Default::default();
+        assert_eq!(default_val, Int::<4>::ZERO);
+        assert!(default_val.is_zero());
+    }
+
+    #[test]
+    fn constants() {
+        // Test MINUS_ONE
+        assert_eq!(Int::<4>::MINUS_ONE + Int::<4>::ONE, Int::<4>::ZERO);
+
+        // Test MIN and MAX
+        assert!(Int::<4>::MIN < Int::<4>::ZERO);
+        assert!(Int::<4>::MAX > Int::<4>::ZERO);
+        assert!(Int::<4>::MIN < Int::<4>::MAX);
+
+        // Test BITS, BYTES, LIMBS
+        assert_eq!(Int::<4>::BITS, 256);
+        assert_eq!(Int::<4>::BYTES, 32);
+        assert_eq!(Int::<4>::LIMBS, 4);
+
+        assert_eq!(Int::<2>::BITS, 128);
+        assert_eq!(Int::<2>::BYTES, 16);
+        assert_eq!(Int::<2>::LIMBS, 2);
+    }
+
+    #[test]
+    fn cmp_vartime() {
+        let a = Int::<4>::from(10_i64);
+        let b = Int::<4>::from(20_i64);
+        let c = Int::<4>::from(10_i64);
+
+        assert_eq!(a.cmp_vartime(&b), Ordering::Less);
+        assert_eq!(b.cmp_vartime(&a), Ordering::Greater);
+        assert_eq!(a.cmp_vartime(&c), Ordering::Equal);
+    }
+
+    #[test]
+    fn cross_size_conversions() {
+        // Test From<&Int<LIMBS>> for Int<LIMBS2>
+        let a = Int::<2>::from(12345_i64);
+        let b: Int<4> = (&a).into();
+        assert_eq!(b, Int::<4>::from(12345_i64));
+
+        // Test From<&crypto_bigint::Int<LIMBS>> for Int<LIMBS2>
+        let c = crypto_bigint::Int::<2>::from(67890_i64);
+        let d: Int<4> = (&c).into();
+        assert_eq!(d, Int::<4>::from(67890_i64));
+
+        // Test reference conversions from primitives
+        let val = 42_i32;
+        let e = Int::<4>::from(&val);
+        assert_eq!(e, Int::<4>::from(42_i64));
+    }
+
+    #[test]
+    fn constant_time_traits() {
+        use crypto_bigint::subtle::Choice;
+
+        let a = Int::<4>::from(10_i64);
+        let b = Int::<4>::from(20_i64);
+        let c = Int::<4>::from(10_i64);
+
+        // Test ConstantTimeEq
+        assert_eq!(a.ct_eq(&c).unwrap_u8(), 1);
+        assert_eq!(a.ct_eq(&b).unwrap_u8(), 0);
+
+        // Test ConstantTimeGreater
+        assert_eq!(b.ct_gt(&a).unwrap_u8(), 1);
+        assert_eq!(a.ct_gt(&b).unwrap_u8(), 0);
+
+        // Test ConstantTimeLess
+        assert_eq!(a.ct_lt(&b).unwrap_u8(), 1);
+        assert_eq!(b.ct_lt(&a).unwrap_u8(), 0);
+
+        // Test ConditionallySelectable
+        let selected_true = Int::<4>::conditional_select(&a, &b, Choice::from(0));
+        assert_eq!(selected_true, a);
+
+        let selected_false = Int::<4>::conditional_select(&a, &b, Choice::from(1));
+        assert_eq!(selected_false, b);
+    }
+
+    #[test]
+    fn crypto_bigint_traits() {
+        use crypto_bigint::{Bounded, Constants};
+
+        // Test Bounded trait
+        assert_eq!(<Int<4> as Bounded>::BITS, 256);
+        assert_eq!(<Int<4> as Bounded>::BYTES, 32);
+
+        // Test Constants trait
+        assert_eq!(<Int<4> as Constants>::MAX, Int::<4>::MAX);
+    }
+
+    #[cfg(feature = "rand")]
+    #[test]
+    fn random_generation() {
+        use rand::prelude::*;
+
+        // Use a seeded RNG for reproducibility
+        let mut rng = StdRng::seed_from_u64(1);
+
+        // Test crypto_bigint::Random trait
+        let random1: Int<4> = crypto_bigint::Random::random(&mut rng);
+        let random2: Int<4> = crypto_bigint::Random::random(&mut rng);
+
+        // Random values should be different
+        assert_ne!(random1, random2);
+
+        // Test Distribution trait
+        let random3: Int<4> = rng.random();
+        let random4: Int<4> = rng.random();
+
+        assert_ne!(random3, random4);
     }
 }

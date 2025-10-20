@@ -7,9 +7,9 @@ use rand::{rngs::StdRng, seq::SliceRandom};
 use rand_core::SeedableRng;
 
 #[cfg(target_pointer_width = "64")]
-pub const WORD_FACTOR: usize = 1;
+const WORD_FACTOR: usize = 1;
 #[cfg(target_pointer_width = "32")]
-pub const WORD_FACTOR: usize = 2;
+const WORD_FACTOR: usize = 2;
 
 #[macro_export]
 macro_rules! add {
