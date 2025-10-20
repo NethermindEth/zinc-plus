@@ -1,5 +1,7 @@
-use crate::traits::{Transcribable, Transcript};
-use ark_std::vec::Vec;
+use crate::{
+    primality::PrimalityTest,
+    traits::{ConstTranscribable, SimpleSemiring, Transcribable, Transcript},
+};
 use crypto_primitives::PrimeField;
 use sha3::{Digest, Keccak256};
 
@@ -31,20 +33,20 @@ impl KeccakTranscript {
     ///
     /// Note that this does NOT update the internal state of the hasher
     #[allow(clippy::arithmetic_side_effects)]
-    fn get_random_bytes(&mut self, length: usize) -> Vec<u8> {
-        let mut result = Vec::with_capacity(length);
+    fn fill_with_random_bytes(&mut self, buf: &mut [u8]) {
         let mut counter = 0;
-        while result.len() < length {
+        let mut filled_length = 0;
+        while filled_length < buf.len() {
             let mut temp_hasher = self.hasher.clone();
             temp_hasher.update(i32::to_le_bytes(counter));
             let hash = temp_hasher.finalize();
-            result.extend_from_slice(&hash);
+            let start = filled_length;
+            let end = (filled_length + hash.len()).min(buf.len());
+            buf[start..end].copy_from_slice(&hash[0..(end - start)]);
 
+            filled_length += hash.len();
             counter += 1;
         }
-
-        result.truncate(length);
-        result
     }
 
     /// Absorbs arbitrary bytes into the transcript.
@@ -56,42 +58,53 @@ impl KeccakTranscript {
     /// Absorbs a field element into the transcript.
     /// Delegates to the field element's implementation of
     /// absorb_into_transcript.
-    pub fn absorb_random_field<F>(&mut self, v: &F)
+    pub fn absorb_random_field<F>(&mut self, v: &F, buf: &mut [u8])
     where
         F: PrimeField,
         F::Inner: Transcribable,
     {
-        let mut buf = vec![0; F::Inner::NUM_BYTES];
         self.absorb(&[0x3]);
-        F::MODULUS.write_transcription_bytes(&mut buf);
-        self.absorb(&buf);
+        v.modulus().write_transcription_bytes(buf);
+        self.absorb(buf);
         self.absorb(&[0x5]);
 
         self.absorb(&[0x1]);
-        v.inner().write_transcription_bytes(&mut buf);
-        self.absorb(&buf);
+        v.inner().write_transcription_bytes(buf);
+        self.absorb(buf);
         self.absorb(&[0x3])
     }
 
-    /// Absorbs a slice of field elements into the transcript.
-    /// Processes each field element in the slice sequentially.
-    pub fn absorb_slice<F>(&mut self, slice: &[F])
-    where
-        F: PrimeField,
-        F::Inner: Transcribable,
-    {
-        for field_element in slice.iter() {
-            self.absorb_random_field(field_element);
-        }
+    fn gen_random<R: ConstTranscribable>(&mut self, buf: &mut [u8]) -> R {
+        self.fill_with_random_bytes(buf);
+        self.absorb(buf);
+        R::read_transcription_bytes(buf)
     }
 }
 
 impl Transcript for KeccakTranscript {
-    fn get_challenge<T: Transcribable>(&mut self) -> T {
-        let challenge = self.get_random_bytes(T::NUM_BYTES);
+    fn get_challenge<T: ConstTranscribable>(&mut self) -> T {
+        let mut buf = vec![0u8; T::NUM_BYTES];
+        self.fill_with_random_bytes(&mut buf);
         self.hasher.update([0x12]);
-        self.hasher.update(&challenge);
+        self.hasher.update(&mut buf);
         self.hasher.update([0x34]);
-        T::read_transcription_bytes(&challenge)
+        T::read_transcription_bytes(&buf)
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn get_prime<R: SimpleSemiring + ConstTranscribable, T: PrimalityTest<R>>(&mut self) -> R {
+        let buf = &mut vec![0u8; R::NUM_BYTES];
+        loop {
+            let mut prime_candidate: R = self.gen_random(buf);
+            if prime_candidate.is_zero() {
+                continue;
+            }
+            if prime_candidate.is_even() {
+                prime_candidate -= R::ONE;
+            }
+            if T::is_probably_prime(&prime_candidate) {
+                return prime_candidate;
+            }
+        }
     }
 }

@@ -18,7 +18,7 @@ ark-serialize = "0.5"
 
 itertools = "0.14"
 thiserror = "2.0"
-crypto-bigint = { version = "0.7.0-rc.6", features = ["zeroize"] }
+crypto-bigint = { version = "0.7.0-rc.8", features = ["zeroize"] }
 displaydoc = "0.2"
 sha3 = "0.10"
 num-traits = "0.2"
@@ -28,6 +28,7 @@ rayon = { version = "1.10", optional = true }
 blake3 = "1.8.2"
 transpose = "0.2.3"
 uninit = "0.6.2"
+crypto-primes = "0.7.0-pre.3"
 
 # P3
 p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3.git", rev = "5ebf8e4" }

@@ -11,7 +11,6 @@ use crate::{
 };
 use ark_std::log2;
 use crypto_primitives::{Matrix, Ring};
-use num_traits::Zero;
 use rand::{distr::StandardUniform, prelude::*};
 use rand_core::RngCore;
 
@@ -24,17 +23,24 @@ pub struct DenseMultilinearExtension<F> {
 }
 
 impl<R: Ring> DenseMultilinearExtension<R> {
-    pub fn from_evaluations_slice(num_vars: usize, evaluations: &[R]) -> Self {
-        Self::from_evaluations_vec(num_vars, evaluations.to_vec())
+    pub fn zero_vars(evaluation: R) -> Self {
+        Self {
+            evaluations: vec![evaluation],
+            num_vars: 0,
+        }
     }
 
-    pub fn evaluate<S>(&self, point: &[S]) -> Result<R, EvaluationError>
+    pub fn from_evaluations_slice(num_vars: usize, evaluations: &[R], zero: R) -> Self {
+        Self::from_evaluations_vec(num_vars, evaluations.to_vec(), zero)
+    }
+
+    pub fn evaluate<S>(&self, point: &[S], zero: R) -> Result<R, EvaluationError>
     where
         R: for<'a> MulByScalar<&'a S>,
     {
         if point.len() == self.num_vars {
             Ok(self
-                .fixed_variables(point)
+                .fixed_variables(point, zero)
                 .evaluations
                 .into_iter()
                 .next()
@@ -47,7 +53,7 @@ impl<R: Ring> DenseMultilinearExtension<R> {
         }
     }
 
-    pub fn from_evaluations_vec(num_vars: usize, evaluations: Vec<R>) -> Self {
+    pub fn from_evaluations_vec(num_vars: usize, evaluations: Vec<R>, zero: R) -> Self {
         // assert that the number of variables matches the size of evaluations
         assert!(
             evaluations.len() <= 1 << num_vars,
@@ -57,7 +63,7 @@ impl<R: Ring> DenseMultilinearExtension<R> {
 
         if evaluations.len() != 1 << num_vars {
             let mut evaluations = evaluations;
-            evaluations.resize(1 << num_vars, R::zero());
+            evaluations.resize(1 << num_vars, zero);
             return Self {
                 num_vars,
                 evaluations,
@@ -73,7 +79,7 @@ impl<R: Ring> DenseMultilinearExtension<R> {
     /// Returns the dense MLE from the given matrix, without modifying the
     /// original matrix.
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn from_matrix<M: Matrix<R>>(matrix: &M) -> Self {
+    pub fn from_matrix<M: Matrix<R>>(matrix: &M, zero: R) -> Self {
         let n_vars: usize = (log2(matrix.num_rows()) + log2(matrix.num_cols())) as usize; // n_vars = s + s'
 
         // Matrices might need to get padded before turned into an MLE
@@ -81,7 +87,7 @@ impl<R: Ring> DenseMultilinearExtension<R> {
         let padded_cols = matrix.num_cols().next_power_of_two();
 
         // build dense vector representing the sparse padded matrix
-        let mut v = vec![R::zero(); padded_rows * padded_cols];
+        let mut v = vec![zero.clone(); padded_rows * padded_cols];
 
         for (row_i, row) in matrix.rows().enumerate() {
             for (col_i, val) in row {
@@ -90,23 +96,23 @@ impl<R: Ring> DenseMultilinearExtension<R> {
         }
 
         // convert the dense vector into a mle
-        Self::from_slice(n_vars, &v)
+        Self::from_slice(n_vars, &v, zero)
     }
 
     /// Takes n_vars and a dense slice and returns its dense MLE.
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn from_slice(n_vars: usize, v: &[R]) -> Self {
+    pub fn from_slice(n_vars: usize, v: &[R], zero: R) -> Self {
         let v_padded: Vec<R> = if v.len() != (1 << n_vars) {
             // pad to 2^n_vars
             [
                 v.to_owned(),
-                ark_std::iter::repeat_n(R::zero(), (1 << n_vars) - v.len()).collect(),
+                ark_std::iter::repeat_n(zero.clone(), (1 << n_vars) - v.len()).collect(),
             ]
             .concat()
         } else {
             v.to_owned()
         };
-        DenseMultilinearExtension::from_evaluations_vec(n_vars, v_padded)
+        DenseMultilinearExtension::from_evaluations_vec(n_vars, v_padded, zero)
     }
 
     fn unary<G>(&mut self, f: G)
@@ -132,7 +138,7 @@ where
     R: Ring,
 {
     #[allow(clippy::arithmetic_side_effects)]
-    fn fix_variables<S>(&mut self, partial_point: &[S])
+    fn fix_variables<S>(&mut self, partial_point: &[S], zero: R)
     where
         R: for<'a> MulByScalar<&'a S>,
     {
@@ -152,7 +158,7 @@ where
                 let right = &poly[2 * b + 1];
                 // a = f(1) - f(0)
                 let a = sub!(right, &left);
-                if !a.is_zero() {
+                if a != zero {
                     // poly[b] = f(0) + r * a
                     let ar = a.mul_by_scalar(r).expect("Multiplication overflow");
                     poly[b] = add!(left, &ar);
@@ -166,12 +172,12 @@ where
         self.num_vars = sub!(nv, dim);
     }
 
-    fn fixed_variables<S>(&self, partial_point: &[S]) -> Self
+    fn fixed_variables<S>(&self, partial_point: &[S], zero: R) -> Self
     where
         R: for<'a> MulByScalar<&'a S>,
     {
         let mut res = self.clone();
-        res.fix_variables(partial_point);
+        res.fix_variables(partial_point, zero);
         res
     }
 }
@@ -181,10 +187,11 @@ where
     R: Ring,
     StandardUniform: Distribution<R>,
 {
-    fn rand<Rng: RngCore + ?Sized>(num_vars: usize, rng: &mut Rng) -> Self {
+    fn rand<Rng: RngCore + ?Sized>(num_vars: usize, rng: &mut Rng, zero: R) -> Self {
         Self::from_evaluations_vec(
             num_vars,
             (0..1 << num_vars).map(|_| rng.random::<R>()).collect(),
+            zero,
         )
     }
 }
@@ -200,19 +207,6 @@ impl<T> Index<usize> for DenseMultilinearExtension<T> {
 impl<T> IndexMut<usize> for DenseMultilinearExtension<T> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         &mut self.evaluations[index]
-    }
-}
-
-impl<R: Ring> Zero for DenseMultilinearExtension<R> {
-    fn zero() -> Self {
-        Self {
-            num_vars: 0,
-            evaluations: vec![R::zero()],
-        }
-    }
-
-    fn is_zero(&self) -> bool {
-        self.num_vars == 0 && self.evaluations[0].is_zero()
     }
 }
 
@@ -313,205 +307,314 @@ impl<R: Ring> AddAssign<(R, &Self)> for DenseMultilinearExtension<R> {
 mod tests {
     use super::*;
     use crate::{
-        pcs::utils::{build_eq_x_r, build_eq_x_r_vec},
+        pcs::{
+            test_utils::get_dyn_config,
+            utils::{build_eq_x_r, build_eq_x_r_vec},
+        },
         poly::mle::MultilinearExtension,
     };
-    use crypto_bigint::{U128, const_monty_params};
-    use crypto_primitives::{DenseRowMatrix, crypto_bigint_const_monty::ConstMontyField};
-    use num_traits::{ConstZero, One, Zero};
+    use crypto_primitives::{
+        DenseRowMatrix, IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
+    };
     use proptest::prelude::*;
 
-    const_monty_params!(ModP, U128, "0076F668F4274572E39A3EA8285319B5");
-    type F = ConstMontyField<ModP, { U128::LIMBS }>;
+    const MODULUS: &str = "0076F668F4274572E39A3EA8285319B5";
+    type F = BoxedMontyField;
 
-    fn any_f() -> impl Strategy<Value = F> {
-        any::<u128>().prop_map(F::from)
+    fn any_f(cfg: <F as PrimeField>::Config) -> impl Strategy<Value = F> + 'static {
+        any::<u128>().prop_map(move |v| v.into_with_cfg(&cfg))
     }
 
     fn any_dme() -> impl Strategy<Value = DenseMultilinearExtension<F>> {
-        (0usize..=5).prop_flat_map(|n| {
+        let cfg = get_dyn_config(MODULUS);
+        (0usize..=5).prop_flat_map(move |n| {
             let len = 1usize << n;
-            prop::collection::vec(any_f(), len)
-                .prop_map(move |evals| DenseMultilinearExtension::from_evaluations_vec(n, evals))
+            let cfg = cfg.clone();
+            prop::collection::vec(any_f(cfg.clone()), len).prop_map(move |evals| {
+                DenseMultilinearExtension::from_evaluations_vec(n, evals, F::zero_with_cfg(&cfg))
+            })
         })
     }
 
     #[test]
     fn test_build_eq_x_r_vec_basic() {
-        let r = [F::from(3u64)];
-        let evals = build_eq_x_r_vec(&r).unwrap();
-        assert_eq!(evals, vec![F::one() - r[0], r[0]]);
+        let cfg = get_dyn_config(MODULUS);
+        let r: [F; _] = [3_u64.into_with_cfg(&cfg)];
+        let evals = build_eq_x_r_vec(&r, &cfg).unwrap();
+        assert_eq!(
+            evals,
+            vec![F::one_with_cfg(&cfg) - r[0].clone(), r[0].clone()]
+        );
     }
 
     #[test]
     fn test_build_eq_x_r_vec_two_vars() {
-        let r = [F::from(2u64), F::from(5u64)];
-        let evals = build_eq_x_r_vec(&r).unwrap();
-        let e00 = (F::one() - r[0]) * (F::one() - r[1]);
-        let e01 = r[0] * (F::one() - r[1]);
-        let e10 = (F::one() - r[0]) * r[1];
-        let e11 = r[0] * r[1];
+        let cfg = get_dyn_config(MODULUS);
+        let r: [F; _] = [2u64.into_with_cfg(&cfg), 5u64.into_with_cfg(&cfg)];
+        let evals = build_eq_x_r_vec(&r, &cfg).unwrap();
+        let e00 = (F::one_with_cfg(&cfg) - r[0].clone()) * (F::one_with_cfg(&cfg) - r[1].clone());
+        let e01 = r[0].clone() * (F::one_with_cfg(&cfg) - r[1].clone());
+        let e10 = (F::one_with_cfg(&cfg) - r[0].clone()) * r[1].clone();
+        let e11 = r[0].clone() * r[1].clone();
         assert_eq!(evals, vec![e00, e01, e10, e11]);
     }
 
     #[test]
     fn test_build_eq_x_r_error_on_empty() {
+        let cfg = get_dyn_config(MODULUS);
         let r: [F; 0] = [];
-        let err = build_eq_x_r_vec(&r).unwrap_err();
+        let err = build_eq_x_r_vec(&r, &cfg).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("Invalid parameters"));
     }
 
     #[test]
     fn test_build_eq_x_r_mle_properties() {
-        let r = [F::from(7u64), F::from(11u64), F::from(13u64)];
-        let mle = build_eq_x_r(&r).unwrap();
+        let cfg = get_dyn_config(MODULUS);
+        let r: [F; _] = [
+            7u64.into_with_cfg(&cfg),
+            11u64.into_with_cfg(&cfg),
+            13u64.into_with_cfg(&cfg),
+        ];
+        let mle = build_eq_x_r(&r, &cfg).unwrap();
         assert_eq!(mle.num_vars, r.len());
         let evals = mle.evaluations;
-        let direct = build_eq_x_r_vec(&r).unwrap();
+        let direct = build_eq_x_r_vec(&r, &cfg).unwrap();
         assert_eq!(evals, direct);
     }
 
     #[test]
     fn test_dense_from_slice_and_indexing() {
+        let cfg = get_dyn_config(MODULUS);
         let n_vars = 3usize;
-        let v = vec![F::from(1u64), F::from(2u64), F::from(3u64)];
-        let dense = DenseMultilinearExtension::from_slice(n_vars, &v);
+        let v = vec![
+            1u64.into_with_cfg(&cfg),
+            2u64.into_with_cfg(&cfg),
+            3u64.into_with_cfg(&cfg),
+        ];
+        let dense = DenseMultilinearExtension::from_slice(n_vars, &v, F::zero_with_cfg(&cfg));
         assert_eq!(dense.num_vars, n_vars);
         let mut expected = v.clone();
-        expected.resize(1 << n_vars, F::zero());
+        expected.resize(1 << n_vars, F::zero_with_cfg(&cfg));
         assert_eq!(dense.evaluations, expected);
-        assert_eq!(dense[0], F::from(1u64));
+        assert_eq!(dense[0], 1u64.into_with_cfg(&cfg));
         let mut d2 = dense.clone();
-        d2[1] = F::from(99u64);
-        assert_eq!(d2[1], F::from(99u64));
+        d2[1] = 99u64.into_with_cfg(&cfg);
+        assert_eq!(d2[1], 99u64.into_with_cfg(&cfg));
     }
 
     #[test]
     fn test_fix_variables_and_evaluate() {
+        let cfg = get_dyn_config(MODULUS);
         let evals = vec![
-            F::from(10u64),
-            F::from(20u64),
-            F::from(30u64),
-            F::from(40u64),
+            10u64.into_with_cfg(&cfg),
+            20u64.into_with_cfg(&cfg),
+            30u64.into_with_cfg(&cfg),
+            40u64.into_with_cfg(&cfg),
         ];
-        let mle = DenseMultilinearExtension::from_evaluations_vec(2, evals.clone());
-        for (idx, &(x0, x1)) in [
-            (F::zero(), F::zero()),
-            (F::one(), F::zero()),
-            (F::zero(), F::one()),
-            (F::one(), F::one()),
+        let mle = DenseMultilinearExtension::from_evaluations_vec(
+            2,
+            evals.clone(),
+            F::zero_with_cfg(&cfg),
+        );
+        for (idx, (x0, x1)) in [
+            (F::zero_with_cfg(&cfg), F::zero_with_cfg(&cfg)),
+            (F::one_with_cfg(&cfg), F::zero_with_cfg(&cfg)),
+            (F::zero_with_cfg(&cfg), F::one_with_cfg(&cfg)),
+            (F::one_with_cfg(&cfg), F::one_with_cfg(&cfg)),
         ]
         .iter()
         .enumerate()
         {
-            let val = mle.evaluate(&[x0, x1]).unwrap();
+            let val = mle
+                .evaluate(&[x0.clone(), x1.clone()], F::zero_with_cfg(&cfg))
+                .unwrap();
             assert_eq!(val, evals[idx]);
         }
         let mut m2 = mle.clone();
-        m2.fix_variables(&[F::one()]);
+        m2.fix_variables(&[F::one_with_cfg(&cfg)], F::zero_with_cfg(&cfg));
         assert_eq!(m2.num_vars, 1);
-        assert_eq!(m2.evaluations, vec![F::from(20u64), F::from(40u64)]);
+        assert_eq!(
+            m2.evaluations,
+            vec![20u64.into_with_cfg(&cfg), 40u64.into_with_cfg(&cfg)]
+        );
     }
 
     #[test]
     fn test_from_matrix_padding_and_conversion() {
+        let cfg = get_dyn_config(MODULUS);
         let m: DenseRowMatrix<F> = DenseRowMatrix::from(vec![
-            vec![F::from(5u64), F::zero()],
-            vec![F::zero(), F::zero()],
-            vec![F::zero(), F::from(7u64)],
+            vec![5u64.into_with_cfg(&cfg), F::zero_with_cfg(&cfg)],
+            vec![F::zero_with_cfg(&cfg), F::zero_with_cfg(&cfg)],
+            vec![F::zero_with_cfg(&cfg), 7u64.into_with_cfg(&cfg)],
         ]);
-        let dense = DenseMultilinearExtension::from_matrix(&m);
+        let dense = DenseMultilinearExtension::from_matrix(&m, F::zero_with_cfg(&cfg));
         assert_eq!(dense.num_vars, 3);
         let evals = dense.evaluations;
-        assert_eq!(evals[0], F::from(5u64));
-        assert_eq!(evals[5], F::from(7u64));
+        assert_eq!(evals[0], 5u64.into_with_cfg(&cfg));
+        assert_eq!(evals[5], 7u64.into_with_cfg(&cfg));
         assert!(evals.iter().enumerate().all(|(i, v)| if i == 0 || i == 5 {
             true
         } else {
-            v.is_zero()
+            v.is_zero_with_cfg(&cfg)
         }));
     }
 
     #[test]
     fn test_from_evaluations_vec_padding_branch_and_slice() {
+        let cfg = get_dyn_config(MODULUS);
         // len < 2^n triggers padding branch
-        let evals = vec![F::from(1u64), F::from(2u64)];
+        let evals = vec![1u64.into_with_cfg(&cfg), 2u64.into_with_cfg(&cfg)];
         let n = 2usize; // 4 expected
-        let d1 = DenseMultilinearExtension::from_evaluations_vec(n, evals.clone());
+        let d1 = DenseMultilinearExtension::from_evaluations_vec(
+            n,
+            evals.clone(),
+            F::zero_with_cfg(&cfg),
+        );
         let mut expected = evals.clone();
-        expected.resize(1 << n, F::ZERO);
+        expected.resize(1 << n, F::zero_with_cfg(&cfg));
         assert_eq!(d1.evaluations, expected);
-        let d2 = DenseMultilinearExtension::from_evaluations_slice(n, &evals);
+        let d2 =
+            DenseMultilinearExtension::from_evaluations_slice(n, &evals, F::zero_with_cfg(&cfg));
         assert_eq!(d2.evaluations, expected);
     }
 
     #[test]
     fn test_fix_variables_edge_cases_and_full_truncate() {
+        let cfg = get_dyn_config(MODULUS);
         let d = DenseMultilinearExtension::from_evaluations_vec(
             2,
-            vec![F::from(1), F::from(2), F::from(3), F::from(4)],
+            vec![
+                1.into_with_cfg(&cfg),
+                2.into_with_cfg(&cfg),
+                3.into_with_cfg(&cfg),
+                4.into_with_cfg(&cfg),
+            ],
+            F::zero_with_cfg(&cfg),
         );
-        let d_fixed = d.fixed_variables(&[]);
+        let d_fixed = d.fixed_variables(&[], F::zero_with_cfg(&cfg));
         assert_eq!(d_fixed.num_vars, 2);
         assert_eq!(
             d_fixed.evaluations,
-            vec![F::from(1), F::from(2), F::from(3), F::from(4)]
+            vec![
+                1.into_with_cfg(&cfg),
+                2.into_with_cfg(&cfg),
+                3.into_with_cfg(&cfg),
+                4.into_with_cfg(&cfg)
+            ]
         );
         let mut d2 = DenseMultilinearExtension::from_evaluations_vec(
             2,
-            vec![F::from(10), F::from(20), F::from(30), F::from(40)],
+            vec![
+                10.into_with_cfg(&cfg),
+                20.into_with_cfg(&cfg),
+                30.into_with_cfg(&cfg),
+                40.into_with_cfg(&cfg),
+            ],
+            F::zero_with_cfg(&cfg),
         );
-        d2.fix_variables(&[F::one(), F::zero()]);
+        d2.fix_variables(
+            &[F::one_with_cfg(&cfg), F::zero_with_cfg(&cfg)],
+            F::zero_with_cfg(&cfg),
+        );
         assert_eq!(d2.num_vars, 0);
-        assert_eq!(d2.evaluations, vec![F::from(20)]);
+        assert_eq!(d2.evaluations, vec![20.into_with_cfg(&cfg)]);
     }
 
     #[test]
     fn test_evaluate_length_mismatch_returns_error() {
+        let cfg = get_dyn_config(MODULUS);
         let d = DenseMultilinearExtension::from_evaluations_vec(
             2,
-            vec![F::from(1), F::from(2), F::from(3), F::from(4)],
+            vec![
+                1.into_with_cfg(&cfg),
+                2.into_with_cfg(&cfg),
+                3.into_with_cfg(&cfg),
+                4.into_with_cfg(&cfg),
+            ],
+            F::zero_with_cfg(&cfg),
         );
-        assert!(d.evaluate(&[F::one()]).is_err());
-        assert!(d.evaluate(&[F::one(), F::one(), F::zero()]).is_err());
+        assert!(
+            d.evaluate(&[F::one_with_cfg(&cfg)], F::zero_with_cfg(&cfg))
+                .is_err()
+        );
+        assert!(
+            d.evaluate(
+                &[
+                    F::one_with_cfg(&cfg),
+                    F::one_with_cfg(&cfg),
+                    F::zero_with_cfg(&cfg)
+                ],
+                F::zero_with_cfg(&cfg)
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn test_zero_impl_for_dense_mle() {
-        let z: DenseMultilinearExtension<F> = Zero::zero();
+        let cfg = get_dyn_config(MODULUS);
+        let z: DenseMultilinearExtension<F> =
+            DenseMultilinearExtension::zero_vars(F::zero_with_cfg(&cfg));
         assert_eq!(z.num_vars, 0);
-        assert_eq!(z.evaluations, vec![F::ZERO]);
-        assert!(z.is_zero());
+        assert_eq!(z.evaluations, vec![F::zero_with_cfg(&cfg)]);
     }
 
     #[test]
     fn test_arithmetic_ops_elementwise_add_sub_mul_and_neg() {
+        let cfg = get_dyn_config(MODULUS);
         let a = DenseMultilinearExtension::from_evaluations_vec(
             2,
-            vec![F::from(1), F::from(2), F::from(3), F::from(4)],
+            vec![
+                1.into_with_cfg(&cfg),
+                2.into_with_cfg(&cfg),
+                3.into_with_cfg(&cfg),
+                4.into_with_cfg(&cfg),
+            ],
+            F::zero_with_cfg(&cfg),
         );
         let b = DenseMultilinearExtension::from_evaluations_vec(
             2,
-            vec![F::from(5), F::from(6), F::from(7), F::from(8)],
+            vec![
+                5.into_with_cfg(&cfg),
+                6.into_with_cfg(&cfg),
+                7.into_with_cfg(&cfg),
+                8.into_with_cfg(&cfg),
+            ],
+            F::zero_with_cfg(&cfg),
         );
 
         let sum = a.clone() + &b;
         assert_eq!(
             sum.evaluations,
-            vec![F::from(6), F::from(8), F::from(10), F::from(12)]
+            vec![
+                6.into_with_cfg(&cfg),
+                8.into_with_cfg(&cfg),
+                10.into_with_cfg(&cfg),
+                12.into_with_cfg(&cfg)
+            ]
         );
 
         let diff = b.clone() - &a;
         assert_eq!(
             diff.evaluations,
-            vec![F::from(4), F::from(4), F::from(4), F::from(4)]
+            vec![
+                4.into_with_cfg(&cfg),
+                4.into_with_cfg(&cfg),
+                4.into_with_cfg(&cfg),
+                4.into_with_cfg(&cfg)
+            ]
         );
 
         let prod = a.clone() * &b;
         assert_eq!(
             prod.evaluations,
-            vec![F::from(5), F::from(12), F::from(21), F::from(32)]
+            vec![
+                5.into_with_cfg(&cfg),
+                12.into_with_cfg(&cfg),
+                21.into_with_cfg(&cfg),
+                32.into_with_cfg(&cfg)
+            ]
         );
 
         // Neg
@@ -525,27 +628,50 @@ mod tests {
 
     #[test]
     fn test_scalar_mul_and_assign_variants() {
+        let cfg = get_dyn_config(MODULUS);
         let a = DenseMultilinearExtension::from_evaluations_vec(
             2,
-            vec![F::from(1), F::from(2), F::from(3), F::from(4)],
+            vec![
+                1.into_with_cfg(&cfg),
+                2.into_with_cfg(&cfg),
+                3.into_with_cfg(&cfg),
+                4.into_with_cfg(&cfg),
+            ],
+            F::zero_with_cfg(&cfg),
         );
         let b = DenseMultilinearExtension::from_evaluations_vec(
             2,
-            vec![F::from(10), F::from(20), F::from(30), F::from(40)],
+            vec![
+                10.into_with_cfg(&cfg),
+                20.into_with_cfg(&cfg),
+                30.into_with_cfg(&cfg),
+                40.into_with_cfg(&cfg),
+            ],
+            F::zero_with_cfg(&cfg),
         );
 
-        let three = F::from(3u64);
+        let three: F = 3u64.into_with_cfg(&cfg);
         let scaled = a.clone() * three;
         assert_eq!(
             scaled.evaluations,
-            vec![F::from(3), F::from(6), F::from(9), F::from(12)]
+            vec![
+                3.into_with_cfg(&cfg),
+                6.into_with_cfg(&cfg),
+                9.into_with_cfg(&cfg),
+                12.into_with_cfg(&cfg)
+            ]
         );
 
         let mut c = a.clone();
         c += &b;
         assert_eq!(
             c.evaluations,
-            vec![F::from(11), F::from(22), F::from(33), F::from(44)]
+            vec![
+                11.into_with_cfg(&cfg),
+                22.into_with_cfg(&cfg),
+                33.into_with_cfg(&cfg),
+                44.into_with_cfg(&cfg)
+            ]
         );
 
         c -= &b;
@@ -555,15 +681,25 @@ mod tests {
         d *= &b;
         assert_eq!(
             d.evaluations,
-            vec![F::from(10), F::from(40), F::from(90), F::from(160)]
+            vec![
+                10.into_with_cfg(&cfg),
+                40.into_with_cfg(&cfg),
+                90.into_with_cfg(&cfg),
+                160.into_with_cfg(&cfg)
+            ]
         );
 
         let mut e = a.clone();
-        let two = F::from(2u64);
+        let two = 2u64.into_with_cfg(&cfg);
         e += (two, &b);
         assert_eq!(
             e.evaluations,
-            vec![F::from(21), F::from(42), F::from(63), F::from(84)]
+            vec![
+                21.into_with_cfg(&cfg),
+                42.into_with_cfg(&cfg),
+                63.into_with_cfg(&cfg),
+                84.into_with_cfg(&cfg)
+            ]
         );
     }
 
@@ -574,19 +710,31 @@ mod tests {
             Vec<F>,
         ),
     > {
-        (0usize..=5).prop_flat_map(|n| {
+        let cfg = get_dyn_config(MODULUS);
+        (0usize..=5).prop_flat_map(move |n| {
+            let cfg = cfg.clone();
             let len = 1usize << n;
-            prop::collection::vec(any_f(), len).prop_flat_map(move |e1| {
+            prop::collection::vec(any_f(cfg.clone()), len).prop_flat_map(move |e1| {
+                let cfg = cfg.clone();
                 let n2 = n;
-                prop::collection::vec(any_f(), len).prop_flat_map(move |e2| {
+                prop::collection::vec(any_f(cfg.clone()), len).prop_flat_map(move |e2| {
+                    let cfg = cfg.clone();
                     let n3 = n2;
                     point_n(n3).prop_map({
                         let e1v = e1.clone();
                         let e2v = e2.clone();
                         move |r| {
                             (
-                                DenseMultilinearExtension::from_evaluations_vec(n3, e1v.clone()),
-                                DenseMultilinearExtension::from_evaluations_vec(n3, e2v.clone()),
+                                DenseMultilinearExtension::from_evaluations_vec(
+                                    n3,
+                                    e1v.clone(),
+                                    F::zero_with_cfg(&cfg),
+                                ),
+                                DenseMultilinearExtension::from_evaluations_vec(
+                                    n3,
+                                    e2v.clone(),
+                                    F::zero_with_cfg(&cfg),
+                                ),
                                 r,
                             )
                         }
@@ -596,14 +744,15 @@ mod tests {
         })
     }
     fn point_n(n: usize) -> impl Strategy<Value = Vec<F>> {
-        prop::collection::vec(any_f(), n)
+        prop::collection::vec(any_f(get_dyn_config(MODULUS)), n)
     }
 
     proptest! {
         #[test]
         fn prop_eval_add_is_linear((p1, p2, r) in any_aligned_pair_with_point()) {
-            let lhs = (p1.clone() + &p2).evaluate(&r).unwrap();
-            let rhs = p1.evaluate(&r).unwrap() + p2.evaluate(&r).unwrap();
+            let cfg = get_dyn_config(MODULUS);
+            let lhs = (p1.clone() + &p2).evaluate(&r, F::zero_with_cfg(&cfg)).unwrap();
+            let rhs = p1.evaluate(&r, F::zero_with_cfg(&cfg)).unwrap() + p2.evaluate(&r, F::zero_with_cfg(&cfg)).unwrap();
             prop_assert_eq!(lhs, rhs);
         }
 
@@ -614,10 +763,11 @@ mod tests {
             let ks = 0usize..=n;
             (Just(p), point, ks)
         })) {
+            let cfg = get_dyn_config(MODULUS);
             let mut pfixed = p.clone();
-            pfixed.fix_variables(&r[..k]);
-            let lhs = pfixed.evaluate(&r[k..]).unwrap();
-            let rhs = p.evaluate(&r).unwrap();
+            pfixed.fix_variables(&r[..k], F::zero_with_cfg(&cfg));
+            let lhs = pfixed.evaluate(&r[k..], F::zero_with_cfg(&cfg)).unwrap();
+            let rhs = p.evaluate(&r, F::zero_with_cfg(&cfg)).unwrap();
             prop_assert_eq!(lhs, rhs);
         }
 
@@ -629,15 +779,16 @@ mod tests {
                 let ks2 = 0usize..=n.saturating_sub(k1);
                 (Just(p), Just(k1), ks2)
             })
-        }), r1 in prop::collection::vec(any_f(), 0..=8usize), r2 in prop::collection::vec(any_f(), 0..=8usize)) {
+        }), r1 in prop::collection::vec(any_f(get_dyn_config(MODULUS)), 0..=8usize), r2 in prop::collection::vec(any_f(get_dyn_config(MODULUS)), 0..=8usize)) {
+            let cfg = get_dyn_config(MODULUS);
             let mut p_step = p.clone();
-            p_step.fix_variables(&r1[..k1.min(r1.len())]);
-            p_step.fix_variables(&r2[..k2.min(r2.len())]);
+            p_step.fix_variables(&r1[..k1.min(r1.len())], F::zero_with_cfg(&cfg));
+            p_step.fix_variables(&r2[..k2.min(r2.len())], F::zero_with_cfg(&cfg));
 
             let mut p_once = p.clone();
             let mut concat = r1[..k1.min(r1.len())].to_vec();
             concat.extend_from_slice(&r2[..k2.min(r2.len())]);
-            p_once.fix_variables(&concat);
+            p_once.fix_variables(&concat, F::zero_with_cfg(&cfg));
 
             prop_assert_eq!(p_step.evaluations, p_once.evaluations);
             prop_assert_eq!(p_step.num_vars, p_once.num_vars);

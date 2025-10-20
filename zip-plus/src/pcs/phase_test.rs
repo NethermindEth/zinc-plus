@@ -12,6 +12,7 @@ use crate::{
     utils::combine_rows,
 };
 use itertools::Itertools;
+use num_traits::ConstZero;
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     pub fn test(
@@ -47,9 +48,10 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 .collect_vec();
 
             // u' in the Zinc paper
-            let combined_row = combine_rows(&coeffs, &evals, pp.linear_code.row_len());
+            let combined_row =
+                combine_rows(&coeffs, &evals, pp.linear_code.row_len(), Zt::CombR::ZERO);
 
-            transcript.write_many(&combined_row)?;
+            transcript.write_const_many(&combined_row)?;
         }
 
         // Open merkle tree for each column drawn
@@ -74,7 +76,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             .step_by(pp.linear_code.codeword_len());
 
         // Write the elements in the squeezed column to the shared transcript
-        transcript.write_many(column_values)?;
+        transcript.write_const_many(column_values)?;
 
         ColumnOpening::open_at_column(column, commit_hint, transcript)
             .map_err(|_| ZipError::InvalidPcsOpen("Failed to open merkle tree".into()))?;
@@ -101,7 +103,7 @@ mod tests {
     };
     use crypto_bigint::U64;
     use crypto_primitives::crypto_bigint_int::Int;
-    use num_traits::ConstOne;
+    use num_traits::{ConstOne, Zero};
 
     const INT_LIMBS: usize = U64::LIMBS;
 
@@ -165,8 +167,11 @@ mod tests {
 
         let oversized_num_vars = 5;
         let oversized_evals: Vec<_> = (0..1 << oversized_num_vars).map(Int::from).collect();
-        let oversized_poly =
-            DenseMultilinearExtension::from_evaluations_vec(oversized_num_vars, oversized_evals);
+        let oversized_poly = DenseMultilinearExtension::from_evaluations_vec(
+            oversized_num_vars,
+            oversized_evals,
+            Zero::zero(),
+        );
 
         // This hint is for a 4-variable poly, but we need it as a placeholder.
         let (hint, _) = TestZip::commit(&pp, &setup_test_params::<N, K, M>(num_vars).1).unwrap();

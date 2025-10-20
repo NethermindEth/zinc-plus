@@ -3,7 +3,6 @@ pub mod dense;
 pub use dense::DenseMultilinearExtension;
 
 use crate::pcs::structs::MulByScalar;
-use num_traits::Zero;
 use rand::prelude::*;
 use std::{
     fmt::Debug,
@@ -25,7 +24,6 @@ pub trait MultilinearExtension<T>:
     + Eq
     + Add
     + Neg
-    + Zero
     + for<'a> AddAssign<&'a Self>
     + for<'a> AddAssign<(T, &'a Self)>
     + for<'a> SubAssign<&'a Self>
@@ -33,13 +31,13 @@ pub trait MultilinearExtension<T>:
 {
     /// Reduce the number of variables of `self` by fixing the
     /// `partial_point.len()` variables at `partial_point`.
-    fn fix_variables<S>(&mut self, partial_point: &[S])
+    fn fix_variables<S>(&mut self, partial_point: &[S], zero: T)
     where
         T: for<'a> MulByScalar<&'a S>;
 
     /// Creates a new object with the number of variables of `self` reduced by
     /// fixing the `partial_point.len()` variables at `partial_point`.
-    fn fixed_variables<S>(&self, partial_point: &[S]) -> Self
+    fn fixed_variables<S>(&self, partial_point: &[S], zero: T) -> Self
     where
         T: for<'a> MulByScalar<&'a S>;
 }
@@ -47,5 +45,5 @@ pub trait MultilinearExtension<T>:
 pub trait MultilinearExtensionRand<T>: MultilinearExtension<T> {
     /// Outputs an `l`-variate multilinear extension where value of evaluations
     /// are sampled uniformly at random.
-    fn rand<R: RngCore + ?Sized>(num_vars: usize, rng: &mut R) -> Self;
+    fn rand<R: RngCore + ?Sized>(num_vars: usize, rng: &mut R, zero: T) -> Self;
 }

@@ -1,10 +1,14 @@
-use crate::{pcs::structs::MulByScalar, traits::Transcribable};
-use crypto_bigint::{Uint, Word};
+use crate::{
+    pcs::structs::MulByScalar,
+    traits::{ConstTranscribable, Named, SimpleSemiring, Transcribable},
+};
+use crypto_bigint::{BitOps, BoxedUint, Integer, Uint, Word};
 use crypto_primitives::crypto_bigint_int::Int;
 use itertools::Itertools;
-use num_traits::CheckedAdd;
+use num_traits::{CheckedAdd, ConstOne, One, Zero};
 use rand::{rngs::StdRng, seq::SliceRandom};
 use rand_core::SeedableRng;
+use std::ops::{Mul, SubAssign};
 
 #[cfg(target_pointer_width = "64")]
 const WORD_FACTOR: usize = 1;
@@ -73,10 +77,10 @@ macro_rules! ilog_round_up {
     }};
 }
 
-pub(crate) fn inner_product<'a, 'b, Coeff, El, L, R>(lhs: L, rhs: R) -> El
+pub(crate) fn inner_product<'a, 'b, Coeff, El, L, R>(lhs: L, rhs: R, zero: El) -> El
 where
-    Coeff: Clone + Default + 'a + 'b,
-    El: Clone + CheckedAdd + for<'z> MulByScalar<&'z Coeff> + Default + 'a + 'b,
+    Coeff: Clone + 'a + 'b,
+    El: Clone + CheckedAdd + for<'z> MulByScalar<&'z Coeff> + 'a + 'b,
     L: IntoIterator<Item = &'a Coeff>,
     R: IntoIterator<Item = &'b El>,
 {
@@ -87,7 +91,7 @@ where
                 .expect("Cannot multiply a codeword element by a coefficient")
         })
         .reduce(|acc, product| add!(acc, &product))
-        .unwrap_or_default()
+        .unwrap_or(zero)
 }
 
 pub(crate) fn num_threads() -> usize {
@@ -162,12 +166,13 @@ pub(super) fn combine_rows<Coeff, El>(
     coeffs: &[Coeff],
     evaluations: &[El],
     row_len: usize,
+    zero: El,
 ) -> Vec<El>
 where
     Coeff: Send + Sync,
-    El: Clone + Default + CheckedAdd + for<'z> MulByScalar<&'z Coeff> + Send + Sync,
+    El: Clone + CheckedAdd + for<'z> MulByScalar<&'z Coeff> + Send + Sync,
 {
-    let mut combined_row = vec![El::default(); row_len];
+    let mut combined_row = vec![zero; row_len];
     parallelize(&mut combined_row, |(combined_row, offset)| {
         combined_row
             .iter_mut()
@@ -394,7 +399,107 @@ pub unsafe trait ReinterpretVector<Target: Sized>: Sized {
 
 unsafe impl<T> ReinterpretVector<T> for T {}
 
-impl<const LIMBS: usize> Transcribable for Uint<LIMBS> {
+//
+// Semiring wrapper for Uint
+//
+
+pub struct UintSemiring<const LIMBS: usize>(pub Uint<LIMBS>);
+
+impl<const LIMBS: usize> ConstOne for UintSemiring<LIMBS> {
+    const ONE: Self = Self(Uint::<LIMBS>::ONE);
+}
+
+impl<const LIMBS: usize> One for UintSemiring<LIMBS> {
+    fn one() -> Self {
+        Self::ONE
+    }
+}
+
+impl<const LIMBS: usize> SubAssign for UintSemiring<LIMBS> {
+    #[allow(clippy::arithmetic_side_effects)]
+    fn sub_assign(&mut self, rhs: Self) {
+        self.0 -= rhs.0;
+    }
+}
+
+impl<const LIMBS: usize> Mul for UintSemiring<LIMBS> {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        Self(self.0.mul(rhs.0))
+    }
+}
+
+impl<const LIMBS: usize> SimpleSemiring for UintSemiring<LIMBS> {
+    const BYTES: usize = Uint::<LIMBS>::NUM_BYTES;
+
+    fn is_zero(&self) -> bool {
+        self.0.is_zero()
+    }
+
+    fn is_even(&self) -> bool {
+        self.0.is_even().into()
+    }
+}
+
+//
+// Named implementations
+//
+
+macro_rules! impl_named_for_primitives {
+    ($($type:ty),+) => {
+        $(
+            impl Named for $type {
+                fn type_name() -> String {
+                    stringify!($type).to_string()
+                }
+            }
+        )+
+    };
+}
+
+impl_named_for_primitives!(i8, i16, i32, i64, i128);
+impl_named_for_primitives!(u8, u16, u32, u64, u128);
+
+impl<const LIMBS: usize> Named for Int<LIMBS> {
+    fn type_name() -> String {
+        format!("Int<{}>", LIMBS)
+    }
+}
+
+impl<const LIMBS: usize> Named for UintSemiring<LIMBS> {
+    fn type_name() -> String {
+        format!("Uint<{}>", LIMBS)
+    }
+}
+
+//
+// Transcribable implementations
+//
+
+macro_rules! impl_transcribable_for_primitives {
+    ($($type:ty),+) => {
+        $(
+            impl ConstTranscribable for $type {
+                const NUM_BYTES: usize = std::mem::size_of::<$type>();
+
+                fn read_transcription_bytes(bytes: &[u8]) -> Self {
+                    Self::from_le_bytes(bytes.try_into().expect("Invalid byte slice length"))
+                }
+
+                fn write_transcription_bytes(&self, buf: &mut [u8]) {
+                    assert_eq!(buf.len(), std::mem::size_of::<$type>());
+                    buf.copy_from_slice(&self.to_le_bytes());
+                }
+            }
+        )+
+    };
+}
+
+impl_transcribable_for_primitives!(u8, u16, u32, u64, u128);
+impl_transcribable_for_primitives!(i8, i16, i32, i64, i128);
+
+impl<const LIMBS: usize> ConstTranscribable for Uint<LIMBS> {
     const NUM_BYTES: usize = 8 * LIMBS / WORD_FACTOR;
 
     fn read_transcription_bytes(bytes: &[u8]) -> Self {
@@ -426,15 +531,72 @@ impl<const LIMBS: usize> Transcribable for Uint<LIMBS> {
     }
 }
 
-impl<const LIMBS: usize> Transcribable for Int<LIMBS> {
+impl<const LIMBS: usize> ConstTranscribable for Int<LIMBS> {
     const NUM_BYTES: usize = Uint::<LIMBS>::NUM_BYTES;
 
     fn read_transcription_bytes(bytes: &[u8]) -> Self {
-        (*Uint::<LIMBS>::read_transcription_bytes(bytes).as_int()).into()
+        (*<Uint<LIMBS> as ConstTranscribable>::read_transcription_bytes(bytes).as_int()).into()
     }
 
     fn write_transcription_bytes(&self, buf: &mut [u8]) {
-        self.inner().as_uint().write_transcription_bytes(buf)
+        ConstTranscribable::write_transcription_bytes(self.inner().as_uint(), buf)
+    }
+}
+
+impl Transcribable for BoxedUint {
+    /// Up to 255 bytes - so up to 2040 bits - should be plenty.
+    const LENGTH_NUM_BYTES: usize = 1;
+
+    fn read_num_bytes(bytes: &[u8]) -> usize {
+        assert_eq!(bytes.len(), Self::LENGTH_NUM_BYTES);
+        usize::from(bytes[0])
+    }
+
+    fn read_transcription_bytes(bytes: &[u8]) -> Self {
+        // crypto_bigint::BoxedUint stores limbs in least-to-most significant order.
+        // It matches little-endian order ef limbs encoding, so platform pointer width
+        // does not matter.
+        let (chunked, rem) = bytes.as_chunks::<{ 8 / WORD_FACTOR }>();
+        assert!(rem.is_empty(), "Invalid byte slice length for BoxedUint");
+        let words = chunked
+            .iter()
+            .map(|chunk| Word::from_le_bytes(*chunk))
+            .collect_vec();
+        BoxedUint::from_words(words)
+    }
+
+    fn get_num_bytes(&self) -> usize {
+        usize::from(u8::try_from(self.bytes_precision()).expect("BoxedUint size must fit into u8"))
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn write_transcription_bytes(&self, buf: &mut [u8]) {
+        // crypto_bigint::BoxedUint stores limbs in least-to-most significant order.
+        // It matches little-endian order ef limbs encoding, so platform pointer width
+        // does not matter.
+        assert_eq!(
+            buf.len(),
+            self.bytes_precision(),
+            "Buffer size mismatch for BoxedUint"
+        );
+        const W_SIZE: usize = size_of::<Word>();
+        for (i, w) in self.as_words().iter().enumerate() {
+            // Performance: reuse buffer and help compiler optimize away materializing
+            // vector
+            buf[(i * W_SIZE)..(i * W_SIZE + W_SIZE)].copy_from_slice(w.to_le_bytes().as_ref());
+        }
+    }
+}
+
+impl<const LIMBS: usize> ConstTranscribable for UintSemiring<LIMBS> {
+    const NUM_BYTES: usize = Uint::<LIMBS>::NUM_BYTES;
+
+    fn read_transcription_bytes(bytes: &[u8]) -> Self {
+        Self(<Uint<LIMBS> as ConstTranscribable>::read_transcription_bytes(bytes))
+    }
+
+    fn write_transcription_bytes(&self, buf: &mut [u8]) {
+        ConstTranscribable::write_transcription_bytes(&self.0, buf)
     }
 }
 
@@ -446,7 +608,7 @@ mod test {
     fn test_inner_product_basic() {
         let lhs = [1, 2, 3];
         let rhs = [4, 5, 6];
-        assert_eq!(inner_product(lhs.iter(), rhs.iter()), 4 + 2 * 5 + 3 * 6);
+        assert_eq!(inner_product(lhs.iter(), rhs.iter(), 0), 4 + 2 * 5 + 3 * 6);
     }
 
     #[test]
@@ -455,7 +617,7 @@ mod test {
         let evaluations = vec![3, 4, 5, 6];
         let row_len = 2;
 
-        let result = combine_rows(&coeffs, &evaluations, row_len);
+        let result = combine_rows(&coeffs, &evaluations, row_len, 0);
 
         assert_eq!(result, vec![(3 + 2 * 5), (4 + 2 * 6)]);
     }
@@ -466,7 +628,7 @@ mod test {
         let evaluations = vec![2, 4, 6, 8];
         let row_len = 2;
 
-        let result = combine_rows(&coeffs, &evaluations, row_len);
+        let result = combine_rows(&coeffs, &evaluations, row_len, 0);
 
         assert_eq!(result, vec![(3 * 2 + 4 * 6), (3 * 4 + 4 * 8)]);
     }
@@ -476,7 +638,7 @@ mod test {
         let evaluations = vec![2000, -3000, 4000, -5000];
         let row_len = 2;
 
-        let result = combine_rows(&coeffs, &evaluations, row_len);
+        let result = combine_rows(&coeffs, &evaluations, row_len, 0);
 
         assert_eq!(
             result,

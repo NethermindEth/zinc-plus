@@ -1,10 +1,10 @@
 use super::{EvaluationError, Polynomial};
 use crate::{
-    pcs::structs::{AsPackable, MulByScalar},
-    traits::{FromRef, Named, Transcribable},
+    pcs::structs::{AsPackable, MulByScalar, ProjectableToField},
+    traits::{ConstTranscribable, FromRef, Named},
     utils::ReinterpretVector,
 };
-use crypto_primitives::Ring;
+use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField, Ring};
 use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, One, Zero};
 use p3_field::Packable;
 use rand::{distr::StandardUniform, prelude::*};
@@ -30,7 +30,7 @@ pub struct DensePolynomial<R, const DEGREE: usize> {
     coeffs: [R; DEGREE],
 }
 
-impl<R: Ring, const DEGREE: usize> DensePolynomial<R, DEGREE> {
+impl<R: Ring + Zero, const DEGREE: usize> DensePolynomial<R, DEGREE> {
     /// Create a new polynomial with the given coefficients.
     /// If the input has fewer than N+1 coefficients, the remaining slots will
     /// be filled with zeros. If the input has more than N+1 coefficients,
@@ -129,7 +129,7 @@ impl<R: Hash, const DEGREE: usize> Hash for DensePolynomial<R, DEGREE> {
     }
 }
 
-impl<R: Ring, const DEGREE: usize> Zero for DensePolynomial<R, DEGREE> {
+impl<R: Ring + Zero, const DEGREE: usize> Zero for DensePolynomial<R, DEGREE> {
     fn zero() -> Self {
         Self {
             coeff_0: R::zero(),
@@ -142,7 +142,7 @@ impl<R: Ring, const DEGREE: usize> Zero for DensePolynomial<R, DEGREE> {
     }
 }
 
-impl<R: Ring, const DEGREE: usize> One for DensePolynomial<R, DEGREE> {
+impl<R: Ring + Zero + One, const DEGREE: usize> One for DensePolynomial<R, DEGREE> {
     fn one() -> Self {
         Self {
             coeff_0: R::one(),
@@ -310,32 +310,44 @@ impl<R: Ring, const DEGREE: usize> CheckedMul for DensePolynomial<R, DEGREE> {
 }
 
 impl<R: Ring, const DEGREE: usize> Sum for DensePolynomial<R, DEGREE> {
-    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        iter.fold(Self::zero(), |acc, x| {
+    fn sum<I: Iterator<Item = Self>>(mut iter: I) -> Self {
+        let Some(first) = iter.next() else {
+            panic!("Sum of an empty iterator is not defined for DensePolynomial");
+        };
+        iter.fold(first, |acc, x| {
             acc.checked_add(&x).expect("overflow in sum")
         })
     }
 }
 
 impl<'a, R: Ring, const DEGREE: usize> Sum<&'a Self> for DensePolynomial<R, DEGREE> {
-    fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
-        iter.fold(Self::zero(), |acc, x| {
+    fn sum<I: Iterator<Item = &'a Self>>(mut iter: I) -> Self {
+        let Some(first) = iter.next() else {
+            panic!("Sum of an empty iterator is not defined for DensePolynomial");
+        };
+        iter.fold(first.clone(), |acc, x| {
             acc.checked_add(x).expect("overflow in sum")
         })
     }
 }
 
 impl<R: Ring, const DEGREE: usize> Product for DensePolynomial<R, DEGREE> {
-    fn product<I: Iterator<Item = Self>>(iter: I) -> Self {
-        iter.fold(Self::one(), |acc, x| {
+    fn product<I: Iterator<Item = Self>>(mut iter: I) -> Self {
+        let Some(first) = iter.next() else {
+            panic!("Product of an empty iterator is not defined for DensePolynomial");
+        };
+        iter.fold(first, |acc, x| {
             acc.checked_mul(&x).expect("overflow in product")
         })
     }
 }
 
 impl<'a, R: Ring, const DEGREE: usize> Product<&'a Self> for DensePolynomial<R, DEGREE> {
-    fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
-        iter.fold(Self::one(), |acc, x| {
+    fn product<I: Iterator<Item = &'a Self>>(mut iter: I) -> Self {
+        let Some(first) = iter.next() else {
+            panic!("Product of an empty iterator is not defined for DensePolynomial");
+        };
+        iter.fold(first.clone(), |acc, x| {
             acc.checked_mul(x).expect("overflow in product")
         })
     }
@@ -365,7 +377,9 @@ impl<R: Ring + Named, const DEGREE: usize> Named for DensePolynomial<R, DEGREE> 
     }
 }
 
-impl<R: Transcribable + Default, const DEGREE: usize> Transcribable for DensePolynomial<R, DEGREE> {
+impl<R: ConstTranscribable + Default, const DEGREE: usize> ConstTranscribable
+    for DensePolynomial<R, DEGREE>
+{
     const NUM_BYTES: usize = R::NUM_BYTES * (DEGREE + 1);
 
     #[allow(clippy::arithmetic_side_effects)]
@@ -402,7 +416,7 @@ impl<R: Transcribable + Default, const DEGREE: usize> Transcribable for DensePol
 
 impl<R, S, const DEGREE: usize> FromRef<DensePolynomial<S, DEGREE>> for DensePolynomial<R, DEGREE>
 where
-    R: Ring + FromRef<S>,
+    R: Ring + FromRef<S> + Default,
 {
     fn from_ref(value: &DensePolynomial<S, DEGREE>) -> Self {
         let coeff_0 = R::from_ref(&value.coeff_0);
@@ -419,7 +433,7 @@ where
 
 impl<R, S, const DEGREE: usize> From<&DensePolynomial<S, DEGREE>> for DensePolynomial<R, DEGREE>
 where
-    R: Ring + FromRef<S>,
+    R: Ring + FromRef<S> + Default,
 {
     fn from(value: &DensePolynomial<S, DEGREE>) -> Self {
         Self::from_ref(value)
@@ -438,6 +452,27 @@ where
             coeff_0,
             coeffs: coeffs?.try_into().ok()?,
         })
+    }
+}
+
+impl<R, F, const DEGREE: usize> ProjectableToField<F> for DensePolynomial<R, DEGREE>
+where
+    R: Ring,
+    F: PrimeField + for<'a> FromWithConfig<&'a R> + for<'a> MulByScalar<&'a F> + 'static,
+{
+    #![allow(clippy::arithmetic_side_effects)] // False alert, field operations are safe
+    fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static {
+        let mut r_powers = vec![sampled_value.clone(); DEGREE];
+        for i in 1..DEGREE {
+            r_powers[i] = r_powers[i - 1].clone() * sampled_value;
+        }
+        let field_cfg = sampled_value.cfg().clone();
+
+        move |poly: &Self| {
+            poly.map(|v: &R| v.into_with_cfg(&field_cfg))
+                .evaluate_at_point(&r_powers)
+                .expect("Failed to evaluate polynomial at point")
+        }
     }
 }
 
@@ -462,7 +497,7 @@ unsafe impl<R: AsPackable, const DEGREE: usize>
 {
 }
 
-impl<R: Transcribable + Default, const DEGREE: usize> Transcribable
+impl<R: ConstTranscribable + Default, const DEGREE: usize> ConstTranscribable
     for PackableDensePolynomial<R, DEGREE>
 {
     const NUM_BYTES: usize = DensePolynomial::<R, DEGREE>::NUM_BYTES;

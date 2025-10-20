@@ -1,13 +1,13 @@
 use crate::{
     pcs::structs::{MulByScalar, ProjectableToField},
-    poly::{Polynomial, dense::DensePolynomial},
-    traits::{FromRef, Transcribable},
+    traits::{ConstTranscribable, FromRef},
+    utils::UintSemiring,
 };
 use crypto_bigint::{
     Uint,
     modular::{ConstMontyForm, ConstMontyParams},
 };
-use crypto_primitives::{Ring, crypto_bigint_const_monty::ConstMontyField, crypto_bigint_int::Int};
+use crypto_primitives::{crypto_bigint_const_monty::ConstMontyField, crypto_bigint_int::Int};
 use num_traits::CheckedMul;
 
 impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> MulByScalar<&Self>
@@ -31,13 +31,12 @@ macro_rules! impl_from_primitive_ref {
     };
 }
 impl_from_primitive_ref!(u8, u16, u32, u64, u128);
-impl_from_primitive_ref!(i8, i16, i32, i64, i128);
 
-impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize> FromRef<Int<LIMBS2>>
-    for ConstMontyField<Mod, LIMBS>
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> FromRef<UintSemiring<LIMBS>>
+    for ConstMontyForm<Mod, LIMBS>
 {
-    fn from_ref(value: &Int<LIMBS2>) -> Self {
-        Self::from(value)
+    fn from_ref(value: &UintSemiring<LIMBS>) -> Self {
+        ConstMontyForm::new(&value.0)
     }
 }
 
@@ -56,34 +55,11 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize>
         _sampled_value: &ConstMontyField<Mod, LIMBS>,
     ) -> impl Fn(&Self) -> ConstMontyField<Mod, LIMBS> + 'static {
         // No need to read anything
-        |value: &Int<LIMBS2>| ConstMontyField::<Mod, LIMBS>::from_ref(value)
+        |value: &Int<LIMBS2>| value.into()
     }
 }
 
-impl<Mod: ConstMontyParams<LIMBS>, R, const LIMBS: usize, const DEGREE: usize>
-    ProjectableToField<ConstMontyField<Mod, LIMBS>> for DensePolynomial<R, DEGREE>
-where
-    R: Ring + Transcribable,
-    ConstMontyField<Mod, LIMBS>: FromRef<R>,
-{
-    #![allow(clippy::arithmetic_side_effects)] // False alert, field operations are safe
-    fn prepare_projection(
-        sampled_value: &ConstMontyField<Mod, LIMBS>,
-    ) -> impl Fn(&Self) -> ConstMontyField<Mod, LIMBS> + 'static {
-        let mut r_powers = vec![*sampled_value; DEGREE];
-        for i in 1..DEGREE {
-            r_powers[i] = r_powers[i - 1] * sampled_value;
-        }
-
-        move |poly: &Self| {
-            poly.map(ConstMontyField::<Mod, LIMBS>::from_ref)
-                .evaluate_at_point(&r_powers)
-                .expect("Failed to evaluate polynomial at point")
-        }
-    }
-}
-
-impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> Transcribable
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> ConstTranscribable
     for ConstMontyForm<Mod, LIMBS>
 {
     const NUM_BYTES: usize = Uint::<LIMBS>::NUM_BYTES;
@@ -129,12 +105,12 @@ mod tests {
 
         let int_value = Int::<{ U128::LIMBS }>::from(10_i64);
         let result = projection_fn(&int_value);
-        assert_eq!(result, F::from_ref(&int_value));
+        assert_eq!(result, F::from(&int_value));
         assert_eq!(result, F::from(10_u64));
 
         let int_value = Int::<{ U128::LIMBS }>::from(-7_i64);
         let result = projection_fn(&int_value);
-        assert_eq!(result, F::from_ref(&int_value));
+        assert_eq!(result, F::from(&int_value));
         assert_eq!(result + F::from(7_u64), F::zero());
     }
 

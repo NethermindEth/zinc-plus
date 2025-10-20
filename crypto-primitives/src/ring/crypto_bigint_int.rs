@@ -7,7 +7,7 @@ use core::{
     ops::{Add, AddAssign, Mul, MulAssign, Rem, RemAssign, Shl, Shr, Sub, SubAssign},
 };
 use crypto_bigint::{
-    CheckedMul as CryptoCheckedMul, CheckedSub as CryptoCheckedSub, Word,
+    CheckedMul as CryptoCheckedMul, CheckedSub as CryptoCheckedSub, Integer, Word,
     subtle::{
         Choice, ConditionallySelectable, ConstantTimeEq, ConstantTimeGreater, ConstantTimeLess,
     },
@@ -501,7 +501,28 @@ impl<const LIMBS: usize, const LIMBS2: usize> TryFrom<&crypto_bigint::Uint<LIMBS
 
 impl<const LIMBS: usize> Ring for Int<LIMBS> {}
 
-impl<const LIMBS: usize> IntRing for Int<LIMBS> {}
+impl<const LIMBS: usize> IntRing for Int<LIMBS> {
+    fn is_odd(&self) -> bool {
+        self.0.is_odd().into()
+    }
+
+    fn is_even(&self) -> bool {
+        self.0.is_even().into()
+    }
+
+    fn is_positive(&self) -> bool {
+        self.0.is_positive().into()
+    }
+
+    fn checked_abs(&self) -> Option<Self> {
+        let result: Option<_> = self.0.abs().try_into_int().into();
+        result.map(Self)
+    }
+
+    fn is_negative(&self) -> bool {
+        self.0.is_negative().into()
+    }
+}
 
 //
 // RNG
