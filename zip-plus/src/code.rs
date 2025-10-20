@@ -1,9 +1,6 @@
 pub mod raa;
 
-use crate::{
-    pcs::structs::ZipTypes,
-    traits::{FromRef, Transcript},
-};
+use crate::{pcs::structs::ZipTypes, traits::FromRef};
 use crypto_primitives::PrimeField;
 
 pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
@@ -15,7 +12,7 @@ pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
     /// makes using it too much of a hassle.
     const REPETITION_FACTOR: usize;
 
-    fn new<T: Transcript>(poly_size: usize, check_for_overflows: bool, transcript: &mut T) -> Self;
+    fn new(poly_size: usize, check_for_overflows: bool) -> Self;
 
     /// Length of each input row before encoding
     fn row_len(&self) -> usize;

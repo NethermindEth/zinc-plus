@@ -14,7 +14,7 @@ use crate::{
 /// A transcript for Polynomial Commitment Scheme (PCS) operations.
 /// Manages both Fiat-Shamir transformations and serialization/deserialization
 /// of proof data.
-#[derive(Default, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PcsTranscript {
     /// Handles Fiat-Shamir transformations for non-interactive zero-knowledge
     /// proofs. Used to absorb field elements and generate cryptographic
@@ -29,19 +29,6 @@ pub struct PcsTranscript {
 impl PcsTranscript {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Converts the transcript into a serialized proof as a byte vector.
-    pub fn into_proof(self) -> Vec<u8> {
-        self.stream.into_inner()
-    }
-
-    /// Creates a transcript from an existing serialized proof.
-    pub fn from_proof(proof: &[u8]) -> Self {
-        Self {
-            fs_transcript: KeccakTranscript::default(),
-            stream: Cursor::new(proof.to_vec()),
-        }
     }
 
     /// Absorbs a field element into the Fiat-Shamir transcript.
@@ -203,7 +190,7 @@ impl PcsTranscript {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::MtHash;
+    use crate::{merkle::MtHash, pcs::ZipPlusProof};
     use crypto_bigint::{U256, const_monty_params};
 
     #[allow(unused_macros)]
@@ -216,8 +203,8 @@ mod tests {
             transcript
                 .$write_fn(&$original_value, &mut buf)
                 .expect(&format!("Failed to write {}", $assert_msg));
-            let proof = transcript.into_proof();
-            let mut transcript = PcsTranscript::from_proof(&proof);
+            let proof: ZipPlusProof = transcript.into();
+            let mut transcript: PcsTranscript = proof.into();
             let read_value = transcript
                 .$read_fn()
                 .expect(&format!("Failed to read {}", $assert_msg));
@@ -238,8 +225,8 @@ mod tests {
             transcript
                 .$write_fn(&$original_values)
                 .expect(&format!("Failed to write {}", $assert_msg));
-            let proof = transcript.into_proof();
-            let mut transcript = PcsTranscript::from_proof(&proof);
+            let proof: ZipPlusProof = transcript.into();
+            let mut transcript: PcsTranscript = proof.into();
             let read_values = transcript
                 .$read_fn($original_values.len())
                 .expect(&format!("Failed to read {}", $assert_msg));

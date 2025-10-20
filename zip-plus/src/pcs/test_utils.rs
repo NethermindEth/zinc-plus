@@ -8,11 +8,14 @@
 
 use crate::{
     code::{LinearCode, raa::RaaCode},
-    pcs::structs::{
-        MulByScalar, ProjectableToField, ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes,
+    pcs::{
+        ZipPlusProof,
+        structs::{
+            MulByScalar, ProjectableToField, ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes,
+        },
     },
     pcs_transcript::PcsTranscript,
-    poly::{Polynomial, dense::DensePolynomial, mle::DenseMultilinearExtension},
+    poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
     traits::{FromRef, Transcribable, Transcript},
 };
 use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
@@ -94,8 +97,7 @@ fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     let poly_size = 1 << num_vars;
     let num_rows = 1 << num_vars.div_ceil(2);
 
-    let mut transcript = MockTranscript::default();
-    let code = Lc::new(poly_size, true, &mut transcript);
+    let code = Lc::new(poly_size, true);
     let pp = ZipPlusParams::new(num_vars, num_rows, code);
 
     let evaluations = prepare_evaluations(poly_size);
@@ -111,7 +113,7 @@ pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
     ZipPlusCommitment,
     Vec<F>,
     F,
-    Vec<u8>,
+    ZipPlusProof,
 )
 where
     F: PrimeField + FromRef<Int<N>> + for<'a> MulByScalar<&'a F>,
@@ -139,7 +141,7 @@ pub fn setup_full_protocol_poly<
     ZipPlusCommitment,
     Vec<F>,
     F,
-    Vec<u8>,
+    ZipPlusProof,
 )
 where
     F: PrimeField + FromRef<Int<N>> + for<'a> MulByScalar<&'a F>,
@@ -155,7 +157,13 @@ fn setup_full_protocol_inner<Zt, Lc, F, const N: usize>(
     num_vars: usize,
     setup: impl FnOnce(usize) -> (ZipPlusParams<Zt, Lc>, DenseMultilinearExtension<Zt::Eval>),
     prepare_evaluation_point: impl FnOnce() -> Vec<Zt::Pt>,
-) -> (ZipPlusParams<Zt, Lc>, ZipPlusCommitment, Vec<F>, F, Vec<u8>)
+) -> (
+    ZipPlusParams<Zt, Lc>,
+    ZipPlusCommitment,
+    Vec<F>,
+    F,
+    ZipPlusProof,
+)
 where
     Zt: ZipTypes,
     Zt::Eval: for<'a> MulByScalar<&'a Zt::Pt>,
@@ -170,67 +178,26 @@ where
 
     let point: Vec<Zt::Pt> = prepare_evaluation_point();
 
-    let mut prover_transcript = PcsTranscript::new();
-    let eval_f = ZipPlus::open(&pp, &poly, &data, &point, &mut prover_transcript).unwrap();
+    let transcript = ZipPlus::test(&pp, &poly, &data).unwrap();
 
-    let proof = prover_transcript.into_proof();
+    let projecting_element: F = {
+        let mut transcript: PcsTranscript = transcript.clone().into();
+        let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
+        F::from_ref(&projecting_element)
+    };
+
+    let (eval_f, proof) = ZipPlus::evaluate(&pp, &poly, &point, transcript).unwrap();
 
     // Verify the evaluation is done correctly
     {
         let expected_eval = poly
             .evaluate(&point)
             .expect("failed to evaluate polynomial");
-        let project = Zt::Eval::prepare_projection(&read_field_projecting_element(&pp, &proof));
+        let project = Zt::Eval::prepare_projection(&projecting_element);
         assert_eq!(eval_f, project(&expected_eval));
     }
 
     let point_f = point.iter().map(F::from_ref).collect_vec();
 
     (pp, comm, point_f, eval_f, proof)
-}
-
-pub fn read_field_projecting_element<Zt, Lc, F>(pp: &ZipPlusParams<Zt, Lc>, proof: &[u8]) -> F
-where
-    Zt: ZipTypes,
-    Zt::Eval: ProjectableToField<F>,
-    Lc: LinearCode<Zt>,
-    F: PrimeField + FromRef<Zt::Chal>,
-{
-    let mut transcript = PcsTranscript::from_proof(proof);
-    // Advance the transcript to the point where we can get the projecting element
-    // TODO: This shouldn't be necessary after we split testing and evaluation
-    // phases
-    if pp.num_rows > 1 {
-        let _ = transcript
-            .read_many::<Zt::CombR>(pp.linear_code.row_len())
-            .unwrap();
-        let _ = transcript
-            .fs_transcript
-            .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND);
-        let _ = transcript
-            .fs_transcript
-            .get_challenges::<Zt::Chal>(pp.num_rows);
-    }
-    for _ in 0..Zt::NUM_COLUMN_OPENINGS {
-        let _ = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
-        let _ = transcript.read_many::<Zt::Cw>(pp.num_rows).unwrap();
-        let _ = transcript.read_merkle_proof().unwrap();
-    }
-    let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
-    F::from_ref(&projecting_element)
-}
-
-#[derive(Default)]
-pub struct MockTranscript {
-    pub counter: i64,
-}
-
-impl Transcript for MockTranscript {
-    fn get_challenge<T: Transcribable>(&mut self) -> T {
-        self.counter += 1;
-        let mut bytes = vec![0u8; T::NUM_BYTES];
-        let counter_bytes = self.counter.to_le_bytes();
-        bytes[..counter_bytes.len()].copy_from_slice(&counter_bytes);
-        T::read_transcription_bytes(&bytes)
-    }
 }

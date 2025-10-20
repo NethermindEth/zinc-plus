@@ -6,7 +6,7 @@ use sha3::{Digest, Keccak256};
 /// A cryptographic transcript implementation using the Keccak-256 hash
 /// function. Used for Fiat-Shamir transformations in zero-knowledge proof
 /// systems.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct KeccakTranscript {
     /// The underlying Keccak-256 hasher that maintains the transcript state.
     hasher: Keccak256,

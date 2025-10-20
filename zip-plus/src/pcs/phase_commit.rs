@@ -213,9 +213,7 @@ mod tests {
             structs::{ZipPlus, ZipPlusParams, ZipTypes},
             test_utils::*,
         },
-        pcs_transcript::PcsTranscript,
         poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
-        transcript::KeccakTranscript,
         utils::WORD_FACTOR,
     };
 
@@ -273,8 +271,7 @@ mod tests {
 
     #[test]
     fn commit_succeeds_for_small_polynomial() {
-        let mut transcript = MockTranscript::default();
-        let code = C::new(16, true, &mut transcript);
+        let code = C::new(16, true);
         let pp = ZipPlusParams::new(4, 4, code);
 
         let evaluations = vec![Int::from(42); 16];
@@ -286,8 +283,7 @@ mod tests {
 
     #[test]
     fn commit_succeeds_for_two_variables() {
-        let mut transcript = MockTranscript::default();
-        let code = C::new(4, true, &mut transcript);
+        let code = C::new(4, true);
         let pp = ZipPlusParams::new(2, 2, code);
 
         let evaluations = vec![Int::from(1), Int::from(2), Int::from(3), Int::from(4)];
@@ -408,9 +404,9 @@ mod tests {
     #[test]
     fn commit_produces_correct_merkle_tree_count() {
         let (pp, poly) = setup_test_params(3);
-        let (data, _) = TestZip::commit(&pp, &poly).unwrap();
+        let (hint, _) = TestZip::commit(&pp, &poly).unwrap();
 
-        assert_eq!(data.rows.len(), pp.num_rows * pp.linear_code.codeword_len());
+        assert_eq!(hint.rows.len(), pp.num_rows * pp.linear_code.codeword_len());
     }
 
     #[test]
@@ -426,8 +422,7 @@ mod tests {
         let results: Vec<Vec<Int<4>>> = (0..10)
             .into_par_iter()
             .map(|_| {
-                let mut transcript = MockTranscript::default();
-                let code = C::new(poly_size, true, &mut transcript);
+                let code = C::new(poly_size, true);
                 let pp = ZipPlusParams::new(num_vars, 8, code);
 
                 TestZip::encode_rows(
@@ -475,8 +470,7 @@ mod tests {
 
     #[test]
     fn encode_rows_succeeds_for_single_row() {
-        let mut transcript = MockTranscript::default();
-        let code = C::new(4, true, &mut transcript);
+        let code = C::new(4, true);
         let pp = ZipPlusParams::new(2, 1, code);
 
         // Create a polynomial with 2 variables and 4 evaluations
@@ -493,8 +487,7 @@ mod tests {
 
     #[test]
     fn encode_rows_succeeds_for_single_poly_row() {
-        let mut transcript = MockTranscript::default();
-        let code = PolyC::new(4, true, &mut transcript);
+        let code = PolyC::new(4, true);
         let pp = ZipPlusParams::new(2, 1, code);
 
         // Create a polynomial with 2 variables and 4 evaluations
@@ -614,10 +607,9 @@ mod tests {
 
     #[test]
     fn proof_size_is_correct_for_parameters() {
-        fn calculate_expected_proof_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
+        fn calculate_expected_test_transcript_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
             let size_of_zt_k = K * size_of::<Word>();
             let size_of_zt_m = M * size_of::<Word>();
-            let size_of_f_b = FIELD_LIMBS * size_of::<Word>();
             let size_of_path_len = size_of::<u64>();
             let size_of_path_elem = size_of::<MtHash>();
             let size_of_dimension = size_of::<u64>();
@@ -633,9 +625,14 @@ mod tests {
             let column_opening_phase_size =
                 Zt::NUM_COLUMN_OPENINGS * (column_values_size + single_merkle_proof_size);
 
+            proximity_phase_size + column_opening_phase_size
+        }
+
+        fn calculate_expected_proof_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
+            let size_of_f_b = FIELD_LIMBS * size_of::<Word>();
             let evaluation_phase_size = pp.linear_code.row_len() * size_of_f_b;
 
-            proximity_phase_size + column_opening_phase_size + evaluation_phase_size
+            calculate_expected_test_transcript_size_bytes(pp) + evaluation_phase_size
         }
 
         const_monty_params!(
@@ -648,25 +645,30 @@ mod tests {
         let mut rng = rng();
         let num_vars = 4;
         let poly_size = 1 << num_vars;
-        let mut keccak_transcript = KeccakTranscript::new();
-        let linear_code = C::new(poly_size, true, &mut keccak_transcript);
+        let linear_code = C::new(poly_size, true);
         let param = TestZip::setup(poly_size, linear_code);
         let evaluations: Vec<_> = (0..poly_size)
             .map(|_| <Zt as ZipTypes>::Eval::from(rng.random::<i8>()))
             .collect();
         let mle = DenseMultilinearExtension::from_evaluations_slice(num_vars, &evaluations);
-        let point_int: Vec<_> = (0..num_vars)
+        let point: Vec<_> = (0..num_vars)
             .map(|_| <Zt as ZipTypes>::Pt::random(&mut rng))
             .collect();
 
-        let (data, _) = TestZip::commit(&param, &mle).unwrap();
-        let mut prover_transcript = PcsTranscript::new();
-        TestZip::open::<F>(&param, &mle, &data, &point_int, &mut prover_transcript).unwrap();
-        let proof = prover_transcript.into_proof();
+        let (hint, _) = TestZip::commit(&param, &mle).unwrap();
 
-        let actual_proof_size_bytes = proof.len();
+        let test_transcript = TestZip::test(&param, &mle, &hint).unwrap();
+        let actual_test_transcript_size_bytes = test_transcript.0.stream.get_ref().len();
+        let expected_test_transcript_size_bytes =
+            calculate_expected_test_transcript_size_bytes(&param);
+        assert_eq!(
+            actual_test_transcript_size_bytes,
+            expected_test_transcript_size_bytes
+        );
+
+        let (_, proof) = TestZip::evaluate::<F>(&param, &mle, &point, test_transcript).unwrap();
+        let actual_proof_size_bytes = proof.0.len();
         let expected_proof_size_bytes = calculate_expected_proof_size_bytes(&param);
-
         assert_eq!(actual_proof_size_bytes, expected_proof_size_bytes);
     }
 }

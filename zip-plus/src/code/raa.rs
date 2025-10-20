@@ -7,7 +7,7 @@ use crate::{
     code::LinearCode,
     mul,
     pcs::structs::ZipTypes,
-    traits::{FromRef, Transcribable, Transcript},
+    traits::{FromRef, Transcribable},
     utils::shuffle_seeded,
 };
 
@@ -19,12 +19,6 @@ pub struct RaaCode<Zt: ZipTypes, const REP: usize> {
     check_for_overflows: bool,
 
     row_len: usize,
-
-    /// Randomness seed for the first permutation
-    perm_1_seed: u64,
-
-    /// Randomness seed for the second permutation
-    perm_2_seed: u64,
 
     phantom: PhantomData<Zt>,
 }
@@ -40,14 +34,19 @@ impl<Zt: ZipTypes, const REP: usize> RaaCode<Zt, REP> {
             self.row_len,
             "Row length must match the code's row length"
         );
+
+        // We don't need a secure/unpredictable randomness here, so use fixed seeds
+        const PERM_1_SEED: u64 = 1;
+        const PERM_2_SEED: u64 = 2;
+
         let mut result: Vec<Out> = repeat(row, REP);
-        shuffle_seeded(&mut result, self.perm_1_seed);
+        shuffle_seeded(&mut result, PERM_1_SEED);
         if self.check_for_overflows {
             accumulate(&mut result);
         } else {
             accumulate_unchecked(&mut result);
         }
-        shuffle_seeded(&mut result, self.perm_2_seed);
+        shuffle_seeded(&mut result, PERM_2_SEED);
         if self.check_for_overflows {
             accumulate(&mut result);
         } else {
@@ -61,7 +60,7 @@ impl<Zt: ZipTypes, const REP: usize> RaaCode<Zt, REP> {
 impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for RaaCode<Zt, REP> {
     const REPETITION_FACTOR: usize = REP;
 
-    fn new<T: Transcript>(poly_size: usize, check_for_overflows: bool, transcript: &mut T) -> Self {
+    fn new(poly_size: usize, check_for_overflows: bool) -> Self {
         assert!(
             REP.is_power_of_two(),
             "Repetition factor must be a power of two"
@@ -99,14 +98,9 @@ impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for RaaCode<Zt, REP> {
             codeword_type_bits
         );
 
-        let perm_1_seed = transcript.get_challenge();
-        let perm_2_seed = transcript.get_challenge();
-
         Self {
             check_for_overflows,
             row_len,
-            perm_1_seed,
-            perm_2_seed,
             phantom: PhantomData,
         }
     }
@@ -192,11 +186,7 @@ mod tests {
     use num_traits::Zero;
 
     use super::*;
-    use crate::{
-        code::LinearCode,
-        pcs::test_utils::{MockTranscript, TestZipTypes},
-        utils::shuffle_seeded,
-    };
+    use crate::{code::LinearCode, pcs::test_utils::TestZipTypes, utils::shuffle_seeded};
 
     const REPETITION_FACTOR: usize = 4;
 
@@ -213,12 +203,7 @@ mod tests {
         F: Fn(&RaaCode<Zt, REPETITION_FACTOR>),
     {
         for check_for_overflows in [true, false] {
-            let mut transcript = MockTranscript::default();
-            let code = RaaCode::<Zt, REPETITION_FACTOR>::new(
-                poly_size,
-                check_for_overflows,
-                &mut transcript,
-            );
+            let code = RaaCode::<Zt, REPETITION_FACTOR>::new(poly_size, check_for_overflows);
             f(&code)
         }
     }
@@ -368,12 +353,7 @@ mod tests {
         const N: usize = 1;
         const K: usize = 1;
 
-        let mut transcript = MockTranscript::default();
-        let _code = RaaCode::<TestZipTypes<N, K, N>, REPETITION_FACTOR>::new(
-            1 << 30,
-            true,
-            &mut transcript,
-        );
+        let _code = RaaCode::<TestZipTypes<N, K, N>, REPETITION_FACTOR>::new(1 << 30, true);
     }
 
     #[test]
