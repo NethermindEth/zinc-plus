@@ -61,6 +61,18 @@ macro_rules! rem {
     };
 }
 
+#[macro_export]
+macro_rules! ilog_round_up {
+    ($a:expr, $tp: ty) => {{
+        let res = if $a.is_power_of_two() {
+            $a.ilog2()
+        } else {
+            add!($a.ilog2(), 1)
+        };
+        <$tp>::try_from(res).expect(concat!("ilog doesn't fit ", stringify!($tp)))
+    }};
+}
+
 pub(crate) fn inner_product<'a, 'b, Coeff, El, L, R>(lhs: L, rhs: R) -> El
 where
     Coeff: Clone + Default + 'a + 'b,

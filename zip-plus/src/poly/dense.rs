@@ -352,7 +352,7 @@ where
 
 impl<R: Ring + Named, const DEGREE: usize> Named for DensePolynomial<R, DEGREE> {
     fn type_name() -> String {
-        format!("DensePolynomial<{}, {DEGREE}>", R::type_name())
+        format!("Poly<{}, {DEGREE}>", R::type_name())
     }
 }
 

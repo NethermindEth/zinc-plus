@@ -11,43 +11,49 @@ use p3_field::Packable;
 use std::marker::PhantomData;
 
 pub trait ZipTypes: Send + Sync {
+    const NUM_COLUMN_OPENINGS: usize;
+
     /// Coefficient ring of evaluation polynomial [Self::Eval]
-    type EvalR: Ring + Named;
+    type EvalR: IntRing + Transcribable + Named;
     /// Ring of witness/polynomial evaluations on boolean hypercube
     type Eval: Ring + Named + Polynomial<Self::EvalR>;
 
     /// Coefficient ring of codeword polynomial [Self::Cw]
-    type CwR: Ring + Named;
+    type CwR: IntRing + Transcribable + Named;
     /// Ring of codeword elements, at least as wide as the evaluation ring
-    type Cw: Ring + Named + Polynomial<Self::CwR> + Transcribable + AsPackable + Copy;
+    type Cw: Ring
+        + Polynomial<Self::CwR>
+        + FromRef<Self::Eval>
+        + Transcribable
+        + AsPackable
+        + Named
+        + Copy;
 
     /// Ring of challenge elements (coefficients) to perform a random linear
     /// combination of codewords
-    type Chal: IntRing + Named + Transcribable;
+    type Chal: IntRing + Transcribable + Named;
 
     /// Ring of point coordinates to evaluate the multilinear polynomial
     type Pt: IntRing;
 
     /// Coefficient ring of linear combination polynomial [Self::Comb]
-    type CombR: Ring + Transcribable + for<'a> MulByScalar<&'a Self::Chal>;
+    type CombR: Ring + FromRef<Self::CombR> + Transcribable + for<'a> MulByScalar<&'a Self::Chal>;
     /// Ring of elements in the linear combination of codewords, at least as
     /// wide as the evaluation, codeword, and challenge rings.
-    type Comb: Ring + Named + Polynomial<Self::CombR> + FromRef<Self::Eval> + FromRef<Self::Cw>;
-
-    /// Linear code used to encode the polynomial matrix representation
-    type Code: LinearCode<Self::Eval, Self::Cw, Self::CombR>;
+    type Comb: Ring + Polynomial<Self::CombR> + FromRef<Self::Eval> + FromRef<Self::Cw> + Named;
 }
 
 /// Zip is a Polynomial Commitment Scheme (PCS) that supports committing to
 /// multilinear polynomials.
-pub struct ZipPlus<Zt: ZipTypes>(PhantomData<Zt>);
+pub struct ZipPlus<Zt: ZipTypes, Lc: LinearCode<Zt>>(PhantomData<(Zt, Lc)>);
 
-impl<Zt> ZipPlus<Zt>
+impl<Zt, Lc> ZipPlus<Zt, Lc>
 where
     Zt: ZipTypes,
+    Lc: LinearCode<Zt>,
 {
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn setup(poly_size: usize, linear_code: Zt::Code) -> ZipPlusParams<Zt> {
+    pub fn setup(poly_size: usize, linear_code: Lc) -> ZipPlusParams<Zt, Lc> {
         assert!(poly_size.is_power_of_two());
         let num_vars = poly_size.ilog2() as usize;
         let num_rows = ((1 << num_vars) / linear_code.row_len()).next_power_of_two();
@@ -57,15 +63,15 @@ where
 
 /// Parameters for the Zip+ PCS.
 #[derive(Clone, Debug)]
-pub struct ZipPlusParams<Zt: ZipTypes> {
+pub struct ZipPlusParams<Zt: ZipTypes, Lc: LinearCode<Zt>> {
     pub num_vars: usize,
     pub num_rows: usize,
-    pub linear_code: Zt::Code,
+    pub linear_code: Lc,
     phantom_data: PhantomData<Zt>,
 }
 
-impl<Zt: ZipTypes> ZipPlusParams<Zt> {
-    pub fn new(num_vars: usize, num_rows: usize, linear_code: Zt::Code) -> Self {
+impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlusParams<Zt, Lc> {
+    pub fn new(num_vars: usize, num_rows: usize, linear_code: Lc) -> Self {
         Self {
             num_vars,
             num_rows,
@@ -197,3 +203,17 @@ pub trait ProjectableToField<F: PrimeField> {
     /// to a prime field using the given sampled value.
     fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static;
 }
+
+macro_rules! impl_projectable_to_field_for_primitives {
+    ($($t:ty),*) => {
+        $(
+            impl<F: PrimeField + From<$t>> ProjectableToField<F> for $t {
+                fn prepare_projection(_sampled_value: &F) -> impl Fn(&Self) -> F + 'static {
+                    move |x: &Self| F::from(*x)
+                }
+            }
+        )*
+    };
+}
+
+impl_projectable_to_field_for_primitives!(i8, i16, i32, i64, i128);

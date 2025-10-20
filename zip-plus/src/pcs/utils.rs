@@ -3,12 +3,15 @@ use crypto_primitives::PrimeField;
 use num_traits::Zero;
 use thiserror::Error;
 
-use crate::{ZipError, poly::mle::DenseMultilinearExtension, sub};
+use crate::{ZipError, add, div, ilog_round_up, mul, poly::mle::DenseMultilinearExtension, sub};
 
 use crate::{
+    code::LinearCode,
     merkle::{MerkleError, MerkleProof, MtHash},
-    pcs::structs::{AsPackable, ZipPlusHint},
+    pcs::structs::{AsPackable, ZipPlusHint, ZipTypes},
     pcs_transcript::PcsTranscript,
+    poly::Polynomial,
+    traits::Transcribable,
 };
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -20,12 +23,39 @@ fn err_too_many_variates(function: &str, upto: usize, got: usize) -> ZipError {
 }
 
 // Ensures that polynomials and evaluation points are of appropriate size
-pub(super) fn validate_input<'a, T: 'a, F: 'a>(
+pub(super) fn validate_input<'a, Zt: ZipTypes + 'a, Lc: LinearCode<Zt>, Pt: 'a>(
     function: &str,
     param_num_vars: usize,
-    polys: impl Iterable<Item = &'a DenseMultilinearExtension<T>>,
-    points: impl Iterable<Item = &'a [F]>,
+    polys: impl Iterable<Item = &'a DenseMultilinearExtension<Zt::Eval>>,
+    points: impl Iterable<Item = &'a [Pt]>,
 ) -> Result<(), ZipError> {
+    // Check bit-width of the linear combinations
+    {
+        // Inner ring should be at most+ 2*log_2(\rho^{-1}*d) + \log_2(d) +
+        // challenge_bits + eval_elem_bits - 1, where d is the size of the messages
+        // being encoded - so num_vars / 2
+        let d = div!(param_num_vars, 2);
+        let codeword_bits = ilog_round_up!(mul!(Lc::REPETITION_FACTOR, d), usize);
+        let mut challenge_bits = mul!(Zt::Chal::NUM_BYTES, 8);
+        if Zt::Comb::DEGREE_BOUND > 0 {
+            // This means we also draft alphas (multiplied with coeffs), which
+            // doubles the number of challenge bits
+            challenge_bits = mul!(challenge_bits, 2);
+        }
+        let max_lc_bits = mul!(Zt::CombR::NUM_BYTES, 8);
+        let actual_lc_bits: usize = add!(
+            add!(
+                add!(mul!(codeword_bits, 2), ilog_round_up!(d, usize)),
+                challenge_bits
+            ),
+            sub!(mul!(Zt::EvalR::NUM_BYTES, 8), 1)
+        );
+        assert!(
+            actual_lc_bits <= max_lc_bits,
+            "The number of bits used for linear combinations is too large: {actual_lc_bits} bits, max allowed is {max_lc_bits} bits"
+        );
+    }
+
     // Ensure all the number of variables in the polynomials don't exceed the limit
     for poly in polys.iter() {
         if param_num_vars < poly.num_vars {

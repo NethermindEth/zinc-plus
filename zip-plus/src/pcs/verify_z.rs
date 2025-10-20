@@ -9,7 +9,7 @@ use crate::{
         utils::{ColumnOpening, point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
-    poly::{Polynomial, mle::DenseMultilinearExtension},
+    poly::Polynomial,
     traits::{FromRef, Transcribable, Transcript},
     utils::inner_product,
 };
@@ -17,25 +17,20 @@ use ark_std::iterable::Iterable;
 use crypto_primitives::PrimeField;
 use itertools::Itertools;
 
-impl<Zt: ZipTypes> ZipPlus<Zt> {
+impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     pub fn verify<F>(
-        vp: &ZipPlusParams<Zt>,
+        vp: &ZipPlusParams<Zt, Lc>,
         comm: &ZipPlusCommitment,
         point_f: &[F],
         eval_f: &F,
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField
-            + FromRef<F>
-            + FromRef<Zt::Chal>
-            + FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::CombR>>::Inner>
-            + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<F> + FromRef<Zt::Chal> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
         Zt::Cw: ProjectableToField<F>,
     {
-        let no_polys = Vec::<DenseMultilinearExtension<bool>>::new();
-        validate_input("verify", vp.num_vars, &no_polys, [point_f])?;
+        validate_input::<Zt, Lc, _>("verify", vp.num_vars, &[], [point_f])?;
 
         let columns_opened = Self::verify_testing(vp, &comm.root, transcript)?;
 
@@ -55,18 +50,14 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     }
 
     pub fn batch_verify<'a, F>(
-        vp: &ZipPlusParams<Zt>,
+        vp: &ZipPlusParams<Zt, Lc>,
         comms: impl Iterable<Item = &'a ZipPlusCommitment>,
         points: &[Vec<F>],
         evals: &[F],
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField
-            + FromRef<F>
-            + FromRef<Zt::Chal>
-            + FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::CombR>>::Inner>
-            + for<'b> MulByScalar<&'b F>,
+        F: PrimeField + FromRef<F> + FromRef<Zt::Chal> + for<'b> MulByScalar<&'b F>,
         F::Inner: Transcribable,
         Zt::Cw: ProjectableToField<F>,
     {
@@ -78,16 +69,13 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
 
     #[allow(clippy::type_complexity)]
     pub(super) fn verify_testing(
-        vp: &ZipPlusParams<Zt>,
+        vp: &ZipPlusParams<Zt, Lc>,
         root: &MtHash,
         transcript: &mut PcsTranscript,
     ) -> Result<Vec<(usize, Vec<Zt::Cw>)>, ZipError> {
         // Gather the coeffs and encoded combined rows per proximity test
-        let mut encoded_combined_rows: Vec<(Vec<Zt::Chal>, Vec<Zt::Chal>, Vec<Zt::CombR>)> =
-            Vec::with_capacity(vp.linear_code.num_proximity_testing());
-
-        if vp.num_rows > 1 {
-            for _ in 0..vp.linear_code.num_proximity_testing() {
+        let encoded_combined_rows: Option<(Vec<Zt::Chal>, Vec<Zt::Chal>, Vec<Zt::CombR>)> = {
+            if vp.num_rows > 1 {
                 // Values to evaluate the coefficients at
                 let alphas = transcript
                     .fs_transcript
@@ -102,18 +90,21 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
 
                 let encoded_combined_row: Vec<Zt::CombR> =
                     vp.linear_code.encode_wide(&combined_row);
-                encoded_combined_rows.push((alphas, coeffs, encoded_combined_row));
+                Some((alphas, coeffs, encoded_combined_row))
+            } else {
+                None
             }
-        }
+        };
 
         let mut columns_opened: Vec<(usize, Vec<Zt::Cw>)> =
-            Vec::with_capacity(vp.linear_code.num_column_opening());
+            Vec::with_capacity(Zt::NUM_COLUMN_OPENINGS);
 
-        for _ in 0..vp.linear_code.num_column_opening() {
+        for _ in 0..Zt::NUM_COLUMN_OPENINGS {
             let column_idx = transcript.squeeze_challenge_idx(vp.linear_code.codeword_len());
             let column_values = transcript.read_many(vp.num_rows)?;
 
-            for (alphas, coeffs, encoded_combined_row) in encoded_combined_rows.iter() {
+            if let Some((ref alphas, ref coeffs, ref encoded_combined_row)) = encoded_combined_rows
+            {
                 Self::verify_column_testing(
                     alphas,
                     coeffs,
@@ -160,7 +151,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     }
 
     fn verify_evaluation<F>(
-        vp: &ZipPlusParams<Zt>,
+        vp: &ZipPlusParams<Zt, Lc>,
         point_f: &[F],
         eval_f: &F,
         columns_opened: &[(usize, Vec<Zt::Cw>)],
@@ -168,10 +159,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
         projecting_element: F,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField
-            + FromRef<F>
-            + FromRef<<Zt::Code as LinearCode<Zt::Eval, Zt::Cw, Zt::CombR>>::Inner>
-            + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + FromRef<F> + for<'a> MulByScalar<&'a F>,
         F::Inner: Transcribable,
         Zt::Cw: ProjectableToField<F>,
     {
@@ -236,7 +224,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
 mod tests {
     use crate::{
         ZipError,
-        code::{DefaultLinearCodeSpec, LinearCode},
+        code::{LinearCode, raa::RaaCode},
         field::F256,
         pcs::{
             structs::{ZipPlus, ZipTypes},
@@ -274,12 +262,13 @@ mod tests {
     type F = F256<ModP>;
 
     type Zt = TestZipTypes<N, K, M>;
-    type C = <Zt as ZipTypes>::Code;
+    type C = RaaCode<Zt, 4>;
 
     type PolyZt = TestPolyZipTypes<N, K, M, DEGREE>;
+    type PolyC = RaaCode<PolyZt, 4>;
 
-    type TestZip = ZipPlus<Zt>;
-    type TestPolyZip = ZipPlus<PolyZt>;
+    type TestZip = ZipPlus<Zt, C>;
+    type TestPolyZip = ZipPlus<PolyZt, PolyC>;
 
     #[test]
     fn successful_verification_of_valid_proof() {
@@ -442,7 +431,7 @@ mod tests {
         let poly_size = 8; // row_len=4, num_rows=2 -> proximity checks are active
         let n = 3;
 
-        let linear_code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut keccak);
+        let linear_code = C::new(poly_size, true, &mut keccak);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let evaluations: Vec<_> = (0..poly_size as i32)
@@ -519,12 +508,7 @@ mod tests {
         let n = 3;
         let poly_size = 1 << n;
         let mut keccak_transcript = KeccakTranscript::new();
-        let linear_code: C = C::new(
-            &DefaultLinearCodeSpec,
-            poly_size,
-            true,
-            &mut keccak_transcript,
-        );
+        let linear_code: C = C::new(poly_size, true, &mut keccak_transcript);
         let param = TestZip::setup(poly_size, linear_code);
         let evaluations: Vec<_> = (0..poly_size)
             .map(|_| <Zt as ZipTypes>::Eval::from(rng.random::<i8>()))
@@ -556,7 +540,7 @@ mod tests {
     fn verification_fails_if_evaluation_consistency_check_is_invalid() {
         let mut keccak = MockTranscript::default();
         let poly_size = 8;
-        let linear_code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut keccak);
+        let linear_code = C::new(poly_size, true, &mut keccak);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let evaluations: Vec<_> = (0..poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
@@ -603,7 +587,7 @@ mod tests {
     fn verification_succeeds_for_zero_polynomial() {
         let mut keccak = MockTranscript::default();
         let poly_size = 8;
-        let linear_code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut keccak);
+        let linear_code = C::new(poly_size, true, &mut keccak);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let evaluations: Vec<_> = vec![Int::<INT_LIMBS>::from(0); poly_size];
@@ -630,7 +614,7 @@ mod tests {
     fn verification_succeeds_at_zero_point() {
         let mut keccak = MockTranscript::default();
         let poly_size = 8;
-        let linear_code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut keccak);
+        let linear_code = C::new(poly_size, true, &mut keccak);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let evaluations: Vec<_> = (1..=poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
@@ -658,7 +642,7 @@ mod tests {
     fn verification_fails_if_proximity_values_are_too_large() {
         let mut keccak = MockTranscript::default();
         let poly_size = 8;
-        let linear_code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut keccak);
+        let linear_code = C::new(poly_size, true, &mut keccak);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let evaluations: Vec<_> = (1..=poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
@@ -702,12 +686,7 @@ mod tests {
             // Match the benchmark’s transcript usage for linear code construction
             let mut keccak_transcript = KeccakTranscript::new();
             let poly_size = 1 << P;
-            let linear_code = C::new(
-                &DefaultLinearCodeSpec,
-                poly_size,
-                true,
-                &mut keccak_transcript,
-            );
+            let linear_code = C::new(poly_size, true, &mut keccak_transcript);
             let params = TestZip::setup(poly_size, linear_code);
 
             let poly = DenseMultilinearExtension::rand(P, &mut rng);
@@ -727,6 +706,44 @@ mod tests {
             // Verifier replays verification from the same proof (also like the bench)
             let mut verifier_tx = PcsTranscript::from_proof(&proof);
             TestZip::verify(
+                &params,
+                &commitment,
+                &point.iter().map(F::from).collect::<Vec<_>>(),
+                &eval_f,
+                &mut verifier_tx,
+            )
+            .expect("verify");
+        }
+
+        inner::<12>();
+    }
+
+    /// Mirrors: `Zip+/Verify` for `poly_size=2^12`
+    #[test]
+    fn bench_p12_verify_poly() {
+        fn inner<const P: usize>() {
+            let mut rng = ThreadRng::default();
+            // Match the benchmark’s transcript usage for linear code construction
+            let mut keccak_transcript = KeccakTranscript::new();
+            let poly_size = 1 << P;
+            let linear_code = PolyC::new(poly_size, true, &mut keccak_transcript);
+            let params = TestPolyZip::setup(poly_size, linear_code);
+
+            let poly = DenseMultilinearExtension::rand(P, &mut rng);
+            let (data, commitment) = TestPolyZip::commit(&params, &poly).expect("commit");
+
+            // Same point choice as the bench
+            let point = vec![1i64; P].iter().map(|v| v.into()).collect_vec();
+
+            // Prover produces a proof once (exactly as in the bench)
+            let mut prover_tx = PcsTranscript::new();
+            let eval_f: F =
+                TestPolyZip::open(&params, &poly, &data, &point, &mut prover_tx).expect("open");
+            let proof = prover_tx.into_proof();
+
+            // Verifier replays verification from the same proof (also like the bench)
+            let mut verifier_tx = PcsTranscript::from_proof(&proof);
+            TestPolyZip::verify(
                 &params,
                 &commitment,
                 &point.iter().map(F::from).collect::<Vec<_>>(),

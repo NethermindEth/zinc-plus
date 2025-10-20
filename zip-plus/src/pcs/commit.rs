@@ -11,7 +11,7 @@ use crate::{
 };
 use uninit::out_ref::Out;
 
-impl<Zt: ZipTypes> ZipPlus<Zt> {
+impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     /// Creates a commitment to a multilinear polynomial using the ZIP PCS
     /// scheme.
     ///
@@ -60,10 +60,10 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     ///   `pp.num_rows`, indicating an internal logic error.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn commit(
-        pp: &ZipPlusParams<Zt>,
+        pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
     ) -> Result<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment), ZipError> {
-        validate_input("commit", pp.num_vars, [poly], None::<&[bool]>)?;
+        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, [poly], None)?;
 
         let expected_num_evals = pp.num_rows * pp.linear_code.row_len();
         assert_eq!(
@@ -105,10 +105,10 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     /// vector of roots.
     #[allow(dead_code)]
     pub fn commit_no_merkle(
-        pp: &ZipPlusParams<Zt>,
+        pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
     ) -> Result<Vec<Zt::Cw>, ZipError> {
-        validate_input("commit", pp.num_vars, [poly], None::<&[bool]>)?;
+        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, [poly], None)?;
 
         let row_len = pp.linear_code.row_len();
         let codeword_len = pp.linear_code.codeword_len();
@@ -134,7 +134,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     /// corresponds to a polynomial in the input slice.
     #[allow(clippy::type_complexity)]
     pub fn batch_commit(
-        pp: &ZipPlusParams<Zt>,
+        pp: &ZipPlusParams<Zt, Lc>,
         polys: &[DenseMultilinearExtension<Zt::Eval>],
     ) -> Result<Vec<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment)>, ZipError> {
         polys.iter().map(|poly| Self::commit(pp, poly)).collect()
@@ -159,7 +159,7 @@ impl<Zt: ZipTypes> ZipPlus<Zt> {
     /// A `Vec<Int<K>>` containing all the encoded rows concatenated together.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn encode_rows(
-        pp: &ZipPlusParams<Zt>,
+        pp: &ZipPlusParams<Zt, Lc>,
         codeword_len: usize,
         row_len: usize,
         evals: &[Zt::Eval],
@@ -206,7 +206,7 @@ mod tests {
     use rand::{Rng, rng};
 
     use crate::{
-        code::{DefaultLinearCodeSpec, LinearCode},
+        code::{LinearCode, raa::RaaCode},
         field::F256,
         merkle::{MerkleTree, MtHash},
         pcs::{
@@ -228,13 +228,13 @@ mod tests {
     const DEGREE: usize = 2;
 
     type Zt = TestZipTypes<N, K, M>;
-    type C = <Zt as ZipTypes>::Code;
+    type C = RaaCode<Zt, 4>;
 
     type PolyZt = TestPolyZipTypes<N, K, M, DEGREE>;
-    type PolyC = <PolyZt as ZipTypes>::Code;
+    type PolyC = RaaCode<PolyZt, 4>;
 
-    type TestZip = ZipPlus<Zt>;
-    type TestPolyZip = ZipPlus<PolyZt>;
+    type TestZip = ZipPlus<Zt, C>;
+    type TestPolyZip = ZipPlus<PolyZt, PolyC>;
 
     #[test]
     fn commit_rejects_too_many_variables() {
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn commit_succeeds_for_small_polynomial() {
         let mut transcript = MockTranscript::default();
-        let code = C::new(&DefaultLinearCodeSpec, 16, true, &mut transcript);
+        let code = C::new(16, true, &mut transcript);
         let pp = ZipPlusParams::new(4, 4, code);
 
         let evaluations = vec![Int::from(42); 16];
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn commit_succeeds_for_two_variables() {
         let mut transcript = MockTranscript::default();
-        let code = C::new(&DefaultLinearCodeSpec, 4, true, &mut transcript);
+        let code = C::new(4, true, &mut transcript);
         let pp = ZipPlusParams::new(2, 2, code);
 
         let evaluations = vec![Int::from(1), Int::from(2), Int::from(3), Int::from(4)];
@@ -427,7 +427,7 @@ mod tests {
             .into_par_iter()
             .map(|_| {
                 let mut transcript = MockTranscript::default();
-                let code = C::new(&DefaultLinearCodeSpec, poly_size, true, &mut transcript);
+                let code = C::new(poly_size, true, &mut transcript);
                 let pp = ZipPlusParams::new(num_vars, 8, code);
 
                 TestZip::encode_rows(
@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn encode_rows_succeeds_for_single_row() {
         let mut transcript = MockTranscript::default();
-        let code = C::new(&DefaultLinearCodeSpec, 4, true, &mut transcript);
+        let code = C::new(4, true, &mut transcript);
         let pp = ZipPlusParams::new(2, 1, code);
 
         // Create a polynomial with 2 variables and 4 evaluations
@@ -494,7 +494,7 @@ mod tests {
     #[test]
     fn encode_rows_succeeds_for_single_poly_row() {
         let mut transcript = MockTranscript::default();
-        let code = PolyC::new(&DefaultLinearCodeSpec, 4, true, &mut transcript);
+        let code = PolyC::new(4, true, &mut transcript);
         let pp = ZipPlusParams::new(2, 1, code);
 
         // Create a polynomial with 2 variables and 4 evaluations
@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn proof_size_is_correct_for_parameters() {
-        fn calculate_expected_proof_size_bytes(pp: &ZipPlusParams<Zt>) -> usize {
+        fn calculate_expected_proof_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
             let size_of_zt_k = K * size_of::<Word>();
             let size_of_zt_m = M * size_of::<Word>();
             let size_of_f_b = FIELD_LIMBS * size_of::<Word>();
@@ -625,14 +625,13 @@ mod tests {
             let codeword_len = pp.linear_code.codeword_len();
             let merkle_depth = codeword_len.next_power_of_two().ilog2() as usize;
 
-            let proximity_phase_size =
-                pp.linear_code.num_proximity_testing() * pp.linear_code.row_len() * size_of_zt_m;
+            let proximity_phase_size = pp.linear_code.row_len() * size_of_zt_m;
 
             let column_values_size = pp.num_rows * size_of_zt_k;
             let single_merkle_proof_size =
                 size_of_dimension * 2 + size_of_path_len + merkle_depth * size_of_path_elem;
-            let column_opening_phase_size = pp.linear_code.num_column_opening()
-                * (column_values_size + single_merkle_proof_size);
+            let column_opening_phase_size =
+                Zt::NUM_COLUMN_OPENINGS * (column_values_size + single_merkle_proof_size);
 
             let evaluation_phase_size = pp.linear_code.row_len() * size_of_f_b;
 
@@ -650,12 +649,7 @@ mod tests {
         let num_vars = 4;
         let poly_size = 1 << num_vars;
         let mut keccak_transcript = KeccakTranscript::new();
-        let linear_code = C::new(
-            &DefaultLinearCodeSpec,
-            poly_size,
-            true,
-            &mut keccak_transcript,
-        );
+        let linear_code = C::new(poly_size, true, &mut keccak_transcript);
         let param = TestZip::setup(poly_size, linear_code);
         let evaluations: Vec<_> = (0..poly_size)
             .map(|_| <Zt as ZipTypes>::Eval::from(rng.random::<i8>()))

@@ -13,20 +13,21 @@ const INT_LIMBS: usize = WORD_FACTOR;
 
 struct BenchZipTypes {}
 impl ZipTypes for BenchZipTypes {
-    type EvalR = Int<{ INT_LIMBS }>;
+    const NUM_COLUMN_OPENINGS: usize = 650;
+    type EvalR = i32;
     type Eval = Self::EvalR;
-    type CwR = Int<{ INT_LIMBS * 4 }>;
+    type CwR = i64;
     type Cw = Self::CwR;
-    type Chal = Int<{ INT_LIMBS }>;
-    type Pt = Int<{ INT_LIMBS }>;
-    type CombR = Int<{ INT_LIMBS * 8 }>;
+    type Chal = i128;
+    type Pt = i128;
+    type CombR = Int<{ INT_LIMBS * 3 }>;
     type Comb = Self::CombR;
-    type Code = RaaCode<Self::Eval, Self::Cw, Self::Comb>;
 }
+type Code = RaaCode<BenchZipTypes, 4>;
 
 fn zip_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");
-    do_bench::<BenchZipTypes>(&mut group);
+    do_bench::<BenchZipTypes, Code>(&mut group);
     group.finish();
 }
 
