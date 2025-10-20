@@ -202,7 +202,77 @@ impl<R: Semiring, const DEGREE: usize> AddAssign for DensePolynomial<R, DEGREE> 
     }
 }
 
-impl<'a, R: Semiring, const DEGREE: usize> AddAssign<&'a Self> for DensePolynomial<R, DEGREE> {
+/// Sealed trait for internal coefficient addition with SIMD specialization
+///
+/// # SIMD Optimization for i32
+///
+/// On Aarch64 (Apple Silicon) with NEON enabled, DensePolynomial<i32, _> addition
+/// uses ARM NEON SIMD instructions for optimal performance:
+/// - Processes 4 i32 elements per iteration using vaddq_s32
+/// - Automatically handles any remainder elements with scalar addition
+/// - Requires compilation with target features enabled
+///
+/// ## Requirements
+/// - Target: aarch64-apple-darwin (Apple Silicon)
+/// - Rust: nightly (for min_specialization feature)
+/// - Target feature: +neon (usually enabled by default on Apple Silicon)
+///
+/// ## Build Instructions
+/// To build with SIMD optimizations:
+/// ```bash
+/// RUSTFLAGS="-C target-cpu=native" cargo +nightly build --release
+/// ```
+mod sealed {
+    use super::*;
+
+    pub trait CoeffAddImpl<const DEGREE: usize>: Sized {
+        fn add_coeffs_inplace(lhs: &mut [Self; DEGREE], rhs: &[Self; DEGREE]);
+    }
+
+    // Default scalar implementation for all Semiring types
+    impl<R: Semiring, const DEGREE: usize> CoeffAddImpl<DEGREE> for R {
+        #[allow(clippy::arithmetic_side_effects)]
+        #[inline(always)]
+        default fn add_coeffs_inplace(lhs: &mut [Self; DEGREE], rhs: &[Self; DEGREE]) {
+            for i in 0..DEGREE {
+                lhs[i] += &rhs[i];
+            }
+        }
+    }
+
+    // SIMD-optimized implementation for i32 on Aarch64
+    // Uses ARM NEON intrinsics to process 4 i32 values in parallel
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    impl<const DEGREE: usize> CoeffAddImpl<DEGREE> for i32 {
+        #[allow(clippy::arithmetic_side_effects)]
+        #[inline(always)]
+        fn add_coeffs_inplace(lhs: &mut [Self; DEGREE], rhs: &[Self; DEGREE]) {
+            use std::arch::aarch64::*;
+            unsafe {
+                let mut i = 0;
+                // Process 4 i32 elements at a time using NEON SIMD
+                while i + 4 <= DEGREE {
+                    let a = vld1q_s32(lhs.as_ptr().add(i));
+                    let b = vld1q_s32(rhs.as_ptr().add(i));
+                    let sum = vaddq_s32(a, b);
+                    vst1q_s32(lhs.as_mut_ptr().add(i), sum);
+                    i += 4;
+                }
+
+                // Handle remaining elements with scalar addition
+                while i < DEGREE {
+                    lhs[i] += rhs[i];
+                    i += 1;
+                }
+            }
+        }
+    }
+}
+
+impl<'a, R: Semiring, const DEGREE: usize> AddAssign<&'a Self> for DensePolynomial<R, DEGREE>
+where
+    R: sealed::CoeffAddImpl<DEGREE>,
+{
     #[allow(clippy::arithmetic_side_effects)]
     #[inline(always)]
     fn add_assign(&mut self, rhs: &'a Self) {
@@ -500,5 +570,88 @@ where
                 .evaluate_at_point(&r_powers)
                 .expect("Failed to evaluate polynomial at point")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_i32_addition() {
+        // Test with various sizes to ensure addition works correctly
+        
+        // Test with 4 elements
+        let poly1: DensePolynomial<i32, 4> = DensePolynomial {
+            coeff_0: 1,
+            coeffs: [2, 3, 4, 5],
+        };
+        let poly2: DensePolynomial<i32, 4> = DensePolynomial {
+            coeff_0: 10,
+            coeffs: [20, 30, 40, 50],
+        };
+        let mut result = poly1.clone();
+        result += &poly2;
+        assert_eq!(result.coeff_0, 11);
+        assert_eq!(result.coeffs, [22, 33, 44, 55]);
+
+        // Test with 8 elements
+        let poly3: DensePolynomial<i32, 8> = DensePolynomial {
+            coeff_0: 1,
+            coeffs: [1, 2, 3, 4, 5, 6, 7, 8],
+        };
+        let poly4: DensePolynomial<i32, 8> = DensePolynomial {
+            coeff_0: 100,
+            coeffs: [10, 20, 30, 40, 50, 60, 70, 80],
+        };
+        let mut result2 = poly3.clone();
+        result2 += &poly4;
+        assert_eq!(result2.coeff_0, 101);
+        assert_eq!(result2.coeffs, [11, 22, 33, 44, 55, 66, 77, 88]);
+
+        // Test with 10 elements
+        let poly5: DensePolynomial<i32, 10> = DensePolynomial {
+            coeff_0: -5,
+            coeffs: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        };
+        let poly6: DensePolynomial<i32, 10> = DensePolynomial {
+            coeff_0: 15,
+            coeffs: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+        };
+        let mut result3 = poly5.clone();
+        result3 += &poly6;
+        assert_eq!(result3.coeff_0, 10);
+        assert_eq!(result3.coeffs, [11, 22, 33, 44, 55, 66, 77, 88, 99, 110]);
+
+        // Test with 3 elements
+        let poly7: DensePolynomial<i32, 3> = DensePolynomial {
+            coeff_0: 7,
+            coeffs: [1, 2, 3],
+        };
+        let poly8: DensePolynomial<i32, 3> = DensePolynomial {
+            coeff_0: 3,
+            coeffs: [4, 5, 6],
+        };
+        let mut result4 = poly7.clone();
+        result4 += &poly8;
+        assert_eq!(result4.coeff_0, 10);
+        assert_eq!(result4.coeffs, [5, 7, 9]);
+    }
+
+    #[test]
+    fn test_non_i32_addition_still_works() {
+        // Ensure other types still work correctly with the generic implementation
+        let poly1: DensePolynomial<i64, 4> = DensePolynomial {
+            coeff_0: 1i64,
+            coeffs: [2, 3, 4, 5],
+        };
+        let poly2: DensePolynomial<i64, 4> = DensePolynomial {
+            coeff_0: 10,
+            coeffs: [20, 30, 40, 50],
+        };
+        let mut result = poly1.clone();
+        result += &poly2;
+        assert_eq!(result.coeff_0, 11);
+        assert_eq!(result.coeffs, [22, 33, 44, 55]);
     }
 }
