@@ -3,8 +3,13 @@ pub mod crypto_bigint_int;
 
 use core::{
     fmt::{Debug, Display},
+    hash::Hash,
     iter::{Product, Sum},
-    ops::{Add, AddAssign, Mul, MulAssign, Rem, RemAssign, Shl, Shr, Sub, SubAssign},
+    ops::{
+        Add, AddAssign, Mul, MulAssign, Rem, RemAssign, Shl, ShlAssign, Shr, ShrAssign, Sub,
+        SubAssign,
+    },
+    str::FromStr,
 };
 use num_traits::{
     CheckedAdd, CheckedMul, CheckedNeg, CheckedRem, CheckedSub, ConstOne, ConstZero, One, Pow, Zero,
@@ -24,6 +29,7 @@ pub trait Ring:
     + Send
     + Zero
     + One
+    + Hash
     // Arithmetic operations consuming rhs
     + CheckedNeg
     + CheckedAdd
@@ -49,19 +55,28 @@ pub trait ConstRing: Ring + ConstZero + ConstOne {}
 impl<T> ConstRing for T where T: Ring + ConstZero + ConstOne {}
 
 /// Ring of integers, usually denoted as `Z`.
-pub trait IntRing:
-    ConstRing
-    + PartialOrd
-    // Arithmetic operations consuming rhs
-    + CheckedRem
-    + Shl<u32>
-    + Shr<u32>
-    + Pow<u32>
-    + RemAssign
-    // Arithmetic operations with rhs reference
-    + for<'a> Rem<&'a Self>
-    + for<'a> RemAssign<&'a Self>
-    {}
+pub trait IntRing: Ring + Ord + Pow<u32> + From<bool> + From<i8> {}
+
+pub trait IntRingWithRem:
+    IntRing + CheckedRem + RemAssign + for<'a> Rem<&'a Self> + for<'a> RemAssign<&'a Self>
+{
+}
+impl<T> IntRingWithRem for T where
+    T: IntRing + CheckedRem + RemAssign + for<'a> Rem<&'a Self> + for<'a> RemAssign<&'a Self>
+{
+}
+
+pub trait IntRingWithShifts:
+    IntRing + Shl<u32> + Shr<u32> + ShlAssign<u32> + ShrAssign<u32>
+{
+}
+impl<T> IntRingWithShifts for T where
+    T: IntRing + Shl<u32> + Shr<u32> + ShlAssign<u32> + ShrAssign<u32>
+{
+}
+
+pub trait ConstIntRing: IntRing + ConstRing + FromStr {}
+impl<T> ConstIntRing for T where T: IntRing + ConstRing + FromStr {}
 
 macro_rules! primitive_int_ring {
     ($t:ident) => {

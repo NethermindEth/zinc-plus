@@ -47,7 +47,7 @@ impl_int_from_primitive_ref!(i8, i16, i32, i64, i128);
 impl<const LIMBS: usize, const LIMBS2: usize> FromRef<Int<LIMBS2>> for Int<LIMBS> {
     #[inline]
     fn from_ref(value: &Int<LIMBS2>) -> Self {
-        Self::from(value)
+        Self::try_from(value.inner()).expect("Destination Int type is too small")
     }
 }
 

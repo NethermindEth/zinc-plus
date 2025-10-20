@@ -1,3 +1,7 @@
+#[cfg(feature = "ark_ff")]
+pub mod ark_ff_field;
+#[cfg(feature = "ark_ff")]
+pub mod ark_ff_fp;
 #[cfg(feature = "crypto_bigint")]
 pub mod crypto_bigint_const_monty;
 

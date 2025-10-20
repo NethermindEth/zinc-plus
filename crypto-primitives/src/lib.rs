@@ -2,6 +2,7 @@
 extern crate alloc;
 
 pub mod field;
+pub(crate) mod helpers;
 pub mod matrix;
 pub mod ring;
 

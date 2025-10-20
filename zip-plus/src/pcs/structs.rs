@@ -5,7 +5,7 @@ use crate::{
     traits::{FromRef, Named, Transcribable},
     utils::ReinterpretVector,
 };
-use crypto_primitives::{IntRing, PrimeField, Ring, crypto_bigint_int::Int};
+use crypto_primitives::{ConstIntRing, PrimeField, Ring, crypto_bigint_int::Int};
 use num_traits::CheckedMul;
 use p3_field::Packable;
 use std::marker::PhantomData;
@@ -14,12 +14,12 @@ pub trait ZipTypes: Send + Sync {
     const NUM_COLUMN_OPENINGS: usize;
 
     /// Coefficient ring of evaluation polynomial [Self::Eval]
-    type EvalR: IntRing + Transcribable + Named;
+    type EvalR: ConstIntRing + Transcribable + Named;
     /// Ring of witness/polynomial evaluations on boolean hypercube
     type Eval: Ring + Named + Polynomial<Self::EvalR>;
 
     /// Coefficient ring of codeword polynomial [Self::Cw]
-    type CwR: IntRing + Transcribable + Named;
+    type CwR: ConstIntRing + Transcribable + Named;
     /// Ring of codeword elements, at least as wide as the evaluation ring
     type Cw: Ring
         + Polynomial<Self::CwR>
@@ -31,10 +31,10 @@ pub trait ZipTypes: Send + Sync {
 
     /// Ring of challenge elements (coefficients) to perform a random linear
     /// combination of codewords
-    type Chal: IntRing + Transcribable + Named;
+    type Chal: ConstIntRing + Transcribable + Named;
 
     /// Ring of point coordinates to evaluate the multilinear polynomial
-    type Pt: IntRing;
+    type Pt: ConstIntRing;
 
     /// Coefficient ring of linear combination polynomial [Self::Comb]
     type CombR: Ring + FromRef<Self::CombR> + Transcribable + for<'a> MulByScalar<&'a Self::Chal>;

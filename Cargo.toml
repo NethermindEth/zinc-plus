@@ -1,7 +1,7 @@
 [workspace]
-members = ["crypto-primitives", "zip-plus"]
+members = ["crypto-primitives", "crypto-primitives-proc-macros", "zip-plus"]
 resolver = "2"
-default-members = ["crypto-primitives", "zip-plus"]
+default-members = ["crypto-primitives", "crypto-primitives-proc-macros", "zip-plus"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 crypto-primitives = { path = "crypto-primitives" }
+crypto-primitives-proc-macros = { path = "crypto-primitives-proc-macros" }
 criterion = "0.7.0"
 proptest = "1.8.0"
 

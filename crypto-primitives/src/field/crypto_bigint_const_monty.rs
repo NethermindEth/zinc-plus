@@ -1,22 +1,23 @@
 use super::*;
 use crate::crypto_bigint_int::Int;
-use alloc::fmt;
 use core::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
+    hash::{Hash, Hasher},
     iter::{Product, Sum},
-    ops::{Add, AddAssign, DivAssign, Mul, MulAssign, Rem, RemAssign, Shl, Shr, Sub, SubAssign},
+    ops::{Add, AddAssign, DivAssign, Mul, MulAssign, Rem, RemAssign, Sub, SubAssign},
+    str::FromStr,
 };
 use crypto_bigint::{
     Limb, Uint,
     modular::{ConstMontyForm, ConstMontyParams as Params, Retrieve},
     subtle::{Choice, ConditionallySelectable, ConstantTimeEq},
 };
+use crypto_primitives_proc_macros::InfallibleCheckedOp;
 use num_traits::{
     CheckedAdd, CheckedDiv, CheckedMul, CheckedNeg, CheckedRem, CheckedSub, ConstOne, ConstZero,
     One, Pow, Zero,
 };
-use pastey::paste;
 
 #[cfg(feature = "rand")]
 use rand::{distr::StandardUniform, prelude::*, rand_core::TryRngCore};
@@ -26,9 +27,11 @@ const WORD_FACTOR: usize = 1;
 #[cfg(target_pointer_width = "32")]
 const WORD_FACTOR: usize = 2;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, InfallibleCheckedOp)]
+#[infallible_checked_unary_op((CheckedNeg, neg))]
+#[infallible_checked_binary_op((CheckedAdd, add), (CheckedSub, sub), (CheckedMul, mul))]
 #[repr(transparent)]
-pub struct ConstMontyField<Mod: Params<LIMBS>, const LIMBS: usize>(pub ConstMontyForm<Mod, LIMBS>);
+pub struct ConstMontyField<Mod: Params<LIMBS>, const LIMBS: usize>(ConstMontyForm<Mod, LIMBS>);
 
 impl<Mod: Params<LIMBS>, const LIMBS: usize> ConstMontyField<Mod, LIMBS> {
     pub const LIMBS: usize = Mod::LIMBS;
@@ -37,17 +40,17 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> ConstMontyField<Mod, LIMBS> {
     pub const BITS: u32 = LIMBS as u32 * Limb::BITS;
 
     #[inline(always)]
-    pub fn new(value: ConstMontyForm<Mod, LIMBS>) -> Self {
+    pub const fn new(value: ConstMontyForm<Mod, LIMBS>) -> Self {
         Self(value)
     }
 
     #[inline(always)]
-    pub fn inner(&self) -> &ConstMontyForm<Mod, LIMBS> {
+    pub const fn inner(&self) -> &ConstMontyForm<Mod, LIMBS> {
         &self.0
     }
 
     #[inline(always)]
-    pub fn into_inner(self) -> ConstMontyForm<Mod, LIMBS> {
+    pub const fn into_inner(self) -> ConstMontyForm<Mod, LIMBS> {
         self.0
     }
 
@@ -108,7 +111,7 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> Debug for ConstMontyField<Mod, LIMB
 }
 
 impl<Mod: Params<LIMBS>, const LIMBS: usize> Display for ConstMontyField<Mod, LIMBS> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{} (mod {})", self.0.retrieve(), Mod::PARAMS.modulus())
     }
 }
@@ -132,23 +135,39 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> Ord for ConstMontyField<Mod, LIMBS>
     }
 }
 
+impl<Mod: Params<LIMBS>, const LIMBS: usize> Hash for ConstMontyField<Mod, LIMBS> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.as_montgomery().hash(state)
+    }
+}
+
+impl<Mod: Params<LIMBS>, const LIMBS: usize> FromStr for ConstMontyField<Mod, LIMBS> {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let uint = Uint::<LIMBS>::from_str_radix_vartime(s, 10).map_err(|_| ())?;
+        Ok(Self(ConstMontyForm::new(&uint)))
+    }
+}
+
 //
 // Zero and One traits
 //
 
 impl<Mod: Params<LIMBS>, const LIMBS: usize> Zero for ConstMontyField<Mod, LIMBS> {
-    #[inline]
+    #[inline(always)]
     fn zero() -> Self {
         Self::ZERO
     }
 
-    #[inline]
+    #[inline(always)]
     fn is_zero(&self) -> bool {
         self == &Self::ZERO
     }
 }
 
 impl<Mod: Params<LIMBS>, const LIMBS: usize> One for ConstMontyField<Mod, LIMBS> {
+    #[inline(always)]
     fn one() -> Self {
         Self::ONE
     }
@@ -169,6 +188,7 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> ConstOne for ConstMontyField<Mod, L
 impl<Mod: Params<LIMBS>, const LIMBS: usize> Neg for ConstMontyField<Mod, LIMBS> {
     type Output = Self;
 
+    #[inline(always)]
     fn neg(self) -> Self::Output {
         Self(self.0.neg())
     }
@@ -223,6 +243,7 @@ impl_basic_op!(Mul, mul);
 impl<Mod: Params<LIMBS>, const LIMBS: usize> Div for ConstMontyField<Mod, LIMBS> {
     type Output = Self;
 
+    #[inline(always)]
     fn div(self, rhs: Self) -> Self::Output {
         self.div(&rhs)
     }
@@ -253,32 +274,9 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> Rem for ConstMontyField<Mod, LIMBS>
 impl<Mod: Params<LIMBS>, const LIMBS: usize> Rem<&Self> for ConstMontyField<Mod, LIMBS> {
     type Output = Self;
 
+    #[inline(always)]
     fn rem(self, rhs: &Self) -> Self::Output {
         self.rem(*rhs)
-    }
-}
-
-impl<Mod: Params<LIMBS>, const LIMBS: usize> Shl<u32> for ConstMontyField<Mod, LIMBS> {
-    type Output = Self;
-
-    #[allow(clippy::arithmetic_side_effects)]
-    fn shl(mut self, rhs: u32) -> Self::Output {
-        let mut value = self.0.retrieve();
-        value <<= rhs;
-        self.0 = ConstMontyForm::new(&value);
-        self
-    }
-}
-
-impl<Mod: Params<LIMBS>, const LIMBS: usize> Shr<u32> for ConstMontyField<Mod, LIMBS> {
-    type Output = Self;
-
-    #[allow(clippy::arithmetic_side_effects)]
-    fn shr(mut self, rhs: u32) -> Self::Output {
-        let mut value = self.0.retrieve();
-        value >>= rhs;
-        self.0 = ConstMontyForm::new(&value);
-        self
     }
 }
 
@@ -307,29 +305,6 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> Inv for ConstMontyField<Mod, LIMBS>
 // Checked arithmetic operations
 // (Note: Field operations do not overflow)
 //
-
-impl<Mod: Params<LIMBS>, const LIMBS: usize> CheckedNeg for ConstMontyField<Mod, LIMBS> {
-    fn checked_neg(&self) -> Option<Self> {
-        Some(Self(self.0.neg()))
-    }
-}
-
-macro_rules! impl_checked_op {
-    ($trait_name:tt, $trait_op:tt) => {
-        impl<Mod: Params<LIMBS>, const LIMBS: usize> $trait_name for ConstMontyField<Mod, LIMBS> {
-            paste! {
-            #[inline(always)]
-            fn [<checked_ $trait_op>](&self, other: &Self) -> Option<Self> {
-                Some(Self(self.0.$trait_op(&other.0)))
-            }
-            }
-        }
-    };
-}
-
-impl_checked_op!(CheckedAdd, add);
-impl_checked_op!(CheckedSub, sub);
-impl_checked_op!(CheckedMul, mul);
 
 impl<Mod: Params<LIMBS>, const LIMBS: usize> CheckedDiv for ConstMontyField<Mod, LIMBS> {
     #[allow(clippy::arithmetic_side_effects)] // False alert
@@ -714,10 +689,10 @@ pub type F32768<Mod> = ConstMontyField<Mod, { 512 * WORD_FACTOR }>;
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::{ConstIntRing, IntRingWithRem, ensure_type_implements_trait};
     use crypto_bigint::{Square, U256, const_monty_params};
     use num_traits::{One, Zero};
-
-    use super::*;
 
     const_monty_params!(
         ModP,
@@ -725,6 +700,12 @@ mod tests {
         "00dca94d8a1ecce3b6e8755d8999787d0524d8ca1ea755e7af84fb646fa31f27"
     );
     type F = ConstMontyField<ModP, { U256::LIMBS }>;
+
+    #[test]
+    fn ensure_blanket_traits() {
+        ensure_type_implements_trait!(F, ConstIntRing);
+        ensure_type_implements_trait!(F, IntRingWithRem);
+    }
 
     #[test]
     fn zero_one_basics() {
@@ -762,63 +743,34 @@ mod tests {
     }
 
     #[test]
-    fn basic_add_smoke() {
+    fn basic_ops() {
+        let a: F = 9_u64.into();
+        let neg_a = -a;
+        assert_eq!(a + neg_a, F::zero());
+
         let a: F = 123_u64.into();
         let b: F = 456_u64.into();
         assert_eq!(a + b, F::from(579_u64));
-    }
 
-    #[test]
-    fn add_wrapping_and_basic() {
-        let a: F = (-100_i64).into();
-        let b: F = 105_u64.into();
-        let c = a + b;
-        let d: F = 5_u64.into();
-        assert_eq!(c, d);
-    }
-
-    #[test]
-    fn sub_basic() {
         let a: F = 100_u64.into();
         let b: F = 7_u64.into();
         assert_eq!(a - b, 93_u64.into());
-    }
 
-    #[test]
-    fn mul_basic() {
         let a: F = 100_u64.into();
         let b: F = 7_u64.into();
         assert_eq!(a * b, 700_u64.into());
-    }
 
-    #[test]
-    fn add_assign_basic() {
-        let mut a: F = 5_u64.into();
-        a += F::from(6_u64);
-        assert_eq!(a, 11_u64.into());
-    }
-
-    #[test]
-    fn mul_assign_basic() {
-        let mut a: F = 11_u64.into();
-        a *= F::from(3_u64);
-        assert_eq!(a, 33_u64.into());
-    }
-
-    #[test]
-    fn neg_basic() {
-        let a: F = 9_u64.into();
-        let neg_a = -a;
-
-        assert_eq!(a + neg_a, F::zero());
-    }
-
-    #[test]
-    fn div_basic() {
         let num: F = 11_u64.into();
         let den: F = 5_u64.into();
         let q = num / den;
         assert_eq!(q * den, num);
+    }
+
+    #[test]
+    fn add_wrapping() {
+        let a: F = (-100_i64).into();
+        let b: F = 105_u64.into();
+        assert_eq!(a + b, F::from(5_u64));
     }
 
     #[test]
@@ -827,6 +779,39 @@ mod tests {
         let a: F = 7_u64.into();
         let zero = F::zero();
         let _ = a / zero;
+    }
+
+    #[test]
+    fn assign_ops_with_refs_and_values() {
+        let mut x: F = 7_u64.into();
+        let y: F = 8_u64.into();
+        x += y;
+        assert_eq!(x, 15_u64.into());
+
+        let mut x: F = 7_u64.into();
+        let y: F = 8_u64.into();
+        x += &y;
+        assert_eq!(x, 15_u64.into());
+
+        let mut x: F = 20_u64.into();
+        let y: F = 6_u64.into();
+        x -= y;
+        assert_eq!(x, 14_u64.into());
+
+        let mut x: F = 20_u64.into();
+        let y: F = 6_u64.into();
+        x -= &y;
+        assert_eq!(x, 14_u64.into());
+
+        let mut x: F = 5_u64.into();
+        let y: F = 9_u64.into();
+        x *= y;
+        assert_eq!(x, 45_u64.into());
+
+        let mut x: F = 5_u64.into();
+        let y: F = 9_u64.into();
+        x *= &y;
+        assert_eq!(x, 45_u64.into());
     }
 
     #[test]
@@ -873,34 +858,6 @@ mod tests {
         assert_eq!(m1, m2);
         assert_eq!(m1, m3);
         assert_eq!(m1, m4);
-    }
-
-    #[test]
-    fn assign_ops_with_refs_and_values() {
-        let mut x: F = 7_u64.into();
-        let y: F = 8_u64.into();
-        x += y;
-        assert_eq!(x, 15_u64.into());
-        let mut x: F = 7_u64.into();
-        let y: F = 8_u64.into();
-        x.add_assign(&y);
-        assert_eq!(x, 15_u64.into());
-        let mut x: F = 20_u64.into();
-        let y: F = 6_u64.into();
-        x -= y;
-        assert_eq!(x, 14_u64.into());
-        let mut x: F = 20_u64.into();
-        let y: F = 6_u64.into();
-        x.sub_assign(&y);
-        assert_eq!(x, 14_u64.into());
-        let mut x: F = 5_u64.into();
-        let y: F = 9_u64.into();
-        x *= y;
-        assert_eq!(x, 45_u64.into());
-        let mut x: F = 5_u64.into();
-        let y: F = 9_u64.into();
-        x.mul_assign(&y);
-        assert_eq!(x, 45_u64.into());
     }
 
     #[test]
@@ -1124,20 +1081,6 @@ mod tests {
     }
 
     #[test]
-    fn shift_operations() {
-        let a: F = 5_u64.into();
-
-        // Test Shl
-        let shifted_left = a << 2;
-        assert_eq!(shifted_left, F::from(20_u64));
-
-        // Test Shr
-        let b: F = 20_u64.into();
-        let shifted_right = b >> 2;
-        assert_eq!(shifted_right, F::from(5_u64));
-    }
-
-    #[test]
     fn pow_operation() {
         let base: F = 2_u64.into();
 
@@ -1278,6 +1221,26 @@ mod tests {
     #[test]
     fn constants() {
         assert_eq!(F::LIMBS, U256::LIMBS);
+    }
+
+    #[test]
+    fn from_str() {
+        // Test parsing from string
+        let a: F = "123".parse().unwrap();
+        assert_eq!(a, F::from(123_u64));
+
+        let b: F = "0".parse().unwrap();
+        assert_eq!(b, F::zero());
+
+        let c: F = "1".parse().unwrap();
+        assert_eq!(c, F::one());
+
+        // Test invalid cases
+        assert!("-123".parse::<F>().is_err()); // Negative not supported
+        assert!("0x123".parse::<F>().is_err()); // Hex not supported
+        assert!("abc".parse::<F>().is_err());
+        assert!("12.34".parse::<F>().is_err());
+        assert!("".parse::<F>().is_err());
     }
 
     #[cfg(feature = "rand")]

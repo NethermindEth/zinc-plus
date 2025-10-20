@@ -11,11 +11,11 @@ use rand::{distr::StandardUniform, prelude::*};
 use std::{
     array,
     fmt::Display,
+    hash::Hash,
     iter,
     iter::{Product, Sum},
     ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
 };
-
 // TODO: rename rename to univariate
 
 // Sadly, we cannot use [R; DEGREE + 1] in stable Rust yet, so we use separate
@@ -117,6 +117,15 @@ impl<R: Display, const DEGREE: usize> Display for DensePolynomial<R, DEGREE> {
         }
         write!(f, "]")?;
         Ok(())
+    }
+}
+
+impl<R: Hash, const DEGREE: usize> Hash for DensePolynomial<R, DEGREE> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.coeff_0.hash(state);
+        for coeff in self.coeffs.iter() {
+            coeff.hash(state);
+        }
     }
 }
 
