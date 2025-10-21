@@ -1,9 +1,5 @@
 use crate::{
-    add,
-    code::LinearCode,
-    mul,
-    pcs::structs::ZipTypes,
-    traits::{ConstTranscribable, FromRef},
+    add, code::LinearCode, mul, pcs::structs::ZipTypes, poly::ConstCoeffBitWidth, traits::FromRef,
     utils::shuffle_seeded,
 };
 use crypto_primitives::PrimeField;
@@ -13,7 +9,7 @@ use std::{marker::PhantomData, ops::AddAssign};
 /// Implementation of a repeat-accumulate-accumulate (RAA) codes over the binary
 /// field, as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
 #[derive(Debug, Clone)]
-pub struct RaaCode<Zt: ZipTypes, const REP: usize> {
+pub struct RaaCode<Zt: ZipTypes<DEGREE>, const REP: usize, const DEGREE: usize> {
     pub(crate) cfg: RaaConfig,
 
     pub(crate) row_len: usize,
@@ -42,7 +38,7 @@ pub struct RaaConfig {
     pub permute_in_place: bool,
 }
 
-impl<Zt: ZipTypes, const REP: usize> RaaCode<Zt, REP> {
+impl<Zt: ZipTypes<DEGREE>, const REP: usize, const DEGREE: usize> RaaCode<Zt, REP, DEGREE> {
     /// Do the actual encoding, as per RAA spec
     fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
     where
@@ -80,7 +76,9 @@ impl<Zt: ZipTypes, const REP: usize> RaaCode<Zt, REP> {
     }
 }
 
-impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for RaaCode<Zt, REP> {
+impl<Zt: ZipTypes<DEGREE>, const REP: usize, const DEGREE: usize> LinearCode<Zt, DEGREE>
+    for RaaCode<Zt, REP, DEGREE>
+{
     type Config = RaaConfig;
 
     const REPETITION_FACTOR: usize = REP;
@@ -105,7 +103,7 @@ impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for RaaCode<Zt, REP> {
         // For RAA it's initial_bits + 2*log(repetition_factor) + num_variables
         let codeword_width_bits = {
             let initial_bits =
-                u32::try_from(Zt::EvalR::NUM_BITS).expect("Size of EvalR type is too large");
+                u32::try_from(Zt::Eval::COEFF_BIT_WIDTH).expect("Size of EvalR type is too large");
 
             let rep_factor_log = REP.ilog2();
             let num_vars_even = if num_vars.is_multiple_of(2) {
@@ -116,7 +114,7 @@ impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for RaaCode<Zt, REP> {
             add!(initial_bits, add!(num_vars_even, mul!(rep_factor_log, 2)))
         };
         let codeword_type_bits =
-            u32::try_from(Zt::CwR::NUM_BITS).expect("Size of CwR type is too large");
+            u32::try_from(Zt::Cw::COEFF_BIT_WIDTH).expect("Size of CwR type is too large");
         assert!(
             codeword_type_bits >= codeword_width_bits,
             "Cannot fit {codeword_width_bits}-bit wide codeword entries in {} bits entries",
@@ -253,12 +251,12 @@ mod tests {
 
     fn test_raa<Zt, F>(poly_size: usize, f: F)
     where
-        Zt: ZipTypes,
-        F: Fn(&RaaCode<Zt, REPETITION_FACTOR>),
+        Zt: ZipTypes<0>,
+        F: Fn(&RaaCode<Zt, REPETITION_FACTOR, 0>),
     {
         for check_for_overflows in [true, false] {
             for permute_in_place in [true, false] {
-                let code = RaaCode::<Zt, REPETITION_FACTOR>::new(
+                let code = RaaCode::<Zt, REPETITION_FACTOR, 0>::new(
                     poly_size,
                     RaaConfig {
                         check_for_overflows,
@@ -383,7 +381,7 @@ mod tests {
 
         for check_for_overflows in [true, false] {
             for permute_in_place in [true, false] {
-                let code = RaaCode::<TestZipTypes<N, K, M>, REPETITION_FACTOR>::new(
+                let code = RaaCode::<TestZipTypes<N, K, M>, REPETITION_FACTOR, 0>::new(
                     16,
                     RaaConfig {
                         check_for_overflows,
@@ -424,7 +422,7 @@ mod tests {
         let data: Vec<Int<N>> = (1..=1024).map(Int::<N>::from).collect();
         let poly_size = data.len() * data.len();
         let codeword_1: Vec<Int<K>> = {
-            let code_in_place = RaaCode::<TestZipTypes<N, K, M>, REPETITION_FACTOR>::new(
+            let code_in_place = RaaCode::<TestZipTypes<N, K, M>, REPETITION_FACTOR, 0>::new(
                 poly_size,
                 RaaConfig {
                     check_for_overflows: true,
@@ -435,7 +433,7 @@ mod tests {
         };
 
         let codeword_2: Vec<Int<K>> = {
-            let code_cloning = RaaCode::<TestZipTypes<N, K, M>, REPETITION_FACTOR>::new(
+            let code_cloning = RaaCode::<TestZipTypes<N, K, M>, REPETITION_FACTOR, 0>::new(
                 poly_size,
                 RaaConfig {
                     check_for_overflows: true,
@@ -456,7 +454,7 @@ mod tests {
         const N: usize = 1;
         const K: usize = 1;
 
-        let _code = RaaCode::<TestZipTypes<N, K, N>, REPETITION_FACTOR>::new(
+        let _code = RaaCode::<TestZipTypes<N, K, N>, REPETITION_FACTOR, 0>::new(
             1 << 30,
             RaaConfig {
                 check_for_overflows: true,

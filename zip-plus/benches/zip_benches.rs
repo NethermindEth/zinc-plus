@@ -17,12 +17,10 @@ use zip_plus::{
 const INT_LIMBS: usize = U64::LIMBS;
 
 struct BenchZipTypes {}
-impl ZipTypes for BenchZipTypes {
+impl ZipTypes<0> for BenchZipTypes {
     const NUM_COLUMN_OPENINGS: usize = 650;
-    type EvalR = i32;
-    type Eval = Self::EvalR;
-    type CwR = i64;
-    type Cw = Self::CwR;
+    type Eval = i32;
+    type Cw = i64;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
@@ -30,7 +28,7 @@ impl ZipTypes for BenchZipTypes {
     type CombR = Int<{ INT_LIMBS * 3 }>;
     type Comb = Self::CombR;
 }
-type Code = RaaCode<BenchZipTypes, 4>;
+type Code = RaaCode<BenchZipTypes, 4, 0>;
 
 const RAA_CONFIG: RaaConfig = RaaConfig {
     check_for_overflows: false,
@@ -39,7 +37,7 @@ const RAA_CONFIG: RaaConfig = RaaConfig {
 
 fn zip_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");
-    do_bench::<BenchZipTypes, Code>(&mut group, RAA_CONFIG);
+    do_bench::<BenchZipTypes, Code, _>(&mut group, RAA_CONFIG);
     group.finish();
 }
 

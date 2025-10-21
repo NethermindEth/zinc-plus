@@ -9,7 +9,7 @@ use crate::{
     merkle::{MerkleError, MerkleProof, MtHash},
     pcs::structs::{ZipPlusHint, ZipTypes},
     pcs_transcript::PcsTranscript,
-    poly::Polynomial,
+    poly::ConstCoeffBitWidth,
     traits::ConstTranscribable,
 };
 #[cfg(feature = "parallel")]
@@ -22,7 +22,13 @@ fn err_too_many_variates(function: &str, upto: usize, got: usize) -> ZipError {
 }
 
 // Ensures that polynomials and evaluation points are of appropriate size
-pub(super) fn validate_input<'a, Zt: ZipTypes + 'a, Lc: LinearCode<Zt>, Pt: 'a>(
+pub(super) fn validate_input<
+    'a,
+    Zt: ZipTypes<DEGREE> + 'a,
+    Lc: LinearCode<Zt, DEGREE>,
+    Pt: 'a,
+    const DEGREE: usize,
+>(
     function: &str,
     param_num_vars: usize,
     polys: impl Iterable<Item = &'a DenseMultilinearExtension<Zt::Eval>>,
@@ -36,7 +42,7 @@ pub(super) fn validate_input<'a, Zt: ZipTypes + 'a, Lc: LinearCode<Zt>, Pt: 'a>(
         let d = div!(param_num_vars, 2);
         let codeword_bits = ilog_round_up!(mul!(Lc::REPETITION_FACTOR, d), usize);
         let mut challenge_bits = Zt::Chal::NUM_BITS;
-        if Zt::Comb::DEGREE_BOUND > 0 {
+        if DEGREE > 0 {
             // This means we also draft alphas (multiplied with coeffs), which
             // doubles the number of challenge bits
             challenge_bits = mul!(challenge_bits, 2);
@@ -47,7 +53,7 @@ pub(super) fn validate_input<'a, Zt: ZipTypes + 'a, Lc: LinearCode<Zt>, Pt: 'a>(
                 add!(mul!(codeword_bits, 2), ilog_round_up!(d, usize)),
                 challenge_bits
             ),
-            sub!(Zt::EvalR::NUM_BITS, 1)
+            sub!(Zt::Eval::COEFF_BIT_WIDTH, 1)
         );
         assert!(
             actual_lc_bits <= max_lc_bits,

@@ -1,20 +1,44 @@
-use super::{EvaluationError, Polynomial};
-use crate::pcs::structs::MulByScalar;
-use crypto_primitives::Semiring;
+use super::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError};
+use crate::traits::ConstTranscribable;
+use crypto_primitives::crypto_bigint_int::Int;
 
-impl<R: Semiring> Polynomial<Self> for R {
-    const DEGREE_BOUND: usize = 0;
+macro_rules! impl_zero_degree {
+    ($($t:ty),+) => {
+        $(
+            impl<T> EvaluatablePolynomial<T, Self> for $t {
+                fn evaluate_at_point(&self, point: &[T]) -> Result<Self, EvaluationError> {
+                    if !point.is_empty() {
+                        return Err(EvaluationError::WrongPointWidth {
+                            expected: 0,
+                            actual: point.len(),
+                        });
+                    }
+                    Ok(self.clone())
+                }
+            }
 
-    fn evaluate_at_point<C>(&self, point: &[C]) -> Result<R, EvaluationError>
-    where
-        Self: for<'a> MulByScalar<&'a C>,
-    {
+            impl ConstCoeffBitWidth for $t {
+                const COEFF_BIT_WIDTH: usize = <$t>::BITS as usize;
+            }
+        )*
+    };
+}
+
+impl_zero_degree!(i8, i16, i32, i64, i128);
+impl_zero_degree!(u8, u16, u32, u64, u128);
+
+impl<T, const LIMBS: usize> EvaluatablePolynomial<T, Self> for Int<LIMBS> {
+    fn evaluate_at_point(&self, point: &[T]) -> Result<Self, EvaluationError> {
         if !point.is_empty() {
             return Err(EvaluationError::WrongPointWidth {
                 expected: 0,
                 actual: point.len(),
             });
         }
-        Ok(self.clone())
+        Ok(*self)
     }
+}
+
+impl<const LIMBS: usize> ConstCoeffBitWidth for Int<LIMBS> {
+    const COEFF_BIT_WIDTH: usize = Self::NUM_BITS;
 }

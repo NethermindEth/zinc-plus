@@ -16,9 +16,11 @@ use crate::{
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
 
-impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
+impl<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize>
+    ZipPlus<Zt, Lc, DEGREE>
+{
     pub fn evaluate<F>(
-        pp: &ZipPlusParams<Zt, Lc>,
+        pp: &ZipPlusParams<Zt, Lc, DEGREE>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
         point: &[Zt::Pt],
         test_transcript: ZipPlusTestTranscript,
@@ -31,7 +33,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
         Zt::Eval: ProjectableToField<F>,
     {
-        validate_input::<Zt, Lc, _>("evaluate", pp.num_vars, [poly], [point])?;
+        validate_input::<Zt, Lc, _, DEGREE>("evaluate", pp.num_vars, [poly], [point])?;
 
         let mut transcript: PcsTranscript = test_transcript.into();
 

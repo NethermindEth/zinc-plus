@@ -26,7 +26,7 @@ use zip_plus::{
 
 type F = BoxedMontyField;
 
-pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>>(
+pub fn do_bench<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize>(
     group: &mut BenchmarkGroup<WallTime>,
     code_config: Lc::Config,
 ) where
@@ -36,49 +36,54 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     Zt::Eval: ProjectableToField<F>,
     Zt::Cw: ProjectableToField<F>,
 {
-    encode_rows::<Zt, Lc, 12>(group, code_config);
-    encode_rows::<Zt, Lc, 13>(group, code_config);
-    encode_rows::<Zt, Lc, 14>(group, code_config);
-    encode_rows::<Zt, Lc, 15>(group, code_config);
-    encode_rows::<Zt, Lc, 16>(group, code_config);
+    encode_rows::<Zt, Lc, DEGREE, 12>(group, code_config);
+    encode_rows::<Zt, Lc, DEGREE, 13>(group, code_config);
+    encode_rows::<Zt, Lc, DEGREE, 14>(group, code_config);
+    encode_rows::<Zt, Lc, DEGREE, 15>(group, code_config);
+    encode_rows::<Zt, Lc, DEGREE, 16>(group, code_config);
 
-    encode_single_row::<Zt, Lc, 128>(group, code_config);
-    encode_single_row::<Zt, Lc, 256>(group, code_config);
-    encode_single_row::<Zt, Lc, 512>(group, code_config);
-    encode_single_row::<Zt, Lc, 1024>(group, code_config);
+    encode_single_row::<Zt, Lc, DEGREE, 128>(group, code_config);
+    encode_single_row::<Zt, Lc, DEGREE, 256>(group, code_config);
+    encode_single_row::<Zt, Lc, DEGREE, 512>(group, code_config);
+    encode_single_row::<Zt, Lc, DEGREE, 1024>(group, code_config);
 
-    merkle_root::<Zt, 12>(group);
-    merkle_root::<Zt, 13>(group);
-    merkle_root::<Zt, 14>(group);
-    merkle_root::<Zt, 15>(group);
-    merkle_root::<Zt, 16>(group);
+    merkle_root::<Zt, DEGREE, 12>(group);
+    merkle_root::<Zt, DEGREE, 13>(group);
+    merkle_root::<Zt, DEGREE, 14>(group);
+    merkle_root::<Zt, DEGREE, 15>(group);
+    merkle_root::<Zt, DEGREE, 16>(group);
 
-    commit::<Zt, Lc, 12>(group, code_config);
-    commit::<Zt, Lc, 13>(group, code_config);
-    commit::<Zt, Lc, 14>(group, code_config);
-    commit::<Zt, Lc, 15>(group, code_config);
-    commit::<Zt, Lc, 16>(group, code_config);
+    commit::<Zt, Lc, DEGREE, 12>(group, code_config);
+    commit::<Zt, Lc, DEGREE, 13>(group, code_config);
+    commit::<Zt, Lc, DEGREE, 14>(group, code_config);
+    commit::<Zt, Lc, DEGREE, 15>(group, code_config);
+    commit::<Zt, Lc, DEGREE, 16>(group, code_config);
 
-    test::<Zt, Lc, 12>(group, code_config);
-    test::<Zt, Lc, 13>(group, code_config);
-    test::<Zt, Lc, 14>(group, code_config);
-    test::<Zt, Lc, 15>(group, code_config);
-    test::<Zt, Lc, 16>(group, code_config);
+    test::<Zt, Lc, DEGREE, 12>(group, code_config);
+    test::<Zt, Lc, DEGREE, 13>(group, code_config);
+    test::<Zt, Lc, DEGREE, 14>(group, code_config);
+    test::<Zt, Lc, DEGREE, 15>(group, code_config);
+    test::<Zt, Lc, DEGREE, 16>(group, code_config);
 
-    evaluate::<Zt, Lc, 12>(group, code_config);
-    evaluate::<Zt, Lc, 13>(group, code_config);
-    evaluate::<Zt, Lc, 14>(group, code_config);
-    evaluate::<Zt, Lc, 15>(group, code_config);
-    evaluate::<Zt, Lc, 16>(group, code_config);
+    evaluate::<Zt, Lc, DEGREE, 12>(group, code_config);
+    evaluate::<Zt, Lc, DEGREE, 13>(group, code_config);
+    evaluate::<Zt, Lc, DEGREE, 14>(group, code_config);
+    evaluate::<Zt, Lc, DEGREE, 15>(group, code_config);
+    evaluate::<Zt, Lc, DEGREE, 16>(group, code_config);
 
-    verify::<Zt, Lc, 12>(group, code_config);
-    verify::<Zt, Lc, 13>(group, code_config);
-    verify::<Zt, Lc, 14>(group, code_config);
-    verify::<Zt, Lc, 15>(group, code_config);
-    verify::<Zt, Lc, 16>(group, code_config);
+    verify::<Zt, Lc, DEGREE, 12>(group, code_config);
+    verify::<Zt, Lc, DEGREE, 13>(group, code_config);
+    verify::<Zt, Lc, DEGREE, 14>(group, code_config);
+    verify::<Zt, Lc, DEGREE, 15>(group, code_config);
+    verify::<Zt, Lc, DEGREE, 16>(group, code_config);
 }
 
-pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
+pub fn encode_rows<
+    Zt: ZipTypes<DEGREE>,
+    Lc: LinearCode<Zt, DEGREE>,
+    const DEGREE: usize,
+    const P: usize,
+>(
     group: &mut BenchmarkGroup<WallTime>,
     code_config: Lc::Config,
 ) where
@@ -96,7 +101,7 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
             let linear_code = Lc::new(poly_size, code_config);
             let params = ZipPlus::setup(poly_size, linear_code);
             let row_len = params.linear_code.row_len();
-            let poly = DenseMultilinearExtension::<<Zt as ZipTypes>::Eval>::rand(
+            let poly = DenseMultilinearExtension::<<Zt as ZipTypes<_>>::Eval>::rand(
                 P,
                 &mut rng,
                 Zero::zero(),
@@ -109,7 +114,12 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     );
 }
 
-pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>, const ROW_LEN: usize>(
+pub fn encode_single_row<
+    Zt: ZipTypes<DEGREE>,
+    Lc: LinearCode<Zt, DEGREE>,
+    const DEGREE: usize,
+    const ROW_LEN: usize,
+>(
     group: &mut BenchmarkGroup<WallTime>,
     code_config: Lc::Config,
 ) where
@@ -126,25 +136,26 @@ pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>, const ROW_LEN: usize>
             let poly_size = ROW_LEN * ROW_LEN;
             let linear_code = Lc::new(poly_size, code_config);
             assert_eq!(linear_code.row_len(), ROW_LEN, "Unexpected row_len");
-            let message: Vec<<Zt as ZipTypes>::Eval> =
+            let message: Vec<<Zt as ZipTypes<_>>::Eval> =
                 (0..ROW_LEN).map(|_i| rng.random()).collect();
             b.iter(|| {
-                let encoded_row: Vec<<Zt as ZipTypes>::Cw> = linear_code.encode(&message);
+                let encoded_row: Vec<<Zt as ZipTypes<_>>::Cw> = linear_code.encode(&message);
                 black_box(encoded_row);
             })
         },
     );
 }
 
-pub fn merkle_root<Zt: ZipTypes, const P: usize>(group: &mut BenchmarkGroup<WallTime>)
-where
+pub fn merkle_root<Zt: ZipTypes<DEGREE>, const DEGREE: usize, const P: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
     StandardUniform: Distribution<Zt::Cw>,
 {
     let mut rng = ThreadRng::default();
 
     let num_leaves = 1 << P;
     let leaves = (0..num_leaves)
-        .map(|_| rng.random::<<Zt as ZipTypes>::Cw>())
+        .map(|_| rng.random::<<Zt as ZipTypes<_>>::Cw>())
         .collect_vec();
     let matrix: DenseRowMatrix<_> = vec![leaves.clone()].into();
     let rows = matrix.to_rows_slices();
@@ -160,7 +171,12 @@ where
     );
 }
 
-pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
+pub fn commit<
+    Zt: ZipTypes<DEGREE>,
+    Lc: LinearCode<Zt, DEGREE>,
+    const DEGREE: usize,
+    const P: usize,
+>(
     group: &mut BenchmarkGroup<WallTime>,
     code_config: Lc::Config,
 ) where
@@ -195,7 +211,7 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     );
 }
 
-pub fn test<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
+pub fn test<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
     code_config: Lc::Config,
 ) where
@@ -227,7 +243,12 @@ pub fn test<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     );
 }
 
-pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
+pub fn evaluate<
+    Zt: ZipTypes<DEGREE>,
+    Lc: LinearCode<Zt, DEGREE>,
+    const DEGREE: usize,
+    const P: usize,
+>(
     group: &mut BenchmarkGroup<WallTime>,
     code_config: Lc::Config,
 ) where
@@ -273,7 +294,12 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     );
 }
 
-pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
+pub fn verify<
+    Zt: ZipTypes<DEGREE>,
+    Lc: LinearCode<Zt, DEGREE>,
+    const DEGREE: usize,
+    const P: usize,
+>(
     group: &mut BenchmarkGroup<WallTime>,
     code_config: Lc::Config,
 ) where

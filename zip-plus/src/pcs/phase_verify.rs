@@ -10,7 +10,7 @@ use crate::{
         utils::{ColumnOpening, point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
-    poly::Polynomial,
+    poly::EvaluatablePolynomial,
     traits::{FromRef, Transcribable, Transcript},
     utils::inner_product,
 };
@@ -18,9 +18,11 @@ use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
 use num_traits::ConstZero;
 
-impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
+impl<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize>
+    ZipPlus<Zt, Lc, DEGREE>
+{
     pub fn verify<F>(
-        vp: &ZipPlusParams<Zt, Lc>,
+        vp: &ZipPlusParams<Zt, Lc, DEGREE>,
         comm: &ZipPlusCommitment,
         point_f: &[F],
         eval_f: &F,
@@ -34,7 +36,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
         Zt::Cw: ProjectableToField<F>,
     {
-        validate_input::<Zt, Lc, _>("verify", vp.num_vars, &[], [point_f])?;
+        validate_input::<Zt, Lc, _, DEGREE>("verify", vp.num_vars, &[], [point_f])?;
 
         let mut transcript: PcsTranscript = proof.clone().into();
 
@@ -64,7 +66,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
     #[allow(clippy::type_complexity)]
     pub(super) fn verify_testing(
-        vp: &ZipPlusParams<Zt, Lc>,
+        vp: &ZipPlusParams<Zt, Lc, DEGREE>,
         root: &MtHash,
         transcript: &mut PcsTranscript,
     ) -> Result<Vec<(usize, Vec<Zt::Cw>)>, ZipError> {
@@ -72,9 +74,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let encoded_combined_rows: Option<(Vec<Zt::Chal>, Vec<Zt::Chal>, Vec<Zt::CombR>)> = {
             if vp.num_rows > 1 {
                 // Values to evaluate the coefficients at
-                let alphas = transcript
-                    .fs_transcript
-                    .get_challenges(Zt::Comb::DEGREE_BOUND);
+                let alphas = transcript.fs_transcript.get_challenges(DEGREE);
 
                 // Coefficients for the linear combination of polynomial with evaluated
                 // coefficients
@@ -146,7 +146,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     }
 
     fn verify_evaluation<F>(
-        vp: &ZipPlusParams<Zt, Lc>,
+        vp: &ZipPlusParams<Zt, Lc, DEGREE>,
         point_f: &[F],
         eval_f: &F,
         columns_opened: &[(usize, Vec<Zt::Cw>)],
@@ -191,7 +191,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         column_entries: &[Zt::Cw],
         column: usize,
         num_rows: usize,
-        project: &impl Fn(&<Zt as ZipTypes>::Cw) -> F,
+        project: &impl Fn(&<Zt as ZipTypes<DEGREE>>::Cw) -> F,
         field_cfg: &F::Config,
     ) -> Result<(), ZipError>
     where
@@ -254,13 +254,13 @@ mod tests {
     type F = BoxedMontyField;
 
     type Zt = TestZipTypes<N, K, M>;
-    type C = RaaSignFlippingCode<Zt, 4>;
+    type C = RaaSignFlippingCode<Zt, 4, 0>;
 
     type PolyZt = TestPolyZipTypes<K, M, DEGREE>;
-    type PolyC = RaaCode<PolyZt, 4>;
+    type PolyC = RaaCode<PolyZt, 4, DEGREE>;
 
-    type TestZip = ZipPlus<Zt, C>;
-    type TestPolyZip = ZipPlus<PolyZt, PolyC>;
+    type TestZip = ZipPlus<Zt, C, 0>;
+    type TestPolyZip = ZipPlus<PolyZt, PolyC, DEGREE>;
 
     #[test]
     fn successful_verification_of_valid_proof() {
@@ -435,7 +435,7 @@ mod tests {
             Zero::zero(),
         );
 
-        let point: Vec<<Zt as ZipTypes>::Pt> =
+        let point: Vec<<Zt as ZipTypes<_>>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
 
         let test_mle2_proof = TestZip::test(&pp, &mle2, &data).expect("test phase should succeed");
@@ -478,7 +478,7 @@ mod tests {
         let corrupted_merkle_tree = MerkleTree::new(&corrupted_data.to_rows_slices());
         let corrupted_data = ZipPlusHint::new(corrupted_data, corrupted_merkle_tree);
 
-        let point: Vec<<Zt as ZipTypes>::Pt> =
+        let point: Vec<<Zt as ZipTypes<_>>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
 
         let test_transcript =
@@ -506,7 +506,7 @@ mod tests {
 
         let (data, comm) = TestZip::commit(&pp, &mle).unwrap();
 
-        let point: Vec<<Zt as ZipTypes>::Pt> =
+        let point: Vec<<Zt as ZipTypes<_>>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
 
         let test_transcript = TestZip::test(&pp, &mle, &data).expect("test phase should succeed");
@@ -537,7 +537,7 @@ mod tests {
         let pp = TestZip::setup(poly_size, linear_code);
 
         let evaluations: Vec<_> = (0..poly_size as i32)
-            .map(<Zt as ZipTypes>::Eval::from)
+            .map(<Zt as ZipTypes<_>>::Eval::from)
             .collect();
         let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations, Zero::zero());
 
@@ -619,11 +619,11 @@ mod tests {
         let linear_code: C = C::new(poly_size, RAA_CFG);
         let pp = TestZip::setup(poly_size, linear_code);
         let evaluations: Vec<_> = (0..poly_size)
-            .map(|_| <Zt as ZipTypes>::Eval::from(rng.random::<i8>()))
+            .map(|_| <Zt as ZipTypes<_>>::Eval::from(rng.random::<i8>()))
             .collect();
         let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations, Zero::zero());
         let point: Vec<_> = (0..n)
-            .map(|_| <Zt as ZipTypes>::Pt::random(&mut rng))
+            .map(|_| <Zt as ZipTypes<_>>::Pt::random(&mut rng))
             .collect();
 
         let (mut data, comm) = TestZip::commit(&pp, &mle).unwrap();
@@ -655,7 +655,7 @@ mod tests {
 
         let (data, comm) = TestZip::commit(&pp, &mle).expect("commit should succeed");
 
-        let point: Vec<<Zt as ZipTypes>::Pt> =
+        let point: Vec<<Zt as ZipTypes<_>>::Pt> =
             [0i64, 0i64, 0i64].into_iter().map(Int::from).collect_vec();
 
         let test_transcript = TestZip::test(&pp, &mle, &data).unwrap();
@@ -701,7 +701,7 @@ mod tests {
 
         let (data, comm) = TestZip::commit(&pp, &mle).expect("commit should succeed");
 
-        let point: Vec<<Zt as ZipTypes>::Pt> =
+        let point: Vec<<Zt as ZipTypes<_>>::Pt> =
             [0i64, 0i64, 0i64].into_iter().map(Int::from).collect_vec();
 
         let test_transcript = TestZip::test(&pp, &mle, &data).unwrap();
@@ -732,7 +732,7 @@ mod tests {
 
         let (data, comm) = TestZip::commit(&pp, &mle).expect("commit should succeed");
 
-        let point: Vec<<Zt as ZipTypes>::Pt> = vec![Int::ZERO; num_vars];
+        let point: Vec<<Zt as ZipTypes<_>>::Pt> = vec![Int::ZERO; num_vars];
 
         let test_transcript = TestZip::test(&pp, &mle, &data).unwrap();
         let (real_eval_f, proof) =
@@ -754,7 +754,7 @@ mod tests {
         let num_vars = 4;
         let (pp, _) = setup_test_params(num_vars);
 
-        let mut evals: Vec<<Zt as ZipTypes>::Eval> =
+        let mut evals: Vec<<Zt as ZipTypes<_>>::Eval> =
             (0..1 << num_vars as i32).map(Int::from).collect();
         evals[1] = Int::from(i64::MAX);
         let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, Zero::zero());
@@ -762,8 +762,8 @@ mod tests {
         let (data, comm) = TestZip::commit(&pp, &poly).unwrap();
 
         // A point of [1, 0, 0, 0] will evaluate to poly.evaluations[1].
-        let mut point = vec![<Zt as ZipTypes>::Pt::ZERO; num_vars];
-        point[0] = <Zt as ZipTypes>::Pt::ONE;
+        let mut point = vec![<Zt as ZipTypes<_>>::Pt::ZERO; num_vars];
+        point[0] = <Zt as ZipTypes<_>>::Pt::ONE;
 
         let test_transcript = TestZip::test(&pp, &poly, &data).unwrap();
         let (eval_f, proof) = TestZip::evaluate::<F>(&pp, &poly, &point, test_transcript).unwrap();
@@ -791,7 +791,7 @@ mod tests {
 
         let (hint, comm) = TestZip::commit(&pp, &poly).unwrap();
 
-        let point: Vec<<Zt as ZipTypes>::Pt> = vec![Int::from(1), Int::from(2)];
+        let point: Vec<<Zt as ZipTypes<_>>::Pt> = vec![Int::from(1), Int::from(2)];
 
         let test_transcript = TestZip::test(&pp, &poly, &hint).unwrap();
         let (eval_f, proof) = TestZip::evaluate::<F>(&pp, &poly, &point, test_transcript).unwrap();
@@ -821,7 +821,7 @@ mod tests {
 
         let (data, comm) = TestZip::commit(&pp, &mle).expect("commit should succeed");
 
-        let point: Vec<<Zt as ZipTypes>::Pt> =
+        let point: Vec<<Zt as ZipTypes<_>>::Pt> =
             [0i64, 0i64, 0i64].into_iter().map(Int::from).collect_vec();
 
         let test_transcript = TestZip::test(&pp, &mle, &data).unwrap();
