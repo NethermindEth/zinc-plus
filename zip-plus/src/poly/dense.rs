@@ -73,12 +73,16 @@ impl<R: Semiring, const DEGREE: usize> Polynomial<R> for DensePolynomial<R, DEGR
 
         // A trivial implementation of a polynomial evaluation at a given point.
         let mut result = self.coeff_0.clone();
-        for (coeff, scalar) in self.coeffs.iter().zip(point.iter()) {
-            let term = coeff
-                .mul_by_scalar(scalar)
-                .ok_or(EvaluationError::Overflow)?;
-            result = result.checked_add(&term).ok_or(EvaluationError::Overflow)?;
+        // Safety: We know that both `self.coeffs` and `point` have length DEGREE.
+        unsafe {
+            for i in 0..DEGREE {
+                let coeff = self.coeffs.get_unchecked(i);
+                let s = point.get_unchecked(i);
+                let t = coeff.mul_by_scalar(s).ok_or(EvaluationError::Overflow)?;
+                result = result.checked_add(&t).ok_or(EvaluationError::Overflow)?;
+            }
         }
+
         Ok(result)
     }
 }
