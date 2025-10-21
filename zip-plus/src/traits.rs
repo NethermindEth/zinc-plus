@@ -1,8 +1,5 @@
 use crate::primality::PrimalityTest;
-use crypto_primitives::crypto_bigint_int::Int;
-use num_traits::ConstOne;
-use std::ops::SubAssign;
-
+use crypto_primitives::{ConstIntSemiring, crypto_bigint_int::Int};
 //
 // FromRef
 //
@@ -52,20 +49,6 @@ impl<const LIMBS: usize, const LIMBS2: usize> FromRef<Int<LIMBS2>> for Int<LIMBS
     fn from_ref(value: &Int<LIMBS2>) -> Self {
         Self::try_from(value.inner()).expect("Destination Int type is too small")
     }
-}
-
-//
-// Simple semiring
-//
-
-/// A simple semiring, used only to generate random field modulus.
-// TODO(alex): Convert to a proper crypto primitive?
-pub trait SimpleSemiring: ConstOne + SubAssign {
-    const BYTES: usize;
-
-    fn is_zero(&self) -> bool;
-
-    fn is_even(&self) -> bool;
 }
 
 //
@@ -153,5 +136,5 @@ pub trait Transcript {
         (0..n).map(|_| self.get_challenge()).collect()
     }
 
-    fn get_prime<R: SimpleSemiring + ConstTranscribable, T: PrimalityTest<R>>(&mut self) -> R;
+    fn get_prime<R: ConstIntSemiring + ConstTranscribable, T: PrimalityTest<R>>(&mut self) -> R;
 }

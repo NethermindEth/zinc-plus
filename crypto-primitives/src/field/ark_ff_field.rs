@@ -1,4 +1,5 @@
 use super::*;
+use crate::{Semiring, boolean::Boolean};
 use ark_ff::{
     AdditiveGroup, CubicExtConfig, CubicExtField, LegendreSymbol, QuadExtConfig, QuadExtField,
     SqrtPrecomputation, fields::Field as ArkWrappedField,
@@ -377,9 +378,23 @@ impl<F: ArkWrappedField> From<bool> for ArkField<F> {
     }
 }
 
+impl<F: ArkWrappedField> From<Boolean> for ArkField<F> {
+    fn from(value: Boolean) -> Self {
+        Self::from(*value)
+    }
+}
+
+impl<F: ArkWrappedField> From<&Boolean> for ArkField<F> {
+    fn from(value: &Boolean) -> Self {
+        Self::from(**value)
+    }
+}
+
 //
-// Ring and Field
+// Semiring, Ring and Field
 //
+
+impl<F: ArkWrappedField> Semiring for ArkField<F> {}
 
 impl<F: ArkWrappedField> Ring for ArkField<F> {}
 

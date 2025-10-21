@@ -1,5 +1,5 @@
 use super::*;
-use crate::crypto_bigint_int::Int;
+use crate::{IntRing, IntSemiring, Semiring, boolean::Boolean, crypto_bigint_int::Int};
 use core::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
@@ -412,6 +412,18 @@ impl FromWithConfig<&bool> for BoxedMontyField {
     }
 }
 
+impl FromWithConfig<Boolean> for BoxedMontyField {
+    fn from_with_cfg(value: Boolean, cfg: &Self::Config) -> Self {
+        Self::from_with_cfg(*value, cfg)
+    }
+}
+
+impl FromWithConfig<&Boolean> for BoxedMontyField {
+    fn from_with_cfg(value: &Boolean, cfg: &Self::Config) -> Self {
+        Self::from_with_cfg(*value, cfg)
+    }
+}
+
 impl<const LIMBS: usize> FromWithConfig<Int<LIMBS>> for BoxedMontyField {
     fn from_with_cfg(value: Int<LIMBS>, cfg: &Self::Config) -> Self {
         Self::from_with_cfg(&value, cfg)
@@ -459,12 +471,14 @@ impl<const LIMBS: usize> FromWithConfig<&crypto_bigint::Uint<LIMBS>> for BoxedMo
 }
 
 //
-// Ring and Field
+// Semiring, Ring and Field
 //
+
+impl Semiring for BoxedMontyField {}
 
 impl Ring for BoxedMontyField {}
 
-impl IntRing for BoxedMontyField {
+impl IntSemiring for BoxedMontyField {
     fn is_odd(&self) -> bool {
         // Sadly there's no efficient way to implement this for Montgomery form
         self.0.retrieve().is_odd().into()
@@ -474,7 +488,9 @@ impl IntRing for BoxedMontyField {
         // Sadly there's no efficient way to implement this for Montgomery form
         self.0.retrieve().is_even().into()
     }
+}
 
+impl IntRing for BoxedMontyField {
     fn checked_abs(&self) -> Option<Self> {
         Some(self.clone())
     }

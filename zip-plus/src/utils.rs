@@ -1,17 +1,14 @@
 use crate::{
     pcs::structs::MulByScalar,
-    traits::{ConstTranscribable, Named, SimpleSemiring, Transcribable},
+    traits::{ConstTranscribable, Named, Transcribable},
 };
-use crypto_bigint::{BitOps, BoxedUint, Integer, Uint, Word};
-use crypto_primitives::crypto_bigint_int::Int;
+use crypto_bigint::{BitOps, BoxedUint, Word};
+use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_uint::Uint};
 use itertools::Itertools;
-use num_traits::{CheckedAdd, ConstOne, One, Zero};
+use num_traits::CheckedAdd;
 use rand::{rngs::StdRng, seq::SliceRandom};
 use rand_core::SeedableRng;
-use std::{
-    iter::Iterator,
-    ops::{Mul, SubAssign},
-};
+use std::iter::Iterator;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -242,49 +239,6 @@ pub(super) fn shuffle_seeded<T>(slice: &mut [T], seed: u64) {
 }
 
 //
-// Semiring wrapper for Uint
-//
-
-pub struct UintSemiring<const LIMBS: usize>(pub Uint<LIMBS>);
-
-impl<const LIMBS: usize> ConstOne for UintSemiring<LIMBS> {
-    const ONE: Self = Self(Uint::<LIMBS>::ONE);
-}
-
-impl<const LIMBS: usize> One for UintSemiring<LIMBS> {
-    fn one() -> Self {
-        Self::ONE
-    }
-}
-
-impl<const LIMBS: usize> SubAssign for UintSemiring<LIMBS> {
-    #[allow(clippy::arithmetic_side_effects)]
-    fn sub_assign(&mut self, rhs: Self) {
-        self.0 -= rhs.0;
-    }
-}
-
-impl<const LIMBS: usize> Mul for UintSemiring<LIMBS> {
-    type Output = Self;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        Self(self.0.mul(rhs.0))
-    }
-}
-
-impl<const LIMBS: usize> SimpleSemiring for UintSemiring<LIMBS> {
-    const BYTES: usize = Uint::<LIMBS>::NUM_BYTES;
-
-    fn is_zero(&self) -> bool {
-        self.0.is_zero()
-    }
-
-    fn is_even(&self) -> bool {
-        self.0.is_even().into()
-    }
-}
-
-//
 // Named implementations
 //
 
@@ -309,7 +263,7 @@ impl<const LIMBS: usize> Named for Int<LIMBS> {
     }
 }
 
-impl<const LIMBS: usize> Named for UintSemiring<LIMBS> {
+impl<const LIMBS: usize> Named for Uint<LIMBS> {
     fn type_name() -> String {
         format!("Uint<{}>", LIMBS)
     }
@@ -377,11 +331,11 @@ impl<const LIMBS: usize> ConstTranscribable for Int<LIMBS> {
     const NUM_BYTES: usize = Uint::<LIMBS>::NUM_BYTES;
 
     fn read_transcription_bytes(bytes: &[u8]) -> Self {
-        (*<Uint<LIMBS> as ConstTranscribable>::read_transcription_bytes(bytes).as_int()).into()
+        *<Uint<LIMBS> as ConstTranscribable>::read_transcription_bytes(bytes).as_int()
     }
 
     fn write_transcription_bytes(&self, buf: &mut [u8]) {
-        ConstTranscribable::write_transcription_bytes(self.inner().as_uint(), buf)
+        ConstTranscribable::write_transcription_bytes(self.as_uint(), buf)
     }
 }
 
@@ -427,18 +381,6 @@ impl Transcribable for BoxedUint {
             // vector
             buf[(i * W_SIZE)..(i * W_SIZE + W_SIZE)].copy_from_slice(w.to_le_bytes().as_ref());
         }
-    }
-}
-
-impl<const LIMBS: usize> ConstTranscribable for UintSemiring<LIMBS> {
-    const NUM_BYTES: usize = Uint::<LIMBS>::NUM_BYTES;
-
-    fn read_transcription_bytes(bytes: &[u8]) -> Self {
-        Self(<Uint<LIMBS> as ConstTranscribable>::read_transcription_bytes(bytes))
-    }
-
-    fn write_transcription_bytes(&self, buf: &mut [u8]) {
-        ConstTranscribable::write_transcription_bytes(&self.0, buf)
     }
 }
 

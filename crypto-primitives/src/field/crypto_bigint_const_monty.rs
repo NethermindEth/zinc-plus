@@ -1,5 +1,8 @@
 use super::*;
-use crate::crypto_bigint_int::Int;
+use crate::{
+    IntRing, IntSemiring, Semiring, boolean::Boolean, crypto_bigint_int::Int,
+    crypto_bigint_uint::Uint,
+};
 use core::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
@@ -9,7 +12,7 @@ use core::{
     str::FromStr,
 };
 use crypto_bigint::{
-    Integer, Limb, Uint,
+    Integer, Limb,
     modular::{ConstMontyForm, ConstMontyParams as Params, Retrieve},
     subtle::{Choice, ConditionallySelectable, ConstantTimeEq},
 };
@@ -57,27 +60,27 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> ConstMontyField<Mod, LIMBS> {
     /// Retrieves the integer currently encoded in this [`ConstMontyForm`],
     /// guaranteed to be reduced.
     pub const fn retrieve(&self) -> Uint<LIMBS> {
-        self.0.retrieve()
+        Uint::new(self.0.retrieve())
     }
 
     /// Access the `ConstMontyForm` value in Montgomery form.
     pub const fn as_montgomery(&self) -> &Uint<LIMBS> {
-        self.0.as_montgomery()
+        Uint::new_ref(self.0.as_montgomery())
     }
 
     /// Mutably access the `ConstMontyForm` value in Montgomery form.
     pub fn as_montgomery_mut(&mut self) -> &mut Uint<LIMBS> {
-        self.0.as_montgomery_mut()
+        Uint::new_ref_mut(self.0.as_montgomery_mut())
     }
 
     /// Create a `ConstMontyForm` from a value in Montgomery form.
     pub const fn from_montgomery(integer: Uint<LIMBS>) -> Self {
-        Self(ConstMontyForm::from_montgomery(integer))
+        Self(ConstMontyForm::from_montgomery(integer.into_inner()))
     }
 
     /// Extract the value from the `ConstMontyForm` in Montgomery form.
     pub const fn to_montgomery(&self) -> Uint<LIMBS> {
-        self.0.to_montgomery()
+        Uint::new(self.0.to_montgomery())
     }
 
     /// Performs division by 2, that is returns `x` such that `x + x = self`.
@@ -96,7 +99,7 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> ConstMontyField<Mod, LIMBS> {
         exponent: &Uint<RHS_LIMBS>,
         exponent_bits: u32,
     ) -> Self {
-        Self(self.0.pow_bounded_exp(exponent, exponent_bits))
+        Self(self.0.pow_bounded_exp(exponent.inner(), exponent_bits))
     }
 }
 
@@ -145,8 +148,8 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> FromStr for ConstMontyField<Mod, LI
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let uint = Uint::<LIMBS>::from_str_radix_vartime(s, 10).map_err(|_| ())?;
-        Ok(Self(ConstMontyForm::new(&uint)))
+        let uint = Uint::<LIMBS>::from_str(s)?;
+        Ok(Self(ConstMontyForm::new(uint.inner())))
     }
 }
 
@@ -421,7 +424,7 @@ macro_rules! impl_from_unsigned {
             impl<Mod: Params<LIMBS>, const LIMBS: usize> From<$t> for ConstMontyField<Mod, LIMBS> {
                 fn from(value: $t) -> Self {
                     let value = Uint::from(value);
-                    Self(ConstMontyForm::new(&value))
+                    Self(ConstMontyForm::new(value.inner()))
                 }
             }
 
@@ -442,7 +445,7 @@ macro_rules! impl_from_signed {
                 #![allow(clippy::arithmetic_side_effects)]
                 fn from(value: $t) -> Self {
                     let magnitude = Uint::from(value.abs_diff(0));
-                    let form = ConstMontyForm::new(&magnitude);
+                    let form = ConstMontyForm::new(magnitude.inner());
                     Self(if value.is_negative() { -form } else { form })
                 }
             }
@@ -465,6 +468,18 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> From<bool> for ConstMontyField<Mod,
     }
 }
 
+impl<Mod: Params<LIMBS>, const LIMBS: usize> From<Boolean> for ConstMontyField<Mod, LIMBS> {
+    fn from(value: Boolean) -> Self {
+        Self::from(*value)
+    }
+}
+
+impl<Mod: Params<LIMBS>, const LIMBS: usize> From<&Boolean> for ConstMontyField<Mod, LIMBS> {
+    fn from(value: &Boolean) -> Self {
+        Self::from(**value)
+    }
+}
+
 impl<Mod: Params<LIMBS>, const LIMBS: usize> From<Uint<LIMBS>> for ConstMontyField<Mod, LIMBS> {
     fn from(value: Uint<LIMBS>) -> Self {
         Self::from(&value)
@@ -473,7 +488,7 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> From<Uint<LIMBS>> for ConstMontyFie
 
 impl<Mod: Params<LIMBS>, const LIMBS: usize> From<&Uint<LIMBS>> for ConstMontyField<Mod, LIMBS> {
     fn from(value: &Uint<LIMBS>) -> Self {
-        Self(ConstMontyForm::new(value))
+        Self(ConstMontyForm::new(value.inner()))
     }
 }
 
@@ -522,12 +537,14 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize, const LIMBS2: usize> From<&crypto_b
 }
 
 //
-// Ring and Field
+// Semiring, Ring and Field
 //
+
+impl<Mod: Params<LIMBS>, const LIMBS: usize> Semiring for ConstMontyField<Mod, LIMBS> {}
 
 impl<Mod: Params<LIMBS>, const LIMBS: usize> Ring for ConstMontyField<Mod, LIMBS> {}
 
-impl<Mod: Params<LIMBS>, const LIMBS: usize> IntRing for ConstMontyField<Mod, LIMBS> {
+impl<Mod: Params<LIMBS>, const LIMBS: usize> IntSemiring for ConstMontyField<Mod, LIMBS> {
     fn is_odd(&self) -> bool {
         // Sadly there's no efficient way to implement this for Montgomery form
         self.0.retrieve().is_odd().into()
@@ -537,7 +554,9 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> IntRing for ConstMontyField<Mod, LI
         // Sadly there's no efficient way to implement this for Montgomery form
         self.0.retrieve().is_even().into()
     }
+}
 
+impl<Mod: Params<LIMBS>, const LIMBS: usize> IntRing for ConstMontyField<Mod, LIMBS> {
     fn checked_abs(&self) -> Option<Self> {
         Some(*self)
     }
@@ -602,7 +621,7 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> crypto_bigint::Random for ConstMont
 impl<'de, Mod, const LIMBS: usize> serde::Deserialize<'de> for ConstMontyField<Mod, LIMBS>
 where
     Mod: Params<LIMBS>,
-    Uint<LIMBS>: crypto_bigint::Encoding,
+    crypto_bigint::Uint<LIMBS>: crypto_bigint::Encoding,
 {
     #[inline(always)]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -617,7 +636,7 @@ where
 impl<Mod, const LIMBS: usize> serde::Serialize for ConstMontyField<Mod, LIMBS>
 where
     Mod: Params<LIMBS>,
-    Uint<LIMBS>: crypto_bigint::Encoding,
+    crypto_bigint::Uint<LIMBS>: crypto_bigint::Encoding,
 {
     #[inline(always)]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -672,7 +691,7 @@ impl<Mod: Params<LIMBS>, const LIMBS: usize> crypto_bigint::Square for ConstMont
 }
 
 impl<Mod: Params<LIMBS>, const LIMBS: usize> Retrieve for ConstMontyField<Mod, LIMBS> {
-    type Output = <ConstMontyForm<Mod, LIMBS> as Retrieve>::Output;
+    type Output = Uint<LIMBS>;
     fn retrieve(&self) -> Self::Output {
         self.retrieve()
     }
@@ -1001,7 +1020,7 @@ mod tests {
 
     #[test]
     fn wrapper_methods() {
-        let value = ConstMontyForm::new(&Uint::from(42_u64));
+        let value = ConstMontyForm::new(Uint::from(42_u64).inner());
         let field = F::new(value);
 
         // Test inner and into_inner
@@ -1198,7 +1217,7 @@ mod tests {
         assert_eq!(d, F::from(-654_i64));
 
         // Conversions from and to ConstMontyForm
-        let mont_form = ConstMontyForm::new(&Uint::<{ U256::LIMBS }>::from(999_u64));
+        let mont_form = ConstMontyForm::new(Uint::<{ U256::LIMBS }>::from(999_u64).inner());
         let f: F = mont_form.into();
         let f2 = F::new(mont_form);
         assert_eq!(f, f2);

@@ -3,10 +3,11 @@ use crate::{
     merkle::{MerkleTree, MtHash},
     poly::Polynomial,
     primality::PrimalityTest,
-    traits::{ConstTranscribable, FromRef, Named, SimpleSemiring},
+    traits::{ConstTranscribable, FromRef, Named},
 };
 use crypto_primitives::{
-    ConstIntRing, DenseRowMatrix, FixedRing, FromWithConfig, PrimeField, crypto_bigint_int::Int,
+    ConstIntRing, ConstIntSemiring, DenseRowMatrix, FixedRing, FromWithConfig, PrimeField,
+    crypto_bigint_int::Int,
 };
 use num_traits::CheckedMul;
 use std::{marker::PhantomData, ops::Neg};
@@ -31,7 +32,7 @@ pub trait ZipTypes: Send + Sync {
         + Copy;
 
     /// Semiring type used to draft field modulus elements, natural numbers
-    type Fmod: SimpleSemiring + ConstTranscribable + Named;
+    type Fmod: ConstIntSemiring + ConstTranscribable + Named;
     type PrimeTest: PrimalityTest<Self::Fmod>;
 
     /// Ring of challenge elements (coefficients) to perform a random linear

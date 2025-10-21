@@ -6,13 +6,12 @@ mod zip_common;
 use zip_common::*;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use crypto_bigint::{U64, Uint};
-use crypto_primes::hazmat::MillerRabin;
-use crypto_primitives::crypto_bigint_int::Int;
+use crypto_bigint::U64;
+use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_uint::Uint};
 use zip_plus::{
     code::raa::{RaaCode, RaaConfig},
     pcs::structs::ZipTypes,
-    utils::UintSemiring,
+    primality::MillerRabin,
 };
 
 const INT_LIMBS: usize = U64::LIMBS;
@@ -24,8 +23,8 @@ impl ZipTypes for BenchZipTypes {
     type Eval = Self::EvalR;
     type CwR = i64;
     type Cw = Self::CwR;
-    type Fmod = UintSemiring<{ INT_LIMBS * 4 }>;
-    type PrimeTest = MillerRabin<Uint<{ INT_LIMBS * 4 }>>;
+    type Fmod = Uint<{ INT_LIMBS * 4 }>;
+    type PrimeTest = MillerRabin;
     type Chal = i128;
     type Pt = i128;
     type CombR = Int<{ INT_LIMBS * 3 }>;

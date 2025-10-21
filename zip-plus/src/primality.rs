@@ -1,17 +1,19 @@
-use crate::utils::UintSemiring;
-use crypto_bigint::{Odd, Uint};
-use crypto_primes::hazmat::MillerRabin;
+use crypto_bigint::Odd;
+use crypto_primitives::crypto_bigint_uint::Uint;
 
 pub trait PrimalityTest<R> {
     fn is_probably_prime(candidate: &R) -> bool;
 }
 
-impl<const LIMBS: usize> PrimalityTest<UintSemiring<LIMBS>> for MillerRabin<Uint<LIMBS>> {
-    fn is_probably_prime(candidate: &UintSemiring<LIMBS>) -> bool {
-        let Some(odd) = Odd::new(candidate.0).into_option() else {
+#[derive(Debug, Clone, Copy)]
+pub struct MillerRabin {}
+
+impl<const LIMBS: usize> PrimalityTest<Uint<LIMBS>> for MillerRabin {
+    fn is_probably_prime(candidate: &Uint<LIMBS>) -> bool {
+        let Some(odd) = Odd::new(*candidate.inner()).into_option() else {
             return false;
         };
-        let test = Self::new(odd);
+        let test = crypto_primes::hazmat::MillerRabin::new(odd);
         test.test_base_two().is_probably_prime()
     }
 }

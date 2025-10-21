@@ -7,7 +7,7 @@ pub mod crypto_bigint_boxed_monty;
 #[cfg(feature = "crypto_bigint")]
 pub mod crypto_bigint_const_monty;
 
-use crate::{ConstIntRing, IntRing, ring::Ring};
+use crate::{ConstIntRing, ring::Ring};
 use core::{
     fmt::Debug,
     ops::{Div, DivAssign, Neg},
