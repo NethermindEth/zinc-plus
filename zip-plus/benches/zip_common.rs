@@ -10,7 +10,8 @@ use ark_std::{
 };
 use criterion::{BenchmarkGroup, measurement::WallTime};
 use crypto_primitives::{
-    Field, FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
+    DenseRowMatrix, Field, FromWithConfig, IntoWithConfig, PrimeField,
+    crypto_bigint_boxed_monty::BoxedMontyField,
 };
 use itertools::Itertools;
 use num_traits::{One, Zero};
@@ -95,14 +96,13 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
             let linear_code = Lc::new(poly_size, code_config);
             let params = ZipPlus::setup(poly_size, linear_code);
             let row_len = params.linear_code.row_len();
-            let codeword_len = params.linear_code.codeword_len();
             let poly = DenseMultilinearExtension::<<Zt as ZipTypes>::Eval>::rand(
                 P,
                 &mut rng,
                 Zero::zero(),
             );
             b.iter(|| {
-                let cw = ZipPlus::encode_rows(&params, codeword_len, row_len, &poly.evaluations);
+                let cw = ZipPlus::encode_rows(&params, row_len, &poly.evaluations);
                 black_box(cw)
             })
         },
@@ -146,12 +146,14 @@ where
     let leaves = (0..num_leaves)
         .map(|_| rng.random::<<Zt as ZipTypes>::Cw>())
         .collect_vec();
+    let matrix: DenseRowMatrix<_> = vec![leaves.clone()].into();
+    let rows = matrix.to_rows_slices();
 
     group.bench_function(
         format!("MerkleRoot: {}, leaves=2^{P}", Zt::Cw::type_name()),
         |b| {
             b.iter(|| {
-                let tree = MerkleTree::new(&leaves, num_leaves);
+                let tree = MerkleTree::new(&rows);
                 black_box(tree.root());
             })
         },

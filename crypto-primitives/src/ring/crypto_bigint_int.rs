@@ -210,6 +210,9 @@ impl<const LIMBS: usize> Neg for Int<LIMBS> {
     type Output = Self;
 
     fn neg(mut self) -> Self {
+        // Mimic rust's default behavior for numbers - panic in debug mode if negating
+        // MIN
+        debug_assert_ne!(self, Self::MIN, "negation of MIN would overflow");
         self.0 = self.0.wrapping_neg();
         self
     }

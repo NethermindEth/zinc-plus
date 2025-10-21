@@ -30,3 +30,7 @@ cast_sign_loss = "deny"
 needless_return = "deny"
 panicking_overflow_checks = "deny"
 unwrap_used = "deny"
+
+[profile.release]
+lto = true # Enable Link Time Optimization
+codegen-units = 1 # Slower compilation but potentially better optimization

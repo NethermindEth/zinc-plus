@@ -4,13 +4,11 @@ use crate::{
     poly::Polynomial,
     primality::PrimalityTest,
     traits::{ConstTranscribable, FromRef, Named, SimpleSemiring},
-    utils::ReinterpretVector,
 };
 use crypto_primitives::{
-    ConstIntRing, FixedRing, FromWithConfig, PrimeField, crypto_bigint_int::Int,
+    ConstIntRing, DenseRowMatrix, FixedRing, FromWithConfig, PrimeField, crypto_bigint_int::Int,
 };
 use num_traits::CheckedMul;
-use p3_field::Packable;
 use std::{marker::PhantomData, ops::Neg};
 
 pub trait ZipTypes: Send + Sync {
@@ -28,7 +26,6 @@ pub trait ZipTypes: Send + Sync {
         + Polynomial<Self::CwR>
         + Neg<Output = Self::Cw>
         + ConstTranscribable
-        + AsPackable
         + FromRef<Self::Eval>
         + Named
         + Copy;
@@ -96,17 +93,20 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlusParams<Zt, Lc> {
 /// Full data of zip commitment to a multilinear polynomial, including encoded
 /// rows and Merkle tree, kept by the prover for the testing phase.
 #[derive(Debug, Default)]
-pub struct ZipPlusHint<R: AsPackable> {
+pub struct ZipPlusHint<R> {
     /// The encoded rows of the polynomial matrix representation, referred to as
     /// "u-hat" in the Zinc paper
-    pub rows: Vec<R>,
+    pub cw_matrix: DenseRowMatrix<R>,
     /// Merkle trees of entire matrix
-    pub merkle_tree: MerkleTree<R::Packable>,
+    pub merkle_tree: MerkleTree,
 }
 
-impl<R: AsPackable> ZipPlusHint<R> {
-    pub fn new(rows: Vec<R>, merkle_tree: MerkleTree<R::Packable>) -> ZipPlusHint<R> {
-        ZipPlusHint { rows, merkle_tree }
+impl<R> ZipPlusHint<R> {
+    pub fn new(cw_matrix: DenseRowMatrix<R>, merkle_tree: MerkleTree) -> ZipPlusHint<R> {
+        ZipPlusHint {
+            cw_matrix,
+            merkle_tree,
+        }
     }
 
     pub fn root(&self) -> MtHash {
@@ -120,48 +120,6 @@ impl<R: AsPackable> ZipPlusHint<R> {
 pub struct ZipPlusCommitment {
     /// Roots of the merkle tree of entire matrix
     pub root: MtHash,
-}
-
-pub trait AsPackable: Clone + ReinterpretVector<Self::Packable> {
-    type Packable: Packable + ConstTranscribable + Clone + Send + Sync;
-}
-
-macro_rules! impl_as_packable_for_primitives {
-    ($($source:ty as $packable:ty),+) => {
-        $(
-            unsafe impl ReinterpretVector<$packable> for $source {}
-
-            impl AsPackable for $source {
-                type Packable = $packable;
-            }
-        )+
-    };
-}
-
-impl_as_packable_for_primitives!(i8 as u8, i16 as u16, i32 as u32, i64 as u64, i128 as u128);
-
-impl<const LIMBS: usize> AsPackable for Int<LIMBS> {
-    type Packable = PackedInt<LIMBS>;
-}
-
-#[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
-#[repr(transparent)]
-pub struct PackedInt<const LIMBS: usize>(pub(crate) Int<LIMBS>);
-
-unsafe impl<const N: usize> ReinterpretVector<PackedInt<N>> for Int<N> {}
-
-impl<const LIMBS: usize> Packable for PackedInt<LIMBS> {}
-
-impl<const LIMBS: usize> ConstTranscribable for PackedInt<LIMBS> {
-    const NUM_BYTES: usize = Int::<LIMBS>::NUM_BYTES;
-
-    fn read_transcription_bytes(bytes: &[u8]) -> Self {
-        Self(<Int<LIMBS> as ConstTranscribable>::read_transcription_bytes(bytes))
-    }
-
-    fn write_transcription_bytes(&self, buf: &mut [u8]) {
-        ConstTranscribable::write_transcription_bytes(&self.0, buf)
-    }
 }
 
 pub trait MulByScalar<Rhs>: Sized {

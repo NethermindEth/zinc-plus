@@ -31,7 +31,7 @@ use crypto_primitives::{
 use itertools::Itertools;
 use num_traits::Zero;
 
-pub const REPETITION_FACTOR: usize = 4;
+const REPETITION_FACTOR: usize = 4;
 
 pub const RAA_CFG: RaaConfig = RaaConfig {
     check_for_overflows: true,
