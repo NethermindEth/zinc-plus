@@ -1,33 +1,65 @@
-use crypto_primitives::PrimeField;
-use num_traits::CheckedAdd;
-use std::{marker::PhantomData, ops::AddAssign};
-
 use crate::{
     add,
     code::LinearCode,
-    mul,
+    mul, neg,
     pcs::structs::ZipTypes,
     traits::{ConstTranscribable, FromRef},
     utils::shuffle_seeded,
+};
+use crypto_primitives::PrimeField;
+use num_traits::{CheckedAdd, CheckedNeg};
+use std::{
+    marker::PhantomData,
+    ops::{AddAssign, Neg},
 };
 
 /// Implementation of a repeat-accumulate-accumulate (RAA) codes over the binary
 /// field, as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
 #[derive(Debug, Clone)]
 pub struct RaaCode<Zt: ZipTypes, const REP: usize> {
-    /// Whether to check for overflows during encoding
-    check_for_overflows: bool,
+    cfg: RaaConfig,
 
     row_len: usize,
 
     phantom: PhantomData<Zt>,
+
+    /// Randomness seed for the first permutation
+    perm_1_seed: u64,
+
+    /// Randomness seed for the second permutation
+    perm_2_seed: u64,
+
+    /// First permutation
+    perm_1: Vec<usize>,
+
+    /// Second permutation
+    perm_2: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RaaConfig {
+    /// Whether to check for overflows during encoding
+    pub check_for_overflows: bool,
+
+    /// Whether to permute the codeword in place, instead of copying it using a
+    /// precomputed permutation.
+    pub permute_in_place: bool,
+
+    /// Whether to flip the signs of every other codeword entry, leading to
+    /// smaller codewords.
+    pub flip_signs: bool,
 }
 
 impl<Zt: ZipTypes, const REP: usize> RaaCode<Zt, REP> {
     /// Do the actual encoding, as per RAA spec
     fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
     where
-        Out: CheckedAdd + for<'a> AddAssign<&'a Out> + FromRef<In> + Clone,
+        Out: Neg<Output = Out>
+            + CheckedNeg
+            + CheckedAdd
+            + for<'a> AddAssign<&'a Out>
+            + FromRef<In>
+            + Clone,
     {
         debug_assert_eq!(
             row.len(),
@@ -35,19 +67,29 @@ impl<Zt: ZipTypes, const REP: usize> RaaCode<Zt, REP> {
             "Row length must match the code's row length"
         );
 
-        // We don't need a secure/unpredictable randomness here, so use fixed seeds
-        const PERM_1_SEED: u64 = 1;
-        const PERM_2_SEED: u64 = 2;
-
         let mut result: Vec<Out> = repeat(row, REP);
-        shuffle_seeded(&mut result, PERM_1_SEED);
-        if self.check_for_overflows {
+        if self.cfg.flip_signs {
+            flip_even_signs(&mut result, self.cfg.check_for_overflows);
+        }
+        if self.cfg.permute_in_place {
+            shuffle_seeded(&mut result, self.perm_1_seed);
+        } else {
+            result = clone_shuffled(&result, &self.perm_1);
+        }
+        if self.cfg.check_for_overflows {
             accumulate(&mut result);
         } else {
             accumulate_unchecked(&mut result);
         }
-        shuffle_seeded(&mut result, PERM_2_SEED);
-        if self.check_for_overflows {
+        if self.cfg.flip_signs {
+            flip_even_signs(&mut result, self.cfg.check_for_overflows);
+        }
+        if self.cfg.permute_in_place {
+            shuffle_seeded(&mut result, self.perm_2_seed);
+        } else {
+            result = clone_shuffled(&result, &self.perm_2);
+        }
+        if self.cfg.check_for_overflows {
             accumulate(&mut result);
         } else {
             accumulate_unchecked(&mut result);
@@ -58,9 +100,11 @@ impl<Zt: ZipTypes, const REP: usize> RaaCode<Zt, REP> {
 }
 
 impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for RaaCode<Zt, REP> {
+    type Config = RaaConfig;
+
     const REPETITION_FACTOR: usize = REP;
 
-    fn new(poly_size: usize, check_for_overflows: bool) -> Self {
+    fn new(poly_size: usize, cfg: RaaConfig) -> Self {
         assert!(
             REP.is_power_of_two(),
             "Repetition factor must be a power of two"
@@ -98,9 +142,24 @@ impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for RaaCode<Zt, REP> {
             codeword_type_bits
         );
 
+        // We don't need a secure/unpredictable randomness here, so use fixed seeds
+        const PERM_1_SEED: u64 = 1;
+        const PERM_2_SEED: u64 = 2;
+
+        let codeword_len = mul!(row_len, REP);
+
+        let mut perm_1: Vec<usize> = (0..codeword_len).collect();
+        shuffle_seeded(&mut perm_1, PERM_1_SEED);
+        let mut perm_2: Vec<usize> = (0..codeword_len).collect();
+        shuffle_seeded(&mut perm_2, PERM_2_SEED);
+
         Self {
-            check_for_overflows,
+            cfg,
             row_len,
+            perm_1_seed: PERM_1_SEED,
+            perm_2_seed: PERM_2_SEED,
+            perm_1,
+            perm_2,
             phantom: PhantomData,
         }
     }
@@ -156,8 +215,12 @@ fn accumulate<I>(input: &mut [I])
 where
     I: CheckedAdd + Clone,
 {
-    for i in 1..input.len() {
-        input[i] = add!(input[i], &input[i - 1], "Accumulation overflow");
+    if let Some(first) = input.first().cloned() {
+        let mut acc = first;
+        for curr in input.iter_mut().skip(1) {
+            acc = add!(curr, &acc, "Accumulation overflow");
+            *curr = acc.clone();
+        }
     }
 }
 
@@ -166,17 +229,56 @@ fn accumulate_unchecked<I>(input: &mut [I])
 where
     I: for<'a> AddAssign<&'a I> + Clone,
 {
-    for i in 1..input.len() {
-        // This allows us to circumvent Rust bounds checking
-        unsafe {
-            let input_i: *mut I = input.get_unchecked_mut(i);
-            let input_i: &mut I = &mut *input_i;
-            // Note:
-            // For Int ring, AddAssign here still results in a panic, but that's more
-            // efficient than doing a checked_add and converting ConstCtOption
-            // into Option and panicking later.
-            *input_i += input.get_unchecked(i - 1);
-        };
+    if let Some(first) = input.first().cloned() {
+        let mut acc = first;
+        for i in 1..input.len() {
+            // Avoid bound checking
+            unsafe {
+                acc += input.get_unchecked(i);
+                *input.get_unchecked_mut(i) = acc.clone();
+            };
+        }
+    }
+}
+
+/// Clone the data using a precomputed permutation.
+fn clone_shuffled<T>(data: &[T], perm: &[usize]) -> Vec<T>
+where
+    T: Clone,
+{
+    perm.iter().map(|&i| data[i].clone()).collect()
+}
+
+/// Flip every other entry in the codeword, starting from the second one.
+fn flip_even_signs<Out>(result: &mut [Out], check_for_overflows: bool)
+where
+    Out: Neg<Output = Out> + CheckedNeg + Clone,
+{
+    if check_for_overflows {
+        flip_even_signs_checked(result);
+    } else {
+        flip_even_signs_unchecked(result);
+    }
+}
+
+fn flip_even_signs_checked<Out>(result: &mut [Out])
+where
+    Out: CheckedNeg + Clone,
+{
+    // Flip every other entry in the codeword
+    for i in (1..result.len()).step_by(2) {
+        result[i] = neg!(result[i]);
+    }
+}
+
+/// Flip every other entry in the codeword, starting from the second one.
+fn flip_even_signs_unchecked<Out>(result: &mut [Out])
+where
+    Out: Neg<Output = Out> + Clone,
+{
+    // Flip every other entry in the codeword
+    for i in (1..result.len()).step_by(2) {
+        result[i] = result[i].clone().neg();
     }
 }
 
@@ -204,8 +306,19 @@ mod tests {
         F: Fn(&RaaCode<Zt, REPETITION_FACTOR>),
     {
         for check_for_overflows in [true, false] {
-            let code = RaaCode::<Zt, REPETITION_FACTOR>::new(poly_size, check_for_overflows);
-            f(&code)
+            for permute_in_place in [true, false] {
+                for flip_signs in [true, false] {
+                    let code = RaaCode::<Zt, REPETITION_FACTOR>::new(
+                        poly_size,
+                        RaaConfig {
+                            check_for_overflows,
+                            permute_in_place,
+                            flip_signs,
+                        },
+                    );
+                    f(&code)
+                }
+            }
         }
     }
 
@@ -318,19 +431,30 @@ mod tests {
     /// against a known output.
     #[test]
     fn encoding_produces_predictable_results() {
-        test_raa::<TestZipTypes<N, K, M>, _>(16, |code| {
-            let a: Vec<Int<N>> = (1..=4).map(Int::<N>::from).collect();
+        let a: Vec<Int<N>> = (1..=4).map(Int::<N>::from).collect();
 
-            let encode_a: Vec<Int<K>> = code.encode(&a);
-            assert_eq!(
-                encode_a,
-                [
-                    0x1E, 0x36, 0x39, 0x5A, 0x70, 0x7E, 0xA5, 0xC1, 0xCB, 0xDC, 0xF9, 0x11E, 0x124,
-                    0x14C, 0x14D, 0x160
-                ]
-                .map(Int::<K>::from)
-            );
-        })
+        for check_for_overflows in [true, false] {
+            for permute_in_place in [true, false] {
+                let code = RaaCode::<TestZipTypes<N, K, M>, REPETITION_FACTOR>::new(
+                    16,
+                    RaaConfig {
+                        check_for_overflows,
+                        permute_in_place,
+                        flip_signs: false,
+                    },
+                );
+
+                let encode_a: Vec<Int<K>> = code.encode(&a);
+                assert_eq!(
+                    encode_a,
+                    [
+                        0x1E, 0x36, 0x39, 0x5A, 0x70, 0x7E, 0xA5, 0xC1, 0xCB, 0xDC, 0xF9, 0x11E,
+                        0x124, 0x14C, 0x14D, 0x160
+                    ]
+                    .map(Int::<K>::from)
+                );
+            }
+        }
     }
 
     #[test]
@@ -349,12 +473,52 @@ mod tests {
     }
 
     #[test]
+    fn in_place_permutation_should_not_affect_order() {
+        let data: Vec<Int<N>> = (1..=1024).map(Int::<N>::from).collect();
+        let poly_size = data.len() * data.len();
+        let codeword_1: Vec<Int<K>> = {
+            let code_in_place = RaaCode::<TestZipTypes<N, K, M>, REPETITION_FACTOR>::new(
+                poly_size,
+                RaaConfig {
+                    check_for_overflows: true,
+                    permute_in_place: true,
+                    flip_signs: false,
+                },
+            );
+            code_in_place.encode(&data)
+        };
+
+        let codeword_2: Vec<Int<K>> = {
+            let code_cloning = RaaCode::<TestZipTypes<N, K, M>, REPETITION_FACTOR>::new(
+                poly_size,
+                RaaConfig {
+                    check_for_overflows: true,
+                    permute_in_place: false,
+                    flip_signs: false,
+                },
+            );
+            code_cloning.encode(&data)
+        };
+        assert_eq!(
+            codeword_1, codeword_2,
+            "In-place permutation should not affect the final codeword"
+        );
+    }
+
+    #[test]
     #[should_panic]
     fn constructor_panics_on_insufficient_codeword_width() {
         const N: usize = 1;
         const K: usize = 1;
 
-        let _code = RaaCode::<TestZipTypes<N, K, N>, REPETITION_FACTOR>::new(1 << 30, true);
+        let _code = RaaCode::<TestZipTypes<N, K, N>, REPETITION_FACTOR>::new(
+            1 << 30,
+            RaaConfig {
+                check_for_overflows: true,
+                permute_in_place: false,
+                flip_signs: false,
+            },
+        );
     }
 
     #[test]

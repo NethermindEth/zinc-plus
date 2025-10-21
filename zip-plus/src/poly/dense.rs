@@ -14,7 +14,7 @@ use std::{
     hash::Hash,
     iter,
     iter::{Product, Sum},
-    ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
+    ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 // TODO: rename rename to univariate
 
@@ -148,6 +148,17 @@ impl<R: Ring + Zero + One, const DEGREE: usize> One for DensePolynomial<R, DEGRE
             coeff_0: R::one(),
             coeffs: array::from_fn::<_, DEGREE, _>(|_| R::zero()),
         }
+    }
+}
+
+impl<R: Ring + Neg<Output = R>, const DEGREE: usize> Neg for DensePolynomial<R, DEGREE> {
+    type Output = Self;
+
+    #[allow(clippy::arithmetic_side_effects)] // By design
+    fn neg(mut self) -> Self::Output {
+        self.coeff_0 = -self.coeff_0;
+        self.coeffs.iter_mut().for_each(|c| *c = -c.clone());
+        self
     }
 }
 

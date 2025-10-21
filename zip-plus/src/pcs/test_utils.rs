@@ -7,7 +7,10 @@
 )]
 
 use crate::{
-    code::{LinearCode, raa::RaaCode},
+    code::{
+        LinearCode,
+        raa::{RaaCode, RaaConfig},
+    },
     pcs::{
         ZipPlusProof,
         structs::{
@@ -28,7 +31,13 @@ use crypto_primitives::{
 use itertools::Itertools;
 use num_traits::Zero;
 
-const REPETITION_FACTOR: usize = 4;
+pub const REPETITION_FACTOR: usize = 4;
+
+pub const RAA_CFG: RaaConfig = RaaConfig {
+    check_for_overflows: true,
+    permute_in_place: false,
+    flip_signs: true,
+};
 
 pub struct TestZipTypes<const N: usize, const K: usize, const M: usize> {}
 impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N, K, M> {
@@ -101,14 +110,14 @@ pub fn setup_poly_test_params<
     })
 }
 
-fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt>>(
+fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt, Config = RaaConfig>>(
     num_vars: usize,
     prepare_evaluations: impl FnOnce(usize) -> Vec<Zt::Eval>,
 ) -> (ZipPlusParams<Zt, Lc>, DenseMultilinearExtension<Zt::Eval>) {
     let poly_size = 1 << num_vars;
     let num_rows = 1 << num_vars.div_ceil(2);
 
-    let code = Lc::new(poly_size, true);
+    let code = Lc::new(poly_size, RAA_CFG);
     let pp = ZipPlusParams::new(num_vars, num_rows, code);
 
     let evaluations = prepare_evaluations(poly_size);

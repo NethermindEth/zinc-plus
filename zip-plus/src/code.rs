@@ -4,6 +4,8 @@ use crate::{pcs::structs::ZipTypes, traits::FromRef};
 use crypto_primitives::PrimeField;
 
 pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
+    type Config: Copy;
+
     /// Repetition factor, a.k.a. inverse rate, the ratio of codeword length to
     /// input row length. Has to be at a power of 2.
     ///
@@ -12,7 +14,7 @@ pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
     /// makes using it too much of a hassle.
     const REPETITION_FACTOR: usize;
 
-    fn new(poly_size: usize, check_for_overflows: bool) -> Self;
+    fn new(poly_size: usize, cfg: Self::Config) -> Self;
 
     /// Length of each input row before encoding
     fn row_len(&self) -> usize;

@@ -25,24 +25,26 @@ use zip_plus::{
 
 type F = BoxedMontyField;
 
-pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>>(group: &mut BenchmarkGroup<WallTime>)
-where
+pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>>(
+    group: &mut BenchmarkGroup<WallTime>,
+    code_config: Lc::Config,
+) where
     StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
     F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
     <F as Field>::Inner: FromRef<Zt::Fmod>,
     Zt::Eval: ProjectableToField<F>,
     Zt::Cw: ProjectableToField<F>,
 {
-    encode_rows::<Zt, Lc, 12>(group);
-    encode_rows::<Zt, Lc, 13>(group);
-    encode_rows::<Zt, Lc, 14>(group);
-    encode_rows::<Zt, Lc, 15>(group);
-    encode_rows::<Zt, Lc, 16>(group);
+    encode_rows::<Zt, Lc, 12>(group, code_config);
+    encode_rows::<Zt, Lc, 13>(group, code_config);
+    encode_rows::<Zt, Lc, 14>(group, code_config);
+    encode_rows::<Zt, Lc, 15>(group, code_config);
+    encode_rows::<Zt, Lc, 16>(group, code_config);
 
-    encode_single_row::<Zt, Lc, 128>(group);
-    encode_single_row::<Zt, Lc, 256>(group);
-    encode_single_row::<Zt, Lc, 512>(group);
-    encode_single_row::<Zt, Lc, 1024>(group);
+    encode_single_row::<Zt, Lc, 128>(group, code_config);
+    encode_single_row::<Zt, Lc, 256>(group, code_config);
+    encode_single_row::<Zt, Lc, 512>(group, code_config);
+    encode_single_row::<Zt, Lc, 1024>(group, code_config);
 
     merkle_root::<Zt, 12>(group);
     merkle_root::<Zt, 13>(group);
@@ -50,33 +52,34 @@ where
     merkle_root::<Zt, 15>(group);
     merkle_root::<Zt, 16>(group);
 
-    commit::<Zt, Lc, 12>(group);
-    commit::<Zt, Lc, 13>(group);
-    commit::<Zt, Lc, 14>(group);
-    commit::<Zt, Lc, 15>(group);
-    commit::<Zt, Lc, 16>(group);
+    commit::<Zt, Lc, 12>(group, code_config);
+    commit::<Zt, Lc, 13>(group, code_config);
+    commit::<Zt, Lc, 14>(group, code_config);
+    commit::<Zt, Lc, 15>(group, code_config);
+    commit::<Zt, Lc, 16>(group, code_config);
 
-    test::<Zt, Lc, 12>(group);
-    test::<Zt, Lc, 13>(group);
-    test::<Zt, Lc, 14>(group);
-    test::<Zt, Lc, 15>(group);
-    test::<Zt, Lc, 16>(group);
+    test::<Zt, Lc, 12>(group, code_config);
+    test::<Zt, Lc, 13>(group, code_config);
+    test::<Zt, Lc, 14>(group, code_config);
+    test::<Zt, Lc, 15>(group, code_config);
+    test::<Zt, Lc, 16>(group, code_config);
 
-    evaluate::<Zt, Lc, 12>(group);
-    evaluate::<Zt, Lc, 13>(group);
-    evaluate::<Zt, Lc, 14>(group);
-    evaluate::<Zt, Lc, 15>(group);
-    evaluate::<Zt, Lc, 16>(group);
+    evaluate::<Zt, Lc, 12>(group, code_config);
+    evaluate::<Zt, Lc, 13>(group, code_config);
+    evaluate::<Zt, Lc, 14>(group, code_config);
+    evaluate::<Zt, Lc, 15>(group, code_config);
+    evaluate::<Zt, Lc, 16>(group, code_config);
 
-    verify::<Zt, Lc, 12>(group);
-    verify::<Zt, Lc, 13>(group);
-    verify::<Zt, Lc, 14>(group);
-    verify::<Zt, Lc, 15>(group);
-    verify::<Zt, Lc, 16>(group);
+    verify::<Zt, Lc, 12>(group, code_config);
+    verify::<Zt, Lc, 13>(group, code_config);
+    verify::<Zt, Lc, 14>(group, code_config);
+    verify::<Zt, Lc, 15>(group, code_config);
+    verify::<Zt, Lc, 16>(group, code_config);
 }
 
 pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
+    code_config: Lc::Config,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
 {
@@ -89,7 +92,7 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
         |b| {
             let mut rng = ThreadRng::default();
             let poly_size = 1 << P;
-            let linear_code = Lc::new(poly_size, false);
+            let linear_code = Lc::new(poly_size, code_config);
             let params = ZipPlus::setup(poly_size, linear_code);
             let row_len = params.linear_code.row_len();
             let codeword_len = params.linear_code.codeword_len();
@@ -108,6 +111,7 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
 
 pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>, const ROW_LEN: usize>(
     group: &mut BenchmarkGroup<WallTime>,
+    code_config: Lc::Config,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
 {
@@ -120,7 +124,7 @@ pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>, const ROW_LEN: usize>
         |b| {
             let mut rng = ThreadRng::default();
             let poly_size = ROW_LEN * ROW_LEN;
-            let linear_code = Lc::new(poly_size, false);
+            let linear_code = Lc::new(poly_size, code_config);
             assert_eq!(linear_code.row_len(), ROW_LEN, "Unexpected row_len");
             let message: Vec<<Zt as ZipTypes>::Eval> =
                 (0..ROW_LEN).map(|_i| rng.random()).collect();
@@ -156,12 +160,13 @@ where
 
 pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
+    code_config: Lc::Config,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
 {
     let mut rng = ThreadRng::default();
     let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size, false);
+    let linear_code = Lc::new(poly_size, code_config);
     let params = ZipPlus::setup(poly_size, linear_code);
 
     group.bench_function(
@@ -188,14 +193,16 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     );
 }
 
-pub fn test<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(group: &mut BenchmarkGroup<WallTime>)
-where
+pub fn test<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+    code_config: Lc::Config,
+) where
     StandardUniform: Distribution<Zt::Eval>,
 {
     let mut rng = ThreadRng::default();
 
     let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size, false);
+    let linear_code = Lc::new(poly_size, code_config);
     let params = ZipPlus::setup(poly_size, linear_code);
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
@@ -220,6 +227,7 @@ where
 
 pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
+    code_config: Lc::Config,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
     F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
@@ -229,7 +237,7 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     let mut rng = ThreadRng::default();
 
     let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size, false);
+    let linear_code = Lc::new(poly_size, code_config);
     let params = ZipPlus::setup(poly_size, linear_code);
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
@@ -265,6 +273,7 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
 
 pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
+    code_config: Lc::Config,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
     F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
@@ -274,7 +283,7 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
 {
     let mut rng = ThreadRng::default();
     let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size, false);
+    let linear_code = Lc::new(poly_size, code_config);
     let params = ZipPlus::setup(poly_size, linear_code);
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());

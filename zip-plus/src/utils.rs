@@ -16,6 +16,16 @@ const WORD_FACTOR: usize = 1;
 const WORD_FACTOR: usize = 2;
 
 #[macro_export]
+macro_rules! neg {
+    ($a:expr) => {
+        neg!($a, "Negation overflow")
+    };
+    ($a:expr, $msg:expr) => {
+        $a.checked_neg().expect($msg)
+    };
+}
+
+#[macro_export]
 macro_rules! add {
     ($a:expr, $b:expr) => {
         add!($a, $b, "Addition overflow")
