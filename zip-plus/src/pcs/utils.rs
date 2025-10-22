@@ -2,7 +2,7 @@ use crate::{
     ZipError, add,
     code::LinearCode,
     div, ilog_round_up,
-    merkle::{MerkleError, MerkleProof, MtHash},
+    merkle::{MerkleError, MtHash},
     mul,
     pcs::structs::{ZipPlusHint, ZipTypes},
     pcs_transcript::PcsTranscript,
@@ -225,13 +225,13 @@ pub struct ColumnOpening {}
 
 impl ColumnOpening {
     pub fn open_at_column<T: ConstTranscribable>(
-        column: usize,
+        column_idx: usize,
         commit_hint: &ZipPlusHint<T>,
         transcript: &mut PcsTranscript,
     ) -> Result<(), MerkleError> {
-        let merkle_path = MerkleProof::create_proof(&commit_hint.merkle_tree, column)?;
+        let merkle_proof = commit_hint.merkle_tree.prove(column_idx)?;
         transcript
-            .write_merkle_proof(&merkle_path)
+            .write_merkle_proof(&merkle_proof)
             .map_err(|_| MerkleError::FailedMerkleProofWriting)?;
         Ok(())
     }

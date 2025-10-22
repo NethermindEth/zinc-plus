@@ -6,10 +6,10 @@ pub mod utils;
 
 pub mod field;
 pub mod merkle;
+pub mod merkle_poc;
 pub mod poly;
 pub mod primality;
 pub mod transcript;
-pub mod merkle_poc;
 
 use ark_std::string::String;
 use crypto_primitives::FieldError;
