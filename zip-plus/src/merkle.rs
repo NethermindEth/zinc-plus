@@ -114,6 +114,21 @@ macro_rules! hash_many {
     }};
 }
 
+/// Find the roots of the left and right subtrees.
+/// Do it parallel if the "parallel" feature is enabled.
+macro_rules! get_left_right_subtree_roots {
+    ($left:ident, $right:ident) => {{
+        #[cfg(feature = "parallel")]
+        let result = rayon::join(
+            || get_subtree_root($left),
+            || get_subtree_root($right),
+        );
+        #[cfg(not(feature = "parallel"))]
+        let result = (get_subtree_root($left), get_subtree_root($right));
+        result
+    }};
+}
+
 fn hash_leaves<S>(rows: &[&[S]], m_cols: usize) -> Vec<MtHash>
 where
     S: ConstTranscribable + Send + Sync,
@@ -163,8 +178,7 @@ fn compute_root_from_leaves(cvs: &[MtHash]) -> MtHash {
     let (left, right) = cvs.split_at(split_len);
 
     // Recursively get the roots of the subtrees (non-root merges).
-    let left_root = get_subtree_root(left);
-    let right_root = get_subtree_root(right);
+    let (left_root, right_root) = get_left_right_subtree_roots!(left, right);
 
     // The final merge is a root merge.
     hazmat::merge_subtrees_root(&left_root.0, &right_root.0, hazmat::Mode::Hash).into()
@@ -178,8 +192,7 @@ fn get_subtree_root(cvs: &[MtHash]) -> MtHash {
     }
     let split_len = cvs.len().next_power_of_two() / 2;
     let (left, right) = cvs.split_at(split_len);
-    let left_root = get_subtree_root(left);
-    let right_root = get_subtree_root(right);
+    let (left_root, right_root) = get_left_right_subtree_roots!(left, right);
     hazmat::merge_subtrees_non_root(&left_root.0, &right_root.0, hazmat::Mode::Hash).into()
 }
 
