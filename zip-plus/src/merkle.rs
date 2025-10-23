@@ -1,4 +1,4 @@
-use crate::traits::ConstTranscribable;
+use crate::{sub, traits::ConstTranscribable};
 use ark_std::cfg_into_iter;
 use blake3::hazmat;
 use itertools::Itertools;
@@ -103,9 +103,9 @@ impl MerkleTree {
 
 // This could've been a function, but macro performance is better.
 macro_rules! hash_many {
-    ($iter:expr, $tpe:tt) => {{
+    ($iter:expr, $t:tt) => {{
         let mut hasher = blake3::Hasher::new();
-        let mut buf = vec![0_u8; <$tpe>::NUM_BYTES];
+        let mut buf = vec![0_u8; <$t>::NUM_BYTES];
         for v in $iter {
             v.write_transcription_bytes(&mut buf);
             hasher.update(&buf);
@@ -119,10 +119,7 @@ macro_rules! hash_many {
 macro_rules! get_left_right_subtree_roots {
     ($left:ident, $right:ident) => {{
         #[cfg(feature = "parallel")]
-        let result = rayon::join(
-            || get_subtree_root($left),
-            || get_subtree_root($right),
-        );
+        let result = rayon::join(|| get_subtree_root($left), || get_subtree_root($right));
         #[cfg(not(feature = "parallel"))]
         let result = (get_subtree_root($left), get_subtree_root($right));
         result
@@ -216,7 +213,7 @@ fn find_path_recursive(cvs: &[MtHash], target_index: usize) -> Vec<MtHash> {
     } else {
         // Target is in the right subtree. Sibling is the root of the left subtree.
         (
-            find_path_recursive(right, target_index - split_len),
+            find_path_recursive(right, sub!(target_index, split_len)),
             get_subtree_root(left),
         )
     };
@@ -344,6 +341,7 @@ enum PathDirection {
 }
 
 /// Helper to determine the path directions (leaf to root).
+#[allow(clippy::arithmetic_side_effects)] // Intentional, no side effects possible.
 fn get_path_directions(total_chunks: usize, target_index: usize) -> Vec<PathDirection> {
     let mut path = Vec::new();
     let mut current_size = total_chunks;
@@ -351,8 +349,8 @@ fn get_path_directions(total_chunks: usize, target_index: usize) -> Vec<PathDire
 
     // Iterate top-down (Root to Leaf) to determine the path based on BLAKE3 rules.
     while current_size > 1 {
-        // BLAKE3 split rule: largest power of two less than N (or N/2 if N is power of
-        // 2).
+        // BLAKE3 split rule: largest power of two less than N
+        // (or N/2 if N is power of 2).
         let split_len = current_size.next_power_of_two() / 2;
 
         if current_index < split_len {
