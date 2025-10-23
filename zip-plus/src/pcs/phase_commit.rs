@@ -597,8 +597,10 @@ mod tests {
             let proximity_phase_size = pp.linear_code.row_len() * size_of_zt_m;
 
             let column_values_size = pp.num_rows * size_of_zt_k;
+            // MerkleProof now has 3 metadata fields: element_index, num_elements,
+            // num_leaves_per_element
             let single_merkle_proof_size =
-                size_of_dimension * 2 + size_of_path_len + merkle_depth * size_of_path_elem;
+                size_of_dimension * 3 + size_of_path_len + merkle_depth * size_of_path_elem;
             let column_opening_phase_size =
                 Zt::NUM_COLUMN_OPENINGS * (column_values_size + single_merkle_proof_size);
 

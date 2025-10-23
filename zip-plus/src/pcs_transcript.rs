@@ -181,9 +181,10 @@ impl PcsTranscript {
     }
 
     pub fn read_merkle_proof(&mut self) -> Result<MerkleProof, ZipError> {
-        // Read the dimensions of matrix used to construct the Merkle tree
-        let leaf_index = self.read_usize()?;
-        let leaf_count = self.read_usize()?;
+        // Read the proof metadata
+        let element_index = self.read_usize()?;
+        let num_elements = self.read_usize()?;
+        let num_leaves_per_element = self.read_usize()?;
 
         // Read the length of the merkle path first
         let path_length = self.read_usize()?;
@@ -191,15 +192,21 @@ impl PcsTranscript {
         // Read each element of the merkle path
         let merkle_path = self.read_const_many(path_length)?;
 
-        Ok(MerkleProof::new(leaf_index, leaf_count, merkle_path))
+        Ok(MerkleProof::new(
+            element_index,
+            num_elements,
+            num_leaves_per_element,
+            merkle_path,
+        ))
     }
 
     pub fn write_merkle_proof(&mut self, proof: &MerkleProof) -> Result<(), ZipError> {
         let mut buf = [0u8; size_of::<u64>()];
 
-        // Write the dimensions of matrix used to construct the Merkle tree
-        self.write_usize(proof.leaf_index, &mut buf)?;
-        self.write_usize(proof.leaf_count, &mut buf)?;
+        // Write the proof metadata
+        self.write_usize(proof.element_index, &mut buf)?;
+        self.write_usize(proof.num_elements, &mut buf)?;
+        self.write_usize(proof.num_leaves_per_element, &mut buf)?;
 
         // Write the length of the merkle path first
         self.write_usize(proof.siblings.len(), &mut buf)?;
