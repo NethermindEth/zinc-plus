@@ -1,5 +1,5 @@
-use crate::{sub, traits::ConstTranscribable};
-use ark_std::cfg_into_iter;
+use crate::{add, sub, traits::ConstTranscribable};
+use ark_std::{cfg_into_iter, cfg_iter};
 use blake3::hazmat;
 use itertools::Itertools;
 use std::{
@@ -55,9 +55,8 @@ where
 
 #[derive(Debug, Default)]
 pub struct MerkleTree {
-    root: MtHash,
-    /// The leaf layer of the tree (ChainingValues of the chunks).
-    leaf_cvs: Vec<MtHash>,
+    /// First vector is leaves, last vector is root
+    layers: Vec<Vec<MtHash>>,
 }
 
 impl MerkleTree {
@@ -79,19 +78,25 @@ impl MerkleTree {
     }
 
     pub fn root(&self) -> MtHash {
-        self.root.clone()
+        self.layers
+            .last()
+            .expect("Merkle tree must have at least one layer")
+            .first()
+            .cloned()
+            .expect("Merkle tree must have a root")
     }
 
     /// Generates a Merkle proof for the element at the given index.
+    /// Uses pre-computed layer values for O(1) sibling lookups.
     pub fn prove(&self, leaf_index: usize) -> Result<MerkleProof, MerkleError> {
-        let leaf_count = self.leaf_cvs.len();
+        let leaf_count = self.layers[0].len();
 
         if leaf_index >= leaf_count || leaf_count == 0 {
             return Err(MerkleError::InvalidLeafIndex(leaf_index));
         }
 
-        // Calculate the sibling path.
-        let siblings = find_path_recursive(&self.leaf_cvs, leaf_index);
+        // Calculate the sibling path using layer values.
+        let siblings = find_path_with_layers(leaf_index, &self.layers);
 
         Ok(MerkleProof {
             leaf_index,
@@ -114,18 +119,6 @@ macro_rules! hash_many {
     }};
 }
 
-/// Find the roots of the left and right subtrees.
-/// Do it parallel if the "parallel" feature is enabled.
-macro_rules! get_left_right_subtree_roots {
-    ($left:ident, $right:ident) => {{
-        #[cfg(feature = "parallel")]
-        let result = rayon::join(|| get_subtree_root($left), || get_subtree_root($right));
-        #[cfg(not(feature = "parallel"))]
-        let result = (get_subtree_root($left), get_subtree_root($right));
-        result
-    }};
-}
-
 fn hash_leaves<S>(rows: &[&[S]], m_cols: usize) -> Vec<MtHash>
 where
     S: ConstTranscribable + Send + Sync,
@@ -139,89 +132,91 @@ where
 }
 
 fn build_merkle_tree_from_leaves(leaves: Vec<MtHash>) -> MerkleTree {
-    if leaves.is_empty() {
+    let n = leaves.len();
+
+    if n == 0 {
         return MerkleTree {
-            root: blake3::hash(&[]).into(),
-            leaf_cvs: vec![],
+            layers: vec![vec![blake3::hash(&[]).into()]],
         };
     }
     assert!(
-        leaves.len().is_power_of_two(),
+        n.is_power_of_two(),
         "Number of leaves must be a power of two"
     );
 
-    let root = if leaves.len() == 1 {
-        // In this design, the root of a single-element tree is just the hash of the
-        // element itself.
-        leaves[0].clone()
-    } else {
-        // Build the tree structure recursively from the leaves.
-        compute_root_from_leaves(&leaves)
-    };
-
-    MerkleTree {
-        root,
-        leaf_cvs: leaves,
-    }
-}
-
-/// Helper to compute the root from leaves (len > 1). The top-level merge uses
-/// merge_subtrees_root.
-fn compute_root_from_leaves(cvs: &[MtHash]) -> MtHash {
-    assert!(cvs.len() > 1);
-
-    // Find the split point according to BLAKE3 rules.
-    let split_len = cvs.len().next_power_of_two() / 2;
-    let (left, right) = cvs.split_at(split_len);
-
-    // Recursively get the roots of the subtrees (non-root merges).
-    let (left_root, right_root) = get_left_right_subtree_roots!(left, right);
-
-    // The final merge is a root merge.
-    hazmat::merge_subtrees_root(&left_root.0, &right_root.0, hazmat::Mode::Hash).into()
-}
-
-/// Recursively merges a slice of ChainingValues into a single root CV for that
-/// subtree.
-fn get_subtree_root(cvs: &[MtHash]) -> MtHash {
-    if cvs.len() == 1 {
-        return cvs[0].clone();
-    }
-    let split_len = cvs.len().next_power_of_two() / 2;
-    let (left, right) = cvs.split_at(split_len);
-    let (left_root, right_root) = get_left_right_subtree_roots!(left, right);
-    hazmat::merge_subtrees_non_root(&left_root.0, &right_root.0, hazmat::Mode::Hash).into()
-}
-
-/// Recursive helper to find the sibling path. This defines the BLAKE3
-/// asymmetric geometry.
-fn find_path_recursive(cvs: &[MtHash], target_index: usize) -> Vec<MtHash> {
-    if cvs.len() <= 1 {
-        return vec![];
+    if n == 1 {
+        return MerkleTree {
+            layers: vec![leaves],
+        };
     }
 
-    // Find the split point (BLAKE3 rule: largest power of 2 less than N).
-    let split_len = cvs.len().next_power_of_two() / 2;
-    let (left, right) = cvs.split_at(split_len);
+    // Build all layers from bottom (leaves) to top (root)
+    // layers[i] contains all contiguous subtree roots of size 2^i
+    let root_layer_idx = n.trailing_zeros() as usize; // log2(n)
+    let num_layers = add!(root_layer_idx, 1);
+    let mut layers: Vec<Vec<MtHash>> = Vec::with_capacity(num_layers);
 
-    let (path_from_child, sibling_root) = if target_index < split_len {
-        // Target is in the left subtree. Sibling is the root of the right subtree.
-        (
-            find_path_recursive(left, target_index),
-            get_subtree_root(right),
-        )
-    } else {
-        // Target is in the right subtree. Sibling is the root of the left subtree.
-        (
-            find_path_recursive(right, sub!(target_index, split_len)),
-            get_subtree_root(left),
-        )
-    };
+    // Layer 0: individual leaves
+    layers.push(leaves);
 
-    // Build the path from leaf towards the root (bottom-up).
-    let mut path = path_from_child;
-    path.push(sibling_root);
-    path
+    // Build each subsequent layer
+    for layer_idx in 1..num_layers {
+        let is_root_layer = layer_idx == root_layer_idx;
+
+        let prev_layer = &layers[sub!(layer_idx, 1)];
+        let (prev_layer_chunks, _) = prev_layer.as_chunks::<2>();
+
+        let current_layer = cfg_iter!(prev_layer_chunks)
+            .map(|[left, right]| {
+                if is_root_layer {
+                    hazmat::merge_subtrees_root(&left.0, &right.0, hazmat::Mode::Hash).into()
+                } else {
+                    hazmat::merge_subtrees_non_root(&left.0, &right.0, hazmat::Mode::Hash).into()
+                }
+            })
+            .collect();
+
+        layers.push(current_layer);
+    }
+
+    MerkleTree { layers }
+}
+
+#[allow(clippy::arithmetic_side_effects)] // Using intentionally, overflow isn't possible
+fn find_path_with_layers(target_index: usize, layers: &[Vec<MtHash>]) -> Vec<MtHash> {
+    let mut siblings = Vec::new();
+    let mut layer_idx = 0;
+    let mut current_layer = &layers[layer_idx];
+    let mut current_index = target_index;
+
+    loop {
+        // Determine if current node is left (even) or right (odd) child
+        let is_left_child = current_index.is_multiple_of(2);
+
+        if is_left_child {
+            // Left child, sibling is on the right
+            let sibling_index = current_index + 1;
+            if sibling_index < current_layer.len() {
+                siblings.push(current_layer[sibling_index].clone());
+            } else {
+                // We've reached the root
+                debug_assert_eq!(layer_idx, layers.len() - 1);
+                debug_assert_eq!(current_layer.len(), 1);
+                break;
+            }
+        } else {
+            // Right child, sibling is on the left
+            let sibling_index = current_index - 1;
+            siblings.push(current_layer[sibling_index].clone());
+        }
+
+        current_index /= 2;
+        layer_idx += 1;
+        current_layer = &layers[layer_idx];
+    }
+
+    // Reverse to get bottom-up order (leaf to root) as expected by verification
+    siblings
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
