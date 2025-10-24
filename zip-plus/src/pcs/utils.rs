@@ -1,17 +1,19 @@
+use crate::{
+    ZipError, add,
+    code::LinearCode,
+    div, ilog_round_up,
+    merkle::{MerkleError, MerkleProof, MtHash},
+    mul,
+    pcs::structs::{ZipPlusHint, ZipTypes},
+    pcs_transcript::PcsTranscript,
+    poly::{ConstCoeffBitWidth, mle::DenseMultilinearExtension},
+    sub,
+    traits::ConstTranscribable,
+};
 use ark_std::{cfg_iter_mut, iterable::Iterable};
 use crypto_primitives::PrimeField;
 use thiserror::Error;
 
-use crate::{ZipError, add, div, ilog_round_up, mul, poly::mle::DenseMultilinearExtension, sub};
-
-use crate::{
-    code::LinearCode,
-    merkle::{MerkleError, MerkleProof, MtHash},
-    pcs::structs::{ZipPlusHint, ZipTypes},
-    pcs_transcript::PcsTranscript,
-    poly::ConstCoeffBitWidth,
-    traits::ConstTranscribable,
-};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 

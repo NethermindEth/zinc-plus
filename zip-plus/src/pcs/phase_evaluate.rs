@@ -62,8 +62,7 @@ impl<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize>
 
         let q_0_combined_row = if num_rows > 1 {
             // Return the evaluation row combination
-            let combined_row =
-                combine_rows(&q_0, &evaluations, row_len, F::zero_with_cfg(&field_cfg));
+            let combined_row = combine_rows(&q_0, &evaluations, row_len);
             Cow::<Vec<F>>::Owned(combined_row)
         } else {
             // If there is only one row, we have no need to take linear combinations

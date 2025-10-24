@@ -12,7 +12,6 @@ use crate::{
     utils::combine_rows,
 };
 use itertools::Itertools;
-use num_traits::ConstZero;
 
 impl<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize>
     ZipPlus<Zt, Lc, DEGREE>
@@ -48,8 +47,7 @@ impl<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize>
                 .collect_vec();
 
             // u' in the Zinc paper
-            let combined_row =
-                combine_rows(&coeffs, &evals, pp.linear_code.row_len(), Zt::CombR::ZERO);
+            let combined_row = combine_rows(&coeffs, &evals, pp.linear_code.row_len());
 
             transcript.write_const_many(&combined_row)?;
         }

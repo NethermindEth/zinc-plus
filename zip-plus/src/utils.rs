@@ -2,15 +2,18 @@ use crate::{
     pcs::structs::MulByScalar,
     traits::{ConstTranscribable, Named, Transcribable},
 };
+use ark_std::cfg_iter_mut;
 use crypto_bigint::{BitOps, BoxedUint, Word};
-use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_uint::Uint};
+use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint};
 use itertools::Itertools;
 use num_traits::CheckedAdd;
 use rand::{rngs::StdRng, seq::SliceRandom};
 use rand_core::SeedableRng;
-use std::iter::Iterator;
+use std::{
+    iter::{Iterator, Sum},
+    mem::MaybeUninit,
+};
 
-use crypto_primitives::boolean::Boolean;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -108,76 +111,6 @@ where
         .unwrap_or(zero)
 }
 
-pub(crate) fn num_threads() -> usize {
-    #[cfg(feature = "parallel")]
-    return rayon::current_num_threads();
-
-    #[cfg(not(feature = "parallel"))]
-    return 1;
-}
-
-#[cfg(not(feature = "parallel"))]
-pub(crate) fn parallelize_into_iter_map_collect<I, T, F, R, C>(iterable: I, f: F) -> C
-where
-    I: Send + IntoIterator<Item = T>,
-    T: Send,
-    R: Send,
-    F: Fn(T) -> R + Send + Sync + Clone,
-    C: FromIterator<R>,
-{
-    iterable.into_iter().map(f).collect()
-}
-
-#[cfg(feature = "parallel")]
-pub(crate) fn parallelize_into_iter_map_collect<I, T, F, R, C>(iterable: I, f: F) -> C
-where
-    I: Send + IntoParallelIterator<Item = T>,
-    T: Send,
-    R: Send,
-    F: Fn(T) -> R + Send + Sync + Clone,
-    C: FromParallelIterator<R>,
-{
-    iterable.into_par_iter().map(f).collect()
-}
-
-pub(crate) fn parallelize_for_each<I, T, F>(iter: I, f: F)
-where
-    I: Send + Iterator<Item = T>,
-    T: Send,
-    F: Fn(T) + Send + Sync + Clone,
-{
-    #[cfg(feature = "parallel")]
-    rayon::scope(|scope| {
-        iter.for_each(|item| {
-            let f = &f;
-            scope.spawn(move |_| f(item))
-        })
-    });
-
-    #[cfg(not(feature = "parallel"))]
-    iter.for_each(f);
-}
-
-pub(crate) fn parallelize<T, F>(v: &mut [T], f: F)
-where
-    T: Send,
-    F: Fn((&mut [T], usize)) + Send + Sync + Clone,
-{
-    #[cfg(feature = "parallel")]
-    {
-        let num_threads = num_threads();
-        let chunk_size = v.len().div_ceil(num_threads);
-        if chunk_size < num_threads {
-            f((v, 0));
-        } else {
-            parallelize_for_each(v.chunks_mut(chunk_size).zip((0..).step_by(chunk_size)), f);
-        }
-    }
-
-    #[cfg(not(feature = "parallel"))]
-    f((v, 0));
-}
-
 /// Computes a linear combination of multiple evaluation rows into a single
 /// combined row.
 ///
@@ -204,31 +137,32 @@ pub(super) fn combine_rows<Coeff, El>(
     coeffs: &[Coeff],
     evaluations: &[El],
     row_len: usize,
-    zero: El,
 ) -> Vec<El>
 where
     Coeff: Send + Sync,
-    El: Clone + CheckedAdd + for<'z> MulByScalar<&'z Coeff> + Send + Sync,
+    El: Clone + Sum + for<'z> MulByScalar<&'z Coeff> + Send + Sync,
 {
-    let mut combined_row = vec![zero; row_len];
-    parallelize(&mut combined_row, |(combined_row, offset)| {
-        combined_row
-            .iter_mut()
-            .zip(offset..)
-            .for_each(|(combined, column)| {
+    let mut combined_row = Vec::with_capacity(row_len);
+
+    cfg_iter_mut!(combined_row.spare_capacity_mut())
+        .enumerate()
+        .for_each(|(column, combined)| {
+            *combined = MaybeUninit::new(
                 coeffs
                     .iter()
                     .zip(evaluations.iter().skip(column).step_by(row_len))
-                    .for_each(|(coeff, eval)| {
-                        *combined = add!(
-                            combined,
-                            &eval
-                                .mul_by_scalar(coeff)
-                                .expect("Cannot multiply evaluation by coefficient")
-                        );
-                    });
-            })
-    });
+                    .map(|(coeff, eval)| {
+                        eval.mul_by_scalar(coeff)
+                            .expect("Cannot multiply evaluation by coefficient")
+                    })
+                    .sum(),
+            );
+        });
+
+    // Safety: We initialized all elements in the combined_row.
+    unsafe {
+        combined_row.set_len(row_len);
+    }
 
     combined_row
 }
@@ -421,7 +355,7 @@ mod test {
         let evaluations = vec![3, 4, 5, 6];
         let row_len = 2;
 
-        let result = combine_rows(&coeffs, &evaluations, row_len, 0);
+        let result = combine_rows(&coeffs, &evaluations, row_len);
 
         assert_eq!(result, vec![(3 + 2 * 5), (4 + 2 * 6)]);
     }
@@ -432,7 +366,7 @@ mod test {
         let evaluations = vec![2, 4, 6, 8];
         let row_len = 2;
 
-        let result = combine_rows(&coeffs, &evaluations, row_len, 0);
+        let result = combine_rows(&coeffs, &evaluations, row_len);
 
         assert_eq!(result, vec![(3 * 2 + 4 * 6), (3 * 4 + 4 * 8)]);
     }
@@ -442,7 +376,7 @@ mod test {
         let evaluations = vec![2000, -3000, 4000, -5000];
         let row_len = 2;
 
-        let result = combine_rows(&coeffs, &evaluations, row_len, 0);
+        let result = combine_rows(&coeffs, &evaluations, row_len);
 
         assert_eq!(
             result,
