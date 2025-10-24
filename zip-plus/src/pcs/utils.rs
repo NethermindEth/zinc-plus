@@ -9,7 +9,6 @@ use crate::{
     poly::{ConstCoeffBitWidth, mle::DenseMultilinearExtension},
     sub,
     traits::ConstTranscribable,
-    utils::parallelize,
 };
 use ark_std::{cfg_iter_mut, iterable::Iterable};
 use crypto_primitives::PrimeField;

@@ -7,7 +7,6 @@ use crate::{
         utils::validate_input,
     },
     poly::mle::DenseMultilinearExtension,
-    utils::num_threads,
 };
 use ark_std::{cfg_chunks, cfg_chunks_mut};
 use crypto_primitives::DenseRowMatrix;
@@ -168,21 +167,16 @@ impl<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize>
         evals: &[Zt::Eval],
     ) -> DenseRowMatrix<Zt::Cw> {
         let codeword_len = pp.linear_code.codeword_len();
-        let rows_per_thread = pp.num_rows.div_ceil(num_threads());
+
         // Performance: Using DenseRowMatrix's linearized row in an uninit form
         // is much more performant that using Vec<Vec<_>>.
         let mut encoded_matrix = DenseRowMatrix::<Zt::Cw>::uninit(pp.num_rows, codeword_len);
 
-        cfg_chunks_mut!(encoded_matrix.data, rows_per_thread * codeword_len)
-            .zip(cfg_chunks!(evals, rows_per_thread * row_len))
-            .for_each(|(encoded_chunk, evals)| {
-                for (row, evals) in encoded_chunk
-                    .chunks_exact_mut(codeword_len)
-                    .zip(evals.chunks_exact(row_len))
-                {
-                    let encoded: Vec<Zt::Cw> = pp.linear_code.encode(evals);
-                    Out::from(row).copy_from_slice(encoded.as_slice());
-                }
+        cfg_chunks_mut!(encoded_matrix.data, codeword_len)
+            .zip(cfg_chunks!(evals, row_len))
+            .for_each(|(row, evals)| {
+                let encoded: Vec<Zt::Cw> = pp.linear_code.encode(evals);
+                Out::from(row).copy_from_slice(encoded.as_slice());
             });
 
         // Safe because we have just initialized all elements.

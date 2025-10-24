@@ -1,5 +1,5 @@
 use crate::{add, traits::ConstTranscribable};
-use ark_std::cfg_into_iter;
+use ark_std::cfg_iter_mut;
 use itertools::Itertools;
 use std::{
     fmt,
@@ -8,7 +8,6 @@ use std::{
 };
 use thiserror::Error;
 
-use crate::utils::parallelize;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -103,9 +102,9 @@ where
 {
     let mut res = Vec::with_capacity(m_cols);
 
-    parallelize(res.spare_capacity_mut(), |(chunk, chunk_start)| {
-        for (j, v) in chunk.iter_mut().enumerate() {
-            let i = chunk_start + j;
+    cfg_iter_mut!(res.spare_capacity_mut())
+        .enumerate()
+        .for_each(|(i, v)| {
             let mut hasher = blake3::Hasher::new();
             let mut buf = vec![0_u8; S::NUM_BYTES];
             for row in rows.iter() {
@@ -114,8 +113,7 @@ where
                 hasher.update(&buf);
             }
             *v = MaybeUninit::new(hasher.finalize().into());
-        }
-    });
+        });
 
     // SAFETY: We filled the entire capacity of `res` with initialized values
     unsafe {
