@@ -3,14 +3,13 @@ use crate::{
     traits::{ConstTranscribable, Named, Transcribable},
 };
 use crypto_bigint::{BitOps, BoxedUint, Word};
-use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_uint::Uint};
+use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint};
 use itertools::Itertools;
 use num_traits::CheckedAdd;
 use rand::{rngs::StdRng, seq::SliceRandom};
 use rand_core::SeedableRng;
 use std::iter::Iterator;
 
-use crypto_primitives::boolean::Boolean;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -116,48 +115,6 @@ pub(crate) fn num_threads() -> usize {
     return 1;
 }
 
-#[cfg(not(feature = "parallel"))]
-pub(crate) fn parallelize_into_iter_map_collect<I, T, F, R, C>(iterable: I, f: F) -> C
-where
-    I: Send + IntoIterator<Item = T>,
-    T: Send,
-    R: Send,
-    F: Fn(T) -> R + Send + Sync + Clone,
-    C: FromIterator<R>,
-{
-    iterable.into_iter().map(f).collect()
-}
-
-#[cfg(feature = "parallel")]
-pub(crate) fn parallelize_into_iter_map_collect<I, T, F, R, C>(iterable: I, f: F) -> C
-where
-    I: Send + IntoParallelIterator<Item = T>,
-    T: Send,
-    R: Send,
-    F: Fn(T) -> R + Send + Sync + Clone,
-    C: FromParallelIterator<R>,
-{
-    iterable.into_par_iter().map(f).collect()
-}
-
-pub(crate) fn parallelize_for_each<I, T, F>(iter: I, f: F)
-where
-    I: Send + Iterator<Item = T>,
-    T: Send,
-    F: Fn(T) + Send + Sync + Clone,
-{
-    #[cfg(feature = "parallel")]
-    rayon::scope(|scope| {
-        iter.for_each(|item| {
-            let f = &f;
-            scope.spawn(move |_| f(item))
-        })
-    });
-
-    #[cfg(not(feature = "parallel"))]
-    iter.for_each(f);
-}
-
 pub(crate) fn parallelize<T, F>(v: &mut [T], f: F)
 where
     T: Send,
@@ -170,7 +127,9 @@ where
         if chunk_size < num_threads {
             f((v, 0));
         } else {
-            parallelize_for_each(v.chunks_mut(chunk_size).zip((0..).step_by(chunk_size)), f);
+            v.par_chunks_mut(chunk_size)
+                .enumerate()
+                .for_each(|(i, chunk)| f((chunk, i * chunk_size)));
         }
     }
 

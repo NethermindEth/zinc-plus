@@ -1,10 +1,16 @@
-use crate::{add, traits::ConstTranscribable, utils::parallelize_into_iter_map_collect};
+use crate::{add, traits::ConstTranscribable};
+use ark_std::cfg_into_iter;
 use itertools::Itertools;
 use std::{
     fmt,
     fmt::{Display, Formatter},
+    mem::MaybeUninit,
 };
 use thiserror::Error;
+
+use crate::utils::parallelize;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 pub const HASH_OUT_LEN: usize = blake3::OUT_LEN;
 
@@ -95,16 +101,28 @@ fn hash_leaves<S>(rows: &[&[S]], m_cols: usize) -> Vec<MtHash>
 where
     S: ConstTranscribable + Send + Sync,
 {
-    parallelize_into_iter_map_collect(0..m_cols, |i| {
-        let mut hasher = blake3::Hasher::new();
-        let mut buf = vec![0_u8; S::NUM_BYTES];
-        for row in rows.iter() {
-            let v = &row[i];
-            v.write_transcription_bytes(&mut buf);
-            hasher.update(&buf);
+    let mut res = Vec::with_capacity(m_cols);
+
+    parallelize(res.spare_capacity_mut(), |(chunk, chunk_start)| {
+        for (j, v) in chunk.iter_mut().enumerate() {
+            let i = chunk_start + j;
+            let mut hasher = blake3::Hasher::new();
+            let mut buf = vec![0_u8; S::NUM_BYTES];
+            for row in rows.iter() {
+                let value = &row[i];
+                value.write_transcription_bytes(&mut buf);
+                hasher.update(&buf);
+            }
+            *v = MaybeUninit::new(hasher.finalize().into());
         }
-        hasher.finalize().into()
-    })
+    });
+
+    // SAFETY: We filled the entire capacity of `res` with initialized values
+    unsafe {
+        res.set_len(m_cols);
+    }
+
+    res
 }
 
 #[allow(clippy::unwrap_used)] // Using unwrap here never panics
