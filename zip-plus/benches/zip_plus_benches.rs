@@ -20,8 +20,8 @@ const INT_LIMBS: usize = U64::LIMBS;
 struct BenchZipPlusTypes<const D: usize> {}
 impl<const D: usize> ZipTypes<D> for BenchZipPlusTypes<D> {
     const NUM_COLUMN_OPENINGS: usize = 650;
-    type Eval = BitDecomposedPolynomial<1, D>;
-    type Cw = BitDecomposedPolynomial<25, D>;
+    type Eval = BitDecomposedPolynomial<2, D>;
+    type Cw = BitDecomposedPolynomial<26, D>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
     type PrimeTest = MillerRabin;
     type Chal = i128;

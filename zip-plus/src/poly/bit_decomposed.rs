@@ -4,25 +4,23 @@ use crate::{
     poly::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, dense::DensePolynomial},
     traits::{ConstTranscribable, FromRef, Named},
 };
-use crypto_primitives::{
-    FromWithConfig, PrimeField, Semiring, boolean::Boolean, crypto_bigint_int::Int,
-};
-use num_traits::{CheckedAdd, CheckedMul, CheckedSub, One, Zero};
+use crypto_primitives::{FromWithConfig, PrimeField, Semiring, crypto_bigint_int::Int, Ring};
+use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
-    array,
     fmt::Display,
     hash::Hash,
     iter::{Product, Sum},
-    ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
+    ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
-/// * `BITS` is the maximum bit depth required
+/// * `BITS` is the maximum bit depth required, INCLUDING a sign bit.
 /// * `DEGREE` cannot be larger than 63
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BitDecomposedPolynomial<const BITS: usize, const DEGREE: usize> {
     /// `slices[i]` holds the i-th bit (LSB at i=0) of all DEGREE+1 coefficients
     /// packed into a u64.
+    /// The representation is Two's Complement. slices[K-1] is the sign bit slice.
     slices: [u64; BITS],
 }
 
@@ -34,54 +32,76 @@ impl<const BITS: usize, const DEGREE: usize> BitDecomposedPolynomial<BITS, DEGRE
     fn extract_coefficient(&self, index: usize) -> i64 {
         debug_assert!(index <= DEGREE, "Coefficient index out of bounds");
 
-        // Build the value as unsigned first to avoid cast warnings
+        // 1. Reconstruct the K-bit value (stored temporarily as u64).
         let mut value: u64 = 0;
-        for (bit_pos, &slice) in self.slices.iter().enumerate() {
-            // Extract the bit at position `index` from this slice
-            let bit = (slice >> index) & 1;
-            value |= bit << bit_pos;
+
+        // The compiler will unroll this loop as K is constant.
+        // We iterate through the slices (bit positions).
+        for k in 0..BITS {
+            // Extract the bit corresponding to the 'index'-th coefficient from the k-th slice.
+            let bit = (self.slices[k] >> index) & 1;
+            // Place it into the k-th position of the reconstructed value.
+            value |= bit << k;
         }
 
-        // Truncate to K bits and sign-extend from K-bit two's complement to i64
-        // Since K=32, we interpret the lower 32 bits as i32 and extend to i64
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let value_i32 = value as u32 as i32;
-        i64::from(value_i32)
+        // 2. Sign-extend the K-bit value to i64.
+        sign_extend::<BITS>(value)
     }
 
-    /// Extract the value of a specific coefficient at the given index as an
-    /// unsigned integer. This is the natural representation stored in
-    /// bit decomposed format.
-    #[inline]
-    fn extract_coefficient_unsigned(&self, index: usize) -> u32 {
-        debug_assert!(index <= DEGREE, "Coefficient index out of bounds");
-
-        let mut value: u64 = 0;
-        for (bit_pos, &slice) in self.slices.iter().enumerate() {
-            // Extract the bit at position `index` from this slice
-            let bit = (slice >> index) & 1;
-            value |= bit << bit_pos;
+    /// Helper function to efficiently invert the remaining slices once the carry is zero.
+    #[inline(always)]
+    fn invert_remaining_slices(input: &Self, output: &mut Self, start_index: usize) {
+        let coefficient_mask: u64 = get_coefficient_mask(DEGREE);
+        for j in start_index..BITS {
+            // Invert and mask to ensure unused upper bits remain zero.
+            output.slices[j] = (!input.slices[j]) & coefficient_mask;
         }
-
-        // Truncate to K bits (K=32, so this fits exactly in u32)
-        #[allow(clippy::cast_possible_truncation)]
-        let value_u32 = value as u32;
-        value_u32
     }
+}
 
-    /// Set a specific coefficient at the given index from an unsigned integer
-    /// value. Returns None if the value doesn't fit in K bits.
+impl<const BITS: usize, const DEGREE: usize> Neg for BitDecomposedPolynomial<BITS, DEGREE> {
+    type Output = Self;
+
+    /// Computes the Two's Complement negation (-self).
+    /// Implements the (~self) + 1 algorithm efficiently in O(K).
     #[inline]
-    fn set_coefficient_unsigned(&mut self, index: usize, value: u32) {
-        debug_assert!(index <= DEGREE, "Coefficient index out of bounds");
+    fn neg(self) -> Self::Output {
+        let mut result = Self::default();
 
-        // Distribute the bits of the value across the slices
-        for (bit_pos, slice) in self.slices.iter_mut().enumerate() {
-            // Extract the bit at position `bit_pos` from the value
-            let bit = u64::from((value >> bit_pos) & 1);
-            // Clear the bit at position `index` in this slice, then set it
-            *slice = (*slice & !(1u64 << index)) | (bit << index);
+        let coefficient_mask: u64 = get_coefficient_mask(DEGREE);
+
+        // Initialize the carry to '1' for all coefficients simultaneously.
+        // This implements the "+ 1" part of the algorithm.
+        let mut carry: u64 = coefficient_mask;
+
+        // The compiler will unroll this loop as K is constant.
+        for i in 0..BITS {
+            // 1. Invert the bits (the "~self" part).
+            // We must apply the COEFFICIENT_MASK here. If NUM_COEFFS < 64, the inversion (!)
+            // would set the unused upper bits to 1. The mask ensures they are treated as 0
+            // for the arithmetic operation.
+            let a_inv = (!self.slices[i]) & coefficient_mask;
+
+            // 2. Specialized Ripple-Carry (Increment Logic):
+
+            // Calculate Sum: S = A_inv XOR C_in
+            result.slices[i] = a_inv ^ carry;
+
+            // Calculate Carry-out: C_out = A_inv AND C_in
+            // The carry propagates upwards only if the inverted value was 1.
+            carry = a_inv & carry;
+
+            // Optimization: If the carry has resolved to 0, the "+1" is complete.
+            // The remaining slices just need to be inverted.
+            if carry == 0 {
+                Self::invert_remaining_slices(&self, &mut result, i + 1);
+                break;
+            }
         }
+
+        // Note: This implementation follows standard Rust wrapping behavior.
+        // Negating the minimum representable K-bit value results in itself.
+        result
     }
 }
 
@@ -163,12 +183,14 @@ impl<const BITS: usize, const DEGREE: usize> AddAssign<&Self>
     for BitDecomposedPolynomial<BITS, DEGREE>
 {
     /// Efficient Polynomial Addition (Parallel Ripple-Carry Adder)
+    /// This implementation works correctly for
+    /// both Unsigned and Two's Complement Signed integers.
     #[allow(clippy::arithmetic_side_effects)]
-    #[inline(always)]
+    // #[inline(always)] // Critical for performance in tight loops // FIXME
     fn add_assign(&mut self, rhs: &Self) {
         let mut carry: u64 = 0;
 
-        // The compiler will unroll this loop as BITS is constant.
+        // The compiler will unroll this loop as K is constant.
         for i in 0..BITS {
             let a = self.slices[i];
             let b = rhs.slices[i];
@@ -179,14 +201,18 @@ impl<const BITS: usize, const DEGREE: usize> AddAssign<&Self>
 
             // Calculate Carry_out (Optimized Majority function):
             // C_out = (A & B) | (C_in & (A XOR B))
+            // This correctly propagates the carry through the sign bit.
             carry = (a & b) | (carry & a_xor_b);
         }
 
+        // Note: In Two's Complement, we rely on K being large enough to hold the result range.
+        // We do not check the final carry bit for overflow detection.
+
         // In debug builds, check if K was large enough.
-        debug_assert!(
-            carry == 0,
-            "Coefficient overflow detected! K must be increased."
-        );
+        // debug_assert!(
+        //     carry == 0,
+        //     "Coefficient overflow detected! K must be increased."
+        // );
     }
 }
 
@@ -201,11 +227,11 @@ impl<const BITS: usize, const DEGREE: usize> SubAssign for BitDecomposedPolynomi
 impl<'a, const BITS: usize, const DEGREE: usize> SubAssign<&'a Self>
     for BitDecomposedPolynomial<BITS, DEGREE>
 {
-    /// Efficient Polynomial Subtraction (Parallel Ripple-Borrow Subtractor)
     #[allow(clippy::arithmetic_side_effects)]
     #[inline(always)]
-    fn sub_assign(&mut self, _rhs: &'a Self) {
-        unimplemented!("Polynomial subtraction is not implemented");
+    fn sub_assign(&mut self, rhs: &'a Self) {
+        // Not very efficient, but we don't use subtraction
+        *self += -*rhs;
     }
 }
 
@@ -275,22 +301,99 @@ impl<const BITS: usize, const DEGREE: usize> One for BitDecomposedPolynomial<BIT
     }
 }
 
+impl<const BITS: usize, const DEGREE: usize> CheckedNeg for BitDecomposedPolynomial<BITS, DEGREE> {
+    fn checked_neg(&self) -> Option<Self> {
+        let mut result = Self::default();
+
+        let coefficient_mask: u64 = get_coefficient_mask(DEGREE);
+
+        // Initialize carry to '1' for all coefficients (the "+ 1" part).
+        let mut carry: u64 = coefficient_mask;
+
+        // The compiler will unroll this loop.
+        for i in 0..BITS {
+            // Invert the input slice (~A) and mask to keep unused bits zero.
+            let a_inv = (!self.slices[i]) & coefficient_mask;
+
+            // Specialized Ripple-Carry (Increment Logic):
+            // Sum: S = A_inv XOR C_in
+            result.slices[i] = a_inv ^ carry;
+
+            // Carry-out: C_out = A_inv AND C_in
+            carry = a_inv & carry;
+
+            // Optimization: If carry is 0, the "+1" is complete.
+            if carry == 0 {
+                Self::invert_remaining_slices(self, &mut result, i + 1);
+                break;
+            }
+        }
+
+        // 2. Check for overflow (O(1)).
+        // Overflow occurs iff (Input is Negative) AND (Result is Negative).
+
+        let sign_index = BITS - 1;
+        let input_sign = self.slices[sign_index];
+        let result_sign = result.slices[sign_index];
+
+        // Create a mask where '1' indicates the corresponding coefficient overflowed.
+        // Since input slices are correctly masked, we don't need to mask here again.
+        let overflow_mask = input_sign & result_sign;
+
+        if overflow_mask != 0 {
+            None
+        } else {
+            Some(result)
+        }
+    }
+}
+
 impl<const BITS: usize, const DEGREE: usize> CheckedAdd for BitDecomposedPolynomial<BITS, DEGREE> {
     fn checked_add(&self, other: &Self) -> Option<Self> {
+        // Ensure we have at least 1 bit (the sign bit) to perform meaningful overflow checks.
+        if BITS == 0 {
+            return Some(Self::zero());
+        }
+
+        // Initialize result. We will compute self + other.
         let mut result = *self;
         let mut carry: u64 = 0;
 
+        // 1. Perform the Ripple-Carry Addition (O(K)).
+        // The logic is identical for signed and unsigned arithmetic.
+        // The compiler will unroll this loop as K is constant.
         for i in 0..BITS {
+            // Read the i-th slice of A (from self, via result) and B (from other).
             let a = result.slices[i];
             let b = other.slices[i];
 
+            // Calculate Sum: S = A XOR B XOR C_in
             let a_xor_b = a ^ b;
             result.slices[i] = a_xor_b ^ carry;
+
+            // Calculate Carry_out (Majority function): C_out = (A&B) | (C_in & (A^B))
             carry = (a & b) | (carry & a_xor_b);
         }
 
-        // Check for overflow
-        if carry != 0 {
+        // 2. Detect Two's Complement Overflow (O(1)).
+        // Note: We ignore the final 'carry' value here.
+
+        // The index of the slice containing the sign bits.
+        let sign_index = BITS - 1;
+
+        // Extract the sign slices of the inputs (A and B) and the sum (S).
+        // We must use the original inputs ('self' and 'other') to compare against the result.
+        let a_sign = self.slices[sign_index];
+        let b_sign = other.slices[sign_index];
+        let s_sign = result.slices[sign_index];
+
+        // Calculate the overflow mask using the optimized rule:
+        // Overflow = (A_sign XOR S_sign) & (B_sign XOR S_sign)
+        // This generates a mask where '1' indicates the corresponding coefficient overflowed.
+        let overflow_mask = (a_sign ^ s_sign) & (b_sign ^ s_sign);
+
+        // If any bit in the overflow mask is set, the operation failed.
+        if overflow_mask != 0 {
             return None;
         }
 
@@ -299,8 +402,10 @@ impl<const BITS: usize, const DEGREE: usize> CheckedAdd for BitDecomposedPolynom
 }
 
 impl<const BITS: usize, const DEGREE: usize> CheckedSub for BitDecomposedPolynomial<BITS, DEGREE> {
-    fn checked_sub(&self, _other: &Self) -> Option<Self> {
-        unimplemented!("Polynomial subtraction is not implemented")
+    fn checked_sub(&self, other: &Self) -> Option<Self> {
+        // Not very efficient, but we don't use subtraction
+        let neg_other = other.checked_neg()?;
+        self.checked_add(&neg_other)
     }
 }
 
@@ -377,66 +482,14 @@ impl<const BITS: usize, const DEGREE: usize, const LIMBS: usize>
             BITS <= int_bits,
             "Cannot convert BitDecomposedPolynomial with BITS > Int<LIMBS>::BITS"
         );
-        DensePolynomial {
-            coeff_0: Int::from(bit_poly.extract_coefficient_unsigned(0)),
-            coeffs: array::from_fn::<_, DEGREE, _>(|i| {
-                Int::from(bit_poly.extract_coefficient_unsigned(i + 1))
-            }),
-        }
-    }
-}
-
-//
-// BitDecomposedPolynomial => DensePolynomial<Boolean, DEGREE>
-//
-
-impl<const BITS: usize, const DEGREE: usize> From<BitDecomposedPolynomial<BITS, DEGREE>>
-    for DensePolynomial<Boolean, DEGREE>
-{
-    fn from(bit_poly: BitDecomposedPolynomial<BITS, DEGREE>) -> Self {
-        (&bit_poly).into()
-    }
-}
-
-impl<const BITS: usize, const DEGREE: usize> From<&BitDecomposedPolynomial<BITS, DEGREE>>
-    for DensePolynomial<Boolean, DEGREE>
-{
-    fn from(bit_poly: &BitDecomposedPolynomial<BITS, DEGREE>) -> Self {
-        DensePolynomial::from_ref(bit_poly)
-    }
-}
-
-impl<const BITS: usize, const DEGREE: usize> FromRef<BitDecomposedPolynomial<BITS, DEGREE>>
-    for DensePolynomial<Boolean, DEGREE>
-{
-    fn from_ref(bit_poly: &BitDecomposedPolynomial<BITS, DEGREE>) -> Self {
-        let c = bit_poly.extract_coefficient_unsigned(0);
-        assert!(
-            c <= 1,
-            "Cannot convert BitDecomposedPolynomial with coeff_0 > 1 to Boolean"
-        );
-        DensePolynomial {
-            coeff_0: Boolean::new(c != 0),
-            coeffs: [Boolean::FALSE; DEGREE],
-        }
-    }
-}
-
-impl<const BITS: usize, const DEGREE: usize> From<DensePolynomial<Boolean, DEGREE>>
-    for BitDecomposedPolynomial<BITS, DEGREE>
-{
-    fn from(dense: DensePolynomial<Boolean, DEGREE>) -> Self {
-        BitDecomposedPolynomial::from(&dense)
-    }
-}
-
-impl<const BITS: usize, const DEGREE: usize> From<&DensePolynomial<Boolean, DEGREE>>
-    for BitDecomposedPolynomial<BITS, DEGREE>
-{
-    fn from(dense: &DensePolynomial<Boolean, DEGREE>) -> Self {
-        let mut result = BitDecomposedPolynomial::zero();
-        result.set_coefficient_unsigned(0, dense.coeff_0.inner().into());
-        result
+        // TODO: Make more efficient
+        let i64_poly = DensePolynomial::<i64, DEGREE>::from(bit_poly);
+        let coeffs = i64_poly
+            .to_coeffs()
+            .iter()
+            .map(|&coeff| Int::<LIMBS>::from(&coeff))
+            .collect::<Vec<_>>();
+        DensePolynomial::new(&coeffs)
     }
 }
 
@@ -457,17 +510,31 @@ impl<const BITS: usize, const DEGREE: usize> From<&BitDecomposedPolynomial<BITS,
 {
     #[allow(clippy::arithmetic_side_effects)]
     fn from(bit_poly: &BitDecomposedPolynomial<BITS, DEGREE>) -> Self {
-        let int_bits = usize::try_from(i64::BITS).expect("Int<LIMBS>::BITS must fit in usize");
-        assert!(
-            BITS <= int_bits,
-            "Cannot convert BitDecomposedPolynomial with BITS > Int<LIMBS>::BITS"
-        );
-        DensePolynomial {
-            coeff_0: i64::from(bit_poly.extract_coefficient_unsigned(0)),
-            coeffs: array::from_fn::<_, DEGREE, _>(|i| {
-                i64::from(bit_poly.extract_coefficient_unsigned(i + 1))
-            }),
+        // let int_bits =
+        //     usize::try_from(Int::<LIMBS>::BITS).expect("Int<LIMBS>::BITS must fit in usize");
+        // assert!(
+        //     BITS <= int_bits,
+        //     "Cannot convert BitDecomposedPolynomial with BITS > Int<LIMBS>::BITS"
+        // );
+        let mut coeffs = Vec::with_capacity(DEGREE + 1);
+
+        // Iterate over all DEGREE + 1 coefficients.
+        for i in 0..=DEGREE {
+            let mut reconstructed_val: u64 = 0;
+
+            // Reconstruct the coefficient from the slices.
+            for k in 0..BITS {
+                // Extract the i-th bit from the k-th slice.
+                let bit = (bit_poly.slices[k] >> i) & 1;
+                // Place the bit into the coefficient value.
+                reconstructed_val |= bit << k;
+            }
+
+            // Interpret the K-bit value as Two's Complement (Sign Extension).
+            coeffs.push(sign_extend::<BITS>(reconstructed_val));
         }
+
+        DensePolynomial::new(&coeffs)
     }
 }
 
@@ -486,13 +553,31 @@ impl<const BITS: usize, const DEGREE: usize> From<&DensePolynomial<i64, DEGREE>>
     fn from(dense: &DensePolynomial<i64, DEGREE>) -> Self {
         let mut result = BitDecomposedPolynomial::zero();
 
-        // Extract all coefficients and set them
-        let coeffs = dense.to_coeffs();
-        for (i, &coeff) in coeffs.iter().enumerate() {
-            assert!(coeff >= 0);
-            result.set_coefficient_unsigned(i, coeff as u32);
-        }
+        // Iterate over the bit depth K.
+        for k in 0..BITS {
+            let mut slice_val: u64 = 0;
+            // Iterate over the 32 coefficients.
+            for (i, &coeff_val) in dense.to_coeffs().iter().enumerate() {
+                // Extract the k-th bit. Casting i64 to u64 preserves the Two's Complement pattern.
+                let unsigned_coeff_val = coeff_val as u64;
 
+                // Optional: Validate input range in debug builds if K < 64.
+                if BITS < 64 && k == 0 {
+                     // Check if the value fits within the K-bit signed range.
+                     // The upper 64-K bits must match the sign bit (K-1).
+                     let shift = 64 - BITS;
+                     let sign_extended = ((unsigned_coeff_val << shift) as i64 >> shift) as u64;
+                     debug_assert_eq!(unsigned_coeff_val, sign_extended,
+                                      "Input coefficient magnitude too large for K-bit Two's Complement");
+                }
+
+                let bit = (unsigned_coeff_val >> k) & 1;
+
+                // Place the bit into the i-th position of the slice.
+                slice_val |= bit << i;
+            }
+            result.slices[k] = slice_val;
+        }
         result
     }
 }
@@ -509,9 +594,21 @@ impl<const BITS: usize, const BITS_2: usize, const DEGREE: usize>
         assert!(BITS >= BITS_2, "Cannot convert to smaller bit depth");
 
         let mut result = Self::zero();
+        
+        // Copy the lower slices
         for i in 0..BITS_2 {
             result.slices[i] = bit_poly.slices[i];
         }
+        
+        // Perform sign extension for the remaining slices
+        // The sign bit is at index BITS_2 - 1
+        let sign_slice = bit_poly.slices[BITS_2 - 1];
+        
+        // For each coefficient, if its sign bit is set, we need to set all higher bits
+        for i in BITS_2..BITS {
+            result.slices[i] = sign_slice;
+        }
+        
         result
     }
 }
@@ -522,6 +619,8 @@ impl<const BITS: usize, const BITS_2: usize, const DEGREE: usize>
 
 impl<const BITS: usize, const DEGREE: usize> Semiring for BitDecomposedPolynomial<BITS, DEGREE> {}
 
+impl<const BITS: usize, const DEGREE: usize> Ring for BitDecomposedPolynomial<BITS, DEGREE> {}
+
 //
 // RNG
 //
@@ -531,11 +630,24 @@ impl<const BITS: usize, const DEGREE: usize> Distribution<BitDecomposedPolynomia
 {
     #[allow(clippy::arithmetic_side_effects)]
     fn sample<Gen: Rng + ?Sized>(&self, rng: &mut Gen) -> BitDecomposedPolynomial<BITS, DEGREE> {
+        // For DEGREE=31, this evaluates to 0xFFFFFFFF.
+        // For DEGREE=63, this evaluates to u64::MAX.
+        let coefficient_mask: u64 = get_coefficient_mask(DEGREE);
+
         let mut slices = [0u64; BITS];
 
-        // Sample each slice independently
+        // Iterate over all K slices (the bit depth).
+        // By generating random bits for all K slices (including the sign slice),
+        // we achieve a uniform distribution across the signed range.
+        // The compiler will unroll this loop as K is constant.
         for slice in slices.iter_mut() {
-            *slice = rng.random::<u64>() & ((1_u64 << DEGREE) - 1); // Ensure we only use DEGREE bits
+            // 1. Generate a full random u64.
+            // rng.gen() is the idiomatic way to generate standard types.
+            let random_val: u64 = rng.random();
+
+            // 2. Apply the mask. This ensures that bits outside the coefficient packing
+            //    (e.g., bits 32 through 63 if NUM_COEFFS=32) are zeroed out.
+            *slice = random_val & coefficient_mask;
         }
 
         BitDecomposedPolynomial { slices }
@@ -615,24 +727,51 @@ impl<const BITS: usize, const DEGREE: usize> EvaluatablePolynomial<i128, Int<5>>
     }
 }
 
+//
+// Helpers
+//
+
+/// Helper to correctly sign-extend a K-bit value stored in a u64 to an i64.
+#[inline(always)]
+fn sign_extend<const BITS: usize>(val: u64) -> i64 {
+    if BITS == 64 {
+        // If K is the full width, a simple cast interprets the Two's Complement correctly.
+        val as i64
+    } else {
+        // If K < 64, we must manually sign-extend.
+        let shift = 64 - BITS;
+        // 1. Left shift to move the sign bit (at K-1) to the MSB (63).
+        // 2. Cast to i64.
+        // 3. Arithmetic right shift (>>) fills the upper bits with the sign bit.
+        ((val as i64) << shift) >> shift
+    }
+}
+
+/// We use u128 arithmetic to robustly handle the calculation even if DEGREE=63.
+/// Calculation: (2^(DEGREE + 1)) - 1.
+const fn get_coefficient_mask(degree: usize) -> u64 {
+    ((1_u128 << (degree + 1)) - 1) as u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use num_traits::{One, Zero};
 
-    const TEST_BITS: usize = 32;
-    const TEST_DEGREE: usize = 31;
+    const TEST_BITS: usize = 28;
+    const TEST_DEGREE: usize = 9;
+
+    /// 2^27 - 1 = 134217727
+    const MAX_VAL: i64 = (1_i64 << (TEST_BITS - 1)) - 1;
+
+    /// -2^27 = -134217728
+    const MIN_VAL: i64 = -(1i64 << (TEST_BITS - 1));
+
     type TestPoly = BitDecomposedPolynomial<TEST_BITS, TEST_DEGREE>;
 
     /// Helper to create a bit decomposed polynomial from u32 coefficients
-    fn make_poly(coeffs: &[u32]) -> TestPoly {
-        let mut poly = TestPoly::zero();
-        for (i, &coeff) in coeffs.iter().enumerate() {
-            if i <= TEST_DEGREE {
-                poly.set_coefficient_unsigned(i, coeff);
-            }
-        }
-        poly
+    fn make_poly(coeffs: &[i64]) -> TestPoly {
+        DensePolynomial::<_, TEST_DEGREE>::new(coeffs).into()
     }
 
     #[test]
@@ -642,7 +781,7 @@ mod tests {
 
         // All coefficients should be zero
         for i in 0..=TEST_DEGREE {
-            assert_eq!(zero.extract_coefficient_unsigned(i), 0);
+            assert_eq!(zero.extract_coefficient(i), 0);
         }
     }
 
@@ -652,9 +791,9 @@ mod tests {
         assert!(!one.is_zero());
 
         // Only coefficient 0 should be 1
-        assert_eq!(one.extract_coefficient_unsigned(0), 1);
+        assert_eq!(one.extract_coefficient(0), 1);
         for i in 1..=TEST_DEGREE {
-            assert_eq!(one.extract_coefficient_unsigned(i), 0);
+            assert_eq!(one.extract_coefficient(i), 0);
         }
     }
 
@@ -668,9 +807,9 @@ mod tests {
         let sum = poly1 + poly2;
 
         // Should be 5 + 7x + 9x^2
-        assert_eq!(sum.extract_coefficient_unsigned(0), 5);
-        assert_eq!(sum.extract_coefficient_unsigned(1), 7);
-        assert_eq!(sum.extract_coefficient_unsigned(2), 9);
+        assert_eq!(sum.extract_coefficient(0), 5);
+        assert_eq!(sum.extract_coefficient(1), 7);
+        assert_eq!(sum.extract_coefficient(2), 9);
     }
 
     #[test]
@@ -681,22 +820,22 @@ mod tests {
         // Create polynomials where lower bits will produce carries
         // Example: coefficient has pattern that will generate carries between bit
         // positions
-        let poly1 = make_poly(&[0x7FFFFFFF, 0x1]); // (2^31 - 1) + x
-        let poly2 = make_poly(&[0x7FFFFFFF, 0x0]); // (2^31 - 1)
+        let poly1 = make_poly(&[1000000, 1]); // 1000000 + x
+        let poly2 = make_poly(&[2000000, 0]); // 2000000
 
         let sum = poly1 + poly2;
 
-        // 0x7FFFFFFF + 0x7FFFFFFF = 0xFFFFFFFE (no overflow within 32 bits)
+        // 1000000 + 2000000 = 3000000
         // This tests the ripple-carry adder working correctly
-        assert_eq!(sum.extract_coefficient_unsigned(0), 0xFFFFFFFE);
-        assert_eq!(sum.extract_coefficient_unsigned(1), 1);
+        assert_eq!(sum.extract_coefficient(0), 3000000);
+        assert_eq!(sum.extract_coefficient(1), 1);
 
         // Test another carry scenario: adding 1 to a value with all lower bits set
-        let poly3 = make_poly(&[0xFF, 0x0]); // 255
-        let poly4 = make_poly(&[0x01, 0x0]); // 1
+        let poly3 = make_poly(&[255, 0]); // 255
+        let poly4 = make_poly(&[1, 0]); // 1
 
         let sum2 = poly3 + poly4;
-        assert_eq!(sum2.extract_coefficient_unsigned(0), 0x100); // 256
+        assert_eq!(sum2.extract_coefficient(0), 256); // 256
     }
 
     #[test]
@@ -728,16 +867,16 @@ mod tests {
         assert!(sum.is_some());
 
         let sum = sum.unwrap();
-        assert_eq!(sum.extract_coefficient_unsigned(0), 5);
-        assert_eq!(sum.extract_coefficient_unsigned(1), 7);
-        assert_eq!(sum.extract_coefficient_unsigned(2), 9);
+        assert_eq!(sum.extract_coefficient(0), 5);
+        assert_eq!(sum.extract_coefficient(1), 7);
+        assert_eq!(sum.extract_coefficient(2), 9);
     }
 
     #[test]
     fn test_checked_add_overflow() {
         // Create two polynomials that will overflow when added
-        let poly1 = make_poly(&[0xFFFFFFFF; 32]);
-        let poly2 = make_poly(&[0x1; 32]);
+        let poly1 = make_poly(&[MAX_VAL; 10]);
+        let poly2 = make_poly(&[1; 10]);
 
         let sum = poly1.checked_add(&poly2);
         // Should return None due to overflow
@@ -754,9 +893,9 @@ mod tests {
 
         let sum: TestPoly = polys.into_iter().sum();
 
-        assert_eq!(sum.extract_coefficient_unsigned(0), 1);
-        assert_eq!(sum.extract_coefficient_unsigned(1), 2);
-        assert_eq!(sum.extract_coefficient_unsigned(2), 3);
+        assert_eq!(sum.extract_coefficient(0), 1);
+        assert_eq!(sum.extract_coefficient(1), 2);
+        assert_eq!(sum.extract_coefficient(2), 3);
     }
 
     #[test]
@@ -769,9 +908,9 @@ mod tests {
 
         let sum: TestPoly = polys.iter().sum();
 
-        assert_eq!(sum.extract_coefficient_unsigned(0), 1);
-        assert_eq!(sum.extract_coefficient_unsigned(1), 2);
-        assert_eq!(sum.extract_coefficient_unsigned(2), 3);
+        assert_eq!(sum.extract_coefficient(0), 1);
+        assert_eq!(sum.extract_coefficient(1), 2);
+        assert_eq!(sum.extract_coefficient(2), 3);
     }
 
     #[test]
@@ -779,7 +918,7 @@ mod tests {
         let poly = make_poly(&[1, 2, 3]);
         let s = format!("{}", poly);
 
-        // Should start with "[1, 2, 3" and have 32 total coefficients
+        // Should start with "[1, 2, 3" and have 10 total coefficients
         assert!(s.starts_with("[1, 2, 3"));
         assert!(s.ends_with("]"));
     }
@@ -843,11 +982,16 @@ mod tests {
         assert_eq!(poly.extract_coefficient(1), 200);
         assert_eq!(poly.extract_coefficient(2), 300);
 
-        // Test value that would be negative in two's complement
-        let poly2 = make_poly(&[0x80000000]); // MSB set
-        let signed = poly2.extract_coefficient(0);
-        // Should be interpreted as negative in i32 two's complement
-        assert!(signed < 0);
+        // Test negative values
+        let poly2 = make_poly(&[-100, -200, -300]);
+        assert_eq!(poly2.extract_coefficient(0), -100);
+        assert_eq!(poly2.extract_coefficient(1), -200);
+        assert_eq!(poly2.extract_coefficient(2), -300);
+
+        // Test value that is negative in two's complement (28-bit MIN)
+        let poly3 = make_poly(&[MIN_VAL]);
+        let signed = poly3.extract_coefficient(0);
+        assert_eq!(signed, MIN_VAL);
     }
 
     #[test]
@@ -870,11 +1014,11 @@ mod tests {
 
         let bit_poly: TestPoly = (&dense).into();
 
-        assert_eq!(bit_poly.extract_coefficient_unsigned(0), 1);
-        assert_eq!(bit_poly.extract_coefficient_unsigned(1), 2);
-        assert_eq!(bit_poly.extract_coefficient_unsigned(2), 3);
-        assert_eq!(bit_poly.extract_coefficient_unsigned(3), 4);
-        assert_eq!(bit_poly.extract_coefficient_unsigned(4), 5);
+        assert_eq!(bit_poly.extract_coefficient(0), 1);
+        assert_eq!(bit_poly.extract_coefficient(1), 2);
+        assert_eq!(bit_poly.extract_coefficient(2), 3);
+        assert_eq!(bit_poly.extract_coefficient(3), 4);
+        assert_eq!(bit_poly.extract_coefficient(4), 5);
     }
 
     #[test]
@@ -908,8 +1052,8 @@ mod tests {
 
     #[test]
     fn test_conversion_max_values() {
-        // Test with maximum u32 values
-        let poly = make_poly(&[0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF]);
+        // Test with maximum and minimum signed 28-bit values
+        let poly = make_poly(&[MAX_VAL, MIN_VAL, MAX_VAL]);
         let dense: DensePolynomial<i64, TEST_DEGREE> = poly.into();
         let back: TestPoly = (&dense).into();
 
@@ -923,9 +1067,9 @@ mod tests {
 
         poly1 += poly2;
 
-        assert_eq!(poly1.extract_coefficient_unsigned(0), 5);
-        assert_eq!(poly1.extract_coefficient_unsigned(1), 7);
-        assert_eq!(poly1.extract_coefficient_unsigned(2), 9);
+        assert_eq!(poly1.extract_coefficient(0), 5);
+        assert_eq!(poly1.extract_coefficient(1), 7);
+        assert_eq!(poly1.extract_coefficient(2), 9);
     }
 
     #[test]
@@ -935,55 +1079,530 @@ mod tests {
 
         poly1 += &poly2;
 
-        assert_eq!(poly1.extract_coefficient_unsigned(0), 5);
-        assert_eq!(poly1.extract_coefficient_unsigned(1), 7);
-        assert_eq!(poly1.extract_coefficient_unsigned(2), 9);
+        assert_eq!(poly1.extract_coefficient(0), 5);
+        assert_eq!(poly1.extract_coefficient(1), 7);
+        assert_eq!(poly1.extract_coefficient(2), 9);
     }
 
     #[test]
     fn test_large_coefficients() {
-        // Test with coefficients near the K-bit limit
-        let large = 0xFFFFFF00u32;
-        let poly = make_poly(&[large, large, large]);
+        // Test with coefficients near the 28-bit signed limit
+        // For 28-bit signed integers, the range is -2^27 to 2^27-1
+        let large_positive = MAX_VAL;
+        let large_negative = MIN_VAL;
+        let poly = make_poly(&[large_positive, large_negative, large_positive]);
 
-        assert_eq!(poly.extract_coefficient_unsigned(0), large);
-        assert_eq!(poly.extract_coefficient_unsigned(1), large);
-        assert_eq!(poly.extract_coefficient_unsigned(2), large);
+        assert_eq!(poly.extract_coefficient(0), large_positive);
+        assert_eq!(poly.extract_coefficient(1), large_negative);
+        assert_eq!(poly.extract_coefficient(2), large_positive);
     }
 
     #[test]
     fn test_all_coefficients_set() {
-        // Test setting all 32 coefficients
+        // Test setting all coefficients
         let mut coeffs = Vec::new();
         #[allow(clippy::cast_possible_truncation)]
         for i in 0..=TEST_DEGREE {
-            coeffs.push(i as u32);
+            coeffs.push(i as i64);
         }
 
         let poly = make_poly(&coeffs);
 
         #[allow(clippy::cast_possible_truncation)]
         for i in 0..=TEST_DEGREE {
-            assert_eq!(poly.extract_coefficient_unsigned(i), i as u32);
+            assert_eq!(poly.extract_coefficient(i), i as i64);
         }
     }
 
     #[test]
     fn test_sparse_polynomial() {
         // Only a few coefficients set
-        let mut poly = TestPoly::zero();
-        poly.set_coefficient_unsigned(0, 1);
-        poly.set_coefficient_unsigned(10, 100);
-        poly.set_coefficient_unsigned(20, 200);
-        poly.set_coefficient_unsigned(31, 999);
+        let mut coeffs = vec![0; TEST_DEGREE + 1];
+        coeffs[0] = 1; // Constant term
+        coeffs[3] = 100; // x^3 term
+        coeffs[6] = 200; // x^6 term
+        coeffs[9] = 999; // x^9 term (highest degree)
+        let poly = make_poly(&coeffs);
 
-        assert_eq!(poly.extract_coefficient_unsigned(0), 1);
-        assert_eq!(poly.extract_coefficient_unsigned(10), 100);
-        assert_eq!(poly.extract_coefficient_unsigned(20), 200);
-        assert_eq!(poly.extract_coefficient_unsigned(31), 999);
+        assert_eq!(poly.extract_coefficient(0), 1);
+        assert_eq!(poly.extract_coefficient(3), 100);
+        assert_eq!(poly.extract_coefficient(6), 200);
+        assert_eq!(poly.extract_coefficient(9), 999);
 
         // Check that other coefficients are zero
-        assert_eq!(poly.extract_coefficient_unsigned(5), 0);
-        assert_eq!(poly.extract_coefficient_unsigned(15), 0);
+        assert_eq!(poly.extract_coefficient(2), 0);
+        assert_eq!(poly.extract_coefficient(5), 0);
+    }
+
+    #[test]
+    fn test_neg_positive_values() {
+        // Test negation of positive values
+        let poly = make_poly(&[100, 200, 300]);
+        let negated = -poly;
+
+        assert_eq!(negated.extract_coefficient(0), -100);
+        assert_eq!(negated.extract_coefficient(1), -200);
+        assert_eq!(negated.extract_coefficient(2), -300);
+    }
+
+    #[test]
+    fn test_neg_negative_values() {
+        // Test negation of negative values
+        let poly = make_poly(&[-100, -200, -300]);
+        let negated = -poly;
+
+        assert_eq!(negated.extract_coefficient(0), 100);
+        assert_eq!(negated.extract_coefficient(1), 200);
+        assert_eq!(negated.extract_coefficient(2), 300);
+    }
+
+    #[test]
+    fn test_neg_zero() {
+        // Negation of zero should be zero
+        let zero = TestPoly::zero();
+        let negated = -zero;
+
+        assert!(negated.is_zero());
+    }
+
+    #[test]
+    fn test_neg_double_negation() {
+        // Double negation should return the original value
+        let poly = make_poly(&[1, 2, 3, 4, 5]);
+        let double_neg = -(-poly);
+
+        assert_eq!(double_neg, poly);
+    }
+
+    #[test]
+    fn test_neg_extreme_values() {
+        // Test negation with extreme values
+        // Negate 28-bit MAX should give -(2^27 - 1) = -134217727
+        let poly_max = make_poly(&[MAX_VAL]);
+        let neg_max = -poly_max;
+        assert_eq!(neg_max.extract_coefficient(0), -MAX_VAL);
+
+        // Negate 28-bit MIN (-2^27) should give -(-2^27) = 2^27
+        // But 2^27 overflows 28-bit range, so this wraps to MIN in two's complement
+        // This is expected behavior for two's complement negation
+        let poly_min = make_poly(&[MIN_VAL]);
+        let neg_min = -poly_min;
+        // -MIN overflows and wraps to MIN in 28-bit two's complement
+        assert_eq!(neg_min.extract_coefficient(0), MIN_VAL);
+    }
+
+    #[test]
+    fn test_neg_mixed_values() {
+        // Test negation with mixed positive and negative values
+        let poly = make_poly(&[100, -50, 0, 200, -300]);
+        let negated = -poly;
+
+        assert_eq!(negated.extract_coefficient(0), -100);
+        assert_eq!(negated.extract_coefficient(1), 50);
+        assert_eq!(negated.extract_coefficient(2), 0);
+        assert_eq!(negated.extract_coefficient(3), -200);
+        assert_eq!(negated.extract_coefficient(4), 300);
+    }
+
+    #[test]
+    fn test_neg_addition_identity() {
+        // Test that poly + (-poly) = 0
+        let poly = make_poly(&[1, 2, 3, 4, 5]);
+        let sum = poly + (-poly);
+
+        assert!(sum.is_zero());
+    }
+
+    /// Equivalence tests: ensure BitDecomposedPolynomial behaves exactly like DensePolynomial
+    mod equivalence_with_dense {
+        use super::*;
+
+        type DensePoly = DensePolynomial<i64, TEST_DEGREE>;
+
+        /// Helper to create both types from the same coefficients
+        fn make_both(coeffs: &[i64]) -> (TestPoly, DensePoly) {
+            let bit_poly = make_poly(coeffs);
+            let dense_poly = DensePoly::new(coeffs);
+            (bit_poly, dense_poly)
+        }
+
+        /// Verify conversion round-trips correctly
+        fn assert_conversion_equivalence(bit_poly: &TestPoly, dense_poly: &DensePoly) {
+            let bit_to_dense: DensePoly = bit_poly.into();
+            let dense_to_bit: TestPoly = dense_poly.into();
+            
+            assert_eq!(bit_to_dense.to_coeffs(), dense_poly.to_coeffs(), 
+                "BitPoly->Dense conversion mismatch");
+            assert_eq!(dense_to_bit, *bit_poly, 
+                "Dense->BitPoly conversion mismatch");
+        }
+
+        #[test]
+        fn test_zero_equivalence() {
+            let bit_zero = TestPoly::zero();
+            let dense_zero = DensePoly::zero();
+
+            assert_eq!(bit_zero.is_zero(), dense_zero.is_zero());
+            assert_conversion_equivalence(&bit_zero, &dense_zero);
+        }
+
+        #[test]
+        fn test_one_equivalence() {
+            let bit_one = TestPoly::one();
+            let dense_one = DensePoly::one();
+
+            assert_conversion_equivalence(&bit_one, &dense_one);
+        }
+
+        #[test]
+        fn test_addition_equivalence() {
+            let coeffs1 = vec![1, 2, 3, 4, 5];
+            let coeffs2 = vec![10, 20, 30, 40, 50];
+
+            let (bit1, dense1) = make_both(&coeffs1);
+            let (bit2, dense2) = make_both(&coeffs2);
+
+            let bit_sum = bit1 + bit2;
+            let dense_sum = dense1 + dense2;
+
+            assert_conversion_equivalence(&bit_sum, &dense_sum);
+        }
+
+        #[test]
+        fn test_addition_with_zero_equivalence() {
+            let coeffs = vec![1, 2, 3];
+            let (bit_poly, dense_poly) = make_both(&coeffs);
+
+            let bit_zero = TestPoly::zero();
+            let dense_zero = DensePoly::zero();
+
+            let bit_result = bit_poly + bit_zero;
+            let dense_result = dense_poly + dense_zero;
+
+            assert_conversion_equivalence(&bit_result, &dense_result);
+        }
+
+        #[test]
+        fn test_subtraction_equivalence() {
+            let coeffs1 = vec![100, 200, 300];
+            let coeffs2 = vec![50, 75, 100];
+
+            let (bit1, dense1) = make_both(&coeffs1);
+            let (bit2, dense2) = make_both(&coeffs2);
+
+            let bit_diff = bit1 - bit2;
+            let dense_diff = dense1 - dense2;
+
+            assert_conversion_equivalence(&bit_diff, &dense_diff);
+        }
+
+        #[test]
+        fn test_negation_equivalence() {
+            let coeffs = vec![100, -50, 0, 200, -300];
+            let (bit_poly, dense_poly) = make_both(&coeffs);
+
+            let bit_neg = -bit_poly;
+            let dense_neg = -dense_poly;
+
+            assert_conversion_equivalence(&bit_neg, &dense_neg);
+        }
+
+        #[test]
+        fn test_add_assign_equivalence() {
+            let coeffs1 = vec![1, 2, 3];
+            let coeffs2 = vec![4, 5, 6];
+
+            let (mut bit1, mut dense1) = make_both(&coeffs1);
+            let (bit2, dense2) = make_both(&coeffs2);
+
+            bit1 += bit2;
+            dense1 += dense2;
+
+            assert_conversion_equivalence(&bit1, &dense1);
+        }
+
+        #[test]
+        fn test_add_assign_ref_equivalence() {
+            let coeffs1 = vec![1, 2, 3];
+            let coeffs2 = vec![4, 5, 6];
+
+            let (mut bit1, mut dense1) = make_both(&coeffs1);
+            let (bit2, dense2) = make_both(&coeffs2);
+
+            bit1 += &bit2;
+            dense1 += &dense2;
+
+            assert_conversion_equivalence(&bit1, &dense1);
+        }
+
+        #[test]
+        fn test_sub_assign_equivalence() {
+            let coeffs1 = vec![100, 200, 300];
+            let coeffs2 = vec![10, 20, 30];
+
+            let (mut bit1, mut dense1) = make_both(&coeffs1);
+            let (bit2, dense2) = make_both(&coeffs2);
+
+            bit1 -= bit2;
+            dense1 -= dense2;
+
+            assert_conversion_equivalence(&bit1, &dense1);
+        }
+
+        #[test]
+        fn test_checked_add_success_equivalence() {
+            let coeffs1 = vec![100, 200, 300];
+            let coeffs2 = vec![10, 20, 30];
+
+            let (bit1, dense1) = make_both(&coeffs1);
+            let (bit2, dense2) = make_both(&coeffs2);
+
+            let bit_result = bit1.checked_add(&bit2);
+            let dense_result = dense1.checked_add(&dense2);
+
+            assert!(bit_result.is_some());
+            assert!(dense_result.is_some());
+
+            assert_conversion_equivalence(&bit_result.unwrap(), &dense_result.unwrap());
+        }
+
+        #[test]
+        fn test_checked_add_overflow_equivalence() {
+            let max_val = (1i64 << 27) - 1;  // 28-bit max
+            let coeffs1 = vec![max_val; 10];
+            let coeffs2 = vec![1; 10];
+
+            let (bit1, dense1) = make_both(&coeffs1);
+            let (bit2, dense2) = make_both(&coeffs2);
+
+            let bit_result = bit1.checked_add(&bit2);
+            let dense_result = dense1.checked_add(&dense2);
+
+            // BitDecomposedPolynomial should return None (28-bit overflow)
+            assert!(bit_result.is_none(), "BitPoly should overflow at 28-bit boundary");
+            
+            // DensePolynomial<i64> will succeed because it has 64-bit range
+            // This is expected behavior - they have different bit widths
+            // We verify the conversion works for values within 28-bit range
+            if let Some(dense_sum) = dense_result {
+                // Verify the dense result is out of 28-bit range
+                let coeffs = dense_sum.to_coeffs();
+                let expected = max_val + 1;
+                assert!(coeffs[0] == expected && expected > max_val);
+            }
+        }
+
+        #[test]
+        fn test_checked_sub_success_equivalence() {
+            let coeffs1 = vec![100, 200, 300];
+            let coeffs2 = vec![10, 20, 30];
+
+            let (bit1, dense1) = make_both(&coeffs1);
+            let (bit2, dense2) = make_both(&coeffs2);
+
+            let bit_result = bit1.checked_sub(&bit2);
+            let dense_result = dense1.checked_sub(&dense2);
+
+            assert!(bit_result.is_some());
+            assert!(dense_result.is_some());
+
+            assert_conversion_equivalence(&bit_result.unwrap(), &dense_result.unwrap());
+        }
+
+        #[test]
+        fn test_checked_neg_equivalence() {
+            let coeffs = vec![100, -50, 0, 200];
+            let (bit_poly, dense_poly) = make_both(&coeffs);
+
+            let bit_result = bit_poly.checked_neg();
+            let dense_result = dense_poly.checked_neg();
+
+            assert!(bit_result.is_some());
+            assert!(dense_result.is_some());
+
+            assert_conversion_equivalence(&bit_result.unwrap(), &dense_result.unwrap());
+        }
+
+        #[test]
+        fn test_display_equivalence() {
+            let coeffs = vec![1, 2, 3, 4, 5];
+            let (bit_poly, dense_poly) = make_both(&coeffs);
+
+            let bit_str = format!("{}", bit_poly);
+            let dense_str = format!("{}", dense_poly);
+
+            // Both should produce the same string representation
+            assert_eq!(bit_str, dense_str);
+        }
+
+        #[test]
+        fn test_hash_equivalence() {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+
+            let coeffs = vec![1, 2, 3, 4, 5];
+            let (bit_poly, dense_poly) = make_both(&coeffs);
+
+            // Convert to same type for hash comparison
+            let bit_as_dense: DensePoly = (&bit_poly).into();
+            let dense_clone = dense_poly.clone();
+
+            let mut hasher1 = DefaultHasher::new();
+            bit_as_dense.hash(&mut hasher1);
+            let hash1 = hasher1.finish();
+
+            let mut hasher2 = DefaultHasher::new();
+            dense_clone.hash(&mut hasher2);
+            let hash2 = hasher2.finish();
+
+            assert_eq!(hash1, hash2);
+        }
+
+        #[test]
+        fn test_extreme_values_equivalence() {
+            let max_val = (1i64 << 27) - 1;  // 28-bit max: 134217727
+            let near_min = -(1i64 << 27) + 1; // 28-bit min + 1: -134217727 (can be negated safely)
+
+            let coeffs = vec![max_val, near_min, 0, max_val];
+            let (bit_poly, dense_poly) = make_both(&coeffs);
+
+            assert_conversion_equivalence(&bit_poly, &dense_poly);
+
+            // Test negation of extreme values
+            // Note: we use near_min instead of min because -min_val overflows in 28-bit
+            let bit_neg = -bit_poly;
+            let dense_neg = -dense_poly;
+
+            assert_conversion_equivalence(&bit_neg, &dense_neg);
+            
+            // Verify the negated values are correct
+            let bit_neg_dense: DensePoly = (&bit_neg).into();
+            let coeffs_neg = bit_neg_dense.to_coeffs();
+            assert_eq!(coeffs_neg[0], -max_val);
+            assert_eq!(coeffs_neg[1], -near_min);
+            assert_eq!(coeffs_neg[2], 0);
+            assert_eq!(coeffs_neg[3], -max_val);
+        }
+
+        #[test]
+        fn test_mixed_operations_equivalence() {
+            // Complex sequence: (a + b) - c + (-d)
+            let (bit_a, dense_a) = make_both(&[10, 20, 30]);
+            let (bit_b, dense_b) = make_both(&[5, 10, 15]);
+            let (bit_c, dense_c) = make_both(&[3, 6, 9]);
+            let (bit_d, dense_d) = make_both(&[1, 2, 3]);
+
+            let bit_result = (bit_a + bit_b) - bit_c + (-bit_d);
+            let dense_result = (dense_a + dense_b) - dense_c + (-dense_d);
+
+            assert_conversion_equivalence(&bit_result, &dense_result);
+        }
+
+        #[test]
+        fn test_default_equivalence() {
+            let bit_default = TestPoly::default();
+            let dense_default = DensePoly::default();
+
+            assert_eq!(bit_default.is_zero(), dense_default.is_zero());
+            assert_conversion_equivalence(&bit_default, &dense_default);
+        }
+
+        #[test]
+        fn test_commutative_addition_equivalence() {
+            let coeffs1 = vec![1, 2, 3];
+            let coeffs2 = vec![4, 5, 6];
+
+            let (bit1, dense1) = make_both(&coeffs1);
+            let (bit2, dense2) = make_both(&coeffs2);
+
+            let bit_sum1 = bit1 + bit2;
+            let bit_sum2 = bit2 + bit1;
+            let dense_sum1 = dense1.clone() + dense2.clone();
+            let dense_sum2 = dense2 + dense1;
+
+            assert_eq!(bit_sum1, bit_sum2);
+            assert_eq!(dense_sum1.to_coeffs(), dense_sum2.to_coeffs());
+            assert_conversion_equivalence(&bit_sum1, &dense_sum1);
+        }
+
+        #[test]
+        fn test_associative_addition_equivalence() {
+            let (bit_a, dense_a) = make_both(&[1, 2]);
+            let (bit_b, dense_b) = make_both(&[3, 4]);
+            let (bit_c, dense_c) = make_both(&[5, 6]);
+
+            let bit_left = (bit_a + bit_b) + bit_c;
+            let bit_right = bit_a + (bit_b + bit_c);
+            let dense_left = (dense_a.clone() + dense_b.clone()) + dense_c.clone();
+            let dense_right = dense_a + (dense_b + dense_c);
+
+            assert_eq!(bit_left, bit_right);
+            assert_eq!(dense_left.to_coeffs(), dense_right.to_coeffs());
+            assert_conversion_equivalence(&bit_left, &dense_left);
+        }
+
+        #[test]
+        fn test_double_negation_equivalence() {
+            let coeffs = vec![1, -2, 3, -4, 5];
+            let (bit_poly, dense_poly) = make_both(&coeffs);
+
+            let bit_double_neg = -(-bit_poly);
+            let dense_double_neg = -(-dense_poly);
+
+            assert_eq!(bit_double_neg, bit_poly);
+            assert_eq!(dense_double_neg.to_coeffs(), dense_poly.to_coeffs());
+            assert_conversion_equivalence(&bit_double_neg, &dense_double_neg);
+        }
+
+        #[test]
+        fn test_additive_inverse_equivalence() {
+            let coeffs = vec![10, 20, 30];
+            let (bit_poly, dense_poly) = make_both(&coeffs);
+
+            let bit_sum = bit_poly + (-bit_poly);
+            let dense_sum = dense_poly.clone() + (-dense_poly);
+
+            assert!(bit_sum.is_zero());
+            assert!(dense_sum.is_zero());
+            assert_conversion_equivalence(&bit_sum, &dense_sum);
+        }
+    }
+
+    #[test]
+    fn test_from_ref_bit_width_expansion() {
+        // Test expanding from 4-bit to 16-bit representation
+        // With 4 bits, the signed range is -8 to 7
+        type SmallPoly = BitDecomposedPolynomial<4, 5>;
+        type LargePoly = BitDecomposedPolynomial<16, 5>;
+
+        // Create a polynomial with both positive and negative coefficients
+        // Coefficients: [5, -3, 0, 7, -8, 2]
+        let coeffs = vec![5_i64, -3, 0, 7, -8, 2];
+        let small_poly: SmallPoly = DensePolynomial::<_, 5>::new(&coeffs).into();
+
+        // Verify the small polynomial has correct coefficients
+        assert_eq!(small_poly.extract_coefficient(0), 5);
+        assert_eq!(small_poly.extract_coefficient(1), -3);
+        assert_eq!(small_poly.extract_coefficient(2), 0);
+        assert_eq!(small_poly.extract_coefficient(3), 7);
+        assert_eq!(small_poly.extract_coefficient(4), -8);
+        assert_eq!(small_poly.extract_coefficient(5), 2);
+
+        // Expand to larger bit width using from_ref
+        let large_poly = LargePoly::from_ref(&small_poly);
+
+        // Verify all coefficients are preserved after expansion
+        assert_eq!(large_poly.extract_coefficient(0), 5);
+        assert_eq!(large_poly.extract_coefficient(1), -3);
+        assert_eq!(large_poly.extract_coefficient(2), 0);
+        assert_eq!(large_poly.extract_coefficient(3), 7);
+        assert_eq!(large_poly.extract_coefficient(4), -8);
+        assert_eq!(large_poly.extract_coefficient(5), 2);
+
+        // Verify sign extension worked correctly
+        // Convert both to dense polynomials and compare
+        let small_dense = DensePolynomial::<i64, 5>::from(&small_poly);
+        let large_dense = DensePolynomial::<i64, 5>::from(&large_poly);
+        assert_eq!(small_dense.to_coeffs(), large_dense.to_coeffs());
     }
 }

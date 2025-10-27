@@ -238,7 +238,7 @@ mod tests {
     };
     use crypto_bigint::{Random, U64};
     use crypto_primitives::{
-        Field, FromWithConfig, IntoWithConfig, PrimeField, boolean::Boolean,
+        Field, FromWithConfig, IntoWithConfig, PrimeField,
         crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int,
     };
     use itertools::Itertools;
@@ -373,7 +373,7 @@ mod tests {
                     .collect_vec();
                 different_eval_coeffs
                     .chunks_exact(DEGREE)
-                    .map(DensePolynomial::<Boolean, DEGREE>::new)
+                    .map(DensePolynomial::<i64, DEGREE>::new)
                     .map(BitDecomposedPolynomial::from)
                     .collect_vec()
             };
@@ -857,7 +857,7 @@ mod tests {
     #[test]
     fn bench_p12_verify() {
         fn inner<const P: usize>() {
-            let mut rng = ThreadRng::default();
+            let mut rng = StdRng::seed_from_u64(1);
             // Match the benchmark’s transcript usage for linear code construction
             let poly_size = 1 << P;
             let linear_code = C::new(poly_size, RAA_CFG);
@@ -895,7 +895,7 @@ mod tests {
     #[test]
     fn bench_p12_verify_poly() {
         fn inner<const P: usize>() {
-            let mut rng = ThreadRng::default();
+            let mut rng = StdRng::seed_from_u64(1);
             // Match the benchmark’s transcript usage for linear code construction
             let poly_size = 1 << P;
             let linear_code = PolyC::new(poly_size, RAA_CFG);

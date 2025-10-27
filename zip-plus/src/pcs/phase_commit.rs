@@ -204,7 +204,7 @@ mod tests {
     };
     use crypto_bigint::{Random, U64, U256, Word};
     use crypto_primitives::{
-        Matrix, boolean::Boolean, crypto_bigint_boxed_monty::BoxedMontyField,
+        Matrix, crypto_bigint_boxed_monty::BoxedMontyField,
         crypto_bigint_int::Int,
     };
     use itertools::Itertools;
@@ -483,9 +483,9 @@ mod tests {
 
         // Create a polynomial with 2 variables and 4 evaluations
         let evaluations = vec![
-            DensePolynomial::new(vec![Boolean::FALSE, Boolean::FALSE]).into(),
-            DensePolynomial::new(vec![Boolean::FALSE, Boolean::TRUE]).into(),
-            DensePolynomial::new(vec![Boolean::TRUE, Boolean::FALSE]).into(),
+            DensePolynomial::new(vec![0, 0]).into(),
+            DensePolynomial::new(vec![0, 1]).into(),
+            DensePolynomial::new(vec![1, 0]).into(),
         ];
         let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations, Zero::zero());
         let encoded = TestPolyZip::encode_rows(&pp, pp.linear_code.row_len(), &poly.evaluations);

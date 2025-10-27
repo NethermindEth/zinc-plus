@@ -28,7 +28,7 @@ use crate::{
 };
 use crypto_bigint::BoxedUint;
 use crypto_primitives::{
-    FromWithConfig, IntSemiring, IntoWithConfig, PrimeField, boolean::Boolean,
+    FromWithConfig, IntSemiring, IntoWithConfig, PrimeField,
     crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
 };
 use itertools::Itertools;
@@ -59,8 +59,8 @@ impl<const K: usize, const M: usize, const DEGREE: usize> ZipTypes<DEGREE>
     for TestPolyZipTypes<K, M, DEGREE>
 {
     const NUM_COLUMN_OPENINGS: usize = 650;
-    type Eval = BitDecomposedPolynomial<1, DEGREE>;
-    type Cw = BitDecomposedPolynomial<17, DEGREE>;
+    type Eval = BitDecomposedPolynomial<2, DEGREE>;
+    type Cw = BitDecomposedPolynomial<18, DEGREE>;
     type Fmod = Uint<K>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
@@ -97,12 +97,12 @@ pub fn setup_poly_test_params<const K: usize, const M: usize, const DEGREE: usiz
     DenseMultilinearExtension<<TestPolyZipTypes<K, M, DEGREE> as ZipTypes<DEGREE>>::Eval>,
 ) {
     setup_test_params_inner(num_vars, |poly_size| {
-        let eval_coeffs: Vec<_> = (1..=(poly_size * DEGREE) as i8)
+        let eval_coeffs: Vec<i64> = (1..=(poly_size * DEGREE) as i8)
             .map(|v| v.is_odd().into())
             .collect_vec();
         eval_coeffs
             .chunks_exact(DEGREE)
-            .map(DensePolynomial::<Boolean, DEGREE>::new)
+            .map(DensePolynomial::<i64, DEGREE>::new)
             .map(BitDecomposedPolynomial::from)
             .collect_vec()
     })
