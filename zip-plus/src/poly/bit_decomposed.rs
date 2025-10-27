@@ -57,6 +57,73 @@ impl<const BITS: usize, const DEGREE: usize> BitDecomposedPolynomial<BITS, DEGRE
             output.slices[j] = (!input.slices[j]) & coefficient_mask;
         }
     }
+
+    /// Parallel Ripple-Carry Adder addition (O(K) latency).
+    #[allow(clippy::arithmetic_side_effects)]
+    fn add_assign_rca(&mut self, rhs: &Self) {
+        let mut carry: u64 = 0;
+
+        // The compiler will unroll this loop as K is constant.
+        for i in 0..BITS {
+            let a = self.slices[i];
+            let b = rhs.slices[i];
+
+            // Calculate Sum bit: S = A XOR B XOR C_in
+            let a_xor_b = a ^ b;
+            self.slices[i] = a_xor_b ^ carry;
+
+            // Calculate Carry_out (Optimized Majority function):
+            // C_out = (A & B) | (C_in & (A XOR B))
+            // This correctly propagates the carry through the sign bit.
+            carry = (a & b) | (carry & a_xor_b);
+        }
+
+        // Note: In Two's Complement, we rely on K being large enough to hold the result range.
+        // We do not check the final carry bit for overflow detection.
+
+        // In debug builds, check if K was large enough.
+        // debug_assert!(
+        //     carry == 0,
+        //     "Coefficient overflow detected! K must be increased."
+        // );
+    }
+
+    /// Parallel Prefix Adder (Kogge-Stone) implementation (O(log K) latency).
+    #[allow(clippy::arithmetic_side_effects)]
+    fn add_assign_ppa(&mut self, rhs: &Self) {
+        if BITS == 0 { return; }
+        // 1. Calculate initial Propagate (P=XOR) and Generate (G=AND).
+        let mut p = [0u64; BITS];
+        let mut g = [0u64; BITS];
+        for i in 0..BITS {
+            p[i] = self.slices[i] ^ rhs.slices[i];
+            g[i] = self.slices[i] & rhs.slices[i];
+        }
+        let p_initial = p;
+
+        // 2. Compute the Carry Prefix Network. (Latency: O(log K))
+        let mut step = 1;
+        while step < BITS {
+            // Iterate backwards for safe in-place updates.
+            for i in (step..BITS).rev() {
+                // Update rule: (P, G) = (Pi & Pj, Gi | (Pi & Gj))
+                let p_i = p[i];
+                p[i] = p_i & p[i - step];
+                g[i] = g[i] | (p_i & g[i - step]);
+            }
+            step *= 2;
+        }
+
+        // 3. Calculate the final Sum (S).
+        // S[i] = P_initial[i] XOR C[i-1] (where C[i-1] is G[i-1]).
+        let mut c_prev = 0u64; // C[-1] = 0.
+        for i in 0..BITS {
+            self.slices[i] = p_initial[i] ^ c_prev;
+            if i < BITS - 1 {
+                 c_prev = g[i];
+            }
+        }
+    }
 }
 
 impl<const BITS: usize, const DEGREE: usize> Neg for BitDecomposedPolynomial<BITS, DEGREE> {
@@ -186,33 +253,14 @@ impl<const BITS: usize, const DEGREE: usize> AddAssign<&Self>
     /// This implementation works correctly for
     /// both Unsigned and Two's Complement Signed integers.
     #[allow(clippy::arithmetic_side_effects)]
-    // #[inline(always)] // Critical for performance in tight loops // FIXME
+    #[inline(always)]
     fn add_assign(&mut self, rhs: &Self) {
-        let mut carry: u64 = 0;
-
-        // The compiler will unroll this loop as K is constant.
-        for i in 0..BITS {
-            let a = self.slices[i];
-            let b = rhs.slices[i];
-
-            // Calculate Sum bit: S = A XOR B XOR C_in
-            let a_xor_b = a ^ b;
-            self.slices[i] = a_xor_b ^ carry;
-
-            // Calculate Carry_out (Optimized Majority function):
-            // C_out = (A & B) | (C_in & (A XOR B))
-            // This correctly propagates the carry through the sign bit.
-            carry = (a & b) | (carry & a_xor_b);
+        // TODO: Test if PPA really is faster than RCA for large K.
+        if BITS < 16 {
+             self.add_assign_rca(rhs); // Use Ripple-Carry for small K
+        } else {
+             self.add_assign_ppa(&rhs); // Use PPA for large K
         }
-
-        // Note: In Two's Complement, we rely on K being large enough to hold the result range.
-        // We do not check the final carry bit for overflow detection.
-
-        // In debug builds, check if K was large enough.
-        // debug_assert!(
-        //     carry == 0,
-        //     "Coefficient overflow detected! K must be increased."
-        // );
     }
 }
 
