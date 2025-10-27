@@ -87,7 +87,6 @@ impl MerkleTree {
     }
 
     /// Generates a Merkle proof for the element at the given index.
-    /// Uses pre-computed layer values for O(1) sibling lookups.
     pub fn prove(&self, leaf_index: usize) -> Result<MerkleProof, MerkleError> {
         let leaf_count = self.layers[0].len();
 
@@ -96,7 +95,7 @@ impl MerkleTree {
         }
 
         // Calculate the sibling path using layer values.
-        let siblings = find_path_with_layers(leaf_index, &self.layers);
+        let siblings = build_sibling_path(leaf_index, &self.layers);
 
         Ok(MerkleProof {
             leaf_index,
@@ -119,6 +118,8 @@ macro_rules! hash_many {
     }};
 }
 
+/// Construct the leaves of the Merkle tree by hashing each column across all
+/// rows.
 fn hash_leaves<S>(rows: &[&[S]], m_cols: usize) -> Vec<MtHash>
 where
     S: ConstTranscribable + Send + Sync,
@@ -131,6 +132,8 @@ where
         .collect()
 }
 
+/// Builds a Merkle tree from the given leaves, abusing blake3::hazmat module
+/// for subtree merging.
 fn build_merkle_tree_from_leaves(leaves: Vec<MtHash>) -> MerkleTree {
     let n = leaves.len();
 
@@ -183,7 +186,7 @@ fn build_merkle_tree_from_leaves(leaves: Vec<MtHash>) -> MerkleTree {
 }
 
 #[allow(clippy::arithmetic_side_effects)] // Using intentionally, overflow isn't possible
-fn find_path_with_layers(target_index: usize, layers: &[Vec<MtHash>]) -> Vec<MtHash> {
+fn build_sibling_path(target_index: usize, layers: &[Vec<MtHash>]) -> Vec<MtHash> {
     let mut siblings = Vec::new();
     let mut layer_idx = 0;
     let mut current_layer = &layers[layer_idx];
