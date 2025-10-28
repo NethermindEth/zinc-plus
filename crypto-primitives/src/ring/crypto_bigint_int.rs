@@ -459,7 +459,7 @@ impl<const LIMBS: usize> From<bool> for Int<LIMBS> {
     }
 }
 
-macro_rules! impl_from_primitive {
+macro_rules! impl_from_signed_primitive {
     ($($t:ty),+) => {
         $(
             impl<const LIMBS: usize> From<$t> for Int<LIMBS> {
@@ -491,7 +491,29 @@ macro_rules! impl_from_primitive {
     };
 }
 
-impl_from_primitive!(i8, i16, i32, i64, i128);
+macro_rules! impl_from_unsigned_primitive {
+    ($(($ut:ty, $st:ty)),+) => {
+        $(
+            impl<const LIMBS: usize> From<$ut> for Int<LIMBS> {
+                fn from(value: $ut) -> Self {
+                    assert!(core::mem::size_of::<$st>() <= crypto_bigint::Int::<LIMBS>::BYTES,
+                            "`{}` is too large to fit into `Int<{LIMBS}>`", stringify!($st));
+                    Self(crypto_bigint::Int::<LIMBS>::from(<$st>::from(value)))
+                }
+            }
+
+            impl<'a, const LIMBS: usize> From<&'a $ut> for Int<LIMBS> {
+                #[inline(always)]
+                fn from(value: &$ut) -> Self {
+                    Self::from(*value)
+                }
+            }
+        )+
+    };
+}
+
+impl_from_signed_primitive!(i8, i16, i32, i64, i128);
+impl_from_unsigned_primitive!((u8, i16), (u16, i32), (u32, i64), (u64, i128));
 
 impl<const LIMBS: usize, const LIMBS2: usize> TryFrom<&crypto_bigint::Int<LIMBS2>> for Int<LIMBS> {
     type Error = ();
