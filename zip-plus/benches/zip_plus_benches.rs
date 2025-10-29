@@ -33,7 +33,7 @@ type Code<const D: usize> = RaaCode<BenchZipPlusTypes<D>, 4, D>;
 
 const RAA_CONFIG: RaaConfig = RaaConfig {
     check_for_overflows: false,
-    permute_in_place: true,
+    permute_in_place: false,
 };
 
 fn zip_plus_benchmarks(c: &mut Criterion) {
