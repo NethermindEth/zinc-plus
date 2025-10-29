@@ -15,13 +15,13 @@ use std::{
 };
 
 /// * `BITS` is the maximum bit depth required, INCLUDING a sign bit.
-/// * `DEGREE` cannot be larger than 63
+/// * `DEGREE` cannot be larger than 31
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BitDecomposedPolynomial<const BITS: usize, const DEGREE: usize> {
     /// `slices[i]` holds the i-th bit (LSB at i=0) of all DEGREE+1 coefficients
-    /// packed into a u64.
+    /// packed into a u32.
     /// The representation is Two's Complement. slices[K-1] is the sign bit slice.
-    slices: [u64; BITS],
+    slices: [u32; BITS],
 }
 
 impl<const BITS: usize, const DEGREE: usize> BitDecomposedPolynomial<BITS, DEGREE> {
@@ -32,8 +32,8 @@ impl<const BITS: usize, const DEGREE: usize> BitDecomposedPolynomial<BITS, DEGRE
     fn extract_coefficient(&self, index: usize) -> i64 {
         debug_assert!(index <= DEGREE, "Coefficient index out of bounds");
 
-        // 1. Reconstruct the K-bit value (stored temporarily as u64).
-        let mut value: u64 = 0;
+        // 1. Reconstruct the K-bit value (stored temporarily as u32).
+        let mut value: u32 = 0;
 
         // The compiler will unroll this loop as K is constant.
         // We iterate through the slices (bit positions).
@@ -51,7 +51,7 @@ impl<const BITS: usize, const DEGREE: usize> BitDecomposedPolynomial<BITS, DEGRE
     /// Helper function to efficiently invert the remaining slices once the carry is zero.
     #[inline(always)]
     fn invert_remaining_slices(input: &Self, output: &mut Self, start_index: usize) {
-        let coefficient_mask: u64 = get_coefficient_mask(DEGREE);
+        let coefficient_mask: u32 = get_coefficient_mask(DEGREE);
         for j in start_index..BITS {
             // Invert and mask to ensure unused upper bits remain zero.
             output.slices[j] = (!input.slices[j]) & coefficient_mask;
@@ -61,7 +61,7 @@ impl<const BITS: usize, const DEGREE: usize> BitDecomposedPolynomial<BITS, DEGRE
     /// Parallel Ripple-Carry Adder addition (O(K) latency).
     #[allow(clippy::arithmetic_side_effects)]
     fn add_assign_rca(&mut self, rhs: &Self) {
-        let mut carry: u64 = 0;
+        let mut carry: u32 = 0;
 
         // The compiler will unroll this loop as K is constant.
         for i in 0..BITS {
@@ -93,8 +93,8 @@ impl<const BITS: usize, const DEGREE: usize> BitDecomposedPolynomial<BITS, DEGRE
     fn add_assign_ppa(&mut self, rhs: &Self) {
         if BITS == 0 { return; }
         // 1. Calculate initial Propagate (P=XOR) and Generate (G=AND).
-        let mut p = [0u64; BITS];
-        let mut g = [0u64; BITS];
+        let mut p = [0u32; BITS];
+        let mut g = [0u32; BITS];
         for i in 0..BITS {
             p[i] = self.slices[i] ^ rhs.slices[i];
             g[i] = self.slices[i] & rhs.slices[i];
@@ -116,7 +116,7 @@ impl<const BITS: usize, const DEGREE: usize> BitDecomposedPolynomial<BITS, DEGRE
 
         // 3. Calculate the final Sum (S).
         // S[i] = P_initial[i] XOR C[i-1] (where C[i-1] is G[i-1]).
-        let mut c_prev = 0u64; // C[-1] = 0.
+        let mut c_prev = 0u32; // C[-1] = 0.
         for i in 0..BITS {
             self.slices[i] = p_initial[i] ^ c_prev;
             if i < BITS - 1 {
@@ -135,16 +135,16 @@ impl<const BITS: usize, const DEGREE: usize> Neg for BitDecomposedPolynomial<BIT
     fn neg(self) -> Self::Output {
         let mut result = Self::default();
 
-        let coefficient_mask: u64 = get_coefficient_mask(DEGREE);
+        let coefficient_mask: u32 = get_coefficient_mask(DEGREE);
 
         // Initialize the carry to '1' for all coefficients simultaneously.
         // This implements the "+ 1" part of the algorithm.
-        let mut carry: u64 = coefficient_mask;
+        let mut carry: u32 = coefficient_mask;
 
         // The compiler will unroll this loop as K is constant.
         for i in 0..BITS {
             // 1. Invert the bits (the "~self" part).
-            // We must apply the COEFFICIENT_MASK here. If NUM_COEFFS < 64, the inversion (!)
+            // We must apply the COEFFICIENT_MASK here. If NUM_COEFFS < 32, the inversion (!)
             // would set the unused upper bits to 1. The mask ensures they are treated as 0
             // for the arithmetic operation.
             let a_inv = (!self.slices[i]) & coefficient_mask;
@@ -353,10 +353,10 @@ impl<const BITS: usize, const DEGREE: usize> CheckedNeg for BitDecomposedPolynom
     fn checked_neg(&self) -> Option<Self> {
         let mut result = Self::default();
 
-        let coefficient_mask: u64 = get_coefficient_mask(DEGREE);
+        let coefficient_mask: u32 = get_coefficient_mask(DEGREE);
 
         // Initialize carry to '1' for all coefficients (the "+ 1" part).
-        let mut carry: u64 = coefficient_mask;
+        let mut carry: u32 = coefficient_mask;
 
         // The compiler will unroll this loop.
         for i in 0..BITS {
@@ -405,7 +405,7 @@ impl<const BITS: usize, const DEGREE: usize> CheckedAdd for BitDecomposedPolynom
 
         // Initialize result. We will compute self + other.
         let mut result = *self;
-        let mut carry: u64 = 0;
+        let mut carry: u32 = 0;
 
         // 1. Perform the Ripple-Carry Addition (O(K)).
         // The logic is identical for signed and unsigned arithmetic.
@@ -568,7 +568,7 @@ impl<const BITS: usize, const DEGREE: usize> From<&BitDecomposedPolynomial<BITS,
 
         // Iterate over all DEGREE + 1 coefficients.
         for i in 0..=DEGREE {
-            let mut reconstructed_val: u64 = 0;
+            let mut reconstructed_val: u32 = 0;
 
             // Reconstruct the coefficient from the slices.
             for k in 0..BITS {
@@ -603,18 +603,18 @@ impl<const BITS: usize, const DEGREE: usize> From<&DensePolynomial<i64, DEGREE>>
 
         // Iterate over the bit depth K.
         for k in 0..BITS {
-            let mut slice_val: u64 = 0;
-            // Iterate over the 32 coefficients.
+            let mut slice_val: u32 = 0;
+            // Iterate over coefficients.
             for (i, &coeff_val) in dense.to_coeffs().iter().enumerate() {
-                // Extract the k-th bit. Casting i64 to u64 preserves the Two's Complement pattern.
-                let unsigned_coeff_val = coeff_val as u64;
+                // Extract the k-th bit. Casting i64 to u32 preserves the Two's Complement pattern.
+                let unsigned_coeff_val = coeff_val as u32;
 
-                // Optional: Validate input range in debug builds if K < 64.
-                if BITS < 64 && k == 0 {
+                // Optional: Validate input range in debug builds if K < 32.
+                if BITS < 32 && k == 0 {
                      // Check if the value fits within the K-bit signed range.
-                     // The upper 64-K bits must match the sign bit (K-1).
-                     let shift = 64 - BITS;
-                     let sign_extended = ((unsigned_coeff_val << shift) as i64 >> shift) as u64;
+                     // The upper 32-K bits must match the sign bit (K-1).
+                     let shift = 32 - BITS;
+                     let sign_extended = ((unsigned_coeff_val << shift) as i32 >> shift) as u32;
                      debug_assert_eq!(unsigned_coeff_val, sign_extended,
                                       "Input coefficient magnitude too large for K-bit Two's Complement");
                 }
@@ -679,22 +679,21 @@ impl<const BITS: usize, const DEGREE: usize> Distribution<BitDecomposedPolynomia
     #[allow(clippy::arithmetic_side_effects)]
     fn sample<Gen: Rng + ?Sized>(&self, rng: &mut Gen) -> BitDecomposedPolynomial<BITS, DEGREE> {
         // For DEGREE=31, this evaluates to 0xFFFFFFFF.
-        // For DEGREE=63, this evaluates to u64::MAX.
-        let coefficient_mask: u64 = get_coefficient_mask(DEGREE);
+        let coefficient_mask: u32 = get_coefficient_mask(DEGREE);
 
-        let mut slices = [0u64; BITS];
+        let mut slices = [0u32; BITS];
 
         // Iterate over all K slices (the bit depth).
         // By generating random bits for all K slices (including the sign slice),
         // we achieve a uniform distribution across the signed range.
         // The compiler will unroll this loop as K is constant.
         for slice in slices.iter_mut() {
-            // 1. Generate a full random u64.
+            // 1. Generate a full random u32.
             // rng.gen() is the idiomatic way to generate standard types.
-            let random_val: u64 = rng.random();
+            let random_val: u32 = rng.random();
 
             // 2. Apply the mask. This ensures that bits outside the coefficient packing
-            //    (e.g., bits 32 through 63 if NUM_COEFFS=32) are zeroed out.
+            //    are zeroed out.
             *slice = random_val & coefficient_mask;
         }
 
@@ -722,7 +721,7 @@ impl<const BITS: usize, const DEGREE: usize> ConstTranscribable
     for BitDecomposedPolynomial<BITS, DEGREE>
 {
     const NUM_BYTES: usize = Self::NUM_BITS.div_ceil(8);
-    const NUM_BITS: usize = u64::BITS as usize * BITS;
+    const NUM_BITS: usize = u32::BITS as usize * BITS;
 
     fn read_transcription_bytes(bytes: &[u8]) -> Self {
         assert_eq!(
@@ -731,11 +730,11 @@ impl<const BITS: usize, const DEGREE: usize> ConstTranscribable
             "Buffer size mismatch for transcription"
         );
 
-        let mut slices = [0u64; BITS];
+        let mut slices = [0u32; BITS];
         for (i, slice) in slices.iter_mut().enumerate() {
-            let start = mul!(i, 8);
-            let end = add!(start, 8);
-            *slice = u64::read_transcription_bytes(&bytes[start..end]);
+            let start = mul!(i, 4);
+            let end = add!(start, 4);
+            *slice = u32::read_transcription_bytes(&bytes[start..end]);
         }
 
         BitDecomposedPolynomial { slices }
@@ -748,8 +747,8 @@ impl<const BITS: usize, const DEGREE: usize> ConstTranscribable
             "Buffer size mismatch for transcription"
         );
         for (i, &slice) in self.slices.iter().enumerate() {
-            let start = mul!(i, 8);
-            let end = add!(start, 8);
+            let start = mul!(i, 4);
+            let end = add!(start, 4);
             slice.write_transcription_bytes(&mut buf[start..end]);
         }
     }
@@ -779,26 +778,27 @@ impl<const BITS: usize, const DEGREE: usize> EvaluatablePolynomial<i128, Int<5>>
 // Helpers
 //
 
-/// Helper to correctly sign-extend a K-bit value stored in a u64 to an i64.
+/// Helper to correctly sign-extend a K-bit value stored in a u32 to an i64.
 #[inline(always)]
-fn sign_extend<const BITS: usize>(val: u64) -> i64 {
-    if BITS == 64 {
+fn sign_extend<const BITS: usize>(val: u32) -> i64 {
+    if BITS == 32 {
         // If K is the full width, a simple cast interprets the Two's Complement correctly.
-        val as i64
+        val as i32 as i64
     } else {
-        // If K < 64, we must manually sign-extend.
-        let shift = 64 - BITS;
-        // 1. Left shift to move the sign bit (at K-1) to the MSB (63).
-        // 2. Cast to i64.
+        // If K < 32, we must manually sign-extend.
+        let shift = 32 - BITS;
+        // 1. Left shift to move the sign bit (at K-1) to the MSB (31).
+        // 2. Cast to i32.
         // 3. Arithmetic right shift (>>) fills the upper bits with the sign bit.
-        ((val as i64) << shift) >> shift
+        // 4. Cast to i64 to return the correct type.
+        (((val as i32) << shift) >> shift) as i64
     }
 }
 
-/// We use u128 arithmetic to robustly handle the calculation even if DEGREE=63.
+/// We use u64 arithmetic to robustly handle the calculation even if DEGREE=31.
 /// Calculation: (2^(DEGREE + 1)) - 1.
-const fn get_coefficient_mask(degree: usize) -> u64 {
-    ((1_u128 << (degree + 1)) - 1) as u64
+const fn get_coefficient_mask(degree: usize) -> u32 {
+    ((1_u64 << (degree + 1)) - 1) as u32
 }
 
 #[cfg(test)]

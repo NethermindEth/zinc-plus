@@ -40,7 +40,7 @@ fn zip_plus_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");
 
     do_bench::<BenchZipPlusTypes<31>, Code<_>, _>(&mut group, RAA_CONFIG);
-    do_bench::<BenchZipPlusTypes<63>, Code<_>, _>(&mut group, RAA_CONFIG);
+    // do_bench::<BenchZipPlusTypes<63>, Code<_>, _>(&mut group, RAA_CONFIG);
 
     group.finish();
 }
