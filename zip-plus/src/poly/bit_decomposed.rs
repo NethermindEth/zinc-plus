@@ -256,11 +256,11 @@ impl<const BITS: usize, const DEGREE: usize> AddAssign<&Self>
     #[inline(always)]
     fn add_assign(&mut self, rhs: &Self) {
         // TODO: Test if PPA really is faster than RCA for large K.
-        if BITS < 16 {
+        // if BITS < 16 {
              self.add_assign_rca(rhs); // Use Ripple-Carry for small K
-        } else {
-             self.add_assign_ppa(&rhs); // Use PPA for large K
-        }
+        // } else {
+        //      self.add_assign_ppa(&rhs); // Use PPA for large K
+        // }
     }
 }
 
