@@ -9,7 +9,7 @@ use std::{marker::PhantomData, ops::AddAssign};
 /// Implementation of a repeat-accumulate-accumulate (RAA) codes over the binary
 /// field, as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
 #[derive(Debug, Clone)]
-pub struct RaaCode<Zt: ZipTypes<DEGREE>, const REP: usize, const DEGREE: usize> {
+pub struct RaaCode<Zt: ZipTypes, const REP: usize> {
     pub(crate) cfg: RaaConfig,
 
     pub(crate) row_len: usize,
@@ -38,7 +38,7 @@ pub struct RaaConfig {
     pub permute_in_place: bool,
 }
 
-impl<Zt: ZipTypes<DEGREE>, const REP: usize, const DEGREE: usize> RaaCode<Zt, REP, DEGREE> {
+impl<Zt: ZipTypes, const REP: usize> RaaCode<Zt, REP> {
     /// Do the actual encoding, as per RAA spec
     fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
     where
@@ -76,9 +76,7 @@ impl<Zt: ZipTypes<DEGREE>, const REP: usize, const DEGREE: usize> RaaCode<Zt, RE
     }
 }
 
-impl<Zt: ZipTypes<DEGREE>, const REP: usize, const DEGREE: usize> LinearCode<Zt, DEGREE>
-    for RaaCode<Zt, REP, DEGREE>
-{
+impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for RaaCode<Zt, REP> {
     type Config = RaaConfig;
 
     const REPETITION_FACTOR: usize = REP;
@@ -251,12 +249,12 @@ mod tests {
 
     fn test_raa<Zt, F>(poly_size: usize, f: F)
     where
-        Zt: ZipTypes<0>,
-        F: Fn(&RaaCode<Zt, REPETITION_FACTOR, 0>),
+        Zt: ZipTypes,
+        F: Fn(&RaaCode<Zt, REPETITION_FACTOR>),
     {
         for check_for_overflows in [true, false] {
             for permute_in_place in [true, false] {
-                let code = RaaCode::<Zt, REPETITION_FACTOR, 0>::new(
+                let code = RaaCode::<Zt, REPETITION_FACTOR>::new(
                     poly_size,
                     RaaConfig {
                         check_for_overflows,
@@ -381,7 +379,7 @@ mod tests {
 
         for check_for_overflows in [true, false] {
             for permute_in_place in [true, false] {
-                let code = RaaCode::<TestZipTypes<N, K, M>, REPETITION_FACTOR, 0>::new(
+                let code = RaaCode::<TestZipTypes<N, K, M>, REPETITION_FACTOR>::new(
                     16,
                     RaaConfig {
                         check_for_overflows,
@@ -422,7 +420,7 @@ mod tests {
         let data: Vec<Int<N>> = (1..=1024).map(Int::<N>::from).collect();
         let poly_size = data.len() * data.len();
         let codeword_1: Vec<Int<K>> = {
-            let code_in_place = RaaCode::<TestZipTypes<N, K, M>, REPETITION_FACTOR, 0>::new(
+            let code_in_place = RaaCode::<TestZipTypes<N, K, M>, REPETITION_FACTOR>::new(
                 poly_size,
                 RaaConfig {
                     check_for_overflows: true,
@@ -433,7 +431,7 @@ mod tests {
         };
 
         let codeword_2: Vec<Int<K>> = {
-            let code_cloning = RaaCode::<TestZipTypes<N, K, M>, REPETITION_FACTOR, 0>::new(
+            let code_cloning = RaaCode::<TestZipTypes<N, K, M>, REPETITION_FACTOR>::new(
                 poly_size,
                 RaaConfig {
                     check_for_overflows: true,
@@ -454,7 +452,7 @@ mod tests {
         const N: usize = 1;
         const K: usize = 1;
 
-        let _code = RaaCode::<TestZipTypes<N, K, N>, REPETITION_FACTOR, 0>::new(
+        let _code = RaaCode::<TestZipTypes<N, K, N>, REPETITION_FACTOR>::new(
             1 << 30,
             RaaConfig {
                 check_for_overflows: true,

@@ -12,7 +12,7 @@ use crypto_primitives::{
 use num_traits::CheckedMul;
 use std::{marker::PhantomData, ops::Neg};
 
-pub trait ZipTypes<const DEGREE: usize>: Send + Sync {
+pub trait ZipTypes: Send + Sync {
     const NUM_COLUMN_OPENINGS: usize;
 
     /// Semiring of witness/polynomial evaluations on boolean hypercube
@@ -46,7 +46,7 @@ pub trait ZipTypes<const DEGREE: usize>: Send + Sync {
     /// Ring of elements in the linear combination of codewords, at least as
     /// wide as the evaluation, codeword, and challenge rings.
     type Comb: FixedSemiring
-        + EvaluatablePolynomial<Self::Chal, Self::CombR>
+        + EvaluatablePolynomial<Self::CombR, Self::Chal, Self::CombR>
         + FromRef<Self::Eval>
         + FromRef<Self::Cw>
         + Named;
@@ -54,17 +54,15 @@ pub trait ZipTypes<const DEGREE: usize>: Send + Sync {
 
 /// Zip is a Polynomial Commitment Scheme (PCS) that supports committing to
 /// multilinear polynomials.
-pub struct ZipPlus<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize>(
-    PhantomData<(Zt, Lc)>,
-);
+pub struct ZipPlus<Zt: ZipTypes, Lc: LinearCode<Zt>>(PhantomData<(Zt, Lc)>);
 
-impl<Zt, Lc, const DEGREE: usize> ZipPlus<Zt, Lc, DEGREE>
+impl<Zt, Lc> ZipPlus<Zt, Lc>
 where
-    Zt: ZipTypes<DEGREE>,
-    Lc: LinearCode<Zt, DEGREE>,
+    Zt: ZipTypes,
+    Lc: LinearCode<Zt>,
 {
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn setup(poly_size: usize, linear_code: Lc) -> ZipPlusParams<Zt, Lc, DEGREE> {
+    pub fn setup(poly_size: usize, linear_code: Lc) -> ZipPlusParams<Zt, Lc> {
         assert!(poly_size.is_power_of_two());
         let num_vars = poly_size.ilog2() as usize;
         let num_rows = ((1 << num_vars) / linear_code.row_len()).next_power_of_two();
@@ -74,16 +72,14 @@ where
 
 /// Parameters for the Zip+ PCS.
 #[derive(Clone, Debug)]
-pub struct ZipPlusParams<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize> {
+pub struct ZipPlusParams<Zt: ZipTypes, Lc: LinearCode<Zt>> {
     pub num_vars: usize,
     pub num_rows: usize,
     pub linear_code: Lc,
     phantom_data: PhantomData<Zt>,
 }
 
-impl<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize>
-    ZipPlusParams<Zt, Lc, DEGREE>
-{
+impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlusParams<Zt, Lc> {
     pub fn new(num_vars: usize, num_rows: usize, linear_code: Lc) -> Self {
         Self {
             num_vars,

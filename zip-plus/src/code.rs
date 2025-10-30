@@ -4,7 +4,7 @@ pub mod raa_sign_flip;
 use crate::{pcs::structs::ZipTypes, traits::FromRef};
 use crypto_primitives::PrimeField;
 
-pub trait LinearCode<Zt: ZipTypes<DEGREE>, const DEGREE: usize = 1>: Sync + Send {
+pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
     type Config: Copy;
 
     /// Repetition factor, a.k.a. inverse rate, the ratio of codeword length to

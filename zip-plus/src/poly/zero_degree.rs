@@ -1,11 +1,15 @@
-use super::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError};
+use super::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial};
 use crate::traits::ConstTranscribable;
 use crypto_primitives::crypto_bigint_int::Int;
 
 macro_rules! impl_zero_degree {
     ($($t:ty),+) => {
         $(
-            impl<T> EvaluatablePolynomial<T, Self> for $t {
+            impl Polynomial<Self> for $t {
+                const DEGREE_BOUND: usize = 0;
+            }
+
+            impl<T> EvaluatablePolynomial<Self, T, Self> for $t {
                 fn evaluate_at_point(&self, point: &[T]) -> Result<Self, EvaluationError> {
                     if !point.is_empty() {
                         return Err(EvaluationError::WrongPointWidth {
@@ -27,7 +31,11 @@ macro_rules! impl_zero_degree {
 impl_zero_degree!(i8, i16, i32, i64, i128);
 impl_zero_degree!(u8, u16, u32, u64, u128);
 
-impl<T, const LIMBS: usize> EvaluatablePolynomial<T, Self> for Int<LIMBS> {
+impl<const LIMBS: usize> Polynomial<Self> for Int<LIMBS> {
+    const DEGREE_BOUND: usize = 0;
+}
+
+impl<T, const LIMBS: usize> EvaluatablePolynomial<Self, T, Self> for Int<LIMBS> {
     fn evaluate_at_point(&self, point: &[T]) -> Result<Self, EvaluationError> {
         if !point.is_empty() {
             return Err(EvaluationError::WrongPointWidth {

@@ -15,9 +15,7 @@ use uninit::out_ref::Out;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-impl<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize>
-    ZipPlus<Zt, Lc, DEGREE>
-{
+impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     /// Creates a commitment to a multilinear polynomial using the ZIP PCS
     /// scheme.
     ///
@@ -66,10 +64,10 @@ impl<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize>
     ///   `pp.num_rows`, indicating an internal logic error.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn commit(
-        pp: &ZipPlusParams<Zt, Lc, DEGREE>,
+        pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
     ) -> Result<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment), ZipError> {
-        validate_input::<Zt, Lc, bool, DEGREE>("commit", pp.num_vars, [poly], None)?;
+        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, [poly], None)?;
 
         let expected_num_evals = pp.num_rows * pp.linear_code.row_len();
         assert_eq!(
@@ -110,10 +108,10 @@ impl<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize>
     /// vector of roots.
     #[allow(dead_code)]
     pub fn commit_no_merkle(
-        pp: &ZipPlusParams<Zt, Lc, DEGREE>,
+        pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
     ) -> Result<DenseRowMatrix<Zt::Cw>, ZipError> {
-        validate_input::<Zt, Lc, bool, DEGREE>("commit", pp.num_vars, [poly], None)?;
+        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, [poly], None)?;
 
         let row_len = pp.linear_code.row_len();
 
@@ -137,7 +135,7 @@ impl<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize>
     /// corresponds to a polynomial in the input slice.
     #[allow(clippy::type_complexity)]
     pub fn batch_commit(
-        pp: &ZipPlusParams<Zt, Lc, DEGREE>,
+        pp: &ZipPlusParams<Zt, Lc>,
         polys: &[DenseMultilinearExtension<Zt::Eval>],
     ) -> Result<Vec<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment)>, ZipError> {
         polys.iter().map(|poly| Self::commit(pp, poly)).collect()
@@ -162,7 +160,7 @@ impl<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize>
     /// A `Vec<Int<K>>` containing all the encoded rows concatenated together.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn encode_rows(
-        pp: &ZipPlusParams<Zt, Lc, DEGREE>,
+        pp: &ZipPlusParams<Zt, Lc>,
         row_len: usize,
         evals: &[Zt::Eval],
     ) -> DenseRowMatrix<Zt::Cw> {
@@ -216,16 +214,16 @@ mod tests {
     const N: usize = INT_LIMBS;
     const K: usize = INT_LIMBS * 4;
     const M: usize = INT_LIMBS * 8;
-    const DEGREE: usize = 2;
+    const DEGREE_PLUS_ONE: usize = 3;
 
     type Zt = TestZipTypes<N, K, M>;
-    type C = RaaSignFlippingCode<Zt, 4, 0>;
+    type C = RaaSignFlippingCode<Zt, 4>;
 
-    type PolyZt = TestPolyZipTypes<K, M, DEGREE>;
-    type PolyC = RaaCode<PolyZt, 4, DEGREE>;
+    type PolyZt = TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>;
+    type PolyC = RaaCode<PolyZt, 4>;
 
-    type TestZip = ZipPlus<Zt, C, 0>;
-    type TestPolyZip = ZipPlus<PolyZt, PolyC, DEGREE>;
+    type TestZip = ZipPlus<Zt, C>;
+    type TestPolyZip = ZipPlus<PolyZt, PolyC>;
 
     #[test]
     fn commit_rejects_too_many_variables() {
@@ -584,7 +582,7 @@ mod tests {
 
     #[test]
     fn proof_size_is_correct_for_parameters() {
-        fn calculate_expected_test_transcript_size_bytes(pp: &ZipPlusParams<Zt, C, 0>) -> usize {
+        fn calculate_expected_test_transcript_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
             let size_of_zt_k = K * size_of::<Word>();
             let size_of_zt_m = M * size_of::<Word>();
             let size_of_path_len = size_of::<u64>();
@@ -605,7 +603,7 @@ mod tests {
             proximity_phase_size + column_opening_phase_size
         }
 
-        fn calculate_expected_proof_size_bytes(pp: &ZipPlusParams<Zt, C, 0>) -> usize {
+        fn calculate_expected_proof_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
             // F stored as `(value, modulus)` where both `value` and `modulus` are of
             // length `len`.
             // `len` itself is stored only once at the beginning of the F list.
@@ -624,12 +622,12 @@ mod tests {
         let linear_code = C::new(poly_size, RAA_CFG);
         let param = TestZip::setup(poly_size, linear_code);
         let evaluations: Vec<_> = (0..poly_size)
-            .map(|_| <Zt as ZipTypes<_>>::Eval::from(rng.random::<i8>()))
+            .map(|_| <Zt as ZipTypes>::Eval::from(rng.random::<i8>()))
             .collect();
         let mle =
             DenseMultilinearExtension::from_evaluations_slice(num_vars, &evaluations, Zero::zero());
         let point: Vec<_> = (0..num_vars)
-            .map(|_| <Zt as ZipTypes<_>>::Pt::random(&mut rng))
+            .map(|_| <Zt as ZipTypes>::Pt::random(&mut rng))
             .collect();
 
         let (hint, _) = TestZip::commit(&param, &mle).unwrap();
