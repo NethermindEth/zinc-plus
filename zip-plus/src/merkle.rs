@@ -218,7 +218,6 @@ fn build_sibling_path(target_index: usize, layers: &[Vec<MtHash>]) -> Vec<MtHash
         current_layer = &layers[layer_idx];
     }
 
-    // Reverse to get bottom-up order (leaf to root) as expected by verification
     siblings
 }
 
