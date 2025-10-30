@@ -367,11 +367,12 @@ mod tests {
                 setup_full_protocol_poly::<F, N, K, M, DEGREE_PLUS_ONE>(num_vars);
 
             let different_evals = {
-                let different_eval_coeffs: Vec<_> = (1..=((1 << num_vars) * DEGREE_PLUS_ONE as i8))
+                let different_eval_coeffs: Vec<_> = (1..=((1 << num_vars)
+                    * (DEGREE_PLUS_ONE - 1) as i8))
                     .map(|x| (x % 3 == 0).into())
                     .collect_vec();
                 different_eval_coeffs
-                    .chunks_exact(DEGREE_PLUS_ONE)
+                    .chunks_exact(DEGREE_PLUS_ONE - 1)
                     .map(DensePolynomial::new)
                     .collect_vec()
             };

@@ -96,7 +96,7 @@ pub fn setup_poly_test_params<const K: usize, const M: usize, const DEGREE_PLUS_
             .map(|v| v.is_odd().into())
             .collect_vec();
         eval_coeffs
-            .chunks_exact(DEGREE_PLUS_ONE)
+            .chunks_exact(DEGREE_PLUS_ONE - 1)
             .map(DensePolynomial::new)
             .collect_vec()
     })
