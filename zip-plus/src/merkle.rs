@@ -1,10 +1,10 @@
-use crate::{add, traits::ConstTranscribable};
-use ark_std::cfg_iter_mut;
+use crate::{add, sub, traits::ConstTranscribable};
+use ark_std::{cfg_into_iter, cfg_iter};
+use blake3::hazmat;
 use itertools::Itertools;
 use std::{
     fmt,
     fmt::{Display, Formatter},
-    mem::MaybeUninit,
 };
 use thiserror::Error;
 
@@ -55,11 +55,6 @@ where
 
 #[derive(Debug, Default)]
 pub struct MerkleTree {
-    inner: Option<MerkleTreeInner>,
-}
-
-#[derive(Debug)]
-struct MerkleTreeInner {
     /// First vector is leaves, last vector is root
     layers: Vec<Vec<MtHash>>,
 }
@@ -79,217 +74,250 @@ impl MerkleTree {
         assert!(row_width.is_power_of_two());
 
         let leaves = hash_leaves(rows, row_width);
-        let inner = build_merkle_tree_from_leaves(leaves);
-
-        Self { inner: Some(inner) }
+        build_merkle_tree_from_leaves(leaves)
     }
 
     pub fn root(&self) -> MtHash {
-        self.inner
-            .as_ref()
-            .expect("Merkle tree not initialized")
-            .layers
+        self.layers
             .last()
-            .and_then(|v| v.first())
+            .expect("Merkle tree must have at least one layer")
+            .first()
             .cloned()
-            .expect("Merkle tree has no root node")
+            .expect("Merkle tree must have a root")
+    }
+
+    /// Generates a Merkle proof for the element at the given index.
+    pub fn prove(&self, leaf_index: usize) -> Result<MerkleProof, MerkleError> {
+        let leaf_count = self.layers[0].len();
+
+        if leaf_index >= leaf_count || leaf_count == 0 {
+            return Err(MerkleError::InvalidLeafIndex(leaf_index));
+        }
+
+        // Calculate the sibling path using layer values.
+        let siblings = build_sibling_path(leaf_index, &self.layers);
+
+        Ok(MerkleProof {
+            leaf_index,
+            leaf_count,
+            siblings,
+        })
     }
 }
 
+// This could've been a function, but macro performance is better.
+macro_rules! hash_many {
+    ($iter:expr, $t:tt) => {{
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = vec![0_u8; <$t>::NUM_BYTES];
+        for v in $iter {
+            v.write_transcription_bytes(&mut buf);
+            hasher.update(&buf);
+        }
+        hasher.finalize().into()
+    }};
+}
+
+/// Construct the leaves of the Merkle tree by hashing each column across all
+/// rows.
 fn hash_leaves<S>(rows: &[&[S]], m_cols: usize) -> Vec<MtHash>
 where
     S: ConstTranscribable + Send + Sync,
 {
-    let mut res = Vec::with_capacity(m_cols);
-
-    cfg_iter_mut!(res.spare_capacity_mut())
-        .enumerate()
-        .for_each(|(i, v)| {
-            let mut hasher = blake3::Hasher::new();
-            let mut buf = vec![0_u8; S::NUM_BYTES];
-            for row in rows.iter() {
-                let value = &row[i];
-                value.write_transcription_bytes(&mut buf);
-                hasher.update(&buf);
-            }
-            *v = MaybeUninit::new(hasher.finalize().into());
-        });
-
-    // SAFETY: We filled the entire capacity of `res` with initialized values
-    unsafe {
-        res.set_len(m_cols);
-    }
-
-    res
+    cfg_into_iter!(0..m_cols)
+        .map(|i| {
+            // Hash the i-th column across all rows.
+            hash_many!(rows.iter().map(|row| &row[i]), S)
+        })
+        .collect()
 }
 
-#[allow(clippy::unwrap_used)] // Using unwrap here never panics
-fn build_merkle_tree_from_leaves(nodes: Vec<MtHash>) -> MerkleTreeInner {
-    if nodes.is_empty() {
-        return MerkleTreeInner {
-            layers: vec![vec![blake3::Hasher::new().finalize().into()]],
+/// Builds a Merkle tree from the given leaves, abusing blake3::hazmat module
+/// for subtree merging.
+fn build_merkle_tree_from_leaves(leaves: Vec<MtHash>) -> MerkleTree {
+    let n = leaves.len();
+
+    if n == 0 {
+        return MerkleTree {
+            layers: vec![vec![blake3::hash(&[]).into()]],
         };
     }
     assert!(
-        nodes.len().is_power_of_two(),
+        n.is_power_of_two(),
         "Number of leaves must be a power of two"
     );
-    let tree_height = nodes.len().trailing_zeros() as usize;
-    let mut layers = Vec::with_capacity(tree_height);
-    layers.push(nodes);
 
-    loop {
-        let (chunked_prev_layer, []) = layers.last().unwrap().as_chunks::<2>() else {
-            unreachable!(
-                "Leaves length must be a power of two, so we should always have an even number of nodes"
-            )
+    if n == 1 {
+        return MerkleTree {
+            layers: vec![leaves],
         };
-        let layer: Vec<MtHash> = chunked_prev_layer
-            .iter()
-            .map(|hash_pair: &[MtHash; 2]| {
-                let mut hasher = blake3::Hasher::new();
-                hasher.update(&hash_pair[0].0);
-                hasher.update(&hash_pair[1].0);
-                hasher.finalize().into()
+    }
+
+    // Build all layers from bottom (leaves) to top (root)
+    // layers[i] contains all contiguous subtree roots of size 2^i
+    let root_layer_idx = n.trailing_zeros() as usize; // log2(n)
+    let num_layers = add!(root_layer_idx, 1);
+    let mut layers: Vec<Vec<MtHash>> = Vec::with_capacity(num_layers);
+
+    // Layer 0: individual leaves
+    layers.push(leaves);
+
+    // Build each subsequent layer
+    for layer_idx in 1..num_layers {
+        let is_root_layer = layer_idx == root_layer_idx;
+
+        let prev_layer = &layers[sub!(layer_idx, 1)];
+        let (prev_layer_chunks, _) = prev_layer.as_chunks::<2>();
+
+        let current_layer = cfg_iter!(prev_layer_chunks)
+            .map(|[left, right]| {
+                if is_root_layer {
+                    hazmat::merge_subtrees_root(&left.0, &right.0, hazmat::Mode::Hash).into()
+                } else {
+                    hazmat::merge_subtrees_non_root(&left.0, &right.0, hazmat::Mode::Hash).into()
+                }
             })
             .collect();
-        let level_size = layer.len();
-        layers.push(layer);
-        if level_size == 1 {
-            break; // We reached the root
-        }
+
+        layers.push(current_layer);
     }
-    MerkleTreeInner { layers }
+
+    MerkleTree { layers }
+}
+
+#[allow(clippy::arithmetic_side_effects)] // Using intentionally, overflow isn't possible
+fn build_sibling_path(target_index: usize, layers: &[Vec<MtHash>]) -> Vec<MtHash> {
+    let mut siblings = Vec::new();
+    let mut layer_idx = 0;
+    let mut current_layer = &layers[layer_idx];
+    let mut current_index = target_index;
+
+    loop {
+        // Determine if current node is left (even) or right (odd) child
+        let is_left_child = current_index.is_multiple_of(2);
+
+        if is_left_child {
+            // Left child, sibling is on the right
+            let sibling_index = current_index + 1;
+            if sibling_index < current_layer.len() {
+                siblings.push(current_layer[sibling_index].clone());
+            } else {
+                // We've reached the root
+                debug_assert_eq!(layer_idx, layers.len() - 1);
+                debug_assert_eq!(current_layer.len(), 1);
+                break;
+            }
+        } else {
+            // Right child, sibling is on the left
+            let sibling_index = current_index - 1;
+            siblings.push(current_layer[sibling_index].clone());
+        }
+
+        current_index /= 2;
+        layer_idx += 1;
+        current_layer = &layers[layer_idx];
+    }
+
+    siblings
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MerkleProof {
-    /// Siblings along the path from leaf to root. Does not include the leaf and
-    /// root hashes.
-    pub siblings: Vec<MtHash>,
     /// Index of the leaf being proven
     pub leaf_index: usize,
     /// Total number of leaves in the tree
-    pub tree_size: usize,
+    pub leaf_count: usize,
+    /// The path of sibling chaining values (bottom-up order).
+    pub siblings: Vec<MtHash>,
 }
 
 impl MerkleProof {
-    pub fn new(path: Vec<MtHash>, leaf_index: usize, tree_size: usize) -> Self {
-        assert!(!path.is_empty(), "Merkle proof path cannot be empty");
-        assert!(leaf_index < tree_size, "Leaf index out of bounds");
+    pub fn new(leaf_index: usize, leaf_count: usize, siblings: Vec<MtHash>) -> Self {
+        assert!(!siblings.is_empty(), "Merkle proof path cannot be empty");
+        assert!(leaf_index < leaf_count, "Leaf index out of bounds");
         Self {
-            siblings: path,
             leaf_index,
-            tree_size,
-        }
-    }
-
-    #[allow(clippy::arithmetic_side_effects)] // Using intentionally, overflow isn't possible
-    pub fn create_proof(merkle_tree: &MerkleTree, leaf_index: usize) -> Result<Self, MerkleError> {
-        let mt = merkle_tree
-            .inner
-            .as_ref()
-            .ok_or(MerkleError::InvalidRootHash)?;
-
-        let mut siblings = Vec::new();
-        let mut layer_idx = 0;
-        let mut current_layer = &mt.layers[layer_idx];
-        let mut current_index = leaf_index;
-
-        loop {
-            // Determine if current node is left (even) or right (odd) child
-            let is_left_child = current_index.is_multiple_of(2);
-
-            if is_left_child {
-                // Left child, sibling is on the right
-                let sibling_index = current_index + 1;
-                if sibling_index < current_layer.len() {
-                    siblings.push(current_layer[sibling_index].clone());
-                } else {
-                    // We've reached the root
-                    debug_assert_eq!(layer_idx, mt.layers.len() - 1);
-                    break;
-                }
-            } else {
-                // Right child, sibling is on the left
-                let sibling_index = current_index - 1;
-                siblings.push(current_layer[sibling_index].clone());
-            }
-
-            current_index /= 2;
-            layer_idx += 1;
-            current_layer = &mt.layers[layer_idx];
-        }
-
-        Ok(MerkleProof {
+            leaf_count,
             siblings,
-            leaf_index,
-            tree_size: mt.layers[0].len(),
-        })
+        }
     }
 
+    /// Verifies the proof against a known root hash and the claimed element
+    /// data.
     pub fn verify<S>(
         &self,
         root: &MtHash,
-        leaf_values: &[S],
+        column_values: &[S],
         leaf_index: usize,
     ) -> Result<(), MerkleError>
     where
         S: ConstTranscribable,
     {
-        if self.siblings.is_empty() {
-            return Err(MerkleError::InvalidMerkleProof(
-                "Merkle proof siblings was empty".to_owned(),
-            ));
-        }
         if leaf_index != self.leaf_index {
             return Err(MerkleError::InvalidLeafIndex(leaf_index));
         }
 
-        let mut buf = vec![0_u8; S::NUM_BYTES];
-        let mut current_hash: MtHash = {
-            let mut hasher = blake3::Hasher::new();
-            for v in leaf_values.iter() {
-                v.write_transcription_bytes(&mut buf);
-                hasher.update(&buf);
-            }
-            hasher.finalize().into()
-        };
-        let mut current_index = self.leaf_index;
-        let mut level_size = self.tree_size;
-        let mut siblings_iter = self.siblings.iter();
+        let mut current_cv: MtHash = hash_many!(column_values, S);
 
-        while level_size > 1 {
-            // Determine if current node is left (even) or right (odd) child
-            let is_left_child = current_index.is_multiple_of(2);
-
-            let sibling_hash = siblings_iter.next().ok_or(MerkleError::InvalidMerkleProof(
-                "Not enough siblings in proof".to_owned(),
-            ))?;
-
-            let mut hasher = blake3::Hasher::new();
-            if is_left_child {
-                hasher.update(&current_hash.0);
-                hasher.update(&sibling_hash.0);
+        if self.leaf_count == 1 {
+            if self.leaf_index == 0 && self.siblings.is_empty() {
+                // The root is just the hash of the single element.
+                if &current_cv != root {
+                    return Err(MerkleError::InvalidRootHash);
+                }
+                return Ok(());
             } else {
-                hasher.update(&sibling_hash.0);
-                hasher.update(&current_hash.0);
+                return Err(MerkleError::InvalidMerkleProof(
+                    "Single element Merkle proof is invalid".to_owned(),
+                ));
             }
-
-            current_hash = hasher.finalize().into();
-
-            current_index /= 2;
-            level_size = level_size.div_ceil(2);
         }
 
-        if siblings_iter.next().is_some() {
+        let directions = get_path_directions(self.leaf_count, self.leaf_index);
+
+        if directions.len() != self.siblings.len() {
             return Err(MerkleError::InvalidMerklePathLength {
                 expected: self.siblings.len(),
-                actual: add!(self.siblings.len(), 1),
+                actual: directions.len(),
             });
         }
 
-        if &current_hash != root {
+        //  Walk up the tree
+        let mut path_iter = self.siblings.iter().zip(directions.iter());
+
+        // Pop the last element for the root merge.
+        let Some((last_sibling, last_direction)) = path_iter.next_back() else {
+            unreachable!("There should always be at least one sibling in the proof");
+        };
+
+        // Iterate over intermediate merges (non-root).
+        for (sibling_cv, direction) in path_iter {
+            let is_left = matches!(direction, PathDirection::Left);
+            if is_left {
+                current_cv = hazmat::merge_subtrees_non_root(
+                    &current_cv.0,
+                    &sibling_cv.0,
+                    hazmat::Mode::Hash,
+                )
+                .into();
+            } else {
+                current_cv = hazmat::merge_subtrees_non_root(
+                    &sibling_cv.0,
+                    &current_cv.0,
+                    hazmat::Mode::Hash,
+                )
+                .into();
+            }
+        }
+
+        // Final root merge.
+        let final_hash: MtHash = if matches!(last_direction, PathDirection::Left) {
+            hazmat::merge_subtrees_root(&current_cv.0, &last_sibling.0, hazmat::Mode::Hash).into()
+        } else {
+            hazmat::merge_subtrees_root(&last_sibling.0, &current_cv.0, hazmat::Mode::Hash).into()
+        };
+
+        if &final_hash != root {
             return Err(MerkleError::InvalidRootHash);
         }
         Ok(())
@@ -301,6 +329,41 @@ impl Display for MerkleProof {
         writeln!(f, "Merkle Path: {}", self.siblings.iter().join(", "))?;
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathDirection {
+    Left,
+    Right,
+}
+
+/// Helper to determine the path directions (leaf to root).
+#[allow(clippy::arithmetic_side_effects)] // Intentional, no side effects possible.
+fn get_path_directions(total_chunks: usize, target_index: usize) -> Vec<PathDirection> {
+    let mut path = Vec::new();
+    let mut current_size = total_chunks;
+    let mut current_index = target_index;
+
+    // Iterate top-down (Root to Leaf) to determine the path based on BLAKE3 rules.
+    while current_size > 1 {
+        // BLAKE3 split rule: largest power of two less than N
+        // (or N/2 if N is power of 2).
+        let split_len = current_size.next_power_of_two() / 2;
+
+        if current_index < split_len {
+            path.push(PathDirection::Left);
+            current_size = split_len;
+        } else {
+            // Went right.
+            path.push(PathDirection::Right);
+            current_size -= split_len;
+            current_index -= split_len;
+        }
+    }
+    // Reverse the path so it is ordered from leaf to root (bottom-up) for
+    // verification.
+    path.reverse();
+    path
 }
 
 #[derive(Error, Debug)]
@@ -349,8 +412,7 @@ mod tests {
         let root = merkle_tree.root();
         // Create a proof for the first leaf
         for (i, leaf) in leaves_data.iter().enumerate() {
-            let proof =
-                MerkleProof::create_proof(&merkle_tree, i).expect("Merkle proof creation failed");
+            let proof = merkle_tree.prove(i).expect("Merkle proof creation failed");
 
             // Verify the proof
             let result = proof.verify(&root, &[*leaf], i);

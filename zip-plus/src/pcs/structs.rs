@@ -112,10 +112,6 @@ impl<R> ZipPlusHint<R> {
             merkle_tree,
         }
     }
-
-    pub fn root(&self) -> MtHash {
-        self.merkle_tree.root()
-    }
 }
 
 /// The compact commitment to a multilinear polynomial, consisting of only the
