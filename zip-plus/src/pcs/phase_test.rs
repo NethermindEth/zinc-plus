@@ -86,7 +86,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 )]
 mod tests {
     use crate::{
-        code::{raa::RaaCode, raa_sign_flip::RaaSignFlippingCode},
+        code::{raa::RaaCode, raa_sign_flip::RaaSignFlippingCode, reed_solomon::ReedSolomon},
         merkle::MerkleTree,
         pcs::{
             structs::{ZipPlus, ZipPlusHint},
@@ -109,7 +109,7 @@ mod tests {
     type C = RaaSignFlippingCode<Zt, 4>;
 
     type PolyZt = TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>;
-    type PolyC = RaaCode<PolyZt, 4>;
+    type PolyC = ReedSolomon;
 
     type TestZip = ZipPlus<Zt, C>;
     type TestPolyZip = ZipPlus<PolyZt, PolyC>;

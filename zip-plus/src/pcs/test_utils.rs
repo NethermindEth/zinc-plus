@@ -11,6 +11,7 @@ use crate::{
         LinearCode,
         raa::{RaaCode, RaaConfig},
         raa_sign_flip::RaaSignFlippingCode,
+        reed_solomon::ReedSolomon,
     },
     pcs::{
         ZipPlusProof,
@@ -57,7 +58,7 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
 {
     const NUM_COLUMN_OPENINGS: usize = 650;
     type Eval = DensePolynomial<Boolean, DEGREE_PLUS_ONE>;
-    type Cw = DensePolynomial<i32, DEGREE_PLUS_ONE>;
+    type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
     type Fmod = Uint<K>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
@@ -76,7 +77,7 @@ pub fn setup_test_params<const N: usize, const K: usize, const M: usize>(
     >,
     DenseMultilinearExtension<<TestZipTypes<N, K, M> as ZipTypes>::Eval>,
 ) {
-    setup_test_params_inner(num_vars, |poly_size| {
+    setup_test_params_inner(num_vars, RAA_CFG, |poly_size| {
         (1..=poly_size as i32).map(Int::from).collect()
     })
 }
@@ -85,13 +86,10 @@ pub fn setup_test_params<const N: usize, const K: usize, const M: usize>(
 pub fn setup_poly_test_params<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize>(
     num_vars: usize,
 ) -> (
-    ZipPlusParams<
-        TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>,
-        RaaCode<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>, REPETITION_FACTOR>,
-    >,
+    ZipPlusParams<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>, ReedSolomon>,
     DenseMultilinearExtension<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Eval>,
 ) {
-    setup_test_params_inner(num_vars, |poly_size| {
+    setup_test_params_inner(num_vars, (), |poly_size| {
         let eval_coeffs: Vec<_> = (1..=(poly_size * (DEGREE_PLUS_ONE - 1)) as i8)
             .map(|v| v.is_odd().into())
             .collect_vec();
@@ -102,14 +100,15 @@ pub fn setup_poly_test_params<const K: usize, const M: usize, const DEGREE_PLUS_
     })
 }
 
-fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt, Config = RaaConfig>>(
+fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     num_vars: usize,
+    cfg: Lc::Config,
     prepare_evaluations: impl FnOnce(usize) -> Vec<Zt::Eval>,
 ) -> (ZipPlusParams<Zt, Lc>, DenseMultilinearExtension<Zt::Eval>) {
     let poly_size = 1 << num_vars;
     let num_rows = 1 << num_vars.div_ceil(2);
 
-    let code = Lc::new(poly_size, RAA_CFG);
+    let code = Lc::new(poly_size, cfg);
     let pp = ZipPlusParams::new(num_vars, num_rows, code);
 
     let evaluations = prepare_evaluations(poly_size);
@@ -152,10 +151,7 @@ pub fn setup_full_protocol_poly<
 >(
     num_vars: usize,
 ) -> (
-    ZipPlusParams<
-        TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>,
-        RaaCode<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>, REPETITION_FACTOR>,
-    >,
+    ZipPlusParams<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>, ReedSolomon>,
     ZipPlusCommitment,
     Vec<F>,
     F,

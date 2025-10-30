@@ -4,7 +4,9 @@ use crate::{
     sub,
     traits::{ConstTranscribable, FromRef, Named},
 };
-use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring};
+use crypto_primitives::{
+    ConstSemiring, FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring,
+};
 use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
@@ -47,6 +49,21 @@ impl<R: Semiring + Zero, const DEGREE_PLUS_ONE: usize> DensePolynomial<R, DEGREE
         let coeffs = coeffs.try_into().expect("unreachable");
 
         DensePolynomial { coeffs }
+    }
+
+    pub fn random_bool<Gen: Rng + ?Sized>(rng: &mut Gen) -> Self
+    where
+        R: ConstSemiring,
+    {
+        Self {
+            coeffs: array::from_fn::<_, DEGREE_PLUS_ONE, _>(|_| {
+                if rng.random::<bool>() {
+                    R::one()
+                } else {
+                    R::zero()
+                }
+            }),
+        }
     }
 }
 
@@ -460,13 +477,17 @@ where
     }
 }
 
-impl<'a, R, S, const DEGREE_PLUS_ONE: usize> MulByScalar<&'a S>
-    for DensePolynomial<R, DEGREE_PLUS_ONE>
+impl<'a, R, S, const DEGREE_PLUS_ONE: usize> MulByScalar<S> for DensePolynomial<R, DEGREE_PLUS_ONE>
 where
-    R: Semiring + MulByScalar<&'a S>,
+    R: Semiring + MulByScalar<S>,
+    S: Clone,
 {
-    fn mul_by_scalar(&self, rhs: &'a S) -> Option<Self> {
-        let coeffs: Option<Vec<R>> = self.coeffs.iter().map(|c| c.mul_by_scalar(rhs)).collect();
+    fn mul_by_scalar(&self, rhs: S) -> Option<Self> {
+        let coeffs: Option<Vec<R>> = self
+            .coeffs
+            .iter()
+            .map(|c| c.mul_by_scalar(rhs.clone()))
+            .collect();
 
         Some(Self {
             coeffs: coeffs?.try_into().ok()?,

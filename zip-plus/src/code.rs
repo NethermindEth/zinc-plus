@@ -1,7 +1,11 @@
 pub mod raa;
 pub mod raa_sign_flip;
+pub mod reed_solomon;
 
-use crate::{pcs::structs::ZipTypes, traits::FromRef};
+use crate::{
+    pcs::structs::{MulByScalar, ZipTypes},
+    traits::FromRef,
+};
 use crypto_primitives::PrimeField;
 
 pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
@@ -65,5 +69,5 @@ pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
     /// A vector of field elements representing the encoded row
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        F: PrimeField + FromRef<F>;
+        F: PrimeField + FromRef<F> + MulByScalar<i64>;
 }

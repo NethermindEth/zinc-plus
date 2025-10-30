@@ -10,8 +10,16 @@ use crypto_primitives::{
 use num_traits::CheckedMul;
 
 impl MulByScalar<&Self> for BoxedMontyField {
+    #[inline(always)]
     fn mul_by_scalar(&self, rhs: &Self) -> Option<Self> {
         self.checked_mul(rhs)
+    }
+}
+
+impl MulByScalar<i64> for BoxedMontyField {
+    #[inline(always)]
+    fn mul_by_scalar(&self, rhs: i64) -> Option<Self> {
+        self.mul_by_scalar(&BoxedMontyField::from_with_cfg(rhs, self.cfg()))
     }
 }
 

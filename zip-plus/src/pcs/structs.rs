@@ -23,6 +23,7 @@ pub trait ZipTypes: Send + Sync {
         + ConstCoeffBitWidth
         + ConstTranscribable
         + FromRef<Self::Eval>
+        + MulByScalar<i64>
         + Named
         + Copy;
 
@@ -41,6 +42,7 @@ pub trait ZipTypes: Send + Sync {
     type CombR: ConstIntRing
         + Neg<Output = Self::CombR>
         + ConstTranscribable
+        + MulByScalar<i64>
         + FromRef<Self::CombR>
         + for<'a> MulByScalar<&'a Self::Chal>;
     /// Ring of elements in the linear combination of codewords, at least as
@@ -128,6 +130,13 @@ pub trait MulByScalar<Rhs>: Sized {
 macro_rules! impl_mul_by_scalar_for_primitives {
     ($($t:ty),*) => {
         $(
+            impl MulByScalar<i64> for $t {
+                fn mul_by_scalar(&self, rhs: i64) -> Option<Self> {
+                    let rhs: $t = rhs.try_into().unwrap();
+                    self.checked_mul(&rhs)
+                }
+            }
+
             impl MulByScalar<&$t> for $t {
                 fn mul_by_scalar(&self, rhs: &$t) -> Option<Self> {
                     self.checked_mul(rhs)
@@ -145,6 +154,12 @@ impl<const LIMBS: usize, const LIMBS2: usize> MulByScalar<&Int<LIMBS2>> for Int<
             return None; // Cannot multiply if the left operand has fewer limbs than the right
         }
         self.checked_mul(&rhs.resize())
+    }
+}
+
+impl<const LIMBS: usize> MulByScalar<i64> for Int<LIMBS> {
+    fn mul_by_scalar(&self, rhs: i64) -> Option<Self> {
+        self.checked_mul(&rhs.into())
     }
 }
 
