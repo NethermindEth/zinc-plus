@@ -314,12 +314,13 @@ mod tests {
         poly::mle::MultilinearExtension,
     };
     use crypto_primitives::{
-        DenseRowMatrix, IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
+        DenseRowMatrix, IntoWithConfig, PrimeField, crypto_bigint_monty::MontyField,
     };
     use proptest::prelude::*;
 
+    const LIMBS: usize = 3;
     const MODULUS: &str = "0076F668F4274572E39A3EA8285319B5";
-    type F = BoxedMontyField;
+    type F = MontyField<LIMBS>;
 
     fn any_f(cfg: <F as PrimeField>::Config) -> impl Strategy<Value = F> + 'static {
         any::<u128>().prop_map(move |v| v.into_with_cfg(&cfg))
@@ -329,8 +330,8 @@ mod tests {
         let cfg = get_dyn_config(MODULUS);
         (0usize..=5).prop_flat_map(move |n| {
             let len = 1usize << n;
-            let cfg = cfg.clone();
-            prop::collection::vec(any_f(cfg.clone()), len).prop_map(move |evals| {
+            let cfg = cfg;
+            prop::collection::vec(any_f(cfg), len).prop_map(move |evals| {
                 DenseMultilinearExtension::from_evaluations_vec(n, evals, F::zero_with_cfg(&cfg))
             })
         })
@@ -712,13 +713,13 @@ mod tests {
     > {
         let cfg = get_dyn_config(MODULUS);
         (0usize..=5).prop_flat_map(move |n| {
-            let cfg = cfg.clone();
+            let cfg = cfg;
             let len = 1usize << n;
-            prop::collection::vec(any_f(cfg.clone()), len).prop_flat_map(move |e1| {
-                let cfg = cfg.clone();
+            prop::collection::vec(any_f(cfg), len).prop_flat_map(move |e1| {
+                let cfg = cfg;
                 let n2 = n;
-                prop::collection::vec(any_f(cfg.clone()), len).prop_flat_map(move |e2| {
-                    let cfg = cfg.clone();
+                prop::collection::vec(any_f(cfg), len).prop_flat_map(move |e2| {
+                    let cfg = cfg;
                     let n3 = n2;
                     point_n(n3).prop_map({
                         let e1v = e1.clone();

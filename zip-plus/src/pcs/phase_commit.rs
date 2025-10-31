@@ -202,10 +202,9 @@ mod tests {
         },
         poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
     };
-    use crypto_bigint::{Random, U64, U256, Word};
+    use crypto_bigint::{Random, U64, U192, Word};
     use crypto_primitives::{
-        Matrix, boolean::Boolean, crypto_bigint_boxed_monty::BoxedMontyField,
-        crypto_bigint_int::Int,
+        Matrix, boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
     };
     use itertools::Itertools;
     use num_traits::Zero;
@@ -214,8 +213,8 @@ mod tests {
     const INT_LIMBS: usize = U64::LIMBS;
 
     const N: usize = INT_LIMBS;
-    const K: usize = INT_LIMBS * 4;
-    const M: usize = INT_LIMBS * 8;
+    const K: usize = INT_LIMBS * 3;
+    const M: usize = INT_LIMBS * 6;
     const DEGREE: usize = 2;
 
     type Zt = TestZipTypes<N, K, M>;
@@ -583,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn proof_size_is_correct_for_parameters() {
+    fn proof_sizeis_correct_for_parameters() {
         fn calculate_expected_test_transcript_size_bytes(pp: &ZipPlusParams<Zt, C, 0>) -> usize {
             let size_of_zt_k = K * size_of::<Word>();
             let size_of_zt_m = M * size_of::<Word>();
@@ -608,15 +607,15 @@ mod tests {
         fn calculate_expected_proof_size_bytes(pp: &ZipPlusParams<Zt, C, 0>) -> usize {
             // F stored as `(value, modulus)` where both `value` and `modulus` are of
             // length `len`.
-            // `len` itself is stored only once at the beginning of the F list.
-            // For BoxedMontyField, length of `len` itself is 1 byte.
-            let size_of_f = 2 * U256::LIMBS * size_of::<Word>();
-            let evaluation_phase_size = 1 + pp.linear_code.row_len() * size_of_f;
+            // `len` itself is not stored as its known in compile time.
+            let size_of_f = 2 * U192::LIMBS * size_of::<Word>();
+            let evaluation_phase_size = pp.linear_code.row_len() * size_of_f;
 
             calculate_expected_test_transcript_size_bytes(pp) + evaluation_phase_size
         }
 
-        type F = BoxedMontyField;
+        const LIMBS: usize = 3;
+        type F = MontyField<LIMBS>;
 
         let mut rng = rng();
         let num_vars = 4;

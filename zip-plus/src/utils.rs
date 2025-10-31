@@ -22,6 +22,11 @@ const WORD_FACTOR: usize = 1;
 #[cfg(target_pointer_width = "32")]
 const WORD_FACTOR: usize = 2;
 
+#[cfg(target_pointer_width = "64")]
+const WORD_BYTE_SIZE: usize = 8;
+#[cfg(target_pointer_width = "32")]
+const WORD_BYTE_SIZE: usize = 4;
+
 #[macro_export]
 macro_rules! neg {
     ($a:expr) => {
@@ -250,11 +255,11 @@ impl ConstTranscribable for Boolean {
 }
 
 impl<const LIMBS: usize> ConstTranscribable for Uint<LIMBS> {
-    const NUM_BYTES: usize = 8 * LIMBS / WORD_FACTOR;
+    const NUM_BYTES: usize = WORD_BYTE_SIZE * LIMBS;
 
     fn read_transcription_bytes(bytes: &[u8]) -> Self {
         // crypto_bigint::Uint stores limbs in least-to-most significant order.
-        // It matches little-endian order ef limbs encoding, so platform pointer width
+        // It matches little-endian order of limbs encoding, so platform pointer width
         // does not matter.
         let (chunked, rem) = bytes.as_chunks::<{ 8 / WORD_FACTOR }>();
         assert!(rem.is_empty(), "Invalid byte slice length for Uint");

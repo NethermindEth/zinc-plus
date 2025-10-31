@@ -23,10 +23,9 @@ use crate::{
     primality::MillerRabin,
     traits::{FromRef, Transcribable, Transcript},
 };
-use crypto_bigint::BoxedUint;
 use crypto_primitives::{
     FromWithConfig, IntSemiring, IntoWithConfig, PrimeField, boolean::Boolean,
-    crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
+    crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
 };
 use itertools::Itertools;
 use num_traits::Zero;
@@ -261,8 +260,10 @@ where
     (pp, comm, point_f, eval_f, proof)
 }
 
-pub fn get_dyn_config(hex_modulus: &str) -> <BoxedMontyField as PrimeField>::Config {
-    let modulus =
-        BoxedUint::from_str_radix_vartime(hex_modulus, 16).expect("Invalid modulus hex string");
-    BoxedMontyField::make_cfg(&modulus).expect("Failed to create field config")
+pub fn get_dyn_config(hex_modulus: &str) -> <MontyField<3> as PrimeField>::Config {
+    let modulus = Uint::new(
+        crypto_bigint::Uint::from_str_radix_vartime(hex_modulus, 16)
+            .expect("Invalid modulus hex string"),
+    );
+    MontyField::make_cfg(&modulus).expect("Failed to create field config")
 }

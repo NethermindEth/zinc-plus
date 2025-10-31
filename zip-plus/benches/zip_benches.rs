@@ -21,7 +21,7 @@ impl ZipTypes<0> for BenchZipTypes {
     const NUM_COLUMN_OPENINGS: usize = 650;
     type Eval = i32;
     type Cw = i64;
-    type Fmod = Uint<{ INT_LIMBS * 4 }>;
+    type Fmod = Uint<{ INT_LIMBS * 3 }>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
     type Pt = i128;

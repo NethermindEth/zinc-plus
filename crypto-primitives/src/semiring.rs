@@ -1,5 +1,4 @@
 pub mod boolean;
-#[cfg(feature = "crypto_bigint")]
 pub mod crypto_bigint_uint;
 
 use core::{

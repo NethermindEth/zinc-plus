@@ -4,18 +4,18 @@ use crate::{
 };
 use crypto_bigint::BoxedUint;
 use crypto_primitives::{
-    FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
+    FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_monty::MontyField,
     crypto_bigint_uint::Uint,
 };
 use num_traits::CheckedMul;
 
-impl MulByScalar<&Self> for BoxedMontyField {
+impl<const LIMBS: usize> MulByScalar<&Self> for MontyField<LIMBS> {
     fn mul_by_scalar(&self, rhs: &Self) -> Option<Self> {
         self.checked_mul(rhs)
     }
 }
 
-impl FromRef<Self> for BoxedMontyField {
+impl<const LIMBS: usize> FromRef<Self> for MontyField<LIMBS> {
     fn from_ref(value: &Self) -> Self {
         value.clone()
     }
@@ -28,13 +28,13 @@ impl<const LIMBS: usize> FromRef<Uint<LIMBS>> for BoxedUint {
     }
 }
 
-impl<T> ProjectableToField<BoxedMontyField> for T
+impl<T, const LIMBS: usize> ProjectableToField<MontyField<LIMBS>> for T
 where
-    BoxedMontyField: for<'a> FromWithConfig<&'a T>,
+    MontyField<LIMBS>: for<'a> FromWithConfig<&'a T>,
 {
     fn prepare_projection(
-        sampled_value: &BoxedMontyField,
-    ) -> impl Fn(&Self) -> BoxedMontyField + 'static {
+        sampled_value: &MontyField<LIMBS>,
+    ) -> impl Fn(&Self) -> MontyField<LIMBS> + 'static {
         let config = sampled_value.cfg().clone();
         move |value: &T| value.into_with_cfg(&config)
     }
@@ -48,14 +48,15 @@ where
 )]
 mod prop_tests {
     use crate::pcs::test_utils::get_dyn_config;
-    use crypto_bigint::U256;
+    use crypto_bigint::U192;
     use crypto_primitives::{
-        FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
+        FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_monty::MontyField,
     };
     use proptest::prelude::*;
 
-    const MODULUS: &str = "00dca94d8a1ecce3b6e8755d8999787d0524d8ca1ea755e7af84fb646fa31f27";
-    type F = BoxedMontyField;
+    const LIMBS: usize = 3;
+    const MODULUS: &str = "da3de725647f9c7c10fd5c6174de36d08e3";
+    type F = MontyField<LIMBS>;
 
     fn any_u128() -> impl Strategy<Value = u128> {
         any::<u128>()
@@ -76,7 +77,7 @@ mod prop_tests {
             for i in 0..128 {
                 if (x >> i) & 1 == 1 { acc += F::from_with_cfg(1u64, &cfg) * F::from_with_cfg(1u64 << i.min(63), &cfg); }
             }
-            let u = crypto_bigint::Uint::<{ U256::LIMBS }>::from(x);
+            let u = crypto_bigint::Uint::<{ U192::LIMBS }>::from(x);
             let g2: F = u.into_with_cfg(&cfg);
             prop_assert_eq!(f, g2);
         }
@@ -104,7 +105,7 @@ mod prop_tests {
         #[test]
         fn prop_from_uint_roundtrip_through_uint(x in any_u128()) {
             let cfg = get_dyn_config(MODULUS);
-            let u: crypto_bigint::Uint<{ U256::LIMBS }> = crypto_bigint::Uint::from(x);
+            let u: crypto_bigint::Uint<{ U192::LIMBS }> = crypto_bigint::Uint::from(x);
             let g_from_uint: F = u.into_with_cfg(&cfg);
             let g_direct: F = x.into_with_cfg(&cfg);
             prop_assert_eq!(g_from_uint, g_direct);

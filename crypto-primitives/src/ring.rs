@@ -1,4 +1,3 @@
-#[cfg(feature = "crypto_bigint")]
 pub mod crypto_bigint_int;
 
 use crate::{ConstIntSemiring, FixedSemiring, IntSemiring, IntSemiringWithShifts, Semiring};

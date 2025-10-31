@@ -1,28 +1,30 @@
 use super::*;
-use crate::{IntRing, IntSemiring, Semiring, boolean::Boolean, crypto_bigint_int::Int};
+use crate::{
+    IntRing, Semiring, boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
+};
 use core::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
     hash::{Hash, Hasher},
     iter::{Product, Sum},
-    ops::{Add, AddAssign, DivAssign, Mul, MulAssign, Rem, RemAssign, Sub, SubAssign},
+    ops::{Add, AddAssign, DivAssign, Mul, MulAssign, Rem, Sub, SubAssign},
 };
 use crypto_bigint::{
-    BoxedUint, Integer, NonZero, Odd, Resize,
-    modular::{BoxedMontyForm, BoxedMontyParams},
+    NonZero, Odd, One,
+    modular::{MontyForm, MontyParams},
 };
 use crypto_primitives_proc_macros::InfallibleCheckedOp;
-use num_traits::{CheckedAdd, CheckedDiv, CheckedMul, CheckedNeg, CheckedRem, CheckedSub, Pow};
+use num_traits::{CheckedAdd, CheckedDiv, CheckedMul, CheckedNeg, CheckedSub, Pow};
 
 #[derive(Clone, PartialEq, Eq, InfallibleCheckedOp)]
 #[infallible_checked_unary_op((CheckedNeg, neg))]
 #[infallible_checked_binary_op((CheckedAdd, add), (CheckedSub, sub), (CheckedMul, mul))]
 #[repr(transparent)]
-pub struct BoxedMontyField(BoxedMontyForm);
+pub struct MontyField<const LIMBS: usize>(MontyForm<LIMBS>);
 
-impl BoxedMontyField {
-    /// Creates a new `BoxedMontyField` from a `BoxedMontyForm`.
-    pub const fn new(form: BoxedMontyForm) -> Self {
+impl<const LIMBS: usize> MontyField<LIMBS> {
+    /// Creates a new `MontyField` from a `MontyForm`.
+    pub const fn new(form: MontyForm<LIMBS>) -> Self {
         Self(form)
     }
 }
@@ -31,13 +33,13 @@ impl BoxedMontyField {
 // Core traits
 //
 
-impl Debug for BoxedMontyField {
+impl<const LIMBS: usize> Debug for MontyField<LIMBS> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         Debug::fmt(&self.0, f)
     }
 }
 
-impl Display for BoxedMontyField {
+impl<const LIMBS: usize> Display for MontyField<LIMBS> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(
             f,
@@ -48,7 +50,7 @@ impl Display for BoxedMontyField {
     }
 }
 
-impl PartialOrd for BoxedMontyField {
+impl<const LIMBS: usize> PartialOrd for MontyField<LIMBS> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         if self.modulus() != other.modulus() {
             return None;
@@ -57,7 +59,7 @@ impl PartialOrd for BoxedMontyField {
     }
 }
 
-impl Hash for BoxedMontyField {
+impl<const LIMBS: usize> Hash for MontyField<LIMBS> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.0.as_montgomery().hash(state)
     }
@@ -67,7 +69,7 @@ impl Hash for BoxedMontyField {
 // Basic arithmetic operations
 //
 
-impl Neg for BoxedMontyField {
+impl<const LIMBS: usize> Neg for MontyField<LIMBS> {
     type Output = Self;
 
     fn neg(self) -> Self::Output {
@@ -77,7 +79,7 @@ impl Neg for BoxedMontyField {
 
 macro_rules! impl_basic_op {
     ($trait:ident, $method:ident) => {
-        impl $trait for BoxedMontyField {
+        impl<const LIMBS: usize> $trait for MontyField<LIMBS> {
             type Output = Self;
 
             #[inline(always)]
@@ -86,7 +88,7 @@ macro_rules! impl_basic_op {
             }
         }
 
-        impl $trait<&Self> for BoxedMontyField {
+        impl<const LIMBS: usize> $trait<&Self> for MontyField<LIMBS> {
             type Output = Self;
 
             #[inline(always)]
@@ -95,20 +97,20 @@ macro_rules! impl_basic_op {
             }
         }
 
-        impl $trait for &BoxedMontyField {
-            type Output = BoxedMontyField;
+        impl<const LIMBS: usize> $trait for &MontyField<LIMBS> {
+            type Output = MontyField<LIMBS>;
 
             #[inline(always)]
             fn $method(self, rhs: Self) -> Self::Output {
-                BoxedMontyField(BoxedMontyForm::$method(&self.0, &rhs.0))
+                MontyField(MontyForm::$method(&self.0, &rhs.0))
             }
         }
 
-        impl $trait<BoxedMontyField> for &BoxedMontyField {
-            type Output = BoxedMontyField;
+        impl<const LIMBS: usize> $trait<MontyField<LIMBS>> for &MontyField<LIMBS> {
+            type Output = MontyField<LIMBS>;
 
             #[inline(always)]
-            fn $method(self, rhs: BoxedMontyField) -> Self::Output {
+            fn $method(self, rhs: MontyField<LIMBS>) -> Self::Output {
                 self.$method(&rhs)
             }
         }
@@ -119,7 +121,7 @@ impl_basic_op!(Add, add);
 impl_basic_op!(Sub, sub);
 impl_basic_op!(Mul, mul);
 
-impl Div for BoxedMontyField {
+impl<const LIMBS: usize> Div for MontyField<LIMBS> {
     type Output = Self;
 
     fn div(self, rhs: Self) -> Self::Output {
@@ -127,7 +129,7 @@ impl Div for BoxedMontyField {
     }
 }
 
-impl Div<&Self> for BoxedMontyField {
+impl<const LIMBS: usize> Div<&Self> for MontyField<LIMBS> {
     type Output = Self;
 
     fn div(self, rhs: &Self) -> Self::Output {
@@ -135,63 +137,31 @@ impl Div<&Self> for BoxedMontyField {
     }
 }
 
-impl Div for &BoxedMontyField {
-    type Output = BoxedMontyField;
+impl<const LIMBS: usize> Div for &MontyField<LIMBS> {
+    type Output = MontyField<LIMBS>;
 
     fn div(self, rhs: Self) -> Self::Output {
         self.checked_div(rhs).expect("Division by zero")
     }
 }
 
-impl Div<BoxedMontyField> for &BoxedMontyField {
-    type Output = BoxedMontyField;
+impl<const LIMBS: usize> Div<MontyField<LIMBS>> for &MontyField<LIMBS> {
+    type Output = MontyField<LIMBS>;
 
-    fn div(self, rhs: BoxedMontyField) -> Self::Output {
+    fn div(self, rhs: MontyField<LIMBS>) -> Self::Output {
         self.div(&rhs)
     }
 }
 
-impl Rem for BoxedMontyField {
-    type Output = Self;
-
-    fn rem(self, rhs: Self) -> Self::Output {
-        self.rem(&rhs)
-    }
-}
-
-impl Rem<&Self> for BoxedMontyField {
-    type Output = Self;
-
-    fn rem(self, rhs: &Self) -> Self::Output {
-        self.checked_rem(rhs).expect("Division by zero")
-    }
-}
-
-impl Rem for &BoxedMontyField {
-    type Output = BoxedMontyField;
-
-    fn rem(self, rhs: Self) -> Self::Output {
-        self.checked_rem(rhs).expect("Division by zero")
-    }
-}
-
-impl Rem<BoxedMontyField> for &BoxedMontyField {
-    type Output = BoxedMontyField;
-
-    fn rem(self, rhs: BoxedMontyField) -> Self::Output {
-        self.rem(&rhs)
-    }
-}
-
-impl Pow<u32> for BoxedMontyField {
+impl<const LIMBS: usize> Pow<u32> for MontyField<LIMBS> {
     type Output = Self;
 
     fn pow(self, rhs: u32) -> Self::Output {
-        Self(self.0.pow(&BoxedUint::from(rhs)))
+        Self(self.0.pow(&crypto_bigint::Uint::<1>::from(rhs)))
     }
 }
 
-impl Inv for BoxedMontyField {
+impl<const LIMBS: usize> Inv for MontyField<LIMBS> {
     type Output = Option<Self>;
 
     fn inv(self) -> Self::Output {
@@ -209,7 +179,7 @@ impl Inv for BoxedMontyField {
 // (Note: Field operations do not overflow)
 //
 
-impl CheckedDiv for BoxedMontyField {
+impl<const LIMBS: usize> CheckedDiv for MontyField<LIMBS> {
     #[allow(clippy::arithmetic_side_effects)] // False alert
     fn checked_div(&self, rhs: &Self) -> Option<Self> {
         let inv = rhs.0.invert();
@@ -218,17 +188,7 @@ impl CheckedDiv for BoxedMontyField {
         }
         // Safe to unwrap since we checked for None above
         let inv = inv.unwrap();
-        Some(Self(BoxedMontyForm::mul(&self.0, &inv)))
-    }
-}
-
-impl CheckedRem for BoxedMontyField {
-    fn checked_rem(&self, v: &Self) -> Option<Self> {
-        let rhs = NonZero::new(v.0.retrieve()).into_option()?;
-        Some(Self(BoxedMontyForm::new(
-            self.0.retrieve().rem(&rhs),
-            self.0.params().clone(),
-        )))
+        Some(Self(MontyForm::mul(&self.0, &inv)))
     }
 }
 
@@ -238,12 +198,12 @@ impl CheckedRem for BoxedMontyField {
 
 macro_rules! impl_field_op_assign {
     ($trait:ident, $method:ident) => {
-        impl $trait for BoxedMontyField {
+        impl<const LIMBS: usize> $trait for MontyField<LIMBS> {
             fn $method(&mut self, rhs: Self) {
                 self.0.$method(&rhs.0);
             }
         }
-        impl $trait<&Self> for BoxedMontyField {
+        impl<const LIMBS: usize> $trait<&Self> for MontyField<LIMBS> {
             fn $method(&mut self, rhs: &Self) {
                 self.0.$method(&rhs.0);
             }
@@ -255,27 +215,15 @@ impl_field_op_assign!(AddAssign, add_assign);
 impl_field_op_assign!(SubAssign, sub_assign);
 impl_field_op_assign!(MulAssign, mul_assign);
 
-impl DivAssign for BoxedMontyField {
+impl<const LIMBS: usize> DivAssign for MontyField<LIMBS> {
     fn div_assign(&mut self, rhs: Self) {
         self.div_assign(&rhs);
     }
 }
 
-impl DivAssign<&Self> for BoxedMontyField {
+impl<const LIMBS: usize> DivAssign<&Self> for MontyField<LIMBS> {
     fn div_assign(&mut self, rhs: &Self) {
-        self.0.mul_assign(rhs.0.invert().expect("Division by zero"))
-    }
-}
-
-impl RemAssign for BoxedMontyField {
-    fn rem_assign(&mut self, rhs: Self) {
-        self.rem_assign(&rhs);
-    }
-}
-
-impl RemAssign<&Self> for BoxedMontyField {
-    fn rem_assign(&mut self, rhs: &Self) {
-        *self = self.checked_rem(rhs).expect("Division by zero");
+        self.0.mul_assign(rhs.0.invert().unwrap())
     }
 }
 
@@ -283,40 +231,40 @@ impl RemAssign<&Self> for BoxedMontyField {
 // Aggregate operations
 //
 
-impl Sum for BoxedMontyField {
+impl<const LIMBS: usize> Sum for MontyField<LIMBS> {
     fn sum<I: Iterator<Item = Self>>(mut iter: I) -> Self {
-        let Some(BoxedMontyField(first)) = iter.next() else {
-            panic!("Sum of an empty iterator is not defined for BoxedMontyField");
+        let Some(MontyField(first)) = iter.next() else {
+            panic!("Sum of an empty iterator is not defined for MontyField");
         };
-        Self(iter.fold(first, |acc, x| BoxedMontyForm::add(&acc, &x.0)))
+        Self(iter.fold(first, |acc, x| MontyForm::add(&acc, &x.0)))
     }
 }
 
-impl<'a> Sum<&'a Self> for BoxedMontyField {
+impl<'a, const LIMBS: usize> Sum<&'a Self> for MontyField<LIMBS> {
     fn sum<I: Iterator<Item = &'a Self>>(mut iter: I) -> Self {
-        let Some(BoxedMontyField(first)) = iter.next() else {
-            panic!("Sum of an empty iterator is not defined for BoxedMontyField");
+        let Some(MontyField(first)) = iter.next() else {
+            panic!("Sum of an empty iterator is not defined for MontyField");
         };
-        Self(iter.fold(first.clone(), |acc, x| BoxedMontyForm::add(&acc, &x.0)))
+        Self(iter.fold(*first, |acc, x| MontyForm::add(&acc, &x.0)))
     }
 }
 
-impl Product for BoxedMontyField {
+impl<const LIMBS: usize> Product for MontyField<LIMBS> {
     fn product<I: Iterator<Item = Self>>(mut iter: I) -> Self {
-        let Some(BoxedMontyField(first)) = iter.next() else {
-            panic!("Product of an empty iterator is not defined for BoxedMontyField");
+        let Some(MontyField(first)) = iter.next() else {
+            panic!("Product of an empty iterator is not defined for MontyField");
         };
-        Self(iter.fold(first, |acc, x| BoxedMontyForm::mul(&acc, &x.0)))
+        Self(iter.fold(first, |acc, x| MontyForm::mul(&acc, &x.0)))
     }
 }
 
-impl<'a> Product<&'a Self> for BoxedMontyField {
+impl<'a, const LIMBS: usize> Product<&'a Self> for MontyField<LIMBS> {
     #[allow(clippy::arithmetic_side_effects)] // False alert
     fn product<I: Iterator<Item = &'a Self>>(mut iter: I) -> Self {
-        let Some(BoxedMontyField(first)) = iter.next() else {
-            panic!("Product of an empty iterator is not defined for BoxedMontyField");
+        let Some(MontyField(first)) = iter.next() else {
+            panic!("Product of an empty iterator is not defined for MontyField");
         };
-        Self(iter.fold(first.clone(), |acc, x| BoxedMontyForm::mul(&acc, &x.0)))
+        Self(iter.fold(*first, |acc, x| MontyForm::mul(&acc, &x.0)))
     }
 }
 
@@ -324,21 +272,21 @@ impl<'a> Product<&'a Self> for BoxedMontyField {
 // Conversions
 //
 
-impl From<BoxedMontyForm> for BoxedMontyField {
+impl<const LIMBS: usize> From<MontyForm<LIMBS>> for MontyField<LIMBS> {
     #[inline(always)]
-    fn from(value: BoxedMontyForm) -> Self {
+    fn from(value: MontyForm<LIMBS>) -> Self {
         Self(value)
     }
 }
 
-impl From<BoxedMontyField> for BoxedMontyForm {
+impl<const LIMBS: usize> From<MontyField<LIMBS>> for MontyForm<LIMBS> {
     #[inline(always)]
-    fn from(value: BoxedMontyField) -> Self {
+    fn from(value: MontyField<LIMBS>) -> Self {
         value.0
     }
 }
 
-impl From<&BoxedMontyField> for BoxedMontyField {
+impl<const LIMBS: usize> From<&MontyField<LIMBS>> for MontyField<LIMBS> {
     fn from(value: &Self) -> Self {
         value.clone()
     }
@@ -347,15 +295,14 @@ impl From<&BoxedMontyField> for BoxedMontyField {
 macro_rules! impl_from_unsigned {
     ($($t:ty),* $(,)?) => {
         $(
-            impl FromWithConfig<$t> for BoxedMontyField {
+            impl<const LIMBS: usize>FromWithConfig<$t> for MontyField<LIMBS> {
                 fn from_with_cfg(value: $t, cfg: &Self::Config) -> Self {
-                    let abs: BoxedUint = value.into();
-                    let abs = abs.resize(cfg.modulus().bits_precision());
-                    Self(BoxedMontyForm::new(abs, cfg.clone()))
+                    let abs: crypto_bigint::Uint<LIMBS> = value.into();
+                    Self(MontyForm::<LIMBS>::new(&abs, *cfg))
                 }
             }
 
-            impl FromWithConfig<&$t> for BoxedMontyField {
+            impl<const LIMBS: usize>FromWithConfig<&$t> for MontyField<LIMBS> {
                 fn from_with_cfg(value: &$t, cfg: &Self::Config) -> Self {
                     Self::from_with_cfg(*value, cfg)
                 }
@@ -368,21 +315,20 @@ macro_rules! impl_from_signed {
     ($($t:ty),* $(,)?) => {
         $(
             #[allow(clippy::arithmetic_side_effects)] // False alert
-            impl FromWithConfig<$t> for BoxedMontyField {
+            impl<const LIMBS: usize>FromWithConfig<$t> for MontyField<LIMBS> {
                 fn from_with_cfg(value: $t, cfg: &Self::Config) -> Self {
                     let abs: u128 = if value == <$t>::MIN {
                         <u128 as TryFrom<$t>>::try_from(<$t>::MAX).expect("unreachable") + 1
                     } else {
                         value.abs().try_into().expect("unreachable")
                     };
-                    let abs: BoxedUint = abs.into();
-                    let abs = abs.resize(cfg.modulus().bits_precision());
-                    let result = Self(BoxedMontyForm::new(abs, cfg.clone()));
+                    let abs: crypto_bigint::Uint<LIMBS> = abs.into();
+                    let result = Self(MontyForm::<LIMBS>::new(&abs, *cfg));
                     if value.is_negative() { -result } else { result }
                 }
             }
 
-            impl FromWithConfig<&$t> for BoxedMontyField {
+            impl<const LIMBS: usize>FromWithConfig<&$t> for MontyField<LIMBS> {
                 fn from_with_cfg(value: &$t, cfg: &Self::Config) -> Self {
                     Self::from_with_cfg(*value, cfg)
                 }
@@ -394,79 +340,77 @@ macro_rules! impl_from_signed {
 impl_from_unsigned!(u8, u16, u32, u64, u128);
 impl_from_signed!(i8, i16, i32, i64, i128);
 
-impl FromWithConfig<bool> for BoxedMontyField {
+impl<const LIMBS: usize> FromWithConfig<bool> for MontyField<LIMBS> {
     fn from_with_cfg(value: bool, cfg: &Self::Config) -> Self {
-        let abs: BoxedUint = if value {
-            BoxedUint::one()
+        let abs = if value {
+            crypto_bigint::Uint::one()
         } else {
-            BoxedUint::zero()
+            Zero::zero()
         };
-        let abs = abs.resize(cfg.modulus().bits_precision());
-        Self(BoxedMontyForm::new(abs, cfg.clone()))
+        Self(MontyForm::<LIMBS>::new(&abs, *cfg))
     }
 }
 
-impl FromWithConfig<&bool> for BoxedMontyField {
+impl<const LIMBS: usize> FromWithConfig<&bool> for MontyField<LIMBS> {
     fn from_with_cfg(value: &bool, cfg: &Self::Config) -> Self {
         Self::from_with_cfg(*value, cfg)
     }
 }
 
-impl FromWithConfig<Boolean> for BoxedMontyField {
+impl<const LIMBS: usize> FromWithConfig<Boolean> for MontyField<LIMBS> {
     fn from_with_cfg(value: Boolean, cfg: &Self::Config) -> Self {
         Self::from_with_cfg(*value, cfg)
     }
 }
 
-impl FromWithConfig<&Boolean> for BoxedMontyField {
+impl<const LIMBS: usize> FromWithConfig<&Boolean> for MontyField<LIMBS> {
     fn from_with_cfg(value: &Boolean, cfg: &Self::Config) -> Self {
         Self::from_with_cfg(*value, cfg)
     }
 }
 
-impl<const LIMBS: usize> FromWithConfig<Int<LIMBS>> for BoxedMontyField {
-    fn from_with_cfg(value: Int<LIMBS>, cfg: &Self::Config) -> Self {
+impl<const LIMBS: usize, const LIMBS2: usize> FromWithConfig<Int<LIMBS2>> for MontyField<LIMBS> {
+    fn from_with_cfg(value: Int<LIMBS2>, cfg: &Self::Config) -> Self {
         Self::from_with_cfg(&value, cfg)
     }
 }
 
-impl<const LIMBS: usize> FromWithConfig<&Int<LIMBS>> for BoxedMontyField {
+impl<const LIMBS: usize, const LIMBS2: usize> FromWithConfig<&Int<LIMBS2>> for MontyField<LIMBS> {
     #[allow(clippy::arithmetic_side_effects)] // False alert
-    fn from_with_cfg(value: &Int<LIMBS>, cfg: &Self::Config) -> Self {
-        let abs: BoxedUint = value.inner().abs().into();
-        let abs = abs.resize(cfg.modulus().bits_precision());
+    fn from_with_cfg(value: &Int<LIMBS2>, cfg: &Self::Config) -> Self {
+        if LIMBS >= LIMBS2 {
+            let abs = value.inner().abs().resize();
 
-        let result = Self(BoxedMontyForm::new(abs, cfg.clone()));
+            let result = Self(MontyForm::<LIMBS>::new(&abs, *cfg));
 
-        if value.is_negative() { -result } else { result }
+            // TODO: ok, this might lead to undesired
+            //       results if `value` is greater than the modulus.
+            if value.is_negative() { -result } else { result }
+        } else {
+            let abs = value
+                .inner()
+                .abs()
+                .rem(cfg.modulus().get().resize::<LIMBS2>())
+                .resize::<LIMBS>();
+            let result = Self(MontyForm::<LIMBS>::new(&abs, *cfg));
+
+            // TODO: same issue as above potnetially?
+            if value.is_negative() { -result } else { result }
+        }
     }
 }
 
-impl FromWithConfig<BoxedUint> for BoxedMontyField {
-    fn from_with_cfg(value: BoxedUint, cfg: &Self::Config) -> Self {
-        Self::from_with_cfg(&value, cfg)
-    }
-}
-
-impl FromWithConfig<&BoxedUint> for BoxedMontyField {
-    fn from_with_cfg(value: &BoxedUint, cfg: &Self::Config) -> Self {
-        let value = value.resize(cfg.modulus().bits_precision());
-        Self(BoxedMontyForm::new(value, cfg.clone()))
-    }
-}
-
-impl<const LIMBS: usize> FromWithConfig<crypto_bigint::Uint<LIMBS>> for BoxedMontyField {
+impl<const LIMBS: usize> FromWithConfig<crypto_bigint::Uint<LIMBS>> for MontyField<LIMBS> {
     fn from_with_cfg(value: crypto_bigint::Uint<LIMBS>, cfg: &Self::Config) -> Self {
         Self::from_with_cfg(&value, cfg)
     }
 }
 
-impl<const LIMBS: usize> FromWithConfig<&crypto_bigint::Uint<LIMBS>> for BoxedMontyField {
+impl<const LIMBS: usize> FromWithConfig<&crypto_bigint::Uint<LIMBS>> for MontyField<LIMBS> {
     #[allow(clippy::arithmetic_side_effects)] // False alert
     fn from_with_cfg(value: &crypto_bigint::Uint<LIMBS>, cfg: &Self::Config) -> Self {
-        let value: BoxedUint = value.into();
-        let value = value.resize(cfg.modulus().bits_precision());
-        Self(BoxedMontyForm::new(value, cfg.clone()))
+        let value = value.into();
+        Self(MontyForm::new(&value, *cfg))
     }
 }
 
@@ -474,108 +418,85 @@ impl<const LIMBS: usize> FromWithConfig<&crypto_bigint::Uint<LIMBS>> for BoxedMo
 // Semiring, Ring and Field
 //
 
-impl Semiring for BoxedMontyField {}
+impl<const LIMBS: usize> Semiring for MontyField<LIMBS> {}
 
-impl Ring for BoxedMontyField {}
+impl<const LIMBS: usize> Ring for MontyField<LIMBS> {}
 
-impl IntSemiring for BoxedMontyField {
-    fn is_odd(&self) -> bool {
-        // Sadly there's no efficient way to implement this for Montgomery form
-        self.0.retrieve().is_odd().into()
-    }
-
-    fn is_even(&self) -> bool {
-        // Sadly there's no efficient way to implement this for Montgomery form
-        self.0.retrieve().is_even().into()
-    }
-}
-
-impl IntRing for BoxedMontyField {
-    fn checked_abs(&self) -> Option<Self> {
-        Some(self.clone())
-    }
-
-    fn is_positive(&self) -> bool {
-        self.0.is_nonzero().into()
-    }
-
-    fn is_negative(&self) -> bool {
-        false
-    }
-}
-
-impl Field for BoxedMontyField {
-    type Inner = BoxedUint;
+impl<const LIMBS: usize> Field for MontyField<LIMBS> {
+    type Inner = Uint<LIMBS>;
 
     #[inline(always)]
     fn inner(&self) -> &Self::Inner {
-        self.0.as_montgomery()
+        Uint::new_ref(self.0.as_montgomery())
     }
 }
 
-impl PrimeField for BoxedMontyField {
-    type Config = BoxedMontyParams;
+impl<const LIMBS: usize> PrimeField for MontyField<LIMBS> {
+    type Config = MontyParams<LIMBS>;
 
     fn cfg(&self) -> &Self::Config {
         self.0.params()
     }
 
-    fn modulus(&self) -> BoxedUint {
-        self.0.params().modulus().clone().get()
+    fn modulus(&self) -> Uint<LIMBS> {
+        Uint::new(self.0.params().modulus().get())
     }
 
     #[allow(clippy::arithmetic_side_effects)] // False alert
-    fn modulus_minus_one_div_two(&self) -> BoxedUint {
-        let value = self.0.params().modulus().clone().get();
-        (value - BoxedUint::one()) / NonZero::new(BoxedUint::from(2_u8)).unwrap()
+    fn modulus_minus_one_div_two(&self) -> Uint<LIMBS> {
+        let value = self.0.params().modulus().get();
+        Uint::new(
+            (value - crypto_bigint::Uint::one())
+                / NonZero::new(crypto_bigint::Uint::<LIMBS>::from(2_u8)).unwrap(),
+        )
     }
 
     fn make_cfg(modulus: &Self::Inner) -> Result<Self::Config, FieldError> {
-        let Some(modulus) = Odd::new(modulus.clone()).into_option() else {
+        let Some(modulus) = Odd::new(*modulus.inner()).into_option() else {
             return Err(FieldError::InvalidModulus);
         };
-        Ok(BoxedMontyParams::new(modulus))
+        Ok(MontyParams::new(modulus))
     }
 
     fn new_unchecked_with_cfg(inner: Self::Inner, cfg: &Self::Config) -> Self {
-        Self(BoxedMontyForm::from_montgomery(inner, cfg.clone()))
+        Self(MontyForm::from_montgomery(inner.into_inner(), *cfg))
     }
 
     fn zero_with_cfg(cfg: &Self::Config) -> Self {
-        Self(BoxedMontyForm::zero(cfg.clone()))
+        Self(MontyForm::zero(*cfg))
     }
 
     fn is_zero_with_cfg(&self, _cfg: &Self::Config) -> bool {
-        self.0.is_zero().into()
+        self.0.as_montgomery().is_zero()
     }
 
     fn one_with_cfg(cfg: &Self::Config) -> Self {
-        Self(BoxedMontyForm::one(cfg.clone()))
+        Self(MontyForm::one(*cfg))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{IntRingWithRem, ensure_type_implements_trait};
+    use crate::ensure_type_implements_trait;
     use alloc::vec;
-    use crypto_bigint::BoxedUint;
+
     use num_traits::Pow;
 
-    type F = BoxedMontyField;
+    const LIMBS: usize = 3;
+
+    type F = MontyField<LIMBS>;
 
     //
     // Test helpers
     //
-    fn test_config() -> BoxedMontyParams {
+    fn test_config() -> MontyParams<LIMBS> {
         // Using a 256-bit prime
-        let modulus = BoxedUint::from_be_hex(
-            "00dca94d8a1ecce3b6e8755d8999787d0524d8ca1ea755e7af84fb646fa31f27",
-            256,
-        )
-        .unwrap();
+        let modulus = crypto_bigint::Uint::<LIMBS>::from_be_hex(
+            "0000000000000da3de725647f9c7c10fd5c6174de36d08e3",
+        );
         let modulus = Odd::new(modulus).expect("modulus should be odd");
-        BoxedMontyParams::new(modulus)
+        MontyParams::new(modulus)
     }
 
     fn from_u64(value: u64) -> F {
@@ -596,7 +517,7 @@ mod tests {
 
     #[test]
     fn ensure_blanket_traits() {
-        ensure_type_implements_trait!(F, IntRingWithRem);
+        ensure_type_implements_trait!(F, PrimeField);
     }
 
     #[test]
@@ -827,20 +748,6 @@ mod tests {
         assert!(a.checked_div(&zero).is_none());
     }
 
-    #[test]
-    fn checked_rem() {
-        let a = from_u64(17);
-        let b = from_u64(5);
-        let zero = zero();
-
-        // Normal remainder
-        let c = a.checked_rem(&b).unwrap();
-        assert_eq!(c, from_u64(2));
-
-        // Remainder by zero
-        assert!(a.checked_rem(&zero).is_none());
-    }
-
     #[allow(clippy::op_ref)]
     #[test]
     fn ref_and_value_combinations_add_sub_mul() {
@@ -946,7 +853,7 @@ mod tests {
         assert_eq!(product2, from_u64(24));
 
         // Test empty collections panic
-        // Note: BoxedMontyField doesn't have a default config, so empty
+        // Note: MontyField doesn't have a default config, so empty
         // iterators must panic
     }
 
@@ -955,8 +862,7 @@ mod tests {
         let cfg = test_config();
 
         // Test FromWithConfig for BoxedUint
-        let u: BoxedUint = BoxedUint::from(123_u64);
-        let f = F::from_with_cfg(u, &cfg);
+        let f = F::from_with_cfg(123_u64, &cfg);
         assert_eq!(f, from_u64(123));
 
         // Test inner() and cfg()
@@ -1063,7 +969,7 @@ mod tests {
         assert_eq!(hash_a, hash_b);
     }
 
-    // BoxedMontyField-specific tests
+    // MontyField-specific tests
 
     #[test]
     fn prime_field_methods() {
@@ -1072,11 +978,24 @@ mod tests {
 
         // Test that we can get modulus
         let modulus = a.modulus();
-        assert!(modulus.bits_precision() > 0);
+        assert_eq!(
+            modulus,
+            Uint::new(crypto_bigint::Uint::<LIMBS>::from_be_hex(
+                "0000000000000da3de725647f9c7c10fd5c6174de36d08e3"
+            ))
+        );
 
         // Test modulus_minus_one_div_two
         let m_minus_1_div_2 = a.modulus_minus_one_div_two();
-        assert!(m_minus_1_div_2.bits_precision() > 0);
+        assert_eq!(
+            m_minus_1_div_2,
+            Uint::new(
+                (crypto_bigint::Uint::<LIMBS>::from_be_hex(
+                    "0000000000000da3de725647f9c7c10fd5c6174de36d08e3"
+                ) - crypto_bigint::Uint::one())
+                    / crypto_bigint::Uint::<LIMBS>::from(2u64)
+            )
+        );
 
         // Test zero_with_cfg and one_with_cfg
         let z = F::zero_with_cfg(cfg);
@@ -1087,11 +1006,9 @@ mod tests {
 
     #[test]
     fn make_cfg_works() {
-        let modulus = BoxedUint::from_be_hex(
-            "00dca94d8a1ecce3b6e8755d8999787d0524d8ca1ea755e7af84fb646fa31f27",
-            256,
-        )
-        .unwrap();
+        let modulus = Uint::new(crypto_bigint::Uint::<LIMBS>::from_be_hex(
+            "0000000000000da3de725647f9c7c10fd5c6174de36d08e3",
+        ));
         let cfg = F::make_cfg(&modulus).expect("Should create config");
 
         // Create a field element using this config
@@ -1101,28 +1018,8 @@ mod tests {
 
     #[test]
     fn make_cfg_rejects_even_modulus() {
-        let even_modulus = BoxedUint::from(42_u64);
+        let even_modulus = Uint::<LIMBS>::from(42_u64);
         let result = F::make_cfg(&even_modulus);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn int_ring_methods() {
-        let even = from_u64(20);
-        let odd = from_u64(21);
-
-        assert!(even.is_even());
-        assert!(!even.is_odd());
-        assert!(odd.is_odd());
-        assert!(!odd.is_even());
-
-        let a = from_u64(10);
-        assert_eq!(a.checked_abs(), Some(a.clone()));
-        assert!(a.is_positive());
-        assert!(!a.is_negative());
-
-        let zero = zero();
-        assert!(!zero.is_positive());
-        assert!(!zero.is_negative());
     }
 }
