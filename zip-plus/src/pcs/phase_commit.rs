@@ -411,7 +411,7 @@ mod tests {
         let poly =
             DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations, Zero::zero());
 
-        let results: Vec<Vec<Vec<Int<4>>>> = (0..10)
+        let results: Vec<Vec<Vec<Int<3>>>> = (0..10)
             .into_par_iter()
             .map(|_| {
                 let code = C::new(poly_size, RAA_CFG);
