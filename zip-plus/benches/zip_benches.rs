@@ -13,6 +13,7 @@ use zip_plus::{
     pcs::structs::ZipTypes,
     primality::MillerRabin,
 };
+use zip_plus::code::raa_sign_flip::RaaSignFlippingCode;
 
 const INT_LIMBS: usize = U64::LIMBS;
 
@@ -20,7 +21,7 @@ struct BenchZipTypes {}
 impl ZipTypes<0> for BenchZipTypes {
     const NUM_COLUMN_OPENINGS: usize = 650;
     type Eval = i32;
-    type Cw = i64;
+    type Cw = i32;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
@@ -28,7 +29,6 @@ impl ZipTypes<0> for BenchZipTypes {
     type CombR = Int<{ INT_LIMBS * 3 }>;
     type Comb = Self::CombR;
 }
-type Code = RaaCode<BenchZipTypes, 4, 0>;
 
 const RAA_CONFIG: RaaConfig = RaaConfig {
     check_for_overflows: false,
@@ -37,7 +37,8 @@ const RAA_CONFIG: RaaConfig = RaaConfig {
 
 fn zip_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");
-    do_bench::<BenchZipTypes, Code, _>(&mut group, RAA_CONFIG);
+    do_bench::<BenchZipTypes, RaaCode<_, 4, _>, _>(&mut group, RAA_CONFIG);
+    do_bench::<BenchZipTypes, RaaSignFlippingCode<_, 4, _>, _>(&mut group, RAA_CONFIG);
     group.finish();
 }
 

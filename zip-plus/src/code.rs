@@ -14,6 +14,7 @@ pub trait LinearCode<Zt: ZipTypes<DEGREE>, const DEGREE: usize = 1>: Sync + Send
     /// that generic parameters may not be used in const operations, this
     /// makes using it too much of a hassle.
     const REPETITION_FACTOR: usize;
+    const NAME: &'static str;
 
     fn new(poly_size: usize, cfg: Self::Config) -> Self;
 
