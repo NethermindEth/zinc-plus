@@ -36,46 +36,46 @@ pub fn do_bench<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: 
     Zt::Eval: ProjectableToField<F>,
     Zt::Cw: ProjectableToField<F>,
 {
-    encode_rows::<Zt, Lc, DEGREE, 12>(group, code_config);
-    encode_rows::<Zt, Lc, DEGREE, 13>(group, code_config);
-    encode_rows::<Zt, Lc, DEGREE, 14>(group, code_config);
-    encode_rows::<Zt, Lc, DEGREE, 15>(group, code_config);
-    encode_rows::<Zt, Lc, DEGREE, 16>(group, code_config);
+    // // encode_rows::<Zt, Lc, DEGREE, 12>(group, code_config);
+    // // encode_rows::<Zt, Lc, DEGREE, 13>(group, code_config);
+    // // encode_rows::<Zt, Lc, DEGREE, 14>(group, code_config);
+    // // encode_rows::<Zt, Lc, DEGREE, 15>(group, code_config);
+    // encode_rows::<Zt, Lc, DEGREE, 16>(group, code_config);
+    //
+    // // encode_single_row::<Zt, Lc, DEGREE, 128>(group, code_config);
+    // // encode_single_row::<Zt, Lc, DEGREE, 256>(group, code_config);
+    // // encode_single_row::<Zt, Lc, DEGREE, 512>(group, code_config);
+    // encode_single_row::<Zt, Lc, DEGREE, 1024>(group, code_config);
+    //
+    // // merkle_root::<Zt, DEGREE, 12>(group);
+    // // merkle_root::<Zt, DEGREE, 13>(group);
+    // // merkle_root::<Zt, DEGREE, 14>(group);
+    // // merkle_root::<Zt, DEGREE, 15>(group);
+    // merkle_root::<Zt, DEGREE, 16>(group);
 
-    encode_single_row::<Zt, Lc, DEGREE, 128>(group, code_config);
-    encode_single_row::<Zt, Lc, DEGREE, 256>(group, code_config);
-    encode_single_row::<Zt, Lc, DEGREE, 512>(group, code_config);
-    encode_single_row::<Zt, Lc, DEGREE, 1024>(group, code_config);
-
-    merkle_root::<Zt, DEGREE, 12>(group);
-    merkle_root::<Zt, DEGREE, 13>(group);
-    merkle_root::<Zt, DEGREE, 14>(group);
-    merkle_root::<Zt, DEGREE, 15>(group);
-    merkle_root::<Zt, DEGREE, 16>(group);
-
-    commit::<Zt, Lc, DEGREE, 12>(group, code_config);
-    commit::<Zt, Lc, DEGREE, 13>(group, code_config);
-    commit::<Zt, Lc, DEGREE, 14>(group, code_config);
-    commit::<Zt, Lc, DEGREE, 15>(group, code_config);
+    // commit::<Zt, Lc, DEGREE, 12>(group, code_config);
+    // commit::<Zt, Lc, DEGREE, 13>(group, code_config);
+    // commit::<Zt, Lc, DEGREE, 14>(group, code_config);
+    // commit::<Zt, Lc, DEGREE, 15>(group, code_config);
     commit::<Zt, Lc, DEGREE, 16>(group, code_config);
 
-    test::<Zt, Lc, DEGREE, 12>(group, code_config);
-    test::<Zt, Lc, DEGREE, 13>(group, code_config);
-    test::<Zt, Lc, DEGREE, 14>(group, code_config);
-    test::<Zt, Lc, DEGREE, 15>(group, code_config);
-    test::<Zt, Lc, DEGREE, 16>(group, code_config);
-
-    evaluate::<Zt, Lc, DEGREE, 12>(group, code_config);
-    evaluate::<Zt, Lc, DEGREE, 13>(group, code_config);
-    evaluate::<Zt, Lc, DEGREE, 14>(group, code_config);
-    evaluate::<Zt, Lc, DEGREE, 15>(group, code_config);
-    evaluate::<Zt, Lc, DEGREE, 16>(group, code_config);
-
-    verify::<Zt, Lc, DEGREE, 12>(group, code_config);
-    verify::<Zt, Lc, DEGREE, 13>(group, code_config);
-    verify::<Zt, Lc, DEGREE, 14>(group, code_config);
-    verify::<Zt, Lc, DEGREE, 15>(group, code_config);
-    verify::<Zt, Lc, DEGREE, 16>(group, code_config);
+    // // test::<Zt, Lc, DEGREE, 12>(group, code_config);
+    // // test::<Zt, Lc, DEGREE, 13>(group, code_config);
+    // // test::<Zt, Lc, DEGREE, 14>(group, code_config);
+    // // test::<Zt, Lc, DEGREE, 15>(group, code_config);
+    // test::<Zt, Lc, DEGREE, 16>(group, code_config);
+    //
+    // // evaluate::<Zt, Lc, DEGREE, 12>(group, code_config);
+    // // evaluate::<Zt, Lc, DEGREE, 13>(group, code_config);
+    // // evaluate::<Zt, Lc, DEGREE, 14>(group, code_config);
+    // // evaluate::<Zt, Lc, DEGREE, 15>(group, code_config);
+    // evaluate::<Zt, Lc, DEGREE, 16>(group, code_config);
+    //
+    // // verify::<Zt, Lc, DEGREE, 12>(group, code_config);
+    // // verify::<Zt, Lc, DEGREE, 13>(group, code_config);
+    // // verify::<Zt, Lc, DEGREE, 14>(group, code_config);
+    // // verify::<Zt, Lc, DEGREE, 15>(group, code_config);
+    // verify::<Zt, Lc, DEGREE, 16>(group, code_config);
 }
 
 pub fn encode_rows<
@@ -91,9 +91,10 @@ pub fn encode_rows<
 {
     group.bench_function(
         format!(
-            "EncodeRows: {} -> {}, poly_size = 2^{P}",
+            "EncodeRows: {} -> {}, poly_size = 2^{P}, code={}",
             Zt::Eval::type_name(),
-            Zt::Cw::type_name()
+            Zt::Cw::type_name(),
+            Lc::NAME
         ),
         |b| {
             let mut rng = ThreadRng::default();
@@ -127,9 +128,10 @@ pub fn encode_single_row<
 {
     group.bench_function(
         format!(
-            "EncodeMessage: {} -> {}, row_len = {ROW_LEN}",
+            "EncodeMessage: {} -> {}, row_len = {ROW_LEN}, code={}",
             Zt::Eval::type_name(),
-            Zt::Cw::type_name()
+            Zt::Cw::type_name(),
+            Lc::NAME
         ),
         |b| {
             let mut rng = ThreadRng::default();
@@ -189,10 +191,10 @@ pub fn commit<
 
     group.bench_function(
         format!(
-            "Commit: Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
+            "Commit: Eval={}, Cw={}, poly_size=2^{P}, code={}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
-            Zt::Comb::type_name()
+            Lc::NAME
         ),
         |b| {
             b.iter_custom(|iters| {
@@ -231,7 +233,7 @@ pub fn test<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usiz
             "Test: Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
-            Zt::Comb::type_name(),
+            Zt::Comb::type_name()
         ),
         |b| {
             b.iter(|| {

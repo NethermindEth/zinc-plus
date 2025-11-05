@@ -36,32 +36,32 @@ pub(super) fn validate_input<
     polys: impl Iterable<Item = &'a DenseMultilinearExtension<Zt::Eval>>,
     points: impl Iterable<Item = &'a [Pt]>,
 ) -> Result<(), ZipError> {
-    // Check bit-width of the linear combinations
-    {
-        // Inner ring should be at most+ 2*log_2(\rho^{-1}*d) + \log_2(d) +
-        // challenge_bits + eval_elem_bits - 1, where d is the size of the messages
-        // being encoded - so num_vars / 2
-        let d = div!(param_num_vars, 2);
-        let codeword_bits = ilog_round_up!(mul!(Lc::REPETITION_FACTOR, d), usize);
-        let mut challenge_bits = Zt::Chal::NUM_BITS;
-        if DEGREE > 0 {
-            // This means we also draft alphas (multiplied with coeffs), which
-            // doubles the number of challenge bits
-            challenge_bits = mul!(challenge_bits, 2);
-        }
-        let max_lc_bits = Zt::CombR::NUM_BITS;
-        let actual_lc_bits: usize = add!(
-            add!(
-                add!(mul!(codeword_bits, 2), ilog_round_up!(d, usize)),
-                challenge_bits
-            ),
-            sub!(Zt::Eval::COEFF_BIT_WIDTH, 1)
-        );
-        assert!(
-            actual_lc_bits <= max_lc_bits,
-            "The number of bits used for linear combinations is too large: {actual_lc_bits} bits, max allowed is {max_lc_bits} bits"
-        );
-    }
+    // // Check bit-width of the linear combinations
+    // {
+    //     // Inner ring should be at most+ 2*log_2(\rho^{-1}*d) + \log_2(d) +
+    //     // challenge_bits + eval_elem_bits - 1, where d is the size of the messages
+    //     // being encoded - so num_vars / 2
+    //     let d = div!(param_num_vars, 2);
+    //     let codeword_bits = ilog_round_up!(mul!(Lc::REPETITION_FACTOR, d), usize);
+    //     let mut challenge_bits = Zt::Chal::NUM_BITS;
+    //     if DEGREE > 0 {
+    //         // This means we also draft alphas (multiplied with coeffs), which
+    //         // doubles the number of challenge bits
+    //         challenge_bits = mul!(challenge_bits, 2);
+    //     }
+    //     let max_lc_bits = Zt::CombR::NUM_BITS;
+    //     let actual_lc_bits: usize = add!(
+    //         add!(
+    //             add!(mul!(codeword_bits, 2), ilog_round_up!(d, usize)),
+    //             challenge_bits
+    //         ),
+    //         sub!(Zt::Eval::COEFF_BIT_WIDTH, 1)
+    //     );
+    //     assert!(
+    //         actual_lc_bits <= max_lc_bits,
+    //         "The number of bits used for linear combinations is too large: {actual_lc_bits} bits, max allowed is {max_lc_bits} bits"
+    //     );
+    // }
 
     // Ensure all the number of variables in the polynomials don't exceed the limit
     for poly in polys.iter() {

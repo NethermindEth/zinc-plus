@@ -37,6 +37,7 @@ proptest = { workspace = true }
 workspace = true
 
 [features]
+default = ["asm", "parallel"]
 parallel = ["dep:rayon"]
 asm = ["ark-ff/asm", "sha3/asm"]
 

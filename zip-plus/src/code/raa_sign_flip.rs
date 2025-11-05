@@ -74,6 +74,7 @@ where
     type Config = <RaaCode<Zt, REP, DEGREE> as LinearCode<Zt, DEGREE>>::Config;
 
     const REPETITION_FACTOR: usize = REP;
+    const NAME: &'static str = "RAA (sign-flipping)";
 
     fn new(poly_size: usize, cfg: Self::Config) -> Self {
         Self {

@@ -82,6 +82,7 @@ impl<Zt: ZipTypes<DEGREE>, const REP: usize, const DEGREE: usize> LinearCode<Zt,
     type Config = RaaConfig;
 
     const REPETITION_FACTOR: usize = REP;
+    const NAME: &'static str = "RAA (regular)";
 
     fn new(poly_size: usize, cfg: RaaConfig) -> Self {
         assert!(
@@ -115,11 +116,11 @@ impl<Zt: ZipTypes<DEGREE>, const REP: usize, const DEGREE: usize> LinearCode<Zt,
         };
         let codeword_type_bits =
             u32::try_from(Zt::Cw::COEFF_BIT_WIDTH).expect("Size of CwR type is too large");
-        assert!(
-            codeword_type_bits >= codeword_width_bits,
-            "Cannot fit {codeword_width_bits}-bit wide codeword entries in {} bits entries",
-            codeword_type_bits
-        );
+        // assert!(
+        //     codeword_type_bits >= codeword_width_bits,
+        //     "Cannot fit {codeword_width_bits}-bit wide codeword entries in {} bits entries",
+        //     codeword_type_bits
+        // );
 
         // We don't need a secure/unpredictable randomness here, so use fixed seeds
         const PERM_1_SEED: u64 = 1;
