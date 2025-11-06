@@ -7,28 +7,28 @@ use crate::{
         utils::{ColumnOpening, validate_input},
     },
     pcs_transcript::PcsTranscript,
-    poly::{EvaluatablePolynomial, mle::DenseMultilinearExtension},
+    poly::{EvaluatablePolynomial, Polynomial, mle::DenseMultilinearExtension},
     traits::{FromRef, Transcript},
     utils::combine_rows,
 };
 use itertools::Itertools;
 
-impl<Zt: ZipTypes<DEGREE>, Lc: LinearCode<Zt, DEGREE>, const DEGREE: usize>
-    ZipPlus<Zt, Lc, DEGREE>
-{
+impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     pub fn test(
-        pp: &ZipPlusParams<Zt, Lc, DEGREE>,
+        pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
         commit_hint: &ZipPlusHint<Zt::Cw>,
     ) -> Result<ZipPlusTestTranscript, ZipError> {
-        validate_input::<Zt, Lc, bool, DEGREE>("test", pp.num_vars, [poly], None)?;
+        validate_input::<Zt, Lc, bool>("test", pp.num_vars, [poly], None)?;
 
         let mut transcript = PcsTranscript::new();
 
         // If we can take linear combinations, perform the proximity test
         if pp.num_rows > 1 {
             // Values to evaluate the coefficients at
-            let alphas = transcript.fs_transcript.get_challenges::<Zt::Chal>(DEGREE);
+            let alphas = transcript
+                .fs_transcript
+                .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND);
 
             // Coefficients for the linear combination of polynomial with evaluated
             // coefficients
@@ -103,16 +103,16 @@ mod tests {
     const N: usize = INT_LIMBS;
     const K: usize = INT_LIMBS * 4;
     const M: usize = INT_LIMBS * 8;
-    const DEGREE: usize = 2;
+    const DEGREE_PLUS_ONE: usize = 3;
 
     type Zt = TestZipTypes<N, K, M>;
-    type C = RaaSignFlippingCode<Zt, 4, 0>;
+    type C = RaaSignFlippingCode<Zt, 4>;
 
-    type PolyZt = TestPolyZipTypes<K, M, DEGREE>;
-    type PolyC = RaaCode<PolyZt, 4, DEGREE>;
+    type PolyZt = TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>;
+    type PolyC = RaaCode<PolyZt, 4>;
 
-    type TestZip = ZipPlus<Zt, C, 0>;
-    type TestPolyZip = ZipPlus<PolyZt, PolyC, DEGREE>;
+    type TestZip = ZipPlus<Zt, C>;
+    type TestPolyZip = ZipPlus<PolyZt, PolyC>;
 
     #[test]
     fn successful_testing_with_correct_polynomial_and_hint() {

@@ -14,6 +14,7 @@ use ark_std::{cfg_iter_mut, iterable::Iterable};
 use crypto_primitives::PrimeField;
 use thiserror::Error;
 
+use crate::poly::Polynomial;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -24,13 +25,7 @@ fn err_too_many_variates(function: &str, upto: usize, got: usize) -> ZipError {
 }
 
 // Ensures that polynomials and evaluation points are of appropriate size
-pub(super) fn validate_input<
-    'a,
-    Zt: ZipTypes<DEGREE> + 'a,
-    Lc: LinearCode<Zt, DEGREE>,
-    Pt: 'a,
-    const DEGREE: usize,
->(
+pub(super) fn validate_input<'a, Zt: ZipTypes + 'a, Lc: LinearCode<Zt>, Pt: 'a>(
     function: &str,
     param_num_vars: usize,
     polys: impl Iterable<Item = &'a DenseMultilinearExtension<Zt::Eval>>,
@@ -44,7 +39,7 @@ pub(super) fn validate_input<
         let d = div!(param_num_vars, 2);
         let codeword_bits = ilog_round_up!(mul!(Lc::REPETITION_FACTOR, d), usize);
         let mut challenge_bits = Zt::Chal::NUM_BITS;
-        if DEGREE > 0 {
+        if Zt::Comb::DEGREE_BOUND > 0 {
             // This means we also draft alphas (multiplied with coeffs), which
             // doubles the number of challenge bits
             challenge_bits = mul!(challenge_bits, 2);

@@ -4,7 +4,13 @@ pub mod zero_degree;
 
 use thiserror::Error;
 
-pub trait EvaluatablePolynomial<S, Out> {
+/// Polynomial with coefficients of type `C` and degree bounded by
+/// `DEGREE_BOUND`.
+pub trait Polynomial<C> {
+    const DEGREE_BOUND: usize;
+}
+
+pub trait EvaluatablePolynomial<C, S, Out>: Polynomial<C> {
     /// Evaluates the polynomial at the given point, treating point `[p_0, p_1,
     /// p_2, ...]` as `[x, x^2, x^3, ..., x^DEGREE_BOUND]`, thus it returns
     /// `a_0 + (a_1 * p_0) + (a_2 * p_1) + ... + (a_DEGREE_BOUND *

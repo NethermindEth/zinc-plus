@@ -10,15 +10,14 @@ use std::ops::{AddAssign, Neg};
 /// Flips signs of every second entry in the codeword, starting from the second
 /// one.
 #[derive(Debug, Clone)]
-pub struct RaaSignFlippingCode<Zt: ZipTypes<DEGREE>, const REP: usize, const DEGREE: usize>
+pub struct RaaSignFlippingCode<Zt: ZipTypes, const REP: usize>
 where
     Zt::Cw: Ring,
 {
-    raa: RaaCode<Zt, REP, DEGREE>,
+    raa: RaaCode<Zt, REP>,
 }
 
-impl<Zt: ZipTypes<DEGREE>, const REP: usize, const DEGREE: usize>
-    RaaSignFlippingCode<Zt, REP, DEGREE>
+impl<Zt: ZipTypes, const REP: usize> RaaSignFlippingCode<Zt, REP>
 where
     Zt::Cw: Ring,
 {
@@ -66,12 +65,11 @@ where
     }
 }
 
-impl<Zt: ZipTypes<DEGREE>, const REP: usize, const DEGREE: usize> LinearCode<Zt, DEGREE>
-    for RaaSignFlippingCode<Zt, REP, DEGREE>
+impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for RaaSignFlippingCode<Zt, REP>
 where
     Zt::Cw: Ring,
 {
-    type Config = <RaaCode<Zt, REP, DEGREE> as LinearCode<Zt, DEGREE>>::Config;
+    type Config = <RaaCode<Zt, REP> as LinearCode<Zt>>::Config;
 
     const REPETITION_FACTOR: usize = REP;
 

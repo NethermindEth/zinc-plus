@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn prepare_projection_for_polynomial() {
-        type Poly = DensePolynomial<Int<{ U128::LIMBS }>, 3>;
+        type Poly = DensePolynomial<Int<{ U128::LIMBS }>, 4>;
 
         // 1 - 2x + 3x^2
         let poly = Poly::new([Int::from(1_i64), Int::from(-2_i64), Int::from(3_i64)]);

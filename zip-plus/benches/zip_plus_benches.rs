@@ -17,19 +17,19 @@ use zip_plus::{
 
 const INT_LIMBS: usize = U64::LIMBS;
 
-struct BenchZipPlusTypes<const D: usize> {}
-impl<const D: usize> ZipTypes<D> for BenchZipPlusTypes<D> {
+struct BenchZipPlusTypes<const D_PLUS_ONE: usize> {}
+impl<const D_PLUS_ONE: usize> ZipTypes for BenchZipPlusTypes<D_PLUS_ONE> {
     const NUM_COLUMN_OPENINGS: usize = 650;
-    type Eval = DensePolynomial<Boolean, D>;
-    type Cw = DensePolynomial<i32, D>;
+    type Eval = DensePolynomial<Boolean, D_PLUS_ONE>;
+    type Cw = DensePolynomial<i32, D_PLUS_ONE>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
     type Pt = i128;
     type CombR = Int<{ INT_LIMBS * 5 }>;
-    type Comb = DensePolynomial<Self::CombR, D>;
+    type Comb = DensePolynomial<Self::CombR, D_PLUS_ONE>;
 }
-type Code<const D: usize> = RaaCode<BenchZipPlusTypes<D>, 4, D>;
+type Code<const D_PLUS_ONE: usize> = RaaCode<BenchZipPlusTypes<D_PLUS_ONE>, 4>;
 
 const RAA_CONFIG: RaaConfig = RaaConfig {
     check_for_overflows: false,
@@ -39,8 +39,8 @@ const RAA_CONFIG: RaaConfig = RaaConfig {
 fn zip_plus_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");
 
-    do_bench::<BenchZipPlusTypes<31>, Code<_>, _>(&mut group, RAA_CONFIG);
-    do_bench::<BenchZipPlusTypes<63>, Code<_>, _>(&mut group, RAA_CONFIG);
+    do_bench::<BenchZipPlusTypes<32>, Code<_>>(&mut group, RAA_CONFIG);
+    do_bench::<BenchZipPlusTypes<64>, Code<_>>(&mut group, RAA_CONFIG);
 
     group.finish();
 }
