@@ -470,8 +470,8 @@ mod tests {
             // Proximity distance is half the codeword length for the default spec.
             // We corrupt more than half of the first row to ensure it's not close.
             let corruption_count = codeword_len / 2 + 1;
-            for i in 0..corruption_count {
-                corrupted_rows[0][i] += Int::ONE;
+            for i in corrupted_rows[0].iter_mut().take(corruption_count) {
+                *i += Int::ONE;
             }
         }
 
