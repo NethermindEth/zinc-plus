@@ -1,7 +1,7 @@
 [workspace]
-members = ["crypto-primitives", "crypto-primitives-proc-macros", "zip-plus"]
+members = ["zip-plus"]
 resolver = "2"
-default-members = ["crypto-primitives", "crypto-primitives-proc-macros", "zip-plus"]
+default-members = ["zip-plus"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,8 +11,8 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
-crypto-primitives = { path = "crypto-primitives" }
-crypto-primitives-proc-macros = { path = "crypto-primitives-proc-macros" }
+crypto-primitives = { git = "ssh://git@github.com/NethermindEth/crypto-primitives.git", branch = "main" }
+crypto-primitives-proc-macros = { git = "ssh://git@github.com/NethermindEth/crypto-primitives.git", branch = "main" }
 criterion = "0.7.0"
 proptest = "1.8.0"
 
