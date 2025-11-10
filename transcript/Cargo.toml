@@ -1,0 +1,26 @@
+[package]
+name = "zinc-transcript"
+publish = false
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+crypto-primitives = { workspace = true }
+zinc-primality = { workspace = true }
+
+itertools = { workspace = true }
+crypto-bigint = { workspace = true }
+sha3 = "0.10"
+num-traits = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+asm = ["sha3/asm"]
+

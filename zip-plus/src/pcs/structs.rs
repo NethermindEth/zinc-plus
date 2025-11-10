@@ -1,16 +1,13 @@
 use crate::{
     code::LinearCode,
     merkle::{MerkleTree, MtHash},
-    poly::{ConstCoeffBitWidth, EvaluatablePolynomial},
-    primality::PrimalityTest,
-    traits::{ConstTranscribable, FromRef, Named},
 };
-use crypto_primitives::{
-    ConstIntRing, ConstIntSemiring, DenseRowMatrix, FixedSemiring, PrimeField,
-    crypto_bigint_int::Int,
-};
-use num_traits::CheckedMul;
+use crypto_primitives::{ConstIntRing, ConstIntSemiring, DenseRowMatrix, FixedSemiring};
 use std::{marker::PhantomData, ops::Neg};
+use zinc_poly::{ConstCoeffBitWidth, EvaluatablePolynomial};
+use zinc_primality::PrimalityTest;
+use zinc_transcript::traits::ConstTranscribable;
+use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar, named::Named};
 
 pub trait ZipTypes: Send + Sync {
     const NUM_COLUMN_OPENINGS: usize;
@@ -116,56 +113,4 @@ impl<R> ZipPlusHint<R> {
 pub struct ZipPlusCommitment {
     /// Roots of the merkle tree of entire matrix
     pub root: MtHash,
-}
-
-pub trait MulByScalar<Rhs>: Sized {
-    /// Multiplies the current element by a scalar from the right (usually - a
-    /// coefficient to obtain a linear combination).
-    /// Returns `None` if the multiplication would overflow.
-    fn mul_by_scalar(&self, rhs: Rhs) -> Option<Self>;
-}
-
-macro_rules! impl_mul_by_scalar_for_primitives {
-    ($($t:ty),*) => {
-        $(
-            impl MulByScalar<&$t> for $t {
-                fn mul_by_scalar(&self, rhs: &$t) -> Option<Self> {
-                    self.checked_mul(rhs)
-                }
-            }
-        )*
-    };
-}
-
-impl_mul_by_scalar_for_primitives!(i8, i16, i32, i64, i128);
-
-impl<const LIMBS: usize, const LIMBS2: usize> MulByScalar<&Int<LIMBS2>> for Int<LIMBS> {
-    fn mul_by_scalar(&self, rhs: &Int<LIMBS2>) -> Option<Self> {
-        if LIMBS < LIMBS2 {
-            return None; // Cannot multiply if the left operand has fewer limbs than the right
-        }
-        self.checked_mul(&rhs.resize())
-    }
-}
-
-macro_rules! impl_mul_int_by_primitive_scalar {
-    ($($t:ty),*) => {
-        $(
-            impl<const LIMBS: usize> MulByScalar<&$t> for Int<LIMBS> {
-                fn mul_by_scalar(&self, rhs: &$t) -> Option<Self> {
-                    self.checked_mul(&Self::from_ref(rhs))
-                }
-            }
-        )*
-    };
-}
-
-impl_mul_int_by_primitive_scalar!(i8, i16, i32, i64, i128);
-
-/// Trait for preparing a projection function to a field element from a current
-/// type.
-pub trait ProjectableToField<F: PrimeField> {
-    /// Prepare a projection function that will project the current type
-    /// to a prime field using the given sampled value.
-    fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static;
 }

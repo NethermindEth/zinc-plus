@@ -7,11 +7,12 @@ use crate::{
         utils::{ColumnOpening, validate_input},
     },
     pcs_transcript::PcsTranscript,
-    poly::{EvaluatablePolynomial, Polynomial, mle::DenseMultilinearExtension},
-    traits::{FromRef, Transcript},
     utils::combine_rows,
 };
 use itertools::Itertools;
+use zinc_poly::{EvaluatablePolynomial, Polynomial, mle::DenseMultilinearExtension};
+use zinc_transcript::traits::Transcript;
+use zinc_utils::from_ref::FromRef;
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     pub fn test(
@@ -92,11 +93,11 @@ mod tests {
             structs::{ZipPlus, ZipPlusHint},
             test_utils::*,
         },
-        poly::mle::DenseMultilinearExtension,
     };
     use crypto_bigint::U64;
     use crypto_primitives::crypto_bigint_int::Int;
     use num_traits::{ConstOne, Zero};
+    use zinc_poly::mle::DenseMultilinearExtension;
 
     const INT_LIMBS: usize = U64::LIMBS;
 

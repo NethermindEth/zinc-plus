@@ -1,5 +1,6 @@
 pub mod dense;
 pub mod mle;
+pub mod utils;
 pub mod zero_degree;
 
 use thiserror::Error;

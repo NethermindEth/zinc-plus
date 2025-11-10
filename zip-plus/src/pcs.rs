@@ -1,4 +1,6 @@
-use crate::{pcs_transcript::PcsTranscript, transcript::KeccakTranscript};
+use zinc_transcript::KeccakTranscript;
+
+use crate::pcs_transcript::PcsTranscript;
 use std::io::Cursor;
 
 mod phase_commit;

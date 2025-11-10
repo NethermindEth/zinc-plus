@@ -1,10 +1,9 @@
 use super::raa::*;
-use crate::{
-    code::LinearCode, neg, pcs::structs::ZipTypes, traits::FromRef, utils::shuffle_seeded,
-};
+use crate::{code::LinearCode, pcs::structs::ZipTypes, utils::shuffle_seeded};
 use crypto_primitives::{PrimeField, Ring};
 use num_traits::{CheckedAdd, CheckedNeg};
 use std::ops::{AddAssign, Neg};
+use zinc_utils::{from_ref::FromRef, neg};
 
 /// Implementation of a repeat-accumulate-accumulate (RAA) codes.
 /// Flips signs of every second entry in the codeword, starting from the second

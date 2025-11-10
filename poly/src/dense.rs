@@ -1,9 +1,5 @@
-use super::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial};
-use crate::{
-    pcs::structs::{MulByScalar, ProjectableToField},
-    sub,
-    traits::{ConstTranscribable, FromRef, Named},
-};
+use super::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError};
+use crate::Polynomial;
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring};
 use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, One, Zero};
@@ -14,6 +10,11 @@ use std::{
     hash::Hash,
     iter::{Product, Sum},
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
+};
+use zinc_transcript::traits::ConstTranscribable;
+use zinc_utils::{
+    from_ref::FromRef, mul_by_scalar::MulByScalar, named::Named,
+    projectable_to_field::ProjectableToField, sub,
 };
 // TODO: rename to univariate?
 

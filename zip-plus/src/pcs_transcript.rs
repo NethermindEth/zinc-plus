@@ -1,14 +1,13 @@
 use crypto_primitives::PrimeField;
 use itertools::Itertools;
 use std::io::{Cursor, ErrorKind, Read, Write};
-
-use crate::{
-    ZipError,
-    merkle::MerkleProof,
-    rem,
+use zinc_transcript::{
+    KeccakTranscript,
     traits::{ConstTranscribable, Transcribable, Transcript},
-    transcript::KeccakTranscript,
 };
+use zinc_utils::rem;
+
+use crate::{ZipError, merkle::MerkleProof};
 
 /// A transcript for Polynomial Commitment Scheme (PCS) operations.
 /// Manages both Fiat-Shamir transformations and serialization/deserialization

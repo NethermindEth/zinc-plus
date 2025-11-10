@@ -1,5 +1,5 @@
 [package]
-name = "zip-plus"
+name = "zinc-poly"
 publish = false
 version.workspace = true
 edition.workspace = true
@@ -11,8 +11,6 @@ bench = false
 
 [dependencies]
 crypto-primitives = { workspace = true }
-zinc-poly = { workspace = true }
-zinc-primality = { workspace = true }
 zinc-transcript = { workspace = true }
 zinc-utils = { workspace = true }
 
@@ -21,33 +19,19 @@ ark-std = { workspace = true }
 itertools = { workspace = true }
 thiserror = { workspace = true }
 crypto-bigint = { workspace = true }
+displaydoc = "0.2"
 num-traits = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }
 rayon = { workspace = true, optional = true }
-blake3 = "1.8.2"
-uninit = "0.6.2"
 crypto-primes = { workspace = true }
 
 [dev-dependencies]
-criterion = { workspace = true }
 proptest = { workspace = true }
 
 [lints]
 workspace = true
 
 [features]
-parallel = ["dep:rayon", "zinc-poly/parallel"]
-asm = ["zinc-transcript/asm"]
+parallel = ["dep:rayon"]
 
-[[bench]]
-name = "random_field_benches"
-harness = false
-
-[[bench]]
-name = "zip_benches"
-harness = false
-
-[[bench]]
-name = "zip_plus_benches"
-harness = false

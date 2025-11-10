@@ -1,13 +1,13 @@
-use crate::{
-    pcs::structs::{MulByScalar, ProjectableToField},
-    traits::FromRef,
-};
 use crypto_bigint::BoxedUint;
 use crypto_primitives::{
     FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
     crypto_bigint_uint::Uint,
 };
 use num_traits::CheckedMul;
+
+use crate::{
+    from_ref::FromRef, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
+};
 
 impl MulByScalar<&Self> for BoxedMontyField {
     fn mul_by_scalar(&self, rhs: &Self) -> Option<Self> {
@@ -47,8 +47,7 @@ where
     clippy::cast_possible_wrap
 )]
 mod prop_tests {
-    use crate::pcs::test_utils::get_dyn_config;
-    use crypto_bigint::U256;
+    use crypto_bigint::{BoxedUint, U256};
     use crypto_primitives::{
         FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
     };
@@ -56,6 +55,12 @@ mod prop_tests {
 
     const MODULUS: &str = "00dca94d8a1ecce3b6e8755d8999787d0524d8ca1ea755e7af84fb646fa31f27";
     type F = BoxedMontyField;
+
+    fn get_dyn_config(hex_modulus: &str) -> <BoxedMontyField as PrimeField>::Config {
+        let modulus =
+            BoxedUint::from_str_radix_vartime(hex_modulus, 16).expect("Invalid modulus hex string");
+        BoxedMontyField::make_cfg(&modulus).expect("Failed to create field config")
+    }
 
     fn any_u128() -> impl Strategy<Value = u128> {
         any::<u128>()

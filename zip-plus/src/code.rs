@@ -1,8 +1,9 @@
 pub mod raa;
 pub mod raa_sign_flip;
 
-use crate::{pcs::structs::ZipTypes, traits::FromRef};
+use crate::pcs::structs::ZipTypes;
 use crypto_primitives::PrimeField;
+use zinc_utils::from_ref::FromRef;
 
 pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
     type Config: Copy;

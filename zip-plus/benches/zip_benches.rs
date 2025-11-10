@@ -3,6 +3,7 @@
 
 mod zip_common;
 
+use zinc_primality::MillerRabin;
 use zip_common::*;
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -11,7 +12,6 @@ use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_uint::Uint};
 use zip_plus::{
     code::raa::{RaaCode, RaaConfig},
     pcs::structs::ZipTypes,
-    primality::MillerRabin,
 };
 
 const INT_LIMBS: usize = U64::LIMBS;

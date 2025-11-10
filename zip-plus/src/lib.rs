@@ -1,14 +1,9 @@
 pub mod code;
 pub mod pcs;
 pub mod pcs_transcript;
-pub mod traits;
 pub mod utils;
 
-pub mod field;
 pub mod merkle;
-pub mod poly;
-pub mod primality;
-pub mod transcript;
 
 use ark_std::string::String;
 use crypto_primitives::FieldError;
@@ -27,11 +22,11 @@ pub enum ZipError {
     #[error("Transcript failure: {1}")]
     Transcript(ark_std::io::ErrorKind, String),
     #[error("Error during polynomial evaluation: {0}")]
-    PolynomialEvaluationError(poly::EvaluationError),
+    PolynomialEvaluationError(zinc_poly::EvaluationError),
 }
 
-impl From<poly::EvaluationError> for ZipError {
-    fn from(err: poly::EvaluationError) -> Self {
+impl From<zinc_poly::EvaluationError> for ZipError {
+    fn from(err: zinc_poly::EvaluationError) -> Self {
         ZipError::PolynomialEvaluationError(err)
     }
 }

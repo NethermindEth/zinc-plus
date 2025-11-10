@@ -1,10 +1,9 @@
-use crate::{
-    add, code::LinearCode, mul, pcs::structs::ZipTypes, poly::ConstCoeffBitWidth, traits::FromRef,
-    utils::shuffle_seeded,
-};
+use crate::{code::LinearCode, pcs::structs::ZipTypes, utils::shuffle_seeded};
 use crypto_primitives::PrimeField;
 use num_traits::CheckedAdd;
 use std::{marker::PhantomData, ops::AddAssign};
+use zinc_poly::ConstCoeffBitWidth;
+use zinc_utils::{add, from_ref::FromRef, mul};
 
 /// Implementation of a repeat-accumulate-accumulate (RAA) codes over the binary
 /// field, as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
