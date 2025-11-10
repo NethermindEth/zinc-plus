@@ -2,7 +2,7 @@ name: Coverage (Push)
 
 on:
   push:
-    branches: ['**']  # all branches, including main
+    branches: ["**"] # all branches, including main
 
 permissions:
   contents: read
@@ -12,6 +12,11 @@ jobs:
   coverage-push:
     runs-on: ubuntu-latest
     steps:
+      - name: Give GitHub Actions access to crypto-primitives
+        uses: webfactory/ssh-agent@v0.5.4
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_KEY }}
+
       - uses: actions/checkout@v4
 
       - run: cargo install cargo-llvm-cov

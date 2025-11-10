@@ -3,8 +3,8 @@ name: Dependency security audit
 on:
   push:
     paths:
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,9 +18,13 @@ jobs:
       contents: read
       checks: write
     steps:
+      - name: Give GitHub Actions access to crypto-primitives
+        uses: webfactory/ssh-agent@v0.5.4
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_KEY }}
+
       - name: Check out
         uses: actions/checkout@v4
-
       - name: Cache audit-check build
         id: cache-audit-check
         uses: actions/cache@v4

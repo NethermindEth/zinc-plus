@@ -12,6 +12,11 @@ jobs:
   linter_check:
     runs-on: ubuntu-latest
     steps:
+      - name: Give GitHub Actions access to crypto-primitives
+        uses: webfactory/ssh-agent@v0.5.4
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_KEY }}
+
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
         with:

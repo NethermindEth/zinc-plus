@@ -2,9 +2,9 @@ name: Build and test code
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,8 +14,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo test --workspace --verbose --no-run
-    - name: Run tests
-      run: cargo test --workspace --verbose
+      - name: Give GitHub Actions access to crypto-primitives
+        uses: webfactory/ssh-agent@v0.5.4
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_KEY }}
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cargo test --workspace --verbose --no-run
+      - name: Run tests
+        run: cargo test --workspace --verbose
