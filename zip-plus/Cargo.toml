@@ -18,16 +18,16 @@ ark-serialize = "0.5"
 
 itertools = "0.14"
 thiserror = "2.0"
-crypto-bigint = { version = "0.7.0-rc.8", features = ["zeroize"] }
+crypto-bigint = { version = "0.7.0-rc.10", features = ["zeroize"] }
 displaydoc = "0.2"
 sha3 = "0.10"
 num-traits = "0.2"
-rand = "0.9"
-rand_core = "0.9"
+rand = "0.10.0-rc.1"
+rand_core = "0.10.0-rc.1"
 rayon = { version = "1.10", optional = true }
 blake3 = "1.8.2"
 uninit = "0.6.2"
-crypto-primes = "0.7.0-pre.3"
+crypto-primes = "0.7.0-pre.4"
 
 [dev-dependencies]
 criterion = { workspace = true }
