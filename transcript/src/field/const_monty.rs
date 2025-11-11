@@ -9,7 +9,7 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> ConstTranscribable
     const NUM_BYTES: usize = Uint::<LIMBS>::NUM_BYTES;
 
     fn read_transcription_bytes(bytes: &[u8]) -> Self {
-        ConstMontyForm::from_montgomery(Uint::read_transcription_bytes(bytes).into_inner())
+        ConstMontyForm::new(&Uint::read_transcription_bytes(bytes).into_inner())
     }
 
     fn write_transcription_bytes(&self, buf: &mut [u8]) {
