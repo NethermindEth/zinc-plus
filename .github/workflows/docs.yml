@@ -9,15 +9,10 @@ jobs:
   # TODO(template) remove docs publishing, when the crate is published to crates.io
   docs:
     permissions:
-      contents: write
+        contents: write
     name: Documentation
     runs-on: ubuntu-latest
     steps:
-      - name: Give GitHub Actions access to crypto-primitives
-        uses: webfactory/ssh-agent@v0.5.4
-        with:
-          ssh-private-key: ${{ secrets.DEPLOY_KEY }}
-
       - name: Checkout source code
         uses: actions/checkout@v4
         with:
@@ -59,4 +54,3 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-
