@@ -1,9 +1,10 @@
-use crate::{
-    primality::PrimalityTest,
-    traits::{ConstTranscribable, Transcribable, Transcript},
-};
+pub mod field;
+pub mod traits;
+
+use crate::traits::{ConstTranscribable, Transcribable, Transcript};
 use crypto_primitives::{ConstIntSemiring, PrimeField};
 use sha3::{Digest, Keccak256};
+use zinc_primality::PrimalityTest;
 
 /// A cryptographic transcript implementation using the Keccak-256 hash
 /// function. Used for Fiat-Shamir transformations in zero-knowledge proof

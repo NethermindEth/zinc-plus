@@ -4,19 +4,20 @@ use crate::{
     merkle::MtHash,
     pcs::{
         ZipPlusProof,
-        structs::{
-            MulByScalar, ProjectableToField, ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes,
-        },
+        structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
         utils::{ColumnOpening, point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
-    poly::{EvaluatablePolynomial, Polynomial},
-    traits::{FromRef, Transcribable, Transcript},
     utils::inner_product,
 };
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
 use num_traits::ConstZero;
+use zinc_poly::{EvaluatablePolynomial, Polynomial};
+use zinc_transcript::traits::{Transcribable, Transcript};
+use zinc_utils::{
+    from_ref::FromRef, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
+};
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     pub fn verify<F>(
@@ -229,11 +230,6 @@ mod tests {
             structs::{ZipPlus, ZipPlusHint, ZipTypes},
             test_utils::*,
         },
-        poly::{
-            dense::DensePolynomial,
-            mle::{DenseMultilinearExtension, MultilinearExtensionRand},
-        },
-        traits::Transcribable,
     };
     use crypto_bigint::{Random, U64};
     use crypto_primitives::{
@@ -243,6 +239,11 @@ mod tests {
     use itertools::Itertools;
     use num_traits::{ConstOne, ConstZero, Zero};
     use rand::prelude::*;
+    use zinc_poly::{
+        dense::DensePolynomial,
+        mle::{DenseMultilinearExtension, MultilinearExtensionRand},
+    };
+    use zinc_transcript::traits::Transcribable;
 
     const INT_LIMBS: usize = U64::LIMBS;
 

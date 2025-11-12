@@ -1,7 +1,7 @@
 [workspace]
-members = ["zip-plus"]
+members = ["poly", "primality", "transcript", "utils", "zip-plus"]
 resolver = "2"
-default-members = ["zip-plus"]
+default-members = ["poly", "primality", "transcript", "utils", "zip-plus"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,10 +11,24 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
-crypto-primitives = { git = "https://github.com/NethermindEth/crypto-primitives.git", branch = "main" }
+crypto-primitives = { git = "https://github.com/NethermindEth/crypto-primitives.git", branch = "main", features = ["std", "ark_std", "crypto_bigint", "rand"]  }
 crypto-primitives-proc-macros = { git = "https://github.com/NethermindEth/crypto-primitives.git", branch = "main" }
+
+crypto-bigint = { version = "0.7.0-rc.10", features = ["zeroize"] }
+crypto-primes = { version = "0.7.0-pre.4" }
+ark-std = "0.5"
 criterion = "0.7.0"
+itertools = "0.14"
+num-traits = "0.2"
 proptest = "1.8.0"
+rand = "0.10.0-rc.1"
+rand_core = "0.10.0-rc.1"
+rayon = { version = "1.10" }
+thiserror = "2.0"
+zinc-primality = { path = "primality/" }
+zinc-transcript = { path = "transcript/" }
+zinc-utils = { path = "utils/" }
+zinc-poly = { path = "poly/" }
 
 [workspace.lints.rust]
 missing_docs = "allow"  # TODO(alex): replace with "deny" once code has been more-or-less stabilized

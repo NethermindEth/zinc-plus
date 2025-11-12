@@ -1,0 +1,19 @@
+[package]
+name = "zinc-primality"
+publish = false
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+crypto-primitives = { workspace = true }
+crypto-bigint = { workspace = true }
+crypto-primes = { workspace = true }
+
+[lints]
+workspace = true
+

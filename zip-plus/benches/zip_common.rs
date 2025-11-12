@@ -16,12 +16,13 @@ use crypto_primitives::{
 use itertools::Itertools;
 use num_traits::{One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
+use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
+use zinc_transcript::traits::ConstTranscribable;
+use zinc_utils::{from_ref::FromRef, named::Named, projectable_to_field::ProjectableToField};
 use zip_plus::{
     code::LinearCode,
     merkle::MerkleTree,
-    pcs::structs::{ProjectableToField, ZipPlus, ZipTypes},
-    poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand},
-    traits::{ConstTranscribable, FromRef, Named},
+    pcs::structs::{ZipPlus, ZipTypes},
 };
 
 type F = BoxedMontyField;

@@ -3,6 +3,8 @@
 
 mod zip_common;
 
+use zinc_poly::dense::DensePolynomial;
+use zinc_primality::MillerRabin;
 use zip_common::*;
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -11,8 +13,6 @@ use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_
 use zip_plus::{
     code::raa::{RaaCode, RaaConfig},
     pcs::structs::ZipTypes,
-    poly::dense::DensePolynomial,
-    primality::MillerRabin,
 };
 
 const INT_LIMBS: usize = U64::LIMBS;

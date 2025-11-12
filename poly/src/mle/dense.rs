@@ -1,18 +1,14 @@
-use std::ops::{Add, AddAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign};
+use core::ops::{Add, AddAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign};
 
 use crate::{
-    add,
-    pcs::structs::MulByScalar,
-    poly::{
-        EvaluationError,
-        mle::{MultilinearExtension, MultilinearExtensionRand},
-    },
-    sub,
+    EvaluationError,
+    mle::{MultilinearExtension, MultilinearExtensionRand},
 };
 use ark_std::log2;
 use crypto_primitives::{Matrix, Ring, Semiring};
 use rand::{distr::StandardUniform, prelude::*};
 use rand_core::RngCore;
+use zinc_utils::{add, mul_by_scalar::MulByScalar, sub};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DenseMultilinearExtension<T> {
@@ -305,18 +301,21 @@ impl<R: Semiring> AddAssign<(R, &Self)> for DenseMultilinearExtension<R> {
     clippy::cast_sign_loss
 )]
 mod tests {
+    use crate::utils::{build_eq_x_r, build_eq_x_r_vec};
+
     use super::*;
-    use crate::{
-        pcs::{
-            test_utils::get_dyn_config,
-            utils::{build_eq_x_r, build_eq_x_r_vec},
-        },
-        poly::mle::MultilinearExtension,
-    };
+
+    use crypto_bigint::BoxedUint;
     use crypto_primitives::{
         DenseRowMatrix, IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
     };
     use proptest::prelude::*;
+
+    fn get_dyn_config(hex_modulus: &str) -> <BoxedMontyField as PrimeField>::Config {
+        let modulus =
+            BoxedUint::from_str_radix_vartime(hex_modulus, 16).expect("Invalid modulus hex string");
+        BoxedMontyField::make_cfg(&modulus).expect("Failed to create field config")
+    }
 
     const MODULUS: &str = "0076F668F4274572E39A3EA8285319B5";
     type F = BoxedMontyField;

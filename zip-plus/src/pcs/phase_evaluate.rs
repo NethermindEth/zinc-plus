@@ -5,16 +5,19 @@ use crate::{
     code::LinearCode,
     pcs::{
         ZipPlusProof, ZipPlusTestTranscript,
-        structs::{MulByScalar, ProjectableToField, ZipPlus, ZipPlusParams, ZipTypes},
+        structs::{ZipPlus, ZipPlusParams, ZipTypes},
         utils::{point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
-    poly::mle::DenseMultilinearExtension,
-    traits::{FromRef, Transcribable, Transcript},
     utils::{combine_rows, inner_product},
 };
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
+use zinc_poly::mle::DenseMultilinearExtension;
+use zinc_transcript::traits::{Transcribable, Transcript};
+use zinc_utils::{
+    from_ref::FromRef, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
+};
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     pub fn evaluate<F>(

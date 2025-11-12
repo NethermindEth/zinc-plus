@@ -2,12 +2,12 @@ pub mod dense;
 
 pub use dense::DenseMultilinearExtension;
 
-use crate::pcs::structs::MulByScalar;
 use rand::prelude::*;
 use std::{
     fmt::Debug,
     ops::{Add, AddAssign, Index, SubAssign},
 };
+use zinc_utils::mul_by_scalar::MulByScalar;
 
 /// This trait describes an interface for the multilinear extension
 /// of an array.

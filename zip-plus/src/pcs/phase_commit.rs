@@ -6,7 +6,6 @@ use crate::{
         structs::{ZipPlus, ZipPlusCommitment, ZipPlusHint, ZipPlusParams, ZipTypes},
         utils::validate_input,
     },
-    poly::mle::DenseMultilinearExtension,
 };
 use ark_std::{cfg_chunks, cfg_chunks_mut};
 use crypto_primitives::DenseRowMatrix;
@@ -14,6 +13,7 @@ use uninit::out_ref::Out;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use zinc_poly::mle::DenseMultilinearExtension;
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     /// Creates a commitment to a multilinear polynomial using the ZIP PCS
@@ -198,7 +198,6 @@ mod tests {
             structs::{ZipPlus, ZipPlusParams, ZipTypes},
             test_utils::*,
         },
-        poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
     };
     use crypto_bigint::{Random, U64, U256, Word};
     use crypto_primitives::{
@@ -208,6 +207,7 @@ mod tests {
     use itertools::Itertools;
     use num_traits::Zero;
     use rand::{Rng, rng};
+    use zinc_poly::{dense::DensePolynomial, mle::DenseMultilinearExtension};
 
     const INT_LIMBS: usize = U64::LIMBS;
 

@@ -14,22 +14,22 @@ use crate::{
     },
     pcs::{
         ZipPlusProof,
-        structs::{
-            MulByScalar, ProjectableToField, ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes,
-        },
+        structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
     },
     pcs_transcript::PcsTranscript,
-    poly::{dense::DensePolynomial, mle::DenseMultilinearExtension},
-    primality::MillerRabin,
-    traits::{FromRef, Transcribable, Transcript},
 };
-use crypto_bigint::BoxedUint;
 use crypto_primitives::{
     FromWithConfig, IntSemiring, IntoWithConfig, PrimeField, boolean::Boolean,
-    crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
+    crypto_bigint_int::Int, crypto_bigint_uint::Uint,
 };
 use itertools::Itertools;
 use num_traits::Zero;
+use zinc_poly::{dense::DensePolynomial, mle::DenseMultilinearExtension};
+use zinc_primality::MillerRabin;
+use zinc_transcript::traits::{Transcribable, Transcript};
+use zinc_utils::{
+    from_ref::FromRef, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
+};
 
 const REPETITION_FACTOR: usize = 4;
 
@@ -243,10 +243,4 @@ where
         .collect_vec();
 
     (pp, comm, point_f, eval_f, proof)
-}
-
-pub fn get_dyn_config(hex_modulus: &str) -> <BoxedMontyField as PrimeField>::Config {
-    let modulus =
-        BoxedUint::from_str_radix_vartime(hex_modulus, 16).expect("Invalid modulus hex string");
-    BoxedMontyField::make_cfg(&modulus).expect("Failed to create field config")
 }
