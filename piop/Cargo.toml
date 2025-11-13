@@ -1,5 +1,5 @@
 [package]
-name = "zinc-plus-piop"
+name = "zinc-piop"
 publish = false
 version.workspace = true
 edition.workspace = true
@@ -12,28 +12,21 @@ bench = false
 [dependencies]
 crypto-primitives = { workspace = true }
 
-ark-std = "0.5"
-ark-ff = "0.5"
-ark-serialize = "0.5"
+ark-std = { workspace = true }
 
-itertools = { workspace = true }
 thiserror = { workspace = true }
-crypto-bigint = { workspace = true }
 num-traits = { workspace = true }
-rand = { workspace = true }
-rand_core = { workspace = true }
 rayon = { workspace = true, optional = true }
 zinc-transcript = { workspace = true }
 zinc-poly = { workspace = true }
 zinc-utils = { workspace = true }
 
 [dev-dependencies]
-criterion = { workspace = true }
-proptest = { workspace = true }
+crypto-bigint = { workspace = true }
+rand = { workspace = true }
 
 [lints]
 workspace = true
 
 [features]
 parallel = ["dep:rayon"]
-asm = ["ark-ff/asm"]
