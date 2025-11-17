@@ -4,10 +4,12 @@ use crate::{
 };
 use crypto_primitives::{ConstIntRing, ConstIntSemiring, DenseRowMatrix, FixedSemiring};
 use std::{marker::PhantomData, ops::Neg};
-use zinc_poly::{ConstCoeffBitWidth, EvaluatablePolynomial};
+use zinc_poly::{ConstCoeffBitWidth, Polynomial};
 use zinc_primality::PrimalityTest;
 use zinc_transcript::traits::ConstTranscribable;
-use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar, named::Named};
+use zinc_utils::{
+    from_ref::FromRef, inner_product::InnerProduct, mul_by_scalar::MulByScalar, named::Named,
+};
 
 pub trait ZipTypes: Send + Sync {
     const NUM_COLUMN_OPENINGS: usize;
@@ -43,7 +45,8 @@ pub trait ZipTypes: Send + Sync {
     /// Ring of elements in the linear combination of codewords, at least as
     /// wide as the evaluation, codeword, and challenge rings.
     type Comb: FixedSemiring
-        + EvaluatablePolynomial<Self::CombR, Self::Chal, Self::CombR>
+        + Polynomial<Self::CombR>
+        + InnerProduct<Self::Chal, Output = Self::CombR>
         + FromRef<Self::Eval>
         + FromRef<Self::Cw>
         + Named;

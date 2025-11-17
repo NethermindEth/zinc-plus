@@ -1,32 +1,14 @@
 use ark_std::cfg_iter_mut;
-use num_traits::CheckedAdd;
 use rand::{rngs::StdRng, seq::SliceRandom};
 use rand_core::SeedableRng;
 use std::{
     iter::{Iterator, Sum},
     mem::MaybeUninit,
 };
-use zinc_utils::{add, mul_by_scalar::MulByScalar};
+use zinc_utils::mul_by_scalar::MulByScalar;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-
-pub(crate) fn inner_product<'a, 'b, Coeff, El, L, R>(lhs: L, rhs: R, zero: El) -> El
-where
-    Coeff: Clone + 'a + 'b,
-    El: Clone + CheckedAdd + for<'z> MulByScalar<&'z Coeff> + 'a + 'b,
-    L: IntoIterator<Item = &'a Coeff>,
-    R: IntoIterator<Item = &'b El>,
-{
-    lhs.into_iter()
-        .zip(rhs)
-        .map(|(lhs, rhs)| {
-            rhs.mul_by_scalar(lhs)
-                .expect("Cannot multiply a codeword element by a coefficient")
-        })
-        .reduce(|acc, product| add!(acc, &product))
-        .unwrap_or(zero)
-}
 
 /// Computes a linear combination of multiple evaluation rows into a single
 /// combined row.
@@ -93,13 +75,6 @@ pub(super) fn shuffle_seeded<T>(slice: &mut [T], seed: u64) {
 #[cfg(test)]
 mod test {
     use super::*;
-
-    #[test]
-    fn test_inner_product_basic() {
-        let lhs = [1, 2, 3];
-        let rhs = [4, 5, 6];
-        assert_eq!(inner_product(lhs.iter(), rhs.iter(), 0), 4 + 2 * 5 + 3 * 6);
-    }
 
     #[test]
     fn test_basic_combination() {

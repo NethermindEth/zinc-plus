@@ -9,14 +9,15 @@ use crate::{
         utils::{point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
-    utils::{combine_rows, inner_product},
+    utils::combine_rows,
 };
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
-    from_ref::FromRef, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
+    from_ref::FromRef, inner_product::InnerProductWithConfig, mul_by_scalar::MulByScalar,
+    projectable_to_field::ProjectableToField,
 };
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
@@ -72,7 +73,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         };
 
         transcript.write_field_elements(&q_0_combined_row)?;
-        let eval_f = inner_product(&q_0_combined_row[..], &q_1, F::zero_with_cfg(&field_cfg));
+        let eval_f = (&q_0_combined_row[..]).inner_product(&q_1, &field_cfg);
         Ok((eval_f, transcript.into()))
     }
 }

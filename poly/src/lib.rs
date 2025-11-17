@@ -12,13 +12,13 @@ pub trait Polynomial<C> {
 }
 
 pub trait EvaluatablePolynomial<C, S, Out>: Polynomial<C> {
-    /// Evaluates the polynomial at the given point, treating point `[p_0, p_1,
-    /// p_2, ...]` as `[x, x^2, x^3, ..., x^DEGREE_BOUND]`, thus it returns
-    /// `a_0 + (a_1 * p_0) + (a_2 * p_1) + ... + (a_DEGREE_BOUND *
-    /// p_{DEGREE_BOUND - 1})`.
-    // Note: we can't reference Self::DEGREE_BOUND here, type parameters may not be
-    // used in const expressions. As such, no point in declaring Self: Polynomial.
-    fn evaluate_at_point(&self, point: &[S]) -> Result<Out, EvaluationError>;
+    /// The type of points a polynomial can be evaluated on.
+    /// For univariate polynomials this typically is `C`,
+    /// for multivariate this is `[C]`.
+    type EvaluationPoint: ?Sized;
+
+    /// Evaluates the polynomial at the given point.
+    fn evaluate_at_point(&self, point: &Self::EvaluationPoint) -> Result<Out, EvaluationError>;
 }
 
 pub trait ConstCoeffBitWidth {
@@ -31,4 +31,6 @@ pub enum EvaluationError {
     WrongPointWidth { expected: usize, actual: usize },
     #[error("Evaluation failed due to overflow")]
     Overflow,
+    #[error("Empty polynomials are not allowed to be evaluate")]
+    EmptyPolynomial,
 }

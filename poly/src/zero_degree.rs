@@ -11,6 +11,8 @@ macro_rules! impl_zero_degree {
             }
 
             impl<T> EvaluatablePolynomial<Self, T, Self> for $t {
+                type EvaluationPoint = [T];
+
                 fn evaluate_at_point(&self, point: &[T]) -> Result<Self, EvaluationError> {
                     if !point.is_empty() {
                         return Err(EvaluationError::WrongPointWidth {
@@ -37,6 +39,8 @@ impl<const LIMBS: usize> Polynomial<Self> for Int<LIMBS> {
 }
 
 impl<T, const LIMBS: usize> EvaluatablePolynomial<Self, T, Self> for Int<LIMBS> {
+    type EvaluationPoint = [T];
+
     fn evaluate_at_point(&self, point: &[T]) -> Result<Self, EvaluationError> {
         if !point.is_empty() {
             return Err(EvaluationError::WrongPointWidth {
