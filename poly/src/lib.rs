@@ -1,5 +1,5 @@
-pub mod dense;
 pub mod mle;
+pub mod univariate;
 pub mod utils;
 pub mod zero_degree;
 

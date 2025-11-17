@@ -207,7 +207,7 @@ mod tests {
     use itertools::Itertools;
     use num_traits::Zero;
     use rand::{Rng, rng};
-    use zinc_poly::{dense::DensePolynomial, mle::DenseMultilinearExtension};
+    use zinc_poly::{mle::DenseMultilinearExtension, univariate::dense::DensePolynomial};
 
     const INT_LIMBS: usize = U64::LIMBS;
 

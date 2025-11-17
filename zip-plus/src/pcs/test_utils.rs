@@ -24,7 +24,7 @@ use crypto_primitives::{
 };
 use itertools::Itertools;
 use num_traits::Zero;
-use zinc_poly::{dense::DensePolynomial, mle::DenseMultilinearExtension};
+use zinc_poly::{mle::DenseMultilinearExtension, univariate::dense::DensePolynomial};
 use zinc_primality::MillerRabin;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{

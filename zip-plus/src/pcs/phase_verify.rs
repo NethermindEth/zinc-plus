@@ -240,8 +240,8 @@ mod tests {
     use num_traits::{ConstOne, ConstZero, Zero};
     use rand::prelude::*;
     use zinc_poly::{
-        dense::DensePolynomial,
         mle::{DenseMultilinearExtension, MultilinearExtensionRand},
+        univariate::dense::DensePolynomial,
     };
     use zinc_transcript::traits::Transcribable;
 

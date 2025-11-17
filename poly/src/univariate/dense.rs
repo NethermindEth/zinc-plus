@@ -1,5 +1,4 @@
-use super::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError};
-use crate::Polynomial;
+use crate::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial};
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring};
 use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, One, Zero};
@@ -16,7 +15,6 @@ use zinc_utils::{
     from_ref::FromRef, mul_by_scalar::MulByScalar, named::Named,
     projectable_to_field::ProjectableToField, sub,
 };
-// TODO: rename to univariate?
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DensePolynomial<R, const DEGREE_PLUS_ONE: usize> {
