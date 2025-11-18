@@ -1,8 +1,5 @@
-use ark_std::cfg_iter;
 use crypto_primitives::crypto_bigint_int::Int;
 use num_traits::CheckedAdd;
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
 use thiserror::Error;
 
 use crate::mul_by_scalar::MulByScalar;
@@ -30,32 +27,22 @@ pub enum InnerProductError {
 
 impl<Lhs, Rhs> InnerProduct<Rhs> for &[Lhs]
 where
-    Lhs: Clone + CheckedAdd + for<'z> MulByScalar<&'z Rhs> + Send + Sync,
-    Rhs: Send + Sync,
+    Lhs: Clone + CheckedAdd + for<'z> MulByScalar<&'z Rhs>,
 {
     type Output = Lhs;
 
     fn inner_product(&self, rhs: &[Rhs], zero: Lhs) -> Result<Self::Output, InnerProductError> {
-        let half_baked = cfg_iter!(self)
+        let half_baked = self
+            .iter()
             .zip(rhs)
             .map(|(lhs, rhs)| lhs.mul_by_scalar(rhs).ok_or(InnerProductError::Overflow));
 
-        #[cfg(not(feature = "parallel"))]
-        return half_baked
+        half_baked
             .reduce(|acc, product| {
                 acc?.checked_add(&product?)
                     .ok_or(InnerProductError::Overflow)
             })
-            .unwrap_or(Ok(zero));
-
-        #[cfg(feature = "parallel")]
-        half_baked.reduce(
-            || Ok(zero.clone()),
-            |acc, product| {
-                acc?.checked_add(&product?)
-                    .ok_or(InnerProductError::Overflow)
-            },
-        )
+            .unwrap_or(Ok(zero))
     }
 }
 

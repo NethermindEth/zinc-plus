@@ -12,10 +12,8 @@ bench = false
 [dependencies]
 crypto-primitives = { workspace = true }
 
-ark-std = { workspace = true }
 crypto-bigint = { workspace = true }
 num-traits = { workspace = true }
-rayon = { workspace = true, optional = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
@@ -24,5 +22,3 @@ proptest = { workspace = true }
 [lints]
 workspace = true
 
-[features]
-parallel = ["dep:rayon"]

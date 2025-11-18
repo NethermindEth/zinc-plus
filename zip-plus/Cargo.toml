@@ -37,7 +37,7 @@ proptest = { workspace = true }
 workspace = true
 
 [features]
-parallel = ["dep:rayon", "zinc-poly/parallel", "zinc-utils/parallel"]
+parallel = ["dep:rayon", "zinc-poly/parallel"]
 asm = ["zinc-transcript/asm"]
 
 [[bench]]
