@@ -159,10 +159,10 @@ where
         #[cfg(feature = "parallel")]
         let evaluations = summer.map(|s| s.evals).reduce(
             || vec![zero.clone(); degree + 1],
-            |mut evaluations, levals| {
+            |mut evaluations, evals| {
                 evaluations
                     .iter_mut()
-                    .zip(levals)
+                    .zip(evals)
                     .for_each(|(e, l)| *e += &l);
                 evaluations
             },
