@@ -23,6 +23,7 @@ zinc-utils = { workspace = true }
 
 [dev-dependencies]
 crypto-bigint = { workspace = true }
+itertools = { workspace = true }
 rand = { workspace = true }
 
 [lints]

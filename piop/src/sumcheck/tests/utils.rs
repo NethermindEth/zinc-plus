@@ -1,6 +1,7 @@
 use ark_std::{end_timer, start_timer, vec::Vec};
 use crypto_bigint::Random;
 use crypto_primitives::PrimeField;
+use itertools::Itertools;
 use rand::{Rng, RngCore};
 use std::ops::Range;
 use std::sync::Arc;
@@ -70,10 +71,9 @@ pub fn random_mle_list<F: PrimeField + Random, Rn: RngCore>(
     config: F::Config,
 ) -> (Vec<DenseMultilinearExtension<F>>, F) {
     let start = start_timer!(|| "sample random mle list");
-    let mut multiplicands = Vec::with_capacity(degree);
-    for _ in 0..degree {
-        multiplicands.push(Vec::with_capacity(1 << nv));
-    }
+    let mut multiplicands = (0..degree)
+        .map(|_| Vec::with_capacity(1 << nv))
+        .collect_vec();
     let mut sum = F::zero_with_cfg(&config);
 
     for _ in 0..1 << nv {
