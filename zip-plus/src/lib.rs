@@ -23,6 +23,8 @@ pub enum ZipError {
     Transcript(ark_std::io::ErrorKind, String),
     #[error("Error during polynomial evaluation: {0}")]
     PolynomialEvaluationError(zinc_poly::EvaluationError),
+    #[error("Error during inner product computation: {0}")]
+    InnerProductError(zinc_utils::inner_product::InnerProductError),
 }
 
 impl From<zinc_poly::EvaluationError> for ZipError {
@@ -34,5 +36,11 @@ impl From<zinc_poly::EvaluationError> for ZipError {
 impl From<FieldError> for ZipError {
     fn from(err: FieldError) -> Self {
         ZipError::InvalidSnark(format!("Field error: {err}"))
+    }
+}
+
+impl From<zinc_utils::inner_product::InnerProductError> for ZipError {
+    fn from(err: zinc_utils::inner_product::InnerProductError) -> Self {
+        ZipError::InnerProductError(err)
     }
 }

@@ -1,9 +1,11 @@
-use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
-use num_traits::{CheckedAdd, Zero};
+use ark_std::cfg_iter;
+use crypto_primitives::crypto_bigint_int::Int;
+use num_traits::CheckedAdd;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use thiserror::Error;
 
-use crate::{add, mul_by_scalar::MulByScalar};
+use crate::mul_by_scalar::MulByScalar;
 
 /// A trait for types that can be dot-multiplied.
 pub trait InnerProduct<Rhs> {
@@ -11,18 +13,49 @@ pub trait InnerProduct<Rhs> {
     type Output;
 
     /// The main entry point for the inner product.
-    fn inner_product(&self, rhs: &[Rhs]) -> Self::Output;
+    fn inner_product(
+        &self,
+        rhs: &[Rhs],
+        zero: Self::Output,
+    ) -> Result<Self::Output, InnerProductError>;
+}
+
+#[derive(Clone, Debug, PartialEq, Error)]
+pub enum InnerProductError {
+    #[error("The length of LHS and RHS does not match: LHS={lhs}, RHS={rhs}")]
+    LengthMismatch { lhs: usize, rhs: usize },
+    #[error("Arithmetic overflow")]
+    Overflow,
 }
 
 impl<Lhs, Rhs> InnerProduct<Rhs> for &[Lhs]
 where
-    Lhs: Clone + Zero + CheckedAdd + for<'z> MulByScalar<&'z Rhs> + Send + Sync,
+    Lhs: Clone + CheckedAdd + for<'z> MulByScalar<&'z Rhs> + Send + Sync,
     Rhs: Send + Sync,
 {
     type Output = Lhs;
 
-    fn inner_product(&self, rhs: &[Rhs]) -> Self::Output {
-        inner_product_aux(self, rhs, Lhs::zero)
+    fn inner_product(&self, rhs: &[Rhs], zero: Lhs) -> Result<Self::Output, InnerProductError> {
+        let half_baked = cfg_iter!(self)
+            .zip(rhs)
+            .map(|(lhs, rhs)| lhs.mul_by_scalar(rhs).ok_or(InnerProductError::Overflow));
+
+        #[cfg(not(feature = "parallel"))]
+        return half_baked
+            .reduce(|acc, product| {
+                acc?.checked_add(&product?)
+                    .ok_or(InnerProductError::Overflow)
+            })
+            .unwrap_or(Ok(zero));
+
+        #[cfg(feature = "parallel")]
+        half_baked.reduce(
+            || Ok(zero.clone()),
+            |acc, product| {
+                acc?.checked_add(&product?)
+                    .ok_or(InnerProductError::Overflow)
+            },
+        )
     }
 }
 
@@ -32,8 +65,9 @@ where
 {
     type Output = Lhs;
 
-    fn inner_product(&self, rhs: &[Rhs]) -> Self::Output {
-        self.as_slice().inner_product(rhs)
+    #[inline]
+    fn inner_product(&self, rhs: &[Rhs], zero: Lhs) -> Result<Self::Output, InnerProductError> {
+        self.as_slice().inner_product(rhs, zero)
     }
 }
 
@@ -43,91 +77,27 @@ where
 {
     type Output = Lhs;
 
-    fn inner_product(&self, rhs: &[Rhs]) -> Self::Output {
-        self.as_slice().inner_product(rhs)
+    #[inline]
+    fn inner_product(&self, rhs: &[Rhs], zero: Lhs) -> Result<Self::Output, InnerProductError> {
+        self.as_slice().inner_product(rhs, zero)
     }
 }
 
 impl<T, const LIMBS: usize> InnerProduct<T> for Int<LIMBS> {
     type Output = Self;
 
-    fn inner_product(&self, point: &[T]) -> Self::Output {
+    fn inner_product(&self, point: &[T], _zero: Self) -> Result<Self::Output, InnerProductError> {
         if !point.is_empty() {
             // TODO: Do we really want the RHS be empty?
             //       Or do we want it to be one point?
-            panic!("The RHS should be empty");
+            Err(InnerProductError::LengthMismatch {
+                lhs: 0,
+                rhs: point.len(),
+            })
+        } else {
+            Ok(*self)
         }
-        *self
     }
-}
-
-/// A trait for types can be dot-multiplied
-/// but with a catch: they need a config for
-/// getting the zero (e.g. `PrimeField`s).
-pub trait InnerProductWithConfig<Rhs> {
-    type Output;
-    type Config;
-
-    fn inner_product(&self, rhs: &[Rhs], config: &Self::Config) -> Self::Output;
-}
-
-impl<Lhs, Rhs> InnerProductWithConfig<Rhs> for &[Lhs]
-where
-    Lhs: PrimeField + CheckedAdd + for<'z> MulByScalar<&'z Rhs>,
-    Rhs: Send + Sync,
-{
-    type Output = Lhs;
-    type Config = Lhs::Config;
-
-    fn inner_product(&self, rhs: &[Rhs], config: &Lhs::Config) -> Self::Output {
-        inner_product_aux(self, rhs, || Lhs::zero_with_cfg(config))
-    }
-}
-
-impl<Lhs: PrimeField, Rhs> InnerProductWithConfig<Rhs> for Vec<Lhs>
-where
-    for<'a> &'a [Lhs]: InnerProductWithConfig<Rhs, Output = Lhs, Config = Lhs::Config>,
-{
-    type Output = Lhs;
-    type Config = Lhs::Config;
-
-    fn inner_product(&self, rhs: &[Rhs], config: &Lhs::Config) -> Self::Output {
-        self.as_slice().inner_product(rhs, config)
-    }
-}
-
-// TODO: can these two merged into one?
-
-#[cfg(not(feature = "parallel"))]
-fn inner_product_aux<Lhs, Rhs, Z>(lhs: &[Lhs], rhs: &[Rhs], zero: Z) -> Lhs
-where
-    Lhs: Clone + CheckedAdd + for<'z> MulByScalar<&'z Rhs>,
-    Z: Fn() -> Lhs,
-{
-    lhs.iter()
-        .zip(rhs)
-        .map(|(lhs, rhs)| {
-            lhs.mul_by_scalar(rhs)
-                .expect("Cannot multiply an element by a coefficient")
-        })
-        .reduce(|acc, product| add!(acc, &product))
-        .unwrap_or(zero())
-}
-
-#[cfg(feature = "parallel")]
-fn inner_product_aux<Lhs, Rhs, Z>(lhs: &[Lhs], rhs: &[Rhs], zero: Z) -> Lhs
-where
-    Lhs: Clone + Sync + Send + CheckedAdd + for<'z> MulByScalar<&'z Rhs>,
-    Rhs: Send + Sync,
-    Z: Fn() -> Lhs + Send + Sync,
-{
-    lhs.par_iter()
-        .zip(rhs)
-        .map(|(lhs, rhs)| {
-            lhs.mul_by_scalar(rhs)
-                .expect("Cannot multiply an element by a coefficient")
-        })
-        .reduce(zero, |acc, product| add!(acc, &product))
 }
 
 #[cfg(test)]
@@ -138,6 +108,6 @@ mod test {
     fn test_inner_product_basic() {
         let lhs = [1, 2, 3];
         let rhs = [4, 5, 6];
-        assert_eq!(lhs.inner_product(&rhs), 4 + 2 * 5 + 3 * 6);
+        assert_eq!(lhs.inner_product(&rhs, 0), Ok(4 + 2 * 5 + 3 * 6));
     }
 }

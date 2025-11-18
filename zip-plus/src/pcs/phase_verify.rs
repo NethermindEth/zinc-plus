@@ -14,9 +14,7 @@ use itertools::Itertools;
 use zinc_poly::Polynomial;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
-    from_ref::FromRef,
-    inner_product::{InnerProduct, InnerProductWithConfig},
-    mul_by_scalar::MulByScalar,
+    from_ref::FromRef, inner_product::InnerProduct, mul_by_scalar::MulByScalar,
     projectable_to_field::ProjectableToField,
 };
 
@@ -131,14 +129,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         num_rows: usize,
     ) -> Result<(), ZipError> {
         let column_entries_comb: Zt::CombR = if num_rows > 1 {
-            let column_entries = column_entries
+            let column_entries: Vec<_> = column_entries
                 .iter()
                 .map(Zt::Comb::from_ref)
-                .map(|p| p.inner_product(alphas))
-                .collect_vec();
-            column_entries.inner_product(coeffs)
+                .map(|p| p.inner_product(alphas, Zt::CombR::from(0)))
+                .try_collect()?;
+            column_entries.inner_product(coeffs, Zt::CombR::from(0))?
         } else {
-            Zt::Comb::from_ref(&column_entries[0]).inner_product(alphas)
+            Zt::Comb::from_ref(&column_entries[0]).inner_product(alphas, Zt::CombR::from(0))?
         };
 
         if column_entries_comb != encoded_combined_row[column] {
@@ -166,7 +164,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
         let (q_0, q_1) = point_to_tensor(vp.num_rows, point_f, field_cfg)?;
 
-        if InnerProductWithConfig::inner_product(&q_0_combined_row, &q_1, field_cfg) != *eval_f {
+        if q_0_combined_row.inner_product(&q_1, F::zero_with_cfg(field_cfg))? != *eval_f {
             return Err(ZipError::InvalidPcsOpen(
                 "Evaluation consistency failure".into(),
             ));
@@ -202,7 +200,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     {
         let column_entries_comb = if num_rows > 1 {
             let column_entries = column_entries.iter().map(project).collect_vec();
-            q_0.inner_product(&column_entries, field_cfg)
+            q_0.inner_product(&column_entries, F::zero_with_cfg(field_cfg))?
             // TODO: this inner product is taking a long time.
         } else {
             project(column_entries.first().expect("No column entries"))

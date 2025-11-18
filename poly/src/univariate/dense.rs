@@ -13,7 +13,10 @@ use std::{
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
-    from_ref::FromRef, inner_product::InnerProduct, mul_by_scalar::MulByScalar, named::Named,
+    from_ref::FromRef,
+    inner_product::{InnerProduct, InnerProductError},
+    mul_by_scalar::MulByScalar,
+    named::Named,
     projectable_to_field::ProjectableToField,
 };
 
@@ -523,7 +526,11 @@ where
 {
     type Output = Out;
 
-    fn inner_product(&self, rhs: &[Rhs]) -> Self::Output {
-        self.as_ref().inner_product(rhs)
+    fn inner_product(
+        &self,
+        rhs: &[Rhs],
+        zero: Self::Output,
+    ) -> Result<Self::Output, InnerProductError> {
+        self.as_ref().inner_product(rhs, zero)
     }
 }

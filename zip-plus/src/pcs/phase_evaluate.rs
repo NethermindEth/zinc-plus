@@ -16,7 +16,7 @@ use itertools::Itertools;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
-    from_ref::FromRef, inner_product::InnerProductWithConfig, mul_by_scalar::MulByScalar,
+    from_ref::FromRef, inner_product::InnerProduct, mul_by_scalar::MulByScalar,
     projectable_to_field::ProjectableToField,
 };
 
@@ -73,7 +73,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         };
 
         transcript.write_field_elements(&q_0_combined_row)?;
-        let eval_f = (&q_0_combined_row[..]).inner_product(&q_1, &field_cfg);
+        let eval_f = (&q_0_combined_row[..]).inner_product(&q_1, F::zero_with_cfg(&field_cfg))?;
         Ok((eval_f, transcript.into()))
     }
 }
