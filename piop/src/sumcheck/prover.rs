@@ -122,6 +122,15 @@ where
         let summer = cfg_into_iter!(0..1 << (nv - i)).fold(zeros, |mut s, b| {
             let index = b << 1;
 
+            // TODO(Alex): Once you have benches set,
+            //             could please try getting rid of vals0 and vals1 fields in the structs, replacing them with
+            //
+            //             ```rust
+            //             let vals0: Vec<_> = polys.iter().map(|poly| poly[index].clone()).collect();
+            //             let vals1: Vec<_> = polys.iter().map(|poly| poly[index + 1].clone()).collect();
+            //             ```
+            //             My bet is that it won't affect running time, but better safe than sorry.
+
             s.vals0
                 .iter_mut()
                 .zip(polys.iter())
@@ -148,10 +157,16 @@ where
                 }
             }
 
+            // TODO(Alex): It seems that the only thing
+            //             we pass around meaningfully is evals,
+            //             so this loop could be reworked to map/reduce - maybe even without
+            //             #[cfg(feature = "parallel")]. Would help to get benchmarks up and
+            //             running first though.
             s.evals
                 .iter_mut()
                 .zip(s.levals.iter())
                 .for_each(|(e, l)| *e += l);
+
             s
         });
 

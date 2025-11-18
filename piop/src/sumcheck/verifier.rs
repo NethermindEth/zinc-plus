@@ -157,7 +157,7 @@ impl<F: FromPrimitiveWithConfig> IPForMLSumcheck<F> {
         })
     }
 
-    /// simulate a verifier message without doing verification
+    /// Simulate a verifier message without doing verification.
     ///
     /// Given the same calling context, `transcript_round` output exactly the
     /// same message as `verify_round`
@@ -187,6 +187,10 @@ pub(crate) fn interpolate_uni_poly<F: FromPrimitiveWithConfig>(
     x: F,
     config: &F::Config,
 ) -> F {
+    // TODO(Alex): Once we have benches, it's worth checking
+    //             if we're even winning anything
+    //             with specialized branches above.
+
     // We will need these a few times
     let zero = F::zero_with_cfg(config);
     let one = F::one_with_cfg(config);
