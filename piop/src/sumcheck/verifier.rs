@@ -244,14 +244,14 @@ pub(crate) fn interpolate_uni_poly<F: FromPrimitiveWithConfig>(
         let last_denom: F = F::from_with_cfg(factorial(len - 1, identity), config);
 
         let mut ratio_numerator = 1i64;
-        let mut ratio_enumerator = 1u64;
+        let mut ratio_denominator = 1u64;
 
         for i in (0..len).rev() {
             let ratio_numerator_f = F::from_with_cfg(ratio_numerator, config);
 
-            let ratio_enumerator_f = F::from_with_cfg(ratio_enumerator, config);
+            let ratio_denominator_f = F::from_with_cfg(ratio_denominator, config);
 
-            let x = prod.clone() * ratio_enumerator_f
+            let x = prod.clone() * ratio_denominator_f
                 / (last_denom.clone() * ratio_numerator_f * &evals[i]);
 
             res += &(p_i[i].clone() * x);
@@ -260,27 +260,27 @@ pub(crate) fn interpolate_uni_poly<F: FromPrimitiveWithConfig>(
             if i != 0 {
                 // Using intentionally, overflow isn't possible
                 ratio_numerator *= -(len as i64 - i as i64);
-                ratio_enumerator *= i as u64;
+                ratio_denominator *= i as u64;
             }
         }
     } else if p_i.len() <= 33 {
         let last_denom = F::from_with_cfg(factorial(len - 1, u128::from), config);
         let mut ratio_numerator = 1i128;
-        let mut ratio_enumerator = 1u128;
+        let mut ratio_denominator = 1u128;
 
         for i in (0..len).rev() {
             let ratio_numerator_f = F::from_with_cfg(ratio_numerator, config);
 
-            let ratio_enumerator_f = F::from_with_cfg(ratio_enumerator, config);
+            let ratio_denominator_f = F::from_with_cfg(ratio_denominator, config);
 
-            let x: F = prod.clone() * ratio_enumerator_f
+            let x: F = prod.clone() * ratio_denominator_f
                 / (last_denom.clone() * ratio_numerator_f * &evals[i]);
             res += &(p_i[i].clone() * x);
 
             // compute ratio for the next step which is current_ratio * -(len-i)/i
             if i != 0 {
                 ratio_numerator *= -(len as i128 - i as i128);
-                ratio_enumerator *= i as u128;
+                ratio_denominator *= i as u128;
             }
         }
     } else {
