@@ -30,9 +30,9 @@ pub struct ProverState<F> {
     pub round: usize,
 }
 
-impl<F: PrimeField> IPForMLSumcheck<F>
+impl<F> IPForMLSumcheck<F>
 where
-    for<'a> F: MulByScalar<&'a F>,
+    for<'a> F: PrimeField + MulByScalar<&'a F>,
 {
     /// initialize the prover to argue for the sum of polynomial over
     /// {0,1}^`num_vars`
