@@ -40,7 +40,7 @@ fn generate_sumcheck_proof<Rn: RngCore>(
     let mut transcript = KeccakTranscript::default();
 
     let ((poly_mles, poly_degree), products, sum) =
-        rand_poly(num_vars, (2, 5), 7, &mut rng, &()).unwrap();
+        rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
     let comb_fn = |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
 
@@ -83,7 +83,7 @@ fn verifier_rejects_proof_with_incorrect_claimed_sum() {
 
     let mut transcript = KeccakTranscript::default();
     let ((poly_mles, poly_degree), products, sum) =
-        rand_poly(num_vars, (2, 5), 7, &mut rng, &()).unwrap();
+        rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
     let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
 
@@ -122,7 +122,7 @@ fn verifier_rejects_proof_with_tampered_prover_message() {
 
     let mut transcript = KeccakTranscript::default();
     let ((poly_mles, poly_degree), products, sum) =
-        rand_poly(num_vars, (2, 5), 7, &mut rng, &()).unwrap();
+        rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
     let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
 
@@ -162,7 +162,7 @@ fn verifier_rejects_proof_with_wrong_degree() {
 
     let mut transcript = KeccakTranscript::default();
     let ((poly_mles, poly_degree), products, sum) =
-        rand_poly(num_vars, (2, 5), 7, &mut rng, &()).unwrap();
+        rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
     let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
 
@@ -196,7 +196,7 @@ fn protocol_is_deterministic_with_same_transcript() {
     let num_vars = 3;
 
     let ((poly_mles, poly_degree), products, _) =
-        rand_poly(num_vars, (2, 5), 7, &mut rng, &()).unwrap();
+        rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
     let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
 
@@ -229,7 +229,7 @@ fn different_polynomials_produce_different_proofs() {
     let num_vars = 3;
 
     let ((poly_mles1, poly_degree1), products1, _) =
-        rand_poly(num_vars, (2, 5), 7, &mut rng, &()).unwrap();
+        rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
     let comb_fn1 = {
         let products = products1.clone();
@@ -360,7 +360,7 @@ fn sumcheck_with_single_variable() {
 
     let mut transcript = KeccakTranscript::default();
     let ((poly_mles, poly_degree), products, sum) =
-        rand_poly(num_vars, (2, 5), 7, &mut rng, &()).unwrap();
+        rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
     let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
 
@@ -393,7 +393,7 @@ fn verifier_rejects_proof_if_transcript_is_tampered() {
 
     let mut prover_transcript = KeccakTranscript::default();
     let ((poly_mles, poly_degree), products, sum) =
-        rand_poly(num_vars, (2, 5), 7, &mut rng, &()).unwrap();
+        rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
     let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
 
@@ -459,7 +459,7 @@ fn verifier_errors_on_incomplete_proof() {
 
     let mut transcript = KeccakTranscript::default();
     let ((poly_mles, poly_degree), products, sum) =
-        rand_poly(num_vars, (2, 5), 7, &mut rng, &()).unwrap();
+        rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
     let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
 
@@ -566,7 +566,7 @@ fn verifier_produces_correct_subclaim() {
 
     let mut prover_transcript = KeccakTranscript::default();
     let ((poly_mles, poly_degree), products, sum) =
-        rand_poly(nvars, (2, 5), 7, &mut rng, &()).unwrap();
+        rand_poly(nvars, 2..5, 7, &mut rng, &()).unwrap();
 
     let original_mles = poly_mles.clone();
     let products_for_verification = products.clone();

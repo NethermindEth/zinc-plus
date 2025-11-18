@@ -2,6 +2,7 @@ use ark_std::{end_timer, start_timer, vec::Vec};
 use crypto_bigint::Random;
 use crypto_primitives::PrimeField;
 use rand::{Rng, RngCore};
+use std::ops::Range;
 use std::sync::Arc;
 use zinc_poly::{mle::DenseMultilinearExtension, utils::ArithErrors};
 
@@ -27,8 +28,7 @@ pub(crate) fn rand_poly<F: PrimeField + Random, Rn: RngCore>(
     let mut degree = 0;
     let mut current_mle_index = 0;
     for _ in 0..num_products {
-        let num_multiplicands =
-            rng.random_range(num_multiplicands_range.0..num_multiplicands_range.1);
+        let num_multiplicands = rng.random_range(num_multiplicands_range.clone());
         degree = num_multiplicands.max(degree);
         let (product, product_sum) = random_mle_list(nv, num_multiplicands, rng, config.clone());
         let product = product
