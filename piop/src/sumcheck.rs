@@ -66,8 +66,6 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
         for<'a> F: MulByScalar<&'a F>,
     {
         let mut buf = vec![0; F::Inner::NUM_BYTES];
-        F::from_with_cfg(nvars as u64, &config);
-        F::from_with_cfg(degree as u64, &config);
         let nvars_field = F::from_with_cfg(nvars as u64, &config);
         let degree_field = F::from_with_cfg(degree as u64, &config);
 
