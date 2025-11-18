@@ -1,5 +1,3 @@
-#![allow(clippy::arithmetic_side_effects)]
-
 //! Verifier
 use std::convert::identity;
 
@@ -110,6 +108,7 @@ impl<F: FromPrimitiveWithConfig> IPForMLSumcheck<F> {
     /// evaluated at `subclaim.point` is `subclaim.expected_evaluation`.
     /// Otherwise, it is highly unlikely that those two will be equal.
     /// Larger field size guarantees smaller soundness error.
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn check_and_generate_subclaim(
         verifier_state: VerifierState<F>,
         asserted_sum: F,
@@ -179,6 +178,9 @@ impl<F: FromPrimitiveWithConfig> IPForMLSumcheck<F> {
 /// and evaluate this  polynomial at `eval_at`. In other words, efficiently
 /// compute  \sum_{i=0}^{len p_i - 1} p_i[i] * (\prod_{j!=i} (eval_at -
 /// j)/(i-j))
+// All the arithmetic ops in the function
+// are made sure to not overflow.
+#[allow(clippy::arithmetic_side_effects)]
 #[allow(clippy::cast_possible_wrap)]
 pub(crate) fn interpolate_uni_poly<F: FromPrimitiveWithConfig>(
     p_i: &[F],
