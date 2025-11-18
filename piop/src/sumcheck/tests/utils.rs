@@ -31,10 +31,6 @@ pub(crate) fn rand_poly<F: PrimeField + Random, Rn: RngCore>(
         let num_multiplicands = rng.random_range(num_multiplicands_range.clone());
         degree = num_multiplicands.max(degree);
         let (product, product_sum) = random_mle_list(nv, num_multiplicands, rng, config.clone());
-        let product = product
-            .into_iter()
-            .map(|p| Arc::into_inner(p).unwrap())
-            .collect::<Vec<_>>();
 
         let coefficient = F::try_random(rng).expect("sampling coefficient failed");
         mles.extend(product);
@@ -72,7 +68,7 @@ pub fn random_mle_list<F: PrimeField + Random, Rn: RngCore>(
     degree: usize,
     rng: &mut Rn,
     config: F::Config,
-) -> (Vec<Arc<DenseMultilinearExtension<F>>>, F) {
+) -> (Vec<DenseMultilinearExtension<F>>, F) {
     let start = start_timer!(|| "sample random mle list");
     let mut multiplicands = Vec::with_capacity(degree);
     for _ in 0..degree {
@@ -93,13 +89,7 @@ pub fn random_mle_list<F: PrimeField + Random, Rn: RngCore>(
 
     let list = multiplicands
         .into_iter()
-        .map(|x| {
-            Arc::new(DenseMultilinearExtension::from_evaluations_vec(
-                nv,
-                x,
-                F::zero_with_cfg(&config),
-            ))
-        })
+        .map(|x| DenseMultilinearExtension::from_evaluations_vec(nv, x, F::zero_with_cfg(&config)))
         .collect();
 
     end_timer!(start);
