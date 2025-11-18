@@ -56,10 +56,7 @@ pub fn rand_poly_comb_fn<F: PrimeField>(
 ) -> F {
     let mut result = F::zero_with_cfg(&config);
     for (coef, indices) in products {
-        let mut term = coef.clone();
-        for &i in indices {
-            term *= &vals[i];
-        }
+        let term = coef.clone() * indices.iter().map(|&i| &vals[i]).product::<F>();
         result += &term;
     }
 
