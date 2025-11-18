@@ -2,7 +2,7 @@ mod utils;
 
 use ark_std::vec::Vec;
 use crypto_bigint::{
-    Odd,
+    Odd, U128, const_monty_params,
     modular::{ConstMontyParams, MontyParams},
 };
 use crypto_primitives::crypto_bigint_const_monty::ConstMontyField;
@@ -19,17 +19,9 @@ use crate::sumcheck::{
 
 use super::{MLSumcheck, SumcheckProof};
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct Params {}
-
 const N: usize = 2;
 
-impl ConstMontyParams<2> for Params {
-    const LIMBS: usize = 2;
-
-    const PARAMS: MontyParams<2> =
-        MontyParams::new(Odd::from_be_hex("00000000b933426489189cb5b47d567f"));
-}
+const_monty_params!(Params, U128, "00000000b933426489189cb5b47d567f");
 
 type F = ConstMontyField<Params, N>;
 
