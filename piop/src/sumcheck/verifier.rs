@@ -1,8 +1,16 @@
 #![allow(clippy::arithmetic_side_effects)]
 
 //! Verifier
-use ark_std::{boxed::Box, vec, vec::Vec};
-use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, PrimeField};
+use std::convert::identity;
+
+use ark_std::{
+    boxed::Box,
+    cfg_into_iter, cfg_iter,
+    vec::{self, Vec},
+};
+use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, PrimeField, Semiring};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 
 use super::{IPForMLSumcheck, SumCheckError, prover::ProverMsg};
@@ -233,7 +241,7 @@ pub(crate) fn interpolate_uni_poly<F: FromPrimitiveWithConfig>(
     //  - for len <= 33 with i128
     //  - for len >  33 with BigInt
     if p_i.len() <= 20 {
-        let last_denom: F = F::from_with_cfg(u64_factorial(len - 1), config);
+        let last_denom: F = F::from_with_cfg(factorial(len - 1, identity), config);
 
         let mut ratio_numerator = 1i64;
         let mut ratio_enumerator = 1u64;
@@ -256,7 +264,7 @@ pub(crate) fn interpolate_uni_poly<F: FromPrimitiveWithConfig>(
             }
         }
     } else if p_i.len() <= 33 {
-        let last_denom = F::from_with_cfg(u128_factorial(len - 1), config);
+        let last_denom = F::from_with_cfg(factorial(len - 1, u128::from), config);
         let mut ratio_numerator = 1i128;
         let mut ratio_enumerator = 1u128;
 
@@ -278,7 +286,7 @@ pub(crate) fn interpolate_uni_poly<F: FromPrimitiveWithConfig>(
     } else {
         // since we are using field operations, we can merge
         // `last_denom` and `ratio_numerator` into a single field element.
-        let mut denom_up = field_factorial::<F>(len - 1, config);
+        let mut denom_up = factorial(len - 1, |u| F::from_with_cfg(u, config));
         let mut denom_down = one;
 
         for i in (0..len).rev() {
@@ -299,32 +307,11 @@ pub(crate) fn interpolate_uni_poly<F: FromPrimitiveWithConfig>(
     res
 }
 
-/// compute the factorial(a) = 1 * 2 * ... * a
-#[inline]
-fn field_factorial<F: FromWithConfig<u64>>(a: usize, config: &F::Config) -> F {
-    let mut res = F::one_with_cfg(config);
-    for i in 1..=(a as u64) {
-        res *= F::from_with_cfg(i, config);
-    }
-    res
-}
-
-/// compute the factorial(a) = 1 * 2 * ... * a
-#[inline]
-fn u128_factorial(a: usize) -> u128 {
-    let mut res = 1u128;
-    for i in 1..=a {
-        res *= i as u128;
-    }
-    res
-}
-
-/// compute the factorial(a) = 1 * 2 * ... * a
-#[inline]
-fn u64_factorial(a: usize) -> u64 {
-    let mut res = 1u64;
-    for i in 1..=a {
-        res *= i as u64;
-    }
-    res
+/// Compute the factorial(a) = 1 * 2 * ... * a.
+fn factorial<R, F>(a: usize, from_u64: F) -> R
+where
+    R: Semiring,
+    F: Fn(u64) -> R + Send + Sync,
+{
+    cfg_into_iter!((1..=(a as u64))).map(from_u64).product()
 }
