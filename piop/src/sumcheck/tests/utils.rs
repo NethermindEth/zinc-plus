@@ -9,7 +9,7 @@ use zinc_poly::{mle::DenseMultilinearExtension, utils::ArithErrors};
 #[allow(clippy::type_complexity)]
 pub(crate) fn rand_poly<F: PrimeField + Random, Rn: RngCore>(
     nv: usize,
-    num_multiplicands_range: (usize, usize),
+    num_multiplicands_range: Range<usize>,
     num_products: usize,
     rng: &mut Rn,
     config: &F::Config,
