@@ -99,13 +99,13 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
                 IPForMLSumcheck::prove_round(&mut prover_state, &verifier_msg, &comb_fn, &config);
             transcript.absorb_random_field_slice(&prover_msg.evaluations, &mut buf);
             prover_msgs.push(prover_msg);
-            let next_verifier_msg = IPForMLSumcheck::sample_round(transcript, &config);
-            transcript.absorb_random_field(&next_verifier_msg.randomness, &mut buf);
+            let next_verifier_msg = transcript.get_field_challenge(&config);
+            transcript.absorb_random_field(&next_verifier_msg, &mut buf);
 
             verifier_msg = Some(next_verifier_msg);
         }
         if let Some(vmsg) = verifier_msg {
-            prover_state.randomness.push(vmsg.randomness);
+            prover_state.randomness.push(vmsg);
         }
 
         (SumcheckProof(prover_msgs), prover_state)
@@ -159,7 +159,7 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
             transcript.absorb_random_field_slice(&prover_msg.evaluations, &mut buf);
             let verifier_msg =
                 IPForMLSumcheck::verify_round(prover_msg, &mut verifier_state, transcript);
-            transcript.absorb_random_field(&verifier_msg.randomness, &mut buf);
+            transcript.absorb_random_field(&verifier_msg, &mut buf);
         }
 
         IPForMLSumcheck::check_and_generate_subclaim(verifier_state, claimed_sum, &config)

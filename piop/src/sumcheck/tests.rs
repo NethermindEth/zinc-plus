@@ -437,9 +437,7 @@ fn prover_panics_if_round_exceeds_num_vars() {
 
     let comb_fn = |_vals: &[F]| F::zero();
 
-    let verifier_msg = Some(super::verifier::VerifierMsg {
-        randomness: F::zero(),
-    });
+    let verifier_msg = Some(F::zero());
 
     IPForMLSumcheck::prove_round(&mut prover_state, &verifier_msg, comb_fn, &());
 }

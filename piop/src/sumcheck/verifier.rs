@@ -15,13 +15,6 @@ use super::{IPForMLSumcheck, SumCheckError, prover::ProverMsg};
 
 pub const SQUEEZE_NATIVE_ELEMENTS_NUM: usize = 1;
 
-/// Verifier Message
-#[derive(Clone)]
-pub struct VerifierMsg<F> {
-    /// randomness sampled by verifier
-    pub randomness: F,
-}
-
 /// Verifier State
 pub struct VerifierState<F: PrimeField> {
     round: usize,
@@ -71,7 +64,7 @@ impl<F: FromPrimitiveWithConfig> IPForMLSumcheck<F> {
         prover_msg: &ProverMsg<F>,
         verifier_state: &mut VerifierState<F>,
         transcript: &mut impl Transcript,
-    ) -> VerifierMsg<F>
+    ) -> F
     where
         F::Inner: ConstTranscribable,
     {
@@ -83,8 +76,8 @@ impl<F: FromPrimitiveWithConfig> IPForMLSumcheck<F> {
         // is moved to `check_and_generate_subclaim`, and will be done after the
         // last round.
 
-        let msg = Self::sample_round(transcript, &verifier_state.config);
-        verifier_state.randomness.push(msg.randomness.clone());
+        let msg: F = transcript.get_field_challenge(&verifier_state.config);
+        verifier_state.randomness.push(msg.clone());
         verifier_state
             .polynomials_received
             .push(prover_msg.evaluations.clone());
@@ -155,21 +148,6 @@ impl<F: FromPrimitiveWithConfig> IPForMLSumcheck<F> {
             point: verifier_state.randomness,
             expected_evaluation: expected,
         })
-    }
-
-    /// Simulate a verifier message without doing verification.
-    ///
-    /// Given the same calling context, `transcript_round` output exactly the
-    /// same message as `verify_round`
-    #[inline]
-    pub fn sample_round(transcript: &mut impl Transcript, config: &F::Config) -> VerifierMsg<F>
-    where
-        F: FromPrimitiveWithConfig,
-        F::Inner: ConstTranscribable,
-    {
-        VerifierMsg {
-            randomness: transcript.get_field_challenge(config),
-        }
     }
 }
 

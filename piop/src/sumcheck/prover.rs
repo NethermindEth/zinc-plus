@@ -7,7 +7,7 @@ use rayon::iter::*;
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtension};
 use zinc_utils::mul_by_scalar::MulByScalar;
 
-use super::{IPForMLSumcheck, verifier::VerifierMsg};
+use super::IPForMLSumcheck;
 
 /// Prover Message
 #[derive(Clone, Debug, PartialEq)]
@@ -61,7 +61,7 @@ where
     #[allow(clippy::arithmetic_side_effects)]
     pub fn prove_round(
         prover_state: &mut ProverState<F>,
-        v_msg: &Option<VerifierMsg<F>>,
+        v_msg: &Option<F>,
         comb_fn: impl Fn(&[F]) -> F + Send + Sync,
         config: &F::Config,
     ) -> ProverMsg<F> {
@@ -69,7 +69,7 @@ where
             if prover_state.round == 0 {
                 panic!("first round should be prover first.");
             }
-            prover_state.randomness.push(msg.randomness.clone());
+            prover_state.randomness.push(msg.clone());
 
             // fix the next variable at the verifier randomness for this round
             let i = prover_state.round;
