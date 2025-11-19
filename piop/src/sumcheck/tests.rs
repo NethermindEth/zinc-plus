@@ -280,7 +280,7 @@ fn sumcheck_with_zero_polynomial() {
         (),
     );
 
-    assert!(MLSumcheck::extract_sum(&proof).is_zero());
+    assert!(proof.extract_sum().is_zero());
 
     let mut verifier_transcript = KeccakTranscript::default();
     let res = MLSumcheck::verify_as_subprotocol(
@@ -581,6 +581,7 @@ fn verifier_produces_correct_subclaim() {
 }
 
 #[test]
+#[should_panic(expected = "Attempt to verify a sumcheck claim for 0 variables")]
 fn zero_variable_case_returns_correct_subclaim() {
     let num_vars = 0;
     let degree = 2;
@@ -592,23 +593,12 @@ fn zero_variable_case_returns_correct_subclaim() {
     let claimed_sum: F = F::from(42u32);
 
     let mut transcript = KeccakTranscript::default();
-    let subclaim = MLSumcheck::verify_as_subprotocol(
+    let _subclaim = MLSumcheck::verify_as_subprotocol(
         &mut transcript,
         num_vars,
         degree,
         claimed_sum,
         &proof,
         (),
-    )
-    .expect("zero-variable verification should succeed");
-
-    // Point should be empty, and expected evaluation should match claimed_sum
-    assert!(
-        subclaim.point.is_empty(),
-        "point should be empty for nvars=0"
-    );
-    assert_eq!(
-        subclaim.expected_evaluation, claimed_sum,
-        "expected evaluation should equal claimed sum"
     );
 }

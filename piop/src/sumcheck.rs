@@ -1,3 +1,5 @@
+use std::ops::Add;
+
 use ark_std::{boxed::Box, marker::PhantomData, vec::Vec};
 use crypto_primitives::FromPrimitiveWithConfig;
 use prover::{ProverMsg, ProverState};
@@ -24,12 +26,17 @@ pub struct MLSumcheck<F>(PhantomData<F>);
 #[derive(Clone, Debug, PartialEq)]
 pub struct SumcheckProof<F>(pub Vec<ProverMsg<F>>);
 
-impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
-    /// extract sum from the proof
-    pub fn extract_sum(proof: &SumcheckProof<F>) -> F {
-        proof.0[0].evaluations[0].clone() + proof.0[0].evaluations[1].clone()
+impl<F> SumcheckProof<F>
+where
+    F: for<'a> Add<&'a F, Output = F> + Clone,
+{
+    /// Derive the claimed sum from the sumcheck protocol.
+    pub fn extract_sum(&self) -> F {
+        self.0[0].evaluations[0].clone() + &self.0[0].evaluations[1]
     }
+}
 
+impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
     /// Sumcheck prover main entry point.
     ///
     /// This function executes the Prover side of the Sumcheck protocol.
@@ -186,7 +193,7 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
         F::Inner: ConstTranscribable,
     {
         if num_vars == 0 {
-            panic!("Attempt to verifiy a sumcheck claim for 0 variables")
+            panic!("Attempt to verify a sumcheck claim for 0 variables")
         }
 
         let mut buf = vec![0; F::Inner::NUM_BYTES];
