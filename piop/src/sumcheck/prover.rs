@@ -7,8 +7,6 @@ use rayon::iter::*;
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtension};
 use zinc_utils::mul_by_scalar::MulByScalar;
 
-use super::IPForMLSumcheck;
-
 /// Prover Message
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProverMsg<F> {
@@ -48,7 +46,7 @@ impl<F> ProverState<F> {
     }
 }
 
-impl<F> IPForMLSumcheck<F>
+impl<F> ProverState<F>
 where
     for<'a> F: PrimeField + MulByScalar<&'a F>,
 {
@@ -58,39 +56,39 @@ where
     /// Adapted Jolt's sumcheck implementation.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn prove_round(
-        prover_state: &mut ProverState<F>,
+        &mut self,
         v_msg: &Option<F>,
         comb_fn: impl Fn(&[F]) -> F + Send + Sync,
         config: &F::Config,
     ) -> ProverMsg<F> {
         if let Some(msg) = v_msg {
-            if prover_state.round == 0 {
+            if self.round == 0 {
                 panic!("first round should be prover first.");
             }
-            prover_state.randomness.push(msg.clone());
+            self.randomness.push(msg.clone());
 
             // fix the next variable at the verifier randomness for this round
-            let i = prover_state.round;
-            let r = prover_state.randomness[i - 1].clone();
+            let i = self.round;
+            let r = self.randomness[i - 1].clone();
 
-            cfg_iter_mut!(prover_state.mles).for_each(|multiplicand| {
+            cfg_iter_mut!(self.mles).for_each(|multiplicand| {
                 multiplicand.fix_variables(slice::from_ref(&r), F::zero_with_cfg(config));
             });
-        } else if prover_state.round > 0 {
+        } else if self.round > 0 {
             panic!("verifier message is empty");
         }
 
-        prover_state.round += 1;
+        self.round += 1;
 
-        if prover_state.round > prover_state.num_vars {
+        if self.round > self.num_vars {
             panic!("Prover is not active");
         }
 
-        let i = prover_state.round;
-        let nv = prover_state.num_vars;
-        let degree = prover_state.max_degree;
+        let i = self.round;
+        let nv = self.num_vars;
+        let degree = self.max_degree;
 
-        let polys = &prover_state.mles;
+        let polys = &self.mles;
 
         struct Scratch<R> {
             evals: Vec<R>,

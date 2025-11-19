@@ -7,7 +7,7 @@ use crypto_primitives::{FromPrimitiveWithConfig, PrimeField, Semiring};
 use rayon::prelude::*;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 
-use super::{IPForMLSumcheck, SumCheckError, prover::ProverMsg};
+use super::{SumCheckError, prover::ProverMsg};
 
 pub const SQUEEZE_NATIVE_ELEMENTS_NUM: usize = 1;
 
@@ -42,14 +42,14 @@ impl<F: PrimeField> VerifierState<F> {
 /// Subclaim when verifier is convinced
 #[derive(Debug)]
 pub struct SubClaim<F> {
-    /// the multi-dimensional point that this multilinear extension is evaluated
-    /// to
+    /// The multi-dimensional point that this multilinear extension is evaluated
+    /// at.
     pub point: Vec<F>,
-    /// the expected evaluation
+    /// The expected evaluation.
     pub expected_evaluation: F,
 }
 
-impl<F: FromPrimitiveWithConfig> IPForMLSumcheck<F> {
+impl<F: FromPrimitiveWithConfig> VerifierState<F> {
     /// Run verifier at current round, given prover message
     ///
     /// Normally, this function should perform actual verification. Instead,
@@ -57,15 +57,11 @@ impl<F: FromPrimitiveWithConfig> IPForMLSumcheck<F> {
     /// verifications altogether in `check_and_generate_subclaim` at
     /// the last step.
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn verify_round(
-        prover_msg: &ProverMsg<F>,
-        verifier_state: &mut VerifierState<F>,
-        transcript: &mut impl Transcript,
-    ) -> F
+    pub fn verify_round(&mut self, prover_msg: &ProverMsg<F>, transcript: &mut impl Transcript) -> F
     where
         F::Inner: ConstTranscribable,
     {
-        if verifier_state.finished {
+        if self.finished {
             panic!("Incorrect verifier state: Verifier is already finished.");
         }
 
@@ -73,21 +69,20 @@ impl<F: FromPrimitiveWithConfig> IPForMLSumcheck<F> {
         // is moved to `check_and_generate_subclaim`, and will be done after the
         // last round.
 
-        let msg: F = transcript.get_field_challenge(&verifier_state.config);
-        verifier_state.randomness.push(msg.clone());
-        verifier_state
-            .polynomials_received
+        let msg: F = transcript.get_field_challenge(&self.config);
+        self.randomness.push(msg.clone());
+        self.polynomials_received
             .push(prover_msg.evaluations.clone());
 
         // Now, verifier should set `expected` to P(r).
         // This operation is also moved to `check_and_generate_subclaim`,
         // and will be done after the last round.
 
-        if verifier_state.round == verifier_state.nv {
+        if self.round == self.nv {
             // accept and close
-            verifier_state.finished = true;
+            self.finished = true;
         } else {
-            verifier_state.round += 1;
+            self.round += 1;
         }
         msg
     }
@@ -100,26 +95,26 @@ impl<F: FromPrimitiveWithConfig> IPForMLSumcheck<F> {
     /// Larger field size guarantees smaller soundness error.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn check_and_generate_subclaim(
-        verifier_state: VerifierState<F>,
+        self,
         asserted_sum: F,
         config: &F::Config,
     ) -> Result<SubClaim<F>, SumCheckError<F>> {
-        if !verifier_state.finished {
+        if !self.finished {
             panic!("Verifier has not finished.");
         }
 
         let mut expected = asserted_sum;
-        if verifier_state.polynomials_received.len() != verifier_state.nv {
+        if self.polynomials_received.len() != self.nv {
             panic!("insufficient rounds");
         }
-        for i in 0..verifier_state.nv {
-            let evaluations = &verifier_state.polynomials_received[i];
-            if evaluations.len() != verifier_state.max_multiplicands + 1 {
+        for i in 0..self.nv {
+            let evaluations = &self.polynomials_received[i];
+            if evaluations.len() != self.max_multiplicands + 1 {
                 return Err(SumCheckError::MaxDegreeExceeded);
             }
 
             let p0 = &evaluations[0];
-            if verifier_state.max_multiplicands > 0 {
+            if self.max_multiplicands > 0 {
                 let p1 = &evaluations[1];
                 if p0.clone() + p1.clone() != expected {
                     return Err(SumCheckError::SumCheckFailed(
@@ -137,12 +132,11 @@ impl<F: FromPrimitiveWithConfig> IPForMLSumcheck<F> {
                 }
             }
 
-            expected =
-                interpolate_uni_poly(evaluations, verifier_state.randomness[i].clone(), config);
+            expected = interpolate_uni_poly(evaluations, self.randomness[i].clone(), config);
         }
 
         Ok(SubClaim {
-            point: verifier_state.randomness,
+            point: self.randomness,
             expected_evaluation: expected,
         })
     }

@@ -9,7 +9,6 @@ use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_transcript::{KeccakTranscript, traits::Transcript};
 
 use crate::sumcheck::{
-    IPForMLSumcheck,
     prover::ProverState,
     tests::utils::{rand_poly, rand_poly_comb_fn},
 };
@@ -436,7 +435,7 @@ fn prover_panics_if_round_exceeds_num_vars() {
 
     let verifier_msg = Some(F::zero());
 
-    IPForMLSumcheck::prove_round(&mut prover_state, &verifier_msg, comb_fn, &());
+    prover_state.prove_round(&verifier_msg, comb_fn, &());
 }
 
 #[test]
