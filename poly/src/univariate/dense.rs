@@ -1,5 +1,5 @@
-use super::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError};
-use crate::Polynomial;
+use crate::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial};
+use core::slice;
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring};
 use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, One, Zero};
@@ -13,10 +13,12 @@ use std::{
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
-    from_ref::FromRef, mul_by_scalar::MulByScalar, named::Named,
-    projectable_to_field::ProjectableToField, sub,
+    from_ref::FromRef,
+    inner_product::{InnerProduct, InnerProductError},
+    mul_by_scalar::MulByScalar,
+    named::Named,
+    projectable_to_field::ProjectableToField,
 };
-// TODO: rename to univariate?
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DensePolynomial<R, const DEGREE_PLUS_ONE: usize> {
@@ -365,24 +367,23 @@ impl<R: Semiring, C, const DEGREE_PLUS_ONE: usize> EvaluatablePolynomial<R, C, R
 where
     R: for<'a> MulByScalar<&'a C>,
 {
-    fn evaluate_at_point(&self, point: &[C]) -> Result<R, EvaluationError>
+    type EvaluationPoint = C;
+
+    fn evaluate_at_point(&self, point: &C) -> Result<R, EvaluationError>
     where
         R: for<'a> MulByScalar<&'a C>,
     {
-        if point.len() != sub!(DEGREE_PLUS_ONE, 1) {
-            return Err(EvaluationError::WrongPointWidth {
-                expected: sub!(DEGREE_PLUS_ONE, 1),
-                actual: point.len(),
-            });
-        }
-
         // A trivial implementation of a polynomial evaluation at a given point.
-        let mut result = self.coeffs[0].clone();
-        for (coeff, scalar) in self.coeffs.iter().skip(1).zip(point.iter()) {
-            let term = coeff
-                .mul_by_scalar(scalar)
+        let mut result = self
+            .coeffs
+            .last()
+            .ok_or(EvaluationError::EmptyPolynomial)?
+            .clone();
+        for coeff in self.coeffs.iter().rev().skip(1) {
+            let term = result
+                .mul_by_scalar(point)
                 .ok_or(EvaluationError::Overflow)?;
-            result = result.checked_add(&term).ok_or(EvaluationError::Overflow)?;
+            result = term.checked_add(coeff).ok_or(EvaluationError::Overflow)?;
         }
         Ok(result)
     }
@@ -483,10 +484,7 @@ where
 {
     #![allow(clippy::arithmetic_side_effects)] // False alert, field operations are safe
     fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static {
-        let mut r_powers = vec![sampled_value.clone(); DEGREE_PLUS_ONE - 1];
-        for i in 1..(DEGREE_PLUS_ONE - 1) {
-            r_powers[i] = r_powers[i - 1].clone() * sampled_value;
-        }
+        let sampled_value = sampled_value.clone();
         let field_cfg = sampled_value.cfg().clone();
 
         move |poly: &Self| {
@@ -499,8 +497,40 @@ where
 
             let poly2 = DensePolynomial { coeffs };
             poly2
-                .evaluate_at_point(&r_powers)
+                .evaluate_at_point(&sampled_value)
                 .expect("Failed to evaluate polynomial at point")
         }
+    }
+}
+
+impl<'a, R, const DEGREE_PLUS_ONE: usize> IntoIterator for &'a DensePolynomial<R, DEGREE_PLUS_ONE> {
+    type Item = &'a R;
+
+    type IntoIter = slice::Iter<'a, R>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.coeffs.iter()
+    }
+}
+
+impl<R, const DEGREE_PLUS_ONE: usize> AsRef<[R]> for DensePolynomial<R, DEGREE_PLUS_ONE> {
+    fn as_ref(&self) -> &[R] {
+        self.coeffs.as_slice()
+    }
+}
+
+impl<R, Rhs, Out, const DEGREE_PLUS_ONE: usize> InnerProduct<Rhs>
+    for DensePolynomial<R, DEGREE_PLUS_ONE>
+where
+    for<'a> &'a [R]: InnerProduct<Rhs, Output = Out>,
+{
+    type Output = Out;
+
+    fn inner_product(
+        &self,
+        rhs: &[Rhs],
+        zero: Self::Output,
+    ) -> Result<Self::Output, InnerProductError> {
+        self.as_ref().inner_product(rhs, zero)
     }
 }

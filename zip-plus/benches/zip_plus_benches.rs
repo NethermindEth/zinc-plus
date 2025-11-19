@@ -3,7 +3,7 @@
 
 mod zip_common;
 
-use zinc_poly::dense::DensePolynomial;
+use zinc_poly::univariate::dense::DensePolynomial;
 use zinc_primality::MillerRabin;
 use zip_common::*;
 

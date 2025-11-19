@@ -8,15 +8,15 @@ use crate::{
         utils::{ColumnOpening, point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
-    utils::inner_product,
 };
+use crypto_bigint::ConstZero;
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
-use num_traits::ConstZero;
-use zinc_poly::{EvaluatablePolynomial, Polynomial};
+use zinc_poly::Polynomial;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
-    from_ref::FromRef, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
+    from_ref::FromRef, inner_product::InnerProduct, mul_by_scalar::MulByScalar,
+    projectable_to_field::ProjectableToField,
 };
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
@@ -130,14 +130,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         num_rows: usize,
     ) -> Result<(), ZipError> {
         let column_entries_comb: Zt::CombR = if num_rows > 1 {
-            let column_entries: Result<Vec<Zt::CombR>, _> = column_entries
+            let column_entries: Vec<_> = column_entries
                 .iter()
                 .map(Zt::Comb::from_ref)
-                .map(|p| p.evaluate_at_point(alphas))
-                .collect();
-            inner_product(coeffs.iter(), column_entries?.iter(), Zt::CombR::ZERO)
+                .map(|p| p.inner_product(alphas, Zt::CombR::ZERO))
+                .try_collect()?;
+            column_entries.inner_product(coeffs, Zt::CombR::ZERO)?
         } else {
-            Zt::Comb::from_ref(&column_entries[0]).evaluate_at_point(alphas)?
+            Zt::Comb::from_ref(&column_entries[0]).inner_product(alphas, Zt::CombR::ZERO)?
         };
 
         if column_entries_comb != encoded_combined_row[column] {
@@ -165,7 +165,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
         let (q_0, q_1) = point_to_tensor(vp.num_rows, point_f, field_cfg)?;
 
-        if inner_product(&q_0_combined_row, &q_1, F::zero_with_cfg(field_cfg)) != *eval_f {
+        if q_0_combined_row.inner_product(&q_1, F::zero_with_cfg(field_cfg))? != *eval_f {
             return Err(ZipError::InvalidPcsOpen(
                 "Evaluation consistency failure".into(),
             ));
@@ -201,7 +201,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     {
         let column_entries_comb = if num_rows > 1 {
             let column_entries = column_entries.iter().map(project).collect_vec();
-            inner_product(q_0, &column_entries, F::zero_with_cfg(field_cfg))
+            q_0.inner_product(&column_entries, F::zero_with_cfg(field_cfg))?
             // TODO: this inner product is taking a long time.
         } else {
             project(column_entries.first().expect("No column entries"))
@@ -240,8 +240,8 @@ mod tests {
     use num_traits::{ConstOne, ConstZero, Zero};
     use rand::prelude::*;
     use zinc_poly::{
-        dense::DensePolynomial,
         mle::{DenseMultilinearExtension, MultilinearExtensionRand},
+        univariate::dense::DensePolynomial,
     };
     use zinc_transcript::traits::Transcribable;
 
@@ -697,7 +697,7 @@ mod tests {
         let linear_code = C::new(poly_size, RAA_CFG);
         let pp = TestZip::setup(poly_size, linear_code);
 
-        let evaluations: Vec<_> = vec![Int::<INT_LIMBS>::from(0); poly_size];
+        let evaluations: Vec<_> = vec![Int::<INT_LIMBS>::ZERO; poly_size];
         let n = 3;
         let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations, Zero::zero());
 

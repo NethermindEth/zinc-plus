@@ -10,9 +10,9 @@ use crate::{
     utils::combine_rows,
 };
 use itertools::Itertools;
-use zinc_poly::{EvaluatablePolynomial, Polynomial, mle::DenseMultilinearExtension};
+use zinc_poly::{Polynomial, mle::DenseMultilinearExtension};
 use zinc_transcript::traits::Transcript;
-use zinc_utils::from_ref::FromRef;
+use zinc_utils::{from_ref::FromRef, inner_product::InnerProduct};
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     pub fn test(
@@ -37,15 +37,12 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 .fs_transcript
                 .get_challenges::<Zt::Chal>(pp.num_rows);
 
-            let evals = poly
+            let evals: Vec<_> = poly
                 .evaluations
                 .iter()
                 .map(Zt::Comb::from_ref)
-                .map(|p| {
-                    p.evaluate_at_point(&alphas)
-                        .expect("Failed to evaluate polynomial")
-                })
-                .collect_vec();
+                .map(|p| p.inner_product(&alphas, Zt::CombR::from(0)))
+                .try_collect()?;
 
             // u' in the Zinc paper
             let combined_row = combine_rows(&coeffs, &evals, pp.linear_code.row_len());
