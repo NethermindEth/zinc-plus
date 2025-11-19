@@ -11,21 +11,30 @@ use super::{SumCheckError, prover::ProverMsg};
 
 pub const SQUEEZE_NATIVE_ELEMENTS_NUM: usize = 1;
 
-/// Verifier State
+/// Sumcheck Verifier State.
 pub struct VerifierState<F: PrimeField> {
+    /// The current round number.
     pub round: usize,
+    /// The number of variables the sumcheck polynomial
+    /// is in.
     pub nv: usize,
+    /// The degree of the polynomial.
     pub max_multiplicands: usize,
+    /// `true` if the protocol has finished.
     pub finished: bool,
-    /// a list storing the univariate polynomial in evaluation form sent by the
-    /// prover at each round
+    /// A list storing the univariate polynomial in evaluation form sent by the
+    /// prover at each round so far.
     pub polynomials_received: Vec<Vec<F>>,
-    /// a list storing the randomness sampled by the verifier at each round
+    /// A list storing the randomness sampled by the verifier at each round so
+    /// far.
     pub randomness: Vec<F>,
+    /// The field configuration to which
+    /// all the field elements belong to.
     pub config: F::Config,
 }
 
 impl<F: PrimeField> VerifierState<F> {
+    /// Initialize the verifier state.
     pub fn new(nvars: usize, degree: usize, config: &F::Config) -> Self {
         Self {
             round: 1,
@@ -50,7 +59,7 @@ pub struct SubClaim<F> {
 }
 
 impl<F: FromPrimitiveWithConfig> VerifierState<F> {
-    /// Run verifier at current round, given prover message
+    /// Run verifier at current round, given prover message.
     ///
     /// Normally, this function should perform actual verification. Instead,
     /// `verify_round` only samples and stores randomness and perform
@@ -142,11 +151,11 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
     }
 }
 
-/// interpolate the *unique* univariate polynomial of degree *at most*
+/// Interpolate the *unique* univariate polynomial of degree *at most*
 /// p_i.len()-1 passing through the y-values in p_i at x = 0,..., p_i.len()-1
 /// and evaluate this  polynomial at `eval_at`. In other words, efficiently
 /// compute  \sum_{i=0}^{len p_i - 1} p_i[i] * (\prod_{j!=i} (eval_at -
-/// j)/(i-j))
+/// j)/(i-j)).
 // All the arithmetic ops in the function
 // are made sure to not overflow.
 #[allow(clippy::arithmetic_side_effects)]

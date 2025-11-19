@@ -7,18 +7,19 @@ use rayon::iter::*;
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtension};
 use zinc_utils::mul_by_scalar::MulByScalar;
 
-/// Prover Message
+/// Prover Round Message.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProverMsg<F> {
-    /// evaluations on P(0), P(1), P(2), ...
+    /// Evaluations on P(0), P(1), P(2), ...
     pub(crate) evaluations: Vec<F>,
 }
 
-/// Prover State
+/// Sumcheck Prover State.
 pub struct ProverState<F> {
     /// Sampled randomness given by the verifier.
     pub randomness: Vec<F>,
-    /// Stores a list of multilinear extensions.
+    /// Stores the list of multilinear extensions
+    /// the sumcheck polynomial is comprised of.
     pub mles: Vec<DenseMultilinearExtension<F>>,
     /// Number of variables.
     pub num_vars: usize,
@@ -30,7 +31,7 @@ pub struct ProverState<F> {
 
 impl<F> ProverState<F> {
     /// Initialize the prover to argue for the sum of products of
-    /// MLE's over {0,1}^`num_vars`.
+    /// MLE's in {0,1}^`num_vars`.
     pub fn new(mles: Vec<DenseMultilinearExtension<F>>, nvars: usize, degree: usize) -> Self {
         Self {
             randomness: Vec::with_capacity(nvars),

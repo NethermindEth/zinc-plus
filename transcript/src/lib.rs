@@ -1,4 +1,3 @@
-pub mod field;
 pub mod traits;
 
 use crate::traits::{ConstTranscribable, Transcribable, Transcript};

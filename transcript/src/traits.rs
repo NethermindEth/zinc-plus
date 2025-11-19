@@ -82,7 +82,7 @@ pub trait Transcript {
     {
         let random_inner = self.get_challenge();
 
-        F::new_unchecked_with_cfg(random_inner, cfg)
+        F::new_with_cfg(random_inner, cfg)
     }
 
     /// Generates a pseudorandom transcribable values as challenges based on the

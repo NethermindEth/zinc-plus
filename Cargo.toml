@@ -11,7 +11,7 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
-crypto-primitives = { git = "https://github.com/NethermindEth/crypto-primitives.git", branch = "main", features = ["std", "ark_std", "crypto_bigint", "rand"]  }
+crypto-primitives = { git = "https://github.com/NethermindEth/crypto-primitives.git", branch = "ElijahVlasov/field-constructor", features = ["std", "ark_std", "crypto_bigint", "rand"]  }
 
 crypto-bigint = { version = "0.7.0-rc.10", features = ["zeroize"] }
 crypto-primes = { version = "0.7.0-pre.4" }
