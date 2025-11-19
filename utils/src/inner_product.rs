@@ -32,12 +32,9 @@ where
     type Output = Lhs;
 
     fn inner_product(&self, rhs: &[Rhs], zero: Lhs) -> Result<Self::Output, InnerProductError> {
-        let half_baked = self
-            .iter()
+        self.iter()
             .zip(rhs)
-            .map(|(lhs, rhs)| lhs.mul_by_scalar(rhs).ok_or(InnerProductError::Overflow));
-
-        half_baked
+            .map(|(lhs, rhs)| lhs.mul_by_scalar(rhs).ok_or(InnerProductError::Overflow))
             .reduce(|acc, product| {
                 acc?.checked_add(&product?)
                     .ok_or(InnerProductError::Overflow)

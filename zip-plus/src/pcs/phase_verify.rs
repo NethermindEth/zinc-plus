@@ -9,6 +9,7 @@ use crate::{
     },
     pcs_transcript::PcsTranscript,
 };
+use crypto_bigint::ConstZero;
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
 use zinc_poly::Polynomial;
@@ -132,11 +133,11 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             let column_entries: Vec<_> = column_entries
                 .iter()
                 .map(Zt::Comb::from_ref)
-                .map(|p| p.inner_product(alphas, Zt::CombR::from(0)))
+                .map(|p| p.inner_product(alphas, Zt::CombR::ZERO))
                 .try_collect()?;
-            column_entries.inner_product(coeffs, Zt::CombR::from(0))?
+            column_entries.inner_product(coeffs, Zt::CombR::ZERO)?
         } else {
-            Zt::Comb::from_ref(&column_entries[0]).inner_product(alphas, Zt::CombR::from(0))?
+            Zt::Comb::from_ref(&column_entries[0]).inner_product(alphas, Zt::CombR::ZERO)?
         };
 
         if column_entries_comb != encoded_combined_row[column] {
@@ -696,7 +697,7 @@ mod tests {
         let linear_code = C::new(poly_size, RAA_CFG);
         let pp = TestZip::setup(poly_size, linear_code);
 
-        let evaluations: Vec<_> = vec![Int::<INT_LIMBS>::from(0); poly_size];
+        let evaluations: Vec<_> = vec![Int::<INT_LIMBS>::ZERO; poly_size];
         let n = 3;
         let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations, Zero::zero());
 
