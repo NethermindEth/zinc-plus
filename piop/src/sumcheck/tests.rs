@@ -512,15 +512,6 @@ fn prover_handles_empty_mle_list() {
 }
 
 #[test]
-#[should_panic(expected = "Attempt to prove a constant.")]
-fn prover_panics_with_zero_variables() {
-    let num_vars = 0;
-    let degree = 2;
-
-    ProverState::<F>::new(Vec::new(), num_vars, degree);
-}
-
-#[test]
 fn verifier_errors_on_mismatched_nvars() {
     let mut rng = rand::rng();
     let nvars_prover = 3;

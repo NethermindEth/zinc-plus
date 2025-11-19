@@ -32,10 +32,6 @@ impl<F> ProverState<F> {
     /// Initialize the prover to argue for the sum of products of
     /// MLE's over {0,1}^`num_vars`.
     pub fn new(mles: Vec<DenseMultilinearExtension<F>>, nvars: usize, degree: usize) -> Self {
-        if nvars == 0 {
-            panic!("Attempt to prove a constant.")
-        }
-
         Self {
             randomness: Vec::with_capacity(nvars),
             mles,

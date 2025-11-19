@@ -67,31 +67,17 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
         F::Inner: ConstTranscribable,
         for<'a> F: MulByScalar<&'a F>,
     {
+        if nvars == 0 {
+            panic!("Attempt to prove a constant")
+        }
+
         let mut buf = vec![0; F::Inner::NUM_BYTES];
         let nvars_field = F::from_with_cfg(nvars as u64, &config);
         let degree_field = F::from_with_cfg(degree as u64, &config);
 
         transcript.absorb_random_field(&nvars_field, &mut buf);
         transcript.absorb_random_field(&degree_field, &mut buf);
-        if nvars == 0 {
-            let base_vals: Vec<F> = mles
-                .iter()
-                .map(|m| {
-                    m.evaluate(&[], F::zero_with_cfg(&config))
-                        .expect("eval at empty point")
-                })
-                .collect();
-            let _sum_at_empty = comb_fn(&base_vals);
 
-            let prover_state = ProverState {
-                randomness: Vec::new(),
-                mles,
-                num_vars: 0,
-                max_degree: degree,
-                round: 0,
-            };
-            return (SumcheckProof(Vec::new()), prover_state);
-        }
         let mut prover_state = ProverState::new(mles, nvars, degree);
         let mut verifier_msg = None;
         let mut prover_msgs = Vec::with_capacity(nvars);
