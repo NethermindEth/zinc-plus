@@ -1,10 +1,7 @@
 mod utils;
 
 use ark_std::vec::Vec;
-use crypto_bigint::{
-    Odd, U128, const_monty_params,
-    modular::{ConstMontyParams, MontyParams},
-};
+use crypto_bigint::{U128, const_monty_params};
 use crypto_primitives::crypto_bigint_const_monty::ConstMontyField;
 use num_traits::Zero;
 use rand::RngCore;
@@ -521,7 +518,7 @@ fn prover_panics_with_zero_variables() {
     let num_vars = 0;
     let degree = 2;
 
-    IPForMLSumcheck::<F>::prover_init(Vec::new(), num_vars, degree);
+    ProverState::<F>::new(Vec::new(), num_vars, degree);
 }
 
 #[test]

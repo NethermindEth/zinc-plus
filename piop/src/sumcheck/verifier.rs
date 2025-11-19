@@ -1,12 +1,8 @@
 //! Verifier
 use std::convert::identity;
 
-use ark_std::{
-    boxed::Box,
-    cfg_into_iter, cfg_iter,
-    vec::{self, Vec},
-};
-use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, PrimeField, Semiring};
+use ark_std::{boxed::Box, cfg_into_iter, vec::Vec};
+use crypto_primitives::{FromPrimitiveWithConfig, PrimeField, Semiring};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
@@ -17,16 +13,30 @@ pub const SQUEEZE_NATIVE_ELEMENTS_NUM: usize = 1;
 
 /// Verifier State
 pub struct VerifierState<F: PrimeField> {
-    round: usize,
-    nv: usize,
-    max_multiplicands: usize,
-    finished: bool,
+    pub round: usize,
+    pub nv: usize,
+    pub max_multiplicands: usize,
+    pub finished: bool,
     /// a list storing the univariate polynomial in evaluation form sent by the
     /// prover at each round
-    polynomials_received: Vec<Vec<F>>,
+    pub polynomials_received: Vec<Vec<F>>,
     /// a list storing the randomness sampled by the verifier at each round
-    randomness: Vec<F>,
-    config: F::Config,
+    pub randomness: Vec<F>,
+    pub config: F::Config,
+}
+
+impl<F: PrimeField> VerifierState<F> {
+    pub fn new(nvars: usize, degree: usize, config: &F::Config) -> Self {
+        Self {
+            round: 1,
+            nv: nvars,
+            max_multiplicands: degree,
+            finished: false,
+            polynomials_received: Vec::with_capacity(nvars),
+            randomness: Vec::with_capacity(nvars),
+            config: config.clone(),
+        }
+    }
 }
 
 /// Subclaim when verifier is convinced
@@ -40,19 +50,6 @@ pub struct SubClaim<F> {
 }
 
 impl<F: FromPrimitiveWithConfig> IPForMLSumcheck<F> {
-    /// initialize the verifier
-    pub fn verifier_init(nvars: usize, degree: usize, config: &F::Config) -> VerifierState<F> {
-        VerifierState {
-            round: 1,
-            nv: nvars,
-            max_multiplicands: degree,
-            finished: false,
-            polynomials_received: Vec::with_capacity(nvars),
-            randomness: Vec::with_capacity(nvars),
-            config: config.clone(),
-        }
-    }
-
     /// Run verifier at current round, given prover message
     ///
     /// Normally, this function should perform actual verification. Instead,
@@ -95,7 +92,7 @@ impl<F: FromPrimitiveWithConfig> IPForMLSumcheck<F> {
         msg
     }
 
-    /// verify the sumcheck phase, and generate the subclaim
+    /// Verify the sumcheck phase, and generate the subclaim.
     ///
     /// If the asserted sum is correct, then the multilinear polynomial
     /// evaluated at `subclaim.point` is `subclaim.expected_evaluation`.

@@ -18,34 +18,27 @@ pub struct ProverMsg<F> {
 
 /// Prover State
 pub struct ProverState<F> {
-    /// sampled randomness given by the verifier
+    /// Sampled randomness given by the verifier.
     pub randomness: Vec<F>,
-    /// Stores a list of multilinear extensions
+    /// Stores a list of multilinear extensions.
     pub mles: Vec<DenseMultilinearExtension<F>>,
-    /// Number of variables
+    /// Number of variables.
     pub num_vars: usize,
-    /// Max degree
+    /// Max degree.
     pub max_degree: usize,
-    /// The current round number
+    /// The current round number.
     pub round: usize,
 }
 
-impl<F> IPForMLSumcheck<F>
-where
-    for<'a> F: PrimeField + MulByScalar<&'a F>,
-{
-    /// initialize the prover to argue for the sum of polynomial over
-    /// {0,1}^`num_vars`
-    pub fn prover_init(
-        mles: Vec<DenseMultilinearExtension<F>>,
-        nvars: usize,
-        degree: usize,
-    ) -> ProverState<F> {
+impl<F> ProverState<F> {
+    /// Initialize the prover to argue for the sum of products of
+    /// MLE's over {0,1}^`num_vars`.
+    pub fn new(mles: Vec<DenseMultilinearExtension<F>>, nvars: usize, degree: usize) -> Self {
         if nvars == 0 {
             panic!("Attempt to prove a constant.")
         }
 
-        ProverState {
+        Self {
             randomness: Vec::with_capacity(nvars),
             mles,
             num_vars: nvars,
@@ -53,11 +46,16 @@ where
             round: 0,
         }
     }
+}
 
-    /// receive message from verifier, generate prover message, and proceed to
-    /// next round
+impl<F> IPForMLSumcheck<F>
+where
+    for<'a> F: PrimeField + MulByScalar<&'a F>,
+{
+    /// Receive message from verifier, generate prover message, and proceed to
+    /// next round.
     ///
-    /// Adapted Jolt's sumcheck implementation
+    /// Adapted Jolt's sumcheck implementation.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn prove_round(
         prover_state: &mut ProverState<F>,
@@ -123,13 +121,16 @@ where
             let index = b << 1;
 
             // TODO(Alex): Once you have benches set,
-            //             could please try getting rid of vals0 and vals1 fields in the structs, replacing them with
+            //             could please try getting rid of vals0 and vals1 fields in the
+            // structs, replacing them with
             //
             //             ```rust
-            //             let vals0: Vec<_> = polys.iter().map(|poly| poly[index].clone()).collect();
-            //             let vals1: Vec<_> = polys.iter().map(|poly| poly[index + 1].clone()).collect();
+            //             let vals0: Vec<_> = polys.iter().map(|poly|
+            // poly[index].clone()).collect();             let vals1: Vec<_> =
+            // polys.iter().map(|poly| poly[index + 1].clone()).collect();
             //             ```
-            //             My bet is that it won't affect running time, but better safe than sorry.
+            //             My bet is that it won't affect running time, but better safe than
+            // sorry.
 
             s.vals0
                 .iter_mut()

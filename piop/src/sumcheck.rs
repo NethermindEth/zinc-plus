@@ -6,6 +6,8 @@ use zinc_poly::{mle::DenseMultilinearExtension, utils::ArithErrors};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_utils::mul_by_scalar::MulByScalar;
 
+use crate::sumcheck::verifier::VerifierState;
+
 use self::verifier::SubClaim;
 
 pub mod prover;
@@ -90,7 +92,7 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
             };
             return (SumcheckProof(Vec::new()), prover_state);
         }
-        let mut prover_state = IPForMLSumcheck::prover_init(mles, nvars, degree);
+        let mut prover_state = ProverState::new(mles, nvars, degree);
         let mut verifier_msg = None;
         let mut prover_msgs = Vec::with_capacity(nvars);
 
@@ -152,7 +154,7 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
             });
         }
 
-        let mut verifier_state = IPForMLSumcheck::verifier_init(num_vars, degree, &config);
+        let mut verifier_state = VerifierState::new(num_vars, degree, &config);
 
         for i in 0..num_vars {
             let prover_msg = &proof.0[i];

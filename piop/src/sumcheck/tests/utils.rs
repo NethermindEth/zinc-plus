@@ -4,7 +4,6 @@ use crypto_primitives::PrimeField;
 use itertools::Itertools;
 use rand::{Rng, RngCore};
 use std::ops::Range;
-use std::sync::Arc;
 use zinc_poly::{mle::DenseMultilinearExtension, utils::ArithErrors};
 
 #[allow(clippy::arithmetic_side_effects)]
