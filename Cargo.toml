@@ -1,7 +1,7 @@
 [workspace]
-members = ["poly", "primality", "transcript", "utils", "zip-plus"]
+members = ["piop", "poly", "primality", "transcript", "utils", "zip-plus"]
 resolver = "2"
-default-members = ["poly", "primality", "transcript", "utils", "zip-plus"]
+default-members = ["piop", "poly", "primality", "transcript", "utils", "zip-plus"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,7 +12,6 @@ publish = false
 
 [workspace.dependencies]
 crypto-primitives = { git = "https://github.com/NethermindEth/crypto-primitives.git", branch = "main", features = ["std", "ark_std", "crypto_bigint", "rand"]  }
-crypto-primitives-proc-macros = { git = "https://github.com/NethermindEth/crypto-primitives.git", branch = "main" }
 
 crypto-bigint = { version = "0.7.0-rc.10", features = ["zeroize"] }
 crypto-primes = { version = "0.7.0-pre.4" }

@@ -1,4 +1,3 @@
-pub mod field;
 pub mod traits;
 
 use crate::traits::{ConstTranscribable, Transcribable, Transcript};
@@ -50,31 +49,6 @@ impl KeccakTranscript {
         }
     }
 
-    /// Absorbs arbitrary bytes into the transcript.
-    /// This updates the internal state of the hasher with the provided data.
-    pub fn absorb(&mut self, v: &[u8]) {
-        self.hasher.update(v);
-    }
-
-    /// Absorbs a field element into the transcript.
-    /// Delegates to the field element's implementation of
-    /// absorb_into_transcript.
-    pub fn absorb_random_field<F>(&mut self, v: &F, buf: &mut [u8])
-    where
-        F: PrimeField,
-        F::Inner: Transcribable,
-    {
-        self.absorb(&[0x3]);
-        v.modulus().write_transcription_bytes(buf);
-        self.absorb(buf);
-        self.absorb(&[0x5]);
-
-        self.absorb(&[0x1]);
-        v.inner().write_transcription_bytes(buf);
-        self.absorb(buf);
-        self.absorb(&[0x3])
-    }
-
     fn gen_random<R: ConstTranscribable>(&mut self, buf: &mut [u8]) -> R {
         self.fill_with_random_bytes(buf);
         self.absorb(buf);
@@ -107,5 +81,30 @@ impl Transcript for KeccakTranscript {
                 return prime_candidate;
             }
         }
+    }
+
+    /// Absorbs arbitrary bytes into the transcript.
+    /// This updates the internal state of the hasher with the provided data.
+    fn absorb(&mut self, v: &[u8]) {
+        self.hasher.update(v);
+    }
+
+    /// Absorbs a field element into the transcript.
+    /// Delegates to the field element's implementation of
+    /// absorb_into_transcript.
+    fn absorb_random_field<F>(&mut self, v: &F, buf: &mut [u8])
+    where
+        F: PrimeField,
+        F::Inner: Transcribable,
+    {
+        self.absorb(&[0x3]);
+        v.modulus().write_transcription_bytes(buf);
+        self.absorb(buf);
+        self.absorb(&[0x5]);
+
+        self.absorb(&[0x1]);
+        v.inner().write_transcription_bytes(buf);
+        self.absorb(buf);
+        self.absorb(&[0x3])
     }
 }
