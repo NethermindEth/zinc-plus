@@ -1,4 +1,4 @@
-/// Number of branches used in each FFT layer (radix). The construction fixes
+/// Number of branches used in each NTT layer (radix). The construction fixes
 /// this to 8 in accordance with the pseudo-Reed–Solomon spec.
 const RADIX: usize = 8;
 /// Base-case input length handled by the Vandermonde block.
@@ -15,7 +15,7 @@ const ALT_P_K2: u128 = 12289;
 const ALT_OMEGA_K2: u128 = 1331;
 
 /// Pseudo Reed-Solomon encoder over the integers. Internally uses a radix-8
-/// FFT-like recursion with a base Vandermonde matrix of dimensions 64x32.
+/// NTT-style recursion with a base Vandermonde matrix of dimensions 64x32.
 #[derive(Debug, Clone)]
 pub struct IprsCode {
     k: usize,
@@ -77,23 +77,10 @@ impl IprsCode {
             row.len(),
             self.m
         );
-        self.encode_fft(row, self.k)
+        self.encode_ntt(row, self.k)
     }
 
-    /// Encode while reducing every stage modulo `p`. This behaves like a
-    /// standard NTT/RS encoder and is used for cross-checks.
-    pub fn encode_mod_p(&self, row: &[u128]) -> Vec<u128> {
-        assert_eq!(
-            row.len(),
-            self.m,
-            "Input length {} does not match expected row length {}",
-            row.len(),
-            self.m
-        );
-        self.encode_fft_mod(row, self.k)
-    }
-
-    fn encode_fft(&self, data: &[u128], depth: usize) -> Vec<u128> {
+    fn encode_ntt(&self, data: &[u128], depth: usize) -> Vec<u128> {
         if depth == 0 {
             // Base-case: multiply the 32-term vector by the precomputed
             // Vandermonde matrix to obtain 64 evaluation points.
@@ -109,28 +96,10 @@ impl IprsCode {
             }
             // Recursively evaluate the “child” polynomial corresponding to
             // coset `x ↦ x + ω^{chunk_idx}`.
-            subresults.push(self.encode_fft(&chunk, depth - 1));
+            subresults.push(self.encode_ntt(&chunk, depth - 1));
         }
 
         self.combine_stage(&subresults, &self.twiddle_tables[depth - 1], AddMode::Wide)
-    }
-
-    fn encode_fft_mod(&self, data: &[u128], depth: usize) -> Vec<u128> {
-        if depth == 0 {
-            return self.base_multiply_mod(data);
-        }
-
-        let chunk_len = data.len() / RADIX;
-        let mut subresults = Vec::with_capacity(RADIX);
-        for chunk_idx in 0..RADIX {
-            let mut chunk = Vec::with_capacity(chunk_len);
-            for j in 0..chunk_len {
-                chunk.push(data[RADIX * j + chunk_idx] % self.modulus);
-            }
-            subresults.push(self.encode_fft_mod(&chunk, depth - 1));
-        }
-
-        self.combine_stage(&subresults, &self.twiddle_tables[depth - 1], AddMode::Modulo)
     }
 
     fn base_multiply(&self, chunk: &[u128]) -> Vec<u128> {
@@ -151,6 +120,41 @@ impl IprsCode {
         output
     }
 
+    /// Encode while reducing every stage modulo `p`. This behaves like a
+    /// standard NTT/RS encoder and is used for cross-checks.
+    #[cfg(test)]
+    pub fn encode_mod_p(&self, row: &[u128]) -> Vec<u128> {
+        assert_eq!(
+            row.len(),
+            self.m,
+            "Input length {} does not match expected row length {}",
+            row.len(),
+            self.m
+        );
+        self.encode_ntt_mod(row, self.k)
+    }
+
+
+    #[cfg(test)]
+    fn encode_ntt_mod(&self, data: &[u128], depth: usize) -> Vec<u128> {
+        if depth == 0 {
+            return self.base_multiply_mod(data);
+        }
+
+        let chunk_len = data.len() / RADIX;
+        let mut subresults = Vec::with_capacity(RADIX);
+        for chunk_idx in 0..RADIX {
+            let mut chunk = Vec::with_capacity(chunk_len);
+            for j in 0..chunk_len {
+                chunk.push(data[RADIX * j + chunk_idx] % self.modulus);
+            }
+            subresults.push(self.encode_ntt_mod(&chunk, depth - 1));
+        }
+
+        self.combine_stage(&subresults, &self.twiddle_tables[depth - 1], AddMode::Modulo)
+    }
+
+    #[cfg(test)]
     fn base_multiply_mod(&self, chunk: &[u128]) -> Vec<u128> {
         assert_eq!(chunk.len(), BASE_DIM);
         let mut output = vec![0u128; BASE_LEN];
@@ -226,7 +230,7 @@ enum AddMode {
 
 /// Precompute stage-specific twiddle tables. Each table contains `stage_len`
 /// entries where entry `i` stores the RADIX consecutive powers of
-/// `(omega)^(stride * i)`. This matches the order used in the recursive FFT.
+/// `(omega)^(stride * i)`. This matches the order used in the recursive NTT.
 fn build_twiddle_tables(
     k: usize,
     n: usize,
@@ -255,7 +259,7 @@ fn build_twiddle_tables(
 }
 
 /// Build the 64x32 Vandermonde block used at the leaves of the recursion. The
-/// evaluation points follow the FFT ordering induced by `(n / 64)` strides.
+/// evaluation points follow the NTT ordering induced by `(n / 64)` strides.
 fn compute_base_matrix(modulus: u128, omega: u128, n: usize) -> [[u128; BASE_DIM]; BASE_LEN] {
     let mut matrix = [[0u128; BASE_DIM]; BASE_LEN];
     // Step between successive evaluation points at the base (size-64) stage.
@@ -372,6 +376,114 @@ mod tests {
         }
     }
 
+    // this is purely to check the correctness of the NTT implementation used
+    // in the test above
+    #[test]
+    fn polynomial_multiplication_via_ntt_matches_naive() {
+        let modulus = DEFAULT_P;
+        let n = 32usize; // power of two >= (16 + 16 - 1)
+        // DEFAULT_OMEGA is a primitive 512-th root; derive a primitive 32-th root.
+        let base_order = 1usize << (6 + 3 * 1); // 512
+        assert_eq!(base_order % n, 0);
+        let omega = mod_pow_generic(DEFAULT_OMEGA, (base_order / n) as u128, modulus);
+
+        let mut poly_a = vec![0u128; 16];
+        let mut poly_b = vec![0u128; 16];
+        for (i, coeff) in poly_a.iter_mut().enumerate() {
+            *coeff = ((i * 13 + 7) as u128) % modulus;
+        }
+        for (i, coeff) in poly_b.iter_mut().enumerate() {
+            *coeff = ((i * 9 + 5) as u128) % modulus;
+        }
+
+        let mut naive = vec![0u128; poly_a.len() + poly_b.len() - 1];
+        for (i, &a) in poly_a.iter().enumerate() {
+            for (j, &b) in poly_b.iter().enumerate() {
+                let idx = i + j;
+                let prod = mod_mul_generic(a, b, modulus);
+                naive[idx] = mod_add_generic(naive[idx], prod, modulus);
+            }
+        }
+
+        let mut a_ntt = vec![0u128; n];
+        let mut b_ntt = vec![0u128; n];
+        a_ntt[..poly_a.len()].copy_from_slice(&poly_a);
+        b_ntt[..poly_b.len()].copy_from_slice(&poly_b);
+
+        radix2_ntt_mod(&mut a_ntt, modulus, omega);
+        radix2_ntt_mod(&mut b_ntt, modulus, omega);
+        for (a_coeff, b_coeff) in a_ntt.iter_mut().zip(b_ntt.iter()) {
+            *a_coeff = mod_mul_generic(*a_coeff, *b_coeff, modulus);
+        }
+        radix2_intt_mod(&mut a_ntt, modulus, omega);
+
+        assert_eq!(&a_ntt[..naive.len()], naive.as_slice());
+    }
+
+    #[test]
+    fn cyclic_polynomial_multiplication_via_ntt_matches_naive() {
+        let modulus = DEFAULT_P;
+        let n = 16usize; // cyclic convolution length
+        // DEFAULT_OMEGA is a primitive 512-th root; derive a primitive n-th root.
+        let base_order = 1usize << (6 + 3 * 1); // 512
+        assert_eq!(base_order % n, 0);
+        let omega = mod_pow_generic(DEFAULT_OMEGA, (base_order / n) as u128, modulus);
+
+        let mut poly_a = vec![0u128; 16];
+        let mut poly_b = vec![0u128; 16];
+        for (i, coeff) in poly_a.iter_mut().enumerate() {
+            *coeff = ((i * 11 + 3) as u128) % modulus;
+        }
+        for (i, coeff) in poly_b.iter_mut().enumerate() {
+            *coeff = ((i * 7 + 2) as u128) % modulus;
+        }
+
+        let mut naive = vec![0u128; n];
+        for (i, &a) in poly_a.iter().enumerate() {
+            for (j, &b) in poly_b.iter().enumerate() {
+                let idx = (i + j) % n;
+                let prod = mod_mul_generic(a, b, modulus);
+                naive[idx] = mod_add_generic(naive[idx], prod, modulus);
+            }
+        }
+
+        let mut a_ntt = vec![0u128; n];
+        let mut b_ntt = vec![0u128; n];
+        a_ntt[..poly_a.len()].copy_from_slice(&poly_a);
+        b_ntt[..poly_b.len()].copy_from_slice(&poly_b);
+
+        radix2_ntt_mod(&mut a_ntt, modulus, omega);
+        radix2_ntt_mod(&mut b_ntt, modulus, omega);
+        for (a_coeff, b_coeff) in a_ntt.iter_mut().zip(b_ntt.iter()) {
+            *a_coeff = mod_mul_generic(*a_coeff, *b_coeff, modulus);
+        }
+        radix2_intt_mod(&mut a_ntt, modulus, omega);
+
+        assert_eq!(a_ntt, naive);
+    }   
+
+    #[test]
+    fn ntt_goes_back_and_forth() {
+        let modulus = DEFAULT_P;
+        let n = 64usize; // power of two
+        let base_order = 1usize << (6 + 3 * 1); // 512
+        assert_eq!(base_order % n, 0);
+        let omega = mod_pow_generic(DEFAULT_OMEGA, (base_order / n) as u128, modulus);
+
+        let mut data = vec![0u128; n];
+        for (i, coeff) in data.iter_mut().enumerate() {
+            *coeff = ((i * 19 + 11) as u128) % modulus;
+        }
+
+        let original = data.clone();
+        radix2_ntt_mod(&mut data, modulus, omega);
+        radix2_intt_mod(&mut data, modulus, omega);
+
+        assert_eq!(data, original);
+    }
+
+    /// Straightforward radix-2 decimation-in-time NTT used only in tests.
+    /// Requires `omega` to be a primitive n-th root of unity.
     fn radix2_ntt_mod(values: &mut [u128], modulus: u128, omega: u128) {
         let n = values.len();
         assert!(n.is_power_of_two());
@@ -403,6 +515,17 @@ mod tests {
                 }
             }
             len <<= 1;
+        }
+    }
+
+    fn radix2_intt_mod(values: &mut [u128], modulus: u128, omega: u128) {
+        let n = values.len();
+        assert!(n.is_power_of_two());
+        let omega_inv = mod_pow_generic(omega, modulus - 2, modulus);
+        radix2_ntt_mod(values, modulus, omega_inv);
+        let inv_n = mod_pow_generic(n as u128, modulus - 2, modulus);
+        for coeff in values.iter_mut() {
+            *coeff = mod_mul_generic(*coeff, inv_n, modulus);
         }
     }
 }
