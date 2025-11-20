@@ -1,10 +1,16 @@
+/// Number of branches used in each FFT layer (radix). The construction fixes
+/// this to 8 in accordance with the pseudo-Reed–Solomon spec.
 const RADIX: usize = 8;
+/// Base-case input length handled by the Vandermonde block.
 const BASE_DIM: usize = 32;
+/// Base-case output length (number of evaluation points).
 const BASE_LEN: usize = 64;
 
+/// Default prime/root pair used in the original Gemini description (works for k=1).
 const DEFAULT_P: u128 = 7681;
 const DEFAULT_OMEGA: u128 = 7146;
 
+/// Alternative pair that works for k=2 (lengths 2^{11} -> 2^{12}).
 const ALT_P_K2: u128 = 12289;
 const ALT_OMEGA_K2: u128 = 1331;
 
@@ -62,6 +68,7 @@ impl IprsCode {
         self.omega
     }
 
+    /// Encode without modular reduction, purely over the integers.
     pub fn encode(&self, row: &[u128]) -> Vec<u128> {
         assert_eq!(
             row.len(),
@@ -73,6 +80,8 @@ impl IprsCode {
         self.encode_fft(row, self.k)
     }
 
+    /// Encode while reducing every stage modulo `p`. This behaves like a
+    /// standard NTT/RS encoder and is used for cross-checks.
     pub fn encode_mod_p(&self, row: &[u128]) -> Vec<u128> {
         assert_eq!(
             row.len(),
@@ -86,6 +95,8 @@ impl IprsCode {
 
     fn encode_fft(&self, data: &[u128], depth: usize) -> Vec<u128> {
         if depth == 0 {
+            // Base-case: multiply the 32-term vector by the precomputed
+            // Vandermonde matrix to obtain 64 evaluation points.
             return self.base_multiply(data);
         }
 
@@ -96,6 +107,8 @@ impl IprsCode {
             for j in 0..chunk_len {
                 chunk.push(data[RADIX * j + chunk_idx]);
             }
+            // Recursively evaluate the “child” polynomial corresponding to
+            // coset `x ↦ x + ω^{chunk_idx}`.
             subresults.push(self.encode_fft(&chunk, depth - 1));
         }
 
@@ -125,6 +138,8 @@ impl IprsCode {
         let mut output = vec![0u128; BASE_LEN];
         for (row_idx, matrix_row) in self.base_matrix.iter().enumerate() {
             let mut acc = 0u128;
+            // Dot-product between the i-th row of the Vandermonde matrix and
+            // the 32 input coordinates.
             for col in 0..BASE_DIM {
                 let term = chunk[col]
                     .checked_mul(matrix_row[col])
@@ -150,14 +165,17 @@ impl IprsCode {
         output
     }
 
-    fn combine_stage(
-        &self,
-        subresults: &[Vec<u128>],
-        twiddle_table: &[[u128; RADIX]],
-        mode: AddMode,
-    ) -> Vec<u128> {
-        let sub_len = subresults[0].len();
-        debug_assert_eq!(twiddle_table.len(), sub_len * RADIX);
+fn combine_stage(
+    &self,
+    subresults: &[Vec<u128>],
+    twiddle_table: &[[u128; RADIX]],
+    mode: AddMode,
+) -> Vec<u128> {
+    // Each index `idx` corresponds to a single output position and therefore
+    // to a unique set of twiddle multipliers. We rely on the precomputed stage
+    // table to avoid recomputing roots on the fly.
+    let sub_len = subresults[0].len();
+    debug_assert_eq!(twiddle_table.len(), sub_len * RADIX);
 
         let mut output = vec![0u128; sub_len * RADIX];
         for (idx, slot) in output.iter_mut().enumerate() {
@@ -206,6 +224,9 @@ enum AddMode {
     Modulo,
 }
 
+/// Precompute stage-specific twiddle tables. Each table contains `stage_len`
+/// entries where entry `i` stores the RADIX consecutive powers of
+/// `(omega)^(stride * i)`. This matches the order used in the recursive FFT.
 fn build_twiddle_tables(
     k: usize,
     n: usize,
@@ -233,6 +254,8 @@ fn build_twiddle_tables(
     tables
 }
 
+/// Build the 64x32 Vandermonde block used at the leaves of the recursion. The
+/// evaluation points follow the FFT ordering induced by `(n / 64)` strides.
 fn compute_base_matrix(modulus: u128, omega: u128, n: usize) -> [[u128; BASE_DIM]; BASE_LEN] {
     let mut matrix = [[0u128; BASE_DIM]; BASE_LEN];
     // Step between successive evaluation points at the base (size-64) stage.
