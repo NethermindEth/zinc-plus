@@ -53,6 +53,29 @@ impl<R: Semiring + Zero, const DEGREE_PLUS_ONE: usize> DensePolynomial<R, DEGREE
     }
 }
 
+impl<R: Semiring, const DEGREE_PLUS_ONE: usize> DensePolynomial<R, DEGREE_PLUS_ONE> {
+    /// Create a new polynomial with the given coefficients.
+    /// If the input has fewer than N+1 coefficients, the remaining slots will
+    /// be filled with zeros. If the input has more than N+1 coefficients,
+    /// it will panic.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn new_with_zero(coeffs: impl AsRef<[R]>, zero: R) -> Self {
+        let coeffs = coeffs.as_ref();
+        assert!(
+            coeffs.len() <= DEGREE_PLUS_ONE,
+            "Too many coefficients provided: expected at most {}, got {}",
+            DEGREE_PLUS_ONE,
+            coeffs.len()
+        );
+
+        let mut coeffs = coeffs.to_vec();
+        coeffs.resize(DEGREE_PLUS_ONE, zero);
+        let coeffs = coeffs.try_into().expect("unreachable");
+
+        DensePolynomial { coeffs }
+    }
+}
+
 impl<R: Copy, const DEGREE_PLUS_ONE: usize> Copy for DensePolynomial<R, DEGREE_PLUS_ONE> {}
 
 impl<R: Default, const DEGREE_PLUS_ONE: usize> Default for DensePolynomial<R, DEGREE_PLUS_ONE> {
@@ -373,18 +396,20 @@ where
     where
         R: for<'a> MulByScalar<&'a C>,
     {
-        // A trivial implementation of a polynomial evaluation at a given point.
+        // Horner's method.
         let mut result = self
             .coeffs
             .last()
             .ok_or(EvaluationError::EmptyPolynomial)?
             .clone();
+
         for coeff in self.coeffs.iter().rev().skip(1) {
             let term = result
                 .mul_by_scalar(point)
                 .ok_or(EvaluationError::Overflow)?;
             result = term.checked_add(coeff).ok_or(EvaluationError::Overflow)?;
         }
+
         Ok(result)
     }
 }
