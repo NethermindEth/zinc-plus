@@ -1,8 +1,8 @@
 //! Dense polynomial with binary coefficients.
 use std::{fmt::Debug, ops::BitAnd};
 
-use crypto_primitives::PrimeField;
-use zinc_utils::projectable_to_field::ProjectableToField;
+use crypto_primitives::{Field, PrimeField, crypto_bigint_monty::MontyField};
+use zinc_utils::projectable_to_field::{ProjectableToField, ProjectableToFieldInner};
 
 use crate::{EvaluatablePolynomial, EvaluationError, Polynomial};
 
@@ -157,16 +157,38 @@ define_binary_poly!(BinaryPoly64, 0);
 define_binary_poly!(BinaryPoly128, 8);
 define_binary_poly!(BinaryPoly256, 24);
 
+macro_rules! impl_projectable_to_field_inner {
+    ($for:ident, $field:ty) => {
+        unsafe impl<T: BinaryPolyCarrier> ProjectableToFieldInner<$field> for $for<T> {
+            fn prepare_projection_to_inner(sampled_value: &$field) -> impl Fn(*mut Self) + 'static {
+                let project = Self::prepare_projection(sampled_value);
+                move |p| unsafe {
+                    let val = project(p.as_ref().expect("A correct pointer was expected here"));
+                    let p = p as *mut <$field as Field>::Inner;
+                    *p = val.into_inner();
+                }
+            }
+        }
+    };
+}
+
+// TODO: this is not ideal for 32bit target architectures.
+impl_projectable_to_field_inner!(BinaryPoly64, MontyField<1>);
+impl_projectable_to_field_inner!(BinaryPoly128, MontyField<2>);
+impl_projectable_to_field_inner!(BinaryPoly256, MontyField<4>);
+
 #[cfg(test)]
 mod test {
-
     use crypto_bigint::{Odd, U128, const_monty_params, modular::MontyParams};
 
     use crypto_primitives::{
         FromWithConfig, crypto_bigint_const_monty::ConstMontyField, crypto_bigint_monty::F256,
+        crypto_bigint_uint::Uint,
     };
     use itertools::Itertools;
-    use zinc_utils::projectable_to_field::ProjectableToField;
+    use zinc_utils::projectable_to_field::{
+        ProjectableToField, ProjectableToFieldInner, project_vec_in_place,
+    };
 
     use crate::{
         EvaluatablePolynomial,
@@ -245,6 +267,27 @@ mod test {
                 project(el),
                 FMonty::from_with_cfg(i as u64, &test_monty_config())
             );
+        }
+    }
+
+    #[test]
+    fn test_vec_projection() {
+        let vec = (0..(1 << 20))
+            .map(|i: u32| BinaryPoly256::from(i))
+            .collect_vec();
+
+        let config = test_monty_config();
+
+        let project =
+            BinaryPoly256::<u32>::prepare_projection_to_inner(&FMonty::from_with_cfg(2, &config));
+
+        let vec: Vec<Uint<4>> = unsafe { project_vec_in_place(vec, project) };
+
+        for (i, x) in vec.into_iter().enumerate() {
+            assert_eq!(
+                FMonty::from_montgomery(x, &config).retrieve(),
+                Uint::from(i as u64)
+            )
         }
     }
 }
