@@ -158,8 +158,7 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
 /// (\text{eval\\_at} - j)/(i-j))$.
 // All the arithmetic ops in the function
 // are made sure to not overflow.
-#[allow(clippy::arithmetic_side_effects)]
-#[allow(clippy::cast_possible_wrap)]
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_wrap)]
 pub(crate) fn interpolate_uni_poly<F: FromPrimitiveWithConfig>(
     p_i: &[F],
     x: F,

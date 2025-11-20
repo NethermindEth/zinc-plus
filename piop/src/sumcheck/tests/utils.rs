@@ -6,8 +6,7 @@ use rand::{Rng, RngCore};
 use std::ops::Range;
 use zinc_poly::{mle::DenseMultilinearExtension, utils::ArithErrors};
 
-#[allow(clippy::arithmetic_side_effects)]
-#[allow(clippy::type_complexity)]
+#[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
 pub(crate) fn rand_poly<F: PrimeField + Random, Rn: RngCore>(
     nv: usize,
     num_multiplicands_range: Range<usize>,
