@@ -41,10 +41,6 @@ parallel = ["dep:rayon", "zinc-poly/parallel"]
 asm = ["zinc-transcript/asm"]
 
 [[bench]]
-name = "random_field_benches"
-harness = false
-
-[[bench]]
 name = "zip_benches"
 harness = false
 
