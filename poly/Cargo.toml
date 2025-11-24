@@ -27,6 +27,7 @@ rayon = { workspace = true, optional = true }
 crypto-primes = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 proptest = { workspace = true }
 
 [lints]
@@ -35,3 +36,6 @@ workspace = true
 [features]
 parallel = ["dep:rayon"]
 
+[[bench]]
+name = "nat_evaluation"
+harness = false
