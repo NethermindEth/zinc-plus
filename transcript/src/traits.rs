@@ -4,7 +4,7 @@
 
 use crypto_bigint::{BitOps, BoxedUint, Word};
 use crypto_primitives::{
-    ConstIntSemiring, WORD_FACTOR, boolean::Boolean, crypto_bigint_int::Int,
+    ConstIntSemiring, PrimeField, WORD_FACTOR, boolean::Boolean, crypto_bigint_int::Int,
     crypto_bigint_uint::Uint,
 };
 use itertools::Itertools;
@@ -76,6 +76,15 @@ pub trait Transcript {
     /// current transcript state, updating it.
     fn get_challenge<T: ConstTranscribable>(&mut self) -> T;
 
+    fn get_field_challenge<F: PrimeField>(&mut self, cfg: &F::Config) -> F
+    where
+        F::Inner: ConstTranscribable,
+    {
+        let random_inner = self.get_challenge();
+
+        F::new_with_cfg(random_inner, cfg)
+    }
+
     /// Generates a pseudorandom transcribable values as challenges based on the
     /// current transcript state, updating it.
     fn get_challenges<T: ConstTranscribable>(&mut self, n: usize) -> Vec<T> {
@@ -83,6 +92,28 @@ pub trait Transcript {
     }
 
     fn get_prime<R: ConstIntSemiring + ConstTranscribable, T: PrimalityTest<R>>(&mut self) -> R;
+
+    /// Absorbs a byte slice into the hash sponge.
+    fn absorb(&mut self, v: &[u8]);
+
+    /// Absorbs a field element into the transcript.
+    /// Delegates to the field element's implementation of
+    /// absorb_into_transcript.
+    fn absorb_random_field<F>(&mut self, v: &F, buf: &mut [u8])
+    where
+        F: PrimeField,
+        F::Inner: Transcribable;
+
+    /// Absorbs a slice of field element into the transcript.
+    /// Delegates to the field element's implementation of
+    /// absorb_into_transcript.
+    fn absorb_random_field_slice<F>(&mut self, v: &[F], buf: &mut [u8])
+    where
+        F: PrimeField,
+        F::Inner: Transcribable,
+    {
+        v.iter().for_each(|x| self.absorb_random_field(x, buf));
+    }
 }
 
 //
