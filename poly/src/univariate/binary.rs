@@ -49,7 +49,24 @@ macro_rules! define_binary_poly {
             const DEGREE_BOUND: usize = T::BIT_SIZE as usize;
         }
 
+        impl<T: BinaryPolyCarrier> $name<T> {
+            #[inline(always)]
+            pub fn x(i: u32) -> Option<Self> {
+                if i >= T::BIT_SIZE {
+                    return None;
+                }
+
+                let coeffs = (1 << i).try_into().unwrap();
+                Some(Self {
+                    coeffs,
+                    _pad_to_word: Default::default(),
+                    _padding: [0; $align],
+                })
+            }
+        }
+
         impl<T: BinaryPolyCarrier> From<T> for $name<T> {
+            #[inline(always)]
             fn from(x: T) -> Self {
                 Self {
                     coeffs: x,
@@ -190,6 +207,16 @@ mod test {
         let project = BinaryPoly128::<u32>::prepare_projection(&F::from(2));
         for i in 0..u32::from(u16::MAX) {
             assert_eq!(project(&BinaryPoly128::from(i)), F::from(i));
+        }
+    }
+
+    #[test]
+    fn x_value_on_2() {
+        for i in 0..64 {
+            let x = BinaryPoly256::<u64>::x(i).unwrap();
+            let x_val = x.evaluate_at_point(&F::from(2)).unwrap();
+            // 1u64 to not fall into i64.
+            assert_eq!(x_val, F::from(1u64 << i));
         }
     }
 
