@@ -15,22 +15,54 @@ const BASE_LEN: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
 pub struct IprsConfig {
-    pub modulus: i128,
-    pub omega: i128,
+    // pub modulus: i128,
+    // pub omega: i128,
     pub k: usize,
     pub m: usize,
     pub n: usize,
 }
 
+trait IprsHelpers<Twiddle> {
+    fn build_twiddle_tables(&self) -> Vec<Vec<[Twiddle; RADIX]>>;
+    fn compute_base_matrix(&self) -> [[Twiddle; BASE_DIM]; BASE_LEN];
+}
+
+fn params_for_k(k: usize) -> (i128, i128) {
+    match k {
+        1 => (7681, 7146),
+        2 => (12289, 1331),
+        _ => panic!("unsupported k: {}", k),
+    }
+}
+
+impl <Twiddle: FromRef<i128>> IprsHelpers<Twiddle> for IprsConfig {
+    fn build_twiddle_tables(&self) -> Vec<Vec<[Twiddle; RADIX]>> {
+        let (modulus, omega) = params_for_k(self.k);
+        build_twiddle_tables(self.k, self.n, modulus, omega)
+            .into_iter()
+            .map(|stage| {
+                stage
+                    .into_iter()
+                    .map(|twiddles| from_fn(|i| Twiddle::from_ref(&twiddles[i])))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn compute_base_matrix(&self) -> [[Twiddle; BASE_DIM]; BASE_LEN] {
+        let (modulus, omega) = params_for_k(self.k);
+        compute_base_matrix(modulus, omega, self.n)
+            .map(|row| from_fn(|i| Twiddle::from_ref(&row[i])))
+    }
+}
+
 impl IprsConfig {
     /// Create a code with custom modulus and generator. The pair must satisfy
     /// that `ω` is a primitive `N`-th root of unity in ℤ_p, where `N = 2^{6+3k}`.
-    pub fn new(k: usize, modulus: i128, omega: i128) -> Self {
+    pub fn new(k: usize) -> Self {
         let m = 1usize << (5 + 3 * k);
         let n = 1usize << (6 + 3 * k);
         Self {
-            modulus,
-            omega,
             k,
             m,
             n,
@@ -134,8 +166,8 @@ impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for IprsCode<Zt, REP>
 where
     Zt: ZipTypes,
     // For simplicity, we require that the Twiddle type can be created from i128
-
-    Zt::Twiddle: FromRef<i128>
+    Zt::Twiddle: FromRef<i128>,
+    IprsConfig: IprsHelpers<Zt::Twiddle>,
 {
     type Config = IprsConfig;
 
@@ -149,20 +181,8 @@ where
             poly_size,
             config.m
         );
-        let base_matrix_raw = compute_base_matrix(config.modulus, config.omega, config.n);
-        let twiddle_tables_raw =
-            build_twiddle_tables(config.k, config.n, config.modulus, config.omega);
-        let base_matrix =
-            from_fn(|row| from_fn(|col| Zt::Twiddle::from_ref(&base_matrix_raw[row][col])));
-        let twiddle_tables = twiddle_tables_raw
-            .into_iter()
-            .map(|stage| {
-                stage
-                    .into_iter()
-                    .map(|entry| entry.map(|value| Zt::Twiddle::from_ref(&value)))
-                    .collect()
-            })
-            .collect();
+        let base_matrix = config.compute_base_matrix();
+        let twiddle_tables = config.build_twiddle_tables();
         Self {
             cfg: config,
             twiddle_tables,
@@ -289,10 +309,10 @@ mod tests {
     use num_traits::{CheckedAdd, CheckedMul, CheckedRem, CheckedSub, One, Zero};
     use zinc_utils::from_ref::FromRef;
 
-    const DEFAULT_P: i128 = 7681;
-    const DEFAULT_OMEGA: i128 = 7146;
-    const ALT_P_K2: i128 = 12289;
-    const ALT_OMEGA_K2: i128 = 1331;
+    const K_1_P: i128 = 7681;
+    const K_1_OMEGA: i128 = 7146;
+    const K_2_P: i128 = 12289;
+    const K_2_OMEGA: i128 = 1331;
 
     const EVAL_LIMBS: usize = 4;
     const CW_LIMBS: usize = 4;
@@ -305,15 +325,15 @@ mod tests {
     const REPETITION_FACTOR: usize = 4;
 
 
-    fn make_code(k: usize, modulus: i128, omega: i128) -> IprsCode<TestZt, REPETITION_FACTOR> {
-        let cfg = IprsConfig::new(k, modulus, omega);
+    fn make_code(k: usize) -> IprsCode<TestZt, REPETITION_FACTOR> {
+        let cfg = IprsConfig::new(k);
         let row_len = cfg.m;
         LinearCode::new(row_len, cfg)
     }
 
     #[test]
     fn encode_has_expected_lengths() {
-        let code = make_code(1, DEFAULT_P, DEFAULT_OMEGA);
+        let code = make_code(1);
         let input = vec![EvalInt::one(); code.row_len()];
         let output = code.encode(&input);
         assert_eq!(output.len(), code.codeword_len());
@@ -321,7 +341,7 @@ mod tests {
 
     #[test]
     fn encode_is_deterministic() {
-        let code = make_code(1, DEFAULT_P, DEFAULT_OMEGA);
+        let code = make_code(1);
         let mut input = vec![EvalInt::zero(); code.row_len()];
         for (idx, value) in input.iter_mut().enumerate() {
             *value = EvalInt::from((idx as i32).pow(3));
@@ -333,10 +353,10 @@ mod tests {
 
     #[test]
     fn mod_p_matches_reduction() {
-        let configs = [(1, DEFAULT_P, DEFAULT_OMEGA), (2, ALT_P_K2, ALT_OMEGA_K2)];
+        let configs = [(1, K_1_P, K_1_OMEGA), (2, K_2_P, K_2_OMEGA)];
 
         for (k, modulus_val, omega_val) in configs {
-            let code = make_code(k, modulus_val, omega_val);
+            let code = make_code(k);
             let mut input = vec![EvalInt::zero(); code.row_len()];
             for (idx, value) in input.iter_mut().enumerate() {
                 *value = EvalInt::from(((idx * 17 + 5) as i128).pow(2));
@@ -344,8 +364,8 @@ mod tests {
 
             let wide = code.encode(&input);
 
-            let modulus = CwInt::from(code.cfg.modulus);
-            let omega = CwInt::from(code.cfg.omega);
+            let modulus = CwInt::from(modulus_val);
+            let omega = CwInt::from(omega_val);
 
             let mut padded = vec![CwInt::zero(); code.codeword_len()];
             for (dst, src) in padded.iter_mut().zip(input.iter()) {
@@ -361,13 +381,13 @@ mod tests {
 
     #[test]
     fn polynomial_multiplication_via_ntt_matches_naive() {
-        let modulus_val = DEFAULT_P;
+        let modulus_val = K_1_P;
         let modulus = CwInt::from(modulus_val);
         let n = 32usize;
         let base_order = 1usize << (6 + 3 * 1);
         assert_eq!(base_order % n, 0);
         let omega_val =
-            super::mod_pow_generic(DEFAULT_OMEGA, (base_order / n) as u128, modulus_val);
+            super::mod_pow_generic(K_1_OMEGA, (base_order / n) as u128, modulus_val);
         let omega = CwInt::from(omega_val);
 
         let mut poly_a = vec![CwInt::zero(); 16];
@@ -405,13 +425,13 @@ mod tests {
 
     #[test]
     fn cyclic_polynomial_multiplication_via_ntt_matches_naive() {
-        let modulus_val = DEFAULT_P;
+        let modulus_val = K_1_P;
         let modulus = CwInt::from(modulus_val);
         let n = 16usize;
         let base_order = 1usize << (6 + 3 * 1);
         assert_eq!(base_order % n, 0);
         let omega_val =
-            super::mod_pow_generic(DEFAULT_OMEGA, (base_order / n) as u128, modulus_val);
+            super::mod_pow_generic(K_1_OMEGA, (base_order / n) as u128, modulus_val);
         let omega = CwInt::from(omega_val);
 
         let mut poly_a = vec![CwInt::zero(); 16];
@@ -449,13 +469,13 @@ mod tests {
 
     #[test]
     fn ntt_goes_back_and_forth() {
-        let modulus_val = DEFAULT_P;
+        let modulus_val = K_1_P;
         let modulus = CwInt::from(modulus_val);
         let n = 64usize;
         let base_order = 1usize << (6 + 3 * 1);
         assert_eq!(base_order % n, 0);
         let omega_val =
-            super::mod_pow_generic(DEFAULT_OMEGA, (base_order / n) as u128, modulus_val);
+            super::mod_pow_generic(K_1_OMEGA, (base_order / n) as u128, modulus_val);
         let omega = CwInt::from(omega_val);
 
         let mut data = vec![CwInt::zero(); n];
