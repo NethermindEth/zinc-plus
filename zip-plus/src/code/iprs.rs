@@ -12,20 +12,13 @@ const BASE_DIM: usize = 32;
 /// Base-case output length (number of evaluation points).
 const BASE_LEN: usize = 64;
 
-/// Default prime/root pair used in the original Gemini description (works for k=1).
-const DEFAULT_P: i128 = 7681;
-const DEFAULT_OMEGA: i128 = 7146;
-
-/// Alternative pair that works for k=2 (lengths 2^{11} -> 2^{12}).
-const ALT_P_K2: i128 = 12289;
-const ALT_OMEGA_K2: i128 = 1331;
 
 #[derive(Debug, Clone)]
-pub struct IprsConfig {
-    pub modulus: i128,
-    pub omega: i128,
-    pub twiddle_tables: Vec<Vec<[i128; RADIX]>>,
-    pub base_matrix: [[i128; BASE_DIM]; BASE_LEN],
+pub struct IprsConfig<Twiddle: ConstIntSemiring + ConstTranscribable + Named> {
+    pub modulus: Twiddle,
+    pub omega: Twiddle,
+    pub twiddle_tables: Vec<Vec<[Twiddle; RADIX]>>,
+    pub base_matrix: [[Twiddle; BASE_DIM]; BASE_LEN],
     // We fix those values in the config as they define the twiddle tables.
     // depth of the recursion
     pub k: usize,
@@ -35,7 +28,7 @@ pub struct IprsConfig {
     pub n: usize,
 }
 
-impl IprsConfig {
+impl IprsConfig<i128> {
     /// Create a code with custom modulus and generator. The pair must satisfy
     /// that `ω` is a primitive `N`-th root of unity in ℤ_p, where `N = 2^{6+3k}`.
     pub fn new(k: usize, modulus: i128, omega: i128) -> Self {
@@ -60,12 +53,12 @@ impl IprsConfig {
 /// NTT-style recursion with a base Vandermonde matrix of dimensions 64x32.
 #[derive(Debug, Clone)]
 pub struct IprsCode {
-    pub cfg: IprsConfig,
+    pub cfg: IprsConfig<i128>,
 }
 
 impl IprsCode {
-    /// Create a code with the default `(p, ω)` pair `(7681, 7146)`, valid for `k = 1`.
-    pub fn new (config: IprsConfig) -> Self {
+    /// Create a code with the default `(p, ω)` pair e.g. `(7681, 7146)`, valid for `k = 1`.
+    pub fn new (config: IprsConfig<i128>) -> Self {
         Self { cfg: config }
     }
 
@@ -216,20 +209,6 @@ fn mod_mul_generic(a: i128, b: i128, modulus: i128) -> i128 {
     canonical_mod(a_red * b_red, modulus)
 }
 
-fn mod_add_generic(a: i128, b: i128, modulus: i128) -> i128 {
-    let a_red = canonical_mod(a, modulus);
-    let b_red = canonical_mod(b, modulus);
-    let tmp = a_red + b_red;
-    if tmp >= modulus { tmp - modulus } else { tmp }
-}
-
-fn mod_sub_generic(a: i128, b: i128, modulus: i128) -> i128 {
-    let a_red = canonical_mod(a, modulus);
-    let b_red = canonical_mod(b, modulus);
-    let diff = a_red - b_red;
-    if diff < 0 { diff + modulus } else { diff }
-}
-
 fn mod_pow_generic(base: i128, exp: u128, modulus: i128) -> i128 {
     let mut result = 1i128;
     let mut b = canonical_mod(base, modulus);
@@ -249,9 +228,31 @@ mod tests {
     use crate::code::iprs::IprsConfig;
 
     use super::{
-        ALT_OMEGA_K2, ALT_P_K2, DEFAULT_OMEGA, DEFAULT_P, IprsCode, canonical_mod, mod_add_generic,
-        mod_mul_generic, mod_pow_generic, mod_sub_generic,
+        IprsCode, canonical_mod,mod_mul_generic, mod_pow_generic,
     };
+
+    /// Default prime/root pair used in the original Gemini description (works for k=1).
+    const DEFAULT_P: i128 = 7681;
+    const DEFAULT_OMEGA: i128 = 7146;
+
+    /// Alternative pair that works for k=2 (lengths 2^{11} -> 2^{12}).
+    const ALT_P_K2: i128 = 12289;
+    const ALT_OMEGA_K2: i128 = 1331;
+
+    fn mod_add_generic(a: i128, b: i128, modulus: i128) -> i128 {
+        let a_red = canonical_mod(a, modulus);
+        let b_red = canonical_mod(b, modulus);
+        let tmp = a_red + b_red;
+        if tmp >= modulus { tmp - modulus } else { tmp }
+    }
+
+    fn mod_sub_generic(a: i128, b: i128, modulus: i128) -> i128 {
+        let a_red = canonical_mod(a, modulus);
+        let b_red = canonical_mod(b, modulus);
+        let diff = a_red - b_red;
+        if diff < 0 { diff + modulus } else { diff }
+    }
+
 
     #[test]
     fn encode_has_expected_lengths() {
