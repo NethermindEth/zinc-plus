@@ -3,6 +3,7 @@ use crate::{
     merkle::{MerkleTree, MtHash},
 };
 use crypto_primitives::{ConstIntRing, ConstIntSemiring, DenseRowMatrix, FixedSemiring};
+use num_traits::CheckedAdd;
 use std::{marker::PhantomData, ops::Neg};
 use zinc_poly::{ConstCoeffBitWidth, Polynomial};
 use zinc_primality::PrimalityTest;
@@ -17,13 +18,18 @@ pub trait ZipTypes: Send + Sync {
     /// Semiring of witness/polynomial evaluations on boolean hypercube
     type Eval: FixedSemiring + Named + ConstCoeffBitWidth;
 
+    /// Semiring of twiddle factors for FFTs
+    type Twiddle: ConstIntSemiring + ConstTranscribable + Named + Copy;
+
     /// Semiring of codeword elements, at least as wide as the evaluation ring
     type Cw: FixedSemiring
         + ConstCoeffBitWidth
         + ConstTranscribable
         + FromRef<Self::Eval>
         + Named
-        + Copy;
+        + Copy
+        + for<'a> MulByScalar<&'a Self::Twiddle>
+        + CheckedAdd;
 
     /// Semiring type used to draft field modulus elements, natural numbers
     type Fmod: ConstIntSemiring + ConstTranscribable + Named;

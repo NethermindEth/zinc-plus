@@ -42,6 +42,7 @@ pub struct TestZipTypes<const N: usize, const K: usize, const M: usize> {}
 impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N, K, M> {
     const NUM_COLUMN_OPENINGS: usize = 650;
     type Eval = Int<N>;
+    type Twiddle = Int<K>;
     type Cw = Int<K>;
     type Fmod = Uint<K>;
     type PrimeTest = MillerRabin;
@@ -57,6 +58,7 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
 {
     const NUM_COLUMN_OPENINGS: usize = 650;
     type Eval = DensePolynomial<Boolean, DEGREE_PLUS_ONE>;
+    type Twiddle = i32;
     type Cw = DensePolynomial<i32, DEGREE_PLUS_ONE>;
     type Fmod = Uint<K>;
     type PrimeTest = MillerRabin;
