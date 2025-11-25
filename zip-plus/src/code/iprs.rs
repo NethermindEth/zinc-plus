@@ -1,3 +1,9 @@
+use crypto_primitives::ConstIntSemiring;
+use zinc_transcript::traits::ConstTranscribable;
+use zinc_utils::named::Named;
+
+use crate::pcs::structs::ZipTypes;
+
 /// Number of branches used in each NTT layer (radix). The construction fixes
 /// this to 8 in accordance with the pseudo-Reed–Solomon spec.
 const RADIX: usize = 8;
@@ -14,70 +20,65 @@ const DEFAULT_OMEGA: i128 = 7146;
 const ALT_P_K2: i128 = 12289;
 const ALT_OMEGA_K2: i128 = 1331;
 
-/// Pseudo Reed-Solomon encoder over the integers. Internally uses a radix-8
-/// NTT-style recursion with a base Vandermonde matrix of dimensions 64x32.
 #[derive(Debug, Clone)]
-pub struct IprsCode {
-    k: usize,
-    m: usize,
-    n: usize,
-    modulus: i128,
-    omega: i128,
-    twiddle_tables: Vec<Vec<[i128; RADIX]>>,
-    base_matrix: [[i128; BASE_DIM]; BASE_LEN],
+pub struct IprsConfig {
+    pub modulus: i128,
+    pub omega: i128,
+    pub twiddle_tables: Vec<Vec<[i128; RADIX]>>,
+    pub base_matrix: [[i128; BASE_DIM]; BASE_LEN],
+    // We fix those values in the config as they define the twiddle tables.
+    // depth of the recursion
+    pub k: usize,
+    // input row length
+    pub m: usize,
+    // codeword length
+    pub n: usize,
 }
 
-impl IprsCode {
-    /// Create a code with the default `(p, ω)` pair `(7681, 7146)`, valid for `k = 1`.
-    pub fn new(k: usize) -> Self {
-        Self::with_params(k, DEFAULT_P, DEFAULT_OMEGA)
-    }
-
+impl IprsConfig {
     /// Create a code with custom modulus and generator. The pair must satisfy
     /// that `ω` is a primitive `N`-th root of unity in ℤ_p, where `N = 2^{6+3k}`.
-    pub fn with_params(k: usize, modulus: i128, omega: i128) -> Self {
-        assert!(k > 0, "k must be positive");
+    pub fn new(k: usize, modulus: i128, omega: i128) -> Self {
         let m = 1usize << (5 + 3 * k);
         let n = 1usize << (6 + 3 * k);
         let base_matrix = compute_base_matrix(modulus, omega, n);
         let twiddle_tables = build_twiddle_tables(k, n, modulus, omega);
         Self {
-            k,
-            m,
-            n,
             modulus,
             omega,
             twiddle_tables,
             base_matrix,
+            k,
+            m,
+            n,
         }
     }
+    
+}
 
-    pub fn row_len(&self) -> usize {
-        self.m
-    }
+/// Pseudo Reed-Solomon encoder over the integers. Internally uses a radix-8
+/// NTT-style recursion with a base Vandermonde matrix of dimensions 64x32.
+#[derive(Debug, Clone)]
+pub struct IprsCode {
+    pub cfg: IprsConfig,
+}
 
-    pub fn codeword_len(&self) -> usize {
-        self.n
-    }
-
-    pub fn modulus(&self) -> i128 {
-        self.modulus
-    }
-
-    pub fn omega(&self) -> i128 {
-        self.omega
+impl IprsCode {
+    /// Create a code with the default `(p, ω)` pair `(7681, 7146)`, valid for `k = 1`.
+    pub fn new (config: IprsConfig) -> Self {
+        Self { cfg: config }
     }
 
     /// Encode without modular reduction, purely over the integers.
     pub fn encode(&self, row: &[i128]) -> Vec<i128> {
         assert_eq!(
             row.len(),
-            self.m,
+            self.cfg.m,
             "Input length {} does not match expected row length {}",
             row.len(),
-            self.m
+            self.cfg.m
         );
-        self.encode_ntt(row, self.k)
+        self.encode_ntt(row, self.cfg.k)
     }
 
     fn encode_ntt(&self, data: &[i128], depth: usize) -> Vec<i128> {
@@ -99,13 +100,13 @@ impl IprsCode {
             subresults.push(self.encode_ntt(&chunk, depth - 1));
         }
 
-        self.combine_stage(&subresults, &self.twiddle_tables[depth - 1], AddMode::Wide)
+        self.combine_stage(&subresults, &self.cfg.twiddle_tables[depth - 1])
     }
 
     fn base_multiply(&self, chunk: &[i128]) -> Vec<i128> {
         assert_eq!(chunk.len(), BASE_DIM);
         let mut output = vec![0i128; BASE_LEN];
-        for (row_idx, matrix_row) in self.base_matrix.iter().enumerate() {
+        for (row_idx, matrix_row) in self.cfg.base_matrix.iter().enumerate() {
             let mut acc = 0i128;
             // Dot-product between the i-th row of the Vandermonde matrix and
             // the 32 input coordinates.
@@ -120,63 +121,10 @@ impl IprsCode {
         output
     }
 
-    /// Encode while reducing every stage modulo `p`. This behaves like a
-    /// standard NTT/RS encoder and is used for cross-checks.
-    #[cfg(test)]
-    pub fn encode_mod_p(&self, row: &[i128]) -> Vec<i128> {
-        assert_eq!(
-            row.len(),
-            self.m,
-            "Input length {} does not match expected row length {}",
-            row.len(),
-            self.m
-        );
-        self.encode_ntt_mod(row, self.k)
-    }
-
-    #[cfg(test)]
-    fn encode_ntt_mod(&self, data: &[i128], depth: usize) -> Vec<i128> {
-        if depth == 0 {
-            return self.base_multiply_mod(data);
-        }
-
-        let chunk_len = data.len() / RADIX;
-        let mut subresults = Vec::with_capacity(RADIX);
-        for chunk_idx in 0..RADIX {
-            let mut chunk = Vec::with_capacity(chunk_len);
-            for j in 0..chunk_len {
-                chunk.push(canonical_mod(data[RADIX * j + chunk_idx], self.modulus));
-            }
-            subresults.push(self.encode_ntt_mod(&chunk, depth - 1));
-        }
-
-        self.combine_stage(
-            &subresults,
-            &self.twiddle_tables[depth - 1],
-            AddMode::Modulo,
-        )
-    }
-
-    #[cfg(test)]
-    fn base_multiply_mod(&self, chunk: &[i128]) -> Vec<i128> {
-        assert_eq!(chunk.len(), BASE_DIM);
-        let mut output = vec![0i128; BASE_LEN];
-        for (row_idx, matrix_row) in self.base_matrix.iter().enumerate() {
-            let mut acc = 0i128;
-            for col in 0..BASE_DIM {
-                let term = self.mod_mul(canonical_mod(chunk[col], self.modulus), matrix_row[col]);
-                acc = self.mod_add(acc, term);
-            }
-            output[row_idx] = acc;
-        }
-        output
-    }
-
     fn combine_stage(
         &self,
         subresults: &[Vec<i128>],
         twiddle_table: &[[i128; RADIX]],
-        mode: AddMode,
     ) -> Vec<i128> {
         // Each index `idx` corresponds to a single output position and therefore
         // to a unique set of twiddle multipliers. We rely on the precomputed stage
@@ -188,42 +136,17 @@ impl IprsCode {
         for (idx, slot) in output.iter_mut().enumerate() {
             let column = idx % sub_len;
             let twiddles = &twiddle_table[idx];
-            match mode {
-                AddMode::Wide => {
-                    let mut acc = 0i128;
-                    for branch in 0..RADIX {
-                        let term = subresults[branch][column]
-                            .checked_mul(twiddles[branch])
-                            .expect("Multiplication overflow");
-                        acc = acc.checked_add(term).expect("Addition overflow");
-                    }
-                    *slot = acc;
-                }
-                AddMode::Modulo => {
-                    let mut acc = 0i128;
-                    for branch in 0..RADIX {
-                        let term = self.mod_mul(subresults[branch][column], twiddles[branch]);
-                        acc = self.mod_add(acc, term);
-                    }
-                    *slot = acc;
-                }
+            let mut acc = 0i128;
+            for branch in 0..RADIX {
+                let term = subresults[branch][column]
+                    .checked_mul(twiddles[branch])
+                    .expect("Multiplication overflow");
+                acc = acc.checked_add(term).expect("Addition overflow");
             }
+            *slot = acc;
         }
         output
     }
-
-    fn mod_add(&self, a: i128, b: i128) -> i128 {
-        mod_add_generic(a, b, self.modulus)
-    }
-
-    fn mod_mul(&self, a: i128, b: i128) -> i128 {
-        mod_mul_generic(a, b, self.modulus)
-    }
-}
-
-enum AddMode {
-    Wide,
-    Modulo,
 }
 
 /// Precompute stage-specific twiddle tables. Each table contains `stage_len`
@@ -323,6 +246,8 @@ fn mod_pow_generic(base: i128, exp: u128, modulus: i128) -> i128 {
 
 #[cfg(test)]
 mod tests {
+    use crate::code::iprs::IprsConfig;
+
     use super::{
         ALT_OMEGA_K2, ALT_P_K2, DEFAULT_OMEGA, DEFAULT_P, IprsCode, canonical_mod, mod_add_generic,
         mod_mul_generic, mod_pow_generic, mod_sub_generic,
@@ -330,16 +255,16 @@ mod tests {
 
     #[test]
     fn encode_has_expected_lengths() {
-        let code = IprsCode::new(1);
-        let input = vec![1i128; code.row_len()];
+        let code = IprsCode::new(IprsConfig::new(1, DEFAULT_P, DEFAULT_OMEGA));
+        let input = vec![1i128; code.cfg.m];
         let output = code.encode(&input);
-        assert_eq!(output.len(), code.codeword_len());
+        assert_eq!(output.len(), code.cfg.n);
     }
 
     #[test]
     fn encode_is_deterministic() {
-        let code = IprsCode::new(1);
-        let mut input = vec![0i128; code.row_len()];
+        let code = IprsCode::new(IprsConfig::new(1, DEFAULT_P, DEFAULT_OMEGA));
+        let mut input = vec![0i128; code.cfg.m];
         for (idx, value) in input.iter_mut().enumerate() {
             *value = (idx as i128).pow(3);
         }
@@ -350,36 +275,24 @@ mod tests {
 
     #[test]
     fn mod_p_matches_reduction() {
-        let code = IprsCode::new(1);
-        let mut input = vec![0i128; code.row_len()];
-        for (idx, value) in input.iter_mut().enumerate() {
-            *value = ((idx * 17 + 5) as i128).pow(2);
-        }
-
-        let wide = code.encode(&input);
-        let narrow = code.encode_mod_p(&input);
-        for (w, n) in wide.iter().zip(narrow.iter()) {
-            assert_eq!(n, &canonical_mod(*w, code.modulus()));
-        }
-    }
-
-    #[test]
-    fn matches_radix2_ntt_mod_p_for_k1_and_k2() {
-        let configs = [(1, DEFAULT_P, DEFAULT_OMEGA), (2, ALT_P_K2, ALT_OMEGA_K2)];
+         let configs = [(1, DEFAULT_P, DEFAULT_OMEGA), (2, ALT_P_K2, ALT_OMEGA_K2)];
 
         for (k, modulus, omega) in configs {
-            let code = IprsCode::with_params(k, modulus, omega);
-            let mut input = vec![0i128; code.row_len()];
+            let code = IprsCode::new(IprsConfig::new(k, modulus, omega));
+            let mut input = vec![0i128; code.cfg.m];
             for (idx, value) in input.iter_mut().enumerate() {
-                *value = ((idx * 31 + 7) as i128) % modulus;
+                *value = ((idx * 17 + 5) as i128).pow(2);
             }
 
-            let mut padded = vec![0i128; code.codeword_len()];
-            padded[..input.len()].copy_from_slice(&input);
-            radix2_ntt_mod(&mut padded, modulus, omega);
+            let wide = code.encode(&input);
 
-            let ours = code.encode_mod_p(&input);
-            assert_eq!(ours, padded);
+            let mut padded = vec![0i128; code.cfg.n];
+            padded[..input.len()].copy_from_slice(&input);
+            radix2_ntt_mod(&mut padded, code.cfg.modulus, code.cfg.omega);
+
+            for (w, n) in wide.iter().zip(padded.iter()) {
+                assert_eq!(n, &canonical_mod(*w, code.cfg.modulus));
+            }
         }
     }
 
