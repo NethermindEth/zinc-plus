@@ -1,8 +1,11 @@
+use crypto_bigint::{CheckedAdd, CheckedMul};
 use crypto_primitives::ConstIntSemiring;
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::named::Named;
+use zinc_utils::{add, from_ref::FromRef, mul};
 
-use crate::pcs::structs::ZipTypes;
+
+use crate::{code::LinearCode, pcs::structs::ZipTypes};
 
 /// Number of branches used in each NTT layer (radix). The construction fixes
 /// this to 8 in accordance with the pseudo-Reed–Solomon spec.
@@ -13,12 +16,13 @@ const BASE_DIM: usize = 32;
 const BASE_LEN: usize = 64;
 
 
-#[derive(Debug, Clone)]
-pub struct IprsConfig<Twiddle: ConstIntSemiring + ConstTranscribable + Named> {
+#[derive(Debug, Clone, Copy)]
+pub struct IprsConfig<Twiddle: ConstIntSemiring + ConstTranscribable + Named + Copy> {
     pub modulus: Twiddle,
     pub omega: Twiddle,
-    pub twiddle_tables: Vec<Vec<[Twiddle; RADIX]>>,
-    pub base_matrix: [[Twiddle; BASE_DIM]; BASE_LEN],
+    pub build_twiddle_tables: fn (usize, usize, Twiddle, Twiddle) -> Vec<Vec<[Twiddle; RADIX]>>,
+    pub compute_base_matrix: fn (Twiddle, Twiddle, usize) -> [[Twiddle; BASE_DIM]; BASE_LEN],
+
     // We fix those values in the config as they define the twiddle tables.
     // depth of the recursion
     pub k: usize,
@@ -34,13 +38,12 @@ impl IprsConfig<i128> {
     pub fn new(k: usize, modulus: i128, omega: i128) -> Self {
         let m = 1usize << (5 + 3 * k);
         let n = 1usize << (6 + 3 * k);
-        let base_matrix = compute_base_matrix(modulus, omega, n);
-        let twiddle_tables = build_twiddle_tables(k, n, modulus, omega);
+    
         Self {
             modulus,
             omega,
-            twiddle_tables,
-            base_matrix,
+            build_twiddle_tables,
+            compute_base_matrix,
             k,
             m,
             n,
@@ -52,18 +55,15 @@ impl IprsConfig<i128> {
 /// Pseudo Reed-Solomon encoder over the integers. Internally uses a radix-8
 /// NTT-style recursion with a base Vandermonde matrix of dimensions 64x32.
 #[derive(Debug, Clone)]
-pub struct IprsCode {
-    pub cfg: IprsConfig<i128>,
+pub struct IprsCode<Zt: ZipTypes> {
+    pub twiddle_tables: Vec<Vec<[Zt::Twiddle; RADIX]>>,
+    pub base_matrix: [[Zt::Twiddle; BASE_DIM]; BASE_LEN],
+    pub cfg: IprsConfig<Zt::Twiddle>
 }
 
-impl IprsCode {
-    /// Create a code with the default `(p, ω)` pair e.g. `(7681, 7146)`, valid for `k = 1`.
-    pub fn new (config: IprsConfig<i128>) -> Self {
-        Self { cfg: config }
-    }
-
+impl<Zt: ZipTypes> IprsCode<Zt> {
     /// Encode without modular reduction, purely over the integers.
-    pub fn encode(&self, row: &[i128]) -> Vec<i128> {
+    fn encode_inner(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
         assert_eq!(
             row.len(),
             self.cfg.m,
@@ -71,14 +71,17 @@ impl IprsCode {
             row.len(),
             self.cfg.m
         );
-        self.encode_ntt(row, self.cfg.k)
+        let row_cw = row.iter().map(|v| Zt::Cw::from_ref(v)).collect::<Vec<_>>();
+
+        self.encode_ntt(&row_cw, self.cfg.k)
     }
 
-    fn encode_ntt(&self, data: &[i128], depth: usize) -> Vec<i128> {
+    fn encode_ntt(&self, data: &[Zt::Cw], depth: usize) -> Vec<Zt::Cw> {
+
         if depth == 0 {
             // Base-case: multiply the 32-term vector by the precomputed
             // Vandermonde matrix to obtain 64 evaluation points.
-            return self.base_multiply(data);
+            return self.base_multiply(&data);
         }
 
         let chunk_len = data.len() / RADIX;
@@ -93,21 +96,21 @@ impl IprsCode {
             subresults.push(self.encode_ntt(&chunk, depth - 1));
         }
 
-        self.combine_stage(&subresults, &self.cfg.twiddle_tables[depth - 1])
+        self.combine_stage(&subresults, &self.twiddle_tables[depth - 1])
     }
 
-    fn base_multiply(&self, chunk: &[i128]) -> Vec<i128> {
+    fn base_multiply(&self, chunk: &[Zt::Cw]) -> Vec<Zt::Cw> {
         assert_eq!(chunk.len(), BASE_DIM);
-        let mut output = vec![0i128; BASE_LEN];
-        for (row_idx, matrix_row) in self.cfg.base_matrix.iter().enumerate() {
-            let mut acc = 0i128;
+        let mut output = vec![Zt::Cw::default(); BASE_LEN];
+        for (row_idx, matrix_row) in self.base_matrix.iter().enumerate() {
+            let mut acc = Zt::Cw::default();
             // Dot-product between the i-th row of the Vandermonde matrix and
             // the 32 input coordinates.
             for col in 0..BASE_DIM {
                 let term = chunk[col]
-                    .checked_mul(matrix_row[col])
+                    .checked_mul(&matrix_row[col])
                     .expect("Base multiplication overflow");
-                acc = acc.checked_add(term).expect("Base addition overflow");
+                acc = acc.checked_add(&term).expect("Base addition overflow");
             }
             output[row_idx] = acc;
         }
@@ -116,29 +119,69 @@ impl IprsCode {
 
     fn combine_stage(
         &self,
-        subresults: &[Vec<i128>],
-        twiddle_table: &[[i128; RADIX]],
-    ) -> Vec<i128> {
+        subresults: &[Vec<Zt::Cw>],
+        twiddle_table: &[[Zt::Twiddle; RADIX]],
+    ) -> Vec<Zt::Cw> {
         // Each index `idx` corresponds to a single output position and therefore
         // to a unique set of twiddle multipliers. We rely on the precomputed stage
         // table to avoid recomputing roots on the fly.
         let sub_len = subresults[0].len();
         debug_assert_eq!(twiddle_table.len(), sub_len * RADIX);
 
-        let mut output = vec![0i128; sub_len * RADIX];
+        let mut output = vec![Zt::Cw::default(); sub_len * RADIX];
         for (idx, slot) in output.iter_mut().enumerate() {
             let column = idx % sub_len;
             let twiddles = &twiddle_table[idx];
-            let mut acc = 0i128;
+            let mut acc = Zt::Cw::default();
             for branch in 0..RADIX {
                 let term = subresults[branch][column]
-                    .checked_mul(twiddles[branch])
+                    .checked_mul(&twiddles[branch])
                     .expect("Multiplication overflow");
-                acc = acc.checked_add(term).expect("Addition overflow");
+                acc = acc.checked_add(&term).expect("Addition overflow");
             }
             *slot = acc;
         }
         output
+    }
+}
+
+
+impl<Zt: ZipTypes> LinearCode<Zt> for IprsCode<Zt> {
+    type Config = IprsConfig<Zt::Twiddle>;
+
+    const REPETITION_FACTOR: usize = 8;
+
+    /// Create a code with the default `(p, ω)` pair e.g. `(7681, 7146)`, valid for `k = 1`.
+    fn new (poly_size: usize, config: IprsConfig<Zt::Twiddle>) -> Self {
+        let twiddle_tables = (config.build_twiddle_tables)(config.k, config.n, config.modulus, config.omega);
+        let base_matrix = (config.compute_base_matrix)(config.modulus, config.omega, config.n);
+        assert!(poly_size == config.m, "Polynomial size {} does not match expected row length {}", poly_size, config.m);
+
+        Self { cfg: config, twiddle_tables, base_matrix  }
+    }
+
+    fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
+        assert!(row.len() == self.cfg.m, "Input length {} does not match expected row length {}", row.len(), self.cfg.m);
+        self.encode_inner(row)
+    }
+    
+    
+    fn row_len(&self) -> usize {
+        self.cfg.m
+    }
+    
+    fn codeword_len(&self) -> usize {
+        self.cfg.n
+    }
+    
+    fn encode_wide(&self, row: &[<Zt as ZipTypes>::CombR]) -> Vec<<Zt as ZipTypes>::CombR> {
+        todo!()
+    }
+    
+    fn encode_f<F>(&self, row: &[F]) -> Vec<F>
+    where
+        F: crypto_primitives::PrimeField + zinc_utils::from_ref::FromRef<F> {
+        todo!()
     }
 }
 
@@ -225,7 +268,7 @@ fn mod_pow_generic(base: i128, exp: u128, modulus: i128) -> i128 {
 
 #[cfg(test)]
 mod tests {
-    use crate::code::iprs::IprsConfig;
+    use crate::{code::{self, LinearCode, iprs::IprsConfig}, pcs::test_utils::TestZipTypes};
 
     use super::{
         IprsCode, canonical_mod,mod_mul_generic, mod_pow_generic,
@@ -256,7 +299,10 @@ mod tests {
 
     #[test]
     fn encode_has_expected_lengths() {
-        let code = IprsCode::new(IprsConfig::new(1, DEFAULT_P, DEFAULT_OMEGA));
+        const m: usize = 1usize << (5 + 3 * 1);
+        const n: usize = 1usize << (6 + 3 * 1);
+        const k: usize = 1;
+        let code: IprsCode<TestZipTypes::<n,k,m>> = IprsCode::new(m, IprsConfig::new(1, DEFAULT_P, DEFAULT_OMEGA));
         let input = vec![1i128; code.cfg.m];
         let output = code.encode(&input);
         assert_eq!(output.len(), code.cfg.n);
