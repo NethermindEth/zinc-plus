@@ -1,5 +1,6 @@
 use std::{array::from_fn};
 
+use crypto_primitives::PrimeField;
 use num_traits::CheckedAdd;
 use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 
@@ -11,12 +12,10 @@ const RADIX: usize = 8;
 /// Base-case input length handled by the Vandermonde block.
 const BASE_DIM: usize = 32;
 /// Base-case output length (number of evaluation points).
-const BASE_LEN: usize = 64;
+const BASE_LEN: usize = BASE_DIM * 2;
 
 #[derive(Debug, Clone, Copy)]
 pub struct IprsConfig {
-    // pub modulus: i128,
-    // pub omega: i128,
     pub k: usize,
     pub m: usize,
     pub n: usize,
@@ -25,35 +24,6 @@ pub struct IprsConfig {
 trait IprsHelpers<Twiddle> {
     fn build_twiddle_tables(&self) -> Vec<Vec<[Twiddle; RADIX]>>;
     fn compute_base_matrix(&self) -> [[Twiddle; BASE_DIM]; BASE_LEN];
-}
-
-fn params_for_k(k: usize) -> (i128, i128) {
-    match k {
-        1 => (7681, 7146),
-        2 => (12289, 1331),
-        _ => panic!("unsupported k: {}", k),
-    }
-}
-
-impl <Twiddle: FromRef<i128>> IprsHelpers<Twiddle> for IprsConfig {
-    fn build_twiddle_tables(&self) -> Vec<Vec<[Twiddle; RADIX]>> {
-        let (modulus, omega) = params_for_k(self.k);
-        build_twiddle_tables(self.k, self.n, modulus, omega)
-            .into_iter()
-            .map(|stage| {
-                stage
-                    .into_iter()
-                    .map(|twiddles| from_fn(|i| Twiddle::from_ref(&twiddles[i])))
-                    .collect()
-            })
-            .collect()
-    }
-
-    fn compute_base_matrix(&self) -> [[Twiddle; BASE_DIM]; BASE_LEN] {
-        let (modulus, omega) = params_for_k(self.k);
-        compute_base_matrix(modulus, omega, self.n)
-            .map(|row| from_fn(|i| Twiddle::from_ref(&row[i])))
-    }
 }
 
 impl IprsConfig {
@@ -214,9 +184,38 @@ where
 
     fn encode_f<F>(&self, _row: &[F]) -> Vec<F>
     where
-        F: crypto_primitives::PrimeField + zinc_utils::from_ref::FromRef<F>,
+        F: PrimeField + zinc_utils::from_ref::FromRef<F>,
     {
         todo!()
+    }
+}
+
+fn params_for_k(k: usize) -> (i128, i128) {
+    match k {
+        1 => (7681, 7146),
+        2 => (12289, 1331),
+        _ => panic!("unsupported k: {}", k),
+    }
+}
+
+impl <Twiddle: FromRef<i128>> IprsHelpers<Twiddle> for IprsConfig {
+    fn build_twiddle_tables(&self) -> Vec<Vec<[Twiddle; RADIX]>> {
+        let (modulus, omega) = params_for_k(self.k);
+        build_twiddle_tables(self.k, self.n, modulus, omega)
+            .into_iter()
+            .map(|stage| {
+                stage
+                    .into_iter()
+                    .map(|twiddles| from_fn(|i| Twiddle::from_ref(&twiddles[i])))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn compute_base_matrix(&self) -> [[Twiddle; BASE_DIM]; BASE_LEN] {
+        let (modulus, omega) = params_for_k(self.k);
+        compute_base_matrix(modulus, omega, self.n)
+            .map(|row| from_fn(|i| Twiddle::from_ref(&row[i])))
     }
 }
 
