@@ -11,6 +11,12 @@ use crate::{code::LinearCode, pcs::structs::ZipTypes};
 #[derive(Debug, Clone, Copy)]
 pub struct IprsConfig {
     pub k: usize,
+    // Parameters defining the code dimensions:
+    // m = number of columns in the input matrix
+    // n = number of columns in the output matrix (code length)
+    // radix = branching factor of the recursion
+    // base_dim = number of columns in the base matrix
+    // base_len = number of rows in the base matrix
     pub m: usize,
     pub n: usize,
     pub radix: usize,
@@ -24,6 +30,37 @@ trait IprsHelpers<Twiddle> {
 }
 
 impl IprsConfig {
+    pub fn new_any_m_default(m: usize) -> Self {
+        const MAX_LOG_BASE_LEN: usize = 6;
+        const LOG_RADIX: usize = 3;
+        Self::new_any_m(m, MAX_LOG_BASE_LEN, LOG_RADIX)
+    }
+
+    pub fn new_any_m(m: usize, max_log_base_len: usize, log_radix: usize) -> Self {
+        assert!(m.is_power_of_two(), "m must be a power of two");
+
+        let n = m << 1;
+
+        let mut k = 0;
+        let mut base_len = 1 << max_log_base_len;
+        while (base_len << (log_radix * k)) < n {
+            k += 1;
+        }
+
+        base_len = n >> (log_radix * k);
+
+        let radix = 1 << log_radix;
+        let base_dim = base_len >> 1;
+        Self {
+            k,
+            m,
+            n,
+            radix,
+            base_dim,
+            base_len,
+        }
+    }
+
     /// Create a code with custom modulus and generator. The pair must satisfy
     /// that `\omega` is a primitive `N`-th root of unity in \mathbb{Z}_p, where
     /// `N = 2^{6+3k}`.
@@ -230,14 +267,39 @@ where
     }
 }
 
-// The pair must satisfy that `\omega` is a primitive `N`-th root of unity in
-// \mathbb{Z}_p, where `N = 2^{6+3k}`.
+// Precomputed table where the modulus satisfies that `\omega` is a primitive
+// `n`-th root of unity in \mathbb{Z}_p`.
+const ROOTS_OF_UNITY: &[(usize, i128, i128)] = &[
+    (2, 3, 2),
+    (4, 5, 2),
+    (8, 17, 9),
+    (16, 17, 3),
+    (32, 97, 28),
+    (64, 193, 125),
+    (128, 257, 9),
+    (256, 257, 3),
+    (512, 7681, 7146),
+    (1024, 12289, 10302),
+    (2048, 12289, 1945),
+    (4096, 12289, 1331),
+    (8192, 40961, 243),
+    (16384, 65537, 81),
+    (32768, 65537, 9),
+    (65536, 65537, 3),
+    (131072, 786433, 213567),
+    (262144, 786433, 1000),
+    (524288, 5767169, 177147),
+    (1048576, 7340033, 2187),
+    (2097152, 23068673, 177147),
+    (4194304, 104857601, 39193363),
+];
+
 fn p_and_root_of_unity(n: usize) -> (i128, i128) {
-    match n {
-        512 => (7681, 7146),
-        4096 => (12289, 1331),
-        _ => panic!("unsupported N: {}", n),
-    }
+    ROOTS_OF_UNITY
+        .iter()
+        .find(|entry| entry.0 == n)
+        .map(|(_, p, omega)| (*p, *omega))
+        .unwrap_or_else(|| panic!("unsupported N: {}", n))
 }
 
 impl<Twiddle: FromRef<i128>> IprsHelpers<Twiddle> for IprsConfig {
@@ -379,7 +441,7 @@ fn mod_pow_generic(base: i128, exp: u128, modulus: i128) -> i128 {
 #[cfg(test)]
 mod tests {
     use super::{IprsCode, IprsConfig};
-    use crate::{code::LinearCode, pcs::test_utils::TestZipTypes};
+    use crate::{code::{LinearCode, iprs::p_and_root_of_unity}, pcs::test_utils::TestZipTypes};
     use crypto_primitives::crypto_bigint_int::Int;
     use num_traits::{CheckedAdd, CheckedMul, CheckedRem, CheckedSub, One, Zero};
     use zinc_utils::from_ref::FromRef;
@@ -414,6 +476,12 @@ mod tests {
             1 << 6, // base_dim
             1 << 7, // base_len
         );
+        let row_len = cfg.m;
+        LinearCode::new(row_len, cfg)
+    }
+
+    fn make_any_m_code(m: usize) -> IprsCode<TestZt, REPETITION_FACTOR> {
+        let cfg = IprsConfig::new_any_m_default(m);
         let row_len = cfg.m;
         LinearCode::new(row_len, cfg)
     }
@@ -490,6 +558,31 @@ mod tests {
             assert_eq!(canonical_mod_int(w, &modulus), *n);
         }
     }
+
+    #[test]
+    fn mod_p_matches_reduction_any_m() {
+        let m = 1 << 11; // any power of two
+        let code = make_any_m_code(m);
+        print!("Code config: {:?}", code.cfg);
+        let mut input = vec![EvalInt::zero(); code.row_len()];
+        for (idx, value) in input.iter_mut().enumerate() {
+            *value = EvalInt::from(((idx * 17 + 5) as i128).pow(2));
+        }   
+        let wide = code.encode(&input);
+        let (p, root_of_unity) = p_and_root_of_unity(code.cfg.n);
+        let modulus = CwInt::from(p);
+        let omega = CwInt::from(root_of_unity);
+        let mut padded = vec![CwInt::zero(); code.codeword_len()];
+        for (dst, src) in padded.iter_mut().zip(input.iter()) {
+            *dst = CwInt::from_ref(src);
+        }
+        radix2_ntt_mod_int(&mut padded, &modulus, &omega);
+        for (w, n) in wide.iter().zip(padded.iter()) {
+            assert_eq!(canonical_mod_int(w, &modulus), *n);
+        }
+    }
+
+    
 
     #[test]
     fn polynomial_multiplication_via_ntt_matches_naive() {
@@ -597,6 +690,27 @@ mod tests {
         radix2_intt_mod_int(&mut data, &modulus, &omega, modulus_val);
 
         assert_eq!(data, original);
+    }
+
+    #[test]
+    fn roots_table_contains_valid_pairs() {
+        for (n, modulus, omega) in super::ROOTS_OF_UNITY.iter() {
+            let n_u128 = u128::try_from(*n).expect("n fits into u128");
+            assert_eq!(
+                super::mod_pow_generic(*omega, n_u128, *modulus),
+                1,
+                "omega^n != 1 mod p for n={}",
+                n
+            );
+            if *n > 2 {
+                assert_ne!(
+                    super::mod_pow_generic(*omega, n_u128 / 2, *modulus),
+                    1,
+                    "omega not primitive for n={}",
+                    n
+                );
+            }
+        }
     }
 
     fn canonical_mod_int<const LIMBS: usize>(
