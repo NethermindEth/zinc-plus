@@ -37,7 +37,6 @@ impl<F: FromPrimitiveWithConfig> EvaluatablePolynomial<F, F, F> for NatEvaluated
     // All the arithmetic ops in the function
     // are made sure to not overflow.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_wrap)]
-    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_wrap)]
     fn evaluate_at_point(&self, point: &Self::EvaluationPoint) -> Result<F, EvaluationError> {
         let NatEvaluatedPoly { evaluations } = self;
         // TODO(Alex): Once we have benches, it's worth checking

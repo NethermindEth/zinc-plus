@@ -5,6 +5,8 @@ use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use zinc_poly::{EvaluatablePolynomial, univariate::nat_evaluation::NatEvaluatedPoly};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 
+use crate::sumcheck::prover::ProverMsg;
+
 use super::SumCheckError;
 
 pub const SQUEEZE_NATIVE_ELEMENTS_NUM: usize = 1;
@@ -64,11 +66,7 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
     /// verifications altogether in `check_and_generate_subclaim` at
     /// the last step.
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn verify_round(
-        &mut self,
-        prover_msg: &NatEvaluatedPoly<F>,
-        transcript: &mut impl Transcript,
-    ) -> F
+    pub fn verify_round(&mut self, prover_msg: &ProverMsg<F>, transcript: &mut impl Transcript) -> F
     where
         F::Inner: ConstTranscribable,
     {
@@ -82,7 +80,7 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
 
         let msg: F = transcript.get_field_challenge(&self.config);
         self.randomness.push(msg.clone());
-        self.polynomials_received.push(prover_msg.clone());
+        self.polynomials_received.push(prover_msg.clone().into());
 
         // Now, verifier should set `expected` to P(r).
         // This operation is also moved to `check_and_generate_subclaim`,

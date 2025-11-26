@@ -10,6 +10,22 @@ use zinc_poly::{
 };
 use zinc_utils::mul_by_scalar::MulByScalar;
 
+#[repr(transparent)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProverMsg<F>(pub NatEvaluatedPoly<F>);
+
+impl<F> From<NatEvaluatedPoly<F>> for ProverMsg<F> {
+    fn from(polynomial: NatEvaluatedPoly<F>) -> Self {
+        Self(polynomial)
+    }
+}
+
+impl<F> From<ProverMsg<F>> for NatEvaluatedPoly<F> {
+    fn from(msg: ProverMsg<F>) -> Self {
+        msg.0
+    }
+}
+
 /// Sumcheck Prover State.
 pub struct ProverState<F> {
     /// Sampled randomness given by the verifier.
@@ -53,7 +69,7 @@ where
         v_msg: &Option<F>,
         comb_fn: impl Fn(&[F]) -> F + Send + Sync,
         config: &F::Config,
-    ) -> NatEvaluatedPoly<F> {
+    ) -> ProverMsg<F> {
         if let Some(msg) = v_msg {
             if self.round == 0 {
                 panic!("first round should be prover first.");
@@ -178,6 +194,6 @@ where
         #[cfg(not(feature = "parallel"))]
         let evaluations = summer.evals;
 
-        NatEvaluatedPoly::new(evaluations)
+        NatEvaluatedPoly::new(evaluations).into()
     }
 }
