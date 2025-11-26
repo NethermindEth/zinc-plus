@@ -1,3 +1,7 @@
+#![allow(clippy::arithmetic_side_effects)] // arithmetic is safe due to bounded configuration parameters
+
+use std::convert::TryFrom;
+
 use crypto_primitives::PrimeField;
 use num_traits::CheckedAdd;
 use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
@@ -79,7 +83,7 @@ impl<Zt: ZipTypes, const REP: usize> IprsCode<Zt, REP> {
             row.len(),
             self.cfg.m
         );
-        let row_cw = row.iter().map(|v| Zt::Cw::from_ref(v)).collect::<Vec<_>>();
+        let row_cw = row.iter().map(Zt::Cw::from_ref).collect::<Vec<_>>();
 
         self.encode_ntt(&row_cw, self.cfg.k)
     }
@@ -88,7 +92,7 @@ impl<Zt: ZipTypes, const REP: usize> IprsCode<Zt, REP> {
         if depth == 0 {
             // Base-case: multiply the base_dim-term vector by the precomputed
             // Vandermonde matrix to obtain base_len evaluation points.
-            return self.base_multiply(&data);
+            return self.base_multiply(data);
         }
 
         let radix = self.cfg.radix;
@@ -281,12 +285,14 @@ fn build_twiddle_tables(
 ) -> Vec<Vec<Vec<i128>>> {
     let mut tables = Vec::with_capacity(k);
     for depth in 1..=k {
-        let stage_len = base_len * radix.pow(depth as u32);
-        let stride = (n / stage_len) as u128;
+        let depth_as_u32 = u32::try_from(depth).expect("depth fits within u32");
+        let stage_len = base_len * radix.pow(depth_as_u32);
+        let stride = u128::try_from(n / stage_len).expect("stride fits into u128");
 
         let mut stage = Vec::with_capacity(stage_len);
         for idx in 0..stage_len {
-            let twiddle_base = mod_pow_generic(omega, stride * idx as u128, modulus);
+            let idx_u128 = u128::try_from(idx).expect("stage idx fits into u128");
+            let twiddle_base = mod_pow_generic(omega, stride * idx_u128, modulus);
             let mut twiddles = Vec::with_capacity(radix);
             let mut power = 1i128;
             for _ in 0..radix {
@@ -312,12 +318,14 @@ fn compute_base_matrix(
 ) -> Vec<Vec<i128>> {
     let mut matrix = vec![vec![0i128; base_dim]; base_len];
     // Step between successive evaluation points at the base (size-64) stage.
-    let row_step = mod_pow_generic(omega, (n / base_len) as u128, modulus);
+    let row_stride =
+        u128::try_from(n / base_len).expect("stride fits into u128");
+    let row_step = mod_pow_generic(omega, row_stride, modulus);
     let mut current = 1i128;
-    for row in 0..base_len {
+    for row in matrix.iter_mut() {
         let mut accum = 1i128;
-        for col in 0..base_dim {
-            matrix[row][col] = accum;
+        for slot in row.iter_mut() {
+            *slot = accum;
             accum = mod_mul_generic(accum, current, modulus);
         }
         current = mod_mul_generic(current, row_step, modulus);
@@ -398,12 +406,12 @@ mod tests {
 
     fn make_custom_code() -> IprsCode<TestZt, REPETITION_FACTOR> {
         let cfg = IprsConfig::new_custom(
-            1,                // k
-            1 << (6 + 2 * 1), // m
-            1 << (7 + 2 * 1), // n
-            4,                // radix
-            1 << 6,           // base_dim
-            1 << 7,           // base_len
+            1,      // k
+            1 << 8, // m
+            1 << 9, // n
+            4,      // radix
+            1 << 6, // base_dim
+            1 << 7, // base_len
         );
         let row_len = cfg.m;
         LinearCode::new(row_len, cfg)
@@ -422,7 +430,8 @@ mod tests {
         let code = make_code(1);
         let mut input = vec![EvalInt::zero(); code.row_len()];
         for (idx, value) in input.iter_mut().enumerate() {
-            *value = EvalInt::from((idx as i32).pow(3));
+            let idx_i32 = i32::try_from(idx).expect("index fits into i32");
+            *value = EvalInt::from(idx_i32.pow(3));
         }
         let first = code.encode(&input);
         let second = code.encode(&input);
@@ -486,7 +495,7 @@ mod tests {
         let modulus_val = K_1_P;
         let modulus = CwInt::from(modulus_val);
         let n = 32usize;
-        let base_order = 1usize << (6 + 3 * 1);
+        let base_order = 1usize << 9;
         assert_eq!(base_order % n, 0);
         let omega_val = super::mod_pow_generic(K_1_OMEGA, (base_order / n) as u128, modulus_val);
         let omega = CwInt::from(omega_val);
@@ -529,7 +538,7 @@ mod tests {
         let modulus_val = K_1_P;
         let modulus = CwInt::from(modulus_val);
         let n = 16usize;
-        let base_order = 1usize << (6 + 3 * 1);
+        let base_order = 1usize << 9;
         assert_eq!(base_order % n, 0);
         let omega_val = super::mod_pow_generic(K_1_OMEGA, (base_order / n) as u128, modulus_val);
         let omega = CwInt::from(omega_val);
@@ -572,7 +581,7 @@ mod tests {
         let modulus_val = K_1_P;
         let modulus = CwInt::from(modulus_val);
         let n = 64usize;
-        let base_order = 1usize << (6 + 3 * 1);
+        let base_order = 1usize << 9;
         assert_eq!(base_order % n, 0);
         let omega_val = super::mod_pow_generic(K_1_OMEGA, (base_order / n) as u128, modulus_val);
         let omega = CwInt::from(omega_val);
@@ -698,7 +707,8 @@ mod tests {
     ) {
         let n = values.len();
         assert!(n.is_power_of_two());
-        let modulus_pow = (modulus_scalar - 2) as u128;
+        let modulus_pow =
+            u128::try_from(modulus_scalar - 2).expect("modulus >= 2");
         let omega_inv = mod_pow_int(omega, modulus_pow, modulus);
         radix2_ntt_mod_int(values, modulus, &omega_inv);
         let n_int = Int::<LIMBS>::from(n as i128);

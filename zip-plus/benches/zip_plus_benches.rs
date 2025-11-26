@@ -21,6 +21,7 @@ struct BenchZipPlusTypes<const D_PLUS_ONE: usize> {}
 impl<const D_PLUS_ONE: usize> ZipTypes for BenchZipPlusTypes<D_PLUS_ONE> {
     const NUM_COLUMN_OPENINGS: usize = 650;
     type Eval = DensePolynomial<Boolean, D_PLUS_ONE>;
+    type Twiddle = i32;
     type Cw = DensePolynomial<i32, D_PLUS_ONE>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
     type PrimeTest = MillerRabin;
