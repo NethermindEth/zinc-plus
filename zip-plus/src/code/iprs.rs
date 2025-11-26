@@ -441,7 +441,10 @@ fn mod_pow_generic(base: i128, exp: u128, modulus: i128) -> i128 {
 #[cfg(test)]
 mod tests {
     use super::{IprsCode, IprsConfig};
-    use crate::{code::{LinearCode, iprs::p_and_root_of_unity}, pcs::test_utils::TestZipTypes};
+    use crate::{
+        code::{LinearCode, iprs::p_and_root_of_unity},
+        pcs::test_utils::TestZipTypes,
+    };
     use crypto_primitives::crypto_bigint_int::Int;
     use num_traits::{CheckedAdd, CheckedMul, CheckedRem, CheckedSub, One, Zero};
     use zinc_utils::from_ref::FromRef;
@@ -567,7 +570,7 @@ mod tests {
         let mut input = vec![EvalInt::zero(); code.row_len()];
         for (idx, value) in input.iter_mut().enumerate() {
             *value = EvalInt::from(((idx * 17 + 5) as i128).pow(2));
-        }   
+        }
         let wide = code.encode(&input);
         let (p, root_of_unity) = p_and_root_of_unity(code.cfg.n);
         let modulus = CwInt::from(p);
@@ -581,8 +584,6 @@ mod tests {
             assert_eq!(canonical_mod_int(w, &modulus), *n);
         }
     }
-
-    
 
     #[test]
     fn polynomial_multiplication_via_ntt_matches_naive() {
