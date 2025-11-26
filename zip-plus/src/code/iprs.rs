@@ -318,8 +318,7 @@ fn compute_base_matrix(
 ) -> Vec<Vec<i128>> {
     let mut matrix = vec![vec![0i128; base_dim]; base_len];
     // Step between successive evaluation points at the base (size-64) stage.
-    let row_stride =
-        u128::try_from(n / base_len).expect("stride fits into u128");
+    let row_stride = u128::try_from(n / base_len).expect("stride fits into u128");
     let row_step = mod_pow_generic(omega, row_stride, modulus);
     let mut current = 1i128;
     for row in matrix.iter_mut() {
@@ -707,8 +706,7 @@ mod tests {
     ) {
         let n = values.len();
         assert!(n.is_power_of_two());
-        let modulus_pow =
-            u128::try_from(modulus_scalar - 2).expect("modulus >= 2");
+        let modulus_pow = u128::try_from(modulus_scalar - 2).expect("modulus >= 2");
         let omega_inv = mod_pow_int(omega, modulus_pow, modulus);
         radix2_ntt_mod_int(values, modulus, &omega_inv);
         let n_int = Int::<LIMBS>::from(n as i128);
