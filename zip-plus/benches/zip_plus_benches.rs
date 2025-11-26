@@ -12,7 +12,6 @@ use crypto_bigint::U64;
 use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint};
 use zip_plus::{
     code::{
-        LinearCode,
         iprs::{IprsCode, IprsConfig},
         raa::{RaaCode, RaaConfig},
     },
