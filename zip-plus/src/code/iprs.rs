@@ -1,52 +1,70 @@
-use std::{array::from_fn};
-
 use crypto_primitives::PrimeField;
 use num_traits::CheckedAdd;
 use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 
 use crate::{code::LinearCode, pcs::structs::ZipTypes};
 
-/// Number of branches used in each NTT layer (radix). The construction fixes
-/// this to 8 in accordance with the pseudo-Reed–Solomon spec.
-const RADIX: usize = 8;
-/// Base-case input length handled by the Vandermonde block.
-const BASE_DIM: usize = 32;
-/// Base-case output length (number of evaluation points).
-const BASE_LEN: usize = BASE_DIM * 2;
-
 #[derive(Debug, Clone, Copy)]
 pub struct IprsConfig {
     pub k: usize,
     pub m: usize,
     pub n: usize,
+    pub radix: usize,
+    pub base_dim: usize,
+    pub base_len: usize,
 }
 
 trait IprsHelpers<Twiddle> {
-    fn build_twiddle_tables(&self) -> Vec<Vec<[Twiddle; RADIX]>>;
-    fn compute_base_matrix(&self) -> [[Twiddle; BASE_DIM]; BASE_LEN];
+    fn build_twiddle_tables(&self) -> Vec<Vec<Vec<Twiddle>>>;
+    fn compute_base_matrix(&self) -> Vec<Vec<Twiddle>>;
 }
 
 impl IprsConfig {
     /// Create a code with custom modulus and generator. The pair must satisfy
-    /// that `ω` is a primitive `N`-th root of unity in ℤ_p, where `N = 2^{6+3k}`.
+    /// that `\omega` is a primitive `N`-th root of unity in \mathbb{Z}_p, where `N = 2^{6+3k}`.  
     pub fn new(k: usize) -> Self {
-        let m = 1usize << (5 + 3 * k);
-        let n = 1usize << (6 + 3 * k);
+        const LOG_BASE_LEN: usize = 6;
+        const LOG_BASE_DIM: usize = LOG_BASE_LEN - 1;
+        const LOG_RADIX: usize = 3;
+        let m = 1usize << (LOG_BASE_DIM + LOG_RADIX * k);
+        let n = 1usize << (LOG_BASE_LEN + LOG_RADIX * k);
         Self {
             k,
             m,
             n,
+            radix: 1 << LOG_RADIX,
+            base_dim: 1 << LOG_BASE_DIM,
+            base_len: 1 << LOG_BASE_LEN,
+        }
+    }
+
+    pub fn new_custom(
+        k: usize,
+        m: usize,
+        n: usize,
+        radix: usize,
+        base_dim: usize,
+        base_len: usize,
+    ) -> Self {
+        Self {
+            k,
+            m,
+            n,
+            radix,
+            base_dim,
+            base_len,
         }
     }
 }
 
-/// Pseudo Reed-Solomon encoder over the integers. Internally uses a radix-8
-/// NTT-style recursion with a base Vandermonde matrix of dimensions 64x32.
+/// Pseudo Reed-Solomon encoder over the integers. Internally uses a configurable
+/// radix NTT-style recursion with a base Vandermonde matrix sized
+/// `base_len x base_dim` (defaults to 64x32).
 #[derive(Debug, Clone)]
 pub struct IprsCode<Zt: ZipTypes, const REP: usize> {
     pub cfg: IprsConfig,
-    twiddle_tables: Vec<Vec<[Zt::Twiddle; RADIX]>>,
-    base_matrix: [[Zt::Twiddle; BASE_DIM]; BASE_LEN],
+    twiddle_tables: Vec<Vec<Vec<Zt::Twiddle>>>, // Per-stage twiddle tables of size stage_len x radix
+    base_matrix: Vec<Vec<Zt::Twiddle>>,         // base_len x base_dim Vandermonde block
 }
 
 impl<Zt: ZipTypes, const REP: usize> IprsCode<Zt, REP> {
@@ -66,20 +84,21 @@ impl<Zt: ZipTypes, const REP: usize> IprsCode<Zt, REP> {
 
     fn encode_ntt(&self, data: &[Zt::Cw], depth: usize) -> Vec<Zt::Cw> {
         if depth == 0 {
-            // Base-case: multiply the 32-term vector by the precomputed
-            // Vandermonde matrix to obtain 64 evaluation points.
+            // Base-case: multiply the base_dim-term vector by the precomputed
+            // Vandermonde matrix to obtain base_len evaluation points.
             return self.base_multiply(&data);
         }
 
-        let chunk_len = data.len() / RADIX;
-        let mut subresults = Vec::with_capacity(RADIX);
-        for chunk_idx in 0..RADIX {
+        let radix = self.cfg.radix;
+        let chunk_len = data.len() / radix;
+        let mut subresults = Vec::with_capacity(radix);
+        for chunk_idx in 0..radix {
             let mut chunk = Vec::with_capacity(chunk_len);
             for j in 0..chunk_len {
-                chunk.push(data[RADIX * j + chunk_idx]);
+                chunk.push(data[radix * j + chunk_idx]);
             }
-            // Recursively evaluate the “child” polynomial corresponding to
-            // coset `x ↦ x + ω^{chunk_idx}`.
+            // Recursively evaluate the "child" polynomial corresponding to
+            // coset `x -> x + \omega^{chunk_idx}`.
             subresults.push(self.encode_ntt(&chunk, depth - 1));
         }
 
@@ -87,13 +106,16 @@ impl<Zt: ZipTypes, const REP: usize> IprsCode<Zt, REP> {
     }
 
     fn base_multiply(&self, chunk: &[Zt::Cw]) -> Vec<Zt::Cw> {
-        assert_eq!(chunk.len(), BASE_DIM);
-        let mut output = vec![Zt::Cw::default(); BASE_LEN];
+        let base_dim = self.cfg.base_dim;
+        let base_len = self.cfg.base_len;
+        assert_eq!(chunk.len(), base_dim);
+        let mut output = vec![Zt::Cw::default(); base_len];
         for (row_idx, matrix_row) in self.base_matrix.iter().enumerate() {
+            debug_assert_eq!(matrix_row.len(), base_dim);
             let mut acc = Zt::Cw::default();
             // Dot-product between the i-th row of the Vandermonde matrix and
-            // the 32 input coordinates.
-            for col in 0..BASE_DIM {
+            // the base_dim input coordinates.
+            for col in 0..base_dim {
                 let term = chunk[col]
                     .mul_by_scalar(&matrix_row[col])
                     .expect("Base multiplication overflow");
@@ -107,20 +129,22 @@ impl<Zt: ZipTypes, const REP: usize> IprsCode<Zt, REP> {
     fn combine_stage(
         &self,
         subresults: &[Vec<Zt::Cw>],
-        twiddle_table: &[[Zt::Twiddle; RADIX]],
+        twiddle_table: &[Vec<Zt::Twiddle>],
     ) -> Vec<Zt::Cw> {
         // Each index `idx` corresponds to a single output position and therefore
         // to a unique set of twiddle multipliers. We rely on the precomputed stage
         // table to avoid recomputing roots on the fly.
         let sub_len = subresults[0].len();
-        debug_assert_eq!(twiddle_table.len(), sub_len * RADIX);
+        let radix = self.cfg.radix;
+        debug_assert_eq!(twiddle_table.len(), sub_len * radix);
+        debug_assert_eq!(subresults.len(), radix);
 
-        let mut output = vec![Zt::Cw::default(); sub_len * RADIX];
+        let mut output = vec![Zt::Cw::default(); sub_len * radix];
         for (idx, slot) in output.iter_mut().enumerate() {
             let column = idx % sub_len;
             let twiddles = &twiddle_table[idx];
             let mut acc = Zt::Cw::default();
-            for branch in 0..RADIX {
+            for branch in 0..radix {
                 let term = subresults[branch][column]
                     .mul_by_scalar(&twiddles[branch])
                     .expect("Multiplication overflow");
@@ -141,9 +165,9 @@ where
 {
     type Config = IprsConfig;
 
-    const REPETITION_FACTOR: usize = REP; 
+    const REPETITION_FACTOR: usize = REP;
 
-    /// Create a code with the default `(p, ω)` pair e.g. `(7681, 7146)`, valid for `k = 1`.
+    /// Create a code with the default `(p, \omega)` pair e.g. `(7681, 7146)`, valid for `k = 1`.
     fn new(poly_size: usize, config: IprsConfig) -> Self {
         assert!(
             poly_size == config.m,
@@ -151,6 +175,15 @@ where
             poly_size,
             config.m
         );
+
+        assert!(
+            config.n == config.m * REP,
+            "Codeword length {} must equal row length {} times repetition factor {}",
+            config.n,
+            config.m,
+            REP
+        );
+
         let base_matrix = config.compute_base_matrix();
         let twiddle_tables = config.build_twiddle_tables();
         Self {
@@ -190,51 +223,70 @@ where
     }
 }
 
-fn params_for_k(k: usize) -> (i128, i128) {
-    match k {
-        1 => (7681, 7146),
-        2 => (12289, 1331),
-        _ => panic!("unsupported k: {}", k),
+// The pair must satisfy that `\omega` is a primitive `N`-th root of unity in \mathbb{Z}_p, where `N = 2^{6+3k}`.
+fn p_and_root_of_unity(n: usize) -> (i128, i128) {
+    match n {
+        512 => (7681, 7146),
+        4096 => (12289, 1331),
+        _ => panic!("unsupported N: {}", n),
     }
 }
 
-impl <Twiddle: FromRef<i128>> IprsHelpers<Twiddle> for IprsConfig {
-    fn build_twiddle_tables(&self) -> Vec<Vec<[Twiddle; RADIX]>> {
-        let (modulus, omega) = params_for_k(self.k);
-        build_twiddle_tables(self.k, self.n, modulus, omega)
+impl<Twiddle: FromRef<i128>> IprsHelpers<Twiddle> for IprsConfig {
+    fn build_twiddle_tables(&self) -> Vec<Vec<Vec<Twiddle>>> {
+        let (modulus, omega) = p_and_root_of_unity(self.n);
+        build_twiddle_tables(self.k, self.n, self.radix, self.base_len, modulus, omega)
             .into_iter()
             .map(|stage| {
                 stage
                     .into_iter()
-                    .map(|twiddles| from_fn(|i| Twiddle::from_ref(&twiddles[i])))
+                    .map(|twiddles| {
+                        twiddles
+                            .into_iter()
+                            .map(|value| Twiddle::from_ref(&value))
+                            .collect()
+                    })
                     .collect()
             })
             .collect()
     }
 
-    fn compute_base_matrix(&self) -> [[Twiddle; BASE_DIM]; BASE_LEN] {
-        let (modulus, omega) = params_for_k(self.k);
-        compute_base_matrix(modulus, omega, self.n)
-            .map(|row| from_fn(|i| Twiddle::from_ref(&row[i])))
+    fn compute_base_matrix(&self) -> Vec<Vec<Twiddle>> {
+        let (modulus, omega) = p_and_root_of_unity(self.n);
+        compute_base_matrix(modulus, omega, self.n, self.base_len, self.base_dim)
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|value| Twiddle::from_ref(&value))
+                    .collect()
+            })
+            .collect()
     }
 }
 
 /// Precompute stage-specific twiddle tables. Each table contains `stage_len`
-/// entries where entry `i` stores the RADIX consecutive powers of
+/// entries where entry `i` stores the radix consecutive powers of
 /// `(omega)^(stride * i)`. This matches the order used in the recursive NTT.
-fn build_twiddle_tables(k: usize, n: usize, modulus: i128, omega: i128) -> Vec<Vec<[i128; RADIX]>> {
+fn build_twiddle_tables(
+    k: usize,
+    n: usize,
+    radix: usize,
+    base_len: usize,
+    modulus: i128,
+    omega: i128,
+) -> Vec<Vec<Vec<i128>>> {
     let mut tables = Vec::with_capacity(k);
     for depth in 1..=k {
-        let stage_len = BASE_LEN * RADIX.pow(depth as u32);
+        let stage_len = base_len * radix.pow(depth as u32);
         let stride = (n / stage_len) as u128;
 
         let mut stage = Vec::with_capacity(stage_len);
         for idx in 0..stage_len {
             let twiddle_base = mod_pow_generic(omega, stride * idx as u128, modulus);
-            let mut twiddles = [0i128; RADIX];
+            let mut twiddles = Vec::with_capacity(radix);
             let mut power = 1i128;
-            for slot in 0..RADIX {
-                twiddles[slot] = to_balanced_rep(power, modulus);
+            for _ in 0..radix {
+                twiddles.push(to_balanced_rep(power, modulus));
                 power = mod_mul_generic(power, twiddle_base, modulus);
             }
             stage.push(twiddles);
@@ -244,16 +296,22 @@ fn build_twiddle_tables(k: usize, n: usize, modulus: i128, omega: i128) -> Vec<V
     tables
 }
 
-/// Build the 64x32 Vandermonde block used at the leaves of the recursion. The
-/// evaluation points follow the NTT ordering induced by `(n / 64)` strides.
-fn compute_base_matrix(modulus: i128, omega: i128, n: usize) -> [[i128; BASE_DIM]; BASE_LEN] {
-    let mut matrix = [[0i128; BASE_DIM]; BASE_LEN];
+/// Build the base_len x base_dim Vandermonde block used at the leaves of the recursion. The
+/// evaluation points follow the NTT ordering induced by `(n / base_len)` strides.
+fn compute_base_matrix(
+    modulus: i128,
+    omega: i128,
+    n: usize,
+    base_len: usize,
+    base_dim: usize,
+) -> Vec<Vec<i128>> {
+    let mut matrix = vec![vec![0i128; base_dim]; base_len];
     // Step between successive evaluation points at the base (size-64) stage.
-    let row_step = mod_pow_generic(omega, (n / BASE_LEN) as u128, modulus);
+    let row_step = mod_pow_generic(omega, (n / base_len) as u128, modulus);
     let mut current = 1i128;
-    for row in 0..BASE_LEN {
+    for row in 0..base_len {
         let mut accum = 1i128;
-        for col in 0..BASE_DIM {
+        for col in 0..base_dim {
             matrix[row][col] = accum;
             accum = mod_mul_generic(accum, current, modulus);
         }
@@ -262,6 +320,7 @@ fn compute_base_matrix(modulus: i128, omega: i128, n: usize) -> [[i128; BASE_DIM
     matrix
 }
 
+/// Compute the canonical representative of `value` modulo `modulus`.
 fn canonical_mod(value: i128, modulus: i128) -> i128 {
     let mut r = value % modulus;
     if r < 0 {
@@ -270,6 +329,7 @@ fn canonical_mod(value: i128, modulus: i128) -> i128 {
     r
 }
 
+/// Convert `value` to its balanced representation modulo `modulus`, i.e.
 fn to_balanced_rep(value: i128, modulus: i128) -> i128 {
     let canonical = canonical_mod(value, modulus);
     let half = (modulus - 1) / 2;
@@ -280,12 +340,14 @@ fn to_balanced_rep(value: i128, modulus: i128) -> i128 {
     }
 }
 
+/// Multiply `a` and `b` modulo `modulus`.
 fn mod_mul_generic(a: i128, b: i128, modulus: i128) -> i128 {
     let a_red = canonical_mod(a, modulus);
     let b_red = canonical_mod(b, modulus);
     canonical_mod(a_red * b_red, modulus)
 }
 
+/// Compute `base^exp mod modulus` using binary exponentiation.
 fn mod_pow_generic(base: i128, exp: u128, modulus: i128) -> i128 {
     let mut result = 1i128;
     let mut b = canonical_mod(base, modulus);
@@ -321,11 +383,23 @@ mod tests {
     type EvalInt = Int<EVAL_LIMBS>;
     type CwInt = Int<CW_LIMBS>;
 
-    const REPETITION_FACTOR: usize = 4;
-
+    const REPETITION_FACTOR: usize = 2;
 
     fn make_code(k: usize) -> IprsCode<TestZt, REPETITION_FACTOR> {
         let cfg = IprsConfig::new(k);
+        let row_len = cfg.m;
+        LinearCode::new(row_len, cfg)
+    }
+
+    fn make_custom_code() -> IprsCode<TestZt, REPETITION_FACTOR> {
+        let cfg = IprsConfig::new_custom(
+            1,                // k
+            1 << (6 + 2 * 1), // m
+            1 << (7 + 2 * 1), // n
+            4,                // radix
+            1 << 6,           // base_dim
+            1 << 7,           // base_len
+        );
         let row_len = cfg.m;
         LinearCode::new(row_len, cfg)
     }
@@ -379,14 +453,37 @@ mod tests {
     }
 
     #[test]
+    fn mod_p_matches_reduction_custom() {
+        let code = make_custom_code();
+        let mut input = vec![EvalInt::zero(); code.row_len()];
+        for (idx, value) in input.iter_mut().enumerate() {
+            *value = EvalInt::from(((idx * 17 + 5) as i128).pow(2));
+        }
+
+        let wide = code.encode(&input);
+
+        let modulus = CwInt::from(K_1_P);
+        let omega = CwInt::from(K_1_OMEGA);
+
+        let mut padded = vec![CwInt::zero(); code.codeword_len()];
+        for (dst, src) in padded.iter_mut().zip(input.iter()) {
+            *dst = CwInt::from_ref(src);
+        }
+        radix2_ntt_mod_int(&mut padded, &modulus, &omega);
+
+        for (w, n) in wide.iter().zip(padded.iter()) {
+            assert_eq!(canonical_mod_int(w, &modulus), *n);
+        }
+    }
+
+    #[test]
     fn polynomial_multiplication_via_ntt_matches_naive() {
         let modulus_val = K_1_P;
         let modulus = CwInt::from(modulus_val);
         let n = 32usize;
         let base_order = 1usize << (6 + 3 * 1);
         assert_eq!(base_order % n, 0);
-        let omega_val =
-            super::mod_pow_generic(K_1_OMEGA, (base_order / n) as u128, modulus_val);
+        let omega_val = super::mod_pow_generic(K_1_OMEGA, (base_order / n) as u128, modulus_val);
         let omega = CwInt::from(omega_val);
 
         let mut poly_a = vec![CwInt::zero(); 16];
@@ -429,8 +526,7 @@ mod tests {
         let n = 16usize;
         let base_order = 1usize << (6 + 3 * 1);
         assert_eq!(base_order % n, 0);
-        let omega_val =
-            super::mod_pow_generic(K_1_OMEGA, (base_order / n) as u128, modulus_val);
+        let omega_val = super::mod_pow_generic(K_1_OMEGA, (base_order / n) as u128, modulus_val);
         let omega = CwInt::from(omega_val);
 
         let mut poly_a = vec![CwInt::zero(); 16];
@@ -473,8 +569,7 @@ mod tests {
         let n = 64usize;
         let base_order = 1usize << (6 + 3 * 1);
         assert_eq!(base_order % n, 0);
-        let omega_val =
-            super::mod_pow_generic(K_1_OMEGA, (base_order / n) as u128, modulus_val);
+        let omega_val = super::mod_pow_generic(K_1_OMEGA, (base_order / n) as u128, modulus_val);
         let omega = CwInt::from(omega_val);
 
         let mut data = vec![CwInt::zero(); n];
