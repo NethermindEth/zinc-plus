@@ -21,7 +21,8 @@ trait IprsHelpers<Twiddle> {
 
 impl IprsConfig {
     /// Create a code with custom modulus and generator. The pair must satisfy
-    /// that `\omega` is a primitive `N`-th root of unity in \mathbb{Z}_p, where `N = 2^{6+3k}`.  
+    /// that `\omega` is a primitive `N`-th root of unity in \mathbb{Z}_p, where
+    /// `N = 2^{6+3k}`.
     pub fn new(k: usize) -> Self {
         const LOG_BASE_LEN: usize = 6;
         const LOG_BASE_DIM: usize = LOG_BASE_LEN - 1;
@@ -57,14 +58,15 @@ impl IprsConfig {
     }
 }
 
-/// Pseudo Reed-Solomon encoder over the integers. Internally uses a configurable
-/// radix NTT-style recursion with a base Vandermonde matrix sized
+/// Pseudo Reed-Solomon encoder over the integers. Internally uses a
+/// configurable radix NTT-style recursion with a base Vandermonde matrix sized
 /// `base_len x base_dim` (defaults to 64x32).
 #[derive(Debug, Clone)]
 pub struct IprsCode<Zt: ZipTypes, const REP: usize> {
     pub cfg: IprsConfig,
-    twiddle_tables: Vec<Vec<Vec<Zt::Twiddle>>>, // Per-stage twiddle tables of size stage_len x radix
-    base_matrix: Vec<Vec<Zt::Twiddle>>,         // base_len x base_dim Vandermonde block
+    twiddle_tables: Vec<Vec<Vec<Zt::Twiddle>>>, /* Per-stage twiddle tables of size stage_len x
+                                                 * radix */
+    base_matrix: Vec<Vec<Zt::Twiddle>>, // base_len x base_dim Vandermonde block
 }
 
 impl<Zt: ZipTypes, const REP: usize> IprsCode<Zt, REP> {
@@ -167,7 +169,8 @@ where
 
     const REPETITION_FACTOR: usize = REP;
 
-    /// Create a code with the default `(p, \omega)` pair e.g. `(7681, 7146)`, valid for `k = 1`.
+    /// Create a code with the default `(p, \omega)` pair e.g. `(7681, 7146)`,
+    /// valid for `k = 1`.
     fn new(poly_size: usize, config: IprsConfig) -> Self {
         assert!(
             poly_size == config.m,
@@ -223,7 +226,8 @@ where
     }
 }
 
-// The pair must satisfy that `\omega` is a primitive `N`-th root of unity in \mathbb{Z}_p, where `N = 2^{6+3k}`.
+// The pair must satisfy that `\omega` is a primitive `N`-th root of unity in
+// \mathbb{Z}_p, where `N = 2^{6+3k}`.
 fn p_and_root_of_unity(n: usize) -> (i128, i128) {
     match n {
         512 => (7681, 7146),
@@ -296,8 +300,9 @@ fn build_twiddle_tables(
     tables
 }
 
-/// Build the base_len x base_dim Vandermonde block used at the leaves of the recursion. The
-/// evaluation points follow the NTT ordering induced by `(n / base_len)` strides.
+/// Build the base_len x base_dim Vandermonde block used at the leaves of the
+/// recursion. The evaluation points follow the NTT ordering induced by `(n /
+/// base_len)` strides.
 fn compute_base_matrix(
     modulus: i128,
     omega: i128,
