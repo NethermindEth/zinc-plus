@@ -272,6 +272,8 @@ impl<Twiddle: FromRef<i128>> IprsHelpers<Twiddle> for IprsConfig {
     }
 }
 
+// All the arithmetic below is not optimized as it's only used during setup.
+
 /// Precompute stage-specific twiddle tables. Each table contains `stage_len`
 /// entries where entry `i` stores the radix consecutive powers of
 /// `(omega)^(stride * i)`. This matches the order used in the recursive NTT.
