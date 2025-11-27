@@ -2,7 +2,8 @@
 use std::{fmt::Debug, ops::BitAnd};
 
 use crypto_primitives::PrimeField;
-use num_traits::{CheckedAdd, ConstZero};
+use itertools::Itertools;
+use num_traits::{CheckedAdd, ConstOne, ConstZero};
 use rand::distr::{Distribution, StandardUniform};
 use zinc_utils::{
     inner_product::{InnerProduct, InnerProductError},
@@ -168,6 +169,29 @@ impl<T: BinaryPolyCarrier> Named for BinaryPoly<T> {
     }
 }
 
+macro_rules! impl_from_binary_poly_for_array {
+    ($degree: literal, $carrier: ty) => {
+        impl<R: ConstZero + ConstOne> From<BinaryPoly<$carrier>> for [R; $degree] {
+            #[allow(clippy::arithmetic_side_effects)]
+            fn from(poly: BinaryPoly<$carrier>) -> Self {
+                (0..$degree)
+                    .map(|i| {
+                        if poly.is_zero_term_unchecked(i) {
+                            R::ZERO
+                        } else {
+                            R::ONE
+                        }
+                    })
+                    .collect_array()
+                    .expect("The size is always correct")
+            }
+        }
+    };
+}
+
+impl_from_binary_poly_for_array!(32, u32);
+impl_from_binary_poly_for_array!(64, u64);
+
 #[cfg(test)]
 mod test {
 
@@ -281,5 +305,25 @@ mod test {
         _assert_impl::<StandardUniform>();
         fn _assert_impl2<T: Distribution<BinaryPoly<u64>>>() {}
         _assert_impl2::<StandardUniform>();
+    }
+
+    #[test]
+    fn into_array() {
+        let poly = BinaryPoly::<u32>::from(0b10101010101010101010101010101010);
+        let expected: [u32; 32] = [
+            0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+            1, 0, 1,
+        ];
+        assert_eq!(Into::<[u32; 32]>::into(poly), expected);
+
+        let poly = BinaryPoly::<u64>::from(
+            0b1010101010101010101010101010101010101010101010101010101010101010,
+        );
+        let expected: [u32; 64] = [
+            0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+            1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1,
+            0, 1, 0, 1, 0, 1,
+        ];
+        assert_eq!(Into::<[u32; 64]>::into(poly), expected);
     }
 }
