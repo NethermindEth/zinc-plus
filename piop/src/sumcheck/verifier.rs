@@ -80,7 +80,7 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
 
         let msg: F = transcript.get_field_challenge(&self.config);
         self.randomness.push(msg.clone());
-        self.polynomials_received.push(prover_msg.clone().into());
+        self.polynomials_received.push(prover_msg.0.clone());
 
         // Now, verifier should set `expected` to P(r).
         // This operation is also moved to `check_and_generate_subclaim`,
@@ -115,7 +115,7 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
             panic!("insufficient rounds");
         }
         for i in 0..self.nv {
-            let NatEvaluatedPoly { evaluations } = &self.polynomials_received[i];
+            let evaluations = &self.polynomials_received[i].evaluations;
             if evaluations.len() != self.max_multiplicands + 1 {
                 return Err(SumCheckError::MaxDegreeExceeded);
             }
