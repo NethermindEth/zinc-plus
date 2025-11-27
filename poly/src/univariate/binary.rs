@@ -57,7 +57,7 @@ impl<T: BinaryPolyCarrier> From<T> for BinaryPoly<T> {
     }
 }
 
-impl<T: BinaryPolyCarrier, F: PrimeField> EvaluatablePolynomial<bool, F, F> for BinaryPoly<T> {
+impl<T: BinaryPolyCarrier, F: PrimeField> EvaluatablePolynomial<bool, F> for BinaryPoly<T> {
     type EvaluationPoint = F;
 
     #[allow(clippy::arithmetic_side_effects)] // (T::BIT_SIZE - 1) - i is fine if 0 <= i < T::BIT_SIZE.
