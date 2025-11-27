@@ -1,5 +1,5 @@
 use crate::from_ref::FromRef;
-use crypto_primitives::crypto_bigint_int::Int;
+use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int};
 use num_traits::CheckedMul;
 
 pub trait MulByScalar<Rhs>: Sized {
@@ -45,3 +45,9 @@ macro_rules! impl_mul_int_by_primitive_scalar {
 }
 
 impl_mul_int_by_primitive_scalar!(i8, i16, i32, i64, i128);
+
+impl MulByScalar<&Boolean> for i128 {
+    fn mul_by_scalar(&self, rhs: &Boolean) -> Option<Self> {
+        Some(if rhs.into_inner() { *self } else { 0 })
+    }
+}

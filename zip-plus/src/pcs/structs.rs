@@ -15,7 +15,12 @@ pub trait ZipTypes: Send + Sync {
     const NUM_COLUMN_OPENINGS: usize;
 
     /// Semiring of witness/polynomial evaluations on boolean hypercube
-    type Eval: FixedSemiring + Named + ConstCoeffBitWidth;
+    type Eval: Clone
+        + Send
+        + Sync
+        + Named
+        + ConstCoeffBitWidth
+        + InnerProduct<Self::Chal, Self::CombR>;
 
     /// Semiring of codeword elements, at least as wide as the evaluation ring
     type Cw: FixedSemiring

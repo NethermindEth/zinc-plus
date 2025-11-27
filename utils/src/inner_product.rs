@@ -1,5 +1,5 @@
 use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int};
-use num_traits::CheckedAdd;
+use num_traits::{CheckedAdd, CheckedMul};
 use thiserror::Error;
 
 use crate::{from_ref::FromRef, mul_by_scalar::MulByScalar};
@@ -60,6 +60,31 @@ where
         self.as_slice().inner_product(rhs, zero)
     }
 }
+
+macro_rules! impl_inner_product_for_primitives {
+    ($($t:ty),*) => {
+       $(
+           impl<T, Out> InnerProduct<T, Out> for $t
+           where
+               Out: From<$t> + for<'a> From<&'a T>,
+               Out: CheckedMul,
+           {
+                fn inner_product(&self, point: &[T], _zero: Out) -> Result<Out, InnerProductError> {
+                        if point.len() != 1 {
+                            Err(InnerProductError::LengthMismatch {
+                                lhs: 1,
+                                rhs: point.len(),
+                            })
+                        } else {
+                            Ok(Out::from(*self).checked_mul(&Out::from(&point[0])).ok_or(InnerProductError::Overflow)?)
+                        }
+                    }
+           }
+       )*
+    };
+}
+
+impl_inner_product_for_primitives!(i8, i16, i32, i64, i128);
 
 impl<T, Out, const LIMBS: usize> InnerProduct<T, Out> for Int<LIMBS>
 where
