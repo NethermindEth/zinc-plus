@@ -2,13 +2,13 @@ use std::ops::Add;
 
 use ark_std::{boxed::Box, marker::PhantomData, vec::Vec};
 use crypto_primitives::FromPrimitiveWithConfig;
-use prover::{ProverMsg, ProverState};
+use prover::ProverState;
 use thiserror::Error;
-use zinc_poly::{mle::DenseMultilinearExtension, utils::ArithErrors};
+use zinc_poly::{EvaluationError, mle::DenseMultilinearExtension, utils::ArithErrors};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_utils::mul_by_scalar::MulByScalar;
 
-use crate::sumcheck::verifier::VerifierState;
+use crate::sumcheck::{prover::ProverMsg, verifier::VerifierState};
 
 use self::verifier::SubClaim;
 
@@ -32,7 +32,7 @@ where
 {
     /// Derive the claimed sum from the sumcheck protocol.
     pub fn extract_sum(&self) -> F {
-        self.0[0].evaluations[0].clone() + &self.0[0].evaluations[1]
+        self.0[0].0.evaluations[0].clone() + &self.0[0].0.evaluations[1]
     }
 }
 
@@ -115,7 +115,7 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
 
         for _ in 0..nvars {
             let prover_msg = prover_state.prove_round(&verifier_msg, &comb_fn, &config);
-            transcript.absorb_random_field_slice(&prover_msg.evaluations, &mut buf);
+            transcript.absorb_random_field_slice(&prover_msg.0.evaluations, &mut buf);
             prover_msgs.push(prover_msg);
             let next_verifier_msg = transcript.get_field_challenge(&config);
             transcript.absorb_random_field(&next_verifier_msg, &mut buf);
@@ -218,12 +218,12 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
 
         for i in 0..num_vars {
             let prover_msg = &proof.0[i];
-            transcript.absorb_random_field_slice(&prover_msg.evaluations, &mut buf);
+            transcript.absorb_random_field_slice(&prover_msg.0.evaluations, &mut buf);
             let verifier_msg = verifier_state.verify_round(prover_msg, transcript);
             transcript.absorb_random_field(&verifier_msg, &mut buf);
         }
 
-        verifier_state.check_and_generate_subclaim(claimed_sum, &config)
+        verifier_state.check_and_generate_subclaim(claimed_sum)
     }
 }
 
@@ -237,10 +237,18 @@ pub enum SumCheckError<F> {
     MaxDegreeExceeded,
     #[error("invalid proof length: expected {expected}, got {got}")]
     InvalidProofLength { expected: usize, got: usize },
+    #[error("verifier failed to evaluate a round polynomial: {0}")]
+    UnivariateEvaluationError(EvaluationError),
 }
 
 impl<F> From<ArithErrors> for SumCheckError<F> {
     fn from(arith_error: ArithErrors) -> Self {
         Self::EvaluationError(arith_error)
+    }
+}
+
+impl<F> From<EvaluationError> for SumCheckError<F> {
+    fn from(error: EvaluationError) -> Self {
+        Self::UnivariateEvaluationError(error)
     }
 }
