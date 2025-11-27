@@ -27,7 +27,6 @@ rand_core = { workspace = true }
 rayon = { workspace = true, optional = true }
 blake3 = "1.8.2"
 uninit = "0.6.2"
-crypto-primes = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
