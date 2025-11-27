@@ -14,7 +14,6 @@ publish = false
 crypto-primitives = { git = "https://github.com/NethermindEth/crypto-primitives.git", branch = "main", features = ["std", "ark_std", "crypto_bigint", "rand"]  }
 
 crypto-bigint = { version = "0.7.0-rc.10", features = ["zeroize"] }
-crypto-primes = { version = "0.7.0-pre.4" }
 ark-std = "0.5"
 criterion = "0.7.0"
 itertools = "0.14"

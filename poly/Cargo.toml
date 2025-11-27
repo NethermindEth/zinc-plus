@@ -24,7 +24,6 @@ num-traits = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }
 rayon = { workspace = true, optional = true }
-crypto-primes = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
