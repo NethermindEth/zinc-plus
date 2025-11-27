@@ -3,6 +3,7 @@ use std::{fmt::Debug, ops::BitAnd};
 
 use crypto_primitives::PrimeField;
 use num_traits::{CheckedAdd, ConstZero};
+use rand::distr::{Distribution, StandardUniform};
 use zinc_utils::{
     inner_product::{InnerProduct, InnerProductError},
     named::Named,
@@ -76,6 +77,16 @@ impl<T: BinaryPolyCarrier> From<T> for BinaryPoly<T> {
     #[inline(always)]
     fn from(x: T) -> Self {
         Self { coeffs: x }
+    }
+}
+
+impl<T> Distribution<BinaryPoly<T>> for StandardUniform
+where
+    T: BinaryPolyCarrier,
+    StandardUniform: Distribution<T>,
+{
+    fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> BinaryPoly<T> {
+        From::from(rng.sample(self))
     }
 }
 
@@ -167,6 +178,7 @@ mod test {
         crypto_bigint_monty::F256,
     };
     use itertools::Itertools;
+    use rand::distr::{Distribution, StandardUniform};
     use zinc_utils::{inner_product::InnerProduct, projectable_to_field::ProjectableToField};
 
     use crate::{EvaluatablePolynomial, univariate::binary::BinaryPoly};
@@ -261,5 +273,13 @@ mod test {
             .sum();
 
         assert_eq!(inner_product, expected);
+    }
+
+    #[test]
+    fn ensure_distribution() {
+        fn _assert_impl<T: Distribution<BinaryPoly<u32>>>() {}
+        _assert_impl::<StandardUniform>();
+        fn _assert_impl2<T: Distribution<BinaryPoly<u64>>>() {}
+        _assert_impl2::<StandardUniform>();
     }
 }
