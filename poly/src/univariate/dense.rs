@@ -387,8 +387,6 @@ impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Polynomial<R>
 
 impl<R: Semiring, const DEGREE_PLUS_ONE: usize> EvaluatablePolynomial<R, R>
     for DensePolynomial<R, DEGREE_PLUS_ONE>
-where
-    R: for<'a> MulByScalar<&'a R>,
 {
     type EvaluationPoint = R;
 
@@ -401,9 +399,7 @@ where
             .clone();
 
         for coeff in self.coeffs.iter().rev().skip(1) {
-            let term = result
-                .mul_by_scalar(point)
-                .ok_or(EvaluationError::Overflow)?;
+            let term = result.checked_mul(point).ok_or(EvaluationError::Overflow)?;
             result = term.checked_add(coeff).ok_or(EvaluationError::Overflow)?;
         }
 
