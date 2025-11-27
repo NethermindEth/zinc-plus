@@ -72,7 +72,7 @@ impl<T: BinaryPolyCarrier, F: PrimeField> EvaluatablePolynomial<bool, F, F> for 
             })
             .fold(F::zero_with_cfg(point.cfg()), |mut acc, coeff| {
                 acc *= point;
-                if coeff != T::ZERO { acc + &one } else { acc }
+                if !coeff.is_zero() { acc + &one } else { acc }
             }))
     }
 }
