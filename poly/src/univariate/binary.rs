@@ -2,16 +2,28 @@
 use std::{fmt::Debug, ops::BitAnd};
 
 use crypto_primitives::PrimeField;
-use num_traits::ConstZero;
-use zinc_utils::projectable_to_field::ProjectableToField;
+use num_traits::{CheckedAdd, ConstZero};
+use zinc_utils::{
+    inner_product::{InnerProduct, InnerProductError},
+    named::Named,
+    projectable_to_field::ProjectableToField,
+};
 
-use crate::{EvaluatablePolynomial, EvaluationError, Polynomial};
+use crate::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial};
 
 // A type used to store the coefficients of
 // the binary polynomials. In our case, it is
 // either `u32` or `u64`.
 pub trait BinaryPolyCarrier:
-    ConstZero + TryFrom<u64, Error: Debug> + for<'a> BitAnd<&'a Self, Output = Self> + Sized + Eq
+    ConstZero
+    + TryFrom<u64, Error: Debug>
+    + for<'a> BitAnd<&'a Self, Output = Self>
+    + Sized
+    + Eq
+    + Named
+    + Copy
+    + Send
+    + Sync
 {
     /// The bit size of the type.
     const BIT_SIZE: u32;
@@ -25,12 +37,17 @@ impl BinaryPolyCarrier for u64 {
     const BIT_SIZE: u32 = 64;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BinaryPoly<T> {
     pub coeffs: T,
 }
 
 impl<T: BinaryPolyCarrier> Polynomial<bool> for BinaryPoly<T> {
     const DEGREE_BOUND: usize = T::BIT_SIZE as usize;
+}
+
+impl<T: BinaryPolyCarrier> ConstCoeffBitWidth for BinaryPoly<T> {
+    const COEFF_BIT_WIDTH: usize = 1;
 }
 
 impl<T: BinaryPolyCarrier> BinaryPoly<T> {
@@ -48,6 +65,11 @@ impl<T: BinaryPolyCarrier> BinaryPoly<T> {
             .expect("1 << pow_of_x is always less than the max T, since T::BIT_SIZE < pow_of_x");
         Some(Self { coeffs })
     }
+
+    /// Is the `term` coefficient equal to 0
+    fn is_zero_term_unchecked(&self, term: u32) -> bool {
+        (T::try_from(1 << term).expect("Unchecked") & &self.coeffs).is_zero()
+    }
 }
 
 impl<T: BinaryPolyCarrier> From<T> for BinaryPoly<T> {
@@ -64,16 +86,16 @@ impl<T: BinaryPolyCarrier, F: PrimeField> EvaluatablePolynomial<bool, F> for Bin
     fn evaluate_at_point(&self, point: &Self::EvaluationPoint) -> Result<F, EvaluationError> {
         // Horner's method.
         let one = F::one_with_cfg(point.cfg());
-        Ok((0..T::BIT_SIZE)
-            .map(|i| {
-                T::try_from(1u64 << ((T::BIT_SIZE - 1) - i))
-                    .expect("T is either u32 or u64 and this should always go through.")
-                    & &self.coeffs
-            })
-            .fold(F::zero_with_cfg(point.cfg()), |mut acc, coeff| {
+        Ok(
+            (0..T::BIT_SIZE).fold(F::zero_with_cfg(point.cfg()), |mut acc, i| {
                 acc *= point;
-                if !coeff.is_zero() { acc + &one } else { acc }
-            }))
+                if !self.is_zero_term_unchecked(T::BIT_SIZE - 1 - i) {
+                    acc + &one
+                } else {
+                    acc
+                }
+            }),
+        )
     }
 }
 
@@ -98,18 +120,40 @@ impl<T: BinaryPolyCarrier, F: PrimeField + 'static> ProjectableToField<F> for Bi
             r_powers
         };
 
-        move |Self { coeffs, .. }| {
+        move |poly| {
             (0..T::BIT_SIZE)
-                .filter(|i| {
-                    !(T::try_from(1 << i)
-                        .expect("If T is u32 i is 31 at most. If T is u64 i is 63 at most.")
-                        & coeffs)
-                        .is_zero()
-                })
+                .filter(|&i| !poly.is_zero_term_unchecked(i))
                 .fold(F::zero_with_cfg(&field_cfg), |acc, i| {
                     acc + &r_powers[i as usize]
                 })
         }
+    }
+}
+
+impl<T, R> InnerProduct<R> for BinaryPoly<T>
+where
+    T: BinaryPolyCarrier,
+    R: CheckedAdd,
+{
+    type Output = R;
+
+    fn inner_product(
+        &self,
+        rhs: &[R],
+        zero: Self::Output,
+    ) -> Result<Self::Output, InnerProductError> {
+        (0..T::BIT_SIZE)
+            .filter(|&i| !self.is_zero_term_unchecked(i))
+            .try_fold(zero, |acc, i| {
+                acc.checked_add(&rhs[i as usize])
+                    .ok_or(InnerProductError::Overflow)
+            })
+    }
+}
+
+impl<T: BinaryPolyCarrier> Named for BinaryPoly<T> {
+    fn type_name() -> String {
+        format!("BinaryPoly<{}>", T::type_name())
     }
 }
 
@@ -119,10 +163,11 @@ mod test {
     use crypto_bigint::{Odd, U128, const_monty_params, modular::MontyParams};
 
     use crypto_primitives::{
-        FromWithConfig, crypto_bigint_const_monty::ConstMontyField, crypto_bigint_monty::F256,
+        FromWithConfig, PrimeField, crypto_bigint_const_monty::ConstMontyField,
+        crypto_bigint_monty::F256,
     };
     use itertools::Itertools;
-    use zinc_utils::projectable_to_field::ProjectableToField;
+    use zinc_utils::{inner_product::InnerProduct, projectable_to_field::ProjectableToField};
 
     use crate::{EvaluatablePolynomial, univariate::binary::BinaryPoly};
 
@@ -189,5 +234,32 @@ mod test {
                 FMonty::from_with_cfg(i as u64, &test_monty_config())
             );
         }
+    }
+
+    #[test]
+    fn binary_poly_inner_product() {
+        let rhs = (0..32)
+            .map(|i| FMonty::from_with_cfg(i, &test_monty_config()))
+            .collect_vec();
+
+        // All odd coeffs are 1.
+        let poly = BinaryPoly::<u32>::from(0b10101010101010101010101010101010);
+
+        let inner_product = poly
+            .inner_product(&rhs, FMonty::zero_with_cfg(&test_monty_config()))
+            .unwrap();
+
+        // Sum of the odd numbers in the range [0, 31].
+        let expected: FMonty = (0..32)
+            .map(|i| {
+                if i % 2 != 0 {
+                    FMonty::from_with_cfg(i, &test_monty_config())
+                } else {
+                    FMonty::zero_with_cfg(&test_monty_config())
+                }
+            })
+            .sum();
+
+        assert_eq!(inner_product, expected);
     }
 }
