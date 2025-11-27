@@ -18,35 +18,18 @@ pub struct DenseMultilinearExtension<T> {
     pub num_vars: usize,
 }
 
-impl<R: Semiring> DenseMultilinearExtension<R> {
+impl<R> DenseMultilinearExtension<R> {
     pub fn zero_vars(evaluation: R) -> Self {
         Self {
             evaluations: vec![evaluation],
             num_vars: 0,
         }
     }
+}
 
+impl<R: Clone> DenseMultilinearExtension<R> {
     pub fn from_evaluations_slice(num_vars: usize, evaluations: &[R], zero: R) -> Self {
         Self::from_evaluations_vec(num_vars, evaluations.to_vec(), zero)
-    }
-
-    pub fn evaluate<S>(&self, point: &[S], zero: R) -> Result<R, EvaluationError>
-    where
-        R: for<'a> MulByScalar<&'a S>,
-    {
-        if point.len() == self.num_vars {
-            Ok(self
-                .fixed_variables(point, zero)
-                .evaluations
-                .into_iter()
-                .next()
-                .expect("Evaluations should not be empty"))
-        } else {
-            Err(EvaluationError::WrongPointWidth {
-                expected: self.num_vars,
-                actual: point.len(),
-            })
-        }
     }
 
     pub fn from_evaluations_vec(num_vars: usize, evaluations: Vec<R>, zero: R) -> Self {
@@ -92,23 +75,28 @@ impl<R: Semiring> DenseMultilinearExtension<R> {
         }
 
         // convert the dense vector into a mle
-        Self::from_slice(n_vars, &v, zero)
+        Self::from_evaluations_slice(n_vars, &v, zero)
     }
+}
 
-    /// Takes n_vars and a dense slice and returns its dense MLE.
-    #[allow(clippy::arithmetic_side_effects)]
-    pub fn from_slice(n_vars: usize, v: &[R], zero: R) -> Self {
-        let v_padded: Vec<R> = if v.len() != (1 << n_vars) {
-            // pad to 2^n_vars
-            [
-                v.to_owned(),
-                ark_std::iter::repeat_n(zero.clone(), (1 << n_vars) - v.len()).collect(),
-            ]
-            .concat()
+impl<R: Semiring> DenseMultilinearExtension<R> {
+    pub fn evaluate<S>(&self, point: &[S], zero: R) -> Result<R, EvaluationError>
+    where
+        R: for<'a> MulByScalar<&'a S>,
+    {
+        if point.len() == self.num_vars {
+            Ok(self
+                .fixed_variables(point, zero)
+                .evaluations
+                .into_iter()
+                .next()
+                .expect("Evaluations should not be empty"))
         } else {
-            v.to_owned()
-        };
-        DenseMultilinearExtension::from_evaluations_vec(n_vars, v_padded, zero)
+            Err(EvaluationError::WrongPointWidth {
+                expected: self.num_vars,
+                actual: point.len(),
+            })
+        }
     }
 
     fn unary<G>(&mut self, f: G)
@@ -391,7 +379,8 @@ mod tests {
             2u64.into_with_cfg(&cfg),
             3u64.into_with_cfg(&cfg),
         ];
-        let dense = DenseMultilinearExtension::from_slice(n_vars, &v, F::zero_with_cfg(&cfg));
+        let dense =
+            DenseMultilinearExtension::from_evaluations_slice(n_vars, &v, F::zero_with_cfg(&cfg));
         assert_eq!(dense.num_vars, n_vars);
         let mut expected = v.clone();
         expected.resize(1 << n_vars, F::zero_with_cfg(&cfg));
