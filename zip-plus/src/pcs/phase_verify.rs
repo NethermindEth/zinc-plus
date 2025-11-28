@@ -863,7 +863,7 @@ mod tests {
             let linear_code = C::new(poly_size, RAA_CFG);
             let pp = TestZip::setup(poly_size, linear_code);
 
-            let mle = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
+            let mle = DenseMultilinearExtension::rand(P, &mut rng);
             let (data, commitment) = TestZip::commit(&pp, &mle).expect("commit");
 
             // Same point choice as the bench
@@ -901,7 +901,7 @@ mod tests {
             let linear_code = PolyC::new(poly_size, RAA_CFG);
             let pp = TestPolyZip::setup(poly_size, linear_code);
 
-            let mle = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
+            let mle = DenseMultilinearExtension::rand(P, &mut rng);
             let (data, commitment) = TestPolyZip::commit(&pp, &mle).expect("commit");
 
             // Same point choice as the bench

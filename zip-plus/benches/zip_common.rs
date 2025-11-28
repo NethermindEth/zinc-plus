@@ -14,7 +14,7 @@ use crypto_primitives::{
     crypto_bigint_boxed_monty::BoxedMontyField,
 };
 use itertools::Itertools;
-use num_traits::{One, Zero};
+use num_traits::One;
 use rand::{distr::StandardUniform, prelude::*};
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
 use zinc_transcript::traits::ConstTranscribable;
@@ -97,11 +97,7 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
             let linear_code = Lc::new(poly_size, code_config);
             let params = ZipPlus::setup(poly_size, linear_code);
             let row_len = params.linear_code.row_len();
-            let poly = DenseMultilinearExtension::<<Zt as ZipTypes>::Eval>::rand(
-                P,
-                &mut rng,
-                Zero::zero(),
-            );
+            let poly = DenseMultilinearExtension::<<Zt as ZipTypes>::Eval>::rand(P, &mut rng);
             b.iter(|| {
                 let cw = ZipPlus::encode_rows(&params, row_len, &poly.evaluations);
                 black_box(cw)
@@ -183,7 +179,7 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
             b.iter_custom(|iters| {
                 let mut total_duration = Duration::ZERO;
                 for _ in 0..iters {
-                    let poly = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
+                    let poly = DenseMultilinearExtension::rand(P, &mut rng);
                     let timer = Instant::now();
                     let res = ZipPlus::commit(&params, &poly).expect("Failed to commit");
                     black_box(res);
@@ -208,7 +204,7 @@ pub fn test<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     let linear_code = Lc::new(poly_size, code_config);
     let params = ZipPlus::setup(poly_size, linear_code);
 
-    let poly = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
+    let poly = DenseMultilinearExtension::rand(P, &mut rng);
     let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
 
     group.bench_function(
@@ -243,7 +239,7 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     let linear_code = Lc::new(poly_size, code_config);
     let params = ZipPlus::setup(poly_size, linear_code);
 
-    let poly = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
+    let poly = DenseMultilinearExtension::rand(P, &mut rng);
     let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
     let point = vec![Zt::Pt::one(); P];
 
@@ -289,7 +285,7 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     let linear_code = Lc::new(poly_size, code_config);
     let params = ZipPlus::setup(poly_size, linear_code);
 
-    let poly = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
+    let poly = DenseMultilinearExtension::rand(P, &mut rng);
     let (data, commitment) = ZipPlus::commit(&params, &poly).unwrap();
     let point = vec![Zt::Pt::one(); P];
 

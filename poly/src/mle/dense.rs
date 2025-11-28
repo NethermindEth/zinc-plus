@@ -168,15 +168,14 @@ where
 
 impl<R> MultilinearExtensionRand<R> for DenseMultilinearExtension<R>
 where
-    R: Semiring,
+    R: Clone,
     StandardUniform: Distribution<R>,
 {
-    fn rand<Rng: RngCore + ?Sized>(num_vars: usize, rng: &mut Rng, zero: R) -> Self {
-        Self::from_evaluations_vec(
+    fn rand<Rng: RngCore + ?Sized>(num_vars: usize, rng: &mut Rng) -> Self {
+        Self {
             num_vars,
-            (0..1 << num_vars).map(|_| rng.random::<R>()).collect(),
-            zero,
-        )
+            evaluations: (0..1 << num_vars).map(|_| rng.random::<R>()).collect(),
+        }
     }
 }
 
