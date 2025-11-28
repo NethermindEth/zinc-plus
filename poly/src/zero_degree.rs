@@ -10,16 +10,10 @@ macro_rules! impl_zero_degree {
                 const DEGREE_BOUND: usize = 0;
             }
 
-            impl<T> EvaluatablePolynomial<Self, T, Self> for $t {
-                type EvaluationPoint = [T];
+            impl EvaluatablePolynomial<Self, Self> for $t {
+                type EvaluationPoint = Self;
 
-                fn evaluate_at_point(&self, point: &[T]) -> Result<Self, EvaluationError> {
-                    if !point.is_empty() {
-                        return Err(EvaluationError::WrongPointWidth {
-                            expected: 0,
-                            actual: point.len(),
-                        });
-                    }
+                fn evaluate_at_point(&self, _point: &Self) -> Result<Self, EvaluationError> {
                     Ok(self.clone())
                 }
             }
@@ -38,16 +32,10 @@ impl<const LIMBS: usize> Polynomial<Self> for Int<LIMBS> {
     const DEGREE_BOUND: usize = 0;
 }
 
-impl<T, const LIMBS: usize> EvaluatablePolynomial<Self, T, Self> for Int<LIMBS> {
-    type EvaluationPoint = [T];
+impl<const LIMBS: usize> EvaluatablePolynomial<Self, Self> for Int<LIMBS> {
+    type EvaluationPoint = Self;
 
-    fn evaluate_at_point(&self, point: &[T]) -> Result<Self, EvaluationError> {
-        if !point.is_empty() {
-            return Err(EvaluationError::WrongPointWidth {
-                expected: 0,
-                actual: point.len(),
-            });
-        }
+    fn evaluate_at_point(&self, _point: &Self) -> Result<Self, EvaluationError> {
         Ok(*self)
     }
 }

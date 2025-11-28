@@ -385,17 +385,12 @@ impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Polynomial<R>
     const DEGREE_BOUND: usize = DEGREE_PLUS_ONE - 1;
 }
 
-impl<R: Semiring, C, const DEGREE_PLUS_ONE: usize> EvaluatablePolynomial<R, C, R>
+impl<R: Semiring, const DEGREE_PLUS_ONE: usize> EvaluatablePolynomial<R, R>
     for DensePolynomial<R, DEGREE_PLUS_ONE>
-where
-    R: for<'a> MulByScalar<&'a C>,
 {
-    type EvaluationPoint = C;
+    type EvaluationPoint = R;
 
-    fn evaluate_at_point(&self, point: &C) -> Result<R, EvaluationError>
-    where
-        R: for<'a> MulByScalar<&'a C>,
-    {
+    fn evaluate_at_point(&self, point: &R) -> Result<R, EvaluationError> {
         // Horner's method.
         let mut result = self
             .coeffs
@@ -404,9 +399,7 @@ where
             .clone();
 
         for coeff in self.coeffs.iter().rev().skip(1) {
-            let term = result
-                .mul_by_scalar(point)
-                .ok_or(EvaluationError::Overflow)?;
+            let term = result.checked_mul(point).ok_or(EvaluationError::Overflow)?;
             result = term.checked_add(coeff).ok_or(EvaluationError::Overflow)?;
         }
 

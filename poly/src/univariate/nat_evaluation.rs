@@ -25,7 +25,7 @@ impl<F> Polynomial<F> for NatEvaluatedPoly<F> {
     const DEGREE_BOUND: usize = usize::MAX;
 }
 
-impl<F: FromPrimitiveWithConfig> EvaluatablePolynomial<F, F, F> for NatEvaluatedPoly<F> {
+impl<F: FromPrimitiveWithConfig> EvaluatablePolynomial<F, F> for NatEvaluatedPoly<F> {
     type EvaluationPoint = F;
 
     /// Interpolate the *unique* univariate polynomial of degree *at most*

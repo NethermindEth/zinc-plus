@@ -11,11 +11,10 @@ pub trait Polynomial<C> {
     const DEGREE_BOUND: usize;
 }
 
-// TODO: Remove the bogus type parameter `S`.
-pub trait EvaluatablePolynomial<C, S, Out>: Polynomial<C> {
+pub trait EvaluatablePolynomial<C, Out>: Polynomial<C> {
     /// The type of points a polynomial can be evaluated on.
-    /// For univariate polynomials this typically is `S`,
-    /// for multivariate this is `[S]`.
+    /// For univariate polynomials this typically is `Out`,
+    /// for multivariate this is `[Out]`.
     type EvaluationPoint: ?Sized;
 
     /// Evaluates the polynomial at the given point.
