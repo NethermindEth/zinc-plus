@@ -1,9 +1,12 @@
 //! Dense polynomial with binary coefficients.
-use std::{fmt::Debug, ops::BitAnd};
+use std::{
+    fmt::Debug,
+    ops::{Add, BitAnd},
+};
 
 use crypto_primitives::PrimeField;
 use itertools::Itertools;
-use num_traits::{CheckedAdd, ConstOne, ConstZero};
+use num_traits::{ConstOne, ConstZero};
 use rand::distr::{Distribution, StandardUniform};
 use zinc_utils::{
     inner_product::{InnerProduct, InnerProductError},
@@ -146,24 +149,23 @@ impl<T: BinaryPolyCarrier, F: PrimeField + 'static> ProjectableToField<F> for Bi
     }
 }
 
-impl<T, R> InnerProduct<R> for BinaryPoly<T>
+impl<T, R, Out> InnerProduct<R, Out> for BinaryPoly<T>
 where
     T: BinaryPolyCarrier,
-    R: CheckedAdd,
+    R: Clone,
+    Out: for<'a> Add<&'a Out, Output = Out> + From<R>,
 {
-    type Output = R;
+    fn inner_product(&self, rhs: &[R], zero: Out) -> Result<Out, InnerProductError> {
+        if rhs.len() != T::BIT_SIZE as usize {
+            return Err(InnerProductError::LengthMismatch {
+                lhs: T::BIT_SIZE as usize,
+                rhs: rhs.len(),
+            });
+        }
 
-    fn inner_product(
-        &self,
-        rhs: &[R],
-        zero: Self::Output,
-    ) -> Result<Self::Output, InnerProductError> {
-        (0..T::BIT_SIZE)
+        Ok((0..T::BIT_SIZE)
             .filter(|&i| !self.is_zero_term(i))
-            .try_fold(zero, |acc, i| {
-                acc.checked_add(&rhs[i as usize])
-                    .ok_or(InnerProductError::Overflow)
-            })
+            .fold(zero, |acc, i| acc.add(&(rhs[i as usize].clone().into()))))
     }
 }
 

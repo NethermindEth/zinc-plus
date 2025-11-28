@@ -1,20 +1,13 @@
-use crypto_primitives::crypto_bigint_int::Int;
+use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int};
 use num_traits::CheckedAdd;
 use thiserror::Error;
 
-use crate::mul_by_scalar::MulByScalar;
+use crate::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 
 /// A trait for types that can be dot-multiplied.
-pub trait InnerProduct<Rhs> {
-    /// The resulting type we get after the inner product.
-    type Output;
-
+pub trait InnerProduct<Rhs, Output> {
     /// The main entry point for the inner product.
-    fn inner_product(
-        &self,
-        rhs: &[Rhs],
-        zero: Self::Output,
-    ) -> Result<Self::Output, InnerProductError>;
+    fn inner_product(&self, rhs: &[Rhs], zero: Output) -> Result<Output, InnerProductError>;
 }
 
 #[derive(Clone, Debug, PartialEq, Error)]
@@ -25,62 +18,80 @@ pub enum InnerProductError {
     Overflow,
 }
 
-impl<Lhs, Rhs> InnerProduct<Rhs> for &[Lhs]
+impl<Lhs, Rhs, Out> InnerProduct<Rhs, Out> for &[Lhs]
 where
-    Lhs: Clone + CheckedAdd + for<'z> MulByScalar<&'z Rhs>,
+    Lhs: CheckedAdd + for<'a> MulByScalar<&'a Rhs>,
+    Out: From<Lhs> + CheckedAdd,
 {
-    type Output = Lhs;
-
-    fn inner_product(&self, rhs: &[Rhs], zero: Lhs) -> Result<Self::Output, InnerProductError> {
+    fn inner_product(&self, rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
         self.iter()
             .zip(rhs)
             .map(|(lhs, rhs)| lhs.mul_by_scalar(rhs).ok_or(InnerProductError::Overflow))
-            .reduce(|acc, product| {
-                acc?.checked_add(&product?)
+            .try_fold(zero, |acc, product| {
+                acc.checked_add(&product?.into())
                     .ok_or(InnerProductError::Overflow)
             })
-            .unwrap_or(Ok(zero))
     }
 }
 
-impl<Lhs, Rhs> InnerProduct<Rhs> for Vec<Lhs>
+impl<Lhs, Rhs, Out> InnerProduct<Rhs, Out> for Vec<Lhs>
 where
-    for<'a> &'a [Lhs]: InnerProduct<Rhs, Output = Lhs>,
+    for<'a> &'a [Lhs]: InnerProduct<Rhs, Out>,
 {
-    type Output = Lhs;
-
     #[inline]
-    fn inner_product(&self, rhs: &[Rhs], zero: Lhs) -> Result<Self::Output, InnerProductError> {
+    fn inner_product(&self, rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
         self.as_slice().inner_product(rhs, zero)
     }
 }
 
-impl<Lhs, Rhs, const N: usize> InnerProduct<Rhs> for [Lhs; N]
+impl<Lhs, Rhs, Out, const N: usize> InnerProduct<Rhs, Out> for [Lhs; N]
 where
-    for<'a> &'a [Lhs]: InnerProduct<Rhs, Output = Lhs>,
+    for<'a> &'a [Lhs]: InnerProduct<Rhs, Out>,
 {
-    type Output = Lhs;
-
     #[inline]
-    fn inner_product(&self, rhs: &[Rhs], zero: Lhs) -> Result<Self::Output, InnerProductError> {
+    fn inner_product(&self, rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
         self.as_slice().inner_product(rhs, zero)
     }
 }
 
-impl<T, const LIMBS: usize> InnerProduct<T> for Int<LIMBS> {
-    type Output = Self;
-
-    fn inner_product(&self, point: &[T], _zero: Self) -> Result<Self::Output, InnerProductError> {
-        if !point.is_empty() {
-            // TODO: Do we really want the RHS be empty?
-            //       Or do we want it to be one point?
+impl<T, Out, const LIMBS: usize> InnerProduct<T, Out> for Int<LIMBS>
+where
+    Int<LIMBS>: for<'a> MulByScalar<&'a T>,
+    Out: FromRef<Self>,
+{
+    fn inner_product(&self, point: &[T], _zero: Out) -> Result<Out, InnerProductError> {
+        if point.len() != 1 {
             Err(InnerProductError::LengthMismatch {
-                lhs: 0,
+                lhs: 1,
                 rhs: point.len(),
             })
         } else {
-            Ok(*self)
+            Ok(Out::from_ref(
+                &self
+                    .mul_by_scalar(&point[0])
+                    .ok_or(InnerProductError::Overflow)?,
+            ))
         }
+    }
+}
+
+impl<const M: usize> InnerProduct<i128, Int<M>> for &[Boolean] {
+    /// If we have a slice of booleans we do not need to multiply at all.
+    /// The inner product is just a sum!
+    fn inner_product(&self, rhs: &[i128], zero: Int<M>) -> Result<Int<M>, InnerProductError> {
+        if self.len() != rhs.len() {
+            return Err(InnerProductError::LengthMismatch {
+                lhs: self.len(),
+                rhs: rhs.len(),
+            });
+        }
+
+        (0..self.len())
+            .filter(|&i| self[i].into_inner())
+            .try_fold(zero, |acc, i| {
+                acc.checked_add(&Int::from(rhs[i]))
+                    .ok_or(InnerProductError::Overflow)
+            })
     }
 }
 
