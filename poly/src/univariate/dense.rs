@@ -573,16 +573,12 @@ impl<R: ConstZero + ConstOne> FromRef<BinaryPoly<u64>> for DensePolynomial<R, 64
 
 impl<R: ConstZero + ConstOne> From<BinaryPoly<u32>> for DensePolynomial<R, 32> {
     fn from(binary_poly: BinaryPoly<u32>) -> Self {
-        Self {
-            coeffs: binary_poly.into(),
-        }
+        Self::from_ref(&binary_poly)
     }
 }
 
 impl<R: ConstZero + ConstOne> From<BinaryPoly<u64>> for DensePolynomial<R, 64> {
     fn from(binary_poly: BinaryPoly<u64>) -> Self {
-        Self {
-            coeffs: binary_poly.into(),
-        }
+        Self::from_ref(&binary_poly)
     }
 }

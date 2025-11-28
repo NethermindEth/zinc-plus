@@ -69,8 +69,12 @@ impl<T: BinaryPolyCarrier> BinaryPoly<T> {
     }
 
     /// Is the `term` coefficient equal to 0
-    fn is_zero_term_unchecked(&self, term: u32) -> bool {
-        (T::try_from(1 << term).expect("Unchecked") & &self.coeffs).is_zero()
+    fn is_zero_term(&self, term: u32) -> bool {
+        (T::try_from(1 << term).expect(
+            "Failed to convert (1 << term) to T.\
+                                       This should not have happened normally.",
+        ) & &self.coeffs)
+            .is_zero()
     }
 }
 
@@ -101,7 +105,7 @@ impl<T: BinaryPolyCarrier, F: PrimeField> EvaluatablePolynomial<bool, F> for Bin
         Ok(
             (0..T::BIT_SIZE).fold(F::zero_with_cfg(point.cfg()), |mut acc, i| {
                 acc *= point;
-                if !self.is_zero_term_unchecked(T::BIT_SIZE - 1 - i) {
+                if !self.is_zero_term(T::BIT_SIZE - 1 - i) {
                     acc + &one
                 } else {
                     acc
@@ -134,7 +138,7 @@ impl<T: BinaryPolyCarrier, F: PrimeField + 'static> ProjectableToField<F> for Bi
 
         move |poly| {
             (0..T::BIT_SIZE)
-                .filter(|&i| !poly.is_zero_term_unchecked(i))
+                .filter(|&i| !poly.is_zero_term(i))
                 .fold(F::zero_with_cfg(&field_cfg), |acc, i| {
                     acc + &r_powers[i as usize]
                 })
@@ -155,7 +159,7 @@ where
         zero: Self::Output,
     ) -> Result<Self::Output, InnerProductError> {
         (0..T::BIT_SIZE)
-            .filter(|&i| !self.is_zero_term_unchecked(i))
+            .filter(|&i| !self.is_zero_term(i))
             .try_fold(zero, |acc, i| {
                 acc.checked_add(&rhs[i as usize])
                     .ok_or(InnerProductError::Overflow)
@@ -165,7 +169,7 @@ where
 
 impl<T: BinaryPolyCarrier> Named for BinaryPoly<T> {
     fn type_name() -> String {
-        format!("BinaryPoly<{}>", T::type_name())
+        format!("BPoly<{}>", T::type_name())
     }
 }
 
@@ -176,7 +180,7 @@ macro_rules! impl_from_binary_poly_for_array {
             fn from(poly: BinaryPoly<$carrier>) -> Self {
                 (0..$degree)
                     .map(|i| {
-                        if poly.is_zero_term_unchecked(i) {
+                        if poly.is_zero_term(i) {
                             R::ZERO
                         } else {
                             R::ONE
