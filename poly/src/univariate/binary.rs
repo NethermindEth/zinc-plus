@@ -277,6 +277,24 @@ mod test {
     }
 
     #[test]
+    fn test_projection_64() {
+        let x = FMonty::from_with_cfg(2, &test_monty_config());
+
+        let v = ((u64::MAX - 1024)..u64::MAX)
+            .map(BinaryPoly::<u64>::from)
+            .collect_vec();
+
+        let project = BinaryPoly::<u64>::prepare_projection(&x);
+
+        for (i, el) in v.iter().enumerate() {
+            assert_eq!(
+                project(el),
+                FMonty::from_with_cfg((u64::MAX - 1024) + i as u64, &test_monty_config())
+            );
+        }
+    }
+
+    #[test]
     fn binary_poly_inner_product() {
         let rhs = (0..32)
             .map(|i| FMonty::from_with_cfg(i, &test_monty_config()))
