@@ -1,13 +1,13 @@
-use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int};
-use num_traits::{CheckedAdd, CheckedMul, One, Zero};
+use crypto_primitives::boolean::Boolean;
+use num_traits::CheckedAdd;
 use thiserror::Error;
 
 use crate::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 
-/// A trait for types that can be dot-multiplied.
-pub trait InnerProduct<Rhs, Output> {
+/// A trait for inner product algorithms implementations.
+pub trait InnerProduct<Lhs: ?Sized, Rhs, Output> {
     /// The main entry point for the inner product.
-    fn inner_product(&self, rhs: &[Rhs], zero: Output) -> Result<Output, InnerProductError>;
+    fn inner_product(lhs: &Lhs, rhs: &[Rhs], zero: Output) -> Result<Output, InnerProductError>;
 }
 
 #[derive(Clone, Debug, PartialEq, Error)]
@@ -18,20 +18,27 @@ pub enum InnerProductError {
     Overflow,
 }
 
-impl<Lhs, Rhs, Out> InnerProduct<Rhs, Out> for &[Lhs]
+/// An implementation of inner product that piggies back
+/// on the `MulByScalar` and `CheckedAdd` traits.
+/// It does `mul_by_scalar` for products of terms
+/// and then combines the results using `checked_add`.
+pub struct MBSInnerProduct;
+
+impl<Lhs, Rhs, Out> InnerProduct<[Lhs], Rhs, Out> for MBSInnerProduct
 where
     Lhs: CheckedAdd + for<'a> MulByScalar<&'a Rhs>,
     Out: From<Lhs> + CheckedAdd,
 {
-    fn inner_product(&self, rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
-        if self.len() != rhs.len() {
+    /// The mul-by-scalar inner product.
+    fn inner_product(lhs: &[Lhs], rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
+        if lhs.len() != rhs.len() {
             return Err(InnerProductError::LengthMismatch {
-                lhs: self.len(),
+                lhs: lhs.len(),
                 rhs: rhs.len(),
             });
         }
 
-        self.iter()
+        lhs.iter()
             .zip(rhs)
             .map(|(lhs, rhs)| lhs.mul_by_scalar(rhs).ok_or(InnerProductError::Overflow))
             .try_fold(zero, |acc, product| {
@@ -41,101 +48,52 @@ where
     }
 }
 
-impl<Lhs, Rhs, Out> InnerProduct<Rhs, Out> for Vec<Lhs>
+// The inner product for vectors of length 1 (a.k.a. scalars).
+// Uses `mul_by_scalar` to multiply the only components of vectors
+// to get the result.
+pub struct ScalarProduct;
+
+impl<Lhs, Rhs, Out> InnerProduct<Lhs, Rhs, Out> for ScalarProduct
 where
-    for<'a> &'a [Lhs]: InnerProduct<Rhs, Out>,
+    Out: for<'a> MulByScalar<&'a Rhs> + FromRef<Lhs>,
 {
-    #[inline]
-    fn inner_product(&self, rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
-        self.as_slice().inner_product(rhs, zero)
-    }
-}
-
-impl<Lhs, Rhs, Out, const N: usize> InnerProduct<Rhs, Out> for [Lhs; N]
-where
-    for<'a> &'a [Lhs]: InnerProduct<Rhs, Out>,
-{
-    #[inline]
-    fn inner_product(&self, rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
-        self.as_slice().inner_product(rhs, zero)
-    }
-}
-
-macro_rules! impl_inner_product_for_primitives {
-    ($($t:ty),*) => {
-       $(
-           impl<T, Out> InnerProduct<T, Out> for $t
-           where
-               T: Zero + One + PartialEq,
-               Out: Zero + One + From<$t> + for<'a> From<&'a T> + CheckedMul,
-           {
-                fn inner_product(&self, point: &[T], _zero: Out) -> Result<Out, InnerProductError> {
-                        if point.len() != 1 {
-                            return Err(InnerProductError::LengthMismatch {
-                                lhs: 1,
-                                rhs: point.len(),
-                            });
-                        }
-
-                        if point[0].is_one() {
-                            return Ok(Out::from(*self))
-                        }
-
-
-                        if point[0].is_zero() {
-                            return Ok(Out::zero());
-                        }
-
-
-                        Out::from(*self).checked_mul(&Out::from(&point[0])).ok_or(InnerProductError::Overflow)
-
-                    }
-           }
-       )*
-    };
-}
-
-impl_inner_product_for_primitives!(i8, i16, i32, i64, i128);
-
-impl<T, Out, const LIMBS: usize> InnerProduct<T, Out> for Int<LIMBS>
-where
-    Int<LIMBS>: for<'a> MulByScalar<&'a T>,
-    Out: FromRef<Self>,
-{
-    fn inner_product(&self, point: &[T], _zero: Out) -> Result<Out, InnerProductError> {
-        if point.len() != 1 {
+    /// A scalar inner product. Assumes `Lhs` is a scalar type
+    /// and always asserts that `point` has only one component.
+    fn inner_product(lhs: &Lhs, point: &[Rhs], _zero: Out) -> Result<Out, InnerProductError> {
+        if point.as_ref().len() != 1 {
             Err(InnerProductError::LengthMismatch {
                 lhs: 1,
-                rhs: point.len(),
+                rhs: point.as_ref().len(),
             })
         } else {
-            Ok(Out::from_ref(
-                &self
-                    .mul_by_scalar(&point[0])
-                    .ok_or(InnerProductError::Overflow)?,
-            ))
+            Ok(Out::from_ref(lhs)
+                .mul_by_scalar(&point[0])
+                .ok_or(InnerProductError::Overflow)?)
         }
     }
 }
 
-impl<Out> InnerProduct<i128, Out> for &[Boolean]
-where
-    Out: CheckedAdd + From<i128>,
+/// The inner product for slices containing `Boolean` elements.
+/// Does `checked_add` to sum the elements of the RHS that
+/// correspond to `true` elements of the boolean slice.
+pub struct BooleanInnerProduct;
+
+impl<Rhs: Clone, Out: From<Rhs> + CheckedAdd> InnerProduct<[Boolean], Rhs, Out>
+    for BooleanInnerProduct
 {
-    /// If we have a slice of booleans we do not need to multiply at all.
-    /// The inner product is just a sum!
-    fn inner_product(&self, rhs: &[i128], zero: Out) -> Result<Out, InnerProductError> {
-        if self.len() != rhs.len() {
+    /// Boolean inner product.
+    fn inner_product(lhs: &[Boolean], rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
+        if lhs.len() != rhs.as_ref().len() {
             return Err(InnerProductError::LengthMismatch {
-                lhs: self.len(),
-                rhs: rhs.len(),
+                lhs: lhs.len(),
+                rhs: rhs.as_ref().len(),
             });
         }
 
-        (0..self.len())
-            .filter(|&i| self[i].into_inner())
+        (0..lhs.len())
+            .filter(|&i| lhs[i].into_inner())
             .try_fold(zero, |acc, i| {
-                acc.checked_add(&Out::from(rhs[i]))
+                acc.checked_add(&Out::from(rhs[i].clone()))
                     .ok_or(InnerProductError::Overflow)
             })
     }
@@ -149,6 +107,36 @@ mod test {
     fn test_inner_product_basic() {
         let lhs = [1, 2, 3];
         let rhs = [4, 5, 6];
-        assert_eq!(lhs.inner_product(&rhs, 0), Ok(4 + 2 * 5 + 3 * 6));
+        assert_eq!(
+            MBSInnerProduct::inner_product(&lhs, &rhs, 0),
+            Ok(4 + 2 * 5 + 3 * 6)
+        );
+    }
+
+    #[test]
+    fn scalar_product() {
+        let lhs = 42i32;
+        let rhs = 23i128;
+
+        assert_eq!(
+            ScalarProduct::inner_product(&lhs, &[rhs], 0).unwrap(),
+            i128::from(lhs) * rhs
+        )
+    }
+
+    #[test]
+    fn boolean_eq_mbs_inner_product() {
+        let lhs = [
+            Boolean::from(true),
+            Boolean::from(false),
+            Boolean::from(true),
+            Boolean::from(true),
+        ];
+        let rhs = [1i128, 2, 3, 4];
+
+        assert_eq!(
+            BooleanInnerProduct::inner_product(&lhs, &rhs, 0),
+            MBSInnerProduct::inner_product(&rhs, &lhs, 0i128)
+        );
     }
 }

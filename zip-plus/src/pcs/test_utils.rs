@@ -24,11 +24,17 @@ use crypto_primitives::{
 };
 use itertools::Itertools;
 use num_traits::Zero;
-use zinc_poly::{mle::DenseMultilinearExtension, univariate::dense::DensePolynomial};
+use zinc_poly::{
+    mle::DenseMultilinearExtension,
+    univariate::dense::{DensePolyInnerProduct, DensePolynomial},
+};
 use zinc_primality::MillerRabin;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
-    from_ref::FromRef, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
+    from_ref::FromRef,
+    inner_product::{BooleanInnerProduct, MBSInnerProduct, ScalarProduct},
+    mul_by_scalar::MulByScalar,
+    projectable_to_field::ProjectableToField,
 };
 
 const REPETITION_FACTOR: usize = 4;
@@ -49,6 +55,8 @@ impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N
     type Pt = Int<N>;
     type CombR = Int<M>;
     type Comb = Self::CombR;
+    type CombDotChal = ScalarProduct;
+    type EvalDotChal = ScalarProduct;
 }
 
 pub struct TestPolyZipTypes<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> {}
@@ -64,6 +72,10 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
     type Pt = i128;
     type CombR = Int<M>;
     type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
+    type CombDotChal =
+        DensePolyInnerProduct<Self::CombR, i128, Int<M>, MBSInnerProduct, DEGREE_PLUS_ONE>;
+    type EvalDotChal =
+        DensePolyInnerProduct<Boolean, i128, Int<M>, BooleanInnerProduct, DEGREE_PLUS_ONE>;
 }
 
 /// Helper function to set up common parameters for tests.

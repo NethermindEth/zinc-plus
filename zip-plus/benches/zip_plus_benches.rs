@@ -3,8 +3,9 @@
 
 mod zip_common;
 
-use zinc_poly::univariate::dense::DensePolynomial;
+use zinc_poly::univariate::dense::{DensePolyInnerProduct, DensePolynomial};
 use zinc_primality::MillerRabin;
+use zinc_utils::inner_product::{BooleanInnerProduct, MBSInnerProduct};
 use zip_common::*;
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -28,6 +29,20 @@ impl<const D_PLUS_ONE: usize> ZipTypes for BenchZipPlusTypes<D_PLUS_ONE> {
     type Pt = i128;
     type CombR = Int<{ INT_LIMBS * 5 }>;
     type Comb = DensePolynomial<Self::CombR, D_PLUS_ONE>;
+    type CombDotChal = DensePolyInnerProduct<
+        Self::CombR,
+        i128,
+        Int<{ INT_LIMBS * 5 }>,
+        MBSInnerProduct,
+        D_PLUS_ONE,
+    >;
+    type EvalDotChal = DensePolyInnerProduct<
+        Boolean,
+        i128,
+        Int<{ INT_LIMBS * 5 }>,
+        BooleanInnerProduct,
+        D_PLUS_ONE,
+    >;
 }
 type Code<const D_PLUS_ONE: usize> = RaaCode<BenchZipPlusTypes<D_PLUS_ONE>, 4>;
 
