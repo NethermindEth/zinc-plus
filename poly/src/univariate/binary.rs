@@ -128,7 +128,7 @@ impl<T: BinaryPolyCarrier, F: PrimeField + 'static> ProjectableToField<F> for Bi
             let mut curr = F::one_with_cfg(&field_cfg);
             r_powers.push(curr.clone());
 
-            for _ in 1..32 {
+            for _ in 1..T::BIT_SIZE {
                 curr *= sampled_value;
                 r_powers.push(curr.clone());
             }
