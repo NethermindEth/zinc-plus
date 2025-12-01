@@ -1,5 +1,5 @@
 use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int};
-use num_traits::{CheckedAdd, CheckedMul};
+use num_traits::{CheckedAdd, CheckedMul, One, Zero};
 use thiserror::Error;
 
 use crate::{from_ref::FromRef, mul_by_scalar::MulByScalar};
@@ -66,18 +66,29 @@ macro_rules! impl_inner_product_for_primitives {
        $(
            impl<T, Out> InnerProduct<T, Out> for $t
            where
-               Out: From<$t> + for<'a> From<&'a T>,
-               Out: CheckedMul,
+               T: Zero + One + PartialEq,
+               Out: Zero + One + From<$t> + for<'a> From<&'a T> + CheckedMul,
            {
                 fn inner_product(&self, point: &[T], _zero: Out) -> Result<Out, InnerProductError> {
                         if point.len() != 1 {
-                            Err(InnerProductError::LengthMismatch {
+                            return Err(InnerProductError::LengthMismatch {
                                 lhs: 1,
                                 rhs: point.len(),
-                            })
-                        } else {
-                            Ok(Out::from(*self).checked_mul(&Out::from(&point[0])).ok_or(InnerProductError::Overflow)?)
+                            });
                         }
+
+                        if point[0].is_one() {
+                            return Ok(Out::from(*self))
+                        }
+
+
+                        if point[0].is_zero() {
+                            return Ok(Out::zero());
+                        }
+
+
+                        Out::from(*self).checked_mul(&Out::from(&point[0])).ok_or(InnerProductError::Overflow)
+
                     }
            }
        )*
