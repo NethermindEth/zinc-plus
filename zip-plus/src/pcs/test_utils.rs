@@ -32,9 +32,9 @@ use zinc_primality::MillerRabin;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
     from_ref::FromRef,
-    inner_product::{BooleanInnerProduct, MBSInnerProduct, ScalarProduct},
+    inner_product::{BooleanInnerProductCheckedAdd, MBSInnerProduct, ScalarProduct},
     mul_by_scalar::MulByScalar,
-    projectable_to_field::ProjectableToField,
+    projection_to_field::ProjectionToField,
 };
 
 const REPETITION_FACTOR: usize = 4;
@@ -74,8 +74,13 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
     type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
     type CombDotChal =
         DensePolyInnerProduct<Self::CombR, i128, Int<M>, MBSInnerProduct, DEGREE_PLUS_ONE>;
-    type EvalDotChal =
-        DensePolyInnerProduct<Boolean, i128, Int<M>, BooleanInnerProduct, DEGREE_PLUS_ONE>;
+    type EvalDotChal = DensePolyInnerProduct<
+        Boolean,
+        i128,
+        Int<M>,
+        BooleanInnerProductCheckedAdd,
+        DEGREE_PLUS_ONE,
+    >;
 }
 
 /// Helper function to set up common parameters for tests.
@@ -134,7 +139,7 @@ fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt, Config = RaaConfig>>
     (pp, poly)
 }
 
-pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
+pub fn setup_full_protocol<F, PEval, PComb, const N: usize, const K: usize, const M: usize>(
     num_vars: usize,
 ) -> (
     ZipPlusParams<
@@ -151,16 +156,18 @@ where
         + for<'a> FromWithConfig<&'a <TestZipTypes<N, K, M> as ZipTypes>::Chal>
         + for<'a> MulByScalar<&'a F>,
     F::Inner: FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod> + Transcribable,
-    <TestZipTypes<N, K, M> as ZipTypes>::Eval: ProjectableToField<F>,
-    <TestZipTypes<N, K, M> as ZipTypes>::Comb: ProjectableToField<F>,
+    PEval: ProjectionToField<<TestZipTypes<N, K, M> as ZipTypes>::Eval, F>,
+    PComb: ProjectionToField<<TestZipTypes<N, K, M> as ZipTypes>::Comb, F>,
 {
-    setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_test_params, || {
+    setup_full_protocol_inner::<_, _, _, PEval, PComb, N>(num_vars, setup_test_params, || {
         (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect()
     })
 }
 
 pub fn setup_full_protocol_poly<
     F,
+    PEval,
+    PComb,
     const N: usize,
     const K: usize,
     const M: usize,
@@ -182,15 +189,15 @@ where
         + for<'a> FromWithConfig<&'a <TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Chal>
         + for<'a> MulByScalar<&'a F>,
     F::Inner: FromRef<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod> + Transcribable,
-    <TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Eval: ProjectableToField<F>,
-    <TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Comb: ProjectableToField<F>,
+    PEval: ProjectionToField<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Eval, F>,
+    PComb: ProjectionToField<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Comb, F>,
 {
-    setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_poly_test_params, || {
+    setup_full_protocol_inner::<_, _, _, PEval, PComb, N>(num_vars, setup_poly_test_params, || {
         (0..num_vars).map(|i| i as i128 + 2).collect()
     })
 }
 
-fn setup_full_protocol_inner<Zt, Lc, F, const N: usize>(
+fn setup_full_protocol_inner<Zt, Lc, F, PEval, PComb, const N: usize>(
     num_vars: usize,
     setup: impl FnOnce(usize) -> (ZipPlusParams<Zt, Lc>, DenseMultilinearExtension<Zt::Eval>),
     prepare_evaluation_point: impl FnOnce() -> Vec<Zt::Pt>,
@@ -209,8 +216,9 @@ where
         + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>,
     F::Inner: FromRef<Zt::Fmod> + Transcribable,
-    Zt::Eval: ProjectableToField<F>,
-    Zt::Comb: ProjectableToField<F> + for<'a> MulByScalar<&'a Zt::Pt>,
+    Zt::Comb: for<'a> MulByScalar<&'a Zt::Pt>,
+    PEval: ProjectionToField<Zt::Eval, F>,
+    PComb: ProjectionToField<Zt::Comb, F>,
 {
     let (pp, poly) = setup(num_vars);
 
@@ -233,7 +241,7 @@ where
         (field_cfg, projecting_element)
     };
 
-    let (eval_f, proof) = ZipPlus::evaluate(&pp, &poly, &point, transcript).unwrap();
+    let (eval_f, proof) = ZipPlus::evaluate::<_, PEval>(&pp, &poly, &point, transcript).unwrap();
 
     // Verify the evaluation is done correctly
     {
@@ -249,7 +257,7 @@ where
         let expected_eval = poly
             .evaluate(&point, Zero::zero())
             .expect("failed to evaluate polynomial");
-        let project = Zt::Comb::prepare_projection(&projecting_element);
+        let project = PComb::prepare_projection(&projecting_element);
         assert_eq!(eval_f, project(&expected_eval));
     }
 

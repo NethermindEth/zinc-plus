@@ -19,11 +19,11 @@ use zinc_utils::{
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProduct},
     mul_by_scalar::MulByScalar,
-    projectable_to_field::ProjectableToField,
+    projection_to_field::ProjectionToField,
 };
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
-    pub fn evaluate<F>(
+    pub fn evaluate<F, P>(
         pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
         point: &[Zt::Pt],
@@ -35,7 +35,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + for<'a> FromWithConfig<&'a Zt::Pt>
             + for<'a> MulByScalar<&'a F>,
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
-        Zt::Eval: ProjectableToField<F>,
+        P: ProjectionToField<Zt::Eval, F>,
     {
         validate_input::<Zt, Lc, _>("evaluate", pp.num_vars, [poly], [point])?;
 
@@ -61,7 +61,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             .collect_vec();
         let (q_0, q_1) = point_to_tensor(num_rows, &point, &field_cfg)?;
 
-        let project = Zt::Eval::prepare_projection(&projecting_element);
+        let project = P::prepare_projection(&projecting_element);
         let evaluations: Vec<F> = poly.evaluations.iter().map(project).collect_vec();
 
         let q_0_combined_row = if num_rows > 1 {

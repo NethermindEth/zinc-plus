@@ -1,3 +1,5 @@
+use std::ops::Add;
+
 use crypto_primitives::boolean::Boolean;
 use num_traits::CheckedAdd;
 use thiserror::Error;
@@ -76,12 +78,12 @@ where
 /// The inner product for slices containing `Boolean` elements.
 /// Does `checked_add` to sum the elements of the RHS that
 /// correspond to `true` elements of the boolean slice.
-pub struct BooleanInnerProduct;
+pub struct BooleanInnerProductCheckedAdd;
 
 impl<Rhs: Clone, Out: From<Rhs> + CheckedAdd> InnerProduct<[Boolean], Rhs, Out>
-    for BooleanInnerProduct
+    for BooleanInnerProductCheckedAdd
 {
-    /// Boolean inner product.
+    /// Boolean checked inner product.
     fn inner_product(lhs: &[Boolean], rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
         if lhs.len() != rhs.as_ref().len() {
             return Err(InnerProductError::LengthMismatch {
@@ -99,8 +101,35 @@ impl<Rhs: Clone, Out: From<Rhs> + CheckedAdd> InnerProduct<[Boolean], Rhs, Out>
     }
 }
 
+/// Does the unchecked `add` to sum the elements of the RHS that
+/// correspond to `true` elements of the boolean slice.
+/// Convenient for performing inner product with field elements
+/// whose `add` is safe and does not overflow.
+pub struct BooleanInnerProductUncheckedAdd;
+impl<Rhs: Clone, Out: From<Rhs> + for<'a> Add<&'a Rhs, Output = Out>>
+    InnerProduct<[Boolean], Rhs, Out> for BooleanInnerProductUncheckedAdd
+{
+    #[allow(clippy::arithmetic_side_effects)]
+    fn inner_product(lhs: &[Boolean], rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
+        if lhs.len() != rhs.as_ref().len() {
+            return Err(InnerProductError::LengthMismatch {
+                lhs: lhs.len(),
+                rhs: rhs.as_ref().len(),
+            });
+        }
+
+        Ok((0..lhs.len())
+            .filter(|&i| lhs[i].into_inner())
+            .fold(zero, |acc, i| acc + &rhs[i]))
+    }
+}
+
 #[cfg(test)]
 mod test {
+    use crypto_bigint::{U64, const_monty_params};
+    use crypto_primitives::crypto_bigint_const_monty::ConstMontyField;
+    use num_traits::ConstZero;
+
     use super::*;
 
     #[test]
@@ -125,7 +154,7 @@ mod test {
     }
 
     #[test]
-    fn boolean_eq_mbs_inner_product() {
+    fn boolean_checked_eq_mbs_inner_product() {
         let lhs = [
             Boolean::from(true),
             Boolean::from(false),
@@ -135,8 +164,31 @@ mod test {
         let rhs = [1i128, 2, 3, 4];
 
         assert_eq!(
-            BooleanInnerProduct::inner_product(&lhs, &rhs, 0),
+            BooleanInnerProductCheckedAdd::inner_product(&lhs, &rhs, 0),
             MBSInnerProduct::inner_product(&rhs, &lhs, 0i128)
+        );
+    }
+
+    const_monty_params!(Params, U64, "0000000000000007");
+
+    #[test]
+    fn boolean_unchecked_eq_boolean_checked() {
+        let lhs = [
+            Boolean::from(true),
+            Boolean::from(false),
+            Boolean::from(true),
+            Boolean::from(true),
+        ];
+        let rhs = [
+            ConstMontyField::<Params, 1>::from(1),
+            ConstMontyField::<Params, 1>::from(2),
+            ConstMontyField::<Params, 1>::from(3),
+            ConstMontyField::<Params, 1>::from(4),
+        ];
+
+        assert_eq!(
+            BooleanInnerProductCheckedAdd::inner_product(&lhs, &rhs, ConstMontyField::ZERO),
+            BooleanInnerProductUncheckedAdd::inner_product(&lhs, &rhs, ConstMontyField::ZERO)
         );
     }
 }

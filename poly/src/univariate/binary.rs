@@ -12,7 +12,7 @@ use rand::distr::{Distribution, StandardUniform};
 use zinc_utils::{
     inner_product::{InnerProduct, InnerProductError},
     named::Named,
-    projectable_to_field::ProjectableToField,
+    projection_to_field::ProjectionToField,
 };
 
 use crate::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial};
@@ -119,9 +119,13 @@ impl<T: BinaryPolyCarrier, F: PrimeField> EvaluatablePolynomial<bool, F> for Bin
     }
 }
 
-impl<T: BinaryPolyCarrier, F: PrimeField + 'static> ProjectableToField<F> for BinaryPoly<T> {
+pub struct BinaryPolyProjectionToField<T: BinaryPolyCarrier>(PhantomData<T>);
+
+impl<T: BinaryPolyCarrier, F: PrimeField + 'static> ProjectionToField<BinaryPoly<T>, F>
+    for BinaryPolyProjectionToField<T>
+{
     #[allow(clippy::arithmetic_side_effects)]
-    fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static {
+    fn prepare_projection(sampled_value: &F) -> impl Fn(&BinaryPoly<T>) -> F + 'static {
         let field_cfg = sampled_value.cfg().clone();
         let r_powers = {
             // It makes sense to preprocess the powers here
@@ -216,11 +220,11 @@ mod test {
     };
     use itertools::Itertools;
     use rand::distr::{Distribution, StandardUniform};
-    use zinc_utils::{inner_product::InnerProduct, projectable_to_field::ProjectableToField};
+    use zinc_utils::{inner_product::InnerProduct, projection_to_field::ProjectionToField};
 
     use crate::{
         EvaluatablePolynomial,
-        univariate::binary::{BinaryPoly, BinaryPolyInnerProduct},
+        univariate::binary::{BinaryPoly, BinaryPolyInnerProduct, BinaryPolyProjectionToField},
     };
 
     const N: usize = 2;
@@ -244,7 +248,7 @@ mod test {
 
     #[test]
     fn test_project_onto_field() {
-        let project = BinaryPoly::<u32>::prepare_projection(&F::from(2));
+        let project = BinaryPolyProjectionToField::prepare_projection(&F::from(2));
         for i in 0..u32::from(u16::MAX) {
             assert_eq!(project(&BinaryPoly::from(i)), F::from(i));
         }
@@ -278,7 +282,7 @@ mod test {
 
         let v = (0..1024).map(BinaryPoly::<u32>::from).collect_vec();
 
-        let project = BinaryPoly::<u32>::prepare_projection(&x);
+        let project = BinaryPolyProjectionToField::prepare_projection(&x);
 
         for (i, el) in v.iter().enumerate() {
             assert_eq!(
@@ -296,7 +300,7 @@ mod test {
             .map(BinaryPoly::<u64>::from)
             .collect_vec();
 
-        let project = BinaryPoly::<u64>::prepare_projection(&x);
+        let project = BinaryPolyProjectionToField::prepare_projection(&x);
 
         for (i, el) in v.iter().enumerate() {
             assert_eq!(
