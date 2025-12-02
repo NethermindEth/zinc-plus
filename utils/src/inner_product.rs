@@ -24,6 +24,13 @@ where
     Out: From<Lhs> + CheckedAdd,
 {
     fn inner_product(&self, rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
+        if self.len() != rhs.len() {
+            return Err(InnerProductError::LengthMismatch {
+                lhs: self.len(),
+                rhs: rhs.len(),
+            });
+        }
+
         self.iter()
             .zip(rhs)
             .map(|(lhs, rhs)| lhs.mul_by_scalar(rhs).ok_or(InnerProductError::Overflow))
@@ -75,10 +82,13 @@ where
     }
 }
 
-impl<const M: usize> InnerProduct<i128, Int<M>> for &[Boolean] {
+impl<Out> InnerProduct<i128, Out> for &[Boolean]
+where
+    Out: CheckedAdd + From<i128>,
+{
     /// If we have a slice of booleans we do not need to multiply at all.
     /// The inner product is just a sum!
-    fn inner_product(&self, rhs: &[i128], zero: Int<M>) -> Result<Int<M>, InnerProductError> {
+    fn inner_product(&self, rhs: &[i128], zero: Out) -> Result<Out, InnerProductError> {
         if self.len() != rhs.len() {
             return Err(InnerProductError::LengthMismatch {
                 lhs: self.len(),
@@ -89,7 +99,7 @@ impl<const M: usize> InnerProduct<i128, Int<M>> for &[Boolean] {
         (0..self.len())
             .filter(|&i| self[i].into_inner())
             .try_fold(zero, |acc, i| {
-                acc.checked_add(&Int::from(rhs[i]))
+                acc.checked_add(&Out::from(rhs[i]))
                     .ok_or(InnerProductError::Overflow)
             })
     }
