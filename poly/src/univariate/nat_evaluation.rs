@@ -1,8 +1,6 @@
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
+use num_traits::Zero;
 use std::convert::identity;
 
-use ark_std::cfg_into_iter;
 use crypto_primitives::{FromPrimitiveWithConfig, Semiring};
 
 use crate::{EvaluatablePolynomial, EvaluationError, Polynomial};
@@ -38,7 +36,7 @@ impl<F: FromPrimitiveWithConfig> EvaluatablePolynomial<F, F> for NatEvaluatedPol
     // are made sure to not overflow.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_wrap)]
     fn evaluate_at_point(&self, point: &Self::EvaluationPoint) -> Result<F, EvaluationError> {
-        let NatEvaluatedPoly { evaluations } = self;
+        let evaluations = &self.evaluations;
         // TODO(Alex): Once we have benches, it's worth checking
         //             if we're even winning anything
         //             with specialized branches above.
@@ -174,5 +172,44 @@ where
     R: Semiring,
     F: Fn(u64) -> R + Send + Sync,
 {
-    cfg_into_iter!((1..=(a as u64))).map(from_u64).product()
+    if a.is_zero() {
+        return from_u64(1);
+    }
+
+    (1..=(a as u64)).map(from_u64).product()
+}
+
+#[cfg(test)]
+mod tests {
+    use crypto_bigint::{Odd, modular::MontyParams};
+    use crypto_primitives::{FromWithConfig, crypto_bigint_monty::F256};
+    use itertools::Itertools;
+
+    use crate::{EvaluatablePolynomial, univariate::nat_evaluation::NatEvaluatedPoly};
+
+    const LIMBS: usize = 4;
+    type F = F256;
+
+    fn test_config() -> MontyParams<LIMBS> {
+        let modulus = crypto_bigint::Uint::<LIMBS>::from_be_hex(
+            "0000000000000000000000000000000000860995AE68FC80E1B1BD1E39D54B33",
+        );
+        let modulus = Odd::new(modulus).expect("modulus should be odd");
+        MontyParams::new(modulus)
+    }
+
+    #[test]
+    fn evaluate_nat_evaluation() {
+        let field_elem = F::from_with_cfg(100, &test_config());
+
+        let poly = NatEvaluatedPoly::new(
+            (0..1024)
+                .map(|x| F::from_with_cfg(x, &test_config()))
+                .collect_vec(),
+        );
+
+        let res = poly.evaluate_at_point(&field_elem).unwrap();
+
+        assert_eq!(res, F::from_with_cfg(100, &test_config()));
+    }
 }
