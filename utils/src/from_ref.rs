@@ -1,4 +1,4 @@
-use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int};
+use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint};
 use num_traits::{ConstOne, ConstZero};
 
 //
@@ -78,5 +78,12 @@ impl<const LIMBS: usize, const LIMBS2: usize> FromRef<Int<LIMBS2>> for Int<LIMBS
     #[inline]
     fn from_ref(value: &Int<LIMBS2>) -> Self {
         Self::try_from(value.inner()).expect("Destination Int type is too small")
+    }
+}
+
+impl<const LIMBS: usize, const LIMBS2: usize> FromRef<Uint<LIMBS2>> for Uint<LIMBS> {
+    #[inline]
+    fn from_ref(value: &Uint<LIMBS2>) -> Self {
+        Self::try_from(value.inner()).expect("Destination Uint type is too small")
     }
 }

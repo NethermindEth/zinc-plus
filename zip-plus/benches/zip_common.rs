@@ -9,9 +9,10 @@ use ark_std::{
     time::{Duration, Instant},
 };
 use criterion::{BenchmarkGroup, measurement::WallTime};
+use crypto_bigint::U64;
 use crypto_primitives::{
     DenseRowMatrix, Field, FromWithConfig, IntoWithConfig, PrimeField,
-    crypto_bigint_boxed_monty::BoxedMontyField,
+    crypto_bigint_monty::MontyField,
 };
 use itertools::Itertools;
 use num_traits::One;
@@ -25,7 +26,8 @@ use zip_plus::{
     pcs::structs::{ZipPlus, ZipTypes},
 };
 
-type F = BoxedMontyField;
+const INT_LIMBS: usize = U64::LIMBS;
+type F = MontyField<{ INT_LIMBS * 4 }>;
 
 pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     group: &mut BenchmarkGroup<WallTime>,
@@ -292,7 +294,7 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     let test_transcript = ZipPlus::test(&params, &poly, &data).expect("Test phase failed");
     let (eval_f, proof) = ZipPlus::evaluate::<F>(&params, &poly, &point, test_transcript)
         .expect("Evaluation phase failed");
-    let field_cfg = eval_f.cfg().clone();
+    let field_cfg = *eval_f.cfg();
     let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
     group.bench_function(
