@@ -128,7 +128,7 @@ impl<T: BinaryPolyCarrier, F: PrimeField + 'static> ProjectableToField<F> for Bi
             let mut curr = F::one_with_cfg(&field_cfg);
             r_powers.push(curr.clone());
 
-            for _ in 1..32 {
+            for _ in 1..T::BIT_SIZE {
                 curr *= sampled_value;
                 r_powers.push(curr.clone());
             }
@@ -272,6 +272,24 @@ mod test {
             assert_eq!(
                 project(el),
                 FMonty::from_with_cfg(i as u64, &test_monty_config())
+            );
+        }
+    }
+
+    #[test]
+    fn test_projection_64() {
+        let x = FMonty::from_with_cfg(2, &test_monty_config());
+
+        let v = ((u64::MAX - 1024)..u64::MAX)
+            .map(BinaryPoly::<u64>::from)
+            .collect_vec();
+
+        let project = BinaryPoly::<u64>::prepare_projection(&x);
+
+        for (i, el) in v.iter().enumerate() {
+            assert_eq!(
+                project(el),
+                FMonty::from_with_cfg((u64::MAX - 1024) + i as u64, &test_monty_config())
             );
         }
     }
