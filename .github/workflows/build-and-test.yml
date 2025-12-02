@@ -17,5 +17,7 @@ jobs:
     - uses: actions/checkout@v4
     - name: Build
       run: cargo test --workspace --verbose --no-run
+    - name: Build benches
+      run: cargo build --benches --all-features
     - name: Run tests
       run: cargo test --workspace --verbose
