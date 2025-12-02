@@ -46,7 +46,7 @@ pub trait ZipTypes: Send + Sync {
     /// wide as the evaluation, codeword, and challenge rings.
     type Comb: FixedSemiring
         + Polynomial<Self::CombR>
-        + InnerProduct<Self::Chal, Output = Self::CombR>
+        + InnerProduct<Self::Chal, Self::CombR>
         + FromRef<Self::Eval>
         + FromRef<Self::Cw>
         + Named;

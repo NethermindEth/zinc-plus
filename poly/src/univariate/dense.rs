@@ -539,18 +539,13 @@ impl<R, const DEGREE_PLUS_ONE: usize> AsRef<[R]> for DensePolynomial<R, DEGREE_P
     }
 }
 
-impl<R, Rhs, Out, const DEGREE_PLUS_ONE: usize> InnerProduct<Rhs>
+impl<R, Rhs, Out, const DEGREE_PLUS_ONE: usize> InnerProduct<Rhs, Out>
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 where
-    for<'a> &'a [R]: InnerProduct<Rhs, Output = Out>,
+    for<'a> &'a [R]: InnerProduct<Rhs, Out>,
 {
-    type Output = Out;
-
-    fn inner_product(
-        &self,
-        rhs: &[Rhs],
-        zero: Self::Output,
-    ) -> Result<Self::Output, InnerProductError> {
+    #[inline]
+    fn inner_product(&self, rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
         self.as_ref().inner_product(rhs, zero)
     }
 }

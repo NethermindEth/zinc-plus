@@ -9,9 +9,9 @@ use crate::{
     },
     pcs_transcript::PcsTranscript,
 };
-use crypto_bigint::ConstZero;
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
+use num_traits::{ConstOne, ConstZero, Zero};
 use zinc_poly::Polynomial;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
@@ -63,7 +63,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         Ok(())
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
     pub(super) fn verify_testing(
         vp: &ZipPlusParams<Zt, Lc>,
         root: &MtHash,
@@ -73,9 +73,19 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let encoded_combined_rows: Option<(Vec<Zt::Chal>, Vec<Zt::Chal>, Vec<Zt::CombR>)> = {
             if vp.num_rows > 1 {
                 // Values to evaluate the coefficients at
-                let alphas = transcript
-                    .fs_transcript
-                    .get_challenges(Zt::Comb::DEGREE_BOUND);
+                let alphas = if Zt::Comb::DEGREE_BOUND.is_zero() {
+                    // If we have just one coefficient
+                    // we don't take an RLC.
+                    vec![Zt::Chal::ONE]
+                } else {
+                    transcript
+                        .fs_transcript
+                        // NB: To take an inner product of coeffs
+                        // of a polynomial with the non-strict degree bound B
+                        // with a slice of challenges
+                        // we need to sample B + 1 challenges.
+                        .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND + 1)
+                };
 
                 // Coefficients for the linear combination of polynomial with evaluated
                 // coefficients
