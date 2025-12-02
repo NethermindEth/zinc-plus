@@ -250,7 +250,7 @@ mod tests {
     };
     use crypto_bigint::{Random, U64};
     use crypto_primitives::{
-        Field, FromWithConfig, IntoWithConfig, PrimeField,
+        Field, FromWithConfig, IntoWithConfig, PrimeField, boolean::Boolean,
         crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int,
     };
     use itertools::Itertools;
@@ -258,10 +258,12 @@ mod tests {
     use rand::prelude::*;
     use zinc_poly::{
         mle::{DenseMultilinearExtension, MultilinearExtensionRand},
-        univariate::dense::{DensePolynomial, HornerProjection},
+        univariate::dense::{DensePolynomial, HornerProjection, InnerProductProjection},
     };
     use zinc_transcript::traits::Transcribable;
-    use zinc_utils::projection_to_field::SimpleProjection;
+    use zinc_utils::{
+        inner_product::BooleanInnerProductUncheckedAdd, projection_to_field::SimpleProjection,
+    };
 
     const INT_LIMBS: usize = U64::LIMBS;
 
@@ -297,7 +299,7 @@ mod tests {
         {
             let (pp, comm, point_f, eval_f, proof) = setup_full_protocol_poly::<
                 F,
-                HornerProjection<_, _>,
+                InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
                 HornerProjection<_, _>,
                 N,
                 K,
@@ -338,7 +340,7 @@ mod tests {
         {
             let (pp, comm, point_f, eval_f, proof) = setup_full_protocol_poly::<
                 F,
-                HornerProjection<_, _>,
+                InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
                 HornerProjection<_, _>,
                 N,
                 K,
@@ -382,7 +384,7 @@ mod tests {
         {
             let (pp, comm, point_f, eval_f, proof) = setup_full_protocol_poly::<
                 F,
-                HornerProjection<_, _>,
+                InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
                 HornerProjection<_, _>,
                 N,
                 K,
@@ -428,7 +430,7 @@ mod tests {
         {
             let (pp, _comm_poly1, point_f, eval_f, proof_poly1) = setup_full_protocol_poly::<
                 F,
-                HornerProjection<_, _>,
+                InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
                 HornerProjection<_, _>,
                 N,
                 K,
@@ -481,7 +483,7 @@ mod tests {
         {
             let (pp, comm, _point_f, eval_f, proof) = setup_full_protocol_poly::<
                 F,
-                HornerProjection<_, _>,
+                InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
                 HornerProjection<_, _>,
                 N,
                 K,

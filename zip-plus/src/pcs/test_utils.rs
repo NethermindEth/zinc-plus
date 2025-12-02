@@ -55,8 +55,8 @@ impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N
     type Pt = Int<N>;
     type CombR = Int<M>;
     type Comb = Self::CombR;
-    type CombDotChal = ScalarProduct;
     type EvalDotChal = ScalarProduct;
+    type CombDotChal = ScalarProduct;
 }
 
 pub struct TestPolyZipTypes<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> {}
@@ -72,8 +72,6 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
     type Pt = i128;
     type CombR = Int<M>;
     type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
-    type CombDotChal =
-        DensePolyInnerProduct<Self::CombR, i128, Int<M>, MBSInnerProduct, DEGREE_PLUS_ONE>;
     type EvalDotChal = DensePolyInnerProduct<
         Boolean,
         i128,
@@ -81,6 +79,8 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
         BooleanInnerProductCheckedAdd,
         DEGREE_PLUS_ONE,
     >;
+    type CombDotChal =
+        DensePolyInnerProduct<Self::CombR, i128, Int<M>, MBSInnerProduct, DEGREE_PLUS_ONE>;
 }
 
 /// Helper function to set up common parameters for tests.
