@@ -13,7 +13,7 @@ use itertools::Itertools;
 use num_traits::{ConstOne, ConstZero, Zero};
 use zinc_poly::{Polynomial, mle::DenseMultilinearExtension};
 use zinc_transcript::traits::Transcript;
-use zinc_utils::{from_ref::FromRef, inner_product::InnerProduct};
+use zinc_utils::inner_product::InnerProduct;
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     #[allow(clippy::arithmetic_side_effects)]
@@ -52,7 +52,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             let evals: Vec<_> = poly
                 .evaluations
                 .iter()
-                .map(Zt::Comb::from_ref)
                 .map(|p| p.inner_product(&alphas, Zt::CombR::ZERO))
                 .try_collect()?;
 

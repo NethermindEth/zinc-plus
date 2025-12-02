@@ -113,7 +113,11 @@ fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt, Config = RaaConfig>>
     let pp = ZipPlusParams::new(num_vars, num_rows, code);
 
     let evaluations = prepare_evaluations(poly_size);
-    let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations, Zero::zero());
+    // We know the length of the evaluations is a power of two.
+    let poly = DenseMultilinearExtension {
+        num_vars,
+        evaluations,
+    };
 
     (pp, poly)
 }

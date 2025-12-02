@@ -1,6 +1,6 @@
 use crate::from_ref::FromRef;
-use crypto_primitives::crypto_bigint_int::Int;
-use num_traits::CheckedMul;
+use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int};
+use num_traits::{CheckedMul, ConstZero};
 
 pub trait MulByScalar<Rhs>: Sized {
     /// Multiplies the current element by a scalar from the right (usually - a
@@ -45,3 +45,16 @@ macro_rules! impl_mul_int_by_primitive_scalar {
 }
 
 impl_mul_int_by_primitive_scalar!(i8, i16, i32, i64, i128);
+
+impl<T> MulByScalar<&Boolean> for T
+where
+    T: Clone + ConstZero + From<Boolean>,
+{
+    fn mul_by_scalar(&self, rhs: &Boolean) -> Option<Self> {
+        Some(if rhs.into_inner() {
+            self.clone()
+        } else {
+            ConstZero::ZERO
+        })
+    }
+}
