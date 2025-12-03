@@ -4,16 +4,18 @@ use criterion::{
     AxisScale, BenchmarkId, Criterion, PlotConfiguration, criterion_group, criterion_main,
 };
 use crypto_bigint::{Odd, modular::MontyParams};
-use crypto_primitives::{FromWithConfig, PrimeField, crypto_bigint_monty::F256};
+use crypto_primitives::{FromWithConfig, PrimeField, boolean::Boolean, crypto_bigint_monty::F256};
 use itertools::Itertools;
 use zinc_poly::{
     EvaluatablePolynomial,
     univariate::{
         binary::{BinaryPoly, BinaryPolyProjectionToField},
-        dense::{DensePolynomial, HornerProjection},
+        dense::{DensePolynomial, InnerProductProjection},
     },
 };
-use zinc_utils::projection_to_field::ProjectionToField;
+use zinc_utils::{
+    inner_product::BooleanInnerProductUncheckedAdd, projection_to_field::ProjectionToField,
+};
 
 const LIMBS: usize = 4;
 
@@ -31,17 +33,26 @@ fn bench_config() -> MontyParams<LIMBS> {
 fn bench_dense_poly_projection(
     group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>,
 ) {
-    let v: Vec<DensePolynomial<u32, 32>> = (0..1024)
+    let v: Vec<DensePolynomial<Boolean, 32>> = (0..1024)
         .map(|i| {
             DensePolynomial::new(
                 (0..32)
-                    .map(|j| if i & (1 << j) == 0 { 0u32 } else { 1 })
+                    .map(|j| {
+                        if i & (1 << j) == 0 {
+                            false.into()
+                        } else {
+                            true.into()
+                        }
+                    })
                     .collect_vec(),
             )
         })
         .collect_vec();
 
-    let project = HornerProjection::prepare_projection(&F::from_with_cfg(235325, &bench_config()));
+    let project =
+        InnerProductProjection::<_, BooleanInnerProductUncheckedAdd, _>::prepare_projection(
+            &F::from_with_cfg(235325, &bench_config()),
+        );
 
     group.bench_with_input(BenchmarkId::new("Project", "Dense version"), &v, |b, v| {
         b.iter(|| {
