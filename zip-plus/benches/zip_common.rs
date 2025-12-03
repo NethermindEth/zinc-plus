@@ -18,7 +18,10 @@ use num_traits::One;
 use rand::{distr::StandardUniform, prelude::*};
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
 use zinc_transcript::traits::ConstTranscribable;
-use zinc_utils::{from_ref::FromRef, named::Named, projection_to_field::ProjectionToField};
+use zinc_utils::{
+    from_ref::FromRef, inner_product::MBSInnerProductChecked, named::Named,
+    projection_to_field::ProjectionToField,
+};
 use zip_plus::{
     code::LinearCode,
     merkle::MerkleTree,
@@ -306,8 +309,14 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, PEval, PCw, const P: usize>(
         ),
         |b| {
             b.iter(|| {
-                ZipPlus::verify::<_, PCw>(&params, &commitment, &point_f, &eval_f, &proof)
-                    .expect("Verification failed");
+                ZipPlus::verify::<_, PCw, MBSInnerProductChecked>(
+                    &params,
+                    &commitment,
+                    &point_f,
+                    &eval_f,
+                    &proof,
+                )
+                .expect("Verification failed");
             })
         },
     );
