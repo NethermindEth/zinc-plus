@@ -16,7 +16,7 @@ use zinc_poly::Polynomial;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
     from_ref::FromRef,
-    inner_product::{InnerProduct, MBSInnerProduct},
+    inner_product::{InnerProduct, MBSInnerProductChecked, MBSInnerProductUnchecked},
     mul_by_scalar::MulByScalar,
     projection_to_field::ProjectionToField,
 };
@@ -147,7 +147,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 .map(Zt::Comb::from_ref)
                 .map(|p| Zt::CombDotChal::inner_product(&p, alphas, Zt::CombR::ZERO))
                 .try_collect()?;
-            MBSInnerProduct::inner_product(&column_entries, coeffs, Zt::CombR::ZERO)?
+            MBSInnerProductChecked::inner_product(&column_entries, coeffs, Zt::CombR::ZERO)?
         } else {
             Zt::CombDotChal::inner_product(
                 &Zt::Comb::from_ref(&column_entries[0]),
@@ -181,8 +181,11 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
         let (q_0, q_1) = point_to_tensor(vp.num_rows, point_f, field_cfg)?;
 
-        if MBSInnerProduct::inner_product(&q_0_combined_row, &q_1, F::zero_with_cfg(field_cfg))?
-            != *eval_f
+        if MBSInnerProductUnchecked::inner_product(
+            &q_0_combined_row,
+            &q_1,
+            F::zero_with_cfg(field_cfg),
+        )? != *eval_f
         {
             return Err(ZipError::InvalidPcsOpen(
                 "Evaluation consistency failure".into(),
@@ -218,7 +221,11 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     {
         let column_entries_comb = if num_rows > 1 {
             let column_entries = column_entries.iter().map(project).collect_vec();
-            MBSInnerProduct::inner_product(q_0, &column_entries, F::zero_with_cfg(field_cfg))?
+            MBSInnerProductUnchecked::inner_product(
+                q_0,
+                &column_entries,
+                F::zero_with_cfg(field_cfg),
+            )?
             // TODO: this inner product is taking a long time.
         } else {
             project(column_entries.first().expect("No column entries"))

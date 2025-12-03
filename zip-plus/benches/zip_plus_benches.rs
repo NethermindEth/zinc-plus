@@ -8,7 +8,7 @@ use zinc_poly::univariate::dense::{
 };
 use zinc_primality::MillerRabin;
 use zinc_utils::inner_product::{
-    BooleanInnerProductCheckedAdd, BooleanInnerProductUncheckedAdd, MBSInnerProduct,
+    BooleanInnerProductCheckedAdd, BooleanInnerProductUncheckedAdd, MBSInnerProductChecked,
 };
 use zip_common::*;
 
@@ -44,7 +44,7 @@ impl<const D_PLUS_ONE: usize> ZipTypes for BenchZipPlusTypes<D_PLUS_ONE> {
         Self::CombR,
         i128,
         Int<{ INT_LIMBS * 5 }>,
-        MBSInnerProduct,
+        MBSInnerProductChecked,
         D_PLUS_ONE,
     >;
 }

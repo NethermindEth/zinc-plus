@@ -32,7 +32,7 @@ use zinc_primality::MillerRabin;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
     from_ref::FromRef,
-    inner_product::{BooleanInnerProductCheckedAdd, MBSInnerProduct, ScalarProduct},
+    inner_product::{BooleanInnerProductCheckedAdd, MBSInnerProductChecked, ScalarProduct},
     mul_by_scalar::MulByScalar,
     projection_to_field::ProjectionToField,
 };
@@ -80,7 +80,7 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
         DEGREE_PLUS_ONE,
     >;
     type CombDotChal =
-        DensePolyInnerProduct<Self::CombR, i128, Int<M>, MBSInnerProduct, DEGREE_PLUS_ONE>;
+        DensePolyInnerProduct<Self::CombR, i128, Int<M>, MBSInnerProductChecked, DEGREE_PLUS_ONE>;
 }
 
 /// Helper function to set up common parameters for tests.

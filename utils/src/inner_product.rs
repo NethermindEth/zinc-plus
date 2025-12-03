@@ -1,4 +1,4 @@
-use std::ops::Add;
+use std::ops::{Add, Mul};
 
 use crypto_primitives::boolean::Boolean;
 use num_traits::CheckedAdd;
@@ -24,11 +24,11 @@ pub enum InnerProductError {
 /// on the `MulByScalar` and `CheckedAdd` traits.
 /// It does `mul_by_scalar` for products of terms
 /// and then combines the results using `checked_add`.
-pub struct MBSInnerProduct;
+pub struct MBSInnerProductChecked;
 
-impl<Lhs, Rhs, Out> InnerProduct<[Lhs], Rhs, Out> for MBSInnerProduct
+impl<Lhs, Rhs, Out> InnerProduct<[Lhs], Rhs, Out> for MBSInnerProductChecked
 where
-    Lhs: CheckedAdd + for<'a> MulByScalar<&'a Rhs>,
+    Lhs: for<'a> MulByScalar<&'a Rhs>,
     Out: From<Lhs> + CheckedAdd,
 {
     /// The mul-by-scalar inner product.
@@ -47,6 +47,35 @@ where
                 acc.checked_add(&product?.into())
                     .ok_or(InnerProductError::Overflow)
             })
+    }
+}
+
+/// An implementation of inner product that piggies back
+/// on the `MulByScalar` and `Add` traits.
+/// It does `mul_by_scalar` for products of terms
+/// and then combines the results using `add`.
+pub struct MBSInnerProductUnchecked;
+
+impl<Lhs, Rhs, Out> InnerProduct<[Lhs], Rhs, Out> for MBSInnerProductUnchecked
+where
+    Lhs: Clone + for<'a> Mul<&'a Rhs, Output = Lhs>,
+    Out: for<'a> Add<&'a Lhs, Output = Out>,
+{
+    /// The mul-by-scalar inner product.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn inner_product(lhs: &[Lhs], rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
+        if lhs.len() != rhs.len() {
+            return Err(InnerProductError::LengthMismatch {
+                lhs: lhs.len(),
+                rhs: rhs.len(),
+            });
+        }
+
+        Ok(lhs
+            .iter()
+            .zip(rhs)
+            .map(|(lhs, rhs)| lhs.clone() * rhs)
+            .fold(zero, |acc, product| acc + &product))
     }
 }
 
@@ -137,7 +166,7 @@ mod test {
         let lhs = [1, 2, 3];
         let rhs = [4, 5, 6];
         assert_eq!(
-            MBSInnerProduct::inner_product(&lhs, &rhs, 0),
+            MBSInnerProductChecked::inner_product(&lhs, &rhs, 0),
             Ok(4 + 2 * 5 + 3 * 6)
         );
     }
@@ -165,7 +194,7 @@ mod test {
 
         assert_eq!(
             BooleanInnerProductCheckedAdd::inner_product(&lhs, &rhs, 0),
-            MBSInnerProduct::inner_product(&rhs, &lhs, 0i128)
+            MBSInnerProductChecked::inner_product(&rhs, &lhs, 0i128)
         );
     }
 
