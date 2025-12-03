@@ -35,15 +35,15 @@ impl<const D_PLUS_ONE: usize> ZipTypes for BenchZipPlusTypes<D_PLUS_ONE> {
     type Comb = DensePolynomial<Self::CombR, D_PLUS_ONE>;
     type EvalDotChal = DensePolyInnerProduct<
         Boolean,
-        i128,
-        Int<{ INT_LIMBS * 5 }>,
+        Self::Chal,
+        Self::CombR,
         BooleanInnerProductCheckedAdd,
         D_PLUS_ONE,
     >;
     type CombDotChal = DensePolyInnerProduct<
         Self::CombR,
-        i128,
-        Int<{ INT_LIMBS * 5 }>,
+        Self::Chal,
+        Self::CombR,
         MBSInnerProductChecked,
         D_PLUS_ONE,
     >;

@@ -74,13 +74,18 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
     type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
     type EvalDotChal = DensePolyInnerProduct<
         Boolean,
-        i128,
-        Int<M>,
+        Self::Chal,
+        Self::CombR,
         BooleanInnerProductCheckedAdd,
         DEGREE_PLUS_ONE,
     >;
-    type CombDotChal =
-        DensePolyInnerProduct<Self::CombR, i128, Int<M>, MBSInnerProductChecked, DEGREE_PLUS_ONE>;
+    type CombDotChal = DensePolyInnerProduct<
+        Self::CombR,
+        Self::Chal,
+        Self::CombR,
+        MBSInnerProductChecked,
+        DEGREE_PLUS_ONE,
+    >;
 }
 
 /// Helper function to set up common parameters for tests.

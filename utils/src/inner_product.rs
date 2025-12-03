@@ -79,9 +79,9 @@ where
     }
 }
 
-// The inner product for vectors of length 1 (a.k.a. scalars).
-// Uses `mul_by_scalar` to multiply the only components of vectors
-// to get the result.
+/// The inner product for vectors of length 1 (a.k.a. scalars).
+/// Uses `mul_by_scalar` to multiply the only components of vectors
+/// to get the result.
 pub struct ScalarProduct;
 
 impl<Lhs, Rhs, Out> InnerProduct<Lhs, Rhs, Out> for ScalarProduct
