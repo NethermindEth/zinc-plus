@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use crate::{
     ZipError,
     code::LinearCode,
@@ -66,17 +64,16 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
         let q_0_combined_row = if num_rows > 1 {
             // Return the evaluation row combination
-            let combined_row = combine_rows(&q_0, &evaluations, row_len);
-            Cow::<Vec<F>>::Owned(combined_row)
+            combine_rows(&q_0, &evaluations, row_len)
         } else {
             // If there is only one row, we have no need to take linear combinations
             // We just return the evaluation row combination
-            Cow::Borrowed(&evaluations)
+            evaluations
         };
 
         transcript.write_field_elements(&q_0_combined_row)?;
         let eval_f = MBSInnerProductUnchecked::inner_product(
-            &q_0_combined_row[..],
+            &q_0_combined_row,
             &q_1,
             F::zero_with_cfg(&field_cfg),
         )?;
