@@ -36,9 +36,5 @@ workspace = true
 parallel = ["dep:rayon"]
 
 [[bench]]
-name = "binary_vs_ordinary"
-harness = false
-
-[[bench]]
 name = "nat_evaluation"
 harness = false
