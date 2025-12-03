@@ -35,8 +35,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + for<'a> FromWithConfig<&'a Zt::Chal>
             + for<'a> MulByScalar<&'a F>,
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
-        I: InnerProduct<[Zt::CombR], Zt::Chal, Zt::CombR>,
         P: ProjectionToField<Zt::Cw, F>,
+        I: InnerProduct<[Zt::CombR], Zt::Chal, Zt::CombR>,
     {
         validate_input::<Zt, Lc, _>("verify", vp.num_vars, &[], [point_f])?;
 
@@ -295,10 +295,7 @@ mod tests {
     fn successful_verification_of_valid_proof() {
         let num_vars = 4;
         {
-            let (pp, comm, point_f, eval_f, proof) =
-                setup_full_protocol::<F, SimpleProjection<_>, SimpleProjection<_>, N, K, M>(
-                    num_vars,
-                );
+            let (pp, comm, point_f, eval_f, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
 
             let result = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
                 &pp, &comm, &point_f, &eval_f, &proof,
@@ -322,10 +319,7 @@ mod tests {
         let num_vars = 4;
 
         {
-            let (pp, comm, point_f, eval_f, proof) =
-                setup_full_protocol::<F, SimpleProjection<_>, SimpleProjection<_>, N, K, M>(
-                    num_vars,
-                );
+            let (pp, comm, point_f, eval_f, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
             let cfg = eval_f.cfg().clone();
 
             let result = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
@@ -366,10 +360,7 @@ mod tests {
         let num_vars = 4;
 
         {
-            let (pp, comm, point_f, eval, proof) =
-                setup_full_protocol::<F, SimpleProjection<_>, SimpleProjection<_>, N, K, M>(
-                    num_vars,
-                );
+            let (pp, comm, point_f, eval, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
             let tampered = tamper(proof);
             let result = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
                 &pp, &comm, &point_f, &eval, &tampered,
@@ -393,9 +384,7 @@ mod tests {
         let num_vars = 4;
         {
             let (pp, _comm_poly1, point_f, eval_f, proof_poly1) =
-                setup_full_protocol::<F, SimpleProjection<_>, SimpleProjection<_>, N, K, M>(
-                    num_vars,
-                );
+                setup_full_protocol::<F, N, K, M>(num_vars);
 
             let different_evals: Vec<_> = (20..(20 + (1 << num_vars))).map(Int::from).collect();
             let poly2 = DenseMultilinearExtension::from_evaluations_vec(
@@ -479,10 +468,7 @@ mod tests {
         }
 
         {
-            let (pp, comm, _point_f, eval_f, proof) =
-                setup_full_protocol::<F, SimpleProjection<_>, SimpleProjection<_>, N, K, M>(
-                    num_vars,
-                );
+            let (pp, comm, _point_f, eval_f, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
             let invalid_point = make_invalid_point(eval_f.cfg());
 
             let result = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(

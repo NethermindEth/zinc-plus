@@ -39,7 +39,7 @@ use zinc_utils::{
         ScalarProduct,
     },
     mul_by_scalar::MulByScalar,
-    projection_to_field::ProjectionToField,
+    projection_to_field::{ProjectionToField, SimpleProjection},
 };
 
 const REPETITION_FACTOR: usize = 4;
@@ -149,7 +149,7 @@ fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt, Config = RaaConfig>>
     (pp, poly)
 }
 
-pub fn setup_full_protocol<F, PEval, PComb, const N: usize, const K: usize, const M: usize>(
+pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
     num_vars: usize,
 ) -> (
     ZipPlusParams<
@@ -164,14 +164,15 @@ pub fn setup_full_protocol<F, PEval, PComb, const N: usize, const K: usize, cons
 where
     F: PrimeField
         + for<'a> FromWithConfig<&'a <TestZipTypes<N, K, M> as ZipTypes>::Chal>
+        + for<'a> FromWithConfig<&'a <TestZipTypes<N, K, M> as ZipTypes>::CombR>
         + for<'a> MulByScalar<&'a F>,
     F::Inner: FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod> + Transcribable,
-    PEval: ProjectionToField<<TestZipTypes<N, K, M> as ZipTypes>::Eval, F>,
-    PComb: ProjectionToField<<TestZipTypes<N, K, M> as ZipTypes>::Comb, F>,
 {
-    setup_full_protocol_inner::<_, _, _, PEval, PComb, N>(num_vars, setup_test_params, || {
-        (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect()
-    })
+    setup_full_protocol_inner::<_, _, _, SimpleProjection<_>, SimpleProjection<_>, N>(
+        num_vars,
+        setup_test_params,
+        || (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect(),
+    )
 }
 
 pub fn setup_full_protocol_poly<
@@ -195,8 +196,8 @@ pub fn setup_full_protocol_poly<
 where
     F: PrimeField
         + for<'a> FromWithConfig<&'a <TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Chal>
-        + for<'a> MulByScalar<&'a F>
         + for<'a> FromWithConfig<&'a <TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::CombR>
+        + for<'a> MulByScalar<&'a F>
         + 'static,
     F::Inner: FromRef<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod> + Transcribable,
 {
