@@ -258,7 +258,7 @@ mod tests {
     };
     use crypto_bigint::{Random, U64};
     use crypto_primitives::{
-        Field, FromWithConfig, IntoWithConfig, PrimeField, boolean::Boolean,
+        Field, FromWithConfig, IntoWithConfig, PrimeField,
         crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int,
     };
     use itertools::Itertools;
@@ -266,12 +266,11 @@ mod tests {
     use rand::prelude::*;
     use zinc_poly::{
         mle::{DenseMultilinearExtension, MultilinearExtensionRand},
-        univariate::dense::{DensePolynomial, HornerProjection, InnerProductProjection},
+        univariate::dense::{DensePolynomial, HornerProjection},
     };
     use zinc_transcript::traits::Transcribable;
     use zinc_utils::{
-        inner_product::{BooleanInnerProductUncheckedAdd, MBSInnerProductChecked},
-        projection_to_field::SimpleProjection,
+        inner_product::MBSInnerProductChecked, projection_to_field::SimpleProjection,
     };
 
     const INT_LIMBS: usize = U64::LIMBS;
@@ -307,15 +306,8 @@ mod tests {
             assert!(result.is_ok(), "Verification failed: {result:?}")
         };
         {
-            let (pp, comm, point_f, eval_f, proof) = setup_full_protocol_poly::<
-                F,
-                InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
-                HornerProjection<_, _>,
-                N,
-                K,
-                M,
-                DEGREE_PLUS_ONE,
-            >(num_vars);
+            let (pp, comm, point_f, eval_f, proof) =
+                setup_full_protocol_poly::<F, N, K, M, DEGREE_PLUS_ONE>(num_vars);
 
             let result = TestPolyZip::verify::<_, HornerProjection<_, _>, MBSInnerProductChecked>(
                 &pp, &comm, &point_f, &eval_f, &proof,
@@ -348,15 +340,8 @@ mod tests {
         }
 
         {
-            let (pp, comm, point_f, eval_f, proof) = setup_full_protocol_poly::<
-                F,
-                InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
-                HornerProjection<_, _>,
-                N,
-                K,
-                M,
-                DEGREE_PLUS_ONE,
-            >(num_vars);
+            let (pp, comm, point_f, eval_f, proof) =
+                setup_full_protocol_poly::<F, N, K, M, DEGREE_PLUS_ONE>(num_vars);
             let cfg = eval_f.cfg().clone();
 
             let result = TestPolyZip::verify::<_, HornerProjection<_, _>, MBSInnerProductChecked>(
@@ -393,15 +378,8 @@ mod tests {
         }
 
         {
-            let (pp, comm, point_f, eval_f, proof) = setup_full_protocol_poly::<
-                F,
-                InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
-                HornerProjection<_, _>,
-                N,
-                K,
-                M,
-                DEGREE_PLUS_ONE,
-            >(num_vars);
+            let (pp, comm, point_f, eval_f, proof) =
+                setup_full_protocol_poly::<F, N, K, M, DEGREE_PLUS_ONE>(num_vars);
             let tampered = tamper(proof);
             let result = TestPolyZip::verify::<_, HornerProjection<_, _>, MBSInnerProductChecked>(
                 &pp, &comm, &point_f, &eval_f, &tampered,
@@ -439,15 +417,8 @@ mod tests {
         }
 
         {
-            let (pp, _comm_poly1, point_f, eval_f, proof_poly1) = setup_full_protocol_poly::<
-                F,
-                InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
-                HornerProjection<_, _>,
-                N,
-                K,
-                M,
-                DEGREE_PLUS_ONE,
-            >(num_vars);
+            let (pp, _comm_poly1, point_f, eval_f, proof_poly1) =
+                setup_full_protocol_poly::<F, N, K, M, DEGREE_PLUS_ONE>(num_vars);
 
             let different_evals = {
                 let different_eval_coeffs: Vec<_> = (1..=((1 << num_vars)
@@ -492,15 +463,8 @@ mod tests {
         };
 
         {
-            let (pp, comm, _point_f, eval_f, proof) = setup_full_protocol_poly::<
-                F,
-                InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
-                HornerProjection<_, _>,
-                N,
-                K,
-                M,
-                DEGREE_PLUS_ONE,
-            >(num_vars);
+            let (pp, comm, _point_f, eval_f, proof) =
+                setup_full_protocol_poly::<F, N, K, M, DEGREE_PLUS_ONE>(num_vars);
             let invalid_point = make_invalid_point(eval_f.cfg());
 
             let result = TestPolyZip::verify::<_, HornerProjection<_, _>, MBSInnerProductChecked>(

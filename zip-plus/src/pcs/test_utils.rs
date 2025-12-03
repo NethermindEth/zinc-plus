@@ -26,13 +26,18 @@ use itertools::Itertools;
 use num_traits::Zero;
 use zinc_poly::{
     mle::DenseMultilinearExtension,
-    univariate::dense::{DensePolyInnerProduct, DensePolynomial},
+    univariate::dense::{
+        DensePolyInnerProduct, DensePolynomial, HornerProjection, InnerProductProjection,
+    },
 };
 use zinc_primality::MillerRabin;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
     from_ref::FromRef,
-    inner_product::{BooleanInnerProductCheckedAdd, MBSInnerProductChecked, ScalarProduct},
+    inner_product::{
+        BooleanInnerProductCheckedAdd, BooleanInnerProductUncheckedAdd, MBSInnerProductChecked,
+        ScalarProduct,
+    },
     mul_by_scalar::MulByScalar,
     projection_to_field::ProjectionToField,
 };
@@ -171,8 +176,6 @@ where
 
 pub fn setup_full_protocol_poly<
     F,
-    PEval,
-    PComb,
     const N: usize,
     const K: usize,
     const M: usize,
@@ -192,12 +195,19 @@ pub fn setup_full_protocol_poly<
 where
     F: PrimeField
         + for<'a> FromWithConfig<&'a <TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Chal>
-        + for<'a> MulByScalar<&'a F>,
+        + for<'a> MulByScalar<&'a F>
+        + for<'a> FromWithConfig<&'a <TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::CombR>
+        + 'static,
     F::Inner: FromRef<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod> + Transcribable,
-    PEval: ProjectionToField<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Eval, F>,
-    PComb: ProjectionToField<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Comb, F>,
 {
-    setup_full_protocol_inner::<_, _, _, PEval, PComb, N>(num_vars, setup_poly_test_params, || {
+    setup_full_protocol_inner::<
+        _,
+        _,
+        _,
+        InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
+        HornerProjection<_, _>,
+        N,
+    >(num_vars, setup_poly_test_params, || {
         (0..num_vars).map(|i| i as i128 + 2).collect()
     })
 }
