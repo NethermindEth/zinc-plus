@@ -1,11 +1,7 @@
-use crypto_primitives::{
-    FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_monty::MontyField,
-};
+use crypto_primitives::crypto_bigint_monty::MontyField;
 use num_traits::CheckedMul;
 
-use crate::{
-    from_ref::FromRef, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
-};
+use crate::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 
 impl<const LIMBS: usize> MulByScalar<&Self> for MontyField<LIMBS> {
     fn mul_by_scalar(&self, rhs: &Self) -> Option<Self> {
@@ -16,18 +12,6 @@ impl<const LIMBS: usize> MulByScalar<&Self> for MontyField<LIMBS> {
 impl<const LIMBS: usize> FromRef<Self> for MontyField<LIMBS> {
     fn from_ref(value: &Self) -> Self {
         value.clone()
-    }
-}
-
-impl<T, const LIMBS: usize> ProjectableToField<MontyField<LIMBS>> for T
-where
-    MontyField<LIMBS>: for<'a> FromWithConfig<&'a T>,
-{
-    fn prepare_projection(
-        sampled_value: &MontyField<LIMBS>,
-    ) -> impl Fn(&Self) -> MontyField<LIMBS> + 'static {
-        let config = sampled_value.cfg().clone();
-        move |value: &T| value.into_with_cfg(&config)
     }
 }
 

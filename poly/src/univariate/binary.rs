@@ -1,6 +1,7 @@
 //! Dense polynomial with binary coefficients.
 use std::{
     fmt::Debug,
+    marker::PhantomData,
     ops::{Add, BitAnd},
 };
 
@@ -11,7 +12,7 @@ use rand::distr::{Distribution, StandardUniform};
 use zinc_utils::{
     inner_product::{InnerProduct, InnerProductError},
     named::Named,
-    projectable_to_field::ProjectableToField,
+    projection_to_field::ProjectionToField,
 };
 
 use crate::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial};
@@ -118,9 +119,13 @@ impl<T: BinaryPolyCarrier, F: PrimeField> EvaluatablePolynomial<bool, F> for Bin
     }
 }
 
-impl<T: BinaryPolyCarrier, F: PrimeField + 'static> ProjectableToField<F> for BinaryPoly<T> {
+pub struct BinaryPolyProjectionToField<T: BinaryPolyCarrier>(PhantomData<T>);
+
+impl<T: BinaryPolyCarrier, F: PrimeField + 'static> ProjectionToField<BinaryPoly<T>, F>
+    for BinaryPolyProjectionToField<T>
+{
     #[allow(clippy::arithmetic_side_effects)]
-    fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static {
+    fn prepare_projection(sampled_value: &F) -> impl Fn(&BinaryPoly<T>) -> F + 'static {
         let field_cfg = sampled_value.cfg().clone();
         let r_powers = {
             // It makes sense to preprocess the powers here
@@ -149,22 +154,28 @@ impl<T: BinaryPolyCarrier, F: PrimeField + 'static> ProjectableToField<F> for Bi
     }
 }
 
-impl<T, R, Out> InnerProduct<R, Out> for BinaryPoly<T>
+pub struct BinaryPolyInnerProduct<T>(PhantomData<T>);
+
+impl<T, Rhs, Out> InnerProduct<BinaryPoly<T>, Rhs, Out> for BinaryPolyInnerProduct<T>
 where
     T: BinaryPolyCarrier,
-    R: Clone,
-    Out: for<'a> Add<&'a Out, Output = Out> + From<R>,
+    Rhs: Clone,
+    Out: for<'a> Add<&'a Out, Output = Out> + From<Rhs>,
 {
-    fn inner_product(&self, rhs: &[R], zero: Out) -> Result<Out, InnerProductError> {
-        if rhs.len() != T::BIT_SIZE as usize {
+    fn inner_product(
+        lhs: &BinaryPoly<T>,
+        rhs: &[Rhs],
+        zero: Out,
+    ) -> Result<Out, InnerProductError> {
+        if rhs.as_ref().len() != T::BIT_SIZE as usize {
             return Err(InnerProductError::LengthMismatch {
                 lhs: T::BIT_SIZE as usize,
-                rhs: rhs.len(),
+                rhs: rhs.as_ref().len(),
             });
         }
 
         Ok((0..T::BIT_SIZE)
-            .filter(|&i| !self.is_zero_term(i))
+            .filter(|&i| !lhs.is_zero_term(i))
             .fold(zero, |acc, i| acc.add(&(rhs[i as usize].clone().into()))))
     }
 }
@@ -209,9 +220,12 @@ mod test {
     };
     use itertools::Itertools;
     use rand::distr::{Distribution, StandardUniform};
-    use zinc_utils::{inner_product::InnerProduct, projectable_to_field::ProjectableToField};
+    use zinc_utils::{inner_product::InnerProduct, projection_to_field::ProjectionToField};
 
-    use crate::{EvaluatablePolynomial, univariate::binary::BinaryPoly};
+    use crate::{
+        EvaluatablePolynomial,
+        univariate::binary::{BinaryPoly, BinaryPolyInnerProduct, BinaryPolyProjectionToField},
+    };
 
     const N: usize = 2;
 
@@ -234,7 +248,7 @@ mod test {
 
     #[test]
     fn test_project_onto_field() {
-        let project = BinaryPoly::<u32>::prepare_projection(&F::from(2));
+        let project = BinaryPolyProjectionToField::prepare_projection(&F::from(2));
         for i in 0..u32::from(u16::MAX) {
             assert_eq!(project(&BinaryPoly::from(i)), F::from(i));
         }
@@ -268,7 +282,7 @@ mod test {
 
         let v = (0..1024).map(BinaryPoly::<u32>::from).collect_vec();
 
-        let project = BinaryPoly::<u32>::prepare_projection(&x);
+        let project = BinaryPolyProjectionToField::prepare_projection(&x);
 
         for (i, el) in v.iter().enumerate() {
             assert_eq!(
@@ -286,7 +300,7 @@ mod test {
             .map(BinaryPoly::<u64>::from)
             .collect_vec();
 
-        let project = BinaryPoly::<u64>::prepare_projection(&x);
+        let project = BinaryPolyProjectionToField::prepare_projection(&x);
 
         for (i, el) in v.iter().enumerate() {
             assert_eq!(
@@ -305,9 +319,12 @@ mod test {
         // All odd coeffs are 1.
         let poly = BinaryPoly::<u32>::from(0b10101010101010101010101010101010);
 
-        let inner_product = poly
-            .inner_product(&rhs, FMonty::zero_with_cfg(&test_monty_config()))
-            .unwrap();
+        let inner_product = BinaryPolyInnerProduct::inner_product(
+            &poly,
+            &rhs,
+            FMonty::zero_with_cfg(&test_monty_config()),
+        )
+        .unwrap();
 
         // Sum of the odd numbers in the range [0, 31].
         let expected: FMonty = (0..32)

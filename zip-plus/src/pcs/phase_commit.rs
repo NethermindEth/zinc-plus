@@ -208,6 +208,7 @@ mod tests {
     use num_traits::Zero;
     use rand::{Rng, rng};
     use zinc_poly::{mle::DenseMultilinearExtension, univariate::dense::DensePolynomial};
+    use zinc_utils::projection_to_field::SimpleProjection;
 
     const INT_LIMBS: usize = U64::LIMBS;
 
@@ -641,7 +642,9 @@ mod tests {
             expected_test_transcript_size_bytes
         );
 
-        let (_, proof) = TestZip::evaluate::<F>(&param, &mle, &point, test_transcript).unwrap();
+        let (_, proof) =
+            TestZip::evaluate::<F, SimpleProjection<_>>(&param, &mle, &point, test_transcript)
+                .unwrap();
         let actual_proof_size_bytes = proof.0.len();
         let expected_proof_size_bytes = calculate_expected_proof_size_bytes(&param);
         assert_eq!(actual_proof_size_bytes, expected_proof_size_bytes);

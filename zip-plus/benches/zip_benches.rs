@@ -4,6 +4,7 @@
 mod zip_common;
 
 use zinc_primality::MillerRabin;
+use zinc_utils::{inner_product::ScalarProduct, projection_to_field::SimpleProjection};
 use zip_common::*;
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -27,6 +28,8 @@ impl ZipTypes for BenchZipTypes {
     type Pt = i128;
     type CombR = Int<{ INT_LIMBS * 3 }>;
     type Comb = Self::CombR;
+    type CombDotChal = ScalarProduct;
+    type EvalDotChal = ScalarProduct;
 }
 type Code = RaaCode<BenchZipTypes, 4>;
 
@@ -37,7 +40,9 @@ const RAA_CONFIG: RaaConfig = RaaConfig {
 
 fn zip_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");
-    do_bench::<BenchZipTypes, Code>(&mut group, RAA_CONFIG);
+    do_bench::<BenchZipTypes, Code, SimpleProjection<_>, SimpleProjection<_>>(
+        &mut group, RAA_CONFIG,
+    );
     group.finish();
 }
 

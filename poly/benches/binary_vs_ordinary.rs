@@ -8,9 +8,12 @@ use crypto_primitives::{FromWithConfig, PrimeField, crypto_bigint_monty::F256};
 use itertools::Itertools;
 use zinc_poly::{
     EvaluatablePolynomial,
-    univariate::{binary::BinaryPoly, dense::DensePolynomial},
+    univariate::{
+        binary::{BinaryPoly, BinaryPolyProjectionToField},
+        dense::{DensePolynomial, HornerProjection},
+    },
 };
-use zinc_utils::projectable_to_field::ProjectableToField;
+use zinc_utils::projection_to_field::ProjectionToField;
 
 const LIMBS: usize = 4;
 
@@ -38,7 +41,7 @@ fn bench_dense_poly_projection(
         })
         .collect_vec();
 
-    let project = DensePolynomial::prepare_projection(&F::from_with_cfg(235325, &bench_config()));
+    let project = HornerProjection::prepare_projection(&F::from_with_cfg(235325, &bench_config()));
 
     group.bench_with_input(BenchmarkId::new("Project", "Dense version"), &v, |b, v| {
         b.iter(|| {
@@ -50,7 +53,8 @@ fn bench_dense_poly_projection(
 
     let v: Vec<BinaryPoly<u32>> = (0..1024).map(|i| i.into()).collect_vec();
 
-    let project = BinaryPoly::<u32>::prepare_projection(&F::from_with_cfg(235325, &bench_config()));
+    let project =
+        BinaryPolyProjectionToField::prepare_projection(&F::from_with_cfg(235325, &bench_config()));
 
     group.bench_with_input(BenchmarkId::new("Project", "Binary version"), &v, |b, v| {
         b.iter(|| {
