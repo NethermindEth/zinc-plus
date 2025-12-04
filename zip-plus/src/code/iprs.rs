@@ -123,8 +123,8 @@ where
         In: Clone,
         Out: CheckedAdd
             + for<'a> AddAssign<&'a Out>
-            + FromRef<Twiddle>
-            + FromRef<In>
+            + From<Twiddle>
+            + From<In>
             + Clone
             + Default
             + for<'a> MulByScalar<&'a Twiddle>,
@@ -146,8 +146,8 @@ where
         In: Clone,
         Out: CheckedAdd
             + for<'a> AddAssign<&'a Out>
-            + FromRef<Twiddle>
-            + FromRef<In>
+            + From<Twiddle>
+            + From<In>
             + Clone
             + Default
             + for<'a> MulByScalar<&'a Twiddle>,
@@ -176,12 +176,13 @@ where
 
     fn base_multiply<In, Out>(&self, chunk: &[In]) -> Vec<Out>
     where
+        In: Clone,
         Out: Clone
             + Default
-            + FromRef<In>
+            + From<In>
             + CheckedAdd
             + for<'a> AddAssign<&'a Out>
-            + FromRef<Twiddle>
+            + From<Twiddle>
             + for<'a> MulByScalar<&'a Twiddle>,
     {
         let base_dim = self.cfg.base_dim;
@@ -194,8 +195,7 @@ where
             // Dot-product between the i-th row of the Vandermonde matrix and
             // the base_dim input coordinates.
             for col in 0..base_dim {
-                let term = 
-                    Out::from_ref(&chunk[col])
+                let term = Out::from(chunk[col].clone())
                     .mul_by_scalar(&matrix_row[col])
                     .expect("Base multiplication overflow");
                 acc = acc.checked_add(&term).expect("Base addition overflow");
@@ -241,9 +241,8 @@ where
 impl<Zt: ZipTypes, Twiddle, const REP: usize> LinearCode<Zt> for IprsCode<Zt, Twiddle, REP>
 where
     Zt: ZipTypes,
-    Twiddle: for<'a> MulByScalar<&'a Zt::CombR>,
-    Zt::Cw: FromRef<Twiddle> + for<'a> MulByScalar<&'a Twiddle>,
-    Zt::CombR: FromRef<Twiddle> + for<'a> MulByScalar<&'a Twiddle>,
+    Zt::Cw: From<Twiddle> + for<'a> MulByScalar<&'a Twiddle>,
+    Zt::CombR: From<Twiddle> + for<'a> MulByScalar<&'a Twiddle>,
     // For simplicity, we require that the Twiddle type can be created from i128
     Twiddle: FromRef<i128> + Send + Sync,
     IprsConfig: IprsHelpers<Twiddle>,

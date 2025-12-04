@@ -605,6 +605,14 @@ where
     }
 }
 
+impl<R: Zero, const DEGREE_PLUS_ONE: usize> From<R> for DensePolynomial<R, DEGREE_PLUS_ONE> {
+    fn from(value: R) -> Self {
+        let mut coeffs = array::from_fn(|_| R::zero());
+        coeffs[0] = value;
+        Self { coeffs }
+    }
+}
+
 impl<R: ConstZero + ConstOne> FromRef<BinaryPoly<u32>> for DensePolynomial<R, 32> {
     fn from_ref(binary_poly: &BinaryPoly<u32>) -> Self {
         Self {

@@ -109,6 +109,14 @@ fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
 
     let config = IprsConfig::new_any_m(1 << 12, 2, 3);
     encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, _>, 12>(&mut group, config);
+    let config = IprsConfig::new_any_m(1 << 13, 2, 3);
+    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, _>, 13>(&mut group, config);
+    let config = IprsConfig::new_any_m(1 << 14, 2, 3);
+    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, _>, 14>(&mut group, config);
+    let config = IprsConfig::new_any_m(1 << 15, 2, 3);
+    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, _>, 15>(&mut group, config);
+    let config = IprsConfig::new_any_m(1 << 16, 2, 3);
+    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, _>, 16>(&mut group, config);
 }
 
 criterion_group!(benches, zip_plus_benchmarks_raa, zip_plus_benchmarks_iprs);
