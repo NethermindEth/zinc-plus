@@ -1,6 +1,6 @@
 #![allow(clippy::arithmetic_side_effects)] // arithmetic is safe due to bounded configuration parameters
 
-use std::convert::TryFrom;
+use std::{convert::TryFrom, marker::PhantomData};
 
 use crypto_primitives::PrimeField;
 use num_traits::CheckedAdd;
@@ -103,14 +103,19 @@ impl IprsConfig {
 /// configurable radix NTT-style recursion with a base Vandermonde matrix sized
 /// `base_len x base_dim` (defaults to 64x32).
 #[derive(Debug, Clone)]
-pub struct IprsCode<Zt: ZipTypes, const REP: usize> {
+pub struct IprsCode<Zt: ZipTypes, Twiddle, const REP: usize> {
     pub cfg: IprsConfig,
-    twiddle_tables: Vec<Vec<Vec<Zt::Twiddle>>>, /* Per-stage twiddle tables of size stage_len x
-                                                 * radix */
-    base_matrix: Vec<Vec<Zt::Twiddle>>, // base_len x base_dim Vandermonde block
+    twiddle_tables: Vec<Vec<Vec<Twiddle>>>, /* Per-stage twiddle tables of size stage_len x
+                                             * radix */
+    base_matrix: Vec<Vec<Twiddle>>, // base_len x base_dim Vandermonde block
+    _phantom: PhantomData<Zt>,
 }
 
-impl<Zt: ZipTypes, const REP: usize> IprsCode<Zt, REP> {
+impl<Zt, Twiddle, const REP: usize> IprsCode<Zt, Twiddle, REP>
+where
+    Zt: ZipTypes,
+    Zt::Cw: for<'a> MulByScalar<&'a Twiddle>,
+{
     /// Encode without modular reduction, purely over the integers.
     fn encode_inner(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
         assert_eq!(
@@ -172,7 +177,7 @@ impl<Zt: ZipTypes, const REP: usize> IprsCode<Zt, REP> {
     fn combine_stage(
         &self,
         subresults: &[Vec<Zt::Cw>],
-        twiddle_table: &[Vec<Zt::Twiddle>],
+        twiddle_table: &[Vec<Twiddle>],
     ) -> Vec<Zt::Cw> {
         // Each index `idx` corresponds to a single output position and therefore
         // to a unique set of twiddle multipliers. We rely on the precomputed stage
@@ -199,12 +204,13 @@ impl<Zt: ZipTypes, const REP: usize> IprsCode<Zt, REP> {
     }
 }
 
-impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for IprsCode<Zt, REP>
+impl<Zt: ZipTypes, Twiddle, const REP: usize> LinearCode<Zt> for IprsCode<Zt, Twiddle, REP>
 where
     Zt: ZipTypes,
+    Zt::Cw: for<'a> MulByScalar<&'a Twiddle>,
     // For simplicity, we require that the Twiddle type can be created from i128
-    Zt::Twiddle: FromRef<i128>,
-    IprsConfig: IprsHelpers<Zt::Twiddle>,
+    Twiddle: FromRef<i128> + Send + Sync,
+    IprsConfig: IprsHelpers<Twiddle>,
 {
     type Config = IprsConfig;
 
@@ -234,6 +240,7 @@ where
             cfg: config,
             twiddle_tables,
             base_matrix,
+            _phantom: Default::default(),
         }
     }
 
@@ -443,7 +450,7 @@ mod tests {
     use super::{IprsCode, IprsConfig};
     use crate::{
         code::{LinearCode, iprs::p_and_root_of_unity},
-        pcs::test_utils::TestZipTypes,
+        pcs::{structs::ZipTypes, test_utils::TestZipTypes},
     };
     use crypto_primitives::crypto_bigint_int::Int;
     use num_traits::{CheckedAdd, CheckedMul, CheckedRem, CheckedSub, One, Zero};
@@ -464,13 +471,23 @@ mod tests {
 
     const REPETITION_FACTOR: usize = 2;
 
-    fn make_code(k: usize) -> IprsCode<TestZt, REPETITION_FACTOR> {
+    fn make_code(
+        k: usize,
+    ) -> IprsCode<
+        TestZt,
+        <TestZipTypes<EVAL_LIMBS, CW_LIMBS, COMB_LIMBS> as ZipTypes>::Cw,
+        REPETITION_FACTOR,
+    > {
         let cfg = IprsConfig::new(k);
         let row_len = cfg.m;
         LinearCode::new(row_len, cfg)
     }
 
-    fn make_custom_code() -> IprsCode<TestZt, REPETITION_FACTOR> {
+    fn make_custom_code() -> IprsCode<
+        TestZt,
+        <TestZipTypes<EVAL_LIMBS, CW_LIMBS, COMB_LIMBS> as ZipTypes>::Cw,
+        REPETITION_FACTOR,
+    > {
         let cfg = IprsConfig::new_custom(
             1,      // k
             1 << 8, // m
@@ -483,7 +500,13 @@ mod tests {
         LinearCode::new(row_len, cfg)
     }
 
-    fn make_any_m_code(m: usize) -> IprsCode<TestZt, REPETITION_FACTOR> {
+    fn make_any_m_code(
+        m: usize,
+    ) -> IprsCode<
+        TestZt,
+        <TestZipTypes<EVAL_LIMBS, CW_LIMBS, COMB_LIMBS> as ZipTypes>::Cw,
+        REPETITION_FACTOR,
+    > {
         let cfg = IprsConfig::new_any_m_default(m);
         let row_len = cfg.m;
         LinearCode::new(row_len, cfg)

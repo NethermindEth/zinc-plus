@@ -24,7 +24,6 @@ struct BenchZipPlusTypes<const D_PLUS_ONE: usize> {}
 impl<const D_PLUS_ONE: usize> ZipTypes for BenchZipPlusTypes<D_PLUS_ONE> {
     const NUM_COLUMN_OPENINGS: usize = 650;
     type Eval = DensePolynomial<Boolean, D_PLUS_ONE>;
-    type Twiddle = i32;
     type Cw = DensePolynomial<i32, D_PLUS_ONE>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
     type PrimeTest = MillerRabin;
@@ -38,7 +37,6 @@ struct BenchZipPlusTypesIPRS<const D_PLUS_ONE: usize> {}
 impl<const D_PLUS_ONE: usize> ZipTypes for BenchZipPlusTypesIPRS<D_PLUS_ONE> {
     const NUM_COLUMN_OPENINGS: usize = 650;
     type Eval = DensePolynomial<Boolean, D_PLUS_ONE>;
-    type Twiddle = i128;
     type Cw = DensePolynomial<i128, D_PLUS_ONE>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
     type PrimeTest = MillerRabin;
@@ -48,7 +46,8 @@ impl<const D_PLUS_ONE: usize> ZipTypes for BenchZipPlusTypesIPRS<D_PLUS_ONE> {
     type Comb = DensePolynomial<Self::CombR, D_PLUS_ONE>;
 }
 type SomeRaaCode<const D_PLUS_ONE: usize> = RaaCode<BenchZipPlusTypes<D_PLUS_ONE>, 4>;
-type SomeIprsCode<const D_PLUS_ONE: usize> = IprsCode<BenchZipPlusTypesIPRS<D_PLUS_ONE>, 2>;
+type SomeIprsCode<Twiddle, const D_PLUS_ONE: usize> =
+    IprsCode<BenchZipPlusTypesIPRS<D_PLUS_ONE>, Twiddle, 2>;
 
 const RAA_CONFIG: RaaConfig = RaaConfig {
     check_for_overflows: false,
@@ -68,7 +67,7 @@ fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS");
 
     let config = IprsConfig::new_any_m(1 << 12, 2, 3);
-    encode_rows::<BenchZipPlusTypesIPRS<32>, SomeIprsCode<_>, 12>(&mut group, config);
+    encode_rows::<BenchZipPlusTypesIPRS<32>, SomeIprsCode<i128, _>, 12>(&mut group, config);
 }
 
 criterion_group!(benches, zip_plus_benchmarks_raa, zip_plus_benchmarks_iprs);
