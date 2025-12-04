@@ -9,112 +9,112 @@ use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 
 use crate::{code::LinearCode, pcs::structs::ZipTypes};
 
-#[derive(Debug, Clone, Copy)]
-pub struct IprsConfig {
-    pub k: usize,
-    // Parameters defining the code dimensions:
-    // m = number of columns in the input matrix
-    // n = number of columns in the output matrix (code length)
-    // radix = branching factor of the recursion
-    // base_dim = number of columns in the base matrix
-    // base_len = number of rows in the base matrix
-    pub m: usize,
-    pub n: usize,
-    pub radix: usize,
-    pub base_dim: usize,
-    pub base_len: usize,
-}
-
 trait IprsHelpers<Twiddle> {
-    fn build_twiddle_tables(&self) -> Vec<Vec<Vec<Twiddle>>>;
-    fn compute_base_matrix(&self) -> Vec<Vec<Twiddle>>;
+    fn build_twiddle_tables() -> Vec<Vec<Vec<Twiddle>>>;
+    fn compute_base_matrix() -> Vec<Vec<Twiddle>>;
 }
 
-impl IprsConfig {
-    pub fn new_any_m_default(m: usize) -> Self {
-        const MAX_LOG_BASE_LEN: usize = 6;
-        const LOG_RADIX: usize = 3;
-        Self::new_any_m(m, MAX_LOG_BASE_LEN, LOG_RADIX)
+pub trait IprsConfig: Default + Copy + Send + Sync {
+    /// The depth of the pseudo NTT.
+    const K: usize;
+    /// Number of columns in the input matrix.
+    const M: usize;
+    /// Number of columns in the output matrix (code length).
+    const N: usize;
+    /// Radix of the NTT.
+    const RADIX: usize;
+    /// Number of columns in the base matrix.
+    const BASE_DIM: usize;
+    /// Number of rows in the base matrix.
+    const BASE_LEN: usize;
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct CustomConfig<
+    const K: usize,
+    const M: usize,
+    const N: usize,
+    const RADIX: usize,
+    const BASE_DIM: usize,
+    const BASE_LEN: usize,
+>;
+
+impl<
+    const K: usize,
+    const M: usize,
+    const N: usize,
+    const RADIX: usize,
+    const BASE_DIM: usize,
+    const BASE_LEN: usize,
+> IprsConfig for CustomConfig<K, M, N, RADIX, BASE_DIM, BASE_LEN>
+{
+    const K: usize = K;
+    const M: usize = M;
+    const N: usize = N;
+    const RADIX: usize = RADIX;
+    const BASE_DIM: usize = BASE_DIM;
+    const BASE_LEN: usize = BASE_LEN;
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct Radix8Config<const K: usize>;
+
+impl<const K: usize> IprsConfig for Radix8Config<K> {
+    const K: usize = K;
+    const M: usize = 1 << (5 + 3 * Self::K);
+    const N: usize = 1 << (6 + 3 * Self::K);
+    const RADIX: usize = 1 << 3;
+    const BASE_DIM: usize = 1 << 5;
+    const BASE_LEN: usize = 1 << 6;
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct AnyMConfig<const M: usize, const MAX_LOG_BASE_LEN: usize, const LOG_RADIX: usize>;
+
+impl<const M: usize, const MAX_LOG_BASE_LEN: usize, const LOG_RADIX: usize>
+    AnyMConfig<M, MAX_LOG_BASE_LEN, LOG_RADIX>
+{
+    const fn compute_k_and_base_len() -> (usize, usize) {
+        assert!(M.is_power_of_two(), "M must be a power of two");
+        assert!(
+            1 << MAX_LOG_BASE_LEN < M,
+            "1 << MAX_LOG_BASE_LEN is too big"
+        );
+
+        let n = M << 1;
+
+        let k = ark_std::log2(n >> MAX_LOG_BASE_LEN) as usize / LOG_RADIX;
+
+        (k, n >> (LOG_RADIX * k))
     }
+}
 
-    pub fn new_any_m(m: usize, max_log_base_len: usize, log_radix: usize) -> Self {
-        assert!(m.is_power_of_two(), "m must be a power of two");
-
-        let n = m << 1;
-
-        let mut k = 0;
-        let mut base_len = 1 << max_log_base_len;
-        while (base_len << (log_radix * k)) < n {
-            k += 1;
-        }
-
-        base_len = n >> (log_radix * k);
-
-        let radix = 1 << log_radix;
-        let base_dim = base_len >> 1;
-        Self {
-            k,
-            m,
-            n,
-            radix,
-            base_dim,
-            base_len,
-        }
-    }
-
-    /// Create a code with custom modulus and generator. The pair must satisfy
-    /// that `\omega` is a primitive `N`-th root of unity in \mathbb{Z}_p, where
-    /// `N = 2^{6+3k}`.
-    pub fn new(k: usize) -> Self {
-        const LOG_BASE_LEN: usize = 6;
-        const LOG_BASE_DIM: usize = LOG_BASE_LEN - 1;
-        const LOG_RADIX: usize = 3;
-        let m = 1usize << (LOG_BASE_DIM + LOG_RADIX * k);
-        let n = 1usize << (LOG_BASE_LEN + LOG_RADIX * k);
-        Self {
-            k,
-            m,
-            n,
-            radix: 1 << LOG_RADIX,
-            base_dim: 1 << LOG_BASE_DIM,
-            base_len: 1 << LOG_BASE_LEN,
-        }
-    }
-
-    pub fn new_custom(
-        k: usize,
-        m: usize,
-        n: usize,
-        radix: usize,
-        base_dim: usize,
-        base_len: usize,
-    ) -> Self {
-        Self {
-            k,
-            m,
-            n,
-            radix,
-            base_dim,
-            base_len,
-        }
-    }
+impl<const M: usize, const MAX_LOG_BASE_LEN: usize, const LOG_RADIX: usize> IprsConfig
+    for AnyMConfig<M, MAX_LOG_BASE_LEN, LOG_RADIX>
+{
+    const K: usize = Self::compute_k_and_base_len().0;
+    const M: usize = M;
+    const N: usize = Self::M << 1;
+    const RADIX: usize = 1 << LOG_RADIX;
+    const BASE_DIM: usize = Self::BASE_LEN >> 1;
+    const BASE_LEN: usize = Self::compute_k_and_base_len().1;
 }
 
 /// Pseudo Reed-Solomon encoder over the integers. Internally uses a
 /// configurable radix NTT-style recursion with a base Vandermonde matrix sized
 /// `base_len x base_dim` (defaults to 64x32).
 #[derive(Debug, Clone)]
-pub struct IprsCode<Zt: ZipTypes, Twiddle, const REP: usize> {
-    pub cfg: IprsConfig,
+pub struct IprsCode<Zt: ZipTypes, Config: IprsConfig, Twiddle, const REP: usize> {
     twiddle_tables: Vec<Vec<Vec<Twiddle>>>, /* Per-stage twiddle tables of size stage_len x
                                              * radix */
     base_matrix: Vec<Vec<Twiddle>>, // base_len x base_dim Vandermonde block
-    _phantom: PhantomData<Zt>,
+    _phantom: PhantomData<(Zt, Config)>,
 }
 
-impl<Zt, Twiddle, const REP: usize> IprsCode<Zt, Twiddle, REP>
+impl<Zt, Config, Twiddle, const REP: usize> IprsCode<Zt, Config, Twiddle, REP>
 where
     Zt: ZipTypes,
+    Config: IprsConfig,
     Zt::Cw: for<'a> MulByScalar<&'a Twiddle>,
 {
     /// Encode without modular reduction, purely over the integers.
@@ -131,14 +131,14 @@ where
     {
         assert_eq!(
             row.len(),
-            self.cfg.m,
+            Config::M,
             "Input length {} does not match expected row length {}",
             row.len(),
-            self.cfg.m
+            Config::M
         );
         let row_cw = row.to_vec();
 
-        self.encode_ntt::<In, Out>(&row_cw, self.cfg.k)
+        self.encode_ntt::<In, Out>(&row_cw, Config::K)
     }
 
     fn encode_ntt<In, Out>(&self, data: &[In], depth: usize) -> Vec<Out>
@@ -158,7 +158,7 @@ where
             return self.base_multiply(data);
         }
 
-        let radix = self.cfg.radix;
+        let radix = Config::RADIX;
         let chunk_len = data.len() / radix;
         let mut subresults: Vec<Vec<Out>> = Vec::with_capacity(radix);
         for chunk_idx in 0..radix {
@@ -185,8 +185,8 @@ where
             + From<Twiddle>
             + for<'a> MulByScalar<&'a Twiddle>,
     {
-        let base_dim = self.cfg.base_dim;
-        let base_len = self.cfg.base_len;
+        let base_dim = Config::BASE_DIM;
+        let base_len = Config::BASE_LEN;
         assert_eq!(chunk.len(), base_dim);
         let mut output = vec![Out::default(); base_len];
         for (row_idx, matrix_row) in self.base_matrix.iter().enumerate() {
@@ -217,7 +217,7 @@ where
         // to a unique set of twiddle multipliers. We rely on the precomputed stage
         // table to avoid recomputing roots on the fly.
         let sub_len = subresults[0].len();
-        let radix = self.cfg.radix;
+        let radix = Config::RADIX;
         debug_assert_eq!(twiddle_table.len(), sub_len * radix);
         debug_assert_eq!(subresults.len(), radix);
 
@@ -238,41 +238,41 @@ where
     }
 }
 
-impl<Zt: ZipTypes, Twiddle, const REP: usize> LinearCode<Zt> for IprsCode<Zt, Twiddle, REP>
+impl<Zt: ZipTypes, Config, Twiddle, const REP: usize> LinearCode<Zt>
+    for IprsCode<Zt, Config, Twiddle, REP>
 where
     Zt: ZipTypes,
+    Config: IprsConfig,
     Zt::Cw: From<Twiddle> + for<'a> MulByScalar<&'a Twiddle>,
     Zt::CombR: From<Twiddle> + for<'a> MulByScalar<&'a Twiddle>,
     // For simplicity, we require that the Twiddle type can be created from i128
     Twiddle: FromRef<i128> + Send + Sync,
-    IprsConfig: IprsHelpers<Twiddle>,
 {
-    type Config = IprsConfig;
+    type Config = Config;
 
     const REPETITION_FACTOR: usize = REP;
 
     /// Create a code with the default `(p, \omega)` pair e.g. `(7681, 7146)`,
     /// valid for `k = 1`.
-    fn new(poly_size: usize, config: IprsConfig) -> Self {
+    fn new(poly_size: usize, _config: Self::Config) -> Self {
         assert!(
-            poly_size == config.m,
+            poly_size == Config::M,
             "Polynomial size {} does not match expected row length {}",
             poly_size,
-            config.m
+            Config::M
         );
 
         assert!(
-            config.n == config.m * REP,
+            Config::N == Config::M * REP,
             "Codeword length {} must equal row length {} times repetition factor {}",
-            config.n,
-            config.m,
+            Config::N,
+            Config::M,
             REP
         );
 
-        let base_matrix = config.compute_base_matrix();
-        let twiddle_tables = config.build_twiddle_tables();
+        let base_matrix = Config::compute_base_matrix();
+        let twiddle_tables = Config::build_twiddle_tables();
         Self {
-            cfg: config,
             twiddle_tables,
             base_matrix,
             _phantom: Default::default(),
@@ -282,10 +282,10 @@ where
     fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw>
 where {
         assert!(
-            row.len() == self.cfg.m,
+            row.len() == Config::M,
             "Input length {} does not match expected row length {}",
             row.len(),
-            self.cfg.m
+            Config::M
         );
         self.encode_inner(
             &row.iter()
@@ -295,11 +295,11 @@ where {
     }
 
     fn row_len(&self) -> usize {
-        self.cfg.m
+        Config::M
     }
 
     fn codeword_len(&self) -> usize {
-        self.cfg.n
+        Config::N
     }
 
     fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {
@@ -349,28 +349,35 @@ fn p_and_root_of_unity(n: usize) -> (i128, i128) {
         .unwrap_or_else(|| panic!("unsupported N: {}", n))
 }
 
-impl<Twiddle: FromRef<i128>> IprsHelpers<Twiddle> for IprsConfig {
-    fn build_twiddle_tables(&self) -> Vec<Vec<Vec<Twiddle>>> {
-        let (modulus, omega) = p_and_root_of_unity(self.n);
-        build_twiddle_tables(self.k, self.n, self.radix, self.base_len, modulus, omega)
-            .into_iter()
-            .map(|stage| {
-                stage
-                    .into_iter()
-                    .map(|twiddles| {
-                        twiddles
-                            .into_iter()
-                            .map(|value| Twiddle::from_ref(&value))
-                            .collect()
-                    })
-                    .collect()
-            })
-            .collect()
+impl<Config: IprsConfig, Twiddle: FromRef<i128>> IprsHelpers<Twiddle> for Config {
+    fn build_twiddle_tables() -> Vec<Vec<Vec<Twiddle>>> {
+        let (modulus, omega) = p_and_root_of_unity(Self::N);
+        build_twiddle_tables(
+            Self::K,
+            Self::N,
+            Self::RADIX,
+            Self::BASE_LEN,
+            modulus,
+            omega,
+        )
+        .into_iter()
+        .map(|stage| {
+            stage
+                .into_iter()
+                .map(|twiddles| {
+                    twiddles
+                        .into_iter()
+                        .map(|value| Twiddle::from_ref(&value))
+                        .collect()
+                })
+                .collect()
+        })
+        .collect()
     }
 
-    fn compute_base_matrix(&self) -> Vec<Vec<Twiddle>> {
-        let (modulus, omega) = p_and_root_of_unity(self.n);
-        compute_base_matrix(modulus, omega, self.n, self.base_len, self.base_dim)
+    fn compute_base_matrix() -> Vec<Vec<Twiddle>> {
+        let (modulus, omega) = p_and_root_of_unity(Self::N);
+        compute_base_matrix(modulus, omega, Self::N, Self::BASE_LEN, Self::BASE_DIM)
             .into_iter()
             .map(|row| {
                 row.into_iter()
@@ -487,9 +494,12 @@ fn mod_pow_generic(base: i128, exp: u128, modulus: i128) -> i128 {
 
 #[cfg(test)]
 mod tests {
-    use super::{IprsCode, IprsConfig};
+    use super::IprsCode;
     use crate::{
-        code::{LinearCode, iprs::p_and_root_of_unity},
+        code::{
+            LinearCode,
+            iprs::{AnyMConfig, CustomConfig, IprsConfig, Radix8Config, p_and_root_of_unity},
+        },
         pcs::{structs::ZipTypes, test_utils::TestZipTypes},
     };
     use crypto_primitives::crypto_bigint_int::Int;
@@ -511,50 +521,39 @@ mod tests {
 
     const REPETITION_FACTOR: usize = 2;
 
-    fn make_code(
-        k: usize,
-    ) -> IprsCode<
+    fn make_code<const K: usize>() -> IprsCode<
         TestZt,
+        Radix8Config<K>,
         <TestZipTypes<EVAL_LIMBS, CW_LIMBS, COMB_LIMBS> as ZipTypes>::Cw,
         REPETITION_FACTOR,
     > {
-        let cfg = IprsConfig::new(k);
-        let row_len = cfg.m;
-        LinearCode::new(row_len, cfg)
+        let row_len = Radix8Config::<K>::M;
+        LinearCode::new(row_len, Default::default())
     }
 
     fn make_custom_code() -> IprsCode<
         TestZt,
+        CustomConfig<1, { 1 << 8 }, { 1 << 9 }, 4, { 1 << 6 }, { 1 << 7 }>,
         <TestZipTypes<EVAL_LIMBS, CW_LIMBS, COMB_LIMBS> as ZipTypes>::Cw,
         REPETITION_FACTOR,
     > {
-        let cfg = IprsConfig::new_custom(
-            1,      // k
-            1 << 8, // m
-            1 << 9, // n
-            4,      // radix
-            1 << 6, // base_dim
-            1 << 7, // base_len
-        );
-        let row_len = cfg.m;
-        LinearCode::new(row_len, cfg)
+        let row_len = CustomConfig::<1, { 1 << 8 }, { 1 << 9 }, 4, { 1 << 6 }, { 1 << 7 }>::M;
+        LinearCode::new(row_len, Default::default())
     }
 
-    fn make_any_m_code(
-        m: usize,
-    ) -> IprsCode<
+    fn make_any_m_code<const M: usize>() -> IprsCode<
         TestZt,
+        AnyMConfig<M, 6, 3>,
         <TestZipTypes<EVAL_LIMBS, CW_LIMBS, COMB_LIMBS> as ZipTypes>::Cw,
         REPETITION_FACTOR,
     > {
-        let cfg = IprsConfig::new_any_m_default(m);
-        let row_len = cfg.m;
-        LinearCode::new(row_len, cfg)
+        let row_len = M;
+        LinearCode::new(row_len, Default::default())
     }
 
     #[test]
     fn encode_has_expected_lengths() {
-        let code = make_code(1);
+        let code = make_code::<1>();
         let input = vec![EvalInt::one(); code.row_len()];
         let output = code.encode(&input);
         assert_eq!(output.len(), code.codeword_len());
@@ -562,7 +561,7 @@ mod tests {
 
     #[test]
     fn encode_is_deterministic() {
-        let code = make_code(1);
+        let code = make_code::<1>();
         let mut input = vec![EvalInt::zero(); code.row_len()];
         for (idx, value) in input.iter_mut().enumerate() {
             let idx_i32 = i32::try_from(idx).expect("index fits into i32");
@@ -573,32 +572,42 @@ mod tests {
         assert_eq!(first, second);
     }
 
+    macro_rules! for_each_params {
+        ([ $(($depth:literal, $p:expr, $omega:expr)),+ $(,)? ], $f:expr) => {
+            $({
+                let code = make_code::<$depth>();
+
+                $f(&code, $p, $omega);
+            })*
+        };
+    }
+
     #[test]
     fn mod_p_matches_reduction() {
-        let configs = [(1, K_1_P, K_1_OMEGA), (2, K_2_P, K_2_OMEGA)];
+        for_each_params!(
+            [(1, K_1_P, K_1_OMEGA), (2, K_2_P, K_2_OMEGA)],
+            |code: &IprsCode<_, _, _, _>, modulus_val, omega_val| {
+                let mut input = vec![EvalInt::zero(); code.row_len()];
+                for (idx, value) in input.iter_mut().enumerate() {
+                    *value = EvalInt::from(((idx * 17 + 5) as i128).pow(2));
+                }
 
-        for (k, modulus_val, omega_val) in configs {
-            let code = make_code(k);
-            let mut input = vec![EvalInt::zero(); code.row_len()];
-            for (idx, value) in input.iter_mut().enumerate() {
-                *value = EvalInt::from(((idx * 17 + 5) as i128).pow(2));
+                let wide = code.encode(&input);
+
+                let modulus = CwInt::from(modulus_val);
+                let omega = CwInt::from(omega_val);
+
+                let mut padded = vec![CwInt::zero(); code.codeword_len()];
+                for (dst, src) in padded.iter_mut().zip(input.iter()) {
+                    *dst = CwInt::from_ref(src);
+                }
+                radix2_ntt_mod_int(&mut padded, &modulus, &omega);
+
+                for (w, n) in wide.iter().zip(padded.iter()) {
+                    assert_eq!(canonical_mod_int(w, &modulus), *n);
+                }
             }
-
-            let wide = code.encode(&input);
-
-            let modulus = CwInt::from(modulus_val);
-            let omega = CwInt::from(omega_val);
-
-            let mut padded = vec![CwInt::zero(); code.codeword_len()];
-            for (dst, src) in padded.iter_mut().zip(input.iter()) {
-                *dst = CwInt::from_ref(src);
-            }
-            radix2_ntt_mod_int(&mut padded, &modulus, &omega);
-
-            for (w, n) in wide.iter().zip(padded.iter()) {
-                assert_eq!(canonical_mod_int(w, &modulus), *n);
-            }
-        }
+        );
     }
 
     #[test]
@@ -627,15 +636,14 @@ mod tests {
 
     #[test]
     fn mod_p_matches_reduction_any_m() {
-        let m = 1 << 11; // any power of two
-        let code = make_any_m_code(m);
-        print!("Code config: {:?}", code.cfg);
+        type Config = AnyMConfig<{ 1 << 11 }, 6, 3>;
+        let code = make_any_m_code::<{ 1 << 11 }>();
         let mut input = vec![EvalInt::zero(); code.row_len()];
         for (idx, value) in input.iter_mut().enumerate() {
             *value = EvalInt::from(((idx * 17 + 5) as i128).pow(2));
         }
         let wide = code.encode(&input);
-        let (p, root_of_unity) = p_and_root_of_unity(code.cfg.n);
+        let (p, root_of_unity) = p_and_root_of_unity(Config::N);
         let modulus = CwInt::from(p);
         let omega = CwInt::from(root_of_unity);
         let mut padded = vec![CwInt::zero(); code.codeword_len()];

@@ -27,7 +27,7 @@ use crypto_primitives::{
 };
 use zip_plus::{
     code::{
-        iprs::{IprsCode, IprsConfig},
+        iprs::{AnyMConfig, IprsCode},
         raa::{RaaCode, RaaConfig},
     },
     pcs::structs::ZipTypes,
@@ -77,8 +77,8 @@ where
 }
 
 type SomeRaaCode<const D_PLUS_ONE: usize> = RaaCode<BenchZipPlusTypes<i32, D_PLUS_ONE>, 4>;
-type SomeIprsCode<Twiddle, const D_PLUS_ONE: usize> =
-    IprsCode<BenchZipPlusTypes<i128, D_PLUS_ONE>, Twiddle, 2>;
+type SomeIprsCode<Twiddle, const M: usize, const D_PLUS_ONE: usize> =
+    IprsCode<BenchZipPlusTypes<i128, D_PLUS_ONE>, AnyMConfig<M, 2, 3>, Twiddle, 2>;
 
 const RAA_CONFIG: RaaConfig = RaaConfig {
     check_for_overflows: false,
@@ -107,16 +107,21 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
 fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS");
 
-    let config = IprsConfig::new_any_m(1 << 12, 2, 3);
-    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, _>, 12>(&mut group, config);
-    let config = IprsConfig::new_any_m(1 << 13, 2, 3);
-    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, _>, 13>(&mut group, config);
-    let config = IprsConfig::new_any_m(1 << 14, 2, 3);
-    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, _>, 14>(&mut group, config);
-    let config = IprsConfig::new_any_m(1 << 15, 2, 3);
-    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, _>, 15>(&mut group, config);
-    let config = IprsConfig::new_any_m(1 << 16, 2, 3);
-    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, _>, 16>(&mut group, config);
+    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, { 1 << 12 }, _>, 12>(
+        &mut group, AnyMConfig,
+    );
+    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, { 1 << 13 }, _>, 13>(
+        &mut group, AnyMConfig,
+    );
+    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, { 1 << 14 }, _>, 14>(
+        &mut group, AnyMConfig,
+    );
+    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, { 1 << 15 }, _>, 15>(
+        &mut group, AnyMConfig,
+    );
+    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, { 1 << 16 }, _>, 16>(
+        &mut group, AnyMConfig,
+    );
 }
 
 criterion_group!(benches, zip_plus_benchmarks_raa, zip_plus_benchmarks_iprs);
