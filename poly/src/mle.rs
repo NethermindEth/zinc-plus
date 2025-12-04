@@ -41,8 +41,8 @@ pub trait MultilinearExtension<T>:
         T: for<'a> MulByScalar<&'a S>;
 }
 
-pub trait MultilinearExtensionRand<T>: MultilinearExtension<T> {
+pub trait MultilinearExtensionRand<T> {
     /// Outputs an `l`-variate multilinear extension where value of evaluations
     /// are sampled uniformly at random.
-    fn rand<R: RngCore + ?Sized>(num_vars: usize, rng: &mut R, zero: T) -> Self;
+    fn rand<R: RngCore + ?Sized>(num_vars: usize, rng: &mut R) -> Self;
 }

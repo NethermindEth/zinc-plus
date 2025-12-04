@@ -125,7 +125,7 @@ fn verifier_rejects_proof_with_tampered_prover_message() {
 
     let mut tampered_proof = proof.clone();
     let one: F = F::from(1u32);
-    tampered_proof.0[0].evaluations[0] += one;
+    tampered_proof.0[0].0.evaluations[0] += one;
 
     let mut verifier_transcript = KeccakTranscript::default();
     let res = MLSumcheck::verify_as_subprotocol(

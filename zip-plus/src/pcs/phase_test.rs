@@ -10,11 +10,13 @@ use crate::{
     utils::combine_rows,
 };
 use itertools::Itertools;
+use num_traits::{ConstOne, ConstZero, Zero};
 use zinc_poly::{Polynomial, mle::DenseMultilinearExtension};
 use zinc_transcript::traits::Transcript;
-use zinc_utils::{from_ref::FromRef, inner_product::InnerProduct};
+use zinc_utils::inner_product::InnerProduct;
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn test(
         pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
@@ -27,9 +29,19 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         // If we can take linear combinations, perform the proximity test
         if pp.num_rows > 1 {
             // Values to evaluate the coefficients at
-            let alphas = transcript
-                .fs_transcript
-                .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND);
+            let alphas = if Zt::Comb::DEGREE_BOUND.is_zero() {
+                // If we have just one coefficient
+                // we don't take an RLC.
+                vec![Zt::Chal::ONE]
+            } else {
+                transcript
+                    .fs_transcript
+                    // NB: To take an inner product of coeffs
+                    // of a polynomial with the non-strict degree bound B
+                    // with a slice of challenges
+                    // we need to sample B + 1 challenges.
+                    .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND + 1)
+            };
 
             // Coefficients for the linear combination of polynomial with evaluated
             // coefficients
@@ -40,8 +52,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             let evals: Vec<_> = poly
                 .evaluations
                 .iter()
-                .map(Zt::Comb::from_ref)
-                .map(|p| p.inner_product(&alphas, Zt::CombR::from(0)))
+                .map(|p| Zt::EvalDotChal::inner_product(p, &alphas, Zt::CombR::ZERO))
                 .try_collect()?;
 
             // u' in the Zinc paper

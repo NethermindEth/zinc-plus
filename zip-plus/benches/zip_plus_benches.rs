@@ -3,8 +3,13 @@
 
 mod zip_common;
 
-use zinc_poly::univariate::dense::DensePolynomial;
+use zinc_poly::univariate::dense::{
+    DensePolyInnerProduct, DensePolynomial, HornerProjection, InnerProductProjection,
+};
 use zinc_primality::MillerRabin;
+use zinc_utils::inner_product::{
+    BooleanInnerProductCheckedAdd, BooleanInnerProductUncheckedAdd, MBSInnerProductChecked,
+};
 use zip_common::*;
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -31,6 +36,20 @@ impl<const D_PLUS_ONE: usize> ZipTypes for BenchZipPlusTypes<D_PLUS_ONE> {
     type Pt = i128;
     type CombR = Int<{ INT_LIMBS * 5 }>;
     type Comb = DensePolynomial<Self::CombR, D_PLUS_ONE>;
+    type EvalDotChal = DensePolyInnerProduct<
+        Boolean,
+        Self::Chal,
+        Self::CombR,
+        BooleanInnerProductCheckedAdd,
+        D_PLUS_ONE,
+    >;
+    type CombDotChal = DensePolyInnerProduct<
+        Self::CombR,
+        Self::Chal,
+        Self::CombR,
+        MBSInnerProductChecked,
+        D_PLUS_ONE,
+    >;
 }
 
 struct BenchZipPlusTypesIPRS<const D_PLUS_ONE: usize> {}
@@ -44,7 +63,23 @@ impl<const D_PLUS_ONE: usize> ZipTypes for BenchZipPlusTypesIPRS<D_PLUS_ONE> {
     type Pt = i128;
     type CombR = Int<{ INT_LIMBS * 5 }>;
     type Comb = DensePolynomial<Self::CombR, D_PLUS_ONE>;
+
+    type EvalDotChal = DensePolyInnerProduct<
+        Boolean,
+        Self::Chal,
+        Self::CombR,
+        BooleanInnerProductCheckedAdd,
+        D_PLUS_ONE,
+    >;
+    type CombDotChal = DensePolyInnerProduct<
+        Self::CombR,
+        Self::Chal,
+        Self::CombR,
+        MBSInnerProductChecked,
+        D_PLUS_ONE,
+    >;
 }
+
 type SomeRaaCode<const D_PLUS_ONE: usize> = RaaCode<BenchZipPlusTypes<D_PLUS_ONE>, 4>;
 type SomeIprsCode<Twiddle, const D_PLUS_ONE: usize> =
     IprsCode<BenchZipPlusTypesIPRS<D_PLUS_ONE>, Twiddle, 2>;
@@ -57,8 +92,18 @@ const RAA_CONFIG: RaaConfig = RaaConfig {
 fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");
 
-    do_bench::<BenchZipPlusTypes<32>, SomeRaaCode<_>>(&mut group, RAA_CONFIG);
-    do_bench::<BenchZipPlusTypes<64>, SomeRaaCode<_>>(&mut group, RAA_CONFIG);
+    do_bench::<
+        BenchZipPlusTypes<32>,
+        SomeRaaCode<_>,
+        InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
+        HornerProjection<_, _>,
+    >(&mut group, RAA_CONFIG);
+    do_bench::<
+        BenchZipPlusTypes<64>,
+        SomeRaaCode<_>,
+        InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
+        HornerProjection<_, _>,
+    >(&mut group, RAA_CONFIG);
 
     group.finish();
 }

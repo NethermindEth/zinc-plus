@@ -2,13 +2,14 @@ use crate::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomi
 use core::slice;
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring};
 use itertools::Itertools;
-use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, One, Zero};
+use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, ConstOne, ConstZero, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
     array,
     fmt::Display,
     hash::Hash,
     iter::{Product, Sum},
+    marker::PhantomData,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 use zinc_transcript::traits::ConstTranscribable;
@@ -17,8 +18,10 @@ use zinc_utils::{
     inner_product::{InnerProduct, InnerProductError},
     mul_by_scalar::MulByScalar,
     named::Named,
-    projectable_to_field::ProjectableToField,
+    projection_to_field::ProjectionToField,
 };
+
+use super::binary::BinaryPoly;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DensePolynomial<R, const DEGREE_PLUS_ONE: usize> {
@@ -47,6 +50,29 @@ impl<R: Semiring + Zero, const DEGREE_PLUS_ONE: usize> DensePolynomial<R, DEGREE
 
         let mut coeffs = coeffs.to_vec();
         coeffs.resize(DEGREE_PLUS_ONE, R::zero());
+        let coeffs = coeffs.try_into().expect("unreachable");
+
+        DensePolynomial { coeffs }
+    }
+}
+
+impl<R: Semiring, const DEGREE_PLUS_ONE: usize> DensePolynomial<R, DEGREE_PLUS_ONE> {
+    /// Create a new polynomial with the given coefficients.
+    /// If the input has fewer than N+1 coefficients, the remaining slots will
+    /// be filled with zeros. If the input has more than N+1 coefficients,
+    /// it will panic.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn new_with_zero(coeffs: impl AsRef<[R]>, zero: R) -> Self {
+        let coeffs = coeffs.as_ref();
+        assert!(
+            coeffs.len() <= DEGREE_PLUS_ONE,
+            "Too many coefficients provided: expected at most {}, got {}",
+            DEGREE_PLUS_ONE,
+            coeffs.len()
+        );
+
+        let mut coeffs = coeffs.to_vec();
+        coeffs.resize(DEGREE_PLUS_ONE, zero);
         let coeffs = coeffs.try_into().expect("unreachable");
 
         DensePolynomial { coeffs }
@@ -362,29 +388,24 @@ impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Polynomial<R>
     const DEGREE_BOUND: usize = DEGREE_PLUS_ONE - 1;
 }
 
-impl<R: Semiring, C, const DEGREE_PLUS_ONE: usize> EvaluatablePolynomial<R, C, R>
+impl<R: Semiring, const DEGREE_PLUS_ONE: usize> EvaluatablePolynomial<R, R>
     for DensePolynomial<R, DEGREE_PLUS_ONE>
-where
-    R: for<'a> MulByScalar<&'a C>,
 {
-    type EvaluationPoint = C;
+    type EvaluationPoint = R;
 
-    fn evaluate_at_point(&self, point: &C) -> Result<R, EvaluationError>
-    where
-        R: for<'a> MulByScalar<&'a C>,
-    {
-        // A trivial implementation of a polynomial evaluation at a given point.
+    fn evaluate_at_point(&self, point: &R) -> Result<R, EvaluationError> {
+        // Horner's method.
         let mut result = self
             .coeffs
             .last()
             .ok_or(EvaluationError::EmptyPolynomial)?
             .clone();
+
         for coeff in self.coeffs.iter().rev().skip(1) {
-            let term = result
-                .mul_by_scalar(point)
-                .ok_or(EvaluationError::Overflow)?;
+            let term = result.checked_mul(point).ok_or(EvaluationError::Overflow)?;
             result = term.checked_add(coeff).ok_or(EvaluationError::Overflow)?;
         }
+
         Ok(result)
     }
 }
@@ -476,18 +497,22 @@ where
     }
 }
 
-impl<R, F, const DEGREE_PLUS_ONE: usize> ProjectableToField<F>
-    for DensePolynomial<R, DEGREE_PLUS_ONE>
+pub struct HornerProjection<R, const DEGREE_PLUS_ONE: usize>(PhantomData<R>);
+
+impl<R, F, const DEGREE_PLUS_ONE: usize> ProjectionToField<DensePolynomial<R, DEGREE_PLUS_ONE>, F>
+    for HornerProjection<R, DEGREE_PLUS_ONE>
 where
     R: Semiring,
     F: PrimeField + for<'a> FromWithConfig<&'a R> + for<'a> MulByScalar<&'a F> + 'static,
 {
     #![allow(clippy::arithmetic_side_effects)] // False alert, field operations are safe
-    fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static {
+    fn prepare_projection(
+        sampled_value: &F,
+    ) -> impl Fn(&DensePolynomial<R, DEGREE_PLUS_ONE>) -> F + 'static {
         let sampled_value = sampled_value.clone();
         let field_cfg = sampled_value.cfg().clone();
 
-        move |poly: &Self| {
+        move |poly: &DensePolynomial<R, DEGREE_PLUS_ONE>| {
             let coeffs: [F; DEGREE_PLUS_ONE] = poly
                 .coeffs
                 .iter()
@@ -499,6 +524,43 @@ where
             poly2
                 .evaluate_at_point(&sampled_value)
                 .expect("Failed to evaluate polynomial at point")
+        }
+    }
+}
+
+pub struct InnerProductProjection<R, I, const DEGREE_PLUS_ONE: usize>(PhantomData<(R, I)>);
+
+impl<R, F, I, const DEGREE_PLUS_ONE: usize>
+    ProjectionToField<DensePolynomial<R, DEGREE_PLUS_ONE>, F>
+    for InnerProductProjection<R, I, DEGREE_PLUS_ONE>
+where
+    I: InnerProduct<[R], F, F>,
+    R: Semiring,
+    F: PrimeField + 'static,
+{
+    #![allow(clippy::arithmetic_side_effects)] // False alert, field operations are safe
+    fn prepare_projection(
+        sampled_value: &F,
+    ) -> impl Fn(&DensePolynomial<R, DEGREE_PLUS_ONE>) -> F + 'static {
+        let field_cfg = sampled_value.cfg().clone();
+        let r_powers = {
+            // Preprocess powers prior to inner product.
+            let mut r_powers = Vec::with_capacity(DEGREE_PLUS_ONE);
+
+            let mut curr = F::one_with_cfg(&field_cfg);
+            r_powers.push(curr.clone());
+
+            for _ in 1..DEGREE_PLUS_ONE {
+                curr *= sampled_value;
+                r_powers.push(curr.clone());
+            }
+
+            r_powers
+        };
+
+        move |poly: &DensePolynomial<R, DEGREE_PLUS_ONE>| {
+            I::inner_product(&poly.coeffs, &r_powers, F::zero_with_cfg(&field_cfg))
+                .expect("Failed to evaluate polynomial")
         }
     }
 }
@@ -519,18 +581,54 @@ impl<R, const DEGREE_PLUS_ONE: usize> AsRef<[R]> for DensePolynomial<R, DEGREE_P
     }
 }
 
-impl<R, Rhs, Out, const DEGREE_PLUS_ONE: usize> InnerProduct<Rhs>
-    for DensePolynomial<R, DEGREE_PLUS_ONE>
-where
-    for<'a> &'a [R]: InnerProduct<Rhs, Output = Out>,
-{
-    type Output = Out;
+pub struct DensePolyInnerProduct<
+    R,
+    Rhs,
+    Out,
+    I: InnerProduct<[R], Rhs, Out>,
+    const DEGREE_PLUS_ONE: usize,
+>(PhantomData<(I, R, Rhs, Out)>);
 
+impl<R, Rhs, Out, I, const DEGREE_PLUS_ONE: usize>
+    InnerProduct<DensePolynomial<R, DEGREE_PLUS_ONE>, Rhs, Out>
+    for DensePolyInnerProduct<R, Rhs, Out, I, DEGREE_PLUS_ONE>
+where
+    I: InnerProduct<[R], Rhs, Out>,
+{
+    #[inline(always)]
     fn inner_product(
-        &self,
+        lhs: &DensePolynomial<R, DEGREE_PLUS_ONE>,
         rhs: &[Rhs],
-        zero: Self::Output,
-    ) -> Result<Self::Output, InnerProductError> {
-        self.as_ref().inner_product(rhs, zero)
+        zero: Out,
+    ) -> Result<Out, InnerProductError> {
+        I::inner_product(&lhs.coeffs, rhs, zero)
+    }
+}
+
+impl<R: ConstZero + ConstOne> FromRef<BinaryPoly<u32>> for DensePolynomial<R, 32> {
+    fn from_ref(binary_poly: &BinaryPoly<u32>) -> Self {
+        Self {
+            coeffs: (*binary_poly).into(),
+        }
+    }
+}
+
+impl<R: ConstZero + ConstOne> FromRef<BinaryPoly<u64>> for DensePolynomial<R, 64> {
+    fn from_ref(binary_poly: &BinaryPoly<u64>) -> Self {
+        Self {
+            coeffs: (*binary_poly).into(),
+        }
+    }
+}
+
+impl<R: ConstZero + ConstOne> From<BinaryPoly<u32>> for DensePolynomial<R, 32> {
+    fn from(binary_poly: BinaryPoly<u32>) -> Self {
+        Self::from_ref(&binary_poly)
+    }
+}
+
+impl<R: ConstZero + ConstOne> From<BinaryPoly<u64>> for DensePolynomial<R, 64> {
+    fn from(binary_poly: BinaryPoly<u64>) -> Self {
+        Self::from_ref(&binary_poly)
     }
 }

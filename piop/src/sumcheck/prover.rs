@@ -4,15 +4,15 @@ use ark_std::{cfg_into_iter, cfg_iter_mut, slice, vec, vec::Vec};
 use crypto_primitives::PrimeField;
 #[cfg(feature = "parallel")]
 use rayon::iter::*;
-use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtension};
+use zinc_poly::{
+    mle::{DenseMultilinearExtension, MultilinearExtension},
+    univariate::nat_evaluation::NatEvaluatedPoly,
+};
 use zinc_utils::mul_by_scalar::MulByScalar;
 
-/// Prover Round Message.
+#[repr(transparent)]
 #[derive(Clone, Debug, PartialEq)]
-pub struct ProverMsg<F> {
-    /// Evaluations on P(0), P(1), P(2), ...
-    pub(crate) evaluations: Vec<F>,
-}
+pub struct ProverMsg<F>(pub NatEvaluatedPoly<F>);
 
 /// Sumcheck Prover State.
 pub struct ProverState<F> {
@@ -182,6 +182,6 @@ where
         #[cfg(not(feature = "parallel"))]
         let evaluations = summer.evals;
 
-        ProverMsg { evaluations }
+        ProverMsg(NatEvaluatedPoly::new(evaluations))
     }
 }

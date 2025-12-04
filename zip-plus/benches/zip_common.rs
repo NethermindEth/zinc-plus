@@ -9,33 +9,38 @@ use ark_std::{
     time::{Duration, Instant},
 };
 use criterion::{BenchmarkGroup, measurement::WallTime};
+use crypto_bigint::U64;
 use crypto_primitives::{
     DenseRowMatrix, Field, FromWithConfig, IntoWithConfig, PrimeField,
-    crypto_bigint_boxed_monty::BoxedMontyField,
+    crypto_bigint_monty::MontyField,
 };
 use itertools::Itertools;
-use num_traits::{One, Zero};
+use num_traits::One;
 use rand::{distr::StandardUniform, prelude::*};
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
 use zinc_transcript::traits::ConstTranscribable;
-use zinc_utils::{from_ref::FromRef, named::Named, projectable_to_field::ProjectableToField};
+use zinc_utils::{
+    from_ref::FromRef, inner_product::MBSInnerProductChecked, named::Named,
+    projection_to_field::ProjectionToField,
+};
 use zip_plus::{
     code::LinearCode,
     merkle::MerkleTree,
     pcs::structs::{ZipPlus, ZipTypes},
 };
 
-type F = BoxedMontyField;
+const INT_LIMBS: usize = U64::LIMBS;
+type F = MontyField<{ INT_LIMBS * 4 }>;
 
-pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>>(
+pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, PEval, PCw>(
     group: &mut BenchmarkGroup<WallTime>,
     code_config: Lc::Config,
 ) where
     StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
     F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
     <F as Field>::Inner: FromRef<Zt::Fmod>,
-    Zt::Eval: ProjectableToField<F>,
-    Zt::Cw: ProjectableToField<F>,
+    PEval: ProjectionToField<Zt::Eval, F>,
+    PCw: ProjectionToField<Zt::Cw, F>,
 {
     encode_rows::<Zt, Lc, 12>(group, code_config);
     encode_rows::<Zt, Lc, 13>(group, code_config);
@@ -66,17 +71,17 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     test::<Zt, Lc, 15>(group, code_config);
     test::<Zt, Lc, 16>(group, code_config);
 
-    evaluate::<Zt, Lc, 12>(group, code_config);
-    evaluate::<Zt, Lc, 13>(group, code_config);
-    evaluate::<Zt, Lc, 14>(group, code_config);
-    evaluate::<Zt, Lc, 15>(group, code_config);
-    evaluate::<Zt, Lc, 16>(group, code_config);
+    evaluate::<Zt, Lc, PEval, 12>(group, code_config);
+    evaluate::<Zt, Lc, PEval, 13>(group, code_config);
+    evaluate::<Zt, Lc, PEval, 14>(group, code_config);
+    evaluate::<Zt, Lc, PEval, 15>(group, code_config);
+    evaluate::<Zt, Lc, PEval, 16>(group, code_config);
 
-    verify::<Zt, Lc, 12>(group, code_config);
-    verify::<Zt, Lc, 13>(group, code_config);
-    verify::<Zt, Lc, 14>(group, code_config);
-    verify::<Zt, Lc, 15>(group, code_config);
-    verify::<Zt, Lc, 16>(group, code_config);
+    verify::<Zt, Lc, PEval, PCw, 12>(group, code_config);
+    verify::<Zt, Lc, PEval, PCw, 13>(group, code_config);
+    verify::<Zt, Lc, PEval, PCw, 14>(group, code_config);
+    verify::<Zt, Lc, PEval, PCw, 15>(group, code_config);
+    verify::<Zt, Lc, PEval, PCw, 16>(group, code_config);
 }
 
 pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
@@ -97,11 +102,7 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
             let linear_code = Lc::new(poly_size, code_config);
             let params = ZipPlus::setup(poly_size, linear_code);
             let row_len = params.linear_code.row_len();
-            let poly = DenseMultilinearExtension::<<Zt as ZipTypes>::Eval>::rand(
-                P,
-                &mut rng,
-                Zero::zero(),
-            );
+            let poly = DenseMultilinearExtension::<<Zt as ZipTypes>::Eval>::rand(P, &mut rng);
             b.iter(|| {
                 let cw = ZipPlus::encode_rows(&params, row_len, &poly.evaluations);
                 black_box(cw)
@@ -183,7 +184,7 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
             b.iter_custom(|iters| {
                 let mut total_duration = Duration::ZERO;
                 for _ in 0..iters {
-                    let poly = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
+                    let poly = DenseMultilinearExtension::rand(P, &mut rng);
                     let timer = Instant::now();
                     let res = ZipPlus::commit(&params, &poly).expect("Failed to commit");
                     black_box(res);
@@ -208,7 +209,7 @@ pub fn test<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     let linear_code = Lc::new(poly_size, code_config);
     let params = ZipPlus::setup(poly_size, linear_code);
 
-    let poly = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
+    let poly = DenseMultilinearExtension::rand(P, &mut rng);
     let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
 
     group.bench_function(
@@ -228,14 +229,14 @@ pub fn test<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     );
 }
 
-pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
+pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, PEval, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
     code_config: Lc::Config,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
     F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
     <F as Field>::Inner: FromRef<Zt::Fmod>,
-    Zt::Eval: ProjectableToField<F>,
+    PEval: ProjectionToField<Zt::Eval, F>,
 {
     let mut rng = ThreadRng::default();
 
@@ -243,7 +244,7 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     let linear_code = Lc::new(poly_size, code_config);
     let params = ZipPlus::setup(poly_size, linear_code);
 
-    let poly = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
+    let poly = DenseMultilinearExtension::rand(P, &mut rng);
     let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
     let point = vec![Zt::Pt::one(); P];
 
@@ -263,8 +264,9 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
                 for _ in 0..iters {
                     let proof = test_transcript.clone();
                     let timer = Instant::now();
-                    let (eval_f, proof) = ZipPlus::evaluate::<F>(&params, &poly, &point, proof)
-                        .expect("Evaluation phase failed");
+                    let (eval_f, proof) =
+                        ZipPlus::evaluate::<F, PEval>(&params, &poly, &point, proof)
+                            .expect("Evaluation phase failed");
                     total_duration += timer.elapsed();
                     black_box((eval_f, proof));
                 }
@@ -274,29 +276,29 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     );
 }
 
-pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
+pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, PEval, PCw, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
     code_config: Lc::Config,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
     F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
     <F as Field>::Inner: FromRef<Zt::Fmod>,
-    Zt::Eval: ProjectableToField<F>,
-    Zt::Cw: ProjectableToField<F>,
+    PEval: ProjectionToField<Zt::Eval, F>,
+    PCw: ProjectionToField<Zt::Cw, F>,
 {
     let mut rng = ThreadRng::default();
     let poly_size = 1 << P;
     let linear_code = Lc::new(poly_size, code_config);
     let params = ZipPlus::setup(poly_size, linear_code);
 
-    let poly = DenseMultilinearExtension::rand(P, &mut rng, Zero::zero());
+    let poly = DenseMultilinearExtension::rand(P, &mut rng);
     let (data, commitment) = ZipPlus::commit(&params, &poly).unwrap();
     let point = vec![Zt::Pt::one(); P];
 
     let test_transcript = ZipPlus::test(&params, &poly, &data).expect("Test phase failed");
-    let (eval_f, proof) = ZipPlus::evaluate::<F>(&params, &poly, &point, test_transcript)
+    let (eval_f, proof) = ZipPlus::evaluate::<F, PEval>(&params, &poly, &point, test_transcript)
         .expect("Evaluation phase failed");
-    let field_cfg = eval_f.cfg().clone();
+    let field_cfg = *eval_f.cfg();
     let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
     group.bench_function(
@@ -309,8 +311,14 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
         ),
         |b| {
             b.iter(|| {
-                ZipPlus::verify(&params, &commitment, &point_f, &eval_f, &proof)
-                    .expect("Verification failed");
+                ZipPlus::verify::<_, PCw, MBSInnerProductChecked>(
+                    &params,
+                    &commitment,
+                    &point_f,
+                    &eval_f,
+                    &proof,
+                )
+                .expect("Verification failed");
             })
         },
     );
