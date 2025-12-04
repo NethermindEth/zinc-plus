@@ -1,8 +1,9 @@
 #![allow(clippy::arithmetic_side_effects)] // arithmetic is safe due to bounded configuration parameters
 
-use std::{convert::TryFrom, marker::PhantomData};
+use std::{convert::TryFrom, marker::PhantomData, ops::AddAssign};
 
 use crypto_primitives::PrimeField;
+use itertools::Itertools;
 use num_traits::CheckedAdd;
 use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 
@@ -117,7 +118,17 @@ where
     Zt::Cw: for<'a> MulByScalar<&'a Twiddle>,
 {
     /// Encode without modular reduction, purely over the integers.
-    fn encode_inner(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
+    fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
+    where
+        In: Clone,
+        Out: CheckedAdd
+            + for<'a> AddAssign<&'a Out>
+            + FromRef<Twiddle>
+            + FromRef<In>
+            + Clone
+            + Default
+            + for<'a> MulByScalar<&'a Twiddle>,
+    {
         assert_eq!(
             row.len(),
             self.cfg.m,
@@ -125,12 +136,22 @@ where
             row.len(),
             self.cfg.m
         );
-        let row_cw = row.iter().map(Zt::Cw::from_ref).collect::<Vec<_>>();
+        let row_cw = row.to_vec();
 
-        self.encode_ntt(&row_cw, self.cfg.k)
+        self.encode_ntt::<In, Out>(&row_cw, self.cfg.k)
     }
 
-    fn encode_ntt(&self, data: &[Zt::Cw], depth: usize) -> Vec<Zt::Cw> {
+    fn encode_ntt<In, Out>(&self, data: &[In], depth: usize) -> Vec<Out>
+    where
+        In: Clone,
+        Out: CheckedAdd
+            + for<'a> AddAssign<&'a Out>
+            + FromRef<Twiddle>
+            + FromRef<In>
+            + Clone
+            + Default
+            + for<'a> MulByScalar<&'a Twiddle>,
+    {
         if depth == 0 {
             // Base-case: multiply the base_dim-term vector by the precomputed
             // Vandermonde matrix to obtain base_len evaluation points.
@@ -139,11 +160,11 @@ where
 
         let radix = self.cfg.radix;
         let chunk_len = data.len() / radix;
-        let mut subresults = Vec::with_capacity(radix);
+        let mut subresults: Vec<Vec<Out>> = Vec::with_capacity(radix);
         for chunk_idx in 0..radix {
             let mut chunk = Vec::with_capacity(chunk_len);
             for j in 0..chunk_len {
-                chunk.push(data[radix * j + chunk_idx]);
+                chunk.push(data[radix * j + chunk_idx].clone());
             }
             // Recursively evaluate the "child" polynomial corresponding to
             // coset `x -> x + \omega^{chunk_idx}`.
@@ -153,18 +174,28 @@ where
         self.combine_stage(&subresults, &self.twiddle_tables[depth - 1])
     }
 
-    fn base_multiply(&self, chunk: &[Zt::Cw]) -> Vec<Zt::Cw> {
+    fn base_multiply<In, Out>(&self, chunk: &[In]) -> Vec<Out>
+    where
+        Out: Clone
+            + Default
+            + FromRef<In>
+            + CheckedAdd
+            + for<'a> AddAssign<&'a Out>
+            + FromRef<Twiddle>
+            + for<'a> MulByScalar<&'a Twiddle>,
+    {
         let base_dim = self.cfg.base_dim;
         let base_len = self.cfg.base_len;
         assert_eq!(chunk.len(), base_dim);
-        let mut output = vec![Zt::Cw::default(); base_len];
+        let mut output = vec![Out::default(); base_len];
         for (row_idx, matrix_row) in self.base_matrix.iter().enumerate() {
             debug_assert_eq!(matrix_row.len(), base_dim);
-            let mut acc = Zt::Cw::default();
+            let mut acc = Out::default();
             // Dot-product between the i-th row of the Vandermonde matrix and
             // the base_dim input coordinates.
             for col in 0..base_dim {
-                let term = chunk[col]
+                let term = 
+                    Out::from_ref(&chunk[col])
                     .mul_by_scalar(&matrix_row[col])
                     .expect("Base multiplication overflow");
                 acc = acc.checked_add(&term).expect("Base addition overflow");
@@ -174,11 +205,14 @@ where
         output
     }
 
-    fn combine_stage(
+    fn combine_stage<Out>(
         &self,
-        subresults: &[Vec<Zt::Cw>],
+        subresults: &[Vec<Out>],
         twiddle_table: &[Vec<Twiddle>],
-    ) -> Vec<Zt::Cw> {
+    ) -> Vec<Out>
+    where
+        Out: Default + Clone + CheckedAdd + for<'a> MulByScalar<&'a Twiddle>,
+    {
         // Each index `idx` corresponds to a single output position and therefore
         // to a unique set of twiddle multipliers. We rely on the precomputed stage
         // table to avoid recomputing roots on the fly.
@@ -187,11 +221,11 @@ where
         debug_assert_eq!(twiddle_table.len(), sub_len * radix);
         debug_assert_eq!(subresults.len(), radix);
 
-        let mut output = vec![Zt::Cw::default(); sub_len * radix];
+        let mut output = vec![Out::default(); sub_len * radix];
         for (idx, slot) in output.iter_mut().enumerate() {
             let column = idx % sub_len;
             let twiddles = &twiddle_table[idx];
-            let mut acc = Zt::Cw::default();
+            let mut acc = Out::default();
             for branch in 0..radix {
                 let term = subresults[branch][column]
                     .mul_by_scalar(&twiddles[branch])
@@ -207,7 +241,9 @@ where
 impl<Zt: ZipTypes, Twiddle, const REP: usize> LinearCode<Zt> for IprsCode<Zt, Twiddle, REP>
 where
     Zt: ZipTypes,
-    Zt::Cw: for<'a> MulByScalar<&'a Twiddle>,
+    Twiddle: for<'a> MulByScalar<&'a Zt::CombR>,
+    Zt::Cw: FromRef<Twiddle> + for<'a> MulByScalar<&'a Twiddle>,
+    Zt::CombR: FromRef<Twiddle> + for<'a> MulByScalar<&'a Twiddle>,
     // For simplicity, we require that the Twiddle type can be created from i128
     Twiddle: FromRef<i128> + Send + Sync,
     IprsConfig: IprsHelpers<Twiddle>,
@@ -244,14 +280,19 @@ where
         }
     }
 
-    fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
+    fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw>
+where {
         assert!(
             row.len() == self.cfg.m,
             "Input length {} does not match expected row length {}",
             row.len(),
             self.cfg.m
         );
-        self.encode_inner(row)
+        self.encode_inner(
+            &row.iter()
+                .map(<Zt::Cw as FromRef<Zt::Eval>>::from_ref)
+                .collect_vec(),
+        )
     }
 
     fn row_len(&self) -> usize {
@@ -262,8 +303,8 @@ where
         self.cfg.n
     }
 
-    fn encode_wide(&self, _row: &[<Zt as ZipTypes>::CombR]) -> Vec<<Zt as ZipTypes>::CombR> {
-        todo!()
+    fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {
+        self.encode_inner::<Zt::CombR, _>(row)
     }
 
     fn encode_f<F>(&self, _row: &[F]) -> Vec<F>
