@@ -2,7 +2,7 @@ use crate::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomi
 use core::slice;
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring};
 use itertools::Itertools;
-use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, ConstOne, ConstZero, One, Zero};
+use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
     array,
@@ -20,8 +20,6 @@ use zinc_utils::{
     named::Named,
     projection_to_field::ProjectionToField,
 };
-
-use super::binary::BinaryPoly;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DensePolynomial<R, const DEGREE_PLUS_ONE: usize> {
@@ -610,33 +608,5 @@ impl<R: Zero, const DEGREE_PLUS_ONE: usize> From<R> for DensePolynomial<R, DEGRE
         let mut coeffs = array::from_fn(|_| R::zero());
         coeffs[0] = value;
         Self { coeffs }
-    }
-}
-
-impl<R: ConstZero + ConstOne> FromRef<BinaryPoly<u32>> for DensePolynomial<R, 32> {
-    fn from_ref(binary_poly: &BinaryPoly<u32>) -> Self {
-        Self {
-            coeffs: (*binary_poly).into(),
-        }
-    }
-}
-
-impl<R: ConstZero + ConstOne> FromRef<BinaryPoly<u64>> for DensePolynomial<R, 64> {
-    fn from_ref(binary_poly: &BinaryPoly<u64>) -> Self {
-        Self {
-            coeffs: (*binary_poly).into(),
-        }
-    }
-}
-
-impl<R: ConstZero + ConstOne> From<BinaryPoly<u32>> for DensePolynomial<R, 32> {
-    fn from(binary_poly: BinaryPoly<u32>) -> Self {
-        Self::from_ref(&binary_poly)
-    }
-}
-
-impl<R: ConstZero + ConstOne> From<BinaryPoly<u64>> for DensePolynomial<R, 64> {
-    fn from(binary_poly: BinaryPoly<u64>) -> Self {
-        Self::from_ref(&binary_poly)
     }
 }
