@@ -5,12 +5,18 @@ use std::{marker::PhantomData, ops::AddAssign};
 use zinc_poly::ConstCoeffBitWidth;
 use zinc_utils::{add, from_ref::FromRef, mul};
 
+pub trait RaaConfig: Copy + Send + Sync {
+    /// Whether to permute the codeword in place, instead of copying it using a
+    /// precomputed permutation.
+    const PERMUTE_IN_PLACE: bool;
+    /// Whether to check for overflows during encoding
+    const CHECK_FOR_OVERFLOWS: bool;
+}
+
 /// Implementation of a repeat-accumulate-accumulate (RAA) codes over the binary
 /// field, as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
 #[derive(Debug, Clone)]
-pub struct RaaCode<Zt: ZipTypes, const REP: usize> {
-    pub(crate) cfg: RaaConfig,
-
+pub struct RaaCode<Zt: ZipTypes, Config: RaaConfig, const REP: usize> {
     pub(crate) row_len: usize,
     /// Randomness seed for the first permutation
     pub(crate) perm_1_seed: u64,
@@ -24,20 +30,10 @@ pub struct RaaCode<Zt: ZipTypes, const REP: usize> {
     /// Second permutation
     pub(crate) perm_2: Vec<usize>,
 
-    phantom: PhantomData<Zt>,
+    phantom: PhantomData<(Zt, Config)>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct RaaConfig {
-    /// Whether to check for overflows during encoding
-    pub check_for_overflows: bool,
-
-    /// Whether to permute the codeword in place, instead of copying it using a
-    /// precomputed permutation.
-    pub permute_in_place: bool,
-}
-
-impl<Zt: ZipTypes, const REP: usize> RaaCode<Zt, REP> {
+impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> RaaCode<Zt, Config, REP> {
     /// Do the actual encoding, as per RAA spec
     fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
     where
@@ -50,22 +46,22 @@ impl<Zt: ZipTypes, const REP: usize> RaaCode<Zt, REP> {
         );
 
         let mut result: Vec<Out> = repeat(row, REP);
-        if self.cfg.permute_in_place {
+        if Config::PERMUTE_IN_PLACE {
             shuffle_seeded(&mut result, self.perm_1_seed);
         } else {
             result = clone_shuffled(&result, &self.perm_1);
         }
-        if self.cfg.check_for_overflows {
+        if Config::CHECK_FOR_OVERFLOWS {
             accumulate(&mut result);
         } else {
             accumulate_unchecked(&mut result);
         }
-        if self.cfg.permute_in_place {
+        if Config::PERMUTE_IN_PLACE {
             shuffle_seeded(&mut result, self.perm_2_seed);
         } else {
             result = clone_shuffled(&result, &self.perm_2);
         }
-        if self.cfg.check_for_overflows {
+        if Config::CHECK_FOR_OVERFLOWS {
             accumulate(&mut result);
         } else {
             accumulate_unchecked(&mut result);
@@ -75,12 +71,12 @@ impl<Zt: ZipTypes, const REP: usize> RaaCode<Zt, REP> {
     }
 }
 
-impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for RaaCode<Zt, REP> {
-    type Config = RaaConfig;
-
+impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> LinearCode<Zt>
+    for RaaCode<Zt, Config, REP>
+{
     const REPETITION_FACTOR: usize = REP;
 
-    fn new(poly_size: usize, cfg: RaaConfig) -> Self {
+    fn new(poly_size: usize) -> Self {
         assert!(
             REP.is_power_of_two(),
             "Repetition factor must be a power of two"
@@ -130,7 +126,6 @@ impl<Zt: ZipTypes, const REP: usize> LinearCode<Zt> for RaaCode<Zt, REP> {
         shuffle_seeded(&mut perm_2, PERM_2_SEED);
 
         Self {
-            cfg,
             row_len,
             perm_1_seed: PERM_1_SEED,
             perm_2_seed: PERM_2_SEED,
@@ -246,23 +241,30 @@ mod tests {
     const K: usize = INT_LIMBS * 4;
     const M: usize = INT_LIMBS * 8;
 
-    fn test_raa<Zt, F>(poly_size: usize, f: F)
-    where
-        Zt: ZipTypes,
-        F: Fn(&RaaCode<Zt, REPETITION_FACTOR>),
+    #[derive(Clone, Copy)]
+    struct RaaConfigGeneric<const PERMUTE_IN_PLACE: bool, const CHECK_FOR_OVERFLOWS: bool>;
+
+    impl<const PERMUTE_IN_PLACE: bool, const CHECK_FOR_OVERFLOWS: bool> RaaConfig
+        for RaaConfigGeneric<PERMUTE_IN_PLACE, CHECK_FOR_OVERFLOWS>
     {
-        for check_for_overflows in [true, false] {
-            for permute_in_place in [true, false] {
-                let code = RaaCode::<Zt, REPETITION_FACTOR>::new(
-                    poly_size,
-                    RaaConfig {
-                        check_for_overflows,
-                        permute_in_place,
-                    },
-                );
-                f(&code)
+        const PERMUTE_IN_PLACE: bool = PERMUTE_IN_PLACE;
+        const CHECK_FOR_OVERFLOWS: bool = CHECK_FOR_OVERFLOWS;
+    }
+
+    macro_rules! test_raa {
+        ($zt:ty, $poly_size:expr, $f:expr) => {
+            test_raa!($zt, $poly_size, $f, RaaConfigGeneric<false, false>);
+            test_raa!($zt, $poly_size, $f, RaaConfigGeneric<false, true>);
+            test_raa!($zt, $poly_size, $f, RaaConfigGeneric<true, false>);
+            test_raa!($zt, $poly_size, $f, RaaConfigGeneric<true, true>);
+        };
+
+        ($zt:ty, $poly_size:expr, $f:expr, $config:ty) => {
+            {
+                let code = RaaCode::<$zt, $config, REPETITION_FACTOR>::new($poly_size);
+                $f(&code)
             }
-        }
+        };
     }
 
     #[test]
@@ -350,8 +352,9 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::arithmetic_side_effects)] // False alert
     fn encoding_preserves_linearity() {
-        test_raa::<TestZipTypes<N, K, M>, _>(16, |code| {
+        test_raa!(TestZipTypes<N, K, M>, 16, |code: &RaaCode<_, _, _>| {
             let a: Vec<Int<N>> = (1..=4).map(Int::<N>::from).collect();
             let b: Vec<Int<N>> = (5..=8).map(Int::<N>::from).collect();
             let sum_ab: Vec<Int<N>> = a.iter().zip(b.iter()).map(|(x, y)| *x + y).collect();
@@ -367,7 +370,7 @@ mod tests {
                 .collect();
 
             assert_eq!(encode_sum_ab, sum_encode_ab);
-        })
+        });
     }
 
     /// Since our shuffle seeds are fixed, we can test the encoding
@@ -376,32 +379,22 @@ mod tests {
     fn encoding_produces_predictable_results() {
         let a: Vec<Int<N>> = (1..=4).map(Int::<N>::from).collect();
 
-        for check_for_overflows in [true, false] {
-            for permute_in_place in [true, false] {
-                let code = RaaCode::<TestZipTypes<N, K, M>, REPETITION_FACTOR>::new(
-                    16,
-                    RaaConfig {
-                        check_for_overflows,
-                        permute_in_place,
-                    },
-                );
-
-                let encode_a: Vec<Int<K>> = code.encode(&a);
-                assert_eq!(
-                    encode_a,
-                    [
-                        0x1E, 0x36, 0x39, 0x5A, 0x70, 0x7E, 0xA5, 0xC1, 0xCB, 0xDC, 0xF9, 0x11E,
-                        0x124, 0x14C, 0x14D, 0x160
-                    ]
-                    .map(Int::<K>::from)
-                );
-            }
-        }
+        test_raa!(TestZipTypes<N, K, M>, 16, |code: &RaaCode<_, _, _>| {
+            let encode_a: Vec<Int<K>> = code.encode(&a);
+            assert_eq!(
+                encode_a,
+                [
+                    0x1E, 0x36, 0x39, 0x5A, 0x70, 0x7E, 0xA5, 0xC1, 0xCB, 0xDC, 0xF9, 0x11E, 0x124,
+                    0x14C, 0x14D, 0x160
+                ]
+                .map(Int::<K>::from)
+            );
+        });
     }
 
     #[test]
     fn encoding_zero_vector_results_in_zero_codeword() {
-        test_raa::<TestZipTypes<N, K, M>, _>(16, |code| {
+        test_raa!(TestZipTypes<N, K, M>, 16, |code: &RaaCode<_, _, _>| {
             let zero_vector: Vec<_> = vec![Int::<N>::zero(); code.row_len()];
             let encoded_vector: Vec<Int<K>> = code.encode(&zero_vector);
 
@@ -411,7 +404,7 @@ mod tests {
                 encoded_vector, expected_codeword,
                 "Encoding a zero vector should result in a zero codeword"
             );
-        })
+        });
     }
 
     #[test]
@@ -419,24 +412,20 @@ mod tests {
         let data: Vec<Int<N>> = (1..=1024).map(Int::<N>::from).collect();
         let poly_size = data.len() * data.len();
         let codeword_1: Vec<Int<K>> = {
-            let code_in_place = RaaCode::<TestZipTypes<N, K, M>, REPETITION_FACTOR>::new(
-                poly_size,
-                RaaConfig {
-                    check_for_overflows: true,
-                    permute_in_place: true,
-                },
-            );
+            let code_in_place = RaaCode::<
+                TestZipTypes<N, K, M>,
+                RaaConfigGeneric<true, true>,
+                REPETITION_FACTOR,
+            >::new(poly_size);
             code_in_place.encode(&data)
         };
 
         let codeword_2: Vec<Int<K>> = {
-            let code_cloning = RaaCode::<TestZipTypes<N, K, M>, REPETITION_FACTOR>::new(
-                poly_size,
-                RaaConfig {
-                    check_for_overflows: true,
-                    permute_in_place: false,
-                },
-            );
+            let code_cloning = RaaCode::<
+                TestZipTypes<N, K, M>,
+                RaaConfigGeneric<false, true>,
+                REPETITION_FACTOR,
+            >::new(poly_size);
             code_cloning.encode(&data)
         };
         assert_eq!(
@@ -451,22 +440,20 @@ mod tests {
         const N: usize = 1;
         const K: usize = 1;
 
-        let _code = RaaCode::<TestZipTypes<N, K, N>, REPETITION_FACTOR>::new(
-            1 << 30,
-            RaaConfig {
-                check_for_overflows: true,
-                permute_in_place: false,
-            },
-        );
+        let _code = RaaCode::<
+            TestZipTypes<N, K, N>,
+            RaaConfigGeneric<false, true>,
+            REPETITION_FACTOR,
+        >::new(1 << 30);
     }
 
     #[test]
     #[should_panic(expected = "Row length must match the code's row length")]
     #[cfg(debug_assertions)]
     fn encode_panics_on_mismatched_row_length() {
-        test_raa::<TestZipTypes<N, K, M>, _>(16, |code| {
+        test_raa!(TestZipTypes<N, K, M>, 16, |code: &RaaCode<_, _, _>| {
             let incorrect_row = vec![Int::<N>::from(1), Int::<N>::from(2), Int::<N>::from(3)];
             let _: Vec<Int<K>> = code.encode(&incorrect_row);
-        })
+        });
     }
 }

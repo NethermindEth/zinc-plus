@@ -31,18 +31,19 @@ impl ZipTypes for BenchZipTypes {
     type CombDotChal = ScalarProduct;
     type EvalDotChal = ScalarProduct;
 }
-type Code = RaaCode<BenchZipTypes, 4>;
 
-const RAA_CONFIG: RaaConfig = RaaConfig {
-    check_for_overflows: false,
-    permute_in_place: false,
-};
+#[derive(Clone, Copy)]
+struct BenchRaaConfig;
+impl RaaConfig for BenchRaaConfig {
+    const PERMUTE_IN_PLACE: bool = false;
+    const CHECK_FOR_OVERFLOWS: bool = false;
+}
+
+type Code = RaaCode<BenchZipTypes, BenchRaaConfig, 4>;
 
 fn zip_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");
-    do_bench::<BenchZipTypes, Code, SimpleProjection<_>, SimpleProjection<_>>(
-        &mut group, RAA_CONFIG,
-    );
+    do_bench::<BenchZipTypes, Code, SimpleProjection<_>, SimpleProjection<_>>(&mut group);
     group.finish();
 }
 

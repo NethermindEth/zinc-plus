@@ -283,10 +283,10 @@ mod tests {
     type F = BoxedMontyField;
 
     type Zt = TestZipTypes<N, K, M>;
-    type C = RaaSignFlippingCode<Zt, 4>;
+    type C = RaaSignFlippingCode<Zt, TestRaaConfig, 4>;
 
     type PolyZt = TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>;
-    type PolyC = RaaCode<PolyZt, 4>;
+    type PolyC = RaaCode<PolyZt, TestRaaConfig, 4>;
 
     type TestZip = ZipPlus<Zt, C>;
     type TestPolyZip = ZipPlus<PolyZt, PolyC>;
@@ -605,7 +605,7 @@ mod tests {
         let poly_size = 8; // row_len=4, num_rows=2 -> proximity checks are active
         let n = 3;
 
-        let linear_code = C::new(poly_size, RAA_CFG);
+        let linear_code = C::new(poly_size);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let evaluations: Vec<_> = (0..poly_size as i32)
@@ -691,7 +691,7 @@ mod tests {
 
         let n = 3;
         let poly_size = 1 << n;
-        let linear_code: C = C::new(poly_size, RAA_CFG);
+        let linear_code: C = C::new(poly_size);
         let pp = TestZip::setup(poly_size, linear_code);
         let evaluations: Vec<_> = (0..poly_size)
             .map(|_| <Zt as ZipTypes>::Eval::from(rng.random::<i8>()))
@@ -725,7 +725,7 @@ mod tests {
     #[test]
     fn verification_fails_if_evaluation_consistency_check_is_invalid() {
         let poly_size = 8;
-        let linear_code = C::new(poly_size, RAA_CFG);
+        let linear_code = C::new(poly_size);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let evaluations: Vec<_> = (0..poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
@@ -774,7 +774,7 @@ mod tests {
     #[test]
     fn verification_succeeds_for_zero_polynomial() {
         let poly_size = 8;
-        let linear_code = C::new(poly_size, RAA_CFG);
+        let linear_code = C::new(poly_size);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let evaluations: Vec<_> = vec![Int::<INT_LIMBS>::ZERO; poly_size];
@@ -808,7 +808,7 @@ mod tests {
     fn verification_succeeds_at_zero_point() {
         let num_vars = 3;
         let poly_size = 1 << num_vars;
-        let linear_code = C::new(poly_size, RAA_CFG);
+        let linear_code = C::new(poly_size);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let evaluations: Vec<_> = (1..=poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
@@ -908,7 +908,7 @@ mod tests {
     #[test]
     fn verification_fails_if_proximity_values_are_too_large() {
         let poly_size = 8;
-        let linear_code = C::new(poly_size, RAA_CFG);
+        let linear_code = C::new(poly_size);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let evaluations: Vec<_> = (1..=poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
@@ -957,7 +957,7 @@ mod tests {
             let mut rng = ThreadRng::default();
             // Match the benchmark’s transcript usage for linear code construction
             let poly_size = 1 << P;
-            let linear_code = C::new(poly_size, RAA_CFG);
+            let linear_code = C::new(poly_size);
             let pp = TestZip::setup(poly_size, linear_code);
 
             let mle = DenseMultilinearExtension::rand(P, &mut rng);
@@ -1003,7 +1003,7 @@ mod tests {
             let mut rng = ThreadRng::default();
             // Match the benchmark’s transcript usage for linear code construction
             let poly_size = 1 << P;
-            let linear_code = PolyC::new(poly_size, RAA_CFG);
+            let linear_code = PolyC::new(poly_size);
             let pp = TestPolyZip::setup(poly_size, linear_code);
 
             let mle = DenseMultilinearExtension::rand(P, &mut rng);

@@ -44,10 +44,13 @@ use zinc_utils::{
 
 const REPETITION_FACTOR: usize = 4;
 
-pub const RAA_CFG: RaaConfig = RaaConfig {
-    check_for_overflows: true,
-    permute_in_place: false,
-};
+#[derive(Clone, Copy)]
+pub struct TestRaaConfig;
+
+impl RaaConfig for TestRaaConfig {
+    const PERMUTE_IN_PLACE: bool = false;
+    const CHECK_FOR_OVERFLOWS: bool = true;
+}
 
 pub struct TestZipTypes<const N: usize, const K: usize, const M: usize> {}
 impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N, K, M> {
@@ -99,7 +102,7 @@ pub fn setup_test_params<const N: usize, const K: usize, const M: usize>(
 ) -> (
     ZipPlusParams<
         TestZipTypes<N, K, M>,
-        RaaSignFlippingCode<TestZipTypes<N, K, M>, REPETITION_FACTOR>,
+        RaaSignFlippingCode<TestZipTypes<N, K, M>, TestRaaConfig, REPETITION_FACTOR>,
     >,
     DenseMultilinearExtension<<TestZipTypes<N, K, M> as ZipTypes>::Eval>,
 ) {
@@ -114,7 +117,7 @@ pub fn setup_poly_test_params<const K: usize, const M: usize, const DEGREE_PLUS_
 ) -> (
     ZipPlusParams<
         TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>,
-        RaaCode<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>, REPETITION_FACTOR>,
+        RaaCode<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>, TestRaaConfig, REPETITION_FACTOR>,
     >,
     DenseMultilinearExtension<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Eval>,
 ) {
@@ -129,14 +132,14 @@ pub fn setup_poly_test_params<const K: usize, const M: usize, const DEGREE_PLUS_
     })
 }
 
-fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt, Config = RaaConfig>>(
+fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     num_vars: usize,
     prepare_evaluations: impl FnOnce(usize) -> Vec<Zt::Eval>,
 ) -> (ZipPlusParams<Zt, Lc>, DenseMultilinearExtension<Zt::Eval>) {
     let poly_size = 1 << num_vars;
     let num_rows = 1 << num_vars.div_ceil(2);
 
-    let code = Lc::new(poly_size, RAA_CFG);
+    let code = Lc::new(poly_size);
     let pp = ZipPlusParams::new(num_vars, num_rows, code);
 
     let evaluations = prepare_evaluations(poly_size);
@@ -154,7 +157,7 @@ pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
 ) -> (
     ZipPlusParams<
         TestZipTypes<N, K, M>,
-        RaaSignFlippingCode<TestZipTypes<N, K, M>, REPETITION_FACTOR>,
+        RaaSignFlippingCode<TestZipTypes<N, K, M>, TestRaaConfig, REPETITION_FACTOR>,
     >,
     ZipPlusCommitment,
     Vec<F>,
@@ -186,7 +189,7 @@ pub fn setup_full_protocol_poly<
 ) -> (
     ZipPlusParams<
         TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>,
-        RaaCode<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>, REPETITION_FACTOR>,
+        RaaCode<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>, TestRaaConfig, REPETITION_FACTOR>,
     >,
     ZipPlusCommitment,
     Vec<F>,

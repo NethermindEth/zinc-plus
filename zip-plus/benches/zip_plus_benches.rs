@@ -49,12 +49,14 @@ impl<const D_PLUS_ONE: usize> ZipTypes for BenchZipPlusTypes<D_PLUS_ONE> {
     >;
 }
 
-type Code<const D_PLUS_ONE: usize> = RaaCode<BenchZipPlusTypes<D_PLUS_ONE>, 4>;
+#[derive(Clone, Copy)]
+struct BenchRaaConfig;
+impl RaaConfig for BenchRaaConfig {
+    const PERMUTE_IN_PLACE: bool = true;
+    const CHECK_FOR_OVERFLOWS: bool = false;
+}
 
-const RAA_CONFIG: RaaConfig = RaaConfig {
-    check_for_overflows: false,
-    permute_in_place: true,
-};
+type Code<const D_PLUS_ONE: usize> = RaaCode<BenchZipPlusTypes<D_PLUS_ONE>, BenchRaaConfig, 4>;
 
 fn zip_plus_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");
@@ -64,13 +66,13 @@ fn zip_plus_benchmarks(c: &mut Criterion) {
         Code<_>,
         InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
         HornerProjection<_, _>,
-    >(&mut group, RAA_CONFIG);
+    >(&mut group);
     do_bench::<
         BenchZipPlusTypes<64>,
         Code<_>,
         InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
         HornerProjection<_, _>,
-    >(&mut group, RAA_CONFIG);
+    >(&mut group);
 
     group.finish();
 }
