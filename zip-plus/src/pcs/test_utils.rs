@@ -9,7 +9,7 @@
 use crate::{
     code::{
         LinearCode,
-        raa::{RaaCode, RaaConfigGeneric},
+        raa::{RaaCode, RaaConfig},
         raa_sign_flip::RaaSignFlippingCode,
     },
     pcs::{
@@ -44,7 +44,13 @@ use zinc_utils::{
 
 const REPETITION_FACTOR: usize = 4;
 
-pub type TestRaaConfig = RaaConfigGeneric<false, true>;
+#[derive(Clone, Copy)]
+pub struct TestRaaConfig;
+
+impl RaaConfig for TestRaaConfig {
+    const PERMUTE_IN_PLACE: bool = false;
+    const CHECK_FOR_OVERFLOWS: bool = true;
+}
 
 pub struct TestZipTypes<const N: usize, const K: usize, const M: usize> {}
 impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N, K, M> {

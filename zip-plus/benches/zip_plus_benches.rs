@@ -16,7 +16,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use crypto_bigint::U64;
 use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint};
 use zip_plus::{
-    code::raa::{RaaCode, RaaConfigGeneric},
+    code::raa::{RaaCode, RaaConfig},
     pcs::structs::ZipTypes,
 };
 
@@ -49,8 +49,14 @@ impl<const D_PLUS_ONE: usize> ZipTypes for BenchZipPlusTypes<D_PLUS_ONE> {
     >;
 }
 
-type Code<const D_PLUS_ONE: usize> =
-    RaaCode<BenchZipPlusTypes<D_PLUS_ONE>, RaaConfigGeneric<true, false>, 4>;
+#[derive(Clone, Copy)]
+struct BenchRaaConfig;
+impl RaaConfig for BenchRaaConfig {
+    const PERMUTE_IN_PLACE: bool = false;
+    const CHECK_FOR_OVERFLOWS: bool = true;
+}
+
+type Code<const D_PLUS_ONE: usize> = RaaCode<BenchZipPlusTypes<D_PLUS_ONE>, BenchRaaConfig, 4>;
 
 fn zip_plus_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");

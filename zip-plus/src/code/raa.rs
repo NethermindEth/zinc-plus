@@ -10,16 +10,6 @@ pub trait RaaConfig: Copy + Send + Sync {
     const CHECK_FOR_OVERFLOWS: bool;
 }
 
-#[derive(Clone, Copy)]
-pub struct RaaConfigGeneric<const PERMUTE_IN_PLACE: bool, const CHECK_FOR_OVERFLOWS: bool>;
-
-impl<const PERMUTE_IN_PLACE: bool, const CHECK_FOR_OVERFLOWS: bool> RaaConfig
-    for RaaConfigGeneric<PERMUTE_IN_PLACE, CHECK_FOR_OVERFLOWS>
-{
-    const PERMUTE_IN_PLACE: bool = PERMUTE_IN_PLACE;
-    const CHECK_FOR_OVERFLOWS: bool = CHECK_FOR_OVERFLOWS;
-}
-
 /// Implementation of a repeat-accumulate-accumulate (RAA) codes over the binary
 /// field, as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
 #[derive(Debug, Clone)]
@@ -247,6 +237,16 @@ mod tests {
     const N: usize = INT_LIMBS;
     const K: usize = INT_LIMBS * 4;
     const M: usize = INT_LIMBS * 8;
+
+    #[derive(Clone, Copy)]
+    struct RaaConfigGeneric<const PERMUTE_IN_PLACE: bool, const CHECK_FOR_OVERFLOWS: bool>;
+
+    impl<const PERMUTE_IN_PLACE: bool, const CHECK_FOR_OVERFLOWS: bool> RaaConfig
+        for RaaConfigGeneric<PERMUTE_IN_PLACE, CHECK_FOR_OVERFLOWS>
+    {
+        const PERMUTE_IN_PLACE: bool = PERMUTE_IN_PLACE;
+        const CHECK_FOR_OVERFLOWS: bool = CHECK_FOR_OVERFLOWS;
+    }
 
     macro_rules! test_raa {
         ($zt:ty, $poly_size:expr, $f:expr) => {
