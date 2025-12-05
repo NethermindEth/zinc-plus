@@ -6,7 +6,10 @@ use zinc_poly::ConstCoeffBitWidth;
 use zinc_utils::{add, from_ref::FromRef, mul};
 
 pub trait RaaConfig: Copy + Send + Sync {
+    /// Whether to permute the codeword in place, instead of copying it using a
+    /// precomputed permutation.
     const PERMUTE_IN_PLACE: bool;
+    /// Whether to check for overflows during encoding
     const CHECK_FOR_OVERFLOWS: bool;
 }
 

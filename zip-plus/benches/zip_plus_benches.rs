@@ -52,8 +52,8 @@ impl<const D_PLUS_ONE: usize> ZipTypes for BenchZipPlusTypes<D_PLUS_ONE> {
 #[derive(Clone, Copy)]
 struct BenchRaaConfig;
 impl RaaConfig for BenchRaaConfig {
-    const PERMUTE_IN_PLACE: bool = false;
-    const CHECK_FOR_OVERFLOWS: bool = true;
+    const PERMUTE_IN_PLACE: bool = true;
+    const CHECK_FOR_OVERFLOWS: bool = false;
 }
 
 type Code<const D_PLUS_ONE: usize> = RaaCode<BenchZipPlusTypes<D_PLUS_ONE>, BenchRaaConfig, 4>;
