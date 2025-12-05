@@ -115,10 +115,10 @@ mod tests {
     const DEGREE_PLUS_ONE: usize = 3;
 
     type Zt = TestZipTypes<N, K, M>;
-    type C = RaaSignFlippingCode<Zt, 4>;
+    type C = RaaSignFlippingCode<Zt, TestRaaConfig, 4>;
 
     type PolyZt = TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>;
-    type PolyC = RaaCode<PolyZt, 4>;
+    type PolyC = RaaCode<PolyZt, TestRaaConfig, 4>;
 
     type TestZip = ZipPlus<Zt, C>;
     type TestPolyZip = ZipPlus<PolyZt, PolyC>;

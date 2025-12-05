@@ -218,10 +218,10 @@ mod tests {
     const DEGREE_PLUS_ONE: usize = 3;
 
     type Zt = TestZipTypes<N, K, M>;
-    type C = RaaSignFlippingCode<Zt, 4>;
+    type C = RaaSignFlippingCode<Zt, TestRaaConfig, 4>;
 
     type PolyZt = TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>;
-    type PolyC = RaaCode<PolyZt, 4>;
+    type PolyC = RaaCode<PolyZt, TestRaaConfig, 4>;
 
     type TestZip = ZipPlus<Zt, C>;
     type TestPolyZip = ZipPlus<PolyZt, PolyC>;
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn commit_succeeds_for_small_polynomial() {
-        let code = C::new(16, RAA_CFG);
+        let code = C::new(16);
         let pp = ZipPlusParams::new(4, 4, code);
 
         let evaluations = vec![Int::from(42); 16];
@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn commit_succeeds_for_two_variables() {
-        let code = C::new(4, RAA_CFG);
+        let code = C::new(4);
         let pp = ZipPlusParams::new(2, 2, code);
 
         let evaluations = vec![Int::from(1), Int::from(2), Int::from(3), Int::from(4)];
@@ -414,7 +414,7 @@ mod tests {
         let results: Vec<Vec<Vec<Int<4>>>> = (0..10)
             .into_par_iter()
             .map(|_| {
-                let code = C::new(poly_size, RAA_CFG);
+                let code = C::new(poly_size);
                 let pp = ZipPlusParams::new(num_vars, 8, code);
 
                 let rows = TestZip::encode_rows(&pp, pp.linear_code.row_len(), &poly.evaluations);
@@ -464,7 +464,7 @@ mod tests {
 
     #[test]
     fn encode_rows_succeeds_for_single_row() {
-        let code = C::new(4, RAA_CFG);
+        let code = C::new(4);
         let pp = ZipPlusParams::new(2, 1, code);
 
         // Create a polynomial with 2 variables and 4 evaluations
@@ -477,7 +477,7 @@ mod tests {
 
     #[test]
     fn encode_rows_succeeds_for_single_poly_row() {
-        let code = PolyC::new(4, RAA_CFG);
+        let code = PolyC::new(4);
         let pp = ZipPlusParams::new(2, 1, code);
 
         // Create a polynomial with 2 variables and 4 evaluations
@@ -620,7 +620,7 @@ mod tests {
         let mut rng = rng();
         let num_vars = 4;
         let poly_size = 1 << num_vars;
-        let linear_code = C::new(poly_size, RAA_CFG);
+        let linear_code = C::new(poly_size);
         let param = TestZip::setup(poly_size, linear_code);
         let evaluations: Vec<_> = (0..poly_size)
             .map(|_| <Zt as ZipTypes>::Eval::from(rng.random::<i8>()))
