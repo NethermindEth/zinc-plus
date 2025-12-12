@@ -1,6 +1,8 @@
 use crate::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial};
 use core::slice;
-use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring};
+use crypto_primitives::{
+    FixedSemiring, FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring,
+};
 use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
@@ -484,14 +486,20 @@ where
 impl<'a, R, S, const DEGREE_PLUS_ONE: usize> MulByScalar<&'a S>
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 where
-    R: Semiring + MulByScalar<&'a S>,
+    R: FixedSemiring + MulByScalar<&'a S>,
 {
     fn mul_by_scalar(&self, rhs: &'a S) -> Option<Self> {
-        let coeffs: Option<Vec<R>> = self.coeffs.iter().map(|c| c.mul_by_scalar(rhs)).collect();
+        let mut coeffs = self.coeffs.clone();
 
-        Some(Self {
-            coeffs: coeffs?.try_into().ok()?,
-        })
+        coeffs
+            .iter_mut()
+            .filter(|coeff| !coeff.is_zero())
+            .try_for_each(|x| {
+                *x = x.mul_by_scalar(rhs)?;
+                Some(())
+            })?;
+
+        Some(Self { coeffs })
     }
 }
 
