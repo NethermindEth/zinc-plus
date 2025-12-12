@@ -16,6 +16,7 @@ use std::{
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
+    checked_assign::CheckedAddAssign,
     from_ref::FromRef,
     inner_product::{InnerProduct, InnerProductError},
     mul_by_scalar::MulByScalar,
@@ -615,5 +616,13 @@ where
         zero: Out,
     ) -> Result<Out, InnerProductError> {
         I::inner_product(&lhs.coeffs, rhs, zero)
+    }
+}
+
+impl<R: CheckedAddAssign, const DEGREE_PLUS_ONE: usize> CheckedAddAssign
+    for DensePolynomial<R, DEGREE_PLUS_ONE>
+{
+    fn checked_add_assign(&mut self, rhs: &Self) -> Option<()> {
+        (0..DEGREE_PLUS_ONE).try_for_each(|i| self.coeffs[i].checked_add_assign(&rhs.coeffs[i]))
     }
 }
