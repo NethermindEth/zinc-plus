@@ -272,40 +272,47 @@ impl<'a, R: Semiring, const DEGREE_PLUS_ONE: usize> MulAssign<&'a Self>
     }
 }
 
-impl<R: Ring, const DEGREE_PLUS_ONE: usize> CheckedNeg for DensePolynomial<R, DEGREE_PLUS_ONE> {
+impl<R: Ring + Zero, const DEGREE_PLUS_ONE: usize> CheckedNeg
+    for DensePolynomial<R, DEGREE_PLUS_ONE>
+{
     fn checked_neg(&self) -> Option<Self> {
-        let coeffs: Option<Vec<R>> = self.coeffs.iter().map(|c| c.checked_neg()).collect();
-        Some(Self {
-            coeffs: coeffs?.try_into().ok()?,
-        })
+        let mut coeffs = self.coeffs.clone();
+
+        coeffs
+            .iter_mut()
+            .filter(|coeff| !coeff.is_zero())
+            .try_for_each(|x| {
+                *x = x.checked_neg()?;
+                Some(())
+            })?;
+
+        Some(Self { coeffs })
     }
 }
 
 impl<R: Semiring, const DEGREE_PLUS_ONE: usize> CheckedAdd for DensePolynomial<R, DEGREE_PLUS_ONE> {
     fn checked_add(&self, other: &Self) -> Option<Self> {
-        let coeffs: Option<Vec<R>> = self
-            .coeffs
-            .iter()
-            .zip(other.coeffs.iter())
-            .map(|(a, b)| a.checked_add(b))
-            .collect();
-        Some(Self {
-            coeffs: coeffs?.try_into().ok()?,
-        })
+        let mut coeffs = self.coeffs.clone();
+
+        coeffs.iter_mut().zip(other).try_for_each(|(a, b)| {
+            *a = a.checked_add(b)?;
+            Some(())
+        })?;
+
+        Some(Self { coeffs })
     }
 }
 
 impl<R: Semiring, const DEGREE_PLUS_ONE: usize> CheckedSub for DensePolynomial<R, DEGREE_PLUS_ONE> {
     fn checked_sub(&self, other: &Self) -> Option<Self> {
-        let coeffs: Option<Vec<R>> = self
-            .coeffs
-            .iter()
-            .zip(other.coeffs.iter())
-            .map(|(a, b)| a.checked_sub(b))
-            .collect();
-        Some(Self {
-            coeffs: coeffs?.try_into().ok()?,
-        })
+        let mut coeffs = self.coeffs.clone();
+
+        coeffs.iter_mut().zip(other).try_for_each(|(a, b)| {
+            *a = a.checked_sub(b)?;
+            Some(())
+        })?;
+
+        Some(Self { coeffs })
     }
 }
 
@@ -365,7 +372,7 @@ impl<'a, R: Semiring, const DEGREE_PLUS_ONE: usize> Product<&'a Self>
 
 impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Semiring for DensePolynomial<R, DEGREE_PLUS_ONE> {}
 
-impl<R: Ring, const DEGREE_PLUS_ONE: usize> Ring for DensePolynomial<R, DEGREE_PLUS_ONE> {}
+impl<R: Ring + Zero, const DEGREE_PLUS_ONE: usize> Ring for DensePolynomial<R, DEGREE_PLUS_ONE> {}
 
 impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Distribution<DensePolynomial<R, DEGREE_PLUS_ONE>>
     for StandardUniform
