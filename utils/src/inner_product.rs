@@ -1,10 +1,9 @@
 use std::ops::{Add, Mul};
 
 use crypto_primitives::boolean::Boolean;
-use num_traits::CheckedAdd;
 use thiserror::Error;
 
-use crate::{from_ref::FromRef, mul_by_scalar::MulByScalar};
+use crate::{checked_assign::CheckedAddAssign, from_ref::FromRef, mul_by_scalar::MulByScalar};
 
 /// A trait for inner product algorithms implementations.
 pub trait InnerProduct<Lhs: ?Sized, Rhs, Output> {
@@ -29,7 +28,7 @@ pub struct MBSInnerProductChecked;
 impl<Lhs, Rhs, Out> InnerProduct<[Lhs], Rhs, Out> for MBSInnerProductChecked
 where
     Lhs: for<'a> MulByScalar<&'a Rhs>,
-    Out: From<Lhs> + CheckedAdd,
+    Out: From<Lhs> + CheckedAddAssign,
 {
     /// The mul-by-scalar inner product.
     fn inner_product(lhs: &[Lhs], rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
@@ -43,9 +42,11 @@ where
         lhs.iter()
             .zip(rhs)
             .map(|(lhs, rhs)| lhs.mul_by_scalar(rhs).ok_or(InnerProductError::Overflow))
-            .try_fold(zero, |acc, product| {
-                acc.checked_add(&product?.into())
-                    .ok_or(InnerProductError::Overflow)
+            .try_fold(zero, |mut acc, product| {
+                acc.checked_add_assign(&product?.into())
+                    .ok_or(InnerProductError::Overflow)?;
+
+                Ok(acc)
             })
     }
 }
@@ -107,10 +108,10 @@ where
 /// The inner product for slices containing `Boolean` elements.
 /// Does `checked_add` to sum the elements of the RHS that
 /// correspond to `true` elements of the boolean slice.
-pub struct BooleanInnerProductCheckedAdd;
+pub struct BooleanInnerProductCheckedAddAssign;
 
-impl<Rhs: Clone, Out: From<Rhs> + CheckedAdd> InnerProduct<[Boolean], Rhs, Out>
-    for BooleanInnerProductCheckedAdd
+impl<Rhs: Clone, Out: From<Rhs> + CheckedAddAssign> InnerProduct<[Boolean], Rhs, Out>
+    for BooleanInnerProductCheckedAddAssign
 {
     /// Boolean checked inner product.
     fn inner_product(lhs: &[Boolean], rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
@@ -123,9 +124,11 @@ impl<Rhs: Clone, Out: From<Rhs> + CheckedAdd> InnerProduct<[Boolean], Rhs, Out>
 
         (0..lhs.len())
             .filter(|&i| lhs[i].into_inner())
-            .try_fold(zero, |acc, i| {
-                acc.checked_add(&Out::from(rhs[i].clone()))
-                    .ok_or(InnerProductError::Overflow)
+            .try_fold(zero, |mut acc, i| {
+                acc.checked_add_assign(&Out::from(rhs[i].clone()))
+                    .ok_or(InnerProductError::Overflow)?;
+
+                Ok(acc)
             })
     }
 }
@@ -193,7 +196,7 @@ mod test {
         let rhs = [1i128, 2, 3, 4];
 
         assert_eq!(
-            BooleanInnerProductCheckedAdd::inner_product(&lhs, &rhs, 0),
+            BooleanInnerProductCheckedAddAssign::inner_product(&lhs, &rhs, 0),
             MBSInnerProductChecked::inner_product(&rhs, &lhs, 0i128)
         );
     }
@@ -216,7 +219,7 @@ mod test {
         ];
 
         assert_eq!(
-            BooleanInnerProductCheckedAdd::inner_product(&lhs, &rhs, ConstMontyField::ZERO),
+            BooleanInnerProductCheckedAddAssign::inner_product(&lhs, &rhs, ConstMontyField::ZERO),
             BooleanInnerProductUncheckedAdd::inner_product(&lhs, &rhs, ConstMontyField::ZERO)
         );
     }

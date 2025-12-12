@@ -8,7 +8,8 @@ use zinc_poly::{ConstCoeffBitWidth, Polynomial};
 use zinc_primality::PrimalityTest;
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
-    from_ref::FromRef, inner_product::InnerProduct, mul_by_scalar::MulByScalar, named::Named,
+    checked_assign::CheckedAddAssign, from_ref::FromRef, inner_product::InnerProduct,
+    mul_by_scalar::MulByScalar, named::Named,
 };
 
 pub trait ZipTypes: Send + Sync {
@@ -40,6 +41,7 @@ pub trait ZipTypes: Send + Sync {
     type CombR: ConstIntRing
         + Neg<Output = Self::CombR>
         + ConstTranscribable
+        + CheckedAddAssign
         + FromRef<Self::CombR>
         + for<'a> MulByScalar<&'a Self::Chal>;
     /// Ring of elements in the linear combination of codewords, at least as

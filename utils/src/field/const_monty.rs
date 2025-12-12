@@ -1,8 +1,9 @@
 use crypto_bigint::modular::{ConstMontyForm, ConstMontyParams};
 use crypto_primitives::{crypto_bigint_const_monty::ConstMontyField, crypto_bigint_uint::Uint};
 use num_traits::CheckedMul;
+use std::ops::AddAssign;
 
-use crate::{from_ref::FromRef, mul_by_scalar::MulByScalar};
+use crate::{checked_assign::CheckedAddAssign, from_ref::FromRef, mul_by_scalar::MulByScalar};
 
 impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> MulByScalar<&Self>
     for ConstMontyField<Mod, LIMBS>
@@ -39,6 +40,17 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> FromRef<Self>
 {
     fn from_ref(value: &Self) -> Self {
         *value
+    }
+}
+
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> CheckedAddAssign
+    for ConstMontyField<Mod, LIMBS>
+{
+    #[inline(always)]
+    fn checked_add_assign(&mut self, rhs: &Self) -> Option<()> {
+        self.add_assign(rhs);
+
+        Some(())
     }
 }
 

@@ -1,7 +1,8 @@
 use crypto_primitives::crypto_bigint_monty::MontyField;
 use num_traits::CheckedMul;
+use std::ops::AddAssign;
 
-use crate::{from_ref::FromRef, mul_by_scalar::MulByScalar};
+use crate::{checked_assign::CheckedAddAssign, from_ref::FromRef, mul_by_scalar::MulByScalar};
 
 impl<const LIMBS: usize> MulByScalar<&Self> for MontyField<LIMBS> {
     fn mul_by_scalar(&self, rhs: &Self) -> Option<Self> {
@@ -12,6 +13,15 @@ impl<const LIMBS: usize> MulByScalar<&Self> for MontyField<LIMBS> {
 impl<const LIMBS: usize> FromRef<Self> for MontyField<LIMBS> {
     fn from_ref(value: &Self) -> Self {
         value.clone()
+    }
+}
+
+impl<const LIMBS: usize> CheckedAddAssign for MontyField<LIMBS> {
+    #[inline(always)]
+    fn checked_add_assign(&mut self, rhs: &Self) -> Option<()> {
+        self.add_assign(rhs);
+
+        Some(())
     }
 }
 

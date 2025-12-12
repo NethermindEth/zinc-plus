@@ -35,8 +35,8 @@ use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
     from_ref::FromRef,
     inner_product::{
-        BooleanInnerProductCheckedAdd, BooleanInnerProductUncheckedAdd, MBSInnerProductChecked,
-        ScalarProduct,
+        BooleanInnerProductCheckedAddAssign, BooleanInnerProductUncheckedAdd,
+        MBSInnerProductChecked, ScalarProduct,
     },
     mul_by_scalar::MulByScalar,
     projection_to_field::{ProjectionToField, SimpleProjection},
@@ -84,7 +84,7 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
         Boolean,
         Self::Chal,
         Self::CombR,
-        BooleanInnerProductCheckedAdd,
+        BooleanInnerProductCheckedAddAssign,
         DEGREE_PLUS_ONE,
     >;
     type CombDotChal = DensePolyInnerProduct<
