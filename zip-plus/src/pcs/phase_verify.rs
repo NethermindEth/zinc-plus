@@ -9,7 +9,7 @@ use crate::{
     },
     pcs_transcript::PcsTranscript,
 };
-use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
+use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
 use num_traits::{ConstOne, ConstZero, Zero};
 use zinc_poly::Polynomial;
@@ -30,7 +30,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         proof: &ZipPlusProof,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField
+        F: FromPrimitiveWithConfig
             + FromRef<F>
             + for<'a> FromWithConfig<&'a Zt::Chal>
             + for<'a> MulByScalar<&'a F>,
@@ -173,7 +173,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         field_cfg: &F::Config,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + FromRef<F> + for<'a> MulByScalar<&'a F>,
+        F: FromPrimitiveWithConfig + FromRef<F> + for<'a> MulByScalar<&'a F>,
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
         P: ProjectionToField<Zt::Cw, F>,
     {

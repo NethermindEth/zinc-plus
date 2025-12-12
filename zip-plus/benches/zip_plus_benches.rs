@@ -3,30 +3,57 @@
 
 mod zip_common;
 
+use num_traits::{One, Zero};
+use std::marker::PhantomData;
+use zinc_transcript::traits::ConstTranscribable;
+
 use zinc_poly::univariate::dense::{
     DensePolyInnerProduct, DensePolynomial, HornerProjection, InnerProductProjection,
 };
 use zinc_primality::MillerRabin;
-use zinc_utils::inner_product::{
-    BooleanInnerProductCheckedAdd, BooleanInnerProductUncheckedAdd, MBSInnerProductChecked,
+use zinc_utils::{
+    from_ref::FromRef,
+    inner_product::{
+        BooleanInnerProductCheckedAdd, BooleanInnerProductUncheckedAdd, MBSInnerProductChecked,
+    },
+    named::Named,
 };
 use zip_common::*;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use crypto_bigint::U64;
-use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint};
+use crypto_primitives::{
+    Semiring, boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
+};
 use zip_plus::{
-    code::raa::{RaaCode, RaaConfig},
+    code::{
+        iprs::{IprsCode, PNTTConfigF2_16_1},
+        raa::{RaaCode, RaaConfig},
+    },
     pcs::structs::ZipTypes,
 };
 
 const INT_LIMBS: usize = U64::LIMBS;
 
-struct BenchZipPlusTypes<const D_PLUS_ONE: usize> {}
-impl<const D_PLUS_ONE: usize> ZipTypes for BenchZipPlusTypes<D_PLUS_ONE> {
+struct BenchZipPlusTypes<CwCoeff, const D_PLUS_ONE: usize>(PhantomData<CwCoeff>);
+
+impl<CwCoeff, const D_PLUS_ONE: usize> ZipTypes for BenchZipPlusTypes<CwCoeff, D_PLUS_ONE>
+where
+    CwCoeff: ConstTranscribable
+        + Copy
+        + Default
+        + FromRef<Boolean>
+        + Named
+        + Semiring
+        + Send
+        + Sync
+        + Zero
+        + One,
+    Int<5>: FromRef<CwCoeff>,
+{
     const NUM_COLUMN_OPENINGS: usize = 650;
     type Eval = DensePolynomial<Boolean, D_PLUS_ONE>;
-    type Cw = DensePolynomial<i32, D_PLUS_ONE>;
+    type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
@@ -56,20 +83,24 @@ impl RaaConfig for BenchRaaConfig {
     const CHECK_FOR_OVERFLOWS: bool = false;
 }
 
-type Code<const D_PLUS_ONE: usize> = RaaCode<BenchZipPlusTypes<D_PLUS_ONE>, BenchRaaConfig, 4>;
+type SomeRaaCode<const D_PLUS_ONE: usize> =
+    RaaCode<BenchZipPlusTypes<i32, D_PLUS_ONE>, BenchRaaConfig, 4>;
 
-fn zip_plus_benchmarks(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Zip+");
+type SomeIprsCode<const DEPTH: usize, const D_PLUS_ONE: usize> =
+    IprsCode<BenchZipPlusTypes<i128, D_PLUS_ONE>, PNTTConfigF2_16_1<DEPTH>>;
+
+fn zip_plus_benchmarks_raa(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip+ RAA");
 
     do_bench::<
-        BenchZipPlusTypes<32>,
-        Code<_>,
+        BenchZipPlusTypes<i32, 32>,
+        SomeRaaCode<_>,
         InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
         HornerProjection<_, _>,
     >(&mut group);
     do_bench::<
-        BenchZipPlusTypes<64>,
-        Code<_>,
+        BenchZipPlusTypes<i32, 64>,
+        SomeRaaCode<_>,
         InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
         HornerProjection<_, _>,
     >(&mut group);
@@ -77,5 +108,15 @@ fn zip_plus_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, zip_plus_benchmarks);
+fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip+ IPRS");
+
+    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<1, _>, 8>(&mut group);
+
+    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<2, _>, 11>(&mut group);
+
+    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<3, _>, 14>(&mut group);
+}
+
+criterion_group!(benches, zip_plus_benchmarks_raa, zip_plus_benchmarks_iprs);
 criterion_main!(benches);

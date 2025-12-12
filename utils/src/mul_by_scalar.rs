@@ -58,3 +58,10 @@ where
         })
     }
 }
+
+impl MulByScalar<&i64> for i128 {
+    #[inline(always)]
+    fn mul_by_scalar(&self, rhs: &i64) -> Option<Self> {
+        self.checked_mul(&i128::from(*rhs))
+    }
+}

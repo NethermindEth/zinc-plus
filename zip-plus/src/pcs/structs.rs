@@ -3,6 +3,7 @@ use crate::{
     merkle::{MerkleTree, MtHash},
 };
 use crypto_primitives::{ConstIntRing, ConstIntSemiring, DenseRowMatrix, FixedSemiring};
+use num_traits::CheckedAdd;
 use std::{marker::PhantomData, ops::Neg};
 use zinc_poly::{ConstCoeffBitWidth, Polynomial};
 use zinc_primality::PrimalityTest;
@@ -23,7 +24,8 @@ pub trait ZipTypes: Send + Sync {
         + ConstTranscribable
         + FromRef<Self::Eval>
         + Named
-        + Copy;
+        + Copy
+        + CheckedAdd;
 
     /// Semiring type used to draft field modulus elements, natural numbers
     type Fmod: ConstIntSemiring + ConstTranscribable + Named;
