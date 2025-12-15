@@ -4,7 +4,7 @@ use num_traits::CheckedAdd;
 use std::{iter::Sum, marker::PhantomData, ops::AddAssign};
 
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
-use num_traits::{CheckedMul, ConstZero, Zero};
+use num_traits::CheckedMul;
 use zinc_utils::{
     from_ref::FromRef,
     mul_by_scalar::{MulByScalar, WideningMulByScalar},
@@ -38,7 +38,7 @@ where
     Config: pntt::radix8::Config,
 {
     /// Encode without modular reduction, purely over the integers.
-    fn encode_inner<In, Out, M>(&self, row: &[In], zero: Out, mul_in_by_twiddle: M) -> Vec<Out>
+    fn encode_inner<In, Out, M>(&self, row: &[In], mul_in_by_twiddle: M) -> Vec<Out>
     where
         In: Clone + Send + Sync,
         Out: FromRef<In>
@@ -60,13 +60,7 @@ where
             Config::N
         );
 
-        pntt::radix8::pntt(
-            row,
-            zero,
-            &self.pntt_params,
-            mul_in_by_twiddle,
-            MBSMulByTwiddle,
-        )
+        pntt::radix8::pntt(row, &self.pntt_params, mul_in_by_twiddle, MBSMulByTwiddle)
     }
 
     // Do the encoding but make use of the fact the input
@@ -85,14 +79,10 @@ where
             Config::N
         );
 
-        let field_cfg = row[0].cfg().clone();
-        let zero = F::zero_with_cfg(&field_cfg);
-
-        let mul_by_twiddle = FieldMulByTwiddle::<_, T>::new(field_cfg);
+        let mul_by_twiddle = FieldMulByTwiddle::<_, T>::new(row[0].cfg().clone());
 
         pntt::radix8::pntt(
             row,
-            zero,
             &self.pntt_params,
             mul_by_twiddle.clone(),
             mul_by_twiddle,
@@ -143,7 +133,7 @@ where
             Config::N
         );
 
-        self.encode_inner(row, Zt::Cw::zero(), WideningMulByTwiddle::<MT>::default())
+        self.encode_inner(row, WideningMulByTwiddle::<MT>::default())
     }
 
     fn row_len(&self) -> usize {
@@ -155,7 +145,7 @@ where
     }
 
     fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {
-        self.encode_inner(row, Zt::CombR::ZERO, MBSMulByTwiddle)
+        self.encode_inner(row, MBSMulByTwiddle)
     }
 
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>

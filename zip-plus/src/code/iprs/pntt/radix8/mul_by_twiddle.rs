@@ -56,6 +56,7 @@ where
 {
     type Output = F;
 
+    #[inline(always)]
     fn mul_by_twiddle(&self, lhs: &F, twiddle: &Twiddle) -> F {
         F::from_with_cfg(twiddle.clone().into(), &self.config) * lhs
     }
@@ -70,6 +71,7 @@ where
 {
     type Output = WM::Output;
 
+    #[inline(always)]
     fn mul_by_twiddle(&self, lhs: &Lhs, twiddle: &Twiddle) -> Self::Output {
         WM::mul_by_scalar_widen(lhs, twiddle)
     }
