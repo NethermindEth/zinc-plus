@@ -1,6 +1,8 @@
 use crate::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial};
 use core::slice;
-use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring};
+use crypto_primitives::{
+    FixedSemiring, FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring,
+};
 use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
@@ -270,40 +272,47 @@ impl<'a, R: Semiring, const DEGREE_PLUS_ONE: usize> MulAssign<&'a Self>
     }
 }
 
-impl<R: Ring, const DEGREE_PLUS_ONE: usize> CheckedNeg for DensePolynomial<R, DEGREE_PLUS_ONE> {
+impl<R: Ring + Zero, const DEGREE_PLUS_ONE: usize> CheckedNeg
+    for DensePolynomial<R, DEGREE_PLUS_ONE>
+{
     fn checked_neg(&self) -> Option<Self> {
-        let coeffs: Option<Vec<R>> = self.coeffs.iter().map(|c| c.checked_neg()).collect();
-        Some(Self {
-            coeffs: coeffs?.try_into().ok()?,
-        })
+        let mut coeffs = self.coeffs.clone();
+
+        coeffs
+            .iter_mut()
+            .filter(|coeff| !coeff.is_zero())
+            .try_for_each(|x| {
+                *x = x.checked_neg()?;
+                Some(())
+            })?;
+
+        Some(Self { coeffs })
     }
 }
 
 impl<R: Semiring, const DEGREE_PLUS_ONE: usize> CheckedAdd for DensePolynomial<R, DEGREE_PLUS_ONE> {
     fn checked_add(&self, other: &Self) -> Option<Self> {
-        let coeffs: Option<Vec<R>> = self
-            .coeffs
-            .iter()
-            .zip(other.coeffs.iter())
-            .map(|(a, b)| a.checked_add(b))
-            .collect();
-        Some(Self {
-            coeffs: coeffs?.try_into().ok()?,
-        })
+        let mut coeffs = self.coeffs.clone();
+
+        coeffs.iter_mut().zip(other).try_for_each(|(a, b)| {
+            *a = a.checked_add(b)?;
+            Some(())
+        })?;
+
+        Some(Self { coeffs })
     }
 }
 
 impl<R: Semiring, const DEGREE_PLUS_ONE: usize> CheckedSub for DensePolynomial<R, DEGREE_PLUS_ONE> {
     fn checked_sub(&self, other: &Self) -> Option<Self> {
-        let coeffs: Option<Vec<R>> = self
-            .coeffs
-            .iter()
-            .zip(other.coeffs.iter())
-            .map(|(a, b)| a.checked_sub(b))
-            .collect();
-        Some(Self {
-            coeffs: coeffs?.try_into().ok()?,
-        })
+        let mut coeffs = self.coeffs.clone();
+
+        coeffs.iter_mut().zip(other).try_for_each(|(a, b)| {
+            *a = a.checked_sub(b)?;
+            Some(())
+        })?;
+
+        Some(Self { coeffs })
     }
 }
 
@@ -363,7 +372,7 @@ impl<'a, R: Semiring, const DEGREE_PLUS_ONE: usize> Product<&'a Self>
 
 impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Semiring for DensePolynomial<R, DEGREE_PLUS_ONE> {}
 
-impl<R: Ring, const DEGREE_PLUS_ONE: usize> Ring for DensePolynomial<R, DEGREE_PLUS_ONE> {}
+impl<R: Ring + Zero, const DEGREE_PLUS_ONE: usize> Ring for DensePolynomial<R, DEGREE_PLUS_ONE> {}
 
 impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Distribution<DensePolynomial<R, DEGREE_PLUS_ONE>>
     for StandardUniform
@@ -484,14 +493,20 @@ where
 impl<'a, R, S, const DEGREE_PLUS_ONE: usize> MulByScalar<&'a S>
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 where
-    R: Semiring + MulByScalar<&'a S>,
+    R: FixedSemiring + MulByScalar<&'a S>,
 {
     fn mul_by_scalar(&self, rhs: &'a S) -> Option<Self> {
-        let coeffs: Option<Vec<R>> = self.coeffs.iter().map(|c| c.mul_by_scalar(rhs)).collect();
+        let mut coeffs = self.coeffs.clone();
 
-        Some(Self {
-            coeffs: coeffs?.try_into().ok()?,
-        })
+        coeffs
+            .iter_mut()
+            .filter(|coeff| !coeff.is_zero())
+            .try_for_each(|x| {
+                *x = x.mul_by_scalar(rhs)?;
+                Some(())
+            })?;
+
+        Some(Self { coeffs })
     }
 }
 
