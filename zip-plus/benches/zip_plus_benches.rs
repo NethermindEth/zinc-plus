@@ -87,10 +87,10 @@ impl RaaConfig for BenchRaaConfig {
 type SomeRaaCode<const D_PLUS_ONE: usize> =
     RaaCode<BenchZipPlusTypes<i32, D_PLUS_ONE>, BenchRaaConfig, 4>;
 
-type SomeIprsCode<const DEPTH: usize, const D_PLUS_ONE: usize> = IprsCode<
-    BenchZipPlusTypes<i128, D_PLUS_ONE>,
+type SomeIprsCode<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
     PNTTConfigF2_16_1<DEPTH>,
-    BinaryPolyWideningMulByScalar<i128>,
+    BinaryPolyWideningMulByScalar<Twiddle>,
 >;
 
 fn zip_plus_benchmarks_raa(c: &mut Criterion) {
@@ -115,13 +115,9 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
 fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS");
 
-    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<1, _>, 16>(&mut group);
+    encode_rows::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, _>, 16>(&mut group);
 
-    // encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<2, _>, 11>(&mut
-    // group);
-    //
-    // encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<3, _>, 14>(&mut
-    // group);
+    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, 2, _>, 22>(&mut group);
 }
 
 criterion_group!(benches, zip_plus_benchmarks_raa, zip_plus_benchmarks_iprs);
