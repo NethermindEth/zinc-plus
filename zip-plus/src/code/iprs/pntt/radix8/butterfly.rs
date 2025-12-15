@@ -45,7 +45,7 @@ pub(crate) fn radix_8_butterfly<Out, Twiddle, M, const I: usize>(
 ) -> Out
 where
     Out: Clone + CheckedAdd,
-    M: MulByTwiddle<Out, Twiddle>,
+    M: MulByTwiddle<Out, Twiddle, Output = Out>,
 {
     let butterfly: [usize; 8] = generate_radix_8_butterfly!(I);
 

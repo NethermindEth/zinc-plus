@@ -11,7 +11,7 @@ use num_traits::{CheckedAdd, CheckedMul};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::{array, iter::Sum};
-use zinc_utils::add;
+use zinc_utils::{add, from_ref::FromRef};
 
 use butterfly::*;
 use octet_reversal::*;
@@ -21,18 +21,19 @@ pub(crate) use mul_by_twiddle::*;
 pub use params::*;
 
 /// The main entrypoint of the radix-8 pseudo NTT algorithm.
-pub(crate) fn pntt<In, Out, C, M>(
+pub(crate) fn pntt<In, Out, C, MI, MO>(
     input: &[In],
     zero: Out,
     params: &Radix8PNTTParams<C>,
-    mul_by_twiddle: M,
+    mul_in_by_twiddle: MI,
+    mul_out_by_twiddle: MO,
 ) -> Vec<Out>
 where
     C: Config,
     In: Clone + Send + Sync,
-    Out: Clone + From<In> + CheckedAdd + CheckedMul + Send + Sync + Sum,
-    for<'a> &'a Out: From<&'a In>,
-    M: MulByTwiddle<Out, C::Int>,
+    Out: Clone + FromRef<In> + CheckedAdd + CheckedMul + Send + Sync + Sum,
+    MI: MulByTwiddle<In, C::Int, Output = Out>,
+    MO: MulByTwiddle<Out, C::Int, Output = Out>,
 {
     assert_eq!(
         C::N,
@@ -42,9 +43,9 @@ where
         input.len()
     );
 
-    let mut output = base_multiply_into_output(input, params, zero, mul_by_twiddle.clone());
+    let mut output = base_multiply_into_output(input, params, zero, mul_in_by_twiddle);
 
-    combine_stages(&mut output, params, mul_by_twiddle);
+    combine_stages(&mut output, params, mul_out_by_twiddle);
 
     output
 }
@@ -57,7 +58,7 @@ fn combine_stages<Out, C, M>(out: &mut [Out], params: &Radix8PNTTParams<C>, mul_
 where
     C: Config,
     Out: Clone + CheckedAdd + CheckedMul + Send + Sync,
-    M: MulByTwiddle<Out, C::Int>,
+    M: MulByTwiddle<Out, C::Int, Output = Out>,
 {
     for k in 0..C::DEPTH {
         // The length of chunks in the current layer.
@@ -101,9 +102,8 @@ fn base_multiply_into_output<In, Out, C, M>(
 where
     C: Config,
     In: Clone + Send + Sync,
-    Out: Clone + From<In> + CheckedAdd + CheckedMul + Sum + Send + Sync + CheckedMul + Sum + Send,
-    for<'a> &'a Out: From<&'a In>,
-    M: MulByTwiddle<Out, C::Int>,
+    Out: Clone + FromRef<In> + CheckedAdd + CheckedMul + Sum + Send + Sync,
+    M: MulByTwiddle<In, C::Int, Output = Out>,
 {
     let mut output = vec![zero; C::M];
 
@@ -122,10 +122,10 @@ where
         // We always know that the first column of the Vandermonde matrix
         // consists of 1's.
         let result = params.base_matrix[row][1..].iter().enumerate().fold(
-            Out::from(input[oct_rev_chunk].clone()),
+            Out::from_ref(&input[oct_rev_chunk].clone()),
             |acc, (col, bm_row_col)| {
                 let term = mul_by_twiddle.mul_by_twiddle(
-                    (&input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))]).into(),
+                    &input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))],
                     bm_row_col,
                 );
 
@@ -231,7 +231,13 @@ mod tests {
 
             let params = Radix8PNTTParams::<C>::new();
 
-            let res: Vec<Int<4>> = pntt(&input, Int::<4>::ZERO, &params, MBSMulByTwiddle);
+            let res: Vec<Int<4>> = pntt(
+                &input,
+                Int::<4>::ZERO,
+                &params,
+                MBSMulByTwiddle,
+                MBSMulByTwiddle,
+            );
 
             res.into_iter()
                 .map(|x| {

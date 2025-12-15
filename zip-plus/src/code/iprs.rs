@@ -4,14 +4,19 @@ use num_traits::CheckedAdd;
 use std::{iter::Sum, marker::PhantomData, ops::AddAssign};
 
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
-use itertools::Itertools;
 use num_traits::{CheckedMul, ConstZero, Zero};
-use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
+use zinc_utils::{
+    from_ref::FromRef,
+    mul_by_scalar::{MulByScalar, WideningMulByScalar},
+};
 
 use crate::{
     code::{
         LinearCode,
-        iprs::pntt::radix8::{FieldMulByTwiddle, MBSMulByTwiddle, Radix8PNTTParams},
+        iprs::pntt::radix8::{
+            FieldMulByTwiddle, MBSMulByTwiddle, MulByTwiddle, Radix8PNTTParams,
+            WideningMulByTwiddle,
+        },
     },
     pcs::structs::ZipTypes,
 };
@@ -22,21 +27,21 @@ pub use pntt::radix8::{Config, PNTTConfigF2_16_1};
 /// radix-8 NTT-style recursion with a base Vandermonde matrix sized
 /// `base_len x base_dim` (defaults to 64x32).
 #[derive(Debug, Clone)]
-pub struct IprsCode<Zt: ZipTypes, Config: pntt::radix8::Config> {
+pub struct IprsCode<Zt: ZipTypes, Config: pntt::radix8::Config, MT> {
     pntt_params: Radix8PNTTParams<Config>,
-    _phantom: PhantomData<Zt>,
+    _phantom: PhantomData<(Zt, MT)>,
 }
 
-impl<Zt, Config> IprsCode<Zt, Config>
+impl<Zt, Config, MT> IprsCode<Zt, Config, MT>
 where
     Zt: ZipTypes,
     Config: pntt::radix8::Config,
 {
     /// Encode without modular reduction, purely over the integers.
-    fn encode_inner<In, Out>(&self, row: &[In], zero: Out) -> Vec<Out>
+    fn encode_inner<In, Out, M>(&self, row: &[In], zero: Out, mul_in_by_twiddle: M) -> Vec<Out>
     where
         In: Clone + Send + Sync,
-        Out: From<In>
+        Out: FromRef<In>
             + Clone
             + CheckedAdd
             + for<'a> AddAssign<&'a Out>
@@ -45,7 +50,7 @@ where
             + Send
             + Sync
             + Sum,
-        for<'a> &'a Out: From<&'a In>,
+        M: MulByTwiddle<In, Config::Int, Output = Out>,
     {
         assert_eq!(
             row.len(),
@@ -55,14 +60,20 @@ where
             Config::N
         );
 
-        pntt::radix8::pntt(row, zero, &self.pntt_params, MBSMulByTwiddle)
+        pntt::radix8::pntt(
+            row,
+            zero,
+            &self.pntt_params,
+            mul_in_by_twiddle,
+            MBSMulByTwiddle,
+        )
     }
 
     // Do the encoding but make use of the fact the input
     // and the output are the same field.
     fn encode_inner_f<F, T>(&self, row: &[F]) -> Vec<F>
     where
-        F: FromWithConfig<T>,
+        F: FromWithConfig<T> + FromRef<F>,
         Config::Int: Into<T>,
         T: Clone + Send + Sync,
     {
@@ -77,22 +88,26 @@ where
         let field_cfg = row[0].cfg().clone();
         let zero = F::zero_with_cfg(&field_cfg);
 
+        let mul_by_twiddle = FieldMulByTwiddle::<_, T>::new(field_cfg);
+
         pntt::radix8::pntt(
             row,
             zero,
             &self.pntt_params,
-            FieldMulByTwiddle::<_, T>::new(field_cfg),
+            mul_by_twiddle.clone(),
+            mul_by_twiddle,
         )
     }
 }
 
-impl<Zt: ZipTypes, Config> LinearCode<Zt> for IprsCode<Zt, Config>
+impl<Zt: ZipTypes, Config, MT> LinearCode<Zt> for IprsCode<Zt, Config, MT>
 where
     Zt: ZipTypes,
     Config: pntt::radix8::Config,
     Zt::CombR: for<'a> MulByScalar<&'a Config::Int>,
     Zt::Cw: CheckedAdd + for<'a> MulByScalar<&'a Config::Int>,
     Config::Int: Into<i64>,
+    MT: WideningMulByScalar<Zt::Eval, Config::Int, Output = Zt::Cw>,
 {
     const REPETITION_FACTOR: usize = Config::M / Config::N;
 
@@ -128,12 +143,7 @@ where
             Config::N
         );
 
-        self.encode_inner(
-            &row.iter()
-                .map(<Zt::Cw as FromRef<Zt::Eval>>::from_ref)
-                .collect_vec(),
-            Zt::Cw::zero(),
-        )
+        self.encode_inner(row, Zt::Cw::zero(), WideningMulByTwiddle::<MT>::default())
     }
 
     fn row_len(&self) -> usize {
@@ -145,7 +155,7 @@ where
     }
 
     fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {
-        self.encode_inner(row, Zt::CombR::ZERO)
+        self.encode_inner(row, Zt::CombR::ZERO, MBSMulByTwiddle)
     }
 
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>

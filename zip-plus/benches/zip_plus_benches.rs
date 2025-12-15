@@ -8,7 +8,8 @@ use std::marker::PhantomData;
 use zinc_transcript::traits::ConstTranscribable;
 
 use zinc_poly::univariate::dense::{
-    DensePolyInnerProduct, DensePolynomial, HornerProjection, InnerProductProjection,
+    BinaryPolyWideningMulByScalar, DensePolyInnerProduct, DensePolynomial, HornerProjection,
+    InnerProductProjection,
 };
 use zinc_primality::MillerRabin;
 use zinc_utils::{
@@ -86,8 +87,11 @@ impl RaaConfig for BenchRaaConfig {
 type SomeRaaCode<const D_PLUS_ONE: usize> =
     RaaCode<BenchZipPlusTypes<i32, D_PLUS_ONE>, BenchRaaConfig, 4>;
 
-type SomeIprsCode<const DEPTH: usize, const D_PLUS_ONE: usize> =
-    IprsCode<BenchZipPlusTypes<i128, D_PLUS_ONE>, PNTTConfigF2_16_1<DEPTH>>;
+type SomeIprsCode<const DEPTH: usize, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<i128, D_PLUS_ONE>,
+    PNTTConfigF2_16_1<DEPTH>,
+    BinaryPolyWideningMulByScalar<i128>,
+>;
 
 fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");
@@ -113,9 +117,11 @@ fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
 
     encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<1, _>, 16>(&mut group);
 
-    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<2, _>, 11>(&mut group);
-
-    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<3, _>, 14>(&mut group);
+    // encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<2, _>, 11>(&mut
+    // group);
+    //
+    // encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<3, _>, 14>(&mut
+    // group);
 }
 
 criterion_group!(benches, zip_plus_benchmarks_raa, zip_plus_benchmarks_iprs);
