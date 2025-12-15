@@ -98,9 +98,10 @@ where
 
     #[allow(clippy::arithmetic_side_effects)]
     fn new(poly_size: usize) -> Self {
-        assert!(
-            poly_size == Config::N,
-            "Polynomial size {} does not match expected row length {}",
+        assert_eq!(
+            poly_size % Config::N,
+            0,
+            "Polynomial size {} is not a multiple of row length {}",
             poly_size,
             Config::N
         );
