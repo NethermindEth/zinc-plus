@@ -56,17 +56,39 @@ where
             add!(a, &mul_by_twiddle.mul_by_twiddle(x, &twiddles[twiddle_idx]))
         })
 }
-macro_rules! do_all_butterflies {
-    ($x:expr, $twiddles:expr, $mbt: expr) => {
-        (
-            radix_8_butterfly::<_, _, _, 0>($x, $twiddles, $mbt),
-            radix_8_butterfly::<_, _, _, 1>($x, $twiddles, $mbt),
-            radix_8_butterfly::<_, _, _, 2>($x, $twiddles, $mbt),
-            radix_8_butterfly::<_, _, _, 3>($x, $twiddles, $mbt),
-            radix_8_butterfly::<_, _, _, 4>($x, $twiddles, $mbt),
-            radix_8_butterfly::<_, _, _, 5>($x, $twiddles, $mbt),
-            radix_8_butterfly::<_, _, _, 6>($x, $twiddles, $mbt),
-            radix_8_butterfly::<_, _, _, 7>($x, $twiddles, $mbt),
-        )
-    };
+
+pub(crate) fn apply_radix_8_butterflies<Out, Twiddle, M>(
+    xs: &[Out],
+    ys: [&mut Out; 8],
+    twiddles: &[Twiddle],
+    mul_by_twiddle: M,
+) where
+    Out: Clone + CheckedAdd,
+    M: MulByTwiddle<Out, Twiddle, Output = Out>,
+{
+    for (i, x) in xs[0..8].iter().enumerate() {}
+}
+
+#[cfg(test)]
+mod tests {
+    use itertools::Itertools;
+
+    use crate::code::iprs::{Config, PNTTConfigF2_16_1};
+
+    #[test]
+    fn print_butterflies() {
+        println!("Twiddles {:?}", PNTTConfigF2_16_1::<1>::TWIDDLES);
+        for i in 0..8 {
+            let indices = generate_radix_8_butterfly!(i);
+            println!(
+                "{:?}",
+                indices
+                    .into_iter()
+                    .map(|i| PNTTConfigF2_16_1::<1>::TWIDDLES[i as usize])
+                    .collect_vec()
+            );
+        }
+
+        assert!(false)
+    }
 }
