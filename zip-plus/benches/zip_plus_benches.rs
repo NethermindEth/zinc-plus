@@ -117,7 +117,7 @@ fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
 
     encode_rows::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, _>, 16>(&mut group);
 
-    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, 2, _>, 22>(&mut group);
+    // encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, 2, _>, 22>(&mut group);
 }
 
 criterion_group!(benches, zip_plus_benchmarks_raa, zip_plus_benchmarks_iprs);
