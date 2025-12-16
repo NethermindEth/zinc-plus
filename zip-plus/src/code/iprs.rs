@@ -1,6 +1,6 @@
 mod pntt;
 
-use num_traits::CheckedAdd;
+use num_traits::{CheckedAdd, CheckedSub};
 use std::{iter::Sum, marker::PhantomData, ops::AddAssign};
 
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
@@ -43,7 +43,9 @@ where
         In: Clone + Send + Sync,
         Out: FromRef<In>
             + Clone
+            + std::fmt::Debug
             + CheckedAdd
+            + CheckedSub
             + for<'a> AddAssign<&'a Out>
             + CheckedMul
             + for<'a> MulByScalar<&'a Config::Int>

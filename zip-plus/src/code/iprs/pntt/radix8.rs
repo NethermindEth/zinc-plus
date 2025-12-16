@@ -7,7 +7,8 @@ mod octet_reversal;
 mod params;
 
 use ark_std::{cfg_chunks_mut, cfg_iter_mut};
-use num_traits::{CheckedAdd, CheckedMul};
+use itertools::Itertools;
+use num_traits::{CheckedAdd, CheckedMul, CheckedSub};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::{array, iter::Sum, mem::MaybeUninit};
@@ -30,7 +31,15 @@ pub(crate) fn pntt<In, Out, C, MI, MO>(
 where
     C: Config,
     In: Clone + Send + Sync,
-    Out: Clone + FromRef<In> + CheckedAdd + CheckedMul + Send + Sync + Sum,
+    Out: Clone
+        + std::fmt::Debug
+        + FromRef<In>
+        + CheckedAdd
+        + CheckedSub
+        + CheckedMul
+        + Send
+        + Sync
+        + Sum,
     MI: MulByTwiddle<In, C::Int, Output = Out>,
     MO: MulByTwiddle<Out, C::Int, Output = Out>,
 {
@@ -56,7 +65,7 @@ where
 fn combine_stages<Out, C, M>(out: &mut [Out], params: &Radix8PNTTParams<C>, mul_by_twiddle: M)
 where
     C: Config,
-    Out: Clone + CheckedAdd + CheckedMul + Send + Sync,
+    Out: Clone + std::fmt::Debug + CheckedAdd + CheckedSub + CheckedMul + Send + Sync,
     M: MulByTwiddle<Out, C::Int, Output = Out>,
 {
     for k in 0..C::DEPTH {
@@ -75,16 +84,25 @@ where
                 });
 
                 // Perform butterflies.
-                (
-                    chunk[i],
-                    chunk[sub_chunk_length + i],
-                    chunk[2 * sub_chunk_length + i],
-                    chunk[3 * sub_chunk_length + i],
-                    chunk[4 * sub_chunk_length + i],
-                    chunk[5 * sub_chunk_length + i],
-                    chunk[6 * sub_chunk_length + i],
-                    chunk[7 * sub_chunk_length + i],
-                ) = do_all_butterflies!(&subresults, &(C::TWIDDLES), mul_by_twiddle.clone());
+                // (
+                //     chunk[i],
+                //     chunk[sub_chunk_length + i],
+                //     chunk[2 * sub_chunk_length + i],
+                //     chunk[3 * sub_chunk_length + i],
+                //     chunk[4 * sub_chunk_length + i],
+                //     chunk[5 * sub_chunk_length + i],
+                //     chunk[6 * sub_chunk_length + i],
+                //     chunk[7 * sub_chunk_length + i],
+                // ) = do_all_butterflies!(&subresults, &(C::TWIDDLES), mul_by_twiddle.clone());
+                //
+                let ys: [&mut Out; 8] = chunk
+                    .chunks_mut(sub_chunk_length)
+                    .map(|mut subchunk| &mut subchunk[i])
+                    .collect_vec()
+                    .try_into()
+                    .expect("");
+
+                apply_radix_8_butterflies(&subresults, ys, &(C::TWIDDLES), mul_by_twiddle.clone());
             }
         });
     }
