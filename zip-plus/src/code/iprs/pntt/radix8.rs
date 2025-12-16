@@ -83,18 +83,6 @@ where
                     )
                 });
 
-                // Perform butterflies.
-                // (
-                //     chunk[i],
-                //     chunk[sub_chunk_length + i],
-                //     chunk[2 * sub_chunk_length + i],
-                //     chunk[3 * sub_chunk_length + i],
-                //     chunk[4 * sub_chunk_length + i],
-                //     chunk[5 * sub_chunk_length + i],
-                //     chunk[6 * sub_chunk_length + i],
-                //     chunk[7 * sub_chunk_length + i],
-                // ) = do_all_butterflies!(&subresults, &(C::TWIDDLES), mul_by_twiddle.clone());
-                //
                 let ys: [&mut Out; 8] = chunk
                     .chunks_mut(sub_chunk_length)
                     .map(|mut subchunk| &mut subchunk[i])
