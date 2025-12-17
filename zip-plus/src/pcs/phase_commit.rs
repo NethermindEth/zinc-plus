@@ -207,8 +207,7 @@ mod tests {
     use itertools::Itertools;
     use num_traits::Zero;
     use rand::{Rng, rng};
-    use zinc_poly::{mle::DenseMultilinearExtension, univariate::dense::DensePolynomial};
-    use zinc_utils::projection_to_field::SimpleProjection;
+    use zinc_poly::{mle::DenseMultilinearExtension, univariate::binary::BinaryPoly};
 
     const INT_LIMBS: usize = U64::LIMBS;
 
@@ -482,9 +481,9 @@ mod tests {
 
         // Create a polynomial with 2 variables and 4 evaluations
         let evaluations = vec![
-            DensePolynomial::new(vec![Boolean::FALSE, Boolean::FALSE]),
-            DensePolynomial::new(vec![Boolean::FALSE, Boolean::TRUE]),
-            DensePolynomial::new(vec![Boolean::TRUE, Boolean::FALSE]),
+            BinaryPoly::new(vec![Boolean::FALSE, Boolean::FALSE]),
+            BinaryPoly::new(vec![Boolean::FALSE, Boolean::TRUE]),
+            BinaryPoly::new(vec![Boolean::TRUE, Boolean::FALSE]),
         ];
         let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations, Zero::zero());
         let encoded = TestPolyZip::encode_rows(&pp, pp.linear_code.row_len(), &poly.evaluations);
@@ -642,9 +641,7 @@ mod tests {
             expected_test_transcript_size_bytes
         );
 
-        let (_, proof) =
-            TestZip::evaluate::<F, SimpleProjection<_>>(&param, &mle, &point, test_transcript)
-                .unwrap();
+        let (_, proof) = TestZip::evaluate::<F>(&param, &mle, &point, test_transcript).unwrap();
         let actual_proof_size_bytes = proof.0.len();
         let expected_proof_size_bytes = calculate_expected_proof_size_bytes(&param);
         assert_eq!(actual_proof_size_bytes, expected_proof_size_bytes);

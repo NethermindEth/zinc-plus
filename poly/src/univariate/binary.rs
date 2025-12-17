@@ -2,21 +2,40 @@ use crate::{
     ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
     univariate::dense::DensePolynomial,
 };
-use crypto_primitives::{Semiring, semiring::boolean::Boolean};
+use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, ConstZero, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
+    borrow::Borrow,
     fmt::Display,
     hash::Hash,
     iter::{Product, Sum},
+    marker::PhantomData,
     ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
 };
 use zinc_transcript::traits::ConstTranscribable;
-use zinc_utils::{add, from_ref::FromRef, mul, named::Named};
+use zinc_utils::{
+    add,
+    from_ref::FromRef,
+    inner_product::{
+        ForceUncheckedInnerProduct, InnerProduct, InnerProductError, InnerProductUnchecked,
+    },
+    mul,
+    mul_by_scalar::WideningMulByScalar,
+    named::Named,
+    projectable_to_field::ProjectableToField,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct BinaryPoly<const DEGREE_PLUS_ONE: usize>(DensePolynomial<Boolean, DEGREE_PLUS_ONE>);
+
+impl<const DEGREE_PLUS_ONE: usize> BinaryPoly<DEGREE_PLUS_ONE> {
+    #[inline(always)]
+    pub const fn inner(&self) -> &DensePolynomial<Boolean, DEGREE_PLUS_ONE> {
+        &self.0
+    }
+}
 
 impl<const DEGREE_PLUS_ONE: usize> AsRef<DensePolynomial<Boolean, DEGREE_PLUS_ONE>>
     for BinaryPoly<DEGREE_PLUS_ONE>
@@ -349,6 +368,132 @@ impl<const DEGREE_PLUS_ONE: usize> From<&BinaryPoly<DEGREE_PLUS_ONE>>
     #[inline(always)]
     fn from(value: &BinaryPoly<DEGREE_PLUS_ONE>) -> Self {
         Self::from_ref(value)
+    }
+}
+
+impl<Rhs: Clone, Out: From<Rhs> + CheckedAdd, const DEGREE_PLUS_ONE: usize> InnerProduct<Rhs, Out>
+    for BinaryPoly<DEGREE_PLUS_ONE>
+{
+    fn inner_product(
+        &self,
+        rhs: &[Rhs],
+        zero: Out,
+    ) -> Result<Out, zinc_utils::inner_product::InnerProductError> {
+        if self.0.coeffs.len() != rhs.as_ref().len() {
+            return Err(InnerProductError::LengthMismatch {
+                lhs: self.0.coeffs.len(),
+                rhs: rhs.as_ref().len(),
+            });
+        }
+
+        (0..self.0.coeffs.len())
+            .filter(|&i| self.0.coeffs[i].into_inner())
+            .try_fold(zero, |acc, i| {
+                acc.checked_add(&Out::from(rhs[i].clone()))
+                    .ok_or(InnerProductError::Overflow)
+            })
+    }
+}
+
+impl<Rhs: Clone, Out: From<Rhs> + CheckedAdd, const DEGREE_PLUS_ONE: usize> InnerProduct<Rhs, Out>
+    for &BinaryPoly<DEGREE_PLUS_ONE>
+{
+    #[inline(always)]
+    fn inner_product(&self, rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
+        (*self).inner_product(rhs, zero)
+    }
+}
+
+impl<Rhs: Clone, Out: From<Rhs> + for<'a> Add<&'a Out, Output = Out>, const DEGREE_PLUS_ONE: usize>
+    InnerProductUnchecked<Rhs, Out> for BinaryPoly<DEGREE_PLUS_ONE>
+{
+    #[allow(clippy::arithmetic_side_effects)] // by design
+    fn inner_product_unchecked(
+        &self,
+        rhs: &[Rhs],
+        zero: Out,
+    ) -> Result<Out, zinc_utils::inner_product::InnerProductError> {
+        if self.0.coeffs.len() != rhs.as_ref().len() {
+            return Err(InnerProductError::LengthMismatch {
+                lhs: self.0.coeffs.len(),
+                rhs: rhs.as_ref().len(),
+            });
+        }
+
+        Ok((0..self.0.coeffs.len())
+            .filter(|&i| self.0.coeffs[i].into_inner())
+            .fold(zero, |acc, i| acc + (&Out::from(rhs[i].clone()))))
+    }
+}
+
+impl<Rhs: Clone, Out: From<Rhs> + for<'b> Add<&'b Out, Output = Out>, const DEGREE_PLUS_ONE: usize>
+    InnerProductUnchecked<Rhs, Out> for &BinaryPoly<DEGREE_PLUS_ONE>
+{
+    #[inline(always)]
+    fn inner_product_unchecked(&self, rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
+        (*self).inner_product_unchecked(rhs, zero)
+    }
+}
+
+impl<F, const DEGREE_PLUS_ONE: usize> ProjectableToField<F> for BinaryPoly<DEGREE_PLUS_ONE>
+where
+    F: PrimeField + 'static,
+{
+    #![allow(clippy::arithmetic_side_effects)] // False alert, field operations are safe
+    fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static {
+        let field_cfg = sampled_value.cfg().clone();
+        let r_powers = {
+            // Preprocess powers prior to inner product.
+            let mut r_powers = Vec::with_capacity(DEGREE_PLUS_ONE);
+
+            let mut curr = F::one_with_cfg(&field_cfg);
+            r_powers.push(curr.clone());
+
+            for _ in 1..DEGREE_PLUS_ONE {
+                curr *= sampled_value;
+                r_powers.push(curr.clone());
+            }
+
+            r_powers
+        };
+
+        move |poly: &BinaryPoly<DEGREE_PLUS_ONE>| {
+            poly.inner_product_unchecked(&r_powers, F::zero_with_cfg(&field_cfg))
+                .expect("Failed to evaluate polynomial")
+        }
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> Borrow<ForceUncheckedInnerProduct<BinaryPoly<DEGREE_PLUS_ONE>>>
+    for BinaryPoly<DEGREE_PLUS_ONE>
+{
+    #[inline(always)]
+    fn borrow(&self) -> &ForceUncheckedInnerProduct<BinaryPoly<DEGREE_PLUS_ONE>> {
+        ForceUncheckedInnerProduct::new_ref(self)
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct BinaryPolyWideningMulByScalar<Output>(PhantomData<Output>);
+
+impl<Rhs, Output, const DEGREE_PLUS_ONE: usize>
+    WideningMulByScalar<BinaryPoly<DEGREE_PLUS_ONE>, Rhs> for BinaryPolyWideningMulByScalar<Output>
+where
+    Rhs: Copy,
+    Output: From<Rhs> + Send + Sync + Default + Copy + Zero,
+{
+    type Output = DensePolynomial<Output, DEGREE_PLUS_ONE>;
+
+    fn mul_by_scalar_widen(lhs: &BinaryPoly<DEGREE_PLUS_ONE>, rhs: &Rhs) -> Self::Output {
+        let mut coeffs: [Output; DEGREE_PLUS_ONE] = [Output::zero(); DEGREE_PLUS_ONE];
+
+        coeffs.iter_mut().enumerate().for_each(|(i, out)| {
+            if lhs.0.coeffs[i].inner() {
+                *out = (*rhs).into();
+            }
+        });
+
+        DensePolynomial { coeffs }
     }
 }
 

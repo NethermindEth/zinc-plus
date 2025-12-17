@@ -19,27 +19,19 @@ use crate::{
     pcs_transcript::PcsTranscript,
 };
 use crypto_primitives::{
-    FromWithConfig, IntSemiring, IntoWithConfig, PrimeField, boolean::Boolean,
-    crypto_bigint_int::Int, crypto_bigint_uint::Uint,
+    FromWithConfig, IntSemiring, IntoWithConfig, PrimeField, crypto_bigint_int::Int,
+    crypto_bigint_uint::Uint,
 };
 use itertools::Itertools;
 use num_traits::Zero;
 use zinc_poly::{
     mle::DenseMultilinearExtension,
-    univariate::dense::{
-        DensePolyInnerProduct, DensePolynomial, HornerProjection, InnerProductProjection,
-    },
+    univariate::{binary::BinaryPoly, dense::DensePolynomial},
 };
 use zinc_primality::MillerRabin;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
-    from_ref::FromRef,
-    inner_product::{
-        BooleanInnerProductCheckedAdd, BooleanInnerProductUncheckedAdd, MBSInnerProductChecked,
-        ScalarProduct,
-    },
-    mul_by_scalar::MulByScalar,
-    projection_to_field::{ProjectionToField, SimpleProjection},
+    from_ref::FromRef, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
 };
 
 const REPETITION_FACTOR: usize = 4;
@@ -63,8 +55,8 @@ impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N
     type Pt = Int<N>;
     type CombR = Int<M>;
     type Comb = Self::CombR;
-    type EvalDotChal = ScalarProduct;
-    type CombDotChal = ScalarProduct;
+    type EvalDotChal = Self::Eval;
+    type CombDotChal = Self::Comb;
 }
 
 pub struct TestPolyZipTypes<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> {}
@@ -72,7 +64,7 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
     for TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>
 {
     const NUM_COLUMN_OPENINGS: usize = 650;
-    type Eval = DensePolynomial<Boolean, DEGREE_PLUS_ONE>;
+    type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
     type Cw = DensePolynomial<i32, DEGREE_PLUS_ONE>;
     type Fmod = Uint<K>;
     type PrimeTest = MillerRabin;
@@ -80,20 +72,8 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
     type Pt = i128;
     type CombR = Int<M>;
     type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
-    type EvalDotChal = DensePolyInnerProduct<
-        Boolean,
-        Self::Chal,
-        Self::CombR,
-        BooleanInnerProductCheckedAdd,
-        DEGREE_PLUS_ONE,
-    >;
-    type CombDotChal = DensePolyInnerProduct<
-        Self::CombR,
-        Self::Chal,
-        Self::CombR,
-        MBSInnerProductChecked,
-        DEGREE_PLUS_ONE,
-    >;
+    type EvalDotChal = Self::Eval;
+    type CombDotChal = Self::Comb;
 }
 
 /// Helper function to set up common parameters for tests.
@@ -127,7 +107,7 @@ pub fn setup_poly_test_params<const K: usize, const M: usize, const DEGREE_PLUS_
             .collect_vec();
         eval_coeffs
             .chunks_exact(DEGREE_PLUS_ONE - 1)
-            .map(DensePolynomial::new)
+            .map(BinaryPoly::new)
             .collect_vec()
     })
 }
@@ -170,12 +150,12 @@ where
         + for<'a> FromWithConfig<&'a <TestZipTypes<N, K, M> as ZipTypes>::CombR>
         + for<'a> MulByScalar<&'a F>,
     F::Inner: FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod> + Transcribable,
+    <TestZipTypes<N, K, M> as ZipTypes>::Eval: ProjectableToField<F>,
+    <TestZipTypes<N, K, M> as ZipTypes>::Comb: ProjectableToField<F>,
 {
-    setup_full_protocol_inner::<_, _, _, SimpleProjection<_>, SimpleProjection<_>, N>(
-        num_vars,
-        setup_test_params,
-        || (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect(),
-    )
+    setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_test_params, || {
+        (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect()
+    })
 }
 
 pub fn setup_full_protocol_poly<
@@ -204,19 +184,12 @@ where
         + 'static,
     F::Inner: FromRef<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod> + Transcribable,
 {
-    setup_full_protocol_inner::<
-        _,
-        _,
-        _,
-        InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
-        HornerProjection<_, _>,
-        N,
-    >(num_vars, setup_poly_test_params, || {
+    setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_poly_test_params, || {
         (0..num_vars).map(|i| i as i128 + 2).collect()
     })
 }
 
-fn setup_full_protocol_inner<Zt, Lc, F, PEval, PComb, const N: usize>(
+fn setup_full_protocol_inner<Zt, Lc, F, const N: usize>(
     num_vars: usize,
     setup: impl FnOnce(usize) -> (ZipPlusParams<Zt, Lc>, DenseMultilinearExtension<Zt::Eval>),
     prepare_evaluation_point: impl FnOnce() -> Vec<Zt::Pt>,
@@ -236,8 +209,8 @@ where
         + for<'a> MulByScalar<&'a F>,
     F::Inner: FromRef<Zt::Fmod> + Transcribable,
     Zt::Comb: for<'a> MulByScalar<&'a Zt::Pt>,
-    PEval: ProjectionToField<Zt::Eval, F>,
-    PComb: ProjectionToField<Zt::Comb, F>,
+    Zt::Eval: ProjectableToField<F>,
+    Zt::Comb: ProjectableToField<F>,
 {
     let (pp, poly) = setup(num_vars);
 
@@ -260,7 +233,7 @@ where
         (field_cfg, projecting_element)
     };
 
-    let (eval_f, proof) = ZipPlus::evaluate::<_, PEval>(&pp, &poly, &point, transcript).unwrap();
+    let (eval_f, proof) = ZipPlus::evaluate(&pp, &poly, &point, transcript).unwrap();
 
     // Verify the evaluation is done correctly
     {
@@ -276,7 +249,7 @@ where
         let expected_eval = poly
             .evaluate(&point, Zero::zero())
             .expect("failed to evaluate polynomial");
-        let project = PComb::prepare_projection(&projecting_element);
+        let project = Zt::Comb::prepare_projection(&projecting_element);
         assert_eq!(eval_f, project(&expected_eval));
     }
 

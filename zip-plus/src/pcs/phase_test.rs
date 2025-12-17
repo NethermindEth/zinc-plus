@@ -1,3 +1,5 @@
+use std::borrow::Borrow;
+
 use crate::{
     ZipError,
     code::LinearCode,
@@ -52,7 +54,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             let evals: Vec<_> = poly
                 .evaluations
                 .iter()
-                .map(|p| Zt::EvalDotChal::inner_product(p, &alphas, Zt::CombR::ZERO))
+                .map(|p| p.borrow().inner_product(&alphas, Zt::CombR::ZERO))
                 .try_collect()?;
 
             // u' in the Zinc paper

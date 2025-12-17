@@ -14,14 +14,12 @@ use itertools::Itertools;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
-    from_ref::FromRef,
-    inner_product::{InnerProduct, MBSInnerProductUnchecked},
-    mul_by_scalar::MulByScalar,
-    projection_to_field::ProjectionToField,
+    from_ref::FromRef, inner_product::InnerProductUnchecked, mul_by_scalar::MulByScalar,
+    projectable_to_field::ProjectableToField,
 };
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
-    pub fn evaluate<F, P>(
+    pub fn evaluate<F>(
         pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
         point: &[Zt::Pt],
@@ -33,7 +31,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + for<'a> FromWithConfig<&'a Zt::Pt>
             + for<'a> MulByScalar<&'a F>,
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
-        P: ProjectionToField<Zt::Eval, F>,
+        Zt::Eval: ProjectableToField<F>,
     {
         validate_input::<Zt, Lc, _>("evaluate", pp.num_vars, [poly], [point])?;
 
@@ -59,7 +57,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             .collect_vec();
         let (q_0, q_1) = point_to_tensor(num_rows, &point, &field_cfg)?;
 
-        let project = P::prepare_projection(&projecting_element);
+        let project = Zt::Eval::prepare_projection(&projecting_element);
         let evaluations: Vec<F> = poly.evaluations.iter().map(project).collect_vec();
 
         let q_0_combined_row = if num_rows > 1 {
@@ -72,11 +70,9 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         };
 
         transcript.write_field_elements(&q_0_combined_row)?;
-        let eval_f = MBSInnerProductUnchecked::inner_product(
-            &q_0_combined_row,
-            &q_1,
-            F::zero_with_cfg(&field_cfg),
-        )?;
+        // It is safe to use unchecked inner product since we are in a field.
+        let eval_f =
+            q_0_combined_row.inner_product_unchecked(&q_1, F::zero_with_cfg(&field_cfg))?;
         Ok((eval_f, transcript.into()))
     }
 }

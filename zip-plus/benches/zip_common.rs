@@ -19,10 +19,7 @@ use num_traits::One;
 use rand::{distr::StandardUniform, prelude::*};
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
 use zinc_transcript::traits::ConstTranscribable;
-use zinc_utils::{
-    from_ref::FromRef, inner_product::MBSInnerProductChecked, named::Named,
-    projection_to_field::ProjectionToField,
-};
+use zinc_utils::{from_ref::FromRef, named::Named, projectable_to_field::ProjectableToField};
 use zip_plus::{
     code::LinearCode,
     merkle::MerkleTree,
@@ -32,13 +29,13 @@ use zip_plus::{
 const INT_LIMBS: usize = U64::LIMBS;
 type F = MontyField<{ INT_LIMBS * 4 }>;
 
-pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, PEval, PCw>(group: &mut BenchmarkGroup<WallTime>)
+pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>>(group: &mut BenchmarkGroup<WallTime>)
 where
     StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
     F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
     <F as Field>::Inner: FromRef<Zt::Fmod>,
-    PEval: ProjectionToField<Zt::Eval, F>,
-    PCw: ProjectionToField<Zt::Cw, F>,
+    Zt::Eval: ProjectableToField<F>,
+    Zt::Cw: ProjectableToField<F>,
 {
     encode_rows::<Zt, Lc, 12>(group);
     encode_rows::<Zt, Lc, 13>(group);
@@ -69,17 +66,17 @@ where
     test::<Zt, Lc, 15>(group);
     test::<Zt, Lc, 16>(group);
 
-    evaluate::<Zt, Lc, PEval, 12>(group);
-    evaluate::<Zt, Lc, PEval, 13>(group);
-    evaluate::<Zt, Lc, PEval, 14>(group);
-    evaluate::<Zt, Lc, PEval, 15>(group);
-    evaluate::<Zt, Lc, PEval, 16>(group);
+    evaluate::<Zt, Lc, 12>(group);
+    evaluate::<Zt, Lc, 13>(group);
+    evaluate::<Zt, Lc, 14>(group);
+    evaluate::<Zt, Lc, 15>(group);
+    evaluate::<Zt, Lc, 16>(group);
 
-    verify::<Zt, Lc, PEval, PCw, 12>(group);
-    verify::<Zt, Lc, PEval, PCw, 13>(group);
-    verify::<Zt, Lc, PEval, PCw, 14>(group);
-    verify::<Zt, Lc, PEval, PCw, 15>(group);
-    verify::<Zt, Lc, PEval, PCw, 16>(group);
+    verify::<Zt, Lc, 12>(group);
+    verify::<Zt, Lc, 13>(group);
+    verify::<Zt, Lc, 14>(group);
+    verify::<Zt, Lc, 15>(group);
+    verify::<Zt, Lc, 16>(group);
 }
 
 pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
@@ -222,13 +219,13 @@ where
     );
 }
 
-pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, PEval, const P: usize>(
+pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
     F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
     <F as Field>::Inner: FromRef<Zt::Fmod>,
-    PEval: ProjectionToField<Zt::Eval, F>,
+    Zt::Eval: ProjectableToField<F>,
 {
     let mut rng = ThreadRng::default();
 
@@ -256,9 +253,8 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, PEval, const P: usize>(
                 for _ in 0..iters {
                     let proof = test_transcript.clone();
                     let timer = Instant::now();
-                    let (eval_f, proof) =
-                        ZipPlus::evaluate::<F, PEval>(&params, &poly, &point, proof)
-                            .expect("Evaluation phase failed");
+                    let (eval_f, proof) = ZipPlus::evaluate::<F>(&params, &poly, &point, proof)
+                        .expect("Evaluation phase failed");
                     total_duration += timer.elapsed();
                     black_box((eval_f, proof));
                 }
@@ -268,14 +264,14 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, PEval, const P: usize>(
     );
 }
 
-pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, PEval, PCw, const P: usize>(
+pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
     F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
     <F as Field>::Inner: FromRef<Zt::Fmod>,
-    PEval: ProjectionToField<Zt::Eval, F>,
-    PCw: ProjectionToField<Zt::Cw, F>,
+    Zt::Eval: ProjectableToField<F>,
+    Zt::Cw: ProjectableToField<F>,
 {
     let mut rng = ThreadRng::default();
     let poly_size = 1 << P;
@@ -287,7 +283,7 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, PEval, PCw, const P: usize>(
     let point = vec![Zt::Pt::one(); P];
 
     let test_transcript = ZipPlus::test(&params, &poly, &data).expect("Test phase failed");
-    let (eval_f, proof) = ZipPlus::evaluate::<F, PEval>(&params, &poly, &point, test_transcript)
+    let (eval_f, proof) = ZipPlus::evaluate::<F>(&params, &poly, &point, test_transcript)
         .expect("Evaluation phase failed");
     let field_cfg = *eval_f.cfg();
     let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
@@ -302,14 +298,8 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, PEval, PCw, const P: usize>(
         ),
         |b| {
             b.iter(|| {
-                ZipPlus::verify::<_, PCw, MBSInnerProductChecked>(
-                    &params,
-                    &commitment,
-                    &point_f,
-                    &eval_f,
-                    &proof,
-                )
-                .expect("Verification failed");
+                ZipPlus::verify(&params, &commitment, &point_f, &eval_f, &proof)
+                    .expect("Verification failed");
             })
         },
     );
