@@ -368,7 +368,7 @@ impl<R: Ring + FixedSemiring, const DEGREE_PLUS_ONE: usize> Ring
 {
 }
 
-impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Distribution<DensePolynomial<R, DEGREE_PLUS_ONE>>
+impl<R, const DEGREE_PLUS_ONE: usize> Distribution<DensePolynomial<R, DEGREE_PLUS_ONE>>
     for StandardUniform
 where
     StandardUniform: Distribution<R>,
