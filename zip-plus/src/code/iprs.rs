@@ -1,13 +1,5 @@
 mod pntt;
 
-use num_traits::CheckedAdd;
-use std::{iter::Sum, marker::PhantomData, ops::AddAssign};
-
-use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
-use itertools::Itertools;
-use num_traits::{CheckedMul, ConstZero, Zero};
-use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
-
 use crate::{
     code::{
         LinearCode,
@@ -15,6 +7,11 @@ use crate::{
     },
     pcs::structs::ZipTypes,
 };
+use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
+use itertools::Itertools;
+use num_traits::{CheckedAdd, CheckedMul, ConstZero, Zero};
+use std::{iter::Sum, marker::PhantomData, ops::AddAssign};
+use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 
 pub use pntt::radix8::{Config, PnttConfigF2_16_1};
 
