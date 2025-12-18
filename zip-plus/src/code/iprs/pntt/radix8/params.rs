@@ -32,9 +32,9 @@ pub trait Config: Copy + Send + Sync {
     fn field_to_int_normalized(x: Self::Field) -> Self::Int;
 }
 
-#[derive(Clone, Debug)]
 // Precomputed parameters needed for
 // pseudo NTT algorithm.
+#[derive(Clone, Debug)]
 pub struct Radix8PNTTParams<C: Config> {
     /// The base matrix of the pseudo NTT.
     pub base_matrix: Vec<Vec<C::Int>>,
@@ -81,11 +81,11 @@ impl<C: Config> Radix8PNTTParams<C> {
     }
 }
 
-#[derive(Clone, Copy)]
 /// Pseudo NTT configuration derived from
 /// the field `Fp` for `p = 2^16 + 1`.
 ///
 /// Supports `DEPTH` up to `3`.
+#[derive(Clone, Copy)]
 pub struct PNTTConfigF2_16_1<const DEPTH: usize>;
 
 pub(crate) mod fq {
@@ -115,10 +115,10 @@ impl<const DEPTH: usize> Config for PNTTConfigF2_16_1<DEPTH> {
     }
 }
 
-#[allow(clippy::arithmetic_side_effects)]
-#[allow(clippy::cast_possible_wrap)]
 /// Field normalization for at most 32-bit fields.
 /// Might have unpleasant overflows if used for bigger fields.
+#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::cast_possible_wrap)]
 fn normalize_field_element(x: u64, p: u64) -> i64 {
     if x >= (p - 1) / 2 {
         x as i64 - p as i64

@@ -10,9 +10,9 @@ pub(crate) trait MulByTwiddle<Lhs, Twiddle>: Clone + Send + Sync {
     fn mul_by_twiddle(&self, lhs: &Lhs, twiddle: &Twiddle) -> Lhs;
 }
 
-#[derive(Clone, Copy, Default)]
 /// The twiddle multiplication that
 /// uses the `MulByScalar` implementation.
+#[derive(Clone, Copy, Default)]
 pub(crate) struct MBSMulByTwiddle;
 
 impl<Lhs, Twiddle> MulByTwiddle<Lhs, Twiddle> for MBSMulByTwiddle

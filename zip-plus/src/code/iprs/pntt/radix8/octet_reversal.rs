@@ -1,8 +1,8 @@
-#[allow(clippy::arithmetic_side_effects)]
 /// Reverse octets (triples of consecutive binary digits)
 /// in a given number `x`. The total number of octets
 /// constituting the number is also provided as the argument
 /// `num_octets`.
+#[allow(clippy::arithmetic_side_effects)]
 pub(crate) fn octet_reversal(x: usize, num_octets: usize) -> usize {
     assert_ne!(num_octets, 0, "The number of octets cannot be zero");
 

@@ -49,10 +49,10 @@ where
     output
 }
 
-#[allow(clippy::arithmetic_side_effects)]
 /// Performs the butterfly steps of the radix-8 pseudo NTT algorithm.
 /// Assumes `out` contains the result of multiplications of the base chunks
 /// with the `base_matrix`.
+#[allow(clippy::arithmetic_side_effects)]
 fn combine_stages<Out, C, M>(out: &mut [Out], params: &Radix8PNTTParams<C>, mul_by_twiddle: M)
 where
     C: Config,
@@ -90,8 +90,8 @@ where
     }
 }
 
-#[allow(clippy::arithmetic_side_effects)]
 /// Allocates the output vector and performs base layer multiplications.
+#[allow(clippy::arithmetic_side_effects)]
 fn base_multiply_into_output<In, Out, C, M>(
     input: &[In],
     params: &Radix8PNTTParams<C>,
