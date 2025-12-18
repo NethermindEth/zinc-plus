@@ -7,7 +7,7 @@ mod octet_reversal;
 
 pub mod params;
 
-use ark_std::{cfg_chunks_mut, cfg_iter_mut};
+use ark_std::{cfg_chunks_mut, cfg_into_iter};
 use num_traits::{CheckedAdd, CheckedMul};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -21,12 +21,7 @@ use params::*;
 pub(crate) use mul_by_twiddle::*;
 
 /// The main entrypoint of the radix-8 pseudo NTT algorithm.
-pub(crate) fn pntt<R, C, M>(
-    input: &[R],
-    zero: R,
-    params: &Radix8PnttParams<C>,
-    mul_by_twiddle: M,
-) -> Vec<R>
+pub(crate) fn pntt<R, C, M>(input: &[R], params: &Radix8PnttParams<C>, mul_by_twiddle: M) -> Vec<R>
 where
     C: Config,
     R: Clone + CheckedAdd + CheckedMul + Send + Sync + Sum,
@@ -40,7 +35,7 @@ where
         input.len()
     );
 
-    let mut output = base_multiply_into_output(input, params, zero, mul_by_twiddle.clone());
+    let mut output = base_multiply_into_output(input, params, mul_by_twiddle.clone());
 
     combine_stages(&mut output, params, mul_by_twiddle);
 
@@ -109,7 +104,6 @@ where
 fn base_multiply_into_output<R, C, M>(
     input: &[R],
     params: &Radix8PnttParams<C>,
-    zero: R,
     mul_by_twiddle: M,
 ) -> Vec<R>
 where
@@ -117,38 +111,34 @@ where
     R: Clone + CheckedAdd + CheckedMul + Sum + Send + Sync,
     M: MulByTwiddle<R, C::Int>,
 {
-    let mut output = vec![zero; C::OUTPUT_LEN];
+    cfg_into_iter!(0..C::OUTPUT_LEN)
+        .map(|i| {
+            let chunk = i / C::BASE_DIM;
+            let row = i % C::BASE_DIM;
 
-    cfg_iter_mut!(output).enumerate().for_each(|(i, out)| {
-        let chunk = i / C::BASE_DIM;
-        let row = i % C::BASE_DIM;
+            // If we'd done all the divide steps of the NTT recursively
+            // we'd end up with chunks of original indices
+            // combined together according to their `3 * C::DEPTH`
+            // least significant bits. Moreover, the value of these
+            // least significant bits correspond to the number of the chunk
+            // in octet-reverse order.
+            let oct_rev_chunk = octet_reversal(chunk, C::DEPTH);
 
-        // If we'd done all the divide steps of the NTT recursively
-        // we'd end up with chunks of original indices
-        // combined together according to their `3 * C::DEPTH`
-        // least significant bits. Moreover, the value of these
-        // least significant bits correspond to the number of the chunk
-        // in octet-reverse order.
-        let oct_rev_chunk = octet_reversal(chunk, C::DEPTH);
+            // We always know that the first column of the Vandermonde matrix
+            // consists of 1's.
+            params.base_matrix[row][1..].iter().enumerate().fold(
+                input[oct_rev_chunk].clone(),
+                |acc, (col, bm_row_col)| {
+                    let term = mul_by_twiddle.mul_by_twiddle(
+                        &input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))],
+                        bm_row_col,
+                    );
 
-        // We always know that the first column of the Vandermonde matrix
-        // consists of 1's.
-        let result = params.base_matrix[row][1..].iter().enumerate().fold(
-            input[oct_rev_chunk].clone(),
-            |acc, (col, bm_row_col)| {
-                let term = mul_by_twiddle.mul_by_twiddle(
-                    &input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))],
-                    bm_row_col,
-                );
-
-                add!(acc, &term)
-            },
-        );
-
-        *out = result;
-    });
-
-    output
+                    add!(acc, &term)
+                },
+            )
+        })
+        .collect()
 }
 
 // TODO: make unchecked versions of the above.
@@ -160,7 +150,6 @@ mod tests {
     use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
     use crypto_primitives::crypto_bigint_int::Int;
     use itertools::Itertools;
-    use num_traits::ConstZero;
     use octet_reversal::octet_reversal;
     use zinc_utils::mul_by_scalar::MulByScalar;
 
@@ -198,7 +187,7 @@ mod tests {
         let our_res = {
             let params = Radix8PnttParams::<C>::new();
 
-            let output = base_multiply_into_output(&input, &params, 0, MBSMulByTwiddle);
+            let output = base_multiply_into_output(&input, &params, MBSMulByTwiddle);
 
             output.into_iter().map(C::Field::from).collect_vec()
         };
@@ -243,7 +232,7 @@ mod tests {
 
             let params = Radix8PnttParams::<C>::new();
 
-            let res: Vec<Int<4>> = pntt(&input, Int::<4>::ZERO, &params, MBSMulByTwiddle);
+            let res: Vec<Int<4>> = pntt(&input, &params, MBSMulByTwiddle);
 
             res.into_iter()
                 .map(|x| {

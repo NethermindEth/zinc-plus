@@ -9,7 +9,7 @@ use crate::{
 };
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use itertools::Itertools;
-use num_traits::{CheckedAdd, CheckedMul, ConstZero, Zero};
+use num_traits::{CheckedAdd, CheckedMul};
 use std::{iter::Sum, marker::PhantomData, ops::AddAssign};
 use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 
@@ -30,7 +30,7 @@ where
     Config: pntt::radix8::params::Config,
 {
     /// Encode without modular reduction, purely over the integers.
-    fn encode_inner<R>(&self, row: &[R], zero: R) -> Vec<R>
+    fn encode_inner<R>(&self, row: &[R]) -> Vec<R>
     where
         R: CheckedAdd
             + for<'a> AddAssign<&'a R>
@@ -49,7 +49,7 @@ where
             Config::INPUT_LEN
         );
 
-        pntt::radix8::pntt(row, zero, &self.pntt_params, MBSMulByTwiddle)
+        pntt::radix8::pntt(row, &self.pntt_params, MBSMulByTwiddle)
     }
 
     // Do the encoding but make use of the fact
@@ -68,14 +68,10 @@ where
             Config::INPUT_LEN
         );
 
-        let field_cfg = row[0].cfg().clone();
-        let zero = F::zero_with_cfg(&field_cfg);
-
         pntt::radix8::pntt(
             row,
-            zero,
             &self.pntt_params,
-            FieldMulByTwiddle::<_, T>::new(field_cfg),
+            FieldMulByTwiddle::<_, T>::new(row[0].cfg().clone()),
         )
     }
 }
@@ -128,7 +124,6 @@ where
             &row.iter()
                 .map(<Zt::Cw as FromRef<Zt::Eval>>::from_ref)
                 .collect_vec(),
-            Zt::Cw::zero(),
         )
     }
 
@@ -141,7 +136,7 @@ where
     }
 
     fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {
-        self.encode_inner(row, Zt::CombR::ZERO)
+        self.encode_inner(row)
     }
 
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
