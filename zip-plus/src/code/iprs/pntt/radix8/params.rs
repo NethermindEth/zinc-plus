@@ -49,7 +49,7 @@ impl<C: Config> Radix8PnttParams<C> {
             base_matrix: Self::precompute_base_matrix(),
             // TODO(Ilia): There's no reason to not use the roots of unity
             //             in precomputation of `base_matrix`.
-            roots_of_unity: Self::precompute_roots_of_unity(),
+            roots_of_unity: Self::precompute_roots_of_unity(C::OUTPUT_LEN),
         }
     }
 
@@ -70,9 +70,9 @@ impl<C: Config> Radix8PnttParams<C> {
         matrix
     }
 
-    fn precompute_roots_of_unity() -> Vec<C::Int> {
-        let domain = Radix2EvaluationDomain::<C::Field>::new(C::OUTPUT_LEN)
-            .expect("Failed to create NTT domain");
+    fn precompute_roots_of_unity(n: usize) -> Vec<C::Int> {
+        let domain =
+            Radix2EvaluationDomain::<C::Field>::new(n).expect("Failed to create NTT domain");
 
         domain
             .elements()
@@ -137,12 +137,7 @@ mod tests {
 
     // Twiddles are indeed the 8th roots of unity.
     fn check_twiddles_generic<C: Config>() {
-        let domain = Radix2EvaluationDomain::<C::Field>::new(8).unwrap();
-
-        let expected = domain
-            .elements()
-            .map(C::field_to_int_normalized)
-            .collect_vec();
+        let expected = Radix8PnttParams::<C>::precompute_roots_of_unity(8);
 
         let our = C::TWIDDLES.to_vec();
 
