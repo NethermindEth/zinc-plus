@@ -37,7 +37,7 @@ pub trait Config: Copy + Send + Sync {
 #[derive(Clone, Debug)]
 pub struct Radix8PnttParams<C: Config> {
     /// The base matrix of the pseudo NTT.
-    pub base_matrix: Vec<Vec<C::Int>>,
+    pub base_matrix: Vec<Vec<C::Int>>, // TODO(Alex): Maybe use DenseRowMatrix for this?
     /// The roots of unity of degree `C::M` lifted to integers.
     pub roots_of_unity: Vec<C::Int>,
 }
