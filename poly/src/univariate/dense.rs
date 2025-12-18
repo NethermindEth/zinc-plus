@@ -457,6 +457,8 @@ impl<R: ConstTranscribable + Default, const DEGREE_PLUS_ONE: usize> ConstTranscr
     }
 }
 
+// Conversions.
+
 impl<R, S, const DEGREE_PLUS_ONE: usize> FromRef<DensePolynomial<S, DEGREE_PLUS_ONE>>
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 where
@@ -481,6 +483,20 @@ where
 {
     fn from(value: &DensePolynomial<S, DEGREE_PLUS_ONE>) -> Self {
         Self::from_ref(value)
+    }
+}
+
+impl<R: Zero, const DEGREE_PLUS_ONE: usize> From<R> for DensePolynomial<R, DEGREE_PLUS_ONE> {
+    fn from(value: R) -> Self {
+        let mut coeffs = array::from_fn(|_| R::zero());
+        coeffs[0] = value;
+        Self { coeffs }
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> FromRef<i64> for DensePolynomial<i128, DEGREE_PLUS_ONE> {
+    fn from_ref(value: &i64) -> Self {
+        Self::from(i128::from(*value))
     }
 }
 
@@ -609,19 +625,5 @@ where
         zero: Out,
     ) -> Result<Out, InnerProductError> {
         I::inner_product(&lhs.coeffs, rhs, zero)
-    }
-}
-
-impl<R: Zero, const DEGREE_PLUS_ONE: usize> From<R> for DensePolynomial<R, DEGREE_PLUS_ONE> {
-    fn from(value: R) -> Self {
-        let mut coeffs = array::from_fn(|_| R::zero());
-        coeffs[0] = value;
-        Self { coeffs }
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> FromRef<i64> for DensePolynomial<i128, DEGREE_PLUS_ONE> {
-    fn from_ref(value: &i64) -> Self {
-        Self::from(i128::from(*value))
     }
 }
