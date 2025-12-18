@@ -63,6 +63,21 @@ where
         // The length of chunks in the current layer.
         let sub_chunk_length = C::BASE_DIM * (1 << (3 * k));
 
+        // On each step of recursive radix-8 NTT
+        // we divide the length of the evaluation domain by 8.
+        // This is done via raising the current primitive root \omega
+        // to 8. Hence on the recursive step k the current primitive
+        // root of unity can be found as the original \omega
+        // raised to 8^k.
+        //
+        // Since we are going from bottom up we are successively
+        // taking
+        //      \omega^(8 ^ (C::DEPTH - 1))
+        //      \omega^(8 ^ (C::DEPTH - 2))
+        //      ...
+        //      \omega^(8 ^ 0) = \omega
+        let curr_prim_root_power = 1 << (3 * (C::DEPTH - 1 - k));
+
         // Work separately on combining each chunk of the next layer.
         cfg_chunks_mut!(out, 8 * sub_chunk_length).for_each(|chunk: &mut [Out]| {
             for i in 0..sub_chunk_length {
@@ -70,7 +85,8 @@ where
                 let subresults: [Out; 8] = array::from_fn(|j| {
                     mul_by_twiddle.mul_by_twiddle(
                         &chunk[j * sub_chunk_length + i],
-                        &params.roots_of_unity[j * i * (1 << (3 * (C::DEPTH - 1 - k)))],
+                        // (omega ^ curr_prim_root_power) ^ ij
+                        &params.roots_of_unity[curr_prim_root_power * i * j],
                     )
                 });
 
