@@ -21,18 +21,16 @@ use params::*;
 pub(crate) use mul_by_twiddle::*;
 
 /// The main entrypoint of the radix-8 pseudo NTT algorithm.
-pub(crate) fn pntt<In, Out, C, M>(
-    input: &[In],
-    zero: Out,
+pub(crate) fn pntt<R, C, M>(
+    input: &[R],
+    zero: R,
     params: &Radix8PnttParams<C>,
     mul_by_twiddle: M,
-) -> Vec<Out>
+) -> Vec<R>
 where
     C: Config,
-    In: Clone + Send + Sync,
-    Out: Clone + From<In> + CheckedAdd + CheckedMul + Send + Sync + Sum,
-    for<'a> &'a Out: From<&'a In>,
-    M: MulByTwiddle<Out, C::Int>,
+    R: Clone + CheckedAdd + CheckedMul + Send + Sync + Sum,
+    M: MulByTwiddle<R, C::Int>,
 {
     assert_eq!(
         C::INPUT_LEN,
@@ -53,11 +51,11 @@ where
 /// Assumes `out` contains the result of multiplications of the base chunks
 /// with the `base_matrix`.
 #[allow(clippy::arithmetic_side_effects)]
-fn combine_stages<Out, C, M>(out: &mut [Out], params: &Radix8PnttParams<C>, mul_by_twiddle: M)
+fn combine_stages<R, C, M>(out: &mut [R], params: &Radix8PnttParams<C>, mul_by_twiddle: M)
 where
     C: Config,
-    Out: Clone + CheckedAdd + CheckedMul + Send + Sync,
-    M: MulByTwiddle<Out, C::Int>,
+    R: Clone + CheckedAdd + CheckedMul + Send + Sync,
+    M: MulByTwiddle<R, C::Int>,
 {
     for k in 0..C::DEPTH {
         // The length of chunks in the current layer.
@@ -79,10 +77,10 @@ where
         let curr_prim_root_power = 1 << (3 * (C::DEPTH - 1 - k));
 
         // Work separately on combining each chunk of the next layer.
-        cfg_chunks_mut!(out, 8 * sub_chunk_length).for_each(|chunk: &mut [Out]| {
+        cfg_chunks_mut!(out, 8 * sub_chunk_length).for_each(|chunk: &mut [R]| {
             for i in 0..sub_chunk_length {
                 // Prepare subresults. Multiply them by the right roots of unity.
-                let subresults: [Out; 8] = array::from_fn(|j| {
+                let subresults: [R; 8] = array::from_fn(|j| {
                     mul_by_twiddle.mul_by_twiddle(
                         &chunk[j * sub_chunk_length + i],
                         // (omega ^ curr_prim_root_power) ^ ij
@@ -108,18 +106,16 @@ where
 
 /// Allocates the output vector and performs base layer multiplications.
 #[allow(clippy::arithmetic_side_effects)]
-fn base_multiply_into_output<In, Out, C, M>(
-    input: &[In],
+fn base_multiply_into_output<R, C, M>(
+    input: &[R],
     params: &Radix8PnttParams<C>,
-    zero: Out,
+    zero: R,
     mul_by_twiddle: M,
-) -> Vec<Out>
+) -> Vec<R>
 where
     C: Config,
-    In: Clone + Send + Sync,
-    Out: Clone + From<In> + CheckedAdd + CheckedMul + Sum + Send + Sync + CheckedMul + Sum + Send,
-    for<'a> &'a Out: From<&'a In>,
-    M: MulByTwiddle<Out, C::Int>,
+    R: Clone + CheckedAdd + CheckedMul + Sum + Send + Sync,
+    M: MulByTwiddle<R, C::Int>,
 {
     let mut output = vec![zero; C::OUTPUT_LEN];
 
@@ -138,10 +134,10 @@ where
         // We always know that the first column of the Vandermonde matrix
         // consists of 1's.
         let result = params.base_matrix[row][1..].iter().enumerate().fold(
-            Out::from(input[oct_rev_chunk].clone()),
+            input[oct_rev_chunk].clone(),
             |acc, (col, bm_row_col)| {
                 let term = mul_by_twiddle.mul_by_twiddle(
-                    (&input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))]).into(),
+                    &input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))],
                     bm_row_col,
                 );
 

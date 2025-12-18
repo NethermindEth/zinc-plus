@@ -38,14 +38,14 @@ macro_rules! generate_radix_8_butterfly {
 /// Apply butterfly given by `twiddles` to a slice
 /// of subresults in `x`. Use `mul_by_twiddle` as a means
 /// to multiply `Out` by `Twiddle`.
-pub(crate) fn radix_8_butterfly<Out, Twiddle, M, const I: usize>(
-    x: &[Out],
+pub(crate) fn radix_8_butterfly<R, Twiddle, M, const I: usize>(
+    x: &[R],
     twiddles: &[Twiddle],
     mul_by_twiddle: M,
-) -> Out
+) -> R
 where
-    Out: Clone + CheckedAdd,
-    M: MulByTwiddle<Out, Twiddle>,
+    R: Clone + CheckedAdd,
+    M: MulByTwiddle<R, Twiddle>,
 {
     let butterfly: [usize; 8] = generate_radix_8_butterfly!(I);
 

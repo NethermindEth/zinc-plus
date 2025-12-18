@@ -30,19 +30,16 @@ where
     Config: pntt::radix8::params::Config,
 {
     /// Encode without modular reduction, purely over the integers.
-    fn encode_inner<In, Out>(&self, row: &[In], zero: Out) -> Vec<Out>
+    fn encode_inner<R>(&self, row: &[R], zero: R) -> Vec<R>
     where
-        In: Clone + Send + Sync,
-        Out: From<In>
-            + Clone
-            + CheckedAdd
-            + for<'a> AddAssign<&'a Out>
+        R: CheckedAdd
+            + for<'a> AddAssign<&'a R>
             + CheckedMul
             + for<'a> MulByScalar<&'a Config::Int>
+            + Sum
+            + Clone
             + Send
-            + Sync
-            + Sum,
-        for<'a> &'a Out: From<&'a In>,
+            + Sync,
     {
         assert_eq!(
             row.len(),
@@ -55,8 +52,8 @@ where
         pntt::radix8::pntt(row, zero, &self.pntt_params, MBSMulByTwiddle)
     }
 
-    // Do the encoding but make use of the fact the input
-    // and the output are the same field.
+    // Do the encoding but make use of the fact
+    // that we are dealing with a field.
     fn encode_inner_f<F, T>(&self, row: &[F]) -> Vec<F>
     where
         F: FromWithConfig<T>,
