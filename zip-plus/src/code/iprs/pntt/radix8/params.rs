@@ -27,8 +27,8 @@ pub trait Config: Copy + Send + Sync {
     /// The length of the pseudo NTT's output.
     const OUTPUT_LEN: usize = Self::BASE_DIM * (1 << (3 * Self::DEPTH));
 
-    /// A helper to get an integer from a field element in
-    /// the range `[-(p - 1)/2, (p - 1)/2]`.
+    /// A helper to get an integer representation that
+    /// lies in the range `[-(p - 1)/2, (p - 1)/2]` from a field element.
     fn field_to_int_normalized(x: Self::Field) -> Self::Int;
 }
 
