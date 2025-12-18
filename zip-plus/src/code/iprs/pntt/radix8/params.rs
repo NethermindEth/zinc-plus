@@ -42,6 +42,12 @@ pub struct Radix8PnttParams<C: Config> {
     pub roots_of_unity: Vec<C::Int>,
 }
 
+impl<C: Config> Default for Radix8PnttParams<C> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<C: Config> Radix8PnttParams<C> {
     /// Precompute pseudo NTT parameters.
     pub fn new() -> Self {

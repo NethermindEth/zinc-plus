@@ -4,7 +4,8 @@
 mod butterfly;
 mod mul_by_twiddle;
 mod octet_reversal;
-mod params;
+
+pub mod params;
 
 use ark_std::{cfg_chunks_mut, cfg_iter_mut};
 use num_traits::{CheckedAdd, CheckedMul};
@@ -15,10 +16,9 @@ use zinc_utils::add;
 
 use butterfly::*;
 use octet_reversal::*;
+use params::*;
 
 pub(crate) use mul_by_twiddle::*;
-
-pub use params::*;
 
 /// The main entrypoint of the radix-8 pseudo NTT algorithm.
 pub(crate) fn pntt<In, Out, C, M>(

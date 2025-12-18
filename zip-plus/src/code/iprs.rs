@@ -3,7 +3,7 @@ mod pntt;
 use crate::{
     code::{
         LinearCode,
-        iprs::pntt::radix8::{FieldMulByTwiddle, MBSMulByTwiddle, Radix8PnttParams},
+        iprs::pntt::radix8::{FieldMulByTwiddle, MBSMulByTwiddle},
     },
     pcs::structs::ZipTypes,
 };
@@ -13,13 +13,13 @@ use num_traits::{CheckedAdd, CheckedMul, ConstZero, Zero};
 use std::{iter::Sum, marker::PhantomData, ops::AddAssign};
 use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 
-pub use pntt::radix8::{Config, PnttConfigF2_16_1};
+pub use pntt::radix8::params::{PnttConfigF2_16_1, Radix8PnttParams};
 
 /// Pseudo Reed-Solomon encoder over the integers. Internally uses a
 /// radix-8 NTT-style recursion with a base Vandermonde matrix sized
 /// `base_len x base_dim` (defaults to 64x32).
 #[derive(Debug, Clone)]
-pub struct IprsCode<Zt: ZipTypes, Config: pntt::radix8::Config> {
+pub struct IprsCode<Zt: ZipTypes, Config: pntt::radix8::params::Config> {
     pntt_params: Radix8PnttParams<Config>,
     _phantom: PhantomData<Zt>,
 }
@@ -27,7 +27,7 @@ pub struct IprsCode<Zt: ZipTypes, Config: pntt::radix8::Config> {
 impl<Zt, Config> IprsCode<Zt, Config>
 where
     Zt: ZipTypes,
-    Config: pntt::radix8::Config,
+    Config: pntt::radix8::params::Config,
 {
     /// Encode without modular reduction, purely over the integers.
     fn encode_inner<In, Out>(&self, row: &[In], zero: Out) -> Vec<Out>
@@ -86,7 +86,7 @@ where
 impl<Zt: ZipTypes, Config> LinearCode<Zt> for IprsCode<Zt, Config>
 where
     Zt: ZipTypes,
-    Config: pntt::radix8::Config,
+    Config: pntt::radix8::params::Config,
     Zt::CombR: for<'a> MulByScalar<&'a Config::Int>,
     Zt::Cw: CheckedAdd + for<'a> MulByScalar<&'a Config::Int>,
     Config::Int: Into<i64>,
