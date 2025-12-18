@@ -11,19 +11,19 @@ use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 use crate::{
     code::{
         LinearCode,
-        iprs::pntt::radix8::{FieldMulByTwiddle, MBSMulByTwiddle, Radix8PNTTParams},
+        iprs::pntt::radix8::{FieldMulByTwiddle, MBSMulByTwiddle, Radix8PnttParams},
     },
     pcs::structs::ZipTypes,
 };
 
-pub use pntt::radix8::{Config, PNTTConfigF2_16_1};
+pub use pntt::radix8::{Config, PnttConfigF2_16_1};
 
 /// Pseudo Reed-Solomon encoder over the integers. Internally uses a
 /// radix-8 NTT-style recursion with a base Vandermonde matrix sized
 /// `base_len x base_dim` (defaults to 64x32).
 #[derive(Debug, Clone)]
 pub struct IprsCode<Zt: ZipTypes, Config: pntt::radix8::Config> {
-    pntt_params: Radix8PNTTParams<Config>,
+    pntt_params: Radix8PnttParams<Config>,
     _phantom: PhantomData<Zt>,
 }
 
@@ -115,7 +115,7 @@ where
         );
 
         Self {
-            pntt_params: Radix8PNTTParams::new(),
+            pntt_params: Radix8PnttParams::new(),
             _phantom: Default::default(),
         }
     }

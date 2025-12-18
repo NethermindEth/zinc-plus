@@ -35,14 +35,14 @@ pub trait Config: Copy + Send + Sync {
 // Precomputed parameters needed for
 // pseudo NTT algorithm.
 #[derive(Clone, Debug)]
-pub struct Radix8PNTTParams<C: Config> {
+pub struct Radix8PnttParams<C: Config> {
     /// The base matrix of the pseudo NTT.
     pub base_matrix: Vec<Vec<C::Int>>,
     /// The roots of unity of degree `C::M` lifted to integers.
     pub roots_of_unity: Vec<C::Int>,
 }
 
-impl<C: Config> Radix8PNTTParams<C> {
+impl<C: Config> Radix8PnttParams<C> {
     /// Precompute pseudo NTT parameters.
     pub fn new() -> Self {
         Self {
@@ -86,7 +86,7 @@ impl<C: Config> Radix8PNTTParams<C> {
 ///
 /// Supports `DEPTH` up to `3`.
 #[derive(Clone, Copy)]
-pub struct PNTTConfigF2_16_1<const DEPTH: usize>;
+pub struct PnttConfigF2_16_1<const DEPTH: usize>;
 
 pub(crate) mod fq {
     #![allow(non_local_definitions)]
@@ -100,7 +100,7 @@ pub(crate) mod fq {
 
 use fq::*;
 
-impl<const DEPTH: usize> Config for PNTTConfigF2_16_1<DEPTH> {
+impl<const DEPTH: usize> Config for PnttConfigF2_16_1<DEPTH> {
     type Int = i64;
     type Field = Fq;
     const BASE_LEN: usize = 32;
@@ -147,6 +147,6 @@ mod tests {
 
     #[test]
     fn check_twiddles() {
-        check_twiddles_generic::<PNTTConfigF2_16_1<1>>();
+        check_twiddles_generic::<PnttConfigF2_16_1<1>>();
     }
 }

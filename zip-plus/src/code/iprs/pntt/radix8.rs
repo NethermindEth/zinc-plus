@@ -24,7 +24,7 @@ pub use params::*;
 pub(crate) fn pntt<In, Out, C, M>(
     input: &[In],
     zero: Out,
-    params: &Radix8PNTTParams<C>,
+    params: &Radix8PnttParams<C>,
     mul_by_twiddle: M,
 ) -> Vec<Out>
 where
@@ -53,7 +53,7 @@ where
 /// Assumes `out` contains the result of multiplications of the base chunks
 /// with the `base_matrix`.
 #[allow(clippy::arithmetic_side_effects)]
-fn combine_stages<Out, C, M>(out: &mut [Out], params: &Radix8PNTTParams<C>, mul_by_twiddle: M)
+fn combine_stages<Out, C, M>(out: &mut [Out], params: &Radix8PnttParams<C>, mul_by_twiddle: M)
 where
     C: Config,
     Out: Clone + CheckedAdd + CheckedMul + Send + Sync,
@@ -94,7 +94,7 @@ where
 #[allow(clippy::arithmetic_side_effects)]
 fn base_multiply_into_output<In, Out, C, M>(
     input: &[In],
-    params: &Radix8PNTTParams<C>,
+    params: &Radix8PnttParams<C>,
     zero: Out,
     mul_by_twiddle: M,
 ) -> Vec<Out>
@@ -184,7 +184,7 @@ mod tests {
         };
 
         let our_res = {
-            let params = Radix8PNTTParams::<C>::new();
+            let params = Radix8PnttParams::<C>::new();
 
             let output = base_multiply_into_output(&input, &params, 0, MBSMulByTwiddle);
 
@@ -196,9 +196,9 @@ mod tests {
 
     #[test]
     fn compare_to_arkworks_ntt_base_layer_multiply() {
-        compare_to_arkworks_ntt_base_layer_generic::<PNTTConfigF2_16_1<1>>();
-        compare_to_arkworks_ntt_base_layer_generic::<PNTTConfigF2_16_1<2>>();
-        compare_to_arkworks_ntt_base_layer_generic::<PNTTConfigF2_16_1<3>>();
+        compare_to_arkworks_ntt_base_layer_generic::<PnttConfigF2_16_1<1>>();
+        compare_to_arkworks_ntt_base_layer_generic::<PnttConfigF2_16_1<2>>();
+        compare_to_arkworks_ntt_base_layer_generic::<PnttConfigF2_16_1<3>>();
     }
 
     fn pntt_against_arkworks_generic<C: Config>()
@@ -229,7 +229,7 @@ mod tests {
         let our_res = {
             let input: Vec<Int<4>> = input.into_iter().map(|x| x.into().into()).collect_vec();
 
-            let params = Radix8PNTTParams::<C>::new();
+            let params = Radix8PnttParams::<C>::new();
 
             let res: Vec<Int<4>> = pntt(&input, Int::<4>::ZERO, &params, MBSMulByTwiddle);
 
@@ -254,8 +254,8 @@ mod tests {
 
     #[test]
     fn pntt_against_arkworks() {
-        pntt_against_arkworks_generic::<PNTTConfigF2_16_1<1>>();
-        pntt_against_arkworks_generic::<PNTTConfigF2_16_1<2>>();
-        pntt_against_arkworks_generic::<PNTTConfigF2_16_1<3>>();
+        pntt_against_arkworks_generic::<PnttConfigF2_16_1<1>>();
+        pntt_against_arkworks_generic::<PnttConfigF2_16_1<2>>();
+        pntt_against_arkworks_generic::<PnttConfigF2_16_1<3>>();
     }
 }
