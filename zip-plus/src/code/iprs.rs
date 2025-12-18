@@ -49,10 +49,10 @@ where
     {
         assert_eq!(
             row.len(),
-            Config::N,
+            Config::INPUT_LEN,
             "Input length {} does not match expected row length {}",
             row.len(),
-            Config::N
+            Config::INPUT_LEN
         );
 
         pntt::radix8::pntt(row, zero, &self.pntt_params, MBSMulByTwiddle)
@@ -68,10 +68,10 @@ where
     {
         assert_eq!(
             row.len(),
-            Config::N,
+            Config::INPUT_LEN,
             "Input length {} does not match expected row length {}",
             row.len(),
-            Config::N
+            Config::INPUT_LEN
         );
 
         let field_cfg = row[0].cfg().clone();
@@ -94,23 +94,23 @@ where
     Zt::Cw: CheckedAdd + for<'a> MulByScalar<&'a Config::Int>,
     Config::Int: Into<i64>,
 {
-    const REPETITION_FACTOR: usize = Config::M / Config::N;
+    const REPETITION_FACTOR: usize = Config::OUTPUT_LEN / Config::INPUT_LEN;
 
     #[allow(clippy::arithmetic_side_effects)]
     fn new(poly_size: usize) -> Self {
         assert_eq!(
-            poly_size % Config::N,
+            poly_size % Config::INPUT_LEN,
             0,
             "Polynomial size {} is not a multiple of row length {}",
             poly_size,
-            Config::N
+            Config::INPUT_LEN
         );
 
         assert!(
-            Config::M == Config::N * Self::REPETITION_FACTOR,
+            Config::OUTPUT_LEN == Config::INPUT_LEN * Self::REPETITION_FACTOR,
             "Codeword length {} must equal row length {} times repetition factor {}",
-            Config::M,
-            Config::N,
+            Config::OUTPUT_LEN,
+            Config::INPUT_LEN,
             Self::REPETITION_FACTOR
         );
 
@@ -122,10 +122,10 @@ where
 
     fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
         assert!(
-            row.len() == Config::N,
+            row.len() == Config::INPUT_LEN,
             "Input length {} does not match expected row length {}",
             row.len(),
-            Config::N
+            Config::INPUT_LEN
         );
 
         self.encode_inner(
@@ -137,11 +137,11 @@ where
     }
 
     fn row_len(&self) -> usize {
-        Config::N
+        Config::INPUT_LEN
     }
 
     fn codeword_len(&self) -> usize {
-        Config::M
+        Config::OUTPUT_LEN
     }
 
     fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {

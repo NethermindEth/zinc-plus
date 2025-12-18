@@ -35,10 +35,10 @@ where
     M: MulByTwiddle<Out, C::Int>,
 {
     assert_eq!(
-        C::N,
+        C::INPUT_LEN,
         input.len(),
         "PNTT expects length = {}, got {}",
-        C::N,
+        C::INPUT_LEN,
         input.len()
     );
 
@@ -105,7 +105,7 @@ where
     for<'a> &'a Out: From<&'a In>,
     M: MulByTwiddle<Out, C::Int>,
 {
-    let mut output = vec![zero; C::M];
+    let mut output = vec![zero; C::OUTPUT_LEN];
 
     cfg_iter_mut!(output).enumerate().for_each(|(i, out)| {
         let chunk = i / C::BASE_DIM;
@@ -207,19 +207,19 @@ mod tests {
         C::Int: From<i64> + Into<i64>,
         Int<4>: From<C::Int> + for<'a> MulByScalar<&'a C::Int>,
     {
-        let input: Vec<C::Int> = (0..C::N)
+        let input: Vec<C::Int> = (0..C::INPUT_LEN)
             .map(|x| i64::try_from(x).unwrap().into())
             .collect_vec();
 
         let arkworks_res = {
-            let domain = Radix2EvaluationDomain::<C::Field>::new(C::M).unwrap();
+            let domain = Radix2EvaluationDomain::<C::Field>::new(C::OUTPUT_LEN).unwrap();
 
             let mut input = input
                 .iter()
                 .map(|i| C::Field::from(i.clone()))
                 .collect_vec();
 
-            input.resize(C::M, C::Field::zero());
+            input.resize(C::OUTPUT_LEN, C::Field::zero());
 
             domain.fft_in_place(&mut input);
 

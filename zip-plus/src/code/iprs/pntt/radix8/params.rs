@@ -23,9 +23,9 @@ pub trait Config: Copy + Send + Sync {
     const TWIDDLES: [Self::Int; 8];
 
     /// The length of the pseudo NTT's input.
-    const N: usize = Self::BASE_LEN * (1 << (3 * Self::DEPTH));
+    const INPUT_LEN: usize = Self::BASE_LEN * (1 << (3 * Self::DEPTH));
     /// The length of the pseudo NTT's output.
-    const M: usize = Self::BASE_DIM * (1 << (3 * Self::DEPTH));
+    const OUTPUT_LEN: usize = Self::BASE_DIM * (1 << (3 * Self::DEPTH));
 
     /// A helper to get an integer from a field element in
     /// the range `[-(p - 1)/2, (p - 1)/2]`.
@@ -71,8 +71,8 @@ impl<C: Config> Radix8PNTTParams<C> {
     }
 
     fn precompute_roots_of_unity() -> Vec<C::Int> {
-        let domain =
-            Radix2EvaluationDomain::<C::Field>::new(C::M).expect("Failed to create NTT domain");
+        let domain = Radix2EvaluationDomain::<C::Field>::new(C::OUTPUT_LEN)
+            .expect("Failed to create NTT domain");
 
         domain
             .elements()
