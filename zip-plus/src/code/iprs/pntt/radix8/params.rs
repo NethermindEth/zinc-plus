@@ -1,4 +1,4 @@
-use ark_ff::{FftField, Field, FpConfig, MontBackend};
+use ark_ff::{FftField, Field, FpConfig};
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
 use itertools::Itertools;
 
@@ -95,7 +95,9 @@ mod fq {
     #[modulus = "65537"]
     #[generator = "3"]
     pub struct FqConfig;
-    pub type Fq = Fp64<MontBackend<FqConfig, 1>>;
+
+    pub type FqBackend = MontBackend<FqConfig, 1>;
+    pub type Fq = Fp64<FqBackend>;
 
     pub const MODULUS: u64 = FqConfig::MODULUS.0[0];
 }
@@ -111,7 +113,7 @@ impl<const DEPTH: usize> Config for PnttConfigF2_16_1<DEPTH> {
     const TWIDDLES: [Self::Int; 8] = [1, 4096, -256, 16, -1, -4096, 256, -16];
 
     fn field_to_int_normalized(x: Self::Field) -> Self::Int {
-        let big_int = MontBackend::<FqConfig, 1>::into_bigint(x);
+        let big_int = FqBackend::into_bigint(x);
 
         normalize_field_element(big_int.0[0], fq::MODULUS)
     }
