@@ -88,7 +88,7 @@ impl<C: Config> Radix8PnttParams<C> {
 #[derive(Clone, Copy)]
 pub struct PnttConfigF2_16_1<const DEPTH: usize>;
 
-pub(crate) mod fq {
+mod fq {
     #![allow(non_local_definitions)]
     use ark_ff::{Fp64, MontBackend, MontConfig};
     #[derive(MontConfig)]
