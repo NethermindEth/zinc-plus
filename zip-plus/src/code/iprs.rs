@@ -38,6 +38,7 @@ where
             + for<'a> MulByScalar<&'a Config::Int>
             + Sum
             + Clone
+            + std::fmt::Debug
             + Send
             + Sync,
     {

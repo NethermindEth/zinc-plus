@@ -8,6 +8,7 @@ mod octet_reversal;
 pub mod params;
 
 use ark_std::{cfg_chunks_mut, cfg_into_iter};
+use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -24,7 +25,7 @@ pub(crate) use mul_by_twiddle::*;
 pub(crate) fn pntt<R, C, M>(input: &[R], params: &Radix8PnttParams<C>, mul_by_twiddle: M) -> Vec<R>
 where
     C: Config,
-    R: Clone + CheckedAdd + CheckedMul + Send + Sync + Sum,
+    R: CheckedAdd + CheckedMul + Sum + Clone + std::fmt::Debug + Send + Sync,
     M: MulByTwiddle<R, C::Int>,
 {
     assert_eq!(
@@ -49,7 +50,7 @@ where
 fn combine_stages<R, C, M>(out: &mut [R], params: &Radix8PnttParams<C>, mul_by_twiddle: M)
 where
     C: Config,
-    R: Clone + CheckedAdd + CheckedMul + Send + Sync,
+    R: CheckedAdd + CheckedMul + Clone + std::fmt::Debug + Send + Sync,
     M: MulByTwiddle<R, C::Int>,
 {
     for k in 0..C::DEPTH {
@@ -83,17 +84,16 @@ where
                     )
                 });
 
+                #[allow(unused_mut)] // false alarm
+                let ys: [&mut R; 8] = chunk
+                    .chunks_mut(sub_chunk_length)
+                    .map(|mut subchunk| &mut subchunk[i])
+                    .collect_vec()
+                    .try_into()
+                    .expect("We are guaranteed to have the right length here");
+
                 // Perform butterflies.
-                (
-                    chunk[i],
-                    chunk[sub_chunk_length + i],
-                    chunk[2 * sub_chunk_length + i],
-                    chunk[3 * sub_chunk_length + i],
-                    chunk[4 * sub_chunk_length + i],
-                    chunk[5 * sub_chunk_length + i],
-                    chunk[6 * sub_chunk_length + i],
-                    chunk[7 * sub_chunk_length + i],
-                ) = do_all_butterflies!(&subresults, &(C::TWIDDLES), mul_by_twiddle.clone());
+                apply_radix_8_butterflies(&subresults, ys, &(C::TWIDDLES), mul_by_twiddle.clone());
             }
         });
     }

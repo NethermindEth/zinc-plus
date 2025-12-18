@@ -3,70 +3,37 @@ use zinc_utils::add;
 
 use super::MulByTwiddle;
 
-/// Generate the indices of twiddle factors
-/// used for a butterfly.
-///
-/// In case of radix 8, we have 8 butterflies.
-macro_rules! generate_radix_8_butterfly {
-    ($i:literal) => {
-        [
-            0,
-            $i % 8,
-            (2 * $i) % 8,
-            (3 * $i) % 8,
-            (4 * $i) % 8,
-            (5 * $i) % 8,
-            (6 * $i) % 8,
-            (7 * $i) % 8,
-        ]
-    };
-    ($i:expr) => {
-        match $i {
-            0 => generate_radix_8_butterfly!(0),
-            1 => generate_radix_8_butterfly!(1),
-            2 => generate_radix_8_butterfly!(2),
-            3 => generate_radix_8_butterfly!(3),
-            4 => generate_radix_8_butterfly!(4),
-            5 => generate_radix_8_butterfly!(5),
-            6 => generate_radix_8_butterfly!(6),
-            7 => generate_radix_8_butterfly!(7),
-            _ => panic!("Incorrect butterfly number"),
-        }
-    };
-}
-
 /// Apply butterfly given by `twiddles` to a slice
 /// of subresults in `x`. Use `mul_by_twiddle` as a means
 /// to multiply `Out` by `Twiddle`.
-pub(crate) fn radix_8_butterfly<R, Twiddle, M, const I: usize>(
-    x: &[R],
+pub(crate) fn apply_radix_8_butterflies<R, Twiddle, M>(
+    xs: &[R],
+    ys: [&mut R; 8],
     twiddles: &[Twiddle],
     mul_by_twiddle: M,
-) -> R
-where
+) where
     R: Clone + CheckedAdd,
     M: MulByTwiddle<R, Twiddle>,
 {
-    let butterfly: [usize; 8] = generate_radix_8_butterfly!(I);
+    ys.into_iter()
+        .zip(BUTTERFLY_TABLE.iter())
+        .for_each(|(y, butterfly)| {
+            *y = xs[1..]
+                .iter()
+                .zip(&butterfly[1..])
+                .fold(xs[0].clone(), |a, (x, &twiddle_idx)| {
+                    add!(a, &mul_by_twiddle.mul_by_twiddle(x, &twiddles[twiddle_idx]))
+                })
+        });
+}
 
-    x[1..]
-        .iter()
-        .zip(&butterfly[1..])
-        .fold(x[0].clone(), |a, (x, &twiddle_idx)| {
-            add!(a, &mul_by_twiddle.mul_by_twiddle(x, &twiddles[twiddle_idx]))
-        })
-}
-macro_rules! do_all_butterflies {
-    ($x:expr, $twiddles:expr, $mbt: expr) => {
-        (
-            radix_8_butterfly::<_, _, _, 0>($x, $twiddles, $mbt),
-            radix_8_butterfly::<_, _, _, 1>($x, $twiddles, $mbt),
-            radix_8_butterfly::<_, _, _, 2>($x, $twiddles, $mbt),
-            radix_8_butterfly::<_, _, _, 3>($x, $twiddles, $mbt),
-            radix_8_butterfly::<_, _, _, 4>($x, $twiddles, $mbt),
-            radix_8_butterfly::<_, _, _, 5>($x, $twiddles, $mbt),
-            radix_8_butterfly::<_, _, _, 6>($x, $twiddles, $mbt),
-            radix_8_butterfly::<_, _, _, 7>($x, $twiddles, $mbt),
-        )
-    };
-}
+const BUTTERFLY_TABLE: [[usize; 8]; 8] = [
+    [0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 1, 2, 3, 4, 5, 6, 7],
+    [0, 2, 4, 6, 0, 2, 4, 6],
+    [0, 3, 6, 1, 4, 7, 2, 5],
+    [0, 4, 0, 4, 0, 4, 0, 4],
+    [0, 5, 2, 7, 4, 1, 6, 3],
+    [0, 6, 4, 2, 0, 6, 4, 2],
+    [0, 7, 6, 5, 4, 3, 2, 1],
+];
