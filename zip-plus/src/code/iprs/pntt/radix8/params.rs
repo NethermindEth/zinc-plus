@@ -96,6 +96,8 @@ pub(crate) mod fq {
     #[generator = "3"]
     pub struct FqConfig;
     pub type Fq = Fp64<MontBackend<FqConfig, 1>>;
+
+    pub const MODULUS: u64 = FqConfig::MODULUS.0[0];
 }
 
 use fq::*;
@@ -111,7 +113,7 @@ impl<const DEPTH: usize> Config for PnttConfigF2_16_1<DEPTH> {
     fn field_to_int_normalized(x: Self::Field) -> Self::Int {
         let big_int = MontBackend::<FqConfig, 1>::into_bigint(x);
 
-        normalize_field_element(big_int.0[0], (1 << 16) + 1)
+        normalize_field_element(big_int.0[0], fq::MODULUS)
     }
 }
 
