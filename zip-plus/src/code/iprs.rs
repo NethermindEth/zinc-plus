@@ -103,8 +103,9 @@ where
             Config::INPUT_LEN
         );
 
-        assert!(
-            Config::OUTPUT_LEN == Config::INPUT_LEN * Self::REPETITION_FACTOR,
+        assert_eq!(
+            Config::OUTPUT_LEN,
+            Config::INPUT_LEN * Self::REPETITION_FACTOR,
             "Codeword length {} must equal row length {} times repetition factor {}",
             Config::OUTPUT_LEN,
             Config::INPUT_LEN,
@@ -118,8 +119,9 @@ where
     }
 
     fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
-        assert!(
-            row.len() == Config::INPUT_LEN,
+        assert_eq!(
+            row.len(),
+            Config::INPUT_LEN,
             "Input length {} does not match expected row length {}",
             row.len(),
             Config::INPUT_LEN
