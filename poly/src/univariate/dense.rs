@@ -132,9 +132,11 @@ impl<R: Semiring + Zero + One, const DEGREE_PLUS_ONE: usize> One
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 {
     fn one() -> Self {
-        Self {
-            coeffs: array::from_fn::<_, DEGREE_PLUS_ONE, _>(|_| R::zero()),
-        }
+        let mut coeffs = array::from_fn::<_, DEGREE_PLUS_ONE, _>(|_| R::zero());
+
+        coeffs[0] = R::one();
+
+        Self { coeffs }
     }
 }
 
@@ -615,5 +617,26 @@ where
         zero: Out,
     ) -> Result<Out, InnerProductError> {
         I::inner_product(&lhs.coeffs, rhs, zero)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_is_correct() {
+        assert_eq!(
+            DensePolynomial::<i64, 4>::zero(),
+            DensePolynomial::new([0, 0, 0, 0])
+        );
+    }
+
+    #[test]
+    fn one_is_correct() {
+        assert_eq!(
+            DensePolynomial::<i64, 4>::one(),
+            DensePolynomial::new([1, 0, 0, 0])
+        );
     }
 }
