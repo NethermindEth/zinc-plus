@@ -70,19 +70,17 @@ where
         //      \omega^(8 ^ (C::DEPTH - 2))
         //      ...
         //      \omega^(8 ^ 0) = \omega
-        let curr_prim_root_power = 1 << (3 * (C::DEPTH - 1 - k));
+        // These factors are already absorbed into `layer_twiddles`.
+        let layer_twiddles = &params.butterfly_twiddles[k];
+        debug_assert_eq!(layer_twiddles.len(), sub_chunk_length);
 
         // Work separately on combining each chunk of the next layer.
         cfg_chunks_mut!(out, 8 * sub_chunk_length).for_each(|chunk: &mut [R]| {
             for i in 0..sub_chunk_length {
-                // Prepare subresults. Multiply them by the right roots of unity.
-                let subresults: [R; 8] = array::from_fn(|j| {
-                    mul_by_twiddle.mul_by_twiddle(
-                        &chunk[j * sub_chunk_length + i],
-                        // (omega ^ curr_prim_root_power) ^ ij
-                        &params.roots_of_unity[curr_prim_root_power * i * j],
-                    )
-                });
+                // Prepare subresults without applying roots of unity; the
+                // per-layer twiddles already include those factors.
+                let subresults: [R; 8] =
+                    array::from_fn(|j| chunk[j * sub_chunk_length + i].clone());
 
                 #[allow(unused_mut)] // false alarm
                 let ys: [&mut R; 8] = chunk
@@ -93,7 +91,7 @@ where
                     .expect("We are guaranteed to have the right length here");
 
                 // Perform butterflies.
-                apply_radix_8_butterflies(ys, &subresults, &(C::TWIDDLES), mul_by_twiddle);
+                apply_radix_8_butterflies(ys, &subresults, &layer_twiddles[i], mul_by_twiddle);
             }
         });
     }
