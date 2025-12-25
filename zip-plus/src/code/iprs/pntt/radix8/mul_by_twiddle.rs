@@ -6,13 +6,14 @@ use zinc_utils::mul_by_scalar::MulByScalar;
 /// A helper trait that allows to provide
 /// the pseudo NTT algorithm a means to
 /// multiply output by twiddles.
+// TODO(alex): Can we get away with using just MulByScalar?
 pub(crate) trait MulByTwiddle<Lhs, Twiddle>: Clone + Send + Sync {
     fn mul_by_twiddle(&self, lhs: &Lhs, twiddle: &Twiddle) -> Lhs;
 }
 
 /// The twiddle multiplication that
 /// uses the `MulByScalar` implementation.
-#[derive(Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct MBSMulByTwiddle;
 
 impl<Lhs, Twiddle> MulByTwiddle<Lhs, Twiddle> for MBSMulByTwiddle
@@ -26,7 +27,7 @@ where
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 /// If we deal with fields we do not have to
 /// worry about overflows. Multiplication by twiddle
 /// is done by conversions and field operations.

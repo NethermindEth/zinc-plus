@@ -1,11 +1,13 @@
 use ark_ff::{FftField, Field, FpConfig};
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
 use itertools::Itertools;
+use std::marker::PhantomData;
+
+/// The integer types of twiddles.
+pub type PnttInt = i64;
 
 /// Configuration of radix-8 pseudo NTT.
 pub trait Config: Copy + Send + Sync {
-    /// The integer types of twiddles.
-    type Int: Clone + std::fmt::Debug + Eq + Send + Sync;
     /// The field used to generate the twiddle factors
     /// and the base matrix for this pseudo NTT.
     type Field: FftField;
@@ -15,12 +17,16 @@ pub trait Config: Copy + Send + Sync {
     const DEPTH: usize;
     /// The number of columns of the base matrix.
     const BASE_LEN: usize;
-    /// The number of rows of the base matrix.
+    /// The number of rows of the base matrix, always a power of 2.
     const BASE_DIM: usize;
+    /// log2 of the number of rows of the base matrix.
+    const BASE_DIM_LOG2: u32 = Self::BASE_DIM.trailing_zeros();
+    /// The mask to compute `i % Self::BASE_DIM`.
+    const BASE_DIM_MASK: usize = Self::BASE_DIM - 1;
     /// The coefficients used to combine subresults.
     /// They are the 8-th roots of unity from the field `Self::Field`
     /// lifted to `Self::Int`.
-    const TWIDDLES: [Self::Int; 8];
+    const TWIDDLES: [PnttInt; 8];
 
     /// The length of the pseudo NTT's input.
     const INPUT_LEN: usize = Self::BASE_LEN * (1 << (3 * Self::DEPTH));
@@ -29,7 +35,7 @@ pub trait Config: Copy + Send + Sync {
 
     /// A helper to get an integer representation that
     /// lies in the range `[-(p - 1)/2, (p - 1)/2]` from a field element.
-    fn field_to_int_normalized(x: Self::Field) -> Self::Int;
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt;
 }
 
 // Precomputed parameters needed for
@@ -37,9 +43,10 @@ pub trait Config: Copy + Send + Sync {
 #[derive(Clone, Debug)]
 pub struct Radix8PnttParams<C: Config> {
     /// The base matrix of the pseudo NTT.
-    pub base_matrix: Vec<Vec<C::Int>>, // TODO(Alex): Maybe use DenseRowMatrix for this?
+    pub base_matrix: Vec<Vec<PnttInt>>, // TODO(Alex): Maybe use DenseRowMatrix for this?
     /// The roots of unity of degree `C::M` lifted to integers.
-    pub roots_of_unity: Vec<C::Int>,
+    pub roots_of_unity: Vec<PnttInt>,
+    _phantom: PhantomData<C>,
 }
 
 impl<C: Config> Default for Radix8PnttParams<C> {
@@ -56,10 +63,11 @@ impl<C: Config> Radix8PnttParams<C> {
             // TODO(Ilia): There's no reason to not use the roots of unity
             //             in precomputation of `base_matrix`.
             roots_of_unity: Self::precompute_roots_of_unity(C::OUTPUT_LEN),
+            _phantom: PhantomData,
         }
     }
 
-    fn precompute_base_matrix() -> Vec<Vec<C::Int>> {
+    fn precompute_base_matrix() -> Vec<Vec<PnttInt>> {
         let domain = Radix2EvaluationDomain::<C::Field>::new(C::BASE_DIM)
             .expect("Failed to create NTT domain");
 
@@ -76,7 +84,7 @@ impl<C: Config> Radix8PnttParams<C> {
         matrix
     }
 
-    fn precompute_roots_of_unity(n: usize) -> Vec<C::Int> {
+    fn precompute_roots_of_unity(n: usize) -> Vec<PnttInt> {
         let domain =
             Radix2EvaluationDomain::<C::Field>::new(n).expect("Failed to create NTT domain");
 
@@ -108,18 +116,15 @@ mod fq {
     pub const MODULUS: u64 = FqConfig::MODULUS.0[0];
 }
 
-use fq::*;
-
 impl<const DEPTH: usize> Config for PnttConfigF2_16_1<DEPTH> {
-    type Int = i64;
-    type Field = Fq;
+    type Field = fq::Fq;
     const BASE_LEN: usize = 32;
     const BASE_DIM: usize = 64;
     const DEPTH: usize = DEPTH;
-    const TWIDDLES: [Self::Int; 8] = [1, 4096, -256, 16, -1, -4096, 256, -16];
+    const TWIDDLES: [PnttInt; 8] = [1, 4096, -256, 16, -1, -4096, 256, -16];
 
-    fn field_to_int_normalized(x: Self::Field) -> Self::Int {
-        let big_int = FqBackend::into_bigint(x);
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq::FqBackend::into_bigint(x);
 
         normalize_field_element(big_int.0[0], fq::MODULUS)
     }

@@ -3,23 +3,23 @@ mod pntt;
 use crate::{
     code::{
         LinearCode,
-        iprs::pntt::radix8::{FieldMulByTwiddle, MBSMulByTwiddle},
+        iprs::pntt::radix8::{FieldMulByTwiddle, MBSMulByTwiddle, params::Config as PnttConfig},
     },
     pcs::structs::ZipTypes,
 };
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul};
-use std::{iter::Sum, marker::PhantomData, ops::AddAssign};
+use std::{fmt::Debug, iter::Sum, marker::PhantomData, ops::AddAssign};
 use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 
-pub use pntt::radix8::params::{PnttConfigF2_16_1, Radix8PnttParams};
+pub use pntt::radix8::params::{PnttConfigF2_16_1, PnttInt, Radix8PnttParams};
 
 /// Pseudo Reed-Solomon encoder over the integers. Internally uses a
 /// radix-8 NTT-style recursion with a base Vandermonde matrix sized
 /// `base_len x base_dim` (defaults to 64x32).
 #[derive(Debug, Clone)]
-pub struct IprsCode<Zt: ZipTypes, Config: pntt::radix8::params::Config> {
+pub struct IprsCode<Zt: ZipTypes, Config: PnttConfig> {
     pntt_params: Radix8PnttParams<Config>,
     _phantom: PhantomData<Zt>,
 }
@@ -27,7 +27,7 @@ pub struct IprsCode<Zt: ZipTypes, Config: pntt::radix8::params::Config> {
 impl<Zt, Config> IprsCode<Zt, Config>
 where
     Zt: ZipTypes,
-    Config: pntt::radix8::params::Config,
+    Config: PnttConfig,
 {
     /// Encode without modular reduction, purely over the integers.
     fn encode_inner<R>(&self, row: &[R]) -> Vec<R>
@@ -35,10 +35,10 @@ where
         R: CheckedAdd
             + for<'a> AddAssign<&'a R>
             + CheckedMul
-            + for<'a> MulByScalar<&'a Config::Int>
+            + for<'a> MulByScalar<&'a PnttInt>
             + Sum
             + Clone
-            + std::fmt::Debug
+            + Debug
             + Send
             + Sync,
     {
@@ -50,16 +50,14 @@ where
             Config::INPUT_LEN
         );
 
-        pntt::radix8::pntt(row, &self.pntt_params, MBSMulByTwiddle)
+        pntt::radix8::pntt(row, &self.pntt_params, &MBSMulByTwiddle)
     }
 
     // Do the encoding but make use of the fact
     // that we are dealing with a field.
-    fn encode_inner_f<F, T>(&self, row: &[F]) -> Vec<F>
+    fn encode_inner_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        F: FromWithConfig<T>,
-        Config::Int: Into<T>,
-        T: Clone + Send + Sync,
+        F: FromWithConfig<PnttInt>,
     {
         assert_eq!(
             row.len(),
@@ -72,7 +70,7 @@ where
         pntt::radix8::pntt(
             row,
             &self.pntt_params,
-            FieldMulByTwiddle::<_, T>::new(row[0].cfg().clone()),
+            &FieldMulByTwiddle::<_, PnttInt>::new(row[0].cfg().clone()),
         )
     }
 }
@@ -80,10 +78,9 @@ where
 impl<Zt: ZipTypes, Config> LinearCode<Zt> for IprsCode<Zt, Config>
 where
     Zt: ZipTypes,
-    Config: pntt::radix8::params::Config,
-    Zt::CombR: for<'a> MulByScalar<&'a Config::Int>,
-    Zt::Cw: CheckedAdd + for<'a> MulByScalar<&'a Config::Int>,
-    Config::Int: Into<i64>,
+    Config: PnttConfig,
+    Zt::CombR: for<'a> MulByScalar<&'a PnttInt>,
+    Zt::Cw: CheckedAdd + for<'a> MulByScalar<&'a PnttInt>,
 {
     const REPETITION_FACTOR: usize = Config::OUTPUT_LEN / Config::INPUT_LEN;
 
