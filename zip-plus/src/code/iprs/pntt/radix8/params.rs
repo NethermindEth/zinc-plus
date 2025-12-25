@@ -38,6 +38,8 @@ pub trait Config: Copy + Send + Sync {
 
     /// A helper to get an integer representation that
     /// lies in the range `[-(p - 1)/2, (p - 1)/2]` from a field element.
+    // TODO(alex): If we need it somewhere else, it would make sense to make this a
+    // property of the field.
     fn field_to_int_normalized(x: Self::Field) -> PnttInt;
 }
 
