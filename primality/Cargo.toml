@@ -12,7 +12,7 @@ bench = false
 [dependencies]
 crypto-primitives = { workspace = true }
 crypto-bigint = { workspace = true }
-crypto-primes = { version = "0.7.0-pre.4" }
+crypto-primes = { version = "= 0.7.0-pre.3" }
 
 [lints]
 workspace = true

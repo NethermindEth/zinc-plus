@@ -13,14 +13,14 @@ publish = false
 [workspace.dependencies]
 crypto-primitives = { git = "https://github.com/NethermindEth/crypto-primitives.git", branch = "main", features = ["std", "ark_std", "crypto_bigint", "rand"]  }
 
-crypto-bigint = { version = "0.7.0-rc.10", features = ["zeroize"] }
+crypto-bigint = { version = "= 0.7.0-rc.9", features = ["zeroize"] }
 ark-std = "0.5"
 criterion = "0.7.0"
 itertools = "0.14"
 num-traits = "0.2"
-proptest = "1.8.0"
-rand = "0.10.0-rc.1"
-rand_core = "0.10.0-rc.1"
+proptest = "1.9.0"
+rand = "0.9"
+rand_core = "0.9"
 rayon = { version = "1.10" }
 thiserror = "2.0"
 zinc-primality = { path = "primality/" }
