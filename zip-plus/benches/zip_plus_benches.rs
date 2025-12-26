@@ -111,7 +111,7 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
 fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS");
 
-    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<1, _>, 8>(&mut group);
+    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<1, _>, 16>(&mut group);
 
     encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<2, _>, 11>(&mut group);
 
