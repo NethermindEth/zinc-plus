@@ -90,7 +90,7 @@ fn mul_and_normalize_twiddle(
     normalize_field_element(product_u64, modulus_u64)
 }
 
-#[allow(clippy::arithmetic_side_effects,clippy::cast_sign_loss)]
+#[allow(clippy::arithmetic_side_effects, clippy::cast_sign_loss)]
 fn to_positive_mod_repr(value: PnttInt, modulus: i64) -> u64 {
     let mut repr = value % modulus;
     if repr < 0 {
