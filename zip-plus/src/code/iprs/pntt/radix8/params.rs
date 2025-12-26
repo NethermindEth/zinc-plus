@@ -1,6 +1,9 @@
-use ark_ff::{FftField, Field, FpConfig};
-use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
-use itertools::Itertools;
+#[cfg(test)]
+use super::precompute::precompute_roots_of_unity;
+use super::precompute::{
+    normalize_field_element, precompute_base_matrix, precompute_butterfly_twiddles,
+};
+use ark_ff::{FftField, FpConfig};
 use std::marker::PhantomData;
 
 /// The integer types of twiddles.
@@ -26,7 +29,7 @@ pub trait Config: Copy + Send + Sync {
     /// The coefficients used to combine subresults.
     /// They are the 8-th roots of unity from the field `Self::Field`
     /// lifted to `Self::Int`.
-    const TWIDDLES: [PnttInt; 8];
+    const BASE_TWIDDLES: [PnttInt; 8];
 
     /// The length of the pseudo NTT's input.
     const INPUT_LEN: usize = Self::BASE_LEN * (1 << (3 * Self::DEPTH));
@@ -44,8 +47,10 @@ pub trait Config: Copy + Send + Sync {
 pub struct Radix8PnttParams<C: Config> {
     /// The base matrix of the pseudo NTT.
     pub base_matrix: Vec<Vec<PnttInt>>, // TODO(Alex): Maybe use DenseRowMatrix for this?
-    /// The roots of unity of degree `C::M` lifted to integers.
-    pub roots_of_unity: Vec<PnttInt>,
+    /// Precomputed twiddles for every stage that already contain the relevant
+    /// root-of-unity factor. This lets the butterfly apply a single
+    /// multiplication per term instead of two.
+    pub butterfly_twiddles: Vec<Vec<[[PnttInt; 8]; 7]>>,
     _phantom: PhantomData<C>,
 }
 
@@ -59,39 +64,10 @@ impl<C: Config> Radix8PnttParams<C> {
     /// Precompute pseudo NTT parameters.
     pub fn new() -> Self {
         Self {
-            base_matrix: Self::precompute_base_matrix(),
-            // TODO(Ilia): There's no reason to not use the roots of unity
-            //             in precomputation of `base_matrix`.
-            roots_of_unity: Self::precompute_roots_of_unity(C::OUTPUT_LEN),
+            base_matrix: precompute_base_matrix::<C>(),
+            butterfly_twiddles: precompute_butterfly_twiddles::<C>(),
             _phantom: PhantomData,
         }
-    }
-
-    fn precompute_base_matrix() -> Vec<Vec<PnttInt>> {
-        let domain = Radix2EvaluationDomain::<C::Field>::new(C::BASE_DIM)
-            .expect("Failed to create NTT domain");
-
-        let mut matrix = Vec::with_capacity(C::BASE_DIM);
-
-        for root in domain.elements() {
-            matrix.push(
-                (0..C::BASE_LEN)
-                    .map(move |i| C::field_to_int_normalized(root.pow([i as u64])))
-                    .collect_vec(),
-            )
-        }
-
-        matrix
-    }
-
-    fn precompute_roots_of_unity(n: usize) -> Vec<PnttInt> {
-        let domain =
-            Radix2EvaluationDomain::<C::Field>::new(n).expect("Failed to create NTT domain");
-
-        domain
-            .elements()
-            .map(C::field_to_int_normalized)
-            .collect_vec()
     }
 }
 
@@ -121,24 +97,12 @@ impl<const DEPTH: usize> Config for PnttConfigF2_16_1<DEPTH> {
     const BASE_LEN: usize = 32;
     const BASE_DIM: usize = 64;
     const DEPTH: usize = DEPTH;
-    const TWIDDLES: [PnttInt; 8] = [1, 4096, -256, 16, -1, -4096, 256, -16];
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 4096, -256, 16, -1, -4096, 256, -16];
 
     fn field_to_int_normalized(x: Self::Field) -> PnttInt {
         let big_int = fq::FqBackend::into_bigint(x);
 
         normalize_field_element(big_int.0[0], fq::MODULUS)
-    }
-}
-
-/// Field normalization for at most 32-bit fields.
-/// Might have unpleasant overflows if used for bigger fields.
-#[allow(clippy::arithmetic_side_effects)]
-#[allow(clippy::cast_possible_wrap)]
-fn normalize_field_element(x: u64, p: u64) -> i64 {
-    if x >= (p - 1) / 2 {
-        x as i64 - p as i64
-    } else {
-        x as i64
     }
 }
 
@@ -148,9 +112,9 @@ mod tests {
 
     // Twiddles are indeed the 8th roots of unity.
     fn check_twiddles_generic<C: Config>() {
-        let expected = Radix8PnttParams::<C>::precompute_roots_of_unity(8);
+        let expected = precompute_roots_of_unity::<C>(8);
 
-        let our = C::TWIDDLES.to_vec();
+        let our = C::BASE_TWIDDLES.to_vec();
 
         assert_eq!(expected, our);
     }
