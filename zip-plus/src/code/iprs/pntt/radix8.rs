@@ -4,7 +4,6 @@
 mod butterfly;
 mod mul_by_twiddle;
 mod octet_reversal;
-mod precompute;
 
 pub mod params;
 
