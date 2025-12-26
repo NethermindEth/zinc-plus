@@ -83,11 +83,8 @@ fn mul_and_normalize_twiddle(
     let twiddle_mod = to_positive_mod_repr(twiddle, modulus_i64);
     let root_mod = to_positive_mod_repr(root, modulus_i64);
     let product = (twiddle_mod * root_mod) % modulus_u64;
-    let product_u64: u64 = product
-        .try_into()
-        .expect("Product reduced modulo prime field fits into u64");
 
-    normalize_field_element(product_u64, modulus_u64)
+    normalize_field_element(product, modulus_u64)
 }
 
 #[allow(clippy::arithmetic_side_effects, clippy::cast_sign_loss)]
