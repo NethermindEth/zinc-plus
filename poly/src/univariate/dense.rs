@@ -132,9 +132,7 @@ impl<R: Semiring + Zero + One, const DEGREE_PLUS_ONE: usize> One
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 {
     fn one() -> Self {
-        Self {
-            coeffs: array::from_fn::<_, DEGREE_PLUS_ONE, _>(|_| R::zero()),
-        }
+        Self::from(R::one())
     }
 }
 
@@ -322,57 +320,53 @@ impl<R: Semiring, const DEGREE_PLUS_ONE: usize> CheckedMul for DensePolynomial<R
     }
 }
 
-impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Sum for DensePolynomial<R, DEGREE_PLUS_ONE> {
-    fn sum<I: Iterator<Item = Self>>(mut iter: I) -> Self {
-        let Some(first) = iter.next() else {
-            panic!("Sum of an empty iterator is not defined for DensePolynomial");
-        };
-        iter.fold(first, |acc, x| {
+impl<R: FixedSemiring, const DEGREE_PLUS_ONE: usize> Sum for DensePolynomial<R, DEGREE_PLUS_ONE> {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::zero(), |acc, x| {
             acc.checked_add(&x).expect("overflow in sum")
         })
     }
 }
 
-impl<'a, R: Semiring, const DEGREE_PLUS_ONE: usize> Sum<&'a Self>
+impl<'a, R: FixedSemiring, const DEGREE_PLUS_ONE: usize> Sum<&'a Self>
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 {
-    fn sum<I: Iterator<Item = &'a Self>>(mut iter: I) -> Self {
-        let Some(first) = iter.next() else {
-            panic!("Sum of an empty iterator is not defined for DensePolynomial");
-        };
-        iter.fold(first.clone(), |acc, x| {
+    fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
+        iter.fold(Self::zero(), |acc, x| {
             acc.checked_add(x).expect("overflow in sum")
         })
     }
 }
 
-impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Product for DensePolynomial<R, DEGREE_PLUS_ONE> {
-    fn product<I: Iterator<Item = Self>>(mut iter: I) -> Self {
-        let Some(first) = iter.next() else {
-            panic!("Product of an empty iterator is not defined for DensePolynomial");
-        };
-        iter.fold(first, |acc, x| {
+impl<R: FixedSemiring, const DEGREE_PLUS_ONE: usize> Product
+    for DensePolynomial<R, DEGREE_PLUS_ONE>
+{
+    fn product<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::one(), |acc, x| {
             acc.checked_mul(&x).expect("overflow in product")
         })
     }
 }
 
-impl<'a, R: Semiring, const DEGREE_PLUS_ONE: usize> Product<&'a Self>
+impl<'a, R: FixedSemiring, const DEGREE_PLUS_ONE: usize> Product<&'a Self>
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 {
-    fn product<I: Iterator<Item = &'a Self>>(mut iter: I) -> Self {
-        let Some(first) = iter.next() else {
-            panic!("Product of an empty iterator is not defined for DensePolynomial");
-        };
-        iter.fold(first.clone(), |acc, x| {
+    fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
+        iter.fold(Self::one(), |acc, x| {
             acc.checked_mul(x).expect("overflow in product")
         })
     }
 }
 
-impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Semiring for DensePolynomial<R, DEGREE_PLUS_ONE> {}
+impl<R: FixedSemiring, const DEGREE_PLUS_ONE: usize> Semiring
+    for DensePolynomial<R, DEGREE_PLUS_ONE>
+{
+}
 
-impl<R: Ring + Zero, const DEGREE_PLUS_ONE: usize> Ring for DensePolynomial<R, DEGREE_PLUS_ONE> {}
+impl<R: Ring + FixedSemiring, const DEGREE_PLUS_ONE: usize> Ring
+    for DensePolynomial<R, DEGREE_PLUS_ONE>
+{
+}
 
 impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Distribution<DensePolynomial<R, DEGREE_PLUS_ONE>>
     for StandardUniform
@@ -463,6 +457,8 @@ impl<R: ConstTranscribable + Default, const DEGREE_PLUS_ONE: usize> ConstTranscr
     }
 }
 
+// Conversions.
+
 impl<R, S, const DEGREE_PLUS_ONE: usize> FromRef<DensePolynomial<S, DEGREE_PLUS_ONE>>
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 where
@@ -487,6 +483,20 @@ where
 {
     fn from(value: &DensePolynomial<S, DEGREE_PLUS_ONE>) -> Self {
         Self::from_ref(value)
+    }
+}
+
+impl<R: Zero, const DEGREE_PLUS_ONE: usize> From<R> for DensePolynomial<R, DEGREE_PLUS_ONE> {
+    fn from(value: R) -> Self {
+        let mut coeffs = array::from_fn(|_| R::zero());
+        coeffs[0] = value;
+        Self { coeffs }
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> FromRef<i64> for DensePolynomial<i128, DEGREE_PLUS_ONE> {
+    fn from_ref(value: &i64) -> Self {
+        Self::from(i128::from(*value))
     }
 }
 

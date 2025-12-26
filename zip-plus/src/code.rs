@@ -1,8 +1,9 @@
+pub mod iprs;
 pub mod raa;
 pub mod raa_sign_flip;
 
 use crate::pcs::structs::ZipTypes;
-use crypto_primitives::PrimeField;
+use crypto_primitives::FromPrimitiveWithConfig;
 use zinc_utils::from_ref::FromRef;
 
 pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
@@ -64,5 +65,5 @@ pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
     /// A vector of field elements representing the encoded row
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        F: PrimeField + FromRef<F>;
+        F: FromPrimitiveWithConfig + FromRef<F>;
 }
