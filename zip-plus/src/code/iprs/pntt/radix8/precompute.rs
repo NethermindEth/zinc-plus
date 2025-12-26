@@ -12,7 +12,6 @@ pub(crate) fn precompute_butterfly_twiddles<C: Config>() -> Vec<Vec<[[PnttInt; 8
     let modulus_i64: i64 = modulus
         .try_into()
         .expect("Field modulus should fit into i64 for pseudo NTT parameters");
-    let modulus_u128 = u128::from(modulus);
 
     (0..C::DEPTH)
         .map(|k| {
@@ -30,7 +29,6 @@ pub(crate) fn precompute_butterfly_twiddles<C: Config>() -> Vec<Vec<[[PnttInt; 8
                                 root,
                                 modulus_i64,
                                 modulus,
-                                modulus_u128,
                             )
                         })
                     })
@@ -64,6 +62,8 @@ pub(crate) fn precompute_roots_of_unity<C: Config>(n: usize) -> Vec<PnttInt> {
         .collect_vec()
 }
 
+/// Field normalization for at most 32-bit fields.
+/// Might have unpleasant overflows if used for bigger fields.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_wrap)]
 pub(crate) fn normalize_field_element(x: u64, p: u64) -> i64 {
     if x >= (p - 1) / 2 {
@@ -79,11 +79,10 @@ fn mul_and_normalize_twiddle(
     root: PnttInt,
     modulus_i64: i64,
     modulus_u64: u64,
-    modulus_u128: u128,
 ) -> PnttInt {
     let twiddle_mod = to_positive_mod_repr(twiddle, modulus_i64);
     let root_mod = to_positive_mod_repr(root, modulus_i64);
-    let product = (twiddle_mod * root_mod) % modulus_u128;
+    let product = (twiddle_mod * root_mod) % modulus_u64;
     let product_u64: u64 = product
         .try_into()
         .expect("Product reduced modulo prime field fits into u64");
@@ -91,12 +90,11 @@ fn mul_and_normalize_twiddle(
     normalize_field_element(product_u64, modulus_u64)
 }
 
-#[allow(clippy::arithmetic_side_effects)]
-fn to_positive_mod_repr(value: PnttInt, modulus: i64) -> u128 {
+#[allow(clippy::arithmetic_side_effects,clippy::cast_sign_loss)]
+fn to_positive_mod_repr(value: PnttInt, modulus: i64) -> u64 {
     let mut repr = value % modulus;
     if repr < 0 {
         repr += modulus;
     }
-    repr.try_into()
-        .expect("Representation is guaranteed to be non-negative and fit into u128")
+    repr as u64
 }
