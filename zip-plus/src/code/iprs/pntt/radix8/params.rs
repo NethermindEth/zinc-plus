@@ -44,6 +44,7 @@ mod precompute {
     use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
     use itertools::Itertools;
     use std::array;
+    use zinc_utils::{add, mul};
 
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_wrap)]
     pub(super) fn precompute_butterfly_twiddles<C: Config>() -> Vec<Vec<[[PnttInt; 8]; 7]>> {
@@ -122,7 +123,7 @@ mod precompute {
     ) -> PnttInt {
         let twiddle_mod = to_positive_mod_repr(twiddle, modulus_i64);
         let root_mod = to_positive_mod_repr(root, modulus_i64);
-        let product = (twiddle_mod * root_mod) % modulus_u64;
+        let product = mul!(twiddle_mod, root_mod) % modulus_u64;
 
         normalize_field_element(product, modulus_u64)
     }
@@ -131,7 +132,7 @@ mod precompute {
     fn to_positive_mod_repr(value: PnttInt, modulus: i64) -> u64 {
         let mut repr = value % modulus;
         if repr < 0 {
-            repr += modulus;
+            repr = add!(repr, modulus);
         }
         repr as u64
     }
@@ -201,8 +202,6 @@ impl<const DEPTH: usize> Config for PnttConfigF2_16_1<DEPTH> {
         precompute::normalize_field_element(big_int.0[0], fq::MODULUS)
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
