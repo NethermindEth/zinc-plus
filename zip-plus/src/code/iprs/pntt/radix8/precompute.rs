@@ -4,14 +4,12 @@ use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
 use itertools::Itertools;
 use std::array;
 
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_wrap)]
 pub(crate) fn precompute_butterfly_twiddles<C: Config>() -> Vec<Vec<[[PnttInt; 8]; 7]>> {
     let roots_of_unity = precompute_roots_of_unity::<C>(C::OUTPUT_LEN);
 
     let modulus = <C::Field as Field>::BasePrimeField::MODULUS.as_ref()[0];
-    let modulus_i64: i64 = modulus
-        .try_into()
-        .expect("Field modulus should fit into i64 for pseudo NTT parameters");
+    let modulus_i64 = modulus as i64;
 
     (0..C::DEPTH)
         .map(|k| {
