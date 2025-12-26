@@ -9,6 +9,7 @@ pub trait Config: Copy + Send + Sync {
     /// The field used to generate the twiddle factors
     /// and the base matrix for this pseudo NTT.
     type Field: FftField;
+    const FIELD_MODULUS: u32;
 
     /// The number of steps where NTT is performed
     /// recursivily.
@@ -40,18 +41,15 @@ pub trait Config: Copy + Send + Sync {
 
 mod precompute {
     use super::{Config, PnttInt};
-    use ark_ff::{Field, PrimeField};
+    use ark_ff::Field;
     use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
     use itertools::Itertools;
     use std::array;
-    use zinc_utils::{add, mul};
+    use zinc_utils::mul;
 
-    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_wrap)]
+    #[allow(clippy::arithmetic_side_effects)]
     pub(super) fn precompute_butterfly_twiddles<C: Config>() -> Vec<Vec<[[PnttInt; 8]; 7]>> {
         let roots_of_unity = precompute_roots_of_unity::<C>(C::OUTPUT_LEN);
-
-        let modulus = <C::Field as Field>::BasePrimeField::MODULUS.as_ref()[0];
-        let modulus_i64 = modulus as i64;
 
         (0..C::DEPTH)
             .map(|k| {
@@ -67,8 +65,7 @@ mod precompute {
                                 mul_and_normalize_twiddle(
                                     C::BASE_TWIDDLES[twiddle_idx],
                                     root,
-                                    modulus_i64,
-                                    modulus,
+                                    C::FIELD_MODULUS,
                                 )
                             })
                         })
@@ -106,35 +103,25 @@ mod precompute {
     /// Field normalization for at most 32-bit fields.
     /// Might have unpleasant overflows if used for bigger fields.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_wrap)]
-    pub(super) fn normalize_field_element(x: u64, p: u64) -> i64 {
-        if x >= (p - 1) / 2 {
-            x as i64 - p as i64
-        } else {
-            x as i64
-        }
+    pub(super) fn normalize_field_element(x: u64, p: u32) -> i64 {
+        debug_assert!(x <= i64::MAX as u64);
+        let x = x as i64;
+        let p = i64::from(p);
+        if x >= (p - 1) / 2 { x - p } else { x }
     }
 
     #[allow(clippy::arithmetic_side_effects)]
-    fn mul_and_normalize_twiddle(
-        twiddle: PnttInt,
-        root: PnttInt,
-        modulus_i64: i64,
-        modulus_u64: u64,
-    ) -> PnttInt {
-        let twiddle_mod = to_positive_mod_repr(twiddle, modulus_i64);
-        let root_mod = to_positive_mod_repr(root, modulus_i64);
-        let product = mul!(twiddle_mod, root_mod) % modulus_u64;
+    fn mul_and_normalize_twiddle(twiddle: PnttInt, root: PnttInt, modulus: u32) -> PnttInt {
+        let twiddle_mod = to_positive_mod_repr(twiddle, modulus);
+        let root_mod = to_positive_mod_repr(root, modulus);
+        let product = mul!(twiddle_mod, root_mod) % u64::from(modulus);
 
-        normalize_field_element(product, modulus_u64)
+        normalize_field_element(product, modulus)
     }
 
-    #[allow(clippy::arithmetic_side_effects, clippy::cast_sign_loss)]
-    fn to_positive_mod_repr(value: PnttInt, modulus: i64) -> u64 {
-        let mut repr = value % modulus;
-        if repr < 0 {
-            repr = add!(repr, modulus);
-        }
-        repr as u64
+    #[allow(clippy::cast_sign_loss)]
+    fn to_positive_mod_repr(value: PnttInt, modulus: u32) -> u64 {
+        value.rem_euclid(i64::from(modulus)) as u64
     }
 }
 
@@ -186,11 +173,13 @@ mod fq {
     pub type FqBackend = MontBackend<FqConfig, 1>;
     pub type Fq = Fp64<FqBackend>;
 
-    pub const MODULUS: u64 = FqConfig::MODULUS.0[0];
+    #[allow(clippy::cast_possible_truncation)] // We know modulus is small enough.
+    pub const MODULUS: u32 = FqConfig::MODULUS.0[0] as u32;
 }
 
 impl<const DEPTH: usize> Config for PnttConfigF2_16_1<DEPTH> {
     type Field = fq::Fq;
+    const FIELD_MODULUS: u32 = fq::MODULUS;
     const BASE_LEN: usize = 32;
     const BASE_DIM: usize = 64;
     const DEPTH: usize = DEPTH;
@@ -199,7 +188,7 @@ impl<const DEPTH: usize> Config for PnttConfigF2_16_1<DEPTH> {
     fn field_to_int_normalized(x: Self::Field) -> PnttInt {
         let big_int = fq::FqBackend::into_bigint(x);
 
-        precompute::normalize_field_element(big_int.0[0], fq::MODULUS)
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
     }
 }
 
