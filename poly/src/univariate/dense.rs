@@ -1,7 +1,7 @@
 use crate::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial};
 use core::slice;
 use crypto_primitives::{
-    FixedSemiring, FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring,
+    FixedSemiring, FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring, boolean::Boolean,
 };
 use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, One, Zero};
@@ -18,7 +18,7 @@ use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
     from_ref::FromRef,
     inner_product::{InnerProduct, InnerProductError},
-    mul_by_scalar::MulByScalar,
+    mul_by_scalar::{MulByScalar, WideningMulByScalar},
     named::Named,
     projection_to_field::ProjectionToField,
 };
@@ -625,5 +625,33 @@ where
         zero: Out,
     ) -> Result<Out, InnerProductError> {
         I::inner_product(&lhs.coeffs, rhs, zero)
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct BinaryPolyWideningMulByScalar<Output>(PhantomData<Output>);
+
+impl<Rhs, Output, const DEGREE_PLUS_ONE: usize>
+    WideningMulByScalar<DensePolynomial<Boolean, DEGREE_PLUS_ONE>, Rhs>
+    for BinaryPolyWideningMulByScalar<Output>
+where
+    Rhs: Copy,
+    Output: From<Rhs> + Send + Sync + Default + Copy + Zero,
+{
+    type Output = DensePolynomial<Output, DEGREE_PLUS_ONE>;
+
+    fn mul_by_scalar_widen(
+        lhs: &DensePolynomial<Boolean, DEGREE_PLUS_ONE>,
+        rhs: &Rhs,
+    ) -> Self::Output {
+        let mut coeffs: [Output; DEGREE_PLUS_ONE] = [Output::zero(); DEGREE_PLUS_ONE];
+
+        coeffs.iter_mut().enumerate().for_each(|(i, out)| {
+            if lhs.coeffs[i].inner() {
+                *out = (*rhs).into();
+            }
+        });
+
+        DensePolynomial { coeffs }
     }
 }

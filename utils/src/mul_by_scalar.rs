@@ -65,3 +65,9 @@ impl MulByScalar<&i64> for i128 {
         self.checked_mul(&i128::from(*rhs))
     }
 }
+
+pub trait WideningMulByScalar<Lhs, Rhs>: Clone + Default + Send + Sync {
+    type Output;
+
+    fn mul_by_scalar_widen(lhs: &Lhs, rhs: &Rhs) -> Self::Output;
+}

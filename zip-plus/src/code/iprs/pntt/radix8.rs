@@ -7,13 +7,13 @@ mod octet_reversal;
 
 pub mod params;
 
-use ark_std::{cfg_chunks_mut, cfg_into_iter};
+use ark_std::{cfg_chunks_mut, cfg_iter_mut};
 use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::{array, fmt::Debug, iter::Sum};
-use zinc_utils::add;
+use std::{array, fmt::Debug, iter::Sum, mem::MaybeUninit};
+use zinc_utils::{add, from_ref::FromRef};
 
 use butterfly::*;
 use octet_reversal::*;
@@ -22,11 +22,18 @@ use params::*;
 pub(crate) use mul_by_twiddle::*;
 
 /// The main entrypoint of the radix-8 pseudo NTT algorithm.
-pub(crate) fn pntt<R, C, M>(input: &[R], params: &Radix8PnttParams<C>, mul_by_twiddle: &M) -> Vec<R>
+pub(crate) fn pntt<In, Out, C, MI, MO>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+    mul_in_by_twiddle: &MI,
+    mul_out_by_twiddle: &MO,
+) -> Vec<Out>
 where
     C: Config,
-    R: CheckedAdd + CheckedMul + Sum + Clone + Send + Sync + Debug,
-    M: MulByTwiddle<R, PnttInt>,
+    In: Clone + Send + Sync,
+    Out: CheckedAdd + CheckedMul + Sum + FromRef<In> + Clone + Send + Sync + Debug,
+    MI: MulByTwiddle<In, PnttInt, Output = Out>,
+    MO: MulByTwiddle<Out, PnttInt, Output = Out>,
 {
     assert_eq!(
         C::INPUT_LEN,
@@ -36,9 +43,9 @@ where
         input.len()
     );
 
-    let mut output = base_multiply_into_output(input, params, mul_by_twiddle);
+    let mut output = base_multiply_into_output(input, params, mul_in_by_twiddle);
 
-    combine_stages(&mut output, params, mul_by_twiddle);
+    combine_stages(&mut output, params, mul_out_by_twiddle);
 
     output
 }
@@ -51,7 +58,7 @@ fn combine_stages<R, C, M>(out: &mut [R], params: &Radix8PnttParams<C>, mul_by_t
 where
     C: Config,
     R: CheckedAdd + CheckedMul + Clone + Send + Sync + Debug,
-    M: MulByTwiddle<R, PnttInt>,
+    M: MulByTwiddle<R, PnttInt, Output = R>,
 {
     for k in 0..C::DEPTH {
         // The length of chunks in the current layer.
@@ -99,18 +106,21 @@ where
 
 /// Allocates the output vector and performs base layer multiplications.
 #[allow(clippy::arithmetic_side_effects)]
-fn base_multiply_into_output<R, C, M>(
-    input: &[R],
+fn base_multiply_into_output<In, Out, C, M>(
+    input: &[In],
     params: &Radix8PnttParams<C>,
     mul_by_twiddle: &M,
-) -> Vec<R>
+) -> Vec<Out>
 where
     C: Config,
-    R: Clone + CheckedAdd + CheckedMul + Sum + Send + Sync,
-    M: MulByTwiddle<R, PnttInt>,
+    In: Clone + Send + Sync,
+    Out: Clone + CheckedAdd + CheckedMul + Sum + FromRef<In> + Send + Sync,
+    M: MulByTwiddle<In, PnttInt, Output = Out>,
 {
-    cfg_into_iter!(0..C::OUTPUT_LEN)
-        .map(|i| {
+    let mut output = Vec::with_capacity(C::OUTPUT_LEN);
+    cfg_iter_mut!(output.spare_capacity_mut())
+        .enumerate()
+        .for_each(|(i, out)| {
             let chunk = i >> C::BASE_DIM_LOG2; // i / C::BASE_DIM
             let row = i & C::BASE_DIM_MASK; // i % C::BASE_DIM
 
@@ -124,8 +134,8 @@ where
 
             // We always know that the first column of the Vandermonde matrix
             // consists of 1's.
-            params.base_matrix[row][1..].iter().enumerate().fold(
-                input[oct_rev_chunk].clone(),
+            let result = params.base_matrix[row][1..].iter().enumerate().fold(
+                Out::from_ref(&input[oct_rev_chunk]),
                 |acc, (col, bm_row_col)| {
                     let term = mul_by_twiddle.mul_by_twiddle(
                         &input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))],
@@ -134,9 +144,17 @@ where
 
                     add!(acc, &term)
                 },
-            )
-        })
-        .collect()
+            );
+
+            *out = MaybeUninit::new(result);
+        });
+
+    // Safety: We initialized all elements in the output.
+    unsafe {
+        output.set_len(C::OUTPUT_LEN);
+    }
+
+    output
 }
 
 // TODO: make unchecked versions of the above.
@@ -225,7 +243,7 @@ mod tests {
 
             let params = Radix8PnttParams::<C>::new();
 
-            let res: Vec<Int<4>> = pntt(&input, &params, &MBSMulByTwiddle);
+            let res: Vec<Int<4>> = pntt(&input, &params, &MBSMulByTwiddle, &MBSMulByTwiddle);
 
             res.into_iter()
                 .map(|x| {
