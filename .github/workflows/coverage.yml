@@ -14,7 +14,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - run: cargo install cargo-llvm-cov
+      - name: Cache llvm-cov build
+        id: cache-llvm-cov
+        uses: actions/cache@v4
+        continue-on-error: false
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-llvm-cov-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-llvm-cov
+
+      - run:  which cargo-llvm-cov || cargo install cargo-llvm-cov
       - run: rustup component add llvm-tools-preview
       - run: cargo llvm-cov --workspace --lcov --output-path lcov.info --ignore-filename-regex '^examples/'
 
