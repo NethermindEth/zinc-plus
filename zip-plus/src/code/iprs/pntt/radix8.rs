@@ -22,18 +22,18 @@ use params::*;
 pub(crate) use mul_by_twiddle::*;
 
 /// The main entrypoint of the radix-8 pseudo NTT algorithm.
-pub(crate) fn pntt<In, Out, C, MI, MO>(
+pub(crate) fn pntt<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
     input: &[In],
     params: &Radix8PnttParams<C>,
-    mul_in_by_twiddle: &MI,
-    mul_out_by_twiddle: &MO,
+    mul_in_by_twiddle: &MulInByTwiddle,
+    mul_out_by_twiddle: &MulOutByTwiddle,
 ) -> Vec<Out>
 where
     C: Config,
     In: Clone + Send + Sync,
     Out: CheckedAdd + CheckedMul + Sum + FromRef<In> + Clone + Send + Sync + Debug,
-    MI: MulByTwiddle<In, PnttInt, Output = Out>,
-    MO: MulByTwiddle<Out, PnttInt, Output = Out>,
+    MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
+    MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
 {
     assert_eq!(
         C::INPUT_LEN,

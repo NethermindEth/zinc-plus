@@ -66,14 +66,14 @@ where
 #[derive(Clone, Default, Copy)]
 pub struct WideningMulByTwiddle<WM>(PhantomData<WM>);
 
-impl<Lhs, Twiddle, WM> MulByTwiddle<Lhs, Twiddle> for WideningMulByTwiddle<WM>
+impl<Lhs, Twiddle, Inner> MulByTwiddle<Lhs, Twiddle> for WideningMulByTwiddle<Inner>
 where
-    WM: WideningMulByScalar<Lhs, Twiddle>,
+    Inner: WideningMulByScalar<Lhs, Twiddle>,
 {
-    type Output = WM::Output;
+    type Output = Inner::Output;
 
     #[inline(always)]
     fn mul_by_twiddle(&self, lhs: &Lhs, twiddle: &Twiddle) -> Self::Output {
-        WM::mul_by_scalar_widen(lhs, twiddle)
+        Inner::mul_by_scalar_widen(lhs, twiddle)
     }
 }
