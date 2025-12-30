@@ -27,7 +27,7 @@ pub(crate) fn apply_radix_8_butterflies<R, Twiddle, M>(
     mul_by_twiddle: &M,
 ) where
     R: Clone + CheckedAdd,
-    M: MulByTwiddle<R, Twiddle>,
+    M: MulByTwiddle<R, Twiddle, Output = R>,
 {
     ys.into_iter()
         .zip(BUTTERFLY_TABLE.iter())
