@@ -7,12 +7,12 @@ mod octet_reversal;
 
 pub mod params;
 
-use ark_std::{cfg_chunks_mut, cfg_iter_mut};
+use ark_std::{cfg_chunks_mut, cfg_into_iter};
 use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::{array, fmt::Debug, iter::Sum, mem::MaybeUninit};
+use std::{array, fmt::Debug, iter::Sum};
 use zinc_utils::{add, from_ref::FromRef};
 
 use butterfly::*;
@@ -117,10 +117,8 @@ where
     Out: Clone + CheckedAdd + CheckedMul + Sum + FromRef<In> + Send + Sync,
     M: MulByTwiddle<In, PnttInt, Output = Out>,
 {
-    let mut output = Vec::with_capacity(C::OUTPUT_LEN);
-    cfg_iter_mut!(output.spare_capacity_mut())
-        .enumerate()
-        .for_each(|(i, out)| {
+    cfg_into_iter!(0..C::OUTPUT_LEN)
+        .map(|i| {
             let chunk = i >> C::BASE_DIM_LOG2; // i / C::BASE_DIM
             let row = i & C::BASE_DIM_MASK; // i % C::BASE_DIM
 
@@ -134,7 +132,7 @@ where
 
             // We always know that the first column of the Vandermonde matrix
             // consists of 1's.
-            let result = params.base_matrix[row][1..].iter().enumerate().fold(
+            params.base_matrix[row][1..].iter().enumerate().fold(
                 Out::from_ref(&input[oct_rev_chunk]),
                 |acc, (col, bm_row_col)| {
                     let term = mul_by_twiddle.mul_by_twiddle(
@@ -144,17 +142,9 @@ where
 
                     add!(acc, &term)
                 },
-            );
-
-            *out = MaybeUninit::new(result);
-        });
-
-    // Safety: We initialized all elements in the output.
-    unsafe {
-        output.set_len(C::OUTPUT_LEN);
-    }
-
-    output
+            )
+        })
+        .collect()
 }
 
 // TODO: make unchecked versions of the above.
