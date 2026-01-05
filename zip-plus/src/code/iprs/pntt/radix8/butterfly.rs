@@ -1,3 +1,5 @@
+use std::ops::Mul;
+
 use num_traits::CheckedAdd;
 use zinc_utils::add;
 
@@ -20,14 +22,15 @@ const BUTTERFLY_TABLE: [[usize; 7]; 8] = [
 /// of subresults in `x`. `twiddles[j][i]` is the factor to multiply
 /// `x[j + 1]` by when the butterfly table requests the `i`-th twiddle.
 /// Use `mul_by_twiddle` as a means to multiply `Out` by `Twiddle`.
+#[allow(clippy::arithmetic_side_effects)]
 pub(crate) fn apply_radix_8_butterflies<R, Twiddle, M>(
     ys: [&mut R; 8],
     xs: &[R],
     twiddles: &[[Twiddle; 8]; 7],
-    mul_by_twiddle: &M,
 ) where
     R: Clone + CheckedAdd,
-    M: MulByTwiddle<R, Twiddle, Output = R>,
+    M: MulByTwiddle<R>,
+    for<'a> &'a M: Mul<&'a Twiddle, Output = R>,
 {
     ys.into_iter()
         .zip(BUTTERFLY_TABLE.iter())
@@ -35,10 +38,7 @@ pub(crate) fn apply_radix_8_butterflies<R, Twiddle, M>(
             *y = xs[1..].iter().zip(&butterfly_row[..]).enumerate().fold(
                 xs[0].clone(),
                 |a, (j_minus_1, (x, &twiddle_idx))| {
-                    add!(
-                        a,
-                        &mul_by_twiddle.mul_by_twiddle(x, &twiddles[j_minus_1][twiddle_idx])
-                    )
+                    add!(a, &(M::new_ref(x) * &twiddles[j_minus_1][twiddle_idx]))
                 },
             )
         });
