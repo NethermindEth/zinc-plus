@@ -6,7 +6,6 @@ use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, ConstZero, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
-    borrow::Borrow,
     fmt::Display,
     hash::Hash,
     iter::{Product, Sum},
@@ -17,9 +16,7 @@ use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
     add,
     from_ref::FromRef,
-    inner_product::{
-        ForceUncheckedInnerProduct, InnerProduct, InnerProductError, InnerProductUnchecked,
-    },
+    inner_product::{InnerProduct, InnerProductError, InnerProductUnchecked},
     mul,
     mul_by_scalar::WideningMulByScalar,
     named::Named,
@@ -461,15 +458,6 @@ where
             poly.inner_product_unchecked(&r_powers, F::zero_with_cfg(&field_cfg))
                 .expect("Failed to evaluate polynomial")
         }
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> Borrow<ForceUncheckedInnerProduct<BinaryPoly<DEGREE_PLUS_ONE>>>
-    for BinaryPoly<DEGREE_PLUS_ONE>
-{
-    #[inline(always)]
-    fn borrow(&self) -> &ForceUncheckedInnerProduct<BinaryPoly<DEGREE_PLUS_ONE>> {
-        ForceUncheckedInnerProduct::new_ref(self)
     }
 }
 

@@ -255,6 +255,16 @@ where
     }
 }
 
+pub trait InnerProductWrapper<T> {
+    fn new_ref(value: &T) -> &Self;
+}
+
+impl<T> InnerProductWrapper<T> for T {
+    fn new_ref(value: &T) -> &Self {
+        value
+    }
+}
+
 /// A zero cost newtype wrapper for forcing
 /// unchecked inner product implementation at type level.
 ///
@@ -265,9 +275,9 @@ where
 #[repr(transparent)]
 pub struct ForceUncheckedInnerProduct<T>(T);
 
-impl<T> ForceUncheckedInnerProduct<T> {
+impl<T> InnerProductWrapper<T> for ForceUncheckedInnerProduct<T> {
     #[inline(always)]
-    pub const fn new_ref(value: &T) -> &Self {
+    fn new_ref(value: &T) -> &Self {
         // Safety: ForceUncheckedInnerProduct<T> is #[repr(transparent)] and is
         // guaranteed to have the same memory layout as T
         unsafe { &*(value as *const T as *const Self) }
@@ -294,9 +304,9 @@ where
 #[repr(transparent)]
 pub struct ForceWideningInnerProduct<T>(T);
 
-impl<T> ForceWideningInnerProduct<T> {
+impl<T> InnerProductWrapper<T> for ForceWideningInnerProduct<T> {
     #[inline(always)]
-    pub const fn new_ref(value: &T) -> &Self {
+    fn new_ref(value: &T) -> &Self {
         // Safety: ForceWideningInnerProduct is #[repr(transparent)] and is
         // guaranteed to have the same memory layout as T
         unsafe { &*(value as *const T as *const Self) }

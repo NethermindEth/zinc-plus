@@ -11,7 +11,6 @@ use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
     array,
-    borrow::Borrow,
     fmt::Display,
     hash::Hash,
     iter::{Product, Sum},
@@ -20,10 +19,7 @@ use std::{
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
     from_ref::FromRef,
-    inner_product::{
-        ForceUncheckedInnerProduct, ForceWideningInnerProduct, InnerProduct, InnerProductError,
-        InnerProductUnchecked, WideningInnerProduct,
-    },
+    inner_product::{InnerProduct, InnerProductError, InnerProductUnchecked, WideningInnerProduct},
     mul_by_scalar::MulByScalar,
     named::Named,
     projectable_to_field::ProjectableToField,
@@ -612,25 +608,5 @@ where
     #[inline(always)]
     fn widening_inner_product(&self, rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
         self.coeffs.widening_inner_product(rhs, zero)
-    }
-}
-
-impl<R, const DEGREE_PLUS_ONE: usize>
-    Borrow<ForceUncheckedInnerProduct<DensePolynomial<R, DEGREE_PLUS_ONE>>>
-    for DensePolynomial<R, DEGREE_PLUS_ONE>
-{
-    #[inline(always)]
-    fn borrow(&self) -> &ForceUncheckedInnerProduct<DensePolynomial<R, DEGREE_PLUS_ONE>> {
-        ForceUncheckedInnerProduct::new_ref(self)
-    }
-}
-
-impl<R, const DEGREE_PLUS_ONE: usize>
-    Borrow<ForceWideningInnerProduct<DensePolynomial<R, DEGREE_PLUS_ONE>>>
-    for DensePolynomial<R, DEGREE_PLUS_ONE>
-{
-    #[inline(always)]
-    fn borrow(&self) -> &ForceWideningInnerProduct<DensePolynomial<R, DEGREE_PLUS_ONE>> {
-        ForceWideningInnerProduct::new_ref(self)
     }
 }

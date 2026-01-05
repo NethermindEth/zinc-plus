@@ -1,5 +1,3 @@
-use std::borrow::Borrow;
-
 use crate::{
     ZipError,
     code::LinearCode,
@@ -15,7 +13,7 @@ use itertools::Itertools;
 use num_traits::{ConstOne, ConstZero, Zero};
 use zinc_poly::{Polynomial, mle::DenseMultilinearExtension};
 use zinc_transcript::traits::Transcript;
-use zinc_utils::inner_product::InnerProduct;
+use zinc_utils::inner_product::{InnerProduct, InnerProductWrapper};
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     #[allow(clippy::arithmetic_side_effects)]
@@ -54,7 +52,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             let evals: Vec<_> = poly
                 .evaluations
                 .iter()
-                .map(|p| p.borrow().inner_product(&alphas, Zt::CombR::ZERO))
+                .map(|p| Zt::EvalDotChal::new_ref(p).inner_product(&alphas, Zt::CombR::ZERO))
                 .try_collect()?;
 
             // u' in the Zinc paper

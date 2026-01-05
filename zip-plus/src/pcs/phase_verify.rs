@@ -1,5 +1,3 @@
-use std::borrow::Borrow;
-
 use crate::{
     ZipError,
     code::LinearCode,
@@ -18,7 +16,7 @@ use zinc_poly::Polynomial;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
     from_ref::FromRef,
-    inner_product::{InnerProduct, InnerProductUnchecked},
+    inner_product::{InnerProduct, InnerProductUnchecked, InnerProductWrapper},
     mul_by_scalar::MulByScalar,
     projectable_to_field::ProjectableToField,
 };
@@ -147,12 +145,11 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             let column_entries: Vec<_> = column_entries
                 .iter()
                 .map(Zt::Comb::from_ref)
-                .map(|p| p.borrow().inner_product(alphas, Zt::CombR::ZERO))
+                .map(|p| Zt::CombDotChal::new_ref(&p).inner_product(alphas, Zt::CombR::ZERO))
                 .try_collect()?;
             column_entries.inner_product(coeffs, Zt::CombR::ZERO)?
         } else {
-            (Zt::Comb::from_ref(&column_entries[0]))
-                .borrow()
+            (Zt::CombDotChal::new_ref(&Zt::Comb::from_ref(&column_entries[0])))
                 .inner_product(alphas, Zt::CombR::ZERO)?
         };
 

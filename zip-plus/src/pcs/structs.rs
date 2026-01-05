@@ -4,19 +4,22 @@ use crate::{
 };
 use crypto_primitives::{ConstIntRing, ConstIntSemiring, DenseRowMatrix, FixedSemiring};
 use num_traits::CheckedAdd;
-use std::{borrow::Borrow, marker::PhantomData, ops::Neg};
+use std::{marker::PhantomData, ops::Neg};
 use zinc_poly::{ConstCoeffBitWidth, Polynomial};
 use zinc_primality::PrimalityTest;
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
-    from_ref::FromRef, inner_product::InnerProduct, mul_by_scalar::MulByScalar, named::Named,
+    from_ref::FromRef,
+    inner_product::{InnerProduct, InnerProductWrapper},
+    mul_by_scalar::MulByScalar,
+    named::Named,
 };
 
 pub trait ZipTypes: Send + Sync {
     const NUM_COLUMN_OPENINGS: usize;
 
     /// Semiring of witness/polynomial evaluations on boolean hypercube
-    type Eval: Borrow<Self::EvalDotChal> + Named + ConstCoeffBitWidth + Clone + Send + Sync;
+    type Eval: Named + ConstCoeffBitWidth + Clone + Send + Sync;
 
     /// Semiring of codeword elements, at least as wide as the evaluation ring
     type Cw: FixedSemiring
@@ -48,13 +51,12 @@ pub trait ZipTypes: Send + Sync {
     /// wide as the evaluation, codeword, and challenge rings.
     type Comb: FixedSemiring
         + Polynomial<Self::CombR>
-        + Borrow<Self::CombDotChal>
         + FromRef<Self::Eval>
         + FromRef<Self::Cw>
         + Named;
 
-    type EvalDotChal: InnerProduct<Self::Chal, Self::CombR>;
-    type CombDotChal: InnerProduct<Self::Chal, Self::CombR>;
+    type EvalDotChal: InnerProduct<Self::Chal, Self::CombR> + InnerProductWrapper<Self::Eval>;
+    type CombDotChal: InnerProduct<Self::Chal, Self::CombR> + InnerProductWrapper<Self::Comb>;
 }
 
 /// Zip is a Polynomial Commitment Scheme (PCS) that supports committing to
