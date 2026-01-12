@@ -5,22 +5,22 @@ use crypto_primitives::PrimeField;
 #[cfg(feature = "parallel")]
 use rayon::iter::*;
 use zinc_poly::{
-    mle::{DenseMultilinearExtension, MultilinearExtension},
+    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
     univariate::nat_evaluation::NatEvaluatedPoly,
 };
-use zinc_utils::mul_by_scalar::MulByScalar;
+use zinc_utils::inner_transparent_field::InnerTransparentField;
 
 #[repr(transparent)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProverMsg<F>(pub NatEvaluatedPoly<F>);
 
 /// Sumcheck Prover State.
-pub struct ProverState<F> {
+pub struct ProverState<F: PrimeField> {
     /// Sampled randomness given by the verifier.
     pub randomness: Vec<F>,
     /// Stores the list of multilinear extensions
     /// the sumcheck polynomial is comprised of.
-    pub mles: Vec<DenseMultilinearExtension<F>>,
+    pub mles: Vec<DenseMultilinearExtension<F::Inner>>,
     /// Number of variables.
     pub num_vars: usize,
     /// Max degree.
@@ -29,10 +29,14 @@ pub struct ProverState<F> {
     pub round: usize,
 }
 
-impl<F> ProverState<F> {
+impl<F: PrimeField> ProverState<F> {
     /// Initialize the prover to argue for the sum of products of
     /// MLE's in {0,1}^`num_vars`.
-    pub fn new(mles: Vec<DenseMultilinearExtension<F>>, nvars: usize, degree: usize) -> Self {
+    pub fn new(
+        mles: Vec<DenseMultilinearExtension<F::Inner>>,
+        nvars: usize,
+        degree: usize,
+    ) -> Self {
         Self {
             randomness: Vec::with_capacity(nvars),
             mles,
@@ -45,7 +49,7 @@ impl<F> ProverState<F> {
 
 impl<F> ProverState<F>
 where
-    for<'a> F: PrimeField + MulByScalar<&'a F>,
+    F: InnerTransparentField,
 {
     /// Receive message from verifier, generate prover message, and proceed to
     /// next round.
@@ -69,7 +73,7 @@ where
             let r = self.randomness[i - 1].clone();
 
             cfg_iter_mut!(self.mles).for_each(|multiplicand| {
-                multiplicand.fix_variables(slice::from_ref(&r), F::zero_with_cfg(config));
+                multiplicand.fix_variables_with_config(slice::from_ref(&r), config);
             });
         } else if self.round > 0 {
             panic!("verifier message is empty");
@@ -130,14 +134,14 @@ where
             s.vals0
                 .iter_mut()
                 .zip(polys.iter())
-                .for_each(|(v0, poly)| *v0 = poly[index].clone());
+                .for_each(|(v0, poly)| *v0.inner_mut() = poly[index].clone());
             s.levals[0] = comb_fn(&s.vals0);
 
             if degree > 0 {
                 s.vals1
                     .iter_mut()
                     .zip(polys.iter())
-                    .for_each(|(v1, poly)| *v1 = poly[index + 1].clone());
+                    .for_each(|(v1, poly)| *v1.inner_mut() = poly[index + 1].clone());
                 s.levals[1] = comb_fn(&s.vals1);
 
                 for (i, (v1, v0)) in s.vals1.iter().zip(s.vals0.iter()).enumerate() {

@@ -40,12 +40,9 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
         let mut transcript: PcsTranscript = test_transcript.into();
 
-        let field_modulus = F::Inner::from_ref(
-            &transcript
-                .fs_transcript
-                .get_prime::<Zt::Fmod, Zt::PrimeTest>(),
-        );
-        let field_cfg = F::make_cfg(&field_modulus)?;
+        let field_cfg = transcript
+            .fs_transcript
+            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
         let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
         let projecting_element: F = (&projecting_element).into_with_cfg(&field_cfg);
 

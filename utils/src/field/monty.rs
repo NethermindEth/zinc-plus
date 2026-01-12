@@ -1,10 +1,13 @@
 use crypto_primitives::{
     FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_monty::MontyField,
+    crypto_bigint_uint::Uint,
 };
 use num_traits::CheckedMul;
+use std::ops::MulAssign;
 
 use crate::{
-    from_ref::FromRef, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
+    from_ref::FromRef, inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
+    projectable_to_field::ProjectableToField,
 };
 
 impl<const LIMBS: usize> MulByScalar<&Self> for MontyField<LIMBS> {
@@ -31,6 +34,28 @@ where
     }
 }
 
+impl<const LIMBS: usize> InnerTransparentField for MontyField<LIMBS> {
+    fn add_inner(lhs: &Self::Inner, rhs: &Self::Inner, config: &Self::Config) -> Self::Inner {
+        Uint::new(
+            lhs.inner()
+                .add_mod(rhs.inner(), config.modulus().as_nz_ref()),
+        )
+    }
+
+    fn sub_inner(lhs: &Self::Inner, rhs: &Self::Inner, config: &Self::Config) -> Self::Inner {
+        Uint::new(
+            lhs.inner()
+                .sub_mod(rhs.inner(), config.modulus().as_nz_ref()),
+        )
+    }
+
+    fn mul_assign_by_inner(&mut self, rhs: &Self::Inner) {
+        let rhs: Self = Self::new_unchecked(*rhs, self.cfg());
+
+        self.mul_assign(rhs);
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::arithmetic_side_effects,
@@ -45,6 +70,8 @@ mod prop_tests {
         crypto_bigint_uint::Uint,
     };
     use proptest::prelude::*;
+
+    use crate::inner_transparent_field::InnerTransparentField;
 
     const LIMBS: usize = 4;
     const MODULUS: &str = "00dca94d8a1ecce3b6e8755d8999787d0524d8ca1ea755e7af84fb646fa31f27";
@@ -111,11 +138,16 @@ mod prop_tests {
         }
 
         #[test]
-        fn prop_from_with_cfg_generic_matches_owned(x in any::<u64>()) {
+        fn prop_inner_ops_match_normal_ops((x, y) in any::<(u128, u128)>()) {
             let cfg = get_dyn_config(MODULUS);
             let a: F = x.into_with_cfg(&cfg);
-            let b: F = F::from_with_cfg(&x, &cfg);
-            prop_assert_eq!(a, b);
+            let b: F = y.into_with_cfg(&cfg);
+            prop_assert_eq!(F::add_inner(a.inner(), b.inner(), &cfg), (a.clone() + b.clone()).into_inner());
+            prop_assert_eq!(F::sub_inner(a.inner(), b.inner(), &cfg), (a.clone() - b.clone()).into_inner());
+
+            let mut res = a.clone();
+            res.mul_assign_by_inner(b.inner());
+            prop_assert_eq!(res, a * b);
         }
     }
 }
