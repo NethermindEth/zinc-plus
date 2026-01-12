@@ -1,14 +1,22 @@
 use core::ops::{Add, AddAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign};
+use num_traits::Zero;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 use crate::{
     EvaluationError,
     mle::{MultilinearExtension, MultilinearExtensionRand},
 };
-use ark_std::log2;
-use crypto_primitives::{Matrix, Ring, Semiring};
+use ark_std::{cfg_into_iter, log2};
+use crypto_primitives::{Matrix, PrimeField, Ring, Semiring};
 use rand::{distr::StandardUniform, prelude::*};
 use rand_core::RngCore;
-use zinc_utils::{add, mul_by_scalar::MulByScalar, sub};
+use zinc_utils::{
+    add, inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
+    projectable_to_field::ProjectableToField, sub,
+};
+
+use super::MultilinearExtensionWithConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DenseMultilinearExtension<T> {
@@ -114,6 +122,76 @@ impl<R: Semiring> DenseMultilinearExtension<R> {
             .iter_mut()
             .zip(other.evaluations.iter())
             .for_each(|(a, b)| f(a, b));
+    }
+}
+
+impl<F> MultilinearExtensionWithConfig<F> for DenseMultilinearExtension<F::Inner>
+where
+    F: InnerTransparentField,
+{
+    #[allow(clippy::arithmetic_side_effects)]
+    fn fix_variables_with_config(
+        &mut self,
+        partial_point: &[F],
+        config: &<F as PrimeField>::Config,
+    ) {
+        assert!(
+            partial_point.len() <= self.num_vars,
+            "too many partial points"
+        );
+
+        if partial_point.len().is_zero() {
+            return;
+        }
+
+        let poly = &mut self.evaluations;
+        let nv = self.num_vars;
+        let dim = partial_point.len();
+
+        let mut r = partial_point[0].clone();
+        for i in 1..dim + 1 {
+            for b in 0..1 << (nv - i) {
+                *r.inner_mut() = partial_point[i - 1].inner().clone();
+                if poly[2 * b + 1] != poly[2 * b] {
+                    // a = f(1) - f(0)
+                    let a = F::sub_inner(&poly[2 * b + 1], &poly[2 * b], config);
+
+                    // poly[b] = f(0) + r * a
+                    r.mul_assign_by_inner(&a);
+                    poly[b] = F::add_inner(&poly[2 * b], r.inner(), config);
+                } else {
+                    poly[b] = poly[2 * b].clone();
+                };
+            }
+        }
+
+        self.evaluations.truncate(1 << (nv - dim));
+        self.num_vars = sub!(nv, dim);
+    }
+
+    fn fixed_variables_with_config(
+        &self,
+        partial_point: &[F],
+        config: &<F as PrimeField>::Config,
+    ) -> Self {
+        let mut res = self.clone();
+        res.fix_variables_with_config(partial_point, config);
+        res
+    }
+
+    fn evaluate_with_config(&self, point: &[F], config: &<F as PrimeField>::Config) -> Option<F> {
+        if point.len() == self.num_vars {
+            Some(F::new_unchecked_with_cfg(
+                self.fixed_variables_with_config(point, config)
+                    .evaluations
+                    .into_iter()
+                    .next()
+                    .expect("Evaluations should not be empty"),
+                config,
+            ))
+        } else {
+            None
+        }
     }
 }
 
@@ -280,6 +358,20 @@ impl<R: Semiring> AddAssign<(R, &Self)> for DenseMultilinearExtension<R> {
     }
 }
 
+pub fn project_coeffs<F: PrimeField, R: ProjectableToField<F> + Send + Sync>(
+    mle: DenseMultilinearExtension<R>,
+    sampled_value: &F,
+) -> DenseMultilinearExtension<F::Inner> {
+    let projection = R::prepare_projection(sampled_value);
+
+    DenseMultilinearExtension {
+        evaluations: cfg_into_iter!(mle.evaluations)
+            .map(|x| projection(&x).inner().clone())
+            .collect(),
+        num_vars: mle.num_vars,
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::arithmetic_side_effects,
@@ -292,20 +384,24 @@ mod tests {
 
     use super::*;
 
-    use crypto_bigint::BoxedUint;
     use crypto_primitives::{
-        DenseRowMatrix, IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
+        DenseRowMatrix, IntoWithConfig, PrimeField, crypto_bigint_monty::MontyField,
+        crypto_bigint_uint::Uint,
     };
     use proptest::prelude::*;
 
-    fn get_dyn_config(hex_modulus: &str) -> <BoxedMontyField as PrimeField>::Config {
-        let modulus =
-            BoxedUint::from_str_radix_vartime(hex_modulus, 16).expect("Invalid modulus hex string");
-        BoxedMontyField::make_cfg(&modulus).expect("Failed to create field config")
+    const LIMBS: usize = 4;
+
+    fn get_dyn_config(hex_modulus: &str) -> <MontyField<LIMBS> as PrimeField>::Config {
+        let modulus = Uint::new(
+            crypto_bigint::Uint::from_str_radix_vartime(hex_modulus, 16)
+                .expect("Invalid modulus hex string"),
+        );
+        MontyField::make_cfg(&modulus).expect("Failed to create field config")
     }
 
     const MODULUS: &str = "0076F668F4274572E39A3EA8285319B5";
-    type F = BoxedMontyField;
+    type F = MontyField<LIMBS>;
 
     fn any_f(cfg: <F as PrimeField>::Config) -> impl Strategy<Value = F> + 'static {
         any::<u128>().prop_map(move |v| v.into_with_cfg(&cfg))
@@ -315,8 +411,8 @@ mod tests {
         let cfg = get_dyn_config(MODULUS);
         (0usize..=5).prop_flat_map(move |n| {
             let len = 1usize << n;
-            let cfg = cfg.clone();
-            prop::collection::vec(any_f(cfg.clone()), len).prop_map(move |evals| {
+            let cfg = cfg;
+            prop::collection::vec(any_f(cfg), len).prop_map(move |evals| {
                 DenseMultilinearExtension::from_evaluations_vec(n, evals, F::zero_with_cfg(&cfg))
             })
         })
@@ -699,13 +795,13 @@ mod tests {
     > {
         let cfg = get_dyn_config(MODULUS);
         (0usize..=5).prop_flat_map(move |n| {
-            let cfg = cfg.clone();
+            let cfg = cfg;
             let len = 1usize << n;
-            prop::collection::vec(any_f(cfg.clone()), len).prop_flat_map(move |e1| {
-                let cfg = cfg.clone();
+            prop::collection::vec(any_f(cfg), len).prop_flat_map(move |e1| {
+                let cfg = cfg;
                 let n2 = n;
-                prop::collection::vec(any_f(cfg.clone()), len).prop_flat_map(move |e2| {
-                    let cfg = cfg.clone();
+                prop::collection::vec(any_f(cfg), len).prop_flat_map(move |e2| {
+                    let cfg = cfg;
                     let n3 = n2;
                     point_n(n3).prop_map({
                         let e1v = e1.clone();
@@ -779,6 +875,24 @@ mod tests {
 
             prop_assert_eq!(p_step.evaluations, p_once.evaluations);
             prop_assert_eq!(p_step.num_vars, p_once.num_vars);
+        }
+
+        #[test]
+        fn prop_mle_eval_eq_eval_with_config((p, r) in any_dme().prop_flat_map(|p| {
+            let n = p.num_vars;
+            let point = point_n(n);
+            (Just(p), point)
+        })) {
+            let cfg = get_dyn_config(MODULUS);
+
+            let p_inner = DenseMultilinearExtension {
+                num_vars: p.num_vars,
+                evaluations: p.evaluations.iter().map(|x| *x.inner()).collect()
+            };
+
+            let lhs = p.evaluate(&r, F::zero_with_cfg(&cfg)).unwrap();
+            let rhs = p_inner.evaluate_with_config(&r, &cfg).unwrap();
+            prop_assert_eq!(lhs, rhs);
         }
     }
 }
