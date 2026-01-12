@@ -6,6 +6,7 @@ use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, ConstZero, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
+    array,
     fmt::Display,
     hash::Hash,
     iter::{Product, Sum},
@@ -58,6 +59,22 @@ impl<const DEGREE_PLUS_ONE: usize> From<BinaryPoly<DEGREE_PLUS_ONE>>
     #[inline(always)]
     fn from(binary_poly: BinaryPoly<DEGREE_PLUS_ONE>) -> Self {
         binary_poly.0
+    }
+}
+
+impl From<u32> for BinaryPoly<32> {
+    fn from(value: u32) -> Self {
+        Self(DensePolynomial {
+            coeffs: array::from_fn(|i| Boolean::new(value & (1 << i) != 0)),
+        })
+    }
+}
+
+impl From<u64> for BinaryPoly<64> {
+    fn from(value: u64) -> Self {
+        Self(DensePolynomial {
+            coeffs: array::from_fn(|i| Boolean::new(value & (1 << i) != 0)),
+        })
     }
 }
 

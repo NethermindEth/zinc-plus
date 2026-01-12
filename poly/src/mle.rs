@@ -1,5 +1,6 @@
 pub mod dense;
 
+use crypto_primitives::PrimeField;
 pub use dense::DenseMultilinearExtension;
 
 use rand::prelude::*;
@@ -39,6 +40,25 @@ pub trait MultilinearExtension<T>:
     fn fixed_variables<S>(&self, partial_point: &[S], zero: T) -> Self
     where
         T: for<'a> MulByScalar<&'a S>;
+}
+
+/// This trait allows to evaluate
+/// multilinear extension types that store
+/// `F::Inner` Montgomery representations
+/// instead of field elements `F` which are typically
+/// an `F::Inner` and the field config.
+pub trait MultilinearExtensionWithConfig<F: PrimeField> {
+    /// Reduce the number of variables of `self` by fixing the
+    /// `partial_point.len()` variables at `partial_point`.
+    fn fix_variables_with_config(&mut self, partial_point: &[F], config: &F::Config);
+
+    /// Creates a new object with the number of variables of `self` reduced by
+    /// fixing the `partial_point.len()` variables at `partial_point`.
+    fn fixed_variables_with_config(&self, partial_point: &[F], config: &F::Config) -> Self;
+
+    /// Evaluate the MLE in full. Asserts that the `point.len()`
+    /// is equal the `self.num_vars`.
+    fn evaluate_with_config(&self, point: &[F], config: &F::Config) -> Option<F>;
 }
 
 pub trait MultilinearExtensionRand<T> {

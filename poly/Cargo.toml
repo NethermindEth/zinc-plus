@@ -38,3 +38,7 @@ parallel = ["dep:rayon"]
 [[bench]]
 name = "nat_evaluation"
 harness = false
+
+[[bench]]
+name = "mle_evaluation"
+harness = false
