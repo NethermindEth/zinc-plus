@@ -1,5 +1,5 @@
 [workspace]
-members = ["piop", "poly", "primality", "transcript", "utils", "zip-plus"]
+members = ["piop", "poly", "primality", "transcript", "uair", "utils", "zip-plus"]
 resolver = "2"
 default-members = ["piop", "poly", "primality", "transcript", "utils", "zip-plus"]
 
@@ -25,6 +25,7 @@ rayon = { version = "1.10" }
 thiserror = "2.0"
 zinc-primality = { path = "primality/" }
 zinc-transcript = { path = "transcript/" }
+zinc-uair = { path = "uair/" }
 zinc-utils = { path = "utils/" }
 zinc-poly = { path = "poly/" }
 
