@@ -12,15 +12,22 @@ use zinc_uair::{
 use zinc_utils::mul_by_scalar::MulByScalar;
 
 #[derive(Clone, Debug)]
-pub struct IdealCheckProof<R> {
+pub struct Proof<R> {
     pub combined_mle_values: Vec<R>,
 }
 
 #[derive(Clone, Debug)]
-pub struct IdealCheckProverState<R, C> {
+pub struct ProverState<R, C> {
     pub evaluation_points: Vec<Vec<C>>,
     pub combined_mles: Vec<DenseMultilinearExtension<R>>,
 }
+
+pub struct SubClaim<R, C> {
+    pub point: Vec<C>,
+    pub value: R,
+}
+
+pub type Result<T, R, I> = std::result::Result<T, IdealCheckError<R, I>>;
 
 pub struct IdealCheckProtocol<R, C>(PhantomData<(R, C)>);
 
@@ -36,8 +43,7 @@ where
         cs_down: &[DenseMultilinearExtension<R>],
         num_constraints: usize,
         num_vars: usize,
-    ) -> Result<(IdealCheckProof<R>, IdealCheckProverState<R, C>), IdealCheckError<R, U::Ideal>>
-    {
+    ) -> Result<(Proof<R>, ProverState<R, C>), R, U::Ideal> {
         let combined_mles =
             Self::get_combined_poly_mles::<U>(cs_up, cs_down, num_constraints, num_vars);
         let mut transcription_buf: Vec<u8> = vec![0; R::NUM_BYTES];
@@ -58,22 +64,23 @@ where
         }
 
         Ok((
-            IdealCheckProof {
+            Proof {
                 combined_mle_values,
             },
-            IdealCheckProverState {
+            ProverState {
                 evaluation_points,
                 combined_mles,
             },
         ))
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn verify_as_subprotocol<U: Uair<R>>(
         transcript: &mut impl Transcript,
-        proof: IdealCheckProof<R>,
+        proof: Proof<R>,
         num_constraints: usize,
         num_vars: usize,
-    ) -> Result<(), IdealCheckError<R, U::Ideal>> {
+    ) -> Result<Vec<SubClaim<R, C>>, R, U::Ideal> {
         let mut transcription_buf: Vec<u8> = vec![0; R::NUM_BYTES];
 
         let mut evaluation_points: Vec<Vec<C>> = Vec::with_capacity(num_constraints);
@@ -109,7 +116,11 @@ where
                 Ok(())
             })?;
 
-        Ok(())
+        Ok(evaluation_points
+            .into_iter()
+            .zip(combined_mle_values)
+            .map(|(point, value)| SubClaim { point, value })
+            .collect())
     }
 
     fn get_combined_poly_mles<U: Uair<R>>(
