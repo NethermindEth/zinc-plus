@@ -12,7 +12,7 @@ use num_traits::{CheckedAdd, CheckedMul, CheckedSub, ConstOne, ConstZero, One, Z
 /// that implements `FixedSemiring` but has zero-cost
 /// operations.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct DummySemiring;
+pub struct DummySemiring;
 
 impl Display for DummySemiring {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
