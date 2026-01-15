@@ -241,12 +241,17 @@ mod tests {
     use crypto_primitives::{FixedSemiring, crypto_bigint_int::Int};
     use itertools::Itertools;
     use num_traits::ConstZero;
-    use zinc_poly::mle::DenseMultilinearExtension;
+    use zinc_poly::{
+        mle::DenseMultilinearExtension,
+        univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal},
+    };
+    use zinc_transcript::KeccakTranscript;
     use zinc_uair::{
         ConstraintBuilder, Uair,
         constraint_counter::count_constraints,
         ideal::{Ideal, ZeroIdeal},
     };
+    use zinc_utils::from_ref::FromRef;
 
     use crate::ideal_check::IdealCheckProtocol;
 
@@ -314,5 +319,58 @@ mod tests {
 
         assert_eq!(&mles[0], &(up[0].clone() * &down[1] - &up[1]));
         assert_eq!(&mles[1], &up[2]);
+    }
+
+    struct TestAirNoMultiplication;
+
+    impl Uair<DensePolynomial<Int<4>, 32>> for TestAirNoMultiplication {
+        type Ideal = DegreeOneIdeal<Int<4>, ZeroIdeal<DensePolynomial<Int<4>, 32>>, 32>;
+
+        fn num_cols() -> usize {
+            3
+        }
+
+        #[allow(clippy::arithmetic_side_effects)]
+        fn constrain<B>(b: &mut B, up: &[B::Expr], _down: &[B::Expr])
+        where
+            B: ConstraintBuilder<DensePolynomial<Int<4>, 32>>,
+            B::Ideal: FromRef<Self::Ideal>,
+        {
+            b.assert_in_ideal(
+                up[0].clone() + &up[1] - &up[2],
+                &B::Ideal::from_ref(&DegreeOneIdeal::new(Int::from(2))),
+            );
+        }
+    }
+
+    #[test]
+    fn test_successful_verification() {
+        let mut transcript = KeccakTranscript::new();
+
+        let up: Vec<DenseMultilinearExtension<Int<4>>> = vec![
+            DenseMultilinearExtension::from_evaluations_slice(
+                4,
+                &(0..4).map(Int::from_i64).collect_vec(),
+                Int::ZERO,
+            ),
+            DenseMultilinearExtension::from_evaluations_slice(
+                4,
+                &(4..8).map(Int::from_i64).collect_vec(),
+                Int::ZERO,
+            ),
+            DenseMultilinearExtension::from_evaluations_slice(
+                4,
+                &(8..12).map(Int::from_i64).collect_vec(),
+                Int::ZERO,
+            ),
+        ];
+
+        IdealCheckProtocol::prove_as_subprotocol(
+            &mut transcript.clone(),
+            cs_up,
+            cs_down,
+            num_constraints,
+            num_vars,
+        )
     }
 }
