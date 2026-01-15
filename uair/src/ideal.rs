@@ -2,11 +2,12 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 
 use crypto_primitives::{FixedSemiring, Semiring};
+use zinc_utils::from_ref::FromRef;
 
-pub trait Ideal<R: Semiring>: Clone + Debug + Send + Sync {
+pub trait Ideal<R: Semiring>: FromRef<Self> + Clone + Debug + Send + Sync {
     fn zero_ideal() -> Self;
 
-    fn contains(&self, elem: R) -> bool;
+    fn contains(&self, elem: &R) -> bool;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -19,29 +20,36 @@ impl<R: FixedSemiring> Ideal<R> for ZeroIdeal<R> {
     }
 
     #[inline(always)]
-    fn contains(&self, elem: R) -> bool {
+    fn contains(&self, elem: &R) -> bool {
         elem.is_zero()
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct DummyIdeal<R: Semiring, I: Ideal<R>>(PhantomData<(R, I)>);
+impl<R: FixedSemiring> FromRef<ZeroIdeal<R>> for ZeroIdeal<R> {
+    #[inline(always)]
+    fn from_ref(ideal: &ZeroIdeal<R>) -> Self {
+        ideal.clone()
+    }
+}
 
-impl<R: Semiring, I: Ideal<R>> Ideal<R> for DummyIdeal<R, I> {
+#[derive(Clone, Copy, Debug)]
+pub struct DummyIdeal<R: Semiring>(PhantomData<R>);
+
+impl<R: Semiring> Ideal<R> for DummyIdeal<R> {
     #[inline(always)]
     fn zero_ideal() -> Self {
         DummyIdeal(Default::default())
     }
 
     #[inline(always)]
-    fn contains(&self, _elem: R) -> bool {
+    fn contains(&self, _elem: &R) -> bool {
         false
     }
 }
 
-impl<R: Semiring, I: Ideal<R>> From<I> for DummyIdeal<R, I> {
+impl<R: Semiring, I: Ideal<R>> FromRef<I> for DummyIdeal<R> {
     #[inline(always)]
-    fn from(_ideal: I) -> Self {
+    fn from_ref(_ideal: &I) -> Self {
         DummyIdeal(Default::default())
     }
 }

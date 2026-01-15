@@ -1,8 +1,6 @@
-use std::marker::PhantomData;
-
-use ark_std::cfg_into_iter;
 use crypto_primitives::{FixedSemiring, Semiring};
 use itertools::Itertools;
+use std::marker::PhantomData;
 use thiserror::Error;
 use zinc_poly::{EvaluationError, mle::DenseMultilinearExtension};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
@@ -31,13 +29,15 @@ where
     R: FixedSemiring + for<'a> MulByScalar<&'a C> + ConstTranscribable,
     C: ConstTranscribable,
 {
+    #[allow(clippy::type_complexity)]
     pub fn prove_as_subprotocol<U: Uair<R>>(
         transcript: &mut impl Transcript,
         cs_up: &[DenseMultilinearExtension<R>],
         cs_down: &[DenseMultilinearExtension<R>],
         num_constraints: usize,
         num_vars: usize,
-    ) -> Result<(IdealCheckProof<R>, IdealCheckProverState<R, C>), IdealCheckError> {
+    ) -> Result<(IdealCheckProof<R>, IdealCheckProverState<R, C>), IdealCheckError<R, U::Ideal>>
+    {
         let combined_mles =
             Self::get_combined_poly_mles::<U>(cs_up, cs_down, num_constraints, num_vars);
         let mut transcription_buf: Vec<u8> = vec![0; R::NUM_BYTES];
@@ -73,21 +73,41 @@ where
         proof: IdealCheckProof<R>,
         num_constraints: usize,
         num_vars: usize,
-    ) -> Result<(), IdealCheckError> {
+    ) -> Result<(), IdealCheckError<R, U::Ideal>> {
         let mut transcription_buf: Vec<u8> = vec![0; R::NUM_BYTES];
 
         let mut evaluation_points: Vec<Vec<C>> = Vec::with_capacity(num_constraints);
-        let mut combined_mle_values: Vec<R> = Vec::with_capacity(num_constraints);
+        let combined_mle_values = proof.combined_mle_values;
 
-        for mle_value in proof.combined_mle_values {
+        for mle_value in &combined_mle_values {
             let challenge: Vec<C> = transcript.get_challenges(num_vars);
 
             mle_value.write_transcription_bytes(&mut transcription_buf);
             transcript.absorb(&transcription_buf);
 
             evaluation_points.push(challenge);
-            combined_mle_values.push(mle_value);
         }
+
+        let mut ideal_collector = IdealCollector::<_, U::Ideal>::new(num_constraints);
+
+        let dummy_up_and_down: Vec<DummySemiring> = vec![DummySemiring; num_constraints];
+
+        U::constrain(&mut ideal_collector, &dummy_up_and_down, &dummy_up_and_down);
+
+        ideal_collector
+            .ideals
+            .iter()
+            .zip(combined_mle_values.iter())
+            .try_for_each(|(ideal, mle_value)| {
+                if !ideal.contains(mle_value) {
+                    return Err(IdealCheckError::IdealCheckFailed(
+                        mle_value.clone(),
+                        ideal.clone(),
+                    ));
+                }
+
+                Ok(())
+            })?;
 
         Ok(())
     }
@@ -107,7 +127,7 @@ where
 
         let pointers: Vec<*mut R> = h_evals.iter_mut().map(|col| col.as_mut_ptr()).collect_vec();
 
-        cfg_into_iter!(0..len).for_each(|i| {
+        (0..len).for_each(|i| {
             let mut builder = IdealCheckConstraintBuilder::new(num_constraints);
 
             let up = cs_up
@@ -157,7 +177,7 @@ impl<R: Semiring> IdealCheckConstraintBuilder<R> {
     }
 }
 
-impl<R: FixedSemiring> ConstraintBuilder for IdealCheckConstraintBuilder<R> {
+impl<R: FixedSemiring> ConstraintBuilder<R> for IdealCheckConstraintBuilder<R> {
     type Expr = R;
     // Ignore all ideal business on the side of the prover.
     type Ideal = DummyIdeal<Self::Expr>;
@@ -168,37 +188,38 @@ impl<R: FixedSemiring> ConstraintBuilder for IdealCheckConstraintBuilder<R> {
     }
 }
 
-pub(crate) struct IdealCollector<R: Semiring> {
-    pub ideals: Vec<R>,
+pub(crate) struct IdealCollector<R: Semiring, I: Ideal<R>> {
+    pub ideals: Vec<I>,
+    _phantom: PhantomData<R>,
 }
 
-impl<R: Semiring> IdealCollector<R> {
+impl<R: Semiring, I: Ideal<R>> IdealCollector<R, I> {
     pub fn new(num_constraints: usize) -> Self {
         Self {
             ideals: Vec::with_capacity(num_constraints),
+            _phantom: Default::default(),
         }
     }
 }
 
-impl<R> ConstraintBuilder for IdealCollector<R>
-where
-    R: FixedSemiring,
-{
+impl<R: FixedSemiring, I: Ideal<R>> ConstraintBuilder<R> for IdealCollector<R, I> {
     type Expr = DummySemiring;
-    type RingForIdeals = R;
+    type Ideal = I;
 
-    fn assert_in_ideal(&mut self, _expr: Self::Expr, ideal_generator: &Self::Expr) {
-        self.ideals.push(ideal_generator.clone());
+    fn assert_in_ideal(&mut self, _expr: Self::Expr, ideal: &Self::Ideal) {
+        self.ideals.push(ideal.clone());
     }
 }
 
 #[derive(Clone, Debug, Error)]
-pub enum IdealCheckError {
+pub enum IdealCheckError<R, I> {
     #[error("ideal check prover failed to evaluate an mle: {0}")]
     MleEvaluationError(EvaluationError),
+    #[error("the combined mle evaluation {0} does not belong to the ideal {1}")]
+    IdealCheckFailed(R, I),
 }
 
-impl From<EvaluationError> for IdealCheckError {
+impl<R, I> From<EvaluationError> for IdealCheckError<R, I> {
     fn from(error: EvaluationError) -> Self {
         Self::MleEvaluationError(error)
     }
@@ -206,27 +227,31 @@ impl From<EvaluationError> for IdealCheckError {
 
 #[cfg(test)]
 mod tests {
-    use std::marker::PhantomData;
-
     use crypto_primitives::{FixedSemiring, crypto_bigint_int::Int};
     use itertools::Itertools;
-    use num_traits::{ConstZero, One, Zero};
+    use num_traits::ConstZero;
     use zinc_poly::mle::DenseMultilinearExtension;
-    use zinc_uair::{Uair, constraint_counter::count_constraints};
+    use zinc_uair::{
+        ConstraintBuilder, Uair,
+        constraint_counter::count_constraints,
+        ideal::{Ideal, ZeroIdeal},
+    };
 
     use crate::ideal_check::IdealCheckProtocol;
 
-    struct TestUair<R>(PhantomData<R>);
+    struct TestUair;
 
-    impl<R: FixedSemiring> Uair<R> for TestUair<R> {
+    impl<R: FixedSemiring> Uair<R> for TestUair {
+        type Ideal = ZeroIdeal<R>;
+
         fn num_cols() -> usize {
             3
         }
 
         #[allow(clippy::arithmetic_side_effects)]
-        fn constrain<B: zinc_uair::ConstraintBuilder>(b: &mut B, up: &[B::Expr], down: &[B::Expr]) {
-            b.assert_in_ideal(up[0].clone() * &down[1] - &up[1], &B::Expr::one());
-            b.assert_in_ideal(up[2].clone(), &B::Expr::zero());
+        fn constrain<B: ConstraintBuilder<R>>(b: &mut B, up: &[B::Expr], down: &[B::Expr]) {
+            b.assert_in_ideal(up[0].clone() * &down[1] - &up[1], &B::Ideal::zero_ideal());
+            b.assert_in_ideal(up[2].clone(), &B::Ideal::zero_ideal());
         }
     }
 
@@ -267,14 +292,14 @@ mod tests {
             ),
         ];
 
-        let mles = IdealCheckProtocol::<_, i128>::get_combined_poly_mles::<TestUair<_>>(
+        let mles = IdealCheckProtocol::<_, i128>::get_combined_poly_mles::<TestUair>(
             &up,
             &down,
-            count_constraints::<Int<4>, TestUair<_>>(),
+            count_constraints::<Int<4>, TestUair>(),
             4,
         );
 
-        assert_eq!(mles.len(), count_constraints::<Int<4>, TestUair<_>>());
+        assert_eq!(mles.len(), count_constraints::<Int<4>, TestUair>());
 
         assert_eq!(&mles[0], &(up[0].clone() * &down[1] - &up[1]));
         assert_eq!(&mles[1], &up[2]);

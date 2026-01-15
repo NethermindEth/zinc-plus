@@ -1,11 +1,10 @@
 use crate::dummy_semiring::DummySemiring;
-use crate::ideal::{Ideal, ZeroIdeal};
 use crate::{ConstraintBuilder, Uair, ideal::DummyIdeal};
-use crypto_primitives::Semiring;
+use crypto_primitives::FixedSemiring;
 
 /// Get the number of polynomial constraints in a `Uair`.
-pub fn count_constraints<R: Semiring, U: Uair<R>>() -> usize {
-    let mut cc = ConstraintCounter::default();
+pub fn count_constraints<R: FixedSemiring, U: Uair<R>>() -> usize {
+    let mut cc = ConstraintCounter::new();
 
     let dummy_up_and_down = vec![DummySemiring; U::num_cols()];
 
@@ -14,20 +13,22 @@ pub fn count_constraints<R: Semiring, U: Uair<R>>() -> usize {
     cc.0
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct ConstraintCounter(usize);
 
-impl ConstraintBuilder for ConstraintCounter {
+impl ConstraintCounter {
+    pub fn new() -> Self {
+        Self(0)
+    }
+}
+
+impl<R: FixedSemiring> ConstraintBuilder<R> for ConstraintCounter {
     type Expr = DummySemiring;
-    type Ideal = DummyIdeal<Self::Expr, ZeroIdeal<Self::Expr>>;
+    type Ideal = DummyIdeal<R>;
 
     #[allow(clippy::arithmetic_side_effects)]
     #[inline(always)]
-    fn assert_in_ideal<I>(&mut self, _expr: Self::Expr, _ideal_generator: &I)
-    where
-        I: Ideal<Self::Expr>,
-        Self::Ideal: From<I>,
-    {
+    fn assert_in_ideal(&mut self, _expr: Self::Expr, _ideal_generator: &Self::Ideal) {
         self.0 += 1;
     }
 }

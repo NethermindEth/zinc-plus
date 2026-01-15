@@ -6,6 +6,7 @@ use std::{
 
 use crypto_primitives::Semiring;
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, ConstOne, ConstZero, One, Zero};
+use zinc_utils::from_ref::FromRef;
 
 /// A dummy type implementing `FixedSemiring` trait.
 /// Used for `ConstraintCounter` to have something
@@ -132,3 +133,10 @@ impl ConstOne for DummySemiring {
 }
 
 impl Semiring for DummySemiring {}
+
+impl<T> FromRef<T> for DummySemiring {
+    #[inline(always)]
+    fn from_ref(_value: &T) -> Self {
+        DummySemiring
+    }
+}
