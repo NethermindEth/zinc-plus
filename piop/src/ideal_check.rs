@@ -1,15 +1,22 @@
-use crypto_primitives::{FixedSemiring, Semiring};
+use ark_std::{cfg_into_iter, cfg_iter};
+use crypto_primitives::{FixedSemiring, PrimeField, Semiring};
 use itertools::Itertools;
 use std::marker::PhantomData;
 use thiserror::Error;
-use zinc_poly::{EvaluationError, mle::DenseMultilinearExtension};
+use zinc_poly::{
+    EvaluationError,
+    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig, dense::project_coeffs},
+};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     ConstraintBuilder, Uair,
     dummy_semiring::DummySemiring,
     ideal::{DummyIdeal, Ideal},
 };
-use zinc_utils::mul_by_scalar::MulByScalar;
+use zinc_utils::{
+    inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
+    projectable_to_field::ProjectableToField,
+};
 
 #[derive(Clone, Debug)]
 pub struct Proof<R> {
@@ -17,9 +24,9 @@ pub struct Proof<R> {
 }
 
 #[derive(Clone, Debug)]
-pub struct ProverState<R, C> {
-    pub evaluation_points: Vec<Vec<C>>,
-    pub combined_mles: Vec<DenseMultilinearExtension<R>>,
+pub struct ProverState<F: PrimeField> {
+    pub evaluation_points: Vec<Vec<F>>,
+    pub combined_mles: Vec<DenseMultilinearExtension<F::Inner>>,
 }
 
 pub struct SubClaim<R, C> {
@@ -37,27 +44,43 @@ where
     C: ConstTranscribable,
 {
     #[allow(clippy::type_complexity)]
-    pub fn prove_as_subprotocol<U: Uair<R>>(
+    pub fn prove_as_subprotocol<U, F>(
         transcript: &mut impl Transcript,
-        cs_up: &[DenseMultilinearExtension<R>],
-        cs_down: &[DenseMultilinearExtension<R>],
+        cs_up: Vec<DenseMultilinearExtension<R>>,
+        cs_down: Vec<DenseMultilinearExtension<R>>,
         num_constraints: usize,
         num_vars: usize,
-    ) -> Result<(Proof<R>, ProverState<R, C>), R, U::Ideal> {
+        field_cfg: &F::Config,
+    ) -> Result<(Proof<F>, ProverState<F>), R, U::Ideal>
+    where
+        U: Uair<R>,
+        R: ProjectableToField<F>,
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+    {
+        let projecting_element: F = transcript.get_field_challenge(field_cfg);
+
+        let cs_up = cfg_into_iter!(cs_up)
+            .map(|mle| project_coeffs(mle, &projecting_element))
+            .collect_vec();
+
+        let cs_down = cfg_into_iter!(cs_down)
+            .map(|mle| project_coeffs(mle, &projecting_element))
+            .collect_vec();
+
         let combined_mles =
-            Self::get_combined_poly_mles::<U>(cs_up, cs_down, num_constraints, num_vars);
+            Self::get_combined_poly_mles::<U, F>(&cs_up, &cs_down, num_constraints, num_vars);
         let mut transcription_buf: Vec<u8> = vec![0; R::NUM_BYTES];
 
-        let mut evaluation_points: Vec<Vec<C>> = Vec::with_capacity(num_constraints);
-        let mut combined_mle_values: Vec<R> = Vec::with_capacity(num_constraints);
+        let mut evaluation_points: Vec<Vec<F>> = Vec::with_capacity(num_constraints);
+        let mut combined_mle_values: Vec<F> = Vec::with_capacity(num_constraints);
 
         for combined_mle in &combined_mles {
-            let challenge: Vec<C> = transcript.get_challenges(num_vars);
+            let challenge: Vec<F> = transcript.get_field_challenges(num_vars, field_cfg);
 
-            let mle_value = combined_mle.evaluate(&challenge, R::zero())?;
+            let mle_value = combined_mle.evaluate_with_config(&challenge, field_cfg)?;
 
-            mle_value.write_transcription_bytes(&mut transcription_buf);
-            transcript.absorb(&transcription_buf);
+            transcript.absorb_random_field(&mle_value, &mut transcription_buf);
 
             evaluation_points.push(challenge);
             combined_mle_values.push(mle_value);
@@ -75,22 +98,28 @@ where
     }
 
     #[allow(clippy::type_complexity)]
-    pub fn verify_as_subprotocol<U: Uair<R>>(
+    pub fn verify_as_subprotocol<U, F>(
         transcript: &mut impl Transcript,
-        proof: Proof<R>,
+        proof: Proof<F>,
         num_constraints: usize,
         num_vars: usize,
-    ) -> Result<Vec<SubClaim<R, C>>, R, U::Ideal> {
+        field_cfg: &F::Config,
+    ) -> Result<Vec<SubClaim<R, C>>, R, U::Ideal>
+    where
+        U: Uair<R>,
+        R: ProjectableToField<F>,
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+    {
         let mut transcription_buf: Vec<u8> = vec![0; R::NUM_BYTES];
 
-        let mut evaluation_points: Vec<Vec<C>> = Vec::with_capacity(num_constraints);
+        let mut evaluation_points: Vec<Vec<F>> = Vec::with_capacity(num_constraints);
         let combined_mle_values = proof.combined_mle_values;
 
         for mle_value in &combined_mle_values {
-            let challenge: Vec<C> = transcript.get_challenges(num_vars);
+            let challenge: Vec<F> = transcript.get_field_challenges(num_vars, field_cfg);
 
-            mle_value.write_transcription_bytes(&mut transcription_buf);
-            transcript.absorb(&transcription_buf);
+            transcript.absorb_random_field(mle_value, &mut transcription_buf);
 
             evaluation_points.push(challenge);
         }
@@ -123,12 +152,18 @@ where
             .collect())
     }
 
-    fn get_combined_poly_mles<U: Uair<R>>(
-        cs_up: &[DenseMultilinearExtension<R>],
-        cs_down: &[DenseMultilinearExtension<R>],
+    fn get_combined_poly_mles<U, F>(
+        cs_up: &[DenseMultilinearExtension<F::Inner>],
+        cs_down: &[DenseMultilinearExtension<F::Inner>],
         num_constraints: usize,
         num_vars: usize,
-    ) -> Vec<DenseMultilinearExtension<R>> {
+    ) -> Vec<DenseMultilinearExtension<F::Inner>>
+    where
+        U: Uair<R>,
+        R: ProjectableToField<F>,
+        F: PrimeField,
+        F::Inner: ConstTranscribable,
+    {
         // Collect h MLEs.
         let len = cs_up[0].evaluations.len();
 
@@ -240,10 +275,11 @@ impl<R, I> From<EvaluationError> for IdealCheckError<R, I> {
 mod tests {
     use crypto_primitives::{FixedSemiring, crypto_bigint_int::Int};
     use itertools::Itertools;
-    use num_traits::ConstZero;
+    use num_traits::{ConstZero, Zero};
+    use rand::{Rng, rng};
     use zinc_poly::{
         mle::DenseMultilinearExtension,
-        univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal},
+        univariate::{binary::BinaryPoly, dense::DensePolynomial, ideal::DegreeOneIdeal},
     };
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::{
@@ -323,8 +359,8 @@ mod tests {
 
     struct TestAirNoMultiplication;
 
-    impl Uair<DensePolynomial<Int<4>, 32>> for TestAirNoMultiplication {
-        type Ideal = DegreeOneIdeal<Int<4>, ZeroIdeal<DensePolynomial<Int<4>, 32>>, 32>;
+    impl<const LIMBS: usize> Uair<DensePolynomial<Int<LIMBS>, 32>> for TestAirNoMultiplication {
+        type Ideal = DegreeOneIdeal<Int<LIMBS>, ZeroIdeal<DensePolynomial<Int<LIMBS>, 32>>, 32>;
 
         fn num_cols() -> usize {
             3
@@ -333,7 +369,7 @@ mod tests {
         #[allow(clippy::arithmetic_side_effects)]
         fn constrain<B>(b: &mut B, up: &[B::Expr], _down: &[B::Expr])
         where
-            B: ConstraintBuilder<DensePolynomial<Int<4>, 32>>,
+            B: ConstraintBuilder<DensePolynomial<Int<LIMBS>, 32>>,
             B::Ideal: FromRef<Self::Ideal>,
         {
             b.assert_in_ideal(
@@ -345,32 +381,80 @@ mod tests {
 
     #[test]
     fn test_successful_verification() {
-        let mut transcript = KeccakTranscript::new();
+        let mut rng = rng();
 
-        let up: Vec<DenseMultilinearExtension<Int<4>>> = vec![
+        type Poly = DensePolynomial<Int<5>, 32>;
+
+        let up: Vec<DenseMultilinearExtension<Poly>> = vec![
             DenseMultilinearExtension::from_evaluations_slice(
                 4,
-                &(0..4).map(Int::from_i64).collect_vec(),
-                Int::ZERO,
+                &(0..4)
+                    .map(|_| Poly::from_ref(&rng.random::<BinaryPoly<32>>()))
+                    .collect_vec(),
+                Poly::zero(),
             ),
             DenseMultilinearExtension::from_evaluations_slice(
                 4,
-                &(4..8).map(Int::from_i64).collect_vec(),
-                Int::ZERO,
+                &(0..4)
+                    .map(|_| Poly::from_ref(&rng.random::<BinaryPoly<32>>()))
+                    .collect_vec(),
+                Poly::zero(),
             ),
             DenseMultilinearExtension::from_evaluations_slice(
                 4,
-                &(8..12).map(Int::from_i64).collect_vec(),
-                Int::ZERO,
+                &(0..4)
+                    .map(|_| Poly::from_ref(&rng.random::<BinaryPoly<32>>()))
+                    .collect_vec(),
+                Poly::zero(),
             ),
         ];
 
-        IdealCheckProtocol::prove_as_subprotocol(
-            &mut transcript.clone(),
-            cs_up,
-            cs_down,
-            num_constraints,
-            num_vars,
-        )
+        let down: Vec<DenseMultilinearExtension<Poly>> = vec![
+            DenseMultilinearExtension::from_evaluations_slice(
+                4,
+                &(0..4)
+                    .map(|_| Poly::from_ref(&rng.random::<BinaryPoly<32>>()))
+                    .collect_vec(),
+                Poly::zero(),
+            ),
+            DenseMultilinearExtension::from_evaluations_slice(
+                4,
+                &(0..4)
+                    .map(|_| Poly::from_ref(&rng.random::<BinaryPoly<32>>()))
+                    .collect_vec(),
+                Poly::zero(),
+            ),
+            DenseMultilinearExtension::from_evaluations_slice(
+                4,
+                &(0..4)
+                    .map(|_| Poly::from_ref(&rng.random::<BinaryPoly<32>>()))
+                    .collect_vec(),
+                Poly::zero(),
+            ),
+        ];
+
+        println!("{:?}", &up);
+
+        let transcript = KeccakTranscript::new();
+
+        let (proof, _) =
+            IdealCheckProtocol::<_, Int<2>>::prove_as_subprotocol::<TestAirNoMultiplication>(
+                &mut transcript.clone(),
+                &up,
+                &down,
+                count_constraints::<Poly, TestAirNoMultiplication>(),
+                4,
+            )
+            .unwrap();
+
+        assert!(
+            IdealCheckProtocol::<_, Int<2>>::verify_as_subprotocol::<TestAirNoMultiplication>(
+                &mut transcript.clone(),
+                proof,
+                count_constraints::<Poly, TestAirNoMultiplication>(),
+                4,
+            )
+            .is_ok()
+        );
     }
 }

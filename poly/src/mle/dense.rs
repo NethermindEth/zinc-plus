@@ -179,18 +179,25 @@ where
         res
     }
 
-    fn evaluate_with_config(&self, point: &[F], config: &<F as PrimeField>::Config) -> Option<F> {
+    fn evaluate_with_config(
+        &self,
+        point: &[F],
+        config: &<F as PrimeField>::Config,
+    ) -> Result<F, EvaluationError> {
         if point.len() == self.num_vars {
-            Some(F::new_unchecked_with_cfg(
+            Ok(F::new_unchecked_with_cfg(
                 self.fixed_variables_with_config(point, config)
                     .evaluations
                     .into_iter()
                     .next()
-                    .expect("Evaluations should not be empty"),
+                    .ok_or(EvaluationError::EmptyPolynomial)?,
                 config,
             ))
         } else {
-            None
+            Err(EvaluationError::WrongPointWidth {
+                expected: self.num_vars,
+                actual: point.len(),
+            })
         }
     }
 }
@@ -214,6 +221,7 @@ where
         let dim = partial_point.len();
 
         for i in 1..dim + 1 {
+            println!("{} {:?}", i, &poly);
             let r = &partial_point[i - 1];
             for b in 0..1 << (nv - i) {
                 let left = &poly[2 * b];

@@ -88,6 +88,15 @@ pub trait Transcript {
 
     /// Generates a pseudorandom transcribable values as challenges based on the
     /// current transcript state, updating it.
+    fn get_field_challenges<F: PrimeField>(&mut self, n: usize, cfg: &F::Config) -> Vec<F>
+    where
+        F::Inner: ConstTranscribable,
+    {
+        (0..n).map(|_| self.get_field_challenge(cfg)).collect()
+    }
+
+    /// Generates a pseudorandom transcribable values as challenges based on the
+    /// current transcript state, updating it.
     fn get_challenges<T: ConstTranscribable>(&mut self, n: usize) -> Vec<T> {
         (0..n).map(|_| self.get_challenge()).collect()
     }
