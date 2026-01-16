@@ -26,12 +26,18 @@ use itertools::Itertools;
 use num_traits::Zero;
 use zinc_poly::{
     mle::DenseMultilinearExtension,
-    univariate::{binary::BinaryPoly, dense::DensePolynomial},
+    univariate::{
+        binary::{BinaryPoly, BinaryPolyInnerProduct},
+        dense::{DensePolyInnerProduct, DensePolynomial},
+    },
 };
 use zinc_primality::MillerRabin;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
-    from_ref::FromRef, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
+    from_ref::FromRef,
+    inner_product::{BooleanInnerProductCheckedAdd, MBSInnerProductChecked, ScalarProduct},
+    mul_by_scalar::MulByScalar,
+    projectable_to_field::ProjectableToField,
 };
 
 const REPETITION_FACTOR: usize = 4;
@@ -55,8 +61,8 @@ impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N
     type Pt = Int<N>;
     type CombR = Int<M>;
     type Comb = Self::CombR;
-    type EvalDotChal = Self::Eval;
-    type CombDotChal = Self::Comb;
+    type EvalDotChal = ScalarProduct;
+    type CombDotChal = ScalarProduct;
 }
 
 pub struct TestPolyZipTypes<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> {}
@@ -72,8 +78,15 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
     type Pt = i128;
     type CombR = Int<M>;
     type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
-    type EvalDotChal = Self::Eval;
-    type CombDotChal = Self::Comb;
+    type EvalDotChal =
+        BinaryPolyInnerProduct<Self::Chal, BooleanInnerProductCheckedAdd, DEGREE_PLUS_ONE>;
+    type CombDotChal = DensePolyInnerProduct<
+        Self::CombR,
+        Self::Chal,
+        Self::CombR,
+        MBSInnerProductChecked,
+        DEGREE_PLUS_ONE,
+    >;
 }
 
 /// Helper function to set up common parameters for tests.
@@ -148,7 +161,8 @@ where
     F: PrimeField
         + for<'a> FromWithConfig<&'a <TestZipTypes<N, K, M> as ZipTypes>::Chal>
         + for<'a> FromWithConfig<&'a <TestZipTypes<N, K, M> as ZipTypes>::CombR>
-        + for<'a> MulByScalar<&'a F>,
+        + for<'a> MulByScalar<&'a F>
+        + FromRef<F>,
     F::Inner: FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod> + Transcribable,
     <TestZipTypes<N, K, M> as ZipTypes>::Eval: ProjectableToField<F>,
     <TestZipTypes<N, K, M> as ZipTypes>::Comb: ProjectableToField<F>,
@@ -181,6 +195,7 @@ where
         + for<'a> FromWithConfig<&'a <TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Chal>
         + for<'a> FromWithConfig<&'a <TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::CombR>
         + for<'a> MulByScalar<&'a F>
+        + FromRef<F>
         + 'static,
     F::Inner: FromRef<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod> + Transcribable,
 {
@@ -206,7 +221,8 @@ where
     F: PrimeField
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> FromWithConfig<&'a Zt::Pt>
-        + for<'a> MulByScalar<&'a F>,
+        + for<'a> MulByScalar<&'a F>
+        + FromRef<F>,
     F::Inner: FromRef<Zt::Fmod> + Transcribable,
     Zt::Comb: for<'a> MulByScalar<&'a Zt::Pt>,
     Zt::Eval: ProjectableToField<F>,

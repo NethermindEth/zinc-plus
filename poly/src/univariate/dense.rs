@@ -14,12 +14,13 @@ use std::{
     fmt::Display,
     hash::Hash,
     iter::{Product, Sum},
+    marker::PhantomData,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
     from_ref::FromRef,
-    inner_product::{InnerProduct, InnerProductError, InnerProductUnchecked, WideningInnerProduct},
+    inner_product::{InnerProduct, InnerProductError},
     mul_by_scalar::MulByScalar,
     named::Named,
     projectable_to_field::ProjectableToField,
@@ -578,35 +579,26 @@ impl<R, const DEGREE_PLUS_ONE: usize> AsRef<[R]> for DensePolynomial<R, DEGREE_P
     }
 }
 
-impl<R, Rhs, Out, const DEGREE_PLUS_ONE: usize> InnerProduct<Rhs, Out>
-    for DensePolynomial<R, DEGREE_PLUS_ONE>
-where
-    for<'a> &'a [R]: InnerProduct<Rhs, Out>,
-{
-    #[inline(always)]
-    fn inner_product(&self, rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
-        self.coeffs.inner_product(rhs, zero)
-    }
-}
+pub struct DensePolyInnerProduct<
+    R,
+    Rhs,
+    Out,
+    I: InnerProduct<[R], Rhs, Out>,
+    const DEGREE_PLUS_ONE: usize,
+>(PhantomData<(I, R, Rhs, Out)>);
 
-impl<R, Rhs, Out, const DEGREE_PLUS_ONE: usize> InnerProductUnchecked<Rhs, Out>
-    for DensePolynomial<R, DEGREE_PLUS_ONE>
+impl<R, Rhs, Out, I, const DEGREE_PLUS_ONE: usize>
+    InnerProduct<DensePolynomial<R, DEGREE_PLUS_ONE>, Rhs, Out>
+    for DensePolyInnerProduct<R, Rhs, Out, I, DEGREE_PLUS_ONE>
 where
-    for<'a> &'a [R]: InnerProductUnchecked<Rhs, Out>,
+    I: InnerProduct<[R], Rhs, Out>,
 {
     #[inline(always)]
-    fn inner_product_unchecked(&self, rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
-        self.coeffs.inner_product_unchecked(rhs, zero)
-    }
-}
-
-impl<R, Rhs, Out, const DEGREE_PLUS_ONE: usize> WideningInnerProduct<Rhs, Out>
-    for DensePolynomial<R, DEGREE_PLUS_ONE>
-where
-    for<'a> &'a [R]: WideningInnerProduct<Rhs, Out>,
-{
-    #[inline(always)]
-    fn widening_inner_product(&self, rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
-        self.coeffs.widening_inner_product(rhs, zero)
+    fn inner_product(
+        lhs: &DensePolynomial<R, DEGREE_PLUS_ONE>,
+        rhs: &[Rhs],
+        zero: Out,
+    ) -> Result<Out, InnerProductError> {
+        I::inner_product(&lhs.coeffs, rhs, zero)
     }
 }

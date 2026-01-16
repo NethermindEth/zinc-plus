@@ -17,7 +17,7 @@ use std::{
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
     from_ref::FromRef,
-    inner_product::{InnerProduct, InnerProductError, InnerProductUnchecked},
+    inner_product::{BooleanInnerProductUncheckedAdd, InnerProduct, InnerProductError},
     mul_by_scalar::WideningMulByScalar,
     named::Named,
     projectable_to_field::ProjectableToField,
@@ -301,73 +301,26 @@ impl<const DEGREE_PLUS_ONE: usize> From<&BinaryPoly<DEGREE_PLUS_ONE>>
     }
 }
 
-impl<Rhs: Clone, Out: From<Rhs> + CheckedAdd, const DEGREE_PLUS_ONE: usize> InnerProduct<Rhs, Out>
-    for BinaryPoly<DEGREE_PLUS_ONE>
+pub struct BinaryPolyInnerProduct<R, I, const DEGREE_PLUS_ONE: usize>(PhantomData<(R, I)>);
+
+impl<Rhs, I, Out, const DEGREE_PLUS_ONE: usize> InnerProduct<BinaryPoly<DEGREE_PLUS_ONE>, Rhs, Out>
+    for BinaryPolyInnerProduct<Rhs, I, DEGREE_PLUS_ONE>
+where
+    I: InnerProduct<[Boolean], Rhs, Out>,
 {
+    #[inline(always)]
     fn inner_product(
-        &self,
+        lhs: &BinaryPoly<DEGREE_PLUS_ONE>,
         rhs: &[Rhs],
         zero: Out,
-    ) -> Result<Out, zinc_utils::inner_product::InnerProductError> {
-        if self.0.coeffs.len() != rhs.as_ref().len() {
-            return Err(InnerProductError::LengthMismatch {
-                lhs: self.0.coeffs.len(),
-                rhs: rhs.as_ref().len(),
-            });
-        }
-
-        (0..self.0.coeffs.len())
-            .filter(|&i| self.0.coeffs[i].into_inner())
-            .try_fold(zero, |acc, i| {
-                acc.checked_add(&Out::from(rhs[i].clone()))
-                    .ok_or(InnerProductError::Overflow)
-            })
-    }
-}
-
-impl<Rhs: Clone, Out: From<Rhs> + CheckedAdd, const DEGREE_PLUS_ONE: usize> InnerProduct<Rhs, Out>
-    for &BinaryPoly<DEGREE_PLUS_ONE>
-{
-    #[inline(always)]
-    fn inner_product(&self, rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
-        (*self).inner_product(rhs, zero)
-    }
-}
-
-impl<Rhs: Clone, Out: From<Rhs> + for<'a> Add<&'a Out, Output = Out>, const DEGREE_PLUS_ONE: usize>
-    InnerProductUnchecked<Rhs, Out> for BinaryPoly<DEGREE_PLUS_ONE>
-{
-    #[allow(clippy::arithmetic_side_effects)] // by design
-    fn inner_product_unchecked(
-        &self,
-        rhs: &[Rhs],
-        zero: Out,
-    ) -> Result<Out, zinc_utils::inner_product::InnerProductError> {
-        if self.0.coeffs.len() != rhs.as_ref().len() {
-            return Err(InnerProductError::LengthMismatch {
-                lhs: self.0.coeffs.len(),
-                rhs: rhs.as_ref().len(),
-            });
-        }
-
-        Ok((0..self.0.coeffs.len())
-            .filter(|&i| self.0.coeffs[i].into_inner())
-            .fold(zero, |acc, i| acc + (&Out::from(rhs[i].clone()))))
-    }
-}
-
-impl<Rhs: Clone, Out: From<Rhs> + for<'b> Add<&'b Out, Output = Out>, const DEGREE_PLUS_ONE: usize>
-    InnerProductUnchecked<Rhs, Out> for &BinaryPoly<DEGREE_PLUS_ONE>
-{
-    #[inline(always)]
-    fn inner_product_unchecked(&self, rhs: &[Rhs], zero: Out) -> Result<Out, InnerProductError> {
-        (*self).inner_product_unchecked(rhs, zero)
+    ) -> Result<Out, InnerProductError> {
+        I::inner_product(&lhs.0.coeffs, rhs, zero)
     }
 }
 
 impl<F, const DEGREE_PLUS_ONE: usize> ProjectableToField<F> for BinaryPoly<DEGREE_PLUS_ONE>
 where
-    F: PrimeField + 'static,
+    F: PrimeField + FromRef<F> + 'static,
 {
     #![allow(clippy::arithmetic_side_effects)] // False alert, field operations are safe
     fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static {
@@ -388,8 +341,12 @@ where
         };
 
         move |poly: &BinaryPoly<DEGREE_PLUS_ONE>| {
-            poly.inner_product_unchecked(&r_powers, F::zero_with_cfg(&field_cfg))
-                .expect("Failed to evaluate polynomial")
+            BinaryPolyInnerProduct::<_, BooleanInnerProductUncheckedAdd, _>::inner_product(
+                poly,
+                &r_powers,
+                F::zero_with_cfg(&field_cfg),
+            )
+            .expect("Failed to evaluate polynomial")
         }
     }
 }

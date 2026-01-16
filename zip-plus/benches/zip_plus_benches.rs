@@ -7,14 +7,14 @@ use num_traits::{One, Zero};
 use std::marker::PhantomData;
 
 use zinc_poly::univariate::{
-    binary::{BinaryPoly, BinaryPolyWideningMulByScalar},
-    dense::DensePolynomial,
+    binary::{BinaryPoly, BinaryPolyInnerProduct, BinaryPolyWideningMulByScalar},
+    dense::{DensePolyInnerProduct, DensePolynomial},
 };
 use zinc_primality::MillerRabin;
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
     from_ref::FromRef,
-    inner_product::{ForceUncheckedInnerProduct, ForceWideningInnerProduct},
+    inner_product::{BooleanInnerProductUncheckedAdd, MBSInnerProductUnchecked},
     named::Named,
 };
 use zip_common::*;
@@ -59,8 +59,15 @@ where
     type Pt = i128;
     type CombR = Int<{ INT_LIMBS * 5 }>;
     type Comb = DensePolynomial<Self::CombR, D_PLUS_ONE>;
-    type EvalDotChal = ForceUncheckedInnerProduct<Self::Eval>;
-    type CombDotChal = ForceWideningInnerProduct<Self::Comb>;
+    type EvalDotChal =
+        BinaryPolyInnerProduct<Self::Chal, BooleanInnerProductUncheckedAdd, D_PLUS_ONE>;
+    type CombDotChal = DensePolyInnerProduct<
+        Self::CombR,
+        Self::Chal,
+        Self::CombR,
+        MBSInnerProductUnchecked,
+        D_PLUS_ONE,
+    >;
 }
 
 #[derive(Clone, Copy)]

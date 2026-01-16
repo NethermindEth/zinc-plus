@@ -14,7 +14,9 @@ use itertools::Itertools;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
-    from_ref::FromRef, inner_product::InnerProductUnchecked, mul_by_scalar::MulByScalar,
+    from_ref::FromRef,
+    inner_product::{InnerProduct, MBSInnerProductUnchecked},
+    mul_by_scalar::MulByScalar,
     projectable_to_field::ProjectableToField,
 };
 
@@ -29,7 +31,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         F: PrimeField
             + for<'a> FromWithConfig<&'a Zt::Chal>
             + for<'a> FromWithConfig<&'a Zt::Pt>
-            + for<'a> MulByScalar<&'a F>,
+            + for<'a> MulByScalar<&'a F>
+            + FromRef<F>,
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
         Zt::Eval: ProjectableToField<F>,
     {
@@ -71,8 +74,11 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
         transcript.write_field_elements(&q_0_combined_row)?;
         // It is safe to use unchecked inner product since we are in a field.
-        let eval_f =
-            q_0_combined_row.inner_product_unchecked(&q_1, F::zero_with_cfg(&field_cfg))?;
+        let eval_f = MBSInnerProductUnchecked::inner_product(
+            &q_0_combined_row,
+            &q_1,
+            F::zero_with_cfg(&field_cfg),
+        )?;
         Ok((eval_f, transcript.into()))
     }
 }
