@@ -86,7 +86,7 @@ mod tests {
         let sampled = F::from(5_u64);
 
         let projection_fn =
-            <Int<{ U128::LIMBS }> as ProjectableToField<F>>::prepare_projection(&sampled);
+            Int::<{ U128::LIMBS }>::prepare_projection(&sampled);
 
         let int_value = Int::<{ U128::LIMBS }>::from(10_i64);
         let result = projection_fn(&int_value);
