@@ -115,9 +115,20 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
 fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS");
 
-    encode_rows::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, _>, 16>(&mut group);
+    do_bench::<
+        BenchZipPlusTypes<i64, 32>,
+        SomeIprsCode<i64, 1, 32>,
+        InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
+        HornerProjection<_, _>,
+    >(&mut group);
+    do_bench::<
+        BenchZipPlusTypes<i64, 64>,
+        SomeIprsCode<i64, 1, 64>,
+        InnerProductProjection<Boolean, BooleanInnerProductUncheckedAdd, _>,
+        HornerProjection<_, _>,
+    >(&mut group);
 
-    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, 2, _>, 22>(&mut group);
+    group.finish();
 }
 
 criterion_group!(benches, zip_plus_benchmarks_raa, zip_plus_benchmarks_iprs);
