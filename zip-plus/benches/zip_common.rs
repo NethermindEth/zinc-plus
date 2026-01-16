@@ -40,27 +40,27 @@ where
     PEval: ProjectionToField<Zt::Eval, F>,
     PCw: ProjectionToField<Zt::Cw, F>,
 {
-    encode_rows::<Zt, Lc, 12>(group);
-    encode_rows::<Zt, Lc, 13>(group);
-    encode_rows::<Zt, Lc, 14>(group);
-    encode_rows::<Zt, Lc, 15>(group);
-    encode_rows::<Zt, Lc, 16>(group);
+    // encode_rows::<Zt, Lc, 12>(group);
+    // encode_rows::<Zt, Lc, 13>(group);
+    // encode_rows::<Zt, Lc, 14>(group);
+    // encode_rows::<Zt, Lc, 15>(group);
+    // encode_rows::<Zt, Lc, 16>(group);
+ 
+    // encode_single_row::<Zt, Lc, 128>(group);
+    // encode_single_row::<Zt, Lc, 256>(group);
+    // encode_single_row::<Zt, Lc, 512>(group);
+    // encode_single_row::<Zt, Lc, 1024>(group);
 
-    encode_single_row::<Zt, Lc, 128>(group);
-    encode_single_row::<Zt, Lc, 256>(group);
-    encode_single_row::<Zt, Lc, 512>(group);
-    encode_single_row::<Zt, Lc, 1024>(group);
+    // merkle_root::<Zt, 12>(group);
+    // merkle_root::<Zt, 13>(group);
+    // merkle_root::<Zt, 14>(group);
+    // merkle_root::<Zt, 15>(group);
+    // merkle_root::<Zt, 16>(group);
 
-    merkle_root::<Zt, 12>(group);
-    merkle_root::<Zt, 13>(group);
-    merkle_root::<Zt, 14>(group);
-    merkle_root::<Zt, 15>(group);
-    merkle_root::<Zt, 16>(group);
-
-    commit::<Zt, Lc, 12>(group);
-    commit::<Zt, Lc, 13>(group);
+    // commit::<Zt, Lc, 12>(group);
+    // commit::<Zt, Lc, 13>(group);
     commit::<Zt, Lc, 14>(group);
-    commit::<Zt, Lc, 15>(group);
+    // commit::<Zt, Lc, 15>(group);
     commit::<Zt, Lc, 16>(group);
 
     test::<Zt, Lc, 12>(group);
