@@ -3,10 +3,12 @@ use crate::{
     univariate::dense::DensePolynomial,
 };
 use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
+use derive_more::{
+    Add, AddAssign, AsRef, Display, From, Mul, MulAssign, Product, Sub, SubAssign, Sum,
+};
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, ConstZero, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
-    fmt::Display,
     hash::Hash,
     iter::{Product, Sum},
     marker::PhantomData,
@@ -14,16 +16,32 @@ use std::{
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
-    add,
     from_ref::FromRef,
     inner_product::{InnerProduct, InnerProductError, InnerProductUnchecked},
-    mul,
     mul_by_scalar::WideningMulByScalar,
     named::Named,
     projectable_to_field::ProjectableToField,
 };
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    Add,
+    AddAssign,
+    AsRef,
+    Clone,
+    Debug,
+    From,
+    Default,
+    Display,
+    Hash,
+    PartialEq,
+    Eq,
+    Mul,
+    MulAssign,
+    Sub,
+    SubAssign,
+    Sum,
+    Product,
+)]
 #[repr(transparent)]
 pub struct BinaryPoly<const DEGREE_PLUS_ONE: usize>(DensePolynomial<Boolean, DEGREE_PLUS_ONE>);
 
@@ -31,24 +49,6 @@ impl<const DEGREE_PLUS_ONE: usize> BinaryPoly<DEGREE_PLUS_ONE> {
     #[inline(always)]
     pub const fn inner(&self) -> &DensePolynomial<Boolean, DEGREE_PLUS_ONE> {
         &self.0
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> AsRef<DensePolynomial<Boolean, DEGREE_PLUS_ONE>>
-    for BinaryPoly<DEGREE_PLUS_ONE>
-{
-    #[inline(always)]
-    fn as_ref(&self) -> &DensePolynomial<Boolean, DEGREE_PLUS_ONE> {
-        &self.0
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> From<DensePolynomial<Boolean, DEGREE_PLUS_ONE>>
-    for BinaryPoly<DEGREE_PLUS_ONE>
-{
-    #[inline(always)]
-    fn from(dense_polynomial: DensePolynomial<Boolean, DEGREE_PLUS_ONE>) -> Self {
-        Self(dense_polynomial)
     }
 }
 
@@ -83,20 +83,6 @@ impl<const DEGREE_PLUS_ONE: usize> BinaryPoly<DEGREE_PLUS_ONE> {
     }
 }
 
-impl<const DEGREE_PLUS_ONE: usize> Display for BinaryPoly<DEGREE_PLUS_ONE> {
-    #[inline(always)]
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> Hash for BinaryPoly<DEGREE_PLUS_ONE> {
-    #[inline(always)]
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
-    }
-}
-
 impl<const DEGREE_PLUS_ONE: usize> Zero for BinaryPoly<DEGREE_PLUS_ONE> {
     #[inline(always)]
     fn zero() -> Self {
@@ -116,16 +102,6 @@ impl<const DEGREE_PLUS_ONE: usize> One for BinaryPoly<DEGREE_PLUS_ONE> {
     }
 }
 
-impl<const DEGREE_PLUS_ONE: usize> Add for BinaryPoly<DEGREE_PLUS_ONE> {
-    type Output = Self;
-
-    #[allow(clippy::arithmetic_side_effects)]
-    #[inline(always)]
-    fn add(self, rhs: Self) -> Self::Output {
-        Self(self.0 + rhs.0)
-    }
-}
-
 impl<'a, const DEGREE_PLUS_ONE: usize> Add<&'a Self> for BinaryPoly<DEGREE_PLUS_ONE> {
     type Output = Self;
 
@@ -133,16 +109,6 @@ impl<'a, const DEGREE_PLUS_ONE: usize> Add<&'a Self> for BinaryPoly<DEGREE_PLUS_
     #[inline(always)]
     fn add(self, rhs: &'a Self) -> Self::Output {
         Self(self.0 + rhs.0)
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> Sub for BinaryPoly<DEGREE_PLUS_ONE> {
-    type Output = Self;
-
-    #[allow(clippy::arithmetic_side_effects)]
-    #[inline(always)]
-    fn sub(self, rhs: Self) -> Self::Output {
-        Self(self.0 - rhs.0)
     }
 }
 
@@ -156,7 +122,9 @@ impl<'a, const DEGREE_PLUS_ONE: usize> Sub<&'a Self> for BinaryPoly<DEGREE_PLUS_
     }
 }
 
-impl<const DEGREE_PLUS_ONE: usize> Mul for BinaryPoly<DEGREE_PLUS_ONE> {
+impl<const DEGREE_PLUS_ONE: usize> Mul<BinaryPoly<DEGREE_PLUS_ONE>>
+    for BinaryPoly<DEGREE_PLUS_ONE>
+{
     type Output = Self;
 
     #[allow(clippy::arithmetic_side_effects)]
@@ -176,24 +144,10 @@ impl<'a, const DEGREE_PLUS_ONE: usize> Mul<&'a Self> for BinaryPoly<DEGREE_PLUS_
     }
 }
 
-impl<const DEGREE_PLUS_ONE: usize> AddAssign for BinaryPoly<DEGREE_PLUS_ONE> {
-    #[inline(always)]
-    fn add_assign(&mut self, rhs: Self) {
-        self.0.add_assign(&rhs.0);
-    }
-}
-
 impl<'a, const DEGREE_PLUS_ONE: usize> AddAssign<&'a Self> for BinaryPoly<DEGREE_PLUS_ONE> {
     #[inline(always)]
     fn add_assign(&mut self, rhs: &'a Self) {
         self.0.add_assign(&rhs.0);
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> SubAssign for BinaryPoly<DEGREE_PLUS_ONE> {
-    #[inline(always)]
-    fn sub_assign(&mut self, rhs: Self) {
-        self.0.sub_assign(&rhs.0);
     }
 }
 
@@ -239,24 +193,10 @@ impl<const DEGREE_PLUS_ONE: usize> CheckedMul for BinaryPoly<DEGREE_PLUS_ONE> {
     }
 }
 
-impl<const DEGREE_PLUS_ONE: usize> Sum for BinaryPoly<DEGREE_PLUS_ONE> {
-    #[inline(always)]
-    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        Self(iter.map(|x| x.0).sum())
-    }
-}
-
 impl<'a, const DEGREE_PLUS_ONE: usize> Sum<&'a Self> for BinaryPoly<DEGREE_PLUS_ONE> {
     #[inline(always)]
     fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
         Self(iter.map(|x| &x.0).sum())
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> Product for BinaryPoly<DEGREE_PLUS_ONE> {
-    #[inline(always)]
-    fn product<I: Iterator<Item = Self>>(iter: I) -> Self {
-        Self(iter.map(|x| x.0).product())
     }
 }
 
@@ -301,25 +241,18 @@ impl<R: Clone + Zero + One + CheckedAdd + CheckedMul, const DEGREE_PLUS_ONE: usi
 
         let result = self.0.coeffs[1..]
             .iter()
-            .fold(
-                (
-                    if self.0.coeffs[0].inner() {
-                        R::one()
-                    } else {
-                        R::zero()
-                    },
-                    R::one(),
-                ),
+            .try_fold(
+                (self.0.coeffs[0].widen::<R>(), R::one()),
                 |(mut acc, mut pow), coeff| {
-                    pow = mul!(pow, point);
+                    pow = pow.checked_mul(point).ok_or(EvaluationError::Overflow)?;
 
                     if coeff.inner() {
-                        acc = add!(acc, &pow);
+                        acc = acc.checked_add(&pow).ok_or(EvaluationError::Overflow)?;
                     }
 
-                    (acc, pow)
+                    Ok((acc, pow))
                 },
-            )
+            )?
             .0;
 
         Ok(result)
@@ -355,7 +288,7 @@ impl<const DEGREE_PLUS_ONE: usize> FromRef<BinaryPoly<DEGREE_PLUS_ONE>>
 {
     #[inline(always)]
     fn from_ref(poly: &BinaryPoly<DEGREE_PLUS_ONE>) -> Self {
-        *poly
+        poly.clone()
     }
 }
 
