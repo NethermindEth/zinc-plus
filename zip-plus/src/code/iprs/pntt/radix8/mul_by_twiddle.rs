@@ -10,7 +10,7 @@ use zinc_utils::mul_by_scalar::{MulByScalar, WideningMulByScalar};
 pub(crate) trait MulByTwiddle<Lhs, Twiddle>: Clone + Send + Sync {
     type Output;
 
-    fn mul_by_twiddle(&self, lhs: &Lhs, twiddle: &Twiddle) -> Self::Output;
+    fn mul_by_twiddle(lhs: &Lhs, twiddle: &Twiddle) -> Self::Output;
 }
 
 /// The twiddle multiplication that
@@ -25,7 +25,7 @@ where
     type Output = Lhs;
 
     #[inline(always)]
-    fn mul_by_twiddle(&self, lhs: &Lhs, twiddle: &Twiddle) -> Lhs {
+    fn mul_by_twiddle(lhs: &Lhs, twiddle: &Twiddle) -> Lhs {
         lhs.mul_by_scalar(twiddle)
             .expect("Twiddle multiplication overflow")
     }
@@ -35,19 +35,7 @@ where
 /// worry about overflows. Multiplication by twiddle
 /// is done by conversions and field operations.
 #[derive(Debug, Clone)]
-pub(crate) struct FieldMulByTwiddle<F: PrimeField, T> {
-    config: F::Config,
-    _phantom: PhantomData<T>,
-}
-
-impl<F: PrimeField, T> FieldMulByTwiddle<F, T> {
-    pub fn new(config: F::Config) -> Self {
-        Self {
-            config,
-            _phantom: Default::default(),
-        }
-    }
-}
+pub(crate) struct FieldMulByTwiddle<F: PrimeField, T>(PhantomData<(F, T)>);
 
 impl<F, Twiddle, T> MulByTwiddle<F, Twiddle> for FieldMulByTwiddle<F, T>
 where
@@ -58,8 +46,8 @@ where
     type Output = F;
 
     #[inline(always)]
-    fn mul_by_twiddle(&self, lhs: &F, twiddle: &Twiddle) -> F {
-        F::from_with_cfg(twiddle.clone().into(), &self.config) * lhs
+    fn mul_by_twiddle(lhs: &F, twiddle: &Twiddle) -> F {
+        F::from_with_cfg(twiddle.clone().into(), lhs.cfg()) * lhs
     }
 }
 
@@ -73,7 +61,7 @@ where
     type Output = Inner::Output;
 
     #[inline(always)]
-    fn mul_by_twiddle(&self, lhs: &Lhs, twiddle: &Twiddle) -> Self::Output {
+    fn mul_by_twiddle(lhs: &Lhs, twiddle: &Twiddle) -> Self::Output {
         Inner::mul_by_scalar_widen(lhs, twiddle)
     }
 }

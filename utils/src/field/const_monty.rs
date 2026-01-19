@@ -1,8 +1,12 @@
 use crypto_bigint::modular::{ConstMontyForm, ConstMontyParams};
-use crypto_primitives::{crypto_bigint_const_monty::ConstMontyField, crypto_bigint_uint::Uint};
+use crypto_primitives::{
+    crypto_bigint_const_monty::ConstMontyField, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
+};
 use num_traits::CheckedMul;
 
-use crate::{from_ref::FromRef, mul_by_scalar::MulByScalar};
+use crate::{
+    from_ref::FromRef, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
+};
 
 impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> MulByScalar<&Self>
     for ConstMontyField<Mod, LIMBS>
@@ -42,6 +46,17 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> FromRef<Self>
     }
 }
 
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize>
+    ProjectableToField<ConstMontyField<Mod, LIMBS>> for Int<LIMBS2>
+{
+    fn prepare_projection(
+        _sampled_value: &ConstMontyField<Mod, LIMBS>,
+    ) -> impl Fn(&Self) -> ConstMontyField<Mod, LIMBS> + 'static {
+        // No need to read anything
+        |value: &Int<LIMBS2>| value.into()
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::arithmetic_side_effects,
@@ -49,7 +64,7 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> FromRef<Self>
     clippy::cast_possible_wrap
 )]
 mod tests {
-    use crate::projection_to_field::{ProjectionToField, SimpleProjection};
+    use crate::projectable_to_field::ProjectableToField;
 
     use super::*;
 
@@ -70,7 +85,7 @@ mod tests {
         // Create a sample field element and an Int value
         let sampled = F::from(5_u64);
 
-        let projection_fn = SimpleProjection::prepare_projection(&sampled);
+        let projection_fn = Int::<{ U128::LIMBS }>::prepare_projection(&sampled);
 
         let int_value = Int::<{ U128::LIMBS }>::from(10_i64);
         let result = projection_fn(&int_value);

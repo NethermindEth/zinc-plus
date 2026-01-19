@@ -16,7 +16,7 @@ pub trait ZipTypes: Send + Sync {
     const NUM_COLUMN_OPENINGS: usize;
 
     /// Semiring of witness/polynomial evaluations on boolean hypercube
-    type Eval: Clone + Send + Sync + Named + ConstCoeffBitWidth;
+    type Eval: Named + ConstCoeffBitWidth + Clone + Send + Sync;
 
     /// Semiring of codeword elements, at least as wide as the evaluation ring
     type Cw: FixedSemiring
@@ -24,6 +24,7 @@ pub trait ZipTypes: Send + Sync {
         + ConstTranscribable
         + FromRef<Self::Eval>
         + Named
+        // TODO(Ilia): Find out if the Copy can be avoided.
         + Copy
         + CheckedAdd;
 
@@ -54,6 +55,7 @@ pub trait ZipTypes: Send + Sync {
 
     type EvalDotChal: InnerProduct<Self::Eval, Self::Chal, Self::CombR>;
     type CombDotChal: InnerProduct<Self::Comb, Self::Chal, Self::CombR>;
+    type ArrCombRDotChal: InnerProduct<[Self::CombR], Self::Chal, Self::CombR>;
 }
 
 /// Zip is a Polynomial Commitment Scheme (PCS) that supports committing to

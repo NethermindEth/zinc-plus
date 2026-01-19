@@ -1,4 +1,4 @@
-use std::ops::{Add, Mul};
+use std::ops::Add;
 
 use crypto_primitives::boolean::Boolean;
 use num_traits::CheckedAdd;
@@ -58,8 +58,8 @@ pub struct MBSInnerProductUnchecked;
 
 impl<Lhs, Rhs, Out> InnerProduct<[Lhs], Rhs, Out> for MBSInnerProductUnchecked
 where
-    Lhs: Clone + for<'a> Mul<&'a Rhs, Output = Lhs>,
-    Out: for<'a> Add<&'a Lhs, Output = Out>,
+    Lhs: Clone + for<'a> MulByScalar<&'a Rhs>,
+    Out: for<'a> Add<&'a Out, Output = Out> + FromRef<Lhs>,
 {
     /// The mul-by-scalar inner product.
     #[allow(clippy::arithmetic_side_effects)]
@@ -71,11 +71,10 @@ where
             });
         }
 
-        Ok(lhs
-            .iter()
+        lhs.iter()
             .zip(rhs)
-            .map(|(lhs, rhs)| lhs.clone() * rhs)
-            .fold(zero, |acc, product| acc + &product))
+            .map(|(lhs, rhs)| lhs.mul_by_scalar(rhs).ok_or(InnerProductError::Overflow))
+            .try_fold(zero, |acc, product| Ok(acc + &Out::from_ref(&product?)))
     }
 }
 
@@ -135,7 +134,7 @@ impl<Rhs: Clone, Out: From<Rhs> + CheckedAdd> InnerProduct<[Boolean], Rhs, Out>
 /// Convenient for performing inner product with field elements
 /// whose `add` is safe and does not overflow.
 pub struct BooleanInnerProductUncheckedAdd;
-impl<Rhs: Clone, Out: From<Rhs> + for<'a> Add<&'a Rhs, Output = Out>>
+impl<Rhs: Clone, Out: FromRef<Rhs> + for<'a> Add<&'a Out, Output = Out>>
     InnerProduct<[Boolean], Rhs, Out> for BooleanInnerProductUncheckedAdd
 {
     #[allow(clippy::arithmetic_side_effects)]
@@ -149,7 +148,7 @@ impl<Rhs: Clone, Out: From<Rhs> + for<'a> Add<&'a Rhs, Output = Out>>
 
         Ok((0..lhs.len())
             .filter(|&i| lhs[i].into_inner())
-            .fold(zero, |acc, i| acc + &rhs[i]))
+            .fold(zero, |acc, i| acc + &Out::from_ref(&rhs[i])))
     }
 }
 

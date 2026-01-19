@@ -17,6 +17,7 @@ zinc-utils = { workspace = true }
 ark-std = { workspace = true }
 
 itertools = { workspace = true }
+derive_more = { workspace = true }
 thiserror = { workspace = true }
 crypto-bigint = { workspace = true }
 displaydoc = "0.2"

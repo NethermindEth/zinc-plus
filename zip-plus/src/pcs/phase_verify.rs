@@ -18,11 +18,11 @@ use zinc_utils::{
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProductUnchecked},
     mul_by_scalar::MulByScalar,
-    projection_to_field::ProjectionToField,
+    projectable_to_field::ProjectableToField,
 };
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
-    pub fn verify<F, P, I>(
+    pub fn verify<F>(
         vp: &ZipPlusParams<Zt, Lc>,
         comm: &ZipPlusCommitment,
         point_f: &[F],
@@ -35,14 +35,13 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + for<'a> FromWithConfig<&'a Zt::Chal>
             + for<'a> MulByScalar<&'a F>,
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
-        P: ProjectionToField<Zt::Cw, F>,
-        I: InnerProduct<[Zt::CombR], Zt::Chal, Zt::CombR>,
+        Zt::Cw: ProjectableToField<F>,
     {
         validate_input::<Zt, Lc, _>("verify", vp.num_vars, &[], [point_f])?;
 
         let mut transcript: PcsTranscript = proof.clone().into();
 
-        let columns_opened = Self::verify_testing::<I>(vp, &comm.root, &mut transcript)?;
+        let columns_opened = Self::verify_testing(vp, &comm.root, &mut transcript)?;
 
         let field_modulus = F::Inner::from_ref(
             &transcript
@@ -53,7 +52,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
         let projecting_element: F = (&projecting_element).into_with_cfg(&field_cfg);
 
-        Self::verify_evaluation::<_, P>(
+        Self::verify_evaluation(
             vp,
             point_f,
             eval_f,
@@ -67,7 +66,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     }
 
     #[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
-    pub(super) fn verify_testing<I: InnerProduct<[Zt::CombR], Zt::Chal, Zt::CombR>>(
+    pub(super) fn verify_testing(
         vp: &ZipPlusParams<Zt, Lc>,
         root: &MtHash,
         transcript: &mut PcsTranscript,
@@ -114,7 +113,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
             if let Some((ref alphas, ref coeffs, ref encoded_combined_row)) = encoded_combined_rows
             {
-                Self::verify_column_testing::<I>(
+                Self::verify_column_testing(
                     alphas,
                     coeffs,
                     encoded_combined_row,
@@ -134,7 +133,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         Ok(columns_opened)
     }
 
-    pub(super) fn verify_column_testing<I: InnerProduct<[Zt::CombR], Zt::Chal, Zt::CombR>>(
+    pub(super) fn verify_column_testing(
         alphas: &[Zt::Chal],
         coeffs: &[Zt::Chal],
         encoded_combined_row: &[Zt::CombR],
@@ -148,7 +147,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 .map(Zt::Comb::from_ref)
                 .map(|p| Zt::CombDotChal::inner_product(&p, alphas, Zt::CombR::ZERO))
                 .try_collect()?;
-            I::inner_product(&column_entries, coeffs, Zt::CombR::ZERO)?
+            Zt::ArrCombRDotChal::inner_product(&column_entries, coeffs, Zt::CombR::ZERO)?
         } else {
             Zt::CombDotChal::inner_product(
                 &Zt::Comb::from_ref(&column_entries[0]),
@@ -163,7 +162,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         Ok(())
     }
 
-    fn verify_evaluation<F, P>(
+    fn verify_evaluation<F>(
         vp: &ZipPlusParams<Zt, Lc>,
         point_f: &[F],
         eval_f: &F,
@@ -175,13 +174,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     where
         F: FromPrimitiveWithConfig + FromRef<F> + for<'a> MulByScalar<&'a F>,
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
-        P: ProjectionToField<Zt::Cw, F>,
+        Zt::Cw: ProjectableToField<F>,
     {
         let q_0_combined_row = transcript.read_field_elements(vp.linear_code.row_len())?;
         let encoded_combined_row = vp.linear_code.encode_f(&q_0_combined_row);
 
         let (q_0, q_1) = point_to_tensor(vp.num_rows, point_f, field_cfg)?;
 
+        // It is safe to use inner_product_unchecked because we're in a field.
         if MBSInnerProductUnchecked::inner_product(
             &q_0_combined_row,
             &q_1,
@@ -192,7 +192,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 "Evaluation consistency failure".into(),
             ));
         }
-        let project = P::prepare_projection(&projecting_element);
+        let project = Zt::Cw::prepare_projection(&projecting_element);
         for (column_idx, column_values) in columns_opened.iter() {
             Self::verify_proximity_q_0(
                 &q_0,
@@ -218,10 +218,11 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         field_cfg: &F::Config,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + for<'a> MulByScalar<&'a F> + FromRef<F>,
     {
         let column_entries_comb = if num_rows > 1 {
             let column_entries = column_entries.iter().map(project).collect_vec();
+            // It is safe to use inner_product_unchecked because we're in a field.
             MBSInnerProductUnchecked::inner_product(
                 q_0,
                 &column_entries,
@@ -266,12 +267,9 @@ mod tests {
     use rand::prelude::*;
     use zinc_poly::{
         mle::{DenseMultilinearExtension, MultilinearExtensionRand},
-        univariate::dense::{DensePolynomial, HornerProjection},
+        univariate::binary::BinaryPoly,
     };
     use zinc_transcript::traits::Transcribable;
-    use zinc_utils::{
-        inner_product::MBSInnerProductChecked, projection_to_field::SimpleProjection,
-    };
 
     const INT_LIMBS: usize = U64::LIMBS;
 
@@ -297,18 +295,14 @@ mod tests {
         {
             let (pp, comm, point_f, eval_f, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
 
-            let result = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
-                &pp, &comm, &point_f, &eval_f, &proof,
-            );
+            let result = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
             assert!(result.is_ok(), "Verification failed: {result:?}")
         };
         {
             let (pp, comm, point_f, eval_f, proof) =
                 setup_full_protocol_poly::<F, N, K, M, DEGREE_PLUS_ONE>(num_vars);
 
-            let result = TestPolyZip::verify::<_, HornerProjection<_, _>, MBSInnerProductChecked>(
-                &pp, &comm, &point_f, &eval_f, &proof,
-            );
+            let result = TestPolyZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
 
             assert!(result.is_ok(), "Verification failed: {result:?}");
         }
@@ -322,7 +316,7 @@ mod tests {
             let (pp, comm, point_f, eval_f, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
             let cfg = eval_f.cfg().clone();
 
-            let result = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
+            let result = TestZip::verify(
                 &pp,
                 &comm,
                 &point_f,
@@ -338,7 +332,7 @@ mod tests {
                 setup_full_protocol_poly::<F, N, K, M, DEGREE_PLUS_ONE>(num_vars);
             let cfg = eval_f.cfg().clone();
 
-            let result = TestPolyZip::verify::<_, HornerProjection<_, _>, MBSInnerProductChecked>(
+            let result = TestPolyZip::verify(
                 &pp,
                 &comm,
                 &point_f,
@@ -362,9 +356,7 @@ mod tests {
         {
             let (pp, comm, point_f, eval, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
             let tampered = tamper(proof);
-            let result = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
-                &pp, &comm, &point_f, &eval, &tampered,
-            );
+            let result = TestZip::verify(&pp, &comm, &point_f, &eval, &tampered);
             assert!(result.is_err());
         }
 
@@ -372,9 +364,7 @@ mod tests {
             let (pp, comm, point_f, eval_f, proof) =
                 setup_full_protocol_poly::<F, N, K, M, DEGREE_PLUS_ONE>(num_vars);
             let tampered = tamper(proof);
-            let result = TestPolyZip::verify::<_, HornerProjection<_, _>, MBSInnerProductChecked>(
-                &pp, &comm, &point_f, &eval_f, &tampered,
-            );
+            let result = TestPolyZip::verify(&pp, &comm, &point_f, &eval_f, &tampered);
             assert!(result.is_err());
         }
     }
@@ -394,13 +384,7 @@ mod tests {
             );
             let (_, comm_poly2) = TestZip::commit(&pp, &poly2).unwrap();
 
-            let result = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
-                &pp,
-                &comm_poly2,
-                &point_f,
-                &eval_f,
-                &proof_poly1,
-            );
+            let result = TestZip::verify(&pp, &comm_poly2, &point_f, &eval_f, &proof_poly1);
 
             assert!(result.is_err());
         }
@@ -416,7 +400,7 @@ mod tests {
                     .collect_vec();
                 different_eval_coeffs
                     .chunks_exact(DEGREE_PLUS_ONE - 1)
-                    .map(DensePolynomial::new)
+                    .map(BinaryPoly::new)
                     .collect_vec()
             };
 
@@ -427,13 +411,7 @@ mod tests {
             );
             let (_, comm_poly2) = TestPolyZip::commit(&pp, &poly2).unwrap();
 
-            let result = TestPolyZip::verify::<_, HornerProjection<_, _>, MBSInnerProductChecked>(
-                &pp,
-                &comm_poly2,
-                &point_f,
-                &eval_f,
-                &proof_poly1,
-            );
+            let result = TestPolyZip::verify(&pp, &comm_poly2, &point_f, &eval_f, &proof_poly1);
 
             assert!(result.is_err());
         }
@@ -456,13 +434,7 @@ mod tests {
                 setup_full_protocol_poly::<F, N, K, M, DEGREE_PLUS_ONE>(num_vars);
             let invalid_point = make_invalid_point(eval_f.cfg());
 
-            let result = TestPolyZip::verify::<_, HornerProjection<_, _>, MBSInnerProductChecked>(
-                &pp,
-                &comm,
-                &invalid_point,
-                &eval_f,
-                &proof,
-            );
+            let result = TestPolyZip::verify(&pp, &comm, &invalid_point, &eval_f, &proof);
 
             assert!(matches!(result, Err(..)));
         }
@@ -471,13 +443,7 @@ mod tests {
             let (pp, comm, _point_f, eval_f, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
             let invalid_point = make_invalid_point(eval_f.cfg());
 
-            let result = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
-                &pp,
-                &comm,
-                &invalid_point,
-                &eval_f,
-                &proof,
-            );
+            let result = TestZip::verify(&pp, &comm, &invalid_point, &eval_f, &proof);
 
             assert!(matches!(result, Err(..)));
         }
@@ -501,9 +467,8 @@ mod tests {
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
 
         let test_mle2_proof = TestZip::test(&pp, &mle2, &data).expect("test phase should succeed");
-        let (eval_f, eval_mle2_proof) =
-            TestZip::evaluate::<F, SimpleProjection<_>>(&pp, &mle2, &point, test_mle2_proof)
-                .expect("evaluation phase should succeed");
+        let (eval_f, eval_mle2_proof) = TestZip::evaluate::<F>(&pp, &mle2, &point, test_mle2_proof)
+            .expect("evaluation phase should succeed");
 
         let eval_mle1 = mle1
             .evaluate(&point, Zero::zero())
@@ -513,13 +478,8 @@ mod tests {
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
         let eval_mle1_f = eval_mle1.into_with_cfg(&field_cfg);
 
-        let verification_result = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
-            &pp,
-            &comm,
-            &point_f,
-            &eval_mle1_f,
-            &eval_mle2_proof,
-        );
+        let verification_result =
+            TestZip::verify(&pp, &comm, &point_f, &eval_mle1_f, &eval_mle2_proof);
 
         assert!(verification_result.is_err());
     }
@@ -551,9 +511,8 @@ mod tests {
 
         let test_transcript =
             TestZip::test(&pp, &mle, &corrupted_data).expect("test phase should succeed");
-        let (eval_f, proof) =
-            TestZip::evaluate::<F, SimpleProjection<_>>(&pp, &mle, &point, test_transcript)
-                .expect("evaluation phase should succeed");
+        let (eval_f, proof) = TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript)
+            .expect("evaluation phase should succeed");
         let field_cfg = eval_f.cfg().clone();
 
         let expected_eval = mle
@@ -563,9 +522,7 @@ mod tests {
 
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
-        let verification_result = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
-            &pp, &comm, &point_f, &eval_f, &proof,
-        );
+        let verification_result = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
 
         assert!(verification_result.is_err());
     }
@@ -581,15 +538,14 @@ mod tests {
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
 
         let test_transcript = TestZip::test(&pp, &mle, &data).expect("test phase should succeed");
-        let (correct_eval_f, proof) =
-            TestZip::evaluate::<F, SimpleProjection<_>>(&pp, &mle, &point, test_transcript)
-                .expect("evaluation phase should succeed");
+        let (correct_eval_f, proof) = TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript)
+            .expect("evaluation phase should succeed");
         let field_cfg = correct_eval_f.cfg().clone();
 
         let incorrect_eval_f = correct_eval_f + F::one_with_cfg(&field_cfg);
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
-        let verification_result = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
+        let verification_result = TestZip::verify(
             &pp,
             &comm,
             &point_f,
@@ -622,9 +578,8 @@ mod tests {
         let eval = mle.evaluate(&point, Zero::zero()).unwrap();
 
         let test_transcript = TestZip::test(&pp, &mle, &data).expect("test phase should succeed");
-        let (eval_f, mut proof) =
-            TestZip::evaluate::<F, SimpleProjection<_>>(&pp, &mle, &point, test_transcript)
-                .expect("evaluation phase should succeed");
+        let (eval_f, mut proof) = TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript)
+            .expect("evaluation phase should succeed");
         let field_cfg = eval_f.cfg().clone();
 
         assert_eq!(
@@ -646,9 +601,7 @@ mod tests {
         let flip_at = bytes_per_int * (row_len / 2);
         proof.0[flip_at] ^= 0x01;
 
-        let res = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
-            &pp, &comm, &point_f, &eval_f, &proof,
-        );
+        let res = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
 
         match res {
             Err(ZipError::InvalidPcsOpen(msg)) => {
@@ -705,9 +658,7 @@ mod tests {
         data.cw_matrix.to_rows_slices_mut()[0][0] += Int::ONE;
 
         let test_transcript = TestZip::test(&pp, &mle, &data).unwrap();
-        let (eval_f, proof) =
-            TestZip::evaluate::<F, SimpleProjection<_>>(&pp, &mle, &point, test_transcript)
-                .unwrap();
+        let (eval_f, proof) = TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();
         let field_cfg = eval_f.cfg().clone();
 
         let point_f = point
@@ -715,9 +666,7 @@ mod tests {
             .map(|v| v.into_with_cfg(&field_cfg))
             .collect_vec();
         let eval_f = evaluate_in_field(&mle.evaluations, &point_f, &field_cfg);
-        let verification_result = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
-            &pp, &comm, &point_f, &eval_f, &proof,
-        );
+        let verification_result = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
 
         assert!(verification_result.is_err());
     }
@@ -739,8 +688,7 @@ mod tests {
 
         let test_transcript = TestZip::test(&pp, &mle, &data).unwrap();
         let (eval_f, mut proof) =
-            TestZip::evaluate::<F, SimpleProjection<_>>(&pp, &mle, &point, test_transcript)
-                .unwrap();
+            TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();
         let field_cfg = eval_f.cfg().clone();
 
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
@@ -758,9 +706,7 @@ mod tests {
         let flip_at = tail_start + (bytes_per_field / 4);
         proof.0[flip_at] ^= 0x01;
 
-        let res = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
-            &pp, &comm, &point_f, &eval_f, &proof,
-        );
+        let res = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
 
         match res {
             Err(ZipError::InvalidPcsOpen(msg)) => {
@@ -788,8 +734,7 @@ mod tests {
 
         let test_transcript = TestZip::test(&pp, &mle, &data).unwrap();
         let (real_eval_f, proof) =
-            TestZip::evaluate::<F, SimpleProjection<_>>(&pp, &mle, &point, test_transcript)
-                .unwrap();
+            TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();
         let field_cfg = real_eval_f.cfg().clone();
 
         let eval_f = mle
@@ -798,9 +743,7 @@ mod tests {
             .into_with_cfg(&field_cfg);
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
-        let res = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
-            &pp, &comm, &point_f, &eval_f, &proof,
-        );
+        let res = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
         assert!(res.is_ok());
     }
 
@@ -821,8 +764,7 @@ mod tests {
 
         let test_transcript = TestZip::test(&pp, &mle, &data).unwrap();
         let (real_eval_f, proof) =
-            TestZip::evaluate::<F, SimpleProjection<_>>(&pp, &mle, &point, test_transcript)
-                .unwrap();
+            TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();
         let field_cfg = real_eval_f.cfg().clone();
 
         let eval_f = mle
@@ -831,9 +773,7 @@ mod tests {
             .into_with_cfg(&field_cfg);
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
-        let res = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
-            &pp, &comm, &point_f, &eval_f, &proof,
-        );
+        let res = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
         assert!(res.is_ok());
     }
 
@@ -854,9 +794,7 @@ mod tests {
         point[0] = <Zt as ZipTypes>::Pt::ONE;
 
         let test_transcript = TestZip::test(&pp, &poly, &data).unwrap();
-        let (eval_f, proof) =
-            TestZip::evaluate::<F, SimpleProjection<_>>(&pp, &poly, &point, test_transcript)
-                .unwrap();
+        let (eval_f, proof) = TestZip::evaluate::<F>(&pp, &poly, &point, test_transcript).unwrap();
         let field_cfg = eval_f.cfg().clone();
 
         let expected_eval = poly
@@ -866,9 +804,7 @@ mod tests {
 
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
-        let verification_result = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
-            &pp, &comm, &point_f, &eval_f, &proof,
-        );
+        let verification_result = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
 
         assert!(
             verification_result.is_ok(),
@@ -886,9 +822,7 @@ mod tests {
         let point: Vec<<Zt as ZipTypes>::Pt> = vec![Int::from(1), Int::from(2)];
 
         let test_transcript = TestZip::test(&pp, &poly, &hint).unwrap();
-        let (eval_f, proof) =
-            TestZip::evaluate::<F, SimpleProjection<_>>(&pp, &poly, &point, test_transcript)
-                .unwrap();
+        let (eval_f, proof) = TestZip::evaluate::<F>(&pp, &poly, &point, test_transcript).unwrap();
         let field_cfg = eval_f.cfg().clone();
 
         let expected_eval = poly
@@ -898,9 +832,7 @@ mod tests {
 
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
-        let verification_result = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
-            &pp, &comm, &point_f, &eval_f, &proof,
-        );
+        let verification_result = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
 
         assert!(verification_result.is_ok());
     }
@@ -922,8 +854,7 @@ mod tests {
 
         let test_transcript = TestZip::test(&pp, &mle, &data).unwrap();
         let (real_eval_f, mut proof) =
-            TestZip::evaluate::<F, SimpleProjection<_>>(&pp, &mle, &point, test_transcript)
-                .unwrap();
+            TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();
         let field_cfg = real_eval_f.cfg().clone();
 
         let eval_f = mle
@@ -944,9 +875,7 @@ mod tests {
             *b = 0xFF;
         }
 
-        let res = TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
-            &pp, &comm, &point_f, &eval_f, &proof,
-        );
+        let res = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
         assert!(res.is_err());
     }
 
@@ -970,8 +899,7 @@ mod tests {
             // Prover produces a proof once (exactly as in the bench)
             let test_transcript = TestZip::test(&pp, &mle, &data).unwrap();
             let (eval_f, proof) =
-                TestZip::evaluate::<F, SimpleProjection<_>>(&pp, &mle, &point, test_transcript)
-                    .unwrap();
+                TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();
             let field_cfg = eval_f.cfg().clone();
 
             assert_eq!(
@@ -983,14 +911,7 @@ mod tests {
             let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
             // Verifier replays verification from the same proof (also like the bench)
-            TestZip::verify::<_, SimpleProjection<_>, MBSInnerProductChecked>(
-                &pp,
-                &commitment,
-                &point_f,
-                &eval_f,
-                &proof,
-            )
-            .expect("verify");
+            TestZip::verify(&pp, &commitment, &point_f, &eval_f, &proof).expect("verify");
         }
 
         inner::<12>();
@@ -1015,21 +936,13 @@ mod tests {
             // Prover produces a proof once (exactly as in the bench)
             let test_proof = TestPolyZip::test(&pp, &mle, &data).unwrap();
             let (eval_f, eval_proof) =
-                TestPolyZip::evaluate::<F, HornerProjection<_, _>>(&pp, &mle, &point, test_proof)
-                    .unwrap();
+                TestPolyZip::evaluate::<F>(&pp, &mle, &point, test_proof).unwrap();
             let field_cfg = eval_f.cfg().clone();
 
             let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
             // Verifier replays verification from the same proof (also like the bench)
-            TestPolyZip::verify::<_, HornerProjection<_, _>, MBSInnerProductChecked>(
-                &pp,
-                &commitment,
-                &point_f,
-                &eval_f,
-                &eval_proof,
-            )
-            .expect("verify");
+            TestPolyZip::verify(&pp, &commitment, &point_f, &eval_f, &eval_proof).expect("verify");
         }
 
         inner::<12>();

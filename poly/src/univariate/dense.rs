@@ -1,4 +1,7 @@
-use crate::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial};
+use crate::{
+    ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
+    univariate::binary::BinaryPoly,
+};
 use core::slice;
 use crypto_primitives::{
     FixedSemiring, FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring, boolean::Boolean,
@@ -18,9 +21,9 @@ use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
     from_ref::FromRef,
     inner_product::{InnerProduct, InnerProductError},
-    mul_by_scalar::{MulByScalar, WideningMulByScalar},
+    mul_by_scalar::MulByScalar,
     named::Named,
-    projection_to_field::ProjectionToField,
+    projectable_to_field::ProjectableToField,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -368,7 +371,7 @@ impl<R: Ring + FixedSemiring, const DEGREE_PLUS_ONE: usize> Ring
 {
 }
 
-impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Distribution<DensePolynomial<R, DEGREE_PLUS_ONE>>
+impl<R, const DEGREE_PLUS_ONE: usize> Distribution<DensePolynomial<R, DEGREE_PLUS_ONE>>
     for StandardUniform
 where
     StandardUniform: Distribution<R>,
@@ -476,6 +479,17 @@ where
     }
 }
 
+impl<R, const DEGREE_PLUS_ONE: usize> FromRef<BinaryPoly<DEGREE_PLUS_ONE>>
+    for DensePolynomial<R, DEGREE_PLUS_ONE>
+where
+    R: Semiring + FromRef<Boolean> + Default,
+{
+    #[inline(always)]
+    fn from_ref(value: &BinaryPoly<DEGREE_PLUS_ONE>) -> Self {
+        Self::from_ref(value.inner())
+    }
+}
+
 impl<R, S, const DEGREE_PLUS_ONE: usize> From<&DensePolynomial<S, DEGREE_PLUS_ONE>>
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 where
@@ -520,10 +534,8 @@ where
     }
 }
 
-pub struct HornerProjection<R, const DEGREE_PLUS_ONE: usize>(PhantomData<R>);
-
-impl<R, F, const DEGREE_PLUS_ONE: usize> ProjectionToField<DensePolynomial<R, DEGREE_PLUS_ONE>, F>
-    for HornerProjection<R, DEGREE_PLUS_ONE>
+impl<R, F, const DEGREE_PLUS_ONE: usize> ProjectableToField<F>
+    for DensePolynomial<R, DEGREE_PLUS_ONE>
 where
     R: Semiring,
     F: PrimeField + for<'a> FromWithConfig<&'a R> + for<'a> MulByScalar<&'a F> + 'static,
@@ -547,43 +559,6 @@ where
             poly2
                 .evaluate_at_point(&sampled_value)
                 .expect("Failed to evaluate polynomial at point")
-        }
-    }
-}
-
-pub struct InnerProductProjection<R, I, const DEGREE_PLUS_ONE: usize>(PhantomData<(R, I)>);
-
-impl<R, F, I, const DEGREE_PLUS_ONE: usize>
-    ProjectionToField<DensePolynomial<R, DEGREE_PLUS_ONE>, F>
-    for InnerProductProjection<R, I, DEGREE_PLUS_ONE>
-where
-    I: InnerProduct<[R], F, F>,
-    R: Semiring,
-    F: PrimeField + 'static,
-{
-    #![allow(clippy::arithmetic_side_effects)] // False alert, field operations are safe
-    fn prepare_projection(
-        sampled_value: &F,
-    ) -> impl Fn(&DensePolynomial<R, DEGREE_PLUS_ONE>) -> F + 'static {
-        let field_cfg = sampled_value.cfg().clone();
-        let r_powers = {
-            // Preprocess powers prior to inner product.
-            let mut r_powers = Vec::with_capacity(DEGREE_PLUS_ONE);
-
-            let mut curr = F::one_with_cfg(&field_cfg);
-            r_powers.push(curr.clone());
-
-            for _ in 1..DEGREE_PLUS_ONE {
-                curr *= sampled_value;
-                r_powers.push(curr.clone());
-            }
-
-            r_powers
-        };
-
-        move |poly: &DensePolynomial<R, DEGREE_PLUS_ONE>| {
-            I::inner_product(&poly.coeffs, &r_powers, F::zero_with_cfg(&field_cfg))
-                .expect("Failed to evaluate polynomial")
         }
     }
 }
@@ -625,33 +600,5 @@ where
         zero: Out,
     ) -> Result<Out, InnerProductError> {
         I::inner_product(&lhs.coeffs, rhs, zero)
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-pub struct BinaryPolyWideningMulByScalar<Output>(PhantomData<Output>);
-
-impl<Rhs, Output, const DEGREE_PLUS_ONE: usize>
-    WideningMulByScalar<DensePolynomial<Boolean, DEGREE_PLUS_ONE>, Rhs>
-    for BinaryPolyWideningMulByScalar<Output>
-where
-    Rhs: Copy,
-    Output: From<Rhs> + Send + Sync + Default + Copy + Zero,
-{
-    type Output = DensePolynomial<Output, DEGREE_PLUS_ONE>;
-
-    fn mul_by_scalar_widen(
-        lhs: &DensePolynomial<Boolean, DEGREE_PLUS_ONE>,
-        rhs: &Rhs,
-    ) -> Self::Output {
-        let mut coeffs: [Output; DEGREE_PLUS_ONE] = [Output::zero(); DEGREE_PLUS_ONE];
-
-        coeffs.iter_mut().enumerate().for_each(|(i, out)| {
-            if lhs.coeffs[i].inner() {
-                *out = (*rhs).into();
-            }
-        });
-
-        DensePolynomial { coeffs }
     }
 }

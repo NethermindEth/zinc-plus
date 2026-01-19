@@ -1,8 +1,13 @@
 use crypto_bigint::BoxedUint;
-use crypto_primitives::{crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_uint::Uint};
+use crypto_primitives::{
+    FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
+    crypto_bigint_uint::Uint,
+};
 use num_traits::CheckedMul;
 
-use crate::{from_ref::FromRef, mul_by_scalar::MulByScalar};
+use crate::{
+    from_ref::FromRef, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
+};
 
 impl MulByScalar<&Self> for BoxedMontyField {
     fn mul_by_scalar(&self, rhs: &Self) -> Option<Self> {
@@ -20,6 +25,18 @@ impl<const LIMBS: usize> FromRef<Uint<LIMBS>> for BoxedUint {
     #[inline]
     fn from_ref(value: &Uint<LIMBS>) -> Self {
         value.inner().into()
+    }
+}
+
+impl<T> ProjectableToField<BoxedMontyField> for T
+where
+    BoxedMontyField: for<'a> FromWithConfig<&'a T>,
+{
+    fn prepare_projection(
+        sampled_value: &BoxedMontyField,
+    ) -> impl Fn(&Self) -> BoxedMontyField + 'static {
+        let config = sampled_value.cfg().clone();
+        move |value: &T| value.into_with_cfg(&config)
     }
 }
 

@@ -17,11 +17,11 @@ use zinc_utils::{
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProductUnchecked},
     mul_by_scalar::MulByScalar,
-    projection_to_field::ProjectionToField,
+    projectable_to_field::ProjectableToField,
 };
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
-    pub fn evaluate<F, P>(
+    pub fn evaluate<F>(
         pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
         point: &[Zt::Pt],
@@ -31,9 +31,10 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         F: PrimeField
             + for<'a> FromWithConfig<&'a Zt::Chal>
             + for<'a> FromWithConfig<&'a Zt::Pt>
-            + for<'a> MulByScalar<&'a F>,
+            + for<'a> MulByScalar<&'a F>
+            + FromRef<F>,
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
-        P: ProjectionToField<Zt::Eval, F>,
+        Zt::Eval: ProjectableToField<F>,
     {
         validate_input::<Zt, Lc, _>("evaluate", pp.num_vars, [poly], [point])?;
 
@@ -59,7 +60,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             .collect_vec();
         let (q_0, q_1) = point_to_tensor(num_rows, &point, &field_cfg)?;
 
-        let project = P::prepare_projection(&projecting_element);
+        let project = Zt::Eval::prepare_projection(&projecting_element);
         let evaluations: Vec<F> = poly.evaluations.iter().map(project).collect_vec();
 
         let q_0_combined_row = if num_rows > 1 {
@@ -72,6 +73,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         };
 
         transcript.write_field_elements(&q_0_combined_row)?;
+        // It is safe to use unchecked inner product since we are in a field.
         let eval_f = MBSInnerProductUnchecked::inner_product(
             &q_0_combined_row,
             &q_1,
