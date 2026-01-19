@@ -2,14 +2,14 @@ pub mod constraint_counter;
 pub mod dummy_semiring;
 pub mod ideal;
 
-use crypto_primitives::FixedSemiring;
-use zinc_utils::from_ref::FromRef;
+use crypto_primitives::{FixedSemiring, Semiring};
+use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 
-use crate::ideal::Ideal;
+use crate::ideal::{Ideal, IdealCheck};
 
-pub trait ConstraintBuilder<R: FixedSemiring> {
-    type Expr: FixedSemiring;
-    type Ideal: Ideal<R>;
+pub trait ConstraintBuilder {
+    type Expr: IdealCheck<Self::Ideal>;
+    type Ideal: Ideal;
 
     fn assert_in_ideal(&mut self, expr: Self::Expr, ideal: &Self::Ideal);
 
@@ -18,13 +18,31 @@ pub trait ConstraintBuilder<R: FixedSemiring> {
     }
 }
 
-pub trait Uair<R: FixedSemiring> {
-    type Ideal: Ideal<R>;
+pub trait Uair<R: Semiring + 'static> {
+    type Ideal: Ideal;
 
     fn num_cols() -> usize;
 
+    fn constrain_general<B, FromR, MulByScalar>(
+        b: &mut B,
+        up: &[B::Expr],
+        down: &[B::Expr],
+        from_ref: FromR,
+        mbs: MulByScalar,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&R) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &R) -> Option<B::Expr>,
+        B::Ideal: FromRef<Self::Ideal>;
+
     fn constrain<B>(b: &mut B, up: &[B::Expr], down: &[B::Expr])
     where
-        B: ConstraintBuilder<R>,
-        B::Ideal: FromRef<Self::Ideal>;
+        B: ConstraintBuilder,
+        B::Expr: FromRef<R> + for<'a> MulByScalar<&'a R>,
+        B::Ideal: FromRef<Self::Ideal>,
+    {
+        Self::constrain_general(b, up, down, B::Expr::from_ref, |x, y| {
+            B::Expr::mul_by_scalar(x, y)
+        })
+    }
 }

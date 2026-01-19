@@ -3,7 +3,11 @@ use crate::{ConstraintBuilder, Uair, ideal::DummyIdeal};
 use crypto_primitives::FixedSemiring;
 
 /// Get the number of polynomial constraints in a `Uair`.
-pub fn count_constraints<R: FixedSemiring, U: Uair<R>>() -> usize {
+pub fn count_constraints<R, U>() -> usize
+where
+    R: FixedSemiring + 'static,
+    U: Uair<R>,
+{
     let mut cc = ConstraintCounter::new();
 
     let dummy_up_and_down = vec![DummySemiring; U::num_cols()];
@@ -22,9 +26,9 @@ impl ConstraintCounter {
     }
 }
 
-impl<R: FixedSemiring> ConstraintBuilder<R> for ConstraintCounter {
+impl ConstraintBuilder for ConstraintCounter {
     type Expr = DummySemiring;
-    type Ideal = DummyIdeal<R>;
+    type Ideal = DummyIdeal;
 
     #[allow(clippy::arithmetic_side_effects)]
     #[inline(always)]

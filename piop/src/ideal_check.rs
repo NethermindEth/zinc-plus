@@ -11,10 +11,10 @@ use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     ConstraintBuilder, Uair,
     dummy_semiring::DummySemiring,
-    ideal::{DummyIdeal, Ideal},
+    ideal::{DummyIdeal, Ideal, IdealCheck},
 };
 use zinc_utils::{
-    inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
+    from_ref::FromRef, inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
     projectable_to_field::ProjectableToField,
 };
 
@@ -29,9 +29,9 @@ pub struct ProverState<F: PrimeField> {
     pub combined_mles: Vec<DenseMultilinearExtension<F::Inner>>,
 }
 
-pub struct SubClaim<R, C> {
-    pub point: Vec<C>,
-    pub value: R,
+pub struct SubClaim<F: PrimeField> {
+    pub point: Vec<F>,
+    pub value: F,
 }
 
 pub type Result<T, R, I> = std::result::Result<T, IdealCheckError<R, I>>;
@@ -40,7 +40,7 @@ pub struct IdealCheckProtocol<R, C>(PhantomData<(R, C)>);
 
 impl<R, C> IdealCheckProtocol<R, C>
 where
-    R: FixedSemiring + for<'a> MulByScalar<&'a C> + ConstTranscribable,
+    R: FixedSemiring + for<'a> MulByScalar<&'a C> + ConstTranscribable + 'static,
     C: ConstTranscribable,
 {
     #[allow(clippy::type_complexity)]
@@ -68,8 +68,14 @@ where
             .map(|mle| project_coeffs(mle, &projecting_element))
             .collect_vec();
 
-        let combined_mles =
-            Self::get_combined_poly_mles::<U, F>(&cs_up, &cs_down, num_constraints, num_vars);
+        let combined_mles = Self::get_combined_poly_mles::<U, F>(
+            &cs_up,
+            &cs_down,
+            &projecting_element,
+            num_constraints,
+            num_vars,
+            field_cfg,
+        );
         let mut transcription_buf: Vec<u8> = vec![0; R::NUM_BYTES];
 
         let mut evaluation_points: Vec<Vec<F>> = Vec::with_capacity(num_constraints);
@@ -104,11 +110,11 @@ where
         num_constraints: usize,
         num_vars: usize,
         field_cfg: &F::Config,
-    ) -> Result<Vec<SubClaim<R, C>>, R, U::Ideal>
+    ) -> Result<Vec<SubClaim<F>>, F, U::Ideal>
     where
         U: Uair<R>,
         R: ProjectableToField<F>,
-        F: InnerTransparentField,
+        F: InnerTransparentField + IdealCheck<U::Ideal>,
         F::Inner: ConstTranscribable,
     {
         let mut transcription_buf: Vec<u8> = vec![0; R::NUM_BYTES];
@@ -124,7 +130,7 @@ where
             evaluation_points.push(challenge);
         }
 
-        let mut ideal_collector = IdealCollector::<_, U::Ideal>::new(num_constraints);
+        let mut ideal_collector = IdealCollector::new(num_constraints);
 
         let dummy_up_and_down: Vec<DummySemiring> = vec![DummySemiring; num_constraints];
 
@@ -135,7 +141,7 @@ where
             .iter()
             .zip(combined_mle_values.iter())
             .try_for_each(|(ideal, mle_value)| {
-                if !ideal.contains(mle_value) {
+                if !mle_value.is_contained_in(ideal) {
                     return Err(IdealCheckError::IdealCheckFailed(
                         mle_value.clone(),
                         ideal.clone(),
@@ -155,8 +161,10 @@ where
     fn get_combined_poly_mles<U, F>(
         cs_up: &[DenseMultilinearExtension<F::Inner>],
         cs_down: &[DenseMultilinearExtension<F::Inner>],
+        projecting_element: &F,
         num_constraints: usize,
         num_vars: usize,
+        field_cfg: &F::Config,
     ) -> Vec<DenseMultilinearExtension<F::Inner>>
     where
         U: Uair<R>,
@@ -164,34 +172,42 @@ where
         F: PrimeField,
         F::Inner: ConstTranscribable,
     {
+        let projection = R::prepare_projection(&projecting_element);
         // Collect h MLEs.
         let len = cs_up[0].evaluations.len();
 
-        let mut h_evals: Vec<Vec<R>> = (0..num_constraints)
+        let mut h_evals: Vec<Vec<F::Inner>> = (0..num_constraints)
             .map(|_| Vec::with_capacity(len))
             .collect_vec();
 
-        let pointers: Vec<*mut R> = h_evals.iter_mut().map(|col| col.as_mut_ptr()).collect_vec();
+        let pointers: Vec<*mut F::Inner> =
+            h_evals.iter_mut().map(|col| col.as_mut_ptr()).collect_vec();
 
         (0..len).for_each(|i| {
-            let mut builder = IdealCheckConstraintBuilder::new(num_constraints);
+            let mut builder = IdealCheckConstraintBuilder::<F>::new(num_constraints);
 
-            let up = cs_up
+            let up: Vec<F> = cs_up
                 .iter()
-                .map(|up| up.evaluations[i].clone())
+                .map(|up| F::new_unchecked_with_cfg(up.evaluations[i].clone(), field_cfg))
                 .collect_vec();
-            let down = cs_down
+            let down: Vec<F> = cs_down
                 .iter()
-                .map(|down| down.evaluations[i].clone())
+                .map(|down| F::new_unchecked_with_cfg(down.evaluations[i].clone(), field_cfg))
                 .collect_vec();
 
-            U::constrain(&mut builder, &up, &down);
+            U::constrain_general(
+                &mut builder,
+                &up,
+                &down,
+                |x| projection(x),
+                |x, y| Some(projection(y) * x),
+            );
 
             pointers
                 .iter()
                 .zip(builder.uair_poly_mles_coeffs)
                 .for_each(|(ptr, eval)| unsafe {
-                    *ptr.add(i) = eval;
+                    *ptr.add(i) = eval.inner().clone();
                 });
         });
 
@@ -223,10 +239,10 @@ impl<R: Semiring> IdealCheckConstraintBuilder<R> {
     }
 }
 
-impl<R: FixedSemiring> ConstraintBuilder<R> for IdealCheckConstraintBuilder<R> {
+impl<R: Semiring> ConstraintBuilder for IdealCheckConstraintBuilder<R> {
     type Expr = R;
     // Ignore all ideal business on the side of the prover.
-    type Ideal = DummyIdeal<Self::Expr>;
+    type Ideal = DummyIdeal;
 
     #[allow(clippy::arithmetic_side_effects)]
     fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {
@@ -234,26 +250,54 @@ impl<R: FixedSemiring> ConstraintBuilder<R> for IdealCheckConstraintBuilder<R> {
     }
 }
 
-pub(crate) struct IdealCollector<R: Semiring, I: Ideal<R>> {
+pub(crate) struct IdealCollector<I: Ideal> {
     pub ideals: Vec<I>,
-    _phantom: PhantomData<R>,
 }
 
-impl<R: Semiring, I: Ideal<R>> IdealCollector<R, I> {
+impl<I: Ideal> IdealCollector<I> {
     pub fn new(num_constraints: usize) -> Self {
         Self {
             ideals: Vec::with_capacity(num_constraints),
-            _phantom: Default::default(),
         }
     }
 }
 
-impl<R: FixedSemiring, I: Ideal<R>> ConstraintBuilder<R> for IdealCollector<R, I> {
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CollectedIdeal<I: Ideal>(I);
+
+impl<I: Ideal> Ideal for CollectedIdeal<I> {
+    fn zero_ideal() -> Self {
+        Self(I::zero_ideal())
+    }
+}
+
+impl<I: Ideal> FromRef<CollectedIdeal<I>> for CollectedIdeal<I> {
+    fn from_ref(value: &CollectedIdeal<I>) -> Self {
+        value.clone()
+    }
+}
+
+impl<I: Ideal> FromRef<I> for CollectedIdeal<I> {
+    fn from_ref(value: &I) -> Self {
+        Self(value.clone())
+    }
+}
+
+impl<I: Ideal> IdealCheck<CollectedIdeal<I>> for DummySemiring {
+    fn is_contained_in(&self, _ideal: &CollectedIdeal<I>) -> bool {
+        true
+    }
+}
+
+impl<I> ConstraintBuilder for IdealCollector<I>
+where
+    I: Ideal,
+{
     type Expr = DummySemiring;
-    type Ideal = I;
+    type Ideal = CollectedIdeal<I>;
 
     fn assert_in_ideal(&mut self, _expr: Self::Expr, ideal: &Self::Ideal) {
-        self.ideals.push(ideal.clone());
+        self.ideals.push(ideal.0.clone());
     }
 }
 
@@ -273,7 +317,10 @@ impl<R, I> From<EvaluationError> for IdealCheckError<R, I> {
 
 #[cfg(test)]
 mod tests {
-    use crypto_primitives::{FixedSemiring, crypto_bigint_int::Int};
+    use crypto_bigint::{Odd, modular::MontyParams};
+    use crypto_primitives::{
+        FixedSemiring, PrimeField, crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
+    };
     use itertools::Itertools;
     use num_traits::{ConstZero, Zero};
     use rand::{Rng, rng};
@@ -285,98 +332,24 @@ mod tests {
     use zinc_uair::{
         ConstraintBuilder, Uair,
         constraint_counter::count_constraints,
-        ideal::{Ideal, ZeroIdeal},
+        ideal::{Ideal, IdealCheck, ZeroIdeal},
     };
     use zinc_utils::from_ref::FromRef;
 
-    use crate::ideal_check::IdealCheckProtocol;
+    use crate::{
+        ideal_check::IdealCheckProtocol,
+        tests::test_airs::{TestAirNoMultiplication, TestUair},
+    };
 
-    struct TestUair;
+    const LIMBS: usize = 4;
+    type F = MontyField<LIMBS>;
 
-    impl<R: FixedSemiring> Uair<R> for TestUair {
-        type Ideal = ZeroIdeal<R>;
-
-        fn num_cols() -> usize {
-            3
-        }
-
-        #[allow(clippy::arithmetic_side_effects)]
-        fn constrain<B: ConstraintBuilder<R>>(b: &mut B, up: &[B::Expr], down: &[B::Expr]) {
-            b.assert_in_ideal(up[0].clone() * &down[1] - &up[1], &B::Ideal::zero_ideal());
-            b.assert_in_ideal(up[2].clone(), &B::Ideal::zero_ideal());
-        }
-    }
-
-    #[test]
-    fn test_get_ideals_and_combined_poly_mles() {
-        let up: Vec<DenseMultilinearExtension<Int<4>>> = vec![
-            DenseMultilinearExtension::from_evaluations_slice(
-                4,
-                &(0..4).map(Int::from_i64).collect_vec(),
-                Int::ZERO,
-            ),
-            DenseMultilinearExtension::from_evaluations_slice(
-                4,
-                &(4..8).map(Int::from_i64).collect_vec(),
-                Int::ZERO,
-            ),
-            DenseMultilinearExtension::from_evaluations_slice(
-                4,
-                &(8..12).map(Int::from_i64).collect_vec(),
-                Int::ZERO,
-            ),
-        ];
-        let down: Vec<DenseMultilinearExtension<Int<4>>> = vec![
-            DenseMultilinearExtension::from_evaluations_slice(
-                4,
-                &(12..16).map(Int::from_i64).collect_vec(),
-                Int::ZERO,
-            ),
-            DenseMultilinearExtension::from_evaluations_slice(
-                4,
-                &(16..20).map(Int::from_i64).collect_vec(),
-                Int::ZERO,
-            ),
-            DenseMultilinearExtension::from_evaluations_slice(
-                4,
-                &(20..24).map(Int::from_i64).collect_vec(),
-                Int::ZERO,
-            ),
-        ];
-
-        let mles = IdealCheckProtocol::<_, i128>::get_combined_poly_mles::<TestUair>(
-            &up,
-            &down,
-            count_constraints::<Int<4>, TestUair>(),
-            4,
+    fn test_config() -> MontyParams<LIMBS> {
+        let modulus = crypto_bigint::Uint::<LIMBS>::from_be_hex(
+            "0000000000000000000000000000000000860995AE68FC80E1B1BD1E39D54B33",
         );
-
-        assert_eq!(mles.len(), count_constraints::<Int<4>, TestUair>());
-
-        assert_eq!(&mles[0], &(up[0].clone() * &down[1] - &up[1]));
-        assert_eq!(&mles[1], &up[2]);
-    }
-
-    struct TestAirNoMultiplication;
-
-    impl<const LIMBS: usize> Uair<DensePolynomial<Int<LIMBS>, 32>> for TestAirNoMultiplication {
-        type Ideal = DegreeOneIdeal<Int<LIMBS>, ZeroIdeal<DensePolynomial<Int<LIMBS>, 32>>, 32>;
-
-        fn num_cols() -> usize {
-            3
-        }
-
-        #[allow(clippy::arithmetic_side_effects)]
-        fn constrain<B>(b: &mut B, up: &[B::Expr], _down: &[B::Expr])
-        where
-            B: ConstraintBuilder<DensePolynomial<Int<LIMBS>, 32>>,
-            B::Ideal: FromRef<Self::Ideal>,
-        {
-            b.assert_in_ideal(
-                up[0].clone() + &up[1] - &up[2],
-                &B::Ideal::from_ref(&DegreeOneIdeal::new(Int::from(2))),
-            );
-        }
+        let modulus = Odd::new(modulus).expect("modulus should be odd");
+        MontyParams::new(modulus)
     }
 
     #[test]
@@ -435,15 +408,18 @@ mod tests {
 
         println!("{:?}", &up);
 
+        let field_cfg = test_config();
+
         let transcript = KeccakTranscript::new();
 
         let (proof, _) =
-            IdealCheckProtocol::<_, Int<2>>::prove_as_subprotocol::<TestAirNoMultiplication>(
+            IdealCheckProtocol::<_, Int<2>>::prove_as_subprotocol::<TestAirNoMultiplication, F>(
                 &mut transcript.clone(),
-                &up,
-                &down,
+                up,
+                down,
                 count_constraints::<Poly, TestAirNoMultiplication>(),
                 4,
+                &field_cfg,
             )
             .unwrap();
 

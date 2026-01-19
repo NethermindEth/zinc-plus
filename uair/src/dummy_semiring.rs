@@ -6,7 +6,9 @@ use std::{
 
 use crypto_primitives::Semiring;
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, ConstOne, ConstZero, One, Zero};
-use zinc_utils::from_ref::FromRef;
+use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
+
+use crate::ideal::{Ideal, IdealCheck};
 
 /// A dummy type implementing `FixedSemiring` trait.
 /// Used for `ConstraintCounter` to have something
@@ -138,5 +140,12 @@ impl<T> FromRef<T> for DummySemiring {
     #[inline(always)]
     fn from_ref(_value: &T) -> Self {
         DummySemiring
+    }
+}
+
+impl<T> MulByScalar<&T> for DummySemiring {
+    #[inline(always)]
+    fn mul_by_scalar(&self, _rhs: &T) -> Option<Self> {
+        Some(DummySemiring)
     }
 }
