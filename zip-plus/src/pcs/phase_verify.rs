@@ -16,7 +16,7 @@ use zinc_poly::Polynomial;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
     from_ref::FromRef,
-    inner_product::{InnerProduct, MBSInnerProductChecked, MBSInnerProductUnchecked},
+    inner_product::{InnerProduct, MBSInnerProductUnchecked},
     mul_by_scalar::MulByScalar,
     projectable_to_field::ProjectableToField,
 };
@@ -147,7 +147,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 .map(Zt::Comb::from_ref)
                 .map(|p| Zt::CombDotChal::inner_product(&p, alphas, Zt::CombR::ZERO))
                 .try_collect()?;
-            MBSInnerProductChecked::inner_product(&column_entries, coeffs, Zt::CombR::ZERO)?
+            Zt::ArrCombRDotChal::inner_product(&column_entries, coeffs, Zt::CombR::ZERO)?
         } else {
             Zt::CombDotChal::inner_product(
                 &Zt::Comb::from_ref(&column_entries[0]),

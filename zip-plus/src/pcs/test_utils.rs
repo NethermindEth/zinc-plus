@@ -63,6 +63,7 @@ impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N
     type Comb = Self::CombR;
     type EvalDotChal = ScalarProduct;
     type CombDotChal = ScalarProduct;
+    type ArrCombRDotChal = MBSInnerProductChecked;
 }
 
 pub struct TestPolyZipTypes<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> {}
@@ -87,6 +88,7 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
         MBSInnerProductChecked,
         DEGREE_PLUS_ONE,
     >;
+    type ArrCombRDotChal = MBSInnerProductChecked;
 }
 
 /// Helper function to set up common parameters for tests.

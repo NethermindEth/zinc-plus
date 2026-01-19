@@ -68,6 +68,7 @@ where
         MBSInnerProductUnchecked,
         D_PLUS_ONE,
     >;
+    type ArrCombRDotChal = MBSInnerProductUnchecked;
 }
 
 #[derive(Clone, Copy)]

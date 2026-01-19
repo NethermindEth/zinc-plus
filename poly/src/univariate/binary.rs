@@ -70,9 +70,7 @@ impl<const DEGREE_PLUS_ONE: usize> BinaryPoly<DEGREE_PLUS_ONE> {
     pub fn new(coeffs: impl AsRef<[Boolean]>) -> Self {
         Self(DensePolynomial::new(coeffs))
     }
-}
 
-impl<const DEGREE_PLUS_ONE: usize> BinaryPoly<DEGREE_PLUS_ONE> {
     /// Create a new polynomial with the given coefficients.
     /// If the input has fewer than N+1 coefficients, the remaining slots will
     /// be filled with zeros. If the input has more than N+1 coefficients,
@@ -122,9 +120,7 @@ impl<'a, const DEGREE_PLUS_ONE: usize> Sub<&'a Self> for BinaryPoly<DEGREE_PLUS_
     }
 }
 
-impl<const DEGREE_PLUS_ONE: usize> Mul<BinaryPoly<DEGREE_PLUS_ONE>>
-    for BinaryPoly<DEGREE_PLUS_ONE>
-{
+impl<const DEGREE_PLUS_ONE: usize> Mul for BinaryPoly<DEGREE_PLUS_ONE> {
     type Output = Self;
 
     #[allow(clippy::arithmetic_side_effects)]

@@ -4,7 +4,7 @@
 mod zip_common;
 
 use zinc_primality::MillerRabin;
-use zinc_utils::inner_product::ScalarProduct;
+use zinc_utils::inner_product::{MBSInnerProductUnchecked, ScalarProduct};
 use zip_common::*;
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -30,6 +30,7 @@ impl ZipTypes for BenchZipTypes {
     type Comb = Self::CombR;
     type EvalDotChal = ScalarProduct;
     type CombDotChal = ScalarProduct;
+    type ArrCombRDotChal = MBSInnerProductUnchecked;
 }
 
 #[derive(Clone, Copy)]
