@@ -1,70 +1,32 @@
-use std::{marker::PhantomData, ops::Mul};
-
 use crypto_primitives::{FromWithConfig, PrimeField};
+use std::marker::PhantomData;
+
 use zinc_utils::mul_by_scalar::{MulByScalar, WideningMulByScalar};
 
-use crate::code::iprs::PnttInt;
+/// A helper trait that allows to provide
+/// the pseudo NTT algorithm a means to
+/// multiply output by twiddles.
+// TODO(alex): Can we get away with using just MulByScalar?
+pub(crate) trait MulByTwiddle<Lhs, Twiddle>: Clone + Send + Sync {
+    type Output;
 
-/// A trait for various wrappers used
-/// to pick the right multiplication
-/// by twiddles.
-pub trait MulByTwiddle<T> {
-    fn new_ref(value: &T) -> &Self;
-}
-
-impl<T> MulByTwiddle<T> for T {
-    fn new_ref(value: &T) -> &Self {
-        value
-    }
-}
-
-#[repr(transparent)]
-pub struct ForceWideningMulByTwiddle<T, WideningMBS>(T, PhantomData<WideningMBS>);
-
-impl<T, WideningMBS> MulByTwiddle<T> for ForceWideningMulByTwiddle<T, WideningMBS> {
-    #[inline(always)]
-    fn new_ref(value: &T) -> &Self {
-        // Safety: ForceWideningMulByTwiddle is #[repr(transparent)] and is
-        // guaranteed to have the same memory layout as T
-        unsafe { &*(value as *const T as *const Self) }
-    }
-}
-
-impl<T, WideningMBS> Mul<&PnttInt> for &ForceWideningMulByTwiddle<T, WideningMBS>
-where
-    WideningMBS: WideningMulByScalar<T, PnttInt>,
-{
-    type Output = WideningMBS::Output;
-
-    fn mul(self, rhs: &PnttInt) -> Self::Output {
-        WideningMBS::mul_by_scalar_widen(&self.0, rhs)
-    }
+    fn mul_by_twiddle(&self, lhs: &Lhs, twiddle: &Twiddle) -> Self::Output;
 }
 
 /// The twiddle multiplication that
 /// uses the `MulByScalar` implementation.
 #[derive(Debug, Clone, Copy)]
-#[repr(transparent)]
-pub(crate) struct ForceMulByScalar<T>(T);
+pub(crate) struct MBSMulByTwiddle;
 
-impl<T> MulByTwiddle<T> for ForceMulByScalar<T> {
-    #[inline(always)]
-    fn new_ref(value: &T) -> &Self {
-        // Safety: ForceMulByScalar is #[repr(transparent)] and is
-        // guaranteed to have the same memory layout as T
-        unsafe { &*(value as *const T as *const Self) }
-    }
-}
-
-impl<T> Mul<&PnttInt> for &ForceMulByScalar<T>
+impl<Lhs, Twiddle> MulByTwiddle<Lhs, Twiddle> for MBSMulByTwiddle
 where
-    T: for<'a> MulByScalar<&'a PnttInt>,
+    Lhs: for<'a> MulByScalar<&'a Twiddle>,
 {
-    type Output = T;
+    type Output = Lhs;
 
-    fn mul(self, rhs: &PnttInt) -> Self::Output {
-        self.0
-            .mul_by_scalar(rhs)
+    #[inline(always)]
+    fn mul_by_twiddle(&self, lhs: &Lhs, twiddle: &Twiddle) -> Lhs {
+        lhs.mul_by_scalar(twiddle)
             .expect("Twiddle multiplication overflow")
     }
 }
@@ -73,25 +35,45 @@ where
 /// worry about overflows. Multiplication by twiddle
 /// is done by conversions and field operations.
 #[derive(Debug, Clone)]
-#[repr(transparent)]
-pub(crate) struct FieldMulByTwiddle<F: PrimeField>(F);
+pub(crate) struct FieldMulByTwiddle<F: PrimeField, T> {
+    config: F::Config,
+    _phantom: PhantomData<T>,
+}
 
-impl<T: PrimeField> MulByTwiddle<T> for FieldMulByTwiddle<T> {
-    #[inline(always)]
-    fn new_ref(value: &T) -> &Self {
-        // Safety: ForceMulByScalar is #[repr(transparent)] and is
-        // guaranteed to have the same memory layout as T
-        unsafe { &*(value as *const T as *const Self) }
+impl<F: PrimeField, T> FieldMulByTwiddle<F, T> {
+    pub fn new(config: F::Config) -> Self {
+        Self {
+            config,
+            _phantom: Default::default(),
+        }
     }
 }
 
-impl<F> Mul<&PnttInt> for &FieldMulByTwiddle<F>
+impl<F, Twiddle, T> MulByTwiddle<F, Twiddle> for FieldMulByTwiddle<F, T>
 where
-    F: PrimeField + FromWithConfig<PnttInt>,
+    F: PrimeField + FromWithConfig<T>,
+    Twiddle: Clone + Into<T>,
+    T: Clone + Send + Sync,
 {
     type Output = F;
 
-    fn mul(self, rhs: &PnttInt) -> Self::Output {
-        F::from_with_cfg(*rhs, self.0.cfg()) * &self.0
+    #[inline(always)]
+    fn mul_by_twiddle(&self, lhs: &F, twiddle: &Twiddle) -> F {
+        F::from_with_cfg(twiddle.clone().into(), &self.config) * lhs
+    }
+}
+
+#[derive(Clone, Default, Copy)]
+pub struct WideningMulByTwiddle<WM>(PhantomData<WM>);
+
+impl<Lhs, Twiddle, Inner> MulByTwiddle<Lhs, Twiddle> for WideningMulByTwiddle<Inner>
+where
+    Inner: WideningMulByScalar<Lhs, Twiddle>,
+{
+    type Output = Inner::Output;
+
+    #[inline(always)]
+    fn mul_by_twiddle(&self, lhs: &Lhs, twiddle: &Twiddle) -> Self::Output {
+        Inner::mul_by_scalar_widen(lhs, twiddle)
     }
 }
