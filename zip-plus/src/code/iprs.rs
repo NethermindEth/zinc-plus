@@ -31,7 +31,7 @@ where
     Config: PnttConfig,
 {
     /// Encode without modular reduction, purely over the integers.
-    fn encode_inner<In, Out, M>(&self, row: &[In], mul_in_by_twiddle: &M) -> Vec<Out>
+    fn encode_inner<In, Out, M>(&self, row: &[In]) -> Vec<Out>
     where
         In: Clone + Send + Sync,
         Out: CheckedAdd
@@ -54,7 +54,7 @@ where
             Config::INPUT_LEN
         );
 
-        pntt::radix8::pntt(row, &self.pntt_params, mul_in_by_twiddle, &MBSMulByTwiddle)
+        pntt::radix8::pntt::<_, _, _, M, MBSMulByTwiddle>(row, &self.pntt_params)
     }
 
     // Do the encoding but make use of the fact
@@ -71,9 +71,10 @@ where
             Config::INPUT_LEN
         );
 
-        let mul_by_twiddle = FieldMulByTwiddle::<_, PnttInt>::new(row[0].cfg().clone());
-
-        pntt::radix8::pntt(row, &self.pntt_params, &mul_by_twiddle, &mul_by_twiddle)
+        pntt::radix8::pntt::<_, _, _, FieldMulByTwiddle<_, PnttInt>, FieldMulByTwiddle<_, PnttInt>>(
+            row,
+            &self.pntt_params,
+        )
     }
 }
 
@@ -121,7 +122,7 @@ where
             Config::INPUT_LEN
         );
 
-        self.encode_inner(row, &WideningMulByTwiddle::<MT>::default())
+        self.encode_inner::<_, _, WideningMulByTwiddle<MT>>(row)
     }
 
     fn row_len(&self) -> usize {
@@ -133,7 +134,7 @@ where
     }
 
     fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {
-        self.encode_inner(row, &MBSMulByTwiddle)
+        self.encode_inner::<_, _, MBSMulByTwiddle>(row)
     }
 
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>

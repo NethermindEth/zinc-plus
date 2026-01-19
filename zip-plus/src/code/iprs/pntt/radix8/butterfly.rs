@@ -24,7 +24,6 @@ pub(crate) fn apply_radix_8_butterflies<R, Twiddle, M>(
     ys: [&mut R; 8],
     xs: &[R],
     twiddles: &[[Twiddle; 8]; 7],
-    mul_by_twiddle: &M,
 ) where
     R: Clone + CheckedAdd,
     M: MulByTwiddle<R, Twiddle, Output = R>,
@@ -35,10 +34,7 @@ pub(crate) fn apply_radix_8_butterflies<R, Twiddle, M>(
             *y = xs[1..].iter().zip(&butterfly_row[..]).enumerate().fold(
                 xs[0].clone(),
                 |a, (j_minus_1, (x, &twiddle_idx))| {
-                    add!(
-                        a,
-                        &mul_by_twiddle.mul_by_twiddle(x, &twiddles[j_minus_1][twiddle_idx])
-                    )
+                    add!(a, &M::mul_by_twiddle(x, &twiddles[j_minus_1][twiddle_idx]))
                 },
             )
         });
