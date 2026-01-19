@@ -110,6 +110,21 @@ pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>, const ROW_LEN: usize>
 ) where
     StandardUniform: Distribution<Zt::Eval>,
 {
+    let mut rng = ThreadRng::default();
+    let poly_size = ROW_LEN * ROW_LEN;
+    let linear_code = Lc::new(poly_size);
+    if linear_code.row_len() != ROW_LEN {
+        // TODO(Ilia): Since IPRS codes require
+        //             the input size to be known at compile time
+        //             this detects IPRS benches.
+        //             Ofc, it's a lame way to handle this and
+        //             one can come up with a more elegant type safe way
+        //             but for the sake of a fast solution it's good enough.
+        //             Once we have time address this pls.
+
+        return;
+    }
+
     group.bench_function(
         format!(
             "EncodeMessage: {} -> {}, row_len = {ROW_LEN}",
@@ -117,10 +132,6 @@ pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>, const ROW_LEN: usize>
             Zt::Cw::type_name()
         ),
         |b| {
-            let mut rng = ThreadRng::default();
-            let poly_size = ROW_LEN * ROW_LEN;
-            let linear_code = Lc::new(poly_size);
-            assert_eq!(linear_code.row_len(), ROW_LEN, "Unexpected row_len");
             let message: Vec<<Zt as ZipTypes>::Eval> =
                 (0..ROW_LEN).map(|_i| rng.random()).collect();
             b.iter(|| {
