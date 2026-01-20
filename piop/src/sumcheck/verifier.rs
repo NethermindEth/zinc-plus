@@ -5,7 +5,7 @@ use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use zinc_poly::{EvaluatablePolynomial, univariate::nat_evaluation::NatEvaluatedPoly};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 
-use crate::sumcheck::prover::ProverMsg;
+use crate::sumcheck::prover::{NatEvaluatedPolyWithoutConstant, ProverMsg};
 
 use super::SumCheckError;
 
@@ -24,7 +24,7 @@ pub struct VerifierState<F: PrimeField> {
     pub finished: bool,
     /// A list storing the univariate polynomial in evaluation form sent by the
     /// prover at each round so far.
-    pub polynomials_received: Vec<Vec<F>>,
+    pub polynomials_received: Vec<NatEvaluatedPolyWithoutConstant<F>>,
     /// A list storing the randomness sampled by the verifier at each round so
     /// far.
     pub randomness: Vec<F>,

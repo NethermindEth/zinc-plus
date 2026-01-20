@@ -7,9 +7,37 @@ use rayon::iter::*;
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
 use zinc_utils::inner_transparent_field::InnerTransparentField;
 
+/// Evaluation of a polynomial on natural points without the constant term.
 #[repr(transparent)]
 #[derive(Clone, Debug, PartialEq)]
-pub struct ProverMsg<F>(pub Vec<F>);
+pub struct NatEvaluatedPolyWithoutConstant<F> {
+    /// Evaluations at 1, 2, ... (P(0) is omitted).
+    pub tail_evaluations: Vec<F>,
+}
+
+impl<F> NatEvaluatedPolyWithoutConstant<F> {
+    pub fn new(tail_evaluations: Vec<F>) -> Self {
+        Self { tail_evaluations }
+    }
+}
+
+impl<F> std::ops::Deref for NatEvaluatedPolyWithoutConstant<F> {
+    type Target = [F];
+
+    fn deref(&self) -> &Self::Target {
+        &self.tail_evaluations
+    }
+}
+
+impl<F> std::ops::DerefMut for NatEvaluatedPolyWithoutConstant<F> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.tail_evaluations
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProverMsg<F>(pub NatEvaluatedPolyWithoutConstant<F>);
 
 /// Sumcheck Prover State.
 pub struct ProverState<F: PrimeField> {
@@ -202,6 +230,8 @@ where
         // Strip the constant term before sending.
         let evaluations_without_constant = evaluations.into_iter().skip(1).collect();
 
-        ProverMsg(evaluations_without_constant)
+        ProverMsg(NatEvaluatedPolyWithoutConstant::new(
+            evaluations_without_constant,
+        ))
     }
 }

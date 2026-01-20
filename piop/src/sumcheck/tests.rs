@@ -632,7 +632,7 @@ fn zero_variable_case_returns_correct_subclaim() {
     let claimed_sum: F = F::from(42u32);
 
     // No prover rounds for zero-variable case
-    let proof = SumcheckProof::<F>(Vec::new(), claimed_sum.clone());
+    let proof = SumcheckProof::<F>(Vec::new(), claimed_sum);
 
     let mut transcript = KeccakTranscript::default();
     let _subclaim = MLSumcheck::verify_as_subprotocol(
