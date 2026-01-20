@@ -4,15 +4,12 @@ use ark_std::{cfg_into_iter, cfg_iter_mut, slice, vec, vec::Vec};
 use crypto_primitives::PrimeField;
 #[cfg(feature = "parallel")]
 use rayon::iter::*;
-use zinc_poly::{
-    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::nat_evaluation::NatEvaluatedPoly,
-};
+use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
 use zinc_utils::inner_transparent_field::InnerTransparentField;
 
 #[repr(transparent)]
 #[derive(Clone, Debug, PartialEq)]
-pub struct ProverMsg<F>(pub NatEvaluatedPoly<F>);
+pub struct ProverMsg<F>(pub Vec<F>);
 
 /// Sumcheck Prover State.
 pub struct ProverState<F: PrimeField> {
@@ -27,6 +24,8 @@ pub struct ProverState<F: PrimeField> {
     pub max_degree: usize,
     /// The current round number.
     pub round: usize,
+    /// Claimed sum for the first round polynomial.
+    pub asserted_sum: Option<F>,
 }
 
 impl<F: PrimeField> ProverState<F> {
@@ -43,6 +42,7 @@ impl<F: PrimeField> ProverState<F> {
             num_vars: nvars,
             max_degree: degree,
             round: 0,
+            asserted_sum: None,
         }
     }
 }
@@ -186,6 +186,22 @@ where
         #[cfg(not(feature = "parallel"))]
         let evaluations = summer.evals;
 
-        ProverMsg(NatEvaluatedPoly::new(evaluations))
+        // Record the claimed sum once during the first round.
+        if self.round == 1 {
+            let p0 = evaluations
+                .first()
+                .expect("evaluations should always contain the constant term");
+            let sum = if degree > 0 {
+                p0.clone() + &evaluations[1]
+            } else {
+                p0.clone()
+            };
+            self.asserted_sum = Some(sum);
+        }
+
+        // Strip the constant term before sending.
+        let evaluations_without_constant = evaluations.into_iter().skip(1).collect();
+
+        ProverMsg(evaluations_without_constant)
     }
 }

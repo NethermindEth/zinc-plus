@@ -66,7 +66,17 @@ fn full_sumcheck_protocol_works_correctly() {
 }
 
 #[test]
-fn verifier_rejects_proof_with_incorrect_claimed_sum() {
+fn prover_message_omits_constant_term() {
+    let mut rng = rand::rng();
+    let num_vars = 3;
+
+    let (poly_degree, _sum, proof) = generate_sumcheck_proof(num_vars, &mut rng);
+
+    assert_eq!(proof.0[0].0.len(), poly_degree);
+}
+
+#[test]
+fn subclaim_differs_with_incorrect_claimed_sum() {
     let mut rng = rand::rng();
     let num_vars = 3;
 
@@ -88,6 +98,17 @@ fn verifier_rejects_proof_with_incorrect_claimed_sum() {
     let one = F::from(1u32);
     let incorrect_sum = sum + one;
 
+    let mut clean_verifier_transcript = KeccakTranscript::default();
+    let clean_subclaim = MLSumcheck::verify_as_subprotocol(
+        &mut clean_verifier_transcript,
+        num_vars,
+        poly_degree,
+        sum,
+        &proof,
+        (),
+    )
+    .unwrap();
+
     let mut verifier_transcript = KeccakTranscript::default();
     let res = MLSumcheck::verify_as_subprotocol(
         &mut verifier_transcript,
@@ -96,16 +117,15 @@ fn verifier_rejects_proof_with_incorrect_claimed_sum() {
         incorrect_sum,
         &proof,
         (),
-    );
+    )
+    .unwrap();
 
-    assert!(matches!(
-        res,
-        Err(super::SumCheckError::SumCheckFailed(_, _, _))
-    ));
+    assert_eq!(clean_subclaim.point, res.point);
+    assert_ne!(clean_subclaim.expected_evaluation, res.expected_evaluation);
 }
 
 #[test]
-fn verifier_rejects_proof_with_tampered_prover_message() {
+fn subclaim_changes_when_prover_message_is_tampered() {
     let mut rng = rand::rng();
     let num_vars = 3;
 
@@ -124,9 +144,20 @@ fn verifier_rejects_proof_with_tampered_prover_message() {
         (),
     );
 
+    let mut clean_verifier_transcript = KeccakTranscript::default();
+    let clean_subclaim = MLSumcheck::verify_as_subprotocol(
+        &mut clean_verifier_transcript,
+        num_vars,
+        poly_degree,
+        sum,
+        &proof,
+        (),
+    )
+    .unwrap();
+
     let mut tampered_proof = proof.clone();
     let one: F = F::from(1u32);
-    tampered_proof.0[0].0.evaluations[0] += one;
+    tampered_proof.0[0].0[0] += one;
 
     let mut verifier_transcript = KeccakTranscript::default();
     let res = MLSumcheck::verify_as_subprotocol(
@@ -136,12 +167,11 @@ fn verifier_rejects_proof_with_tampered_prover_message() {
         sum,
         &tampered_proof,
         (),
-    );
+    )
+    .unwrap();
 
-    assert!(matches!(
-        res,
-        Err(super::SumCheckError::SumCheckFailed(_, _, _))
-    ));
+    assert_ne!(clean_subclaim.point, res.point);
+    assert_ne!(clean_subclaim.expected_evaluation, res.expected_evaluation);
 }
 
 #[test]
@@ -380,7 +410,7 @@ fn sumcheck_with_single_variable() {
 }
 
 #[test]
-fn verifier_rejects_proof_if_transcript_is_tampered() {
+fn subclaim_changes_if_transcript_is_tampered() {
     let mut rng = rand::rng();
     let num_vars = 3;
 
@@ -407,8 +437,8 @@ fn verifier_rejects_proof_if_transcript_is_tampered() {
         sum,
         &proof,
         (),
-    );
-    assert!(clean_res.is_ok());
+    )
+    .unwrap();
 
     let mut tampered_transcript = KeccakTranscript::default();
     tampered_transcript.absorb(b"tampering the transcript");
@@ -419,8 +449,14 @@ fn verifier_rejects_proof_if_transcript_is_tampered() {
         sum,
         &proof,
         (),
+    )
+    .unwrap();
+
+    assert_ne!(clean_res.point, tampered_res.point);
+    assert_ne!(
+        clean_res.expected_evaluation,
+        tampered_res.expected_evaluation
     );
-    assert!(tampered_res.is_err());
 }
 
 #[test]
@@ -434,6 +470,7 @@ fn prover_panics_if_round_exceeds_num_vars() {
         num_vars,
         max_degree: 2,
         round: num_vars, // Set to the last valid round
+        asserted_sum: None,
     };
 
     let comb_fn = |_vals: &[F]| F::ZERO;
@@ -591,11 +628,11 @@ fn zero_variable_case_returns_correct_subclaim() {
     let num_vars = 0;
     let degree = 2;
 
-    // No prover rounds for zero-variable case
-    let proof = SumcheckProof::<F>(Vec::new());
-
     // Let's pick some arbitrary "claimed sum"
     let claimed_sum: F = F::from(42u32);
+
+    // No prover rounds for zero-variable case
+    let proof = SumcheckProof::<F>(Vec::new(), claimed_sum.clone());
 
     let mut transcript = KeccakTranscript::default();
     let _subclaim = MLSumcheck::verify_as_subprotocol(
