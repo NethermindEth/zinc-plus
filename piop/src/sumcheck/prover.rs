@@ -220,18 +220,20 @@ where
                 .first()
                 .expect("evaluations should always contain the constant term");
             let sum = if degree > 0 {
-                p0.clone() + &evaluations[1]
+                p0.clone()
+                    + evaluations
+                        .get(1)
+                        .expect("degree > 0 implies evaluation at 1 is present")
             } else {
                 p0.clone()
             };
             self.asserted_sum = Some(sum);
         }
 
-        // Strip the constant term before sending.
-        let evaluations_without_constant = evaluations.into_iter().skip(1).collect();
+        // Strip the constant term before sending, without re-allocating all elements.
+        let mut evaluations_without_constant = evaluations;
+        let tail = evaluations_without_constant.split_off(1); // leaves P(0) behind; tail holds P(1..)
 
-        ProverMsg(NatEvaluatedPolyWithoutConstant::new(
-            evaluations_without_constant,
-        ))
+        ProverMsg(NatEvaluatedPolyWithoutConstant::new(tail))
     }
 }
