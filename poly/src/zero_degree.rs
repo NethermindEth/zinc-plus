@@ -1,6 +1,7 @@
 use super::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError};
 use crate::Polynomial;
 use crypto_primitives::crypto_bigint_int::Int;
+use std::slice;
 use zinc_transcript::traits::ConstTranscribable;
 
 macro_rules! impl_zero_degree {
@@ -8,6 +9,10 @@ macro_rules! impl_zero_degree {
         $(
             impl Polynomial<Self> for $t {
                 const DEGREE_BOUND: usize = 0;
+
+                fn as_coeffs_slice(&self) -> &[Self] {
+                    slice::from_ref(self)
+                }
             }
 
             impl EvaluatablePolynomial<Self, Self> for $t {
@@ -30,6 +35,10 @@ impl_zero_degree!(u8, u16, u32, u64, u128);
 
 impl<const LIMBS: usize> Polynomial<Self> for Int<LIMBS> {
     const DEGREE_BOUND: usize = 0;
+
+    fn as_coeffs_slice(&self) -> &[Self] {
+        slice::from_ref(self)
+    }
 }
 
 impl<const LIMBS: usize> EvaluatablePolynomial<Self, Self> for Int<LIMBS> {

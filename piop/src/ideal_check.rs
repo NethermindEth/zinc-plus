@@ -1,10 +1,10 @@
 use ark_std::{cfg_into_iter, cfg_iter};
-use crypto_primitives::{FixedSemiring, PrimeField, Semiring};
+use crypto_primitives::{FixedSemiring, FromWithConfig, PrimeField, Semiring};
 use itertools::Itertools;
 use std::marker::PhantomData;
 use thiserror::Error;
 use zinc_poly::{
-    EvaluationError,
+    CoefficientProjectable, EvaluationError, Polynomial,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig, dense::project_coeffs},
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
@@ -36,11 +36,15 @@ pub struct SubClaim<F: PrimeField> {
 
 pub type Result<T, R, I> = std::result::Result<T, IdealCheckError<R, I>>;
 
-pub struct IdealCheckProtocol<R, C>(PhantomData<(R, C)>);
+pub struct IdealCheckProtocol<R, Rcoeff, C>(PhantomData<(R, Rcoeff, C)>);
 
-impl<R, C> IdealCheckProtocol<R, C>
+impl<R, Rcoeff, C> IdealCheckProtocol<R, Rcoeff, C>
 where
-    R: FixedSemiring + for<'a> MulByScalar<&'a C> + ConstTranscribable + 'static,
+    R: CoefficientProjectable<Rcoeff>
+        + FixedSemiring
+        + for<'a> MulByScalar<&'a C>
+        + ConstTranscribable
+        + 'static,
     C: ConstTranscribable,
 {
     #[allow(clippy::type_complexity)]
@@ -55,26 +59,39 @@ where
     where
         U: Uair<R>,
         R: ProjectableToField<F>,
-        F: InnerTransparentField,
+        F: InnerTransparentField + FromWithConfig<Rcoeff> + 'static,
         F::Inner: ConstTranscribable,
     {
         let projecting_element: F = transcript.get_field_challenge(field_cfg);
 
         let cs_up = cfg_into_iter!(cs_up)
-            .map(|mle| project_coeffs(mle, &projecting_element))
+            .map(|mle| DenseMultilinearExtension {
+                evaluations: mle
+                    .evaluations
+                    .into_iter()
+                    .map(|coeff| coeff.project_coefficients(&projecting_element))
+                    .collect(),
+                num_vars: mle.num_vars,
+            })
             .collect_vec();
 
         let cs_down = cfg_into_iter!(cs_down)
-            .map(|mle| project_coeffs(mle, &projecting_element))
+            .map(|mle| DenseMultilinearExtension {
+                evaluations: mle
+                    .evaluations
+                    .into_iter()
+                    .map(|coeff| coeff.project_coefficients(&projecting_element))
+                    .collect(),
+                num_vars: mle.num_vars,
+            })
             .collect_vec();
 
-        let combined_mles = Self::get_combined_poly_mles::<U, F>(
+        let combined_mles = Self::get_combined_poly_mles::<U, F, _, _>(
             &cs_up,
             &cs_down,
-            &projecting_element,
+            |x| x.clone().project_coefficients(&projecting_element),
             num_constraints,
             num_vars,
-            field_cfg,
         );
         let mut transcription_buf: Vec<u8> = vec![0; R::NUM_BYTES];
 
@@ -158,41 +175,40 @@ where
             .collect())
     }
 
-    fn get_combined_poly_mles<U, F>(
-        cs_up: &[DenseMultilinearExtension<F::Inner>],
-        cs_down: &[DenseMultilinearExtension<F::Inner>],
-        projecting_element: &F,
+    fn get_combined_poly_mles<U, F, P, Proj>(
+        cs_up: &[DenseMultilinearExtension<P>],
+        cs_down: &[DenseMultilinearExtension<P>],
+        projection: Proj,
         num_constraints: usize,
         num_vars: usize,
-        field_cfg: &F::Config,
-    ) -> Vec<DenseMultilinearExtension<F::Inner>>
+    ) -> Vec<DenseMultilinearExtension<P>>
     where
         U: Uair<R>,
         R: ProjectableToField<F>,
-        F: PrimeField,
+        P: Polynomial<F> + Semiring,
+        F: PrimeField + FromWithConfig<Rcoeff>,
         F::Inner: ConstTranscribable,
+        Proj: Fn(&R) -> P + Send + Sync,
     {
-        let projection = R::prepare_projection(&projecting_element);
         // Collect h MLEs.
         let len = cs_up[0].evaluations.len();
 
-        let mut h_evals: Vec<Vec<F::Inner>> = (0..num_constraints)
+        let mut h_evals: Vec<Vec<P>> = (0..num_constraints)
             .map(|_| Vec::with_capacity(len))
             .collect_vec();
 
-        let pointers: Vec<*mut F::Inner> =
-            h_evals.iter_mut().map(|col| col.as_mut_ptr()).collect_vec();
+        let pointers: Vec<*mut P> = h_evals.iter_mut().map(|col| col.as_mut_ptr()).collect_vec();
 
         (0..len).for_each(|i| {
-            let mut builder = IdealCheckConstraintBuilder::<F>::new(num_constraints);
+            let mut builder = IdealCheckConstraintBuilder::<P>::new(num_constraints);
 
-            let up: Vec<F> = cs_up
+            let up: Vec<P> = cs_up
                 .iter()
-                .map(|up| F::new_unchecked_with_cfg(up.evaluations[i].clone(), field_cfg))
+                .map(|up| (up.evaluations[i].clone()))
                 .collect_vec();
-            let down: Vec<F> = cs_down
+            let down: Vec<P> = cs_down
                 .iter()
-                .map(|down| F::new_unchecked_with_cfg(down.evaluations[i].clone(), field_cfg))
+                .map(|down| (down.evaluations[i].clone()))
                 .collect_vec();
 
             U::constrain_general(
@@ -207,7 +223,7 @@ where
                 .iter()
                 .zip(builder.uair_poly_mles_coeffs)
                 .for_each(|(ptr, eval)| unsafe {
-                    *ptr.add(i) = eval.inner().clone();
+                    *ptr.add(i) = eval.clone();
                 });
         });
 
@@ -227,11 +243,11 @@ where
     }
 }
 
-pub(crate) struct IdealCheckConstraintBuilder<R: Semiring> {
-    pub uair_poly_mles_coeffs: Vec<R>,
+pub(crate) struct IdealCheckConstraintBuilder<P: Semiring> {
+    pub uair_poly_mles_coeffs: Vec<P>,
 }
 
-impl<R: Semiring> IdealCheckConstraintBuilder<R> {
+impl<P: Semiring> IdealCheckConstraintBuilder<P> {
     pub fn new(num_constraints: usize) -> Self {
         Self {
             uair_poly_mles_coeffs: Vec::with_capacity(num_constraints),
@@ -239,8 +255,8 @@ impl<R: Semiring> IdealCheckConstraintBuilder<R> {
     }
 }
 
-impl<R: Semiring> ConstraintBuilder for IdealCheckConstraintBuilder<R> {
-    type Expr = R;
+impl<P: Semiring> ConstraintBuilder for IdealCheckConstraintBuilder<P> {
+    type Expr = P;
     // Ignore all ideal business on the side of the prover.
     type Ideal = DummyIdeal;
 

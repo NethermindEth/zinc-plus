@@ -8,7 +8,7 @@ pub trait Ideal: FromRef<Self> + Clone + Debug + Send + Sync {
     fn zero_ideal() -> Self;
 }
 
-pub trait IdealCheck<I: Ideal>: Semiring {
+pub trait IdealCheck<I: Ideal> {
     fn is_contained_in(&self, ideal: &I) -> bool;
 }
 

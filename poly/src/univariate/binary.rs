@@ -1,5 +1,5 @@
 use crate::{
-    ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
+    CoefficientProjectable, ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
     univariate::dense::DensePolynomial,
 };
 use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
@@ -26,7 +26,6 @@ use zinc_utils::{
 #[derive(
     Add,
     AddAssign,
-    AsRef,
     Clone,
     Debug,
     From,
@@ -78,6 +77,13 @@ impl<const DEGREE_PLUS_ONE: usize> BinaryPoly<DEGREE_PLUS_ONE> {
     #[inline(always)]
     pub fn new_padded(coeffs: impl AsRef<[Boolean]>) -> Self {
         Self(DensePolynomial::new_with_zero(coeffs, Boolean::ZERO))
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> AsRef<[Boolean]> for BinaryPoly<DEGREE_PLUS_ONE> {
+    #[inline(always)]
+    fn as_ref(&self) -> &[Boolean] {
+        self.0.as_ref()
     }
 }
 
@@ -223,6 +229,11 @@ impl<const DEGREE_PLUS_ONE: usize> Distribution<BinaryPoly<DEGREE_PLUS_ONE>> for
 //
 impl<const DEGREE_PLUS_ONE: usize> Polynomial<Boolean> for BinaryPoly<DEGREE_PLUS_ONE> {
     const DEGREE_BOUND: usize = DensePolynomial::<Boolean, DEGREE_PLUS_ONE>::DEGREE_BOUND;
+
+    #[inline(always)]
+    fn as_coeffs_slice(&self) -> &[Boolean] {
+        self.0.as_coeffs_slice()
+    }
 }
 
 impl<R: Clone + Zero + One + CheckedAdd + CheckedMul, const DEGREE_PLUS_ONE: usize>
@@ -344,6 +355,15 @@ where
             )
             .expect("Failed to evaluate polynomial")
         }
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> CoefficientProjectable<Boolean> for BinaryPoly<DEGREE_PLUS_ONE> {
+    fn project_coefficients<F: crypto_primitives::FromWithConfig<Boolean> + 'static>(
+        self,
+        projecting_element: &F,
+    ) -> impl Polynomial<F> + Semiring + 'static {
+        self.0.project_coefficients(projecting_element)
     }
 }
 

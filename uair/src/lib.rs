@@ -2,13 +2,13 @@ pub mod constraint_counter;
 pub mod dummy_semiring;
 pub mod ideal;
 
-use crypto_primitives::{FixedSemiring, Semiring};
+use crypto_primitives::Semiring;
 use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 
 use crate::ideal::{Ideal, IdealCheck};
 
 pub trait ConstraintBuilder {
-    type Expr: IdealCheck<Self::Ideal>;
+    type Expr: Semiring + IdealCheck<Self::Ideal>;
     type Ideal: Ideal;
 
     fn assert_in_ideal(&mut self, expr: Self::Expr, ideal: &Self::Ideal);

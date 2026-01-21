@@ -3,12 +3,15 @@ pub mod univariate;
 pub mod utils;
 pub mod zero_degree;
 
+use crypto_primitives::{FromWithConfig, PrimeField, Semiring};
 use thiserror::Error;
 
 /// Polynomial with coefficients of type `C` and degree bounded by
 /// `DEGREE_BOUND`.
-pub trait Polynomial<C> {
+pub trait Polynomial<C>: Clone {
     const DEGREE_BOUND: usize;
+
+    fn as_coeffs_slice(&self) -> &[C];
 }
 
 pub trait EvaluatablePolynomial<C, Out>: Polynomial<C> {
@@ -33,4 +36,11 @@ pub enum EvaluationError {
     Overflow,
     #[error("Empty polynomials are not allowed to be evaluate")]
     EmptyPolynomial,
+}
+
+pub trait CoefficientProjectable<C>: Polynomial<C> {
+    fn project_coefficients<F: FromWithConfig<C> + 'static>(
+        self,
+        projecting_element: &F,
+    ) -> impl Polynomial<F> + Semiring + 'static;
 }

@@ -1,5 +1,5 @@
 use crate::{
-    ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
+    CoefficientProjectable, ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
     univariate::binary::BinaryPoly,
 };
 use core::slice;
@@ -387,6 +387,11 @@ impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Polynomial<R>
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 {
     const DEGREE_BOUND: usize = DEGREE_PLUS_ONE - 1;
+
+    #[inline(always)]
+    fn as_coeffs_slice(&self) -> &[R] {
+        self.coeffs.as_slice()
+    }
 }
 
 impl<R: Semiring, const DEGREE_PLUS_ONE: usize> EvaluatablePolynomial<R, R>
@@ -556,6 +561,21 @@ where
             poly2
                 .evaluate_at_point(&sampled_value)
                 .expect("Failed to evaluate polynomial at point")
+        }
+    }
+}
+
+impl<R: Semiring, const DEGREE_PLUS_ONE: usize> CoefficientProjectable<R>
+    for DensePolynomial<R, DEGREE_PLUS_ONE>
+{
+    fn project_coefficients<F: FromWithConfig<R> + 'static>(
+        self,
+        projecting_element: &F,
+    ) -> impl Polynomial<F> + Semiring + 'static {
+        DensePolynomial::<_, DEGREE_PLUS_ONE> {
+            coeffs: array::from_fn(|i| {
+                F::from_with_cfg(self.coeffs[i].clone(), projecting_element.cfg())
+            }),
         }
     }
 }
