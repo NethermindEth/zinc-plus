@@ -1,4 +1,3 @@
-use num_traits::Zero;
 use std::convert::identity;
 
 use crypto_primitives::{FromPrimitiveWithConfig, Semiring};
@@ -173,17 +172,13 @@ where
     R: Semiring,
     F: Fn(u64) -> R + Send + Sync,
 {
-    if a.is_zero() {
-        return from_u64(1);
-    }
-
     (1..=(a as u64))
-        .map(from_u64)
+        .map(&from_u64)
         .reduce(|mut acc, next| {
             acc *= next;
             acc
         })
-        .expect("The iterator cannot be empty as we have checked if a is zero")
+        .unwrap_or(from_u64(1))
 }
 
 #[cfg(test)]
