@@ -12,7 +12,7 @@ use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::{array, fmt::Debug, iter::Sum, ops::Mul};
+use std::{array, fmt::Debug};
 use zinc_utils::{add, from_ref::FromRef};
 
 use butterfly::*;
@@ -29,11 +29,9 @@ pub(crate) fn pntt<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
 where
     C: Config,
     In: Clone + Send + Sync,
-    Out: CheckedAdd + CheckedMul + Sum + FromRef<In> + Clone + Send + Sync + Debug,
-    MulInByTwiddle: MulByTwiddle<In>,
-    MulOutByTwiddle: MulByTwiddle<Out>,
-    for<'a> &'a MulInByTwiddle: Mul<&'a PnttInt, Output = Out>,
-    for<'a> &'a MulOutByTwiddle: Mul<&'a PnttInt, Output = Out>,
+    Out: CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug,
+    MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
+    MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
 {
     assert_eq!(
         C::INPUT_LEN,
@@ -58,8 +56,7 @@ fn combine_stages<R, C, M>(out: &mut [R], params: &Radix8PnttParams<C>)
 where
     C: Config,
     R: CheckedAdd + CheckedMul + Clone + Send + Sync + Debug,
-    M: MulByTwiddle<R>,
-    for<'a> &'a M: Mul<&'a PnttInt, Output = R>,
+    M: MulByTwiddle<R, PnttInt, Output = R>,
 {
     for k in 0..C::DEPTH {
         // The length of chunks in the current layer.
@@ -99,7 +96,7 @@ where
                     .expect("We are guaranteed to have the right length here");
 
                 // Perform butterflies.
-                apply_radix_8_butterflies(ys, &subresults, &layer_twiddles[i]);
+                apply_radix_8_butterflies::<_, _, M>(ys, &subresults, &layer_twiddles[i]);
             }
         });
     }
@@ -111,9 +108,8 @@ fn base_multiply_into_output<In, Out, C, M>(input: &[In], params: &Radix8PnttPar
 where
     C: Config,
     In: Clone + Send + Sync,
-    Out: Clone + CheckedAdd + CheckedMul + Sum + FromRef<In> + Send + Sync,
-    M: MulByTwiddle<In>,
-    for<'a> &'a M: Mul<&'a PnttInt, Output = Out>,
+    Out: Clone + CheckedAdd + CheckedMul + FromRef<In> + Send + Sync,
+    M: MulByTwiddle<In, PnttInt, Output = Out>,
 {
     cfg_into_iter!(0..C::OUTPUT_LEN)
         .map(|i| {
@@ -133,8 +129,10 @@ where
             params.base_matrix[row][1..].iter().enumerate().fold(
                 Out::from_ref(&input[oct_rev_chunk]),
                 |acc, (col, bm_row_col)| {
-                    let term = M::new_ref(&input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))])
-                        * bm_row_col;
+                    let term = M::mul_by_twiddle(
+                        &input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))],
+                        bm_row_col,
+                    );
 
                     add!(acc, &term)
                 },
@@ -188,7 +186,7 @@ mod tests {
         let our_res = {
             let params = Radix8PnttParams::<C>::new();
 
-            let output = base_multiply_into_output::<_, _, _, ForceMulByScalar<_>>(&input, &params);
+            let output = base_multiply_into_output::<_, _, _, MBSMulByTwiddle>(&input, &params);
 
             output.into_iter().map(C::Field::from).collect_vec()
         };
@@ -230,7 +228,7 @@ mod tests {
             let params = Radix8PnttParams::<C>::new();
 
             let res: Vec<Int<4>> =
-                pntt::<_, _, _, ForceMulByScalar<_>, ForceMulByScalar<_>>(&input, &params);
+                pntt::<_, _, _, MBSMulByTwiddle, MBSMulByTwiddle>(&input, &params);
 
             res.into_iter()
                 .map(|x| {

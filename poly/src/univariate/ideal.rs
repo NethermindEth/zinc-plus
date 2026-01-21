@@ -1,4 +1,4 @@
-use crypto_primitives::{FixedSemiring, Semiring};
+use crypto_primitives::FixedSemiring;
 use num_traits::Zero;
 use zinc_uair::ideal::{Ideal, IdealCheck};
 use zinc_utils::from_ref::FromRef;

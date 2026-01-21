@@ -9,10 +9,7 @@ use zinc_poly::{ConstCoeffBitWidth, Polynomial};
 use zinc_primality::PrimalityTest;
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
-    from_ref::FromRef,
-    inner_product::{InnerProduct, InnerProductWrapper},
-    mul_by_scalar::MulByScalar,
-    named::Named,
+    from_ref::FromRef, inner_product::InnerProduct, mul_by_scalar::MulByScalar, named::Named,
 };
 
 pub trait ZipTypes: Send + Sync {
@@ -27,6 +24,7 @@ pub trait ZipTypes: Send + Sync {
         + ConstTranscribable
         + FromRef<Self::Eval>
         + Named
+        // TODO(Ilia): Find out if the Copy can be avoided.
         + Copy
         + CheckedAdd;
 
@@ -55,8 +53,9 @@ pub trait ZipTypes: Send + Sync {
         + FromRef<Self::Cw>
         + Named;
 
-    type EvalDotChal: InnerProduct<Self::Chal, Self::CombR> + InnerProductWrapper<Self::Eval>;
-    type CombDotChal: InnerProduct<Self::Chal, Self::CombR> + InnerProductWrapper<Self::Comb>;
+    type EvalDotChal: InnerProduct<Self::Eval, Self::Chal, Self::CombR>;
+    type CombDotChal: InnerProduct<Self::Comb, Self::Chal, Self::CombR>;
+    type ArrCombRDotChal: InnerProduct<[Self::CombR], Self::Chal, Self::CombR>;
 }
 
 /// Zip is a Polynomial Commitment Scheme (PCS) that supports committing to

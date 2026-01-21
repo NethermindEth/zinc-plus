@@ -3,18 +3,17 @@
 
 mod zip_common;
 
-use num_traits::{One, Zero};
 use std::marker::PhantomData;
 
 use zinc_poly::univariate::{
-    binary::{BinaryPoly, BinaryPolyWideningMulByScalar},
-    dense::DensePolynomial,
+    binary::{BinaryPoly, BinaryPolyInnerProduct, BinaryPolyWideningMulByScalar},
+    dense::{DensePolyInnerProduct, DensePolynomial},
 };
 use zinc_primality::MillerRabin;
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
     from_ref::FromRef,
-    inner_product::{ForceUncheckedInnerProduct, ForceWideningInnerProduct},
+    inner_product::{BooleanInnerProductUncheckedAdd, MBSInnerProductUnchecked},
     named::Named,
 };
 use zip_common::*;
@@ -22,7 +21,7 @@ use zip_common::*;
 use criterion::{Criterion, criterion_group, criterion_main};
 use crypto_bigint::U64;
 use crypto_primitives::{
-    Semiring, boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
+    FixedSemiring, boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
 };
 use zip_plus::{
     code::{
@@ -43,11 +42,9 @@ where
         + Default
         + FromRef<Boolean>
         + Named
-        + Semiring
+        + FixedSemiring
         + Send
-        + Sync
-        + Zero
-        + One,
+        + Sync,
     Int<5>: FromRef<CwCoeff>,
 {
     const NUM_COLUMN_OPENINGS: usize = 650;
@@ -59,8 +56,16 @@ where
     type Pt = i128;
     type CombR = Int<{ INT_LIMBS * 5 }>;
     type Comb = DensePolynomial<Self::CombR, D_PLUS_ONE>;
-    type EvalDotChal = ForceUncheckedInnerProduct<Self::Eval>;
-    type CombDotChal = ForceWideningInnerProduct<Self::Comb>;
+    type EvalDotChal =
+        BinaryPolyInnerProduct<Self::Chal, BooleanInnerProductUncheckedAdd, D_PLUS_ONE>;
+    type CombDotChal = DensePolyInnerProduct<
+        Self::CombR,
+        Self::Chal,
+        Self::CombR,
+        MBSInnerProductUnchecked,
+        D_PLUS_ONE,
+    >;
+    type ArrCombRDotChal = MBSInnerProductUnchecked;
 }
 
 #[derive(Clone, Copy)]
@@ -91,9 +96,10 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
 fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS");
 
-    encode_rows::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, _>, 16>(&mut group);
+    do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, 32>>(&mut group);
+    do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 1, 64>>(&mut group);
 
-    encode_rows::<BenchZipPlusTypes<i128, 32>, SomeIprsCode<i128, 2, _>, 22>(&mut group);
+    group.finish();
 }
 
 criterion_group!(benches, zip_plus_benchmarks_raa, zip_plus_benchmarks_iprs);

@@ -16,7 +16,7 @@ use zinc_poly::Polynomial;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
     from_ref::FromRef,
-    inner_product::{InnerProduct, InnerProductUnchecked, InnerProductWrapper},
+    inner_product::{InnerProduct, MBSInnerProductUnchecked},
     mul_by_scalar::MulByScalar,
     projectable_to_field::ProjectableToField,
 };
@@ -43,9 +43,12 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
         let columns_opened = Self::verify_testing(vp, &comm.root, &mut transcript)?;
 
-        let field_cfg = transcript
-            .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+        let field_modulus = F::Inner::from_ref(
+            &transcript
+                .fs_transcript
+                .get_prime::<Zt::Fmod, Zt::PrimeTest>(),
+        );
+        let field_cfg = F::make_cfg(&field_modulus)?;
         let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
         let projecting_element: F = (&projecting_element).into_with_cfg(&field_cfg);
 
@@ -142,12 +145,15 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             let column_entries: Vec<_> = column_entries
                 .iter()
                 .map(Zt::Comb::from_ref)
-                .map(|p| Zt::CombDotChal::new_ref(&p).inner_product(alphas, Zt::CombR::ZERO))
+                .map(|p| Zt::CombDotChal::inner_product(&p, alphas, Zt::CombR::ZERO))
                 .try_collect()?;
-            column_entries.inner_product(coeffs, Zt::CombR::ZERO)?
+            Zt::ArrCombRDotChal::inner_product(&column_entries, coeffs, Zt::CombR::ZERO)?
         } else {
-            (Zt::CombDotChal::new_ref(&Zt::Comb::from_ref(&column_entries[0])))
-                .inner_product(alphas, Zt::CombR::ZERO)?
+            Zt::CombDotChal::inner_product(
+                &Zt::Comb::from_ref(&column_entries[0]),
+                alphas,
+                Zt::CombR::ZERO,
+            )?
         };
 
         if column_entries_comb != encoded_combined_row[column] {
@@ -176,7 +182,12 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let (q_0, q_1) = point_to_tensor(vp.num_rows, point_f, field_cfg)?;
 
         // It is safe to use inner_product_unchecked because we're in a field.
-        if q_0_combined_row.inner_product_unchecked(&q_1, F::zero_with_cfg(field_cfg))? != *eval_f {
+        if MBSInnerProductUnchecked::inner_product(
+            &q_0_combined_row,
+            &q_1,
+            F::zero_with_cfg(field_cfg),
+        )? != *eval_f
+        {
             return Err(ZipError::InvalidPcsOpen(
                 "Evaluation consistency failure".into(),
             ));
@@ -207,12 +218,16 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         field_cfg: &F::Config,
     ) -> Result<(), ZipError>
     where
-        F: PrimeField + for<'a> MulByScalar<&'a F>,
+        F: PrimeField + for<'a> MulByScalar<&'a F> + FromRef<F>,
     {
         let column_entries_comb = if num_rows > 1 {
             let column_entries = column_entries.iter().map(project).collect_vec();
             // It is safe to use inner_product_unchecked because we're in a field.
-            q_0.inner_product_unchecked(&column_entries, F::zero_with_cfg(field_cfg))?
+            MBSInnerProductUnchecked::inner_product(
+                q_0,
+                &column_entries,
+                F::zero_with_cfg(field_cfg),
+            )?
             // TODO: this inner product is taking a long time.
         } else {
             project(column_entries.first().expect("No column entries"))
