@@ -167,6 +167,7 @@ impl<F: FromPrimitiveWithConfig> EvaluatablePolynomial<F, F> for NatEvaluatedPol
 }
 
 /// Compute the factorial(a) = 1 * 2 * ... * a.
+#[allow(clippy::arithmetic_side_effects)]
 fn factorial<R, F>(a: usize, from_u64: F) -> R
 where
     R: Semiring,
@@ -176,7 +177,13 @@ where
         return from_u64(1);
     }
 
-    (1..=(a as u64)).map(from_u64).product()
+    (1..=(a as u64))
+        .map(from_u64)
+        .reduce(|mut acc, next| {
+            acc *= next;
+            acc
+        })
+        .expect("The iterator cannot be empty as we have checked if a is zero")
 }
 
 #[cfg(test)]
