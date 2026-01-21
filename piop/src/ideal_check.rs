@@ -1,3 +1,5 @@
+mod utils;
+
 use ark_std::{cfg_into_iter, cfg_iter};
 use crypto_primitives::{FixedSemiring, FromWithConfig, PrimeField, Semiring};
 use itertools::Itertools;
@@ -6,6 +8,7 @@ use thiserror::Error;
 use zinc_poly::{
     CoefficientProjectable, EvaluationError, Polynomial,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig, dense::project_coeffs},
+    univariate::dense::DensePolynomial,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
@@ -24,28 +27,26 @@ pub struct Proof<R> {
 }
 
 #[derive(Clone, Debug)]
-pub struct ProverState<F: PrimeField> {
+pub struct ProverState<F: PrimeField, const DEGREE_PLUS_ONE: usize> {
     pub evaluation_points: Vec<Vec<F>>,
-    pub combined_mles: Vec<DenseMultilinearExtension<F::Inner>>,
+    pub combined_mles: Vec<DenseMultilinearExtension<DensePolynomial<F, DEGREE_PLUS_ONE>>>,
 }
 
-pub struct SubClaim<F: PrimeField> {
+pub struct SubClaim<F: PrimeField, const DEGREE_PLUS_ONE: usize> {
     pub point: Vec<F>,
-    pub value: F,
+    pub value: DensePolynomial<F, DEGREE_PLUS_ONE>,
 }
 
 pub type Result<T, R, I> = std::result::Result<T, IdealCheckError<R, I>>;
 
-pub struct IdealCheckProtocol<R, Rcoeff, C>(PhantomData<(R, Rcoeff, C)>);
+pub struct IdealCheckProtocol<R, Rcoeff, const DEGREE_PLUS_ONE: usize>(PhantomData<(R, Rcoeff)>);
 
-impl<R, Rcoeff, C> IdealCheckProtocol<R, Rcoeff, C>
+impl<R, Rcoeff, const DEGREE_PLUS_ONE: usize> IdealCheckProtocol<R, Rcoeff, DEGREE_PLUS_ONE>
 where
-    R: CoefficientProjectable<Rcoeff>
+    R: CoefficientProjectable<Rcoeff, DEGREE_PLUS_ONE>
         + FixedSemiring
-        + for<'a> MulByScalar<&'a C>
         + ConstTranscribable
         + 'static,
-    C: ConstTranscribable,
 {
     #[allow(clippy::type_complexity)]
     pub fn prove_as_subprotocol<U, F>(
@@ -55,7 +56,14 @@ where
         num_constraints: usize,
         num_vars: usize,
         field_cfg: &F::Config,
-    ) -> Result<(Proof<F>, ProverState<F>), R, U::Ideal>
+    ) -> Result<
+        (
+            Proof<DensePolynomial<F, DEGREE_PLUS_ONE>>,
+            ProverState<F, DEGREE_PLUS_ONE>,
+        ),
+        R,
+        U::Ideal,
+    >
     where
         U: Uair<R>,
         R: ProjectableToField<F>,
@@ -96,17 +104,34 @@ where
         let mut transcription_buf: Vec<u8> = vec![0; R::NUM_BYTES];
 
         let mut evaluation_points: Vec<Vec<F>> = Vec::with_capacity(num_constraints);
-        let mut combined_mle_values: Vec<F> = Vec::with_capacity(num_constraints);
+        let mut combined_mle_values: Vec<DensePolynomial<F, DEGREE_PLUS_ONE>> =
+            Vec::with_capacity(num_constraints);
 
         for combined_mle in &combined_mles {
             let challenge: Vec<F> = transcript.get_field_challenges(num_vars, field_cfg);
 
-            let mle_value = combined_mle.evaluate_with_config(&challenge, field_cfg)?;
+            let mle_value_coeffs = cfg_into_iter!(0..DEGREE_PLUS_ONE)
+                .map(|i| {
+                    let coeff_mle = DenseMultilinearExtension {
+                        evaluations: combined_mle
+                            .evaluations
+                            .iter()
+                            .map(|coeff| coeff.as_ref()[i].inner().clone())
+                            .collect(),
+                        num_vars,
+                    };
 
-            transcript.absorb_random_field(&mle_value, &mut transcription_buf);
+                    coeff_mle.evaluate_with_config(&challenge, field_cfg)
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+
+            transcript.absorb_random_field_slice(&mle_value_coeffs, &mut transcription_buf);
 
             evaluation_points.push(challenge);
-            combined_mle_values.push(mle_value);
+            combined_mle_values.push(DensePolynomial::new_with_zero(
+                mle_value_coeffs,
+                F::zero_with_cfg(field_cfg),
+            ));
         }
 
         Ok((
@@ -123,15 +148,16 @@ where
     #[allow(clippy::type_complexity)]
     pub fn verify_as_subprotocol<U, F>(
         transcript: &mut impl Transcript,
-        proof: Proof<F>,
+        proof: Proof<DensePolynomial<F, DEGREE_PLUS_ONE>>,
         num_constraints: usize,
         num_vars: usize,
         field_cfg: &F::Config,
-    ) -> Result<Vec<SubClaim<F>>, F, U::Ideal>
+    ) -> Result<Vec<SubClaim<F, DEGREE_PLUS_ONE>>, DensePolynomial<F, DEGREE_PLUS_ONE>, U::Ideal>
     where
         U: Uair<R>,
         R: ProjectableToField<F>,
-        F: InnerTransparentField + IdealCheck<U::Ideal>,
+        DensePolynomial<F, DEGREE_PLUS_ONE>: IdealCheck<U::Ideal>,
+        F: PrimeField,
         F::Inner: ConstTranscribable,
     {
         let mut transcription_buf: Vec<u8> = vec![0; R::NUM_BYTES];
@@ -142,7 +168,7 @@ where
         for mle_value in &combined_mle_values {
             let challenge: Vec<F> = transcript.get_field_challenges(num_vars, field_cfg);
 
-            transcript.absorb_random_field(mle_value, &mut transcription_buf);
+            transcript.absorb_random_field_slice(&mle_value.coeffs, &mut transcription_buf);
 
             evaluation_points.push(challenge);
         }
@@ -153,12 +179,17 @@ where
 
         U::constrain(&mut ideal_collector, &dummy_up_and_down, &dummy_up_and_down);
 
+        let zero = DensePolynomial::new_with_zero(
+            [F::zero_with_cfg(field_cfg)],
+            F::zero_with_cfg(field_cfg),
+        );
+
         ideal_collector
             .ideals
             .iter()
             .zip(combined_mle_values.iter())
             .try_for_each(|(ideal, mle_value)| {
-                if !mle_value.is_contained_in(ideal) {
+                if !mle_value.is_contained_in_with_zero(ideal, &zero) {
                     return Err(IdealCheckError::IdealCheckFailed(
                         mle_value.clone(),
                         ideal.clone(),
@@ -300,7 +331,7 @@ impl<I: Ideal> FromRef<I> for CollectedIdeal<I> {
 }
 
 impl<I: Ideal> IdealCheck<CollectedIdeal<I>> for DummySemiring {
-    fn is_contained_in(&self, _ideal: &CollectedIdeal<I>) -> bool {
+    fn is_contained_in_with_zero(&self, _ideal: &CollectedIdeal<I>, _zero: &Self) -> bool {
         true
     }
 }
@@ -429,7 +460,7 @@ mod tests {
         let transcript = KeccakTranscript::new();
 
         let (proof, _) =
-            IdealCheckProtocol::<_, Int<2>>::prove_as_subprotocol::<TestAirNoMultiplication, F>(
+            IdealCheckProtocol::<_, _, _>::prove_as_subprotocol::<TestAirNoMultiplication, F>(
                 &mut transcript.clone(),
                 up,
                 down,
@@ -440,11 +471,12 @@ mod tests {
             .unwrap();
 
         assert!(
-            IdealCheckProtocol::<_, Int<2>>::verify_as_subprotocol::<TestAirNoMultiplication>(
+            IdealCheckProtocol::<_, Int<5>, _>::verify_as_subprotocol::<TestAirNoMultiplication, F>(
                 &mut transcript.clone(),
                 proof,
                 count_constraints::<Poly, TestAirNoMultiplication>(),
                 4,
+                &field_cfg,
             )
             .is_ok()
         );

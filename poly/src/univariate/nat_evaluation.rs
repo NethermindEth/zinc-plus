@@ -20,10 +20,6 @@ impl<F> NatEvaluatedPoly<F> {
 
 impl<F: Clone> Polynomial<F> for NatEvaluatedPoly<F> {
     const DEGREE_BOUND: usize = usize::MAX;
-
-    fn as_coeffs_slice(&self) -> &[F] {
-        &self.evaluations
-    }
 }
 
 impl<F: FromPrimitiveWithConfig> EvaluatablePolynomial<F, F> for NatEvaluatedPoly<F> {

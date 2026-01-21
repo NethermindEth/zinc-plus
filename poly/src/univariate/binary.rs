@@ -2,13 +2,14 @@ use crate::{
     CoefficientProjectable, ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
     univariate::dense::DensePolynomial,
 };
-use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
+use crypto_primitives::{FromWithConfig, PrimeField, Semiring, semiring::boolean::Boolean};
 use derive_more::{
     Add, AddAssign, AsRef, Display, From, Mul, MulAssign, Product, Sub, SubAssign, Sum,
 };
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, ConstZero, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
+    array,
     hash::Hash,
     iter::{Product, Sum},
     marker::PhantomData,
@@ -57,6 +58,22 @@ impl<const DEGREE_PLUS_ONE: usize> From<BinaryPoly<DEGREE_PLUS_ONE>>
     #[inline(always)]
     fn from(binary_poly: BinaryPoly<DEGREE_PLUS_ONE>) -> Self {
         binary_poly.0
+    }
+}
+
+impl From<u32> for BinaryPoly<32> {
+    fn from(value: u32) -> Self {
+        Self(DensePolynomial {
+            coeffs: array::from_fn(|i| Boolean::new(value & (1 << i) != 0)),
+        })
+    }
+}
+
+impl From<u64> for BinaryPoly<64> {
+    fn from(value: u64) -> Self {
+        Self(DensePolynomial {
+            coeffs: array::from_fn(|i| Boolean::new(value & (1 << i) != 0)),
+        })
     }
 }
 
@@ -229,11 +246,6 @@ impl<const DEGREE_PLUS_ONE: usize> Distribution<BinaryPoly<DEGREE_PLUS_ONE>> for
 //
 impl<const DEGREE_PLUS_ONE: usize> Polynomial<Boolean> for BinaryPoly<DEGREE_PLUS_ONE> {
     const DEGREE_BOUND: usize = DensePolynomial::<Boolean, DEGREE_PLUS_ONE>::DEGREE_BOUND;
-
-    #[inline(always)]
-    fn as_coeffs_slice(&self) -> &[Boolean] {
-        self.0.as_coeffs_slice()
-    }
 }
 
 impl<R: Clone + Zero + One + CheckedAdd + CheckedMul, const DEGREE_PLUS_ONE: usize>
@@ -358,11 +370,13 @@ where
     }
 }
 
-impl<const DEGREE_PLUS_ONE: usize> CoefficientProjectable<Boolean> for BinaryPoly<DEGREE_PLUS_ONE> {
-    fn project_coefficients<F: crypto_primitives::FromWithConfig<Boolean> + 'static>(
+impl<const DEGREE_PLUS_ONE: usize> CoefficientProjectable<Boolean, DEGREE_PLUS_ONE>
+    for BinaryPoly<DEGREE_PLUS_ONE>
+{
+    fn project_coefficients<F: FromWithConfig<Boolean> + 'static>(
         self,
         projecting_element: &F,
-    ) -> impl Polynomial<F> + Semiring + 'static {
+    ) -> DensePolynomial<F, DEGREE_PLUS_ONE> {
         self.0.project_coefficients(projecting_element)
     }
 }

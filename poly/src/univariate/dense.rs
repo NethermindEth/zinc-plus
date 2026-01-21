@@ -387,11 +387,6 @@ impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Polynomial<R>
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 {
     const DEGREE_BOUND: usize = DEGREE_PLUS_ONE - 1;
-
-    #[inline(always)]
-    fn as_coeffs_slice(&self) -> &[R] {
-        self.coeffs.as_slice()
-    }
 }
 
 impl<R: Semiring, const DEGREE_PLUS_ONE: usize> EvaluatablePolynomial<R, R>
@@ -565,14 +560,14 @@ where
     }
 }
 
-impl<R: Semiring, const DEGREE_PLUS_ONE: usize> CoefficientProjectable<R>
+impl<R: Semiring, const DEGREE_PLUS_ONE: usize> CoefficientProjectable<R, DEGREE_PLUS_ONE>
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 {
     fn project_coefficients<F: FromWithConfig<R> + 'static>(
         self,
         projecting_element: &F,
-    ) -> impl Polynomial<F> + Semiring + 'static {
-        DensePolynomial::<_, DEGREE_PLUS_ONE> {
+    ) -> DensePolynomial<F, DEGREE_PLUS_ONE> {
+        DensePolynomial {
             coeffs: array::from_fn(|i| {
                 F::from_with_cfg(self.coeffs[i].clone(), projecting_element.cfg())
             }),

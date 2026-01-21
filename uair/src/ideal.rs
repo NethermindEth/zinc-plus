@@ -9,7 +9,7 @@ pub trait Ideal: FromRef<Self> + Clone + Debug + Send + Sync {
 }
 
 pub trait IdealCheck<I: Ideal> {
-    fn is_contained_in(&self, ideal: &I) -> bool;
+    fn is_contained_in_with_zero(&self, ideal: &I, zero: &Self) -> bool;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -22,10 +22,10 @@ impl Ideal for ZeroIdeal {
     }
 }
 
-impl<R: FixedSemiring> IdealCheck<ZeroIdeal> for R {
+impl<R: Semiring> IdealCheck<ZeroIdeal> for R {
     #[inline(always)]
-    fn is_contained_in(&self, _ideal: &ZeroIdeal) -> bool {
-        self.is_zero()
+    fn is_contained_in_with_zero(&self, _ideal: &ZeroIdeal, zero: &R) -> bool {
+        self == zero
     }
 }
 
@@ -48,7 +48,7 @@ impl Ideal for DummyIdeal {
 
 impl<R: Semiring> IdealCheck<DummyIdeal> for R {
     #[inline(always)]
-    fn is_contained_in(&self, _ideal: &DummyIdeal) -> bool {
+    fn is_contained_in_with_zero(&self, _ideal: &DummyIdeal, _zero: &R) -> bool {
         false
     }
 }

@@ -6,12 +6,12 @@ pub mod zero_degree;
 use crypto_primitives::{FromWithConfig, PrimeField, Semiring};
 use thiserror::Error;
 
+use crate::univariate::dense::DensePolynomial;
+
 /// Polynomial with coefficients of type `C` and degree bounded by
 /// `DEGREE_BOUND`.
 pub trait Polynomial<C>: Clone {
     const DEGREE_BOUND: usize;
-
-    fn as_coeffs_slice(&self) -> &[C];
 }
 
 pub trait EvaluatablePolynomial<C, Out>: Polynomial<C> {
@@ -38,9 +38,9 @@ pub enum EvaluationError {
     EmptyPolynomial,
 }
 
-pub trait CoefficientProjectable<C>: Polynomial<C> {
+pub trait CoefficientProjectable<C, const DEGREE_PLUS_ONE: usize>: Polynomial<C> {
     fn project_coefficients<F: FromWithConfig<C> + 'static>(
         self,
         projecting_element: &F,
-    ) -> impl Polynomial<F> + Semiring + 'static;
+    ) -> DensePolynomial<F, DEGREE_PLUS_ONE>;
 }
