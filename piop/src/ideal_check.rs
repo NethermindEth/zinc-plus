@@ -1,13 +1,15 @@
 mod utils;
 
-use ark_std::{cfg_into_iter, cfg_iter};
+use ark_std::cfg_into_iter;
 use crypto_primitives::{FixedSemiring, FromWithConfig, PrimeField, Semiring};
 use itertools::Itertools;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use std::marker::PhantomData;
 use thiserror::Error;
 use zinc_poly::{
     CoefficientProjectable, EvaluationError, Polynomial,
-    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig, dense::project_coeffs},
+    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
     univariate::dense::DensePolynomial,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
@@ -17,7 +19,7 @@ use zinc_uair::{
     ideal::{DummyIdeal, Ideal, IdealCheck},
 };
 use zinc_utils::{
-    from_ref::FromRef, inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
+    from_ref::FromRef, inner_transparent_field::InnerTransparentField,
     projectable_to_field::ProjectableToField,
 };
 
@@ -46,6 +48,8 @@ where
     R: CoefficientProjectable<Rcoeff, DEGREE_PLUS_ONE>
         + FixedSemiring
         + ConstTranscribable
+        + Send
+        + Sync
         + 'static,
 {
     #[allow(clippy::type_complexity)]
@@ -67,7 +71,7 @@ where
     where
         U: Uair<R>,
         R: ProjectableToField<F>,
-        F: InnerTransparentField + FromWithConfig<Rcoeff> + 'static,
+        F: InnerTransparentField + FromWithConfig<Rcoeff> + Send + Sync + 'static,
         F::Inner: ConstTranscribable,
     {
         let projecting_element: F = transcript.get_field_challenge(field_cfg);
@@ -81,7 +85,7 @@ where
                     .collect(),
                 num_vars: mle.num_vars,
             })
-            .collect_vec();
+            .collect::<Vec<_>>();
 
         let cs_down = cfg_into_iter!(cs_down)
             .map(|mle| DenseMultilinearExtension {
@@ -92,7 +96,7 @@ where
                     .collect(),
                 num_vars: mle.num_vars,
             })
-            .collect_vec();
+            .collect::<Vec<_>>();
 
         let combined_mles = Self::get_combined_poly_mles::<U, F, _, _>(
             &cs_up,
@@ -101,7 +105,7 @@ where
             num_constraints,
             num_vars,
         );
-        let mut transcription_buf: Vec<u8> = vec![0; R::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
         let mut evaluation_points: Vec<Vec<F>> = Vec::with_capacity(num_constraints);
         let mut combined_mle_values: Vec<DensePolynomial<F, DEGREE_PLUS_ONE>> =
@@ -160,7 +164,7 @@ where
         F: PrimeField,
         F::Inner: ConstTranscribable,
     {
-        let mut transcription_buf: Vec<u8> = vec![0; R::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
         let mut evaluation_points: Vec<Vec<F>> = Vec::with_capacity(num_constraints);
         let combined_mle_values = proof.combined_mle_values;
@@ -175,7 +179,7 @@ where
 
         let mut ideal_collector = IdealCollector::new(num_constraints);
 
-        let dummy_up_and_down: Vec<DummySemiring> = vec![DummySemiring; num_constraints];
+        let dummy_up_and_down: Vec<DummySemiring> = vec![DummySemiring; U::num_cols()];
 
         U::constrain(&mut ideal_collector, &dummy_up_and_down, &dummy_up_and_down);
 
@@ -366,26 +370,22 @@ impl<R, I> From<EvaluationError> for IdealCheckError<R, I> {
 mod tests {
     use crypto_bigint::{Odd, modular::MontyParams};
     use crypto_primitives::{
-        FixedSemiring, PrimeField, crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
+        crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
     };
     use itertools::Itertools;
-    use num_traits::{ConstZero, Zero};
+    use num_traits::Zero;
     use rand::{Rng, rng};
     use zinc_poly::{
         mle::DenseMultilinearExtension,
-        univariate::{binary::BinaryPoly, dense::DensePolynomial, ideal::DegreeOneIdeal},
+        univariate::{binary::BinaryPoly, dense::DensePolynomial},
     };
     use zinc_transcript::KeccakTranscript;
-    use zinc_uair::{
-        ConstraintBuilder, Uair,
-        constraint_counter::count_constraints,
-        ideal::{Ideal, IdealCheck, ZeroIdeal},
-    };
+    use zinc_uair::constraint_counter::count_constraints;
     use zinc_utils::from_ref::FromRef;
 
     use crate::{
         ideal_check::IdealCheckProtocol,
-        tests::test_airs::{TestAirNoMultiplication, TestUair},
+        tests::test_airs::TestAirNoMultiplication,
     };
 
     const LIMBS: usize = 4;
@@ -408,22 +408,18 @@ mod tests {
         let up: Vec<DenseMultilinearExtension<Poly>> = vec![
             DenseMultilinearExtension::from_evaluations_slice(
                 4,
-                &(0..4)
-                    .map(|_| Poly::from_ref(&rng.random::<BinaryPoly<32>>()))
-                    .collect_vec(),
+                &(0..4).map(|i| Poly::from(Int::from_i8(i))).collect_vec(),
+                Poly::zero(),
+            ),
+            DenseMultilinearExtension::from_evaluations_slice(
+                4,
+                &(0..4).map(|_| Poly::from(Int::from_i8(1))).collect_vec(),
                 Poly::zero(),
             ),
             DenseMultilinearExtension::from_evaluations_slice(
                 4,
                 &(0..4)
-                    .map(|_| Poly::from_ref(&rng.random::<BinaryPoly<32>>()))
-                    .collect_vec(),
-                Poly::zero(),
-            ),
-            DenseMultilinearExtension::from_evaluations_slice(
-                4,
-                &(0..4)
-                    .map(|_| Poly::from_ref(&rng.random::<BinaryPoly<32>>()))
+                    .map(|i| Poly::from(Int::from_i8(i + 1)))
                     .collect_vec(),
                 Poly::zero(),
             ),
@@ -452,8 +448,6 @@ mod tests {
                 Poly::zero(),
             ),
         ];
-
-        println!("{:?}", &up);
 
         let field_cfg = test_config();
 

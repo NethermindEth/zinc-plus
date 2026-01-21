@@ -1,5 +1,4 @@
-use crate::dummy_semiring::DummySemiring;
-use crate::{ConstraintBuilder, Uair, ideal::DummyIdeal};
+use crate::{ConstraintBuilder, Uair, dummy_semiring::DummySemiring, ideal::DummyIdeal};
 use crypto_primitives::FixedSemiring;
 
 /// Get the number of polynomial constraints in a `Uair`.

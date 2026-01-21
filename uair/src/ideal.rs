@@ -1,5 +1,4 @@
-use std::fmt::Debug;
-use std::marker::PhantomData;
+use std::{fmt::Debug, marker::PhantomData};
 
 use crypto_primitives::{FixedSemiring, Semiring};
 use zinc_utils::from_ref::FromRef;

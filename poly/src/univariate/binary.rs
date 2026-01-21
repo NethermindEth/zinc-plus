@@ -4,7 +4,7 @@ use crate::{
 };
 use crypto_primitives::{FromWithConfig, PrimeField, Semiring, semiring::boolean::Boolean};
 use derive_more::{
-    Add, AddAssign, AsRef, Display, From, Mul, MulAssign, Product, Sub, SubAssign, Sum,
+    Add, AddAssign, Display, From, Mul, MulAssign, Product, Sub, SubAssign, Sum,
 };
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, ConstZero, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
