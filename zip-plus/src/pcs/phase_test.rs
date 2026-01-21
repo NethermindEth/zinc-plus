@@ -56,7 +56,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 .try_collect()?;
 
             // u' in the Zinc paper
-            let combined_row = combine_rows(&coeffs, &evals, pp.linear_code.row_len());
+            let combined_row =
+                combine_rows(&coeffs, &evals, pp.linear_code.row_len(), &Zt::CombR::ZERO);
 
             transcript.write_const_many(&combined_row)?;
         }

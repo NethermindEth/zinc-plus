@@ -1,4 +1,3 @@
-use num_traits::Zero;
 use std::convert::identity;
 
 use crypto_primitives::{FromPrimitiveWithConfig, Semiring};
@@ -167,16 +166,19 @@ impl<F: FromPrimitiveWithConfig> EvaluatablePolynomial<F, F> for NatEvaluatedPol
 }
 
 /// Compute the factorial(a) = 1 * 2 * ... * a.
+#[allow(clippy::arithmetic_side_effects)]
 fn factorial<R, F>(a: usize, from_u64: F) -> R
 where
     R: Semiring,
     F: Fn(u64) -> R + Send + Sync,
 {
-    if a.is_zero() {
-        return from_u64(1);
-    }
-
-    (1..=(a as u64)).map(from_u64).product()
+    (1..=(a as u64))
+        .map(&from_u64)
+        .reduce(|mut acc, next| {
+            acc *= next;
+            acc
+        })
+        .unwrap_or(from_u64(1))
 }
 
 #[cfg(test)]

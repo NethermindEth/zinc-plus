@@ -12,7 +12,7 @@ use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::{array, fmt::Debug, iter::Sum};
+use std::{array, fmt::Debug};
 use zinc_utils::{add, from_ref::FromRef};
 
 use butterfly::*;
@@ -29,7 +29,7 @@ pub(crate) fn pntt<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
 where
     C: Config,
     In: Clone + Send + Sync,
-    Out: CheckedAdd + CheckedMul + Sum + FromRef<In> + Clone + Send + Sync + Debug,
+    Out: CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug,
     MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
     MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
 {
@@ -108,7 +108,7 @@ fn base_multiply_into_output<In, Out, C, M>(input: &[In], params: &Radix8PnttPar
 where
     C: Config,
     In: Clone + Send + Sync,
-    Out: Clone + CheckedAdd + CheckedMul + Sum + FromRef<In> + Send + Sync,
+    Out: Clone + CheckedAdd + CheckedMul + FromRef<In> + Send + Sync,
     M: MulByTwiddle<In, PnttInt, Output = Out>,
 {
     cfg_into_iter!(0..C::OUTPUT_LEN)
