@@ -91,10 +91,8 @@ impl<R: Clone> DenseMultilinearExtension<R> {
     }
 }
 
-impl<R: Default> FromIterator<R> for DenseMultilinearExtension<R> {
-    fn from_iter<T: IntoIterator<Item = R>>(iter: T) -> Self {
-        let mut evaluations = Vec::from_iter(iter);
-
+impl<R: Default> DenseMultilinearExtension<R> {
+    pub fn from_evaluations_vec_pad(mut evaluations: Vec<R>) -> Self {
         let len = evaluations.len();
 
         evaluations.resize_with(len.next_power_of_two(), Default::default);
@@ -105,6 +103,12 @@ impl<R: Default> FromIterator<R> for DenseMultilinearExtension<R> {
             evaluations,
             num_vars,
         }
+    }
+}
+
+impl<R: Default> FromIterator<R> for DenseMultilinearExtension<R> {
+    fn from_iter<T: IntoIterator<Item = R>>(iter: T) -> Self {
+        Self::from_evaluations_vec_pad(iter.into_iter().collect())
     }
 }
 
@@ -129,6 +133,16 @@ impl<R> IntoIterator for DenseMultilinearExtension<R> {
 
     fn into_iter(self) -> Self::IntoIter {
         self.evaluations.into_iter()
+    }
+}
+
+#[cfg(feature = "parallel")]
+impl<R: Send + Default> FromParallelIterator<R> for DenseMultilinearExtension<R> {
+    fn from_par_iter<I>(par_iter: I) -> Self
+    where
+        I: IntoParallelIterator<Item = R>,
+    {
+        Self::from_evaluations_vec_pad(par_iter.into_par_iter().collect())
     }
 }
 
