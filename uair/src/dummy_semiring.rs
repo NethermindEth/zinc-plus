@@ -8,12 +8,11 @@ use crypto_primitives::Semiring;
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, ConstOne, ConstZero, One, Zero};
 use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 
-use crate::ideal::{Ideal, IdealCheck};
-
 /// A dummy type implementing `FixedSemiring` trait.
 /// Used for `ConstraintCounter` to have something
 /// that implements `FixedSemiring` but has zero-cost
-/// operations.
+/// operations. Can be used in other contexts
+/// where operations on expression should be ignored.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Hash)]
 pub struct DummySemiring;
 

@@ -1,16 +1,29 @@
-use std::{fmt::Debug, marker::PhantomData};
+use std::fmt::Debug;
 
-use crypto_primitives::{FixedSemiring, Semiring};
+use crypto_primitives::Semiring;
 use zinc_utils::from_ref::FromRef;
 
+/// A trait for types describing ideals.
 pub trait Ideal: FromRef<Self> + Clone + Debug + Send + Sync {
+    /// Get an ideal object defining a zero ideal,
+    /// i.e. containing only the additive zero
+    /// of a semiring.
     fn zero_ideal() -> Self;
 }
 
+/// A trait for semirings or different structures
+/// elements of which can be checked to belong to
+/// an ideal of type `I`.
 pub trait IdealCheck<I: Ideal> {
+    /// Returns true if an element of the type
+    /// belongs to the ideal `ideal`.
+    /// The method is given a reference to the additive zero of the type
+    /// for utilitary reasons (e.g. when dealing with random fields).
     fn is_contained_in_with_zero(&self, ideal: &I, zero: &Self) -> bool;
 }
 
+/// The type of ideals that encode only
+/// one ideal: zero ideal containing only the additive zero.
 #[derive(Clone, Copy, Debug)]
 pub struct ZeroIdeal;
 
@@ -35,6 +48,8 @@ impl FromRef<ZeroIdeal> for ZeroIdeal {
     }
 }
 
+/// A dummy ideal. Convenient when ideal checks
+/// have to be ignored.
 #[derive(Clone, Copy, Debug)]
 pub struct DummyIdeal;
 
