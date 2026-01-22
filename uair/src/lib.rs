@@ -3,6 +3,7 @@
 pub mod constraint_counter;
 pub mod dummy_semiring;
 pub mod ideal;
+pub mod ideal_collector;
 
 use crypto_primitives::Semiring;
 use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};

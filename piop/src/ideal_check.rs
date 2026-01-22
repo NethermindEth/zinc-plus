@@ -2,6 +2,7 @@ mod utils;
 
 use ark_std::cfg_into_iter;
 use crypto_primitives::{FixedSemiring, FromWithConfig, PrimeField, Semiring};
+use derive_more::From;
 use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -17,6 +18,7 @@ use zinc_uair::{
     ConstraintBuilder, Uair,
     dummy_semiring::DummySemiring,
     ideal::{DummyIdeal, Ideal, IdealCheck},
+    ideal_collector::{IdealCollector, IdealCollectorError, collect_ideals},
 };
 use zinc_utils::{
     from_ref::FromRef, inner_transparent_field::InnerTransparentField,
@@ -177,31 +179,12 @@ where
             evaluation_points.push(challenge);
         }
 
-        let mut ideal_collector = IdealCollector::new(num_constraints);
+        let ideal_collector = collect_ideals::<_, U>(num_constraints);
 
-        let dummy_up_and_down: Vec<DummySemiring> = vec![DummySemiring; U::num_cols()];
-
-        U::constrain(&mut ideal_collector, &dummy_up_and_down, &dummy_up_and_down);
-
-        let zero = DensePolynomial::new_with_zero(
-            [F::zero_with_cfg(field_cfg)],
-            F::zero_with_cfg(field_cfg),
-        );
-
-        ideal_collector
-            .ideals
-            .iter()
-            .zip(combined_mle_values.iter())
-            .try_for_each(|(ideal, mle_value)| {
-                if !mle_value.is_contained_in_with_zero(ideal, &zero) {
-                    return Err(IdealCheckError::IdealCheckFailed(
-                        mle_value.clone(),
-                        ideal.clone(),
-                    ));
-                }
-
-                Ok(())
-            })?;
+        ideal_collector.batched_ideal_check(
+            &combined_mle_values,
+            &DensePolynomial::zero_with_cfg(field_cfg),
+        )?;
 
         Ok(evaluation_points
             .into_iter()
@@ -301,69 +284,12 @@ impl<P: Semiring> ConstraintBuilder for IdealCheckConstraintBuilder<P> {
     }
 }
 
-pub(crate) struct IdealCollector<I: Ideal> {
-    pub ideals: Vec<I>,
-}
-
-impl<I: Ideal> IdealCollector<I> {
-    pub fn new(num_constraints: usize) -> Self {
-        Self {
-            ideals: Vec::with_capacity(num_constraints),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct CollectedIdeal<I: Ideal>(I);
-
-impl<I: Ideal> Ideal for CollectedIdeal<I> {
-    fn zero_ideal() -> Self {
-        Self(I::zero_ideal())
-    }
-}
-
-impl<I: Ideal> FromRef<CollectedIdeal<I>> for CollectedIdeal<I> {
-    fn from_ref(value: &CollectedIdeal<I>) -> Self {
-        value.clone()
-    }
-}
-
-impl<I: Ideal> FromRef<I> for CollectedIdeal<I> {
-    fn from_ref(value: &I) -> Self {
-        Self(value.clone())
-    }
-}
-
-impl<I: Ideal> IdealCheck<CollectedIdeal<I>> for DummySemiring {
-    fn is_contained_in_with_zero(&self, _ideal: &CollectedIdeal<I>, _zero: &Self) -> bool {
-        true
-    }
-}
-
-impl<I> ConstraintBuilder for IdealCollector<I>
-where
-    I: Ideal,
-{
-    type Expr = DummySemiring;
-    type Ideal = CollectedIdeal<I>;
-
-    fn assert_in_ideal(&mut self, _expr: Self::Expr, ideal: &Self::Ideal) {
-        self.ideals.push(ideal.0.clone());
-    }
-}
-
-#[derive(Clone, Debug, Error)]
+#[derive(Clone, Debug, From, Error)]
 pub enum IdealCheckError<R, I> {
     #[error("ideal check prover failed to evaluate an mle: {0}")]
     MleEvaluationError(EvaluationError),
-    #[error("the combined mle evaluation {0} does not belong to the ideal {1}")]
-    IdealCheckFailed(R, I),
-}
-
-impl<R, I> From<EvaluationError> for IdealCheckError<R, I> {
-    fn from(error: EvaluationError) -> Self {
-        Self::MleEvaluationError(error)
-    }
+    #[error("mle evaluation ideal check failure: {0}")]
+    IdealCollectorError(IdealCollectorError<R, I>),
 }
 
 #[cfg(test)]

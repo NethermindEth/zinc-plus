@@ -131,6 +131,19 @@ impl<R: Semiring + Zero, const DEGREE_PLUS_ONE: usize> Zero
     }
 }
 
+impl<F: PrimeField, const DEGREE_PLUS_ONE: usize> DensePolynomial<F, DEGREE_PLUS_ONE> {
+    pub fn zero_with_cfg(cfg: &F::Config) -> Self {
+        let zero = F::zero_with_cfg(cfg);
+        Self {
+            coeffs: array::from_fn(|_| zero.clone()),
+        }
+    }
+
+    pub fn one_with_cfg(cfg: &F::Config) -> Self {
+        Self::new_with_zero([F::one_with_cfg(cfg)], F::zero_with_cfg(cfg))
+    }
+}
+
 impl<R: Semiring + Zero + One, const DEGREE_PLUS_ONE: usize> One
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 {
