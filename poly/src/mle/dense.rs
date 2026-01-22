@@ -2,6 +2,10 @@ use core::ops::{Add, AddAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAs
 use num_traits::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use std::{
+    ops::{Deref, DerefMut},
+    slice::SliceIndex,
+};
 
 use crate::{
     EvaluationError,
@@ -87,6 +91,82 @@ impl<R: Clone> DenseMultilinearExtension<R> {
     }
 }
 
+impl<R: Default> FromIterator<R> for DenseMultilinearExtension<R> {
+    fn from_iter<T: IntoIterator<Item = R>>(iter: T) -> Self {
+        let mut evaluations = Vec::from_iter(iter);
+
+        let len = evaluations.len();
+
+        evaluations.resize_with(len.next_power_of_two(), Default::default);
+
+        let num_vars = ark_std::log2(evaluations.len()) as usize;
+
+        Self {
+            evaluations,
+            num_vars,
+        }
+    }
+}
+
+impl<R> Deref for DenseMultilinearExtension<R> {
+    type Target = [R];
+
+    fn deref(&self) -> &Self::Target {
+        &self.evaluations
+    }
+}
+
+impl<R> DerefMut for DenseMultilinearExtension<R> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.evaluations
+    }
+}
+
+impl<R> IntoIterator for DenseMultilinearExtension<R> {
+    type Item = R;
+
+    type IntoIter = std::vec::IntoIter<R>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.evaluations.into_iter()
+    }
+}
+
+#[cfg(feature = "parallel")]
+impl<R: Send + Sync> IntoParallelIterator for DenseMultilinearExtension<R> {
+    type Iter = rayon::vec::IntoIter<R>;
+
+    type Item = R;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.evaluations.into_par_iter()
+    }
+}
+
+#[cfg(feature = "parallel")]
+impl<'data, R: Send + Sync> IntoParallelRefIterator<'data> for &'data DenseMultilinearExtension<R> {
+    type Iter = rayon::slice::Iter<'data, R>;
+
+    type Item = &'data R;
+
+    fn par_iter(&'data self) -> Self::Iter {
+        self.evaluations.par_iter()
+    }
+}
+
+#[cfg(feature = "parallel")]
+impl<'data, R: Send + Sync> IntoParallelRefMutIterator<'data>
+    for &'data mut DenseMultilinearExtension<R>
+{
+    type Iter = rayon::slice::IterMut<'data, R>;
+
+    type Item = &'data mut R;
+
+    fn par_iter_mut(&'data mut self) -> Self::Iter {
+        self.evaluations.par_iter_mut()
+    }
+}
+
 impl<R: Semiring> DenseMultilinearExtension<R> {
     pub fn evaluate<S>(&self, point: &[S], zero: R) -> Result<R, EvaluationError>
     where
@@ -95,7 +175,6 @@ impl<R: Semiring> DenseMultilinearExtension<R> {
         if point.len() == self.num_vars {
             Ok(self
                 .fixed_variables(point, zero)
-                .evaluations
                 .into_iter()
                 .next()
                 .expect("Evaluations should not be empty"))
@@ -111,17 +190,14 @@ impl<R: Semiring> DenseMultilinearExtension<R> {
     where
         G: FnMut(&mut R),
     {
-        self.evaluations.iter_mut().for_each(f);
+        self.iter_mut().for_each(f);
     }
 
     fn binary<G>(&mut self, other: &Self, mut f: G)
     where
         G: FnMut(&mut R, &R),
     {
-        self.evaluations
-            .iter_mut()
-            .zip(other.evaluations.iter())
-            .for_each(|(a, b)| f(a, b));
+        self.iter_mut().zip(other.iter()).for_each(|(a, b)| f(a, b));
     }
 }
 
@@ -144,7 +220,6 @@ where
             return;
         }
 
-        let poly = &mut self.evaluations;
         let nv = self.num_vars;
         let dim = partial_point.len();
 
@@ -152,15 +227,15 @@ where
         for i in 1..dim + 1 {
             for b in 0..1 << (nv - i) {
                 *r.inner_mut() = partial_point[i - 1].inner().clone();
-                if poly[2 * b + 1] != poly[2 * b] {
+                if self[2 * b + 1] != self[2 * b] {
                     // a = f(1) - f(0)
-                    let a = F::sub_inner(&poly[2 * b + 1], &poly[2 * b], config);
+                    let a = F::sub_inner(&self[2 * b + 1], &self[2 * b], config);
 
-                    // poly[b] = f(0) + r * a
+                    // self[b] = f(0) + r * a
                     r.mul_assign_by_inner(&a);
-                    poly[b] = F::add_inner(&poly[2 * b], r.inner(), config);
+                    self[b] = F::add_inner(&self[2 * b], r.inner(), config);
                 } else {
-                    poly[b] = poly[2 * b].clone();
+                    self[b] = self[2 * b].clone();
                 };
             }
         }
@@ -183,7 +258,6 @@ where
         if point.len() == self.num_vars {
             Some(F::new_unchecked_with_cfg(
                 self.fixed_variables_with_config(point, config)
-                    .evaluations
                     .into_iter()
                     .next()
                     .expect("Evaluations should not be empty"),
@@ -209,23 +283,22 @@ where
             "too many partial points"
         );
 
-        let poly = &mut self.evaluations;
         let nv = self.num_vars;
         let dim = partial_point.len();
 
         for i in 1..dim + 1 {
             let r = &partial_point[i - 1];
             for b in 0..1 << (nv - i) {
-                let left = &poly[2 * b];
-                let right = &poly[2 * b + 1];
+                let left = &self[2 * b];
+                let right = &self[2 * b + 1];
                 // a = f(1) - f(0)
                 let a = sub!(right, &left);
                 if a != zero {
-                    // poly[b] = f(0) + r * a
+                    // self[b] = f(0) + r * a
                     let ar = a.mul_by_scalar(r).expect("Multiplication overflow");
-                    poly[b] = add!(left, &ar);
+                    self[b] = add!(left, &ar);
                 } else {
-                    poly[b] = left.clone();
+                    self[b] = left.clone();
                 };
             }
         }
@@ -246,27 +319,24 @@ where
 
 impl<R> MultilinearExtensionRand<R> for DenseMultilinearExtension<R>
 where
-    R: Clone,
+    R: Clone + Default,
     StandardUniform: Distribution<R>,
 {
     fn rand<Rng: RngCore + ?Sized>(num_vars: usize, rng: &mut Rng) -> Self {
-        Self {
-            num_vars,
-            evaluations: (0..1 << num_vars).map(|_| rng.random::<R>()).collect(),
-        }
+        (0..1 << num_vars).map(|_| rng.random::<R>()).collect()
     }
 }
 
-impl<T> Index<usize> for DenseMultilinearExtension<T> {
-    type Output = T;
+impl<T, I: SliceIndex<[T]>> Index<I> for DenseMultilinearExtension<T> {
+    type Output = I::Output;
 
-    fn index(&self, index: usize) -> &Self::Output {
+    fn index(&self, index: I) -> &Self::Output {
         &self.evaluations[index]
     }
 }
 
-impl<T> IndexMut<usize> for DenseMultilinearExtension<T> {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+impl<T, I: SliceIndex<[T]>> IndexMut<I> for DenseMultilinearExtension<T> {
+    fn index_mut(&mut self, index: I) -> &mut Self::Output {
         &mut self.evaluations[index]
     }
 }
@@ -533,10 +603,9 @@ mod tests {
         ]);
         let dense = DenseMultilinearExtension::from_matrix(&m, F::zero_with_cfg(&cfg));
         assert_eq!(dense.num_vars, 3);
-        let evals = dense.evaluations;
-        assert_eq!(evals[0], 5u64.into_with_cfg(&cfg));
-        assert_eq!(evals[5], 7u64.into_with_cfg(&cfg));
-        assert!(evals.iter().enumerate().all(|(i, v)| if i == 0 || i == 5 {
+        assert_eq!(dense[0], 5u64.into_with_cfg(&cfg));
+        assert_eq!(dense[5], 7u64.into_with_cfg(&cfg));
+        assert!(dense.iter().enumerate().all(|(i, v)| if i == 0 || i == 5 {
             true
         } else {
             v.is_zero_with_cfg(&cfg)

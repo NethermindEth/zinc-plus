@@ -236,7 +236,7 @@ fn different_polynomials_produce_different_proofs() {
 
     let mut poly_mles2 = poly_mles1;
     let one: F = F::ONE;
-    poly_mles2[0].evaluations[0] = F::add_inner(&poly_mles2[0].evaluations[0], one.inner(), &());
+    poly_mles2[0][0] = F::add_inner(&poly_mles2[0].evaluations[0], one.inner(), &());
 
     let comb_fn2 = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products1, ()) };
 

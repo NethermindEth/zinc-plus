@@ -58,7 +58,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let (q_0, q_1) = point_to_tensor(num_rows, &point, &field_cfg)?;
 
         let project = Zt::Eval::prepare_projection(&projecting_element);
-        let evaluations: Vec<F> = poly.evaluations.iter().map(project).collect_vec();
+        let evaluations: Vec<F> = poly.iter().map(project).collect_vec();
 
         let q_0_combined_row = if num_rows > 1 {
             // Return the evaluation row combination
