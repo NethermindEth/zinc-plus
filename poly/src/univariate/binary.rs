@@ -386,7 +386,7 @@ impl<const DEGREE_PLUS_ONE: usize>
     type Output = DensePolynomial<i64, DEGREE_PLUS_ONE>;
 
     fn mul_by_scalar_widen(lhs: &BinaryPoly<DEGREE_PLUS_ONE>, rhs: &i64) -> Self::Output {
-        widen_ref_simd::<DEGREE_PLUS_ONE>(lhs, *rhs)
+        widen_simd::<DEGREE_PLUS_ONE>(lhs, *rhs)
     }
 }
 
@@ -407,7 +407,7 @@ pub fn widen_ref<const DEGREE_PLUS_ONE: usize>(
 use core::mem::MaybeUninit;
 
 #[inline(always)]
-pub fn widen_ref_simd<const DEGREE_PLUS_ONE: usize>(
+pub fn widen_simd<const DEGREE_PLUS_ONE: usize>(
     poly: &BinaryPoly<DEGREE_PLUS_ONE>,
     scalar: i64,
 ) -> DensePolynomial<i64, DEGREE_PLUS_ONE> {
@@ -422,18 +422,6 @@ pub fn widen_ref_simd<const DEGREE_PLUS_ONE: usize>(
     unsafe {
         widen_fill_neon::<DEGREE_PLUS_ONE>(in_ptr, out_ptr, scalar);
     }
-
-    #[cfg(target_arch = "x86_64")]
-        {
-            // Prefer AVX-512 if present
-            if std::is_x86_feature_detected!("avx512bw") {
-                widen_fill_avx512::<DEGREE_PLUS_ONE>(in_ptr, out_ptr, scalar);
-            } else if std::is_x86_feature_detected!("avx2") {
-                widen_fill_avx2::<DEGREE_PLUS_ONE>(in_ptr, out_ptr, scalar);
-            } else {
-                widen_fill_scalar::<DEGREE_PLUS_ONE>(in_ptr, out_ptr, scalar);
-            }
-        }
 
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     unsafe {
@@ -494,67 +482,8 @@ unsafe fn widen_fill_neon<const N: usize>(in_ptr: *const u8, out_ptr: *mut i64, 
 
         i += 16;
     }
-}
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-#[inline(always)]
-unsafe fn widen_fill_avx2<const N: usize>(in_ptr: *const u8, out_ptr: *mut i64, scalar: i64) {
-    use core::arch::x86_64::*;
-
-    let zeros = _mm256_setzero_si256();
-
-    let mut i = 0usize;
-    while i + 32 <= N {
-        let v = _mm256_loadu_si256(in_ptr.add(i) as *const __m256i);
-
-        // signed compare is fine for 0/1 bytes
-        let cmp = _mm256_cmpgt_epi8(v, zeros);
-        let mask32 = _mm256_movemask_epi8(cmp) as u32;
-
-        // Fill 32 outputs branchlessly
-        let mut m = mask32;
-        for lane in 0..32 {
-            let bit = (m & 1) as i64; // 0 or 1
-            let mask = -bit;          // 0 or -1
-            *out_ptr.add(i + lane) = scalar & mask;
-            m >>= 1;
-        }
-
-        i += 32;
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512bw,avx512f")]
-#[inline(always)]
-unsafe fn widen_fill_avx512<const N: usize>(in_ptr: *const u8, out_ptr: *mut i64, scalar: i64) {
-    use core::arch::x86_64::*;
-
-    // We rely on 0/1 bytes, so signed compare > 0 works.
-    let zeros_bytes: __m512i = _mm512_setzero_si512();
-    let zeros_i64: __m512i = _mm512_setzero_si512();
-
-    let mut i = 0usize;
-    while i + 64 <= N {
-        // Load 64 coefficient-bytes.
-        let vbytes: __m512i = _mm512_loadu_si512(in_ptr.add(i) as *const __m512i);
-
-        // __mmask64: bit j is 1 iff byte j > 0
-        let m64: __mmask64 = _mm512_cmpgt_epi8_mask(vbytes, zeros_bytes);
-
-        // Expand mask into 8 groups of 8 coefficients.
-        // Each group produces one __m512i of 8 i64 values, then store.
-        for g in 0..8 {
-            let m8: __mmask8 = ((m64 >> (g * 8)) as u8) as __mmask8;
-            let outv: __m512i = _mm512_mask_set1_epi64(zeros_i64, m8, scalar);
-            _mm512_storeu_si512(out_ptr.add(i + g * 8) as *mut __m512i, outv);
-        }
-
-        i += 64;
-    }
-
-    // Tail
+    // Handle remaining lanes
     while i < N {
         let bit = *in_ptr.add(i) != 0;
         let mask = -((bit as i64));
@@ -562,8 +491,6 @@ unsafe fn widen_fill_avx512<const N: usize>(in_ptr: *const u8, out_ptr: *mut i64
         i += 1;
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -583,5 +510,55 @@ mod tests {
 
             assert_eq!(result, i);
         }
+    }
+
+    #[test]
+    fn widen_ref_and_widen_ref_simd_match() {
+        // Test with degree 4
+        for i in 0..16 {
+            let poly = BinaryPoly::<4>::new([
+                (i & 0b0001 != 0).into(),
+                (i & 0b0010 != 0).into(),
+                (i & 0b0100 != 0).into(),
+                (i & 0b1000 != 0).into(),
+            ]);
+
+            for scalar in [1, 42, -7, 100, -100, i64::MAX, i64::MIN] {
+                let result_ref = widen_ref(&poly, scalar);
+                let result_simd = widen_ref_simd(&poly, scalar);
+                assert_eq!(result_ref.coeffs, result_simd.coeffs, 
+                    "Mismatch for pattern {} with scalar {}", i, scalar);
+            }
+        }
+
+        let poly32 = BinaryPoly::<32>::new([
+            true.into(), false.into(), true.into(), true.into(),
+            false.into(), false.into(), true.into(), false.into(),
+            true.into(), true.into(), false.into(), true.into(),
+            false.into(), true.into(), false.into(), false.into(),
+            true.into(), false.into(), false.into(), true.into(),
+            false.into(), true.into(), true.into(), false.into(),
+            false.into(), false.into(), true.into(), true.into(),
+            true.into(), false.into(), true.into(), false.into(),
+        ]);
+
+        for scalar in [1, 42, -7, 100, -100] {
+            let result_ref = widen_ref(&poly32, scalar);
+            let result_simd = widen_simd(&poly32, scalar);
+            assert_eq!(result_ref.coeffs, result_simd.coeffs,
+                "Mismatch for degree 32 with scalar {}", scalar);
+        }
+
+        // Test with all zeros
+        let poly_zeros = BinaryPoly::<16>::new([false.into(); 16]);
+        let result_ref_zeros = widen_ref(&poly_zeros, 42);
+        let result_simd_zeros = widen_simd(&poly_zeros, 42);
+        assert_eq!(result_ref_zeros.coeffs, result_simd_zeros.coeffs);
+
+        // Test with all ones
+        let poly_ones = BinaryPoly::<16>::new([true.into(); 16]);
+        let result_ref_ones = widen_ref(&poly_ones, 42);
+        let result_simd_ones = widen_simd(&poly_ones, 42);
+        assert_eq!(result_ref_ones.coeffs, result_simd_ones.coeffs);
     }
 }
