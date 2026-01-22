@@ -35,7 +35,7 @@ impl<R: FixedSemiring + 'static> Uair<R> for TestUair {
 pub struct TestAirNoMultiplication;
 
 impl<const LIMBS: usize> Uair<DensePolynomial<Int<LIMBS>, 32>> for TestAirNoMultiplication {
-    type Ideal = DegreeOneIdeal<Int<LIMBS>, ZeroIdeal, 32>;
+    type Ideal = DegreeOneIdeal<Int<LIMBS>, 32>;
 
     fn num_cols() -> usize {
         3

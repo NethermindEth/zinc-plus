@@ -7,49 +7,42 @@ use crate::EvaluatablePolynomial;
 use super::dense::DensePolynomial;
 
 #[derive(Clone, Copy, Debug)]
-pub enum DegreeOneIdeal<R: Semiring, Inner: Ideal, const DEGREE_PLUS_ONE: usize> {
+pub enum DegreeOneIdeal<R: Semiring, const DEGREE_PLUS_ONE: usize> {
     DegreeOneIdeal { generating_root: R },
-    Inner(Inner),
+    ZeroIdeal,
 }
 
-impl<R: FixedSemiring, Inner: Ideal, const DEGREE_PLUS_ONE: usize>
-    DegreeOneIdeal<R, Inner, DEGREE_PLUS_ONE>
-{
+impl<R: FixedSemiring, const DEGREE_PLUS_ONE: usize> DegreeOneIdeal<R, DEGREE_PLUS_ONE> {
     pub fn new(generating_root: R) -> Self {
         Self::DegreeOneIdeal { generating_root }
     }
 }
 
-impl<R: Semiring, Inner: Ideal, const DEGREE_PLUS_ONE: usize>
-    FromRef<DegreeOneIdeal<R, Inner, DEGREE_PLUS_ONE>>
-    for DegreeOneIdeal<R, Inner, DEGREE_PLUS_ONE>
+impl<R: Semiring, const DEGREE_PLUS_ONE: usize> FromRef<DegreeOneIdeal<R, DEGREE_PLUS_ONE>>
+    for DegreeOneIdeal<R, DEGREE_PLUS_ONE>
 {
     #[inline(always)]
-    fn from_ref(ideal: &DegreeOneIdeal<R, Inner, DEGREE_PLUS_ONE>) -> Self {
+    fn from_ref(ideal: &DegreeOneIdeal<R, DEGREE_PLUS_ONE>) -> Self {
         ideal.clone()
     }
 }
 
-impl<R: Semiring, Inner: Ideal, const DEGREE_PLUS_ONE: usize> Ideal
-    for DegreeOneIdeal<R, Inner, DEGREE_PLUS_ONE>
-{
+impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Ideal for DegreeOneIdeal<R, DEGREE_PLUS_ONE> {
     #[inline(always)]
     fn zero_ideal() -> Self {
-        Self::Inner(Inner::zero_ideal())
+        Self::ZeroIdeal
     }
 }
 
-impl<R, F, Inner, const DEGREE_PLUS_ONE: usize>
-    IdealCheck<DegreeOneIdeal<R, Inner, DEGREE_PLUS_ONE>> for DensePolynomial<F, DEGREE_PLUS_ONE>
+impl<R, F, const DEGREE_PLUS_ONE: usize> IdealCheck<DegreeOneIdeal<R, DEGREE_PLUS_ONE>>
+    for DensePolynomial<F, DEGREE_PLUS_ONE>
 where
     R: Semiring,
     F: FromWithConfig<R>,
-    Inner: Ideal,
-    DensePolynomial<F, DEGREE_PLUS_ONE>: IdealCheck<Inner>,
 {
     fn is_contained_in_with_zero(
         &self,
-        ideal: &DegreeOneIdeal<R, Inner, DEGREE_PLUS_ONE>,
+        ideal: &DegreeOneIdeal<R, DEGREE_PLUS_ONE>,
         zero: &Self,
     ) -> bool {
         match ideal {
@@ -59,7 +52,7 @@ where
                     .expect("arithmetic overflow")
                     == zero.coeffs[0]
             }
-            DegreeOneIdeal::Inner(inner) => self.is_contained_in_with_zero(inner, zero),
+            DegreeOneIdeal::ZeroIdeal => self == zero,
         }
     }
 }

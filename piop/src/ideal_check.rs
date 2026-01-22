@@ -369,9 +369,7 @@ impl<R, I> From<EvaluationError> for IdealCheckError<R, I> {
 #[cfg(test)]
 mod tests {
     use crypto_bigint::{Odd, modular::MontyParams};
-    use crypto_primitives::{
-        crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
-    };
+    use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
     use itertools::Itertools;
     use num_traits::Zero;
     use rand::{Rng, rng};
@@ -383,10 +381,7 @@ mod tests {
     use zinc_uair::constraint_counter::count_constraints;
     use zinc_utils::from_ref::FromRef;
 
-    use crate::{
-        ideal_check::IdealCheckProtocol,
-        tests::test_airs::TestAirNoMultiplication,
-    };
+    use crate::{ideal_check::IdealCheckProtocol, tests::test_airs::TestAirNoMultiplication};
 
     const LIMBS: usize = 4;
     type F = MontyField<LIMBS>;
