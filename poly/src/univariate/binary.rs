@@ -1,3 +1,6 @@
+#![feature(maybe_uninit_array_assume_init)]
+#![feature(const_maybe_uninit_array_assume_init)]
+
 use crate::{
     ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
     univariate::dense::DensePolynomial,
@@ -347,29 +350,220 @@ where
     }
 }
 
+// #[derive(Clone, Copy, Default)]
+// pub struct BinaryPolyWideningMulByScalar<Output>(PhantomData<Output>);
+
+// impl<Rhs, Output, const DEGREE_PLUS_ONE: usize>
+//     WideningMulByScalar<BinaryPoly<DEGREE_PLUS_ONE>, Rhs> for BinaryPolyWideningMulByScalar<Output>
+// where
+//     Rhs: Copy,
+//     Output: From<Rhs> + Send + Sync + Default + Copy + Zero,
+// {
+//     type Output = DensePolynomial<Output, DEGREE_PLUS_ONE>;
+
+//     fn mul_by_scalar_widen(lhs: &BinaryPoly<DEGREE_PLUS_ONE>, rhs: &Rhs) -> Self::Output {
+//         let mut coeffs: [Output; DEGREE_PLUS_ONE] = [Output::zero(); DEGREE_PLUS_ONE];
+
+//         coeffs.iter_mut().enumerate().for_each(|(i, out)| {
+//             if lhs.0.coeffs[i].inner() {
+//                 *out = (*rhs).into();
+//             }
+//         });
+
+//         DensePolynomial { coeffs }
+//     }
+// }
+
+//////
+/// 
+/// 
 #[derive(Clone, Copy, Default)]
 pub struct BinaryPolyWideningMulByScalar<Output>(PhantomData<Output>);
 
-impl<Rhs, Output, const DEGREE_PLUS_ONE: usize>
-    WideningMulByScalar<BinaryPoly<DEGREE_PLUS_ONE>, Rhs> for BinaryPolyWideningMulByScalar<Output>
-where
-    Rhs: Copy,
-    Output: From<Rhs> + Send + Sync + Default + Copy + Zero,
+impl<const DEGREE_PLUS_ONE: usize>
+    WideningMulByScalar<BinaryPoly<DEGREE_PLUS_ONE>, i64> for BinaryPolyWideningMulByScalar<i64>
 {
-    type Output = DensePolynomial<Output, DEGREE_PLUS_ONE>;
+    type Output = DensePolynomial<i64, DEGREE_PLUS_ONE>;
 
-    fn mul_by_scalar_widen(lhs: &BinaryPoly<DEGREE_PLUS_ONE>, rhs: &Rhs) -> Self::Output {
-        let mut coeffs: [Output; DEGREE_PLUS_ONE] = [Output::zero(); DEGREE_PLUS_ONE];
-
-        coeffs.iter_mut().enumerate().for_each(|(i, out)| {
-            if lhs.0.coeffs[i].inner() {
-                *out = (*rhs).into();
-            }
-        });
-
-        DensePolynomial { coeffs }
+    fn mul_by_scalar_widen(lhs: &BinaryPoly<DEGREE_PLUS_ONE>, rhs: &i64) -> Self::Output {
+        widen_ref_simd::<DEGREE_PLUS_ONE>(lhs, *rhs)
     }
 }
+
+pub fn widen_ref<const DEGREE_PLUS_ONE: usize>(
+    poly: &BinaryPoly<DEGREE_PLUS_ONE>,
+    scalar: i64,
+) -> DensePolynomial<i64, DEGREE_PLUS_ONE> {
+    let mut coeffs: [i64; DEGREE_PLUS_ONE] = [0; DEGREE_PLUS_ONE];
+    coeffs.iter_mut().enumerate().for_each(|(i, out)| {
+        if poly.0.coeffs[i].inner() {
+            *out = scalar;
+        }
+    });
+    DensePolynomial { coeffs }
+}
+
+
+use core::mem::MaybeUninit;
+
+#[inline(always)]
+pub fn widen_ref_simd<const DEGREE_PLUS_ONE: usize>(
+    poly: &BinaryPoly<DEGREE_PLUS_ONE>,
+    scalar: i64,
+) -> DensePolynomial<i64, DEGREE_PLUS_ONE> {
+    // poly.0.coeffs is stored as consecutive u8 values in memory.
+    // Each byte is 0 or 1 
+    let in_ptr = poly.0.coeffs.as_ptr() as *const u8;
+
+    let mut coeffs_uninit = MaybeUninit::<[i64; DEGREE_PLUS_ONE]>::uninit();
+    let out_ptr = coeffs_uninit.as_mut_ptr() as *mut i64;
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        widen_fill_neon::<DEGREE_PLUS_ONE>(in_ptr, out_ptr, scalar);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+        {
+            // Prefer AVX-512 if present
+            if std::is_x86_feature_detected!("avx512bw") {
+                widen_fill_avx512::<DEGREE_PLUS_ONE>(in_ptr, out_ptr, scalar);
+            } else if std::is_x86_feature_detected!("avx2") {
+                widen_fill_avx2::<DEGREE_PLUS_ONE>(in_ptr, out_ptr, scalar);
+            } else {
+                widen_fill_scalar::<DEGREE_PLUS_ONE>(in_ptr, out_ptr, scalar);
+            }
+        }
+
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    unsafe {
+        widen_fill_scalar::<DEGREE_PLUS_ONE>(in_ptr, out_ptr, scalar);
+    }
+
+    let coeffs = unsafe { coeffs_uninit.assume_init() };
+    DensePolynomial { coeffs }
+}
+
+#[inline(always)]
+unsafe fn widen_fill_scalar<const N: usize>(in_ptr: *const u8, out_ptr: *mut i64, scalar: i64) {
+    for i in 0..N {
+        let bit = *in_ptr.add(i) as i64;
+        // branchless: if bit != 0 => mask = -1 else 0
+        let mask = -((bit != 0) as i64);
+        *out_ptr.add(i) = scalar & mask;
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn widen_fill_neon<const N: usize>(in_ptr: *const u8, out_ptr: *mut i64, scalar: i64) {
+    use core::arch::aarch64::*;
+
+    // weights = [1,2,4,8,16,32,64,128] for bitmask compression per 8 lanes
+    let weights_arr: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
+    let weights: uint8x8_t = vld1_u8(weights_arr.as_ptr());
+
+    let mut i = 0usize;
+    while i + 16 <= N {
+        let v: uint8x16_t = vld1q_u8(in_ptr.add(i));
+
+        // cmp lanes: 0xFF if v > 0 else 0
+        let cmp: uint8x16_t = vcgtq_u8(v, vdupq_n_u8(0));
+
+        // bits lanes: 1 if v > 0 else 0
+        let bits: uint8x16_t = vshrq_n_u8(cmp, 7);
+
+        let lo: uint8x8_t = vget_low_u8(bits);
+        let hi: uint8x8_t = vget_high_u8(bits);
+
+        // Multiply by weights and horizontally sum to get an 8-bit mask per half.
+        let lo_mask: u16 = vaddv_u8(vmul_u8(lo, weights)) as u16;
+        let hi_mask: u16 = vaddv_u8(vmul_u8(hi, weights)) as u16;
+
+        // 16-bit mask for lanes 0..15
+        let mask16: u16 = lo_mask | (hi_mask << 8);
+
+        // Fill 16 outputs branchlessly
+        let mut m = mask16 as u32;
+        for lane in 0..16 {
+            let bit = (m & 1) as i64; // 0 or 1
+            let mask = -bit;          // 0 or -1
+            *out_ptr.add(i + lane) = scalar & mask;
+            m >>= 1;
+        }
+
+        i += 16;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline(always)]
+unsafe fn widen_fill_avx2<const N: usize>(in_ptr: *const u8, out_ptr: *mut i64, scalar: i64) {
+    use core::arch::x86_64::*;
+
+    let zeros = _mm256_setzero_si256();
+
+    let mut i = 0usize;
+    while i + 32 <= N {
+        let v = _mm256_loadu_si256(in_ptr.add(i) as *const __m256i);
+
+        // signed compare is fine for 0/1 bytes
+        let cmp = _mm256_cmpgt_epi8(v, zeros);
+        let mask32 = _mm256_movemask_epi8(cmp) as u32;
+
+        // Fill 32 outputs branchlessly
+        let mut m = mask32;
+        for lane in 0..32 {
+            let bit = (m & 1) as i64; // 0 or 1
+            let mask = -bit;          // 0 or -1
+            *out_ptr.add(i + lane) = scalar & mask;
+            m >>= 1;
+        }
+
+        i += 32;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512bw,avx512f")]
+#[inline(always)]
+unsafe fn widen_fill_avx512<const N: usize>(in_ptr: *const u8, out_ptr: *mut i64, scalar: i64) {
+    use core::arch::x86_64::*;
+
+    // We rely on 0/1 bytes, so signed compare > 0 works.
+    let zeros_bytes: __m512i = _mm512_setzero_si512();
+    let zeros_i64: __m512i = _mm512_setzero_si512();
+
+    let mut i = 0usize;
+    while i + 64 <= N {
+        // Load 64 coefficient-bytes.
+        let vbytes: __m512i = _mm512_loadu_si512(in_ptr.add(i) as *const __m512i);
+
+        // __mmask64: bit j is 1 iff byte j > 0
+        let m64: __mmask64 = _mm512_cmpgt_epi8_mask(vbytes, zeros_bytes);
+
+        // Expand mask into 8 groups of 8 coefficients.
+        // Each group produces one __m512i of 8 i64 values, then store.
+        for g in 0..8 {
+            let m8: __mmask8 = ((m64 >> (g * 8)) as u8) as __mmask8;
+            let outv: __m512i = _mm512_mask_set1_epi64(zeros_i64, m8, scalar);
+            _mm512_storeu_si512(out_ptr.add(i + g * 8) as *mut __m512i, outv);
+        }
+
+        i += 64;
+    }
+
+    // Tail
+    while i < N {
+        let bit = *in_ptr.add(i) != 0;
+        let mask = -((bit as i64));
+        *out_ptr.add(i) = scalar & mask;
+        i += 1;
+    }
+}
+
+
 
 #[cfg(test)]
 mod tests {
