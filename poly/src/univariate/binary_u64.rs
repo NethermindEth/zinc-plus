@@ -1,15 +1,12 @@
-#![feature(maybe_uninit_array_assume_init)]
-#![feature(const_maybe_uninit_array_assume_init)]
-
 use crate::{
     ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
     univariate::dense::DensePolynomial,
 };
 use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
 use derive_more::{
-    Add, AddAssign, AsRef, Display, From, Mul, MulAssign, Product, Sub, SubAssign, Sum,
+    Add, AddAssign, AsRef, Display, Mul, MulAssign, Product, Sub, SubAssign, Sum,
 };
-use num_traits::{CheckedAdd, CheckedMul, CheckedSub, ConstZero, One, Zero};
+use num_traits::{CheckedAdd, CheckedMul, CheckedSub, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
     array,
@@ -136,7 +133,7 @@ impl<const DEGREE_PLUS_ONE: usize> One for BinaryU64Poly<DEGREE_PLUS_ONE> {
 impl<'a, const DEGREE_PLUS_ONE: usize> Add<&'a Self> for BinaryU64Poly<DEGREE_PLUS_ONE> {
     type Output = Self;
 
-    #[allow(clippy::arithmetic_side_effects)]
+    #[allow(clippy::arithmetic_side_effects,clippy::suspicious_arithmetic_impl)]
     #[inline(always)]
     fn add(self, rhs: &'a Self) -> Self::Output {
         // addition in GF(2) is XOR
@@ -147,7 +144,7 @@ impl<'a, const DEGREE_PLUS_ONE: usize> Add<&'a Self> for BinaryU64Poly<DEGREE_PL
 impl<'a, const DEGREE_PLUS_ONE: usize> Sub<&'a Self> for BinaryU64Poly<DEGREE_PLUS_ONE> {
     type Output = Self;
 
-    #[allow(clippy::arithmetic_side_effects)]
+    #[allow(clippy::arithmetic_side_effects,clippy::suspicious_arithmetic_impl)]
     #[inline(always)]
     fn sub(self, rhs: &'a Self) -> Self::Output {
         // subtraction in GF(2) is XOR
@@ -160,7 +157,7 @@ impl<const DEGREE_PLUS_ONE: usize> Mul for BinaryU64Poly<DEGREE_PLUS_ONE> {
 
     #[allow(clippy::arithmetic_side_effects)]
     #[inline(always)]
-    fn mul(self, rhs: Self) -> Self::Output {
+    fn mul(self, _rhs: Self) -> Self::Output {
         unimplemented!("Multiplication for BinaryU64Poly is not implemented yet");
     }
 }
@@ -175,6 +172,7 @@ impl<'a, const DEGREE_PLUS_ONE: usize> Mul<&'a Self> for BinaryU64Poly<DEGREE_PL
     }
 }
 
+#[allow(clippy::suspicious_op_assign_impl)]
 impl<'a, const DEGREE_PLUS_ONE: usize> AddAssign<&'a Self> for BinaryU64Poly<DEGREE_PLUS_ONE> {
     #[inline(always)]
     fn add_assign(&mut self, rhs: &'a Self) {
@@ -183,6 +181,7 @@ impl<'a, const DEGREE_PLUS_ONE: usize> AddAssign<&'a Self> for BinaryU64Poly<DEG
     }
 }
 
+#[allow(clippy::suspicious_op_assign_impl)]
 impl<'a, const DEGREE_PLUS_ONE: usize> SubAssign<&'a Self> for BinaryU64Poly<DEGREE_PLUS_ONE> {
     #[inline(always)]
     fn sub_assign(&mut self, rhs: &'a Self) {
@@ -226,7 +225,7 @@ impl<const DEGREE_PLUS_ONE: usize> CheckedSub for BinaryU64Poly<DEGREE_PLUS_ONE>
 
 impl<const DEGREE_PLUS_ONE: usize> CheckedMul for BinaryU64Poly<DEGREE_PLUS_ONE> {
     #[inline(always)]
-    fn checked_mul(&self, other: &Self) -> Option<Self> {
+    fn checked_mul(&self, _other: &Self) -> Option<Self> {
         unimplemented!("Checked multiplication for BinaryU64Poly is not implemented yet");
     }
 }
@@ -257,7 +256,7 @@ impl<const DEGREE_PLUS_ONE: usize> Distribution<BinaryU64Poly<DEGREE_PLUS_ONE>>
         // I didn't manage to delegate this one to
         // `DensePolynomial::sample` because of unsatisfied
         // traits.
-        BinaryU64Poly::new(&coeffs)
+        BinaryU64Poly::new(coeffs)
 
         // BinaryU64Poly(DensePolynomial::new(coeffs))
     }
@@ -410,33 +409,7 @@ where
     }
 }
 
-// #[derive(Clone, Copy, Default)]
-// pub struct BinaryU64PolyWideningMulByScalar<Output>(PhantomData<Output>);
 
-// impl<Rhs, Output, const DEGREE_PLUS_ONE: usize>
-//     WideningMulByScalar<BinaryU64Poly<DEGREE_PLUS_ONE>, Rhs> for
-// BinaryU64PolyWideningMulByScalar<Output> where
-//     Rhs: Copy,
-//     Output: From<Rhs> + Send + Sync + Default + Copy + Zero,
-// {
-//     type Output = DensePolynomial<Output, DEGREE_PLUS_ONE>;
-
-//     fn mul_by_scalar_widen(lhs: &BinaryU64Poly<DEGREE_PLUS_ONE>, rhs: &Rhs)
-// -> Self::Output {         let mut coeffs: [Output; DEGREE_PLUS_ONE] =
-// [Output::zero(); DEGREE_PLUS_ONE];
-
-//         coeffs.iter_mut().enumerate().for_each(|(i, out)| {
-//             if lhs.0.coeffs[i].inner() {
-//                 *out = (*rhs).into();
-//             }
-//         });
-
-//         DensePolynomial { coeffs }
-//     }
-// }
-
-//////
-///
 #[derive(Clone, Copy, Default)]
 pub struct BinaryU64PolyWideningMulByScalar<Output>(PhantomData<Output>);
 
@@ -561,7 +534,7 @@ unsafe fn widen_fill_neon<const N: usize>(mask_ref: &u64, out_ptr: *mut i64, sca
             let m3: int64x2_t = vld1q_s64(masks_ptr.add(6));
 
             // Branchless select: scalar & -1 = scalar, scalar & 0 = 0
-            vst1q_s64(out_ptr.add(i + 0), vandq_s64(scalar_v, m0));
+            vst1q_s64(out_ptr.add(i), vandq_s64(scalar_v, m0));
             vst1q_s64(out_ptr.add(i + 2), vandq_s64(scalar_v, m1));
             vst1q_s64(out_ptr.add(i + 4), vandq_s64(scalar_v, m2));
             vst1q_s64(out_ptr.add(i + 6), vandq_s64(scalar_v, m3));
@@ -596,7 +569,7 @@ unsafe fn widen_fill_neon<const N: usize>(mask_ref: &u64, out_ptr: *mut i64, sca
             let m3: int64x2_t = vmovl_s32(vget_high_s32(hi32));
 
             // Branchless select: scalar & 0xFFFF... = scalar, scalar & 0x0000... = 0
-            vst1q_s64(out_ptr.add(i + 0), vandq_s64(scalar_v, m0));
+            vst1q_s64(out_ptr.add(i), vandq_s64(scalar_v, m0));
             vst1q_s64(out_ptr.add(i + 2), vandq_s64(scalar_v, m1));
             vst1q_s64(out_ptr.add(i + 4), vandq_s64(scalar_v, m2));
             vst1q_s64(out_ptr.add(i + 6), vandq_s64(scalar_v, m3));
@@ -681,8 +654,6 @@ unsafe fn widen_fill_avx512<const N: usize>(mask_ref: &u64, out_ptr: *mut i64, s
 
 #[cfg(test)]
 mod tests {
-    use proptest::result;
-
     use crate::univariate::binary_ref::{BinaryRefPoly, BinaryRefPolyWideningMulByScalar};
 
     use super::*;
@@ -788,7 +759,7 @@ mod tests {
             false.into(),
         ];
 
-        let poly32 = BinaryU64Poly::<32>::new(coeffs.clone());
+        let poly32 = BinaryU64Poly::<32>::new(coeffs);
         let poly32_ref = BinaryRefPoly::<32>::new(coeffs);
 
         for scalar in [1, 42, -7, 100, -100] {
