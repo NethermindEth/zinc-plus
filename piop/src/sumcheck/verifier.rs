@@ -125,6 +125,7 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
                 let p1 = &evaluations[1];
                 if p0.clone() + p1.clone() != expected {
                     return Err(SumCheckError::SumCheckFailed(
+                        i,
                         Box::new(p0.clone() + p1.clone()),
                         Box::new(expected),
                     ));
@@ -133,6 +134,7 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
                 // Degree 0, constant polynomial
                 if p0.clone() != expected {
                     return Err(SumCheckError::SumCheckFailed(
+                        i,
                         Box::new(p0.clone()),
                         Box::new(expected),
                     ));

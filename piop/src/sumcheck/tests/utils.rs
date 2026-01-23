@@ -15,14 +15,14 @@ pub(crate) fn rand_poly<F: PrimeField + Random, Rn: RngCore>(
     config: &F::Config,
 ) -> Result<
     (
-        (Vec<DenseMultilinearExtension<F>>, usize),
+        (Vec<DenseMultilinearExtension<F::Inner>>, usize),
         Vec<(F, Vec<usize>)>,
         F,
     ),
     ArithErrors,
 > {
     let mut sum = F::zero_with_cfg(config);
-    let mut mles = vec![];
+    let mut mles: Vec<DenseMultilinearExtension<F>> = vec![];
     let mut products = Vec::with_capacity(num_products);
     let mut degree = 0;
     let mut current_mle_index = 0;
@@ -40,6 +40,18 @@ pub(crate) fn rand_poly<F: PrimeField + Random, Rn: RngCore>(
         products.push((coefficient, indices));
         current_mle_index += num_multiplicands;
     }
+
+    let mles = mles
+        .into_iter()
+        .map(|mle| DenseMultilinearExtension {
+            evaluations: mle
+                .evaluations
+                .into_iter()
+                .map(|x| x.inner().clone())
+                .collect(),
+            num_vars: mle.num_vars,
+        })
+        .collect();
 
     Ok(((mles, degree), products, sum))
 }
