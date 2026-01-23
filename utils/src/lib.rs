@@ -1,6 +1,7 @@
 pub mod field;
 pub mod from_ref;
 pub mod inner_product;
+pub mod inner_transparent_field;
 pub mod mul_by_scalar;
 pub mod named;
 pub mod ops_macros;

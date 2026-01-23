@@ -5,5 +5,5 @@ use crypto_primitives::PrimeField;
 pub trait ProjectableToField<F: PrimeField> {
     /// Prepare a projection function that will project the current type
     /// to a prime field using the given sampled value.
-    fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static;
+    fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + Send + Sync + 'static;
 }

@@ -19,9 +19,11 @@ num-traits = { workspace = true }
 rayon = { workspace = true, optional = true }
 zinc-transcript = { workspace = true }
 zinc-poly = { workspace = true }
+zinc-primality = { workspace = true }
 zinc-utils = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 crypto-bigint = { workspace = true }
 itertools = { workspace = true }
 rand = { workspace = true }
@@ -31,3 +33,7 @@ workspace = true
 
 [features]
 parallel = ["dep:rayon"]
+
+[[bench]]
+name = "sumcheck"
+harness = false
