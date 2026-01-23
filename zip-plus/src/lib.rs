@@ -5,7 +5,8 @@ pub mod utils;
 
 pub mod merkle;
 
-use ark_std::string::String;
+use std::io::ErrorKind;
+
 use crypto_primitives::FieldError;
 use thiserror::Error;
 
@@ -20,7 +21,7 @@ pub enum ZipError {
     #[error("Serialization Error: {0}")]
     Serialization(String),
     #[error("Transcript failure: {1}")]
-    Transcript(ark_std::io::ErrorKind, String),
+    Transcript(ErrorKind, String),
     #[error("Error during polynomial evaluation: {0}")]
     PolynomialEvaluationError(zinc_poly::EvaluationError),
     #[error("Error during inner product computation: {0}")]

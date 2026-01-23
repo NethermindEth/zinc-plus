@@ -1,9 +1,8 @@
-use ark_std::cfg_iter_mut;
 use num_traits::CheckedAdd;
 use rand::{rngs::StdRng, seq::SliceRandom};
 use rand_core::SeedableRng;
 use std::{iter::Iterator, mem::MaybeUninit};
-use zinc_utils::mul_by_scalar::MulByScalar;
+use zinc_utils::{cfg_iter_mut, mul_by_scalar::MulByScalar};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;

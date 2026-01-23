@@ -7,9 +7,9 @@ use crate::{
         utils::validate_input,
     },
 };
-use ark_std::{cfg_chunks, cfg_chunks_mut};
 use crypto_primitives::DenseRowMatrix;
 use uninit::out_ref::Out;
+use zinc_utils::{cfg_chunks, cfg_chunks_mut};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -67,7 +67,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
     ) -> Result<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment), ZipError> {
-        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, [poly], None)?;
+        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, &[poly], &[])?;
 
         let expected_num_evals = pp.num_rows * pp.linear_code.row_len();
         assert_eq!(
@@ -111,7 +111,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
     ) -> Result<DenseRowMatrix<Zt::Cw>, ZipError> {
-        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, [poly], None)?;
+        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, &[poly], &[])?;
 
         let row_len = pp.linear_code.row_len();
 

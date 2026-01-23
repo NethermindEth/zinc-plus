@@ -22,7 +22,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         poly: &DenseMultilinearExtension<Zt::Eval>,
         commit_hint: &ZipPlusHint<Zt::Cw>,
     ) -> Result<ZipPlusTestTranscript, ZipError> {
-        validate_input::<Zt, Lc, bool>("test", pp.num_vars, [poly], None)?;
+        validate_input::<Zt, Lc, bool>("test", pp.num_vars, &[poly], &[])?;
 
         let mut transcript = PcsTranscript::new();
 

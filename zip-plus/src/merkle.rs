@@ -1,4 +1,3 @@
-use ark_std::{cfg_into_iter, cfg_iter};
 use blake3::hazmat;
 use itertools::Itertools;
 use std::{
@@ -7,7 +6,7 @@ use std::{
 };
 use thiserror::Error;
 use zinc_transcript::traits::ConstTranscribable;
-use zinc_utils::{add, sub};
+use zinc_utils::{add, cfg_into_iter, cfg_iter, sub};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
