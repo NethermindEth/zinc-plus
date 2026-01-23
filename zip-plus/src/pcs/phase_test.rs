@@ -9,11 +9,15 @@ use crate::{
     pcs_transcript::PcsTranscript,
     utils::combine_rows,
 };
+use ark_std::cfg_iter;
 use itertools::Itertools;
 use num_traits::{ConstOne, ConstZero, Zero};
 use zinc_poly::{Polynomial, mle::DenseMultilinearExtension};
 use zinc_transcript::traits::Transcript;
 use zinc_utils::inner_product::InnerProduct;
+
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     #[allow(clippy::arithmetic_side_effects)]
@@ -49,11 +53,9 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 .fs_transcript
                 .get_challenges::<Zt::Chal>(pp.num_rows);
 
-            let evals: Vec<_> = poly
-                .evaluations
-                .iter()
+            let evals: Vec<_> = cfg_iter!(poly.evaluations)
                 .map(|p| Zt::EvalDotChal::inner_product(p, &alphas, Zt::CombR::ZERO))
-                .try_collect()?;
+                .collect::<Result<Vec<_>, _>>()?;
 
             // eprintln!("=== # alphas: {}", alphas.len());
             // eprintln!("=== # coeffs: {}", coeffs.len());
