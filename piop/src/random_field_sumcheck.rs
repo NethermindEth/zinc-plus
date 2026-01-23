@@ -119,7 +119,9 @@ impl<F: FromPrimitiveWithConfig, R: Semiring + ProjectableToField<F>> RFSumcheck
     where
         F::Inner: ConstTranscribable + ConstIntSemiring,
     {
-        // Simulate getting the projecting element.
+        // Simulate getting the projecting element
+        // Verifier does not use that element as it verifies only over RC,
+        // but we keep it here for stability of FS sampling. 
         let _ = transcript.get_field_challenge::<F>(&field_cfg);
 
         let subclaim = MLSumcheck::verify_as_subprotocol(
