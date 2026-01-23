@@ -1,12 +1,12 @@
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 use ark_std::cfg_iter_mut;
 use num_traits::CheckedAdd;
 use rand::{rngs::StdRng, seq::SliceRandom};
 use rand_core::SeedableRng;
 use std::{iter::Iterator, mem::MaybeUninit};
-use zinc_utils::mul_by_scalar::MulByScalar;
-
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
+use zinc_utils::{add, mul_by_scalar::MulByScalar};
 
 /// Computes a linear combination of multiple evaluation rows into a single
 /// combined row.
@@ -46,19 +46,15 @@ where
     cfg_iter_mut!(combined_row.spare_capacity_mut())
         .enumerate()
         .for_each(|(column, combined)| {
+            let column_evals = evaluations.iter().skip(column).step_by(row_len);
             *combined = MaybeUninit::new(
-                coeffs
-                    .iter()
-                    .zip(evaluations.iter().skip(column).step_by(row_len))
-                    .map(|(coeff, eval)| {
+                column_evals
+                    .zip(coeffs.iter())
+                    .map(|(eval, coeff)| {
                         eval.mul_by_scalar(coeff)
                             .expect("Cannot multiply evaluation by coefficient")
                     })
-                    .reduce(|mut acc, next| {
-                        acc = acc.checked_add(&next).expect("addition overflow");
-                        acc
-                    })
-                    .unwrap_or(zero.clone()),
+                    .fold(zero.clone(), |acc, next| add!(acc, &next, "Addition overflow while combining rows"))
             );
         });
 
