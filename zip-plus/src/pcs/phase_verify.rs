@@ -37,7 +37,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
         Zt::Cw: ProjectableToField<F>,
     {
-        validate_input::<Zt, Lc, _>("verify", vp.num_vars, &[], [point_f])?;
+        validate_input::<Zt, Lc, _>("verify", vp.num_vars, &[], &[point_f])?;
 
         let mut transcript: PcsTranscript = proof.clone().into();
 
