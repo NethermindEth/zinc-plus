@@ -3,9 +3,7 @@ use crate::{
     univariate::dense::DensePolynomial,
 };
 use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
-use derive_more::{
-    Add, AddAssign, AsRef, Display, Mul, MulAssign, Product, Sub, SubAssign, Sum,
-};
+use derive_more::{Add, AddAssign, AsRef, Display, Mul, MulAssign, Product, Sub, SubAssign, Sum};
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
@@ -133,7 +131,7 @@ impl<const DEGREE_PLUS_ONE: usize> One for BinaryU64Poly<DEGREE_PLUS_ONE> {
 impl<'a, const DEGREE_PLUS_ONE: usize> Add<&'a Self> for BinaryU64Poly<DEGREE_PLUS_ONE> {
     type Output = Self;
 
-    #[allow(clippy::arithmetic_side_effects,clippy::suspicious_arithmetic_impl)]
+    #[allow(clippy::arithmetic_side_effects, clippy::suspicious_arithmetic_impl)]
     #[inline(always)]
     fn add(self, rhs: &'a Self) -> Self::Output {
         // addition in GF(2) is XOR
@@ -144,7 +142,7 @@ impl<'a, const DEGREE_PLUS_ONE: usize> Add<&'a Self> for BinaryU64Poly<DEGREE_PL
 impl<'a, const DEGREE_PLUS_ONE: usize> Sub<&'a Self> for BinaryU64Poly<DEGREE_PLUS_ONE> {
     type Output = Self;
 
-    #[allow(clippy::arithmetic_side_effects,clippy::suspicious_arithmetic_impl)]
+    #[allow(clippy::arithmetic_side_effects, clippy::suspicious_arithmetic_impl)]
     #[inline(always)]
     fn sub(self, rhs: &'a Self) -> Self::Output {
         // subtraction in GF(2) is XOR
@@ -289,7 +287,7 @@ impl<R: Clone + Zero + One + CheckedAdd + CheckedMul, const DEGREE_PLUS_ONE: usi
 
         //             if coeff.inner() {
         //                 acc =
-        // acc.checked_add(&pow).ok_or(EvaluationError::Overflow)?;             
+        // acc.checked_add(&pow).ok_or(EvaluationError::Overflow)?;
         // }
 
         //             Ok((acc, pow))
@@ -409,7 +407,6 @@ where
     }
 }
 
-
 #[derive(Clone, Copy, Default)]
 pub struct BinaryU64PolyWideningMulByScalar<Output>(PhantomData<Output>);
 
@@ -474,7 +471,10 @@ pub fn widen_simd<const DEGREE_PLUS_ONE: usize>(
     unsafe {
         widen_fill_avx512::<DEGREE_PLUS_ONE>(&poly.0, out_ptr, scalar);
     }
-    #[cfg(not(any(target_arch = "aarch64", all(target_arch = "x86_64", target_feature = "avx512f"))))]
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        all(target_arch = "x86_64", target_feature = "avx512f")
+    )))]
     {
         panic!("SIMD widening not supported on this architecture");
     }
@@ -483,7 +483,11 @@ pub fn widen_simd<const DEGREE_PLUS_ONE: usize>(
     DensePolynomial { coeffs }
 }
 
-#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation, clippy::cast_lossless)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_lossless
+)]
 #[allow(unsafe_op_in_unsafe_fn)]
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
@@ -587,13 +591,18 @@ unsafe fn widen_fill_neon<const N: usize>(mask_ref: &u64, out_ptr: *mut i64, sca
     }
 }
 
-#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation, clippy::cast_lossless)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_lossless
+)]
 #[allow(unsafe_op_in_unsafe_fn)]
 #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
 #[inline(always)]
 // Converts a u64 bitmask into an array of i64 values using AVX512 SIMD.
-// Processes 32 bits at a time with 4-way unrolling for instruction-level parallelism.
-// Significantly cleaner than NEON due to native mask register support.
+// Processes 32 bits at a time with 4-way unrolling for instruction-level
+// parallelism. Significantly cleaner than NEON due to native mask register
+// support.
 unsafe fn widen_fill_avx512<const N: usize>(mask_ref: &u64, out_ptr: *mut i64, scalar: i64) {
     #[cfg(target_arch = "x86_64")]
     use core::arch::x86_64::*;
@@ -605,31 +614,31 @@ unsafe fn widen_fill_avx512<const N: usize>(mask_ref: &u64, out_ptr: *mut i64, s
     // Interleave independent operations to keep multiple execution units busy
     while i + 32 <= N {
         let shift = i as u32;
-        
+
         // Extract all 4 bytes at once - no dependencies between extractions
         let byte0: u8 = ((mask64 >> shift) & 0xFF) as u8;
         let byte1: u8 = ((mask64 >> (shift + 8)) & 0xFF) as u8;
         let byte2: u8 = ((mask64 >> (shift + 16)) & 0xFF) as u8;
         let byte3: u8 = ((mask64 >> (shift + 24)) & 0xFF) as u8;
-        
+
         // Convert to mask registers - independent operations
         let kmask0: __mmask8 = byte0;
         let kmask1: __mmask8 = byte1;
         let kmask2: __mmask8 = byte2;
         let kmask3: __mmask8 = byte3;
-        
+
         // Predicated broadcasts - all can execute in parallel on different ports
         let result0: __m512i = _mm512_maskz_set1_epi64(kmask0, scalar);
         let result1: __m512i = _mm512_maskz_set1_epi64(kmask1, scalar);
         let result2: __m512i = _mm512_maskz_set1_epi64(kmask2, scalar);
         let result3: __m512i = _mm512_maskz_set1_epi64(kmask3, scalar);
-        
+
         // Stores - can pipeline as they have no dependencies on each other
         _mm512_storeu_si512(out_ptr.add(i) as *mut __m512i, result0);
         _mm512_storeu_si512(out_ptr.add(i + 8) as *mut __m512i, result1);
         _mm512_storeu_si512(out_ptr.add(i + 16) as *mut __m512i, result2);
         _mm512_storeu_si512(out_ptr.add(i + 24) as *mut __m512i, result3);
-        
+
         i += 32;
     }
 
@@ -678,7 +687,7 @@ mod tests {
         scalar: i64,
     ) -> DensePolynomial<i64, DEGREE_PLUS_ONE> {
         let mut coeffs: [i64; DEGREE_PLUS_ONE] = [0; DEGREE_PLUS_ONE];
-        for (i, coeff) in coeffs.iter_mut().enumerate().take(DEGREE_PLUS_ONE)  {
+        for (i, coeff) in coeffs.iter_mut().enumerate().take(DEGREE_PLUS_ONE) {
             if (poly.0 & (1 << i)) != 0 {
                 *coeff = scalar;
             }
