@@ -39,7 +39,7 @@ workspace = true
 
 [features]
 parallel = ["dep:rayon", "zinc-poly/parallel", "ark-ff/parallel", "ark-poly/parallel"]
-asm = ["zinc-transcript/asm"]
+sha3-asm = ["zinc-transcript/sha3-asm"]
 
 [[bench]]
 name = "zip_benches"

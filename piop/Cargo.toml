@@ -32,7 +32,8 @@ rand = { workspace = true }
 workspace = true
 
 [features]
-parallel = ["dep:rayon"]
+parallel = ["dep:rayon", "zinc-poly/parallel"]
+sha3-asm = ["zinc-transcript/sha3-asm"]
 
 [[bench]]
 name = "sumcheck"
