@@ -2,6 +2,7 @@ use crate::{
     ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
     univariate::dense::DensePolynomial,
 };
+use core::mem::MaybeUninit;
 use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
 use derive_more::{Add, AddAssign, AsRef, Display, Mul, MulAssign, Product, Sub, SubAssign, Sum};
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, One, Zero};
@@ -59,9 +60,6 @@ impl<const DEGREE_PLUS_ONE: usize> From<BinaryU64Poly<DEGREE_PLUS_ONE>> for u64 
 
 impl From<u32> for BinaryU64Poly<32> {
     fn from(value: u32) -> Self {
-        // Self(DensePolynomial {
-        //     coeffs: array::from_fn(|i| Boolean::new(value & (1 << i) != 0)),
-        // })
         Self(u64::from(value)) // we ignore upper bits
     }
 }
@@ -143,6 +141,7 @@ impl<'a, const DEGREE_PLUS_ONE: usize> Sub<&'a Self> for BinaryU64Poly<DEGREE_PL
     type Output = Self;
 
     #[allow(clippy::arithmetic_side_effects, clippy::suspicious_arithmetic_impl)]
+    #[allow(clippy::arithmetic_side_effects, clippy::suspicious_arithmetic_impl)]
     #[inline(always)]
     fn sub(self, rhs: &'a Self) -> Self::Output {
         // subtraction in GF(2) is XOR
@@ -207,7 +206,6 @@ impl<const DEGREE_PLUS_ONE: usize> CheckedAdd for BinaryU64Poly<DEGREE_PLUS_ONE>
     #[inline(always)]
     fn checked_add(&self, other: &Self) -> Option<Self> {
         // addition in GF(2) is XOR
-        // we don't really check idk
         Some(Self(self.0 ^ other.0))
     }
 }
@@ -216,7 +214,6 @@ impl<const DEGREE_PLUS_ONE: usize> CheckedSub for BinaryU64Poly<DEGREE_PLUS_ONE>
     #[inline(always)]
     fn checked_sub(&self, other: &Self) -> Option<Self> {
         // subtraction in GF(2) is XOR
-        // we don't really check idk
         Some(Self(self.0 ^ other.0))
     }
 }
@@ -250,13 +247,7 @@ impl<const DEGREE_PLUS_ONE: usize> Distribution<BinaryU64Poly<DEGREE_PLUS_ONE>>
     #[inline(always)]
     fn sample<Gen: Rng + ?Sized>(&self, rng: &mut Gen) -> BinaryU64Poly<DEGREE_PLUS_ONE> {
         let coeffs: [Boolean; DEGREE_PLUS_ONE] = rng.random();
-
-        // I didn't manage to delegate this one to
-        // `DensePolynomial::sample` because of unsatisfied
-        // traits.
         BinaryU64Poly::new(coeffs)
-
-        // BinaryU64Poly(DensePolynomial::new(coeffs))
     }
 }
 
@@ -278,23 +269,6 @@ impl<R: Clone + Zero + One + CheckedAdd + CheckedMul, const DEGREE_PLUS_ONE: usi
             return Ok(R::zero());
         }
 
-        // let result = self.0.coeffs[1..]
-        //     .iter()
-        //     .try_fold(
-        //         (self.0.coeffs[0].widen::<R>(), R::one()),
-        //         |(mut acc, mut pow), coeff| {
-        //             pow = pow.checked_mul(point).ok_or(EvaluationError::Overflow)?;
-
-        //             if coeff.inner() {
-        //                 acc =
-        // acc.checked_add(&pow).ok_or(EvaluationError::Overflow)?;
-        // }
-
-        //             Ok((acc, pow))
-        //         },
-        //     )?
-        //     .0;
-        // TODO: vectorize this
         let mut result = R::zero();
         let mut pow = R::one();
         for i in 0..DEGREE_PLUS_ONE {
@@ -417,49 +391,14 @@ impl<const DEGREE_PLUS_ONE: usize> WideningMulByScalar<BinaryU64Poly<DEGREE_PLUS
 
     fn mul_by_scalar_widen(lhs: &BinaryU64Poly<DEGREE_PLUS_ONE>, rhs: &i64) -> Self::Output {
         widen_simd::<DEGREE_PLUS_ONE>(lhs, *rhs)
-        // widen_ref::<DEGREE_PLUS_ONE>(lhs, *rhs)
     }
 }
-
-// pub fn widen_ref<const DEGREE_PLUS_ONE: usize>(
-//     poly: &BinaryU64Poly<DEGREE_PLUS_ONE>,
-//     scalar: i64,
-// ) -> DensePolynomial<i64, DEGREE_PLUS_ONE> {
-//     let mut coeffs: [i64; DEGREE_PLUS_ONE] = [0; DEGREE_PLUS_ONE];
-//     let mut coeffs_uninit: MaybeUninit<[i64; DEGREE_PLUS_ONE]> =
-// MaybeUninit::<[i64; DEGREE_PLUS_ONE]>::uninit();     let out_ptr =
-// coeffs_uninit.as_mut_ptr() as *mut i64;
-
-//     let mut i = 0usize;
-//     let mas
-//     while i + 16 <= DEGREE_PLUS_ONE {
-//         let mut m = mask16 as u32;
-//         for lane in 0..16 {
-//             let bit = (m & 1) as i64; // 0 or 1
-//             let mask = -bit;          // 0 or -1 // full width mask
-//             *out_ptr.add(i + lane) = scalar & mask;
-//             m >>= 1;
-//         }
-
-//         i += 16;
-//     }
-//         // if (poly.0 & (1 << i)) != 0 {
-//         //     *out = scalar;
-//         // }
-//     // });
-//     DensePolynomial { coeffs }
-// }
-
-use core::mem::MaybeUninit;
 
 #[inline(always)]
 pub fn widen_simd<const DEGREE_PLUS_ONE: usize>(
     poly: &BinaryU64Poly<DEGREE_PLUS_ONE>,
     scalar: i64,
 ) -> DensePolynomial<i64, DEGREE_PLUS_ONE> {
-    // poly.0.coeffs is stored as consecutive u8 values in memory.
-    // Each byte is 0 or 1
-
     let mut coeffs_uninit = MaybeUninit::<[i64; DEGREE_PLUS_ONE]>::uninit();
     let out_ptr = coeffs_uninit.as_mut_ptr() as *mut i64;
 
@@ -695,6 +634,7 @@ mod tests {
         DensePolynomial { coeffs }
     }
 
+    #[ignore = "CI system does not support SIMD features"]
     #[test]
     fn widen_ref_and_widen_ref_simd_match() {
         // Test with degree 4
