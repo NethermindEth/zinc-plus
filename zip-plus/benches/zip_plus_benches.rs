@@ -3,7 +3,6 @@
 
 mod zip_common;
 
-use num_traits::{One, Zero};
 use std::marker::PhantomData;
 
 use zinc_poly::univariate::{
@@ -22,7 +21,7 @@ use zip_common::*;
 use criterion::{Criterion, criterion_group, criterion_main};
 use crypto_bigint::U64;
 use crypto_primitives::{
-    Semiring, boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
+    FixedSemiring, boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
 };
 use zip_plus::{
     code::{
@@ -43,11 +42,9 @@ where
         + Default
         + FromRef<Boolean>
         + Named
-        + Semiring
+        + FixedSemiring
         + Send
-        + Sync
-        + Zero
-        + One,
+        + Sync,
     Int<5>: FromRef<CwCoeff>,
 {
     const NUM_COLUMN_OPENINGS: usize = 650;

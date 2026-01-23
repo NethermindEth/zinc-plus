@@ -42,7 +42,7 @@ where
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r_vec<F>(r: &[F], cfg: &F::Config) -> Result<Vec<F>, ArithErrors>
+pub(crate) fn build_eq_x_r_vec<F>(r: &[F], cfg: &F::Config) -> Result<Vec<F>, ArithErrors>
 where
     F: PrimeField,
 {
@@ -83,13 +83,6 @@ where
         // for the current step we will need
         // if x_0 = 0:   (1-r0) * [b_1, ..., b_k]
         // if x_0 = 1:   r0 * [b_1, ..., b_k]
-        // let mut res = vec![];
-        // for &b_i in buf.iter() {
-        //     let tmp = r[0] * b_i;
-        //     res.push(b_i - tmp);
-        //     res.push(tmp);
-        // }
-        // *buf = res;
 
         let mut res = vec![F::zero_with_cfg(cfg); buf.len() << 1];
         cfg_iter_mut!(res).enumerate().for_each(|(i, val)| {
@@ -137,7 +130,7 @@ where
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r_inner_vec<F>(r: &[F], cfg: &F::Config) -> Result<Vec<F::Inner>, ArithErrors>
+fn build_eq_x_r_inner_vec<F>(r: &[F], cfg: &F::Config) -> Result<Vec<F::Inner>, ArithErrors>
 where
     F: PrimeField,
     F::Inner: Zero,
@@ -185,13 +178,6 @@ where
         // for the current step we will need
         // if x_0 = 0:   (1-r0) * [b_1, ..., b_k]
         // if x_0 = 1:   r0 * [b_1, ..., b_k]
-        // let mut res = vec![];
-        // for &b_i in buf.iter() {
-        //     let tmp = r[0] * b_i;
-        //     res.push(b_i - tmp);
-        //     res.push(tmp);
-        // }
-        // *buf = res;
 
         let mut bi = F::zero_with_cfg(cfg);
 

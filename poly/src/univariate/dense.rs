@@ -361,10 +361,7 @@ impl<'a, R: FixedSemiring, const DEGREE_PLUS_ONE: usize> Product<&'a Self>
     }
 }
 
-impl<R: FixedSemiring, const DEGREE_PLUS_ONE: usize> Semiring
-    for DensePolynomial<R, DEGREE_PLUS_ONE>
-{
-}
+impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Semiring for DensePolynomial<R, DEGREE_PLUS_ONE> {}
 
 impl<R: Ring + FixedSemiring, const DEGREE_PLUS_ONE: usize> Ring
     for DensePolynomial<R, DEGREE_PLUS_ONE>

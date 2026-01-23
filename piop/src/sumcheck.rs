@@ -1,4 +1,5 @@
 use num_traits::Zero;
+use std::ops::Add;
 
 use ark_std::{boxed::Box, marker::PhantomData, vec::Vec};
 use crypto_primitives::FromPrimitiveWithConfig;

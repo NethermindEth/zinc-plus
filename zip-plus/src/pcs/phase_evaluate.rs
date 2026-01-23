@@ -62,7 +62,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
         let q_0_combined_row = if num_rows > 1 {
             // Return the evaluation row combination
-            combine_rows(&q_0, &evaluations, row_len)
+            combine_rows(&q_0, &evaluations, row_len, &F::zero_with_cfg(&field_cfg))
         } else {
             // If there is only one row, we have no need to take linear combinations
             // We just return the evaluation row combination
