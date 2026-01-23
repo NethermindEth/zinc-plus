@@ -225,7 +225,6 @@ mod tests {
     macro_rules! test_read_write {
         // TODO: N is magic
         ($write_fn:ident, $read_fn:ident, $original_value:expr, $assert_msg:expr) => {{
-            use ark_std::format;
             let mut buf = vec![0u8; MtHash::NUM_BYTES];
             let mut transcript = PcsTranscript::new();
             transcript
@@ -248,7 +247,6 @@ mod tests {
     macro_rules! test_read_write_vec {
         // TODO: N is magic
         ($write_fn:ident, $read_fn:ident, $original_values:expr, $assert_msg:expr) => {{
-            use ark_std::format;
             let mut transcript = PcsTranscript::new();
             transcript
                 .$write_fn(&$original_values)

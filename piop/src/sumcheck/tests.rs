@@ -1,6 +1,5 @@
 mod utils;
 
-use ark_std::vec::Vec;
 use crypto_bigint::{U128, const_monty_params};
 use crypto_primitives::{Field, crypto_bigint_const_monty::ConstMontyField};
 use num_traits::{ConstOne, ConstZero, Zero};

@@ -6,13 +6,13 @@ use rayon::prelude::*;
 use crate::{
     EvaluationError,
     mle::{MultilinearExtension, MultilinearExtensionRand},
+    utils::log2,
 };
-use ark_std::{cfg_into_iter, log2};
 use crypto_primitives::{Matrix, PrimeField, Ring, Semiring};
 use rand::{distr::StandardUniform, prelude::*};
 use rand_core::RngCore;
 use zinc_utils::{
-    add, inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
+    add, cfg_into_iter, inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
     projectable_to_field::ProjectableToField, sub,
 };
 

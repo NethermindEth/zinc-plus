@@ -1,4 +1,3 @@
-use ark_std::iterable::Iterable;
 use crypto_primitives::PrimeField;
 
 use zinc_poly::{
@@ -22,11 +21,11 @@ fn err_too_many_variates(function: &str, upto: usize, got: usize) -> ZipError {
 }
 
 // Ensures that polynomials and evaluation points are of appropriate size
-pub(super) fn validate_input<'a, Zt: ZipTypes + 'a, Lc: LinearCode<Zt>, Pt: 'a>(
+pub(super) fn validate_input<Zt: ZipTypes, Lc: LinearCode<Zt>, Pt>(
     function: &str,
     param_num_vars: usize,
-    polys: impl Iterable<Item = &'a DenseMultilinearExtension<Zt::Eval>>,
-    points: impl Iterable<Item = &'a [Pt]>,
+    polys: &[&DenseMultilinearExtension<Zt::Eval>],
+    points: &[&[Pt]],
 ) -> Result<(), ZipError> {
     // Check bit-width of the linear combinations
     {
