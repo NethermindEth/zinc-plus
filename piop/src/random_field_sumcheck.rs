@@ -39,7 +39,7 @@ impl<F: PrimeField, R> RFProverState<F, R> {
 
 impl<F: FromPrimitiveWithConfig, R: Semiring + ProjectableToField<F>> RFSumcheck<F, R> {
     /// Random field sumcheck prover.
-    /// Samples a random field element, projects the input mles
+    /// Samples a random field element, projects the input MLEs
     /// and performs the sumcheck proving algorithm.
     ///
     /// # Arguments
@@ -121,7 +121,7 @@ impl<F: FromPrimitiveWithConfig, R: Semiring + ProjectableToField<F>> RFSumcheck
     {
         // Simulate getting the projecting element
         // Verifier does not use that element as it verifies only over RC,
-        // but we keep it here for stability of FS sampling. 
+        // but we keep it here for stability of FS sampling.
         let _ = transcript.get_field_challenge::<F>(&field_cfg);
 
         let subclaim = MLSumcheck::verify_as_subprotocol(
