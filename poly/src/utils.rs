@@ -83,13 +83,6 @@ where
         // for the current step we will need
         // if x_0 = 0:   (1-r0) * [b_1, ..., b_k]
         // if x_0 = 1:   r0 * [b_1, ..., b_k]
-        // let mut res = vec![];
-        // for &b_i in buf.iter() {
-        //     let tmp = r[0] * b_i;
-        //     res.push(b_i - tmp);
-        //     res.push(tmp);
-        // }
-        // *buf = res;
 
         let mut res = vec![F::zero_with_cfg(cfg); buf.len() << 1];
         cfg_iter_mut!(res).enumerate().for_each(|(i, val)| {
@@ -185,13 +178,6 @@ where
         // for the current step we will need
         // if x_0 = 0:   (1-r0) * [b_1, ..., b_k]
         // if x_0 = 1:   r0 * [b_1, ..., b_k]
-        // let mut res = vec![];
-        // for &b_i in buf.iter() {
-        //     let tmp = r[0] * b_i;
-        //     res.push(b_i - tmp);
-        //     res.push(tmp);
-        // }
-        // *buf = res;
 
         let mut bi = F::zero_with_cfg(cfg);
 
