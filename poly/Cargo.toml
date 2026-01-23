@@ -35,6 +35,7 @@ workspace = true
 
 [features]
 parallel = ["dep:rayon"]
+simd = []
 
 [[bench]]
 name = "nat_evaluation"
