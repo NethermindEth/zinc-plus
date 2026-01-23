@@ -394,6 +394,7 @@ impl<const DEGREE_PLUS_ONE: usize> WideningMulByScalar<BinaryU64Poly<DEGREE_PLUS
     }
 }
 
+#[allow(unreachable_code,unused_variables)] // CI system does not support SIMD features
 #[inline(always)]
 pub fn widen_simd<const DEGREE_PLUS_ONE: usize>(
     poly: &BinaryU64Poly<DEGREE_PLUS_ONE>,
