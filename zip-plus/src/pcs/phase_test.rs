@@ -55,6 +55,10 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 .map(|p| Zt::EvalDotChal::inner_product(p, &alphas, Zt::CombR::ZERO))
                 .try_collect()?;
 
+            // eprintln!("=== # alphas: {}", alphas.len());
+            // eprintln!("=== # coeffs: {}", coeffs.len());
+            // eprintln!("=== # evals: {}", evals.len());
+
             // u' in the Zinc paper
             let combined_row =
                 combine_rows(&coeffs, &evals, pp.linear_code.row_len(), &Zt::CombR::ZERO);

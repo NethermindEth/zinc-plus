@@ -945,6 +945,6 @@ mod tests {
             TestPolyZip::verify(&pp, &commitment, &point_f, &eval_f, &eval_proof).expect("verify");
         }
 
-        inner::<12>();
+        inner::<19>();
     }
 }
