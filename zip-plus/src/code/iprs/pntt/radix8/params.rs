@@ -162,6 +162,13 @@ impl<C: Config> Radix8PnttParams<C> {
 #[derive(Clone, Copy)]
 pub struct PnttConfigF2_16_1<const DEPTH: usize>;
 
+/// Rate 1/4 variant of [`PnttConfigF2_16_1`].
+///
+/// Keeps the same field and base length but uses a base dimension four times
+/// larger (BASE_DIM = 4 * BASE_LEN).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF2_16_1_R4<const DEPTH: usize>;
+
 mod fq {
     #![allow(non_local_definitions)]
     use ark_ff::{Fp64, MontBackend, MontConfig};
@@ -182,6 +189,21 @@ impl<const DEPTH: usize> Config for PnttConfigF2_16_1<DEPTH> {
     const FIELD_MODULUS: u32 = fq::MODULUS;
     const BASE_LEN: usize = 32;
     const BASE_DIM: usize = 64;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 4096, -256, 16, -1, -4096, 256, -16];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq::FqBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF2_16_1_R4<DEPTH> {
+    type Field = fq::Fq;
+    const FIELD_MODULUS: u32 = fq::MODULUS;
+    const BASE_LEN: usize = 32;
+    const BASE_DIM: usize = 128;
     const DEPTH: usize = DEPTH;
     const BASE_TWIDDLES: [PnttInt; 8] = [1, 4096, -256, 16, -1, -4096, 256, -16];
 

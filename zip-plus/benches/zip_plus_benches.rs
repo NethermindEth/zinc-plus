@@ -25,7 +25,7 @@ use crypto_primitives::{
 };
 use zip_plus::{
     code::{
-        iprs::{IprsCode, PnttConfigF2_16_1},
+        iprs::{IprsCode, PnttConfigF2_16_1}, // rate 1/2
         raa::{RaaCode, RaaConfig},
     },
     pcs::structs::ZipTypes,
@@ -47,7 +47,7 @@ where
         + Sync,
     Int<5>: FromRef<CwCoeff>,
 {
-    const NUM_COLUMN_OPENINGS: usize = 650;
+    const NUM_COLUMN_OPENINGS: usize = 300;
     type Eval = BinaryPoly<D_PLUS_ONE>;
     type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
@@ -96,8 +96,8 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
 fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS");
 
-    do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, 32>>(&mut group);
-    do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 1, 64>>(&mut group);
+    do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 2, 32>>(&mut group);
+    do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 2, 64>>(&mut group);
 
     group.finish();
 }

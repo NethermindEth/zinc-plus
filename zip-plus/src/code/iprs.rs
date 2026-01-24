@@ -13,7 +13,12 @@ use std::{fmt::Debug, iter::Sum, marker::PhantomData, ops::AddAssign};
 use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 
 use crate::code::iprs::pntt::radix8::{MulByTwiddle, WideningMulByTwiddle};
-pub use pntt::radix8::params::{PnttConfigF2_16_1, PnttInt, Radix8PnttParams};
+pub use pntt::radix8::params::{
+    PnttConfigF2_16_1,
+    PnttConfigF2_16_1_R4,
+    PnttInt,
+    Radix8PnttParams,
+};
 use zinc_utils::mul_by_scalar::WideningMulByScalar;
 
 /// Pseudo Reed-Solomon encoder over the integers. Internally uses a

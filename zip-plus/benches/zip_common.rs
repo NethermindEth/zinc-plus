@@ -15,6 +15,7 @@ use num_traits::One;
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
     hint::black_box,
+    panic,
     time::{Duration, Instant},
 };
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
@@ -23,11 +24,58 @@ use zinc_utils::{from_ref::FromRef, named::Named, projectable_to_field::Projecta
 use zip_plus::{
     code::LinearCode,
     merkle::MerkleTree,
-    pcs::structs::{ZipPlus, ZipTypes},
+    pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
 };
 
 const INT_LIMBS: usize = U64::LIMBS;
 type F = MontyField<{ INT_LIMBS * 4 }>;
+const FIXED_NUM_ROWS: usize = 1 << 3;
+const FIXED_ROW_LEN: usize = 1 << 11;
+
+fn params_with_fixed_rows<Zt: ZipTypes, Lc: LinearCode<Zt>>() -> (ZipPlusParams<Zt, Lc>, usize) {
+    let poly_size = FIXED_NUM_ROWS * FIXED_ROW_LEN;
+    if poly_size.is_power_of_two() {
+        if let Ok(linear_code) = panic::catch_unwind(|| Lc::new(poly_size)) {
+            let row_len = linear_code.row_len();
+            if row_len == FIXED_ROW_LEN {
+                let num_vars = poly_size.ilog2() as usize;
+                let params = ZipPlusParams::new(num_vars, FIXED_NUM_ROWS, linear_code);
+                return (params, num_vars);
+            }
+        }
+    }
+
+    // Fallback: find a consistent poly_size for the fixed number of rows.
+    let mut poly_size = FIXED_NUM_ROWS;
+    for _ in 0..20 {
+        let linear_code = match panic::catch_unwind(|| Lc::new(poly_size)) {
+            Ok(code) => code,
+            Err(_) => {
+                poly_size = poly_size.saturating_mul(2);
+                continue;
+            }
+        };
+
+        let row_len = linear_code.row_len();
+        let target_poly_size = FIXED_NUM_ROWS * row_len;
+        if target_poly_size == poly_size {
+            let num_vars = poly_size.ilog2() as usize;
+            let params = ZipPlusParams::new(num_vars, FIXED_NUM_ROWS, linear_code);
+            return (params, num_vars);
+        }
+
+        poly_size = if target_poly_size.is_power_of_two() {
+            target_poly_size
+        } else {
+            target_poly_size.next_power_of_two()
+        };
+    }
+
+    panic!(
+        "Failed to find a valid poly_size for fixed num_rows={} within bounds",
+        FIXED_NUM_ROWS
+    );
+}
 
 pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>>(group: &mut BenchmarkGroup<WallTime>)
 where
@@ -37,66 +85,47 @@ where
     Zt::Eval: ProjectableToField<F>,
     Zt::Cw: ProjectableToField<F>,
 {
-    encode_rows::<Zt, Lc, 12>(group);
-    encode_rows::<Zt, Lc, 13>(group);
-    encode_rows::<Zt, Lc, 14>(group);
-    encode_rows::<Zt, Lc, 15>(group);
-    encode_rows::<Zt, Lc, 16>(group);
+    //encode_rows::<Zt, Lc>(group);
+    encode_rows::<Zt, Lc>(group);
 
-    encode_single_row::<Zt, Lc, 128>(group);
-    encode_single_row::<Zt, Lc, 256>(group);
-    encode_single_row::<Zt, Lc, 512>(group);
-    encode_single_row::<Zt, Lc, 1024>(group);
+    // encode_single_row::<Zt, Lc, 128>(group);
+    // encode_single_row::<Zt, Lc, 256>(group);
+    // encode_single_row::<Zt, Lc, 512>(group);
+    // encode_single_row::<Zt, Lc, 1024>(group);
 
-    merkle_root::<Zt, 12>(group);
-    merkle_root::<Zt, 13>(group);
-    merkle_root::<Zt, 14>(group);
-    merkle_root::<Zt, 15>(group);
-    merkle_root::<Zt, 16>(group);
+    // merkle_root::<Zt, 12>(group);
+    // merkle_root::<Zt, 13>(group);
+    //merkle_root::<Zt, 14>(group);
+    // merkle_root::<Zt, 15>(group);
+    // merkle_root::<Zt, 16>(group);
+    // commit::<Zt, Lc>(group);
+    commit::<Zt, Lc>(group);
 
-    commit::<Zt, Lc, 12>(group);
-    commit::<Zt, Lc, 13>(group);
-    commit::<Zt, Lc, 14>(group);
-    commit::<Zt, Lc, 15>(group);
-    commit::<Zt, Lc, 16>(group);
+    // est::<Zt, Lc>(group);
+    test::<Zt, Lc>(group);
 
-    test::<Zt, Lc, 12>(group);
-    test::<Zt, Lc, 13>(group);
-    test::<Zt, Lc, 14>(group);
-    test::<Zt, Lc, 15>(group);
-    test::<Zt, Lc, 16>(group);
-
-    evaluate::<Zt, Lc, 12>(group);
-    evaluate::<Zt, Lc, 13>(group);
-    evaluate::<Zt, Lc, 14>(group);
-    evaluate::<Zt, Lc, 15>(group);
-    evaluate::<Zt, Lc, 16>(group);
-
-    verify::<Zt, Lc, 12>(group);
-    verify::<Zt, Lc, 13>(group);
-    verify::<Zt, Lc, 14>(group);
-    verify::<Zt, Lc, 15>(group);
-    verify::<Zt, Lc, 16>(group);
+    //verify::<Zt, Lc>(group);
+    verify::<Zt, Lc>(group);
 }
 
-pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
+pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
 {
     group.bench_function(
         format!(
-            "EncodeRows: {} -> {}, poly_size = 2^{P}",
+            "EncodeRows: {} -> {}, num_rows=2^3, row_len={}",
             Zt::Eval::type_name(),
-            Zt::Cw::type_name()
+            Zt::Cw::type_name(),
+            params_with_fixed_rows::<Zt, Lc>().0.linear_code.row_len()
         ),
         |b| {
             let mut rng = ThreadRng::default();
-            let poly_size = 1 << P;
-            let linear_code = Lc::new(poly_size);
-            let params = ZipPlus::setup(poly_size, linear_code);
+            let (params, num_vars) = params_with_fixed_rows::<Zt, Lc>();
             let row_len = params.linear_code.row_len();
-            let poly = DenseMultilinearExtension::<<Zt as ZipTypes>::Eval>::rand(P, &mut rng);
+            let poly =
+                DenseMultilinearExtension::<<Zt as ZipTypes>::Eval>::rand(num_vars, &mut rng);
             b.iter(|| {
                 let cw = ZipPlus::encode_rows(&params, row_len, &poly.evaluations);
                 black_box(cw)
@@ -166,19 +195,18 @@ where
     );
 }
 
-pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
+pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
 {
     let mut rng = ThreadRng::default();
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
-    let params = ZipPlus::setup(poly_size, linear_code);
+    let (params, num_vars) = params_with_fixed_rows::<Zt, Lc>();
+    let row_len = params.linear_code.row_len();
 
     group.bench_function(
         format!(
-            "Commit: Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
+            "Commit: Eval={}, Cw={}, Comb={}, num_rows=2^3, row_len={row_len}, poly_size=2^{num_vars}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
             Zt::Comb::type_name()
@@ -187,7 +215,7 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
             b.iter_custom(|iters| {
                 let mut total_duration = Duration::ZERO;
                 for _ in 0..iters {
-                    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+                    let poly = DenseMultilinearExtension::rand(num_vars, &mut rng);
                     let timer = Instant::now();
                     let res = ZipPlus::commit(&params, &poly).expect("Failed to commit");
                     black_box(res);
@@ -200,22 +228,20 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     );
 }
 
-pub fn test<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(group: &mut BenchmarkGroup<WallTime>)
+pub fn test<Zt: ZipTypes, Lc: LinearCode<Zt>>(group: &mut BenchmarkGroup<WallTime>)
 where
     StandardUniform: Distribution<Zt::Eval>,
 {
     let mut rng = ThreadRng::default();
+    let (params, num_vars) = params_with_fixed_rows::<Zt, Lc>();
+    let row_len = params.linear_code.row_len();
 
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
-    let params = ZipPlus::setup(poly_size, linear_code);
-
-    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+    let poly = DenseMultilinearExtension::rand(num_vars, &mut rng);
     let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
 
     group.bench_function(
         format!(
-            "Test: Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
+            "Test: Eval={}, Cw={}, Comb={}, num_rows=2^3, row_len={row_len}, poly_size=2^{num_vars}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
             Zt::Comb::type_name(),
@@ -230,7 +256,7 @@ where
     );
 }
 
-pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
+pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
@@ -239,20 +265,18 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     Zt::Eval: ProjectableToField<F>,
 {
     let mut rng = ThreadRng::default();
+    let (params, num_vars) = params_with_fixed_rows::<Zt, Lc>();
+    let row_len = params.linear_code.row_len();
 
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
-    let params = ZipPlus::setup(poly_size, linear_code);
-
-    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+    let poly = DenseMultilinearExtension::rand(num_vars, &mut rng);
     let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
-    let point = vec![Zt::Pt::one(); P];
+    let point = vec![Zt::Pt::one(); num_vars];
 
     let test_transcript = ZipPlus::test(&params, &poly, &data).expect("Test phase failed");
 
     group.bench_function(
         format!(
-            "Evaluate: Eval={}, Cw={}, Comb={}, poly_size=2^{P}, modulus=({} bits)",
+            "Evaluate: Eval={}, Cw={}, Comb={}, num_rows=2^3, row_len={row_len}, poly_size=2^{num_vars}, modulus=({} bits)",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
             Zt::Comb::type_name(),
@@ -275,7 +299,7 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     );
 }
 
-pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
+pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
@@ -285,13 +309,12 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     Zt::Cw: ProjectableToField<F>,
 {
     let mut rng = ThreadRng::default();
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
-    let params = ZipPlus::setup(poly_size, linear_code);
+    let (params, num_vars) = params_with_fixed_rows::<Zt, Lc>();
+    let row_len = params.linear_code.row_len();
 
-    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+    let poly = DenseMultilinearExtension::rand(num_vars, &mut rng);
     let (data, commitment) = ZipPlus::commit(&params, &poly).unwrap();
-    let point = vec![Zt::Pt::one(); P];
+    let point = vec![Zt::Pt::one(); num_vars];
 
     let test_transcript = ZipPlus::test(&params, &poly, &data).expect("Test phase failed");
     let (eval_f, proof) = ZipPlus::evaluate::<F>(&params, &poly, &point, test_transcript)
@@ -301,7 +324,7 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
 
     group.bench_function(
         format!(
-            "Verify: Eval={}, Cw={}, Comb={}, poly_size=2^{P}, modulus=({} bits)",
+            "Verify (skip eval): Eval={}, Cw={}, Comb={}, num_rows=2^3, row_len={row_len}, poly_size=2^{num_vars}, modulus=({} bits)",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
             Zt::Comb::type_name(),
@@ -309,7 +332,7 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
         ),
         |b| {
             b.iter(|| {
-                ZipPlus::verify(&params, &commitment, &point_f, &eval_f, &proof)
+                ZipPlus::verify_skip_evaluation(&params, &commitment, &point_f, &proof)
                     .expect("Verification failed");
             })
         },

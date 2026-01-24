@@ -62,72 +62,175 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         Ok(())
     }
 
+    pub fn verify_skip_evaluation<F>(
+        vp: &ZipPlusParams<Zt, Lc>,
+        comm: &ZipPlusCommitment,
+        point_f: &[F],
+        proof: &ZipPlusProof,
+    ) -> Result<(), ZipError>
+    where
+        F: FromPrimitiveWithConfig
+            + FromRef<F>
+            + for<'a> FromWithConfig<&'a Zt::Chal>
+            + for<'a> MulByScalar<&'a F>,
+        F::Inner: FromRef<Zt::Fmod> + Transcribable,
+        Zt::Cw: ProjectableToField<F>,
+    {
+        validate_input::<Zt, Lc, _>("verify", vp.num_vars, &[], &[point_f])?;
+
+        let mut transcript: PcsTranscript = proof.clone().into();
+
+        Self::verify_testing_no_openings(vp, &comm.root, &mut transcript)?;
+
+        Ok(())
+    }
+
     #[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
     pub(super) fn verify_testing(
         vp: &ZipPlusParams<Zt, Lc>,
         root: &MtHash,
         transcript: &mut PcsTranscript,
     ) -> Result<Vec<(usize, Vec<Zt::Cw>)>, ZipError> {
-        // Gather the coeffs and encoded combined rows per proximity test
-        let encoded_combined_rows: Option<(Vec<Zt::Chal>, Vec<Zt::Chal>, Vec<Zt::CombR>)> = {
-            if vp.num_rows > 1 {
-                // Values to evaluate the coefficients at
-                let alphas = if Zt::Comb::DEGREE_BOUND.is_zero() {
-                    // If we have just one coefficient
-                    // we don't take an RLC.
-                    vec![Zt::Chal::ONE]
-                } else {
-                    transcript
-                        .fs_transcript
-                        // NB: To take an inner product of coeffs
-                        // of a polynomial with the non-strict degree bound B
-                        // with a slice of challenges
-                        // we need to sample B + 1 challenges.
-                        .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND + 1)
-                };
-
-                // Coefficients for the linear combination of polynomial with evaluated
-                // coefficients
-                let coeffs = transcript.fs_transcript.get_challenges(vp.num_rows);
-
-                let combined_row: Vec<Zt::CombR> =
-                    transcript.read_const_many(vp.linear_code.row_len())?;
-
-                let encoded_combined_row: Vec<Zt::CombR> =
-                    vp.linear_code.encode_wide(&combined_row);
-                Some((alphas, coeffs, encoded_combined_row))
-            } else {
-                None
-            }
-        };
-
+        let codeword_len = vp.linear_code.codeword_len();
         let mut columns_opened: Vec<(usize, Vec<Zt::Cw>)> =
             Vec::with_capacity(Zt::NUM_COLUMN_OPENINGS);
 
-        for _ in 0..Zt::NUM_COLUMN_OPENINGS {
-            let column_idx = transcript.squeeze_challenge_idx(vp.linear_code.codeword_len());
-            let column_values = transcript.read_const_many(vp.num_rows)?;
+        if vp.num_rows > 1 {
+            // Values to evaluate the coefficients at
+            let alphas = if Zt::Comb::DEGREE_BOUND.is_zero() {
+                // If we have just one coefficient
+                // we don't take an RLC.
+                vec![Zt::Chal::ONE]
+            } else {
+                transcript
+                    .fs_transcript
+                    // NB: To take an inner product of coeffs
+                    // of a polynomial with the non-strict degree bound B
+                    // with a slice of challenges
+                    // we need to sample B + 1 challenges.
+                    .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND + 1)
+            };
 
-            if let Some((ref alphas, ref coeffs, ref encoded_combined_row)) = encoded_combined_rows
-            {
+            // Coefficients for the linear combination of polynomial with evaluated
+            // coefficients
+            let coeffs = transcript.fs_transcript.get_challenges(vp.num_rows);
+
+            let combined_row: Vec<Zt::CombR> =
+                transcript.read_const_many(vp.linear_code.row_len())?;
+
+            let encoded_combined_row: Vec<Zt::CombR> =
+                vp.linear_code.encode_wide(&combined_row);
+
+            for _ in 0..Zt::NUM_COLUMN_OPENINGS {
+                let column_idx = transcript.squeeze_challenge_idx(codeword_len);
+                let column_values: Vec<Zt::Cw> = transcript.read_const_many(vp.num_rows)?;
+
                 Self::verify_column_testing(
-                    alphas,
-                    coeffs,
-                    encoded_combined_row,
+                    &alphas,
+                    &coeffs,
+                    &encoded_combined_row,
                     &column_values,
                     column_idx,
                     vp.num_rows,
                 )?;
-            }
 
-            ColumnOpening::verify_column(root, &column_values, column_idx, transcript).map_err(
-                |e| ZipError::InvalidPcsOpen(format!("Column opening verification failed: {e}")),
-            )?;
-            // TODO: Verify column opening is taking a long time.
-            columns_opened.push((column_idx, column_values));
+                ColumnOpening::verify_column(root, &column_values, column_idx, transcript)
+                    .map_err(|e| {
+                        ZipError::InvalidPcsOpen(format!(
+                            "Column opening verification failed: {e}"
+                        ))
+                    })?;
+                // TODO: Verify column opening is taking a long time.
+                columns_opened.push((column_idx, column_values));
+            }
+        } else {
+            for _ in 0..Zt::NUM_COLUMN_OPENINGS {
+                let column_idx = transcript.squeeze_challenge_idx(codeword_len);
+                let column_values: Vec<Zt::Cw> = transcript.read_const_many(vp.num_rows)?;
+
+                ColumnOpening::verify_column(root, &column_values, column_idx, transcript)
+                    .map_err(|e| {
+                        ZipError::InvalidPcsOpen(format!(
+                            "Column opening verification failed: {e}"
+                        ))
+                    })?;
+                // TODO: Verify column opening is taking a long time.
+                columns_opened.push((column_idx, column_values));
+            }
         }
 
         Ok(columns_opened)
+    }
+
+    #[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
+    pub(super) fn verify_testing_no_openings(
+        vp: &ZipPlusParams<Zt, Lc>,
+        root: &MtHash,
+        transcript: &mut PcsTranscript,
+    ) -> Result<(), ZipError> {
+        let codeword_len = vp.linear_code.codeword_len();
+
+        if vp.num_rows > 1 {
+            // Values to evaluate the coefficients at
+            let alphas = if Zt::Comb::DEGREE_BOUND.is_zero() {
+                // If we have just one coefficient
+                // we don't take an RLC.
+                vec![Zt::Chal::ONE]
+            } else {
+                transcript
+                    .fs_transcript
+                    // NB: To take an inner product of coeffs
+                    // of a polynomial with the non-strict degree bound B
+                    // with a slice of challenges
+                    // we need to sample B + 1 challenges.
+                    .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND + 1)
+            };
+
+            // Coefficients for the linear combination of polynomial with evaluated
+            // coefficients
+            let coeffs = transcript.fs_transcript.get_challenges(vp.num_rows);
+
+            let combined_row: Vec<Zt::CombR> =
+                transcript.read_const_many(vp.linear_code.row_len())?;
+
+            let encoded_combined_row: Vec<Zt::CombR> =
+                vp.linear_code.encode_wide(&combined_row);
+
+            for _ in 0..Zt::NUM_COLUMN_OPENINGS {
+                let column_idx = transcript.squeeze_challenge_idx(codeword_len);
+                let column_values: Vec<Zt::Cw> = transcript.read_const_many(vp.num_rows)?;
+
+                Self::verify_column_testing(
+                    &alphas,
+                    &coeffs,
+                    &encoded_combined_row,
+                    &column_values,
+                    column_idx,
+                    vp.num_rows,
+                )?;
+
+                ColumnOpening::verify_column(root, &column_values, column_idx, transcript)
+                    .map_err(|e| {
+                        ZipError::InvalidPcsOpen(format!(
+                            "Column opening verification failed: {e}"
+                        ))
+                    })?;
+            }
+        } else {
+            for _ in 0..Zt::NUM_COLUMN_OPENINGS {
+                let column_idx = transcript.squeeze_challenge_idx(codeword_len);
+                let column_values: Vec<Zt::Cw> = transcript.read_const_many(vp.num_rows)?;
+
+                ColumnOpening::verify_column(root, &column_values, column_idx, transcript)
+                    .map_err(|e| {
+                        ZipError::InvalidPcsOpen(format!(
+                            "Column opening verification failed: {e}"
+                        ))
+                    })?;
+            }
+        }
+
+        Ok(())
     }
 
     pub(super) fn verify_column_testing(
@@ -139,12 +242,17 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         num_rows: usize,
     ) -> Result<(), ZipError> {
         let column_entries_comb: Zt::CombR = if num_rows > 1 {
-            let column_entries: Vec<_> = column_entries
-                .iter()
-                .map(Zt::Comb::from_ref)
-                .map(|p| Zt::CombDotChal::inner_product(&p, alphas, Zt::CombR::ZERO))
-                .try_collect()?;
-            Zt::ArrCombRDotChal::inner_product(&column_entries, coeffs, Zt::CombR::ZERO)?
+            let mut column_entries_combined = Vec::with_capacity(column_entries.len());
+            for entry in column_entries {
+                let p = Zt::Comb::from_ref(entry);
+                let combined = Zt::CombDotChal::inner_product(&p, alphas, Zt::CombR::ZERO)?;
+                column_entries_combined.push(combined);
+            }
+            Zt::ArrCombRDotChal::inner_product(
+                &column_entries_combined,
+                coeffs,
+                Zt::CombR::ZERO,
+            )?
         } else {
             Zt::CombDotChal::inner_product(
                 &Zt::Comb::from_ref(&column_entries[0]),
