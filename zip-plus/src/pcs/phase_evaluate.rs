@@ -1,24 +1,28 @@
 use crate::{
     ZipError,
     code::LinearCode,
+    combine_rows,
     pcs::{
         ZipPlusProof, ZipPlusTestTranscript,
         structs::{ZipPlus, ZipPlusParams, ZipTypes},
         utils::{point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
-    utils::combine_rows,
 };
+use ark_std::cfg_iter_mut;
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
+    add,
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProductUnchecked},
     mul_by_scalar::MulByScalar,
     projectable_to_field::ProjectableToField,
 };
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     pub fn evaluate<F>(
@@ -65,7 +69,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
         let q_0_combined_row = if num_rows > 1 {
             // Return the evaluation row combination
-            combine_rows(&q_0, &evaluations, row_len, &F::zero_with_cfg(&field_cfg))
+            combine_rows!(
+                &q_0,
+                evaluations.iter(),
+                |eval| Ok::<_, ZipError>(eval),
+                |acc: F, scaled| add!(acc, &scaled, "Addition overflow while combining rows"),
+                row_len,
+                F::zero_with_cfg(&field_cfg)
+            )
         } else {
             // If there is only one row, we have no need to take linear combinations
             // We just return the evaluation row combination

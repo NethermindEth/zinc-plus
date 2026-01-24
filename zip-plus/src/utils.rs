@@ -1,17 +1,13 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use ark_std::cfg_iter_mut;
-use num_traits::CheckedAdd;
 use rand::{rngs::StdRng, seq::SliceRandom};
 use rand_core::SeedableRng;
-use std::{iter::Iterator, mem::MaybeUninit};
-use zinc_utils::{add, mul_by_scalar::MulByScalar};
 
 /// Computes a linear combination of multiple evaluation rows into a single
 /// combined row.
 ///
-/// Given a flat `evaluations` vector, interpreted as a matrix with `row_len`
+/// Given a flat `evaluations` iterator, interpreted as a matrix with `row_len`
 /// columns, this function treats each consecutive `row_len` values as one row.
 /// The output is a single row, computed by multiplying each input row by the
 /// corresponding coefficient from `coeffs`, and summing these scaled rows
@@ -24,46 +20,51 @@ use zinc_utils::{add, mul_by_scalar::MulByScalar};
 /// # Arguments
 ///
 /// - `coeffs`: Coefficients applied to each row.
-/// - `evaluations`: Flattened evaluations arranged row-wise.
+/// - `evals_iter`: Iterator over flattened evaluations arranged row-wise.
+/// - `convert_eval`: Function to convert each evaluation to the desired type.
+///    Should be just `|eval| Ok::<_, ZipError>(eval)` if no conversion is needed.
+/// - `add_scaled`: Function to add a scaled evaluation to an accumulator.
 /// - `row_len`: Number of columns per evaluation row.
 /// - `zero`: Additive neutral element of `El`.
 ///
 /// # Returns
 ///
 /// A vector of length `row_len` representing the combined row.
-pub(super) fn combine_rows<Coeff, El>(
-    coeffs: &[Coeff],
-    evaluations: &[El],
-    row_len: usize,
-    zero: &El,
-) -> Vec<El>
-where
-    Coeff: Send + Sync,
-    El: Clone + CheckedAdd + for<'z> MulByScalar<&'z Coeff> + Send + Sync,
-{
-    let mut combined_row = Vec::with_capacity(row_len);
+#[macro_export]
+#[allow(unused_imports)]
+macro_rules! combine_rows {
+    ($coeffs:expr, $evals_iter:expr, $convert_eval:expr, $add_scaled:expr, $row_len:expr, $zero:expr) => {{
+        let row_len = $row_len;
+        let mut combined_row = Vec::with_capacity(row_len);
 
-    cfg_iter_mut!(combined_row.spare_capacity_mut())
-        .enumerate()
-        .for_each(|(column, combined)| {
-            let column_evals = evaluations.iter().skip(column).step_by(row_len);
-            *combined = MaybeUninit::new(
-                column_evals
-                    .zip(coeffs.iter())
-                    .map(|(eval, coeff)| {
-                        eval.mul_by_scalar(coeff)
-                            .expect("Cannot multiply evaluation by coefficient")
-                    })
-                    .fold(zero.clone(), |acc, next| add!(acc, &next, "Addition overflow while combining rows"))
-            );
-        });
+        cfg_iter_mut!(combined_row.spare_capacity_mut())
+            .enumerate()
+            .try_for_each(|(column, combined)| -> Result<(), crate::ZipError> {
+                let mut acc = $zero;
 
-    // Safety: We initialized all elements in the combined_row.
-    unsafe {
-        combined_row.set_len(row_len);
-    }
+                for (eval, coeff) in $evals_iter
+                    .skip(column)
+                    .step_by(row_len)
+                    .zip($coeffs.iter())
+                {
+                    let eval = $convert_eval(eval)?;
+                    let scaled = eval
+                        .mul_by_scalar(coeff)
+                        .expect("Cannot multiply evaluation by coefficient");
+                    acc = $add_scaled(acc, scaled);
+                }
 
-    combined_row
+                *combined = std::mem::MaybeUninit::new(acc);
+                Ok(())
+            })?;
+
+        // Safety: We initialized all elements in the combined_row.
+        unsafe {
+            combined_row.set_len(row_len);
+        }
+
+        combined_row
+    }};
 }
 
 /// Reorder the elements in slice using the given randomness seed
@@ -75,35 +76,62 @@ pub(super) fn shuffle_seeded<T>(slice: &mut [T], seed: u64) {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::ZipError;
+    use ark_std::cfg_iter_mut;
+    use zinc_utils::mul_by_scalar::MulByScalar;
 
     #[test]
-    fn test_basic_combination() {
+    fn test_basic_combination() -> Result<(), ZipError> {
         let coeffs = vec![1, 2];
         let evaluations = vec![3, 4, 5, 6];
         let row_len = 2;
 
-        let result = combine_rows(&coeffs, &evaluations, row_len, &0);
+        let result = combine_rows!(
+            &coeffs,
+            evaluations.iter(),
+            |eval| Ok::<_, ZipError>(eval),
+            |acc, scaled| acc + scaled,
+            row_len,
+            0_i32
+        );
 
         assert_eq!(result, vec![(3 + 2 * 5), (4 + 2 * 6)]);
+        Ok(())
     }
 
     #[test]
-    fn test_second_combination() {
+    fn test_second_combination() -> Result<(), ZipError> {
         let coeffs = vec![3, 4];
         let evaluations = vec![2, 4, 6, 8];
         let row_len = 2;
 
-        let result = combine_rows(&coeffs, &evaluations, row_len, &0);
+        let result = combine_rows!(
+            &coeffs,
+            evaluations.iter(),
+            |eval| Ok::<_, ZipError>(eval),
+            |acc, scaled| acc + scaled,
+            row_len,
+            0_i32
+        );
 
         assert_eq!(result, vec![(3 * 2 + 4 * 6), (3 * 4 + 4 * 8)]);
+        Ok(())
     }
+
     #[test]
-    fn test_large_values() {
+    fn test_large_values() -> Result<(), ZipError> {
         let coeffs = vec![1000, -500];
         let evaluations = vec![2000, -3000, 4000, -5000];
         let row_len = 2;
 
-        let result = combine_rows(&coeffs, &evaluations, row_len, &0);
+        let result = combine_rows!(
+            &coeffs,
+            evaluations.iter(),
+            |eval| Ok::<_, ZipError>(eval),
+            |acc, scaled| acc + scaled,
+            row_len,
+            0_i32
+        );
 
         assert_eq!(
             result,
@@ -112,5 +140,6 @@ mod test {
                 (1000 * -3000 + (-500) * -5000)
             ]
         );
+        Ok(())
     }
 }
