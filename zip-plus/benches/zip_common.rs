@@ -219,6 +219,7 @@ where
     // merkle_root::<Zt, 16>(group);
     // commit::<Zt, Lc>(group);
     commit::<Zt, Lc>(group);
+    commit_n::<Zt, Lc, 10>(group);
 
     // est::<Zt, Lc>(group);
     test::<Zt, Lc>(group);
@@ -340,6 +341,58 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>>(
                 let timer = Instant::now();
                 let res = ZipPlus::commit(&params, &poly).expect("Failed to commit");
                 black_box(res);
+                total_duration += timer.elapsed();
+            }
+
+            record_peak_alloc(&label);
+            total_duration
+        })
+    });
+}
+
+pub fn commit_n<Zt: ZipTypes, Lc: LinearCode<Zt>, const N: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    let mut rng = ThreadRng::default();
+    let (params, num_vars) = params_with_fixed_rows::<Zt, Lc>();
+    let row_len = params.linear_code.row_len();
+
+    let label = format!(
+        "Commit x{N}: Eval={}, Cw={}, Comb={}, num_rows=2^3, row_len={row_len}, poly_size=2^{num_vars}",
+        Zt::Eval::type_name(),
+        Zt::Cw::type_name(),
+        Zt::Comb::type_name()
+    );
+
+    group.bench_function(label.clone(), |b| {
+        b.iter_custom(|iters| {
+            let mut total_duration = Duration::ZERO;
+            reset_peak_alloc();
+            for _ in 0..iters {
+                let polys: Vec<_> = (0..N)
+                    .map(|_| DenseMultilinearExtension::rand(num_vars, &mut rng))
+                    .collect();
+                let timer = Instant::now();
+
+                #[cfg(feature = "parallel")]
+                {
+                    use rayon::prelude::*;
+                    polys.par_iter().for_each(|poly| {
+                        let res = ZipPlus::commit(&params, poly).expect("Failed to commit");
+                        black_box(res);
+                    });
+                }
+
+                #[cfg(not(feature = "parallel"))]
+                {
+                    for poly in &polys {
+                        let res = ZipPlus::commit(&params, poly).expect("Failed to commit");
+                        black_box(res);
+                    }
+                }
+
                 total_duration += timer.elapsed();
             }
 
