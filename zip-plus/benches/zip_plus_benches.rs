@@ -28,7 +28,8 @@ use crypto_primitives::{
 };
 use zip_plus::{
     code::{
-        iprs::{IprsCode, PnttConfigF2_16_1},
+        // iprs::{IprsCode, PnttConfigF2_16_1}, // rate 1/2
+        iprs::{IprsCode, PnttConfigF2_16_1_R4}, // rate 1/4
         raa::{RaaCode, RaaConfig},
     },
     pcs::structs::ZipTypes,
@@ -89,7 +90,7 @@ type SomeRaaCode<const D_PLUS_ONE: usize> =
 
 type SomeIprsCode<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize> = IprsCode<
     BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
-    PnttConfigF2_16_1<DEPTH>,
+    PnttConfigF2_16_1_R4<DEPTH>,
     BinaryPolyWideningMulByScalar<Twiddle>,
 >;
 

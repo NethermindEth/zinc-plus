@@ -44,7 +44,7 @@ where
     // encode_rows::<Zt, Lc, 13>(group);
     // encode_rows::<Zt, Lc, 14>(group);
     // encode_rows::<Zt, Lc, 15>(group);
-    // encode_rows::<Zt, Lc, 16>(group);
+    encode_rows::<Zt, Lc, 16>(group);
  
     // encode_single_row::<Zt, Lc, 128>(group);
     // encode_single_row::<Zt, Lc, 256>(group);
@@ -59,27 +59,27 @@ where
 
     // commit::<Zt, Lc, 12>(group);
     // commit::<Zt, Lc, 13>(group);
-    commit::<Zt, Lc, 14>(group);
+    // commit::<Zt, Lc, 14>(group);
     // commit::<Zt, Lc, 15>(group);
     commit::<Zt, Lc, 16>(group);
 
-    test::<Zt, Lc, 12>(group);
-    test::<Zt, Lc, 13>(group);
-    test::<Zt, Lc, 14>(group);
-    test::<Zt, Lc, 15>(group);
+    // test::<Zt, Lc, 12>(group);
+    // test::<Zt, Lc, 13>(group);
+    // test::<Zt, Lc, 14>(group);
+    // test::<Zt, Lc, 15>(group);
     test::<Zt, Lc, 16>(group);
 
-    evaluate::<Zt, Lc, PEval, 12>(group);
-    evaluate::<Zt, Lc, PEval, 13>(group);
-    evaluate::<Zt, Lc, PEval, 14>(group);
-    evaluate::<Zt, Lc, PEval, 15>(group);
-    evaluate::<Zt, Lc, PEval, 16>(group);
+    // evaluate::<Zt, Lc, PEval, 12>(group);
+    // evaluate::<Zt, Lc, PEval, 13>(group);
+    // evaluate::<Zt, Lc, PEval, 14>(group);
+    // evaluate::<Zt, Lc, PEval, 15>(group);
+    // evaluate::<Zt, Lc, PEval, 16>(group);
 
-    verify::<Zt, Lc, PEval, PCw, 12>(group);
-    verify::<Zt, Lc, PEval, PCw, 13>(group);
-    verify::<Zt, Lc, PEval, PCw, 14>(group);
-    verify::<Zt, Lc, PEval, PCw, 15>(group);
-    verify::<Zt, Lc, PEval, PCw, 16>(group);
+    // verify::<Zt, Lc, PEval, PCw, 12>(group);
+    // verify::<Zt, Lc, PEval, PCw, 13>(group);
+    // verify::<Zt, Lc, PEval, PCw, 14>(group);
+    // verify::<Zt, Lc, PEval, PCw, 15>(group);
+    // verify::<Zt, Lc, PEval, PCw, 16>(group);
 }
 
 pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
