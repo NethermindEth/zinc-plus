@@ -91,6 +91,7 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     do_bench::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>>(&mut group);
 
     group.finish();
+    print_peak_alloc_summary("Zip+ RAA");
 }
 
 fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
@@ -100,6 +101,7 @@ fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 2, 64>>(&mut group);
 
     group.finish();
+    print_peak_alloc_summary("Zip+ IPRS");
 }
 
 criterion_group!(benches, zip_plus_benchmarks_raa, zip_plus_benchmarks_iprs);
