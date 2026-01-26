@@ -476,14 +476,21 @@ where
     }
 }
 
-impl<R, const DEGREE_PLUS_ONE: usize> FromRef<BinaryPoly<DEGREE_PLUS_ONE>>
+impl<R, const DEGREE_PLUS_ONE: usize> FromRef<BinaryPoly>
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 where
     R: Semiring + FromRef<Boolean> + Default,
 {
     #[inline(always)]
-    fn from_ref(value: &BinaryPoly<DEGREE_PLUS_ONE>) -> Self {
-        Self::from_ref(value.inner())
+    fn from_ref(value: &BinaryPoly) -> Self {
+        // Self::from_ref(value.inner())
+        let bits = *value.as_ref();
+        let coeffs = array::from_fn(|i| {
+            let bit_set = i < 32 && ((bits >> i) & 1) == 1;
+            let b = Boolean::from(bit_set);
+            R::from_ref(&b)
+        });
+        DensePolynomial { coeffs }
     }
 }
 

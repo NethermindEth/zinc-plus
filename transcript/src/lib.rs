@@ -59,7 +59,7 @@ impl KeccakTranscript {
 impl Transcript for KeccakTranscript {
     fn get_challenge<T: ConstTranscribable>(&mut self) -> T {
         let mut buf = vec![0u8; T::NUM_BYTES];
-        self.fill_with_random_bytes(&mut buf);
+        self.fill_with_random_bytes(&mut buf[0..=1]);
         self.hasher.update([0x12]);
         self.hasher.update(&mut buf);
         self.hasher.update([0x34]);
