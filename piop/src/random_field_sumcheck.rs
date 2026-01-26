@@ -166,7 +166,7 @@ mod tests {
         let b: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
         let c: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
 
-        let nvars = zinc_poly::utils::log2(witness_size) as usize;
+        let nvars = zinc_utils::log2(witness_size) as usize;
 
         let a: DenseMultilinearExtension<BinaryPoly<32>> =
             DenseMultilinearExtension::from_evaluations_vec(
