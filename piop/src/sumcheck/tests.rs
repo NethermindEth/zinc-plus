@@ -314,7 +314,7 @@ fn sumcheck_with_zero_polynomial() {
         (),
     );
 
-    assert!(proof.extract_sum().is_zero());
+    assert!(proof.claimed_sum.is_zero());
 
     let mut verifier_transcript = KeccakTranscript::default();
     let res = MLSumcheck::verify_as_subprotocol(

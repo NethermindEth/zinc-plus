@@ -31,13 +31,6 @@ pub struct SumcheckProof<F>{
     pub claimed_sum: F,
 }
 
-impl<F: Clone> SumcheckProof<F> {
-    /// Derive the claimed sum from the sumcheck protocol.
-    pub fn extract_sum(&self) -> F {
-        self.claimed_sum.clone()
-    }
-}
-
 impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
     /// Sumcheck prover main entry point.
     ///

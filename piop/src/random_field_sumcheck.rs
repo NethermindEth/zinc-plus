@@ -219,7 +219,7 @@ mod tests {
                 &mut transcript,
                 nvars,
                 3,
-                proof.0.extract_sum(),
+                proof.0.claimed_sum.clone(),
                 &proof,
                 field_cfg,
             )
