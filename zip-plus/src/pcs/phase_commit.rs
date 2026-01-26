@@ -71,16 +71,16 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
         let expected_num_evals = pp.num_rows * pp.linear_code.row_len();
         assert_eq!(
-            poly.evaluations.len(),
+            poly.len(),
             expected_num_evals,
             "Polynomial has an incorrect number of evaluations ({}) for the expected matrix size ({})",
-            poly.evaluations.len(),
+            poly.len(),
             expected_num_evals
         );
 
         let row_len = pp.linear_code.row_len();
 
-        let cw_matrix = Self::encode_rows(pp, row_len, &poly.evaluations);
+        let cw_matrix = Self::encode_rows(pp, row_len, poly);
 
         let merkle_tree = MerkleTree::new(&cw_matrix.to_rows_slices());
         let root = merkle_tree.root();
@@ -115,7 +115,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
         let row_len = pp.linear_code.row_len();
 
-        let rows = Self::encode_rows(pp, row_len, &poly.evaluations);
+        let rows = Self::encode_rows(pp, row_len, poly);
         Ok(rows)
     }
 
@@ -230,8 +230,7 @@ mod tests {
         let (pp, _) = setup_test_params(3); // Setup for 3 variables
 
         // Create polynomial with 4 variables (which is > 3)
-        let evaluations = (1..=16).map(Int::from).collect();
-        let poly = DenseMultilinearExtension::from_evaluations_vec(4, evaluations, Zero::zero());
+        let poly: DenseMultilinearExtension<_> = (1..=16).map(Int::from).collect();
 
         let result = TestZip::commit(&pp, &poly);
         assert!(result.is_err());
@@ -291,16 +290,8 @@ mod tests {
         let (pp, _) = setup_test_params(3);
 
         let polys = vec![
-            DenseMultilinearExtension::from_evaluations_vec(
-                3,
-                (1..=8).map(Int::from).collect(),
-                Zero::zero(),
-            ),
-            DenseMultilinearExtension::from_evaluations_vec(
-                3,
-                (9..=16).map(Int::from).collect(),
-                Zero::zero(),
-            ),
+            (1..=8).map(Int::from).collect(),
+            (9..=16).map(Int::from).collect(),
         ];
 
         let results = TestZip::batch_commit(&pp, &polys);
@@ -314,7 +305,7 @@ mod tests {
     #[test]
     fn encode_rows_produces_correct_size() {
         let (pp, poly) = setup_test_params(3);
-        let encoded = TestZip::encode_rows(&pp, pp.linear_code.row_len(), &poly.evaluations);
+        let encoded = TestZip::encode_rows(&pp, pp.linear_code.row_len(), &poly);
 
         assert_eq!(encoded.num_rows, pp.num_rows);
         assert_eq!(encoded.num_cols, pp.linear_code.codeword_len());
@@ -325,12 +316,12 @@ mod tests {
     #[test]
     fn encoded_rows_match_linear_code_definition() {
         let (pp, poly) = setup_test_params(3);
-        let encoded = TestZip::encode_rows(&pp, pp.linear_code.row_len(), &poly.evaluations);
+        let encoded = TestZip::encode_rows(&pp, pp.linear_code.row_len(), &poly);
 
         for (i, row_chunk) in encoded.as_rows().enumerate() {
             let start = i * pp.linear_code.row_len();
             let end = start + pp.linear_code.row_len();
-            let row_evals = &poly.evaluations[start..end];
+            let row_evals = &poly[start..end];
             let expected_encoding = pp.linear_code.encode(row_evals);
             assert_eq!(
                 row_chunk,

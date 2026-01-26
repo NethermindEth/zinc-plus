@@ -28,7 +28,7 @@ where
 {
     fn prepare_projection(
         sampled_value: &MontyField<LIMBS>,
-    ) -> impl Fn(&Self) -> MontyField<LIMBS> + 'static {
+    ) -> impl Fn(&Self) -> MontyField<LIMBS> + Send + Sync + 'static {
         let config = sampled_value.cfg().clone();
         move |value: &T| value.into_with_cfg(&config)
     }

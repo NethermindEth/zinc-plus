@@ -11,9 +11,12 @@ use crate::{
 };
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
+    cfg_iter,
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProductUnchecked},
     mul_by_scalar::MulByScalar,
@@ -58,7 +61,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let (q_0, q_1) = point_to_tensor(num_rows, &point, &field_cfg)?;
 
         let project = Zt::Eval::prepare_projection(&projecting_element);
-        let evaluations: Vec<F> = poly.evaluations.iter().map(project).collect_vec();
+        let evaluations: Vec<F> = cfg_iter!(poly).map(project).collect();
 
         let q_0_combined_row = if num_rows > 1 {
             // Return the evaluation row combination
