@@ -24,10 +24,10 @@ type F = ConstMontyField<Params, N>;
 fn generate_sumcheck_proof<Rn: RngCore>(
     num_vars: usize,
     mut rng: &mut Rn,
-) -> (usize, F, SumcheckProof<F>) {
+) -> (usize, SumcheckProof<F>) {
     let mut transcript = KeccakTranscript::default();
 
-    let ((poly_mles, poly_degree), products, sum) =
+    let ((poly_mles, poly_degree), products, _) =
         rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
     let comb_fn = |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
@@ -40,7 +40,7 @@ fn generate_sumcheck_proof<Rn: RngCore>(
         comb_fn,
         (),
     );
-    (poly_degree, sum, proof)
+    (poly_degree, proof)
 }
 
 #[test]
@@ -49,17 +49,11 @@ fn full_sumcheck_protocol_works_correctly() {
     let num_vars = 3;
 
     for _ in 0..20 {
-        let (poly_degree, sum, proof) = generate_sumcheck_proof(num_vars, &mut rng);
+        let (poly_degree, proof) = generate_sumcheck_proof(num_vars, &mut rng);
 
         let mut transcript = KeccakTranscript::default();
-        let res = MLSumcheck::verify_as_subprotocol(
-            &mut transcript,
-            num_vars,
-            poly_degree,
-            sum,
-            &proof,
-            (),
-        );
+        let res =
+            MLSumcheck::verify_as_subprotocol(&mut transcript, num_vars, poly_degree, &proof, ());
         assert!(res.is_ok())
     }
 }
@@ -69,7 +63,7 @@ fn prover_message_omits_constant_term() {
     let mut rng = rand::rng();
     let num_vars = 3;
 
-    let (poly_degree, _sum, proof) = generate_sumcheck_proof(num_vars, &mut rng);
+    let (poly_degree, proof) = generate_sumcheck_proof(num_vars, &mut rng);
 
     assert_eq!(proof.messages[0].0.len(), poly_degree);
 }
@@ -80,12 +74,12 @@ fn subclaim_differs_with_incorrect_claimed_sum() {
     let num_vars = 3;
 
     let mut transcript = KeccakTranscript::default();
-    let ((poly_mles, poly_degree), products, sum) =
+    let ((poly_mles, poly_degree), products, _) =
         rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
     let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
 
-    let (proof, _) = MLSumcheck::prove_as_subprotocol(
+    let (mut proof, _) = MLSumcheck::prove_as_subprotocol(
         &mut transcript,
         poly_mles,
         num_vars,
@@ -95,25 +89,25 @@ fn subclaim_differs_with_incorrect_claimed_sum() {
     );
 
     let one = F::from(1u32);
-    let incorrect_sum = sum + one;
+    let incorrect_sum = proof.claimed_sum.clone() + one;
 
     let mut clean_verifier_transcript = KeccakTranscript::default();
     let clean_subclaim = MLSumcheck::verify_as_subprotocol(
         &mut clean_verifier_transcript,
         num_vars,
         poly_degree,
-        sum,
         &proof,
         (),
     )
     .unwrap();
+
+    proof.claimed_sum = incorrect_sum.clone();
 
     let mut verifier_transcript = KeccakTranscript::default();
     let res = MLSumcheck::verify_as_subprotocol(
         &mut verifier_transcript,
         num_vars,
         poly_degree,
-        incorrect_sum,
         &proof,
         (),
     )
@@ -129,7 +123,7 @@ fn subclaim_changes_when_prover_message_is_tampered() {
     let num_vars = 3;
 
     let mut transcript = KeccakTranscript::default();
-    let ((poly_mles, poly_degree), products, sum) =
+    let ((poly_mles, poly_degree), products, _) =
         rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
     let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
@@ -148,7 +142,6 @@ fn subclaim_changes_when_prover_message_is_tampered() {
         &mut clean_verifier_transcript,
         num_vars,
         poly_degree,
-        sum,
         &proof,
         (),
     )
@@ -163,7 +156,6 @@ fn subclaim_changes_when_prover_message_is_tampered() {
         &mut verifier_transcript,
         num_vars,
         poly_degree,
-        sum,
         &tampered_proof,
         (),
     )
@@ -179,7 +171,7 @@ fn verifier_rejects_proof_with_wrong_degree() {
     let num_vars = 3;
 
     let mut transcript = KeccakTranscript::default();
-    let ((poly_mles, poly_degree), products, sum) =
+    let ((poly_mles, poly_degree), products, _) =
         rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
     let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
@@ -200,7 +192,6 @@ fn verifier_rejects_proof_with_wrong_degree() {
         &mut verifier_transcript,
         num_vars,
         incorrect_degree,
-        sum,
         &proof,
         (),
     );
@@ -300,8 +291,6 @@ fn sumcheck_with_zero_polynomial() {
         })
         .collect();
 
-    let sum = F::ZERO;
-
     let comb_fn = |vals: &[F]| -> F { vals.iter().product() };
 
     let mut transcript = KeccakTranscript::default();
@@ -314,6 +303,8 @@ fn sumcheck_with_zero_polynomial() {
         (),
     );
 
+    assert_eq!(proof.claimed_sum, F::zero());
+
     assert!(proof.claimed_sum.is_zero());
 
     let mut verifier_transcript = KeccakTranscript::default();
@@ -321,7 +312,6 @@ fn sumcheck_with_zero_polynomial() {
         &mut verifier_transcript,
         num_vars,
         poly_degree,
-        sum,
         &proof,
         (),
     );
@@ -367,7 +357,6 @@ fn sumcheck_with_constant_polynomial() {
         &mut verifier_transcript,
         num_vars,
         poly_degree,
-        sum,
         &proof,
         (),
     );
@@ -381,7 +370,7 @@ fn sumcheck_with_single_variable() {
     let num_vars = 1;
 
     let mut transcript = KeccakTranscript::default();
-    let ((poly_mles, poly_degree), products, sum) =
+    let ((poly_mles, poly_degree), products, _) =
         rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
     let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
@@ -400,7 +389,6 @@ fn sumcheck_with_single_variable() {
         &mut verifier_transcript,
         num_vars,
         poly_degree,
-        sum,
         &proof,
         (),
     );
@@ -414,7 +402,7 @@ fn subclaim_changes_if_transcript_is_tampered() {
     let num_vars = 3;
 
     let mut prover_transcript = KeccakTranscript::default();
-    let ((poly_mles, poly_degree), products, sum) =
+    let ((poly_mles, poly_degree), products, _) =
         rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
     let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
@@ -429,15 +417,9 @@ fn subclaim_changes_if_transcript_is_tampered() {
     );
 
     let mut clean_transcript = KeccakTranscript::default();
-    let clean_res = MLSumcheck::verify_as_subprotocol(
-        &mut clean_transcript,
-        num_vars,
-        poly_degree,
-        sum,
-        &proof,
-        (),
-    )
-    .unwrap();
+    let clean_res =
+        MLSumcheck::verify_as_subprotocol(&mut clean_transcript, num_vars, poly_degree, &proof, ())
+            .unwrap();
 
     let mut tampered_transcript = KeccakTranscript::default();
     tampered_transcript.absorb(b"tampering the transcript");
@@ -445,7 +427,6 @@ fn subclaim_changes_if_transcript_is_tampered() {
         &mut tampered_transcript,
         num_vars,
         poly_degree,
-        sum,
         &proof,
         (),
     )
@@ -508,7 +489,6 @@ fn verifier_errors_on_incomplete_proof() {
         &mut verifier_transcript,
         num_vars,
         poly_degree,
-        sum,
         &incomplete_proof,
         (),
     );
@@ -525,7 +505,6 @@ fn prover_handles_empty_mle_list() {
 
     let poly_mles: Vec<DenseMultilinearExtension<<F as Field>::Inner>> = Vec::new();
     let poly_degree = 0;
-    let sum = F::ZERO;
 
     let comb_fn = |_vals: &[F]| -> F { F::ZERO };
 
@@ -544,7 +523,6 @@ fn prover_handles_empty_mle_list() {
         &mut verifier_transcript,
         num_vars,
         poly_degree,
-        sum,
         &proof,
         (),
     );
@@ -558,14 +536,13 @@ fn verifier_errors_on_mismatched_nvars() {
     let nvars_prover = 3;
     let nvars_verifier = 4;
 
-    let (poly_degree, sum, proof) = generate_sumcheck_proof(nvars_prover, &mut rng);
+    let (poly_degree, proof) = generate_sumcheck_proof(nvars_prover, &mut rng);
 
     let mut transcript = KeccakTranscript::default();
     let res = MLSumcheck::verify_as_subprotocol(
         &mut transcript,
         nvars_verifier, // verifier expects more rounds than the proof contains
         poly_degree,
-        sum,
         &proof,
         (),
     );
@@ -601,15 +578,9 @@ fn verifier_produces_correct_subclaim() {
     );
 
     let mut verifier_transcript = KeccakTranscript::default();
-    let subclaim = MLSumcheck::verify_as_subprotocol(
-        &mut verifier_transcript,
-        nvars,
-        poly_degree,
-        sum,
-        &proof,
-        (),
-    )
-    .unwrap();
+    let subclaim =
+        MLSumcheck::verify_as_subprotocol(&mut verifier_transcript, nvars, poly_degree, &proof, ())
+            .unwrap();
 
     let mle_evals_at_point: Vec<F> = original_mles
         .iter()
@@ -631,15 +602,12 @@ fn zero_variable_case_returns_correct_subclaim() {
     let claimed_sum: F = F::from(42u32);
 
     // No prover rounds for zero-variable case
-    let proof = SumcheckProof::<F> { messages: vec![], claimed_sum };
+    let proof = SumcheckProof::<F> {
+        messages: vec![],
+        claimed_sum,
+    };
 
     let mut transcript = KeccakTranscript::default();
-    let _subclaim = MLSumcheck::verify_as_subprotocol(
-        &mut transcript,
-        num_vars,
-        degree,
-        claimed_sum,
-        &proof,
-        (),
-    );
+    let _subclaim =
+        MLSumcheck::verify_as_subprotocol(&mut transcript, num_vars, degree, &proof, ());
 }
