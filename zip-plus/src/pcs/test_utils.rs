@@ -253,14 +253,8 @@ where
     // Verify the evaluation is done correctly
     {
         // Widen up polynomial for evaluation
-        let poly = DenseMultilinearExtension {
-            evaluations: poly
-                .evaluations
-                .iter()
-                .map(Zt::Comb::from_ref)
-                .collect_vec(),
-            num_vars,
-        };
+        let poly: DenseMultilinearExtension<_> = poly.iter().map(Zt::Comb::from_ref).collect();
+
         let expected_eval = poly
             .evaluate(&point, Zero::zero())
             .expect("failed to evaluate polynomial");

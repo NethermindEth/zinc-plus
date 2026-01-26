@@ -1,6 +1,5 @@
 //! Verifier
 
-use ark_std::vec::Vec;
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use zinc_poly::{EvaluatablePolynomial, univariate::nat_evaluation::NatEvaluatedPoly};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};

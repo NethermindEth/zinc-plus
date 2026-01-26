@@ -1,9 +1,9 @@
-use ark_std::{end_timer, start_timer, vec::Vec};
+use std::ops::Range;
+
 use crypto_bigint::Random;
 use crypto_primitives::PrimeField;
 use itertools::Itertools;
 use rand::{Rng, RngCore};
-use std::ops::Range;
 use zinc_poly::{mle::DenseMultilinearExtension, utils::ArithErrors};
 
 #[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
@@ -87,7 +87,6 @@ pub fn random_mle_list<F: PrimeField + Random, Rn: RngCore>(
     rng: &mut Rn,
     config: F::Config,
 ) -> (Vec<DenseMultilinearExtension<F>>, F) {
-    let start = start_timer!(|| "sample random mle list");
     let mut multiplicands = (0..degree)
         .map(|_| Vec::with_capacity(1 << nv))
         .collect_vec();
@@ -109,6 +108,5 @@ pub fn random_mle_list<F: PrimeField + Random, Rn: RngCore>(
         .map(|x| DenseMultilinearExtension::from_evaluations_vec(nv, x, F::zero_with_cfg(&config)))
         .collect();
 
-    end_timer!(start);
     (list, sum)
 }

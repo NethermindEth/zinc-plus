@@ -5,4 +5,5 @@ pub mod inner_transparent_field;
 pub mod mul_by_scalar;
 pub mod named;
 pub mod ops_macros;
+pub mod parallel;
 pub mod projectable_to_field;

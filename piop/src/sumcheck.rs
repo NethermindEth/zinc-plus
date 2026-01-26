@@ -1,9 +1,8 @@
 use num_traits::Zero;
-use std::ops::Add;
 
-use ark_std::{boxed::Box, marker::PhantomData, vec::Vec};
 use crypto_primitives::FromPrimitiveWithConfig;
 use prover::ProverState;
+use std::{marker::PhantomData, ops::Add};
 use thiserror::Error;
 use zinc_poly::{EvaluationError, mle::DenseMultilinearExtension, utils::ArithErrors};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};

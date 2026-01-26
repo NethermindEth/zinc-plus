@@ -22,7 +22,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         poly: &DenseMultilinearExtension<Zt::Eval>,
         commit_hint: &ZipPlusHint<Zt::Cw>,
     ) -> Result<ZipPlusTestTranscript, ZipError> {
-        validate_input::<Zt, Lc, bool>("test", pp.num_vars, [poly], None)?;
+        validate_input::<Zt, Lc, bool>("test", pp.num_vars, &[poly], &[])?;
 
         let mut transcript = PcsTranscript::new();
 
@@ -50,7 +50,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 .get_challenges::<Zt::Chal>(pp.num_rows);
 
             let evals: Vec<_> = poly
-                .evaluations
                 .iter()
                 .map(|p| Zt::EvalDotChal::inner_product(p, &alphas, Zt::CombR::ZERO))
                 .try_collect()?;
@@ -105,7 +104,7 @@ mod tests {
     };
     use crypto_bigint::U64;
     use crypto_primitives::crypto_bigint_int::Int;
-    use num_traits::{ConstOne, Zero};
+    use num_traits::ConstOne;
     use zinc_poly::mle::DenseMultilinearExtension;
 
     const INT_LIMBS: usize = U64::LIMBS;
@@ -167,12 +166,8 @@ mod tests {
         let (pp, _) = setup_test_params(num_vars);
 
         let oversized_num_vars = 5;
-        let oversized_evals: Vec<_> = (0..1 << oversized_num_vars).map(Int::from).collect();
-        let oversized_poly = DenseMultilinearExtension::from_evaluations_vec(
-            oversized_num_vars,
-            oversized_evals,
-            Zero::zero(),
-        );
+        let oversized_poly: DenseMultilinearExtension<_> =
+            (0..1 << oversized_num_vars).map(Int::from).collect();
 
         // This hint is for a 4-variable poly, but we need it as a placeholder.
         let (hint, _) = TestZip::commit(&pp, &setup_test_params::<N, K, M>(num_vars).1).unwrap();
