@@ -2,7 +2,7 @@ use num_traits::Zero;
 
 use crypto_primitives::FromPrimitiveWithConfig;
 use prover::ProverState;
-use std::{marker::PhantomData, ops::Add};
+use std::marker::PhantomData;
 use thiserror::Error;
 use zinc_poly::{EvaluationError, mle::DenseMultilinearExtension, utils::ArithErrors};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};

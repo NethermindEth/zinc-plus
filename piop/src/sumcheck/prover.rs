@@ -5,10 +5,7 @@ use std::slice;
 use crypto_primitives::PrimeField;
 #[cfg(feature = "parallel")]
 use rayon::iter::*;
-use zinc_poly::{
-    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::nat_evaluation::NatEvaluatedPoly,
-};
+use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
 use zinc_utils::{cfg_into_iter, cfg_iter_mut, inner_transparent_field::InnerTransparentField};
 
 /// Evaluation of a polynomial on natural points without the constant term.
