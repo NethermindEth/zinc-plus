@@ -71,7 +71,7 @@ fn prover_message_omits_constant_term() {
 
     let (poly_degree, _sum, proof) = generate_sumcheck_proof(num_vars, &mut rng);
 
-    assert_eq!(proof.0[0].0.len(), poly_degree);
+    assert_eq!(proof.messages[0].0.len(), poly_degree);
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn subclaim_changes_when_prover_message_is_tampered() {
 
     let mut tampered_proof = proof.clone();
     let one: F = F::from(1u32);
-    tampered_proof.0[0].0[0] += one;
+    tampered_proof.messages[0].0[0] += one;
 
     let mut verifier_transcript = KeccakTranscript::default();
     let res = MLSumcheck::verify_as_subprotocol(
@@ -500,7 +500,7 @@ fn verifier_errors_on_incomplete_proof() {
     );
 
     let mut incomplete_proof = proof.clone();
-    incomplete_proof.0.pop();
+    incomplete_proof.messages.pop(); // Remove last prover message
 
     let mut verifier_transcript = KeccakTranscript::default();
 
@@ -631,7 +631,7 @@ fn zero_variable_case_returns_correct_subclaim() {
     let claimed_sum: F = F::from(42u32);
 
     // No prover rounds for zero-variable case
-    let proof = SumcheckProof::<F>(Vec::new(), claimed_sum);
+    let proof = SumcheckProof::<F> { messages: vec![], claimed_sum };
 
     let mut transcript = KeccakTranscript::default();
     let _subclaim = MLSumcheck::verify_as_subprotocol(
