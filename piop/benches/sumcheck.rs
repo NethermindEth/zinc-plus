@@ -8,7 +8,7 @@ use criterion::{
     criterion_group, criterion_main, measurement::WallTime,
 };
 use crypto_primitives::{
-    ConstIntSemiring, Field, FromPrimitiveWithConfig, PrimeField, crypto_bigint_monty::MontyField,
+    ConstIntSemiring, Field, FromPrimitiveWithConfig, crypto_bigint_monty::MontyField,
 };
 use num_traits::Zero;
 use rand::{Rng, rng};
@@ -28,7 +28,7 @@ pub fn bench_simple_product<F, const LIMBS: usize>(
     group: &mut BenchmarkGroup<WallTime>,
     witness_size: usize,
 ) where
-    F: PrimeField + FromPrimitiveWithConfig + InnerTransparentField + 'static,
+    F: FromPrimitiveWithConfig + InnerTransparentField + FromRef<F> + 'static,
     F::Inner: FromRef<F::Inner> + ConstTranscribable + ConstIntSemiring,
     MillerRabin: PrimalityTest<F::Inner>,
     for<'a> &'a F: Mul<&'a F, Output = F>,
@@ -38,7 +38,7 @@ pub fn bench_simple_product<F, const LIMBS: usize>(
     let b: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
     let c: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
 
-    let nvars = ark_std::log2(witness_size) as usize;
+    let nvars = zinc_poly::utils::log2(witness_size) as usize;
 
     let params = format!("LIMBS={}/nvars={}", LIMBS, nvars);
 

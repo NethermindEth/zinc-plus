@@ -1,12 +1,26 @@
-use ark_std::cfg_iter_mut;
 use crypto_primitives::PrimeField;
 use num_traits::Zero;
 use thiserror::Error;
+use zinc_utils::cfg_iter_mut;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 use crate::mle::DenseMultilinearExtension;
+
+/// Returns ceil(log2(x)).
+/// Copied from ark-std.
+#[inline(always)]
+#[allow(clippy::arithmetic_side_effects)]
+pub const fn log2(x: usize) -> u32 {
+    if x == 0 {
+        0
+    } else if x.is_power_of_two() {
+        1usize.leading_zeros() - x.leading_zeros()
+    } else {
+        0usize.leading_zeros() - x.leading_zeros()
+    }
+}
 
 /// A `enum` specifying the possible failure modes of the arithmetics.
 #[derive(displaydoc::Display, Debug, Error)]
@@ -42,7 +56,7 @@ where
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r_vec<F>(r: &[F], cfg: &F::Config) -> Result<Vec<F>, ArithErrors>
+pub(crate) fn build_eq_x_r_vec<F>(r: &[F], cfg: &F::Config) -> Result<Vec<F>, ArithErrors>
 where
     F: PrimeField,
 {
@@ -83,13 +97,6 @@ where
         // for the current step we will need
         // if x_0 = 0:   (1-r0) * [b_1, ..., b_k]
         // if x_0 = 1:   r0 * [b_1, ..., b_k]
-        // let mut res = vec![];
-        // for &b_i in buf.iter() {
-        //     let tmp = r[0] * b_i;
-        //     res.push(b_i - tmp);
-        //     res.push(tmp);
-        // }
-        // *buf = res;
 
         let mut res = vec![F::zero_with_cfg(cfg); buf.len() << 1];
         cfg_iter_mut!(res).enumerate().for_each(|(i, val)| {
@@ -137,7 +144,7 @@ where
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r_inner_vec<F>(r: &[F], cfg: &F::Config) -> Result<Vec<F::Inner>, ArithErrors>
+fn build_eq_x_r_inner_vec<F>(r: &[F], cfg: &F::Config) -> Result<Vec<F::Inner>, ArithErrors>
 where
     F: PrimeField,
     F::Inner: Zero,
@@ -185,13 +192,6 @@ where
         // for the current step we will need
         // if x_0 = 0:   (1-r0) * [b_1, ..., b_k]
         // if x_0 = 1:   r0 * [b_1, ..., b_k]
-        // let mut res = vec![];
-        // for &b_i in buf.iter() {
-        //     let tmp = r[0] * b_i;
-        //     res.push(b_i - tmp);
-        //     res.push(tmp);
-        // }
-        // *buf = res;
 
         let mut bi = F::zero_with_cfg(cfg);
 

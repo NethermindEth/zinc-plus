@@ -240,12 +240,9 @@ where
 
     let (field_cfg, projecting_element) = {
         let mut transcript: PcsTranscript = transcript.clone().into();
-        let field_modulus = F::Inner::from_ref(
-            &transcript
-                .fs_transcript
-                .get_prime::<Zt::Fmod, Zt::PrimeTest>(),
-        );
-        let field_cfg = F::make_cfg(&field_modulus).unwrap();
+        let field_cfg = transcript
+            .fs_transcript
+            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
         let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
         let projecting_element: F = (&projecting_element).into_with_cfg(&field_cfg);
         (field_cfg, projecting_element)
@@ -256,14 +253,8 @@ where
     // Verify the evaluation is done correctly
     {
         // Widen up polynomial for evaluation
-        let poly = DenseMultilinearExtension {
-            evaluations: poly
-                .evaluations
-                .iter()
-                .map(Zt::Comb::from_ref)
-                .collect_vec(),
-            num_vars,
-        };
+        let poly: DenseMultilinearExtension<_> = poly.iter().map(Zt::Comb::from_ref).collect();
+
         let expected_eval = poly
             .evaluate(&point, Zero::zero())
             .expect("failed to evaluate polynomial");

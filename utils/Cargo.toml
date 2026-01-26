@@ -10,13 +10,12 @@ license.workspace = true
 bench = false
 
 [dependencies]
-ark-std = {workspace = true}
 crypto-primitives = { workspace = true }
 
 crypto-bigint = { workspace = true }
 num-traits = { workspace = true }
 thiserror = { workspace = true }
-rayon = {workspace = true, optional = true}
+rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

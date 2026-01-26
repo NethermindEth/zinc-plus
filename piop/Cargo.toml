@@ -12,8 +12,6 @@ bench = false
 [dependencies]
 crypto-primitives = { workspace = true }
 
-ark-std = { workspace = true }
-
 derive_more = { workspace = true }
 itertools = { workspace = true }
 thiserror = { workspace = true }
@@ -35,7 +33,7 @@ rand = { workspace = true }
 workspace = true
 
 [features]
-parallel = ["dep:rayon"]
+parallel = ["dep:rayon", "zinc-utils/parallel"]
 
 [[bench]]
 name = "sumcheck"

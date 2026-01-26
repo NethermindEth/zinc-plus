@@ -1,6 +1,5 @@
 mod utils;
 
-use ark_std::cfg_into_iter;
 use crypto_primitives::{FixedSemiring, FromWithConfig, PrimeField, Semiring};
 use derive_more::From;
 use itertools::Itertools;
@@ -20,6 +19,7 @@ use zinc_uair::{
     ideal::{DummyIdeal, Ideal, IdealCheck},
     ideal_collector::{IdealCollector, IdealCollectorError, collect_ideals},
 };
+use zinc_utils::cfg_into_iter;
 use zinc_utils::{
     from_ref::FromRef, inner_transparent_field::InnerTransparentField,
     projectable_to_field::ProjectableToField,

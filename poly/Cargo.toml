@@ -15,8 +15,6 @@ zinc-transcript = { workspace = true }
 zinc-uair = { workspace = true }
 zinc-utils = { workspace = true }
 
-ark-std = { workspace = true }
-
 itertools = { workspace = true }
 derive_more = { workspace = true }
 thiserror = { workspace = true }
@@ -35,7 +33,7 @@ proptest = { workspace = true }
 workspace = true
 
 [features]
-parallel = ["dep:rayon"]
+parallel = ["dep:rayon", "zinc-utils/parallel"]
 
 [[bench]]
 name = "nat_evaluation"

@@ -7,13 +7,12 @@ mod octet_reversal;
 
 pub mod params;
 
-use ark_std::{cfg_chunks_mut, cfg_into_iter};
 use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::{array, fmt::Debug};
-use zinc_utils::{add, from_ref::FromRef};
+use zinc_utils::{add, cfg_chunks_mut, cfg_into_iter, from_ref::FromRef};
 
 use butterfly::*;
 use octet_reversal::*;

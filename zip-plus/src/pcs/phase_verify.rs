@@ -37,18 +37,15 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
         Zt::Cw: ProjectableToField<F>,
     {
-        validate_input::<Zt, Lc, _>("verify", vp.num_vars, &[], [point_f])?;
+        validate_input::<Zt, Lc, _>("verify", vp.num_vars, &[], &[point_f])?;
 
         let mut transcript: PcsTranscript = proof.clone().into();
 
         let columns_opened = Self::verify_testing(vp, &comm.root, &mut transcript)?;
 
-        let field_modulus = F::Inner::from_ref(
-            &transcript
-                .fs_transcript
-                .get_prime::<Zt::Fmod, Zt::PrimeTest>(),
-        );
-        let field_cfg = F::make_cfg(&field_modulus)?;
+        let field_cfg = transcript
+            .fs_transcript
+            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
         let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
         let projecting_element: F = (&projecting_element).into_with_cfg(&field_cfg);
 
@@ -376,12 +373,9 @@ mod tests {
             let (pp, _comm_poly1, point_f, eval_f, proof_poly1) =
                 setup_full_protocol::<F, N, K, M>(num_vars);
 
-            let different_evals: Vec<_> = (20..(20 + (1 << num_vars))).map(Int::from).collect();
-            let poly2 = DenseMultilinearExtension::from_evaluations_vec(
-                num_vars,
-                different_evals,
-                Zero::zero(),
-            );
+            let poly2: DenseMultilinearExtension<_> =
+                (20..(20 + (1 << num_vars))).map(Int::from).collect();
+
             let (_, comm_poly2) = TestZip::commit(&pp, &poly2).unwrap();
 
             let result = TestZip::verify(&pp, &comm_poly2, &point_f, &eval_f, &proof_poly1);
@@ -456,12 +450,7 @@ mod tests {
 
         let (data, comm) = TestZip::commit(&pp, &mle1).unwrap();
 
-        let different_evals: Vec<_> = (20..=35).map(Int::from).collect();
-        let mle2 = DenseMultilinearExtension::from_evaluations_vec(
-            num_vars,
-            different_evals,
-            Zero::zero(),
-        );
+        let mle2: DenseMultilinearExtension<_> = (20..=35).map(Int::from).collect();
 
         let point: Vec<<Zt as ZipTypes>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
@@ -559,15 +548,13 @@ mod tests {
     #[test]
     fn verification_fails_if_proximity_check_is_invalid() {
         let poly_size = 8; // row_len=4, num_rows=2 -> proximity checks are active
-        let n = 3;
 
         let linear_code = C::new(poly_size);
         let pp = TestZip::setup(poly_size, linear_code);
 
-        let evaluations: Vec<_> = (0..poly_size as i32)
+        let mle: DenseMultilinearExtension<_> = (0..poly_size as i32)
             .map(<Zt as ZipTypes>::Eval::from)
             .collect();
-        let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations, Zero::zero());
 
         let (data, comm) = TestZip::commit(&pp, &mle).expect("commit should succeed");
 
@@ -646,10 +633,9 @@ mod tests {
         let poly_size = 1 << n;
         let linear_code: C = C::new(poly_size);
         let pp = TestZip::setup(poly_size, linear_code);
-        let evaluations: Vec<_> = (0..poly_size)
+        let mle: DenseMultilinearExtension<_> = (0..poly_size)
             .map(|_| <Zt as ZipTypes>::Eval::from(rng.random::<i8>()))
             .collect();
-        let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations, Zero::zero());
         let point: Vec<_> = (0..n)
             .map(|_| <Zt as ZipTypes>::Pt::random(&mut rng))
             .collect();
@@ -665,7 +651,7 @@ mod tests {
             .iter()
             .map(|v| v.into_with_cfg(&field_cfg))
             .collect_vec();
-        let eval_f = evaluate_in_field(&mle.evaluations, &point_f, &field_cfg);
+        let eval_f = evaluate_in_field(&mle, &point_f, &field_cfg);
         let verification_result = TestZip::verify(&pp, &comm, &point_f, &eval_f, &proof);
 
         assert!(verification_result.is_err());
@@ -677,9 +663,8 @@ mod tests {
         let linear_code = C::new(poly_size);
         let pp = TestZip::setup(poly_size, linear_code);
 
-        let evaluations: Vec<_> = (0..poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
-        let n = 3;
-        let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations, Zero::zero());
+        let mle: DenseMultilinearExtension<_> =
+            (0..poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
 
         let (data, comm) = TestZip::commit(&pp, &mle).expect("commit should succeed");
 
@@ -723,9 +708,7 @@ mod tests {
         let linear_code = C::new(poly_size);
         let pp = TestZip::setup(poly_size, linear_code);
 
-        let evaluations: Vec<_> = vec![Int::<INT_LIMBS>::ZERO; poly_size];
-        let n = 3;
-        let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations, Zero::zero());
+        let mle: DenseMultilinearExtension<_> = (0..poly_size).map(|_| Int::ZERO).collect();
 
         let (data, comm) = TestZip::commit(&pp, &mle).expect("commit should succeed");
 
@@ -754,9 +737,8 @@ mod tests {
         let linear_code = C::new(poly_size);
         let pp = TestZip::setup(poly_size, linear_code);
 
-        let evaluations: Vec<_> = (1..=poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
-        let mle =
-            DenseMultilinearExtension::from_evaluations_slice(num_vars, &evaluations, Zero::zero());
+        let mle: DenseMultilinearExtension<_> =
+            (1..=poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
 
         let (data, comm) = TestZip::commit(&pp, &mle).expect("commit should succeed");
 
@@ -843,9 +825,8 @@ mod tests {
         let linear_code = C::new(poly_size);
         let pp = TestZip::setup(poly_size, linear_code);
 
-        let evaluations: Vec<_> = (1..=poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
-        let n = 3;
-        let mle = DenseMultilinearExtension::from_evaluations_slice(n, &evaluations, Zero::zero());
+        let mle: DenseMultilinearExtension<_> =
+            (1..=poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
 
         let (data, comm) = TestZip::commit(&pp, &mle).expect("commit should succeed");
 
@@ -894,7 +875,7 @@ mod tests {
 
             // Same point choice as the bench
             let point = vec![1i64; P].iter().map(|v| v.into()).collect_vec();
-            let eval = *mle.evaluations.last().expect("nonempty evals");
+            let eval = *mle.last().expect("nonempty evals");
 
             // Prover produces a proof once (exactly as in the bench)
             let test_transcript = TestZip::test(&pp, &mle, &data).unwrap();

@@ -4,13 +4,12 @@
 use rayon::prelude::*;
 use std::marker::PhantomData;
 
-use ark_std::cfg_into_iter;
 use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, PrimeField, Semiring};
 use thiserror::Error;
 use zinc_poly::mle::{DenseMultilinearExtension, dense::project_coeffs};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_utils::{
-    from_ref::FromRef, inner_transparent_field::InnerTransparentField,
+    cfg_into_iter, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
     projectable_to_field::ProjectableToField,
 };
 
@@ -39,7 +38,7 @@ impl<F: PrimeField, R> RFProverState<F, R> {
 
 impl<F: FromPrimitiveWithConfig, R: Semiring + ProjectableToField<F>> RFSumcheck<F, R> {
     /// Random field sumcheck prover.
-    /// Samples a random field element, projects the input mles
+    /// Samples a random field element, projects the input MLEs
     /// and performs the sumcheck proving algorithm.
     ///
     /// # Arguments
@@ -119,7 +118,9 @@ impl<F: FromPrimitiveWithConfig, R: Semiring + ProjectableToField<F>> RFSumcheck
     where
         F::Inner: ConstTranscribable + ConstIntSemiring,
     {
-        // Simulate getting the projecting element.
+        // Simulate getting the projecting element
+        // Verifier does not use that element as it verifies only over RC,
+        // but we keep it here for stability of FS sampling.
         let _ = transcript.get_field_challenge::<F>(&field_cfg);
 
         let subclaim = MLSumcheck::verify_as_subprotocol(
@@ -172,7 +173,7 @@ mod tests {
         let b: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
         let c: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
 
-        let nvars = ark_std::log2(witness_size) as usize;
+        let nvars = zinc_poly::utils::log2(witness_size) as usize;
 
         let a: DenseMultilinearExtension<BinaryPoly<32>> =
             DenseMultilinearExtension::from_evaluations_vec(

@@ -553,7 +553,7 @@ where
     #![allow(clippy::arithmetic_side_effects)] // False alert, field operations are safe
     fn prepare_projection(
         sampled_value: &F,
-    ) -> impl Fn(&DensePolynomial<R, DEGREE_PLUS_ONE>) -> F + 'static {
+    ) -> impl Fn(&DensePolynomial<R, DEGREE_PLUS_ONE>) -> F + Send + Sync + 'static {
         let sampled_value = sampled_value.clone();
         let field_cfg = sampled_value.cfg().clone();
 
