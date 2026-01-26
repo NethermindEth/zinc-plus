@@ -4,10 +4,6 @@
 #![allow(non_local_definitions)]
 #![allow(clippy::eq_op, clippy::arithmetic_side_effects, clippy::unwrap_used)]
 
-use ark_std::{
-    hint::black_box,
-    time::{Duration, Instant},
-};
 use criterion::{BenchmarkGroup, measurement::WallTime};
 use crypto_bigint::U64;
 use crypto_primitives::{
@@ -17,6 +13,10 @@ use crypto_primitives::{
 use itertools::Itertools;
 use num_traits::One;
 use rand::{distr::StandardUniform, prelude::*};
+use std::{
+    hint::black_box,
+    time::{Duration, Instant},
+};
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{from_ref::FromRef, named::Named, projectable_to_field::ProjectableToField};

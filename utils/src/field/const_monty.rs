@@ -3,9 +3,11 @@ use crypto_primitives::{
     crypto_bigint_const_monty::ConstMontyField, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
 };
 use num_traits::CheckedMul;
+use std::ops::MulAssign;
 
 use crate::{
-    from_ref::FromRef, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
+    from_ref::FromRef, inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
+    projectable_to_field::ProjectableToField,
 };
 
 impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> MulByScalar<&Self>
@@ -54,6 +56,30 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize>
     ) -> impl Fn(&Self) -> ConstMontyField<Mod, LIMBS> + 'static {
         // No need to read anything
         |value: &Int<LIMBS2>| value.into()
+    }
+}
+
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> InnerTransparentField
+    for ConstMontyField<Mod, LIMBS>
+{
+    fn add_inner(lhs: &Self::Inner, rhs: &Self::Inner, _config: &Self::Config) -> Self::Inner {
+        Uint::new(
+            lhs.inner()
+                .add_mod(rhs.inner(), Mod::PARAMS.modulus().as_nz_ref()),
+        )
+    }
+
+    fn sub_inner(lhs: &Self::Inner, rhs: &Self::Inner, _config: &Self::Config) -> Self::Inner {
+        Uint::new(
+            lhs.inner()
+                .sub_mod(rhs.inner(), Mod::PARAMS.modulus().as_nz_ref()),
+        )
+    }
+
+    fn mul_assign_by_inner(&mut self, rhs: &Self::Inner) {
+        let rhs: Self = Self::new_unchecked(*rhs);
+
+        self.mul_assign(rhs);
     }
 }
 
@@ -152,6 +178,18 @@ mod tests {
             let a: F = F::from(x);
             let b: F = F::from(&x);
             prop_assert_eq!(a, b);
+        }
+
+        #[test]
+        fn prop_inner_ops_match_normal_ops((x, y) in any::<(u128, u128)>()) {
+            let a: F = x.into();
+            let b: F = y.into();
+            prop_assert_eq!(F::add_inner(a.inner(), b.inner(), &()), (a + b).into_inner());
+            prop_assert_eq!(F::sub_inner(a.inner(), b.inner(), &()), (a - b).into_inner());
+
+            let mut res = a;
+            res.mul_assign_by_inner(b.inner());
+            prop_assert_eq!(res, a * b);
         }
     }
 }

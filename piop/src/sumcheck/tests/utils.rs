@@ -1,9 +1,9 @@
-use ark_std::{end_timer, start_timer, vec::Vec};
+use std::ops::Range;
+
 use crypto_bigint::Random;
 use crypto_primitives::PrimeField;
 use itertools::Itertools;
 use rand::{Rng, RngCore};
-use std::ops::Range;
 use zinc_poly::{mle::DenseMultilinearExtension, utils::ArithErrors};
 
 #[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
@@ -15,14 +15,14 @@ pub(crate) fn rand_poly<F: PrimeField + Random, Rn: RngCore>(
     config: &F::Config,
 ) -> Result<
     (
-        (Vec<DenseMultilinearExtension<F>>, usize),
+        (Vec<DenseMultilinearExtension<F::Inner>>, usize),
         Vec<(F, Vec<usize>)>,
         F,
     ),
     ArithErrors,
 > {
     let mut sum = F::zero_with_cfg(config);
-    let mut mles = vec![];
+    let mut mles: Vec<DenseMultilinearExtension<F>> = vec![];
     let mut products = Vec::with_capacity(num_products);
     let mut degree = 0;
     let mut current_mle_index = 0;
@@ -40,6 +40,18 @@ pub(crate) fn rand_poly<F: PrimeField + Random, Rn: RngCore>(
         products.push((coefficient, indices));
         current_mle_index += num_multiplicands;
     }
+
+    let mles = mles
+        .into_iter()
+        .map(|mle| DenseMultilinearExtension {
+            evaluations: mle
+                .evaluations
+                .into_iter()
+                .map(|x| x.inner().clone())
+                .collect(),
+            num_vars: mle.num_vars,
+        })
+        .collect();
 
     Ok(((mles, degree), products, sum))
 }
@@ -75,7 +87,6 @@ pub fn random_mle_list<F: PrimeField + Random, Rn: RngCore>(
     rng: &mut Rn,
     config: F::Config,
 ) -> (Vec<DenseMultilinearExtension<F>>, F) {
-    let start = start_timer!(|| "sample random mle list");
     let mut multiplicands = (0..degree)
         .map(|_| Vec::with_capacity(1 << nv))
         .collect_vec();
@@ -97,6 +108,5 @@ pub fn random_mle_list<F: PrimeField + Random, Rn: RngCore>(
         .map(|x| DenseMultilinearExtension::from_evaluations_vec(nv, x, F::zero_with_cfg(&config)))
         .collect();
 
-    end_timer!(start);
     (list, sum)
 }

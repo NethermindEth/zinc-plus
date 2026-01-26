@@ -1,12 +1,12 @@
 mod utils;
 
-use ark_std::vec::Vec;
 use crypto_bigint::{U128, const_monty_params};
-use crypto_primitives::crypto_bigint_const_monty::ConstMontyField;
-use num_traits::Zero;
+use crypto_primitives::{Field, crypto_bigint_const_monty::ConstMontyField};
+use num_traits::{ConstOne, ConstZero, Zero};
 use rand::RngCore;
-use zinc_poly::mle::DenseMultilinearExtension;
+use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
 use zinc_transcript::{KeccakTranscript, traits::Transcript};
+use zinc_utils::inner_transparent_field::InnerTransparentField;
 
 use crate::sumcheck::{
     prover::ProverState,
@@ -99,7 +99,7 @@ fn verifier_rejects_proof_with_incorrect_claimed_sum() {
 
     assert!(matches!(
         res,
-        Err(super::SumCheckError::SumCheckFailed(_, _))
+        Err(super::SumCheckError::SumCheckFailed(_, _, _))
     ));
 }
 
@@ -139,7 +139,7 @@ fn verifier_rejects_proof_with_tampered_prover_message() {
 
     assert!(matches!(
         res,
-        Err(super::SumCheckError::SumCheckFailed(_, _))
+        Err(super::SumCheckError::SumCheckFailed(_, _, _))
     ));
 }
 
@@ -235,8 +235,8 @@ fn different_polynomials_produce_different_proofs() {
     );
 
     let mut poly_mles2 = poly_mles1;
-    let one: F = F::from(1u32);
-    poly_mles2[0].evaluations[0] += one;
+    let one: F = F::ONE;
+    poly_mles2[0].evaluations[0] = F::add_inner(&poly_mles2[0].evaluations[0], one.inner(), &());
 
     let comb_fn2 = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products1, ()) };
 
@@ -259,14 +259,18 @@ fn sumcheck_with_zero_polynomial() {
 
     let poly_degree = 2;
     let num_mles = 2;
-    let zero_evals = vec![F::zero(); 1 << num_vars];
-    let poly_mles: Vec<DenseMultilinearExtension<F>> = (0..num_mles)
+    let zero_evals = vec![<F as Field>::Inner::ZERO; 1 << num_vars];
+    let poly_mles: Vec<DenseMultilinearExtension<<F as Field>::Inner>> = (0..num_mles)
         .map(|_| {
-            DenseMultilinearExtension::from_evaluations_vec(num_vars, zero_evals.clone(), F::zero())
+            DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                zero_evals.clone(),
+                <F as Field>::Inner::ZERO,
+            )
         })
         .collect();
 
-    let sum = F::zero();
+    let sum = F::ZERO;
 
     let comb_fn = |vals: &[F]| -> F { vals.iter().product() };
 
@@ -301,14 +305,14 @@ fn sumcheck_with_constant_polynomial() {
 
     let poly_degree = 2;
     let num_mles = 2;
-    let one: F = F::from(1u32);
-    let const_evals = vec![one; 1 << num_vars];
-    let poly_mles: Vec<DenseMultilinearExtension<F>> = (0..num_mles)
+    let one: F = F::ONE;
+    let const_evals = vec![*one.inner(); 1 << num_vars];
+    let poly_mles: Vec<DenseMultilinearExtension<<F as Field>::Inner>> = (0..num_mles)
         .map(|_| {
             DenseMultilinearExtension::from_evaluations_vec(
                 num_vars,
                 const_evals.clone(),
-                F::zero(),
+                <F as Field>::Inner::ZERO,
             )
         })
         .collect();
@@ -424,16 +428,16 @@ fn prover_panics_if_round_exceeds_num_vars() {
     let num_vars = 3;
 
     let mut prover_state = ProverState {
-        randomness: vec![F::zero(); num_vars],
+        randomness: vec![F::ZERO; num_vars],
         mles: Vec::new(),
         num_vars,
         max_degree: 2,
         round: num_vars, // Set to the last valid round
     };
 
-    let comb_fn = |_vals: &[F]| F::zero();
+    let comb_fn = |_vals: &[F]| F::ZERO;
 
-    let verifier_msg = Some(F::zero());
+    let verifier_msg = Some(F::ZERO);
 
     prover_state.prove_round(&verifier_msg, comb_fn, &());
 }
@@ -482,11 +486,11 @@ fn verifier_errors_on_incomplete_proof() {
 fn prover_handles_empty_mle_list() {
     let num_vars = 3;
 
-    let poly_mles: Vec<DenseMultilinearExtension<F>> = Vec::new();
+    let poly_mles: Vec<DenseMultilinearExtension<<F as Field>::Inner>> = Vec::new();
     let poly_degree = 0;
-    let sum = F::zero();
+    let sum = F::ZERO;
 
-    let comb_fn = |_vals: &[F]| -> F { F::zero() };
+    let comb_fn = |_vals: &[F]| -> F { F::ZERO };
 
     let mut transcript = KeccakTranscript::default();
     let (proof, _) = MLSumcheck::prove_as_subprotocol(
@@ -572,7 +576,7 @@ fn verifier_produces_correct_subclaim() {
 
     let mle_evals_at_point: Vec<F> = original_mles
         .iter()
-        .map(|mle| mle.evaluate(&subclaim.point, F::zero()).unwrap())
+        .map(|mle| mle.evaluate_with_config(&subclaim.point, &()).unwrap())
         .collect();
 
     let manual_eval = rand_poly_comb_fn(&mle_evals_at_point, &products_for_verification, ());

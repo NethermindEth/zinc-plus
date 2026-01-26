@@ -9,6 +9,7 @@ use crypto_primitives::{
 };
 use itertools::Itertools;
 use zinc_primality::PrimalityTest;
+use zinc_utils::from_ref::FromRef;
 
 /// Trait for types that can be transcribed to and from a byte representation.
 /// Byte order is not specified, but it must be portable across platforms.
@@ -92,6 +93,18 @@ pub trait Transcript {
     }
 
     fn get_prime<R: ConstIntSemiring + ConstTranscribable, T: PrimalityTest<R>>(&mut self) -> R;
+
+    fn get_random_field_cfg<F, FMod, T>(&mut self) -> F::Config
+    where
+        F: PrimeField,
+        FMod: ConstTranscribable + ConstIntSemiring,
+        F::Inner: FromRef<FMod>,
+        T: PrimalityTest<FMod>,
+    {
+        let prime = self.get_prime::<FMod, T>();
+
+        F::make_cfg(&F::Inner::from_ref(&prime)).expect("prime is guaranteed to be prime")
+    }
 
     /// Absorbs a byte slice into the hash sponge.
     fn absorb(&mut self, v: &[u8]);

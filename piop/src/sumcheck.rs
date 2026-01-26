@@ -1,12 +1,12 @@
-use std::ops::Add;
+use num_traits::Zero;
 
-use ark_std::{boxed::Box, marker::PhantomData, vec::Vec};
 use crypto_primitives::FromPrimitiveWithConfig;
 use prover::ProverState;
+use std::{marker::PhantomData, ops::Add};
 use thiserror::Error;
 use zinc_poly::{EvaluationError, mle::DenseMultilinearExtension, utils::ArithErrors};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_utils::mul_by_scalar::MulByScalar;
+use zinc_utils::inner_transparent_field::InnerTransparentField;
 
 use crate::sumcheck::{prover::ProverMsg, verifier::VerifierState};
 
@@ -88,15 +88,15 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
     /// * Panics if the number of variables is `0`.
     pub fn prove_as_subprotocol(
         transcript: &mut impl Transcript,
-        mles: Vec<DenseMultilinearExtension<F>>,
+        mles: Vec<DenseMultilinearExtension<F::Inner>>,
         nvars: usize,
         degree: usize,
         comb_fn: impl Fn(&[F]) -> F + Send + Sync,
         config: F::Config,
     ) -> (SumcheckProof<F>, ProverState<F>)
     where
-        F::Inner: ConstTranscribable,
-        for<'a> F: MulByScalar<&'a F>,
+        F::Inner: ConstTranscribable + Zero,
+        F: InnerTransparentField,
     {
         if nvars == 0 {
             panic!("Attempt to prove a constant")
@@ -231,8 +231,8 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
 pub enum SumCheckError<F> {
     #[error("univariate polynomial evaluation error")]
     EvaluationError(ArithErrors),
-    #[error("incorrect sumcheck sum. Expected `{0}`. Received `{1}`")]
-    SumCheckFailed(Box<F>, Box<F>),
+    #[error("incorrect sumcheck sum at round {0}. Expected `{1}`. Received `{2}`")]
+    SumCheckFailed(usize, Box<F>, Box<F>),
     #[error("max degree exceeded")]
     MaxDegreeExceeded,
     #[error("invalid proof length: expected {expected}, got {got}")]
