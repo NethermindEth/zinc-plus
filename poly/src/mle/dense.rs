@@ -97,7 +97,7 @@ impl<R: Default> DenseMultilinearExtension<R> {
 
         evaluations.resize_with(len.next_power_of_two(), Default::default);
 
-        let num_vars = ark_std::log2(evaluations.len()) as usize;
+        let num_vars = crate::utils::log2(evaluations.len()) as usize;
 
         Self {
             evaluations,

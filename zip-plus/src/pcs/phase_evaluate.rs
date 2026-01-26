@@ -9,7 +9,6 @@ use crate::{
     pcs_transcript::PcsTranscript,
     utils::combine_rows,
 };
-use ark_std::cfg_iter;
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
 #[cfg(feature = "parallel")]
@@ -17,6 +16,7 @@ use rayon::prelude::*;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
+    cfg_iter,
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProductUnchecked},
     mul_by_scalar::MulByScalar,
