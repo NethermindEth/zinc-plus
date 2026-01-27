@@ -9,18 +9,18 @@ use crate::{
     },
     pcs_transcript::PcsTranscript,
 };
-use zinc_utils::cfg_iter_mut;
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
-    add,
+    add, cfg_iter_mut,
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProductUnchecked},
     mul_by_scalar::MulByScalar,
     projectable_to_field::ProjectableToField,
 };
+
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 

@@ -12,8 +12,7 @@ use crate::{
 use num_traits::{CheckedAdd, ConstOne, ConstZero, Zero};
 use zinc_poly::{Polynomial, mle::DenseMultilinearExtension};
 use zinc_transcript::traits::Transcript;
-use zinc_utils::{add, inner_product::InnerProduct, mul_by_scalar::MulByScalar};
-use zinc_utils::cfg_iter_mut;
+use zinc_utils::{add, cfg_iter_mut, inner_product::InnerProduct, mul_by_scalar::MulByScalar};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -63,7 +62,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 Zt::CombR::ZERO
             );
 
-            transcript.write_const_many(&combined_row, combined_row.len())?;
+            transcript.write_const_many(&combined_row)?;
             // std::hint::black_box(&combined_row);
         }
 
@@ -84,7 +83,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let column_values = commit_hint.cw_matrix.as_rows().map(|row| &row[column]);
 
         // Write the elements in the squeezed column to the shared transcript
-        transcript.write_const_many(column_values, commit_hint.cw_matrix.num_rows)?;
+        transcript.write_const_many_iter(column_values, commit_hint.cw_matrix.num_rows)?;
 
         ColumnOpening::open_at_column(column, commit_hint, transcript)
             .map_err(|_| ZipError::InvalidPcsOpen("Failed to open merkle tree".into()))?;

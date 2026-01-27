@@ -1,3 +1,4 @@
+use crate::{ZipError, merkle::MerkleProof};
 use crypto_primitives::PrimeField;
 use itertools::Itertools;
 use std::io::{Cursor, ErrorKind, Read, Write};
@@ -5,9 +6,10 @@ use zinc_transcript::{
     KeccakTranscript,
     traits::{ConstTranscribable, Transcribable, Transcript},
 };
-use zinc_utils::rem;
+use zinc_utils::{cfg_chunks_mut, cfg_iter, rem};
 
-use crate::{ZipError, merkle::MerkleProof};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 /// A transcript for Polynomial Commitment Scheme (PCS) operations.
 /// Manages both Fiat-Shamir transformations and serialization/deserialization
@@ -120,19 +122,54 @@ impl PcsTranscript {
         Ok(())
     }
 
-    pub fn write_const_many<'a, T: ConstTranscribable + 'a, I>(
+    pub fn write_const_many<T: ConstTranscribable + Send + Sync>(
+        &mut self,
+        vs: &[T],
+    ) -> Result<(), ZipError> {
+        let inner = self.stream.get_mut();
+        let old_len = inner.len();
+        let new_len = old_len + vs.len() * T::NUM_BYTES;
+        inner.resize(new_len, 0_u8);
+
+        cfg_chunks_mut!(&mut inner[old_len..], T::NUM_BYTES)
+            .zip(cfg_iter!(vs))
+            .for_each(|(chunk, v)| v.write_transcription_bytes(chunk));
+
+        self.stream.set_position(new_len as u64);
+        Ok(())
+    }
+
+    pub fn write_const_many_iter<'a, T, I>(
         &mut self,
         vs: I,
         vs_len: usize,
     ) -> Result<(), ZipError>
     where
+        T: ConstTranscribable + Send + Sync + 'a,
         I: IntoIterator<Item = &'a T>,
     {
-        self.stream.get_mut().reserve(vs_len * T::NUM_BYTES);
-        for v in vs {
-            self.write_const(v)?;
-        }
+        let inner = self.stream.get_mut();
+        let old_len = inner.len();
+        let new_len = old_len + vs_len * T::NUM_BYTES;
+        inner.resize(new_len, 0_u8);
 
+        // Guaranteeing every iterator is parallel is not very convenient, so use this
+        // workaround to collect the iterator into a Vec if the parallel feature
+        // is enabled.
+
+        #[cfg(feature = "parallel")]
+        let vs = vs.into_iter().collect_vec();
+        #[cfg(feature = "parallel")]
+        let vs = cfg_iter!(vs);
+
+        // #[cfg(not(feature = "parallel"))]
+        // let vs = vs.into_iter();
+
+        cfg_chunks_mut!(&mut inner[old_len..], T::NUM_BYTES)
+            .zip(vs)
+            .for_each(|(chunk, v)| v.write_transcription_bytes(chunk));
+
+        self.stream.set_position(new_len as u64);
         Ok(())
     }
 
@@ -149,10 +186,7 @@ impl PcsTranscript {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    fn write_usize(
-        &mut self,
-        value: usize,
-    ) -> Result<(), ZipError> {
+    fn write_usize(&mut self, value: usize) -> Result<(), ZipError> {
         let value_u64: u64 = value.try_into().map_err(|_err| {
             ZipError::Transcript(
                 ErrorKind::Unsupported,
@@ -203,7 +237,7 @@ impl PcsTranscript {
         self.write_usize(proof.siblings.len())?;
 
         // Write each element of the merkle path
-        self.write_const_many(&proof.siblings, proof.siblings.len())?;
+        self.write_const_many(&proof.siblings)?;
         Ok(())
     }
 }
@@ -247,7 +281,7 @@ mod tests {
         ($write_fn:ident, $read_fn:ident, $original_values:expr, $assert_msg:expr) => {{
             let mut transcript = PcsTranscript::new();
             transcript
-                .$write_fn(&$original_values, $original_values.len())
+                .$write_fn(&$original_values)
                 .expect(&format!("Failed to write {}", $assert_msg));
             let proof: ZipPlusProof = transcript.into();
             let mut transcript: PcsTranscript = proof.into();

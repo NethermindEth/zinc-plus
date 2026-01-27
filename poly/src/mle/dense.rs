@@ -539,7 +539,7 @@ mod tests {
         assert!(evals.iter().enumerate().all(|(i, v)| if i == 0 || i == 5 {
             true
         } else {
-            v.is_zero_with_cfg(&cfg)
+            F::is_zero(v)
         }));
     }
 

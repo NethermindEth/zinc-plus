@@ -25,7 +25,8 @@ use rayon::prelude::*;
 /// - `coeffs`: Coefficients applied to each row.
 /// - `evals_iter`: Iterator over flattened evaluations arranged row-wise.
 /// - `convert_eval`: Function to convert each evaluation to the desired type.
-///    Should be just `|eval| Ok::<_, ZipError>(eval)` if no conversion is needed.
+///   Should be just `|eval| Ok::<_, ZipError>(eval)` if no conversion is
+///   needed.
 /// - `add_scaled`: Function to add a scaled evaluation to an accumulator.
 /// - `row_len`: Number of columns per evaluation row.
 /// - `zero`: Additive neutral element of `El`.
@@ -80,8 +81,7 @@ pub(super) fn shuffle_seeded<T>(slice: &mut [T], seed: u64) {
 mod test {
     use super::*;
     use crate::ZipError;
-    use zinc_utils::cfg_iter_mut;
-    use zinc_utils::mul_by_scalar::MulByScalar;
+    use zinc_utils::{cfg_iter_mut, mul_by_scalar::MulByScalar};
 
     #[test]
     fn test_basic_combination() -> Result<(), ZipError> {

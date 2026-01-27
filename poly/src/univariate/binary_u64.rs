@@ -17,7 +17,10 @@ use std::{
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
     from_ref::FromRef,
-    inner_product::{BooleanInnerProductUncheckedAdd, InnerProduct, InnerProductError},
+    inner_product::{
+        BooleanInnerProductCheckedAdd, BooleanInnerProductUncheckedAdd, InnerProduct,
+        InnerProductError,
+    },
     mul_by_scalar::WideningMulByScalar,
     named::Named,
     projectable_to_field::ProjectableToField,
@@ -326,13 +329,14 @@ impl<const DEGREE_PLUS_ONE: usize> From<&BinaryU64Poly<DEGREE_PLUS_ONE>>
     }
 }
 
-pub struct BinaryU64PolyInnerProduct<R, const DEGREE_PLUS_ONE: usize>(PhantomData<(R)>);
+pub struct BinaryU64PolyInnerProduct<R, I, const DEGREE_PLUS_ONE: usize>(PhantomData<(R, I)>);
 
-impl<Rhs, Out, const DEGREE_PLUS_ONE: usize>
+impl<Rhs, I, Out, const DEGREE_PLUS_ONE: usize>
     InnerProduct<BinaryU64Poly<DEGREE_PLUS_ONE>, Rhs, Out>
-    for BinaryU64PolyInnerProduct<Rhs, DEGREE_PLUS_ONE>
+    for BinaryU64PolyInnerProduct<Rhs, I, DEGREE_PLUS_ONE>
 where
     Out: FromRef<Rhs> + for<'a> Add<&'a Out, Output = Out>,
+    I: InnerProduct<[Boolean], Rhs, Out>, // Unused!
 {
     #[inline(always)]
     fn inner_product(
@@ -388,7 +392,7 @@ where
         };
 
         move |poly: &BinaryU64Poly<DEGREE_PLUS_ONE>| {
-            BinaryU64PolyInnerProduct::<_, _>::inner_product(
+            BinaryU64PolyInnerProduct::<_, BooleanInnerProductCheckedAdd, _>::inner_product(
                 poly,
                 &r_powers,
                 F::zero_with_cfg(&field_cfg),
