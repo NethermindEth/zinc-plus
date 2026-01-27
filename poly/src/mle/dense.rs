@@ -1,3 +1,5 @@
+mod try_collect_dense_mle;
+
 use core::ops::{Add, AddAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign};
 use num_traits::Zero;
 #[cfg(feature = "parallel")]
@@ -20,6 +22,8 @@ use zinc_utils::{
 };
 
 use super::MultilinearExtensionWithConfig;
+
+pub use try_collect_dense_mle::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DenseMultilinearExtension<T> {
