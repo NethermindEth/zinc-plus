@@ -122,30 +122,26 @@ impl PcsTranscript {
         Ok(())
     }
 
-    pub fn write_const_many<T: ConstTranscribable + Send + Sync>(
+    // Note(alex):
+    // Parallelizing this greatly degrades performance rather than improving it.
+    // Maybe we should think of breakpoints for parallelization later.
+    pub fn write_const_many<T: ConstTranscribable>(
         &mut self,
         vs: &[T],
     ) -> Result<(), ZipError> {
-        let inner = self.stream.get_mut();
-        let old_len = inner.len();
-        let new_len = old_len + vs.len() * T::NUM_BYTES;
-        inner.resize(new_len, 0_u8);
-
-        cfg_chunks_mut!(&mut inner[old_len..], T::NUM_BYTES)
-            .zip(cfg_iter!(vs))
-            .for_each(|(chunk, v)| v.write_transcription_bytes(chunk));
-
-        self.stream.set_position(new_len as u64);
-        Ok(())
+        self.write_const_many_iter(vs.iter(), vs.len())
     }
 
+    // Note(alex):
+    // Parallelizing this greatly degrades performance rather than improving it.
+    // Maybe we should think of breakpoints for parallelization later.
     pub fn write_const_many_iter<'a, T, I>(
         &mut self,
         vs: I,
         vs_len: usize,
     ) -> Result<(), ZipError>
     where
-        T: ConstTranscribable + Send + Sync + 'a,
+        T: ConstTranscribable + 'a,
         I: IntoIterator<Item = &'a T>,
     {
         let inner = self.stream.get_mut();
@@ -153,19 +149,7 @@ impl PcsTranscript {
         let new_len = old_len + vs_len * T::NUM_BYTES;
         inner.resize(new_len, 0_u8);
 
-        // Guaranteeing every iterator is parallel is not very convenient, so use this
-        // workaround to collect the iterator into a Vec if the parallel feature
-        // is enabled.
-
-        #[cfg(feature = "parallel")]
-        let vs = vs.into_iter().collect_vec();
-        #[cfg(feature = "parallel")]
-        let vs = cfg_iter!(vs);
-
-        // #[cfg(not(feature = "parallel"))]
-        // let vs = vs.into_iter();
-
-        cfg_chunks_mut!(&mut inner[old_len..], T::NUM_BYTES)
+        inner[old_len..].chunks_mut(T::NUM_BYTES)
             .zip(vs)
             .for_each(|(chunk, v)| v.write_transcription_bytes(chunk));
 
