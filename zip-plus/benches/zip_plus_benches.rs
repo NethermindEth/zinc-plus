@@ -96,15 +96,11 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
 // fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
 //     let mut group = c.benchmark_group("Zip+ IPRS");
 //
-//     do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, 32>>(&mut
-// group);     do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 1,
-// 64>>(&mut group);
+//     do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, 32>>(&mut group);
+//     do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 1, 64>>(&mut group);
 //
 //     group.finish();
 // }
 
-criterion_group!(
-    benches,
-    zip_plus_benchmarks_raa /* , zip_plus_benchmarks_iprs */
-);
+criterion_group!(benches, zip_plus_benchmarks_raa/* , zip_plus_benchmarks_iprs */);
 criterion_main!(benches);

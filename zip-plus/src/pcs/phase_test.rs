@@ -64,6 +64,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             );
 
             transcript.write_const_many(&combined_row)?;
+            // std::hint::black_box(&combined_row);
         }
 
         // Open merkle tree for each column drawn
