@@ -111,7 +111,6 @@ impl<F: FromPrimitiveWithConfig, R: Semiring + ProjectableToField<F>> RFSumcheck
         transcript: &mut impl Transcript,
         num_vars: usize,
         degree: usize,
-        claimed_sum: F,
         proof: &RFSumcheckProof<F, R>,
         field_cfg: F::Config,
     ) -> Result<SubClaim<F>, RFSumcheckError<F>>
@@ -123,14 +122,8 @@ impl<F: FromPrimitiveWithConfig, R: Semiring + ProjectableToField<F>> RFSumcheck
         // but we keep it here for stability of FS sampling.
         let _ = transcript.get_field_challenge::<F>(&field_cfg);
 
-        let subclaim = MLSumcheck::verify_as_subprotocol(
-            transcript,
-            num_vars,
-            degree,
-            claimed_sum,
-            &proof.0,
-            field_cfg,
-        )?;
+        let subclaim =
+            MLSumcheck::verify_as_subprotocol(transcript, num_vars, degree, &proof.0, field_cfg)?;
 
         Ok(subclaim)
     }
@@ -219,7 +212,6 @@ mod tests {
                 &mut transcript,
                 nvars,
                 3,
-                proof.0.extract_sum(),
                 &proof,
                 field_cfg,
             )

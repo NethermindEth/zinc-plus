@@ -114,7 +114,6 @@ pub fn bench_simple_product<F, const LIMBS: usize>(
                             &mut transcript,
                             nvars,
                             3,
-                            proof.0.extract_sum(),
                             &proof,
                             field_cfg,
                         )
