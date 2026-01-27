@@ -71,7 +71,7 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
     for TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>
 {
     const NUM_COLUMN_OPENINGS: usize = 650;
-    type Eval = BinaryPoly;
+    type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
     type Cw = DensePolynomial<i32, DEGREE_PLUS_ONE>;
     type Fmod = Uint<K>;
     type PrimeTest = MillerRabin;
@@ -80,7 +80,7 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
     type CombR = Int<M>;
     type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
     type EvalDotChal =
-        BinaryPolyInnerProduct<Self::Chal, BooleanInnerProductCheckedAdd>;
+        BinaryPolyInnerProduct<Self::Chal, BooleanInnerProductCheckedAdd, DEGREE_PLUS_ONE>;
     type CombDotChal = DensePolyInnerProduct<
         Self::CombR,
         Self::Chal,

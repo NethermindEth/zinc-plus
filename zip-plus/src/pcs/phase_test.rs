@@ -9,11 +9,11 @@ use crate::{
     },
     pcs_transcript::PcsTranscript,
 };
-use ark_std::cfg_iter_mut;
 use num_traits::{CheckedAdd, ConstOne, ConstZero, Zero};
 use zinc_poly::{Polynomial, mle::DenseMultilinearExtension};
 use zinc_transcript::traits::Transcript;
 use zinc_utils::{add, inner_product::InnerProduct, mul_by_scalar::MulByScalar};
+use zinc_utils::cfg_iter_mut;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;

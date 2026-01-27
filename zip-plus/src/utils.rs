@@ -7,9 +7,6 @@ use zinc_utils::{cfg_iter_mut, mul_by_scalar::MulByScalar};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use rand::{rngs::StdRng, seq::SliceRandom};
-use rand_core::SeedableRng;
-
 /// Computes a linear combination of multiple evaluation rows into a single
 /// combined row.
 ///
@@ -83,7 +80,7 @@ pub(super) fn shuffle_seeded<T>(slice: &mut [T], seed: u64) {
 mod test {
     use super::*;
     use crate::ZipError;
-    use ark_std::cfg_iter_mut;
+    use zinc_utils::cfg_iter_mut;
     use zinc_utils::mul_by_scalar::MulByScalar;
 
     #[test]

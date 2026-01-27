@@ -326,13 +326,13 @@ impl<const DEGREE_PLUS_ONE: usize> From<&BinaryU64Poly<DEGREE_PLUS_ONE>>
     }
 }
 
-pub struct BinaryU64PolyInnerProduct<R, I, const DEGREE_PLUS_ONE: usize>(PhantomData<(R, I)>);
+pub struct BinaryU64PolyInnerProduct<R, const DEGREE_PLUS_ONE: usize>(PhantomData<(R)>);
 
-impl<Rhs, I, Out, const DEGREE_PLUS_ONE: usize>
+impl<Rhs, Out, const DEGREE_PLUS_ONE: usize>
     InnerProduct<BinaryU64Poly<DEGREE_PLUS_ONE>, Rhs, Out>
-    for BinaryU64PolyInnerProduct<Rhs, I, DEGREE_PLUS_ONE>
+    for BinaryU64PolyInnerProduct<Rhs, DEGREE_PLUS_ONE>
 where
-    I: InnerProduct<[Boolean], Rhs, Out>,
+    Out: FromRef<Rhs> + for<'a> Add<&'a Out, Output = Out>,
 {
     #[inline(always)]
     fn inner_product(
@@ -340,11 +340,28 @@ where
         rhs: &[Rhs],
         zero: Out,
     ) -> Result<Out, InnerProductError> {
-        let lhs = DensePolynomial::<Boolean, DEGREE_PLUS_ONE>::new(array::from_fn(|i| {
-            Boolean::new((lhs.0 & (1 << i)) != 0)
-        })
-            as [Boolean; DEGREE_PLUS_ONE]); // idk 
-        I::inner_product(&lhs.coeffs, rhs, zero)
+        // let lhs = DensePolynomial::<Boolean, DEGREE_PLUS_ONE>::new(array::from_fn(|i| {
+        //     Boolean::new((lhs.0 & (1 << i)) != 0)
+        // })
+        //     as [Boolean; DEGREE_PLUS_ONE]); // idk
+        // I::inner_product(&lhs.coeffs, rhs, zero)
+
+        if rhs.len() != DEGREE_PLUS_ONE {
+            return Err(InnerProductError::LengthMismatch {
+                lhs: DEGREE_PLUS_ONE,
+                rhs: rhs.len(),
+            });
+        }
+
+        let mut acc = zero;
+        let mut bits = lhs.0;
+        while bits != 0 {
+            let i = bits.trailing_zeros() as usize;
+            acc = acc + &Out::from_ref(&rhs[i]);
+            bits &= bits - 1;
+        }
+
+        Ok(acc)
     }
 }
 
@@ -371,7 +388,7 @@ where
         };
 
         move |poly: &BinaryU64Poly<DEGREE_PLUS_ONE>| {
-            BinaryU64PolyInnerProduct::<_, BooleanInnerProductUncheckedAdd, _>::inner_product(
+            BinaryU64PolyInnerProduct::<_, _>::inner_product(
                 poly,
                 &r_powers,
                 F::zero_with_cfg(&field_cfg),

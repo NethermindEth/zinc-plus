@@ -9,7 +9,7 @@ use crate::{
     },
     pcs_transcript::PcsTranscript,
 };
-use ark_std::cfg_iter_mut;
+use zinc_utils::cfg_iter_mut;
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
 use zinc_poly::mle::DenseMultilinearExtension;

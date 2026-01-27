@@ -48,7 +48,7 @@ where
     Int<5>: FromRef<CwCoeff>,
 {
     const NUM_COLUMN_OPENINGS: usize = 650;
-    type Eval = BinaryPoly;
+    type Eval = BinaryPoly<D_PLUS_ONE>;
     type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
     type PrimeTest = MillerRabin;
@@ -57,7 +57,7 @@ where
     type CombR = Int<{ INT_LIMBS * 5 }>;
     type Comb = DensePolynomial<Self::CombR, D_PLUS_ONE>;
     type EvalDotChal =
-        BinaryPolyInnerProduct<Self::Chal, BooleanInnerProductUncheckedAdd>;
+        BinaryPolyInnerProduct<Self::Chal, D_PLUS_ONE>;
     type CombDotChal = DensePolyInnerProduct<
         Self::CombR,
         Self::Chal,
