@@ -63,7 +63,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 Zt::CombR::ZERO
             );
 
-            transcript.write_const_many(&combined_row)?;
+            transcript.write_const_many(&combined_row, combined_row.len())?;
             // std::hint::black_box(&combined_row);
         }
 
@@ -84,7 +84,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let column_values = commit_hint.cw_matrix.as_rows().map(|row| &row[column]);
 
         // Write the elements in the squeezed column to the shared transcript
-        transcript.write_const_many(column_values)?;
+        transcript.write_const_many(column_values, commit_hint.cw_matrix.num_rows)?;
 
         ColumnOpening::open_at_column(column, commit_hint, transcript)
             .map_err(|_| ZipError::InvalidPcsOpen("Failed to open merkle tree".into()))?;
