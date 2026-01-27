@@ -63,15 +63,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 Zt::CombR::ZERO
             );
 
-            // transcript.write_const_many(&combined_row)?;
-            std::hint::black_box(combined_row);
+            transcript.write_const_many(&combined_row)?;
         }
 
-        // // Open merkle tree for each column drawn
-        // for _ in 0..Zt::NUM_COLUMN_OPENINGS {
-        //     let column = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
-        //     Self::open_merkle_trees_for_column(commit_hint, column, &mut transcript)?;
-        // }
+        // Open merkle tree for each column drawn
+        for _ in 0..Zt::NUM_COLUMN_OPENINGS {
+            let column = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
+            Self::open_merkle_trees_for_column(commit_hint, column, &mut transcript)?;
+        }
 
         Ok(transcript.into())
     }
