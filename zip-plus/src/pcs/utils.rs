@@ -48,10 +48,10 @@ pub(super) fn validate_input<Zt: ZipTypes, Lc: LinearCode<Zt>, Pt>(
             ),
             sub!(Zt::Eval::COEFF_BIT_WIDTH, 1)
         );
-        // assert!(
-        //     actual_lc_bits <= max_lc_bits,
-        //     "The number of bits used for linear combinations is too large: {actual_lc_bits} bits, max allowed is {max_lc_bits} bits"
-        // );
+        assert!(
+            actual_lc_bits <= max_lc_bits,
+            "The number of bits used for linear combinations is too large: {actual_lc_bits} bits, max allowed is {max_lc_bits} bits"
+        );
     }
 
     // Ensure all the number of variables in the polynomials don't exceed the limit

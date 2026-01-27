@@ -9,10 +9,10 @@ use crate::{
     },
     pcs_transcript::PcsTranscript,
 };
-use num_traits::{CheckedAdd, ConstOne, ConstZero, Zero};
+use num_traits::{ConstOne, ConstZero, Zero};
 use zinc_poly::{Polynomial, mle::DenseMultilinearExtension};
 use zinc_transcript::traits::Transcript;
-use zinc_utils::{add, cfg_iter_mut, inner_product::InnerProduct, mul_by_scalar::MulByScalar};
+use zinc_utils::{cfg_iter_mut, inner_product::InnerProduct, mul_by_scalar::MulByScalar};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;

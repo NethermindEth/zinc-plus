@@ -1,11 +1,5 @@
-use num_traits::CheckedAdd;
 use rand::{rngs::StdRng, seq::SliceRandom};
 use rand_core::SeedableRng;
-use std::{iter::Iterator, mem::MaybeUninit};
-use zinc_utils::{cfg_iter_mut, mul_by_scalar::MulByScalar};
-
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
 
 /// Computes a linear combination of multiple evaluation rows into a single
 /// combined row.
@@ -25,7 +19,7 @@ use rayon::prelude::*;
 /// - `coeffs`: Coefficients applied to each row.
 /// - `evals_iter`: Iterator over flattened evaluations arranged row-wise.
 /// - `convert_eval`: Function to convert each evaluation to the desired type.
-///   Should be just `|eval| Ok::<_, ZipError>(eval)` if no conversion is
+///   Should be just `Ok::<_, ZipError>` if no conversion is
 ///   needed.
 /// - `add_scaled`: Function to add a scaled evaluation to an accumulator.
 /// - `row_len`: Number of columns per evaluation row.
@@ -43,7 +37,7 @@ macro_rules! combine_rows {
 
         cfg_iter_mut!(combined_row.spare_capacity_mut())
             .enumerate()
-            .try_for_each(|(column, combined)| -> Result<(), crate::ZipError> {
+            .try_for_each(|(column, combined)| -> Result<(), ZipError> {
                 let mut acc = $zero;
 
                 for (eval, coeff) in $evals_iter
@@ -79,20 +73,22 @@ pub(super) fn shuffle_seeded<T>(slice: &mut [T], seed: u64) {
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use crate::ZipError;
     use zinc_utils::{cfg_iter_mut, mul_by_scalar::MulByScalar};
 
+    #[cfg(feature = "parallel")]
+    use rayon::prelude::*;
+
     #[test]
     fn test_basic_combination() -> Result<(), ZipError> {
-        let coeffs = vec![1, 2];
-        let evaluations = vec![3, 4, 5, 6];
+        let coeffs = [1, 2];
+        let evaluations = [3, 4, 5, 6];
         let row_len = 2;
 
         let result = combine_rows!(
             &coeffs,
             evaluations.iter(),
-            |eval| Ok::<_, ZipError>(eval),
+            Ok::<_, ZipError>,
             |acc, scaled| acc + scaled,
             row_len,
             0_i32
@@ -104,14 +100,14 @@ mod test {
 
     #[test]
     fn test_second_combination() -> Result<(), ZipError> {
-        let coeffs = vec![3, 4];
-        let evaluations = vec![2, 4, 6, 8];
+        let coeffs = [3, 4];
+        let evaluations = [2, 4, 6, 8];
         let row_len = 2;
 
         let result = combine_rows!(
             &coeffs,
             evaluations.iter(),
-            |eval| Ok::<_, ZipError>(eval),
+            Ok::<_, ZipError>,
             |acc, scaled| acc + scaled,
             row_len,
             0_i32
@@ -123,14 +119,14 @@ mod test {
 
     #[test]
     fn test_large_values() -> Result<(), ZipError> {
-        let coeffs = vec![1000, -500];
-        let evaluations = vec![2000, -3000, 4000, -5000];
+        let coeffs = [1000, -500];
+        let evaluations = [2000, -3000, 4000, -5000];
         let row_len = 2;
 
         let result = combine_rows!(
             &coeffs,
             evaluations.iter(),
-            |eval| Ok::<_, ZipError>(eval),
+            Ok::<_, ZipError>,
             |acc, scaled| acc + scaled,
             row_len,
             0_i32

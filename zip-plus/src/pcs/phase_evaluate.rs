@@ -69,7 +69,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             combine_rows!(
                 &q_0,
                 evaluations.iter(),
-                |eval| Ok::<_, ZipError>(eval),
+                Ok::<_, ZipError>,
                 |acc: F, scaled| add!(acc, &scaled, "Addition overflow while combining rows"),
                 row_len,
                 F::zero_with_cfg(&field_cfg)

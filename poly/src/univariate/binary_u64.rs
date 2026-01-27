@@ -8,7 +8,6 @@ use derive_more::{Add, AddAssign, AsRef, Display, Mul, MulAssign, Product, Sub, 
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, One, WrappingAdd, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
-    array,
     hash::Hash,
     iter::{Product, Sum},
     marker::PhantomData,
@@ -339,13 +338,14 @@ where
     I: InnerProduct<[Boolean], Rhs, Out>, // Unused!
 {
     #[inline(always)]
+    #[allow(clippy::arithmetic_side_effects)] // By design
     fn inner_product(
         lhs: &BinaryU64Poly<DEGREE_PLUS_ONE>,
         rhs: &[Rhs],
         zero: Out,
     ) -> Result<Out, InnerProductError> {
-        // let lhs = DensePolynomial::<Boolean, DEGREE_PLUS_ONE>::new(array::from_fn(|i| {
-        //     Boolean::new((lhs.0 & (1 << i)) != 0)
+        // let lhs = DensePolynomial::<Boolean, DEGREE_PLUS_ONE>::new(array::from_fn(|i|
+        // {     Boolean::new((lhs.0 & (1 << i)) != 0)
         // })
         //     as [Boolean; DEGREE_PLUS_ONE]); // idk
         // I::inner_product(&lhs.coeffs, rhs, zero)
