@@ -18,6 +18,7 @@ use zinc_utils::cfg_iter_mut;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+// TODO(alex): Return overflow checks!
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     #[allow(clippy::arithmetic_side_effects)]
     pub fn test(
@@ -52,20 +53,12 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 .fs_transcript
                 .get_challenges::<Zt::Chal>(pp.num_rows);
 
-            // eprintln!("=== # alphas: {}", alphas.len());
-            // eprintln!("=== # coeffs: {}", coeffs.len());
-            // eprintln!("=== # evals: {}", evals.len());
-
             // u' in the Zinc paper
             let combined_row = combine_rows!(
                 &coeffs,
                 poly.evaluations.iter(),
                 |eval| Zt::EvalDotChal::inner_product(eval, &alphas, Zt::CombR::ZERO),
-                |acc: Zt::CombR, scaled| add!(
-                    acc,
-                    &scaled,
-                    "Addition overflow while combining rows"
-                ),
+                |acc: Zt::CombR, scaled| acc + &scaled,
                 pp.linear_code.row_len(),
                 Zt::CombR::ZERO
             );

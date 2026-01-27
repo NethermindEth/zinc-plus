@@ -1,6 +1,6 @@
 use crate::from_ref::FromRef;
 use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int};
-use num_traits::{CheckedMul, ConstZero};
+use num_traits::{CheckedMul, ConstZero, WrappingMul};
 
 pub trait MulByScalar<Rhs>: Sized {
     /// Multiplies the current element by a scalar from the right (usually - a
@@ -28,7 +28,8 @@ impl<const LIMBS: usize, const LIMBS2: usize> MulByScalar<&Int<LIMBS2>> for Int<
         if LIMBS < LIMBS2 {
             return None; // Cannot multiply if the left operand has fewer limbs than the right
         }
-        self.checked_mul(&rhs.resize())
+        // TODO(alex): Return overflow check!
+        Some(self.wrapping_mul(&rhs.resize()))
     }
 }
 

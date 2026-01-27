@@ -5,7 +5,7 @@ use crate::{
 use core::mem::MaybeUninit;
 use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
 use derive_more::{Add, AddAssign, AsRef, Display, Mul, MulAssign, Product, Sub, SubAssign, Sum};
-use num_traits::{CheckedAdd, CheckedMul, CheckedSub, One, Zero};
+use num_traits::{CheckedAdd, CheckedMul, CheckedSub, One, WrappingAdd, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
     array,
@@ -14,6 +14,7 @@ use std::{
     marker::PhantomData,
     ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
 };
+use crypto_primitives::crypto_bigint_int::Int;
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
     from_ref::FromRef,
@@ -42,16 +43,16 @@ use zinc_utils::{
     Product,
 )]
 #[repr(transparent)]
-pub struct BinaryU64Poly<const DEGREE_PLUS_ONE: usize>(u64); // we can fit up to degree 6, which is ok for now
+pub struct BinaryU64Poly<const DEGREE_PLUS_ONE: usize>(u32); // we can fit up to degree 6, which is ok for now
 
 impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
     #[inline(always)]
-    pub const fn inner(&self) -> &u64 {
+    pub const fn inner(&self) -> &u32 {
         &self.0
     }
 }
 
-impl<const DEGREE_PLUS_ONE: usize> From<BinaryU64Poly<DEGREE_PLUS_ONE>> for u64 {
+impl<const DEGREE_PLUS_ONE: usize> From<BinaryU64Poly<DEGREE_PLUS_ONE>> for u32 {
     #[inline(always)]
     fn from(binary_poly: BinaryU64Poly<DEGREE_PLUS_ONE>) -> Self {
         binary_poly.0
@@ -60,15 +61,15 @@ impl<const DEGREE_PLUS_ONE: usize> From<BinaryU64Poly<DEGREE_PLUS_ONE>> for u64 
 
 impl From<u32> for BinaryU64Poly<32> {
     fn from(value: u32) -> Self {
-        Self(u64::from(value)) // we ignore upper bits
+        Self(u32::from(value)) // we ignore upper bits
     }
 }
 
-impl From<u64> for BinaryU64Poly<64> {
-    fn from(value: u64) -> Self {
-        Self(value) // we don't ignore any bits
-    }
-}
+// impl From<u64> for BinaryU64Poly<64> {
+//     fn from(value: u64) -> Self {
+//         Self(value) // we don't ignore any bits
+//     }
+// }
 
 impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
     /// Create a new polynomial with the given coefficients.
@@ -80,7 +81,7 @@ impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
         // Self(DensePolynomial::new(coeffs))
         let coeffs = coeffs.as_ref();
         assert!(coeffs.len() <= DEGREE_PLUS_ONE);
-        let mut value: u64 = 0;
+        let mut value: u32 = 0;
         for (i, coeff) in coeffs.iter().enumerate() {
             if coeff.inner() {
                 value |= 1 << i;
@@ -97,7 +98,7 @@ impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
     pub fn new_padded(coeffs: impl AsRef<[Boolean]>) -> Self {
         let coeffs = coeffs.as_ref();
         assert!(coeffs.len() <= DEGREE_PLUS_ONE);
-        let mut value: u64 = 0;
+        let mut value: u32 = 0;
         for (i, coeff) in coeffs.iter().enumerate() {
             if coeff.inner() {
                 value |= 1 << i;
@@ -299,7 +300,7 @@ impl<const DEGREE_PLUS_ONE: usize> ConstTranscribable for BinaryU64Poly<DEGREE_P
 
     #[inline(always)]
     fn read_transcription_bytes(bytes: &[u8]) -> Self {
-        Self(u64::read_transcription_bytes(bytes))
+        Self(u32::read_transcription_bytes(bytes))
     }
 
     #[inline(always)]
@@ -365,6 +366,39 @@ where
     }
 }
 
+pub struct BinaryU64PolyIntInnerProduct<const DEGREE_PLUS_ONE: usize>();
+
+impl<const I1: usize, const DEGREE_PLUS_ONE: usize>
+    InnerProduct<BinaryU64Poly<DEGREE_PLUS_ONE>, Int<I1>, Int<I1>>
+    for BinaryU64PolyIntInnerProduct<DEGREE_PLUS_ONE>
+{
+    #[inline(always)]
+    fn inner_product(
+        lhs: &BinaryU64Poly<DEGREE_PLUS_ONE>,
+        rhs: &[Int<I1>],
+        zero: Int<I1>,
+    ) -> Result<Int<I1>, InnerProductError> {
+        if rhs.len() != DEGREE_PLUS_ONE {
+            return Err(InnerProductError::LengthMismatch {
+                lhs: DEGREE_PLUS_ONE,
+                rhs: rhs.len(),
+            });
+        }
+
+        let mut acc = zero.into_inner();
+        let mut bits = lhs.0;
+        while bits != 0 {
+            let i = bits.trailing_zeros() as usize;
+            // TODO(alex): Overflow checks!
+            acc = acc.wrapping_add(rhs[i].inner());
+            bits &= bits - 1;
+        }
+
+        Ok(Int::new(acc))
+    }
+}
+
+
 impl<F, const DEGREE_PLUS_ONE: usize> ProjectableToField<F> for BinaryU64Poly<DEGREE_PLUS_ONE>
 where
     F: PrimeField + FromRef<F> + 'static,
@@ -422,7 +456,7 @@ pub fn widen_simd<const DEGREE_PLUS_ONE: usize>(
 
     #[cfg(target_arch = "aarch64")]
     unsafe {
-        widen_fill_neon::<DEGREE_PLUS_ONE>(&poly.0, out_ptr, scalar);
+        widen_fill_neon::<DEGREE_PLUS_ONE>(&(poly.0 as u64), out_ptr, scalar);
     }
     #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
     unsafe {
