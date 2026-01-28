@@ -305,13 +305,13 @@ where
                 let left = &self[2 * b];
                 let right = &self[2 * b + 1];
                 // a = f(1) - f(0)
-                let a = sub!(right, &left);
+                let a = sub!(*right, left);
                 if a != zero {
                     // self[b] = f(0) + r * a
                     let ar = a
                         .mul_by_scalar::<CHECKED>(r)
                         .expect("Multiplication overflow");
-                    self[b] = add!(left, &ar);
+                    self[b] = add!(*left, ar);
                 } else {
                     self[b] = left.clone();
                 };

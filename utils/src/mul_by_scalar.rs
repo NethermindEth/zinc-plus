@@ -1,6 +1,6 @@
 use crate::from_ref::FromRef;
 use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int};
-use num_traits::{CheckedMul, ConstZero, WrappingMul};
+use num_traits::{CheckedMul, ConstZero};
 
 pub trait MulByScalar<Rhs>: Sized {
     /// Multiplies the current element by a scalar from the right (usually - a
@@ -29,6 +29,7 @@ macro_rules! impl_mul_by_scalar_for_primitives {
 impl_mul_by_scalar_for_primitives!(i8, i16, i32, i64, i128);
 
 impl<const LIMBS: usize, const LIMBS2: usize> MulByScalar<&Int<LIMBS2>> for Int<LIMBS> {
+    #[allow(clippy::arithmetic_side_effects)] // By design
     fn mul_by_scalar<const CHECK: bool>(&self, rhs: &Int<LIMBS2>) -> Option<Self> {
         if LIMBS < LIMBS2 {
             return None; // Cannot multiply if the left operand has fewer limbs than the right
@@ -36,7 +37,7 @@ impl<const LIMBS: usize, const LIMBS2: usize> MulByScalar<&Int<LIMBS2>> for Int<
         if CHECK {
             self.checked_mul(&rhs.resize())
         } else {
-            Some(self.wrapping_mul(&rhs.resize()))
+            Some(*self * rhs.resize())
         }
     }
 }

@@ -4,7 +4,7 @@ macro_rules! neg {
         neg!($a, "Negation overflow")
     };
     ($a:expr, $msg:expr) => {
-        $a.checked_neg().expect($msg)
+        num_traits::CheckedNeg::checked_neg(&$a).expect($msg)
     };
 }
 
@@ -14,7 +14,7 @@ macro_rules! add {
         add!($a, $b, "Addition overflow")
     };
     ($a:expr, $b:expr, $msg:expr) => {
-        $a.checked_add($b).expect($msg)
+        num_traits::CheckedAdd::checked_add(&$a, &$b).expect($msg)
     };
 }
 
@@ -24,7 +24,7 @@ macro_rules! sub {
         sub!($a, $b, "Subtraction overflow")
     };
     ($a:expr, $b:expr, $msg:expr) => {
-        $a.checked_sub($b).expect($msg)
+        num_traits::CheckedSub::checked_sub(&$a, &$b).expect($msg)
     };
 }
 
@@ -34,7 +34,7 @@ macro_rules! mul {
         mul!($a, $b, "Multiplication overflow")
     };
     ($a:expr, $b:expr, $msg:expr) => {
-        $a.checked_mul($b).expect($msg)
+        num_traits::CheckedMul::checked_mul(&$a, &$b).expect($msg)
     };
 }
 
@@ -44,7 +44,7 @@ macro_rules! div {
         div!($a, $b, "Division by zero")
     };
     ($a:expr, $b:expr, $msg:expr) => {
-        $a.checked_div($b).expect($msg)
+        num_traits::CheckedDiv::checked_div(&$a, &$b).expect($msg)
     };
 }
 
@@ -54,7 +54,7 @@ macro_rules! rem {
         rem!($a, $b, "Division by zero")
     };
     ($a:expr, $b:expr, $msg:expr) => {
-        $a.checked_rem($b).expect($msg)
+        num_traits::CheckedRem::checked_rem(&$a, &$b).expect($msg)
     };
 }
 

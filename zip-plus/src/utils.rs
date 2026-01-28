@@ -30,7 +30,7 @@ use rand_core::SeedableRng;
 #[macro_export]
 #[allow(unused_imports)]
 macro_rules! combine_rows {
-    ($check:ident, $coeffs:expr, $evals_iter:expr, $convert_eval:expr, $add_scaled:expr, $row_len:expr, $zero:expr) => {{
+    ($check:ident, $coeffs:expr, $evals_iter:expr, $convert_eval:expr, $row_len:expr, $zero:expr) => {{
         let row_len = $row_len;
         let mut combined_row = Vec::with_capacity(row_len);
 
@@ -48,7 +48,16 @@ macro_rules! combine_rows {
                     let scaled = eval
                         .mul_by_scalar::<$check>(coeff)
                         .expect("Cannot multiply evaluation by coefficient");
-                    acc = $add_scaled(acc, scaled);
+
+                    if $check {
+                        acc = zinc_utils::add!(
+                            acc,
+                            &scaled,
+                            "Addition overflow while combining rows"
+                        );
+                    } else {
+                        acc += scaled;
+                    }
                 }
 
                 *combined = std::mem::MaybeUninit::new(acc);
@@ -90,7 +99,6 @@ mod test {
             &coeffs,
             evaluations.iter(),
             Ok::<_, ZipError>,
-            |acc, scaled| acc + scaled,
             row_len,
             0_i32
         );
@@ -110,7 +118,6 @@ mod test {
             &coeffs,
             evaluations.iter(),
             Ok::<_, ZipError>,
-            |acc, scaled| acc + scaled,
             row_len,
             0_i32
         );
@@ -130,7 +137,6 @@ mod test {
             &coeffs,
             evaluations.iter(),
             Ok::<_, ZipError>,
-            |acc, scaled| acc + scaled,
             row_len,
             0_i32
         );

@@ -14,7 +14,7 @@ use itertools::Itertools;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
-    UNCHECKED, add, cfg_iter, cfg_iter_mut,
+    UNCHECKED, cfg_iter, cfg_iter_mut,
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProduct},
     mul_by_scalar::MulByScalar,
@@ -71,7 +71,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 &q_0,
                 evaluations.iter(),
                 Ok::<_, ZipError>,
-                |acc: F, scaled| add!(acc, &scaled, "Addition overflow while combining rows"),
                 row_len,
                 F::zero_with_cfg(&field_cfg)
             )

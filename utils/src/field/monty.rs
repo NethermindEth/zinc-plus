@@ -12,7 +12,7 @@ use crate::{
 impl<const LIMBS: usize> MulByScalar<&Self> for MontyField<LIMBS> {
     #[allow(clippy::arithmetic_side_effects)] // False alert
     fn mul_by_scalar<const CHECK: bool>(&self, rhs: &Self) -> Option<Self> {
-        // Multiplication cannot overflow
+        // Field operations cannot overflow
         Some(self * rhs)
     }
 }

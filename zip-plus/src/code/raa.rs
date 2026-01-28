@@ -193,7 +193,7 @@ where
     if let Some(first) = input.first().cloned() {
         let mut acc = first;
         for curr in input.iter_mut().skip(1) {
-            acc = add!(curr, &acc, "Accumulation overflow");
+            acc = add!(*curr, acc, "Accumulation overflow");
             *curr = acc.clone();
         }
     }
