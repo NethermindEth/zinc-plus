@@ -11,8 +11,6 @@ use crate::{
 };
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{

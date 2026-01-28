@@ -8,7 +8,6 @@ use derive_more::{AsRef, Display};
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
-    array,
     hash::Hash,
     iter::{Product, Sum},
     marker::PhantomData,
@@ -16,7 +15,6 @@ use std::{
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
-    CHECKED,
     from_ref::FromRef,
     inner_product::{InnerProduct, InnerProductError},
     mul_by_scalar::WideningMulByScalar,

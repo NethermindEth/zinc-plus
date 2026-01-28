@@ -17,7 +17,6 @@ use std::{
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
-    UNCHECKED,
     from_ref::FromRef,
     inner_product::{BooleanInnerProductAdd, InnerProduct, InnerProductError},
     mul_by_scalar::WideningMulByScalar,
