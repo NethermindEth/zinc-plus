@@ -44,7 +44,7 @@ impl<I: Ideal> IdealCollector<I> {
         cfg_iter!(self.ideals)
             .zip(cfg_iter!(values))
             .try_for_each(|(ideal, value)| {
-                if !value.is_contained_in_with_zero(ideal, zero) {
+                if !value.is_contained_in(ideal) {
                     Err(IdealCollectorError::IdealCheckFailed(
                         value.clone(),
                         ideal.clone(),
@@ -110,7 +110,7 @@ impl<I: Ideal> FromRef<I> for CollectedIdeal<I> {
 }
 
 impl<I: Ideal> IdealCheck<CollectedIdeal<I>> for DummySemiring {
-    fn is_contained_in_with_zero(&self, _ideal: &CollectedIdeal<I>, _zero: &Self) -> bool {
+    fn is_contained_in(&self, _ideal: &CollectedIdeal<I>) -> bool {
         // Do nothing.
         true
     }

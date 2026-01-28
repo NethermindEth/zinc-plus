@@ -2,55 +2,51 @@ use crypto_primitives::{FixedSemiring, FromWithConfig, Semiring};
 use zinc_uair::ideal::{Ideal, IdealCheck};
 use zinc_utils::from_ref::FromRef;
 
-use crate::EvaluatablePolynomial;
+use crate::{EvaluatablePolynomial, univariate::dynamic::DynamicPolynomial};
 
 use super::dense::DensePolynomial;
 
 #[derive(Clone, Copy, Debug)]
-pub enum DegreeOneIdeal<R: Semiring, const DEGREE_PLUS_ONE: usize> {
+pub enum DegreeOneIdeal<R: Semiring> {
     DegreeOneIdeal { generating_root: R },
     ZeroIdeal,
 }
 
-impl<R: FixedSemiring, const DEGREE_PLUS_ONE: usize> DegreeOneIdeal<R, DEGREE_PLUS_ONE> {
+impl<R: FixedSemiring> DegreeOneIdeal<R> {
     pub fn new(generating_root: R) -> Self {
         Self::DegreeOneIdeal { generating_root }
     }
 }
 
-impl<R: Semiring, const DEGREE_PLUS_ONE: usize> FromRef<DegreeOneIdeal<R, DEGREE_PLUS_ONE>>
-    for DegreeOneIdeal<R, DEGREE_PLUS_ONE>
-{
+impl<R: Semiring> FromRef<DegreeOneIdeal<R>> for DegreeOneIdeal<R> {
     #[inline(always)]
-    fn from_ref(ideal: &DegreeOneIdeal<R, DEGREE_PLUS_ONE>) -> Self {
+    fn from_ref(ideal: &DegreeOneIdeal<R>) -> Self {
         ideal.clone()
     }
 }
 
-impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Ideal for DegreeOneIdeal<R, DEGREE_PLUS_ONE> {
+impl<R: Semiring> Ideal for DegreeOneIdeal<R> {
     #[inline(always)]
     fn zero_ideal() -> Self {
         Self::ZeroIdeal
     }
 }
 
-impl<R, F, const DEGREE_PLUS_ONE: usize> IdealCheck<DegreeOneIdeal<R, DEGREE_PLUS_ONE>>
-    for DensePolynomial<F, DEGREE_PLUS_ONE>
+impl<R, F> IdealCheck<DegreeOneIdeal<R>> for DynamicPolynomial<F>
 where
     R: Semiring,
     F: FromWithConfig<R>,
 {
-    fn is_contained_in_with_zero(
-        &self,
-        ideal: &DegreeOneIdeal<R, DEGREE_PLUS_ONE>,
-        zero: &Self,
-    ) -> bool {
+    fn is_contained_in(&self, ideal: &DegreeOneIdeal<R>, zero: &Self) -> bool {
         match ideal {
             DegreeOneIdeal::DegreeOneIdeal { generating_root } => {
                 let field_cfg = zero.coeffs[0].cfg();
-                self.evaluate_at_point(&F::from_with_cfg(generating_root.clone(), field_cfg))
+                let root_in_field = F::from_with_cfg(generating_root.clone(), field_cfg);
+                self.evaluate_at_point(&root_in_field)
                     .expect("arithmetic overflow")
-                    == zero.coeffs[0]
+                    == zero
+                        .evaluate_at_point(&root_in_field)
+                        .expect("should be fine")
             }
             DegreeOneIdeal::ZeroIdeal => self == zero,
         }

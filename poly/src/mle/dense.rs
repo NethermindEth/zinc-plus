@@ -105,6 +105,21 @@ impl<R: Default> DenseMultilinearExtension<R> {
     }
 }
 
+impl<R: Clone> DenseMultilinearExtension<R> {
+    pub fn from_evaluations_vec_pad_with_zero(mut evaluations: Vec<R>, zero: &R) -> Self {
+        let len = evaluations.len();
+
+        evaluations.resize(len.next_power_of_two(), zero.clone());
+
+        let num_vars = zinc_utils::log2(evaluations.len()) as usize;
+
+        Self {
+            evaluations,
+            num_vars,
+        }
+    }
+}
+
 impl<R: Default> FromIterator<R> for DenseMultilinearExtension<R> {
     fn from_iter<T: IntoIterator<Item = R>>(iter: T) -> Self {
         Self::from_evaluations_vec_pad(iter.into_iter().collect())
@@ -459,6 +474,28 @@ pub fn project_coeffs<F: PrimeField, R: ProjectableToField<F> + Send + Sync>(
             .map(|x| projection(&x).inner().clone())
             .collect(),
         num_vars: mle.num_vars,
+    }
+}
+
+pub trait CollectDenseMleWithZero: Iterator {
+    fn collect_dense_mle_with_zero(
+        self,
+        zero: &Self::Item,
+    ) -> DenseMultilinearExtension<Self::Item>;
+}
+
+impl<T> CollectDenseMleWithZero for T
+where
+    T: Iterator,
+    T::Item: Clone,
+{
+    fn collect_dense_mle_with_zero(
+        self,
+        zero: &Self::Item,
+    ) -> DenseMultilinearExtension<Self::Item> {
+        let evaluations = self.collect();
+
+        DenseMultilinearExtension::from_evaluations_vec_pad_with_zero(evaluations, zero)
     }
 }
 

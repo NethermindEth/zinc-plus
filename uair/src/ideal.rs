@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 
 use crypto_primitives::Semiring;
+use num_traits::Zero;
 use zinc_utils::from_ref::FromRef;
 
 /// A trait for types describing ideals.
@@ -17,9 +18,7 @@ pub trait Ideal: FromRef<Self> + Clone + Debug + Send + Sync {
 pub trait IdealCheck<I: Ideal> {
     /// Returns true if an element of the type
     /// belongs to the ideal `ideal`.
-    /// The method is given a reference to the additive zero of the type
-    /// for utilitary reasons (e.g. when dealing with random fields).
-    fn is_contained_in_with_zero(&self, ideal: &I, zero: &Self) -> bool;
+    fn is_contained_in(&self, ideal: &I) -> bool;
 }
 
 /// The type of ideals that encode only
@@ -34,10 +33,10 @@ impl Ideal for ZeroIdeal {
     }
 }
 
-impl<R: Semiring> IdealCheck<ZeroIdeal> for R {
+impl<R: Semiring + Zero> IdealCheck<ZeroIdeal> for R {
     #[inline(always)]
-    fn is_contained_in_with_zero(&self, _ideal: &ZeroIdeal, zero: &R) -> bool {
-        self == zero
+    fn is_contained_in(&self, _ideal: &ZeroIdeal) -> bool {
+        self.is_zero()
     }
 }
 
@@ -62,7 +61,7 @@ impl Ideal for DummyIdeal {
 
 impl<R: Semiring> IdealCheck<DummyIdeal> for R {
     #[inline(always)]
-    fn is_contained_in_with_zero(&self, _ideal: &DummyIdeal, _zero: &R) -> bool {
+    fn is_contained_in(&self, _ideal: &DummyIdeal) -> bool {
         false
     }
 }

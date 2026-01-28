@@ -1,5 +1,4 @@
 mod combined_poly_builder;
-mod utils;
 
 use crypto_primitives::{FixedSemiring, FromWithConfig, PrimeField, Semiring};
 use derive_more::From;
@@ -11,7 +10,7 @@ use thiserror::Error;
 use zinc_poly::{
     CoefficientProjectable, EvaluationError, Polynomial,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::dense::DensePolynomial,
+    univariate::{dense::DensePolynomial, dynamic::DynamicPolynomial},
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
@@ -20,7 +19,7 @@ use zinc_uair::{
     ideal::{DummyIdeal, Ideal, IdealCheck},
     ideal_collector::{IdealCollector, IdealCollectorError, collect_ideals},
 };
-use zinc_utils::cfg_into_iter;
+use zinc_utils::{cfg_into_iter, cfg_iter};
 use zinc_utils::{
     from_ref::FromRef, inner_transparent_field::InnerTransparentField,
     projectable_to_field::ProjectableToField,
@@ -32,9 +31,9 @@ pub struct Proof<R> {
 }
 
 #[derive(Clone, Debug)]
-pub struct ProverState<F: PrimeField, const DEGREE_PLUS_ONE: usize> {
+pub struct ProverState<F: PrimeField> {
     pub evaluation_points: Vec<Vec<F>>,
-    pub combined_mles: Vec<DenseMultilinearExtension<DensePolynomial<F, DEGREE_PLUS_ONE>>>,
+    pub combined_mles: Vec<Vec<DenseMultilinearExtension<F::Inner>>>,
 }
 
 pub struct SubClaim<F: PrimeField, const DEGREE_PLUS_ONE: usize> {
@@ -58,19 +57,11 @@ where
     #[allow(clippy::type_complexity)]
     pub fn prove_as_subprotocol<U, F>(
         transcript: &mut impl Transcript,
-        cs_up: Vec<DenseMultilinearExtension<R>>,
-        cs_down: Vec<DenseMultilinearExtension<R>>,
+        trace: &[DenseMultilinearExtension<R>],
         num_constraints: usize,
         num_vars: usize,
         field_cfg: &F::Config,
-    ) -> Result<
-        (
-            Proof<DensePolynomial<F, DEGREE_PLUS_ONE>>,
-            ProverState<F, DEGREE_PLUS_ONE>,
-        ),
-        R,
-        U::Ideal,
-    >
+    ) -> Result<(Proof<DynamicPolynomial<F>>, ProverState<F>), R, U::Ideal>
     where
         U: Uair<R>,
         R: ProjectableToField<F>,
@@ -79,65 +70,30 @@ where
     {
         let projecting_element: F = transcript.get_field_challenge(field_cfg);
 
-        let cs_up = cfg_into_iter!(cs_up)
-            .map(|mle| DenseMultilinearExtension {
-                evaluations: mle
-                    .evaluations
-                    .into_iter()
-                    .map(|coeff| coeff.project_coefficients(&projecting_element))
-                    .collect(),
-                num_vars: mle.num_vars,
-            })
-            .collect::<Vec<_>>();
-
-        let cs_down = cfg_into_iter!(cs_down)
-            .map(|mle| DenseMultilinearExtension {
-                evaluations: mle
-                    .evaluations
-                    .into_iter()
-                    .map(|coeff| coeff.project_coefficients(&projecting_element))
-                    .collect(),
-                num_vars: mle.num_vars,
-            })
-            .collect::<Vec<_>>();
-
-        let combined_mles = Self::get_combined_poly_mles::<U, F, _, _>(
-            &cs_up,
-            &cs_down,
-            |x| x.clone().project_coefficients(&projecting_element),
+        let combined_mles = combined_poly_builder::compute_combined_polynomials::<F, _, _, U, _>(
+            trace,
+            &projecting_element,
             num_constraints,
-            num_vars,
         );
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
         let mut evaluation_points: Vec<Vec<F>> = Vec::with_capacity(num_constraints);
-        let mut combined_mle_values: Vec<DensePolynomial<F, DEGREE_PLUS_ONE>> =
+        let mut combined_mle_values: Vec<DynamicPolynomial<F>> =
             Vec::with_capacity(num_constraints);
 
         for combined_mle in &combined_mles {
             let challenge: Vec<F> = transcript.get_field_challenges(num_vars, field_cfg);
 
-            let mle_value_coeffs = cfg_into_iter!(0..DEGREE_PLUS_ONE)
-                .map(|i| {
-                    let coeff_mle = DenseMultilinearExtension {
-                        evaluations: combined_mle
-                            .evaluations
-                            .iter()
-                            .map(|coeff| coeff.as_ref()[i].inner().clone())
-                            .collect(),
-                        num_vars,
-                    };
-
-                    coeff_mle.evaluate_with_config(&challenge, field_cfg)
-                })
+            let mle_coeffs_values = cfg_iter!(combined_mle)
+                .map(|coeff_mle| coeff_mle.evaluate_with_config(&challenge, field_cfg))
                 .collect::<std::result::Result<Vec<_>, _>>()?;
 
-            transcript.absorb_random_field_slice(&mle_value_coeffs, &mut transcription_buf);
+            transcript.absorb_random_field_slice(&mle_coeffs_values, &mut transcription_buf);
 
             evaluation_points.push(challenge);
-            combined_mle_values.push(DensePolynomial::new_with_zero(
-                mle_value_coeffs,
-                F::zero_with_cfg(field_cfg),
+            combined_mle_values.push(DynamicPolynomial::new_trimmed_with_zero(
+                mle_coeffs_values,
+                &F::zero_with_cfg(field_cfg),
             ));
         }
 
@@ -155,7 +111,7 @@ where
     #[allow(clippy::type_complexity)]
     pub fn verify_as_subprotocol<U, F>(
         transcript: &mut impl Transcript,
-        proof: Proof<DensePolynomial<F, DEGREE_PLUS_ONE>>,
+        proof: Proof<DynamicPolynomial<F>>,
         num_constraints: usize,
         num_vars: usize,
         field_cfg: &F::Config,
@@ -163,7 +119,7 @@ where
     where
         U: Uair<R>,
         R: ProjectableToField<F>,
-        DensePolynomial<F, DEGREE_PLUS_ONE>: IdealCheck<U::Ideal>,
+        DynamicPolynomial<F>: IdealCheck<U::Ideal>,
         F: PrimeField,
         F::Inner: ConstTranscribable,
     {
@@ -184,7 +140,7 @@ where
 
         ideal_collector.batched_ideal_check(
             &combined_mle_values,
-            &DensePolynomial::zero_with_cfg(field_cfg),
+            &DynamicPolynomial::zero_with_cfg(field_cfg),
         )?;
 
         Ok(evaluation_points
@@ -192,73 +148,6 @@ where
             .zip(combined_mle_values)
             .map(|(point, value)| SubClaim { point, value })
             .collect())
-    }
-
-    fn get_combined_poly_mles<U, F, P, Proj>(
-        cs_up: &[DenseMultilinearExtension<P>],
-        cs_down: &[DenseMultilinearExtension<P>],
-        projection: Proj,
-        num_constraints: usize,
-        num_vars: usize,
-    ) -> Vec<DenseMultilinearExtension<P>>
-    where
-        U: Uair<R>,
-        R: ProjectableToField<F>,
-        P: Polynomial<F> + Semiring,
-        F: PrimeField + FromWithConfig<Rcoeff>,
-        F::Inner: ConstTranscribable,
-        Proj: Fn(&R) -> P + Send + Sync,
-    {
-        // Collect h MLEs.
-        let len = cs_up[0].evaluations.len();
-
-        let mut h_evals: Vec<Vec<P>> = (0..num_constraints)
-            .map(|_| Vec::with_capacity(len))
-            .collect_vec();
-
-        let pointers: Vec<*mut P> = h_evals.iter_mut().map(|col| col.as_mut_ptr()).collect_vec();
-
-        (0..len).for_each(|i| {
-            let mut builder = IdealCheckConstraintBuilder::<P>::new(num_constraints);
-
-            let up: Vec<P> = cs_up
-                .iter()
-                .map(|up| (up.evaluations[i].clone()))
-                .collect_vec();
-            let down: Vec<P> = cs_down
-                .iter()
-                .map(|down| (down.evaluations[i].clone()))
-                .collect_vec();
-
-            U::constrain_general(
-                &mut builder,
-                &up,
-                &down,
-                |x| projection(x),
-                |x, y| Some(projection(y) * x),
-            );
-
-            pointers
-                .iter()
-                .zip(builder.uair_poly_mles_coeffs)
-                .for_each(|(ptr, eval)| unsafe {
-                    *ptr.add(i) = eval.clone();
-                });
-        });
-
-        h_evals
-            .into_iter()
-            .map(|mut evaluations| {
-                unsafe {
-                    evaluations.set_len(len);
-                }
-
-                DenseMultilinearExtension {
-                    evaluations,
-                    num_vars,
-                }
-            })
-            .collect()
     }
 }
 
@@ -327,7 +216,7 @@ mod tests {
 
         type Poly = DensePolynomial<Int<5>, 32>;
 
-        let up: Vec<DenseMultilinearExtension<Poly>> = vec![
+        let trace: Vec<DenseMultilinearExtension<Poly>> = vec![
             DenseMultilinearExtension::from_evaluations_slice(
                 4,
                 &(0..4).map(|i| Poly::from(Int::from_i8(i))).collect_vec(),
@@ -347,30 +236,6 @@ mod tests {
             ),
         ];
 
-        let down: Vec<DenseMultilinearExtension<Poly>> = vec![
-            DenseMultilinearExtension::from_evaluations_slice(
-                4,
-                &(0..4)
-                    .map(|_| Poly::from_ref(&rng.random::<BinaryPoly<32>>()))
-                    .collect_vec(),
-                Poly::zero(),
-            ),
-            DenseMultilinearExtension::from_evaluations_slice(
-                4,
-                &(0..4)
-                    .map(|_| Poly::from_ref(&rng.random::<BinaryPoly<32>>()))
-                    .collect_vec(),
-                Poly::zero(),
-            ),
-            DenseMultilinearExtension::from_evaluations_slice(
-                4,
-                &(0..4)
-                    .map(|_| Poly::from_ref(&rng.random::<BinaryPoly<32>>()))
-                    .collect_vec(),
-                Poly::zero(),
-            ),
-        ];
-
         let field_cfg = test_config();
 
         let transcript = KeccakTranscript::new();
@@ -378,8 +243,7 @@ mod tests {
         let (proof, _) =
             IdealCheckProtocol::<_, _, _>::prove_as_subprotocol::<TestAirNoMultiplication, F>(
                 &mut transcript.clone(),
-                up,
-                down,
+                &trace,
                 count_constraints::<Poly, TestAirNoMultiplication>(),
                 4,
                 &field_cfg,

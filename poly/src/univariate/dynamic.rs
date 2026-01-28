@@ -86,7 +86,22 @@ impl<R> DynamicPolynomial<R> {
     }
 }
 
-impl<R: Eq> DynamicPolynomial<R> {
+impl<R: Eq + Clone> DynamicPolynomial<R> {
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn new_trimmed_with_zero(coeffs: impl AsRef<[R]>, zero: &R) -> Self {
+        let coeffs = coeffs.as_ref();
+
+        if let Some((non_zero, _)) = coeffs.iter().rev().find_position(|coeff| *coeff != zero) {
+            let deg_plus_one = coeffs.len() - non_zero;
+
+            Self {
+                coeffs: coeffs.iter().take(deg_plus_one).cloned().collect(),
+            }
+        } else {
+            Self::zero()
+        }
+    }
+
     #[allow(clippy::arithmetic_side_effects)]
     pub fn degree_with_zero(&self, zero: &R) -> Option<usize> {
         if let Some((non_zero, _)) = self
