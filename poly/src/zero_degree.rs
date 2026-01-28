@@ -46,11 +46,11 @@ impl<const LIMBS: usize> ConstCoeffBitWidth for Int<LIMBS> {
 
 impl<const LIMBS: usize> CoefficientProjectable<Int<LIMBS>, 1> for Int<LIMBS> {
     fn project_coefficients<F: crypto_primitives::FromWithConfig<Int<LIMBS>> + 'static>(
-        self,
+        &self,
         projecting_element: &F,
     ) -> DensePolynomial<F, 1> {
         DensePolynomial::new_with_zero(
-            [F::from_with_cfg(self, projecting_element.cfg())],
+            [F::from_with_cfg(*self, projecting_element.cfg())],
             F::zero_with_cfg(projecting_element.cfg()),
         )
     }

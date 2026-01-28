@@ -1,6 +1,5 @@
 //! UAIR description tools.
 
-pub mod combined_poly_builder;
 pub mod constraint_counter;
 pub mod dummy_semiring;
 pub mod ideal;

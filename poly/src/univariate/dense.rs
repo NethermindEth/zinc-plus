@@ -577,7 +577,7 @@ impl<R: Semiring, const DEGREE_PLUS_ONE: usize> CoefficientProjectable<R, DEGREE
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 {
     fn project_coefficients<F: FromWithConfig<R> + 'static>(
-        self,
+        &self,
         projecting_element: &F,
     ) -> DensePolynomial<F, DEGREE_PLUS_ONE> {
         DensePolynomial {

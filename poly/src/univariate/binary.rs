@@ -3,9 +3,7 @@ use crate::{
     univariate::dense::DensePolynomial,
 };
 use crypto_primitives::{FromWithConfig, PrimeField, Semiring, semiring::boolean::Boolean};
-use derive_more::{
-    Add, AddAssign, Display, From, Mul, MulAssign, Product, Sub, SubAssign, Sum,
-};
+use derive_more::{Add, AddAssign, Display, From, Mul, MulAssign, Product, Sub, SubAssign, Sum};
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, ConstZero, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
@@ -374,7 +372,7 @@ impl<const DEGREE_PLUS_ONE: usize> CoefficientProjectable<Boolean, DEGREE_PLUS_O
     for BinaryPoly<DEGREE_PLUS_ONE>
 {
     fn project_coefficients<F: FromWithConfig<Boolean> + 'static>(
-        self,
+        &self,
         projecting_element: &F,
     ) -> DensePolynomial<F, DEGREE_PLUS_ONE> {
         self.0.project_coefficients(projecting_element)

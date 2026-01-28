@@ -40,7 +40,7 @@ pub enum EvaluationError {
 
 pub trait CoefficientProjectable<C, const DEGREE_PLUS_ONE: usize>: Polynomial<C> {
     fn project_coefficients<F: FromWithConfig<C> + 'static>(
-        self,
+        &self,
         projecting_element: &F,
     ) -> DensePolynomial<F, DEGREE_PLUS_ONE>;
 }

@@ -1,3 +1,4 @@
+mod combined_poly_builder;
 mod utils;
 
 use crypto_primitives::{FixedSemiring, FromWithConfig, PrimeField, Semiring};
