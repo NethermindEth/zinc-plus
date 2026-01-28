@@ -1,6 +1,6 @@
 use crate::{
     ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
-    univariate::dense::DensePolynomial,
+    univariate::{binary_shared::prepare_projection, dense::DensePolynomial},
 };
 use core::mem::MaybeUninit;
 use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
@@ -17,7 +17,7 @@ use std::{
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
     from_ref::FromRef,
-    inner_product::{BooleanInnerProductUncheckedAdd, InnerProduct, InnerProductError},
+    inner_product::{InnerProduct, InnerProductError},
     mul_by_scalar::WideningMulByScalar,
     named::Named,
     projectable_to_field::ProjectableToField,
@@ -382,32 +382,10 @@ impl<F, const DEGREE_PLUS_ONE: usize> ProjectableToField<F> for BinaryU64Poly<DE
 where
     F: PrimeField + FromRef<F> + 'static,
 {
-    #![allow(clippy::arithmetic_side_effects)] // False alert, field operations are safe
     fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static {
-        let field_cfg = sampled_value.cfg().clone();
-        let r_powers = {
-            // Preprocess powers prior to inner product.
-            let mut r_powers = Vec::with_capacity(DEGREE_PLUS_ONE);
-
-            let mut curr = F::one_with_cfg(&field_cfg);
-            r_powers.push(curr.clone());
-
-            for _ in 1..DEGREE_PLUS_ONE {
-                curr *= sampled_value;
-                r_powers.push(curr.clone());
-            }
-
-            r_powers
-        };
-
-        move |poly: &BinaryU64Poly<DEGREE_PLUS_ONE>| {
-            BinaryU64PolyInnerProduct::<_, BooleanInnerProductUncheckedAdd, _>::inner_product(
-                poly,
-                &r_powers,
-                F::zero_with_cfg(&field_cfg),
-            )
-            .expect("Failed to evaluate polynomial")
-        }
+        prepare_projection::<F, Self, _, DEGREE_PLUS_ONE>(sampled_value, |poly, i| {
+            (poly.0 & (1 << i)) != 0
+        })
     }
 }
 

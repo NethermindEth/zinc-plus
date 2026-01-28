@@ -1,4 +1,5 @@
 pub mod binary_ref;
+pub mod binary_shared;
 pub mod binary_u64;
 
 pub mod dense;
