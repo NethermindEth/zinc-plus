@@ -267,8 +267,9 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
                 for _ in 0..iters {
                     let proof = test_transcript.clone();
                     let timer = Instant::now();
-                    let (eval_f, proof) = ZipPlus::evaluate::<F, CHECK_FOR_OVERFLOWS>(&params, &poly, &point, proof)
-                        .expect("Evaluation phase failed");
+                    let (eval_f, proof) =
+                        ZipPlus::evaluate::<F, CHECK_FOR_OVERFLOWS>(&params, &poly, &point, proof)
+                            .expect("Evaluation phase failed");
                     total_duration += timer.elapsed();
                     black_box((eval_f, proof));
                 }
@@ -298,8 +299,9 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool,
 
     let test_transcript =
         ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, &poly, &data).expect("Test phase failed");
-    let (eval_f, proof) = ZipPlus::evaluate::<F, CHECK_FOR_OVERFLOWS>(&params, &poly, &point, test_transcript)
-        .expect("Evaluation phase failed");
+    let (eval_f, proof) =
+        ZipPlus::evaluate::<F, CHECK_FOR_OVERFLOWS>(&params, &poly, &point, test_transcript)
+            .expect("Evaluation phase failed");
     let field_cfg = *eval_f.cfg();
     let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
