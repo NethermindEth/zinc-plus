@@ -17,8 +17,9 @@ use std::{
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
+    UNCHECKED,
     from_ref::FromRef,
-    inner_product::{BooleanInnerProductUncheckedAdd, InnerProduct, InnerProductError},
+    inner_product::{BooleanInnerProductAdd, InnerProduct, InnerProductError},
     mul_by_scalar::WideningMulByScalar,
     named::Named,
     projectable_to_field::ProjectableToField,
@@ -316,21 +317,21 @@ impl<const DEGREE_PLUS_ONE: usize> From<&BinaryRefPoly<DEGREE_PLUS_ONE>>
     }
 }
 
-pub struct BinaryRefPolyInnerProduct<R, I, const DEGREE_PLUS_ONE: usize>(PhantomData<(R, I)>);
+pub struct BinaryRefPolyInnerProduct<R, const DEGREE_PLUS_ONE: usize>(PhantomData<R>);
 
-impl<Rhs, I, Out, const DEGREE_PLUS_ONE: usize>
-    InnerProduct<BinaryRefPoly<DEGREE_PLUS_ONE>, Rhs, Out>
-    for BinaryRefPolyInnerProduct<Rhs, I, DEGREE_PLUS_ONE>
+impl<Rhs, Out, const DEGREE_PLUS_ONE: usize> InnerProduct<BinaryRefPoly<DEGREE_PLUS_ONE>, Rhs, Out>
+    for BinaryRefPolyInnerProduct<Rhs, DEGREE_PLUS_ONE>
 where
-    I: InnerProduct<[Boolean], Rhs, Out>,
+    Rhs: Clone,
+    Out: FromRef<Rhs> + CheckedAdd,
 {
     #[inline(always)]
-    fn inner_product(
+    fn inner_product<const CHECK: bool>(
         lhs: &BinaryRefPoly<DEGREE_PLUS_ONE>,
         rhs: &[Rhs],
         zero: Out,
     ) -> Result<Out, InnerProductError> {
-        I::inner_product(&lhs.0.coeffs, rhs, zero)
+        BooleanInnerProductAdd::inner_product::<CHECK>(&lhs.0.coeffs, rhs, zero)
     }
 }
 
@@ -357,7 +358,7 @@ where
         };
 
         move |poly: &BinaryRefPoly<DEGREE_PLUS_ONE>| {
-            BinaryRefPolyInnerProduct::<_, BooleanInnerProductUncheckedAdd, _>::inner_product(
+            BinaryRefPolyInnerProduct::inner_product::<UNCHECKED>(
                 poly,
                 &r_powers,
                 F::zero_with_cfg(&field_cfg),

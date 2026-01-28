@@ -4,12 +4,13 @@
 mod zip_common;
 
 use zinc_primality::MillerRabin;
-use zinc_utils::inner_product::{MBSInnerProductUnchecked, ScalarProduct};
+use zinc_utils::inner_product::{MBSInnerProduct, ScalarProduct};
 use zip_common::*;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use crypto_bigint::U64;
 use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_uint::Uint};
+use zinc_utils::UNCHECKED;
 use zip_plus::{
     code::raa::{RaaCode, RaaConfig},
     pcs::structs::ZipTypes,
@@ -30,7 +31,7 @@ impl ZipTypes for BenchZipTypes {
     type Comb = Self::CombR;
     type EvalDotChal = ScalarProduct;
     type CombDotChal = ScalarProduct;
-    type ArrCombRDotChal = MBSInnerProductUnchecked;
+    type ArrCombRDotChal = MBSInnerProduct;
 }
 
 #[derive(Clone, Copy)]
@@ -44,7 +45,7 @@ type Code = RaaCode<BenchZipTypes, BenchRaaConfig, 4>;
 
 fn zip_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");
-    do_bench::<BenchZipTypes, Code>(&mut group);
+    do_bench::<BenchZipTypes, Code, UNCHECKED>(&mut group);
     group.finish();
 }
 

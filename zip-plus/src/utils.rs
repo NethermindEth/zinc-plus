@@ -19,8 +19,7 @@ use rand_core::SeedableRng;
 /// - `coeffs`: Coefficients applied to each row.
 /// - `evals_iter`: Iterator over flattened evaluations arranged row-wise.
 /// - `convert_eval`: Function to convert each evaluation to the desired type.
-///   Should be just `Ok::<_, ZipError>` if no conversion is
-///   needed.
+///   Should be just `Ok::<_, ZipError>` if no conversion is needed.
 /// - `add_scaled`: Function to add a scaled evaluation to an accumulator.
 /// - `row_len`: Number of columns per evaluation row.
 /// - `zero`: Additive neutral element of `El`.

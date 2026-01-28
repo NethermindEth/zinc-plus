@@ -10,6 +10,7 @@ pub trait RaaConfig: Copy + Send + Sync {
     /// precomputed permutation.
     const PERMUTE_IN_PLACE: bool;
     /// Whether to check for overflows during encoding
+    // TODO: Unify with `CHECK_FOR_OVERFLOW` in `zinc_poly`
     const CHECK_FOR_OVERFLOWS: bool;
 }
 

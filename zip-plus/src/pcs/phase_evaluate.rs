@@ -14,9 +14,9 @@ use itertools::Itertools;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
-    add, cfg_iter_mut,
+    UNCHECKED, add, cfg_iter_mut,
     from_ref::FromRef,
-    inner_product::{InnerProduct, MBSInnerProductUnchecked},
+    inner_product::{InnerProduct, MBSInnerProduct},
     mul_by_scalar::MulByScalar,
     projectable_to_field::ProjectableToField,
 };
@@ -82,7 +82,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
         transcript.write_field_elements(&q_0_combined_row)?;
         // It is safe to use unchecked inner product since we are in a field.
-        let eval_f = MBSInnerProductUnchecked::inner_product(
+        let eval_f = MBSInnerProduct::inner_product::<UNCHECKED>(
             &q_0_combined_row,
             &q_1,
             F::zero_with_cfg(&field_cfg),

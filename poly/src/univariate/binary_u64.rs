@@ -5,7 +5,7 @@ use crate::{
 use core::mem::MaybeUninit;
 use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
 use derive_more::{Add, AddAssign, AsRef, Display, Mul, MulAssign, Product, Sub, SubAssign, Sum};
-use num_traits::{CheckedAdd, CheckedMul, CheckedSub, One, WrappingAdd, Zero};
+use num_traits::{CheckedAdd, CheckedMul, CheckedSub, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
     hash::Hash,
@@ -15,11 +15,9 @@ use std::{
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
+    CHECKED,
     from_ref::FromRef,
-    inner_product::{
-        BooleanInnerProductCheckedAdd, BooleanInnerProductUncheckedAdd, InnerProduct,
-        InnerProductError,
-    },
+    inner_product::{InnerProduct, InnerProductError},
     mul_by_scalar::WideningMulByScalar,
     named::Named,
     projectable_to_field::ProjectableToField,
@@ -328,28 +326,21 @@ impl<const DEGREE_PLUS_ONE: usize> From<&BinaryU64Poly<DEGREE_PLUS_ONE>>
     }
 }
 
-pub struct BinaryU64PolyInnerProduct<R, I, const DEGREE_PLUS_ONE: usize>(PhantomData<(R, I)>);
+pub struct BinaryU64PolyInnerProduct<R, const DEGREE_PLUS_ONE: usize>(PhantomData<R>);
 
-impl<Rhs, I, Out, const DEGREE_PLUS_ONE: usize>
-    InnerProduct<BinaryU64Poly<DEGREE_PLUS_ONE>, Rhs, Out>
-    for BinaryU64PolyInnerProduct<Rhs, I, DEGREE_PLUS_ONE>
+impl<Rhs, Out, const DEGREE_PLUS_ONE: usize> InnerProduct<BinaryU64Poly<DEGREE_PLUS_ONE>, Rhs, Out>
+    for BinaryU64PolyInnerProduct<Rhs, DEGREE_PLUS_ONE>
 where
-    Out: FromRef<Rhs> + for<'a> Add<&'a Out, Output = Out>,
-    I: InnerProduct<[Boolean], Rhs, Out>, // Unused!
+    Rhs: Clone,
+    Out: FromRef<Rhs> + CheckedAdd,
 {
     #[inline(always)]
     #[allow(clippy::arithmetic_side_effects)] // By design
-    fn inner_product(
+    fn inner_product<const CHECK: bool>(
         lhs: &BinaryU64Poly<DEGREE_PLUS_ONE>,
         rhs: &[Rhs],
         zero: Out,
     ) -> Result<Out, InnerProductError> {
-        // let lhs = DensePolynomial::<Boolean, DEGREE_PLUS_ONE>::new(array::from_fn(|i|
-        // {     Boolean::new((lhs.0 & (1 << i)) != 0)
-        // })
-        //     as [Boolean; DEGREE_PLUS_ONE]); // idk
-        // I::inner_product(&lhs.coeffs, rhs, zero)
-
         if rhs.len() != DEGREE_PLUS_ONE {
             return Err(InnerProductError::LengthMismatch {
                 lhs: DEGREE_PLUS_ONE,
@@ -361,7 +352,12 @@ where
         let mut bits = lhs.0;
         while bits != 0 {
             let i = bits.trailing_zeros() as usize;
-            acc = acc + &Out::from_ref(&rhs[i]);
+            let rhs = Out::from_ref(&rhs[i]);
+            if CHECK {
+                acc = acc.checked_add(&rhs).ok_or(InnerProductError::Overflow)?;
+            } else {
+                acc = acc + rhs;
+            }
             bits &= bits - 1;
         }
 
@@ -392,7 +388,7 @@ where
         };
 
         move |poly: &BinaryU64Poly<DEGREE_PLUS_ONE>| {
-            BinaryU64PolyInnerProduct::<_, BooleanInnerProductCheckedAdd, _>::inner_product(
+            BinaryU64PolyInnerProduct::<_, _>::inner_product::<CHECKED>(
                 poly,
                 &r_powers,
                 F::zero_with_cfg(&field_cfg),

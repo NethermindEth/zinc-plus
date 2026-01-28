@@ -208,6 +208,7 @@ mod tests {
     use num_traits::Zero;
     use rand::{Rng, rng};
     use zinc_poly::{mle::DenseMultilinearExtension, univariate::binary::BinaryPoly};
+    use zinc_utils::CHECKED;
 
     const INT_LIMBS: usize = U64::LIMBS;
 
@@ -632,7 +633,7 @@ mod tests {
 
         let (hint, _) = TestZip::commit(&param, &mle).unwrap();
 
-        let test_transcript = TestZip::test(&param, &mle, &hint).unwrap();
+        let test_transcript = TestZip::test::<CHECKED>(&param, &mle, &hint).unwrap();
         let actual_test_transcript_size_bytes = test_transcript.0.stream.get_ref().len();
         let expected_test_transcript_size_bytes =
             calculate_expected_test_transcript_size_bytes(&param);

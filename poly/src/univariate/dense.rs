@@ -610,11 +610,11 @@ where
     I: InnerProduct<[R], Rhs, Out>,
 {
     #[inline(always)]
-    fn inner_product(
+    fn inner_product<const CHECK: bool>(
         lhs: &DensePolynomial<R, DEGREE_PLUS_ONE>,
         rhs: &[Rhs],
         zero: Out,
     ) -> Result<Out, InnerProductError> {
-        I::inner_product(&lhs.coeffs, rhs, zero)
+        I::inner_product::<CHECK>(&lhs.coeffs, rhs, zero)
     }
 }

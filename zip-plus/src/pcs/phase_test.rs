@@ -17,10 +17,9 @@ use zinc_utils::{cfg_iter_mut, inner_product::InnerProduct, mul_by_scalar::MulBy
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-// TODO(alex): Return overflow checks!
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn test(
+    pub fn test<const CHECK_FOR_OVERFLOW: bool>(
         pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
         commit_hint: &ZipPlusHint<Zt::Cw>,
@@ -56,7 +55,11 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             let combined_row = combine_rows!(
                 &coeffs,
                 poly.evaluations.iter(),
-                |eval| Zt::EvalDotChal::inner_product(eval, &alphas, Zt::CombR::ZERO),
+                |eval| Zt::EvalDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
+                    eval,
+                    &alphas,
+                    Zt::CombR::ZERO
+                ),
                 |acc: Zt::CombR, scaled| acc + &scaled,
                 pp.linear_code.row_len(),
                 Zt::CombR::ZERO
@@ -110,6 +113,7 @@ mod tests {
     use crypto_primitives::crypto_bigint_int::Int;
     use num_traits::{ConstOne, Zero};
     use zinc_poly::mle::DenseMultilinearExtension;
+    use zinc_utils::CHECKED;
 
     const INT_LIMBS: usize = U64::LIMBS;
 
@@ -132,7 +136,7 @@ mod tests {
         let num_vars = 4;
         let (pp, poly) = setup_test_params(num_vars);
         let (hint, _) = TestZip::commit(&pp, &poly).unwrap();
-        let result = TestZip::test(&pp, &poly, &hint);
+        let result = TestZip::test::<CHECKED>(&pp, &poly, &hint);
         assert!(result.is_ok());
     }
 
@@ -141,7 +145,7 @@ mod tests {
         let num_vars = 4;
         let (pp, poly) = setup_poly_test_params(num_vars);
         let (hint, _) = TestPolyZip::commit(&pp, &poly).unwrap();
-        let result = TestPolyZip::test(&pp, &poly, &hint);
+        let result = TestPolyZip::test::<CHECKED>(&pp, &poly, &hint);
         assert!(result.is_ok());
     }
 
@@ -159,7 +163,7 @@ mod tests {
         let corrupted_merkle_tree = MerkleTree::new(&original_hint.cw_matrix.to_rows_slices());
         let corrupted_rows_hint = ZipPlusHint::new(original_hint.cw_matrix, corrupted_merkle_tree);
 
-        let result = TestZip::test(&pp, &poly, &corrupted_rows_hint);
+        let result = TestZip::test::<CHECKED>(&pp, &poly, &corrupted_rows_hint);
 
         assert!(result.is_ok());
     }
@@ -180,7 +184,7 @@ mod tests {
         // This hint is for a 4-variable poly, but we need it as a placeholder.
         let (hint, _) = TestZip::commit(&pp, &setup_test_params::<N, K, M>(num_vars).1).unwrap();
 
-        let result = TestZip::test(&pp, &oversized_poly, &hint);
+        let result = TestZip::test::<CHECKED>(&pp, &oversized_poly, &hint);
 
         assert!(result.is_err());
     }
