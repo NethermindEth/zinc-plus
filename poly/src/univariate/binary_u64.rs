@@ -4,7 +4,7 @@ use crate::{
 };
 use core::mem::MaybeUninit;
 use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
-use derive_more::{Add, AddAssign, AsRef, Display, Mul, MulAssign, Product, Sub, SubAssign, Sum};
+use derive_more::{AddAssign, AsRef, Display, MulAssign, Product, SubAssign};
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
@@ -24,7 +24,6 @@ use zinc_utils::{
 };
 
 #[derive(
-    Add,
     AddAssign,
     AsRef,
     Clone,
@@ -34,11 +33,8 @@ use zinc_utils::{
     Hash,
     PartialEq,
     Eq,
-    Mul,
     MulAssign,
-    Sub,
     SubAssign,
-    Sum,
     Product,
 )]
 #[repr(transparent)]
@@ -137,6 +133,16 @@ impl<'a, const DEGREE_PLUS_ONE: usize> Add<&'a Self> for BinaryU64Poly<DEGREE_PL
     }
 }
 
+impl<const DEGREE_PLUS_ONE: usize> Add for BinaryU64Poly<DEGREE_PLUS_ONE> {
+    type Output = Self;
+
+    #[allow(clippy::arithmetic_side_effects)]
+    #[inline(always)]
+    fn add(self, rhs: Self) -> Self::Output {
+        self.add(&rhs)
+    }
+}
+
 impl<'a, const DEGREE_PLUS_ONE: usize> Sub<&'a Self> for BinaryU64Poly<DEGREE_PLUS_ONE> {
     type Output = Self;
 
@@ -145,6 +151,16 @@ impl<'a, const DEGREE_PLUS_ONE: usize> Sub<&'a Self> for BinaryU64Poly<DEGREE_PL
     fn sub(self, rhs: &'a Self) -> Self::Output {
         // subtraction in GF(2) is XOR
         Self(self.0 ^ rhs.0)
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> Sub for BinaryU64Poly<DEGREE_PLUS_ONE> {
+    type Output = Self;
+
+    #[allow(clippy::arithmetic_side_effects)]
+    #[inline(always)]
+    fn sub(self, rhs: Self) -> Self::Output {
+        self.sub(&rhs)
     }
 }
 
