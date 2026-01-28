@@ -339,7 +339,7 @@ where
     F: PrimeField + FromRef<F> + 'static,
 {
     #![allow(clippy::arithmetic_side_effects)] // False alert, field operations are safe
-    fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static {
+    fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + Send + Sync + 'static {
         let field_cfg = sampled_value.cfg().clone();
         let r_powers = {
             // Preprocess powers prior to inner product.

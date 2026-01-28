@@ -53,7 +53,7 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize>
 {
     fn prepare_projection(
         _sampled_value: &ConstMontyField<Mod, LIMBS>,
-    ) -> impl Fn(&Self) -> ConstMontyField<Mod, LIMBS> + 'static {
+    ) -> impl Fn(&Self) -> ConstMontyField<Mod, LIMBS> + Send + Sync + 'static {
         // No need to read anything
         |value: &Int<LIMBS2>| value.into()
     }

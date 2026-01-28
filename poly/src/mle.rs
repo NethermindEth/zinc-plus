@@ -6,7 +6,7 @@ pub use dense::DenseMultilinearExtension;
 use rand::prelude::*;
 use std::{
     fmt::Debug,
-    ops::{Add, AddAssign, Index, SubAssign},
+    ops::{Add, AddAssign, SubAssign},
 };
 use zinc_utils::mul_by_scalar::MulByScalar;
 
@@ -27,7 +27,6 @@ pub trait MultilinearExtension<T>:
     + for<'a> AddAssign<&'a Self>
     + for<'a> AddAssign<(T, &'a Self)>
     + for<'a> SubAssign<&'a Self>
-    + Index<usize>
 {
     /// Reduce the number of variables of `self` by fixing the
     /// `partial_point.len()` variables at `partial_point`.
