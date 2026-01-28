@@ -1,6 +1,6 @@
 use crate::{
     ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
-    univariate::{binary_shared::prepare_projection, dense::DensePolynomial},
+    univariate::{dense::DensePolynomial, prepare_projection},
 };
 use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
 use derive_more::{
