@@ -1,6 +1,6 @@
 use crate::{
     ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
-    univariate::dense::DensePolynomial,
+    univariate::{dense::DensePolynomial, prepare_projection},
 };
 use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
 use derive_more::{
@@ -339,32 +339,10 @@ impl<F, const DEGREE_PLUS_ONE: usize> ProjectableToField<F> for BinaryRefPoly<DE
 where
     F: PrimeField + FromRef<F> + 'static,
 {
-    #![allow(clippy::arithmetic_side_effects)] // False alert, field operations are safe
     fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static {
-        let field_cfg = sampled_value.cfg().clone();
-        let r_powers = {
-            // Preprocess powers prior to inner product.
-            let mut r_powers = Vec::with_capacity(DEGREE_PLUS_ONE);
-
-            let mut curr = F::one_with_cfg(&field_cfg);
-            r_powers.push(curr.clone());
-
-            for _ in 1..DEGREE_PLUS_ONE {
-                curr *= sampled_value;
-                r_powers.push(curr.clone());
-            }
-
-            r_powers
-        };
-
-        move |poly: &BinaryRefPoly<DEGREE_PLUS_ONE>| {
-            BinaryRefPolyInnerProduct::inner_product::<UNCHECKED>(
-                poly,
-                &r_powers,
-                F::zero_with_cfg(&field_cfg),
-            )
-            .expect("Failed to evaluate polynomial")
-        }
+        prepare_projection::<F, Self, _, DEGREE_PLUS_ONE>(sampled_value, |poly, i| {
+            poly.0.coeffs[i].inner()
+        })
     }
 }
 

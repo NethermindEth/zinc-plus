@@ -35,7 +35,7 @@ where
 {
     fn prepare_projection(
         sampled_value: &BoxedMontyField,
-    ) -> impl Fn(&Self) -> BoxedMontyField + 'static {
+    ) -> impl Fn(&Self) -> BoxedMontyField + Send + Sync + 'static {
         let config = sampled_value.cfg().clone();
         move |value: &T| value.into_with_cfg(&config)
     }

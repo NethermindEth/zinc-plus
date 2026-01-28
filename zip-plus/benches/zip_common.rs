@@ -99,7 +99,7 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
             let row_len = params.linear_code.row_len();
             let poly = DenseMultilinearExtension::<<Zt as ZipTypes>::Eval>::rand(P, &mut rng);
             b.iter(|| {
-                let cw = ZipPlus::encode_rows(&params, row_len, &poly.evaluations);
+                let cw = ZipPlus::encode_rows(&params, row_len, &poly);
                 black_box(cw)
             })
         },

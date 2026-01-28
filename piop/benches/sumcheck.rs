@@ -38,7 +38,7 @@ pub fn bench_simple_product<F, const LIMBS: usize>(
     let b: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
     let c: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
 
-    let nvars = zinc_poly::utils::log2(witness_size) as usize;
+    let nvars = zinc_utils::log2(witness_size) as usize;
 
     let params = format!("LIMBS={}/nvars={}", LIMBS, nvars);
 
@@ -114,7 +114,6 @@ pub fn bench_simple_product<F, const LIMBS: usize>(
                             &mut transcript,
                             nvars,
                             3,
-                            proof.0.extract_sum(),
                             &proof,
                             field_cfg,
                         )

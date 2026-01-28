@@ -4,7 +4,7 @@ use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use zinc_poly::{EvaluatablePolynomial, univariate::nat_evaluation::NatEvaluatedPoly};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 
-use crate::sumcheck::prover::ProverMsg;
+use crate::sumcheck::prover::{NatEvaluatedPolyWithoutConstant, ProverMsg};
 
 use super::SumCheckError;
 
@@ -23,7 +23,7 @@ pub struct VerifierState<F: PrimeField> {
     pub finished: bool,
     /// A list storing the univariate polynomial in evaluation form sent by the
     /// prover at each round so far.
-    pub polynomials_received: Vec<NatEvaluatedPoly<F>>,
+    pub polynomials_received: Vec<NatEvaluatedPolyWithoutConstant<F>>,
     /// A list storing the randomness sampled by the verifier at each round so
     /// far.
     pub randomness: Vec<F>,
@@ -73,9 +73,9 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
             panic!("Incorrect verifier state: Verifier is already finished.");
         }
 
-        // Now, verifier should check if the received P(0) + P(1) = expected. The check
-        // is moved to `check_and_generate_subclaim`, and will be done after the
-        // last round.
+        // The constant term is omitted from prover messages. The verifier stores the
+        // provided evaluations and will reconstruct the missing value in
+        // `check_and_generate_subclaim`.
 
         let msg: F = transcript.get_field_challenge(&self.config);
         self.randomness.push(msg.clone());
@@ -96,10 +96,10 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
 
     /// Verify the sumcheck phase, and generate the subclaim.
     ///
-    /// If the asserted sum is correct, then the multilinear polynomial
-    /// evaluated at `subclaim.point` is `subclaim.expected_evaluation`.
-    /// Otherwise, it is highly unlikely that those two will be equal.
-    /// Larger field size guarantees smaller soundness error.
+    /// The verifier reconstructs the missing constant term under the
+    /// assumption that `P(0) + P(1) == expected`. If the asserted sum is
+    /// correct, then the multilinear polynomial evaluated at `subclaim.point`
+    /// is `subclaim.expected_evaluation`.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn check_and_generate_subclaim(
         self,
@@ -113,34 +113,31 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
         if self.polynomials_received.len() != self.nv {
             panic!("insufficient rounds");
         }
-        for i in 0..self.nv {
-            let evaluations = &self.polynomials_received[i].evaluations;
-            if evaluations.len() != self.max_multiplicands + 1 {
+        for (i, evaluations_without_constant) in self.polynomials_received.iter().enumerate() {
+            let expected_len = if self.max_multiplicands == 0 {
+                0
+            } else {
+                self.max_multiplicands
+            };
+            if evaluations_without_constant.len() != expected_len {
                 return Err(SumCheckError::MaxDegreeExceeded);
             }
 
-            let p0 = &evaluations[0];
-            if self.max_multiplicands > 0 {
-                let p1 = &evaluations[1];
-                if p0.clone() + p1.clone() != expected {
-                    return Err(SumCheckError::SumCheckFailed(
-                        i,
-                        Box::new(p0.clone() + p1.clone()),
-                        Box::new(expected),
-                    ));
-                }
+            let constant_term = if self.max_multiplicands == 0 {
+                expected.clone()
             } else {
-                // Degree 0, constant polynomial
-                if p0.clone() != expected {
-                    return Err(SumCheckError::SumCheckFailed(
-                        i,
-                        Box::new(p0.clone()),
-                        Box::new(expected),
-                    ));
-                }
-            }
+                let p1 = evaluations_without_constant
+                    .first()
+                    .expect("degree > 0 implies the polynomial has an evaluation at 1");
+                expected.clone() - p1.clone()
+            };
+            let mut reconstructed_evaluations =
+                Vec::with_capacity(evaluations_without_constant.len() + 1);
+            reconstructed_evaluations.push(constant_term);
+            reconstructed_evaluations.extend_from_slice(evaluations_without_constant);
 
-            expected = self.polynomials_received[i].evaluate_at_point(&self.randomness[i])?;
+            let reconstructed_poly = NatEvaluatedPoly::new(reconstructed_evaluations);
+            expected = reconstructed_poly.evaluate_at_point(&self.randomness[i])?;
         }
 
         Ok(SubClaim {

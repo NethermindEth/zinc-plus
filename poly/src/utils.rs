@@ -8,20 +8,6 @@ use rayon::prelude::*;
 
 use crate::mle::DenseMultilinearExtension;
 
-/// Returns ceil(log2(x)).
-/// Copied from ark-std.
-#[inline(always)]
-#[allow(clippy::arithmetic_side_effects)]
-pub const fn log2(x: usize) -> u32 {
-    if x == 0 {
-        0
-    } else if x.is_power_of_two() {
-        1usize.leading_zeros() - x.leading_zeros()
-    } else {
-        0usize.leading_zeros() - x.leading_zeros()
-    }
-}
-
 /// A `enum` specifying the possible failure modes of the arithmetics.
 #[derive(displaydoc::Display, Debug, Error)]
 pub enum ArithErrors {
