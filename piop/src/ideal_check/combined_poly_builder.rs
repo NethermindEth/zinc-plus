@@ -1,14 +1,16 @@
-use std::{collections::HashMap, mem::MaybeUninit};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+use std::mem::MaybeUninit;
 
-use crypto_primitives::{DenseRowMatrix, FromWithConfig, Matrix, PrimeField, Ring, Semiring};
+use crypto_primitives::{FromWithConfig, PrimeField, Semiring};
 use itertools::{Itertools, max};
 use zinc_poly::{
     CoefficientProjectable,
     mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero},
-    univariate::{dense::DensePolynomial, dynamic::DynamicPolynomial},
+    univariate::dynamic::DynamicPolynomial,
 };
 use zinc_uair::{ConstraintBuilder, Uair, ideal::DummyIdeal};
-use zinc_utils::{cfg_iter, cfg_iter_mut};
+use zinc_utils::{cfg_iter, cfg_iter_mut, from_ref::FromRef};
 
 pub struct CombinedPolyRowBuilder<F: PrimeField> {
     combined_evaluations: Vec<DynamicPolynomial<F>>,
@@ -32,6 +34,7 @@ impl<F: PrimeField> CombinedPolyRowBuilder<F> {
     }
 }
 
+#[allow(clippy::arithmetic_side_effects)]
 pub fn compute_combined_polynomials<F, R, Rcoeff, U, const DEGREE_PLUS_ONE: usize>(
     trace: &[DenseMultilinearExtension<R>],
     projecting_element: &F,
@@ -47,7 +50,7 @@ where
 
     let mut trace_matrix: Vec<Vec<DynamicPolynomial<F>>> = (0..num_rows)
         .map(|_| Vec::with_capacity(num_cols))
-        .collect_vec();
+        .collect();
 
     cfg_iter_mut!(trace_matrix)
         .enumerate()
@@ -80,6 +83,7 @@ where
                 |x, y| {
                     Some(DynamicPolynomial::from(y.project_coefficients(projecting_element)) * x)
                 },
+                DummyIdeal::from_ref,
             );
 
             let mut combined_evaluations = constraint_builder.combined_evaluations;
@@ -95,7 +99,7 @@ where
 
             (max_degree, combined_evaluations)
         })
-        .collect_vec();
+        .collect();
 
     combined_poly_rows.push(
         combined_poly_rows
@@ -120,7 +124,7 @@ where
                                 row[constraint].coeffs[coeff].inner().clone()
                             }
                         })
-                        .collect_dense_mle_with_zero(&field_zero.inner())
+                        .collect_dense_mle_with_zero(field_zero.inner())
                 })
                 .collect_vec()
         })

@@ -64,17 +64,18 @@ pub trait Uair<R: Semiring + 'static> {
     ///   implementation.
     /// - `mbs`: a closure that allows to multiply expressions by `R`.
     ///   Same rationale as for `from_ref`.
-    fn constrain_general<B, FromR, MulByScalar>(
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
         b: &mut B,
         up: &[B::Expr],
         down: &[B::Expr],
         from_ref: FromR,
         mbs: MulByScalar,
+        ideal_from_ref: IFromR,
     ) where
         B: ConstraintBuilder,
         FromR: Fn(&R) -> B::Expr,
         MulByScalar: Fn(&B::Expr, &R) -> Option<B::Expr>,
-        B::Ideal: FromRef<Self::Ideal>;
+        IFromR: Fn(&Self::Ideal) -> B::Ideal;
 
     // Same as `constrain_general` but `from_ref` and `mbs`
     // come from the trait implementations.
@@ -84,8 +85,13 @@ pub trait Uair<R: Semiring + 'static> {
         B::Expr: FromRef<R> + for<'a> MulByScalar<&'a R>,
         B::Ideal: FromRef<Self::Ideal>,
     {
-        Self::constrain_general(b, up, down, B::Expr::from_ref, |x, y| {
-            B::Expr::mul_by_scalar(x, y)
-        })
+        Self::constrain_general(
+            b,
+            up,
+            down,
+            B::Expr::from_ref,
+            |x, y| B::Expr::mul_by_scalar(x, y),
+            B::Ideal::from_ref,
+        )
     }
 }

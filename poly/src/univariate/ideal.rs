@@ -1,10 +1,10 @@
-use crypto_primitives::{FixedSemiring, FromWithConfig, Semiring};
+use crypto_primitives::{FixedSemiring, FromWithConfig, PrimeField, Semiring};
+use num_traits::Zero;
 use zinc_uair::ideal::{Ideal, IdealCheck};
 use zinc_utils::from_ref::FromRef;
 
 use crate::{EvaluatablePolynomial, univariate::dynamic::DynamicPolynomial};
 
-use super::dense::DensePolynomial;
 
 #[derive(Clone, Copy, Debug)]
 pub enum DegreeOneIdeal<R: Semiring> {
@@ -32,23 +32,39 @@ impl<R: Semiring> Ideal for DegreeOneIdeal<R> {
     }
 }
 
-impl<R, F> IdealCheck<DegreeOneIdeal<R>> for DynamicPolynomial<F>
-where
-    R: Semiring,
-    F: FromWithConfig<R>,
-{
-    fn is_contained_in(&self, ideal: &DegreeOneIdeal<R>, zero: &Self) -> bool {
+impl<F: PrimeField> DegreeOneIdeal<F> {
+    pub fn from_with_cfg<R>(ideal_over_ring: &DegreeOneIdeal<R>, field_cfg: &F::Config) -> Self
+    where
+        R: Semiring,
+        F: FromWithConfig<R>,
+    {
+        match ideal_over_ring {
+            DegreeOneIdeal::DegreeOneIdeal { generating_root } => Self::DegreeOneIdeal {
+                generating_root: F::from_with_cfg(generating_root.clone(), field_cfg),
+            },
+
+            DegreeOneIdeal::ZeroIdeal => Self::ZeroIdeal,
+        }
+    }
+}
+
+impl<F: PrimeField> IdealCheck<DegreeOneIdeal<F>> for DynamicPolynomial<F> {
+    fn is_contained_in(&self, ideal: &DegreeOneIdeal<F>) -> bool {
+        if self.is_zero() {
+            return true;
+        }
+
         match ideal {
             DegreeOneIdeal::DegreeOneIdeal { generating_root } => {
-                let field_cfg = zero.coeffs[0].cfg();
+                let field_cfg = self.coeffs[0].cfg();
                 let root_in_field = F::from_with_cfg(generating_root.clone(), field_cfg);
-                self.evaluate_at_point(&root_in_field)
-                    .expect("arithmetic overflow")
-                    == zero
+                F::is_zero(
+                    &self
                         .evaluate_at_point(&root_in_field)
-                        .expect("should be fine")
+                        .expect("arithmetic overflow"),
+                )
             }
-            DegreeOneIdeal::ZeroIdeal => self == zero,
+            DegreeOneIdeal::ZeroIdeal => self.is_zero(),
         }
     }
 }

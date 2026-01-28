@@ -1,5 +1,7 @@
+mod batched_ideal_check;
 mod combined_poly_builder;
 
+use batched_ideal_check::*;
 use crypto_primitives::{FixedSemiring, FromWithConfig, PrimeField, Semiring};
 use derive_more::From;
 use itertools::Itertools;
@@ -8,20 +10,19 @@ use rayon::prelude::*;
 use std::marker::PhantomData;
 use thiserror::Error;
 use zinc_poly::{
-    CoefficientProjectable, EvaluationError, Polynomial,
+    CoefficientProjectable, EvaluationError,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::{dense::DensePolynomial, dynamic::DynamicPolynomial},
+    univariate::dynamic::DynamicPolynomial,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     ConstraintBuilder, Uair,
-    dummy_semiring::DummySemiring,
     ideal::{DummyIdeal, Ideal, IdealCheck},
-    ideal_collector::{IdealCollector, IdealCollectorError, collect_ideals},
+    ideal_collector::collect_ideals,
 };
-use zinc_utils::{cfg_into_iter, cfg_iter};
+use zinc_utils::cfg_iter;
 use zinc_utils::{
-    from_ref::FromRef, inner_transparent_field::InnerTransparentField,
+    inner_transparent_field::InnerTransparentField,
     projectable_to_field::ProjectableToField,
 };
 
@@ -36,9 +37,9 @@ pub struct ProverState<F: PrimeField> {
     pub combined_mles: Vec<Vec<DenseMultilinearExtension<F::Inner>>>,
 }
 
-pub struct SubClaim<F: PrimeField, const DEGREE_PLUS_ONE: usize> {
+pub struct SubClaim<F: PrimeField> {
     pub point: Vec<F>,
-    pub value: DensePolynomial<F, DEGREE_PLUS_ONE>,
+    pub value: DynamicPolynomial<F>,
 }
 
 pub type Result<T, R, I> = std::result::Result<T, IdealCheckError<R, I>>;
@@ -109,19 +110,22 @@ where
     }
 
     #[allow(clippy::type_complexity)]
-    pub fn verify_as_subprotocol<U, F>(
+    pub fn verify_as_subprotocol<U, F, IdealOverF, IdealOverFFromRef>(
         transcript: &mut impl Transcript,
         proof: Proof<DynamicPolynomial<F>>,
         num_constraints: usize,
         num_vars: usize,
+        ideal_over_f_from_ref: IdealOverFFromRef,
         field_cfg: &F::Config,
-    ) -> Result<Vec<SubClaim<F, DEGREE_PLUS_ONE>>, DensePolynomial<F, DEGREE_PLUS_ONE>, U::Ideal>
+    ) -> Result<Vec<SubClaim<F>>, DynamicPolynomial<F>, IdealOverF>
     where
         U: Uair<R>,
         R: ProjectableToField<F>,
-        DynamicPolynomial<F>: IdealCheck<U::Ideal>,
         F: PrimeField,
         F::Inner: ConstTranscribable,
+        IdealOverF: Ideal,
+        DynamicPolynomial<F>: IdealCheck<IdealOverF>,
+        IdealOverFFromRef: Fn(&U::Ideal) -> IdealOverF,
     {
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
@@ -138,9 +142,13 @@ where
 
         let ideal_collector = collect_ideals::<_, U>(num_constraints);
 
-        ideal_collector.batched_ideal_check(
+        batched_ideal_check::<_, _>(
+            &ideal_collector
+                .ideals
+                .iter()
+                .map(ideal_over_f_from_ref)
+                .collect_vec(),
             &combined_mle_values,
-            &DynamicPolynomial::zero_with_cfg(field_cfg),
         )?;
 
         Ok(evaluation_points
@@ -179,7 +187,7 @@ pub enum IdealCheckError<R, I> {
     #[error("ideal check prover failed to evaluate an mle: {0}")]
     MleEvaluationError(EvaluationError),
     #[error("mle evaluation ideal check failure: {0}")]
-    IdealCollectorError(IdealCollectorError<R, I>),
+    IdealCollectorError(BatchedIdealCheckError<R, I>),
 }
 
 #[cfg(test)]
@@ -188,14 +196,14 @@ mod tests {
     use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
     use itertools::Itertools;
     use num_traits::Zero;
-    use rand::{Rng, rng};
+    
     use zinc_poly::{
         mle::DenseMultilinearExtension,
-        univariate::{binary::BinaryPoly, dense::DensePolynomial},
+        univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal},
     };
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::constraint_counter::count_constraints;
-    use zinc_utils::from_ref::FromRef;
+    
 
     use crate::{ideal_check::IdealCheckProtocol, tests::test_airs::TestAirNoMultiplication};
 
@@ -212,8 +220,6 @@ mod tests {
 
     #[test]
     fn test_successful_verification() {
-        let mut rng = rng();
-
         type Poly = DensePolynomial<Int<5>, 32>;
 
         let trace: Vec<DenseMultilinearExtension<Poly>> = vec![
@@ -251,11 +257,17 @@ mod tests {
             .unwrap();
 
         assert!(
-            IdealCheckProtocol::<_, Int<5>, _>::verify_as_subprotocol::<TestAirNoMultiplication, F>(
+            IdealCheckProtocol::<_, Int<5>, _>::verify_as_subprotocol::<
+                TestAirNoMultiplication,
+                F,
+                _,
+                _,
+            >(
                 &mut transcript.clone(),
                 proof,
                 count_constraints::<Poly, TestAirNoMultiplication>(),
                 4,
+                |ideal_over_ring| { DegreeOneIdeal::from_with_cfg(ideal_over_ring, &field_cfg) },
                 &field_cfg,
             )
             .is_ok()
