@@ -642,7 +642,8 @@ mod tests {
             expected_test_transcript_size_bytes
         );
 
-        let (_, proof) = TestZip::evaluate::<F>(&param, &mle, &point, test_transcript).unwrap();
+        let (_, proof) =
+            TestZip::evaluate::<F, CHECKED>(&param, &mle, &point, test_transcript).unwrap();
         let actual_proof_size_bytes = proof.0.len();
         let expected_proof_size_bytes = calculate_expected_proof_size_bytes(&param);
         assert_eq!(actual_proof_size_bytes, expected_proof_size_bytes);

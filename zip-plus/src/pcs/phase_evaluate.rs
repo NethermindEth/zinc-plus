@@ -25,7 +25,7 @@ use zinc_utils::{
 use rayon::prelude::*;
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
-    pub fn evaluate<F>(
+    pub fn evaluate<F, const CHECK_FOR_OVERFLOW: bool>(
         pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
         point: &[Zt::Pt],
@@ -67,6 +67,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let q_0_combined_row = if num_rows > 1 {
             // Return the evaluation row combination
             combine_rows!(
+                CHECK_FOR_OVERFLOW,
                 &q_0,
                 evaluations.iter(),
                 Ok::<_, ZipError>,

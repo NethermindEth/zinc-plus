@@ -30,7 +30,7 @@ use rand_core::SeedableRng;
 #[macro_export]
 #[allow(unused_imports)]
 macro_rules! combine_rows {
-    ($coeffs:expr, $evals_iter:expr, $convert_eval:expr, $add_scaled:expr, $row_len:expr, $zero:expr) => {{
+    ($check:ident, $coeffs:expr, $evals_iter:expr, $convert_eval:expr, $add_scaled:expr, $row_len:expr, $zero:expr) => {{
         let row_len = $row_len;
         let mut combined_row = Vec::with_capacity(row_len);
 
@@ -46,7 +46,7 @@ macro_rules! combine_rows {
                 {
                     let eval = $convert_eval(eval)?;
                     let scaled = eval
-                        .mul_by_scalar(coeff)
+                        .mul_by_scalar::<$check>(coeff)
                         .expect("Cannot multiply evaluation by coefficient");
                     acc = $add_scaled(acc, scaled);
                 }
@@ -71,9 +71,10 @@ pub(super) fn shuffle_seeded<T>(slice: &mut [T], seed: u64) {
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects)]
 mod test {
     use crate::ZipError;
-    use zinc_utils::{cfg_iter_mut, mul_by_scalar::MulByScalar};
+    use zinc_utils::{CHECKED, cfg_iter_mut, mul_by_scalar::MulByScalar};
 
     #[cfg(feature = "parallel")]
     use rayon::prelude::*;
@@ -85,6 +86,7 @@ mod test {
         let row_len = 2;
 
         let result = combine_rows!(
+            CHECKED,
             &coeffs,
             evaluations.iter(),
             Ok::<_, ZipError>,
@@ -104,6 +106,7 @@ mod test {
         let row_len = 2;
 
         let result = combine_rows!(
+            CHECKED,
             &coeffs,
             evaluations.iter(),
             Ok::<_, ZipError>,
@@ -123,6 +126,7 @@ mod test {
         let row_len = 2;
 
         let result = combine_rows!(
+            CHECKED,
             &coeffs,
             evaluations.iter(),
             Ok::<_, ZipError>,

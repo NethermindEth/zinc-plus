@@ -53,6 +53,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
             // u' in the Zinc paper
             let combined_row = combine_rows!(
+                CHECK_FOR_OVERFLOW,
                 &coeffs,
                 poly.evaluations.iter(),
                 |eval| Zt::EvalDotChal::inner_product::<CHECK_FOR_OVERFLOW>(

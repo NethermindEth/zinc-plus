@@ -62,7 +62,7 @@ where
 struct BenchRaaConfig;
 impl RaaConfig for BenchRaaConfig {
     const PERMUTE_IN_PLACE: bool = true;
-    const CHECK_FOR_OVERFLOWS: bool = false;
+    const CHECK_FOR_OVERFLOWS: bool = UNCHECKED;
 }
 
 type SomeRaaCode<const D_PLUS_ONE: usize> =

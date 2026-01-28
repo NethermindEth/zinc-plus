@@ -50,7 +50,10 @@ where
 
         lhs.iter()
             .zip(rhs)
-            .map(|(lhs, rhs)| lhs.mul_by_scalar(rhs).ok_or(InnerProductError::Overflow))
+            .map(|(lhs, rhs)| {
+                lhs.mul_by_scalar::<CHECK>(rhs)
+                    .ok_or(InnerProductError::Overflow)
+            })
             .try_fold(zero, |acc, product| {
                 let product = Out::from_ref(&product?);
                 if CHECK {
@@ -85,7 +88,7 @@ where
             })
         } else {
             Ok(Out::from_ref(lhs)
-                .mul_by_scalar(&point[0])
+                .mul_by_scalar::<CHECK>(&point[0])
                 .ok_or(InnerProductError::Overflow)?)
         }
     }

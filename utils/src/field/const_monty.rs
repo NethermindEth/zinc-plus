@@ -2,7 +2,6 @@ use crypto_bigint::modular::{ConstMontyForm, ConstMontyParams};
 use crypto_primitives::{
     crypto_bigint_const_monty::ConstMontyField, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
 };
-use num_traits::CheckedMul;
 use std::ops::MulAssign;
 
 use crate::{
@@ -13,8 +12,10 @@ use crate::{
 impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> MulByScalar<&Self>
     for ConstMontyField<Mod, LIMBS>
 {
-    fn mul_by_scalar(&self, rhs: &Self) -> Option<Self> {
-        self.checked_mul(rhs)
+    #[allow(clippy::arithmetic_side_effects)] // False alert
+    fn mul_by_scalar<const CHECK: bool>(&self, rhs: &Self) -> Option<Self> {
+        // Multiplication cannot overflow
+        Some(self * rhs)
     }
 }
 

@@ -487,8 +487,9 @@ mod tests {
 
         let test_mle2_proof =
             TestZip::test::<CHECKED>(&pp, &mle2, &data).expect("test phase should succeed");
-        let (eval_f, eval_mle2_proof) = TestZip::evaluate::<F>(&pp, &mle2, &point, test_mle2_proof)
-            .expect("evaluation phase should succeed");
+        let (eval_f, eval_mle2_proof) =
+            TestZip::evaluate::<F, CHECKED>(&pp, &mle2, &point, test_mle2_proof)
+                .expect("evaluation phase should succeed");
 
         let eval_mle1 = mle1
             .evaluate(&point, Zero::zero())
@@ -531,7 +532,7 @@ mod tests {
 
         let test_transcript = TestZip::test::<CHECKED>(&pp, &mle, &corrupted_data)
             .expect("test phase should succeed");
-        let (eval_f, proof) = TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript)
+        let (eval_f, proof) = TestZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_transcript)
             .expect("evaluation phase should succeed");
         let field_cfg = eval_f.cfg().clone();
 
@@ -560,8 +561,9 @@ mod tests {
 
         let test_transcript =
             TestZip::test::<CHECKED>(&pp, &mle, &data).expect("test phase should succeed");
-        let (correct_eval_f, proof) = TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript)
-            .expect("evaluation phase should succeed");
+        let (correct_eval_f, proof) =
+            TestZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_transcript)
+                .expect("evaluation phase should succeed");
         let field_cfg = correct_eval_f.cfg().clone();
 
         let incorrect_eval_f = correct_eval_f + F::one_with_cfg(&field_cfg);
@@ -601,8 +603,9 @@ mod tests {
 
         let test_transcript =
             TestZip::test::<CHECKED>(&pp, &mle, &data).expect("test phase should succeed");
-        let (eval_f, mut proof) = TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript)
-            .expect("evaluation phase should succeed");
+        let (eval_f, mut proof) =
+            TestZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_transcript)
+                .expect("evaluation phase should succeed");
         let field_cfg = eval_f.cfg().clone();
 
         assert_eq!(
@@ -681,7 +684,8 @@ mod tests {
         data.cw_matrix.to_rows_slices_mut()[0][0] += Int::ONE;
 
         let test_transcript = TestZip::test::<CHECKED>(&pp, &mle, &data).unwrap();
-        let (eval_f, proof) = TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();
+        let (eval_f, proof) =
+            TestZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_transcript).unwrap();
         let field_cfg = eval_f.cfg().clone();
 
         let point_f = point
@@ -712,7 +716,7 @@ mod tests {
 
         let test_transcript = TestZip::test::<CHECKED>(&pp, &mle, &data).unwrap();
         let (eval_f, mut proof) =
-            TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();
+            TestZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_transcript).unwrap();
         let field_cfg = eval_f.cfg().clone();
 
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
@@ -758,7 +762,7 @@ mod tests {
 
         let test_transcript = TestZip::test::<CHECKED>(&pp, &mle, &data).unwrap();
         let (real_eval_f, proof) =
-            TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();
+            TestZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_transcript).unwrap();
         let field_cfg = real_eval_f.cfg().clone();
 
         let eval_f = mle
@@ -788,7 +792,7 @@ mod tests {
 
         let test_transcript = TestZip::test::<CHECKED>(&pp, &mle, &data).unwrap();
         let (real_eval_f, proof) =
-            TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();
+            TestZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_transcript).unwrap();
         let field_cfg = real_eval_f.cfg().clone();
 
         let eval_f = mle
@@ -818,7 +822,8 @@ mod tests {
         point[0] = <Zt as ZipTypes>::Pt::ONE;
 
         let test_transcript = TestZip::test::<CHECKED>(&pp, &poly, &data).unwrap();
-        let (eval_f, proof) = TestZip::evaluate::<F>(&pp, &poly, &point, test_transcript).unwrap();
+        let (eval_f, proof) =
+            TestZip::evaluate::<F, CHECKED>(&pp, &poly, &point, test_transcript).unwrap();
         let field_cfg = eval_f.cfg().clone();
 
         let expected_eval = poly
@@ -847,7 +852,8 @@ mod tests {
         let point: Vec<<Zt as ZipTypes>::Pt> = vec![Int::from(1), Int::from(2)];
 
         let test_transcript = TestZip::test::<CHECKED>(&pp, &poly, &hint).unwrap();
-        let (eval_f, proof) = TestZip::evaluate::<F>(&pp, &poly, &point, test_transcript).unwrap();
+        let (eval_f, proof) =
+            TestZip::evaluate::<F, CHECKED>(&pp, &poly, &point, test_transcript).unwrap();
         let field_cfg = eval_f.cfg().clone();
 
         let expected_eval = poly
@@ -880,7 +886,7 @@ mod tests {
 
         let test_transcript = TestZip::test::<CHECKED>(&pp, &mle, &data).unwrap();
         let (real_eval_f, mut proof) =
-            TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();
+            TestZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_transcript).unwrap();
         let field_cfg = real_eval_f.cfg().clone();
 
         let eval_f = mle
@@ -925,7 +931,7 @@ mod tests {
             // Prover produces a proof once (exactly as in the bench)
             let test_transcript = TestZip::test::<CHECKED>(&pp, &mle, &data).unwrap();
             let (eval_f, proof) =
-                TestZip::evaluate::<F>(&pp, &mle, &point, test_transcript).unwrap();
+                TestZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_transcript).unwrap();
             let field_cfg = eval_f.cfg().clone();
 
             assert_eq!(
@@ -963,7 +969,7 @@ mod tests {
             // Prover produces a proof once (exactly as in the bench)
             let test_proof = TestPolyZip::test::<CHECKED>(&pp, &mle, &data).unwrap();
             let (eval_f, eval_proof) =
-                TestPolyZip::evaluate::<F>(&pp, &mle, &point, test_proof).unwrap();
+                TestPolyZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_proof).unwrap();
             let field_cfg = eval_f.cfg().clone();
 
             let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();

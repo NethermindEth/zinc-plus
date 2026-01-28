@@ -38,7 +38,7 @@ impl ZipTypes for BenchZipTypes {
 struct BenchRaaConfig;
 impl RaaConfig for BenchRaaConfig {
     const PERMUTE_IN_PLACE: bool = false;
-    const CHECK_FOR_OVERFLOWS: bool = false;
+    const CHECK_FOR_OVERFLOWS: bool = UNCHECKED;
 }
 
 type Code = RaaCode<BenchZipTypes, BenchRaaConfig, 4>;

@@ -535,14 +535,14 @@ impl<'a, R, S, const DEGREE_PLUS_ONE: usize> MulByScalar<&'a S>
 where
     R: FixedSemiring + MulByScalar<&'a S>,
 {
-    fn mul_by_scalar(&self, rhs: &'a S) -> Option<Self> {
+    fn mul_by_scalar<const CHECK: bool>(&self, rhs: &'a S) -> Option<Self> {
         let mut coeffs = self.coeffs.clone();
 
         coeffs
             .iter_mut()
             .filter(|coeff| !coeff.is_zero())
             .try_for_each(|x| {
-                *x = x.mul_by_scalar(rhs)?;
+                *x = x.mul_by_scalar::<CHECK>(rhs)?;
                 Some(())
             })?;
 

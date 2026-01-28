@@ -248,7 +248,7 @@ where
         (field_cfg, projecting_element)
     };
 
-    let (eval_f, proof) = ZipPlus::evaluate(&pp, &poly, &point, transcript).unwrap();
+    let (eval_f, proof) = ZipPlus::evaluate::<_, CHECKED>(&pp, &poly, &point, transcript).unwrap();
 
     // Verify the evaluation is done correctly
     {

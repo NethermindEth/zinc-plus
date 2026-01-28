@@ -12,8 +12,8 @@ use crypto_primitives::{Matrix, PrimeField, Ring, Semiring};
 use rand::{distr::StandardUniform, prelude::*};
 use rand_core::RngCore;
 use zinc_utils::{
-    add, cfg_into_iter, inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
-    projectable_to_field::ProjectableToField, sub,
+    CHECKED, add, cfg_into_iter, inner_transparent_field::InnerTransparentField,
+    mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField, sub,
 };
 
 use super::MultilinearExtensionWithConfig;
@@ -222,7 +222,9 @@ where
                 let a = sub!(right, &left);
                 if a != zero {
                     // poly[b] = f(0) + r * a
-                    let ar = a.mul_by_scalar(r).expect("Multiplication overflow");
+                    let ar = a
+                        .mul_by_scalar::<CHECKED>(r)
+                        .expect("Multiplication overflow");
                     poly[b] = add!(left, &ar);
                 } else {
                     poly[b] = left.clone();
