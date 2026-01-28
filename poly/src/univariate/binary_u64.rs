@@ -141,7 +141,6 @@ impl<'a, const DEGREE_PLUS_ONE: usize> Sub<&'a Self> for BinaryU64Poly<DEGREE_PL
     type Output = Self;
 
     #[allow(clippy::arithmetic_side_effects, clippy::suspicious_arithmetic_impl)]
-    #[allow(clippy::arithmetic_side_effects, clippy::suspicious_arithmetic_impl)]
     #[inline(always)]
     fn sub(self, rhs: &'a Self) -> Self::Output {
         // subtraction in GF(2) is XOR
@@ -154,8 +153,8 @@ impl<const DEGREE_PLUS_ONE: usize> Mul for BinaryU64Poly<DEGREE_PLUS_ONE> {
 
     #[allow(clippy::arithmetic_side_effects)]
     #[inline(always)]
-    fn mul(self, _rhs: Self) -> Self::Output {
-        unimplemented!("Multiplication for BinaryU64Poly is not implemented yet");
+    fn mul(self, rhs: Self) -> Self::Output {
+        self.mul(&rhs)
     }
 }
 
@@ -205,16 +204,26 @@ impl<'a, const DEGREE_PLUS_ONE: usize> MulAssign<&'a Self> for BinaryU64Poly<DEG
 impl<const DEGREE_PLUS_ONE: usize> CheckedAdd for BinaryU64Poly<DEGREE_PLUS_ONE> {
     #[inline(always)]
     fn checked_add(&self, other: &Self) -> Option<Self> {
-        // addition in GF(2) is XOR
-        Some(Self(self.0 ^ other.0))
+        // If any bit is set in both operands, addition would overflow (1+1)
+        if (self.0 & other.0) != 0 {
+            None
+        } else {
+            Some(Self(self.0 ^ other.0))
+        }
     }
 }
 
 impl<const DEGREE_PLUS_ONE: usize> CheckedSub for BinaryU64Poly<DEGREE_PLUS_ONE> {
     #[inline(always)]
     fn checked_sub(&self, other: &Self) -> Option<Self> {
-        // subtraction in GF(2) is XOR
-        Some(Self(self.0 ^ other.0))
+        // If any bit is 0 in self and 1 in other, subtraction would overflow (0-1)
+        if ((!self.0) & other.0) != 0 {
+            // There exists a bit where self is 0 and other is 1
+            None
+        } else {
+            // subtraction in GF(2) is XOR
+            Some(Self(self.0 ^ other.0))
+        }
     }
 }
 
@@ -228,14 +237,14 @@ impl<const DEGREE_PLUS_ONE: usize> CheckedMul for BinaryU64Poly<DEGREE_PLUS_ONE>
 impl<'a, const DEGREE_PLUS_ONE: usize> Sum<&'a Self> for BinaryU64Poly<DEGREE_PLUS_ONE> {
     #[inline(always)]
     fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
-        Self(iter.map(|x| &x.0).sum())
+        iter.sum()
     }
 }
 
 impl<'a, const DEGREE_PLUS_ONE: usize> Product<&'a Self> for BinaryU64Poly<DEGREE_PLUS_ONE> {
     #[inline(always)]
     fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
-        Self(iter.map(|x| &x.0).product())
+        iter.product()
     }
 }
 
@@ -245,9 +254,13 @@ impl<const DEGREE_PLUS_ONE: usize> Distribution<BinaryU64Poly<DEGREE_PLUS_ONE>>
     for StandardUniform
 {
     #[inline(always)]
+    #[allow(clippy::arithmetic_side_effects)]
     fn sample<Gen: Rng + ?Sized>(&self, rng: &mut Gen) -> BinaryU64Poly<DEGREE_PLUS_ONE> {
-        let coeffs: [Boolean; DEGREE_PLUS_ONE] = rng.random();
-        BinaryU64Poly::new(coeffs)
+        let mut value: u64 = rng.next_u64();
+        if DEGREE_PLUS_ONE < 64 {
+            value &= (1u64 << DEGREE_PLUS_ONE) - 1;
+        }
+        BinaryU64Poly::<DEGREE_PLUS_ONE>(value)
     }
 }
 
@@ -340,10 +353,11 @@ where
         rhs: &[Rhs],
         zero: Out,
     ) -> Result<Out, InnerProductError> {
-        let lhs = DensePolynomial::<Boolean, DEGREE_PLUS_ONE>::new(array::from_fn(|i| {
-            Boolean::new((lhs.0 & (1 << i)) != 0)
-        })
-            as [Boolean; DEGREE_PLUS_ONE]); // idk 
+        let lhs =
+            DensePolynomial::<Boolean, DEGREE_PLUS_ONE>::new(
+                array::from_fn::<_, DEGREE_PLUS_ONE, _>(|i| Boolean::new((lhs.0 & (1 << i)) != 0))
+                    as [Boolean; DEGREE_PLUS_ONE],
+            );
         I::inner_product(&lhs.coeffs, rhs, zero)
     }
 }
