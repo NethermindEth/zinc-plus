@@ -4,7 +4,7 @@ use crate::{
 };
 use core::mem::MaybeUninit;
 use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
-use derive_more::{AddAssign, AsRef, Display, MulAssign, Product, SubAssign};
+use derive_more::{AsRef, Display};
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
@@ -23,20 +23,7 @@ use zinc_utils::{
     projectable_to_field::ProjectableToField,
 };
 
-#[derive(
-    AddAssign,
-    AsRef,
-    Clone,
-    Debug,
-    Default,
-    Display,
-    Hash,
-    PartialEq,
-    Eq,
-    MulAssign,
-    SubAssign,
-    Product,
-)]
+#[derive(AsRef, Clone, Debug, Default, Display, Hash, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct BinaryU64Poly<const DEGREE_PLUS_ONE: usize>(u64); // we can fit up to degree 6, which is ok for now
 
@@ -193,12 +180,26 @@ impl<'a, const DEGREE_PLUS_ONE: usize> AddAssign<&'a Self> for BinaryU64Poly<DEG
     }
 }
 
+impl<const DEGREE_PLUS_ONE: usize> AddAssign for BinaryU64Poly<DEGREE_PLUS_ONE> {
+    #[inline(always)]
+    fn add_assign(&mut self, rhs: Self) {
+        self.add_assign(&rhs);
+    }
+}
+
 #[allow(clippy::suspicious_op_assign_impl)]
 impl<'a, const DEGREE_PLUS_ONE: usize> SubAssign<&'a Self> for BinaryU64Poly<DEGREE_PLUS_ONE> {
     #[inline(always)]
     fn sub_assign(&mut self, rhs: &'a Self) {
         // subtraction in GF(2) is XOR
         self.0 ^= rhs.0;
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> SubAssign for BinaryU64Poly<DEGREE_PLUS_ONE> {
+    #[inline(always)]
+    fn sub_assign(&mut self, rhs: Self) {
+        self.sub_assign(&rhs);
     }
 }
 
@@ -371,8 +372,7 @@ where
     ) -> Result<Out, InnerProductError> {
         let lhs =
             DensePolynomial::<Boolean, DEGREE_PLUS_ONE>::new(
-                array::from_fn::<_, DEGREE_PLUS_ONE, _>(|i| Boolean::new((lhs.0 & (1 << i)) != 0))
-                    as [Boolean; DEGREE_PLUS_ONE],
+                array::from_fn::<_, DEGREE_PLUS_ONE, _>(|i| Boolean::new((lhs.0 & (1 << i)) != 0)),
             );
         I::inner_product(&lhs.coeffs, rhs, zero)
     }
@@ -682,42 +682,15 @@ mod tests {
             }
         }
 
-        let coeffs = [
-            true.into(),
-            false.into(),
-            true.into(),
-            true.into(),
-            false.into(),
-            false.into(),
-            true.into(),
-            false.into(),
-            true.into(),
-            true.into(),
-            false.into(),
-            true.into(),
-            false.into(),
-            true.into(),
-            false.into(),
-            false.into(),
-            true.into(),
-            false.into(),
-            false.into(),
-            true.into(),
-            false.into(),
-            true.into(),
-            true.into(),
-            false.into(),
-            false.into(),
-            false.into(),
-            true.into(),
-            true.into(),
-            true.into(),
-            false.into(),
-            true.into(),
-            false.into(),
-        ];
+        let coeffs: Vec<_> = [
+            1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 0, 0, 1, 1, 1,
+            0, 1, 0,
+        ]
+        .into_iter()
+        .map(|x| (x != 0).into())
+        .collect();
 
-        let poly32 = BinaryU64Poly::<32>::new(coeffs);
+        let poly32 = BinaryU64Poly::<32>::new(coeffs.clone());
         let poly32_ref = BinaryRefPoly::<32>::new(coeffs);
 
         for scalar in [1, 42, -7, 100, -100] {
