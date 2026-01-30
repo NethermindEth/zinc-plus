@@ -15,7 +15,7 @@ use crypto_primitives::{Matrix, PrimeField, Ring, Semiring};
 use rand::{distr::StandardUniform, prelude::*};
 use rand_core::RngCore;
 use zinc_utils::{
-    add, cfg_into_iter, inner_transparent_field::InnerTransparentField, log2,
+    CHECKED, add, cfg_into_iter, inner_transparent_field::InnerTransparentField, log2,
     mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField, sub,
 };
 
@@ -305,11 +305,13 @@ where
                 let left = &self[2 * b];
                 let right = &self[2 * b + 1];
                 // a = f(1) - f(0)
-                let a = sub!(right, &left);
+                let a = sub!(*right, left);
                 if a != zero {
                     // self[b] = f(0) + r * a
-                    let ar = a.mul_by_scalar(r).expect("Multiplication overflow");
-                    self[b] = add!(left, &ar);
+                    let ar = a
+                        .mul_by_scalar::<CHECKED>(r)
+                        .expect("Multiplication overflow");
+                    self[b] = add!(*left, ar);
                 } else {
                     self[b] = left.clone();
                 };
