@@ -388,6 +388,7 @@ where
             } else {
                 acc = acc + rhs;
             }
+            // changes the LSB 1 bit to 0
             bits &= bits - 1;
         }
 
