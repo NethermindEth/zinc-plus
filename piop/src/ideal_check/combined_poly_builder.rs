@@ -2,7 +2,7 @@
 use rayon::prelude::*;
 use std::mem::MaybeUninit;
 
-use crypto_primitives::{FromWithConfig, PrimeField, Semiring};
+use crypto_primitives::{Field, FromWithConfig, PrimeField, Semiring};
 use itertools::{Itertools, max};
 use zinc_poly::{
     CoefficientProjectable,
@@ -11,6 +11,8 @@ use zinc_poly::{
 };
 use zinc_uair::{ConstraintBuilder, Uair, ideal::DummyIdeal};
 use zinc_utils::{cfg_iter, cfg_iter_mut, from_ref::FromRef};
+
+use crate::ideal_check::structs::IdealCheckTypes;
 
 pub struct CombinedPolyRowBuilder<F: PrimeField> {
     combined_evaluations: Vec<DynamicPolynomial<F>>,
@@ -35,20 +37,22 @@ impl<F: PrimeField> CombinedPolyRowBuilder<F> {
 }
 
 #[allow(clippy::arithmetic_side_effects)]
-pub fn compute_combined_polynomials<F, R, Rcoeff, U, const DEGREE_PLUS_ONE: usize>(
-    trace: &[DenseMultilinearExtension<R>],
-    projecting_element: &F,
+pub fn compute_combined_polynomials<
+    IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>,
+    U,
+    const DEGREE_PLUS_ONE: usize,
+>(
+    trace: &[DenseMultilinearExtension<IcTypes::Witness>],
+    projecting_element: &IcTypes::F,
     num_constraints: usize,
-) -> Vec<Vec<DenseMultilinearExtension<F::Inner>>>
+) -> Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>>
 where
-    F: FromWithConfig<Rcoeff> + 'static,
-    R: CoefficientProjectable<Rcoeff, DEGREE_PLUS_ONE> + Semiring + 'static,
-    U: Uair<R>,
+    U: Uair<IcTypes::Witness>,
 {
     let num_rows = trace[0].len();
     let num_cols = trace.len();
 
-    let mut trace_matrix: Vec<Vec<DynamicPolynomial<F>>> = (0..num_rows)
+    let mut trace_matrix: Vec<Vec<DynamicPolynomial<IcTypes::F>>> = (0..num_rows)
         .map(|_| Vec::with_capacity(num_cols))
         .collect();
 
@@ -69,37 +73,40 @@ where
             unsafe { row.set_len(num_cols) };
         });
 
-    let field_zero: F = F::zero_with_cfg(projecting_element.cfg());
+    let field_zero = IcTypes::F::zero_with_cfg(projecting_element.cfg());
 
-    let mut combined_poly_rows: Vec<(usize, Vec<DynamicPolynomial<F>>)> = cfg_iter!(trace_matrix)
-        .zip(cfg_iter!(trace_matrix).skip(1))
-        .map(|(up, down)| {
-            let mut constraint_builder = CombinedPolyRowBuilder::new(num_constraints);
-            U::constrain_general(
-                &mut constraint_builder,
-                up,
-                down,
-                |x| x.project_coefficients(projecting_element).into(),
-                |x, y| {
-                    Some(DynamicPolynomial::from(y.project_coefficients(projecting_element)) * x)
-                },
-                DummyIdeal::from_ref,
-            );
+    let mut combined_poly_rows: Vec<(usize, Vec<DynamicPolynomial<IcTypes::F>>)> =
+        cfg_iter!(trace_matrix)
+            .zip(cfg_iter!(trace_matrix).skip(1))
+            .map(|(up, down)| {
+                let mut constraint_builder = CombinedPolyRowBuilder::new(num_constraints);
+                U::constrain_general(
+                    &mut constraint_builder,
+                    up,
+                    down,
+                    |x| x.project_coefficients(projecting_element).into(),
+                    |x, y| {
+                        Some(
+                            DynamicPolynomial::from(y.project_coefficients(projecting_element)) * x,
+                        )
+                    },
+                    DummyIdeal::from_ref,
+                );
 
-            let mut combined_evaluations = constraint_builder.combined_evaluations;
+                let mut combined_evaluations = constraint_builder.combined_evaluations;
 
-            combined_evaluations
-                .iter_mut()
-                .for_each(|eval| eval.trim_with_zero(&field_zero));
+                combined_evaluations
+                    .iter_mut()
+                    .for_each(|eval| eval.trim_with_zero(&field_zero));
 
-            let max_degree = max(combined_evaluations
-                .iter()
-                .map(|eval| eval.degree_with_zero(&field_zero).unwrap_or(0)))
-            .expect("the iter can't be empty");
+                let max_degree = max(combined_evaluations
+                    .iter()
+                    .map(|eval| eval.degree_with_zero(&field_zero).unwrap_or(0)))
+                .expect("the iter can't be empty");
 
-            (max_degree, combined_evaluations)
-        })
-        .collect();
+                (max_degree, combined_evaluations)
+            })
+            .collect();
 
     combined_poly_rows.push(
         combined_poly_rows
@@ -111,7 +118,8 @@ where
     let max_degree = *max(combined_poly_rows.iter().map(|(max_degree, _)| max_degree))
         .expect("the iter can't be empty");
 
-    let result: Vec<Vec<DenseMultilinearExtension<F::Inner>>> = (0..num_constraints)
+    let result: Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>> = (0
+        ..num_constraints)
         .map(|constraint| {
             (0..=max_degree)
                 .map(|coeff| {

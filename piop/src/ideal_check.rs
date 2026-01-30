@@ -1,13 +1,15 @@
 mod batched_ideal_check;
 mod combined_poly_builder;
+mod structs;
 
 use batched_ideal_check::*;
-use crypto_primitives::{FixedSemiring, FromWithConfig, PrimeField, Semiring};
+use crypto_primitives::{Field, FixedSemiring, FromWithConfig, PrimeField, Semiring};
 use derive_more::From;
 use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::marker::PhantomData;
+use structs::*;
 use thiserror::Error;
 use zinc_poly::{
     CoefficientProjectable, EvaluationError,
@@ -22,68 +24,53 @@ use zinc_uair::{
 };
 use zinc_utils::cfg_iter;
 use zinc_utils::{
-    inner_transparent_field::InnerTransparentField,
-    projectable_to_field::ProjectableToField,
+    inner_transparent_field::InnerTransparentField, projectable_to_field::ProjectableToField,
 };
-
-#[derive(Clone, Debug)]
-pub struct Proof<R> {
-    pub combined_mle_values: Vec<R>,
-}
-
-#[derive(Clone, Debug)]
-pub struct ProverState<F: PrimeField> {
-    pub evaluation_points: Vec<Vec<F>>,
-    pub combined_mles: Vec<Vec<DenseMultilinearExtension<F::Inner>>>,
-}
-
-pub struct SubClaim<F: PrimeField> {
-    pub point: Vec<F>,
-    pub value: DynamicPolynomial<F>,
-}
 
 pub type Result<T, R, I> = std::result::Result<T, IdealCheckError<R, I>>;
 
-pub struct IdealCheckProtocol<R, Rcoeff, const DEGREE_PLUS_ONE: usize>(PhantomData<(R, Rcoeff)>);
+pub struct IdealCheckProtocol<
+    IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>,
+    const DEGREE_PLUS_ONE: usize,
+>(PhantomData<IcTypes>);
 
-impl<R, Rcoeff, const DEGREE_PLUS_ONE: usize> IdealCheckProtocol<R, Rcoeff, DEGREE_PLUS_ONE>
-where
-    R: CoefficientProjectable<Rcoeff, DEGREE_PLUS_ONE>
-        + FixedSemiring
-        + ConstTranscribable
-        + Send
-        + Sync
-        + 'static,
+impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
+    IdealCheckProtocol<IcTypes, DEGREE_PLUS_ONE>
 {
     #[allow(clippy::type_complexity)]
-    pub fn prove_as_subprotocol<U, F>(
+    pub fn prove_as_subprotocol<U>(
         transcript: &mut impl Transcript,
-        trace: &[DenseMultilinearExtension<R>],
+        trace: &[DenseMultilinearExtension<IcTypes::Witness>],
         num_constraints: usize,
         num_vars: usize,
-        field_cfg: &F::Config,
-    ) -> Result<(Proof<DynamicPolynomial<F>>, ProverState<F>), R, U::Ideal>
+        field_cfg: &<IcTypes::F as PrimeField>::Config,
+    ) -> Result<
+        (
+            Proof<IcTypes, DEGREE_PLUS_ONE>,
+            ProverState<IcTypes, DEGREE_PLUS_ONE>,
+        ),
+        IcTypes::Witness,
+        U::Ideal,
+    >
     where
-        U: Uair<R>,
-        R: ProjectableToField<F>,
-        F: InnerTransparentField + FromWithConfig<Rcoeff> + Send + Sync + 'static,
-        F::Inner: ConstTranscribable,
+        U: Uair<IcTypes::Witness>,
+        <IcTypes::F as Field>::Inner: ConstTranscribable,
     {
-        let projecting_element: F = transcript.get_field_challenge(field_cfg);
+        let projecting_element = transcript.get_field_challenge(field_cfg);
 
-        let combined_mles = combined_poly_builder::compute_combined_polynomials::<F, _, _, U, _>(
+        let combined_mles = combined_poly_builder::compute_combined_polynomials::<IcTypes, U, _>(
             trace,
             &projecting_element,
             num_constraints,
         );
-        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; <IcTypes::F as Field>::Inner::NUM_BYTES];
 
-        let mut evaluation_points: Vec<Vec<F>> = Vec::with_capacity(num_constraints);
-        let mut combined_mle_values: Vec<DynamicPolynomial<F>> =
+        let mut evaluation_points: Vec<Vec<IcTypes::F>> = Vec::with_capacity(num_constraints);
+        let mut combined_mle_values: Vec<DynamicPolynomial<IcTypes::F>> =
             Vec::with_capacity(num_constraints);
 
         for combined_mle in &combined_mles {
-            let challenge: Vec<F> = transcript.get_field_challenges(num_vars, field_cfg);
+            let challenge = transcript.get_field_challenges(num_vars, field_cfg);
 
             let mle_coeffs_values = cfg_iter!(combined_mle)
                 .map(|coeff_mle| coeff_mle.evaluate_with_config(&challenge, field_cfg))
@@ -94,7 +81,7 @@ where
             evaluation_points.push(challenge);
             combined_mle_values.push(DynamicPolynomial::new_trimmed_with_zero(
                 mle_coeffs_values,
-                &F::zero_with_cfg(field_cfg),
+                &IcTypes::F::zero_with_cfg(field_cfg),
             ));
         }
 
@@ -110,30 +97,32 @@ where
     }
 
     #[allow(clippy::type_complexity)]
-    pub fn verify_as_subprotocol<U, F, IdealOverF, IdealOverFFromRef>(
+    pub fn verify_as_subprotocol<U, IdealOverF, IdealOverFFromRef>(
         transcript: &mut impl Transcript,
-        proof: Proof<DynamicPolynomial<F>>,
+        proof: Proof<IcTypes, DEGREE_PLUS_ONE>,
         num_constraints: usize,
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
-        field_cfg: &F::Config,
-    ) -> Result<Vec<SubClaim<F>>, DynamicPolynomial<F>, IdealOverF>
+        field_cfg: &<IcTypes::F as PrimeField>::Config,
+    ) -> Result<
+        Vec<VerifierSubClaim<IcTypes, DEGREE_PLUS_ONE>>,
+        DynamicPolynomial<IcTypes::F>,
+        IdealOverF,
+    >
     where
-        U: Uair<R>,
-        R: ProjectableToField<F>,
-        F: PrimeField,
-        F::Inner: ConstTranscribable,
+        U: Uair<IcTypes::Witness>,
+        <IcTypes::F as Field>::Inner: ConstTranscribable,
         IdealOverF: Ideal,
-        DynamicPolynomial<F>: IdealCheck<IdealOverF>,
+        DynamicPolynomial<IcTypes::F>: IdealCheck<IdealOverF>,
         IdealOverFFromRef: Fn(&U::Ideal) -> IdealOverF,
     {
-        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; <IcTypes::F as Field>::Inner::NUM_BYTES];
 
-        let mut evaluation_points: Vec<Vec<F>> = Vec::with_capacity(num_constraints);
+        let mut evaluation_points: Vec<Vec<IcTypes::F>> = Vec::with_capacity(num_constraints);
         let combined_mle_values = proof.combined_mle_values;
 
         for mle_value in &combined_mle_values {
-            let challenge: Vec<F> = transcript.get_field_challenges(num_vars, field_cfg);
+            let challenge = transcript.get_field_challenges(num_vars, field_cfg);
 
             transcript.absorb_random_field_slice(&mle_value.coeffs, &mut transcription_buf);
 
@@ -154,31 +143,8 @@ where
         Ok(evaluation_points
             .into_iter()
             .zip(combined_mle_values)
-            .map(|(point, value)| SubClaim { point, value })
+            .map(|(point, value)| VerifierSubClaim { point, value })
             .collect())
-    }
-}
-
-pub(crate) struct IdealCheckConstraintBuilder<P: Semiring> {
-    pub uair_poly_mles_coeffs: Vec<P>,
-}
-
-impl<P: Semiring> IdealCheckConstraintBuilder<P> {
-    pub fn new(num_constraints: usize) -> Self {
-        Self {
-            uair_poly_mles_coeffs: Vec::with_capacity(num_constraints),
-        }
-    }
-}
-
-impl<P: Semiring> ConstraintBuilder for IdealCheckConstraintBuilder<P> {
-    type Expr = P;
-    // Ignore all ideal business on the side of the prover.
-    type Ideal = DummyIdeal;
-
-    #[allow(clippy::arithmetic_side_effects)]
-    fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {
-        self.uair_poly_mles_coeffs.push(expr);
     }
 }
 
@@ -196,19 +162,20 @@ mod tests {
     use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
     use itertools::Itertools;
     use num_traits::Zero;
-    
+
     use zinc_poly::{
         mle::DenseMultilinearExtension,
         univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal},
     };
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::constraint_counter::count_constraints;
-    
 
-    use crate::{ideal_check::IdealCheckProtocol, tests::test_airs::TestAirNoMultiplication};
+    use crate::{
+        ideal_check::{IdealCheckProtocol, structs::IdealCheckTypes},
+        tests::test_airs::TestAirNoMultiplication,
+    };
 
     const LIMBS: usize = 4;
-    type F = MontyField<LIMBS>;
 
     fn test_config() -> MontyParams<LIMBS> {
         let modulus = crypto_bigint::Uint::<LIMBS>::from_be_hex(
@@ -218,28 +185,21 @@ mod tests {
         MontyParams::new(modulus)
     }
 
+    struct TestIcTypes;
+
+    impl<const DEGREE_PLUS_ONE: usize> IdealCheckTypes<DEGREE_PLUS_ONE> for TestIcTypes {
+        type WitnessCoeff = Int<5>;
+        type Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>;
+
+        type F = MontyField<4>;
+    }
+
     #[test]
     fn test_successful_verification() {
-        type Poly = DensePolynomial<Int<5>, 32>;
-
-        let trace: Vec<DenseMultilinearExtension<Poly>> = vec![
-            DenseMultilinearExtension::from_evaluations_slice(
-                4,
-                &(0..4).map(|i| Poly::from(Int::from_i8(i))).collect_vec(),
-                Poly::zero(),
-            ),
-            DenseMultilinearExtension::from_evaluations_slice(
-                4,
-                &(0..4).map(|_| Poly::from(Int::from_i8(1))).collect_vec(),
-                Poly::zero(),
-            ),
-            DenseMultilinearExtension::from_evaluations_slice(
-                4,
-                &(0..4)
-                    .map(|i| Poly::from(Int::from_i8(i + 1)))
-                    .collect_vec(),
-                Poly::zero(),
-            ),
+        let trace: Vec<DenseMultilinearExtension<<TestIcTypes as IdealCheckTypes<_>>::Witness>> = vec![
+            (0..4).map(|i| (Int::from_i8(i).into())).collect(),
+            (0..4).map(|_| (Int::from_i8(1).into())).collect(),
+            (0..4).map(|i| (Int::from_i8(i + 1).into())).collect(),
         ];
 
         let field_cfg = test_config();
@@ -247,25 +207,30 @@ mod tests {
         let transcript = KeccakTranscript::new();
 
         let (proof, _) =
-            IdealCheckProtocol::<_, _, _>::prove_as_subprotocol::<TestAirNoMultiplication, F>(
+            IdealCheckProtocol::<TestIcTypes, _>::prove_as_subprotocol::<TestAirNoMultiplication>(
                 &mut transcript.clone(),
                 &trace,
-                count_constraints::<Poly, TestAirNoMultiplication>(),
-                4,
+                count_constraints::<
+                    <TestIcTypes as IdealCheckTypes<_>>::Witness,
+                    TestAirNoMultiplication,
+                >(),
+                2,
                 &field_cfg,
             )
             .unwrap();
 
         assert!(
-            IdealCheckProtocol::<_, Int<5>, _>::verify_as_subprotocol::<
+            IdealCheckProtocol::<TestIcTypes, _>::verify_as_subprotocol::<
                 TestAirNoMultiplication,
-                F,
                 _,
                 _,
             >(
                 &mut transcript.clone(),
                 proof,
-                count_constraints::<Poly, TestAirNoMultiplication>(),
+                count_constraints::<
+                    <TestIcTypes as IdealCheckTypes<_>>::Witness,
+                    TestAirNoMultiplication,
+                >(),
                 4,
                 |ideal_over_ring| { DegreeOneIdeal::from_with_cfg(ideal_over_ring, &field_cfg) },
                 &field_cfg,
