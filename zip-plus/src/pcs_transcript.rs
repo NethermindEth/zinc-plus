@@ -28,6 +28,13 @@ impl PcsTranscript {
         Self::default()
     }
 
+    pub fn new_with_capacity(capacity: usize) -> Self {
+        Self {
+            fs_transcript: Default::default(),
+            stream: Cursor::new(Vec::with_capacity(capacity)),
+        }
+    }
+
     // TODO if we change this to an iterator we may be able to save some memory
     pub fn write_field_elements<F>(&mut self, elems: &[F]) -> Result<(), ZipError>
     where
