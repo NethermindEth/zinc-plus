@@ -2,7 +2,7 @@
 use rayon::prelude::*;
 use std::mem::MaybeUninit;
 
-use crypto_primitives::{Field, FromWithConfig, PrimeField, Semiring};
+use crypto_primitives::{DenseRowMatrix, Field, Matrix, PrimeField};
 use itertools::{Itertools, max};
 use zinc_poly::{
     CoefficientProjectable,
@@ -10,7 +10,7 @@ use zinc_poly::{
     univariate::dynamic::DynamicPolynomial,
 };
 use zinc_uair::{ConstraintBuilder, Uair, ideal::DummyIdeal};
-use zinc_utils::{cfg_iter, cfg_iter_mut, from_ref::FromRef};
+use zinc_utils::from_ref::FromRef;
 
 use crate::ideal_check::structs::IdealCheckTypes;
 
@@ -52,78 +52,50 @@ where
     let num_rows = trace[0].len();
     let num_cols = trace.len();
 
-    let mut trace_matrix: Vec<Vec<DynamicPolynomial<IcTypes::F>>> = (0..num_rows)
-        .map(|_| Vec::with_capacity(num_cols))
-        .collect();
-
-    cfg_iter_mut!(trace_matrix)
-        .enumerate()
-        .for_each(|(row_num, row)| {
-            row.spare_capacity_mut()
-                .iter_mut()
-                .enumerate()
-                .for_each(|(col_num, cell)| {
-                    *cell = MaybeUninit::new(
-                        trace[col_num][row_num]
-                            .project_coefficients(projecting_element)
-                            .into(),
-                    );
-                });
-
-            unsafe { row.set_len(num_cols) };
-        });
+    let trace_matrix =
+        project_trace_matrix::<IcTypes, _>(num_rows, num_cols, trace, projecting_element);
 
     let field_zero = IcTypes::F::zero_with_cfg(projecting_element.cfg());
 
-    let mut combined_poly_rows: Vec<(usize, Vec<DynamicPolynomial<IcTypes::F>>)> =
-        cfg_iter!(trace_matrix)
-            .zip(cfg_iter!(trace_matrix).skip(1))
+    let mut max_degrees_and_combined_poly_rows: Vec<(usize, Vec<DynamicPolynomial<IcTypes::F>>)> =
+        trace_matrix
+            .as_rows()
+            .zip(trace_matrix.as_rows().skip(1))
             .map(|(up, down)| {
-                let mut constraint_builder = CombinedPolyRowBuilder::new(num_constraints);
-                U::constrain_general(
-                    &mut constraint_builder,
+                combine_rows_and_get_max_degree::<IcTypes, U, _>(
                     up,
                     down,
-                    |x| x.project_coefficients(projecting_element).into(),
-                    |x, y| {
-                        Some(
-                            DynamicPolynomial::from(y.project_coefficients(projecting_element)) * x,
-                        )
-                    },
-                    DummyIdeal::from_ref,
-                );
-
-                let mut combined_evaluations = constraint_builder.combined_evaluations;
-
-                combined_evaluations
-                    .iter_mut()
-                    .for_each(|eval| eval.trim_with_zero(&field_zero));
-
-                let max_degree = max(combined_evaluations
-                    .iter()
-                    .map(|eval| eval.degree_with_zero(&field_zero).unwrap_or(0)))
-                .expect("the iter can't be empty");
-
-                (max_degree, combined_evaluations)
+                    num_constraints,
+                    projecting_element,
+                    &field_zero,
+                )
             })
             .collect();
 
-    combined_poly_rows.push(
-        combined_poly_rows
+    let max_degree = *max(max_degrees_and_combined_poly_rows
+        .iter()
+        .map(|(max_degree, _)| max_degree))
+    .expect("We assume the number of constraints is not zero so this iterator is not empty");
+
+    // For the sake of padding we duplicate
+    // the last combined value
+    // to have N-sized mle at the end
+    // not N-1.
+    // This is essentially c^up and c^down
+    // thing from the whirlaway.
+    max_degrees_and_combined_poly_rows.push(
+        max_degrees_and_combined_poly_rows
             .last()
-            .expect("shouldn't be empty")
+            .expect("We assume the number of constraints is not zero so this iterator is not empty")
             .clone(),
     );
-
-    let max_degree = *max(combined_poly_rows.iter().map(|(max_degree, _)| max_degree))
-        .expect("the iter can't be empty");
 
     let result: Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>> = (0
         ..num_constraints)
         .map(|constraint| {
             (0..=max_degree)
                 .map(|coeff| {
-                    combined_poly_rows
+                    max_degrees_and_combined_poly_rows
                         .iter()
                         .map(|(_, row)| {
                             if coeff >= row[constraint].coeffs.len() {
@@ -139,4 +111,68 @@ where
         .collect_vec();
 
     result
+}
+
+fn project_trace_matrix<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>(
+    num_rows: usize,
+    num_cols: usize,
+    trace: &[DenseMultilinearExtension<IcTypes::Witness>],
+    projecting_element: &IcTypes::F,
+) -> DenseRowMatrix<DynamicPolynomial<<IcTypes as IdealCheckTypes<DEGREE_PLUS_ONE>>::F>> {
+    let mut matr = DenseRowMatrix::uninit(num_rows, num_cols);
+
+    matr.cells_mut().enumerate().for_each(|(row_idx, row)| {
+        row.for_each(|(col_idx, cell)| {
+            *cell = MaybeUninit::new(
+                trace[col_idx][row_idx]
+                    .project_coefficients(projecting_element)
+                    .into(),
+            );
+        });
+    });
+
+    unsafe { matr.init() }
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn combine_rows_and_get_max_degree<IcTypes, U, const DEGREE_PLUS_ONE: usize>(
+    up: &[DynamicPolynomial<IcTypes::F>],
+    down: &[DynamicPolynomial<IcTypes::F>],
+    num_constraints: usize,
+    projecting_element: &IcTypes::F,
+    field_zero: &IcTypes::F,
+) -> (usize, Vec<DynamicPolynomial<IcTypes::F>>)
+where
+    IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>,
+    U: Uair<IcTypes::Witness>,
+{
+    let mut constraint_builder = CombinedPolyRowBuilder::new(num_constraints);
+
+    U::constrain_general(
+        &mut constraint_builder,
+        up,
+        down,
+        |x| x.project_coefficients(projecting_element).into(),
+        |x, y| Some(DynamicPolynomial::from(y.project_coefficients(projecting_element)) * x),
+        DummyIdeal::from_ref,
+    );
+
+    let mut combined_evaluations = constraint_builder.combined_evaluations;
+
+    combined_evaluations
+        .iter_mut()
+        .for_each(|eval| eval.trim_with_zero(field_zero));
+
+    let max_degree = max(combined_evaluations
+        .iter()
+        .map(|eval| eval.degree_with_zero(field_zero).unwrap_or(0)))
+    .expect("We assume the number of constraints is not zero so this iterator is not empty");
+
+    (max_degree, combined_evaluations)
+}
+
+fn prepare_coefficient_mles<
+    IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>,
+    const DEGREE_PLUS_ONE: usize,
+>() {
 }

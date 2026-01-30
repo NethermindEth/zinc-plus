@@ -33,7 +33,7 @@ rand = { workspace = true }
 workspace = true
 
 [features]
-parallel = ["dep:rayon", "zinc-utils/parallel"]
+parallel = ["dep:rayon", "zinc-utils/parallel", "crypto-primitives/parallel"]
 
 [[bench]]
 name = "sumcheck"
