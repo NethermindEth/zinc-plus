@@ -90,27 +90,12 @@ where
             .clone(),
     );
 
-    let result: Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>> = (0
-        ..num_constraints)
-        .map(|constraint| {
-            (0..=max_degree)
-                .map(|coeff| {
-                    max_degrees_and_combined_poly_rows
-                        .iter()
-                        .map(|(_, row)| {
-                            if coeff >= row[constraint].coeffs.len() {
-                                field_zero.inner().clone()
-                            } else {
-                                row[constraint].coeffs[coeff].inner().clone()
-                            }
-                        })
-                        .collect_dense_mle_with_zero(field_zero.inner())
-                })
-                .collect_vec()
-        })
-        .collect_vec();
-
-    result
+    prepare_coefficient_mles::<IcTypes, _>(
+        num_constraints,
+        max_degree,
+        &max_degrees_and_combined_poly_rows,
+        &field_zero,
+    )
 }
 
 fn project_trace_matrix<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>(
@@ -174,5 +159,28 @@ where
 fn prepare_coefficient_mles<
     IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>,
     const DEGREE_PLUS_ONE: usize,
->() {
+>(
+    num_constraints: usize,
+    max_degree: usize,
+    max_degrees_and_combined_poly_rows: &[(usize, Vec<DynamicPolynomial<IcTypes::F>>)],
+    field_zero: &IcTypes::F,
+) -> Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>> {
+    (0..num_constraints)
+        .map(|constraint| {
+            (0..=max_degree)
+                .map(|coeff| {
+                    max_degrees_and_combined_poly_rows
+                        .iter()
+                        .map(|(_, row)| {
+                            if coeff >= row[constraint].coeffs.len() {
+                                field_zero.inner().clone()
+                            } else {
+                                row[constraint].coeffs[coeff].inner().clone()
+                            }
+                        })
+                        .collect_dense_mle_with_zero(field_zero.inner())
+                })
+                .collect_vec()
+        })
+        .collect_vec()
 }
