@@ -1,5 +1,3 @@
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
 use std::mem::MaybeUninit;
 
 use crypto_primitives::{DenseRowMatrix, Field, Matrix, PrimeField};

@@ -28,6 +28,7 @@ criterion = { workspace = true }
 crypto-bigint = { workspace = true }
 itertools = { workspace = true }
 rand = { workspace = true }
+zinc-test-uair = { workspace = true }
 
 [lints]
 workspace = true

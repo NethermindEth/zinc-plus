@@ -1,6 +1,4 @@
-use std::marker::PhantomData;
-
-use crypto_primitives::{Field, FromWithConfig, PrimeField, Semiring};
+use crypto_primitives::{Field, FromWithConfig, Semiring};
 use zinc_poly::{
     CoefficientProjectable, mle::DenseMultilinearExtension, univariate::dynamic::DynamicPolynomial,
 };

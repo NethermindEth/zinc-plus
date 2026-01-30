@@ -3,7 +3,7 @@ mod combined_poly_builder;
 mod structs;
 
 use batched_ideal_check::*;
-use crypto_primitives::{Field, FixedSemiring, FromWithConfig, PrimeField, Semiring};
+use crypto_primitives::{Field, PrimeField};
 use derive_more::From;
 use itertools::Itertools;
 #[cfg(feature = "parallel")]
@@ -12,20 +12,17 @@ use std::marker::PhantomData;
 use structs::*;
 use thiserror::Error;
 use zinc_poly::{
-    CoefficientProjectable, EvaluationError,
+    EvaluationError,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
     univariate::dynamic::DynamicPolynomial,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
-    ConstraintBuilder, Uair,
-    ideal::{DummyIdeal, Ideal, IdealCheck},
+    Uair,
+    ideal::{Ideal, IdealCheck},
     ideal_collector::collect_ideals,
 };
 use zinc_utils::cfg_iter;
-use zinc_utils::{
-    inner_transparent_field::InnerTransparentField, projectable_to_field::ProjectableToField,
-};
 
 pub type Result<T, R, I> = std::result::Result<T, IdealCheckError<R, I>>;
 
@@ -160,20 +157,19 @@ pub enum IdealCheckError<R, I> {
 mod tests {
     use crypto_bigint::{Odd, modular::MontyParams};
     use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
-    use itertools::Itertools;
-    use num_traits::Zero;
 
-    use zinc_poly::{
-        mle::DenseMultilinearExtension,
-        univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal},
+    use rand::rng;
+    use zinc_poly::univariate::{
+        dense::DensePolynomial, dynamic::DynamicPolynomial, ideal::DegreeOneIdeal,
     };
+    use zinc_test_uair::{GenerateWitness, TestAirNoMultiplication, TestUairSimpleMultiplication};
     use zinc_transcript::KeccakTranscript;
-    use zinc_uair::constraint_counter::count_constraints;
-
-    use crate::{
-        ideal_check::{IdealCheckProtocol, structs::IdealCheckTypes},
-        tests::test_airs::TestAirNoMultiplication,
+    use zinc_uair::{
+        constraint_counter::count_constraints,
+        ideal::{Ideal, IdealCheck, ZeroIdeal},
     };
+
+    use crate::ideal_check::{IdealCheckProtocol, structs::IdealCheckTypes};
 
     const LIMBS: usize = 4;
 
@@ -194,48 +190,66 @@ mod tests {
         type F = MontyField<4>;
     }
 
-    #[test]
-    fn test_successful_verification() {
-        let trace: Vec<DenseMultilinearExtension<<TestIcTypes as IdealCheckTypes<_>>::Witness>> = vec![
-            (0..4).map(|i| (Int::from_i8(i).into())).collect(),
-            (0..4).map(|_| (Int::from_i8(1).into())).collect(),
-            (0..4).map(|i| (Int::from_i8(i + 1).into())).collect(),
-        ];
+    fn test_successful_verification_generic<
+        U,
+        IdealOverF,
+        IdealOverFFromRef,
+        const DEGREE_PLUS_ONE: usize,
+    >(
+        num_vars: usize,
+        ideal_over_f_from_ref: IdealOverFFromRef,
+    ) where
+        U: GenerateWitness<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
+        IdealOverF: Ideal,
+        IdealOverFFromRef: Fn(&U::Ideal) -> IdealOverF,
+        DynamicPolynomial<MontyField<LIMBS>>: IdealCheck<IdealOverF>,
+    {
+        let mut rng = rng();
+
+        let trace = U::generate_witness(num_vars, &mut rng);
 
         let field_cfg = test_config();
 
         let transcript = KeccakTranscript::new();
 
-        let (proof, _) =
-            IdealCheckProtocol::<TestIcTypes, _>::prove_as_subprotocol::<TestAirNoMultiplication>(
-                &mut transcript.clone(),
-                &trace,
-                count_constraints::<
-                    <TestIcTypes as IdealCheckTypes<_>>::Witness,
-                    TestAirNoMultiplication,
-                >(),
-                2,
-                &field_cfg,
-            )
-            .unwrap();
+        let num_constraints =
+            count_constraints::<<TestIcTypes as IdealCheckTypes<_>>::Witness, U>();
+
+        let (proof, _) = IdealCheckProtocol::<TestIcTypes, _>::prove_as_subprotocol::<U>(
+            &mut transcript.clone(),
+            &trace,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )
+        .unwrap();
 
         assert!(
-            IdealCheckProtocol::<TestIcTypes, _>::verify_as_subprotocol::<
-                TestAirNoMultiplication,
-                _,
-                _,
-            >(
+            IdealCheckProtocol::<TestIcTypes, _>::verify_as_subprotocol::<U, _, _>(
                 &mut transcript.clone(),
                 proof,
-                count_constraints::<
-                    <TestIcTypes as IdealCheckTypes<_>>::Witness,
-                    TestAirNoMultiplication,
-                >(),
+                num_constraints,
                 4,
-                |ideal_over_ring| { DegreeOneIdeal::from_with_cfg(ideal_over_ring, &field_cfg) },
+                ideal_over_f_from_ref,
                 &field_cfg,
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_successful_verification() {
+        let field_cfg = test_config();
+
+        let num_vars = 2;
+
+        test_successful_verification_generic::<TestAirNoMultiplication, _, _, 32>(
+            num_vars,
+            |ideal_over_ring| DegreeOneIdeal::from_with_cfg(ideal_over_ring, &field_cfg),
+        );
+        test_successful_verification_generic::<TestUairSimpleMultiplication, _, _, 32>(
+            num_vars,
+            |_ideal_over_ring| ZeroIdeal,
         );
     }
 }

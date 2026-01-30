@@ -5,7 +5,6 @@ use zinc_utils::from_ref::FromRef;
 
 use crate::{EvaluatablePolynomial, univariate::dynamic::DynamicPolynomial};
 
-
 #[derive(Clone, Copy, Debug)]
 pub enum DegreeOneIdeal<R: Semiring> {
     DegreeOneIdeal { generating_root: R },

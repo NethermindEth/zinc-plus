@@ -34,8 +34,8 @@ pub trait ConstraintBuilder {
 /// The trait that a universal AIR description has to implement.
 /// This must include all the constraint description logic of an UAIR.
 ///
-/// One type might implement different UAIR logics for different underlying semirings
-/// hence the generic type parameter.
+/// One type might implement different UAIR logics for different underlying
+/// semirings hence the generic type parameter.
 pub trait Uair<R: Semiring + 'static> {
     /// The ideal type the AIR operates with.
     /// Since a `ConstraintBuilder` is "opaque" for a `Uair`
@@ -52,18 +52,17 @@ pub trait Uair<R: Semiring + 'static> {
     /// A general method for describing constraints.
     ///
     /// # Arguments
-    /// - `b`: a builder encapsulating the constraint storing logic.
-    ///   Its type `B` has to have compatible `B::Ideal` with
-    ///   the `Self::Ideal`, i.e. it must implement `FromRef<Self::Ideal>` trait.
+    /// - `b`: a builder encapsulating the constraint storing logic. Its type
+    ///   `B` has to have compatible `B::Ideal` with the `Self::Ideal`, i.e. it
+    ///   must implement `FromRef<Self::Ideal>` trait.
     /// - `up`: a slice of expressions representing the current row of UAIR.
-    /// - `down`: a slice of expressions representing the next row of UAIR.
-    ///   It is safe to assume it has the same length as `up`.
-    /// - `from_ref`: a closure that turns the underlying ring `R` into `B::Expr`.
-    ///   Sometimes (e.g. when dealing with random fields) it is
-    ///   convenient to provide a closure instead of a `FromRef`
-    ///   implementation.
-    /// - `mbs`: a closure that allows to multiply expressions by `R`.
-    ///   Same rationale as for `from_ref`.
+    /// - `down`: a slice of expressions representing the next row of UAIR. It
+    ///   is safe to assume it has the same length as `up`.
+    /// - `from_ref`: a closure that turns the underlying ring `R` into
+    ///   `B::Expr`. Sometimes (e.g. when dealing with random fields) it is
+    ///   convenient to provide a closure instead of a `FromRef` implementation.
+    /// - `mbs`: a closure that allows to multiply expressions by `R`. Same
+    ///   rationale as for `from_ref`.
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
         b: &mut B,
         up: &[B::Expr],

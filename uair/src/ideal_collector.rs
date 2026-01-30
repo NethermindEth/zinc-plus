@@ -1,6 +1,4 @@
 use crypto_primitives::Semiring;
-use thiserror::Error;
-use zinc_utils::cfg_iter;
 use zinc_utils::from_ref::FromRef;
 
 use crate::{
