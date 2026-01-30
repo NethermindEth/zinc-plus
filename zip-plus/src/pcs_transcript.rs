@@ -8,6 +8,20 @@ use zinc_transcript::{
 };
 use zinc_utils::{add, mul, rem};
 
+macro_rules! safe_cast {
+    ($value:expr, $from:ident, $to:ident) => {
+        $to::try_from($value).map_err(|_err| {
+            ZipError::Transcript(
+                ErrorKind::Unsupported,
+                format!(
+                    "Failed to convert {} to {}",
+                    stringify!($from),
+                    stringify!($to)
+                ),
+            )
+        })
+    };
+}
 /// A transcript for Polynomial Commitment Scheme (PCS) operations.
 /// Manages both Fiat-Shamir transformations and serialization/deserialization
 /// of proof data.
@@ -29,9 +43,11 @@ impl PcsTranscript {
     }
 
     pub fn new_with_capacity(capacity: usize) -> Self {
+        // We zero-initialize the stream vector in advance to avoid dealing with
+        // MaybeUninit
         Self {
             fs_transcript: Default::default(),
-            stream: Cursor::new(Vec::with_capacity(capacity)),
+            stream: Cursor::new(vec![0; capacity]),
         }
     }
 
@@ -117,12 +133,18 @@ impl PcsTranscript {
     }
 
     pub fn write_const<T: ConstTranscribable>(&mut self, v: &T) -> Result<(), ZipError> {
+        let prev_pos = safe_cast!(self.stream.position(), u64, usize)?;
+        let data_len = T::NUM_BYTES;
+        let next_pos = add!(prev_pos, data_len);
+
         let inner = self.stream.get_mut();
-        let old_len = inner.len();
-        let new_len = add!(old_len, T::NUM_BYTES);
-        inner.resize(new_len, 0_u8);
-        v.write_transcription_bytes(&mut inner[old_len..]);
-        self.stream.set_position(new_len as u64);
+        // Enlarge the inner buffer if needed
+        if inner.len() < next_pos {
+            inner.resize(next_pos, 0_u8);
+        }
+
+        v.write_transcription_bytes(&mut inner[prev_pos..next_pos]);
+        self.stream.set_position(safe_cast!(next_pos, usize, u64)?);
         Ok(())
     }
 
@@ -141,17 +163,22 @@ impl PcsTranscript {
         T: ConstTranscribable + 'a,
         I: IntoIterator<Item = &'a T>,
     {
-        let inner = self.stream.get_mut();
-        let old_len = inner.len();
-        let new_len = add!(old_len, mul!(vs_len, T::NUM_BYTES));
-        inner.resize(new_len, 0_u8);
+        let prev_pos = safe_cast!(self.stream.position(), u64, usize)?;
+        let data_len = mul!(vs_len, T::NUM_BYTES);
+        let next_pos = add!(prev_pos, data_len);
 
-        inner[old_len..]
+        let inner = self.stream.get_mut();
+        // Enlarge the inner buffer if needed
+        if inner.len() < next_pos {
+            inner.resize(next_pos, 0_u8);
+        }
+
+        inner[prev_pos..next_pos]
             .chunks_mut(T::NUM_BYTES)
             .zip(vs)
             .for_each(|(chunk, v)| v.write_transcription_bytes(chunk));
 
-        self.stream.set_position(new_len as u64);
+        self.stream.set_position(next_pos as u64);
         Ok(())
     }
 
@@ -169,22 +196,12 @@ impl PcsTranscript {
     }
 
     fn write_usize(&mut self, value: usize) -> Result<(), ZipError> {
-        let value_u64: u64 = value.try_into().map_err(|_err| {
-            ZipError::Transcript(
-                ErrorKind::Unsupported,
-                "Failed to convert usize to u64".to_string(),
-            )
-        })?;
+        let value_u64 = safe_cast!(value, usize, u64)?;
         self.write_const(&value_u64)
     }
 
     fn read_usize(&mut self) -> Result<usize, ZipError> {
-        self.read_const::<u64>()?.try_into().map_err(|_| {
-            ZipError::Transcript(
-                ErrorKind::Unsupported,
-                "Failed to convert u64 to usize".to_string(),
-            )
-        })
+        safe_cast!(self.read_const::<u64>()?, u64, usize)
     }
 
     /// Generates a pseudorandom index based on the current transcript state.

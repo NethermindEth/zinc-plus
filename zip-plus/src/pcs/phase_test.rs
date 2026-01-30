@@ -27,17 +27,17 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ) -> Result<ZipPlusTestTranscript, ZipError> {
         validate_input::<Zt, Lc, bool>("test", pp.num_vars, &[poly], &[])?;
 
-        let mut transcript = PcsTranscript::new_with_capacity(
+        let estimated_transcript_size =
             // Combined rows
             pp.linear_code.row_len() * Zt::CombR::NUM_BYTES
             // Column openings
             + Zt::NUM_COLUMN_OPENINGS * (
-                // Column itself
-                commit_hint.cw_matrix.num_rows * Zt::Cw::NUM_BYTES
+            // Column itself
+            commit_hint.cw_matrix.num_rows * Zt::Cw::NUM_BYTES
                 // Merkle proof
                 + MerkleProof::estimate_transcribed_size(commit_hint.merkle_tree.height())
-            ),
-        );
+            );
+        let mut transcript = PcsTranscript::new_with_capacity(estimated_transcript_size);
 
         // If we can take linear combinations, perform the proximity test
         if pp.num_rows > 1 {
@@ -85,10 +85,9 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             Self::open_merkle_trees_for_column(commit_hint, column, &mut transcript)?;
         }
 
-        let transcript_storage = transcript.stream.get_ref();
         assert_eq!(
-            transcript_storage.len(),
-            transcript_storage.capacity(),
+            transcript.stream.get_ref().len(),
+            estimated_transcript_size,
             "PCS transcript capacity was precalculated incorrectly"
         );
 
