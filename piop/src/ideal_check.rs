@@ -62,20 +62,18 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
         );
         let mut transcription_buf: Vec<u8> = vec![0; <IcTypes::F as Field>::Inner::NUM_BYTES];
 
-        let mut evaluation_points: Vec<Vec<IcTypes::F>> = Vec::with_capacity(num_constraints);
         let mut combined_mle_values: Vec<DynamicPolynomialF<IcTypes::F>> =
             Vec::with_capacity(num_constraints);
 
-        for combined_mle in &combined_mles {
-            let challenge = transcript.get_field_challenges(num_vars, field_cfg);
+        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
+        for combined_mle in &combined_mles {
             let mle_coeffs_values = cfg_iter!(combined_mle)
-                .map(|coeff_mle| coeff_mle.evaluate_with_config(&challenge, field_cfg))
+                .map(|coeff_mle| coeff_mle.evaluate_with_config(&evaluation_point, field_cfg))
                 .collect::<std::result::Result<Vec<_>, _>>()?;
 
             transcript.absorb_random_field_slice(&mle_coeffs_values, &mut transcription_buf);
 
-            evaluation_points.push(challenge);
             combined_mle_values.push(DynamicPolynomialF::new_trimmed(mle_coeffs_values));
         }
 
@@ -84,7 +82,7 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
                 combined_mle_values,
             },
             ProverState {
-                evaluation_points,
+                evaluation_point,
                 combined_mles,
             },
         ))
@@ -99,7 +97,7 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
         ideal_over_f_from_ref: IdealOverFFromRef,
         field_cfg: &<IcTypes::F as PrimeField>::Config,
     ) -> Result<
-        Vec<VerifierSubClaim<IcTypes, DEGREE_PLUS_ONE>>,
+        VerifierSubClaim<IcTypes, DEGREE_PLUS_ONE>,
         DynamicPolynomialF<IcTypes::F>,
         IdealOverF,
     >
@@ -112,15 +110,12 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
     {
         let mut transcription_buf: Vec<u8> = vec![0; <IcTypes::F as Field>::Inner::NUM_BYTES];
 
-        let mut evaluation_points: Vec<Vec<IcTypes::F>> = Vec::with_capacity(num_constraints);
         let combined_mle_values = proof.combined_mle_values;
 
+        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+
         for mle_value in &combined_mle_values {
-            let challenge = transcript.get_field_challenges(num_vars, field_cfg);
-
             transcript.absorb_random_field_slice(&mle_value.coeffs, &mut transcription_buf);
-
-            evaluation_points.push(challenge);
         }
 
         let ideal_collector = collect_ideals::<_, U>(num_constraints);
@@ -134,11 +129,10 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
             &combined_mle_values,
         )?;
 
-        Ok(evaluation_points
-            .into_iter()
-            .zip(combined_mle_values)
-            .map(|(point, value)| VerifierSubClaim { point, value })
-            .collect())
+        Ok(VerifierSubClaim {
+            point: evaluation_point,
+            values: combined_mle_values,
+        })
     }
 }
 

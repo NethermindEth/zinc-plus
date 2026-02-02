@@ -28,12 +28,12 @@ pub struct Proof<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ON
 
 #[derive(Clone, Debug)]
 pub struct ProverState<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize> {
-    pub evaluation_points: Vec<Vec<IcTypes::F>>,
+    pub evaluation_point: Vec<IcTypes::F>,
     pub combined_mles: Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>>,
 }
 
 pub struct VerifierSubClaim<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
 {
     pub point: Vec<IcTypes::F>,
-    pub value: DynamicPolynomialF<IcTypes::F>,
+    pub values: Vec<DynamicPolynomialF<IcTypes::F>>,
 }
