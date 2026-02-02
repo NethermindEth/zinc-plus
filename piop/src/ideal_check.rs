@@ -62,20 +62,24 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
         );
         let mut transcription_buf: Vec<u8> = vec![0; <IcTypes::F as Field>::Inner::NUM_BYTES];
 
-        let mut combined_mle_values: Vec<DynamicPolynomialF<IcTypes::F>> =
-            Vec::with_capacity(num_constraints);
-
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
-        for combined_mle in &combined_mles {
-            let mle_coeffs_values = cfg_iter!(combined_mle)
-                .map(|coeff_mle| coeff_mle.evaluate_with_config(&evaluation_point, field_cfg))
-                .collect::<std::result::Result<Vec<_>, _>>()?;
+        let combined_mle_values = cfg_iter!(combined_mles)
+            .map(|combined_mle| {
+                Ok(DynamicPolynomialF::new_trimmed(
+                    cfg_iter!(combined_mle)
+                        .map(|coeff_mle| {
+                            coeff_mle.evaluate_with_config(&evaluation_point, field_cfg)
+                        })
+                        .collect::<std::result::Result<Vec<_>, _>>()?,
+                ))
+            })
+            .collect::<std::result::Result<Vec<_>, IdealCheckError<_, _>>>()?;
 
-            transcript.absorb_random_field_slice(&mle_coeffs_values, &mut transcription_buf);
-
-            combined_mle_values.push(DynamicPolynomialF::new_trimmed(mle_coeffs_values));
-        }
+        combined_mle_values.iter().for_each(|combined_mle_value| {
+            transcript
+                .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
+        });
 
         Ok((
             Proof {
