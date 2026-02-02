@@ -10,6 +10,7 @@ pub trait RaaConfig: Copy + Send + Sync {
     /// precomputed permutation.
     const PERMUTE_IN_PLACE: bool;
     /// Whether to check for overflows during encoding
+    // TODO: Unify with `CHECK_FOR_OVERFLOW` in `zinc_poly`
     const CHECK_FOR_OVERFLOWS: bool;
 }
 
@@ -192,7 +193,7 @@ where
     if let Some(first) = input.first().cloned() {
         let mut acc = first;
         for curr in input.iter_mut().skip(1) {
-            acc = add!(curr, &acc, "Accumulation overflow");
+            acc = add!(*curr, acc, "Accumulation overflow");
             *curr = acc.clone();
         }
     }

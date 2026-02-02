@@ -11,11 +11,7 @@ use zinc_poly::univariate::{
 };
 use zinc_primality::MillerRabin;
 use zinc_transcript::traits::ConstTranscribable;
-use zinc_utils::{
-    from_ref::FromRef,
-    inner_product::{BooleanInnerProductUncheckedAdd, MBSInnerProductUnchecked},
-    named::Named,
-};
+use zinc_utils::{UNCHECKED, from_ref::FromRef, inner_product::MBSInnerProduct, named::Named};
 use zip_common::*;
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -56,23 +52,17 @@ where
     type Pt = i128;
     type CombR = Int<{ INT_LIMBS * 5 }>;
     type Comb = DensePolynomial<Self::CombR, D_PLUS_ONE>;
-    type EvalDotChal =
-        BinaryPolyInnerProduct<Self::Chal, BooleanInnerProductUncheckedAdd, D_PLUS_ONE>;
-    type CombDotChal = DensePolyInnerProduct<
-        Self::CombR,
-        Self::Chal,
-        Self::CombR,
-        MBSInnerProductUnchecked,
-        D_PLUS_ONE,
-    >;
-    type ArrCombRDotChal = MBSInnerProductUnchecked;
+    type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, D_PLUS_ONE>;
+    type CombDotChal =
+        DensePolyInnerProduct<Self::CombR, Self::Chal, Self::CombR, MBSInnerProduct, D_PLUS_ONE>;
+    type ArrCombRDotChal = MBSInnerProduct;
 }
 
 #[derive(Clone, Copy)]
 struct BenchRaaConfig;
 impl RaaConfig for BenchRaaConfig {
     const PERMUTE_IN_PLACE: bool = true;
-    const CHECK_FOR_OVERFLOWS: bool = false;
+    const CHECK_FOR_OVERFLOWS: bool = UNCHECKED;
 }
 
 type SomeRaaCode<const D_PLUS_ONE: usize> =
@@ -87,8 +77,8 @@ type SomeIprsCode<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize> = IprsCo
 fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");
 
-    do_bench::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>>(&mut group);
-    do_bench::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>>(&mut group);
+    do_bench::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>, UNCHECKED>(&mut group);
+    do_bench::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>, UNCHECKED>(&mut group);
 
     group.finish();
 }
@@ -96,8 +86,8 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
 fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS");
 
-    do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, 32>>(&mut group);
-    do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 1, 64>>(&mut group);
+    do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, 32>, UNCHECKED>(&mut group);
+    do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 1, 64>, UNCHECKED>(&mut group);
 
     group.finish();
 }

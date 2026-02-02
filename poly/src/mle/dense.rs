@@ -10,14 +10,13 @@ use std::{
 use crate::{
     EvaluationError,
     mle::{MultilinearExtension, MultilinearExtensionRand},
-    utils::log2,
 };
 use crypto_primitives::{Matrix, PrimeField, Ring, Semiring};
 use rand::{distr::StandardUniform, prelude::*};
 use rand_core::RngCore;
 use zinc_utils::{
-    add, cfg_into_iter, inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
-    projectable_to_field::ProjectableToField, sub,
+    CHECKED, add, cfg_into_iter, inner_transparent_field::InnerTransparentField, log2,
+    mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField, sub,
 };
 
 use super::MultilinearExtensionWithConfig;
@@ -97,7 +96,7 @@ impl<R: Default> DenseMultilinearExtension<R> {
 
         evaluations.resize_with(len.next_power_of_two(), Default::default);
 
-        let num_vars = crate::utils::log2(evaluations.len()) as usize;
+        let num_vars = zinc_utils::log2(evaluations.len()) as usize;
 
         Self {
             evaluations,
@@ -306,11 +305,13 @@ where
                 let left = &self[2 * b];
                 let right = &self[2 * b + 1];
                 // a = f(1) - f(0)
-                let a = sub!(right, &left);
+                let a = sub!(*right, left);
                 if a != zero {
                     // self[b] = f(0) + r * a
-                    let ar = a.mul_by_scalar(r).expect("Multiplication overflow");
-                    self[b] = add!(left, &ar);
+                    let ar = a
+                        .mul_by_scalar::<CHECKED>(r)
+                        .expect("Multiplication overflow");
+                    self[b] = add!(*left, ar);
                 } else {
                     self[b] = left.clone();
                 };
@@ -622,7 +623,7 @@ mod tests {
         assert!(dense.iter().enumerate().all(|(i, v)| if i == 0 || i == 5 {
             true
         } else {
-            v.is_zero_with_cfg(&cfg)
+            F::is_zero(v)
         }));
     }
 

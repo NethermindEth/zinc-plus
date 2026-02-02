@@ -16,9 +16,9 @@ pub(crate) trait MulByTwiddle<Lhs, Twiddle>: Clone + Send + Sync {
 /// The twiddle multiplication that
 /// uses the `MulByScalar` implementation.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct MBSMulByTwiddle;
+pub(crate) struct MBSMulByTwiddle<const CHECK: bool>;
 
-impl<Lhs, Twiddle> MulByTwiddle<Lhs, Twiddle> for MBSMulByTwiddle
+impl<Lhs, Twiddle, const CHECK: bool> MulByTwiddle<Lhs, Twiddle> for MBSMulByTwiddle<CHECK>
 where
     Lhs: for<'a> MulByScalar<&'a Twiddle>,
 {
@@ -26,7 +26,7 @@ where
 
     #[inline(always)]
     fn mul_by_twiddle(lhs: &Lhs, twiddle: &Twiddle) -> Lhs {
-        lhs.mul_by_scalar(twiddle)
+        lhs.mul_by_scalar::<CHECK>(twiddle)
             .expect("Twiddle multiplication overflow")
     }
 }

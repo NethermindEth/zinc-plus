@@ -34,8 +34,9 @@ use zinc_poly::{
 use zinc_primality::MillerRabin;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
+    CHECKED,
     from_ref::FromRef,
-    inner_product::{BooleanInnerProductCheckedAdd, MBSInnerProductChecked, ScalarProduct},
+    inner_product::{MBSInnerProduct, ScalarProduct},
     mul_by_scalar::MulByScalar,
     projectable_to_field::ProjectableToField,
 };
@@ -63,7 +64,7 @@ impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N
     type Comb = Self::CombR;
     type EvalDotChal = ScalarProduct;
     type CombDotChal = ScalarProduct;
-    type ArrCombRDotChal = MBSInnerProductChecked;
+    type ArrCombRDotChal = MBSInnerProduct;
 }
 
 pub struct TestPolyZipTypes<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> {}
@@ -79,16 +80,15 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
     type Pt = i128;
     type CombR = Int<M>;
     type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
-    type EvalDotChal =
-        BinaryPolyInnerProduct<Self::Chal, BooleanInnerProductCheckedAdd, DEGREE_PLUS_ONE>;
+    type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, DEGREE_PLUS_ONE>;
     type CombDotChal = DensePolyInnerProduct<
         Self::CombR,
         Self::Chal,
         Self::CombR,
-        MBSInnerProductChecked,
+        MBSInnerProduct,
         DEGREE_PLUS_ONE,
     >;
-    type ArrCombRDotChal = MBSInnerProductChecked;
+    type ArrCombRDotChal = MBSInnerProduct;
 }
 
 /// Helper function to set up common parameters for tests.
@@ -236,7 +236,7 @@ where
 
     let point: Vec<Zt::Pt> = prepare_evaluation_point();
 
-    let transcript = ZipPlus::test(&pp, &poly, &data).unwrap();
+    let transcript = ZipPlus::test::<CHECKED>(&pp, &poly, &data).unwrap();
 
     let (field_cfg, projecting_element) = {
         let mut transcript: PcsTranscript = transcript.clone().into();
@@ -248,7 +248,7 @@ where
         (field_cfg, projecting_element)
     };
 
-    let (eval_f, proof) = ZipPlus::evaluate(&pp, &poly, &point, transcript).unwrap();
+    let (eval_f, proof) = ZipPlus::evaluate::<_, CHECKED>(&pp, &poly, &point, transcript).unwrap();
 
     // Verify the evaluation is done correctly
     {

@@ -7,3 +7,22 @@ pub mod named;
 pub mod ops_macros;
 pub mod parallel;
 pub mod projectable_to_field;
+
+// Can't use enums in const generics in stable Rust yet, so we use consts
+// instead.
+pub const CHECKED: bool = true;
+pub const UNCHECKED: bool = false;
+
+/// Returns ceil(log2(x)).
+/// Copied from ark-std.
+#[inline(always)]
+#[allow(clippy::arithmetic_side_effects)]
+pub const fn log2(x: usize) -> u32 {
+    if x == 0 {
+        0
+    } else if x.is_power_of_two() {
+        1usize.leading_zeros() - x.leading_zeros()
+    } else {
+        0usize.leading_zeros() - x.leading_zeros()
+    }
+}

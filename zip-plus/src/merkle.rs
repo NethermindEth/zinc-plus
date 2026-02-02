@@ -77,6 +77,10 @@ impl MerkleTree {
         build_merkle_tree_from_leaves(leaves)
     }
 
+    pub fn height(&self) -> usize {
+        self.layers.len()
+    }
+
     pub fn root(&self) -> MtHash {
         self.layers
             .last()
@@ -321,6 +325,14 @@ impl MerkleProof {
             return Err(MerkleError::InvalidRootHash);
         }
         Ok(())
+    }
+
+    /// Estimate the number of bytes that would be written to [[PcsTranscript]]
+    /// when an instance of this type is transcribed.
+    #[allow(clippy::arithmetic_side_effects)] // Overflow isn't possible
+    pub fn estimate_transcribed_size(merkle_tree_height: usize) -> usize {
+        // Note the proof does not include leaf layer, so we subtract 1.
+        3 * u64::NUM_BYTES + (merkle_tree_height - 1) * MtHash::NUM_BYTES
     }
 }
 

@@ -1,3 +1,4 @@
+use crate::{ZipError, merkle::MerkleProof};
 use crypto_primitives::PrimeField;
 use itertools::Itertools;
 use std::io::{Cursor, ErrorKind, Read, Write};
@@ -5,10 +6,22 @@ use zinc_transcript::{
     KeccakTranscript,
     traits::{ConstTranscribable, Transcribable, Transcript},
 };
-use zinc_utils::rem;
+use zinc_utils::{add, mul, rem};
 
-use crate::{ZipError, merkle::MerkleProof};
-
+macro_rules! safe_cast {
+    ($value:expr, $from:ident, $to:ident) => {
+        $to::try_from($value).map_err(|_err| {
+            ZipError::Transcript(
+                ErrorKind::Unsupported,
+                format!(
+                    "Failed to convert {} to {}",
+                    stringify!($from),
+                    stringify!($to)
+                ),
+            )
+        })
+    };
+}
 /// A transcript for Polynomial Commitment Scheme (PCS) operations.
 /// Manages both Fiat-Shamir transformations and serialization/deserialization
 /// of proof data.
@@ -27,6 +40,15 @@ pub struct PcsTranscript {
 impl PcsTranscript {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn new_with_capacity(capacity: usize) -> Self {
+        // We zero-initialize the stream vector in advance to avoid dealing with
+        // MaybeUninit
+        Self {
+            fs_transcript: Default::default(),
+            stream: Cursor::new(vec![0; capacity]),
+        }
     }
 
     // TODO if we change this to an iterator we may be able to save some memory
@@ -110,32 +132,58 @@ impl PcsTranscript {
         Ok(())
     }
 
-    pub fn write_const<T: ConstTranscribable>(
-        &mut self,
-        v: &T,
-        buf: &mut [u8],
-    ) -> Result<(), ZipError> {
-        v.write_transcription_bytes(buf);
-        self.stream.write_all(buf)?;
+    pub fn write_const<T: ConstTranscribable>(&mut self, v: &T) -> Result<(), ZipError> {
+        let prev_pos = safe_cast!(self.stream.position(), u64, usize)?;
+        let data_len = T::NUM_BYTES;
+        let next_pos = add!(prev_pos, data_len);
+
+        let inner = self.stream.get_mut();
+        // Enlarge the inner buffer if needed
+        if inner.len() < next_pos {
+            inner.resize(next_pos, 0_u8);
+        }
+
+        v.write_transcription_bytes(&mut inner[prev_pos..next_pos]);
+        self.stream.set_position(safe_cast!(next_pos, usize, u64)?);
         Ok(())
     }
 
-    pub fn write_const_many<'a, T: ConstTranscribable + 'a, I>(
-        &mut self,
-        vs: I,
-    ) -> Result<(), ZipError>
+    // Note(alex):
+    // Parallelizing this greatly degrades performance rather than improving it.
+    // Maybe we should think of breakpoints for parallelization later.
+    pub fn write_const_many<T: ConstTranscribable>(&mut self, vs: &[T]) -> Result<(), ZipError> {
+        self.write_const_many_iter(vs.iter(), vs.len())
+    }
+
+    // Note(alex):
+    // Parallelizing this greatly degrades performance rather than improving it.
+    // Maybe we should think of breakpoints for parallelization later.
+    pub fn write_const_many_iter<'a, T, I>(&mut self, vs: I, vs_len: usize) -> Result<(), ZipError>
     where
+        T: ConstTranscribable + 'a,
         I: IntoIterator<Item = &'a T>,
     {
-        let mut buf = vec![0; T::NUM_BYTES];
-        for v in vs {
-            self.write_const(v, &mut buf)?;
+        let prev_pos = safe_cast!(self.stream.position(), u64, usize)?;
+        let data_len = mul!(vs_len, T::NUM_BYTES);
+        let next_pos = add!(prev_pos, data_len);
+
+        let inner = self.stream.get_mut();
+        // Enlarge the inner buffer if needed
+        if inner.len() < next_pos {
+            inner.resize(next_pos, 0_u8);
         }
 
+        inner[prev_pos..next_pos]
+            .chunks_mut(T::NUM_BYTES)
+            .zip(vs)
+            .for_each(|(chunk, v)| v.write_transcription_bytes(chunk));
+
+        self.stream.set_position(next_pos as u64);
         Ok(())
     }
 
     pub fn read_const<T: ConstTranscribable>(&mut self) -> Result<T, ZipError> {
+        // TODO: Read from the Vec directly instead of using a buffer
         let mut buf = vec![0u8; T::NUM_BYTES];
         self.stream.read_exact(&mut buf)?;
         Ok(T::read_transcription_bytes(&buf))
@@ -147,27 +195,13 @@ impl PcsTranscript {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    fn write_usize(
-        &mut self,
-        value: usize,
-        buf: &mut [u8; size_of::<u64>()],
-    ) -> Result<(), ZipError> {
-        let value_u64: u64 = value.try_into().map_err(|_err| {
-            ZipError::Transcript(
-                ErrorKind::Unsupported,
-                "Failed to convert usize to u64".to_string(),
-            )
-        })?;
-        self.write_const(&value_u64, buf)
+    fn write_usize(&mut self, value: usize) -> Result<(), ZipError> {
+        let value_u64 = safe_cast!(value, usize, u64)?;
+        self.write_const(&value_u64)
     }
 
     fn read_usize(&mut self) -> Result<usize, ZipError> {
-        self.read_const::<u64>()?.try_into().map_err(|_| {
-            ZipError::Transcript(
-                ErrorKind::Unsupported,
-                "Failed to convert u64 to usize".to_string(),
-            )
-        })
+        safe_cast!(self.read_const::<u64>()?, u64, usize)
     }
 
     /// Generates a pseudorandom index based on the current transcript state.
@@ -194,14 +228,12 @@ impl PcsTranscript {
     }
 
     pub fn write_merkle_proof(&mut self, proof: &MerkleProof) -> Result<(), ZipError> {
-        let mut buf = [0u8; size_of::<u64>()];
-
         // Write the dimensions of matrix used to construct the Merkle tree
-        self.write_usize(proof.leaf_index, &mut buf)?;
-        self.write_usize(proof.leaf_count, &mut buf)?;
+        self.write_usize(proof.leaf_index)?;
+        self.write_usize(proof.leaf_count)?;
 
         // Write the length of the merkle path first
-        self.write_usize(proof.siblings.len(), &mut buf)?;
+        self.write_usize(proof.siblings.len())?;
 
         // Write each element of the merkle path
         self.write_const_many(&proof.siblings)?;
@@ -225,10 +257,9 @@ mod tests {
     macro_rules! test_read_write {
         // TODO: N is magic
         ($write_fn:ident, $read_fn:ident, $original_value:expr, $assert_msg:expr) => {{
-            let mut buf = vec![0u8; MtHash::NUM_BYTES];
             let mut transcript = PcsTranscript::new();
             transcript
-                .$write_fn(&$original_value, &mut buf)
+                .$write_fn(&$original_value)
                 .expect(&format!("Failed to write {}", $assert_msg));
             let proof: ZipPlusProof = transcript.into();
             let mut transcript: PcsTranscript = proof.into();

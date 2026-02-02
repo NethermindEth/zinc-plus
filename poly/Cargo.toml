@@ -33,6 +33,7 @@ workspace = true
 
 [features]
 parallel = ["dep:rayon", "zinc-utils/parallel"]
+simd = []
 
 [[bench]]
 name = "nat_evaluation"
