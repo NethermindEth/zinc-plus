@@ -32,8 +32,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             pp.linear_code.row_len() * Zt::CombR::NUM_BYTES
             // Column openings
             + Zt::NUM_COLUMN_OPENINGS * (
-            // Column itself
-            commit_hint.cw_matrix.num_rows * Zt::Cw::NUM_BYTES
+                // Column itself
+                commit_hint.cw_matrix.num_rows * Zt::Cw::NUM_BYTES
                 // Merkle proof
                 + MerkleProof::estimate_transcribed_size(commit_hint.merkle_tree.height())
             );
