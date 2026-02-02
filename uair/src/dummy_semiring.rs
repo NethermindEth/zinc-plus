@@ -48,7 +48,7 @@ impl_binary_op!(Add, add);
 impl_binary_op!(Sub, sub);
 impl_binary_op!(Mul, mul);
 
-macro_rules! impl_op_assing {
+macro_rules! impl_op_assign {
     ($trait:ident, $op:ident) => {
         impl $trait<&DummySemiring> for DummySemiring {
             #[inline(always)]
@@ -62,9 +62,9 @@ macro_rules! impl_op_assing {
     };
 }
 
-impl_op_assing!(AddAssign, add_assign);
-impl_op_assing!(SubAssign, sub_assign);
-impl_op_assing!(MulAssign, mul_assign);
+impl_op_assign!(AddAssign, add_assign);
+impl_op_assign!(SubAssign, sub_assign);
+impl_op_assign!(MulAssign, mul_assign);
 
 macro_rules! impl_checked_op {
     ($trait:ident, $op:ident) => {
