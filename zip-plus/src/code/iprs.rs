@@ -3,18 +3,22 @@ mod pntt;
 use crate::{
     code::{
         LinearCode,
-        iprs::pntt::radix8::{FieldMulByTwiddle, MBSMulByTwiddle, params::Config as PnttConfig},
+        iprs::pntt::radix8::{
+            FieldMulByTwiddle, MBSMulByTwiddle, MulByTwiddle, WideningMulByTwiddle,
+            params::Config as PnttConfig,
+        },
     },
     pcs::structs::ZipTypes,
 };
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::{CheckedAdd, CheckedMul};
-use std::{fmt::Debug, iter::Sum, marker::PhantomData, ops::AddAssign};
-use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
-
-use crate::code::iprs::pntt::radix8::{MulByTwiddle, WideningMulByTwiddle};
 pub use pntt::radix8::params::{PnttConfigF2_16_1, PnttInt, Radix8PnttParams};
-use zinc_utils::mul_by_scalar::WideningMulByScalar;
+use std::{fmt::Debug, iter::Sum, marker::PhantomData, ops::AddAssign};
+use zinc_utils::{
+    CHECKED,
+    from_ref::FromRef,
+    mul_by_scalar::{MulByScalar, WideningMulByScalar},
+};
 
 /// Pseudo Reed-Solomon encoder over the integers. Internally uses a
 /// radix-8 NTT-style recursion with a base Vandermonde matrix sized
@@ -54,7 +58,7 @@ where
             Config::INPUT_LEN
         );
 
-        pntt::radix8::pntt::<_, _, _, M, MBSMulByTwiddle>(row, &self.pntt_params)
+        pntt::radix8::pntt::<_, _, _, M, MBSMulByTwiddle<CHECKED>>(row, &self.pntt_params)
     }
 
     // Do the encoding but make use of the fact
@@ -134,7 +138,7 @@ where
     }
 
     fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {
-        self.encode_inner::<_, _, MBSMulByTwiddle>(row)
+        self.encode_inner::<_, _, MBSMulByTwiddle<CHECKED>>(row)
     }
 
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>

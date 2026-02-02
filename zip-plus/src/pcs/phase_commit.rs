@@ -208,6 +208,7 @@ mod tests {
     use num_traits::Zero;
     use rand::{Rng, rng};
     use zinc_poly::{mle::DenseMultilinearExtension, univariate::binary::BinaryPoly};
+    use zinc_utils::CHECKED;
 
     const INT_LIMBS: usize = U64::LIMBS;
 
@@ -623,7 +624,7 @@ mod tests {
 
         let (hint, _) = TestZip::commit(&param, &mle).unwrap();
 
-        let test_transcript = TestZip::test(&param, &mle, &hint).unwrap();
+        let test_transcript = TestZip::test::<CHECKED>(&param, &mle, &hint).unwrap();
         let actual_test_transcript_size_bytes = test_transcript.0.stream.get_ref().len();
         let expected_test_transcript_size_bytes =
             calculate_expected_test_transcript_size_bytes(&param);
@@ -632,7 +633,8 @@ mod tests {
             expected_test_transcript_size_bytes
         );
 
-        let (_, proof) = TestZip::evaluate::<F>(&param, &mle, &point, test_transcript).unwrap();
+        let (_, proof) =
+            TestZip::evaluate::<F, CHECKED>(&param, &mle, &point, test_transcript).unwrap();
         let actual_proof_size_bytes = proof.0.len();
         let expected_proof_size_bytes = calculate_expected_proof_size_bytes(&param);
         assert_eq!(actual_proof_size_bytes, expected_proof_size_bytes);

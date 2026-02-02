@@ -14,7 +14,7 @@ use thiserror::Error;
 use zinc_poly::{
     EvaluationError,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::dynamic::DynamicPolynomial,
+    univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
@@ -63,7 +63,7 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
         let mut transcription_buf: Vec<u8> = vec![0; <IcTypes::F as Field>::Inner::NUM_BYTES];
 
         let mut evaluation_points: Vec<Vec<IcTypes::F>> = Vec::with_capacity(num_constraints);
-        let mut combined_mle_values: Vec<DynamicPolynomial<IcTypes::F>> =
+        let mut combined_mle_values: Vec<DynamicPolynomialF<IcTypes::F>> =
             Vec::with_capacity(num_constraints);
 
         for combined_mle in &combined_mles {
@@ -76,10 +76,7 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
             transcript.absorb_random_field_slice(&mle_coeffs_values, &mut transcription_buf);
 
             evaluation_points.push(challenge);
-            combined_mle_values.push(DynamicPolynomial::new_trimmed_with_zero(
-                mle_coeffs_values,
-                &IcTypes::F::zero_with_cfg(field_cfg),
-            ));
+            combined_mle_values.push(DynamicPolynomialF::new_trimmed(mle_coeffs_values));
         }
 
         Ok((
@@ -103,14 +100,14 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
         field_cfg: &<IcTypes::F as PrimeField>::Config,
     ) -> Result<
         Vec<VerifierSubClaim<IcTypes, DEGREE_PLUS_ONE>>,
-        DynamicPolynomial<IcTypes::F>,
+        DynamicPolynomialF<IcTypes::F>,
         IdealOverF,
     >
     where
         U: Uair<IcTypes::Witness>,
         <IcTypes::F as Field>::Inner: ConstTranscribable,
         IdealOverF: Ideal,
-        DynamicPolynomial<IcTypes::F>: IdealCheck<IdealOverF>,
+        DynamicPolynomialF<IcTypes::F>: IdealCheck<IdealOverF>,
         IdealOverFFromRef: Fn(&U::Ideal) -> IdealOverF,
     {
         let mut transcription_buf: Vec<u8> = vec![0; <IcTypes::F as Field>::Inner::NUM_BYTES];
@@ -160,7 +157,7 @@ mod tests {
 
     use rand::rng;
     use zinc_poly::univariate::{
-        dense::DensePolynomial, dynamic::DynamicPolynomial, ideal::DegreeOneIdeal,
+        dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF, ideal::DegreeOneIdeal,
     };
     use zinc_test_uair::{GenerateWitness, TestAirNoMultiplication, TestUairSimpleMultiplication};
     use zinc_transcript::KeccakTranscript;
@@ -202,7 +199,7 @@ mod tests {
         U: GenerateWitness<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
         IdealOverF: Ideal,
         IdealOverFFromRef: Fn(&U::Ideal) -> IdealOverF,
-        DynamicPolynomial<MontyField<LIMBS>>: IdealCheck<IdealOverF>,
+        DynamicPolynomialF<MontyField<LIMBS>>: IdealCheck<IdealOverF>,
     {
         let mut rng = rng();
 

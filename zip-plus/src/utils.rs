@@ -1,16 +1,10 @@
-use num_traits::CheckedAdd;
 use rand::{rngs::StdRng, seq::SliceRandom};
 use rand_core::SeedableRng;
-use std::{iter::Iterator, mem::MaybeUninit};
-use zinc_utils::{cfg_iter_mut, mul_by_scalar::MulByScalar};
-
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
 
 /// Computes a linear combination of multiple evaluation rows into a single
 /// combined row.
 ///
-/// Given a flat `evaluations` vector, interpreted as a matrix with `row_len`
+/// Given a flat `evaluations` iterator, interpreted as a matrix with `row_len`
 /// columns, this function treats each consecutive `row_len` values as one row.
 /// The output is a single row, computed by multiplying each input row by the
 /// corresponding coefficient from `coeffs`, and summing these scaled rows
@@ -23,50 +17,60 @@ use rayon::prelude::*;
 /// # Arguments
 ///
 /// - `coeffs`: Coefficients applied to each row.
-/// - `evaluations`: Flattened evaluations arranged row-wise.
+/// - `evals_iter`: Iterator over flattened evaluations arranged row-wise.
+/// - `convert_eval`: Function to convert each evaluation to the desired type.
+///   Should be just `Ok::<_, ZipError>` if no conversion is needed.
+/// - `add_scaled`: Function to add a scaled evaluation to an accumulator.
 /// - `row_len`: Number of columns per evaluation row.
 /// - `zero`: Additive neutral element of `El`.
 ///
 /// # Returns
 ///
 /// A vector of length `row_len` representing the combined row.
-pub(super) fn combine_rows<Coeff, El>(
-    coeffs: &[Coeff],
-    evaluations: &[El],
-    row_len: usize,
-    zero: &El,
-) -> Vec<El>
-where
-    Coeff: Send + Sync,
-    El: Clone + CheckedAdd + for<'z> MulByScalar<&'z Coeff> + Send + Sync,
-{
-    let mut combined_row = Vec::with_capacity(row_len);
+#[macro_export]
+#[allow(unused_imports)]
+macro_rules! combine_rows {
+    ($check:ident, $coeffs:expr, $evals_iter:expr, $convert_eval:expr, $row_len:expr, $zero:expr) => {{
+        let row_len = $row_len;
+        let mut combined_row = Vec::with_capacity(row_len);
 
-    cfg_iter_mut!(combined_row.spare_capacity_mut())
-        .enumerate()
-        .for_each(|(column, combined)| {
-            *combined = MaybeUninit::new(
-                coeffs
-                    .iter()
-                    .zip(evaluations.iter().skip(column).step_by(row_len))
-                    .map(|(coeff, eval)| {
-                        eval.mul_by_scalar(coeff)
-                            .expect("Cannot multiply evaluation by coefficient")
-                    })
-                    .reduce(|mut acc, next| {
-                        acc = acc.checked_add(&next).expect("addition overflow");
-                        acc
-                    })
-                    .unwrap_or(zero.clone()),
-            );
-        });
+        cfg_iter_mut!(combined_row.spare_capacity_mut())
+            .enumerate()
+            .try_for_each(|(column, combined)| -> Result<(), ZipError> {
+                let mut acc = $zero;
 
-    // Safety: We initialized all elements in the combined_row.
-    unsafe {
-        combined_row.set_len(row_len);
-    }
+                for (eval, coeff) in $evals_iter
+                    .skip(column)
+                    .step_by(row_len)
+                    .zip($coeffs.iter())
+                {
+                    let eval = $convert_eval(eval)?;
+                    let scaled = eval
+                        .mul_by_scalar::<$check>(coeff)
+                        .expect("Cannot multiply evaluation by coefficient");
 
-    combined_row
+                    if $check {
+                        acc = zinc_utils::add!(
+                            acc,
+                            &scaled,
+                            "Addition overflow while combining rows"
+                        );
+                    } else {
+                        acc += scaled;
+                    }
+                }
+
+                *combined = std::mem::MaybeUninit::new(acc);
+                Ok(())
+            })?;
+
+        // Safety: We initialized all elements in the combined_row.
+        unsafe {
+            combined_row.set_len(row_len);
+        }
+
+        combined_row
+    }};
 }
 
 /// Reorder the elements in slice using the given randomness seed
@@ -76,37 +80,66 @@ pub(super) fn shuffle_seeded<T>(slice: &mut [T], seed: u64) {
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects)]
 mod test {
-    use super::*;
+    use crate::ZipError;
+    use zinc_utils::{CHECKED, cfg_iter_mut, mul_by_scalar::MulByScalar};
+
+    #[cfg(feature = "parallel")]
+    use rayon::prelude::*;
 
     #[test]
-    fn test_basic_combination() {
-        let coeffs = vec![1, 2];
-        let evaluations = vec![3, 4, 5, 6];
+    fn test_basic_combination() -> Result<(), ZipError> {
+        let coeffs = [1, 2];
+        let evaluations = [3, 4, 5, 6];
         let row_len = 2;
 
-        let result = combine_rows(&coeffs, &evaluations, row_len, &0);
+        let result = combine_rows!(
+            CHECKED,
+            &coeffs,
+            evaluations.iter(),
+            Ok::<_, ZipError>,
+            row_len,
+            0_i32
+        );
 
         assert_eq!(result, vec![(3 + 2 * 5), (4 + 2 * 6)]);
+        Ok(())
     }
 
     #[test]
-    fn test_second_combination() {
-        let coeffs = vec![3, 4];
-        let evaluations = vec![2, 4, 6, 8];
+    fn test_second_combination() -> Result<(), ZipError> {
+        let coeffs = [3, 4];
+        let evaluations = [2, 4, 6, 8];
         let row_len = 2;
 
-        let result = combine_rows(&coeffs, &evaluations, row_len, &0);
+        let result = combine_rows!(
+            CHECKED,
+            &coeffs,
+            evaluations.iter(),
+            Ok::<_, ZipError>,
+            row_len,
+            0_i32
+        );
 
         assert_eq!(result, vec![(3 * 2 + 4 * 6), (3 * 4 + 4 * 8)]);
+        Ok(())
     }
+
     #[test]
-    fn test_large_values() {
-        let coeffs = vec![1000, -500];
-        let evaluations = vec![2000, -3000, 4000, -5000];
+    fn test_large_values() -> Result<(), ZipError> {
+        let coeffs = [1000, -500];
+        let evaluations = [2000, -3000, 4000, -5000];
         let row_len = 2;
 
-        let result = combine_rows(&coeffs, &evaluations, row_len, &0);
+        let result = combine_rows!(
+            CHECKED,
+            &coeffs,
+            evaluations.iter(),
+            Ok::<_, ZipError>,
+            row_len,
+            0_i32
+        );
 
         assert_eq!(
             result,
@@ -115,5 +148,6 @@ mod test {
                 (1000 * -3000 + (-500) * -5000)
             ]
         );
+        Ok(())
     }
 }

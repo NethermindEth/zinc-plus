@@ -5,7 +5,7 @@ use itertools::{Itertools, max};
 use zinc_poly::{
     CoefficientProjectable,
     mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero},
-    univariate::dynamic::DynamicPolynomial,
+    univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_uair::{ConstraintBuilder, Uair, ideal::DummyIdeal};
 use zinc_utils::from_ref::FromRef;
@@ -13,11 +13,11 @@ use zinc_utils::from_ref::FromRef;
 use crate::ideal_check::structs::IdealCheckTypes;
 
 pub struct CombinedPolyRowBuilder<F: PrimeField> {
-    combined_evaluations: Vec<DynamicPolynomial<F>>,
+    combined_evaluations: Vec<DynamicPolynomialF<F>>,
 }
 
 impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
-    type Expr = DynamicPolynomial<F>;
+    type Expr = DynamicPolynomialF<F>;
     type Ideal = DummyIdeal;
 
     #[allow(clippy::arithmetic_side_effects)]
@@ -55,7 +55,7 @@ where
 
     let field_zero = IcTypes::F::zero_with_cfg(projecting_element.cfg());
 
-    let mut max_degrees_and_combined_poly_rows: Vec<(usize, Vec<DynamicPolynomial<IcTypes::F>>)> =
+    let mut max_degrees_and_combined_poly_rows: Vec<(usize, Vec<DynamicPolynomialF<IcTypes::F>>)> =
         trace_matrix
             .as_rows()
             .zip(trace_matrix.as_rows().skip(1))
@@ -65,7 +65,6 @@ where
                     down,
                     num_constraints,
                     projecting_element,
-                    &field_zero,
                 )
             })
             .collect();
@@ -101,7 +100,7 @@ fn project_trace_matrix<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_
     num_cols: usize,
     trace: &[DenseMultilinearExtension<IcTypes::Witness>],
     projecting_element: &IcTypes::F,
-) -> DenseRowMatrix<DynamicPolynomial<<IcTypes as IdealCheckTypes<DEGREE_PLUS_ONE>>::F>> {
+) -> DenseRowMatrix<DynamicPolynomialF<<IcTypes as IdealCheckTypes<DEGREE_PLUS_ONE>>::F>> {
     let mut matr = DenseRowMatrix::uninit(num_rows, num_cols);
 
     matr.cells_mut().enumerate().for_each(|(row_idx, row)| {
@@ -119,12 +118,11 @@ fn project_trace_matrix<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_
 
 #[allow(clippy::arithmetic_side_effects)]
 fn combine_rows_and_get_max_degree<IcTypes, U, const DEGREE_PLUS_ONE: usize>(
-    up: &[DynamicPolynomial<IcTypes::F>],
-    down: &[DynamicPolynomial<IcTypes::F>],
+    up: &[DynamicPolynomialF<IcTypes::F>],
+    down: &[DynamicPolynomialF<IcTypes::F>],
     num_constraints: usize,
     projecting_element: &IcTypes::F,
-    field_zero: &IcTypes::F,
-) -> (usize, Vec<DynamicPolynomial<IcTypes::F>>)
+) -> (usize, Vec<DynamicPolynomialF<IcTypes::F>>)
 where
     IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>,
     U: Uair<IcTypes::Witness>,
@@ -136,19 +134,17 @@ where
         up,
         down,
         |x| x.project_coefficients(projecting_element).into(),
-        |x, y| Some(DynamicPolynomial::from(y.project_coefficients(projecting_element)) * x),
+        |x, y| Some(DynamicPolynomialF::from(y.project_coefficients(projecting_element)) * x),
         DummyIdeal::from_ref,
     );
 
     let mut combined_evaluations = constraint_builder.combined_evaluations;
 
-    combined_evaluations
-        .iter_mut()
-        .for_each(|eval| eval.trim_with_zero(field_zero));
+    combined_evaluations.iter_mut().for_each(|eval| eval.trim());
 
     let max_degree = max(combined_evaluations
         .iter()
-        .map(|eval| eval.degree_with_zero(field_zero).unwrap_or(0)))
+        .map(|eval| eval.degree().unwrap_or(0)))
     .expect("We assume the number of constraints is not zero so this iterator is not empty");
 
     (max_degree, combined_evaluations)
@@ -160,7 +156,7 @@ fn prepare_coefficient_mles<
 >(
     num_constraints: usize,
     max_degree: usize,
-    max_degrees_and_combined_poly_rows: &[(usize, Vec<DynamicPolynomial<IcTypes::F>>)],
+    max_degrees_and_combined_poly_rows: &[(usize, Vec<DynamicPolynomialF<IcTypes::F>>)],
     field_zero: &IcTypes::F,
 ) -> Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>> {
     (0..num_constraints)

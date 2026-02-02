@@ -1,13 +1,14 @@
 use crate::{
     CoefficientProjectable, ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
-    univariate::binary::BinaryPoly,
+    univariate::{binary_ref::BinaryRefPoly, binary_u64::BinaryU64Poly},
 };
+
 use core::slice;
 use crypto_primitives::{
     FixedSemiring, FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring, boolean::Boolean,
 };
 use itertools::Itertools;
-use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, One, Zero};
+use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, ConstOne, ConstZero, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
     array,
@@ -489,14 +490,33 @@ where
     }
 }
 
-impl<R, const DEGREE_PLUS_ONE: usize> FromRef<BinaryPoly<DEGREE_PLUS_ONE>>
+impl<R, const DEGREE_PLUS_ONE: usize> FromRef<BinaryRefPoly<DEGREE_PLUS_ONE>>
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 where
     R: Semiring + FromRef<Boolean> + Default,
 {
     #[inline(always)]
-    fn from_ref(value: &BinaryPoly<DEGREE_PLUS_ONE>) -> Self {
+    fn from_ref(value: &BinaryRefPoly<DEGREE_PLUS_ONE>) -> Self {
         Self::from_ref(value.inner())
+    }
+}
+
+impl<R, const DEGREE_PLUS_ONE: usize> FromRef<BinaryU64Poly<DEGREE_PLUS_ONE>>
+    for DensePolynomial<R, DEGREE_PLUS_ONE>
+where
+    R: Semiring + FromRef<Boolean> + Default,
+{
+    #[inline(always)]
+    fn from_ref(value: &BinaryU64Poly<DEGREE_PLUS_ONE>) -> Self {
+        let mut coeffs = array::from_fn::<_, DEGREE_PLUS_ONE, _>(|_| R::default());
+        coeffs.iter_mut().enumerate().for_each(|(i, coeff)| {
+            if value.inner() & (1 << i) != 0 {
+                *coeff = R::from_ref(&Boolean::ONE);
+            } else {
+                *coeff = R::from_ref(&Boolean::ZERO);
+            }
+        });
+        DensePolynomial { coeffs }
     }
 }
 
@@ -529,14 +549,14 @@ impl<'a, R, S, const DEGREE_PLUS_ONE: usize> MulByScalar<&'a S>
 where
     R: FixedSemiring + MulByScalar<&'a S>,
 {
-    fn mul_by_scalar(&self, rhs: &'a S) -> Option<Self> {
+    fn mul_by_scalar<const CHECK: bool>(&self, rhs: &'a S) -> Option<Self> {
         let mut coeffs = self.coeffs.clone();
 
         coeffs
             .iter_mut()
             .filter(|coeff| !coeff.is_zero())
             .try_for_each(|x| {
-                *x = x.mul_by_scalar(rhs)?;
+                *x = x.mul_by_scalar::<CHECK>(rhs)?;
                 Some(())
             })?;
 
@@ -619,11 +639,11 @@ where
     I: InnerProduct<[R], Rhs, Out>,
 {
     #[inline(always)]
-    fn inner_product(
+    fn inner_product<const CHECK: bool>(
         lhs: &DensePolynomial<R, DEGREE_PLUS_ONE>,
         rhs: &[Rhs],
         zero: Out,
     ) -> Result<Out, InnerProductError> {
-        I::inner_product(&lhs.coeffs, rhs, zero)
+        I::inner_product::<CHECK>(&lhs.coeffs, rhs, zero)
     }
 }

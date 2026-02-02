@@ -153,7 +153,7 @@ macro_rules! impl_transcribable_for_primitives {
                 }
 
                 fn write_transcription_bytes(&self, buf: &mut [u8]) {
-                    assert_eq!(buf.len(), std::mem::size_of::<$type>());
+                    debug_assert_eq!(buf.len(), std::mem::size_of::<$type>());
                     buf.copy_from_slice(&self.to_le_bytes());
                 }
             }

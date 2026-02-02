@@ -60,6 +60,8 @@ pub trait ZipTypes: Send + Sync {
 
 /// Zip is a Polynomial Commitment Scheme (PCS) that supports committing to
 /// multilinear polynomials.
+// Note(alex): We cannot define CHECK_FOR_OVERFLOW in ZipTypes because type
+// parameters may not be used in const expressions
 pub struct ZipPlus<Zt: ZipTypes, Lc: LinearCode<Zt>>(PhantomData<(Zt, Lc)>);
 
 impl<Zt, Lc> ZipPlus<Zt, Lc>

@@ -8,7 +8,10 @@ use rand::{
 };
 use zinc_poly::{
     mle::{DenseMultilinearExtension, MultilinearExtensionRand},
-    univariate::{dense::DensePolynomial, dynamic::DynamicPolynomial, ideal::DegreeOneIdeal},
+    univariate::{
+        dense::DensePolynomial, dynamic::over_fixed_semiring::DynamicPolynomialFS,
+        ideal::DegreeOneIdeal,
+    },
 };
 use zinc_uair::{
     ConstraintBuilder, Uair,
@@ -53,14 +56,14 @@ where
         num_vars: usize,
         rng: &mut Rng,
     ) -> Vec<DenseMultilinearExtension<DensePolynomial<R, DEGREE_PLUS_ONE>>> {
-        let mut a: Vec<DynamicPolynomial<R>> = vec![DynamicPolynomial::new(vec![R::from_ref(
+        let mut a: Vec<DynamicPolynomialFS<R>> = vec![DynamicPolynomialFS::new(vec![R::from_ref(
             &rng.random::<i8>(),
         )])];
-        let mut b: Vec<DynamicPolynomial<R>> = vec![DynamicPolynomial::new(vec![
+        let mut b: Vec<DynamicPolynomialFS<R>> = vec![DynamicPolynomialFS::new(vec![
             R::zero(),
             R::from_ref(&rng.random::<i8>()),
         ])];
-        let mut c: Vec<DynamicPolynomial<R>> = vec![DynamicPolynomial::new(vec![
+        let mut c: Vec<DynamicPolynomialFS<R>> = vec![DynamicPolynomialFS::new(vec![
             R::zero(),
             R::from_ref(&rng.random::<i8>()),
         ])];

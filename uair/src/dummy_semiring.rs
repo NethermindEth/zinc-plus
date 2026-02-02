@@ -144,7 +144,7 @@ impl<T> FromRef<T> for DummySemiring {
 
 impl<T> MulByScalar<&T> for DummySemiring {
     #[inline(always)]
-    fn mul_by_scalar(&self, _rhs: &T) -> Option<Self> {
+    fn mul_by_scalar<const CHECKED: bool>(&self, _rhs: &T) -> Option<Self> {
         Some(DummySemiring)
     }
 }

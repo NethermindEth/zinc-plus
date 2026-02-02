@@ -6,7 +6,7 @@ pub mod ideal;
 pub mod ideal_collector;
 
 use crypto_primitives::Semiring;
-use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
+use zinc_utils::{UNCHECKED, from_ref::FromRef, mul_by_scalar::MulByScalar};
 
 use crate::ideal::{Ideal, IdealCheck};
 
@@ -89,7 +89,7 @@ pub trait Uair<R: Semiring + 'static> {
             up,
             down,
             B::Expr::from_ref,
-            |x, y| B::Expr::mul_by_scalar(x, y),
+            |x, y| B::Expr::mul_by_scalar::<UNCHECKED>(x, y),
             B::Ideal::from_ref,
         )
     }

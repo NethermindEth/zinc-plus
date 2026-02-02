@@ -150,7 +150,7 @@ mod tests {
     use crypto_primitives::crypto_bigint_int::Int;
     use itertools::Itertools;
     use octet_reversal::octet_reversal;
-    use zinc_utils::mul_by_scalar::MulByScalar;
+    use zinc_utils::{CHECKED, mul_by_scalar::MulByScalar};
 
     use super::*;
 
@@ -185,7 +185,8 @@ mod tests {
         let our_res = {
             let params = Radix8PnttParams::<C>::new();
 
-            let output = base_multiply_into_output::<_, _, _, MBSMulByTwiddle>(&input, &params);
+            let output =
+                base_multiply_into_output::<_, _, _, MBSMulByTwiddle<CHECKED>>(&input, &params);
 
             output.into_iter().map(C::Field::from).collect_vec()
         };
@@ -227,7 +228,9 @@ mod tests {
             let params = Radix8PnttParams::<C>::new();
 
             let res: Vec<Int<4>> =
-                pntt::<_, _, _, MBSMulByTwiddle, MBSMulByTwiddle>(&input, &params);
+                pntt::<_, _, _, MBSMulByTwiddle<CHECKED>, MBSMulByTwiddle<CHECKED>>(
+                    &input, &params,
+                );
 
             res.into_iter()
                 .map(|x| {

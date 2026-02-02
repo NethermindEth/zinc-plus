@@ -3,15 +3,16 @@ use crypto_primitives::{
     FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
     crypto_bigint_uint::Uint,
 };
-use num_traits::CheckedMul;
 
 use crate::{
     from_ref::FromRef, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
 };
 
 impl MulByScalar<&Self> for BoxedMontyField {
-    fn mul_by_scalar(&self, rhs: &Self) -> Option<Self> {
-        self.checked_mul(rhs)
+    #[allow(clippy::arithmetic_side_effects)] // False alert
+    fn mul_by_scalar<const CHECK: bool>(&self, rhs: &Self) -> Option<Self> {
+        // Field operations cannot overflow
+        Some(self * rhs)
     }
 }
 

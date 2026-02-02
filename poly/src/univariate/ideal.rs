@@ -3,7 +3,7 @@ use num_traits::Zero;
 use zinc_uair::ideal::{Ideal, IdealCheck};
 use zinc_utils::from_ref::FromRef;
 
-use crate::{EvaluatablePolynomial, univariate::dynamic::DynamicPolynomial};
+use crate::{EvaluatablePolynomial, univariate::dynamic::over_field::DynamicPolynomialF};
 
 #[derive(Clone, Copy, Debug)]
 pub enum DegreeOneIdeal<R: Semiring> {
@@ -47,7 +47,7 @@ impl<F: PrimeField> DegreeOneIdeal<F> {
     }
 }
 
-impl<F: PrimeField> IdealCheck<DegreeOneIdeal<F>> for DynamicPolynomial<F> {
+impl<F: PrimeField> IdealCheck<DegreeOneIdeal<F>> for DynamicPolynomialF<F> {
     fn is_contained_in(&self, ideal: &DegreeOneIdeal<F>) -> bool {
         if self.is_zero() {
             return true;

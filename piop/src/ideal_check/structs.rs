@@ -1,6 +1,7 @@
 use crypto_primitives::{Field, FromWithConfig, Semiring};
 use zinc_poly::{
-    CoefficientProjectable, mle::DenseMultilinearExtension, univariate::dynamic::DynamicPolynomial,
+    CoefficientProjectable, mle::DenseMultilinearExtension,
+    univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
@@ -22,7 +23,7 @@ pub trait IdealCheckTypes<const DEGREE_PLUS_ONE: usize> {
 
 #[derive(Clone, Debug)]
 pub struct Proof<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize> {
-    pub combined_mle_values: Vec<DynamicPolynomial<IcTypes::F>>,
+    pub combined_mle_values: Vec<DynamicPolynomialF<IcTypes::F>>,
 }
 
 #[derive(Clone, Debug)]
@@ -34,5 +35,5 @@ pub struct ProverState<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_P
 pub struct VerifierSubClaim<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
 {
     pub point: Vec<IcTypes::F>,
-    pub value: DynamicPolynomial<IcTypes::F>,
+    pub value: DynamicPolynomialF<IcTypes::F>,
 }
