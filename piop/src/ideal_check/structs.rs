@@ -34,6 +34,6 @@ pub struct ProverState<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_P
 
 pub struct VerifierSubClaim<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
 {
-    pub point: Vec<IcTypes::F>,
+    pub evaluation_point: Vec<IcTypes::F>,
     pub values: Vec<DynamicPolynomialF<IcTypes::F>>,
 }

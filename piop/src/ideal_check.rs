@@ -112,6 +112,8 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
         DynamicPolynomialF<IcTypes::F>: IdealCheck<IdealOverF>,
         IdealOverFFromRef: Fn(&U::Ideal) -> IdealOverF,
     {
+        let _: IcTypes::F = transcript.get_field_challenge(field_cfg);
+
         let mut transcription_buf: Vec<u8> = vec![0; <IcTypes::F as Field>::Inner::NUM_BYTES];
 
         let combined_mle_values = proof.combined_mle_values;
@@ -134,7 +136,7 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
         )?;
 
         Ok(VerifierSubClaim {
-            point: evaluation_point,
+            evaluation_point,
             values: combined_mle_values,
         })
     }
@@ -230,21 +232,26 @@ mod tests {
     {
         let transcript = KeccakTranscript::new();
 
-        let (proof, _) = run_prover::<U, DEGREE_PLUS_ONE>(num_vars, &mut transcript.clone());
+        let (proof, prover_state) =
+            run_prover::<U, DEGREE_PLUS_ONE>(num_vars, &mut transcript.clone());
 
         let num_constraints =
             count_constraints::<<TestIcTypes as IdealCheckTypes<_>>::Witness, U>();
 
-        assert!(
+        let verifier_result =
             IdealCheckProtocol::<TestIcTypes, _>::verify_as_subprotocol::<U, _, _>(
                 &mut transcript.clone(),
                 proof,
                 num_constraints,
-                4,
+                num_vars,
                 ideal_over_f_from_ref,
                 &test_config(),
             )
-            .is_ok()
+            .expect("Verification failed");
+
+        assert_eq!(
+            prover_state.evaluation_point,
+            verifier_result.evaluation_point
         );
     }
 
