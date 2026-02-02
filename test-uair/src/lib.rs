@@ -1,7 +1,7 @@
 #![allow(clippy::arithmetic_side_effects)] // UAIRs should not care about overflows
 mod generate_witness;
 
-use crypto_primitives::{FixedSemiring, Semiring, crypto_bigint_int::Int};
+use crypto_primitives::{FixedSemiring, Semiring, boolean::Boolean, crypto_bigint_int::Int};
 use rand::{
     Rng,
     distr::{Distribution, StandardUniform},
@@ -9,8 +9,8 @@ use rand::{
 use zinc_poly::{
     mle::{DenseMultilinearExtension, MultilinearExtensionRand},
     univariate::{
-        dense::DensePolynomial, dynamic::over_fixed_semiring::DynamicPolynomialFS,
-        ideal::DegreeOneIdeal,
+        binary::BinaryPoly, dense::DensePolynomial,
+        dynamic::over_fixed_semiring::DynamicPolynomialFS, ideal::DegreeOneIdeal,
     },
 };
 use zinc_uair::{
@@ -147,14 +147,23 @@ impl<const LIMBS: usize> GenerateWitness<DensePolynomial<Int<LIMBS>, 32>>
         num_vars: usize,
         rng: &mut Rng,
     ) -> Vec<DenseMultilinearExtension<DensePolynomial<Int<LIMBS>, 32>>> {
-        let a: DenseMultilinearExtension<_> = DenseMultilinearExtension::rand(num_vars, rng)
-            .into_iter()
-            .map(|x| DensePolynomial::from(Int::from_i8(x)))
-            .collect();
+        let a: DenseMultilinearExtension<DensePolynomial<Int<LIMBS>, 32>> =
+            DenseMultilinearExtension::rand(num_vars, rng)
+                .into_iter()
+                .map(|x: u32| {
+                    DensePolynomial::from_ref(&DensePolynomial::<Boolean, _>::from(
+                        BinaryPoly::<32>::from(x),
+                    ))
+                })
+                .collect();
 
         let b: DenseMultilinearExtension<_> = DenseMultilinearExtension::rand(num_vars, rng)
             .into_iter()
-            .map(|x| DensePolynomial::from(Int::from_i8(x)))
+            .map(|x: u32| {
+                DensePolynomial::from_ref(&DensePolynomial::<Boolean, _>::from(
+                    BinaryPoly::<32>::from(x),
+                ))
+            })
             .collect();
 
         let c = a.clone() + b.clone();

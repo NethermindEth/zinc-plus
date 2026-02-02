@@ -164,7 +164,7 @@ mod tests {
         ideal::{Ideal, IdealCheck, ZeroIdeal},
     };
 
-    use crate::ideal_check::{IdealCheckProtocol, structs::IdealCheckTypes};
+    use super::*;
 
     const LIMBS: usize = 4;
 
@@ -185,6 +185,35 @@ mod tests {
         type F = MontyField<4>;
     }
 
+    fn run_prover<U, const DEGREE_PLUS_ONE: usize>(
+        num_vars: usize,
+        transcript: &mut impl Transcript,
+    ) -> (
+        Proof<TestIcTypes, DEGREE_PLUS_ONE>,
+        ProverState<TestIcTypes, DEGREE_PLUS_ONE>,
+    )
+    where
+        U: GenerateWitness<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
+    {
+        let mut rng = rng();
+
+        let trace = U::generate_witness(num_vars, &mut rng);
+
+        let field_cfg = test_config();
+
+        let num_constraints =
+            count_constraints::<<TestIcTypes as IdealCheckTypes<_>>::Witness, U>();
+
+        IdealCheckProtocol::<TestIcTypes, _>::prove_as_subprotocol::<U>(
+            transcript,
+            &trace,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )
+        .unwrap()
+    }
+
     fn test_successful_verification_generic<
         U,
         IdealOverF,
@@ -199,25 +228,12 @@ mod tests {
         IdealOverFFromRef: Fn(&U::Ideal) -> IdealOverF,
         DynamicPolynomialF<MontyField<LIMBS>>: IdealCheck<IdealOverF>,
     {
-        let mut rng = rng();
-
-        let trace = U::generate_witness(num_vars, &mut rng);
-
-        let field_cfg = test_config();
-
         let transcript = KeccakTranscript::new();
+
+        let (proof, _) = run_prover::<U, DEGREE_PLUS_ONE>(num_vars, &mut transcript.clone());
 
         let num_constraints =
             count_constraints::<<TestIcTypes as IdealCheckTypes<_>>::Witness, U>();
-
-        let (proof, _) = IdealCheckProtocol::<TestIcTypes, _>::prove_as_subprotocol::<U>(
-            &mut transcript.clone(),
-            &trace,
-            num_constraints,
-            num_vars,
-            &field_cfg,
-        )
-        .unwrap();
 
         assert!(
             IdealCheckProtocol::<TestIcTypes, _>::verify_as_subprotocol::<U, _, _>(
@@ -226,7 +242,7 @@ mod tests {
                 num_constraints,
                 4,
                 ideal_over_f_from_ref,
-                &field_cfg,
+                &test_config(),
             )
             .is_ok()
         );
