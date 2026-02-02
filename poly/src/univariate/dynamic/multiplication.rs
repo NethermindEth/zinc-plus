@@ -16,13 +16,11 @@ pub(crate) fn mul_schoolbook<R: Semiring, const CHECKED: bool>(
             let from = k.saturating_sub(n);
             let to = std::cmp::min(k, m);
 
-            *out = MaybeUninit::new((from + 1..=to).try_fold(
-                lhs[from].clone() * &rhs[k - from],
-                |mut acc, next| {
-                    acc = acc.checked_add(&lhs[next].checked_mul(&rhs[k - next])?)?;
-                    Some(acc)
-                },
-            )?);
+            *out = MaybeUninit::new(
+                (from + 1..=to).try_fold(lhs[from].clone() * &rhs[k - from], |acc, next| {
+                    acc.checked_add(&lhs[next].checked_mul(&rhs[k - next])?)
+                })?,
+            );
 
             Some(())
         })?;
@@ -33,13 +31,11 @@ pub(crate) fn mul_schoolbook<R: Semiring, const CHECKED: bool>(
             let from = k.saturating_sub(n);
             let to = std::cmp::min(k, m);
 
-            *out = MaybeUninit::new((from + 1..=to).fold(
-                lhs[from].clone() * &rhs[k - from],
-                |mut acc, next| {
-                    acc += lhs[next].clone() * &rhs[k - next];
-                    acc
-                },
-            ));
+            *out = MaybeUninit::new(
+                (from + 1..=to).fold(lhs[from].clone() * &rhs[k - from], |acc, next| {
+                    acc + lhs[next].clone() * &rhs[k - next]
+                }),
+            );
         });
         Some(())
     }
