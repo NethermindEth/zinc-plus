@@ -2,6 +2,7 @@ use crate::{
     ZipError,
     code::LinearCode,
     combine_rows,
+    merkle::MerkleProof,
     pcs::{
         ZipPlusTestTranscript,
         structs::{ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
@@ -11,7 +12,7 @@ use crate::{
 };
 use num_traits::{ConstOne, ConstZero, Zero};
 use zinc_poly::{Polynomial, mle::DenseMultilinearExtension};
-use zinc_transcript::traits::Transcript;
+use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_utils::{cfg_iter_mut, inner_product::InnerProduct, mul_by_scalar::MulByScalar};
 
 #[cfg(feature = "parallel")]
@@ -26,7 +27,17 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ) -> Result<ZipPlusTestTranscript, ZipError> {
         validate_input::<Zt, Lc, bool>("test", pp.num_vars, &[poly], &[])?;
 
-        let mut transcript = PcsTranscript::new();
+        let estimated_transcript_size =
+            // Combined rows
+            pp.linear_code.row_len() * Zt::CombR::NUM_BYTES
+            // Column openings
+            + Zt::NUM_COLUMN_OPENINGS * (
+                // Column itself
+                commit_hint.cw_matrix.num_rows * Zt::Cw::NUM_BYTES
+                // Merkle proof
+                + MerkleProof::estimate_transcribed_size(commit_hint.merkle_tree.height())
+            );
+        let mut transcript = PcsTranscript::new_with_capacity(estimated_transcript_size);
 
         // If we can take linear combinations, perform the proximity test
         if pp.num_rows > 1 {
@@ -73,6 +84,12 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             let column = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
             Self::open_merkle_trees_for_column(commit_hint, column, &mut transcript)?;
         }
+
+        assert_eq!(
+            transcript.stream.get_ref().len(),
+            estimated_transcript_size,
+            "PCS transcript capacity was precalculated incorrectly"
+        );
 
         Ok(transcript.into())
     }
