@@ -237,7 +237,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 &column_entries,
                 F::zero_with_cfg(field_cfg),
             )?
-            // TODO: this inner product is taking a long time.
         } else {
             project(column_entries.first().expect("No column entries"))
         };

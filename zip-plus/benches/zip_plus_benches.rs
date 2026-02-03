@@ -78,7 +78,8 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");
 
     do_bench::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>, UNCHECKED>(&mut group);
-    do_bench::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>, UNCHECKED>(&mut group);
+    // do_bench::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>, UNCHECKED>(&mut
+    // group);
 
     group.finish();
 }
@@ -86,8 +87,9 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
 fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS");
 
-    do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, 32>, UNCHECKED>(&mut group);
-    do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 1, 64>, UNCHECKED>(&mut group);
+    // do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, 32>,
+    // UNCHECKED>(&mut group); do_bench::<BenchZipPlusTypes<i64, 64>,
+    // SomeIprsCode<i64, 1, 64>, UNCHECKED>(&mut group);
 
     group.finish();
 }
