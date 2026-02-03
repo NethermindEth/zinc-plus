@@ -15,7 +15,7 @@ use crate::{
 
 /// Polynomials of dynamic degree. The implementation
 /// is tailored to work with random finite fields.
-/// To be used in UAIF and PIOP where ZIP+ degree bound
+/// To be used in UAIR and PIOP where ZIP+ degree bound
 /// is not observed anymore.
 ///
 /// Note that operations involving dynamic polynomials
