@@ -1,3 +1,4 @@
+//! Ideal-check subprotocol.
 mod batched_ideal_check;
 mod combined_poly_builder;
 mod structs;
@@ -26,6 +27,7 @@ use zinc_utils::cfg_iter;
 
 pub type Result<T, R, I> = std::result::Result<T, IdealCheckError<R, I>>;
 
+/// Ideal-check subprotocol.
 pub struct IdealCheckProtocol<
     IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>,
     const DEGREE_PLUS_ONE: usize,
@@ -34,6 +36,22 @@ pub struct IdealCheckProtocol<
 impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
     IdealCheckProtocol<IcTypes, DEGREE_PLUS_ONE>
 {
+    /// The prover part of the ideal-check subprotocol.
+    ///
+    /// The prover samples a random field element
+    /// and projects the coefficients of coefficients
+    /// of the input MLEs. Then it computes the combined polynomials
+    /// encoded by the UAIR `U`, samples a random evaluation point
+    /// and sends the evaluations of the combined polynomials
+    /// to the verifier.
+    ///
+    /// # Parameters
+    /// - `transcript`: the Fiat-Shamir transcript.
+    /// - `trace`: the input trace for the UAIR `U`.
+    /// - `num_constraints`: the number of constraints the UAIR `U` encodes.
+    /// - `num_vars`: the number of variables the trace row MLEs have.
+    /// - `field_cfg`: random field configuration sampled on the previous steps
+    ///   of the overall protocol.
     #[allow(clippy::type_complexity)]
     pub fn prove_as_subprotocol<U>(
         transcript: &mut impl Transcript,
@@ -92,6 +110,30 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
         ))
     }
 
+    /// The verifier part of the ideal-check subprotocol.
+    ///
+    /// The verifier samples a random field element
+    /// the same way the prover sampled a random field
+    /// element for projecting coefficients but disregards it
+    /// as the verifier does not need to project anything.
+    /// Then it computes the ideals encoded by the UAIR `U`,
+    /// samples a random evaluation point and receives
+    /// the evaluations of the combined polynomials sent by the prover
+    /// and checks they belong to the corresponding ideals defined
+    /// by the UAIR `U`.
+    ///
+    /// # Parameters
+    /// - `transcript`: the Fiat-Shamir transcript.
+    /// - `proof`: a purported proof produced by the prover.
+    /// - `num_constraints`: the number of constraints the UAIR `U` encodes.
+    /// - `num_vars`: the number of variables the trace row MLEs have.
+    /// - `ideal_over_f_from_ref`: since the UAIR `U` is not aware of the field
+    ///   the ideal check is operating on it defines ideals over the ring
+    ///   `IcTypes::Witness`. `ideal_over_f_from_ref` allows to convert the
+    ///   ideals over `IcTypes::Witness` into ideals over the field
+    ///   `IcTypes::F`. Think of this as a projection for ideals.
+    /// - `field_cfg`: random field configuration sampled on the previous steps
+    ///   of the overall protocol.
     #[allow(clippy::type_complexity)]
     pub fn verify_as_subprotocol<U, IdealOverF, IdealOverFFromRef>(
         transcript: &mut impl Transcript,
@@ -112,6 +154,8 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
         DynamicPolynomialF<IcTypes::F>: IdealCheck<IdealOverF>,
         IdealOverFFromRef: Fn(&U::Ideal) -> IdealOverF,
     {
+        // Sample a field element to maintain FS symmetry with
+        // the prover.
         let _: IcTypes::F = transcript.get_field_challenge(field_cfg);
 
         let mut transcription_buf: Vec<u8> = vec![0; <IcTypes::F as Field>::Inner::NUM_BYTES];

@@ -12,28 +12,10 @@ use zinc_utils::from_ref::FromRef;
 
 use crate::ideal_check::structs::IdealCheckTypes;
 
-pub struct CombinedPolyRowBuilder<F: PrimeField> {
-    combined_evaluations: Vec<DynamicPolynomialF<F>>,
-}
-
-impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
-    type Expr = DynamicPolynomialF<F>;
-    type Ideal = DummyIdeal;
-
-    #[allow(clippy::arithmetic_side_effects)]
-    fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {
-        self.combined_evaluations.push(expr);
-    }
-}
-
-impl<F: PrimeField> CombinedPolyRowBuilder<F> {
-    pub fn new(num_constraints: usize) -> Self {
-        Self {
-            combined_evaluations: Vec::with_capacity(num_constraints),
-        }
-    }
-}
-
+/// Given a UAIR `U` and a trace `trace` this function
+/// obtains the combined polynomials' MLE coefficients.
+/// Since each coefficient is also a univariate polynomial
+/// we split the resulting MLE into coefficient MLEs.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn compute_combined_polynomials<
     IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>,
@@ -80,6 +62,8 @@ where
     // not N-1.
     // This is essentially c^up and c^down
     // thing from the whirlaway.
+    // TODO(Ilia): reimplement it using Albert's idea
+    //             with selector polynomials.
     max_degrees_and_combined_poly_rows.push(
         max_degrees_and_combined_poly_rows
             .last()
@@ -95,6 +79,7 @@ where
     )
 }
 
+/// Apply projection to coefficients of coefficients of the input trace.
 fn project_trace_matrix<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>(
     num_rows: usize,
     num_cols: usize,
@@ -116,6 +101,9 @@ fn project_trace_matrix<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_
     unsafe { matr.init() }
 }
 
+/// Apply combination polynomial to each row
+/// and compute the maximum degree of resulting polynomials
+/// to pad the resulting vector of MLEs accordingly.
 #[allow(clippy::arithmetic_side_effects)]
 fn combine_rows_and_get_max_degree<IcTypes, U, const DEGREE_PLUS_ONE: usize>(
     up: &[DynamicPolynomialF<IcTypes::F>],
@@ -150,6 +138,8 @@ where
     (max_degree, combined_evaluations)
 }
 
+/// Turn the resulting slice of vectors of dynamic polynomials
+/// into a vector of vectors of coefficient MLEs.
 fn prepare_coefficient_mles<
     IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>,
     const DEGREE_PLUS_ONE: usize,
@@ -177,4 +167,26 @@ fn prepare_coefficient_mles<
                 .collect_vec()
         })
         .collect_vec()
+}
+
+pub struct CombinedPolyRowBuilder<F: PrimeField> {
+    combined_evaluations: Vec<DynamicPolynomialF<F>>,
+}
+
+impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
+    type Expr = DynamicPolynomialF<F>;
+    type Ideal = DummyIdeal;
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {
+        self.combined_evaluations.push(expr);
+    }
+}
+
+impl<F: PrimeField> CombinedPolyRowBuilder<F> {
+    pub fn new(num_constraints: usize) -> Self {
+        Self {
+            combined_evaluations: Vec::with_capacity(num_constraints),
+        }
+    }
 }

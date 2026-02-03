@@ -7,7 +7,7 @@ use zinc_utils::cfg_iter;
 /// Checks if the collected ideals contain a slice
 /// of elements `values`. Returns an error if the
 /// lengths mismatch or if any of the `values`
-/// does not belong to the ideal.
+/// does not belong to the corresponding ideal.
 pub fn batched_ideal_check<I: Ideal, R: Clone + IdealCheck<I> + Send + Sync>(
     ideals: &[I],
     values: &[R],
