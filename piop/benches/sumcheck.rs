@@ -214,13 +214,123 @@ pub fn bench_eq_r_product<F, const LIMBS: usize>(
     );
 }
 
+#[allow(clippy::arithmetic_side_effects)]
+pub fn bench_eq_r_batch<F, const LIMBS: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+    witness_size: usize,
+    batch_size: usize,
+) where
+    F: FromPrimitiveWithConfig + InnerTransparentField + FromRef<F> + 'static,
+    F::Inner: FromRef<F::Inner> + ConstTranscribable + ConstIntSemiring,
+    MillerRabin: PrimalityTest<F::Inner>,
+    for<'a> &'a F: Mul<&'a F, Output = F>,
+{
+    assert!(batch_size > 0, "batch_size must be > 0");
+
+    let mut rng = rng();
+    let nvars = zinc_utils::log2(witness_size) as usize;
+
+    let params = format!("LIMBS={}/nvars={}/batch={}", LIMBS, nvars, batch_size);
+
+    let mut a_polys = Vec::with_capacity(batch_size);
+    for _ in 0..batch_size {
+        let a: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
+        let a = DenseMultilinearExtension::from_evaluations_vec(
+            nvars,
+            a.into_iter().map(BinaryPoly::from).collect(),
+            BinaryPoly::zero(),
+        );
+        a_polys.push(a);
+    }
+
+    let transcript = KeccakTranscript::new();
+
+    let prove = |(a_polys, mut transcript): (Vec<_>, KeccakTranscript)|
+     -> RFSumcheckProof<F, BinaryPoly<32>> {
+        let field_cfg = transcript.get_random_field_cfg::<F, <F as Field>::Inner, MillerRabin>();
+
+        let alphas: Vec<F> = (0..batch_size)
+            .map(|_| transcript.get_field_challenge(&field_cfg))
+            .collect();
+
+        let eq_r = build_eq_x_r_inner(&vec![F::from_with_cfg(2u32, &field_cfg); nvars], &field_cfg)
+            .expect("Failed to build eq_r");
+
+        (RFSumcheck::<F, _>::prove_as_subprotocol(
+            &mut transcript,
+            a_polys,
+            vec![eq_r],
+            nvars,
+            2,
+            |_x, vals| {
+                let eq = &vals[batch_size];
+                let mut acc = &alphas[0] * &vals[0];
+                for (alpha, val) in alphas.iter().zip(&vals[0..batch_size]).skip(1) {
+                    acc = acc + alpha * val;
+                }
+                &acc * eq
+            },
+            field_cfg,
+        ))
+        .0
+    };
+
+    group.bench_with_input(
+        BenchmarkId::new("Eq(r, x) Batch Product Sumcheck Prover", &params),
+        &(a_polys.clone(), transcript.clone()),
+        |bench, (a_polys, transcript)| {
+            bench.iter_batched(
+                || (a_polys.clone(), transcript.clone()),
+                |(a_polys, transcript)| {
+                    let _ = black_box(&prove((a_polys, transcript)));
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
+
+    let proof = prove((a_polys, transcript.clone()));
+
+    group.bench_with_input(
+        BenchmarkId::new("Eq(r, x) Batch Product Sumcheck Verifier", &params),
+        &(proof, transcript),
+        |bench, (proof, transcript)| {
+            bench.iter_batched(
+                || (proof.clone(), transcript.clone()),
+                |(proof, mut transcript)| {
+                    let field_cfg =
+                        transcript.get_random_field_cfg::<F, <F as Field>::Inner, MillerRabin>();
+
+                    for _ in 0..batch_size {
+                        let _ = transcript.get_field_challenge::<F>(&field_cfg);
+                    }
+
+                    let _ = black_box(
+                        RFSumcheck::<F, _>::verify_as_subprotocol(
+                            &mut transcript,
+                            nvars,
+                            2,
+                            &proof,
+                            field_cfg,
+                        )
+                        .expect("Failed to verify"),
+                    );
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
+}
+
 pub fn sumcheck_benches(c: &mut Criterion) {
     let plot_config = PlotConfiguration::default().summary_scale(AxisScale::Logarithmic);
 
     let mut group = c.benchmark_group("Sumcheck benchmarks");
     group.plot_config(plot_config);
-    bench_eq_r_product::<MontyField<3>, 3>(&mut group, 1 << 11);
-    bench_eq_r_product::<MontyField<4>, 4>(&mut group, 1 << 11);
+    // bench_eq_r_product::<MontyField<3>, 3>(&mut group, 1 << 11);
+    // bench_eq_r_product::<MontyField<4>, 4>(&mut group, 1 << 11);
+    bench_eq_r_batch::<MontyField<3>, 3>(&mut group, 1 << 13, 4);
+    // bench_eq_r_batch::<MontyField<4>, 4>(&mut group, 1 << 11, 70);
     // bench_simple_product::<MontyField<3>, 3>(&mut group, 1 << 13);
     // bench_simple_product::<MontyField<4>, 4>(&mut group, 1 << 13);
     // bench_eq_r_product::<MontyField<3>, 3>(&mut group, 1 << 13);

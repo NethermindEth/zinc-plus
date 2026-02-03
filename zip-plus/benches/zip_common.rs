@@ -17,9 +17,11 @@ use std::{
     hint::black_box,
     time::{Duration, Instant},
 };
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
 use zinc_transcript::traits::ConstTranscribable;
-use zinc_utils::{from_ref::FromRef, named::Named, projectable_to_field::ProjectableToField};
+use zinc_utils::{cfg_iter, from_ref::FromRef, named::Named, projectable_to_field::ProjectableToField};
 use zip_plus::{
     code::LinearCode,
     merkle::MerkleTree,
@@ -59,8 +61,10 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     // merkle_root::<Zt, 16>(group);
 
     // commit::<Zt, Lc, 12>(group);
-    commit::<Zt, Lc, 14>(group);
-    test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
+    commit::<Zt, Lc, 13>(group);
+    commit_batch::<Zt, Lc, 13, 2>(group);
+    test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
+    test_batch::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13, 2>(group);
 
     // evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12>(group);
     // evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
@@ -196,6 +200,45 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     );
 }
 
+pub fn commit_batch<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize, const B: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let params = ZipPlus::setup(poly_size, linear_code);
+
+    let polys: Vec<_> = (0..B)
+        .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
+        .collect();
+
+    group.bench_function(
+        format!(
+            "CommitBatch: Eval={}, Cw={}, Comb={}, poly_size=2^{P}, batch={B}",
+            Zt::Eval::type_name(),
+            Zt::Cw::type_name(),
+            Zt::Comb::type_name()
+        ),
+        |b| {
+            b.iter_custom(|iters| {
+                let mut total_duration = Duration::ZERO;
+                for _ in 0..iters {
+                    let timer = Instant::now();
+                    let results: Vec<_> = cfg_iter!(&polys)
+                        .map(|poly| ZipPlus::commit(&params, poly).expect("Failed to commit"))
+                        .collect();
+                    black_box(results);
+                    total_duration += timer.elapsed();
+                }
+
+                total_duration
+            })
+        },
+    );
+}
+
 pub fn test<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where
@@ -222,6 +265,53 @@ pub fn test<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, c
                 let test_transcript = ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, &poly, &data)
                     .expect("Test phase failed");
                 black_box(test_transcript);
+            })
+        },
+    );
+}
+
+pub fn test_batch<
+    Zt: ZipTypes,
+    Lc: LinearCode<Zt>,
+    const CHECK_FOR_OVERFLOWS: bool,
+    const P: usize,
+    const B: usize,
+>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    let mut rng = ThreadRng::default();
+
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let params = ZipPlus::setup(poly_size, linear_code);
+
+    let batch: Vec<_> = (0..B)
+        .map(|_| {
+            let poly = DenseMultilinearExtension::rand(P, &mut rng);
+            let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
+            (poly, data)
+        })
+        .collect();
+
+    group.bench_function(
+        format!(
+            "TestBatch: Eval={}, Cw={}, Comb={}, poly_size=2^{P}, batch={B}",
+            Zt::Eval::type_name(),
+            Zt::Cw::type_name(),
+            Zt::Comb::type_name(),
+        ),
+        |b| {
+            b.iter(|| {
+                let results: Vec<_> = cfg_iter!(&batch)
+                    .map(|pair| {
+                        let (poly, data) = pair;
+                        ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, poly, data)
+                            .expect("Test phase failed")
+                    })
+                    .collect();
+                black_box(results);
             })
         },
     );
