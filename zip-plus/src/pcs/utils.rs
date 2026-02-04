@@ -1,18 +1,10 @@
+use crate::{ZipError, code::LinearCode, pcs::structs::ZipTypes};
 use crypto_primitives::PrimeField;
-
 use zinc_poly::{
     ConstCoeffBitWidth, Polynomial, mle::DenseMultilinearExtension, utils::build_eq_x_r,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{add, div, ilog_round_up, mul, sub};
-
-use crate::{
-    ZipError,
-    code::LinearCode,
-    merkle::{MerkleError, MtHash},
-    pcs::structs::{ZipPlusHint, ZipTypes},
-    pcs_transcript::PcsTranscript,
-};
 
 fn err_too_many_variates(function: &str, upto: usize, got: usize) -> ZipError {
     ZipError::InvalidPcsParam(format!(
@@ -112,39 +104,4 @@ where
     };
 
     Ok((q_0.evaluations, q_1.evaluations))
-}
-
-/// This is a helper struct to open a column in a multilinear polynomial
-/// Opening a column `j` in an `n x m` matrix `u_hat` requires opening `m`
-/// Merkle trees, one for each row at position j
-/// Note that the proof is written to the transcript and the order of the proofs
-/// is the same as the order of the columns
-#[derive(Clone)]
-pub struct ColumnOpening {}
-
-impl ColumnOpening {
-    pub fn open_at_column<T: ConstTranscribable>(
-        column_idx: usize,
-        commit_hint: &ZipPlusHint<T>,
-        transcript: &mut PcsTranscript,
-    ) -> Result<(), MerkleError> {
-        let merkle_proof = commit_hint.merkle_tree.prove(column_idx)?;
-        transcript
-            .write_merkle_proof(&merkle_proof)
-            .map_err(|_| MerkleError::FailedMerkleProofWriting)?;
-        Ok(())
-    }
-
-    pub fn verify_column<T: ConstTranscribable>(
-        root: &MtHash,
-        column: &[T],
-        column_index: usize,
-        transcript: &mut PcsTranscript,
-    ) -> Result<(), MerkleError> {
-        let proof = transcript
-            .read_merkle_proof()
-            .map_err(|_| MerkleError::FailedMerkleProofReading)?;
-        proof.verify(root, column, column_index)?;
-        Ok(())
-    }
 }

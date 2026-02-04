@@ -5,17 +5,19 @@ use crate::{
     pcs::{
         ZipPlusProof,
         structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
-        utils::{ColumnOpening, point_to_tensor, validate_input},
+        utils::{point_to_tensor, validate_input},
     },
     pcs_transcript::PcsTranscript,
 };
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
 use num_traits::{ConstOne, ConstZero, Zero};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use zinc_poly::Polynomial;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
-    UNCHECKED,
+    UNCHECKED, cfg_into_iter, cfg_iter,
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProduct},
     mul_by_scalar::MulByScalar,
@@ -44,6 +46,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
         let columns_opened =
             Self::verify_testing::<CHECK_FOR_OVERFLOW>(vp, &comm.root, &mut transcript)?;
+        // std::hint::black_box(columns_opened);
 
         let field_cfg = transcript
             .fs_transcript
@@ -103,32 +106,46 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             }
         };
 
-        let mut columns_opened: Vec<(usize, Vec<Zt::Cw>)> =
-            Vec::with_capacity(Zt::NUM_COLUMN_OPENINGS);
+        // Read the transcript sequentially
+        let columns_and_proofs: Vec<_> = (0..Zt::NUM_COLUMN_OPENINGS)
+            .map(|_| -> Result<_, ZipError> {
+                let column_idx = transcript.squeeze_challenge_idx(vp.linear_code.codeword_len());
+                let column_values = transcript.read_const_many(vp.num_rows)?;
+                let proof = transcript.read_merkle_proof().map_err(|e| {
+                    ZipError::InvalidPcsOpen(format!("Failed to read a Merkle proof: {e}"))
+                })?;
+                Ok((column_idx, column_values, proof))
+            })
+            .try_collect()?;
 
-        for _ in 0..Zt::NUM_COLUMN_OPENINGS {
-            let column_idx = transcript.squeeze_challenge_idx(vp.linear_code.codeword_len());
-            let column_values = transcript.read_const_many(vp.num_rows)?;
+        let columns_opened: Vec<(usize, Vec<Zt::Cw>)> = cfg_into_iter!(columns_and_proofs)
+            .map(
+                |(column_idx, column_values, proof)| -> Result<_, ZipError> {
+                    if let Some((ref alphas, ref coeffs, ref encoded_combined_row)) =
+                        encoded_combined_rows
+                    {
+                        Self::verify_column_testing::<CHECK_FOR_OVERFLOW>(
+                            alphas,
+                            coeffs,
+                            encoded_combined_row,
+                            &column_values,
+                            column_idx,
+                            vp.num_rows,
+                        )?;
+                    }
 
-            if let Some((ref alphas, ref coeffs, ref encoded_combined_row)) = encoded_combined_rows
-            {
-                Self::verify_column_testing::<CHECK_FOR_OVERFLOW>(
-                    alphas,
-                    coeffs,
-                    encoded_combined_row,
-                    &column_values,
-                    column_idx,
-                    vp.num_rows,
-                )?;
-            }
+                    proof
+                        .verify(root, &column_values, column_idx)
+                        .map_err(|e| {
+                            ZipError::InvalidPcsOpen(format!(
+                                "Column opening verification failed: {e}"
+                            ))
+                        })?;
 
-            ColumnOpening::verify_column(root, &column_values, column_idx, transcript).map_err(
-                |e| ZipError::InvalidPcsOpen(format!("Column opening verification failed: {e}")),
-            )?;
-            // TODO: Verify column opening is taking a long time.
-            columns_opened.push((column_idx, column_values));
-        }
-
+                    Ok((column_idx, column_values))
+                },
+            )
+            .collect::<Result<_, _>>()?;
         Ok(columns_opened)
     }
 
@@ -202,7 +219,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             ));
         }
         let project = Zt::Cw::prepare_projection(&projecting_element);
-        for (column_idx, column_values) in columns_opened.iter() {
+        cfg_iter!(columns_opened).try_for_each(|(column_idx, column_values)| {
             Self::verify_proximity_q_0(
                 &q_0,
                 &encoded_combined_row,
@@ -211,8 +228,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 vp.num_rows,
                 &project,
                 field_cfg,
-            )?;
-        }
+            )
+        })?;
 
         Ok(())
     }
