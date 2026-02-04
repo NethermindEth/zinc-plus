@@ -16,13 +16,7 @@ use crate::{
     univariate::{
         binary::BinaryPoly,
         dense::DensePolynomial,
-        dynamic::{
-            internal::{
-                add_assign, degree, display, is_zero, mul, neg, new_coeffs_trimmed, sub_assign,
-                trim,
-            },
-            over_field::DynamicPolynomialF,
-        },
+        dynamic::{self, over_field::DynamicPolynomialF},
     },
 };
 
@@ -47,7 +41,7 @@ impl<R: FixedSemiring> DynamicPolynomialFS<R> {
     #[inline(always)]
     pub fn new_trimmed(coeffs: impl AsRef<[R]>) -> Self {
         Self {
-            coeffs: new_coeffs_trimmed(coeffs.as_ref(), R::is_zero),
+            coeffs: dynamic::new_coeffs_trimmed(coeffs.as_ref(), R::is_zero),
         }
     }
 
@@ -60,19 +54,19 @@ impl<R: FixedSemiring> DynamicPolynomialFS<R> {
 
     #[inline(always)]
     pub fn degree(&self) -> Option<usize> {
-        degree(&self.coeffs, R::is_zero)
+        dynamic::degree(&self.coeffs, R::is_zero)
     }
 
     #[inline(always)]
     pub fn trim(&mut self) {
-        trim(&mut self.coeffs, R::is_zero);
+        dynamic::trim(&mut self.coeffs, R::is_zero);
     }
 }
 
 impl<R: FixedSemiring> Display for DynamicPolynomialFS<R> {
     #[inline(always)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        display(&self.coeffs, f)
+        dynamic::display(&self.coeffs, f)
     }
 }
 
@@ -84,7 +78,7 @@ impl<R: FixedSemiring> Zero for DynamicPolynomialFS<R> {
 
     #[inline(always)]
     fn is_zero(&self) -> bool {
-        is_zero(&self.coeffs, R::is_zero)
+        dynamic::is_zero(&self.coeffs, R::is_zero)
     }
 }
 
@@ -105,7 +99,7 @@ impl<R: FixedSemiring + Ring> Neg for DynamicPolynomialFS<R> {
 
     fn neg(self) -> Self::Output {
         Self {
-            coeffs: neg(self.coeffs),
+            coeffs: dynamic::neg(self.coeffs),
         }
     }
 }
@@ -169,7 +163,7 @@ impl<'a, R: FixedSemiring> Mul<&'a DynamicPolynomialFS<R>> for &'a DynamicPolyno
 
     fn mul(self, rhs: Self) -> Self::Output {
         Self::Output {
-            coeffs: mul::<_, UNCHECKED>(&self.coeffs, &rhs.coeffs, R::is_zero)
+            coeffs: dynamic::mul::<_, UNCHECKED>(&self.coeffs, &rhs.coeffs, R::is_zero)
                 .expect("we do not expect overflow here"),
         }
     }
@@ -219,7 +213,7 @@ impl<R: FixedSemiring> CheckedMul for DynamicPolynomialFS<R> {
     #[allow(clippy::arithmetic_side_effects)] // degrees normally shouldn't be that large
     fn checked_mul(&self, rhs: &Self) -> Option<Self> {
         Some(Self {
-            coeffs: mul::<_, CHECKED>(&self.coeffs, &rhs.coeffs, R::is_zero)?,
+            coeffs: dynamic::mul::<_, CHECKED>(&self.coeffs, &rhs.coeffs, R::is_zero)?,
         })
     }
 }
@@ -244,7 +238,7 @@ impl<R: FixedSemiring> AddAssign for DynamicPolynomialFS<R> {
 
 impl<R: FixedSemiring> AddAssign<&Self> for DynamicPolynomialFS<R> {
     fn add_assign(&mut self, rhs: &Self) {
-        add_assign(&mut self.coeffs, &rhs.coeffs, |_| R::zero());
+        dynamic::add_assign(&mut self.coeffs, &rhs.coeffs, |_| R::zero());
     }
 }
 
@@ -258,7 +252,7 @@ impl<R: FixedSemiring> SubAssign for DynamicPolynomialFS<R> {
 impl<R: FixedSemiring> SubAssign<&Self> for DynamicPolynomialFS<R> {
     #[allow(clippy::arithmetic_side_effects)] // by definition
     fn sub_assign(&mut self, rhs: &Self) {
-        sub_assign(&mut self.coeffs, &rhs.coeffs, |_| R::zero());
+        dynamic::sub_assign(&mut self.coeffs, &rhs.coeffs, |_| R::zero());
     }
 }
 

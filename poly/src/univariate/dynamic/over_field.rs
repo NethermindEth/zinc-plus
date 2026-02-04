@@ -9,12 +9,7 @@ use zinc_utils::UNCHECKED;
 
 use crate::{
     EvaluatablePolynomial, EvaluationError, Polynomial,
-    univariate::{
-        dense::DensePolynomial,
-        dynamic::internal::{
-            add_assign, degree, display, is_zero, mul, neg, new_coeffs_trimmed, sub_assign, trim,
-        },
-    },
+    univariate::{dense::DensePolynomial, dynamic},
 };
 
 /// Polynomials of dynamic degree. The implementation
@@ -38,7 +33,7 @@ impl<F: PrimeField> DynamicPolynomialF<F> {
     #[inline(always)]
     pub fn new_trimmed(coeffs: impl AsRef<[F]>) -> Self {
         Self {
-            coeffs: new_coeffs_trimmed(coeffs.as_ref(), F::is_zero),
+            coeffs: dynamic::new_coeffs_trimmed(coeffs.as_ref(), F::is_zero),
         }
     }
 
@@ -51,19 +46,19 @@ impl<F: PrimeField> DynamicPolynomialF<F> {
 
     #[inline(always)]
     pub fn degree(&self) -> Option<usize> {
-        degree(&self.coeffs, F::is_zero)
+        dynamic::degree(&self.coeffs, F::is_zero)
     }
 
     #[inline(always)]
     pub fn trim(&mut self) {
-        trim(&mut self.coeffs, F::is_zero);
+        dynamic::trim(&mut self.coeffs, F::is_zero);
     }
 }
 
 impl<F: PrimeField> Display for DynamicPolynomialF<F> {
     #[inline(always)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        display(&self.coeffs, f)
+        dynamic::display(&self.coeffs, f)
     }
 }
 
@@ -83,7 +78,7 @@ impl<F: PrimeField> Zero for DynamicPolynomialF<F> {
 
     #[inline(always)]
     fn is_zero(&self) -> bool {
-        is_zero(&self.coeffs, F::is_zero)
+        dynamic::is_zero(&self.coeffs, F::is_zero)
     }
 }
 
@@ -97,7 +92,7 @@ impl<F: PrimeField> Neg for DynamicPolynomialF<F> {
     #[inline(always)]
     fn neg(self) -> Self::Output {
         Self {
-            coeffs: neg(self.coeffs),
+            coeffs: dynamic::neg(self.coeffs),
         }
     }
 }
@@ -163,7 +158,7 @@ impl<'a, F: PrimeField> Mul<&'a DynamicPolynomialF<F>> for &'a DynamicPolynomial
     #[allow(clippy::arithmetic_side_effects)]
     fn mul(self, rhs: Self) -> Self::Output {
         Self::Output {
-            coeffs: mul::<_, UNCHECKED>(&self.coeffs, &rhs.coeffs, F::is_zero)
+            coeffs: dynamic::mul::<_, UNCHECKED>(&self.coeffs, &rhs.coeffs, F::is_zero)
                 .expect("overflow in a field will not happen"),
         }
     }
@@ -206,7 +201,7 @@ impl<F: PrimeField> AddAssign for DynamicPolynomialF<F> {
 impl<F: PrimeField> AddAssign<&Self> for DynamicPolynomialF<F> {
     #[allow(clippy::arithmetic_side_effects)] // by definition
     fn add_assign(&mut self, rhs: &Self) {
-        add_assign(&mut self.coeffs, &rhs.coeffs, |elem| {
+        dynamic::add_assign(&mut self.coeffs, &rhs.coeffs, |elem| {
             F::zero_with_cfg(elem.cfg())
         });
     }
@@ -222,7 +217,7 @@ impl<F: PrimeField> SubAssign for DynamicPolynomialF<F> {
 impl<F: PrimeField> SubAssign<&Self> for DynamicPolynomialF<F> {
     #[allow(clippy::arithmetic_side_effects)] // by definition
     fn sub_assign(&mut self, rhs: &Self) {
-        sub_assign(&mut self.coeffs, &rhs.coeffs, |elem| {
+        dynamic::sub_assign(&mut self.coeffs, &rhs.coeffs, |elem| {
             F::zero_with_cfg(elem.cfg())
         });
     }
