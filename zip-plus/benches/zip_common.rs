@@ -72,11 +72,11 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     // evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15>(group);
     // evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
 
-    // verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12>(group);
-    // verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
-    // verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
-    // verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15>(group);
-    // verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
+    // verify_only_test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12>(group);
+    verify_only_test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
+    // verify_only_test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
+    // verify_only_test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15>(group);
+    // verify_only_test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
 }
 
 pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
@@ -364,14 +364,15 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     );
 }
 
-pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, const P: usize>(
+pub fn verify_only_test<
+    Zt: ZipTypes,
+    Lc: LinearCode<Zt>,
+    const CHECK_FOR_OVERFLOWS: bool,
+    const P: usize,
+>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
-    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
-    <F as Field>::Inner: FromRef<Zt::Fmod>,
-    Zt::Eval: ProjectableToField<F>,
-    Zt::Cw: ProjectableToField<F>,
 {
     let mut rng = ThreadRng::default();
     let poly_size = 1 << P;
@@ -380,34 +381,21 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool,
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
     let (data, commitment) = ZipPlus::commit(&params, &poly).unwrap();
-    let point = vec![Zt::Pt::one(); P];
-
     let test_transcript =
         ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, &poly, &data).expect("Test phase failed");
-    let (eval_f, proof) =
-        ZipPlus::evaluate::<F, CHECK_FOR_OVERFLOWS>(&params, &poly, &point, test_transcript)
-            .expect("Evaluation phase failed");
-    let field_cfg = *eval_f.cfg();
-    let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
     group.bench_function(
         format!(
-            "Verify: Eval={}, Cw={}, Comb={}, poly_size=2^{P}, modulus=({} bits)",
+            "VerifyOnlyTest: Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
-            Zt::Comb::type_name(),
-            Zt::Fmod::NUM_BYTES * 8
+            Zt::Comb::type_name()
         ),
         |b| {
             b.iter(|| {
-                ZipPlus::verify::<_, CHECK_FOR_OVERFLOWS>(
-                    &params,
-                    &commitment,
-                    &point_f,
-                    &eval_f,
-                    &proof,
-                )
-                .expect("Verification failed");
+                let proof = test_transcript.clone();
+                ZipPlus::verify_test_phase::<CHECK_FOR_OVERFLOWS>(&params, &commitment, proof)
+                    .expect("Test phase verification failed");
             })
         },
     );

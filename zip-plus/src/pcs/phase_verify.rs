@@ -3,7 +3,7 @@ use crate::{
     code::LinearCode,
     merkle::MtHash,
     pcs::{
-        ZipPlusProof,
+        ZipPlusProof, ZipPlusTestTranscript,
         structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
         utils::{ColumnOpening, point_to_tensor, validate_input},
     },
@@ -13,6 +13,7 @@ use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, IntoWithConfig,
 use itertools::Itertools;
 use num_traits::{ConstOne, ConstZero, Zero};
 use zinc_poly::Polynomial;
+use zinc_transcript::KeccakTranscript;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
     UNCHECKED,
@@ -23,6 +24,20 @@ use zinc_utils::{
 };
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
+    pub fn verify_test_phase<const CHECK_FOR_OVERFLOW: bool>(
+        vp: &ZipPlusParams<Zt, Lc>,
+        comm: &ZipPlusCommitment,
+        test_transcript: ZipPlusTestTranscript,
+    ) -> Result<(), ZipError> {
+        let mut transcript: PcsTranscript = test_transcript.into();
+        transcript.fs_transcript = KeccakTranscript::default();
+        transcript.stream.set_position(0);
+
+        Self::verify_testing::<CHECK_FOR_OVERFLOW>(vp, &comm.root, &mut transcript)?;
+
+        Ok(())
+    }
+
     pub fn verify<F, const CHECK_FOR_OVERFLOW: bool>(
         vp: &ZipPlusParams<Zt, Lc>,
         comm: &ZipPlusCommitment,
