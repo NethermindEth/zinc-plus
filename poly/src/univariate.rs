@@ -4,6 +4,7 @@ use zinc_utils::from_ref::FromRef;
 pub mod binary_ref;
 pub mod binary_u64;
 pub mod dense;
+pub mod dynamic;
 pub mod nat_evaluation;
 
 /// Shared projection helper for binary polynomials.
