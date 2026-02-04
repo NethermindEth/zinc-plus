@@ -21,7 +21,7 @@ use crypto_primitives::{
 };
 use zip_plus::{
     code::{
-        iprs::{IprsCode, PnttConfigF2_16_1},
+        iprs::{IprsCode, PnttConfigF2_16_1, PnttConfigF2_16_1_Base128},
         raa::{RaaCode, RaaConfig},
     },
     pcs::structs::ZipTypes,
@@ -74,6 +74,12 @@ type SomeIprsCode<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize> = IprsCo
     BinaryPolyWideningMulByScalar<Twiddle>,
 >;
 
+type SomeIprsCodeBase128<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Base128<DEPTH>,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
 fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");
 
@@ -90,6 +96,14 @@ fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
 
     do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, 32>, UNCHECKED>(&mut group);
     do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 1, 64>, UNCHECKED>(&mut group);
+    commit_matrix_4x1024_iprs::<
+        BenchZipPlusTypes<i64, 32>,
+        SomeIprsCodeBase128<i64, 1, 32>,
+    >(&mut group);
+    commit_matrix_4x1024_iprs::<
+        BenchZipPlusTypes<i64, 64>,
+        SomeIprsCodeBase128<i64, 1, 64>,
+    >(&mut group);
 
     group.finish();
 }

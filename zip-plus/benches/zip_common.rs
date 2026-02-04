@@ -55,7 +55,7 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     // encode_single_row::<Zt, Lc, 1024>(group);
 
     // merkle_root::<Zt, 12>(group);
-    // merkle_root::<Zt, 13>(group);
+    merkle_root::<Zt, 13>(group);
     // merkle_root::<Zt, 14>(group);
     // merkle_root::<Zt, 15>(group);
     // merkle_root::<Zt, 16>(group);
@@ -124,6 +124,48 @@ pub fn commit_matrix_4x1024_raa<Zt: ZipTypes, Lc: LinearCode<Zt>>(
         "Expected row_len to be {ROW_LEN}, got {row_len}"
     );
     let params = ZipPlusParams::new(P, NUM_ROWS, linear_code);
+
+    group.bench_function(
+        format!(
+            "CommitMatrix4x1024: Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
+            Zt::Eval::type_name(),
+            Zt::Cw::type_name(),
+            Zt::Comb::type_name()
+        ),
+        |b| {
+            b.iter_custom(|iters| {
+                let mut total_duration = Duration::ZERO;
+                for _ in 0..iters {
+                    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+                    let timer = Instant::now();
+                    let res = ZipPlus::commit(&params, &poly).expect("Failed to commit");
+                    black_box(res);
+                    total_duration += timer.elapsed();
+                }
+
+                total_duration
+            })
+        },
+    );
+}
+
+pub fn commit_matrix_4x1024_iprs<Zt: ZipTypes, Lc: LinearCode<Zt>>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    const ROW_LEN: usize = 1024;
+    const P: usize = 12; // 2^12 = 4096 = 4 * 1024
+
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let row_len = linear_code.row_len();
+    assert_eq!(
+        row_len, ROW_LEN,
+        "Expected row_len to be {ROW_LEN}, got {row_len}"
+    );
+    let params = ZipPlus::setup(poly_size, linear_code);
 
     group.bench_function(
         format!(
