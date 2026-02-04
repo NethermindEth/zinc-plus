@@ -21,7 +21,11 @@ use crypto_primitives::{
 };
 use zip_plus::{
     code::{
-        iprs::{IprsCode, PnttConfigF2_16_1, PnttConfigF2_16_1_Base128},
+        iprs::{
+            IprsCode,
+            PnttConfigF2_16_1,
+            PnttConfigF2_16_1_Base128,
+        },
         raa::{RaaCode, RaaConfig},
     },
     pcs::structs::ZipTypes,
@@ -82,25 +86,16 @@ type SomeIprsCodeBase128<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize> =
 
 fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");
-
-    commit_matrix_8x1024_raa::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>>(&mut group);
-    commit_matrix_8x1024_raa::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>>(&mut group);
     commit_matrix_32x256_raa::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>>(&mut group);
-    commit_matrix_32x256_raa::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>>(&mut group);
-    test_matrix_8x1024_raa::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>, UNCHECKED>(&mut group);
-    test_matrix_8x1024_raa::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>, UNCHECKED>(&mut group);
+    commit_batch_matrix_32x256_raa::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>, 2>(&mut group);
     test_matrix_32x256_raa::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>, UNCHECKED>(&mut group);
-    test_matrix_32x256_raa::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>, UNCHECKED>(&mut group);
-    verify_only_test_matrix_8x1024_raa::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>, UNCHECKED>(
-        &mut group,
-    );
-    verify_only_test_matrix_8x1024_raa::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>, UNCHECKED>(
-        &mut group,
-    );
+    test_batch_matrix_32x256_raa::<
+        BenchZipPlusTypes<i32, 32>,
+        SomeRaaCode<_>,
+        UNCHECKED,
+        2,
+    >(&mut group);
     verify_only_test_matrix_32x256_raa::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>, UNCHECKED>(
-        &mut group,
-    );
-    verify_only_test_matrix_32x256_raa::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>, UNCHECKED>(
         &mut group,
     );
 
@@ -110,36 +105,37 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
 fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS");
 
-    commit_matrix_8x1024_iprs::<
-        BenchZipPlusTypes<i64, 32>,
-        SomeIprsCodeBase128<i64, 1, 32>,
-    >(&mut group);
-    commit_matrix_8x1024_iprs::<
-        BenchZipPlusTypes<i64, 64>,
-        SomeIprsCodeBase128<i64, 1, 64>,
-    >(&mut group);
-    commit_matrix_32x256_iprs::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, 32>>(&mut group);
-    commit_matrix_32x256_iprs::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 1, 64>>(&mut group);
-    test_matrix_8x1024_iprs::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeBase128<i64, 1, 32>, UNCHECKED>(
+    commit_matrix_4x2048_iprs::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 2, 32>>(
         &mut group,
     );
-    test_matrix_8x1024_iprs::<BenchZipPlusTypes<i64, 64>, SomeIprsCodeBase128<i64, 1, 64>, UNCHECKED>(
+    commit_matrix_32x256_iprs::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, 32>>(&mut group);
+    commit_batch_matrix_4x2048_iprs::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 2, 32>, 2>(
+        &mut group,
+    );
+    commit_batch_matrix_32x256_iprs::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, 32>, 2>(
+        &mut group,
+    );
+    test_matrix_4x2048_iprs::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 2, 32>, UNCHECKED>(
         &mut group,
     );
     test_matrix_32x256_iprs::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, 32>, UNCHECKED>(
         &mut group,
     );
-    test_matrix_32x256_iprs::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 1, 64>, UNCHECKED>(
-        &mut group,
-    );
-    verify_only_test_matrix_8x1024_iprs::<
+    test_batch_matrix_4x2048_iprs::<
         BenchZipPlusTypes<i64, 32>,
-        SomeIprsCodeBase128<i64, 1, 32>,
+        SomeIprsCode<i64, 2, 32>,
         UNCHECKED,
+        2,
     >(&mut group);
-    verify_only_test_matrix_8x1024_iprs::<
-        BenchZipPlusTypes<i64, 64>,
-        SomeIprsCodeBase128<i64, 1, 64>,
+    test_batch_matrix_32x256_iprs::<
+        BenchZipPlusTypes<i64, 32>,
+        SomeIprsCode<i64, 1, 32>,
+        UNCHECKED,
+        2,
+    >(&mut group);
+    verify_only_test_matrix_4x2048_iprs::<
+        BenchZipPlusTypes<i64, 32>,
+        SomeIprsCode<i64, 2, 32>,
         UNCHECKED,
     >(&mut group);
     verify_only_test_matrix_32x256_iprs::<
@@ -147,14 +143,13 @@ fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
         SomeIprsCode<i64, 1, 32>,
         UNCHECKED,
     >(&mut group);
-    verify_only_test_matrix_32x256_iprs::<
-        BenchZipPlusTypes<i64, 64>,
-        SomeIprsCode<i64, 1, 64>,
-        UNCHECKED,
-    >(&mut group);
 
     group.finish();
 }
 
-criterion_group!(benches, zip_plus_benchmarks_raa, zip_plus_benchmarks_iprs);
+criterion_group!(
+    benches,
+    zip_plus_benchmarks_raa,
+    zip_plus_benchmarks_iprs
+);
 criterion_main!(benches);
