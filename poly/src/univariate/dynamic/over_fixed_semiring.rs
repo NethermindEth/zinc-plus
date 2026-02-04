@@ -2,7 +2,6 @@ use crypto_primitives::{
     FixedSemiring, FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring, boolean::Boolean,
 };
 use derive_more::From;
-use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, ConstZero, One, Zero};
 use std::{
     fmt::Display,
@@ -17,7 +16,13 @@ use crate::{
     univariate::{
         binary::BinaryPoly,
         dense::DensePolynomial,
-        dynamic::{multiplication::mul_schoolbook, over_field::DynamicPolynomialF},
+        dynamic::{
+            internal::{
+                add_assign, degree, display, is_zero, mul, neg, new_coeffs_trimmed, sub_assign,
+                trim,
+            },
+            over_field::DynamicPolynomialF,
+        },
     },
 };
 
@@ -39,62 +44,35 @@ pub struct DynamicPolynomialFS<R: FixedSemiring> {
 
 impl<R: FixedSemiring> DynamicPolynomialFS<R> {
     /// Create a new polynomial with the given coefficients.
-    #[allow(clippy::arithmetic_side_effects)]
+    #[inline(always)]
     pub fn new_trimmed(coeffs: impl AsRef<[R]>) -> Self {
-        let coeffs = coeffs.as_ref();
-
-        if let Some((non_zero, _)) = coeffs.iter().rev().find_position(|coeff| !coeff.is_zero()) {
-            let deg_plus_one = coeffs.len() - non_zero;
-
-            Self {
-                coeffs: coeffs.iter().take(deg_plus_one).cloned().collect(),
-            }
-        } else {
-            Self::zero()
+        Self {
+            coeffs: new_coeffs_trimmed(coeffs.as_ref(), R::is_zero),
         }
     }
 
+    #[inline(always)]
     pub fn new(coeffs: impl AsRef<[R]>) -> Self {
         Self {
             coeffs: Vec::from(coeffs.as_ref()),
         }
     }
 
-    #[allow(clippy::arithmetic_side_effects)]
+    #[inline(always)]
     pub fn degree(&self) -> Option<usize> {
-        if let Some((non_zero, _)) = self
-            .coeffs
-            .iter()
-            .rev()
-            .find_position(|coeff| !coeff.is_zero())
-        {
-            Some(self.coeffs.len() - non_zero - 1)
-        } else {
-            None
-        }
+        degree(&self.coeffs, R::is_zero)
     }
 
-    #[allow(clippy::arithmetic_side_effects)]
+    #[inline(always)]
     pub fn trim(&mut self) {
-        self.coeffs
-            .truncate(self.degree().map_or(0, |degree| degree + 1));
+        trim(&mut self.coeffs, R::is_zero);
     }
 }
 
 impl<R: FixedSemiring> Display for DynamicPolynomialFS<R> {
+    #[inline(always)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[")?;
-        let mut first = true;
-        for coeff in self.coeffs.iter() {
-            if first {
-                first = false;
-            } else {
-                write!(f, ", ")?;
-            }
-            write!(f, "{}", coeff)?;
-        }
-        write!(f, "]")?;
-        Ok(())
+        display(&self.coeffs, f)
     }
 }
 
@@ -104,8 +82,9 @@ impl<R: FixedSemiring> Zero for DynamicPolynomialFS<R> {
         Default::default()
     }
 
+    #[inline(always)]
     fn is_zero(&self) -> bool {
-        self.coeffs.iter().all(|coeff| coeff.is_zero())
+        is_zero(&self.coeffs, R::is_zero)
     }
 }
 
@@ -126,7 +105,7 @@ impl<R: FixedSemiring + Ring> Neg for DynamicPolynomialFS<R> {
 
     fn neg(self) -> Self::Output {
         Self {
-            coeffs: self.coeffs.into_iter().map(|coeff| coeff.neg()).collect(),
+            coeffs: neg(self.coeffs),
         }
     }
 }
@@ -134,7 +113,6 @@ impl<R: FixedSemiring + Ring> Neg for DynamicPolynomialFS<R> {
 impl<R: FixedSemiring> Add for DynamicPolynomialFS<R> {
     type Output = Self;
 
-    #[allow(clippy::arithmetic_side_effects)]
     fn add(self, rhs: Self) -> Self::Output {
         self.add(&rhs)
     }
@@ -143,18 +121,8 @@ impl<R: FixedSemiring> Add for DynamicPolynomialFS<R> {
 impl<R: FixedSemiring> Add<&Self> for DynamicPolynomialFS<R> {
     type Output = Self;
 
-    #[allow(clippy::arithmetic_side_effects)]
     fn add(mut self, rhs: &Self) -> Self::Output {
-        if self.coeffs.len() < rhs.coeffs.len() {
-            self.coeffs.resize(rhs.coeffs.len(), R::zero());
-        }
-
-        self.coeffs
-            .iter_mut()
-            .zip(&rhs.coeffs)
-            .for_each(|(lhs, rhs)| {
-                *lhs += rhs;
-            });
+        self.add_assign(rhs);
 
         self
     }
@@ -163,7 +131,6 @@ impl<R: FixedSemiring> Add<&Self> for DynamicPolynomialFS<R> {
 impl<R: FixedSemiring> Sub for DynamicPolynomialFS<R> {
     type Output = Self;
 
-    #[allow(clippy::arithmetic_side_effects)]
     fn sub(self, rhs: Self) -> Self::Output {
         self.sub(&rhs)
     }
@@ -172,18 +139,8 @@ impl<R: FixedSemiring> Sub for DynamicPolynomialFS<R> {
 impl<R: FixedSemiring> Sub<&Self> for DynamicPolynomialFS<R> {
     type Output = Self;
 
-    #[allow(clippy::arithmetic_side_effects)]
     fn sub(mut self, rhs: &Self) -> Self::Output {
-        if self.coeffs.len() < rhs.coeffs.len() {
-            self.coeffs.resize(rhs.coeffs.len(), R::zero());
-        }
-
-        self.coeffs
-            .iter_mut()
-            .zip(&rhs.coeffs)
-            .for_each(|(lhs, rhs)| {
-                *lhs -= rhs;
-            });
+        self.sub_assign(rhs);
 
         self
     }
@@ -210,24 +167,11 @@ impl<R: FixedSemiring> Mul<&Self> for DynamicPolynomialFS<R> {
 impl<'a, R: FixedSemiring> Mul<&'a DynamicPolynomialFS<R>> for &'a DynamicPolynomialFS<R> {
     type Output = DynamicPolynomialFS<R>;
 
-    #[allow(clippy::arithmetic_side_effects)]
     fn mul(self, rhs: Self) -> Self::Output {
-        if self.is_zero() || rhs.is_zero() {
-            return Self::Output::zero();
+        Self::Output {
+            coeffs: mul::<_, UNCHECKED>(&self.coeffs, &rhs.coeffs, R::is_zero)
+                .expect("we do not expect overflow here"),
         }
-
-        let degree = (self.coeffs.len() - 1) + (rhs.coeffs.len() - 1);
-        let mut coeffs = Vec::with_capacity(degree + 1);
-
-        mul_schoolbook::<_, UNCHECKED>(&self.coeffs, &rhs.coeffs, coeffs.spare_capacity_mut());
-
-        // Safety: the multiplication algorithm should fill in the entire spare
-        // capacity.
-        unsafe {
-            coeffs.set_len(degree + 1);
-        }
-
-        Self::Output { coeffs }
     }
 }
 
@@ -274,22 +218,9 @@ impl<R: FixedSemiring> CheckedSub for DynamicPolynomialFS<R> {
 impl<R: FixedSemiring> CheckedMul for DynamicPolynomialFS<R> {
     #[allow(clippy::arithmetic_side_effects)] // degrees normally shouldn't be that large
     fn checked_mul(&self, rhs: &Self) -> Option<Self> {
-        if self.is_zero() || rhs.is_zero() {
-            return Some(Self::zero());
-        }
-
-        let degree = (self.coeffs.len() - 1) + (rhs.coeffs.len() - 1);
-        let mut coeffs = Vec::with_capacity(degree + 1);
-
-        mul_schoolbook::<_, CHECKED>(&self.coeffs, &rhs.coeffs, coeffs.spare_capacity_mut())?;
-
-        // Safety: the multiplication algorithm should fill in the entire spare
-        // capacity.
-        unsafe {
-            coeffs.set_len(degree + 1);
-        }
-
-        Some(Self::Output { coeffs })
+        Some(Self {
+            coeffs: mul::<_, CHECKED>(&self.coeffs, &rhs.coeffs, R::is_zero)?,
+        })
     }
 }
 
@@ -306,25 +237,14 @@ impl<R: FixedSemiring + Ring> CheckedNeg for DynamicPolynomialFS<R> {
 }
 
 impl<R: FixedSemiring> AddAssign for DynamicPolynomialFS<R> {
-    #[allow(clippy::arithmetic_side_effects)] // by definition
     fn add_assign(&mut self, rhs: Self) {
         self.add_assign(&rhs);
     }
 }
 
 impl<R: FixedSemiring> AddAssign<&Self> for DynamicPolynomialFS<R> {
-    #[allow(clippy::arithmetic_side_effects)] // by definition
     fn add_assign(&mut self, rhs: &Self) {
-        if self.coeffs.len() < rhs.coeffs.len() {
-            self.coeffs.resize(rhs.coeffs.len(), R::zero());
-        }
-
-        self.coeffs
-            .iter_mut()
-            .zip(&rhs.coeffs)
-            .for_each(|(lhs, rhs)| {
-                *lhs += rhs;
-            });
+        add_assign(&mut self.coeffs, &rhs.coeffs, |_| R::zero());
     }
 }
 
@@ -338,16 +258,7 @@ impl<R: FixedSemiring> SubAssign for DynamicPolynomialFS<R> {
 impl<R: FixedSemiring> SubAssign<&Self> for DynamicPolynomialFS<R> {
     #[allow(clippy::arithmetic_side_effects)] // by definition
     fn sub_assign(&mut self, rhs: &Self) {
-        if self.coeffs.len() < rhs.coeffs.len() {
-            self.coeffs.resize(rhs.coeffs.len(), R::zero());
-        }
-
-        self.coeffs
-            .iter_mut()
-            .zip(rhs.coeffs.iter())
-            .for_each(|(lhs, rhs)| {
-                *lhs -= rhs;
-            });
+        sub_assign(&mut self.coeffs, &rhs.coeffs, |_| R::zero());
     }
 }
 

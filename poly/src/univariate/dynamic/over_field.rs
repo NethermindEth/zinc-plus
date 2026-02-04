@@ -163,7 +163,8 @@ impl<'a, F: PrimeField> Mul<&'a DynamicPolynomialF<F>> for &'a DynamicPolynomial
     #[allow(clippy::arithmetic_side_effects)]
     fn mul(self, rhs: Self) -> Self::Output {
         Self::Output {
-            coeffs: mul::<_, UNCHECKED>(&self.coeffs, &rhs.coeffs, F::is_zero),
+            coeffs: mul::<_, UNCHECKED>(&self.coeffs, &rhs.coeffs, F::is_zero)
+                .expect("overflow in a field will not happen"),
         }
     }
 }

@@ -87,15 +87,15 @@ pub(crate) fn mul<R: Semiring, const CHECK: bool>(
     lhs: &[R],
     rhs: &[R],
     is_zero_elem: impl Fn(&R) -> bool,
-) -> Vec<R> {
+) -> Option<Vec<R>> {
     if is_zero(lhs, &is_zero_elem) || is_zero(rhs, is_zero_elem) {
-        return Vec::new();
+        return Some(Vec::new());
     }
 
     let degree = (lhs.len() - 1) + (rhs.len() - 1);
     let mut coeffs = Vec::with_capacity(degree + 1);
 
-    mul_schoolbook::<_, CHECK>(lhs, rhs, coeffs.spare_capacity_mut());
+    mul_schoolbook::<_, CHECK>(lhs, rhs, coeffs.spare_capacity_mut())?;
 
     // Safety: the multiplication algorithm should fill in the entire spare
     // capacity.
@@ -103,5 +103,5 @@ pub(crate) fn mul<R: Semiring, const CHECK: bool>(
         coeffs.set_len(degree + 1);
     }
 
-    coeffs
+    Some(coeffs)
 }
