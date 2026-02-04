@@ -127,10 +127,8 @@ pub fn commit_matrix_4x1024_raa<Zt: ZipTypes, Lc: LinearCode<Zt>>(
 
     group.bench_function(
         format!(
-            "CommitMatrix4x1024: Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
-            Zt::Eval::type_name(),
-            Zt::Cw::type_name(),
-            Zt::Comb::type_name()
+            "CommitMatrix/4x1024/{}",
+            Zt::Eval::type_name()
         ),
         |b| {
             b.iter_custom(|iters| {
@@ -144,6 +142,256 @@ pub fn commit_matrix_4x1024_raa<Zt: ZipTypes, Lc: LinearCode<Zt>>(
                 }
 
                 total_duration
+            })
+        },
+    );
+}
+
+pub fn commit_matrix_8x1024_raa<Zt: ZipTypes, Lc: LinearCode<Zt>>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    const NUM_ROWS: usize = 8;
+    const ROW_LEN: usize = 1024;
+    const P: usize = 13; // 2^13 = 8192 = 8 * 1024
+    const POLY_SIZE_FOR_ROW_LEN: usize = 1 << 20; // Ensures RAA row_len = 1024
+
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(POLY_SIZE_FOR_ROW_LEN);
+    let row_len = linear_code.row_len();
+    assert_eq!(
+        row_len, ROW_LEN,
+        "Expected row_len to be {ROW_LEN}, got {row_len}"
+    );
+    let params = ZipPlusParams::new(P, NUM_ROWS, linear_code);
+
+    group.bench_function(
+        format!(
+            "CommitMatrix/8x1024/{}",
+            Zt::Eval::type_name()
+        ),
+        |b| {
+            b.iter_custom(|iters| {
+                let mut total_duration = Duration::ZERO;
+                for _ in 0..iters {
+                    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+                    let timer = Instant::now();
+                    let res = ZipPlus::commit(&params, &poly).expect("Failed to commit");
+                    black_box(res);
+                    total_duration += timer.elapsed();
+                }
+
+                total_duration
+            })
+        },
+    );
+}
+
+pub fn commit_matrix_32x256_raa<Zt: ZipTypes, Lc: LinearCode<Zt>>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    const NUM_ROWS: usize = 32;
+    const ROW_LEN: usize = 256;
+    const P: usize = 13; // 2^13 = 8192 = 32 * 256
+    const POLY_SIZE_FOR_ROW_LEN: usize = 1 << 16; // Ensures RAA row_len = 256
+
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(POLY_SIZE_FOR_ROW_LEN);
+    let row_len = linear_code.row_len();
+    assert_eq!(
+        row_len, ROW_LEN,
+        "Expected row_len to be {ROW_LEN}, got {row_len}"
+    );
+    let params = ZipPlusParams::new(P, NUM_ROWS, linear_code);
+
+    group.bench_function(
+        format!(
+            "CommitMatrix/32x256/{}",
+            Zt::Eval::type_name()
+        ),
+        |b| {
+            b.iter_custom(|iters| {
+                let mut total_duration = Duration::ZERO;
+                for _ in 0..iters {
+                    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+                    let timer = Instant::now();
+                    let res = ZipPlus::commit(&params, &poly).expect("Failed to commit");
+                    black_box(res);
+                    total_duration += timer.elapsed();
+                }
+
+                total_duration
+            })
+        },
+    );
+}
+
+pub fn test_matrix_8x1024_raa<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    const NUM_ROWS: usize = 8;
+    const ROW_LEN: usize = 1024;
+    const P: usize = 13; // 2^13 = 8192 = 8 * 1024
+    const POLY_SIZE_FOR_ROW_LEN: usize = 1 << 20; // Ensures RAA row_len = 1024
+
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(POLY_SIZE_FOR_ROW_LEN);
+    let row_len = linear_code.row_len();
+    assert_eq!(
+        row_len, ROW_LEN,
+        "Expected row_len to be {ROW_LEN}, got {row_len}"
+    );
+    let params = ZipPlusParams::new(P, NUM_ROWS, linear_code);
+
+    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+    let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
+
+    group.bench_function(
+        format!(
+            "TestMatrix/8x1024/{}",
+            Zt::Eval::type_name()
+        ),
+        |b| {
+            b.iter(|| {
+                let test_transcript =
+                    ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, &poly, &data)
+                        .expect("Test phase failed");
+                black_box(test_transcript);
+            })
+        },
+    );
+}
+
+pub fn test_matrix_32x256_raa<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    const NUM_ROWS: usize = 32;
+    const ROW_LEN: usize = 256;
+    const P: usize = 13; // 2^13 = 8192 = 32 * 256
+    const POLY_SIZE_FOR_ROW_LEN: usize = 1 << 16; // Ensures RAA row_len = 256
+
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(POLY_SIZE_FOR_ROW_LEN);
+    let row_len = linear_code.row_len();
+    assert_eq!(
+        row_len, ROW_LEN,
+        "Expected row_len to be {ROW_LEN}, got {row_len}"
+    );
+    let params = ZipPlusParams::new(P, NUM_ROWS, linear_code);
+
+    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+    let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
+
+    group.bench_function(
+        format!(
+            "TestMatrix/32x256/{}",
+            Zt::Eval::type_name()
+        ),
+        |b| {
+            b.iter(|| {
+                let test_transcript =
+                    ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, &poly, &data)
+                        .expect("Test phase failed");
+                black_box(test_transcript);
+            })
+        },
+    );
+}
+
+pub fn verify_only_test_matrix_8x1024_raa<
+    Zt: ZipTypes,
+    Lc: LinearCode<Zt>,
+    const CHECK_FOR_OVERFLOWS: bool,
+>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    const NUM_ROWS: usize = 8;
+    const ROW_LEN: usize = 1024;
+    const P: usize = 13; // 2^13 = 8192 = 8 * 1024
+    const POLY_SIZE_FOR_ROW_LEN: usize = 1 << 20; // Ensures RAA row_len = 1024
+
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(POLY_SIZE_FOR_ROW_LEN);
+    let row_len = linear_code.row_len();
+    assert_eq!(
+        row_len, ROW_LEN,
+        "Expected row_len to be {ROW_LEN}, got {row_len}"
+    );
+    let params = ZipPlusParams::new(P, NUM_ROWS, linear_code);
+
+    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+    let (data, commitment) = ZipPlus::commit(&params, &poly).unwrap();
+    let test_transcript =
+        ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, &poly, &data).expect("Test phase failed");
+
+    group.bench_function(
+        format!(
+            "VerifyOnlyTestMatrix/8x1024/{}",
+            Zt::Eval::type_name()
+        ),
+        |b| {
+            b.iter(|| {
+                let proof = test_transcript.clone();
+                ZipPlus::verify_test_phase::<CHECK_FOR_OVERFLOWS>(&params, &commitment, proof)
+                    .expect("Test phase verification failed");
+            })
+        },
+    );
+}
+
+pub fn verify_only_test_matrix_32x256_raa<
+    Zt: ZipTypes,
+    Lc: LinearCode<Zt>,
+    const CHECK_FOR_OVERFLOWS: bool,
+>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    const NUM_ROWS: usize = 32;
+    const ROW_LEN: usize = 256;
+    const P: usize = 13; // 2^13 = 8192 = 32 * 256
+    const POLY_SIZE_FOR_ROW_LEN: usize = 1 << 16; // Ensures RAA row_len = 256
+
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(POLY_SIZE_FOR_ROW_LEN);
+    let row_len = linear_code.row_len();
+    assert_eq!(
+        row_len, ROW_LEN,
+        "Expected row_len to be {ROW_LEN}, got {row_len}"
+    );
+    let params = ZipPlusParams::new(P, NUM_ROWS, linear_code);
+
+    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+    let (data, commitment) = ZipPlus::commit(&params, &poly).unwrap();
+    let test_transcript =
+        ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, &poly, &data).expect("Test phase failed");
+
+    group.bench_function(
+        format!(
+            "VerifyOnlyTestMatrix/32x256/{}",
+            Zt::Eval::type_name()
+        ),
+        |b| {
+            b.iter(|| {
+                let proof = test_transcript.clone();
+                ZipPlus::verify_test_phase::<CHECK_FOR_OVERFLOWS>(&params, &commitment, proof)
+                    .expect("Test phase verification failed");
             })
         },
     );
@@ -169,10 +417,8 @@ pub fn commit_matrix_4x1024_iprs<Zt: ZipTypes, Lc: LinearCode<Zt>>(
 
     group.bench_function(
         format!(
-            "CommitMatrix4x1024: Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
-            Zt::Eval::type_name(),
-            Zt::Cw::type_name(),
-            Zt::Comb::type_name()
+            "CommitMatrix/4x1024/{}",
+            Zt::Eval::type_name()
         ),
         |b| {
             b.iter_custom(|iters| {
@@ -186,6 +432,244 @@ pub fn commit_matrix_4x1024_iprs<Zt: ZipTypes, Lc: LinearCode<Zt>>(
                 }
 
                 total_duration
+            })
+        },
+    );
+}
+
+pub fn commit_matrix_8x1024_iprs<Zt: ZipTypes, Lc: LinearCode<Zt>>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    const ROW_LEN: usize = 1024;
+    const P: usize = 13; // 2^13 = 8192 = 8 * 1024
+
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let row_len = linear_code.row_len();
+    assert_eq!(
+        row_len, ROW_LEN,
+        "Expected row_len to be {ROW_LEN}, got {row_len}"
+    );
+    let params = ZipPlus::setup(poly_size, linear_code);
+
+    group.bench_function(
+        format!(
+            "CommitMatrix/8x1024/{}",
+            Zt::Eval::type_name()
+        ),
+        |b| {
+            b.iter_custom(|iters| {
+                let mut total_duration = Duration::ZERO;
+                for _ in 0..iters {
+                    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+                    let timer = Instant::now();
+                    let res = ZipPlus::commit(&params, &poly).expect("Failed to commit");
+                    black_box(res);
+                    total_duration += timer.elapsed();
+                }
+
+                total_duration
+            })
+        },
+    );
+}
+
+pub fn commit_matrix_32x256_iprs<Zt: ZipTypes, Lc: LinearCode<Zt>>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    const ROW_LEN: usize = 256;
+    const P: usize = 13; // 2^13 = 8192 = 32 * 256
+
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let row_len = linear_code.row_len();
+    assert_eq!(
+        row_len, ROW_LEN,
+        "Expected row_len to be {ROW_LEN}, got {row_len}"
+    );
+    let params = ZipPlus::setup(poly_size, linear_code);
+
+    group.bench_function(
+        format!(
+            "CommitMatrix/32x256/{}",
+            Zt::Eval::type_name()
+        ),
+        |b| {
+            b.iter_custom(|iters| {
+                let mut total_duration = Duration::ZERO;
+                for _ in 0..iters {
+                    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+                    let timer = Instant::now();
+                    let res = ZipPlus::commit(&params, &poly).expect("Failed to commit");
+                    black_box(res);
+                    total_duration += timer.elapsed();
+                }
+
+                total_duration
+            })
+        },
+    );
+}
+
+pub fn test_matrix_8x1024_iprs<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    const ROW_LEN: usize = 1024;
+    const P: usize = 13; // 2^13 = 8192 = 8 * 1024
+
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let row_len = linear_code.row_len();
+    assert_eq!(
+        row_len, ROW_LEN,
+        "Expected row_len to be {ROW_LEN}, got {row_len}"
+    );
+    let params = ZipPlus::setup(poly_size, linear_code);
+
+    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+    let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
+
+    group.bench_function(
+        format!(
+            "TestMatrix/8x1024/{}",
+            Zt::Eval::type_name()
+        ),
+        |b| {
+            b.iter(|| {
+                let test_transcript =
+                    ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, &poly, &data)
+                        .expect("Test phase failed");
+                black_box(test_transcript);
+            })
+        },
+    );
+}
+
+pub fn test_matrix_32x256_iprs<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    const ROW_LEN: usize = 256;
+    const P: usize = 13; // 2^13 = 8192 = 32 * 256
+
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let row_len = linear_code.row_len();
+    assert_eq!(
+        row_len, ROW_LEN,
+        "Expected row_len to be {ROW_LEN}, got {row_len}"
+    );
+    let params = ZipPlus::setup(poly_size, linear_code);
+
+    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+    let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
+
+    group.bench_function(
+        format!(
+            "TestMatrix/32x256/{}",
+            Zt::Eval::type_name()
+        ),
+        |b| {
+            b.iter(|| {
+                let test_transcript =
+                    ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, &poly, &data)
+                        .expect("Test phase failed");
+                black_box(test_transcript);
+            })
+        },
+    );
+}
+
+pub fn verify_only_test_matrix_8x1024_iprs<
+    Zt: ZipTypes,
+    Lc: LinearCode<Zt>,
+    const CHECK_FOR_OVERFLOWS: bool,
+>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    const ROW_LEN: usize = 1024;
+    const P: usize = 13; // 2^13 = 8192 = 8 * 1024
+
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let row_len = linear_code.row_len();
+    assert_eq!(
+        row_len, ROW_LEN,
+        "Expected row_len to be {ROW_LEN}, got {row_len}"
+    );
+    let params = ZipPlus::setup(poly_size, linear_code);
+
+    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+    let (data, commitment) = ZipPlus::commit(&params, &poly).unwrap();
+    let test_transcript =
+        ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, &poly, &data).expect("Test phase failed");
+
+    group.bench_function(
+        format!(
+            "VerifyOnlyTestMatrix/8x1024/{}",
+            Zt::Eval::type_name()
+        ),
+        |b| {
+            b.iter(|| {
+                let proof = test_transcript.clone();
+                ZipPlus::verify_test_phase::<CHECK_FOR_OVERFLOWS>(&params, &commitment, proof)
+                    .expect("Test phase verification failed");
+            })
+        },
+    );
+}
+
+pub fn verify_only_test_matrix_32x256_iprs<
+    Zt: ZipTypes,
+    Lc: LinearCode<Zt>,
+    const CHECK_FOR_OVERFLOWS: bool,
+>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    const ROW_LEN: usize = 256;
+    const P: usize = 13; // 2^13 = 8192 = 32 * 256
+
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let row_len = linear_code.row_len();
+    assert_eq!(
+        row_len, ROW_LEN,
+        "Expected row_len to be {ROW_LEN}, got {row_len}"
+    );
+    let params = ZipPlus::setup(poly_size, linear_code);
+
+    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+    let (data, commitment) = ZipPlus::commit(&params, &poly).unwrap();
+    let test_transcript =
+        ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, &poly, &data).expect("Test phase failed");
+
+    group.bench_function(
+        format!(
+            "VerifyOnlyTestMatrix/32x256/{}",
+            Zt::Eval::type_name()
+        ),
+        |b| {
+            b.iter(|| {
+                let proof = test_transcript.clone();
+                ZipPlus::verify_test_phase::<CHECK_FOR_OVERFLOWS>(&params, &commitment, proof)
+                    .expect("Test phase verification failed");
             })
         },
     );
