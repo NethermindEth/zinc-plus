@@ -1,6 +1,5 @@
 use crypto_primitives::{PrimeField, Semiring};
 use derive_more::From;
-use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, ConstZero, Zero};
 use std::{
     fmt::Display,
@@ -10,7 +9,12 @@ use zinc_utils::UNCHECKED;
 
 use crate::{
     EvaluatablePolynomial, EvaluationError, Polynomial,
-    univariate::{dense::DensePolynomial, dynamic::multiplication::mul_schoolbook},
+    univariate::{
+        dense::DensePolynomial,
+        dynamic::internal::{
+            add_assign, degree, display, is_zero, mul, neg, new_coeffs_trimmed, sub_assign, trim,
+        },
+    },
 };
 
 /// Polynomials of dynamic degree. The implementation
@@ -31,66 +35,35 @@ pub struct DynamicPolynomialF<F: PrimeField> {
 
 impl<F: PrimeField> DynamicPolynomialF<F> {
     /// Create a new polynomial with the given coefficients.
-    #[allow(clippy::arithmetic_side_effects)]
+    #[inline(always)]
     pub fn new_trimmed(coeffs: impl AsRef<[F]>) -> Self {
-        let coeffs = coeffs.as_ref();
-
-        if let Some((non_zero, _)) = coeffs
-            .iter()
-            .rev()
-            .find_position(|&coeff| !F::is_zero(coeff))
-        {
-            let deg_plus_one = coeffs.len() - non_zero;
-
-            Self {
-                coeffs: coeffs.iter().take(deg_plus_one).cloned().collect(),
-            }
-        } else {
-            Self::zero()
+        Self {
+            coeffs: new_coeffs_trimmed(coeffs.as_ref(), F::is_zero),
         }
     }
 
+    #[inline(always)]
     pub fn new(coeffs: impl AsRef<[F]>) -> Self {
         Self {
             coeffs: Vec::from(coeffs.as_ref()),
         }
     }
 
-    #[allow(clippy::arithmetic_side_effects)]
+    #[inline(always)]
     pub fn degree(&self) -> Option<usize> {
-        if let Some((non_zero, _)) = self
-            .coeffs
-            .iter()
-            .rev()
-            .find_position(|coeff| !F::is_zero(coeff))
-        {
-            Some(self.coeffs.len() - non_zero - 1)
-        } else {
-            None
-        }
+        degree(&self.coeffs, F::is_zero)
     }
 
-    #[allow(clippy::arithmetic_side_effects)]
+    #[inline(always)]
     pub fn trim(&mut self) {
-        self.coeffs
-            .truncate(self.degree().map_or(0, |degree| degree + 1));
+        trim(&mut self.coeffs, F::is_zero);
     }
 }
 
 impl<F: PrimeField> Display for DynamicPolynomialF<F> {
+    #[inline(always)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[")?;
-        let mut first = true;
-        for coeff in self.coeffs.iter() {
-            if first {
-                first = false;
-            } else {
-                write!(f, ", ")?;
-            }
-            write!(f, "{}", coeff)?;
-        }
-        write!(f, "]")?;
-        Ok(())
+        display(&self.coeffs, f)
     }
 }
 
@@ -108,8 +81,9 @@ impl<F: PrimeField> Zero for DynamicPolynomialF<F> {
         Default::default()
     }
 
+    #[inline(always)]
     fn is_zero(&self) -> bool {
-        self.coeffs.iter().all(F::is_zero)
+        is_zero(&self.coeffs, F::is_zero)
     }
 }
 
@@ -120,9 +94,10 @@ impl<F: PrimeField> ConstZero for DynamicPolynomialF<F> {
 impl<F: PrimeField> Neg for DynamicPolynomialF<F> {
     type Output = Self;
 
+    #[inline(always)]
     fn neg(self) -> Self::Output {
         Self {
-            coeffs: self.coeffs.into_iter().map(|coeff| coeff.neg()).collect(),
+            coeffs: neg(self.coeffs),
         }
     }
 }
@@ -130,7 +105,6 @@ impl<F: PrimeField> Neg for DynamicPolynomialF<F> {
 impl<F: PrimeField> Add for DynamicPolynomialF<F> {
     type Output = Self;
 
-    #[allow(clippy::arithmetic_side_effects)]
     fn add(self, rhs: Self) -> Self::Output {
         self.add(&rhs)
     }
@@ -139,19 +113,9 @@ impl<F: PrimeField> Add for DynamicPolynomialF<F> {
 impl<F: PrimeField> Add<&Self> for DynamicPolynomialF<F> {
     type Output = Self;
 
-    #[allow(clippy::arithmetic_side_effects)]
+    #[inline(always)]
     fn add(mut self, rhs: &Self) -> Self::Output {
-        if self.coeffs.len() < rhs.coeffs.len() {
-            self.coeffs
-                .resize(rhs.coeffs.len(), F::zero_with_cfg(rhs.coeffs[0].cfg()));
-        }
-
-        self.coeffs
-            .iter_mut()
-            .zip(&rhs.coeffs)
-            .for_each(|(lhs, rhs)| {
-                *lhs += rhs;
-            });
+        self.add_assign(rhs);
 
         self
     }
@@ -160,7 +124,6 @@ impl<F: PrimeField> Add<&Self> for DynamicPolynomialF<F> {
 impl<F: PrimeField> Sub for DynamicPolynomialF<F> {
     type Output = Self;
 
-    #[allow(clippy::arithmetic_side_effects)]
     fn sub(self, rhs: Self) -> Self::Output {
         self.sub(&rhs)
     }
@@ -169,19 +132,8 @@ impl<F: PrimeField> Sub for DynamicPolynomialF<F> {
 impl<F: PrimeField> Sub<&Self> for DynamicPolynomialF<F> {
     type Output = Self;
 
-    #[allow(clippy::arithmetic_side_effects)]
     fn sub(mut self, rhs: &Self) -> Self::Output {
-        if self.coeffs.len() < rhs.coeffs.len() {
-            self.coeffs
-                .resize(rhs.coeffs.len(), F::zero_with_cfg(rhs.coeffs[0].cfg()));
-        }
-
-        self.coeffs
-            .iter_mut()
-            .zip(&rhs.coeffs)
-            .for_each(|(lhs, rhs)| {
-                *lhs -= rhs;
-            });
+        self.sub_assign(rhs);
 
         self
     }
@@ -210,22 +162,9 @@ impl<'a, F: PrimeField> Mul<&'a DynamicPolynomialF<F>> for &'a DynamicPolynomial
 
     #[allow(clippy::arithmetic_side_effects)]
     fn mul(self, rhs: Self) -> Self::Output {
-        if self.is_zero() || rhs.is_zero() {
-            return Self::Output::zero();
+        Self::Output {
+            coeffs: mul::<_, UNCHECKED>(&self.coeffs, &rhs.coeffs, F::is_zero),
         }
-
-        let degree = (self.coeffs.len() - 1) + (rhs.coeffs.len() - 1);
-        let mut coeffs = Vec::with_capacity(degree + 1);
-
-        mul_schoolbook::<_, UNCHECKED>(&self.coeffs, &rhs.coeffs, coeffs.spare_capacity_mut());
-
-        // Safety: the multiplication algorithm should fill in the entire spare
-        // capacity.
-        unsafe {
-            coeffs.set_len(degree + 1);
-        }
-
-        Self::Output { coeffs }
     }
 }
 
@@ -258,7 +197,6 @@ impl<F: PrimeField> CheckedNeg for DynamicPolynomialF<F> {
 }
 
 impl<F: PrimeField> AddAssign for DynamicPolynomialF<F> {
-    #[allow(clippy::arithmetic_side_effects)] // by definition
     fn add_assign(&mut self, rhs: Self) {
         self.add_assign(&rhs);
     }
@@ -267,17 +205,9 @@ impl<F: PrimeField> AddAssign for DynamicPolynomialF<F> {
 impl<F: PrimeField> AddAssign<&Self> for DynamicPolynomialF<F> {
     #[allow(clippy::arithmetic_side_effects)] // by definition
     fn add_assign(&mut self, rhs: &Self) {
-        if self.coeffs.len() < rhs.coeffs.len() {
-            self.coeffs
-                .resize(rhs.coeffs.len(), F::zero_with_cfg(rhs.coeffs[0].cfg()));
-        }
-
-        self.coeffs
-            .iter_mut()
-            .zip(&rhs.coeffs)
-            .for_each(|(lhs, rhs)| {
-                *lhs += rhs;
-            });
+        add_assign(&mut self.coeffs, &rhs.coeffs, |elem| {
+            F::zero_with_cfg(elem.cfg())
+        });
     }
 }
 
@@ -291,17 +221,9 @@ impl<F: PrimeField> SubAssign for DynamicPolynomialF<F> {
 impl<F: PrimeField> SubAssign<&Self> for DynamicPolynomialF<F> {
     #[allow(clippy::arithmetic_side_effects)] // by definition
     fn sub_assign(&mut self, rhs: &Self) {
-        if self.coeffs.len() < rhs.coeffs.len() {
-            self.coeffs
-                .resize(rhs.coeffs.len(), F::zero_with_cfg(rhs.coeffs[0].cfg()));
-        }
-
-        self.coeffs
-            .iter_mut()
-            .zip(rhs.coeffs.iter())
-            .for_each(|(lhs, rhs)| {
-                *lhs -= rhs;
-            });
+        sub_assign(&mut self.coeffs, &rhs.coeffs, |elem| {
+            F::zero_with_cfg(elem.cfg())
+        });
     }
 }
 
@@ -651,5 +573,13 @@ mod tests {
                 F::from_with_cfg(3i32, &field_cfg),
             ])
         );
+    }
+
+    #[test]
+    fn evaluate_zero_poly() {
+        assert_eq!(
+            DynamicPolynomialF::<F>::ZERO.evaluate_at_point(&F::one_with_cfg(&test_config())),
+            Ok(F::zero_with_cfg(&test_config()))
+        )
     }
 }
