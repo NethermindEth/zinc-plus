@@ -25,7 +25,7 @@ use zinc_utils::{cfg_iter, from_ref::FromRef, named::Named, projectable_to_field
 use zip_plus::{
     code::LinearCode,
     merkle::MerkleTree,
-    pcs::structs::{ZipPlus, ZipTypes},
+    pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
 };
 
 const INT_LIMBS: usize = U64::LIMBS;
@@ -100,6 +100,50 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
             b.iter(|| {
                 let cw = ZipPlus::encode_rows(&params, row_len, &poly);
                 black_box(cw)
+            })
+        },
+    );
+}
+
+pub fn commit_matrix_4x1024_raa<Zt: ZipTypes, Lc: LinearCode<Zt>>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    const NUM_ROWS: usize = 4;
+    const ROW_LEN: usize = 1024;
+    const P: usize = 12; // 2^12 = 4096 = 4 * 1024
+    const POLY_SIZE_FOR_ROW_LEN: usize = 1 << 20; // Ensures RAA row_len = 1024
+
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(POLY_SIZE_FOR_ROW_LEN);
+    let row_len = linear_code.row_len();
+    assert_eq!(
+        row_len, ROW_LEN,
+        "Expected row_len to be {ROW_LEN}, got {row_len}"
+    );
+    let params = ZipPlusParams::new(P, NUM_ROWS, linear_code);
+
+    group.bench_function(
+        format!(
+            "CommitMatrix4x1024: Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
+            Zt::Eval::type_name(),
+            Zt::Cw::type_name(),
+            Zt::Comb::type_name()
+        ),
+        |b| {
+            b.iter_custom(|iters| {
+                let mut total_duration = Duration::ZERO;
+                for _ in 0..iters {
+                    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+                    let timer = Instant::now();
+                    let res = ZipPlus::commit(&params, &poly).expect("Failed to commit");
+                    black_box(res);
+                    total_duration += timer.elapsed();
+                }
+
+                total_duration
             })
         },
     );

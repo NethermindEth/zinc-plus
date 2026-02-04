@@ -79,6 +79,8 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
 
     do_bench::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>, UNCHECKED>(&mut group);
     do_bench::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>, UNCHECKED>(&mut group);
+    commit_matrix_4x1024_raa::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>>(&mut group);
+    commit_matrix_4x1024_raa::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>>(&mut group);
 
     group.finish();
 }

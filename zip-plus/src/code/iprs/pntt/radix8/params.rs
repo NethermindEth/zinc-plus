@@ -162,6 +162,14 @@ impl<C: Config> Radix8PnttParams<C> {
 #[derive(Clone, Copy)]
 pub struct PnttConfigF2_16_1<const DEPTH: usize>;
 
+/// Pseudo NTT configuration derived from
+/// the field `Fp` for `p = 2^16 + 1`, with a larger base matrix
+/// to support `INPUT_LEN = 128 * 2^{3*DEPTH}`.
+///
+/// Supports `DEPTH` up to `3`.
+#[derive(Clone, Copy)]
+pub struct PnttConfigF2_16_1_Base128<const DEPTH: usize>;
+
 mod fq {
     #![allow(non_local_definitions)]
     use ark_ff::{Fp64, MontBackend, MontConfig};
@@ -182,6 +190,21 @@ impl<const DEPTH: usize> Config for PnttConfigF2_16_1<DEPTH> {
     const FIELD_MODULUS: u32 = fq::MODULUS;
     const BASE_LEN: usize = 32;
     const BASE_DIM: usize = 64;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 4096, -256, 16, -1, -4096, 256, -16];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq::FqBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF2_16_1_Base128<DEPTH> {
+    type Field = fq::Fq;
+    const FIELD_MODULUS: u32 = fq::MODULUS;
+    const BASE_LEN: usize = 128;
+    const BASE_DIM: usize = 256;
     const DEPTH: usize = DEPTH;
     const BASE_TWIDDLES: [PnttInt; 8] = [1, 4096, -256, 16, -1, -4096, 256, -16];
 
