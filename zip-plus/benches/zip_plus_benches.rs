@@ -21,7 +21,17 @@ use crypto_primitives::{
 };
 use zip_plus::{
     code::{
-        iprs::{IprsCode, PnttConfigF2_16_1_Depth2_Rate1_2, PnttConfigF2_16_1_Depth2_Rate1_4},
+        iprs::{
+            IprsCode,
+            PnttConfigF2_16_1_Base16_Depth1_Rate1_2,
+            PnttConfigF2_16_1_Base16_Depth1_Rate1_4,
+            PnttConfigF2_16_1_Base32_Depth1_Rate1_2,
+            PnttConfigF2_16_1_Base32_Depth1_Rate1_4,
+            PnttConfigF2_16_1_Base64_Depth1_Rate1_2,
+            PnttConfigF2_16_1_Base64_Depth1_Rate1_4,
+            PnttConfigF2_16_1_Depth2_Rate1_2,
+            PnttConfigF2_16_1_Depth2_Rate1_4,
+        },
         raa::{RaaCode, RaaConfig},
     },
     pcs::structs::ZipTypes,
@@ -74,9 +84,45 @@ type SomeIprsCodeDepth2<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
     BinaryPolyWideningMulByScalar<Twiddle>,
 >;
 
+type SomeIprsCodeDepth1Base16<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Base16_Depth1_Rate1_2,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
+type SomeIprsCodeDepth1Base32<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Base32_Depth1_Rate1_2,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
+type SomeIprsCodeDepth1Base64<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Base64_Depth1_Rate1_2,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
 type SomeIprsCodeDepth2Rate1_4<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
     BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
     PnttConfigF2_16_1_Depth2_Rate1_4,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
+type SomeIprsCodeDepth1Base16Rate1_4<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Base16_Depth1_Rate1_4,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
+type SomeIprsCodeDepth1Base32Rate1_4<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Base32_Depth1_Rate1_4,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
+type SomeIprsCodeDepth1Base64Rate1_4<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Base64_Depth1_Rate1_4,
     BinaryPolyWideningMulByScalar<Twiddle>,
 >;
 
@@ -103,6 +149,28 @@ fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     group.finish();
 }
 
+fn zip_plus_benchmarks_iprs_matrix_shapes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip+ IPRS Matrix Shapes");
+
+    do_bench_iprs_matrix_shapes::<
+        BenchZipPlusTypes<i64, 32>,
+        SomeIprsCodeDepth1Base16<i64, 32>,
+        UNCHECKED,
+    >(&mut group);
+    do_bench_iprs_matrix_shapes::<
+        BenchZipPlusTypes<i64, 32>,
+        SomeIprsCodeDepth1Base32<i64, 32>,
+        UNCHECKED,
+    >(&mut group);
+    do_bench_iprs_matrix_shapes::<
+        BenchZipPlusTypes<i64, 32>,
+        SomeIprsCodeDepth1Base64<i64, 32>,
+        UNCHECKED,
+    >(&mut group);
+
+    group.finish();
+}
+
 fn zip_plus_benchmarks_iprs_rate1_4(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS rate1_4");
 
@@ -122,10 +190,34 @@ fn zip_plus_benchmarks_iprs_rate1_4(c: &mut Criterion) {
     group.finish();
 }
 
+fn zip_plus_benchmarks_iprs_rate1_4_matrix_shapes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip+ IPRS rate1_4 Matrix Shapes");
+
+    do_bench_iprs_matrix_shapes::<
+        BenchZipPlusTypes<i64, 32>,
+        SomeIprsCodeDepth1Base16Rate1_4<i64, 32>,
+        UNCHECKED,
+    >(&mut group);
+    do_bench_iprs_matrix_shapes::<
+        BenchZipPlusTypes<i64, 32>,
+        SomeIprsCodeDepth1Base32Rate1_4<i64, 32>,
+        UNCHECKED,
+    >(&mut group);
+    do_bench_iprs_matrix_shapes::<
+        BenchZipPlusTypes<i64, 32>,
+        SomeIprsCodeDepth1Base64Rate1_4<i64, 32>,
+        UNCHECKED,
+    >(&mut group);
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     zip_plus_benchmarks_raa,
     zip_plus_benchmarks_iprs,
-    zip_plus_benchmarks_iprs_rate1_4
+    zip_plus_benchmarks_iprs_matrix_shapes,
+    zip_plus_benchmarks_iprs_rate1_4,
+    zip_plus_benchmarks_iprs_rate1_4_matrix_shapes
 );
 criterion_main!(benches);
