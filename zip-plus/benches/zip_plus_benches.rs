@@ -126,6 +126,38 @@ type SomeIprsCodeDepth1Base64Rate1_4<Twiddle, const D_PLUS_ONE: usize> = IprsCod
     BinaryPolyWideningMulByScalar<Twiddle>,
 >;
 
+// Implement IprsFusedEncode for IPRS codes when simd feature is enabled
+#[cfg(feature = "simd")]
+mod fused_impl {
+    use super::*;
+    use zip_common::IprsFusedEncode;
+
+    // Macro to implement IprsFusedEncode for all IPRS code types
+    macro_rules! impl_fused_encode {
+        ($code_type:ident) => {
+            impl<const D_PLUS_ONE: usize> IprsFusedEncode<BenchZipPlusTypes<i64, D_PLUS_ONE>>
+                for $code_type<i64, D_PLUS_ONE>
+            {
+                fn encode_fused(
+                    &self,
+                    row: &[<BenchZipPlusTypes<i64, D_PLUS_ONE> as ZipTypes>::Eval],
+                ) -> Vec<<BenchZipPlusTypes<i64, D_PLUS_ONE> as ZipTypes>::Cw> {
+                    IprsCode::encode_fused(self, row)
+                }
+            }
+        };
+    }
+
+    impl_fused_encode!(SomeIprsCodeDepth2);
+    impl_fused_encode!(SomeIprsCodeDepth1Base16);
+    impl_fused_encode!(SomeIprsCodeDepth1Base32);
+    impl_fused_encode!(SomeIprsCodeDepth1Base64);
+    impl_fused_encode!(SomeIprsCodeDepth2Rate1_4);
+    impl_fused_encode!(SomeIprsCodeDepth1Base16Rate1_4);
+    impl_fused_encode!(SomeIprsCodeDepth1Base32Rate1_4);
+    impl_fused_encode!(SomeIprsCodeDepth1Base64Rate1_4);
+}
+
 fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");
     do_bench::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>, UNCHECKED>(&mut group);

@@ -47,5 +47,11 @@ pub mod binary {
     pub use crate::univariate::binary_u64::{
         BinaryU64Poly as BinaryPoly, BinaryU64PolyInnerProduct as BinaryPolyInnerProduct,
         BinaryU64PolyWideningMulByScalar as BinaryPolyWideningMulByScalar,
+        FusedMulAdd as BinaryPolyFusedMulAdd,
     };
 }
+
+// Re-export SIMD-accelerated functions
+pub use dense::add_assign_simd;
+#[cfg(feature = "simd")]
+pub use binary_u64::FusedMulAdd;

@@ -42,6 +42,7 @@ asm = ["zinc-transcript/asm"]
 simd = ["zinc-poly/simd"]
 bench-64 = []
 pntt-timing = []
+unchecked-butterfly = []
 
 [[bench]]
 name = "zip_benches"

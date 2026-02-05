@@ -206,6 +206,24 @@ mod fq {
     pub const MODULUS: u32 = FqConfig::MODULUS.0[0] as u32;
 }
 
+/// Field Fp for p = 12289 = 3 * 2^12 + 1.
+/// This is the smallest prime supporting 4096th roots of unity,
+/// enabling depth-3 configurations with BASE_DIM up to 8.
+mod fq_12289 {
+    #![allow(non_local_definitions)]
+    use ark_ff::{Fp64, MontBackend, MontConfig};
+    #[derive(MontConfig)]
+    #[modulus = "12289"]
+    #[generator = "11"]
+    pub struct FqConfig;
+
+    pub type FqBackend = MontBackend<FqConfig, 1>;
+    pub type Fq = Fp64<FqBackend>;
+
+    #[allow(clippy::cast_possible_truncation)]
+    pub const MODULUS: u32 = FqConfig::MODULUS.0[0] as u32;
+}
+
 impl<const DEPTH: usize> Config for PnttConfigF2_16_1<DEPTH> {
     type Field = fq::Fq;
     const FIELD_MODULUS: u32 = fq::MODULUS;
@@ -300,6 +318,36 @@ pub type PnttConfigF2_16_1_Base32_Depth1_Rate1_4 =
 pub type PnttConfigF2_16_1_Base64_Depth1_Rate1_4 =
     PnttConfigF2_16_1_Rate1_4_Base<64, 1>;
 
+/// Pseudo NTT configuration derived from the field Fp for p = 12289.
+/// This is the smallest prime supporting 4096th roots of unity.
+///
+/// With `BASE_LEN = 4` and `BASE_DIM = 8`, this yields rate 1/2 codes.
+/// At `DEPTH = 3`, this encodes messages of size 2^11.
+#[derive(Clone, Copy)]
+pub struct PnttConfigF12289_Rate1_2<const BASE_LEN: usize, const DEPTH: usize>;
+
+impl<const BASE_LEN: usize, const DEPTH: usize> Config
+    for PnttConfigF12289_Rate1_2<BASE_LEN, DEPTH>
+{
+    type Field = fq_12289::Fq;
+    const FIELD_MODULUS: u32 = fq_12289::MODULUS;
+    const BASE_LEN: usize = BASE_LEN;
+    const BASE_DIM: usize = BASE_LEN * 2;
+    const DEPTH: usize = DEPTH;
+    // 8th roots of unity in F_12289 (normalized to [-p/2, p/2])
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, -4043, 1479, 5146, -1, 4043, -1479, -5146];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq_12289::FqBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+/// Depth-3 configuration for message size $2^{11}$ with rate $\frac{1}{2}$.
+/// Uses the smallest possible base field: $\mathbb{F}_{12289}$ where $12289 = 3 \cdot 2^{12} + 1$.
+pub type PnttConfigF12289_Depth3_Rate1_2 = PnttConfigF12289_Rate1_2<4, 3>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,5 +364,23 @@ mod tests {
     #[test]
     fn check_twiddles() {
         check_twiddles_generic::<PnttConfigF2_16_1<1>>();
+    }
+
+    #[test]
+    fn check_twiddles_f12289() {
+        check_twiddles_generic::<PnttConfigF12289_Depth3_Rate1_2>();
+    }
+
+    #[test]
+    fn check_f12289_depth3_config() {
+        // Verify the configuration parameters
+        type C = PnttConfigF12289_Depth3_Rate1_2;
+        assert_eq!(C::BASE_LEN, 4);
+        assert_eq!(C::BASE_DIM, 8);
+        assert_eq!(C::DEPTH, 3);
+        assert_eq!(C::INPUT_LEN, 2048); // 4 * 8^3 = 2^11
+        assert_eq!(C::OUTPUT_LEN, 4096); // 8 * 8^3 = 2^12
+        assert_eq!(C::FIELD_MODULUS, 12289);
+        // Rate = INPUT_LEN / OUTPUT_LEN = 1/2
     }
 }

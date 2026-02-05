@@ -19,11 +19,15 @@ use std::{
 };
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
 use zinc_transcript::traits::ConstTranscribable;
-use zinc_utils::{from_ref::FromRef, named::Named, projectable_to_field::ProjectableToField};
+use zinc_utils::{cfg_chunks, cfg_chunks_mut, from_ref::FromRef, named::Named, projectable_to_field::ProjectableToField};
+#[cfg(feature = "parallel")]
+use rayon::slice::{ParallelSlice, ParallelSliceMut};
+#[cfg(feature = "parallel")]
+use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use zip_plus::{
     code::LinearCode,
     merkle::MerkleTree,
-    pcs::structs::{ZipPlus, ZipTypes},
+    pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
 };
 
 const INT_LIMBS: usize = U64::LIMBS;
@@ -76,6 +80,7 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     // verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
 }
 
+#[cfg(not(feature = "simd"))]
 pub fn do_bench_iprs_matrices<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where
@@ -85,29 +90,27 @@ pub fn do_bench_iprs_matrices<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_
     Zt::Eval: ProjectableToField<F>,
     Zt::Cw: ProjectableToField<F>,
 {
-    // commit::<Zt, Lc, 13>(group);
-    // commit::<Zt, Lc, 14>(group);
-    // commit::<Zt, Lc, 15>(group);
     encode_rows::<Zt, Lc, 16>(group);
-
-    // encode_single_row::<Zt, Lc, 128>(group);
-    // encode_single_row::<Zt, Lc, 256>(group);
-    // encode_single_row::<Zt, Lc, 512>(group);
-    // encode_single_row::<Zt, Lc, 1024>(group);
-
-    // merkle_root::<Zt, 12>(group);
-    // merkle_root::<Zt, 13>(group);
-    // merkle_root::<Zt, 14>(group);
-    // merkle_root::<Zt, 15>(group);
-    merkle_root::<Zt, 16>(group);
     commit::<Zt, Lc, 16>(group);
-    // commit::<Zt, Lc, 17>(group);
-    // test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
-    // test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
-    // test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15>(group);
-    // test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
-    // test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 17>(group);
+}
 
+#[cfg(feature = "simd")]
+pub fn do_bench_iprs_matrices<Zt: ZipTypes, Lc: LinearCode<Zt> + IprsFusedEncode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
+    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
+    <F as Field>::Inner: FromRef<Zt::Fmod>,
+    Zt::Eval: ProjectableToField<F>,
+    Zt::Cw: ProjectableToField<F>,
+{
+    // Encoding benchmarks - both regular and fused
+    encode_rows::<Zt, Lc, 16>(group);
+    encode_rows_fused::<Zt, Lc, 16>(group);
+
+    // Commit benchmarks - both regular and fused
+    commit::<Zt, Lc, 16>(group);
+    commit_fused::<Zt, Lc, 16>(group);
 }
 
 pub fn do_bench_iprs_matrix_shapes<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(
@@ -150,6 +153,69 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
             })
         },
     );
+}
+
+/// SIMD-optimized encode_rows benchmark using fused multiply-add.
+#[cfg(feature = "simd")]
+pub fn encode_rows_fused<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+    Lc: IprsFusedEncode<Zt>,
+{
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let params = ZipPlus::setup(poly_size, linear_code);
+    let row_len = params.linear_code.row_len();
+    let rows = poly_size / row_len;
+    let codeword_len = params.linear_code.codeword_len();
+
+    group.bench_function(
+        format!(
+            "EncodeRowsFused: matrix={rows}x{row_len}, {} -> {}, poly_size=2^{P}",
+            Zt::Eval::type_name(),
+            Zt::Cw::type_name(),
+            rows = rows,
+            row_len = row_len
+        ),
+        |b| {
+            let mut rng = ThreadRng::default();
+            let poly = DenseMultilinearExtension::<<Zt as ZipTypes>::Eval>::rand(P, &mut rng);
+            b.iter(|| {
+                let cw = encode_rows_fused_inner::<Zt, Lc>(&params, row_len, codeword_len, &poly);
+                black_box(cw)
+            })
+        },
+    );
+}
+
+/// Helper trait for fused encoding.
+#[cfg(feature = "simd")]
+pub trait IprsFusedEncode<Zt: ZipTypes>: LinearCode<Zt> {
+    fn encode_fused(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw>;
+}
+
+#[cfg(feature = "simd")]
+fn encode_rows_fused_inner<Zt: ZipTypes, Lc: LinearCode<Zt> + IprsFusedEncode<Zt>>(
+    pp: &ZipPlusParams<Zt, Lc>,
+    row_len: usize,
+    codeword_len: usize,
+    evals: &[Zt::Eval],
+) -> DenseRowMatrix<Zt::Cw> {
+    use uninit::out_ref::Out;
+
+    let num_rows = evals.len() / row_len;
+    let mut encoded_matrix = DenseRowMatrix::<Zt::Cw>::uninit(num_rows, codeword_len);
+
+    cfg_chunks_mut!(encoded_matrix.data, codeword_len)
+        .zip(cfg_chunks!(evals, row_len))
+        .for_each(|(row, evals)| {
+            let encoded: Vec<Zt::Cw> = pp.linear_code.encode_fused(evals);
+            Out::from(row).copy_from_slice(encoded.as_slice());
+        });
+
+    // Safe because we have just initialized all elements.
+    unsafe { encoded_matrix.init() }
 }
 
 pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>, const ROW_LEN: usize>(
@@ -241,6 +307,47 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
                     let poly = DenseMultilinearExtension::rand(P, &mut rng);
                     let timer = Instant::now();
                     let res = ZipPlus::commit(&params, &poly).expect("Failed to commit");
+                    black_box(res);
+                    total_duration += timer.elapsed();
+                }
+
+                total_duration
+            })
+        },
+    );
+}
+
+/// SIMD-optimized commit benchmark using fused multiply-add.
+#[cfg(feature = "simd")]
+pub fn commit_fused<Zt: ZipTypes, Lc: LinearCode<Zt> + IprsFusedEncode<Zt>, const P: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let params = ZipPlus::setup(poly_size, linear_code);
+    let row_len = params.linear_code.row_len();
+    let rows = poly_size / row_len;
+
+    group.bench_function(
+        format!(
+            "CommitFused: matrix={rows}x{row_len}, Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
+            Zt::Eval::type_name(),
+            Zt::Cw::type_name(),
+            Zt::Comb::type_name(),
+            rows = rows,
+            row_len = row_len
+        ),
+        |b| {
+            b.iter_custom(|iters| {
+                let mut total_duration = Duration::ZERO;
+                for _ in 0..iters {
+                    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+                    let timer = Instant::now();
+                    let res = ZipPlus::commit_fused(&params, &poly, |lc, row| lc.encode_fused(row))
+                        .expect("Failed to commit");
                     black_box(res);
                     total_duration += timer.elapsed();
                 }

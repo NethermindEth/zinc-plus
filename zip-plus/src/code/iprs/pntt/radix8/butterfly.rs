@@ -1,3 +1,5 @@
+use std::ops::AddAssign;
+
 use num_traits::CheckedAdd;
 use zinc_utils::add;
 
@@ -20,6 +22,8 @@ const BUTTERFLY_TABLE: [[usize; 7]; 8] = [
 /// of subresults in `x`. `twiddles[j][i]` is the factor to multiply
 /// `x[j + 1]` by when the butterfly table requests the `i`-th twiddle.
 /// Use `mul_by_twiddle` as a means to multiply `Out` by `Twiddle`.
+///
+/// This version uses CheckedAdd (overflow-checked addition).
 pub(crate) fn apply_radix_8_butterflies<R, Twiddle, M>(
     ys: [&mut R; 8],
     xs: &[R],
@@ -38,4 +42,29 @@ pub(crate) fn apply_radix_8_butterflies<R, Twiddle, M>(
                 },
             )
         });
+}
+
+/// Apply butterfly given by `twiddles` to a slice of subresults in `x`.
+/// 
+/// This is an unchecked version that uses AddAssign instead of CheckedAdd.
+/// It is faster because it skips overflow checking, but should only be used
+/// when overflow is known to be impossible (e.g., when accumulating values
+/// that are known to be bounded).
+#[inline(always)]
+pub(crate) fn apply_radix_8_butterflies_unchecked<R, Twiddle, M>(
+    ys: [&mut R; 8],
+    xs: &[R],
+    twiddles: &[[Twiddle; 8]; 7],
+) where
+    R: Clone + for<'a> AddAssign<&'a R>,
+    M: MulByTwiddle<R, Twiddle, Output = R>,
+{
+    for (y, butterfly_row) in ys.into_iter().zip(BUTTERFLY_TABLE.iter()) {
+        let mut acc = xs[0].clone();
+        for (j_minus_1, (&twiddle_idx, x)) in butterfly_row.iter().zip(&xs[1..]).enumerate() {
+            let twisted = M::mul_by_twiddle(x, &twiddles[j_minus_1][twiddle_idx]);
+            acc += &twisted;
+        }
+        *y = acc;
+    }
 }

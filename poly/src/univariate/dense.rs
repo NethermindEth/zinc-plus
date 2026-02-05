@@ -237,6 +237,116 @@ impl<'a, R: Semiring, const DEGREE_PLUS_ONE: usize> AddAssign<&'a Self>
     }
 }
 
+// ============================================================================
+// SIMD-accelerated operations for DensePolynomial<i64, N>
+// ============================================================================
+
+/// SIMD-accelerated in-place addition for DensePolynomial<i64, N>.
+/// This is a standalone function that can be called directly for performance-critical code.
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[inline(always)]
+pub fn add_assign_simd<const N: usize>(
+    dest: &mut DensePolynomial<i64, N>,
+    src: &DensePolynomial<i64, N>,
+) {
+    unsafe {
+        add_i64_neon::<N>(&mut dest.coeffs, &src.coeffs);
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[inline(always)]
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn add_i64_neon<const N: usize>(a: &mut [i64; N], b: &[i64; N]) {
+    use core::arch::aarch64::*;
+    let mut i = 0;
+    // Process 8 i64s per iteration (4 x int64x2_t) for better ILP
+    while i + 8 <= N {
+        let a_ptr = a.as_mut_ptr().add(i);
+        let b_ptr = b.as_ptr().add(i);
+        
+        let va0 = vld1q_s64(a_ptr);
+        let va1 = vld1q_s64(a_ptr.add(2));
+        let va2 = vld1q_s64(a_ptr.add(4));
+        let va3 = vld1q_s64(a_ptr.add(6));
+        
+        let vb0 = vld1q_s64(b_ptr);
+        let vb1 = vld1q_s64(b_ptr.add(2));
+        let vb2 = vld1q_s64(b_ptr.add(4));
+        let vb3 = vld1q_s64(b_ptr.add(6));
+        
+        vst1q_s64(a_ptr, vaddq_s64(va0, vb0));
+        vst1q_s64(a_ptr.add(2), vaddq_s64(va1, vb1));
+        vst1q_s64(a_ptr.add(4), vaddq_s64(va2, vb2));
+        vst1q_s64(a_ptr.add(6), vaddq_s64(va3, vb3));
+        
+        i += 8;
+    }
+    // Process 2 i64s at a time for remainder
+    while i + 2 <= N {
+        let a_ptr = a.as_mut_ptr().add(i);
+        let b_ptr = b.as_ptr().add(i);
+        let va = vld1q_s64(a_ptr);
+        let vb = vld1q_s64(b_ptr);
+        vst1q_s64(a_ptr, vaddq_s64(va, vb));
+        i += 2;
+    }
+    // Scalar tail
+    #[allow(clippy::arithmetic_side_effects)]
+    while i < N {
+        a[i] += b[i];
+        i += 1;
+    }
+}
+
+/// SIMD-accelerated in-place addition for DensePolynomial<i64, N> on x86_64 with AVX512.
+#[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx512f"))]
+#[inline(always)]
+pub fn add_assign_simd<const N: usize>(
+    dest: &mut DensePolynomial<i64, N>,
+    src: &DensePolynomial<i64, N>,
+) {
+    unsafe {
+        add_i64_avx512::<N>(&mut dest.coeffs, &src.coeffs);
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx512f"))]
+#[inline(always)]
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn add_i64_avx512<const N: usize>(a: &mut [i64; N], b: &[i64; N]) {
+    use core::arch::x86_64::*;
+    let mut i = 0;
+    // Process 8 i64s per iteration (__m512i)
+    while i + 8 <= N {
+        let a_ptr = a.as_mut_ptr().add(i) as *mut __m512i;
+        let b_ptr = b.as_ptr().add(i) as *const __m512i;
+        let va = _mm512_loadu_si512(a_ptr);
+        let vb = _mm512_loadu_si512(b_ptr);
+        _mm512_storeu_si512(a_ptr, _mm512_add_epi64(va, vb));
+        i += 8;
+    }
+    // Scalar tail
+    #[allow(clippy::arithmetic_side_effects)]
+    while i < N {
+        a[i] += b[i];
+        i += 1;
+    }
+}
+
+/// Fallback for non-SIMD platforms - just delegates to standard AddAssign
+#[cfg(not(any(
+    all(feature = "simd", target_arch = "aarch64"),
+    all(feature = "simd", target_arch = "x86_64", target_feature = "avx512f")
+)))]
+#[inline(always)]
+pub fn add_assign_simd<const N: usize>(
+    dest: &mut DensePolynomial<i64, N>,
+    src: &DensePolynomial<i64, N>,
+) {
+    *dest += src;
+}
+
 impl<R: Semiring, const DEGREE_PLUS_ONE: usize> SubAssign for DensePolynomial<R, DEGREE_PLUS_ONE> {
     #[allow(clippy::arithmetic_side_effects)]
     #[inline(always)]

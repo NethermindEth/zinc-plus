@@ -8,6 +8,7 @@ use crate::{
         LinearCode,
         iprs::pntt::radix8::{
             FieldMulByTwiddle, MBSMulByTwiddle, MulByTwiddle, WideningMulByTwiddle,
+            FusedWideningMulByTwiddle,
             params::Config as PnttConfig,
         },
     },
@@ -95,6 +96,46 @@ where
             row,
             &self.pntt_params,
         )
+    }
+}
+
+/// Additional optimized encoding methods for IPRS code.
+#[cfg(feature = "simd")]
+impl<Zt, Config, MT> IprsCode<Zt, Config, MT>
+where
+    Zt: ZipTypes,
+    Config: PnttConfig,
+    Zt::CombR: for<'a> MulByScalar<&'a PnttInt>,
+    Zt::Cw: Default
+        + CheckedAdd
+        + for<'a> MulByScalar<&'a PnttInt>
+        + zinc_poly::univariate::binary_u64::FusedMulAdd<Zt::Eval, PnttInt>,
+    MT: WideningMulByScalar<Zt::Eval, PnttInt, Output = Zt::Cw>,
+{
+    /// Optimized encode using fused multiply-add.
+    /// This version is more efficient as it avoids intermediate allocations
+    /// when computing input * twiddle + accumulator.
+    pub fn encode_fused(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw>
+    where
+        Zt::Eval: Clone + Send + Sync,
+        Zt::Cw: Clone + std::fmt::Debug + Send + Sync + std::iter::Sum + zinc_utils::from_ref::FromRef<Zt::Eval>,
+    {
+        assert_eq!(
+            row.len(),
+            Config::INPUT_LEN,
+            "Input length {} does not match expected row length {}",
+            row.len(),
+            Config::INPUT_LEN
+        );
+
+        pntt::radix8::pntt_fused::<
+            _,
+            _,
+            _,
+            WideningMulByTwiddle<MT>,
+            FusedWideningMulByTwiddle<MT>,
+            MBSMulByTwiddle<CHECKED>,
+        >(row, &self.pntt_params)
     }
 }
 

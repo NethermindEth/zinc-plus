@@ -1,17 +1,22 @@
 //! Pseudo number theoretic transform of radix 8.
 
-#[macro_use]
 mod butterfly;
 mod mul_by_twiddle;
 mod octet_reversal;
 
 pub mod params;
 
+#[cfg(not(feature = "unchecked-butterfly"))]
+use butterfly::apply_radix_8_butterflies;
+#[cfg(feature = "unchecked-butterfly")]
+use butterfly::apply_radix_8_butterflies_unchecked;
 use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::{array, fmt::Debug};
+#[cfg(feature = "unchecked-butterfly")]
+use std::ops::AddAssign;
 use zinc_utils::{add, cfg_chunks_mut, cfg_into_iter, from_ref::FromRef};
 
 #[cfg(feature = "pntt-timing")]
@@ -23,7 +28,6 @@ static BASE_LAYER_NANOS: AtomicU64 = AtomicU64::new(0);
 static BUTTERFLY_NANOS: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "pntt-timing")]
 static PNTT_CALL_COUNT: AtomicU64 = AtomicU64::new(0);
-
 /// Reset timing counters. Call before starting a benchmark.
 #[cfg(feature = "pntt-timing")]
 pub fn reset_timing() {
@@ -53,14 +57,47 @@ pub fn print_timing() {
     println!("==============================\n");
 }
 
-use butterfly::*;
 use octet_reversal::*;
 use params::*;
 
 pub(crate) use mul_by_twiddle::*;
 
 /// The main entrypoint of the radix-8 pseudo NTT algorithm.
+#[cfg(not(feature = "unchecked-butterfly"))]
 pub(crate) fn pntt<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+) -> Vec<Out>
+where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug,
+    MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
+    MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
+{
+    pntt_impl::<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(input, params)
+}
+
+/// The main entrypoint of the radix-8 pseudo NTT algorithm.
+/// This version uses unchecked addition in butterflies for better performance.
+#[cfg(feature = "unchecked-butterfly")]
+pub(crate) fn pntt<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+) -> Vec<Out>
+where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug + for<'a> AddAssign<&'a Out>,
+    MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
+    MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
+{
+    pntt_impl::<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(input, params)
+}
+
+/// Implementation of the radix-8 pseudo NTT algorithm.
+#[cfg(not(feature = "unchecked-butterfly"))]
+fn pntt_impl<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
     input: &[In],
     params: &Radix8PnttParams<C>,
 ) -> Vec<Out>
@@ -107,9 +144,199 @@ where
     output
 }
 
+/// Implementation of the radix-8 pseudo NTT algorithm with unchecked butterflies.
+#[cfg(feature = "unchecked-butterfly")]
+fn pntt_impl<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+) -> Vec<Out>
+where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug + for<'a> AddAssign<&'a Out>,
+    MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
+    MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
+{
+    assert_eq!(
+        C::INPUT_LEN,
+        input.len(),
+        "PNTT expects length = {}, got {}",
+        C::INPUT_LEN,
+        input.len()
+    );
+
+    #[cfg(feature = "pntt-timing")]
+    PNTT_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    #[cfg(feature = "pntt-timing")]
+    let base_start = std::time::Instant::now();
+    
+    let mut output = base_multiply_into_output::<_, _, _, MulInByTwiddle>(input, params);
+
+    #[cfg(feature = "pntt-timing")]
+    {
+        let base_elapsed = base_start.elapsed().as_nanos() as u64;
+        BASE_LAYER_NANOS.fetch_add(base_elapsed, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "pntt-timing")]
+    let butterfly_start = std::time::Instant::now();
+    
+    combine_stages::<_, _, MulOutByTwiddle>(&mut output, params);
+
+    #[cfg(feature = "pntt-timing")]
+    {
+        let butterfly_elapsed = butterfly_start.elapsed().as_nanos() as u64;
+        BUTTERFLY_NANOS.fetch_add(butterfly_elapsed, Ordering::Relaxed);
+    }
+
+    output
+}
+
+/// Optimized PNTT using fused multiply-add for the base layer.
+/// This version avoids intermediate allocations when multiplying inputs by twiddles.
+#[cfg(not(feature = "unchecked-butterfly"))]
+#[allow(dead_code)]
+pub(crate) fn pntt_fused<In, Out, C, MulInByTwiddle, FusedMulAdd, MulOutByTwiddle>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+) -> Vec<Out>
+where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: Default + CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug,
+    MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
+    FusedMulAdd: FusedMulAddByTwiddle<In, PnttInt, Out>,
+    MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
+{
+    pntt_fused_impl::<In, Out, C, MulInByTwiddle, FusedMulAdd, MulOutByTwiddle>(input, params)
+}
+
+/// Optimized PNTT using fused multiply-add for the base layer.
+/// This version uses unchecked butterflies for better performance.
+#[cfg(feature = "unchecked-butterfly")]
+#[allow(dead_code)]
+pub(crate) fn pntt_fused<In, Out, C, MulInByTwiddle, FusedMulAdd, MulOutByTwiddle>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+) -> Vec<Out>
+where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: Default + CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug + for<'a> AddAssign<&'a Out>,
+    MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
+    FusedMulAdd: FusedMulAddByTwiddle<In, PnttInt, Out>,
+    MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
+{
+    pntt_fused_impl::<In, Out, C, MulInByTwiddle, FusedMulAdd, MulOutByTwiddle>(input, params)
+}
+
+#[cfg(not(feature = "unchecked-butterfly"))]
+fn pntt_fused_impl<In, Out, C, MulInByTwiddle, FusedMulAdd, MulOutByTwiddle>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+) -> Vec<Out>
+where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: Default + CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug,
+    MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
+    FusedMulAdd: FusedMulAddByTwiddle<In, PnttInt, Out>,
+    MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
+{
+    assert_eq!(
+        C::INPUT_LEN,
+        input.len(),
+        "PNTT expects length = {}, got {}",
+        C::INPUT_LEN,
+        input.len()
+    );
+
+    #[cfg(feature = "pntt-timing")]
+    PNTT_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    #[cfg(feature = "pntt-timing")]
+    let base_start = std::time::Instant::now();
+    
+    // Use the fused version for the base layer
+    let mut output =
+        base_multiply_into_output_fused::<_, _, _, MulInByTwiddle, FusedMulAdd>(input, params);
+
+    #[cfg(feature = "pntt-timing")]
+    {
+        let base_elapsed = base_start.elapsed().as_nanos() as u64;
+        BASE_LAYER_NANOS.fetch_add(base_elapsed, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "pntt-timing")]
+    let butterfly_start = std::time::Instant::now();
+    
+    combine_stages::<_, _, MulOutByTwiddle>(&mut output, params);
+
+    #[cfg(feature = "pntt-timing")]
+    {
+        let butterfly_elapsed = butterfly_start.elapsed().as_nanos() as u64;
+        BUTTERFLY_NANOS.fetch_add(butterfly_elapsed, Ordering::Relaxed);
+    }
+
+    output
+}
+
+#[cfg(feature = "unchecked-butterfly")]
+fn pntt_fused_impl<In, Out, C, MulInByTwiddle, FusedMulAdd, MulOutByTwiddle>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+) -> Vec<Out>
+where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: Default + CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug + for<'a> AddAssign<&'a Out>,
+    MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
+    FusedMulAdd: FusedMulAddByTwiddle<In, PnttInt, Out>,
+    MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
+{
+    assert_eq!(
+        C::INPUT_LEN,
+        input.len(),
+        "PNTT expects length = {}, got {}",
+        C::INPUT_LEN,
+        input.len()
+    );
+
+    #[cfg(feature = "pntt-timing")]
+    PNTT_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    #[cfg(feature = "pntt-timing")]
+    let base_start = std::time::Instant::now();
+    
+    // Use the fused version for the base layer
+    let mut output =
+        base_multiply_into_output_fused::<_, _, _, MulInByTwiddle, FusedMulAdd>(input, params);
+
+    #[cfg(feature = "pntt-timing")]
+    {
+        let base_elapsed = base_start.elapsed().as_nanos() as u64;
+        BASE_LAYER_NANOS.fetch_add(base_elapsed, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "pntt-timing")]
+    let butterfly_start = std::time::Instant::now();
+    
+    combine_stages::<_, _, MulOutByTwiddle>(&mut output, params);
+
+    #[cfg(feature = "pntt-timing")]
+    {
+        let butterfly_elapsed = butterfly_start.elapsed().as_nanos() as u64;
+        BUTTERFLY_NANOS.fetch_add(butterfly_elapsed, Ordering::Relaxed);
+    }
+
+    output
+}
+
 /// Performs the butterfly steps of the radix-8 pseudo NTT algorithm.
 /// Assumes `out` contains the result of multiplications of the base chunks
 /// with the `base_matrix`.
+#[cfg(not(feature = "unchecked-butterfly"))]
 #[allow(clippy::arithmetic_side_effects)]
 fn combine_stages<R, C, M>(out: &mut [R], params: &Radix8PnttParams<C>)
 where
@@ -161,6 +388,42 @@ where
     }
 }
 
+/// Performs the butterfly steps of the radix-8 pseudo NTT algorithm.
+/// This version uses unchecked addition (no overflow checks) for better performance.
+/// Use only when overflow is guaranteed not to occur.
+#[cfg(feature = "unchecked-butterfly")]
+#[allow(clippy::arithmetic_side_effects)]
+fn combine_stages<R, C, M>(out: &mut [R], params: &Radix8PnttParams<C>)
+where
+    C: Config,
+    R: Clone + Send + Sync + Debug + for<'a> AddAssign<&'a R>,
+    M: MulByTwiddle<R, PnttInt, Output = R>,
+{
+    for k in 0..C::DEPTH {
+        let sub_chunk_length = C::BASE_DIM * (1 << (3 * k));
+        let layer_twiddles = &params.butterfly_twiddles[k];
+        debug_assert_eq!(layer_twiddles.len(), sub_chunk_length);
+
+        cfg_chunks_mut!(out, 8 * sub_chunk_length).for_each(|chunk: &mut [R]| {
+            for i in 0..sub_chunk_length {
+                let subresults: [R; 8] =
+                    array::from_fn(|j| chunk[j * sub_chunk_length + i].clone());
+
+                #[allow(unused_mut)]
+                let ys: [&mut R; 8] = chunk
+                    .chunks_mut(sub_chunk_length)
+                    .map(|mut subchunk| &mut subchunk[i])
+                    .collect_vec()
+                    .try_into()
+                    .expect("We are guaranteed to have the right length here");
+
+                // Perform unchecked butterflies (no overflow checking).
+                apply_radix_8_butterflies_unchecked::<_, _, M>(ys, &subresults, &layer_twiddles[i]);
+            }
+        });
+    }
+}
+
 /// Allocates the output vector and performs base layer multiplications.
 #[allow(clippy::arithmetic_side_effects)]
 fn base_multiply_into_output<In, Out, C, M>(input: &[In], params: &Radix8PnttParams<C>) -> Vec<Out>
@@ -196,6 +459,40 @@ where
                     add!(acc, &term)
                 },
             )
+        })
+        .collect()
+}
+
+/// Optimized base layer multiplication using fused multiply-add.
+/// This version avoids intermediate allocations by computing acc += input * twiddle directly.
+#[allow(clippy::arithmetic_side_effects, dead_code)]
+fn base_multiply_into_output_fused<In, Out, C, M, F>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+) -> Vec<Out>
+where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: Clone + Default + FromRef<In> + Send + Sync,
+    M: MulByTwiddle<In, PnttInt, Output = Out>,
+    F: FusedMulAddByTwiddle<In, PnttInt, Out>,
+{
+    cfg_into_iter!(0..C::OUTPUT_LEN)
+        .map(|i| {
+            let chunk = i >> C::BASE_DIM_LOG2; // i / C::BASE_DIM
+            let row = i & C::BASE_DIM_MASK; // i % C::BASE_DIM
+            let oct_rev_chunk = octet_reversal(chunk, C::DEPTH);
+
+            // Start with the first column (all 1's in Vandermonde)
+            let mut acc = Out::from_ref(&input[oct_rev_chunk]);
+
+            // Use fused multiply-add for remaining columns
+            for (col, bm_row_col) in params.base_matrix[row][1..].iter().enumerate() {
+                let input_idx = oct_rev_chunk | ((col + 1) << (3 * C::DEPTH));
+                F::fused_mul_add(&mut acc, &input[input_idx], bm_row_col);
+            }
+
+            acc
         })
         .collect()
 }
@@ -316,5 +613,73 @@ mod tests {
         pntt_against_arkworks_generic::<PnttConfigF2_16_1<1>>();
         pntt_against_arkworks_generic::<PnttConfigF2_16_1<2>>();
         pntt_against_arkworks_generic::<PnttConfigF2_16_1<3>>();
+    }
+
+    /// Test that pntt_fused produces the same results as pntt.
+    #[cfg(feature = "simd")]
+    #[test]
+    fn pntt_fused_matches_pntt() {
+        use super::{FusedWideningMulByTwiddle, WideningMulByTwiddle, pntt_fused};
+        use zinc_poly::univariate::binary_u64::{BinaryU64Poly, BinaryU64PolyWideningMulByScalar};
+        use zinc_poly::univariate::dense::DensePolynomial;
+        use rand::Rng;
+
+        // Use concrete types matching the IPRS encode: BinaryU64Poly<32> -> DensePolynomial<i64, 32>
+        type EvalPoly = BinaryU64Poly<32>;
+        type CwPoly = DensePolynomial<i64, 32>;
+        type MT = BinaryU64PolyWideningMulByScalar<i64>;
+
+        fn test_fused_matches<C: Config>()
+        where
+            C::Field: From<PnttInt>,
+            CwPoly: for<'a> MulByScalar<&'a PnttInt>,
+        {
+            // Create random binary input polynomials
+            let mut rng = rand::rng();
+            let input: Vec<EvalPoly> = (0..C::INPUT_LEN)
+                .map(|_| {
+                    // Generate random u32 for 32-coefficient binary polynomial
+                    let inner: u32 = rng.random();
+                    EvalPoly::from(inner)
+                })
+                .collect_vec();
+
+            let params = Radix8PnttParams::<C>::new();
+
+            // Regular pntt
+            let regular_result: Vec<CwPoly> = pntt::<
+                _,
+                _,
+                _,
+                WideningMulByTwiddle<MT>,
+                MBSMulByTwiddle<CHECKED>,
+            >(&input, &params);
+
+            // Fused pntt
+            let fused_result: Vec<CwPoly> = pntt_fused::<
+                _,
+                _,
+                _,
+                WideningMulByTwiddle<MT>,
+                FusedWideningMulByTwiddle<MT>,
+                MBSMulByTwiddle<CHECKED>,
+            >(&input, &params);
+
+            // Results should be identical
+            assert_eq!(regular_result.len(), fused_result.len());
+            for (i, (r, f)) in regular_result.iter().zip(fused_result.iter()).enumerate() {
+                assert_eq!(
+                    r.coeffs.as_slice(),
+                    f.coeffs.as_slice(),
+                    "Mismatch at output index {}: regular={:?}, fused={:?}",
+                    i,
+                    r.coeffs.as_slice(),
+                    f.coeffs.as_slice()
+                );
+            }
+        }
+
+        test_fused_matches::<PnttConfigF2_16_1<1>>();
+        test_fused_matches::<PnttConfigF2_16_1<2>>();
     }
 }
