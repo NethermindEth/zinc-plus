@@ -76,7 +76,6 @@ type SomeIprsCodeDepth2<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
 
 fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");
-
     do_bench::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>, UNCHECKED>(&mut group);
     do_bench::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>, UNCHECKED>(&mut group);
 
@@ -96,5 +95,9 @@ fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, zip_plus_benchmarks_raa, zip_plus_benchmarks_iprs);
+criterion_group!(
+    benches,
+    zip_plus_benchmarks_raa,
+    zip_plus_benchmarks_iprs
+);
 criterion_main!(benches);
