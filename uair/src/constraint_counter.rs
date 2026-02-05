@@ -34,4 +34,8 @@ impl ConstraintBuilder for ConstraintCounter {
     fn assert_in_ideal(&mut self, _expr: Self::Expr, _ideal_generator: &Self::Ideal) {
         self.0 += 1;
     }
+
+    fn assert_zero(&mut self, _expr: Self::Expr) {
+        self.0 += 1;
+    }
 }

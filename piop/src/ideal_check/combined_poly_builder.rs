@@ -181,6 +181,10 @@ impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
     fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {
         self.combined_evaluations.push(expr);
     }
+
+    fn assert_zero(&mut self, expr: Self::Expr) {
+        self.combined_evaluations.push(expr);
+    }
 }
 
 impl<F: PrimeField> CombinedPolyRowBuilder<F> {
