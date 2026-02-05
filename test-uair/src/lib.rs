@@ -13,9 +13,7 @@ use zinc_poly::{
         dynamic::over_fixed_semiring::DynamicPolynomialFS, ideal::DegreeOneIdeal,
     },
 };
-use zinc_uair::{
-    ConstraintBuilder, Uair,
-};
+use zinc_uair::{ConstraintBuilder, Uair};
 use zinc_utils::from_ref::FromRef;
 
 pub use generate_witness::*;

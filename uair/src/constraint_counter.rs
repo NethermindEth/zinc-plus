@@ -35,6 +35,8 @@ impl ConstraintBuilder for ConstraintCounter {
         self.0 += 1;
     }
 
+    #[allow(clippy::arithmetic_side_effects)]
+    #[inline(always)]
     fn assert_zero(&mut self, _expr: Self::Expr) {
         self.0 += 1;
     }

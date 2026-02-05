@@ -21,9 +21,8 @@ use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     Uair,
     ideal::{Ideal, IdealCheck},
-    ideal_collector::collect_ideals,
+    ideal_collector::{CollectedIdeal, collect_ideals},
 };
-use zinc_uair::ideal_collector::CollectedIdeal;
 use zinc_utils::cfg_iter;
 
 pub type Result<T, R, I> = std::result::Result<T, IdealCheckError<R, I>>;
@@ -308,7 +307,7 @@ mod tests {
             num_vars,
             |ideal_over_ring| {
                 ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(&i, &field_cfg))
-            }
+            },
         );
         test_successful_verification_generic::<TestUairSimpleMultiplication, _, _, 32>(
             num_vars,

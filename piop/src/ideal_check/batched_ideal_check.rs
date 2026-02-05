@@ -8,7 +8,7 @@ use zinc_utils::cfg_iter;
 /// of elements `values`. Returns an error if the
 /// lengths mismatch or if any of the `values`
 /// does not belong to the corresponding ideal.
-pub fn batched_ideal_check<I: Ideal + IdealCheck<R>, R: Clone  + Send + Sync>(
+pub fn batched_ideal_check<I: Ideal + IdealCheck<R>, R: Clone + Send + Sync>(
     ideals: &[I],
     values: &[R],
 ) -> Result<(), BatchedIdealCheckError<R, I>> {

@@ -6,7 +6,6 @@ pub mod ideal;
 pub mod ideal_collector;
 
 use crypto_primitives::Semiring;
-use num_traits::Zero;
 use zinc_utils::{UNCHECKED, from_ref::FromRef, mul_by_scalar::MulByScalar};
 
 use crate::ideal::{Ideal, IdealCheck};
@@ -18,7 +17,7 @@ pub trait ConstraintBuilder {
     /// It is opaque from the PoV of an AIR apart from
     /// the fact that arithmetic operations are available on it
     /// and one can check if an expression is in an ideal.
-    type Expr: Semiring + Zero;
+    type Expr: Semiring;
     /// The type of ideals used by the constraint builder.
     type Ideal: Ideal + IdealCheck<Self::Expr>;
 

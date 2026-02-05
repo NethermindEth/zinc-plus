@@ -1,7 +1,9 @@
 use crypto_primitives::{FixedSemiring, FromWithConfig, PrimeField, Semiring};
 use num_traits::Zero;
-use zinc_uair::ideal::{Ideal, IdealCheck};
-use zinc_uair::ideal_collector::CollectedIdeal;
+use zinc_uair::{
+    ideal::{Ideal, IdealCheck},
+    ideal_collector::CollectedIdeal,
+};
 use zinc_utils::from_ref::FromRef;
 
 use crate::{EvaluatablePolynomial, univariate::dynamic::over_field::DynamicPolynomialF};

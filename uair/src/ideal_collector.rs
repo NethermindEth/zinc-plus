@@ -67,7 +67,9 @@ pub struct CollectedIdeal<I: Ideal> {
 
 impl<I: Ideal> CollectedIdeal<I> {
     pub fn zero() -> Self {
-        CollectedIdeal { ideal_or_zero: None }
+        CollectedIdeal {
+            ideal_or_zero: None,
+        }
     }
 
     pub fn map<I2: Ideal>(&self, f: impl FnOnce(&I) -> I2) -> CollectedIdeal<I2> {
@@ -80,8 +82,7 @@ impl<I: Ideal> CollectedIdeal<I> {
     }
 }
 
-impl<I: Ideal> Ideal for CollectedIdeal<I> {
-}
+impl<I: Ideal> Ideal for CollectedIdeal<I> {}
 
 impl<I: Ideal> FromRef<CollectedIdeal<I>> for CollectedIdeal<I> {
     fn from_ref(value: &CollectedIdeal<I>) -> Self {
@@ -91,7 +92,9 @@ impl<I: Ideal> FromRef<CollectedIdeal<I>> for CollectedIdeal<I> {
 
 impl<I: Ideal> FromRef<I> for CollectedIdeal<I> {
     fn from_ref(value: &I) -> Self {
-        Self { ideal_or_zero: Some(value.clone()) }
+        Self {
+            ideal_or_zero: Some(value.clone()),
+        }
     }
 }
 
