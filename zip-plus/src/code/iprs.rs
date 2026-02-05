@@ -1,5 +1,8 @@
 mod pntt;
 
+#[cfg(feature = "pntt-timing")]
+pub use pntt::radix8::{reset_timing, print_timing};
+
 use crate::{
     code::{
         LinearCode,

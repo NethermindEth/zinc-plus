@@ -41,6 +41,7 @@ parallel = ["dep:rayon", "zinc-utils/parallel", "zinc-poly/parallel", "ark-ff/pa
 asm = ["zinc-transcript/asm"]
 simd = ["zinc-poly/simd"]
 bench-64 = []
+pntt-timing = []
 
 [[bench]]
 name = "zip_benches"

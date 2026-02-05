@@ -14,6 +14,45 @@ use rayon::prelude::*;
 use std::{array, fmt::Debug};
 use zinc_utils::{add, cfg_chunks_mut, cfg_into_iter, from_ref::FromRef};
 
+#[cfg(feature = "pntt-timing")]
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(feature = "pntt-timing")]
+static BASE_LAYER_NANOS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "pntt-timing")]
+static BUTTERFLY_NANOS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "pntt-timing")]
+static PNTT_CALL_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Reset timing counters. Call before starting a benchmark.
+#[cfg(feature = "pntt-timing")]
+pub fn reset_timing() {
+    BASE_LAYER_NANOS.store(0, Ordering::Relaxed);
+    BUTTERFLY_NANOS.store(0, Ordering::Relaxed);
+    PNTT_CALL_COUNT.store(0, Ordering::Relaxed);
+}
+
+/// Print timing statistics.
+#[cfg(feature = "pntt-timing")]
+pub fn print_timing() {
+    let base_ns = BASE_LAYER_NANOS.load(Ordering::Relaxed);
+    let butterfly_ns = BUTTERFLY_NANOS.load(Ordering::Relaxed);
+    let calls = PNTT_CALL_COUNT.load(Ordering::Relaxed);
+    let total_ns = base_ns + butterfly_ns;
+    
+    println!("\n=== PNTT Timing Statistics ===");
+    println!("Total PNTT calls: {}", calls);
+    println!("Base layer:   {:>10.3} ms ({:>5.1}%)", base_ns as f64 / 1_000_000.0, 100.0 * base_ns as f64 / total_ns as f64);
+    println!("Butterfly:    {:>10.3} ms ({:>5.1}%)", butterfly_ns as f64 / 1_000_000.0, 100.0 * butterfly_ns as f64 / total_ns as f64);
+    println!("Total:        {:>10.3} ms", total_ns as f64 / 1_000_000.0);
+    if calls > 0 {
+        println!("Avg per call: {:>10.3} ms", total_ns as f64 / 1_000_000.0 / calls as f64);
+        println!("  Base layer: {:>10.3} µs", base_ns as f64 / 1_000.0 / calls as f64);
+        println!("  Butterfly:  {:>10.3} µs", butterfly_ns as f64 / 1_000.0 / calls as f64);
+    }
+    println!("==============================\n");
+}
+
 use butterfly::*;
 use octet_reversal::*;
 use params::*;
@@ -40,9 +79,30 @@ where
         input.len()
     );
 
+    #[cfg(feature = "pntt-timing")]
+    PNTT_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    #[cfg(feature = "pntt-timing")]
+    let base_start = std::time::Instant::now();
+    
     let mut output = base_multiply_into_output::<_, _, _, MulInByTwiddle>(input, params);
 
+    #[cfg(feature = "pntt-timing")]
+    {
+        let base_elapsed = base_start.elapsed().as_nanos() as u64;
+        BASE_LAYER_NANOS.fetch_add(base_elapsed, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "pntt-timing")]
+    let butterfly_start = std::time::Instant::now();
+    
     combine_stages::<_, _, MulOutByTwiddle>(&mut output, params);
+
+    #[cfg(feature = "pntt-timing")]
+    {
+        let butterfly_elapsed = butterfly_start.elapsed().as_nanos() as u64;
+        BUTTERFLY_NANOS.fetch_add(butterfly_elapsed, Ordering::Relaxed);
+    }
 
     output
 }
