@@ -53,7 +53,7 @@ impl RaaConfig for TestRaaConfig {
 
 pub struct TestZipTypes<const N: usize, const K: usize, const M: usize> {}
 impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N, K, M> {
-    const NUM_COLUMN_OPENINGS: usize = 650;
+    const NUM_COLUMN_OPENINGS: usize = 200;
     type Eval = Int<N>;
     type Cw = Int<K>;
     type Fmod = Uint<K>;
@@ -71,7 +71,7 @@ pub struct TestPolyZipTypes<const K: usize, const M: usize, const DEGREE_PLUS_ON
 impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
     for TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>
 {
-    const NUM_COLUMN_OPENINGS: usize = 650;
+    const NUM_COLUMN_OPENINGS: usize = 200;
     type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
     type Cw = DensePolynomial<i32, DEGREE_PLUS_ONE>;
     type Fmod = Uint<K>;
