@@ -21,7 +21,7 @@ use crypto_primitives::{
 };
 use zip_plus::{
     code::{
-        iprs::{IprsCode, PnttConfigF2_16_1_Depth2_Rate1_2},
+        iprs::{IprsCode, PnttConfigF2_16_1_Depth2_Rate1_2, PnttConfigF2_16_1_Depth2_Rate1_4},
         raa::{RaaCode, RaaConfig},
     },
     pcs::structs::ZipTypes,
@@ -74,10 +74,17 @@ type SomeIprsCodeDepth2<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
     BinaryPolyWideningMulByScalar<Twiddle>,
 >;
 
+type SomeIprsCodeDepth2Rate1_4<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Depth2_Rate1_4,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
 fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");
     do_bench::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>, UNCHECKED>(&mut group);
-    do_bench::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>, UNCHECKED>(&mut group);
+    // Skipped 64-bit benchmarks.
+    // do_bench::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>, UNCHECKED>(&mut group);
 
     group.finish();
 }
@@ -88,9 +95,29 @@ fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     do_bench_iprs_matrices::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeDepth2<i64, 32>, UNCHECKED>(
         &mut group,
     );
-    do_bench_iprs_matrices::<BenchZipPlusTypes<i64, 64>, SomeIprsCodeDepth2<i64, 64>, UNCHECKED>(
-        &mut group,
-    );
+    // Skipped 64-bit benchmarks.
+    // do_bench_iprs_matrices::<BenchZipPlusTypes<i64, 64>, SomeIprsCodeDepth2<i64, 64>, UNCHECKED>(
+    //     &mut group,
+    // );
+
+    group.finish();
+}
+
+fn zip_plus_benchmarks_iprs_rate1_4(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip+ IPRS rate1_4");
+
+    do_bench_iprs_matrices::<
+        BenchZipPlusTypes<i64, 32>,
+        SomeIprsCodeDepth2Rate1_4<i64, 32>,
+        UNCHECKED,
+    >(&mut group);
+
+    // Skipped 64-bit benchmarks.
+    // do_bench_iprs_matrices::<
+    //     BenchZipPlusTypes<i64, 64>,
+    //     SomeIprsCodeDepth2Rate1_4<i64, 64>,
+    //     UNCHECKED,
+    // >(&mut group);
 
     group.finish();
 }
@@ -98,6 +125,7 @@ fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
 criterion_group!(
     benches,
     zip_plus_benchmarks_raa,
-    zip_plus_benchmarks_iprs
+    zip_plus_benchmarks_iprs,
+    zip_plus_benchmarks_iprs_rate1_4
 );
 criterion_main!(benches);

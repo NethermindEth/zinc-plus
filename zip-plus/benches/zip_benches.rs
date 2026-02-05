@@ -13,7 +13,7 @@ use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_uint::Uint};
 use zinc_utils::UNCHECKED;
 use zip_plus::{
     code::{
-        iprs::{IprsCode, PnttConfigF2_16_1_Depth2_Rate1_2},
+        iprs::{IprsCode, PnttConfigF2_16_1_Depth2_Rate1_2, PnttConfigF2_16_1_Depth2_Rate1_4},
         raa::{RaaCode, RaaConfig},
     },
     pcs::structs::ZipTypes,
@@ -60,6 +60,8 @@ impl WideningMulByScalar<i32, i64> for I32WideningMulByScalar {
 }
 
 type IprsCodeDepth2 = IprsCode<BenchZipTypes, PnttConfigF2_16_1_Depth2_Rate1_2, I32WideningMulByScalar>;
+type IprsCodeDepth2Rate1_4 =
+    IprsCode<BenchZipTypes, PnttConfigF2_16_1_Depth2_Rate1_4, I32WideningMulByScalar>;
 
 fn zip_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");
@@ -73,5 +75,11 @@ fn zip_benchmarks_iprs(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, zip_benchmarks, zip_benchmarks_iprs);
+fn zip_benchmarks_iprs_rate1_4(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip IPRS rate1_4");
+    do_bench_iprs_matrices::<BenchZipTypes, IprsCodeDepth2Rate1_4, UNCHECKED>(&mut group);
+    group.finish();
+}
+
+criterion_group!(benches, zip_benchmarks, zip_benchmarks_iprs, zip_benchmarks_iprs_rate1_4);
 criterion_main!(benches);
