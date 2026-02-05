@@ -90,8 +90,15 @@ pub fn do_bench_iprs_matrices<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_
     Zt::Eval: ProjectableToField<F>,
     Zt::Cw: ProjectableToField<F>,
 {
-    encode_rows::<Zt, Lc, 16>(group);
+
+    commit::<Zt, Lc, 13>(group);
+    commit::<Zt, Lc, 14>(group);
+    commit::<Zt, Lc, 15>(group);
     commit::<Zt, Lc, 16>(group);
+    commit::<Zt, Lc, 17>(group);
+    // test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
+    // evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
+    // verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
 }
 
 #[cfg(feature = "simd")]
