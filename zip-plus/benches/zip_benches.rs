@@ -13,7 +13,17 @@ use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_uint::Uint};
 use zinc_utils::UNCHECKED;
 use zip_plus::{
     code::{
-        iprs::{IprsCode, PnttConfigF2_16_1_Depth2_Rate1_2, PnttConfigF2_16_1_Depth2_Rate1_4},
+        iprs::{
+            IprsCode,
+            PnttConfigF2_16_1_Base16_Depth1_Rate1_2,
+            PnttConfigF2_16_1_Base16_Depth1_Rate1_4,
+            PnttConfigF2_16_1_Base32_Depth1_Rate1_2,
+            PnttConfigF2_16_1_Base32_Depth1_Rate1_4,
+            PnttConfigF2_16_1_Base64_Depth1_Rate1_2,
+            PnttConfigF2_16_1_Base64_Depth1_Rate1_4,
+            PnttConfigF2_16_1_Depth2_Rate1_2,
+            PnttConfigF2_16_1_Depth2_Rate1_4,
+        },
         raa::{RaaCode, RaaConfig},
     },
     pcs::structs::ZipTypes,
@@ -63,6 +73,20 @@ type IprsCodeDepth2 = IprsCode<BenchZipTypes, PnttConfigF2_16_1_Depth2_Rate1_2, 
 type IprsCodeDepth2Rate1_4 =
     IprsCode<BenchZipTypes, PnttConfigF2_16_1_Depth2_Rate1_4, I32WideningMulByScalar>;
 
+type IprsCodeDepth1Base16 =
+    IprsCode<BenchZipTypes, PnttConfigF2_16_1_Base16_Depth1_Rate1_2, I32WideningMulByScalar>;
+type IprsCodeDepth1Base32 =
+    IprsCode<BenchZipTypes, PnttConfigF2_16_1_Base32_Depth1_Rate1_2, I32WideningMulByScalar>;
+type IprsCodeDepth1Base64 =
+    IprsCode<BenchZipTypes, PnttConfigF2_16_1_Base64_Depth1_Rate1_2, I32WideningMulByScalar>;
+
+type IprsCodeDepth1Base16Rate1_4 =
+    IprsCode<BenchZipTypes, PnttConfigF2_16_1_Base16_Depth1_Rate1_4, I32WideningMulByScalar>;
+type IprsCodeDepth1Base32Rate1_4 =
+    IprsCode<BenchZipTypes, PnttConfigF2_16_1_Base32_Depth1_Rate1_4, I32WideningMulByScalar>;
+type IprsCodeDepth1Base64Rate1_4 =
+    IprsCode<BenchZipTypes, PnttConfigF2_16_1_Base64_Depth1_Rate1_4, I32WideningMulByScalar>;
+
 fn zip_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");
     do_bench::<BenchZipTypes, Code, UNCHECKED>(&mut group);
@@ -75,11 +99,40 @@ fn zip_benchmarks_iprs(c: &mut Criterion) {
     group.finish();
 }
 
+fn zip_benchmarks_iprs_matrix_shapes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip IPRS Matrix Shapes");
+    do_bench_iprs_matrix_shapes::<BenchZipTypes, IprsCodeDepth1Base16, UNCHECKED>(&mut group);
+    do_bench_iprs_matrix_shapes::<BenchZipTypes, IprsCodeDepth1Base32, UNCHECKED>(&mut group);
+    do_bench_iprs_matrix_shapes::<BenchZipTypes, IprsCodeDepth1Base64, UNCHECKED>(&mut group);
+    group.finish();
+}
+
 fn zip_benchmarks_iprs_rate1_4(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip IPRS rate1_4");
     do_bench_iprs_matrices::<BenchZipTypes, IprsCodeDepth2Rate1_4, UNCHECKED>(&mut group);
     group.finish();
 }
 
-criterion_group!(benches, zip_benchmarks, zip_benchmarks_iprs, zip_benchmarks_iprs_rate1_4);
+fn zip_benchmarks_iprs_rate1_4_matrix_shapes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip IPRS rate1_4 Matrix Shapes");
+    do_bench_iprs_matrix_shapes::<BenchZipTypes, IprsCodeDepth1Base16Rate1_4, UNCHECKED>(
+        &mut group,
+    );
+    do_bench_iprs_matrix_shapes::<BenchZipTypes, IprsCodeDepth1Base32Rate1_4, UNCHECKED>(
+        &mut group,
+    );
+    do_bench_iprs_matrix_shapes::<BenchZipTypes, IprsCodeDepth1Base64Rate1_4, UNCHECKED>(
+        &mut group,
+    );
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    zip_benchmarks,
+    zip_benchmarks_iprs,
+    zip_benchmarks_iprs_matrix_shapes,
+    zip_benchmarks_iprs_rate1_4,
+    zip_benchmarks_iprs_rate1_4_matrix_shapes
+);
 criterion_main!(benches);
