@@ -144,6 +144,7 @@ impl PcsTranscript {
         }
 
         v.write_transcription_bytes(&mut inner[prev_pos..next_pos]);
+
         self.stream.set_position(safe_cast!(next_pos, usize, u64)?);
         Ok(())
     }
@@ -183,16 +184,28 @@ impl PcsTranscript {
     }
 
     pub fn read_const<T: ConstTranscribable>(&mut self) -> Result<T, ZipError> {
-        // TODO: Read from the Vec directly instead of using a buffer
-        let mut buf = vec![0u8; T::NUM_BYTES];
-        self.stream.read_exact(&mut buf)?;
-        Ok(T::read_transcription_bytes(&buf))
+        let prev_pos = safe_cast!(self.stream.position(), u64, usize)?;
+        let data_len = T::NUM_BYTES;
+        let next_pos = add!(prev_pos, data_len);
+
+        let res = T::read_transcription_bytes(&self.stream.get_ref()[prev_pos..next_pos]);
+
+        self.stream.set_position(safe_cast!(next_pos, usize, u64)?);
+        Ok(res)
     }
 
     pub fn read_const_many<T: ConstTranscribable>(&mut self, n: usize) -> Result<Vec<T>, ZipError> {
-        (0..n)
-            .map(|_| self.read_const())
-            .collect::<Result<Vec<_>, _>>()
+        let prev_pos = safe_cast!(self.stream.position(), u64, usize)?;
+        let data_len = mul!(n, T::NUM_BYTES);
+        let next_pos = add!(prev_pos, data_len);
+
+        let res = self.stream.get_ref()[prev_pos..next_pos]
+            .chunks(T::NUM_BYTES)
+            .map(T::read_transcription_bytes)
+            .collect_vec();
+
+        self.stream.set_position(safe_cast!(next_pos, usize, u64)?);
+        Ok(res)
     }
 
     fn write_usize(&mut self, value: usize) -> Result<(), ZipError> {
