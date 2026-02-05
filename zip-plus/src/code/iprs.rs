@@ -13,6 +13,12 @@ use crate::{
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::{CheckedAdd, CheckedMul};
 pub use pntt::radix8::params::{
+    PnttConfigF2_16_1_Base16_Depth1_Rate1_2,
+    PnttConfigF2_16_1_Base16_Depth1_Rate1_4,
+    PnttConfigF2_16_1_Base32_Depth1_Rate1_2,
+    PnttConfigF2_16_1_Base32_Depth1_Rate1_4,
+    PnttConfigF2_16_1_Base64_Depth1_Rate1_2,
+    PnttConfigF2_16_1_Base64_Depth1_Rate1_4,
     PnttConfigF2_16_1,
     PnttConfigF2_16_1_Depth2_Rate1_2,
     PnttConfigF2_16_1_Depth2_Rate1_4,

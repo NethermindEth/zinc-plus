@@ -97,6 +97,18 @@ pub fn do_bench_iprs_matrices<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_
 
 }
 
+pub fn do_bench_iprs_matrix_shapes<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
+    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
+    <F as Field>::Inner: FromRef<Zt::Fmod>,
+    Zt::Eval: ProjectableToField<F>,
+    Zt::Cw: ProjectableToField<F>,
+{
+    commit::<Zt, Lc, 11>(group);
+}
+
 pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where
