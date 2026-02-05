@@ -305,9 +305,7 @@ mod tests {
 
         test_successful_verification_generic::<TestAirNoMultiplication, _, _, 32>(
             num_vars,
-            |ideal_over_ring| {
-                ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(&i, &field_cfg))
-            },
+            |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
         );
         test_successful_verification_generic::<TestUairSimpleMultiplication, _, _, 32>(
             num_vars,
