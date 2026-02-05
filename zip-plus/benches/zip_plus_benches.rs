@@ -108,13 +108,23 @@ type SomeIprsCodeDepth2Rate1_4<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
     PnttConfigF2_16_1_Depth2_Rate1_4,
     BinaryPolyWideningMulByScalar<Twiddle>,
 >;
-                    row: &[<BenchZipPlusTypes<i64, D_PLUS_ONE> as ZipTypes>::Eval],
-                ) -> Vec<<BenchZipPlusTypes<i64, D_PLUS_ONE> as ZipTypes>::Cw> {
-                    IprsCode::encode_fused(self, row)
-                }
-            }
-        };
-    }
+type SomeIprsCodeDepth1Base16Rate1_4<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Base16_Depth1_Rate1_4,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
+type SomeIprsCodeDepth1Base32Rate1_4<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Base32_Depth1_Rate1_4,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
+type SomeIprsCodeDepth1Base64Rate1_4<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Base64_Depth1_Rate1_4,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
 
 // Implement IprsFusedEncode for IPRS codes when simd feature is enabled
 #[cfg(feature = "simd")]
@@ -146,15 +156,7 @@ mod fused_impl {
     impl_fused_encode!(SomeIprsCodeDepth1Base16Rate1_4);
     impl_fused_encode!(SomeIprsCodeDepth1Base32Rate1_4);
     impl_fused_encode!(SomeIprsCodeDepth1Base64Rate1_4);
-}
-    impl_fused_encode!(SomeIprsCodeDepth2);
-    impl_fused_encode!(SomeIprsCodeDepth1Base16);
-    impl_fused_encode!(SomeIprsCodeDepth1Base32);
-    impl_fused_encode!(SomeIprsCodeDepth1Base64);
-    impl_fused_encode!(SomeIprsCodeDepth2Rate1_4);
-    impl_fused_encode!(SomeIprsCodeDepth1Base16Rate1_4);
-    impl_fused_encode!(SomeIprsCodeDepth1Base32Rate1_4);
-    impl_fused_encode!(SomeIprsCodeDepth1Base64Rate1_4);
+    impl_fused_encode!(SomeIprsCodeF12289Depth3);
 }
 /// IPRS code using the smallest possible field (F_12289) for depth-3 rate-1/2.
 /// Encodes messages of size 2^11 with BASE_LEN=4, BASE_DIM=8.
