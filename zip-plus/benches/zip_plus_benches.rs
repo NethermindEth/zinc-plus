@@ -31,6 +31,7 @@ use zip_plus::{
             PnttConfigF2_16_1_Base64_Depth1_Rate1_4,
             PnttConfigF2_16_1_Depth2_Rate1_2,
             PnttConfigF2_16_1_Depth2_Rate1_4,
+            PnttConfigF12289_Depth3_Rate1_2,
         },
         raa::{RaaCode, RaaConfig},
     },
@@ -126,6 +127,14 @@ type SomeIprsCodeDepth1Base64Rate1_4<Twiddle, const D_PLUS_ONE: usize> = IprsCod
     BinaryPolyWideningMulByScalar<Twiddle>,
 >;
 
+/// IPRS code using the smallest possible field (F_12289) for depth-3 rate-1/2.
+/// Encodes messages of size 2^11 with BASE_LEN=4, BASE_DIM=8.
+type SomeIprsCodeF12289Depth3<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF12289_Depth3_Rate1_2,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
 fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");
     do_bench::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>, UNCHECKED>(&mut group);
@@ -212,12 +221,32 @@ fn zip_plus_benchmarks_iprs_rate1_4_matrix_shapes(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmarks for IPRS with F_12289 (smallest field for depth-3).
+/// This configuration uses:
+/// - Field: F_12289 (p = 3 * 2^12 + 1)
+/// - BASE_LEN = 4, BASE_DIM = 8
+/// - DEPTH = 3
+/// - Rate = 1/2
+/// - Message size = 2^11
+fn zip_plus_benchmarks_iprs_f12289(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip+ IPRS F12289 Depth3");
+
+    do_bench_iprs_matrices::<
+        BenchZipPlusTypes<i64, 32>,
+        SomeIprsCodeF12289Depth3<i64, 32>,
+        UNCHECKED,
+    >(&mut group);
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     zip_plus_benchmarks_raa,
     zip_plus_benchmarks_iprs,
     zip_plus_benchmarks_iprs_matrix_shapes,
     zip_plus_benchmarks_iprs_rate1_4,
-    zip_plus_benchmarks_iprs_rate1_4_matrix_shapes
+    zip_plus_benchmarks_iprs_rate1_4_matrix_shapes,
+    zip_plus_benchmarks_iprs_f12289
 );
 criterion_main!(benches);

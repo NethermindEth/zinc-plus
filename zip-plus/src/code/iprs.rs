@@ -23,6 +23,8 @@ pub use pntt::radix8::params::{
     PnttConfigF2_16_1_Depth2_Rate1_2,
     PnttConfigF2_16_1_Depth2_Rate1_4,
     PnttConfigF2_16_1_Rate1_4,
+    PnttConfigF12289_Rate1_2,
+    PnttConfigF12289_Depth3_Rate1_2,
     PnttInt,
     Radix8PnttParams,
 };
