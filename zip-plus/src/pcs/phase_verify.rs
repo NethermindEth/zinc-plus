@@ -46,7 +46,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
         let columns_opened =
             Self::verify_testing::<CHECK_FOR_OVERFLOW>(vp, &comm.root, &mut transcript)?;
-        // std::hint::black_box(columns_opened);
 
         let field_cfg = transcript
             .fs_transcript
