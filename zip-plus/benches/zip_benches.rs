@@ -12,9 +12,13 @@ use crypto_bigint::U64;
 use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_uint::Uint};
 use zinc_utils::UNCHECKED;
 use zip_plus::{
-    code::raa::{RaaCode, RaaConfig},
+    code::{
+        iprs::{IprsCode, PnttConfigF2_16_1_Depth2_Rate1_2},
+        raa::{RaaCode, RaaConfig},
+    },
     pcs::structs::ZipTypes,
 };
+use zinc_utils::mul_by_scalar::WideningMulByScalar;
 
 const INT_LIMBS: usize = U64::LIMBS;
 
@@ -43,11 +47,31 @@ impl RaaConfig for BenchRaaConfig {
 
 type Code = RaaCode<BenchZipTypes, BenchRaaConfig, 4>;
 
+#[derive(Clone, Default)]
+struct I32WideningMulByScalar;
+
+impl WideningMulByScalar<i32, i64> for I32WideningMulByScalar {
+    type Output = i64;
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn mul_by_scalar_widen(lhs: &i32, rhs: &i64) -> Self::Output {
+        i64::from(*lhs) * *rhs
+    }
+}
+
+type IprsCodeDepth2 = IprsCode<BenchZipTypes, PnttConfigF2_16_1_Depth2_Rate1_2, I32WideningMulByScalar>;
+
 fn zip_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");
     do_bench::<BenchZipTypes, Code, UNCHECKED>(&mut group);
     group.finish();
 }
 
-criterion_group!(benches, zip_benchmarks);
+fn zip_benchmarks_iprs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip IPRS");
+    do_bench_iprs_matrices::<BenchZipTypes, IprsCodeDepth2, UNCHECKED>(&mut group);
+    group.finish();
+}
+
+criterion_group!(benches, zip_benchmarks, zip_benchmarks_iprs);
 criterion_main!(benches);

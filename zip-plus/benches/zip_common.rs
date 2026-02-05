@@ -80,6 +80,52 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
 }
 
+pub fn do_bench_iprs_matrices<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
+    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
+    <F as Field>::Inner: FromRef<Zt::Fmod>,
+    Zt::Eval: ProjectableToField<F>,
+    Zt::Cw: ProjectableToField<F>,
+{
+    encode_rows::<Zt, Lc, 13>(group);
+    encode_rows::<Zt, Lc, 14>(group);
+    encode_rows::<Zt, Lc, 15>(group);
+    encode_rows::<Zt, Lc, 16>(group);
+    encode_rows::<Zt, Lc, 17>(group);
+
+    merkle_root::<Zt, 13>(group);
+    merkle_root::<Zt, 14>(group);
+    merkle_root::<Zt, 15>(group);
+    merkle_root::<Zt, 16>(group);
+    merkle_root::<Zt, 17>(group);
+
+    commit::<Zt, Lc, 13>(group);
+    commit::<Zt, Lc, 14>(group);
+    commit::<Zt, Lc, 15>(group);
+    commit::<Zt, Lc, 16>(group);
+    commit::<Zt, Lc, 17>(group);
+
+    test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
+    test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
+    test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15>(group);
+    test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
+    test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 17>(group);
+
+    evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
+    evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
+    evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15>(group);
+    evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
+    evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 17>(group);
+
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15>(group);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 17>(group);
+}
+
 pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where

@@ -12,7 +12,14 @@ use crate::{
 };
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::{CheckedAdd, CheckedMul};
-pub use pntt::radix8::params::{PnttConfigF2_16_1, PnttInt, Radix8PnttParams};
+pub use pntt::radix8::params::{
+    PnttConfigF2_16_1,
+    PnttConfigF2_16_1_Depth2_Rate1_2,
+    PnttConfigF2_16_1_Depth2_Rate1_4,
+    PnttConfigF2_16_1_Rate1_4,
+    PnttInt,
+    Radix8PnttParams,
+};
 use std::{fmt::Debug, iter::Sum, marker::PhantomData, ops::AddAssign};
 use zinc_utils::{
     CHECKED,

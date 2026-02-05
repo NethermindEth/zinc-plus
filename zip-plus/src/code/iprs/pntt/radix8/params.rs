@@ -159,8 +159,21 @@ impl<C: Config> Radix8PnttParams<C> {
 /// the field `Fp` for `p = 2^16 + 1`.
 ///
 /// Supports `DEPTH` up to `3`.
+///
+/// With `BASE_LEN = 32` and `BASE_DIM = 64`,
+/// this yields rate $\frac{1}{2}$ codes.
 #[derive(Clone, Copy)]
 pub struct PnttConfigF2_16_1<const DEPTH: usize>;
+
+/// Pseudo NTT configuration derived from
+/// the field `Fp` for `p = 2^16 + 1`.
+///
+/// Supports `DEPTH` up to `3`.
+///
+/// With `BASE_LEN = 32` and `BASE_DIM = 128`,
+/// this yields rate $\frac{1}{4}$ codes.
+#[derive(Clone, Copy)]
+pub struct PnttConfigF2_16_1_Rate1_4<const DEPTH: usize>;
 
 mod fq {
     #![allow(non_local_definitions)]
@@ -191,6 +204,27 @@ impl<const DEPTH: usize> Config for PnttConfigF2_16_1<DEPTH> {
         precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
     }
 }
+
+impl<const DEPTH: usize> Config for PnttConfigF2_16_1_Rate1_4<DEPTH> {
+    type Field = fq::Fq;
+    const FIELD_MODULUS: u32 = fq::MODULUS;
+    const BASE_LEN: usize = 32;
+    const BASE_DIM: usize = 128;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 4096, -256, 16, -1, -4096, 256, -16];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq::FqBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+/// Depth-2 configuration for message size $2^{11}$ with rate $\frac{1}{2}$.
+pub type PnttConfigF2_16_1_Depth2_Rate1_2 = PnttConfigF2_16_1<2>;
+
+/// Depth-2 configuration for message size $2^{11}$ with rate $\frac{1}{4}$.
+pub type PnttConfigF2_16_1_Depth2_Rate1_4 = PnttConfigF2_16_1_Rate1_4<2>;
 
 #[cfg(test)]
 mod tests {
