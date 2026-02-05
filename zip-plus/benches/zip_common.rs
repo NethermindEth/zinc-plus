@@ -122,7 +122,7 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
 
     group.bench_function(
         format!(
-            "EncodeRows: {} -> {}, matrix = {rows}x{row_len}, poly_size = 2^{P}",
+            "EncodeRows: matrix={rows}x{row_len}, {} -> {}, poly_size=2^{P}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
             rows = rows,
@@ -214,7 +214,7 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
 
     group.bench_function(
         format!(
-            "Commit: Eval={}, Cw={}, Comb={}, matrix={rows}x{row_len}, poly_size=2^{P}",
+            "Commit: matrix={rows}x{row_len}, Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
             Zt::Comb::type_name(),
@@ -256,7 +256,7 @@ pub fn test<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, c
 
     group.bench_function(
         format!(
-            "Test: Eval={}, Cw={}, Comb={}, matrix={rows}x{row_len}, poly_size=2^{P}",
+            "Test: matrix={rows}x{row_len}, Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
             Zt::Comb::type_name(),
@@ -298,7 +298,7 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
 
     group.bench_function(
         format!(
-            "Evaluate: Eval={}, Cw={}, Comb={}, matrix={rows}x{row_len}, poly_size=2^{P}, modulus=({} bits)",
+            "Evaluate: matrix={rows}x{row_len}, Eval={}, Cw={}, Comb={}, poly_size=2^{P}, modulus=({} bits)",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
             Zt::Comb::type_name(),
@@ -354,7 +354,7 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool,
 
     group.bench_function(
         format!(
-            "Verify: Eval={}, Cw={}, Comb={}, matrix={rows}x{row_len}, poly_size=2^{P}, modulus=({} bits)",
+            "Verify: matrix={rows}x{row_len}, Eval={}, Cw={}, Comb={}, poly_size=2^{P}, modulus=({} bits)",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
             Zt::Comb::type_name(),
