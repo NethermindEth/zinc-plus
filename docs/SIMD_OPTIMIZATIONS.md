@@ -30,11 +30,17 @@ Added `add_assign_simd<N>` function with platform-specific implementations:
 ```rust
 // NEON (aarch64): Process 8 i64s per iteration using 4×int64x2_t
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-pub unsafe fn add_assign_simd<const N: usize>(lhs: &mut [i64; N], rhs: &[i64; N])
+pub fn add_assign_simd<const N: usize>(
+    dest: &mut DensePolynomial<i64, N>,
+    src: &DensePolynomial<i64, N>,
+)
 
 // AVX-512 (x86_64): Process 8 i64s per iteration using __m512i
 #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx512f"))]
-pub unsafe fn add_assign_simd<const N: usize>(lhs: &mut [i64; N], rhs: &[i64; N])
+pub fn add_assign_simd<const N: usize>(
+    dest: &mut DensePolynomial<i64, N>,
+    src: &DensePolynomial<i64, N>,
+)
 ```
 
 ### 2. Fused Multiply-Add Trait
@@ -64,8 +70,8 @@ impl<const N: usize> FusedMulAdd<BinaryU64Poly<N>, i64> for DensePolynomial<i64,
 Added `FusedMulAddByTwiddle` trait and `FusedWideningMulByTwiddle` struct:
 
 ```rust
-pub trait FusedMulAddByTwiddle<Acc, Lhs, Twiddle>: Send + Sync {
-    fn fused_mul_add(acc: &mut Acc, lhs: &Lhs, twiddle: Twiddle);
+pub trait FusedMulAddByTwiddle<Lhs, Twiddle, Acc>: Send + Sync {
+    fn fused_mul_add(acc: &mut Acc, lhs: &Lhs, twiddle: &Twiddle);
 }
 ```
 
@@ -171,6 +177,11 @@ Benefits:
 1. **No intermediate allocation** - Eliminates temporary `DensePolynomial` per multiplication
 2. **Better cache utilization** - Accumulator stays in registers/L1 cache
 3. **SIMD vectorization** - The addition loop is vectorized with NEON/AVX-512
+
+### Correctness Notes
+
+1. **Checked vs unchecked addition**: The fused base-layer path uses `FusedMulAdd` which does not perform overflow checks, even when the non-fused path would use checked addition. This matches current implementation but means the fused path assumes no overflow can occur.
+2. **Binary polynomial size constraint**: The SIMD fused multiply-add uses a `u64` bitmask, so it only supports `BinaryU64Poly<N>` with $N \le 64$ (as used by IPRS). Larger $N$ would require a different representation.
 
 ### Platform Support
 
