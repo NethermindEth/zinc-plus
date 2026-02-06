@@ -13,7 +13,12 @@ use crate::{
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::{CheckedAdd, CheckedMul};
 pub use pntt::radix8::params::{PnttConfigF2_16_1, PnttInt, Radix8PnttParams};
-use std::{fmt::Debug, iter::Sum, marker::PhantomData, ops::AddAssign};
+use std::{
+    fmt::Debug,
+    iter::Sum,
+    marker::PhantomData,
+    ops::{Add, AddAssign},
+};
 use zinc_utils::{
     CHECKED,
     from_ref::FromRef,
@@ -24,12 +29,12 @@ use zinc_utils::{
 /// radix-8 NTT-style recursion with a base Vandermonde matrix sized
 /// `base_len x base_dim` (defaults to 64x32).
 #[derive(Debug, Clone)]
-pub struct IprsCode<Zt: ZipTypes, Config: PnttConfig, MT> {
+pub struct IprsCode<Zt: ZipTypes, Config: PnttConfig, MT, const CHECK: bool> {
     pntt_params: Radix8PnttParams<Config>,
     _phantom: PhantomData<(Zt, MT)>,
 }
 
-impl<Zt, Config, MT> IprsCode<Zt, Config, MT>
+impl<Zt, Config, MT, const CHECK: bool> IprsCode<Zt, Config, MT, CHECK>
 where
     Zt: ZipTypes,
     Config: PnttConfig,
@@ -40,6 +45,7 @@ where
         In: Clone + Send + Sync,
         Out: CheckedAdd
             + for<'a> AddAssign<&'a Out>
+            + for<'a> Add<&'a Out, Output = Out>
             + CheckedMul
             + for<'a> MulByScalar<&'a PnttInt>
             + Sum
@@ -58,7 +64,7 @@ where
             Config::INPUT_LEN
         );
 
-        pntt::radix8::pntt::<_, _, _, M, MBSMulByTwiddle<CHECKED>>(row, &self.pntt_params)
+        pntt::radix8::pntt::<_, _, _, M, MBSMulByTwiddle<CHECKED>, CHECK>(row, &self.pntt_params)
     }
 
     // Do the encoding but make use of the fact
@@ -75,14 +81,18 @@ where
             Config::INPUT_LEN
         );
 
-        pntt::radix8::pntt::<_, _, _, FieldMulByTwiddle<_, PnttInt>, FieldMulByTwiddle<_, PnttInt>>(
-            row,
-            &self.pntt_params,
-        )
+        pntt::radix8::pntt::<
+            _,
+            _,
+            _,
+            FieldMulByTwiddle<_, PnttInt>,
+            FieldMulByTwiddle<_, PnttInt>,
+            CHECK,
+        >(row, &self.pntt_params)
     }
 }
 
-impl<Zt: ZipTypes, Config, MT> LinearCode<Zt> for IprsCode<Zt, Config, MT>
+impl<Zt: ZipTypes, Config, MT, const CHECK: bool> LinearCode<Zt> for IprsCode<Zt, Config, MT, CHECK>
 where
     Zt: ZipTypes,
     Config: PnttConfig,
