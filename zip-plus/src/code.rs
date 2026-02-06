@@ -4,6 +4,8 @@ pub mod raa_sign_flip;
 
 use crate::pcs::structs::ZipTypes;
 use crypto_primitives::FromPrimitiveWithConfig;
+use std::mem::MaybeUninit;
+use uninit::out_ref::Out;
 use zinc_utils::from_ref::FromRef;
 
 pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
@@ -36,6 +38,29 @@ pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
     /// # Returns
     /// A vector of cryptographic integers representing the encoded row
     fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw>;
+
+    /// Encodes a row of cryptographic integers directly into an uninitialized
+    /// output buffer.
+    ///
+    /// This default implementation allocates a temporary vector and copies
+    /// the results into `out`. Implementers are encouraged to override this
+    /// to avoid per-row allocations.
+    ///
+    /// # Parameters
+    /// - `row`: Slice of cryptographic integers to encode
+    /// - `out`: Uninitialized output buffer of length `codeword_len()`
+    fn encode_into_uninit(&self, row: &[Zt::Eval], out: &mut [MaybeUninit<Zt::Cw>]) {
+        let encoded = self.encode(row);
+        Out::from(out).copy_from_slice(encoded.as_slice());
+    }
+
+    /// Encodes a row using SIMD fused operations when available.
+    ///
+    /// The default implementation falls back to `encode_into_uninit`.
+    #[cfg(feature = "simd")]
+    fn encode_fused_into_uninit(&self, row: &[Zt::Eval], out: &mut [MaybeUninit<Zt::Cw>]) {
+        self.encode_into_uninit(row, out);
+    }
 
     /// Encodes a row of cryptographic integers using this linear encoding
     /// scheme.

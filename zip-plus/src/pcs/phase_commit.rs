@@ -173,8 +173,15 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         cfg_chunks_mut!(encoded_matrix.data, codeword_len)
             .zip(cfg_chunks!(evals, row_len))
             .for_each(|(row, evals)| {
-                let encoded: Vec<Zt::Cw> = pp.linear_code.encode(evals);
-                Out::from(row).copy_from_slice(encoded.as_slice());
+                #[cfg(feature = "simd")]
+                {
+                    pp.linear_code.encode_fused_into_uninit(evals, row);
+                }
+
+                #[cfg(not(feature = "simd"))]
+                {
+                    pp.linear_code.encode_into_uninit(evals, row);
+                }
             });
 
         // Safe because we have just initialized all elements.

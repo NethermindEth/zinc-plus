@@ -30,7 +30,7 @@ pub use pntt::radix8::params::{
     PnttInt,
     Radix8PnttParams,
 };
-use std::{fmt::Debug, iter::Sum, marker::PhantomData, ops::AddAssign};
+use std::{fmt::Debug, iter::Sum, marker::PhantomData, ops::AddAssign, mem::MaybeUninit};
 use zinc_utils::{
     CHECKED,
     from_ref::FromRef,
@@ -139,6 +139,7 @@ where
     }
 }
 
+#[cfg(not(feature = "simd"))]
 impl<Zt: ZipTypes, Config, MT> LinearCode<Zt> for IprsCode<Zt, Config, MT>
 where
     Zt: ZipTypes,
@@ -186,6 +187,22 @@ where
         self.encode_inner::<_, _, WideningMulByTwiddle<MT>>(row)
     }
 
+    fn encode_into_uninit(&self, row: &[Zt::Eval], out: &mut [MaybeUninit<Zt::Cw>]) {
+        assert_eq!(
+            row.len(),
+            Config::INPUT_LEN,
+            "Input length {} does not match expected row length {}",
+            row.len(),
+            Config::INPUT_LEN
+        );
+
+        pntt::radix8::pntt_into::<_, _, _, WideningMulByTwiddle<MT>, MBSMulByTwiddle<CHECKED>>(
+            row,
+            &self.pntt_params,
+            out,
+        );
+    }
+
     fn row_len(&self) -> usize {
         Config::INPUT_LEN
     }
@@ -205,3 +222,110 @@ where
         self.encode_inner_f(row)
     }
 }
+
+#[cfg(feature = "simd")]
+impl<Zt: ZipTypes, Config, MT> LinearCode<Zt> for IprsCode<Zt, Config, MT>
+where
+    Zt: ZipTypes,
+    Config: PnttConfig,
+    Zt::CombR: for<'a> MulByScalar<&'a PnttInt>,
+    Zt::Cw: Default
+        + CheckedAdd
+        + for<'a> MulByScalar<&'a PnttInt>
+        + zinc_poly::univariate::binary_u64::FusedMulAdd<Zt::Eval, PnttInt>,
+    MT: WideningMulByScalar<Zt::Eval, PnttInt, Output = Zt::Cw>,
+{
+    const REPETITION_FACTOR: usize = Config::OUTPUT_LEN / Config::INPUT_LEN;
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn new(poly_size: usize) -> Self {
+        assert_eq!(
+            poly_size % Config::INPUT_LEN,
+            0,
+            "Polynomial size {} is not a multiple of row length {}",
+            poly_size,
+            Config::INPUT_LEN
+        );
+
+        assert_eq!(
+            Config::OUTPUT_LEN,
+            Config::INPUT_LEN * Self::REPETITION_FACTOR,
+            "Codeword length {} must equal row length {} times repetition factor {}",
+            Config::OUTPUT_LEN,
+            Config::INPUT_LEN,
+            Self::REPETITION_FACTOR
+        );
+
+        Self {
+            pntt_params: Radix8PnttParams::new(),
+            _phantom: Default::default(),
+        }
+    }
+
+    fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
+        assert_eq!(
+            row.len(),
+            Config::INPUT_LEN,
+            "Input length {} does not match expected row length {}",
+            row.len(),
+            Config::INPUT_LEN
+        );
+
+        self.encode_inner::<_, _, WideningMulByTwiddle<MT>>(row)
+    }
+
+    fn encode_into_uninit(&self, row: &[Zt::Eval], out: &mut [MaybeUninit<Zt::Cw>]) {
+        assert_eq!(
+            row.len(),
+            Config::INPUT_LEN,
+            "Input length {} does not match expected row length {}",
+            row.len(),
+            Config::INPUT_LEN
+        );
+
+        pntt::radix8::pntt_into::<_, _, _, WideningMulByTwiddle<MT>, MBSMulByTwiddle<CHECKED>>(
+            row,
+            &self.pntt_params,
+            out,
+        );
+    }
+
+    fn encode_fused_into_uninit(&self, row: &[Zt::Eval], out: &mut [MaybeUninit<Zt::Cw>]) {
+        assert_eq!(
+            row.len(),
+            Config::INPUT_LEN,
+            "Input length {} does not match expected row length {}",
+            row.len(),
+            Config::INPUT_LEN
+        );
+
+        pntt::radix8::pntt_fused_into::<
+            _,
+            _,
+            _,
+            WideningMulByTwiddle<MT>,
+            FusedWideningMulByTwiddle<MT>,
+            MBSMulByTwiddle<CHECKED>,
+        >(row, &self.pntt_params, out);
+    }
+
+    fn row_len(&self) -> usize {
+        Config::INPUT_LEN
+    }
+
+    fn codeword_len(&self) -> usize {
+        Config::OUTPUT_LEN
+    }
+
+    fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {
+        self.encode_inner::<_, _, MBSMulByTwiddle<CHECKED>>(row)
+    }
+
+    fn encode_f<F>(&self, row: &[F]) -> Vec<F>
+    where
+        F: FromPrimitiveWithConfig + FromRef<F>,
+    {
+        self.encode_inner_f(row)
+    }
+}
+

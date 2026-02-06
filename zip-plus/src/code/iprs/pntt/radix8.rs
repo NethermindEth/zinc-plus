@@ -14,7 +14,7 @@ use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::{array, fmt::Debug};
+use std::{array, fmt::Debug, mem::MaybeUninit};
 #[cfg(feature = "unchecked-butterfly")]
 use std::ops::AddAssign;
 use zinc_utils::{add, cfg_chunks_mut, cfg_into_iter, from_ref::FromRef};
@@ -76,6 +76,47 @@ where
     MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
 {
     pntt_impl::<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(input, params)
+}
+
+/// In-place PNTT that writes into an existing output buffer.
+#[cfg(not(feature = "unchecked-butterfly"))]
+pub(crate) fn pntt_into<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+    out: &mut [MaybeUninit<Out>],
+)
+where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug,
+    MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
+    MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
+{
+    pntt_into_impl::<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(input, params, out)
+}
+
+/// In-place PNTT that writes into an existing output buffer.
+#[cfg(feature = "unchecked-butterfly")]
+pub(crate) fn pntt_into<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+    out: &mut [MaybeUninit<Out>],
+)
+where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: CheckedAdd
+        + CheckedMul
+        + FromRef<In>
+        + Clone
+        + Send
+        + Sync
+        + Debug
+        + for<'a> AddAssign<&'a Out>,
+    MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
+    MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
+{
+    pntt_into_impl::<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(input, params, out)
 }
 
 /// The main entrypoint of the radix-8 pseudo NTT algorithm.
@@ -142,6 +183,88 @@ where
     }
 
     output
+}
+
+#[cfg(not(feature = "unchecked-butterfly"))]
+fn pntt_into_impl<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+    out: &mut [MaybeUninit<Out>],
+) where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug,
+    MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
+    MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
+{
+    assert_eq!(
+        C::INPUT_LEN,
+        input.len(),
+        "PNTT expects length = {}, got {}",
+        C::INPUT_LEN,
+        input.len()
+    );
+
+    assert_eq!(
+        C::OUTPUT_LEN,
+        out.len(),
+        "PNTT output expects length = {}, got {}",
+        C::OUTPUT_LEN,
+        out.len()
+    );
+
+    base_multiply_into_output_in_place::<_, _, _, MulInByTwiddle>(input, params, out);
+
+    // Safe because we have just initialized all output elements.
+    let out_init = unsafe {
+        std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut Out, out.len())
+    };
+
+    combine_stages::<_, _, MulOutByTwiddle>(out_init, params);
+}
+
+#[cfg(feature = "unchecked-butterfly")]
+fn pntt_into_impl<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+    out: &mut [MaybeUninit<Out>],
+) where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: CheckedAdd
+        + CheckedMul
+        + FromRef<In>
+        + Clone
+        + Send
+        + Sync
+        + Debug
+        + for<'a> AddAssign<&'a Out>,
+    MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
+    MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
+{
+    assert_eq!(
+        C::INPUT_LEN,
+        input.len(),
+        "PNTT expects length = {}, got {}",
+        C::INPUT_LEN,
+        input.len()
+    );
+
+    assert_eq!(
+        C::OUTPUT_LEN,
+        out.len(),
+        "PNTT output expects length = {}, got {}",
+        C::OUTPUT_LEN,
+        out.len()
+    );
+
+    base_multiply_into_output_in_place::<_, _, _, MulInByTwiddle>(input, params, out);
+
+    let out_init = unsafe {
+        std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut Out, out.len())
+    };
+
+    combine_stages::<_, _, MulOutByTwiddle>(out_init, params);
 }
 
 /// Implementation of the radix-8 pseudo NTT algorithm with unchecked butterflies.
@@ -212,6 +335,54 @@ where
     pntt_fused_impl::<In, Out, C, MulInByTwiddle, FusedMulAdd, MulOutByTwiddle>(input, params)
 }
 
+/// In-place fused PNTT that writes into an existing output buffer.
+#[cfg(not(feature = "unchecked-butterfly"))]
+pub(crate) fn pntt_fused_into<In, Out, C, MulInByTwiddle, FusedMulAdd, MulOutByTwiddle>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+    out: &mut [MaybeUninit<Out>],
+)
+where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: Default + CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug,
+    MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
+    FusedMulAdd: FusedMulAddByTwiddle<In, PnttInt, Out>,
+    MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
+{
+    pntt_fused_into_impl::<In, Out, C, MulInByTwiddle, FusedMulAdd, MulOutByTwiddle>(
+        input, params, out,
+    )
+}
+
+/// In-place fused PNTT that writes into an existing output buffer.
+#[cfg(feature = "unchecked-butterfly")]
+pub(crate) fn pntt_fused_into<In, Out, C, MulInByTwiddle, FusedMulAdd, MulOutByTwiddle>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+    out: &mut [MaybeUninit<Out>],
+)
+where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: Default
+        + CheckedAdd
+        + CheckedMul
+        + FromRef<In>
+        + Clone
+        + Send
+        + Sync
+        + Debug
+        + for<'a> AddAssign<&'a Out>,
+    MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
+    FusedMulAdd: FusedMulAddByTwiddle<In, PnttInt, Out>,
+    MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
+{
+    pntt_fused_into_impl::<In, Out, C, MulInByTwiddle, FusedMulAdd, MulOutByTwiddle>(
+        input, params, out,
+    )
+}
+
 /// Optimized PNTT using fused multiply-add for the base layer.
 /// This version uses unchecked butterflies for better performance.
 #[cfg(feature = "unchecked-butterfly")]
@@ -280,6 +451,94 @@ where
     }
 
     output
+}
+
+#[cfg(not(feature = "unchecked-butterfly"))]
+fn pntt_fused_into_impl<In, Out, C, MulInByTwiddle, FusedMulAdd, MulOutByTwiddle>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+    out: &mut [MaybeUninit<Out>],
+) where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: Default + CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug,
+    MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
+    FusedMulAdd: FusedMulAddByTwiddle<In, PnttInt, Out>,
+    MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
+{
+    assert_eq!(
+        C::INPUT_LEN,
+        input.len(),
+        "PNTT expects length = {}, got {}",
+        C::INPUT_LEN,
+        input.len()
+    );
+
+    assert_eq!(
+        C::OUTPUT_LEN,
+        out.len(),
+        "PNTT output expects length = {}, got {}",
+        C::OUTPUT_LEN,
+        out.len()
+    );
+
+    base_multiply_into_output_fused_in_place::<_, _, _, MulInByTwiddle, FusedMulAdd>(
+        input, params, out,
+    );
+
+    let out_init = unsafe {
+        std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut Out, out.len())
+    };
+
+    combine_stages::<_, _, MulOutByTwiddle>(out_init, params);
+}
+
+#[cfg(feature = "unchecked-butterfly")]
+fn pntt_fused_into_impl<In, Out, C, MulInByTwiddle, FusedMulAdd, MulOutByTwiddle>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+    out: &mut [MaybeUninit<Out>],
+) where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: Default
+        + CheckedAdd
+        + CheckedMul
+        + FromRef<In>
+        + Clone
+        + Send
+        + Sync
+        + Debug
+        + for<'a> AddAssign<&'a Out>,
+    MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
+    FusedMulAdd: FusedMulAddByTwiddle<In, PnttInt, Out>,
+    MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
+{
+    assert_eq!(
+        C::INPUT_LEN,
+        input.len(),
+        "PNTT expects length = {}, got {}",
+        C::INPUT_LEN,
+        input.len()
+    );
+
+    assert_eq!(
+        C::OUTPUT_LEN,
+        out.len(),
+        "PNTT output expects length = {}, got {}",
+        C::OUTPUT_LEN,
+        out.len()
+    );
+
+    base_multiply_into_output_fused_in_place::<_, _, _, MulInByTwiddle, FusedMulAdd>(
+        input, params, out,
+    );
+
+    let out_init = unsafe {
+        std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut Out, out.len())
+    };
+
+    combine_stages::<_, _, MulOutByTwiddle>(out_init, params);
 }
 
 #[cfg(feature = "unchecked-butterfly")]
@@ -463,6 +722,45 @@ where
         .collect()
 }
 
+/// Writes base layer multiplication output directly into an uninitialized buffer.
+#[allow(clippy::arithmetic_side_effects)]
+fn base_multiply_into_output_in_place<In, Out, C, M>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+    out: &mut [MaybeUninit<Out>],
+) where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: Clone + CheckedAdd + CheckedMul + FromRef<In> + Send + Sync,
+    M: MulByTwiddle<In, PnttInt, Output = Out>,
+{
+    cfg_chunks_mut!(out, C::BASE_DIM)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+            let start = chunk_idx * C::BASE_DIM;
+            for (offset, out_cell) in chunk.iter_mut().enumerate() {
+                let i = start + offset;
+                let chunk = i >> C::BASE_DIM_LOG2; // i / C::BASE_DIM
+                let row = i & C::BASE_DIM_MASK; // i % C::BASE_DIM
+                let oct_rev_chunk = octet_reversal(chunk, C::DEPTH);
+
+                let value = params.base_matrix[row][1..].iter().enumerate().fold(
+                    Out::from_ref(&input[oct_rev_chunk]),
+                    |acc, (col, bm_row_col)| {
+                        let term = M::mul_by_twiddle(
+                            &input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))],
+                            bm_row_col,
+                        );
+
+                        add!(acc, &term)
+                    },
+                );
+
+                out_cell.write(value);
+            }
+        });
+}
+
 /// Optimized base layer multiplication using fused multiply-add.
 /// This version avoids intermediate allocations by computing acc += input * twiddle directly.
 #[allow(clippy::arithmetic_side_effects, dead_code)]
@@ -495,6 +793,41 @@ where
             acc
         })
         .collect()
+}
+
+/// Writes fused base layer multiplication output directly into an uninitialized buffer.
+#[allow(clippy::arithmetic_side_effects)]
+fn base_multiply_into_output_fused_in_place<In, Out, C, M, F>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+    out: &mut [MaybeUninit<Out>],
+) where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: Clone + Default + FromRef<In> + Send + Sync,
+    M: MulByTwiddle<In, PnttInt, Output = Out>,
+    F: FusedMulAddByTwiddle<In, PnttInt, Out>,
+{
+    cfg_chunks_mut!(out, C::BASE_DIM)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+            let start = chunk_idx * C::BASE_DIM;
+            for (offset, out_cell) in chunk.iter_mut().enumerate() {
+                let i = start + offset;
+                let chunk = i >> C::BASE_DIM_LOG2; // i / C::BASE_DIM
+                let row = i & C::BASE_DIM_MASK; // i % C::BASE_DIM
+                let oct_rev_chunk = octet_reversal(chunk, C::DEPTH);
+
+                let mut acc = Out::from_ref(&input[oct_rev_chunk]);
+
+                for (col, bm_row_col) in params.base_matrix[row][1..].iter().enumerate() {
+                    let input_idx = oct_rev_chunk | ((col + 1) << (3 * C::DEPTH));
+                    F::fused_mul_add(&mut acc, &input[input_idx], bm_row_col);
+                }
+
+                out_cell.write(acc);
+            }
+        });
 }
 
 // TODO: make unchecked versions of the above.
