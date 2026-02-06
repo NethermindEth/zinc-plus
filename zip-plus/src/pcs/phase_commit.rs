@@ -173,84 +173,11 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         cfg_chunks_mut!(encoded_matrix.data, codeword_len)
             .zip(cfg_chunks!(evals, row_len))
             .for_each(|(row, evals)| {
-                #[cfg(feature = "simd")]
-                {
-                    pp.linear_code.encode_fused_into_uninit(evals, row);
-                }
-
-                #[cfg(not(feature = "simd"))]
-                {
-                    pp.linear_code.encode_into_uninit(evals, row);
-                }
+                pp.linear_code.encode_into_uninit(evals, row);
             });
 
         // Safe because we have just initialized all elements.
         unsafe { encoded_matrix.init() }
-    }
-}
-
-/// SIMD-optimized encoding methods using fused multiply-add.
-#[cfg(feature = "simd")]
-impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
-    /// Encodes polynomial evaluations using the fused multiply-add optimization.
-    /// This is more efficient than `encode_rows` as it avoids intermediate allocations.
-    #[allow(clippy::arithmetic_side_effects)]
-    pub fn encode_rows_fused<F>(
-        pp: &ZipPlusParams<Zt, Lc>,
-        row_len: usize,
-        evals: &[Zt::Eval],
-        encode_fn: F,
-    ) -> DenseRowMatrix<Zt::Cw>
-    where
-        F: Fn(&Lc, &[Zt::Eval]) -> Vec<Zt::Cw> + Sync,
-    {
-        let codeword_len = pp.linear_code.codeword_len();
-        let num_rows = evals.len() / row_len;
-
-        let mut encoded_matrix = DenseRowMatrix::<Zt::Cw>::uninit(num_rows, codeword_len);
-
-        cfg_chunks_mut!(encoded_matrix.data, codeword_len)
-            .zip(cfg_chunks!(evals, row_len))
-            .for_each(|(row, evals)| {
-                let encoded: Vec<Zt::Cw> = encode_fn(&pp.linear_code, evals);
-                Out::from(row).copy_from_slice(encoded.as_slice());
-            });
-
-        unsafe { encoded_matrix.init() }
-    }
-
-    /// Creates a commitment using the fused multiply-add optimization.
-    #[allow(clippy::arithmetic_side_effects)]
-    pub fn commit_fused<F>(
-        pp: &ZipPlusParams<Zt, Lc>,
-        poly: &DenseMultilinearExtension<Zt::Eval>,
-        encode_fn: F,
-    ) -> Result<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment), ZipError>
-    where
-        F: Fn(&Lc, &[Zt::Eval]) -> Vec<Zt::Cw> + Sync,
-    {
-        validate_input::<Zt, Lc, bool>("commit_fused", pp.num_vars, &[poly], &[])?;
-
-        let expected_num_evals = pp.num_rows * pp.linear_code.row_len();
-        assert_eq!(
-            poly.len(),
-            expected_num_evals,
-            "Polynomial has an incorrect number of evaluations ({}) for the expected matrix size ({})",
-            poly.len(),
-            expected_num_evals
-        );
-
-        let row_len = pp.linear_code.row_len();
-
-        let cw_matrix = Self::encode_rows_fused(pp, row_len, poly, encode_fn);
-
-        let merkle_tree = MerkleTree::new(&cw_matrix.to_rows_slices());
-        let root = merkle_tree.root();
-
-        Ok((
-            ZipPlusHint::new(cw_matrix, merkle_tree),
-            ZipPlusCommitment { root },
-        ))
     }
 }
 

@@ -54,14 +54,6 @@ pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
         Out::from(out).copy_from_slice(encoded.as_slice());
     }
 
-    /// Encodes a row using SIMD fused operations when available.
-    ///
-    /// The default implementation falls back to `encode_into_uninit`.
-    #[cfg(feature = "simd")]
-    fn encode_fused_into_uninit(&self, row: &[Zt::Eval], out: &mut [MaybeUninit<Zt::Cw>]) {
-        self.encode_into_uninit(row, out);
-    }
-
     /// Encodes a row of cryptographic integers using this linear encoding
     /// scheme.
     ///
