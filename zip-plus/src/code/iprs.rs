@@ -29,12 +29,12 @@ use zinc_utils::{
 /// radix-8 NTT-style recursion with a base Vandermonde matrix sized
 /// `base_len x base_dim` (defaults to 64x32).
 #[derive(Debug, Clone)]
-pub struct IprsCode<Zt: ZipTypes, Config: PnttConfig, MT, const CHECK: bool> {
+pub struct IprsCode<Zt: ZipTypes, Config: PnttConfig, MT, const CHECK_ADDITION: bool> {
     pntt_params: Radix8PnttParams<Config>,
     _phantom: PhantomData<(Zt, MT)>,
 }
 
-impl<Zt, Config, MT, const CHECK: bool> IprsCode<Zt, Config, MT, CHECK>
+impl<Zt, Config, MT, const CHECK_ADDITION: bool> IprsCode<Zt, Config, MT, CHECK_ADDITION>
 where
     Zt: ZipTypes,
     Config: PnttConfig,
@@ -64,7 +64,10 @@ where
             Config::INPUT_LEN
         );
 
-        pntt::radix8::pntt::<_, _, _, M, MBSMulByTwiddle<CHECKED>, CHECK>(row, &self.pntt_params)
+        pntt::radix8::pntt::<_, _, _, M, MBSMulByTwiddle<CHECKED>, CHECK_ADDITION>(
+            row,
+            &self.pntt_params,
+        )
     }
 
     // Do the encoding but make use of the fact
@@ -87,12 +90,13 @@ where
             _,
             FieldMulByTwiddle<_, PnttInt>,
             FieldMulByTwiddle<_, PnttInt>,
-            CHECK,
+            CHECK_ADDITION,
         >(row, &self.pntt_params)
     }
 }
 
-impl<Zt: ZipTypes, Config, MT, const CHECK: bool> LinearCode<Zt> for IprsCode<Zt, Config, MT, CHECK>
+impl<Zt: ZipTypes, Config, MT, const CHECK_ADDITION: bool> LinearCode<Zt>
+    for IprsCode<Zt, Config, MT, CHECK_ADDITION>
 where
     Zt: ZipTypes,
     Config: PnttConfig,

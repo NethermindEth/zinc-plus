@@ -21,7 +21,7 @@ use params::*;
 pub(crate) use mul_by_twiddle::*;
 
 /// The main entrypoint of the radix-8 pseudo NTT algorithm.
-pub(crate) fn pntt<In, Out, C, MulInByTwiddle, MulOutByTwiddle, const CHECK: bool>(
+pub(crate) fn pntt<In, Out, C, MulInByTwiddle, MulOutByTwiddle, const CHECK_ADDITION: bool>(
     input: &[In],
     params: &Radix8PnttParams<C>,
 ) -> Vec<Out>
@@ -47,9 +47,10 @@ where
         input.len()
     );
 
-    let mut output = base_multiply_into_output::<_, _, _, MulInByTwiddle, CHECK>(input, params);
+    let mut output =
+        base_multiply_into_output::<_, _, _, MulInByTwiddle, CHECK_ADDITION>(input, params);
 
-    combine_stages::<_, _, MulOutByTwiddle, CHECK>(&mut output, params);
+    combine_stages::<_, _, MulOutByTwiddle, CHECK_ADDITION>(&mut output, params);
 
     output
 }
@@ -58,7 +59,7 @@ where
 /// Assumes `out` contains the result of multiplications of the base chunks
 /// with the `base_matrix`.
 #[allow(clippy::arithmetic_side_effects)]
-fn combine_stages<R, C, M, const CHECK: bool>(out: &mut [R], params: &Radix8PnttParams<C>)
+fn combine_stages<R, C, M, const CHECK_ADDITION: bool>(out: &mut [R], params: &Radix8PnttParams<C>)
 where
     C: Config,
     R: CheckedAdd + CheckedMul + Clone + Send + Sync + Debug + for<'a> Add<&'a R, Output = R>,
@@ -102,7 +103,11 @@ where
                     .expect("We are guaranteed to have the right length here");
 
                 // Perform butterflies.
-                apply_radix_8_butterflies::<_, _, M, CHECK>(ys, &subresults, &layer_twiddles[i]);
+                apply_radix_8_butterflies::<_, _, M, CHECK_ADDITION>(
+                    ys,
+                    &subresults,
+                    &layer_twiddles[i],
+                );
             }
         });
     }
@@ -110,7 +115,7 @@ where
 
 /// Allocates the output vector and performs base layer multiplications.
 #[allow(clippy::arithmetic_side_effects)]
-fn base_multiply_into_output<In, Out, C, M, const CHECK: bool>(
+fn base_multiply_into_output<In, Out, C, M, const CHECK_ADDITION: bool>(
     input: &[In],
     params: &Radix8PnttParams<C>,
 ) -> Vec<Out>
@@ -149,7 +154,11 @@ where
                         bm_row_col,
                     );
 
-                    if CHECK { add!(acc, &term) } else { acc + &term }
+                    if CHECK_ADDITION {
+                        add!(acc, &term)
+                    } else {
+                        acc + &term
+                    }
                 },
             )
         })
