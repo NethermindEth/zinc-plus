@@ -17,18 +17,16 @@ pub trait ConstraintBuilder {
     /// It is opaque from the PoV of an AIR apart from
     /// the fact that arithmetic operations are available on it
     /// and one can check if an expression is in an ideal.
-    type Expr: Semiring + IdealCheck<Self::Ideal>;
+    type Expr: Semiring;
     /// The type of ideals used by the constraint builder.
-    type Ideal: Ideal;
+    type Ideal: Ideal + IdealCheck<Self::Expr>;
 
     /// Add a constraint saying that `expr` belongs to the ideal `ideal`.
     fn assert_in_ideal(&mut self, expr: Self::Expr, ideal: &Self::Ideal);
 
     /// Add a constraint saying that `expr` is equal to zero which is
     /// the same as saying that `expr` belongs to the zero ideal.
-    fn assert_zero(&mut self, expr: Self::Expr) {
-        self.assert_in_ideal(expr, &Self::Ideal::zero_ideal());
-    }
+    fn assert_zero(&mut self, expr: Self::Expr);
 }
 
 /// The trait that a universal AIR description has to implement.

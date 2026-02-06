@@ -21,7 +21,7 @@ use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     Uair,
     ideal::{Ideal, IdealCheck},
-    ideal_collector::collect_ideals,
+    ideal_collector::{CollectedIdeal, collect_ideals},
 };
 use zinc_utils::cfg_iter;
 
@@ -150,9 +150,8 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
     where
         U: Uair<IcTypes::Witness>,
         <IcTypes::F as Field>::Inner: ConstTranscribable,
-        IdealOverF: Ideal,
-        DynamicPolynomialF<IcTypes::F>: IdealCheck<IdealOverF>,
-        IdealOverFFromRef: Fn(&U::Ideal) -> IdealOverF,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<IcTypes::F>>,
+        IdealOverFFromRef: Fn(&CollectedIdeal<U::Ideal>) -> IdealOverF,
     {
         // Sample a field element to maintain FS symmetry with
         // the prover.
@@ -207,7 +206,7 @@ mod tests {
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::{
         constraint_counter::count_constraints,
-        ideal::{Ideal, IdealCheck, ZeroIdeal},
+        ideal::{Ideal, IdealCheck},
     };
 
     use super::*;
@@ -270,9 +269,8 @@ mod tests {
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
         U: GenerateWitness<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
-        IdealOverF: Ideal,
-        IdealOverFFromRef: Fn(&U::Ideal) -> IdealOverF,
-        DynamicPolynomialF<MontyField<LIMBS>>: IdealCheck<IdealOverF>,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
+        IdealOverFFromRef: Fn(&CollectedIdeal<U::Ideal>) -> IdealOverF,
     {
         let transcript = KeccakTranscript::new();
 
@@ -307,11 +305,11 @@ mod tests {
 
         test_successful_verification_generic::<TestAirNoMultiplication, _, _, 32>(
             num_vars,
-            |ideal_over_ring| DegreeOneIdeal::from_with_cfg(ideal_over_ring, &field_cfg),
+            |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
         );
         test_successful_verification_generic::<TestUairSimpleMultiplication, _, _, 32>(
             num_vars,
-            |_ideal_over_ring| ZeroIdeal,
+            |_ideal_over_ring| CollectedIdeal::zero(),
         );
     }
 }

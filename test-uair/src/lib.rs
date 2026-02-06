@@ -13,18 +13,16 @@ use zinc_poly::{
         dynamic::over_fixed_semiring::DynamicPolynomialFS, ideal::DegreeOneIdeal,
     },
 };
-use zinc_uair::{
-    ConstraintBuilder, Uair,
-    ideal::{Ideal, ZeroIdeal},
-};
+use zinc_uair::{ConstraintBuilder, Uair};
 use zinc_utils::from_ref::FromRef;
 
 pub use generate_witness::*;
+use zinc_uair::ideal::DummyIdeal;
 
 pub struct TestUairSimpleMultiplication;
 
 impl<R: Semiring + 'static> Uair<R> for TestUairSimpleMultiplication {
-    type Ideal = ZeroIdeal;
+    type Ideal = DummyIdeal; // Not used
 
     fn num_cols() -> usize {
         3
@@ -40,9 +38,9 @@ impl<R: Semiring + 'static> Uair<R> for TestUairSimpleMultiplication {
     ) where
         B: ConstraintBuilder,
     {
-        b.assert_in_ideal(up[0].clone() * &up[1] - &down[0], &B::Ideal::zero_ideal());
-        b.assert_in_ideal(up[1].clone() * &up[2] - &down[1], &B::Ideal::zero_ideal());
-        b.assert_in_ideal(up[0].clone() * &up[2] - &down[2], &B::Ideal::zero_ideal());
+        b.assert_zero(up[0].clone() * &up[1] - &down[0]);
+        b.assert_zero(up[1].clone() * &up[2] - &down[1]);
+        b.assert_zero(up[0].clone() * &up[2] - &down[2]);
     }
 }
 

@@ -10,7 +10,7 @@ use crate::{
 /// A `ConstraintBuilder` that collects
 /// ideals used in a `Uair`.
 pub struct IdealCollector<I: Ideal> {
-    pub ideals: Vec<I>,
+    pub ideals: Vec<CollectedIdeal<I>>,
 }
 
 impl<I: Ideal> IdealCollector<I> {
@@ -47,7 +47,11 @@ where
     type Ideal = CollectedIdeal<I>;
 
     fn assert_in_ideal(&mut self, _expr: Self::Expr, ideal: &Self::Ideal) {
-        self.ideals.push(ideal.0.clone());
+        self.ideals.push(ideal.clone());
+    }
+
+    fn assert_zero(&mut self, _expr: Self::Expr) {
+        self.ideals.push(CollectedIdeal::zero());
     }
 }
 
@@ -57,13 +61,28 @@ where
 /// ideal checks for the sake of just
 /// collecting the inner ideals.
 #[derive(Clone, Copy, Debug)]
-pub struct CollectedIdeal<I: Ideal>(I);
+pub struct CollectedIdeal<I: Ideal> {
+    pub ideal_or_zero: Option<I>,
+}
 
-impl<I: Ideal> Ideal for CollectedIdeal<I> {
-    fn zero_ideal() -> Self {
-        Self(I::zero_ideal())
+impl<I: Ideal> CollectedIdeal<I> {
+    pub fn zero() -> Self {
+        CollectedIdeal {
+            ideal_or_zero: None,
+        }
+    }
+
+    pub fn map<I2: Ideal>(&self, f: impl FnOnce(&I) -> I2) -> CollectedIdeal<I2> {
+        match &self.ideal_or_zero {
+            Some(ideal) => CollectedIdeal {
+                ideal_or_zero: Some(f(ideal)),
+            },
+            None => CollectedIdeal::zero(),
+        }
     }
 }
+
+impl<I: Ideal> Ideal for CollectedIdeal<I> {}
 
 impl<I: Ideal> FromRef<CollectedIdeal<I>> for CollectedIdeal<I> {
     fn from_ref(value: &CollectedIdeal<I>) -> Self {
@@ -73,12 +92,14 @@ impl<I: Ideal> FromRef<CollectedIdeal<I>> for CollectedIdeal<I> {
 
 impl<I: Ideal> FromRef<I> for CollectedIdeal<I> {
     fn from_ref(value: &I) -> Self {
-        Self(value.clone())
+        Self {
+            ideal_or_zero: Some(value.clone()),
+        }
     }
 }
 
-impl<I: Ideal> IdealCheck<CollectedIdeal<I>> for DummySemiring {
-    fn is_contained_in(&self, _ideal: &CollectedIdeal<I>) -> bool {
+impl<I: Ideal> IdealCheck<DummySemiring> for CollectedIdeal<I> {
+    fn contains(&self, _value: &DummySemiring) -> bool {
         // Do nothing.
         true
     }
