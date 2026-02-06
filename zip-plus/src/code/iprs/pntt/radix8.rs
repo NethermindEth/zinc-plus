@@ -21,17 +21,6 @@ use params::*;
 pub(crate) use mul_by_twiddle::*;
 
 /// The main entrypoint of the radix-8 pseudo NTT algorithm.
-///
-/// The `CHECK` const generic controls overflow checking:
-/// - When `CHECK` is `true`, performs overflow-checked addition (safer).
-/// - When `CHECK` is `false`, uses unchecked addition (faster, ~12-15%
-///   speedup).
-///
-/// The unchecked version is safe for IPRS encoding because:
-/// - Input: i32 (31 bits), Twiddle: i64 (16 bits)
-/// - After widening multiply: 47 bits
-/// - After 8 additions in butterfly: 50 bits, after 32 in base layer: 52 bits
-/// - i64 capacity: 63 bits, so overflow is impossible.
 pub(crate) fn pntt<In, Out, C, MulInByTwiddle, MulOutByTwiddle, const CHECK: bool>(
     input: &[In],
     params: &Radix8PnttParams<C>,
@@ -120,9 +109,6 @@ where
 }
 
 /// Allocates the output vector and performs base layer multiplications.
-///
-/// When `CHECK` is `true`, performs overflow-checked addition.
-/// When `CHECK` is `false`, uses unchecked addition for better performance.
 #[allow(clippy::arithmetic_side_effects)]
 fn base_multiply_into_output<In, Out, C, M, const CHECK: bool>(
     input: &[In],
