@@ -108,65 +108,6 @@ pub fn do_bench_iprs_matrix_shapes<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK
     commit::<Zt, Lc, 11>(group);
 }
 
-/// Benchmark for F257 IPRS configurations with different matrix shapes.
-/// Uses poly_size=2^P with different row/column configurations.
-/// Includes config_name in the benchmark ID to distinguish configs with same matrix shape.
-pub fn do_bench_iprs_f257_matrix_shapes<
-    Zt: ZipTypes,
-    Lc: LinearCode<Zt>,
-    const CHECK_FOR_OVERFLOWS: bool,
-    const P: usize,
->(
-    group: &mut BenchmarkGroup<WallTime>,
-    config_name: &str,
-) where
-    StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
-    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
-    <F as Field>::Inner: FromRef<Zt::Fmod>,
-    Zt::Eval: ProjectableToField<F>,
-    Zt::Cw: ProjectableToField<F>,
-{
-    commit_with_config_name::<Zt, Lc, P>(group, config_name);
-}
-
-pub fn commit_with_config_name<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-    config_name: &str,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-{
-    let mut rng = ThreadRng::default();
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
-    let params = ZipPlus::setup(poly_size, linear_code);
-    let row_len = params.linear_code.row_len();
-    let rows = poly_size / row_len;
-
-    group.bench_function(
-        format!(
-            "Commit: {config_name}, matrix={rows}x{row_len}, Eval={}, Cw={}, poly_size=2^{P}",
-            Zt::Eval::type_name(),
-            Zt::Cw::type_name(),
-            rows = rows,
-            row_len = row_len
-        ),
-        |b| {
-            b.iter_custom(|iters| {
-                let mut total_duration = Duration::ZERO;
-                for _ in 0..iters {
-                    let poly = DenseMultilinearExtension::rand(P, &mut rng);
-                    let timer = Instant::now();
-                    let res = ZipPlus::commit(&params, &poly).expect("Failed to commit");
-                    black_box(res);
-                    total_duration += timer.elapsed();
-                }
-
-                total_duration
-            })
-        },
-    );
-}
-
 pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where
