@@ -4,10 +4,11 @@ This document describes the optimizations made to the IPRS (Integer Pseudo Reed-
 
 ## Overview
 
-Two major optimizations were implemented to improve IPRS encoding performance:
+Three major optimizations were implemented to improve IPRS encoding performance:
 
 1. **Unchecked Butterfly Addition** (~12-15% overall speedup)
-2. **In-Place PNTT Output** (reduces per-row allocations)
+2. **Unchecked Base Layer Addition** (~5-10% additional speedup)
+3. **In-Place PNTT Output** (reduces per-row allocations)
 
 ---
 
@@ -118,7 +119,60 @@ Benchmarks run on Apple M-series (aarch64), 100 iterations of `encode_rows`:
 
 ---
 
-## 2. In-Place PNTT Output Optimization
+## 2. Unchecked Base Layer Optimization
+
+### Background
+
+The same overflow analysis that applies to the butterfly stage also applies to the base layer. The base layer performs a matrix-vector multiplication with the 64×32 Vandermonde-like matrix, accumulating 32 terms per output.
+
+### The Problem
+
+The original base layer implementation used the `add!` macro which calls `checked_add`, performing overflow checking on every addition in the inner loop.
+
+### The Solution
+
+Using the same reasoning as the butterfly optimization, the base layer values cannot overflow:
+
+| Stage | Maximum Value | Bits Required |
+|-------|---------------|---------------|
+| Input (i32) | $2^{31}$ | 31 bits |
+| Twiddle | $2^{16}$ (Vandermonde matrix entries) | 16 bits |
+| After widening multiply | $2^{47}$ | 47 bits |
+| After 32 additions | $32 \times 2^{47} = 2^{52}$ | 52 bits |
+| i64 capacity | $2^{63}$ | 63 bits |
+
+Since $2^{52} \ll 2^{63}$, overflow is impossible.
+
+### Implementation
+
+When `unchecked-butterfly` is enabled, the base layer functions use direct `+` operator instead of the `add!` macro:
+
+**File:** `zip-plus/src/code/iprs/pntt/radix8.rs`
+
+```rust
+/// Allocates the output vector and performs base layer multiplications.
+/// This version uses unchecked addition for better performance.
+#[cfg(feature = "unchecked-butterfly")]
+fn base_multiply_into_output_unchecked<In, Out, C, M>(...) -> Vec<Out>
+where
+    Out: Clone + FromRef<In> + Send + Sync + for<'a> Add<&'a Out, Output = Out>,
+    ...
+{
+    // ... same logic, but uses:
+    acc + &term  // Direct add instead of add!(acc, &term)
+}
+```
+
+### Expected Performance Improvement
+
+Based on the base layer taking ~54% of total PNTT time, and assuming similar overhead reduction as butterflies:
+- Base layer speedup: ~15-20%
+- Overall PNTT speedup: ~8-11% additional
+- Combined with butterfly optimization: **~20-25% total speedup**
+
+---
+
+## 3. In-Place PNTT Output Optimization
 
 ### Background
 
@@ -280,7 +334,7 @@ cargo test --release --features "asm simd parallel unchecked-butterfly" -p zip-p
 
 ## Safety Considerations
 
-### Unchecked Butterfly
+### Unchecked Butterfly and Base Layer
 
 ✅ **Safe to use when:**
 - Encoding with standard IPRS parameters ($\mathbb{F}_{2^{16}+1}$, DEPTH=2)
@@ -306,8 +360,8 @@ The in-place optimization uses `MaybeUninit` and requires careful handling:
 |------|---------|
 | `zip-plus/Cargo.toml` | Added `unchecked-butterfly` feature flag |
 | `zip-plus/src/code.rs` | Added `encode_into_uninit` and `encode_fused_into_uninit` to `LinearCode` trait |
-| `zip-plus/src/code/iprs.rs` | Implemented in-place encoding for `IprsCode` |
-| `zip-plus/src/code/iprs/pntt/radix8.rs` | Added `pntt_into`, conditional butterfly imports |
+| `zip-plus/src/code/iprs.rs` | Implemented in-place encoding for `IprsCode`, conditional `encode_inner` for unchecked |
+| `zip-plus/src/code/iprs/pntt/radix8.rs` | Added `pntt_into`, conditional butterfly imports, `base_multiply_into_output_unchecked`, `base_multiply_into_output_in_place_unchecked` |
 | `zip-plus/src/code/iprs/pntt/radix8/butterfly.rs` | Added `apply_radix_8_butterflies_unchecked` |
 | `zip-plus/src/pcs/phase_commit.rs` | Updated `encode_rows` to use in-place encoding |
 
@@ -317,4 +371,5 @@ The in-place optimization uses `MaybeUninit` and requires careful handling:
 
 1. **SIMD addition** — Vectorize the 32-coefficient polynomial additions using NEON/AVX
 2. **Cache optimization** — Improve memory access patterns in butterfly stage
-3. **Base layer optimization** — The base layer takes ~54% of time and could benefit from similar analysis
+3. **SIMD base layer multiply** — Vectorize the base layer matrix-vector multiplication
+4. **Reduce cloning in butterflies** — Avoid cloning 8 subresults per butterfly call

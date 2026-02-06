@@ -16,8 +16,10 @@ use num_traits::{CheckedAdd, CheckedMul};
 use rayon::prelude::*;
 use std::{array, fmt::Debug, mem::MaybeUninit};
 #[cfg(feature = "unchecked-butterfly")]
-use std::ops::AddAssign;
-use zinc_utils::{add, cfg_chunks_mut, cfg_into_iter, from_ref::FromRef};
+use std::ops::{Add, AddAssign};
+#[cfg(not(feature = "unchecked-butterfly"))]
+use zinc_utils::add;
+use zinc_utils::{cfg_chunks_mut, cfg_into_iter, from_ref::FromRef};
 
 #[cfg(feature = "pntt-timing")]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -112,7 +114,8 @@ where
         + Send
         + Sync
         + Debug
-        + for<'a> AddAssign<&'a Out>,
+        + for<'a> AddAssign<&'a Out>
+        + for<'a> Add<&'a Out, Output = Out>,
     MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
     MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
 {
@@ -129,7 +132,7 @@ pub(crate) fn pntt<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
 where
     C: Config,
     In: Clone + Send + Sync,
-    Out: CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug + for<'a> AddAssign<&'a Out>,
+    Out: CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug + for<'a> AddAssign<&'a Out> + for<'a> Add<&'a Out, Output = Out>,
     MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
     MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
 {
@@ -238,7 +241,8 @@ fn pntt_into_impl<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
         + Send
         + Sync
         + Debug
-        + for<'a> AddAssign<&'a Out>,
+        + for<'a> AddAssign<&'a Out>
+        + for<'a> Add<&'a Out, Output = Out>,
     MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
     MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
 {
@@ -258,7 +262,7 @@ fn pntt_into_impl<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
         out.len()
     );
 
-    base_multiply_into_output_in_place::<_, _, _, MulInByTwiddle>(input, params, out);
+    base_multiply_into_output_in_place_unchecked::<_, _, _, MulInByTwiddle>(input, params, out);
 
     let out_init = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut Out, out.len())
@@ -276,7 +280,7 @@ fn pntt_impl<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
 where
     C: Config,
     In: Clone + Send + Sync,
-    Out: CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug + for<'a> AddAssign<&'a Out>,
+    Out: CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug + for<'a> AddAssign<&'a Out> + for<'a> Add<&'a Out, Output = Out>,
     MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
     MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
 {
@@ -294,7 +298,7 @@ where
     #[cfg(feature = "pntt-timing")]
     let base_start = std::time::Instant::now();
     
-    let mut output = base_multiply_into_output::<_, _, _, MulInByTwiddle>(input, params);
+    let mut output = base_multiply_into_output_unchecked::<_, _, _, MulInByTwiddle>(input, params);
 
     #[cfg(feature = "pntt-timing")]
     {
@@ -408,6 +412,7 @@ where
 }
 
 /// Allocates the output vector and performs base layer multiplications.
+#[cfg(not(feature = "unchecked-butterfly"))]
 #[allow(clippy::arithmetic_side_effects)]
 fn base_multiply_into_output<In, Out, C, M>(input: &[In], params: &Radix8PnttParams<C>) -> Vec<Out>
 where
@@ -447,6 +452,7 @@ where
 }
 
 /// Writes base layer multiplication output directly into an uninitialized buffer.
+#[cfg(not(feature = "unchecked-butterfly"))]
 #[allow(clippy::arithmetic_side_effects)]
 fn base_multiply_into_output_in_place<In, Out, C, M>(
     input: &[In],
@@ -485,7 +491,80 @@ fn base_multiply_into_output_in_place<In, Out, C, M>(
         });
 }
 
-// TODO: make unchecked versions of the above.
+/// Allocates the output vector and performs base layer multiplications.
+/// This version uses unchecked addition for better performance.
+#[cfg(feature = "unchecked-butterfly")]
+#[allow(clippy::arithmetic_side_effects)]
+fn base_multiply_into_output_unchecked<In, Out, C, M>(input: &[In], params: &Radix8PnttParams<C>) -> Vec<Out>
+where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: Clone + FromRef<In> + Send + Sync + for<'a> Add<&'a Out, Output = Out>,
+    M: MulByTwiddle<In, PnttInt, Output = Out>,
+{
+    cfg_into_iter!(0..C::OUTPUT_LEN)
+        .map(|i| {
+            let chunk = i >> C::BASE_DIM_LOG2; // i / C::BASE_DIM
+            let row = i & C::BASE_DIM_MASK; // i % C::BASE_DIM
+            let oct_rev_chunk = octet_reversal(chunk, C::DEPTH);
+
+            // We always know that the first column of the Vandermonde matrix
+            // consists of 1's.
+            params.base_matrix[row][1..].iter().enumerate().fold(
+                Out::from_ref(&input[oct_rev_chunk]),
+                |acc, (col, bm_row_col)| {
+                    let term = M::mul_by_twiddle(
+                        &input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))],
+                        bm_row_col,
+                    );
+
+                    acc + &term
+                },
+            )
+        })
+        .collect()
+}
+
+/// Writes base layer multiplication output directly into an uninitialized buffer.
+/// This version uses unchecked addition for better performance.
+#[cfg(feature = "unchecked-butterfly")]
+#[allow(clippy::arithmetic_side_effects)]
+fn base_multiply_into_output_in_place_unchecked<In, Out, C, M>(
+    input: &[In],
+    params: &Radix8PnttParams<C>,
+    out: &mut [MaybeUninit<Out>],
+) where
+    C: Config,
+    In: Clone + Send + Sync,
+    Out: Clone + FromRef<In> + Send + Sync + for<'a> Add<&'a Out, Output = Out>,
+    M: MulByTwiddle<In, PnttInt, Output = Out>,
+{
+    cfg_chunks_mut!(out, C::BASE_DIM)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+            let start = chunk_idx * C::BASE_DIM;
+            for (offset, out_cell) in chunk.iter_mut().enumerate() {
+                let i = start + offset;
+                let chunk = i >> C::BASE_DIM_LOG2; // i / C::BASE_DIM
+                let row = i & C::BASE_DIM_MASK; // i % C::BASE_DIM
+                let oct_rev_chunk = octet_reversal(chunk, C::DEPTH);
+
+                let value = params.base_matrix[row][1..].iter().enumerate().fold(
+                    Out::from_ref(&input[oct_rev_chunk]),
+                    |acc, (col, bm_row_col)| {
+                        let term = M::mul_by_twiddle(
+                            &input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))],
+                            bm_row_col,
+                        );
+
+                        acc + &term
+                    },
+                );
+
+                out_cell.write(value);
+            }
+        });
+}
 
 #[cfg(test)]
 mod tests {
@@ -530,8 +609,12 @@ mod tests {
         let our_res = {
             let params = Radix8PnttParams::<C>::new();
 
+            #[cfg(not(feature = "unchecked-butterfly"))]
             let output =
                 base_multiply_into_output::<_, _, _, MBSMulByTwiddle<CHECKED>>(&input, &params);
+            #[cfg(feature = "unchecked-butterfly")]
+            let output =
+                base_multiply_into_output_unchecked::<_, _, _, MBSMulByTwiddle<CHECKED>>(&input, &params);
 
             output.into_iter().map(C::Field::from).collect_vec()
         };

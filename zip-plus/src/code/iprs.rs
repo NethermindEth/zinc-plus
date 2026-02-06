@@ -51,11 +51,42 @@ where
     Config: PnttConfig,
 {
     /// Encode without modular reduction, purely over the integers.
+    #[cfg(not(feature = "unchecked-butterfly"))]
     fn encode_inner<In, Out, M>(&self, row: &[In]) -> Vec<Out>
     where
         In: Clone + Send + Sync,
         Out: CheckedAdd
             + for<'a> AddAssign<&'a Out>
+            + CheckedMul
+            + for<'a> MulByScalar<&'a PnttInt>
+            + Sum
+            + FromRef<In>
+            + Clone
+            + Debug
+            + Send
+            + Sync,
+        M: MulByTwiddle<In, PnttInt, Output = Out>,
+    {
+        assert_eq!(
+            row.len(),
+            Config::INPUT_LEN,
+            "Input length {} does not match expected row length {}",
+            row.len(),
+            Config::INPUT_LEN
+        );
+
+        pntt::radix8::pntt::<_, _, _, M, MBSMulByTwiddle<CHECKED>>(row, &self.pntt_params)
+    }
+
+    /// Encode without modular reduction, purely over the integers.
+    /// This version is used when unchecked-butterfly feature is enabled.
+    #[cfg(feature = "unchecked-butterfly")]
+    fn encode_inner<In, Out, M>(&self, row: &[In]) -> Vec<Out>
+    where
+        In: Clone + Send + Sync,
+        Out: CheckedAdd
+            + for<'a> AddAssign<&'a Out>
+            + for<'a> std::ops::Add<&'a Out, Output = Out>
             + CheckedMul
             + for<'a> MulByScalar<&'a PnttInt>
             + Sum
