@@ -22,7 +22,6 @@ const BUTTERFLY_TABLE: [[usize; 7]; 8] = [
 /// of subresults in `x`. `twiddles[j][i]` is the factor to multiply
 /// `x[j + 1]` by when the butterfly table requests the `i`-th twiddle.
 /// Use `mul_by_twiddle` as a means to multiply `Out` by `Twiddle`.
-///
 #[allow(clippy::arithmetic_side_effects)]
 pub(crate) fn apply_radix_8_butterflies<R, Twiddle, M, const CHECK: bool>(
     ys: [&mut R; 8],
