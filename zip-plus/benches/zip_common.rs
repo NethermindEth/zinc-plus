@@ -58,7 +58,7 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     // merkle_root::<Zt, 14>(group);
     // merkle_root::<Zt, 15>(group);
     // merkle_root::<Zt, 16>(group);
-    // commit::<Zt, Lc, 12>(group);
+    commit::<Zt, Lc, 12>(group);
     commit::<Zt, Lc, 13>(group);
     commit::<Zt, Lc, 14>(group);
     commit::<Zt, Lc, 15>(group);

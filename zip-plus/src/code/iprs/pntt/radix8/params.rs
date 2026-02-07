@@ -318,6 +318,26 @@ pub type PnttConfigF2_16_1_Base32_Depth1_Rate1_4 =
 pub type PnttConfigF2_16_1_Base64_Depth1_Rate1_4 =
     PnttConfigF2_16_1_Rate1_4_Base<64, 1>;
 
+/// Depth-3 configuration for message size $2^{12}$ with rate $\frac{1}{2}$.
+/// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
+///
+/// Configuration:
+/// - `BASE_LEN = 8`, `BASE_DIM = 16`
+/// - `INPUT_LEN = 8 * 8^3 = 4096 = 2^{12}`
+/// - `OUTPUT_LEN = 16 * 8^3 = 8192 = 2^{13}`
+pub type PnttConfigF2_16_1_Base8_Depth3_Rate1_2 =
+    PnttConfigF2_16_1_Rate1_2_Base<8, 3>;
+
+/// Depth-3 configuration for message size $2^{12}$ with rate $\frac{1}{4}$.
+/// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
+///
+/// Configuration:
+/// - `BASE_LEN = 8`, `BASE_DIM = 32`
+/// - `INPUT_LEN = 8 \cdot 8^3 = 4096 = 2^{12}`
+/// - `OUTPUT_LEN = 32 \cdot 8^3 = 16384 = 2^{14}`
+pub type PnttConfigF2_16_1_Base8_Depth3_Rate1_4 =
+    PnttConfigF2_16_1_Rate1_4_Base<8, 3>;
+
 /// Pseudo NTT configuration derived from the field Fp for p = 12289.
 /// This is the smallest prime supporting 4096th roots of unity.
 ///
@@ -381,6 +401,19 @@ mod tests {
         assert_eq!(C::INPUT_LEN, 2048); // 4 * 8^3 = 2^11
         assert_eq!(C::OUTPUT_LEN, 4096); // 8 * 8^3 = 2^12
         assert_eq!(C::FIELD_MODULUS, 12289);
+        // Rate = INPUT_LEN / OUTPUT_LEN = 1/2
+    }
+
+    #[test]
+    fn check_f65537_base8_depth3_config() {
+        // Verify the configuration parameters for 2^12 message size
+        type C = PnttConfigF2_16_1_Base8_Depth3_Rate1_2;
+        assert_eq!(C::BASE_LEN, 8);
+        assert_eq!(C::BASE_DIM, 16);
+        assert_eq!(C::DEPTH, 3);
+        assert_eq!(C::INPUT_LEN, 4096); // 8 * 8^3 = 2^12
+        assert_eq!(C::OUTPUT_LEN, 8192); // 16 * 8^3 = 2^13
+        assert_eq!(C::FIELD_MODULUS, 65537);
         // Rate = INPUT_LEN / OUTPUT_LEN = 1/2
     }
 }

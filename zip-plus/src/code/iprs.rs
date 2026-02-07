@@ -1,4 +1,4 @@
-mod pntt;
+pub mod pntt;
 
 #[cfg(feature = "pntt-timing")]
 pub use pntt::radix8::{reset_timing, print_timing};
@@ -22,6 +22,8 @@ pub use pntt::radix8::params::{
     PnttConfigF2_16_1_Base32_Depth1_Rate1_4,
     PnttConfigF2_16_1_Base64_Depth1_Rate1_2,
     PnttConfigF2_16_1_Base64_Depth1_Rate1_4,
+    PnttConfigF2_16_1_Base8_Depth3_Rate1_2,
+    PnttConfigF2_16_1_Base8_Depth3_Rate1_4,
     PnttConfigF2_16_1,
     PnttConfigF2_16_1_Depth2_Rate1_2,
     PnttConfigF2_16_1_Depth2_Rate1_4,
