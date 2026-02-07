@@ -166,6 +166,46 @@ type IprsCode128Bit_Base256_Depth2_Rate1_4 =
 type IprsCode128Bit_Depth3_Rate1_2 =
     IprsCode<BenchZipTypes128Bit, PnttConfigF2_16_1_Depth3_Rate1_2, Int2WideningMulByScalar>;
 
+// --- 128-bit eval with 256-bit codewords for depth-3 (avoids Int<3> overflow) ---
+
+/// ZipTypes for 128-bit evaluations with Int<4> codewords (256 bits).
+/// Needed for depth-3 PNTT where 3 recursion levels overflow Int<3>.
+struct BenchZipTypes128BitDepth3 {}
+impl ZipTypes for BenchZipTypes128BitDepth3 {
+    const NUM_COLUMN_OPENINGS: usize = 200;
+    type Eval = Int<2>;
+    type Cw = Int<4>;
+    type Fmod = Uint<{ INT_LIMBS * 4 }>;
+    type PrimeTest = MillerRabin;
+    type Chal = i128;
+    type Pt = i128;
+    type CombR = Int<6>;
+    type Comb = Self::CombR;
+    type EvalDotChal = ScalarProduct;
+    type CombDotChal = ScalarProduct;
+    type ArrCombRDotChal = MBSInnerProduct;
+}
+
+/// Widening multiplication: Int<2> × i64 → Int<4>.
+#[derive(Clone, Default)]
+struct Int2WideningMulByScalarToInt4;
+
+impl WideningMulByScalar<Int<2>, i64> for Int2WideningMulByScalarToInt4 {
+    type Output = Int<4>;
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn mul_by_scalar_widen(lhs: &Int<2>, rhs: &i64) -> Self::Output {
+        use zinc_utils::from_ref::FromRef;
+        let wide: Int<4> = Int::<4>::from_ref(lhs);
+        let rhs_wide: Int<4> = Int::<4>::from_ref(rhs);
+        wide * rhs_wide
+    }
+}
+
+/// Depth-3 IPRS code for 128-bit inputs with Int<4> codewords (msg size 2^14).
+type IprsCode128BitDepth3_Cw4_Rate1_2 =
+    IprsCode<BenchZipTypes128BitDepth3, PnttConfigF2_16_1_Depth3_Rate1_2, Int2WideningMulByScalarToInt4>;
+
 // --- 256-bit integer types for encoding benchmarks ---
 
 /// ZipTypes for 256-bit integer evaluations (Int<4> = 4×64 = 256 bits).
@@ -475,6 +515,7 @@ fn zip_benchmarks_iprs_rate1_4_matrix_shapes(c: &mut Criterion) {
 
 /// Benchmark encoding 128-bit integers with selected IPRS codes:
 /// depth-2 for msg sizes 2^12 and 2^13, depth-3 for msg size 2^14.
+/// The depth-3 case uses Int<4> codewords (256 bits) to avoid overflow.
 fn zip_benchmarks_encode_128bit_selected(c: &mut Criterion) {
     let mut rng = ThreadRng::default();
     let mut group = c.benchmark_group("Zip Encode 128-bit Selected");
@@ -483,8 +524,29 @@ fn zip_benchmarks_encode_128bit_selected(c: &mut Criterion) {
     bench_encode_128bit!(group, rng, IprsCode128Bit_Base64_Depth2_Rate1_2,  12, "1/2");
     // depth 2, msg_size = 2^13, rate 1/2
     bench_encode_128bit!(group, rng, IprsCode128Bit_Base128_Depth2_Rate1_2, 13, "1/2");
-    // depth 3, msg_size = 2^14, rate 1/2
-    bench_encode_128bit!(group, rng, IprsCode128Bit_Depth3_Rate1_2,         14, "1/2");
+    // depth 3, msg_size = 2^14, rate 1/2 (uses Int<4> codewords to avoid overflow)
+    {
+        let len = 1usize << 14;
+        let code = IprsCode128BitDepth3_Cw4_Rate1_2::new(len);
+        let message: Vec<Int<2>> = (0..code.row_len())
+            .map(|_| rng.random())
+            .collect();
+
+        group.bench_function(
+            format!(
+                "Encode: {} -> {}, len={}, rate=1/2, field=F65537",
+                Int::<2>::type_name(),
+                Int::<4>::type_name(),
+                len,
+            ),
+            |b| {
+                b.iter(|| {
+                    let encoded = code.encode(&message);
+                    black_box(encoded);
+                })
+            },
+        );
+    }
 
     group.finish();
 }

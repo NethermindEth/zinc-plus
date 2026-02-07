@@ -8,6 +8,7 @@ use criterion::{BenchmarkGroup, measurement::WallTime};
 use crypto_bigint::U64;
 use crypto_primitives::{
     DenseRowMatrix, Field, FromWithConfig, IntoWithConfig, PrimeField,
+    crypto_bigint_int::Int,
     crypto_bigint_monty::MontyField,
 };
 use itertools::Itertools;
@@ -18,6 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
+use zinc_poly::univariate::dense::DensePolynomial;
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{cfg_chunks, cfg_chunks_mut, from_ref::FromRef, named::Named, projectable_to_field::ProjectableToField};
 #[cfg(feature = "parallel")]
@@ -33,6 +35,39 @@ use zip_plus::{
 const INT_LIMBS: usize = U64::LIMBS;
 type F = MontyField<{ INT_LIMBS * 4 }>;
 
+/// Trait for computing the runtime maximum bit width of a value.
+pub trait MaxBitWidth {
+    /// Returns the minimum number of bits needed to represent the magnitude.
+    /// For compound types (polynomials), returns the max across all coefficients.
+    fn max_bit_width(&self) -> u32;
+}
+
+impl MaxBitWidth for i32 {
+    fn max_bit_width(&self) -> u32 {
+        i32::BITS - self.unsigned_abs().leading_zeros()
+    }
+}
+
+impl MaxBitWidth for i64 {
+    fn max_bit_width(&self) -> u32 {
+        i64::BITS - self.unsigned_abs().leading_zeros()
+    }
+}
+
+impl<const LIMBS: usize> MaxBitWidth for Int<LIMBS> {
+    fn max_bit_width(&self) -> u32 {
+        self.inner().abs().bits_vartime()
+    }
+}
+
+impl<R: MaxBitWidth, const DEGREE_PLUS_ONE: usize> MaxBitWidth
+    for DensePolynomial<R, DEGREE_PLUS_ONE>
+{
+    fn max_bit_width(&self) -> u32 {
+        self.coeffs.iter().map(|c| c.max_bit_width()).max().unwrap_or(0)
+    }
+}
+
 pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where
@@ -40,7 +75,7 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
     <F as Field>::Inner: FromRef<Zt::Fmod>,
     Zt::Eval: ProjectableToField<F>,
-    Zt::Cw: ProjectableToField<F>,
+    Zt::Cw: ProjectableToField<F> + MaxBitWidth,
 {
     // encode_rows::<Zt, Lc, 12>(group);
     // encode_rows::<Zt, Lc, 13>(group);
@@ -87,7 +122,7 @@ pub fn do_bench_iprs_matrices<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_
     F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
     <F as Field>::Inner: FromRef<Zt::Fmod>,
     Zt::Eval: ProjectableToField<F>,
-    Zt::Cw: ProjectableToField<F>,
+    Zt::Cw: ProjectableToField<F> + MaxBitWidth,
 {
     commit::<Zt, Lc, 13>(group);
     commit::<Zt, Lc, 14>(group);
@@ -103,7 +138,7 @@ pub fn do_bench_iprs_matrix_shapes<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK
     F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
     <F as Field>::Inner: FromRef<Zt::Fmod>,
     Zt::Eval: ProjectableToField<F>,
-    Zt::Cw: ProjectableToField<F>,
+    Zt::Cw: ProjectableToField<F> + MaxBitWidth,
 {
     commit::<Zt, Lc, 11>(group);
 }
@@ -203,6 +238,7 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
+    Zt::Cw: MaxBitWidth,
 {
     let mut rng = ThreadRng::default();
     let poly_size = 1 << P;
@@ -211,14 +247,26 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     let row_len = params.linear_code.row_len();
     let rows = poly_size / row_len;
 
+    // Trial encoding to compute max codeword bit width (outside timed section)
+    let trial_poly = DenseMultilinearExtension::rand(P, &mut rng);
+    let trial_cw = ZipPlus::encode_rows(&params, row_len, &trial_poly);
+    let max_cw_bits: u32 = trial_cw
+        .to_rows_slices()
+        .iter()
+        .flat_map(|row| row.iter())
+        .map(|v| v.max_bit_width())
+        .max()
+        .unwrap_or(0);
+
     group.bench_function(
         format!(
-            "Commit: matrix={rows}x{row_len}, Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
+            "Commit: matrix={rows}x{row_len}, max_cw_bits={max_cw_bits}, Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
             Zt::Comb::type_name(),
             rows = rows,
-            row_len = row_len
+            row_len = row_len,
+            max_cw_bits = max_cw_bits,
         ),
         |b| {
             b.iter_custom(|iters| {

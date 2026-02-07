@@ -56,6 +56,7 @@ cargo bench --bench zip_benches -p zip-plus
 | `Zip IPRS rate1_4 Matrix Shapes` | IPRS depth-1, rate 1/4 | Single-row encode with base 16/32/64 at rate 1/4 |
 | `Zip Encode 128-bit` | IPRS depth-2, 128-bit ints | Encode `Int<2>` → `Int<3>` for sizes 2^11–2^14 at rate 1/2 and 1/4 |
 | `Zip Encode 256-bit` | IPRS depth-3, 256-bit ints | Encode `Int<4>` → `Int<5>` at rate 1/2 and 1/4 |
+| `Zip Encode 128-bit Selected` | IPRS depth-2/3, 128-bit ints | Encode `Int<2>` → `Int<3>` at sizes 2^12, 2^13 and `Int<2>` → `Int<4>` at size 2^14 (rate 1/2) |
 
 **Filter examples:**
 
@@ -68,6 +69,8 @@ cargo bench --bench zip_benches -p zip-plus -- "rate1_4"
 cargo bench --bench zip_benches -p zip-plus -- "128-bit"
 # Only 256-bit encoding
 cargo bench --bench zip_benches -p zip-plus -- "256-bit"
+# Only 128-bit selected (depth-2 for 2^12/2^13, depth-3 for 2^14)
+cargo bench --bench zip_benches -p zip-plus -- "128-bit Selected"
 ```
 
 ### `zip_plus_benches` — Zip+ PCS (polynomial coefficients)
@@ -93,6 +96,12 @@ cargo bench --bench zip_plus_benches -p zip-plus
 | `Zip+ IPRS F12289 Depth3 2^11` | IPRS depth-3 over F12289, row_len=2048, rate 1/2. Matrix sizes 4×2048 to 64×2048 |
 | `Zip+ IPRS F65537 Depth2 Rate1_4` | IPRS depth-2, row_len=4096, rate 1/4 (i64-safe). Matrix sizes 4×4096 to 32×4096 |
 | `Zip+ IPRS F65537 Depth2 Wide` | IPRS depth-2, rate 1/2, fixed 4 rows with increasing row_len (4096→32768). Explores wide matrices: 4×4096, 4×8192, 4×16384, 4×32768 |
+| `Zip+ Commit Comparison` | Commit with optimal matrix shapes: 2×2^12, 2×2^13, 4×2^13, 4×2^14, 8×2^14. Uses depth-2 for msg sizes 2^12–2^14 and depth-3 for msg size 2^14 |
+| `Zip+ Test Comparison` | Test phase (proximity test) with the same optimal matrix shapes as Commit Comparison |
+| `Zip+ Evaluate Comparison` | Evaluate phase (evaluation proof generation) with the same optimal matrix shapes as Commit Comparison |
+| `Zip+ Commit Comparison Rate1_4` | Same matrix shapes as Commit Comparison but with rate 1/4 IPRS codes (all depth-2) |
+| `Zip+ Test Comparison Rate1_4` | Test phase with rate 1/4 IPRS codes (same matrix shapes as Commit Comparison) |
+| `Zip+ Evaluate Comparison Rate1_4` | Evaluate phase with rate 1/4 IPRS codes (same matrix shapes as Commit Comparison) |
 
 **Filter examples:**
 
@@ -103,6 +112,10 @@ cargo bench --bench zip_plus_benches -p zip-plus -- "F65537 Depth3"
 cargo bench --bench zip_plus_benches -p zip-plus -- "F65537 Depth2 Rate1_4"
 # Only F65537 Depth2 Wide (fixed 4 rows, increasing row_len)
 cargo bench --bench zip_plus_benches -p zip-plus -- "Depth2 Wide"
+# Only Commit Comparison (optimal matrix shapes)
+cargo bench --bench zip_plus_benches -p zip-plus -- "Commit Comparison"
+# Only Commit Comparison at rate 1/4
+cargo bench --bench zip_plus_benches -p zip-plus -- "Commit Comparison Rate1_4"
 # Only F12289
 cargo bench --bench zip_plus_benches -p zip-plus -- "F12289"
 # Only RAA
@@ -110,6 +123,57 @@ cargo bench --bench zip_plus_benches -p zip-plus -- "RAA"
 # A specific matrix size
 cargo bench --bench zip_plus_benches -p zip-plus -- "matrix=16x4096"
 ```
+
+### Benchmark Results: Commit Comparison
+
+Results from the `Zip+ Commit Comparison` group with `--features "parallel simd asm unchecked-butterfly"` (Apple M-series):
+
+| Matrix | Entries | IPRS Config | Depth | msg_size | Time |
+|--------|---------|-------------|-------|----------|------|
+| 2×4096 | 2^13 | Base64 Depth2 | 2 | 2^12 | ~2.67 ms |
+| 2×8192 | 2^14 | Base128 Depth2 | 2 | 2^13 | ~6.77 ms |
+| 4×8192 | 2^15 | Base128 Depth2 | 2 | 2^13 | ~13.0 ms |
+| 4×16384 | 2^16 | Depth3 | 3 | 2^14 | ~15.9 ms |
+| 8×16384 | 2^17 | Depth3 | 3 | 2^14 | ~30.5 ms |
+
+### Benchmark Results: Test Comparison
+
+Results from the `Zip+ Test Comparison` group with `--features "parallel simd asm unchecked-butterfly"` (Apple M-series).
+The test phase performs the proximity test: it re-encodes each row and checks that the committed codeword is close to the encoding.
+
+| Matrix | Entries | IPRS Config | Depth | msg_size | Time |
+|--------|---------|-------------|-------|----------|------|
+| 2×4096 | 2^13 | Base64 Depth2 | 2 | 2^12 | ~562 µs |
+| 2×8192 | 2^14 | Base128 Depth2 | 2 | 2^13 | ~1.14 ms |
+| 4×8192 | 2^15 | Base128 Depth2 | 2 | 2^13 | ~1.58 ms |
+| 4×16384 | 2^16 | Depth3 | 3 | 2^14 | ~2.40 ms |
+| 8×16384 | 2^17 | Depth3 | 3 | 2^14 | ~3.05 ms |
+
+### Benchmark Results: Evaluate Comparison
+
+Results from the `Zip+ Evaluate Comparison` group with `--features "parallel simd asm unchecked-butterfly"` (Apple M-series).
+The evaluate phase generates the evaluation proof: it reduces the polynomial evaluation claim to column openings via the sumcheck protocol and computes the final field evaluation.
+
+| Matrix | Entries | IPRS Config | Depth | msg_size | Time |
+|--------|---------|-------------|-------|----------|------|
+| 2×4096 | 2^13 | Base64 Depth2 | 2 | 2^12 | ~1.58 ms |
+| 2×8192 | 2^14 | Base128 Depth2 | 2 | 2^13 | ~2.25 ms |
+| 4×8192 | 2^15 | Base128 Depth2 | 2 | 2^13 | ~3.96 ms |
+| 4×16384 | 2^16 | Depth3 | 3 | 2^14 | ~6.22 ms |
+| 8×16384 | 2^17 | Depth3 | 3 | 2^14 | ~10.8 ms |
+
+### Benchmark Results: 128-bit Encoding (Selected)
+
+Results from the `Zip Encode 128-bit Selected` group (`Int<2>` evaluations, rate 1/2, F65537):
+
+| msg_size | IPRS Config | Depth | Cw type | Time |
+|----------|-------------|-------|---------|------|
+| 2^12 = 4096 | Base64 Depth2 | 2 | `Int<3>` | ~1.39 ms |
+| 2^13 = 8192 | Base128 Depth2 | 2 | `Int<3>` | ~4.40 ms |
+| 2^14 = 16384 | Depth3 | 3 | `Int<4>` | ~7.81 ms |
+
+> **Note:** The depth-3 case for 2^14 requires `Int<4>` (256-bit) codewords because
+> 3 recursion levels overflow the default `Int<3>` (192-bit) codeword type.
 
 ### Proof Size Analysis
 
