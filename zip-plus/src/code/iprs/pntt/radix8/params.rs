@@ -454,6 +454,33 @@ pub type PnttConfigF2_16_1_Base128_Depth2_Rate1_4 =
 pub type PnttConfigF2_16_1_Base256_Depth2_Rate1_4 =
     PnttConfigF2_16_1_Rate1_4_Base<256, 2>;
 
+/// Depth-3 configuration for message size $2^{13}$ with rate $\frac{1}{4}$.
+/// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
+///
+/// **Warning:** This configuration overflows `i64` codeword coefficients at
+/// butterfly stage 2 (57-bit intermediate × 16-bit twiddle = 73 bits > 63).
+/// Use [`PnttConfigF2_16_1_Base128_Depth2_Rate1_4`] instead for `i64` coefficients.
+///
+/// Configuration:
+/// - `BASE_LEN = 16`, `BASE_DIM = 64`
+/// - `INPUT_LEN = 16 \cdot 8^3 = 8192 = 2^{13}`
+/// - `OUTPUT_LEN = 64 \cdot 8^3 = 32768 = 2^{15}`
+pub type PnttConfigF2_16_1_Base16_Depth3_Rate1_4 =
+    PnttConfigF2_16_1_Rate1_4_Base<16, 3>;
+
+/// Depth-3 configuration for message size $2^{14}$ with rate $\frac{1}{4}$.
+/// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
+///
+/// **Warning:** This configuration overflows `i64` codeword coefficients at
+/// butterfly stage 2 (58-bit intermediate × 16-bit twiddle = 74 bits > 63).
+/// Use [`PnttConfigF2_16_1_Base256_Depth2_Rate1_4`] instead for `i64` coefficients.
+///
+/// Configuration:
+/// - `BASE_LEN = 32`, `BASE_DIM = 128`
+/// - `INPUT_LEN = 32 \cdot 8^3 = 16384 = 2^{14}`
+/// - `OUTPUT_LEN = 128 \cdot 8^3 = 65536 = 2^{16}`
+pub type PnttConfigF2_16_1_Depth3_Rate1_4 = PnttConfigF2_16_1_Rate1_4<3>;
+
 /// Pseudo NTT configuration derived from the field Fp for p = 12289.
 /// This is the smallest prime supporting 4096th roots of unity.
 ///
