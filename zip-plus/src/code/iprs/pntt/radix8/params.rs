@@ -224,6 +224,24 @@ mod fq_12289 {
     pub const MODULUS: u32 = FqConfig::MODULUS.0[0] as u32;
 }
 
+/// Field Fp for p = 257 = 2^8 + 1 (Fermat prime).
+/// Supports up to 256th roots of unity, enabling small depth-2
+/// configurations with compact base matrices.
+mod fq_257 {
+    #![allow(non_local_definitions)]
+    use ark_ff::{Fp64, MontBackend, MontConfig};
+    #[derive(MontConfig)]
+    #[modulus = "257"]
+    #[generator = "3"]
+    pub struct FqConfig;
+
+    pub type FqBackend = MontBackend<FqConfig, 1>;
+    pub type Fq = Fp64<FqBackend>;
+
+    #[allow(clippy::cast_possible_truncation)]
+    pub const MODULUS: u32 = FqConfig::MODULUS.0[0] as u32;
+}
+
 impl<const DEPTH: usize> Config for PnttConfigF2_16_1<DEPTH> {
     type Field = fq::Fq;
     const FIELD_MODULUS: u32 = fq::MODULUS;
@@ -320,11 +338,11 @@ pub type PnttConfigF2_16_1_Base64_Depth1_Rate1_4 =
 
 /// Depth-3 configuration for message size $2^{12}$ with rate $\frac{1}{2}$.
 /// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
-///
+/// 
 /// Configuration:
 /// - `BASE_LEN = 8`, `BASE_DIM = 16`
-/// - `INPUT_LEN = 8 * 8^3 = 4096 = 2^{12}`
-/// - `OUTPUT_LEN = 16 * 8^3 = 8192 = 2^{13}`
+/// - `INPUT_LEN = 8 \cdot 8^3 = 4096 = 2^{12}`
+/// - `OUTPUT_LEN = 16 \cdot 8^3 = 8192 = 2^{13}`
 pub type PnttConfigF2_16_1_Base8_Depth3_Rate1_2 =
     PnttConfigF2_16_1_Rate1_2_Base<8, 3>;
 
@@ -368,6 +386,45 @@ impl<const BASE_LEN: usize, const DEPTH: usize> Config
 /// Uses the smallest possible base field: $\mathbb{F}_{12289}$ where $12289 = 3 \cdot 2^{12} + 1$.
 pub type PnttConfigF12289_Depth3_Rate1_2 = PnttConfigF12289_Rate1_2<4, 3>;
 
+/// Pseudo NTT configuration derived from the field Fp for p = 257 = 2^8 + 1.
+/// This is a Fermat prime with multiplicative group of order 256.
+///
+/// With `BASE_LEN` and `BASE_DIM = 2 * BASE_LEN`, this yields rate 1/2 codes.
+#[derive(Clone, Copy)]
+pub struct PnttConfigF257_Rate1_2<const BASE_LEN: usize, const DEPTH: usize>;
+
+impl<const BASE_LEN: usize, const DEPTH: usize> Config
+    for PnttConfigF257_Rate1_2<BASE_LEN, DEPTH>
+{
+    type Field = fq_257::Fq;
+    const FIELD_MODULUS: u32 = fq_257::MODULUS;
+    const BASE_LEN: usize = BASE_LEN;
+    const BASE_DIM: usize = BASE_LEN * 2;
+    const DEPTH: usize = DEPTH;
+    // 8th roots of unity in F_257 (normalized to [-128, 128])
+    // ω = 64 is a primitive 8th root of unity (3^32 mod 257)
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 64, -16, 4, -1, -64, 16, -4];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq_257::FqBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+/// Depth-2 configuration for message size $2^7$ with rate $\frac{1}{2}$.
+/// Uses the Fermat prime field: $\mathbb{F}_{257}$ where $257 = 2^8 + 1$.
+pub type PnttConfigF257_Depth2_Rate1_2 = PnttConfigF257_Rate1_2<2, 2>;
+
+/// Depth-1 configuration for message size $2^7$ with rate $\frac{1}{2}$.
+/// Uses the Fermat prime field: $\mathbb{F}_{257}$ where $257 = 2^8 + 1$.
+/// Alternative to Depth2 with larger base matrix (32x16 vs 4x2).
+pub type PnttConfigF257_Base16_Depth1_Rate1_2 = PnttConfigF257_Rate1_2<16, 1>;
+
+/// Depth-1 configuration for message size $2^6$ with rate $\frac{1}{2}$.
+/// Uses the Fermat prime field: $\mathbb{F}_{257}$ where $257 = 2^8 + 1$.
+pub type PnttConfigF257_Base8_Depth1_Rate1_2 = PnttConfigF257_Rate1_2<8, 1>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,6 +459,48 @@ mod tests {
         assert_eq!(C::OUTPUT_LEN, 4096); // 8 * 8^3 = 2^12
         assert_eq!(C::FIELD_MODULUS, 12289);
         // Rate = INPUT_LEN / OUTPUT_LEN = 1/2
+    }
+
+    #[test]
+    fn check_twiddles_f257() {
+        check_twiddles_generic::<PnttConfigF257_Depth2_Rate1_2>();
+    }
+
+    #[test]
+    fn check_f257_depth2_config() {
+        // Verify the configuration parameters
+        type C = PnttConfigF257_Depth2_Rate1_2;
+        assert_eq!(C::BASE_LEN, 2);
+        assert_eq!(C::BASE_DIM, 4);
+        assert_eq!(C::DEPTH, 2);
+        assert_eq!(C::INPUT_LEN, 128); // 2 * 8^2 = 2^7
+        assert_eq!(C::OUTPUT_LEN, 256); // 4 * 8^2 = 2^8
+        assert_eq!(C::FIELD_MODULUS, 257);
+        // Rate = INPUT_LEN / OUTPUT_LEN = 1/2
+    }
+
+    #[test]
+    fn check_f257_base16_depth1_config() {
+        // Verify the configuration parameters for 2^7 message size with depth 1
+        type C = PnttConfigF257_Base16_Depth1_Rate1_2;
+        assert_eq!(C::BASE_LEN, 16);
+        assert_eq!(C::BASE_DIM, 32);
+        assert_eq!(C::DEPTH, 1);
+        assert_eq!(C::INPUT_LEN, 128); // 16 * 8^1 = 2^7
+        assert_eq!(C::OUTPUT_LEN, 256); // 32 * 8^1 = 2^8
+        assert_eq!(C::FIELD_MODULUS, 257);
+    }
+
+    #[test]
+    fn check_f257_base8_depth1_config() {
+        // Verify the configuration parameters for 2^6 message size
+        type C = PnttConfigF257_Base8_Depth1_Rate1_2;
+        assert_eq!(C::BASE_LEN, 8);
+        assert_eq!(C::BASE_DIM, 16);
+        assert_eq!(C::DEPTH, 1);
+        assert_eq!(C::INPUT_LEN, 64); // 8 * 8^1 = 2^6
+        assert_eq!(C::OUTPUT_LEN, 128); // 16 * 8^1 = 2^7
+        assert_eq!(C::FIELD_MODULUS, 257);
     }
 
     #[test]

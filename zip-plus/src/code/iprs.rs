@@ -16,6 +16,10 @@ use crate::{
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::{CheckedAdd, CheckedMul};
 pub use pntt::radix8::params::{
+    PnttConfigF257_Base8_Depth1_Rate1_2,
+    PnttConfigF257_Base16_Depth1_Rate1_2,
+    PnttConfigF257_Depth2_Rate1_2,
+    PnttConfigF257_Rate1_2,
     PnttConfigF2_16_1_Base16_Depth1_Rate1_2,
     PnttConfigF2_16_1_Base16_Depth1_Rate1_4,
     PnttConfigF2_16_1_Base32_Depth1_Rate1_2,
@@ -31,6 +35,8 @@ pub use pntt::radix8::params::{
     PnttInt,
     Radix8PnttParams,
 };
+pub type PnttConfigF12289_Depth3_Rate1_2 =
+    pntt::radix8::params::PnttConfigF12289_Depth3_Rate1_2;
 use std::{fmt::Debug, iter::Sum, marker::PhantomData, ops::AddAssign, mem::MaybeUninit};
 use zinc_utils::{
     CHECKED,
@@ -79,7 +85,7 @@ where
 
         pntt::radix8::pntt::<_, _, _, M, MBSMulByTwiddle<CHECKED>>(row, &self.pntt_params)
     }
-
+                    iprs::pntt::radix8::{
     /// Encode without modular reduction, purely over the integers.
     /// This version is used when unchecked-butterfly feature is enabled.
     #[cfg(feature = "unchecked-butterfly")]
