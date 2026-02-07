@@ -38,6 +38,7 @@ use zip_plus::{
             PnttConfigF2_16_1_Base256_Depth2_Rate1_4,
             PnttConfigF2_16_1_Depth2_Rate1_2,
             PnttConfigF2_16_1_Depth2_Rate1_4,
+            PnttConfigF2_16_1_Depth3_Rate1_2,
         },
         raa::{RaaCode, RaaConfig},
     },
@@ -160,6 +161,10 @@ type IprsCode128Bit_Base128_Depth2_Rate1_4 =
     IprsCode<BenchZipTypes128Bit, PnttConfigF2_16_1_Base128_Depth2_Rate1_4, Int2WideningMulByScalar>;
 type IprsCode128Bit_Base256_Depth2_Rate1_4 =
     IprsCode<BenchZipTypes128Bit, PnttConfigF2_16_1_Base256_Depth2_Rate1_4, Int2WideningMulByScalar>;
+
+// Depth-3, rate 1/2 config for 128-bit integers (msg size 2^14).
+type IprsCode128Bit_Depth3_Rate1_2 =
+    IprsCode<BenchZipTypes128Bit, PnttConfigF2_16_1_Depth3_Rate1_2, Int2WideningMulByScalar>;
 
 // --- 256-bit integer types for encoding benchmarks ---
 
@@ -468,6 +473,22 @@ fn zip_benchmarks_iprs_rate1_4_matrix_shapes(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark encoding 128-bit integers with selected IPRS codes:
+/// depth-2 for msg sizes 2^12 and 2^13, depth-3 for msg size 2^14.
+fn zip_benchmarks_encode_128bit_selected(c: &mut Criterion) {
+    let mut rng = ThreadRng::default();
+    let mut group = c.benchmark_group("Zip Encode 128-bit Selected");
+
+    // depth 2, msg_size = 2^12, rate 1/2
+    bench_encode_128bit!(group, rng, IprsCode128Bit_Base64_Depth2_Rate1_2,  12, "1/2");
+    // depth 2, msg_size = 2^13, rate 1/2
+    bench_encode_128bit!(group, rng, IprsCode128Bit_Base128_Depth2_Rate1_2, 13, "1/2");
+    // depth 3, msg_size = 2^14, rate 1/2
+    bench_encode_128bit!(group, rng, IprsCode128Bit_Depth3_Rate1_2,         14, "1/2");
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     zip_benchmarks,
@@ -477,6 +498,7 @@ criterion_group!(
     zip_benchmarks_iprs_rate1_4_matrix_shapes,
     zip_benchmarks_encode_128bit,
     zip_benchmarks_encode_256bit,
-    zip_benchmarks_encode_256bit_depth2
+    zip_benchmarks_encode_256bit_depth2,
+    zip_benchmarks_encode_128bit_selected
 );
 criterion_main!(benches);

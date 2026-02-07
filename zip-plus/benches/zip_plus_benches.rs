@@ -34,6 +34,7 @@ use zip_plus::{
             PnttConfigF2_16_1_Base64_Depth1_Rate1_4,
             PnttConfigF2_16_1_Depth2_Rate1_2,
             PnttConfigF2_16_1_Depth2_Rate1_4,
+            PnttConfigF2_16_1_Depth3_Rate1_2,
         },
         raa::{RaaCode, RaaConfig},
     },
@@ -163,6 +164,13 @@ type SomeIprsCodeF65537Base64Depth2Rate1_4<Twiddle, const D_PLUS_ONE: usize> = I
 type SomeIprsCodeF12289Depth3<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
     BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
     PnttConfigF12289_Depth3_Rate1_2,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
+/// F65537 depth-3 rate-1/2 config for message size 2^14 (base matrix 64x32)
+type SomeIprsCodeF65537Depth3<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Depth3_Rate1_2,
     BinaryPolyWideningMulByScalar<Twiddle>,
 >;
 
@@ -377,6 +385,26 @@ fn zip_plus_benchmarks_iprs_f65537_depth2_wide(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmarks for Zip+ commit with optimal matrix shapes.
+/// Uses depth-2 IPRS codes for message sizes 2^12–2^14, and depth-3 for 2^14.
+/// Matrix shapes: 2×2^12, 2×2^13, 4×2^13, 4×2^14, 8×2^14.
+fn zip_plus_benchmarks_commit_comparison(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip+ Commit Comparison");
+
+    // 2 rows × 4096 cols (2×2^12), depth 2, msg_size=2^12, poly_size=2^13
+    commit::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base64Depth2<i64, 32>, 13>(&mut group);
+    // 2 rows × 8192 cols (2×2^13), depth 2, msg_size=2^13, poly_size=2^14
+    commit::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base128Depth2<i64, 32>, 14>(&mut group);
+    // 4 rows × 8192 cols (4×2^13), depth 2, msg_size=2^13, poly_size=2^15
+    commit::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base128Depth2<i64, 32>, 15>(&mut group);
+    // 4 rows × 16384 cols (4×2^14), depth 2, msg_size=2^14, poly_size=2^16
+    commit::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base256Depth2<i64, 32>, 16>(&mut group);
+    // 8 rows × 16384 cols (8×2^14), depth 3, msg_size=2^14, poly_size=2^17
+    commit::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Depth3<i64, 32>, 17>(&mut group);
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     zip_plus_benchmarks_raa,
@@ -388,6 +416,7 @@ criterion_group!(
     zip_plus_benchmarks_iprs_f65537_depth2,
     zip_plus_benchmarks_iprs_f12289_depth3,
     zip_plus_benchmarks_iprs_f65537_depth2_rate1_4,
-    zip_plus_benchmarks_iprs_f65537_depth2_wide
+    zip_plus_benchmarks_iprs_f65537_depth2_wide,
+    zip_plus_benchmarks_commit_comparison
 );
 criterion_main!(benches);
