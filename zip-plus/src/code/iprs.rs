@@ -28,6 +28,7 @@ pub use pntt::radix8::params::{
     PnttConfigF2_16_1_Base64_Depth1_Rate1_4,
     PnttConfigF2_16_1_Base8_Depth3_Rate1_2,
     PnttConfigF2_16_1_Base8_Depth3_Rate1_4,
+    PnttConfigF2_16_1_Base64_Depth2_Rate1_4,
     PnttConfigF2_16_1,
     PnttConfigF2_16_1_Depth2_Rate1_2,
     PnttConfigF2_16_1_Depth2_Rate1_4,
@@ -85,16 +86,17 @@ where
 
         pntt::radix8::pntt::<_, _, _, M, MBSMulByTwiddle<CHECKED>>(row, &self.pntt_params)
     }
-                    iprs::pntt::radix8::{
+
     /// Encode without modular reduction, purely over the integers.
     /// This version is used when unchecked-butterfly feature is enabled.
+    /// The butterfly twiddle multiplication is also unchecked since the same
+    /// overflow analysis applies (worst case ~2^56 for DEPTH=2, well within i64).
     #[cfg(feature = "unchecked-butterfly")]
     fn encode_inner<In, Out, M>(&self, row: &[In]) -> Vec<Out>
     where
         In: Clone + Send + Sync,
         Out: CheckedAdd
             + for<'a> AddAssign<&'a Out>
-            + for<'a> std::ops::Add<&'a Out, Output = Out>
             + CheckedMul
             + for<'a> MulByScalar<&'a PnttInt>
             + Sum
@@ -113,7 +115,7 @@ where
             Config::INPUT_LEN
         );
 
-        pntt::radix8::pntt::<_, _, _, M, MBSMulByTwiddle<CHECKED>>(row, &self.pntt_params)
+        pntt::radix8::pntt::<_, _, _, M, MBSMulByTwiddle<false>>(row, &self.pntt_params)
     }
 
     // Do the encoding but make use of the fact
@@ -193,7 +195,14 @@ where
             Config::INPUT_LEN
         );
 
+        #[cfg(not(feature = "unchecked-butterfly"))]
         pntt::radix8::pntt_into::<_, _, _, WideningMulByTwiddle<MT>, MBSMulByTwiddle<CHECKED>>(
+            row,
+            &self.pntt_params,
+            out,
+        );
+        #[cfg(feature = "unchecked-butterfly")]
+        pntt::radix8::pntt_into::<_, _, _, WideningMulByTwiddle<MT>, MBSMulByTwiddle<false>>(
             row,
             &self.pntt_params,
             out,

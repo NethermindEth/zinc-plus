@@ -10,13 +10,12 @@ pub mod params;
 use butterfly::apply_radix_8_butterflies;
 #[cfg(feature = "unchecked-butterfly")]
 use butterfly::apply_radix_8_butterflies_unchecked;
-use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::{array, fmt::Debug, mem::MaybeUninit};
 #[cfg(feature = "unchecked-butterfly")]
-use std::ops::{Add, AddAssign};
+use std::ops::AddAssign;
 #[cfg(not(feature = "unchecked-butterfly"))]
 use zinc_utils::add;
 use zinc_utils::{cfg_chunks_mut, cfg_into_iter, from_ref::FromRef};
@@ -114,8 +113,7 @@ where
         + Send
         + Sync
         + Debug
-        + for<'a> AddAssign<&'a Out>
-        + for<'a> Add<&'a Out, Output = Out>,
+        + for<'a> AddAssign<&'a Out>,
     MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
     MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
 {
@@ -132,7 +130,7 @@ pub(crate) fn pntt<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
 where
     C: Config,
     In: Clone + Send + Sync,
-    Out: CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug + for<'a> AddAssign<&'a Out> + for<'a> Add<&'a Out, Output = Out>,
+    Out: CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug + for<'a> AddAssign<&'a Out>,
     MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
     MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
 {
@@ -241,8 +239,7 @@ fn pntt_into_impl<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
         + Send
         + Sync
         + Debug
-        + for<'a> AddAssign<&'a Out>
-        + for<'a> Add<&'a Out, Output = Out>,
+        + for<'a> AddAssign<&'a Out>,
     MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
     MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
 {
@@ -280,7 +277,7 @@ fn pntt_impl<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
 where
     C: Config,
     In: Clone + Send + Sync,
-    Out: CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug + for<'a> AddAssign<&'a Out> + for<'a> Add<&'a Out, Output = Out>,
+    Out: CheckedAdd + CheckedMul + FromRef<In> + Clone + Send + Sync + Debug + for<'a> AddAssign<&'a Out>,
     MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
     MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
 {
@@ -360,13 +357,12 @@ where
                 let subresults: [R; 8] =
                     array::from_fn(|j| chunk[j * sub_chunk_length + i].clone());
 
-                #[allow(unused_mut)] // false alarm
-                let ys: [&mut R; 8] = chunk
-                    .chunks_mut(sub_chunk_length)
-                    .map(|mut subchunk| &mut subchunk[i])
-                    .collect_vec()
-                    .try_into()
-                    .expect("We are guaranteed to have the right length here");
+                // Build mutable references to the 8 output positions directly
+                // via pointer arithmetic, avoiding a Vec heap allocation.
+                let chunk_ptr = chunk.as_mut_ptr();
+                let ys: [&mut R; 8] = array::from_fn(|j| unsafe {
+                    &mut *chunk_ptr.add(j * sub_chunk_length + i)
+                });
 
                 // Perform butterflies.
                 apply_radix_8_butterflies::<_, _, M>(ys, &subresults, &layer_twiddles[i]);
@@ -396,13 +392,12 @@ where
                 let subresults: [R; 8] =
                     array::from_fn(|j| chunk[j * sub_chunk_length + i].clone());
 
-                #[allow(unused_mut)]
-                let ys: [&mut R; 8] = chunk
-                    .chunks_mut(sub_chunk_length)
-                    .map(|mut subchunk| &mut subchunk[i])
-                    .collect_vec()
-                    .try_into()
-                    .expect("We are guaranteed to have the right length here");
+                // Build mutable references to the 8 output positions directly
+                // via pointer arithmetic, avoiding a Vec heap allocation.
+                let chunk_ptr = chunk.as_mut_ptr();
+                let ys: [&mut R; 8] = array::from_fn(|j| unsafe {
+                    &mut *chunk_ptr.add(j * sub_chunk_length + i)
+                });
 
                 // Perform unchecked butterflies (no overflow checking).
                 apply_radix_8_butterflies_unchecked::<_, _, M>(ys, &subresults, &layer_twiddles[i]);
@@ -425,14 +420,7 @@ where
         .map(|i| {
             let chunk = i >> C::BASE_DIM_LOG2; // i / C::BASE_DIM
             let row = i & C::BASE_DIM_MASK; // i % C::BASE_DIM
-
-            // If we'd done all the divide steps of the NTT recursively
-            // we'd end up with chunks of original indices
-            // combined together according to their `3 * C::DEPTH`
-            // least significant bits. Moreover, the value of these
-            // least significant bits correspond to the number of the chunk
-            // in octet-reverse order.
-            let oct_rev_chunk = octet_reversal(chunk, C::DEPTH);
+            let oct_rev_chunk = params.oct_rev_table[chunk];
 
             // We always know that the first column of the Vandermonde matrix
             // consists of 1's.
@@ -467,13 +455,9 @@ fn base_multiply_into_output_in_place<In, Out, C, M>(
     cfg_chunks_mut!(out, C::BASE_DIM)
         .enumerate()
         .for_each(|(chunk_idx, chunk)| {
-            let start = chunk_idx * C::BASE_DIM;
-            for (offset, out_cell) in chunk.iter_mut().enumerate() {
-                let i = start + offset;
-                let chunk = i >> C::BASE_DIM_LOG2; // i / C::BASE_DIM
-                let row = i & C::BASE_DIM_MASK; // i % C::BASE_DIM
-                let oct_rev_chunk = octet_reversal(chunk, C::DEPTH);
-
+            // All elements within a chunk share the same oct_rev_chunk.
+            let oct_rev_chunk = params.oct_rev_table[chunk_idx];
+            for (row, out_cell) in chunk.iter_mut().enumerate() {
                 let value = params.base_matrix[row][1..].iter().enumerate().fold(
                     Out::from_ref(&input[oct_rev_chunk]),
                     |acc, (col, bm_row_col)| {
@@ -499,28 +483,26 @@ fn base_multiply_into_output_unchecked<In, Out, C, M>(input: &[In], params: &Rad
 where
     C: Config,
     In: Clone + Send + Sync,
-    Out: Clone + FromRef<In> + Send + Sync + for<'a> Add<&'a Out, Output = Out>,
+    Out: Clone + FromRef<In> + Send + Sync + for<'a> AddAssign<&'a Out>,
     M: MulByTwiddle<In, PnttInt, Output = Out>,
 {
     cfg_into_iter!(0..C::OUTPUT_LEN)
         .map(|i| {
             let chunk = i >> C::BASE_DIM_LOG2; // i / C::BASE_DIM
             let row = i & C::BASE_DIM_MASK; // i % C::BASE_DIM
-            let oct_rev_chunk = octet_reversal(chunk, C::DEPTH);
+            let oct_rev_chunk = params.oct_rev_table[chunk];
 
             // We always know that the first column of the Vandermonde matrix
-            // consists of 1's.
-            params.base_matrix[row][1..].iter().enumerate().fold(
-                Out::from_ref(&input[oct_rev_chunk]),
-                |acc, (col, bm_row_col)| {
-                    let term = M::mul_by_twiddle(
-                        &input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))],
-                        bm_row_col,
-                    );
-
-                    acc + &term
-                },
-            )
+            // consists of 1's. Use AddAssign for in-place accumulation.
+            let mut acc = Out::from_ref(&input[oct_rev_chunk]);
+            for (col, bm_row_col) in params.base_matrix[row][1..].iter().enumerate() {
+                let term = M::mul_by_twiddle(
+                    &input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))],
+                    bm_row_col,
+                );
+                acc += &term;
+            }
+            acc
         })
         .collect()
 }
@@ -536,32 +518,25 @@ fn base_multiply_into_output_in_place_unchecked<In, Out, C, M>(
 ) where
     C: Config,
     In: Clone + Send + Sync,
-    Out: Clone + FromRef<In> + Send + Sync + for<'a> Add<&'a Out, Output = Out>,
+    Out: Clone + FromRef<In> + Send + Sync + for<'a> AddAssign<&'a Out>,
     M: MulByTwiddle<In, PnttInt, Output = Out>,
 {
     cfg_chunks_mut!(out, C::BASE_DIM)
         .enumerate()
         .for_each(|(chunk_idx, chunk)| {
-            let start = chunk_idx * C::BASE_DIM;
-            for (offset, out_cell) in chunk.iter_mut().enumerate() {
-                let i = start + offset;
-                let chunk = i >> C::BASE_DIM_LOG2; // i / C::BASE_DIM
-                let row = i & C::BASE_DIM_MASK; // i % C::BASE_DIM
-                let oct_rev_chunk = octet_reversal(chunk, C::DEPTH);
-
-                let value = params.base_matrix[row][1..].iter().enumerate().fold(
-                    Out::from_ref(&input[oct_rev_chunk]),
-                    |acc, (col, bm_row_col)| {
-                        let term = M::mul_by_twiddle(
-                            &input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))],
-                            bm_row_col,
-                        );
-
-                        acc + &term
-                    },
-                );
-
-                out_cell.write(value);
+            // All elements within a chunk share the same oct_rev_chunk.
+            let oct_rev_chunk = params.oct_rev_table[chunk_idx];
+            for (row, out_cell) in chunk.iter_mut().enumerate() {
+                // Use AddAssign for in-place accumulation.
+                let mut acc = Out::from_ref(&input[oct_rev_chunk]);
+                for (col, bm_row_col) in params.base_matrix[row][1..].iter().enumerate() {
+                    let term = M::mul_by_twiddle(
+                        &input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))],
+                        bm_row_col,
+                    );
+                    acc += &term;
+                }
+                out_cell.write(acc);
             }
         });
 }

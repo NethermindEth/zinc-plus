@@ -135,6 +135,10 @@ pub struct Radix8PnttParams<C: Config> {
     /// root-of-unity factor. This lets the butterfly apply a single
     /// multiplication per term instead of two.
     pub butterfly_twiddles: Vec<Vec<[[PnttInt; 8]; 7]>>,
+    /// Precomputed octet-reversal permutation table.
+    /// `oct_rev_table[chunk]` = `octet_reversal(chunk, DEPTH)` for
+    /// `chunk` in `0 .. 8^DEPTH`.
+    pub oct_rev_table: Vec<usize>,
     _phantom: PhantomData<C>,
 }
 
@@ -146,10 +150,17 @@ impl<C: Config> Default for Radix8PnttParams<C> {
 
 impl<C: Config> Radix8PnttParams<C> {
     /// Precompute pseudo NTT parameters.
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn new() -> Self {
+        use super::octet_reversal::octet_reversal;
+        let num_chunks = 1 << (3 * C::DEPTH);
+        let oct_rev_table: Vec<usize> = (0..num_chunks)
+            .map(|c| octet_reversal(c, C::DEPTH))
+            .collect();
         Self {
             base_matrix: precompute::precompute_base_matrix::<C>(),
             butterfly_twiddles: precompute::precompute_butterfly_twiddles::<C>(),
+            oct_rev_table,
             _phantom: PhantomData,
         }
     }
@@ -349,12 +360,30 @@ pub type PnttConfigF2_16_1_Base8_Depth3_Rate1_2 =
 /// Depth-3 configuration for message size $2^{12}$ with rate $\frac{1}{4}$.
 /// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
 ///
+/// **Warning:** This configuration overflows `i64` codeword coefficients at
+/// butterfly stage 2 (56-bit intermediate × 16-bit twiddle = 72 bits > 63).
+/// Use [`PnttConfigF2_16_1_Base64_Depth2_Rate1_4`] instead for `i64` coefficients.
+///
 /// Configuration:
 /// - `BASE_LEN = 8`, `BASE_DIM = 32`
 /// - `INPUT_LEN = 8 \cdot 8^3 = 4096 = 2^{12}`
 /// - `OUTPUT_LEN = 32 \cdot 8^3 = 16384 = 2^{14}`
 pub type PnttConfigF2_16_1_Base8_Depth3_Rate1_4 =
     PnttConfigF2_16_1_Rate1_4_Base<8, 3>;
+
+/// Depth-2 configuration for message size $2^{12}$ with rate $\frac{1}{4}$.
+/// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
+///
+/// This is the recommended depth-2 alternative to the depth-3 config which
+/// overflows `i64`. The larger base matrix (256×64) trades a bigger base layer
+/// for fewer butterfly stages, keeping intermediates within 59 bits.
+///
+/// Configuration:
+/// - `BASE_LEN = 64`, `BASE_DIM = 256`
+/// - `INPUT_LEN = 64 \cdot 8^2 = 4096 = 2^{12}`
+/// - `OUTPUT_LEN = 256 \cdot 8^2 = 16384 = 2^{14}`
+pub type PnttConfigF2_16_1_Base64_Depth2_Rate1_4 =
+    PnttConfigF2_16_1_Rate1_4_Base<64, 2>;
 
 /// Pseudo NTT configuration derived from the field Fp for p = 12289.
 /// This is the smallest prime supporting 4096th roots of unity.
@@ -514,5 +543,23 @@ mod tests {
         assert_eq!(C::OUTPUT_LEN, 8192); // 16 * 8^3 = 2^13
         assert_eq!(C::FIELD_MODULUS, 65537);
         // Rate = INPUT_LEN / OUTPUT_LEN = 1/2
+    }
+
+    #[test]
+    fn check_f65537_base64_depth2_rate1_4_config() {
+        // Verify the depth-2 rate 1/4 configuration for 2^12 message size
+        type C = PnttConfigF2_16_1_Base64_Depth2_Rate1_4;
+        assert_eq!(C::BASE_LEN, 64);
+        assert_eq!(C::BASE_DIM, 256);
+        assert_eq!(C::DEPTH, 2);
+        assert_eq!(C::INPUT_LEN, 4096); // 64 * 8^2 = 2^12
+        assert_eq!(C::OUTPUT_LEN, 16384); // 256 * 8^2 = 2^14
+        assert_eq!(C::FIELD_MODULUS, 65537);
+        // Rate = INPUT_LEN / OUTPUT_LEN = 1/4
+    }
+
+    #[test]
+    fn check_twiddles_f65537_base64_depth2_rate1_4() {
+        check_twiddles_generic::<PnttConfigF2_16_1_Base64_Depth2_Rate1_4>();
     }
 }

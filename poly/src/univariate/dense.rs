@@ -645,16 +645,30 @@ impl<'a, R, S, const DEGREE_PLUS_ONE: usize> MulByScalar<&'a S>
 where
     R: FixedSemiring + MulByScalar<&'a S>,
 {
+    #[inline(always)]
     fn mul_by_scalar<const CHECK: bool>(&self, rhs: &'a S) -> Option<Self> {
         let mut coeffs = self.coeffs.clone();
 
-        coeffs
-            .iter_mut()
-            .filter(|coeff| !coeff.is_zero())
-            .try_for_each(|x| {
-                *x = x.mul_by_scalar::<CHECK>(rhs)?;
-                Some(())
-            })?;
+        if CHECK {
+            // Checked path: skip zeros to avoid unnecessary overflow checks,
+            // and propagate None on overflow.
+            coeffs
+                .iter_mut()
+                .filter(|coeff| !coeff.is_zero())
+                .try_for_each(|x| {
+                    *x = x.mul_by_scalar::<CHECK>(rhs)?;
+                    Some(())
+                })?;
+        } else {
+            // Unchecked path: branchless loop over all coefficients.
+            // Avoids the zero-check filter which causes branch mispredictions
+            // in the butterfly stage where most coefficients are non-zero.
+            // For numeric types, 0 * x = 0 is always correct.
+            for x in &mut coeffs {
+                // mul_by_scalar::<false> always returns Some for standard types
+                *x = x.mul_by_scalar::<false>(rhs).expect("unchecked mul_by_scalar should not fail");
+            }
+        }
 
         Some(Self { coeffs })
     }
