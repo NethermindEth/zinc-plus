@@ -37,6 +37,9 @@ use zip_plus::{
             PnttConfigF2_16_1_Depth2_Rate1_4,
             PnttConfigF2_16_1_Depth3_Rate1_2,
             PnttConfigF2_16_1_Depth3_Rate1_4,
+            PnttConfigF2_16_1_Base1_Depth4_Rate1_4,
+            PnttConfigF2_16_1_Base2_Depth4_Rate1_4,
+            PnttConfigF2_16_1_Base4_Depth4_Rate1_4,
         },
         raa::{RaaCode, RaaConfig},
     },
@@ -186,7 +189,7 @@ type SomeIprsCodeF65537Base256Depth2Rate1_4<Twiddle, const D_PLUS_ONE: usize> = 
 >;
 
 /// F65537 depth-3 rate-1/4 config for message size 2^13 (base matrix 64x16)
-/// **Warning:** Overflows i64 at butterfly stage 2. Uses smaller base matrix than depth-2 variant.
+/// Requires i128 codeword coefficients to avoid overflow.
 type SomeIprsCodeF65537Base16Depth3Rate1_4<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
     BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
     PnttConfigF2_16_1_Base16_Depth3_Rate1_4,
@@ -194,10 +197,34 @@ type SomeIprsCodeF65537Base16Depth3Rate1_4<Twiddle, const D_PLUS_ONE: usize> = I
 >;
 
 /// F65537 depth-3 rate-1/4 config for message size 2^14 (base matrix 128x32)
-/// **Warning:** Overflows i64 at butterfly stage 2. Uses smaller base matrix than depth-2 variant.
+/// Requires i128 codeword coefficients to avoid overflow.
 type SomeIprsCodeF65537Depth3Rate1_4<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
     BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
     PnttConfigF2_16_1_Depth3_Rate1_4,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
+/// F65537 depth-4 rate-1/4 config for message size 2^12 (base matrix 4x1)
+/// Requires i128 codeword coefficients (~86-bit intermediates).
+type SomeIprsCodeF65537Base1Depth4Rate1_4<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Base1_Depth4_Rate1_4,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
+/// F65537 depth-4 rate-1/4 config for message size 2^13 (base matrix 8x2)
+/// Requires i128 codeword coefficients (~87-bit intermediates).
+type SomeIprsCodeF65537Base2Depth4Rate1_4<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Base2_Depth4_Rate1_4,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
+/// F65537 depth-4 rate-1/4 config for message size 2^14 (base matrix 16x4)
+/// Requires i128 codeword coefficients (~88-bit intermediates).
+type SomeIprsCodeF65537Base4Depth4Rate1_4<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Base4_Depth4_Rate1_4,
     BinaryPolyWideningMulByScalar<Twiddle>,
 >;
 
@@ -532,63 +559,113 @@ fn zip_plus_benchmarks_evaluate_comparison_rate1_4(c: &mut Criterion) {
 }
 
 /// Benchmarks for Zip+ commit with optimal matrix shapes at rate 1/4, depth 3.
-/// Uses depth-3 IPRS codes for all message sizes (2^12, 2^13, 2^14),
-/// trading smaller base matrices for one additional recursion level.
+/// Uses depth-3 IPRS codes with i128 coefficients to avoid overflow.
 /// Matrix shapes: 2×2^12, 2×2^13, 4×2^13, 4×2^14, 8×2^14.
-///
-/// **Warning:** Depth-3 rate-1/4 configs overflow i64 at the last butterfly stage.
-/// Results are computed with wrapping arithmetic in release mode.
 fn zip_plus_benchmarks_commit_comparison_rate1_4_depth3(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ Commit Comparison Rate1_4 Depth3");
 
     // 2 rows × 4096 cols (2×2^12), depth 3, msg_size=2^12, poly_size=2^13
-    commit::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base8Depth3Rate1_4<i64, 32>, 13>(&mut group);
+    commit::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base8Depth3Rate1_4<i128, 32>, 13>(&mut group);
     // 2 rows × 8192 cols (2×2^13), depth 3, msg_size=2^13, poly_size=2^14
-    commit::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base16Depth3Rate1_4<i64, 32>, 14>(&mut group);
+    commit::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base16Depth3Rate1_4<i128, 32>, 14>(&mut group);
     // 4 rows × 8192 cols (4×2^13), depth 3, msg_size=2^13, poly_size=2^15
-    commit::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base16Depth3Rate1_4<i64, 32>, 15>(&mut group);
+    commit::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base16Depth3Rate1_4<i128, 32>, 15>(&mut group);
     // 4 rows × 16384 cols (4×2^14), depth 3, msg_size=2^14, poly_size=2^16
-    commit::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Depth3Rate1_4<i64, 32>, 16>(&mut group);
+    commit::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Depth3Rate1_4<i128, 32>, 16>(&mut group);
     // 8 rows × 16384 cols (8×2^14), depth 3, msg_size=2^14, poly_size=2^17
-    commit::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Depth3Rate1_4<i64, 32>, 17>(&mut group);
+    commit::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Depth3Rate1_4<i128, 32>, 17>(&mut group);
 
     group.finish();
 }
 
-/// Benchmarks for the Zip+ test phase with optimal matrix shapes at rate 1/4 depth 3
-/// (same configs as Commit Comparison Rate1_4 Depth3).
+/// Benchmarks for the Zip+ test phase with optimal matrix shapes at rate 1/4 depth 3.
 fn zip_plus_benchmarks_test_comparison_rate1_4_depth3(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ Test Comparison Rate1_4 Depth3");
 
     // 2 rows × 4096 cols (2×2^12), depth 3, msg_size=2^12, poly_size=2^13
-    test::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base8Depth3Rate1_4<i64, 32>, UNCHECKED, 13>(&mut group);
+    test::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base8Depth3Rate1_4<i128, 32>, UNCHECKED, 13>(&mut group);
     // 2 rows × 8192 cols (2×2^13), depth 3, msg_size=2^13, poly_size=2^14
-    test::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base16Depth3Rate1_4<i64, 32>, UNCHECKED, 14>(&mut group);
+    test::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base16Depth3Rate1_4<i128, 32>, UNCHECKED, 14>(&mut group);
     // 4 rows × 8192 cols (4×2^13), depth 3, msg_size=2^13, poly_size=2^15
-    test::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base16Depth3Rate1_4<i64, 32>, UNCHECKED, 15>(&mut group);
+    test::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base16Depth3Rate1_4<i128, 32>, UNCHECKED, 15>(&mut group);
     // 4 rows × 16384 cols (4×2^14), depth 3, msg_size=2^14, poly_size=2^16
-    test::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Depth3Rate1_4<i64, 32>, UNCHECKED, 16>(&mut group);
+    test::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Depth3Rate1_4<i128, 32>, UNCHECKED, 16>(&mut group);
     // 8 rows × 16384 cols (8×2^14), depth 3, msg_size=2^14, poly_size=2^17
-    test::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Depth3Rate1_4<i64, 32>, UNCHECKED, 17>(&mut group);
+    test::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Depth3Rate1_4<i128, 32>, UNCHECKED, 17>(&mut group);
 
     group.finish();
 }
 
-/// Benchmarks for the Zip+ evaluate phase with optimal matrix shapes at rate 1/4 depth 3
-/// (same configs as Commit Comparison Rate1_4 Depth3).
+/// Benchmarks for the Zip+ evaluate phase with optimal matrix shapes at rate 1/4 depth 3.
 fn zip_plus_benchmarks_evaluate_comparison_rate1_4_depth3(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ Evaluate Comparison Rate1_4 Depth3");
 
     // 2 rows × 4096 cols (2×2^12), depth 3, msg_size=2^12, poly_size=2^13
-    evaluate::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base8Depth3Rate1_4<i64, 32>, UNCHECKED, 13>(&mut group);
+    evaluate::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base8Depth3Rate1_4<i128, 32>, UNCHECKED, 13>(&mut group);
     // 2 rows × 8192 cols (2×2^13), depth 3, msg_size=2^13, poly_size=2^14
-    evaluate::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base16Depth3Rate1_4<i64, 32>, UNCHECKED, 14>(&mut group);
+    evaluate::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base16Depth3Rate1_4<i128, 32>, UNCHECKED, 14>(&mut group);
     // 4 rows × 8192 cols (4×2^13), depth 3, msg_size=2^13, poly_size=2^15
-    evaluate::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base16Depth3Rate1_4<i64, 32>, UNCHECKED, 15>(&mut group);
+    evaluate::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base16Depth3Rate1_4<i128, 32>, UNCHECKED, 15>(&mut group);
     // 4 rows × 16384 cols (4×2^14), depth 3, msg_size=2^14, poly_size=2^16
-    evaluate::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Depth3Rate1_4<i64, 32>, UNCHECKED, 16>(&mut group);
+    evaluate::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Depth3Rate1_4<i128, 32>, UNCHECKED, 16>(&mut group);
     // 8 rows × 16384 cols (8×2^14), depth 3, msg_size=2^14, poly_size=2^17
-    evaluate::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Depth3Rate1_4<i64, 32>, UNCHECKED, 17>(&mut group);
+    evaluate::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Depth3Rate1_4<i128, 32>, UNCHECKED, 17>(&mut group);
+
+    group.finish();
+}
+
+/// Benchmarks for Zip+ commit with optimal matrix shapes at rate 1/4, depth 4.
+/// Uses depth-4 IPRS codes with i128 coefficients (smallest possible base matrices).
+/// Matrix shapes: 2×2^12, 2×2^13, 4×2^13, 4×2^14, 8×2^14.
+fn zip_plus_benchmarks_commit_comparison_rate1_4_depth4(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip+ Commit Comparison Rate1_4 Depth4");
+
+    // 2 rows × 4096 cols (2×2^12), depth 4, msg_size=2^12, poly_size=2^13
+    commit::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base1Depth4Rate1_4<i128, 32>, 13>(&mut group);
+    // 2 rows × 8192 cols (2×2^13), depth 4, msg_size=2^13, poly_size=2^14
+    commit::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base2Depth4Rate1_4<i128, 32>, 14>(&mut group);
+    // 4 rows × 8192 cols (4×2^13), depth 4, msg_size=2^13, poly_size=2^15
+    commit::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base2Depth4Rate1_4<i128, 32>, 15>(&mut group);
+    // 4 rows × 16384 cols (4×2^14), depth 4, msg_size=2^14, poly_size=2^16
+    commit::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base4Depth4Rate1_4<i128, 32>, 16>(&mut group);
+    // 8 rows × 16384 cols (8×2^14), depth 4, msg_size=2^14, poly_size=2^17
+    commit::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base4Depth4Rate1_4<i128, 32>, 17>(&mut group);
+
+    group.finish();
+}
+
+/// Benchmarks for the Zip+ test phase with optimal matrix shapes at rate 1/4 depth 4.
+fn zip_plus_benchmarks_test_comparison_rate1_4_depth4(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip+ Test Comparison Rate1_4 Depth4");
+
+    // 2 rows × 4096 cols (2×2^12), depth 4, msg_size=2^12, poly_size=2^13
+    test::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base1Depth4Rate1_4<i128, 32>, UNCHECKED, 13>(&mut group);
+    // 2 rows × 8192 cols (2×2^13), depth 4, msg_size=2^13, poly_size=2^14
+    test::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base2Depth4Rate1_4<i128, 32>, UNCHECKED, 14>(&mut group);
+    // 4 rows × 8192 cols (4×2^13), depth 4, msg_size=2^13, poly_size=2^15
+    test::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base2Depth4Rate1_4<i128, 32>, UNCHECKED, 15>(&mut group);
+    // 4 rows × 16384 cols (4×2^14), depth 4, msg_size=2^14, poly_size=2^16
+    test::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base4Depth4Rate1_4<i128, 32>, UNCHECKED, 16>(&mut group);
+    // 8 rows × 16384 cols (8×2^14), depth 4, msg_size=2^14, poly_size=2^17
+    test::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base4Depth4Rate1_4<i128, 32>, UNCHECKED, 17>(&mut group);
+
+    group.finish();
+}
+
+/// Benchmarks for the Zip+ evaluate phase with optimal matrix shapes at rate 1/4 depth 4.
+fn zip_plus_benchmarks_evaluate_comparison_rate1_4_depth4(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip+ Evaluate Comparison Rate1_4 Depth4");
+
+    // 2 rows × 4096 cols (2×2^12), depth 4, msg_size=2^12, poly_size=2^13
+    evaluate::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base1Depth4Rate1_4<i128, 32>, UNCHECKED, 13>(&mut group);
+    // 2 rows × 8192 cols (2×2^13), depth 4, msg_size=2^13, poly_size=2^14
+    evaluate::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base2Depth4Rate1_4<i128, 32>, UNCHECKED, 14>(&mut group);
+    // 4 rows × 8192 cols (4×2^13), depth 4, msg_size=2^13, poly_size=2^15
+    evaluate::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base2Depth4Rate1_4<i128, 32>, UNCHECKED, 15>(&mut group);
+    // 4 rows × 16384 cols (4×2^14), depth 4, msg_size=2^14, poly_size=2^16
+    evaluate::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base4Depth4Rate1_4<i128, 32>, UNCHECKED, 16>(&mut group);
+    // 8 rows × 16384 cols (8×2^14), depth 4, msg_size=2^14, poly_size=2^17
+    evaluate::<BenchZipPlusTypes<i128, 32>, SomeIprsCodeF65537Base4Depth4Rate1_4<i128, 32>, UNCHECKED, 17>(&mut group);
 
     group.finish();
 }
@@ -613,6 +690,9 @@ criterion_group!(
     zip_plus_benchmarks_evaluate_comparison_rate1_4,
     zip_plus_benchmarks_commit_comparison_rate1_4_depth3,
     zip_plus_benchmarks_test_comparison_rate1_4_depth3,
-    zip_plus_benchmarks_evaluate_comparison_rate1_4_depth3
+    zip_plus_benchmarks_evaluate_comparison_rate1_4_depth3,
+    zip_plus_benchmarks_commit_comparison_rate1_4_depth4,
+    zip_plus_benchmarks_test_comparison_rate1_4_depth4,
+    zip_plus_benchmarks_evaluate_comparison_rate1_4_depth4
 );
 criterion_main!(benches);

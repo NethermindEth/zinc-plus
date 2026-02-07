@@ -481,6 +481,42 @@ pub type PnttConfigF2_16_1_Base16_Depth3_Rate1_4 =
 /// - `OUTPUT_LEN = 128 \cdot 8^3 = 65536 = 2^{16}`
 pub type PnttConfigF2_16_1_Depth3_Rate1_4 = PnttConfigF2_16_1_Rate1_4<3>;
 
+/// Depth-4 configuration for message size $2^{12}$ with rate $\frac{1}{4}$.
+/// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
+///
+/// Requires `i128` codeword coefficients (worst-case intermediates ~$2^{86}$ bits).
+///
+/// Configuration:
+/// - `BASE_LEN = 1`, `BASE_DIM = 4`
+/// - `INPUT_LEN = 1 \cdot 8^4 = 4096 = 2^{12}`
+/// - `OUTPUT_LEN = 4 \cdot 8^4 = 16384 = 2^{14}`
+pub type PnttConfigF2_16_1_Base1_Depth4_Rate1_4 =
+    PnttConfigF2_16_1_Rate1_4_Base<1, 4>;
+
+/// Depth-4 configuration for message size $2^{13}$ with rate $\frac{1}{4}$.
+/// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
+///
+/// Requires `i128` codeword coefficients (worst-case intermediates ~$2^{87}$ bits).
+///
+/// Configuration:
+/// - `BASE_LEN = 2`, `BASE_DIM = 8`
+/// - `INPUT_LEN = 2 \cdot 8^4 = 8192 = 2^{13}`
+/// - `OUTPUT_LEN = 8 \cdot 8^4 = 32768 = 2^{15}`
+pub type PnttConfigF2_16_1_Base2_Depth4_Rate1_4 =
+    PnttConfigF2_16_1_Rate1_4_Base<2, 4>;
+
+/// Depth-4 configuration for message size $2^{14}$ with rate $\frac{1}{4}$.
+/// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
+///
+/// Requires `i128` codeword coefficients (worst-case intermediates ~$2^{88}$ bits).
+///
+/// Configuration:
+/// - `BASE_LEN = 4`, `BASE_DIM = 16`
+/// - `INPUT_LEN = 4 \cdot 8^4 = 16384 = 2^{14}`
+/// - `OUTPUT_LEN = 16 \cdot 8^4 = 65536 = 2^{16}`
+pub type PnttConfigF2_16_1_Base4_Depth4_Rate1_4 =
+    PnttConfigF2_16_1_Rate1_4_Base<4, 4>;
+
 /// Pseudo NTT configuration derived from the field Fp for p = 12289.
 /// This is the smallest prime supporting 4096th roots of unity.
 ///

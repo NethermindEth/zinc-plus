@@ -420,6 +420,35 @@ impl<const DEGREE_PLUS_ONE: usize> WideningMulByScalar<BinaryU64Poly<DEGREE_PLUS
     }
 }
 
+impl<const DEGREE_PLUS_ONE: usize> WideningMulByScalar<BinaryU64Poly<DEGREE_PLUS_ONE>, i64>
+    for BinaryU64PolyWideningMulByScalar<i128>
+{
+    type Output = DensePolynomial<i128, DEGREE_PLUS_ONE>;
+
+    fn mul_by_scalar_widen(lhs: &BinaryU64Poly<DEGREE_PLUS_ONE>, rhs: &i64) -> Self::Output {
+        widen_to_i128::<DEGREE_PLUS_ONE>(lhs, *rhs)
+    }
+}
+
+/// Widens a binary polynomial by an i64 scalar, producing i128 coefficients.
+/// Each bit in the polynomial selects either 0 or the scalar (widened to i128).
+#[inline(always)]
+#[allow(clippy::arithmetic_side_effects)]
+pub fn widen_to_i128<const DEGREE_PLUS_ONE: usize>(
+    poly: &BinaryU64Poly<DEGREE_PLUS_ONE>,
+    scalar: i64,
+) -> DensePolynomial<i128, DEGREE_PLUS_ONE> {
+    let scalar_wide = i128::from(scalar);
+    let mask: u64 = poly.0;
+    let mut coeffs = [0i128; DEGREE_PLUS_ONE];
+    for (i, coeff) in coeffs.iter_mut().enumerate() {
+        if i < 64 && (mask >> i) & 1 == 1 {
+            *coeff = scalar_wide;
+        }
+    }
+    DensePolynomial { coeffs }
+}
+
 #[allow(unreachable_code, unused_variables)] // CI system does not support SIMD features
 #[inline(always)]
 pub fn widen_simd<const DEGREE_PLUS_ONE: usize>(

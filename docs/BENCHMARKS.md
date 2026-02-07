@@ -102,9 +102,12 @@ cargo bench --bench zip_plus_benches -p zip-plus
 | `Zip+ Commit Comparison Rate1_4` | Same matrix shapes as Commit Comparison but with rate 1/4 IPRS codes (all depth-2) |
 | `Zip+ Test Comparison Rate1_4` | Test phase with rate 1/4 IPRS codes (same matrix shapes as Commit Comparison) |
 | `Zip+ Evaluate Comparison Rate1_4` | Evaluate phase with rate 1/4 IPRS codes (same matrix shapes as Commit Comparison) |
-| `Zip+ Commit Comparison Rate1_4 Depth3` | Same matrix shapes as Commit Comparison with rate 1/4, depth-3 IPRS codes (smaller base matrices, one more recursion level). **Warning:** overflows i64 at the last butterfly stage |
-| `Zip+ Test Comparison Rate1_4 Depth3` | Test phase with rate 1/4 depth-3 IPRS codes (same matrix shapes as Commit Comparison) |
-| `Zip+ Evaluate Comparison Rate1_4 Depth3` | Evaluate phase with rate 1/4 depth-3 IPRS codes (same matrix shapes as Commit Comparison) |
+| `Zip+ Commit Comparison Rate1_4 Depth3` | Same matrix shapes as Commit Comparison with rate 1/4, depth-3 IPRS codes and `i128` codeword coefficients (avoids i64 overflow) |
+| `Zip+ Test Comparison Rate1_4 Depth3` | Test phase with rate 1/4 depth-3 IPRS codes (i128 coefficients) |
+| `Zip+ Evaluate Comparison Rate1_4 Depth3` | Evaluate phase with rate 1/4 depth-3 IPRS codes (i128 coefficients) |
+| `Zip+ Commit Comparison Rate1_4 Depth4` | Same matrix shapes with rate 1/4, depth-4 IPRS codes and `i128` coefficients. Smallest possible base matrices (4×1, 8×2, 16×4) |
+| `Zip+ Test Comparison Rate1_4 Depth4` | Test phase with rate 1/4 depth-4 IPRS codes (i128 coefficients) |
+| `Zip+ Evaluate Comparison Rate1_4 Depth4` | Evaluate phase with rate 1/4 depth-4 IPRS codes (i128 coefficients) |
 
 **Filter examples:**
 
@@ -121,6 +124,8 @@ cargo bench --bench zip_plus_benches -p zip-plus -- "Commit Comparison"
 cargo bench --bench zip_plus_benches -p zip-plus -- "Commit Comparison Rate1_4"
 # Only Commit Comparison at rate 1/4 depth 3
 cargo bench --bench zip_plus_benches -p zip-plus -- "Comparison Rate1_4 Depth3"
+# Only Commit Comparison at rate 1/4 depth 4
+cargo bench --bench zip_plus_benches -p zip-plus -- "Comparison Rate1_4 Depth4"
 # Only F12289
 cargo bench --bench zip_plus_benches -p zip-plus -- "F12289"
 # Only RAA

@@ -54,6 +54,12 @@ impl MaxBitWidth for i64 {
     }
 }
 
+impl MaxBitWidth for i128 {
+    fn max_bit_width(&self) -> u32 {
+        i128::BITS - self.unsigned_abs().leading_zeros()
+    }
+}
+
 impl<const LIMBS: usize> MaxBitWidth for Int<LIMBS> {
     fn max_bit_width(&self) -> u32 {
         self.inner().abs().bits_vartime()
