@@ -214,14 +214,35 @@ fn pntt_into_impl<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
         out.len()
     );
 
+    #[cfg(feature = "pntt-timing")]
+    PNTT_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    #[cfg(feature = "pntt-timing")]
+    let base_start = std::time::Instant::now();
+
     base_multiply_into_output_in_place::<_, _, _, MulInByTwiddle>(input, params, out);
+
+    #[cfg(feature = "pntt-timing")]
+    {
+        let base_elapsed = base_start.elapsed().as_nanos() as u64;
+        BASE_LAYER_NANOS.fetch_add(base_elapsed, Ordering::Relaxed);
+    }
 
     // Safe because we have just initialized all output elements.
     let out_init = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut Out, out.len())
     };
 
+    #[cfg(feature = "pntt-timing")]
+    let butterfly_start = std::time::Instant::now();
+
     combine_stages::<_, _, MulOutByTwiddle>(out_init, params);
+
+    #[cfg(feature = "pntt-timing")]
+    {
+        let butterfly_elapsed = butterfly_start.elapsed().as_nanos() as u64;
+        BUTTERFLY_NANOS.fetch_add(butterfly_elapsed, Ordering::Relaxed);
+    }
 }
 
 #[cfg(feature = "unchecked-butterfly")]
@@ -259,13 +280,34 @@ fn pntt_into_impl<In, Out, C, MulInByTwiddle, MulOutByTwiddle>(
         out.len()
     );
 
+    #[cfg(feature = "pntt-timing")]
+    PNTT_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    #[cfg(feature = "pntt-timing")]
+    let base_start = std::time::Instant::now();
+
     base_multiply_into_output_in_place_unchecked::<_, _, _, MulInByTwiddle>(input, params, out);
+
+    #[cfg(feature = "pntt-timing")]
+    {
+        let base_elapsed = base_start.elapsed().as_nanos() as u64;
+        BASE_LAYER_NANOS.fetch_add(base_elapsed, Ordering::Relaxed);
+    }
 
     let out_init = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut Out, out.len())
     };
 
+    #[cfg(feature = "pntt-timing")]
+    let butterfly_start = std::time::Instant::now();
+
     combine_stages::<_, _, MulOutByTwiddle>(out_init, params);
+
+    #[cfg(feature = "pntt-timing")]
+    {
+        let butterfly_elapsed = butterfly_start.elapsed().as_nanos() as u64;
+        BUTTERFLY_NANOS.fetch_add(butterfly_elapsed, Ordering::Relaxed);
+    }
 }
 
 /// Implementation of the radix-8 pseudo NTT algorithm with unchecked butterflies.
@@ -493,14 +535,14 @@ where
             let oct_rev_chunk = params.oct_rev_table[chunk];
 
             // We always know that the first column of the Vandermonde matrix
-            // consists of 1's. Use AddAssign for in-place accumulation.
+            // consists of 1's. Use fused mul_by_twiddle_and_add to avoid temporaries.
             let mut acc = Out::from_ref(&input[oct_rev_chunk]);
             for (col, bm_row_col) in params.base_matrix[row][1..].iter().enumerate() {
-                let term = M::mul_by_twiddle(
+                M::mul_by_twiddle_and_add(
+                    &mut acc,
                     &input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))],
                     bm_row_col,
                 );
-                acc += &term;
             }
             acc
         })
@@ -527,14 +569,14 @@ fn base_multiply_into_output_in_place_unchecked<In, Out, C, M>(
             // All elements within a chunk share the same oct_rev_chunk.
             let oct_rev_chunk = params.oct_rev_table[chunk_idx];
             for (row, out_cell) in chunk.iter_mut().enumerate() {
-                // Use AddAssign for in-place accumulation.
+                // Use fused mul_by_twiddle_and_add to avoid temporaries.
                 let mut acc = Out::from_ref(&input[oct_rev_chunk]);
                 for (col, bm_row_col) in params.base_matrix[row][1..].iter().enumerate() {
-                    let term = M::mul_by_twiddle(
+                    M::mul_by_twiddle_and_add(
+                        &mut acc,
                         &input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))],
                         bm_row_col,
                     );
-                    acc += &term;
                 }
                 out_cell.write(acc);
             }

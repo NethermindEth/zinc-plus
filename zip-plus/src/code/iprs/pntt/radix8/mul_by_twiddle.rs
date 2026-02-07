@@ -1,5 +1,6 @@
 use crypto_primitives::{FromWithConfig, PrimeField};
 use std::marker::PhantomData;
+use std::ops::AddAssign;
 
 use zinc_utils::mul_by_scalar::{MulByScalar, WideningMulByScalar};
 
@@ -11,6 +12,16 @@ pub(crate) trait MulByTwiddle<Lhs, Twiddle>: Clone + Send + Sync {
     type Output;
 
     fn mul_by_twiddle(lhs: &Lhs, twiddle: &Twiddle) -> Self::Output;
+
+    /// Fused multiply-and-add: equivalent to `*acc += mul_by_twiddle(lhs, twiddle)`
+    /// but can be overridden to avoid creating a temporary.
+    fn mul_by_twiddle_and_add(acc: &mut Self::Output, lhs: &Lhs, twiddle: &Twiddle)
+    where
+        Self::Output: for<'a> AddAssign<&'a Self::Output>,
+    {
+        let term = Self::mul_by_twiddle(lhs, twiddle);
+        *acc += &term;
+    }
 }
 
 /// The twiddle multiplication that
@@ -26,8 +37,27 @@ where
 
     #[inline(always)]
     fn mul_by_twiddle(lhs: &Lhs, twiddle: &Twiddle) -> Lhs {
-        lhs.mul_by_scalar::<CHECK>(twiddle)
-            .expect("Twiddle multiplication overflow")
+        if CHECK {
+            lhs.mul_by_scalar::<CHECK>(twiddle)
+                .expect("Twiddle multiplication overflow")
+        } else {
+            // SAFETY: mul_by_scalar::<false> always returns Some for standard
+            // numeric types — the unchecked path never produces None.
+            unsafe {
+                lhs.mul_by_scalar::<false>(twiddle).unwrap_unchecked()
+            }
+        }
+    }
+
+    /// Fused multiply-twiddle-and-add using `MulByScalar::mul_by_scalar_and_add_to`.
+    /// For types like `DensePolynomial`, this avoids creating an intermediate
+    /// polynomial (saves a clone + separate add pass).
+    #[inline(always)]
+    fn mul_by_twiddle_and_add(acc: &mut Lhs, lhs: &Lhs, twiddle: &Twiddle)
+    where
+        Lhs: for<'a> AddAssign<&'a Lhs>,
+    {
+        lhs.mul_by_scalar_and_add_to::<CHECK>(twiddle, acc);
     }
 }
 

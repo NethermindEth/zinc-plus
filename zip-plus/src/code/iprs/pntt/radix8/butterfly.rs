@@ -50,6 +50,9 @@ pub(crate) fn apply_radix_8_butterflies<R, Twiddle, M>(
 /// It is faster because it skips overflow checking, but should only be used
 /// when overflow is known to be impossible (e.g., when accumulating values
 /// that are known to be bounded).
+///
+/// Uses `mul_by_twiddle_and_add` to fuse the twiddle multiplication and
+/// accumulation, avoiding a temporary polynomial allocation per multiply.
 #[inline(always)]
 pub(crate) fn apply_radix_8_butterflies_unchecked<R, Twiddle, M>(
     ys: [&mut R; 8],
@@ -62,8 +65,7 @@ pub(crate) fn apply_radix_8_butterflies_unchecked<R, Twiddle, M>(
     for (y, butterfly_row) in ys.into_iter().zip(BUTTERFLY_TABLE.iter()) {
         let mut acc = xs[0].clone();
         for (j_minus_1, (&twiddle_idx, x)) in butterfly_row.iter().zip(&xs[1..]).enumerate() {
-            let twisted = M::mul_by_twiddle(x, &twiddles[j_minus_1][twiddle_idx]);
-            acc += &twisted;
+            M::mul_by_twiddle_and_add(&mut acc, x, &twiddles[j_minus_1][twiddle_idx]);
         }
         *y = acc;
     }

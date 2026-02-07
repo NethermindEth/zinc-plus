@@ -347,6 +347,46 @@ pub type PnttConfigF2_16_1_Base32_Depth1_Rate1_4 =
 pub type PnttConfigF2_16_1_Base64_Depth1_Rate1_4 =
     PnttConfigF2_16_1_Rate1_4_Base<64, 1>;
 
+/// Depth-2 configuration for message size $2^{12}$ with rate $\frac{1}{2}$.
+/// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
+///
+/// Configuration:
+/// - `BASE_LEN = 64`, `BASE_DIM = 128`
+/// - `INPUT_LEN = 64 \cdot 8^2 = 4096 = 2^{12}`
+/// - `OUTPUT_LEN = 128 \cdot 8^2 = 8192 = 2^{13}`
+pub type PnttConfigF2_16_1_Base64_Depth2_Rate1_2 =
+    PnttConfigF2_16_1_Rate1_2_Base<64, 2>;
+
+/// Depth-2 configuration for message size $2^{13}$ with rate $\frac{1}{2}$.
+/// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
+///
+/// Configuration:
+/// - `BASE_LEN = 128`, `BASE_DIM = 256`
+/// - `INPUT_LEN = 128 \cdot 8^2 = 8192 = 2^{13}`
+/// - `OUTPUT_LEN = 256 \cdot 8^2 = 16384 = 2^{14}`
+pub type PnttConfigF2_16_1_Base128_Depth2_Rate1_2 =
+    PnttConfigF2_16_1_Rate1_2_Base<128, 2>;
+
+/// Depth-2 configuration for message size $2^{14}$ with rate $\frac{1}{2}$.
+/// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
+///
+/// Configuration:
+/// - `BASE_LEN = 256`, `BASE_DIM = 512`
+/// - `INPUT_LEN = 256 \cdot 8^2 = 16384 = 2^{14}`
+/// - `OUTPUT_LEN = 512 \cdot 8^2 = 32768 = 2^{15}`
+pub type PnttConfigF2_16_1_Base256_Depth2_Rate1_2 =
+    PnttConfigF2_16_1_Rate1_2_Base<256, 2>;
+
+/// Depth-2 configuration for message size $2^{15}$ with rate $\frac{1}{2}$.
+/// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
+///
+/// Configuration:
+/// - `BASE_LEN = 512`, `BASE_DIM = 1024`
+/// - `INPUT_LEN = 512 \cdot 8^2 = 32768 = 2^{15}`
+/// - `OUTPUT_LEN = 1024 \cdot 8^2 = 65536 = 2^{16}`
+pub type PnttConfigF2_16_1_Base512_Depth2_Rate1_2 =
+    PnttConfigF2_16_1_Rate1_2_Base<512, 2>;
+
 /// Depth-3 configuration for message size $2^{12}$ with rate $\frac{1}{2}$.
 /// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
 /// 
@@ -384,6 +424,26 @@ pub type PnttConfigF2_16_1_Base8_Depth3_Rate1_4 =
 /// - `OUTPUT_LEN = 256 \cdot 8^2 = 16384 = 2^{14}`
 pub type PnttConfigF2_16_1_Base64_Depth2_Rate1_4 =
     PnttConfigF2_16_1_Rate1_4_Base<64, 2>;
+
+/// Depth-2 configuration for message size $2^{13}$ with rate $\frac{1}{4}$.
+/// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
+///
+/// Configuration:
+/// - `BASE_LEN = 128`, `BASE_DIM = 512`
+/// - `INPUT_LEN = 128 \cdot 8^2 = 8192 = 2^{13}`
+/// - `OUTPUT_LEN = 512 \cdot 8^2 = 32768 = 2^{15}`
+pub type PnttConfigF2_16_1_Base128_Depth2_Rate1_4 =
+    PnttConfigF2_16_1_Rate1_4_Base<128, 2>;
+
+/// Depth-2 configuration for message size $2^{14}$ with rate $\frac{1}{4}$.
+/// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
+///
+/// Configuration:
+/// - `BASE_LEN = 256`, `BASE_DIM = 1024`
+/// - `INPUT_LEN = 256 \cdot 8^2 = 16384 = 2^{14}`
+/// - `OUTPUT_LEN = 1024 \cdot 8^2 = 65536 = 2^{16}`
+pub type PnttConfigF2_16_1_Base256_Depth2_Rate1_4 =
+    PnttConfigF2_16_1_Rate1_4_Base<256, 2>;
 
 /// Pseudo NTT configuration derived from the field Fp for p = 12289.
 /// This is the smallest prime supporting 4096th roots of unity.
@@ -530,6 +590,50 @@ mod tests {
         assert_eq!(C::INPUT_LEN, 64); // 8 * 8^1 = 2^6
         assert_eq!(C::OUTPUT_LEN, 128); // 16 * 8^1 = 2^7
         assert_eq!(C::FIELD_MODULUS, 257);
+    }
+
+    #[test]
+    fn check_f65537_base64_depth2_rate1_2_config() {
+        type C = PnttConfigF2_16_1_Base64_Depth2_Rate1_2;
+        assert_eq!(C::BASE_LEN, 64);
+        assert_eq!(C::BASE_DIM, 128);
+        assert_eq!(C::DEPTH, 2);
+        assert_eq!(C::INPUT_LEN, 4096); // 64 * 8^2 = 2^12
+        assert_eq!(C::OUTPUT_LEN, 8192); // 128 * 8^2 = 2^13
+        assert_eq!(C::FIELD_MODULUS, 65537);
+    }
+
+    #[test]
+    fn check_f65537_base128_depth2_rate1_2_config() {
+        type C = PnttConfigF2_16_1_Base128_Depth2_Rate1_2;
+        assert_eq!(C::BASE_LEN, 128);
+        assert_eq!(C::BASE_DIM, 256);
+        assert_eq!(C::DEPTH, 2);
+        assert_eq!(C::INPUT_LEN, 8192); // 128 * 8^2 = 2^13
+        assert_eq!(C::OUTPUT_LEN, 16384); // 256 * 8^2 = 2^14
+        assert_eq!(C::FIELD_MODULUS, 65537);
+    }
+
+    #[test]
+    fn check_f65537_base256_depth2_rate1_2_config() {
+        type C = PnttConfigF2_16_1_Base256_Depth2_Rate1_2;
+        assert_eq!(C::BASE_LEN, 256);
+        assert_eq!(C::BASE_DIM, 512);
+        assert_eq!(C::DEPTH, 2);
+        assert_eq!(C::INPUT_LEN, 16384); // 256 * 8^2 = 2^14
+        assert_eq!(C::OUTPUT_LEN, 32768); // 512 * 8^2 = 2^15
+        assert_eq!(C::FIELD_MODULUS, 65537);
+    }
+
+    #[test]
+    fn check_f65537_base512_depth2_rate1_2_config() {
+        type C = PnttConfigF2_16_1_Base512_Depth2_Rate1_2;
+        assert_eq!(C::BASE_LEN, 512);
+        assert_eq!(C::BASE_DIM, 1024);
+        assert_eq!(C::DEPTH, 2);
+        assert_eq!(C::INPUT_LEN, 32768); // 512 * 8^2 = 2^15
+        assert_eq!(C::OUTPUT_LEN, 65536); // 1024 * 8^2 = 2^16
+        assert_eq!(C::FIELD_MODULUS, 65537);
     }
 
     #[test]

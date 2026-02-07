@@ -7,12 +7,31 @@ pub trait MulByScalar<Rhs>: Sized {
     /// coefficient to obtain a linear combination).
     /// Returns `None` if the multiplication would overflow.
     fn mul_by_scalar<const CHECK: bool>(&self, rhs: Rhs) -> Option<Self>;
+
+    /// Fused multiply-scalar-and-add: `*acc += self * rhs`.
+    ///
+    /// The default implementation creates a temporary and adds it.
+    /// Specialized implementations (e.g. `DensePolynomial`) can fuse the
+    /// operation to avoid the intermediate allocation.
+    #[inline(always)]
+    fn mul_by_scalar_and_add_to<const CHECK: bool>(
+        &self,
+        rhs: Rhs,
+        acc: &mut Self,
+    ) where
+        Self: for<'a> std::ops::AddAssign<&'a Self>,
+    {
+        if let Some(term) = self.mul_by_scalar::<CHECK>(rhs) {
+            *acc += &term;
+        }
+    }
 }
 
 macro_rules! impl_mul_by_scalar_for_primitives {
     ($($t:ty),*) => {
         $(
             impl MulByScalar<&$t> for $t {
+                #[inline(always)]
                 #[allow(clippy::arithmetic_side_effects)] // By design
                 fn mul_by_scalar<const CHECK: bool>(&self, rhs: &$t) -> Option<Self> {
                     if CHECK {
@@ -92,4 +111,14 @@ pub trait WideningMulByScalar<Lhs, Rhs>: Clone + Default + Send + Sync {
     type Output;
 
     fn mul_by_scalar_widen(lhs: &Lhs, rhs: &Rhs) -> Self::Output;
+
+    /// Fused widen-and-add: equivalent to `*acc += mul_by_scalar_widen(lhs, rhs)`
+    /// but can be overridden for better performance (e.g., avoiding temporary allocation).
+    fn widen_and_add(acc: &mut Self::Output, lhs: &Lhs, rhs: &Rhs)
+    where
+        Self::Output: for<'a> std::ops::AddAssign<&'a Self::Output>,
+    {
+        let term = Self::mul_by_scalar_widen(lhs, rhs);
+        *acc += &term;
+    }
 }

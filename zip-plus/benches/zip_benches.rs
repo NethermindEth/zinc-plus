@@ -23,12 +23,19 @@ use zip_plus::{
             IprsCode,
             PnttConfigF2_16_1_Base8_Depth3_Rate1_2,
             PnttConfigF2_16_1_Base8_Depth3_Rate1_4,
+            PnttConfigF2_16_1_Base64_Depth2_Rate1_2,
+            PnttConfigF2_16_1_Base128_Depth2_Rate1_2,
+            PnttConfigF2_16_1_Base256_Depth2_Rate1_2,
+            PnttConfigF2_16_1_Base512_Depth2_Rate1_2,
             PnttConfigF2_16_1_Base16_Depth1_Rate1_2,
             PnttConfigF2_16_1_Base16_Depth1_Rate1_4,
             PnttConfigF2_16_1_Base32_Depth1_Rate1_2,
             PnttConfigF2_16_1_Base32_Depth1_Rate1_4,
             PnttConfigF2_16_1_Base64_Depth1_Rate1_2,
             PnttConfigF2_16_1_Base64_Depth1_Rate1_4,
+            PnttConfigF2_16_1_Base64_Depth2_Rate1_4,
+            PnttConfigF2_16_1_Base128_Depth2_Rate1_4,
+            PnttConfigF2_16_1_Base256_Depth2_Rate1_4,
             PnttConfigF2_16_1_Depth2_Rate1_2,
             PnttConfigF2_16_1_Depth2_Rate1_4,
         },
@@ -95,6 +102,65 @@ type IprsCodeDepth1Base32Rate1_4 =
 type IprsCodeDepth1Base64Rate1_4 =
     IprsCode<BenchZipTypes, PnttConfigF2_16_1_Base64_Depth1_Rate1_4, I32WideningMulByScalar>;
 
+// --- 128-bit integer types for encoding benchmarks ---
+
+/// ZipTypes for 128-bit integer evaluations (Int<2> = 2×64 = 128 bits).
+/// Codeword type is Int<3> (192 bits) to hold the widened result after
+/// multiplying by i64 twiddle factors and accumulating.
+struct BenchZipTypes128Bit {}
+impl ZipTypes for BenchZipTypes128Bit {
+    const NUM_COLUMN_OPENINGS: usize = 200;
+    type Eval = Int<2>;
+    type Cw = Int<3>;
+    type Fmod = Uint<{ INT_LIMBS * 4 }>;
+    type PrimeTest = MillerRabin;
+    type Chal = i128;
+    type Pt = i128;
+    type CombR = Int<5>;
+    type Comb = Self::CombR;
+    type EvalDotChal = ScalarProduct;
+    type CombDotChal = ScalarProduct;
+    type ArrCombRDotChal = MBSInnerProduct;
+}
+
+/// Widening multiplication: Int<2> × i64 → Int<3>.
+/// This widens the 128-bit input to 192 bits, then multiplies by the i64
+/// twiddle factor.
+#[derive(Clone, Default)]
+struct Int2WideningMulByScalar;
+
+impl WideningMulByScalar<Int<2>, i64> for Int2WideningMulByScalar {
+    type Output = Int<3>;
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn mul_by_scalar_widen(lhs: &Int<2>, rhs: &i64) -> Self::Output {
+        use zinc_utils::from_ref::FromRef;
+        let wide: Int<3> = Int::<3>::from_ref(lhs);
+        let rhs_wide: Int<3> = Int::<3>::from_ref(rhs);
+        wide * rhs_wide
+    }
+}
+
+// Rate 1/2, depth-2 configs for 128-bit integers (sizes 2^11–2^14).
+type IprsCode128Bit_Depth2_Rate1_2 =
+    IprsCode<BenchZipTypes128Bit, PnttConfigF2_16_1_Depth2_Rate1_2, Int2WideningMulByScalar>;
+type IprsCode128Bit_Base64_Depth2_Rate1_2 =
+    IprsCode<BenchZipTypes128Bit, PnttConfigF2_16_1_Base64_Depth2_Rate1_2, Int2WideningMulByScalar>;
+type IprsCode128Bit_Base128_Depth2_Rate1_2 =
+    IprsCode<BenchZipTypes128Bit, PnttConfigF2_16_1_Base128_Depth2_Rate1_2, Int2WideningMulByScalar>;
+type IprsCode128Bit_Base256_Depth2_Rate1_2 =
+    IprsCode<BenchZipTypes128Bit, PnttConfigF2_16_1_Base256_Depth2_Rate1_2, Int2WideningMulByScalar>;
+
+// Rate 1/4, depth-2 configs for 128-bit integers (sizes 2^11–2^14).
+type IprsCode128Bit_Depth2_Rate1_4 =
+    IprsCode<BenchZipTypes128Bit, PnttConfigF2_16_1_Depth2_Rate1_4, Int2WideningMulByScalar>;
+type IprsCode128Bit_Base64_Depth2_Rate1_4 =
+    IprsCode<BenchZipTypes128Bit, PnttConfigF2_16_1_Base64_Depth2_Rate1_4, Int2WideningMulByScalar>;
+type IprsCode128Bit_Base128_Depth2_Rate1_4 =
+    IprsCode<BenchZipTypes128Bit, PnttConfigF2_16_1_Base128_Depth2_Rate1_4, Int2WideningMulByScalar>;
+type IprsCode128Bit_Base256_Depth2_Rate1_4 =
+    IprsCode<BenchZipTypes128Bit, PnttConfigF2_16_1_Base256_Depth2_Rate1_4, Int2WideningMulByScalar>;
+
 // --- 256-bit integer types for encoding benchmarks ---
 
 /// ZipTypes for 256-bit integer evaluations (Int<4> = 4×64 = 256 bits).
@@ -144,6 +210,74 @@ type IprsCode256BitRate1_2 =
 type IprsCode256BitRate1_4 =
     IprsCode<BenchZipTypes256Bit, PnttConfigF2_16_1_Base8_Depth3_Rate1_4, Int4WideningMulByScalar>;
 
+/// IPRS code for F65537, depth 2, rate 1/2, with 256-bit integer inputs.
+/// INPUT_LEN = 4096 (2^12), OUTPUT_LEN = 8192.
+type IprsCode256Bit_Base64_Depth2 =
+    IprsCode<BenchZipTypes256Bit, PnttConfigF2_16_1_Base64_Depth2_Rate1_2, Int4WideningMulByScalar>;
+
+/// IPRS code for F65537, depth 2, rate 1/2, with 256-bit integer inputs.
+/// INPUT_LEN = 8192 (2^13), OUTPUT_LEN = 16384.
+type IprsCode256Bit_Base128_Depth2 =
+    IprsCode<BenchZipTypes256Bit, PnttConfigF2_16_1_Base128_Depth2_Rate1_2, Int4WideningMulByScalar>;
+
+/// IPRS code for F65537, depth 2, rate 1/2, with 256-bit integer inputs.
+/// INPUT_LEN = 16384 (2^14), OUTPUT_LEN = 32768.
+type IprsCode256Bit_Base256_Depth2 =
+    IprsCode<BenchZipTypes256Bit, PnttConfigF2_16_1_Base256_Depth2_Rate1_2, Int4WideningMulByScalar>;
+
+/// IPRS code for F65537, depth 2, rate 1/2, with 256-bit integer inputs.
+/// INPUT_LEN = 32768 (2^15), OUTPUT_LEN = 65536.
+type IprsCode256Bit_Base512_Depth2 =
+    IprsCode<BenchZipTypes256Bit, PnttConfigF2_16_1_Base512_Depth2_Rate1_2, Int4WideningMulByScalar>;
+
+/// Helper: benchmark encoding a single row of random 128-bit integers.
+macro_rules! bench_encode_128bit {
+    ($group:expr, $rng:expr, $code_ty:ty, $len_log:expr, $rate:expr) => {{
+        let len = 1usize << $len_log;
+        let code = <$code_ty>::new(len);
+        let message: Vec<Int<2>> = (0..code.row_len())
+            .map(|_| $rng.random())
+            .collect();
+
+        $group.bench_function(
+            format!(
+                "Encode: {} -> {}, len={}, rate={}, field=F65537",
+                Int::<2>::type_name(),
+                Int::<3>::type_name(),
+                len,
+                $rate,
+            ),
+            |b| {
+                b.iter(|| {
+                    let encoded = code.encode(&message);
+                    black_box(encoded);
+                })
+            },
+        );
+    }};
+}
+
+/// Benchmark encoding random 128-bit integers with IPRS (depth-2) over
+/// F_{65537} for message sizes 2^11 through 2^14, at rate 1/2 and 1/4.
+fn zip_benchmarks_encode_128bit(c: &mut Criterion) {
+    let mut rng = ThreadRng::default();
+    let mut group = c.benchmark_group("Zip Encode 128-bit");
+
+    // Rate 1/2
+    bench_encode_128bit!(group, rng, IprsCode128Bit_Depth2_Rate1_2,        11, "1/2");
+    bench_encode_128bit!(group, rng, IprsCode128Bit_Base64_Depth2_Rate1_2,  12, "1/2");
+    bench_encode_128bit!(group, rng, IprsCode128Bit_Base128_Depth2_Rate1_2, 13, "1/2");
+    bench_encode_128bit!(group, rng, IprsCode128Bit_Base256_Depth2_Rate1_2, 14, "1/2");
+
+    // Rate 1/4
+    bench_encode_128bit!(group, rng, IprsCode128Bit_Depth2_Rate1_4,        11, "1/4");
+    bench_encode_128bit!(group, rng, IprsCode128Bit_Base64_Depth2_Rate1_4,  12, "1/4");
+    bench_encode_128bit!(group, rng, IprsCode128Bit_Base128_Depth2_Rate1_4, 13, "1/4");
+    bench_encode_128bit!(group, rng, IprsCode128Bit_Base256_Depth2_Rate1_4, 14, "1/4");
+
+    group.finish();
+}
+
 /// Benchmark encoding a single vector of 2^12 random 256-bit integers
 /// with IPRS at rate 1/2 and rate 1/4 over F_{65537}.
 fn zip_benchmarks_encode_256bit(c: &mut Criterion) {
@@ -182,6 +316,103 @@ fn zip_benchmarks_encode_256bit(c: &mut Criterion) {
         group.bench_function(
             format!(
                 "Encode: {} -> {}, len=4096, rate=1/4, field=F65537",
+                Int::<4>::type_name(),
+                Int::<5>::type_name(),
+            ),
+            |b| {
+                b.iter(|| {
+                    let encoded = code.encode(&message);
+                    black_box(encoded);
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark encoding 256-bit integers with IPRS depth-2 rate-1/2 codes
+/// for message sizes 2^12 through 2^15 over F_{65537}.
+fn zip_benchmarks_encode_256bit_depth2(c: &mut Criterion) {
+    let mut rng = ThreadRng::default();
+    let mut group = c.benchmark_group("Zip Encode 256-bit Depth2");
+
+    // 2^12 = 4096
+    {
+        let code = IprsCode256Bit_Base64_Depth2::new(1 << 12);
+        let message: Vec<Int<4>> = (0..code.row_len())
+            .map(|_| rng.random())
+            .collect();
+
+        group.bench_function(
+            format!(
+                "Encode: {} -> {}, len=4096, rate=1/2, field=F65537",
+                Int::<4>::type_name(),
+                Int::<5>::type_name(),
+            ),
+            |b| {
+                b.iter(|| {
+                    let encoded = code.encode(&message);
+                    black_box(encoded);
+                })
+            },
+        );
+    }
+
+    // 2^13 = 8192
+    {
+        let code = IprsCode256Bit_Base128_Depth2::new(1 << 13);
+        let message: Vec<Int<4>> = (0..code.row_len())
+            .map(|_| rng.random())
+            .collect();
+
+        group.bench_function(
+            format!(
+                "Encode: {} -> {}, len=8192, rate=1/2, field=F65537",
+                Int::<4>::type_name(),
+                Int::<5>::type_name(),
+            ),
+            |b| {
+                b.iter(|| {
+                    let encoded = code.encode(&message);
+                    black_box(encoded);
+                })
+            },
+        );
+    }
+
+    // 2^14 = 16384
+    {
+        let code = IprsCode256Bit_Base256_Depth2::new(1 << 14);
+        let message: Vec<Int<4>> = (0..code.row_len())
+            .map(|_| rng.random())
+            .collect();
+
+        group.bench_function(
+            format!(
+                "Encode: {} -> {}, len=16384, rate=1/2, field=F65537",
+                Int::<4>::type_name(),
+                Int::<5>::type_name(),
+            ),
+            |b| {
+                b.iter(|| {
+                    let encoded = code.encode(&message);
+                    black_box(encoded);
+                })
+            },
+        );
+    }
+
+    // 2^15 = 32768
+    {
+        let code = IprsCode256Bit_Base512_Depth2::new(1 << 15);
+        let message: Vec<Int<4>> = (0..code.row_len())
+            .map(|_| rng.random())
+            .collect();
+
+        group.bench_function(
+            format!(
+                "Encode: {} -> {}, len=32768, rate=1/2, field=F65537",
                 Int::<4>::type_name(),
                 Int::<5>::type_name(),
             ),
@@ -244,6 +475,8 @@ criterion_group!(
     zip_benchmarks_iprs_matrix_shapes,
     zip_benchmarks_iprs_rate1_4,
     zip_benchmarks_iprs_rate1_4_matrix_shapes,
-    zip_benchmarks_encode_256bit
+    zip_benchmarks_encode_128bit,
+    zip_benchmarks_encode_256bit,
+    zip_benchmarks_encode_256bit_depth2
 );
 criterion_main!(benches);

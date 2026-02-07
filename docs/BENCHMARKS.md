@@ -7,7 +7,7 @@ each crate's `benches/` directory.
 
 | Crate | Bench name | What it measures |
 |---|---|---|
-| `zip-plus` | `zip_benches` | Zip PCS (integer coefficients): RAA & IPRS encoding, commit, 256-bit encoding |
+| `zip-plus` | `zip_benches` | Zip PCS (integer coefficients): RAA & IPRS encoding, commit, 128-bit & 256-bit encoding |
 | `zip-plus` | `zip_plus_benches` | Zip+ PCS (polynomial coefficients): RAA, IPRS (multiple fields/depths/rates), commit |
 | `piop` | `sumcheck` | Sumcheck prover & verifier over random fields |
 | `poly` | `mle_evaluation` | Multilinear extension evaluation (field & inner representation) |
@@ -54,6 +54,7 @@ cargo bench --bench zip_benches -p zip-plus
 | `Zip IPRS Matrix Shapes` | IPRS depth-1, rate 1/2 | Single-row encode with base 16/32/64 matrix shapes |
 | `Zip IPRS rate1_4` | IPRS depth-2, rate 1/4 | Commit with IPRS (F65537) at rate 1/4 |
 | `Zip IPRS rate1_4 Matrix Shapes` | IPRS depth-1, rate 1/4 | Single-row encode with base 16/32/64 at rate 1/4 |
+| `Zip Encode 128-bit` | IPRS depth-2, 128-bit ints | Encode `Int<2>` → `Int<3>` for sizes 2^11–2^14 at rate 1/2 and 1/4 |
 | `Zip Encode 256-bit` | IPRS depth-3, 256-bit ints | Encode `Int<4>` → `Int<5>` at rate 1/2 and 1/4 |
 
 **Filter examples:**
@@ -63,6 +64,8 @@ cargo bench --bench zip_benches -p zip-plus
 cargo bench --bench zip_benches -p zip-plus -- "Zip\+"
 # Only IPRS rate 1/4
 cargo bench --bench zip_benches -p zip-plus -- "rate1_4"
+# Only 128-bit encoding
+cargo bench --bench zip_benches -p zip-plus -- "128-bit"
 # Only 256-bit encoding
 cargo bench --bench zip_benches -p zip-plus -- "256-bit"
 ```
@@ -89,6 +92,7 @@ cargo bench --bench zip_plus_benches -p zip-plus
 | `Zip+ IPRS F65537 Depth2` | IPRS depth-2, row_len=2048, rate 1/2. Matrix sizes from 4×2048 to 64×2048 |
 | `Zip+ IPRS F12289 Depth3 2^11` | IPRS depth-3 over F12289, row_len=2048, rate 1/2. Matrix sizes 4×2048 to 64×2048 |
 | `Zip+ IPRS F65537 Depth2 Rate1_4` | IPRS depth-2, row_len=4096, rate 1/4 (i64-safe). Matrix sizes 4×4096 to 32×4096 |
+| `Zip+ IPRS F65537 Depth2 Wide` | IPRS depth-2, rate 1/2, fixed 4 rows with increasing row_len (4096→32768). Explores wide matrices: 4×4096, 4×8192, 4×16384, 4×32768 |
 
 **Filter examples:**
 
@@ -97,6 +101,8 @@ cargo bench --bench zip_plus_benches -p zip-plus
 cargo bench --bench zip_plus_benches -p zip-plus -- "F65537 Depth3"
 # Only F65537 Depth2 at rate 1/4
 cargo bench --bench zip_plus_benches -p zip-plus -- "F65537 Depth2 Rate1_4"
+# Only F65537 Depth2 Wide (fixed 4 rows, increasing row_len)
+cargo bench --bench zip_plus_benches -p zip-plus -- "Depth2 Wide"
 # Only F12289
 cargo bench --bench zip_plus_benches -p zip-plus -- "F12289"
 # Only RAA
@@ -104,6 +110,33 @@ cargo bench --bench zip_plus_benches -p zip-plus -- "RAA"
 # A specific matrix size
 cargo bench --bench zip_plus_benches -p zip-plus -- "matrix=16x4096"
 ```
+
+### Proof Size Analysis
+
+The Zip+ proof size (in bits) is dominated by two terms:
+
+```
+proof_size ≈ 2 × 32 × 200 × 26 × num_rows + 128 × num_columns
+           = 332,800 × num_rows + 128 × num_columns
+```
+
+The first term accounts for the Merkle authentication paths (one per sampled column, per row), while the second term accounts for the column openings themselves. These are the dominant costs for wide matrices; other minor contributions exist but become negligible as the matrix width increases.
+
+**Choosing matrix dimensions:** Given a fixed number of matrix entries (`num_rows × num_columns`), the optimal shape minimizes the proof size. Taking the derivative and solving yields:
+
+```
+optimal_num_rows ≈ √(total_entries / 2600)
+```
+
+In practice, `num_rows` must be a power of two. The table below shows optimal configurations:
+
+| Total Entries | Best num_rows | num_columns | Proof Size |
+|---------------|---------------|-------------|------------|
+| 2^14 = 16,384 | 2 | 8,192 | ~209 KB |
+| 2^15 = 32,768 | 4 | 8,192 | ~290 KB |
+| 2^16 = 65,536 | 4 | 16,384 | ~418 KB |
+
+**Trade-off with verifier time:** Wider matrices (more columns, fewer rows) reduce proof size but increase verifier time, since the verifier must read and hash more column data. When configuring parameters, consider both proof size and verification latency requirements for your use case.
 
 ### `profile_encode` — Profiling Example
 

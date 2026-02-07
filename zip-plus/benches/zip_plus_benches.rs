@@ -39,6 +39,12 @@ use zip_plus::{
     },
     pcs::structs::ZipTypes,
 };
+use zip_plus::code::iprs::{
+    PnttConfigF2_16_1_Base64_Depth2_Rate1_2,
+    PnttConfigF2_16_1_Base128_Depth2_Rate1_2,
+    PnttConfigF2_16_1_Base256_Depth2_Rate1_2,
+    PnttConfigF2_16_1_Base512_Depth2_Rate1_2,
+};
 use zip_plus::code::iprs::pntt::radix8::params::PnttConfigF12289_Depth3_Rate1_2;
 
 const INT_LIMBS: usize = U64::LIMBS;
@@ -157,6 +163,34 @@ type SomeIprsCodeF65537Base64Depth2Rate1_4<Twiddle, const D_PLUS_ONE: usize> = I
 type SomeIprsCodeF12289Depth3<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
     BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
     PnttConfigF12289_Depth3_Rate1_2,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
+/// F65537 depth-2 rate-1/2 config for message size 2^12 (base matrix 128x64)
+type SomeIprsCodeF65537Base64Depth2<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Base64_Depth2_Rate1_2,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
+/// F65537 depth-2 rate-1/2 config for message size 2^13 (base matrix 256x128)
+type SomeIprsCodeF65537Base128Depth2<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Base128_Depth2_Rate1_2,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
+/// F65537 depth-2 rate-1/2 config for message size 2^14 (base matrix 512x256)
+type SomeIprsCodeF65537Base256Depth2<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Base256_Depth2_Rate1_2,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
+/// F65537 depth-2 rate-1/2 config for message size 2^15 (base matrix 1024x512)
+type SomeIprsCodeF65537Base512Depth2<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Base512_Depth2_Rate1_2,
     BinaryPolyWideningMulByScalar<Twiddle>,
 >;
 
@@ -325,6 +359,24 @@ fn zip_plus_benchmarks_iprs_f65537_depth2_rate1_4(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmarks for F65537 IPRS Depth-2 rate-1/2 configurations
+/// with 4 rows and varying message sizes (row_len = 2^12..2^15).
+/// Matrix sizes: 4×2^12, 4×2^13, 4×2^14, 4×2^15
+fn zip_plus_benchmarks_iprs_f65537_depth2_wide(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip+ IPRS F65537 Depth2 Wide");
+
+    // 4 rows x 4096 cols (4 x 2^12), poly_size=2^14
+    commit::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base64Depth2<i64, 32>, 14>(&mut group);
+    // 4 rows x 8192 cols (4 x 2^13), poly_size=2^15
+    commit::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base128Depth2<i64, 32>, 15>(&mut group);
+    // 4 rows x 16384 cols (4 x 2^14), poly_size=2^16
+    commit::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base256Depth2<i64, 32>, 16>(&mut group);
+    // 4 rows x 32768 cols (4 x 2^15), poly_size=2^17
+    commit::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base512Depth2<i64, 32>, 17>(&mut group);
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     zip_plus_benchmarks_raa,
@@ -335,6 +387,7 @@ criterion_group!(
     zip_plus_benchmarks_iprs_f65537_depth3,
     zip_plus_benchmarks_iprs_f65537_depth2,
     zip_plus_benchmarks_iprs_f12289_depth3,
-    zip_plus_benchmarks_iprs_f65537_depth2_rate1_4
+    zip_plus_benchmarks_iprs_f65537_depth2_rate1_4,
+    zip_plus_benchmarks_iprs_f65537_depth2_wide
 );
 criterion_main!(benches);

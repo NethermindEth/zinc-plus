@@ -665,12 +665,41 @@ where
             // in the butterfly stage where most coefficients are non-zero.
             // For numeric types, 0 * x = 0 is always correct.
             for x in &mut coeffs {
-                // mul_by_scalar::<false> always returns Some for standard types
-                *x = x.mul_by_scalar::<false>(rhs).expect("unchecked mul_by_scalar should not fail");
+                // SAFETY: mul_by_scalar::<false> always returns Some for standard
+                // numeric types (i8..i128, Int), so the unwrap cannot fail.
+                *x = unsafe { x.mul_by_scalar::<false>(rhs).unwrap_unchecked() };
             }
         }
 
         Some(Self { coeffs })
+    }
+
+    /// Fused multiply-scalar-and-add: for each coefficient,
+    /// `acc.coeffs[i] += self.coeffs[i] * rhs`, avoiding the intermediate
+    /// polynomial allocation that `mul_by_scalar` + `AddAssign` would incur.
+    #[inline(always)]
+    fn mul_by_scalar_and_add_to<const CHECK: bool>(
+        &self,
+        rhs: &'a S,
+        acc: &mut Self,
+    ) where
+        Self: for<'b> AddAssign<&'b Self>,
+    {
+        if CHECK {
+            // Checked: fall back to mul + add (propagates None on overflow).
+            if let Some(term) = self.mul_by_scalar::<CHECK>(rhs) {
+                *acc += &term;
+            }
+        } else {
+            // Unchecked: fused loop — no temporary polynomial needed.
+            for i in 0..DEGREE_PLUS_ONE {
+                // SAFETY: mul_by_scalar::<false> always returns Some.
+                let scaled = unsafe {
+                    self.coeffs[i].mul_by_scalar::<false>(rhs).unwrap_unchecked()
+                };
+                acc.coeffs[i] += &scaled;
+            }
+        }
     }
 }
 
