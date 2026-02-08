@@ -375,6 +375,10 @@ fn zip_plus_benchmarks_iprs_f65537_depth3(c: &mut Criterion) {
 fn zip_plus_benchmarks_iprs_f65537_depth2(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS F65537 Depth2");
 
+    // 1 row x 2048 cols (2^0 x 2^11), poly_size=2^11
+    commit::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeDepth2<i64, 32>, 11>(&mut group);
+    test::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeDepth2<i64, 32>, UNCHECKED, 11>(&mut group);
+    evaluate::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeDepth2<i64, 32>, UNCHECKED, 11>(&mut group);
     // 4 rows x 2048 cols (2^2 x 2^11), poly_size=2^13
     commit::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeDepth2<i64, 32>, 13>(&mut group);
     // 8 rows x 2048 cols (2^3 x 2^11), poly_size=2^14
