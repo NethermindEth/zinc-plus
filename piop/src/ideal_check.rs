@@ -116,6 +116,7 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
             ProverState {
                 evaluation_point,
                 combined_mles,
+                trace_matrix,
             },
         ))
     }

@@ -5,6 +5,7 @@ use zinc_poly::{
     CoefficientProjectable, mle::DenseMultilinearExtension,
     univariate::dynamic::over_field::DynamicPolynomialF,
 };
+use zinc_utils::cfg_iter;
 
 use crate::ideal_check::structs::IdealCheckTypes;
 
@@ -17,18 +18,8 @@ pub(crate) fn project_trace_matrix<
     num_cols: usize,
     trace: &[DenseMultilinearExtension<IcTypes::Witness>],
     projecting_element: &IcTypes::F,
-) -> DenseRowMatrix<DynamicPolynomialF<<IcTypes as IdealCheckTypes<DEGREE_PLUS_ONE>>::F>> {
-    let mut matr = DenseRowMatrix::uninit(num_rows, num_cols);
-
-    matr.cells_mut().enumerate().for_each(|(row_idx, row)| {
-        row.for_each(|(col_idx, cell)| {
-            *cell = MaybeUninit::new(
-                trace[col_idx][row_idx]
-                    .project_coefficients(projecting_element)
-                    .into(),
-            );
-        });
-    });
-
-    unsafe { matr.init() }
+) -> Vec<
+    DenseMultilinearExtension<DynamicPolynomialF<<IcTypes as IdealCheckTypes<DEGREE_PLUS_ONE>>::F>>,
+> {
+    cfg_iter!(trace).map()
 }
