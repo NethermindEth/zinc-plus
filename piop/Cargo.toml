@@ -31,6 +31,7 @@ workspace = true
 
 [features]
 parallel = ["dep:rayon", "zinc-utils/parallel"]
+simd = ["zinc-poly/simd"]
 
 [[bench]]
 name = "sumcheck"
