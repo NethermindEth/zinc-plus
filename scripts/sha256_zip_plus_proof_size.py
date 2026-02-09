@@ -2,8 +2,8 @@
 """
 Compute combined Zip+ proof size for SHA-256, summing two components:
 
-  A: n_pol=10, flat_vec_norm=261, degree=32
-  B: n_pol=5,  flat_vec_norm=293, degree=1
+  A: n_pol=10, flat_vec_norm=133, degree=32
+  B: n_pol=5,  flat_vec_norm=155, degree=1
 
 Uses base_field_size=12 and:
   - depth=1 for k=6,7,8 (N = 2^k)
@@ -67,11 +67,11 @@ def fmt_size(bits: int) -> str:
 
 
 COMPONENTS = [
-    {"label": "A", "n_pol": 10, "flat_vec_norm": 261, "degree": 32},
-    {"label": "B", "n_pol": 5,  "flat_vec_norm": 293, "degree": 1},
+    {"label": "A", "n_pol": 10, "flat_vec_norm": 133, "degree": 32},
+    {"label": "B", "n_pol": 5,  "flat_vec_norm": 150, "degree": 1},
 ]
 
-QUERY_COUNTS = [100, 147]
+QUERY_COUNTS = [100, 147, 200, 240]
 
 
 def main():

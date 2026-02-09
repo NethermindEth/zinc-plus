@@ -98,131 +98,215 @@ type IprsR14D2V8  = IprsCode<Zt, PnttConfigF12289_Rate1_4<4, 2>, Mul>;
 type IprsR14D2V9  = IprsCode<Zt, PnttConfigF12289_Rate1_4<8, 2>, Mul>;
 type IprsR14D2V10 = IprsCode<Zt, PnttConfigF12289_Rate1_4<16, 2>, Mul>;
 
-fn zip_commit_5_polys(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Zip Commit F12289 5 Polys");
+fn zip_commit_5_polys_r12d1(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip Commit F12289 5 Polys IPRS-1-1/2-F12289");
 
-    commit_n_polys::<Zt, IprsR12D1V6, 6, 5>(&mut group, "F12289 depth-1 rate-1/2");
-    commit_n_polys::<Zt, IprsR12D1V7, 7, 5>(&mut group, "F12289 depth-1 rate-1/2");
-    commit_n_polys::<Zt, IprsR12D1V8, 8, 5>(&mut group, "F12289 depth-1 rate-1/2");
-    commit_n_polys::<Zt, IprsR12D1V9, 9, 5>(&mut group, "F12289 depth-1 rate-1/2");
-    commit_n_polys::<Zt, IprsR12D1V10, 10, 5>(&mut group, "F12289 depth-1 rate-1/2");
-
-    commit_n_polys::<Zt, IprsR12D2V6, 6, 5>(&mut group, "F12289 depth-2 rate-1/2");
-    commit_n_polys::<Zt, IprsR12D2V7, 7, 5>(&mut group, "F12289 depth-2 rate-1/2");
-    commit_n_polys::<Zt, IprsR12D2V8, 8, 5>(&mut group, "F12289 depth-2 rate-1/2");
-    commit_n_polys::<Zt, IprsR12D2V9, 9, 5>(&mut group, "F12289 depth-2 rate-1/2");
-    commit_n_polys::<Zt, IprsR12D2V10, 10, 5>(&mut group, "F12289 depth-2 rate-1/2");
-
-    commit_n_polys::<Zt, IprsR14D1V6, 6, 5>(&mut group, "F12289 depth-1 rate-1/4");
-    commit_n_polys::<Zt, IprsR14D1V7, 7, 5>(&mut group, "F12289 depth-1 rate-1/4");
-    commit_n_polys::<Zt, IprsR14D1V8, 8, 5>(&mut group, "F12289 depth-1 rate-1/4");
-    commit_n_polys::<Zt, IprsR14D1V9, 9, 5>(&mut group, "F12289 depth-1 rate-1/4");
-    commit_n_polys::<Zt, IprsR14D1V10, 10, 5>(&mut group, "F12289 depth-1 rate-1/4");
-
-    commit_n_polys::<Zt, IprsR14D2V6, 6, 5>(&mut group, "F12289 depth-2 rate-1/4");
-    commit_n_polys::<Zt, IprsR14D2V7, 7, 5>(&mut group, "F12289 depth-2 rate-1/4");
-    commit_n_polys::<Zt, IprsR14D2V8, 8, 5>(&mut group, "F12289 depth-2 rate-1/4");
-    commit_n_polys::<Zt, IprsR14D2V9, 9, 5>(&mut group, "F12289 depth-2 rate-1/4");
-    commit_n_polys::<Zt, IprsR14D2V10, 10, 5>(&mut group, "F12289 depth-2 rate-1/4");
+    commit_n_polys::<Zt, IprsR12D1V6, 6, 5>(&mut group, "IPRS-1-1/2-F12289");
+    commit_n_polys::<Zt, IprsR12D1V7, 7, 5>(&mut group, "IPRS-1-1/2-F12289");
+    commit_n_polys::<Zt, IprsR12D1V8, 8, 5>(&mut group, "IPRS-1-1/2-F12289");
+    commit_n_polys::<Zt, IprsR12D1V9, 9, 5>(&mut group, "IPRS-1-1/2-F12289");
+    commit_n_polys::<Zt, IprsR12D1V10, 10, 5>(&mut group, "IPRS-1-1/2-F12289");
 
     group.finish();
 }
 
-fn zip_test_5_polys(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Zip Test F12289 5 Polys");
+fn zip_commit_5_polys_r12d2(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip Commit F12289 5 Polys IPRS-2-1/2-F12289");
 
-    test_n_polys::<Zt, IprsR12D1V6, { UNCHECKED }, 6, 5>(&mut group, "F12289 depth-1 rate-1/2");
-    test_n_polys::<Zt, IprsR12D1V7, { UNCHECKED }, 7, 5>(&mut group, "F12289 depth-1 rate-1/2");
-    test_n_polys::<Zt, IprsR12D1V8, { UNCHECKED }, 8, 5>(&mut group, "F12289 depth-1 rate-1/2");
-    test_n_polys::<Zt, IprsR12D1V9, { UNCHECKED }, 9, 5>(&mut group, "F12289 depth-1 rate-1/2");
-    test_n_polys::<Zt, IprsR12D1V10, { UNCHECKED }, 10, 5>(&mut group, "F12289 depth-1 rate-1/2");
-
-    test_n_polys::<Zt, IprsR12D2V6, { UNCHECKED }, 6, 5>(&mut group, "F12289 depth-2 rate-1/2");
-    test_n_polys::<Zt, IprsR12D2V7, { UNCHECKED }, 7, 5>(&mut group, "F12289 depth-2 rate-1/2");
-    test_n_polys::<Zt, IprsR12D2V8, { UNCHECKED }, 8, 5>(&mut group, "F12289 depth-2 rate-1/2");
-    test_n_polys::<Zt, IprsR12D2V9, { UNCHECKED }, 9, 5>(&mut group, "F12289 depth-2 rate-1/2");
-    test_n_polys::<Zt, IprsR12D2V10, { UNCHECKED }, 10, 5>(&mut group, "F12289 depth-2 rate-1/2");
-
-    test_n_polys::<Zt, IprsR14D1V6, { UNCHECKED }, 6, 5>(&mut group, "F12289 depth-1 rate-1/4");
-    test_n_polys::<Zt, IprsR14D1V7, { UNCHECKED }, 7, 5>(&mut group, "F12289 depth-1 rate-1/4");
-    test_n_polys::<Zt, IprsR14D1V8, { UNCHECKED }, 8, 5>(&mut group, "F12289 depth-1 rate-1/4");
-    test_n_polys::<Zt, IprsR14D1V9, { UNCHECKED }, 9, 5>(&mut group, "F12289 depth-1 rate-1/4");
-    test_n_polys::<Zt, IprsR14D1V10, { UNCHECKED }, 10, 5>(&mut group, "F12289 depth-1 rate-1/4");
-
-    test_n_polys::<Zt, IprsR14D2V6, { UNCHECKED }, 6, 5>(&mut group, "F12289 depth-2 rate-1/4");
-    test_n_polys::<Zt, IprsR14D2V7, { UNCHECKED }, 7, 5>(&mut group, "F12289 depth-2 rate-1/4");
-    test_n_polys::<Zt, IprsR14D2V8, { UNCHECKED }, 8, 5>(&mut group, "F12289 depth-2 rate-1/4");
-    test_n_polys::<Zt, IprsR14D2V9, { UNCHECKED }, 9, 5>(&mut group, "F12289 depth-2 rate-1/4");
-    test_n_polys::<Zt, IprsR14D2V10, { UNCHECKED }, 10, 5>(&mut group, "F12289 depth-2 rate-1/4");
+    commit_n_polys::<Zt, IprsR12D2V6, 6, 5>(&mut group, "IPRS-2-1/2-F12289");
+    commit_n_polys::<Zt, IprsR12D2V7, 7, 5>(&mut group, "IPRS-2-1/2-F12289");
+    commit_n_polys::<Zt, IprsR12D2V8, 8, 5>(&mut group, "IPRS-2-1/2-F12289");
+    commit_n_polys::<Zt, IprsR12D2V9, 9, 5>(&mut group, "IPRS-2-1/2-F12289");
+    commit_n_polys::<Zt, IprsR12D2V10, 10, 5>(&mut group, "IPRS-2-1/2-F12289");
 
     group.finish();
 }
 
-fn zip_evaluate_5_polys(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Zip Evaluate F12289 5 Polys");
+fn zip_commit_5_polys_r14d1(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip Commit F12289 5 Polys IPRS-1-1/4-F12289");
 
-    evaluate_n_polys::<Zt, IprsR12D1V6, { UNCHECKED }, 6, 5>(&mut group, "F12289 depth-1 rate-1/2");
-    evaluate_n_polys::<Zt, IprsR12D1V7, { UNCHECKED }, 7, 5>(&mut group, "F12289 depth-1 rate-1/2");
-    evaluate_n_polys::<Zt, IprsR12D1V8, { UNCHECKED }, 8, 5>(&mut group, "F12289 depth-1 rate-1/2");
-    evaluate_n_polys::<Zt, IprsR12D1V9, { UNCHECKED }, 9, 5>(&mut group, "F12289 depth-1 rate-1/2");
-    evaluate_n_polys::<Zt, IprsR12D1V10, { UNCHECKED }, 10, 5>(&mut group, "F12289 depth-1 rate-1/2");
-
-    evaluate_n_polys::<Zt, IprsR12D2V6, { UNCHECKED }, 6, 5>(&mut group, "F12289 depth-2 rate-1/2");
-    evaluate_n_polys::<Zt, IprsR12D2V7, { UNCHECKED }, 7, 5>(&mut group, "F12289 depth-2 rate-1/2");
-    evaluate_n_polys::<Zt, IprsR12D2V8, { UNCHECKED }, 8, 5>(&mut group, "F12289 depth-2 rate-1/2");
-    evaluate_n_polys::<Zt, IprsR12D2V9, { UNCHECKED }, 9, 5>(&mut group, "F12289 depth-2 rate-1/2");
-    evaluate_n_polys::<Zt, IprsR12D2V10, { UNCHECKED }, 10, 5>(&mut group, "F12289 depth-2 rate-1/2");
-
-    evaluate_n_polys::<Zt, IprsR14D1V6, { UNCHECKED }, 6, 5>(&mut group, "F12289 depth-1 rate-1/4");
-    evaluate_n_polys::<Zt, IprsR14D1V7, { UNCHECKED }, 7, 5>(&mut group, "F12289 depth-1 rate-1/4");
-    evaluate_n_polys::<Zt, IprsR14D1V8, { UNCHECKED }, 8, 5>(&mut group, "F12289 depth-1 rate-1/4");
-    evaluate_n_polys::<Zt, IprsR14D1V9, { UNCHECKED }, 9, 5>(&mut group, "F12289 depth-1 rate-1/4");
-    evaluate_n_polys::<Zt, IprsR14D1V10, { UNCHECKED }, 10, 5>(&mut group, "F12289 depth-1 rate-1/4");
-
-    evaluate_n_polys::<Zt, IprsR14D2V6, { UNCHECKED }, 6, 5>(&mut group, "F12289 depth-2 rate-1/4");
-    evaluate_n_polys::<Zt, IprsR14D2V7, { UNCHECKED }, 7, 5>(&mut group, "F12289 depth-2 rate-1/4");
-    evaluate_n_polys::<Zt, IprsR14D2V8, { UNCHECKED }, 8, 5>(&mut group, "F12289 depth-2 rate-1/4");
-    evaluate_n_polys::<Zt, IprsR14D2V9, { UNCHECKED }, 9, 5>(&mut group, "F12289 depth-2 rate-1/4");
-    evaluate_n_polys::<Zt, IprsR14D2V10, { UNCHECKED }, 10, 5>(&mut group, "F12289 depth-2 rate-1/4");
+    commit_n_polys::<Zt, IprsR14D1V6, 6, 5>(&mut group, "IPRS-1-1/4-F12289");
+    commit_n_polys::<Zt, IprsR14D1V7, 7, 5>(&mut group, "IPRS-1-1/4-F12289");
+    commit_n_polys::<Zt, IprsR14D1V8, 8, 5>(&mut group, "IPRS-1-1/4-F12289");
+    commit_n_polys::<Zt, IprsR14D1V9, 9, 5>(&mut group, "IPRS-1-1/4-F12289");
+    commit_n_polys::<Zt, IprsR14D1V10, 10, 5>(&mut group, "IPRS-1-1/4-F12289");
 
     group.finish();
 }
 
-fn zip_verify_5_polys(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Zip Verify F12289 5 Polys");
+fn zip_commit_5_polys_r14d2(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip Commit F12289 5 Polys IPRS-2-1/4-F12289");
 
-    verify_n_polys::<Zt, IprsR12D1V6, { UNCHECKED }, 6, 5>(&mut group, "F12289 depth-1 rate-1/2");
-    verify_n_polys::<Zt, IprsR12D1V7, { UNCHECKED }, 7, 5>(&mut group, "F12289 depth-1 rate-1/2");
-    verify_n_polys::<Zt, IprsR12D1V8, { UNCHECKED }, 8, 5>(&mut group, "F12289 depth-1 rate-1/2");
-    verify_n_polys::<Zt, IprsR12D1V9, { UNCHECKED }, 9, 5>(&mut group, "F12289 depth-1 rate-1/2");
-    verify_n_polys::<Zt, IprsR12D1V10, { UNCHECKED }, 10, 5>(&mut group, "F12289 depth-1 rate-1/2");
+    commit_n_polys::<Zt, IprsR14D2V6, 6, 5>(&mut group, "IPRS-2-1/4-F12289");
+    commit_n_polys::<Zt, IprsR14D2V7, 7, 5>(&mut group, "IPRS-2-1/4-F12289");
+    commit_n_polys::<Zt, IprsR14D2V8, 8, 5>(&mut group, "IPRS-2-1/4-F12289");
+    commit_n_polys::<Zt, IprsR14D2V9, 9, 5>(&mut group, "IPRS-2-1/4-F12289");
+    commit_n_polys::<Zt, IprsR14D2V10, 10, 5>(&mut group, "IPRS-2-1/4-F12289");
 
-    verify_n_polys::<Zt, IprsR12D2V6, { UNCHECKED }, 6, 5>(&mut group, "F12289 depth-2 rate-1/2");
-    verify_n_polys::<Zt, IprsR12D2V7, { UNCHECKED }, 7, 5>(&mut group, "F12289 depth-2 rate-1/2");
-    verify_n_polys::<Zt, IprsR12D2V8, { UNCHECKED }, 8, 5>(&mut group, "F12289 depth-2 rate-1/2");
-    verify_n_polys::<Zt, IprsR12D2V9, { UNCHECKED }, 9, 5>(&mut group, "F12289 depth-2 rate-1/2");
-    verify_n_polys::<Zt, IprsR12D2V10, { UNCHECKED }, 10, 5>(&mut group, "F12289 depth-2 rate-1/2");
+    group.finish();
+}
 
-    verify_n_polys::<Zt, IprsR14D1V6, { UNCHECKED }, 6, 5>(&mut group, "F12289 depth-1 rate-1/4");
-    verify_n_polys::<Zt, IprsR14D1V7, { UNCHECKED }, 7, 5>(&mut group, "F12289 depth-1 rate-1/4");
-    verify_n_polys::<Zt, IprsR14D1V8, { UNCHECKED }, 8, 5>(&mut group, "F12289 depth-1 rate-1/4");
-    verify_n_polys::<Zt, IprsR14D1V9, { UNCHECKED }, 9, 5>(&mut group, "F12289 depth-1 rate-1/4");
-    verify_n_polys::<Zt, IprsR14D1V10, { UNCHECKED }, 10, 5>(&mut group, "F12289 depth-1 rate-1/4");
+fn zip_test_5_polys_r12d1(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip Test F12289 5 Polys IPRS-1-1/2-F12289");
 
-    verify_n_polys::<Zt, IprsR14D2V6, { UNCHECKED }, 6, 5>(&mut group, "F12289 depth-2 rate-1/4");
-    verify_n_polys::<Zt, IprsR14D2V7, { UNCHECKED }, 7, 5>(&mut group, "F12289 depth-2 rate-1/4");
-    verify_n_polys::<Zt, IprsR14D2V8, { UNCHECKED }, 8, 5>(&mut group, "F12289 depth-2 rate-1/4");
-    verify_n_polys::<Zt, IprsR14D2V9, { UNCHECKED }, 9, 5>(&mut group, "F12289 depth-2 rate-1/4");
-    verify_n_polys::<Zt, IprsR14D2V10, { UNCHECKED }, 10, 5>(&mut group, "F12289 depth-2 rate-1/4");
+    test_n_polys::<Zt, IprsR12D1V6, { UNCHECKED }, 6, 5>(&mut group, "IPRS-1-1/2-F12289");
+    test_n_polys::<Zt, IprsR12D1V7, { UNCHECKED }, 7, 5>(&mut group, "IPRS-1-1/2-F12289");
+    test_n_polys::<Zt, IprsR12D1V8, { UNCHECKED }, 8, 5>(&mut group, "IPRS-1-1/2-F12289");
+    test_n_polys::<Zt, IprsR12D1V9, { UNCHECKED }, 9, 5>(&mut group, "IPRS-1-1/2-F12289");
+    test_n_polys::<Zt, IprsR12D1V10, { UNCHECKED }, 10, 5>(&mut group, "IPRS-1-1/2-F12289");
+
+    group.finish();
+}
+
+fn zip_test_5_polys_r12d2(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip Test F12289 5 Polys IPRS-2-1/2-F12289");
+
+    test_n_polys::<Zt, IprsR12D2V6, { UNCHECKED }, 6, 5>(&mut group, "IPRS-2-1/2-F12289");
+    test_n_polys::<Zt, IprsR12D2V7, { UNCHECKED }, 7, 5>(&mut group, "IPRS-2-1/2-F12289");
+    test_n_polys::<Zt, IprsR12D2V8, { UNCHECKED }, 8, 5>(&mut group, "IPRS-2-1/2-F12289");
+    test_n_polys::<Zt, IprsR12D2V9, { UNCHECKED }, 9, 5>(&mut group, "IPRS-2-1/2-F12289");
+    test_n_polys::<Zt, IprsR12D2V10, { UNCHECKED }, 10, 5>(&mut group, "IPRS-2-1/2-F12289");
+
+    group.finish();
+}
+
+fn zip_test_5_polys_r14d1(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip Test F12289 5 Polys IPRS-1-1/4-F12289");
+
+    test_n_polys::<Zt, IprsR14D1V6, { UNCHECKED }, 6, 5>(&mut group, "IPRS-1-1/4-F12289");
+    test_n_polys::<Zt, IprsR14D1V7, { UNCHECKED }, 7, 5>(&mut group, "IPRS-1-1/4-F12289");
+    test_n_polys::<Zt, IprsR14D1V8, { UNCHECKED }, 8, 5>(&mut group, "IPRS-1-1/4-F12289");
+    test_n_polys::<Zt, IprsR14D1V9, { UNCHECKED }, 9, 5>(&mut group, "IPRS-1-1/4-F12289");
+    test_n_polys::<Zt, IprsR14D1V10, { UNCHECKED }, 10, 5>(&mut group, "IPRS-1-1/4-F12289");
+
+    group.finish();
+}
+
+fn zip_test_5_polys_r14d2(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip Test F12289 5 Polys IPRS-2-1/4-F12289");
+
+    test_n_polys::<Zt, IprsR14D2V6, { UNCHECKED }, 6, 5>(&mut group, "IPRS-2-1/4-F12289");
+    test_n_polys::<Zt, IprsR14D2V7, { UNCHECKED }, 7, 5>(&mut group, "IPRS-2-1/4-F12289");
+    test_n_polys::<Zt, IprsR14D2V8, { UNCHECKED }, 8, 5>(&mut group, "IPRS-2-1/4-F12289");
+    test_n_polys::<Zt, IprsR14D2V9, { UNCHECKED }, 9, 5>(&mut group, "IPRS-2-1/4-F12289");
+    test_n_polys::<Zt, IprsR14D2V10, { UNCHECKED }, 10, 5>(&mut group, "IPRS-2-1/4-F12289");
+
+    group.finish();
+}
+
+fn zip_evaluate_5_polys_r12d1(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip Evaluate F12289 5 Polys IPRS-1-1/2-F12289");
+
+    evaluate_n_polys::<Zt, IprsR12D1V6, { UNCHECKED }, 6, 5>(&mut group, "IPRS-1-1/2-F12289");
+    evaluate_n_polys::<Zt, IprsR12D1V7, { UNCHECKED }, 7, 5>(&mut group, "IPRS-1-1/2-F12289");
+    evaluate_n_polys::<Zt, IprsR12D1V8, { UNCHECKED }, 8, 5>(&mut group, "IPRS-1-1/2-F12289");
+    evaluate_n_polys::<Zt, IprsR12D1V9, { UNCHECKED }, 9, 5>(&mut group, "IPRS-1-1/2-F12289");
+    evaluate_n_polys::<Zt, IprsR12D1V10, { UNCHECKED }, 10, 5>(&mut group, "IPRS-1-1/2-F12289");
+
+    group.finish();
+}
+
+fn zip_evaluate_5_polys_r12d2(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip Evaluate F12289 5 Polys IPRS-2-1/2-F12289");
+
+    evaluate_n_polys::<Zt, IprsR12D2V6, { UNCHECKED }, 6, 5>(&mut group, "IPRS-2-1/2-F12289");
+    evaluate_n_polys::<Zt, IprsR12D2V7, { UNCHECKED }, 7, 5>(&mut group, "IPRS-2-1/2-F12289");
+    evaluate_n_polys::<Zt, IprsR12D2V8, { UNCHECKED }, 8, 5>(&mut group, "IPRS-2-1/2-F12289");
+    evaluate_n_polys::<Zt, IprsR12D2V9, { UNCHECKED }, 9, 5>(&mut group, "IPRS-2-1/2-F12289");
+    evaluate_n_polys::<Zt, IprsR12D2V10, { UNCHECKED }, 10, 5>(&mut group, "IPRS-2-1/2-F12289");
+
+    group.finish();
+}
+
+fn zip_evaluate_5_polys_r14d1(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip Evaluate F12289 5 Polys IPRS-1-1/4-F12289");
+
+    evaluate_n_polys::<Zt, IprsR14D1V6, { UNCHECKED }, 6, 5>(&mut group, "IPRS-1-1/4-F12289");
+    evaluate_n_polys::<Zt, IprsR14D1V7, { UNCHECKED }, 7, 5>(&mut group, "IPRS-1-1/4-F12289");
+    evaluate_n_polys::<Zt, IprsR14D1V8, { UNCHECKED }, 8, 5>(&mut group, "IPRS-1-1/4-F12289");
+    evaluate_n_polys::<Zt, IprsR14D1V9, { UNCHECKED }, 9, 5>(&mut group, "IPRS-1-1/4-F12289");
+    evaluate_n_polys::<Zt, IprsR14D1V10, { UNCHECKED }, 10, 5>(&mut group, "IPRS-1-1/4-F12289");
+
+    group.finish();
+}
+
+fn zip_evaluate_5_polys_r14d2(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip Evaluate F12289 5 Polys IPRS-2-1/4-F12289");
+
+    evaluate_n_polys::<Zt, IprsR14D2V6, { UNCHECKED }, 6, 5>(&mut group, "IPRS-2-1/4-F12289");
+    evaluate_n_polys::<Zt, IprsR14D2V7, { UNCHECKED }, 7, 5>(&mut group, "IPRS-2-1/4-F12289");
+    evaluate_n_polys::<Zt, IprsR14D2V8, { UNCHECKED }, 8, 5>(&mut group, "IPRS-2-1/4-F12289");
+    evaluate_n_polys::<Zt, IprsR14D2V9, { UNCHECKED }, 9, 5>(&mut group, "IPRS-2-1/4-F12289");
+    evaluate_n_polys::<Zt, IprsR14D2V10, { UNCHECKED }, 10, 5>(&mut group, "IPRS-2-1/4-F12289");
+
+    group.finish();
+}
+
+fn zip_verify_5_polys_r12d1(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip Verify F12289 5 Polys IPRS-1-1/2-F12289");
+
+    verify_n_polys::<Zt, IprsR12D1V6, { UNCHECKED }, 6, 5>(&mut group, "IPRS-1-1/2-F12289");
+    verify_n_polys::<Zt, IprsR12D1V7, { UNCHECKED }, 7, 5>(&mut group, "IPRS-1-1/2-F12289");
+    verify_n_polys::<Zt, IprsR12D1V8, { UNCHECKED }, 8, 5>(&mut group, "IPRS-1-1/2-F12289");
+    verify_n_polys::<Zt, IprsR12D1V9, { UNCHECKED }, 9, 5>(&mut group, "IPRS-1-1/2-F12289");
+    verify_n_polys::<Zt, IprsR12D1V10, { UNCHECKED }, 10, 5>(&mut group, "IPRS-1-1/2-F12289");
+
+    group.finish();
+}
+
+fn zip_verify_5_polys_r12d2(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip Verify F12289 5 Polys IPRS-2-1/2-F12289");
+
+    verify_n_polys::<Zt, IprsR12D2V6, { UNCHECKED }, 6, 5>(&mut group, "IPRS-2-1/2-F12289");
+    verify_n_polys::<Zt, IprsR12D2V7, { UNCHECKED }, 7, 5>(&mut group, "IPRS-2-1/2-F12289");
+    verify_n_polys::<Zt, IprsR12D2V8, { UNCHECKED }, 8, 5>(&mut group, "IPRS-2-1/2-F12289");
+    verify_n_polys::<Zt, IprsR12D2V9, { UNCHECKED }, 9, 5>(&mut group, "IPRS-2-1/2-F12289");
+    verify_n_polys::<Zt, IprsR12D2V10, { UNCHECKED }, 10, 5>(&mut group, "IPRS-2-1/2-F12289");
+
+    group.finish();
+}
+
+fn zip_verify_5_polys_r14d1(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip Verify F12289 5 Polys IPRS-1-1/4-F12289");
+
+    verify_n_polys::<Zt, IprsR14D1V6, { UNCHECKED }, 6, 5>(&mut group, "IPRS-1-1/4-F12289");
+    verify_n_polys::<Zt, IprsR14D1V7, { UNCHECKED }, 7, 5>(&mut group, "IPRS-1-1/4-F12289");
+    verify_n_polys::<Zt, IprsR14D1V8, { UNCHECKED }, 8, 5>(&mut group, "IPRS-1-1/4-F12289");
+    verify_n_polys::<Zt, IprsR14D1V9, { UNCHECKED }, 9, 5>(&mut group, "IPRS-1-1/4-F12289");
+    verify_n_polys::<Zt, IprsR14D1V10, { UNCHECKED }, 10, 5>(&mut group, "IPRS-1-1/4-F12289");
+
+    group.finish();
+}
+
+fn zip_verify_5_polys_r14d2(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip Verify F12289 5 Polys IPRS-2-1/4-F12289");
+
+    verify_n_polys::<Zt, IprsR14D2V6, { UNCHECKED }, 6, 5>(&mut group, "IPRS-2-1/4-F12289");
+    verify_n_polys::<Zt, IprsR14D2V7, { UNCHECKED }, 7, 5>(&mut group, "IPRS-2-1/4-F12289");
+    verify_n_polys::<Zt, IprsR14D2V8, { UNCHECKED }, 8, 5>(&mut group, "IPRS-2-1/4-F12289");
+    verify_n_polys::<Zt, IprsR14D2V9, { UNCHECKED }, 9, 5>(&mut group, "IPRS-2-1/4-F12289");
+    verify_n_polys::<Zt, IprsR14D2V10, { UNCHECKED }, 10, 5>(&mut group, "IPRS-2-1/4-F12289");
 
     group.finish();
 }
 
 criterion_group!(
     benches,
-    zip_commit_5_polys,
-    zip_test_5_polys,
-    zip_evaluate_5_polys,
-    zip_verify_5_polys
+    zip_commit_5_polys_r12d1,
+    zip_commit_5_polys_r12d2,
+    zip_commit_5_polys_r14d1,
+    zip_commit_5_polys_r14d2,
+    zip_test_5_polys_r12d1,
+    zip_test_5_polys_r12d2,
+    zip_test_5_polys_r14d1,
+    zip_test_5_polys_r14d2,
+    zip_evaluate_5_polys_r12d1,
+    zip_evaluate_5_polys_r12d2,
+    zip_evaluate_5_polys_r14d1,
+    zip_evaluate_5_polys_r14d2,
+    zip_verify_5_polys_r12d1,
+    zip_verify_5_polys_r12d2,
+    zip_verify_5_polys_r14d1,
+    zip_verify_5_polys_r14d2
 );
 criterion_main!(benches);

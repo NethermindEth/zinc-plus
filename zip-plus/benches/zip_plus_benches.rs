@@ -696,9 +696,9 @@ fn zip_plus_benchmarks_commit_10_polys_8vars(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ Commit 10 Polys 8 Vars");
 
     // Depth 1, rate 1/4: msg_size=2^8, 1 row × 256 cols, poly_size=2^8
-    commit_n_polys::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base32Depth1Rate1_4<i64, 32>, 8, 10>(&mut group, "IPRS depth-1 rate-1/4");
+    commit_n_polys::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base32Depth1Rate1_4<i64, 32>, 8, 10>(&mut group, "IPRS-1-1/4-F65537");
     // Depth 2, rate 1/4: msg_size=2^8, 1 row × 256 cols, poly_size=2^8
-    commit_n_polys::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base4Depth2Rate1_4<i64, 32>, 8, 10>(&mut group, "IPRS depth-2 rate-1/4");
+    commit_n_polys::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base4Depth2Rate1_4<i64, 32>, 8, 10>(&mut group, "IPRS-2-1/4-F65537");
 
     group.finish();
 }
