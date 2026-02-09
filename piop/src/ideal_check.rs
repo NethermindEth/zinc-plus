@@ -76,12 +76,8 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
     {
         let projecting_element = transcript.get_field_challenge(field_cfg);
 
-        let trace_matrix = project_trace_matrix::<IcTypes, DEGREE_PLUS_ONE>(
-            trace[0].len(),
-            trace.len(),
-            trace,
-            &projecting_element,
-        );
+        let trace_matrix =
+            project_trace_matrix::<IcTypes, DEGREE_PLUS_ONE>(trace, &projecting_element);
 
         let combined_mles = combined_poly_builder::compute_combined_polynomials::<IcTypes, U, _>(
             &trace_matrix,

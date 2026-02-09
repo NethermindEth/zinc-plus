@@ -1,6 +1,7 @@
 //! UAIR description tools.
 
 pub mod constraint_counter;
+pub mod degree_counter;
 pub mod dummy_semiring;
 pub mod ideal;
 pub mod ideal_collector;

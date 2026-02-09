@@ -169,3 +169,44 @@ impl<const LIMBS: usize> GenerateWitness<DensePolynomial<Int<LIMBS>, 32>>
         vec![a, b, c]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use zinc_uair::{constraint_counter::count_constraints, degree_counter::count_max_degree};
+
+    use super::*;
+
+    const LIMBS: usize = 4;
+
+    #[test]
+    fn test_air_no_multiplication_correct_constraints_number() {
+        assert_eq!(
+            count_constraints::<DensePolynomial<Int<LIMBS>, 32>, TestAirNoMultiplication>(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_uair_simple_multiplication_correct_constraints_number() {
+        assert_eq!(
+            count_constraints::<DensePolynomial<Int<LIMBS>, 32>, TestUairSimpleMultiplication>(),
+            3
+        );
+    }
+
+    #[test]
+    fn test_air_no_multiplication_correct_max_degree() {
+        assert_eq!(
+            count_max_degree::<DensePolynomial<Int<LIMBS>, 32>, TestAirNoMultiplication>(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_uair_simple_multiplication_correct_max_degree() {
+        assert_eq!(
+            count_max_degree::<DensePolynomial<Int<LIMBS>, 32>, TestUairSimpleMultiplication>(),
+            2
+        );
+    }
+}

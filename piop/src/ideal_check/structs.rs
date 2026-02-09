@@ -30,7 +30,7 @@ pub struct Proof<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ON
 pub struct ProverState<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize> {
     pub evaluation_point: Vec<IcTypes::F>,
     pub combined_mles: Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>>,
-    pub trace_matrix: DenseRowMatrix<DynamicPolynomialF<IcTypes::F>>,
+    pub trace_matrix: Vec<DenseMultilinearExtension<DynamicPolynomialF<IcTypes::F>>>,
 }
 
 pub struct VerifierSubClaim<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>

@@ -1,10 +1,10 @@
 use crate::{ConstraintBuilder, Uair, dummy_semiring::DummySemiring, ideal::DummyIdeal};
-use crypto_primitives::FixedSemiring;
+use crypto_primitives::Semiring;
 
 /// Get the number of polynomial constraints in a `Uair`.
 pub fn count_constraints<R, U>() -> usize
 where
-    R: FixedSemiring + 'static,
+    R: Semiring + 'static,
     U: Uair<R>,
 {
     let mut cc = ConstraintCounter::new();

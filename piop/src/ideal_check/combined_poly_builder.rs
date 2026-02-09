@@ -6,7 +6,7 @@ use zinc_poly::{
     univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_uair::{ConstraintBuilder, Uair, ideal::DummyIdeal};
-use zinc_utils::from_ref::FromRef;
+use zinc_utils::{cfg_into_iter, from_ref::FromRef};
 
 use crate::ideal_check::structs::IdealCheckTypes;
 
@@ -20,9 +20,9 @@ pub fn compute_combined_polynomials<
     U,
     const DEGREE_PLUS_ONE: usize,
 >(
-    trace_matrix: &DenseRowMatrix<
+    trace_matrix: &[DenseMultilinearExtension<
         DynamicPolynomialF<<IcTypes as IdealCheckTypes<DEGREE_PLUS_ONE>>::F>,
-    >,
+    >],
     projecting_element: &IcTypes::F,
     num_constraints: usize,
 ) -> Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>>
@@ -31,14 +31,24 @@ where
 {
     let field_zero = IcTypes::F::zero_with_cfg(projecting_element.cfg());
 
+    let num_rows = trace_matrix[0].len();
+
     let mut max_degrees_and_combined_poly_rows: Vec<(usize, Vec<DynamicPolynomialF<IcTypes::F>>)> =
-        trace_matrix
-            .as_rows()
-            .zip(trace_matrix.as_rows().skip(1))
-            .map(|(up, down)| {
+        cfg_into_iter!(0..num_rows - 1)
+            .map(|row_idx| {
+                let up = trace_matrix
+                    .iter()
+                    .map(|column| column[row_idx].clone())
+                    .collect_vec();
+
+                let down = trace_matrix
+                    .iter()
+                    .map(|column| column[row_idx + 1].clone())
+                    .collect_vec();
+
                 combine_rows_and_get_max_degree::<IcTypes, U, _>(
-                    up,
-                    down,
+                    &up,
+                    &down,
                     num_constraints,
                     projecting_element,
                 )
@@ -58,12 +68,8 @@ where
     // thing from the whirlaway.
     // TODO(Ilia): reimplement it using Albert's idea
     //             with selector polynomials.
-    max_degrees_and_combined_poly_rows.push(
-        max_degrees_and_combined_poly_rows
-            .last()
-            .expect("We assume the number of constraints is not zero so this iterator is not empty")
-            .clone(),
-    );
+    max_degrees_and_combined_poly_rows
+        .push((0, vec![DynamicPolynomialF::new([]); num_constraints]));
 
     prepare_coefficient_mles::<IcTypes, _>(
         num_constraints,
