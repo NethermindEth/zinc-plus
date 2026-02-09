@@ -88,6 +88,10 @@ pub trait Transcript {
 
     /// Generates a pseudorandom transcribable values as challenges based on the
     /// current transcript state, updating it.
+    // TODO(Alex): `get_field_challenge` is not efficient
+    //             to call in a batch because each call allocates its own buffer.
+    //             It might make sense to make a separate `get_challenge_with_buf`
+    //             alternative to `get_challenge`.
     fn get_field_challenges<F: PrimeField>(&mut self, n: usize, cfg: &F::Config) -> Vec<F>
     where
         F::Inner: ConstTranscribable,
