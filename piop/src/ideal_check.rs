@@ -169,7 +169,7 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
 
         let ideal_collector = collect_ideals::<_, U>(num_constraints);
 
-        batched_ideal_check::<_, _>(
+        batched_ideal_check(
             &ideal_collector
                 .ideals
                 .iter()
