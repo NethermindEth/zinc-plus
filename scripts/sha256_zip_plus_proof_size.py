@@ -2,20 +2,46 @@
 """
 Compute combined Zip+ proof size for SHA-256, summing two components:
 
-  A: n_pol=10, bitbound=43, flat_vec_norm=261, degree=32
-  B: n_pol=5,  bitbound=75, flat_vec_norm=293, degree=1
+  A: n_pol=10, flat_vec_norm=261, degree=32
+  B: n_pol=5,  flat_vec_norm=293, degree=1
+
+Uses base_field_size=12 and:
+  - depth=1 for k=6,7,8 (N = 2^k)
+  - depth=2 for k=9,10
+
+The bitbound is computed as: log2(C) + base_field_size + depth*(3 + base_field_size) - 1
+where C = num_columns.
 
 Runs for n_queries=100 and n_queries=147.
 
 Usage:
     python3 scripts/sha256_zip_plus_proof_size.py
-    python3 scripts/sha256_zip_plus_proof_size.py --min-exp=10 --max-exp=20
+    python3 scripts/sha256_zip_plus_proof_size.py --min-exp=6 --max-exp=10
 """
 
 import argparse
 
+BASE_FIELD_SIZE = 12
 
-def find_optimal(total_entries: int, row_cost: int, col_cost: int) -> tuple[int, int, int]:
+
+def depth_for_exp(exp: int) -> int:
+    """Return IPRS depth: 1 for k<=8, 2 for k>=9."""
+    return 1 if exp <= 8 else 2
+
+
+import math
+
+
+def compute_bitbound(num_cols: int, base_field_size: int, depth: int) -> int:
+    return int(math.log2(num_cols)) + base_field_size + depth * (3 + base_field_size) - 1
+
+
+def find_optimal(
+    total_entries: int,
+    n_pol: int, degree: int, n_queries: int,
+    base_field_size: int, depth: int,
+    col_cost: int,
+) -> tuple[int, int, int]:
     """Find the power-of-2 num_rows that minimises proof size."""
     best = None
     num_rows = 1
@@ -23,6 +49,8 @@ def find_optimal(total_entries: int, row_cost: int, col_cost: int) -> tuple[int,
         num_cols = total_entries // num_rows
         if num_cols < 1:
             break
+        bitbound = compute_bitbound(num_cols, base_field_size, depth)
+        row_cost = n_pol * degree * n_queries * bitbound
         cost = row_cost * num_rows + col_cost * num_cols
         if best is None or cost < best[2]:
             best = (num_rows, num_cols, cost)
@@ -39,8 +67,8 @@ def fmt_size(bits: int) -> str:
 
 
 COMPONENTS = [
-    {"label": "A", "n_pol": 10, "bitbound": 43, "flat_vec_norm": 261, "degree": 32},
-    {"label": "B", "n_pol": 5,  "bitbound": 75, "flat_vec_norm": 293, "degree": 1},
+    {"label": "A", "n_pol": 10, "flat_vec_norm": 261, "degree": 32},
+    {"label": "B", "n_pol": 5,  "flat_vec_norm": 293, "degree": 1},
 ]
 
 QUERY_COUNTS = [100, 147]
@@ -54,27 +82,32 @@ def main():
 
     for nq in QUERY_COUNTS:
         print(f"\n{'=' * 70}")
-        print(f"  n_queries = {nq}")
+        print(f"  n_queries = {nq}, base_field_size = {BASE_FIELD_SIZE}")
         print(f"{'=' * 70}")
         for c in COMPONENTS:
-            rc = c["n_pol"] * c["degree"] * nq * c["bitbound"]
-            print(f"  {c['label']}: n_pol={c['n_pol']}, bitbound={c['bitbound']}, "
-                  f"flat_vec_norm={c['flat_vec_norm']}  =>  row_cost={rc:,}")
+            print(f"  {c['label']}: n_pol={c['n_pol']}, degree={c['degree']}, "
+                  f"flat_vec_norm={c['flat_vec_norm']}")
+        print(f"  bitbound(C, depth) = log2(C) + {BASE_FIELD_SIZE} + depth*(3+{BASE_FIELD_SIZE}) - 1")
 
-        hdr = (f"{'2^N':>6} | {'A':>12} | {'B':>12} | {'A + B':>12}")
+        hdr = (f"{'2^N':>6} | {'depth':>5} | {'A':>12} | {'B':>12} | {'A + B':>12}")
         print(f"\n{hdr}")
         print("-" * len(hdr))
 
         for exp in range(args.min_exp, args.max_exp + 1):
             total = 1 << exp
+            depth = depth_for_exp(exp)
             costs = []
             for c in COMPONENTS:
-                rc = c["n_pol"] * c["degree"] * nq * c["bitbound"]
                 cc = c["flat_vec_norm"]
-                _, _, cost = find_optimal(total, rc, cc)
+                _, _, cost = find_optimal(
+                    total,
+                    c["n_pol"], c["degree"], nq,
+                    BASE_FIELD_SIZE, depth,
+                    cc,
+                )
                 costs.append(cost)
             total_cost = sum(costs)
-            print(f"  2^{exp:<2} | {fmt_size(costs[0]):>12} | {fmt_size(costs[1]):>12} | {fmt_size(total_cost):>12}")
+            print(f"  2^{exp:<2} | {depth:>5} | {fmt_size(costs[0]):>12} | {fmt_size(costs[1]):>12} | {fmt_size(total_cost):>12}")
 
         print()
 

@@ -541,10 +541,11 @@ pub type PnttConfigF2_16_1_Base4_Depth4_Rate1_4 =
     PnttConfigF2_16_1_Rate1_4_Base<4, 4>;
 
 /// Pseudo NTT configuration derived from the field Fp for p = 12289.
-/// This is the smallest prime supporting 4096th roots of unity.
+/// This is the smallest prime supporting 4096th roots of unity
+/// ($12289 = 3 \cdot 2^{12} + 1$, so the multiplicative group has a
+/// $2^{12}$-order subgroup).
 ///
-/// With `BASE_LEN = 4` and `BASE_DIM = 8`, this yields rate 1/2 codes.
-/// At `DEPTH = 3`, this encodes messages of size 2^11.
+/// Rate 1/2: `BASE_DIM = 2 * BASE_LEN`.
 #[derive(Clone, Copy)]
 pub struct PnttConfigF12289_Rate1_2<const BASE_LEN: usize, const DEPTH: usize>;
 
@@ -557,6 +558,33 @@ impl<const BASE_LEN: usize, const DEPTH: usize> Config
     const BASE_DIM: usize = BASE_LEN * 2;
     const DEPTH: usize = DEPTH;
     // 8th roots of unity in F_12289 (normalized to [-p/2, p/2])
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, -4043, 1479, 5146, -1, 4043, -1479, -5146];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq_12289::FqBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+/// Pseudo NTT configuration derived from Fp for p = 12289, with rate 1/4.
+///
+/// Rate 1/4: `BASE_DIM = 4 * BASE_LEN`.
+///
+/// Constraint: `BASE_DIM` must be ≤ 4096 (the largest power-of-2 dividing
+/// $p - 1 = 12288 = 3 \cdot 2^{12}$), so `BASE_LEN ≤ 1024`.
+#[derive(Clone, Copy)]
+pub struct PnttConfigF12289_Rate1_4<const BASE_LEN: usize, const DEPTH: usize>;
+
+impl<const BASE_LEN: usize, const DEPTH: usize> Config
+    for PnttConfigF12289_Rate1_4<BASE_LEN, DEPTH>
+{
+    type Field = fq_12289::Fq;
+    const FIELD_MODULUS: u32 = fq_12289::MODULUS;
+    const BASE_LEN: usize = BASE_LEN;
+    const BASE_DIM: usize = BASE_LEN * 4;
+    const DEPTH: usize = DEPTH;
+    // Same 8th roots of unity in F_12289 (normalized to [-p/2, p/2])
     const BASE_TWIDDLES: [PnttInt; 8] = [1, -4043, 1479, 5146, -1, 4043, -1479, -5146];
 
     fn field_to_int_normalized(x: Self::Field) -> PnttInt {
@@ -633,6 +661,11 @@ mod tests {
     }
 
     #[test]
+    fn check_twiddles_f12289_rate1_4() {
+        check_twiddles_generic::<PnttConfigF12289_Rate1_4<8, 1>>();
+    }
+
+    #[test]
     fn check_f12289_depth3_config() {
         // Verify the configuration parameters
         type C = PnttConfigF12289_Depth3_Rate1_2;
@@ -643,6 +676,73 @@ mod tests {
         assert_eq!(C::OUTPUT_LEN, 4096); // 8 * 8^3 = 2^12
         assert_eq!(C::FIELD_MODULUS, 12289);
         // Rate = INPUT_LEN / OUTPUT_LEN = 1/2
+    }
+
+    // --- F12289 rate 1/2 configs for vars 6–11 ---
+
+    #[test]
+    fn check_f12289_d1v6_rate1_2() {
+        type C = PnttConfigF12289_Rate1_2<8, 1>;
+        assert_eq!(C::INPUT_LEN, 64);   // 8 * 8 = 2^6
+        assert_eq!(C::OUTPUT_LEN, 128); // 16 * 8 = 2^7
+        assert_eq!(C::FIELD_MODULUS, 12289);
+    }
+
+    #[test]
+    fn check_f12289_d1v11_rate1_2() {
+        type C = PnttConfigF12289_Rate1_2<256, 1>;
+        assert_eq!(C::INPUT_LEN, 2048);  // 256 * 8 = 2^11
+        assert_eq!(C::OUTPUT_LEN, 4096); // 512 * 8 = 2^12
+        assert_eq!(C::BASE_DIM, 512);    // ≤ 4096 ✓
+    }
+
+    #[test]
+    fn check_f12289_d2v6_rate1_2() {
+        type C = PnttConfigF12289_Rate1_2<1, 2>;
+        assert_eq!(C::INPUT_LEN, 64);   // 1 * 64 = 2^6
+        assert_eq!(C::OUTPUT_LEN, 128); // 2 * 64 = 2^7
+    }
+
+    #[test]
+    fn check_f12289_d2v11_rate1_2() {
+        type C = PnttConfigF12289_Rate1_2<32, 2>;
+        assert_eq!(C::INPUT_LEN, 2048);  // 32 * 64 = 2^11
+        assert_eq!(C::OUTPUT_LEN, 4096); // 64 * 64 = 2^12
+        assert_eq!(C::BASE_DIM, 64);     // ≤ 4096 ✓
+    }
+
+    // --- F12289 rate 1/4 configs for vars 6–11 ---
+
+    #[test]
+    fn check_f12289_d1v6_rate1_4() {
+        type C = PnttConfigF12289_Rate1_4<8, 1>;
+        assert_eq!(C::INPUT_LEN, 64);   // 8 * 8 = 2^6
+        assert_eq!(C::OUTPUT_LEN, 256); // 32 * 8 = 2^8
+        assert_eq!(C::BASE_DIM, 32);    // ≤ 4096 ✓
+    }
+
+    #[test]
+    fn check_f12289_d1v11_rate1_4() {
+        type C = PnttConfigF12289_Rate1_4<256, 1>;
+        assert_eq!(C::INPUT_LEN, 2048);   // 256 * 8 = 2^11
+        assert_eq!(C::OUTPUT_LEN, 8192);  // 1024 * 8 = 2^13
+        assert_eq!(C::BASE_DIM, 1024);    // ≤ 4096 ✓
+    }
+
+    #[test]
+    fn check_f12289_d2v6_rate1_4() {
+        type C = PnttConfigF12289_Rate1_4<1, 2>;
+        assert_eq!(C::INPUT_LEN, 64);   // 1 * 64 = 2^6
+        assert_eq!(C::OUTPUT_LEN, 256); // 4 * 64 = 2^8
+        assert_eq!(C::BASE_DIM, 4);     // ≤ 4096 ✓
+    }
+
+    #[test]
+    fn check_f12289_d2v11_rate1_4() {
+        type C = PnttConfigF12289_Rate1_4<32, 2>;
+        assert_eq!(C::INPUT_LEN, 2048);   // 32 * 64 = 2^11
+        assert_eq!(C::OUTPUT_LEN, 8192);  // 128 * 64 = 2^13
+        assert_eq!(C::BASE_DIM, 128);     // ≤ 4096 ✓
     }
 
     #[test]

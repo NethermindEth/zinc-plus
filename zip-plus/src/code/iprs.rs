@@ -51,6 +51,10 @@ pub use pntt::radix8::params::{
     PnttInt,
     Radix8PnttParams,
 };
+pub use pntt::radix8::params::{
+    PnttConfigF12289_Rate1_2,
+    PnttConfigF12289_Rate1_4,
+};
 pub type PnttConfigF12289_Depth3_Rate1_2 =
     pntt::radix8::params::PnttConfigF12289_Depth3_Rate1_2;
 use std::{fmt::Debug, iter::Sum, marker::PhantomData, ops::AddAssign, mem::MaybeUninit};
