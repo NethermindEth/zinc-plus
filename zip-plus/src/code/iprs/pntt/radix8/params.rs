@@ -420,6 +420,29 @@ pub type PnttConfigF2_16_1_Depth3_Rate1_2 = PnttConfigF2_16_1<3>;
 pub type PnttConfigF2_16_1_Base8_Depth3_Rate1_4 =
     PnttConfigF2_16_1_Rate1_4_Base<8, 3>;
 
+/// Depth-0 configuration for message size $2^{8}$ with rate $\frac{1}{4}$.
+/// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
+///
+/// At depth 0 there are no butterfly stages — the code is just a base
+/// Vandermonde matrix multiplication (256×1024).
+///
+/// Configuration:
+/// - `BASE_LEN = 256`, `BASE_DIM = 1024`
+/// - `INPUT_LEN = 256 \cdot 8^0 = 256 = 2^{8}`
+/// - `OUTPUT_LEN = 1024 \cdot 8^0 = 1024 = 2^{10}`
+pub type PnttConfigF2_16_1_Base256_Depth0_Rate1_4 =
+    PnttConfigF2_16_1_Rate1_4_Base<256, 0>;
+
+/// Depth-2 configuration for message size $2^{8}$ with rate $\frac{1}{4}$.
+/// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
+///
+/// Configuration:
+/// - `BASE_LEN = 4`, `BASE_DIM = 16`
+/// - `INPUT_LEN = 4 \cdot 8^2 = 256 = 2^{8}`
+/// - `OUTPUT_LEN = 16 \cdot 8^2 = 1024 = 2^{10}`
+pub type PnttConfigF2_16_1_Base4_Depth2_Rate1_4 =
+    PnttConfigF2_16_1_Rate1_4_Base<4, 2>;
+
 /// Depth-2 configuration for message size $2^{12}$ with rate $\frac{1}{4}$.
 /// Uses the Fermat prime field $\mathbb{F}_{65537}$ where $65537 = 2^{16} + 1$.
 ///

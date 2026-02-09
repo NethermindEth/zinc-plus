@@ -4,7 +4,11 @@
 /// `num_octets`.
 #[allow(clippy::arithmetic_side_effects)]
 pub(crate) fn octet_reversal(x: usize, num_octets: usize) -> usize {
-    assert_ne!(num_octets, 0, "The number of octets cannot be zero");
+    if num_octets == 0 {
+        // Depth 0: only one chunk (index 0), reversal is identity.
+        debug_assert_eq!(x, 0);
+        return 0;
+    }
 
     let mut result = 0;
 

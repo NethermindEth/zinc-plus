@@ -240,6 +240,232 @@ where
     );
 }
 
+pub fn commit_n_polys<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize, const N: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+    label: &str,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+    Zt::Cw: MaxBitWidth,
+{
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let params = ZipPlus::setup(poly_size, linear_code);
+    let row_len = params.linear_code.row_len();
+    let rows = poly_size / row_len;
+
+    group.bench_function(
+        format!(
+            "Commit {N} polys ({label}): matrix={rows}x{row_len}, Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
+            Zt::Eval::type_name(),
+            Zt::Cw::type_name(),
+            Zt::Comb::type_name(),
+            rows = rows,
+            row_len = row_len,
+        ),
+        |b| {
+            b.iter_custom(|iters| {
+                let mut total_duration = Duration::ZERO;
+                for _ in 0..iters {
+                    let polys: Vec<_> = (0..N)
+                        .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
+                        .collect();
+                    let timer = Instant::now();
+                    for poly in &polys {
+                        let res = ZipPlus::commit(&params, poly).expect("Failed to commit");
+                        black_box(res);
+                    }
+                    total_duration += timer.elapsed();
+                }
+
+                total_duration
+            })
+        },
+    );
+}
+
+pub fn test_n_polys<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, const P: usize, const N: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+    label: &str,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let params = ZipPlus::setup(poly_size, linear_code);
+    let row_len = params.linear_code.row_len();
+    let rows = poly_size / row_len;
+
+    group.bench_function(
+        format!(
+            "Test {N} polys ({label}): matrix={rows}x{row_len}, Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
+            Zt::Eval::type_name(),
+            Zt::Cw::type_name(),
+            Zt::Comb::type_name(),
+            rows = rows,
+            row_len = row_len,
+        ),
+        |b| {
+            b.iter_custom(|iters| {
+                let mut total_duration = Duration::ZERO;
+                for _ in 0..iters {
+                    let polys: Vec<_> = (0..N)
+                        .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
+                        .collect();
+                    let hints: Vec<_> = polys
+                        .iter()
+                        .map(|poly| ZipPlus::commit(&params, poly).expect("Failed to commit"))
+                        .collect();
+                    let timer = Instant::now();
+                    for (poly, (hint, _)) in polys.iter().zip(hints.iter()) {
+                        let test_transcript =
+                            ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, poly, hint)
+                                .expect("Test phase failed");
+                        black_box(test_transcript);
+                    }
+                    total_duration += timer.elapsed();
+                }
+                total_duration
+            })
+        },
+    );
+}
+
+pub fn evaluate_n_polys<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, const P: usize, const N: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+    label: &str,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
+    <F as Field>::Inner: FromRef<Zt::Fmod>,
+    Zt::Eval: ProjectableToField<F>,
+{
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let params = ZipPlus::setup(poly_size, linear_code);
+    let row_len = params.linear_code.row_len();
+    let rows = poly_size / row_len;
+    let point = vec![Zt::Pt::one(); P];
+
+    group.bench_function(
+        format!(
+            "Evaluate {N} polys ({label}): matrix={rows}x{row_len}, Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
+            Zt::Eval::type_name(),
+            Zt::Cw::type_name(),
+            Zt::Comb::type_name(),
+            rows = rows,
+            row_len = row_len,
+        ),
+        |b| {
+            b.iter_custom(|iters| {
+                let mut total_duration = Duration::ZERO;
+                for _ in 0..iters {
+                    let polys: Vec<_> = (0..N)
+                        .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
+                        .collect();
+                    let hints: Vec<_> = polys
+                        .iter()
+                        .map(|poly| ZipPlus::commit(&params, poly).expect("Failed to commit"))
+                        .collect();
+                    let transcripts: Vec<_> = polys
+                        .iter()
+                        .zip(hints.iter())
+                        .map(|(poly, (hint, _))| {
+                            ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, poly, hint)
+                                .expect("Test phase failed")
+                        })
+                        .collect();
+                    let timer = Instant::now();
+                    for (poly, transcript) in polys.iter().zip(transcripts.into_iter()) {
+                        let (eval_f, proof) =
+                            ZipPlus::evaluate::<F, CHECK_FOR_OVERFLOWS>(&params, poly, &point, transcript)
+                                .expect("Evaluation phase failed");
+                        black_box((eval_f, proof));
+                    }
+                    total_duration += timer.elapsed();
+                }
+                total_duration
+            })
+        },
+    );
+}
+
+pub fn verify_n_polys<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, const P: usize, const N: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+    label: &str,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
+    <F as Field>::Inner: FromRef<Zt::Fmod>,
+    Zt::Eval: ProjectableToField<F>,
+    Zt::Cw: ProjectableToField<F>,
+{
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let params = ZipPlus::setup(poly_size, linear_code);
+    let row_len = params.linear_code.row_len();
+    let rows = poly_size / row_len;
+    let point = vec![Zt::Pt::one(); P];
+
+    // Pre-compute commitments, test transcripts, evaluations, and proofs
+    let polys: Vec<_> = (0..N)
+        .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
+        .collect();
+    let commits: Vec<_> = polys
+        .iter()
+        .map(|poly| ZipPlus::commit(&params, poly).expect("Failed to commit"))
+        .collect();
+    let transcripts: Vec<_> = polys
+        .iter()
+        .zip(commits.iter())
+        .map(|(poly, (hint, _))| {
+            ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, poly, hint)
+                .expect("Test phase failed")
+        })
+        .collect();
+    let evals_and_proofs: Vec<_> = polys
+        .iter()
+        .zip(transcripts.into_iter())
+        .map(|(poly, transcript)| {
+            ZipPlus::evaluate::<F, CHECK_FOR_OVERFLOWS>(&params, poly, &point, transcript)
+                .expect("Evaluation phase failed")
+        })
+        .collect();
+
+    // Compute field point once for verification
+    let (ref first_eval_f, _) = evals_and_proofs[0];
+    let field_cfg = *first_eval_f.cfg();
+    let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
+
+    group.bench_function(
+        format!(
+            "Verify {N} polys ({label}): matrix={rows}x{row_len}, Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
+            Zt::Eval::type_name(),
+            Zt::Cw::type_name(),
+            Zt::Comb::type_name(),
+            rows = rows,
+            row_len = row_len,
+        ),
+        |b| {
+            b.iter(|| {
+                for ((_, commitment), (eval_f, proof)) in commits.iter().zip(evals_and_proofs.iter()) {
+                    ZipPlus::verify::<_, CHECK_FOR_OVERFLOWS>(
+                        &params,
+                        commitment,
+                        &point_f,
+                        eval_f,
+                        proof,
+                    )
+                    .expect("Verification failed");
+                }
+            })
+        },
+    );
+}
+
 pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where

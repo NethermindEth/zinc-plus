@@ -36,6 +36,7 @@ use zip_plus::{
             PnttConfigF2_16_1_Base64_Depth2_Rate1_4,
             PnttConfigF2_16_1_Base128_Depth2_Rate1_4,
             PnttConfigF2_16_1_Base256_Depth2_Rate1_4,
+            PnttConfigF2_16_1_Base4_Depth2_Rate1_4,
             PnttConfigF2_16_1_Depth2_Rate1_2,
             PnttConfigF2_16_1_Depth2_Rate1_4,
             PnttConfigF2_16_1_Depth3_Rate1_2,
@@ -102,6 +103,10 @@ type IprsCodeDepth1Base32Rate1_4 =
     IprsCode<BenchZipTypes, PnttConfigF2_16_1_Base32_Depth1_Rate1_4, I32WideningMulByScalar>;
 type IprsCodeDepth1Base64Rate1_4 =
     IprsCode<BenchZipTypes, PnttConfigF2_16_1_Base64_Depth1_Rate1_4, I32WideningMulByScalar>;
+
+/// Depth-2 rate 1/4 IPRS code for message size 2^8 (base matrix 16x4)
+type IprsCodeDepth2Base4Rate1_4 =
+    IprsCode<BenchZipTypes, PnttConfigF2_16_1_Base4_Depth2_Rate1_4, I32WideningMulByScalar>;
 
 // --- 128-bit integer types for encoding benchmarks ---
 
@@ -551,6 +556,20 @@ fn zip_benchmarks_encode_128bit_selected(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmarks for Zip commit of 40 polynomials with 8 variables (poly_size=2^8),
+/// matrix shape 1×256, with 32-bit integer entries.
+/// Uses depth-1 and depth-2 IPRS codes with rate 1/4.
+fn zip_benchmarks_commit_40_polys_8vars(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip Commit 40 Polys 8 Vars");
+
+    // Depth 1, rate 1/4: msg_size=2^8, 1 row × 256 cols, poly_size=2^8
+    commit_n_polys::<BenchZipTypes, IprsCodeDepth1Base32Rate1_4, 8, 40>(&mut group, "IPRS depth-1 rate-1/4");
+    // Depth 2, rate 1/4: msg_size=2^8, 1 row × 256 cols, poly_size=2^8
+    commit_n_polys::<BenchZipTypes, IprsCodeDepth2Base4Rate1_4, 8, 40>(&mut group, "IPRS depth-2 rate-1/4");
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     zip_benchmarks,
@@ -561,6 +580,7 @@ criterion_group!(
     zip_benchmarks_encode_128bit,
     zip_benchmarks_encode_256bit,
     zip_benchmarks_encode_256bit_depth2,
-    zip_benchmarks_encode_128bit_selected
+    zip_benchmarks_encode_128bit_selected,
+    zip_benchmarks_commit_40_polys_8vars
 );
 criterion_main!(benches);

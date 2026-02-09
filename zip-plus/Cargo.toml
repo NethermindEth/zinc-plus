@@ -51,3 +51,27 @@ harness = false
 [[bench]]
 name = "zip_plus_benches"
 harness = false
+
+[[bench]]
+name = "zip_plus_commit_10"
+harness = false
+
+[[bench]]
+name = "zip_plus_commit_15"
+harness = false
+
+[[bench]]
+name = "zip_plus_commit_40"
+harness = false
+
+[[bench]]
+name = "zip_plus_commit_55"
+harness = false
+
+[[bench]]
+name = "zip_commit_5"
+harness = false
+
+[[bench]]
+name = "zip_commit_40"
+harness = false

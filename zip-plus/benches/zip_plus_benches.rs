@@ -52,6 +52,7 @@ use zip_plus::code::iprs::{
     PnttConfigF2_16_1_Base512_Depth2_Rate1_2,
     PnttConfigF2_16_1_Base128_Depth2_Rate1_4,
     PnttConfigF2_16_1_Base256_Depth2_Rate1_4,
+    PnttConfigF2_16_1_Base4_Depth2_Rate1_4,
 };
 use zip_plus::code::iprs::pntt::radix8::params::PnttConfigF12289_Depth3_Rate1_2;
 
@@ -185,6 +186,20 @@ type SomeIprsCodeF65537Base128Depth2Rate1_4<Twiddle, const D_PLUS_ONE: usize> = 
 type SomeIprsCodeF65537Base256Depth2Rate1_4<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
     BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
     PnttConfigF2_16_1_Base256_Depth2_Rate1_4,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
+/// F65537 depth-1 rate-1/4 config for message size 2^8 (base matrix 128x32)
+type SomeIprsCodeF65537Base32Depth1Rate1_4<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Base32_Depth1_Rate1_4,
+    BinaryPolyWideningMulByScalar<Twiddle>,
+>;
+
+/// F65537 depth-2 rate-1/4 config for message size 2^8 (base matrix 16x4)
+type SomeIprsCodeF65537Base4Depth2Rate1_4<Twiddle, const D_PLUS_ONE: usize> = IprsCode<
+    BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+    PnttConfigF2_16_1_Base4_Depth2_Rate1_4,
     BinaryPolyWideningMulByScalar<Twiddle>,
 >;
 
@@ -674,6 +689,20 @@ fn zip_plus_benchmarks_evaluate_comparison_rate1_4_depth4(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmarks for Zip+ commit of 10 polynomials with 8 variables (poly_size=2^8),
+/// matrix shape 1×256, with degree <32 polynomial entries.
+/// Uses depth-1 and depth-2 IPRS codes with rate 1/4.
+fn zip_plus_benchmarks_commit_10_polys_8vars(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zip+ Commit 10 Polys 8 Vars");
+
+    // Depth 1, rate 1/4: msg_size=2^8, 1 row × 256 cols, poly_size=2^8
+    commit_n_polys::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base32Depth1Rate1_4<i64, 32>, 8, 10>(&mut group, "IPRS depth-1 rate-1/4");
+    // Depth 2, rate 1/4: msg_size=2^8, 1 row × 256 cols, poly_size=2^8
+    commit_n_polys::<BenchZipPlusTypes<i64, 32>, SomeIprsCodeF65537Base4Depth2Rate1_4<i64, 32>, 8, 10>(&mut group, "IPRS depth-2 rate-1/4");
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     zip_plus_benchmarks_raa,
@@ -697,6 +726,7 @@ criterion_group!(
     zip_plus_benchmarks_evaluate_comparison_rate1_4_depth3,
     zip_plus_benchmarks_commit_comparison_rate1_4_depth4,
     zip_plus_benchmarks_test_comparison_rate1_4_depth4,
-    zip_plus_benchmarks_evaluate_comparison_rate1_4_depth4
+    zip_plus_benchmarks_evaluate_comparison_rate1_4_depth4,
+    zip_plus_benchmarks_commit_10_polys_8vars
 );
 criterion_main!(benches);
