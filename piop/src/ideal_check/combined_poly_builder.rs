@@ -1,7 +1,7 @@
 use std::mem::MaybeUninit;
 
 use crypto_primitives::{DenseRowMatrix, Field, Matrix, PrimeField};
-use itertools::{Itertools, max};
+use itertools::Itertools;
 use zinc_poly::{
     CoefficientProjectable,
     mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero},
@@ -50,10 +50,11 @@ where
             })
             .collect();
 
-    let max_degree = *max(max_degrees_and_combined_poly_rows
+    let max_degree = *max_degrees_and_combined_poly_rows
         .iter()
-        .map(|(max_degree, _)| max_degree))
-    .expect("We assume the number of constraints is not zero so this iterator is not empty");
+        .map(|(max_degree, _)| max_degree)
+        .max()
+        .expect("We assume the number of constraints is not zero so this iterator is not empty");
 
     // For the sake of padding we duplicate
     // the last combined value
@@ -129,10 +130,11 @@ where
 
     combined_evaluations.iter_mut().for_each(|eval| eval.trim());
 
-    let max_degree = max(combined_evaluations
+    let max_degree = combined_evaluations
         .iter()
-        .map(|eval| eval.degree().unwrap_or(0)))
-    .expect("We assume the number of constraints is not zero so this iterator is not empty");
+        .map(|eval| eval.degree().unwrap_or(0))
+        .max()
+        .expect("We assume the number of constraints is not zero so this iterator is not empty");
 
     (max_degree, combined_evaluations)
 }
