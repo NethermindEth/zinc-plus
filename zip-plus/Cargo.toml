@@ -97,5 +97,18 @@ name = "zip_commit_5_f12289"
 harness = false
 
 [[bench]]
+name = "zip_commit_10_f12289"
+harness = false
+
+[[bench]]
+name = "zip_commit_55_f12289"
+harness = false
+
+[[bench]]
+name = "square_mod_bench"
+harness = false
+required-features = ["parallel"]
+
+[[bench]]
 name = "zip_commit_40_f12289"
 harness = false

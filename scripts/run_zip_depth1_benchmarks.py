@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """
-Run Zip+ depth-1 IPRS benchmarks over F12289 for 10 and 55 polynomials,
+Run Zip depth-1 IPRS benchmarks over F12289 for 10 and 55 polynomials,
 then collect the Criterion results and emit a LaTeX table.
 
+This is the Zip (scalar-evaluation) counterpart of run_depth1_benchmarks.py
+which runs the same benchmark configurations but with Zip+ (polynomial
+evaluations).
+
 Benchmarks executed:
-  - zip_plus_commit_10_f12289  with filter IPRS-1-1/4-F12289
-  - zip_plus_commit_10_f12289  with filter IPRS-1-1/2-F12289Face in Zip Plus 
-  - zip_plus_commit_55_f12289  with filter IPRS-1-1/2-F12289
-  - zip_plus_commit_55_f12289  with filter IPRS-1-1/4-F12289
+  - zip_commit_10_f12289  with filter IPRS-1-1/4-F12289
+  - zip_commit_10_f12289  with filter IPRS-1-1/2-F12289
+  - zip_commit_55_f12289  with filter IPRS-1-1/2-F12289
+  - zip_commit_55_f12289  with filter IPRS-1-1/4-F12289
 
 Usage:
-    python3 scripts/run_depth1_benchmarks.py
-    python3 scripts/run_depth1_benchmarks.py --dry-run      # skip running, just read existing results
-    python3 scripts/run_depth1_benchmarks.py --output table.tex
-    python3 scripts/run_depth1_benchmarks.py --ops verify            # only run Verify benchmarks
-    python3 scripts/run_depth1_benchmarks.py --ops commit evaluate   # run Commit and Evaluate only
+    python3 scripts/run_zip_depth1_benchmarks.py
+    python3 scripts/run_zip_depth1_benchmarks.py --dry-run      # skip running, just read existing results
+    python3 scripts/run_zip_depth1_benchmarks.py --output table.tex
+    python3 scripts/run_zip_depth1_benchmarks.py --verify-only   # only run Verify benchmarks
 """
 
 import argparse
@@ -33,10 +36,10 @@ FEATURES = "asm parallel simd unchecked-butterfly"
 
 # Each entry: (bench_name, filter_pattern)
 BENCHMARKS = [
-    ("zip_plus_commit_10_f12289", "IPRS-1-1/4-F12289"),
-    ("zip_plus_commit_10_f12289", "IPRS-1-1/2-F12289"),
-    ("zip_plus_commit_55_f12289", "IPRS-1-1/2-F12289"),
-    ("zip_plus_commit_55_f12289", "IPRS-1-1/4-F12289"),
+    ("zip_commit_10_f12289", "IPRS-1-1/4-F12289"),
+    ("zip_commit_10_f12289", "IPRS-1-1/2-F12289"),
+    ("zip_commit_55_f12289", "IPRS-1-1/2-F12289"),
+    ("zip_commit_55_f12289", "IPRS-1-1/4-F12289"),
 ]
 
 # Operations benchmarked in each bench binary
@@ -46,21 +49,11 @@ OPERATIONS = ["Commit", "Test", "Evaluate", "Verify"]
 NUM_VARS = [6, 7, 8, 9, 10]
 
 
-def run_benchmarks(dry_run: bool = False, ops: Optional[list[str]] = None) -> None:
-    """Execute all cargo bench commands sequentially.
-
-    Args:
-        dry_run: If True, skip running benchmarks.
-        ops: List of operations to benchmark (e.g. ["Commit", "Verify"]).
-             If None, run all operations.
-    """
+def run_benchmarks(dry_run: bool = False, verify_only: bool = False) -> None:
+    """Execute all cargo bench commands sequentially."""
     for bench_name, filter_pat in BENCHMARKS:
-        if ops is not None and set(ops) != set(OPERATIONS):
-            # Build a Criterion regex filter that matches only the selected operations.
-            ops_alt = "|".join(re.escape(op) for op in ops)
-            effective_filter = f"Zip\\+ ({ops_alt}).*{filter_pat}"
-        else:
-            effective_filter = filter_pat
+        # When --verify-only is set, narrow the Criterion filter to Verify groups only.
+        effective_filter = f"Zip Verify.*{filter_pat}" if verify_only else filter_pat
         cmd = [
             "cargo", "bench",
             "--bench", bench_name,
@@ -93,7 +86,7 @@ def collect_results() -> dict:
     results: dict = {}
 
     for bench_name, iprs_label in BENCHMARKS:
-        # Derive n_polys from bench name (e.g. zip_plus_commit_10_f12289 → 10)
+        # Derive n_polys from bench name (e.g. zip_commit_10_f12289 → 10)
         m = re.search(r"commit_(\d+)_", bench_name)
         assert m, f"Cannot parse n_polys from {bench_name}"
         n_polys = int(m.group(1))
@@ -101,7 +94,7 @@ def collect_results() -> dict:
         iprs_dir_suffix = iprs_label_to_dir_suffix(iprs_label)
 
         for op in OPERATIONS:
-            group_dir_name = f"Zip+ {op} F12289 {n_polys} Polys {iprs_dir_suffix}"
+            group_dir_name = f"Zip {op} F12289 {n_polys} Polys {iprs_dir_suffix}"
             group_path = CRITERION_DIR / group_dir_name
 
             if not group_path.is_dir():
@@ -151,25 +144,21 @@ def fmt_time(ns: float) -> str:
         return f"{ns / 1_000_000_000:.2f} s"
 
 
-def generate_latex(results: dict, ops: Optional[list[str]] = None) -> str:
+def generate_latex(results: dict) -> str:
     """
     Build a LaTeX table with the collected benchmark data.
 
-    Columns: num_vars | <selected operations>
+    Columns: num_vars | Commit | Test | Evaluate | Verify
     Grouped by (n_polys, iprs_label).
     """
-    display_ops = ops if ops is not None else OPERATIONS
-    n_cols = 1 + len(display_ops)
-    col_spec = "c|" + "c" * len(display_ops)
-
     lines = []
     lines.append(r"\begin{table}[ht]")
     lines.append(r"\centering")
-    lines.append(r"\caption{Zip+ Depth-1 IPRS benchmarks over $\mathbb{F}_{12289}$}")
-    lines.append(r"\label{tab:depth1-benchmarks}")
-    lines.append(r"\begin{tabular}{" + col_spec + r"}")
+    lines.append(r"\caption{Zip Depth-1 IPRS benchmarks over $\mathbb{F}_{12289}$}")
+    lines.append(r"\label{tab:zip-depth1-benchmarks}")
+    lines.append(r"\begin{tabular}{c|c}")
     lines.append(r"\toprule")
-    lines.append(r"$\nu$ & " + " & ".join(display_ops) + r" \\")
+    lines.append(r"$\nu$ & Verify \\")
     lines.append(r"\midrule")
 
     for n_polys in sorted(results.keys()):
@@ -178,14 +167,14 @@ def generate_latex(results: dict, ops: Optional[list[str]] = None) -> str:
 
             # Section header
             rate = iprs_label.split("-")[2]  # e.g. "1/4" from "IPRS-1-1/4-F12289"
-            lines.append(r"\multicolumn{" + str(n_cols) + r"}{c}{\textbf{" +
+            lines.append(r"\multicolumn{2}{c}{\textbf{" +
                          f"{n_polys} polys, depth-1, rate {rate}" +
                          r"}} \\")
             lines.append(r"\midrule")
 
             for nv in NUM_VARS:
                 cells = []
-                for op in display_ops:
+                for op in OPERATIONS:
                     val = op_data.get(op, {}).get(nv)
                     cells.append(fmt_time(val) if val is not None else "--")
                 lines.append(f"  {nv} & " + " & ".join(cells) + r" \\")
@@ -203,7 +192,7 @@ def generate_latex(results: dict, ops: Optional[list[str]] = None) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run depth-1 IPRS benchmarks and generate a LaTeX table."
+        description="Run Zip depth-1 IPRS benchmarks and generate a LaTeX table."
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -214,19 +203,12 @@ def main():
         help="Write LaTeX table to this file (default: print to stdout).",
     )
     parser.add_argument(
-        "--ops", nargs="+",
-        choices=[op.lower() for op in OPERATIONS],
-        default=None,
-        metavar="OP",
-        help="Operations to benchmark (default: all). "
-             "Choose from: commit, test, evaluate, verify.",
+        "--verify-only", action="store_true",
+        help="Only run Verify benchmarks (skip Commit, Test, Evaluate).",
     )
     args = parser.parse_args()
 
-    # Normalise operation names to title-case to match OPERATIONS.
-    selected_ops = [op.capitalize() for op in args.ops] if args.ops else None
-
-    run_benchmarks(dry_run=args.dry_run, ops=selected_ops)
+    run_benchmarks(dry_run=args.dry_run, verify_only=args.verify_only)
 
     print("\nCollecting Criterion results …")
     results = collect_results()
@@ -235,7 +217,7 @@ def main():
         print("No results found. Run benchmarks first (without --dry-run).", file=sys.stderr)
         sys.exit(1)
 
-    latex = generate_latex(results, ops=selected_ops)
+    latex = generate_latex(results)
 
     if args.output:
         Path(args.output).write_text(latex + "\n")
