@@ -1,8 +1,43 @@
 #!/usr/bin/env python3
 """Run the sumcheck benchmark and output results as a LaTeX table.
 
-Usage:
-    python3 scripts/bench_sumcheck_to_latex.py [--output TABLE.tex] [--features "parallel simd"]
+This script executes ``cargo bench --bench sumcheck -p zinc-piop`` with the
+requested Cargo feature flags, parses the Criterion output, and produces a
+LaTeX table summarising the median wall-clock times for each benchmark
+configuration.
+
+The generated table is organised as follows:
+  - Rows are indexed by the number of sumcheck variables *n* (i.e. the
+    multilinear extension is defined over {0,1}^n).
+  - Columns are grouped by benchmark type (Prover / Verifier). Within each
+    group there is one sub-column per field size (e.g. 192-bit for
+    ``MontyField<3>`` and 256-bit for ``MontyField<4>``).
+
+The table uses the ``booktabs``, ``multirow`` and ``siunitx`` LaTeX packages.
+Times are automatically formatted in the most readable unit (µs, ms, or s).
+
+Usage
+-----
+Run the benchmarks and print the table to stdout::
+
+    python3 scripts/bench_sumcheck_to_latex.py
+
+Save to a file::
+
+    python3 scripts/bench_sumcheck_to_latex.py -o table.tex
+
+Specify custom Cargo features::
+
+    python3 scripts/bench_sumcheck_to_latex.py --features "parallel simd asm"
+
+Only run benchmarks matching a filter::
+
+    python3 scripts/bench_sumcheck_to_latex.py --filter "Sum-of-40"
+
+Parse previously captured output from stdin instead of running cargo::
+
+    cargo bench --bench sumcheck -p zinc-piop --features "parallel simd" 2>&1 \\
+        | python3 scripts/bench_sumcheck_to_latex.py --from-stdin
 """
 
 import argparse
