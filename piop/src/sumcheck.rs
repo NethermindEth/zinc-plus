@@ -87,7 +87,7 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
         nvars: usize,
         degree: usize,
         comb_fn: impl Fn(&[F]) -> F + Send + Sync,
-        config: F::Config,
+        config: &F::Config,
     ) -> (SumcheckProof<F>, ProverState<F>)
     where
         F::Inner: ConstTranscribable + Zero,
@@ -112,7 +112,7 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
             let prover_msg = prover_state.prove_round(&verifier_msg, &comb_fn, &config);
             transcript.absorb_random_field_slice(&prover_msg.0.tail_evaluations, &mut buf);
             prover_msgs.push(prover_msg);
-            let next_verifier_msg = transcript.get_field_challenge(&config);
+            let next_verifier_msg = transcript.get_field_challenge(config);
             transcript.absorb_random_field(&next_verifier_msg, &mut buf);
 
             verifier_msg = Some(next_verifier_msg);

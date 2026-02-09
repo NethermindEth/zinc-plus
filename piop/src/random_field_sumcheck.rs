@@ -69,13 +69,13 @@ impl<F: FromPrimitiveWithConfig, R: Semiring + ProjectableToField<F>> RFSumcheck
         nvars: usize,
         degree: usize,
         comb_fn: impl Fn(&F, &[F]) -> F + Send + Sync,
-        field_cfg: F::Config,
+        field_cfg: &F::Config,
     ) -> (RFSumcheckProof<F, R>, RFProverState<F, R>)
     where
         F::Inner: ConstTranscribable + ConstIntSemiring + FromRef<F::Inner>,
         F: InnerTransparentField,
     {
-        let projecting_element: F = transcript.get_field_challenge(&field_cfg);
+        let projecting_element: F = transcript.get_field_challenge(field_cfg);
 
         let field_mles = cfg_into_iter!(mles)
             .map(|mle| project_coeffs(mle, &projecting_element))
@@ -203,7 +203,7 @@ mod tests {
             nvars,
             3,
             |_x, vals| (&vals[0] * &vals[1] - &vals[2]) * &vals[3],
-            field_cfg,
+            &field_cfg,
         ))
         .0;
 

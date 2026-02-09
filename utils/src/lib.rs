@@ -1,3 +1,5 @@
+use crypto_primitives::Semiring;
+
 pub mod field;
 pub mod from_ref;
 pub mod inner_product;
@@ -25,4 +27,28 @@ pub const fn log2(x: usize) -> u32 {
     } else {
         0usize.leading_zeros() - x.leading_zeros()
     }
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+pub fn powers<R: Semiring>(x: R, one: R, num_pows: usize) -> Vec<R> {
+    if num_pows == 0 {
+        return Vec::new();
+    }
+
+    let mut pows = Vec::with_capacity(num_pows);
+
+    pows.push(one);
+
+    if num_pows == 1 {
+        return pows;
+    }
+
+    let mut curr_pow = x.clone();
+
+    for _ in 1..num_pows {
+        pows.push(curr_pow.clone());
+        curr_pow *= &x;
+    }
+
+    pows
 }

@@ -38,7 +38,7 @@ fn generate_sumcheck_proof<Rn: RngCore>(
         num_vars,
         poly_degree,
         comb_fn,
-        (),
+        &(),
     );
     (poly_degree, proof)
 }
@@ -85,7 +85,7 @@ fn subclaim_differs_with_incorrect_claimed_sum() {
         num_vars,
         poly_degree,
         comb_fn,
-        (),
+        &(),
     );
 
     let one = F::from(1u32);
@@ -134,7 +134,7 @@ fn subclaim_changes_when_prover_message_is_tampered() {
         num_vars,
         poly_degree,
         comb_fn,
-        (),
+        &(),
     );
 
     let mut clean_verifier_transcript = KeccakTranscript::default();
@@ -182,7 +182,7 @@ fn verifier_rejects_proof_with_wrong_degree() {
         num_vars,
         poly_degree,
         comb_fn,
-        (),
+        &(),
     );
 
     let incorrect_degree = poly_degree - 1;
@@ -216,7 +216,7 @@ fn protocol_is_deterministic_with_same_transcript() {
         num_vars,
         poly_degree,
         comb_fn.clone(),
-        (),
+        &(),
     );
 
     let mut transcript2 = KeccakTranscript::default();
@@ -226,7 +226,7 @@ fn protocol_is_deterministic_with_same_transcript() {
         num_vars,
         poly_degree,
         comb_fn,
-        (),
+        &(),
     );
 
     assert_eq!(proof1, proof2);
@@ -252,7 +252,7 @@ fn different_polynomials_produce_different_proofs() {
         num_vars,
         poly_degree1,
         comb_fn1,
-        (),
+        &(),
     );
 
     let mut poly_mles2 = poly_mles1;
@@ -268,7 +268,7 @@ fn different_polynomials_produce_different_proofs() {
         num_vars,
         poly_degree1,
         comb_fn2,
-        (),
+        &(),
     );
 
     assert_ne!(proof1, proof2);
@@ -300,7 +300,7 @@ fn sumcheck_with_zero_polynomial() {
         num_vars,
         poly_degree,
         comb_fn,
-        (),
+        &(),
     );
 
     assert_eq!(proof.claimed_sum, F::zero());
@@ -349,7 +349,7 @@ fn sumcheck_with_constant_polynomial() {
         num_vars,
         poly_degree,
         comb_fn,
-        (),
+        &(),
     );
 
     assert_eq!(proof.claimed_sum, sum);
@@ -383,7 +383,7 @@ fn sumcheck_with_single_variable() {
         num_vars,
         poly_degree,
         comb_fn,
-        (),
+        &(),
     );
 
     let mut verifier_transcript = KeccakTranscript::default();
@@ -415,7 +415,7 @@ fn subclaim_changes_if_transcript_is_tampered() {
         num_vars,
         poly_degree,
         comb_fn,
-        (),
+        &(),
     );
 
     let mut clean_transcript = KeccakTranscript::default();
@@ -479,7 +479,7 @@ fn verifier_errors_on_incomplete_proof() {
         num_vars,
         poly_degree,
         comb_fn,
-        (),
+        &(),
     );
 
     let mut incomplete_proof = proof.clone();
@@ -517,7 +517,7 @@ fn prover_handles_empty_mle_list() {
         num_vars,
         poly_degree,
         comb_fn,
-        (),
+        &(),
     );
 
     let mut verifier_transcript = KeccakTranscript::default();
@@ -575,7 +575,7 @@ fn verifier_produces_correct_subclaim() {
         nvars,
         poly_degree,
         comb_fn,
-        (),
+        &(),
     );
 
     let mut verifier_transcript = KeccakTranscript::default();
