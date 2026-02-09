@@ -23,27 +23,6 @@ macro_rules! safe_cast {
     };
 }
 
-/// Perform a bounds-checked read from the stream for a given range, and
-/// execute an action on the resulting slice. After the action is executed,
-/// update stream's position to the end of the range.
-macro_rules! with_stream_slice {
-    ($stream:expr, $range:expr, $action:expr) => {{
-        let stream_vec = $stream.get_ref();
-        if $range.end > stream_vec.len() {
-            return Err(ZipError::Transcript(
-                ErrorKind::UnexpectedEof,
-                format!(
-                    "Attempted to read beyond the end of the stream: range {:?}, but stream length is {}",
-                    $range, stream_vec.len()
-                ),
-            ));
-        }
-        let res = $action(&stream_vec[$range])?;
-        $stream.set_position(safe_cast!($range.end, usize, u64)?);
-        res
-    }};
-}
-
 /// A transcript for Polynomial Commitment Scheme (PCS) operations.
 /// Manages both Fiat-Shamir transformations and serialization/deserialization
 /// of proof data.
@@ -206,32 +185,18 @@ impl PcsTranscript {
     }
 
     pub fn read_const<T: ConstTranscribable>(&mut self) -> Result<T, ZipError> {
-        let prev_pos = safe_cast!(self.stream.position(), u64, usize)?;
-        let data_len = T::NUM_BYTES;
-        let next_pos = add!(prev_pos, data_len);
-
-        let res = with_stream_slice!(self.stream, prev_pos..next_pos, |slice: &[u8]| {
-            Ok::<_, ZipError>(T::read_transcription_bytes(slice))
-        });
-
-        Ok(res)
+        read_stream_slice(&mut self.stream, T::NUM_BYTES, |slice| {
+            Ok(T::read_transcription_bytes(slice))
+        })
     }
 
     pub fn read_const_many<T: ConstTranscribable>(&mut self, n: usize) -> Result<Vec<T>, ZipError> {
-        let prev_pos = safe_cast!(self.stream.position(), u64, usize)?;
-        let data_len = mul!(n, T::NUM_BYTES);
-        let next_pos = add!(prev_pos, data_len);
-
-        let res = with_stream_slice!(self.stream, prev_pos..next_pos, |slice: &[u8]| {
-            Ok::<_, ZipError>(
-                slice
-                    .chunks(T::NUM_BYTES)
-                    .map(T::read_transcription_bytes)
-                    .collect_vec(),
-            )
-        });
-
-        Ok(res)
+        read_stream_slice(&mut self.stream, mul!(n, T::NUM_BYTES), |slice| {
+            Ok(slice
+                .chunks(T::NUM_BYTES)
+                .map(T::read_transcription_bytes)
+                .collect_vec())
+        })
     }
 
     fn write_usize(&mut self, value: usize) -> Result<(), ZipError> {
@@ -278,6 +243,35 @@ impl PcsTranscript {
         self.write_const_many(&proof.siblings)?;
         Ok(())
     }
+}
+
+/// Perform a bounds-checked read from the stream for a length, and
+/// execute an action on the resulting slice. After the action is executed,
+/// advance the stream position by the length.
+#[inline]
+fn read_stream_slice<T>(
+    stream: &mut Cursor<Vec<u8>>,
+    length: usize,
+    action: impl Fn(&[u8]) -> Result<T, ZipError>,
+) -> Result<T, ZipError> {
+    let prev_pos = safe_cast!(stream.position(), u64, usize)?;
+    let next_pos = add!(prev_pos, length);
+
+    let stream_vec = stream.get_ref();
+    if next_pos > stream_vec.len() {
+        return Err(ZipError::Transcript(
+            ErrorKind::UnexpectedEof,
+            format!(
+                "Attempted to read beyond the end of the stream: {} + {} exceeds stream length {}",
+                prev_pos,
+                length,
+                stream_vec.len()
+            ),
+        ));
+    }
+    let res = action(&stream_vec[prev_pos..next_pos])?;
+    stream.set_position(safe_cast!(next_pos, usize, u64)?);
+    Ok(res)
 }
 
 // Do not expose this outside
