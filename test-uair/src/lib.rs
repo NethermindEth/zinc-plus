@@ -17,12 +17,12 @@ use zinc_uair::{ConstraintBuilder, Uair};
 use zinc_utils::from_ref::FromRef;
 
 pub use generate_witness::*;
-use zinc_uair::ideal::DummyIdeal;
+use zinc_uair::ideal::ImpossibleIdeal;
 
 pub struct TestUairSimpleMultiplication;
 
 impl<R: Semiring + 'static> Uair<R> for TestUairSimpleMultiplication {
-    type Ideal = DummyIdeal; // Not used
+    type Ideal = ImpossibleIdeal; // Not used
 
     fn num_cols() -> usize {
         3

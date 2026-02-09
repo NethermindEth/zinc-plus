@@ -18,20 +18,20 @@ pub trait IdealCheck<T> {
 /// A dummy ideal. Convenient when ideal checks
 /// have to be ignored.
 #[derive(Clone, Copy, Debug)]
-pub struct DummyIdeal;
+pub struct ImpossibleIdeal;
 
-impl Ideal for DummyIdeal {}
+impl Ideal for ImpossibleIdeal {}
 
-impl<R: Semiring> IdealCheck<R> for DummyIdeal {
+impl<R: Semiring> IdealCheck<R> for ImpossibleIdeal {
     #[inline(always)]
     fn contains(&self, _value: &R) -> bool {
         false
     }
 }
 
-impl<I: Ideal> FromRef<I> for DummyIdeal {
+impl<I: Ideal> FromRef<I> for ImpossibleIdeal {
     #[inline(always)]
     fn from_ref(_ideal: &I) -> Self {
-        DummyIdeal
+        ImpossibleIdeal
     }
 }

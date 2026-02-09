@@ -7,7 +7,7 @@ use zinc_poly::{
     mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero},
     univariate::dynamic::over_field::DynamicPolynomialF,
 };
-use zinc_uair::{ConstraintBuilder, Uair, ideal::DummyIdeal};
+use zinc_uair::{ConstraintBuilder, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::from_ref::FromRef;
 
 use crate::ideal_check::structs::IdealCheckTypes;
@@ -123,7 +123,7 @@ where
         down,
         |x| x.project_coefficients(projecting_element).into(),
         |x, y| Some(DynamicPolynomialF::from(y.project_coefficients(projecting_element)) * x),
-        DummyIdeal::from_ref,
+        ImpossibleIdeal::from_ref,
     );
 
     let mut combined_evaluations = constraint_builder.combined_evaluations;
@@ -175,7 +175,7 @@ pub struct CombinedPolyRowBuilder<F: PrimeField> {
 
 impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
     type Expr = DynamicPolynomialF<F>;
-    type Ideal = DummyIdeal;
+    type Ideal = ImpossibleIdeal;
 
     #[allow(clippy::arithmetic_side_effects)]
     fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {
