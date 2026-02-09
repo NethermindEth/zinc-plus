@@ -142,6 +142,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig> CombinedPolyResolver<F>
             .map(|mle| mle.evaluate_with_config(&sumcheck_eval_point, field_cfg))
             .collect::<Result<Vec<_>, _>>()?;
 
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        transcript.absorb_random_field_slice(&evals, &mut transcription_buf);
+
         Ok((
             Proof {
                 sumcheck_proof,
@@ -242,6 +245,10 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig> CombinedPolyResolver<F>
                 expected: expected_claim_value,
             });
         }
+
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        transcript.absorb_random_field_slice(&proof.up_evals, &mut transcription_buf);
+        transcript.absorb_random_field_slice(&proof.down_evals, &mut transcription_buf);
 
         Ok(())
     }
