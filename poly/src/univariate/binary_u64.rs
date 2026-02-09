@@ -8,6 +8,7 @@ use derive_more::{AsRef, Display};
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
+    array,
     hash::Hash,
     iter::{Product, Sum},
     marker::PhantomData,
@@ -24,7 +25,7 @@ use zinc_utils::{
 
 #[derive(AsRef, Clone, Debug, Default, Display, Hash, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct BinaryU64Poly<const DEGREE_PLUS_ONE: usize>(u64); // we can fit up to degree 6, which is ok for now
+pub struct BinaryU64Poly<const DEGREE_PLUS_ONE: usize>(u64); // we can fit up to degree 64, which is ok for now
 
 impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
     #[inline(always)]
@@ -37,6 +38,17 @@ impl<const DEGREE_PLUS_ONE: usize> From<BinaryU64Poly<DEGREE_PLUS_ONE>> for u64 
     #[inline(always)]
     fn from(binary_poly: BinaryU64Poly<DEGREE_PLUS_ONE>) -> Self {
         binary_poly.0
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> From<BinaryU64Poly<DEGREE_PLUS_ONE>>
+    for DensePolynomial<Boolean, DEGREE_PLUS_ONE>
+{
+    #[inline(always)]
+    fn from(binary_poly: BinaryU64Poly<DEGREE_PLUS_ONE>) -> Self {
+        DensePolynomial {
+            coeffs: array::from_fn(|i| Boolean::new(!(binary_poly.0 & (1 << i)).is_zero())),
+        }
     }
 }
 

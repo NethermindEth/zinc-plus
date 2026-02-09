@@ -6,17 +6,16 @@ use crate::{
     pcs::{
         ZipPlusTestTranscript,
         structs::{ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
-        utils::{ColumnOpening, validate_input},
+        utils::validate_input,
     },
     pcs_transcript::PcsTranscript,
 };
 use num_traits::{ConstOne, ConstZero, Zero};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use zinc_poly::{Polynomial, mle::DenseMultilinearExtension};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_utils::{cfg_iter_mut, inner_product::InnerProduct, mul_by_scalar::MulByScalar};
-
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     #[allow(clippy::arithmetic_side_effects)]
@@ -96,16 +95,21 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
     pub(super) fn open_merkle_trees_for_column(
         commit_hint: &ZipPlusHint<Zt::Cw>,
-        column: usize,
+        column_idx: usize,
         transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError> {
-        let column_values = commit_hint.cw_matrix.as_rows().map(|row| &row[column]);
+        let column_values = commit_hint.cw_matrix.as_rows().map(|row| &row[column_idx]);
 
         // Write the elements in the squeezed column to the shared transcript
         transcript.write_const_many_iter(column_values, commit_hint.cw_matrix.num_rows)?;
 
-        ColumnOpening::open_at_column(column, commit_hint, transcript)
+        let merkle_proof = commit_hint
+            .merkle_tree
+            .prove(column_idx)
             .map_err(|_| ZipError::InvalidPcsOpen("Failed to open merkle tree".into()))?;
+        transcript
+            .write_merkle_proof(&merkle_proof)
+            .map_err(|_| ZipError::InvalidPcsOpen("Failed to write a merkle tree proof".into()))?;
 
         Ok(())
     }
