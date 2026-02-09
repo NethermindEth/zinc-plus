@@ -21,7 +21,7 @@ use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     Uair,
     ideal::{Ideal, IdealCheck},
-    ideal_collector::{CollectedIdeal, collect_ideals},
+    ideal_collector::{IdealOrZero, collect_ideals},
 };
 use zinc_utils::cfg_iter;
 
@@ -151,7 +151,7 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
         U: Uair<IcTypes::Witness>,
         <IcTypes::F as Field>::Inner: ConstTranscribable,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<IcTypes::F>>,
-        IdealOverFFromRef: Fn(&CollectedIdeal<U::Ideal>) -> IdealOverF,
+        IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
         // Sample a field element to maintain FS symmetry with
         // the prover.
@@ -270,7 +270,7 @@ mod tests {
     ) where
         U: GenerateWitness<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
-        IdealOverFFromRef: Fn(&CollectedIdeal<U::Ideal>) -> IdealOverF,
+        IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
         let transcript = KeccakTranscript::new();
 
@@ -309,7 +309,7 @@ mod tests {
         );
         test_successful_verification_generic::<TestUairSimpleMultiplication, _, _, 32>(
             num_vars,
-            |_ideal_over_ring| CollectedIdeal::zero(),
+            |_ideal_over_ring| IdealOrZero::zero(),
         );
     }
 }

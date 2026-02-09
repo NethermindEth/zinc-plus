@@ -6,9 +6,9 @@ use zinc_utils::from_ref::FromRef;
 /// A trait for types describing ideals.
 pub trait Ideal: FromRef<Self> + Clone + Debug + Send + Sync {}
 
-/// A trait for semirings or different structures
-/// elements of which can be checked to belong to
-/// an ideal of type `I`.
+/// A trait for ideals that implement
+/// membership check for an algebraic structure
+/// `T`.
 pub trait IdealCheck<T> {
     /// Returns true if an element of the type
     /// belongs to this ideal.

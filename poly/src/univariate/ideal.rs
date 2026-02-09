@@ -2,7 +2,7 @@ use crypto_primitives::{FixedSemiring, FromWithConfig, PrimeField, Semiring};
 use num_traits::Zero;
 use zinc_uair::{
     ideal::{Ideal, IdealCheck},
-    ideal_collector::CollectedIdeal,
+    ideal_collector::IdealOrZero,
 };
 use zinc_utils::from_ref::FromRef;
 
@@ -45,7 +45,7 @@ impl<F: PrimeField> DegreeOneIdeal<F> {
     }
 }
 
-impl<F: PrimeField> IdealCheck<DynamicPolynomialF<F>> for CollectedIdeal<DegreeOneIdeal<F>> {
+impl<F: PrimeField> IdealCheck<DynamicPolynomialF<F>> for IdealOrZero<DegreeOneIdeal<F>> {
     fn contains(&self, value: &DynamicPolynomialF<F>) -> bool {
         if value.is_zero() {
             return true;

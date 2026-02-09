@@ -10,7 +10,7 @@ use crate::{
 /// A `ConstraintBuilder` that collects
 /// ideals used in a `Uair`.
 pub struct IdealCollector<I: Ideal> {
-    pub ideals: Vec<CollectedIdeal<I>>,
+    pub ideals: Vec<IdealOrZero<I>>,
 }
 
 impl<I: Ideal> IdealCollector<I> {
@@ -44,53 +44,51 @@ where
     I: Ideal,
 {
     type Expr = DummySemiring;
-    type Ideal = CollectedIdeal<I>;
+    type Ideal = IdealOrZero<I>;
 
     fn assert_in_ideal(&mut self, _expr: Self::Expr, ideal: &Self::Ideal) {
         self.ideals.push(ideal.clone());
     }
 
     fn assert_zero(&mut self, _expr: Self::Expr) {
-        self.ideals.push(CollectedIdeal::zero());
+        self.ideals.push(IdealOrZero::zero());
     }
 }
 
 /// A type implementing ideal trait
-/// that is used to store inner
-/// ideal type `I` but ignores all
-/// ideal checks for the sake of just
-/// collecting the inner ideals.
+/// that is either stores inner
+/// ideal type `I` or zero ideal.
 #[derive(Clone, Copy, Debug)]
-pub struct CollectedIdeal<I: Ideal> {
+pub struct IdealOrZero<I: Ideal> {
     pub ideal_or_zero: Option<I>,
 }
 
-impl<I: Ideal> CollectedIdeal<I> {
+impl<I: Ideal> IdealOrZero<I> {
     pub fn zero() -> Self {
-        CollectedIdeal {
+        IdealOrZero {
             ideal_or_zero: None,
         }
     }
 
-    pub fn map<I2: Ideal>(&self, f: impl FnOnce(&I) -> I2) -> CollectedIdeal<I2> {
+    pub fn map<I2: Ideal>(&self, f: impl FnOnce(&I) -> I2) -> IdealOrZero<I2> {
         match &self.ideal_or_zero {
-            Some(ideal) => CollectedIdeal {
+            Some(ideal) => IdealOrZero {
                 ideal_or_zero: Some(f(ideal)),
             },
-            None => CollectedIdeal::zero(),
+            None => IdealOrZero::zero(),
         }
     }
 }
 
-impl<I: Ideal> Ideal for CollectedIdeal<I> {}
+impl<I: Ideal> Ideal for IdealOrZero<I> {}
 
-impl<I: Ideal> FromRef<CollectedIdeal<I>> for CollectedIdeal<I> {
-    fn from_ref(value: &CollectedIdeal<I>) -> Self {
+impl<I: Ideal> FromRef<IdealOrZero<I>> for IdealOrZero<I> {
+    fn from_ref(value: &IdealOrZero<I>) -> Self {
         value.clone()
     }
 }
 
-impl<I: Ideal> FromRef<I> for CollectedIdeal<I> {
+impl<I: Ideal> FromRef<I> for IdealOrZero<I> {
     fn from_ref(value: &I) -> Self {
         Self {
             ideal_or_zero: Some(value.clone()),
@@ -98,7 +96,7 @@ impl<I: Ideal> FromRef<I> for CollectedIdeal<I> {
     }
 }
 
-impl<I: Ideal> IdealCheck<DummySemiring> for CollectedIdeal<I> {
+impl<I: Ideal> IdealCheck<DummySemiring> for IdealOrZero<I> {
     fn contains(&self, _value: &DummySemiring) -> bool {
         // Do nothing.
         true
