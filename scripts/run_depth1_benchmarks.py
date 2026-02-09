@@ -5,14 +5,14 @@ then collect the Criterion results and emit a LaTeX table.
 
 Benchmarks executed:
   - zip_plus_commit_10_f12289  with filter IPRS-1-1/4-F12289
-  - zip_plus_commit_10_f12289  with filter IPRS-1-1/2-F12289
+  - zip_plus_commit_10_f12289  with filter IPRS-1-1/2-F12289Face in Zip Plus 
   - zip_plus_commit_55_f12289  with filter IPRS-1-1/2-F12289
   - zip_plus_commit_55_f12289  with filter IPRS-1-1/4-F12289
 
 Usage:
-    python3 scripts/run_depth2_benchmarks.py
-    python3 scripts/run_depth2_benchmarks.py --dry-run      # skip running, just read existing results
-    python3 scripts/run_depth2_benchmarks.py --output table.tex
+    python3 scripts/run_depth1_benchmarks.py
+    python3 scripts/run_depth1_benchmarks.py --dry-run      # skip running, just read existing results
+    python3 scripts/run_depth1_benchmarks.py --output table.tex
 """
 
 import argparse
@@ -38,7 +38,7 @@ BENCHMARKS = [
 ]
 
 # Operations benchmarked in each bench binary
-OPERATIONS = ["Commit", "Test", "Evaluate", "Verify"]
+OPERATIONS = ["Verify"]
 
 # Number of variables (num_vars) in each benchmark
 NUM_VARS = [6, 7, 8, 9, 10]
@@ -149,9 +149,9 @@ def generate_latex(results: dict) -> str:
     lines.append(r"\centering")
     lines.append(r"\caption{Zip+ Depth-1 IPRS benchmarks over $\mathbb{F}_{12289}$}")
     lines.append(r"\label{tab:depth1-benchmarks}")
-    lines.append(r"\begin{tabular}{c|cccc}")
+    lines.append(r"\begin{tabular}{c|c}")
     lines.append(r"\toprule")
-    lines.append(r"$\nu$ & Commit & Test & Evaluate & Verify \\")
+    lines.append(r"$\nu$ & Verify \\")
     lines.append(r"\midrule")
 
     for n_polys in sorted(results.keys()):
@@ -160,7 +160,7 @@ def generate_latex(results: dict) -> str:
 
             # Section header
             rate = iprs_label.split("-")[2]  # e.g. "1/4" from "IPRS-1-1/4-F12289"
-            lines.append(r"\multicolumn{5}{c}{\textbf{" +
+            lines.append(r"\multicolumn{2}{c}{\textbf{" +
                          f"{n_polys} polys, depth-1, rate {rate}" +
                          r"}} \\")
             lines.append(r"\midrule")

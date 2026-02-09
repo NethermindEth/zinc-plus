@@ -99,11 +99,11 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     // merkle_root::<Zt, 14>(group);
     // merkle_root::<Zt, 15>(group);
     // merkle_root::<Zt, 16>(group);
-    commit::<Zt, Lc, 12>(group);
-    commit::<Zt, Lc, 13>(group);
-    commit::<Zt, Lc, 14>(group);
-    commit::<Zt, Lc, 15>(group);
-    commit::<Zt, Lc, 16>(group);
+    // commit::<Zt, Lc, 12>(group);
+    // commit::<Zt, Lc, 13>(group);
+    // commit::<Zt, Lc, 14>(group);
+    // commit::<Zt, Lc, 15>(group);
+    // commit::<Zt, Lc, 16>(group);
     // test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12>(group);
     // test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
     // test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
@@ -114,11 +114,11 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     // evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
     // evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15>(group);
     // evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
-    // verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12>(group);
-    // verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
-    // verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
-    // verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15>(group);
-    // verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12>(group);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15>(group);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
 }
 
 pub fn do_bench_iprs_matrices<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(

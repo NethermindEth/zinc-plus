@@ -44,24 +44,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
         let mut transcript: PcsTranscript = proof.clone().into();
 
-        let columns_opened =
-            Self::verify_testing::<CHECK_FOR_OVERFLOW>(vp, &comm.root, &mut transcript)?;
-
-        let field_cfg = transcript
-            .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
-        let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
-        let projecting_element: F = (&projecting_element).into_with_cfg(&field_cfg);
-
-        Self::verify_evaluation(
-            vp,
-            point_f,
-            eval_f,
-            &columns_opened,
-            &mut transcript,
-            projecting_element,
-            &field_cfg,
-        )?;
+        Self::verify_testing::<CHECK_FOR_OVERFLOW>(vp, &comm.root, &mut transcript)?;
 
         Ok(())
     }
