@@ -18,7 +18,7 @@ impl<F> NatEvaluatedPoly<F> {
     }
 }
 
-impl<F> Polynomial<F> for NatEvaluatedPoly<F> {
+impl<F: Clone> Polynomial<F> for NatEvaluatedPoly<F> {
     const DEGREE_BOUND: usize = usize::MAX;
 }
 

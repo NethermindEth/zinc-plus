@@ -10,6 +10,8 @@ use std::{
 };
 use zinc_utils::mul_by_scalar::MulByScalar;
 
+use crate::EvaluationError;
+
 /// This trait describes an interface for the multilinear extension
 /// of an array.
 /// The latter is a multilinear polynomial represented in terms of its
@@ -57,7 +59,7 @@ pub trait MultilinearExtensionWithConfig<F: PrimeField> {
 
     /// Evaluate the MLE in full. Asserts that the `point.len()`
     /// is equal the `self.num_vars`.
-    fn evaluate_with_config(&self, point: &[F], config: &F::Config) -> Option<F>;
+    fn evaluate_with_config(&self, point: &[F], config: &F::Config) -> Result<F, EvaluationError>;
 }
 
 pub trait MultilinearExtensionRand<T> {

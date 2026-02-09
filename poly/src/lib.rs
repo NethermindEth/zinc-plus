@@ -3,11 +3,14 @@ pub mod univariate;
 pub mod utils;
 pub mod zero_degree;
 
+use crypto_primitives::FromWithConfig;
 use thiserror::Error;
+
+use crate::univariate::dense::DensePolynomial;
 
 /// Polynomial with coefficients of type `C` and degree bounded by
 /// `DEGREE_BOUND`.
-pub trait Polynomial<C> {
+pub trait Polynomial<C>: Clone {
     const DEGREE_BOUND: usize;
 }
 
@@ -33,4 +36,11 @@ pub enum EvaluationError {
     Overflow,
     #[error("Empty polynomials are not allowed to be evaluate")]
     EmptyPolynomial,
+}
+
+pub trait CoefficientProjectable<C, const DEGREE_PLUS_ONE: usize>: Polynomial<C> {
+    fn project_coefficients<F: FromWithConfig<C> + 'static>(
+        &self,
+        projecting_element: &F,
+    ) -> DensePolynomial<F, DEGREE_PLUS_ONE>;
 }

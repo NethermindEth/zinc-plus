@@ -1,5 +1,5 @@
 use super::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError};
-use crate::Polynomial;
+use crate::{CoefficientProjectable, Polynomial, univariate::dense::DensePolynomial};
 use crypto_primitives::crypto_bigint_int::Int;
 use zinc_transcript::traits::ConstTranscribable;
 
@@ -42,4 +42,16 @@ impl<const LIMBS: usize> EvaluatablePolynomial<Self, Self> for Int<LIMBS> {
 
 impl<const LIMBS: usize> ConstCoeffBitWidth for Int<LIMBS> {
     const COEFF_BIT_WIDTH: usize = Self::NUM_BITS;
+}
+
+impl<const LIMBS: usize> CoefficientProjectable<Int<LIMBS>, 1> for Int<LIMBS> {
+    fn project_coefficients<F: crypto_primitives::FromWithConfig<Int<LIMBS>> + 'static>(
+        &self,
+        projecting_element: &F,
+    ) -> DensePolynomial<F, 1> {
+        DensePolynomial::new_with_zero(
+            [F::from_with_cfg(*self, projecting_element.cfg())],
+            F::zero_with_cfg(projecting_element.cfg()),
+        )
+    }
 }

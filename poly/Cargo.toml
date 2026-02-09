@@ -12,6 +12,7 @@ bench = false
 [dependencies]
 crypto-primitives = { workspace = true }
 zinc-transcript = { workspace = true }
+zinc-uair = { workspace = true }
 zinc-utils = { workspace = true }
 
 itertools = { workspace = true }

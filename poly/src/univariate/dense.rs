@@ -1,7 +1,8 @@
 use crate::{
-    ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
+    CoefficientProjectable, ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
     univariate::{binary_ref::BinaryRefPoly, binary_u64::BinaryU64Poly},
 };
+
 use core::slice;
 use crypto_primitives::{
     FixedSemiring, FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring, boolean::Boolean,
@@ -128,6 +129,19 @@ impl<R: Semiring + Zero, const DEGREE_PLUS_ONE: usize> Zero
 
     fn is_zero(&self) -> bool {
         self.coeffs.iter().all(|c| c.is_zero())
+    }
+}
+
+impl<F: PrimeField, const DEGREE_PLUS_ONE: usize> DensePolynomial<F, DEGREE_PLUS_ONE> {
+    pub fn zero_with_cfg(cfg: &F::Config) -> Self {
+        let zero = F::zero_with_cfg(cfg);
+        Self {
+            coeffs: array::from_fn(|_| zero.clone()),
+        }
+    }
+
+    pub fn one_with_cfg(cfg: &F::Config) -> Self {
+        Self::new_with_zero([F::one_with_cfg(cfg)], F::zero_with_cfg(cfg))
     }
 }
 
@@ -575,6 +589,21 @@ where
             poly2
                 .evaluate_at_point(&sampled_value)
                 .expect("Failed to evaluate polynomial at point")
+        }
+    }
+}
+
+impl<R: Semiring, const DEGREE_PLUS_ONE: usize> CoefficientProjectable<R, DEGREE_PLUS_ONE>
+    for DensePolynomial<R, DEGREE_PLUS_ONE>
+{
+    fn project_coefficients<F: FromWithConfig<R> + 'static>(
+        &self,
+        projecting_element: &F,
+    ) -> DensePolynomial<F, DEGREE_PLUS_ONE> {
+        DensePolynomial {
+            coeffs: array::from_fn(|i| {
+                F::from_with_cfg(self.coeffs[i].clone(), projecting_element.cfg())
+            }),
         }
     }
 }
