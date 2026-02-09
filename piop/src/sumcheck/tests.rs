@@ -53,7 +53,7 @@ fn full_sumcheck_protocol_works_correctly() {
 
         let mut transcript = KeccakTranscript::default();
         let res =
-            MLSumcheck::verify_as_subprotocol(&mut transcript, num_vars, poly_degree, &proof, ());
+            MLSumcheck::verify_as_subprotocol(&mut transcript, num_vars, poly_degree, &proof, &());
         assert!(res.is_ok())
     }
 }
@@ -97,7 +97,7 @@ fn subclaim_differs_with_incorrect_claimed_sum() {
         num_vars,
         poly_degree,
         &proof,
-        (),
+        &(),
     )
     .unwrap();
 
@@ -109,7 +109,7 @@ fn subclaim_differs_with_incorrect_claimed_sum() {
         num_vars,
         poly_degree,
         &proof,
-        (),
+        &(),
     )
     .unwrap();
 
@@ -143,7 +143,7 @@ fn subclaim_changes_when_prover_message_is_tampered() {
         num_vars,
         poly_degree,
         &proof,
-        (),
+        &(),
     )
     .unwrap();
 
@@ -157,7 +157,7 @@ fn subclaim_changes_when_prover_message_is_tampered() {
         num_vars,
         poly_degree,
         &tampered_proof,
-        (),
+        &(),
     )
     .unwrap();
 
@@ -193,7 +193,7 @@ fn verifier_rejects_proof_with_wrong_degree() {
         num_vars,
         incorrect_degree,
         &proof,
-        (),
+        &(),
     );
 
     assert!(res.is_err());
@@ -313,7 +313,7 @@ fn sumcheck_with_zero_polynomial() {
         num_vars,
         poly_degree,
         &proof,
-        (),
+        &(),
     );
 
     assert!(res.is_ok());
@@ -360,7 +360,7 @@ fn sumcheck_with_constant_polynomial() {
         num_vars,
         poly_degree,
         &proof,
-        (),
+        &(),
     );
 
     assert!(res.is_ok());
@@ -392,7 +392,7 @@ fn sumcheck_with_single_variable() {
         num_vars,
         poly_degree,
         &proof,
-        (),
+        &(),
     );
 
     assert!(res.is_ok());
@@ -419,9 +419,14 @@ fn subclaim_changes_if_transcript_is_tampered() {
     );
 
     let mut clean_transcript = KeccakTranscript::default();
-    let clean_res =
-        MLSumcheck::verify_as_subprotocol(&mut clean_transcript, num_vars, poly_degree, &proof, ())
-            .unwrap();
+    let clean_res = MLSumcheck::verify_as_subprotocol(
+        &mut clean_transcript,
+        num_vars,
+        poly_degree,
+        &proof,
+        &(),
+    )
+    .unwrap();
 
     let mut tampered_transcript = KeccakTranscript::default();
     tampered_transcript.absorb(b"tampering the transcript");
@@ -430,7 +435,7 @@ fn subclaim_changes_if_transcript_is_tampered() {
         num_vars,
         poly_degree,
         &proof,
-        (),
+        &(),
     )
     .unwrap();
 
@@ -492,7 +497,7 @@ fn verifier_errors_on_incomplete_proof() {
         num_vars,
         poly_degree,
         &incomplete_proof,
-        (),
+        &(),
     );
 
     assert!(
@@ -526,7 +531,7 @@ fn prover_handles_empty_mle_list() {
         num_vars,
         poly_degree,
         &proof,
-        (),
+        &(),
     );
 
     assert!(res.is_ok());
@@ -546,7 +551,7 @@ fn verifier_errors_on_mismatched_nvars() {
         nvars_verifier, // verifier expects more rounds than the proof contains
         poly_degree,
         &proof,
-        (),
+        &(),
     );
 
     assert!(
@@ -579,9 +584,14 @@ fn verifier_produces_correct_subclaim() {
     );
 
     let mut verifier_transcript = KeccakTranscript::default();
-    let subclaim =
-        MLSumcheck::verify_as_subprotocol(&mut verifier_transcript, nvars, poly_degree, &proof, ())
-            .unwrap();
+    let subclaim = MLSumcheck::verify_as_subprotocol(
+        &mut verifier_transcript,
+        nvars,
+        poly_degree,
+        &proof,
+        &(),
+    )
+    .unwrap();
 
     let mle_evals_at_point: Vec<F> = original_mles
         .iter()
@@ -610,5 +620,5 @@ fn zero_variable_case_returns_correct_subclaim() {
 
     let mut transcript = KeccakTranscript::default();
     let _subclaim =
-        MLSumcheck::verify_as_subprotocol(&mut transcript, num_vars, degree, &proof, ());
+        MLSumcheck::verify_as_subprotocol(&mut transcript, num_vars, degree, &proof, &());
 }

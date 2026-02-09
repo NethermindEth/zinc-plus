@@ -123,7 +123,7 @@ impl<F: FromPrimitiveWithConfig, R: Semiring + ProjectableToField<F>> RFSumcheck
         let _ = transcript.get_field_challenge::<F>(&field_cfg);
 
         let subclaim =
-            MLSumcheck::verify_as_subprotocol(transcript, num_vars, degree, &proof.0, field_cfg)?;
+            MLSumcheck::verify_as_subprotocol(transcript, num_vars, degree, &proof.0, &field_cfg)?;
 
         Ok(subclaim)
     }

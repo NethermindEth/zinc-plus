@@ -1,4 +1,4 @@
-use crypto_primitives::PrimeField;
+use crypto_primitives::{PrimeField, Semiring};
 use num_traits::Zero;
 use thiserror::Error;
 use zinc_utils::cfg_iter_mut;
@@ -195,4 +195,22 @@ where
     }
 
     Ok(())
+}
+
+/// Evaluate eq polynomial.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn eq_eval<R: Semiring>(x: &[R], y: &[R], one: R) -> Result<R, ArithErrors> {
+    if x.len() != y.len() {
+        return Err(ArithErrors::InvalidParameters(
+            "x and y have different length".to_string(),
+        ));
+    }
+
+    let mut res = one.clone();
+    for (xi, yi) in x.iter().zip(y.iter()) {
+        let xi_yi = xi.clone() * yi;
+        res *= xi_yi.clone() + xi_yi - xi - yi + one.clone();
+    }
+
+    Ok(res)
 }
