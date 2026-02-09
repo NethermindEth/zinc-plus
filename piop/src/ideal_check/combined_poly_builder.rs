@@ -1,6 +1,4 @@
-use std::mem::MaybeUninit;
-
-use crypto_primitives::{DenseRowMatrix, Field, Matrix, PrimeField};
+use crypto_primitives::{DenseRowMatrix, Field, PrimeField};
 use itertools::{Itertools, max};
 use zinc_poly::{
     CoefficientProjectable,
@@ -22,19 +20,15 @@ pub fn compute_combined_polynomials<
     U,
     const DEGREE_PLUS_ONE: usize,
 >(
-    trace: &[DenseMultilinearExtension<IcTypes::Witness>],
+    trace_matrix: &DenseRowMatrix<
+        DynamicPolynomialF<<IcTypes as IdealCheckTypes<DEGREE_PLUS_ONE>>::F>,
+    >,
     projecting_element: &IcTypes::F,
     num_constraints: usize,
 ) -> Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>>
 where
     U: Uair<IcTypes::Witness>,
 {
-    let num_rows = trace[0].len();
-    let num_cols = trace.len();
-
-    let trace_matrix =
-        project_trace_matrix::<IcTypes, _>(num_rows, num_cols, trace, projecting_element);
-
     let field_zero = IcTypes::F::zero_with_cfg(projecting_element.cfg());
 
     let mut max_degrees_and_combined_poly_rows: Vec<(usize, Vec<DynamicPolynomialF<IcTypes::F>>)> =
@@ -77,28 +71,6 @@ where
         &max_degrees_and_combined_poly_rows,
         &field_zero,
     )
-}
-
-/// Apply projection to coefficients of coefficients of the input trace.
-fn project_trace_matrix<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>(
-    num_rows: usize,
-    num_cols: usize,
-    trace: &[DenseMultilinearExtension<IcTypes::Witness>],
-    projecting_element: &IcTypes::F,
-) -> DenseRowMatrix<DynamicPolynomialF<<IcTypes as IdealCheckTypes<DEGREE_PLUS_ONE>>::F>> {
-    let mut matr = DenseRowMatrix::uninit(num_rows, num_cols);
-
-    matr.cells_mut().enumerate().for_each(|(row_idx, row)| {
-        row.for_each(|(col_idx, cell)| {
-            *cell = MaybeUninit::new(
-                trace[col_idx][row_idx]
-                    .project_coefficients(projecting_element)
-                    .into(),
-            );
-        });
-    });
-
-    unsafe { matr.init() }
 }
 
 /// Apply combination polynomial to each row
