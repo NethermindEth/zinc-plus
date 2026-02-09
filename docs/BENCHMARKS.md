@@ -552,6 +552,36 @@ Results from the Zip baseline benchmarks using integer evaluations (`i32` → `I
 | Evaluate | ~14.0 ms | ~14.2 ms |
 | Verify | ~46.4 ms | ~45.0 ms |
 
+### Automated Benchmark Script: Depth-1 F12289 (10 & 55 Polys)
+
+The script `scripts/run_depth2_benchmarks.py` runs depth-1 IPRS benchmarks over F12289
+for 10 and 55 polynomials at both rates 1/2 and 1/4, then collects the Criterion results
+and generates a LaTeX table.
+
+```bash
+# Run all four benchmark commands and print the LaTeX table
+python3 scripts/run_depth2_benchmarks.py
+
+# Skip running benchmarks; only collect existing Criterion results
+python3 scripts/run_depth2_benchmarks.py --dry-run
+
+# Save the LaTeX table to a file
+python3 scripts/run_depth2_benchmarks.py --output table.tex
+```
+
+The script executes these four commands in sequence:
+
+```bash
+cargo bench --bench zip_plus_commit_10_f12289 --features "asm parallel simd unchecked-butterfly" -- "IPRS-1-1/4-F12289"
+cargo bench --bench zip_plus_commit_10_f12289 --features "asm parallel simd unchecked-butterfly" -- "IPRS-1-1/2-F12289"
+cargo bench --bench zip_plus_commit_55_f12289 --features "asm parallel simd unchecked-butterfly" -- "IPRS-1-1/2-F12289"
+cargo bench --bench zip_plus_commit_55_f12289 --features "asm parallel simd unchecked-butterfly" -- "IPRS-1-1/4-F12289"
+```
+
+It then reads median timings from Criterion's JSON output and produces a table with
+columns for Commit, Test, Evaluate, and Verify across `num_vars` 6–10, grouped by
+polynomial count and rate.
+
 ### `profile_encode` — Profiling Example
 
 Not a Criterion benchmark, but a standalone binary for profiling `encode_rows`
