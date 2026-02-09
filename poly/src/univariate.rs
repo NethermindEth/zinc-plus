@@ -53,4 +53,3 @@ pub mod binary {
 
 // Re-export SIMD-accelerated functions
 pub use dense::add_assign_simd;
- mul_scalar_and_add_to_simd, mul_scalar_simd};
