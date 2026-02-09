@@ -22,6 +22,28 @@ macro_rules! safe_cast {
         })
     };
 }
+
+/// Perform a bounds-checked read from the stream for a given range, and
+/// execute an action on the resulting slice. After the action is executed,
+/// update stream's position to the end of the range.
+macro_rules! with_stream_slice {
+    ($stream:expr, $range:expr, $action:expr) => {{
+        let stream_vec = $stream.get_ref();
+        if $range.end > stream_vec.len() {
+            return Err(ZipError::Transcript(
+                ErrorKind::UnexpectedEof,
+                format!(
+                    "Attempted to read beyond the end of the stream: range {:?}, but stream length is {}",
+                    $range, stream_vec.len()
+                ),
+            ));
+        }
+        let res = $action(&stream_vec[$range])?;
+        $stream.set_position(safe_cast!($range.end, usize, u64)?);
+        res
+    }};
+}
+
 /// A transcript for Polynomial Commitment Scheme (PCS) operations.
 /// Manages both Fiat-Shamir transformations and serialization/deserialization
 /// of proof data.
@@ -188,9 +210,10 @@ impl PcsTranscript {
         let data_len = T::NUM_BYTES;
         let next_pos = add!(prev_pos, data_len);
 
-        let res = T::read_transcription_bytes(&self.stream.get_ref()[prev_pos..next_pos]);
+        let res = with_stream_slice!(self.stream, prev_pos..next_pos, |slice: &[u8]| {
+            Ok::<_, ZipError>(T::read_transcription_bytes(slice))
+        });
 
-        self.stream.set_position(safe_cast!(next_pos, usize, u64)?);
         Ok(res)
     }
 
@@ -199,12 +222,15 @@ impl PcsTranscript {
         let data_len = mul!(n, T::NUM_BYTES);
         let next_pos = add!(prev_pos, data_len);
 
-        let res = self.stream.get_ref()[prev_pos..next_pos]
-            .chunks(T::NUM_BYTES)
-            .map(T::read_transcription_bytes)
-            .collect_vec();
+        let res = with_stream_slice!(self.stream, prev_pos..next_pos, |slice: &[u8]| {
+            Ok::<_, ZipError>(
+                slice
+                    .chunks(T::NUM_BYTES)
+                    .map(T::read_transcription_bytes)
+                    .collect_vec(),
+            )
+        });
 
-        self.stream.set_position(safe_cast!(next_pos, usize, u64)?);
         Ok(res)
     }
 
