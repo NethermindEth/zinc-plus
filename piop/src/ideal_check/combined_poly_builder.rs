@@ -16,7 +16,6 @@ use crate::ideal_check::structs::IdealCheckTypes;
 /// obtains the combined polynomials' MLE coefficients.
 /// Since each coefficient is also a univariate polynomial
 /// we split the resulting MLE into coefficient MLEs.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn compute_combined_polynomials<
     IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>,
     U,
@@ -177,7 +176,6 @@ impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
     type Expr = DynamicPolynomialF<F>;
     type Ideal = ImpossibleIdeal;
 
-    #[allow(clippy::arithmetic_side_effects)]
     fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {
         self.combined_evaluations.push(expr);
     }
