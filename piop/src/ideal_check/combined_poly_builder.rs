@@ -1,20 +1,21 @@
 use crypto_primitives::{DenseRowMatrix, Field, PrimeField};
 use itertools::{Itertools, max};
+use std::{collections::HashMap, mem::MaybeUninit};
+
 use zinc_poly::{
     CoefficientProjectable,
     mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero},
     univariate::dynamic::over_field::DynamicPolynomialF,
 };
-use zinc_uair::{ConstraintBuilder, Uair, ideal::DummyIdeal};
+use zinc_uair::{ConstraintBuilder, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::{cfg_into_iter, from_ref::FromRef};
 
-use crate::ideal_check::structs::IdealCheckTypes;
+use crate::ideal_check::{structs::IdealCheckTypes, utils::project_trace_matrix};
 
 /// Given a UAIR `U` and a trace `trace` this function
 /// obtains the combined polynomials' MLE coefficients.
 /// Since each coefficient is also a univariate polynomial
 /// we split the resulting MLE into coefficient MLEs.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn compute_combined_polynomials<
     IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>,
     U,
@@ -23,13 +24,14 @@ pub fn compute_combined_polynomials<
     trace_matrix: &[DenseMultilinearExtension<
         DynamicPolynomialF<<IcTypes as IdealCheckTypes<DEGREE_PLUS_ONE>>::F>,
     >],
-    projecting_element: &IcTypes::F,
+    projected_scalars: &HashMap<IcTypes::Witness, DynamicPolynomialF<IcTypes::F>>,
     num_constraints: usize,
+    field_cfg: &<IcTypes::F as PrimeField>::Config,
 ) -> Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>>
 where
     U: Uair<IcTypes::Witness>,
 {
-    let field_zero = IcTypes::F::zero_with_cfg(projecting_element.cfg());
+    let field_zero = IcTypes::F::zero_with_cfg(field_cfg);
 
     let num_rows = trace_matrix[0].len();
 
@@ -50,15 +52,16 @@ where
                     &up,
                     &down,
                     num_constraints,
-                    projecting_element,
+                    projected_scalars,
                 )
             })
             .collect();
 
-    let max_degree = *max(max_degrees_and_combined_poly_rows
+    let max_degree = *max_degrees_and_combined_poly_rows
         .iter()
-        .map(|(max_degree, _)| max_degree))
-    .expect("We assume the number of constraints is not zero so this iterator is not empty");
+        .map(|(max_degree, _)| max_degree)
+        .max()
+        .expect("We assume the number of constraints is not zero so this iterator is not empty");
 
     // For the sake of padding we duplicate
     // the last combined value
@@ -87,7 +90,7 @@ fn combine_rows_and_get_max_degree<IcTypes, U, const DEGREE_PLUS_ONE: usize>(
     up: &[DynamicPolynomialF<IcTypes::F>],
     down: &[DynamicPolynomialF<IcTypes::F>],
     num_constraints: usize,
-    projecting_element: &IcTypes::F,
+    projected_scalars: &HashMap<IcTypes::Witness, DynamicPolynomialF<IcTypes::F>>,
 ) -> (usize, Vec<DynamicPolynomialF<IcTypes::F>>)
 where
     IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>,
@@ -95,23 +98,31 @@ where
 {
     let mut constraint_builder = CombinedPolyRowBuilder::new(num_constraints);
 
+    let project = |x: &IcTypes::Witness| {
+        projected_scalars
+            .get(x)
+            .cloned()
+            .expect("all scalars should have been projected at this point")
+    };
+
     U::constrain_general(
         &mut constraint_builder,
         up,
         down,
-        |x| x.project_coefficients(projecting_element).into(),
-        |x, y| Some(DynamicPolynomialF::from(y.project_coefficients(projecting_element)) * x),
-        DummyIdeal::from_ref,
+        project,
+        |x, y| Some(project(y) * x),
+        ImpossibleIdeal::from_ref,
     );
 
     let mut combined_evaluations = constraint_builder.combined_evaluations;
 
     combined_evaluations.iter_mut().for_each(|eval| eval.trim());
 
-    let max_degree = max(combined_evaluations
+    let max_degree = combined_evaluations
         .iter()
-        .map(|eval| eval.degree().unwrap_or(0)))
-    .expect("We assume the number of constraints is not zero so this iterator is not empty");
+        .map(|eval| eval.degree().unwrap_or(0))
+        .max()
+        .expect("We assume the number of constraints is not zero so this iterator is not empty");
 
     (max_degree, combined_evaluations)
 }
@@ -153,9 +164,8 @@ pub struct CombinedPolyRowBuilder<F: PrimeField> {
 
 impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
     type Expr = DynamicPolynomialF<F>;
-    type Ideal = DummyIdeal;
+    type Ideal = ImpossibleIdeal;
 
-    #[allow(clippy::arithmetic_side_effects)]
     fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {
         self.combined_evaluations.push(expr);
     }

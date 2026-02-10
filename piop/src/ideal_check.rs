@@ -10,19 +10,20 @@ use derive_more::From;
 use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::marker::PhantomData;
+use std::{collections::HashMap, marker::PhantomData};
 use structs::*;
 use thiserror::Error;
 use zinc_poly::{
-    EvaluationError,
+    CoefficientProjectable, EvaluationError,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
     univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     Uair,
+    collect_scalars::collect_scalars,
     ideal::{Ideal, IdealCheck},
-    ideal_collector::{CollectedIdeal, collect_ideals},
+    ideal_collector::{IdealOrZero, collect_ideals},
 };
 use zinc_utils::cfg_iter;
 
@@ -76,14 +77,33 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
     {
         let projecting_element = transcript.get_field_challenge(field_cfg);
 
+        // Project UAIR scalars prior to doing anything.
+        let uair_scalars = collect_scalars::<IcTypes::Witness, U>();
+
+        // TODO(Ilia): if there's a lot of scalars
+        //             we should do this in parallel probably.
+        let projected_scalars: HashMap<IcTypes::Witness, DynamicPolynomialF<IcTypes::F>> =
+            HashMap::from_iter(uair_scalars.into_iter().map(|scalar| {
+                (scalar.clone(), {
+                    let mut dynamic_poly =
+                        DynamicPolynomialF::from(scalar.project_coefficients(&projecting_element));
+
+                    dynamic_poly.trim();
+
+                    dynamic_poly
+                })
+            }));
+
         let trace_matrix =
             project_trace_matrix::<IcTypes, DEGREE_PLUS_ONE>(trace, &projecting_element);
 
         let combined_mles = combined_poly_builder::compute_combined_polynomials::<IcTypes, U, _>(
             &trace_matrix,
-            &projecting_element,
+            &projected_scalars,
             num_constraints,
+            field_cfg,
         );
+
         let mut transcription_buf: Vec<u8> = vec![0; <IcTypes::F as Field>::Inner::NUM_BYTES];
 
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
@@ -113,6 +133,7 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
                 evaluation_point,
                 combined_mles,
                 trace_matrix,
+                projected_scalars,
             },
         ))
     }
@@ -158,7 +179,7 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
         U: Uair<IcTypes::Witness>,
         <IcTypes::F as Field>::Inner: ConstTranscribable,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<IcTypes::F>>,
-        IdealOverFFromRef: Fn(&CollectedIdeal<U::Ideal>) -> IdealOverF,
+        IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
         // Sample a field element to maintain FS symmetry with
         // the prover.
@@ -176,7 +197,7 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
 
         let ideal_collector = collect_ideals::<_, U>(num_constraints);
 
-        batched_ideal_check::<_, _>(
+        batched_ideal_check(
             &ideal_collector
                 .ideals
                 .iter()
@@ -277,7 +298,7 @@ mod tests {
     ) where
         U: GenerateWitness<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
-        IdealOverFFromRef: Fn(&CollectedIdeal<U::Ideal>) -> IdealOverF,
+        IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
         let transcript = KeccakTranscript::new();
 
@@ -316,7 +337,7 @@ mod tests {
         );
         test_successful_verification_generic::<TestUairSimpleMultiplication, _, _, 32>(
             num_vars,
-            |_ideal_over_ring| CollectedIdeal::zero(),
+            |_ideal_over_ring| IdealOrZero::zero(),
         );
     }
 }

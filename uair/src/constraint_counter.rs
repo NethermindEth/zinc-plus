@@ -1,4 +1,4 @@
-use crate::{ConstraintBuilder, Uair, dummy_semiring::DummySemiring, ideal::DummyIdeal};
+use crate::{ConstraintBuilder, Uair, dummy_semiring::DummySemiring, ideal::ImpossibleIdeal};
 use crypto_primitives::Semiring;
 
 /// Get the number of polynomial constraints in a `Uair`.
@@ -27,7 +27,7 @@ impl ConstraintCounter {
 
 impl ConstraintBuilder for ConstraintCounter {
     type Expr = DummySemiring;
-    type Ideal = DummyIdeal;
+    type Ideal = ImpossibleIdeal;
 
     #[allow(clippy::arithmetic_side_effects)]
     #[inline(always)]

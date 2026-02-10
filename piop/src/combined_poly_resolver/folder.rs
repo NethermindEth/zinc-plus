@@ -1,6 +1,6 @@
 use crypto_primitives::PrimeField;
 use zinc_uair::ConstraintBuilder;
-use zinc_uair::ideal::DummyIdeal;
+use zinc_uair::ideal::ImpossibleIdeal;
 
 pub struct ConstraintFolder<'a, F: PrimeField> {
     challenge_powers: &'a [F],
@@ -27,7 +27,7 @@ impl<'a, F: PrimeField> ConstraintFolder<'a, F> {
 impl<'a, F: PrimeField> ConstraintBuilder for ConstraintFolder<'a, F> {
     type Expr = F;
 
-    type Ideal = DummyIdeal;
+    type Ideal = ImpossibleIdeal;
 
     #[inline(always)]
     fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {

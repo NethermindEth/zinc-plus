@@ -11,7 +11,7 @@ use zinc_poly::mle::MultilinearExtensionWithConfig;
 use zinc_poly::mle::dense::CollectDenseMleWithZero;
 use zinc_poly::utils::{ArithErrors, build_eq_x_r_inner, eq_eval};
 use zinc_poly::{CoefficientProjectable, EvaluatablePolynomial, EvaluationError};
-use zinc_uair::ideal::DummyIdeal;
+use zinc_uair::ideal::ImpossibleIdeal;
 use zinc_utils::{cfg_iter, field, powers};
 
 use crypto_primitives::{
@@ -128,7 +128,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig> CombinedPolyResolver<F>
                     &mle_values[num_cols + 2..],
                     |x| F::one_with_cfg(field_cfg),
                     |x, y| Some(F::one_with_cfg(field_cfg)),
-                    |x| DummyIdeal,
+                    |x| ImpossibleIdeal,
                 );
 
                 folder.folded_constraints * selector * eq_r
@@ -232,7 +232,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig> CombinedPolyResolver<F>
             &proof.down_evals,
             |x| F::zero_with_cfg(field_cfg),
             |x, y| Some(F::zero_with_cfg(field_cfg)),
-            |_| DummyIdeal,
+            |_| ImpossibleIdeal,
         );
 
         let expected_claim_value = eq_r_value * selector_value * folder.folded_constraints;

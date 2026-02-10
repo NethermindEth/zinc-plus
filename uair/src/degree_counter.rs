@@ -6,7 +6,7 @@ use std::{
 use crypto_primitives::Semiring;
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub};
 
-use crate::{ConstraintBuilder, Uair, ideal::DummyIdeal};
+use crate::{ConstraintBuilder, Uair, ideal::ImpossibleIdeal};
 
 pub fn count_max_degree<R, U>() -> usize
 where
@@ -23,7 +23,7 @@ where
         &up_and_down,
         |_| DegreeCountingSemiring::scalar(),
         |x, _| Some(*x),
-        |_| DummyIdeal,
+        |_| ImpossibleIdeal,
     );
 
     dc.0
@@ -40,7 +40,7 @@ impl DegreeCounter {
 impl ConstraintBuilder for DegreeCounter {
     type Expr = DegreeCountingSemiring;
 
-    type Ideal = DummyIdeal;
+    type Ideal = ImpossibleIdeal;
 
     fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {
         self.0 = std::cmp::max(self.0, expr.0);
