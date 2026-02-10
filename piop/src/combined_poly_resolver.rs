@@ -12,7 +12,7 @@ use zinc_poly::mle::dense::CollectDenseMleWithZero;
 use zinc_poly::utils::{ArithErrors, build_eq_x_r_inner, eq_eval};
 use zinc_poly::{CoefficientProjectable, EvaluatablePolynomial, EvaluationError};
 use zinc_uair::ideal::ImpossibleIdeal;
-use zinc_utils::{cfg_iter, field, powers};
+use zinc_utils::{cfg_iter, field, from_ref::FromRef, powers};
 
 use crypto_primitives::{
     DenseRowMatrix, FromPrimitiveWithConfig, FromWithConfig, PrimeField, Semiring,
@@ -26,6 +26,7 @@ use zinc_utils::projectable_to_field::ProjectableToField;
 use zinc_utils::{cfg_into_iter, inner_transparent_field::InnerTransparentField};
 
 use crate::combined_poly_resolver::folder::ConstraintFolder;
+use crate::ideal_check;
 use crate::sumcheck::{self, MLSumcheck, SumCheckError};
 
 pub use structs::*;
@@ -163,8 +164,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig> CombinedPolyResolver<F>
         num_constraints: usize,
         num_vars: usize,
         max_degree: usize,
-        evaluation_point: &[F],
-        claimed_values: &[DynamicPolynomialF<F>],
+        ic_check_subclaim: &ideal_check::VerifierSubClaim<F>,
         field_cfg: &F::Config,
     ) -> Result<(), CombinedPolyResolverError<F>>
     where
@@ -182,7 +182,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig> CombinedPolyResolver<F>
         let folding_challenge_powers: Vec<F> =
             powers(folding_challenge, one.clone(), num_constraints);
 
-        let expected_sum = claimed_values
+        let expected_sum = ic_check_subclaim
+            .values
             .iter()
             .zip(&folding_challenge_powers)
             .map(
@@ -221,7 +222,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig> CombinedPolyResolver<F>
 
         let sumcheck_point = subclaim.point;
 
-        let eq_r_value = eq_eval(&sumcheck_point, evaluation_point, one.clone())?;
+        let eq_r_value = eq_eval(
+            &sumcheck_point,
+            &ic_check_subclaim.evaluation_point,
+            one.clone(),
+        )?;
         let selector_value = eq_eval(&sumcheck_point, &vec![one.clone(); num_vars], one)?;
 
         let mut folder = ConstraintFolder::new(&folding_challenge_powers, &zero);

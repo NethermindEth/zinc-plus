@@ -11,7 +11,6 @@ use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::{collections::HashMap, marker::PhantomData};
-use structs::*;
 use thiserror::Error;
 use zinc_poly::{
     CoefficientProjectable, EvaluationError,
@@ -28,6 +27,8 @@ use zinc_uair::{
 use zinc_utils::cfg_iter;
 
 use crate::ideal_check::utils::project_trace_matrix;
+
+pub use structs::*;
 
 pub type Result<T, R, I> = std::result::Result<T, IdealCheckError<R, I>>;
 
@@ -170,11 +171,7 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
         field_cfg: &<IcTypes::F as PrimeField>::Config,
-    ) -> Result<
-        VerifierSubClaim<IcTypes, DEGREE_PLUS_ONE>,
-        DynamicPolynomialF<IcTypes::F>,
-        IdealOverF,
-    >
+    ) -> Result<VerifierSubClaim<IcTypes::F>, DynamicPolynomialF<IcTypes::F>, IdealOverF>
     where
         U: Uair<IcTypes::Witness>,
         <IcTypes::F as Field>::Inner: ConstTranscribable,
