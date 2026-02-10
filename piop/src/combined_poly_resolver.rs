@@ -2,13 +2,15 @@ mod folder;
 mod structs;
 mod utils;
 
+use itertools::Itertools;
 use num_traits::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::{collections::HashMap, marker::PhantomData};
+use std::{collections::HashMap, marker::PhantomData, slice};
 use thiserror::Error;
 use zinc_poly::{
     EvaluatablePolynomial, EvaluationError,
+    mle::MultilinearExtensionWithConfig,
     utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
 };
 use zinc_uair::ideal::ImpossibleIdeal;
@@ -25,7 +27,7 @@ use zinc_utils::inner_transparent_field::InnerTransparentField;
 use crate::{
     combined_poly_resolver::{folder::ConstraintFolder, utils::project_scalars_to_field},
     ideal_check,
-    sumcheck::{self, MLSumcheck, SumCheckError},
+    sumcheck::{MLSumcheck, SumCheckError},
 };
 
 pub use structs::*;
@@ -79,8 +81,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         let eq_r = build_eq_x_r_inner(evaluation_point, field_cfg)?;
 
-        println!("eq_r num vars {:?}", eq_r.num_vars);
-
         let last_row_selector =
             build_eq_x_r_inner(&vec![F::one_with_cfg(field_cfg); num_vars], field_cfg)?;
 
@@ -103,10 +103,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
             mles
         };
-
-        for mle in &mles {
-            println!("num_vars {:?}", mle.num_vars);
-        }
 
         let (sumcheck_proof, sumcheck_prover_state) = MLSumcheck::prove_as_subprotocol(
             transcript,
@@ -142,12 +138,23 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             field_cfg,
         );
 
-        println!("prover eq value: {:?}", &sumcheck_prover_state.mles[0]);
+        // Sumcheck prover stops evaluating MLEs
+        // at the second to last challenge
+        // leaving all MLEs in num_vars=1
+        // state. We need to evaluate them up
+        // and send to the verifier.
+
+        let last_sumcheck_challenge = sumcheck_prover_state
+            .randomness
+            .last()
+            .expect("sumcheck could not have had 0 rounds");
 
         let evals: Vec<F> = sumcheck_prover_state.mles[2..]
             .iter()
-            .map(|mle| F::new_unchecked_with_cfg(mle.evaluations[0].clone(), field_cfg))
-            .collect();
+            .map(|mle| {
+                mle.evaluate_with_config(slice::from_ref(last_sumcheck_challenge), field_cfg)
+            })
+            .try_collect()?;
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
         transcript.absorb_random_field_slice(&evals, &mut transcription_buf);
@@ -241,8 +248,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         )?;
         let selector_value = eq_eval(&sumcheck_point, &vec![one.clone(); num_vars], one.clone())?;
 
-        println!("verifier eq value: {:?}", eq_r_value);
-
         let mut folder = ConstraintFolder::new(&folding_challenge_powers, &zero);
 
         let project = |scalar: &R| {
@@ -320,8 +325,8 @@ impl<F: PrimeField> From<SumCheckError<F>> for CombinedPolyResolverError<F> {
 mod tests {
     use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
     use rand::rng;
-    use zinc_poly::univariate::dense::DensePolynomial;
-    use zinc_test_uair::{GenerateWitness, TestUairSimpleMultiplication};
+    use zinc_poly::univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal};
+    use zinc_test_uair::{GenerateWitness, TestAirNoMultiplication, TestUairSimpleMultiplication};
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::{
         constraint_counter::count_constraints,
@@ -388,19 +393,18 @@ mod tests {
         )
         .expect("CombinedPolyResolver prover failed");
 
-        let result = CombinedPolyResolver::verify_as_subprotocol::<_, U>(
-            &mut verifier_transcript,
-            proof,
-            num_constraints,
-            num_vars,
-            max_degree,
-            ic_check_subclaim,
-            &test_config(),
+        assert!(
+            CombinedPolyResolver::verify_as_subprotocol::<_, U>(
+                &mut verifier_transcript,
+                proof,
+                num_constraints,
+                num_vars,
+                max_degree,
+                ic_check_subclaim,
+                &test_config(),
+            )
+            .is_ok()
         );
-
-        println!("{:?}", result);
-
-        assert!(false)
     }
 
     #[test]
@@ -409,10 +413,10 @@ mod tests {
 
         let num_vars = 2;
 
-        // test_successful_verification_generic::<TestAirNoMultiplication, _, _, 32>(
-        //     num_vars,
-        //     |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
-        // );
+        test_successful_verification_generic::<TestAirNoMultiplication, _, _, 32>(
+            num_vars,
+            |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
+        );
         test_successful_verification_generic::<TestUairSimpleMultiplication, _, _, 32>(
             num_vars,
             |_ideal_over_ring| IdealOrZero::zero(),
