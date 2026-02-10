@@ -174,8 +174,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig> CombinedPolyResolver<F>
     {
         let projecting_element: F = transcript.get_field_challenge(field_cfg);
 
-        let num_cols = U::num_cols();
-
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
 
