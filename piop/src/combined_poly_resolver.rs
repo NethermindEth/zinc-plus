@@ -1,35 +1,31 @@
 mod folder;
 mod structs;
+mod utils;
 
-use derive_more::{Display, From};
+use itertools::Itertools;
 use num_traits::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::marker::PhantomData;
+use std::{collections::HashMap, marker::PhantomData};
 use thiserror::Error;
 use zinc_poly::{
-    CoefficientProjectable, EvaluatablePolynomial, EvaluationError,
-    mle::{MultilinearExtensionWithConfig, dense::CollectDenseMleWithZero},
+    EvaluatablePolynomial, EvaluationError,
+    mle::MultilinearExtensionWithConfig,
     utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
 };
 use zinc_uair::ideal::ImpossibleIdeal;
-use zinc_utils::{cfg_iter, field, from_ref::FromRef, powers};
+use zinc_utils::{cfg_iter, from_ref::FromRef, powers};
 
-use crypto_primitives::{
-    DenseRowMatrix, FromPrimitiveWithConfig, FromWithConfig, PrimeField, Semiring,
-};
+use crypto_primitives::{FromPrimitiveWithConfig, PrimeField, Semiring};
 use zinc_poly::{
     mle::DenseMultilinearExtension, univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::Uair;
-use zinc_utils::{
-    cfg_into_iter, inner_transparent_field::InnerTransparentField,
-    projectable_to_field::ProjectableToField,
-};
+use zinc_utils::inner_transparent_field::InnerTransparentField;
 
 use crate::{
-    combined_poly_resolver::folder::ConstraintFolder,
+    combined_poly_resolver::{folder::ConstraintFolder, utils::project_scalars_to_field},
     ideal_check,
     sumcheck::{self, MLSumcheck, SumCheckError},
 };
@@ -38,24 +34,27 @@ pub use structs::*;
 
 pub struct CombinedPolyResolver<F: InnerTransparentField>(PhantomData<F>);
 
-impl<F: InnerTransparentField + FromPrimitiveWithConfig> CombinedPolyResolver<F> {
+impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedPolyResolver<F> {
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn prove_as_subprotocol<Rcoeff, R, U, const DEGREE_PLUS_ONE: usize>(
+    pub fn prove_as_subprotocol<R, U>(
         transcript: &mut impl Transcript,
         trace_matrix: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
         evaluation_point: &[F],
+        projected_scalars: HashMap<R, DynamicPolynomialF<F>>,
         num_constraints: usize,
         num_vars: usize,
         max_degree: usize,
         field_cfg: &F::Config,
     ) -> Result<(Proof<F>, ProverState<F>), CombinedPolyResolverError<F>>
     where
-        R: Semiring + 'static + CoefficientProjectable<Rcoeff, DEGREE_PLUS_ONE>,
-        F: FromWithConfig<Rcoeff>,
-        F::Inner: ConstTranscribable + Zero,
+        R: Semiring + Send + Sync + 'static,
+        F::Inner: ConstTranscribable + Send + Sync + Zero + Default,
         U: Uair<R>,
     {
         let projecting_element: F = transcript.get_field_challenge(field_cfg);
+
+        let projected_scalars: HashMap<R, F> =
+            project_scalars_to_field(projected_scalars, &projecting_element)?;
 
         let zero = F::zero_with_cfg(field_cfg);
 
@@ -78,16 +77,12 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig> CombinedPolyResolver<F>
                             .inner()
                             .clone()
                     })
-                    .collect_dense_mle_with_zero(zero.inner())
+                    .collect()
             })
             .collect();
 
         let down: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(up)
-            .map(|column| {
-                cfg_iter!(column[1..])
-                    .cloned()
-                    .collect_dense_mle_with_zero(zero.inner())
-            })
+            .map(|column| cfg_iter!(column[1..]).cloned().collect())
             .collect();
 
         let eq_r = build_eq_x_r_inner(evaluation_point, field_cfg)?;
@@ -128,13 +123,20 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig> CombinedPolyResolver<F>
 
                 let mut folder = ConstraintFolder::new(&folding_challenge_powers, &zero);
 
+                let project = |scalar: &R| {
+                    projected_scalars
+                        .get(scalar)
+                        .cloned()
+                        .expect("all scalars should have been projected at this point")
+                };
+
                 U::constrain_general(
                     &mut folder,
                     &mle_values[2..num_cols + 2],
                     &mle_values[num_cols + 2..],
-                    |x| F::one_with_cfg(field_cfg),
-                    |x, y| Some(F::one_with_cfg(field_cfg)),
-                    |x| ImpossibleIdeal,
+                    project,
+                    |x, y| Some(project(y) * x),
+                    ImpossibleIdeal::from_ref,
                 );
 
                 folder.folded_constraints * selector * eq_r
@@ -169,7 +171,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig> CombinedPolyResolver<F>
         num_constraints: usize,
         num_vars: usize,
         max_degree: usize,
-        ic_check_subclaim: &ideal_check::VerifierSubClaim<F>,
+        ic_check_subclaim: ideal_check::VerifierSubClaim<R, F>,
         field_cfg: &F::Config,
     ) -> Result<(), CombinedPolyResolverError<F>>
     where
@@ -178,6 +180,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig> CombinedPolyResolver<F>
         U: Uair<R>,
     {
         let projecting_element: F = transcript.get_field_challenge(field_cfg);
+
+        let projected_scalars: HashMap<R, F> =
+            project_scalars_to_field(ic_check_subclaim.projected_scalars, &projecting_element)?;
 
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
@@ -236,12 +241,19 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig> CombinedPolyResolver<F>
 
         let mut folder = ConstraintFolder::new(&folding_challenge_powers, &zero);
 
+        let project = |scalar: &R| {
+            projected_scalars
+                .get(scalar)
+                .cloned()
+                .expect("all scalars should have been projected at this point")
+        };
+
         U::constrain_general(
             &mut folder,
             &proof.up_evals,
             &proof.down_evals,
-            |x| F::zero_with_cfg(field_cfg),
-            |x, y| Some(F::zero_with_cfg(field_cfg)),
+            project,
+            |x, y| Some(project(y) * x),
             ImpossibleIdeal::from_ref,
         );
 

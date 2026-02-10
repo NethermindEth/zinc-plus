@@ -98,8 +98,8 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
         }
 
         let mut buf = vec![0; F::Inner::NUM_BYTES];
-        let nvars_field = F::from_with_cfg(nvars as u64, &config);
-        let degree_field = F::from_with_cfg(degree as u64, &config);
+        let nvars_field = F::from_with_cfg(nvars as u64, config);
+        let degree_field = F::from_with_cfg(degree as u64, config);
 
         transcript.absorb_random_field(&nvars_field, &mut buf);
         transcript.absorb_random_field(&degree_field, &mut buf);
@@ -109,7 +109,7 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
         let mut prover_msgs = Vec::with_capacity(nvars);
 
         for _ in 0..nvars {
-            let prover_msg = prover_state.prove_round(&verifier_msg, &comb_fn, &config);
+            let prover_msg = prover_state.prove_round(&verifier_msg, &comb_fn, config);
             transcript.absorb_random_field_slice(&prover_msg.0.tail_evaluations, &mut buf);
             prover_msgs.push(prover_msg);
             let next_verifier_msg = transcript.get_field_challenge(config);
@@ -203,8 +203,8 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
 
         let (nvars_field, degree_field): (F, F) = {
             (
-                F::from_with_cfg(num_vars as u64, &config),
-                F::from_with_cfg(degree as u64, &config),
+                F::from_with_cfg(num_vars as u64, config),
+                F::from_with_cfg(degree as u64, config),
             )
         };
         transcript.absorb_random_field(&nvars_field, &mut buf);

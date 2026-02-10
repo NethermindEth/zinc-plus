@@ -10,23 +10,22 @@ use derive_more::From;
 use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::{collections::HashMap, marker::PhantomData};
+use std::marker::PhantomData;
 use thiserror::Error;
 use zinc_poly::{
-    CoefficientProjectable, EvaluationError,
+    EvaluationError,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
     univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     Uair,
-    collect_scalars::collect_scalars,
     ideal::{Ideal, IdealCheck},
     ideal_collector::{IdealOrZero, collect_ideals},
 };
 use zinc_utils::cfg_iter;
 
-use crate::ideal_check::utils::project_trace_matrix;
+use crate::ideal_check::utils::{project_scalars, project_trace_matrix};
 
 pub use structs::*;
 
@@ -79,21 +78,7 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
         let projecting_element = transcript.get_field_challenge(field_cfg);
 
         // Project UAIR scalars prior to doing anything.
-        let uair_scalars = collect_scalars::<IcTypes::Witness, U>();
-
-        // TODO(Ilia): if there's a lot of scalars
-        //             we should do this in parallel probably.
-        let projected_scalars: HashMap<IcTypes::Witness, DynamicPolynomialF<IcTypes::F>> =
-            HashMap::from_iter(uair_scalars.into_iter().map(|scalar| {
-                (scalar.clone(), {
-                    let mut dynamic_poly =
-                        DynamicPolynomialF::from(scalar.project_coefficients(&projecting_element));
-
-                    dynamic_poly.trim();
-
-                    dynamic_poly
-                })
-            }));
+        let projected_scalars = project_scalars::<IcTypes, U, DEGREE_PLUS_ONE>(&projecting_element);
 
         let trace_matrix =
             project_trace_matrix::<IcTypes, DEGREE_PLUS_ONE>(trace, &projecting_element);
@@ -171,7 +156,11 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
         field_cfg: &<IcTypes::F as PrimeField>::Config,
-    ) -> Result<VerifierSubClaim<IcTypes::F>, DynamicPolynomialF<IcTypes::F>, IdealOverF>
+    ) -> Result<
+        VerifierSubClaim<IcTypes::Witness, IcTypes::F>,
+        DynamicPolynomialF<IcTypes::F>,
+        IdealOverF,
+    >
     where
         U: Uair<IcTypes::Witness>,
         <IcTypes::F as Field>::Inner: ConstTranscribable,
@@ -180,8 +169,10 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
     {
         // Sample a field element to maintain FS symmetry with
         // the prover.
-        // We also will need it in a later stage of the protocol.
-        let coefficient_projecting_element: IcTypes::F = transcript.get_field_challenge(field_cfg);
+        let projecting_element: IcTypes::F = transcript.get_field_challenge(field_cfg);
+
+        // Project scalars for later use.
+        let projected_scalars = project_scalars::<IcTypes, U, DEGREE_PLUS_ONE>(&projecting_element);
 
         let mut transcription_buf: Vec<u8> = vec![0; <IcTypes::F as Field>::Inner::NUM_BYTES];
 
@@ -207,7 +198,7 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
         Ok(VerifierSubClaim {
             evaluation_point,
             values: combined_mle_values,
-            coefficient_projecting_element,
+            projected_scalars,
         })
     }
 }

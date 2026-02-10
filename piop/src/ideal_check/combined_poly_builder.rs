@@ -1,16 +1,17 @@
-use crypto_primitives::{DenseRowMatrix, Field, PrimeField};
-use itertools::{Itertools, max};
-use std::{collections::HashMap, mem::MaybeUninit};
+use crypto_primitives::{Field, PrimeField};
+use itertools::Itertools;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+use std::collections::HashMap;
 
 use zinc_poly::{
-    CoefficientProjectable,
     mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero},
     univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_uair::{ConstraintBuilder, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::{cfg_into_iter, from_ref::FromRef};
 
-use crate::ideal_check::{structs::IdealCheckTypes, utils::project_trace_matrix};
+use crate::ideal_check::structs::IdealCheckTypes;
 
 /// Given a UAIR `U` and a trace `trace` this function
 /// obtains the combined polynomials' MLE coefficients.
