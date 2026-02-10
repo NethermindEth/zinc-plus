@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crypto_primitives::{Field, FromWithConfig, Semiring};
 use zinc_poly::{
     CoefficientProjectable, mle::DenseMultilinearExtension,
@@ -30,10 +32,12 @@ pub struct Proof<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ON
 pub struct ProverState<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize> {
     pub evaluation_point: Vec<IcTypes::F>,
     pub combined_mles: Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>>,
+    pub projected_scalars: HashMap<IcTypes::Witness, DynamicPolynomialF<IcTypes::F>>,
 }
 
 pub struct VerifierSubClaim<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
 {
     pub evaluation_point: Vec<IcTypes::F>,
     pub values: Vec<DynamicPolynomialF<IcTypes::F>>,
+    pub coefficient_projecting_element: IcTypes::F,
 }

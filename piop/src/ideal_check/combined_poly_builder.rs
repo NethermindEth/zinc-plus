@@ -1,4 +1,4 @@
-use std::mem::MaybeUninit;
+use std::{collections::HashMap, mem::MaybeUninit};
 
 use crypto_primitives::{DenseRowMatrix, Field, Matrix, PrimeField};
 use itertools::Itertools;
@@ -23,6 +23,7 @@ pub fn compute_combined_polynomials<
 >(
     trace: &[DenseMultilinearExtension<IcTypes::Witness>],
     projecting_element: &IcTypes::F,
+    projected_scalars: &HashMap<IcTypes::Witness, DynamicPolynomialF<IcTypes::F>>,
     num_constraints: usize,
 ) -> Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>>
 where
@@ -45,7 +46,7 @@ where
                     up,
                     down,
                     num_constraints,
-                    projecting_element,
+                    projected_scalars,
                 )
             })
             .collect();
@@ -109,7 +110,7 @@ fn combine_rows_and_get_max_degree<IcTypes, U, const DEGREE_PLUS_ONE: usize>(
     up: &[DynamicPolynomialF<IcTypes::F>],
     down: &[DynamicPolynomialF<IcTypes::F>],
     num_constraints: usize,
-    projecting_element: &IcTypes::F,
+    projected_scalars: &HashMap<IcTypes::Witness, DynamicPolynomialF<IcTypes::F>>,
 ) -> (usize, Vec<DynamicPolynomialF<IcTypes::F>>)
 where
     IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>,
@@ -117,12 +118,19 @@ where
 {
     let mut constraint_builder = CombinedPolyRowBuilder::new(num_constraints);
 
+    let project = |x: &IcTypes::Witness| {
+        projected_scalars
+            .get(x)
+            .cloned()
+            .expect("all scalars should have been projected at this point")
+    };
+
     U::constrain_general(
         &mut constraint_builder,
         up,
         down,
-        |x| x.project_coefficients(projecting_element).into(),
-        |x, y| Some(DynamicPolynomialF::from(y.project_coefficients(projecting_element)) * x),
+        &project,
+        |x, y| Some(project(y) * x),
         ImpossibleIdeal::from_ref,
     );
 

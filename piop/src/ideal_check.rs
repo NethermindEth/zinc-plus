@@ -9,17 +9,18 @@ use derive_more::From;
 use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::marker::PhantomData;
+use std::{collections::HashMap, marker::PhantomData};
 use structs::*;
 use thiserror::Error;
 use zinc_poly::{
-    EvaluationError,
+    CoefficientProjectable, EvaluationError,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
     univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     Uair,
+    collect_scalars::collect_scalars,
     ideal::{Ideal, IdealCheck},
     ideal_collector::{IdealOrZero, collect_ideals},
 };
@@ -73,11 +74,34 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
     {
         let projecting_element = transcript.get_field_challenge(field_cfg);
 
+        // Project UAIR scalars prior to doing anything.
+        let uair_scalars = collect_scalars::<IcTypes::Witness, U>();
+
+        // TODO(Ilia): if there's a lot of scalars
+        //             we should do this in parallel probably.
+        let projected_scalars: HashMap<IcTypes::Witness, DynamicPolynomialF<IcTypes::F>> =
+            uair_scalars
+                .into_iter()
+                .map(|scalar| {
+                    (scalar.clone(), {
+                        let mut dynamic_poly = DynamicPolynomialF::from(
+                            scalar.project_coefficients(&projecting_element),
+                        );
+
+                        dynamic_poly.trim();
+
+                        dynamic_poly
+                    })
+                })
+                .collect();
+
         let combined_mles = combined_poly_builder::compute_combined_polynomials::<IcTypes, U, _>(
             trace,
             &projecting_element,
+            &projected_scalars,
             num_constraints,
         );
+
         let mut transcription_buf: Vec<u8> = vec![0; <IcTypes::F as Field>::Inner::NUM_BYTES];
 
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
@@ -106,6 +130,7 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
             ProverState {
                 evaluation_point,
                 combined_mles,
+                projected_scalars,
             },
         ))
     }
@@ -155,7 +180,8 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
     {
         // Sample a field element to maintain FS symmetry with
         // the prover.
-        let _: IcTypes::F = transcript.get_field_challenge(field_cfg);
+        // We also will need it in a later stage of the protocol.
+        let coefficient_projecting_element: IcTypes::F = transcript.get_field_challenge(field_cfg);
 
         let mut transcription_buf: Vec<u8> = vec![0; <IcTypes::F as Field>::Inner::NUM_BYTES];
 
@@ -181,6 +207,7 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
         Ok(VerifierSubClaim {
             evaluation_point,
             values: combined_mle_values,
+            coefficient_projecting_element,
         })
     }
 }
