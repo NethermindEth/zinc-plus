@@ -80,16 +80,20 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
         // TODO(Ilia): if there's a lot of scalars
         //             we should do this in parallel probably.
         let projected_scalars: HashMap<IcTypes::Witness, DynamicPolynomialF<IcTypes::F>> =
-            HashMap::from_iter(uair_scalars.into_iter().map(|scalar| {
-                (scalar.clone(), {
-                    let mut dynamic_poly =
-                        DynamicPolynomialF::from(scalar.project_coefficients(&projecting_element));
+            uair_scalars
+                .into_iter()
+                .map(|scalar| {
+                    (scalar.clone(), {
+                        let mut dynamic_poly = DynamicPolynomialF::from(
+                            scalar.project_coefficients(&projecting_element),
+                        );
 
-                    dynamic_poly.trim();
+                        dynamic_poly.trim();
 
-                    dynamic_poly
+                        dynamic_poly
+                    })
                 })
-            }));
+                .collect();
 
         let combined_mles = combined_poly_builder::compute_combined_polynomials::<IcTypes, U, _>(
             trace,
