@@ -110,5 +110,13 @@ harness = false
 required-features = ["parallel"]
 
 [[bench]]
+name = "zip_plus_commit_100"
+harness = false
+
+[[bench]]
+name = "zip_plus_commit_100_f12289"
+harness = false
+
+[[bench]]
 name = "zip_commit_40_f12289"
 harness = false

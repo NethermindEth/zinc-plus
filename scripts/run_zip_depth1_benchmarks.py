@@ -66,7 +66,8 @@ def run_benchmarks(dry_run: bool = False, verify_only: bool = False) -> None:
         if dry_run:
             print("  [dry-run] skipped")
             continue
-        result = subprocess.run(cmd, cwd=WORKSPACE)
+        env = {**os.environ, "RUSTFLAGS": "-A warnings"}
+        result = subprocess.run(cmd, cwd=WORKSPACE, env=env)
         if result.returncode != 0:
             print(f"WARNING: benchmark exited with code {result.returncode}", file=sys.stderr)
 

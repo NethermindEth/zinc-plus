@@ -34,7 +34,7 @@ const INT_LIMBS: usize = U64::LIMBS;
 /// ZipTypes for 32-bit integer evaluations with 128-bit codewords.
 struct BenchZipTypes32Bit {}
 impl ZipTypes for BenchZipTypes32Bit {
-    const NUM_COLUMN_OPENINGS: usize = 200;
+    const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = i32;
     type Cw = Int<2>; // 128-bit codewords
     type Fmod = Uint<{ INT_LIMBS * 4 }>;

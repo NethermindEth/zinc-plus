@@ -51,7 +51,7 @@ const INT_LIMBS: usize = U64::LIMBS;
 
 struct BenchZipTypes {}
 impl ZipTypes for BenchZipTypes {
-    const NUM_COLUMN_OPENINGS: usize = 200;
+    const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = i32;
     type Cw = i64;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
@@ -115,7 +115,7 @@ type IprsCodeDepth2Base4Rate1_4 =
 /// multiplying by i64 twiddle factors and accumulating.
 struct BenchZipTypes128Bit {}
 impl ZipTypes for BenchZipTypes128Bit {
-    const NUM_COLUMN_OPENINGS: usize = 200;
+    const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = Int<2>;
     type Cw = Int<3>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
@@ -177,7 +177,7 @@ type IprsCode128Bit_Depth3_Rate1_2 =
 /// Needed for depth-3 PNTT where 3 recursion levels overflow Int<3>.
 struct BenchZipTypes128BitDepth3 {}
 impl ZipTypes for BenchZipTypes128BitDepth3 {
-    const NUM_COLUMN_OPENINGS: usize = 200;
+    const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = Int<2>;
     type Cw = Int<4>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
@@ -218,7 +218,7 @@ type IprsCode128BitDepth3_Cw4_Rate1_2 =
 /// multiplying by i64 twiddle factors and accumulating.
 struct BenchZipTypes256Bit {}
 impl ZipTypes for BenchZipTypes256Bit {
-    const NUM_COLUMN_OPENINGS: usize = 200;
+    const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = Int<4>;
     type Cw = Int<5>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;

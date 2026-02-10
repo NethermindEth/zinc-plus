@@ -12,7 +12,8 @@ use crypto_primitives::{
     crypto_bigint_monty::MontyField,
 };
 use itertools::Itertools;
-use num_traits::One;
+use num_traits::{ConstOne, ConstZero, One};
+use zinc_poly::Polynomial;
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
     hint::black_box,
@@ -20,16 +21,19 @@ use std::{
 };
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
 use zinc_poly::univariate::dense::DensePolynomial;
-use zinc_transcript::traits::ConstTranscribable;
+use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_utils::{cfg_chunks, cfg_chunks_mut, from_ref::FromRef, named::Named, projectable_to_field::ProjectableToField};
 #[cfg(feature = "parallel")]
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 #[cfg(feature = "parallel")]
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
+use zinc_utils::inner_product::InnerProduct;
 use zip_plus::{
+    ZipError,
     code::LinearCode,
     merkle::MerkleTree,
-    pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
+    pcs::{ZipPlusProof, structs::{ZipPlus, ZipPlusParams, ZipTypes}},
+    pcs_transcript::PcsTranscript,
 };
 
 const INT_LIMBS: usize = U64::LIMBS;
@@ -119,6 +123,16 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
     verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15>(group);
     verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
+    verify_encode::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12>(group);
+    verify_encode::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
+    verify_encode::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
+    verify_encode::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15>(group);
+    verify_encode::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
+    verify_query_check::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12>(group);
+    verify_query_check::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
+    verify_query_check::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
+    verify_query_check::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15>(group);
+    verify_query_check::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
 }
 
 pub fn do_bench_iprs_matrices<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(
@@ -161,13 +175,7 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     let rows = poly_size / row_len;
 
     group.bench_function(
-        format!(
-            "EncodeRows: matrix={rows}x{row_len}, {} -> {}, poly_size=2^{P}",
-            Zt::Eval::type_name(),
-            Zt::Cw::type_name(),
-            rows = rows,
-            row_len = row_len
-        ),
+        format!("{rows}x{row_len}, 2^{P}", rows = rows, row_len = row_len),
         |b| {
             let mut rng = ThreadRng::default();
             let poly = DenseMultilinearExtension::<<Zt as ZipTypes>::Eval>::rand(P, &mut rng);
@@ -200,11 +208,7 @@ pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>, const ROW_LEN: usize>
     }
 
     group.bench_function(
-        format!(
-            "EncodeMessage: {} -> {}, row_len = {ROW_LEN}",
-            Zt::Eval::type_name(),
-            Zt::Cw::type_name()
-        ),
+        format!("row_len={ROW_LEN}"),
         |b| {
             let message: Vec<<Zt as ZipTypes>::Eval> =
                 (0..ROW_LEN).map(|_i| rng.random()).collect();
@@ -230,7 +234,7 @@ where
     let rows = matrix.to_rows_slices();
 
     group.bench_function(
-        format!("MerkleRoot: {}, leaves=2^{P}", Zt::Cw::type_name()),
+        format!("leaves=2^{P}"),
         |b| {
             b.iter(|| {
                 let tree = MerkleTree::new(&rows);
@@ -255,14 +259,7 @@ pub fn commit_n_polys<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize, const N:
     let rows = poly_size / row_len;
 
     group.bench_function(
-        format!(
-            "Commit {N} polys ({label}): matrix={rows}x{row_len}, Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
-            Zt::Eval::type_name(),
-            Zt::Cw::type_name(),
-            Zt::Comb::type_name(),
-            rows = rows,
-            row_len = row_len,
-        ),
+        format!("{rows}x{row_len}, 2^{P}", rows = rows, row_len = row_len),
         |b| {
             b.iter_custom(|iters| {
                 let mut total_duration = Duration::ZERO;
@@ -298,14 +295,7 @@ pub fn test_n_polys<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS:
     let rows = poly_size / row_len;
 
     group.bench_function(
-        format!(
-            "Test {N} polys ({label}): matrix={rows}x{row_len}, Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
-            Zt::Eval::type_name(),
-            Zt::Cw::type_name(),
-            Zt::Comb::type_name(),
-            rows = rows,
-            row_len = row_len,
-        ),
+        format!("{rows}x{row_len}, 2^{P}", rows = rows, row_len = row_len),
         |b| {
             b.iter_custom(|iters| {
                 let mut total_duration = Duration::ZERO;
@@ -350,14 +340,7 @@ pub fn evaluate_n_polys<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFL
     let point = vec![Zt::Pt::one(); P];
 
     group.bench_function(
-        format!(
-            "Evaluate {N} polys ({label}): matrix={rows}x{row_len}, Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
-            Zt::Eval::type_name(),
-            Zt::Cw::type_name(),
-            Zt::Comb::type_name(),
-            rows = rows,
-            row_len = row_len,
-        ),
+        format!("{rows}x{row_len}, 2^{P}", rows = rows, row_len = row_len),
         |b| {
             b.iter_custom(|iters| {
                 let mut total_duration = Duration::ZERO;
@@ -441,14 +424,7 @@ pub fn verify_n_polys<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOW
     let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
     group.bench_function(
-        format!(
-            "Verify {N} polys ({label}): matrix={rows}x{row_len}, Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
-            Zt::Eval::type_name(),
-            Zt::Cw::type_name(),
-            Zt::Comb::type_name(),
-            rows = rows,
-            row_len = row_len,
-        ),
+        format!("{rows}x{row_len}, 2^{P}", rows = rows, row_len = row_len),
         |b| {
             b.iter(|| {
                 for ((_, commitment), (eval_f, proof)) in commits.iter().zip(evals_and_proofs.iter()) {
@@ -460,6 +436,196 @@ pub fn verify_n_polys<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOW
                         proof,
                     )
                     .expect("Verification failed");
+                }
+            })
+        },
+    );
+}
+
+/// Benchmarks only the encoding phase of the verifier for N polynomials.
+pub fn verify_encode_n_polys<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, const P: usize, const N: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+    label: &str,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
+    <F as Field>::Inner: FromRef<Zt::Fmod>,
+    Zt::Eval: ProjectableToField<F>,
+    Zt::Cw: ProjectableToField<F>,
+{
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let params = ZipPlus::setup(poly_size, linear_code);
+    let row_len = params.linear_code.row_len();
+    let rows = poly_size / row_len;
+    let point = vec![Zt::Pt::one(); P];
+
+    // Pre-compute proofs for all N polynomials
+    let polys: Vec<_> = (0..N)
+        .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
+        .collect();
+    let commits: Vec<_> = polys
+        .iter()
+        .map(|poly| ZipPlus::commit(&params, poly).expect("Failed to commit"))
+        .collect();
+    let transcripts: Vec<_> = polys
+        .iter()
+        .zip(commits.iter())
+        .map(|(poly, (hint, _))| {
+            ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, poly, hint)
+                .expect("Test phase failed")
+        })
+        .collect();
+    let evals_and_proofs: Vec<_> = polys
+        .iter()
+        .zip(transcripts.into_iter())
+        .map(|(poly, transcript)| {
+            ZipPlus::evaluate::<F, CHECK_FOR_OVERFLOWS>(&params, poly, &point, transcript)
+                .expect("Evaluation phase failed")
+        })
+        .collect();
+
+    group.bench_function(
+        format!("{rows}x{row_len}, 2^{P}", rows = rows, row_len = row_len),
+        |b| {
+            b.iter(|| {
+                for (_, proof) in evals_and_proofs.iter() {
+                    let mut transcript: PcsTranscript = proof.clone().into();
+
+                    if rows > 1 {
+                        let _alphas = if Zt::Comb::DEGREE_BOUND == 0 {
+                            vec![Zt::Chal::ONE]
+                        } else {
+                            transcript
+                                .fs_transcript
+                                .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND + 1)
+                        };
+                        let _coeffs: Vec<Zt::Chal> =
+                            transcript.fs_transcript.get_challenges(rows);
+
+                        let combined_row: Vec<Zt::CombR> =
+                            transcript.read_const_many(row_len).unwrap();
+
+                        let encoded = params.linear_code.encode_wide(&combined_row);
+                        black_box(encoded);
+                    }
+                }
+            })
+        },
+    );
+}
+
+/// Benchmarks only the query-and-check phase of the verifier for N polynomials.
+pub fn verify_query_check_n_polys<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, const P: usize, const N: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+    label: &str,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
+    <F as Field>::Inner: FromRef<Zt::Fmod>,
+    Zt::Eval: ProjectableToField<F>,
+    Zt::Cw: ProjectableToField<F>,
+{
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let params = ZipPlus::setup(poly_size, linear_code);
+    let row_len = params.linear_code.row_len();
+    let rows = poly_size / row_len;
+    let point = vec![Zt::Pt::one(); P];
+
+    // Pre-compute everything
+    let polys: Vec<_> = (0..N)
+        .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
+        .collect();
+    let commits: Vec<_> = polys
+        .iter()
+        .map(|poly| ZipPlus::commit(&params, poly).expect("Failed to commit"))
+        .collect();
+    let transcripts: Vec<_> = polys
+        .iter()
+        .zip(commits.iter())
+        .map(|(poly, (hint, _))| {
+            ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, poly, hint)
+                .expect("Test phase failed")
+        })
+        .collect();
+    let evals_and_proofs: Vec<_> = polys
+        .iter()
+        .zip(transcripts.into_iter())
+        .map(|(poly, transcript)| {
+            ZipPlus::evaluate::<F, CHECK_FOR_OVERFLOWS>(&params, poly, &point, transcript)
+                .expect("Evaluation phase failed")
+        })
+        .collect();
+
+    // Pre-run encoding phase for each proof to get precomputed data and post-encode transcript
+    let precomputed_per_poly: Vec<_> = evals_and_proofs
+        .iter()
+        .zip(commits.iter())
+        .map(|((_, proof), (_, commitment))| {
+            let mut transcript: PcsTranscript = proof.clone().into();
+
+            let precomputed = if rows > 1 {
+                let alphas = if Zt::Comb::DEGREE_BOUND == 0 {
+                    vec![Zt::Chal::ONE]
+                } else {
+                    transcript
+                        .fs_transcript
+                        .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND + 1)
+                };
+                let coeffs: Vec<Zt::Chal> =
+                    transcript.fs_transcript.get_challenges(rows);
+                let combined_row: Vec<Zt::CombR> =
+                    transcript.read_const_many(row_len).unwrap();
+                let encoded_combined_row: Vec<Zt::CombR> =
+                    params.linear_code.encode_wide(&combined_row);
+                Some((alphas, coeffs, encoded_combined_row))
+            } else {
+                None
+            };
+
+            (transcript, precomputed, commitment.root.clone())
+        })
+        .collect();
+
+    group.bench_function(
+        format!("{rows}x{row_len}, 2^{P}", rows = rows, row_len = row_len),
+        |b| {
+            b.iter(|| {
+                for (transcript_snapshot, precomputed, root) in &precomputed_per_poly {
+                    let mut transcript = transcript_snapshot.clone();
+
+                    let columns_and_proofs: Vec<(usize, Vec<Zt::Cw>, zip_plus::merkle::MerkleProof)> =
+                        (0..Zt::NUM_COLUMN_OPENINGS)
+                            .map(|_| {
+                                let column_idx =
+                                    transcript.squeeze_challenge_idx(params.linear_code.codeword_len());
+                                let column_values: Vec<Zt::Cw> =
+                                    transcript.read_const_many(rows).unwrap();
+                                let proof = transcript.read_merkle_proof().unwrap();
+                                (column_idx, column_values, proof)
+                            })
+                            .collect();
+
+                    for (column_idx, column_values, merkle_proof) in &columns_and_proofs {
+                        if let Some((alphas, coeffs, encoded_combined_row)) = precomputed {
+                            bench_verify_column_testing::<Zt, CHECK_FOR_OVERFLOWS>(
+                                alphas,
+                                coeffs,
+                                encoded_combined_row,
+                                column_values,
+                                *column_idx,
+                                rows,
+                            )
+                            .expect("Column testing failed");
+                        }
+
+                        merkle_proof
+                            .verify(root, column_values, *column_idx)
+                            .expect("Merkle verification failed");
+                    }
                 }
             })
         },
@@ -491,15 +657,7 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
         .unwrap_or(0);
 
     group.bench_function(
-        format!(
-            "Commit: matrix={rows}x{row_len}, max_cw_bits={max_cw_bits}, Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
-            Zt::Eval::type_name(),
-            Zt::Cw::type_name(),
-            Zt::Comb::type_name(),
-            rows = rows,
-            row_len = row_len,
-            max_cw_bits = max_cw_bits,
-        ),
+        format!("{rows}x{row_len}, 2^{P}, cw={max_cw_bits}b", rows = rows, row_len = row_len, max_cw_bits = max_cw_bits),
         |b| {
             b.iter_custom(|iters| {
                 let mut total_duration = Duration::ZERO;
@@ -534,14 +692,7 @@ pub fn test<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, c
     let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
 
     group.bench_function(
-        format!(
-            "Test: matrix={rows}x{row_len}, Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
-            Zt::Eval::type_name(),
-            Zt::Cw::type_name(),
-            Zt::Comb::type_name(),
-            rows = rows,
-            row_len = row_len,
-        ),
+        format!("{rows}x{row_len}, 2^{P}", rows = rows, row_len = row_len),
         |b| {
             b.iter(|| {
                 let test_transcript = ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, &poly, &data)
@@ -576,15 +727,7 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
         ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, &poly, &data).expect("Test phase failed");
 
     group.bench_function(
-        format!(
-            "Evaluate: matrix={rows}x{row_len}, Eval={}, Cw={}, Comb={}, poly_size=2^{P}, modulus=({} bits)",
-            Zt::Eval::type_name(),
-            Zt::Cw::type_name(),
-            Zt::Comb::type_name(),
-            Zt::Fmod::NUM_BYTES * 8,
-            rows = rows,
-            row_len = row_len
-        ),
+        format!("{rows}x{row_len}, 2^{P}", rows = rows, row_len = row_len),
         |b| {
             b.iter_custom(|iters| {
                 let mut total_duration = Duration::ZERO;
@@ -632,15 +775,7 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool,
     let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
     group.bench_function(
-        format!(
-            "Verify: matrix={rows}x{row_len}, Eval={}, Cw={}, Comb={}, poly_size=2^{P}, modulus=({} bits)",
-            Zt::Eval::type_name(),
-            Zt::Cw::type_name(),
-            Zt::Comb::type_name(),
-            Zt::Fmod::NUM_BYTES * 8,
-            rows = rows,
-            row_len = row_len
-        ),
+        format!("{rows}x{row_len}, 2^{P}", rows = rows, row_len = row_len),
         |b| {
             b.iter(|| {
                 ZipPlus::verify::<_, CHECK_FOR_OVERFLOWS>(
@@ -654,4 +789,215 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool,
             })
         },
     );
+}
+
+/// Benchmarks only the encoding phase of the verifier:
+/// reading the combined row from the transcript and calling `encode_wide`.
+pub fn verify_encode<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, const P: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
+    <F as Field>::Inner: FromRef<Zt::Fmod>,
+    Zt::Eval: ProjectableToField<F>,
+    Zt::Cw: ProjectableToField<F>,
+{
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let params = ZipPlus::setup(poly_size, linear_code);
+    let row_len = params.linear_code.row_len();
+    let rows = poly_size / row_len;
+
+    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+    let (data, _commitment) = ZipPlus::commit(&params, &poly).unwrap();
+    let point = vec![Zt::Pt::one(); P];
+
+    let test_transcript =
+        ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, &poly, &data).expect("Test phase failed");
+    let (_eval_f, proof) =
+        ZipPlus::evaluate::<F, CHECK_FOR_OVERFLOWS>(&params, &poly, &point, test_transcript)
+            .expect("Evaluation phase failed");
+
+    // Pre-compute the transcript state just before encode_wide.
+    // We replay the Fiat-Shamir draws and read the combined_row,
+    // so the benchmark times only the encoding.
+    let proof_snapshot: ZipPlusProof = proof.clone();
+
+    group.bench_function(
+        format!("{rows}x{row_len}, 2^{P}", rows = rows, row_len = row_len),
+        |b| {
+            b.iter(|| {
+                let mut transcript: PcsTranscript = proof_snapshot.clone().into();
+
+                if rows > 1 {
+                    // Replay FS draws (cheap)
+                    let _alphas = if Zt::Comb::DEGREE_BOUND == 0 {
+                        vec![Zt::Chal::ONE]
+                    } else {
+                        transcript
+                            .fs_transcript
+                            .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND + 1)
+                    };
+                    let _coeffs: Vec<Zt::Chal> =
+                        transcript.fs_transcript.get_challenges(rows);
+
+                    // Read the combined row sent by the prover
+                    let combined_row: Vec<Zt::CombR> =
+                        transcript.read_const_many(row_len).unwrap();
+
+                    // THE EXPENSIVE PART: encode the combined row
+                    let encoded = params.linear_code.encode_wide(&combined_row);
+                    black_box(encoded);
+                }
+            })
+        },
+    );
+}
+
+/// Benchmarks only the query-and-check phase of the verifier:
+/// squeezing column indices, reading column openings + Merkle proofs,
+/// computing inner products, and verifying Merkle paths.
+pub fn verify_query_check<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, const P: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
+    <F as Field>::Inner: FromRef<Zt::Fmod>,
+    Zt::Eval: ProjectableToField<F>,
+    Zt::Cw: ProjectableToField<F>,
+{
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let params = ZipPlus::setup(poly_size, linear_code);
+    let row_len = params.linear_code.row_len();
+    let rows = poly_size / row_len;
+
+    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+    let (data, commitment) = ZipPlus::commit(&params, &poly).unwrap();
+    let point = vec![Zt::Pt::one(); P];
+
+    let test_transcript =
+        ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, &poly, &data).expect("Test phase failed");
+    let (_eval_f, proof) =
+        ZipPlus::evaluate::<F, CHECK_FOR_OVERFLOWS>(&params, &poly, &point, test_transcript)
+            .expect("Evaluation phase failed");
+
+    // Pre-run the encoding phase to obtain:
+    //   1. The encoded combined row (needed for inner-product checks)
+    //   2. The alphas and coeffs challenges
+    //   3. The transcript advanced past the encoding phase
+    let prepare = || -> (
+        PcsTranscript,
+        Option<(Vec<Zt::Chal>, Vec<Zt::Chal>, Vec<Zt::CombR>)>,
+    ) {
+        let mut transcript: PcsTranscript = proof.clone().into();
+
+        let precomputed = if rows > 1 {
+            let alphas = if Zt::Comb::DEGREE_BOUND == 0 {
+                vec![Zt::Chal::ONE]
+            } else {
+                transcript
+                    .fs_transcript
+                    .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND + 1)
+            };
+            let coeffs: Vec<Zt::Chal> =
+                transcript.fs_transcript.get_challenges(rows);
+            let combined_row: Vec<Zt::CombR> =
+                transcript.read_const_many(row_len).unwrap();
+            let encoded_combined_row: Vec<Zt::CombR> =
+                params.linear_code.encode_wide(&combined_row);
+            Some((alphas, coeffs, encoded_combined_row))
+        } else {
+            None
+        };
+
+        (transcript, precomputed)
+    };
+
+    // Snapshot transcript state right after the encoding phase
+    let (transcript_after_encode, precomputed) = prepare();
+
+    group.bench_function(
+        format!("{rows}x{row_len}, 2^{P}", rows = rows, row_len = row_len),
+        |b| {
+            b.iter(|| {
+                let mut transcript = transcript_after_encode.clone();
+
+                // Read columns and Merkle proofs from the transcript
+                let columns_and_proofs: Vec<(usize, Vec<Zt::Cw>, zip_plus::merkle::MerkleProof)> =
+                    (0..Zt::NUM_COLUMN_OPENINGS)
+                        .map(|_| {
+                            let column_idx =
+                                transcript.squeeze_challenge_idx(params.linear_code.codeword_len());
+                            let column_values: Vec<Zt::Cw> =
+                                transcript.read_const_many(rows).unwrap();
+                            let proof = transcript.read_merkle_proof().unwrap();
+                            (column_idx, column_values, proof)
+                        })
+                        .collect();
+
+                // Verify each column: inner-product check + Merkle proof
+                for (column_idx, column_values, merkle_proof) in &columns_and_proofs {
+                    if let Some((ref alphas, ref coeffs, ref encoded_combined_row)) = precomputed {
+                        bench_verify_column_testing::<Zt, CHECK_FOR_OVERFLOWS>(
+                            alphas,
+                            coeffs,
+                            encoded_combined_row,
+                            column_values,
+                            *column_idx,
+                            rows,
+                        )
+                        .expect("Column testing failed");
+                    }
+
+                    merkle_proof
+                        .verify(&commitment.root, column_values, *column_idx)
+                        .expect("Merkle verification failed");
+                }
+            })
+        },
+    );
+}
+
+/// Replicates `ZipPlus::verify_column_testing` using public APIs,
+/// since the original is `pub(super)` and not accessible from benchmarks.
+fn bench_verify_column_testing<Zt: ZipTypes, const CHECK_FOR_OVERFLOW: bool>(
+    alphas: &[Zt::Chal],
+    coeffs: &[Zt::Chal],
+    encoded_combined_row: &[Zt::CombR],
+    column_entries: &[Zt::Cw],
+    column: usize,
+    num_rows: usize,
+) -> Result<(), ZipError> {
+    let column_entries_comb: Zt::CombR = if num_rows > 1 {
+        let column_entries: Vec<_> = column_entries
+            .iter()
+            .map(Zt::Comb::from_ref)
+            .map(|p| {
+                Zt::CombDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
+                    &p,
+                    alphas,
+                    Zt::CombR::ZERO,
+                )
+            })
+            .try_collect()?;
+        Zt::ArrCombRDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
+            &column_entries,
+            coeffs,
+            Zt::CombR::ZERO,
+        )?
+    } else {
+        Zt::CombDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
+            &Zt::Comb::from_ref(&column_entries[0]),
+            alphas,
+            Zt::CombR::ZERO,
+        )?
+    };
+
+    if column_entries_comb != encoded_combined_row[column] {
+        return Err(ZipError::InvalidPcsOpen("Proximity failure".into()));
+    }
+    Ok(())
 }

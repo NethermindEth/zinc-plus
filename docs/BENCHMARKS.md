@@ -9,18 +9,18 @@ each crate's `benches/` directory.
 |---|---|---|
 | `zip-plus` | `zip_benches` | Zip PCS (integer coefficients): RAA & IPRS encoding, commit, 128-bit & 256-bit encoding |
 | `zip-plus` | `zip_plus_benches` | Zip+ PCS (polynomial coefficients): RAA, IPRS (multiple fields/depths/rates), commit/test/evaluate comparisons |
-| `zip-plus` | `zip_plus_commit_10` | Zip+ 10 polys (F65537): commit, test, evaluate, verify across 6–11 vars |
-| `zip-plus` | `zip_plus_commit_15` | Zip+ 15 polys (F65537): commit, test, evaluate, verify across 6–11 vars |
-| `zip-plus` | `zip_plus_commit_40` | Zip+ 40 polys (F65537): commit, test, evaluate, verify across 6–11 vars |
-| `zip-plus` | `zip_plus_commit_55` | Zip+ 55 polys (F65537): commit, test, evaluate, verify across 6–11 vars |
-| `zip-plus` | `zip_commit_5` | Zip 5 polys (F65537): commit, test, evaluate, verify across 6–11 vars |
-| `zip-plus` | `zip_commit_40` | Zip 40 polys (F65537): commit, test, evaluate, verify across 6–11 vars |
-| `zip-plus` | `zip_plus_commit_10_f12289` | Zip+ 10 polys (F12289): commit, test, evaluate, verify across 6–10 vars |
-| `zip-plus` | `zip_plus_commit_15_f12289` | Zip+ 15 polys (F12289): commit, test, evaluate, verify across 6–10 vars |
-| `zip-plus` | `zip_plus_commit_40_f12289` | Zip+ 40 polys (F12289): commit, test, evaluate, verify across 6–10 vars |
-| `zip-plus` | `zip_plus_commit_55_f12289` | Zip+ 55 polys (F12289): commit, test, evaluate, verify across 6–10 vars |
-| `zip-plus` | `zip_commit_5_f12289` | Zip 5 polys (F12289): commit, test, evaluate, verify across 6–10 vars |
-| `zip-plus` | `zip_commit_40_f12289` | Zip 40 polys (F12289): commit, test, evaluate, verify across 6–10 vars |
+| `zip-plus` | `zip_plus_commit_10` | Zip+ 10 polys (F65537): commit, test, evaluate, verify, verify-encode, verify-query-check across 6–11 vars |
+| `zip-plus` | `zip_plus_commit_15` | Zip+ 15 polys (F65537): commit, test, evaluate, verify, verify-encode, verify-query-check across 6–11 vars |
+| `zip-plus` | `zip_plus_commit_40` | Zip+ 40 polys (F65537): commit, test, evaluate, verify, verify-encode, verify-query-check across 6–11 vars |
+| `zip-plus` | `zip_plus_commit_55` | Zip+ 55 polys (F65537): commit, test, evaluate, verify, verify-encode, verify-query-check across 6–11 vars |
+| `zip-plus` | `zip_commit_5` | Zip 5 polys (F65537): commit, test, evaluate, verify, verify-encode, verify-query-check across 6–11 vars |
+| `zip-plus` | `zip_commit_40` | Zip 40 polys (F65537): commit, test, evaluate, verify, verify-encode, verify-query-check across 6–11 vars |
+| `zip-plus` | `zip_plus_commit_10_f12289` | Zip+ 10 polys (F12289): commit, test, evaluate, verify, verify-encode, verify-query-check across 6–10 vars |
+| `zip-plus` | `zip_plus_commit_15_f12289` | Zip+ 15 polys (F12289): commit, test, evaluate, verify, verify-encode, verify-query-check across 6–10 vars |
+| `zip-plus` | `zip_plus_commit_40_f12289` | Zip+ 40 polys (F12289): commit, test, evaluate, verify, verify-encode, verify-query-check across 6–10 vars |
+| `zip-plus` | `zip_plus_commit_55_f12289` | Zip+ 55 polys (F12289): commit, test, evaluate, verify, verify-encode, verify-query-check across 6–10 vars |
+| `zip-plus` | `zip_commit_5_f12289` | Zip 5 polys (F12289): commit, test, evaluate, verify, verify-encode, verify-query-check across 6–10 vars |
+| `zip-plus` | `zip_commit_40_f12289` | Zip 40 polys (F12289): commit, test, evaluate, verify, verify-encode, verify-query-check across 6–10 vars |
 | `piop` | `sumcheck` | Sumcheck prover & verifier over random fields |
 | `poly` | `mle_evaluation` | Multilinear extension evaluation (field & inner representation) |
 | `poly` | `nat_evaluation` | Natural evaluation domain polynomial evaluation |
@@ -314,10 +314,15 @@ In practice, `num_rows` must be a power of two. The table below shows optimal co
 
 ### Multi-Polynomial Benchmarks (`zip_plus_commit_*` / `zip_commit_*`)
 
-These standalone bench targets measure **commit + test + evaluate + verify** for multiple
+These standalone bench targets measure **commit + test + evaluate + verify + verify-encode + verify-query-check** for multiple
 multilinear polynomials simultaneously. Each one sweeps over `num_vars` = 6–11 (F65537) or
 6–10 (F12289), using a **1-row matrix** (1 × 2^num_vars). The IPRS codes use depth-1 and
 depth-2 at rate 1/4.
+
+The **verify** benchmark measures the full verifier. **verify-encode** isolates the
+phase where the verifier encodes the received vector (i.e. calls `encode_wide` on the
+combined row), while **verify-query-check** isolates the subsequent phase where the
+verifier queries columns, computes inner products, and checks them against the encoding.
 
 Two families exist:
 
@@ -359,16 +364,18 @@ The group names follow the pattern:
 - F12289: `Zip+ {Op} F12289 {N} Polys IPRS-{depth}-{rate}-F12289`
 - Zip (non-plus): `Zip {Op} {N} Polys IPRS-...`
 
+where `{Op}` is one of: `Commit`, `Test`, `Evaluate`, `Verify`, `VerifyEncode`, `VerifyQueryCheck`.
+
 The IPRS tag format is `IPRS-X-Y-Z` where **X** = depth, **Y** = rate, **Z** = base field.
 
-For **F65537** bench files there are 8 groups (4 phases × 2 codes):
+For **F65537** bench files there are 12 groups (6 phases × 2 codes):
 
 | Group name pattern | Code |
 |---|---|
 | `Zip+ {Op} {N} Polys IPRS-1-1/4-F65537` | Depth-1, rate 1/4 |
 | `Zip+ {Op} {N} Polys IPRS-2-1/4-F65537` | Depth-2, rate 1/4 |
 
-For **F12289** bench files there are 16 groups (4 phases × 4 codes):
+For **F12289** bench files there are 24 groups (6 phases × 4 codes):
 
 | Group name pattern | Code |
 |---|---|
@@ -390,6 +397,22 @@ cargo bench --bench zip_plus_commit_55 -p zip-plus -- "Commit"
 cargo bench --bench zip_plus_commit_55_f12289 -p zip-plus -- "1/2-F12289"
 # Only verify phase for a specific code
 cargo bench --bench zip_plus_commit_55 -p zip-plus -- "Verify.*IPRS-2"
+# Only verify-encode (encoding sub-step of verify)
+cargo bench --bench zip_plus_commit_55_f12289 -p zip-plus -- "VerifyEncode"
+# Only verify-query-check (column query + inner product check sub-step of verify)
+cargo bench --bench zip_plus_commit_55_f12289 -p zip-plus -- "VerifyQueryCheck"
+```
+
+### Benchmark Name Format
+
+Benchmark parameter tags use a compact format to fit terminal display:
+
+- **N-poly benchmarks:** `"{rows}x{row_len}, 2^{num_vars}"` — e.g. `"1x64, 2^6"`
+- **Single-poly benchmarks:** `"{rows}x{row_len}, 2^{num_vars}, cw={max_cw_bits}b"` (commit only includes the codeword bit-width)
+
+The full Criterion output combines the group name with the tag, e.g.:
+```
+Zip+ Verify F12289 55 Polys IPRS-1-1/2-F12289/1x64, 2^6
 ```
 
 ### Benchmark Results: Zip+ Multi-Polynomial (8 Vars, matrix=1×256)
@@ -554,33 +577,35 @@ Results from the Zip baseline benchmarks using integer evaluations (`i32` → `I
 
 ### Automated Benchmark Script: Depth-1 F12289 (10 & 55 Polys)
 
-The script `scripts/run_depth2_benchmarks.py` runs depth-1 IPRS benchmarks over F12289
+The script `scripts/run_depth1_benchmarks.py` runs depth-1 IPRS benchmarks over F12289
 for 10 and 55 polynomials at both rates 1/2 and 1/4, then collects the Criterion results
 and generates a LaTeX table.
 
 ```bash
-# Run all four benchmark commands and print the LaTeX table
-python3 scripts/run_depth2_benchmarks.py
+# Run all benchmark commands and print the LaTeX table
+python3 scripts/run_depth1_benchmarks.py
 
 # Skip running benchmarks; only collect existing Criterion results
-python3 scripts/run_depth2_benchmarks.py --dry-run
+python3 scripts/run_depth1_benchmarks.py --dry-run
 
 # Save the LaTeX table to a file
-python3 scripts/run_depth2_benchmarks.py --output table.tex
+python3 scripts/run_depth1_benchmarks.py --output table.tex
+
+# Run only specific operations (e.g. verify sub-steps)
+python3 scripts/run_depth1_benchmarks.py --ops verifyencode verifyquerycheck
+
+# Run only Commit and Evaluate
+python3 scripts/run_depth1_benchmarks.py --ops commit evaluate
 ```
 
-The script executes these four commands in sequence:
+The script executes benchmark commands for the configured bench/filter pairs in sequence.
+By default it runs all six operations (Commit, Test, Evaluate, Verify, VerifyEncode,
+VerifyQueryCheck). The `--ops` flag restricts which operations are benchmarked by
+construing a Criterion regex filter that matches only the selected operation names.
 
-```bash
-cargo bench --bench zip_plus_commit_10_f12289 --features "asm parallel simd unchecked-butterfly" -- "IPRS-1-1/4-F12289"
-cargo bench --bench zip_plus_commit_10_f12289 --features "asm parallel simd unchecked-butterfly" -- "IPRS-1-1/2-F12289"
-cargo bench --bench zip_plus_commit_55_f12289 --features "asm parallel simd unchecked-butterfly" -- "IPRS-1-1/2-F12289"
-cargo bench --bench zip_plus_commit_55_f12289 --features "asm parallel simd unchecked-butterfly" -- "IPRS-1-1/4-F12289"
-```
-
-It then reads median timings from Criterion's JSON output and produces a table with
-columns for Commit, Test, Evaluate, and Verify across `num_vars` 6–10, grouped by
-polynomial count and rate.
+It then reads median timings from Criterion's JSON output and produces a LaTeX table with
+columns for the selected operations across `num_vars` 6–10, grouped by polynomial count
+and rate.
 
 ### `profile_encode` — Profiling Example
 

@@ -4,16 +4,17 @@ Run Zip+ depth-1 IPRS benchmarks over F12289 for 10 and 55 polynomials,
 then collect the Criterion results and emit a LaTeX table.
 
 Benchmarks executed:
-  - zip_plus_commit_10_f12289  with filter IPRS-1-1/4-F12289
-  - zip_plus_commit_10_f12289  with filter IPRS-1-1/2-F12289Face in Zip Plus 
-  - zip_plus_commit_55_f12289  with filter IPRS-1-1/2-F12289
-  - zip_plus_commit_55_f12289  with filter IPRS-1-1/4-F12289
+  - zip_plus_commit_10_f12289  with code IPRS-1-1/4-F12289
+  - zip_plus_commit_10_f12289  with code IPRS-1-1/2-F12289Face in Zip Plus 
+  - zip_plus_commit_55_f12289  with code IPRS-1-1/2-F12289
+  - zip_plus_commit_55_f12289  with code IPRS-1-1/4-F12289
 
 Usage:
     python3 scripts/run_depth1_benchmarks.py
     python3 scripts/run_depth1_benchmarks.py --dry-run      # skip running, just read existing results
     python3 scripts/run_depth1_benchmarks.py --output table.tex
     python3 scripts/run_depth1_benchmarks.py --ops verify            # only run Verify benchmarks
+    python3 scripts/run_depth1_benchmarks.py --ops verifyencode verifyquerycheck  # verify sub-steps only
     python3 scripts/run_depth1_benchmarks.py --ops commit evaluate   # run Commit and Evaluate only
 """
 
@@ -33,14 +34,18 @@ FEATURES = "asm parallel simd unchecked-butterfly"
 
 # Each entry: (bench_name, filter_pattern)
 BENCHMARKS = [
-    # ("zip_plus_commit_10_f12289", "IPRS-1-1/4-F12289"),
-    # ("zip_plus_commit_10_f12289", "IPRS-1-1/2-F12289"),
-    ("zip_plus_commit_55_f12289", "IPRS-1-1/2-F12289"),
-    ("zip_plus_commit_55_f12289", "IPRS-1-1/4-F12289"),
-]
+    ("zip_plus_commit_10_f12289", "IPRS-1-1/4-F12289"),
+    #("zip_plus_commit_10_f12289", "IPRS-1-1/2-F12289"),
+    ("zip_plus_commit_10_f12289", "IPRS-1-1/4-F12289-Q105"),
+    #("zip_plus_commit_55_f12289", "IPRS-1-1/4-F12289"),
+    #("zip_plus_commit_55_f12289", "IPRS-1-1/2-F12289"),
+    #("zip_plus_commit_55_f12289", "IPRS-1-1/4-F12289-Q105"),
+    ("zip_plus_commit_100_f12289", "IPRS-1-1/4-F12289"),
+    #("zip_plus_commit_100_f12289", "IPRS-1-1/2-F12289"),    
+    ("zip_plus_commit_100_f12289", "IPRS-1-1/4-F12289-Q105"),]
 
 # Operations benchmarked in each bench binary
-OPERATIONS = ["Commit", "Test", "Evaluate", "Verify"]
+OPERATIONS = ["Commit", "Test", "Evaluate", "Verify", "VerifyEncode", "VerifyQueryCheck"]
 
 # Number of variables (num_vars) in each benchmark
 NUM_VARS = [6, 7, 8, 9, 10]
@@ -55,12 +60,18 @@ def run_benchmarks(dry_run: bool = False, ops: Optional[list[str]] = None) -> No
              If None, run all operations.
     """
     for bench_name, filter_pat in BENCHMARKS:
+        # Append "/" so the filter matches the exact group name boundary in
+        # Criterion's "{group}/{benchmark}" ID format.  This prevents e.g.
+        # "IPRS-1-1/4-F12289" from also matching "IPRS-1-1/4-F12289-Q105".
+        anchored = filter_pat + "/"
         if ops is not None and set(ops) != set(OPERATIONS):
             # Build a Criterion regex filter that matches only the selected operations.
-            ops_alt = "|".join(re.escape(op) for op in ops)
-            effective_filter = f"Zip\\+ ({ops_alt}).*{filter_pat}"
+            # Sort longer names first so that e.g. "VerifyEncode" is tried before "Verify".
+            sorted_ops = sorted(ops, key=len, reverse=True)
+            ops_alt = "|".join(re.escape(op) for op in sorted_ops)
+            effective_filter = f"Zip\\+ ({ops_alt}) .*{anchored}"
         else:
-            effective_filter = filter_pat
+            effective_filter = anchored
         cmd = [
             "cargo", "bench",
             "--bench", bench_name,
@@ -73,7 +84,8 @@ def run_benchmarks(dry_run: bool = False, ops: Optional[list[str]] = None) -> No
         if dry_run:
             print("  [dry-run] skipped")
             continue
-        result = subprocess.run(cmd, cwd=WORKSPACE)
+        env = {**os.environ, "RUSTFLAGS": "-A warnings"}
+        result = subprocess.run(cmd, cwd=WORKSPACE, env=env)
         if result.returncode != 0:
             print(f"WARNING: benchmark exited with code {result.returncode}", file=sys.stderr)
 
@@ -122,9 +134,9 @@ def collect_results() -> dict:
                 median_ns = estimates["median"]["point_estimate"]
 
                 # Extract num_vars from the sub-directory name.
-                # Pattern: "... matrix=1x<cols>, Eval=..."
-                # cols = 2^num_vars for single-row layout
-                col_match = re.search(r"matrix=(\d+)x(\d+)", sub.name)
+                # New format: "{rows}x{row_len}, 2^{P}"
+                # Old format: "... matrix={rows}x{row_len}, ..."
+                col_match = re.search(r"(\d+)x(\d+)", sub.name)
                 if not col_match:
                     continue
                 rows = int(col_match.group(1))
@@ -178,8 +190,10 @@ def generate_latex(results: dict, ops: Optional[list[str]] = None) -> str:
 
             # Section header
             rate = iprs_label.split("-")[2]  # e.g. "1/4" from "IPRS-1-1/4-F12289"
+            q_match = re.search(r"-Q(\d+)$", iprs_label)
+            q_suffix = f", {q_match.group(1)} queries" if q_match else ""
             lines.append(r"\multicolumn{" + str(n_cols) + r"}{c}{\textbf{" +
-                         f"{n_polys} polys, depth-1, rate {rate}" +
+                         f"{n_polys} polys, depth-1, rate {rate}{q_suffix}" +
                          r"}} \\")
             lines.append(r"\midrule")
 
@@ -219,12 +233,13 @@ def main():
         default=None,
         metavar="OP",
         help="Operations to benchmark (default: all). "
-             "Choose from: commit, test, evaluate, verify.",
+             "Choose from: commit, test, evaluate, verify, verifyencode, verifyquerycheck.",
     )
     args = parser.parse_args()
 
-    # Normalise operation names to title-case to match OPERATIONS.
-    selected_ops = [op.capitalize() for op in args.ops] if args.ops else None
+    # Normalise operation names to match OPERATIONS (case-insensitive match).
+    ops_map = {op.lower(): op for op in OPERATIONS}
+    selected_ops = [ops_map[op.lower()] for op in args.ops] if args.ops else None
 
     run_benchmarks(dry_run=args.dry_run, ops=selected_ops)
 
