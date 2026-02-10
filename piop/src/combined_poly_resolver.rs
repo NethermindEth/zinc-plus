@@ -2,7 +2,6 @@ mod folder;
 mod structs;
 mod utils;
 
-use itertools::Itertools;
 use num_traits::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -10,7 +9,6 @@ use std::{collections::HashMap, marker::PhantomData};
 use thiserror::Error;
 use zinc_poly::{
     EvaluatablePolynomial, EvaluationError,
-    mle::MultilinearExtensionWithConfig,
     utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
 };
 use zinc_uair::ideal::ImpossibleIdeal;
@@ -35,7 +33,7 @@ pub use structs::*;
 pub struct CombinedPolyResolver<F: InnerTransparentField>(PhantomData<F>);
 
 impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedPolyResolver<F> {
-    #[allow(clippy::arithmetic_side_effects)]
+    #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
     pub fn prove_as_subprotocol<R, U>(
         transcript: &mut impl Transcript,
         trace_matrix: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
@@ -66,14 +64,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
                     .map(|coeff| {
                         coeff
                             .evaluate_at_point(&projecting_element)
-                            .map_err(|err| {
-                                CombinedPolyResolverError::ProjectionError(
-                                    coeff.clone(),
-                                    projecting_element.clone(),
-                                    err,
-                                )
-                            })
-                            .expect("todo")
+                            .expect("evaluation cannot fail here")
                             .inner()
                             .clone()
                     })
@@ -104,8 +95,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             mles.push(last_row_selector);
             mles.push(eq_r);
 
-            mles.extend(up);
-            mles.extend(down);
+            mles.extend(up.clone());
+            mles.extend(down.clone());
 
             mles
         };
@@ -144,11 +135,10 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             field_cfg,
         );
 
-        let sumcheck_eval_point = sumcheck_prover_state.randomness.clone();
-
-        let evals: Vec<F> = cfg_iter!(sumcheck_prover_state.mles[2..])
-            .map(|mle| mle.evaluate_with_config(&sumcheck_eval_point, field_cfg))
-            .collect::<Result<Vec<_>, _>>()?;
+        let evals: Vec<F> = sumcheck_prover_state.mles[2..]
+            .iter()
+            .map(|mle| F::new_unchecked_with_cfg(mle.evaluations[0].clone(), field_cfg))
+            .collect();
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
         transcript.absorb_random_field_slice(&evals, &mut transcription_buf);
@@ -160,6 +150,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
                 down_evals: evals[num_cols..].to_vec(),
             },
             ProverState {
+                up,
+                down,
                 sumcheck_prover_state,
             },
         ))
@@ -173,7 +165,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         max_degree: usize,
         ic_check_subclaim: ideal_check::VerifierSubClaim<R, F>,
         field_cfg: &F::Config,
-    ) -> Result<(), CombinedPolyResolverError<F>>
+    ) -> Result<VerifierSubclaim<F>, CombinedPolyResolverError<F>>
     where
         R: Semiring + 'static,
         F::Inner: ConstTranscribable,
@@ -270,7 +262,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         transcript.absorb_random_field_slice(&proof.up_evals, &mut transcription_buf);
         transcript.absorb_random_field_slice(&proof.down_evals, &mut transcription_buf);
 
-        Ok(())
+        Ok(VerifierSubclaim {
+            up_evals: proof.up_evals,
+            down_evals: proof.down_evals,
+            evaluation_point: sumcheck_point,
+        })
     }
 }
 
@@ -305,5 +301,108 @@ impl<F: PrimeField> From<ArithErrors> for CombinedPolyResolverError<F> {
 impl<F: PrimeField> From<SumCheckError<F>> for CombinedPolyResolverError<F> {
     fn from(sumcheck_error: SumCheckError<F>) -> Self {
         Self::SumcheckError(sumcheck_error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
+    use rand::rng;
+    use zinc_poly::univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal};
+    use zinc_test_uair::{GenerateWitness, TestAirNoMultiplication, TestUairSimpleMultiplication};
+    use zinc_transcript::KeccakTranscript;
+    use zinc_uair::{
+        constraint_counter::count_constraints,
+        degree_counter::count_max_degree,
+        ideal::{Ideal, IdealCheck},
+        ideal_collector::IdealOrZero,
+    };
+
+    use crate::{
+        ideal_check::{IdealCheckProtocol, IdealCheckTypes},
+        test_utils::{LIMBS, TestIcTypes, run_ideal_check_prover, test_config},
+    };
+
+    use super::*;
+
+    fn test_successful_verification_generic<
+        U,
+        IdealOverF,
+        IdealOverFFromRef,
+        const DEGREE_PLUS_ONE: usize,
+    >(
+        num_vars: usize,
+        ideal_over_f_from_ref: IdealOverFFromRef,
+    ) where
+        U: GenerateWitness<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
+        IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
+    {
+        let mut rng = rng();
+
+        let mut prover_transcript = KeccakTranscript::new();
+        let mut verifier_transcript = prover_transcript.clone();
+
+        let trace = U::generate_witness(num_vars, &mut rng);
+
+        let (ic_proof, ic_prover_state) =
+            run_ideal_check_prover::<U, DEGREE_PLUS_ONE>(num_vars, &trace, &mut prover_transcript);
+
+        let num_constraints =
+            count_constraints::<<TestIcTypes as IdealCheckTypes<_>>::Witness, U>();
+
+        let ic_check_subclaim =
+            IdealCheckProtocol::<TestIcTypes, _>::verify_as_subprotocol::<U, _, _>(
+                &mut verifier_transcript,
+                ic_proof,
+                num_constraints,
+                num_vars,
+                ideal_over_f_from_ref,
+                &test_config(),
+            )
+            .expect("Verification failed");
+
+        let max_degree = count_max_degree::<_, U>();
+
+        let (proof, _) = CombinedPolyResolver::prove_as_subprotocol::<_, U>(
+            &mut prover_transcript,
+            &ic_prover_state.trace_matrix,
+            &ic_prover_state.evaluation_point,
+            ic_prover_state.projected_scalars,
+            num_constraints,
+            num_vars,
+            max_degree,
+            &test_config(),
+        )
+        .expect("CombinedPolyResolver prover failed");
+
+        assert!(
+            CombinedPolyResolver::verify_as_subprotocol::<_, U>(
+                &mut verifier_transcript,
+                proof,
+                num_constraints,
+                num_vars,
+                max_degree,
+                ic_check_subclaim,
+                &test_config()
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_successful_verification() {
+        let field_cfg = test_config();
+
+        let num_vars = 2;
+
+        test_successful_verification_generic::<TestAirNoMultiplication, _, _, 32>(
+            num_vars,
+            |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
+        );
+        test_successful_verification_generic::<TestUairSimpleMultiplication, _, _, 32>(
+            num_vars,
+            |_ideal_over_ring| IdealOrZero::zero(),
+        );
     }
 }

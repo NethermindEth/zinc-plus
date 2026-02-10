@@ -227,55 +227,9 @@ mod tests {
         ideal::{Ideal, IdealCheck},
     };
 
+    use crate::test_utils::{LIMBS, TestIcTypes, run_ideal_check_prover, test_config};
+
     use super::*;
-
-    const LIMBS: usize = 4;
-
-    fn test_config() -> MontyParams<LIMBS> {
-        let modulus = crypto_bigint::Uint::<LIMBS>::from_be_hex(
-            "0000000000000000000000000000000000860995AE68FC80E1B1BD1E39D54B33",
-        );
-        let modulus = Odd::new(modulus).expect("modulus should be odd");
-        MontyParams::new(modulus)
-    }
-
-    struct TestIcTypes;
-
-    impl<const DEGREE_PLUS_ONE: usize> IdealCheckTypes<DEGREE_PLUS_ONE> for TestIcTypes {
-        type WitnessCoeff = Int<5>;
-        type Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>;
-
-        type F = MontyField<4>;
-    }
-
-    fn run_prover<U, const DEGREE_PLUS_ONE: usize>(
-        num_vars: usize,
-        transcript: &mut impl Transcript,
-    ) -> (
-        Proof<TestIcTypes, DEGREE_PLUS_ONE>,
-        ProverState<TestIcTypes, DEGREE_PLUS_ONE>,
-    )
-    where
-        U: GenerateWitness<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
-    {
-        let mut rng = rng();
-
-        let trace = U::generate_witness(num_vars, &mut rng);
-
-        let field_cfg = test_config();
-
-        let num_constraints =
-            count_constraints::<<TestIcTypes as IdealCheckTypes<_>>::Witness, U>();
-
-        IdealCheckProtocol::<TestIcTypes, _>::prove_as_subprotocol::<U>(
-            transcript,
-            &trace,
-            num_constraints,
-            num_vars,
-            &field_cfg,
-        )
-        .unwrap()
-    }
 
     fn test_successful_verification_generic<
         U,
@@ -290,10 +244,14 @@ mod tests {
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
+        let mut rng = rng();
         let transcript = KeccakTranscript::new();
 
-        let (proof, prover_state) =
-            run_prover::<U, DEGREE_PLUS_ONE>(num_vars, &mut transcript.clone());
+        let (proof, prover_state) = run_ideal_check_prover::<U, DEGREE_PLUS_ONE>(
+            num_vars,
+            &U::generate_witness(num_vars, &mut rng),
+            &mut transcript.clone(),
+        );
 
         let num_constraints =
             count_constraints::<<TestIcTypes as IdealCheckTypes<_>>::Witness, U>();

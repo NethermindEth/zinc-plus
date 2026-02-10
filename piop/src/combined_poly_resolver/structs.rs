@@ -1,4 +1,5 @@
 use crypto_primitives::PrimeField;
+use zinc_poly::mle::DenseMultilinearExtension;
 
 use crate::sumcheck::{self, SumcheckProof};
 
@@ -10,5 +11,13 @@ pub struct Proof<F: PrimeField> {
 }
 
 pub struct ProverState<F: PrimeField> {
+    pub up: Vec<DenseMultilinearExtension<F::Inner>>,
+    pub down: Vec<DenseMultilinearExtension<F::Inner>>,
     pub sumcheck_prover_state: sumcheck::prover::ProverState<F>,
+}
+
+pub struct VerifierSubclaim<F: PrimeField> {
+    pub evaluation_point: Vec<F>,
+    pub up_evals: Vec<F>,
+    pub down_evals: Vec<F>,
 }
