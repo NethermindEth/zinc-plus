@@ -1,3 +1,5 @@
+//! Combined polynomial resolver subprotocol.
+
 mod folder;
 mod structs;
 mod utils;
@@ -35,6 +37,30 @@ pub use structs::*;
 pub struct CombinedPolyResolver<F: InnerTransparentField>(PhantomData<F>);
 
 impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedPolyResolver<F> {
+    /// The prover part of the combined polynomial resolver subprotocol.
+    /// It projects the trace matrix along the projection F[X] -> F
+    /// defined by a random challenge and runs the prover part
+    /// of a sumcheck protocol of the form:
+    /// $$
+    /// \sum_{b \in H} (f_0(b, x_0[b],...,x_n[b], x_0ˆdown[b],...,x_nˆdown[b])
+    ///                 + \alpha f_1(...) + ... + \alpha^k f_k(...))
+    ///                     = v_0 + \alpha * v_1 + ... + \alphaˆk * v_k,
+    /// $$
+    /// where $f_i(b, x_0[b],...,x_n[b], x_0ˆdown[b],...,x_nˆdown[b])
+    ///         = eq(r, b) * (1 - eq(r, 1,...1))
+    ///             * g_i(x_0[b],...,x_n[b], x_0ˆdown[b],...,x_nˆdown[b])$
+    /// and `g_i` is a constraint polynomial given by the UAIR `U`.
+    /// `v_0,...,v_k` are the claimed evaluations of the combined polynomials.
+    ///
+    /// # Parameters
+    /// - `transcript`: FS-transcript.
+    /// - `trace_matrix`: The trace that have been projected to F[X].
+    /// - `evaluation_point`: The evaluation point for the claims.
+    /// - `projected_scalars`: The UAIR scalars projected to `F[X]`.
+    /// - `num_constraints`: The number of constraint polynomials in the UAIR `U`.
+    /// - `num_vars`: The number of variables of the trace MLEs.
+    /// - `max_degree`: The degree of the UAIR `U`.
+    /// - `field_cfg`: The random field config.
     #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
     pub fn prove_as_subprotocol<R, U>(
         transcript: &mut impl Transcript,
@@ -53,6 +79,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     {
         let projecting_element: F = transcript.get_field_challenge(field_cfg);
 
+        // Project scalars along F[X] -> F.
         let projected_scalars: HashMap<R, F> =
             project_scalars_to_field(projected_scalars, &projecting_element)?;
 
@@ -61,6 +88,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         let num_cols = U::num_cols();
 
+        // Project trace along F[X] -> F.
         let up: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(trace_matrix)
             .map(|column| {
                 cfg_iter!(column)
@@ -75,15 +103,21 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             })
             .collect();
 
+        // Shifted trace. Just take the trace, drop the first row
+        // and append 0 to the end.
         let down: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(up)
             .map(|column| cfg_iter!(column[1..]).cloned().collect())
             .collect();
 
         let eq_r = build_eq_x_r_inner(evaluation_point, field_cfg)?;
 
+        // To get the constraints on the last row ignored
+        // we multiply each constraint polynomial
+        // by the selector (1 - eq(1,...,1, x))
         let last_row_selector =
             build_eq_x_r_inner(&vec![F::one_with_cfg(field_cfg); num_vars], field_cfg)?;
 
+        // The challenge '\alpha' to batch multiple evaluation claims
         let folding_challenge: F = transcript.get_field_challenge(field_cfg);
 
         let folding_challenge_powers: Vec<F> = powers(
@@ -168,11 +202,22 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             ProverState {
                 up,
                 down,
-                sumcheck_prover_state,
+                evaluation_point: sumcheck_prover_state.randomness,
             },
         ))
     }
 
+    /// The verifier part of the combined polynomial resolver
+    /// subprotocol.
+    ///
+    /// # Parameters
+    /// - `transcript`: FS-transcript.
+    /// - `proof`: The prover's proof.
+    /// - `num_constraints`: The number of constraints of the UAIR `U`.
+    /// - `max_degree`: The degree of the UAIR `U`.
+    /// - `ic_check_subclaim`: The subclaim left after the ideal check
+    ///   subprotocol. The subclaim is resolved by this protocol.
+    /// - `field_cfg`: The random field config.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn verify_as_subprotocol<R, U>(
         transcript: &mut impl Transcript,
@@ -201,6 +246,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         let folding_challenge_powers: Vec<F> =
             powers(folding_challenge, one.clone(), num_constraints);
 
+        // Compute v_0 + \alpha * v_1 + ... + \alpha ^ k * v_k.
         let expected_sum = ic_check_subclaim
             .values
             .iter()
