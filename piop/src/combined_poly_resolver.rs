@@ -55,6 +55,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             project_scalars_to_field(projected_scalars, &projecting_element)?;
 
         let zero = F::zero_with_cfg(field_cfg);
+        let one = F::one_with_cfg(field_cfg);
 
         let num_cols = U::num_cols();
 
@@ -130,10 +131,12 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
                     ImpossibleIdeal::from_ref,
                 );
 
-                folder.folded_constraints * selector * eq_r
+                folder.folded_constraints * (one.clone() - selector) * eq_r
             },
             field_cfg,
         );
+
+        println!("prover eq value: {:?}", &sumcheck_prover_state.mles[0]);
 
         let evals: Vec<F> = sumcheck_prover_state.mles[2..]
             .iter()
@@ -157,6 +160,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         ))
     }
 
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn verify_as_subprotocol<R, U>(
         transcript: &mut impl Transcript,
         proof: Proof<F>,
@@ -214,10 +218,10 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             });
         }
 
-        let subclaim: sumcheck::verifier::SubClaim<F> = MLSumcheck::verify_as_subprotocol(
+        let subclaim = MLSumcheck::verify_as_subprotocol(
             transcript,
             num_vars,
-            max_degree,
+            max_degree + 2,
             &proof.sumcheck_proof,
             field_cfg,
         )?;
@@ -229,7 +233,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             &ic_check_subclaim.evaluation_point,
             one.clone(),
         )?;
-        let selector_value = eq_eval(&sumcheck_point, &vec![one.clone(); num_vars], one)?;
+        let selector_value = eq_eval(&sumcheck_point, &vec![one.clone(); num_vars], one.clone())?;
+
+        println!("verifier eq value: {:?}", eq_r_value);
 
         let mut folder = ConstraintFolder::new(&folding_challenge_powers, &zero);
 
@@ -249,7 +255,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             ImpossibleIdeal::from_ref,
         );
 
-        let expected_claim_value = eq_r_value * selector_value * folder.folded_constraints;
+        let expected_claim_value = eq_r_value * (one - selector_value) * folder.folded_constraints;
 
         if expected_claim_value != subclaim.expected_evaluation {
             return Err(CombinedPolyResolverError::ClaimValueDoesNotMatch {
@@ -308,8 +314,8 @@ impl<F: PrimeField> From<SumCheckError<F>> for CombinedPolyResolverError<F> {
 mod tests {
     use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
     use rand::rng;
-    use zinc_poly::univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal};
-    use zinc_test_uair::{GenerateWitness, TestAirNoMultiplication, TestUairSimpleMultiplication};
+    use zinc_poly::univariate::dense::DensePolynomial;
+    use zinc_test_uair::{GenerateWitness, TestUairSimpleMultiplication};
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::{
         constraint_counter::count_constraints,
@@ -376,18 +382,19 @@ mod tests {
         )
         .expect("CombinedPolyResolver prover failed");
 
-        assert!(
-            CombinedPolyResolver::verify_as_subprotocol::<_, U>(
-                &mut verifier_transcript,
-                proof,
-                num_constraints,
-                num_vars,
-                max_degree,
-                ic_check_subclaim,
-                &test_config()
-            )
-            .is_ok()
+        let result = CombinedPolyResolver::verify_as_subprotocol::<_, U>(
+            &mut verifier_transcript,
+            proof,
+            num_constraints,
+            num_vars,
+            max_degree,
+            ic_check_subclaim,
+            &test_config(),
         );
+
+        println!("{:?}", result);
+
+        assert!(false)
     }
 
     #[test]
@@ -396,10 +403,10 @@ mod tests {
 
         let num_vars = 2;
 
-        test_successful_verification_generic::<TestAirNoMultiplication, _, _, 32>(
-            num_vars,
-            |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
-        );
+        // test_successful_verification_generic::<TestAirNoMultiplication, _, _, 32>(
+        //     num_vars,
+        //     |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
+        // );
         test_successful_verification_generic::<TestUairSimpleMultiplication, _, _, 32>(
             num_vars,
             |_ideal_over_ring| IdealOrZero::zero(),

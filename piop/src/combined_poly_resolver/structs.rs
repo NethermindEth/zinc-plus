@@ -16,6 +16,7 @@ pub struct ProverState<F: PrimeField> {
     pub sumcheck_prover_state: sumcheck::prover::ProverState<F>,
 }
 
+#[derive(Clone, Debug)]
 pub struct VerifierSubclaim<F: PrimeField> {
     pub evaluation_point: Vec<F>,
     pub up_evals: Vec<F>,

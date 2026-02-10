@@ -1,6 +1,5 @@
 use crypto_bigint::{Odd, modular::MontyParams};
 use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
-use rand::rng;
 use zinc_poly::{mle::DenseMultilinearExtension, univariate::dense::DensePolynomial};
 use zinc_test_uair::GenerateWitness;
 use zinc_transcript::traits::Transcript;
@@ -44,7 +43,7 @@ where
 
     IdealCheckProtocol::<TestIcTypes, _>::prove_as_subprotocol::<U>(
         transcript,
-        &trace,
+        trace,
         num_constraints,
         num_vars,
         &field_cfg,
