@@ -7,10 +7,11 @@ use num_traits::Zero;
 use rayon::prelude::*;
 use std::marker::PhantomData;
 use thiserror::Error;
-use zinc_poly::mle::MultilinearExtensionWithConfig;
-use zinc_poly::mle::dense::CollectDenseMleWithZero;
-use zinc_poly::utils::{ArithErrors, build_eq_x_r_inner, eq_eval};
-use zinc_poly::{CoefficientProjectable, EvaluatablePolynomial, EvaluationError};
+use zinc_poly::{
+    CoefficientProjectable, EvaluatablePolynomial, EvaluationError,
+    mle::{MultilinearExtensionWithConfig, dense::CollectDenseMleWithZero},
+    utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
+};
 use zinc_uair::ideal::ImpossibleIdeal;
 use zinc_utils::{cfg_iter, field, from_ref::FromRef, powers};
 
@@ -22,12 +23,16 @@ use zinc_poly::{
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::Uair;
-use zinc_utils::projectable_to_field::ProjectableToField;
-use zinc_utils::{cfg_into_iter, inner_transparent_field::InnerTransparentField};
+use zinc_utils::{
+    cfg_into_iter, inner_transparent_field::InnerTransparentField,
+    projectable_to_field::ProjectableToField,
+};
 
-use crate::combined_poly_resolver::folder::ConstraintFolder;
-use crate::ideal_check;
-use crate::sumcheck::{self, MLSumcheck, SumCheckError};
+use crate::{
+    combined_poly_resolver::folder::ConstraintFolder,
+    ideal_check,
+    sumcheck::{self, MLSumcheck, SumCheckError},
+};
 
 pub use structs::*;
 

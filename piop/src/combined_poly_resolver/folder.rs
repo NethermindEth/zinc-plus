@@ -1,6 +1,5 @@
 use crypto_primitives::PrimeField;
-use zinc_uair::ConstraintBuilder;
-use zinc_uair::ideal::ImpossibleIdeal;
+use zinc_uair::{ConstraintBuilder, ideal::ImpossibleIdeal};
 
 pub struct ConstraintFolder<'a, F: PrimeField> {
     challenge_powers: &'a [F],

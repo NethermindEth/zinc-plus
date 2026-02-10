@@ -213,8 +213,6 @@ impl<const LIMBS: usize> Uair<DensePolynomial<Int<LIMBS>, 32>> for TestAirScalar
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use zinc_uair::{
         collect_scalars::collect_scalars, constraint_counter::count_constraints,
         degree_counter::count_max_degree,
@@ -229,6 +227,14 @@ mod tests {
         assert_eq!(
             count_constraints::<DensePolynomial<Int<LIMBS>, 32>, TestUairSimpleMultiplication>(),
             3
+        );
+    }
+
+    #[test]
+    fn test_air_no_multiplication_correct_constraints_number() {
+        assert_eq!(
+            count_constraints::<DensePolynomial<Int<LIMBS>, 32>, TestAirNoMultiplication>(),
+            1
         );
     }
 
@@ -252,7 +258,7 @@ mod tests {
     fn test_air_scalar_multiplications_correct_collect_scalars() {
         assert_eq!(
             collect_scalars::<DensePolynomial<Int<LIMBS>, 32>, TestAirScalarMultiplications>(),
-            HashSet::from_iter(vec![
+            (vec![
                 DensePolynomial::new([Int::from_i8(-1), Int::from_i8(0), Int::from_i8(1)]),
                 DensePolynomial::new([
                     Int::from_i8(1),
@@ -260,7 +266,9 @@ mod tests {
                     Int::from_i8(3),
                     Int::from_i8(4),
                 ])
-            ])
+            ]
+            .into_iter()
+            .collect())
         );
     }
 }

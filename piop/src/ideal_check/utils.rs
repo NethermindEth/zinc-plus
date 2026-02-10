@@ -3,7 +3,8 @@ use rayon::prelude::*;
 
 use num_traits::Zero;
 use zinc_poly::{
-    CoefficientProjectable, mle::DenseMultilinearExtension, mle::dense::CollectDenseMleWithZero,
+    CoefficientProjectable,
+    mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero},
     univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_utils::cfg_iter;

@@ -16,6 +16,7 @@ use crate::ideal_check::{structs::IdealCheckTypes, utils::project_trace_matrix};
 /// obtains the combined polynomials' MLE coefficients.
 /// Since each coefficient is also a univariate polynomial
 /// we split the resulting MLE into coefficient MLEs.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn compute_combined_polynomials<
     IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>,
     U,
@@ -109,7 +110,7 @@ where
         &mut constraint_builder,
         up,
         down,
-        project,
+        &project,
         |x, y| Some(project(y) * x),
         ImpossibleIdeal::from_ref,
     );

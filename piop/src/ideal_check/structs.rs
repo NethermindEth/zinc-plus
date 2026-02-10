@@ -1,6 +1,5 @@
 use crypto_primitives::{DenseRowMatrix, Field, FromWithConfig, PrimeField, Semiring};
 use std::collections::HashMap;
-
 use zinc_poly::{
     CoefficientProjectable, mle::DenseMultilinearExtension,
     univariate::dynamic::over_field::DynamicPolynomialF,
