@@ -232,7 +232,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig> CombinedPolyResolver<F>
             &proof.down_evals,
             |x| F::zero_with_cfg(field_cfg),
             |x, y| Some(F::zero_with_cfg(field_cfg)),
-            |_| ImpossibleIdeal,
+            ImpossibleIdeal::from_ref,
         );
 
         let expected_claim_value = eq_r_value * selector_value * folder.folded_constraints;
