@@ -1,7 +1,7 @@
 use crypto_primitives::PrimeField;
 use zinc_poly::mle::DenseMultilinearExtension;
 
-use crate::sumcheck::{self, SumcheckProof};
+use crate::sumcheck::SumcheckProof;
 
 /// The proof type of the combined polynomial resolver
 /// subprotocol.

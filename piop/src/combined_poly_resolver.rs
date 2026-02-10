@@ -43,8 +43,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// of a sumcheck protocol of the form:
     /// $$
     /// \sum_{b \in H} (f_0(b, x_0[b],...,x_n[b], x_0ˆdown[b],...,x_nˆdown[b])
-    ///                 + \alpha f_1(...) + ... + \alpha^k f_k(...))
-    ///                     = v_0 + \alpha * v_1 + ... + \alphaˆk * v_k,
+    ///                 + \alpha f_1(...) + ... + \alpha^k f_k(...)) = v_0 +
+    ///                   \alpha * v_1 + ... + \alphaˆk * v_k,
     /// $$
     /// where $f_i(b, x_0[b],...,x_n[b], x_0ˆdown[b],...,x_nˆdown[b])
     ///         = eq(r, b) * (1 - eq(r, 1,...1))
@@ -57,7 +57,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// - `trace_matrix`: The trace that have been projected to F[X].
     /// - `evaluation_point`: The evaluation point for the claims.
     /// - `projected_scalars`: The UAIR scalars projected to `F[X]`.
-    /// - `num_constraints`: The number of constraint polynomials in the UAIR `U`.
+    /// - `num_constraints`: The number of constraint polynomials in the UAIR
+    ///   `U`.
     /// - `num_vars`: The number of variables of the trace MLEs.
     /// - `max_degree`: The degree of the UAIR `U`.
     /// - `field_cfg`: The random field config.
