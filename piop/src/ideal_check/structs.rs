@@ -40,4 +40,5 @@ pub struct VerifierSubClaim<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEG
 {
     pub evaluation_point: Vec<IcTypes::F>,
     pub values: Vec<DynamicPolynomialF<IcTypes::F>>,
+    pub coefficient_projecting_element: IcTypes::F,
 }

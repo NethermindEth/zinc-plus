@@ -183,7 +183,8 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
     {
         // Sample a field element to maintain FS symmetry with
         // the prover.
-        let _: IcTypes::F = transcript.get_field_challenge(field_cfg);
+        // We also will need it in a later stage of the protocol.
+        let coefficient_projecting_element: IcTypes::F = transcript.get_field_challenge(field_cfg);
 
         let mut transcription_buf: Vec<u8> = vec![0; <IcTypes::F as Field>::Inner::NUM_BYTES];
 
@@ -209,6 +210,7 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
         Ok(VerifierSubClaim {
             evaluation_point,
             values: combined_mle_values,
+            coefficient_projecting_element,
         })
     }
 }
