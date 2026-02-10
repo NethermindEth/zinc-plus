@@ -1,6 +1,8 @@
 //! UAIR description tools.
 
+pub mod collect_scalars;
 pub mod constraint_counter;
+pub mod do_nothing_builder;
 pub mod dummy_semiring;
 pub mod ideal;
 pub mod ideal_collector;

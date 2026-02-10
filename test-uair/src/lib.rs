@@ -169,3 +169,87 @@ impl<const LIMBS: usize> GenerateWitness<DensePolynomial<Int<LIMBS>, 32>>
         vec![a, b, c]
     }
 }
+
+pub struct TestAirScalarMultiplications;
+
+impl<const LIMBS: usize> Uair<DensePolynomial<Int<LIMBS>, 32>> for TestAirScalarMultiplications {
+    type Ideal = DegreeOneIdeal<Int<LIMBS>>;
+
+    fn num_cols() -> usize {
+        3
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: &[B::Expr],
+        _down: &[B::Expr],
+        from_ref: FromR,
+        mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+        FromR: Fn(&DensePolynomial<Int<LIMBS>, 32>) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &DensePolynomial<Int<LIMBS>, 32>) -> Option<B::Expr>,
+    {
+        b.assert_in_ideal(
+            mbs(
+                &up[0],
+                &DensePolynomial::new([Int::from_i8(-1), Int::from_i8(0), Int::from_i8(1)]),
+            )
+            .expect("arithmetic overflow")
+                + &up[1]
+                - &up[2]
+                + from_ref(&DensePolynomial::new([
+                    Int::from_i8(1),
+                    Int::from_i8(2),
+                    Int::from_i8(3),
+                    Int::from_i8(4),
+                ])),
+            &ideal_from_ref(&DegreeOneIdeal::new(Int::from(2))),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use zinc_uair::{collect_scalars::collect_scalars, constraint_counter::count_constraints};
+
+    use super::*;
+
+    const LIMBS: usize = 4;
+
+    #[test]
+    fn test_uair_simple_multiplication_correct_constraints_number() {
+        assert_eq!(
+            count_constraints::<DensePolynomial<Int<LIMBS>, 32>, TestUairSimpleMultiplication>(),
+            3
+        );
+    }
+
+    #[test]
+    fn test_air_no_multiplication_correct_constraints_number() {
+        assert_eq!(
+            count_constraints::<DensePolynomial<Int<LIMBS>, 32>, TestAirNoMultiplication>(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_air_scalar_multiplications_correct_collect_scalars() {
+        assert_eq!(
+            collect_scalars::<DensePolynomial<Int<LIMBS>, 32>, TestAirScalarMultiplications>(),
+            HashSet::from_iter(vec![
+                DensePolynomial::new([Int::from_i8(-1), Int::from_i8(0), Int::from_i8(1)]),
+                DensePolynomial::new([
+                    Int::from_i8(1),
+                    Int::from_i8(2),
+                    Int::from_i8(3),
+                    Int::from_i8(4),
+                ])
+            ])
+        );
+    }
+}
