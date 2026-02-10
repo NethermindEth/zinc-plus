@@ -79,6 +79,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         let eq_r = build_eq_x_r_inner(evaluation_point, field_cfg)?;
 
+        println!("eq_r num vars {:?}", eq_r.num_vars);
+
         let last_row_selector =
             build_eq_x_r_inner(&vec![F::one_with_cfg(field_cfg); num_vars], field_cfg)?;
 
@@ -101,6 +103,10 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
             mles
         };
+
+        for mle in &mles {
+            println!("num_vars {:?}", mle.num_vars);
+        }
 
         let (sumcheck_proof, sumcheck_prover_state) = MLSumcheck::prove_as_subprotocol(
             transcript,
