@@ -15,6 +15,8 @@ use num_traits::{CheckedAdd, CheckedMul};
 pub use pntt::radix8::params::{
     PnttConfigF2_16_1, PnttConfigF2_16B16, PnttConfigF2_16B64,
     PnttConfigF167772161, PnttConfigF167772161B16, PnttConfigF167772161B64,
+    PnttConfigF1179649B16,
+    PnttConfigF7340033B16,
     PnttInt, Radix8PnttParams,
 };
 use std::{
