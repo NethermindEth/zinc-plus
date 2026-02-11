@@ -19,17 +19,11 @@ use crypto_bigint::U64;
 use crypto_primitives::{
     FixedSemiring, boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
 };
-
-/// 192-bit signed integer for codeword coefficients.
-/// Sufficient for all DEPTH/field configurations up to DEPTH=5/F7340033
-/// (worst case ~180 bits for scalar i32, ~149 bits for BPoly<31>).
-type CwInt = Int<3>;
 use zip_plus::{
     code::{
         iprs::{
             IprsCode, PnttConfigF2_16B16,
             PnttConfigF1179649B16,
-            PnttConfigF7340033B16,
         },
         raa::{RaaCode, RaaConfig},
     },
@@ -80,7 +74,7 @@ struct BenchZipScalarTypes;
 impl ZipTypes for BenchZipScalarTypes {
     const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = i32;
-    type Cw = CwInt;
+    type Cw = i128;  // Use i128 to avoid overflow when accumulating products
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
@@ -94,15 +88,7 @@ impl ZipTypes for BenchZipScalarTypes {
 
 // IPRS code types for scalar i32 evaluations (BASE_LEN=16 only)
 type IprsScalarB16<const DEPTH: usize, const CHECK: bool> =
-    IprsCode<BenchZipScalarTypes, PnttConfigF2_16B16<DEPTH>, ScalarWideningMulByScalar<CwInt>, CHECK>;
-
-// F1179649 = 9 × 2^17 + 1 (supports NTT up to 2^17)
-type IprsScalarMidB16<const DEPTH: usize, const CHECK: bool> =
-    IprsCode<BenchZipScalarTypes, PnttConfigF1179649B16<DEPTH>, ScalarWideningMulByScalar<CwInt>, CHECK>;
-
-// F7340033 = 7 × 2^20 + 1 (supports NTT up to 2^20)
-type IprsScalarMid2B16<const DEPTH: usize, const CHECK: bool> =
-    IprsCode<BenchZipScalarTypes, PnttConfigF7340033B16<DEPTH>, ScalarWideningMulByScalar<CwInt>, CHECK>;
+    IprsCode<BenchZipScalarTypes, PnttConfigF2_16B16<DEPTH>, ScalarWideningMulByScalar<i128>, CHECK>;
 
 #[allow(dead_code)]
 type SomeRaaCode<const D_PLUS_ONE: usize> =
@@ -127,15 +113,6 @@ type IprsMidB16<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const CHEC
         CHECK,
     >;
 
-// F7340033 (7 × 2^20 + 1): Row lengths up to 524288 (D=5)
-type IprsMid2B16<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const CHECK: bool> =
-    IprsCode<
-        BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
-        PnttConfigF7340033B16<DEPTH>,
-        BinaryPolyWideningMulByScalar<Twiddle>,
-        CHECK,
-    >;
-
 #[allow(dead_code)]
 fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");
@@ -149,35 +126,27 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
 fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ Encode");
 
-    // ========== BPoly<31> benchmarks (BASE_LEN=16 only) ==========
-    // F65537: DEPTH 1-3
-    encode_single_row::<BenchZipPlusTypes<CwInt, 32>, IprsB16<CwInt, 1, 32, UNCHECKED>, 128>(&mut group, "IPRS-1-1_2-F65537");
-    encode_single_row::<BenchZipPlusTypes<CwInt, 32>, IprsB16<CwInt, 2, 32, UNCHECKED>, 1024>(&mut group, "IPRS-2-1_2-F65537");
-    encode_single_row::<BenchZipPlusTypes<CwInt, 32>, IprsB16<CwInt, 3, 32, UNCHECKED>, 8192>(&mut group, "IPRS-3-1_2-F65537");
-    // F1179649: DEPTH 4 (row_len = 65536 = 2^16)
-    encode_single_row::<BenchZipPlusTypes<CwInt, 32>, IprsMidB16<CwInt, 4, 32, UNCHECKED>, 65536>(&mut group, "IPRS-4-1_2-F1179649");
-    // F7340033: DEPTH 5 (row_len = 524288 = 2^19)
-    encode_single_row::<BenchZipPlusTypes<CwInt, 32>, IprsMid2B16<CwInt, 5, 32, UNCHECKED>, 524288>(&mut group, "IPRS-5-1_2-F7340033");
+    // ========== BPoly<31> benchmarks (BASE_LEN=16, Cw coeff = i128) ==========
+    // F65537: DEPTH 1-3 (max ~72 bits after D=3)
+    encode_single_row::<BenchZipPlusTypes<i128, 32>, IprsB16<i128, 1, 32, UNCHECKED>, 128>(&mut group, "IPRS-1-1_2-F65537");
+    encode_single_row::<BenchZipPlusTypes<i128, 32>, IprsB16<i128, 2, 32, UNCHECKED>, 1024>(&mut group, "IPRS-2-1_2-F65537");
+    encode_single_row::<BenchZipPlusTypes<i128, 32>, IprsB16<i128, 3, 32, UNCHECKED>, 8192>(&mut group, "IPRS-3-1_2-F65537");
+    // F1179649: DEPTH 4 (max ~111 bits)
+    encode_single_row::<BenchZipPlusTypes<i128, 32>, IprsMidB16<i128, 4, 32, UNCHECKED>, 65536>(&mut group, "IPRS-4-1_2-F1179649");
 
     // ========== Degree-0 (constant) polynomial benchmarks ==========
     // F65537: DEPTH 1-3
-    encode_single_row::<BenchZipPlusTypes<CwInt, 1>, IprsB16<CwInt, 1, 1, UNCHECKED>, 128>(&mut group, "IPRS-1-1_2-F65537-Deg0");
-    encode_single_row::<BenchZipPlusTypes<CwInt, 1>, IprsB16<CwInt, 2, 1, UNCHECKED>, 1024>(&mut group, "IPRS-2-1_2-F65537-Deg0");
-    encode_single_row::<BenchZipPlusTypes<CwInt, 1>, IprsB16<CwInt, 3, 1, UNCHECKED>, 8192>(&mut group, "IPRS-3-1_2-F65537-Deg0");
+    encode_single_row::<BenchZipPlusTypes<i128, 1>, IprsB16<i128, 1, 1, UNCHECKED>, 128>(&mut group, "IPRS-1-1_2-F65537-Deg0");
+    encode_single_row::<BenchZipPlusTypes<i128, 1>, IprsB16<i128, 2, 1, UNCHECKED>, 1024>(&mut group, "IPRS-2-1_2-F65537-Deg0");
+    encode_single_row::<BenchZipPlusTypes<i128, 1>, IprsB16<i128, 3, 1, UNCHECKED>, 8192>(&mut group, "IPRS-3-1_2-F65537-Deg0");
     // F1179649: DEPTH 4
-    encode_single_row::<BenchZipPlusTypes<CwInt, 1>, IprsMidB16<CwInt, 4, 1, UNCHECKED>, 65536>(&mut group, "IPRS-4-1_2-F1179649-Deg0");
-    // F7340033: DEPTH 5
-    encode_single_row::<BenchZipPlusTypes<CwInt, 1>, IprsMid2B16<CwInt, 5, 1, UNCHECKED>, 524288>(&mut group, "IPRS-5-1_2-F7340033-Deg0");
+    encode_single_row::<BenchZipPlusTypes<i128, 1>, IprsMidB16<i128, 4, 1, UNCHECKED>, 65536>(&mut group, "IPRS-4-1_2-F1179649-Deg0");
 
-    // ========== Scalar i32 benchmarks ==========
-    // F65537: DEPTH 1-3
+    // ========== Scalar i32 benchmarks (Cw = i128) ==========
+    // F65537: DEPTH 1-3 (max ~103 bits after D=3)
     encode_single_row::<BenchZipScalarTypes, IprsScalarB16<1, UNCHECKED>, 128>(&mut group, "IPRS-1-1_2-F65537-i32");
     encode_single_row::<BenchZipScalarTypes, IprsScalarB16<2, UNCHECKED>, 1024>(&mut group, "IPRS-2-1_2-F65537-i32");
     encode_single_row::<BenchZipScalarTypes, IprsScalarB16<3, UNCHECKED>, 8192>(&mut group, "IPRS-3-1_2-F65537-i32");
-    // F1179649: DEPTH 4
-    encode_single_row::<BenchZipScalarTypes, IprsScalarMidB16<4, UNCHECKED>, 65536>(&mut group, "IPRS-4-1_2-F1179649-i32");
-    // F7340033: DEPTH 5
-    encode_single_row::<BenchZipScalarTypes, IprsScalarMid2B16<5, UNCHECKED>, 524288>(&mut group, "IPRS-5-1_2-F7340033-i32");
 
     group.finish();
 }

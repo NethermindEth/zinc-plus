@@ -422,20 +422,25 @@ where
 #[derive(Clone, Copy, Default)]
 pub struct BinaryU64PolyWideningMulByScalar<Output>(PhantomData<Output>);
 
-impl<Output, const DEGREE_PLUS_ONE: usize>
-    WideningMulByScalar<BinaryU64Poly<DEGREE_PLUS_ONE>, i64>
-    for BinaryU64PolyWideningMulByScalar<Output>
-where
-    Output: From<i64> + Send + Sync + Default + Copy + Zero,
+impl<const DEGREE_PLUS_ONE: usize> WideningMulByScalar<BinaryU64Poly<DEGREE_PLUS_ONE>, i64>
+    for BinaryU64PolyWideningMulByScalar<i64>
 {
-    type Output = DensePolynomial<Output, DEGREE_PLUS_ONE>;
+    type Output = DensePolynomial<i64, DEGREE_PLUS_ONE>;
 
     fn mul_by_scalar_widen(lhs: &BinaryU64Poly<DEGREE_PLUS_ONE>, rhs: &i64) -> Self::Output {
-        // Use SIMD to widen binary poly → DensePolynomial<i64, D>, then
-        // convert each coefficient to the wider Output type.
+        widen_simd::<DEGREE_PLUS_ONE>(lhs, *rhs)
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> WideningMulByScalar<BinaryU64Poly<DEGREE_PLUS_ONE>, i64>
+    for BinaryU64PolyWideningMulByScalar<i128>
+{
+    type Output = DensePolynomial<i128, DEGREE_PLUS_ONE>;
+
+    fn mul_by_scalar_widen(lhs: &BinaryU64Poly<DEGREE_PLUS_ONE>, rhs: &i64) -> Self::Output {
         let i64_result = widen_simd::<DEGREE_PLUS_ONE>(lhs, *rhs);
         DensePolynomial {
-            coeffs: i64_result.coeffs.map(Output::from),
+            coeffs: i64_result.coeffs.map(i128::from),
         }
     }
 }
