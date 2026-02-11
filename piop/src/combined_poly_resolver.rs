@@ -234,6 +234,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         F::Inner: ConstTranscribable,
         U: Uair<R>,
     {
+        proof.validate_evaluation_sizes::<_, U>()?;
+
         let projecting_element: F = transcript.get_field_challenge(field_cfg);
 
         let projected_scalars: HashMap<R, F> =
@@ -342,6 +344,10 @@ pub enum CombinedPolyResolverError<F: PrimeField> {
     MleEvaluationError(EvaluationError),
     #[error("error projecting polynomial {0} by point {1}: {2}")]
     ProjectionError(DynamicPolynomialF<F>, F, EvaluationError),
+    #[error("wrong trace columns evaluations number: got {got}, expected {expected}")]
+    WrongUpEvalsNumber { got: usize, expected: usize },
+    #[error("wrong shifted trace columns evaluations number: got {got}, expected {expected}")]
+    WrongDownEvalsNumber { got: usize, expected: usize },
     #[error("sumcheck verification failed: {0}")]
     SumcheckError(SumCheckError<F>),
     #[error("wrong sumcheck claimed sum: received {got}, expected {expected}")]

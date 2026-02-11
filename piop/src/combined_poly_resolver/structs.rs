@@ -1,7 +1,8 @@
-use crypto_primitives::PrimeField;
+use crypto_primitives::{PrimeField, Semiring};
 use zinc_poly::mle::DenseMultilinearExtension;
+use zinc_uair::Uair;
 
-use crate::sumcheck::SumcheckProof;
+use crate::{combined_poly_resolver::CombinedPolyResolverError, sumcheck::SumcheckProof};
 
 /// The proof type of the combined polynomial resolver
 /// subprotocol.
@@ -14,6 +15,32 @@ pub struct Proof<F: PrimeField> {
     pub up_evals: Vec<F>,
     /// The evaluations of the shifted projected trace columns MLEs.
     pub down_evals: Vec<F>,
+}
+
+impl<F: PrimeField> Proof<F> {
+    /// Check if `up_evals` and `down_evals` vectors
+    /// has the length `U::num_cols()`.
+    pub fn validate_evaluation_sizes<R: Semiring + 'static, U: Uair<R>>(
+        &self,
+    ) -> Result<(), CombinedPolyResolverError<F>> {
+        let num_cols = U::num_cols();
+
+        if self.up_evals.len() != num_cols {
+            return Err(CombinedPolyResolverError::WrongUpEvalsNumber {
+                got: self.up_evals.len(),
+                expected: num_cols,
+            });
+        }
+
+        if self.down_evals.len() != num_cols {
+            return Err(CombinedPolyResolverError::WrongDownEvalsNumber {
+                got: self.down_evals.len(),
+                expected: num_cols,
+            });
+        }
+
+        Ok(())
+    }
 }
 
 /// Expensive data computed in the course
