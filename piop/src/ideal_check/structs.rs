@@ -1,41 +1,41 @@
 use std::collections::HashMap;
 
 use crypto_primitives::{Field, FromWithConfig, Semiring};
-use zinc_poly::{
-    CoefficientProjectable, mle::DenseMultilinearExtension,
-    univariate::dynamic::over_field::DynamicPolynomialF,
-};
+use crypto_primitives::boolean::Boolean;
+use crypto_primitives::crypto_bigint_int::Int;
+use zinc_poly::{CoefficientProjectable, mle::DenseMultilinearExtension, univariate::dynamic::over_field::DynamicPolynomialF, Polynomial};
+use zinc_poly::univariate::dense::DensePolynomial;
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
     inner_transparent_field::InnerTransparentField, projectable_to_field::ProjectableToField,
 };
 
-pub trait IdealCheckTypes<const DEGREE_PLUS_ONE: usize> {
-    type WitnessCoeff;
-    type Witness: Semiring
-        + CoefficientProjectable<Self::WitnessCoeff, DEGREE_PLUS_ONE>
+pub trait IdealCheckTypes<R: Semiring, const DEGREE_PLUS_ONE: usize> {
+    type Witness: Polynomial<R>
+        + Semiring
+        + CoefficientProjectable<R, DEGREE_PLUS_ONE>
         + ProjectableToField<Self::F>
         + ConstTranscribable
         + Send
         + Sync
         + 'static;
 
-    type F: InnerTransparentField + FromWithConfig<Self::WitnessCoeff> + Send + Sync + 'static;
+    type F: InnerTransparentField + FromWithConfig<R> + Send + Sync + 'static;
 }
 
 #[derive(Clone, Debug)]
-pub struct Proof<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize> {
+pub struct Proof<R: Semiring, IcTypes: IdealCheckTypes<R, DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize> {
     pub combined_mle_values: Vec<DynamicPolynomialF<IcTypes::F>>,
 }
 
 #[derive(Clone, Debug)]
-pub struct ProverState<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize> {
+pub struct ProverState<R: Semiring, IcTypes: IdealCheckTypes<R, DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize> {
     pub evaluation_point: Vec<IcTypes::F>,
     pub combined_mles: Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>>,
     pub projected_scalars: HashMap<IcTypes::Witness, DynamicPolynomialF<IcTypes::F>>,
 }
 
-pub struct VerifierSubClaim<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
+pub struct VerifierSubClaim<R: Semiring, IcTypes: IdealCheckTypes<R, DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
 {
     pub evaluation_point: Vec<IcTypes::F>,
     pub values: Vec<DynamicPolynomialF<IcTypes::F>>,

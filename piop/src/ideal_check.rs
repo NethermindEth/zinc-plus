@@ -4,7 +4,7 @@ mod combined_poly_builder;
 mod structs;
 
 use batched_ideal_check::*;
-use crypto_primitives::{Field, PrimeField};
+use crypto_primitives::{Field, PrimeField, Semiring};
 use derive_more::From;
 use itertools::Itertools;
 #[cfg(feature = "parallel")]
@@ -30,12 +30,13 @@ pub type Result<T, R, I> = std::result::Result<T, IdealCheckError<R, I>>;
 
 /// Ideal-check subprotocol.
 pub struct IdealCheckProtocol<
-    IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>,
+    R: Semiring,
+    IcTypes: IdealCheckTypes<R, DEGREE_PLUS_ONE>,
     const DEGREE_PLUS_ONE: usize,
->(PhantomData<IcTypes>);
+>(PhantomData<(R, IcTypes)>);
 
-impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
-    IdealCheckProtocol<IcTypes, DEGREE_PLUS_ONE>
+impl<R: Semiring, IcTypes: IdealCheckTypes<R, DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
+    IdealCheckProtocol<R, IcTypes, DEGREE_PLUS_ONE>
 {
     /// The prover part of the ideal-check subprotocol.
     ///
@@ -62,8 +63,8 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
         field_cfg: &<IcTypes::F as PrimeField>::Config,
     ) -> Result<
         (
-            Proof<IcTypes, DEGREE_PLUS_ONE>,
-            ProverState<IcTypes, DEGREE_PLUS_ONE>,
+            Proof<R, IcTypes, DEGREE_PLUS_ONE>,
+            ProverState<R, IcTypes, DEGREE_PLUS_ONE>,
         ),
         IcTypes::Witness,
         U::Ideal,
@@ -95,7 +96,7 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
                 })
                 .collect();
 
-        let combined_mles = combined_poly_builder::compute_combined_polynomials::<IcTypes, U, _>(
+        let combined_mles = combined_poly_builder::compute_combined_polynomials::<R, IcTypes, U, _>(
             trace,
             &projecting_element,
             &projected_scalars,
@@ -162,13 +163,13 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
     #[allow(clippy::type_complexity)]
     pub fn verify_as_subprotocol<U, IdealOverF, IdealOverFFromRef>(
         transcript: &mut impl Transcript,
-        proof: Proof<IcTypes, DEGREE_PLUS_ONE>,
+        proof: Proof<R, IcTypes, DEGREE_PLUS_ONE>,
         num_constraints: usize,
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
         field_cfg: &<IcTypes::F as PrimeField>::Config,
     ) -> Result<
-        VerifierSubClaim<IcTypes, DEGREE_PLUS_ONE>,
+        VerifierSubClaim<R, IcTypes, DEGREE_PLUS_ONE>,
         DynamicPolynomialF<IcTypes::F>,
         IdealOverF,
     >
@@ -250,8 +251,7 @@ mod tests {
 
     struct TestIcTypes;
 
-    impl<const DEGREE_PLUS_ONE: usize> IdealCheckTypes<DEGREE_PLUS_ONE> for TestIcTypes {
-        type WitnessCoeff = Int<5>;
+    impl<const DEGREE_PLUS_ONE: usize> IdealCheckTypes<Int<5>, DEGREE_PLUS_ONE> for TestIcTypes {
         type Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>;
 
         type F = MontyField<4>;
@@ -261,8 +261,8 @@ mod tests {
         num_vars: usize,
         transcript: &mut impl Transcript,
     ) -> (
-        Proof<TestIcTypes, DEGREE_PLUS_ONE>,
-        ProverState<TestIcTypes, DEGREE_PLUS_ONE>,
+        Proof<Int<5>, TestIcTypes, DEGREE_PLUS_ONE>,
+        ProverState<Int<5>, TestIcTypes, DEGREE_PLUS_ONE>,
     )
     where
         U: GenerateWitness<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
@@ -274,9 +274,9 @@ mod tests {
         let field_cfg = test_config();
 
         let num_constraints =
-            count_constraints::<<TestIcTypes as IdealCheckTypes<_>>::Witness, U>();
+            count_constraints::<<TestIcTypes as IdealCheckTypes<_, _>>::Witness, U>();
 
-        IdealCheckProtocol::<TestIcTypes, _>::prove_as_subprotocol::<U>(
+        IdealCheckProtocol::<_, TestIcTypes, _>::prove_as_subprotocol::<U>(
             transcript,
             &trace,
             num_constraints,
@@ -305,10 +305,10 @@ mod tests {
             run_prover::<U, DEGREE_PLUS_ONE>(num_vars, &mut transcript.clone());
 
         let num_constraints =
-            count_constraints::<<TestIcTypes as IdealCheckTypes<_>>::Witness, U>();
+            count_constraints::<<TestIcTypes as IdealCheckTypes<_, _>>::Witness, U>();
 
         let verifier_result =
-            IdealCheckProtocol::<TestIcTypes, _>::verify_as_subprotocol::<U, _, _>(
+            IdealCheckProtocol::<_, TestIcTypes, _>::verify_as_subprotocol::<U, _, _>(
                 &mut transcript.clone(),
                 proof,
                 num_constraints,

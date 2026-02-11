@@ -28,35 +28,34 @@ const DEGREE_PLUS_ONE: usize = 32;
 #[derive(Clone)]
 struct BenchIcTypes<const FIELD_LIMBS: usize, const INT_LIMBS: usize>;
 
-impl<const FIELD_LIMBS: usize, const INT_LIMBS: usize> IdealCheckTypes<DEGREE_PLUS_ONE>
+trait BenchIcTrait<const FIELD_LIMBS: usize, const INT_LIMBS: usize>:
+    IdealCheckTypes<
+        Int<INT_LIMBS>,
+        DEGREE_PLUS_ONE,
+        Witness = DensePolynomial<Int<INT_LIMBS>, DEGREE_PLUS_ONE>,
+        F = MontyField<FIELD_LIMBS>,
+    > + Clone
+{
+    const FIELD_LIMBS: usize;
+}
+
+impl<const FIELD_LIMBS: usize, const INT_LIMBS: usize> IdealCheckTypes<Int<INT_LIMBS>, DEGREE_PLUS_ONE>
     for BenchIcTypes<FIELD_LIMBS, INT_LIMBS>
 {
-    type WitnessCoeff = Int<INT_LIMBS>;
     type Witness = DensePolynomial<Int<INT_LIMBS>, DEGREE_PLUS_ONE>;
     type F = MontyField<FIELD_LIMBS>;
 }
 
-trait BenchIcTrait {
-    const FIELD_LIMBS: usize;
-}
-
-impl<const FIELD_LIMBS: usize, const INT_LIMBS: usize> BenchIcTrait
+impl<const FIELD_LIMBS: usize, const INT_LIMBS: usize> BenchIcTrait<FIELD_LIMBS, INT_LIMBS>
     for BenchIcTypes<FIELD_LIMBS, INT_LIMBS>
 {
     const FIELD_LIMBS: usize = FIELD_LIMBS;
 }
 
 #[allow(clippy::arithmetic_side_effects)]
-fn bench_no_mult<IcTypes>(group: &mut BenchmarkGroup<WallTime>, witness_size: usize)
+fn bench_no_mult<IcTypes, const FIELD_LIMBS: usize, const INT_LIMBS: usize>(group: &mut BenchmarkGroup<WallTime>, witness_size: usize)
 where
-    IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE> + BenchIcTrait + Clone,
-    IcTypes::WitnessCoeff: Semiring + 'static,
-    IcTypes::F: Field,
-    <IcTypes::F as Field>::Inner:
-        ConstIntSemiring + FromRef<<IcTypes::F as Field>::Inner> + ConstTranscribable,
-    TestAirNoMultiplication: Uair<IcTypes::Witness, Ideal = DegreeOneIdeal<IcTypes::WitnessCoeff>>
-        + GenerateWitness<IcTypes::Witness>,
-    MillerRabin: PrimalityTest<<IcTypes::F as Field>::Inner>,
+    IcTypes: BenchIcTrait<FIELD_LIMBS, INT_LIMBS>,
 {
     let mut rng = rng();
     let num_vars = zinc_utils::log2(witness_size) as usize;
@@ -66,12 +65,12 @@ where
 
     let transcript = KeccakTranscript::new();
 
-    let num_constraints = count_constraints::<IcTypes::Witness, TestAirNoMultiplication>();
+    let num_constraints = count_constraints::<<IcTypes as IdealCheckTypes<_, _>>::Witness, TestAirNoMultiplication>();
 
     let prove =
-        |(trace, mut transcript): (Vec<_>, KeccakTranscript)| -> Proof<IcTypes, DEGREE_PLUS_ONE> {
+        |(trace, mut transcript): (Vec<_>, KeccakTranscript)| -> Proof<_, IcTypes, DEGREE_PLUS_ONE> {
             let field_cfg = transcript
-                .get_random_field_cfg::<IcTypes::F, <IcTypes::F as Field>::Inner, MillerRabin>();
+                .get_random_field_cfg::<<IcTypes as IdealCheckTypes<_, _>>::F, <<IcTypes as IdealCheckTypes<_, _>>::F as Field>::Inner, MillerRabin>();
             IdealCheckProtocol::prove_as_subprotocol::<TestAirNoMultiplication>(
                 &mut transcript,
                 &trace,
@@ -107,8 +106,8 @@ where
                 || (proof.clone(), transcript.clone()),
                 |(proof, mut transcript)| {
                     let field_cfg = transcript.get_random_field_cfg::<
-                        IcTypes::F,
-                        <IcTypes::F as Field>::Inner,
+                        <IcTypes as IdealCheckTypes<_, _>>::F,
+                        <<IcTypes as IdealCheckTypes<_, _>>::F as Field>::Inner,
                         MillerRabin,
                     >();
                     let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<
@@ -134,23 +133,17 @@ where
 }
 
 pub fn bench_no_mult_3(group: &mut BenchmarkGroup<WallTime>, witness_size: usize) {
-    bench_no_mult::<BenchIcTypes<3, 4>>(group, witness_size)
+    bench_no_mult::<BenchIcTypes<3, 4>, 3, 4>(group, witness_size)
 }
 
 pub fn bench_no_mult_4(group: &mut BenchmarkGroup<WallTime>, witness_size: usize) {
-    bench_no_mult::<BenchIcTypes<4, 5>>(group, witness_size)
+    bench_no_mult::<BenchIcTypes<4, 5>, 4, 5>(group, witness_size)
 }
 
 #[allow(clippy::arithmetic_side_effects)]
-fn bench_simple_mult<IcTypes>(group: &mut BenchmarkGroup<WallTime>, witness_size: usize)
+fn bench_simple_mult<IcTypes, const FIELD_LIMBS: usize, const INT_LIMBS: usize>(group: &mut BenchmarkGroup<WallTime>, witness_size: usize)
 where
-    IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE> + BenchIcTrait + Clone,
-    IcTypes::F: Field,
-    <IcTypes::F as Field>::Inner:
-        ConstIntSemiring + FromRef<<IcTypes::F as Field>::Inner> + ConstTranscribable,
-    TestUairSimpleMultiplication: Uair<IcTypes::Witness> + GenerateWitness<IcTypes::Witness>,
-    MillerRabin: PrimalityTest<<IcTypes::F as Field>::Inner>,
-    IdealOrZero<DegreeOneIdeal<IcTypes::F>>: IdealCheck<DynamicPolynomialF<IcTypes::F>>,
+    IcTypes: BenchIcTrait<FIELD_LIMBS, INT_LIMBS>,
 {
     let mut rng = rng();
     let num_vars = zinc_utils::log2(witness_size) as usize;
@@ -164,12 +157,12 @@ where
 
     let transcript = KeccakTranscript::new();
 
-    let num_constraints = count_constraints::<IcTypes::Witness, TestUairSimpleMultiplication>();
+    let num_constraints = count_constraints::<<IcTypes as IdealCheckTypes<_, _>>::Witness, TestUairSimpleMultiplication>();
 
     let prove =
-        |(trace, mut transcript): (Vec<_>, KeccakTranscript)| -> Proof<IcTypes, DEGREE_PLUS_ONE> {
+        |(trace, mut transcript): (Vec<_>, KeccakTranscript)| -> Proof<_, IcTypes, DEGREE_PLUS_ONE> {
             let field_cfg = transcript
-                .get_random_field_cfg::<IcTypes::F, <IcTypes::F as Field>::Inner, MillerRabin>();
+                .get_random_field_cfg::<<IcTypes as IdealCheckTypes<_, _>>::F, <<IcTypes as IdealCheckTypes<_, _>>::F as Field>::Inner, MillerRabin>();
             IdealCheckProtocol::prove_as_subprotocol::<TestUairSimpleMultiplication>(
                 &mut transcript,
                 &trace,
@@ -205,8 +198,8 @@ where
                 || (proof.clone(), transcript.clone()),
                 |(proof, mut transcript)| {
                     let field_cfg = transcript.get_random_field_cfg::<
-                        IcTypes::F,
-                        <IcTypes::F as Field>::Inner,
+                        <IcTypes as IdealCheckTypes<_, _>>::F,
+                        <<IcTypes as IdealCheckTypes<_, _>>::F as Field>::Inner,
                         MillerRabin,
                     >();
                     let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<
@@ -230,11 +223,11 @@ where
 }
 
 pub fn bench_simple_mult_3(group: &mut BenchmarkGroup<WallTime>, witness_size: usize) {
-    bench_simple_mult::<BenchIcTypes<3, 4>>(group, witness_size)
+    bench_simple_mult::<BenchIcTypes<3, 4>, 3, 4>(group, witness_size)
 }
 
 pub fn bench_simple_mult_4(group: &mut BenchmarkGroup<WallTime>, witness_size: usize) {
-    bench_simple_mult::<BenchIcTypes<4, 5>>(group, witness_size)
+    bench_simple_mult::<BenchIcTypes<4, 5>, 4, 5>(group, witness_size)
 }
 
 /// Before/after diff for combined_poly_builder (parallel vs sequential):
