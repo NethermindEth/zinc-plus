@@ -162,6 +162,32 @@ impl<C: Config> Radix8PnttParams<C> {
 #[derive(Clone, Copy)]
 pub struct PnttConfigF2_16_1<const DEPTH: usize>;
 
+/// Pseudo NTT configuration with BASE_LEN=16, BASE_DIM=32 (rate 1/2).
+/// For row lengths: 128 (DEPTH=1), 1024 (DEPTH=2), 8192 (DEPTH=3), 65536 (DEPTH=4).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF2_16B16<const DEPTH: usize>;
+
+/// Pseudo NTT configuration with BASE_LEN=64, BASE_DIM=128 (rate 1/2).
+/// For row lengths: 512 (DEPTH=1), 4096 (DEPTH=2), 32768 (DEPTH=3).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF2_16B64<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F167772161 (5 × 2^25 + 1) with BASE_LEN=32, BASE_DIM=64 (rate 1/2).
+/// Supports NTT domains up to 2^25, enabling row lengths up to 2^20.
+/// Row lengths: 256 (D=1), 2048 (D=2), 16384 (D=3), 131072 (D=4), 1048576 (D=5).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF167772161<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F167772161 with BASE_LEN=16, BASE_DIM=32 (rate 1/2).
+/// Row lengths: 128 (D=1), 1024 (D=2), 8192 (D=3), 65536 (D=4), 524288 (D=5).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF167772161B16<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F167772161 with BASE_LEN=64, BASE_DIM=128 (rate 1/2).
+/// Row lengths: 512 (D=1), 4096 (D=2), 32768 (D=3), 262144 (D=4).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF167772161B64<const DEPTH: usize>;
+
 mod fq {
     #![allow(non_local_definitions)]
     use ark_ff::{Fp64, MontBackend, MontConfig};
@@ -177,6 +203,22 @@ mod fq {
     pub const MODULUS: u32 = FqConfig::MODULUS.0[0] as u32;
 }
 
+/// Field F167772161 = 5 × 2^25 + 1, supports NTT domains up to 2^25.
+mod fq_large {
+    #![allow(non_local_definitions)]
+    use ark_ff::{Fp64, MontBackend, MontConfig};
+    #[derive(MontConfig)]
+    #[modulus = "167772161"]
+    #[generator = "3"]
+    pub struct FqLargeConfig;
+
+    pub type FqLargeBackend = MontBackend<FqLargeConfig, 1>;
+    pub type FqLarge = Fp64<FqLargeBackend>;
+
+    #[allow(clippy::cast_possible_truncation)]
+    pub const MODULUS: u32 = FqLargeConfig::MODULUS.0[0] as u32;
+}
+
 impl<const DEPTH: usize> Config for PnttConfigF2_16_1<DEPTH> {
     type Field = fq::Fq;
     const FIELD_MODULUS: u32 = fq::MODULUS;
@@ -187,6 +229,84 @@ impl<const DEPTH: usize> Config for PnttConfigF2_16_1<DEPTH> {
 
     fn field_to_int_normalized(x: Self::Field) -> PnttInt {
         let big_int = fq::FqBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF2_16B16<DEPTH> {
+    type Field = fq::Fq;
+    const FIELD_MODULUS: u32 = fq::MODULUS;
+    const BASE_LEN: usize = 16;
+    const BASE_DIM: usize = 32;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 4096, -256, 16, -1, -4096, 256, -16];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq::FqBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF2_16B64<DEPTH> {
+    type Field = fq::Fq;
+    const FIELD_MODULUS: u32 = fq::MODULUS;
+    const BASE_LEN: usize = 64;
+    const BASE_DIM: usize = 128;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 4096, -256, 16, -1, -4096, 256, -16];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq::FqBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+// F167772161 = 5 × 2^25 + 1 configurations
+// 8th roots of unity for F167772161: [1, 71493608, 65249968, 30406922, -1, -71493608, -65249968, -30406922]
+impl<const DEPTH: usize> Config for PnttConfigF167772161<DEPTH> {
+    type Field = fq_large::FqLarge;
+    const FIELD_MODULUS: u32 = fq_large::MODULUS;
+    const BASE_LEN: usize = 32;
+    const BASE_DIM: usize = 64;
+    const DEPTH: usize = DEPTH;
+    // 8th roots of unity in F167772161, centered around 0
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 71493608, 65249968, 30406922, -1, -71493608, -65249968, -30406922];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq_large::FqLargeBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF167772161B16<DEPTH> {
+    type Field = fq_large::FqLarge;
+    const FIELD_MODULUS: u32 = fq_large::MODULUS;
+    const BASE_LEN: usize = 16;
+    const BASE_DIM: usize = 32;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 71493608, 65249968, 30406922, -1, -71493608, -65249968, -30406922];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq_large::FqLargeBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF167772161B64<DEPTH> {
+    type Field = fq_large::FqLarge;
+    const FIELD_MODULUS: u32 = fq_large::MODULUS;
+    const BASE_LEN: usize = 64;
+    const BASE_DIM: usize = 128;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 71493608, 65249968, 30406922, -1, -71493608, -65249968, -30406922];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq_large::FqLargeBackend::into_bigint(x);
 
         precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
     }
@@ -206,7 +326,12 @@ mod tests {
     }
 
     #[test]
-    fn check_twiddles() {
+    fn check_twiddles_f65537() {
         check_twiddles_generic::<PnttConfigF2_16_1<1>>();
+    }
+
+    #[test]
+    fn check_twiddles_f167772161() {
+        check_twiddles_generic::<PnttConfigF167772161<1>>();
     }
 }

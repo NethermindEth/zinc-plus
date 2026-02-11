@@ -12,7 +12,11 @@ use crate::{
 };
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::{CheckedAdd, CheckedMul};
-pub use pntt::radix8::params::{PnttConfigF2_16_1, PnttInt, Radix8PnttParams};
+pub use pntt::radix8::params::{
+    PnttConfigF2_16_1, PnttConfigF2_16B16, PnttConfigF2_16B64,
+    PnttConfigF167772161, PnttConfigF167772161B16, PnttConfigF167772161B64,
+    PnttInt, Radix8PnttParams,
+};
 use std::{
     fmt::Debug,
     iter::Sum,
@@ -64,7 +68,7 @@ where
             Config::INPUT_LEN
         );
 
-        pntt::radix8::pntt::<_, _, _, M, MBSMulByTwiddle<CHECKED>, CHECK_ADDITION>(
+        pntt::radix8::pntt::<_, _, _, M, MBSMulByTwiddle<CHECK_ADDITION>, CHECK_ADDITION>(
             row,
             &self.pntt_params,
         )

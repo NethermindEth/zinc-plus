@@ -31,6 +31,7 @@ type F = MontyField<{ INT_LIMBS * 4 }>;
 
 pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(
     group: &mut BenchmarkGroup<WallTime>,
+    code_name: &str,
 ) where
     StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
     F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
@@ -44,23 +45,30 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     // encode_rows::<Zt, Lc, 15>(group);
     // encode_rows::<Zt, Lc, 16>(group);
 
-    // encode_single_row::<Zt, Lc, 128>(group);
-    // encode_single_row::<Zt, Lc, 256>(group);
-    // encode_single_row::<Zt, Lc, 512>(group);
-    // encode_single_row::<Zt, Lc, 1024>(group);
-
+    encode_single_row::<Zt, Lc, 128>(group, code_name);
+    encode_single_row::<Zt, Lc, 256>(group, code_name);
+    encode_single_row::<Zt, Lc, 512>(group, code_name);
+    encode_single_row::<Zt, Lc, 1024>(group, code_name);
+    encode_single_row::<Zt, Lc, 2048>(group, code_name);
+    encode_single_row::<Zt, Lc, 4096>(group, code_name);
+    encode_single_row::<Zt, Lc, 8192>(group, code_name);
+    encode_single_row::<Zt, Lc, 16384>(group, code_name);
+    encode_single_row::<Zt, Lc, 32768>(group, code_name);
+    // encode_single_row::<Zt, Lc, 65536>(group, code_name);
+    
+    
     // merkle_root::<Zt, 12>(group);
     // merkle_root::<Zt, 13>(group);
     // merkle_root::<Zt, 14>(group);
     // merkle_root::<Zt, 15>(group);
     // merkle_root::<Zt, 16>(group);
-    commit::<Zt, Lc, 10>(group);
-    commit::<Zt, Lc, 11>(group);
-    commit::<Zt, Lc, 12>(group);
-    commit::<Zt, Lc, 13>(group);
-    commit::<Zt, Lc, 14>(group);
-    commit::<Zt, Lc, 15>(group);
-    commit::<Zt, Lc, 16>(group);
+    // commit::<Zt, Lc, 10>(group);
+    // commit::<Zt, Lc, 11>(group);
+    // commit::<Zt, Lc, 12>(group);
+    // commit::<Zt, Lc, 13>(group);
+    // commit::<Zt, Lc, 14>(group);
+    // commit::<Zt, Lc, 15>(group);
+    // commit::<Zt, Lc, 16>(group);
 
     //test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12>(group);
     //test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
@@ -109,6 +117,7 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
 
 pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>, const ROW_LEN: usize>(
     group: &mut BenchmarkGroup<WallTime>,
+    code_name: &str,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
 {
@@ -129,7 +138,7 @@ pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>, const ROW_LEN: usize>
 
     group.bench_function(
         format!(
-            "EncodeMessage: {} -> {}, row_len = {ROW_LEN}",
+            "{code_name}/EncodeMessage: {} -> {}, row_len = {ROW_LEN}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name()
         ),
