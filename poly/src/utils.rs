@@ -1,4 +1,4 @@
-use crypto_primitives::{PrimeField, Semiring};
+use crypto_primitives::{Field, PrimeField, Semiring};
 use num_traits::Zero;
 use thiserror::Error;
 use zinc_utils::cfg_iter_mut;
@@ -216,11 +216,11 @@ pub fn eq_eval<R: Semiring>(x: &[R], y: &[R], one: R) -> Result<R, ArithErrors> 
 }
 
 #[allow(clippy::arithmetic_side_effects)]
-pub fn next_mle_inner<F: PrimeField>(
-    num_vars: usize,
+pub fn next_mle_inner<F: Field>(
+    num_vars: u32,
     zero: F,
     one: F,
-) -> Result<DenseMultilinearExtension<F>, ArithErrors> {
+) -> Result<DenseMultilinearExtension<F::Inner>, ArithErrors> {
     if num_vars % 2 != 0 {
         return Err(ArithErrors::InvalidParameters(
             "num_vars must be even".to_string(),
@@ -228,17 +228,17 @@ pub fn next_mle_inner<F: PrimeField>(
     }
 
     let mut mle = (0..1 << num_vars)
-        .map(|_| zero.clone())
-        .collect_dense_mle_with_zero(&zero);
+        .map(|_| zero.inner().clone())
+        .collect_dense_mle_with_zero(zero.inner());
 
     let half_vars = num_vars / 2;
 
-    for i in 0..(1 << half_vars) - 1 {
+    for i in 0usize..(1 << half_vars) - 1 {
         let next = i + 1;
 
         let i_concat_next = (next << half_vars) | i;
 
-        for j in 0..num_vars
+        mle[i_concat_next] = one.inner().clone();
     }
 
     Ok(mle)
@@ -315,4 +315,65 @@ pub fn next_mle_eval<R: Semiring>(point: &[R], zero: R, one: R) -> R {
         })
         // Sum over all carry positions: any valid "k" gives contribution 1.
         .fold(zero, |acc, next| acc + next)
+}
+
+#[cfg(test)]
+mod tests {
+    use crypto_bigint::{U128, const_monty_params};
+    use crypto_primitives::crypto_bigint_const_monty::ConstMontyField;
+    use num_traits::One;
+
+    use crate::mle::MultilinearExtensionWithConfig;
+
+    use super::*;
+
+    const N: usize = 2;
+
+    const_monty_params!(Params, U128, "00000000b933426489189cb5b47d567f");
+
+    type F = ConstMontyField<Params, N>;
+
+    #[test]
+    fn next_mle_is_one_on_successors() {
+        let num_vars = 8;
+
+        let next_mle = next_mle_inner(num_vars, F::zero(), F::one()).unwrap();
+
+        for i in 0..(1 << ((num_vars / 2) - 1)) {
+            let mut point: Vec<F> = (0..(num_vars / 2))
+                .map(|j| {
+                    if i & (1 << j) == 0 {
+                        F::zero()
+                    } else {
+                        F::one()
+                    }
+                })
+                .collect();
+
+            point.extend((0..(num_vars / 2)).map(|j| {
+                if (i + 1) & (1 << j) == 0 {
+                    F::zero()
+                } else {
+                    F::one()
+                }
+            }));
+
+            assert_eq!(next_mle.evaluate_with_config(&point, &()), Ok(F::one()));
+        }
+    }
+
+    #[test]
+    fn next_mle_is_one_only_on_successors() {
+        let num_vars = 8;
+
+        let next_mle = next_mle_inner(num_vars, F::zero(), F::one()).unwrap();
+
+        // The number of successors is (1 << (num_vars / 2)) - 1
+        // and we know the mle is one on them. So we need to check
+        // that it is one only on that many points.
+        assert_eq!(
+            next_mle.evaluations.iter().filter(|x| !x.is_zero()).count(),
+            (1 << (num_vars / 2)) - 1
+        );
+    }
 }
