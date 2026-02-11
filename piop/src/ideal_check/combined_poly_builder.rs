@@ -86,7 +86,11 @@ where
 }
 
 /// Apply projection to coefficients of coefficients of the input trace.
-fn project_trace_matrix<R: Semiring, IcTypes: IdealCheckTypes<R, DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>(
+fn project_trace_matrix<
+    R: Semiring,
+    IcTypes: IdealCheckTypes<R, DEGREE_PLUS_ONE>,
+    const DEGREE_PLUS_ONE: usize,
+>(
     num_rows: usize,
     num_cols: usize,
     trace: &[DenseMultilinearExtension<IcTypes::Witness>],

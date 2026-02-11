@@ -2,11 +2,18 @@
 mod generate_witness;
 
 use crypto_primitives::{FixedSemiring, Semiring, boolean::Boolean, crypto_bigint_int::Int};
-use rand::{Rng, distr::{Distribution, StandardUniform}, RngCore};
-use zinc_poly::{mle::{DenseMultilinearExtension, MultilinearExtensionRand}, univariate::{
-    binary::BinaryPoly, dense::DensePolynomial,
-    dynamic::over_fixed_semiring::DynamicPolynomialFS, ideal::DegreeOneIdeal,
-}, Polynomial};
+use rand::{
+    Rng, RngCore,
+    distr::{Distribution, StandardUniform},
+};
+use zinc_poly::{
+    Polynomial,
+    mle::{DenseMultilinearExtension, MultilinearExtensionRand},
+    univariate::{
+        binary::BinaryPoly, dense::DensePolynomial,
+        dynamic::over_fixed_semiring::DynamicPolynomialFS, ideal::DegreeOneIdeal,
+    },
+};
 use zinc_uair::{ConstraintBuilder, Uair};
 use zinc_utils::from_ref::FromRef;
 
@@ -48,15 +55,12 @@ where
         num_vars: usize,
         rng: &mut Rng,
     ) -> Vec<DenseMultilinearExtension<DensePolynomial<R, DEGREE_PLUS_ONE>>> {
-        let mut a: Vec<DynamicPolynomialFS<R>> = vec![DynamicPolynomialFS::new(vec![rng.random::<R>()])];
-        let mut b: Vec<DynamicPolynomialFS<R>> = vec![DynamicPolynomialFS::new(vec![
-            R::zero(),
-            rng.random::<R>(),
-        ])];
-        let mut c: Vec<DynamicPolynomialFS<R>> = vec![DynamicPolynomialFS::new(vec![
-            R::zero(),
-            rng.random::<R>(),
-        ])];
+        let mut a: Vec<DynamicPolynomialFS<R>> =
+            vec![DynamicPolynomialFS::new(vec![rng.random::<R>()])];
+        let mut b: Vec<DynamicPolynomialFS<R>> =
+            vec![DynamicPolynomialFS::new(vec![R::zero(), rng.random::<R>()])];
+        let mut c: Vec<DynamicPolynomialFS<R>> =
+            vec![DynamicPolynomialFS::new(vec![R::zero(), rng.random::<R>()])];
 
         for i in 1..1 << num_vars {
             let prev_a = a[i - 1].clone();
@@ -205,8 +209,8 @@ mod tests {
                     Int::from_i8(4),
                 ])
             ]
-                .into_iter()
-                .collect())
+            .into_iter()
+            .collect())
         );
     }
 }

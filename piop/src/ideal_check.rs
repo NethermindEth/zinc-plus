@@ -224,12 +224,9 @@ pub enum IdealCheckError<R, I> {
 #[cfg(test)]
 mod tests {
     use crypto_bigint::{Odd, modular::MontyParams};
-    use crypto_primitives::boolean::Boolean;
-    use crypto_primitives::crypto_bigint_monty::MontyField;
+    use crypto_primitives::{boolean::Boolean, crypto_bigint_monty::MontyField};
     use rand::rng;
-    use zinc_poly::univariate::{
-        dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF,
-    };
+    use zinc_poly::univariate::{dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF};
     use zinc_test_uair::{GenerateWitness, TestAirBinary, TestUairSimpleMultiplication};
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::{

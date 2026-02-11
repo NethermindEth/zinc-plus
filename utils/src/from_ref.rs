@@ -80,7 +80,6 @@ impl FromRef<Boolean> for Boolean {
     }
 }
 
-
 impl<const LIMBS: usize, const LIMBS2: usize> FromRef<Int<LIMBS2>> for Int<LIMBS> {
     #[inline]
     fn from_ref(value: &Int<LIMBS2>) -> Self {

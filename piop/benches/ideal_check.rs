@@ -5,9 +5,9 @@ use criterion::{
     criterion_group, criterion_main, measurement::WallTime,
 };
 use crypto_primitives::{
-    ConstIntSemiring, Field, Semiring, crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
+    ConstIntSemiring, Field, Semiring, boolean::Boolean, crypto_bigint_int::Int,
+    crypto_bigint_monty::MontyField,
 };
-use crypto_primitives::boolean::Boolean;
 use rand::rng;
 use zinc_piop::ideal_check::{IdealCheckProtocol, IdealCheckTypes, Proof};
 use zinc_poly::univariate::{
@@ -46,15 +46,15 @@ impl<const FIELD_LIMBS: usize> IdealCheckTypes<Boolean, DEGREE_PLUS_ONE>
     type F = MontyField<FIELD_LIMBS>;
 }
 
-impl<const FIELD_LIMBS: usize> BenchIcTrait<FIELD_LIMBS>
-    for BenchIcTypes<FIELD_LIMBS>
-{
+impl<const FIELD_LIMBS: usize> BenchIcTrait<FIELD_LIMBS> for BenchIcTypes<FIELD_LIMBS> {
     const FIELD_LIMBS: usize = FIELD_LIMBS;
 }
 
 #[allow(clippy::arithmetic_side_effects)]
-fn bench_bin<IcTypes, const FIELD_LIMBS: usize>(group: &mut BenchmarkGroup<WallTime>, witness_size: usize)
-where
+fn bench_bin<IcTypes, const FIELD_LIMBS: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+    witness_size: usize,
+) where
     IcTypes: BenchIcTrait<FIELD_LIMBS>,
 {
     let mut rng = rng();
@@ -65,7 +65,8 @@ where
 
     let transcript = KeccakTranscript::new();
 
-    let num_constraints = count_constraints::<<IcTypes as IdealCheckTypes<_, _>>::Witness, TestAirBinary>();
+    let num_constraints =
+        count_constraints::<<IcTypes as IdealCheckTypes<_, _>>::Witness, TestAirBinary>();
 
     let prove =
         |(trace, mut transcript): (Vec<_>, KeccakTranscript)| -> Proof<_, IcTypes, DEGREE_PLUS_ONE> {
@@ -119,9 +120,7 @@ where
                         proof,
                         num_constraints,
                         num_vars,
-                        |ideal_over_ring| {
-                            IdealOrZero::zero()
-                        },
+                        |ideal_over_ring| IdealOrZero::zero(),
                         &field_cfg,
                     ))
                     .expect("Failed to verify");
@@ -141,8 +140,10 @@ pub fn bench_bin_4(group: &mut BenchmarkGroup<WallTime>, witness_size: usize) {
 }
 
 #[allow(clippy::arithmetic_side_effects)]
-fn bench_simple_mult<IcTypes, const FIELD_LIMBS: usize>(group: &mut BenchmarkGroup<WallTime>, witness_size: usize)
-where
+fn bench_simple_mult<IcTypes, const FIELD_LIMBS: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+    witness_size: usize,
+) where
     IcTypes: BenchIcTrait<FIELD_LIMBS>,
 {
     let mut rng = rng();
@@ -157,7 +158,10 @@ where
 
     let transcript = KeccakTranscript::new();
 
-    let num_constraints = count_constraints::<<IcTypes as IdealCheckTypes<_, _>>::Witness, TestUairSimpleMultiplication>();
+    let num_constraints = count_constraints::<
+        <IcTypes as IdealCheckTypes<_, _>>::Witness,
+        TestUairSimpleMultiplication,
+    >();
 
     let prove =
         |(trace, mut transcript): (Vec<_>, KeccakTranscript)| -> Proof<_, IcTypes, DEGREE_PLUS_ONE> {
