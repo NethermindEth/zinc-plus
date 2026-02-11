@@ -13,7 +13,9 @@ use std::{collections::HashMap, marker::PhantomData, slice};
 use thiserror::Error;
 use zinc_poly::{
     EvaluatablePolynomial, EvaluationError,
-    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
+    mle::{
+        DenseMultilinearExtension, MultilinearExtensionWithConfig,
+    },
     univariate::dynamic::over_field::DynamicPolynomialF,
     utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
 };
@@ -109,7 +111,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         // Shifted trace. Just take the trace, drop the first row
         // and append 0 to the end.
         let down: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(up)
-            .map(|column| cfg_iter!(column[1..]).cloned().collect())
+            .map(|column| column[1..].iter().cloned().collect())
             .collect();
 
         let eq_r = build_eq_x_r_inner(evaluation_point, field_cfg)?;
