@@ -43,7 +43,7 @@ where
         + Sync,
     Int<5>: FromRef<CwCoeff>,
 {
-    const NUM_COLUMN_OPENINGS: usize = 200;
+    const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = BinaryPoly<D_PLUS_ONE>;
     type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
@@ -65,6 +65,7 @@ impl RaaConfig for BenchRaaConfig {
     const CHECK_FOR_OVERFLOWS: bool = UNCHECKED;
 }
 
+#[allow(dead_code)]
 type SomeRaaCode<const D_PLUS_ONE: usize> =
     RaaCode<BenchZipPlusTypes<i32, D_PLUS_ONE>, BenchRaaConfig, 4>;
 
@@ -76,6 +77,7 @@ type SomeIprsCode<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const CH
         CHECK,
     >;
 
+#[allow(dead_code)]
 fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");
 
@@ -98,5 +100,5 @@ fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, zip_plus_benchmarks_raa, zip_plus_benchmarks_iprs);
+criterion_group!(benches, zip_plus_benchmarks_iprs);
 criterion_main!(benches);
