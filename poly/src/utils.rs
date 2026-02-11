@@ -6,7 +6,7 @@ use zinc_utils::cfg_iter_mut;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use crate::mle::DenseMultilinearExtension;
+use crate::mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero};
 
 /// A `enum` specifying the possible failure modes of the arithmetics.
 #[derive(displaydoc::Display, Debug, Error)]
@@ -213,4 +213,106 @@ pub fn eq_eval<R: Semiring>(x: &[R], y: &[R], one: R) -> Result<R, ArithErrors> 
     }
 
     Ok(res)
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+pub fn next_mle_inner<F: PrimeField>(
+    num_vars: usize,
+    zero: F,
+    one: F,
+) -> Result<DenseMultilinearExtension<F>, ArithErrors> {
+    if num_vars % 2 != 0 {
+        return Err(ArithErrors::InvalidParameters(
+            "num_vars must be even".to_string(),
+        ));
+    }
+
+    let mut mle = (0..1 << num_vars)
+        .map(|_| zero.clone())
+        .collect_dense_mle_with_zero(&zero);
+
+    let half_vars = num_vars / 2;
+
+    for i in 0..(1 << half_vars) - 1 {
+        let next = i + 1;
+
+        let i_concat_next = (next << half_vars) | i;
+
+        for j in 0..num_vars
+    }
+
+    Ok(mle)
+}
+
+/// Evaluates the next MLE at point `point` in log-time.
+///
+/// # Arguments
+/// - `point`: A slice of 2n field elements representing two n-bit vectors concatenated.
+///   The first n elements are `x` (original vector), the last n are `y` (candidate successor).
+///
+/// # Behavior
+/// Constructs a polynomial P(x, y) such that:
+/// \begin{equation}
+///     P(x, y) = 1 \quad \text{if and only if} \quad y = x + 1.
+/// \end{equation}
+///
+/// The polynomial sums contributions for each possible carry position `k`,
+/// ensuring that:
+/// 1. Bits to the left of `k` (more significant) match.
+/// 2. Bit at position `k` transitions from 0 (in x) to 1 (in y).
+/// 3. Bits to the right of `k` are 1 in x and 0 in y (simulating the carry propagation).
+///
+/// # Panics
+/// Panics if `point.len()` is not even.
+///
+/// # Returns
+/// Field element: 1 if y = x + 1, 0 otherwise.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn next_mle_eval<R: Semiring>(point: &[R], zero: R, one: R) -> R {
+    // Check that the point length is even: we split into x and y of equal length.
+    assert_eq!(
+        point.len() % 2,
+        0,
+        "Input point must have an even number of variables."
+    );
+    let n = point.len() / 2;
+
+    // Split point into x (first n) and y (last n).
+    let (x, y) = point.split_at(n);
+
+    // Sum contributions for each possible carry position k = 0..n-1.
+    (0..n)
+        .map(|k| {
+            // Term 1: bits to the left of k match
+            //
+            // For i > k, enforce x_i == y_i.
+            // Using equality polynomial: x_i * y_i + (1 - x_i)*(1 - y_i).
+            //
+            // Indices are reversed because bits are big-endian.
+            let eq_high_bits = (k + 1..n)
+                .map(|i| {
+                    x[n - 1 - i].clone() * &y[n - 1 - i]
+                        + (one.clone() - &x[n - 1 - i]) * (one.clone() - &y[n - 1 - i])
+                })
+                .fold(one.clone(), |acc, next| acc * next);
+
+            // Term 2: carry bit at position k
+            //
+            // Enforce x_k = 0 and y_k = 1.
+            // Condition: (1 - x_k) * y_k.
+            let carry_bit = (one.clone() - &x[n - 1 - k]) * &y[n - 1 - k];
+
+            // Term 3: bits to the right of k are 1 in x and 0 in y
+            //
+            // For i < k, enforce x_i = 1 and y_i = 0.
+            // Condition: x_i * (1 - y_i).
+            let low_bits_are_one_zero = (0..k)
+                .map(|i| (one.clone() - &y[n - 1 - i]) * &x[n - 1 - i])
+                .fold(one.clone(), |acc, next| acc * next);
+
+            // Multiply the three terms for this k, representing one "carry pattern".
+            eq_high_bits * carry_bit * low_bits_are_one_zero
+        })
+        // Sum over all carry positions: any valid "k" gives contribution 1.
+        .fold(zero, |acc, next| acc + next)
 }
