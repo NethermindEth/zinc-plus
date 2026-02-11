@@ -225,7 +225,7 @@ pub enum IdealCheckError<R, I> {
 mod tests {
     use crypto_bigint::{Odd, modular::MontyParams};
     use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
-
+    use crypto_primitives::boolean::Boolean;
     use rand::rng;
     use zinc_poly::univariate::{
         dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF, ideal::DegreeOneIdeal,
@@ -251,8 +251,8 @@ mod tests {
 
     struct TestIcTypes;
 
-    impl<const DEGREE_PLUS_ONE: usize> IdealCheckTypes<Int<5>, DEGREE_PLUS_ONE> for TestIcTypes {
-        type Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>;
+    impl<const DEGREE_PLUS_ONE: usize> IdealCheckTypes<Boolean, DEGREE_PLUS_ONE> for TestIcTypes {
+        type Witness = DensePolynomial<Boolean, DEGREE_PLUS_ONE>;
 
         type F = MontyField<4>;
     }
@@ -261,11 +261,11 @@ mod tests {
         num_vars: usize,
         transcript: &mut impl Transcript,
     ) -> (
-        Proof<Int<5>, TestIcTypes, DEGREE_PLUS_ONE>,
-        ProverState<Int<5>, TestIcTypes, DEGREE_PLUS_ONE>,
+        Proof<Boolean, TestIcTypes, DEGREE_PLUS_ONE>,
+        ProverState<Boolean, TestIcTypes, DEGREE_PLUS_ONE>,
     )
     where
-        U: GenerateWitness<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
+        U: GenerateWitness<DensePolynomial<Boolean, DEGREE_PLUS_ONE>>,
     {
         let mut rng = rng();
 
@@ -295,7 +295,7 @@ mod tests {
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
-        U: GenerateWitness<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
+        U: GenerateWitness<DensePolynomial<Boolean, DEGREE_PLUS_ONE>>,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {

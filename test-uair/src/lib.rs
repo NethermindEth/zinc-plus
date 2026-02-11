@@ -47,23 +47,21 @@ impl<R: Semiring + 'static> Uair<R> for TestUairSimpleMultiplication {
 impl<R, const DEGREE_PLUS_ONE: usize> GenerateWitness<DensePolynomial<R, DEGREE_PLUS_ONE>>
     for TestUairSimpleMultiplication
 where
-    R: FixedSemiring + 'static + FromRef<i8>,
+    R: FixedSemiring + 'static,
     StandardUniform: Distribution<R>,
 {
     fn generate_witness<Rng: rand::RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
     ) -> Vec<DenseMultilinearExtension<DensePolynomial<R, DEGREE_PLUS_ONE>>> {
-        let mut a: Vec<DynamicPolynomialFS<R>> = vec![DynamicPolynomialFS::new(vec![R::from_ref(
-            &rng.random::<i8>(),
-        )])];
+        let mut a: Vec<DynamicPolynomialFS<R>> = vec![DynamicPolynomialFS::new(vec![rng.random::<R>()])];
         let mut b: Vec<DynamicPolynomialFS<R>> = vec![DynamicPolynomialFS::new(vec![
             R::zero(),
-            R::from_ref(&rng.random::<i8>()),
+            rng.random::<R>(),
         ])];
         let mut c: Vec<DynamicPolynomialFS<R>> = vec![DynamicPolynomialFS::new(vec![
             R::zero(),
-            R::from_ref(&rng.random::<i8>()),
+            rng.random::<R>(),
         ])];
 
         for i in 1..1 << num_vars {
@@ -134,6 +132,31 @@ impl<const LIMBS: usize> Uair<DensePolynomial<Int<LIMBS>, 32>> for TestAirNoMult
         b.assert_in_ideal(
             up[0].clone() + &up[1] - &up[2],
             &ideal_from_ref(&DegreeOneIdeal::new(Int::from(2))),
+        );
+    }
+}
+
+impl Uair<DensePolynomial<Boolean, 32>> for TestAirNoMultiplication {
+    type Ideal = DegreeOneIdeal<Boolean>;
+
+    fn num_cols() -> usize {
+        3
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: &[B::Expr],
+        _down: &[B::Expr],
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        b.assert_in_ideal(
+            up[0].clone() + &up[1] - &up[2],
+            &ideal_from_ref(&DegreeOneIdeal::new(todo!() /*Int::from(2)*/)),
         );
     }
 }

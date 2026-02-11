@@ -74,6 +74,13 @@ impl<const LIMBS: usize> FromRef<Boolean> for Int<LIMBS> {
     }
 }
 
+impl FromRef<Boolean> for Boolean {
+    fn from_ref(value: &Boolean) -> Self {
+        *value
+    }
+}
+
+
 impl<const LIMBS: usize, const LIMBS2: usize> FromRef<Int<LIMBS2>> for Int<LIMBS> {
     #[inline]
     fn from_ref(value: &Int<LIMBS2>) -> Self {

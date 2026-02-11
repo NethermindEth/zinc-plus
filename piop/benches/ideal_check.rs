@@ -7,6 +7,7 @@ use criterion::{
 use crypto_primitives::{
     ConstIntSemiring, Field, Semiring, crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
 };
+use crypto_primitives::boolean::Boolean;
 use rand::rng;
 use zinc_piop::ideal_check::{IdealCheckProtocol, IdealCheckTypes, Proof};
 use zinc_poly::univariate::{
@@ -26,36 +27,36 @@ use zinc_utils::from_ref::FromRef;
 const DEGREE_PLUS_ONE: usize = 32;
 
 #[derive(Clone)]
-struct BenchIcTypes<const FIELD_LIMBS: usize, const INT_LIMBS: usize>;
+struct BenchIcTypes<const FIELD_LIMBS: usize>;
 
-trait BenchIcTrait<const FIELD_LIMBS: usize, const INT_LIMBS: usize>:
+trait BenchIcTrait<const FIELD_LIMBS: usize>:
     IdealCheckTypes<
-        Int<INT_LIMBS>,
+        Boolean,
         DEGREE_PLUS_ONE,
-        Witness = DensePolynomial<Int<INT_LIMBS>, DEGREE_PLUS_ONE>,
+        Witness = DensePolynomial<Boolean, DEGREE_PLUS_ONE>,
         F = MontyField<FIELD_LIMBS>,
     > + Clone
 {
     const FIELD_LIMBS: usize;
 }
 
-impl<const FIELD_LIMBS: usize, const INT_LIMBS: usize> IdealCheckTypes<Int<INT_LIMBS>, DEGREE_PLUS_ONE>
-    for BenchIcTypes<FIELD_LIMBS, INT_LIMBS>
+impl<const FIELD_LIMBS: usize> IdealCheckTypes<Boolean, DEGREE_PLUS_ONE>
+    for BenchIcTypes<FIELD_LIMBS>
 {
-    type Witness = DensePolynomial<Int<INT_LIMBS>, DEGREE_PLUS_ONE>;
+    type Witness = DensePolynomial<Boolean, DEGREE_PLUS_ONE>;
     type F = MontyField<FIELD_LIMBS>;
 }
 
-impl<const FIELD_LIMBS: usize, const INT_LIMBS: usize> BenchIcTrait<FIELD_LIMBS, INT_LIMBS>
-    for BenchIcTypes<FIELD_LIMBS, INT_LIMBS>
+impl<const FIELD_LIMBS: usize> BenchIcTrait<FIELD_LIMBS>
+    for BenchIcTypes<FIELD_LIMBS>
 {
     const FIELD_LIMBS: usize = FIELD_LIMBS;
 }
 
 #[allow(clippy::arithmetic_side_effects)]
-fn bench_no_mult<IcTypes, const FIELD_LIMBS: usize, const INT_LIMBS: usize>(group: &mut BenchmarkGroup<WallTime>, witness_size: usize)
+fn bench_no_mult<IcTypes, const FIELD_LIMBS: usize>(group: &mut BenchmarkGroup<WallTime>, witness_size: usize)
 where
-    IcTypes: BenchIcTrait<FIELD_LIMBS, INT_LIMBS>,
+    IcTypes: BenchIcTrait<FIELD_LIMBS>,
 {
     let mut rng = rng();
     let num_vars = zinc_utils::log2(witness_size) as usize;
@@ -133,17 +134,17 @@ where
 }
 
 pub fn bench_no_mult_3(group: &mut BenchmarkGroup<WallTime>, witness_size: usize) {
-    bench_no_mult::<BenchIcTypes<3, 4>, 3, 4>(group, witness_size)
+    bench_no_mult::<BenchIcTypes<3>, 3>(group, witness_size)
 }
 
 pub fn bench_no_mult_4(group: &mut BenchmarkGroup<WallTime>, witness_size: usize) {
-    bench_no_mult::<BenchIcTypes<4, 5>, 4, 5>(group, witness_size)
+    bench_no_mult::<BenchIcTypes<4>, 4>(group, witness_size)
 }
 
 #[allow(clippy::arithmetic_side_effects)]
-fn bench_simple_mult<IcTypes, const FIELD_LIMBS: usize, const INT_LIMBS: usize>(group: &mut BenchmarkGroup<WallTime>, witness_size: usize)
+fn bench_simple_mult<IcTypes, const FIELD_LIMBS: usize>(group: &mut BenchmarkGroup<WallTime>, witness_size: usize)
 where
-    IcTypes: BenchIcTrait<FIELD_LIMBS, INT_LIMBS>,
+    IcTypes: BenchIcTrait<FIELD_LIMBS>,
 {
     let mut rng = rng();
     let num_vars = zinc_utils::log2(witness_size) as usize;
@@ -223,11 +224,11 @@ where
 }
 
 pub fn bench_simple_mult_3(group: &mut BenchmarkGroup<WallTime>, witness_size: usize) {
-    bench_simple_mult::<BenchIcTypes<3, 4>, 3, 4>(group, witness_size)
+    bench_simple_mult::<BenchIcTypes<3>, 3>(group, witness_size)
 }
 
 pub fn bench_simple_mult_4(group: &mut BenchmarkGroup<WallTime>, witness_size: usize) {
-    bench_simple_mult::<BenchIcTypes<4, 5>, 4, 5>(group, witness_size)
+    bench_simple_mult::<BenchIcTypes<4>, 4>(group, witness_size)
 }
 
 /// Before/after diff for combined_poly_builder (parallel vs sequential):
