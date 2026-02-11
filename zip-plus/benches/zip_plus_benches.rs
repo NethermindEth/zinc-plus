@@ -11,7 +11,7 @@ use zinc_poly::univariate::{
 };
 use zinc_primality::MillerRabin;
 use zinc_transcript::traits::ConstTranscribable;
-use zinc_utils::{UNCHECKED, from_ref::FromRef, inner_product::MBSInnerProduct, named::Named};
+use zinc_utils::{UNCHECKED, from_ref::FromRef, inner_product::{MBSInnerProduct, ScalarProduct}, mul_by_scalar::ScalarWideningMulByScalar, named::Named};
 use zip_common::*;
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -67,6 +67,37 @@ impl RaaConfig for BenchRaaConfig {
     const PERMUTE_IN_PLACE: bool = true;
     const CHECK_FOR_OVERFLOWS: bool = UNCHECKED;
 }
+
+/// ZipTypes implementation for scalar i32 evaluations (non-polynomial)
+struct BenchZipScalarTypes;
+
+impl ZipTypes for BenchZipScalarTypes {
+    const NUM_COLUMN_OPENINGS: usize = 147;
+    type Eval = i32;
+    type Cw = i128;  // Use i128 to avoid overflow when accumulating products
+    type Fmod = Uint<{ INT_LIMBS * 4 }>;
+    type PrimeTest = MillerRabin;
+    type Chal = i128;
+    type Pt = i128;
+    type CombR = Int<{ INT_LIMBS * 3 }>;
+    type Comb = Self::CombR;
+    type EvalDotChal = ScalarProduct;
+    type CombDotChal = ScalarProduct;
+    type ArrCombRDotChal = MBSInnerProduct;
+}
+
+// IPRS code types for scalar i32 evaluations (BASE_LEN > 16 only)
+type IprsScalarB32<const DEPTH: usize, const CHECK: bool> =
+    IprsCode<BenchZipScalarTypes, PnttConfigF2_16_1<DEPTH>, ScalarWideningMulByScalar<i128>, CHECK>;
+
+type IprsScalarB64<const DEPTH: usize, const CHECK: bool> =
+    IprsCode<BenchZipScalarTypes, PnttConfigF2_16B64<DEPTH>, ScalarWideningMulByScalar<i128>, CHECK>;
+
+type IprsScalarLargeB32<const DEPTH: usize, const CHECK: bool> =
+    IprsCode<BenchZipScalarTypes, PnttConfigF167772161<DEPTH>, ScalarWideningMulByScalar<i128>, CHECK>;
+
+type IprsScalarLargeB64<const DEPTH: usize, const CHECK: bool> =
+    IprsCode<BenchZipScalarTypes, PnttConfigF167772161B64<DEPTH>, ScalarWideningMulByScalar<i128>, CHECK>;
 
 #[allow(dead_code)]
 type SomeRaaCode<const D_PLUS_ONE: usize> =
@@ -178,6 +209,50 @@ fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     encode_single_row::<BenchZipPlusTypes<i64, 32>, IprsLargeB16<i64, 5, 32, UNCHECKED>, 524288>(&mut group, "IPRS-5-1_2-F167772161");
     // Row length 1048576 (2^20): BASE_LEN=32, DEPTH=5
     encode_single_row::<BenchZipPlusTypes<i64, 32>, IprsLargeB32<i64, 5, 32, UNCHECKED>, 1048576>(&mut group, "IPRS-5-1_2-F167772161");
+
+    // ========== Degree-0 (constant) polynomial benchmarks ==========
+    // Using D_PLUS_ONE = 1 for BPoly<1> (constant polynomials)
+    // Field F2^16+1 = F65537
+    encode_single_row::<BenchZipPlusTypes<i64, 1>, IprsB16<i64, 1, 1, UNCHECKED>, 128>(&mut group, "IPRS-1-1_2-F65537-Deg0");
+    encode_single_row::<BenchZipPlusTypes<i64, 1>, IprsB32<i64, 1, 1, UNCHECKED>, 256>(&mut group, "IPRS-1-1_2-F65537-Deg0");
+    encode_single_row::<BenchZipPlusTypes<i64, 1>, IprsB64<i64, 1, 1, UNCHECKED>, 512>(&mut group, "IPRS-1-1_2-F65537-Deg0");
+    encode_single_row::<BenchZipPlusTypes<i64, 1>, IprsB16<i64, 2, 1, UNCHECKED>, 1024>(&mut group, "IPRS-2-1_2-F65537-Deg0");
+    encode_single_row::<BenchZipPlusTypes<i64, 1>, IprsB32<i64, 2, 1, UNCHECKED>, 2048>(&mut group, "IPRS-2-1_2-F65537-Deg0");
+    encode_single_row::<BenchZipPlusTypes<i64, 1>, IprsB64<i64, 2, 1, UNCHECKED>, 4096>(&mut group, "IPRS-2-1_2-F65537-Deg0");
+    encode_single_row::<BenchZipPlusTypes<i64, 1>, IprsB16<i64, 3, 1, UNCHECKED>, 8192>(&mut group, "IPRS-3-1_2-F65537-Deg0");
+    encode_single_row::<BenchZipPlusTypes<i64, 1>, IprsB32<i64, 3, 1, UNCHECKED>, 16384>(&mut group, "IPRS-3-1_2-F65537-Deg0");
+    encode_single_row::<BenchZipPlusTypes<i64, 1>, IprsB64<i64, 3, 1, UNCHECKED>, 32768>(&mut group, "IPRS-3-1_2-F65537-Deg0");
+
+    // Larger row lengths using F167772161 (5 × 2^25 + 1) - Degree 0
+    encode_single_row::<BenchZipPlusTypes<i64, 1>, IprsLargeB16<i64, 4, 1, UNCHECKED>, 65536>(&mut group, "IPRS-4-1_2-F167772161-Deg0");
+    encode_single_row::<BenchZipPlusTypes<i64, 1>, IprsLargeB32<i64, 4, 1, UNCHECKED>, 131072>(&mut group, "IPRS-4-1_2-F167772161-Deg0");
+    encode_single_row::<BenchZipPlusTypes<i64, 1>, IprsLargeB64<i64, 4, 1, UNCHECKED>, 262144>(&mut group, "IPRS-4-1_2-F167772161-Deg0");
+    encode_single_row::<BenchZipPlusTypes<i64, 1>, IprsLargeB16<i64, 5, 1, UNCHECKED>, 524288>(&mut group, "IPRS-5-1_2-F167772161-Deg0");
+    encode_single_row::<BenchZipPlusTypes<i64, 1>, IprsLargeB32<i64, 5, 1, UNCHECKED>, 1048576>(&mut group, "IPRS-5-1_2-F167772161-Deg0");
+
+    // ========== Scalar i32 benchmarks (BASE_LEN > 16 only) ==========
+    // Using i32 as eval type (non-polynomial)
+    // Field F2^16+1 = F65537
+    // Row length 256: BASE_LEN=32, DEPTH=1
+    encode_single_row::<BenchZipScalarTypes, IprsScalarB32<1, UNCHECKED>, 256>(&mut group, "IPRS-1-1_2-F65537-i32");
+    // Row length 512: BASE_LEN=64, DEPTH=1
+    encode_single_row::<BenchZipScalarTypes, IprsScalarB64<1, UNCHECKED>, 512>(&mut group, "IPRS-1-1_2-F65537-i32");
+    // Row length 2048: BASE_LEN=32, DEPTH=2
+    encode_single_row::<BenchZipScalarTypes, IprsScalarB32<2, UNCHECKED>, 2048>(&mut group, "IPRS-2-1_2-F65537-i32");
+    // Row length 4096: BASE_LEN=64, DEPTH=2
+    encode_single_row::<BenchZipScalarTypes, IprsScalarB64<2, UNCHECKED>, 4096>(&mut group, "IPRS-2-1_2-F65537-i32");
+    // Row length 16384: BASE_LEN=32, DEPTH=3
+    encode_single_row::<BenchZipScalarTypes, IprsScalarB32<3, UNCHECKED>, 16384>(&mut group, "IPRS-3-1_2-F65537-i32");
+    // Row length 32768: BASE_LEN=64, DEPTH=3
+    encode_single_row::<BenchZipScalarTypes, IprsScalarB64<3, UNCHECKED>, 32768>(&mut group, "IPRS-3-1_2-F65537-i32");
+
+    // Larger row lengths using F167772161 (5 × 2^25 + 1) - i32
+    // Row length 131072: BASE_LEN=32, DEPTH=4
+    encode_single_row::<BenchZipScalarTypes, IprsScalarLargeB32<4, UNCHECKED>, 131072>(&mut group, "IPRS-4-1_2-F167772161-i32");
+    // Row length 262144: BASE_LEN=64, DEPTH=4
+    encode_single_row::<BenchZipScalarTypes, IprsScalarLargeB64<4, UNCHECKED>, 262144>(&mut group, "IPRS-4-1_2-F167772161-i32");
+    // Row length 1048576: BASE_LEN=32, DEPTH=5
+    encode_single_row::<BenchZipScalarTypes, IprsScalarLargeB32<5, UNCHECKED>, 1048576>(&mut group, "IPRS-5-1_2-F167772161-i32");
 
     group.finish();
 }
