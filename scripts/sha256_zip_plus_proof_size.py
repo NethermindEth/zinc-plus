@@ -9,7 +9,9 @@ Uses base_field_size=12 and:
   - depth=1 for k=6,7,8 (N = 2^k)
   - depth=2 for k=9,10
 
-The bitbound is computed as: log2(C) + base_field_size + depth*(3 + base_field_size) - 1
+Two bitbound formulas are compared:
+  v1: log2(C) + base_field_size + depth*(3 + base_field_size) - 1
+  v2: log2(C)/2 + (depth+1)*base_field_size + 0.5*(1+4*depth) - log2(3*pi)*0.5*(1+depth)
 where C = num_columns.
 
 Runs for n_queries=100 and n_queries=147.
@@ -32,8 +34,23 @@ def depth_for_exp(exp: int) -> int:
 import math
 
 
-def compute_bitbound(num_cols: int, base_field_size: int, depth: int) -> int:
-    return int(math.log2(num_cols)) + base_field_size + depth * (3 + base_field_size) - 1
+def compute_bitbound_v1(num_cols: int, base_field_size: int, depth: int) -> float:
+    return math.log2(num_cols) + base_field_size + depth * (3 + base_field_size) - 1
+
+
+def compute_bitbound_v2(num_cols: int, base_field_size: int, depth: int) -> float:
+    return (
+        math.log2(num_cols) / 2
+        + (depth + 1) * base_field_size
+        + 0.5 * (1 + 4 * depth)
+        - math.log2(3 * math.pi) * 0.5 * (1 + depth)
+    )
+
+
+BITBOUND_FORMULAS = {
+    "v1": compute_bitbound_v1,
+    "v2": compute_bitbound_v2,
+}
 
 
 def find_optimal(
@@ -41,7 +58,8 @@ def find_optimal(
     n_pol: int, degree: int, n_queries: int,
     base_field_size: int, depth: int,
     col_cost: int,
-) -> tuple[int, int, int]:
+    bitbound_fn=compute_bitbound_v1,
+) -> tuple[int, int, float]:
     """Find the power-of-2 num_rows that minimises proof size."""
     best = None
     num_rows = 1
@@ -49,7 +67,7 @@ def find_optimal(
         num_cols = total_entries // num_rows
         if num_cols < 1:
             break
-        bitbound = compute_bitbound(num_cols, base_field_size, depth)
+        bitbound = bitbound_fn(num_cols, base_field_size, depth)
         row_cost = n_pol * degree * n_queries * bitbound
         cost = row_cost * num_rows + col_cost * num_cols
         if best is None or cost < best[2]:
@@ -68,11 +86,10 @@ def fmt_size(bits: int) -> str:
 
 COMPONENTS = [
     {"label": "A", "n_pol": 10, "flat_vec_norm": 133, "degree": 32},
-    {"label": "B", "n_pol": 77,  "flat_vec_norm": 150, "degree": 1},
+    {"label": "B", "n_pol": 5,  "flat_vec_norm": 150, "degree": 1},
 ]
 
-QUERY_COUNTS = [100, 147]#, 200, 240]
-
+QUERY_COUNTS = [96,142] #[96, 100, 142, 148, 192, 200, 232, 240] # 96 and 142 correspond to 96 bits of security like Binius
 
 def main():
     parser = argparse.ArgumentParser(description="SHA-256 Zip+ combined proof size")
@@ -81,33 +98,42 @@ def main():
     args = parser.parse_args()
 
     for nq in QUERY_COUNTS:
-        print(f"\n{'=' * 70}")
+        print(f"\n{'=' * 90}")
         print(f"  n_queries = {nq}, base_field_size = {BASE_FIELD_SIZE}")
-        print(f"{'=' * 70}")
+        print(f"{'=' * 90}")
         for c in COMPONENTS:
             print(f"  {c['label']}: n_pol={c['n_pol']}, degree={c['degree']}, "
                   f"flat_vec_norm={c['flat_vec_norm']}")
-        print(f"  bitbound(C, depth) = log2(C) + {BASE_FIELD_SIZE} + depth*(3+{BASE_FIELD_SIZE}) - 1")
+        print(f"  v1: log2(C) + {BASE_FIELD_SIZE} + depth*(3+{BASE_FIELD_SIZE}) - 1")
+        print(f"  v2: log2(C) + (depth+1)*{BASE_FIELD_SIZE} + 0.5*(1+4*depth) - log2(3*pi)*0.5*(1+depth)")
 
-        hdr = (f"{'2^N':>6} | {'depth':>5} | {'A':>12} | {'B':>12} | {'A + B':>12}")
+        hdr = (f"{'2^N':>6} | {'depth':>5} | {'A(v1)':>12} | {'B(v1)':>12} | {'v1 total':>12} | {'A(v2)':>12} | {'B(v2)':>12} | {'v2 total':>12}")
         print(f"\n{hdr}")
         print("-" * len(hdr))
 
         for exp in range(args.min_exp, args.max_exp + 1):
             total = 1 << exp
             depth = depth_for_exp(exp)
-            costs = []
-            for c in COMPONENTS:
-                cc = c["flat_vec_norm"]
-                _, _, cost = find_optimal(
-                    total,
-                    c["n_pol"], c["degree"], nq,
-                    BASE_FIELD_SIZE, depth,
-                    cc,
-                )
-                costs.append(cost)
-            total_cost = sum(costs)
-            print(f"  2^{exp:<2} | {depth:>5} | {fmt_size(costs[0]):>12} | {fmt_size(costs[1]):>12} | {fmt_size(total_cost):>12}")
+            row = f"  2^{exp:<2} | {depth:>5}"
+            totals = {}
+            for label, bb_fn in BITBOUND_FORMULAS.items():
+                costs = []
+                for c in COMPONENTS:
+                    cc = c["flat_vec_norm"]
+                    _, _, cost = find_optimal(
+                        total,
+                        c["n_pol"], c["degree"], nq,
+                        BASE_FIELD_SIZE, depth,
+                        cc,
+                        bitbound_fn=bb_fn,
+                    )
+                    costs.append(cost)
+                totals[label] = (costs, sum(costs))
+            cv1, tv1 = totals["v1"]
+            cv2, tv2 = totals["v2"]
+            row += f" | {fmt_size(cv1[0]):>12} | {fmt_size(cv1[1]):>12} | {fmt_size(tv1):>12}"
+            row += f" | {fmt_size(cv2[0]):>12} | {fmt_size(cv2[1]):>12} | {fmt_size(tv2):>12}"
+            print(row)
 
         print()
 

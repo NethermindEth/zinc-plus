@@ -38,7 +38,7 @@ BENCHMARKS = [
     #("zip_plus_commit_10_f12289", "IPRS-1-1/2-F12289"),
     ("zip_plus_commit_10_f12289", "IPRS-1-1/4-F12289-Q105"),
     #("zip_plus_commit_55_f12289", "IPRS-1-1/4-F12289"),
-    #("zip_plus_commit_55_f12289", "IPRS-1-1/2-F12289"),
+    ("zip_plus_commit_55_f12289", "IPRS-1-1/2-F12289"),
     #("zip_plus_commit_55_f12289", "IPRS-1-1/4-F12289-Q105"),
     ("zip_plus_commit_82_f12289", "IPRS-1-1/4-F12289"),
     #("zip_plus_commit_82_f12289", "IPRS-1-1/2-F12289"),    
@@ -48,8 +48,8 @@ BENCHMARKS = [
 OPERATIONS = ["Commit", "Test", "Evaluate", "Verify", "VerifyEncode", "VerifyQueryCheck"]
 
 # Number of variables (num_vars) in each benchmark
-NUM_VARS = [6, 7, 8, 9, 10]
-
+# NUM_VARS = [6, 7, 8, 9, 10]
+NUM_VARS = [8]
 
 def run_benchmarks(dry_run: bool = False, ops: Optional[list[str]] = None) -> None:
     """Execute all cargo bench commands sequentially.
