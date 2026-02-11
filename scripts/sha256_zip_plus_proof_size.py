@@ -68,7 +68,7 @@ def fmt_size(bits: int) -> str:
 
 COMPONENTS = [
     {"label": "A", "n_pol": 10, "flat_vec_norm": 133, "degree": 32},
-    {"label": "B", "n_pol": 90,  "flat_vec_norm": 150, "degree": 1},
+    {"label": "B", "n_pol": 77,  "flat_vec_norm": 150, "degree": 1},
 ]
 
 QUERY_COUNTS = [100, 147]#, 200, 240]

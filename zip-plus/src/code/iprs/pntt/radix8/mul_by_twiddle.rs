@@ -94,4 +94,16 @@ where
     fn mul_by_twiddle(lhs: &Lhs, twiddle: &Twiddle) -> Self::Output {
         Inner::mul_by_scalar_widen(lhs, twiddle)
     }
+
+    /// Fused widen-multiply-and-add: delegates to
+    /// [`WideningMulByScalar::widen_and_add`] to allow specialized
+    /// implementations (e.g. for `DensePolynomial`) to avoid creating
+    /// intermediate temporaries.
+    #[inline(always)]
+    fn mul_by_twiddle_and_add(acc: &mut Self::Output, lhs: &Lhs, twiddle: &Twiddle)
+    where
+        Self::Output: for<'a> AddAssign<&'a Self::Output>,
+    {
+        Inner::widen_and_add(acc, lhs, twiddle);
+    }
 }

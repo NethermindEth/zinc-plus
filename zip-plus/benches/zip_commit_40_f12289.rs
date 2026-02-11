@@ -7,7 +7,8 @@
 //!
 //! Note: With rate 1/4 IPRS codes over F12289, 32-bit i32 evals × 14-bit
 //! twiddles produce intermediates that exceed i64 during butterfly stages.
-//! We use Int<2> (128-bit) codewords to avoid overflow.
+//! We use native i128 codewords to avoid overflow while keeping hardware
+//! arithmetic performance (unlike software bigint `Int<2>`).
 
 #![allow(non_local_definitions)]
 #![allow(clippy::eq_op, clippy::arithmetic_side_effects, clippy::unwrap_used)]
@@ -22,7 +23,6 @@ use zip_common::*;
 use criterion::{Criterion, criterion_group, criterion_main};
 use crypto_bigint::U64;
 use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_uint::Uint};
-use zinc_utils::from_ref::FromRef;
 use zinc_utils::mul_by_scalar::WideningMulByScalar;
 use zip_plus::{
     code::iprs::{IprsCode, PnttConfigF12289_Rate1_2, PnttConfigF12289_Rate1_4},
@@ -31,12 +31,12 @@ use zip_plus::{
 
 const INT_LIMBS: usize = U64::LIMBS;
 
-/// ZipTypes for 32-bit integer evaluations with 128-bit codewords.
+/// ZipTypes for 32-bit integer evaluations with native i128 codewords.
 struct BenchZipTypes32Bit {}
 impl ZipTypes for BenchZipTypes32Bit {
     const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = i32;
-    type Cw = Int<2>; // 128-bit codewords
+    type Cw = i128; // native 128-bit codewords (much faster than Int<2>)
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
@@ -48,23 +48,28 @@ impl ZipTypes for BenchZipTypes32Bit {
     type ArrCombRDotChal = MBSInnerProduct;
 }
 
-/// Widening multiplication: i32 × i64 → Int<2>.
+/// Widening multiplication: i32 × i64 → i128 (native hardware multiply).
 #[derive(Clone, Default)]
-struct I32ToInt2WideningMulByScalar;
+struct I32ToI128WideningMulByScalar;
 
-impl WideningMulByScalar<i32, i64> for I32ToInt2WideningMulByScalar {
-    type Output = Int<2>;
+impl WideningMulByScalar<i32, i64> for I32ToI128WideningMulByScalar {
+    type Output = i128;
 
+    #[inline(always)]
     #[allow(clippy::arithmetic_side_effects)]
     fn mul_by_scalar_widen(lhs: &i32, rhs: &i64) -> Self::Output {
-        let wide_lhs: Int<2> = Int::<2>::from_ref(lhs);
-        let wide_rhs: Int<2> = Int::<2>::from_ref(rhs);
-        wide_lhs * wide_rhs
+        i128::from(*lhs) * i128::from(*rhs)
+    }
+
+    #[inline(always)]
+    #[allow(clippy::arithmetic_side_effects)]
+    fn widen_and_add(acc: &mut Self::Output, lhs: &i32, rhs: &i64) {
+        *acc += i128::from(*lhs) * i128::from(*rhs);
     }
 }
 
 type Zt = BenchZipTypes32Bit;
-type Mul = I32ToInt2WideningMulByScalar;
+type Mul = I32ToI128WideningMulByScalar;
 
 // --- Rate 1/2 ---
 
