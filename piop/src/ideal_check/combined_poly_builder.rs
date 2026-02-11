@@ -1,8 +1,9 @@
 use crypto_primitives::{Field, PrimeField};
+use std::collections::HashMap;
+
 use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::collections::HashMap;
 
 use zinc_poly::{
     mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero},
@@ -140,7 +141,7 @@ fn prepare_coefficient_mles<
     max_degrees_and_combined_poly_rows: &[(usize, Vec<DynamicPolynomialF<IcTypes::F>>)],
     field_zero: &IcTypes::F,
 ) -> Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>> {
-    (0..num_constraints)
+    cfg_into_iter!(0..num_constraints)
         .map(|constraint| {
             (0..=max_degree)
                 .map(|coeff| {
@@ -157,7 +158,7 @@ fn prepare_coefficient_mles<
                 })
                 .collect_vec()
         })
-        .collect_vec()
+        .collect()
 }
 
 pub struct CombinedPolyRowBuilder<F: PrimeField> {

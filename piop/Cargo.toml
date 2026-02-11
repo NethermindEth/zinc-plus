@@ -40,3 +40,8 @@ simd = ["zinc-poly/simd"]
 [[bench]]
 name = "sumcheck"
 harness = false
+
+[[bench]]
+name = "ideal_check"
+harness = false
+

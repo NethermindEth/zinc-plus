@@ -11,6 +11,7 @@ use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::marker::PhantomData;
+pub use structs::*;
 use thiserror::Error;
 use zinc_poly::{
     EvaluationError,
@@ -26,8 +27,6 @@ use zinc_uair::{
 use zinc_utils::cfg_iter;
 
 use crate::ideal_check::utils::{project_scalars, project_trace_matrix};
-
-pub use structs::*;
 
 pub type Result<T, R, I> = std::result::Result<T, IdealCheckError<R, I>>;
 
