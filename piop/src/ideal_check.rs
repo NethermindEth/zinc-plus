@@ -4,7 +4,6 @@ mod combined_poly_builder;
 mod structs;
 
 use batched_ideal_check::*;
-use crypto_primitives::{Field, PrimeField};
 use derive_more::From;
 use itertools::Itertools;
 #[cfg(feature = "parallel")]
@@ -29,13 +28,9 @@ use zinc_utils::cfg_iter;
 pub type Result<T, R, I> = std::result::Result<T, IdealCheckError<R, I>>;
 
 /// Ideal-check subprotocol.
-pub struct IdealCheckProtocol<IcTypes: IdealCheckTypes, const DEGREE_PLUS_ONE: usize>(
-    PhantomData<IcTypes>,
-);
+pub struct IdealCheckProtocol<F: IdealCheckField, const DEGREE_PLUS_ONE: usize>(PhantomData<F>);
 
-impl<IcTypes: IdealCheckTypes, const DEGREE_PLUS_ONE: usize>
-    IdealCheckProtocol<IcTypes, DEGREE_PLUS_ONE>
-{
+impl<F: IdealCheckField, const DEGREE_PLUS_ONE: usize> IdealCheckProtocol<F, DEGREE_PLUS_ONE> {
     /// The prover part of the ideal-check subprotocol.
     ///
     /// The prover samples a random field element
@@ -58,18 +53,15 @@ impl<IcTypes: IdealCheckTypes, const DEGREE_PLUS_ONE: usize>
         trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
         num_constraints: usize,
         num_vars: usize,
-        field_cfg: &<IcTypes::F as PrimeField>::Config,
+        field_cfg: &F::Config,
     ) -> Result<
-        (
-            Proof<IcTypes, DEGREE_PLUS_ONE>,
-            ProverState<IcTypes, DEGREE_PLUS_ONE>,
-        ),
+        (Proof<F, DEGREE_PLUS_ONE>, ProverState<F, DEGREE_PLUS_ONE>),
         BinaryPoly<DEGREE_PLUS_ONE>,
         U::Ideal,
     >
     where
         U: Uair<BinaryPoly<DEGREE_PLUS_ONE>>,
-        <IcTypes::F as Field>::Inner: ConstTranscribable,
+        F::Inner: ConstTranscribable,
     {
         let projecting_element = transcript.get_field_challenge(field_cfg);
 
@@ -78,31 +70,30 @@ impl<IcTypes: IdealCheckTypes, const DEGREE_PLUS_ONE: usize>
 
         // TODO(Ilia): if there's a lot of scalars
         //             we should do this in parallel probably.
-        let projected_scalars: HashMap<
-            BinaryPoly<DEGREE_PLUS_ONE>,
-            DynamicPolynomialF<IcTypes::F>,
-        > = uair_scalars
-            .into_iter()
-            .map(|scalar| {
-                (scalar.clone(), {
-                    let mut dynamic_poly =
-                        DynamicPolynomialF::from(scalar.project_coefficients(&projecting_element));
+        let projected_scalars: HashMap<BinaryPoly<DEGREE_PLUS_ONE>, DynamicPolynomialF<F>> =
+            uair_scalars
+                .into_iter()
+                .map(|scalar| {
+                    (scalar.clone(), {
+                        let mut dynamic_poly = DynamicPolynomialF::from(
+                            scalar.project_coefficients(&projecting_element),
+                        );
 
-                    dynamic_poly.trim();
+                        dynamic_poly.trim();
 
-                    dynamic_poly
+                        dynamic_poly
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
-        let combined_mles = combined_poly_builder::compute_combined_polynomials::<IcTypes, U, _>(
+        let combined_mles = combined_poly_builder::compute_combined_polynomials::<F, U, _>(
             trace,
             &projecting_element,
             &projected_scalars,
             num_constraints,
         );
 
-        let mut transcription_buf: Vec<u8> = vec![0; <IcTypes::F as Field>::Inner::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
@@ -162,24 +153,24 @@ impl<IcTypes: IdealCheckTypes, const DEGREE_PLUS_ONE: usize>
     #[allow(clippy::type_complexity)]
     pub fn verify_as_subprotocol<U, IdealOverF, IdealOverFFromRef>(
         transcript: &mut impl Transcript,
-        proof: Proof<IcTypes, DEGREE_PLUS_ONE>,
+        proof: Proof<F, DEGREE_PLUS_ONE>,
         num_constraints: usize,
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
-        field_cfg: &<IcTypes::F as PrimeField>::Config,
-    ) -> Result<VerifierSubClaim<IcTypes>, DynamicPolynomialF<IcTypes::F>, IdealOverF>
+        field_cfg: &F::Config,
+    ) -> Result<VerifierSubClaim<F>, DynamicPolynomialF<F>, IdealOverF>
     where
         U: Uair<BinaryPoly<DEGREE_PLUS_ONE>>,
-        <IcTypes::F as Field>::Inner: ConstTranscribable,
-        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<IcTypes::F>>,
+        F::Inner: ConstTranscribable,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
         // Sample a field element to maintain FS symmetry with
         // the prover.
         // We also will need it in a later stage of the protocol.
-        let coefficient_projecting_element: IcTypes::F = transcript.get_field_challenge(field_cfg);
+        let coefficient_projecting_element: F = transcript.get_field_challenge(field_cfg);
 
-        let mut transcription_buf: Vec<u8> = vec![0; <IcTypes::F as Field>::Inner::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
         let combined_mle_values = proof.combined_mle_values;
 
@@ -241,18 +232,14 @@ mod tests {
         MontyParams::new(modulus)
     }
 
-    struct TestIcTypes;
-
-    impl IdealCheckTypes for TestIcTypes {
-        type F = MontyField<LIMBS>;
-    }
+    type TestIcField = MontyField<LIMBS>;
 
     fn run_prover<U, const DEGREE_PLUS_ONE: usize>(
         num_vars: usize,
         transcript: &mut impl Transcript,
     ) -> (
-        Proof<TestIcTypes, DEGREE_PLUS_ONE>,
-        ProverState<TestIcTypes, DEGREE_PLUS_ONE>,
+        Proof<TestIcField, DEGREE_PLUS_ONE>,
+        ProverState<TestIcField, DEGREE_PLUS_ONE>,
     )
     where
         U: GenerateWitness<BinaryPoly<DEGREE_PLUS_ONE>>,
@@ -265,7 +252,7 @@ mod tests {
 
         let num_constraints = count_constraints::<BinaryPoly<DEGREE_PLUS_ONE>, U>();
 
-        IdealCheckProtocol::<TestIcTypes, _>::prove_as_subprotocol::<U>(
+        IdealCheckProtocol::<TestIcField, _>::prove_as_subprotocol::<U>(
             transcript,
             &trace,
             num_constraints,
@@ -285,7 +272,7 @@ mod tests {
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
         U: GenerateWitness<BinaryPoly<DEGREE_PLUS_ONE>>,
-        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<TestIcField>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
         let transcript = KeccakTranscript::new();
@@ -296,7 +283,7 @@ mod tests {
         let num_constraints = count_constraints::<BinaryPoly<DEGREE_PLUS_ONE>, U>();
 
         let verifier_result =
-            IdealCheckProtocol::<TestIcTypes, _>::verify_as_subprotocol::<U, _, _>(
+            IdealCheckProtocol::<TestIcField, _>::verify_as_subprotocol::<U, _, _>(
                 &mut transcript.clone(),
                 proof,
                 num_constraints,

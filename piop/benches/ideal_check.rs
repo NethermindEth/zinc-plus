@@ -5,14 +5,11 @@ use criterion::{
 use crypto_primitives::{Field, crypto_bigint_monty::MontyField};
 use rand::rng;
 use std::hint::black_box;
-use zinc_piop::ideal_check::{IdealCheckProtocol, IdealCheckTypes, Proof};
+use zinc_piop::ideal_check::{IdealCheckProtocol, Proof};
 use zinc_poly::univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF};
 use zinc_primality::MillerRabin;
 use zinc_test_uair::{GenerateWitness, TestAirBinary, TestUairSimpleMultiplication};
-use zinc_transcript::{
-    KeccakTranscript,
-    traits::{ConstTranscribable, Transcript},
-};
+use zinc_transcript::{KeccakTranscript, traits::Transcript};
 use zinc_uair::{
     Uair,
     constraint_counter::count_constraints,
@@ -22,32 +19,15 @@ use zinc_uair::{
 
 const DEGREE_PLUS_ONE: usize = 32;
 
-#[derive(Clone)]
-struct BenchIcTypes<const FIELD_LIMBS: usize>;
-
-trait BenchIcTrait<const FIELD_LIMBS: usize>:
-    IdealCheckTypes<F = MontyField<FIELD_LIMBS>> + Clone
-{
-    const FIELD_LIMBS: usize;
-}
-
-impl<const FIELD_LIMBS: usize> IdealCheckTypes for BenchIcTypes<FIELD_LIMBS> {
-    type F = MontyField<FIELD_LIMBS>;
-}
-
-impl<const FIELD_LIMBS: usize> BenchIcTrait<FIELD_LIMBS> for BenchIcTypes<FIELD_LIMBS> {
-    const FIELD_LIMBS: usize = FIELD_LIMBS;
-}
+type BenchIcField<const FIELD_LIMBS: usize> = MontyField<FIELD_LIMBS>;
 
 #[allow(clippy::arithmetic_side_effects)]
-fn do_bench<IcTypes, Air, IdealOverFFromRef, IdealOverF, const FIELD_LIMBS: usize>(
+fn do_bench<Air, IdealOverFFromRef, IdealOverF, const FIELD_LIMBS: usize>(
     group: &mut BenchmarkGroup<WallTime>,
     air_name: &str,
     witness_size: usize,
     ideal_over_f_from_ref: IdealOverFFromRef,
 ) where
-    IcTypes: BenchIcTrait<FIELD_LIMBS> + IdealCheckTypes,
-    <<IcTypes as IdealCheckTypes>::F as Field>::Inner: ConstTranscribable,
     Air: Uair<BinaryPoly<DEGREE_PLUS_ONE>> + GenerateWitness<BinaryPoly<DEGREE_PLUS_ONE>>,
     IdealOverF: Ideal,
     IdealOverF: IdealCheck<DynamicPolynomialF<MontyField<FIELD_LIMBS>>>,
@@ -58,21 +38,16 @@ fn do_bench<IcTypes, Air, IdealOverFFromRef, IdealOverF, const FIELD_LIMBS: usiz
     let num_vars = zinc_utils::log2(witness_size) as usize;
     let trace = Air::generate_witness(num_vars, &mut rng);
 
-    let params = format!(
-        "{}/LIMBS={}/nvars={}",
-        air_name,
-        IcTypes::FIELD_LIMBS,
-        num_vars
-    );
+    let params = format!("{}/LIMBS={}/nvars={}", air_name, FIELD_LIMBS, num_vars);
 
     let transcript = KeccakTranscript::new();
 
     let num_constraints = count_constraints::<BinaryPoly<DEGREE_PLUS_ONE>, Air>();
 
     let prove =
-        |(trace, mut transcript): (Vec<_>, KeccakTranscript)| -> Proof<IcTypes, DEGREE_PLUS_ONE> {
+        |(trace, mut transcript): (Vec<_>, KeccakTranscript)| -> Proof<BenchIcField<FIELD_LIMBS>, DEGREE_PLUS_ONE> {
             let field_cfg = transcript
-                .get_random_field_cfg::<<IcTypes as IdealCheckTypes>::F, <<IcTypes as IdealCheckTypes>::F as Field>::Inner, MillerRabin>();
+                .get_random_field_cfg::<BenchIcField<FIELD_LIMBS>, <BenchIcField<FIELD_LIMBS> as Field>::Inner, MillerRabin>();
             IdealCheckProtocol::prove_as_subprotocol::<Air>(
                 &mut transcript,
                 &trace,
@@ -108,8 +83,8 @@ fn do_bench<IcTypes, Air, IdealOverFFromRef, IdealOverF, const FIELD_LIMBS: usiz
                 || (proof.clone(), transcript.clone()),
                 |(proof, mut transcript)| {
                     let field_cfg = transcript.get_random_field_cfg::<
-                        <IcTypes as IdealCheckTypes>::F,
-                        <<IcTypes as IdealCheckTypes>::F as Field>::Inner,
+                        BenchIcField<FIELD_LIMBS>,
+                        <BenchIcField<FIELD_LIMBS> as Field>::Inner,
                         MillerRabin,
                     >();
                     let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<Air, _, _>(
@@ -132,7 +107,7 @@ pub fn bench_bin<const FIELD_LIMBS: usize>(
     group: &mut BenchmarkGroup<WallTime>,
     witness_size: usize,
 ) {
-    do_bench::<BenchIcTypes<FIELD_LIMBS>, TestAirBinary, _, _, FIELD_LIMBS>(
+    do_bench::<TestAirBinary, _, _, FIELD_LIMBS>(
         group,
         "Binary",
         witness_size,
@@ -144,7 +119,7 @@ pub fn bench_simple_mul<const FIELD_LIMBS: usize>(
     group: &mut BenchmarkGroup<WallTime>,
     witness_size: usize,
 ) {
-    do_bench::<BenchIcTypes<FIELD_LIMBS>, TestUairSimpleMultiplication, _, _, FIELD_LIMBS>(
+    do_bench::<TestUairSimpleMultiplication, _, _, FIELD_LIMBS>(
         group,
         "SimpleMul",
         witness_size,

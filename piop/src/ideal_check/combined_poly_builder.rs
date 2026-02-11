@@ -1,45 +1,42 @@
 use std::{collections::HashMap, mem::MaybeUninit};
 
-use crypto_primitives::{DenseRowMatrix, Field, PrimeField};
+use crate::ideal_check::IdealCheckField;
+use crypto_primitives::DenseRowMatrix;
 use itertools::Itertools;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use zinc_poly::{
     CoefficientProjectable,
     mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero},
-    univariate::dynamic::over_field::DynamicPolynomialF,
+    univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF},
 };
 use zinc_uair::{ConstraintBuilder, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::{cfg_chunks_mut, cfg_into_iter, cfg_iter, from_ref::FromRef};
-
-use crate::ideal_check::structs::IdealCheckTypes;
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
-use zinc_poly::univariate::binary::BinaryPoly;
 
 /// Given a UAIR `U` and a trace `trace` this function
 /// obtains the combined polynomials' MLE coefficients.
 /// Since each coefficient is also a univariate polynomial
 /// we split the resulting MLE into coefficient MLEs.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn compute_combined_polynomials<IcTypes: IdealCheckTypes, U, const DEGREE_PLUS_ONE: usize>(
+pub fn compute_combined_polynomials<F: IdealCheckField, U, const DEGREE_PLUS_ONE: usize>(
     trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
-    projecting_element: &IcTypes::F,
-    projected_scalars: &HashMap<BinaryPoly<DEGREE_PLUS_ONE>, DynamicPolynomialF<IcTypes::F>>,
+    projecting_element: &F,
+    projected_scalars: &HashMap<BinaryPoly<DEGREE_PLUS_ONE>, DynamicPolynomialF<F>>,
     num_constraints: usize,
-) -> Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>>
+) -> Vec<Vec<DenseMultilinearExtension<F::Inner>>>
 where
     U: Uair<BinaryPoly<DEGREE_PLUS_ONE>>,
 {
     let num_rows = trace[0].len();
     let num_cols = trace.len();
 
-    let trace_matrix =
-        project_trace_matrix::<IcTypes, _>(num_rows, num_cols, trace, projecting_element);
+    let trace_matrix = project_trace_matrix(num_rows, num_cols, trace, projecting_element);
 
-    let field_zero = IcTypes::F::zero_with_cfg(projecting_element.cfg());
+    let field_zero = F::zero_with_cfg(projecting_element.cfg());
 
     let rows: Vec<_> = trace_matrix.as_rows().collect();
     let indices: Vec<usize> = (0..num_rows - 1).collect();
-    let mut max_degrees_and_combined_poly_rows: Vec<(usize, Vec<DynamicPolynomialF<IcTypes::F>>)> =
+    let mut max_degrees_and_combined_poly_rows: Vec<(usize, Vec<DynamicPolynomialF<F>>)> =
         cfg_iter!(indices)
             .map(|&i| {
                 combine_rows_and_get_max_degree::<_, U, _>(
@@ -81,12 +78,12 @@ where
 }
 
 /// Apply projection to coefficients of coefficients of the input trace.
-fn project_trace_matrix<IcTypes: IdealCheckTypes, const DEGREE_PLUS_ONE: usize>(
+fn project_trace_matrix<F: IdealCheckField, const DEGREE_PLUS_ONE: usize>(
     num_rows: usize,
     num_cols: usize,
     trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
-    projecting_element: &IcTypes::F,
-) -> DenseRowMatrix<DynamicPolynomialF<IcTypes::F>> {
+    projecting_element: &F,
+) -> DenseRowMatrix<DynamicPolynomialF<F>> {
     let mut matr = DenseRowMatrix::uninit(num_rows, num_cols);
 
     cfg_chunks_mut!(matr.data, num_cols)
@@ -115,7 +112,7 @@ fn combine_rows_and_get_max_degree<F, U, const DEGREE_PLUS_ONE: usize>(
     projected_scalars: &HashMap<BinaryPoly<DEGREE_PLUS_ONE>, DynamicPolynomialF<F>>,
 ) -> (usize, Vec<DynamicPolynomialF<F>>)
 where
-    F: PrimeField,
+    F: IdealCheckField,
     U: Uair<BinaryPoly<DEGREE_PLUS_ONE>>,
 {
     let mut constraint_builder = CombinedPolyRowBuilder::new(num_constraints);
@@ -151,7 +148,7 @@ where
 
 /// Turn the resulting slice of vectors of dynamic polynomials
 /// into a vector of vectors of coefficient MLEs.
-fn prepare_coefficient_mles<F: PrimeField>(
+fn prepare_coefficient_mles<F: IdealCheckField>(
     num_constraints: usize,
     max_degree: usize,
     max_degrees_and_combined_poly_rows: &[(usize, Vec<DynamicPolynomialF<F>>)],
@@ -177,11 +174,11 @@ fn prepare_coefficient_mles<F: PrimeField>(
         .collect()
 }
 
-pub struct CombinedPolyRowBuilder<F: PrimeField> {
+pub struct CombinedPolyRowBuilder<F: IdealCheckField> {
     combined_evaluations: Vec<DynamicPolynomialF<F>>,
 }
 
-impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
+impl<F: IdealCheckField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
     type Expr = DynamicPolynomialF<F>;
     type Ideal = ImpossibleIdeal;
 
@@ -194,7 +191,7 @@ impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
     }
 }
 
-impl<F: PrimeField> CombinedPolyRowBuilder<F> {
+impl<F: IdealCheckField> CombinedPolyRowBuilder<F> {
     pub fn new(num_constraints: usize) -> Self {
         Self {
             combined_evaluations: Vec::with_capacity(num_constraints),
