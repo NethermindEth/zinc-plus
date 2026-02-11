@@ -78,6 +78,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         F::Inner: ConstTranscribable + Send + Sync + Zero + Default,
         U: Uair<R>,
     {
+        debug_assert_ne!(
+            num_vars, 1,
+            "The protocol is not needed when the number of variables is 1 :)"
+        );
+
         let projecting_element: F = transcript.get_field_challenge(field_cfg);
 
         // Project scalars along F[X] -> F.
