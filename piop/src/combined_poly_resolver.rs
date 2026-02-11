@@ -13,9 +13,7 @@ use std::{collections::HashMap, marker::PhantomData, slice};
 use thiserror::Error;
 use zinc_poly::{
     EvaluatablePolynomial, EvaluationError,
-    mle::{
-        DenseMultilinearExtension, MultilinearExtensionWithConfig,
-    },
+    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
     univariate::dynamic::over_field::DynamicPolynomialF,
     utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
 };
