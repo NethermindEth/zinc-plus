@@ -1,6 +1,5 @@
-use crypto_primitives::{PrimeField, Semiring};
+use crypto_primitives::PrimeField;
 use zinc_poly::mle::DenseMultilinearExtension;
-use zinc_uair::Uair;
 
 use crate::{combined_poly_resolver::CombinedPolyResolverError, sumcheck::SumcheckProof};
 
@@ -19,12 +18,11 @@ pub struct Proof<F: PrimeField> {
 
 impl<F: PrimeField> Proof<F> {
     /// Check if `up_evals` and `down_evals` vectors
-    /// has the length `U::num_cols()`.
-    pub fn validate_evaluation_sizes<R: Semiring + 'static, U: Uair<R>>(
+    /// has the length `num_cols`.
+    pub fn validate_evaluation_sizes(
         &self,
+        num_cols: usize,
     ) -> Result<(), CombinedPolyResolverError<F>> {
-        let num_cols = U::num_cols();
-
         if self.up_evals.len() != num_cols {
             return Err(CombinedPolyResolverError::WrongUpEvalsNumber {
                 got: self.up_evals.len(),

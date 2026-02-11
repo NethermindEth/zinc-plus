@@ -239,7 +239,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         F::Inner: ConstTranscribable,
         U: Uair<R>,
     {
-        proof.validate_evaluation_sizes::<_, U>()?;
+        proof.validate_evaluation_sizes(U::num_cols())?;
 
         let projecting_element: F = transcript.get_field_challenge(field_cfg);
 
