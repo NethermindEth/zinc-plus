@@ -4,6 +4,7 @@ mod folder;
 mod structs;
 mod utils;
 
+use crypto_primitives::{FromPrimitiveWithConfig, PrimeField, Semiring};
 use itertools::Itertools;
 use num_traits::Zero;
 #[cfg(feature = "parallel")]
@@ -12,19 +13,15 @@ use std::{collections::HashMap, marker::PhantomData, slice};
 use thiserror::Error;
 use zinc_poly::{
     EvaluatablePolynomial, EvaluationError,
-    mle::MultilinearExtensionWithConfig,
+    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
+    univariate::dynamic::over_field::DynamicPolynomialF,
     utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
 };
-use zinc_uair::ideal::ImpossibleIdeal;
-use zinc_utils::{cfg_iter, from_ref::FromRef, powers};
-
-use crypto_primitives::{FromPrimitiveWithConfig, PrimeField, Semiring};
-use zinc_poly::{
-    mle::DenseMultilinearExtension, univariate::dynamic::over_field::DynamicPolynomialF,
-};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_uair::Uair;
-use zinc_utils::inner_transparent_field::InnerTransparentField;
+use zinc_uair::{Uair, ideal::ImpossibleIdeal};
+use zinc_utils::{
+    cfg_iter, from_ref::FromRef, inner_transparent_field::InnerTransparentField, powers,
+};
 
 use crate::{
     combined_poly_resolver::{folder::ConstraintFolder, utils::project_scalars_to_field},
