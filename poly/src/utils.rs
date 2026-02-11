@@ -215,6 +215,8 @@ pub fn eq_eval<R: Semiring>(x: &[R], y: &[R], one: R) -> Result<R, ArithErrors> 
     Ok(res)
 }
 
+/// Returns a multilinear polynomial in 2n variables that evaluates to 1
+/// if and only if the second n-bit vector is equal to the first vector plus one (viewed as big-endian integers).
 #[allow(clippy::arithmetic_side_effects)]
 pub fn next_mle_inner<F: Field>(
     num_vars: u32,
@@ -320,8 +322,10 @@ pub fn next_mle_eval<R: Semiring>(point: &[R], zero: R, one: R) -> R {
 #[cfg(test)]
 mod tests {
     use crypto_bigint::{U128, const_monty_params};
-    use crypto_primitives::crypto_bigint_const_monty::ConstMontyField;
+    use crypto_primitives::{IntoWithConfig, crypto_bigint_const_monty::ConstMontyField};
+    use itertools::Itertools;
     use num_traits::One;
+    use proptest::{prelude::*, proptest};
 
     use crate::mle::MultilinearExtensionWithConfig;
 
@@ -333,14 +337,14 @@ mod tests {
 
     type F = ConstMontyField<Params, N>;
 
+    const NUM_VARS: u32 = 8;
+
     #[test]
     fn next_mle_is_one_on_successors() {
-        let num_vars = 8;
+        let next_mle = next_mle_inner(NUM_VARS, F::zero(), F::one()).unwrap();
 
-        let next_mle = next_mle_inner(num_vars, F::zero(), F::one()).unwrap();
-
-        for i in 0..(1 << ((num_vars / 2) - 1)) {
-            let mut point: Vec<F> = (0..(num_vars / 2))
+        for i in 0..(1 << ((NUM_VARS / 2) - 1)) {
+            let mut point: Vec<F> = (0..(NUM_VARS / 2))
                 .map(|j| {
                     if i & (1 << j) == 0 {
                         F::zero()
@@ -350,7 +354,7 @@ mod tests {
                 })
                 .collect();
 
-            point.extend((0..(num_vars / 2)).map(|j| {
+            point.extend((0..(NUM_VARS / 2)).map(|j| {
                 if (i + 1) & (1 << j) == 0 {
                     F::zero()
                 } else {
@@ -375,5 +379,25 @@ mod tests {
             next_mle.evaluations.iter().filter(|x| !x.is_zero()).count(),
             (1 << (num_vars / 2)) - 1
         );
+    }
+
+    fn any_f(cfg: <F as PrimeField>::Config) -> impl Strategy<Value = F> + 'static {
+        any::<u128>().prop_map(move |v| v.into_with_cfg(&cfg))
+    }
+
+    fn point_n(n: usize) -> impl Strategy<Value = Vec<F>> {
+        prop::collection::vec(any_f(()), n)
+    }
+
+    proptest! {
+    #[test]
+    fn prop_next_mle_eval_coincide_with_next_mle_evaluate_at_point(r in point_n(NUM_VARS as usize)) {
+        let next_mle = next_mle_inner(NUM_VARS, F::zero(), F::one()).unwrap();
+
+        prop_assert_eq!(
+            next_mle.evaluate_with_config(&r, &()),
+            Ok(next_mle_eval(&r, F::zero(), F::one()))
+        );
+    }
     }
 }
