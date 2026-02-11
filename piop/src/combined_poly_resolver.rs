@@ -176,7 +176,12 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         // leaving all MLEs in num_vars=1
         // state. We need to evaluate them up
         // and send to the verifier.
-        debug_assert!(sumcheck_prover_state.mles.iter().all(|mle| mle.num_vars == 1));
+        debug_assert!(
+            sumcheck_prover_state
+                .mles
+                .iter()
+                .all(|mle| mle.num_vars == 1)
+        );
 
         let last_sumcheck_challenge = sumcheck_prover_state
             .randomness
@@ -248,6 +253,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         let folding_challenge_powers: Vec<F> =
             powers(folding_challenge, one.clone(), num_constraints);
 
+        // TODO(Alex): investigate if parallelising this is beneficial.
         // Compute v_0 + \alpha * v_1 + ... + \alpha ^ k * v_k.
         let expected_sum = ic_check_subclaim
             .values
