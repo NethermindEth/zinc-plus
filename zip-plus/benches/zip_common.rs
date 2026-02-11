@@ -54,6 +54,8 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     // merkle_root::<Zt, 14>(group);
     // merkle_root::<Zt, 15>(group);
     // merkle_root::<Zt, 16>(group);
+    commit::<Zt, Lc, 8>(group);
+    commit::<Zt, Lc, 9>(group);
     commit::<Zt, Lc, 10>(group);
     commit::<Zt, Lc, 11>(group);
     commit::<Zt, Lc, 12>(group);
@@ -324,6 +326,205 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool,
                     &proof,
                 )
                 .expect("Verification failed");
+            })
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Multi-polynomial benchmarks: measure each Zip+ phase over `num_polys`
+// independent polynomials of size 2^P.
+// ---------------------------------------------------------------------------
+
+pub fn batch_commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+    num_polys: usize,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let params = ZipPlus::setup(poly_size, linear_code);
+
+    group.bench_function(
+        format!(
+            "BatchCommit: num_polys={num_polys}, poly_size=2^{P}",
+        ),
+        |b| {
+            b.iter_custom(|iters| {
+                let mut total_duration = Duration::ZERO;
+                for _ in 0..iters {
+                    let polys: Vec<_> = (0..num_polys)
+                        .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
+                        .collect();
+                    let timer = Instant::now();
+                    for poly in &polys {
+                        let res = ZipPlus::commit(&params, poly).expect("Failed to commit");
+                        black_box(&res);
+                    }
+                    total_duration += timer.elapsed();
+                }
+                total_duration
+            })
+        },
+    );
+}
+
+pub fn batch_test<
+    Zt: ZipTypes,
+    Lc: LinearCode<Zt>,
+    const CHECK_FOR_OVERFLOWS: bool,
+    const P: usize,
+>(
+    group: &mut BenchmarkGroup<WallTime>,
+    num_polys: usize,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let params = ZipPlus::setup(poly_size, linear_code);
+
+    let polys_and_hints: Vec<_> = (0..num_polys)
+        .map(|_| {
+            let poly = DenseMultilinearExtension::rand(P, &mut rng);
+            let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
+            (poly, data)
+        })
+        .collect();
+
+    group.bench_function(
+        format!(
+            "BatchTest: num_polys={num_polys}, poly_size=2^{P}",
+        ),
+        |b| {
+            b.iter(|| {
+                for (poly, data) in &polys_and_hints {
+                    let transcript =
+                        ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, poly, data)
+                            .expect("Test phase failed");
+                    black_box(transcript);
+                }
+            })
+        },
+    );
+}
+
+pub fn batch_evaluate<
+    Zt: ZipTypes,
+    Lc: LinearCode<Zt>,
+    const CHECK_FOR_OVERFLOWS: bool,
+    const P: usize,
+>(
+    group: &mut BenchmarkGroup<WallTime>,
+    num_polys: usize,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
+    <F as Field>::Inner: FromRef<Zt::Fmod>,
+    Zt::Eval: ProjectableToField<F>,
+{
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let params = ZipPlus::setup(poly_size, linear_code);
+
+    let polys_and_transcripts: Vec<_> = (0..num_polys)
+        .map(|_| {
+            let poly = DenseMultilinearExtension::rand(P, &mut rng);
+            let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
+            let transcript =
+                ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, &poly, &data)
+                    .expect("Test phase failed");
+            (poly, transcript)
+        })
+        .collect();
+    let point = vec![Zt::Pt::one(); P];
+
+    group.bench_function(
+        format!(
+            "BatchEvaluate: num_polys={num_polys}, poly_size=2^{P}",
+        ),
+        |b| {
+            b.iter_custom(|iters| {
+                let mut total_duration = Duration::ZERO;
+                for _ in 0..iters {
+                    let timer = Instant::now();
+                    for (poly, transcript) in &polys_and_transcripts {
+                        let t = transcript.clone();
+                        let (eval_f, proof) =
+                            ZipPlus::evaluate::<F, CHECK_FOR_OVERFLOWS>(
+                                &params, poly, &point, t,
+                            )
+                            .expect("Evaluation phase failed");
+                        black_box((eval_f, proof));
+                    }
+                    total_duration += timer.elapsed();
+                }
+                total_duration
+            })
+        },
+    );
+}
+
+pub fn batch_verify<
+    Zt: ZipTypes,
+    Lc: LinearCode<Zt>,
+    const CHECK_FOR_OVERFLOWS: bool,
+    const P: usize,
+>(
+    group: &mut BenchmarkGroup<WallTime>,
+    num_polys: usize,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
+    <F as Field>::Inner: FromRef<Zt::Fmod>,
+    Zt::Eval: ProjectableToField<F>,
+    Zt::Cw: ProjectableToField<F>,
+{
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let params = ZipPlus::setup(poly_size, linear_code);
+
+    let verification_data: Vec<_> = (0..num_polys)
+        .map(|_| {
+            let poly = DenseMultilinearExtension::rand(P, &mut rng);
+            let (data, commitment) = ZipPlus::commit(&params, &poly).unwrap();
+            let point = vec![Zt::Pt::one(); P];
+            let test_transcript =
+                ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, &poly, &data)
+                    .expect("Test phase failed");
+            let (eval_f, proof) =
+                ZipPlus::evaluate::<F, CHECK_FOR_OVERFLOWS>(
+                    &params, &poly, &point, test_transcript,
+                )
+                .expect("Evaluation phase failed");
+            let field_cfg = *eval_f.cfg();
+            let point_f: Vec<F> =
+                point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
+            (commitment, point_f, eval_f, proof)
+        })
+        .collect();
+
+    group.bench_function(
+        format!(
+            "BatchVerify: num_polys={num_polys}, poly_size=2^{P}",
+        ),
+        |b| {
+            b.iter(|| {
+                for (commitment, point_f, eval_f, proof) in &verification_data {
+                    ZipPlus::verify::<F, CHECK_FOR_OVERFLOWS>(
+                        &params,
+                        commitment,
+                        point_f,
+                        eval_f,
+                        proof,
+                    )
+                    .expect("Verification failed");
+                }
             })
         },
     );

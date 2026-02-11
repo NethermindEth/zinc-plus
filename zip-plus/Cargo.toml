@@ -48,3 +48,7 @@ harness = false
 [[bench]]
 name = "zip_plus_benches"
 harness = false
+
+[[bench]]
+name = "zip_plus_multi_poly_benches"
+harness = false
