@@ -1,6 +1,6 @@
 use std::{collections::HashMap, mem::MaybeUninit};
 
-use crypto_primitives::{DenseRowMatrix, Field, Matrix, PrimeField};
+use crypto_primitives::{DenseRowMatrix, Field, PrimeField};
 use itertools::Itertools;
 use zinc_poly::{
     CoefficientProjectable,
@@ -8,7 +8,10 @@ use zinc_poly::{
     univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_uair::{ConstraintBuilder, Uair, ideal::ImpossibleIdeal};
-use zinc_utils::from_ref::FromRef;
+use zinc_utils::{cfg_chunks_mut, cfg_into_iter, cfg_iter, from_ref::FromRef};
+
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 use crate::ideal_check::structs::IdealCheckTypes;
 
@@ -16,6 +19,7 @@ use crate::ideal_check::structs::IdealCheckTypes;
 /// obtains the combined polynomials' MLE coefficients.
 /// Since each coefficient is also a univariate polynomial
 /// we split the resulting MLE into coefficient MLEs.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn compute_combined_polynomials<
     IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>,
     U,
@@ -37,14 +41,14 @@ where
 
     let field_zero = IcTypes::F::zero_with_cfg(projecting_element.cfg());
 
+    let rows: Vec<_> = trace_matrix.as_rows().collect();
+    let indices: Vec<usize> = (0..num_rows - 1).collect();
     let mut max_degrees_and_combined_poly_rows: Vec<(usize, Vec<DynamicPolynomialF<IcTypes::F>>)> =
-        trace_matrix
-            .as_rows()
-            .zip(trace_matrix.as_rows().skip(1))
-            .map(|(up, down)| {
+        cfg_iter!(indices)
+            .map(|&i| {
                 combine_rows_and_get_max_degree::<IcTypes, U, _>(
-                    up,
-                    down,
+                    rows[i],
+                    rows[i + 1],
                     num_constraints,
                     projected_scalars,
                 )
@@ -89,15 +93,17 @@ fn project_trace_matrix<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_
 ) -> DenseRowMatrix<DynamicPolynomialF<<IcTypes as IdealCheckTypes<DEGREE_PLUS_ONE>>::F>> {
     let mut matr = DenseRowMatrix::uninit(num_rows, num_cols);
 
-    matr.cells_mut().enumerate().for_each(|(row_idx, row)| {
-        row.for_each(|(col_idx, cell)| {
-            *cell = MaybeUninit::new(
-                trace[col_idx][row_idx]
-                    .project_coefficients(projecting_element)
-                    .into(),
-            );
+    cfg_chunks_mut!(matr.data, num_cols)
+        .enumerate()
+        .for_each(|(row_idx, row)| {
+            for (col_idx, cell) in row.iter_mut().enumerate() {
+                *cell = MaybeUninit::new(
+                    trace[col_idx][row_idx]
+                        .project_coefficients(projecting_element)
+                        .into(),
+                );
+            }
         });
-    });
 
     unsafe { matr.init() }
 }
@@ -158,7 +164,7 @@ fn prepare_coefficient_mles<
     max_degrees_and_combined_poly_rows: &[(usize, Vec<DynamicPolynomialF<IcTypes::F>>)],
     field_zero: &IcTypes::F,
 ) -> Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>> {
-    (0..num_constraints)
+    cfg_into_iter!(0..num_constraints)
         .map(|constraint| {
             (0..=max_degree)
                 .map(|coeff| {
@@ -175,7 +181,7 @@ fn prepare_coefficient_mles<
                 })
                 .collect_vec()
         })
-        .collect_vec()
+        .collect()
 }
 
 pub struct CombinedPolyRowBuilder<F: PrimeField> {

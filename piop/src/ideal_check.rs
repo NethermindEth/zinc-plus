@@ -10,7 +10,7 @@ use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::{collections::HashMap, marker::PhantomData};
-use structs::*;
+pub use structs::*;
 use thiserror::Error;
 use zinc_poly::{
     CoefficientProjectable, EvaluationError,
