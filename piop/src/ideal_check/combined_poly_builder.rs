@@ -1,7 +1,7 @@
 use std::{collections::HashMap, mem::MaybeUninit};
 
 use crate::ideal_check::IdealCheckField;
-use crypto_primitives::DenseRowMatrix;
+use crypto_primitives::{DenseRowMatrix, PrimeField};
 use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -174,11 +174,11 @@ fn prepare_coefficient_mles<F: IdealCheckField>(
         .collect()
 }
 
-pub struct CombinedPolyRowBuilder<F: IdealCheckField> {
+pub struct CombinedPolyRowBuilder<F: PrimeField> {
     combined_evaluations: Vec<DynamicPolynomialF<F>>,
 }
 
-impl<F: IdealCheckField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
+impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
     type Expr = DynamicPolynomialF<F>;
     type Ideal = ImpossibleIdeal;
 
@@ -191,7 +191,7 @@ impl<F: IdealCheckField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
     }
 }
 
-impl<F: IdealCheckField> CombinedPolyRowBuilder<F> {
+impl<F: PrimeField> CombinedPolyRowBuilder<F> {
     pub fn new(num_constraints: usize) -> Self {
         Self {
             combined_evaluations: Vec::with_capacity(num_constraints),
