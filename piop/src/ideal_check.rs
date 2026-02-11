@@ -224,13 +224,13 @@ pub enum IdealCheckError<R, I> {
 #[cfg(test)]
 mod tests {
     use crypto_bigint::{Odd, modular::MontyParams};
-    use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
     use crypto_primitives::boolean::Boolean;
+    use crypto_primitives::crypto_bigint_monty::MontyField;
     use rand::rng;
     use zinc_poly::univariate::{
-        dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF, ideal::DegreeOneIdeal,
+        dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF,
     };
-    use zinc_test_uair::{GenerateWitness, TestAirNoMultiplication, TestUairSimpleMultiplication};
+    use zinc_test_uair::{GenerateWitness, TestAirBinary, TestUairSimpleMultiplication};
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::{
         constraint_counter::count_constraints,
@@ -254,7 +254,7 @@ mod tests {
     impl<const DEGREE_PLUS_ONE: usize> IdealCheckTypes<Boolean, DEGREE_PLUS_ONE> for TestIcTypes {
         type Witness = DensePolynomial<Boolean, DEGREE_PLUS_ONE>;
 
-        type F = MontyField<4>;
+        type F = MontyField<LIMBS>;
     }
 
     fn run_prover<U, const DEGREE_PLUS_ONE: usize>(
@@ -326,13 +326,11 @@ mod tests {
 
     #[test]
     fn test_successful_verification() {
-        let field_cfg = test_config();
-
         let num_vars = 2;
 
-        test_successful_verification_generic::<TestAirNoMultiplication, _, _, 32>(
+        test_successful_verification_generic::<TestAirBinary, _, _, 32>(
             num_vars,
-            |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
+            |_ideal_over_ring| IdealOrZero::zero(),
         );
         test_successful_verification_generic::<TestUairSimpleMultiplication, _, _, 32>(
             num_vars,

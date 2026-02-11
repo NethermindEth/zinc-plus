@@ -14,7 +14,7 @@ use zinc_poly::univariate::{
     dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF, ideal::DegreeOneIdeal,
 };
 use zinc_primality::{MillerRabin, PrimalityTest};
-use zinc_test_uair::{GenerateWitness, TestAirNoMultiplication, TestUairSimpleMultiplication};
+use zinc_test_uair::{GenerateWitness, TestAirBinary, TestUairSimpleMultiplication};
 use zinc_transcript::{
     KeccakTranscript,
     traits::{ConstTranscribable, Transcript},
@@ -22,7 +22,6 @@ use zinc_transcript::{
 use zinc_uair::{
     Uair, constraint_counter::count_constraints, ideal::IdealCheck, ideal_collector::IdealOrZero,
 };
-use zinc_utils::from_ref::FromRef;
 
 const DEGREE_PLUS_ONE: usize = 32;
 
@@ -54,25 +53,25 @@ impl<const FIELD_LIMBS: usize> BenchIcTrait<FIELD_LIMBS>
 }
 
 #[allow(clippy::arithmetic_side_effects)]
-fn bench_no_mult<IcTypes, const FIELD_LIMBS: usize>(group: &mut BenchmarkGroup<WallTime>, witness_size: usize)
+fn bench_bin<IcTypes, const FIELD_LIMBS: usize>(group: &mut BenchmarkGroup<WallTime>, witness_size: usize)
 where
     IcTypes: BenchIcTrait<FIELD_LIMBS>,
 {
     let mut rng = rng();
     let num_vars = zinc_utils::log2(witness_size) as usize;
-    let trace = TestAirNoMultiplication::generate_witness(num_vars, &mut rng);
+    let trace = TestAirBinary::generate_witness(num_vars, &mut rng);
 
-    let params = format!("NoMult/LIMBS={}/nvars={}", IcTypes::FIELD_LIMBS, num_vars);
+    let params = format!("Binary/LIMBS={}/nvars={}", IcTypes::FIELD_LIMBS, num_vars);
 
     let transcript = KeccakTranscript::new();
 
-    let num_constraints = count_constraints::<<IcTypes as IdealCheckTypes<_, _>>::Witness, TestAirNoMultiplication>();
+    let num_constraints = count_constraints::<<IcTypes as IdealCheckTypes<_, _>>::Witness, TestAirBinary>();
 
     let prove =
         |(trace, mut transcript): (Vec<_>, KeccakTranscript)| -> Proof<_, IcTypes, DEGREE_PLUS_ONE> {
             let field_cfg = transcript
                 .get_random_field_cfg::<<IcTypes as IdealCheckTypes<_, _>>::F, <<IcTypes as IdealCheckTypes<_, _>>::F as Field>::Inner, MillerRabin>();
-            IdealCheckProtocol::prove_as_subprotocol::<TestAirNoMultiplication>(
+            IdealCheckProtocol::prove_as_subprotocol::<TestAirBinary>(
                 &mut transcript,
                 &trace,
                 num_constraints,
@@ -112,7 +111,7 @@ where
                         MillerRabin,
                     >();
                     let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<
-                        TestAirNoMultiplication,
+                        TestAirBinary,
                         _,
                         _,
                     >(
@@ -121,7 +120,7 @@ where
                         num_constraints,
                         num_vars,
                         |ideal_over_ring| {
-                            ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg))
+                            IdealOrZero::zero()
                         },
                         &field_cfg,
                     ))
@@ -133,12 +132,12 @@ where
     );
 }
 
-pub fn bench_no_mult_3(group: &mut BenchmarkGroup<WallTime>, witness_size: usize) {
-    bench_no_mult::<BenchIcTypes<3>, 3>(group, witness_size)
+pub fn bench_bin_3(group: &mut BenchmarkGroup<WallTime>, witness_size: usize) {
+    bench_bin::<BenchIcTypes<3>, 3>(group, witness_size)
 }
 
-pub fn bench_no_mult_4(group: &mut BenchmarkGroup<WallTime>, witness_size: usize) {
-    bench_no_mult::<BenchIcTypes<4>, 4>(group, witness_size)
+pub fn bench_bin_4(group: &mut BenchmarkGroup<WallTime>, witness_size: usize) {
+    bench_bin::<BenchIcTypes<4>, 4>(group, witness_size)
 }
 
 #[allow(clippy::arithmetic_side_effects)]
@@ -242,16 +241,16 @@ pub fn ideal_check_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Ideal check benchmarks");
     group.plot_config(plot_config);
 
-    bench_no_mult_3(&mut group, 1 << 13);
-    bench_no_mult_4(&mut group, 1 << 13);
-    bench_no_mult_3(&mut group, 1 << 14);
-    bench_no_mult_4(&mut group, 1 << 14);
-    bench_no_mult_3(&mut group, 1 << 15);
-    bench_no_mult_4(&mut group, 1 << 15);
-    bench_no_mult_3(&mut group, 1 << 16);
-    bench_no_mult_4(&mut group, 1 << 16);
-    bench_no_mult_3(&mut group, 1 << 17);
-    bench_no_mult_4(&mut group, 1 << 17);
+    bench_bin_3(&mut group, 1 << 13);
+    bench_bin_4(&mut group, 1 << 13);
+    // bench_bin_3(&mut group, 1 << 14);
+    // bench_bin_4(&mut group, 1 << 14);
+    // bench_bin_3(&mut group, 1 << 15);
+    // bench_bin_4(&mut group, 1 << 15);
+    // bench_bin_3(&mut group, 1 << 16);
+    // bench_bin_4(&mut group, 1 << 16);
+    bench_bin_3(&mut group, 1 << 17);
+    bench_bin_4(&mut group, 1 << 17);
 
     bench_simple_mult_3(&mut group, 1 << 2);
     bench_simple_mult_4(&mut group, 1 << 2);

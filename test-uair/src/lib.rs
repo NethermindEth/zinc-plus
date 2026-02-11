@@ -2,17 +2,11 @@
 mod generate_witness;
 
 use crypto_primitives::{FixedSemiring, Semiring, boolean::Boolean, crypto_bigint_int::Int};
-use rand::{
-    Rng,
-    distr::{Distribution, StandardUniform},
-};
-use zinc_poly::{
-    mle::{DenseMultilinearExtension, MultilinearExtensionRand},
-    univariate::{
-        binary::BinaryPoly, dense::DensePolynomial,
-        dynamic::over_fixed_semiring::DynamicPolynomialFS, ideal::DegreeOneIdeal,
-    },
-};
+use rand::{Rng, distr::{Distribution, StandardUniform}, RngCore};
+use zinc_poly::{mle::{DenseMultilinearExtension, MultilinearExtensionRand}, univariate::{
+    binary::BinaryPoly, dense::DensePolynomial,
+    dynamic::over_fixed_semiring::DynamicPolynomialFS, ideal::DegreeOneIdeal,
+}, Polynomial};
 use zinc_uair::{ConstraintBuilder, Uair};
 use zinc_utils::from_ref::FromRef;
 
@@ -109,97 +103,13 @@ where
     }
 }
 
-pub struct TestAirNoMultiplication;
+pub struct TestAirBinary;
 
-impl<const LIMBS: usize> Uair<DensePolynomial<Int<LIMBS>, 32>> for TestAirNoMultiplication {
-    type Ideal = DegreeOneIdeal<Int<LIMBS>>;
-
-    fn num_cols() -> usize {
-        3
-    }
-
-    fn constrain_general<B, FromR, MulByScalar, IFromR>(
-        b: &mut B,
-        up: &[B::Expr],
-        _down: &[B::Expr],
-        _from_ref: FromR,
-        _mbs: MulByScalar,
-        ideal_from_ref: IFromR,
-    ) where
-        B: ConstraintBuilder,
-        IFromR: Fn(&Self::Ideal) -> B::Ideal,
-    {
-        b.assert_in_ideal(
-            up[0].clone() + &up[1] - &up[2],
-            &ideal_from_ref(&DegreeOneIdeal::new(Int::from(2))),
-        );
-    }
-}
-
-impl Uair<DensePolynomial<Boolean, 32>> for TestAirNoMultiplication {
-    type Ideal = DegreeOneIdeal<Boolean>;
+impl Uair<DensePolynomial<Boolean, 32>> for TestAirBinary {
+    type Ideal = ImpossibleIdeal;
 
     fn num_cols() -> usize {
-        3
-    }
-
-    fn constrain_general<B, FromR, MulByScalar, IFromR>(
-        b: &mut B,
-        up: &[B::Expr],
-        _down: &[B::Expr],
-        _from_ref: FromR,
-        _mbs: MulByScalar,
-        ideal_from_ref: IFromR,
-    ) where
-        B: ConstraintBuilder,
-        IFromR: Fn(&Self::Ideal) -> B::Ideal,
-    {
-        b.assert_in_ideal(
-            up[0].clone() + &up[1] - &up[2],
-            &ideal_from_ref(&DegreeOneIdeal::new(todo!() /*Int::from(2)*/)),
-        );
-    }
-}
-
-impl<const LIMBS: usize> GenerateWitness<DensePolynomial<Int<LIMBS>, 32>>
-    for TestAirNoMultiplication
-{
-    fn generate_witness<Rng: rand::RngCore + ?Sized>(
-        num_vars: usize,
-        rng: &mut Rng,
-    ) -> Vec<DenseMultilinearExtension<DensePolynomial<Int<LIMBS>, 32>>> {
-        let a: DenseMultilinearExtension<DensePolynomial<Int<LIMBS>, 32>> =
-            DenseMultilinearExtension::rand(num_vars, rng)
-                .into_iter()
-                .map(|x: u32| {
-                    DensePolynomial::from_ref(&DensePolynomial::<Boolean, _>::from(
-                        BinaryPoly::<32>::from(x),
-                    ))
-                })
-                .collect();
-
-        let b: DenseMultilinearExtension<_> = DenseMultilinearExtension::rand(num_vars, rng)
-            .into_iter()
-            .map(|x: u32| {
-                DensePolynomial::from_ref(&DensePolynomial::<Boolean, _>::from(
-                    BinaryPoly::<32>::from(x),
-                ))
-            })
-            .collect();
-
-        let c = a.clone() + b.clone();
-
-        vec![a, b, c]
-    }
-}
-
-pub struct TestAirScalarMultiplications;
-
-impl<const LIMBS: usize> Uair<DensePolynomial<Int<LIMBS>, 32>> for TestAirScalarMultiplications {
-    type Ideal = DegreeOneIdeal<Int<LIMBS>>;
-
-    fn num_cols() -> usize {
-        3
+        2
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -207,30 +117,54 @@ impl<const LIMBS: usize> Uair<DensePolynomial<Int<LIMBS>, 32>> for TestAirScalar
         up: &[B::Expr],
         _down: &[B::Expr],
         from_ref: FromR,
-        mbs: MulByScalar,
-        ideal_from_ref: IFromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
     ) where
         B: ConstraintBuilder,
-        IFromR: Fn(&Self::Ideal) -> B::Ideal,
-        FromR: Fn(&DensePolynomial<Int<LIMBS>, 32>) -> B::Expr,
-        MulByScalar: Fn(&B::Expr, &DensePolynomial<Int<LIMBS>, 32>) -> Option<B::Expr>,
+        FromR: Fn(&DensePolynomial<Boolean, 32>) -> B::Expr,
     {
-        b.assert_in_ideal(
-            mbs(
-                &up[0],
-                &DensePolynomial::new([Int::from_i8(-1), Int::from_i8(0), Int::from_i8(1)]),
-            )
-            .expect("arithmetic overflow")
-                + &up[1]
-                - &up[2]
-                + from_ref(&DensePolynomial::new([
-                    Int::from_i8(1),
-                    Int::from_i8(2),
-                    Int::from_i8(3),
-                    Int::from_i8(4),
-                ])),
-            &ideal_from_ref(&DegreeOneIdeal::new(Int::from(2))),
-        );
+        // X is the polynomial with coefficients [0, 1, 0, ..., 0]
+        let x_poly = {
+            let mut coeffs = [Boolean::new(false); 32];
+            coeffs[1] = Boolean::new(true);
+            DensePolynomial::new(coeffs)
+        };
+        // Constraint: up[0] * X - up[1] = 0
+        b.assert_zero(up[0].clone() * &from_ref(&x_poly) - &up[1])
+    }
+}
+
+impl GenerateWitness<DensePolynomial<Boolean, 32>> for TestAirBinary {
+    fn generate_witness<Rng: RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> Vec<DenseMultilinearExtension<DensePolynomial<Boolean, 32>>> {
+        // Generate random binary polynomials for column `a`
+        let a: DenseMultilinearExtension<DensePolynomial<Boolean, 32>> =
+            DenseMultilinearExtension::<u32>::rand(num_vars, rng)
+                .into_iter()
+                .map(|x| {
+                    // Mask to 31 bits to ensure the highest degree is at most 30
+                    // (since we need to shift left for a * X)
+                    DensePolynomial::from_ref(&BinaryPoly::<32>::from(x & 0x7FFF_FFFF))
+                })
+                .collect();
+
+        // Compute a * X by shifting coefficients left by one position
+        // (coeff[0] <- 0, coeff[i+1] <- coeff[i])
+        let a_times_x: DenseMultilinearExtension<DensePolynomial<Boolean, 32>> = a
+            .iter()
+            .map(|poly| {
+                let mut new_coeffs = [Boolean::new(false); 32];
+                // Shift coefficients: coeff[i] -> coeff[i+1]
+                for i in 0..31 {
+                    new_coeffs[i + 1] = poly.coeffs[i];
+                }
+                DensePolynomial::new(new_coeffs)
+            })
+            .collect();
+
+        vec![a, a_times_x]
     }
 }
 
@@ -271,8 +205,8 @@ mod tests {
                     Int::from_i8(4),
                 ])
             ]
-            .into_iter()
-            .collect())
+                .into_iter()
+                .collect())
         );
     }
 }
