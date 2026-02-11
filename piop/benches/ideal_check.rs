@@ -4,23 +4,18 @@ use criterion::{
     AxisScale, BatchSize, BenchmarkGroup, BenchmarkId, Criterion, PlotConfiguration,
     criterion_group, criterion_main, measurement::WallTime,
 };
-use crypto_primitives::{
-    ConstIntSemiring, Field, Semiring, boolean::Boolean, crypto_bigint_int::Int,
-    crypto_bigint_monty::MontyField,
-};
+use crypto_primitives::{Field, PrimeField, boolean::Boolean, crypto_bigint_monty::MontyField};
 use rand::rng;
 use zinc_piop::ideal_check::{IdealCheckProtocol, IdealCheckTypes, Proof};
-use zinc_poly::univariate::{
-    dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF, ideal::DegreeOneIdeal,
-};
-use zinc_primality::{MillerRabin, PrimalityTest};
+use zinc_poly::univariate::{dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF};
+use zinc_primality::MillerRabin;
 use zinc_test_uair::{GenerateWitness, TestAirBinary, TestUairSimpleMultiplication};
-use zinc_transcript::{
-    KeccakTranscript,
-    traits::{ConstTranscribable, Transcript},
-};
+use zinc_transcript::{KeccakTranscript, traits::Transcript};
 use zinc_uair::{
-    Uair, constraint_counter::count_constraints, ideal::IdealCheck, ideal_collector::IdealOrZero,
+    Uair,
+    constraint_counter::count_constraints,
+    ideal::{Ideal, IdealCheck},
+    ideal_collector::IdealOrZero,
 };
 
 const DEGREE_PLUS_ONE: usize = 32;
@@ -51,123 +46,43 @@ impl<const FIELD_LIMBS: usize> BenchIcTrait<FIELD_LIMBS> for BenchIcTypes<FIELD_
 }
 
 #[allow(clippy::arithmetic_side_effects)]
-fn bench_bin<IcTypes, const FIELD_LIMBS: usize>(
+fn do_bench<IcTypes, Air, IdealOverFFromRef, IdealOverF, const FIELD_LIMBS: usize>(
     group: &mut BenchmarkGroup<WallTime>,
+    air_name: &str,
     witness_size: usize,
+    ideal_over_f_from_ref: IdealOverFFromRef,
 ) where
-    IcTypes: BenchIcTrait<FIELD_LIMBS>,
+    IcTypes: BenchIcTrait<FIELD_LIMBS> + IdealCheckTypes<Boolean, DEGREE_PLUS_ONE>,
+    <IcTypes as IdealCheckTypes<Boolean, DEGREE_PLUS_ONE>>::F: PrimeField,
+    Air: Uair<DensePolynomial<Boolean, DEGREE_PLUS_ONE>>
+        + GenerateWitness<DensePolynomial<Boolean, DEGREE_PLUS_ONE>>,
+    IdealOverF: Ideal,
+    IdealOverF: IdealCheck<DynamicPolynomialF<MontyField<FIELD_LIMBS>>>,
+    IdealOverFFromRef: Fn(
+            &IdealOrZero<<Air as Uair<DensePolynomial<Boolean, DEGREE_PLUS_ONE>>>::Ideal>,
+        ) -> IdealOverF
+        + Copy,
 {
     let mut rng = rng();
     let num_vars = zinc_utils::log2(witness_size) as usize;
-    let trace = TestAirBinary::generate_witness(num_vars, &mut rng);
-
-    let params = format!("Binary/LIMBS={}/nvars={}", IcTypes::FIELD_LIMBS, num_vars);
-
-    let transcript = KeccakTranscript::new();
-
-    let num_constraints =
-        count_constraints::<<IcTypes as IdealCheckTypes<_, _>>::Witness, TestAirBinary>();
-
-    let prove =
-        |(trace, mut transcript): (Vec<_>, KeccakTranscript)| -> Proof<_, IcTypes, DEGREE_PLUS_ONE> {
-            let field_cfg = transcript
-                .get_random_field_cfg::<<IcTypes as IdealCheckTypes<_, _>>::F, <<IcTypes as IdealCheckTypes<_, _>>::F as Field>::Inner, MillerRabin>();
-            IdealCheckProtocol::prove_as_subprotocol::<TestAirBinary>(
-                &mut transcript,
-                &trace,
-                num_constraints,
-                num_vars,
-                &field_cfg,
-            )
-            .expect("Prover failed")
-            .0
-        };
-
-    group.bench_with_input(
-        BenchmarkId::new("Ideal Check Prover", &params),
-        &(trace.clone(), transcript.clone()),
-        |bench, (trace, transcript)| {
-            bench.iter_batched(
-                || (trace.clone(), transcript.clone()),
-                |(trace, transcript)| {
-                    let _ = black_box(&prove((trace, transcript)));
-                },
-                BatchSize::SmallInput,
-            );
-        },
-    );
-
-    let proof = prove((trace, transcript.clone()));
-
-    group.bench_with_input(
-        BenchmarkId::new("Ideal Check Verifier", &params),
-        &(proof, transcript),
-        |bench, (proof, transcript)| {
-            bench.iter_batched(
-                || (proof.clone(), transcript.clone()),
-                |(proof, mut transcript)| {
-                    let field_cfg = transcript.get_random_field_cfg::<
-                        <IcTypes as IdealCheckTypes<_, _>>::F,
-                        <<IcTypes as IdealCheckTypes<_, _>>::F as Field>::Inner,
-                        MillerRabin,
-                    >();
-                    let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<
-                        TestAirBinary,
-                        _,
-                        _,
-                    >(
-                        &mut transcript,
-                        proof,
-                        num_constraints,
-                        num_vars,
-                        |ideal_over_ring| IdealOrZero::zero(),
-                        &field_cfg,
-                    ))
-                    .expect("Failed to verify");
-                },
-                BatchSize::SmallInput,
-            );
-        },
-    );
-}
-
-pub fn bench_bin_3(group: &mut BenchmarkGroup<WallTime>, witness_size: usize) {
-    bench_bin::<BenchIcTypes<3>, 3>(group, witness_size)
-}
-
-pub fn bench_bin_4(group: &mut BenchmarkGroup<WallTime>, witness_size: usize) {
-    bench_bin::<BenchIcTypes<4>, 4>(group, witness_size)
-}
-
-#[allow(clippy::arithmetic_side_effects)]
-fn bench_simple_mult<IcTypes, const FIELD_LIMBS: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-    witness_size: usize,
-) where
-    IcTypes: BenchIcTrait<FIELD_LIMBS>,
-{
-    let mut rng = rng();
-    let num_vars = zinc_utils::log2(witness_size) as usize;
-    let trace = TestUairSimpleMultiplication::generate_witness(num_vars, &mut rng);
+    let trace = Air::generate_witness(num_vars, &mut rng);
 
     let params = format!(
-        "SimpleMult/LIMBS={}/nvars={}",
+        "{}/LIMBS={}/nvars={}",
+        air_name,
         IcTypes::FIELD_LIMBS,
         num_vars
     );
 
     let transcript = KeccakTranscript::new();
 
-    let num_constraints = count_constraints::<
-        <IcTypes as IdealCheckTypes<_, _>>::Witness,
-        TestUairSimpleMultiplication,
-    >();
+    let num_constraints = count_constraints::<<IcTypes as IdealCheckTypes<_, _>>::Witness, Air>();
 
     let prove =
         |(trace, mut transcript): (Vec<_>, KeccakTranscript)| -> Proof<_, IcTypes, DEGREE_PLUS_ONE> {
             let field_cfg = transcript
                 .get_random_field_cfg::<<IcTypes as IdealCheckTypes<_, _>>::F, <<IcTypes as IdealCheckTypes<_, _>>::F as Field>::Inner, MillerRabin>();
-            IdealCheckProtocol::prove_as_subprotocol::<TestUairSimpleMultiplication>(
+            IdealCheckProtocol::prove_as_subprotocol::<Air>(
                 &mut transcript,
                 &trace,
                 num_constraints,
@@ -206,16 +121,12 @@ fn bench_simple_mult<IcTypes, const FIELD_LIMBS: usize>(
                         <<IcTypes as IdealCheckTypes<_, _>>::F as Field>::Inner,
                         MillerRabin,
                     >();
-                    let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<
-                        TestUairSimpleMultiplication,
-                        _,
-                        _,
-                    >(
+                    let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<Air, _, _>(
                         &mut transcript,
                         proof,
                         num_constraints,
                         num_vars,
-                        |_ideal_over_ring| IdealOrZero::zero(),
+                        ideal_over_f_from_ref,
                         &field_cfg,
                     ))
                     .expect("Failed to verify");
@@ -226,12 +137,28 @@ fn bench_simple_mult<IcTypes, const FIELD_LIMBS: usize>(
     );
 }
 
-pub fn bench_simple_mult_3(group: &mut BenchmarkGroup<WallTime>, witness_size: usize) {
-    bench_simple_mult::<BenchIcTypes<3>, 3>(group, witness_size)
+pub fn bench_bin<const FIELD_LIMBS: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+    witness_size: usize,
+) {
+    do_bench::<BenchIcTypes<FIELD_LIMBS>, TestAirBinary, _, _, FIELD_LIMBS>(
+        group,
+        "Binary",
+        witness_size,
+        |_ideal_over_ring| IdealOrZero::zero(),
+    )
 }
 
-pub fn bench_simple_mult_4(group: &mut BenchmarkGroup<WallTime>, witness_size: usize) {
-    bench_simple_mult::<BenchIcTypes<4>, 4>(group, witness_size)
+pub fn bench_simple_mul<const FIELD_LIMBS: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+    witness_size: usize,
+) {
+    do_bench::<BenchIcTypes<FIELD_LIMBS>, TestUairSimpleMultiplication, _, _, FIELD_LIMBS>(
+        group,
+        "SimpleMul",
+        witness_size,
+        |_ideal_over_ring| IdealOrZero::zero(),
+    )
 }
 
 /// Before/after diff for combined_poly_builder (parallel vs sequential):
@@ -245,19 +172,19 @@ pub fn ideal_check_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Ideal check benchmarks");
     group.plot_config(plot_config);
 
-    bench_bin_3(&mut group, 1 << 13);
-    bench_bin_4(&mut group, 1 << 13);
-    // bench_bin_3(&mut group, 1 << 14);
-    // bench_bin_4(&mut group, 1 << 14);
-    // bench_bin_3(&mut group, 1 << 15);
-    // bench_bin_4(&mut group, 1 << 15);
-    // bench_bin_3(&mut group, 1 << 16);
-    // bench_bin_4(&mut group, 1 << 16);
-    bench_bin_3(&mut group, 1 << 17);
-    bench_bin_4(&mut group, 1 << 17);
+    bench_bin::<3>(&mut group, 1 << 13);
+    bench_bin::<4>(&mut group, 1 << 13);
+    bench_bin::<3>(&mut group, 1 << 14);
+    bench_bin::<4>(&mut group, 1 << 14);
+    bench_bin::<3>(&mut group, 1 << 15);
+    bench_bin::<4>(&mut group, 1 << 15);
+    bench_bin::<3>(&mut group, 1 << 16);
+    bench_bin::<4>(&mut group, 1 << 16);
+    bench_bin::<3>(&mut group, 1 << 17);
+    bench_bin::<4>(&mut group, 1 << 17);
 
-    bench_simple_mult_3(&mut group, 1 << 2);
-    bench_simple_mult_4(&mut group, 1 << 2);
+    bench_simple_mul::<3>(&mut group, 1 << 2);
+    bench_simple_mul::<4>(&mut group, 1 << 2);
 
     group.finish();
 }

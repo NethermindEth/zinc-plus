@@ -1,12 +1,9 @@
 use std::collections::HashMap;
 
-use crypto_primitives::{
-    Field, FromWithConfig, Semiring, boolean::Boolean, crypto_bigint_int::Int,
-};
+use crypto_primitives::{Field, FromWithConfig, Semiring};
 use zinc_poly::{
-    CoefficientProjectable, Polynomial,
-    mle::DenseMultilinearExtension,
-    univariate::{dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF},
+    CoefficientProjectable, Polynomial, mle::DenseMultilinearExtension,
+    univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{

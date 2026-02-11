@@ -1,7 +1,7 @@
 #![allow(clippy::arithmetic_side_effects)] // UAIRs should not care about overflows
 mod generate_witness;
 
-use crypto_primitives::{FixedSemiring, Semiring, boolean::Boolean, crypto_bigint_int::Int};
+use crypto_primitives::{FixedSemiring, Semiring, boolean::Boolean};
 use rand::{
     Rng, RngCore,
     distr::{Distribution, StandardUniform},
@@ -11,7 +11,7 @@ use zinc_poly::{
     mle::{DenseMultilinearExtension, MultilinearExtensionRand},
     univariate::{
         binary::BinaryPoly, dense::DensePolynomial,
-        dynamic::over_fixed_semiring::DynamicPolynomialFS, ideal::DegreeOneIdeal,
+        dynamic::over_fixed_semiring::DynamicPolynomialFS,
     },
 };
 use zinc_uair::{ConstraintBuilder, Uair};
