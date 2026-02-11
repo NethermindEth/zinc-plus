@@ -1,16 +1,18 @@
-use std::hint::black_box;
-
 use criterion::{
     AxisScale, BatchSize, BenchmarkGroup, BenchmarkId, Criterion, PlotConfiguration,
     criterion_group, criterion_main, measurement::WallTime,
 };
-use crypto_primitives::{Field, PrimeField, boolean::Boolean, crypto_bigint_monty::MontyField};
+use crypto_primitives::{Field, crypto_bigint_monty::MontyField};
 use rand::rng;
+use std::hint::black_box;
 use zinc_piop::ideal_check::{IdealCheckProtocol, IdealCheckTypes, Proof};
-use zinc_poly::univariate::{dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF};
+use zinc_poly::univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF};
 use zinc_primality::MillerRabin;
 use zinc_test_uair::{GenerateWitness, TestAirBinary, TestUairSimpleMultiplication};
-use zinc_transcript::{KeccakTranscript, traits::Transcript};
+use zinc_transcript::{
+    KeccakTranscript,
+    traits::{ConstTranscribable, Transcript},
+};
 use zinc_uair::{
     Uair,
     constraint_counter::count_constraints,
@@ -24,20 +26,12 @@ const DEGREE_PLUS_ONE: usize = 32;
 struct BenchIcTypes<const FIELD_LIMBS: usize>;
 
 trait BenchIcTrait<const FIELD_LIMBS: usize>:
-    IdealCheckTypes<
-        Boolean,
-        DEGREE_PLUS_ONE,
-        Witness = DensePolynomial<Boolean, DEGREE_PLUS_ONE>,
-        F = MontyField<FIELD_LIMBS>,
-    > + Clone
+    IdealCheckTypes<F = MontyField<FIELD_LIMBS>> + Clone
 {
     const FIELD_LIMBS: usize;
 }
 
-impl<const FIELD_LIMBS: usize> IdealCheckTypes<Boolean, DEGREE_PLUS_ONE>
-    for BenchIcTypes<FIELD_LIMBS>
-{
-    type Witness = DensePolynomial<Boolean, DEGREE_PLUS_ONE>;
+impl<const FIELD_LIMBS: usize> IdealCheckTypes for BenchIcTypes<FIELD_LIMBS> {
     type F = MontyField<FIELD_LIMBS>;
 }
 
@@ -52,16 +46,13 @@ fn do_bench<IcTypes, Air, IdealOverFFromRef, IdealOverF, const FIELD_LIMBS: usiz
     witness_size: usize,
     ideal_over_f_from_ref: IdealOverFFromRef,
 ) where
-    IcTypes: BenchIcTrait<FIELD_LIMBS> + IdealCheckTypes<Boolean, DEGREE_PLUS_ONE>,
-    <IcTypes as IdealCheckTypes<Boolean, DEGREE_PLUS_ONE>>::F: PrimeField,
-    Air: Uair<DensePolynomial<Boolean, DEGREE_PLUS_ONE>>
-        + GenerateWitness<DensePolynomial<Boolean, DEGREE_PLUS_ONE>>,
+    IcTypes: BenchIcTrait<FIELD_LIMBS> + IdealCheckTypes,
+    <<IcTypes as IdealCheckTypes>::F as Field>::Inner: ConstTranscribable,
+    Air: Uair<BinaryPoly<DEGREE_PLUS_ONE>> + GenerateWitness<BinaryPoly<DEGREE_PLUS_ONE>>,
     IdealOverF: Ideal,
     IdealOverF: IdealCheck<DynamicPolynomialF<MontyField<FIELD_LIMBS>>>,
-    IdealOverFFromRef: Fn(
-            &IdealOrZero<<Air as Uair<DensePolynomial<Boolean, DEGREE_PLUS_ONE>>>::Ideal>,
-        ) -> IdealOverF
-        + Copy,
+    IdealOverFFromRef:
+        Fn(&IdealOrZero<<Air as Uair<BinaryPoly<DEGREE_PLUS_ONE>>>::Ideal>) -> IdealOverF + Copy,
 {
     let mut rng = rng();
     let num_vars = zinc_utils::log2(witness_size) as usize;
@@ -76,12 +67,12 @@ fn do_bench<IcTypes, Air, IdealOverFFromRef, IdealOverF, const FIELD_LIMBS: usiz
 
     let transcript = KeccakTranscript::new();
 
-    let num_constraints = count_constraints::<<IcTypes as IdealCheckTypes<_, _>>::Witness, Air>();
+    let num_constraints = count_constraints::<BinaryPoly<DEGREE_PLUS_ONE>, Air>();
 
     let prove =
-        |(trace, mut transcript): (Vec<_>, KeccakTranscript)| -> Proof<_, IcTypes, DEGREE_PLUS_ONE> {
+        |(trace, mut transcript): (Vec<_>, KeccakTranscript)| -> Proof<IcTypes, DEGREE_PLUS_ONE> {
             let field_cfg = transcript
-                .get_random_field_cfg::<<IcTypes as IdealCheckTypes<_, _>>::F, <<IcTypes as IdealCheckTypes<_, _>>::F as Field>::Inner, MillerRabin>();
+                .get_random_field_cfg::<<IcTypes as IdealCheckTypes>::F, <<IcTypes as IdealCheckTypes>::F as Field>::Inner, MillerRabin>();
             IdealCheckProtocol::prove_as_subprotocol::<Air>(
                 &mut transcript,
                 &trace,
@@ -117,8 +108,8 @@ fn do_bench<IcTypes, Air, IdealOverFFromRef, IdealOverF, const FIELD_LIMBS: usiz
                 || (proof.clone(), transcript.clone()),
                 |(proof, mut transcript)| {
                     let field_cfg = transcript.get_random_field_cfg::<
-                        <IcTypes as IdealCheckTypes<_, _>>::F,
-                        <<IcTypes as IdealCheckTypes<_, _>>::F as Field>::Inner,
+                        <IcTypes as IdealCheckTypes>::F,
+                        <<IcTypes as IdealCheckTypes>::F as Field>::Inner,
                         MillerRabin,
                     >();
                     let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<Air, _, _>(

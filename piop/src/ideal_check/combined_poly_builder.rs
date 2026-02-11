@@ -1,6 +1,6 @@
 use std::{collections::HashMap, mem::MaybeUninit};
 
-use crypto_primitives::{DenseRowMatrix, Field, PrimeField, Semiring};
+use crypto_primitives::{DenseRowMatrix, Field, PrimeField};
 use itertools::Itertools;
 use zinc_poly::{
     CoefficientProjectable,
@@ -10,35 +10,30 @@ use zinc_poly::{
 use zinc_uair::{ConstraintBuilder, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::{cfg_chunks_mut, cfg_into_iter, cfg_iter, from_ref::FromRef};
 
+use crate::ideal_check::structs::IdealCheckTypes;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-
-use crate::ideal_check::structs::IdealCheckTypes;
+use zinc_poly::univariate::binary::BinaryPoly;
 
 /// Given a UAIR `U` and a trace `trace` this function
 /// obtains the combined polynomials' MLE coefficients.
 /// Since each coefficient is also a univariate polynomial
 /// we split the resulting MLE into coefficient MLEs.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn compute_combined_polynomials<
-    R: Semiring,
-    IcTypes: IdealCheckTypes<R, DEGREE_PLUS_ONE>,
-    U,
-    const DEGREE_PLUS_ONE: usize,
->(
-    trace: &[DenseMultilinearExtension<IcTypes::Witness>],
+pub fn compute_combined_polynomials<IcTypes: IdealCheckTypes, U, const DEGREE_PLUS_ONE: usize>(
+    trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
     projecting_element: &IcTypes::F,
-    projected_scalars: &HashMap<IcTypes::Witness, DynamicPolynomialF<IcTypes::F>>,
+    projected_scalars: &HashMap<BinaryPoly<DEGREE_PLUS_ONE>, DynamicPolynomialF<IcTypes::F>>,
     num_constraints: usize,
 ) -> Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>>
 where
-    U: Uair<IcTypes::Witness>,
+    U: Uair<BinaryPoly<DEGREE_PLUS_ONE>>,
 {
     let num_rows = trace[0].len();
     let num_cols = trace.len();
 
     let trace_matrix =
-        project_trace_matrix::<R, IcTypes, _>(num_rows, num_cols, trace, projecting_element);
+        project_trace_matrix::<IcTypes, _>(num_rows, num_cols, trace, projecting_element);
 
     let field_zero = IcTypes::F::zero_with_cfg(projecting_element.cfg());
 
@@ -47,7 +42,7 @@ where
     let mut max_degrees_and_combined_poly_rows: Vec<(usize, Vec<DynamicPolynomialF<IcTypes::F>>)> =
         cfg_iter!(indices)
             .map(|&i| {
-                combine_rows_and_get_max_degree::<R, IcTypes, U, _>(
+                combine_rows_and_get_max_degree::<_, U, _>(
                     rows[i],
                     rows[i + 1],
                     num_constraints,
@@ -77,7 +72,7 @@ where
             .clone(),
     );
 
-    prepare_coefficient_mles::<R, IcTypes, _>(
+    prepare_coefficient_mles(
         num_constraints,
         max_degree,
         &max_degrees_and_combined_poly_rows,
@@ -86,16 +81,12 @@ where
 }
 
 /// Apply projection to coefficients of coefficients of the input trace.
-fn project_trace_matrix<
-    R: Semiring,
-    IcTypes: IdealCheckTypes<R, DEGREE_PLUS_ONE>,
-    const DEGREE_PLUS_ONE: usize,
->(
+fn project_trace_matrix<IcTypes: IdealCheckTypes, const DEGREE_PLUS_ONE: usize>(
     num_rows: usize,
     num_cols: usize,
-    trace: &[DenseMultilinearExtension<IcTypes::Witness>],
+    trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
     projecting_element: &IcTypes::F,
-) -> DenseRowMatrix<DynamicPolynomialF<<IcTypes as IdealCheckTypes<R, DEGREE_PLUS_ONE>>::F>> {
+) -> DenseRowMatrix<DynamicPolynomialF<IcTypes::F>> {
     let mut matr = DenseRowMatrix::uninit(num_rows, num_cols);
 
     cfg_chunks_mut!(matr.data, num_cols)
@@ -117,20 +108,19 @@ fn project_trace_matrix<
 /// and compute the maximum degree of resulting polynomials
 /// to pad the resulting vector of MLEs accordingly.
 #[allow(clippy::arithmetic_side_effects)]
-fn combine_rows_and_get_max_degree<R, IcTypes, U, const DEGREE_PLUS_ONE: usize>(
-    up: &[DynamicPolynomialF<IcTypes::F>],
-    down: &[DynamicPolynomialF<IcTypes::F>],
+fn combine_rows_and_get_max_degree<F, U, const DEGREE_PLUS_ONE: usize>(
+    up: &[DynamicPolynomialF<F>],
+    down: &[DynamicPolynomialF<F>],
     num_constraints: usize,
-    projected_scalars: &HashMap<IcTypes::Witness, DynamicPolynomialF<IcTypes::F>>,
-) -> (usize, Vec<DynamicPolynomialF<IcTypes::F>>)
+    projected_scalars: &HashMap<BinaryPoly<DEGREE_PLUS_ONE>, DynamicPolynomialF<F>>,
+) -> (usize, Vec<DynamicPolynomialF<F>>)
 where
-    R: Semiring,
-    IcTypes: IdealCheckTypes<R, DEGREE_PLUS_ONE>,
-    U: Uair<IcTypes::Witness>,
+    F: PrimeField,
+    U: Uair<BinaryPoly<DEGREE_PLUS_ONE>>,
 {
     let mut constraint_builder = CombinedPolyRowBuilder::new(num_constraints);
 
-    let project = |x: &IcTypes::Witness| {
+    let project = |x: &BinaryPoly<DEGREE_PLUS_ONE>| {
         projected_scalars
             .get(x)
             .cloned()
@@ -161,16 +151,12 @@ where
 
 /// Turn the resulting slice of vectors of dynamic polynomials
 /// into a vector of vectors of coefficient MLEs.
-fn prepare_coefficient_mles<
-    R: Semiring,
-    IcTypes: IdealCheckTypes<R, DEGREE_PLUS_ONE>,
-    const DEGREE_PLUS_ONE: usize,
->(
+fn prepare_coefficient_mles<F: PrimeField>(
     num_constraints: usize,
     max_degree: usize,
-    max_degrees_and_combined_poly_rows: &[(usize, Vec<DynamicPolynomialF<IcTypes::F>>)],
-    field_zero: &IcTypes::F,
-) -> Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>> {
+    max_degrees_and_combined_poly_rows: &[(usize, Vec<DynamicPolynomialF<F>>)],
+    field_zero: &F,
+) -> Vec<Vec<DenseMultilinearExtension<F::Inner>>> {
     cfg_into_iter!(0..num_constraints)
         .map(|constraint| {
             (0..=max_degree)
