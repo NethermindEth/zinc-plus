@@ -216,7 +216,8 @@ pub fn eq_eval<R: Semiring>(x: &[R], y: &[R], one: R) -> Result<R, ArithErrors> 
 }
 
 /// Returns a multilinear polynomial in 2n variables that evaluates to 1
-/// if and only if the second n-bit vector is equal to the first vector plus one (viewed as big-endian integers).
+/// if and only if the second n-bit vector is equal to the first vector plus one
+/// (viewed as big-endian integers).
 #[allow(clippy::arithmetic_side_effects)]
 pub fn next_mle_inner<F: Field>(
     num_vars: u32,
@@ -246,11 +247,12 @@ pub fn next_mle_inner<F: Field>(
     Ok(mle)
 }
 
-/// Evaluates the next MLE at point `point` in log-time.
+/// Evaluates the next MLE at the point `point` in log-time.
 ///
 /// # Arguments
-/// - `point`: A slice of 2n field elements representing two n-bit vectors concatenated.
-///   The first n elements are `x` (original vector), the last n are `y` (candidate successor).
+/// - `point`: A slice of 2n field elements representing two n-bit vectors
+///   concatenated. The first n elements are `x` (original vector), the last n
+///   are `y` (candidate successor).
 ///
 /// # Behavior
 /// Constructs a polynomial P(x, y) such that:
@@ -262,7 +264,8 @@ pub fn next_mle_inner<F: Field>(
 /// ensuring that:
 /// 1. Bits to the left of `k` (more significant) match.
 /// 2. Bit at position `k` transitions from 0 (in x) to 1 (in y).
-/// 3. Bits to the right of `k` are 1 in x and 0 in y (simulating the carry propagation).
+/// 3. Bits to the right of `k` are 1 in x and 0 in y (simulating the carry
+///    propagation).
 ///
 /// # Panics
 /// Panics if `point.len()` is not even.
@@ -292,24 +295,21 @@ pub fn next_mle_eval<R: Semiring>(point: &[R], zero: R, one: R) -> R {
             //
             // Indices are reversed because bits are big-endian.
             let eq_high_bits = (k + 1..n)
-                .map(|i| {
-                    x[n - 1 - i].clone() * &y[n - 1 - i]
-                        + (one.clone() - &x[n - 1 - i]) * (one.clone() - &y[n - 1 - i])
-                })
+                .map(|i| x[i].clone() * &y[i] + (one.clone() - &x[i]) * (one.clone() - &y[i]))
                 .fold(one.clone(), |acc, next| acc * next);
 
             // Term 2: carry bit at position k
             //
             // Enforce x_k = 0 and y_k = 1.
             // Condition: (1 - x_k) * y_k.
-            let carry_bit = (one.clone() - &x[n - 1 - k]) * &y[n - 1 - k];
+            let carry_bit = (one.clone() - &x[k]) * &y[k];
 
             // Term 3: bits to the right of k are 1 in x and 0 in y
             //
             // For i < k, enforce x_i = 1 and y_i = 0.
             // Condition: x_i * (1 - y_i).
             let low_bits_are_one_zero = (0..k)
-                .map(|i| (one.clone() - &y[n - 1 - i]) * &x[n - 1 - i])
+                .map(|i| (one.clone() - &y[i]) * &x[i])
                 .fold(one.clone(), |acc, next| acc * next);
 
             // Multiply the three terms for this k, representing one "carry pattern".
@@ -323,7 +323,6 @@ pub fn next_mle_eval<R: Semiring>(point: &[R], zero: R, one: R) -> R {
 mod tests {
     use crypto_bigint::{U128, const_monty_params};
     use crypto_primitives::{IntoWithConfig, crypto_bigint_const_monty::ConstMontyField};
-    use itertools::Itertools;
     use num_traits::One;
     use proptest::{prelude::*, proptest};
 
@@ -368,16 +367,14 @@ mod tests {
 
     #[test]
     fn next_mle_is_one_only_on_successors() {
-        let num_vars = 8;
-
-        let next_mle = next_mle_inner(num_vars, F::zero(), F::one()).unwrap();
+        let next_mle = next_mle_inner(NUM_VARS, F::zero(), F::one()).unwrap();
 
         // The number of successors is (1 << (num_vars / 2)) - 1
         // and we know the mle is one on them. So we need to check
         // that it is one only on that many points.
         assert_eq!(
             next_mle.evaluations.iter().filter(|x| !x.is_zero()).count(),
-            (1 << (num_vars / 2)) - 1
+            (1 << (NUM_VARS / 2)) - 1
         );
     }
 
@@ -389,9 +386,39 @@ mod tests {
         prop::collection::vec(any_f(()), n)
     }
 
+    #[test]
+    fn next_mle_eval_coincides_with_next_mle_evaluated_at_successors() {
+        let next_mle = next_mle_inner(NUM_VARS, F::zero(), F::one()).unwrap();
+
+        for i in 0..(1 << ((NUM_VARS / 2) - 1)) {
+            let mut point: Vec<F> = (0..(NUM_VARS / 2))
+                .map(|j| {
+                    if i & (1 << j) == 0 {
+                        F::zero()
+                    } else {
+                        F::one()
+                    }
+                })
+                .collect();
+
+            point.extend((0..(NUM_VARS / 2)).map(|j| {
+                if (i + 1) & (1 << j) == 0 {
+                    F::zero()
+                } else {
+                    F::one()
+                }
+            }));
+
+            assert_eq!(
+                next_mle.evaluate_with_config(&point, &()),
+                Ok(next_mle_eval(&point, F::zero(), F::one()))
+            );
+        }
+    }
+
     proptest! {
     #[test]
-    fn prop_next_mle_eval_coincide_with_next_mle_evaluate_at_point(r in point_n(NUM_VARS as usize)) {
+    fn prop_next_mle_eval_coincides_with_next_mle_evaluate_at_point(r in point_n(NUM_VARS as usize)) {
         let next_mle = next_mle_inner(NUM_VARS, F::zero(), F::one()).unwrap();
 
         prop_assert_eq!(
