@@ -199,7 +199,6 @@ where
 
 /// Returns a multilinear polynomial in 2n variables that evaluates to 1
 /// if and only if the second n-bit vector is equal to the first vector plus one
-/// (viewed as big-endian integers).
 #[allow(clippy::arithmetic_side_effects)]
 pub fn next_mle_inner<F: Field>(
     num_vars: u32,
@@ -274,8 +273,6 @@ pub fn next_mle_eval<R: Semiring>(point: &[R], zero: R, one: R) -> R {
             //
             // For i > k, enforce x_i == y_i.
             // Using equality polynomial: x_i * y_i + (1 - x_i)*(1 - y_i).
-            //
-            // Indices are reversed because bits are big-endian.
             let eq_high_bits = (k + 1..n)
                 .map(|i| x[i].clone() * &y[i] + (one.clone() - &x[i]) * (one.clone() - &y[i]))
                 .fold(one.clone(), |acc, next| acc * next);
