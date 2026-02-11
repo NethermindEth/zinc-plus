@@ -1,5 +1,3 @@
-use crypto_primitives::Semiring;
-
 pub mod field;
 pub mod from_ref;
 pub mod inner_product;
@@ -9,6 +7,8 @@ pub mod named;
 pub mod ops_macros;
 pub mod parallel;
 pub mod projectable_to_field;
+
+use crypto_primitives::Semiring;
 
 // Can't use enums in const generics in stable Rust yet, so we use constants
 // instead.
