@@ -1,18 +1,29 @@
 use std::collections::HashMap;
 
-use crypto_primitives::{FromWithConfig, boolean::Boolean};
+use crypto_primitives::{ConstIntSemiring, Field, FromWithConfig, boolean::Boolean};
 use zinc_poly::{
     mle::DenseMultilinearExtension,
     univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF},
 };
-use zinc_utils::inner_transparent_field::InnerTransparentField;
+use zinc_transcript::traits::ConstTranscribable;
+use zinc_utils::{from_ref::FromRef, inner_transparent_field::InnerTransparentField};
 
 pub trait IdealCheckField:
-    InnerTransparentField + FromWithConfig<Boolean> + Send + Sync + 'static
+    InnerTransparentField
+    + Field<Inner: ConstIntSemiring + ConstTranscribable + FromRef<Self::Inner>>
+    + FromWithConfig<Boolean>
+    + Send
+    + Sync
+    + 'static
 {
 }
 impl<T> IdealCheckField for T where
-    T: InnerTransparentField + FromWithConfig<Boolean> + Send + Sync + 'static
+    T: InnerTransparentField
+        + Field<Inner: ConstIntSemiring + ConstTranscribable + FromRef<Self::Inner>>
+        + FromWithConfig<Boolean>
+        + Send
+        + Sync
+        + 'static
 {
 }
 

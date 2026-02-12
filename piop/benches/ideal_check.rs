@@ -2,12 +2,12 @@ use criterion::{
     AxisScale, BatchSize, BenchmarkGroup, BenchmarkId, Criterion, PlotConfiguration,
     criterion_group, criterion_main, measurement::WallTime,
 };
-use crypto_primitives::{Field, crypto_bigint_monty::MontyField};
+use crypto_primitives::crypto_bigint_monty::MontyField;
 use rand::rng;
 use std::hint::black_box;
-use zinc_piop::ideal_check::{IdealCheckProtocol, Proof};
+use zinc_piop::ideal_check::{IdealCheckField, IdealCheckProtocol, Proof};
 use zinc_poly::univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF};
-use zinc_primality::MillerRabin;
+use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_test_uair::{GenerateWitness, TestAirBinary, TestUairSimpleMultiplication};
 use zinc_transcript::{KeccakTranscript, traits::Transcript};
 use zinc_uair::{
@@ -19,18 +19,17 @@ use zinc_uair::{
 
 const DEGREE_PLUS_ONE: usize = 32;
 
-type BenchIcField<const FIELD_LIMBS: usize> = MontyField<FIELD_LIMBS>;
-
 #[allow(clippy::arithmetic_side_effects)]
-fn do_bench<Air, IdealOverFFromRef, IdealOverF, const FIELD_LIMBS: usize>(
+fn do_bench<F, Air, IdealOverFFromRef, IdealOverF>(
     group: &mut BenchmarkGroup<WallTime>,
-    air_name: &str,
+    bench_title: &str,
     witness_size: usize,
     ideal_over_f_from_ref: IdealOverFFromRef,
 ) where
+    F: IdealCheckField,
+    MillerRabin: PrimalityTest<F::Inner>,
     Air: Uair<BinaryPoly<DEGREE_PLUS_ONE>> + GenerateWitness<BinaryPoly<DEGREE_PLUS_ONE>>,
-    IdealOverF: Ideal,
-    IdealOverF: IdealCheck<DynamicPolynomialF<MontyField<FIELD_LIMBS>>>,
+    IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
     IdealOverFFromRef:
         Fn(&IdealOrZero<<Air as Uair<BinaryPoly<DEGREE_PLUS_ONE>>>::Ideal>) -> IdealOverF + Copy,
 {
@@ -38,26 +37,24 @@ fn do_bench<Air, IdealOverFFromRef, IdealOverF, const FIELD_LIMBS: usize>(
     let num_vars = zinc_utils::log2(witness_size) as usize;
     let trace = Air::generate_witness(num_vars, &mut rng);
 
-    let params = format!("{}/LIMBS={}/nvars={}", air_name, FIELD_LIMBS, num_vars);
+    let params = format!("{}/nvars={}", bench_title, num_vars);
 
     let transcript = KeccakTranscript::new();
 
     let num_constraints = count_constraints::<BinaryPoly<DEGREE_PLUS_ONE>, Air>();
 
-    let prove =
-        |(trace, mut transcript): (Vec<_>, KeccakTranscript)| -> Proof<BenchIcField<FIELD_LIMBS>, DEGREE_PLUS_ONE> {
-            let field_cfg = transcript
-                .get_random_field_cfg::<BenchIcField<FIELD_LIMBS>, <BenchIcField<FIELD_LIMBS> as Field>::Inner, MillerRabin>();
-            IdealCheckProtocol::prove_as_subprotocol::<Air>(
-                &mut transcript,
-                &trace,
-                num_constraints,
-                num_vars,
-                &field_cfg,
-            )
-            .expect("Prover failed")
-            .0
-        };
+    let prove = |(trace, mut transcript): (Vec<_>, KeccakTranscript)| -> Proof<F, DEGREE_PLUS_ONE> {
+        let field_cfg = transcript.get_random_field_cfg::<F, _, MillerRabin>();
+        IdealCheckProtocol::prove_as_subprotocol::<Air>(
+            &mut transcript,
+            &trace,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )
+        .expect("Prover failed")
+        .0
+    };
 
     group.bench_with_input(
         BenchmarkId::new("Ideal Check Prover", &params),
@@ -82,11 +79,7 @@ fn do_bench<Air, IdealOverFFromRef, IdealOverF, const FIELD_LIMBS: usize>(
             bench.iter_batched(
                 || (proof.clone(), transcript.clone()),
                 |(proof, mut transcript)| {
-                    let field_cfg = transcript.get_random_field_cfg::<
-                        BenchIcField<FIELD_LIMBS>,
-                        <BenchIcField<FIELD_LIMBS> as Field>::Inner,
-                        MillerRabin,
-                    >();
+                    let field_cfg = transcript.get_random_field_cfg::<F, _, MillerRabin>();
                     let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<Air, _, _>(
                         &mut transcript,
                         proof,
@@ -107,11 +100,11 @@ pub fn bench_bin<const FIELD_LIMBS: usize>(
     group: &mut BenchmarkGroup<WallTime>,
     witness_size: usize,
 ) {
-    do_bench::<TestAirBinary, _, _, FIELD_LIMBS>(
+    do_bench::<MontyField<FIELD_LIMBS>, TestAirBinary, _, _>(
         group,
-        "Binary",
+        &format!("Binary/LIMBS={FIELD_LIMBS}"),
         witness_size,
-        |_ideal_over_ring| IdealOrZero::zero(),
+        |_ideal_over_ring| IdealOrZero::Zero,
     )
 }
 
@@ -119,11 +112,11 @@ pub fn bench_simple_mul<const FIELD_LIMBS: usize>(
     group: &mut BenchmarkGroup<WallTime>,
     witness_size: usize,
 ) {
-    do_bench::<TestUairSimpleMultiplication, _, _, FIELD_LIMBS>(
+    do_bench::<MontyField<FIELD_LIMBS>, TestUairSimpleMultiplication, _, _>(
         group,
-        "SimpleMul",
+        &format!("SimpleMul/LIMBS={FIELD_LIMBS}"),
         witness_size,
-        |_ideal_over_ring| IdealOrZero::zero(),
+        |_ideal_over_ring| IdealOrZero::Zero,
     )
 }
 
