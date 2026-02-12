@@ -3,9 +3,11 @@ use rand::RngCore;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_uair::Uair;
 
-pub trait GenerateWitness<R: Semiring + 'static>: Uair<R> {
+pub trait GenerateWitness: Uair {
+    type Witness;
+
     fn generate_witness<Rng: RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
-    ) -> Vec<DenseMultilinearExtension<R>>;
+    ) -> Vec<DenseMultilinearExtension<Self::Witness>>;
 }

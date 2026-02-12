@@ -1,17 +1,21 @@
-use crate::{ConstraintBuilder, Uair, dummy_semiring::DummySemiring, ideal::ImpossibleIdeal};
+use crate::{
+    ConstraintBuilder, TraceRow, Uair, dummy_semiring::DummySemiring, ideal::ImpossibleIdeal,
+};
 use crypto_primitives::Semiring;
 
 /// Get the number of polynomial constraints in a `Uair`.
-pub fn count_constraints<R, U>() -> usize
-where
-    R: Semiring + 'static,
-    U: Uair<R>,
-{
+pub fn count_constraints<U: Uair>() -> usize {
     let mut cc = ConstraintCounter::new();
 
-    let dummy_up_and_down = vec![DummySemiring; U::num_cols()];
+    let dummy_up_and_down = vec![DummySemiring; U::signature().max_cols()];
 
-    U::constrain(&mut cc, &dummy_up_and_down, &dummy_up_and_down);
+    let trace_row = TraceRow {
+        binary_poly: &dummy_up_and_down,
+        arbitrary_poly: &dummy_up_and_down,
+        int: &dummy_up_and_down,
+    };
+
+    U::constrain(&mut cc, trace_row, trace_row);
 
     cc.0
 }
