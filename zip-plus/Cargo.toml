@@ -89,6 +89,10 @@ name = "zip_plus_commit_40_f12289"
 harness = false
 
 [[bench]]
+name = "zip_plus_commit_32_f12289"
+harness = false
+
+[[bench]]
 name = "zip_plus_commit_55_f12289"
 harness = false
 
