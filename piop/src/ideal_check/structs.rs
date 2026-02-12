@@ -1,5 +1,5 @@
+use crypto_primitives::{PrimeField, Semiring};
 use std::collections::HashMap;
-
 use crypto_primitives::{ConstIntSemiring, Field, FromWithConfig, boolean::Boolean};
 use zinc_poly::{
     mle::DenseMultilinearExtension,
@@ -36,11 +36,12 @@ pub struct Proof<F: IdealCheckField, const DEGREE_PLUS_ONE: usize> {
 pub struct ProverState<F: IdealCheckField, const DEGREE_PLUS_ONE: usize> {
     pub evaluation_point: Vec<F>,
     pub combined_mles: Vec<Vec<DenseMultilinearExtension<F::Inner>>>,
+    pub trace_matrix: Vec<DenseMultilinearExtension<DynamicPolynomialF<F>>>,
     pub projected_scalars: HashMap<BinaryPoly<DEGREE_PLUS_ONE>, DynamicPolynomialF<F>>,
 }
 
-pub struct VerifierSubClaim<F: IdealCheckField> {
+pub struct VerifierSubClaim<R: Semiring, F: PrimeField> {
     pub evaluation_point: Vec<F>,
     pub values: Vec<DynamicPolynomialF<F>>,
-    pub coefficient_projecting_element: F,
+    pub projected_scalars: HashMap<R, DynamicPolynomialF<F>>,
 }
