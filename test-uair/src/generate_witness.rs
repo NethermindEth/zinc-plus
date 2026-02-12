@@ -3,7 +3,7 @@ use rand::RngCore;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_uair::Uair;
 
-pub trait GenerateWitness: Uair {
+pub trait GenerateSingleTypeWitness: Uair {
     type Witness;
 
     fn generate_witness<Rng: RngCore + ?Sized>(

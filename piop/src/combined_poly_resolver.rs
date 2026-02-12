@@ -365,7 +365,9 @@ mod tests {
     use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
     use rand::rng;
     use zinc_poly::univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal};
-    use zinc_test_uair::{GenerateWitness, TestAirNoMultiplication, TestUairSimpleMultiplication};
+    use zinc_test_uair::{
+        GenerateSingleTypeWitness, TestAirNoMultiplication, TestUairSimpleMultiplication,
+    };
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::{
         constraint_counter::count_constraints,
@@ -376,7 +378,8 @@ mod tests {
 
     use crate::{
         ideal_check::IdealCheckProtocol,
-        test_utils::{LIMBS, TestIcTypes, run_ideal_check_prover, test_config},
+        projections::project_scalars_to_field,
+        test_utils::{LIMBS, run_ideal_check_prover_single_type, test_config},
     };
 
     use super::*;
@@ -390,7 +393,8 @@ mod tests {
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
-        U: GenerateWitness<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
+        U: GenerateSingleTypeWitness<Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+            + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
@@ -401,30 +405,35 @@ mod tests {
 
         let trace = U::generate_witness(num_vars, &mut rng);
 
-        let (ic_proof, ic_prover_state) =
-            run_ideal_check_prover::<U, DEGREE_PLUS_ONE>(num_vars, &trace, &mut prover_transcript);
-
-        let num_constraints =
-            count_constraints::<<TestIcTypes as IdealCheckTypes<_>>::Witness, U>();
-
-        let ic_check_subclaim =
-            IdealCheckProtocol::<TestIcTypes, _>::verify_as_subprotocol::<U, _, _>(
-                &mut verifier_transcript,
-                ic_proof,
-                num_constraints,
+        let (ic_proof, ic_prover_state, projected_scalars, projected_trace) =
+            run_ideal_check_prover_single_type::<U, DEGREE_PLUS_ONE>(
                 num_vars,
-                ideal_over_f_from_ref,
-                &test_config(),
-            )
-            .expect("Verification failed");
+                &trace,
+                &mut prover_transcript,
+            );
 
-        let max_degree = count_max_degree::<_, U>();
+        let num_constraints = count_constraints::<U>();
 
-        let (proof, _) = CombinedPolyResolver::prove_as_subprotocol::<_, U>(
+        let ic_check_subclaim = IdealCheckProtocol::verify_as_subprotocol::<U, _, _>(
+            &mut verifier_transcript,
+            ic_proof,
+            num_constraints,
+            num_vars,
+            ideal_over_f_from_ref,
+            &test_config(),
+        )
+        .expect("Verification failed");
+
+        let max_degree = count_max_degree::<U>();
+
+        let projecting_element: MontyField<4> =
+            prover_transcript.get_field_challenge(&test_config());
+
+        let (proof, _) = CombinedPolyResolver::prove_as_subprotocol::<U>(
             &mut prover_transcript,
-            &ic_prover_state.trace_matrix,
+            &projected_trace_matrix,
             &ic_prover_state.evaluation_point,
-            ic_prover_state.projected_scalars,
+            &project_scalars_to_field(projected_scalars, &projecting_element).unwrap(),
             num_constraints,
             num_vars,
             max_degree,

@@ -49,7 +49,7 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
     pub fn prove_as_subprotocol<U>(
         transcript: &mut impl Transcript,
         trace: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
-        projected_scalars: HashMap<U::Scalar, DynamicPolynomialF<F>>,
+        projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
         num_constraints: usize,
         num_vars: usize,
         field_cfg: &F::Config,
@@ -59,8 +59,8 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
         F::Inner: ConstTranscribable,
     {
         let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
-            &trace,
-            &projected_scalars,
+            trace,
+            projected_scalars,
             num_constraints,
             field_cfg,
         );
@@ -125,7 +125,6 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
     pub fn verify_as_subprotocol<U, IdealOverF, IdealOverFFromRef>(
         transcript: &mut impl Transcript,
         proof: Proof<F>,
-        projected_scalars: HashMap<U::Scalar, DynamicPolynomialF<F>>,
         num_constraints: usize,
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
@@ -182,14 +181,16 @@ mod tests {
     use zinc_poly::univariate::{
         dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF, ideal::DegreeOneIdeal,
     };
-    use zinc_test_uair::{GenerateWitness, TestAirNoMultiplication, TestUairSimpleMultiplication};
+    use zinc_test_uair::{
+        GenerateSingleTypeWitness, TestAirNoMultiplication, TestUairSimpleMultiplication,
+    };
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::{
         constraint_counter::count_constraints,
         ideal::{Ideal, IdealCheck},
     };
 
-    use crate::test_utils::{LIMBS, TestIcTypes, run_ideal_check_prover, test_config};
+    use crate::test_utils::{LIMBS, run_ideal_check_prover_single_type, test_config};
 
     use super::*;
 
@@ -202,32 +203,31 @@ mod tests {
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
-        U: GenerateWitness<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
+        U: GenerateSingleTypeWitness<Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+            + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
         let mut rng = rng();
         let transcript = KeccakTranscript::new();
 
-        let (proof, prover_state) = run_ideal_check_prover::<U, DEGREE_PLUS_ONE>(
+        let (proof, prover_state, _) = run_ideal_check_prover_single_type::<U, DEGREE_PLUS_ONE>(
             num_vars,
             &U::generate_witness(num_vars, &mut rng),
             &mut transcript.clone(),
         );
 
-        let num_constraints =
-            count_constraints::<<TestIcTypes as IdealCheckTypes<_>>::Witness, U>();
+        let num_constraints = count_constraints::<U>();
 
-        let verifier_result =
-            IdealCheckProtocol::<TestIcTypes, _>::verify_as_subprotocol::<U, _, _>(
-                &mut transcript.clone(),
-                proof,
-                num_constraints,
-                num_vars,
-                ideal_over_f_from_ref,
-                &test_config(),
-            )
-            .expect("Verification failed");
+        let verifier_result = IdealCheckProtocol::verify_as_subprotocol::<U, _, _>(
+            &mut transcript.clone(),
+            proof,
+            num_constraints,
+            num_vars,
+            ideal_over_f_from_ref,
+            &test_config(),
+        )
+        .expect("Verification failed");
 
         assert_eq!(
             prover_state.evaluation_point,
@@ -241,11 +241,11 @@ mod tests {
 
         let num_vars = 2;
 
-        test_successful_verification_generic::<TestAirNoMultiplication, _, _, 32>(
+        test_successful_verification_generic::<TestAirNoMultiplication<5>, _, _, 32>(
             num_vars,
             |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
         );
-        test_successful_verification_generic::<TestUairSimpleMultiplication, _, _, 32>(
+        test_successful_verification_generic::<TestUairSimpleMultiplication<Int<5>>, _, _, 32>(
             num_vars,
             |_ideal_over_ring| IdealOrZero::zero(),
         );
