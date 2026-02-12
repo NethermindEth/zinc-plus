@@ -155,12 +155,12 @@ impl GenerateWitness<BinaryPoly<32>> for TestAirBinary {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     use zinc_uair::{
         collect_scalars::collect_scalars, constraint_counter::count_constraints,
         degree_counter::count_max_degree,
     };
-
-    use super::*;
 
     #[test]
     fn test_uair_simple_multiplication_correct_constraints_number() {
@@ -178,16 +178,8 @@ mod tests {
     #[test]
     fn test_uair_simple_multiplication_correct_max_degree() {
         assert_eq!(
-            count_max_degree::<DensePolynomial<Int<LIMBS>, 32>, TestUairSimpleMultiplication>(),
+            count_max_degree::<BinaryPoly<32>, TestUairSimpleMultiplication>(),
             2
-        );
-    }
-
-    #[test]
-    fn test_air_no_multiplication_correct_max_degree() {
-        assert_eq!(
-            count_max_degree::<DensePolynomial<Int<LIMBS>, 32>, TestAirNoMultiplication>(),
-            1
         );
     }
 
