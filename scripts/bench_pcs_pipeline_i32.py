@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Benchmark the full PCS pipeline (Commit, Test, Verify) for Zip+ with num_rows=1.
+Benchmark the full PCS pipeline (Commit, Test, Verify) for Zip+ with i32 evaluations and num_rows=1.
 
-This script runs the "PCS Pipeline Suite 1row" criterion benchmarks and collects
+This script runs the "PCS Pipeline Suite i32 1row" criterion benchmarks and collects
 the results into a LaTeX table.
 
-The benchmarks use BPoly<31> evaluations with various IPRS codes,
+The benchmarks use i32 evaluations with various IPRS codes,
 forcing num_rows=1 (single row layout). With num_rows=1, poly_size must equal row_len.
 Different fields are used to support different row lengths.
 
@@ -27,9 +27,9 @@ Different fields are used to support different row lengths.
     2^18 = 262144     B64 D=4 (rate 1/2)  F167772161      262144
 
 Usage:
-    python3 scripts/bench_pcs_pipeline.py
-    python3 scripts/bench_pcs_pipeline.py --no-run --input bench_output.txt
-    python3 scripts/bench_pcs_pipeline.py --output pcs_table.tex
+    python3 scripts/bench_pcs_pipeline_i32.py
+    python3 scripts/bench_pcs_pipeline_i32.py --no-run --input bench_output.txt
+    python3 scripts/bench_pcs_pipeline_i32.py --output pcs_table_i32.tex
 """
 
 import argparse
@@ -40,7 +40,7 @@ import sys
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-BENCH_FILTER = "PCS Pipeline Suite 1row"
+BENCH_FILTER = "PCS Pipeline Suite i32 1row"
 CARGO_BENCH_CMD = [
     "cargo", "bench",
     "--bench", "zip_plus_benches",
@@ -55,7 +55,7 @@ EXPECTED_POLY_EXPS = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18]
 
 # Number of repetitions: report the cost of performing each operation this many
 # times (the measured per-operation time is multiplied by this factor).
-NUM_REPETITIONS = 10
+NUM_REPETITIONS = 24
 
 # The three phases we benchmark
 PHASES = ["Commit", "Test", "Verify"]
@@ -140,7 +140,7 @@ def parse_criterion_output(
     text: str,
 ) -> dict[tuple[str, int], tuple[float, float, float]]:
     """
-    Parse criterion benchmark output for the PCS pipeline suite.
+    Parse criterion benchmark output for the PCS pipeline suite (i32).
 
     Returns a dict mapping (phase, poly_exp) -> (low_us, median_us, high_us).
     phase is one of "Commit", "Test", "Verify".
@@ -186,20 +186,22 @@ def generate_latex_table(
     lines = [
         r"\begin{table}[ht]",
         r"\centering",
-        r"\caption{PCS pipeline benchmark ($\times" + str(NUM_REPETITIONS) + r"$) for BPoly\textlangle 31\textrangle{} with IPRS num\_rows=1 (parallel+asm+simd).}",
-        r"\label{tab:pcs-pipeline-suite-1row}",
-        r"\begin{tabular}{r r l r r r}",
+        r"\caption{PCS pipeline benchmark ($\times" + str(NUM_REPETITIONS) + r"$) for i32 with num\_rows=1 (parallel+asm+simd).}",
+        r"\label{tab:pcs-pipeline-suite-i32-1row}",
+        r"\begin{tabular}{r r r l r r r}",
         r"\toprule",
         (
-            r"\textbf{row\_len} & $\boldsymbol{2^P}$ & \textbf{Field}"
+            r"\textbf{Row len} & $\boldsymbol{2^k}$ & $\boldsymbol{2^P}$ & \textbf{Field}"
             r" & \textbf{Commit} & \textbf{Test} & \textbf{Verify} \\"
         ),
         r"\midrule",
     ]
 
     for poly_exp in EXPECTED_POLY_EXPS:
-        num_rows, _config, _field = POLY_EXP_CONFIG[poly_exp]
-        row_len = 1 << poly_exp  # With num_rows=1, row_len = poly_size
+        _num_rows, _config, _field = POLY_EXP_CONFIG[poly_exp]
+        # With num_rows=1, poly_size = row_len = 2^poly_exp
+        row_len = 2 ** poly_exp
+        row_exp = poly_exp
         field = field_for_poly_exp(poly_exp)
 
         phase_strs = []
@@ -212,7 +214,7 @@ def generate_latex_table(
                 phase_strs.append("---")
 
         lines.append(
-            f"{row_len:>7} & $2^{{{poly_exp}}}$"
+            f"{row_len:>7} & $2^{{{row_exp}}}$ & $2^{{{poly_exp}}}$"
             f" & {field}"
             f" & {phase_strs[0]} & {phase_strs[1]} & {phase_strs[2]} \\\\"
         )
@@ -230,7 +232,7 @@ def generate_latex_table(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run PCS pipeline (Commit/Test/Verify) benchmarks and produce a LaTeX table."
+        description="Run PCS pipeline (Commit/Test/Verify) benchmarks for i32 and produce a LaTeX table."
     )
     parser.add_argument(
         "--no-run",
@@ -298,8 +300,9 @@ def main():
     for (phase, poly_exp), (lo, med, hi) in sorted(
         results.items(), key=lambda x: (x[0][0], x[0][1])
     ):
+        # With num_rows=1, row_len = poly_size = 2^poly_exp
         print(
-            f"  {phase:>8}  2^{poly_exp:<2} (num_rows=1)  "
+            f"  {phase:>8}  2^{poly_exp:<2} (row_len=2^{poly_exp})  "
             f"{_format_time(lo):>20} .. {_format_time(med):>20} .. {_format_time(hi):>20}"
         )
 

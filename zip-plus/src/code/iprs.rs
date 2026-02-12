@@ -16,7 +16,9 @@ pub use pntt::radix8::params::{
     PnttConfigF2_16_1, PnttConfigF2_16B16, PnttConfigF2_16B64,
     PnttConfigF167772161, PnttConfigF167772161B16, PnttConfigF167772161B64,
     PnttConfigF1179649B16,
-    PnttConfigF7340033B16,
+    PnttConfigF3329B8, PnttConfigF3329B16,
+    PnttConfigF3329R4B2, PnttConfigF3329R4B4, PnttConfigF3329R4B8,
+    PnttConfigF7340033B16, PnttConfigF7340033B32, PnttConfigF7340033B64,
     PnttInt, Radix8PnttParams,
 };
 use std::{
