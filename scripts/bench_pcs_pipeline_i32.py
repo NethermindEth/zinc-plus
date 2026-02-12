@@ -55,7 +55,7 @@ EXPECTED_POLY_EXPS = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18]
 
 # Number of repetitions: report the cost of performing each operation this many
 # times (the measured per-operation time is multiplied by this factor).
-NUM_REPETITIONS = 24
+NUM_REPETITIONS = 3
 
 # The three phases we benchmark
 PHASES = ["Commit", "Test", "Verify"]

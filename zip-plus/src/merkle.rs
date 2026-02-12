@@ -1,5 +1,5 @@
-use blake3::hazmat;
 use itertools::Itertools;
+use sha2::{Digest, Sha256};
 use std::{
     fmt,
     fmt::{Display, Formatter},
@@ -11,7 +11,7 @@ use zinc_utils::{add, cfg_into_iter, cfg_iter, sub};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-pub const HASH_OUT_LEN: usize = blake3::OUT_LEN;
+pub const HASH_OUT_LEN: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[repr(transparent)]
@@ -25,8 +25,10 @@ impl Default for MtHash {
 
 impl Display for MtHash {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let blake3_hash: blake3::Hash = self.0.into();
-        <blake3::Hash as Display>::fmt(&blake3_hash, f)
+        for byte in &self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
     }
 }
 
@@ -112,13 +114,14 @@ impl MerkleTree {
 // This could've been a function, but macro performance is better.
 macro_rules! hash_many {
     ($iter:expr, $t:tt) => {{
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = Sha256::new();
         let mut buf = vec![0_u8; <$t>::NUM_BYTES];
         for v in $iter {
             v.write_transcription_bytes(&mut buf);
             hasher.update(&buf);
         }
-        hasher.finalize().into()
+        let result: [u8; 32] = hasher.finalize().into();
+        MtHash(result)
     }};
 }
 
@@ -136,14 +139,14 @@ where
         .collect()
 }
 
-/// Builds a Merkle tree from the given leaves, abusing blake3::hazmat module
-/// for subtree merging.
+/// Builds a standard binary Merkle tree from the given leaves using SHA256.
 fn build_merkle_tree_from_leaves(leaves: Vec<MtHash>) -> MerkleTree {
     let n = leaves.len();
 
     if n == 0 {
+        let hash: [u8; 32] = Sha256::digest([]).into();
         return MerkleTree {
-            layers: vec![vec![blake3::hash(&[]).into()]],
+            layers: vec![vec![MtHash(hash)]],
         };
     }
     assert!(
@@ -158,7 +161,6 @@ fn build_merkle_tree_from_leaves(leaves: Vec<MtHash>) -> MerkleTree {
     }
 
     // Build all layers from bottom (leaves) to top (root)
-    // layers[i] contains all contiguous subtree roots of size 2^i
     let root_layer_idx = n.trailing_zeros() as usize; // log2(n)
     let num_layers = add!(root_layer_idx, 1);
     let mut layers: Vec<Vec<MtHash>> = Vec::with_capacity(num_layers);
@@ -168,18 +170,12 @@ fn build_merkle_tree_from_leaves(leaves: Vec<MtHash>) -> MerkleTree {
 
     // Build each subsequent layer
     for layer_idx in 1..num_layers {
-        let is_root_layer = layer_idx == root_layer_idx;
-
         let prev_layer = &layers[sub!(layer_idx, 1)];
         let (prev_layer_chunks, _) = prev_layer.as_chunks::<2>();
 
         let current_layer = cfg_iter!(prev_layer_chunks)
             .map(|[left, right]| {
-                if is_root_layer {
-                    hazmat::merge_subtrees_root(&left.0, &right.0, hazmat::Mode::Hash).into()
-                } else {
-                    hazmat::merge_subtrees_non_root(&left.0, &right.0, hazmat::Mode::Hash).into()
-                }
+                hash_pair(&left.0, &right.0)
             })
             .collect();
 
@@ -187,6 +183,16 @@ fn build_merkle_tree_from_leaves(leaves: Vec<MtHash>) -> MerkleTree {
     }
 
     MerkleTree { layers }
+}
+
+/// Hash two 32-byte chaining values into one using SHA256.
+#[inline]
+fn hash_pair(left: &[u8; 32], right: &[u8; 32]) -> MtHash {
+    let mut hasher = Sha256::new();
+    hasher.update(left);
+    hasher.update(right);
+    let result: [u8; 32] = hasher.finalize().into();
+    MtHash(result)
 }
 
 #[allow(clippy::arithmetic_side_effects)] // Using intentionally, overflow isn't possible
@@ -298,27 +304,23 @@ impl MerkleProof {
         for (sibling_cv, direction) in path_iter {
             let is_left = matches!(direction, PathDirection::Left);
             if is_left {
-                current_cv = hazmat::merge_subtrees_non_root(
+                current_cv = hash_pair(
                     &current_cv.0,
                     &sibling_cv.0,
-                    hazmat::Mode::Hash,
-                )
-                .into();
+                );
             } else {
-                current_cv = hazmat::merge_subtrees_non_root(
+                current_cv = hash_pair(
                     &sibling_cv.0,
                     &current_cv.0,
-                    hazmat::Mode::Hash,
-                )
-                .into();
+                );
             }
         }
 
         // Final root merge.
         let final_hash: MtHash = if matches!(last_direction, PathDirection::Left) {
-            hazmat::merge_subtrees_root(&current_cv.0, &last_sibling.0, hazmat::Mode::Hash).into()
+            hash_pair(&current_cv.0, &last_sibling.0)
         } else {
-            hazmat::merge_subtrees_root(&last_sibling.0, &current_cv.0, hazmat::Mode::Hash).into()
+            hash_pair(&last_sibling.0, &current_cv.0)
         };
 
         if &final_hash != root {
@@ -356,9 +358,9 @@ fn get_path_directions(total_chunks: usize, target_index: usize) -> Vec<PathDire
     let mut current_size = total_chunks;
     let mut current_index = target_index;
 
-    // Iterate top-down (Root to Leaf) to determine the path based on BLAKE3 rules.
+    // Iterate top-down (Root to Leaf) to determine the path.
     while current_size > 1 {
-        // BLAKE3 split rule: largest power of two less than N
+        // Standard binary split: largest power of two less than N
         // (or N/2 if N is power of 2).
         let split_len = current_size.next_power_of_two() / 2;
 
