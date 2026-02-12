@@ -8,6 +8,8 @@ use num_traits::{CheckedAdd, CheckedMul, CheckedSub};
 
 use crate::{ConstraintBuilder, Uair, ideal::ImpossibleIdeal};
 
+/// Compute the maximum number of multiplicands
+/// in products of witness elements in the UAIR `U`.
 pub fn count_max_degree<R, U>() -> usize
 where
     R: Semiring + 'static,
