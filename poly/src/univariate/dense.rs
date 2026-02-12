@@ -1,6 +1,9 @@
 use crate::{
     CoefficientProjectable, ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
-    univariate::{binary_ref::BinaryRefPoly, binary_u64::BinaryU64Poly},
+    univariate::{
+        binary_ref::BinaryRefPoly, binary_u64::BinaryU64Poly,
+        dynamic::over_field::DynamicPolynomialF,
+    },
 };
 
 use core::slice;
@@ -682,5 +685,11 @@ where
         zero: Out,
     ) -> Result<Out, InnerProductError> {
         I::inner_product::<CHECK>(&lhs.coeffs, rhs, zero)
+    }
+}
+
+impl<R, const DEGREE_PLUS_ONE: usize> DensePolynomial<R, DEGREE_PLUS_ONE> {
+    pub fn map_coeffs<F: PrimeField>(&self, f: impl Fn(&R) -> F) -> DynamicPolynomialF<F> {
+        DynamicPolynomialF::new_trimmed(self.coeffs.iter().map(f).collect_vec())
     }
 }
