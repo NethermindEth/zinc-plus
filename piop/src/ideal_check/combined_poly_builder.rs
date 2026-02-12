@@ -1,4 +1,4 @@
-use crypto_primitives::{Field, PrimeField};
+use crypto_primitives::PrimeField;
 use std::collections::HashMap;
 
 use itertools::Itertools;

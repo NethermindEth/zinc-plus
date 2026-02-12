@@ -243,7 +243,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             .map(
                 |(claimed_value, random_coeff)| -> Result<F, CombinedPolyResolverError<F>> {
                     Ok(claimed_value
-                        .evaluate_at_point(&projecting_element)
+                        .evaluate_at_point(projecting_element)
                         .map_err(|err| {
                             CombinedPolyResolverError::ProjectionError(
                                 claimed_value.clone(),
@@ -378,7 +378,7 @@ mod tests {
 
     use crate::{
         ideal_check::IdealCheckProtocol,
-        projections::project_scalars_to_field,
+        projections::{project_scalars_to_field, project_trace_to_field},
         test_utils::{LIMBS, run_ideal_check_prover_single_type, test_config},
     };
 
@@ -429,11 +429,14 @@ mod tests {
         let projecting_element: MontyField<4> =
             prover_transcript.get_field_challenge(&test_config());
 
+        let projected_scalars =
+            project_scalars_to_field(projected_scalars, &projecting_element).unwrap();
+
         let (proof, _) = CombinedPolyResolver::prove_as_subprotocol::<U>(
             &mut prover_transcript,
-            &projected_trace_matrix,
+            project_trace_to_field::<_, 32>(&[], &projected_trace, &[], &projecting_element),
             &ic_prover_state.evaluation_point,
-            &project_scalars_to_field(projected_scalars, &projecting_element).unwrap(),
+            &projected_scalars,
             num_constraints,
             num_vars,
             max_degree,
@@ -441,13 +444,18 @@ mod tests {
         )
         .expect("CombinedPolyResolver prover failed");
 
+        let projecting_element: MontyField<LIMBS> =
+            verifier_transcript.get_field_challenge(&test_config());
+
         assert!(
-            CombinedPolyResolver::verify_as_subprotocol::<_, U>(
+            CombinedPolyResolver::verify_as_subprotocol::<U>(
                 &mut verifier_transcript,
                 proof,
                 num_constraints,
                 num_vars,
                 max_degree,
+                &projecting_element,
+                &projected_scalars,
                 ic_check_subclaim,
                 &test_config(),
             )
@@ -461,11 +469,11 @@ mod tests {
 
         let num_vars = 2;
 
-        test_successful_verification_generic::<TestAirNoMultiplication, _, _, 32>(
+        test_successful_verification_generic::<TestAirNoMultiplication<5>, _, _, 32>(
             num_vars,
             |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
         );
-        test_successful_verification_generic::<TestUairSimpleMultiplication, _, _, 32>(
+        test_successful_verification_generic::<TestUairSimpleMultiplication<Int<5>>, _, _, 32>(
             num_vars,
             |_ideal_over_ring| IdealOrZero::zero(),
         );

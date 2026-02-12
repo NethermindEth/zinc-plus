@@ -9,7 +9,7 @@ use zinc_poly::{
 };
 use zinc_test_uair::GenerateSingleTypeWitness;
 use zinc_transcript::traits::Transcript;
-use zinc_uair::{Uair, collect_scalars::collect_scalars, constraint_counter::count_constraints};
+use zinc_uair::{Uair, constraint_counter::count_constraints};
 
 use crate::{
     ideal_check::{self, IdealCheckProtocol},

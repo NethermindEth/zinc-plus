@@ -3,10 +3,8 @@ pub mod univariate;
 pub mod utils;
 pub mod zero_degree;
 
-use crypto_primitives::FromWithConfig;
 use thiserror::Error;
 
-use crate::univariate::dense::DensePolynomial;
 
 /// Polynomial with coefficients of type `C` and degree bounded by
 /// `DEGREE_BOUND`.

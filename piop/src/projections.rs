@@ -11,7 +11,9 @@ use zinc_poly::{
     },
 };
 use zinc_uair::{Uair, collect_scalars::collect_scalars};
-use zinc_utils::{cfg_extend, cfg_iter, projectable_to_field::ProjectableToField};
+use zinc_utils::{
+    cfg_extend, cfg_iter, from_ref::FromRef, projectable_to_field::ProjectableToField,
+};
 
 #[allow(clippy::arithmetic_side_effects)]
 pub fn project_trace_coeffs<F, PolyCoeff, Int, const DEGREE_PLUS_ONE: usize>(
@@ -69,20 +71,59 @@ where
     result
 }
 
-pub fn project_trace_to_field<F: PrimeField, const DEGREE_PLUS_ONE: usize>(
+#[allow(clippy::arithmetic_side_effects)]
+pub fn project_trace_to_field<F: PrimeField + FromRef<F> + 'static, const DEGREE_PLUS_ONE: usize>(
     binary_poly_trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
     arbitrary_poly_trace: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
     int_trace: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
-    projecting_element: &F
-) -> Vec<DenseMultilinearExtension<F::Inner>> {
-    let binary_poly_projection = BinaryPoly::<DEGREE_PLUS_ONE>::prepare_projection(projecting_element);
+    projecting_element: &F,
+) -> Vec<DenseMultilinearExtension<F::Inner>>
+where
+    F::Inner: Default,
+{
+    let binary_poly_projection =
+        BinaryPoly::<DEGREE_PLUS_ONE>::prepare_projection(projecting_element);
 
     let mut result =
         Vec::with_capacity(binary_poly_trace.len() + arbitrary_poly_trace.len() + int_trace.len());
 
-    cfg_iter!(binary_poly_trace).map(|column| {
+    cfg_extend!(
+        result,
+        cfg_iter!(binary_poly_trace).map(|column| {
+            cfg_iter!(column)
+                .map(|poly| binary_poly_projection(poly).inner().clone())
+                .collect()
+        })
+    );
 
-    })
+    cfg_extend!(
+        result,
+        cfg_iter!(arbitrary_poly_trace).map(|column| {
+            cfg_iter!(column)
+                .map(|poly| {
+                    poly.evaluate_at_point(projecting_element)
+                        .expect("dynamic poly evaluation does not fail")
+                        .inner()
+                        .clone()
+                })
+                .collect()
+        })
+    );
+
+    result.extend(int_trace.iter().map(|column| {
+        column
+            .iter()
+            .map(|i| {
+                if i.coeffs.is_empty() {
+                    F::Inner::default()
+                } else {
+                    i.coeffs[0].inner().clone()
+                }
+            })
+            .collect()
+    }));
+
+    result
 }
 
 pub fn project_scalars<F: PrimeField, U: Uair>(
