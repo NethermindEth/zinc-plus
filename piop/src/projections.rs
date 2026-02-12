@@ -15,6 +15,7 @@ use zinc_utils::{
     cfg_extend, cfg_iter, from_ref::FromRef, projectable_to_field::ProjectableToField,
 };
 
+/// Project a multi-typed trace onto F[X].
 #[allow(clippy::arithmetic_side_effects)]
 pub fn project_trace_coeffs<F, PolyCoeff, Int, const DEGREE_PLUS_ONE: usize>(
     binary_poly_trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
@@ -71,6 +72,14 @@ where
     result
 }
 
+/// Project a multi-typed traces along F[X]->F.
+/// Note, that we do not need Montgomery forms for the
+/// binary polynomials as they can be projected just
+/// using a field config. Projecting int trace is just
+/// turning constant `DynamicPolynomialF`s into `F`s.
+/// The real work may happen only for the arbitrary polynomials
+/// which we have no better solution than just evaluate them on
+/// the projecting element.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn project_trace_to_field<F: PrimeField + FromRef<F> + 'static, const DEGREE_PLUS_ONE: usize>(
     binary_poly_trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
@@ -126,6 +135,7 @@ where
     result
 }
 
+/// Project scalars of a UAIR onto F[X].
 pub fn project_scalars<F: PrimeField, U: Uair>(
     project: impl Fn(&U::Scalar) -> DynamicPolynomialF<F>,
 ) -> HashMap<U::Scalar, DynamicPolynomialF<F>> {
@@ -147,10 +157,14 @@ pub fn project_scalars<F: PrimeField, U: Uair>(
         .collect()
 }
 
+/// Project scalars of a UAIR along F[X] -> F.
 pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
     scalars: HashMap<R, DynamicPolynomialF<F>>,
     projecting_element: &F,
 ) -> Result<HashMap<R, F>, (R, F, EvaluationError)> {
+    // TODO(Ilia): Parallelising this might be good for big UAIRs.
+    //             We'd conditionally route between sequential and parallel
+    //             projection depending on how many scalars the UAIR has.
     scalars
         .into_iter()
         .map(
