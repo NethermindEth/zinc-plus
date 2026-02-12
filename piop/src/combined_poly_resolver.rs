@@ -2,7 +2,6 @@
 
 mod folder;
 mod structs;
-mod utils;
 
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField, Semiring};
 use itertools::Itertools;
@@ -18,13 +17,13 @@ use zinc_poly::{
     utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_uair::{Uair, ideal::ImpossibleIdeal};
+use zinc_uair::{TraceRow, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::{
     cfg_iter, from_ref::FromRef, inner_transparent_field::InnerTransparentField, powers,
 };
 
 use crate::{
-    combined_poly_resolver::{folder::ConstraintFolder, utils::project_scalars_to_field},
+    combined_poly_resolver::folder::ConstraintFolder,
     ideal_check,
     sumcheck::{MLSumcheck, SumCheckError},
 };
@@ -60,51 +59,27 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// - `max_degree`: The degree of the UAIR `U`.
     /// - `field_cfg`: The random field config.
     #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
-    pub fn prove_as_subprotocol<R, U>(
+    pub fn prove_as_subprotocol<U>(
         transcript: &mut impl Transcript,
-        trace_matrix: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
+        trace_matrix: Vec<DenseMultilinearExtension<F::Inner>>,
         evaluation_point: &[F],
-        projected_scalars: HashMap<R, DynamicPolynomialF<F>>,
+        projected_scalars: &HashMap<U::Scalar, F>,
         num_constraints: usize,
         num_vars: usize,
         max_degree: usize,
         field_cfg: &F::Config,
     ) -> Result<(Proof<F>, ProverState<F>), CombinedPolyResolverError<F>>
     where
-        R: Semiring + Send + Sync + 'static,
         F::Inner: ConstTranscribable + Send + Sync + Zero + Default,
-        U: Uair<R>,
+        U: Uair,
     {
         debug_assert_ne!(
             num_vars, 1,
             "The protocol is not needed when the number of variables is 1 :)"
         );
 
-        let projecting_element: F = transcript.get_field_challenge(field_cfg);
-
-        // Project scalars along F[X] -> F.
-        let projected_scalars: HashMap<R, F> =
-            project_scalars_to_field(projected_scalars, &projecting_element)?;
-
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
-
-        let num_cols = U::num_cols();
-
-        // Project trace along F[X] -> F.
-        let up: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(trace_matrix)
-            .map(|column| {
-                cfg_iter!(column)
-                    .map(|coeff| {
-                        coeff
-                            .evaluate_at_point(&projecting_element)
-                            .expect("evaluation cannot fail here")
-                            .inner()
-                            .clone()
-                    })
-                    .collect()
-            })
-            .collect();
 
         // Shifted trace. Just take the trace, drop the first row
         // and append 0 to the end. Note, that the latter happens
@@ -112,7 +87,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         // as it always pads to the next power of two.
         // It might lead to a problem when `num_vars = 1` but that is not going to
         // happen on real world traces.
-        let down: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(up)
+        let down: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(trace_matrix)
             .map(|column| column[1..].iter().cloned().collect())
             .collect();
 
@@ -129,14 +104,16 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         let folding_challenge_powers: Vec<F> =
             powers(folding_challenge, one.clone(), num_constraints);
 
+        let num_cols = trace_matrix.len();
+
         let mles: Vec<DenseMultilinearExtension<F::Inner>> = {
             let mut mles = Vec::with_capacity(2 * num_cols + 2);
 
             mles.push(last_row_selector);
             mles.push(eq_r);
 
-            mles.extend(up.clone());
-            mles.extend(down.clone());
+            mles.extend(trace_matrix);
+            mles.extend(down);
 
             mles
         };
@@ -154,7 +131,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
                 let mut folder = ConstraintFolder::new(&folding_challenge_powers, &zero);
 
-                let project = |scalar: &R| {
+                let project = |scalar: &U::Scalar| {
                     projected_scalars
                         .get(scalar)
                         .cloned()
@@ -163,8 +140,14 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
                 U::constrain_general(
                     &mut folder,
-                    &mle_values[2..num_cols + 2],
-                    &mle_values[num_cols + 2..],
+                    TraceRow::from_slice_with_signature(
+                        &mle_values[2..num_cols + 2],
+                        &U::signature(),
+                    ),
+                    TraceRow::from_slice_with_signature(
+                        &mle_values[num_cols + 2..],
+                        &U::signature(),
+                    ),
                     project,
                     |x, y| Some(project(y) * x),
                     ImpossibleIdeal::from_ref,
@@ -209,8 +192,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
                 down_evals: evals[num_cols..].to_vec(),
             },
             ProverState {
-                up,
-                down,
                 evaluation_point: sumcheck_prover_state.randomness,
             },
         ))
@@ -228,26 +209,22 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ///   subprotocol. The subclaim is resolved by this protocol.
     /// - `field_cfg`: The random field config.
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn verify_as_subprotocol<R, U>(
+    pub fn verify_as_subprotocol<U>(
         transcript: &mut impl Transcript,
         proof: Proof<F>,
         num_constraints: usize,
         num_vars: usize,
         max_degree: usize,
-        ic_check_subclaim: ideal_check::VerifierSubClaim<R, F>,
+        projecting_element: &F,
+        projected_scalars: &HashMap<U::Scalar, F>,
+        ic_check_subclaim: ideal_check::VerifierSubClaim<F>,
         field_cfg: &F::Config,
     ) -> Result<VerifierSubclaim<F>, CombinedPolyResolverError<F>>
     where
-        R: Semiring + 'static,
         F::Inner: ConstTranscribable,
-        U: Uair<R>,
+        U: Uair,
     {
-        proof.validate_evaluation_sizes(U::num_cols())?;
-
-        let projecting_element: F = transcript.get_field_challenge(field_cfg);
-
-        let projected_scalars: HashMap<R, F> =
-            project_scalars_to_field(ic_check_subclaim.projected_scalars, &projecting_element)?;
+        proof.validate_evaluation_sizes(U::signature().total_cols())?;
 
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
@@ -308,7 +285,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         let mut folder = ConstraintFolder::new(&folding_challenge_powers, &zero);
 
-        let project = |scalar: &R| {
+        let project = |scalar: &U::Scalar| {
             projected_scalars
                 .get(scalar)
                 .cloned()
@@ -317,8 +294,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         U::constrain_general(
             &mut folder,
-            &proof.up_evals,
-            &proof.down_evals,
+            TraceRow::from_slice_with_signature(&proof.up_evals, &U::signature()),
+            TraceRow::from_slice_with_signature(&proof.down_evals, &U::signature()),
             project,
             |x, y| Some(project(y) * x),
             ImpossibleIdeal::from_ref,
@@ -398,7 +375,7 @@ mod tests {
     };
 
     use crate::{
-        ideal_check::{IdealCheckProtocol, IdealCheckTypes},
+        ideal_check::IdealCheckProtocol,
         test_utils::{LIMBS, TestIcTypes, run_ideal_check_prover, test_config},
     };
 

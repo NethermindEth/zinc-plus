@@ -14,15 +14,12 @@ pub struct Proof<F: PrimeField> {
 }
 
 #[derive(Clone, Debug)]
-pub struct ProverState<R: Semiring, F: PrimeField> {
+pub struct ProverState<F: PrimeField> {
     pub evaluation_point: Vec<F>,
     pub combined_mles: Vec<Vec<DenseMultilinearExtension<F::Inner>>>,
-    pub trace_matrix: Vec<DenseMultilinearExtension<DynamicPolynomialF<F>>>,
-    pub projected_scalars: HashMap<R, DynamicPolynomialF<F>>,
 }
 
-pub struct VerifierSubClaim<R: Semiring, F: PrimeField> {
+pub struct VerifierSubClaim<F: PrimeField> {
     pub evaluation_point: Vec<F>,
     pub values: Vec<DynamicPolynomialF<F>>,
-    pub projected_scalars: HashMap<R, DynamicPolynomialF<F>>,
 }

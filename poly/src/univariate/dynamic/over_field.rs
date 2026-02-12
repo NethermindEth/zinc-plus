@@ -53,6 +53,14 @@ impl<F: PrimeField> DynamicPolynomialF<F> {
     pub fn trim(&mut self) {
         dynamic::trim(&mut self.coeffs, F::is_zero);
     }
+
+    pub fn constant_poly(a: F) -> Self {
+        if F::is_zero(&a) {
+            Self::default()
+        } else {
+            DynamicPolynomialF { coeffs: vec![a] }
+        }
+    }
 }
 
 impl<F: PrimeField> Display for DynamicPolynomialF<F> {

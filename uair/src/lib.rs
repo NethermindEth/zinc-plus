@@ -67,6 +67,18 @@ pub struct TraceRow<'a, Expr> {
     pub int: &'a [Expr],
 }
 
+impl<'a, Expr> TraceRow<'a, Expr> {
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn from_slice_with_signature(row: &'a [Expr], signature: &UairSignature) -> Self {
+        Self {
+            binary_poly: &row[0..signature.binary_poly_cols],
+            arbitrary_poly: &row[signature.binary_poly_cols
+                ..signature.binary_poly_cols + signature.arbitrary_poly_cols],
+            int: &row[signature.binary_poly_cols + signature.arbitrary_poly_cols..],
+        }
+    }
+}
+
 /// The trait that a universal AIR description has to implement.
 /// This must include all the constraint description logic of an UAIR.
 ///

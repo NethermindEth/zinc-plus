@@ -1,13 +1,16 @@
+use crypto_primitives::{FromWithConfig, PrimeField, Semiring};
+use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-
-use crypto_primitives::{FromWithConfig, PrimeField};
+use std::collections::HashMap;
 use zinc_poly::{
+    EvaluatablePolynomial, EvaluationError,
     mle::DenseMultilinearExtension,
     univariate::{
         binary::BinaryPoly, dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF,
     },
 };
+use zinc_uair::{Uair, collect_scalars::collect_scalars};
 use zinc_utils::{cfg_extend, cfg_iter};
 
 #[allow(clippy::arithmetic_side_effects)]
@@ -64,4 +67,44 @@ where
     );
 
     result
+}
+
+pub fn project_scalars<F: PrimeField, U: Uair>(
+    project: impl Fn(&U::Scalar) -> DynamicPolynomialF<F>,
+) -> HashMap<U::Scalar, DynamicPolynomialF<F>> {
+    let uair_scalars = collect_scalars::<U>();
+
+    // TODO(Ilia): if there's a lot of scalars
+    //             we should do this in parallel probably.
+    uair_scalars
+        .into_iter()
+        .map(|scalar| {
+            (scalar.clone(), {
+                let mut dynamic_poly = project(&scalar);
+
+                dynamic_poly.trim();
+
+                dynamic_poly
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
+    scalars: HashMap<R, DynamicPolynomialF<F>>,
+    projecting_element: &F,
+) -> Result<HashMap<R, F>, (R, F, EvaluationError)> {
+    scalars
+        .into_iter()
+        .map(
+            |(scalar, value)| -> Result<(R, F), (R, F, EvaluationError)> {
+                Ok((
+                    scalar.clone(),
+                    value
+                        .evaluate_at_point(projecting_element)
+                        .map_err(|err| (scalar.clone(), projecting_element.clone(), err))?,
+                ))
+            },
+        )
+        .try_collect()
 }
