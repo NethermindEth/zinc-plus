@@ -50,9 +50,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ///
     /// # Parameters
     /// - `transcript`: FS-transcript.
-    /// - `trace_matrix`: The trace that have been projected to F[X].
+    /// - `trace_matrix`: The trace that have been projected to F.
     /// - `evaluation_point`: The evaluation point for the claims.
-    /// - `projected_scalars`: The UAIR scalars projected to `F[X]`.
+    /// - `projected_scalars`: The UAIR scalars projected to `F`.
     /// - `num_constraints`: The number of constraint polynomials in the UAIR
     ///   `U`.
     /// - `num_vars`: The number of variables of the trace MLEs.
@@ -205,10 +205,13 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// - `proof`: The prover's proof.
     /// - `num_constraints`: The number of constraints of the UAIR `U`.
     /// - `max_degree`: The degree of the UAIR `U`.
+    /// - `projecting_element`: The random challenge used to project F[X]->F.
+    /// - `projected_scalars`: The scalars of the UAIR `U` projected onto `F`.
     /// - `ic_check_subclaim`: The subclaim left after the ideal check
     ///   subprotocol. The subclaim is resolved by this protocol.
     /// - `field_cfg`: The random field config.
     #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+    // TODO(Ilia): sanitise too_many_arguments ^ once we have time
     pub fn verify_as_subprotocol<U>(
         transcript: &mut impl Transcript,
         proof: Proof<F>,
@@ -383,6 +386,10 @@ mod tests {
     };
 
     use super::*;
+
+    // TODO(Ilia): These tests are absolute joke.
+    //             Once we have time we need to create a comprehensive test suite
+    //             akin to the one we have for the PCS or the sumcheck.
 
     fn test_successful_verification_generic<
         U,

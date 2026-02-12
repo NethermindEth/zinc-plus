@@ -32,15 +32,24 @@ pub trait ConstraintBuilder {
     fn assert_zero(&mut self, expr: Self::Expr);
 }
 
+/// The signature of a UAIR.
+/// Contains the number of columns of
+/// each of the types: binary polynomials,
+/// polynomials with arbitrary coefficients,
+/// and integers.
 pub struct UairSignature {
+    /// Number of columns with binary polynomial elements.
     pub binary_poly_cols: usize,
+    /// Number of columns with arbitrary polynomial elements.
     pub arbitrary_poly_cols: usize,
+    /// Number of columns with integers.
     pub int_cols: usize,
 }
 
 impl UairSignature {
+    /// Maximum number of columns accross the three types.
     pub const fn max_cols(&self) -> usize {
-        // TODO(Ilia): is there const max?
+        // TODO(Ilia): is there a const max?
         if self.binary_poly_cols < self.arbitrary_poly_cols {
             if self.arbitrary_poly_cols < self.int_cols {
                 self.int_cols
@@ -54,12 +63,17 @@ impl UairSignature {
         }
     }
 
+    /// The sum of the numbers of columns accross
+    /// all types.
     #[allow(clippy::arithmetic_side_effects)] // we don't have that many columns
     pub const fn total_cols(&self) -> usize {
         self.binary_poly_cols + self.arbitrary_poly_cols + self.int_cols
     }
 }
 
+/// A view on a row of the trace.
+/// Contains references to cells of the trace
+/// of all types lying in the same trace row.
 #[derive(Clone, Copy)]
 pub struct TraceRow<'a, Expr> {
     pub binary_poly: &'a [Expr],
@@ -68,6 +82,9 @@ pub struct TraceRow<'a, Expr> {
 }
 
 impl<'a, Expr> TraceRow<'a, Expr> {
+    /// Given a slice that represents a raw row of the trace,
+    /// creates a `TraceRow` from it.
+    /// Subdivides the slice according to the given signature `signature`.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn from_slice_with_signature(row: &'a [Expr], signature: &UairSignature) -> Self {
         Self {
@@ -94,6 +111,9 @@ pub trait Uair {
     /// via the `FromRef` trait.
     type Ideal: Ideal;
 
+    /// The type of scalars of the UAIR.
+    /// For now, we assume they are of
+    /// the type "arbitrary polynomials".
     type Scalar: Semiring;
 
     /// Signature of the UAIR.
@@ -105,9 +125,11 @@ pub trait Uair {
     /// - `b`: a builder encapsulating the constraint storing logic. Its type
     ///   `B` has to have compatible `B::Ideal` with the `Self::Ideal`, i.e. it
     ///   must implement `FromRef<Self::Ideal>` trait.
-    /// - `up`: a slice of expressions representing the current row of UAIR.
-    /// - `down`: a slice of expressions representing the next row of UAIR. It
-    ///   is safe to assume it has the same length as `up`.
+    /// - `up`: a `TraceRow` of expressions representing the current row of
+    ///   UAIR.
+    /// - `down`: a `TraceRow` of expressions representing the next row of UAIR.
+    ///   It is safe to assume all the members have the same lengths as
+    ///   corresponding members of `up`.
     /// - `from_ref`: a closure that turns the underlying ring `R` into
     ///   `B::Expr`. Sometimes (e.g. when dealing with random fields) it is
     ///   convenient to provide a closure instead of a `FromRef` implementation.

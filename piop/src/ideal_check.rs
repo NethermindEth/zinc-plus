@@ -40,7 +40,10 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
     ///
     /// # Parameters
     /// - `transcript`: the Fiat-Shamir transcript.
-    /// - `trace`: the input trace for the UAIR `U`.
+    /// - `trace`: the input trace for the UAIR `U` projected to
+    ///   `DynamicPolynomialF<F>`.
+    /// - `projected_scalars`: the scalars of the UAIR `U` projected to
+    ///   `DynamicPolynomialF<F>`.
     /// - `num_constraints`: the number of constraints the UAIR `U` encodes.
     /// - `num_vars`: the number of variables the trace row MLEs have.
     /// - `field_cfg`: random field configuration sampled on the previous steps
@@ -174,7 +177,6 @@ pub enum IdealCheckError<F: PrimeField, I> {
 
 #[cfg(test)]
 mod tests {
-
     use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
 
     use rand::rng;
@@ -193,6 +195,10 @@ mod tests {
     use crate::test_utils::{LIMBS, run_ideal_check_prover_single_type, test_config};
 
     use super::*;
+
+    // TODO(Ilia): These tests are absolute joke.
+    //             Once we have time we need to create a comprehensive test suite
+    //             akin to the one we have for the PCS or the sumcheck.
 
     fn test_successful_verification_generic<
         U,
