@@ -1,38 +1,44 @@
-use crypto_primitives::{Field, FromWithConfig, PrimeField, Semiring};
+use crypto_primitives::{
+    ConstIntSemiring, Field, FromWithConfig, PrimeField, Semiring, boolean::Boolean,
+};
 use std::collections::HashMap;
 use zinc_poly::{
-    CoefficientProjectable, mle::DenseMultilinearExtension,
-    univariate::dynamic::over_field::DynamicPolynomialF,
+    mle::DenseMultilinearExtension,
+    univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF},
 };
 use zinc_transcript::traits::ConstTranscribable;
-use zinc_utils::{
-    inner_transparent_field::InnerTransparentField, projectable_to_field::ProjectableToField,
-};
+use zinc_utils::{from_ref::FromRef, inner_transparent_field::InnerTransparentField};
 
-pub trait IdealCheckTypes<const DEGREE_PLUS_ONE: usize> {
-    type WitnessCoeff;
-    type Witness: Semiring
-        + CoefficientProjectable<Self::WitnessCoeff, DEGREE_PLUS_ONE>
-        + ProjectableToField<Self::F>
-        + ConstTranscribable
+pub trait IdealCheckField:
+    InnerTransparentField
+    + Field<Inner: ConstIntSemiring + ConstTranscribable + FromRef<Self::Inner>>
+    + FromWithConfig<Boolean>
+    + Send
+    + Sync
+    + 'static
+{
+}
+impl<T> IdealCheckField for T where
+    T: InnerTransparentField
+        + Field<Inner: ConstIntSemiring + ConstTranscribable + FromRef<Self::Inner>>
+        + FromWithConfig<Boolean>
         + Send
         + Sync
-        + 'static;
-
-    type F: InnerTransparentField + FromWithConfig<Self::WitnessCoeff> + Send + Sync + 'static;
+        + 'static
+{
 }
 
 #[derive(Clone, Debug)]
-pub struct Proof<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize> {
-    pub combined_mle_values: Vec<DynamicPolynomialF<IcTypes::F>>,
+pub struct Proof<F: IdealCheckField, const DEGREE_PLUS_ONE: usize> {
+    pub combined_mle_values: Vec<DynamicPolynomialF<F>>,
 }
 
 #[derive(Clone, Debug)]
-pub struct ProverState<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize> {
-    pub evaluation_point: Vec<IcTypes::F>,
-    pub combined_mles: Vec<Vec<DenseMultilinearExtension<<IcTypes::F as Field>::Inner>>>,
-    pub trace_matrix: Vec<DenseMultilinearExtension<DynamicPolynomialF<IcTypes::F>>>,
-    pub projected_scalars: HashMap<IcTypes::Witness, DynamicPolynomialF<IcTypes::F>>,
+pub struct ProverState<F: IdealCheckField, const DEGREE_PLUS_ONE: usize> {
+    pub evaluation_point: Vec<F>,
+    pub combined_mles: Vec<Vec<DenseMultilinearExtension<F::Inner>>>,
+    pub trace_matrix: Vec<DenseMultilinearExtension<DynamicPolynomialF<F>>>,
+    pub projected_scalars: HashMap<BinaryPoly<DEGREE_PLUS_ONE>, DynamicPolynomialF<F>>,
 }
 
 pub struct VerifierSubClaim<R: Semiring, F: PrimeField> {

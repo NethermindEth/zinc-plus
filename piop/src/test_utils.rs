@@ -1,11 +1,11 @@
 use crypto_bigint::{Odd, modular::MontyParams};
-use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
-use zinc_poly::{mle::DenseMultilinearExtension, univariate::dense::DensePolynomial};
+use crypto_primitives::crypto_bigint_monty::MontyField;
+use zinc_poly::{mle::DenseMultilinearExtension, univariate::binary::BinaryPoly};
 use zinc_test_uair::GenerateWitness;
 use zinc_transcript::traits::Transcript;
 use zinc_uair::constraint_counter::count_constraints;
 
-use crate::ideal_check::{self, IdealCheckProtocol, IdealCheckTypes};
+use crate::ideal_check::{self, IdealCheckProtocol};
 
 pub const LIMBS: usize = 4;
 
@@ -17,31 +17,24 @@ pub fn test_config() -> MontyParams<LIMBS> {
     MontyParams::new(modulus)
 }
 
-pub struct TestIcTypes;
-
-impl<const DEGREE_PLUS_ONE: usize> IdealCheckTypes<DEGREE_PLUS_ONE> for TestIcTypes {
-    type WitnessCoeff = Int<5>;
-    type Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>;
-
-    type F = MontyField<4>;
-}
+pub type TestIcField = MontyField<4>;
 
 pub fn run_ideal_check_prover<U, const DEGREE_PLUS_ONE: usize>(
     num_vars: usize,
-    trace: &[DenseMultilinearExtension<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>],
+    trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
     transcript: &mut impl Transcript,
 ) -> (
-    ideal_check::Proof<TestIcTypes, DEGREE_PLUS_ONE>,
-    ideal_check::ProverState<TestIcTypes, DEGREE_PLUS_ONE>,
+    ideal_check::Proof<TestIcField, DEGREE_PLUS_ONE>,
+    ideal_check::ProverState<TestIcField, DEGREE_PLUS_ONE>,
 )
 where
-    U: GenerateWitness<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
+    U: GenerateWitness<BinaryPoly<DEGREE_PLUS_ONE>>,
 {
     let field_cfg = test_config();
 
-    let num_constraints = count_constraints::<<TestIcTypes as IdealCheckTypes<_>>::Witness, U>();
+    let num_constraints = count_constraints::<BinaryPoly<DEGREE_PLUS_ONE>, U>();
 
-    IdealCheckProtocol::<TestIcTypes, _>::prove_as_subprotocol::<U>(
+    IdealCheckProtocol::<TestIcField, _>::prove_as_subprotocol::<U>(
         transcript,
         trace,
         num_constraints,

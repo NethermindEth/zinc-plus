@@ -5,7 +5,6 @@ mod structs;
 mod utils;
 
 use batched_ideal_check::*;
-use crypto_primitives::{Field, PrimeField};
 use derive_more::From;
 use itertools::Itertools;
 #[cfg(feature = "parallel")]
@@ -16,7 +15,7 @@ use thiserror::Error;
 use zinc_poly::{
     EvaluationError,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::dynamic::over_field::DynamicPolynomialF,
+    univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF},
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
@@ -31,14 +30,9 @@ use crate::ideal_check::utils::{project_scalars, project_trace_matrix};
 pub type Result<T, R, I> = std::result::Result<T, IdealCheckError<R, I>>;
 
 /// Ideal-check subprotocol.
-pub struct IdealCheckProtocol<
-    IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>,
-    const DEGREE_PLUS_ONE: usize,
->(PhantomData<IcTypes>);
+pub struct IdealCheckProtocol<F: IdealCheckField, const DEGREE_PLUS_ONE: usize>(PhantomData<F>);
 
-impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
-    IdealCheckProtocol<IcTypes, DEGREE_PLUS_ONE>
-{
+impl<F: IdealCheckField, const DEGREE_PLUS_ONE: usize> IdealCheckProtocol<F, DEGREE_PLUS_ONE> {
     /// The prover part of the ideal-check subprotocol.
     ///
     /// The prover samples a random field element
@@ -58,38 +52,33 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
     #[allow(clippy::type_complexity)]
     pub fn prove_as_subprotocol<U>(
         transcript: &mut impl Transcript,
-        trace: &[DenseMultilinearExtension<IcTypes::Witness>],
+        trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
         num_constraints: usize,
         num_vars: usize,
-        field_cfg: &<IcTypes::F as PrimeField>::Config,
+        field_cfg: &F::Config,
     ) -> Result<
-        (
-            Proof<IcTypes, DEGREE_PLUS_ONE>,
-            ProverState<IcTypes, DEGREE_PLUS_ONE>,
-        ),
-        IcTypes::Witness,
+        (Proof<F, DEGREE_PLUS_ONE>, ProverState<F, DEGREE_PLUS_ONE>),
+        BinaryPoly<DEGREE_PLUS_ONE>,
         U::Ideal,
     >
     where
-        U: Uair<IcTypes::Witness>,
-        <IcTypes::F as Field>::Inner: ConstTranscribable,
+        U: Uair<BinaryPoly<DEGREE_PLUS_ONE>>,
     {
         let projecting_element = transcript.get_field_challenge(field_cfg);
 
         // Project UAIR scalars prior to doing anything.
-        let projected_scalars = project_scalars::<IcTypes, U, DEGREE_PLUS_ONE>(&projecting_element);
+        let projected_scalars = project_scalars::<F, U, DEGREE_PLUS_ONE>(&projecting_element);
 
-        let trace_matrix =
-            project_trace_matrix::<IcTypes, DEGREE_PLUS_ONE>(trace, &projecting_element);
+        let trace_matrix = project_trace_matrix::<F, DEGREE_PLUS_ONE>(trace, &projecting_element);
 
-        let combined_mles = combined_poly_builder::compute_combined_polynomials::<IcTypes, U, _>(
+        let combined_mles = combined_poly_builder::compute_combined_polynomials::<F, U, _>(
             &trace_matrix,
             &projected_scalars,
             num_constraints,
             field_cfg,
         );
 
-        let mut transcription_buf: Vec<u8> = vec![0; <IcTypes::F as Field>::Inner::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
@@ -150,30 +139,26 @@ impl<IcTypes: IdealCheckTypes<DEGREE_PLUS_ONE>, const DEGREE_PLUS_ONE: usize>
     #[allow(clippy::type_complexity)]
     pub fn verify_as_subprotocol<U, IdealOverF, IdealOverFFromRef>(
         transcript: &mut impl Transcript,
-        proof: Proof<IcTypes, DEGREE_PLUS_ONE>,
+        proof: Proof<F, DEGREE_PLUS_ONE>,
         num_constraints: usize,
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
-        field_cfg: &<IcTypes::F as PrimeField>::Config,
-    ) -> Result<
-        VerifierSubClaim<IcTypes::Witness, IcTypes::F>,
-        DynamicPolynomialF<IcTypes::F>,
-        IdealOverF,
-    >
+        field_cfg: &F::Config,
+    ) -> Result<VerifierSubClaim<BinaryPoly<DEGREE_PLUS_ONE>, F>, DynamicPolynomialF<F>, IdealOverF>
     where
-        U: Uair<IcTypes::Witness>,
-        <IcTypes::F as Field>::Inner: ConstTranscribable,
-        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<IcTypes::F>>,
+        U: Uair<BinaryPoly<DEGREE_PLUS_ONE>>,
+        F::Inner: ConstTranscribable,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
         // Sample a field element to maintain FS symmetry with
         // the prover.
-        let projecting_element: IcTypes::F = transcript.get_field_challenge(field_cfg);
+        let projecting_element: F = transcript.get_field_challenge(field_cfg);
 
         // Project scalars for later use.
-        let projected_scalars = project_scalars::<IcTypes, U, DEGREE_PLUS_ONE>(&projecting_element);
+        let projected_scalars = project_scalars::<F, U, DEGREE_PLUS_ONE>(&projecting_element);
 
-        let mut transcription_buf: Vec<u8> = vec![0; <IcTypes::F as Field>::Inner::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
         let combined_mle_values = proof.combined_mle_values;
 
@@ -212,23 +197,17 @@ pub enum IdealCheckError<R, I> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
-    use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
-
+    use crate::test_utils::{TestIcField, run_ideal_check_prover, test_config};
     use rand::rng;
-    use zinc_poly::univariate::{
-        dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF, ideal::DegreeOneIdeal,
-    };
-    use zinc_test_uair::{GenerateWitness, TestAirNoMultiplication, TestUairSimpleMultiplication};
+    use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
+    use zinc_test_uair::{GenerateWitness, TestAirBinary, TestUairSimpleMultiplication};
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::{
         constraint_counter::count_constraints,
         ideal::{Ideal, IdealCheck},
     };
-
-    use crate::test_utils::{LIMBS, TestIcTypes, run_ideal_check_prover, test_config};
-
-    use super::*;
 
     fn test_successful_verification_generic<
         U,
@@ -239,8 +218,8 @@ mod tests {
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
-        U: GenerateWitness<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
-        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
+        U: GenerateWitness<BinaryPoly<DEGREE_PLUS_ONE>>,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<TestIcField>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
         let mut rng = rng();
@@ -252,11 +231,10 @@ mod tests {
             &mut transcript.clone(),
         );
 
-        let num_constraints =
-            count_constraints::<<TestIcTypes as IdealCheckTypes<_>>::Witness, U>();
+        let num_constraints = count_constraints::<BinaryPoly<DEGREE_PLUS_ONE>, U>();
 
         let verifier_result =
-            IdealCheckProtocol::<TestIcTypes, _>::verify_as_subprotocol::<U, _, _>(
+            IdealCheckProtocol::<TestIcField, _>::verify_as_subprotocol::<U, _, _>(
                 &mut transcript.clone(),
                 proof,
                 num_constraints,
@@ -274,17 +252,15 @@ mod tests {
 
     #[test]
     fn test_successful_verification() {
-        let field_cfg = test_config();
-
         let num_vars = 2;
 
-        test_successful_verification_generic::<TestAirNoMultiplication, _, _, 32>(
+        test_successful_verification_generic::<TestAirBinary, _, _, 32>(
             num_vars,
-            |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
+            |_ideal_over_ring| IdealOrZero::Zero,
         );
         test_successful_verification_generic::<TestUairSimpleMultiplication, _, _, 32>(
             num_vars,
-            |_ideal_over_ring| IdealOrZero::zero(),
+            |_ideal_over_ring| IdealOrZero::Zero,
         );
     }
 }
