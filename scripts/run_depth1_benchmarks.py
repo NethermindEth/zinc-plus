@@ -34,8 +34,8 @@ FEATURES = "asm parallel simd unchecked-butterfly"
 
 # Each entry: (bench_name, filter_pattern)
 BENCHMARKS = [
-    ("zip_plus_commit_32_f12289", "IPRS-1-1/4-F12289"),
-    #("zip_plus_commit_10_f12289", "IPRS-1-1/4-F12289"),
+    #("zip_plus_commit_32_f12289", "IPRS-1-1/4-F12289"),
+    ("zip_plus_commit_5_f12289", "IPRS-1-1/4-F12289"),
     #("zip_plus_commit_10_f12289", "IPRS-1-1/2-F12289"),
     # ("zip_plus_commit_10_f12289", "IPRS-1-1/4-F12289-Q105"),
     #("zip_plus_commit_55_f12289", "IPRS-1-1/4-F12289"),
