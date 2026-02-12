@@ -25,9 +25,9 @@ pub fn project_trace_coeffs<F, PolyCoeff, Int, const DEGREE_PLUS_ONE: usize>(
     field_cfg: &F::Config,
 ) -> Vec<DenseMultilinearExtension<DynamicPolynomialF<F>>>
 where
-    F: FromWithConfig<PolyCoeff> + FromWithConfig<Int>,
-    PolyCoeff: Clone,
-    Int: Clone,
+    F: FromWithConfig<PolyCoeff> + FromWithConfig<Int> + Send + Sync,
+    PolyCoeff: Clone + Send + Sync,
+    Int: Clone + Send + Sync,
 {
     let zero = F::zero_with_cfg(field_cfg);
     let one = F::one_with_cfg(field_cfg);

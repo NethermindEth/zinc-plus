@@ -4,7 +4,7 @@ mod combined_poly_builder;
 mod structs;
 
 use batched_ideal_check::*;
-use crypto_primitives::{Field, PrimeField};
+use crypto_primitives::PrimeField;
 use derive_more::From;
 use itertools::Itertools;
 #[cfg(feature = "parallel")]
@@ -211,7 +211,7 @@ mod tests {
         let mut rng = rng();
         let transcript = KeccakTranscript::new();
 
-        let (proof, prover_state, _, _) = run_ideal_check_prover_single_type::<U, DEGREE_PLUS_ONE>(
+        let (proof, prover_state, ..) = run_ideal_check_prover_single_type::<U, DEGREE_PLUS_ONE>(
             num_vars,
             &U::generate_witness(num_vars, &mut rng),
             &mut transcript.clone(),

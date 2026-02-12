@@ -1,7 +1,5 @@
 use std::{cell::RefCell, collections::HashSet};
 
-use crypto_primitives::Semiring;
-
 use crate::{
     TraceRow, Uair, do_nothing_builder::DoNothingBuilder, dummy_semiring::DummySemiring,
     ideal::ImpossibleIdeal,

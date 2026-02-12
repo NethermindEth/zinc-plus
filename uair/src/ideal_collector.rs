@@ -1,4 +1,3 @@
-use crypto_primitives::Semiring;
 use zinc_utils::from_ref::FromRef;
 
 use crate::{

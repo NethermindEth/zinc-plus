@@ -1,5 +1,4 @@
 use crypto_primitives::PrimeField;
-use zinc_poly::mle::DenseMultilinearExtension;
 
 use crate::{combined_poly_resolver::CombinedPolyResolverError, sumcheck::SumcheckProof};
 

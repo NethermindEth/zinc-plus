@@ -1,7 +1,6 @@
 use crate::{
     ConstraintBuilder, TraceRow, Uair, dummy_semiring::DummySemiring, ideal::ImpossibleIdeal,
 };
-use crypto_primitives::Semiring;
 
 /// Get the number of polynomial constraints in a `Uair`.
 pub fn count_constraints<U: Uair>() -> usize {

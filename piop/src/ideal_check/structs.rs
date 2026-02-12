@@ -1,11 +1,6 @@
-use crypto_primitives::{Field, FromWithConfig, PrimeField, Semiring};
-use std::collections::HashMap;
+use crypto_primitives::PrimeField;
 use zinc_poly::{
     mle::DenseMultilinearExtension, univariate::dynamic::over_field::DynamicPolynomialF,
-};
-use zinc_transcript::traits::ConstTranscribable;
-use zinc_utils::{
-    inner_transparent_field::InnerTransparentField, projectable_to_field::ProjectableToField,
 };
 
 #[derive(Clone, Debug)]
