@@ -37,10 +37,3 @@ pub enum EvaluationError {
     #[error("Empty polynomials are not allowed to be evaluate")]
     EmptyPolynomial,
 }
-
-pub trait CoefficientProjectable<C, const DEGREE_PLUS_ONE: usize>: Polynomial<C> {
-    fn project_coefficients<F: FromWithConfig<C> + 'static>(
-        &self,
-        projecting_element: &F,
-    ) -> DensePolynomial<F, DEGREE_PLUS_ONE>;
-}
