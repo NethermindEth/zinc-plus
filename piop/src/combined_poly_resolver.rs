@@ -3,7 +3,7 @@
 mod folder;
 mod structs;
 
-use crypto_primitives::{FromPrimitiveWithConfig, PrimeField, Semiring};
+use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use itertools::Itertools;
 use num_traits::Zero;
 #[cfg(feature = "parallel")]
@@ -208,7 +208,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// - `ic_check_subclaim`: The subclaim left after the ideal check
     ///   subprotocol. The subclaim is resolved by this protocol.
     /// - `field_cfg`: The random field config.
-    #[allow(clippy::arithmetic_side_effects)]
+    #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
     pub fn verify_as_subprotocol<U>(
         transcript: &mut impl Transcript,
         proof: Proof<F>,

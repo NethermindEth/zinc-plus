@@ -26,11 +26,9 @@ pub fn test_config() -> MontyParams<LIMBS> {
     MontyParams::new(modulus)
 }
 
-type WitnessCoeff = Int<5>;
-type Witness = DensePolynomial<Int<5>, 32>;
-
 type F = MontyField<4>;
 
+#[allow(clippy::type_complexity)]
 pub fn run_ideal_check_prover_single_type<U, const DEGREE_PLUS_ONE: usize>(
     num_vars: usize,
     trace: &[DenseMultilinearExtension<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>],

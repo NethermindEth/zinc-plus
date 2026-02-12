@@ -1,4 +1,3 @@
-use crypto_primitives::Semiring;
 use rand::RngCore;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_uair::Uair;

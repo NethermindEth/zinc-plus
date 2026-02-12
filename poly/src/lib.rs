@@ -5,7 +5,6 @@ pub mod zero_degree;
 
 use thiserror::Error;
 
-
 /// Polynomial with coefficients of type `C` and degree bounded by
 /// `DEGREE_BOUND`.
 pub trait Polynomial<C>: Clone {
