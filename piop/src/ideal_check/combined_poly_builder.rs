@@ -1,17 +1,15 @@
-use crypto_primitives::{Field, PrimeField};
-use std::collections::HashMap;
-
 use crate::ideal_check::IdealCheckField;
-use crypto_primitives::{DenseRowMatrix, PrimeField};
+use crypto_primitives::PrimeField;
 use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use std::collections::HashMap;
 use zinc_poly::{
     mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero},
     univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF},
 };
 use zinc_uair::{ConstraintBuilder, Uair, ideal::ImpossibleIdeal};
-use zinc_utils::{cfg_chunks_mut, cfg_into_iter, cfg_iter, from_ref::FromRef};
+use zinc_utils::{cfg_into_iter, from_ref::FromRef};
 
 /// Given a UAIR `U` and a trace `trace` this function
 /// obtains the combined polynomials' MLE coefficients.
@@ -19,22 +17,19 @@ use zinc_utils::{cfg_chunks_mut, cfg_into_iter, cfg_iter, from_ref::FromRef};
 /// we split the resulting MLE into coefficient MLEs.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn compute_combined_polynomials<F: IdealCheckField, U, const DEGREE_PLUS_ONE: usize>(
-    trace_matrix: &[DenseMultilinearExtension<
-        DynamicPolynomialF<<IcTypes as IdealCheckTypes<DEGREE_PLUS_ONE>>::F>,
-    >],
-    projecting_element: &F,
+    trace_matrix: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
     projected_scalars: &HashMap<BinaryPoly<DEGREE_PLUS_ONE>, DynamicPolynomialF<F>>,
     num_constraints: usize,
-    field_cfg: &<IcTypes::F as PrimeField>::Config,
+    field_cfg: &F::Config,
 ) -> Vec<Vec<DenseMultilinearExtension<F::Inner>>>
 where
     U: Uair<BinaryPoly<DEGREE_PLUS_ONE>>,
 {
-    let field_zero = IcTypes::F::zero_with_cfg(field_cfg);
+    let field_zero = F::zero_with_cfg(field_cfg);
 
     let num_rows = trace_matrix[0].len();
 
-    let mut max_degrees_and_combined_poly_rows: Vec<(usize, Vec<DynamicPolynomialF<IcTypes::F>>)> =
+    let mut max_degrees_and_combined_poly_rows: Vec<(usize, Vec<DynamicPolynomialF<F>>)> =
         cfg_into_iter!(0..num_rows - 1)
             .map(|row_idx| {
                 let up = trace_matrix
@@ -47,7 +42,7 @@ where
                     .map(|column| column[row_idx + 1].clone())
                     .collect_vec();
 
-                combine_rows_and_get_max_degree::<IcTypes, U, _>(
+                combine_rows_and_get_max_degree::<F, U, _>(
                     &up,
                     &down,
                     num_constraints,

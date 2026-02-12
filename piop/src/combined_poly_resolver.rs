@@ -385,10 +385,16 @@ impl<F: PrimeField> From<SumCheckError<F>> for CombinedPolyResolverError<F> {
 
 #[cfg(test)]
 mod tests {
-    use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
+    use super::*;
+
+    use crate::{
+        ideal_check::IdealCheckProtocol,
+        test_utils::{LIMBS, TestIcField, run_ideal_check_prover, test_config},
+    };
+    use crypto_primitives::crypto_bigint_monty::MontyField;
     use rand::rng;
-    use zinc_poly::univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal};
-    use zinc_test_uair::{GenerateWitness, TestAirNoMultiplication, TestUairSimpleMultiplication};
+    use zinc_poly::univariate::binary::BinaryPoly;
+    use zinc_test_uair::{GenerateWitness, TestAirBinary, TestUairSimpleMultiplication};
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::{
         constraint_counter::count_constraints,
@@ -396,13 +402,6 @@ mod tests {
         ideal::{Ideal, IdealCheck},
         ideal_collector::IdealOrZero,
     };
-
-    use crate::{
-        ideal_check::{IdealCheckProtocol, IdealCheckTypes},
-        test_utils::{LIMBS, TestIcTypes, run_ideal_check_prover, test_config},
-    };
-
-    use super::*;
 
     fn test_successful_verification_generic<
         U,
@@ -413,7 +412,7 @@ mod tests {
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
-        U: GenerateWitness<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
+        U: GenerateWitness<BinaryPoly<DEGREE_PLUS_ONE>>,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
@@ -427,11 +426,10 @@ mod tests {
         let (ic_proof, ic_prover_state) =
             run_ideal_check_prover::<U, DEGREE_PLUS_ONE>(num_vars, &trace, &mut prover_transcript);
 
-        let num_constraints =
-            count_constraints::<<TestIcTypes as IdealCheckTypes<_>>::Witness, U>();
+        let num_constraints = count_constraints::<BinaryPoly<DEGREE_PLUS_ONE>, U>();
 
         let ic_check_subclaim =
-            IdealCheckProtocol::<TestIcTypes, _>::verify_as_subprotocol::<U, _, _>(
+            IdealCheckProtocol::<TestIcField, _>::verify_as_subprotocol::<U, _, _>(
                 &mut verifier_transcript,
                 ic_proof,
                 num_constraints,
@@ -471,17 +469,15 @@ mod tests {
 
     #[test]
     fn test_successful_verification() {
-        let field_cfg = test_config();
-
         let num_vars = 2;
 
-        test_successful_verification_generic::<TestAirNoMultiplication, _, _, 32>(
+        test_successful_verification_generic::<TestAirBinary, _, _, 32>(
             num_vars,
-            |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
+            |_ideal_over_ring| IdealOrZero::Zero,
         );
         test_successful_verification_generic::<TestUairSimpleMultiplication, _, _, 32>(
             num_vars,
-            |_ideal_over_ring| IdealOrZero::zero(),
+            |_ideal_over_ring| IdealOrZero::Zero,
         );
     }
 }

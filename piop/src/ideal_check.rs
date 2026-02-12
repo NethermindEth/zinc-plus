@@ -63,17 +63,15 @@ impl<F: IdealCheckField, const DEGREE_PLUS_ONE: usize> IdealCheckProtocol<F, DEG
     >
     where
         U: Uair<BinaryPoly<DEGREE_PLUS_ONE>>,
-        F::Inner: ConstTranscribable,
     {
         let projecting_element = transcript.get_field_challenge(field_cfg);
 
         // Project UAIR scalars prior to doing anything.
-        let projected_scalars = project_scalars::<IcTypes, U, DEGREE_PLUS_ONE>(&projecting_element);
+        let projected_scalars = project_scalars::<F, U, DEGREE_PLUS_ONE>(&projecting_element);
 
-        let trace_matrix =
-            project_trace_matrix::<IcTypes, DEGREE_PLUS_ONE>(trace, &projecting_element);
+        let trace_matrix = project_trace_matrix::<F, DEGREE_PLUS_ONE>(trace, &projecting_element);
 
-        let combined_mles = combined_poly_builder::compute_combined_polynomials::<IcTypes, U, _>(
+        let combined_mles = combined_poly_builder::compute_combined_polynomials::<F, U, _>(
             &trace_matrix,
             &projected_scalars,
             num_constraints,
@@ -145,12 +143,8 @@ impl<F: IdealCheckField, const DEGREE_PLUS_ONE: usize> IdealCheckProtocol<F, DEG
         num_constraints: usize,
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
-        field_cfg: &<IcTypes::F as PrimeField>::Config,
-    ) -> Result<
-        VerifierSubClaim<IcTypes::Witness, IcTypes::F>,
-        DynamicPolynomialF<IcTypes::F>,
-        IdealOverF,
-    >
+        field_cfg: &F::Config,
+    ) -> Result<VerifierSubClaim<BinaryPoly<DEGREE_PLUS_ONE>, F>, DynamicPolynomialF<F>, IdealOverF>
     where
         U: Uair<BinaryPoly<DEGREE_PLUS_ONE>>,
         F::Inner: ConstTranscribable,
@@ -159,10 +153,10 @@ impl<F: IdealCheckField, const DEGREE_PLUS_ONE: usize> IdealCheckProtocol<F, DEG
     {
         // Sample a field element to maintain FS symmetry with
         // the prover.
-        let projecting_element: IcTypes::F = transcript.get_field_challenge(field_cfg);
+        let projecting_element: F = transcript.get_field_challenge(field_cfg);
 
         // Project scalars for later use.
-        let projected_scalars = project_scalars::<IcTypes, U, DEGREE_PLUS_ONE>(&projecting_element);
+        let projected_scalars = project_scalars::<F, U, DEGREE_PLUS_ONE>(&projecting_element);
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
@@ -203,7 +197,9 @@ pub enum IdealCheckError<R, I> {
 
 #[cfg(test)]
 mod tests {
-    use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
+    use super::*;
+
+    use crate::test_utils::{TestIcField, run_ideal_check_prover, test_config};
     use rand::rng;
     use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
     use zinc_test_uair::{GenerateWitness, TestAirBinary, TestUairSimpleMultiplication};
@@ -212,10 +208,6 @@ mod tests {
         constraint_counter::count_constraints,
         ideal::{Ideal, IdealCheck},
     };
-
-    use crate::test_utils::{LIMBS, TestIcTypes, run_ideal_check_prover, test_config};
-
-    use super::*;
 
     fn test_successful_verification_generic<
         U,

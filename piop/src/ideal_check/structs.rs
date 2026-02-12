@@ -1,6 +1,7 @@
-use crypto_primitives::{PrimeField, Semiring};
+use crypto_primitives::{
+    ConstIntSemiring, Field, FromWithConfig, PrimeField, Semiring, boolean::Boolean,
+};
 use std::collections::HashMap;
-use crypto_primitives::{ConstIntSemiring, Field, FromWithConfig, boolean::Boolean};
 use zinc_poly::{
     mle::DenseMultilinearExtension,
     univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF},
