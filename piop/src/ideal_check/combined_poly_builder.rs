@@ -9,7 +9,7 @@ use zinc_poly::{
     mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero},
     univariate::dynamic::over_field::DynamicPolynomialF,
 };
-use zinc_uair::{ConstraintBuilder, Uair, ideal::ImpossibleIdeal};
+use zinc_uair::{ConstraintBuilder, TraceRow, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::{cfg_into_iter, from_ref::FromRef};
 
 /// Given a UAIR `U` and a trace `trace` this function
@@ -103,8 +103,8 @@ where
 
     U::constrain_general(
         &mut constraint_builder,
-        up,
-        down,
+        TraceRow::from_slice_with_signature(up, &U::signature()),
+        TraceRow::from_slice_with_signature(down, &U::signature()),
         &project,
         |x, y| Some(project(y) * x),
         ImpossibleIdeal::from_ref,
