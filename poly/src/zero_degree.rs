@@ -1,5 +1,5 @@
 use super::{ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError};
-use crate::{Polynomial, univariate::dense::DensePolynomial};
+use crate::Polynomial;
 use crypto_primitives::crypto_bigint_int::Int;
 use zinc_transcript::traits::ConstTranscribable;
 
