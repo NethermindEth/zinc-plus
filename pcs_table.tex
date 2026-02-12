@@ -1,0 +1,16 @@
+\begin{table}[ht]
+\centering
+\caption{PCS pipeline benchmark for BPoly\textlangle 31\textrangle{} with IPRS rate 1/4 (parallel+asm+simd).}
+\label{tab:pcs-pipeline-suite}
+\begin{tabular}{r r r l r r r}
+\toprule
+\textbf{Row len} & $\boldsymbol{2^k}$ & $\boldsymbol{2^P}$ & \textbf{Field} & \textbf{Commit} & \textbf{Test} & \textbf{Verify} \\
+\midrule
+     16 & $2^{4}$ & $2^{8}$ & $\mathbb{F}_{3329}$ & 290.2\,\textmu s & 151.4\,\textmu s & 2.62\,ms \\
+     16 & $2^{4}$ & $2^{9}$ & $\mathbb{F}_{3329}$ & 429.0\,\textmu s & 191.8\,\textmu s & 3.38\,ms \\
+     32 & $2^{5}$ & $2^{10}$ & $\mathbb{F}_{3329}$ & 753.9\,\textmu s & 231.1\,\textmu s & 3.63\,ms \\
+     32 & $2^{5}$ & $2^{11}$ & $\mathbb{F}_{3329}$ & 1.26\,ms & 299.4\,\textmu s & 5.48\,ms \\
+     64 & $2^{6}$ & $2^{12}$ & $\mathbb{F}_{3329}$ & 2.51\,ms & 291.4\,\textmu s & 7.34\,ms \\
+\bottomrule
+\end{tabular}
+\end{table}

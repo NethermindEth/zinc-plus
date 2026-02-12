@@ -85,8 +85,8 @@ def fmt_size(bits: int) -> str:
 
 
 COMPONENTS = [
-    {"label": "A", "n_pol": 10, "flat_vec_norm": 133, "degree": 32},
-    {"label": "B", "n_pol": 5,  "flat_vec_norm": 150, "degree": 1},
+    {"label": "A", "n_pol": 0, "flat_vec_norm": 133, "degree": 32},
+    {"label": "B", "n_pol": 24,  "flat_vec_norm": 150, "degree": 1},
 ]
 
 QUERY_COUNTS = [96,142] #[96, 100, 142, 148, 192, 200, 232, 240] # 96 and 142 correspond to 96 bits of security like Binius

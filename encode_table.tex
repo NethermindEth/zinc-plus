@@ -1,0 +1,28 @@
+\begin{table}[ht]
+\centering
+\caption{EncodeMessage benchmark (batch\,=\,1, rate\,$1/2$, parallel+asm+simd).}
+\label{tab:encode-message-suite}
+\begin{tabular}{r r l r r}
+\toprule
+\textbf{Row len} & $\boldsymbol{2^k}$ & \textbf{Field} & \textbf{i32} & \textbf{BPoly\textlangle 31\textrangle} \\
+\midrule
+     64 & $2^{6}$ & $\mathbb{F}_{3329}$ & 26.2\,\textmu s & 33.11\,ms \\
+    128 & $2^{7}$ & $\mathbb{F}_{3329}$ & 31.3\,\textmu s & 90.3\,\textmu s \\
+\midrule
+    256 & $2^{8}$ & $\mathbb{F}_{65537}$ & 36.6\,\textmu s & 181.0\,\textmu s \\
+    512 & $2^{9}$ & $\mathbb{F}_{65537}$ & 40.6\,\textmu s & 370.1\,\textmu s \\
+   1024 & $2^{10}$ & $\mathbb{F}_{65537}$ & 85.3\,\textmu s & 573.4\,\textmu s \\
+   2048 & $2^{11}$ & $\mathbb{F}_{65537}$ & 113.0\,\textmu s & 1.13\,ms \\
+   4096 & $2^{12}$ & $\mathbb{F}_{65537}$ & 210.0\,\textmu s & 2.63\,ms \\
+   8192 & $2^{13}$ & $\mathbb{F}_{65537}$ & 350.9\,\textmu s & 4.04\,ms \\
+  16384 & $2^{14}$ & $\mathbb{F}_{65537}$ & 545.0\,\textmu s & 8.80\,ms \\
+  32768 & $2^{15}$ & $\mathbb{F}_{65537}$ & 1.32\,ms & 20.79\,ms \\
+\midrule
+  65536 & $2^{16}$ & $\mathbb{F}_{1179649}$ & 2.06\,ms & --- \\
+\midrule
+ 131072 & $2^{17}$ & $\mathbb{F}_{167772161}$ & 5.31\,ms & 73.67\,ms \\
+ 262144 & $2^{18}$ & $\mathbb{F}_{167772161}$ & 14.89\,ms & 184.54\,ms \\
+ 524288 & $2^{19}$ & $\mathbb{F}_{167772161}$ & 17.54\,ms & 350.12\,ms \\
+\bottomrule
+\end{tabular}
+\end{table}

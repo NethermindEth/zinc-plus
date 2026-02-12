@@ -36,13 +36,14 @@ FEATURES = "asm parallel simd unchecked-butterfly"
 BENCHMARKS = [
     ("zip_plus_commit_10_f12289", "IPRS-1-1/4-F12289"),
     #("zip_plus_commit_10_f12289", "IPRS-1-1/2-F12289"),
-    ("zip_plus_commit_10_f12289", "IPRS-1-1/4-F12289-Q105"),
+    # ("zip_plus_commit_10_f12289", "IPRS-1-1/4-F12289-Q105"),
     #("zip_plus_commit_55_f12289", "IPRS-1-1/4-F12289"),
-    ("zip_plus_commit_55_f12289", "IPRS-1-1/2-F12289"),
+    # ("zip_plus_commit_55_f12289", "IPRS-1-1/2-F12289"),
     #("zip_plus_commit_55_f12289", "IPRS-1-1/4-F12289-Q105"),
-    ("zip_plus_commit_82_f12289", "IPRS-1-1/4-F12289"),
+    # ("zip_plus_commit_82_f12289", "IPRS-1-1/4-F12289"),
     #("zip_plus_commit_82_f12289", "IPRS-1-1/2-F12289"),    
-    ("zip_plus_commit_82_f12289", "IPRS-1-1/4-F12289-Q105"),]
+    # ("zip_plus_commit_82_f12289", "IPRS-1-1/4-F12289-Q105"),
+    ]
 
 # Operations benchmarked in each bench binary
 OPERATIONS = ["Commit", "Test", "Evaluate", "Verify", "VerifyEncode", "VerifyQueryCheck"]
