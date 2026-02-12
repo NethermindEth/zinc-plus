@@ -47,7 +47,7 @@ pub struct UairSignature {
 }
 
 impl UairSignature {
-    /// Maximum number of columns accross the three types.
+    /// Maximum number of columns across the three types.
     pub const fn max_cols(&self) -> usize {
         // TODO(Ilia): is there a const max?
         if self.binary_poly_cols < self.arbitrary_poly_cols {
@@ -63,7 +63,7 @@ impl UairSignature {
         }
     }
 
-    /// The sum of the numbers of columns accross
+    /// The sum of the numbers of columns across
     /// all types.
     #[allow(clippy::arithmetic_side_effects)] // we don't have that many columns
     pub const fn total_cols(&self) -> usize {
