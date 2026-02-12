@@ -11,7 +11,7 @@ use zinc_poly::{
     },
 };
 use zinc_uair::{Uair, collect_scalars::collect_scalars};
-use zinc_utils::{cfg_extend, cfg_iter};
+use zinc_utils::{cfg_extend, cfg_iter, projectable_to_field::ProjectableToField};
 
 #[allow(clippy::arithmetic_side_effects)]
 pub fn project_trace_coeffs<F, PolyCoeff, Int, const DEGREE_PLUS_ONE: usize>(
@@ -69,6 +69,22 @@ where
     result
 }
 
+pub fn project_trace_to_field<F: PrimeField, const DEGREE_PLUS_ONE: usize>(
+    binary_poly_trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
+    arbitrary_poly_trace: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
+    int_trace: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
+    projecting_element: &F
+) -> Vec<DenseMultilinearExtension<F::Inner>> {
+    let binary_poly_projection = BinaryPoly::<DEGREE_PLUS_ONE>::prepare_projection(projecting_element);
+
+    let mut result =
+        Vec::with_capacity(binary_poly_trace.len() + arbitrary_poly_trace.len() + int_trace.len());
+
+    cfg_iter!(binary_poly_trace).map(|column| {
+
+    })
+}
+
 pub fn project_scalars<F: PrimeField, U: Uair>(
     project: impl Fn(&U::Scalar) -> DynamicPolynomialF<F>,
 ) -> HashMap<U::Scalar, DynamicPolynomialF<F>> {
@@ -90,7 +106,7 @@ pub fn project_scalars<F: PrimeField, U: Uair>(
         .collect()
 }
 
-pub(crate) fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
+pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
     scalars: HashMap<R, DynamicPolynomialF<F>>,
     projecting_element: &F,
 ) -> Result<HashMap<R, F>, (R, F, EvaluationError)> {

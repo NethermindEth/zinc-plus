@@ -13,7 +13,9 @@ use zinc_poly::univariate::{
     dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF, ideal::DegreeOneIdeal,
 };
 use zinc_primality::{MillerRabin, PrimalityTest};
-use zinc_test_uair::{GenerateWitness, TestAirNoMultiplication, TestUairSimpleMultiplication};
+use zinc_test_uair::{
+    GenerateSingleTypeWitness, TestAirNoMultiplication, TestUairSimpleMultiplication,
+};
 use zinc_transcript::{
     KeccakTranscript,
     traits::{ConstTranscribable, Transcript},
@@ -55,7 +57,7 @@ where
     <IcTypes::F as Field>::Inner:
         ConstIntSemiring + FromRef<<IcTypes::F as Field>::Inner> + ConstTranscribable,
     TestAirNoMultiplication: Uair<IcTypes::Witness, Ideal = DegreeOneIdeal<IcTypes::WitnessCoeff>>
-        + GenerateWitness<IcTypes::Witness>,
+        + GenerateSingleTypeWitness<IcTypes::Witness>,
     MillerRabin: PrimalityTest<<IcTypes::F as Field>::Inner>,
 {
     let mut rng = rng();
@@ -148,7 +150,8 @@ where
     IcTypes::F: Field,
     <IcTypes::F as Field>::Inner:
         ConstIntSemiring + FromRef<<IcTypes::F as Field>::Inner> + ConstTranscribable,
-    TestUairSimpleMultiplication: Uair<IcTypes::Witness> + GenerateWitness<IcTypes::Witness>,
+    TestUairSimpleMultiplication:
+        Uair<IcTypes::Witness> + GenerateSingleTypeWitness<IcTypes::Witness>,
     MillerRabin: PrimalityTest<<IcTypes::F as Field>::Inner>,
     IdealOrZero<DegreeOneIdeal<IcTypes::F>>: IdealCheck<DynamicPolynomialF<IcTypes::F>>,
 {

@@ -25,7 +25,7 @@ pub struct TestUairSimpleMultiplication<R>(PhantomData<R>);
 
 impl<R: Semiring + 'static> Uair for TestUairSimpleMultiplication<R> {
     type Ideal = ImpossibleIdeal; // Not used
-    type Scalar = R;
+    type Scalar = DensePolynomial<R, 32>;
 
     fn signature() -> UairSignature {
         UairSignature {
@@ -54,7 +54,7 @@ impl<R: Semiring + 'static> Uair for TestUairSimpleMultiplication<R> {
     }
 }
 
-impl<R> GenerateWitness for TestUairSimpleMultiplication<R>
+impl<R> GenerateSingleTypeWitness for TestUairSimpleMultiplication<R>
 where
     R: FixedSemiring + 'static + FromRef<i8>,
     StandardUniform: Distribution<R>,
@@ -156,7 +156,7 @@ impl<const LIMBS: usize> Uair for TestAirNoMultiplication<LIMBS> {
     }
 }
 
-impl<const LIMBS: usize> GenerateWitness for TestAirNoMultiplication<LIMBS> {
+impl<const LIMBS: usize> GenerateSingleTypeWitness for TestAirNoMultiplication<LIMBS> {
     type Witness = DensePolynomial<Int<LIMBS>, 32>;
 
     fn generate_witness<Rng: rand::RngCore + ?Sized>(
