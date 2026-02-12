@@ -6,23 +6,25 @@ use std::{
 use crypto_primitives::Semiring;
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub};
 
-use crate::{ConstraintBuilder, Uair, ideal::ImpossibleIdeal};
+use crate::{ConstraintBuilder, TraceRow, Uair, ideal::ImpossibleIdeal};
 
 /// Compute the maximum number of multiplicands
 /// in products of witness elements in the UAIR `U`.
-pub fn count_max_degree<R, U>() -> usize
-where
-    R: Semiring + 'static,
-    U: Uair<R>,
-{
+pub fn count_max_degree<U: Uair>() -> usize {
     let mut dc = DegreeCounter::new();
 
-    let up_and_down = vec![DegreeCountingSemiring::var(); U::num_cols()];
+    let up_and_down = vec![DegreeCountingSemiring::var(); U::signature().max_cols()];
+
+    let trace_row = TraceRow {
+        binary_poly: &up_and_down,
+        arbitrary_poly: &up_and_down,
+        int: &up_and_down,
+    };
 
     U::constrain_general(
         &mut dc,
-        &up_and_down,
-        &up_and_down,
+        trace_row,
+        trace_row,
         |_| DegreeCountingSemiring::scalar(),
         |x, _| Some(*x),
         |_| ImpossibleIdeal,

@@ -2,7 +2,7 @@ use crypto_primitives::Semiring;
 use zinc_utils::from_ref::FromRef;
 
 use crate::{
-    ConstraintBuilder, Uair,
+    ConstraintBuilder, TraceRow, Uair,
     dummy_semiring::DummySemiring,
     ideal::{Ideal, IdealCheck},
 };
@@ -27,14 +27,17 @@ impl<I: Ideal> IdealCollector<I> {
 /// Given a `Uair` and a hint of how many constraints
 /// it is going to have, creates an `IdealCollector`
 /// object and collects ideals from the `Uair`.
-pub fn collect_ideals<R: Semiring + 'static, U: Uair<R>>(
-    num_constraints: usize,
-) -> IdealCollector<U::Ideal> {
+pub fn collect_ideals<U: Uair>(num_constraints: usize) -> IdealCollector<U::Ideal> {
     let mut ideal_collector = IdealCollector::new(num_constraints);
 
-    let dummy_up_and_down: Vec<DummySemiring> = vec![DummySemiring; U::num_cols()];
+    let dummy_up_and_down = vec![DummySemiring; U::signature().max_cols()];
 
-    U::constrain(&mut ideal_collector, &dummy_up_and_down, &dummy_up_and_down);
+    let trace_row = TraceRow {
+        binary_poly: &dummy_up_and_down,
+        arbitrary_poly: &dummy_up_and_down,
+        int: &dummy_up_and_down,
+    };
+    U::constrain(&mut ideal_collector, trace_row, trace_row);
 
     ideal_collector
 }

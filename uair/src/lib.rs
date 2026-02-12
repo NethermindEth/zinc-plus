@@ -32,12 +32,47 @@ pub trait ConstraintBuilder {
     fn assert_zero(&mut self, expr: Self::Expr);
 }
 
+pub struct UairSignature {
+    pub binary_poly_cols: usize,
+    pub arbitrary_poly_cols: usize,
+    pub int_cols: usize,
+}
+
+impl UairSignature {
+    pub const fn max_cols(&self) -> usize {
+        // TODO(Ilia): is there const max?
+        if self.binary_poly_cols < self.arbitrary_poly_cols {
+            if self.arbitrary_poly_cols < self.int_cols {
+                self.int_cols
+            } else {
+                self.arbitrary_poly_cols
+            }
+        } else if self.binary_poly_cols < self.int_cols {
+            self.int_cols
+        } else {
+            self.binary_poly_cols
+        }
+    }
+
+    #[allow(clippy::arithmetic_side_effects)] // we don't have that many columns
+    pub const fn total_cols(&self) -> usize {
+        self.binary_poly_cols + self.arbitrary_poly_cols + self.int_cols
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct TraceRow<'a, Expr> {
+    pub binary_poly: &'a [Expr],
+    pub arbitrary_poly: &'a [Expr],
+    pub int: &'a [Expr],
+}
+
 /// The trait that a universal AIR description has to implement.
 /// This must include all the constraint description logic of an UAIR.
 ///
 /// One type might implement different UAIR logics for different underlying
 /// semirings hence the generic type parameter.
-pub trait Uair<R: Semiring + 'static> {
+pub trait Uair {
     /// The ideal type the AIR operates with.
     /// Since a `ConstraintBuilder` is "opaque" for a `Uair`
     /// a `Uair` has to have a means to create ideals
@@ -47,8 +82,10 @@ pub trait Uair<R: Semiring + 'static> {
     /// via the `FromRef` trait.
     type Ideal: Ideal;
 
-    /// Number of witness columns the `Uair` is supposed to have.
-    fn num_cols() -> usize;
+    type Scalar: Semiring;
+
+    /// Signature of the UAIR.
+    fn signature() -> UairSignature;
 
     /// A general method for describing constraints.
     ///
@@ -64,25 +101,25 @@ pub trait Uair<R: Semiring + 'static> {
     ///   convenient to provide a closure instead of a `FromRef` implementation.
     /// - `mbs`: a closure that allows to multiply expressions by `R`. Same
     ///   rationale as for `from_ref`.
-    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+    fn constrain_general<'a, B, FromR, MulByScalar, IFromR>(
         b: &mut B,
-        up: &[B::Expr],
-        down: &[B::Expr],
+        up: TraceRow<'a, B::Expr>,
+        down: TraceRow<'a, B::Expr>,
         from_ref: FromR,
         mbs: MulByScalar,
         ideal_from_ref: IFromR,
     ) where
         B: ConstraintBuilder,
-        FromR: Fn(&R) -> B::Expr,
-        MulByScalar: Fn(&B::Expr, &R) -> Option<B::Expr>,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
         IFromR: Fn(&Self::Ideal) -> B::Ideal;
 
     // Same as `constrain_general` but `from_ref` and `mbs`
     // come from the trait implementations.
-    fn constrain<B>(b: &mut B, up: &[B::Expr], down: &[B::Expr])
+    fn constrain<'a, B>(b: &mut B, up: TraceRow<'a, B::Expr>, down: TraceRow<'a, B::Expr>)
     where
         B: ConstraintBuilder,
-        B::Expr: FromRef<R> + for<'a> MulByScalar<&'a R>,
+        B::Expr: FromRef<Self::Scalar> + for<'b> MulByScalar<&'b Self::Scalar>,
         B::Ideal: FromRef<Self::Ideal>,
     {
         Self::constrain_general(
