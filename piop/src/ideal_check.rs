@@ -2,7 +2,6 @@
 mod batched_ideal_check;
 mod combined_poly_builder;
 mod structs;
-mod utils;
 
 use batched_ideal_check::*;
 use crypto_primitives::{Field, PrimeField};
