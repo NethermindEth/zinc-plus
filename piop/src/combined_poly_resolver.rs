@@ -107,7 +107,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             .collect();
 
         // Shifted trace. Just take the trace, drop the first row
-        // and append 0 to the end.
+        // and append 0 to the end. Note, that the latter happens
+        // thanks to the FromIterator implementation for `DenseMultilinearExtension`
+        // as it always pads to the next power of two.
+        // It might lead to a problem when `num_vars = 1` but that is not going to
+        // happen on real world traces.
         let down: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(up)
             .map(|column| column[1..].iter().cloned().collect())
             .collect();
