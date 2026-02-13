@@ -1,5 +1,8 @@
 use rand::RngCore;
-use zinc_poly::mle::DenseMultilinearExtension;
+use zinc_poly::{
+    mle::DenseMultilinearExtension,
+    univariate::{binary::BinaryPoly, dense::DensePolynomial},
+};
 use zinc_uair::Uair;
 
 /// A trait for UAIRs for generating single-typed witness,
@@ -11,4 +14,19 @@ pub trait GenerateSingleTypeWitness: Uair {
         num_vars: usize,
         rng: &mut Rng,
     ) -> Vec<DenseMultilinearExtension<Self::Witness>>;
+}
+
+pub trait GenerateMultyTypeWitness: Uair {
+    type PolyCoeff;
+    type Int;
+
+    #[allow(clippy::type_complexity)]
+    fn generate_witness<Rng: RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> (
+        Vec<DenseMultilinearExtension<BinaryPoly<32>>>,
+        Vec<DenseMultilinearExtension<DensePolynomial<Self::PolyCoeff, 32>>>,
+        Vec<DenseMultilinearExtension<Self::Int>>,
+    );
 }
