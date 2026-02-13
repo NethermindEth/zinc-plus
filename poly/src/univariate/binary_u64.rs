@@ -12,7 +12,7 @@ use std::{
     hash::Hash,
     iter::{Product, Sum},
     marker::PhantomData,
-    ops::{Add, AddAssign, Deref, Mul, MulAssign, Sub, SubAssign},
+    ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
