@@ -4,11 +4,14 @@ mod generate_witness;
 use std::marker::PhantomData;
 
 use crypto_primitives::{FixedSemiring, Semiring, boolean::Boolean, crypto_bigint_int::Int};
+use num_traits::Zero;
 use rand::{
     Rng,
     distr::{Distribution, StandardUniform},
+    random,
 };
 use zinc_poly::{
+    EvaluatablePolynomial,
     mle::{DenseMultilinearExtension, MultilinearExtensionRand},
     univariate::{
         binary::BinaryPoly, dense::DensePolynomial,
@@ -233,6 +236,166 @@ impl<const LIMBS: usize> Uair for TestAirScalarMultiplications<LIMBS> {
                 ])),
             &ideal_from_ref(&DegreeOneIdeal::new(Int::from(2))),
         );
+    }
+}
+
+pub struct BinaryDecompositionUair;
+
+impl Uair for BinaryDecompositionUair {
+    type Ideal = DegreeOneIdeal<u32>;
+    type Scalar = DensePolynomial<u32, 32>;
+
+    fn signature() -> UairSignature {
+        UairSignature {
+            binary_poly_cols: 1,
+            arbitrary_poly_cols: 0,
+            int_cols: 1,
+        }
+    }
+
+    fn constrain_general<'a, B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<'a, B::Expr>,
+        _down: TraceRow<'a, B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        let int_col = &up.int[0];
+        let binary_poly_col = &up.binary_poly[0];
+
+        b.assert_in_ideal(
+            binary_poly_col.clone() - int_col,
+            &ideal_from_ref(&DegreeOneIdeal::new(2)),
+        );
+    }
+}
+
+impl GenerateMultyTypeWitness for BinaryDecompositionUair {
+    type PolyCoeff = u32;
+    type Int = u32;
+
+    fn generate_witness<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> (
+        Vec<DenseMultilinearExtension<BinaryPoly<32>>>,
+        Vec<DenseMultilinearExtension<DensePolynomial<Self::PolyCoeff, 32>>>,
+        Vec<DenseMultilinearExtension<Self::Int>>,
+    ) {
+        let int_col: DenseMultilinearExtension<u32> =
+            DenseMultilinearExtension::rand(num_vars, rng);
+
+        let binary_poly_col: DenseMultilinearExtension<BinaryPoly<32>> =
+            int_col.iter().map(|i| BinaryPoly::from(*i)).collect();
+
+        (vec![binary_poly_col], vec![], vec![int_col])
+    }
+}
+
+pub struct BigLinearUair;
+
+impl Uair for BigLinearUair {
+    type Ideal = DegreeOneIdeal<u32>;
+    type Scalar = DensePolynomial<u32, 32>;
+
+    fn signature() -> UairSignature {
+        UairSignature {
+            binary_poly_cols: 16,
+            arbitrary_poly_cols: 0,
+            int_cols: 1,
+        }
+    }
+
+    fn constrain_general<'a, B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<'a, B::Expr>,
+        down: TraceRow<'a, B::Expr>,
+        from_ref: FromR,
+        mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        let sum_of_binary_polys = up.binary_poly[1..]
+            .iter()
+            .fold(up.binary_poly[0].clone(), |acc, next| acc + next);
+
+        // up.binary_poly[0] + up.binary_poly[1] + ... up.binary_poly[16]
+        //      = up.int[0] mod (X - 2)
+        b.assert_in_ideal(
+            sum_of_binary_polys - &up.int[0],
+            &ideal_from_ref(&DegreeOneIdeal::new(2)),
+        );
+
+        // down.binary_poly[0] = up.int[0] mod (X - 2)
+        b.assert_in_ideal(
+            down.binary_poly[0].clone() - &up.int[0],
+            &ideal_from_ref(&DegreeOneIdeal::new(2)),
+        );
+
+        // up.binary_poly[i] = down.binary_poly[i], for all i=1,...,16
+        up.binary_poly[1..]
+            .iter()
+            .zip(&down.binary_poly[1..])
+            .for_each(|(up, down)| {
+                b.assert_zero(up.clone() - down);
+            });
+    }
+}
+
+impl GenerateMultyTypeWitness for BigLinearUair {
+    type PolyCoeff = u32;
+    type Int = u32;
+
+    fn generate_witness<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> (
+        Vec<DenseMultilinearExtension<BinaryPoly<32>>>,
+        Vec<DenseMultilinearExtension<DensePolynomial<Self::PolyCoeff, 32>>>,
+        Vec<DenseMultilinearExtension<Self::Int>>,
+    ) {
+        let mut binary_poly_cols: Vec<DenseMultilinearExtension<BinaryPoly<32>>> =
+            vec![(0..(1 << num_vars)).map(|_| BinaryPoly::zero()).collect(); 16];
+        let mut int_col: DenseMultilinearExtension<u32> = (0..(1 << num_vars)).collect();
+
+        binary_poly_cols.iter_mut().for_each(|col| {
+            col[0] = rng.random();
+        });
+
+        for i in 0..(1 << num_vars) - 1 {
+            int_col[i] = binary_poly_cols
+                .iter()
+                .map(|col| col[i].evaluate_at_point(&2u32).expect("should be fine"))
+                .sum();
+
+            binary_poly_cols[0][i + 1] = BinaryPoly::from(int_col[i]);
+            binary_poly_cols[1..].iter_mut().for_each(|col| {
+                col[i + 1] = col[i].clone();
+            });
+        }
+
+        let len = int_col.len();
+
+        int_col[len - 1] = binary_poly_cols
+            .iter()
+            .map(|col| {
+                col[len - 1]
+                    .evaluate_at_point(&2u32)
+                    .expect("should be fine")
+            })
+            .sum();
+
+        (binary_poly_cols, vec![], vec![int_col])
     }
 }
 

@@ -16,7 +16,8 @@ use zinc_piop::{
 use zinc_poly::univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal};
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_test_uair::{
-    GenerateSingleTypeWitness, TestAirNoMultiplication, TestUairSimpleMultiplication,
+    BigLinearUair, BinaryDecompositionUair, GenerateMultyTypeWitness, GenerateSingleTypeWitness,
+    TestAirNoMultiplication, TestUairSimpleMultiplication,
 };
 use zinc_transcript::{
     KeccakTranscript,
@@ -222,6 +223,219 @@ pub fn bench_simple_mult_4(group: &mut BenchmarkGroup<WallTime>, witness_size: u
     bench_simple_mult::<4, 5>(group, witness_size)
 }
 
+#[allow(clippy::arithmetic_side_effects)]
+fn bench_binary_decompoisition<const FIELD_LIMBS: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+    witness_size: usize,
+) where
+    <F<FIELD_LIMBS> as Field>::Inner: ConstIntSemiring + ConstTranscribable,
+    MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Inner>,
+{
+    let mut rng = rng();
+    let num_vars = zinc_utils::log2(witness_size) as usize;
+    let (binary_poly_trace, _, int_trace) =
+        BinaryDecompositionUair::generate_witness(num_vars, &mut rng);
+
+    let params = format!(
+        "BinaryDecomposition/LIMBS={}/nvars={}",
+        FIELD_LIMBS, num_vars
+    );
+
+    let transcript = KeccakTranscript::new();
+
+    let num_constraints = count_constraints::<BinaryDecompositionUair>();
+
+    let prove = |(binary_poly_trace, int_trace, mut transcript): (
+        Vec<_>,
+        Vec<_>,
+        KeccakTranscript,
+    )|
+     -> Proof<F<FIELD_LIMBS>> {
+        let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
+
+        let trace =
+            project_trace_coeffs::<_, u32, u32, _>(&binary_poly_trace, &[], &int_trace, &field_cfg);
+
+        let projected_scalars =
+            project_scalars::<F<FIELD_LIMBS>, BinaryDecompositionUair>(|scalar| {
+                scalar.map_coeffs(|coeff| F::from_with_cfg(coeff, &field_cfg))
+            });
+
+        IdealCheckProtocol::prove_as_subprotocol::<BinaryDecompositionUair>(
+            &mut transcript,
+            &trace,
+            &projected_scalars,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )
+        .expect("Prover failed")
+        .0
+    };
+
+    group.bench_with_input(
+        BenchmarkId::new("Ideal Check Prover", &params),
+        &(
+            binary_poly_trace.clone(),
+            int_trace.clone(),
+            transcript.clone(),
+        ),
+        |bench, (binary_poly_trace, int_trace, transcript)| {
+            bench.iter_batched(
+                || {
+                    (
+                        binary_poly_trace.clone(),
+                        int_trace.clone(),
+                        transcript.clone(),
+                    )
+                },
+                |(binary_poly_trace, int_trace, transcript)| {
+                    let _ = black_box(&prove((binary_poly_trace, int_trace, transcript)));
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
+
+    let proof = prove((binary_poly_trace, int_trace, transcript.clone()));
+
+    group.bench_with_input(
+        BenchmarkId::new("Ideal Check Verifier", &params),
+        &(proof, transcript),
+        |bench, (proof, transcript)| {
+            bench.iter_batched(
+                || (proof.clone(), transcript.clone()),
+                |(proof, mut transcript)| {
+                    let field_cfg =
+                        transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
+                    let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<
+                        BinaryDecompositionUair,
+                        _,
+                        _,
+                    >(
+                        &mut transcript,
+                        proof,
+                        num_constraints,
+                        num_vars,
+                        |ideal_over_ring| {
+                            ideal_over_ring.map(|ideal_over_ring| {
+                                DegreeOneIdeal::from_with_cfg(ideal_over_ring, &field_cfg)
+                            })
+                        },
+                        &field_cfg,
+                    ))
+                    .expect("Failed to verify");
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+    witness_size: usize,
+) where
+    <F<FIELD_LIMBS> as Field>::Inner: ConstIntSemiring + ConstTranscribable,
+    MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Inner>,
+{
+    let mut rng = rng();
+    let num_vars = zinc_utils::log2(witness_size) as usize;
+    let (binary_poly_trace, _, int_trace) = BigLinearUair::generate_witness(num_vars, &mut rng);
+
+    let params = format!("BigLinearUair/LIMBS={}/nvars={}", FIELD_LIMBS, num_vars);
+
+    let transcript = KeccakTranscript::new();
+
+    let num_constraints = count_constraints::<BigLinearUair>();
+
+    let prove = |(binary_poly_trace, int_trace, mut transcript): (
+        Vec<_>,
+        Vec<_>,
+        KeccakTranscript,
+    )|
+     -> Proof<F<FIELD_LIMBS>> {
+        let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
+
+        let trace =
+            project_trace_coeffs::<_, u32, u32, _>(&binary_poly_trace, &[], &int_trace, &field_cfg);
+
+        let projected_scalars = project_scalars::<F<FIELD_LIMBS>, BigLinearUair>(|scalar| {
+            scalar.map_coeffs(|coeff| F::from_with_cfg(coeff, &field_cfg))
+        });
+
+        IdealCheckProtocol::prove_as_subprotocol::<BigLinearUair>(
+            &mut transcript,
+            &trace,
+            &projected_scalars,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )
+        .expect("Prover failed")
+        .0
+    };
+
+    group.bench_with_input(
+        BenchmarkId::new("Ideal Check Prover", &params),
+        &(
+            binary_poly_trace.clone(),
+            int_trace.clone(),
+            transcript.clone(),
+        ),
+        |bench, (binary_poly_trace, int_trace, transcript)| {
+            bench.iter_batched(
+                || {
+                    (
+                        binary_poly_trace.clone(),
+                        int_trace.clone(),
+                        transcript.clone(),
+                    )
+                },
+                |(binary_poly_trace, int_trace, transcript)| {
+                    let _ = black_box(&prove((binary_poly_trace, int_trace, transcript)));
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
+
+    let proof = prove((binary_poly_trace, int_trace, transcript.clone()));
+
+    group.bench_with_input(
+        BenchmarkId::new("Ideal Check Verifier", &params),
+        &(proof, transcript),
+        |bench, (proof, transcript)| {
+            bench.iter_batched(
+                || (proof.clone(), transcript.clone()),
+                |(proof, mut transcript)| {
+                    let field_cfg =
+                        transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
+                    let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<
+                        BigLinearUair,
+                        _,
+                        _,
+                    >(
+                        &mut transcript,
+                        proof,
+                        num_constraints,
+                        num_vars,
+                        |ideal_over_ring| {
+                            ideal_over_ring.map(|ideal_over_ring| {
+                                DegreeOneIdeal::from_with_cfg(ideal_over_ring, &field_cfg)
+                            })
+                        },
+                        &field_cfg,
+                    ))
+                    .expect("Failed to verify");
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
+}
+
 /// Before/after diff for combined_poly_builder (parallel vs sequential):
 ///   1. cargo bench -p zinc-piop --bench ideal_check -- "Ideal Check Prover"
 ///      --save-baseline sequential
@@ -233,19 +447,45 @@ pub fn ideal_check_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Ideal check benchmarks");
     group.plot_config(plot_config);
 
-    bench_no_mult_3(&mut group, 1 << 13);
-    bench_no_mult_4(&mut group, 1 << 13);
-    bench_no_mult_3(&mut group, 1 << 14);
-    bench_no_mult_4(&mut group, 1 << 14);
-    bench_no_mult_3(&mut group, 1 << 15);
-    bench_no_mult_4(&mut group, 1 << 15);
-    bench_no_mult_3(&mut group, 1 << 16);
-    bench_no_mult_4(&mut group, 1 << 16);
-    bench_no_mult_3(&mut group, 1 << 17);
-    bench_no_mult_4(&mut group, 1 << 17);
+    // bench_no_mult_3(&mut group, 1 << 13);
+    // bench_no_mult_4(&mut group, 1 << 13);
+    // bench_no_mult_3(&mut group, 1 << 14);
+    // bench_no_mult_4(&mut group, 1 << 14);
+    // bench_no_mult_3(&mut group, 1 << 15);
+    // bench_no_mult_4(&mut group, 1 << 15);
+    // bench_no_mult_3(&mut group, 1 << 16);
+    // bench_no_mult_4(&mut group, 1 << 16);
+    // bench_no_mult_3(&mut group, 1 << 17);
+    // bench_no_mult_4(&mut group, 1 << 17);
+    //
+    // bench_simple_mult_3(&mut group, 1 << 2);
+    // bench_simple_mult_4(&mut group, 1 << 2);
 
-    bench_simple_mult_3(&mut group, 1 << 2);
-    bench_simple_mult_4(&mut group, 1 << 2);
+    // bench_binary_decompoisition::<3>(&mut group, 1 << 12);
+    // bench_binary_decompoisition::<4>(&mut group, 1 << 12);
+    // bench_binary_decompoisition::<3>(&mut group, 1 << 13);
+    // bench_binary_decompoisition::<4>(&mut group, 1 << 13);
+    // bench_binary_decompoisition::<3>(&mut group, 1 << 14);
+    // bench_binary_decompoisition::<4>(&mut group, 1 << 14);
+    // bench_binary_decompoisition::<3>(&mut group, 1 << 15);
+    // bench_binary_decompoisition::<4>(&mut group, 1 << 15);
+    // bench_binary_decompoisition::<3>(&mut group, 1 << 16);
+    // bench_binary_decompoisition::<4>(&mut group, 1 << 16);
+    // bench_binary_decompoisition::<3>(&mut group, 1 << 17);
+    // bench_binary_decompoisition::<4>(&mut group, 1 << 17);
+
+    bench_big_linear_uair::<3>(&mut group, 1 << 12);
+    bench_big_linear_uair::<4>(&mut group, 1 << 12);
+    bench_big_linear_uair::<3>(&mut group, 1 << 13);
+    bench_big_linear_uair::<4>(&mut group, 1 << 13);
+    bench_big_linear_uair::<3>(&mut group, 1 << 14);
+    bench_big_linear_uair::<4>(&mut group, 1 << 14);
+    bench_big_linear_uair::<3>(&mut group, 1 << 15);
+    bench_big_linear_uair::<4>(&mut group, 1 << 15);
+    bench_big_linear_uair::<3>(&mut group, 1 << 16);
+    bench_big_linear_uair::<4>(&mut group, 1 << 16);
+    bench_big_linear_uair::<3>(&mut group, 1 << 17);
+    bench_big_linear_uair::<4>(&mut group, 1 << 17);
 
     group.finish();
 }
