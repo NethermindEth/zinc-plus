@@ -131,10 +131,10 @@ pub trait Uair {
     ///   convenient to provide a closure instead of a `FromRef` implementation.
     /// - `mbs`: a closure that allows to multiply expressions by `R`. Same
     ///   rationale as for `from_ref`.
-    fn constrain_general<'a, B, FromR, MulByScalar, IFromR>(
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
         b: &mut B,
-        up: TraceRow<'a, B::Expr>,
-        down: TraceRow<'a, B::Expr>,
+        up: TraceRow<B::Expr>,
+        down: TraceRow<B::Expr>,
         from_ref: FromR,
         mbs: MulByScalar,
         ideal_from_ref: IFromR,
@@ -146,7 +146,7 @@ pub trait Uair {
 
     // Same as `constrain_general` but `from_ref` and `mbs`
     // come from the trait implementations.
-    fn constrain<'a, B>(b: &mut B, up: TraceRow<'a, B::Expr>, down: TraceRow<'a, B::Expr>)
+    fn constrain<B>(b: &mut B, up: TraceRow<B::Expr>, down: TraceRow<B::Expr>)
     where
         B: ConstraintBuilder,
         B::Expr: FromRef<Self::Scalar> + for<'b> MulByScalar<&'b Self::Scalar>,

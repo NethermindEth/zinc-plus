@@ -37,10 +37,10 @@ impl<R: Semiring + 'static> Uair for TestUairSimpleMultiplication<R> {
         }
     }
 
-    fn constrain_general<'a, B, FromR, MulByScalar, IFromR>(
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
         b: &mut B,
-        up: TraceRow<'a, B::Expr>,
-        down: TraceRow<'a, B::Expr>,
+        up: TraceRow<B::Expr>,
+        down: TraceRow<B::Expr>,
         _from_ref: FromR,
         _mbs: MulByScalar,
         _ideal_from_ref: IFromR,
@@ -138,10 +138,10 @@ impl<const LIMBS: usize> Uair for TestAirNoMultiplication<LIMBS> {
         }
     }
 
-    fn constrain_general<'a, B, FromR, MulByScalar, IFromR>(
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
         b: &mut B,
-        up: TraceRow<'a, B::Expr>,
-        _down: TraceRow<'a, B::Expr>,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
         _from_ref: FromR,
         _mbs: MulByScalar,
         ideal_from_ref: IFromR,
@@ -204,10 +204,10 @@ impl<const LIMBS: usize> Uair for TestAirScalarMultiplications<LIMBS> {
         }
     }
 
-    fn constrain_general<'a, B, FromR, MulByScalar, IFromR>(
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
         b: &mut B,
-        up: TraceRow<'a, B::Expr>,
-        _down: TraceRow<'a, B::Expr>,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
         from_ref: FromR,
         mbs: MulByScalar,
         ideal_from_ref: IFromR,
@@ -252,10 +252,10 @@ impl Uair for BinaryDecompositionUair {
         }
     }
 
-    fn constrain_general<'a, B, FromR, MulByScalar, IFromR>(
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
         b: &mut B,
-        up: TraceRow<'a, B::Expr>,
-        _down: TraceRow<'a, B::Expr>,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
         _from_ref: FromR,
         _mbs: MulByScalar,
         ideal_from_ref: IFromR,
@@ -311,10 +311,10 @@ impl Uair for BigLinearUair {
         }
     }
 
-    fn constrain_general<'a, B, FromR, MulByScalar, IFromR>(
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
         b: &mut B,
-        up: TraceRow<'a, B::Expr>,
-        down: TraceRow<'a, B::Expr>,
+        up: TraceRow<B::Expr>,
+        down: TraceRow<B::Expr>,
         _from_ref: FromR,
         _mbs: MulByScalar,
         ideal_from_ref: IFromR,
