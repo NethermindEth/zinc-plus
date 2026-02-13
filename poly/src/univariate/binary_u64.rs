@@ -1,13 +1,10 @@
 use crate::{
     ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
-    univariate::{
-        dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF, prepare_projection,
-    },
+    univariate::{dense::DensePolynomial, prepare_projection},
 };
 use core::mem::MaybeUninit;
 use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
 use derive_more::{AsRef, Display};
-use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
@@ -15,7 +12,7 @@ use std::{
     hash::Hash,
     iter::{Product, Sum},
     marker::PhantomData,
-    ops::{Add, AddAssign, Deref, Mul, MulAssign, Sub, SubAssign},
+    ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
@@ -673,16 +670,6 @@ unsafe fn widen_fill_avx512<const N: usize>(mask_ref: &u64, out_ptr: *mut i64, s
         let mask = -(bit as i64); // 0 or -1 (all bits set)
         *out_ptr.add(i) = scalar & mask;
         i += 1;
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
-    pub fn map_coeffs<F: PrimeField>(&self, f: impl Fn(bool) -> F) -> DynamicPolynomialF<F> {
-        DynamicPolynomialF::new_trimmed(
-            (0..DEGREE_PLUS_ONE)
-                .map(|i| f(!(self.0 & (1 << i)).is_zero()))
-                .collect_vec(),
-        )
     }
 }
 

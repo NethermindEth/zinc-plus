@@ -1,14 +1,11 @@
 use crate::{
     ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
-    univariate::{
-        dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF, prepare_projection,
-    },
+    univariate::{dense::DensePolynomial, prepare_projection},
 };
 use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
 use derive_more::{
     Add, AddAssign, AsRef, Display, From, Mul, MulAssign, Product, Sub, SubAssign, Sum,
 };
-use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, ConstZero, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
@@ -410,18 +407,6 @@ where
     Output: From<Rhs> + Send + Sync + Default + Copy + Zero,
 {
     BinaryRefPolyWideningMulByScalar::<Output>::mul_by_scalar_widen(poly, &scalar)
-}
-
-impl<const DEGREE_PLUS_ONE: usize> BinaryRefPoly<DEGREE_PLUS_ONE> {
-    pub fn map_coeffs<F: PrimeField>(&self, f: impl Fn(bool) -> F) -> DynamicPolynomialF<F> {
-        DynamicPolynomialF::new_trimmed(
-            self.0
-                .coeffs
-                .iter()
-                .map(|coeff| f(coeff.into_inner()))
-                .collect_vec(),
-        )
-    }
 }
 
 #[cfg(test)]

@@ -54,7 +54,10 @@ where
     let num_constraints = count_constraints::<U>();
 
     let scalars = project_scalars::<F, U>(|scalar| {
-        scalar.map_coeffs(|coeff| F::from_with_cfg(coeff, &field_cfg))
+        scalar
+            .iter()
+            .map(|coeff| F::from_with_cfg(coeff, &field_cfg))
+            .collect()
     });
 
     let trace =

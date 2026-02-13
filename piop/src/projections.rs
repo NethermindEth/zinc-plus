@@ -41,7 +41,16 @@ where
         cfg_iter!(binary_poly_trace).map(|column| {
             cfg_iter!(column)
                 .map(|binary_poly| {
-                    binary_poly.map_coeffs(|coeff| if coeff { one.clone() } else { zero.clone() })
+                    binary_poly
+                        .iter()
+                        .map(|coeff| {
+                            if coeff.into_inner() {
+                                one.clone()
+                            } else {
+                                zero.clone()
+                            }
+                        })
+                        .collect()
                 })
                 .collect()
         })
@@ -52,7 +61,10 @@ where
         cfg_iter!(arbitrary_poly_trace).map(|column| {
             cfg_iter!(column)
                 .map(|arbitrary_poly| {
-                    arbitrary_poly.map_coeffs(|coeff| F::from_with_cfg(coeff.clone(), field_cfg))
+                    arbitrary_poly
+                        .iter()
+                        .map(|coeff| F::from_with_cfg(coeff.clone(), field_cfg))
+                        .collect()
                 })
                 .collect()
         })

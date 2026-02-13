@@ -58,7 +58,10 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
         let projected_scalars =
             project_scalars::<F<FIELD_LIMBS>, TestAirNoMultiplication<INT_LIMBS>>(|scalar| {
-                scalar.map_coeffs(|coeff| F::from_with_cfg(coeff, &field_cfg))
+                scalar
+                    .iter()
+                    .map(|coeff| F::from_with_cfg(coeff, &field_cfg))
+                    .collect()
             });
 
         IdealCheckProtocol::prove_as_subprotocol::<TestAirNoMultiplication<INT_LIMBS>>(
@@ -153,10 +156,15 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
         let trace = project_trace_coeffs::<_, _, Int<5>, _>(&[], &trace, &[], &field_cfg);
 
-        let projected_scalars =
-            project_scalars::<F<FIELD_LIMBS>, TestUairSimpleMultiplication<Int<INT_LIMBS>>>(
-                |scalar| scalar.map_coeffs(|coeff| F::from_with_cfg(coeff, &field_cfg)),
-            );
+        let projected_scalars = project_scalars::<
+            F<FIELD_LIMBS>,
+            TestUairSimpleMultiplication<Int<INT_LIMBS>>,
+        >(|scalar| {
+            scalar
+                .iter()
+                .map(|coeff| F::from_with_cfg(coeff, &field_cfg))
+                .collect()
+        });
 
         IdealCheckProtocol::prove_as_subprotocol::<TestUairSimpleMultiplication<Int<INT_LIMBS>>>(
             &mut transcript,
@@ -258,7 +266,10 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
 
         let projected_scalars =
             project_scalars::<F<FIELD_LIMBS>, BinaryDecompositionUair>(|scalar| {
-                scalar.map_coeffs(|coeff| F::from_with_cfg(coeff, &field_cfg))
+                scalar
+                    .iter()
+                    .map(|coeff| F::from_with_cfg(coeff, &field_cfg))
+                    .collect()
             });
 
         IdealCheckProtocol::prove_as_subprotocol::<BinaryDecompositionUair>(
@@ -362,7 +373,10 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
             project_trace_coeffs::<_, u32, u32, _>(&binary_poly_trace, &[], &int_trace, &field_cfg);
 
         let projected_scalars = project_scalars::<F<FIELD_LIMBS>, BigLinearUair>(|scalar| {
-            scalar.map_coeffs(|coeff| F::from_with_cfg(coeff, &field_cfg))
+            scalar
+                .iter()
+                .map(|coeff| F::from_with_cfg(coeff, &field_cfg))
+                .collect()
         });
 
         IdealCheckProtocol::prove_as_subprotocol::<BigLinearUair>(
