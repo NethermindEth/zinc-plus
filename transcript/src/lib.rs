@@ -1,7 +1,12 @@
 pub mod traits;
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 use crate::traits::{ConstTranscribable, GenTranscribable, Transcript};
 use crypto_primitives::{ConstIntSemiring, PrimeField};
+use itertools::Itertools;
+use std::iter;
 use zinc_primality::PrimalityTest;
 use zinc_utils::add;
 
@@ -57,6 +62,15 @@ impl Transcript for Blake3Transcript {
     #[allow(clippy::arithmetic_side_effects)]
     fn get_prime<R: ConstIntSemiring + ConstTranscribable, T: PrimalityTest<R>>(&mut self) -> R {
         let buf = &mut vec![0u8; R::NUM_BYTES];
+
+        // Set MSB to 1
+        buf[R::NUM_BYTES - 1] |= 1 << 7;
+        let msb_one: R = R::read_transcription_bytes_exact(buf);
+        let two = R::ONE + R::ONE;
+
+        #[cfg(feature = "parallel")]
+        let num_threads = rayon::current_num_threads();
+
         loop {
             let mut prime_candidate: R = self.gen_random(buf);
             if prime_candidate.is_zero() {
@@ -65,8 +79,35 @@ impl Transcript for Blake3Transcript {
             if prime_candidate.is_even() {
                 prime_candidate -= R::ONE;
             }
-            if T::is_probably_prime(&prime_candidate) {
-                return prime_candidate;
+
+            // Set the MSB to one to ensure the candidate is of the correct bit length
+            if prime_candidate < msb_one {
+                prime_candidate += &msb_one;
+            }
+
+            let iter = iter::successors(Some(prime_candidate), |current| current.checked_add(&two));
+
+            if let Some(prime) = {
+                #[cfg(feature = "parallel")]
+                {
+                    // Unfortunately, `rayon::par_bridge` does not preserve the order of the
+                    // iterator, so we use this workaround to get a well-defined
+                    // order.
+                    iter.chunks(num_threads * 10).into_iter().find_map(|chunk| {
+                        let chunk = chunk.collect_vec();
+                        chunk
+                            .into_par_iter()
+                            .find_first(|v| T::is_probably_prime(v))
+                    })
+                }
+
+                #[cfg(not(feature = "parallel"))]
+                {
+                    let mut iter = iter;
+                    iter.find(|v| T::is_probably_prime(v))
+                }
+            } {
+                return prime;
             }
         }
     }

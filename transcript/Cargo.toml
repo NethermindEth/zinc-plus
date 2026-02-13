@@ -13,6 +13,7 @@ bench = false
 crypto-primitives = { workspace = true }
 zinc-primality = { workspace = true }
 zinc-utils = { workspace = true }
+rayon = { workspace = true, optional = true }
 
 itertools = { workspace = true }
 crypto-bigint = { workspace = true }
@@ -21,4 +22,7 @@ num-traits = { workspace = true }
 
 [lints]
 workspace = true
+
+[features]
+parallel = ["rayon"]
 
