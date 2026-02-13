@@ -12,7 +12,7 @@ use std::{
     hash::Hash,
     iter::{Product, Sum},
     marker::PhantomData,
-    ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
+    ops::{Add, AddAssign, Deref, Mul, MulAssign, Sub, SubAssign},
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
@@ -365,6 +365,40 @@ impl<const DEGREE_PLUS_ONE: usize> From<&BinaryU64Poly<DEGREE_PLUS_ONE>>
     #[inline(always)]
     fn from(value: &BinaryU64Poly<DEGREE_PLUS_ONE>) -> Self {
         Self::from_ref(value)
+    }
+}
+
+pub struct BinaryU64PolyIter<'a, const DEGREE_PLUS_ONE: usize> {
+    i: usize,
+    poly: &'a BinaryU64Poly<DEGREE_PLUS_ONE>,
+}
+
+impl<'a, const DEGREE_PLUS_ONE: usize> BinaryU64PolyIter<'a, DEGREE_PLUS_ONE> {
+    pub fn new(poly: &'a BinaryU64Poly<DEGREE_PLUS_ONE>) -> Self {
+        Self { i: 0, poly }
+    }
+}
+
+impl<'a, const DEGREE_PLUS_ONE: usize> Iterator for BinaryU64PolyIter<'a, DEGREE_PLUS_ONE> {
+    type Item = Boolean;
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.i < DEGREE_PLUS_ONE {
+            let i = self.i;
+
+            self.i += 1;
+
+            Some((!(self.poly.0 & (1 << i)).is_zero()).into())
+        } else {
+            None
+        }
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
+    pub fn iter(&'_ self) -> BinaryU64PolyIter<'_, DEGREE_PLUS_ONE> {
+        BinaryU64PolyIter::new(self)
     }
 }
 

@@ -13,7 +13,7 @@ use std::{
     hash::Hash,
     iter::{Product, Sum},
     marker::PhantomData,
-    ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
+    ops::{Add, AddAssign, Deref, DerefMut, Mul, MulAssign, Sub, SubAssign},
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
@@ -313,6 +313,34 @@ impl<const DEGREE_PLUS_ONE: usize> From<&BinaryRefPoly<DEGREE_PLUS_ONE>>
     #[inline(always)]
     fn from(value: &BinaryRefPoly<DEGREE_PLUS_ONE>) -> Self {
         Self::from_ref(value)
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> BinaryRefPoly<DEGREE_PLUS_ONE> {
+    #[inline(always)]
+    pub fn iter(&'_ self) -> std::slice::Iter<'_, Boolean> {
+        self.0.iter()
+    }
+
+    #[inline(always)]
+    pub fn iter_mut(&'_ mut self) -> std::slice::IterMut<'_, Boolean> {
+        self.0.iter_mut()
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> Deref for BinaryRefPoly<DEGREE_PLUS_ONE> {
+    type Target = [Boolean];
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        self.0.deref()
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> DerefMut for BinaryRefPoly<DEGREE_PLUS_ONE> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.deref_mut()
     }
 }
 

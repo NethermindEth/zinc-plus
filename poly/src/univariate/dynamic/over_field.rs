@@ -277,6 +277,15 @@ impl<F: PrimeField> EvaluatablePolynomial<F, F> for DynamicPolynomialF<F> {
     }
 }
 
+impl<F: PrimeField> FromIterator<F> for DynamicPolynomialF<F> {
+    #[inline(always)]
+    fn from_iter<T: IntoIterator<Item = F>>(iter: T) -> Self {
+        Self {
+            coeffs: iter.into_iter().collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crypto_bigint::{Odd, modular::MontyParams};
