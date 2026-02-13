@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Benchmark the full PCS pipeline (Commit, Test, Verify) for Zip+ with num_rows=1.
+    Benchmark the full PCS pipeline (Commit, Test, Verify) for Zip+ with num_rows=1.
 
 This script runs the "PCS Pipeline Suite 1row" criterion benchmarks and collects
 the results into a LaTeX table.

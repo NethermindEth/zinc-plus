@@ -5,26 +5,18 @@ Benchmark the full PCS pipeline (Commit, Test, Verify) for Zip+ with i32 evaluat
 This script runs the "PCS Pipeline Suite i32 1row" criterion benchmarks and collects
 the results into a LaTeX table.
 
-The benchmarks use i32 evaluations with various IPRS codes,
+The benchmarks use i32 evaluations with rate 1/4 IPRS codes,
 forcing num_rows=1 (single row layout). With num_rows=1, poly_size must equal row_len.
-Different fields are used to support different row lengths.
 
-    poly_size (2^P)   Config              Field           row_len
-    ───────────────   ──────              ─────           ───────
-    2^4  = 16         R4B2 D=1 (rate 1/4) F3329           16
-    2^5  = 32         R4B4 D=1 (rate 1/4) F3329           32
-    2^6  = 64         R4B8 D=1 (rate 1/4) F3329           64
-    2^7  = 128        B16 D=1 (rate 1/2)  F65537          128
-    2^8  = 256        B32 D=1 (rate 1/2)  F65537          256
-    2^9  = 512        B64 D=1 (rate 1/2)  F65537          512
-    2^10 = 1024       B16 D=2 (rate 1/2)  F65537          1024
-    2^11 = 2048       B32 D=2 (rate 1/2)  F65537          2048
-    2^12 = 4096       B64 D=2 (rate 1/2)  F65537          4096
-    2^13 = 8192       B16 D=3 (rate 1/2)  F65537          8192
-    2^14 = 16384      B32 D=3 (rate 1/2)  F65537          16384
-    2^16 = 65536      B16 D=4 (rate 1/2)  F1179649        65536
-    2^17 = 131072     B32 D=4 (rate 1/2)  F167772161      131072
-    2^18 = 262144     B64 D=4 (rate 1/2)  F167772161      262144
+    poly_size (2^P)   Config               Field           row_len
+    ───────────────   ──────               ─────           ───────
+    2^4  = 16         R4B2 D=1 (rate 1/4)  F3329           16
+    2^5  = 32         R4B4 D=1 (rate 1/4)  F3329           32
+    2^6  = 64         R4B8 D=1 (rate 1/4)  F3329           64
+    2^10 = 1024       R4B16 D=2 (rate 1/4) F65537          1024
+    2^11 = 2048       R4B32 D=2 (rate 1/4) F65537          2048
+    2^12 = 4096       R4B64 D=2 (rate 1/4) F65537          4096
+    2^13 = 8192       R4B16 D=3 (rate 1/4) F65537          8192
 
 Usage:
     python3 scripts/bench_pcs_pipeline_i32.py
@@ -50,8 +42,8 @@ CARGO_BENCH_CMD = [
 
 # Expected polynomial size exponents for num_rows=1 benchmarks.
 # With num_rows=1, poly_size must equal row_len.
-# Different fields support different row lengths.
-EXPECTED_POLY_EXPS = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18]
+# All use rate 1/4 IPRS codes.
+EXPECTED_POLY_EXPS = [4, 5, 6, 10, 11, 12, 13]
 
 # Number of repetitions: report the cost of performing each operation this many
 # times (the measured per-operation time is multiplied by this factor).
@@ -62,29 +54,21 @@ PHASES = ["Commit", "Test", "Verify"]
 
 # Map poly exponent → (num_rows, config description, field)
 # With num_rows=1, poly_size = row_len
+# All use rate 1/4 IPRS codes
 POLY_EXP_CONFIG = {
     4:  (1, "R4B2 D=1",  "F3329"),      # row_len=16
     5:  (1, "R4B4 D=1",  "F3329"),      # row_len=32
     6:  (1, "R4B8 D=1",  "F3329"),      # row_len=64
-    7:  (1, "B16 D=1",   "F65537"),     # row_len=128
-    8:  (1, "B32 D=1",   "F65537"),     # row_len=256
-    9:  (1, "B64 D=1",   "F65537"),     # row_len=512
-    10: (1, "B16 D=2",   "F65537"),     # row_len=1024
-    11: (1, "B32 D=2",   "F65537"),     # row_len=2048
-    12: (1, "B64 D=2",   "F65537"),     # row_len=4096
-    13: (1, "B16 D=3",   "F65537"),     # row_len=8192
-    14: (1, "B32 D=3",   "F65537"),     # row_len=16384
-    16: (1, "B16 D=4",   "F1179649"),   # row_len=65536
-    17: (1, "B32 D=4",   "F167772161"), # row_len=131072
-    18: (1, "B64 D=4",   "F167772161"), # row_len=262144
+    10: (1, "R4B16 D=2", "F65537"),     # row_len=1024
+    11: (1, "R4B32 D=2", "F65537"),     # row_len=2048
+    12: (1, "R4B64 D=2", "F65537"),     # row_len=4096
+    13: (1, "R4B16 D=3", "F65537"),     # row_len=8192
 }
 
 # Map field name to LaTeX representation
 FIELD_LATEX = {
     "F3329":      r"$\mathbb{F}_{3329}$",
     "F65537":     r"$\mathbb{F}_{65537}$",
-    "F1179649":   r"$\mathbb{F}_{1179649}$",
-    "F167772161": r"$\mathbb{F}_{167772161}$",
 }
 
 
@@ -186,8 +170,8 @@ def generate_latex_table(
     lines = [
         r"\begin{table}[ht]",
         r"\centering",
-        r"\caption{PCS pipeline benchmark ($\times" + str(NUM_REPETITIONS) + r"$) for i32 with num\_rows=1 (parallel+asm+simd).}",
-        r"\label{tab:pcs-pipeline-suite-i32-1row}",
+        r"\caption{PCS pipeline benchmark ($\times" + str(NUM_REPETITIONS) + r"$) for i32 with num\_rows=1, rate 1/4 (parallel+asm+simd).}",
+        r"\label{tab:pcs-pipeline-suite-i32-1row-r4}",
         r"\begin{tabular}{r r r l r r r}",
         r"\toprule",
         (

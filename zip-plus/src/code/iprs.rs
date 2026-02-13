@@ -14,6 +14,7 @@ use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::{CheckedAdd, CheckedMul};
 pub use pntt::radix8::params::{
     PnttConfigF2_16_1, PnttConfigF2_16B16, PnttConfigF2_16B64,
+    PnttConfigF2_16R4B16, PnttConfigF2_16R4B32, PnttConfigF2_16R4B64,
     PnttConfigF167772161, PnttConfigF167772161B16, PnttConfigF167772161B64,
     PnttConfigF1179649B16,
     PnttConfigF3329B8, PnttConfigF3329B16,
