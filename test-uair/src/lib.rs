@@ -316,8 +316,8 @@ impl Uair for BigLinearUair {
         b: &mut B,
         up: TraceRow<'a, B::Expr>,
         down: TraceRow<'a, B::Expr>,
-        from_ref: FromR,
-        mbs: MulByScalar,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
         ideal_from_ref: IFromR,
     ) where
         B: ConstraintBuilder,
@@ -330,19 +330,19 @@ impl Uair for BigLinearUair {
             .fold(up.binary_poly[0].clone(), |acc, next| acc + next);
 
         // up.binary_poly[0] + up.binary_poly[1] + ... up.binary_poly[16]
-        //      = up.int[0] mod (X - 2)
+        //      = up.int[0] mod (X - 1)
         b.assert_in_ideal(
             sum_of_binary_polys - &up.int[0],
-            &ideal_from_ref(&DegreeOneIdeal::new(2)),
+            &ideal_from_ref(&DegreeOneIdeal::new(1)),
         );
 
-        // down.binary_poly[0] = up.int[0] mod (X - 2)
+        // down.binary_poly[0] = up.int[0] mod (X - 1)
         b.assert_in_ideal(
             down.binary_poly[0].clone() - &up.int[0],
             &ideal_from_ref(&DegreeOneIdeal::new(2)),
         );
 
-        // up.binary_poly[i] = down.binary_poly[i], for all i=1,...,16
+        // up.binary_poly[i] = down.binary_poly[i], for all i=1,...,15
         up.binary_poly[1..]
             .iter()
             .zip(&down.binary_poly[1..])
@@ -366,7 +366,7 @@ impl GenerateMultyTypeWitness for BigLinearUair {
     ) {
         let mut binary_poly_cols: Vec<DenseMultilinearExtension<BinaryPoly<32>>> =
             vec![(0..(1 << num_vars)).map(|_| BinaryPoly::zero()).collect(); 16];
-        let mut int_col: DenseMultilinearExtension<u32> = (0..(1 << num_vars)).collect();
+        let mut int_col: DenseMultilinearExtension<u32> = (0..(1 << num_vars)).map(|_| 0).collect();
 
         binary_poly_cols.iter_mut().for_each(|col| {
             col[0] = rng.random();
@@ -375,7 +375,7 @@ impl GenerateMultyTypeWitness for BigLinearUair {
         for i in 0..(1 << num_vars) - 1 {
             int_col[i] = binary_poly_cols
                 .iter()
-                .map(|col| col[i].evaluate_at_point(&2u32).expect("should be fine"))
+                .map(|col| col[i].evaluate_at_point(&1u32).expect("should be fine"))
                 .sum();
 
             binary_poly_cols[0][i + 1] = BinaryPoly::from(int_col[i]);
@@ -390,7 +390,7 @@ impl GenerateMultyTypeWitness for BigLinearUair {
             .iter()
             .map(|col| {
                 col[len - 1]
-                    .evaluate_at_point(&2u32)
+                    .evaluate_at_point(&1u32)
                     .expect("should be fine")
             })
             .sum();
