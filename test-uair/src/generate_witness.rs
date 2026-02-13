@@ -16,7 +16,7 @@ pub trait GenerateSingleTypeWitness: Uair {
     ) -> Vec<DenseMultilinearExtension<Self::Witness>>;
 }
 
-pub trait GenerateMultyTypeWitness: Uair {
+pub trait GenerateMultiTypeWitness: Uair {
     type PolyCoeff;
     type Int;
 

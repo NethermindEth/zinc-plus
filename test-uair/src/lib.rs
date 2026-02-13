@@ -275,7 +275,7 @@ impl Uair for BinaryDecompositionUair {
     }
 }
 
-impl GenerateMultyTypeWitness for BinaryDecompositionUair {
+impl GenerateMultiTypeWitness for BinaryDecompositionUair {
     type PolyCoeff = u32;
     type Int = u32;
 
@@ -351,7 +351,7 @@ impl Uair for BigLinearUair {
     }
 }
 
-impl GenerateMultyTypeWitness for BigLinearUair {
+impl GenerateMultiTypeWitness for BigLinearUair {
     type PolyCoeff = u32;
     type Int = u32;
 

@@ -16,7 +16,7 @@ use zinc_piop::{
 use zinc_poly::univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal};
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_test_uair::{
-    BigLinearUair, BinaryDecompositionUair, GenerateMultyTypeWitness, GenerateSingleTypeWitness,
+    BigLinearUair, BinaryDecompositionUair, GenerateMultiTypeWitness, GenerateSingleTypeWitness,
     TestAirNoMultiplication, TestUairSimpleMultiplication,
 };
 use zinc_transcript::{
