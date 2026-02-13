@@ -28,7 +28,7 @@ use zinc_uair::{Uair, constraint_counter::count_constraints, ideal_collector::Id
 const DEGREE_PLUS_ONE: usize = 32;
 
 type WitnessCoeff<const INT_LIMBS: usize> = Int<INT_LIMBS>;
-type Witness<const INT_LIMBS: usize> = DensePolynomial<Int<INT_LIMBS>, DEGREE_PLUS_ONE>;
+type Witness<const INT_LIMBS: usize> = DensePolynomial<WitnessCoeff<INT_LIMBS>, DEGREE_PLUS_ONE>;
 type F<const FIELD_LIMBS: usize> = MontyField<FIELD_LIMBS>;
 
 #[allow(clippy::arithmetic_side_effects)]
