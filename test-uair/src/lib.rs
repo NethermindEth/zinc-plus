@@ -8,7 +8,6 @@ use num_traits::Zero;
 use rand::{
     Rng,
     distr::{Distribution, StandardUniform},
-    random,
 };
 use zinc_poly::{
     EvaluatablePolynomial,
