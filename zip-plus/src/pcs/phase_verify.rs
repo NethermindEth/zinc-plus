@@ -148,7 +148,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         Ok(columns_opened)
     }
 
-    pub(super) fn verify_column_testing<const CHECK_FOR_OVERFLOW: bool>(
+    pub(crate) fn verify_column_testing<const CHECK_FOR_OVERFLOW: bool>(
         alphas: &[Zt::Chal],
         coeffs: &[Zt::Chal],
         encoded_combined_row: &[Zt::CombR],
@@ -233,7 +233,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         Ok(())
     }
 
-    fn verify_proximity_q_0<F>(
+    pub(crate) fn verify_proximity_q_0<F>(
         q_0: &[F],
         encoded_q_0_combined_row: &[F],
         column_entries: &[Zt::Cw],

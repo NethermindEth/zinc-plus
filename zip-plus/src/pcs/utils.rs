@@ -13,7 +13,7 @@ fn err_too_many_variates(function: &str, upto: usize, got: usize) -> ZipError {
 }
 
 // Ensures that polynomials and evaluation points are of appropriate size
-pub(super) fn validate_input<Zt: ZipTypes, Lc: LinearCode<Zt>, Pt>(
+pub(crate) fn validate_input<Zt: ZipTypes, Lc: LinearCode<Zt>, Pt>(
     function: &str,
     param_num_vars: usize,
     polys: &[&DenseMultilinearExtension<Zt::Eval>],
@@ -80,7 +80,7 @@ pub(super) fn validate_input<Zt: ZipTypes, Lc: LinearCode<Zt>, Pt>(
 /// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
 /// right
 #[allow(clippy::unwrap_used)]
-pub(super) fn point_to_tensor<F>(
+pub(crate) fn point_to_tensor<F>(
     num_rows: usize,
     point: &[F],
     cfg: &F::Config,
