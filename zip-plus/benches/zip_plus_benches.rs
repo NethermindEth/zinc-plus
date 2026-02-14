@@ -506,6 +506,52 @@ fn pcs_pipeline_suite_1row(c: &mut Criterion) {
     let mut group = c.benchmark_group("PCS Pipeline Suite 1row");
     group.sample_size(10);
 
+    // ── Encode ───────────────────────────────────────────────────────
+    // F3329 rate 1/4: small row lengths (P=4,5,6)
+    encode_rows_1row::<BenchZipPlusTypes<i128, 32>, IprsSmallR4B2<i128, 1, 32, UNCHECKED>, 4>(&mut group);
+    encode_rows_1row::<BenchZipPlusTypes<i128, 32>, IprsSmallR4B4<i128, 1, 32, UNCHECKED>, 5>(&mut group);
+    encode_rows_1row::<BenchZipPlusTypes<i128, 32>, IprsSmallR4B8<i128, 1, 32, UNCHECKED>, 6>(&mut group);
+
+    // F65537 rate 1/2: medium row lengths (P=7,8,9,10,11,12,13,14)
+    encode_rows_1row::<BenchZipPlusTypes<i128, 32>, IprsB16<i128, 1, 32, UNCHECKED>,  7>(&mut group);
+    encode_rows_1row::<BenchZipPlusTypes<i128, 32>, IprsB32<i128, 1, 32, UNCHECKED>,  8>(&mut group);
+    encode_rows_1row::<BenchZipPlusTypes<i128, 32>, IprsB64<i128, 1, 32, UNCHECKED>,  9>(&mut group);
+    encode_rows_1row::<BenchZipPlusTypes<i128, 32>, IprsB16<i128, 2, 32, UNCHECKED>, 10>(&mut group);
+    encode_rows_1row::<BenchZipPlusTypes<i128, 32>, IprsB32<i128, 2, 32, UNCHECKED>, 11>(&mut group);
+    encode_rows_1row::<BenchZipPlusTypes<i128, 32>, IprsB64<i128, 2, 32, UNCHECKED>, 12>(&mut group);
+    encode_rows_1row::<BenchZipPlusTypes<i128, 32>, IprsB16<i128, 3, 32, UNCHECKED>, 13>(&mut group);
+    encode_rows_1row::<BenchZipPlusTypes<i128, 32>, IprsB32<i128, 3, 32, UNCHECKED>, 14>(&mut group);
+
+    // F1179649: larger row lengths (P=16)
+    encode_rows_1row::<BenchZipPlusTypes<i128, 32>, IprsMidB16<i128, 4, 32, UNCHECKED>, 16>(&mut group);
+
+    // F167772161: largest row lengths (P=17,18)
+    encode_rows_1row::<BenchZipPlusTypes<i128, 32>, IprsLargeB32<i128, 4, 32, UNCHECKED>, 17>(&mut group);
+    encode_rows_1row::<BenchZipPlusTypes<i128, 32>, IprsLargeB64<i128, 4, 32, UNCHECKED>, 18>(&mut group);
+
+    // ── Merkle ───────────────────────────────────────────────────────
+    // F3329 rate 1/4: small row lengths (P=4,5,6)
+    merkle_1row::<BenchZipPlusTypes<i128, 32>, IprsSmallR4B2<i128, 1, 32, UNCHECKED>, 4>(&mut group);
+    merkle_1row::<BenchZipPlusTypes<i128, 32>, IprsSmallR4B4<i128, 1, 32, UNCHECKED>, 5>(&mut group);
+    merkle_1row::<BenchZipPlusTypes<i128, 32>, IprsSmallR4B8<i128, 1, 32, UNCHECKED>, 6>(&mut group);
+
+    // F65537 rate 1/2: medium row lengths (P=7,8,9,10,11,12,13,14)
+    merkle_1row::<BenchZipPlusTypes<i128, 32>, IprsB16<i128, 1, 32, UNCHECKED>,  7>(&mut group);
+    merkle_1row::<BenchZipPlusTypes<i128, 32>, IprsB32<i128, 1, 32, UNCHECKED>,  8>(&mut group);
+    merkle_1row::<BenchZipPlusTypes<i128, 32>, IprsB64<i128, 1, 32, UNCHECKED>,  9>(&mut group);
+    merkle_1row::<BenchZipPlusTypes<i128, 32>, IprsB16<i128, 2, 32, UNCHECKED>, 10>(&mut group);
+    merkle_1row::<BenchZipPlusTypes<i128, 32>, IprsB32<i128, 2, 32, UNCHECKED>, 11>(&mut group);
+    merkle_1row::<BenchZipPlusTypes<i128, 32>, IprsB64<i128, 2, 32, UNCHECKED>, 12>(&mut group);
+    merkle_1row::<BenchZipPlusTypes<i128, 32>, IprsB16<i128, 3, 32, UNCHECKED>, 13>(&mut group);
+    merkle_1row::<BenchZipPlusTypes<i128, 32>, IprsB32<i128, 3, 32, UNCHECKED>, 14>(&mut group);
+
+    // F1179649: larger row lengths (P=16)
+    merkle_1row::<BenchZipPlusTypes<i128, 32>, IprsMidB16<i128, 4, 32, UNCHECKED>, 16>(&mut group);
+
+    // F167772161: largest row lengths (P=17,18)
+    merkle_1row::<BenchZipPlusTypes<i128, 32>, IprsLargeB32<i128, 4, 32, UNCHECKED>, 17>(&mut group);
+    merkle_1row::<BenchZipPlusTypes<i128, 32>, IprsLargeB64<i128, 4, 32, UNCHECKED>, 18>(&mut group);
+
     // ── Commit ───────────────────────────────────────────────────────
     // F3329 rate 1/4: small row lengths (P=4,5,6)
     commit_1row::<BenchZipPlusTypes<i128, 32>, IprsSmallR4B2<i128, 1, 32, UNCHECKED>, 4>(&mut group);  // row_len=16
@@ -578,31 +624,81 @@ fn pcs_pipeline_suite_1row(c: &mut Criterion) {
     group.finish();
 }
 
-/// Full PCS pipeline suite with num_rows=1: Commit, Test, Verify for scalar i32.
-/// Forces the matrix to have a single row (1 x n), using various IPRS codes.
+/// Full PCS pipeline suite: Commit, Test, Verify for scalar i32.
+/// Forces the matrix to use a specific number of rows, using various IPRS codes.
 ///
-/// With num_rows=1, poly_size must equal row_len. We use different fields
-/// to support different row lengths:
-///
-/// poly_size (2^P)   Config                Field        row_len formula
-/// ───────────────   ──────                ─────        ───────────────
-/// 2^4  = 16         R4B2 D=1 (rate 1/4)   F3329        2 × 8^1 = 16
-/// 2^5  = 32         R4B4 D=1 (rate 1/4)   F3329        4 × 8^1 = 32
-/// 2^6  = 64         R4B8 D=1 (rate 1/4)   F3329        8 × 8^1 = 64
-/// 2^7  = 128        B16 D=1 (rate 1/2)    F65537       16 × 8^1 = 128
-/// 2^8  = 256        B32 D=1 (rate 1/2)    F65537       32 × 8^1 = 256
-/// 2^9  = 512        B64 D=1 (rate 1/2)    F65537       64 × 8^1 = 512
-/// 2^10 = 1024       R4B16 D=2 (rate 1/4)  F65537       16 × 8^2 = 1024
-/// 2^11 = 2048       R4B32 D=2 (rate 1/4)  F65537       32 × 8^2 = 2048
-/// 2^12 = 4096       R4B64 D=2 (rate 1/4)  F65537       64 × 8^2 = 4096
-/// 2^13 = 8192       R4B16 D=3 (rate 1/4)  F65537       16 × 8^3 = 8192
-/// 2^14 = 16384      B32 D=3 (rate 1/2)    F65537       32 × 8^3 = 16384
-/// 2^16 = 65536      B16 D=4 (rate 1/2)    F1179649     16 × 8^4 = 65536
-/// 2^17 = 131072     B32 D=4 (rate 1/2)    F167772161   32 × 8^4 = 131072
-/// 2^18 = 262144     B64 D=4 (rate 1/2)    F167772161   64 × 8^4 = 262144
+/// poly_size (2^P)   Config                Field        row_len formula          num_rows
+/// ───────────────   ──────                ─────        ───────────────          ────────
+/// 2^4  = 16         R4B2 D=1 (rate 1/4)   F3329        2 × 8^1 = 16           1
+/// 2^5  = 32         R4B4 D=1 (rate 1/4)   F3329        4 × 8^1 = 32           1
+/// 2^6  = 64         R4B8 D=1 (rate 1/4)   F3329        8 × 8^1 = 64           1
+/// 2^7  = 128        B16 D=1 (rate 1/2)    F65537       16 × 8^1 = 128         1
+/// 2^8  = 256        B32 D=1 (rate 1/2)    F65537       32 × 8^1 = 256         1
+/// 2^9  = 512        B64 D=1 (rate 1/2)    F65537       64 × 8^1 = 512         1
+/// 2^10 = 1024       R4B16 D=2 (rate 1/4)  F65537       16 × 8^2 = 1024        1
+/// 2^10 = 1024       R4B64 D=1 (rate 1/4)  F65537       64 × 8^1 = 512         2
+/// 2^11 = 2048       R4B16 D=2 (rate 1/4)  F65537       16 × 8^2 = 1024        2
+/// 2^12 = 4096       R4B16 D=2 (rate 1/4)  F65537       16 × 8^2 = 1024        4
+/// 2^13 = 8192       R4B32 D=2 (rate 1/4)  F65537       32 × 8^2 = 2048        4
+/// 2^14 = 16384      B32 D=3 (rate 1/2)    F65537       32 × 8^3 = 16384       1
+/// 2^16 = 65536      B16 D=4 (rate 1/2)    F1179649     16 × 8^4 = 65536       1
+/// 2^17 = 131072     B32 D=4 (rate 1/2)    F167772161   32 × 8^4 = 131072      1
+/// 2^18 = 262144     B64 D=4 (rate 1/2)    F167772161   64 × 8^4 = 262144      1
 fn pcs_pipeline_suite_scalar_1row(c: &mut Criterion) {
     let mut group = c.benchmark_group("PCS Pipeline Suite i32 1row");
     group.sample_size(10);
+
+    // ── Encode ───────────────────────────────────────────────────────
+    // F3329 rate 1/4: small row lengths (P=4,5,6)
+    encode_rows_1row::<BenchZipScalarTypes, IprsScalarSmallR4B2<1, UNCHECKED>, 4>(&mut group);
+    encode_rows_1row::<BenchZipScalarTypes, IprsScalarSmallR4B4<1, UNCHECKED>, 5>(&mut group);
+    encode_rows_1row::<BenchZipScalarTypes, IprsScalarSmallR4B8<1, UNCHECKED>, 6>(&mut group);
+
+    // F65537 rate 1/4: medium row lengths (P=10,11,12,13)
+    encode_rows_1row::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, 10>(&mut group);
+    encode_rows_nrows::<BenchZipScalarTypes, IprsScalarR4B64<1, UNCHECKED>, 10>(&mut group, 2);
+    encode_rows_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, 11>(&mut group, 2);
+    encode_rows_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, 12>(&mut group, 4);
+    encode_rows_nrows::<BenchZipScalarTypes, IprsScalarR4B32<2, UNCHECKED>, 13>(&mut group, 4);
+
+    // F65537 rate 1/2: row lengths not covered by rate 1/4 (P=7,8,9,14)
+    encode_rows_1row::<BenchZipScalarTypes, IprsScalarB16<1, UNCHECKED>,  7>(&mut group);
+    encode_rows_1row::<BenchZipScalarTypes, IprsScalarB32<1, UNCHECKED>,  8>(&mut group);
+    encode_rows_1row::<BenchZipScalarTypes, IprsScalarB64<1, UNCHECKED>,  9>(&mut group);
+    encode_rows_1row::<BenchZipScalarTypes, IprsScalarB32<3, UNCHECKED>, 14>(&mut group);
+
+    // F1179649: larger row lengths (P=16)
+    encode_rows_1row::<BenchZipScalarTypes, IprsScalarMidB16<4, UNCHECKED>, 16>(&mut group);
+
+    // F167772161: largest row lengths (P=17,18)
+    encode_rows_1row::<BenchZipScalarTypes, IprsScalarLargeB32<4, UNCHECKED>, 17>(&mut group);
+    encode_rows_1row::<BenchZipScalarTypes, IprsScalarLargeB64<4, UNCHECKED>, 18>(&mut group);
+
+    // ── Merkle ───────────────────────────────────────────────────────
+    // F3329 rate 1/4: small row lengths (P=4,5,6)
+    merkle_1row::<BenchZipScalarTypes, IprsScalarSmallR4B2<1, UNCHECKED>, 4>(&mut group);
+    merkle_1row::<BenchZipScalarTypes, IprsScalarSmallR4B4<1, UNCHECKED>, 5>(&mut group);
+    merkle_1row::<BenchZipScalarTypes, IprsScalarSmallR4B8<1, UNCHECKED>, 6>(&mut group);
+
+    // F65537 rate 1/4: medium row lengths (P=10,11,12,13)
+    merkle_1row::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, 10>(&mut group);
+    merkle_nrows::<BenchZipScalarTypes, IprsScalarR4B64<1, UNCHECKED>, 10>(&mut group, 2);
+    merkle_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, 11>(&mut group, 2);
+    merkle_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, 12>(&mut group, 4);
+    merkle_nrows::<BenchZipScalarTypes, IprsScalarR4B32<2, UNCHECKED>, 13>(&mut group, 4);
+
+    // F65537 rate 1/2: row lengths not covered by rate 1/4 (P=7,8,9,14)
+    merkle_1row::<BenchZipScalarTypes, IprsScalarB16<1, UNCHECKED>,  7>(&mut group);
+    merkle_1row::<BenchZipScalarTypes, IprsScalarB32<1, UNCHECKED>,  8>(&mut group);
+    merkle_1row::<BenchZipScalarTypes, IprsScalarB64<1, UNCHECKED>,  9>(&mut group);
+    merkle_1row::<BenchZipScalarTypes, IprsScalarB32<3, UNCHECKED>, 14>(&mut group);
+
+    // F1179649: larger row lengths (P=16)
+    merkle_1row::<BenchZipScalarTypes, IprsScalarMidB16<4, UNCHECKED>, 16>(&mut group);
+
+    // F167772161: largest row lengths (P=17,18)
+    merkle_1row::<BenchZipScalarTypes, IprsScalarLargeB32<4, UNCHECKED>, 17>(&mut group);
+    merkle_1row::<BenchZipScalarTypes, IprsScalarLargeB64<4, UNCHECKED>, 18>(&mut group);
 
     // ── Commit ───────────────────────────────────────────────────────
     // F3329 rate 1/4: small row lengths (P=4,5,6)
@@ -611,10 +707,11 @@ fn pcs_pipeline_suite_scalar_1row(c: &mut Criterion) {
     commit_1row::<BenchZipScalarTypes, IprsScalarSmallR4B8<1, UNCHECKED>, 6>(&mut group);  // row_len=64
 
     // F65537 rate 1/4: medium row lengths (P=10,11,12,13)
-    commit_1row::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, 10>(&mut group);  // row_len=1024
-    commit_1row::<BenchZipScalarTypes, IprsScalarR4B32<2, UNCHECKED>, 11>(&mut group);  // row_len=2048
-    commit_1row::<BenchZipScalarTypes, IprsScalarR4B64<2, UNCHECKED>, 12>(&mut group);  // row_len=4096
-    commit_1row::<BenchZipScalarTypes, IprsScalarR4B16<3, UNCHECKED>, 13>(&mut group);  // row_len=8192
+    commit_1row::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, 10>(&mut group);  // row_len=1024, num_rows=1
+    commit_nrows::<BenchZipScalarTypes, IprsScalarR4B64<1, UNCHECKED>, 10>(&mut group, 2);  // row_len=512, num_rows=2
+    commit_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, 11>(&mut group, 2);  // row_len=1024, num_rows=2
+    commit_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, 12>(&mut group, 4);  // row_len=1024, num_rows=4
+    commit_nrows::<BenchZipScalarTypes, IprsScalarR4B32<2, UNCHECKED>, 13>(&mut group, 4);  // row_len=2048, num_rows=4
 
     // F65537 rate 1/2: row lengths not covered by rate 1/4 (P=7,8,9,14)
     commit_1row::<BenchZipScalarTypes, IprsScalarB16<1, UNCHECKED>,  7>(&mut group);  // row_len=128
@@ -637,9 +734,10 @@ fn pcs_pipeline_suite_scalar_1row(c: &mut Criterion) {
 
     // F65537 rate 1/4
     test_1row::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, UNCHECKED, 10>(&mut group);
-    test_1row::<BenchZipScalarTypes, IprsScalarR4B32<2, UNCHECKED>, UNCHECKED, 11>(&mut group);
-    test_1row::<BenchZipScalarTypes, IprsScalarR4B64<2, UNCHECKED>, UNCHECKED, 12>(&mut group);
-    test_1row::<BenchZipScalarTypes, IprsScalarR4B16<3, UNCHECKED>, UNCHECKED, 13>(&mut group);
+    test_nrows::<BenchZipScalarTypes, IprsScalarR4B64<1, UNCHECKED>, UNCHECKED, 10>(&mut group, 2);
+    test_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, UNCHECKED, 11>(&mut group, 2);
+    test_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, UNCHECKED, 12>(&mut group, 4);
+    test_nrows::<BenchZipScalarTypes, IprsScalarR4B32<2, UNCHECKED>, UNCHECKED, 13>(&mut group, 4);
 
     // F65537 rate 1/2
     test_1row::<BenchZipScalarTypes, IprsScalarB16<1, UNCHECKED>, UNCHECKED,  7>(&mut group);
@@ -662,9 +760,10 @@ fn pcs_pipeline_suite_scalar_1row(c: &mut Criterion) {
 
     // F65537 rate 1/4
     verify_1row::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, UNCHECKED, 10>(&mut group);
-    verify_1row::<BenchZipScalarTypes, IprsScalarR4B32<2, UNCHECKED>, UNCHECKED, 11>(&mut group);
-    verify_1row::<BenchZipScalarTypes, IprsScalarR4B64<2, UNCHECKED>, UNCHECKED, 12>(&mut group);
-    verify_1row::<BenchZipScalarTypes, IprsScalarR4B16<3, UNCHECKED>, UNCHECKED, 13>(&mut group);
+    verify_nrows::<BenchZipScalarTypes, IprsScalarR4B64<1, UNCHECKED>, UNCHECKED, 10>(&mut group, 2);
+    verify_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, UNCHECKED, 11>(&mut group, 2);
+    verify_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, UNCHECKED, 12>(&mut group, 4);
+    verify_nrows::<BenchZipScalarTypes, IprsScalarR4B32<2, UNCHECKED>, UNCHECKED, 13>(&mut group, 4);
 
     // F65537 rate 1/2
     verify_1row::<BenchZipScalarTypes, IprsScalarB16<1, UNCHECKED>, UNCHECKED,  7>(&mut group);

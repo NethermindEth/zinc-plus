@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-Benchmark the full PCS pipeline (Commit, Test, Verify) for Zip+ with i32 evaluations and num_rows=1.
+Benchmark the full PCS pipeline (Commit, Test, Verify) for Zip+ with i32 evaluations.
 
 This script runs the "PCS Pipeline Suite i32 1row" criterion benchmarks and collects
 the results into a LaTeX table.
 
-The benchmarks use i32 evaluations with rate 1/4 IPRS codes,
-forcing num_rows=1 (single row layout). With num_rows=1, poly_size must equal row_len.
+The benchmarks use i32 evaluations with rate 1/4 IPRS codes.
 
-    poly_size (2^P)   Config               Field           row_len
-    ───────────────   ──────               ─────           ───────
-    2^4  = 16         R4B2 D=1 (rate 1/4)  F3329           16
-    2^5  = 32         R4B4 D=1 (rate 1/4)  F3329           32
-    2^6  = 64         R4B8 D=1 (rate 1/4)  F3329           64
-    2^10 = 1024       R4B16 D=2 (rate 1/4) F65537          1024
-    2^11 = 2048       R4B32 D=2 (rate 1/4) F65537          2048
-    2^12 = 4096       R4B64 D=2 (rate 1/4) F65537          4096
-    2^13 = 8192       R4B16 D=3 (rate 1/4) F65537          8192
+    poly_size (2^P)   Config               Field           row_len     num_rows
+    ───────────────   ──────               ─────           ───────     ────────
+    2^4  = 16         R4B2 D=1 (rate 1/4)  F3329           16          1
+    2^5  = 32         R4B4 D=1 (rate 1/4)  F3329           32          1
+    2^6  = 64         R4B8 D=1 (rate 1/4)  F3329           64          1
+    2^10 = 1024       R4B16 D=2 (rate 1/4) F65537          1024        1
+    2^10 = 1024       R4B64 D=1 (rate 1/4) F65537          512         2
+    2^11 = 2048       R4B16 D=2 (rate 1/4) F65537          1024        2
+    2^12 = 4096       R4B16 D=2 (rate 1/4) F65537          1024        4
+    2^13 = 8192       R4B32 D=2 (rate 1/4) F65537          2048        4
 
 Usage:
     python3 scripts/bench_pcs_pipeline_i32.py
@@ -40,29 +40,33 @@ CARGO_BENCH_CMD = [
     "--", BENCH_FILTER,
 ]
 
-# Expected polynomial size exponents for num_rows=1 benchmarks.
-# With num_rows=1, poly_size must equal row_len.
+# Expected polynomial size exponents and num_rows for benchmarks.
+# Each entry is (poly_exp, num_rows).
 # All use rate 1/4 IPRS codes.
-EXPECTED_POLY_EXPS = [4, 5, 6, 10, 11, 12, 13]
+EXPECTED_CONFIGS = [
+    (4, 1), (5, 1), (6, 1),
+    (10, 1), (10, 2),
+    (11, 2), (12, 4), (13, 4),
+]
 
 # Number of repetitions: report the cost of performing each operation this many
 # times (the measured per-operation time is multiplied by this factor).
-NUM_REPETITIONS = 3
+NUM_REPETITIONS = 24
 
-# The three phases we benchmark
-PHASES = ["Commit", "Test", "Verify"]
+# The five phases we benchmark
+PHASES = ["Encode", "Merkle", "Commit", "Test", "Verify"]
 
-# Map poly exponent → (num_rows, config description, field)
-# With num_rows=1, poly_size = row_len
+# Map (poly exponent, num_rows) → (config description, field)
 # All use rate 1/4 IPRS codes
 POLY_EXP_CONFIG = {
-    4:  (1, "R4B2 D=1",  "F3329"),      # row_len=16
-    5:  (1, "R4B4 D=1",  "F3329"),      # row_len=32
-    6:  (1, "R4B8 D=1",  "F3329"),      # row_len=64
-    10: (1, "R4B16 D=2", "F65537"),     # row_len=1024
-    11: (1, "R4B32 D=2", "F65537"),     # row_len=2048
-    12: (1, "R4B64 D=2", "F65537"),     # row_len=4096
-    13: (1, "R4B16 D=3", "F65537"),     # row_len=8192
+    (4, 1):  ("R4B2 D=1",  "F3329"),      # row_len=16
+    (5, 1):  ("R4B4 D=1",  "F3329"),      # row_len=32
+    (6, 1):  ("R4B8 D=1",  "F3329"),      # row_len=64
+    (10, 1): ("R4B16 D=2", "F65537"),     # row_len=1024
+    (10, 2): ("R4B64 D=1", "F65537"),     # row_len=512
+    (11, 2): ("R4B16 D=2", "F65537"),     # row_len=1024
+    (12, 4): ("R4B16 D=2", "F65537"),     # row_len=1024
+    (13, 4): ("R4B32 D=2", "F65537"),     # row_len=2048
 }
 
 # Map field name to LaTeX representation
@@ -72,20 +76,22 @@ FIELD_LATEX = {
 }
 
 
-def field_for_poly_exp(p: int) -> str:
-    """Map polynomial size exponent to the field label."""
-    _, _, field = POLY_EXP_CONFIG.get(p, (1, "", "F3329"))
+def field_for_config(poly_exp: int, num_rows: int) -> str:
+    """Map (polynomial size exponent, num_rows) to the field label."""
+    _, field = POLY_EXP_CONFIG.get((poly_exp, num_rows), ("", "F3329"))
     return FIELD_LATEX.get(field, r"$\mathbb{F}$")
 
 
 # ── Parsing ────────────────────────────────────────────────────────────────────
 
 # Matches benchmark name lines like:
+#   Encode poly_size=2^4 num_rows=1
+#   Merkle poly_size=2^4 num_rows=1
 #   Commit poly_size=2^4 num_rows=1
-#   Test poly_size=2^5 num_rows=1
+#   Test poly_size=2^5 num_rows=2
 #   Verify poly_size=2^6 num_rows=1
 _RE_PHASE_NAME = re.compile(
-    r"(?P<phase>Commit|Test|Verify)\s+poly_size=2\^(?P<exp>\d+)"
+    r"(?P<phase>Encode|Merkle|Commit|Test|Verify)\s+poly_size=2\^(?P<exp>\d+)\s+num_rows=(?P<rows>\d+)"
 )
 
 # Criterion's time output line
@@ -122,15 +128,16 @@ def _format_time(us: float) -> str:
 
 def parse_criterion_output(
     text: str,
-) -> dict[tuple[str, int], tuple[float, float, float]]:
+) -> dict[tuple[str, int, int], tuple[float, float, float]]:
     """
     Parse criterion benchmark output for the PCS pipeline suite (i32).
 
-    Returns a dict mapping (phase, poly_exp) -> (low_us, median_us, high_us).
+    Returns a dict mapping (phase, poly_exp, num_rows) -> (low_us, median_us, high_us).
     phase is one of "Commit", "Test", "Verify".
     poly_exp is the exponent P where poly_size = 2^P.
+    num_rows is the number of rows used.
     """
-    results: dict[tuple[str, int], tuple[float, float, float]] = {}
+    results: dict[tuple[str, int, int], tuple[float, float, float]] = {}
     lines = text.splitlines()
     i = 0
     while i < len(lines):
@@ -139,6 +146,7 @@ def parse_criterion_output(
         if m_name:
             phase = m_name.group("phase")
             poly_exp = int(m_name.group("exp"))
+            num_rows = int(m_name.group("rows"))
 
             # Look ahead for the time: line
             for j in range(i + 1, min(i + 5, len(lines))):
@@ -149,7 +157,7 @@ def parse_criterion_output(
                     high = _parse_time_us(m_time.group(5), m_time.group(6))
                     # Scale by NUM_REPETITIONS to report the cost of
                     # performing the operation multiple times.
-                    results[(phase, poly_exp)] = (
+                    results[(phase, poly_exp, num_rows)] = (
                         low * NUM_REPETITIONS,
                         med * NUM_REPETITIONS,
                         high * NUM_REPETITIONS,
@@ -164,33 +172,33 @@ def parse_criterion_output(
 
 
 def generate_latex_table(
-    results: dict[tuple[str, int], tuple[float, float, float]],
+    results: dict[tuple[str, int, int], tuple[float, float, float]],
 ) -> str:
     """Generate a LaTeX table from the parsed results."""
     lines = [
         r"\begin{table}[ht]",
         r"\centering",
-        r"\caption{PCS pipeline benchmark ($\times" + str(NUM_REPETITIONS) + r"$) for i32 with num\_rows=1, rate 1/4 (parallel+asm+simd).}",
+        r"\caption{PCS pipeline benchmark ($\times" + str(NUM_REPETITIONS) + r"$) for i32, rate 1/4 (parallel+asm+simd).}",
         r"\label{tab:pcs-pipeline-suite-i32-1row-r4}",
-        r"\begin{tabular}{r r r l r r r}",
+        r"\begin{tabular}{r r r r l r r r r r}",
         r"\toprule",
         (
-            r"\textbf{Row len} & $\boldsymbol{2^k}$ & $\boldsymbol{2^P}$ & \textbf{Field}"
-            r" & \textbf{Commit} & \textbf{Test} & \textbf{Verify} \\"
+            r"\textbf{Row len} & $\boldsymbol{2^k}$ & \textbf{Rows} & $\boldsymbol{2^P}$ & \textbf{Field}"
+            r" & \textbf{Encode} & \textbf{Merkle} & \textbf{Commit} & \textbf{Test} & \textbf{Verify} \\"
         ),
         r"\midrule",
     ]
 
-    for poly_exp in EXPECTED_POLY_EXPS:
-        _num_rows, _config, _field = POLY_EXP_CONFIG[poly_exp]
-        # With num_rows=1, poly_size = row_len = 2^poly_exp
-        row_len = 2 ** poly_exp
-        row_exp = poly_exp
-        field = field_for_poly_exp(poly_exp)
+    for poly_exp, num_rows in EXPECTED_CONFIGS:
+        _config, _field = POLY_EXP_CONFIG[(poly_exp, num_rows)]
+        poly_size = 2 ** poly_exp
+        row_len = poly_size // num_rows
+        row_exp = row_len.bit_length() - 1
+        field = field_for_config(poly_exp, num_rows)
 
         phase_strs = []
         for phase in PHASES:
-            key = (phase, poly_exp)
+            key = (phase, poly_exp, num_rows)
             if key in results:
                 _, med, _ = results[key]
                 phase_strs.append(_format_time(med))
@@ -198,9 +206,9 @@ def generate_latex_table(
                 phase_strs.append("---")
 
         lines.append(
-            f"{row_len:>7} & $2^{{{row_exp}}}$ & $2^{{{poly_exp}}}$"
+            f"{row_len:>7} & $2^{{{row_exp}}}$ & {num_rows} & $2^{{{poly_exp}}}$"
             f" & {field}"
-            f" & {phase_strs[0]} & {phase_strs[1]} & {phase_strs[2]} \\\\"
+            f" & {phase_strs[0]} & {phase_strs[1]} & {phase_strs[2]} & {phase_strs[3]} & {phase_strs[4]} \\\\"
         )
 
     lines += [
@@ -281,12 +289,13 @@ def main():
         sys.exit(1)
 
     # Print summary
-    for (phase, poly_exp), (lo, med, hi) in sorted(
-        results.items(), key=lambda x: (x[0][0], x[0][1])
+    for (phase, poly_exp, num_rows), (lo, med, hi) in sorted(
+        results.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])
     ):
-        # With num_rows=1, row_len = poly_size = 2^poly_exp
+        row_len = (2 ** poly_exp) // num_rows
+        row_exp = row_len.bit_length() - 1
         print(
-            f"  {phase:>8}  2^{poly_exp:<2} (row_len=2^{poly_exp})  "
+            f"  {phase:>8}  2^{poly_exp:<2} (row_len=2^{row_exp}, num_rows={num_rows})  "
             f"{_format_time(lo):>20} .. {_format_time(med):>20} .. {_format_time(hi):>20}"
         )
 

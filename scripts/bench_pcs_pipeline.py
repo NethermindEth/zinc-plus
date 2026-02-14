@@ -57,8 +57,8 @@ EXPECTED_POLY_EXPS = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18]
 # times (the measured per-operation time is multiplied by this factor).
 NUM_REPETITIONS = 10
 
-# The three phases we benchmark
-PHASES = ["Commit", "Test", "Verify"]
+# The five phases we benchmark
+PHASES = ["Encode", "Merkle", "Commit", "Test", "Verify"]
 
 # Map poly exponent → (num_rows, config description, field)
 # With num_rows=1, poly_size = row_len
@@ -97,11 +97,13 @@ def field_for_poly_exp(p: int) -> str:
 # ── Parsing ────────────────────────────────────────────────────────────────────
 
 # Matches benchmark name lines like:
+#   Encode poly_size=2^4 num_rows=1
+#   Merkle poly_size=2^4 num_rows=1
 #   Commit poly_size=2^4 num_rows=1
 #   Test poly_size=2^5 num_rows=1
 #   Verify poly_size=2^6 num_rows=1
 _RE_PHASE_NAME = re.compile(
-    r"(?P<phase>Commit|Test|Verify)\s+poly_size=2\^(?P<exp>\d+)"
+    r"(?P<phase>Encode|Merkle|Commit|Test|Verify)\s+poly_size=2\^(?P<exp>\d+)"
 )
 
 # Criterion's time output line
@@ -188,11 +190,11 @@ def generate_latex_table(
         r"\centering",
         r"\caption{PCS pipeline benchmark ($\times" + str(NUM_REPETITIONS) + r"$) for BPoly\textlangle 31\textrangle{} with IPRS num\_rows=1 (parallel+asm+simd).}",
         r"\label{tab:pcs-pipeline-suite-1row}",
-        r"\begin{tabular}{r r l r r r}",
+        r"\begin{tabular}{r r l r r r r r}",
         r"\toprule",
         (
             r"\textbf{row\_len} & $\boldsymbol{2^P}$ & \textbf{Field}"
-            r" & \textbf{Commit} & \textbf{Test} & \textbf{Verify} \\"
+            r" & \textbf{Encode} & \textbf{Merkle} & \textbf{Commit} & \textbf{Test} & \textbf{Verify} \\"
         ),
         r"\midrule",
     ]
@@ -214,7 +216,7 @@ def generate_latex_table(
         lines.append(
             f"{row_len:>7} & $2^{{{poly_exp}}}$"
             f" & {field}"
-            f" & {phase_strs[0]} & {phase_strs[1]} & {phase_strs[2]} \\\\"
+            f" & {phase_strs[0]} & {phase_strs[1]} & {phase_strs[2]} & {phase_strs[3]} & {phase_strs[4]} \\\\"
         )
 
     lines += [

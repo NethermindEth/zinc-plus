@@ -735,9 +735,10 @@ def main():
         for (phase, exp_or_rowlen, config), (lo, med, hi) in sorted(
             res.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])
         ):
+            row_len = _config_row_len(config)
             print(
                 f"  {label:>6} {phase:>8}  2^{exp_or_rowlen:<3} {config:<28}  "
-                f"{_format_time(med):>20}"
+                f"row_len={row_len:<6} {_format_time(med):>20}"
             )
 
     # ── Generate LaTeX ────────────────────────────────────────────────────
