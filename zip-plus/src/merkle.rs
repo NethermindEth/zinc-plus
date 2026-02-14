@@ -127,14 +127,31 @@ macro_rules! hash_many {
 
 /// Construct the leaves of the Merkle tree by hashing each column across all
 /// rows.
+///
+/// For each column, serializes all row elements into a single contiguous byte
+/// buffer and feeds it to Blake3 in one `update` call.  This lets Blake3
+/// process full 1 KiB chunks with SIMD, which is significantly faster than
+/// the per-element `update` approach when columns are tall (many rows).
 fn hash_leaves<S>(rows: &[&[S]], m_cols: usize) -> Vec<MtHash>
 where
     S: ConstTranscribable + Send + Sync,
 {
+    let num_rows = rows.len();
+    let elem_bytes = S::NUM_BYTES;
+    let col_bytes = num_rows * elem_bytes;
+
     cfg_into_iter!(0..m_cols)
         .map(|i| {
-            // Hash the i-th column across all rows.
-            hash_many!(rows.iter().map(|row| &row[i]), S)
+            // Serialize the entire column into a contiguous byte buffer.
+            let mut buf = vec![0_u8; col_bytes];
+            for (r, row) in rows.iter().enumerate() {
+                let start = r * elem_bytes;
+                row[i].write_transcription_bytes(&mut buf[start..start + elem_bytes]);
+            }
+            // Hash the contiguous buffer in one call.
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&buf);
+            hasher.finalize().into()
         })
         .collect()
 }
