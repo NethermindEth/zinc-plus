@@ -15,7 +15,7 @@ pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
     /// makes using it too much of a hassle.
     const REPETITION_FACTOR: usize;
 
-    fn new(poly_size: usize) -> Self;
+    fn new(row_len: usize) -> Self;
 
     /// Length of each input row before encoding
     fn row_len(&self) -> usize;

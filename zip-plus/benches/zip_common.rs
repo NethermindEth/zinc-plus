@@ -93,8 +93,9 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
         ),
         |b| {
             let mut rng = ThreadRng::default();
-            let poly_size = 1 << P;
-            let linear_code = Lc::new(poly_size);
+            let poly_size: usize = 1 << P;
+            let row_len = poly_size.isqrt().next_power_of_two();
+            let linear_code = Lc::new(row_len);
             let params = ZipPlus::setup(poly_size, linear_code);
             let row_len = params.linear_code.row_len();
             let poly = DenseMultilinearExtension::<<Zt as ZipTypes>::Eval>::rand(P, &mut rng);
@@ -112,8 +113,8 @@ pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>, const ROW_LEN: usize>
     StandardUniform: Distribution<Zt::Eval>,
 {
     let mut rng = ThreadRng::default();
-    let poly_size = ROW_LEN * ROW_LEN;
-    let linear_code = Lc::new(poly_size);
+    let _poly_size = ROW_LEN * ROW_LEN;
+    let linear_code = Lc::new(ROW_LEN);
     if linear_code.row_len() != ROW_LEN {
         // TODO(Ilia): Since IPRS codes require
         //             the input size to be known at compile time
@@ -173,8 +174,9 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     StandardUniform: Distribution<Zt::Eval>,
 {
     let mut rng = ThreadRng::default();
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
+    let poly_size: usize = 1 << P;
+    let row_len = poly_size.isqrt().next_power_of_two();
+    let linear_code = Lc::new(row_len);
     let params = ZipPlus::setup(poly_size, linear_code);
 
     group.bench_function(
@@ -208,8 +210,9 @@ pub fn test<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, c
 {
     let mut rng = ThreadRng::default();
 
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
+    let poly_size: usize = 1 << P;
+    let row_len = poly_size.isqrt().next_power_of_two();
+    let linear_code = Lc::new(row_len);
     let params = ZipPlus::setup(poly_size, linear_code);
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
@@ -242,8 +245,9 @@ pub fn evaluate<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
 {
     let mut rng = ThreadRng::default();
 
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
+    let poly_size: usize = 1 << P;
+    let row_len = poly_size.isqrt().next_power_of_two();
+    let linear_code = Lc::new(row_len);
     let params = ZipPlus::setup(poly_size, linear_code);
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
@@ -289,8 +293,9 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool,
     Zt::Cw: ProjectableToField<F>,
 {
     let mut rng = ThreadRng::default();
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
+    let poly_size: usize = 1 << P;
+    let row_len = poly_size.isqrt().next_power_of_two();
+    let linear_code = Lc::new(row_len);
     let params = ZipPlus::setup(poly_size, linear_code);
 
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
