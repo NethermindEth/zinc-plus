@@ -162,6 +162,9 @@ type IprsScalarR4B64<const DEPTH: usize, const CHECK: bool> =
 type SomeRaaCode<const D_PLUS_ONE: usize> =
     RaaCode<BenchZipPlusTypes<i32, D_PLUS_ONE>, BenchRaaConfig, 4>;
 
+// RAA code for scalar i32 evaluations (REP=4, rate 1/4)
+type RaaScalarCode = RaaCode<BenchZipScalarTypes, BenchRaaConfig, 4>;
+
 // All IPRS codes use BASE_LEN=16, BASE_DIM=32 (rate 1/2)
 // F65537 (2^16+1): Row lengths 128 (D=1), 1024 (D=2), 8192 (D=3)
 type IprsB16<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const CHECK: bool> =
@@ -781,6 +784,89 @@ fn pcs_pipeline_suite_scalar_1row(c: &mut Criterion) {
     group.finish();
 }
 
+/// Full PCS pipeline suite: Encode, Merkle, Commit, Test, Verify for scalar i32
+/// using RAA codes (REP=4, rate 1/4). Uses the natural RAA row structure where
+/// row_len = next_power_of_two(sqrt(poly_size)).
+///
+/// poly_size (2^P)   row_len     num_rows
+/// ───────────────   ───────     ────────
+/// 2^8  = 256        16          16
+/// 2^9  = 512        32          16
+/// 2^10 = 1024       32          32
+/// 2^11 = 2048       64          32
+/// 2^12 = 4096       64          64
+/// 2^13 = 8192       128         64
+/// 2^14 = 16384      128         128
+/// 2^16 = 65536      256         256
+/// 2^17 = 131072     512         256
+/// 2^18 = 262144     512         512
+fn pcs_pipeline_suite_raa_scalar(c: &mut Criterion) {
+    let mut group = c.benchmark_group("PCS Pipeline Suite RAA i32");
+    group.sample_size(10);
+
+    // ── Encode ───────────────────────────────────────────────────────
+    encode_rows_nrows::<BenchZipScalarTypes, RaaScalarCode,  8>(&mut group, 16);
+    encode_rows_nrows::<BenchZipScalarTypes, RaaScalarCode,  9>(&mut group, 16);
+    encode_rows_nrows::<BenchZipScalarTypes, RaaScalarCode, 10>(&mut group, 32);
+    encode_rows_nrows::<BenchZipScalarTypes, RaaScalarCode, 11>(&mut group, 32);
+    encode_rows_nrows::<BenchZipScalarTypes, RaaScalarCode, 12>(&mut group, 64);
+    encode_rows_nrows::<BenchZipScalarTypes, RaaScalarCode, 13>(&mut group, 64);
+    encode_rows_nrows::<BenchZipScalarTypes, RaaScalarCode, 14>(&mut group, 128);
+    encode_rows_nrows::<BenchZipScalarTypes, RaaScalarCode, 16>(&mut group, 256);
+    encode_rows_nrows::<BenchZipScalarTypes, RaaScalarCode, 17>(&mut group, 256);
+    encode_rows_nrows::<BenchZipScalarTypes, RaaScalarCode, 18>(&mut group, 512);
+
+    // ── Merkle ───────────────────────────────────────────────────────
+    merkle_nrows::<BenchZipScalarTypes, RaaScalarCode,  8>(&mut group, 16);
+    merkle_nrows::<BenchZipScalarTypes, RaaScalarCode,  9>(&mut group, 16);
+    merkle_nrows::<BenchZipScalarTypes, RaaScalarCode, 10>(&mut group, 32);
+    merkle_nrows::<BenchZipScalarTypes, RaaScalarCode, 11>(&mut group, 32);
+    merkle_nrows::<BenchZipScalarTypes, RaaScalarCode, 12>(&mut group, 64);
+    merkle_nrows::<BenchZipScalarTypes, RaaScalarCode, 13>(&mut group, 64);
+    merkle_nrows::<BenchZipScalarTypes, RaaScalarCode, 14>(&mut group, 128);
+    merkle_nrows::<BenchZipScalarTypes, RaaScalarCode, 16>(&mut group, 256);
+    merkle_nrows::<BenchZipScalarTypes, RaaScalarCode, 17>(&mut group, 256);
+    merkle_nrows::<BenchZipScalarTypes, RaaScalarCode, 18>(&mut group, 512);
+
+    // ── Commit ───────────────────────────────────────────────────────
+    commit_nrows::<BenchZipScalarTypes, RaaScalarCode,  8>(&mut group, 16);
+    commit_nrows::<BenchZipScalarTypes, RaaScalarCode,  9>(&mut group, 16);
+    commit_nrows::<BenchZipScalarTypes, RaaScalarCode, 10>(&mut group, 32);
+    commit_nrows::<BenchZipScalarTypes, RaaScalarCode, 11>(&mut group, 32);
+    commit_nrows::<BenchZipScalarTypes, RaaScalarCode, 12>(&mut group, 64);
+    commit_nrows::<BenchZipScalarTypes, RaaScalarCode, 13>(&mut group, 64);
+    commit_nrows::<BenchZipScalarTypes, RaaScalarCode, 14>(&mut group, 128);
+    commit_nrows::<BenchZipScalarTypes, RaaScalarCode, 16>(&mut group, 256);
+    commit_nrows::<BenchZipScalarTypes, RaaScalarCode, 17>(&mut group, 256);
+    commit_nrows::<BenchZipScalarTypes, RaaScalarCode, 18>(&mut group, 512);
+
+    // ── Test ─────────────────────────────────────────────────────────
+    test_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED,  8>(&mut group, 16);
+    test_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED,  9>(&mut group, 16);
+    test_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED, 10>(&mut group, 32);
+    test_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED, 11>(&mut group, 32);
+    test_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED, 12>(&mut group, 64);
+    test_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED, 13>(&mut group, 64);
+    test_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED, 14>(&mut group, 128);
+    test_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED, 16>(&mut group, 256);
+    test_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED, 17>(&mut group, 256);
+    test_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED, 18>(&mut group, 512);
+
+    // ── Verify ───────────────────────────────────────────────────────
+    verify_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED,  8>(&mut group, 16);
+    verify_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED,  9>(&mut group, 16);
+    verify_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED, 10>(&mut group, 32);
+    verify_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED, 11>(&mut group, 32);
+    verify_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED, 12>(&mut group, 64);
+    verify_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED, 13>(&mut group, 64);
+    verify_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED, 14>(&mut group, 128);
+    verify_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED, 16>(&mut group, 256);
+    verify_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED, 17>(&mut group, 256);
+    verify_nrows::<BenchZipScalarTypes, RaaScalarCode, UNCHECKED, 18>(&mut group, 512);
+
+    group.finish();
+}
+
 /// Compare different code configurations for encoding a single BPoly<31> message
 /// of length 2^18 = 262144. Only configs that produce exactly row_len = 262144
 /// are compared (i.e. BASE_LEN=64, DEPTH=4 with different fields).
@@ -823,5 +909,5 @@ fn encode_full_poly_2_18_config_search(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, zip_plus_benchmarks_iprs, encode_message_suite, pcs_pipeline_suite, pcs_pipeline_suite_scalar, pcs_pipeline_suite_1row, pcs_pipeline_suite_scalar_1row, encode_full_poly_2_18_config_search);
+criterion_group!(benches, zip_plus_benchmarks_iprs, encode_message_suite, pcs_pipeline_suite, pcs_pipeline_suite_scalar, pcs_pipeline_suite_1row, pcs_pipeline_suite_scalar_1row, pcs_pipeline_suite_raa_scalar, encode_full_poly_2_18_config_search);
 criterion_main!(benches);
