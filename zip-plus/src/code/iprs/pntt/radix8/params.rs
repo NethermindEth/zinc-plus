@@ -489,6 +489,53 @@ pub struct PnttConfigF7340033B32<const DEPTH: usize>;
 #[derive(Clone, Copy)]
 pub struct PnttConfigF7340033B64<const DEPTH: usize>;
 
+// ==================== Rate 1/4 configurations for larger fields ====================
+
+/// Pseudo NTT configuration for F1179649 (9 × 2^17 + 1) with BASE_LEN=16, BASE_DIM=64 (rate 1/4).
+/// NTT domain up to 2^17. Row lengths: 128 (D=1), 1024 (D=2), 8192 (D=3).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF1179649R4B16<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F1179649 (9 × 2^17 + 1) with BASE_LEN=32, BASE_DIM=128 (rate 1/4).
+/// NTT domain up to 2^17. Row lengths: 256 (D=1), 2048 (D=2).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF1179649R4B32<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F1179649 (9 × 2^17 + 1) with BASE_LEN=64, BASE_DIM=256 (rate 1/4).
+/// NTT domain up to 2^17. Row lengths: 512 (D=1), 4096 (D=2).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF1179649R4B64<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F7340033 (7 × 2^20 + 1) with BASE_LEN=16, BASE_DIM=64 (rate 1/4).
+/// NTT domain up to 2^20. Row lengths: 128 (D=1), 1024 (D=2), 8192 (D=3), 65536 (D=4).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF7340033R4B16<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F7340033 (7 × 2^20 + 1) with BASE_LEN=32, BASE_DIM=128 (rate 1/4).
+/// NTT domain up to 2^20. Row lengths: 256 (D=1), 2048 (D=2), 16384 (D=3).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF7340033R4B32<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F7340033 (7 × 2^20 + 1) with BASE_LEN=64, BASE_DIM=256 (rate 1/4).
+/// NTT domain up to 2^20. Row lengths: 512 (D=1), 4096 (D=2), 32768 (D=3).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF7340033R4B64<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F167772161 (5 × 2^25 + 1) with BASE_LEN=16, BASE_DIM=64 (rate 1/4).
+/// NTT domain up to 2^25. Row lengths: 128 (D=1), 1024 (D=2), 8192 (D=3), 65536 (D=4).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF167772161R4B16<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F167772161 (5 × 2^25 + 1) with BASE_LEN=32, BASE_DIM=128 (rate 1/4).
+/// NTT domain up to 2^25. Row lengths: 256 (D=1), 2048 (D=2), 16384 (D=3), 131072 (D=4).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF167772161R4B32<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F167772161 (5 × 2^25 + 1) with BASE_LEN=64, BASE_DIM=256 (rate 1/4).
+/// NTT domain up to 2^25. Row lengths: 512 (D=1), 4096 (D=2), 32768 (D=3), 262144 (D=4).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF167772161R4B64<const DEPTH: usize>;
+
 impl<const DEPTH: usize> Config for PnttConfigF3329B8<DEPTH> {
     type Field = fq_small::FqSmall;
     const FIELD_MODULUS: u32 = fq_small::MODULUS;
@@ -614,6 +661,146 @@ impl<const DEPTH: usize> Config for PnttConfigF7340033B64<DEPTH> {
     }
 }
 
+// ==================== Rate 1/4 Config trait implementations ====================
+
+// F1179649 rate 1/4 configurations
+impl<const DEPTH: usize> Config for PnttConfigF1179649R4B16<DEPTH> {
+    type Field = fq_mid::FqMid;
+    const FIELD_MODULUS: u32 = fq_mid::MODULUS;
+    const BASE_LEN: usize = 16;
+    const BASE_DIM: usize = 64;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 494273, 490629, -495809, -1, -494273, -490629, 495809];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq_mid::FqMidBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF1179649R4B32<DEPTH> {
+    type Field = fq_mid::FqMid;
+    const FIELD_MODULUS: u32 = fq_mid::MODULUS;
+    const BASE_LEN: usize = 32;
+    const BASE_DIM: usize = 128;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 494273, 490629, -495809, -1, -494273, -490629, 495809];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq_mid::FqMidBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF1179649R4B64<DEPTH> {
+    type Field = fq_mid::FqMid;
+    const FIELD_MODULUS: u32 = fq_mid::MODULUS;
+    const BASE_LEN: usize = 64;
+    const BASE_DIM: usize = 256;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 494273, 490629, -495809, -1, -494273, -490629, 495809];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq_mid::FqMidBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+// F7340033 rate 1/4 configurations
+impl<const DEPTH: usize> Config for PnttConfigF7340033R4B16<DEPTH> {
+    type Field = fq_mid2::FqMid2;
+    const FIELD_MODULUS: u32 = fq_mid2::MODULUS;
+    const BASE_LEN: usize = 16;
+    const BASE_DIM: usize = 64;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 2001861, 2306278, -3413510, -1, -2001861, -2306278, 3413510];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq_mid2::FqMid2Backend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF7340033R4B32<DEPTH> {
+    type Field = fq_mid2::FqMid2;
+    const FIELD_MODULUS: u32 = fq_mid2::MODULUS;
+    const BASE_LEN: usize = 32;
+    const BASE_DIM: usize = 128;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 2001861, 2306278, -3413510, -1, -2001861, -2306278, 3413510];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq_mid2::FqMid2Backend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF7340033R4B64<DEPTH> {
+    type Field = fq_mid2::FqMid2;
+    const FIELD_MODULUS: u32 = fq_mid2::MODULUS;
+    const BASE_LEN: usize = 64;
+    const BASE_DIM: usize = 256;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 2001861, 2306278, -3413510, -1, -2001861, -2306278, 3413510];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq_mid2::FqMid2Backend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+// F167772161 rate 1/4 configurations
+impl<const DEPTH: usize> Config for PnttConfigF167772161R4B16<DEPTH> {
+    type Field = fq_large::FqLarge;
+    const FIELD_MODULUS: u32 = fq_large::MODULUS;
+    const BASE_LEN: usize = 16;
+    const BASE_DIM: usize = 64;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 71493608, 65249968, 30406922, -1, -71493608, -65249968, -30406922];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq_large::FqLargeBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF167772161R4B32<DEPTH> {
+    type Field = fq_large::FqLarge;
+    const FIELD_MODULUS: u32 = fq_large::MODULUS;
+    const BASE_LEN: usize = 32;
+    const BASE_DIM: usize = 128;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 71493608, 65249968, 30406922, -1, -71493608, -65249968, -30406922];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq_large::FqLargeBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF167772161R4B64<DEPTH> {
+    type Field = fq_large::FqLarge;
+    const FIELD_MODULUS: u32 = fq_large::MODULUS;
+    const BASE_LEN: usize = 64;
+    const BASE_DIM: usize = 256;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 71493608, 65249968, 30406922, -1, -71493608, -65249968, -30406922];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq_large::FqLargeBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,6 +830,9 @@ mod tests {
     #[test]
     fn check_twiddles_f1179649() {
         check_twiddles_generic::<PnttConfigF1179649B16<1>>();
+        check_twiddles_generic::<PnttConfigF1179649R4B16<1>>();
+        check_twiddles_generic::<PnttConfigF1179649R4B32<1>>();
+        check_twiddles_generic::<PnttConfigF1179649R4B64<1>>();
     }
 
     #[test]
@@ -654,5 +844,15 @@ mod tests {
     #[test]
     fn check_twiddles_f7340033() {
         check_twiddles_generic::<PnttConfigF7340033B16<1>>();
+        check_twiddles_generic::<PnttConfigF7340033R4B16<1>>();
+        check_twiddles_generic::<PnttConfigF7340033R4B32<1>>();
+        check_twiddles_generic::<PnttConfigF7340033R4B64<1>>();
+    }
+
+    #[test]
+    fn check_twiddles_f167772161_r4() {
+        check_twiddles_generic::<PnttConfigF167772161R4B16<1>>();
+        check_twiddles_generic::<PnttConfigF167772161R4B32<1>>();
+        check_twiddles_generic::<PnttConfigF167772161R4B64<1>>();
     }
 }
