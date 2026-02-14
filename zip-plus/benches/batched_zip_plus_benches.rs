@@ -33,6 +33,7 @@ use zip_plus::{
         LinearCode,
         raa::{RaaCode, RaaConfig},
     },
+    merkle::MerkleTree,
     pcs::structs::{ZipPlus, ZipTypes},
 };
 
@@ -268,6 +269,100 @@ fn batched_verify<
     );
 }
 
+/// Benchmark only the Merkle tree construction for a batched commit.
+///
+/// This isolates the cost of `MerkleTree::new` on the concatenated codeword
+/// rows of `batch_size` polynomials.  Encoding is done once in setup so the
+/// measurement captures only the tree building.
+fn batched_merkle_tree<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+    batch_size: usize,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let params = ZipPlus::<Zt, Lc>::setup(poly_size, linear_code);
+
+    let row_len = params.linear_code.row_len();
+
+    // Pre-encode all polynomials
+    let cw_matrices: Vec<_> = (0..batch_size)
+        .map(|_| {
+            let poly = DenseMultilinearExtension::rand(P, &mut rng);
+            ZipPlus::<Zt, Lc>::encode_rows(&params, row_len, &poly)
+        })
+        .collect();
+
+    // Collect row slices for MerkleTree::new (same layout as BatchedZipPlus::commit)
+    let all_rows: Vec<&[Zt::Cw]> = cw_matrices
+        .iter()
+        .flat_map(|m| m.to_rows_slices())
+        .collect();
+
+    group.bench_function(
+        format!(
+            "BatchedMerkleTree: Cw={}, poly_size=2^{P}, batch={batch_size}, total_rows={}",
+            Zt::Cw::type_name(),
+            all_rows.len(),
+        ),
+        |b| {
+            b.iter(|| {
+                let tree = MerkleTree::new(&all_rows);
+                black_box(tree.root());
+            })
+        },
+    );
+}
+
+/// Benchmark building `batch_size` separate Merkle trees (one per polynomial)
+/// vs the batched single-tree approach.  This lets us directly compare the
+/// cost of m independent trees against 1 batched tree.
+fn separate_merkle_trees<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+    batch_size: usize,
+) where
+    StandardUniform: Distribution<Zt::Eval>,
+{
+    let mut rng = ThreadRng::default();
+    let poly_size = 1 << P;
+    let linear_code = Lc::new(poly_size);
+    let params = ZipPlus::<Zt, Lc>::setup(poly_size, linear_code);
+
+    let row_len = params.linear_code.row_len();
+
+    // Pre-encode all polynomials
+    let cw_matrices: Vec<_> = (0..batch_size)
+        .map(|_| {
+            let poly = DenseMultilinearExtension::rand(P, &mut rng);
+            ZipPlus::<Zt, Lc>::encode_rows(&params, row_len, &poly)
+        })
+        .collect();
+
+    // Pre-collect row slices per polynomial
+    let per_poly_rows: Vec<Vec<&[Zt::Cw]>> = cw_matrices
+        .iter()
+        .map(|m| m.to_rows_slices().into_iter().collect())
+        .collect();
+
+    group.bench_function(
+        format!(
+            "SeparateMerkleTrees: Cw={}, poly_size=2^{P}, batch={batch_size}, rows_per_tree={}",
+            Zt::Cw::type_name(),
+            per_poly_rows[0].len(),
+        ),
+        |b| {
+            b.iter(|| {
+                for rows in &per_poly_rows {
+                    let tree = MerkleTree::new(rows);
+                    black_box(tree.root());
+                }
+            })
+        },
+    );
+}
+
 /// Run all batched benchmarks for a given ZipTypes/Code/P combination
 /// with several batch sizes.
 fn do_batched_bench<
@@ -286,6 +381,8 @@ fn do_batched_bench<
 {
     for &batch_size in &[1, 2, 5, 10] {
         batched_commit::<Zt, Lc, P>(group, batch_size);
+        batched_merkle_tree::<Zt, Lc, P>(group, batch_size);
+        separate_merkle_trees::<Zt, Lc, P>(group, batch_size);
         batched_test::<Zt, Lc, CHECK_FOR_OVERFLOWS, P>(group, batch_size);
         batched_evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, P>(group, batch_size);
         batched_verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, P>(group, batch_size);
