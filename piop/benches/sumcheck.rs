@@ -78,7 +78,7 @@ pub fn bench_simple_product<F, const LIMBS: usize>(
             nvars,
             3,
             |_x, vals| (&vals[0] * &vals[1] - &vals[2]) * &vals[3],
-            field_cfg,
+            &field_cfg,
         ))
         .0
     };
