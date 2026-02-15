@@ -38,45 +38,46 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             );
         let mut transcript = PcsTranscript::new_with_capacity(estimated_transcript_size);
 
-        // If we can take linear combinations, perform the proximity test
-        if pp.num_rows > 1 {
-            // Values to evaluate the coefficients at
-            let alphas = if Zt::Comb::DEGREE_BOUND.is_zero() {
-                // If we have just one coefficient
-                // we don't take an RLC.
-                vec![Zt::Chal::ONE]
-            } else {
-                transcript
-                    .fs_transcript
-                    // NB: To take an inner product of coeffs
-                    // of a polynomial with the non-strict degree bound B
-                    // with a slice of challenges
-                    // we need to sample B + 1 challenges.
-                    .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND + 1)
-            };
-
-            // Coefficients for the linear combination of polynomial with evaluated
-            // coefficients
-            let coeffs = transcript
+        // Proximity test: always encode the message and verify proximity
+        let alphas = if Zt::Comb::DEGREE_BOUND.is_zero() {
+            // If we have just one coefficient
+            // we don't take an RLC.
+            vec![Zt::Chal::ONE]
+        } else {
+            transcript
                 .fs_transcript
-                .get_challenges::<Zt::Chal>(pp.num_rows);
+                // NB: To take an inner product of coeffs
+                // of a polynomial with the non-strict degree bound B
+                // with a slice of challenges
+                // we need to sample B + 1 challenges.
+                .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND + 1)
+        };
 
-            // u' in the Zinc paper
-            let combined_row = combine_rows!(
-                CHECK_FOR_OVERFLOW,
-                &coeffs,
-                poly.evaluations.iter(),
-                |eval| Zt::EvalDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
-                    eval,
-                    &alphas,
-                    Zt::CombR::ZERO
-                ),
-                pp.linear_code.row_len(),
+        // Coefficients for the linear combination of rows.
+        // When num_rows == 1, no combination is needed.
+        let coeffs = if pp.num_rows > 1 {
+            transcript
+                .fs_transcript
+                .get_challenges::<Zt::Chal>(pp.num_rows)
+        } else {
+            vec![Zt::Chal::ONE]
+        };
+
+        // u' in the Zinc paper
+        let combined_row = combine_rows!(
+            CHECK_FOR_OVERFLOW,
+            &coeffs,
+            poly.evaluations.iter(),
+            |eval| Zt::EvalDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
+                eval,
+                &alphas,
                 Zt::CombR::ZERO
-            );
+            ),
+            pp.linear_code.row_len(),
+            Zt::CombR::ZERO
+        );
 
-            transcript.write_const_many(&combined_row)?;
-        }
+        transcript.write_const_many(&combined_row)?;
 
         // Open merkle tree for each column drawn
         for _ in 0..Zt::NUM_COLUMN_OPENINGS {

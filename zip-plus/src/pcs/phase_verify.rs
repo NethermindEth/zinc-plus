@@ -72,38 +72,28 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         root: &MtHash,
         transcript: &mut PcsTranscript,
     ) -> Result<Vec<(usize, Vec<Zt::Cw>)>, ZipError> {
-        // Gather the coeffs and encoded combined rows per proximity test
-        let encoded_combined_rows: Option<(Vec<Zt::Chal>, Vec<Zt::Chal>, Vec<Zt::CombR>)> = {
-            if vp.num_rows > 1 {
-                // Values to evaluate the coefficients at
-                let alphas = if Zt::Comb::DEGREE_BOUND.is_zero() {
-                    // If we have just one coefficient
-                    // we don't take an RLC.
-                    vec![Zt::Chal::ONE]
-                } else {
-                    transcript
-                        .fs_transcript
-                        // NB: To take an inner product of coeffs
-                        // of a polynomial with the non-strict degree bound B
-                        // with a slice of challenges
-                        // we need to sample B + 1 challenges.
-                        .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND + 1)
-                };
-
-                // Coefficients for the linear combination of polynomial with evaluated
-                // coefficients
-                let coeffs = transcript.fs_transcript.get_challenges(vp.num_rows);
-
-                let combined_row: Vec<Zt::CombR> =
-                    transcript.read_const_many(vp.linear_code.row_len())?;
-
-                let encoded_combined_row: Vec<Zt::CombR> =
-                    vp.linear_code.encode_wide(&combined_row);
-                Some((alphas, coeffs, encoded_combined_row))
-            } else {
-                None
-            }
+        // Proximity test: always read and encode the combined row
+        let alphas = if Zt::Comb::DEGREE_BOUND.is_zero() {
+            vec![Zt::Chal::ONE]
+        } else {
+            transcript
+                .fs_transcript
+                .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND + 1)
         };
+
+        // Coefficients for the linear combination of rows.
+        // When num_rows == 1, no combination is needed.
+        let coeffs = if vp.num_rows > 1 {
+            transcript.fs_transcript.get_challenges(vp.num_rows)
+        } else {
+            vec![Zt::Chal::ONE]
+        };
+
+        let combined_row: Vec<Zt::CombR> =
+            transcript.read_const_many(vp.linear_code.row_len())?;
+
+        let encoded_combined_row: Vec<Zt::CombR> =
+            vp.linear_code.encode_wide(&combined_row);
 
         // Read the transcript sequentially
         let columns_and_proofs: Vec<_> = (0..Zt::NUM_COLUMN_OPENINGS)
@@ -120,18 +110,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let columns_opened: Vec<(usize, Vec<Zt::Cw>)> = cfg_into_iter!(columns_and_proofs)
             .map(
                 |(column_idx, column_values, proof)| -> Result<_, ZipError> {
-                    if let Some((ref alphas, ref coeffs, ref encoded_combined_row)) =
-                        encoded_combined_rows
-                    {
-                        Self::verify_column_testing::<CHECK_FOR_OVERFLOW>(
-                            alphas,
-                            coeffs,
-                            encoded_combined_row,
-                            &column_values,
-                            column_idx,
-                            vp.num_rows,
-                        )?;
-                    }
+                    Self::verify_column_testing::<CHECK_FOR_OVERFLOW>(
+                        &alphas,
+                        &coeffs,
+                        &encoded_combined_row,
+                        &column_values,
+                        column_idx,
+                        vp.num_rows,
+                    )?;
 
                     proof
                         .verify(root, &column_values, column_idx)

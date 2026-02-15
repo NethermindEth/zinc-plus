@@ -1,0 +1,19 @@
+\begin{table}[ht]
+\centering
+\caption{Batched PCS pipeline benchmark (batch=24) for i32, rate 1/4 (parallel+asm+simd).}
+\label{tab:batched-pcs-pipeline-suite-i32-1row-r4}
+\begin{tabular}{r r r r l r r r r r}
+\toprule
+\textbf{Row len} & $\boldsymbol{2^k}$ & \textbf{Rows} & $\boldsymbol{2^P}$ & \textbf{Field} & \textbf{Encode} & \textbf{Merkle} & \textbf{Commit} & \textbf{Test} & \textbf{Verify} \\
+\midrule
+     16 & $2^{4}$ & 1 & $2^{4}$ & $\mathbb{F}_{3329}$ & 531.8\,\textmu s & 147.3\,\textmu s & 736.4\,\textmu s & 38.5\,\textmu s & 237.4\,\textmu s \\
+     32 & $2^{5}$ & 1 & $2^{5}$ & $\mathbb{F}_{3329}$ & 660.0\,\textmu s & 186.5\,\textmu s & 852.9\,\textmu s & 39.2\,\textmu s & 230.5\,\textmu s \\
+     64 & $2^{6}$ & 1 & $2^{6}$ & $\mathbb{F}_{3329}$ & 725.3\,\textmu s & 228.0\,\textmu s & 1.01\,ms & 40.0\,\textmu s & 243.9\,\textmu s \\
+   1024 & $2^{10}$ & 1 & $2^{10}$ & $\mathbb{F}_{65537}$ & 2.58\,ms & 752.4\,\textmu s & 3.43\,ms & 50.2\,\textmu s & 290.0\,\textmu s \\
+    512 & $2^{9}$ & 2 & $2^{10}$ & $\mathbb{F}_{65537}$ & 2.63\,ms & 611.0\,\textmu s & 3.18\,ms & 954.2\,\textmu s & 7.49\,ms \\
+   1024 & $2^{10}$ & 2 & $2^{11}$ & $\mathbb{F}_{65537}$ & 3.65\,ms & 983.2\,\textmu s & 4.69\,ms & 932.5\,\textmu s & 9.04\,ms \\
+   1024 & $2^{10}$ & 4 & $2^{12}$ & $\mathbb{F}_{65537}$ & 4.40\,ms & 1.55\,ms & 6.28\,ms & 1.02\,ms & 9.03\,ms \\
+   2048 & $2^{11}$ & 4 & $2^{13}$ & $\mathbb{F}_{65537}$ & 7.23\,ms & 2.74\,ms & 10.95\,ms & 1.23\,ms & 19.49\,ms \\
+\bottomrule
+\end{tabular}
+\end{table}

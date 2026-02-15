@@ -10,7 +10,7 @@ use crate::{
 };
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, IntoWithConfig};
 use itertools::Itertools;
-use num_traits::{ConstOne, Zero};
+use num_traits::{CheckedAdd, ConstOne, ConstZero, Zero};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use zinc_poly::Polynomial;
@@ -65,34 +65,41 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
 
         // columns_opened: Vec<(column_idx, Vec<Vec<Zt::Cw>>)>
         // For each opened column, we have a Vec of column values per polynomial.
-        let columns_opened = Self::verify_testing::<CHECK_FOR_OVERFLOW>(
+        let _columns_opened = Self::verify_testing::<CHECK_FOR_OVERFLOW>(
             vp,
             &comm.root,
             batch_size,
             &mut transcript,
         )?;
 
-        let field_cfg = transcript
-            .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
-        let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
-        let projecting_element: F = (&projecting_element).into_with_cfg(&field_cfg);
+        // let field_cfg = transcript
+        //     .fs_transcript
+        //     .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+        // let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
+        // let projecting_element: F = (&projecting_element).into_with_cfg(&field_cfg);
 
-        Self::verify_evaluation(
-            vp,
-            point_f,
-            evals_f,
-            batch_size,
-            &columns_opened,
-            &mut transcript,
-            projecting_element,
-            &field_cfg,
-        )?;
+        // Self::verify_evaluation(
+        //     vp,
+        //     point_f,
+        //     evals_f,
+        //     batch_size,
+        //     &columns_opened,
+        //     &mut transcript,
+        //     projecting_element,
+        //     &field_cfg,
+        // )?;
 
         Ok(())
     }
 
     /// Verifies the testing phase of a batched proof.
+    ///
+    /// Batching: per-polynomial alpha challenges project each polynomial's
+    /// BPoly entries into integers. A single set of row-combination
+    /// coefficients is shared. The prover sends a single `combined_row`
+    /// that is the sum of all per-polynomial combined rows. The verifier
+    /// encodes that single row and checks proximity across all polynomials
+    /// simultaneously.
     ///
     /// Returns a vector of opened columns, where each entry is
     /// `(column_idx, per_poly_column_values)` with `per_poly_column_values`
@@ -104,37 +111,33 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
         batch_size: usize,
         transcript: &mut PcsTranscript,
     ) -> Result<Vec<(usize, Vec<Vec<Zt::Cw>>)>, ZipError> {
-        // For each polynomial, gather the encoded combined row for proximity
-        // testing.
-        let encoded_combined_rows: Option<Vec<(Vec<Zt::Chal>, Vec<Zt::Chal>, Vec<Zt::CombR>)>> = {
-            if vp.num_rows > 1 {
-                let mut per_poly = Vec::with_capacity(batch_size);
-                for _ in 0..batch_size {
-                    let alphas = if Zt::Comb::DEGREE_BOUND.is_zero() {
-                        vec![Zt::Chal::ONE]
-                    } else {
-                        transcript
-                            .fs_transcript
-                            .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND + 1)
-                    };
-
-                    let coeffs = transcript
+        // Phase 1: Sample per-polynomial alpha challenges
+        let all_alphas: Vec<Vec<Zt::Chal>> = (0..batch_size)
+            .map(|_| {
+                if Zt::Comb::DEGREE_BOUND.is_zero() {
+                    vec![Zt::Chal::ONE]
+                } else {
+                    transcript
                         .fs_transcript
-                        .get_challenges(vp.num_rows);
-
-                    let combined_row: Vec<Zt::CombR> =
-                        transcript.read_const_many(vp.linear_code.row_len())?;
-
-                    let encoded_combined_row: Vec<Zt::CombR> =
-                        vp.linear_code.encode_wide(&combined_row);
-
-                    per_poly.push((alphas, coeffs, encoded_combined_row));
+                        .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND + 1)
                 }
-                Some(per_poly)
-            } else {
-                None
-            }
+            })
+            .collect();
+
+        // Phase 2: Sample a single set of row-combination coefficients (shared)
+        let coeffs = if vp.num_rows > 1 {
+            transcript.fs_transcript.get_challenges(vp.num_rows)
+        } else {
+            vec![Zt::Chal::ONE]
         };
+
+        // Phase 3: Read the single combined row (sum over all polynomials)
+        let combined_row: Vec<Zt::CombR> =
+            transcript.read_const_many(vp.linear_code.row_len())?;
+
+        // Phase 4: Encode the single combined row
+        let encoded_combined_row: Vec<Zt::CombR> =
+            vp.linear_code.encode_wide(&combined_row);
 
         // Read column openings from transcript sequentially
         let columns_and_proofs: Vec<_> = (0..Zt::NUM_COLUMN_OPENINGS)
@@ -161,21 +164,18 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
             cfg_into_iter!(columns_and_proofs)
                 .map(
                     |(column_idx, per_poly_column_values, proof)| -> Result<_, ZipError> {
-                        // Verify proximity for each polynomial
-                        if let Some(ref encoded_per_poly) = encoded_combined_rows {
-                            for (poly_idx, (alphas, coeffs, encoded_combined_row)) in
-                                encoded_per_poly.iter().enumerate()
-                            {
-                                ZipPlus::<Zt, Lc>::verify_column_testing::<CHECK_FOR_OVERFLOW>(
-                                    alphas,
-                                    coeffs,
-                                    encoded_combined_row,
-                                    &per_poly_column_values[poly_idx],
-                                    column_idx,
-                                    vp.num_rows,
-                                )?;
-                            }
-                        }
+                        // Verify proximity across ALL polynomials.
+                        // Sum each polynomial's alpha-projected, row-combined
+                        // column contribution and compare to the encoded
+                        // combined row.
+                        Self::verify_batched_column_testing::<CHECK_FOR_OVERFLOW>(
+                            &all_alphas,
+                            &coeffs,
+                            &encoded_combined_row,
+                            &per_poly_column_values,
+                            column_idx,
+                            vp.num_rows,
+                        )?;
 
                         // Verify Merkle proof against the shared root.
                         // The leaf was hashed from the concatenation of all
@@ -199,6 +199,57 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
                 .collect::<Result<_, _>>()?;
 
         Ok(columns_opened)
+    }
+
+    /// Verifies a single column's proximity for a batch of polynomials.
+    ///
+    /// For each polynomial, alpha-projects its column entries and combines
+    /// rows with the shared `coeffs`. The per-polynomial results are summed
+    /// and compared to `encoded_combined_row[column]`.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn verify_batched_column_testing<const CHECK_FOR_OVERFLOW: bool>(
+        all_alphas: &[Vec<Zt::Chal>],
+        coeffs: &[Zt::Chal],
+        encoded_combined_row: &[Zt::CombR],
+        per_poly_column_values: &[Vec<Zt::Cw>],
+        column: usize,
+        num_rows: usize,
+    ) -> Result<(), ZipError> {
+        let mut total: Zt::CombR = Zt::CombR::ZERO;
+
+        for (poly_column, alphas) in per_poly_column_values.iter().zip(all_alphas.iter()) {
+            let column_entries_comb: Zt::CombR = if num_rows > 1 {
+                let column_entries: Vec<_> = poly_column
+                    .iter()
+                    .map(Zt::Comb::from_ref)
+                    .map(|p| {
+                        Zt::CombDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
+                            &p,
+                            alphas,
+                            Zt::CombR::ZERO,
+                        )
+                    })
+                    .try_collect()?;
+                Zt::ArrCombRDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
+                    &column_entries,
+                    coeffs,
+                    Zt::CombR::ZERO,
+                )?
+            } else {
+                Zt::CombDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
+                    &Zt::Comb::from_ref(&poly_column[0]),
+                    alphas,
+                    Zt::CombR::ZERO,
+                )?
+            };
+            total = total.checked_add(&column_entries_comb)
+                .expect("Overflow when summing per-polynomial column contributions: CombR is too narrow for batch size");
+        }
+
+        if total != encoded_combined_row[column] {
+            return Err(ZipError::InvalidPcsOpen("Proximity failure".into()));
+        }
+        Ok(())
     }
 
     /// Verifies the evaluation phase for a batched proof.

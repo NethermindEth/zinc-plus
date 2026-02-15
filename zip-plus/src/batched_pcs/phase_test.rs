@@ -9,7 +9,7 @@ use crate::{
     },
     pcs_transcript::PcsTranscript,
 };
-use num_traits::{ConstOne, ConstZero, Zero};
+use num_traits::{CheckedAdd, ConstOne, ConstZero, Zero};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use zinc_poly::{Polynomial, mle::DenseMultilinearExtension};
@@ -23,12 +23,13 @@ use super::structs::{
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
     /// Performs the testing phase for a batch of committed polynomials.
     ///
-    /// This mirrors the single-polynomial testing phase but operates on `m`
-    /// polynomials simultaneously. Each polynomial gets its own alphas,
-    /// coefficients, and combined row (sampled and computed sequentially from
-    /// the shared Fiat-Shamir transcript). Column openings are shared: the
-    /// same column indices are queried for all polynomials, and a single
-    /// Merkle proof is produced per column.
+    /// Batching works by sampling per-polynomial alpha challenges
+    /// `c_{i,1}, ..., c_{i,32}` that project each polynomial's BPoly entries
+    /// into integers. A single set of row-combination coefficients is then
+    /// sampled. Each polynomial's integer matrix rows are combined with these
+    /// shared coefficients, and the results are summed across all polynomials
+    /// to produce a single `combined_row`. From this point the protocol
+    /// proceeds exactly as the non-batched case.
     ///
     /// # Parameters
     /// - `pp`: Public parameters shared across all polynomials.
@@ -56,10 +57,11 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
         }
 
         let total_rows_per_poly = pp.num_rows;
+        let row_len = pp.linear_code.row_len();
 
         let estimated_transcript_size =
-            // Combined rows: one per polynomial
-            batch_size * pp.linear_code.row_len() * Zt::CombR::NUM_BYTES
+            // Single combined row (sum over all polynomials)
+            row_len * Zt::CombR::NUM_BYTES
             // Column openings
             + Zt::NUM_COLUMN_OPENINGS * (
                 // Column values from all m polynomials
@@ -69,41 +71,54 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
             );
         let mut transcript = PcsTranscript::new_with_capacity(estimated_transcript_size);
 
-        // For each polynomial, compute the combined row  (proximity test)
-        if pp.num_rows > 1 {
-            for (poly_idx, poly) in polys.iter().enumerate() {
-                let alphas = if Zt::Comb::DEGREE_BOUND.is_zero() {
+        // Phase 1: Sample per-polynomial alpha challenges
+        let all_alphas: Vec<Vec<Zt::Chal>> = (0..batch_size)
+            .map(|_| {
+                if Zt::Comb::DEGREE_BOUND.is_zero() {
                     vec![Zt::Chal::ONE]
                 } else {
                     transcript
                         .fs_transcript
                         .get_challenges::<Zt::Chal>(Zt::Comb::DEGREE_BOUND + 1)
-                };
+                }
+            })
+            .collect();
 
-                let coeffs = transcript
-                    .fs_transcript
-                    .get_challenges::<Zt::Chal>(pp.num_rows);
+        // Phase 2: Sample a single set of row-combination coefficients (shared)
+        let coeffs = if pp.num_rows > 1 {
+            transcript
+                .fs_transcript
+                .get_challenges::<Zt::Chal>(pp.num_rows)
+        } else {
+            vec![Zt::Chal::ONE]
+        };
 
-                let combined_row = combine_rows!(
-                    CHECK_FOR_OVERFLOW,
-                    &coeffs,
-                    poly.evaluations.iter(),
-                    |eval| Zt::EvalDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
-                        eval,
-                        &alphas,
-                        Zt::CombR::ZERO
-                    ),
-                    pp.linear_code.row_len(),
+        // Phase 3: For each polynomial, alpha-project and row-combine, then sum
+        let mut combined_row = vec![Zt::CombR::ZERO; row_len];
+        for (poly, alphas) in polys.iter().zip(all_alphas.iter()) {
+            let poly_combined = combine_rows!(
+                CHECK_FOR_OVERFLOW,
+                &coeffs,
+                poly.evaluations.iter(),
+                |eval| Zt::EvalDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
+                    eval,
+                    alphas,
                     Zt::CombR::ZERO
-                );
-
-                transcript.write_const_many(&combined_row).map_err(|e| {
-                    ZipError::Serialization(format!(
-                        "Failed to write combined row for poly {poly_idx}: {e}"
-                    ))
-                })?;
+                ),
+                row_len,
+                Zt::CombR::ZERO
+            );
+            for (acc, val) in combined_row.iter_mut().zip(poly_combined.iter()) {
+                *acc = acc.checked_add(val)
+                    .expect("Overflow when summing per-polynomial combined rows: CombR is too narrow for batch size");
             }
         }
+
+        transcript.write_const_many(&combined_row).map_err(|e| {
+            ZipError::Serialization(format!(
+                "Failed to write combined row: {e}"
+            ))
+        })?;
 
         // Open Merkle tree for each column drawn — shared across all polynomials
         for _ in 0..Zt::NUM_COLUMN_OPENINGS {

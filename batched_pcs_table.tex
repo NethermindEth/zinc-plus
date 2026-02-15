@@ -1,0 +1,25 @@
+\begin{table}[ht]
+\centering
+\caption{Batched PCS pipeline benchmark (batch=5) for BPoly\textlangle 31\textrangle{} with IPRS num\_rows=1 (parallel+asm+simd).}
+\label{tab:batched-pcs-pipeline-suite-bpoly31-1row}
+\begin{tabular}{r r l r r r r r}
+\toprule
+\textbf{row\_len} & $\boldsymbol{2^P}$ & \textbf{Field} & \textbf{Encode} & \textbf{Merkle} & \textbf{Commit} & \textbf{Test} & \textbf{Verify} \\
+\midrule
+     16 & $2^{4}$ & $\mathbb{F}_{3329}$ & 169.2\,\textmu s & 163.8\,\textmu s & 370.7\,\textmu s & 44.8\,\textmu s & 259.9\,\textmu s \\
+     32 & $2^{5}$ & $\mathbb{F}_{3329}$ & 269.8\,\textmu s & 216.4\,\textmu s & 510.3\,\textmu s & 48.6\,\textmu s & 258.7\,\textmu s \\
+     64 & $2^{6}$ & $\mathbb{F}_{3329}$ & 410.2\,\textmu s & 297.6\,\textmu s & 780.8\,\textmu s & 45.4\,\textmu s & 267.1\,\textmu s \\
+    128 & $2^{7}$ & $\mathbb{F}_{65537}$ & 453.6\,\textmu s & 299.4\,\textmu s & 816.6\,\textmu s & 45.2\,\textmu s & 268.7\,\textmu s \\
+    256 & $2^{8}$ & $\mathbb{F}_{65537}$ & 885.6\,\textmu s & 442.8\,\textmu s & 1.42\,ms & 50.9\,\textmu s & 280.5\,\textmu s \\
+    512 & $2^{9}$ & $\mathbb{F}_{65537}$ & 1.66\,ms & 702.5\,\textmu s & 2.59\,ms & 53.4\,\textmu s & 289.7\,\textmu s \\
+   1024 & $2^{10}$ & $\mathbb{F}_{65537}$ & 2.74\,ms & 1.22\,ms & 3.99\,ms & 55.0\,\textmu s & 299.1\,\textmu s \\
+   2048 & $2^{11}$ & $\mathbb{F}_{65537}$ & 5.38\,ms & 2.16\,ms & 7.61\,ms & 56.4\,\textmu s & 315.6\,\textmu s \\
+   4096 & $2^{12}$ & $\mathbb{F}_{65537}$ & 12.54\,ms & 4.03\,ms & 17.35\,ms & 61.7\,\textmu s & 412.5\,\textmu s \\
+   8192 & $2^{13}$ & $\mathbb{F}_{65537}$ & 19.07\,ms & 7.66\,ms & 26.84\,ms & 69.6\,\textmu s & 363.1\,\textmu s \\
+  16384 & $2^{14}$ & $\mathbb{F}_{65537}$ & 43.42\,ms & 14.99\,ms & 58.82\,ms & 78.9\,\textmu s & 407.8\,\textmu s \\
+  65536 & $2^{16}$ & $\mathbb{F}_{1179649}$ & 164.98\,ms & 57.02\,ms & 229.90\,ms & 183.9\,\textmu s & 751.0\,\textmu s \\
+ 131072 & $2^{17}$ & $\mathbb{F}_{167772161}$ & 369.01\,ms & 113.26\,ms & 513.01\,ms & 273.5\,\textmu s & 1.25\,ms \\
+ 262144 & $2^{18}$ & $\mathbb{F}_{167772161}$ & 925.34\,ms & 228.28\,ms & 1.48\,s & 650.9\,\textmu s & 2.21\,ms \\
+\bottomrule
+\end{tabular}
+\end{table}

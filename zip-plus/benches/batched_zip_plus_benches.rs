@@ -8,398 +8,450 @@
 
 mod zip_common;
 
-use criterion::{BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime};
+use std::marker::PhantomData;
+
+use criterion::{Criterion, criterion_group, criterion_main};
 use crypto_bigint::U64;
 use crypto_primitives::{
-    Field, FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_int::Int,
-    crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
+    FixedSemiring,
+    boolean::Boolean, crypto_bigint_int::Int,
+    crypto_bigint_uint::Uint,
 };
-use num_traits::One;
-use rand::{distr::StandardUniform, prelude::*};
-use std::{
-    hint::black_box,
-    time::{Duration, Instant},
+
+use zinc_poly::univariate::{
+    binary::{BinaryPoly, BinaryPolyInnerProduct, BinaryPolyWideningMulByScalar},
+    dense::{DensePolyInnerProduct, DensePolynomial},
 };
-use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
 use zinc_primality::MillerRabin;
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
     UNCHECKED, from_ref::FromRef, inner_product::{MBSInnerProduct, ScalarProduct},
-    named::Named, projectable_to_field::ProjectableToField,
+    mul_by_scalar::ScalarWideningMulByScalar,
+    named::Named,
 };
 use zip_plus::{
-    batched_pcs::structs::BatchedZipPlus,
-    code::{
-        LinearCode,
-        raa::{RaaCode, RaaConfig},
+    code::iprs::{
+        IprsCode,
+        PnttConfigF2_16_1, PnttConfigF2_16B16, PnttConfigF2_16B64,
+        PnttConfigF2_16R4B16, PnttConfigF2_16R4B32, PnttConfigF2_16R4B64,
+        PnttConfigF3329R4B2, PnttConfigF3329R4B4, PnttConfigF3329R4B8,
+        PnttConfigF1179649B16,
+        PnttConfigF167772161, PnttConfigF167772161B64,
     },
-    merkle::MerkleTree,
-    pcs::structs::{ZipPlus, ZipTypes},
+    pcs::structs::ZipTypes,
 };
 
 const INT_LIMBS: usize = U64::LIMBS;
-type F = MontyField<{ INT_LIMBS * 4 }>;
 
-// ---------- ZipTypes for scalar benchmarks ----------
+// ---------- ZipTypes for scalar i32 benchmarks (matching PCS Pipeline i32) ----
 
-struct BenchZipTypes {}
-impl ZipTypes for BenchZipTypes {
-    const NUM_COLUMN_OPENINGS: usize = 200;
+/// ZipTypes implementation for scalar i32 evaluations, matching the
+/// configuration used in the PCS Pipeline Suite i32 1row.
+struct BenchZipScalarTypes;
+
+impl ZipTypes for BenchZipScalarTypes {
+    const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = i32;
-    type Cw = i64;
+    type Cw = i128;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
     type Pt = i128;
-    type CombR = Int<{ INT_LIMBS * 3 }>;
+    // Extra limb vs non-batched (3→4) to accommodate summing BATCH_SIZE=24
+    // combined rows without overflow (need ceil(log2(24))=5 extra bits).
+    type CombR = Int<{ INT_LIMBS * 4 }>;
     type Comb = Self::CombR;
     type EvalDotChal = ScalarProduct;
     type CombDotChal = ScalarProduct;
     type ArrCombRDotChal = MBSInnerProduct;
 }
 
-#[derive(Clone, Copy)]
-struct BenchRaaConfig;
-impl RaaConfig for BenchRaaConfig {
-    const PERMUTE_IN_PLACE: bool = false;
-    const CHECK_FOR_OVERFLOWS: bool = UNCHECKED;
-}
+// IPRS code types for scalar i32 evaluations (same as zip_plus_benches.rs)
+// F65537 B16 (BASE_LEN=16): row_len = 16 × 8^D
+type IprsScalarB16<const DEPTH: usize, const CHECK: bool> =
+    IprsCode<BenchZipScalarTypes, PnttConfigF2_16B16<DEPTH>, ScalarWideningMulByScalar<i128>, CHECK>;
 
-type Code = RaaCode<BenchZipTypes, BenchRaaConfig, 4>;
+// F65537 B64 (BASE_LEN=64): row_len = 64 × 8^D
+type IprsScalarB64<const DEPTH: usize, const CHECK: bool> =
+    IprsCode<BenchZipScalarTypes, PnttConfigF2_16B64<DEPTH>, ScalarWideningMulByScalar<i128>, CHECK>;
 
-// ---------- Batched benchmark helpers ----------
+// F3329 rate 1/4 scalar i32 codes
+type IprsScalarSmallR4B2<const DEPTH: usize, const CHECK: bool> =
+    IprsCode<BenchZipScalarTypes, PnttConfigF3329R4B2<DEPTH>, ScalarWideningMulByScalar<i128>, CHECK>;
+type IprsScalarSmallR4B4<const DEPTH: usize, const CHECK: bool> =
+    IprsCode<BenchZipScalarTypes, PnttConfigF3329R4B4<DEPTH>, ScalarWideningMulByScalar<i128>, CHECK>;
+type IprsScalarSmallR4B8<const DEPTH: usize, const CHECK: bool> =
+    IprsCode<BenchZipScalarTypes, PnttConfigF3329R4B8<DEPTH>, ScalarWideningMulByScalar<i128>, CHECK>;
 
-/// Benchmark the batched commit phase for a given polynomial size and batch size.
-fn batched_commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-    batch_size: usize,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
+// F65537 rate 1/4 scalar i32 codes
+type IprsScalarR4B16<const DEPTH: usize, const CHECK: bool> =
+    IprsCode<BenchZipScalarTypes, PnttConfigF2_16R4B16<DEPTH>, ScalarWideningMulByScalar<i128>, CHECK>;
+type IprsScalarR4B32<const DEPTH: usize, const CHECK: bool> =
+    IprsCode<BenchZipScalarTypes, PnttConfigF2_16R4B32<DEPTH>, ScalarWideningMulByScalar<i128>, CHECK>;
+type IprsScalarR4B64<const DEPTH: usize, const CHECK: bool> =
+    IprsCode<BenchZipScalarTypes, PnttConfigF2_16R4B64<DEPTH>, ScalarWideningMulByScalar<i128>, CHECK>;
+
+// F1179649 B16: scalar i32
+type IprsScalarMidB16<const DEPTH: usize, const CHECK: bool> =
+    IprsCode<BenchZipScalarTypes, PnttConfigF1179649B16<DEPTH>, ScalarWideningMulByScalar<i128>, CHECK>;
+
+// F167772161 (5 × 2^25 + 1) scalar i32 codes
+type IprsScalarLargeB32<const DEPTH: usize, const CHECK: bool> =
+    IprsCode<BenchZipScalarTypes, PnttConfigF167772161<DEPTH>, ScalarWideningMulByScalar<i128>, CHECK>;
+type IprsScalarLargeB64<const DEPTH: usize, const CHECK: bool> =
+    IprsCode<BenchZipScalarTypes, PnttConfigF167772161B64<DEPTH>, ScalarWideningMulByScalar<i128>, CHECK>;
+
+// ---------- ZipTypes for BPoly<31> benchmarks (matching PCS Pipeline Suite 1row) ----
+
+struct BenchZipPlusTypes<CwCoeff, const D_PLUS_ONE: usize>(PhantomData<CwCoeff>);
+
+impl<CwCoeff, const D_PLUS_ONE: usize> ZipTypes for BenchZipPlusTypes<CwCoeff, D_PLUS_ONE>
+where
+    CwCoeff: ConstTranscribable
+        + Copy
+        + Default
+        + FromRef<Boolean>
+        + Named
+        + FixedSemiring
+        + Send
+        + Sync,
+    Int<6>: FromRef<CwCoeff>,
 {
-    let mut rng = ThreadRng::default();
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
-    let params = ZipPlus::<Zt, Lc>::setup(poly_size, linear_code);
-
-    group.bench_function(
-        format!(
-            "BatchedCommit: Eval={}, Cw={}, poly_size=2^{P}, batch={batch_size}",
-            Zt::Eval::type_name(),
-            Zt::Cw::type_name(),
-        ),
-        |b| {
-            b.iter_custom(|iters| {
-                let mut total_duration = Duration::ZERO;
-                for _ in 0..iters {
-                    let polys: Vec<_> = (0..batch_size)
-                        .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
-                        .collect();
-                    let timer = Instant::now();
-                    let res = BatchedZipPlus::<Zt, Lc>::commit(&params, &polys)
-                        .expect("Batched commit failed");
-                    black_box(res);
-                    total_duration += timer.elapsed();
-                }
-                total_duration
-            })
-        },
-    );
+    const NUM_COLUMN_OPENINGS: usize = 147;
+    type Eval = BinaryPoly<D_PLUS_ONE>;
+    type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
+    type Fmod = Uint<{ INT_LIMBS * 4 }>;
+    type PrimeTest = MillerRabin;
+    type Chal = i128;
+    type Pt = i128;
+    // Extra limb vs non-batched (5→6) to accommodate summing batch_size=5
+    // combined rows without overflow (need ceil(log2(5))=3 extra bits).
+    type CombR = Int<{ INT_LIMBS * 6 }>;
+    type Comb = DensePolynomial<Self::CombR, D_PLUS_ONE>;
+    type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, D_PLUS_ONE>;
+    type CombDotChal =
+        DensePolyInnerProduct<Self::CombR, Self::Chal, Self::CombR, MBSInnerProduct, D_PLUS_ONE>;
+    type ArrCombRDotChal = MBSInnerProduct;
 }
 
-/// Benchmark the batched test phase for a given polynomial size and batch size.
-fn batched_test<
-    Zt: ZipTypes,
-    Lc: LinearCode<Zt>,
-    const CHECK_FOR_OVERFLOWS: bool,
-    const P: usize,
->(
-    group: &mut BenchmarkGroup<WallTime>,
-    batch_size: usize,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-{
-    let mut rng = ThreadRng::default();
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
-    let params = ZipPlus::<Zt, Lc>::setup(poly_size, linear_code);
+// IPRS BPoly code types (matching zip_plus_benches.rs)
+// F65537 B16 (BASE_LEN=16): row_len = 16 × 8^D
+type IprsBPolyB16<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const CHECK: bool> =
+    IprsCode<
+        BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+        PnttConfigF2_16B16<DEPTH>,
+        BinaryPolyWideningMulByScalar<Twiddle>,
+        CHECK,
+    >;
 
-    let polys: Vec<_> = (0..batch_size)
-        .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
-        .collect();
-    let (hint, _) = BatchedZipPlus::<Zt, Lc>::commit(&params, &polys).unwrap();
+// F65537 B32 (BASE_LEN=32): row_len = 32 × 8^D
+type IprsBPolyB32<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const CHECK: bool> =
+    IprsCode<
+        BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+        PnttConfigF2_16_1<DEPTH>,
+        BinaryPolyWideningMulByScalar<Twiddle>,
+        CHECK,
+    >;
 
-    group.bench_function(
-        format!(
-            "BatchedTest: Eval={}, Cw={}, Comb={}, poly_size=2^{P}, batch={batch_size}",
-            Zt::Eval::type_name(),
-            Zt::Cw::type_name(),
-            Zt::Comb::type_name(),
-        ),
-        |b| {
-            b.iter(|| {
-                let transcript =
-                    BatchedZipPlus::<Zt, Lc>::test::<CHECK_FOR_OVERFLOWS>(&params, &polys, &hint)
-                        .expect("Batched test phase failed");
-                black_box(transcript);
-            })
-        },
-    );
-}
+// F65537 B64 (BASE_LEN=64): row_len = 64 × 8^D
+type IprsBPolyB64<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const CHECK: bool> =
+    IprsCode<
+        BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+        PnttConfigF2_16B64<DEPTH>,
+        BinaryPolyWideningMulByScalar<Twiddle>,
+        CHECK,
+    >;
 
-/// Benchmark the batched evaluate phase.
-fn batched_evaluate<
-    Zt: ZipTypes,
-    Lc: LinearCode<Zt>,
-    const CHECK_FOR_OVERFLOWS: bool,
-    const P: usize,
->(
-    group: &mut BenchmarkGroup<WallTime>,
-    batch_size: usize,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
-    <F as Field>::Inner: FromRef<Zt::Fmod>,
-    Zt::Eval: ProjectableToField<F>,
-{
-    let mut rng = ThreadRng::default();
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
-    let params = ZipPlus::<Zt, Lc>::setup(poly_size, linear_code);
+// F3329 rate 1/4 R4B2 (BASE_LEN=2, BASE_DIM=8): row_len = 2 × 8^D
+type IprsBPolySmallR4B2<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const CHECK: bool> =
+    IprsCode<
+        BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+        PnttConfigF3329R4B2<DEPTH>,
+        BinaryPolyWideningMulByScalar<Twiddle>,
+        CHECK,
+    >;
 
-    let polys: Vec<_> = (0..batch_size)
-        .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
-        .collect();
-    let (hint, _) = BatchedZipPlus::<Zt, Lc>::commit(&params, &polys).unwrap();
-    let point = vec![Zt::Pt::one(); P];
+// F3329 rate 1/4 R4B4 (BASE_LEN=4, BASE_DIM=16): row_len = 4 × 8^D
+type IprsBPolySmallR4B4<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const CHECK: bool> =
+    IprsCode<
+        BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+        PnttConfigF3329R4B4<DEPTH>,
+        BinaryPolyWideningMulByScalar<Twiddle>,
+        CHECK,
+    >;
 
-    let test_transcript =
-        BatchedZipPlus::<Zt, Lc>::test::<CHECK_FOR_OVERFLOWS>(&params, &polys, &hint)
-            .expect("Batched test phase failed");
+// F3329 rate 1/4 R4B8 (BASE_LEN=8, BASE_DIM=32): row_len = 8 × 8^D
+type IprsBPolySmallR4B8<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const CHECK: bool> =
+    IprsCode<
+        BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+        PnttConfigF3329R4B8<DEPTH>,
+        BinaryPolyWideningMulByScalar<Twiddle>,
+        CHECK,
+    >;
 
-    group.bench_function(
-        format!(
-            "BatchedEvaluate: Eval={}, Cw={}, Comb={}, poly_size=2^{P}, batch={batch_size}, modulus=({} bits)",
-            Zt::Eval::type_name(),
-            Zt::Cw::type_name(),
-            Zt::Comb::type_name(),
-            Zt::Fmod::NUM_BYTES * 8,
-        ),
-        |b| {
-            b.iter_custom(|iters| {
-                let mut total_duration = Duration::ZERO;
-                for _ in 0..iters {
-                    let transcript = test_transcript.clone();
-                    let timer = Instant::now();
-                    let (evals_f, proof) = BatchedZipPlus::<Zt, Lc>::evaluate::<
-                        F,
-                        CHECK_FOR_OVERFLOWS,
-                    >(
-                        &params, &polys, &point, transcript
-                    )
-                    .expect("Batched evaluate failed");
-                    total_duration += timer.elapsed();
-                    black_box((evals_f, proof));
-                }
-                total_duration
-            })
-        },
-    );
-}
+// F1179649 (9 × 2^17 + 1) BPoly B16
+type IprsBPolyMidB16<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const CHECK: bool> =
+    IprsCode<
+        BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+        PnttConfigF1179649B16<DEPTH>,
+        BinaryPolyWideningMulByScalar<Twiddle>,
+        CHECK,
+    >;
 
-/// Benchmark the batched verify phase.
-fn batched_verify<
-    Zt: ZipTypes,
-    Lc: LinearCode<Zt>,
-    const CHECK_FOR_OVERFLOWS: bool,
-    const P: usize,
->(
-    group: &mut BenchmarkGroup<WallTime>,
-    batch_size: usize,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
-    <F as Field>::Inner: FromRef<Zt::Fmod>,
-    Zt::Eval: ProjectableToField<F>,
-    Zt::Cw: ProjectableToField<F>,
-{
-    let mut rng = ThreadRng::default();
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
-    let params = ZipPlus::<Zt, Lc>::setup(poly_size, linear_code);
+// F167772161 (5 × 2^25 + 1) BPoly B32
+type IprsBPolyLargeB32<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const CHECK: bool> =
+    IprsCode<
+        BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+        PnttConfigF167772161<DEPTH>,
+        BinaryPolyWideningMulByScalar<Twiddle>,
+        CHECK,
+    >;
 
-    let polys: Vec<_> = (0..batch_size)
-        .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
-        .collect();
-    let (hint, commitment) = BatchedZipPlus::<Zt, Lc>::commit(&params, &polys).unwrap();
-    let point = vec![Zt::Pt::one(); P];
+// F167772161 (5 × 2^25 + 1) BPoly B64
+type IprsBPolyLargeB64<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const CHECK: bool> =
+    IprsCode<
+        BenchZipPlusTypes<Twiddle, D_PLUS_ONE>,
+        PnttConfigF167772161B64<DEPTH>,
+        BinaryPolyWideningMulByScalar<Twiddle>,
+        CHECK,
+    >;
 
-    let test_transcript =
-        BatchedZipPlus::<Zt, Lc>::test::<CHECK_FOR_OVERFLOWS>(&params, &polys, &hint)
-            .expect("Batched test phase failed");
-    let (evals_f, proof) = BatchedZipPlus::<Zt, Lc>::evaluate::<F, CHECK_FOR_OVERFLOWS>(
-        &params,
-        &polys,
-        &point,
-        test_transcript,
-    )
-    .expect("Batched evaluate failed");
-    let field_cfg = *evals_f[0].cfg();
-    let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
-
-    group.bench_function(
-        format!(
-            "BatchedVerify: Eval={}, Cw={}, Comb={}, poly_size=2^{P}, batch={batch_size}, modulus=({} bits)",
-            Zt::Eval::type_name(),
-            Zt::Cw::type_name(),
-            Zt::Comb::type_name(),
-            Zt::Fmod::NUM_BYTES * 8,
-        ),
-        |b| {
-            b.iter(|| {
-                BatchedZipPlus::<Zt, Lc>::verify::<_, CHECK_FOR_OVERFLOWS>(
-                    &params,
-                    &commitment,
-                    &point_f,
-                    &evals_f,
-                    &proof,
-                )
-                .expect("Batched verification failed");
-            })
-        },
-    );
-}
-
-/// Benchmark only the Merkle tree construction for a batched commit.
-///
-/// This isolates the cost of `MerkleTree::new` on the concatenated codeword
-/// rows of `batch_size` polynomials.  Encoding is done once in setup so the
-/// measurement captures only the tree building.
-fn batched_merkle_tree<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-    batch_size: usize,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-{
-    let mut rng = ThreadRng::default();
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
-    let params = ZipPlus::<Zt, Lc>::setup(poly_size, linear_code);
-
-    let row_len = params.linear_code.row_len();
-
-    // Pre-encode all polynomials
-    let cw_matrices: Vec<_> = (0..batch_size)
-        .map(|_| {
-            let poly = DenseMultilinearExtension::rand(P, &mut rng);
-            ZipPlus::<Zt, Lc>::encode_rows(&params, row_len, &poly)
-        })
-        .collect();
-
-    // Collect row slices for MerkleTree::new (same layout as BatchedZipPlus::commit)
-    let all_rows: Vec<&[Zt::Cw]> = cw_matrices
-        .iter()
-        .flat_map(|m| m.to_rows_slices())
-        .collect();
-
-    group.bench_function(
-        format!(
-            "BatchedMerkleTree: Cw={}, poly_size=2^{P}, batch={batch_size}, total_rows={}",
-            Zt::Cw::type_name(),
-            all_rows.len(),
-        ),
-        |b| {
-            b.iter(|| {
-                let tree = MerkleTree::new(&all_rows);
-                black_box(tree.root());
-            })
-        },
-    );
-}
-
-/// Benchmark building `batch_size` separate Merkle trees (one per polynomial)
-/// vs the batched single-tree approach.  This lets us directly compare the
-/// cost of m independent trees against 1 batched tree.
-fn separate_merkle_trees<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-    batch_size: usize,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-{
-    let mut rng = ThreadRng::default();
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
-    let params = ZipPlus::<Zt, Lc>::setup(poly_size, linear_code);
-
-    let row_len = params.linear_code.row_len();
-
-    // Pre-encode all polynomials
-    let cw_matrices: Vec<_> = (0..batch_size)
-        .map(|_| {
-            let poly = DenseMultilinearExtension::rand(P, &mut rng);
-            ZipPlus::<Zt, Lc>::encode_rows(&params, row_len, &poly)
-        })
-        .collect();
-
-    // Pre-collect row slices per polynomial
-    let per_poly_rows: Vec<Vec<&[Zt::Cw]>> = cw_matrices
-        .iter()
-        .map(|m| m.to_rows_slices().into_iter().collect())
-        .collect();
-
-    group.bench_function(
-        format!(
-            "SeparateMerkleTrees: Cw={}, poly_size=2^{P}, batch={batch_size}, rows_per_tree={}",
-            Zt::Cw::type_name(),
-            per_poly_rows[0].len(),
-        ),
-        |b| {
-            b.iter(|| {
-                for rows in &per_poly_rows {
-                    let tree = MerkleTree::new(rows);
-                    black_box(tree.root());
-                }
-            })
-        },
-    );
-}
-
-/// Run all batched benchmarks for a given ZipTypes/Code/P combination
-/// with several batch sizes.
-fn do_batched_bench<
-    Zt: ZipTypes,
-    Lc: LinearCode<Zt>,
-    const CHECK_FOR_OVERFLOWS: bool,
-    const P: usize,
->(
-    group: &mut BenchmarkGroup<WallTime>,
-) where
-    StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
-    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
-    <F as Field>::Inner: FromRef<Zt::Fmod>,
-    Zt::Eval: ProjectableToField<F>,
-    Zt::Cw: ProjectableToField<F>,
-{
-    for &batch_size in &[1, 2, 5, 10] {
-        batched_commit::<Zt, Lc, P>(group, batch_size);
-        batched_merkle_tree::<Zt, Lc, P>(group, batch_size);
-        separate_merkle_trees::<Zt, Lc, P>(group, batch_size);
-        batched_test::<Zt, Lc, CHECK_FOR_OVERFLOWS, P>(group, batch_size);
-        batched_evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, P>(group, batch_size);
-        batched_verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, P>(group, batch_size);
-    }
-}
+/// Batch size: number of polynomials committed together in the batched PCS.
+const BATCH_SIZE: usize = 24;
 
 // ---------- Criterion entry point ----------
 
-fn batched_zip_plus_benchmarks(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Batched Zip+");
+/// Batched PCS pipeline suite for scalar i32, rate 1/4 IPRS codes.
+/// Mirrors the "PCS Pipeline Suite i32 1row" configs but uses BatchedZipPlus
+/// with `BATCH_SIZE` polynomials sharing a single Merkle tree.
+///
+/// poly_size (2^P)   Config                Field        row_len     num_rows
+/// ───────────────   ──────                ─────        ───────     ────────
+/// 2^4  = 16         R4B2 D=1 (rate 1/4)   F3329        16          1
+/// 2^5  = 32         R4B4 D=1 (rate 1/4)   F3329        32          1
+/// 2^6  = 64         R4B8 D=1 (rate 1/4)   F3329        64          1
+/// 2^10 = 1024       R4B16 D=2 (rate 1/4)  F65537       1024        1
+/// 2^10 = 1024       R4B64 D=1 (rate 1/4)  F65537       512         2
+/// 2^11 = 2048       R4B16 D=2 (rate 1/4)  F65537       1024        2
+/// 2^12 = 4096       R4B16 D=2 (rate 1/4)  F65537       1024        4
+/// 2^13 = 8192       R4B32 D=2 (rate 1/4)  F65537       2048        4
+fn batched_pcs_pipeline_suite_scalar_1row(c: &mut Criterion) {
+    use zip_common::*;
 
-    do_batched_bench::<BenchZipTypes, Code, UNCHECKED, 12>(&mut group);
-    do_batched_bench::<BenchZipTypes, Code, UNCHECKED, 14>(&mut group);
-    do_batched_bench::<BenchZipTypes, Code, UNCHECKED, 16>(&mut group);
+    let mut group = c.benchmark_group("Batched PCS Pipeline Suite i32 1row");
+    group.sample_size(10);
+
+    // ── Encode ───────────────────────────────────────────────────────
+    // F3329 rate 1/4: small row lengths (P=4,5,6)
+    batched_encode_nrows::<BenchZipScalarTypes, IprsScalarSmallR4B2<1, UNCHECKED>, 4>(&mut group, 1, BATCH_SIZE);
+    batched_encode_nrows::<BenchZipScalarTypes, IprsScalarSmallR4B4<1, UNCHECKED>, 5>(&mut group, 1, BATCH_SIZE);
+    batched_encode_nrows::<BenchZipScalarTypes, IprsScalarSmallR4B8<1, UNCHECKED>, 6>(&mut group, 1, BATCH_SIZE);
+
+    // F65537 rate 1/4: medium row lengths (P=10,11,12,13)
+    batched_encode_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, 10>(&mut group, 1, BATCH_SIZE);
+    batched_encode_nrows::<BenchZipScalarTypes, IprsScalarR4B64<1, UNCHECKED>, 10>(&mut group, 2, BATCH_SIZE);
+    batched_encode_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, 11>(&mut group, 2, BATCH_SIZE);
+    batched_encode_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, 12>(&mut group, 4, BATCH_SIZE);
+    batched_encode_nrows::<BenchZipScalarTypes, IprsScalarR4B32<2, UNCHECKED>, 13>(&mut group, 4, BATCH_SIZE);
+
+    // ── Merkle ───────────────────────────────────────────────────────
+    // F3329 rate 1/4: small row lengths (P=4,5,6)
+    batched_merkle_nrows::<BenchZipScalarTypes, IprsScalarSmallR4B2<1, UNCHECKED>, 4>(&mut group, 1, BATCH_SIZE);
+    batched_merkle_nrows::<BenchZipScalarTypes, IprsScalarSmallR4B4<1, UNCHECKED>, 5>(&mut group, 1, BATCH_SIZE);
+    batched_merkle_nrows::<BenchZipScalarTypes, IprsScalarSmallR4B8<1, UNCHECKED>, 6>(&mut group, 1, BATCH_SIZE);
+
+    // F65537 rate 1/4: medium row lengths (P=10,11,12,13)
+    batched_merkle_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, 10>(&mut group, 1, BATCH_SIZE);
+    batched_merkle_nrows::<BenchZipScalarTypes, IprsScalarR4B64<1, UNCHECKED>, 10>(&mut group, 2, BATCH_SIZE);
+    batched_merkle_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, 11>(&mut group, 2, BATCH_SIZE);
+    batched_merkle_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, 12>(&mut group, 4, BATCH_SIZE);
+    batched_merkle_nrows::<BenchZipScalarTypes, IprsScalarR4B32<2, UNCHECKED>, 13>(&mut group, 4, BATCH_SIZE);
+
+    // ── Commit ───────────────────────────────────────────────────────
+    // F3329 rate 1/4: small row lengths (P=4,5,6)
+    batched_commit_nrows::<BenchZipScalarTypes, IprsScalarSmallR4B2<1, UNCHECKED>, 4>(&mut group, 1, BATCH_SIZE);
+    batched_commit_nrows::<BenchZipScalarTypes, IprsScalarSmallR4B4<1, UNCHECKED>, 5>(&mut group, 1, BATCH_SIZE);
+    batched_commit_nrows::<BenchZipScalarTypes, IprsScalarSmallR4B8<1, UNCHECKED>, 6>(&mut group, 1, BATCH_SIZE);
+
+    // F65537 rate 1/4: medium row lengths (P=10,11,12,13)
+    batched_commit_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, 10>(&mut group, 1, BATCH_SIZE);
+    batched_commit_nrows::<BenchZipScalarTypes, IprsScalarR4B64<1, UNCHECKED>, 10>(&mut group, 2, BATCH_SIZE);
+    batched_commit_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, 11>(&mut group, 2, BATCH_SIZE);
+    batched_commit_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, 12>(&mut group, 4, BATCH_SIZE);
+    batched_commit_nrows::<BenchZipScalarTypes, IprsScalarR4B32<2, UNCHECKED>, 13>(&mut group, 4, BATCH_SIZE);
+
+    // ── Test ─────────────────────────────────────────────────────────
+    // F3329 rate 1/4
+    batched_test_nrows::<BenchZipScalarTypes, IprsScalarSmallR4B2<1, UNCHECKED>, UNCHECKED, 4>(&mut group, 1, BATCH_SIZE);
+    batched_test_nrows::<BenchZipScalarTypes, IprsScalarSmallR4B4<1, UNCHECKED>, UNCHECKED, 5>(&mut group, 1, BATCH_SIZE);
+    batched_test_nrows::<BenchZipScalarTypes, IprsScalarSmallR4B8<1, UNCHECKED>, UNCHECKED, 6>(&mut group, 1, BATCH_SIZE);
+
+    // F65537 rate 1/4
+    batched_test_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, UNCHECKED, 10>(&mut group, 1, BATCH_SIZE);
+    batched_test_nrows::<BenchZipScalarTypes, IprsScalarR4B64<1, UNCHECKED>, UNCHECKED, 10>(&mut group, 2, BATCH_SIZE);
+    batched_test_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, UNCHECKED, 11>(&mut group, 2, BATCH_SIZE);
+    batched_test_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, UNCHECKED, 12>(&mut group, 4, BATCH_SIZE);
+    batched_test_nrows::<BenchZipScalarTypes, IprsScalarR4B32<2, UNCHECKED>, UNCHECKED, 13>(&mut group, 4, BATCH_SIZE);
+
+    // ── Verify ───────────────────────────────────────────────────────
+    // F3329 rate 1/4
+    batched_verify_nrows::<BenchZipScalarTypes, IprsScalarSmallR4B2<1, UNCHECKED>, UNCHECKED, 4>(&mut group, 1, BATCH_SIZE);
+    batched_verify_nrows::<BenchZipScalarTypes, IprsScalarSmallR4B4<1, UNCHECKED>, UNCHECKED, 5>(&mut group, 1, BATCH_SIZE);
+    batched_verify_nrows::<BenchZipScalarTypes, IprsScalarSmallR4B8<1, UNCHECKED>, UNCHECKED, 6>(&mut group, 1, BATCH_SIZE);
+
+    // F65537 rate 1/4
+    batched_verify_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, UNCHECKED, 10>(&mut group, 1, BATCH_SIZE);
+    batched_verify_nrows::<BenchZipScalarTypes, IprsScalarR4B64<1, UNCHECKED>, UNCHECKED, 10>(&mut group, 2, BATCH_SIZE);
+    batched_verify_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, UNCHECKED, 11>(&mut group, 2, BATCH_SIZE);
+    batched_verify_nrows::<BenchZipScalarTypes, IprsScalarR4B16<2, UNCHECKED>, UNCHECKED, 12>(&mut group, 4, BATCH_SIZE);
+    batched_verify_nrows::<BenchZipScalarTypes, IprsScalarR4B32<2, UNCHECKED>, UNCHECKED, 13>(&mut group, 4, BATCH_SIZE);
 
     group.finish();
 }
 
-criterion_group!(benches, batched_zip_plus_benchmarks);
+/// Batched PCS pipeline suite for BPoly<31>, various IPRS codes, num_rows=1.
+/// Mirrors the "PCS Pipeline Suite BPoly31 1row" configs but uses BatchedZipPlus
+/// with 5 polynomials sharing a single Merkle tree.
+///
+/// poly_size (2^P)   Config                Field        row_len
+/// ───────────────   ──────                ─────        ───────
+/// 2^4  = 16         R4B2 D=1 (rate 1/4)   F3329        16
+/// 2^5  = 32         R4B4 D=1 (rate 1/4)   F3329        32
+/// 2^6  = 64         R4B8 D=1 (rate 1/4)   F3329        64
+/// 2^7  = 128        B16 D=1 (rate 1/2)    F65537       128
+/// 2^8  = 256        B32 D=1 (rate 1/2)    F65537       256
+/// 2^9  = 512        B64 D=1 (rate 1/2)    F65537       512
+/// 2^10 = 1024       B16 D=2 (rate 1/2)    F65537       1024
+/// 2^11 = 2048       B32 D=2 (rate 1/2)    F65537       2048
+/// 2^12 = 4096       B64 D=2 (rate 1/2)    F65537       4096
+/// 2^13 = 8192       B16 D=3 (rate 1/2)    F65537       8192
+/// 2^14 = 16384      B32 D=3 (rate 1/2)    F65537       16384
+/// 2^16 = 65536      B16 D=4 (rate 1/2)    F1179649     65536
+/// 2^17 = 131072     B32 D=4 (rate 1/2)    F167772161   131072
+/// 2^18 = 262144     B64 D=4 (rate 1/2)    F167772161   262144
+fn batched_pcs_pipeline_suite_bpoly31_1row(c: &mut Criterion) {
+    use zip_common::*;
+
+    let mut group = c.benchmark_group("Batched PCS Pipeline Suite BPoly31 1row");
+    group.sample_size(10);
+
+    // ── Encode ───────────────────────────────────────────────────────
+    // F3329 rate 1/4: small row lengths (P=4,5,6)
+    batched_encode_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolySmallR4B2<i128, 1, 32, UNCHECKED>, 4>(&mut group, 1, 5);
+    batched_encode_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolySmallR4B4<i128, 1, 32, UNCHECKED>, 5>(&mut group, 1, 5);
+    batched_encode_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolySmallR4B8<i128, 1, 32, UNCHECKED>, 6>(&mut group, 1, 5);
+
+    // F65537 rate 1/2: medium row lengths (P=7..14)
+    batched_encode_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB16<i128, 1, 32, UNCHECKED>,  7>(&mut group, 1, 5);
+    batched_encode_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB32<i128, 1, 32, UNCHECKED>,  8>(&mut group, 1, 5);
+    batched_encode_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB64<i128, 1, 32, UNCHECKED>,  9>(&mut group, 1, 5);
+    batched_encode_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB16<i128, 2, 32, UNCHECKED>, 10>(&mut group, 1, 5);
+    batched_encode_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB32<i128, 2, 32, UNCHECKED>, 11>(&mut group, 1, 5);
+    batched_encode_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB64<i128, 2, 32, UNCHECKED>, 12>(&mut group, 1, 5);
+    batched_encode_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB16<i128, 3, 32, UNCHECKED>, 13>(&mut group, 1, 5);
+    batched_encode_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB32<i128, 3, 32, UNCHECKED>, 14>(&mut group, 1, 5);
+
+    // F1179649: larger row lengths (P=16)
+    batched_encode_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyMidB16<i128, 4, 32, UNCHECKED>, 16>(&mut group, 1, 5);
+
+    // F167772161: largest row lengths (P=17,18)
+    batched_encode_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyLargeB32<i128, 4, 32, UNCHECKED>, 17>(&mut group, 1, 5);
+    batched_encode_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyLargeB64<i128, 4, 32, UNCHECKED>, 18>(&mut group, 1, 5);
+
+    // ── Merkle ───────────────────────────────────────────────────────
+    // F3329 rate 1/4: small row lengths (P=4,5,6)
+    batched_merkle_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolySmallR4B2<i128, 1, 32, UNCHECKED>, 4>(&mut group, 1, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolySmallR4B4<i128, 1, 32, UNCHECKED>, 5>(&mut group, 1, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolySmallR4B8<i128, 1, 32, UNCHECKED>, 6>(&mut group, 1, 5);
+
+    // F65537 rate 1/2
+    batched_merkle_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB16<i128, 1, 32, UNCHECKED>,  7>(&mut group, 1, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB32<i128, 1, 32, UNCHECKED>,  8>(&mut group, 1, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB64<i128, 1, 32, UNCHECKED>,  9>(&mut group, 1, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB16<i128, 2, 32, UNCHECKED>, 10>(&mut group, 1, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB32<i128, 2, 32, UNCHECKED>, 11>(&mut group, 1, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB64<i128, 2, 32, UNCHECKED>, 12>(&mut group, 1, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB16<i128, 3, 32, UNCHECKED>, 13>(&mut group, 1, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB32<i128, 3, 32, UNCHECKED>, 14>(&mut group, 1, 5);
+
+    // F1179649
+    batched_merkle_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyMidB16<i128, 4, 32, UNCHECKED>, 16>(&mut group, 1, 5);
+
+    // F167772161
+    batched_merkle_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyLargeB32<i128, 4, 32, UNCHECKED>, 17>(&mut group, 1, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyLargeB64<i128, 4, 32, UNCHECKED>, 18>(&mut group, 1, 5);
+
+    // ── Commit ───────────────────────────────────────────────────────
+    // F3329 rate 1/4
+    batched_commit_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolySmallR4B2<i128, 1, 32, UNCHECKED>, 4>(&mut group, 1, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolySmallR4B4<i128, 1, 32, UNCHECKED>, 5>(&mut group, 1, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolySmallR4B8<i128, 1, 32, UNCHECKED>, 6>(&mut group, 1, 5);
+
+    // F65537 rate 1/2
+    batched_commit_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB16<i128, 1, 32, UNCHECKED>,  7>(&mut group, 1, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB32<i128, 1, 32, UNCHECKED>,  8>(&mut group, 1, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB64<i128, 1, 32, UNCHECKED>,  9>(&mut group, 1, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB16<i128, 2, 32, UNCHECKED>, 10>(&mut group, 1, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB32<i128, 2, 32, UNCHECKED>, 11>(&mut group, 1, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB64<i128, 2, 32, UNCHECKED>, 12>(&mut group, 1, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB16<i128, 3, 32, UNCHECKED>, 13>(&mut group, 1, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB32<i128, 3, 32, UNCHECKED>, 14>(&mut group, 1, 5);
+
+    // F1179649
+    batched_commit_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyMidB16<i128, 4, 32, UNCHECKED>, 16>(&mut group, 1, 5);
+
+    // F167772161
+    batched_commit_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyLargeB32<i128, 4, 32, UNCHECKED>, 17>(&mut group, 1, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyLargeB64<i128, 4, 32, UNCHECKED>, 18>(&mut group, 1, 5);
+
+    // ── Test ─────────────────────────────────────────────────────────
+    // F3329 rate 1/4
+    batched_test_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolySmallR4B2<i128, 1, 32, UNCHECKED>, UNCHECKED, 4>(&mut group, 1, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolySmallR4B4<i128, 1, 32, UNCHECKED>, UNCHECKED, 5>(&mut group, 1, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolySmallR4B8<i128, 1, 32, UNCHECKED>, UNCHECKED, 6>(&mut group, 1, 5);
+
+    // F65537 rate 1/2
+    batched_test_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB16<i128, 1, 32, UNCHECKED>, UNCHECKED,  7>(&mut group, 1, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB32<i128, 1, 32, UNCHECKED>, UNCHECKED,  8>(&mut group, 1, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB64<i128, 1, 32, UNCHECKED>, UNCHECKED,  9>(&mut group, 1, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB16<i128, 2, 32, UNCHECKED>, UNCHECKED, 10>(&mut group, 1, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB32<i128, 2, 32, UNCHECKED>, UNCHECKED, 11>(&mut group, 1, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB64<i128, 2, 32, UNCHECKED>, UNCHECKED, 12>(&mut group, 1, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB16<i128, 3, 32, UNCHECKED>, UNCHECKED, 13>(&mut group, 1, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB32<i128, 3, 32, UNCHECKED>, UNCHECKED, 14>(&mut group, 1, 5);
+
+    // F1179649
+    batched_test_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyMidB16<i128, 4, 32, UNCHECKED>, UNCHECKED, 16>(&mut group, 1, 5);
+
+    // F167772161
+    batched_test_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyLargeB32<i128, 4, 32, UNCHECKED>, UNCHECKED, 17>(&mut group, 1, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyLargeB64<i128, 4, 32, UNCHECKED>, UNCHECKED, 18>(&mut group, 1, 5);
+
+    // ── Verify ───────────────────────────────────────────────────────
+    // F3329 rate 1/4
+    batched_verify_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolySmallR4B2<i128, 1, 32, UNCHECKED>, UNCHECKED, 4>(&mut group, 1, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolySmallR4B4<i128, 1, 32, UNCHECKED>, UNCHECKED, 5>(&mut group, 1, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolySmallR4B8<i128, 1, 32, UNCHECKED>, UNCHECKED, 6>(&mut group, 1, 5);
+
+    // F65537 rate 1/2
+    batched_verify_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB16<i128, 1, 32, UNCHECKED>, UNCHECKED,  7>(&mut group, 1, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB32<i128, 1, 32, UNCHECKED>, UNCHECKED,  8>(&mut group, 1, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB64<i128, 1, 32, UNCHECKED>, UNCHECKED,  9>(&mut group, 1, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB16<i128, 2, 32, UNCHECKED>, UNCHECKED, 10>(&mut group, 1, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB32<i128, 2, 32, UNCHECKED>, UNCHECKED, 11>(&mut group, 1, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB64<i128, 2, 32, UNCHECKED>, UNCHECKED, 12>(&mut group, 1, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB16<i128, 3, 32, UNCHECKED>, UNCHECKED, 13>(&mut group, 1, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyB32<i128, 3, 32, UNCHECKED>, UNCHECKED, 14>(&mut group, 1, 5);
+
+    // F1179649
+    batched_verify_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyMidB16<i128, 4, 32, UNCHECKED>, UNCHECKED, 16>(&mut group, 1, 5);
+
+    // F167772161
+    batched_verify_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyLargeB32<i128, 4, 32, UNCHECKED>, UNCHECKED, 17>(&mut group, 1, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i128, 32>, IprsBPolyLargeB64<i128, 4, 32, UNCHECKED>, UNCHECKED, 18>(&mut group, 1, 5);
+
+    group.finish();
+}
+
+criterion_group!(benches, batched_pcs_pipeline_suite_scalar_1row, batched_pcs_pipeline_suite_bpoly31_1row);
 criterion_main!(benches);

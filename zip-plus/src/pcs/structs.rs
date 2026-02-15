@@ -44,7 +44,8 @@ pub trait ZipTypes: Send + Sync {
         + Neg<Output = Self::CombR>
         + ConstTranscribable
         + FromRef<Self::CombR>
-        + for<'a> MulByScalar<&'a Self::Chal>;
+        + for<'a> MulByScalar<&'a Self::Chal>
+        + CheckedAdd;
     /// Ring of elements in the linear combination of codewords, at least as
     /// wide as the evaluation, codeword, and challenge rings.
     type Comb: FixedSemiring
