@@ -109,26 +109,28 @@ impl MerkleTree {
     }
 }
 
-// This could've been a function, but macro performance is better.
-macro_rules! hash_many {
-    ($iter:expr, $t:tt) => {{
-        let mut hasher = blake3::Hasher::new();
-        let mut buf = vec![0_u8; <$t>::NUM_BYTES];
-        for v in $iter {
-            v.write_transcription_bytes(&mut buf);
-            hasher.update(&buf);
-        }
-        hasher.finalize().into()
-    }};
+/// Serialize all elements of `values` into a single contiguous byte buffer
+/// and hash them with Blake3 in one `update` call.  This lets Blake3 process
+/// full 1 KiB chunks with SIMD, which is significantly faster than the
+/// per-element `update` approach.
+fn hash_column<S: ConstTranscribable>(values: &[S]) -> MtHash {
+    let elem_bytes = S::NUM_BYTES;
+    let mut buf = vec![0_u8; values.len() * elem_bytes];
+    for (i, v) in values.iter().enumerate() {
+        let start = i * elem_bytes;
+        v.write_transcription_bytes(&mut buf[start..start + elem_bytes]);
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&buf);
+    hasher.finalize().into()
 }
 
 /// Construct the leaves of the Merkle tree by hashing each column across all
 /// rows.
 ///
-/// For each column, serializes all row elements into a single contiguous byte
-/// buffer and feeds it to Blake3 in one `update` call.  This lets Blake3
-/// process full 1 KiB chunks with SIMD, which is significantly faster than
-/// the per-element `update` approach when columns are tall (many rows).
+/// For each column, serializes all row elements into a contiguous byte buffer
+/// and feeds them to Blake3 in one `update` call (same strategy as
+/// [`hash_column`], but avoids collecting the column into a temporary `Vec`).
 fn hash_leaves<S>(rows: &[&[S]], m_cols: usize) -> Vec<MtHash>
 where
     S: ConstTranscribable + Send + Sync,
@@ -139,13 +141,11 @@ where
 
     cfg_into_iter!(0..m_cols)
         .map(|i| {
-            // Serialize the entire column into a contiguous byte buffer.
             let mut buf = vec![0_u8; col_bytes];
             for (r, row) in rows.iter().enumerate() {
                 let start = r * elem_bytes;
                 row[i].write_transcription_bytes(&mut buf[start..start + elem_bytes]);
             }
-            // Hash the contiguous buffer in one call.
             let mut hasher = blake3::Hasher::new();
             hasher.update(&buf);
             hasher.finalize().into()
@@ -278,7 +278,7 @@ impl MerkleProof {
             return Err(MerkleError::InvalidLeafIndex(leaf_index));
         }
 
-        let mut current_cv: MtHash = hash_many!(column_values, S);
+        let mut current_cv: MtHash = hash_column(column_values);
 
         if self.leaf_count == 1 {
             if self.leaf_index == 0 && self.siblings.is_empty() {
