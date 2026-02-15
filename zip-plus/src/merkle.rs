@@ -114,14 +114,13 @@ impl MerkleTree {
 // This could've been a function, but macro performance is better.
 macro_rules! hash_many {
     ($iter:expr, $t:tt) => {{
-        let mut hasher = Sha256::new();
+        let mut hasher = blake3::Hasher::new();
         let mut buf = vec![0_u8; <$t>::NUM_BYTES];
         for v in $iter {
             v.write_transcription_bytes(&mut buf);
             hasher.update(&buf);
         }
-        let result: [u8; 32] = hasher.finalize().into();
-        MtHash(result)
+        hasher.finalize().into()
     }};
 }
 
