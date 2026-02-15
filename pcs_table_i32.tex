@@ -1,0 +1,16 @@
+\begin{table}[ht]
+\centering
+\caption{PCS pipeline benchmark ($\times10$) for i32 with IPRS rate 1/4 (parallel+asm+simd).}
+\label{tab:pcs-pipeline-suite-i32}
+\begin{tabular}{r r r l r r r}
+\toprule
+\textbf{Row len} & $\boldsymbol{2^k}$ & $\boldsymbol{2^P}$ & \textbf{Field} & \textbf{Commit} & \textbf{Test} & \textbf{Verify} \\
+\midrule
+     16 & $2^{4}$ & $2^{8}$ & $\mathbb{F}_{3329}$ & 1.75\,ms & 1.64\,ms & 9.74\,ms \\
+     16 & $2^{4}$ & $2^{9}$ & $\mathbb{F}_{3329}$ & 2.00\,ms & 1.30\,ms & 18.27\,ms \\
+     32 & $2^{5}$ & $2^{10}$ & $\mathbb{F}_{3329}$ & 2.26\,ms & 1.41\,ms & 20.11\,ms \\
+     32 & $2^{5}$ & $2^{11}$ & $\mathbb{F}_{3329}$ & 2.70\,ms & 1.68\,ms & 16.42\,ms \\
+     64 & $2^{6}$ & $2^{12}$ & $\mathbb{F}_{3329}$ & 4.99\,ms & 1.84\,ms & 16.41\,ms \\
+\bottomrule
+\end{tabular}
+\end{table}
