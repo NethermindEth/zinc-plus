@@ -179,19 +179,17 @@ where
         // if x_0 = 0:   (1-r0) * [b_1, ..., b_k]
         // if x_0 = 1:   r0 * [b_1, ..., b_k]
 
-        let mut bi = F::zero_with_cfg(cfg);
-
-        *buf = (0..(buf.len() << 1))
-            .map(|i| {
-                *bi.inner_mut() = buf[i >> 1].clone();
-                let tmp = r[0].clone() * &bi;
-                if (i & 1) == 0 {
-                    (bi.clone() - &tmp).into_inner()
-                } else {
-                    tmp.into_inner()
-                }
-            })
-            .collect();
+        let mut res = vec![F::Inner::zero(); buf.len() << 1];
+        cfg_iter_mut!(res).enumerate().for_each(|(i, val)| {
+            let bi = F::new_with_cfg(buf[i >> 1].clone(), cfg);
+            let tmp = r[0].clone() * &bi;
+            if (i & 1) == 0 {
+                *val = (bi - tmp).into_inner();
+            } else {
+                *val = tmp.into_inner();
+            }
+        });
+        *buf = res;
     }
 
     Ok(())
