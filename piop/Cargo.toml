@@ -45,3 +45,7 @@ harness = false
 name = "ideal_check"
 harness = false
 
+[[bench]]
+name = "combined_poly_resolver"
+harness = false
+

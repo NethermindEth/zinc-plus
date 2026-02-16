@@ -41,6 +41,7 @@ pub struct ProverState<F: IdealCheckField, const DEGREE_PLUS_ONE: usize> {
     pub projected_scalars: HashMap<BinaryPoly<DEGREE_PLUS_ONE>, DynamicPolynomialF<F>>,
 }
 
+#[derive(Clone)]
 pub struct VerifierSubClaim<R: Semiring, F: PrimeField> {
     pub evaluation_point: Vec<F>,
     pub values: Vec<DynamicPolynomialF<F>>,
