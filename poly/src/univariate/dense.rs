@@ -595,12 +595,12 @@ where
 
 impl<R, const DEGREE_PLUS_ONE: usize> DensePolynomial<R, DEGREE_PLUS_ONE> {
     #[inline(always)]
-    pub fn iter(&'_ self) -> std::slice::Iter<'_, R> {
+    pub fn iter(&self) -> std::slice::Iter<'_, R> {
         self.coeffs.iter()
     }
 
     #[inline(always)]
-    pub fn iter_mut(&'_ mut self) -> std::slice::IterMut<'_, R> {
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, R> {
         self.coeffs.iter_mut()
     }
 }
