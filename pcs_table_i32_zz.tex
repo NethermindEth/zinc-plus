@@ -1,0 +1,25 @@
+\begin{table}[ht]
+\centering
+\caption{PCS pipeline benchmark ($\times3$) for i32 with num\_rows=1 (parallel+asm+simd).}
+\label{tab:pcs-pipeline-suite-i32-1row}
+\begin{tabular}{r r r l r r r}
+\toprule
+\textbf{Row len} & $\boldsymbol{2^k}$ & $\boldsymbol{2^P}$ & \textbf{Field} & \textbf{Commit} & \textbf{Test} & \textbf{Verify} \\
+\midrule
+     16 & $2^{4}$ & $2^{4}$ & $\mathbb{F}_{3329}$ & 441.7\,\textmu s & 101.6\,\textmu s & 414.9\,\textmu s \\
+     32 & $2^{5}$ & $2^{5}$ & $\mathbb{F}_{3329}$ & 543.9\,\textmu s & 102.1\,\textmu s & 425.1\,\textmu s \\
+     64 & $2^{6}$ & $2^{6}$ & $\mathbb{F}_{3329}$ & 662.8\,\textmu s & 102.5\,\textmu s & 640.8\,\textmu s \\
+    128 & $2^{7}$ & $2^{7}$ & $\mathbb{F}_{65537}$ & 660.6\,\textmu s & 103.0\,\textmu s & 477.2\,\textmu s \\
+    256 & $2^{8}$ & $2^{8}$ & $\mathbb{F}_{65537}$ & 805.4\,\textmu s & 119.5\,\textmu s & 514.6\,\textmu s \\
+    512 & $2^{9}$ & $2^{9}$ & $\mathbb{F}_{65537}$ & 1.03\,ms & 121.2\,\textmu s & 519.8\,\textmu s \\
+   1024 & $2^{10}$ & $2^{10}$ & $\mathbb{F}_{65537}$ & 1.42\,ms & 124.8\,\textmu s & 544.0\,\textmu s \\
+   2048 & $2^{11}$ & $2^{11}$ & $\mathbb{F}_{65537}$ & 2.00\,ms & 125.3\,\textmu s & 563.3\,\textmu s \\
+   4096 & $2^{12}$ & $2^{12}$ & $\mathbb{F}_{65537}$ & 3.17\,ms & 128.1\,\textmu s & 622.7\,\textmu s \\
+   8192 & $2^{13}$ & $2^{13}$ & $\mathbb{F}_{65537}$ & 5.16\,ms & 132.5\,\textmu s & 625.6\,\textmu s \\
+  16384 & $2^{14}$ & $2^{14}$ & $\mathbb{F}_{65537}$ & 9.67\,ms & 136.3\,\textmu s & 679.1\,\textmu s \\
+  65536 & $2^{16}$ & $2^{16}$ & $\mathbb{F}_{1179649}$ & 33.38\,ms & 187.3\,\textmu s & 857.6\,\textmu s \\
+ 131072 & $2^{17}$ & $2^{17}$ & $\mathbb{F}_{167772161}$ & 71.47\,ms & 225.4\,\textmu s & 1.14\,ms \\
+ 262144 & $2^{18}$ & $2^{18}$ & $\mathbb{F}_{167772161}$ & 157.71\,ms & 317.9\,\textmu s & 1.72\,ms \\
+\bottomrule
+\end{tabular}
+\end{table}

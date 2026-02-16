@@ -1,0 +1,20 @@
+\begin{table}[ht]
+\centering
+\caption{Zip+ Encode Benchmark Results for \texttt{BPoly<31>} $\to$ \texttt{Poly<i64, 31>} (features: \texttt{parallel}, \texttt{asm}, \texttt{simd}). The IPRS code follows the convention \texttt{IPRS-$d$-$r$-F$p$}, where $d$ is the FRI folding depth, $r$ is the code rate (e.g., \texttt{1\_2} denotes rate $1/2$), and F$p$ specifies the prime field $\mathbb{F}_p$.}
+\label{tab:zip-plus-encode-benchmarks}
+\begin{tabular}{l c c}
+\toprule
+\textbf{IPRS Code} & \textbf{Row Length} & \textbf{Time (ms)} \\
+\midrule
+IPRS-2-1\_2-F65537      & $2^{12}$ & 0.995 \\
+IPRS-3-1\_2-F65537      & $2^{13}$ & 1.431 \\
+IPRS-3-1\_2-F65537      & $2^{14}$ & 3.228 \\
+IPRS-3-1\_2-F65537      & $2^{15}$ & 7.830 \\
+IPRS-4-1\_2-F167772161  & $2^{16}$ & 12.653 \\
+IPRS-4-1\_2-F167772161  & $2^{17}$ & 29.011 \\
+IPRS-4-1\_2-F167772161  & $2^{18}$ & 71.229 \\
+IPRS-5-1\_2-F167772161  & $2^{19}$ & 115.81 \\
+IPRS-5-1\_2-F167772161  & $2^{20}$ & 289.66 \\
+\bottomrule
+\end{tabular}
+\end{table}

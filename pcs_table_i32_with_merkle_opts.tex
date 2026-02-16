@@ -1,0 +1,19 @@
+\begin{table}[ht]
+\centering
+\caption{PCS pipeline benchmark ($\times24$) for i32, rate 1/4 (parallel+asm+simd).}
+\label{tab:pcs-pipeline-suite-i32-1row-r4}
+\begin{tabular}{r r r r l r r r r r}
+\toprule
+\textbf{Row len} & $\boldsymbol{2^k}$ & \textbf{Rows} & $\boldsymbol{2^P}$ & \textbf{Field} & \textbf{Encode} & \textbf{Merkle} & \textbf{Commit} & \textbf{Test} & \textbf{Verify} \\
+\midrule
+     16 & $2^{4}$ & 1 & $2^{4}$ & $\mathbb{F}_{3329}$ & 592.8\,\textmu s & 3.43\,ms & 4.02\,ms & 799.3\,\textmu s & 3.30\,ms \\
+     32 & $2^{5}$ & 1 & $2^{5}$ & $\mathbb{F}_{3329}$ & 670.0\,\textmu s & 4.33\,ms & 5.00\,ms & 795.6\,\textmu s & 3.37\,ms \\
+     64 & $2^{6}$ & 1 & $2^{6}$ & $\mathbb{F}_{3329}$ & 782.6\,\textmu s & 5.21\,ms & 5.97\,ms & 805.8\,\textmu s & 3.65\,ms \\
+   1024 & $2^{10}$ & 1 & $2^{10}$ & $\mathbb{F}_{65537}$ & 2.63\,ms & 12.18\,ms & 14.90\,ms & 992.2\,\textmu s & 4.58\,ms \\
+    512 & $2^{9}$ & 2 & $2^{10}$ & $\mathbb{F}_{65537}$ & 2.49\,ms & 9.32\,ms & 11.90\,ms & 2.51\,ms & 10.34\,ms \\
+   1024 & $2^{10}$ & 2 & $2^{11}$ & $\mathbb{F}_{65537}$ & 3.69\,ms & 12.20\,ms & 16.07\,ms & 2.72\,ms & 11.30\,ms \\
+   1024 & $2^{10}$ & 4 & $2^{12}$ & $\mathbb{F}_{65537}$ & 4.41\,ms & 12.32\,ms & 17.87\,ms & 2.83\,ms & 11.35\,ms \\
+   2048 & $2^{11}$ & 4 & $2^{13}$ & $\mathbb{F}_{65537}$ & 7.23\,ms & 18.00\,ms & 27.17\,ms & 3.14\,ms & 20.10\,ms \\
+\bottomrule
+\end{tabular}
+\end{table}
