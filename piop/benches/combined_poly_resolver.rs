@@ -77,28 +77,29 @@ fn do_bench<F, Air, IdealOverFFromRef, IdealOverF>(
 
     group.bench_with_input(
         BenchmarkId::new("CPR Prover", &params),
-        &(prover_transcript.clone(),  ic_prover_state.projected_scalars.clone()),
-        |bench, (transcript, scalars )| {
+        &(
+            prover_transcript.clone(),
+            ic_prover_state.projected_scalars.clone(),
+        ),
+        |bench, (transcript, scalars)| {
             bench.iter_batched(
-                ||(scalars.clone(), transcript.clone()), 
+                || (scalars.clone(), transcript.clone()),
                 |(scalars, mut transcript)| {
-                    let _ = black_box(
-                        CombinedPolyResolver::<F>::prove_as_subprotocol::<_, Air>(
-                            &mut transcript,
-                            &ic_prover_state.trace_matrix,
-                            &ic_prover_state.evaluation_point,
-                            scalars.clone(),
-                            num_constraints,
-                            num_vars,
-                            max_degree,
-                            &prover_field_cfg,
-                        ),
-                    )
+                    let _ = black_box(CombinedPolyResolver::<F>::prove_as_subprotocol::<_, Air>(
+                        &mut transcript,
+                        &ic_prover_state.trace_matrix,
+                        &ic_prover_state.evaluation_point,
+                        scalars.clone(),
+                        num_constraints,
+                        num_vars,
+                        max_degree,
+                        &prover_field_cfg,
+                    ))
                     .expect("CPR Prover failed");
                 },
-            BatchSize::SmallInput,
+                BatchSize::SmallInput,
             );
-        }
+        },
     );
 
     let (cpr_proof, _) = CombinedPolyResolver::<F>::prove_as_subprotocol::<_, Air>(
@@ -120,17 +121,15 @@ fn do_bench<F, Air, IdealOverFFromRef, IdealOverF>(
             bench.iter_batched(
                 || (proof.clone(), subclaim.clone(), transcript.clone()),
                 |(proof, subclaim, mut transcript)| {
-                    let _ = black_box(
-                        CombinedPolyResolver::<F>::verify_as_subprotocol::<_, Air>(
-                            &mut transcript,
-                            proof,
-                            num_constraints,
-                            num_vars,
-                            max_degree,
-                            subclaim,
-                            &prover_field_cfg,
-                        ),
-                    )
+                    let _ = black_box(CombinedPolyResolver::<F>::verify_as_subprotocol::<_, Air>(
+                        &mut transcript,
+                        proof,
+                        num_constraints,
+                        num_vars,
+                        max_degree,
+                        subclaim,
+                        &prover_field_cfg,
+                    ))
                     .expect("CPR Verifier failed");
                 },
                 BatchSize::SmallInput,
