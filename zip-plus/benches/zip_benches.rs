@@ -20,7 +20,7 @@ const INT_LIMBS: usize = U64::LIMBS;
 
 struct BenchZipTypes {}
 impl ZipTypes for BenchZipTypes {
-    const NUM_COLUMN_OPENINGS: usize = 147;
+    const NUM_COLUMN_OPENINGS: usize = 200;
     type Eval = i32;
     type Cw = i64;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;

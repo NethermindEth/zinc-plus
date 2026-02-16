@@ -67,7 +67,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     }
 
     #[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
-    pub fn verify_testing<const CHECK_FOR_OVERFLOW: bool>(
+    pub(super) fn verify_testing<const CHECK_FOR_OVERFLOW: bool>(
         vp: &ZipPlusParams<Zt, Lc>,
         root: &MtHash,
         transcript: &mut PcsTranscript,

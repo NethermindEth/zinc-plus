@@ -27,7 +27,6 @@ rand = { workspace = true }
 rand_core = { workspace = true }
 rayon = { workspace = true, optional = true }
 blake3 = "1.8.2"
-sha2 = "0.10"
 uninit = "0.6.2"
 
 [dev-dependencies]
@@ -41,9 +40,6 @@ workspace = true
 parallel = ["dep:rayon", "zinc-utils/parallel", "zinc-poly/parallel", "ark-ff/parallel", "ark-poly/parallel"]
 asm = ["zinc-transcript/asm"]
 simd = ["zinc-poly/simd"]
-bench-64 = []
-pntt-timing = []
-unchecked-butterfly = []
 
 [[bench]]
 name = "zip_benches"
@@ -55,8 +51,4 @@ harness = false
 
 [[bench]]
 name = "batched_zip_plus_benches"
-harness = false
-
-[[bench]]
-name = "r4_config_search"
 harness = false

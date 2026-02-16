@@ -24,8 +24,7 @@ use zip_plus::{
     batched_pcs::structs::BatchedZipPlus,
     code::LinearCode,
     merkle::MerkleTree,
-    pcs::{ZipPlusProof, structs::{ZipPlus, ZipPlusParams, ZipTypes}},
-    pcs_transcript::PcsTranscript,
+    pcs::structs::{ZipPlus, ZipTypes},
 };
 
 const INT_LIMBS: usize = U64::LIMBS;
@@ -33,7 +32,6 @@ type F = MontyField<{ INT_LIMBS * 4 }>;
 
 pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(
     group: &mut BenchmarkGroup<WallTime>,
-    code_name: &str,
 ) where
     StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
     F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
@@ -41,54 +39,46 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     Zt::Eval: ProjectableToField<F>,
     Zt::Cw: ProjectableToField<F>,
 {
-    //. encode_rows::<Zt, Lc, 10>(group);
-    // encode_rows::<Zt, Lc, 13>(group);
-    // encode_rows::<Zt, Lc, 14>(group);
-    // encode_rows::<Zt, Lc, 15>(group);
-    // encode_rows::<Zt, Lc, 16>(group);
+    encode_rows::<Zt, Lc, 12>(group);
+    encode_rows::<Zt, Lc, 13>(group);
+    encode_rows::<Zt, Lc, 14>(group);
+    encode_rows::<Zt, Lc, 15>(group);
+    encode_rows::<Zt, Lc, 16>(group);
 
-    // encode_single_row::<Zt, Lc, 128>(group, code_name);
-    // encode_single_row::<Zt, Lc, 256>(group, code_name);
-    // encode_single_row::<Zt, Lc, 512>(group, code_name);
-    // encode_single_row::<Zt, Lc, 1024>(group, code_name);
-    // encode_single_row::<Zt, Lc, 2048>(group, code_name);
-    // encode_single_row::<Zt, Lc, 4096>(group, code_name);
-    // encode_single_row::<Zt, Lc, 8192>(group, code_name);
-    // encode_single_row::<Zt, Lc, 16384>(group, code_name);
-    // encode_single_row::<Zt, Lc, 32768>(group, code_name);
-    // encode_single_row::<Zt, Lc, 65536>(group, code_name);
-    
-    
-    // merkle_root::<Zt, 12>(group);
-    // merkle_root::<Zt, 13>(group);
-    // merkle_root::<Zt, 14>(group);
-    // merkle_root::<Zt, 15>(group);
-    // merkle_root::<Zt, 16>(group);
-    // commit::<Zt, Lc, 10>(group);
-    // commit::<Zt, Lc, 11>(group);
-    // commit::<Zt, Lc, 12>(group);
-    // commit::<Zt, Lc, 13>(group);
-    // commit::<Zt, Lc, 14>(group);
-    // commit::<Zt, Lc, 15>(group);
-    // commit::<Zt, Lc, 16>(group);
+    encode_single_row::<Zt, Lc, 128>(group);
+    encode_single_row::<Zt, Lc, 256>(group);
+    encode_single_row::<Zt, Lc, 512>(group);
+    encode_single_row::<Zt, Lc, 1024>(group);
 
-    //test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12>(group);
-    //test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
-    //test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
-    //test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15>(group);
-    //test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
-//
-    //evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12>(group);
-    //evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
-    //evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
-    //evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15>(group);
-    //evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
-//
-    //verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12>(group);
-    //verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
-    //verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
-    //verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15>(group);
-    //verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
+    merkle_root::<Zt, 12>(group);
+    merkle_root::<Zt, 13>(group);
+    merkle_root::<Zt, 14>(group);
+    merkle_root::<Zt, 15>(group);
+    merkle_root::<Zt, 16>(group);
+
+    commit::<Zt, Lc, 12>(group);
+    commit::<Zt, Lc, 13>(group);
+    commit::<Zt, Lc, 14>(group);
+    commit::<Zt, Lc, 15>(group);
+    commit::<Zt, Lc, 16>(group);
+
+    test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12>(group);
+    test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
+    test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
+    test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15>(group);
+    test::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
+
+    evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12>(group);
+    evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
+    evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
+    evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15>(group);
+    evaluate::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
+
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12>(group);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13>(group);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14>(group);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15>(group);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16>(group);
 }
 
 pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
@@ -119,7 +109,6 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
 
 pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>, const ROW_LEN: usize>(
     group: &mut BenchmarkGroup<WallTime>,
-    code_name: &str,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
 {
@@ -140,7 +129,7 @@ pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>, const ROW_LEN: usize>
 
     group.bench_function(
         format!(
-            "{code_name}/EncodeMessage: {} -> {}, row_len = {ROW_LEN}",
+            "EncodeMessage: {} -> {}, row_len = {ROW_LEN}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name()
         ),
@@ -150,40 +139,6 @@ pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>, const ROW_LEN: usize>
             b.iter(|| {
                 let encoded_row: Vec<<Zt as ZipTypes>::Cw> = linear_code.encode(&message);
                 black_box(encoded_row);
-            })
-        },
-    );
-}
-
-pub fn encode_message_batch<Zt: ZipTypes, Lc: LinearCode<Zt>, const ROW_LEN: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-    code_name: &str,
-    num_rows: usize,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-{
-    let mut rng = ThreadRng::default();
-    let poly_size = ROW_LEN * ROW_LEN;
-    let linear_code = Lc::new(poly_size);
-    if linear_code.row_len() != ROW_LEN {
-        return;
-    }
-
-    group.bench_function(
-        format!(
-            "{code_name}/EncodeMessage batch={num_rows}: {} -> {}, row_len = {ROW_LEN}",
-            Zt::Eval::type_name(),
-            Zt::Cw::type_name()
-        ),
-        |b| {
-            let messages: Vec<Vec<<Zt as ZipTypes>::Eval>> = (0..num_rows)
-                .map(|_| (0..ROW_LEN).map(|_| rng.random()).collect())
-                .collect();
-            b.iter(|| {
-                for msg in &messages {
-                    let encoded_row: Vec<<Zt as ZipTypes>::Cw> = linear_code.encode(msg);
-                    black_box(&encoded_row);
-                }
             })
         },
     );
@@ -218,24 +173,14 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
 ) where
     StandardUniform: Distribution<Zt::Eval>,
 {
-    commit_named::<Zt, Lc, P>(group, "");
-}
-
-pub fn commit_named<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-    label: &str,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-{
     let mut rng = ThreadRng::default();
     let poly_size = 1 << P;
     let linear_code = Lc::new(poly_size);
     let params = ZipPlus::setup(poly_size, linear_code);
 
-    let suffix = if label.is_empty() { String::new() } else { format!(" {label}") };
     group.bench_function(
         format!(
-            "Commit: Eval={}, Cw={}, Comb={}, poly_size=2^{P}{suffix}",
+            "Commit: Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
             Zt::Comb::type_name()
@@ -262,15 +207,6 @@ pub fn test<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, c
 ) where
     StandardUniform: Distribution<Zt::Eval>,
 {
-    test_named::<Zt, Lc, CHECK_FOR_OVERFLOWS, P>(group, "");
-}
-
-pub fn test_named<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, const P: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-    label: &str,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-{
     let mut rng = ThreadRng::default();
 
     let poly_size = 1 << P;
@@ -280,10 +216,9 @@ pub fn test_named<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: b
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
     let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
 
-    let suffix = if label.is_empty() { String::new() } else { format!(" {label}") };
     group.bench_function(
         format!(
-            "Test: Eval={}, Cw={}, Comb={}, poly_size=2^{P}{suffix}",
+            "Test: Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
             Zt::Comb::type_name(),
@@ -354,255 +289,41 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool,
     Zt::Eval: ProjectableToField<F>,
     Zt::Cw: ProjectableToField<F>,
 {
-    verify_named::<Zt, Lc, CHECK_FOR_OVERFLOWS, P>(group, "");
-}
-
-pub fn verify_named<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, const P: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-    label: &str,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
-    <F as Field>::Inner: FromRef<Zt::Fmod>,
-    Zt::Eval: ProjectableToField<F>,
-    Zt::Cw: ProjectableToField<F>,
-{
     let mut rng = ThreadRng::default();
     let poly_size = 1 << P;
     let linear_code = Lc::new(poly_size);
     let params = ZipPlus::setup(poly_size, linear_code);
 
-    verify_inner_named::<Zt, Lc, CHECK_FOR_OVERFLOWS, P>(group, &mut rng, &params, label);
-}
-
-pub fn verify_1row<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, const P: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
-    <F as Field>::Inner: FromRef<Zt::Fmod>,
-    Zt::Eval: ProjectableToField<F>,
-    Zt::Cw: ProjectableToField<F>,
-{
-    verify_nrows::<Zt, Lc, CHECK_FOR_OVERFLOWS, P>(group, 1);
-}
-
-pub fn verify_nrows<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, const P: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-    num_rows: usize,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
-    <F as Field>::Inner: FromRef<Zt::Fmod>,
-    Zt::Eval: ProjectableToField<F>,
-    Zt::Cw: ProjectableToField<F>,
-{
-    let mut rng = ThreadRng::default();
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
-    let params = ZipPlusParams::new(P, num_rows, linear_code);
-
-    verify_inner_named::<Zt, Lc, CHECK_FOR_OVERFLOWS, P>(group, &mut rng, &params, "");
-}
-
-fn verify_inner<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, const P: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-    rng: &mut ThreadRng,
-    params: &ZipPlusParams<Zt, Lc>,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
-    <F as Field>::Inner: FromRef<Zt::Fmod>,
-    Zt::Eval: ProjectableToField<F>,
-    Zt::Cw: ProjectableToField<F>,
-{
-    verify_inner_named::<Zt, Lc, CHECK_FOR_OVERFLOWS, P>(group, rng, params, "");
-}
-
-fn verify_inner_named<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, const P: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-    rng: &mut ThreadRng,
-    params: &ZipPlusParams<Zt, Lc>,
-    label: &str,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
-    <F as Field>::Inner: FromRef<Zt::Fmod>,
-    Zt::Eval: ProjectableToField<F>,
-    Zt::Cw: ProjectableToField<F>,
-{
-
-    let poly = DenseMultilinearExtension::rand(P, rng);
-    let (data, commitment) = ZipPlus::commit(params, &poly).unwrap();
+    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+    let (data, commitment) = ZipPlus::commit(&params, &poly).unwrap();
     let point = vec![Zt::Pt::one(); P];
 
     let test_transcript =
-        ZipPlus::test::<CHECK_FOR_OVERFLOWS>(params, &poly, &data).expect("Test phase failed");
-    let (_eval_f, proof) =
-        ZipPlus::evaluate::<F, CHECK_FOR_OVERFLOWS>(params, &poly, &point, test_transcript)
+        ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, &poly, &data).expect("Test phase failed");
+    let (eval_f, proof) =
+        ZipPlus::evaluate::<F, CHECK_FOR_OVERFLOWS>(&params, &poly, &point, test_transcript)
             .expect("Evaluation phase failed");
+    let field_cfg = *eval_f.cfg();
+    let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
-    let suffix = if label.is_empty() { String::new() } else { format!(" {label}") };
     group.bench_function(
         format!(
-            "Verify poly_size=2^{P} num_rows={}{suffix}",
-            params.num_rows
+            "Verify: Eval={}, Cw={}, Comb={}, poly_size=2^{P}, modulus=({} bits)",
+            Zt::Eval::type_name(),
+            Zt::Cw::type_name(),
+            Zt::Comb::type_name(),
+            Zt::Fmod::NUM_BYTES * 8
         ),
         |b| {
             b.iter(|| {
-                // Only benchmark verify_testing (skip verify_evaluation)
-                let mut transcript: PcsTranscript = proof.clone().into();
-                ZipPlus::verify_testing::<CHECK_FOR_OVERFLOWS>(
-                    params,
-                    &commitment.root,
-                    &mut transcript,
+                ZipPlus::verify::<_, CHECK_FOR_OVERFLOWS>(
+                    &params,
+                    &commitment,
+                    &point_f,
+                    &eval_f,
+                    &proof,
                 )
-                .expect("Verify testing failed");
-            })
-        },
-    );
-}
-
-pub fn commit_1row<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-{
-    commit_nrows::<Zt, Lc, P>(group, 1);
-}
-
-pub fn commit_nrows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-    num_rows: usize,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-{
-    let mut rng = ThreadRng::default();
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
-    let params = ZipPlusParams::new(P, num_rows, linear_code);
-
-    group.bench_function(
-        format!("Commit poly_size=2^{P} num_rows={num_rows}"),
-        |b| {
-            b.iter_custom(|iters| {
-                let mut total_duration = Duration::ZERO;
-                for _ in 0..iters {
-                    let poly = DenseMultilinearExtension::rand(P, &mut rng);
-                    let timer = Instant::now();
-                    let res = ZipPlus::commit(&params, &poly).expect("Failed to commit");
-                    black_box(res);
-                    total_duration += timer.elapsed();
-                }
-
-                total_duration
-            })
-        },
-    );
-}
-
-pub fn encode_rows_1row<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-{
-    encode_rows_nrows::<Zt, Lc, P>(group, 1);
-}
-
-pub fn encode_rows_nrows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-    num_rows: usize,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-{
-    let mut rng = ThreadRng::default();
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
-    let params = ZipPlusParams::new(P, num_rows, linear_code);
-    let row_len = params.linear_code.row_len();
-
-    group.bench_function(
-        format!("Encode poly_size=2^{P} num_rows={num_rows}"),
-        |b| {
-            b.iter_custom(|iters| {
-                let mut total_duration = Duration::ZERO;
-                for _ in 0..iters {
-                    let poly = DenseMultilinearExtension::rand(P, &mut rng);
-                    let timer = Instant::now();
-                    let cw = ZipPlus::encode_rows(&params, row_len, &poly);
-                    black_box(cw);
-                    total_duration += timer.elapsed();
-                }
-                total_duration
-            })
-        },
-    );
-}
-
-pub fn merkle_1row<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-{
-    merkle_nrows::<Zt, Lc, P>(group, 1);
-}
-
-pub fn merkle_nrows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-    num_rows: usize,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-{
-    let mut rng = ThreadRng::default();
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
-    let params = ZipPlusParams::new(P, num_rows, linear_code);
-    let row_len = params.linear_code.row_len();
-
-    let poly = DenseMultilinearExtension::rand(P, &mut rng);
-    let cw_matrix = ZipPlus::encode_rows(&params, row_len, &poly);
-
-    group.bench_function(
-        format!("Merkle poly_size=2^{P} num_rows={num_rows}"),
-        |b| {
-            b.iter(|| {
-                let tree = MerkleTree::new(&cw_matrix.to_rows_slices());
-                black_box(tree.root());
-            })
-        },
-    );
-}
-
-pub fn test_1row<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, const P: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-{
-    test_nrows::<Zt, Lc, CHECK_FOR_OVERFLOWS, P>(group, 1);
-}
-
-pub fn test_nrows<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool, const P: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-    num_rows: usize,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-{
-    let mut rng = ThreadRng::default();
-
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
-    let params = ZipPlusParams::new(P, num_rows, linear_code);
-
-    let poly = DenseMultilinearExtension::rand(P, &mut rng);
-    let (data, _) = ZipPlus::commit(&params, &poly).unwrap();
-
-    group.bench_function(
-        format!("Test poly_size=2^{P} num_rows={num_rows}"),
-        |b| {
-            b.iter(|| {
-                let test_transcript = ZipPlus::test::<CHECK_FOR_OVERFLOWS>(&params, &poly, &data)
-                    .expect("Test phase failed");
-                black_box(test_transcript);
+                .expect("Verification failed");
             })
         },
     );
