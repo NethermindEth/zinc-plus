@@ -297,6 +297,86 @@ impl<const DEPTH: usize> Config for PnttConfigF2_16B16<DEPTH> {
     }
 }
 
+// ==================== F65537 rate 1/4 configurations ====================
+
+/// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=1, BASE_DIM=4 (rate 1/4).
+/// NTT domain up to 2^16. Row lengths: 8 (D=1), 64 (D=2), 512 (D=3).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF2_16R4B1<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=2, BASE_DIM=8 (rate 1/4).
+/// NTT domain up to 2^16. Row lengths: 16 (D=1), 128 (D=2), 1024 (D=3).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF2_16R4B2<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=4, BASE_DIM=16 (rate 1/4).
+/// NTT domain up to 2^16. Row lengths: 32 (D=1), 256 (D=2), 2048 (D=3).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF2_16R4B4<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=16, BASE_DIM=64 (rate 1/4).
+/// NTT domain up to 2^16, enabling row lengths up to 2^13.
+/// Row lengths: 128 (D=1), 1024 (D=2), 8192 (D=3).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF2_16R4B16<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=32, BASE_DIM=128 (rate 1/4).
+/// NTT domain up to 2^16, enabling row lengths up to 2^11.
+/// Row lengths: 256 (D=1), 2048 (D=2).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF2_16R4B32<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=64, BASE_DIM=256 (rate 1/4).
+/// NTT domain up to 2^16, enabling row lengths up to 2^12.
+/// Row lengths: 512 (D=1), 4096 (D=2).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF2_16R4B64<const DEPTH: usize>;
+
+impl<const DEPTH: usize> Config for PnttConfigF2_16R4B1<DEPTH> {
+    type Field = fq::Fq;
+    const FIELD_MODULUS: u32 = fq::MODULUS;
+    const BASE_LEN: usize = 1;
+    const BASE_DIM: usize = 4;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 4096, -256, 16, -1, -4096, 256, -16];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq::FqBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF2_16R4B2<DEPTH> {
+    type Field = fq::Fq;
+    const FIELD_MODULUS: u32 = fq::MODULUS;
+    const BASE_LEN: usize = 2;
+    const BASE_DIM: usize = 8;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 4096, -256, 16, -1, -4096, 256, -16];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq::FqBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF2_16R4B4<DEPTH> {
+    type Field = fq::Fq;
+    const FIELD_MODULUS: u32 = fq::MODULUS;
+    const BASE_LEN: usize = 4;
+    const BASE_DIM: usize = 16;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 4096, -256, 16, -1, -4096, 256, -16];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq::FqBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
 impl<const DEPTH: usize> Config for PnttConfigF2_16B64<DEPTH> {
     type Field = fq::Fq;
     const FIELD_MODULUS: u32 = fq::MODULUS;
@@ -427,24 +507,6 @@ impl<const DEPTH: usize> Config for PnttConfigF1179649B16<DEPTH> {
         precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
     }
 }
-
-/// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=16, BASE_DIM=64 (rate 1/4).
-/// NTT domain up to 2^16, enabling row lengths up to 2^13.
-/// Row lengths: 128 (D=1), 1024 (D=2), 8192 (D=3).
-#[derive(Clone, Copy)]
-pub struct PnttConfigF2_16R4B16<const DEPTH: usize>;
-
-/// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=32, BASE_DIM=128 (rate 1/4).
-/// NTT domain up to 2^16, enabling row lengths up to 2^11.
-/// Row lengths: 256 (D=1), 2048 (D=2).
-#[derive(Clone, Copy)]
-pub struct PnttConfigF2_16R4B32<const DEPTH: usize>;
-
-/// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=64, BASE_DIM=256 (rate 1/4).
-/// NTT domain up to 2^16, enabling row lengths up to 2^12.
-/// Row lengths: 512 (D=1), 4096 (D=2).
-#[derive(Clone, Copy)]
-pub struct PnttConfigF2_16R4B64<const DEPTH: usize>;
 
 /// Pseudo NTT configuration for F3329 (13 × 2^8 + 1) with BASE_LEN=8, BASE_DIM=16 (rate 1/2).
 /// Supports NTT domains up to 2^8, enabling row lengths up to 2^6.
@@ -817,6 +879,9 @@ mod tests {
     #[test]
     fn check_twiddles_f65537() {
         check_twiddles_generic::<PnttConfigF2_16_1<1>>();
+        check_twiddles_generic::<PnttConfigF2_16R4B1<1>>();
+        check_twiddles_generic::<PnttConfigF2_16R4B2<1>>();
+        check_twiddles_generic::<PnttConfigF2_16R4B4<1>>();
         check_twiddles_generic::<PnttConfigF2_16R4B16<1>>();
         check_twiddles_generic::<PnttConfigF2_16R4B32<1>>();
         check_twiddles_generic::<PnttConfigF2_16R4B64<1>>();
