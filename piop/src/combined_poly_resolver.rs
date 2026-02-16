@@ -125,7 +125,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
                 evals
             },
         };
-            
+
         // The challenge '\alpha' to batch multiple evaluation claims
         let folding_challenge: F = transcript.get_field_challenge(field_cfg);
 

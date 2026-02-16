@@ -184,7 +184,11 @@ where
             let mut bi = F::zero_with_cfg(cfg);
             *bi.inner_mut() = buf[i >> 1].clone();
             let tmp = r[0].clone() * &bi;
-            if (i & 1) == 0 { *val = (bi - tmp).inner().clone(); } else { *val = tmp.inner().clone(); }
+            if (i & 1) == 0 {
+                *val = (bi - tmp).inner().clone();
+            } else {
+                *val = tmp.inner().clone();
+            }
         });
         *buf = res;
     }
