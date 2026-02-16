@@ -2,9 +2,8 @@
 
 mod folder;
 mod structs;
-mod utils;
 
-use crypto_primitives::{FromPrimitiveWithConfig, PrimeField, Semiring};
+use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use itertools::Itertools;
 use num_traits::Zero;
 #[cfg(feature = "parallel")]
@@ -18,13 +17,13 @@ use zinc_poly::{
     utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_uair::{Uair, ideal::ImpossibleIdeal};
+use zinc_uair::{TraceRow, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::{
     cfg_iter, from_ref::FromRef, inner_transparent_field::InnerTransparentField, powers,
 };
 
 use crate::{
-    combined_poly_resolver::{folder::ConstraintFolder, utils::project_scalars_to_field},
+    combined_poly_resolver::folder::ConstraintFolder,
     ideal_check,
     sumcheck::{MLSumcheck, SumCheckError},
 };
@@ -51,60 +50,36 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ///
     /// # Parameters
     /// - `transcript`: FS-transcript.
-    /// - `trace_matrix`: The trace that have been projected to F[X].
+    /// - `trace_matrix`: The trace that have been projected to F.
     /// - `evaluation_point`: The evaluation point for the claims.
-    /// - `projected_scalars`: The UAIR scalars projected to `F[X]`.
+    /// - `projected_scalars`: The UAIR scalars projected to `F`.
     /// - `num_constraints`: The number of constraint polynomials in the UAIR
     ///   `U`.
     /// - `num_vars`: The number of variables of the trace MLEs.
     /// - `max_degree`: The degree of the UAIR `U`.
     /// - `field_cfg`: The random field config.
     #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
-    pub fn prove_as_subprotocol<R, U>(
+    pub fn prove_as_subprotocol<U>(
         transcript: &mut impl Transcript,
-        trace_matrix: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
+        trace_matrix: Vec<DenseMultilinearExtension<F::Inner>>,
         evaluation_point: &[F],
-        projected_scalars: HashMap<R, DynamicPolynomialF<F>>,
+        projected_scalars: &HashMap<U::Scalar, F>,
         num_constraints: usize,
         num_vars: usize,
         max_degree: usize,
         field_cfg: &F::Config,
     ) -> Result<(Proof<F>, ProverState<F>), CombinedPolyResolverError<F>>
     where
-        R: Semiring + Send + Sync + 'static,
         F::Inner: ConstTranscribable + Send + Sync + Zero + Default,
-        U: Uair<R>,
+        U: Uair,
     {
         debug_assert_ne!(
             num_vars, 1,
             "The protocol is not needed when the number of variables is 1 :)"
         );
 
-        let projecting_element: F = transcript.get_field_challenge(field_cfg);
-
-        // Project scalars along F[X] -> F.
-        let projected_scalars: HashMap<R, F> =
-            project_scalars_to_field(projected_scalars, &projecting_element)?;
-
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
-
-        let num_cols = U::num_cols();
-
-        // Project trace along F[X] -> F.
-        let up: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(trace_matrix)
-            .map(|column| {
-                cfg_iter!(column)
-                    .map(|coeff| {
-                        coeff
-                            .evaluate_at_point(&projecting_element)
-                            .expect("evaluation cannot fail here")
-                            .inner()
-                            .clone()
-                    })
-                    .collect()
-            })
-            .collect();
 
         // Shifted trace. Just take the trace, drop the first row
         // and append 0 to the end. Note, that the latter happens
@@ -112,7 +87,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         // as it always pads to the next power of two.
         // It might lead to a problem when `num_vars = 1` but that is not going to
         // happen on real world traces.
-        let down: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(up)
+        let down: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(trace_matrix)
             .map(|column| column[1..].iter().cloned().collect())
             .collect();
 
@@ -129,14 +104,16 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         let folding_challenge_powers: Vec<F> =
             powers(folding_challenge, one.clone(), num_constraints);
 
+        let num_cols = trace_matrix.len();
+
         let mles: Vec<DenseMultilinearExtension<F::Inner>> = {
             let mut mles = Vec::with_capacity(2 * num_cols + 2);
 
             mles.push(last_row_selector);
             mles.push(eq_r);
 
-            mles.extend(up.clone());
-            mles.extend(down.clone());
+            mles.extend(trace_matrix);
+            mles.extend(down);
 
             mles
         };
@@ -154,7 +131,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
                 let mut folder = ConstraintFolder::new(&folding_challenge_powers, &zero);
 
-                let project = |scalar: &R| {
+                let project = |scalar: &U::Scalar| {
                     projected_scalars
                         .get(scalar)
                         .cloned()
@@ -163,8 +140,14 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
                 U::constrain_general(
                     &mut folder,
-                    &mle_values[2..num_cols + 2],
-                    &mle_values[num_cols + 2..],
+                    TraceRow::from_slice_with_signature(
+                        &mle_values[2..num_cols + 2],
+                        &U::signature(),
+                    ),
+                    TraceRow::from_slice_with_signature(
+                        &mle_values[num_cols + 2..],
+                        &U::signature(),
+                    ),
                     project,
                     |x, y| Some(project(y) * x),
                     ImpossibleIdeal::from_ref,
@@ -209,8 +192,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
                 down_evals: evals[num_cols..].to_vec(),
             },
             ProverState {
-                up,
-                down,
                 evaluation_point: sumcheck_prover_state.randomness,
             },
         ))
@@ -224,30 +205,29 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// - `proof`: The prover's proof.
     /// - `num_constraints`: The number of constraints of the UAIR `U`.
     /// - `max_degree`: The degree of the UAIR `U`.
+    /// - `projecting_element`: The random challenge used to project F[X]->F.
+    /// - `projected_scalars`: The scalars of the UAIR `U` projected onto `F`.
     /// - `ic_check_subclaim`: The subclaim left after the ideal check
     ///   subprotocol. The subclaim is resolved by this protocol.
     /// - `field_cfg`: The random field config.
-    #[allow(clippy::arithmetic_side_effects)]
-    pub fn verify_as_subprotocol<R, U>(
+    #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+    // TODO(Ilia): sanitise too_many_arguments ^ once we have time
+    pub fn verify_as_subprotocol<U>(
         transcript: &mut impl Transcript,
         proof: Proof<F>,
         num_constraints: usize,
         num_vars: usize,
         max_degree: usize,
-        ic_check_subclaim: ideal_check::VerifierSubClaim<R, F>,
+        projecting_element: &F,
+        projected_scalars: &HashMap<U::Scalar, F>,
+        ic_check_subclaim: ideal_check::VerifierSubClaim<F>,
         field_cfg: &F::Config,
     ) -> Result<VerifierSubclaim<F>, CombinedPolyResolverError<F>>
     where
-        R: Semiring + 'static,
         F::Inner: ConstTranscribable,
-        U: Uair<R>,
+        U: Uair,
     {
-        proof.validate_evaluation_sizes(U::num_cols())?;
-
-        let projecting_element: F = transcript.get_field_challenge(field_cfg);
-
-        let projected_scalars: HashMap<R, F> =
-            project_scalars_to_field(ic_check_subclaim.projected_scalars, &projecting_element)?;
+        proof.validate_evaluation_sizes(U::signature().total_cols())?;
 
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
@@ -266,7 +246,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             .map(
                 |(claimed_value, random_coeff)| -> Result<F, CombinedPolyResolverError<F>> {
                     Ok(claimed_value
-                        .evaluate_at_point(&projecting_element)
+                        .evaluate_at_point(projecting_element)
                         .map_err(|err| {
                             CombinedPolyResolverError::ProjectionError(
                                 claimed_value.clone(),
@@ -308,7 +288,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         let mut folder = ConstraintFolder::new(&folding_challenge_powers, &zero);
 
-        let project = |scalar: &R| {
+        let project = |scalar: &U::Scalar| {
             projected_scalars
                 .get(scalar)
                 .cloned()
@@ -317,8 +297,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         U::constrain_general(
             &mut folder,
-            &proof.up_evals,
-            &proof.down_evals,
+            TraceRow::from_slice_with_signature(&proof.up_evals, &U::signature()),
+            TraceRow::from_slice_with_signature(&proof.down_evals, &U::signature()),
             project,
             |x, y| Some(project(y) * x),
             ImpossibleIdeal::from_ref,
@@ -388,7 +368,9 @@ mod tests {
     use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
     use rand::rng;
     use zinc_poly::univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal};
-    use zinc_test_uair::{GenerateWitness, TestAirNoMultiplication, TestUairSimpleMultiplication};
+    use zinc_test_uair::{
+        GenerateSingleTypeWitness, TestAirNoMultiplication, TestUairSimpleMultiplication,
+    };
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::{
         constraint_counter::count_constraints,
@@ -398,11 +380,16 @@ mod tests {
     };
 
     use crate::{
-        ideal_check::{IdealCheckProtocol, IdealCheckTypes},
-        test_utils::{LIMBS, TestIcTypes, run_ideal_check_prover, test_config},
+        ideal_check::IdealCheckProtocol,
+        projections::{project_scalars_to_field, project_trace_to_field},
+        test_utils::{LIMBS, run_ideal_check_prover_single_type, test_config},
     };
 
     use super::*;
+
+    // TODO(Ilia): These tests are absolute joke.
+    //             Once we have time we need to create a comprehensive test suite
+    //             akin to the one we have for the PCS or the sumcheck.
 
     fn test_successful_verification_generic<
         U,
@@ -413,7 +400,8 @@ mod tests {
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
-        U: GenerateWitness<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
+        U: GenerateSingleTypeWitness<Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+            + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
@@ -424,30 +412,38 @@ mod tests {
 
         let trace = U::generate_witness(num_vars, &mut rng);
 
-        let (ic_proof, ic_prover_state) =
-            run_ideal_check_prover::<U, DEGREE_PLUS_ONE>(num_vars, &trace, &mut prover_transcript);
-
-        let num_constraints =
-            count_constraints::<<TestIcTypes as IdealCheckTypes<_>>::Witness, U>();
-
-        let ic_check_subclaim =
-            IdealCheckProtocol::<TestIcTypes, _>::verify_as_subprotocol::<U, _, _>(
-                &mut verifier_transcript,
-                ic_proof,
-                num_constraints,
+        let (ic_proof, ic_prover_state, projected_scalars, projected_trace) =
+            run_ideal_check_prover_single_type::<U, DEGREE_PLUS_ONE>(
                 num_vars,
-                ideal_over_f_from_ref,
-                &test_config(),
-            )
-            .expect("Verification failed");
+                &trace,
+                &mut prover_transcript,
+            );
 
-        let max_degree = count_max_degree::<_, U>();
+        let num_constraints = count_constraints::<U>();
 
-        let (proof, _) = CombinedPolyResolver::prove_as_subprotocol::<_, U>(
+        let ic_check_subclaim = IdealCheckProtocol::verify_as_subprotocol::<U, _, _>(
+            &mut verifier_transcript,
+            ic_proof,
+            num_constraints,
+            num_vars,
+            ideal_over_f_from_ref,
+            &test_config(),
+        )
+        .expect("Verification failed");
+
+        let max_degree = count_max_degree::<U>();
+
+        let projecting_element: MontyField<4> =
+            prover_transcript.get_field_challenge(&test_config());
+
+        let projected_scalars =
+            project_scalars_to_field(projected_scalars, &projecting_element).unwrap();
+
+        let (proof, _) = CombinedPolyResolver::prove_as_subprotocol::<U>(
             &mut prover_transcript,
-            &ic_prover_state.trace_matrix,
+            project_trace_to_field::<_, 32>(&[], &projected_trace, &[], &projecting_element),
             &ic_prover_state.evaluation_point,
-            ic_prover_state.projected_scalars,
+            &projected_scalars,
             num_constraints,
             num_vars,
             max_degree,
@@ -455,13 +451,18 @@ mod tests {
         )
         .expect("CombinedPolyResolver prover failed");
 
+        let projecting_element: MontyField<LIMBS> =
+            verifier_transcript.get_field_challenge(&test_config());
+
         assert!(
-            CombinedPolyResolver::verify_as_subprotocol::<_, U>(
+            CombinedPolyResolver::verify_as_subprotocol::<U>(
                 &mut verifier_transcript,
                 proof,
                 num_constraints,
                 num_vars,
                 max_degree,
+                &projecting_element,
+                &projected_scalars,
                 ic_check_subclaim,
                 &test_config(),
             )
@@ -475,11 +476,11 @@ mod tests {
 
         let num_vars = 2;
 
-        test_successful_verification_generic::<TestAirNoMultiplication, _, _, 32>(
+        test_successful_verification_generic::<TestAirNoMultiplication<5>, _, _, 32>(
             num_vars,
             |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
         );
-        test_successful_verification_generic::<TestUairSimpleMultiplication, _, _, 32>(
+        test_successful_verification_generic::<TestUairSimpleMultiplication<Int<5>>, _, _, 32>(
             num_vars,
             |_ideal_over_ring| IdealOrZero::zero(),
         );

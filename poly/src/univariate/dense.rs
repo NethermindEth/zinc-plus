@@ -1,5 +1,5 @@
 use crate::{
-    CoefficientProjectable, ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
+    ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
     univariate::{binary_ref::BinaryRefPoly, binary_u64::BinaryU64Poly},
 };
 
@@ -589,21 +589,6 @@ where
             poly2
                 .evaluate_at_point(&sampled_value)
                 .expect("Failed to evaluate polynomial at point")
-        }
-    }
-}
-
-impl<R: Semiring, const DEGREE_PLUS_ONE: usize> CoefficientProjectable<R, DEGREE_PLUS_ONE>
-    for DensePolynomial<R, DEGREE_PLUS_ONE>
-{
-    fn project_coefficients<F: FromWithConfig<R> + 'static>(
-        &self,
-        projecting_element: &F,
-    ) -> DensePolynomial<F, DEGREE_PLUS_ONE> {
-        DensePolynomial {
-            coeffs: array::from_fn(|i| {
-                F::from_with_cfg(self.coeffs[i].clone(), projecting_element.cfg())
-            }),
         }
     }
 }
