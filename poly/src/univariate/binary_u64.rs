@@ -397,7 +397,7 @@ impl<'a, const DEGREE_PLUS_ONE: usize> Iterator for BinaryU64PolyIter<'a, DEGREE
 }
 
 impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
-    pub fn iter(&'_ self) -> BinaryU64PolyIter<'_, DEGREE_PLUS_ONE> {
+    pub fn iter(&self) -> BinaryU64PolyIter<'_, DEGREE_PLUS_ONE> {
         BinaryU64PolyIter::new(self)
     }
 }

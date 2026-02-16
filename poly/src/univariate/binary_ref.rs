@@ -318,12 +318,12 @@ impl<const DEGREE_PLUS_ONE: usize> From<&BinaryRefPoly<DEGREE_PLUS_ONE>>
 
 impl<const DEGREE_PLUS_ONE: usize> BinaryRefPoly<DEGREE_PLUS_ONE> {
     #[inline(always)]
-    pub fn iter(&'_ self) -> std::slice::Iter<'_, Boolean> {
+    pub fn iter(&self) -> std::slice::Iter<'_, Boolean> {
         self.0.iter()
     }
 
     #[inline(always)]
-    pub fn iter_mut(&'_ mut self) -> std::slice::IterMut<'_, Boolean> {
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Boolean> {
         self.0.iter_mut()
     }
 }
