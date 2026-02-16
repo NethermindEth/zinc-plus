@@ -67,7 +67,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
     ) -> Result<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment), ZipError> {
-        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, &[poly], &[])?;
+        validate_input::<Zt, Lc, bool>(
+            "commit",
+            pp.num_vars,
+            pp.num_rows,
+            pp.linear_code.row_len(),
+            &[poly],
+            &[],
+        )?;
 
         let expected_num_evals = pp.num_rows * pp.linear_code.row_len();
         assert_eq!(
@@ -111,7 +118,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
     ) -> Result<DenseRowMatrix<Zt::Cw>, ZipError> {
-        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, &[poly], &[])?;
+        validate_input::<Zt, Lc, bool>(
+            "commit",
+            pp.num_vars,
+            pp.num_rows,
+            pp.linear_code.row_len(),
+            &[poly],
+            &[],
+        )?;
 
         let row_len = pp.linear_code.row_len();
 

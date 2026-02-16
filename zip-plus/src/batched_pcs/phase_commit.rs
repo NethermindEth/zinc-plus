@@ -55,7 +55,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
         let cw_matrices: Vec<_> = polys
             .iter()
             .map(|poly| {
-                validate_input::<Zt, Lc, bool>("batched_commit", pp.num_vars, &[poly], &[])?;
+                validate_input::<Zt, Lc, bool>(
+                    "batched_commit",
+                    pp.num_vars,
+                    pp.num_rows,
+                    pp.linear_code.row_len(),
+                    &[poly],
+                    &[],
+                )?;
                 assert_eq!(
                     poly.len(),
                     expected_num_evals,

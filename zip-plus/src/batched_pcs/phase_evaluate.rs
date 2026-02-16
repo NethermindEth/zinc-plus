@@ -60,7 +60,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
         assert!(!polys.is_empty(), "Batch must contain at least one polynomial");
 
         for poly in polys {
-            validate_input::<Zt, Lc, _>("batched_evaluate", pp.num_vars, &[poly], &[point])?;
+            validate_input::<Zt, Lc, _>(
+                "batched_evaluate",
+                pp.num_vars,
+                pp.num_rows,
+                pp.linear_code.row_len(),
+                &[poly],
+                &[point],
+            )?;
         }
 
         let mut transcript: PcsTranscript = test_transcript.into();

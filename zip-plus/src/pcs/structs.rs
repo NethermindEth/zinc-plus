@@ -70,11 +70,32 @@ where
     Zt: ZipTypes,
     Lc: LinearCode<Zt>,
 {
-    #[allow(clippy::arithmetic_side_effects)]
     pub fn setup(poly_size: usize, linear_code: Lc) -> ZipPlusParams<Zt, Lc> {
         assert!(poly_size.is_power_of_two());
         let num_vars = poly_size.ilog2() as usize;
-        let num_rows = ((1 << num_vars) / linear_code.row_len()).next_power_of_two();
+        let row_len = linear_code.row_len();
+        assert!(row_len > 0, "row_len must be > 0");
+        assert!(row_len.is_power_of_two(), "row_len ({row_len}) must be a power of two");
+        assert!(
+            poly_size % row_len == 0,
+            "poly_size ({poly_size}) must be divisible by row_len ({row_len})"
+        );
+
+        let num_rows = poly_size / row_len;
+        assert!(
+            num_rows.is_power_of_two(),
+            "num_rows ({num_rows}) must be a power of two"
+        );
+
+        let computed_poly_size = num_rows
+            .checked_mul(row_len)
+            .expect("num_rows * row_len overflowed usize");
+        assert_eq!(
+            computed_poly_size,
+            poly_size,
+            "num_rows ({num_rows}) * row_len ({row_len}) must equal poly_size ({poly_size})"
+        );
+
         ZipPlusParams::new(num_vars, num_rows, linear_code)
     }
 }
@@ -90,6 +111,31 @@ pub struct ZipPlusParams<Zt: ZipTypes, Lc: LinearCode<Zt>> {
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlusParams<Zt, Lc> {
     pub fn new(num_vars: usize, num_rows: usize, linear_code: Lc) -> Self {
+        assert!(num_rows > 0, "num_rows must be > 0");
+        assert!(
+            num_rows.is_power_of_two(),
+            "num_rows ({num_rows}) must be a power of two"
+        );
+
+        let row_len = linear_code.row_len();
+        assert!(row_len > 0, "row_len must be > 0");
+        assert!(
+            row_len.is_power_of_two(),
+            "row_len ({row_len}) must be a power of two"
+        );
+
+        let poly_size = (1usize)
+            .checked_shl(num_vars as u32)
+            .expect("num_vars too large to compute poly_size");
+        let matrix_size = num_rows
+            .checked_mul(row_len)
+            .expect("num_rows * row_len overflowed usize");
+        assert_eq!(
+            matrix_size,
+            poly_size,
+            "num_rows ({num_rows}) * row_len ({row_len}) must equal 2^num_vars ({poly_size})"
+        );
+
         Self {
             num_vars,
             num_rows,

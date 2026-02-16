@@ -53,7 +53,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
         );
 
         for poly in polys {
-            validate_input::<Zt, Lc, bool>("batched_test", pp.num_vars, &[poly], &[])?;
+            validate_input::<Zt, Lc, bool>(
+                "batched_test",
+                pp.num_vars,
+                pp.num_rows,
+                pp.linear_code.row_len(),
+                &[poly],
+                &[],
+            )?;
         }
 
         let total_rows_per_poly = pp.num_rows;

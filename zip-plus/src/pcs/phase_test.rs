@@ -24,7 +24,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         poly: &DenseMultilinearExtension<Zt::Eval>,
         commit_hint: &ZipPlusHint<Zt::Cw>,
     ) -> Result<ZipPlusTestTranscript, ZipError> {
-        validate_input::<Zt, Lc, bool>("test", pp.num_vars, &[poly], &[])?;
+        validate_input::<Zt, Lc, bool>(
+            "test",
+            pp.num_vars,
+            pp.num_rows,
+            pp.linear_code.row_len(),
+            &[poly],
+            &[],
+        )?;
 
         let estimated_transcript_size =
             // Combined rows
