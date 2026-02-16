@@ -4,7 +4,7 @@ use zinc_poly::{
     ConstCoeffBitWidth, Polynomial, mle::DenseMultilinearExtension, utils::build_eq_x_r,
 };
 use zinc_transcript::traits::ConstTranscribable;
-use zinc_utils::{add, ilog_round_up, mul, sub};
+use zinc_utils::{add, div, ilog_round_up, mul, sub};
 
 fn err_too_many_variates(function: &str, upto: usize, got: usize) -> ZipError {
     ZipError::InvalidPcsParam(format!(
@@ -13,19 +13,18 @@ fn err_too_many_variates(function: &str, upto: usize, got: usize) -> ZipError {
 }
 
 // Ensures that polynomials and evaluation points are of appropriate size
-pub(super) fn validate_input<Zt: ZipTypes, Lc: LinearCode<Zt>, Pt>(
+pub(crate) fn validate_input<Zt: ZipTypes, Lc: LinearCode<Zt>, Pt>(
     function: &str,
     param_num_vars: usize,
-    row_len: usize,
     polys: &[&DenseMultilinearExtension<Zt::Eval>],
     points: &[&[Pt]],
 ) -> Result<(), ZipError> {
     // Check bit-width of the linear combinations
     {
-        // Inner ring should be at most 2*log_2(\rho^{-1}*d) + \log_2(d) +
-        // challenge_bits + eval_elem_bits - 1, where d is the log of the size
-        // of the messages being encoded (i.e. log2(row_len)).
-        let d = row_len.ilog2() as usize;
+        // Inner ring should be at most+ 2*log_2(\rho^{-1}*d) + \log_2(d) +
+        // challenge_bits + eval_elem_bits - 1, where d is the size of the messages
+        // being encoded - so num_vars / 2
+        let d = div!(param_num_vars, 2);
         let codeword_bits = ilog_round_up!(mul!(Lc::REPETITION_FACTOR, d), usize);
         let mut challenge_bits = Zt::Chal::NUM_BITS;
         if Zt::Comb::DEGREE_BOUND > 0 {
@@ -81,7 +80,7 @@ pub(super) fn validate_input<Zt: ZipTypes, Lc: LinearCode<Zt>, Pt>(
 /// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
 /// right
 #[allow(clippy::unwrap_used)]
-pub(super) fn point_to_tensor<F>(
+pub(crate) fn point_to_tensor<F>(
     num_rows: usize,
     point: &[F],
     cfg: &F::Config,

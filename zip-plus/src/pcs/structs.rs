@@ -44,7 +44,8 @@ pub trait ZipTypes: Send + Sync {
         + Neg<Output = Self::CombR>
         + ConstTranscribable
         + FromRef<Self::CombR>
-        + for<'a> MulByScalar<&'a Self::Chal>;
+        + for<'a> MulByScalar<&'a Self::Chal>
+        + CheckedAdd;
     /// Ring of elements in the linear combination of codewords, at least as
     /// wide as the evaluation, codeword, and challenge rings.
     type Comb: FixedSemiring
@@ -73,16 +74,7 @@ where
     pub fn setup(poly_size: usize, linear_code: Lc) -> ZipPlusParams<Zt, Lc> {
         assert!(poly_size.is_power_of_two());
         let num_vars = poly_size.ilog2() as usize;
-        let row_len = linear_code.row_len();
-        assert!(
-            row_len > 0 && poly_size % row_len == 0,
-            "poly_size ({poly_size}) must be divisible by row_len ({row_len})"
-        );
-        let num_rows = poly_size / row_len;
-        assert!(
-            num_rows.is_power_of_two(),
-            "num_rows ({num_rows}) must be a power of two"
-        );
+        let num_rows = ((1 << num_vars) / linear_code.row_len()).next_power_of_two();
         ZipPlusParams::new(num_vars, num_rows, linear_code)
     }
 }
