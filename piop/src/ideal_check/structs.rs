@@ -14,6 +14,7 @@ pub struct ProverState<F: PrimeField> {
     pub combined_mles: Vec<Vec<DenseMultilinearExtension<F::Inner>>>,
 }
 
+#[derive(Clone)]
 pub struct VerifierSubClaim<F: PrimeField> {
     pub evaluation_point: Vec<F>,
     pub values: Vec<DynamicPolynomialF<F>>,
