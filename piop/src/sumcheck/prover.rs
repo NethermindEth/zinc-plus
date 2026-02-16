@@ -232,8 +232,8 @@ where
         }
 
         // Strip the constant term before sending, without re-allocating all elements.
-        let mut evaluations_without_constant = evaluations;
-        let tail = evaluations_without_constant.split_off(1); // leaves P(0) behind; tail holds P(1..)
+        let mut tail = evaluations;
+        tail.remove(0); // leaves P(0) behind; tail holds P(1..)
 
         ProverMsg(NatEvaluatedPolyWithoutConstant::new(tail))
     }

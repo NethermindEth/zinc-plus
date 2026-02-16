@@ -93,12 +93,15 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             .collect();
 
         let eq_r = build_eq_x_r_inner(evaluation_point, field_cfg)?;
-
-        // To get the constraints on the last row ignored
-        // we multiply each constraint polynomial
-        // by the selector (1 - eq(1,...,1, x))
-        let last_row_selector = build_eq_x_r_inner(&vec![one.clone(); num_vars], field_cfg)?;
-
+        let last_row_selector = DenseMultilinearExtension {
+            num_vars,
+            evaluations: {
+                let mut evals = vec![zero.inner().clone(); 1 << num_vars];
+                evals[(1 << num_vars) - 1] = one.inner().clone();
+                evals
+            },
+        };
+            
         // The challenge '\alpha' to batch multiple evaluation claims
         let folding_challenge: F = transcript.get_field_challenge(field_cfg);
 
