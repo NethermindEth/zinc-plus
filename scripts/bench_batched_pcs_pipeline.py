@@ -7,22 +7,22 @@ This script runs the "Batched PCS Pipeline Suite BPoly31 1row" criterion benchma
 and collects the results into a LaTeX table.  The benchmarks batch 5
 polynomials into a single shared Merkle tree, using various IPRS codes.
 
-    poly_size (2^P)   Config              Field           row_len
-    ───────────────   ──────              ─────           ───────
-    2^4  = 16         R4B2 D=1 (rate 1/4) F3329           16
-    2^5  = 32         R4B4 D=1 (rate 1/4) F3329           32
-    2^6  = 64         R4B8 D=1 (rate 1/4) F3329           64
-    2^7  = 128        B16 D=1 (rate 1/2)  F65537          128
-    2^8  = 256        B32 D=1 (rate 1/2)  F65537          256
-    2^9  = 512        B64 D=1 (rate 1/2)  F65537          512
-    2^10 = 1024       B16 D=2 (rate 1/2)  F65537          1024
-    2^11 = 2048       B32 D=2 (rate 1/2)  F65537          2048
-    2^12 = 4096       B64 D=2 (rate 1/2)  F65537          4096
-    2^13 = 8192       B16 D=3 (rate 1/2)  F65537          8192
-    2^14 = 16384      B32 D=3 (rate 1/2)  F65537          16384
-    2^16 = 65536      B16 D=4 (rate 1/2)  F1179649        65536
-    2^17 = 131072     B32 D=4 (rate 1/2)  F167772161      131072
-    2^18 = 262144     B64 D=4 (rate 1/2)  F167772161      262144
+    poly_size (2^P)   Config               Field           row_len
+    ───────────────   ──────               ─────           ───────
+    2^4  = 16         R4B2 D=1 (rate 1/4)  F3329           16
+    2^5  = 32         R4B4 D=1 (rate 1/4)  F3329           32
+    2^6  = 64         R4B8 D=1 (rate 1/4)  F3329           64
+    2^7  = 128        R4B16 D=1 (rate 1/4) F65537          128
+    2^8  = 256        R4B32 D=1 (rate 1/4) F65537          256
+    2^9  = 512        R4B64 D=1 (rate 1/4) F65537          512
+    2^10 = 1024       R4B16 D=2 (rate 1/4) F65537          1024
+    2^11 = 2048       R4B32 D=2 (rate 1/4) F65537          2048
+    2^12 = 4096       R4B64 D=2 (rate 1/4) F65537          4096
+    2^13 = 8192       R4B16 D=3 (rate 1/4) F65537          8192
+    2^14 = 16384      B32 D=3 (rate 1/2)   F65537          16384
+    2^16 = 65536      B16 D=4 (rate 1/2)   F1179649        65536
+    2^17 = 131072     B32 D=4 (rate 1/2)   F167772161      131072
+    2^18 = 262144     B64 D=4 (rate 1/2)   F167772161      262144
 
 Usage:
     python3 scripts/bench_batched_pcs_pipeline.py
@@ -63,13 +63,13 @@ POLY_EXP_CONFIG = {
     4:  (1, "R4B2 D=1",  "F3329"),      # row_len=16
     5:  (1, "R4B4 D=1",  "F3329"),      # row_len=32
     6:  (1, "R4B8 D=1",  "F3329"),      # row_len=64
-    7:  (1, "B16 D=1",   "F65537"),     # row_len=128
-    8:  (1, "B32 D=1",   "F65537"),     # row_len=256
-    9:  (1, "B64 D=1",   "F65537"),     # row_len=512
-    10: (1, "B16 D=2",   "F65537"),     # row_len=1024
-    11: (1, "B32 D=2",   "F65537"),     # row_len=2048
-    12: (1, "B64 D=2",   "F65537"),     # row_len=4096
-    13: (1, "B16 D=3",   "F65537"),     # row_len=8192
+    7:  (1, "R4B16 D=1", "F65537"),     # row_len=128
+    8:  (1, "R4B32 D=1", "F65537"),     # row_len=256
+    9:  (1, "R4B64 D=1", "F65537"),     # row_len=512
+    10: (1, "R4B16 D=2", "F65537"),     # row_len=1024
+    11: (1, "R4B32 D=2", "F65537"),     # row_len=2048
+    12: (1, "R4B64 D=2", "F65537"),     # row_len=4096
+    13: (1, "R4B16 D=3", "F65537"),     # row_len=8192
     14: (1, "B32 D=3",   "F65537"),     # row_len=16384
     16: (1, "B16 D=4",   "F1179649"),   # row_len=65536
     17: (1, "B32 D=4",   "F167772161"), # row_len=131072
