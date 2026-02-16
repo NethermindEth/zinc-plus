@@ -37,6 +37,9 @@ pub trait Config: Copy + Send + Sync {
     // TODO(alex): If we need it somewhere else, it would make sense to make this a
     // property of the field.
     fn field_to_int_normalized(x: Self::Field) -> PnttInt;
+
+    /// Validate that the depth fits the NTT domain for this configuration.
+    fn assert_depth_valid() {}
 }
 
 mod precompute {
@@ -147,6 +150,7 @@ impl<C: Config> Default for Radix8PnttParams<C> {
 impl<C: Config> Radix8PnttParams<C> {
     /// Precompute pseudo NTT parameters.
     pub fn new() -> Self {
+        C::assert_depth_valid();
         Self {
             base_matrix: precompute::precompute_base_matrix::<C>(),
             butterfly_twiddles: precompute::precompute_butterfly_twiddles::<C>(),
@@ -190,22 +194,29 @@ impl<const DEPTH: usize> Config for PnttConfigF2_16_1<DEPTH> {
 
         precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
     }
+
+    fn assert_depth_valid() {
+        assert!(
+            DEPTH <= 3,
+            "DEPTH {DEPTH} exceeds max 3 for F65537 PNTT (BASE_DIM=64)"
+        );
+    }
 }
 
 // ==================== F65537 rate 1/4 configurations ====================
 
 /// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=1, BASE_DIM=4 (rate 1/4).
-/// NTT domain up to 2^16. Row lengths: 8 (D=1), 64 (D=2), 512 (D=3).
+/// NTT domain up to 2^16. Row lengths: 8 (D=1), 64 (D=2), 512 (D=3), 4096 (D=4).
 #[derive(Clone, Copy)]
 pub struct PnttConfigF2_16R4B1<const DEPTH: usize>;
 
 /// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=2, BASE_DIM=8 (rate 1/4).
-/// NTT domain up to 2^16. Row lengths: 16 (D=1), 128 (D=2), 1024 (D=3).
+/// NTT domain up to 2^16. Row lengths: 16 (D=1), 128 (D=2), 1024 (D=3), 8192 (D=4).
 #[derive(Clone, Copy)]
 pub struct PnttConfigF2_16R4B2<const DEPTH: usize>;
 
 /// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=4, BASE_DIM=16 (rate 1/4).
-/// NTT domain up to 2^16. Row lengths: 32 (D=1), 256 (D=2), 2048 (D=3).
+/// NTT domain up to 2^16. Row lengths: 32 (D=1), 256 (D=2), 2048 (D=3), 16384 (D=4).
 #[derive(Clone, Copy)]
 pub struct PnttConfigF2_16R4B4<const DEPTH: usize>;
 
@@ -216,8 +227,8 @@ pub struct PnttConfigF2_16R4B4<const DEPTH: usize>;
 pub struct PnttConfigF2_16R4B16<const DEPTH: usize>;
 
 /// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=32, BASE_DIM=128 (rate 1/4).
-/// NTT domain up to 2^16, enabling row lengths up to 2^11.
-/// Row lengths: 256 (D=1), 2048 (D=2).
+/// NTT domain up to 2^16, enabling row lengths up to 2^14.
+/// Row lengths: 256 (D=1), 2048 (D=2), 16384 (D=3).
 #[derive(Clone, Copy)]
 pub struct PnttConfigF2_16R4B32<const DEPTH: usize>;
 
@@ -240,6 +251,13 @@ impl<const DEPTH: usize> Config for PnttConfigF2_16R4B1<DEPTH> {
 
         precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
     }
+
+    fn assert_depth_valid() {
+        assert!(
+            DEPTH <= 4,
+            "DEPTH {DEPTH} exceeds max 4 for F65537 PNTT (BASE_DIM=4)"
+        );
+    }
 }
 
 impl<const DEPTH: usize> Config for PnttConfigF2_16R4B2<DEPTH> {
@@ -254,6 +272,13 @@ impl<const DEPTH: usize> Config for PnttConfigF2_16R4B2<DEPTH> {
         let big_int = fq::FqBackend::into_bigint(x);
 
         precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+
+    fn assert_depth_valid() {
+        assert!(
+            DEPTH <= 4,
+            "DEPTH {DEPTH} exceeds max 4 for F65537 PNTT (BASE_DIM=8)"
+        );
     }
 }
 
@@ -270,6 +295,13 @@ impl<const DEPTH: usize> Config for PnttConfigF2_16R4B4<DEPTH> {
 
         precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
     }
+
+    fn assert_depth_valid() {
+        assert!(
+            DEPTH <= 4,
+            "DEPTH {DEPTH} exceeds max 4 for F65537 PNTT (BASE_DIM=16)"
+        );
+    }
 }
 
 impl<const DEPTH: usize> Config for PnttConfigF2_16R4B16<DEPTH> {
@@ -284,6 +316,13 @@ impl<const DEPTH: usize> Config for PnttConfigF2_16R4B16<DEPTH> {
         let big_int = fq::FqBackend::into_bigint(x);
 
         precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+
+    fn assert_depth_valid() {
+        assert!(
+            DEPTH <= 3,
+            "DEPTH {DEPTH} exceeds max 3 for F65537 PNTT (BASE_DIM=64)"
+        );
     }
 }
 
@@ -300,6 +339,13 @@ impl<const DEPTH: usize> Config for PnttConfigF2_16R4B32<DEPTH> {
 
         precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
     }
+
+    fn assert_depth_valid() {
+        assert!(
+            DEPTH <= 3,
+            "DEPTH {DEPTH} exceeds max 3 for F65537 PNTT (BASE_DIM=128)"
+        );
+    }
 }
 
 impl<const DEPTH: usize> Config for PnttConfigF2_16R4B64<DEPTH> {
@@ -314,6 +360,13 @@ impl<const DEPTH: usize> Config for PnttConfigF2_16R4B64<DEPTH> {
         let big_int = fq::FqBackend::into_bigint(x);
 
         precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+
+    fn assert_depth_valid() {
+        assert!(
+            DEPTH <= 2,
+            "DEPTH {DEPTH} exceeds max 2 for F65537 PNTT (BASE_DIM=256)"
+        );
     }
 }
 
