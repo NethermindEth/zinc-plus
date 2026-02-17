@@ -124,7 +124,8 @@ impl<R: Clone> DenseMultilinearExtension<R> {
     }
 }
 
-impl<R: Default> FromIterator<R> for DenseMultilinearExtension<R> {
+// Keeping Send bound here to match the FromParallelIterator impl
+impl<R: Send + Default> FromIterator<R> for DenseMultilinearExtension<R> {
     fn from_iter<T: IntoIterator<Item = R>>(iter: T) -> Self {
         Self::from_evaluations_vec_pad(iter.into_iter().collect())
     }
@@ -360,7 +361,7 @@ where
 
 impl<R> MultilinearExtensionRand<R> for DenseMultilinearExtension<R>
 where
-    R: Clone + Default,
+    R: Send + Clone + Default,
     StandardUniform: Distribution<R>,
 {
     fn rand<Rng: RngCore + ?Sized>(num_vars: usize, rng: &mut Rng) -> Self {
