@@ -297,6 +297,80 @@ impl GenerateMultiTypeWitness for BinaryDecompositionUair {
     }
 }
 
+pub struct BigBinaryDecompositionUair;
+
+impl Uair for BigBinaryDecompositionUair {
+    type Ideal = DegreeOneIdeal<u32>;
+    type Scalar = DensePolynomial<u32, 32>;
+
+    fn signature() -> UairSignature {
+        UairSignature {
+            binary_poly_cols: 40,
+            arbitrary_poly_cols: 0,
+            int_cols: 1,
+        }
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        let sum = up.binary_poly[1..]
+            .iter()
+            .fold(up.binary_poly[0].clone(), |acc, next| acc + next);
+
+        // sum of all 40 binary poly columns - int[0] ≡ 0 mod (X - 2)
+        b.assert_in_ideal(sum - &up.int[0], &ideal_from_ref(&DegreeOneIdeal::new(2)));
+    }
+}
+
+impl GenerateMultiTypeWitness for BigBinaryDecompositionUair {
+    type PolyCoeff = u32;
+    type Int = u32;
+
+    fn generate_witness<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> (
+        Vec<DenseMultilinearExtension<BinaryPoly<32>>>,
+        Vec<DenseMultilinearExtension<DensePolynomial<Self::PolyCoeff, 32>>>,
+        Vec<DenseMultilinearExtension<Self::Int>>,
+    ) {
+        let num_rows = 1 << num_vars;
+
+        // Limit each binary poly to 26 bits so that 40 * (2^26 - 1) < 2^32
+        // and the sum of evaluations at X=2 fits in a u32.
+        let mask = (1u32 << 26) - 1;
+        let cols: Vec<DenseMultilinearExtension<BinaryPoly<32>>> = (0..40)
+            .map(|_| {
+                (0..num_rows)
+                    .map(|_| BinaryPoly::from(rng.random::<u32>() & mask))
+                    .collect()
+            })
+            .collect();
+
+        // Compute int column as the exact sum of all 40 evaluations at X=2.
+        let int_col: DenseMultilinearExtension<u32> = (0..num_rows)
+            .map(|row| {
+                cols.iter()
+                    .map(|col| col[row].evaluate_at_point(&2u32).expect("should be fine"))
+                    .sum::<u32>()
+            })
+            .collect();
+
+        (cols, vec![], vec![int_col])
+    }
+}
+
 pub struct BigLinearUair;
 
 impl Uair for BigLinearUair {
