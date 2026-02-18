@@ -149,10 +149,7 @@ where
             Proof {
                 combined_mle_values,
             },
-            ProverState {
-                evaluation_point,
-                combined_mles,
-            },
+            ProverState { evaluation_point },
         ))
     }
 
