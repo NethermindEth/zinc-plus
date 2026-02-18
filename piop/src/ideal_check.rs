@@ -7,14 +7,12 @@ use batched_ideal_check::*;
 use crypto_primitives::PrimeField;
 use derive_more::From;
 use itertools::Itertools;
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
 use std::{collections::HashMap, marker::PhantomData};
 pub use structs::*;
 use thiserror::Error;
 use zinc_poly::{
     EvaluationError,
-    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
+    mle::DenseMultilinearExtension,
     univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
@@ -23,7 +21,7 @@ use zinc_uair::{
     ideal::{Ideal, IdealCheck},
     ideal_collector::{IdealOrZero, collect_ideals},
 };
-use zinc_utils::{cfg_iter, inner_transparent_field::InnerTransparentField};
+use zinc_utils::inner_transparent_field::InnerTransparentField;
 
 /// Ideal-check subprotocol.
 pub struct IdealCheckProtocol<F: InnerTransparentField>(PhantomData<F>);
@@ -61,28 +59,20 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
         U: Uair,
         F::Inner: ConstTranscribable,
     {
-        let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
-            trace,
-            projected_scalars,
-            num_constraints,
-            field_cfg,
-        );
-
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
-        let combined_mle_values = cfg_iter!(combined_mles)
-            .map(|combined_mle| {
-                Ok(DynamicPolynomialF::new_trimmed(
-                    cfg_iter!(combined_mle)
-                        .map(|coeff_mle| {
-                            coeff_mle.evaluate_with_config(&evaluation_point, field_cfg)
-                        })
-                        .collect::<std::result::Result<Vec<_>, _>>()?,
-                ))
-            })
-            .collect::<std::result::Result<Vec<_>, IdealCheckError<_, _>>>()?;
+        // Evaluate constraints, gather coefficients, and fold MLEs in one fused
+        // pass. See `combined_poly_builder::compute_combined_values` for
+        // details on the optimisations vs. the previous two-pass approach.
+        let combined_mle_values = combined_poly_builder::compute_combined_values::<_, U>(
+            trace,
+            projected_scalars,
+            num_constraints,
+            &evaluation_point,
+            field_cfg,
+        );
 
         combined_mle_values.iter().for_each(|combined_mle_value| {
             transcript
@@ -95,7 +85,6 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
             },
             ProverState {
                 evaluation_point,
-                combined_mles,
             },
         ))
     }
