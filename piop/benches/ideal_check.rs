@@ -41,7 +41,8 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 ) where
     <F<FIELD_LIMBS> as Field>::Inner: ConstIntSemiring + ConstTranscribable,
     TestAirNoMultiplication<INT_LIMBS>: Uair<Scalar = Witness<INT_LIMBS>, Ideal = DegreeOneIdeal<WitnessCoeff<INT_LIMBS>>>
-        + GenerateSingleTypeWitness<Witness = Witness<INT_LIMBS>>,
+        + GenerateSingleTypeWitness<Witness = Witness<INT_LIMBS>>
+        + IdealCheckProtocol,
     MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Inner>,
 {
     let mut rng = rng();
@@ -137,8 +138,9 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     witness_size: usize,
 ) where
     <F<FIELD_LIMBS> as Field>::Inner: ConstIntSemiring + ConstTranscribable,
-    TestUairSimpleMultiplication<Int<INT_LIMBS>>:
-        Uair<Scalar = Witness<INT_LIMBS>> + GenerateSingleTypeWitness<Witness = Witness<INT_LIMBS>>,
+    TestUairSimpleMultiplication<Int<INT_LIMBS>>: Uair<Scalar = Witness<INT_LIMBS>>
+        + GenerateSingleTypeWitness<Witness = Witness<INT_LIMBS>>
+        + IdealCheckProtocol,
     MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Inner>,
 {
     let mut rng = rng();

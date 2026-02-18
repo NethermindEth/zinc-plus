@@ -18,7 +18,7 @@ use zinc_poly::{
     },
 };
 use zinc_uair::{
-    ConstraintBuilder, NonLinearUair, TraceRow, Uair, UairSignature,
+    ConstraintBuilder, LinearUair, NonLinearUair, TraceRow, Uair, UairSignature,
     ideal::degree_one::DegreeOneIdeal,
 };
 use zinc_utils::from_ref::FromRef;
@@ -29,6 +29,7 @@ use zinc_uair::ideal::ImpossibleIdeal;
 pub struct TestUairSimpleMultiplication<R>(PhantomData<R>);
 
 impl<R: Semiring + 'static> Uair for TestUairSimpleMultiplication<R> {
+    type ConstraintType = NonLinearUair;
     type Ideal = ImpossibleIdeal; // Not used
     type Scalar = DensePolynomial<R, 32>;
 
@@ -58,8 +59,6 @@ impl<R: Semiring + 'static> Uair for TestUairSimpleMultiplication<R> {
         b.assert_zero(up[0].clone() * &up[2] - &down[2]);
     }
 }
-
-impl<R: Semiring + 'static> NonLinearUair for TestUairSimpleMultiplication<R> {}
 
 impl<R> GenerateSingleTypeWitness for TestUairSimpleMultiplication<R>
 where
@@ -132,6 +131,7 @@ where
 pub struct TestAirNoMultiplication<const LIMBS: usize>;
 
 impl<const LIMBS: usize> Uair for TestAirNoMultiplication<LIMBS> {
+    type ConstraintType = NonLinearUair;
     type Ideal = DegreeOneIdeal<Int<LIMBS>>;
     type Scalar = DensePolynomial<Int<LIMBS>, 32>;
 
@@ -162,8 +162,6 @@ impl<const LIMBS: usize> Uair for TestAirNoMultiplication<LIMBS> {
         );
     }
 }
-
-impl<const LIMBS: usize> NonLinearUair for TestAirNoMultiplication<LIMBS> {}
 
 impl<const LIMBS: usize> GenerateSingleTypeWitness for TestAirNoMultiplication<LIMBS> {
     type Witness = DensePolynomial<Int<LIMBS>, 32>;
@@ -200,6 +198,7 @@ impl<const LIMBS: usize> GenerateSingleTypeWitness for TestAirNoMultiplication<L
 pub struct TestAirScalarMultiplications<const LIMBS: usize>;
 
 impl<const LIMBS: usize> Uair for TestAirScalarMultiplications<LIMBS> {
+    type ConstraintType = NonLinearUair;
     type Ideal = DegreeOneIdeal<Int<LIMBS>>;
     type Scalar = DensePolynomial<Int<LIMBS>, 32>;
 
@@ -245,11 +244,10 @@ impl<const LIMBS: usize> Uair for TestAirScalarMultiplications<LIMBS> {
     }
 }
 
-impl<const LIMBS: usize> NonLinearUair for TestAirScalarMultiplications<LIMBS> {}
-
 pub struct BinaryDecompositionUair;
 
 impl Uair for BinaryDecompositionUair {
+    type ConstraintType = NonLinearUair;
     type Ideal = DegreeOneIdeal<u32>;
     type Scalar = DensePolynomial<u32, 32>;
 
@@ -284,8 +282,6 @@ impl Uair for BinaryDecompositionUair {
     }
 }
 
-impl NonLinearUair for BinaryDecompositionUair {}
-
 impl GenerateMultiTypeWitness for BinaryDecompositionUair {
     type PolyCoeff = u32;
     type Int = u32;
@@ -311,6 +307,7 @@ impl GenerateMultiTypeWitness for BinaryDecompositionUair {
 pub struct BigLinearUair;
 
 impl Uair for BigLinearUair {
+    type ConstraintType = LinearUair;
     type Ideal = DegreeOneIdeal<u32>;
     type Scalar = DensePolynomial<u32, 32>;
 
@@ -361,9 +358,6 @@ impl Uair for BigLinearUair {
             });
     }
 }
-
-// TODO: Change this!
-impl NonLinearUair for BigLinearUair {}
 
 impl GenerateMultiTypeWitness for BigLinearUair {
     type PolyCoeff = u32;
