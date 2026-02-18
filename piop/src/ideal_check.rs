@@ -3,6 +3,8 @@ mod batched_ideal_check;
 mod combined_poly_builder;
 mod structs;
 
+pub use structs::*;
+
 use batched_ideal_check::*;
 use crypto_primitives::PrimeField;
 use derive_more::From;
@@ -10,7 +12,6 @@ use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::{collections::HashMap, marker::PhantomData};
-pub use structs::*;
 use thiserror::Error;
 use zinc_poly::{
     EvaluationError,
@@ -61,6 +62,8 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
         U: Uair,
         F::Inner: ConstTranscribable,
     {
+        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+
         let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
             trace,
             projected_scalars,
@@ -69,8 +72,6 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
         );
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
-
-        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
         let combined_mle_values = cfg_iter!(combined_mles)
             .map(|combined_mle| {
@@ -180,16 +181,14 @@ mod tests {
     use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
 
     use rand::rng;
-    use zinc_poly::univariate::{
-        dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF, ideal::DegreeOneIdeal,
-    };
+    use zinc_poly::univariate::{dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF};
     use zinc_test_uair::{
         GenerateSingleTypeWitness, TestAirNoMultiplication, TestUairSimpleMultiplication,
     };
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::{
         constraint_counter::count_constraints,
-        ideal::{Ideal, IdealCheck},
+        ideal::{Ideal, IdealCheck, degree_one::DegreeOneIdeal},
     };
 
     use crate::test_utils::{LIMBS, run_ideal_check_prover_single_type, test_config};

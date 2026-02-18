@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 
+use crate::{
+    ideal_check::{IdealCheckProtocol, Proof, ProverState},
+    projections::{project_scalars, project_trace_coeffs},
+};
 use crypto_bigint::{Odd, modular::MontyParams};
 use crypto_primitives::{FromWithConfig, crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
 use num_traits::Zero;
@@ -10,11 +14,6 @@ use zinc_poly::{
 use zinc_test_uair::GenerateSingleTypeWitness;
 use zinc_transcript::traits::Transcript;
 use zinc_uair::{Uair, constraint_counter::count_constraints};
-
-use crate::{
-    ideal_check::{self, IdealCheckProtocol},
-    projections::{project_scalars, project_trace_coeffs},
-};
 
 pub const LIMBS: usize = 4;
 
@@ -34,8 +33,8 @@ pub fn run_ideal_check_prover_single_type<U, const DEGREE_PLUS_ONE: usize>(
     trace: &[DenseMultilinearExtension<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>],
     transcript: &mut impl Transcript,
 ) -> (
-    ideal_check::Proof<F>,
-    ideal_check::ProverState<F>,
+    Proof<F>,
+    ProverState<F>,
     HashMap<U::Scalar, DynamicPolynomialF<F>>,
     Vec<DenseMultilinearExtension<DynamicPolynomialF<F>>>,
 )

@@ -3,6 +3,13 @@
 mod folder;
 mod structs;
 
+pub use structs::*;
+
+use crate::{
+    combined_poly_resolver::folder::ConstraintFolder,
+    ideal_check::VerifierSubClaim,
+    sumcheck::{MLSumcheck, SumCheckError},
+};
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use itertools::Itertools;
 use num_traits::Zero;
@@ -21,14 +28,6 @@ use zinc_uair::{TraceRow, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::{
     cfg_iter, from_ref::FromRef, inner_transparent_field::InnerTransparentField, powers,
 };
-
-use crate::{
-    combined_poly_resolver::folder::ConstraintFolder,
-    ideal_check,
-    sumcheck::{MLSumcheck, SumCheckError},
-};
-
-pub use structs::*;
 
 pub struct CombinedPolyResolver<F: InnerTransparentField>(PhantomData<F>);
 
@@ -220,7 +219,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         max_degree: usize,
         projecting_element: &F,
         projected_scalars: &HashMap<U::Scalar, F>,
-        ic_check_subclaim: ideal_check::VerifierSubClaim<F>,
+        ic_check_subclaim: VerifierSubClaim<F>,
         field_cfg: &F::Config,
     ) -> Result<VerifierSubclaim<F>, CombinedPolyResolverError<F>>
     where
@@ -365,9 +364,14 @@ impl<F: PrimeField> From<SumCheckError<F>> for CombinedPolyResolverError<F> {
 
 #[cfg(test)]
 mod tests {
+    use crate::{
+        ideal_check::IdealCheckProtocol,
+        projections::{project_scalars_to_field, project_trace_to_field},
+        test_utils::{LIMBS, run_ideal_check_prover_single_type, test_config},
+    };
     use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
     use rand::rng;
-    use zinc_poly::univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal};
+    use zinc_poly::univariate::dense::DensePolynomial;
     use zinc_test_uair::{
         GenerateSingleTypeWitness, TestAirNoMultiplication, TestUairSimpleMultiplication,
     };
@@ -375,14 +379,8 @@ mod tests {
     use zinc_uair::{
         constraint_counter::count_constraints,
         degree_counter::count_max_degree,
-        ideal::{Ideal, IdealCheck},
+        ideal::{Ideal, IdealCheck, degree_one::DegreeOneIdeal},
         ideal_collector::IdealOrZero,
-    };
-
-    use crate::{
-        ideal_check::IdealCheckProtocol,
-        projections::{project_scalars_to_field, project_trace_to_field},
-        test_utils::{LIMBS, run_ideal_check_prover_single_type, test_config},
     };
 
     use super::*;

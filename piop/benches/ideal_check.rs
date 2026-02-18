@@ -13,7 +13,7 @@ use zinc_piop::{
     ideal_check::{IdealCheckProtocol, Proof},
     projections::{project_scalars, project_trace_coeffs},
 };
-use zinc_poly::univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal};
+use zinc_poly::univariate::dense::DensePolynomial;
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_test_uair::{
     BigLinearUair, BinaryDecompositionUair, GenerateMultiTypeWitness, GenerateSingleTypeWitness,
@@ -23,7 +23,10 @@ use zinc_transcript::{
     KeccakTranscript,
     traits::{ConstTranscribable, Transcript},
 };
-use zinc_uair::{Uair, constraint_counter::count_constraints, ideal_collector::IdealOrZero};
+use zinc_uair::{
+    Uair, constraint_counter::count_constraints, ideal::degree_one::DegreeOneIdeal,
+    ideal_collector::IdealOrZero,
+};
 
 const DEGREE_PLUS_ONE: usize = 32;
 

@@ -14,10 +14,12 @@ use zinc_poly::{
     mle::{DenseMultilinearExtension, MultilinearExtensionRand},
     univariate::{
         binary::BinaryPoly, dense::DensePolynomial,
-        dynamic::over_fixed_semiring::DynamicPolynomialFS, ideal::DegreeOneIdeal,
+        dynamic::over_fixed_semiring::DynamicPolynomialFS,
     },
 };
-use zinc_uair::{ConstraintBuilder, TraceRow, Uair, UairSignature};
+use zinc_uair::{
+    ConstraintBuilder, TraceRow, Uair, UairSignature, ideal::degree_one::DegreeOneIdeal,
+};
 use zinc_utils::from_ref::FromRef;
 
 pub use generate_witness::*;
