@@ -66,7 +66,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                     .collect()
             });
 
-        IdealCheckProtocol::prove_as_subprotocol::<TestAirNoMultiplication<INT_LIMBS>>(
+        TestAirNoMultiplication::prove_as_subprotocol(
             transcript,
             &trace,
             &projected_scalars,
@@ -105,11 +105,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             bench.iter_batched(
                 || (proof.clone(), transcript.clone()),
                 |(proof, mut transcript)| {
-                    let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<
-                        TestAirNoMultiplication<INT_LIMBS>,
-                        _,
-                        _,
-                    >(
+                    let _ = black_box(TestAirNoMultiplication::verify_as_subprotocol(
                         &mut transcript,
                         proof,
                         num_constraints,
@@ -169,7 +165,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 .collect()
         });
 
-        IdealCheckProtocol::prove_as_subprotocol::<TestUairSimpleMultiplication<Int<INT_LIMBS>>>(
+        TestUairSimpleMultiplication::prove_as_subprotocol(
             transcript,
             &trace,
             &projected_scalars,
@@ -208,11 +204,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             bench.iter_batched(
                 || (proof.clone(), transcript.clone()),
                 |(proof, mut transcript)| {
-                    let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<
-                        TestUairSimpleMultiplication<Int<INT_LIMBS>>,
-                        _,
-                        _,
-                    >(
+                    let _ = black_box(TestUairSimpleMultiplication::verify_as_subprotocol(
                         &mut transcript,
                         proof,
                         num_constraints,
@@ -272,7 +264,7 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
                     .collect()
             });
 
-        IdealCheckProtocol::prove_as_subprotocol::<BinaryDecompositionUair>(
+        BinaryDecompositionUair::prove_as_subprotocol(
             transcript,
             &trace,
             &projected_scalars,
@@ -316,11 +308,7 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
             bench.iter_batched(
                 || (proof.clone(), transcript.clone()),
                 |(proof, mut transcript)| {
-                    let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<
-                        BinaryDecompositionUair,
-                        _,
-                        _,
-                    >(
+                    let _ = black_box(BinaryDecompositionUair::verify_as_subprotocol(
                         &mut transcript,
                         proof,
                         num_constraints,
@@ -371,7 +359,7 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
                 .collect()
         });
 
-        IdealCheckProtocol::prove_as_subprotocol::<BigLinearUair>(
+        BigLinearUair::prove_as_subprotocol(
             transcript,
             &trace,
             &projected_scalars,
@@ -415,11 +403,7 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
             bench.iter_batched(
                 || (proof.clone(), transcript.clone()),
                 |(proof, mut transcript)| {
-                    let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<
-                        BigLinearUair,
-                        _,
-                        _,
-                    >(
+                    let _ = black_box(BigLinearUair::verify_as_subprotocol(
                         &mut transcript,
                         proof,
                         num_constraints,

@@ -40,7 +40,8 @@ pub fn run_ideal_check_prover_single_type<U, const DEGREE_PLUS_ONE: usize>(
 )
 where
     U: GenerateSingleTypeWitness<Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
-        + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
+        + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+        + IdealCheckProtocol,
     F: FromWithConfig<Int<5>>,
 {
     assert!(
@@ -62,7 +63,7 @@ where
     let trace =
         project_trace_coeffs::<F, Int<5>, Int<5>, DEGREE_PLUS_ONE>(&[], trace, &[], &field_cfg);
 
-    let (proof, state) = IdealCheckProtocol::prove_as_subprotocol::<U>(
+    let (proof, state) = U::prove_as_subprotocol(
         transcript,
         &trace,
         &scalars,

@@ -11,7 +11,7 @@ use derive_more::From;
 use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::{collections::HashMap, marker::PhantomData};
+use std::collections::HashMap;
 use thiserror::Error;
 use zinc_poly::{
     EvaluationError,
@@ -20,16 +20,14 @@ use zinc_poly::{
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
-    Uair,
+    NonLinearUair, Uair,
     ideal::{Ideal, IdealCheck},
     ideal_collector::{IdealOrZero, collect_ideals},
 };
 use zinc_utils::{cfg_iter, inner_transparent_field::InnerTransparentField};
 
 /// Ideal-check subprotocol.
-pub struct IdealCheckProtocol<F: InnerTransparentField>(PhantomData<F>);
-
-impl<F: InnerTransparentField> IdealCheckProtocol<F> {
+pub trait IdealCheckProtocol: Uair {
     /// The prover part of the ideal-check subprotocol.
     ///
     /// The prover samples a random field element
@@ -50,7 +48,64 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
     /// - `field_cfg`: random field configuration sampled on the previous steps
     ///   of the overall protocol.
     #[allow(clippy::type_complexity)]
-    pub fn prove_as_subprotocol<U>(
+    fn prove_as_subprotocol<F>(
+        transcript: &mut impl Transcript,
+        trace: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
+        projected_scalars: &HashMap<Self::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, Self::Ideal>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable;
+
+    /// The verifier part of the ideal-check subprotocol.
+    ///
+    /// The verifier samples a random field element
+    /// the same way the prover sampled a random field
+    /// element for projecting coefficients but disregards it
+    /// as the verifier does not need to project anything.
+    /// Then it computes the ideals encoded by the UAIR `U`,
+    /// samples a random evaluation point and receives
+    /// the evaluations of the combined polynomials sent by the prover
+    /// and checks they belong to the corresponding ideals defined
+    /// by the UAIR `U`.
+    ///
+    /// # Parameters
+    /// - `transcript`: the Fiat-Shamir transcript.
+    /// - `proof`: a purported proof produced by the prover.
+    /// - `num_constraints`: the number of constraints the UAIR `U` encodes.
+    /// - `num_vars`: the number of variables the trace row MLEs have.
+    /// - `ideal_over_f_from_ref`: since the UAIR `U` is not aware of the field
+    ///   the ideal check is operating on it defines ideals over the ring
+    ///   `IcTypes::Witness`. `ideal_over_f_from_ref` allows to convert the
+    ///   ideals over `IcTypes::Witness` into ideals over the field
+    ///   `IcTypes::F`. Think of this as a projection for ideals.
+    /// - `field_cfg`: random field configuration sampled on the previous steps
+    ///   of the overall protocol.
+    #[allow(clippy::type_complexity)]
+    fn verify_as_subprotocol<F, IdealOverF, IdealOverFFromRef>(
+        transcript: &mut impl Transcript,
+        proof: Proof<F>,
+        num_constraints: usize,
+        num_vars: usize,
+        ideal_over_f_from_ref: IdealOverFFromRef,
+        field_cfg: &F::Config,
+    ) -> Result<VerifierSubClaim<F>, IdealCheckError<F, IdealOverF>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+        IdealOverFFromRef: Fn(&IdealOrZero<Self::Ideal>) -> IdealOverF;
+}
+
+impl<U> IdealCheckProtocol for U
+where
+    U: NonLinearUair,
+{
+    #[allow(clippy::type_complexity)]
+    fn prove_as_subprotocol<F>(
         transcript: &mut impl Transcript,
         trace: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
         projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
@@ -59,7 +114,7 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
         field_cfg: &F::Config,
     ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
     where
-        U: Uair,
+        F: InnerTransparentField,
         F::Inner: ConstTranscribable,
     {
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
@@ -101,32 +156,7 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
         ))
     }
 
-    /// The verifier part of the ideal-check subprotocol.
-    ///
-    /// The verifier samples a random field element
-    /// the same way the prover sampled a random field
-    /// element for projecting coefficients but disregards it
-    /// as the verifier does not need to project anything.
-    /// Then it computes the ideals encoded by the UAIR `U`,
-    /// samples a random evaluation point and receives
-    /// the evaluations of the combined polynomials sent by the prover
-    /// and checks they belong to the corresponding ideals defined
-    /// by the UAIR `U`.
-    ///
-    /// # Parameters
-    /// - `transcript`: the Fiat-Shamir transcript.
-    /// - `proof`: a purported proof produced by the prover.
-    /// - `num_constraints`: the number of constraints the UAIR `U` encodes.
-    /// - `num_vars`: the number of variables the trace row MLEs have.
-    /// - `ideal_over_f_from_ref`: since the UAIR `U` is not aware of the field
-    ///   the ideal check is operating on it defines ideals over the ring
-    ///   `IcTypes::Witness`. `ideal_over_f_from_ref` allows to convert the
-    ///   ideals over `IcTypes::Witness` into ideals over the field
-    ///   `IcTypes::F`. Think of this as a projection for ideals.
-    /// - `field_cfg`: random field configuration sampled on the previous steps
-    ///   of the overall protocol.
-    #[allow(clippy::type_complexity)]
-    pub fn verify_as_subprotocol<U, IdealOverF, IdealOverFFromRef>(
+    fn verify_as_subprotocol<F, IdealOverF, IdealOverFFromRef>(
         transcript: &mut impl Transcript,
         proof: Proof<F>,
         num_constraints: usize,
@@ -135,7 +165,7 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
         field_cfg: &F::Config,
     ) -> Result<VerifierSubClaim<F>, IdealCheckError<F, IdealOverF>>
     where
-        U: Uair,
+        F: InnerTransparentField,
         F::Inner: ConstTranscribable,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
@@ -209,7 +239,8 @@ mod tests {
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
         U: GenerateSingleTypeWitness<Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
-            + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
+            + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+            + IdealCheckProtocol,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
@@ -224,7 +255,7 @@ mod tests {
 
         let num_constraints = count_constraints::<U>();
 
-        let verifier_result = IdealCheckProtocol::verify_as_subprotocol::<U, _, _>(
+        let verifier_result = U::verify_as_subprotocol(
             &mut transcript.clone(),
             proof,
             num_constraints,

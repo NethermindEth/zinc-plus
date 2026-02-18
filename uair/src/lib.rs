@@ -162,3 +162,9 @@ pub trait Uair {
         )
     }
 }
+
+/// UAIR that only has linear constraints.
+pub trait LinearUair: Uair {}
+
+/// UAIR that has at least one non-linear constraint.
+pub trait NonLinearUair: Uair {}

@@ -18,7 +18,8 @@ use zinc_poly::{
     },
 };
 use zinc_uair::{
-    ConstraintBuilder, TraceRow, Uair, UairSignature, ideal::degree_one::DegreeOneIdeal,
+    ConstraintBuilder, NonLinearUair, TraceRow, Uair, UairSignature,
+    ideal::degree_one::DegreeOneIdeal,
 };
 use zinc_utils::from_ref::FromRef;
 
@@ -57,6 +58,8 @@ impl<R: Semiring + 'static> Uair for TestUairSimpleMultiplication<R> {
         b.assert_zero(up[0].clone() * &up[2] - &down[2]);
     }
 }
+
+impl<R: Semiring + 'static> NonLinearUair for TestUairSimpleMultiplication<R> {}
 
 impl<R> GenerateSingleTypeWitness for TestUairSimpleMultiplication<R>
 where
@@ -160,6 +163,8 @@ impl<const LIMBS: usize> Uair for TestAirNoMultiplication<LIMBS> {
     }
 }
 
+impl<const LIMBS: usize> NonLinearUair for TestAirNoMultiplication<LIMBS> {}
+
 impl<const LIMBS: usize> GenerateSingleTypeWitness for TestAirNoMultiplication<LIMBS> {
     type Witness = DensePolynomial<Int<LIMBS>, 32>;
 
@@ -240,6 +245,8 @@ impl<const LIMBS: usize> Uair for TestAirScalarMultiplications<LIMBS> {
     }
 }
 
+impl<const LIMBS: usize> NonLinearUair for TestAirScalarMultiplications<LIMBS> {}
+
 pub struct BinaryDecompositionUair;
 
 impl Uair for BinaryDecompositionUair {
@@ -276,6 +283,8 @@ impl Uair for BinaryDecompositionUair {
         );
     }
 }
+
+impl NonLinearUair for BinaryDecompositionUair {}
 
 impl GenerateMultiTypeWitness for BinaryDecompositionUair {
     type PolyCoeff = u32;
@@ -352,6 +361,9 @@ impl Uair for BigLinearUair {
             });
     }
 }
+
+// TODO: Change this!
+impl NonLinearUair for BigLinearUair {}
 
 impl GenerateMultiTypeWitness for BigLinearUair {
     type PolyCoeff = u32;

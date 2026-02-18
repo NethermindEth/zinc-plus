@@ -399,7 +399,8 @@ mod tests {
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
         U: GenerateSingleTypeWitness<Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
-            + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
+            + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+            + IdealCheckProtocol,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
@@ -419,7 +420,7 @@ mod tests {
 
         let num_constraints = count_constraints::<U>();
 
-        let ic_check_subclaim = IdealCheckProtocol::verify_as_subprotocol::<U, _, _>(
+        let ic_check_subclaim = U::verify_as_subprotocol(
             &mut verifier_transcript,
             ic_proof,
             num_constraints,
