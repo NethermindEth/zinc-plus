@@ -307,7 +307,7 @@ impl Uair for BigBinaryDecompositionUair {
         UairSignature {
             binary_poly_cols: 40,
             arbitrary_poly_cols: 0,
-            int_cols: 0,
+            int_cols: 1,
         }
     }
 
@@ -328,8 +328,8 @@ impl Uair for BigBinaryDecompositionUair {
             .iter()
             .fold(up.binary_poly[0].clone(), |acc, next| acc + next);
 
-        // sum of all 40 binary poly columns ≡ 0 mod (X - 2)
-        b.assert_in_ideal(sum, &ideal_from_ref(&DegreeOneIdeal::new(2)));
+        // sum of all 40 binary poly columns - int[0] ≡ 0 mod (X - 2)
+        b.assert_in_ideal(sum - &up.int[0], &ideal_from_ref(&DegreeOneIdeal::new(2)));
     }
 }
 
@@ -345,38 +345,29 @@ impl GenerateMultiTypeWitness for BigBinaryDecompositionUair {
         Vec<DenseMultilinearExtension<DensePolynomial<Self::PolyCoeff, 32>>>,
         Vec<DenseMultilinearExtension<Self::Int>>,
     ) {
-        // Generate 39 random binary poly columns and set the 40th so their sum evaluates to 0 at X=2.
         let num_rows = 1 << num_vars;
-        let mut cols: Vec<DenseMultilinearExtension<BinaryPoly<32>>> =
-            (0..39)
-                .map(|_| {
-                    (0..num_rows)
-                        .map(|_| rng.random::<BinaryPoly<32>>())
-                        .collect()
-                })
-                .collect();
 
-        // The last column is the negation of the sum of the first 39 at X=2, lifted back to a BinaryPoly.
-        // Since we work mod (X-2), we need sum(col_i(2)) + col_39(2) ≡ 0.
-        // We use wrapping arithmetic on u32.
-        let last_col: DenseMultilinearExtension<BinaryPoly<32>> = (0..num_rows)
-            .map(|row| {
-                let partial_sum: u32 = cols
-                    .iter()
-                    .map(|col| {
-                        col[row]
-                            .evaluate_at_point(&2u32)
-                            .expect("should be fine")
-                    })
-                    .fold(0u32, |a, b| a.wrapping_add(b));
-                // We need last(2) = -partial_sum (wrapping)
-                BinaryPoly::from(0u32.wrapping_sub(partial_sum))
+        // Limit each binary poly to 26 bits so that 40 * (2^26 - 1) < 2^32
+        // and the sum of evaluations at X=2 fits in a u32.
+        let mask = (1u32 << 26) - 1;
+        let cols: Vec<DenseMultilinearExtension<BinaryPoly<32>>> = (0..40)
+            .map(|_| {
+                (0..num_rows)
+                    .map(|_| BinaryPoly::from(rng.random::<u32>() & mask))
+                    .collect()
             })
             .collect();
 
-        cols.push(last_col);
+        // Compute int column as the exact sum of all 40 evaluations at X=2.
+        let int_col: DenseMultilinearExtension<u32> = (0..num_rows)
+            .map(|row| {
+                cols.iter()
+                    .map(|col| col[row].evaluate_at_point(&2u32).expect("should be fine"))
+                    .sum::<u32>()
+            })
+            .collect();
 
-        (cols, vec![], vec![])
+        (cols, vec![], vec![int_col])
     }
 }
 
