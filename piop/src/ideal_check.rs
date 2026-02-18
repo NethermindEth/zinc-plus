@@ -142,117 +142,6 @@ where
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
-        <U::ConstraintType as IdealCheckDispatch>::verify_impl::<U, F, IdealOverF, IdealOverFFromRef>(
-            transcript,
-            proof,
-            num_constraints,
-            num_vars,
-            ideal_over_f_from_ref,
-            field_cfg,
-        )
-    }
-}
-
-/// A workaround dispatch trait implemented directly on constraint type markers.
-/// This avoids the coherence conflict of two blanket impls on
-/// `IdealCheckProtocol` by dispatching through `U::ConstraintType`.
-pub trait IdealCheckDispatch: UairConstraintType {
-    #[allow(clippy::type_complexity)]
-    fn prove_impl<U, F>(
-        transcript: &mut impl Transcript,
-        trace: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
-        projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
-        num_constraints: usize,
-        num_vars: usize,
-        field_cfg: &F::Config,
-    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
-    where
-        U: Uair<ConstraintType = Self>,
-        F: InnerTransparentField,
-        F::Inner: ConstTranscribable;
-
-    #[allow(clippy::type_complexity)]
-    fn verify_impl<U, F, IdealOverF, IdealOverFFromRef>(
-        transcript: &mut impl Transcript,
-        proof: Proof<F>,
-        num_constraints: usize,
-        num_vars: usize,
-        ideal_over_f_from_ref: IdealOverFFromRef,
-        field_cfg: &F::Config,
-    ) -> Result<VerifierSubClaim<F>, IdealCheckError<F, IdealOverF>>
-    where
-        U: Uair<ConstraintType = Self>,
-        F: InnerTransparentField,
-        F::Inner: ConstTranscribable,
-        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
-        IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF;
-}
-
-impl IdealCheckDispatch for LinearUair {
-    fn prove_impl<U, F>(
-        transcript: &mut impl Transcript,
-        trace: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
-        projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
-        num_constraints: usize,
-        num_vars: usize,
-        field_cfg: &F::Config,
-    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
-    where
-        U: Uair<ConstraintType = Self>,
-        F: InnerTransparentField,
-        F::Inner: ConstTranscribable,
-    {
-        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
-
-        let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
-            trace,
-            projected_scalars,
-            num_constraints,
-            field_cfg,
-        );
-
-        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
-
-        let combined_mle_values = cfg_iter!(combined_mles)
-            .map(|combined_mle| {
-                Ok(DynamicPolynomialF::new_trimmed(
-                    cfg_iter!(combined_mle)
-                        .map(|coeff_mle| {
-                            coeff_mle.evaluate_with_config(&evaluation_point, field_cfg)
-                        })
-                        .collect::<std::result::Result<Vec<_>, _>>()?,
-                ))
-            })
-            .collect::<std::result::Result<Vec<_>, IdealCheckError<_, _>>>()?;
-
-        combined_mle_values.iter().for_each(|combined_mle_value| {
-            transcript
-                .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
-        });
-
-        Ok((
-            Proof {
-                combined_mle_values,
-            },
-            ProverState { evaluation_point },
-        ))
-    }
-
-    fn verify_impl<U, F, IdealOverF, IdealOverFFromRef>(
-        transcript: &mut impl Transcript,
-        proof: Proof<F>,
-        num_constraints: usize,
-        num_vars: usize,
-        ideal_over_f_from_ref: IdealOverFFromRef,
-        field_cfg: &F::Config,
-    ) -> Result<VerifierSubClaim<F>, IdealCheckError<F, IdealOverF>>
-    where
-        U: Uair<ConstraintType = Self>,
-        F: InnerTransparentField,
-        F::Inner: ConstTranscribable,
-        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
-        IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
-    {
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
         let combined_mle_values = proof.combined_mle_values;
@@ -278,6 +167,65 @@ impl IdealCheckDispatch for LinearUair {
             evaluation_point,
             values: combined_mle_values,
         })
+    }
+}
+
+/// A workaround dispatch trait implemented directly on constraint type markers.
+/// This avoids the coherence conflict of two blanket impls on
+/// `IdealCheckProtocol` by dispatching through `U::ConstraintType`.
+pub trait IdealCheckDispatch: UairConstraintType {
+    #[allow(clippy::type_complexity)]
+    fn prove_impl<U, F>(
+        transcript: &mut impl Transcript,
+        trace: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
+        projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
+    where
+        U: Uair<ConstraintType = Self>,
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable;
+}
+
+impl IdealCheckDispatch for LinearUair {
+    fn prove_impl<U, F>(
+        transcript: &mut impl Transcript,
+        trace: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
+        projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
+    where
+        U: Uair<ConstraintType = Self>,
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+    {
+        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+
+        let combined_mle_values = combined_poly_builder::evaluate_combined_polynomials::<_, U>(
+            trace,
+            projected_scalars,
+            num_constraints,
+            &evaluation_point,
+            field_cfg,
+        )?;
+
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+
+        combined_mle_values.iter().for_each(|combined_mle_value| {
+            transcript
+                .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
+        });
+
+        Ok((
+            Proof {
+                combined_mle_values,
+            },
+            ProverState { evaluation_point },
+        ))
     }
 }
 
@@ -329,48 +277,6 @@ impl IdealCheckDispatch for NonLinearUair {
             },
             ProverState { evaluation_point },
         ))
-    }
-
-    fn verify_impl<U, F, IdealOverF, IdealOverFFromRef>(
-        transcript: &mut impl Transcript,
-        proof: Proof<F>,
-        num_constraints: usize,
-        num_vars: usize,
-        ideal_over_f_from_ref: IdealOverFFromRef,
-        field_cfg: &F::Config,
-    ) -> Result<VerifierSubClaim<F>, IdealCheckError<F, IdealOverF>>
-    where
-        U: Uair<ConstraintType = Self>,
-        F: InnerTransparentField,
-        F::Inner: ConstTranscribable,
-        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
-        IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
-    {
-        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
-
-        let combined_mle_values = proof.combined_mle_values;
-
-        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
-
-        for mle_value in &combined_mle_values {
-            transcript.absorb_random_field_slice(&mle_value.coeffs, &mut transcription_buf);
-        }
-
-        let ideal_collector = collect_ideals::<U>(num_constraints);
-
-        batched_ideal_check(
-            &ideal_collector
-                .ideals
-                .iter()
-                .map(ideal_over_f_from_ref)
-                .collect_vec(),
-            &combined_mle_values,
-        )?;
-
-        Ok(VerifierSubClaim {
-            evaluation_point,
-            values: combined_mle_values,
-        })
     }
 }
 
