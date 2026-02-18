@@ -20,6 +20,7 @@ use zinc_poly::{
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     Uair,
+    degree_counter::count_max_degree,
     ideal::{Ideal, IdealCheck},
     ideal_collector::{IdealOrZero, collect_ideals},
 };
@@ -61,28 +62,48 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
         U: Uair,
         F::Inner: ConstTranscribable,
     {
-        let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
-            trace,
-            projected_scalars,
-            num_constraints,
-            field_cfg,
-        );
-
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
-        let combined_mle_values = cfg_iter!(combined_mles)
-            .map(|combined_mle| {
-                Ok(DynamicPolynomialF::new_trimmed(
-                    cfg_iter!(combined_mle)
-                        .map(|coeff_mle| {
-                            coeff_mle.evaluate_with_config(&evaluation_point, field_cfg)
-                        })
-                        .collect::<std::result::Result<Vec<_>, _>>()?,
-                ))
-            })
-            .collect::<std::result::Result<Vec<_>, IdealCheckError<_, _>>>()?;
+        let max_constraint_degree = count_max_degree::<U>();
+
+        let (combined_mle_values, combined_mles) = if max_constraint_degree <= 1 {
+            // For linear constraints (degree ≤ 1), evaluate column MLEs first
+            // and then apply the linear combination, avoiding row-by-row
+            // DynamicPolynomialF arithmetic.
+            let values =
+                combined_poly_builder::evaluate_combined_polynomials_linear::<_, U>(
+                    trace,
+                    projected_scalars,
+                    &evaluation_point,
+                    num_constraints,
+                    field_cfg,
+                )?;
+            (values, vec![])
+        } else {
+            let mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
+                trace,
+                projected_scalars,
+                num_constraints,
+                field_cfg,
+            );
+
+            let values = cfg_iter!(mles)
+                .map(|combined_mle| {
+                    Ok(DynamicPolynomialF::new_trimmed(
+                        cfg_iter!(combined_mle)
+                            .map(|coeff_mle| {
+                                coeff_mle
+                                    .evaluate_with_config(&evaluation_point, field_cfg)
+                            })
+                            .collect::<std::result::Result<Vec<_>, _>>()?,
+                    ))
+                })
+                .collect::<std::result::Result<Vec<_>, IdealCheckError<_, _>>>()?;
+
+            (values, mles)
+        };
 
         combined_mle_values.iter().for_each(|combined_mle_value| {
             transcript
