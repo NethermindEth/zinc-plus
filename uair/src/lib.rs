@@ -92,25 +92,12 @@ impl<'a, Expr> TraceRow<'a, Expr> {
     }
 }
 
-pub trait UairConstraintType {}
-
-/// Marker for UAIR that only has linear constraints.
-pub struct LinearUair {}
-impl UairConstraintType for LinearUair {}
-
-/// Marker for UAIR that has at least one non-linear constraint.
-pub struct NonLinearUair {}
-impl UairConstraintType for NonLinearUair {}
-
 /// The trait that a universal AIR description has to implement.
 /// This must include all the constraint description logic of an UAIR.
 ///
 /// One type might implement different UAIR logics for different underlying
 /// semirings hence the generic type parameter.
 pub trait Uair {
-    #[allow(private_bounds)]
-    type ConstraintType: UairConstraintType;
-
     /// The ideal type the AIR operates with.
     /// Since a `ConstraintBuilder` is "opaque" for a `Uair`
     /// a `Uair` has to have a means to create ideals

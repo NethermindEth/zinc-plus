@@ -12,6 +12,7 @@ use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::collections::HashMap;
+use num_traits::ConstZero;
 use thiserror::Error;
 use zinc_poly::{
     EvaluationError,
@@ -20,11 +21,12 @@ use zinc_poly::{
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
-    LinearUair, NonLinearUair, Uair, UairConstraintType,
+    Uair,
+    degree_counter::count_constraint_degrees,
     ideal::{Ideal, IdealCheck},
     ideal_collector::{IdealOrZero, collect_ideals},
 };
-use zinc_utils::{cfg_iter, inner_transparent_field::InnerTransparentField};
+use zinc_utils::{cfg_iter, cfg_iter_mut, inner_transparent_field::InnerTransparentField};
 
 /// Ideal-check subprotocol.
 pub trait IdealCheckProtocol: Uair {
@@ -103,7 +105,6 @@ pub trait IdealCheckProtocol: Uair {
 impl<U> IdealCheckProtocol for U
 where
     U: Uair,
-    U::ConstraintType: IdealCheckDispatch,
 {
     #[allow(clippy::type_complexity)]
     fn prove_as_subprotocol<F>(
@@ -118,14 +119,71 @@ where
         F: InnerTransparentField,
         F::Inner: ConstTranscribable,
     {
-        <U::ConstraintType as IdealCheckDispatch>::prove_impl::<U, F>(
-            transcript,
-            trace,
-            projected_scalars,
-            num_constraints,
-            num_vars,
-            field_cfg,
-        )
+        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+
+        let constraint_degrees = count_constraint_degrees::<U>();
+        let has_linear = constraint_degrees.iter().any(|&d| d <= 1);
+        let has_non_linear = constraint_degrees.iter().any(|&d| d > 1);
+
+        // Fast path: evaluate linear constraints by evaluating trace columns
+        // at the point first, then applying constraints.
+        //
+        // After that, replace the MLEs for non-linear constraints with the correct ones.
+        // TODO: Skip evaluating non-linear constraints at all in the fast path?
+        let mut combined_mle_values = if has_linear {
+            combined_poly_builder::evaluate_combined_polynomials::<_, U>(
+                trace,
+                projected_scalars,
+                num_constraints,
+                &evaluation_point,
+                field_cfg,
+            )?
+        } else {
+            vec![DynamicPolynomialF::ZERO; num_constraints]
+        };
+
+        // MLE path: build combined polynomial MLEs row-by-row
+        // (needed for non-linear constraints).
+        if has_non_linear {
+            // TODO: Skip building linear constraints at all in the slow path?
+            let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
+                trace,
+                projected_scalars,
+                num_constraints,
+                field_cfg,
+            );
+
+            // Replace the (incorrect) fast-path result for non-linear constraints by
+            // evaluating coefficient MLEs.
+            cfg_iter_mut!(combined_mle_values)
+                .zip(cfg_iter!(constraint_degrees))
+                .enumerate()
+                .filter(|&(_, (_, &degree))| degree > 1)
+                .try_for_each::<_, _>(|(i, (mle_value, _))| {
+                    let coeffs = combined_mles[i]
+                        .iter()
+                        .map(|coeff_mle| {
+                            coeff_mle.evaluate_with_config(&evaluation_point, field_cfg)
+                        })
+                        .try_collect::<_, Vec<_>, _>()?;
+                    *mle_value = DynamicPolynomialF::new_trimmed(coeffs);
+                    Ok::<_, EvaluationError>(())
+                })?;
+        };
+
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+
+        combined_mle_values.iter().for_each(|combined_mle_value| {
+            transcript
+                .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
+        });
+
+        Ok((
+            Proof {
+                combined_mle_values,
+            },
+            ProverState { evaluation_point },
+        ))
     }
 
     fn verify_as_subprotocol<F, IdealOverF, IdealOverFFromRef>(
@@ -167,116 +225,6 @@ where
             evaluation_point,
             values: combined_mle_values,
         })
-    }
-}
-
-/// A workaround dispatch trait implemented directly on constraint type markers.
-/// This avoids the coherence conflict of two blanket impls on
-/// `IdealCheckProtocol` by dispatching through `U::ConstraintType`.
-pub trait IdealCheckDispatch: UairConstraintType {
-    #[allow(clippy::type_complexity)]
-    fn prove_impl<U, F>(
-        transcript: &mut impl Transcript,
-        trace: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
-        projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
-        num_constraints: usize,
-        num_vars: usize,
-        field_cfg: &F::Config,
-    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
-    where
-        U: Uair<ConstraintType = Self>,
-        F: InnerTransparentField,
-        F::Inner: ConstTranscribable;
-}
-
-impl IdealCheckDispatch for LinearUair {
-    fn prove_impl<U, F>(
-        transcript: &mut impl Transcript,
-        trace: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
-        projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
-        num_constraints: usize,
-        num_vars: usize,
-        field_cfg: &F::Config,
-    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
-    where
-        U: Uair<ConstraintType = Self>,
-        F: InnerTransparentField,
-        F::Inner: ConstTranscribable,
-    {
-        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
-
-        let combined_mle_values = combined_poly_builder::evaluate_combined_polynomials::<_, U>(
-            trace,
-            projected_scalars,
-            num_constraints,
-            &evaluation_point,
-            field_cfg,
-        )?;
-
-        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
-
-        combined_mle_values.iter().for_each(|combined_mle_value| {
-            transcript
-                .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
-        });
-
-        Ok((
-            Proof {
-                combined_mle_values,
-            },
-            ProverState { evaluation_point },
-        ))
-    }
-}
-
-impl IdealCheckDispatch for NonLinearUair {
-    fn prove_impl<U, F>(
-        transcript: &mut impl Transcript,
-        trace: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
-        projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
-        num_constraints: usize,
-        num_vars: usize,
-        field_cfg: &F::Config,
-    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
-    where
-        U: Uair<ConstraintType = Self>,
-        F: InnerTransparentField,
-        F::Inner: ConstTranscribable,
-    {
-        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
-
-        let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
-            trace,
-            projected_scalars,
-            num_constraints,
-            field_cfg,
-        );
-
-        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
-
-        let combined_mle_values = cfg_iter!(combined_mles)
-            .map(|combined_mle| {
-                Ok(DynamicPolynomialF::new_trimmed(
-                    cfg_iter!(combined_mle)
-                        .map(|coeff_mle| {
-                            coeff_mle.evaluate_with_config(&evaluation_point, field_cfg)
-                        })
-                        .collect::<std::result::Result<Vec<_>, _>>()?,
-                ))
-            })
-            .collect::<std::result::Result<Vec<_>, IdealCheckError<_, _>>>()?;
-
-        combined_mle_values.iter().for_each(|combined_mle_value| {
-            transcript
-                .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
-        });
-
-        Ok((
-            Proof {
-                combined_mle_values,
-            },
-            ProverState { evaluation_point },
-        ))
     }
 }
 
