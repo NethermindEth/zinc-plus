@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use std::{collections::HashMap, marker::PhantomData, slice};
 use thiserror::Error;
 use zinc_poly::{
-    EvaluatablePolynomial, EvaluationError,
+    EvaluationError,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
     univariate::dynamic::over_field::DynamicPolynomialF,
     utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
@@ -81,6 +81,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
+
 
         // Shifted trace. Just take the trace, drop the first row
         // and append 0 to the end. Note, that the latter happens
@@ -237,6 +238,18 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
 
+        // Precompute powers of the projecting element for batch evaluation.
+        let projection_powers: Vec<F> = {
+            let max_coeffs_len = ic_check_subclaim
+                .values
+                .iter()
+                .map(|poly| poly.coeffs.len())
+                .max()
+                .unwrap_or(0)
+                .max(1);
+            powers(projecting_element.clone(), one.clone(), max_coeffs_len)
+        };
+
         let folding_challenge: F = transcript.get_field_challenge(field_cfg);
 
         let folding_challenge_powers: Vec<F> =
@@ -251,7 +264,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             .map(
                 |(claimed_value, random_coeff)| -> Result<F, CombinedPolyResolverError<F>> {
                     Ok(claimed_value
-                        .evaluate_at_point(projecting_element)
+                        .evaluate_with_powers(&projection_powers)
                         .map_err(|err| {
                             CombinedPolyResolverError::ProjectionError(
                                 claimed_value.clone(),
