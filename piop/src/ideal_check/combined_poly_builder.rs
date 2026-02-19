@@ -171,7 +171,6 @@ pub fn evaluate_combined_polynomials<F, U>(
     trace_matrix: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
     projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
     num_constraints: usize,
-    max_num_coeffs: usize,
     evaluation_point: &[F],
     field_cfg: &F::Config,
 ) -> Result<Vec<DynamicPolynomialF<F>>, EvaluationError>
@@ -183,6 +182,14 @@ where
     let zero_inner = field_zero.inner().clone();
     let num_rows = trace_matrix[0].len();
     let num_vars = evaluation_point.len();
+
+    // Maximum number of coefficients across all trace entries
+    let max_num_coeffs = trace_matrix
+        .iter()
+        .flat_map(|col| col.evaluations.iter())
+        .map(|p| p.coeffs.len())
+        .max()
+        .unwrap_or(0);
 
     // Evaluate "up" and "down" versions of each trace column at the evaluation
     // point. "up"[i]   = trace[col][i]   for i < N-1, zero at i = N-1

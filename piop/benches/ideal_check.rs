@@ -73,6 +73,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             &projected_scalars,
             num_constraints,
             num_vars,
+            false,
             field_cfg,
         )
         .expect("Prover failed")
@@ -173,6 +174,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             &projected_scalars,
             num_constraints,
             num_vars,
+            false,
             field_cfg,
         )
         .expect("Prover failed")
@@ -272,6 +274,7 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
             &projected_scalars,
             num_constraints,
             num_vars,
+            false,
             field_cfg,
         )
         .expect("Prover failed")
@@ -367,6 +370,7 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
             &projected_scalars,
             num_constraints,
             num_vars,
+            true,
             field_cfg,
         )
         .expect("Prover failed")

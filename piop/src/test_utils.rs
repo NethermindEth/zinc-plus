@@ -69,6 +69,7 @@ where
         &scalars,
         num_constraints,
         num_vars,
+        true, // TODO: test both?
         &field_cfg,
     )
     .unwrap();

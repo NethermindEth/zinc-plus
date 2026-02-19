@@ -26,7 +26,7 @@ use zinc_uair::{
     ideal::{Ideal, IdealCheck},
     ideal_collector::{IdealOrZero, collect_ideals},
 };
-use zinc_utils::{cfg_iter, cfg_iter_mut, inner_transparent_field::InnerTransparentField, mul};
+use zinc_utils::{cfg_iter_mut, inner_transparent_field::InnerTransparentField};
 
 /// Ideal-check subprotocol.
 pub trait IdealCheckProtocol: Uair {
@@ -47,6 +47,9 @@ pub trait IdealCheckProtocol: Uair {
     ///   `DynamicPolynomialF<F>`.
     /// - `num_constraints`: the number of constraints the UAIR `U` encodes.
     /// - `num_vars`: the number of variables the trace row MLEs have.
+    /// - `use_direct_eval`: whether to use the direct evaluation approach for
+    ///   linear constraints, depends on the UAIR structure, number of columns
+    ///   and number of constraints.
     /// - `field_cfg`: random field configuration sampled on the previous steps
     ///   of the overall protocol.
     #[allow(clippy::type_complexity)]
@@ -56,6 +59,7 @@ pub trait IdealCheckProtocol: Uair {
         projected_scalars: &HashMap<Self::Scalar, DynamicPolynomialF<F>>,
         num_constraints: usize,
         num_vars: usize,
+        use_direct_eval: bool,
         field_cfg: &F::Config,
     ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, Self::Ideal>>
     where
@@ -113,29 +117,16 @@ where
         projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
         num_constraints: usize,
         num_vars: usize,
+        use_direct_eval: bool,
         field_cfg: &F::Config,
     ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
     where
         F: InnerTransparentField,
         F::Inner: ConstTranscribable,
     {
-        let num_columns = trace_matrix.len();
-
-        // Maximum number of coefficients across all trace entries
-        let max_num_coeffs = trace_matrix
-            .iter()
-            .flat_map(|col| col.evaluations.iter())
-            .map(|p| p.coeffs.len())
-            .max()
-            .unwrap_or(0);
-
         let constraint_degrees = count_constraint_degrees::<U>();
         let has_linear = constraint_degrees.iter().any(|&d| d <= 1);
         let has_non_linear = constraint_degrees.iter().any(|&d| d > 1);
-
-        // Heuristic: if the number of constraints is large compared to the number of
-        // trace columns, it's makes sense to evaluate the linear constraints directly
-        let use_direct_eval = num_constraints > mul!(2, num_columns);
 
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
@@ -151,7 +142,6 @@ where
                 trace_matrix,
                 projected_scalars,
                 num_constraints,
-                max_num_coeffs,
                 &evaluation_point,
                 field_cfg,
             )?
@@ -174,10 +164,9 @@ where
             // Replace the (incorrect) fast-path result for non-linear constraints by
             // evaluating coefficient MLEs.
             cfg_iter_mut!(combined_mle_values)
-                .zip(cfg_iter!(constraint_degrees))
                 .enumerate()
-                .filter(|(_, (mle_value, _))| *mle_value == &DynamicPolynomialF::ZERO)
-                .try_for_each::<_, _>(|(i, (mle_value, _))| {
+                .filter(|(_, mle_value)| *mle_value == &DynamicPolynomialF::ZERO)
+                .try_for_each::<_, _>(|(i, mle_value)| {
                     let coeffs = combined_mles[i]
                         .iter()
                         .map(|coeff_mle| {
