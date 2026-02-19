@@ -409,8 +409,9 @@ impl GenerateMultiTypeWitness for BigLinearUair {
 #[cfg(test)]
 mod tests {
     use zinc_uair::{
-        collect_scalars::collect_scalars, constraint_counter::count_constraints,
-        degree_counter::count_max_degree,
+        collect_scalars::collect_scalars,
+        constraint_counter::count_constraints,
+        degree_counter::{count_constraint_degrees, count_max_degree},
     };
 
     use super::*;
@@ -418,29 +419,21 @@ mod tests {
     const LIMBS: usize = 4;
 
     #[test]
-    fn test_uair_simple_multiplication_correct_constraints_number() {
-        assert_eq!(
-            count_constraints::<TestUairSimpleMultiplication<Int<LIMBS>>>(),
-            3
-        );
-    }
+    fn test_constraint_degrees() {
+        fn assert_uair_shape<U: Uair>(expected_degrees: &[usize]) {
+            assert_eq!(count_constraints::<U>(), expected_degrees.len());
+            assert_eq!(count_constraint_degrees::<U>(), expected_degrees);
+            assert_eq!(
+                count_max_degree::<U>(),
+                *expected_degrees.iter().max().unwrap()
+            );
+        }
 
-    #[test]
-    fn test_air_no_multiplication_correct_constraints_number() {
-        assert_eq!(count_constraints::<TestAirNoMultiplication<LIMBS>>(), 1);
-    }
-
-    #[test]
-    fn test_uair_simple_multiplication_correct_max_degree() {
-        assert_eq!(
-            count_max_degree::<TestUairSimpleMultiplication<Int<LIMBS>>>(),
-            2
-        );
-    }
-
-    #[test]
-    fn test_air_no_multiplication_correct_max_degree() {
-        assert_eq!(count_max_degree::<TestAirNoMultiplication<LIMBS>>(), 1);
+        assert_uair_shape::<TestUairSimpleMultiplication<Int<LIMBS>>>(&[2, 2, 2]);
+        assert_uair_shape::<TestAirNoMultiplication<LIMBS>>(&[1]);
+        assert_uair_shape::<TestAirScalarMultiplications<LIMBS>>(&[1]);
+        assert_uair_shape::<BinaryDecompositionUair>(&[1]);
+        assert_uair_shape::<BigLinearUair>(&[1; 17]);
     }
 
     #[test]
