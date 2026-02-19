@@ -1,6 +1,6 @@
 use crate::{
     ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
-    univariate::{dense::DensePolynomial, prepare_projection},
+    univariate::dense::DensePolynomial,
 };
 use core::mem::MaybeUninit;
 use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
@@ -446,10 +446,63 @@ impl<F, const DEGREE_PLUS_ONE: usize> ProjectableToField<F> for BinaryU64Poly<DE
 where
     F: PrimeField + FromRef<F> + 'static,
 {
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static {
-        prepare_projection::<F, Self, _, DEGREE_PLUS_ONE>(sampled_value, |poly, i| {
-            (poly.0 & (1 << i)) != 0
-        })
+        let field_cfg = sampled_value.cfg().clone();
+
+        // Pre-compute powers: r^0, r^1, ..., r^{DEGREE_PLUS_ONE - 1}
+        let r_powers = {
+            let mut r_powers = Vec::with_capacity(DEGREE_PLUS_ONE);
+            let mut curr = F::one_with_cfg(&field_cfg);
+            r_powers.push(curr.clone());
+            for _ in 1..DEGREE_PLUS_ONE {
+                curr *= sampled_value;
+                r_powers.push(curr.clone());
+            }
+            r_powers
+        };
+
+        // Build byte-chunk lookup tables for fast projection.
+        // Instead of iterating all DEGREE_PLUS_ONE bits per polynomial and
+        // conditionally adding the corresponding power, we split the packed u64
+        // into 8-bit chunks and pre-compute the sum of powers for every
+        // possible byte value in each chunk.  This reduces per-element work
+        // from ~DEGREE_PLUS_ONE/2 conditional adds (average 50% bit density)
+        // to ceil(DEGREE_PLUS_ONE/8) table look-ups + additions.
+        const CHUNK_BITS: usize = 8;
+        let num_chunks = DEGREE_PLUS_ONE.div_ceil(CHUNK_BITS);
+        let tables: Vec<Vec<F>> = (0..num_chunks)
+            .map(|chunk_idx| {
+                let start_bit = chunk_idx * CHUNK_BITS;
+                let chunk_size = CHUNK_BITS.min(DEGREE_PLUS_ONE - start_bit);
+                let table_size = 1usize << chunk_size;
+
+                let mut table = Vec::with_capacity(table_size);
+                table.push(F::zero_with_cfg(&field_cfg));
+                for byte_val in 1..table_size {
+                    // Build incrementally:
+                    //   table[v] = table[v with lowest bit cleared] + r^(start + lowest_set_bit)
+                    let lowest_bit = byte_val.trailing_zeros() as usize;
+                    let mut entry = table[byte_val & (byte_val - 1)].clone();
+                    entry += r_powers[start_bit + lowest_bit].clone();
+                    table.push(entry);
+                }
+                table
+            })
+            .collect();
+
+        move |poly: &Self| {
+            let bits = poly.0;
+            let mut acc = F::zero_with_cfg(&field_cfg);
+            for (chunk_idx, table) in tables.iter().enumerate() {
+                let byte_val =
+                    ((bits >> (chunk_idx * CHUNK_BITS)) as usize) & (table.len() - 1);
+                if byte_val != 0 {
+                    acc += table[byte_val].clone();
+                }
+            }
+            acc
+        }
     }
 }
 

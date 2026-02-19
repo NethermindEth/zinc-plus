@@ -224,7 +224,7 @@ where
                 up_coeff_evals,
                 inner_zero.clone(),
             );
-            up_coeffs.push(up_mle.evaluate_with_config(evaluation_point, field_cfg)?);
+            up_coeffs.push(up_mle.evaluate_with_config_owned(evaluation_point, field_cfg)?);
 
             // down coefficient MLE: col[j+1].coeffs[d] for j < N-1, zero for j = N-1
             let down_coeff_evals: Vec<_> = (0..num_rows)
@@ -245,7 +245,7 @@ where
                 down_coeff_evals,
                 inner_zero.clone(),
             );
-            down_coeffs.push(down_mle.evaluate_with_config(evaluation_point, field_cfg)?);
+            down_coeffs.push(down_mle.evaluate_with_config_owned(evaluation_point, field_cfg)?);
         }
 
         Ok((

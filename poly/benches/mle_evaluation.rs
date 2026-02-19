@@ -11,7 +11,8 @@ use crypto_primitives::{FromWithConfig, PrimeField, crypto_bigint_monty::F256};
 use itertools::Itertools;
 use num_traits::ConstZero;
 use rand::{Rng, rng};
-use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
+use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig, dense::project_coeffs};
+use zinc_poly::univariate::binary::BinaryPoly;
 
 const LIMBS: usize = 4;
 
@@ -80,6 +81,64 @@ fn bench_dense_mle_evaluation(
     }
 }
 
+/// Benchmark for the full BPoly MLE evaluation pipeline:
+/// project_coeffs (BPoly → F::Inner) + evaluate_with_config_owned.
+#[allow(clippy::arithmetic_side_effects)]
+fn bench_bpoly_project_and_evaluate(
+    group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>,
+) {
+    let mut rng = rng();
+    let config = bench_config();
+    let projecting_element = F::from_with_cfg(rng.random::<u128>(), &config);
+
+    for nvars in [10, 12, 14, 16] {
+        let v: DenseMultilinearExtension<BinaryPoly<31>> = DenseMultilinearExtension::from_evaluations_vec(
+            nvars,
+            (0..(1 << nvars)).map(|_| rng.random()).collect_vec(),
+            BinaryPoly::<31>::default(),
+        );
+
+        let point: Vec<F> = (0..nvars)
+            .map(|_| F::from_with_cfg(rng.random::<u128>(), &config))
+            .collect_vec();
+
+        // Full pipeline: project + evaluate
+        group.bench_with_input(
+            BenchmarkId::new("BPoly<31> project+evaluate", format!("nvars={}", nvars)),
+            &v,
+            |b, v| {
+                b.iter(|| {
+                    let projected = project_coeffs(v.clone(), &projecting_element);
+                    let _ = black_box(projected.evaluate_with_config_owned(&point, &config));
+                });
+            },
+        );
+
+        // Projection only
+        group.bench_with_input(
+            BenchmarkId::new("BPoly<31> project_coeffs only", format!("nvars={}", nvars)),
+            &v,
+            |b, v| {
+                b.iter(|| {
+                    let _ = black_box(project_coeffs(v.clone(), &projecting_element));
+                });
+            },
+        );
+
+        // Evaluate only (on pre-projected data)
+        let projected = project_coeffs(v.clone(), &projecting_element);
+        group.bench_with_input(
+            BenchmarkId::new("BPoly<31> evaluate_with_config only", format!("nvars={}", nvars)),
+            &projected,
+            |b, projected| {
+                b.iter(|| {
+                    let _ = black_box(projected.evaluate_with_config(&point, &config));
+                });
+            },
+        );
+    }
+}
+
 pub fn binary_poly_benchmarks(c: &mut Criterion) {
     let plot_config = PlotConfiguration::default().summary_scale(AxisScale::Logarithmic);
 
@@ -87,6 +146,7 @@ pub fn binary_poly_benchmarks(c: &mut Criterion) {
     group.plot_config(plot_config);
 
     bench_dense_mle_evaluation(&mut group);
+    bench_bpoly_project_and_evaluate(&mut group);
     group.finish();
 }
 

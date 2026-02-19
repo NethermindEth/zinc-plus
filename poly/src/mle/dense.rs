@@ -306,6 +306,27 @@ where
             })
         }
     }
+
+    fn evaluate_with_config_owned(
+        mut self,
+        point: &[F],
+        config: &<F as PrimeField>::Config,
+    ) -> Result<F, EvaluationError> {
+        if point.len() == self.num_vars {
+            self.fix_variables_with_config(point, config);
+            Ok(F::new_unchecked_with_cfg(
+                self.into_iter()
+                    .next()
+                    .expect("Evaluations should not be empty"),
+                config,
+            ))
+        } else {
+            Err(EvaluationError::WrongPointWidth {
+                expected: point.len(),
+                actual: self.num_vars,
+            })
+        }
+    }
 }
 
 impl<R> MultilinearExtension<R> for DenseMultilinearExtension<R>
