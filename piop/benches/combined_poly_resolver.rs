@@ -62,18 +62,18 @@ fn do_bench<F, Air, IdealOverFFromRef, IdealOverF>(
         )
         .expect("IC Prover failed");
 
-    let ic_check_subclaim =
-        IdealCheckProtocol::<F, DEGREE_PLUS_ONE>::verify_as_subprotocol::<Air, _, _>(
-            &mut verifier_transcript,
-            ic_proof,
-            num_constraints,
-            num_vars,
-            ideal_over_f_from_ref,
-            &prover_field_cfg,
-        )
-        .expect("IC Verifier failed");
+    // let ic_check_subclaim =
+    //     IdealCheckProtocol::<F, DEGREE_PLUS_ONE>::verify_as_subprotocol::<Air, _, _>(
+    //         &mut verifier_transcript,
+    //         ic_proof,
+    //         num_constraints,
+    //         num_vars,
+    //         ideal_over_f_from_ref,
+    //         &prover_field_cfg,
+    //     )
+    //     .expect("IC Verifier failed");
 
-    let verifier_transcript_after_ic = verifier_transcript.clone();
+    // let verifier_transcript_after_ic = verifier_transcript.clone();
 
     group.bench_with_input(
         BenchmarkId::new("CPR Prover", &params),
@@ -102,40 +102,8 @@ fn do_bench<F, Air, IdealOverFFromRef, IdealOverF>(
         },
     );
 
-    let (cpr_proof, _) = CombinedPolyResolver::<F>::prove_as_subprotocol::<_, Air>(
-        &mut prover_transcript,
-        &ic_prover_state.trace_matrix,
-        &ic_prover_state.evaluation_point,
-        ic_prover_state.projected_scalars.clone(),
-        num_constraints,
-        num_vars,
-        max_degree,
-        &prover_field_cfg,
-    )
-    .expect("CPR Prover failed");
-
-    group.bench_with_input(
-        BenchmarkId::new("CPR Verifier", &params),
-        &(cpr_proof, ic_check_subclaim, verifier_transcript_after_ic),
-        |bench, (proof, subclaim, transcript)| {
-            bench.iter_batched(
-                || (proof.clone(), subclaim.clone(), transcript.clone()),
-                |(proof, subclaim, mut transcript)| {
-                    let _ = black_box(CombinedPolyResolver::<F>::verify_as_subprotocol::<_, Air>(
-                        &mut transcript,
-                        proof,
-                        num_constraints,
-                        num_vars,
-                        max_degree,
-                        subclaim,
-                        &prover_field_cfg,
-                    ))
-                    .expect("CPR Verifier failed");
-                },
-                BatchSize::SmallInput,
-            );
-        },
-    );
+    // NOTE: Verifier benchmark and its setup call removed to get clean prover-only profiles.
+    // Restore from git when verifier profiling is needed.
 }
 
 pub fn bench_bin<const FIELD_LIMBS: usize>(
