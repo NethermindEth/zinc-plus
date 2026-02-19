@@ -53,6 +53,34 @@ impl<F: PrimeField> DynamicPolynomialF<F> {
     pub fn trim(&mut self) {
         dynamic::trim(&mut self.coeffs, F::is_zero);
     }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn evaluate_with_powers(&self, powers: &[F]) -> Result<F, EvaluationError> {
+        assert!(
+            powers.len() >= self.coeffs.len(),
+            "not enough precomputed powers: have {}, need {}",
+            powers.len(),
+            self.coeffs.len()
+        );
+
+        let cfg = match self.coeffs.first() {
+            Some(elem) => elem.cfg(),
+            None => {
+                return match powers.first() {
+                    Some(elem) => Ok(F::zero_with_cfg(elem.cfg())),
+                    None => Err(EvaluationError::EmptyPolynomial),
+                };
+            }
+        };
+
+        let zero = F::zero_with_cfg(cfg);
+        Ok(self
+            .coeffs
+            .iter()
+            .zip(powers)
+            .map(|(coeff, power)| coeff.clone() * power)
+            .fold(zero, |acc, term| acc + term))
+    }
 }
 
 impl<F: PrimeField> Display for DynamicPolynomialF<F> {
