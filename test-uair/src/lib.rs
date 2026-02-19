@@ -18,8 +18,7 @@ use zinc_poly::{
     },
 };
 use zinc_uair::{
-    ConstraintBuilder, TraceRow, Uair, UairSignature,
-    ideal::degree_one::DegreeOneIdeal,
+    ConstraintBuilder, TraceRow, Uair, UairSignature, ideal::degree_one::DegreeOneIdeal,
 };
 use zinc_utils::from_ref::FromRef;
 

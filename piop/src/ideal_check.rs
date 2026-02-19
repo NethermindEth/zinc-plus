@@ -9,10 +9,10 @@ use batched_ideal_check::*;
 use crypto_primitives::PrimeField;
 use derive_more::From;
 use itertools::Itertools;
+use num_traits::ConstZero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::collections::HashMap;
-use num_traits::ConstZero;
 use thiserror::Error;
 use zinc_poly::{
     EvaluationError,
@@ -26,7 +26,7 @@ use zinc_uair::{
     ideal::{Ideal, IdealCheck},
     ideal_collector::{IdealOrZero, collect_ideals},
 };
-use zinc_utils::{cfg_iter, cfg_iter_mut, inner_transparent_field::InnerTransparentField};
+use zinc_utils::{cfg_iter, cfg_iter_mut, inner_transparent_field::InnerTransparentField, mul};
 
 /// Ideal-check subprotocol.
 pub trait IdealCheckProtocol: Uair {
@@ -109,7 +109,7 @@ where
     #[allow(clippy::type_complexity)]
     fn prove_as_subprotocol<F>(
         transcript: &mut impl Transcript,
-        trace: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
+        trace_matrix: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
         projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
         num_constraints: usize,
         num_vars: usize,
@@ -119,22 +119,39 @@ where
         F: InnerTransparentField,
         F::Inner: ConstTranscribable,
     {
-        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+        let num_columns = trace_matrix.len();
+
+        // Maximum number of coefficients across all trace entries
+        let max_num_coeffs = trace_matrix
+            .iter()
+            .flat_map(|col| col.evaluations.iter())
+            .map(|p| p.coeffs.len())
+            .max()
+            .unwrap_or(0);
 
         let constraint_degrees = count_constraint_degrees::<U>();
         let has_linear = constraint_degrees.iter().any(|&d| d <= 1);
         let has_non_linear = constraint_degrees.iter().any(|&d| d > 1);
 
-        // Fast path: evaluate linear constraints by evaluating trace columns
-        // at the point first, then applying constraints.
+        // Heuristic: if the number of constraints is large compared to the number of
+        // trace columns, it's makes sense to evaluate the linear constraints directly
+        let use_direct_eval = num_constraints > mul!(2, num_columns);
+
+        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+
+        // Evaluate linear constraints by evaluating trace columns at the point first,
+        // then applying constraints.
         //
-        // After that, replace the MLEs for non-linear constraints with the correct ones.
-        // TODO: Skip evaluating non-linear constraints at all in the fast path?
-        let mut combined_mle_values = if has_linear {
+        // After that, replace the MLEs for non-linear constraints with the correct
+        // ones.
+        //
+        // TODO: Skip evaluating non-linear constraints at all?
+        let mut combined_mle_values = if has_linear && use_direct_eval {
             combined_poly_builder::evaluate_combined_polynomials::<_, U>(
-                trace,
+                trace_matrix,
                 projected_scalars,
                 num_constraints,
+                max_num_coeffs,
                 &evaluation_point,
                 field_cfg,
             )?
@@ -143,11 +160,12 @@ where
         };
 
         // MLE path: build combined polynomial MLEs row-by-row
-        // (needed for non-linear constraints).
-        if has_non_linear {
-            // TODO: Skip building linear constraints at all in the slow path?
+        // (needed for non-linear constraints, or the constraints that failed
+        // heuristics).
+        if has_non_linear || !use_direct_eval {
+            // TODO: Skip building already-evaluated linear constraints?
             let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
-                trace,
+                trace_matrix,
                 projected_scalars,
                 num_constraints,
                 field_cfg,
@@ -158,7 +176,7 @@ where
             cfg_iter_mut!(combined_mle_values)
                 .zip(cfg_iter!(constraint_degrees))
                 .enumerate()
-                .filter(|&(_, (_, &degree))| degree > 1)
+                .filter(|(_, (mle_value, _))| *mle_value == &DynamicPolynomialF::ZERO)
                 .try_for_each::<_, _>(|(i, (mle_value, _))| {
                     let coeffs = combined_mles[i]
                         .iter()

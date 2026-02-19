@@ -164,11 +164,14 @@ fn prepare_coefficient_mles<F: PrimeField>(
 /// and is more efficient for linear constraints because the evaluation
 /// of a linear combination of MLEs equals the linear combination of
 /// individual MLE evaluations.
+///
+/// Does `2 * num_columns * max_num_coeffs` evaluations of MLEs.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn evaluate_combined_polynomials<F, U>(
     trace_matrix: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
     projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
     num_constraints: usize,
+    max_num_coeffs: usize,
     evaluation_point: &[F],
     field_cfg: &F::Config,
 ) -> Result<Vec<DynamicPolynomialF<F>>, EvaluationError>
@@ -181,24 +184,16 @@ where
     let num_rows = trace_matrix[0].len();
     let num_vars = evaluation_point.len();
 
-    // Find maximum number of coefficients across all trace entries
-    let max_coeffs = trace_matrix
-        .iter()
-        .flat_map(|col| col.evaluations.iter())
-        .map(|p| p.coeffs.len())
-        .max()
-        .unwrap_or(0);
-
     // Evaluate "up" and "down" versions of each trace column at the evaluation
     // point. "up"[i]   = trace[col][i]   for i < N-1, zero at i = N-1
     // "down"[i] = trace[col][i+1] for i < N-1, zero at i = N-1
     // These match the row-pair semantics of compute_combined_polynomials.
     let column_evals: Vec<(DynamicPolynomialF<F>, DynamicPolynomialF<F>)> = cfg_iter!(trace_matrix)
         .map(|col| {
-            let mut up_coeffs = Vec::with_capacity(max_coeffs);
-            let mut down_coeffs = Vec::with_capacity(max_coeffs);
+            let mut up_coeffs = Vec::with_capacity(max_num_coeffs);
+            let mut down_coeffs = Vec::with_capacity(max_num_coeffs);
 
-            for d in 0..max_coeffs {
+            for d in 0..max_num_coeffs {
                 // Build "up" coefficient MLE for degree d
                 let up_coeff_evals: Vec<F::Inner> = (0..num_rows)
                     .map(|i| {
