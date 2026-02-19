@@ -12,7 +12,7 @@ use rayon::prelude::*;
 use std::{collections::HashMap, marker::PhantomData, slice};
 use thiserror::Error;
 use zinc_poly::{
-    EvaluatablePolynomial, EvaluationError,
+    EvaluationError,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
     univariate::dynamic::over_field::DynamicPolynomialF,
     utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
@@ -82,22 +82,31 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         let projecting_element: F = transcript.get_field_challenge(field_cfg);
 
-        // Project scalars along F[X] -> F.
-        let projected_scalars: HashMap<R, F> =
-            project_scalars_to_field(projected_scalars, &projecting_element)?;
-
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
 
+        // Precompute powers of the projecting element for batch evaluation.
+        let projection_powers: Vec<F> = {
+            let max_coeffs_len = trace_matrix.iter().flat_map(|col| col.iter()).map(|poly| poly.coeffs.len()).chain(projected_scalars.values().map(|poly| poly.coeffs.len())).max().unwrap_or(0).max(1);
+            powers(projecting_element.clone(), one.clone(), max_coeffs_len)
+        };
+
+        // Project scalars along F[X] -> F.
+        let projected_scalars: HashMap<R, F> = project_scalars_to_field(
+            projected_scalars,
+            &projection_powers,
+            &projecting_element,
+        )?;
+
         let num_cols = U::num_cols();
 
-        // Project trace along F[X] -> F.
+        // Project trace along F[X] -> F using precomputed powers.
         let up: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(trace_matrix)
             .map(|column| {
                 cfg_iter!(column)
                     .map(|coeff| {
                         coeff
-                            .evaluate_at_point(&projecting_element)
+                            .evaluate_with_powers(&projection_powers)
                             .expect("evaluation cannot fail here")
                             .inner()
                             .clone()
@@ -249,11 +258,20 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         let projecting_element: F = transcript.get_field_challenge(field_cfg);
 
-        let projected_scalars: HashMap<R, F> =
-            project_scalars_to_field(ic_check_subclaim.projected_scalars, &projecting_element)?;
-
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
+
+        // Precompute powers of the projecting element for batch evaluation.
+        let projection_powers: Vec<F> = {
+            let max_coeffs_len = ic_check_subclaim.values.iter().map(|poly| poly.coeffs.len()).chain(ic_check_subclaim.projected_scalars.values().map(|poly| poly.coeffs.len())).max().unwrap_or(0).max(1);
+            powers(projecting_element.clone(), one.clone(), max_coeffs_len)
+        };
+        
+        let projected_scalars: HashMap<R, F> = project_scalars_to_field(
+            ic_check_subclaim.projected_scalars,
+            &projection_powers,
+            &projecting_element,
+        )?;
 
         let folding_challenge: F = transcript.get_field_challenge(field_cfg);
 
@@ -269,7 +287,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             .map(
                 |(claimed_value, random_coeff)| -> Result<F, CombinedPolyResolverError<F>> {
                     Ok(claimed_value
-                        .evaluate_at_point(&projecting_element)
+                        .evaluate_with_powers(&projection_powers)
                         .map_err(|err| {
                             CombinedPolyResolverError::ProjectionError(
                                 claimed_value.clone(),
