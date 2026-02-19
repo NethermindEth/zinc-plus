@@ -11,7 +11,7 @@ pub struct ProverState<F: PrimeField> {
     pub evaluation_point: Vec<F>,
 }
 
-pub struct VerifierSubClaim<F: PrimeField> {
+pub struct VerifierSubclaim<F: PrimeField> {
     pub evaluation_point: Vec<F>,
     pub values: Vec<DynamicPolynomialF<F>>,
 }

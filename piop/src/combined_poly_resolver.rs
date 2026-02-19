@@ -7,7 +7,7 @@ pub use structs::*;
 
 use crate::{
     combined_poly_resolver::folder::ConstraintFolder,
-    ideal_check::VerifierSubClaim,
+    ideal_check,
     sumcheck::{MLSumcheck, SumCheckError},
 };
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
@@ -219,7 +219,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         max_degree: usize,
         projecting_element: &F,
         projected_scalars: &HashMap<U::Scalar, F>,
-        ic_check_subclaim: VerifierSubClaim<F>,
+        ic_check_subclaim: ideal_check::VerifierSubclaim<F>,
         field_cfg: &F::Config,
     ) -> Result<VerifierSubclaim<F>, CombinedPolyResolverError<F>>
     where

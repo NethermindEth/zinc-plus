@@ -192,56 +192,40 @@ where
         .unwrap_or(0);
 
     // Evaluate "up" and "down" versions of each trace column at the evaluation
-    // point. "up"[i]   = trace[col][i]   for i < N-1, zero at i = N-1
-    // "down"[i] = trace[col][i+1] for i < N-1, zero at i = N-1
-    // These match the row-pair semantics of compute_combined_polynomials.
+    // point, these match the semantics of compute_combined_polynomials.
     let column_evals: Vec<(DynamicPolynomialF<F>, DynamicPolynomialF<F>)> = cfg_iter!(trace_matrix)
         .map(|col| {
             let mut up_coeffs = Vec::with_capacity(max_num_coeffs);
             let mut down_coeffs = Vec::with_capacity(max_num_coeffs);
 
             for d in 0..max_num_coeffs {
-                // Build "up" coefficient MLE for degree d
-                let up_coeff_evals: Vec<F::Inner> = (0..num_rows)
-                    .map(|i| {
-                        if i < num_rows - 1 {
-                            col.evaluations[i]
-                                .coeffs
-                                .get(d)
-                                .map(|c| c.inner().clone())
-                                .unwrap_or_else(|| zero_inner.clone())
-                        } else {
-                            zero_inner.clone()
-                        }
-                    })
-                    .collect();
+                macro_rules! make_coeff_evals {
+                    ($coeffs_vec:ident, $row_shift:literal) => {
+                        let coeff_evals: Vec<F::Inner> = (0..num_rows)
+                            .map(|i| {
+                                if i < num_rows - 1 {
+                                    col.evaluations[i + $row_shift]
+                                        .coeffs
+                                        .get(d)
+                                        .map(|c| c.inner().clone())
+                                        .unwrap_or_else(|| zero_inner.clone())
+                                } else {
+                                    zero_inner.clone()
+                                }
+                            })
+                            .collect();
 
-                let up_coeff_mle = DenseMultilinearExtension {
-                    evaluations: up_coeff_evals,
-                    num_vars,
-                };
-                up_coeffs.push(up_coeff_mle.evaluate_with_config(evaluation_point, field_cfg)?);
+                        let coeff_mle = DenseMultilinearExtension {
+                            evaluations: coeff_evals,
+                            num_vars,
+                        };
+                        $coeffs_vec
+                            .push(coeff_mle.evaluate_with_config(evaluation_point, field_cfg)?);
+                    };
+                }
 
-                // Build "down" coefficient MLE for degree d
-                let down_coeff_evals: Vec<F::Inner> = (0..num_rows)
-                    .map(|i| {
-                        if i < num_rows - 1 {
-                            col.evaluations[i + 1]
-                                .coeffs
-                                .get(d)
-                                .map(|c| c.inner().clone())
-                                .unwrap_or_else(|| zero_inner.clone())
-                        } else {
-                            zero_inner.clone()
-                        }
-                    })
-                    .collect();
-
-                let down_coeff_mle = DenseMultilinearExtension {
-                    evaluations: down_coeff_evals,
-                    num_vars,
-                };
-                down_coeffs.push(down_coeff_mle.evaluate_with_config(evaluation_point, field_cfg)?);
+                make_coeff_evals!(up_coeffs, 0);
+                make_coeff_evals!(down_coeffs, 1);
             }
 
             Ok((

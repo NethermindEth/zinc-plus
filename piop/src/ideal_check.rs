@@ -98,7 +98,7 @@ pub trait IdealCheckProtocol: Uair {
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
         field_cfg: &F::Config,
-    ) -> Result<VerifierSubClaim<F>, IdealCheckError<F, IdealOverF>>
+    ) -> Result<VerifierSubclaim<F>, IdealCheckError<F, IdealOverF>>
     where
         F: InnerTransparentField,
         F::Inner: ConstTranscribable,
@@ -200,7 +200,7 @@ where
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
         field_cfg: &F::Config,
-    ) -> Result<VerifierSubClaim<F>, IdealCheckError<F, IdealOverF>>
+    ) -> Result<VerifierSubclaim<F>, IdealCheckError<F, IdealOverF>>
     where
         F: InnerTransparentField,
         F::Inner: ConstTranscribable,
@@ -228,7 +228,7 @@ where
             &combined_mle_values,
         )?;
 
-        Ok(VerifierSubClaim {
+        Ok(VerifierSubclaim {
             evaluation_point,
             values: combined_mle_values,
         })
