@@ -107,7 +107,7 @@ def main():
         print(f"  v1: log2(C) + {BASE_FIELD_SIZE} + depth*(3+{BASE_FIELD_SIZE}) - 1")
         print(f"  v2: log2(C) + (depth+1)*{BASE_FIELD_SIZE} + 0.5*(1+4*depth) - log2(3*pi)*0.5*(1+depth)")
 
-        hdr = (f"{'2^N':>6} | {'depth':>5} | {'A(v1)':>12} | {'B(v1)':>12} | {'v1 total':>12} | {'A(v2)':>12} | {'B(v2)':>12} | {'v2 total':>12}")
+        hdr = (f"{'2^N':>6} | {'depth':>5} | {'rA(v1)':>7} | {'A(v1)':>12} | {'rB(v1)':>7} | {'B(v1)':>12} | {'v1 total':>12} | {'rA(v2)':>7} | {'A(v2)':>12} | {'rB(v2)':>7} | {'B(v2)':>12} | {'v2 total':>12}")
         print(f"\n{hdr}")
         print("-" * len(hdr))
 
@@ -118,9 +118,10 @@ def main():
             totals = {}
             for label, bb_fn in BITBOUND_FORMULAS.items():
                 costs = []
+                rows = []
                 for c in COMPONENTS:
                     cc = c["flat_vec_norm"]
-                    _, _, cost = find_optimal(
+                    nr, _, cost = find_optimal(
                         total,
                         c["n_pol"], c["degree"], nq,
                         BASE_FIELD_SIZE, depth,
@@ -128,11 +129,12 @@ def main():
                         bitbound_fn=bb_fn,
                     )
                     costs.append(cost)
-                totals[label] = (costs, sum(costs))
-            cv1, tv1 = totals["v1"]
-            cv2, tv2 = totals["v2"]
-            row += f" | {fmt_size(cv1[0]):>12} | {fmt_size(cv1[1]):>12} | {fmt_size(tv1):>12}"
-            row += f" | {fmt_size(cv2[0]):>12} | {fmt_size(cv2[1]):>12} | {fmt_size(tv2):>12}"
+                    rows.append(nr)
+                totals[label] = (costs, rows, sum(costs))
+            cv1, rv1, tv1 = totals["v1"]
+            cv2, rv2, tv2 = totals["v2"]
+            row += f" | {rv1[0]:>7} | {fmt_size(cv1[0]):>12} | {rv1[1]:>7} | {fmt_size(cv1[1]):>12} | {fmt_size(tv1):>12}"
+            row += f" | {rv2[0]:>7} | {fmt_size(cv2[0]):>12} | {rv2[1]:>7} | {fmt_size(cv2[1]):>12} | {fmt_size(tv2):>12}"
             print(row)
 
         print()
