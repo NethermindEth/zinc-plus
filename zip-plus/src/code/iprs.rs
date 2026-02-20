@@ -69,7 +69,7 @@ where
             Config::INPUT_LEN
         );
 
-        pntt::radix8::pntt::<_, _, _, M, MBSMulByTwiddle<CHECKED>, CHECK_ADDITION>(
+        pntt::radix8::pntt::<_, _, _, M, MBSMulByTwiddle<CHECK_ADDITION>, CHECK_ADDITION>(
             row,
             &self.pntt_params,
         )
