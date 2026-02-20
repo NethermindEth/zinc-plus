@@ -27,6 +27,7 @@ pub fn compute_combined_polynomials<F, U>(
     projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
     num_constraints: usize,
     field_cfg: &F::Config,
+    skip_constraints: &[bool],
 ) -> Vec<Vec<DenseMultilinearExtension<F::Inner>>>
 where
     F: PrimeField,
@@ -80,6 +81,7 @@ where
         max_degree,
         &max_degrees_and_combined_poly_rows,
         &field_zero,
+        skip_constraints,
     )
 }
 
@@ -135,9 +137,16 @@ fn prepare_coefficient_mles<F: PrimeField>(
     max_degree: usize,
     max_degrees_and_combined_poly_rows: &[(usize, Vec<DynamicPolynomialF<F>>)],
     field_zero: &F,
+    skip_constraints: &[bool],
 ) -> Vec<Vec<DenseMultilinearExtension<F::Inner>>> {
     cfg_into_iter!(0..num_constraints)
         .map(|constraint| {
+            // Skip building coefficient MLEs for zero-ideal constraints.
+            // For an honest prover these MLEs are zero; the combined
+            // polynomial resolver handles the zero entries downstream.
+            if skip_constraints[constraint] {
+                return vec![];
+            }
             (0..=max_degree)
                 .map(|coeff| {
                     max_degrees_and_combined_poly_rows

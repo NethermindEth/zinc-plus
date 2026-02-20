@@ -128,6 +128,15 @@ where
         let has_linear = constraint_degrees.iter().any(|&d| d <= 1);
         let has_non_linear = constraint_degrees.iter().any(|&d| d > 1);
 
+        // Collect ideals to identify assert_zero constraints whose
+        // combined polynomial is zero by construction (for honest provers).
+        let ideal_collector = collect_ideals::<U>(num_constraints);
+        let is_zero_ideal: Vec<bool> = ideal_collector
+            .ideals
+            .iter()
+            .map(|i| i.is_zero_ideal())
+            .collect();
+
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
         // Evaluate linear constraints by evaluating trace columns at the point first,
@@ -159,13 +168,19 @@ where
                 projected_scalars,
                 num_constraints,
                 field_cfg,
+                &is_zero_ideal,
             );
 
             // Replace the (incorrect) fast-path result for non-linear constraints by
             // evaluating coefficient MLEs.
             cfg_iter_mut!(combined_mle_values)
                 .enumerate()
-                .filter(|(_, mle_value)| *mle_value == &DynamicPolynomialF::ZERO)
+                .filter(|(i, mle_value)| {
+                    // Skip zero-ideal constraints: their combined
+                    // polynomial is zero for an honest prover, so
+                    // there is nothing to evaluate.
+                    !is_zero_ideal[*i] && *mle_value == &DynamicPolynomialF::ZERO
+                })
                 .try_for_each::<_, _>(|(i, mle_value)| {
                     let coeffs = combined_mles[i]
                         .iter()
@@ -219,14 +234,20 @@ where
 
         let ideal_collector = collect_ideals::<U>(num_constraints);
 
-        batched_ideal_check(
-            &ideal_collector
-                .ideals
-                .iter()
-                .map(ideal_over_f_from_ref)
-                .collect_vec(),
-            &combined_mle_values,
-        )?;
+        // Only check non-trivial ideals. For assert_zero constraints
+        // the ideal is the zero ideal and the combined polynomial
+        // value is zero by construction; the sumcheck that follows
+        // verifies consistency of the claimed evaluations with the
+        // actual trace.
+        let (non_trivial_ideals, non_trivial_values): (Vec<_>, Vec<_>) = ideal_collector
+            .ideals
+            .iter()
+            .zip(combined_mle_values.iter())
+            .filter(|(ideal, _)| !ideal.is_zero_ideal())
+            .map(|(ideal, value)| (ideal_over_f_from_ref(ideal), value.clone()))
+            .unzip();
+
+        batched_ideal_check(&non_trivial_ideals, &non_trivial_values)?;
 
         Ok(VerifierSubclaim {
             evaluation_point,

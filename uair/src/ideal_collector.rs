@@ -72,6 +72,12 @@ impl<I: Ideal> IdealOrZero<I> {
         }
     }
 
+    /// Returns `true` if this is the zero ideal
+    /// (i.e., the ideal used by `assert_zero` constraints).
+    pub fn is_zero_ideal(&self) -> bool {
+        self.ideal_or_zero.is_none()
+    }
+
     pub fn map<I2: Ideal>(&self, f: impl FnOnce(&I) -> I2) -> IdealOrZero<I2> {
         match &self.ideal_or_zero {
             Some(ideal) => IdealOrZero {
