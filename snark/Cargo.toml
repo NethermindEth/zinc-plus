@@ -40,6 +40,8 @@ parallel = [
     "zinc-utils/parallel",
     "zip-plus/parallel",
 ]
+asm = ["zip-plus/asm"]
+simd = ["zip-plus/simd"]
 
 [[bench]]
 name = "sha256_snark"
