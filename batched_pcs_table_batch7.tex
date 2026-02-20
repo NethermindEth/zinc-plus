@@ -1,0 +1,14 @@
+\begin{table}[ht]
+\centering
+\caption{Batched PCS pipeline benchmark (batch=7) for BPoly\textlangle 31\textrangle{} with IPRS num\_rows=2 (parallel+asm+simd).}
+\label{tab:batched-pcs-pipeline-suite-bpoly31-2row-batch7}
+\begin{tabular}{r r l r r r r r}
+\toprule
+\textbf{row\_len} & $\boldsymbol{2^P}$ & \textbf{Field} & \textbf{Encode} & \textbf{Merkle} & \textbf{Commit} & \textbf{Test} & \textbf{Verify} \\
+\midrule
+    256 & $2^{9}$ & $\mathbb{F}_{65537}$ & 1.37\,ms & 820.5\,\textmu s & 2.40\,ms & 463.0\,\textmu s & 961.8\,\textmu s \\
+    512 & $2^{10}$ & $\mathbb{F}_{65537}$ & 2.87\,ms & 1.47\,ms & 4.45\,ms & 512.3\,\textmu s & 1.48\,ms \\
+   1024 & $2^{11}$ & $\mathbb{F}_{65537}$ & 3.80\,ms & 2.75\,ms & 6.83\,ms & 595.1\,\textmu s & 1.64\,ms \\
+\bottomrule
+\end{tabular}
+\end{table}

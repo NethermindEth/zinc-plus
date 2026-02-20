@@ -108,6 +108,7 @@ type IprsBPolyR4B32<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const 
 // ---------- Batched benchmark helpers ----------------------------------------
 
 const BATCH_SIZE: usize = 5;
+const BATCH_SIZE_7: usize = 7;
 
 fn batched_encode_nrows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
@@ -389,5 +390,88 @@ fn batched_pcs_pipeline_suite_bpoly31_2row(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, batched_pcs_pipeline_suite_bpoly31_1row, batched_pcs_pipeline_suite_bpoly31_2row);
+/// Batched PCS pipeline suite for BPoly<31>, batch_size=7, poly sizes 2^9, 2^10, 2^11 only.
+///
+/// poly_size (2^P)   Config                 Field        row_len
+/// ───────────────   ──────                 ─────        ───────
+/// 2^9  = 512        R4B64 D=1 (rate 1/4)   F65537       512
+/// 2^10 = 1024       R4B16 D=2 (rate 1/4)   F65537       1024
+/// 2^11 = 2048       R4B32 D=2 (rate 1/4)   F65537       2048
+fn batched_pcs_pipeline_suite_bpoly31_1row_batch7(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Batched PCS Pipeline Suite BPoly31 1row batch7");
+    group.sample_size(10);
+
+    // ── Encode ───────────────────────────────────────────────────────
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>,  9>(&mut group, 1, BATCH_SIZE_7);
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, 10>(&mut group, 1, BATCH_SIZE_7);
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 2, 32, UNCHECKED>, 11>(&mut group, 1, BATCH_SIZE_7);
+
+    // ── Merkle ───────────────────────────────────────────────────────
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>,  9>(&mut group, 1, BATCH_SIZE_7);
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, 10>(&mut group, 1, BATCH_SIZE_7);
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 2, 32, UNCHECKED>, 11>(&mut group, 1, BATCH_SIZE_7);
+
+    // ── Commit ───────────────────────────────────────────────────────
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>,  9>(&mut group, 1, BATCH_SIZE_7);
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, 10>(&mut group, 1, BATCH_SIZE_7);
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 2, 32, UNCHECKED>, 11>(&mut group, 1, BATCH_SIZE_7);
+
+    // ── Test ─────────────────────────────────────────────────────────
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>, UNCHECKED,  9>(&mut group, 1, BATCH_SIZE_7);
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, UNCHECKED, 10>(&mut group, 1, BATCH_SIZE_7);
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 2, 32, UNCHECKED>, UNCHECKED, 11>(&mut group, 1, BATCH_SIZE_7);
+
+    // ── Verify ───────────────────────────────────────────────────────
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>, UNCHECKED,  9>(&mut group, 1, BATCH_SIZE_7);
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, UNCHECKED, 10>(&mut group, 1, BATCH_SIZE_7);
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 2, 32, UNCHECKED>, UNCHECKED, 11>(&mut group, 1, BATCH_SIZE_7);
+
+    group.finish();
+}
+
+/// Batched PCS pipeline suite for BPoly<31>, batch_size=7, poly sizes 2^9, 2^10, 2^11 with num_rows=2.
+///
+/// poly_size (2^P)   Config                 Field        row_len
+/// ───────────────   ──────                 ─────        ───────
+/// 2^9  = 512        R4B32 D=1 (rate 1/4)   F65537       256
+/// 2^10 = 1024       R4B64 D=1 (rate 1/4)   F65537       512
+/// 2^11 = 2048       R4B16 D=2 (rate 1/4)   F65537       1024
+fn batched_pcs_pipeline_suite_bpoly31_2row_batch7(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Batched PCS Pipeline Suite BPoly31 2row batch7");
+    group.sample_size(10);
+
+    // ── Encode ───────────────────────────────────────────────────────
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 1, 32, UNCHECKED>,  9>(&mut group, 2, BATCH_SIZE_7);
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>, 10>(&mut group, 2, BATCH_SIZE_7);
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, 11>(&mut group, 2, BATCH_SIZE_7);
+
+    // ── Merkle ───────────────────────────────────────────────────────
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 1, 32, UNCHECKED>,  9>(&mut group, 2, BATCH_SIZE_7);
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>, 10>(&mut group, 2, BATCH_SIZE_7);
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, 11>(&mut group, 2, BATCH_SIZE_7);
+
+    // ── Commit ───────────────────────────────────────────────────────
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 1, 32, UNCHECKED>,  9>(&mut group, 2, BATCH_SIZE_7);
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>, 10>(&mut group, 2, BATCH_SIZE_7);
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, 11>(&mut group, 2, BATCH_SIZE_7);
+
+    // ── Test ─────────────────────────────────────────────────────────
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 1, 32, UNCHECKED>, UNCHECKED,  9>(&mut group, 2, BATCH_SIZE_7);
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>, UNCHECKED, 10>(&mut group, 2, BATCH_SIZE_7);
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, UNCHECKED, 11>(&mut group, 2, BATCH_SIZE_7);
+
+    // ── Verify ───────────────────────────────────────────────────────
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 1, 32, UNCHECKED>, UNCHECKED,  9>(&mut group, 2, BATCH_SIZE_7);
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>, UNCHECKED, 10>(&mut group, 2, BATCH_SIZE_7);
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, UNCHECKED, 11>(&mut group, 2, BATCH_SIZE_7);
+
+    group.finish();
+}
+
+criterion_group!(benches,
+    batched_pcs_pipeline_suite_bpoly31_1row,
+    batched_pcs_pipeline_suite_bpoly31_2row,
+    batched_pcs_pipeline_suite_bpoly31_1row_batch7,
+    batched_pcs_pipeline_suite_bpoly31_2row_batch7,
+);
 criterion_main!(benches);
