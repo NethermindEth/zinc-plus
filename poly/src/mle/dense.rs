@@ -17,7 +17,7 @@ use crypto_primitives::{Matrix, PrimeField, Ring, Semiring};
 use rand::{distr::StandardUniform, prelude::*};
 use rand_core::RngCore;
 use zinc_utils::{
-    CHECKED, add, cfg_into_iter, inner_transparent_field::InnerTransparentField, log2,
+    CHECKED, add, cfg_into_iter, inner_transparent_field::InnerTransparentField,
     mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField, sub,
 };
 
@@ -74,7 +74,8 @@ impl<R: Clone> DenseMultilinearExtension<R> {
     /// original matrix.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn from_matrix<M: Matrix<R>>(matrix: &M, zero: R) -> Self {
-        let n_vars: usize = (log2(matrix.num_rows()) + log2(matrix.num_cols())) as usize; // n_vars = s + s'
+        let n_vars: usize = // n_vars = s + s'
+            (zinc_utils::log2(matrix.num_rows()) + zinc_utils::log2(matrix.num_cols())) as usize;
 
         // Matrices might need to get padded before turned into an MLE
         let padded_rows = matrix.num_rows().next_power_of_two();

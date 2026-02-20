@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use crate::{
     ideal_check::{IdealCheckProtocol, Proof, ProverState},
-    projections::{project_scalars, project_trace_coeffs},
+    projections::{
+        ColumnMajorTrace, RowMajorTrace, project_scalars, project_trace_coeffs_column_major,
+        project_trace_coeffs_row_major,
+    },
 };
 use crypto_bigint::{Odd, modular::MontyParams};
 use crypto_primitives::{FromWithConfig, crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
@@ -27,8 +30,10 @@ pub fn test_config() -> MontyParams<LIMBS> {
 
 type F = MontyField<4>;
 
+/// Run ideal check prover using MLE-first approach (for linear constraints).
+/// Uses column-indexed trace.
 #[allow(clippy::type_complexity)]
-pub fn run_ideal_check_prover_single_type<U, const DEGREE_PLUS_ONE: usize>(
+pub fn run_ideal_check_prover_linear<U, const DEGREE_PLUS_ONE: usize>(
     num_vars: usize,
     trace: &[DenseMultilinearExtension<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>],
     transcript: &mut impl Transcript,
@@ -36,7 +41,7 @@ pub fn run_ideal_check_prover_single_type<U, const DEGREE_PLUS_ONE: usize>(
     Proof<F>,
     ProverState<F>,
     HashMap<U::Scalar, DynamicPolynomialF<F>>,
-    Vec<DenseMultilinearExtension<DynamicPolynomialF<F>>>,
+    ColumnMajorTrace<F>,
 )
 where
     U: GenerateSingleTypeWitness<Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
@@ -46,7 +51,7 @@ where
 {
     assert!(
         U::signature().binary_poly_cols.is_zero() && U::signature().int_cols.is_zero(),
-        "the signature should be single ttyped"
+        "the signature should be single typed"
     );
 
     let field_cfg = test_config();
@@ -60,16 +65,74 @@ where
             .collect()
     });
 
-    let trace =
-        project_trace_coeffs::<F, Int<5>, Int<5>, DEGREE_PLUS_ONE>(&[], trace, &[], &field_cfg);
+    let trace = project_trace_coeffs_column_major::<F, Int<5>, Int<5>, DEGREE_PLUS_ONE>(
+        &[],
+        trace,
+        &[],
+        &field_cfg,
+    );
 
-    let (proof, state) = U::prove_as_subprotocol(
+    let (proof, state) = U::prove_linear(
         transcript,
         &trace,
         &scalars,
         num_constraints,
         num_vars,
-        true, // TODO: test both?
+        &field_cfg,
+    )
+    .unwrap();
+
+    (proof, state, scalars, trace)
+}
+
+/// Run ideal check prover using combined polynomial approach (for any
+/// constraints). Uses row-indexed (transposed) trace.
+#[allow(clippy::type_complexity)]
+pub fn run_ideal_check_prover_combined<U, const DEGREE_PLUS_ONE: usize>(
+    num_vars: usize,
+    trace: &[DenseMultilinearExtension<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>],
+    transcript: &mut impl Transcript,
+) -> (
+    Proof<F>,
+    ProverState<F>,
+    HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    RowMajorTrace<F>,
+)
+where
+    U: GenerateSingleTypeWitness<Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+        + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+        + IdealCheckProtocol,
+    F: FromWithConfig<Int<5>>,
+{
+    assert!(
+        U::signature().binary_poly_cols.is_zero() && U::signature().int_cols.is_zero(),
+        "the signature should be single typed"
+    );
+
+    let field_cfg = test_config();
+
+    let num_constraints = count_constraints::<U>();
+
+    let scalars = project_scalars::<F, U>(|scalar| {
+        scalar
+            .iter()
+            .map(|coeff| F::from_with_cfg(coeff, &field_cfg))
+            .collect()
+    });
+
+    let trace = project_trace_coeffs_row_major::<F, Int<5>, Int<5>, DEGREE_PLUS_ONE>(
+        &[],
+        trace,
+        &[],
+        &field_cfg,
+    );
+
+    let (proof, state) = U::prove_combined(
+        transcript,
+        &trace,
+        &scalars,
+        num_constraints,
+        num_vars,
         &field_cfg,
     )
     .unwrap();

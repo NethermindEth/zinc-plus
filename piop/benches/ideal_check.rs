@@ -11,7 +11,9 @@ use crypto_primitives::{
 use rand::rng;
 use zinc_piop::{
     ideal_check::{IdealCheckProtocol, Proof},
-    projections::{project_scalars, project_trace_coeffs},
+    projections::{
+        project_scalars, project_trace_coeffs_column_major, project_trace_coeffs_row_major,
+    },
 };
 use zinc_poly::univariate::dense::DensePolynomial;
 use zinc_primality::{MillerRabin, PrimalityTest};
@@ -57,7 +59,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                  trace: &[_],
                  transcript: &mut KeccakTranscript|
      -> Proof<F<FIELD_LIMBS>> {
-        let trace = project_trace_coeffs::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
+        let trace = project_trace_coeffs_row_major::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
 
         let projected_scalars =
             project_scalars::<F<FIELD_LIMBS>, TestAirNoMultiplication<INT_LIMBS>>(|scalar| {
@@ -67,13 +69,14 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                     .collect()
             });
 
-        TestAirNoMultiplication::prove_as_subprotocol(
+        // Even though this UAIR is linear, using prove_combined yields much better
+        // prover performance for it.
+        TestAirNoMultiplication::prove_combined(
             transcript,
             &trace,
             &projected_scalars,
             num_constraints,
             num_vars,
-            false,
             field_cfg,
         )
         .expect("Prover failed")
@@ -156,7 +159,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                  trace: &[_],
                  transcript: &mut KeccakTranscript|
      -> Proof<F<FIELD_LIMBS>> {
-        let trace = project_trace_coeffs::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
+        let trace = project_trace_coeffs_row_major::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
 
         let projected_scalars = project_scalars::<
             F<FIELD_LIMBS>,
@@ -168,13 +171,12 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 .collect()
         });
 
-        TestUairSimpleMultiplication::prove_as_subprotocol(
+        TestUairSimpleMultiplication::prove_combined(
             transcript,
             &trace,
             &projected_scalars,
             num_constraints,
             num_vars,
-            false,
             field_cfg,
         )
         .expect("Prover failed")
@@ -257,8 +259,12 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
                  int_trace: &[_],
                  transcript: &mut KeccakTranscript|
      -> Proof<F<FIELD_LIMBS>> {
-        let trace =
-            project_trace_coeffs::<_, u32, u32, _>(binary_poly_trace, &[], int_trace, field_cfg);
+        let trace = project_trace_coeffs_row_major::<_, u32, u32, _>(
+            binary_poly_trace,
+            &[],
+            int_trace,
+            field_cfg,
+        );
 
         let projected_scalars =
             project_scalars::<F<FIELD_LIMBS>, BinaryDecompositionUair>(|scalar| {
@@ -268,13 +274,12 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
                     .collect()
             });
 
-        BinaryDecompositionUair::prove_as_subprotocol(
+        BinaryDecompositionUair::prove_combined(
             transcript,
             &trace,
             &projected_scalars,
             num_constraints,
             num_vars,
-            false,
             field_cfg,
         )
         .expect("Prover failed")
@@ -354,8 +359,12 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
                  int_trace: &[_],
                  transcript: &mut KeccakTranscript|
      -> Proof<F<FIELD_LIMBS>> {
-        let trace =
-            project_trace_coeffs::<_, u32, u32, _>(binary_poly_trace, &[], int_trace, field_cfg);
+        let trace = project_trace_coeffs_column_major::<_, u32, u32, _>(
+            binary_poly_trace,
+            &[],
+            int_trace,
+            field_cfg,
+        );
 
         let projected_scalars = project_scalars::<F<FIELD_LIMBS>, BigLinearUair>(|scalar| {
             scalar
@@ -364,13 +373,12 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
                 .collect()
         });
 
-        BigLinearUair::prove_as_subprotocol(
+        BigLinearUair::prove_linear(
             transcript,
             &trace,
             &projected_scalars,
             num_constraints,
             num_vars,
-            true,
             field_cfg,
         )
         .expect("Prover failed")

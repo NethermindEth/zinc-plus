@@ -1,10 +1,10 @@
-use crypto_primitives::PrimeField;
-use std::collections::HashMap;
-
-use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+use crate::projections::{ColumnMajorTrace, RowMajorTrace};
+use crypto_primitives::PrimeField;
+use itertools::Itertools;
+use std::collections::HashMap;
 use zinc_poly::{
     EvaluationError,
     mle::{
@@ -12,7 +12,11 @@ use zinc_poly::{
     },
     univariate::dynamic::over_field::DynamicPolynomialF,
 };
-use zinc_uair::{ConstraintBuilder, TraceRow, Uair, ideal::ImpossibleIdeal};
+use zinc_uair::{
+    ConstraintBuilder, TraceRow, Uair,
+    degree_counter::{count_constraint_degrees, count_max_degree},
+    ideal::ImpossibleIdeal,
+};
 use zinc_utils::{
     cfg_into_iter, cfg_iter, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
 };
@@ -21,9 +25,11 @@ use zinc_utils::{
 /// obtains the combined polynomials' MLE coefficients.
 /// Since each coefficient is also a univariate polynomial
 /// we split the resulting MLE into coefficient MLEs.
+///
+/// `trace_matrix` is row-indexed: `trace_matrix[row][col]`.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn compute_combined_polynomials<F, U>(
-    trace_matrix: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
+    trace_matrix: &RowMajorTrace<F>,
     projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
     num_constraints: usize,
     field_cfg: &F::Config,
@@ -35,24 +41,17 @@ where
 {
     let field_zero = F::zero_with_cfg(field_cfg);
 
-    let num_rows = trace_matrix[0].len();
+    let num_rows = trace_matrix.len();
 
     let mut max_degrees_and_combined_poly_rows: Vec<(usize, Vec<DynamicPolynomialF<F>>)> =
         cfg_into_iter!(0..num_rows - 1)
             .map(|row_idx| {
-                let up = trace_matrix
-                    .iter()
-                    .map(|column| column[row_idx].clone())
-                    .collect_vec();
-
-                let down = trace_matrix
-                    .iter()
-                    .map(|column| column[row_idx + 1].clone())
-                    .collect_vec();
+                let up = &trace_matrix[row_idx];
+                let down = &trace_matrix[row_idx + 1];
 
                 combine_rows_and_get_max_degree::<F, U>(
-                    &up,
-                    &down,
+                    up,
+                    down,
                     num_constraints,
                     projected_scalars,
                 )
@@ -80,7 +79,7 @@ where
         num_constraints,
         max_degree,
         &max_degrees_and_combined_poly_rows,
-        &field_zero,
+        field_zero.inner(),
         skip_constraints,
     )
 }
@@ -136,7 +135,7 @@ fn prepare_coefficient_mles<F: PrimeField>(
     num_constraints: usize,
     max_degree: usize,
     max_degrees_and_combined_poly_rows: &[(usize, Vec<DynamicPolynomialF<F>>)],
-    field_zero: &F,
+    field_zero_inner: &F::Inner,
     skip_constraints: &[bool],
 ) -> Vec<Vec<DenseMultilinearExtension<F::Inner>>> {
     cfg_into_iter!(0..num_constraints)
@@ -147,20 +146,20 @@ fn prepare_coefficient_mles<F: PrimeField>(
             if skip_constraints[constraint] {
                 return vec![];
             }
-            (0..=max_degree)
+            cfg_into_iter!(0..=max_degree)
                 .map(|coeff| {
                     max_degrees_and_combined_poly_rows
                         .iter()
                         .map(|(_, row)| {
                             if coeff >= row[constraint].coeffs.len() {
-                                field_zero.inner().clone()
+                                field_zero_inner.clone()
                             } else {
                                 row[constraint].coeffs[coeff].inner().clone()
                             }
                         })
-                        .collect_dense_mle_with_zero(field_zero.inner())
+                        .collect_dense_mle_with_zero(field_zero_inner)
                 })
-                .collect_vec()
+                .collect()
         })
         .collect()
 }
@@ -174,10 +173,12 @@ fn prepare_coefficient_mles<F: PrimeField>(
 /// of a linear combination of MLEs equals the linear combination of
 /// individual MLE evaluations.
 ///
+/// `trace_matrix` is column-indexed: `trace_matrix[col]` is an MLE.
+///
 /// Does `2 * num_columns * max_num_coeffs` evaluations of MLEs.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn evaluate_combined_polynomials<F, U>(
-    trace_matrix: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
+    trace_matrix: &ColumnMajorTrace<F>,
     projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
     num_constraints: usize,
     evaluation_point: &[F],
@@ -189,8 +190,15 @@ where
 {
     let field_zero = F::zero_with_cfg(field_cfg);
     let zero_inner = field_zero.inner().clone();
-    let num_rows = trace_matrix[0].len();
+    let num_rows = trace_matrix.first().map(|c| c.len()).unwrap_or(0);
     let num_vars = evaluation_point.len();
+
+    // Sanity check: this approach only works for linear constraints
+    if count_max_degree::<U>() > 1 {
+        return Err(EvaluationError::UnsupportedConstraintDegrees {
+            degrees: count_constraint_degrees::<U>(),
+        });
+    }
 
     // Maximum number of coefficients across all trace entries
     let max_num_coeffs = trace_matrix
@@ -202,6 +210,7 @@ where
 
     // Evaluate "up" and "down" versions of each trace column at the evaluation
     // point, these match the semantics of compute_combined_polynomials.
+    // With column-indexed format, each column is already an MLE.
     let column_evals: Vec<(DynamicPolynomialF<F>, DynamicPolynomialF<F>)> = cfg_iter!(trace_matrix)
         .map(|col| {
             let mut up_coeffs = Vec::with_capacity(max_num_coeffs);

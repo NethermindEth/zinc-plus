@@ -366,8 +366,8 @@ impl<F: PrimeField> From<SumCheckError<F>> for CombinedPolyResolverError<F> {
 mod tests {
     use crate::{
         ideal_check::IdealCheckProtocol,
-        projections::{project_scalars_to_field, project_trace_to_field},
-        test_utils::{LIMBS, run_ideal_check_prover_single_type, test_config},
+        projections::{evaluate_trace_to_column_mles, project_scalars_to_field},
+        test_utils::{LIMBS, run_ideal_check_prover_combined, test_config},
     };
     use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
     use rand::rng;
@@ -412,7 +412,7 @@ mod tests {
         let trace = U::generate_witness(num_vars, &mut rng);
 
         let (ic_proof, ic_prover_state, projected_scalars, projected_trace) =
-            run_ideal_check_prover_single_type::<U, DEGREE_PLUS_ONE>(
+            run_ideal_check_prover_combined::<U, DEGREE_PLUS_ONE>(
                 num_vars,
                 &trace,
                 &mut prover_transcript,
@@ -440,7 +440,7 @@ mod tests {
 
         let (proof, _) = CombinedPolyResolver::prove_as_subprotocol::<U>(
             &mut prover_transcript,
-            project_trace_to_field::<_, 32>(&[], &projected_trace, &[], &projecting_element),
+            evaluate_trace_to_column_mles(&projected_trace, &projecting_element),
             &ic_prover_state.evaluation_point,
             &projected_scalars,
             num_constraints,
