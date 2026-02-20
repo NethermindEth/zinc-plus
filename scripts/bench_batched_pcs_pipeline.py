@@ -9,6 +9,7 @@ polynomials into a single shared Merkle tree, using various IPRS codes.
 
     poly_size (2^P)   Config               Field           row_len
     ───────────────   ──────               ─────           ───────
+    2^9  = 512        R4B64 D=1 (rate 1/4) F65537          512
     2^10 = 1024       R4B16 D=2 (rate 1/4) F65537          1024
     2^11 = 2048       R4B32 D=2 (rate 1/4) F65537          2048
 
@@ -26,7 +27,7 @@ import sys
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-BENCH_FILTER = "Batched PCS Pipeline Suite BPoly31 1row/.* poly_size=2\\^(10|11) "
+BENCH_FILTER = "Batched PCS Pipeline Suite BPoly31 1row/.* poly_size=2\\^(9|10|11) "
 CARGO_BENCH_CMD = [
     "cargo", "bench",
     "--bench", "batched_zip_plus_benches",
@@ -34,9 +35,9 @@ CARGO_BENCH_CMD = [
     "--", BENCH_FILTER,
 ]
 
-# Expected polynomial size exponents for num_rows=1, depth=2 benchmarks.
+# Expected polynomial size exponents for num_rows=1 benchmarks.
 # With num_rows=1, row_len = poly_size.
-EXPECTED_POLY_EXPS = [10, 11]
+EXPECTED_POLY_EXPS = [9, 10, 11]
 
 # Number of polynomials in the batch (must match the batch_size in benchmarks).
 BATCH_SIZE = 5
@@ -47,6 +48,7 @@ PHASES = ["Encode", "Merkle", "Commit", "Test", "Verify"]
 # Map poly exponent → (num_rows, config description, field)
 # With num_rows=1, row_len = poly_size
 POLY_EXP_CONFIG = {
+    9:  (1, "R4B64 D=1", "F65537"),     # row_len=512
     10: (1, "R4B16 D=2", "F65537"),     # row_len=1024
     11: (1, "R4B32 D=2", "F65537"),     # row_len=2048
 }

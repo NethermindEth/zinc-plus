@@ -23,8 +23,7 @@ Usage:
 
 import argparse
 
-BASE_FIELD_SIZE = 12
-
+BASE_FIELD_SIZE = 16
 
 def depth_for_exp(exp: int) -> int:
     """Return IPRS depth: 1 for k<=8, 2 for k>=9."""
@@ -85,7 +84,7 @@ def fmt_size(bits: int) -> str:
 
 
 COMPONENTS = [
-    {"label": "A", "n_pol": 5, "flat_vec_norm": 133, "degree": 32},
+    {"label": "A", "n_pol": 7, "flat_vec_norm": 133, "degree": 32},
     {"label": "B", "n_pol": 0,  "flat_vec_norm": 150, "degree": 1},
 ]
 
@@ -107,7 +106,7 @@ def main():
         print(f"  v1: log2(C) + {BASE_FIELD_SIZE} + depth*(3+{BASE_FIELD_SIZE}) - 1")
         print(f"  v2: log2(C) + (depth+1)*{BASE_FIELD_SIZE} + 0.5*(1+4*depth) - log2(3*pi)*0.5*(1+depth)")
 
-        hdr = (f"{'2^N':>6} | {'depth':>5} | {'A(v1)':>12} | {'B(v1)':>12} | {'v1 total':>12} | {'A(v2)':>12} | {'B(v2)':>12} | {'v2 total':>12}")
+        hdr = (f"{'2^N':>6} | {'depth':>5} | {'A(v1)':>12} {'rows':>5} | {'B(v1)':>12} {'rows':>5} | {'v1 total':>12} | {'A(v2)':>12} {'rows':>5} | {'B(v2)':>12} {'rows':>5} | {'v2 total':>12}")
         print(f"\n{hdr}")
         print("-" * len(hdr))
 
@@ -118,9 +117,10 @@ def main():
             totals = {}
             for label, bb_fn in BITBOUND_FORMULAS.items():
                 costs = []
+                rows_list = []
                 for c in COMPONENTS:
                     cc = c["flat_vec_norm"]
-                    _, _, cost = find_optimal(
+                    opt_rows, _, cost = find_optimal(
                         total,
                         c["n_pol"], c["degree"], nq,
                         BASE_FIELD_SIZE, depth,
@@ -128,11 +128,12 @@ def main():
                         bitbound_fn=bb_fn,
                     )
                     costs.append(cost)
-                totals[label] = (costs, sum(costs))
-            cv1, tv1 = totals["v1"]
-            cv2, tv2 = totals["v2"]
-            row += f" | {fmt_size(cv1[0]):>12} | {fmt_size(cv1[1]):>12} | {fmt_size(tv1):>12}"
-            row += f" | {fmt_size(cv2[0]):>12} | {fmt_size(cv2[1]):>12} | {fmt_size(tv2):>12}"
+                    rows_list.append(opt_rows)
+                totals[label] = (costs, rows_list, sum(costs))
+            cv1, rv1, tv1 = totals["v1"]
+            cv2, rv2, tv2 = totals["v2"]
+            row += f" | {fmt_size(cv1[0]):>12} {rv1[0]:>5} | {fmt_size(cv1[1]):>12} {rv1[1]:>5} | {fmt_size(tv1):>12}"
+            row += f" | {fmt_size(cv2[0]):>12} {rv2[0]:>5} | {fmt_size(cv2[1]):>12} {rv2[1]:>5} | {fmt_size(tv2):>12}"
             print(row)
 
         print()
