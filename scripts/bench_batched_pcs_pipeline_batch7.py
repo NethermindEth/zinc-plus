@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
 Benchmark the full PCS pipeline (Encode, Merkle, Commit, Test, Verify) for
-**Batched** Zip+ with BPoly<31> evaluations, num_rows=2, and batch_size=7.
+**Batched** Zip+ with BPoly<31> evaluations, num_rows=1, depth=2, and batch_size=7.
 
-This script runs the "Batched PCS Pipeline Suite BPoly31 2row batch7" criterion
+This script runs the "Batched PCS Pipeline Suite BPoly31 1row batch7" criterion
 benchmarks and collects the results into a LaTeX table.  The benchmarks batch 7
 polynomials into a single shared Merkle tree, using various IPRS codes.
 
     poly_size (2^P)   Config               Field           row_len
     ───────────────   ──────               ─────           ───────
-    2^9  = 512        R4B32 D=1 (rate 1/4) F65537          256
-    2^10 = 1024       R4B64 D=1 (rate 1/4) F65537          512
-    2^11 = 2048       R4B16 D=2 (rate 1/4) F65537          1024
+    2^10 = 1024       R4B16 D=2 (rate 1/4) F65537          1024
+    2^11 = 2048       R4B32 D=2 (rate 1/4) F65537          2048
 
 Usage:
     python3 scripts/bench_batched_pcs_pipeline_batch7.py
@@ -27,7 +26,7 @@ import sys
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-BENCH_FILTER = "Batched PCS Pipeline Suite BPoly31 2row batch7/.* poly_size=2\\^(9|10|11) "
+BENCH_FILTER = "Batched PCS Pipeline Suite BPoly31 1row batch7/.* poly_size=2\\^(10|11) "
 CARGO_BENCH_CMD = [
     "cargo", "bench",
     "--bench", "batched_zip_plus_benches",
@@ -35,10 +34,9 @@ CARGO_BENCH_CMD = [
     "--", BENCH_FILTER,
 ]
 
-# Expected polynomial size exponents for num_rows=2 benchmarks.
-# With num_rows=2, row_len = poly_size / 2.
-# Different fields support different row lengths.
-EXPECTED_POLY_EXPS = [9, 10, 11]
+# Expected polynomial size exponents for num_rows=1, depth=2 benchmarks.
+# With num_rows=1, row_len = poly_size.
+EXPECTED_POLY_EXPS = [10, 11]
 
 # Number of polynomials in the batch (must match the batch_size in benchmarks).
 BATCH_SIZE = 7
@@ -47,11 +45,10 @@ BATCH_SIZE = 7
 PHASES = ["Encode", "Merkle", "Commit", "Test", "Verify"]
 
 # Map poly exponent → (num_rows, config description, field)
-# With num_rows=2, row_len = poly_size / 2
+# With num_rows=1, row_len = poly_size
 POLY_EXP_CONFIG = {
-    9:  (2, "R4B32 D=1", "F65537"),     # row_len=256
-    10: (2, "R4B64 D=1", "F65537"),     # row_len=512
-    11: (2, "R4B16 D=2", "F65537"),     # row_len=1024
+    10: (1, "R4B16 D=2", "F65537"),     # row_len=1024
+    11: (1, "R4B32 D=2", "F65537"),     # row_len=2048
 }
 
 # Map field name to LaTeX representation
@@ -62,7 +59,7 @@ FIELD_LATEX = {
 
 def field_for_poly_exp(p: int) -> str:
     """Map polynomial size exponent to the field label."""
-    _, _, field = POLY_EXP_CONFIG.get(p, (1, "", "F3329"))
+    _, _, field = POLY_EXP_CONFIG.get(p, (1, "", "F65537"))
     return FIELD_LATEX.get(field, r"$\mathbb{F}$")
 
 
@@ -157,8 +154,8 @@ def generate_latex_table(
     lines = [
         r"\begin{table}[ht]",
         r"\centering",
-        r"\caption{Batched PCS pipeline benchmark (batch=" + str(BATCH_SIZE) + r") for BPoly\textlangle 31\textrangle{} with IPRS num\_rows=2 (parallel+asm+simd).}",
-        r"\label{tab:batched-pcs-pipeline-suite-bpoly31-2row-batch7}",
+        r"\caption{Batched PCS pipeline benchmark (batch=" + str(BATCH_SIZE) + r") for BPoly\textlangle 31\textrangle{} with IPRS num\_rows=1, depth=2 (parallel+asm+simd).}",
+        r"\label{tab:batched-pcs-pipeline-suite-bpoly31-1row-d2-batch7}",
         r"\begin{tabular}{r r l r r r r r}",
         r"\toprule",
         (
@@ -170,7 +167,7 @@ def generate_latex_table(
 
     for poly_exp in EXPECTED_POLY_EXPS:
         num_rows, _config, _field = POLY_EXP_CONFIG[poly_exp]
-        row_len = (1 << poly_exp) // num_rows  # With num_rows=2, row_len = poly_size / 2
+        row_len = (1 << poly_exp) // num_rows  # With num_rows=1, row_len = poly_size
         field = field_for_poly_exp(poly_exp)
 
         phase_strs = []
@@ -201,7 +198,7 @@ def generate_latex_table(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run Batched PCS pipeline (Encode/Merkle/Commit/Test/Verify) benchmarks (batch=7) for BPoly<31> and produce a LaTeX table."
+        description="Run Batched PCS pipeline (Encode/Merkle/Commit/Test/Verify) benchmarks (batch=7) for BPoly<31> with num_rows=1, depth=2 and produce a LaTeX table."
     )
     parser.add_argument(
         "--no-run",
@@ -270,7 +267,7 @@ def main():
         results.items(), key=lambda x: (x[0][0], x[0][1])
     ):
         print(
-            f"  {phase:>8}  2^{poly_exp:<2} (num_rows=2)  "
+            f"  {phase:>8}  2^{poly_exp:<2} (num_rows=1, D=2)  "
             f"{_format_time(lo):>20} .. {_format_time(med):>20} .. {_format_time(hi):>20}"
         )
 
