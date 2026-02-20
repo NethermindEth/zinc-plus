@@ -2,6 +2,13 @@
 //!
 //! Breaks the prover pipeline into individual steps so that the cost
 //! contribution of each stage is visible.
+//!
+//! Uses IPRS codes for the PCS layer. The IPRS configuration per `num_vars`
+//! matches the batched PCS pipeline table's rate-1/4 configs (F65537):
+//!
+//!   nvars=9  → R4B32 D=1  (poly_size=512,  row_len=256)
+//!   nvars=10 → R4B64 D=1  (poly_size=1024, row_len=512)
+//!   nvars=11 → R4B16 D=2  (poly_size=2048, row_len=1024)
 
 #![allow(
     clippy::arithmetic_side_effects,
@@ -33,7 +40,7 @@ use zinc_piop::{
 use zinc_poly::{
     mle::DenseMultilinearExtension,
     univariate::{
-        binary::{BinaryPoly, BinaryPolyInnerProduct},
+        binary::{BinaryPoly, BinaryPolyInnerProduct, BinaryPolyWideningMulByScalar},
         dense::{DensePolyInnerProduct, DensePolynomial},
         dynamic::over_field::DynamicPolynomialF,
     },
@@ -46,12 +53,15 @@ use zinc_uair::{
     degree_counter::count_max_degree,
 };
 use zinc_utils::inner_product::{MBSInnerProduct, ScalarProduct};
+use zinc_utils::mul_by_scalar::ScalarWideningMulByScalar;
 use zip_plus::{
     batched_pcs::structs::BatchedZipPlus,
     code::{
         LinearCode,
-        raa::{RaaCode, RaaConfig},
-        raa_sign_flip::RaaSignFlippingCode,
+        iprs::{
+            IprsCode,
+            PnttConfigF2_16R4B16, PnttConfigF2_16R4B32, PnttConfigF2_16R4B64,
+        },
     },
     merkle::HASH_OUT_LEN,
     pcs::structs::{ZipPlus, ZipTypes},
@@ -62,34 +72,23 @@ use zip_plus::{
 // ---------------------------------------------------------------------------
 
 const INT_LIMBS: usize = U64::LIMBS; // 1 on 64-bit
-const REPETITION_FACTOR: usize = 4;
 const FIELD_LIMBS: usize = INT_LIMBS * 4; // = 4
 
 // ---------------------------------------------------------------------------
-// PCS config: RAA code
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy)]
-struct BenchRaaConfig;
-impl RaaConfig for BenchRaaConfig {
-    const PERMUTE_IN_PLACE: bool = false;
-    const CHECK_FOR_OVERFLOWS: bool = true;
-}
-
-// ---------------------------------------------------------------------------
-// ZipTypes for binary polynomial columns (BinaryPoly<32>)
+// ZipTypes for binary polynomial columns (BinaryPoly<32>) — IPRS
 // ---------------------------------------------------------------------------
 
 struct BpZt;
 impl ZipTypes for BpZt {
     const NUM_COLUMN_OPENINGS: usize = 200;
     type Eval = BinaryPoly<32>;
-    type Cw = DensePolynomial<i32, 32>;
+    type Cw = DensePolynomial<i64, 32>;
     type Fmod = Uint<FIELD_LIMBS>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
     type Pt = i128;
-    type CombR = Int<{ INT_LIMBS * 5 }>;
+    // Extra limb (6 vs 5) to accommodate batch accumulation in IPRS.
+    type CombR = Int<{ INT_LIMBS * 6 }>;
     type Comb = DensePolynomial<Self::CombR, 32>;
     type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, 32>;
     type CombDotChal =
@@ -97,29 +96,42 @@ impl ZipTypes for BpZt {
     type ArrCombRDotChal = MBSInnerProduct;
 }
 
-type BpLc = RaaCode<BpZt, BenchRaaConfig, REPETITION_FACTOR>;
-
 // ---------------------------------------------------------------------------
-// ZipTypes for integer columns (Int<INT_LIMBS>)
+// ZipTypes for integer columns (i64 eval, i128 codeword) — IPRS
 // ---------------------------------------------------------------------------
 
 struct IntZt;
 impl ZipTypes for IntZt {
     const NUM_COLUMN_OPENINGS: usize = 200;
-    type Eval = Int<INT_LIMBS>;
-    type Cw = Int<FIELD_LIMBS>;
+    type Eval = i64;
+    type Cw = i128;
     type Fmod = Uint<FIELD_LIMBS>;
     type PrimeTest = MillerRabin;
-    type Chal = Int<INT_LIMBS>;
-    type Pt = Int<INT_LIMBS>;
-    type CombR = Int<{ INT_LIMBS * 8 }>;
-    type Comb = Self::CombR;
+    type Chal = i128;
+    type Pt = i128;
+    // 201 bits needed for linear combination; Int<4> = 256 bits.
+    type CombR = Int<4>;
+    type Comb = Int<4>;
     type EvalDotChal = ScalarProduct;
     type CombDotChal = ScalarProduct;
     type ArrCombRDotChal = MBSInnerProduct;
 }
 
-type IntLc = RaaSignFlippingCode<IntZt, BenchRaaConfig, REPETITION_FACTOR>;
+// ---------------------------------------------------------------------------
+// IPRS code aliases per num_vars
+// ---------------------------------------------------------------------------
+
+// nvars=9  → R4B32 D=1 (row_len=256, poly_size=512)
+type BpIprs9 = IprsCode<BpZt, PnttConfigF2_16R4B32<1>, BinaryPolyWideningMulByScalar<i64>, true>;
+type IntIprs9 = IprsCode<IntZt, PnttConfigF2_16R4B32<1>, ScalarWideningMulByScalar<i128>, true>;
+
+// nvars=10 → R4B64 D=1 (row_len=512, poly_size=1024)
+type BpIprs10 = IprsCode<BpZt, PnttConfigF2_16R4B64<1>, BinaryPolyWideningMulByScalar<i64>, true>;
+type IntIprs10 = IprsCode<IntZt, PnttConfigF2_16R4B64<1>, ScalarWideningMulByScalar<i128>, true>;
+
+// nvars=11 → R4B16 D=2 (row_len=1024, poly_size=2048)
+type BpIprs11 = IprsCode<BpZt, PnttConfigF2_16R4B16<2>, BinaryPolyWideningMulByScalar<i64>, true>;
+type IntIprs11 = IprsCode<IntZt, PnttConfigF2_16R4B16<2>, ScalarWideningMulByScalar<i128>, true>;
 
 // ---------------------------------------------------------------------------
 // Field type
@@ -133,27 +145,22 @@ type F = MontyField<FIELD_LIMBS>;
 
 fn bench_sha256_snark(c: &mut Criterion) {
     let mut group = c.benchmark_group("SHA256 SNARK steps");
-    for num_vars in [9, 10, 11] {
-        run_sha256_bench(&mut group, num_vars);
-    }
+    run_sha256_bench::<BpIprs9, IntIprs9>(&mut group, 9);
+    run_sha256_bench::<BpIprs10, IntIprs10>(&mut group, 10);
+    run_sha256_bench::<BpIprs11, IntIprs11>(&mut group, 11);
     group.finish();
 }
 
 /// Helper: build the Fiat-Shamir transcript up to field_cfg sampling.
-/// Returns (prover_transcript, field_cfg).
+/// Absorbs the two commitment roots (binary-poly and integer) and then
+/// samples the random field configuration.
 fn build_transcript_and_field_cfg(
-    bp_up_comm_root: &zip_plus::merkle::MtHash,
-    int_up_comm_root: &zip_plus::merkle::MtHash,
-    bp_down_comm_root: &zip_plus::merkle::MtHash,
-    int_down_comm_root: &zip_plus::merkle::MtHash,
+    bp_comm_root: &zip_plus::merkle::MtHash,
+    int_comm_root: &zip_plus::merkle::MtHash,
 ) -> (zinc_transcript::KeccakTranscript, <F as PrimeField>::Config) {
     let mut t = zinc_transcript::KeccakTranscript::new();
     let mut buf = [0u8; HASH_OUT_LEN];
-    for root in [bp_up_comm_root, int_up_comm_root] {
-        ConstTranscribable::write_transcription_bytes(root, &mut buf);
-        t.absorb(&buf);
-    }
-    for root in [bp_down_comm_root, int_down_comm_root] {
+    for root in [bp_comm_root, int_comm_root] {
         ConstTranscribable::write_transcription_bytes(root, &mut buf);
         t.absorb(&buf);
     }
@@ -162,7 +169,14 @@ fn build_transcript_and_field_cfg(
     (t, field_cfg)
 }
 
-fn run_sha256_bench(group: &mut criterion::BenchmarkGroup<WallTime>, num_vars: usize) {
+
+fn run_sha256_bench<BpCode, IntCode>(
+    group: &mut criterion::BenchmarkGroup<WallTime>,
+    num_vars: usize,
+) where
+    BpCode: LinearCode<BpZt>,
+    IntCode: LinearCode<IntZt>,
+{
     let mut rng = rng();
     let params = format!("nvars={num_vars}");
 
@@ -170,14 +184,21 @@ fn run_sha256_bench(group: &mut criterion::BenchmarkGroup<WallTime>, num_vars: u
     let (binary_poly_trace, _, int_trace_u32) =
         Sha256CompressionUair::<INT_LIMBS>::generate_witness(num_vars, &mut rng);
 
+    // Int<INT_LIMBS> trace — used by the PIOP (ideal check, combined resolver).
     let int_trace: Vec<DenseMultilinearExtension<Int<INT_LIMBS>>> = int_trace_u32
         .iter()
         .map(|col| col.iter().map(|&v| Int::from(v as i64)).collect())
         .collect();
 
+    // i64 trace — used by the PCS (IntZt::Eval = i64).
+    let int_trace_i64: Vec<DenseMultilinearExtension<i64>> = int_trace_u32
+        .iter()
+        .map(|col| col.iter().map(|&v| v as i64).collect())
+        .collect();
+
     let poly_size = 1usize << num_vars;
-    let bp_pcs_params = ZipPlus::<BpZt, BpLc>::setup(poly_size, BpLc::new(poly_size));
-    let int_pcs_params = ZipPlus::<IntZt, IntLc>::setup(poly_size, IntLc::new(poly_size));
+    let bp_pcs_params = ZipPlus::<BpZt, BpCode>::setup(poly_size, BpCode::new(poly_size));
+    let int_pcs_params = ZipPlus::<IntZt, IntCode>::setup(poly_size, IntCode::new(poly_size));
 
     let n_bp = binary_poly_trace.len();
 
@@ -191,32 +212,16 @@ fn run_sha256_bench(group: &mut criterion::BenchmarkGroup<WallTime>, num_vars: u
             }
         };
 
-    // Pre-compute shifted traces (needed by several steps)
-    let shifted_bp_trace: Vec<DenseMultilinearExtension<BinaryPoly<32>>> = binary_poly_trace
-        .iter()
-        .map(|col| col[1..].to_vec().into_iter().collect())
-        .collect();
-    let shifted_int_trace: Vec<DenseMultilinearExtension<Int<INT_LIMBS>>> = int_trace
-        .iter()
-        .map(|col| col[1..].to_vec().into_iter().collect())
-        .collect();
-
     // Pre-compute commits (needed by test, transcript, and later steps)
-    let (bp_up_hint, bp_up_comm) =
-        BatchedZipPlus::<BpZt, BpLc>::commit(&bp_pcs_params, &binary_poly_trace).unwrap();
-    let (int_up_hint, int_up_comm) =
-        BatchedZipPlus::<IntZt, IntLc>::commit(&int_pcs_params, &int_trace).unwrap();
-    let (bp_down_hint, bp_down_comm) =
-        BatchedZipPlus::<BpZt, BpLc>::commit(&bp_pcs_params, &shifted_bp_trace).unwrap();
-    let (int_down_hint, int_down_comm) =
-        BatchedZipPlus::<IntZt, IntLc>::commit(&int_pcs_params, &shifted_int_trace).unwrap();
+    let (bp_hint, bp_comm) =
+        BatchedZipPlus::<BpZt, BpCode>::commit(&bp_pcs_params, &binary_poly_trace).unwrap();
+    let (int_hint, int_comm) =
+        BatchedZipPlus::<IntZt, IntCode>::commit(&int_pcs_params, &int_trace_i64).unwrap();
 
     // Pre-compute transcript + field_cfg (needed by projection / PIOP steps)
     let (_, field_cfg) = build_transcript_and_field_cfg(
-        &bp_up_comm.root,
-        &int_up_comm.root,
-        &bp_down_comm.root,
-        &int_down_comm.root,
+        &bp_comm.root,
+        &int_comm.root,
     );
 
     // Pre-compute projected trace (needed by ideal check and later)
@@ -237,99 +242,64 @@ fn run_sha256_bench(group: &mut criterion::BenchmarkGroup<WallTime>, num_vars: u
     let max_degree = count_max_degree::<Sha256CompressionUair<INT_LIMBS>>();
 
     // =====================================================================
-    // Step 1: Build shifted traces
+    // Step 1: Batched PCS commit (2 batches: bp + int)
     // =====================================================================
     group.bench_with_input(
-        BenchmarkId::new("1_shifted_traces", &params),
+        BenchmarkId::new("1_pcs_commit", &params),
         &num_vars,
         |bench, _| {
             bench.iter(|| {
-                let sbp: Vec<DenseMultilinearExtension<BinaryPoly<32>>> = binary_poly_trace
-                    .iter()
-                    .map(|col| col[1..].to_vec().into_iter().collect())
-                    .collect();
-                let sint: Vec<DenseMultilinearExtension<Int<INT_LIMBS>>> = int_trace
-                    .iter()
-                    .map(|col| col[1..].to_vec().into_iter().collect())
-                    .collect();
-                black_box((sbp, sint));
-            });
-        },
-    );
-
-    // =====================================================================
-    // Step 2: Batched PCS commit (4 batches)
-    // =====================================================================
-    group.bench_with_input(
-        BenchmarkId::new("2_pcs_commit", &params),
-        &num_vars,
-        |bench, _| {
-            bench.iter(|| {
-                let c1 = BatchedZipPlus::<BpZt, BpLc>::commit(
+                let c1 = BatchedZipPlus::<BpZt, BpCode>::commit(
                     &bp_pcs_params, &binary_poly_trace,
                 ).unwrap();
-                let c2 = BatchedZipPlus::<IntZt, IntLc>::commit(
-                    &int_pcs_params, &int_trace,
+                let c2 = BatchedZipPlus::<IntZt, IntCode>::commit(
+                    &int_pcs_params, &int_trace_i64,
                 ).unwrap();
-                let c3 = BatchedZipPlus::<BpZt, BpLc>::commit(
-                    &bp_pcs_params, &shifted_bp_trace,
-                ).unwrap();
-                let c4 = BatchedZipPlus::<IntZt, IntLc>::commit(
-                    &int_pcs_params, &shifted_int_trace,
-                ).unwrap();
-                black_box((c1, c2, c3, c4));
+                black_box((c1, c2));
             });
         },
     );
 
     // =====================================================================
-    // Step 3: Batched PCS proximity test (4 batches)
+    // Step 2: Batched PCS proximity test (2 batches: bp + int)
     // =====================================================================
     group.bench_with_input(
-        BenchmarkId::new("3_pcs_test", &params),
+        BenchmarkId::new("2_pcs_test", &params),
         &num_vars,
         |bench, _| {
             bench.iter(|| {
-                let t1 = BatchedZipPlus::<BpZt, BpLc>::test::<true>(
-                    &bp_pcs_params, &binary_poly_trace, &bp_up_hint,
+                let t1 = BatchedZipPlus::<BpZt, BpCode>::test::<true>(
+                    &bp_pcs_params, &binary_poly_trace, &bp_hint,
                 ).unwrap();
-                let t2 = BatchedZipPlus::<IntZt, IntLc>::test::<true>(
-                    &int_pcs_params, &int_trace, &int_up_hint,
+                let t2 = BatchedZipPlus::<IntZt, IntCode>::test::<true>(
+                    &int_pcs_params, &int_trace_i64, &int_hint,
                 ).unwrap();
-                let t3 = BatchedZipPlus::<BpZt, BpLc>::test::<true>(
-                    &bp_pcs_params, &shifted_bp_trace, &bp_down_hint,
-                ).unwrap();
-                let t4 = BatchedZipPlus::<IntZt, IntLc>::test::<true>(
-                    &int_pcs_params, &shifted_int_trace, &int_down_hint,
-                ).unwrap();
-                black_box((t1, t2, t3, t4));
+                black_box((t1, t2));
             });
         },
     );
 
     // =====================================================================
-    // Step 4: Transcript + field config sampling
+    // Step 3: Transcript + field config sampling
     // =====================================================================
     group.bench_with_input(
-        BenchmarkId::new("4_transcript_field_cfg", &params),
+        BenchmarkId::new("3_transcript_field_cfg", &params),
         &num_vars,
         |bench, _| {
             bench.iter(|| {
                 black_box(build_transcript_and_field_cfg(
-                    &bp_up_comm.root,
-                    &int_up_comm.root,
-                    &bp_down_comm.root,
-                    &int_down_comm.root,
+                    &bp_comm.root,
+                    &int_comm.root,
                 ));
             });
         },
     );
 
     // =====================================================================
-    // Step 5: Project trace to F[X]
+    // Step 4: Project trace to F[X]
     // =====================================================================
     group.bench_with_input(
-        BenchmarkId::new("5_project_trace_fx", &params),
+        BenchmarkId::new("4_project_trace_fx", &params),
         &num_vars,
         |bench, _| {
             bench.iter(|| {
@@ -346,10 +316,10 @@ fn run_sha256_bench(group: &mut criterion::BenchmarkGroup<WallTime>, num_vars: u
     );
 
     // =====================================================================
-    // Step 6: Project scalars to F[X]
+    // Step 5: Project scalars to F[X]
     // =====================================================================
     group.bench_with_input(
-        BenchmarkId::new("6_project_scalars_fx", &params),
+        BenchmarkId::new("5_project_scalars_fx", &params),
         &num_vars,
         |bench, _| {
             bench.iter(|| {
@@ -363,20 +333,18 @@ fn run_sha256_bench(group: &mut criterion::BenchmarkGroup<WallTime>, num_vars: u
     );
 
     // =====================================================================
-    // Step 7: Ideal check prover
+    // Step 6: Ideal check prover
     // =====================================================================
     group.bench_with_input(
-        BenchmarkId::new("7_ideal_check", &params),
+        BenchmarkId::new("6_ideal_check", &params),
         &num_vars,
         |bench, _| {
             bench.iter_batched(
                 || {
                     // Rebuild transcript to the same state the prover would have
                     let (t, _) = build_transcript_and_field_cfg(
-                        &bp_up_comm.root,
-                        &int_up_comm.root,
-                        &bp_down_comm.root,
-                        &int_down_comm.root,
+                        &bp_comm.root,
+                        &int_comm.root,
                     );
                     t
                 },
@@ -400,19 +368,17 @@ fn run_sha256_bench(group: &mut criterion::BenchmarkGroup<WallTime>, num_vars: u
     );
 
     // =====================================================================
-    // Step 8: Project trace & scalars F[X] → F
+    // Step 7: Project trace & scalars F[X] -> F
     // =====================================================================
     group.bench_with_input(
-        BenchmarkId::new("8_project_to_f", &params),
+        BenchmarkId::new("7_project_to_f", &params),
         &num_vars,
         |bench, _| {
             // We need a projecting element; run the ideal check once to advance
             // the transcript to the right state.
             let (mut t, _) = build_transcript_and_field_cfg(
-                &bp_up_comm.root,
-                &int_up_comm.root,
-                &bp_down_comm.root,
-                &int_down_comm.root,
+                &bp_comm.root,
+                &int_comm.root,
             );
             let _ = Sha256CompressionUair::<INT_LIMBS>::prove_as_subprotocol(
                 &mut t,
@@ -443,18 +409,16 @@ fn run_sha256_bench(group: &mut criterion::BenchmarkGroup<WallTime>, num_vars: u
     );
 
     // =====================================================================
-    // Step 9: Combined polynomial resolver
+    // Step 8: Combined polynomial resolver
     // =====================================================================
     group.bench_with_input(
-        BenchmarkId::new("9_combined_resolver", &params),
+        BenchmarkId::new("8_combined_resolver", &params),
         &num_vars,
         |bench, _| {
             // Run through ideal check once to get ic_prover_state
             let (mut t, _) = build_transcript_and_field_cfg(
-                &bp_up_comm.root,
-                &int_up_comm.root,
-                &bp_down_comm.root,
-                &int_down_comm.root,
+                &bp_comm.root,
+                &int_comm.root,
             );
             let (_, ic_prover_state) =
                 Sha256CompressionUair::<INT_LIMBS>::prove_as_subprotocol(

@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use crate::from_ref::FromRef;
 use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int};
 use num_traits::{CheckedMul, ConstZero};
@@ -92,4 +94,23 @@ pub trait WideningMulByScalar<Lhs, Rhs>: Clone + Default + Send + Sync {
     type Output;
 
     fn mul_by_scalar_widen(lhs: &Lhs, rhs: &Rhs) -> Self::Output;
+}
+
+/// Multiplies `Lhs` by `Rhs` and produces `Output`.
+#[derive(Clone, Copy, Default)]
+pub struct ScalarWideningMulByScalar<Output>(PhantomData<Output>);
+
+impl<Lhs, Rhs, Output> WideningMulByScalar<Lhs, Rhs> for ScalarWideningMulByScalar<Output>
+where
+    Lhs: Copy + Into<Output>,
+    Rhs: Copy + Into<Output>,
+    Output: std::ops::Mul<Output, Output = Output> + Clone + Default + Send + Sync,
+{
+    type Output = Output;
+
+    fn mul_by_scalar_widen(lhs: &Lhs, rhs: &Rhs) -> Self::Output {
+        let lhs_wide: Output = (*lhs).into();
+        let rhs_wide: Output = (*rhs).into();
+        lhs_wide * rhs_wide
+    }
 }
