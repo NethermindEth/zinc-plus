@@ -128,9 +128,10 @@ fn hash_column<S: ConstTranscribable>(values: &[S]) -> MtHash {
 /// Construct the leaves of the Merkle tree by hashing each column across all
 /// rows.
 ///
-/// For each column, serializes all row elements into a contiguous byte buffer
-/// and feeds them to Blake3 in one `update` call (same strategy as
-/// [`hash_column`], but avoids collecting the column into a temporary `Vec`).
+/// For each column, serializes all row elements into a single contiguous byte
+/// buffer and feeds it to Blake3 in one `update` call.  This lets Blake3
+/// process full 1 KiB chunks with SIMD, which is significantly faster than
+/// the per-element `update` approach when columns are tall (many rows).
 fn hash_leaves<S>(rows: &[&[S]], m_cols: usize) -> Vec<MtHash>
 where
     S: ConstTranscribable + Send + Sync,
