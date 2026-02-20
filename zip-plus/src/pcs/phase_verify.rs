@@ -233,7 +233,57 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         Ok(())
     }
 
-    fn verify_proximity_q_0<F>(
+    /// Verify a proof with externally provided field configuration and
+    /// projecting element.
+    ///
+    /// Unlike [`verify`](Self::verify), this method does not sample `field_cfg`
+    /// and `projecting_element` from the PCS transcript. Instead, they are
+    /// provided by the caller. This is needed when a composition layer
+    /// controls the Fiat-Shamir transcript (e.g., in a SNARK that chains
+    /// PIOP and PCS).
+    pub fn verify_in_field<F, const CHECK_FOR_OVERFLOW: bool>(
+        vp: &ZipPlusParams<Zt, Lc>,
+        comm: &ZipPlusCommitment,
+        point_f: &[F],
+        eval_f: &F,
+        projecting_element: F,
+        proof: &ZipPlusProof,
+        field_cfg: &F::Config,
+    ) -> Result<(), ZipError>
+    where
+        F: FromPrimitiveWithConfig + FromRef<F> + for<'a> MulByScalar<&'a F>,
+        F::Inner: FromRef<Zt::Fmod> + Transcribable,
+        Zt::Cw: ProjectableToField<F>,
+    {
+        if point_f.len() != vp.num_vars {
+            return Err(ZipError::InvalidPcsParam(format!(
+                "verify_in_field: point has {} variables, expected {}",
+                point_f.len(),
+                vp.num_vars
+            )));
+        }
+
+        let mut transcript: PcsTranscript = proof.clone().into();
+
+        let columns_opened =
+            Self::verify_testing::<CHECK_FOR_OVERFLOW>(vp, &comm.root, &mut transcript)?;
+
+        // Use externally provided field_cfg and projecting_element
+        // instead of sampling them from the PCS transcript.
+        Self::verify_evaluation(
+            vp,
+            point_f,
+            eval_f,
+            &columns_opened,
+            &mut transcript,
+            projecting_element,
+            field_cfg,
+        )?;
+
+        Ok(())
+    }
+
+    pub(crate) fn verify_proximity_q_0<F>(
         q_0: &[F],
         encoded_q_0_combined_row: &[F],
         column_entries: &[Zt::Cw],

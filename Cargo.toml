@@ -1,5 +1,5 @@
 [workspace]
-members = ["piop", "poly", "primality", "test-uair", "transcript", "uair", "utils", "zip-plus"]
+members = ["piop", "poly", "primality", "snark", "test-uair", "transcript", "uair", "utils", "zip-plus"]
 resolver = "2"
 default-members = ["piop", "poly", "primality", "transcript", "utils", "zip-plus"]
 

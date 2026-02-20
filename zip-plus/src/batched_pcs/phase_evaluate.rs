@@ -63,8 +63,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
             validate_input::<Zt, Lc, _>(
                 "batched_evaluate",
                 pp.num_vars,
-                pp.num_rows,
-                pp.linear_code.row_len(),
                 &[poly],
                 &[point],
             )?;
@@ -114,6 +112,75 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
                 &q_0_combined_row,
                 &q_1,
                 F::zero_with_cfg(&field_cfg),
+            )?;
+
+            evals_f.push(eval_f);
+        }
+
+        Ok((evals_f, transcript.into()))
+    }
+
+    /// Like [`evaluate`](Self::evaluate), but operates entirely in the field.
+    ///
+    /// The caller supplies the field configuration and projecting element that
+    /// were already derived from the transcript (e.g. by the SNARK layer
+    /// before running the ideal-check subprotocol).
+    ///
+    /// # Parameters
+    /// - `pp`: Public parameters shared across all polynomials.
+    /// - `polys`: Slice of multilinear polynomials in the batch.
+    /// - `point_f`: The shared evaluation point already in the field.
+    /// - `projecting_element`: The element used to project evaluations to `F`.
+    /// - `test_transcript`: The transcript from the testing phase.
+    /// - `field_cfg`: The field configuration.
+    pub fn evaluate_in_field<F>(
+        pp: &BatchedZipPlusParams<Zt, Lc>,
+        polys: &[DenseMultilinearExtension<Zt::Eval>],
+        point_f: &[F],
+        projecting_element: &F,
+        test_transcript: BatchedZipPlusTestTranscript,
+        field_cfg: &F::Config,
+    ) -> Result<(Vec<F>, BatchedZipPlusProof), ZipError>
+    where
+        F: PrimeField + for<'a> MulByScalar<&'a F> + FromRef<F>,
+        F::Inner: FromRef<Zt::Fmod> + Transcribable,
+        Zt::Eval: ProjectableToField<F>,
+    {
+        assert!(!polys.is_empty(), "Batch must contain at least one polynomial");
+
+        let mut transcript: PcsTranscript = test_transcript.into();
+
+        let num_rows = pp.num_rows;
+        let row_len = pp.linear_code.row_len();
+
+        let (q_0, q_1) = point_to_tensor(num_rows, point_f, field_cfg)?;
+
+        let project = Zt::Eval::prepare_projection(projecting_element);
+
+        let mut evals_f = Vec::with_capacity(polys.len());
+
+        for poly in polys {
+            let evaluations: Vec<F> = cfg_iter!(poly).map(&project).collect();
+
+            let q_0_combined_row = if num_rows > 1 {
+                combine_rows!(
+                    UNCHECKED,
+                    q_0.as_slice(),
+                    evaluations.iter(),
+                    Ok::<_, ZipError>,
+                    row_len,
+                    F::zero_with_cfg(field_cfg)
+                )
+            } else {
+                evaluations
+            };
+
+            transcript.write_field_elements(&q_0_combined_row)?;
+
+            let eval_f = MBSInnerProduct::inner_product::<UNCHECKED>(
+                &q_0_combined_row,
+                &q_1,
+                F::zero_with_cfg(field_cfg),
             )?;
 
             evals_f.push(eval_f);

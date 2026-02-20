@@ -92,6 +92,60 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
         Ok(())
     }
 
+    /// Like [`verify`](Self::verify), but operates entirely in the field.
+    ///
+    /// The caller supplies the field configuration and projecting element
+    /// that were already derived from the transcript (e.g. by the SNARK
+    /// verifier before running the ideal-check subprotocol).
+    ///
+    /// Unlike [`verify`], this method also verifies the evaluation phase.
+    pub fn verify_in_field<F, const CHECK_FOR_OVERFLOW: bool>(
+        vp: &BatchedZipPlusParams<Zt, Lc>,
+        comm: &BatchedZipPlusCommitment,
+        point_f: &[F],
+        evals_f: &[F],
+        projecting_element: F,
+        proof: &BatchedZipPlusProof,
+        field_cfg: &F::Config,
+    ) -> Result<(), ZipError>
+    where
+        F: FromPrimitiveWithConfig
+            + FromRef<F>
+            + for<'a> FromWithConfig<&'a Zt::Chal>
+            + for<'a> MulByScalar<&'a F>,
+        F::Inner: FromRef<Zt::Fmod> + Transcribable,
+        Zt::Cw: ProjectableToField<F>,
+    {
+        let batch_size = comm.batch_size;
+        assert_eq!(
+            evals_f.len(),
+            batch_size,
+            "Number of evaluations must match batch size"
+        );
+
+        let mut transcript: PcsTranscript = proof.clone().into();
+
+        let columns_opened = Self::verify_testing::<CHECK_FOR_OVERFLOW>(
+            vp,
+            &comm.root,
+            batch_size,
+            &mut transcript,
+        )?;
+
+        Self::verify_evaluation(
+            vp,
+            point_f,
+            evals_f,
+            batch_size,
+            &columns_opened,
+            &mut transcript,
+            projecting_element,
+            field_cfg,
+        )?;
+
+        Ok(())
+    }
+
     /// Verifies the testing phase of a batched proof.
     ///
     /// Batching: per-polynomial alpha challenges project each polynomial's
@@ -253,7 +307,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
     }
 
     /// Verifies the evaluation phase for a batched proof.
-    #[allow(clippy::too_many_arguments, dead_code)]
+    #[allow(clippy::too_many_arguments)]
     fn verify_evaluation<F>(
         vp: &BatchedZipPlusParams<Zt, Lc>,
         point_f: &[F],

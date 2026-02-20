@@ -56,8 +56,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
             validate_input::<Zt, Lc, bool>(
                 "batched_test",
                 pp.num_vars,
-                pp.num_rows,
-                pp.linear_code.row_len(),
                 &[poly],
                 &[],
             )?;

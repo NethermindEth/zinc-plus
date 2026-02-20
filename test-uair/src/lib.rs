@@ -1,5 +1,6 @@
 #![allow(clippy::arithmetic_side_effects)] // UAIRs should not care about overflows
 mod generate_witness;
+pub mod sha256_compression;
 
 use std::marker::PhantomData;
 

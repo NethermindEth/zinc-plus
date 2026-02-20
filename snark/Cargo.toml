@@ -1,0 +1,46 @@
+[package]
+name = "zinc-snark"
+publish = false
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+crypto-primitives = { workspace = true }
+itertools = { workspace = true }
+num-traits = { workspace = true }
+rayon = { workspace = true, optional = true }
+thiserror = { workspace = true }
+zinc-piop = { path = "../piop/" }
+zinc-poly = { workspace = true }
+zinc-primality = { workspace = true }
+zinc-test-uair = { workspace = true }
+zinc-transcript = { workspace = true }
+zinc-uair = { workspace = true }
+zinc-utils = { workspace = true }
+zip-plus = { path = "../zip-plus/" }
+
+[dev-dependencies]
+criterion = { workspace = true }
+crypto-bigint = { workspace = true }
+rand = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+parallel = [
+    "dep:rayon",
+    "zinc-piop/parallel",
+    "zinc-poly/parallel",
+    "zinc-utils/parallel",
+    "zip-plus/parallel",
+]
+
+[[bench]]
+name = "sha256_snark"
+harness = false
