@@ -52,7 +52,7 @@ CARGO_BENCH_CMD = [
 EXPECTED_POLY_EXPS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19]
 
 # Number of polynomials in the batch (must match the batch_size in benchmarks).
-BATCH_SIZE = 8
+BATCH_SIZE = 5
 
 # The five phases we benchmark
 PHASES = ["Encode", "Merkle", "Commit", "Test", "Verify"]
