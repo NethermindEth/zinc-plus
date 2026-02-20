@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
 Benchmark the full PCS pipeline (Encode, Merkle, Commit, Test, Verify) for
-**Batched** Zip+ with BPoly<31> evaluations and num_rows=1.
+**Batched** Zip+ with BPoly<31> evaluations and num_rows=2.
 
-This script runs the "Batched PCS Pipeline Suite BPoly31 1row" criterion benchmarks
+This script runs the "Batched PCS Pipeline Suite BPoly31 2row" criterion benchmarks
 and collects the results into a LaTeX table.  The benchmarks batch 5
 polynomials into a single shared Merkle tree, using various IPRS codes.
 
     poly_size (2^P)   Config               Field           row_len
     ───────────────   ──────               ─────           ───────
-    2^9  = 512        R4B64 D=1 (rate 1/4) F65537          512
-    2^10 = 1024       R4B16 D=2 (rate 1/4) F65537          1024
-    2^11 = 2048       R4B32 D=2 (rate 1/4) F65537          2048
+    2^9  = 512        R4B32 D=1 (rate 1/4) F65537          256
+    2^10 = 1024       R4B64 D=1 (rate 1/4) F65537          512
+    2^11 = 2048       R4B16 D=2 (rate 1/4) F65537          1024
 
 Usage:
     python3 scripts/bench_batched_pcs_pipeline.py
@@ -27,7 +27,7 @@ import sys
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-BENCH_FILTER = "Batched PCS Pipeline Suite BPoly31 1row/.* poly_size=2\\^(9|10|11) "
+BENCH_FILTER = "Batched PCS Pipeline Suite BPoly31 2row/.* poly_size=2\\^(9|10|11) "
 CARGO_BENCH_CMD = [
     "cargo", "bench",
     "--bench", "batched_zip_plus_benches",
@@ -35,8 +35,8 @@ CARGO_BENCH_CMD = [
     "--", BENCH_FILTER,
 ]
 
-# Expected polynomial size exponents for num_rows=1 benchmarks.
-# With num_rows=1, poly_size must equal row_len.
+# Expected polynomial size exponents for num_rows=2 benchmarks.
+# With num_rows=2, row_len = poly_size / 2.
 # Different fields support different row lengths.
 EXPECTED_POLY_EXPS = [9, 10, 11]
 
@@ -47,11 +47,11 @@ BATCH_SIZE = 5
 PHASES = ["Encode", "Merkle", "Commit", "Test", "Verify"]
 
 # Map poly exponent → (num_rows, config description, field)
-# With num_rows=1, poly_size = row_len
+# With num_rows=2, row_len = poly_size / 2
 POLY_EXP_CONFIG = {
-    9:  (1, "R4B64 D=1", "F65537"),     # row_len=512
-    10: (1, "R4B16 D=2", "F65537"),     # row_len=1024
-    11: (1, "R4B32 D=2", "F65537"),     # row_len=2048
+    9:  (2, "R4B32 D=1", "F65537"),     # row_len=256
+    10: (2, "R4B64 D=1", "F65537"),     # row_len=512
+    11: (2, "R4B16 D=2", "F65537"),     # row_len=1024
 }
 
 # Map field name to LaTeX representation
@@ -69,11 +69,11 @@ def field_for_poly_exp(p: int) -> str:
 # ── Parsing ────────────────────────────────────────────────────────────────────
 
 # Matches benchmark name lines like:
-#   Encode poly_size=2^4 num_rows=1
-#   Merkle poly_size=2^4 num_rows=1
-#   Commit poly_size=2^4 num_rows=1
-#   Test poly_size=2^5 num_rows=1
-#   Verify poly_size=2^6 num_rows=1
+#   Encode poly_size=2^4 num_rows=2
+#   Merkle poly_size=2^4 num_rows=2
+#   Commit poly_size=2^4 num_rows=2
+#   Test poly_size=2^5 num_rows=2
+#   Verify poly_size=2^6 num_rows=2
 _RE_PHASE_NAME = re.compile(
     r"(?P<phase>Encode|Merkle|Commit|Test|Verify)\s+poly_size=2\^(?P<exp>\d+)"
 )
@@ -157,8 +157,8 @@ def generate_latex_table(
     lines = [
         r"\begin{table}[ht]",
         r"\centering",
-        r"\caption{Batched PCS pipeline benchmark (batch=" + str(BATCH_SIZE) + r") for BPoly\textlangle 31\textrangle{} with IPRS num\_rows=1 (parallel+asm+simd).}",
-        r"\label{tab:batched-pcs-pipeline-suite-bpoly31-1row}",
+        r"\caption{Batched PCS pipeline benchmark (batch=" + str(BATCH_SIZE) + r") for BPoly\textlangle 31\textrangle{} with IPRS num\_rows=2 (parallel+asm+simd).}",
+        r"\label{tab:batched-pcs-pipeline-suite-bpoly31-2row}",
         r"\begin{tabular}{r r l r r r r r}",
         r"\toprule",
         (
@@ -170,7 +170,7 @@ def generate_latex_table(
 
     for poly_exp in EXPECTED_POLY_EXPS:
         num_rows, _config, _field = POLY_EXP_CONFIG[poly_exp]
-        row_len = 1 << poly_exp  # With num_rows=1, row_len = poly_size
+        row_len = (1 << poly_exp) // num_rows  # With num_rows=2, row_len = poly_size / 2
         field = field_for_poly_exp(poly_exp)
 
         phase_strs = []
@@ -270,7 +270,7 @@ def main():
         results.items(), key=lambda x: (x[0][0], x[0][1])
     ):
         print(
-            f"  {phase:>8}  2^{poly_exp:<2} (num_rows=1)  "
+            f"  {phase:>8}  2^{poly_exp:<2} (num_rows=2)  "
             f"{_format_time(lo):>20} .. {_format_time(med):>20} .. {_format_time(hi):>20}"
         )
 
