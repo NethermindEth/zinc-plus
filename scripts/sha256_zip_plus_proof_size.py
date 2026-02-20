@@ -23,7 +23,7 @@ Usage:
 
 import argparse
 
-BASE_FIELD_SIZE = 12
+BASE_FIELD_SIZE = 16
 
 
 def depth_for_exp(exp: int) -> int:
@@ -85,11 +85,11 @@ def fmt_size(bits: int) -> str:
 
 
 COMPONENTS = [
-    {"label": "A", "n_pol": 0, "flat_vec_norm": 133, "degree": 32},
+    {"label": "A", "n_pol": 5, "flat_vec_norm": 133, "degree": 32},
     {"label": "B", "n_pol": 24,  "flat_vec_norm": 150, "degree": 1},
 ]
 
-QUERY_COUNTS = [96,142] #[96, 100, 142, 148, 192, 200, 232, 240] # 96 and 142 correspond to 96 bits of security like Binius
+QUERY_COUNTS = [100,142] #[96, 100, 142, 148, 192, 200, 232, 240] # 96 and 142 correspond to 96 bits of security like Binius
 
 def main():
     parser = argparse.ArgumentParser(description="SHA-256 Zip+ combined proof size")

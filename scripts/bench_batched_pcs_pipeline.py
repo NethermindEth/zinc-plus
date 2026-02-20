@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
 """
 Benchmark the full PCS pipeline (Encode, Merkle, Commit, Test, Verify) for
-**Batched** Zip+ with BPoly<31> evaluations and num_rows=1.
+**Batched** Zip+ with BPoly<31> evaluations and num_rows=2.
 
-This script runs the "Batched PCS Pipeline Suite BPoly31 1row" criterion benchmarks
+This script runs the "Batched PCS Pipeline Suite BPoly31 2row" criterion benchmarks
 and collects the results into a LaTeX table.  The benchmarks batch 5
 polynomials into a single shared Merkle tree, using various IPRS codes.
 
     poly_size (2^P)   Config               Field           row_len
     ───────────────   ──────               ─────           ───────
-    2^4  = 16         R4B2 D=1 (rate 1/4)  F3329           16
-    2^5  = 32         R4B4 D=1 (rate 1/4)  F3329           32
-    2^6  = 64         R4B8 D=1 (rate 1/4)  F3329           64
-    2^7  = 128        R4B16 D=1 (rate 1/4) F65537          128
-    2^8  = 256        R4B32 D=1 (rate 1/4) F65537          256
-    2^9  = 512        R4B64 D=1 (rate 1/4) F65537          512
-    2^10 = 1024       R4B16 D=2 (rate 1/4) F65537          1024
-    2^11 = 2048       R4B32 D=2 (rate 1/4) F65537          2048
-    2^12 = 4096       R4B64 D=2 (rate 1/4) F65537          4096
-    2^13 = 8192       R4B16 D=3 (rate 1/4) F65537          8192
-    2^14 = 16384      B32 D=3 (rate 1/2)   F65537          16384
-    2^16 = 65536      B16 D=4 (rate 1/2)   F1179649        65536
-    2^17 = 131072     B32 D=4 (rate 1/2)   F167772161      131072
-    2^18 = 262144     B64 D=4 (rate 1/2)   F167772161      262144
+    2^5  = 32         R4B2 D=1 (rate 1/4)  F3329           16
+    2^6  = 64         R4B4 D=1 (rate 1/4)  F3329           32
+    2^7  = 128        R4B8 D=1 (rate 1/4)  F3329           64
+    2^8  = 256        R4B16 D=1 (rate 1/4) F65537          128
+    2^9  = 512        R4B32 D=1 (rate 1/4) F65537          256
+    2^10 = 1024       R4B64 D=1 (rate 1/4) F65537          512
+    2^11 = 2048       R4B16 D=2 (rate 1/4) F65537          1024
+    2^12 = 4096       R4B32 D=2 (rate 1/4) F65537          2048
+    2^13 = 8192       R4B64 D=2 (rate 1/4) F65537          4096
+    2^14 = 16384      R4B16 D=3 (rate 1/4) F65537          8192
+    2^15 = 32768      B32 D=3 (rate 1/2)   F65537          16384
+    2^17 = 131072     B16 D=4 (rate 1/2)   F1179649        65536
+    2^18 = 262144     B32 D=4 (rate 1/2)   F167772161      131072
+    2^19 = 524288     B64 D=4 (rate 1/2)   F167772161      262144
 
 Usage:
     python3 scripts/bench_batched_pcs_pipeline.py
@@ -38,7 +38,7 @@ import sys
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-BENCH_FILTER = "Batched PCS Pipeline Suite BPoly31 1row"
+BENCH_FILTER = "Batched PCS Pipeline Suite BPoly31 2row"
 CARGO_BENCH_CMD = [
     "cargo", "bench",
     "--bench", "batched_zip_plus_benches",
@@ -46,34 +46,34 @@ CARGO_BENCH_CMD = [
     "--", BENCH_FILTER,
 ]
 
-# Expected polynomial size exponents for num_rows=1 benchmarks.
-# With num_rows=1, poly_size must equal row_len.
+# Expected polynomial size exponents for num_rows=2 benchmarks.
+# With num_rows=2, poly_size = 2 * row_len.
 # Different fields support different row lengths.
-EXPECTED_POLY_EXPS = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18]
+EXPECTED_POLY_EXPS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19]
 
 # Number of polynomials in the batch (must match the batch_size in benchmarks).
-BATCH_SIZE = 5
+BATCH_SIZE = 8
 
 # The five phases we benchmark
 PHASES = ["Encode", "Merkle", "Commit", "Test", "Verify"]
 
 # Map poly exponent → (num_rows, config description, field)
-# With num_rows=1, poly_size = row_len
+# With num_rows=2, poly_size = 2 * row_len
 POLY_EXP_CONFIG = {
-    4:  (1, "R4B2 D=1",  "F3329"),      # row_len=16
-    5:  (1, "R4B4 D=1",  "F3329"),      # row_len=32
-    6:  (1, "R4B8 D=1",  "F3329"),      # row_len=64
-    7:  (1, "R4B16 D=1", "F65537"),     # row_len=128
-    8:  (1, "R4B32 D=1", "F65537"),     # row_len=256
-    9:  (1, "R4B64 D=1", "F65537"),     # row_len=512
-    10: (1, "R4B16 D=2", "F65537"),     # row_len=1024
-    11: (1, "R4B32 D=2", "F65537"),     # row_len=2048
-    12: (1, "R4B64 D=2", "F65537"),     # row_len=4096
-    13: (1, "R4B16 D=3", "F65537"),     # row_len=8192
-    14: (1, "B32 D=3",   "F65537"),     # row_len=16384
-    16: (1, "B16 D=4",   "F1179649"),   # row_len=65536
-    17: (1, "B32 D=4",   "F167772161"), # row_len=131072
-    18: (1, "B64 D=4",   "F167772161"), # row_len=262144
+    5:  (2, "R4B2 D=1",  "F3329"),      # row_len=16
+    6:  (2, "R4B4 D=1",  "F3329"),      # row_len=32
+    7:  (2, "R4B8 D=1",  "F3329"),      # row_len=64
+    8:  (2, "R4B16 D=1", "F65537"),     # row_len=128
+    9:  (2, "R4B32 D=1", "F65537"),     # row_len=256
+    10: (2, "R4B64 D=1", "F65537"),     # row_len=512
+    11: (2, "R4B16 D=2", "F65537"),     # row_len=1024
+    12: (2, "R4B32 D=2", "F65537"),     # row_len=2048
+    13: (2, "R4B64 D=2", "F65537"),     # row_len=4096
+    14: (2, "R4B16 D=3", "F65537"),     # row_len=8192
+    15: (2, "B32 D=3",   "F65537"),     # row_len=16384
+    17: (2, "B16 D=4",   "F1179649"),   # row_len=65536
+    18: (2, "B32 D=4",   "F167772161"), # row_len=131072
+    19: (2, "B64 D=4",   "F167772161"), # row_len=262144
 }
 
 # Map field name to LaTeX representation
@@ -87,7 +87,7 @@ FIELD_LATEX = {
 
 def field_for_poly_exp(p: int) -> str:
     """Map polynomial size exponent to the field label."""
-    _, _, field = POLY_EXP_CONFIG.get(p, (1, "", "F3329"))
+    _, _, field = POLY_EXP_CONFIG.get(p, (2, "", "F3329"))
     return FIELD_LATEX.get(field, r"$\mathbb{F}$")
 
 
@@ -182,8 +182,8 @@ def generate_latex_table(
     lines = [
         r"\begin{table}[ht]",
         r"\centering",
-        r"\caption{Batched PCS pipeline benchmark (batch=" + str(BATCH_SIZE) + r") for BPoly\textlangle 31\textrangle{} with IPRS num\_rows=1 (parallel+asm+simd).}",
-        r"\label{tab:batched-pcs-pipeline-suite-bpoly31-1row}",
+        r"\caption{Batched PCS pipeline benchmark (batch=" + str(BATCH_SIZE) + r") for BPoly\textlangle 31\textrangle{} with IPRS num\_rows=2 (parallel+asm+simd).}",
+        r"\label{tab:batched-pcs-pipeline-suite-bpoly31-2row}",
         r"\begin{tabular}{r r l r r r r r}",
         r"\toprule",
         (
@@ -195,7 +195,7 @@ def generate_latex_table(
 
     for poly_exp in EXPECTED_POLY_EXPS:
         num_rows, _config, _field = POLY_EXP_CONFIG[poly_exp]
-        row_len = 1 << poly_exp  # With num_rows=1, row_len = poly_size
+        row_len = (1 << poly_exp) // num_rows  # With num_rows=2, row_len = poly_size / 2
         field = field_for_poly_exp(poly_exp)
 
         phase_strs = []
@@ -295,7 +295,7 @@ def main():
         results.items(), key=lambda x: (x[0][0], x[0][1])
     ):
         print(
-            f"  {phase:>8}  2^{poly_exp:<2} (num_rows=1)  "
+            f"  {phase:>8}  2^{poly_exp:<2} (num_rows=2)  "
             f"{_format_time(lo):>20} .. {_format_time(med):>20} .. {_format_time(hi):>20}"
         )
 

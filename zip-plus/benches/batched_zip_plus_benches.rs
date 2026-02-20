@@ -336,159 +336,159 @@ fn batched_pcs_pipeline_suite_scalar_1row(c: &mut Criterion) {
     group.finish();
 }
 
-/// Batched PCS pipeline suite for BPoly<31>, various IPRS codes, num_rows=1.
+/// Batched PCS pipeline suite for BPoly<31>, various IPRS codes, num_rows=2.
 /// Mirrors the "PCS Pipeline Suite BPoly31 1row" configs but uses BatchedZipPlus
-/// with 5 polynomials sharing a single Merkle tree.
+/// with 5 polynomials sharing a single Merkle tree, and num_rows=2.
 ///
-/// poly_size (2^P)   Config                 Field        row_len
-/// ───────────────   ──────                 ─────        ───────
-/// 2^4  = 16         R4B2 D=1 (rate 1/4)    F3329        16
-/// 2^5  = 32         R4B4 D=1 (rate 1/4)    F3329        32
-/// 2^6  = 64         R4B8 D=1 (rate 1/4)    F3329        64
-/// 2^7  = 128        R4B16 D=1 (rate 1/4)   F65537       128
-/// 2^8  = 256        R4B32 D=1 (rate 1/4)   F65537       256
-/// 2^9  = 512        R4B64 D=1 (rate 1/4)   F65537       512
-/// 2^10 = 1024       R4B16 D=2 (rate 1/4)   F65537       1024
-/// 2^11 = 2048       R4B32 D=2 (rate 1/4)   F65537       2048
-/// 2^12 = 4096       R4B64 D=2 (rate 1/4)   F65537       4096
-/// 2^13 = 8192       R4B16 D=3 (rate 1/4)   F65537       8192
-/// 2^14 = 16384      B32 D=3 (rate 1/2)     F65537       16384
-/// 2^16 = 65536      B16 D=4 (rate 1/2)     F1179649     65536
-/// 2^17 = 131072     B32 D=4 (rate 1/2)     F167772161   131072
-/// 2^18 = 262144     B64 D=4 (rate 1/2)     F167772161   262144
-fn batched_pcs_pipeline_suite_bpoly31_1row(c: &mut Criterion) {
+/// poly_size (2^P)   Config                 Field        row_len     num_rows
+/// ───────────────   ──────                 ─────        ───────     ────────
+/// 2^5  = 32         R4B2 D=1 (rate 1/4)    F3329        16          2
+/// 2^6  = 64         R4B4 D=1 (rate 1/4)    F3329        32          2
+/// 2^7  = 128        R4B8 D=1 (rate 1/4)    F3329        64          2
+/// 2^8  = 256        R4B16 D=1 (rate 1/4)   F65537       128         2
+/// 2^9  = 512        R4B32 D=1 (rate 1/4)   F65537       256         2
+/// 2^10 = 1024       R4B64 D=1 (rate 1/4)   F65537       512         2
+/// 2^11 = 2048       R4B16 D=2 (rate 1/4)   F65537       1024        2
+/// 2^12 = 4096       R4B32 D=2 (rate 1/4)   F65537       2048        2
+/// 2^13 = 8192       R4B64 D=2 (rate 1/4)   F65537       4096        2
+/// 2^14 = 16384      R4B16 D=3 (rate 1/4)   F65537       8192        2
+/// 2^15 = 32768      B32 D=3 (rate 1/2)     F65537       16384       2
+/// 2^17 = 131072     B16 D=4 (rate 1/2)     F1179649     65536       2
+/// 2^18 = 262144     B32 D=4 (rate 1/2)     F167772161   131072      2
+/// 2^19 = 524288     B64 D=4 (rate 1/2)     F167772161   262144      2
+fn batched_pcs_pipeline_suite_bpoly31_2row(c: &mut Criterion) {
     use zip_common::*;
 
-    let mut group = c.benchmark_group("Batched PCS Pipeline Suite BPoly31 1row");
+    let mut group = c.benchmark_group("Batched PCS Pipeline Suite BPoly31 2row");
     group.sample_size(10);
 
     // ── Encode ───────────────────────────────────────────────────────
-    // F3329 rate 1/4: small row lengths (P=4,5,6)
-    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B2<i64, 1, 32, UNCHECKED>, 4>(&mut group, 1, 5);
-    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B4<i64, 1, 32, UNCHECKED>, 5>(&mut group, 1, 5);
-    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B8<i64, 1, 32, UNCHECKED>, 6>(&mut group, 1, 5);
+    // F3329 rate 1/4: small row lengths (P=5,6,7)
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B2<i64, 1, 32, UNCHECKED>, 5>(&mut group, 2, 5);
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B4<i64, 1, 32, UNCHECKED>, 6>(&mut group, 2, 5);
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B8<i64, 1, 32, UNCHECKED>, 7>(&mut group, 2, 5);
 
-    // F65537 rate 1/4: medium row lengths (P=7..13)
-    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 1, 32, UNCHECKED>,  7>(&mut group, 1, 5);
-    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 1, 32, UNCHECKED>,  8>(&mut group, 1, 5);
-    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>,  9>(&mut group, 1, 5);
-    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, 10>(&mut group, 1, 5);
-    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 2, 32, UNCHECKED>, 11>(&mut group, 1, 5);
-    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 2, 32, UNCHECKED>, 12>(&mut group, 1, 5);
-    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 3, 32, UNCHECKED>, 13>(&mut group, 1, 5);
+    // F65537 rate 1/4: medium row lengths (P=8..14)
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 1, 32, UNCHECKED>,  8>(&mut group, 2, 5);
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 1, 32, UNCHECKED>,  9>(&mut group, 2, 5);
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>, 10>(&mut group, 2, 5);
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, 11>(&mut group, 2, 5);
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 2, 32, UNCHECKED>, 12>(&mut group, 2, 5);
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 2, 32, UNCHECKED>, 13>(&mut group, 2, 5);
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 3, 32, UNCHECKED>, 14>(&mut group, 2, 5);
 
-    // F65537 rate 1/2 (P=14)
-    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyB32<i64, 3, 32, UNCHECKED>, 14>(&mut group, 1, 5);
+    // F65537 rate 1/2 (P=15)
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyB32<i64, 3, 32, UNCHECKED>, 15>(&mut group, 2, 5);
 
-    // F1179649: larger row lengths (P=16)
-    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyMidB16<i64, 4, 32, UNCHECKED>, 16>(&mut group, 1, 5);
+    // F1179649: larger row lengths (P=17)
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyMidB16<i64, 4, 32, UNCHECKED>, 17>(&mut group, 2, 5);
 
-    // F167772161: largest row lengths (P=17,18)
-    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB32<i64, 4, 32, UNCHECKED>, 17>(&mut group, 1, 5);
-    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB64<i64, 4, 32, UNCHECKED>, 18>(&mut group, 1, 5);
+    // F167772161: largest row lengths (P=18,19)
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB32<i64, 4, 32, UNCHECKED>, 18>(&mut group, 2, 5);
+    batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB64<i64, 4, 32, UNCHECKED>, 19>(&mut group, 2, 5);
 
     // ── Merkle ───────────────────────────────────────────────────────
-    // F3329 rate 1/4: small row lengths (P=4,5,6)
-    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B2<i64, 1, 32, UNCHECKED>, 4>(&mut group, 1, 5);
-    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B4<i64, 1, 32, UNCHECKED>, 5>(&mut group, 1, 5);
-    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B8<i64, 1, 32, UNCHECKED>, 6>(&mut group, 1, 5);
+    // F3329 rate 1/4: small row lengths (P=5,6,7)
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B2<i64, 1, 32, UNCHECKED>, 5>(&mut group, 2, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B4<i64, 1, 32, UNCHECKED>, 6>(&mut group, 2, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B8<i64, 1, 32, UNCHECKED>, 7>(&mut group, 2, 5);
 
     // F65537 rate 1/4
-    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 1, 32, UNCHECKED>,  7>(&mut group, 1, 5);
-    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 1, 32, UNCHECKED>,  8>(&mut group, 1, 5);
-    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>,  9>(&mut group, 1, 5);
-    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, 10>(&mut group, 1, 5);
-    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 2, 32, UNCHECKED>, 11>(&mut group, 1, 5);
-    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 2, 32, UNCHECKED>, 12>(&mut group, 1, 5);
-    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 3, 32, UNCHECKED>, 13>(&mut group, 1, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 1, 32, UNCHECKED>,  8>(&mut group, 2, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 1, 32, UNCHECKED>,  9>(&mut group, 2, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>, 10>(&mut group, 2, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, 11>(&mut group, 2, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 2, 32, UNCHECKED>, 12>(&mut group, 2, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 2, 32, UNCHECKED>, 13>(&mut group, 2, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 3, 32, UNCHECKED>, 14>(&mut group, 2, 5);
 
     // F65537 rate 1/2
-    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyB32<i64, 3, 32, UNCHECKED>, 14>(&mut group, 1, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyB32<i64, 3, 32, UNCHECKED>, 15>(&mut group, 2, 5);
 
     // F1179649
-    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyMidB16<i64, 4, 32, UNCHECKED>, 16>(&mut group, 1, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyMidB16<i64, 4, 32, UNCHECKED>, 17>(&mut group, 2, 5);
 
     // F167772161
-    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB32<i64, 4, 32, UNCHECKED>, 17>(&mut group, 1, 5);
-    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB64<i64, 4, 32, UNCHECKED>, 18>(&mut group, 1, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB32<i64, 4, 32, UNCHECKED>, 18>(&mut group, 2, 5);
+    batched_merkle_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB64<i64, 4, 32, UNCHECKED>, 19>(&mut group, 2, 5);
 
     // ── Commit ───────────────────────────────────────────────────────
     // F3329 rate 1/4
-    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B2<i64, 1, 32, UNCHECKED>, 4>(&mut group, 1, 5);
-    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B4<i64, 1, 32, UNCHECKED>, 5>(&mut group, 1, 5);
-    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B8<i64, 1, 32, UNCHECKED>, 6>(&mut group, 1, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B2<i64, 1, 32, UNCHECKED>, 5>(&mut group, 2, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B4<i64, 1, 32, UNCHECKED>, 6>(&mut group, 2, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B8<i64, 1, 32, UNCHECKED>, 7>(&mut group, 2, 5);
 
     // F65537 rate 1/4
-    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 1, 32, UNCHECKED>,  7>(&mut group, 1, 5);
-    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 1, 32, UNCHECKED>,  8>(&mut group, 1, 5);
-    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>,  9>(&mut group, 1, 5);
-    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, 10>(&mut group, 1, 5);
-    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 2, 32, UNCHECKED>, 11>(&mut group, 1, 5);
-    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 2, 32, UNCHECKED>, 12>(&mut group, 1, 5);
-    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 3, 32, UNCHECKED>, 13>(&mut group, 1, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 1, 32, UNCHECKED>,  8>(&mut group, 2, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 1, 32, UNCHECKED>,  9>(&mut group, 2, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>, 10>(&mut group, 2, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, 11>(&mut group, 2, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 2, 32, UNCHECKED>, 12>(&mut group, 2, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 2, 32, UNCHECKED>, 13>(&mut group, 2, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 3, 32, UNCHECKED>, 14>(&mut group, 2, 5);
 
     // F65537 rate 1/2
-    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyB32<i64, 3, 32, UNCHECKED>, 14>(&mut group, 1, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyB32<i64, 3, 32, UNCHECKED>, 15>(&mut group, 2, 5);
 
     // F1179649
-    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyMidB16<i64, 4, 32, UNCHECKED>, 16>(&mut group, 1, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyMidB16<i64, 4, 32, UNCHECKED>, 17>(&mut group, 2, 5);
 
     // F167772161
-    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB32<i64, 4, 32, UNCHECKED>, 17>(&mut group, 1, 5);
-    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB64<i64, 4, 32, UNCHECKED>, 18>(&mut group, 1, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB32<i64, 4, 32, UNCHECKED>, 18>(&mut group, 2, 5);
+    batched_commit_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB64<i64, 4, 32, UNCHECKED>, 19>(&mut group, 2, 5);
 
     // ── Test ─────────────────────────────────────────────────────────
     // F3329 rate 1/4
-    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B2<i64, 1, 32, UNCHECKED>, UNCHECKED, 4>(&mut group, 1, 5);
-    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B4<i64, 1, 32, UNCHECKED>, UNCHECKED, 5>(&mut group, 1, 5);
-    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B8<i64, 1, 32, UNCHECKED>, UNCHECKED, 6>(&mut group, 1, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B2<i64, 1, 32, UNCHECKED>, UNCHECKED, 5>(&mut group, 2, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B4<i64, 1, 32, UNCHECKED>, UNCHECKED, 6>(&mut group, 2, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B8<i64, 1, 32, UNCHECKED>, UNCHECKED, 7>(&mut group, 2, 5);
 
     // F65537 rate 1/4
-    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 1, 32, UNCHECKED>, UNCHECKED,  7>(&mut group, 1, 5);
-    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 1, 32, UNCHECKED>, UNCHECKED,  8>(&mut group, 1, 5);
-    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>, UNCHECKED,  9>(&mut group, 1, 5);
-    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, UNCHECKED, 10>(&mut group, 1, 5);
-    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 2, 32, UNCHECKED>, UNCHECKED, 11>(&mut group, 1, 5);
-    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 2, 32, UNCHECKED>, UNCHECKED, 12>(&mut group, 1, 5);
-    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 3, 32, UNCHECKED>, UNCHECKED, 13>(&mut group, 1, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 1, 32, UNCHECKED>, UNCHECKED,  8>(&mut group, 2, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 1, 32, UNCHECKED>, UNCHECKED,  9>(&mut group, 2, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>, UNCHECKED, 10>(&mut group, 2, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, UNCHECKED, 11>(&mut group, 2, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 2, 32, UNCHECKED>, UNCHECKED, 12>(&mut group, 2, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 2, 32, UNCHECKED>, UNCHECKED, 13>(&mut group, 2, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 3, 32, UNCHECKED>, UNCHECKED, 14>(&mut group, 2, 5);
 
     // F65537 rate 1/2
-    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyB32<i64, 3, 32, UNCHECKED>, UNCHECKED, 14>(&mut group, 1, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyB32<i64, 3, 32, UNCHECKED>, UNCHECKED, 15>(&mut group, 2, 5);
 
     // F1179649
-    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyMidB16<i64, 4, 32, UNCHECKED>, UNCHECKED, 16>(&mut group, 1, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyMidB16<i64, 4, 32, UNCHECKED>, UNCHECKED, 17>(&mut group, 2, 5);
 
     // F167772161
-    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB32<i64, 4, 32, UNCHECKED>, UNCHECKED, 17>(&mut group, 1, 5);
-    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB64<i64, 4, 32, UNCHECKED>, UNCHECKED, 18>(&mut group, 1, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB32<i64, 4, 32, UNCHECKED>, UNCHECKED, 18>(&mut group, 2, 5);
+    batched_test_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB64<i64, 4, 32, UNCHECKED>, UNCHECKED, 19>(&mut group, 2, 5);
 
     // ── Verify ───────────────────────────────────────────────────────
     // F3329 rate 1/4
-    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B2<i64, 1, 32, UNCHECKED>, UNCHECKED, 4>(&mut group, 1, 5);
-    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B4<i64, 1, 32, UNCHECKED>, UNCHECKED, 5>(&mut group, 1, 5);
-    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B8<i64, 1, 32, UNCHECKED>, UNCHECKED, 6>(&mut group, 1, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B2<i64, 1, 32, UNCHECKED>, UNCHECKED, 5>(&mut group, 2, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B4<i64, 1, 32, UNCHECKED>, UNCHECKED, 6>(&mut group, 2, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolySmallR4B8<i64, 1, 32, UNCHECKED>, UNCHECKED, 7>(&mut group, 2, 5);
 
     // F65537 rate 1/4
-    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 1, 32, UNCHECKED>, UNCHECKED,  7>(&mut group, 1, 5);
-    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 1, 32, UNCHECKED>, UNCHECKED,  8>(&mut group, 1, 5);
-    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>, UNCHECKED,  9>(&mut group, 1, 5);
-    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, UNCHECKED, 10>(&mut group, 1, 5);
-    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 2, 32, UNCHECKED>, UNCHECKED, 11>(&mut group, 1, 5);
-    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 2, 32, UNCHECKED>, UNCHECKED, 12>(&mut group, 1, 5);
-    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 3, 32, UNCHECKED>, UNCHECKED, 13>(&mut group, 1, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 1, 32, UNCHECKED>, UNCHECKED,  8>(&mut group, 2, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 1, 32, UNCHECKED>, UNCHECKED,  9>(&mut group, 2, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>, UNCHECKED, 10>(&mut group, 2, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 2, 32, UNCHECKED>, UNCHECKED, 11>(&mut group, 2, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 2, 32, UNCHECKED>, UNCHECKED, 12>(&mut group, 2, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 2, 32, UNCHECKED>, UNCHECKED, 13>(&mut group, 2, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B16<i64, 3, 32, UNCHECKED>, UNCHECKED, 14>(&mut group, 2, 5);
 
     // F65537 rate 1/2
-    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyB32<i64, 3, 32, UNCHECKED>, UNCHECKED, 14>(&mut group, 1, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyB32<i64, 3, 32, UNCHECKED>, UNCHECKED, 15>(&mut group, 2, 5);
 
     // F1179649
-    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyMidB16<i64, 4, 32, UNCHECKED>, UNCHECKED, 16>(&mut group, 1, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyMidB16<i64, 4, 32, UNCHECKED>, UNCHECKED, 17>(&mut group, 2, 5);
 
     // F167772161
-    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB32<i64, 4, 32, UNCHECKED>, UNCHECKED, 17>(&mut group, 1, 5);
-    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB64<i64, 4, 32, UNCHECKED>, UNCHECKED, 18>(&mut group, 1, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB32<i64, 4, 32, UNCHECKED>, UNCHECKED, 18>(&mut group, 2, 5);
+    batched_verify_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyLargeB64<i64, 4, 32, UNCHECKED>, UNCHECKED, 19>(&mut group, 2, 5);
 
     group.finish();
 }
 
-criterion_group!(benches, batched_pcs_pipeline_suite_scalar_1row, batched_pcs_pipeline_suite_bpoly31_1row);
+criterion_group!(benches, batched_pcs_pipeline_suite_scalar_1row, batched_pcs_pipeline_suite_bpoly31_2row);
 criterion_main!(benches);
