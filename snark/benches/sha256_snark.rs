@@ -7,8 +7,8 @@
 //! matches the batched PCS pipeline table's rate-1/4 configs (F65537):
 //!
 //!   nvars=9  → R4B32 D=1  (poly_size=512,  row_len=256)
-//!   nvars=10 → R4B64 D=1  (poly_size=1024, row_len=512)
-//!   nvars=11 → R4B16 D=2  (poly_size=2048, row_len=1024)
+//!   nvars=10 → R4B16 D=2  (poly_size=1024, row_len=1024)
+//!   nvars=11 → R4B32 D=2  (poly_size=2048, row_len=2048)
 
 #![allow(
     clippy::arithmetic_side_effects,
@@ -60,7 +60,7 @@ use zip_plus::{
         LinearCode,
         iprs::{
             IprsCode,
-            PnttConfigF2_16R4B16, PnttConfigF2_16R4B32, PnttConfigF2_16R4B64,
+            PnttConfigF2_16R4B16, PnttConfigF2_16R4B32,
         },
     },
     merkle::HASH_OUT_LEN,
@@ -125,13 +125,13 @@ impl ZipTypes for IntZt {
 type BpIprs9 = IprsCode<BpZt, PnttConfigF2_16R4B32<1>, BinaryPolyWideningMulByScalar<i64>, true>;
 type IntIprs9 = IprsCode<IntZt, PnttConfigF2_16R4B32<1>, ScalarWideningMulByScalar<i128>, true>;
 
-// nvars=10 → R4B64 D=1 (row_len=512, poly_size=1024)
-type BpIprs10 = IprsCode<BpZt, PnttConfigF2_16R4B64<1>, BinaryPolyWideningMulByScalar<i64>, true>;
-type IntIprs10 = IprsCode<IntZt, PnttConfigF2_16R4B64<1>, ScalarWideningMulByScalar<i128>, true>;
+// nvars=10 → R4B16 D=2 (row_len=1024, poly_size=1024)
+type BpIprs10 = IprsCode<BpZt, PnttConfigF2_16R4B16<2>, BinaryPolyWideningMulByScalar<i64>, true>;
+type IntIprs10 = IprsCode<IntZt, PnttConfigF2_16R4B16<2>, ScalarWideningMulByScalar<i128>, true>;
 
-// nvars=11 → R4B16 D=2 (row_len=1024, poly_size=2048)
-type BpIprs11 = IprsCode<BpZt, PnttConfigF2_16R4B16<2>, BinaryPolyWideningMulByScalar<i64>, true>;
-type IntIprs11 = IprsCode<IntZt, PnttConfigF2_16R4B16<2>, ScalarWideningMulByScalar<i128>, true>;
+// nvars=11 → R4B32 D=2 (row_len=2048, poly_size=2048)
+type BpIprs11 = IprsCode<BpZt, PnttConfigF2_16R4B32<2>, BinaryPolyWideningMulByScalar<i64>, true>;
+type IntIprs11 = IprsCode<IntZt, PnttConfigF2_16R4B32<2>, ScalarWideningMulByScalar<i128>, true>;
 
 // ---------------------------------------------------------------------------
 // Field type
