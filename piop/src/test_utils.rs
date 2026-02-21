@@ -1,19 +1,11 @@
-use std::collections::HashMap;
-
-use crate::{
-    ideal_check::{IdealCheckProtocol, Proof, ProverState},
-    projections::{project_scalars, project_trace_coeffs},
-};
 use crypto_bigint::{Odd, modular::MontyParams};
-use crypto_primitives::{FromWithConfig, crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
-use num_traits::Zero;
-use zinc_poly::{
-    mle::DenseMultilinearExtension,
-    univariate::{dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF},
-};
-use zinc_test_uair::GenerateSingleTypeWitness;
+use crypto_primitives::crypto_bigint_monty::MontyField;
+use zinc_poly::{mle::DenseMultilinearExtension, univariate::binary::BinaryPoly};
+use zinc_test_uair::GenerateWitness;
 use zinc_transcript::traits::Transcript;
-use zinc_uair::{Uair, constraint_counter::count_constraints};
+use zinc_uair::constraint_counter::count_constraints;
+
+use crate::ideal_check::{self, IdealCheckProtocol};
 
 pub const LIMBS: usize = 4;
 
@@ -25,54 +17,29 @@ pub fn test_config() -> MontyParams<LIMBS> {
     MontyParams::new(modulus)
 }
 
-type F = MontyField<4>;
+pub type TestIcField = MontyField<4>;
 
-#[allow(clippy::type_complexity)]
-pub fn run_ideal_check_prover_single_type<U, const DEGREE_PLUS_ONE: usize>(
+pub fn run_ideal_check_prover<U, const DEGREE_PLUS_ONE: usize>(
     num_vars: usize,
-    trace: &[DenseMultilinearExtension<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>],
+    trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
     transcript: &mut impl Transcript,
 ) -> (
-    Proof<F>,
-    ProverState<F>,
-    HashMap<U::Scalar, DynamicPolynomialF<F>>,
-    Vec<DenseMultilinearExtension<DynamicPolynomialF<F>>>,
+    ideal_check::Proof<TestIcField, DEGREE_PLUS_ONE>,
+    ideal_check::ProverState<TestIcField, DEGREE_PLUS_ONE>,
 )
 where
-    U: GenerateSingleTypeWitness<Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
-        + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
-        + IdealCheckProtocol,
-    F: FromWithConfig<Int<5>>,
+    U: GenerateWitness<BinaryPoly<DEGREE_PLUS_ONE>>,
 {
-    assert!(
-        U::signature().binary_poly_cols.is_zero() && U::signature().int_cols.is_zero(),
-        "the signature should be single ttyped"
-    );
-
     let field_cfg = test_config();
 
-    let num_constraints = count_constraints::<U>();
+    let num_constraints = count_constraints::<BinaryPoly<DEGREE_PLUS_ONE>, U>();
 
-    let scalars = project_scalars::<F, U>(|scalar| {
-        scalar
-            .iter()
-            .map(|coeff| F::from_with_cfg(coeff, &field_cfg))
-            .collect()
-    });
-
-    let trace =
-        project_trace_coeffs::<F, Int<5>, Int<5>, DEGREE_PLUS_ONE>(&[], trace, &[], &field_cfg);
-
-    let (proof, state) = U::prove_as_subprotocol(
+    IdealCheckProtocol::<TestIcField, _>::prove_as_subprotocol::<U>(
         transcript,
-        &trace,
-        &scalars,
+        trace,
         num_constraints,
         num_vars,
-        true, // TODO: test both?
         &field_cfg,
     )
-    .unwrap();
-
-    (proof, state, scalars, trace)
+    .unwrap()
 }
