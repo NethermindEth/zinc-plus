@@ -2,37 +2,34 @@
 mod batched_ideal_check;
 mod combined_poly_builder;
 mod structs;
-mod utils;
+
+pub use structs::*;
 
 use batched_ideal_check::*;
+use crypto_primitives::PrimeField;
 use derive_more::From;
 use itertools::Itertools;
+use num_traits::ConstZero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::marker::PhantomData;
-pub use structs::*;
+use std::collections::HashMap;
 use thiserror::Error;
 use zinc_poly::{
     EvaluationError,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF},
+    univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     Uair,
+    degree_counter::count_constraint_degrees,
     ideal::{Ideal, IdealCheck},
     ideal_collector::{IdealOrZero, collect_ideals},
 };
-use zinc_utils::cfg_iter;
-
-use crate::ideal_check::utils::{project_scalars, project_trace_matrix};
-
-pub type Result<T, R, I> = std::result::Result<T, IdealCheckError<R, I>>;
+use zinc_utils::{cfg_iter_mut, inner_transparent_field::InnerTransparentField};
 
 /// Ideal-check subprotocol.
-pub struct IdealCheckProtocol<F: IdealCheckField, const DEGREE_PLUS_ONE: usize>(PhantomData<F>);
-
-impl<F: IdealCheckField, const DEGREE_PLUS_ONE: usize> IdealCheckProtocol<F, DEGREE_PLUS_ONE> {
+pub trait IdealCheckProtocol: Uair {
     /// The prover part of the ideal-check subprotocol.
     ///
     /// The prover samples a random field element
@@ -44,73 +41,30 @@ impl<F: IdealCheckField, const DEGREE_PLUS_ONE: usize> IdealCheckProtocol<F, DEG
     ///
     /// # Parameters
     /// - `transcript`: the Fiat-Shamir transcript.
-    /// - `trace`: the input trace for the UAIR `U`.
+    /// - `trace`: the input trace for the UAIR `U` projected to
+    ///   `DynamicPolynomialF<F>`.
+    /// - `projected_scalars`: the scalars of the UAIR `U` projected to
+    ///   `DynamicPolynomialF<F>`.
     /// - `num_constraints`: the number of constraints the UAIR `U` encodes.
     /// - `num_vars`: the number of variables the trace row MLEs have.
+    /// - `use_direct_eval`: whether to use the direct evaluation approach for
+    ///   linear constraints, depends on the UAIR structure, number of columns
+    ///   and number of constraints.
     /// - `field_cfg`: random field configuration sampled on the previous steps
     ///   of the overall protocol.
     #[allow(clippy::type_complexity)]
-    pub fn prove_as_subprotocol<U>(
+    fn prove_as_subprotocol<F>(
         transcript: &mut impl Transcript,
-        trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
+        trace: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
+        projected_scalars: &HashMap<Self::Scalar, DynamicPolynomialF<F>>,
         num_constraints: usize,
         num_vars: usize,
+        use_direct_eval: bool,
         field_cfg: &F::Config,
-    ) -> Result<
-        (Proof<F, DEGREE_PLUS_ONE>, ProverState<F, DEGREE_PLUS_ONE>),
-        BinaryPoly<DEGREE_PLUS_ONE>,
-        U::Ideal,
-    >
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, Self::Ideal>>
     where
-        U: Uair<BinaryPoly<DEGREE_PLUS_ONE>>,
-    {
-        let projecting_element = transcript.get_field_challenge(field_cfg);
-
-        // Project UAIR scalars prior to doing anything.
-        let projected_scalars = project_scalars::<F, U, DEGREE_PLUS_ONE>(&projecting_element);
-
-        let trace_matrix = project_trace_matrix::<F, DEGREE_PLUS_ONE>(trace, &projecting_element);
-
-        let combined_mles = combined_poly_builder::compute_combined_polynomials::<F, U, _>(
-            &trace_matrix,
-            &projected_scalars,
-            num_constraints,
-            field_cfg,
-        );
-
-        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
-
-        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
-
-        let combined_mle_values = cfg_iter!(combined_mles)
-            .map(|combined_mle| {
-                Ok(DynamicPolynomialF::new_trimmed(
-                    cfg_iter!(combined_mle)
-                        .map(|coeff_mle| {
-                            coeff_mle.evaluate_with_config(&evaluation_point, field_cfg)
-                        })
-                        .collect::<std::result::Result<Vec<_>, _>>()?,
-                ))
-            })
-            .collect::<std::result::Result<Vec<_>, IdealCheckError<_, _>>>()?;
-
-        combined_mle_values.iter().for_each(|combined_mle_value| {
-            transcript
-                .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
-        });
-
-        Ok((
-            Proof {
-                combined_mle_values,
-            },
-            ProverState {
-                evaluation_point,
-                combined_mles,
-                trace_matrix,
-                projected_scalars,
-            },
-        ))
-    }
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable;
 
     /// The verifier part of the ideal-check subprotocol.
     ///
@@ -137,27 +91,137 @@ impl<F: IdealCheckField, const DEGREE_PLUS_ONE: usize> IdealCheckProtocol<F, DEG
     /// - `field_cfg`: random field configuration sampled on the previous steps
     ///   of the overall protocol.
     #[allow(clippy::type_complexity)]
-    pub fn verify_as_subprotocol<U, IdealOverF, IdealOverFFromRef>(
+    fn verify_as_subprotocol<F, IdealOverF, IdealOverFFromRef>(
         transcript: &mut impl Transcript,
-        proof: Proof<F, DEGREE_PLUS_ONE>,
+        proof: Proof<F>,
         num_constraints: usize,
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
         field_cfg: &F::Config,
-    ) -> Result<VerifierSubClaim<BinaryPoly<DEGREE_PLUS_ONE>, F>, DynamicPolynomialF<F>, IdealOverF>
+    ) -> Result<VerifierSubclaim<F>, IdealCheckError<F, IdealOverF>>
     where
-        U: Uair<BinaryPoly<DEGREE_PLUS_ONE>>,
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+        IdealOverFFromRef: Fn(&IdealOrZero<Self::Ideal>) -> IdealOverF;
+}
+
+impl<U> IdealCheckProtocol for U
+where
+    U: Uair,
+{
+    #[allow(clippy::type_complexity)]
+    fn prove_as_subprotocol<F>(
+        transcript: &mut impl Transcript,
+        trace_matrix: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
+        projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        use_direct_eval: bool,
+        field_cfg: &F::Config,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+    {
+        let constraint_degrees = count_constraint_degrees::<U>();
+        let has_linear = constraint_degrees.iter().any(|&d| d <= 1);
+        let has_non_linear = constraint_degrees.iter().any(|&d| d > 1);
+
+        // Collect ideals to identify assert_zero constraints whose
+        // combined polynomial is zero by construction (for honest provers).
+        let ideal_collector = collect_ideals::<U>(num_constraints);
+        let is_zero_ideal: Vec<bool> = ideal_collector
+            .ideals
+            .iter()
+            .map(|i| i.is_zero_ideal())
+            .collect();
+
+        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+
+        // Evaluate linear constraints by evaluating trace columns at the point first,
+        // then applying constraints.
+        //
+        // After that, replace the MLEs for non-linear constraints with the correct
+        // ones.
+        //
+        // TODO: Skip evaluating non-linear constraints at all?
+        let mut combined_mle_values = if has_linear && use_direct_eval {
+            combined_poly_builder::evaluate_combined_polynomials::<_, U>(
+                trace_matrix,
+                projected_scalars,
+                num_constraints,
+                &evaluation_point,
+                field_cfg,
+            )?
+        } else {
+            vec![DynamicPolynomialF::ZERO; num_constraints]
+        };
+
+        // MLE path: build combined polynomial MLEs row-by-row
+        // (needed for non-linear constraints, or the constraints that failed
+        // heuristics).
+        if has_non_linear || !use_direct_eval {
+            // TODO: Skip building already-evaluated linear constraints?
+            let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
+                trace_matrix,
+                projected_scalars,
+                num_constraints,
+                field_cfg,
+                &is_zero_ideal,
+            );
+
+            // Replace the (incorrect) fast-path result for non-linear constraints by
+            // evaluating coefficient MLEs.
+            cfg_iter_mut!(combined_mle_values)
+                .enumerate()
+                .filter(|(i, mle_value)| {
+                    // Skip zero-ideal constraints: their combined
+                    // polynomial is zero for an honest prover, so
+                    // there is nothing to evaluate.
+                    !is_zero_ideal[*i] && *mle_value == &DynamicPolynomialF::ZERO
+                })
+                .try_for_each::<_, _>(|(i, mle_value)| {
+                    let coeffs = combined_mles[i]
+                        .iter()
+                        .map(|coeff_mle| {
+                            coeff_mle.evaluate_with_config(&evaluation_point, field_cfg)
+                        })
+                        .try_collect::<_, Vec<_>, _>()?;
+                    *mle_value = DynamicPolynomialF::new_trimmed(coeffs);
+                    Ok::<_, EvaluationError>(())
+                })?;
+        };
+
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+
+        combined_mle_values.iter().for_each(|combined_mle_value| {
+            transcript
+                .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
+        });
+
+        Ok((
+            Proof {
+                combined_mle_values,
+            },
+            ProverState { evaluation_point },
+        ))
+    }
+
+    fn verify_as_subprotocol<F, IdealOverF, IdealOverFFromRef>(
+        transcript: &mut impl Transcript,
+        proof: Proof<F>,
+        num_constraints: usize,
+        num_vars: usize,
+        ideal_over_f_from_ref: IdealOverFFromRef,
+        field_cfg: &F::Config,
+    ) -> Result<VerifierSubclaim<F>, IdealCheckError<F, IdealOverF>>
+    where
+        F: InnerTransparentField,
         F::Inner: ConstTranscribable,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
-        // Sample a field element to maintain FS symmetry with
-        // the prover.
-        let projecting_element: F = transcript.get_field_challenge(field_cfg);
-
-        // Project scalars for later use.
-        let projected_scalars = project_scalars::<F, U, DEGREE_PLUS_ONE>(&projecting_element);
-
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
         let combined_mle_values = proof.combined_mle_values;
@@ -168,46 +232,60 @@ impl<F: IdealCheckField, const DEGREE_PLUS_ONE: usize> IdealCheckProtocol<F, DEG
             transcript.absorb_random_field_slice(&mle_value.coeffs, &mut transcription_buf);
         }
 
-        let ideal_collector = collect_ideals::<_, U>(num_constraints);
+        let ideal_collector = collect_ideals::<U>(num_constraints);
 
-        batched_ideal_check(
-            &ideal_collector
-                .ideals
-                .iter()
-                .map(ideal_over_f_from_ref)
-                .collect_vec(),
-            &combined_mle_values,
-        )?;
+        // Only check non-trivial ideals. For assert_zero constraints
+        // the ideal is the zero ideal and the combined polynomial
+        // value is zero by construction; the sumcheck that follows
+        // verifies consistency of the claimed evaluations with the
+        // actual trace.
+        let (non_trivial_ideals, non_trivial_values): (Vec<_>, Vec<_>) = ideal_collector
+            .ideals
+            .iter()
+            .zip(combined_mle_values.iter())
+            .filter(|(ideal, _)| !ideal.is_zero_ideal())
+            .map(|(ideal, value)| (ideal_over_f_from_ref(ideal), value.clone()))
+            .unzip();
 
-        Ok(VerifierSubClaim {
+        batched_ideal_check(&non_trivial_ideals, &non_trivial_values)?;
+
+        Ok(VerifierSubclaim {
             evaluation_point,
             values: combined_mle_values,
-            projected_scalars,
         })
     }
 }
 
 #[derive(Clone, Debug, From, Error)]
-pub enum IdealCheckError<R, I> {
+pub enum IdealCheckError<F: PrimeField, I> {
     #[error("ideal check prover failed to evaluate an mle: {0}")]
     MleEvaluationError(EvaluationError),
     #[error("mle evaluation ideal check failure: {0}")]
-    IdealCollectorError(BatchedIdealCheckError<R, I>),
+    IdealCollectorError(BatchedIdealCheckError<DynamicPolynomialF<F>, I>),
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
 
-    use crate::test_utils::{TestIcField, run_ideal_check_prover, test_config};
     use rand::rng;
-    use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
-    use zinc_test_uair::{GenerateWitness, TestAirBinary, TestUairSimpleMultiplication};
+    use zinc_poly::univariate::{dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF};
+    use zinc_test_uair::{
+        GenerateSingleTypeWitness, TestAirNoMultiplication, TestUairSimpleMultiplication,
+    };
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::{
         constraint_counter::count_constraints,
-        ideal::{Ideal, IdealCheck},
+        ideal::{Ideal, IdealCheck, degree_one::DegreeOneIdeal},
     };
+
+    use crate::test_utils::{LIMBS, run_ideal_check_prover_single_type, test_config};
+
+    use super::*;
+
+    // TODO(Ilia): These tests are absolute joke.
+    //             Once we have time we need to create a comprehensive test suite
+    //             akin to the one we have for the PCS or the sumcheck.
 
     fn test_successful_verification_generic<
         U,
@@ -218,31 +296,32 @@ mod tests {
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
-        U: GenerateWitness<BinaryPoly<DEGREE_PLUS_ONE>>,
-        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<TestIcField>>,
+        U: GenerateSingleTypeWitness<Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+            + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+            + IdealCheckProtocol,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
         let mut rng = rng();
         let transcript = KeccakTranscript::new();
 
-        let (proof, prover_state) = run_ideal_check_prover::<U, DEGREE_PLUS_ONE>(
+        let (proof, prover_state, ..) = run_ideal_check_prover_single_type::<U, DEGREE_PLUS_ONE>(
             num_vars,
             &U::generate_witness(num_vars, &mut rng),
             &mut transcript.clone(),
         );
 
-        let num_constraints = count_constraints::<BinaryPoly<DEGREE_PLUS_ONE>, U>();
+        let num_constraints = count_constraints::<U>();
 
-        let verifier_result =
-            IdealCheckProtocol::<TestIcField, _>::verify_as_subprotocol::<U, _, _>(
-                &mut transcript.clone(),
-                proof,
-                num_constraints,
-                num_vars,
-                ideal_over_f_from_ref,
-                &test_config(),
-            )
-            .expect("Verification failed");
+        let verifier_result = U::verify_as_subprotocol(
+            &mut transcript.clone(),
+            proof,
+            num_constraints,
+            num_vars,
+            ideal_over_f_from_ref,
+            &test_config(),
+        )
+        .expect("Verification failed");
 
         assert_eq!(
             prover_state.evaluation_point,
@@ -252,15 +331,17 @@ mod tests {
 
     #[test]
     fn test_successful_verification() {
+        let field_cfg = test_config();
+
         let num_vars = 2;
 
-        test_successful_verification_generic::<TestAirBinary, _, _, 32>(
+        test_successful_verification_generic::<TestAirNoMultiplication<5>, _, _, 32>(
             num_vars,
-            |_ideal_over_ring| IdealOrZero::Zero,
+            |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
         );
-        test_successful_verification_generic::<TestUairSimpleMultiplication, _, _, 32>(
+        test_successful_verification_generic::<TestUairSimpleMultiplication<Int<5>>, _, _, 32>(
             num_vars,
-            |_ideal_over_ring| IdealOrZero::Zero,
+            |_ideal_over_ring| IdealOrZero::zero(),
         );
     }
 }

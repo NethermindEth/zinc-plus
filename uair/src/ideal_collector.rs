@@ -1,8 +1,7 @@
-use crypto_primitives::Semiring;
 use zinc_utils::from_ref::FromRef;
 
 use crate::{
-    ConstraintBuilder, Uair,
+    ConstraintBuilder, TraceRow, Uair,
     dummy_semiring::DummySemiring,
     ideal::{Ideal, IdealCheck},
 };
@@ -27,14 +26,17 @@ impl<I: Ideal> IdealCollector<I> {
 /// Given a `Uair` and a hint of how many constraints
 /// it is going to have, creates an `IdealCollector`
 /// object and collects ideals from the `Uair`.
-pub fn collect_ideals<R: Semiring + 'static, U: Uair<R>>(
-    num_constraints: usize,
-) -> IdealCollector<U::Ideal> {
+pub fn collect_ideals<U: Uair>(num_constraints: usize) -> IdealCollector<U::Ideal> {
     let mut ideal_collector = IdealCollector::new(num_constraints);
 
-    let dummy_up_and_down: Vec<DummySemiring> = vec![DummySemiring; U::num_cols()];
+    let dummy_up_and_down = vec![DummySemiring; U::signature().max_cols()];
 
-    U::constrain(&mut ideal_collector, &dummy_up_and_down, &dummy_up_and_down);
+    let trace_row = TraceRow {
+        binary_poly: &dummy_up_and_down,
+        arbitrary_poly: &dummy_up_and_down,
+        int: &dummy_up_and_down,
+    };
+    U::constrain(&mut ideal_collector, trace_row, trace_row);
 
     ideal_collector
 }
@@ -51,7 +53,7 @@ where
     }
 
     fn assert_zero(&mut self, _expr: Self::Expr) {
-        self.ideals.push(IdealOrZero::Zero);
+        self.ideals.push(IdealOrZero::zero());
     }
 }
 
@@ -59,16 +61,29 @@ where
 /// that is either stores inner
 /// ideal type `I` or zero ideal.
 #[derive(Clone, Copy, Debug)]
-pub enum IdealOrZero<I: Ideal> {
-    Ideal(I),
-    Zero,
+pub struct IdealOrZero<I: Ideal> {
+    pub ideal_or_zero: Option<I>,
 }
 
 impl<I: Ideal> IdealOrZero<I> {
+    pub fn zero() -> Self {
+        IdealOrZero {
+            ideal_or_zero: None,
+        }
+    }
+
+    /// Returns `true` if this is the zero ideal
+    /// (i.e., the ideal used by `assert_zero` constraints).
+    pub fn is_zero_ideal(&self) -> bool {
+        self.ideal_or_zero.is_none()
+    }
+
     pub fn map<I2: Ideal>(&self, f: impl FnOnce(&I) -> I2) -> IdealOrZero<I2> {
-        match self {
-            IdealOrZero::Ideal(ideal) => IdealOrZero::Ideal(f(ideal)),
-            IdealOrZero::Zero => IdealOrZero::Zero,
+        match &self.ideal_or_zero {
+            Some(ideal) => IdealOrZero {
+                ideal_or_zero: Some(f(ideal)),
+            },
+            None => IdealOrZero::zero(),
         }
     }
 }
@@ -83,7 +98,9 @@ impl<I: Ideal> FromRef<IdealOrZero<I>> for IdealOrZero<I> {
 
 impl<I: Ideal> FromRef<I> for IdealOrZero<I> {
     fn from_ref(value: &I) -> Self {
-        IdealOrZero::Ideal(value.clone())
+        Self {
+            ideal_or_zero: Some(value.clone()),
+        }
     }
 }
 

@@ -1,9 +1,9 @@
 use crate::{
-    CoefficientProjectable, ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
+    ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
     univariate::{dense::DensePolynomial, prepare_projection},
 };
 use core::mem::MaybeUninit;
-use crypto_primitives::{FromWithConfig, PrimeField, Semiring, semiring::boolean::Boolean};
+use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
 use derive_more::{AsRef, Display};
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
@@ -31,10 +31,6 @@ impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
     #[inline(always)]
     pub const fn inner(&self) -> &u64 {
         &self.0
-    }
-
-    pub fn to_u64(&self) -> u64 {
-        self.0
     }
 }
 
@@ -454,22 +450,6 @@ where
         prepare_projection::<F, Self, _, DEGREE_PLUS_ONE>(sampled_value, |poly, i| {
             (poly.0 & (1 << i)) != 0
         })
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> CoefficientProjectable<Boolean, DEGREE_PLUS_ONE>
-    for BinaryU64Poly<DEGREE_PLUS_ONE>
-{
-    fn project_coefficients<F: FromWithConfig<Boolean> + 'static>(
-        &self,
-        projecting_element: &F,
-    ) -> DensePolynomial<F, DEGREE_PLUS_ONE> {
-        DensePolynomial {
-            coeffs: array::from_fn(|i| {
-                let coeff = (self.0 & (1 << i)) != 0;
-                F::from_with_cfg(coeff.into(), projecting_element.cfg())
-            }),
-        }
     }
 }
 
