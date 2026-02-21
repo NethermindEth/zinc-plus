@@ -51,7 +51,7 @@ where
     }
 
     fn assert_zero(&mut self, _expr: Self::Expr) {
-        self.ideals.push(IdealOrZero::zero());
+        self.ideals.push(IdealOrZero::Zero);
     }
 }
 
@@ -59,23 +59,16 @@ where
 /// that is either stores inner
 /// ideal type `I` or zero ideal.
 #[derive(Clone, Copy, Debug)]
-pub struct IdealOrZero<I: Ideal> {
-    pub ideal_or_zero: Option<I>,
+pub enum IdealOrZero<I: Ideal> {
+    Ideal(I),
+    Zero,
 }
 
 impl<I: Ideal> IdealOrZero<I> {
-    pub fn zero() -> Self {
-        IdealOrZero {
-            ideal_or_zero: None,
-        }
-    }
-
     pub fn map<I2: Ideal>(&self, f: impl FnOnce(&I) -> I2) -> IdealOrZero<I2> {
-        match &self.ideal_or_zero {
-            Some(ideal) => IdealOrZero {
-                ideal_or_zero: Some(f(ideal)),
-            },
-            None => IdealOrZero::zero(),
+        match self {
+            IdealOrZero::Ideal(ideal) => IdealOrZero::Ideal(f(ideal)),
+            IdealOrZero::Zero => IdealOrZero::Zero,
         }
     }
 }
@@ -90,9 +83,7 @@ impl<I: Ideal> FromRef<IdealOrZero<I>> for IdealOrZero<I> {
 
 impl<I: Ideal> FromRef<I> for IdealOrZero<I> {
     fn from_ref(value: &I) -> Self {
-        Self {
-            ideal_or_zero: Some(value.clone()),
-        }
+        IdealOrZero::Ideal(value.clone())
     }
 }
 

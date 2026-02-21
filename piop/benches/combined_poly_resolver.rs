@@ -2,10 +2,13 @@ use criterion::{
     AxisScale, BatchSize, BenchmarkGroup, BenchmarkId, Criterion, PlotConfiguration,
     criterion_group, criterion_main, measurement::WallTime,
 };
-use crypto_primitives::crypto_bigint_monty::MontyField;
+use crypto_primitives::{FromPrimitiveWithConfig, crypto_bigint_monty::MontyField};
 use rand::rng;
 use std::hint::black_box;
-use zinc_piop::ideal_check::{IdealCheckField, IdealCheckProtocol, Proof};
+use zinc_piop::{
+    combined_poly_resolver::CombinedPolyResolver,
+    ideal_check::{IdealCheckField, IdealCheckProtocol},
+};
 use zinc_poly::univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF};
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_test_uair::{GenerateWitness, TestAirBinary, TestUairSimpleMultiplication};
@@ -13,6 +16,7 @@ use zinc_transcript::{KeccakTranscript, traits::Transcript};
 use zinc_uair::{
     Uair,
     constraint_counter::count_constraints,
+    degree_counter::count_max_degree,
     ideal::{Ideal, IdealCheck},
     ideal_collector::IdealOrZero,
 };
@@ -26,7 +30,7 @@ fn do_bench<F, Air, IdealOverFFromRef, IdealOverF>(
     witness_size: usize,
     ideal_over_f_from_ref: IdealOverFFromRef,
 ) where
-    F: IdealCheckField,
+    F: IdealCheckField + FromPrimitiveWithConfig,
     MillerRabin: PrimalityTest<F::Inner>,
     Air: Uair<BinaryPoly<DEGREE_PLUS_ONE>> + GenerateWitness<BinaryPoly<DEGREE_PLUS_ONE>>,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
@@ -39,61 +43,67 @@ fn do_bench<F, Air, IdealOverFFromRef, IdealOverF>(
 
     let params = format!("{}/nvars={}", bench_title, num_vars);
 
-    let transcript = KeccakTranscript::new();
+    let mut prover_transcript = KeccakTranscript::new();
+    let mut verifier_transcript = prover_transcript.clone();
+
+    let prover_field_cfg = prover_transcript.get_random_field_cfg::<F, _, MillerRabin>();
+    let _ = verifier_transcript.get_random_field_cfg::<F, _, MillerRabin>();
 
     let num_constraints = count_constraints::<BinaryPoly<DEGREE_PLUS_ONE>, Air>();
+    let max_degree = count_max_degree::<BinaryPoly<DEGREE_PLUS_ONE>, Air>();
 
-    let prove = |(trace, mut transcript): (Vec<_>, KeccakTranscript)| -> Proof<F, DEGREE_PLUS_ONE> {
-        let field_cfg = transcript.get_random_field_cfg::<F, _, MillerRabin>();
-        IdealCheckProtocol::prove_as_subprotocol::<Air>(
-            &mut transcript,
+    let (ic_proof, ic_prover_state) =
+        IdealCheckProtocol::<F, DEGREE_PLUS_ONE>::prove_as_subprotocol::<Air>(
+            &mut prover_transcript,
             &trace,
             num_constraints,
             num_vars,
-            &field_cfg,
+            &prover_field_cfg,
         )
-        .expect("Prover failed")
-        .0
-    };
+        .expect("IC Prover failed");
+
+    // let ic_check_subclaim =
+    //     IdealCheckProtocol::<F, DEGREE_PLUS_ONE>::verify_as_subprotocol::<Air, _, _>(
+    //         &mut verifier_transcript,
+    //         ic_proof,
+    //         num_constraints,
+    //         num_vars,
+    //         ideal_over_f_from_ref,
+    //         &prover_field_cfg,
+    //     )
+    //     .expect("IC Verifier failed");
+
+    // let verifier_transcript_after_ic = verifier_transcript.clone();
 
     group.bench_with_input(
-        BenchmarkId::new("Ideal Check Prover", &params),
-        &(trace.clone(), transcript.clone()),
-        |bench, (trace, transcript)| {
+        BenchmarkId::new("CPR Prover", &params),
+        &(
+            prover_transcript.clone(),
+            ic_prover_state.projected_scalars.clone(),
+        ),
+        |bench, (transcript, scalars)| {
             bench.iter_batched(
-                || (trace.clone(), transcript.clone()),
-                |(trace, transcript)| {
-                    let _ = black_box(&prove((trace, transcript)));
-                },
-                BatchSize::SmallInput,
-            );
-        },
-    );
-
-    let proof = prove((trace, transcript.clone()));
-
-    group.bench_with_input(
-        BenchmarkId::new("Ideal Check Verifier", &params),
-        &(proof, transcript),
-        |bench, (proof, transcript)| {
-            bench.iter_batched(
-                || (proof.clone(), transcript.clone()),
-                |(proof, mut transcript)| {
-                    let field_cfg = transcript.get_random_field_cfg::<F, _, MillerRabin>();
-                    let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<Air, _, _>(
+                || (scalars.clone(), transcript.clone()),
+                |(scalars, mut transcript)| {
+                    let _ = black_box(CombinedPolyResolver::<F>::prove_as_subprotocol::<_, Air>(
                         &mut transcript,
-                        proof,
+                        &ic_prover_state.trace_matrix,
+                        &ic_prover_state.evaluation_point,
+                        scalars.clone(),
                         num_constraints,
                         num_vars,
-                        ideal_over_f_from_ref,
-                        &field_cfg,
+                        max_degree,
+                        &prover_field_cfg,
                     ))
-                    .expect("Failed to verify");
+                    .expect("CPR Prover failed");
                 },
                 BatchSize::SmallInput,
             );
         },
     );
+
+    // NOTE: Verifier benchmark and its setup call removed to get clean prover-only profiles.
+    // Restore from git when verifier profiling is needed.
 }
 
 pub fn bench_bin<const FIELD_LIMBS: usize>(
@@ -120,15 +130,10 @@ pub fn bench_simple_mul<const FIELD_LIMBS: usize>(
     )
 }
 
-/// Before/after diff for combined_poly_builder (parallel vs sequential):
-///   1. cargo bench -p zinc-piop --bench ideal_check -- "Ideal Check Prover"
-///      --save-baseline sequential
-///   2. cargo bench -p zinc-piop --bench ideal_check --features parallel --
-///      "Ideal Check Prover" --baseline sequential
-pub fn ideal_check_benches(c: &mut Criterion) {
+pub fn combined_poly_resolver_benches(c: &mut Criterion) {
     let plot_config = PlotConfiguration::default().summary_scale(AxisScale::Logarithmic);
 
-    let mut group = c.benchmark_group("Ideal check benchmarks");
+    let mut group = c.benchmark_group("Combined poly resolver benchmarks");
     group.plot_config(plot_config);
 
     bench_bin::<3>(&mut group, 1 << 13);
@@ -148,5 +153,5 @@ pub fn ideal_check_benches(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, ideal_check_benches);
+criterion_group!(benches, combined_poly_resolver_benches);
 criterion_main!(benches);

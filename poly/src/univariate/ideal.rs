@@ -51,8 +51,8 @@ impl<F: PrimeField> IdealCheck<DynamicPolynomialF<F>> for IdealOrZero<DegreeOneI
             return true;
         }
 
-        match &self.ideal_or_zero {
-            Some(DegreeOneIdeal { generating_root }) => {
+        match self {
+            IdealOrZero::Ideal(DegreeOneIdeal { generating_root }) => {
                 let field_cfg = value.coeffs[0].cfg();
                 let root_in_field = F::from_with_cfg(generating_root.clone(), field_cfg);
                 F::is_zero(
@@ -61,7 +61,7 @@ impl<F: PrimeField> IdealCheck<DynamicPolynomialF<F>> for IdealOrZero<DegreeOneI
                         .expect("arithmetic overflow"),
                 )
             }
-            None => value.is_zero(),
+            IdealOrZero::Zero => value.is_zero(),
         }
     }
 }

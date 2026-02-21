@@ -12,7 +12,7 @@ use rayon::prelude::*;
 use std::{collections::HashMap, marker::PhantomData, slice};
 use thiserror::Error;
 use zinc_poly::{
-    EvaluatablePolynomial, EvaluationError,
+    EvaluationError,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
     univariate::dynamic::over_field::DynamicPolynomialF,
     utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
@@ -82,22 +82,31 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         let projecting_element: F = transcript.get_field_challenge(field_cfg);
 
-        // Project scalars along F[X] -> F.
-        let projected_scalars: HashMap<R, F> =
-            project_scalars_to_field(projected_scalars, &projecting_element)?;
-
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
 
+        // Precompute powers of the projecting element for batch evaluation.
+        let projection_powers: Vec<F> = {
+            let max_coeffs_len = trace_matrix.iter().flat_map(|col| col.iter()).map(|poly| poly.coeffs.len()).chain(projected_scalars.values().map(|poly| poly.coeffs.len())).max().unwrap_or(0).max(1);
+            powers(projecting_element.clone(), one.clone(), max_coeffs_len)
+        };
+
+        // Project scalars along F[X] -> F.
+        let projected_scalars: HashMap<R, F> = project_scalars_to_field(
+            projected_scalars,
+            &projection_powers,
+            &projecting_element,
+        )?;
+
         let num_cols = U::num_cols();
 
-        // Project trace along F[X] -> F.
+        // Project trace along F[X] -> F using precomputed powers.
         let up: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(trace_matrix)
             .map(|column| {
                 cfg_iter!(column)
                     .map(|coeff| {
                         coeff
-                            .evaluate_at_point(&projecting_element)
+                            .evaluate_with_powers(&projection_powers)
                             .expect("evaluation cannot fail here")
                             .inner()
                             .clone()
@@ -117,11 +126,14 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             .collect();
 
         let eq_r = build_eq_x_r_inner(evaluation_point, field_cfg)?;
-
-        // To get the constraints on the last row ignored
-        // we multiply each constraint polynomial
-        // by the selector (1 - eq(1,...,1, x))
-        let last_row_selector = build_eq_x_r_inner(&vec![one.clone(); num_vars], field_cfg)?;
+        let last_row_selector = DenseMultilinearExtension {
+            num_vars,
+            evaluations: {
+                let mut evals = vec![zero.inner().clone(); 1 << num_vars];
+                evals[(1 << num_vars) - 1] = one.inner().clone();
+                evals
+            },
+        };
 
         // The challenge '\alpha' to batch multiple evaluation claims
         let folding_challenge: F = transcript.get_field_challenge(field_cfg);
@@ -246,11 +258,20 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         let projecting_element: F = transcript.get_field_challenge(field_cfg);
 
-        let projected_scalars: HashMap<R, F> =
-            project_scalars_to_field(ic_check_subclaim.projected_scalars, &projecting_element)?;
-
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
+
+        // Precompute powers of the projecting element for batch evaluation.
+        let projection_powers: Vec<F> = {
+            let max_coeffs_len = ic_check_subclaim.values.iter().map(|poly| poly.coeffs.len()).chain(ic_check_subclaim.projected_scalars.values().map(|poly| poly.coeffs.len())).max().unwrap_or(0).max(1);
+            powers(projecting_element.clone(), one.clone(), max_coeffs_len)
+        };
+        
+        let projected_scalars: HashMap<R, F> = project_scalars_to_field(
+            ic_check_subclaim.projected_scalars,
+            &projection_powers,
+            &projecting_element,
+        )?;
 
         let folding_challenge: F = transcript.get_field_challenge(field_cfg);
 
@@ -266,7 +287,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             .map(
                 |(claimed_value, random_coeff)| -> Result<F, CombinedPolyResolverError<F>> {
                     Ok(claimed_value
-                        .evaluate_at_point(&projecting_element)
+                        .evaluate_with_powers(&projection_powers)
                         .map_err(|err| {
                             CombinedPolyResolverError::ProjectionError(
                                 claimed_value.clone(),
@@ -385,10 +406,16 @@ impl<F: PrimeField> From<SumCheckError<F>> for CombinedPolyResolverError<F> {
 
 #[cfg(test)]
 mod tests {
-    use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
+    use super::*;
+
+    use crate::{
+        ideal_check::IdealCheckProtocol,
+        test_utils::{LIMBS, TestIcField, run_ideal_check_prover, test_config},
+    };
+    use crypto_primitives::crypto_bigint_monty::MontyField;
     use rand::rng;
-    use zinc_poly::univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal};
-    use zinc_test_uair::{GenerateWitness, TestAirNoMultiplication, TestUairSimpleMultiplication};
+    use zinc_poly::univariate::binary::BinaryPoly;
+    use zinc_test_uair::{GenerateWitness, TestAirBinary, TestUairSimpleMultiplication};
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::{
         constraint_counter::count_constraints,
@@ -396,13 +423,6 @@ mod tests {
         ideal::{Ideal, IdealCheck},
         ideal_collector::IdealOrZero,
     };
-
-    use crate::{
-        ideal_check::{IdealCheckProtocol, IdealCheckTypes},
-        test_utils::{LIMBS, TestIcTypes, run_ideal_check_prover, test_config},
-    };
-
-    use super::*;
 
     fn test_successful_verification_generic<
         U,
@@ -413,7 +433,7 @@ mod tests {
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
-        U: GenerateWitness<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
+        U: GenerateWitness<BinaryPoly<DEGREE_PLUS_ONE>>,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
@@ -427,11 +447,10 @@ mod tests {
         let (ic_proof, ic_prover_state) =
             run_ideal_check_prover::<U, DEGREE_PLUS_ONE>(num_vars, &trace, &mut prover_transcript);
 
-        let num_constraints =
-            count_constraints::<<TestIcTypes as IdealCheckTypes<_>>::Witness, U>();
+        let num_constraints = count_constraints::<BinaryPoly<DEGREE_PLUS_ONE>, U>();
 
         let ic_check_subclaim =
-            IdealCheckProtocol::<TestIcTypes, _>::verify_as_subprotocol::<U, _, _>(
+            IdealCheckProtocol::<TestIcField, _>::verify_as_subprotocol::<U, _, _>(
                 &mut verifier_transcript,
                 ic_proof,
                 num_constraints,
@@ -471,17 +490,15 @@ mod tests {
 
     #[test]
     fn test_successful_verification() {
-        let field_cfg = test_config();
-
         let num_vars = 2;
 
-        test_successful_verification_generic::<TestAirNoMultiplication, _, _, 32>(
+        test_successful_verification_generic::<TestAirBinary, _, _, 32>(
             num_vars,
-            |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
+            |_ideal_over_ring| IdealOrZero::Zero,
         );
         test_successful_verification_generic::<TestUairSimpleMultiplication, _, _, 32>(
             num_vars,
-            |_ideal_over_ring| IdealOrZero::zero(),
+            |_ideal_over_ring| IdealOrZero::Zero,
         );
     }
 }
