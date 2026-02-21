@@ -126,7 +126,6 @@ where
     {
         let constraint_degrees = count_constraint_degrees::<U>();
         let has_linear = constraint_degrees.iter().any(|&d| d <= 1);
-        let has_non_linear = constraint_degrees.iter().any(|&d| d > 1);
 
         // Collect ideals to identify assert_zero constraints whose
         // combined polynomial is zero by construction (for honest provers).
@@ -136,6 +135,16 @@ where
             .iter()
             .map(|i| i.is_zero_ideal())
             .collect();
+
+        // Only enter the MLE path if there are non-linear constraints
+        // with non-zero ideals (i.e., that actually need evaluation).
+        // Zero-ideal non-linear constraints (assert_zero) have combined
+        // polynomials that are zero for an honest prover, so they can
+        // be skipped entirely.
+        let needs_mle_path = constraint_degrees
+            .iter()
+            .zip(is_zero_ideal.iter())
+            .any(|(&d, &is_zero)| d > 1 && !is_zero);
 
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
@@ -159,9 +168,9 @@ where
         };
 
         // MLE path: build combined polynomial MLEs row-by-row
-        // (needed for non-linear constraints, or the constraints that failed
-        // heuristics).
-        if has_non_linear || !use_direct_eval {
+        // (needed for non-linear constraints with non-zero ideals,
+        // or when direct evaluation is disabled).
+        if needs_mle_path || !use_direct_eval {
             // TODO: Skip building already-evaluated linear constraints?
             let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
                 trace_matrix,

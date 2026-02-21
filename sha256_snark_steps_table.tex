@@ -1,0 +1,48 @@
+\begin{table}[ht]
+\centering
+\caption{%
+SHA-256 compression SNARK prover pipeline, broken into individual steps
+(parallel+asm+simd, Apple M1 Max).
+The UAIR under test is \texttt{Sha256CompressionUair}, which encodes a single
+invocation of the SHA-256 compression function
+$h = \mathrm{compress}(H, M)$
+over 64 rounds of mixing, with 32-bit additions reduced to binary-polynomial
+and integer trace columns.
+The PCS layer uses IPRS codes at rate~$1/4$
+($\mathbb{F}_{65537}$, R4B32 $D{=}1$ for $n{=}9$; R4B16 $D{=}2$ for $n{=}10$).
+%
+\textbf{Steps:}
+(1)~\emph{PCS commit} -- encode both batches (binary-poly and integer columns)
+    into IPRS codewords and Merkle-commit;
+(2)~\emph{PCS test} -- produce proximity proofs that committed columns are
+    close to valid codewords;
+(3)~\emph{Transcript \& field cfg} -- absorb commitment roots and sample a
+    random prime-field modulus via Miller--Rabin;
+(4)~\emph{Project trace to $F[X]$} -- lift binary-poly and integer trace
+    columns to multilinear extensions over~$F[X]$;
+(5)~\emph{Project scalars to $F[X]$} -- map UAIR constraint scalars into~$F[X]$;
+(6)~\emph{Ideal check} -- run the ideal-check PIOP prover (sumcheck rounds
+    verifying that the projected trace satisfies all constraints);
+(7)~\emph{Project to $F$} -- evaluate the $F[X]$ trace and scalars at the
+    projecting-element challenge, collapsing to concrete field values;
+(8)~\emph{Combined resolver} -- combine all evaluated polynomials into a
+    single opening claim for the PCS.
+}
+\label{tab:sha256-snark-steps}
+\begin{tabular}{c l r r}
+\toprule
+\textbf{\#} & \textbf{Step} & $\boldsymbol{n{=}9}$ & $\boldsymbol{n{=}10}$ \\
+\midrule
+1 & PCS commit          &  6.64\,ms           & 11.43\,ms \\
+2 & PCS test            &  0.96\,ms           &  1.21\,ms \\
+3 & Transcript \& field cfg & 345.4\,\textmu s &  56.6\,\textmu s \\
+4 & Project trace $\to F[X]$ & 0.73\,ms        &  1.77\,ms \\
+5 & Project scalars $\to F[X]$ & $<$0.01\,\textmu s & $<$0.01\,\textmu s \\
+6 & Ideal check          &  1.70\,ms           &  7.34\,ms \\
+7 & Project $\to F$      &  155.4\,\textmu s   & 249.1\,\textmu s \\
+8 & Combined resolver    &  1.02\,ms           &  1.72\,ms \\
+\midrule
+  & \textbf{Total}       & \textbf{11.55\,ms}  & \textbf{23.78\,ms} \\
+\bottomrule
+\end{tabular}
+\end{table}
