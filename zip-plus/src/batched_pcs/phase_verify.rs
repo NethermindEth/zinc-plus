@@ -274,7 +274,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
 
         for poly_idx in 0..batch_size {
             let q_0_combined_row =
-                transcript.read_field_elements(vp.linear_code.row_len())?;
+                transcript.read_field_elements(vp.linear_code.row_len(), field_cfg)?;
             let encoded_combined_row: Vec<F> =
                 vp.linear_code.encode_f(&q_0_combined_row);
 

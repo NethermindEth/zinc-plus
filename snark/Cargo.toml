@@ -1,0 +1,50 @@
+[package]
+name = "zinc-snark"
+publish = false
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+crypto-primitives = { workspace = true }
+crypto-bigint = { workspace = true }
+zinc-piop = { path = "../piop" }
+zinc-poly = { workspace = true }
+zinc-primality = { workspace = true }
+zinc-ecdsa-uair = { workspace = true }
+zinc-sha256-uair = { workspace = true }
+zinc-transcript = { workspace = true }
+zinc-uair = { workspace = true }
+zinc-utils = { workspace = true }
+zip-plus = { path = "../zip-plus" }
+
+itertools = { workspace = true }
+num-traits = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+flate2 = "1.1"
+
+[features]
+parallel = [
+    "zinc-piop/parallel",
+    "zinc-poly/parallel",
+    "zinc-utils/parallel",
+    "zip-plus/parallel",
+    "crypto-primitives/parallel",
+]
+simd = ["zinc-poly/simd", "zip-plus/simd"]
+asm = ["zip-plus/asm"]
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "e2e_sha256"
+harness = false

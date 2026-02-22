@@ -434,6 +434,7 @@ mod tests {
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
         U: GenerateWitness<BinaryPoly<DEGREE_PLUS_ONE>>,
+        BinaryPoly<DEGREE_PLUS_ONE>: ideal_check::ProjectToField<MontyField<LIMBS>>,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
@@ -450,7 +451,7 @@ mod tests {
         let num_constraints = count_constraints::<BinaryPoly<DEGREE_PLUS_ONE>, U>();
 
         let ic_check_subclaim =
-            IdealCheckProtocol::<TestIcField, _>::verify_as_subprotocol::<U, _, _>(
+            IdealCheckProtocol::<TestIcField>::verify_as_subprotocol::<BinaryPoly<DEGREE_PLUS_ONE>, U, _, _>(
                 &mut verifier_transcript,
                 ic_proof,
                 num_constraints,

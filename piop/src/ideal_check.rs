@@ -11,11 +11,12 @@ use itertools::Itertools;
 use rayon::prelude::*;
 use std::marker::PhantomData;
 pub use structs::*;
+pub use utils::ProjectToField;
 use thiserror::Error;
 use zinc_poly::{
     EvaluationError,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF},
+    univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
@@ -30,9 +31,9 @@ use crate::ideal_check::utils::{project_scalars, project_trace_matrix};
 pub type Result<T, R, I> = std::result::Result<T, IdealCheckError<R, I>>;
 
 /// Ideal-check subprotocol.
-pub struct IdealCheckProtocol<F: IdealCheckField, const DEGREE_PLUS_ONE: usize>(PhantomData<F>);
+pub struct IdealCheckProtocol<F: IdealCheckField>(PhantomData<F>);
 
-impl<F: IdealCheckField, const DEGREE_PLUS_ONE: usize> IdealCheckProtocol<F, DEGREE_PLUS_ONE> {
+impl<F: IdealCheckField> IdealCheckProtocol<F> {
     /// The prover part of the ideal-check subprotocol.
     ///
     /// The prover samples a random field element
@@ -50,28 +51,29 @@ impl<F: IdealCheckField, const DEGREE_PLUS_ONE: usize> IdealCheckProtocol<F, DEG
     /// - `field_cfg`: random field configuration sampled on the previous steps
     ///   of the overall protocol.
     #[allow(clippy::type_complexity)]
-    pub fn prove_as_subprotocol<U>(
+    pub fn prove_as_subprotocol<R, U>(
         transcript: &mut impl Transcript,
-        trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
+        trace: &[DenseMultilinearExtension<R>],
         num_constraints: usize,
         num_vars: usize,
         field_cfg: &F::Config,
     ) -> Result<
-        (Proof<F, DEGREE_PLUS_ONE>, ProverState<F, DEGREE_PLUS_ONE>),
-        BinaryPoly<DEGREE_PLUS_ONE>,
+        (Proof<F>, ProverState<F, R>),
+        R,
         U::Ideal,
     >
     where
-        U: Uair<BinaryPoly<DEGREE_PLUS_ONE>>,
+        R: ProjectToField<F>,
+        U: Uair<R>,
     {
         let projecting_element = transcript.get_field_challenge(field_cfg);
 
         // Project UAIR scalars prior to doing anything.
-        let projected_scalars = project_scalars::<F, U, DEGREE_PLUS_ONE>(&projecting_element);
+        let projected_scalars = project_scalars::<F, U, R>(&projecting_element);
 
-        let trace_matrix = project_trace_matrix::<F, DEGREE_PLUS_ONE>(trace, &projecting_element);
+        let trace_matrix = project_trace_matrix::<F, R>(trace, &projecting_element);
 
-        let combined_mles = combined_poly_builder::compute_combined_polynomials::<F, U, _>(
+        let combined_mles = combined_poly_builder::compute_combined_polynomials::<F, U, R>(
             &trace_matrix,
             &projected_scalars,
             num_constraints,
@@ -137,16 +139,17 @@ impl<F: IdealCheckField, const DEGREE_PLUS_ONE: usize> IdealCheckProtocol<F, DEG
     /// - `field_cfg`: random field configuration sampled on the previous steps
     ///   of the overall protocol.
     #[allow(clippy::type_complexity)]
-    pub fn verify_as_subprotocol<U, IdealOverF, IdealOverFFromRef>(
+    pub fn verify_as_subprotocol<R, U, IdealOverF, IdealOverFFromRef>(
         transcript: &mut impl Transcript,
-        proof: Proof<F, DEGREE_PLUS_ONE>,
+        proof: Proof<F>,
         num_constraints: usize,
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
         field_cfg: &F::Config,
-    ) -> Result<VerifierSubClaim<BinaryPoly<DEGREE_PLUS_ONE>, F>, DynamicPolynomialF<F>, IdealOverF>
+    ) -> Result<VerifierSubClaim<R, F>, DynamicPolynomialF<F>, IdealOverF>
     where
-        U: Uair<BinaryPoly<DEGREE_PLUS_ONE>>,
+        R: ProjectToField<F>,
+        U: Uair<R>,
         F::Inner: ConstTranscribable,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
@@ -156,7 +159,7 @@ impl<F: IdealCheckField, const DEGREE_PLUS_ONE: usize> IdealCheckProtocol<F, DEG
         let projecting_element: F = transcript.get_field_challenge(field_cfg);
 
         // Project scalars for later use.
-        let projected_scalars = project_scalars::<F, U, DEGREE_PLUS_ONE>(&projecting_element);
+        let projected_scalars = project_scalars::<F, U, R>(&projecting_element);
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
@@ -201,6 +204,7 @@ mod tests {
 
     use crate::test_utils::{TestIcField, run_ideal_check_prover, test_config};
     use rand::rng;
+    use zinc_poly::univariate::binary::BinaryPoly;
     use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
     use zinc_test_uair::{GenerateWitness, TestAirBinary, TestUairSimpleMultiplication};
     use zinc_transcript::KeccakTranscript;
@@ -219,6 +223,7 @@ mod tests {
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
         U: GenerateWitness<BinaryPoly<DEGREE_PLUS_ONE>>,
+        BinaryPoly<DEGREE_PLUS_ONE>: ProjectToField<TestIcField>,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<TestIcField>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
@@ -234,7 +239,7 @@ mod tests {
         let num_constraints = count_constraints::<BinaryPoly<DEGREE_PLUS_ONE>, U>();
 
         let verifier_result =
-            IdealCheckProtocol::<TestIcField, _>::verify_as_subprotocol::<U, _, _>(
+            IdealCheckProtocol::<TestIcField>::verify_as_subprotocol::<BinaryPoly<DEGREE_PLUS_ONE>, U, _, _>(
                 &mut transcript.clone(),
                 proof,
                 num_constraints,

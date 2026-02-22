@@ -611,11 +611,11 @@ mod tests {
         }
 
         fn calculate_expected_proof_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
-            // F stored as `(value, modulus)` where both `value` and `modulus` are of
-            // length `len`.
+            // F stored as inner value only (modulus omitted — verifier derives it
+            // from the Fiat-Shamir transcript).
             // `len` itself is stored only once at the beginning of the F list.
             // For BoxedMontyField, length of `len` itself is 1 byte.
-            let size_of_f = 2 * U256::LIMBS * size_of::<Word>();
+            let size_of_f = U256::LIMBS * size_of::<Word>();
             let evaluation_phase_size = 1 + pp.linear_code.row_len() * size_of_f;
 
             calculate_expected_test_transcript_size_bytes(pp) + evaluation_phase_size

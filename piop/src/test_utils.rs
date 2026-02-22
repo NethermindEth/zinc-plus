@@ -5,7 +5,7 @@ use zinc_test_uair::GenerateWitness;
 use zinc_transcript::traits::Transcript;
 use zinc_uair::constraint_counter::count_constraints;
 
-use crate::ideal_check::{self, IdealCheckProtocol};
+use crate::ideal_check::{self, IdealCheckProtocol, ProjectToField};
 
 pub const LIMBS: usize = 4;
 
@@ -24,17 +24,18 @@ pub fn run_ideal_check_prover<U, const DEGREE_PLUS_ONE: usize>(
     trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
     transcript: &mut impl Transcript,
 ) -> (
-    ideal_check::Proof<TestIcField, DEGREE_PLUS_ONE>,
-    ideal_check::ProverState<TestIcField, DEGREE_PLUS_ONE>,
+    ideal_check::Proof<TestIcField>,
+    ideal_check::ProverState<TestIcField, BinaryPoly<DEGREE_PLUS_ONE>>,
 )
 where
     U: GenerateWitness<BinaryPoly<DEGREE_PLUS_ONE>>,
+    BinaryPoly<DEGREE_PLUS_ONE>: ProjectToField<TestIcField>,
 {
     let field_cfg = test_config();
 
     let num_constraints = count_constraints::<BinaryPoly<DEGREE_PLUS_ONE>, U>();
 
-    IdealCheckProtocol::<TestIcField, _>::prove_as_subprotocol::<U>(
+    IdealCheckProtocol::<TestIcField>::prove_as_subprotocol::<BinaryPoly<DEGREE_PLUS_ONE>, U>(
         transcript,
         trace,
         num_constraints,

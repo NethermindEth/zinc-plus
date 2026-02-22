@@ -194,7 +194,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
         Zt::Cw: ProjectableToField<F>,
     {
-        let q_0_combined_row = transcript.read_field_elements(vp.linear_code.row_len())?;
+        let q_0_combined_row = transcript.read_field_elements(vp.linear_code.row_len(), field_cfg)?;
         let encoded_combined_row = vp.linear_code.encode_f(&q_0_combined_row);
 
         let (q_0, q_1) = point_to_tensor(vp.num_rows, point_f, field_cfg)?;
@@ -728,8 +728,8 @@ mod tests {
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
         let row_len = pp.linear_code.row_len();
-        // Two elements: one for value and one for module
-        let bytes_per_field = eval_f.inner().get_num_bytes() * 2;
+        // Only inner value is serialized (modulus is omitted)
+        let bytes_per_field = eval_f.inner().get_num_bytes();
         let q0_bytes = row_len * bytes_per_field;
         assert!(
             proof.0.len() >= q0_bytes,

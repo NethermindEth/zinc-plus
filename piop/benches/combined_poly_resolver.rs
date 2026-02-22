@@ -53,7 +53,7 @@ fn do_bench<F, Air, IdealOverFFromRef, IdealOverF>(
     let max_degree = count_max_degree::<BinaryPoly<DEGREE_PLUS_ONE>, Air>();
 
     let (ic_proof, ic_prover_state) =
-        IdealCheckProtocol::<F, DEGREE_PLUS_ONE>::prove_as_subprotocol::<Air>(
+        IdealCheckProtocol::<F>::prove_as_subprotocol::<BinaryPoly<DEGREE_PLUS_ONE>, Air>(
             &mut prover_transcript,
             &trace,
             num_constraints,

@@ -1,12 +1,12 @@
 use crate::ideal_check::IdealCheckField;
-use crypto_primitives::PrimeField;
+use crypto_primitives::{PrimeField, Semiring};
 use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::collections::HashMap;
 use zinc_poly::{
     mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero},
-    univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF},
+    univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_uair::{ConstraintBuilder, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::{cfg_into_iter, from_ref::FromRef};
@@ -16,14 +16,15 @@ use zinc_utils::{cfg_into_iter, from_ref::FromRef};
 /// Since each coefficient is also a univariate polynomial
 /// we split the resulting MLE into coefficient MLEs.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn compute_combined_polynomials<F: IdealCheckField, U, const DEGREE_PLUS_ONE: usize>(
+pub fn compute_combined_polynomials<F: IdealCheckField, U, R>(
     trace_matrix: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
-    projected_scalars: &HashMap<BinaryPoly<DEGREE_PLUS_ONE>, DynamicPolynomialF<F>>,
+    projected_scalars: &HashMap<R, DynamicPolynomialF<F>>,
     num_constraints: usize,
     field_cfg: &F::Config,
 ) -> Vec<Vec<DenseMultilinearExtension<F::Inner>>>
 where
-    U: Uair<BinaryPoly<DEGREE_PLUS_ONE>>,
+    R: Semiring + 'static,
+    U: Uair<R>,
 {
     let field_zero = F::zero_with_cfg(field_cfg);
 
@@ -42,7 +43,7 @@ where
                     .map(|column| column[row_idx + 1].clone())
                     .collect_vec();
 
-                combine_rows_and_get_max_degree::<F, U, _>(
+                combine_rows_and_get_max_degree::<F, U, R>(
                     &up,
                     &down,
                     num_constraints,
@@ -80,19 +81,20 @@ where
 /// and compute the maximum degree of resulting polynomials
 /// to pad the resulting vector of MLEs accordingly.
 #[allow(clippy::arithmetic_side_effects)]
-fn combine_rows_and_get_max_degree<F, U, const DEGREE_PLUS_ONE: usize>(
+fn combine_rows_and_get_max_degree<F, U, R>(
     up: &[DynamicPolynomialF<F>],
     down: &[DynamicPolynomialF<F>],
     num_constraints: usize,
-    projected_scalars: &HashMap<BinaryPoly<DEGREE_PLUS_ONE>, DynamicPolynomialF<F>>,
+    projected_scalars: &HashMap<R, DynamicPolynomialF<F>>,
 ) -> (usize, Vec<DynamicPolynomialF<F>>)
 where
     F: IdealCheckField,
-    U: Uair<BinaryPoly<DEGREE_PLUS_ONE>>,
+    R: Semiring + 'static,
+    U: Uair<R>,
 {
     let mut constraint_builder = CombinedPolyRowBuilder::new(num_constraints);
 
-    let project = |x: &BinaryPoly<DEGREE_PLUS_ONE>| {
+    let project = |x: &R| {
         projected_scalars
             .get(x)
             .cloned()
@@ -116,7 +118,7 @@ where
         .iter()
         .map(|eval| eval.degree().unwrap_or(0))
         .max()
-        .expect("We assume the number of constraints is not zero so this iterator is not empty");
+        .unwrap_or(0); // 0 constraints → max_degree = 0
 
     (max_degree, combined_evaluations)
 }
