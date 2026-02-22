@@ -243,21 +243,43 @@ impl<F: PrimeField> MulAssign<&Self> for DynamicPolynomialF<F> {
 
 impl<F: PrimeField> Semiring for DynamicPolynomialF<F> {}
 
-impl<F: PrimeField> DynamicPolynomialF<F> {
+impl<F: PrimeField> Div for DynamicPolynomialF<F> {
+    type Output = Self;
+
+    fn div(self, rhs: Self) -> Self::Output {
+        self.div_rem_euclid(&rhs).0
+    }
+}
+
+impl<F: PrimeField> Rem for DynamicPolynomialF<F> {
+    type Output = Self;
+
+    fn rem(self, rhs: Self) -> Self::Output {
+        self.div_rem_euclid(&rhs).1
+    }
+}
+
+impl<F: PrimeField> Euclid for DynamicPolynomialF<F> {
+    fn div_euclid(&self, v: &Self) -> Self {
+        self.div_rem_euclid(v).0
+    }
+
+    fn rem_euclid(&self, v: &Self) -> Self {
+        self.div_rem_euclid(v).1
+    }
+
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn div_rem(&self, divisor: &Self) -> (Self, Self) {
+    fn div_rem_euclid(&self, divisor: &Self) -> (Self, Self) {
         let zero_poly = DynamicPolynomialF::zero();
-
-        assert!(!self.coeffs.is_empty(), "dividend is empty");
-
-        let cfg = self.coeffs[0].cfg();
-        let zero = F::zero_with_cfg(cfg);
 
         let divisor_deg = divisor.degree().expect("division by zero polynomial");
 
-        let dividend_deg = self
-            .degree()
-            .expect("dividend has non-empty coeffs but all are zero");
+        let Some(dividend_deg) = self.degree() else {
+            return (zero_poly.clone(), zero_poly);
+        };
+
+        let cfg = self.coeffs[0].cfg();
+        let zero = F::zero_with_cfg(cfg);
 
         if dividend_deg < divisor_deg {
             return (zero_poly.clone(), self.clone());
@@ -293,36 +315,6 @@ impl<F: PrimeField> DynamicPolynomialF<F> {
             DynamicPolynomialF { coeffs: quotient },
             DynamicPolynomialF { coeffs: remainder },
         )
-    }
-}
-
-impl<F: PrimeField> Div for DynamicPolynomialF<F> {
-    type Output = Self;
-
-    fn div(self, rhs: Self) -> Self::Output {
-        self.div_rem(&rhs).0
-    }
-}
-
-impl<F: PrimeField> Rem for DynamicPolynomialF<F> {
-    type Output = Self;
-
-    fn rem(self, rhs: Self) -> Self::Output {
-        self.div_rem(&rhs).1
-    }
-}
-
-impl<F: PrimeField> Euclid for DynamicPolynomialF<F> {
-    fn div_euclid(&self, v: &Self) -> Self {
-        self.div_rem(v).0
-    }
-
-    fn rem_euclid(&self, v: &Self) -> Self {
-        self.div_rem(v).1
-    }
-
-    fn div_rem_euclid(&self, v: &Self) -> (Self, Self) {
-        self.div_rem(v)
     }
 }
 
@@ -679,7 +671,7 @@ mod tests {
             coeffs: vec![f(0), f(0)],
         };
 
-        let _ = dividend.div_rem(&divisor);
+        let _ = dividend.div_rem_euclid(&divisor);
     }
 
     #[test]
@@ -691,7 +683,7 @@ mod tests {
             coeffs: vec![f(1), f(1)],
         };
 
-        let (q, r) = dividend.div_rem(&divisor);
+        let (q, r) = dividend.div_rem_euclid(&divisor);
         let q2 = dividend.div_euclid(&divisor);
         let r2 = dividend.rem_euclid(&divisor);
 
@@ -780,7 +772,7 @@ mod tests {
             dividend in any_poly_varied(50),
             divisor in any_poly_varied(50)
         ) {
-            let (quotient, remainder) = dividend.div_rem(&divisor);
+            let (quotient, remainder) = dividend.div_rem_euclid(&divisor);
 
             let product = &quotient * &divisor;
             let reconstructed = product + &remainder;
@@ -799,7 +791,7 @@ mod tests {
             d in any_poly_varied(25)
         ) {
             let dividend = &q * &d;
-            let (quotient, remainder) = dividend.div_rem(&d);
+            let (quotient, remainder) = dividend.div_rem_euclid(&d);
 
             let mut remainder_trimmed = remainder;
             let mut quotient_trimmed = quotient;
