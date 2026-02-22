@@ -40,7 +40,8 @@ use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_utils::{
     UNCHECKED,
     from_ref::FromRef,
-    inner_product::MBSInnerProduct,
+    inner_product::{MBSInnerProduct, ScalarProduct},
+    mul_by_scalar::ScalarWideningMulByScalar,
     named::Named,
     projectable_to_field::ProjectableToField,
 };
@@ -59,6 +60,9 @@ use zinc_sha256_uair::{Sha256Uair, witness::GenerateWitness};
 
 const INT_LIMBS: usize = U64::LIMBS;
 type F = MontyField<{ INT_LIMBS * 4 }>;
+/// 512-bit field for ECDSA PCS with Int<4> evaluations.
+/// Wider than F because CombR = Int<8> (512-bit) requires Fmod = Uint<8>.
+type FScalar = MontyField<{ INT_LIMBS * 8 }>;
 
 struct Sha256ZipTypes<CwCoeff, const D_PLUS_ONE: usize>(PhantomData<CwCoeff>);
 
@@ -89,6 +93,29 @@ where
     type ArrCombRDotChal = MBSInnerProduct;
 }
 
+/// ZipTypes for ECDSA columns using scalar (Int<4>) evaluations.
+///
+/// ECDSA values are field elements (scalars), not polynomials.
+/// Using Int<4> (256-bit) instead of BinaryPoly<32> saves ~32× per-cell
+/// encoding cost in the IPRS NTT, since each cell is 1 coefficient
+/// rather than 32 binary coefficients.
+struct EcdsaScalarZipTypes;
+
+impl ZipTypes for EcdsaScalarZipTypes {
+    const NUM_COLUMN_OPENINGS: usize = 64;
+    type Eval = Int<{ INT_LIMBS * 4 }>;      // 256-bit integer
+    type Cw = Int<{ INT_LIMBS * 5 }>;        // 320-bit codeword
+    type Fmod = Uint<{ INT_LIMBS * 8 }>;     // 512-bit modulus search
+    type PrimeTest = MillerRabin;
+    type Chal = i128;
+    type Pt = i128;
+    type CombR = Int<{ INT_LIMBS * 8 }>;     // 512-bit combination ring
+    type Comb = Self::CombR;
+    type EvalDotChal = ScalarProduct;
+    type CombDotChal = ScalarProduct;
+    type ArrCombRDotChal = MBSInnerProduct;
+}
+
 // IPRS code types for BinaryPoly<32>
 type IprsBPoly32R4B64<const DEPTH: usize, const CHECK: bool> = IprsCode<
     Sha256ZipTypes<i64, 32>,
@@ -109,6 +136,20 @@ type IprsBPoly32R4B32<const DEPTH: usize, const CHECK: bool> = IprsCode<
     CHECK,
 >;
 
+// IPRS code types for Int<4> (scalar ECDSA evaluations)
+type IprsInt4R4B64<const DEPTH: usize, const CHECK: bool> = IprsCode<
+    EcdsaScalarZipTypes,
+    PnttConfigF2_16R4B64<DEPTH>,
+    ScalarWideningMulByScalar<Int<{ INT_LIMBS * 5 }>>,
+    CHECK,
+>;
+type IprsInt4R4B16<const DEPTH: usize, const CHECK: bool> = IprsCode<
+    EcdsaScalarZipTypes,
+    PnttConfigF2_16R4B16<DEPTH>,
+    ScalarWideningMulByScalar<Int<{ INT_LIMBS * 5 }>>,
+    CHECK,
+>;
+
 // ─── SHA-256 Trace Parameters ───────────────────────────────────────────────
 //
 // SHA-256 has 64 rows × 19 columns.
@@ -123,11 +164,12 @@ type IprsBPoly32R4B32<const DEPTH: usize, const CHECK: bool> = IprsCode<
 //     → 8×64=512 SHA rows + 258 ECDSA rows = 770 → pad to 1024
 
 const SHA256_NUM_VARS: usize = 7;        // 2^7 = 128 rows (64 real + 64 padding)
-const SHA256_BATCH_SIZE: usize = 19;      // 19 SHA-256 columns
+const SHA256_BATCH_SIZE: usize = 20;      // 20 SHA-256 columns
 
-// For 8× SHA-256 + ECDSA: 33 columns (19 SHA + 14 ECDSA), 1024 rows
-const SHA256_8X_ECDSA_NUM_VARS: usize = 10;   // 1024 rows
-const SHA256_8X_ECDSA_BATCH_SIZE: usize = 34;  // 20 SHA + 14 ECDSA columns
+// For 8× SHA-256 + ECDSA: two separate PCS batches
+const SHA256_8X_NUM_VARS: usize = 9;           // 2^9 = 512 rows (8 × 64 SHA rounds)
+const ECDSA_NUM_VARS: usize = 9;               // 2^9 = 512 rows (258 ECDSA rows + padding)
+const ECDSA_BATCH_SIZE: usize = 14;            // 14 ECDSA columns
 
 // ─── Benchmark helpers ──────────────────────────────────────────────────────
 
@@ -140,6 +182,20 @@ fn generate_random_trace(
     num_vars: usize,
     num_cols: usize,
 ) -> Vec<DenseMultilinearExtension<BinaryPoly<32>>> {
+    let mut rng = rand::rng();
+    (0..num_cols)
+        .map(|_| DenseMultilinearExtension::rand(num_vars, &mut rng))
+        .collect()
+}
+
+/// Generate random ECDSA-shaped trace with Int<4> (256-bit scalar) evaluations.
+///
+/// Using scalars instead of BinaryPoly<32> makes PCS encoding ~32× cheaper
+/// per cell since each evaluation is 1 coefficient rather than 32.
+fn generate_random_scalar_trace(
+    num_vars: usize,
+    num_cols: usize,
+) -> Vec<DenseMultilinearExtension<Int<{ INT_LIMBS * 4 }>>> {
     let mut rng = rand::rng();
     (0..num_cols)
         .map(|_| DenseMultilinearExtension::rand(num_vars, &mut rng))
@@ -332,70 +388,157 @@ fn sha256_single(c: &mut Criterion) {
     group.finish();
 }
 
-/// 8× SHA-256 + ECDSA (1024 rows × 33 columns = poly_size 2^10).
+/// 8× SHA-256 + ECDSA — the paper's target benchmark configuration.
 ///
-/// This is the paper's target benchmark configuration.
-/// - 19 columns for SHA-256 (8 instances × 64 rows = 512 rows)
-/// - 14 columns for ECDSA (258 rows, simulated with random data)
-/// - All padded to 1024 rows, total 33 columns.
+/// Uses **two separate PCS batches** with evaluation types matched to the
+/// arithmetic of each UAIR:
+/// - SHA-256:  20 columns × BinaryPoly<32> (polynomial evaluations, 32 binary coefficients)
+/// - ECDSA:    14 columns × Int<4>          (scalar evaluations, 1 × 256-bit integer)
 ///
-/// The combined trace uses **real SHA-256 witness** columns (19) concatenated
-/// with random ECDSA-shaped columns (14). The PCS cost is data-agnostic, so
-/// timing is identical regardless of trace content; this labelling makes the
-/// benchmark honest about what the witness represents.
+/// This is ~32× cheaper per cell for the ECDSA columns compared to
+/// BinaryPoly<32>, because the IPRS NTT processes 1 coefficient rather than 32.
 ///
-/// **Note:** Proof size for DEPTH=2 (1024 rows) does NOT meet the paper's
-/// 200–300 KB target due to i64 serialization width and coefficient
-/// incompressibility. Proof size claims should be scoped to DEPTH=1 configs.
-/// The 14-column DEPTH=1 benchmarks below DO meet the target.
+/// Both batches use DEPTH=1 (row_len=512, poly_size=512), which gives
+/// valid proof-size claims under deflate compression.
+///
+/// Target metrics (MacBook Air M4):
+///   - Combined prover:  < 30 ms (or just above)
+///   - Combined verifier: < 5 ms
 fn sha256_8x_ecdsa(c: &mut Criterion) {
     let mut group = c.benchmark_group("8xSHA256+ECDSA");
     group.sample_size(10);
 
-    // ── Build combined trace: 19 SHA-256 cols + 14 random ECDSA cols ─
-    // SHA-256 witness at poly_size=1024 (10 vars) — real witness data
-    let sha_trace = generate_sha256_trace(SHA256_8X_ECDSA_NUM_VARS);
-    // Random ECDSA-shaped columns (matching 14-column ECDSA geometry)
-    let ecdsa_trace = generate_random_trace(SHA256_8X_ECDSA_NUM_VARS, 14);
-    let trace_33: Vec<DenseMultilinearExtension<BinaryPoly<32>>> =
-        sha_trace.into_iter().chain(ecdsa_trace.into_iter()).collect();
-    assert_eq!(trace_33.len(), SHA256_8X_ECDSA_BATCH_SIZE);
+    // ── Build traces ────────────────────────────────────────────────
+    // SHA-256: 20 columns × 512 rows (8 instances × 64 rounds)
+    let sha_trace = generate_sha256_trace(SHA256_8X_NUM_VARS);
+    assert_eq!(sha_trace.len(), SHA256_BATCH_SIZE);
 
-    // poly_size = 2^10 = 1024, num_rows = 1, row_len = 1024
-    // R4B16 DEPTH=2 gives row_len = 16 × 64 = 1024  ✓
-    // NOTE: This is PCS-only timing. For PIOP overhead, see sha256_full_pipeline.
-    bench_pcs_pipeline::<Sha256ZipTypes<i64, 32>, IprsBPoly32R4B16<2, UNCHECKED>, 10, UNCHECKED>(
-        &mut group,
-        "33cols/PCS-only/R4B16d2",
-        1,
-        SHA256_8X_ECDSA_BATCH_SIZE,
-        &trace_33,
+    // ECDSA: 14 columns × 512 rows (258 real + 254 padding)
+    // Int<4> = 256-bit scalar — matches secp256k1 field element width
+    let ecdsa_trace = generate_random_scalar_trace(ECDSA_NUM_VARS, ECDSA_BATCH_SIZE);
+    assert_eq!(ecdsa_trace.len(), ECDSA_BATCH_SIZE);
+
+    // ── PCS params ──────────────────────────────────────────────────
+    // SHA: BinaryPoly<32>, R4B64 DEPTH=1 → row_len = 64 × 8 = 512 ✓
+    type ShaZt = Sha256ZipTypes<i64, 32>;
+    type ShaLc = IprsBPoly32R4B64<1, UNCHECKED>;
+    let sha_params = ZipPlusParams::<ShaZt, ShaLc>::new(
+        SHA256_8X_NUM_VARS, 1, ShaLc::new(512),
     );
 
-    // ── Paper model config: 14 columns (ECDSA-sized), DEPTH=1 ────────
-    // The paper's proof_size.py uses n_pol=14.
-    // Benchmark with 14 columns at poly=2^9 (ECDSA's 258 rows padded to 512)
-    // R4B64 DEPTH=1: row_len = 64 × 8 = 512  ✓
-    // **DEPTH=1: proof size claims are valid here.**
-    let trace_14 = generate_random_trace(9, 14);
-    bench_pcs_pipeline::<Sha256ZipTypes<i64, 32>, IprsBPoly32R4B64<1, UNCHECKED>, 9, UNCHECKED>(
-        &mut group,
-        "14cols/PCS-only/R4B64d1",
-        1,
-        14,
-        &trace_14,
+    // ECDSA: Int<4>, R4B64 DEPTH=1 → row_len = 64 × 8 = 512 ✓
+    type EcZt = EcdsaScalarZipTypes;
+    type EcLc = IprsInt4R4B64<1, UNCHECKED>;
+    let ec_params = ZipPlusParams::<EcZt, EcLc>::new(
+        ECDSA_NUM_VARS, 1, EcLc::new(512),
     );
 
-    // ── Paper model config: 14 columns at poly=2^7 (128 rows) ────────
-    // Smaller config with R4B16 DEPTH=1 (row_len=128, DEPTH=1 compresses well)
-    // **DEPTH=1: proof size claims are valid here.**
-    let trace_14_small = generate_random_trace(7, 14);
-    bench_pcs_pipeline::<Sha256ZipTypes<i64, 32>, IprsBPoly32R4B16<1, UNCHECKED>, 7, UNCHECKED>(
-        &mut group,
-        "14cols/PCS-only/R4B16d1",
-        1,
-        14,
-        &trace_14_small,
+    // ── Combined Prover (SHA PCS + ECDSA PCS) ───────────────────────
+    group.bench_function("Combined/PCS/Prover", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let t = Instant::now();
+
+                // SHA PCS: commit + test + evaluate
+                let (sha_hint, _) = BatchedZipPlus::<ShaZt, ShaLc>::commit(
+                    &sha_params, &sha_trace,
+                ).expect("sha commit");
+                let sha_tx = BatchedZipPlus::<ShaZt, ShaLc>::test::<UNCHECKED>(
+                    &sha_params, &sha_trace, &sha_hint,
+                ).expect("sha test");
+                let sha_pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
+                let _ = BatchedZipPlus::<ShaZt, ShaLc>::evaluate::<F, UNCHECKED>(
+                    &sha_params, &sha_trace, &sha_pt, sha_tx,
+                ).expect("sha evaluate");
+
+                // ECDSA PCS: commit + test + evaluate (Int<4> — ~32× cheaper per cell)
+                let (ec_hint, _) = BatchedZipPlus::<EcZt, EcLc>::commit(
+                    &ec_params, &ecdsa_trace,
+                ).expect("ecdsa commit");
+                let ec_tx = BatchedZipPlus::<EcZt, EcLc>::test::<UNCHECKED>(
+                    &ec_params, &ecdsa_trace, &ec_hint,
+                ).expect("ecdsa test");
+                let ec_pt: Vec<i128> = vec![1i128; ECDSA_NUM_VARS];
+                let _ = BatchedZipPlus::<EcZt, EcLc>::evaluate::<FScalar, UNCHECKED>(
+                    &ec_params, &ecdsa_trace, &ec_pt, ec_tx,
+                ).expect("ecdsa evaluate");
+
+                total += t.elapsed();
+            }
+            total
+        });
+    });
+
+    // ── Combined Verifier ───────────────────────────────────────────
+    // Prepare SHA proof
+    let (sha_hint, sha_comm) = BatchedZipPlus::<ShaZt, ShaLc>::commit(
+        &sha_params, &sha_trace,
+    ).expect("commit");
+    let sha_tx = BatchedZipPlus::<ShaZt, ShaLc>::test::<UNCHECKED>(
+        &sha_params, &sha_trace, &sha_hint,
+    ).expect("test");
+    let sha_pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
+    let (sha_evals_f, sha_proof) = BatchedZipPlus::<ShaZt, ShaLc>::evaluate::<F, UNCHECKED>(
+        &sha_params, &sha_trace, &sha_pt, sha_tx,
+    ).expect("evaluate");
+    let sha_cfg = *sha_evals_f[0].cfg();
+    let sha_pt_f: Vec<F> = sha_pt.iter().map(|v| v.into_with_cfg(&sha_cfg)).collect();
+
+    // Prepare ECDSA proof
+    let (ec_hint, ec_comm) = BatchedZipPlus::<EcZt, EcLc>::commit(
+        &ec_params, &ecdsa_trace,
+    ).expect("commit");
+    let ec_tx = BatchedZipPlus::<EcZt, EcLc>::test::<UNCHECKED>(
+        &ec_params, &ecdsa_trace, &ec_hint,
+    ).expect("test");
+    let ec_pt: Vec<i128> = vec![1i128; ECDSA_NUM_VARS];
+    let (ec_evals_f, ec_proof) = BatchedZipPlus::<EcZt, EcLc>::evaluate::<FScalar, UNCHECKED>(
+        &ec_params, &ecdsa_trace, &ec_pt, ec_tx,
+    ).expect("evaluate");
+    let ec_cfg = *ec_evals_f[0].cfg();
+    let ec_pt_f: Vec<FScalar> = ec_pt.iter().map(|v| v.into_with_cfg(&ec_cfg)).collect();
+
+    group.bench_function("Combined/PCS/Verifier", |b| {
+        b.iter(|| {
+            let sha_r = BatchedZipPlus::<ShaZt, ShaLc>::verify::<F, UNCHECKED>(
+                &sha_params, &sha_comm, &sha_pt_f, &sha_evals_f, &sha_proof,
+            );
+            let _ = black_box(sha_r);
+            let ec_r = BatchedZipPlus::<EcZt, EcLc>::verify::<FScalar, UNCHECKED>(
+                &ec_params, &ec_comm, &ec_pt_f, &ec_evals_f, &ec_proof,
+            );
+            let _ = black_box(ec_r);
+        });
+    });
+
+    // ── Proof sizes ─────────────────────────────────────────────────
+    let sha_proof_bytes: Vec<u8> = {
+        let tx: zip_plus::pcs_transcript::PcsTranscript = sha_proof.into();
+        tx.stream.into_inner()
+    };
+    let ec_proof_bytes: Vec<u8> = {
+        let tx: zip_plus::pcs_transcript::PcsTranscript = ec_proof.into();
+        tx.stream.into_inner()
+    };
+
+    let mut all_bytes = Vec::new();
+    all_bytes.extend(&sha_proof_bytes);
+    all_bytes.extend(&ec_proof_bytes);
+    let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&all_bytes).unwrap();
+    let compressed = encoder.finish().unwrap();
+
+    println!(
+        "  SHA PCS proof: {} bytes ({:.1} KB), ECDSA PCS proof: {} bytes ({:.1} KB)",
+        sha_proof_bytes.len(), sha_proof_bytes.len() as f64 / 1024.0,
+        ec_proof_bytes.len(), ec_proof_bytes.len() as f64 / 1024.0,
+    );
+    println!(
+        "  Combined total: {} bytes ({:.1} KB), compressed = {} bytes ({:.1} KB, {:.1}× ratio)",
+        all_bytes.len(), all_bytes.len() as f64 / 1024.0,
+        compressed.len(), compressed.len() as f64 / 1024.0,
+        all_bytes.len() as f64 / compressed.len() as f64,
     );
 
     group.finish();
