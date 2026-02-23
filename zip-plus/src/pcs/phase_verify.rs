@@ -17,7 +17,7 @@ use rayon::prelude::*;
 use zinc_poly::Polynomial;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
-    UNCHECKED, cfg_into_iter, cfg_iter,
+    UNCHECKED, cfg_into_iter,
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProduct},
     mul_by_scalar::MulByScalar,
@@ -99,9 +99,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let combined_row: Vec<Zt::CombR> =
             transcript.read_const_many(vp.linear_code.row_len())?;
 
-        let encoded_combined_row: Vec<Zt::CombR> =
-            vp.linear_code.encode_wide(&combined_row);
-
         // Read the transcript sequentially
         let columns_and_proofs: Vec<_> = (0..Zt::NUM_COLUMN_OPENINGS)
             .map(|_| -> Result<_, ZipError> {
@@ -114,39 +111,48 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             })
             .try_collect()?;
 
-        let columns_opened: Vec<(usize, Vec<Zt::Cw>)> = cfg_into_iter!(columns_and_proofs)
-            .map(
-                |(column_idx, column_values, proof)| -> Result<_, ZipError> {
-                    Self::verify_column_testing::<CHECK_FOR_OVERFLOW>(
-                        &alphas,
-                        &coeffs,
-                        &encoded_combined_row,
-                        &column_values,
-                        column_idx,
-                        vp.num_rows,
-                    )?;
+        // Encode the combined row only at the opened column positions
+        // (spot-check encoding — much cheaper than full encode for the verifier).
+        let positions: Vec<usize> = columns_and_proofs
+            .iter()
+            .map(|(idx, _, _)| *idx)
+            .collect();
+        let encoded_at_positions: Vec<Zt::CombR> =
+            vp.linear_code
+                .encode_wide_at_positions(&combined_row, &positions);
 
-                    proof
-                        .verify(root, &column_values, column_idx)
-                        .map_err(|e| {
-                            ZipError::InvalidPcsOpen(format!(
-                                "Column opening verification failed: {e}"
-                            ))
-                        })?;
+        let columns_opened: Vec<(usize, Vec<Zt::Cw>)> =
+            cfg_into_iter!(columns_and_proofs.into_iter().zip(encoded_at_positions).collect::<Vec<_>>())
+                .map(
+                    |((column_idx, column_values, proof), encoded_value)| -> Result<_, ZipError> {
+                        Self::verify_column_testing::<CHECK_FOR_OVERFLOW>(
+                            &alphas,
+                            &coeffs,
+                            &encoded_value,
+                            &column_values,
+                            vp.num_rows,
+                        )?;
 
-                    Ok((column_idx, column_values))
-                },
-            )
-            .collect::<Result<_, _>>()?;
+                        proof
+                            .verify(root, &column_values, column_idx)
+                            .map_err(|e| {
+                                ZipError::InvalidPcsOpen(format!(
+                                    "Column opening verification failed: {e}"
+                                ))
+                            })?;
+
+                        Ok((column_idx, column_values))
+                    },
+                )
+                .collect::<Result<_, _>>()?;
         Ok(columns_opened)
     }
 
     pub(crate) fn verify_column_testing<const CHECK_FOR_OVERFLOW: bool>(
         alphas: &[Zt::Chal],
         coeffs: &[Zt::Chal],
-        encoded_combined_row: &[Zt::CombR],
+        expected_encoded: &Zt::CombR,
         column_entries: &[Zt::Cw],
-        column: usize,
         num_rows: usize,
     ) -> Result<(), ZipError> {
         let column_entries_comb: Zt::CombR = if num_rows > 1 {
@@ -174,7 +180,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             )?
         };
 
-        if column_entries_comb != encoded_combined_row[column] {
+        if column_entries_comb != *expected_encoded {
             return Err(ZipError::InvalidPcsOpen("Proximity failure".into()));
         }
         Ok(())
@@ -195,7 +201,13 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         Zt::Cw: ProjectableToField<F>,
     {
         let q_0_combined_row = transcript.read_field_elements(vp.linear_code.row_len(), field_cfg)?;
-        let encoded_combined_row = vp.linear_code.encode_f(&q_0_combined_row);
+
+        // Encode the combined row only at the opened column positions
+        let eval_positions: Vec<usize> = columns_opened
+            .iter()
+            .map(|(idx, _)| *idx)
+            .collect();
+        let encoded_at_positions = vp.linear_code.encode_f_at_positions(&q_0_combined_row, &eval_positions);
 
         let (q_0, q_1) = point_to_tensor(vp.num_rows, point_f, field_cfg)?;
 
@@ -211,12 +223,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             ));
         }
         let project = Zt::Cw::prepare_projection(&projecting_element);
-        cfg_iter!(columns_opened).try_for_each(|(column_idx, column_values)| {
+        let open_count = columns_opened.len();
+        cfg_into_iter!(0..open_count).try_for_each(|idx| {
+            let (_column_idx, column_values) = &columns_opened[idx];
+            let encoded_value = &encoded_at_positions[idx];
             Self::verify_proximity_q_0(
                 &q_0,
-                &encoded_combined_row,
+                encoded_value,
                 column_values,
-                *column_idx,
                 vp.num_rows,
                 &project,
                 field_cfg,
@@ -228,9 +242,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
     pub(crate) fn verify_proximity_q_0<F>(
         q_0: &[F],
-        encoded_q_0_combined_row: &[F],
+        expected_encoded: &F,
         column_entries: &[Zt::Cw],
-        column: usize,
         num_rows: usize,
         project: &impl Fn(&<Zt as ZipTypes>::Cw) -> F,
         field_cfg: &F::Config,
@@ -249,7 +262,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         } else {
             project(column_entries.first().expect("No column entries"))
         };
-        if column_entries_comb != encoded_q_0_combined_row[column] {
+        if column_entries_comb != *expected_encoded {
             return Err(ZipError::InvalidPcsOpen("Proximity failure".into()));
         }
 

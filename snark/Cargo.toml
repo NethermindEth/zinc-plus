@@ -30,6 +30,7 @@ thiserror = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 flate2 = "1.1"
+rayon = { workspace = true }
 
 [features]
 parallel = [

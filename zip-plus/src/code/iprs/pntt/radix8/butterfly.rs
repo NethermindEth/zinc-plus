@@ -7,7 +7,7 @@ use super::MulByTwiddle;
 
 /// The butterfly table for radix-8 FFT. Each entry is the index of the twiddle
 /// factor to be used for the corresponding input element.
-const BUTTERFLY_TABLE: [[usize; 7]; 8] = [
+pub(crate) const BUTTERFLY_TABLE: [[usize; 7]; 8] = [
     [0, 0, 0, 0, 0, 0, 0],
     [1, 2, 3, 4, 5, 6, 7],
     [2, 4, 6, 0, 2, 4, 6],

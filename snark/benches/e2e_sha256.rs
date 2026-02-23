@@ -669,13 +669,19 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
 
     group.bench_function("Combined/PCS/Verifier", |b| {
         b.iter(|| {
-            let sha_r = BatchedZipPlus::<ShaZt, ShaLc>::verify::<F, UNCHECKED>(
-                &sha_params, &sha_comm, &sha_pt, &sha_proof,
+            let (sha_r, ec_r) = rayon::join(
+                || {
+                    BatchedZipPlus::<ShaZt, ShaLc>::verify::<F, UNCHECKED>(
+                        &sha_params, &sha_comm, &sha_pt, &sha_proof,
+                    )
+                },
+                || {
+                    BatchedZipPlus::<EcZt, EcLc>::verify::<FScalar, UNCHECKED>(
+                        &ec_params, &ec_comm, &ec_pt, &ec_proof,
+                    )
+                },
             );
             let _ = black_box(sha_r);
-            let ec_r = BatchedZipPlus::<EcZt, EcLc>::verify::<FScalar, UNCHECKED>(
-                &ec_params, &ec_comm, &ec_pt, &ec_proof,
-            );
             let _ = black_box(ec_r);
         });
     });
@@ -874,15 +880,31 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
         // ── Split Verifier (3 batches) ──────────────────────────────
         group.bench_function("SplitSHA/PCS/Verifier", |b| {
             b.iter(|| {
-                let _ = black_box(BatchedZipPlus::<ShaPolyZt, ShaPolyLc>::verify::<F, UNCHECKED>(
-                    &sha_poly_params, &sp_comm, &sp_pt, &sp_proof,
-                ));
-                let _ = black_box(BatchedZipPlus::<ShaIntZt, ShaIntLc>::verify::<F, UNCHECKED>(
-                    &sha_int_params, &si_comm, &si_pt, &si_proof,
-                ));
-                let _ = black_box(BatchedZipPlus::<EcZt, EcLc>::verify::<FScalar, UNCHECKED>(
-                    &ec_params, &ec_comm, &ec_pt, &ec_proof,
-                ));
+                // Run all 3 verify calls concurrently using rayon::join
+                let ((r1, r2), r3) = rayon::join(
+                    || {
+                        rayon::join(
+                            || {
+                                BatchedZipPlus::<ShaPolyZt, ShaPolyLc>::verify::<F, UNCHECKED>(
+                                    &sha_poly_params, &sp_comm, &sp_pt, &sp_proof,
+                                )
+                            },
+                            || {
+                                BatchedZipPlus::<ShaIntZt, ShaIntLc>::verify::<F, UNCHECKED>(
+                                    &sha_int_params, &si_comm, &si_pt, &si_proof,
+                                )
+                            },
+                        )
+                    },
+                    || {
+                        BatchedZipPlus::<EcZt, EcLc>::verify::<FScalar, UNCHECKED>(
+                            &ec_params, &ec_comm, &ec_pt, &ec_proof,
+                        )
+                    },
+                );
+                let _ = black_box(r1);
+                let _ = black_box(r2);
+                let _ = black_box(r3);
             });
         });
 
