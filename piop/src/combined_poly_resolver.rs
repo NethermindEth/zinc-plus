@@ -177,7 +177,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         let evals: Vec<F> = sumcheck_prover_state.mles[2..]
             .iter()
             .map(|mle| {
-                mle.clone().evaluate_with_config(slice::from_ref(last_sumcheck_challenge), field_cfg)
+                mle.clone()
+                    .evaluate_with_config(slice::from_ref(last_sumcheck_challenge), field_cfg)
             })
             .try_collect()?;
 

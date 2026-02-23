@@ -295,7 +295,10 @@ where
     ) -> Result<F, EvaluationError> {
         if point.len() == self.num_vars {
             self.fix_variables_with_config(point, config);
-            Ok(F::new_unchecked_with_cfg(self.into_iter().next().expect("Evaluations should not be empty"),
+            Ok(F::new_unchecked_with_cfg(
+                self.into_iter()
+                    .next()
+                    .expect("Evaluations should not be empty"),
                 config,
             ))
         } else {

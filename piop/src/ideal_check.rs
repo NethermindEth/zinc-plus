@@ -5,11 +5,12 @@ mod structs;
 
 pub use structs::*;
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 use crate::projections::{ColumnMajorTrace, RowMajorTrace};
 use batched_ideal_check::*;
 use crypto_primitives::PrimeField;
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
 use derive_more::From;
 use num_traits::ConstZero;
 use std::collections::HashMap;

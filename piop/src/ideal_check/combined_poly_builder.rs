@@ -3,7 +3,6 @@ use rayon::prelude::*;
 
 use crate::projections::{ColumnMajorTrace, RowMajorTrace};
 use crypto_primitives::PrimeField;
-use itertools::Itertools;
 use std::collections::HashMap;
 use zinc_poly::{
     EvaluationError,

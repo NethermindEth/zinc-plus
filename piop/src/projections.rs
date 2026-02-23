@@ -12,7 +12,7 @@ use zinc_poly::{
     },
 };
 use zinc_uair::{Uair, collect_scalars::collect_scalars};
-use zinc_utils::{cfg_extend, cfg_into_iter, cfg_iter};
+use zinc_utils::{cfg_extend, cfg_into_iter, cfg_iter, cfg_iter_mut};
 
 /// Row-indexed trace matrix: `trace[row][col]`.
 /// Each row contains all column values for that row.
@@ -46,6 +46,8 @@ where
     let zero = F::zero_with_cfg(field_cfg);
     let one = F::one_with_cfg(field_cfg);
 
+    let binary_len = binary_poly_trace.len();
+    let arbitrary_len = arbitrary_poly_trace.len();
     let num_cols = binary_poly_trace.len() + arbitrary_poly_trace.len() + int_trace.len();
 
     // Determine number of rows from the first non-empty column
@@ -59,44 +61,53 @@ where
     // Build row-by-row
     cfg_into_iter!(0..num_rows)
         .map(|row_idx| {
-            let mut row = Vec::with_capacity(num_cols);
+            let mut row: Vec<DynamicPolynomialF<F>> = Vec::with_capacity(num_cols);
+            let spare = row.spare_capacity_mut();
 
             // Binary poly columns
-            for col in binary_poly_trace {
-                let binary_poly = &col.evaluations[row_idx];
-                row.push(
-                    binary_poly
-                        .iter()
-                        .map(|coeff| {
-                            if coeff.into_inner() {
-                                one.clone()
-                            } else {
-                                zero.clone()
-                            }
-                        })
-                        .collect(),
-                );
-            }
+            cfg_iter_mut!(spare[..binary_len])
+                .zip(cfg_iter!(binary_poly_trace))
+                .for_each(|(slot, col)| {
+                    let binary_poly = &col.evaluations[row_idx];
+                    slot.write(
+                        binary_poly
+                            .iter()
+                            .map(|coeff| {
+                                if coeff.into_inner() {
+                                    one.clone()
+                                } else {
+                                    zero.clone()
+                                }
+                            })
+                            .collect(),
+                    );
+                });
 
             // Arbitrary poly columns
-            for col in arbitrary_poly_trace {
-                let arbitrary_poly = &col.evaluations[row_idx];
-                row.push(
-                    arbitrary_poly
-                        .iter()
-                        .map(|coeff| F::from_with_cfg(coeff.clone(), field_cfg))
-                        .collect(),
-                );
-            }
+            cfg_iter_mut!(spare[binary_len..binary_len + arbitrary_len])
+                .zip(cfg_iter!(arbitrary_poly_trace))
+                .for_each(|(slot, col)| {
+                    let arbitrary_poly = &col.evaluations[row_idx];
+                    slot.write(
+                        arbitrary_poly
+                            .iter()
+                            .map(|coeff| F::from_with_cfg(coeff.clone(), field_cfg))
+                            .collect(),
+                    );
+                });
 
             // Int columns
-            for col in int_trace {
-                let int_val = &col.evaluations[row_idx];
-                row.push(DynamicPolynomialF {
-                    coeffs: vec![F::from_with_cfg(int_val.clone(), field_cfg)],
+            cfg_iter_mut!(spare[binary_len + arbitrary_len..])
+                .zip(cfg_iter!(int_trace))
+                .for_each(|(slot, col)| {
+                    let int_val = &col.evaluations[row_idx];
+                    slot.write(DynamicPolynomialF {
+                        coeffs: vec![F::from_with_cfg(int_val.clone(), field_cfg)],
+                    });
                 });
-            }
 
+            // SAFETY: All slots have been initialized above.
+            unsafe { row.set_len(num_cols) };
             row
         })
         .collect()
@@ -124,12 +135,15 @@ where
     let zero = F::zero_with_cfg(field_cfg);
     let one = F::one_with_cfg(field_cfg);
 
-    let num_vars = binary_poly_trace
-        .first()
-        .map(|c| c.num_vars)
-        .or_else(|| arbitrary_poly_trace.first().map(|c| c.num_vars))
-        .or_else(|| int_trace.first().map(|c| c.num_vars))
-        .unwrap_or(0);
+    let num_vars = [
+        binary_poly_trace.first().map(|c| c.num_vars),
+        arbitrary_poly_trace.first().map(|c| c.num_vars),
+        int_trace.first().map(|c| c.num_vars),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(0);
 
     let mut result =
         Vec::with_capacity(binary_poly_trace.len() + arbitrary_poly_trace.len() + int_trace.len());
