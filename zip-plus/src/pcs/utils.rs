@@ -16,6 +16,7 @@ fn err_too_many_variates(function: &str, upto: usize, got: usize) -> ZipError {
 pub(super) fn validate_input<Zt: ZipTypes, Lc: LinearCode<Zt>, Pt>(
     function: &str,
     param_num_vars: usize,
+    batch_size: usize,
     polys: &[&DenseMultilinearExtension<Zt::Eval>],
     points: &[&[Pt]],
 ) -> Result<(), ZipError> {
@@ -38,7 +39,10 @@ pub(super) fn validate_input<Zt: ZipTypes, Lc: LinearCode<Zt>, Pt>(
                 add!(mul!(codeword_bits, 2), ilog_round_up!(d, usize)),
                 challenge_bits
             ),
-            sub!(Zt::Eval::COEFF_BIT_WIDTH, 1)
+            add!(
+                sub!(Zt::Eval::COEFF_BIT_WIDTH, 1),
+                ilog_round_up!(batch_size, usize)
+            )
         );
         assert!(
             actual_lc_bits <= max_lc_bits,
