@@ -115,13 +115,17 @@ The prover takes the witness trace — a vector of `DenseMultilinearExtension<Ev
 
 The Ideal Check protocol operates as follows:
 
-1. **Projection:** The prover samples a random field element `α` from the Fiat-Shamir transcript. Each `BinaryPoly<32>` element (a polynomial with binary coefficients: $p(X) = \sum c_i X^i$ where $c_i \in \{0,1\}$) is *projected* to a prime field $\mathbb{F}_p$ by evaluating at $\alpha$: the value becomes $p(\alpha) = \sum c_i \alpha^i \in \mathbb{F}_p$. This maps the entire trace from `BinaryPoly<32>` to `DynamicPolynomialF<F>` (an $\mathbb{F}_p$-valued polynomial whose coefficients are themselves in $\mathbb{F}_p$).
+1. **Coefficient lifting $\mathbb{Z}[X] \to \mathbb{F}_q[X]$:** A random field element $\alpha$ is sampled from the Fiat-Shamir transcript, but it is **not used for evaluation** — it is only used to obtain the field configuration (`α.cfg()`). Each trace cell is lifted from its native ring to a polynomial over $\mathbb{F}_q$ by converting each coefficient individually. For example, a `BinaryPoly<32>` with binary coefficients $p(X) = \sum c_i X^i$ ($c_i \in \{0,1\}$) becomes a `DynamicPolynomialF<F>` with $\mathbb{F}_q$ coefficients $\hat{p}(X) = \sum \hat{c}_i X^i$ where $\hat{c}_i = c_i \bmod q$. This is a coefficient-wise embedding (not evaluation at $\alpha$), preserving the polynomial structure: the trace lives in $\mathbb{F}_q[X]$ after this step.
 
-2. **Combined polynomial construction:** The UAIR's `constrain_general` method is invoked with `up` and `down` row expressions. The constraint builder collects the algebraic expressions (products, sums, differences of trace columns and constant scalars) and evaluates them on the projected trace. Each constraint yields one "combined MLE" — a multilinear extension over the boolean hypercube whose evaluations are the constraint expressions at each row.
+2. **Combined polynomial construction:** The UAIR's `constrain_general` method is invoked with `up` and `down` row expressions in $\mathbb{F}_q[X]$. The constraint builder collects the algebraic expressions (products, sums, differences of trace columns and constant scalars) and evaluates them on the lifted trace. Each constraint yields one "combined MLE" — a multilinear extension over the boolean hypercube whose evaluations are the constraint expressions at each row, with each evaluation being a polynomial in $\mathbb{F}_q[X]$.
 
-3. **Evaluation at random point:** A random evaluation point $\mathbf{r} \in \mathbb{F}_p^{\text{num\_vars}}$ is sampled from the transcript. Each combined MLE is evaluated at $\mathbf{r}$, producing a `DynamicPolynomialF<F>` value (a univariate polynomial over $\mathbb{F}_p$ with coefficients that are the projected constraint expression at that point).
+3. **Evaluation at random point:** A random evaluation point $\mathbf{r} \in \mathbb{F}_q^{\text{num\_vars}}$ is sampled from the transcript. Each combined MLE is evaluated at $\mathbf{r}$, producing a `DynamicPolynomialF<F>` value — still a univariate polynomial over $\mathbb{F}_q$ (the MLE evaluation interpolates the coefficient-level MLEs, yielding one $\mathbb{F}_q$ value per coefficient index, which together form a polynomial in $X$).
 
-4. **The IC proof** consists of these evaluated polynomials (`combined_mle_values`).
+4. **Ideal membership check:** The IC prover sends these $\mathbb{F}_q[X]$ evaluated polynomials to the verifier, who checks membership in the corresponding ideals (e.g., $(X^{32}-1)$ for cyclotomic, $(X-2)$ for carry constraints). This check operates on $\mathbb{F}_q[X]$ values, **not** on $\mathbb{F}_q$ scalars.
+
+5. **The IC proof** consists of these evaluated polynomials (`combined_mle_values`).
+
+**Important:** The $\alpha$ challenge that projects $\mathbb{F}_q[X] \to \mathbb{F}_q$ (by evaluating each polynomial at $\alpha$) is sampled later, at the start of the CPR phase (Step 3 below). This ordering is deliberate: the ideal membership check must operate on $\mathbb{F}_q[X]$ polynomials (since ideals like $(X^{32}-1)$ are polynomial ideals), and the projection to scalars happens only after the ideal structure has been verified.
 
 **What this produces:** For each constraint, a claimed evaluation of the combined constraint polynomial at the random point. The verifier will check that each evaluation belongs to the correct ideal.
 
@@ -134,13 +138,15 @@ The Ideal Check protocol operates as follows:
 )
 ```
 
-The CPR reduces the IC's evaluation claims to claims about individual trace column evaluations:
+The CPR reduces the IC's evaluation claims to claims about individual trace column evaluations. Crucially, the CPR is where the **$\alpha$-projection from $\mathbb{F}_q[X]$ to $\mathbb{F}_q$** occurs:
 
-1. **Batching:** The verifier (via Fiat-Shamir) samples a random $\beta$, and the prover combines the $k$ constraint claims into a single sumcheck claim: $\sum_{b \in \{0,1\}^n} \text{eq}(\mathbf{r}, b) \cdot [f_0(b) + \beta f_1(b) + \ldots + \beta^k f_k(b)] = v_0 + \beta v_1 + \ldots + \beta^k v_k$
+1. **$\alpha$-projection $\mathbb{F}_q[X] \to \mathbb{F}_q$:** A fresh random challenge $\alpha$ is sampled from the Fiat-Shamir transcript (`projecting_element`). The prover evaluates every $\mathbb{F}_q[X]$ trace cell at $\alpha$: each `DynamicPolynomialF<F>` value $\hat{p}(X) = \sum_j c_j X^j$ becomes $\hat{p}(\alpha) = \sum_j c_j \alpha^j \in \mathbb{F}_q$. This flattens the trace from a matrix of $\mathbb{F}_q[X]$ polynomials to a matrix of $\mathbb{F}_q$ scalars. UAIR scalars are also projected from $\mathbb{F}_q[X]$ to $\mathbb{F}_q$ via `project_scalars_to_field`.
 
-2. **Sumcheck:** The prover runs a sumcheck protocol over this batched sum. In each round, the prover sends a univariate polynomial (message) that restricts one variable of the multilinear sum. After $n$ rounds, the sum is reduced to a claim about a single point.
+2. **Batching:** The verifier (via Fiat-Shamir) samples a random $\beta$, and the prover combines the $k$ constraint claims into a single sumcheck claim: $\sum_{b \in \{0,1\}^n} \text{eq}(\mathbf{r}, b) \cdot [f_0(b) + \beta f_1(b) + \ldots + \beta^k f_k(b)] = v_0 + \beta v_1 + \ldots + \beta^k v_k$
 
-3. **Opening:** At the end of sumcheck, the CPR provides the evaluations of each trace column MLE at the sumcheck evaluation point: `up_evals[i]` = column $i$ evaluated at the point, and `down_evals[i]` = column $i$ evaluated at the shifted point (for constraints that reference the next row).
+3. **Sumcheck:** The prover runs a sumcheck protocol over this batched sum (now over $\mathbb{F}_q$ scalars). In each round, the prover sends a univariate polynomial (message) that restricts one variable of the multilinear sum. After $n$ rounds, the sum is reduced to a claim about a single point.
+
+4. **Opening:** At the end of sumcheck, the CPR provides the evaluations of each trace column MLE at the sumcheck evaluation point: `up_evals[i]` = column $i$ evaluated at the point, and `down_evals[i]` = column $i$ evaluated at the shifted point (for constraints that reference the next row). These are $\mathbb{F}_q$ scalars.
 
 **What this produces:** A sumcheck proof (round messages + claimed sum) plus the column evaluation vectors `up_evals` and `down_evals`. These constitute the CPR's subclaim: "the committed trace polynomials, when evaluated at this point, yield these values."
 
@@ -695,13 +701,15 @@ The verifier now spends its time roughly as:
 
 ### 14.1 CPR→PCS Binding Gap
 
-**The most significant architectural gap.** The CPR produces evaluation claims: "column $i$ of the committed trace evaluates to `up_evals[i]` at the sumcheck point." The PCS independently verifies that the committed polynomials pass proximity testing and evaluation consistency at a *different* point (derived by hashing the CPR point into `i128` values via `derive_pcs_point()`).
+**The most significant architectural gap.** The CPR produces evaluation claims: "column $i$ of the committed trace evaluates to `up_evals[i]` at the sumcheck point $\mathbf{s}$, and to `down_evals[i]` at the shifted point." The PCS independently verifies that the committed polynomials pass proximity testing and evaluation consistency at a *different* point (derived by hashing the CPR point into `i128` values via `derive_pcs_point()`).
 
-**What's missing:** There is no check that the PCS-evaluated values are consistent with the CPR's claimed `up_evals`. The CPR operates on projected $\mathbb{F}_p$ values at the sumcheck point; the PCS evaluates committed `BinaryPoly<32>` polynomials at an `i128` point in a different coordinate system.
+**What's missing:** There is no check that the PCS-evaluated values are consistent with the CPR's claimed `up_evals` or `down_evals`. Both vectors are prover-supplied values that the CPR verifier plugs into the constraint expression to check algebraic consistency with the sumcheck terminal claim — but neither is verified against the PCS commitment. The CPR operates on projected $\mathbb{F}_q$ values at the sumcheck point; the PCS evaluates committed `BinaryPoly<32>` polynomials at an `i128` point in a different coordinate system.
 
-**Impact:** The IC, CPR, and PCS each independently verify their respective claims, but nothing cryptographically binds the CPR's column-evaluation claims to the PCS's committed polynomials. A malicious prover could (in theory) commit one trace via PCS, run the PIOP on a different trace, and both would pass independently.
+Specifically for `down_evals`: the "down" (shifted) trace is never separately committed. The prover constructs it by dropping the first row and appending a zero row (`column[1..].iter().cloned().collect()`), but only the original unshifted trace is committed via the PCS. The `down_evals` are absorbed into the Fiat-Shamir transcript (maintaining transcript consistency) but are otherwise taken on faith.
 
-**What would fix it:** Either (a) the PCS must evaluate at the CPR's sumcheck point and the verifier checks `up_evals[i] == pcs_opened_value[i]`, or (b) a secondary sumcheck reduces the CPR claims to a single evaluation claim that the PCS can verify directly.
+**Impact:** The IC, CPR, and PCS each independently verify their respective claims, but nothing cryptographically binds the CPR's column-evaluation claims (`up_evals` and `down_evals`) to the PCS's committed polynomials. A malicious prover could (in theory) commit one trace via PCS, run the PIOP on a different trace, and both would pass independently.
+
+**What would fix it:** Either (a) the PCS must evaluate at the CPR's sumcheck point $\mathbf{s}$ and the verifier checks `up_evals[i] == pcs_opened_value[i]` (and derives `down_evals` from the committed polynomials evaluated at the appropriately shifted point), or (b) a secondary sumcheck reduces the CPR claims to a single evaluation claim that the PCS can verify directly.
 
 This is documented in `pipeline.rs` with a detailed comment block.
 
