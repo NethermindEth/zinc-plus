@@ -1,44 +1,35 @@
 //! ECDSA full pipeline round-trip: PCS + IC + CPR → verify.
 //!
-//! Demonstrates end-to-end proving/verification for ECDSA constraints:
-//! 1. Commit the BinaryPoly<32> trace via PCS
-//! 2. IC₁ on BinaryPoly<32> (0 constraints — trivial pass)
-//! 3. Convert trace to DensePolynomial<i64, 1> (evaluate at X=2)
-//! 4. IC₂ on i64 (11 assert_zero constraints)
-//! 5. PCS test + evaluate
-//! 6. Verify IC₁, IC₂, CPRs, and PCS
+//! Demonstrates end-to-end proving/verification for ECDSA constraints
+//! using `Int<4>` throughout — the same 256-bit integer type is used as
+//! PCS evaluation type AND PIOP constraint ring (single-ring pipeline).
 //!
-//! **Note:** Uses the all-zero BinaryPoly<32> trace. The all-zero i64 trace
-//! trivially satisfies all 11 constraints. For non-trivial constraint testing,
-//! see `ecdsa_ideal_check.rs` which uses the constant-row (1,1,0) witness
-//! directly in `DensePolynomial<i64, 1>`.
+//! 1. Generate an all-zero `Int<4>` trace (14 columns × 128 rows)
+//! 2. Commit the trace via PCS (using `EcdsaScalarZipTypes`)
+//! 3. Run PIOP: IdealCheck (11 constraints) + CombinedPolyResolver
+//! 4. PCS test + evaluate
+//! 5. Verify IC, CPR, and PCS
+//!
+//! All-zero `Int<4>` trivially satisfies all 11 constraints.
+//! For non-trivial constraint testing, see `ecdsa_ideal_check.rs`.
 
 #![allow(clippy::arithmetic_side_effects)]
 
-use std::marker::PhantomData;
-
 use crypto_bigint::U64;
 use crypto_primitives::{
-    boolean::Boolean,
     crypto_bigint_int::Int,
+    crypto_bigint_monty::MontyField,
     crypto_bigint_uint::Uint,
-    FixedSemiring,
 };
 
 use zinc_poly::mle::DenseMultilinearExtension;
-use zinc_poly::univariate::binary::{
-    BinaryPoly, BinaryPolyInnerProduct, BinaryPolyWideningMulByScalar,
-};
-use zinc_poly::univariate::dense::{DensePolyInnerProduct, DensePolynomial};
 use zinc_primality::MillerRabin;
-use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::ideal::ImpossibleIdeal;
 use zinc_uair::ideal_collector::IdealOrZero;
 use zinc_utils::{
     UNCHECKED,
-    from_ref::FromRef,
-    inner_product::MBSInnerProduct,
-    named::Named,
+    inner_product::{MBSInnerProduct, ScalarProduct},
+    mul_by_scalar::ScalarWideningMulByScalar,
 };
 use zip_plus::{
     code::{
@@ -50,59 +41,54 @@ use zip_plus::{
 
 use zinc_ecdsa_uair::{
     EcdsaIdealOverF, EcdsaUair, NUM_COLS,
-    convert_trace_bp_to_i64,
 };
 use zinc_snark::pipeline;
 
-// ─── Type definitions (reused from other pipeline tests) ────────────────────
+// ─── Type definitions: Int<4> single-ring PCS configuration ─────────────────
 
 const INT_LIMBS: usize = U64::LIMBS;
 
-struct TestZipTypes<CwCoeff, const D_PLUS_ONE: usize>(PhantomData<CwCoeff>);
+/// ZipTypes for ECDSA using `Int<4>` (256-bit) evaluations throughout.
+///
+/// ECDSA values are field-element scalars — not polynomials — so `Int<4>`
+/// is the natural evaluation ring. All PIOP constraints are also expressed
+/// in `Int<4>`, making this a **single-ring** pipeline.
+struct EcdsaScalarZipTypes;
 
-impl<CwCoeff, const D_PLUS_ONE: usize> ZipTypes for TestZipTypes<CwCoeff, D_PLUS_ONE>
-where
-    CwCoeff: ConstTranscribable
-        + Copy
-        + Default
-        + FromRef<Boolean>
-        + Named
-        + FixedSemiring
-        + Send
-        + Sync,
-    Int<6>: FromRef<CwCoeff>,
-{
-    const NUM_COLUMN_OPENINGS: usize = 64;
-    type Eval = BinaryPoly<D_PLUS_ONE>;
-    type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
-    type Fmod = Uint<{ INT_LIMBS * 4 }>;
+impl ZipTypes for EcdsaScalarZipTypes {
+    const NUM_COLUMN_OPENINGS: usize = 147;
+    type Eval = Int<{ INT_LIMBS * 4 }>;          // 256-bit integer
+    type Cw = Int<{ INT_LIMBS * 5 }>;            // 320-bit codeword
+    type Fmod = Uint<{ INT_LIMBS * 8 }>;         // 512-bit modulus search
     type PrimeTest = MillerRabin;
     type Chal = i128;
     type Pt = i128;
-    type CombR = Int<{ INT_LIMBS * 6 }>;
-    type Comb = DensePolynomial<Self::CombR, D_PLUS_ONE>;
-    type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, D_PLUS_ONE>;
-    type CombDotChal =
-        DensePolyInnerProduct<Self::CombR, Self::Chal, Self::CombR, MBSInnerProduct, D_PLUS_ONE>;
+    type CombR = Int<{ INT_LIMBS * 8 }>;         // 512-bit combination ring
+    type Comb = Self::CombR;
+    type EvalDotChal = ScalarProduct;
+    type CombDotChal = ScalarProduct;
     type ArrCombRDotChal = MBSInnerProduct;
 }
 
-type Zt = TestZipTypes<i64, 32>;
-type Lc = IprsCode<Zt, PnttConfigF2_16R4B16<1>, BinaryPolyWideningMulByScalar<i64>, UNCHECKED>;
+type Zt = EcdsaScalarZipTypes;
+/// 512-bit PCS field — matches `Zt::Fmod = Uint<8>` and `Zt::CombR = Int<8>`.
+type PcsF = MontyField<{ U64::LIMBS * 8 }>;
+type Lc = IprsCode<Zt, PnttConfigF2_16R4B16<1>, ScalarWideningMulByScalar<Int<{ U64::LIMBS * 5 }>>, UNCHECKED>;
 
 #[test]
 fn ecdsa_pipeline_round_trip() {
     // Use num_vars=7 (128 rows) to match PCS config (row_len=128, DEPTH=1).
     let num_vars = 7;
 
-    // Generate all-zero BinaryPoly<32> trace (14 columns × 128 rows).
-    // All-zero satisfies all 11 ECDSA constraints when converted to i64.
-    let trace: Vec<DenseMultilinearExtension<BinaryPoly<32>>> = (0..NUM_COLS)
+    // Generate all-zero Int<4> trace (14 columns × 128 rows).
+    // All-zero trivially satisfies all 11 ECDSA constraints.
+    let zero = Int::<{ INT_LIMBS * 4 }>::default();
+    let trace: Vec<DenseMultilinearExtension<Int<{ INT_LIMBS * 4 }>>> = (0..NUM_COLS)
         .map(|_| {
             DenseMultilinearExtension::from_evaluations_vec(
                 num_vars,
-                vec![BinaryPoly::from(0u32); 1 << num_vars],
-                BinaryPoly::from(0u32),
+                vec![zero; 1 << num_vars],
+                zero,
             )
         })
         .collect();
@@ -112,26 +98,24 @@ fn ecdsa_pipeline_round_trip() {
     let linear_code = Lc::new(row_len);
     let params = ZipPlusParams::new(num_vars, 1, linear_code);
 
-    // ── Prove (dual-ring: 0 BP constraints + 11 i64 constraints) ────
-    let proof = pipeline::prove_dual_ring::<
-        EcdsaUair,          // U1: BinaryPoly<32> (0 constraints)
-        EcdsaUair,          // U2: DensePolynomial<i64, 1> (11 constraints)
+    // ── Prove (single-ring: 11 Int<4> constraints) ──────────────────
+    let proof = pipeline::prove_generic::<
+        EcdsaUair,                              // U: Uair<Int<4>>
+        Int<{ INT_LIMBS * 4 }>,                 // R = Int<4>
         Zt,
         Lc,
-        32,                 // D1 (BinaryPoly<32>)
-        1,                  // D2 (DensePolynomial<i64, 1>)
+        PcsF,                                   // PCS field (512-bit)
         UNCHECKED,
-        _,                  // ConvertFn (inferred)
     >(
         &params,
         &trace,
         num_vars,
-        convert_trace_bp_to_i64,
     );
 
-    println!("ECDSA pipeline prover completed:");
+    println!("ECDSA Int<4> pipeline prover completed:");
     println!("  PCS commit:      {:?}", proof.timing.pcs_commit);
-    println!("  IC+CPR (both):   {:?}", proof.timing.ideal_check);
+    println!("  Ideal check:     {:?}", proof.timing.ideal_check);
+    println!("  CPR:             {:?}", proof.timing.combined_poly_resolver);
     println!("  PCS test:        {:?}", proof.timing.pcs_test);
     println!("  PCS evaluate:    {:?}", proof.timing.pcs_evaluate);
     println!("  Total:           {:?}", proof.timing.total);
@@ -140,20 +124,14 @@ fn ecdsa_pipeline_round_trip() {
         proof.pcs_proof_bytes.len(),
         proof.pcs_proof_bytes.len() as f64 / 1024.0,
     );
-    println!(
-        "  BP IC: {} constraints, i64 IC: {} constraints",
-        proof.bp_ic_proof_values.len(),
-        proof.qx_ic_proof_values.len(),
-    );
 
     // ── Verify ──────────────────────────────────────────────────────
-    let verify_result = pipeline::verify_dual_ring::<
-        EcdsaUair,          // U1
-        EcdsaUair,          // U2
+    let verify_result = pipeline::verify_generic::<
+        EcdsaUair,                              // U: Uair<Int<4>>
+        Int<{ INT_LIMBS * 4 }>,                 // R = Int<4>
         Zt,
         Lc,
-        32,                 // D1
-        1,                  // D2
+        PcsF,                                   // PCS field (512-bit)
         UNCHECKED,
         EcdsaIdealOverF,
         _,
@@ -169,7 +147,7 @@ fn ecdsa_pipeline_round_trip() {
         },
     );
 
-    println!("\nECDSA pipeline verifier completed:");
+    println!("\nECDSA Int<4> pipeline verifier completed:");
     println!(
         "  IC+CPR verify: {:?}",
         verify_result.timing.ideal_check_verify
@@ -180,9 +158,9 @@ fn ecdsa_pipeline_round_trip() {
 
     assert!(
         verify_result.accepted,
-        "ECDSA pipeline verification FAILED"
+        "ECDSA Int<4> pipeline verification FAILED"
     );
     println!(
-        "\n✓ ECDSA pipeline round-trip PASSED (0 F₂[X] + 11 i64 assert_zero constraints)"
+        "\n✓ ECDSA Int<4> single-ring pipeline round-trip PASSED (11 assert_zero constraints)"
     );
 }

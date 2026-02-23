@@ -7,7 +7,7 @@ import math
 row_len = 512
 codeword_len = 512 * 4      # rate 1/4 = 2048
 num_rows = 1                 # DEPTH=1, R4B64, poly_size=512
-num_queries = 64
+num_queries = 147
 
 merkle_height = int(math.log2(codeword_len))   # 11
 merkle_proof = 3 * 8 + (merkle_height - 1) * 32   # 24 + 320 = 344

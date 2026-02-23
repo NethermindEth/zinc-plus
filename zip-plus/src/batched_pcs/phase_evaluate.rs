@@ -89,6 +89,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
 
         let project = Zt::Eval::prepare_projection(&projecting_element);
 
+        // Step 1: Compute all per-polynomial combined rows and evaluations
+        let mut per_poly_rows: Vec<Vec<F>> = Vec::with_capacity(polys.len());
         let mut evals_f = Vec::with_capacity(polys.len());
 
         for poly in polys {
@@ -107,8 +109,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
                 evaluations
             };
 
-            transcript.write_field_elements(&q_0_combined_row)?;
-
             // It is safe to use unchecked inner product since we are in a field.
             let eval_f = MBSInnerProduct::inner_product::<UNCHECKED>(
                 &q_0_combined_row,
@@ -116,8 +116,35 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
                 F::zero_with_cfg(&field_cfg),
             )?;
 
+            per_poly_rows.push(q_0_combined_row);
             evals_f.push(eval_f);
         }
+
+        // Step 2: Sample batching challenge β from Fiat-Shamir transcript
+        let beta: Zt::Chal = transcript.fs_transcript.get_challenge();
+        let beta: F = (&beta).into_with_cfg(&field_cfg);
+
+        // Step 3: Compute batched_row = Σ β^i × r_i
+        let mut batched_row = vec![F::zero_with_cfg(&field_cfg); row_len];
+        let mut beta_power = F::one_with_cfg(&field_cfg);
+        for row in &per_poly_rows {
+            for (acc, val) in batched_row.iter_mut().zip(row.iter()) {
+                let scaled = val
+                    .mul_by_scalar::<UNCHECKED>(&beta_power)
+                    .expect("Field multiplication cannot overflow");
+                *acc += scaled;
+            }
+            beta_power = beta_power
+                .mul_by_scalar::<UNCHECKED>(&beta)
+                .expect("Field multiplication cannot overflow");
+        }
+
+        // Step 4: Write the single batched row to the transcript.
+        transcript.write_field_elements(&batched_row)?;
+
+        // Step 5: Write per-polynomial evaluation scalars so the verifier
+        // can read them back in the same field context.
+        transcript.write_field_elements(&evals_f)?;
 
         Ok((evals_f, transcript.into()))
     }

@@ -25,7 +25,7 @@ use crypto_primitives::{
     crypto_bigint_int::Int,
     crypto_bigint_monty::MontyField,
     crypto_bigint_uint::Uint,
-    Field, FixedSemiring, FromWithConfig, IntoWithConfig, PrimeField,
+    Field, FixedSemiring, FromWithConfig,
 };
 use num_traits::One;
 
@@ -54,6 +54,7 @@ use zip_plus::{
     pcs::structs::{ZipPlusParams, ZipTypes},
 };
 
+use zinc_ecdsa_uair::EcdsaUair;
 use zinc_sha256_uair::{Sha256Uair, witness::GenerateWitness};
 
 // ─── Type definitions (matching batched_zip_plus_benches.rs) ────────────────
@@ -78,7 +79,7 @@ where
         + Sync,
     Int<6>: FromRef<CwCoeff>,
 {
-    const NUM_COLUMN_OPENINGS: usize = 64; // 64 queries ≈ 128-bit security at rate 1/4
+    const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = BinaryPoly<D_PLUS_ONE>;
     type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
@@ -102,7 +103,7 @@ where
 struct EcdsaScalarZipTypes;
 
 impl ZipTypes for EcdsaScalarZipTypes {
-    const NUM_COLUMN_OPENINGS: usize = 64;
+    const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = Int<{ INT_LIMBS * 4 }>;      // 256-bit integer
     type Cw = Int<{ INT_LIMBS * 5 }>;        // 320-bit codeword
     type Fmod = Uint<{ INT_LIMBS * 8 }>;     // 512-bit modulus search
@@ -260,11 +261,9 @@ fn bench_pcs_pipeline<Zt, Lc, const P: usize, const CHECK: bool>(
     let test_tx = BatchedZipPlus::<Zt, Lc>::test::<CHECK>(&params, trace, &hint)
         .expect("test");
     let point: Vec<Zt::Pt> = vec![Zt::Pt::one(); P];
-    let (evals_f, proof) =
+    let (_evals_f, proof) =
         BatchedZipPlus::<Zt, Lc>::evaluate::<F, CHECK>(&params, trace, &point, test_tx)
             .expect("evaluate");
-    let field_cfg = *evals_f[0].cfg();
-    let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
     // ── Verifier benchmark ──────────────────────────────────────────
     group.bench_function(format!("{label}/Verifier"), |b| {
@@ -272,8 +271,7 @@ fn bench_pcs_pipeline<Zt, Lc, const P: usize, const CHECK: bool>(
             let result = BatchedZipPlus::<Zt, Lc>::verify::<F, CHECK>(
                 &params,
                 &commitment,
-                &point_f,
-                &evals_f,
+                &point,
                 &proof,
             );
             let _ = black_box(result);
@@ -479,11 +477,9 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
         &sha_params, &sha_trace, &sha_hint,
     ).expect("test");
     let sha_pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
-    let (sha_evals_f, sha_proof) = BatchedZipPlus::<ShaZt, ShaLc>::evaluate::<F, UNCHECKED>(
+    let (_sha_evals_f, sha_proof) = BatchedZipPlus::<ShaZt, ShaLc>::evaluate::<F, UNCHECKED>(
         &sha_params, &sha_trace, &sha_pt, sha_tx,
     ).expect("evaluate");
-    let sha_cfg = *sha_evals_f[0].cfg();
-    let sha_pt_f: Vec<F> = sha_pt.iter().map(|v| v.into_with_cfg(&sha_cfg)).collect();
 
     // Prepare ECDSA proof
     let (ec_hint, ec_comm) = BatchedZipPlus::<EcZt, EcLc>::commit(
@@ -493,50 +489,95 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
         &ec_params, &ecdsa_trace, &ec_hint,
     ).expect("test");
     let ec_pt: Vec<i128> = vec![1i128; ECDSA_NUM_VARS];
-    let (ec_evals_f, ec_proof) = BatchedZipPlus::<EcZt, EcLc>::evaluate::<FScalar, UNCHECKED>(
+    let (_ec_evals_f, ec_proof) = BatchedZipPlus::<EcZt, EcLc>::evaluate::<FScalar, UNCHECKED>(
         &ec_params, &ecdsa_trace, &ec_pt, ec_tx,
     ).expect("evaluate");
-    let ec_cfg = *ec_evals_f[0].cfg();
-    let ec_pt_f: Vec<FScalar> = ec_pt.iter().map(|v| v.into_with_cfg(&ec_cfg)).collect();
 
     group.bench_function("Combined/PCS/Verifier", |b| {
         b.iter(|| {
             let sha_r = BatchedZipPlus::<ShaZt, ShaLc>::verify::<F, UNCHECKED>(
-                &sha_params, &sha_comm, &sha_pt_f, &sha_evals_f, &sha_proof,
+                &sha_params, &sha_comm, &sha_pt, &sha_proof,
             );
             let _ = black_box(sha_r);
             let ec_r = BatchedZipPlus::<EcZt, EcLc>::verify::<FScalar, UNCHECKED>(
-                &ec_params, &ec_comm, &ec_pt_f, &ec_evals_f, &ec_proof,
+                &ec_params, &ec_comm, &ec_pt, &ec_proof,
             );
             let _ = black_box(ec_r);
         });
     });
 
-    // ── Proof sizes ─────────────────────────────────────────────────
-    let sha_proof_bytes: Vec<u8> = {
-        let tx: zip_plus::pcs_transcript::PcsTranscript = sha_proof.into();
-        tx.stream.into_inner()
-    };
-    let ec_proof_bytes: Vec<u8> = {
-        let tx: zip_plus::pcs_transcript::PcsTranscript = ec_proof.into();
-        tx.stream.into_inner()
-    };
+    // ── Proof sizes (full pipeline: PCS + PIOP) ─────────────────────
+    // Generate full-pipeline proofs for accurate size reporting.
+    // SHA: pipeline::prove (BinaryPoly<32>, single-ring PIOP)
+    let sha_zinc_proof = zinc_snark::pipeline::prove::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
+        &sha_params,
+        &sha_trace,
+        SHA256_8X_NUM_VARS,
+    );
+    // ECDSA: pipeline::prove_generic (Int<4>, single-ring PIOP)
+    let ec_zinc_proof = zinc_snark::pipeline::prove_generic::< 
+        EcdsaUair,
+        Int<{ INT_LIMBS * 4 }>,
+        EcZt,
+        EcLc,
+        FScalar,
+        UNCHECKED,
+    >(
+        &ec_params,
+        &ecdsa_trace,
+        ECDSA_NUM_VARS,
+    );
 
+    // Helper to compute PIOP proof size from a ZincProof.
+    fn piop_size(p: &zinc_snark::pipeline::ZincProof) -> usize {
+        p.ic_proof_values.iter().map(|v| v.len()).sum::<usize>()
+            + p.cpr_sumcheck_messages.iter().map(|v| v.len()).sum::<usize>()
+            + p.cpr_sumcheck_claimed_sum.len()
+            + p.cpr_up_evals.iter().map(|v| v.len()).sum::<usize>()
+            + p.cpr_down_evals.iter().map(|v| v.len()).sum::<usize>()
+            + p.evaluation_point_bytes.iter().map(|v| v.len()).sum::<usize>()
+            + p.pcs_evals_bytes.iter().map(|v| v.len()).sum::<usize>()
+    }
+
+    let sha_pcs = sha_zinc_proof.pcs_proof_bytes.len();
+    let sha_piop = piop_size(&sha_zinc_proof);
+    let ec_pcs = ec_zinc_proof.pcs_proof_bytes.len();
+    let ec_piop = piop_size(&ec_zinc_proof);
+    let total_raw = sha_pcs + sha_piop + ec_pcs + ec_piop;
+
+    // Collect all bytes for compression measurement.
     let mut all_bytes = Vec::new();
-    all_bytes.extend(&sha_proof_bytes);
-    all_bytes.extend(&ec_proof_bytes);
+    for p in [&sha_zinc_proof, &ec_zinc_proof] {
+        all_bytes.extend(&p.pcs_proof_bytes);
+        for v in &p.ic_proof_values { all_bytes.extend(v); }
+        for v in &p.cpr_sumcheck_messages { all_bytes.extend(v); }
+        all_bytes.extend(&p.cpr_sumcheck_claimed_sum);
+        for v in &p.cpr_up_evals { all_bytes.extend(v); }
+        for v in &p.cpr_down_evals { all_bytes.extend(v); }
+        for v in &p.evaluation_point_bytes { all_bytes.extend(v); }
+        for v in &p.pcs_evals_bytes { all_bytes.extend(v); }
+    }
     let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
     encoder.write_all(&all_bytes).unwrap();
     let compressed = encoder.finish().unwrap();
 
+    println!("\n=== 8xSHA256+ECDSA Combined Proof Size ===");
     println!(
-        "  SHA PCS proof: {} bytes ({:.1} KB), ECDSA PCS proof: {} bytes ({:.1} KB)",
-        sha_proof_bytes.len(), sha_proof_bytes.len() as f64 / 1024.0,
-        ec_proof_bytes.len(), ec_proof_bytes.len() as f64 / 1024.0,
+        "  SHA:   PCS = {} bytes ({:.1} KB), PIOP = {} bytes ({:.1} KB)",
+        sha_pcs, sha_pcs as f64 / 1024.0,
+        sha_piop, sha_piop as f64 / 1024.0,
     );
     println!(
-        "  Combined total: {} bytes ({:.1} KB), compressed = {} bytes ({:.1} KB, {:.1}× ratio)",
-        all_bytes.len(), all_bytes.len() as f64 / 1024.0,
+        "  ECDSA: PCS = {} bytes ({:.1} KB), PIOP = {} bytes ({:.1} KB)",
+        ec_pcs, ec_pcs as f64 / 1024.0,
+        ec_piop, ec_piop as f64 / 1024.0,
+    );
+    println!(
+        "  Total raw:  {} bytes ({:.1} KB)",
+        total_raw, total_raw as f64 / 1024.0,
+    );
+    println!(
+        "  Compressed: {} bytes ({:.1} KB, {:.1}× ratio)",
         compressed.len(), compressed.len() as f64 / 1024.0,
         all_bytes.len() as f64 / compressed.len() as f64,
     );
@@ -718,20 +759,17 @@ fn sha256_end_to_end(c: &mut Criterion) {
         let test_tx = BatchedZipPlus::<Zt, Lc>::test::<UNCHECKED>(&params, &trace, &hint)
             .expect("test");
         let point: Vec<<Zt as ZipTypes>::Pt> = vec![<Zt as ZipTypes>::Pt::one(); SHA256_NUM_VARS];
-        let (evals_f, proof) = BatchedZipPlus::<Zt, Lc>::evaluate::<F, UNCHECKED>(
+        let (_evals_f, proof) = BatchedZipPlus::<Zt, Lc>::evaluate::<F, UNCHECKED>(
             &params, &trace, &point, test_tx,
         )
         .expect("evaluate");
-        let field_cfg = *evals_f[0].cfg();
-        let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
         group.bench_function("TotalVerifier/1xSHA256", |b| {
             b.iter(|| {
                 let result = BatchedZipPlus::<Zt, Lc>::verify::<F, UNCHECKED>(
                     &params,
                     &commitment,
-                    &point_f,
-                    &evals_f,
+                    &point,
                     &proof,
                 );
                 let _ = black_box(result);

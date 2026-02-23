@@ -1,6 +1,6 @@
 # Zinc+ End-to-End Implementation: What It Does and What It Does Not
 
-**Date:** 2026-02-22
+**Date:** 2026-02-23
 
 ---
 
@@ -139,18 +139,24 @@ The PCS "test" phase is the proximity testing step (analogous to FRI in other sy
 
 **What this produces:** A PCS transcript containing Merkle proofs and queried row slices.
 
-### Step 5: PCS Evaluate
+### Step 5: PCS Evaluate (Batched)
 
 ```
 (evals_f, proof) = BatchedZipPlus::evaluate(params, trace, point, test_transcript)
 ```
 
-The PCS evaluation phase computes the claimed evaluations of all committed polynomials at a given point, and produces an evaluation proof:
+The PCS evaluation phase computes the claimed evaluations of all committed polynomials at a given point, and produces an evaluation proof. Since 2026-02-23, **the eval phase is batched** to minimize proof size:
 
-1. The prover evaluates each committed MLE at the evaluation point (reducing the multilinear polynomial to a single field element per column).
-2. These evaluations are included in the proof along with the proximity test data.
+1. The prover evaluates each committed MLE at the evaluation point, producing one field-projected, row-combined evaluation row $r_i$ per polynomial.
+2. A Fiat-Shamir batching challenge $\beta$ is sampled from the transcript (after the test phase).
+3. A single **batched row** $\hat{r} = \sum_{i=0}^{m-1} \beta^i \cdot r_i$ is computed and written to the proof transcript (512 field elements for the standard configuration).
+4. Per-polynomial evaluation scalars $v_i = \langle r_i, q_1 \rangle$ are written as individual field elements (one per polynomial).
+
+This batching reduces the eval-phase proof data from $O(m \times \text{row\_len})$ to $O(\text{row\_len} + m)$ field elements, where $m$ is the batch size (number of polynomials).
 
 **Important note on the evaluation point:** The PCS evaluation point is derived by hashing the CPR's evaluation point into `i128` values. This is NOT the same point as the CPR evaluation point (which lives in $\mathbb{F}_p$). See §12 for why this matters.
+
+**Important note on field context:** The `verify()` API accepts the evaluation point as raw integers (`&[Zt::Pt]`), not as field elements. This is because the PCS verifier derives its own random field configuration from the Fiat-Shamir transcript, which differs from the pipeline's PIOP field. The PCS internally converts the raw point to field elements using its own `field_cfg`.
 
 **What this produces:** A `ZincProof` struct containing all serialized data.
 
@@ -179,13 +185,18 @@ The verifier is implemented as `verify()` in `pipeline.rs`. It reconstructs the 
 3. At the final round, verify that the sumcheck's terminal claim is consistent with the IC's evaluation claims and the column evaluations (`up_evals`, `down_evals`).
 4. **Output:** A `VerifierSubclaim` containing the evaluation point where the trace columns should be opened.
 
-### Step 3: PCS Verification
+### Step 3: PCS Verification (Batched)
 
-1. Deserialize the PCS proof (Merkle openings, proximity test data, evaluations).
-2. Verify the Merkle proofs against the commitment.
-3. Verify proximity: the queried row slices must be close to codewords of the IPRS code.
-4. Verify evaluation consistency: the claimed polynomial evaluations must be consistent with the committed polynomials at the evaluation point.
-5. **Output:** `accepted: bool` — whether all checks pass.
+1. Deserialize the PCS proof (Merkle openings, proximity test data, batched evaluation row, per-polynomial scalars).
+2. Derive the PCS's own random field configuration from the Fiat-Shamir transcript. Convert the raw evaluation point to field elements in this context.
+3. Verify the Merkle proofs against the commitment.
+4. Verify testing-phase proximity: the queried row slices must be close to codewords of the IPRS code.
+5. Sample the same batching challenge $\beta$ from the transcript (matching the prover).
+6. Verify batched evaluation consistency:
+   - Read the single batched row $\hat{r}$ and per-polynomial scalars $v_i$ from the proof.
+   - Check $\langle \hat{r}, q_1 \rangle = \sum_i \beta^i \cdot v_i$ (batched evaluation consistency).
+   - For each opened column $j$: check that the $\beta$-weighted sum of per-polynomial field-projected, $q_0$-combined column values equals $\text{encode}(\hat{r})[j]$ (batched proximity in eval phase).
+7. **Output:** `accepted: bool` — whether all checks pass.
 
 ### Final Verdict
 
@@ -273,7 +284,12 @@ These constraints are algebraically specified in comments but cannot be expresse
 
 ### Trace Layout
 
-The ECDSA witness is a 258-row × 14-column matrix. The algebraic constraints operate on `DensePolynomial<i64, 1>` (essentially i64 scalars, degree-0 polynomials). For the PIOP pipeline tests, the PCS commits `BinaryPoly<32>` columns (converted to i64 for constraints). For the paper's target benchmark, the ECDSA PCS batch uses `Int<4>` (256-bit integer) evaluations, which are ~32× cheaper per cell in the IPRS NTT.
+The ECDSA witness is a **258-row × 14-column** matrix. The logical column meanings are the same regardless of the evaluation type (see table below). The trace is now unified under `Int<4>` (256-bit integer) for **all** contexts — PCS commitment, PIOP constraint checking, and the end-to-end pipeline:
+
+| Context | Evaluation type | Purpose |
+|---------|----------------|---------|
+| **Unified pipeline** (PCS + IC + CPR) | `Int<4>` (256-bit integer) | All 11 constraints are expressed directly in `Int<4>` via `Uair<Int<4>>`. The same ring is used for PCS commitment, IdealCheck, and CombinedPolyResolver — no ring conversion needed. This eliminates the prior dual-ring architecture. |
+| **Legacy constraint checking** | `DensePolynomial<i64, 1>` | Degree-0 polynomials (plain i64 scalars). Retained for the original constraint formulation; the `Int<4>` version is algebraically identical. |
 
 | Col | Name | Description |
 |-----|------|-------------|
@@ -289,7 +305,7 @@ The ECDSA witness is a 258-row × 14-column matrix. The algebraic constraints op
 
 ### Implemented Constraints (11 of 11)
 
-All 11 ECDSA constraints are implemented over `DensePolynomial<i64, 1>` using `assert_zero` (exact integer equality). They use Shamir's trick for simultaneous $u_1 \cdot G + u_2 \cdot Q$ computation on secp256k1 ($a = 0$, so the doubling formula simplifies).
+All 11 ECDSA constraints are implemented over both `DensePolynomial<i64, 1>` and `Int<4>` using `assert_zero` (exact integer equality). The `Int<4>` implementation is the primary one used in the unified pipeline; the i64 version is retained for legacy reference. They use Shamir's trick for simultaneous $u_1 \cdot G + u_2 \cdot Q$ computation on secp256k1 ($a = 0$, so the doubling formula simplifies).
 
 | # | Constraint | Max degree |
 |---|-----------|------------|
@@ -346,7 +362,7 @@ Both IC+CPR passes share the same Fiat-Shamir transcript, so the random challeng
 
 | Field | Content | Size |
 |-------|---------|------|
-| `pcs_proof_bytes` | Serialized PCS transcript (Merkle proofs, queried rows, evaluations) | ~400 KB for 20 cols, DEPTH=1 |
+| `pcs_proof_bytes` | Serialized PCS transcript (Merkle proofs, queried rows, batched eval row, per-poly scalars) | ~350 KB for 20 cols, DEPTH=1 |
 | `commitment` | Merkle root + batch size | Small |
 | `ic_proof_values` | Combined MLE evaluations (one `DynamicPolynomialF` per constraint) | Tens of bytes per constraint |
 | `cpr_sumcheck_messages` | Sumcheck round polynomials | $O(\text{num\_vars} \times \text{degree})$ field elements |
@@ -480,11 +496,9 @@ Specifically: without C12–C14, a prover could supply a trace where:
 
 ### 12.4 ECDSA Not Over Real secp256k1 Field
 
-The ECDSA constraints operate on `DensePolynomial<i64, 1>` (64-bit integers) with a toy curve over $\mathbb{F}_{101}$, not the real secp256k1 base field (256-bit prime). The constraint *algebra* is correct (it correctly describes Jacobian-coordinate point doubling and addition with Shamir's trick), but:
+The ECDSA constraints operate on `Int<4>` (256-bit integers) in the unified pipeline and `DensePolynomial<i64, 1>` (64-bit integers) in the legacy formulation, both using a toy curve over $\mathbb{F}_{101}$, not the real secp256k1 base field (256-bit prime). The constraint *algebra* is correct (it correctly describes Jacobian-coordinate point doubling and addition with Shamir's trick), but:
 - The witness values are from $\mathbb{F}_{101}$, not $\mathbb{F}_p$.
-- i64 arithmetic would overflow for real 256-bit field elements.
-- The BinaryPoly<32> UAIR has 0 constraints — the ECDSA constraints exist only in the DensePolynomial<i64, 1> ring.
-- For PCS benchmarking, the ECDSA batch uses `Int<4>` (256-bit) evaluations via `EcdsaScalarZipTypes`, avoiding the 32× overhead of `BinaryPoly<32>` encoding.
+- The `Int<4>` pipeline uses `prove_generic`/`verify_generic` with `EcdsaScalarZipTypes` (`Eval = Int<4>`, `CombR = Int<8>`, `PcsF = MontyField<8>`), avoiding the dual-ring architecture entirely.
 
 ### 12.5 ECDSA Boundary Constraints Not Enforced
 
@@ -494,7 +508,7 @@ The 11 ECDSA constraints are "non-boundary" constraints applied uniformly to all
 
 ### 12.6 No Compact Proof Serialization
 
-Field elements are serialized at full width (8 bytes per i64 coefficient, 32 bytes per PiopField element in Montgomery form). For DEPTH=1 IPRS coefficients that fit in ~41 bits, this wastes ~23 bits per coefficient. Deflate compression compensates (2.3× ratio for DEPTH=1) but not for DEPTH≥2.
+Field elements are serialized at full width (8 bytes per i64 coefficient, 32 bytes per PiopField element in Montgomery form). For DEPTH=1 IPRS coefficients that fit in ~41 bits, this wastes ~23 bits per coefficient. Deflate compression compensates (~1.8–2.1× ratio for DEPTH=1) but not for DEPTH≥2. The eval-phase batching (Task A, 2026-02-23) dramatically reduced the eval-phase contribution, so the remaining proof size is dominated by test-phase Merkle openings and column data.
 
 ### 12.7 PCS Field Is Not 256-bit
 
@@ -526,7 +540,7 @@ Seven integration tests in `snark/tests/`:
 | `full_pipeline_round_trip` | Single-ring: `prove()` → `verify()` with TrivialIdeal. Full IC + CPR + PCS round-trip for the 6 F₂[X] constraints. |
 | `dual_ring_pipeline_round_trip` | Dual-ring: `prove_dual_ring()` → `verify_dual_ring()`. BP pass (6 constraints, TrivialIdeal) + QX pass (5 constraints, real DegreeOne(2) ideal) + PCS. **This is the most comprehensive test.** |
 | `ecdsa_ideal_check_succeeds_on_valid_witness` | ECDSA IC prover on the constant fixed-point trace. Verifies the 11 i64 constraints produce a valid IC proof. |
-| `ecdsa_pipeline_round_trip` | ECDSA: prove → verify with EcdsaIdealOverF. Full IC + CPR + PCS round-trip for 11 ECDSA constraints on a zero trace. |
+| `ecdsa_pipeline_round_trip` | ECDSA single-ring `Int<4>` pipeline: `prove_generic()` → `verify_generic()`. All 11 constraints checked in `Int<4>` ring with `EcdsaScalarZipTypes` (PCS field = `MontyField<8>`). Full IC + CPR + PCS round-trip on a zero trace. |
 
 Additionally, each UAIR crate has unit tests for constraint count, max degree, scalar collection, and (for SHA-256) NIST test vector validation.
 
@@ -555,11 +569,14 @@ The `sha256_8x_ecdsa` benchmark uses **two independent PCS batches** rather than
 
 This design matches the paper's intent: ECDSA values are field elements (scalars), not polynomials, so committing them as `Int<4>` (256-bit signed integer) avoids the 32× overhead of processing 32 binary coefficients per cell.
 
-**Benchmark results (MacBook Air M4):**
-- Combined PCS prover: ~25.6 ms (target < 30 ms)
-- Combined PCS verifier: ~3.0 ms (target < 5 ms)
-- SHA PCS proof: ~688 KB, ECDSA PCS proof: ~539 KB
-- Combined compressed: ~718 KB (1.7× ratio)
+**Benchmark results (MacBook Air M4, after eval-phase batching):**
+- Combined PCS prover: ~23.8 ms (target < 30 ms) ✓
+- Combined PCS verifier: ~17.9 ms
+- SHA PCS proof: ~384 KB, ECDSA PCS proof: ~123 KB
+- Combined compressed: **~276 KB** (1.8× ratio, target ≤ 300 KB) ✓
+- 1×SHA-256 full pipeline: ~10 ms prover, ~350 KB PCS proof (~165 KB compressed)
+
+The eval-phase batching optimization (2026-02-23) reduced combined proof size from ~718 KB to ~276 KB (2.6× reduction) by writing a single batched row instead of one row per polynomial.
 
 Run all benchmarks:
 ```bash
@@ -573,7 +590,7 @@ cargo bench -p zinc-snark --bench e2e_sha256 --features=zinc-snark/parallel,zinc
 ```
 zinc-plus-new/
 ├── snark/              # Top-level pipeline (prove/verify), benchmarks, integration tests
-│   ├── src/pipeline.rs # prove(), verify(), prove_dual_ring(), verify_dual_ring()
+│   ├── src/pipeline.rs # prove(), verify(), prove_generic(), verify_generic(), prove_dual_ring(), verify_dual_ring()
 │   ├── benches/        # Criterion benchmarks
 │   └── tests/          # 7 integration tests
 ├── piop/               # PIOP protocols

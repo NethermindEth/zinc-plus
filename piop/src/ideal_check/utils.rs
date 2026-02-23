@@ -1,5 +1,5 @@
 use crate::ideal_check::IdealCheckField;
-use crypto_primitives::{FromWithConfig, Semiring};
+use crypto_primitives::{FromWithConfig, Semiring, crypto_bigint_int::Int};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -31,6 +31,17 @@ impl<F: IdealCheckField, const D: usize> ProjectToField<F> for BinaryPoly<D> {
 /// implements `FromWithConfig<i64>`.
 impl<F: IdealCheckField + FromWithConfig<i64>, const D: usize> ProjectToField<F>
     for DensePolynomial<i64, D>
+{
+    fn project_to_field(&self, projecting_element: &F) -> DynamicPolynomialF<F> {
+        self.project_coefficients(projecting_element).into()
+    }
+}
+
+/// Int<LIMBS> (256-bit integer, etc.) can be projected to any IdealCheckField
+/// that implements `FromWithConfig<Int<LIMBS>>`. Since Int<N> is a degree-0
+/// polynomial (a scalar), projection produces a 1-coefficient DynamicPolynomialF.
+impl<F: IdealCheckField + FromWithConfig<Int<LIMBS>>, const LIMBS: usize> ProjectToField<F>
+    for Int<LIMBS>
 {
     fn project_to_field(&self, projecting_element: &F) -> DynamicPolynomialF<F> {
         self.project_coefficients(projecting_element).into()

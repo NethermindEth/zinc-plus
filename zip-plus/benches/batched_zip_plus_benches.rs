@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use criterion::{BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime};
 use crypto_bigint::U64;
 use crypto_primitives::{
-    Field, FromWithConfig, IntoWithConfig, PrimeField,
+    Field, FromWithConfig,
     FixedSemiring,
     boolean::Boolean,
     crypto_bigint_int::Int,
@@ -283,15 +283,13 @@ fn batched_verify_nrows<
     let test_transcript =
         BatchedZipPlus::<Zt, Lc>::test::<CHECK_FOR_OVERFLOWS>(&params, &polys, &hint)
             .expect("Batched test phase failed");
-    let (evals_f, proof) = BatchedZipPlus::<Zt, Lc>::evaluate::<F, CHECK_FOR_OVERFLOWS>(
+    let (_evals_f, proof) = BatchedZipPlus::<Zt, Lc>::evaluate::<F, CHECK_FOR_OVERFLOWS>(
         &params,
         &polys,
         &point,
         test_transcript,
     )
     .expect("Batched evaluate failed");
-    let field_cfg = *evals_f[0].cfg();
-    let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
     group.bench_function(
         format!("Verify poly_size=2^{P} num_rows={num_rows}"),
@@ -300,8 +298,7 @@ fn batched_verify_nrows<
                 BatchedZipPlus::<Zt, Lc>::verify::<_, CHECK_FOR_OVERFLOWS>(
                     &params,
                     &commitment,
-                    &point_f,
-                    &evals_f,
+                    &point,
                     &proof,
                 )
                 .expect("Batched verification failed");

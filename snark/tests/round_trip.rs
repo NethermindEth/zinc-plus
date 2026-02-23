@@ -12,7 +12,7 @@ use crypto_primitives::{
     boolean::Boolean,
     crypto_bigint_int::Int,
     crypto_bigint_uint::Uint,
-    FixedSemiring, IntoWithConfig, PrimeField,
+    FixedSemiring,
 };
 use num_traits::One;
 
@@ -59,7 +59,7 @@ where
         + Sync,
     Int<6>: FromRef<CwCoeff>,
 {
-    const NUM_COLUMN_OPENINGS: usize = 64;
+    const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = BinaryPoly<D_PLUS_ONE>;
     type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
@@ -95,13 +95,10 @@ fn round_trip_pcs_sha256() {
     let test_tx = BatchedZipPlus::<Zt, Lc>::test::<UNCHECKED>(&params, &trace, &hint)
         .expect("test failed");
     let point: Vec<i128> = vec![i128::one(); num_vars];
-    let (evals_f, proof) = BatchedZipPlus::<Zt, Lc>::evaluate::<F, UNCHECKED>(
+    let (_evals_f, proof) = BatchedZipPlus::<Zt, Lc>::evaluate::<F, UNCHECKED>(
         &params, &trace, &point, test_tx,
     )
     .expect("evaluate failed");
-
-    let field_cfg = *evals_f[0].cfg();
-    let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
     // ── Serialize proof ──────────────────────────────────────────────
     let proof_bytes: Vec<u8> = {
@@ -122,8 +119,7 @@ fn round_trip_pcs_sha256() {
     let verify_result = BatchedZipPlus::<Zt, Lc>::verify::<F, UNCHECKED>(
         &params,
         &commitment,
-        &point_f,
-        &evals_f,
+        &point,
         &deserialized_proof,
     );
 

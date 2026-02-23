@@ -68,6 +68,7 @@
 pub mod constraints;
 pub mod witness;
 
+use crypto_primitives::crypto_bigint_int::Int;
 use zinc_poly::univariate::binary::BinaryPoly;
 use zinc_poly::univariate::dense::DensePolynomial;
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
@@ -104,11 +105,14 @@ pub const COL_RA: usize = 11;
 pub const COL_U1: usize = 12;
 pub const COL_U2: usize = 13;
 
-// ─── Toy curve constants (for testing with DensePolynomial<i64, 1>) ─────────
+// ─── Toy curve constants ────────────────────────────────────────────────────
 // Curve: y² = x³ + 7 over F_101 (same equation as secp256k1, small prime)
 // G  = (15, 7)   — generator
 // Q  = (15, 7)   — public key (= G for simplicity)
 // G+Q= (35, 82)  — precomputed table point (= 2G affine)
+//
+// Constants are provided as both i64 (for DensePolynomial<i64, 1> constraints)
+// and Int<4> (for Int<4> constraints). The values are identical.
 
 /// Generator x-coordinate.
 pub const GX: i64 = 15;
@@ -383,6 +387,154 @@ impl Uair<DensePolynomial<i64, 1>> for EcdsaUair {
     }
 }
 
+// ─── Int<4> implementation (11 constraints, 256-bit integer arithmetic) ──────
+//
+// Ring: Int<4> (256-bit signed integers). Identical constraint algebra to the
+// DensePolynomial<i64, 1> implementation above, but using Int<4> which can
+// represent full secp256k1 field elements without overflow.
+//
+// This is the target ring for the unified ECDSA pipeline: the same Int<4>
+// type is used for PCS commitments, PIOP constraints, and witness values.
+
+/// Number of constraints for the Int<4> ECDSA UAIR.
+pub const NUM_CONSTRAINTS_INT4: usize = 11;
+
+impl Uair<Int<4>> for EcdsaUair {
+    type Ideal = ImpossibleIdeal;
+
+    fn num_cols() -> usize {
+        NUM_COLS
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: &[B::Expr],
+        down: &[B::Expr],
+        from_ref: FromR,
+        mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Int<4>) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Int<4>) -> Option<B::Expr>,
+        IFromR: Fn(&ImpossibleIdeal) -> B::Ideal,
+    {
+        // ── Helpers ─────────────────────────────────────────────────
+        let int = |v: i64| Int::<4>::from_ref(&v);
+        let cst = |v: i64| from_ref(&int(v));
+        let smul = |e: &B::Expr, v: i64| mbs(e, &int(v)).unwrap();
+
+        let one = cst(1);
+
+        // ── C1: Scalar accumulation u₁ ─────────────────────────────
+        // down[u1] - 2·up[u1] - up[b1] = 0
+        b.assert_zero(
+            down[COL_U1].clone() - &smul(&up[COL_U1], 2) - &up[COL_B1],
+        );
+
+        // ── C2: Scalar accumulation u₂ ─────────────────────────────
+        // down[u2] - 2·up[u2] - up[b2] = 0
+        b.assert_zero(
+            down[COL_U2].clone() - &smul(&up[COL_U2], 2) - &up[COL_B2],
+        );
+
+        // ── C3: Doubling scratch S = Y² ────────────────────────────
+        b.assert_zero(
+            up[COL_S].clone() - &(up[COL_Y].clone() * &up[COL_Y]),
+        );
+
+        // ── C4: Doubled Z-coordinate: Z_mid = 2·Y·Z ───────────────
+        b.assert_zero(
+            up[COL_Z_MID].clone()
+                - &smul(&(up[COL_Y].clone() * &up[COL_Z]), 2),
+        );
+
+        // ── C5: Doubled X-coordinate ───────────────────────────────
+        // X_mid = 9X⁴ - 8XS
+        let x_sq = up[COL_X].clone() * &up[COL_X];
+        let x_four = x_sq.clone() * &x_sq;
+        let x_s = up[COL_X].clone() * &up[COL_S];
+        b.assert_zero(
+            up[COL_X_MID].clone() - &smul(&x_four, 9) + &smul(&x_s, 8),
+        );
+
+        // ── C6: Doubled Y-coordinate ───────────────────────────────
+        // Y_mid = 12X³S - 3X²·X_mid - 8S²
+        let x_cubed_s = x_sq.clone() * &up[COL_X] * &up[COL_S];
+        let x_sq_xmid = x_sq * &up[COL_X_MID];
+        let s_sq = up[COL_S].clone() * &up[COL_S];
+        b.assert_zero(
+            up[COL_Y_MID].clone()
+                - &smul(&x_cubed_s, 12)
+                + &smul(&x_sq_xmid, 3)
+                + &smul(&s_sq, 8),
+        );
+
+        // ── Shamir selector ────────────────────────────────────────
+        // s = b1 + b2 - b1·b2 (= 1 iff any bit is set)
+        let b1b2 = up[COL_B1].clone() * &up[COL_B2];
+        let s = up[COL_B1].clone() + &up[COL_B2] - &b1b2;
+
+        // Table point selection:
+        // T_x = b1·(1-b2)·Gx + (1-b1)·b2·Qx + b1·b2·PGQx
+        let one_minus_b2 = one.clone() - &up[COL_B2];
+        let one_minus_b1 = one.clone() - &up[COL_B1];
+        let b1_not_b2 = up[COL_B1].clone() * &one_minus_b2;
+        let not_b1_b2 = one_minus_b1 * &up[COL_B2];
+        let t_x = smul(&b1_not_b2, GX)
+            + &smul(&not_b1_b2, QX)
+            + &smul(&b1b2, PGQX);
+        let t_y = smul(&b1_not_b2, GY)
+            + &smul(&not_b1_b2, QY)
+            + &smul(&b1b2, PGQY);
+
+        // ── C7: Addition scratch H = T_x·Z_mid² - X_mid ───────────
+        let zmid_sq = up[COL_Z_MID].clone() * &up[COL_Z_MID];
+        b.assert_zero(
+            up[COL_H].clone() - &(t_x * &zmid_sq) + &up[COL_X_MID],
+        );
+
+        // ── C8: Addition scratch R_a = T_y·Z_mid³ - Y_mid ─────────
+        let zmid_cubed = zmid_sq.clone() * &up[COL_Z_MID];
+        b.assert_zero(
+            up[COL_RA].clone() - &(t_y * &zmid_cubed) + &up[COL_Y_MID],
+        );
+
+        // ── C9: Result Z-coordinate ────────────────────────────────
+        // Z[t+1] = (1-s)·Z_mid + s·(Z_mid·H)
+        let one_minus_s = one - &s;
+        let zmid_h = up[COL_Z_MID].clone() * &up[COL_H];
+        b.assert_zero(
+            down[COL_Z].clone()
+                - &(one_minus_s.clone() * &up[COL_Z_MID])
+                - &(s.clone() * &zmid_h),
+        );
+
+        // ── C10: Result X-coordinate ───────────────────────────────
+        let ra_sq = up[COL_RA].clone() * &up[COL_RA];
+        let h_sq = up[COL_H].clone() * &up[COL_H];
+        let h_cubed = h_sq.clone() * &up[COL_H];
+        let xmid_h_sq = up[COL_X_MID].clone() * &h_sq;
+        let add_x = ra_sq - &h_cubed - &smul(&xmid_h_sq, 2);
+        b.assert_zero(
+            down[COL_X].clone()
+                - &(one_minus_s.clone() * &up[COL_X_MID])
+                - &(s.clone() * &add_x),
+        );
+
+        // ── C11: Result Y-coordinate ───────────────────────────────
+        let xmid_h_sq_2 = up[COL_X_MID].clone() * &h_sq;
+        let ra_term = up[COL_RA].clone() * &(xmid_h_sq_2 - &down[COL_X]);
+        let ymid_h_cubed = up[COL_Y_MID].clone() * &h_cubed;
+        let add_y = ra_term - &ymid_h_cubed;
+        b.assert_zero(
+            down[COL_Y].clone()
+                - &(one_minus_s * &up[COL_Y_MID])
+                - &(s * &add_y),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,6 +557,19 @@ mod tests {
     fn i64_max_degree() {
         let d = count_max_degree::<DensePolynomial<i64, 1>, EcdsaUair>();
         // C11 has degree 6: s(deg2) * Ra(1) * X_mid(1) * H²(2) = 6
+        assert!(d <= 6, "Max degree should be at most 6, got {d}");
+        assert!(d >= 4, "Max degree should be at least 4 (doubling formulas), got {d}");
+    }
+
+    #[test]
+    fn int4_constraint_count() {
+        let n = count_constraints::<Int<4>, EcdsaUair>();
+        assert_eq!(n, NUM_CONSTRAINTS_INT4, "Expected 11 ECDSA Int<4> constraints");
+    }
+
+    #[test]
+    fn int4_max_degree() {
+        let d = count_max_degree::<Int<4>, EcdsaUair>();
         assert!(d <= 6, "Max degree should be at most 6, got {d}");
         assert!(d >= 4, "Max degree should be at least 4 (doubling formulas), got {d}");
     }

@@ -3,12 +3,12 @@ use crate::{
     code::LinearCode,
     merkle::MtHash,
     pcs::{
-        structs::{ZipPlus, ZipTypes},
+        structs::ZipTypes,
         utils::point_to_tensor,
     },
     pcs_transcript::PcsTranscript,
 };
-use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
+use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, IntoWithConfig};
 use itertools::Itertools;
 use num_traits::{CheckedAdd, ConstOne, ConstZero, Zero};
 #[cfg(feature = "parallel")]
@@ -31,63 +31,68 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
     /// Verifies a batched ZipPlus proof.
     ///
     /// All polynomials are evaluated at the same point. Verification checks
-    /// that the committed batch is consistent with the supplied evaluations.
+    /// that the committed batch is consistent with the proof-internal
+    /// evaluation scalars and batched row.
     ///
     /// # Parameters
     /// - `vp`: Public (verifier) parameters.
     /// - `comm`: The batched commitment (single Merkle root + batch size).
-    /// - `point_f`: The shared evaluation point in the field.
-    /// - `evals_f`: One evaluation per polynomial.
+    /// - `point`: The shared evaluation point (raw, not yet in field).
     /// - `proof`: The batched proof.
     pub fn verify<F, const CHECK_FOR_OVERFLOW: bool>(
         vp: &BatchedZipPlusParams<Zt, Lc>,
         comm: &BatchedZipPlusCommitment,
-        _point_f: &[F],
-        evals_f: &[F],
+        point: &[Zt::Pt],
         proof: &BatchedZipPlusProof,
     ) -> Result<(), ZipError>
     where
         F: FromPrimitiveWithConfig
             + FromRef<F>
             + for<'a> FromWithConfig<&'a Zt::Chal>
+            + for<'a> FromWithConfig<&'a Zt::Pt>
             + for<'a> MulByScalar<&'a F>,
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
         Zt::Cw: ProjectableToField<F>,
     {
         let batch_size = comm.batch_size;
-        assert_eq!(
-            evals_f.len(),
-            batch_size,
-            "Number of evaluations must match batch size"
-        );
 
         let mut transcript: PcsTranscript = proof.clone().into();
 
         // columns_opened: Vec<(column_idx, Vec<Vec<Zt::Cw>>)>
         // For each opened column, we have a Vec of column values per polynomial.
-        let _columns_opened = Self::verify_testing::<CHECK_FOR_OVERFLOW>(
+        let columns_opened = Self::verify_testing::<CHECK_FOR_OVERFLOW>(
             vp,
             &comm.root,
             batch_size,
             &mut transcript,
         )?;
 
-        // let field_cfg = transcript
-        //     .fs_transcript
-        //     .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
-        // let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
-        // let projecting_element: F = (&projecting_element).into_with_cfg(&field_cfg);
+        let field_cfg = transcript
+            .fs_transcript
+            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+        let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
+        let projecting_element: F = (&projecting_element).into_with_cfg(&field_cfg);
 
-        // Self::verify_evaluation(
-        //     vp,
-        //     point_f,
-        //     evals_f,
-        //     batch_size,
-        //     &columns_opened,
-        //     &mut transcript,
-        //     projecting_element,
-        //     &field_cfg,
-        // )?;
+        // Sample batching challenge β (must match prover's β)
+        let beta: Zt::Chal = transcript.fs_transcript.get_challenge();
+        let beta: F = (&beta).into_with_cfg(&field_cfg);
+
+        // Convert raw point to field elements using the PCS's own field_cfg
+        let point_f: Vec<F> = point
+            .iter()
+            .map(|v| v.into_with_cfg(&field_cfg))
+            .collect();
+
+        Self::verify_evaluation(
+            vp,
+            &point_f,
+            batch_size,
+            &columns_opened,
+            &mut transcript,
+            projecting_element,
+            beta,
+            &field_cfg,
+        )?;
 
         Ok(())
     }
@@ -253,15 +258,23 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
     }
 
     /// Verifies the evaluation phase for a batched proof.
-    #[allow(clippy::too_many_arguments, dead_code)]
+    ///
+    /// The prover writes a single batched row `r̂ = Σ β^i · r_i` and
+    /// per-polynomial evaluation scalars to the proof transcript. The verifier
+    /// reads both from the proof (in the correct field context) and checks:
+    ///
+    /// 1. `⟨r̂, q_1⟩ == Σ β^i · v_i` (batched evaluation consistency).
+    /// 2. For each opened column `j`: the β-weighted sum of per-polynomial
+    ///    field-projected, q_0-combined column values equals `encode(r̂)[j]`.
+    #[allow(clippy::too_many_arguments)]
     fn verify_evaluation<F>(
         vp: &BatchedZipPlusParams<Zt, Lc>,
         point_f: &[F],
-        evals_f: &[F],
         batch_size: usize,
         columns_opened: &[(usize, Vec<Vec<Zt::Cw>>)],
         transcript: &mut PcsTranscript,
         projecting_element: F,
+        beta: F,
         field_cfg: &F::Config,
     ) -> Result<(), ZipError>
     where
@@ -272,39 +285,88 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
         let (q_0, q_1) = point_to_tensor(vp.num_rows, point_f, field_cfg)?;
         let project = Zt::Cw::prepare_projection(&projecting_element);
 
-        for poly_idx in 0..batch_size {
-            let q_0_combined_row =
-                transcript.read_field_elements(vp.linear_code.row_len(), field_cfg)?;
-            let encoded_combined_row: Vec<F> =
-                vp.linear_code.encode_f(&q_0_combined_row);
+        // Read the single batched row from the transcript
+        let batched_row =
+            transcript.read_field_elements(vp.linear_code.row_len(), field_cfg)?;
 
-            // Verify evaluation consistency
-            if MBSInnerProduct::inner_product::<UNCHECKED>(
-                &q_0_combined_row,
-                &q_1,
-                F::zero_with_cfg(field_cfg),
-            )? != evals_f[poly_idx]
-            {
-                return Err(ZipError::InvalidPcsOpen(format!(
-                    "Evaluation consistency failure for polynomial {poly_idx}"
-                )));
-            }
+        // Read per-polynomial evaluation scalars from the proof transcript.
+        // These are in the PCS's field context (same field_cfg as batched_row).
+        let proof_evals: Vec<F> =
+            transcript.read_field_elements(batch_size, field_cfg)?;
 
-            // Verify proximity for this polynomial against opened columns
-            cfg_iter!(columns_opened).try_for_each(
-                |(column_idx, per_poly_column_values)| {
-                    ZipPlus::<Zt, Lc>::verify_proximity_q_0(
-                        &q_0,
-                        &encoded_combined_row,
-                        &per_poly_column_values[poly_idx],
-                        *column_idx,
-                        vp.num_rows,
-                        &project,
-                        field_cfg,
-                    )
-                },
-            )?;
+        // Verify batched evaluation consistency: ⟨batched_row, q_1⟩ == Σ β^i · v_i
+        // Uses the proof-internal eval scalars (correct field context).
+        let batched_eval = MBSInnerProduct::inner_product::<UNCHECKED>(
+            &batched_row,
+            &q_1,
+            F::zero_with_cfg(field_cfg),
+        )?;
+
+        let mut expected_batched_eval = F::zero_with_cfg(field_cfg);
+        let mut beta_power = F::one_with_cfg(field_cfg);
+        for eval in &proof_evals {
+            let term = eval
+                .mul_by_scalar::<UNCHECKED>(&beta_power)
+                .expect("Field multiplication cannot overflow");
+            expected_batched_eval += term;
+            beta_power = beta_power
+                .mul_by_scalar::<UNCHECKED>(&beta)
+                .expect("Field multiplication cannot overflow");
         }
+
+        if batched_eval != expected_batched_eval {
+            return Err(ZipError::InvalidPcsOpen(
+                "Batched evaluation consistency failure".into(),
+            ));
+        }
+
+        // Encode the batched row under the linear code
+        let encoded_batched_row: Vec<F> =
+            vp.linear_code.encode_f(&batched_row);
+
+        // Pre-compute β powers for proximity checks
+        let mut beta_powers: Vec<F> = Vec::with_capacity(batch_size);
+        let mut bp = F::one_with_cfg(field_cfg);
+        for _ in 0..batch_size {
+            beta_powers.push(bp.clone());
+            bp = bp
+                .mul_by_scalar::<UNCHECKED>(&beta)
+                .expect("Field multiplication cannot overflow");
+        }
+
+        // Verify proximity for each opened column across all polynomials
+        cfg_iter!(columns_opened).try_for_each(
+            |(column_idx, per_poly_column_values)| -> Result<(), ZipError> {
+                let mut batched_column_value = F::zero_with_cfg(field_cfg);
+
+                for (poly_idx, column_values) in
+                    per_poly_column_values.iter().enumerate()
+                {
+                    let per_poly_val = if vp.num_rows > 1 {
+                        let projected: Vec<F> =
+                            column_values.iter().map(&project).collect();
+                        MBSInnerProduct::inner_product::<UNCHECKED>(
+                            &q_0,
+                            &projected,
+                            F::zero_with_cfg(field_cfg),
+                        )?
+                    } else {
+                        project(&column_values[0])
+                    };
+                    let term = per_poly_val
+                        .mul_by_scalar::<UNCHECKED>(&beta_powers[poly_idx])
+                        .expect("Field multiplication cannot overflow");
+                    batched_column_value += term;
+                }
+
+                if batched_column_value != encoded_batched_row[*column_idx] {
+                    return Err(ZipError::InvalidPcsOpen(
+                        "Batched proximity failure in eval phase".into(),
+                    ));
+                }
+                Ok(())
+            },
+        )?;
 
         Ok(())
     }
@@ -347,8 +409,7 @@ mod tests {
     ) -> (
         BatchedZipPlusParams<Zt, C>,
         BatchedZipPlusCommitment,
-        Vec<F>,
-        Vec<F>,
+        Vec<<Zt as ZipTypes>::Pt>,
         BatchedZipPlusProof,
     ) {
         let (pp, _) = setup_test_params::<N, K, M>(num_vars);
@@ -362,27 +423,11 @@ mod tests {
         let point: Vec<<Zt as ZipTypes>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
 
-        let (field_cfg, _projecting_element) = {
-            let mut t: PcsTranscript = test_transcript.clone().into();
-            let field_cfg = t
-                .fs_transcript
-                .get_random_field_cfg::<F, <Zt as ZipTypes>::Fmod, <Zt as ZipTypes>::PrimeTest>(
-            );
-            let pe: <Zt as ZipTypes>::Chal = t.fs_transcript.get_challenge();
-            let pe_f: F = (&pe).into_with_cfg(&field_cfg);
-            (field_cfg, pe_f)
-        };
-
-        let (evals_f, proof) =
+        let (_evals_f, proof) =
             TestBatchedZip::evaluate::<F, CHECKED>(&pp, &polys, &point, test_transcript)
                 .unwrap();
 
-        let point_f: Vec<F> = point
-            .iter()
-            .map(|v| v.into_with_cfg(&field_cfg))
-            .collect();
-
-        (pp, comm, point_f, evals_f, proof)
+        (pp, comm, point, proof)
     }
 
     #[test]
@@ -391,11 +436,11 @@ mod tests {
         let poly: zinc_poly::mle::DenseMultilinearExtension<_> =
             (1..=16).map(Int::from).collect();
 
-        let (pp, comm, point_f, evals_f, proof) =
+        let (pp, comm, point, proof) =
             setup_batched_protocol(num_vars, vec![poly]);
 
         let result =
-            TestBatchedZip::verify::<F, CHECKED>(&pp, &comm, &point_f, &evals_f, &proof);
+            TestBatchedZip::verify::<F, CHECKED>(&pp, &comm, &point, &proof);
         assert!(result.is_ok(), "Single-poly batched verification failed: {result:?}");
     }
 
@@ -407,33 +452,44 @@ mod tests {
         let poly2: zinc_poly::mle::DenseMultilinearExtension<_> =
             (17..=32).map(Int::from).collect();
 
-        let (pp, comm, point_f, evals_f, proof) =
+        let (pp, comm, point, proof) =
             setup_batched_protocol(num_vars, vec![poly1, poly2]);
 
         let result =
-            TestBatchedZip::verify::<F, CHECKED>(&pp, &comm, &point_f, &evals_f, &proof);
+            TestBatchedZip::verify::<F, CHECKED>(&pp, &comm, &point, &proof);
         assert!(result.is_ok(), "Multi-poly batched verification failed: {result:?}");
     }
 
     #[test]
-    #[ignore = "Evaluation phase verification is not yet wired in the batched verifier"]
-    fn batched_verification_fails_with_wrong_evaluation() {
+    fn batched_verification_fails_with_tampered_proof() {
         let num_vars = 4;
         let poly1: zinc_poly::mle::DenseMultilinearExtension<_> =
             (1..=16).map(Int::from).collect();
         let poly2: zinc_poly::mle::DenseMultilinearExtension<_> =
             (17..=32).map(Int::from).collect();
 
-        let (pp, comm, point_f, mut evals_f, proof) =
+        let (pp, comm, point, proof) =
             setup_batched_protocol(num_vars, vec![poly1, poly2]);
 
-        // Corrupt the first evaluation
-        let cfg = evals_f[0].cfg().clone();
-        evals_f[0] = evals_f[0].clone() + F::one_with_cfg(&cfg);
+        // Tamper with the proof bytes (flip a byte in the eval phase data).
+        let mut proof_bytes: Vec<u8> = {
+            let tx: PcsTranscript = proof.into();
+            tx.stream.into_inner()
+        };
+        // Flip a byte near the end (in the eval phase region)
+        let idx = proof_bytes.len() - 10;
+        proof_bytes[idx] ^= 0xFF;
+        let tampered_proof: super::BatchedZipPlusProof = {
+            let tx = PcsTranscript {
+                fs_transcript: zinc_transcript::KeccakTranscript::default(),
+                stream: std::io::Cursor::new(proof_bytes),
+            };
+            tx.into()
+        };
 
         let result =
-            TestBatchedZip::verify::<F, CHECKED>(&pp, &comm, &point_f, &evals_f, &proof);
-        assert!(result.is_err());
+            TestBatchedZip::verify::<F, CHECKED>(&pp, &comm, &point, &tampered_proof);
+        assert!(result.is_err(), "Verification should fail with tampered proof");
     }
 
     #[test]
@@ -446,11 +502,11 @@ mod tests {
             })
             .collect();
 
-        let (pp, comm, point_f, evals_f, proof) =
+        let (pp, comm, point, proof) =
             setup_batched_protocol(num_vars, polys);
 
         let result =
-            TestBatchedZip::verify::<F, CHECKED>(&pp, &comm, &point_f, &evals_f, &proof);
+            TestBatchedZip::verify::<F, CHECKED>(&pp, &comm, &point, &proof);
         assert!(result.is_ok(), "5-poly batched verification failed: {result:?}");
     }
 }

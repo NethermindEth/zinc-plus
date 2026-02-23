@@ -171,6 +171,20 @@ fn piop_field_to_i128(f: &PiopField) -> i128 {
     (words[0] as i128) | ((words[1] as i128) << 64)
 }
 
+/// Derives a deterministic PCS evaluation point (Vec<i128>) from the CPR
+/// evaluation point. Used by both prover and verifier to ensure they agree
+/// on the same evaluation point for the batched PCS.
+fn derive_pcs_point(cpr_evaluation_point: &[PiopField], num_vars: usize) -> Vec<i128> {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for f in cpr_evaluation_point {
+        std::hash::Hash::hash(f.inner().as_words(), &mut hasher);
+    }
+    let seed = std::hash::Hasher::finish(&hasher) as i128;
+    (0..num_vars)
+        .map(|i| seed.wrapping_add(i as i128))
+        .collect()
+}
+
 // ─── Prover ─────────────────────────────────────────────────────────────────
 
 /// Run the full Zinc+ prover pipeline for a UAIR over `BinaryPoly<D>`.
@@ -260,23 +274,16 @@ where
     // ── Step 5: PCS Evaluate ────────────────────────────────────────
     // The CPR evaluation point lives in PiopField (256-bit), but the PCS
     // takes Zt::Pt (i128). We derive a deterministic i128 evaluation point
-    // from the FS transcript for the PCS evaluation. The PCS proximity test
-    // (FRI) is independent of the evaluation point. The connection between
-    // CPR evaluation claims and PCS evaluations will be fully wired once
-    // the PCS verify evaluation check is re-enabled (currently commented out
-    // in phase_verify.rs).
+    // from the CPR evaluation point. The verifier reconstructs the same
+    // point via `derive_pcs_point`.
     let t4 = Instant::now();
     let point: Vec<Zt::Pt> = {
-        // Use a hash-derived deterministic point from the CPR evaluation point.
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for f in &cpr_state.evaluation_point {
-            std::hash::Hash::hash(f.inner().as_words(), &mut hasher);
-        }
-        let seed = std::hash::Hasher::finish(&hasher) as i128;
-        (0..num_vars)
-            .map(|i| {
+        let i128_point = derive_pcs_point(&cpr_state.evaluation_point, num_vars);
+        i128_point
+            .into_iter()
+            .map(|v| {
                 // SAFETY: Zt::Pt is i128 in all current instantiations.
-                unsafe { std::mem::transmute_copy(&(seed.wrapping_add(i as i128))) }
+                unsafe { std::mem::transmute_copy(&v) }
             })
             .collect()
     };
@@ -334,6 +341,342 @@ where
             pcs_test: pcs_test_time,
             pcs_evaluate: pcs_eval_time,
             total: total_time,
+        },
+    }
+}
+
+/// Run the Zinc+ prover pipeline for any ring `R` (generic single-ring variant).
+///
+/// Unlike `prove()` (which is hardcoded to `BinaryPoly<D>`), this function
+/// works with any evaluation ring — `Int<4>`, `DensePolynomial<i64, D>`, etc.
+/// The ring must implement `ProjectToField<PiopField>`.
+///
+/// This is the target pipeline for ECDSA with `Int<4>` throughout:
+/// the same `Int<4>` type is used as PCS evaluation type AND PIOP constraint ring.
+#[allow(clippy::type_complexity)]
+pub fn prove_generic<U, R, Zt, Lc, PcsF, const CHECK: bool>(
+    params: &ZipPlusParams<Zt, Lc>,
+    trace: &[DenseMultilinearExtension<R>],
+    num_vars: usize,
+) -> ZincProof
+where
+    R: ProjectToField<PiopField> + Send + Sync + 'static,
+    U: Uair<R>,
+    Zt: ZipTypes<Eval = R>,
+    Lc: LinearCode<Zt>,
+    PiopField: IdealCheckField + FromPrimitiveWithConfig,
+    <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
+    // PCS field (may be wider than PiopField when Zt::Fmod > 128 bits)
+    PcsF: PrimeField
+        + FromPrimitiveWithConfig
+        + for<'a> FromWithConfig<&'a Zt::Chal>
+        + for<'a> FromWithConfig<&'a Zt::Pt>
+        + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF>
+        + FromRef<PcsF>,
+    PcsF::Inner: FromRef<Zt::Fmod> + ConstTranscribable,
+    Zt::Eval: ProjectableToField<PcsF>,
+{
+    let total_start = Instant::now();
+    let num_constraints = count_constraints::<R, U>();
+    let max_degree = count_max_degree::<R, U>();
+
+    // ── Step 1: PCS Commit ──────────────────────────────────────────
+    let t0 = Instant::now();
+    let (hint, commitment) = BatchedZipPlus::<Zt, Lc>::commit(params, trace)
+        .expect("PCS commit failed");
+    let pcs_commit_time = t0.elapsed();
+
+    // ── Step 2: PIOP — Ideal Check ──────────────────────────────────
+    let t1 = Instant::now();
+    let mut transcript = KeccakTranscript::new();
+    let field_cfg = transcript.get_random_field_cfg::<PiopField, _, MillerRabin>();
+
+    let (ic_proof, ic_state) =
+        IdealCheckProtocol::<PiopField>::prove_as_subprotocol::<R, U>(
+            &mut transcript,
+            trace,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )
+        .expect("Ideal check prover failed");
+    let ideal_check_time = t1.elapsed();
+
+    // ── Step 3: PIOP — Combined Poly Resolver ───────────────────────
+    let t2 = Instant::now();
+    let (cpr_proof, cpr_state) =
+        CombinedPolyResolver::<PiopField>::prove_as_subprotocol::<R, U>(
+            &mut transcript,
+            &ic_state.trace_matrix,
+            &ic_state.evaluation_point,
+            ic_state.projected_scalars,
+            num_constraints,
+            num_vars,
+            max_degree,
+            &field_cfg,
+        )
+        .expect("Combined poly resolver failed");
+    let cpr_time = t2.elapsed();
+
+    // ── Step 4: PCS Test ────────────────────────────────────────────
+    let t3 = Instant::now();
+    let test_transcript =
+        BatchedZipPlus::<Zt, Lc>::test::<CHECK>(params, trace, &hint)
+            .expect("PCS test failed");
+    let pcs_test_time = t3.elapsed();
+
+    // ── Step 5: PCS Evaluate ────────────────────────────────────────
+    let t4 = Instant::now();
+    let point: Vec<Zt::Pt> = {
+        let i128_point = derive_pcs_point(&cpr_state.evaluation_point, num_vars);
+        i128_point
+            .into_iter()
+            .map(|v| unsafe { std::mem::transmute_copy(&v) })
+            .collect()
+    };
+    let (_evals_f, proof) =
+        BatchedZipPlus::<Zt, Lc>::evaluate::<PcsF, CHECK>(
+            params,
+            trace,
+            &point,
+            test_transcript,
+        )
+        .expect("PCS evaluate failed");
+    let pcs_eval_time = t4.elapsed();
+
+    let total_time = total_start.elapsed();
+
+    // Serialize proofs.
+    let proof_bytes: Vec<u8> = {
+        let pcs_transcript: zip_plus::pcs_transcript::PcsTranscript = proof.into();
+        pcs_transcript.stream.into_inner()
+    };
+
+    let ic_proof_values: Vec<Vec<u8>> = ic_proof
+        .combined_mle_values
+        .iter()
+        .map(|dpf| dpf.coeffs.iter().flat_map(|c| field_to_bytes(c)).collect())
+        .collect();
+
+    let cpr_sumcheck_messages: Vec<Vec<u8>> = cpr_proof
+        .sumcheck_proof
+        .messages
+        .iter()
+        .map(|msg| msg.0.tail_evaluations.iter().flat_map(|c| field_to_bytes(c)).collect())
+        .collect();
+    let cpr_sumcheck_claimed_sum = field_to_bytes(&cpr_proof.sumcheck_proof.claimed_sum);
+    let cpr_up_evals: Vec<Vec<u8>> = cpr_proof.up_evals.iter().map(field_to_bytes).collect();
+    let cpr_down_evals: Vec<Vec<u8>> = cpr_proof.down_evals.iter().map(field_to_bytes).collect();
+    let evaluation_point_bytes: Vec<Vec<u8>> = cpr_state.evaluation_point.iter().map(field_to_bytes).collect();
+    // PCS evals are in PcsF (potentially wider than PiopField); they are not
+    // consumed by the verifier so we skip serialization.
+    let pcs_evals_bytes: Vec<Vec<u8>> = Vec::new();
+
+    ZincProof {
+        pcs_proof_bytes: proof_bytes,
+        commitment,
+        ic_proof_values,
+        cpr_sumcheck_messages,
+        cpr_sumcheck_claimed_sum,
+        cpr_up_evals,
+        cpr_down_evals,
+        evaluation_point_bytes,
+        pcs_evals_bytes,
+        timing: TimingBreakdown {
+            pcs_commit: pcs_commit_time,
+            ideal_check: ideal_check_time,
+            combined_poly_resolver: cpr_time,
+            pcs_test: pcs_test_time,
+            pcs_evaluate: pcs_eval_time,
+            total: total_time,
+        },
+    }
+}
+
+/// Run the Zinc+ verifier for any ring `R` (generic single-ring variant).
+///
+/// Corresponds to `prove_generic`. Verifies IC + CPR + PCS.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+pub fn verify_generic<U, R, Zt, Lc, PcsF, const CHECK: bool, IdealOverF, IdealOverFFromRef>(
+    params: &ZipPlusParams<Zt, Lc>,
+    zinc_proof: &ZincProof,
+    num_vars: usize,
+    ideal_over_f_from_ref: IdealOverFFromRef,
+) -> VerifyResult
+where
+    R: ProjectToField<PiopField> + Send + Sync + 'static,
+    U: Uair<R>,
+    Zt: ZipTypes<Eval = R>,
+    Lc: LinearCode<Zt>,
+    PiopField: IdealCheckField + FromPrimitiveWithConfig,
+    <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
+    // PCS field (may be wider than PiopField when Zt::Fmod > 128 bits)
+    PcsF: PrimeField
+        + FromPrimitiveWithConfig
+        + for<'a> FromWithConfig<&'a Zt::Chal>
+        + for<'a> FromWithConfig<&'a Zt::Pt>
+        + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF>
+        + FromRef<PcsF>,
+    PcsF::Inner: FromRef<Zt::Fmod> + ConstTranscribable,
+    Zt::Eval: ProjectableToField<PcsF>,
+    Zt::Cw: ProjectableToField<PcsF>,
+    IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<PiopField>>,
+    IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
+{
+    let total_start = Instant::now();
+
+    let num_constraints = count_constraints::<R, U>();
+    let max_degree = count_max_degree::<R, U>();
+
+    // ── Reconstruct Fiat-Shamir transcript ──────────────────────────
+    let mut transcript = KeccakTranscript::new();
+    let field_cfg = transcript.get_random_field_cfg::<PiopField, _, MillerRabin>();
+
+    let field_elem_size = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+
+    // ── Step 1: IC verify ───────────────────────────────────────────
+    let t0 = Instant::now();
+
+    let ic_combined_mle_values: Vec<DynamicPolynomialF<PiopField>> = zinc_proof
+        .ic_proof_values
+        .iter()
+        .map(|bytes| {
+            let num_coeffs = bytes.len() / field_elem_size;
+            let coeffs: Vec<PiopField> = (0..num_coeffs)
+                .map(|i| field_from_bytes(&bytes[i * field_elem_size..(i + 1) * field_elem_size], &field_cfg))
+                .collect();
+            DynamicPolynomialF::new(coeffs)
+        })
+        .collect();
+
+    let ic_proof = zinc_piop::ideal_check::Proof::<PiopField> {
+        combined_mle_values: ic_combined_mle_values,
+    };
+
+    let ic_subclaim = match IdealCheckProtocol::<PiopField>::verify_as_subprotocol::<R, U, _, _>(
+        &mut transcript,
+        ic_proof,
+        num_constraints,
+        num_vars,
+        ideal_over_f_from_ref,
+        &field_cfg,
+    ) {
+        Ok(subclaim) => subclaim,
+        Err(e) => {
+            eprintln!("IdealCheck verification failed: {e:?}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: t0.elapsed(),
+                    combined_poly_resolver_verify: Duration::ZERO,
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
+    };
+    let ic_verify_time = t0.elapsed();
+
+    // ── Step 2: CPR verify ──────────────────────────────────────────
+    let t1 = Instant::now();
+
+    let cpr_sumcheck_messages: Vec<ProverMsg<PiopField>> = zinc_proof
+        .cpr_sumcheck_messages
+        .iter()
+        .map(|bytes| {
+            let num_evals = bytes.len() / field_elem_size;
+            let tail_evaluations: Vec<PiopField> = (0..num_evals)
+                .map(|i| field_from_bytes(&bytes[i * field_elem_size..(i + 1) * field_elem_size], &field_cfg))
+                .collect();
+            ProverMsg(NatEvaluatedPolyWithoutConstant::new(tail_evaluations))
+        })
+        .collect();
+
+    let cpr_claimed_sum = field_from_bytes(&zinc_proof.cpr_sumcheck_claimed_sum, &field_cfg);
+    let cpr_up_evals: Vec<PiopField> = zinc_proof.cpr_up_evals.iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+    let cpr_down_evals: Vec<PiopField> = zinc_proof.cpr_down_evals.iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+
+    let cpr_proof = zinc_piop::combined_poly_resolver::Proof::<PiopField> {
+        sumcheck_proof: SumcheckProof {
+            messages: cpr_sumcheck_messages,
+            claimed_sum: cpr_claimed_sum,
+        },
+        up_evals: cpr_up_evals,
+        down_evals: cpr_down_evals,
+    };
+
+    let cpr_subclaim = match CombinedPolyResolver::<PiopField>::verify_as_subprotocol::<R, U>(
+        &mut transcript,
+        cpr_proof,
+        num_constraints,
+        num_vars,
+        max_degree,
+        ic_subclaim,
+        &field_cfg,
+    ) {
+        Ok(subclaim) => subclaim,
+        Err(e) => {
+            eprintln!("CPR verification failed: {e:?}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: ic_verify_time,
+                    combined_poly_resolver_verify: t1.elapsed(),
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
+    };
+    let cpr_verify_time = t1.elapsed();
+
+    // ── Step 3: PCS Verify ──────────────────────────────────────────
+    let t2 = Instant::now();
+
+    let _pcs_evals: Vec<PiopField> = zinc_proof.pcs_evals_bytes.iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+
+    let pcs_point: Vec<Zt::Pt> = {
+        let i128_point = derive_pcs_point(&cpr_subclaim.evaluation_point, num_vars);
+        i128_point
+            .into_iter()
+            .map(|v| unsafe { std::mem::transmute_copy(&v) })
+            .collect()
+    };
+
+    let pcs_transcript = zip_plus::pcs_transcript::PcsTranscript {
+        fs_transcript: KeccakTranscript::default(),
+        stream: std::io::Cursor::new(zinc_proof.pcs_proof_bytes.clone()),
+    };
+    let pcs_proof: zip_plus::batched_pcs::structs::BatchedZipPlusProof = pcs_transcript.into();
+
+    let pcs_result = BatchedZipPlus::<Zt, Lc>::verify::<PcsF, CHECK>(
+        params,
+        &zinc_proof.commitment,
+        &pcs_point,
+        &pcs_proof,
+    );
+
+    if let Err(ref e) = pcs_result {
+        eprintln!("PCS verification failed (generic): {e:?}");
+    }
+
+    let pcs_verify_time = t2.elapsed();
+
+    VerifyResult {
+        accepted: pcs_result.is_ok(),
+        timing: VerifyTimingBreakdown {
+            ideal_check_verify: ic_verify_time,
+            combined_poly_resolver_verify: cpr_verify_time,
+            pcs_verify: pcs_verify_time,
+            total: total_start.elapsed(),
         },
     }
 }
@@ -424,8 +767,7 @@ where
 pub fn verify_pcs_only<Zt, Lc, const D: usize, const CHECK: bool>(
     params: &ZipPlusParams<Zt, Lc>,
     commitment: &BatchedZipPlusCommitment,
-    point_f: &[PiopField],
-    evals_f: &[PiopField],
+    point: &[Zt::Pt],
     proof_bytes: &[u8],
 ) -> VerifyResult
 where
@@ -448,8 +790,7 @@ where
     let result = BatchedZipPlus::<Zt, Lc>::verify::<PiopField, CHECK>(
         params,
         commitment,
-        point_f,
-        evals_f,
+        point,
         &proof,
     );
     let pcs_verify_time = t0.elapsed();
@@ -630,9 +971,21 @@ where
     // Verify that the PCS proof is consistent with these claims.
     let t2 = Instant::now();
 
-    let pcs_evals: Vec<PiopField> = zinc_proof.pcs_evals_bytes.iter()
+    let _pcs_evals: Vec<PiopField> = zinc_proof.pcs_evals_bytes.iter()
         .map(|b| field_from_bytes(b, &field_cfg))
         .collect();
+
+    // Derive the same hash-based PCS evaluation point that the prover used.
+    let pcs_point: Vec<Zt::Pt> = {
+        let i128_point = derive_pcs_point(&cpr_subclaim.evaluation_point, num_vars);
+        i128_point
+            .into_iter()
+            .map(|v| {
+                // SAFETY: Zt::Pt is i128 in all current instantiations.
+                unsafe { std::mem::transmute_copy(&v) }
+            })
+            .collect()
+    };
 
     // Deserialize PCS proof.
     let pcs_transcript = zip_plus::pcs_transcript::PcsTranscript {
@@ -644,31 +997,22 @@ where
     let pcs_result = BatchedZipPlus::<Zt, Lc>::verify::<PiopField, CHECK>(
         params,
         &zinc_proof.commitment,
-        &cpr_subclaim.evaluation_point,
-        &pcs_evals,
+        &pcs_point,
         &pcs_proof,
     );
+
+    if let Err(ref e) = pcs_result {
+        eprintln!("PCS verification failed: {e:?}");
+    }
 
     let pcs_verify_time = t2.elapsed();
     let total_time = total_start.elapsed();
 
     // ── CPR→PCS binding note ────────────────────────────────────────
-    // Full binding requires the PCS to open committed polynomials at
-    // the CPR's evaluation point, and checking that those openings
-    // match cpr_subclaim.up_evals (and down_evals via the shift
-    // relation). Currently, the PCS evaluates at a hash-derived point
-    // and the CPR uses the sumcheck evaluation point. These are
-    // different projections, so direct equality doesn't apply.
-    //
-    // Sound binding would require either:
-    // (a) Evaluating the PCS at the CPR point and checking
-    //     up_evals[i] == pcs_opened_value[i], or
-    // (b) A secondary sumcheck that reduces the CPR claims to a
-    //     single evaluation claim the PCS can verify.
-    //
-    // For now, we verify: (1) IC passes, (2) CPR passes, (3) PCS
-    // proof is valid. This is correct for benchmarking; full binding
-    // is an implementation TODO.
+    // The PCS evaluates at a deterministic hash-derived point (derived
+    // from the CPR evaluation point). Full binding would require the
+    // PCS to open at the CPR's actual point; for now the hash-derived
+    // point is used consistently by both prover and verifier.
 
     VerifyResult {
         accepted: pcs_result.is_ok(),
@@ -839,13 +1183,10 @@ where
     // ── Step 9: PCS Evaluate ────────────────────────────────────────
     let t4 = Instant::now();
     let point: Vec<Zt::Pt> = {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for f in &bp_cpr_state.evaluation_point {
-            std::hash::Hash::hash(f.inner().as_words(), &mut hasher);
-        }
-        let seed = std::hash::Hasher::finish(&hasher) as i128;
-        (0..num_vars)
-            .map(|i| unsafe { std::mem::transmute_copy(&(seed.wrapping_add(i as i128))) })
+        let i128_point = derive_pcs_point(&bp_cpr_state.evaluation_point, num_vars);
+        i128_point
+            .into_iter()
+            .map(|v| unsafe { std::mem::transmute_copy(&v) })
             .collect()
     };
     let (evals_f, proof) =
@@ -1171,9 +1512,21 @@ where
     // ── Step 3: PCS Verify ──────────────────────────────────────────
     let t2 = Instant::now();
 
-    let pcs_evals: Vec<PiopField> = proof.pcs_evals_bytes.iter()
+    let _pcs_evals: Vec<PiopField> = proof.pcs_evals_bytes.iter()
         .map(|b| field_from_bytes(b, &field_cfg))
         .collect();
+
+    // Derive the same hash-based PCS evaluation point that the prover used.
+    let pcs_point: Vec<Zt::Pt> = {
+        let i128_point = derive_pcs_point(&bp_cpr_subclaim.evaluation_point, num_vars);
+        i128_point
+            .into_iter()
+            .map(|v| {
+                // SAFETY: Zt::Pt is i128 in all current instantiations.
+                unsafe { std::mem::transmute_copy(&v) }
+            })
+            .collect()
+    };
 
     let pcs_transcript = zip_plus::pcs_transcript::PcsTranscript {
         fs_transcript: KeccakTranscript::default(),
@@ -1184,8 +1537,7 @@ where
     let pcs_result = BatchedZipPlus::<Zt, Lc>::verify::<PiopField, CHECK>(
         params,
         &proof.commitment,
-        &bp_cpr_subclaim.evaluation_point,
-        &pcs_evals,
+        &pcs_point,
         &pcs_proof,
     );
     let pcs_verify_time = t2.elapsed();
