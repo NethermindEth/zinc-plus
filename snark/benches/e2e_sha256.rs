@@ -56,6 +56,7 @@ use zip_plus::{
 
 use zinc_ecdsa_uair::EcdsaUair;
 use zinc_sha256_uair::{Sha256Uair, witness::GenerateWitness};
+use zinc_sha256_uair::witness::{generate_poly_witness, generate_int_witness};
 
 // ─── Type definitions (matching batched_zip_plus_benches.rs) ────────────────
 
@@ -117,6 +118,30 @@ impl ZipTypes for EcdsaScalarZipTypes {
     type ArrCombRDotChal = MBSInnerProduct;
 }
 
+/// ZipTypes for the SHA-256 integer columns (indices 5–7, 10–14, 19) committed
+/// as `Int<1>` (64-bit integer) instead of `BinaryPoly<32>` (256 bytes).
+///
+/// These columns only participate in Q[X] carry/BitPoly constraints (C7–C11)
+/// and their values are 32-bit unsigned integers that fit in a single 64-bit limb.
+/// Committing them with `Int<1>` reduces the codeword size from 256 B to ~16 B,
+/// saving ~328 KB at 147 column openings for a single SHA-256 proof.
+struct Sha256IntZipTypes;
+
+impl ZipTypes for Sha256IntZipTypes {
+    const NUM_COLUMN_OPENINGS: usize = 147;
+    type Eval = Int<{ INT_LIMBS }>;           // 64-bit integer (Int<1>)
+    type Cw = Int<{ INT_LIMBS * 2 }>;         // 128-bit codeword (Int<2>)
+    type Fmod = Uint<{ INT_LIMBS * 4 }>;      // 256-bit modulus search
+    type PrimeTest = MillerRabin;
+    type Chal = i128;
+    type Pt = i128;
+    type CombR = Int<{ INT_LIMBS * 4 }>;      // 256-bit combination ring
+    type Comb = Self::CombR;
+    type EvalDotChal = ScalarProduct;
+    type CombDotChal = ScalarProduct;
+    type ArrCombRDotChal = MBSInnerProduct;
+}
+
 // IPRS code types for BinaryPoly<32>
 type IprsBPoly32R4B64<const DEPTH: usize, const CHECK: bool> = IprsCode<
     Sha256ZipTypes<i64, 32>,
@@ -151,6 +176,26 @@ type IprsInt4R4B16<const DEPTH: usize, const CHECK: bool> = IprsCode<
     CHECK,
 >;
 
+// IPRS code types for Int<1> (SHA-256 integer columns)
+type IprsInt1R4B64<const DEPTH: usize, const CHECK: bool> = IprsCode<
+    Sha256IntZipTypes,
+    PnttConfigF2_16R4B64<DEPTH>,
+    ScalarWideningMulByScalar<Int<{ INT_LIMBS * 2 }>>,
+    CHECK,
+>;
+type IprsInt1R4B16<const DEPTH: usize, const CHECK: bool> = IprsCode<
+    Sha256IntZipTypes,
+    PnttConfigF2_16R4B16<DEPTH>,
+    ScalarWideningMulByScalar<Int<{ INT_LIMBS * 2 }>>,
+    CHECK,
+>;
+type IprsInt1R4B32<const DEPTH: usize, const CHECK: bool> = IprsCode<
+    Sha256IntZipTypes,
+    PnttConfigF2_16R4B32<DEPTH>,
+    ScalarWideningMulByScalar<Int<{ INT_LIMBS * 2 }>>,
+    CHECK,
+>;
+
 // ─── SHA-256 Trace Parameters ───────────────────────────────────────────────
 //
 // SHA-256 has 64 rows × 19 columns.
@@ -166,6 +211,10 @@ type IprsInt4R4B16<const DEPTH: usize, const CHECK: bool> = IprsCode<
 
 const SHA256_NUM_VARS: usize = 7;        // 2^7 = 128 rows (64 real + 64 padding)
 const SHA256_BATCH_SIZE: usize = 20;      // 20 SHA-256 columns
+
+// Split SHA-256 batch sizes for two-PCS configuration
+const SHA256_POLY_BATCH_SIZE: usize = 11; // 11 BinaryPoly columns (C1–C6)
+const SHA256_INT_BATCH_SIZE: usize = 9;   // 9 Int columns (C7–C11)
 
 // For 8× SHA-256 + ECDSA: two separate PCS batches
 const SHA256_8X_NUM_VARS: usize = 9;           // 2^9 = 512 rows (8 × 64 SHA rounds)
@@ -287,7 +336,7 @@ fn bench_pcs_pipeline<Zt, Lc, const P: usize, const CHECK: bool>(
     let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
     encoder.write_all(&proof_bytes).unwrap();
     let compressed = encoder.finish().unwrap();
-    println!(
+    eprintln!(
         "  {label}: proof_size = {} bytes ({:.1} KB), compressed = {} bytes ({:.1} KB, {:.1}× ratio)",
         proof_bytes.len(),
         proof_bytes.len() as f64 / 1024.0,
@@ -328,6 +377,131 @@ fn sha256_single(c: &mut Criterion) {
         SHA256_BATCH_SIZE,
         &trace,
     );
+
+    // ── Split PCS: BinaryPoly batch + Int batch ─────────────────────
+    // Split the 20 SHA-256 columns into two PCS batches:
+    //   - BinaryPoly batch (11 cols): columns used in F₂[X] rotation constraints
+    //   - Int batch (9 cols): columns only used in Q[X] carry/BitPoly constraints
+    // The PIOP still runs on the full 20-column BinaryPoly<32> trace.
+    {
+        let mut rng = rand::rng();
+        let poly_trace = generate_poly_witness(SHA256_NUM_VARS, &mut rng);
+        let int_trace = generate_int_witness(SHA256_NUM_VARS, &mut rng);
+        assert_eq!(poly_trace.len(), SHA256_POLY_BATCH_SIZE);
+        assert_eq!(int_trace.len(), SHA256_INT_BATCH_SIZE);
+
+        type PolyZt = Sha256ZipTypes<i64, 32>;
+        type PolyLc = IprsBPoly32R4B16<1, UNCHECKED>;
+        type IntZt = Sha256IntZipTypes;
+        type IntLc = IprsInt1R4B16<1, UNCHECKED>;
+
+        let poly_lc = PolyLc::new(128);
+        let poly_params = ZipPlusParams::<PolyZt, PolyLc>::new(SHA256_NUM_VARS, 1, poly_lc);
+        let int_lc = IntLc::new(128);
+        let int_params = ZipPlusParams::<IntZt, IntLc>::new(SHA256_NUM_VARS, 1, int_lc);
+
+        // ── Prover (both batches) ───────────────────────────────────
+        group.bench_function("1xSHA256/SplitPCS/Prover", |b| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let t = Instant::now();
+
+                    // BinaryPoly batch
+                    let (poly_hint, _) = BatchedZipPlus::<PolyZt, PolyLc>::commit(
+                        &poly_params, &poly_trace,
+                    ).expect("poly commit");
+                    let poly_tx = BatchedZipPlus::<PolyZt, PolyLc>::test::<UNCHECKED>(
+                        &poly_params, &poly_trace, &poly_hint,
+                    ).expect("poly test");
+                    let poly_pt: Vec<i128> = vec![1i128; SHA256_NUM_VARS];
+                    let _ = BatchedZipPlus::<PolyZt, PolyLc>::evaluate::<F, UNCHECKED>(
+                        &poly_params, &poly_trace, &poly_pt, poly_tx,
+                    ).expect("poly evaluate");
+
+                    // Int batch
+                    let (int_hint, _) = BatchedZipPlus::<IntZt, IntLc>::commit(
+                        &int_params, &int_trace,
+                    ).expect("int commit");
+                    let int_tx = BatchedZipPlus::<IntZt, IntLc>::test::<UNCHECKED>(
+                        &int_params, &int_trace, &int_hint,
+                    ).expect("int test");
+                    let int_pt: Vec<i128> = vec![1i128; SHA256_NUM_VARS];
+                    let _ = BatchedZipPlus::<IntZt, IntLc>::evaluate::<F, UNCHECKED>(
+                        &int_params, &int_trace, &int_pt, int_tx,
+                    ).expect("int evaluate");
+
+                    total += t.elapsed();
+                }
+                total
+            });
+        });
+
+        // Prepare proofs for verifier and size measurement
+        let (poly_hint, poly_comm) = BatchedZipPlus::<PolyZt, PolyLc>::commit(
+            &poly_params, &poly_trace,
+        ).expect("commit");
+        let poly_tx = BatchedZipPlus::<PolyZt, PolyLc>::test::<UNCHECKED>(
+            &poly_params, &poly_trace, &poly_hint,
+        ).expect("test");
+        let poly_pt: Vec<i128> = vec![1i128; SHA256_NUM_VARS];
+        let (_poly_evals, poly_proof) = BatchedZipPlus::<PolyZt, PolyLc>::evaluate::<F, UNCHECKED>(
+            &poly_params, &poly_trace, &poly_pt, poly_tx,
+        ).expect("evaluate");
+
+        let (int_hint, int_comm) = BatchedZipPlus::<IntZt, IntLc>::commit(
+            &int_params, &int_trace,
+        ).expect("commit");
+        let int_tx = BatchedZipPlus::<IntZt, IntLc>::test::<UNCHECKED>(
+            &int_params, &int_trace, &int_hint,
+        ).expect("test");
+        let int_pt: Vec<i128> = vec![1i128; SHA256_NUM_VARS];
+        let (_int_evals, int_proof) = BatchedZipPlus::<IntZt, IntLc>::evaluate::<F, UNCHECKED>(
+            &int_params, &int_trace, &int_pt, int_tx,
+        ).expect("evaluate");
+
+        // ── Verifier (both batches) ─────────────────────────────────
+        group.bench_function("1xSHA256/SplitPCS/Verifier", |b| {
+            b.iter(|| {
+                let r1 = BatchedZipPlus::<PolyZt, PolyLc>::verify::<F, UNCHECKED>(
+                    &poly_params, &poly_comm, &poly_pt, &poly_proof,
+                );
+                let _ = black_box(r1);
+                let r2 = BatchedZipPlus::<IntZt, IntLc>::verify::<F, UNCHECKED>(
+                    &int_params, &int_comm, &int_pt, &int_proof,
+                );
+                let _ = black_box(r2);
+            });
+        });
+
+        // ── Proof size comparison ───────────────────────────────────
+        let poly_bytes: Vec<u8> = {
+            let tx: zip_plus::pcs_transcript::PcsTranscript = poly_proof.into();
+            tx.stream.into_inner()
+        };
+        let int_bytes: Vec<u8> = {
+            let tx: zip_plus::pcs_transcript::PcsTranscript = int_proof.into();
+            tx.stream.into_inner()
+        };
+        let combined_size = poly_bytes.len() + int_bytes.len();
+
+        let mut all_bytes = Vec::new();
+        all_bytes.extend(&poly_bytes);
+        all_bytes.extend(&int_bytes);
+        let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&all_bytes).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        eprintln!("\n=== Split PCS Proof Size (1xSHA256) ===");
+        eprintln!("  BinaryPoly batch ({} cols): {} bytes ({:.1} KB)",
+            SHA256_POLY_BATCH_SIZE, poly_bytes.len(), poly_bytes.len() as f64 / 1024.0);
+        eprintln!("  Int batch ({} cols):        {} bytes ({:.1} KB)",
+            SHA256_INT_BATCH_SIZE, int_bytes.len(), int_bytes.len() as f64 / 1024.0);
+        eprintln!("  Combined raw:  {} bytes ({:.1} KB)", combined_size, combined_size as f64 / 1024.0);
+        eprintln!("  Compressed:    {} bytes ({:.1} KB, {:.1}× ratio)",
+            compressed.len(), compressed.len() as f64 / 1024.0,
+            all_bytes.len() as f64 / compressed.len() as f64);
+    }
 
     // ── Full pipeline: PCS + PIOP (headline benchmark) ──────────────
     // This is the honest prover time: IC + CPR + PCS commit + test + evaluate.
@@ -372,7 +546,7 @@ fn sha256_single(c: &mut Criterion) {
             });
         });
 
-        println!(
+        eprintln!(
             "\n  Full pipeline prover breakdown: IC={:?}, CPR={:?}, PCS commit={:?}, test={:?}, evaluate={:?}, total={:?}",
             zinc_proof.timing.ideal_check,
             zinc_proof.timing.combined_poly_resolver,
@@ -561,26 +735,214 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
     encoder.write_all(&all_bytes).unwrap();
     let compressed = encoder.finish().unwrap();
 
-    println!("\n=== 8xSHA256+ECDSA Combined Proof Size ===");
-    println!(
-        "  SHA:   PCS = {} bytes ({:.1} KB), PIOP = {} bytes ({:.1} KB)",
+    // Compute analytical breakdown of PCS proof components.
+    // PCS proof = proximity_phase + column_opening_phase + eval_phase
+    //   proximity = row_len × CombR_bytes
+    //   column_openings = NUM_OPENINGS × (batch_size × num_rows × Cw_bytes + merkle_proof)
+    //   eval = row_len × PcsF_bytes + batch_size × PcsF_bytes  (+length prefixes)
+    let sha_col_per_opening = SHA256_BATCH_SIZE * 1 * <ShaZt as ZipTypes>::Cw::NUM_BYTES;
+    let ec_col_per_opening = ECDSA_BATCH_SIZE * 1 * <EcZt as ZipTypes>::Cw::NUM_BYTES;
+
+    eprintln!("\n=== 8xSHA256+ECDSA Combined Proof Size (NUM_COLUMN_OPENINGS={}) ===",
+        <ShaZt as ZipTypes>::NUM_COLUMN_OPENINGS);
+    eprintln!("  SHA:   PCS = {} bytes ({:.1} KB), PIOP = {} bytes ({:.1} KB)",
         sha_pcs, sha_pcs as f64 / 1024.0,
         sha_piop, sha_piop as f64 / 1024.0,
     );
-    println!(
-        "  ECDSA: PCS = {} bytes ({:.1} KB), PIOP = {} bytes ({:.1} KB)",
+    eprintln!("    column values/opening: {} cols × {} B/cw = {} B",
+        SHA256_BATCH_SIZE, <ShaZt as ZipTypes>::Cw::NUM_BYTES, sha_col_per_opening);
+    eprintln!("    CombR = Int<6> = {} B, PcsF = MontyField<4> ≈ 16 B",
+        <ShaZt as ZipTypes>::CombR::NUM_BYTES);
+    eprintln!("  ECDSA: PCS = {} bytes ({:.1} KB), PIOP = {} bytes ({:.1} KB)",
         ec_pcs, ec_pcs as f64 / 1024.0,
         ec_piop, ec_piop as f64 / 1024.0,
     );
-    println!(
-        "  Total raw:  {} bytes ({:.1} KB)",
+    eprintln!("    column values/opening: {} cols × {} B/cw = {} B",
+        ECDSA_BATCH_SIZE, <EcZt as ZipTypes>::Cw::NUM_BYTES, ec_col_per_opening);
+    eprintln!("    CombR = Int<8> = {} B, PcsF = MontyField<8> ≈ 64 B",
+        <EcZt as ZipTypes>::CombR::NUM_BYTES);
+    eprintln!("  SHA/ECDSA PCS ratio:  {:.2}×", sha_pcs as f64 / ec_pcs as f64);
+    eprintln!("  Total raw:  {} bytes ({:.1} KB)",
         total_raw, total_raw as f64 / 1024.0,
     );
-    println!(
-        "  Compressed: {} bytes ({:.1} KB, {:.1}× ratio)",
+    eprintln!("  Compressed: {} bytes ({:.1} KB, {:.1}× ratio)",
         compressed.len(), compressed.len() as f64 / 1024.0,
         all_bytes.len() as f64 / compressed.len() as f64,
     );
+
+    // ── Split SHA PCS: BinaryPoly (11 cols) + Int (9 cols) + ECDSA ──
+    // Splits the 20 SHA-256 columns into two PCS batches by column type,
+    // keeping the ECDSA batch unchanged.  Three PCS batches total:
+    //   1. SHA BinaryPoly (11 cols) — rotation/shift constraints
+    //   2. SHA Int<1>     (9 cols)  — carry/BitPoly constraints
+    //   3. ECDSA Int<4>   (14 cols) — scalar arithmetic
+    {
+        let mut rng = rand::rng();
+        let sha_poly_trace = generate_poly_witness(SHA256_8X_NUM_VARS, &mut rng);
+        let sha_int_trace  = generate_int_witness(SHA256_8X_NUM_VARS, &mut rng);
+        assert_eq!(sha_poly_trace.len(), SHA256_POLY_BATCH_SIZE);
+        assert_eq!(sha_int_trace.len(), SHA256_INT_BATCH_SIZE);
+
+        // SHA BinaryPoly batch: same ZipTypes as mono, R4B64 DEPTH=1
+        type ShaPolyZt = Sha256ZipTypes<i64, 32>;
+        type ShaPolyLc = IprsBPoly32R4B64<1, UNCHECKED>;
+        let sha_poly_params = ZipPlusParams::<ShaPolyZt, ShaPolyLc>::new(
+            SHA256_8X_NUM_VARS, 1, ShaPolyLc::new(512),
+        );
+
+        // SHA Int batch: Int<1> ZipTypes, R4B64 DEPTH=1
+        type ShaIntZt = Sha256IntZipTypes;
+        type ShaIntLc = IprsInt1R4B64<1, UNCHECKED>;
+        let sha_int_params = ZipPlusParams::<ShaIntZt, ShaIntLc>::new(
+            SHA256_8X_NUM_VARS, 1, ShaIntLc::new(512),
+        );
+
+        // ── Split Prover (3 batches) ────────────────────────────────
+        group.bench_function("SplitSHA/PCS/Prover", |b| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let t = Instant::now();
+
+                    // SHA BinaryPoly batch
+                    let (h, _) = BatchedZipPlus::<ShaPolyZt, ShaPolyLc>::commit(
+                        &sha_poly_params, &sha_poly_trace,
+                    ).expect("sha poly commit");
+                    let tx = BatchedZipPlus::<ShaPolyZt, ShaPolyLc>::test::<UNCHECKED>(
+                        &sha_poly_params, &sha_poly_trace, &h,
+                    ).expect("sha poly test");
+                    let pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
+                    let _ = BatchedZipPlus::<ShaPolyZt, ShaPolyLc>::evaluate::<F, UNCHECKED>(
+                        &sha_poly_params, &sha_poly_trace, &pt, tx,
+                    ).expect("sha poly evaluate");
+
+                    // SHA Int batch
+                    let (h, _) = BatchedZipPlus::<ShaIntZt, ShaIntLc>::commit(
+                        &sha_int_params, &sha_int_trace,
+                    ).expect("sha int commit");
+                    let tx = BatchedZipPlus::<ShaIntZt, ShaIntLc>::test::<UNCHECKED>(
+                        &sha_int_params, &sha_int_trace, &h,
+                    ).expect("sha int test");
+                    let pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
+                    let _ = BatchedZipPlus::<ShaIntZt, ShaIntLc>::evaluate::<F, UNCHECKED>(
+                        &sha_int_params, &sha_int_trace, &pt, tx,
+                    ).expect("sha int evaluate");
+
+                    // ECDSA batch (unchanged)
+                    let (h, _) = BatchedZipPlus::<EcZt, EcLc>::commit(
+                        &ec_params, &ecdsa_trace,
+                    ).expect("ecdsa commit");
+                    let tx = BatchedZipPlus::<EcZt, EcLc>::test::<UNCHECKED>(
+                        &ec_params, &ecdsa_trace, &h,
+                    ).expect("ecdsa test");
+                    let pt: Vec<i128> = vec![1i128; ECDSA_NUM_VARS];
+                    let _ = BatchedZipPlus::<EcZt, EcLc>::evaluate::<FScalar, UNCHECKED>(
+                        &ec_params, &ecdsa_trace, &pt, tx,
+                    ).expect("ecdsa evaluate");
+
+                    total += t.elapsed();
+                }
+                total
+            });
+        });
+
+        // Prepare proofs for verifier and size measurement
+        let (sp_h, sp_comm) = BatchedZipPlus::<ShaPolyZt, ShaPolyLc>::commit(
+            &sha_poly_params, &sha_poly_trace,
+        ).expect("commit");
+        let sp_tx = BatchedZipPlus::<ShaPolyZt, ShaPolyLc>::test::<UNCHECKED>(
+            &sha_poly_params, &sha_poly_trace, &sp_h,
+        ).expect("test");
+        let sp_pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
+        let (_, sp_proof) = BatchedZipPlus::<ShaPolyZt, ShaPolyLc>::evaluate::<F, UNCHECKED>(
+            &sha_poly_params, &sha_poly_trace, &sp_pt, sp_tx,
+        ).expect("evaluate");
+
+        let (si_h, si_comm) = BatchedZipPlus::<ShaIntZt, ShaIntLc>::commit(
+            &sha_int_params, &sha_int_trace,
+        ).expect("commit");
+        let si_tx = BatchedZipPlus::<ShaIntZt, ShaIntLc>::test::<UNCHECKED>(
+            &sha_int_params, &sha_int_trace, &si_h,
+        ).expect("test");
+        let si_pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
+        let (_, si_proof) = BatchedZipPlus::<ShaIntZt, ShaIntLc>::evaluate::<F, UNCHECKED>(
+            &sha_int_params, &sha_int_trace, &si_pt, si_tx,
+        ).expect("evaluate");
+
+        // Reuse ECDSA proof from above (ec_comm, ec_pt, ec_proof)
+
+        // ── Split Verifier (3 batches) ──────────────────────────────
+        group.bench_function("SplitSHA/PCS/Verifier", |b| {
+            b.iter(|| {
+                let _ = black_box(BatchedZipPlus::<ShaPolyZt, ShaPolyLc>::verify::<F, UNCHECKED>(
+                    &sha_poly_params, &sp_comm, &sp_pt, &sp_proof,
+                ));
+                let _ = black_box(BatchedZipPlus::<ShaIntZt, ShaIntLc>::verify::<F, UNCHECKED>(
+                    &sha_int_params, &si_comm, &si_pt, &si_proof,
+                ));
+                let _ = black_box(BatchedZipPlus::<EcZt, EcLc>::verify::<FScalar, UNCHECKED>(
+                    &ec_params, &ec_comm, &ec_pt, &ec_proof,
+                ));
+            });
+        });
+
+        // ── Proof size comparison ───────────────────────────────────
+        let sp_bytes: Vec<u8> = {
+            let tx: zip_plus::pcs_transcript::PcsTranscript = sp_proof.into();
+            tx.stream.into_inner()
+        };
+        let si_bytes: Vec<u8> = {
+            let tx: zip_plus::pcs_transcript::PcsTranscript = si_proof.into();
+            tx.stream.into_inner()
+        };
+
+        let split_sha_pcs = sp_bytes.len() + si_bytes.len();
+        let split_total_raw = split_sha_pcs + ec_pcs + sha_piop + ec_piop;
+
+        let mut split_all = Vec::new();
+        split_all.extend(&sp_bytes);
+        split_all.extend(&si_bytes);
+        // ECDSA PCS bytes from the full-pipeline proof
+        split_all.extend(&ec_zinc_proof.pcs_proof_bytes);
+        // PIOP data for both proofs
+        for p in [&sha_zinc_proof, &ec_zinc_proof] {
+            for v in &p.ic_proof_values { split_all.extend(v); }
+            for v in &p.cpr_sumcheck_messages { split_all.extend(v); }
+            split_all.extend(&p.cpr_sumcheck_claimed_sum);
+            for v in &p.cpr_up_evals { split_all.extend(v); }
+            for v in &p.cpr_down_evals { split_all.extend(v); }
+            for v in &p.evaluation_point_bytes { split_all.extend(v); }
+            for v in &p.pcs_evals_bytes { split_all.extend(v); }
+        }
+        let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&split_all).unwrap();
+        let split_compressed = enc.finish().unwrap();
+
+        let sp_col_opening = SHA256_POLY_BATCH_SIZE * 1 * <ShaPolyZt as ZipTypes>::Cw::NUM_BYTES;
+        let si_col_opening = SHA256_INT_BATCH_SIZE * 1 * <ShaIntZt as ZipTypes>::Cw::NUM_BYTES;
+
+        eprintln!("\n=== 8xSHA256+ECDSA Split-SHA Proof Size ===");
+        eprintln!("  SHA BinaryPoly ({} cols): PCS = {} bytes ({:.1} KB)",
+            SHA256_POLY_BATCH_SIZE, sp_bytes.len(), sp_bytes.len() as f64 / 1024.0);
+        eprintln!("    column values/opening: {} cols × {} B/cw = {} B",
+            SHA256_POLY_BATCH_SIZE, <ShaPolyZt as ZipTypes>::Cw::NUM_BYTES, sp_col_opening);
+        eprintln!("  SHA Int ({} cols):        PCS = {} bytes ({:.1} KB)",
+            SHA256_INT_BATCH_SIZE, si_bytes.len(), si_bytes.len() as f64 / 1024.0);
+        eprintln!("    column values/opening: {} cols × {} B/cw = {} B",
+            SHA256_INT_BATCH_SIZE, <ShaIntZt as ZipTypes>::Cw::NUM_BYTES, si_col_opening);
+        eprintln!("  ECDSA ({} cols):          PCS = {} bytes ({:.1} KB)",
+            ECDSA_BATCH_SIZE, ec_pcs, ec_pcs as f64 / 1024.0);
+        eprintln!("  Split SHA PCS: {} bytes ({:.1} KB) vs mono {} bytes ({:.1} KB) → {:.2}× smaller",
+            split_sha_pcs, split_sha_pcs as f64 / 1024.0,
+            sha_pcs, sha_pcs as f64 / 1024.0,
+            sha_pcs as f64 / split_sha_pcs as f64);
+        eprintln!("  Total raw:  {} bytes ({:.1} KB) vs mono {} bytes ({:.1} KB)",
+            split_total_raw, split_total_raw as f64 / 1024.0,
+            total_raw, total_raw as f64 / 1024.0);
+        eprintln!("  Compressed: {} bytes ({:.1} KB, {:.1}× ratio)",
+            split_compressed.len(), split_compressed.len() as f64 / 1024.0,
+            split_all.len() as f64 / split_compressed.len() as f64);
+    }
 
     group.finish();
 }
@@ -860,12 +1222,91 @@ fn sha256_full_pipeline(c: &mut Criterion) {
     encoder.write_all(&all_bytes).unwrap();
     let compressed = encoder.finish().unwrap();
 
-    println!("\n=== Full Pipeline Proof Size ===");
-    println!("  PCS proof:     {} bytes ({:.1} KB)", pcs_size, pcs_size as f64 / 1024.0);
-    println!("  PIOP proof:    {} bytes ({:.1} KB)", piop_size, piop_size as f64 / 1024.0);
-    println!("  Total raw:     {} bytes ({:.1} KB)", total_size, total_size as f64 / 1024.0);
-    println!("  Compressed:    {} bytes ({:.1} KB)", compressed.len(), compressed.len() as f64 / 1024.0);
-    println!("  Target limit:  800 KB → {}", if total_size <= 819200 { "✓ UNDER" } else { "✗ OVER" });
+    eprintln!("\n=== Full Pipeline Proof Size ===");
+    eprintln!("  PCS proof:     {} bytes ({:.1} KB)", pcs_size, pcs_size as f64 / 1024.0);
+    eprintln!("  PIOP proof:    {} bytes ({:.1} KB)", piop_size, piop_size as f64 / 1024.0);
+    eprintln!("  Total raw:     {} bytes ({:.1} KB)", total_size, total_size as f64 / 1024.0);
+    eprintln!("  Compressed:    {} bytes ({:.1} KB)", compressed.len(), compressed.len() as f64 / 1024.0);
+    eprintln!("  Target limit:  800 KB → {}", if total_size <= 819200 { "✓ UNDER" } else { "✗ OVER" });
+
+    // ── Split PCS proof size comparison ─────────────────────────────
+    // Run separate PCS for the BinaryPoly (11 cols) and Int (9 cols) batches
+    // to measure the proof size savings from the column type split.
+    // The PIOP proof size is unchanged — only PCS is split.
+    {
+        let mut rng = rand::rng();
+        let poly_trace = generate_poly_witness(num_vars, &mut rng);
+        let int_trace = generate_int_witness(num_vars, &mut rng);
+
+        type IntZt = Sha256IntZipTypes;
+        type IntLc = IprsInt1R4B16<1, UNCHECKED>;
+        let int_lc = IntLc::new(128);
+        let int_params = ZipPlusParams::<IntZt, IntLc>::new(num_vars, 1, int_lc);
+
+        // BinaryPoly batch PCS
+        let (poly_hint, _) = BatchedZipPlus::<Zt, Lc>::commit(&params, &poly_trace)
+            .expect("poly commit");
+        let poly_tx = BatchedZipPlus::<Zt, Lc>::test::<UNCHECKED>(&params, &poly_trace, &poly_hint)
+            .expect("poly test");
+        let poly_pt: Vec<i128> = vec![1i128; num_vars];
+        let (_, poly_proof) = BatchedZipPlus::<Zt, Lc>::evaluate::<F, UNCHECKED>(
+            &params, &poly_trace, &poly_pt, poly_tx,
+        ).expect("poly evaluate");
+
+        // Int batch PCS
+        let (int_hint, _) = BatchedZipPlus::<IntZt, IntLc>::commit(&int_params, &int_trace)
+            .expect("int commit");
+        let int_tx = BatchedZipPlus::<IntZt, IntLc>::test::<UNCHECKED>(
+            &int_params, &int_trace, &int_hint,
+        ).expect("int test");
+        let int_pt: Vec<i128> = vec![1i128; num_vars];
+        let (_, int_proof) = BatchedZipPlus::<IntZt, IntLc>::evaluate::<F, UNCHECKED>(
+            &int_params, &int_trace, &int_pt, int_tx,
+        ).expect("int evaluate");
+
+        let poly_pcs_bytes: Vec<u8> = {
+            let tx: zip_plus::pcs_transcript::PcsTranscript = poly_proof.into();
+            tx.stream.into_inner()
+        };
+        let int_pcs_bytes: Vec<u8> = {
+            let tx: zip_plus::pcs_transcript::PcsTranscript = int_proof.into();
+            tx.stream.into_inner()
+        };
+        let split_pcs_total = poly_pcs_bytes.len() + int_pcs_bytes.len();
+        let split_total = split_pcs_total + piop_size;
+
+        let mut split_bytes = Vec::new();
+        split_bytes.extend(&poly_pcs_bytes);
+        split_bytes.extend(&int_pcs_bytes);
+        // Include PIOP data for compression
+        for v in &zinc_proof.ic_proof_values { split_bytes.extend(v); }
+        for v in &zinc_proof.cpr_sumcheck_messages { split_bytes.extend(v); }
+        split_bytes.extend(&zinc_proof.cpr_sumcheck_claimed_sum);
+        for v in &zinc_proof.cpr_up_evals { split_bytes.extend(v); }
+        for v in &zinc_proof.cpr_down_evals { split_bytes.extend(v); }
+        for v in &zinc_proof.evaluation_point_bytes { split_bytes.extend(v); }
+        for v in &zinc_proof.pcs_evals_bytes { split_bytes.extend(v); }
+
+        let mut enc2 = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        enc2.write_all(&split_bytes).unwrap();
+        let split_compressed = enc2.finish().unwrap();
+
+        eprintln!("\n=== Split PCS Full Pipeline Proof Size ===");
+        eprintln!("  BinaryPoly PCS ({} cols): {} bytes ({:.1} KB)",
+            SHA256_POLY_BATCH_SIZE, poly_pcs_bytes.len(), poly_pcs_bytes.len() as f64 / 1024.0);
+        eprintln!("  Int PCS ({} cols):        {} bytes ({:.1} KB)",
+            SHA256_INT_BATCH_SIZE, int_pcs_bytes.len(), int_pcs_bytes.len() as f64 / 1024.0);
+        eprintln!("  Split PCS total: {} bytes ({:.1} KB) vs mono {} bytes ({:.1} KB) → {:.2}× smaller",
+            split_pcs_total, split_pcs_total as f64 / 1024.0,
+            pcs_size, pcs_size as f64 / 1024.0,
+            pcs_size as f64 / split_pcs_total as f64);
+        eprintln!("  Split total (PCS+PIOP): {} bytes ({:.1} KB) vs mono {} bytes ({:.1} KB)",
+            split_total, split_total as f64 / 1024.0,
+            total_size, total_size as f64 / 1024.0);
+        eprintln!("  Split compressed: {} bytes ({:.1} KB, {:.1}× ratio)",
+            split_compressed.len(), split_compressed.len() as f64 / 1024.0,
+            split_bytes.len() as f64 / split_compressed.len() as f64);
+    }
 
     group.finish();
 }

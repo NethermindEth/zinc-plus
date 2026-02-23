@@ -108,10 +108,129 @@ The ECDSA trace now uses `Int<4>` (256-bit integer) throughout — for PCS commi
 
 5. **`snark/tests/ecdsa_pipeline.rs`** — Rewritten to use `Int<4>` single-ring pipeline with `EcdsaScalarZipTypes` (Eval=Int<4>, Cw=Int<5>, CombR=Int<8>, PcsF=MontyField<8>).
 
-### Remaining Work (Optional Enhancements)
+---
 
-- **Real secp256k1 witness:** Current witness uses toy $\mathbb{F}_{101}$ values. Generating a real 256-bit ECDSA verification trace would validate the constraint algebra at full scale.
-- **Combined 8×SHA-256 + ECDSA benchmark:** Wire the `prove_generic` pipeline into the combined benchmark to include PIOP timing alongside PCS timing.
+## Agent 3: Split SHA-256 Trace into BinaryPoly and Int Columns
+
+### Goal
+
+Split the SHA-256 trace into two PCS batches: one with `BinaryPoly<32>` for columns that participate in F₂[X] rotation/shift constraints, and one with `Int<1>` (64-bit integer, sufficient for 32-bit values + carries) for columns that only participate in integer arithmetic (carry propagation, BitPoly checks). This reduces the codeword size from 256 bytes to 8 bytes for 9 out of 20 columns.
+
+### The Problem
+
+Today, all 20 SHA-256 columns are committed together with `Eval = BinaryPoly<32>`, `Cw = DensePolynomial<i64, 32>` (256 bytes/codeword). But many columns never appear in rotation constraints — they only appear in integer addition carry constraints (C10–C11) and BitPoly checks (C7–C9). Committing those as 256-byte polynomials wastes ~2,016 bytes per column opening (9 cols × 256 B – 9 cols × 32 B = ~2,016 B), which at 147 column openings is ~289 KB of waste.
+
+### Column Classification
+
+Constraints by column usage:
+
+| Constraint | Type | Columns Used |
+|---|---|---|
+| C1: Σ₀ rotation | F₂[X], cyclotomic | 0 (a), 3 (Σ₀) |
+| C2: Σ₁ rotation | F₂[X], cyclotomic | 1 (e), 4 (Σ₁) |
+| C3: σ₀ rotation+shift | F₂[X], cyclotomic | 2 (W), 8 (σ₀_w), 15 (S0) |
+| C4: σ₁ rotation+shift | F₂[X], cyclotomic | 2 (W), 9 (σ₁_w), 16 (S1) |
+| C5: σ₀ decomposition | F₂[X], assert_zero | 2 (W), 15 (S0), 17 (R0) |
+| C6: σ₁ decomposition | F₂[X], assert_zero | 2 (W), 16 (S1), 18 (R1) |
+| C7: Ch_ef BitPoly | Q[X], BitPoly | 6 (ch_ef) |
+| C8: Ch_neg_eg BitPoly | Q[X], BitPoly | 7 (ch_neg_eg) |
+| C9: Maj BitPoly | Q[X], BitPoly | 5 (Maj) |
+| C10: a-update carry | Q[X], (X−2) | **down[0]**, 3 (Σ₀), 4 (Σ₁), 5 (Maj), 6 (ch_ef), 7 (ch_neg_eg), 11 (h), 12 (μ_a), 19 (K_t), 2 (W) |
+| C11: e-update carry | Q[X], (X−2) | **down[1]**, 4 (Σ₁), 6 (ch_ef), 7 (ch_neg_eg), 10 (d), 11 (h), 13 (μ_e), 19 (K_t), 2 (W) |
+
+**Columns requiring `BinaryPoly<32>` (used in F₂[X] constraints C1–C6):**
+0 (a_hat), 1 (e_hat), 2 (W_hat), 3 (Σ₀_hat), 4 (Σ₁_hat), 8 (σ₀_w_hat), 9 (σ₁_w_hat), 15 (S0), 16 (S1), 17 (R0), 18 (R1)
+→ **11 columns** in BinaryPoly PCS batch
+
+**Columns that could be `Int<1>` (only used in Q[X] constraints C7–C11):**
+5 (Maj), 6 (ch_ef), 7 (ch_neg_eg), 10 (d), 11 (h), 12 (μ_a), 13 (μ_e), 14 (μ_W), 19 (K_t)
+→ **9 columns** in Int PCS batch
+
+### Proof Size Impact
+
+Current (all BinaryPoly, `Cw = DensePolynomial<i64, 32>` = 256 B):
+- Column opening data per opening: 20 cols × 256 B = 5,120 B
+
+After split:
+- BinaryPoly batch: 11 cols × 256 B = 2,816 B per opening
+- Int batch: 9 cols × 8 B = 72 B per opening (Cw = Int<1+> ≈ 8–16 B)
+- Total per opening: ~2,888 B vs 5,120 B → **1.77× smaller**
+
+At 147 column openings: saves ~328 KB raw in a single SHA-256 proof.
+
+### Implementation Plan
+
+#### Step 1 (Agent 1): Refactor trace generation for split columns
+
+In `sha256-uair/src/witness.rs`:
+- The existing `GenerateWitness<BinaryPoly<32>>` stays as-is but only returns the 11 polynomial columns (indices 0–4, 8–9, 15–18).
+- Add `GenerateWitness<Int<1>>` (or a new trait) that returns the 9 integer columns (indices 5–7, 10–14, 19), each as `DenseMultilinearExtension<Int<1>>`.
+- The integer value for each cell is `BinaryPoly::to_u64() as i64`, which fits in `Int<1>`.
+
+#### Step 2 (Agent 1): Define `Sha256IntZipTypes`
+
+In `snark/benches/e2e_sha256.rs` (and eventually a shared types module):
+```rust
+struct Sha256IntZipTypes;
+impl ZipTypes for Sha256IntZipTypes {
+    const NUM_COLUMN_OPENINGS: usize = 147;
+    type Eval = Int<1>;     // 64-bit integer
+    type Cw = Int<2>;       // 128-bit codeword (to avoid overflow in NTT)
+    type Fmod = Uint<4>;    // 256-bit modulus search
+    type PrimeTest = MillerRabin;
+    type Chal = i128;
+    type Pt = i128;
+    type CombR = Int<4>;    // 256-bit combination ring
+    type Comb = Self::CombR;
+    type EvalDotChal = ScalarProduct;
+    type CombDotChal = ScalarProduct;
+    type ArrCombRDotChal = MBSInnerProduct;
+}
+```
+
+#### Step 3 (Agent 1): Two PCS batches in benchmarks
+
+Modify `sha256_8x_ecdsa` (and `sha256_single` / `sha256_full_pipeline`) to:
+1. Generate `sha_poly_trace: Vec<DenseMultilinearExtension<BinaryPoly<32>>>` (11 cols).
+2. Generate `sha_int_trace: Vec<DenseMultilinearExtension<Int<1>>>` (9 cols).
+3. Commit/test/evaluate the BinaryPoly batch with `Sha256ZipTypes`.
+4. Commit/test/evaluate the Int batch with `Sha256IntZipTypes` (using `MontyField<4>` as PcsF).
+5. Sum both PCS proof sizes.
+
+#### Step 4 (Agent 2): Pipeline support for split-trace proofs
+
+In `snark/src/pipeline.rs`:
+- Add `prove_split_sha256()` that runs PIOP on the full 20-column `BinaryPoly<32>` trace (constraints only need the BinaryPoly view), but commits the two trace halves to separate PCS batches.
+- The PIOP (IdealCheck + CPR) operates on the `BinaryPoly<32>` trace since `Int<1>` values are trivially embeddable as `BinaryPoly<32>`.
+- The PCS evaluation claims from CPR are split: polynomial columns evaluated with `Sha256ZipTypes`, integer columns evaluated with `Sha256IntZipTypes`.
+- The verifier reconstructs both PCS proofs and checks them independently.
+
+### Key Insight: PIOP Still Uses One Trace Type
+
+The PIOP (IdealCheck + CPR) doesn't care about PCS types — it operates on `BinaryPoly<32>` for all 20 columns. The split only affects **PCS commitment and proof size**. The integer columns store `BinaryPoly::from(u32)` values where only bit 0 determines the integer value; the polynomial structure is trivial but the PCS doesn't need to know that.
+
+### Interaction Protocol
+
+1. **Agent 1** implements Steps 1–3 (trace split, new ZipTypes, benchmark changes).
+2. **Agent 1** runs `cargo test -p zinc-sha256-uair` and `cargo check -p zinc-snark`.
+3. **Agent 2** implements Step 4 (pipeline support).
+4. **Agent 2** runs `cargo test -p zinc-snark` — all existing tests must pass.
+5. **Agent 1** runs `cargo bench --bench e2e_sha256 -p zinc-snark -- "Full Pipeline"` to measure new proof sizes.
+6. Both agents confirm the size reduction.
+
+### Expected Result
+
+For 1×SHA-256 (num_vars=7, 128 rows, R4B16 DEPTH=1):
+- BinaryPoly batch (11 cols): ~11/20 of current PCS size
+- Int batch (9 cols): much smaller due to 8–16 B codewords vs 256 B
+- Combined: significantly smaller than current 805 KB (mono-batch)
+
+### Verification
+
+```bash
+cargo test -p zinc-sha256-uair -p zinc-snark
+cargo bench --bench e2e_sha256 -p zinc-snark --features=zinc-snark/parallel,zinc-snark/simd -- "Full Pipeline"
+```
 
 ---
 

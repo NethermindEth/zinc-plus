@@ -5,16 +5,28 @@
 //! empty message, recording all 19 column values at each of the 64 rounds.
 
 use rand::RngCore;
+use crypto_primitives::crypto_bigint_int::Int;
 use zinc_poly::{
     mle::DenseMultilinearExtension,
     univariate::binary::BinaryPoly,
 };
+use zinc_utils::from_ref::FromRef;
 
 use crate::{
     Sha256Uair,
     constants::{H, K},
     NUM_COLS,
 };
+
+// ─── Column classification for split PCS batches ────────────────────────────
+
+/// Column indices that participate in F₂[X] rotation/shift constraints (C1–C6)
+/// and must be committed as `BinaryPoly<32>`.
+pub const POLY_COLUMN_INDICES: [usize; 11] = [0, 1, 2, 3, 4, 8, 9, 15, 16, 17, 18];
+
+/// Column indices that only participate in Q[X] carry/BitPoly constraints (C7–C11)
+/// and can be committed as `Int<1>` (64-bit integer).
+pub const INT_COLUMN_INDICES: [usize; 9] = [5, 6, 7, 10, 11, 12, 13, 14, 19];
 
 // ─── GenerateWitness impl ───────────────────────────────────────────────────
 
@@ -200,6 +212,53 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256Uair {
             })
             .collect()
     }
+}
+
+// ─── Split witness generators ───────────────────────────────────────────────
+
+/// Generate only the 11 BinaryPoly columns (indices 0–4, 8–9, 15–18) used in
+/// F₂[X] rotation/shift constraints (C1–C6).
+///
+/// The PIOP still operates on the full 20-column trace; this function produces
+/// the subset for a smaller PCS batch.
+pub fn generate_poly_witness(
+    num_vars: usize,
+    rng: &mut impl RngCore,
+) -> Vec<DenseMultilinearExtension<BinaryPoly<32>>> {
+    let full = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(num_vars, rng);
+    POLY_COLUMN_INDICES
+        .iter()
+        .map(|&i| full[i].clone())
+        .collect()
+}
+
+/// Generate the 9 integer columns (indices 5–7, 10–14, 19) used only in Q[X]
+/// carry/BitPoly constraints (C7–C11), encoded as `Int<1>` (64-bit integer).
+///
+/// Each cell value is `BinaryPoly::to_u64() as i64` wrapped in `Int<1>`.
+/// These values are 32-bit unsigned integers (≤ 2³²−1), so they always fit
+/// within a single 64-bit limb.
+pub fn generate_int_witness(
+    num_vars: usize,
+    rng: &mut impl RngCore,
+) -> Vec<DenseMultilinearExtension<Int<1>>> {
+    let full = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(num_vars, rng);
+    let zero = Int::<1>::from_ref(&0i64);
+    INT_COLUMN_INDICES
+        .iter()
+        .map(|&i| {
+            let evals: Vec<Int<1>> = full[i]
+                .evaluations
+                .iter()
+                .map(|bp| Int::<1>::from_ref(&(bp.to_u64() as i64)))
+                .collect();
+            DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                evals,
+                zero,
+            )
+        })
+        .collect()
 }
 
 // ─── SHA-256 helper functions ───────────────────────────────────────────────

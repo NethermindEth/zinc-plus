@@ -85,7 +85,7 @@ def fmt_size(bits: int) -> str:
 
 COMPONENTS = [
     {"label": "A", "n_pol": 14, "flat_vec_norm": 133, "degree": 32},
-    #{"label": "C", "n_pol": 20, "flat_vec_norm": 133, "degree": 32},
+    #{"label": "C", "n_pol": 20, "flat_vec_norm": 300, "degree": 1},
     {"label": "B", "n_pol": 6,  "flat_vec_norm": 155, "degree": 1},
 ]
 
