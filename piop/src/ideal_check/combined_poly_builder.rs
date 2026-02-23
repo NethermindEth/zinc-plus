@@ -146,7 +146,7 @@ fn prepare_coefficient_mles<F: PrimeField>(
             if skip_constraints[constraint] {
                 return vec![];
             }
-            cfg_into_iter!(0..=max_degree)
+            (0..=max_degree)
                 .map(|coeff| {
                     max_degrees_and_combined_poly_rows
                         .iter()
