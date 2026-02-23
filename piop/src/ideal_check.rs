@@ -8,8 +8,9 @@ pub use structs::*;
 use crate::projections::{ColumnMajorTrace, RowMajorTrace};
 use batched_ideal_check::*;
 use crypto_primitives::PrimeField;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use derive_more::From;
-use itertools::Itertools;
 use num_traits::ConstZero;
 use std::collections::HashMap;
 use thiserror::Error;
@@ -23,7 +24,7 @@ use zinc_uair::{
     ideal::{Ideal, IdealCheck},
     ideal_collector::{IdealOrZero, collect_ideals},
 };
-use zinc_utils::inner_transparent_field::InnerTransparentField;
+use zinc_utils::{cfg_into_iter, inner_transparent_field::InnerTransparentField};
 
 /// Ideal-check subprotocol.
 pub trait IdealCheckProtocol: Uair {
@@ -202,8 +203,7 @@ where
         );
 
         // Evaluate coefficient MLEs at the evaluation point.
-        let combined_mle_values: Vec<DynamicPolynomialF<F>> = combined_mles
-            .iter()
+        let combined_mle_values: Vec<DynamicPolynomialF<F>> = cfg_into_iter!(combined_mles)
             .enumerate()
             .map(|(i, coeff_mles)| {
                 // Skip zero-ideal constraints: their combined polynomial
@@ -212,9 +212,9 @@ where
                     return Ok(DynamicPolynomialF::ZERO);
                 }
                 let coeffs = coeff_mles
-                    .iter()
+                    .into_iter()
                     .map(|coeff_mle| coeff_mle.evaluate_with_config(&evaluation_point, field_cfg))
-                    .try_collect::<_, Vec<_>, _>()?;
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok(DynamicPolynomialF::new_trimmed(coeffs))
             })
             .collect::<Result<Vec<_>, EvaluationError>>()?;

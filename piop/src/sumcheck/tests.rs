@@ -594,7 +594,7 @@ fn verifier_produces_correct_subclaim() {
     .unwrap();
 
     let mle_evals_at_point: Vec<F> = original_mles
-        .iter()
+        .into_iter()
         .map(|mle| mle.evaluate_with_config(&subclaim.point, &()).unwrap())
         .collect();
 

@@ -289,16 +289,13 @@ where
     }
 
     fn evaluate_with_config(
-        &self,
+        mut self,
         point: &[F],
         config: &<F as PrimeField>::Config,
     ) -> Result<F, EvaluationError> {
         if point.len() == self.num_vars {
-            Ok(F::new_unchecked_with_cfg(
-                self.fixed_variables_with_config(point, config)
-                    .into_iter()
-                    .next()
-                    .expect("Evaluations should not be empty"),
+            self.fix_variables_with_config(point, config);
+            Ok(F::new_unchecked_with_cfg(self.into_iter().next().expect("Evaluations should not be empty"),
                 config,
             ))
         } else {
