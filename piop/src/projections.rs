@@ -43,74 +43,28 @@ where
     PolyCoeff: Clone + Send + Sync,
     Int: Clone + Send + Sync,
 {
-    let zero = F::zero_with_cfg(field_cfg);
-    let one = F::one_with_cfg(field_cfg);
+    // Phase 1: Build column-major projections in parallel.
+    let column_trace: ColumnMajorTrace<F> = project_trace_coeffs_column_major(
+        binary_poly_trace,
+        arbitrary_poly_trace,
+        int_trace,
+        field_cfg,
+    );
 
-    let binary_len = binary_poly_trace.len();
-    let arbitrary_len = arbitrary_poly_trace.len();
-    let num_cols = binary_poly_trace.len() + arbitrary_poly_trace.len() + int_trace.len();
+    let num_cols = column_trace.len();
+    let num_rows = column_trace.first().map(|col| col.evaluations.len()).unwrap_or(0);
 
-    // Determine number of rows from the first non-empty column
-    let num_rows = binary_poly_trace
-        .first()
-        .map(|c| c.len())
-        .or_else(|| arbitrary_poly_trace.first().map(|c| c.len()))
-        .or_else(|| int_trace.first().map(|c| c.len()))
-        .unwrap_or(0);
+    // Phase 2: Transpose column-major -> row-major by moving elements.
+    let mut rows: Vec<Vec<DynamicPolynomialF<F>>> =
+        (0..num_rows).map(|_| Vec::with_capacity(num_cols)).collect();
 
-    // Build row-by-row
-    cfg_into_iter!(0..num_rows)
-        .map(|row_idx| {
-            let mut row: Vec<DynamicPolynomialF<F>> = Vec::with_capacity(num_cols);
-            let spare = row.spare_capacity_mut();
+    for mut col in column_trace {
+        for (row_idx, val) in col.evaluations.drain(..).enumerate() {
+            rows[row_idx].push(val);
+        }
+    }
 
-            // Binary poly columns
-            cfg_iter_mut!(spare[..binary_len])
-                .zip(cfg_iter!(binary_poly_trace))
-                .for_each(|(slot, col)| {
-                    let binary_poly = &col.evaluations[row_idx];
-                    slot.write(
-                        binary_poly
-                            .iter()
-                            .map(|coeff| {
-                                if coeff.into_inner() {
-                                    one.clone()
-                                } else {
-                                    zero.clone()
-                                }
-                            })
-                            .collect(),
-                    );
-                });
-
-            // Arbitrary poly columns
-            cfg_iter_mut!(spare[binary_len..binary_len + arbitrary_len])
-                .zip(cfg_iter!(arbitrary_poly_trace))
-                .for_each(|(slot, col)| {
-                    let arbitrary_poly = &col.evaluations[row_idx];
-                    slot.write(
-                        arbitrary_poly
-                            .iter()
-                            .map(|coeff| F::from_with_cfg(coeff.clone(), field_cfg))
-                            .collect(),
-                    );
-                });
-
-            // Int columns
-            cfg_iter_mut!(spare[binary_len + arbitrary_len..])
-                .zip(cfg_iter!(int_trace))
-                .for_each(|(slot, col)| {
-                    let int_val = &col.evaluations[row_idx];
-                    slot.write(DynamicPolynomialF {
-                        coeffs: vec![F::from_with_cfg(int_val.clone(), field_cfg)],
-                    });
-                });
-
-            // SAFETY: All slots have been initialized above.
-            unsafe { row.set_len(num_cols) };
-            row
-        })
-        .collect()
+    rows
 }
 
 /// Project a multi-typed trace onto F[X], returning a column-indexed matrix.
