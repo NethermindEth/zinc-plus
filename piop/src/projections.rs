@@ -1,9 +1,10 @@
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 use crypto_primitives::{FromWithConfig, PrimeField, Semiring};
 use itertools::Itertools;
 use num_traits::Zero;
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
-use std::collections::HashMap;
+use std::{collections::HashMap, iter};
 use zinc_poly::{
     EvaluatablePolynomial, EvaluationError,
     mle::DenseMultilinearExtension,
@@ -58,10 +59,16 @@ where
         .or_else(|| int_trace.first().map(|c| c.len()))
         .unwrap_or(0);
 
+    // Preallocate the result matrix with the correct number of rows and columns.
+    // (We have to work around the fact that cloned Vec doesn't keep its capacity)
+    let mut result: RowMajorTrace<F> = iter::repeat_with(|| Vec::with_capacity(num_cols))
+        .take(num_rows)
+        .collect();
+
     // Build row-by-row
-    cfg_into_iter!(0..num_rows)
-        .map(|row_idx| {
-            let mut row: Vec<DynamicPolynomialF<F>> = Vec::with_capacity(num_cols);
+    cfg_iter_mut!(result)
+        .enumerate()
+        .for_each(|(row_idx, row)| {
             let spare = row.spare_capacity_mut();
 
             // Binary poly columns
@@ -108,9 +115,8 @@ where
 
             // SAFETY: All slots have been initialized above.
             unsafe { row.set_len(num_cols) };
-            row
-        })
-        .collect()
+        });
+    result
 }
 
 /// Project a multi-typed trace onto F[X], returning a column-indexed matrix.
