@@ -297,6 +297,259 @@ impl GenerateMultiTypeWitness for BinaryDecompositionUair {
     }
 }
 
+/// A UAIR with 5 linear constraints: 24 int columns split into
+/// 5 groups (of sizes 5, 5, 5, 5, 4), each group summed and checked against
+/// its own binary poly column modulo the ideal (X - 2).
+pub struct FiveConstraintDecompositionUair;
+
+impl Uair for FiveConstraintDecompositionUair {
+    type Ideal = DegreeOneIdeal<u32>;
+    type Scalar = DensePolynomial<u32, 32>;
+
+    fn signature() -> UairSignature {
+        UairSignature {
+            binary_poly_cols: 5,
+            arbitrary_poly_cols: 0,
+            int_cols: 24,
+        }
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        let ideal = ideal_from_ref(&DegreeOneIdeal::new(2));
+        let group_sizes = [5, 5, 5, 5, 4];
+        let mut int_offset = 0;
+        for (group, &size) in group_sizes.iter().enumerate() {
+            let sum = up.int[int_offset + 1..int_offset + size]
+                .iter()
+                .fold(up.int[int_offset].clone(), |acc, next| acc + next);
+            b.assert_in_ideal(up.binary_poly[group].clone() - &sum, &ideal);
+            int_offset += size;
+        }
+    }
+}
+
+impl GenerateMultiTypeWitness for FiveConstraintDecompositionUair {
+    type PolyCoeff = u32;
+    type Int = u32;
+
+    fn generate_witness<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> (
+        Vec<DenseMultilinearExtension<BinaryPoly<32>>>,
+        Vec<DenseMultilinearExtension<DensePolynomial<Self::PolyCoeff, 32>>>,
+        Vec<DenseMultilinearExtension<Self::Int>>,
+    ) {
+        let num_rows = 1 << num_vars;
+        let group_sizes: [usize; 5] = [5, 5, 5, 5, 4];
+
+        // Limit each int to 29 bits so that 5 * (2^29 - 1) < 2^32.
+        let mask = (1u32 << 29) - 1;
+        let int_cols: Vec<DenseMultilinearExtension<u32>> = (0..24)
+            .map(|_| {
+                (0..num_rows)
+                    .map(|_| rng.random::<u32>() & mask)
+                    .collect()
+            })
+            .collect();
+
+        // 5 binary poly columns, each derived from its group's int sum.
+        let mut int_offset = 0;
+        let binary_poly_cols: Vec<DenseMultilinearExtension<BinaryPoly<32>>> = group_sizes
+            .iter()
+            .map(|&size| {
+                let col = (0..num_rows)
+                    .map(|row| {
+                        let sum: u32 = int_cols[int_offset..int_offset + size]
+                            .iter()
+                            .map(|col| col[row])
+                            .sum();
+                        BinaryPoly::from(sum)
+                    })
+                    .collect();
+                int_offset += size;
+                col
+            })
+            .collect();
+
+        (binary_poly_cols, vec![], int_cols)
+    }
+}
+
+/// A UAIR with 5 linear constraints: 5 binary poly columns and 5 int columns,
+/// each constraint checks that a binary poly column equals its corresponding
+/// int column modulo the ideal (X - 2).
+pub struct FiveConstraintSimpleUair;
+
+impl Uair for FiveConstraintSimpleUair {
+    type Ideal = DegreeOneIdeal<u32>;
+    type Scalar = DensePolynomial<u32, 32>;
+
+    fn signature() -> UairSignature {
+        UairSignature {
+            binary_poly_cols: 5,
+            arbitrary_poly_cols: 0,
+            int_cols: 5,
+        }
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        let ideal = ideal_from_ref(&DegreeOneIdeal::new(2));
+        for i in 0..5 {
+            b.assert_in_ideal(up.binary_poly[i].clone() - &up.int[i], &ideal);
+        }
+    }
+}
+
+impl GenerateMultiTypeWitness for FiveConstraintSimpleUair {
+    type PolyCoeff = u32;
+    type Int = u32;
+
+    fn generate_witness<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> (
+        Vec<DenseMultilinearExtension<BinaryPoly<32>>>,
+        Vec<DenseMultilinearExtension<DensePolynomial<Self::PolyCoeff, 32>>>,
+        Vec<DenseMultilinearExtension<Self::Int>>,
+    ) {
+        let num_rows = 1 << num_vars;
+
+        let int_cols: Vec<DenseMultilinearExtension<u32>> = (0..5)
+            .map(|_| DenseMultilinearExtension::rand(num_vars, rng))
+            .collect();
+
+        let binary_poly_cols: Vec<DenseMultilinearExtension<BinaryPoly<32>>> = int_cols
+            .iter()
+            .map(|int_col| {
+                (0..num_rows)
+                    .map(|row| BinaryPoly::from(int_col[row]))
+                    .collect()
+            })
+            .collect();
+
+        (binary_poly_cols, vec![], int_cols)
+    }
+}
+
+/// A UAIR with 5 degree-2 constraints over 24 int columns (no polynomial columns).
+/// Columns are split into 5 groups (of sizes 5, 5, 5, 5, 4). In each group,
+/// the first two columns are multiplied, the middle columns are summed in, and
+/// the last column holds the result:
+///   int[start] * int[start+1] + int[start+2] + ... + int[start+size-2] - int[start+size-1] == 0
+pub struct FiveConstraintQuadraticUair;
+
+impl Uair for FiveConstraintQuadraticUair {
+    type Ideal = DegreeOneIdeal<u32>;
+    type Scalar = DensePolynomial<u32, 32>;
+
+    fn signature() -> UairSignature {
+        UairSignature {
+            binary_poly_cols: 0,
+            arbitrary_poly_cols: 0,
+            int_cols: 24,
+        }
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        let group_sizes = [5, 5, 5, 5, 4];
+        let mut int_offset = 0;
+        for &size in &group_sizes {
+            let product = up.int[int_offset].clone() * &up.int[int_offset + 1];
+            let linear_sum = up.int[int_offset + 3..int_offset + size - 1]
+                .iter()
+                .fold(up.int[int_offset + 2].clone(), |acc, next| acc + next);
+            b.assert_zero(product + &linear_sum - &up.int[int_offset + size - 1]);
+            int_offset += size;
+        }
+    }
+}
+
+impl GenerateMultiTypeWitness for FiveConstraintQuadraticUair {
+    type PolyCoeff = u32;
+    type Int = u32;
+
+    fn generate_witness<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> (
+        Vec<DenseMultilinearExtension<BinaryPoly<32>>>,
+        Vec<DenseMultilinearExtension<DensePolynomial<Self::PolyCoeff, 32>>>,
+        Vec<DenseMultilinearExtension<Self::Int>>,
+    ) {
+        let num_rows = 1 << num_vars;
+        let group_sizes: [usize; 5] = [5, 5, 5, 5, 4];
+
+        // Limit values to 12 bits so products (24 bits) plus a few sums stay within u32.
+        let mask = (1u32 << 12) - 1;
+
+        let mut int_cols: Vec<DenseMultilinearExtension<u32>> = Vec::with_capacity(24);
+
+        for &size in &group_sizes {
+            // Generate random input columns (all except the last in the group).
+            let input_cols: Vec<DenseMultilinearExtension<u32>> = (0..size - 1)
+                .map(|_| {
+                    (0..num_rows)
+                        .map(|_| rng.random::<u32>() & mask)
+                        .collect()
+                })
+                .collect();
+
+            // Result column: input[0] * input[1] + input[2] + ... + input[size-2].
+            let result_col: DenseMultilinearExtension<u32> = (0..num_rows)
+                .map(|row| {
+                    let product = input_cols[0][row] * input_cols[1][row];
+                    let linear: u32 = input_cols[2..].iter().map(|col| col[row]).sum();
+                    product + linear
+                })
+                .collect();
+
+            for col in input_cols {
+                int_cols.push(col);
+            }
+            int_cols.push(result_col);
+        }
+
+        (vec![], vec![], int_cols)
+    }
+}
+
 pub struct BigLinearUair;
 
 impl Uair for BigLinearUair {
