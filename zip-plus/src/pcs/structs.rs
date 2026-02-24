@@ -124,5 +124,5 @@ impl<R> ZipPlusHint<R> {
 pub struct ZipPlusCommitment {
     /// Roots of the merkle tree of entire matrix
     pub root: MtHash,
-    pub batch_size: usize
+    pub batch_size: usize,
 }

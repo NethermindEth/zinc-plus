@@ -55,28 +55,25 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let (q0, q1) = point_to_tensor(num_rows, &point, &field_cfg)?;
 
         let degree_bound = Zt::Comb::DEGREE_BOUND;
-        let projected_polys_as_comb_r = polys.iter().map(|poly| {
+        let polys_as_comb_r: Vec<Vec<Zt::CombR>> = polys.iter().map(|poly| {
             let alphas = if degree_bound.is_zero() {
                 vec![Zt::Chal::ONE]
             } else {
                 transcript.fs_transcript.get_challenges(degree_bound + 1)
             };
 
-            // Alpha-project this poly's evals
-            let projected = poly.evaluations.iter().map(|eval| Zt::EvalDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
+            poly.evaluations.iter().map(|eval| Zt::EvalDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
                 eval,
                 &alphas,
                 Zt::CombR::ZERO
-            )).collect::<Result<Vec<_>, _>>()?;
-
-            Ok::<_, ZipError>(projected)
-        }).collect::<Result<Vec<_>, ZipError>>()?;
+            )).collect()
+        }).collect::<Result<_, ZipError>>()?;
         
         // TODO. b_per_poly can be fused with for loop below. Compute b_i, write to transcript and compute eval_i
         let zero_f = F::zero_with_cfg(&field_cfg);
-        let b_per_poly = projected_polys_as_comb_r.iter().flat_map(|poly_comb_r| {
+        let b_per_poly: Vec<F> = polys_as_comb_r.iter().flat_map(|poly_comb_r| {
             (0..num_rows).map(|j| {
-                let row_f = poly_comb_r[j*row_len..(j+1)*row_len].iter().map(|int| int.into_with_cfg(&field_cfg)).collect::<Vec<F>>();
+                let row_f: Vec<F> = poly_comb_r[j*row_len..(j+1)*row_len].iter().map(|int| int.into_with_cfg(&field_cfg)).collect();
                 // b_j = <row_j, q1> (inner product in field)
                 MBSInnerProduct::inner_product::<UNCHECKED>(
                     &row_f, 
@@ -84,7 +81,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                     zero_f.clone()
                 )
             })
-        }).collect::<Result<Vec<_>, _>>()?;
+        }).collect::<Result<_, _>>()?;
 
         let mut evals = Vec::with_capacity(batch_size);
         for i in 0..batch_size {
@@ -107,7 +104,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             transcript.fs_transcript.get_challenges::<Zt::Chal>(num_rows)
         };
 
-        let combined_row: Vec<Zt::CombR> = projected_polys_as_comb_r.iter()
+        let combined_row: Vec<Zt::CombR> = polys_as_comb_r.iter()
             .try_fold(
                 vec![Zt::CombR::ZERO; row_len],
                 |mut acc, poly| -> Result<_, ZipError> {
@@ -175,7 +172,7 @@ mod tests {
         code::{raa::RaaCode, raa_sign_flip::RaaSignFlippingCode},
         merkle::MerkleTree,
         pcs::{
-            structs::{ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
+            structs::{ZipPlus, ZipPlusHint, ZipTypes},
             test_utils::*,
         },
         pcs_transcript::PcsTranscript,
