@@ -199,7 +199,7 @@ type IprsInt1R4B32<const DEPTH: usize, const CHECK: bool> = IprsCode<
 // ─── SHA-256 Trace Parameters ───────────────────────────────────────────────
 //
 // SHA-256 has 64 rows × 19 columns.
-// ECDSA has 258 rows × 14 columns.
+// ECDSA has 258 rows × 9 columns.
 //
 // IPRS codes need DEPTH ≥ 1 (radix-8 NTT), and row_len = BASE_LEN × 8^DEPTH.
 //
@@ -219,7 +219,7 @@ const SHA256_INT_BATCH_SIZE: usize = 9;   // 9 Int columns (C7–C11)
 // For 8× SHA-256 + ECDSA: two separate PCS batches
 const SHA256_8X_NUM_VARS: usize = 9;           // 2^9 = 512 rows (8 × 64 SHA rounds)
 const ECDSA_NUM_VARS: usize = 9;               // 2^9 = 512 rows (258 ECDSA rows + padding)
-const ECDSA_BATCH_SIZE: usize = 14;            // 14 ECDSA columns
+const ECDSA_BATCH_SIZE: usize = 9;             // 9 ECDSA columns
 
 // ─── Benchmark helpers ──────────────────────────────────────────────────────
 
@@ -565,7 +565,7 @@ fn sha256_single(c: &mut Criterion) {
 /// Uses **two separate PCS batches** with evaluation types matched to the
 /// arithmetic of each UAIR:
 /// - SHA-256:  20 columns × BinaryPoly<32> (polynomial evaluations, 32 binary coefficients)
-/// - ECDSA:    14 columns × Int<4>          (scalar evaluations, 1 × 256-bit integer)
+/// - ECDSA:    9 columns × Int<4>           (scalar evaluations, 1 × 256-bit integer)
 ///
 /// This is ~32× cheaper per cell for the ECDSA columns compared to
 /// BinaryPoly<32>, because the IPRS NTT processes 1 coefficient rather than 32.
@@ -585,7 +585,7 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
     let sha_trace = generate_sha256_trace(SHA256_8X_NUM_VARS);
     assert_eq!(sha_trace.len(), SHA256_BATCH_SIZE);
 
-    // ECDSA: 14 columns × 512 rows (258 real + 254 padding)
+    // ECDSA: 9 columns × 512 rows (258 real + 254 padding)
     // Int<4> = 256-bit scalar — matches secp256k1 field element width
     let ecdsa_trace = generate_random_scalar_trace(ECDSA_NUM_VARS, ECDSA_BATCH_SIZE);
     assert_eq!(ecdsa_trace.len(), ECDSA_BATCH_SIZE);
@@ -781,7 +781,7 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
     // keeping the ECDSA batch unchanged.  Three PCS batches total:
     //   1. SHA BinaryPoly (11 cols) — rotation/shift constraints
     //   2. SHA Int<1>     (9 cols)  — carry/BitPoly constraints
-    //   3. ECDSA Int<4>   (14 cols) — scalar arithmetic
+    //   3. ECDSA Int<4>   (9 cols) — scalar arithmetic
     {
         let mut rng = rand::rng();
         let sha_poly_trace = generate_poly_witness(SHA256_8X_NUM_VARS, &mut rng);

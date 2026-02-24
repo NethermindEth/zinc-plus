@@ -90,20 +90,25 @@ The prover is implemented in `snark/src/pipeline.rs`. There are multiple entry p
 
 The following description covers the common flow.
 
-### Step 1: PCS Commit
+### Step 1: PCS Commit (Batched)
 
 ```
-(hint, commitment) = BatchedZipPlus::commit(params, trace)
+(hint, commitment) = BatchedZipPlus::commit(params, polys)
 ```
 
-The prover takes the witness trace — a vector of `DenseMultilinearExtension<Eval>`, one per column — and commits to it using the Zip+ scheme:
+The prover takes the witness trace — a vector of `DenseMultilinearExtension<Eval>`, one per column — and commits to it using the batched Zip+ scheme:
 
-1. The trace MLEs are arranged into a matrix (rows × columns).
-2. Each row is encoded using an IPRS linear code (Interleaved Puncturable Reed-Solomon), which expands the row by the code rate (1/4 for R4 codes).
-3. The encoded rows are hashed into a Merkle tree. The Merkle root is the **commitment**.
-4. A **hint** (the full encoded matrix) is retained by the prover for later steps.
+1. **Encode:** For each polynomial (trace column), its evaluations are arranged into a matrix of `num_rows` rows × `row_len` columns, and each row is encoded using the IPRS linear code (expanding from `row_len` to `cw_len` elements, e.g., 512 → 2,048 for rate 1/4). This produces one **codeword matrix** per polynomial, of shape `num_rows × cw_len`.
 
-**What this produces:** A Merkle-root commitment binding the prover to the trace polynomial.
+2. **Concatenate rows:** All codeword matrices are flattened into a single list of rows: all rows of polynomial 0, then all rows of polynomial 1, etc. For a batch of $m$ polynomials with $n$ rows each, this produces $m \times n$ rows total.
+
+3. **Hash columns into Merkle leaves:** The `MerkleTree::new` function hashes **columns**, not rows. For each column index $j \in [0, \text{cw\_len})$, it concatenates the $j$-th element from every row (across all polynomials in the batch): $\text{leaf}_j = \text{blake3}(\text{row}_0[j] \| \text{row}_1[j] \| \ldots \| \text{row}_{mn-1}[j])$. This produces `cw_len` Merkle leaves (e.g., 2,048).
+
+4. **Build Merkle tree:** A single Merkle tree is built over these column-hash leaves. The Merkle root is the **commitment**, binding the prover to all polynomials in the batch simultaneously.
+
+5. A **hint** (all codeword matrices + the Merkle tree) is retained by the prover for later opening phases.
+
+**What this produces:** A single Merkle-root commitment binding the prover to the entire batch of trace polynomials. The batched design means opening a single column index reveals data from all polynomials at once, sharing one Merkle proof per column opening rather than one per polynomial.
 
 ### Step 2: PIOP — Ideal Check (IC)
 
@@ -156,37 +161,131 @@ The CPR reduces the IC's evaluation claims to claims about individual trace colu
 test_transcript = BatchedZipPlus::test(params, trace, hint)
 ```
 
-The PCS "test" phase is the proximity testing step (analogous to FRI in other systems). It:
+The PCS "test" phase is the proximity testing step of the Zip+ protocol. Unlike FRI-based systems that use iterative folding rounds, Zip+ performs a **single-round direct spot-check proximity test**: the prover sends one combined row and then opens the committed Merkle tree at randomly sampled column positions. The verifier re-encodes that combined row at only those positions and checks consistency.
 
-1. Samples random query indices from the Fiat-Shamir transcript.
-2. Opens the Merkle tree at those indices, revealing encoded row slices.
-3. Records these openings in a transcript that the verifier will replay.
+Implementation: `BatchedZipPlus::test()` in `zip-plus/src/batched_pcs/phase_test.rs`.
 
-The number of column openings is a compile-time constant: `NUM_COLUMN_OPENINGS = 147` in the standard configuration.
+#### Phase 1: Per-polynomial $\alpha$-projection challenges
 
-**What this produces:** A PCS transcript containing Merkle proofs and queried row slices.
+For each polynomial $i$ in the batch, the prover squeezes `DEGREE_BOUND + 1` challenges $\alpha_{i,0}, \ldots, \alpha_{i,D}$ (of type `Zt::Chal`) from the Fiat-Shamir transcript. These challenges will be used to project each `BPoly<32>` evaluation cell $\hat{p}(X) = \sum_j c_j X^j$ into an integer via the inner product $\langle (c_0, \ldots, c_D), (\alpha_{i,0}, \ldots, \alpha_{i,D}) \rangle$. When `DEGREE_BOUND == 0` (scalar evaluations, e.g., `Int<N>`), this step is trivial: $\alpha = [1]$.
+
+#### Phase 2: Shared row-combination coefficients
+
+A single set of `num_rows` challenges $\gamma_0, \ldots, \gamma_{R-1}$ is squeezed from the Fiat-Shamir transcript. These coefficients are **shared across all polynomials** in the batch — batching works because each polynomial has the same matrix dimensions. When `num_rows == 1`, this step is trivial: $\gamma = [1]$.
+
+#### Phase 3: Compute the combined row $u'$
+
+For each polynomial $i$:
+
+1. View its `num_rows × row_len` evaluation matrix. For each column $j \in [0, \text{row\_len})$, iterate over the rows $k = 0, \ldots, R-1$: project the evaluation cell at $(k, j)$ into an integer via $\langle \text{eval}_{k,j}, \boldsymbol{\alpha}_i \rangle$, scale by the row coefficient $\gamma_k$, and accumulate. This produces a per-polynomial combined row $u_i$ of `row_len` integers in the `CombR` ring.
+2. The `combine_rows!` macro performs this operation column-major (`.skip(column).step_by(row_len)`) with checked arithmetic when `CHECK_FOR_OVERFLOW = true`.
+
+All per-polynomial combined rows are summed element-wise: $u' = \sum_{i=0}^{m-1} u_i$ (also with checked addition to detect `CombR` overflow).
+
+The combined row $u'$ is written to the proof byte stream via `transcript.write_const_many(&combined_row)`. This data is **not** absorbed into the Fiat-Shamir sponge — it is only serialized for the verifier to read back.
+
+#### Phase 4: Column openings (repeated `NUM_COLUMN_OPENINGS` times)
+
+For each of `NUM_COLUMN_OPENINGS` iterations:
+
+1. **Sample a column index:** `column = transcript.squeeze_challenge_idx(codeword_len)` — the FS transcript yields a `u32`, and the column index is `u32 % codeword_len`. Note this indexes into the *codeword* (encoded) domain, not the *message* (row) domain.
+
+2. **Open the Merkle tree at that column** via `open_merkle_trees_for_column()`:
+   - For each codeword matrix in the batch, write the full column at `column_idx`: all `num_rows` values of type `Zt::Cw`. This gives the verifier the raw codeword entries it needs to recompute the proximity check.
+   - Write a **single** Merkle authentication path from the shared tree: `commit_hint.merkle_tree.prove(column_idx)` builds a sibling path by walking up the tree layers. The proof is serialized as `(leaf_index: u64, leaf_count: u64, path_length: u64, siblings: [Blake3Hash; path_length])`, where each hash is 32 bytes.
+
+The number of column openings is a compile-time constant: `NUM_COLUMN_OPENINGS = 147` in the standard configuration (set in the `ZipTypes` trait). This is the primary soundness amplification parameter: each column opening is an independent spot-check, and the linear code's distance guarantees that a codeword far from valid will disagree at a constant fraction of positions. With 147 random spot-checks at code rate $\rho = 1/4$, the false-accept probability is $\leq (1 - \delta)^{147}$ where $\delta$ is the relative distance.
+
+#### Proof byte layout
+
+The transcript is pre-allocated to the exact size:
+
+| Section | Content | Size |
+|---------|---------|------|
+| Combined row $u'$ | `row_len` elements of `Zt::CombR` | `row_len × CombR::NUM_BYTES` |
+| Column opening $\times 147$ | `batch_size × num_rows` codeword elements + 1 Merkle proof | `147 × (batch_size × num_rows × Cw::NUM_BYTES + 3×8 + (tree_height-1)×32)` |
+
+An assertion at the end of `test()` checks that the actual byte count matches the pre-calculated estimate — a compile-time sanity check against serialization bugs.
+
+#### What the verifier does with this (preview)
+
+During `verify_testing()`, the verifier:
+
+1. Re-derives the same $\boldsymbol{\alpha}_i$ and $\gamma_k$ challenges from the FS transcript.
+2. Reads the combined row $u'$ from the proof.
+3. For each column opening, reads the column values and Merkle proof.
+4. **Spot-check encodes** $u'$ using `encode_wide_at_positions()` — this encodes $u'$ with the linear code but only evaluates the encoding at the opened column positions, which is much cheaper than a full encode.
+5. For each opened column $j$: alpha-projects and row-combines the column codeword values using the same $\boldsymbol{\alpha}_i$ and $\gamma_k$, and checks that the result equals the encoded value of $u'$ at position $j$.
+6. Verifies the Merkle proof against the committed root (the leaf is the Blake3 hash of the concatenated column values across all polynomials and rows).
+
+If the committed codeword matrices are $\delta$-far from valid codewords, a constant fraction of columns will fail the proximity check, and the probability that all 147 random spot-checks miss every disagreement is negligible.
+
+**What this produces:** A `BatchedZipPlusTestTranscript` wrapping a `PcsTranscript` that contains both the serialized proof bytes and the Fiat-Shamir sponge state. This transcript is passed directly to the evaluate phase (Step 5), which continues squeezing challenges from the same sponge — binding the evaluation-phase randomness to the test-phase data.
 
 ### Step 5: PCS Evaluate (Batched)
 
 ```
-(evals_f, proof) = BatchedZipPlus::evaluate(params, trace, point, test_transcript)
+(evals_f, proof) = BatchedZipPlus::evaluate(params, polys, point, test_transcript)
 ```
 
-The PCS evaluation phase computes the claimed evaluations of all committed polynomials at a given point, and produces an evaluation proof. The eval phase uses **batching** to minimize proof size:
+The PCS evaluation phase computes the claimed evaluation of each committed polynomial at a shared point, and produces a batched evaluation proof. The key idea is that instead of writing one full `row_len`-sized combined row per polynomial (which would cost $O(m \times \text{row\_len})$ proof data), a single batched row is written, reducing the proof data to $O(\text{row\_len} + m)$.
 
-1. A Fiat-Shamir **projecting element** `α` is sampled from the transcript. For each committed polynomial, each evaluation (which is a ring element, e.g., `BinaryPoly<32>`) is projected to a field element by evaluating the polynomial at `α`, then combined across rows via inner product with a **tensor factor** $q_0$ derived from the evaluation point. This produces one **combined row** $r_i$ per polynomial (a vector of `row_len` field elements).
-2. Each polynomial's scalar evaluation is $v_i = \langle r_i, q_1 \rangle$ where $q_1$ is the second tensor factor.
-3. A batching challenge $\beta$ is sampled from the Fiat-Shamir transcript (after the test phase).
-4. A single **batched row** $\hat{r} = \sum_{i=0}^{m-1} \beta^i \cdot r_i$ is computed and written to the proof transcript (`row_len` field elements, typically 512).
-5. Per-polynomial evaluation scalars $v_i$ are written as individual field elements (one per polynomial).
+#### Tensor decomposition of the evaluation point
 
-This batching reduces the eval-phase proof data from $O(m \times \text{row\_len})$ to $O(\text{row\_len} + m)$ field elements, where $m$ is the batch size (number of polynomials). For the standard 8×SHA-256 configuration, this reduced the eval phase from ~320 KB to ~17 KB per batch.
+The evaluation point $\mathbf{p} \in F^{n}$ (where $n = \text{num\_vars}$) is split into two parts via `point_to_tensor(num_rows, point_f, field_cfg)`:
 
-**Important note on the evaluation point:** The PCS evaluation point is derived by hashing the CPR's evaluation point into `i128` values via `derive_pcs_point()`. Both prover and verifier call this function to agree on the same deterministic point. This is NOT the same point as the CPR evaluation point (which lives in $\mathbb{F}_p$). See §14 for why this matters.
+- **High variables** $\mathbf{p}_{\text{hi}} = (p_0, \ldots, p_{n - \log_2(\text{num\_rows}) - 1})$: these index *within* a row.
+- **Low variables** $\mathbf{p}_{\text{lo}} = (p_{n - \log_2(\text{num\_rows})}, \ldots, p_{n-1})$: these index *across* rows.
 
-**Important note on field context:** The `verify()` API accepts the evaluation point as raw integers (`&[Zt::Pt]`), not as field elements. The PCS internally derives its own random field configuration from the Fiat-Shamir transcript and converts the raw point to field elements using its own `field_cfg`.
+Each part is expanded into an equality polynomial tensor:
+- $q_0 = \text{eq}(\mathbf{p}_{\text{lo}}, \cdot)$: a vector of `num_rows` coefficients used to combine rows.
+- $q_1 = \text{eq}(\mathbf{p}_{\text{hi}}, \cdot)$: a vector of `row_len` coefficients used to evaluate within a row.
 
-**What this produces:** A `ZincProof` struct containing all serialized data.
+The MLE evaluation satisfies $f(\mathbf{p}) = \langle q_0 \cdot M, q_1 \rangle$ where $M$ is the evaluation matrix (rows × `row_len`).
+
+#### Per-polynomial projection and row combination
+
+For each polynomial $i$ in the batch:
+
+1. **Project to field:** Every evaluation cell $e \in \text{Eval}$ (e.g., `BinaryPoly<32>`) is projected to a field element $F$ using a precomputed projection closure. For `BinaryPoly<32>`, this computes $\sum_j c_j \alpha^j \in F$ where $\alpha$ is the PCS projecting element (sampled from the Fiat-Shamir transcript as a `Zt::Chal`, then converted to $F$). For `Int<N>` evaluations, this is a direct lift $\mathbb{Z} \to F$. The projection closure is created once via `Zt::Eval::prepare_projection(&projecting_element)` and reused for all cells.
+
+2. **Row combination via $q_0$:** Let $e_i$ denote the flat vector of projected field elements for polynomial $i$ (length `num_rows × row_len`), laid out in row-major order: $e_i[k \cdot \text{row\_len} + j]$ is the projected value at row $k$, column $j$. These are combined across rows using the `combine_rows!` macro. For each column index $j \in [0, \text{row\_len})$, this computes:
+$$r_i[j] = \sum_{k=0}^{\text{num\_rows}-1} q_0[k] \cdot e_i[k \cdot \text{row\_len} + j]$$
+   producing a **combined row** $r_i$ of `row_len` field elements for polynomial $i$ (where $i \in [0, m)$ ranges over the $m$ polynomials in the batch). The macro iterates column-major (`.skip(column).step_by(row_len)`) and accumulates scaled values via `MulByScalar`. When `num_rows == 1`, this step is skipped and the projected evaluations are used directly as $r_i$.
+
+3. **Scalar evaluation:** The polynomial's evaluation at the point is $v_i = \langle r_i, q_1 \rangle$, computed as a standard inner product via `MBSInnerProduct`.
+
+#### Batching across polynomials
+
+After computing all per-polynomial combined rows $r_0, \ldots, r_{m-1}$ and scalar evaluations $v_0, \ldots, v_{m-1}$:
+
+4. **Sample batching challenge:** A challenge $\beta$ is sampled from the Fiat-Shamir transcript (as `Zt::Chal`, converted to $F$).
+
+5. **Compute batched row:** A single row $\hat{r} = \sum_{i=0}^{m-1} \beta^i \cdot r_i$ is computed element-wise. Powers of $\beta$ are accumulated iteratively.
+
+6. **Write to proof transcript:**
+   - The batched row $\hat{r}$ (`row_len` field elements, e.g., 512 × 32 bytes = 16 KB for `MontyField<4>`).
+   - The $m$ per-polynomial evaluation scalars $v_0, \ldots, v_{m-1}$ ($m$ field elements).
+
+#### Proof size reduction
+
+For $m$ polynomials:
+- **Without batching:** $m$ combined rows → $m \times \text{row\_len}$ field elements.
+- **With batching:** 1 batched row + $m$ scalars → $\text{row\_len} + m$ field elements.
+
+For the 20-column SHA-256 batch: $20 \times 512 = 10{,}240$ elements → $512 + 20 = 532$ elements (**19× reduction**). At 32 bytes per `MontyField<4>` element: ~320 KB → ~17 KB.
+
+#### Consistency relation (verified by the verifier)
+
+The verifier checks:
+$$\langle \hat{r}, q_1 \rangle = \sum_{i=0}^{m-1} \beta^i \cdot v_i$$
+This holds because $\langle \hat{r}, q_1 \rangle = \sum_i \beta^i \langle r_i, q_1 \rangle = \sum_i \beta^i v_i$, by linearity of inner products.
+
+**Important note on the evaluation point:** The PCS evaluation point is derived by hashing the CPR's evaluation point into `i128` values via `derive_pcs_point()`. Both prover and verifier call this function to agree on the same deterministic point. This is NOT the same point as the CPR evaluation point (which lives in $\mathbb{F}_q$). See §14 for why this matters.
+
+**Important note on field context:** The PCS samples its own field configuration from its internal Fiat-Shamir transcript via `get_random_field_cfg()`. The evaluation point is passed as raw integers (`&[Zt::Pt]`) and converted to field elements using this PCS-local field config. This field config is independent of the PIOP's field config.
+
+**What this produces:** A `BatchedZipPlusProof` (serialized into `ZincProof.pcs_proof_bytes`) containing the test-phase data, the batched row, and the per-polynomial scalars.
 
 ---
 
@@ -215,27 +314,54 @@ The verifier is implemented as `verify()` / `verify_generic()` / `verify_dual_ri
 
 ### Step 3: PCS Verification (Batched)
 
-The PCS verification consists of two sub-phases: **testing** (proximity) and **evaluation** (opening). Both have been heavily optimized (see §13 for details).
+The PCS verification consists of two sub-phases: **testing** (proximity) and **evaluation** (opening). Both have been heavily optimized (see §13 for details). All notation below references the symbols defined in §3 Steps 1, 4, and 5.
 
 #### Testing Phase (`verify_testing`)
 
-1. Sample per-polynomial alpha challenges (`batch_size` sets of `DEGREE_BOUND + 1` values) and shared row-combination coefficients (`num_rows` values) from the Fiat-Shamir transcript.
-2. Read the single **combined row** from the proof transcript: this is the prover's sum over all polynomial-specific combined rows, of length `row_len` CombR elements.
-3. Read `NUM_COLUMN_OPENINGS` (147) column openings from the proof: each contains a column index, per-polynomial column values (one `Cw`-element per polynomial per row), and a Merkle proof.
-4. Collect all 147 opened column indices into a position list.
-5. **Spot-check encoding:** Call `encode_wide_at_positions(&combined_row, &positions)` to compute the linear-code encoding ONLY at the 147 opened positions (not the full 2048-element codeword). This uses the precomputed encoding matrix (see §13) for efficiency.
-6. For each column opening, verify:
-   - **`verify_batched_column_testing`**: For each polynomial in the batch, alpha-project its column entries via inner product (`CombDotChal::inner_product`), combine with row coefficients (`ArrCombRDotChal::inner_product`), sum across all polynomials. The result must equal the spot-check-encoded value for that column position.
-   - **Merkle proof verify**: The column values are hashed and verified against the Merkle root (commitment).
+The testing phase checks that the committed codeword matrices are close to valid codewords of the IPRS linear code.
+
+1. **Sample challenges from transcript:**
+   - Per-polynomial alpha challenges: for each polynomial $i \in [0, m)$, sample `DEGREE_BOUND + 1` challenges $\alpha_i^{(0)}, \ldots, \alpha_i^{(D)}$ from the Fiat-Shamir transcript (where $D = \text{DEGREE\_BOUND}$). These are used to project each `Cw`-element (a polynomial like `DensePolynomial<i64, 32>`) to a `CombR` integer.
+   - Shared row-combination coefficients: sample `num_rows` challenges $c_0, \ldots, c_{\text{num\_rows}-1}$, shared across all polynomials. When `num_rows == 1`, this is just $[1]$.
+
+2. **Read the combined row** from the proof transcript: a vector of `row_len` `CombR` elements. On the prover side (Step 4), this is computed as the sum over all polynomials of the alpha-projected, row-combined encoded rows.
+
+3. **Read `NUM_COLUMN_OPENINGS`** (147) column openings from the proof transcript. For each opening $t \in [0, 147)$:
+   - A column index $j_t \in [0, \text{cw\_len})$ squeezed from the Fiat-Shamir transcript.
+   - For each polynomial $i \in [0, m)$: the column values $\text{cw}_i[0][j_t], \ldots, \text{cw}_i[\text{num\_rows}-1][j_t]$ — one `Cw`-element per row — totalling $m \times \text{num\_rows}$ `Cw`-elements per opening.
+   - A Merkle proof (sibling path from leaf $j_t$ to the root).
+
+4. **Spot-check encoding:** Collect the 147 opened positions $\{j_0, \ldots, j_{146}\}$ and call `encode_wide_at_positions(&combined_row, &positions)`. This computes the IPRS linear-code encoding of the combined row **only** at the 147 opened positions (not the full `cw_len`-element codeword), using the precomputed encoding matrix (see §13). Result: 147 `CombR` values.
+
+5. **Per-column proximity check** (`verify_batched_column_testing`): For each opened column $j_t$:
+   - For each polynomial $i$: alpha-project the `Cw`-column entries into `CombR` integers via inner product with $(\alpha_i^{(0)}, \ldots, \alpha_i^{(D)})$, then combine across rows via inner product with $(c_0, \ldots, c_{\text{num\_rows}-1})$. This produces one `CombR` value per polynomial.
+   - Sum all $m$ per-polynomial `CombR` values into a total.
+   - Check: `total == encode_wide_at_positions(combined_row)[t]`.
+
+6. **Merkle proof verification:** For each opened column $j_t$, concatenate all per-polynomial column values (the same data written during the commit phase to form the leaf) and verify the Merkle proof against the commitment root.
 
 #### Evaluation Phase (`verify_evaluation`)
 
-1. Compute the tensor decomposition $(q_0, q_1) = \text{point\_to\_tensor}(\text{num\_rows}, \text{point\_f}, \text{field\_cfg})$.
-2. Read the single **batched row** $\hat{r}$ from the proof transcript (`row_len` field elements).
-3. Read $m$ (batch\_size) per-polynomial evaluation scalars $v_i$.
-4. **Batched evaluation consistency:** Check that $\langle \hat{r}, q_1 \rangle = \sum_{i=0}^{m-1} \beta^i \cdot v_i$.
-5. **Spot-check encoding in field:** Call `encode_f_at_positions(&batched_row, &eval_positions)` to compute the field-level encoding at the opened positions.
-6. **Per-column proximity:** For each opened column, compute the $\beta$-weighted sum of per-polynomial field-projected, $q_0$-combined column values. Compare this sum to the encoded value at that position.
+The evaluation phase checks that the prover's claimed polynomial evaluations $v_0, \ldots, v_{m-1}$ and batched row $\hat{r}$ are consistent with the committed codeword and the evaluation point $\mathbf{p}$.
+
+1. **Tensor decomposition:** Compute $(q_0, q_1) = \text{point\_to\_tensor}(\text{num\_rows}, \mathbf{p}_F, \text{field\_cfg})$, exactly as in §3 Step 5.
+
+2. **Prepare field projection:** Create the projection closure via `Zt::Cw::prepare_projection(&projecting_element)`, where the projecting element $\alpha$ was sampled earlier from the Fiat-Shamir transcript (same $\alpha$ as used by the prover).
+
+3. **Read proof data:**
+   - The batched row $\hat{r}$ from the proof transcript: `row_len` field elements (e.g., 512 `MontyField<4>` values).
+   - The $m$ per-polynomial evaluation scalars $v_0, \ldots, v_{m-1}$.
+
+4. **Batched evaluation consistency:** Verify $\langle \hat{r}, q_1 \rangle = \sum_{i=0}^{m-1} \beta^i \cdot v_i$. Both sides are computed in the PCS's field. The left side is a standard inner product of the batched row with $q_1$. The right side accumulates $\beta$-weighted scalars.
+
+5. **Spot-check encoding in field:** Call `encode_f_at_positions(&batched_row, &positions)` to compute the field-level IPRS encoding of $\hat{r}$ at the same 147 opened positions. This uses the same precomputed encoding matrix as the testing phase, but operates in the Montgomery field rather than on `CombR` integers.
+
+6. **Per-column evaluation proximity:** For each opened column $j_t$:
+   - For each polynomial $i$: project its `Cw`-column entries to field elements via the projection closure, then combine across rows via inner product with $q_0$. This produces one field element per polynomial.
+   - Compute the $\beta$-weighted sum: $\hat{v}_{j_t} = \sum_{i=0}^{m-1} \beta^i \cdot (\text{per-poly value for } i)$.
+   - Check: $\hat{v}_{j_t} = \text{encode\_f\_at\_positions}(\hat{r})[t]$.
+
+   This verifies that the prover's batched row $\hat{r}$ is consistent with the committed column data at the opened positions, which — together with the testing phase — ensures that $\hat{r}$ is close to the true $\beta$-batched encoding of the committed polynomials.
 
 #### Final Verdict
 
@@ -325,42 +451,38 @@ These constraints are algebraically specified in comments but cannot be expresse
 
 ### Trace Layout
 
-The ECDSA witness is a **258-row × 14-column** matrix. The trace is unified under `Int<4>` (256-bit integer) for all contexts — PCS commitment, PIOP constraint checking, and the end-to-end pipeline:
+The ECDSA witness is a **258-row × 9-column** matrix. The trace is unified under `Int<4>` (256-bit integer) for all contexts — PCS commitment, PIOP constraint checking, and the end-to-end pipeline:
 
 | Context | Evaluation type | Purpose |
 |---------|----------------|---------|
-| **Unified pipeline** (PCS + IC + CPR) | `Int<4>` (256-bit integer) | All 11 constraints are expressed directly in `Int<4>` via `Uair<Int<4>>`. The same ring is used for PCS commitment, IdealCheck, and CombinedPolyResolver — no ring conversion needed. This eliminates the prior dual-ring architecture. |
+| **Unified pipeline** (PCS + IC + CPR) | `Int<4>` (256-bit integer) | All 7 constraints are expressed directly in `Int<4>` via `Uair<Int<4>>`. The same ring is used for PCS commitment, IdealCheck, and CombinedPolyResolver — no ring conversion needed. This eliminates the prior dual-ring architecture. |
 | **Legacy constraint checking** | `DensePolynomial<i64, 1>` | Degree-0 polynomials (plain i64 scalars). Retained for the original constraint formulation; the `Int<4>` version is algebraically identical. |
+
+The scalars $u_1 = e \cdot s^{-1} \bmod n$ and $u_2 = r \cdot s^{-1} \bmod n$ are given to the verifier in the clear (they are public inputs derived from the message hash and signature). The verifier can independently compute the corresponding bit decomposition columns $b_1, b_2$ and verify that the scalar accumulation is correct without dedicated trace columns or constraints. The quotient bit $k$ (for the final signature check $R_x \equiv r \pmod{n}$) is handled in boundary constraints, not as a trace column.
 
 | Col | Name | Description |
 |-----|------|-------------|
 | 0 | b₁ | Bit of scalar $u_1$ |
 | 1 | b₂ | Bit of scalar $u_2$ |
-| 2 | k | Quotient bit for signature check |
-| 3–5 | X, Y, Z | Accumulator point (Jacobian coordinates) |
-| 6–8 | X_mid, Y_mid, Z_mid | Doubled point |
-| 9 | S | Doubling scratch: $Y^2$ |
-| 10 | H | Addition scratch: chord x-difference |
-| 11 | R_a | Addition scratch: chord y-difference |
-| 12–13 | u₁, u₂ | Scalar accumulators |
+| 2–4 | X, Y, Z | Accumulator point (Jacobian coordinates) |
+| 5–7 | X_mid, Y_mid, Z_mid | Doubled point |
+| 8 | H | Addition scratch: chord x-difference $T_x Z_{\text{mid}}^2 - X_{\text{mid}}$ |
 
-### Implemented Constraints (11 of 11)
+The auxiliary values $S = Y^2$ (doubling scratch) and $R_a = T_y Z_{\text{mid}}^3 - Y_{\text{mid}}$ (addition y-difference) are not separate trace columns; they are inlined as sub-expressions in the constraints. This raises the maximum constraint degree (from ~6 to ~10) but saves 2 columns of proof data. $H$ is kept as a column because it appears cubed ($H^3$) in two constraints — inlining would push the degree to ~12+.
 
-All 11 ECDSA constraints are implemented over both `DensePolynomial<i64, 1>` and `Int<4>` using `assert_zero` (exact integer equality). The `Int<4>` implementation is the primary one used in the unified pipeline; the i64 version is retained for legacy reference. They use Shamir's trick for simultaneous $u_1 \cdot G + u_2 \cdot Q$ computation on secp256k1 ($a = 0$, so the doubling formula simplifies).
+### Implemented Constraints (7 of 7)
+
+All 7 ECDSA non-boundary constraints use `assert_zero` (exact integer equality). They use Shamir's trick for simultaneous $u_1 \cdot G + u_2 \cdot Q$ computation on secp256k1 ($a = 0$, so the doubling formula simplifies). The scalars $u_1, u_2$ are public inputs (not in the trace). The former auxiliary definitions $S = Y^2$ and $R_a = T_y Z_{\text{mid}}^3 - Y_{\text{mid}}$ are inlined.
 
 | # | Constraint | Max degree |
 |---|-----------|------------|
-| C1 | $\text{down}[u_1] = 2 \cdot \text{up}[u_1] + \text{up}[b_1]$ | 1 |
-| C2 | $\text{down}[u_2] = 2 \cdot \text{up}[u_2] + \text{up}[b_2]$ | 1 |
-| C3 | $S = Y^2$ | 2 |
-| C4 | $Z_{\text{mid}} = 2YZ$ | 2 |
-| C5 | $X_{\text{mid}} = 9X^4 - 8XS$ | 4 |
-| C6 | $Y_{\text{mid}} = 12X^3 S - 3X^2 X_{\text{mid}} - 8S^2$ | 4 |
-| C7 | $H = T_x Z_{\text{mid}}^2 - X_{\text{mid}}$ | ~4 |
-| C8 | $R_a = T_y Z_{\text{mid}}^3 - Y_{\text{mid}}$ | ~5 |
-| C9 | $Z[t{+}1] = (1{-}s) Z_{\text{mid}} + s \cdot Z_{\text{mid}} H$ | ~4 |
-| C10 | $X[t{+}1] = (1{-}s) X_{\text{mid}} + s(R_a^2 - H^3 - 2 X_{\text{mid}} H^2)$ | ~5 |
-| C11 | $Y[t{+}1] = (1{-}s) Y_{\text{mid}} + s(R_a(X_{\text{mid}} H^2 - X[t{+}1]) - Y_{\text{mid}} H^3)$ | ~6 |
+| C1 | $Z_{\text{mid}} = 2YZ$ | 2 |
+| C2 | $X_{\text{mid}} = 9X^4 - 8XY^2$ | 4 |
+| C3 | $Y_{\text{mid}} = 12X^3 Y^2 - 3X^2 X_{\text{mid}} - 8Y^4$ | 5 |
+| C4 | $H = T_x Z_{\text{mid}}^2 - X_{\text{mid}}$ | ~4 |
+| C5 | $Z[t{+}1] = (1{-}s) Z_{\text{mid}} + s \cdot Z_{\text{mid}} H$ | ~4 |
+| C6 | $X[t{+}1] = (1{-}s) X_{\text{mid}} + s\bigl((T_y Z_{\text{mid}}^3 - Y_{\text{mid}})^2 - H^3 - 2 X_{\text{mid}} H^2\bigr)$ | 12 |
+| C7 | $Y[t{+}1] = (1{-}s) Y_{\text{mid}} + s\bigl((T_y Z_{\text{mid}}^3 - Y_{\text{mid}})(X_{\text{mid}} H^2 - X[t{+}1]) - Y_{\text{mid}} H^3\bigr)$ | 10 |
 
 Where $s = b_1 + b_2 - b_1 b_2$ (Shamir selector: $s = 1$ iff any bit is set), and $T = (T_x, T_y)$ is the table point selected by $(b_1, b_2)$ from $\{\mathcal{O}, G, Q, G{+}Q\}$.
 
@@ -484,7 +606,7 @@ The PCS proof transcript is the dominant contributor to proof size. Its structur
 - 1 combined row (`row_len × CombR::NUM_BYTES`): e.g., 512 × 48 = 24,576 bytes (BinaryPoly batch) or 512 × 64 = 32,768 bytes (ECDSA batch).
 - `NUM_COLUMN_OPENINGS` (147) column openings, each containing:
   - Column index (8 bytes).
-  - Per-polynomial column values: `batch_size × num_rows × Cw::NUM_BYTES` per opening. For SHA BinaryPoly: 11 × 1 × 256 = 2,816 bytes; for SHA Int: 9 × 1 × 16 = 144 bytes; for ECDSA: 14 × 1 × 40 = 560 bytes.
+  - Per-polynomial column values: `batch_size × num_rows × Cw::NUM_BYTES` per opening. For SHA BinaryPoly: 11 × 1 × 256 = 2,816 bytes; for SHA Int: 9 × 1 × 16 = 144 bytes; for ECDSA: 9 × 1 × 40 = 360 bytes.
   - Merkle proof: ~11 blake3 hashes (~352 bytes per proof for tree depth ≈ log₂(2048) = 11).
 
 **Eval phase (batched):**
@@ -540,7 +662,7 @@ The system defines seven ideal types, each handling a different kind of constrai
 ### `EcdsaIdealOverF`
 
 - **Used by:** ECDSA pipeline verification
-- **Check:** Checks if value is zero (matching the `assert_zero` semantics of all 11 ECDSA constraints).
+- **Check:** Checks if value is zero (matching the `assert_zero` semantics of all 7 ECDSA constraints).
 
 ### `ImpossibleIdeal`
 
@@ -734,7 +856,7 @@ The ECDSA constraints operate on `Int<4>` (256-bit integers) in the unified pipe
 
 ### 14.5 ECDSA Boundary Constraints Not Enforced
 
-The 11 ECDSA constraints are "non-boundary" constraints applied uniformly to all rows. The implementation does not enforce:
+The 7 ECDSA constraints are "non-boundary" constraints applied uniformly to all rows. The implementation does not enforce:
 - Row 1 (precomputation): that the initial accumulator is the identity element.
 - Row 258 (final check): that the final accumulated point matches the expected signature verification result.
 
@@ -787,7 +909,7 @@ After eval-phase batching, column openings dominate the test-phase proof. For 14
 
 **Estimated savings: ~16 KB on eval phase, plus ~2× faster ECDSA field arithmetic.**
 
-Currently ECDSA uses `CombR = Int<8>` (512-bit) which forces `PcsF = MontyField<8>` (64 bytes/element). The actual overflow bound for 14 columns × 1 row × 256-bit evaluations with 128-bit challenges is ~384 bits, fitting in `Int<6>` (384-bit). Narrowing to `CombR = Int<6>` and `PcsF = MontyField<4>` (32 bytes) would:
+Currently ECDSA uses `CombR = Int<8>` (512-bit) which forces `PcsF = MontyField<8>` (64 bytes/element). The actual overflow bound for 9 columns × 1 row × 256-bit evaluations with 128-bit challenges is ~384 bits, fitting in `Int<6>` (384-bit). Narrowing to `CombR = Int<6>` and `PcsF = MontyField<4>` (32 bytes) would:
 - Halve the ECDSA eval-phase batched row (512 × 32 = 16 KB vs 512 × 64 = 32 KB).
 - Speed up ECDSA field arithmetic by ~2× (128-bit Montgomery multiplication vs 512-bit).
 - Reduce the test-phase combined row (512 × 48 vs 512 × 64).
@@ -847,8 +969,8 @@ Seven integration tests in `snark/tests/`:
 | `qx_ideal_check_succeeds_on_valid_sha256_witness` | IC prover on Q[X]-projected SHA-256 trace. Verifies the 5 Q[X] constraints (including the $(X-2)$ ideal). Does NOT run verification. |
 | `full_pipeline_round_trip` | Single-ring: `prove()` → `verify()` with TrivialIdeal. Full IC + CPR + PCS round-trip for the 6 F₂[X] constraints. |
 | `dual_ring_pipeline_round_trip` | Dual-ring: `prove_dual_ring()` → `verify_dual_ring()`. BP pass (6 constraints, TrivialIdeal) + QX pass (5 constraints, real DegreeOne(2) ideal) + PCS. **This is the most comprehensive test.** |
-| `ecdsa_ideal_check_succeeds_on_valid_witness` | ECDSA IC prover on the constant fixed-point trace. Verifies the 11 i64 constraints produce a valid IC proof. |
-| `ecdsa_pipeline_round_trip` | ECDSA single-ring `Int<4>` pipeline: `prove_generic()` → `verify_generic()`. All 11 constraints checked in `Int<4>` ring with `EcdsaScalarZipTypes` (PCS field = `MontyField<8>`). Full IC + CPR + PCS round-trip on a zero trace. |
+| `ecdsa_ideal_check_succeeds_on_valid_witness` | ECDSA IC prover on the constant fixed-point trace. Verifies the 7 i64 constraints produce a valid IC proof. |
+| `ecdsa_pipeline_round_trip` | ECDSA single-ring `Int<4>` pipeline: `prove_generic()` → `verify_generic()`. All 7 constraints checked in `Int<4>` ring with `EcdsaScalarZipTypes` (PCS field = `MontyField<8>`). Full IC + CPR + PCS round-trip on a zero trace. |
 
 Additionally:
 - Each UAIR crate has unit tests for constraint count, max degree, scalar collection, and (for SHA-256) NIST test vector validation.
@@ -864,7 +986,7 @@ Five criterion benchmark suites in `snark/benches/e2e_sha256.rs`:
 | Suite | What it measures |
 |-------|-----------------|
 | `sha256_single` | **Headline benchmark.** PCS-only prover/verifier + full-pipeline (`pipeline::prove`/`pipeline::verify`) prover/verifier + proof size for single SHA-256 (20 cols, DEPTH=1). Reports split-PCS proof sizes (11 BPoly + 9 Int). |
-| `sha256_8x_ecdsa` | **Paper target benchmark.** Two separate PCS batches: SHA-256 columns as `BinaryPoly<32>` + 14 ECDSA columns as `Int<4>` (256-bit scalar), both at DEPTH=1 (512 rows). Reports combined prover/verifier timing, proof sizes (monolithic and split-SHA variants), and parallel verification. |
+| `sha256_8x_ecdsa` | **Paper target benchmark.** Two separate PCS batches: SHA-256 columns as `BinaryPoly<32>` + 9 ECDSA columns as `Int<4>` (256-bit scalar), both at DEPTH=1 (512 rows). Reports combined prover/verifier timing, proof sizes (monolithic and split-SHA variants), and parallel verification. |
 | `sha256_piop_only` | IC and CPR prover in isolation (no PCS). |
 | `sha256_end_to_end` | Manual PIOP+PCS composition (IC + CPR + PCS commit/test/evaluate). |
 | `sha256_full_pipeline` | Uses `pipeline::prove()` / `pipeline::verify()` directly, reports detailed proof size breakdown (PCS + PIOP components). |
@@ -878,7 +1000,7 @@ ECDSA_NUM_VARS        = 9    // 512 rows (258 real + 254 padding)
 SHA256_BATCH_SIZE     = 20   // 20 SHA-256 columns (monolithic)
 SHA256_POLY_BATCH_SIZE = 11  // BinaryPoly columns (split)
 SHA256_INT_BATCH_SIZE  = 9   // Int columns (split)
-ECDSA_BATCH_SIZE      = 14   // 14 ECDSA columns
+ECDSA_BATCH_SIZE      = 9    // 9 ECDSA columns
 ```
 
 ### Dual-PCS Architecture for 8×SHA-256 + ECDSA
@@ -890,7 +1012,7 @@ The `sha256_8x_ecdsa` benchmark uses **two (or three) independent PCS batches** 
 | SHA-256 (mono) | 20 | `BinaryPoly<32>` | `Sha256ZipTypes<i64, 32>` | R4B64 DEPTH=1 | 512 | `MontyField<4>` (128-bit) |
 | SHA-256 BPoly (split) | 11 | `BinaryPoly<32>` | `Sha256ZipTypes<i64, 32>` | R4B64 DEPTH=1 | 512 | `MontyField<4>` (128-bit) |
 | SHA-256 Int (split) | 9 | `Int<1>` | `Sha256IntZipTypes` | R4B64 DEPTH=1 | 512 | `MontyField<4>` (128-bit) |
-| ECDSA | 14 | `Int<4>` | `EcdsaScalarZipTypes` | R4B64 DEPTH=1 | 512 | `MontyField<8>` (512-bit) |
+| ECDSA | 9 | `Int<4>` | `EcdsaScalarZipTypes` | R4B64 DEPTH=1 | 512 | `MontyField<8>` (512-bit) |
 
 This design matches the paper's intent: ECDSA values are field elements (scalars), not polynomials, so committing them as `Int<4>` (256-bit signed integer) avoids the 32× overhead of processing 32 binary coefficients per cell.
 
@@ -954,8 +1076,8 @@ zinc-plus-new/
 │       └── constants.rs # H[], K[] SHA-256 constants
 ├── ecdsa-uair/         # ECDSA UAIR + witness
 │   └── src/
-│       ├── lib.rs       # 11 Int<4> + 11 i64 constraints, ideal types
-│       ├── constraints.rs # Mathematical specification of all 11 constraints
+│       ├── lib.rs       # 7 Int<4> + 7 i64 constraints, ideal types
+│       ├── constraints.rs # Mathematical specification of all 7 constraints
 │       └── witness.rs   # Constant fixed-point witness generator (Int<4> + i64)
 ├── uair/               # Abstract UAIR trait, constraint builders
 ├── poly/               # Polynomial types (BinaryPoly, DensePolynomial, MLE)

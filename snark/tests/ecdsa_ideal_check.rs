@@ -75,7 +75,7 @@ fn ecdsa_ideal_check_succeeds_on_valid_witness() {
         num_constraints, max_degree
     );
     assert_eq!(num_constraints, NUM_CONSTRAINTS_I64);
-    assert!(max_degree >= 4 && max_degree <= 6);
+    assert!(max_degree >= 4 && max_degree <= 12);
 
     // Step 2: IdealCheck prover.
     let mut transcript = zinc_transcript::KeccakTranscript::new();

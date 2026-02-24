@@ -1,7 +1,7 @@
 //! ECDSA Verification UAIR (Universal Algebraic Intermediate Representation).
 //!
 //! This crate defines the ECDSA signature verification arithmetization as
-//! described in the Zinc+ paper: **258 rows × 14 columns**.
+//! described in the Zinc+ paper: **258 rows × 9 columns**.
 //!
 //! # Architecture
 //!
@@ -13,45 +13,45 @@
 //! a single 256-step double-and-add loop, processing one bit of each
 //! scalar per row.
 //!
+//! The scalars u₁, u₂ are public inputs (given to the verifier in the clear).
+//! The quotient bit k is handled in boundary constraints only.
+//! The auxiliary values S = Y² and R_a = T_y·Z_mid³ − Y_mid are inlined
+//! as sub-expressions in the constraints (not separate columns).
+//!
 //! # Structure
 //!
 //! - Row 1: Precomputation (public-key curve check, G+Q precompute)
 //! - Rows 2–257: Shamir's trick double-and-add loop (256 scalar bits)
 //! - Row 258: Final verification (inverse, affine conversion, sig check)
 //!
-//! # Column layout (14 columns)
+//! # Column layout (9 columns)
 //!
-//! | Index | Name  | Ring       | Description                                |
-//! |-------|-------|------------|--------------------------------------------|
-//! | 0     | b₁    | Q          | Bit of scalar u₁ (bit-index 257-t)         |
-//! | 1     | b₂    | Q          | Bit of scalar u₂ (bit-index 257-t)         |
-//! | 2     | k     | Q          | Quotient bit for sig check R_x ≡ r (mod n) |
-//! | 3     | X     | F_p        | Accumulator x-coord (Jacobian)             |
-//! | 4     | Y     | F_p        | Accumulator y-coord (Jacobian)             |
-//! | 5     | Z     | F_p        | Accumulator z-coord (Jacobian)             |
-//! | 6     | X_mid | F_p        | Doubled point 2P x-coord (Jacobian)        |
-//! | 7     | Y_mid | F_p        | Doubled point 2P y-coord (Jacobian)        |
-//! | 8     | Z_mid | F_p        | Doubled point 2P z-coord (Jacobian)        |
-//! | 9     | S     | F_p        | Doubling scratch: S = Y²                   |
-//! | 10    | H     | F_p        | Addition scratch: chord x-diff             |
-//! | 11    | R_a   | F_p        | Addition scratch: chord y-diff             |
-//! | 12    | u₁    | F_n        | Scalar accumulator for u₁ = e·s⁻¹          |
-//! | 13    | u₂    | F_n        | Scalar accumulator for u₂ = r·s⁻¹          |
+//! | Index | Name  | Description                                |
+//! |-------|-------|--------------------------------------------|
+//! | 0     | b₁    | Bit of scalar u₁ (bit-index 257-t)         |
+//! | 1     | b₂    | Bit of scalar u₂ (bit-index 257-t)         |
+//! | 2     | X     | Accumulator x-coord (Jacobian)             |
+//! | 3     | Y     | Accumulator y-coord (Jacobian)             |
+//! | 4     | Z     | Accumulator z-coord (Jacobian)             |
+//! | 5     | X_mid | Doubled point 2P x-coord (Jacobian)        |
+//! | 6     | Y_mid | Doubled point 2P y-coord (Jacobian)        |
+//! | 7     | Z_mid | Doubled point 2P z-coord (Jacobian)        |
+//! | 8     | H     | Addition scratch: chord x-diff             |
 //!
-//! # Constraints (11 non-boundary)
+//! # Constraints (7 non-boundary)
 //!
-//! The ECDSA verification constraints operate in F_p and F_n, not in
-//! F₂\[X\]. Since the current Zinc+ UAIR framework only supports a
-//! single ring per UAIR, and the PCS/PIOP operate on BinaryPoly traces,
-//! this crate provides:
+//! The ECDSA verification constraints operate in F_p, not in F₂\[X\].
+//! Since the current Zinc+ UAIR framework only supports a single ring
+//! per UAIR, and the PCS/PIOP operate on BinaryPoly traces, this crate
+//! provides:
 //!
-//! - Correct trace dimensions for benchmarking (258 rows × 14 columns)
+//! - Correct trace dimensions for benchmarking (258 rows × 9 columns)
 //! - Random witness generation (valid for PCS timing, not constraint-sound)
 //! - The UAIR struct with constraint specifications
 //!
 //! Full constraint implementation requires the multi-ring UAIR extension
 //! described in the paper (Section 5.2). See the [`constraints`] module
-//! for the mathematical specification of all 11 constraints.
+//! for the mathematical specification of all 7 constraints.
 //!
 //! # secp256k1 Parameters
 //!
@@ -79,31 +79,26 @@ use zinc_uair::{
 };
 use zinc_utils::from_ref::FromRef;
 
-/// Total number of trace columns (from the paper: 14).
-pub const NUM_COLS: usize = 14;
+/// Total number of trace columns (from the paper: 9).
+pub const NUM_COLS: usize = 9;
 
 /// Number of trace rows: 1 (precomp) + 256 (scalar mul) + 1 (final check) = 258.
 pub const NUM_ROWS: usize = 258;
 
-/// Number of non-boundary constraints (from the paper: 11).
+/// Number of non-boundary constraints (from the paper: 7).
 pub const NUM_CONSTRAINTS: usize = 0; // Placeholder — constraints require F_p ring
 
 // ─── Column indices ──────────────────────────────────────────────────────────
 
 pub const COL_B1: usize = 0;
 pub const COL_B2: usize = 1;
-pub const COL_K: usize = 2;
-pub const COL_X: usize = 3;
-pub const COL_Y: usize = 4;
-pub const COL_Z: usize = 5;
-pub const COL_X_MID: usize = 6;
-pub const COL_Y_MID: usize = 7;
-pub const COL_Z_MID: usize = 8;
-pub const COL_S: usize = 9;
-pub const COL_H: usize = 10;
-pub const COL_RA: usize = 11;
-pub const COL_U1: usize = 12;
-pub const COL_U2: usize = 13;
+pub const COL_X: usize = 2;
+pub const COL_Y: usize = 3;
+pub const COL_Z: usize = 4;
+pub const COL_X_MID: usize = 5;
+pub const COL_Y_MID: usize = 6;
+pub const COL_Z_MID: usize = 7;
+pub const COL_H: usize = 8;
 
 // ─── Toy curve constants ────────────────────────────────────────────────────
 // Curve: y² = x³ + 7 over F_101 (same equation as secp256k1, small prime)
@@ -152,7 +147,7 @@ impl IdealCheck<BinaryPoly<32>> for EcdsaIdeal {
 
 /// Ideal over the PIOP field for ECDSA IC verification.
 ///
-/// Since all 11 ECDSA constraints use `assert_zero`, the only ideal
+/// Since all 7 ECDSA constraints use `assert_zero`, the only ideal
 /// membership check is "value is zero". This is the field-level analog
 /// of `ImpossibleIdeal` (the UAIR-level ideal).
 #[derive(Clone, Debug)]
@@ -232,17 +227,21 @@ impl Uair<BinaryPoly<32>> for EcdsaUair {
     }
 }
 
-// ─── DensePolynomial<i64, 1> implementation (11 constraints) ────────────────
+// ─── DensePolynomial<i64, 1> implementation (7 constraints) ─────────────────
 //
 // Ring: degree-0 integer polynomials (effectively i64 scalars).
 // All constraints are assert_zero (exact integer equality).
 // The witness uses integer arithmetic without modular reduction,
 // so only works for small values where products don't overflow i64.
 //
+// S = Y² and R_a = T_y·Z_mid³ − Y_mid are inlined as sub-expressions
+// (not separate columns). u₁, u₂ are public inputs (no trace columns).
+// k is boundary-only (no trace column).
+//
 // For real secp256k1, a proper 256-bit field type would be needed.
 
 /// Number of constraints for the i64 ECDSA UAIR.
-pub const NUM_CONSTRAINTS_I64: usize = 11;
+pub const NUM_CONSTRAINTS_I64: usize = 7;
 
 impl Uair<DensePolynomial<i64, 1>> for EcdsaUair {
     type Ideal = ImpossibleIdeal;
@@ -271,51 +270,32 @@ impl Uair<DensePolynomial<i64, 1>> for EcdsaUair {
 
         let one = cst(1);
 
-        // ── C1: Scalar accumulation u₁ ─────────────────────────────
-        // down[u1] - 2·up[u1] - up[b1] = 0
-        b.assert_zero(
-            down[COL_U1].clone() - &smul(&up[COL_U1], 2) - &up[COL_B1],
-        );
-
-        // ── C2: Scalar accumulation u₂ ─────────────────────────────
-        // down[u2] - 2·up[u2] - up[b2] = 0
-        b.assert_zero(
-            down[COL_U2].clone() - &smul(&up[COL_U2], 2) - &up[COL_B2],
-        );
-
-        // ── C3: Doubling scratch S = Y² ────────────────────────────
-        b.assert_zero(
-            up[COL_S].clone() - &(up[COL_Y].clone() * &up[COL_Y]),
-        );
-
-        // ── C4: Doubled Z-coordinate: Z_mid = 2·Y·Z ───────────────
+        // ── C1: Doubled Z-coordinate: Z_mid = 2·Y·Z ───────────────
         b.assert_zero(
             up[COL_Z_MID].clone()
                 - &smul(&(up[COL_Y].clone() * &up[COL_Z]), 2),
         );
 
-        // ── C5: Doubled X-coordinate ───────────────────────────────
-        // X_mid = M² - 2U where M = 3X², U = 4XS
-        // Expanded: X_mid = 9X⁴ - 8XS
+        // ── C2: Doubled X-coordinate ───────────────────────────────
+        // X_mid = 9X⁴ - 8X·Y² (S = Y² inlined)
         let x_sq = up[COL_X].clone() * &up[COL_X];
         let x_four = x_sq.clone() * &x_sq;
-        let x_s = up[COL_X].clone() * &up[COL_S];
+        let y_sq = up[COL_Y].clone() * &up[COL_Y]; // inlined S
+        let x_y_sq = up[COL_X].clone() * &y_sq;
         b.assert_zero(
-            up[COL_X_MID].clone() - &smul(&x_four, 9) + &smul(&x_s, 8),
+            up[COL_X_MID].clone() - &smul(&x_four, 9) + &smul(&x_y_sq, 8),
         );
 
-        // ── C6: Doubled Y-coordinate ───────────────────────────────
-        // Y_mid = M·(U - X_mid) - 8S²
-        // where M = 3X², U = 4XS
-        // Expanded: Y_mid = 12X³S - 3X²·X_mid - 8S²
-        let x_cubed_s = x_sq.clone() * &up[COL_X] * &up[COL_S];
+        // ── C3: Doubled Y-coordinate ───────────────────────────────
+        // Y_mid = 12X³Y² - 3X²·X_mid - 8Y⁴ (S = Y² inlined)
+        let x_cubed_y_sq = x_sq.clone() * &up[COL_X] * &y_sq;
         let x_sq_xmid = x_sq * &up[COL_X_MID];
-        let s_sq = up[COL_S].clone() * &up[COL_S];
+        let y_four = y_sq.clone() * &y_sq;
         b.assert_zero(
             up[COL_Y_MID].clone()
-                - &smul(&x_cubed_s, 12)
+                - &smul(&x_cubed_y_sq, 12)
                 + &smul(&x_sq_xmid, 3)
-                + &smul(&s_sq, 8),
+                + &smul(&y_four, 8),
         );
 
         // ── Shamir selector ────────────────────────────────────────
@@ -336,19 +316,17 @@ impl Uair<DensePolynomial<i64, 1>> for EcdsaUair {
             + &smul(&not_b1_b2, QY)
             + &smul(&b1b2, PGQY);
 
-        // ── C7: Addition scratch H = T_x·Z_mid² - X_mid ───────────
+        // ── C4: Addition scratch H = T_x·Z_mid² - X_mid ───────────
         let zmid_sq = up[COL_Z_MID].clone() * &up[COL_Z_MID];
         b.assert_zero(
             up[COL_H].clone() - &(t_x * &zmid_sq) + &up[COL_X_MID],
         );
 
-        // ── C8: Addition scratch R_a = T_y·Z_mid³ - Y_mid ─────────
+        // ── Inlined R_a = T_y·Z_mid³ - Y_mid ──────────────────────
         let zmid_cubed = zmid_sq.clone() * &up[COL_Z_MID];
-        b.assert_zero(
-            up[COL_RA].clone() - &(t_y * &zmid_cubed) + &up[COL_Y_MID],
-        );
+        let r_a = t_y * &zmid_cubed - &up[COL_Y_MID];
 
-        // ── C9: Result Z-coordinate ────────────────────────────────
+        // ── C5: Result Z-coordinate ────────────────────────────────
         // Z[t+1] = (1-s)·Z_mid + s·(Z_mid·H)
         let one_minus_s = one - &s;
         let zmid_h = up[COL_Z_MID].clone() * &up[COL_H];
@@ -358,10 +336,10 @@ impl Uair<DensePolynomial<i64, 1>> for EcdsaUair {
                 - &(s.clone() * &zmid_h),
         );
 
-        // ── C10: Result X-coordinate ───────────────────────────────
+        // ── C6: Result X-coordinate ───────────────────────────────
         // When s=0: X[t+1] = X_mid
-        // When s=1: X[t+1] = Ra² - H³ - 2·X_mid·H²
-        let ra_sq = up[COL_RA].clone() * &up[COL_RA];
+        // When s=1: X[t+1] = R_a² - H³ - 2·X_mid·H²
+        let ra_sq = r_a.clone() * &r_a;
         let h_sq = up[COL_H].clone() * &up[COL_H];
         let h_cubed = h_sq.clone() * &up[COL_H];
         let xmid_h_sq = up[COL_X_MID].clone() * &h_sq;
@@ -372,11 +350,11 @@ impl Uair<DensePolynomial<i64, 1>> for EcdsaUair {
                 - &(s.clone() * &add_x),
         );
 
-        // ── C11: Result Y-coordinate ───────────────────────────────
+        // ── C7: Result Y-coordinate ───────────────────────────────
         // When s=0: Y[t+1] = Y_mid
-        // When s=1: Y[t+1] = Ra·(X_mid·H² - X[t+1]) - Y_mid·H³
+        // When s=1: Y[t+1] = R_a·(X_mid·H² - X[t+1]) - Y_mid·H³
         let xmid_h_sq_2 = up[COL_X_MID].clone() * &h_sq;
-        let ra_term = up[COL_RA].clone() * &(xmid_h_sq_2 - &down[COL_X]);
+        let ra_term = r_a * &(xmid_h_sq_2 - &down[COL_X]);
         let ymid_h_cubed = up[COL_Y_MID].clone() * &h_cubed;
         let add_y = ra_term - &ymid_h_cubed;
         b.assert_zero(
@@ -387,7 +365,7 @@ impl Uair<DensePolynomial<i64, 1>> for EcdsaUair {
     }
 }
 
-// ─── Int<4> implementation (11 constraints, 256-bit integer arithmetic) ──────
+// ─── Int<4> implementation (7 constraints, 256-bit integer arithmetic) ───────
 //
 // Ring: Int<4> (256-bit signed integers). Identical constraint algebra to the
 // DensePolynomial<i64, 1> implementation above, but using Int<4> which can
@@ -397,7 +375,7 @@ impl Uair<DensePolynomial<i64, 1>> for EcdsaUair {
 // type is used for PCS commitments, PIOP constraints, and witness values.
 
 /// Number of constraints for the Int<4> ECDSA UAIR.
-pub const NUM_CONSTRAINTS_INT4: usize = 11;
+pub const NUM_CONSTRAINTS_INT4: usize = 7;
 
 impl Uair<Int<4>> for EcdsaUair {
     type Ideal = ImpossibleIdeal;
@@ -426,48 +404,32 @@ impl Uair<Int<4>> for EcdsaUair {
 
         let one = cst(1);
 
-        // ── C1: Scalar accumulation u₁ ─────────────────────────────
-        // down[u1] - 2·up[u1] - up[b1] = 0
-        b.assert_zero(
-            down[COL_U1].clone() - &smul(&up[COL_U1], 2) - &up[COL_B1],
-        );
-
-        // ── C2: Scalar accumulation u₂ ─────────────────────────────
-        // down[u2] - 2·up[u2] - up[b2] = 0
-        b.assert_zero(
-            down[COL_U2].clone() - &smul(&up[COL_U2], 2) - &up[COL_B2],
-        );
-
-        // ── C3: Doubling scratch S = Y² ────────────────────────────
-        b.assert_zero(
-            up[COL_S].clone() - &(up[COL_Y].clone() * &up[COL_Y]),
-        );
-
-        // ── C4: Doubled Z-coordinate: Z_mid = 2·Y·Z ───────────────
+        // ── C1: Doubled Z-coordinate: Z_mid = 2·Y·Z ───────────────
         b.assert_zero(
             up[COL_Z_MID].clone()
                 - &smul(&(up[COL_Y].clone() * &up[COL_Z]), 2),
         );
 
-        // ── C5: Doubled X-coordinate ───────────────────────────────
-        // X_mid = 9X⁴ - 8XS
+        // ── C2: Doubled X-coordinate ───────────────────────────────
+        // X_mid = 9X⁴ - 8X·Y² (S = Y² inlined)
         let x_sq = up[COL_X].clone() * &up[COL_X];
         let x_four = x_sq.clone() * &x_sq;
-        let x_s = up[COL_X].clone() * &up[COL_S];
+        let y_sq = up[COL_Y].clone() * &up[COL_Y]; // inlined S
+        let x_y_sq = up[COL_X].clone() * &y_sq;
         b.assert_zero(
-            up[COL_X_MID].clone() - &smul(&x_four, 9) + &smul(&x_s, 8),
+            up[COL_X_MID].clone() - &smul(&x_four, 9) + &smul(&x_y_sq, 8),
         );
 
-        // ── C6: Doubled Y-coordinate ───────────────────────────────
-        // Y_mid = 12X³S - 3X²·X_mid - 8S²
-        let x_cubed_s = x_sq.clone() * &up[COL_X] * &up[COL_S];
+        // ── C3: Doubled Y-coordinate ───────────────────────────────
+        // Y_mid = 12X³Y² - 3X²·X_mid - 8Y⁴ (S = Y² inlined)
+        let x_cubed_y_sq = x_sq.clone() * &up[COL_X] * &y_sq;
         let x_sq_xmid = x_sq * &up[COL_X_MID];
-        let s_sq = up[COL_S].clone() * &up[COL_S];
+        let y_four = y_sq.clone() * &y_sq;
         b.assert_zero(
             up[COL_Y_MID].clone()
-                - &smul(&x_cubed_s, 12)
+                - &smul(&x_cubed_y_sq, 12)
                 + &smul(&x_sq_xmid, 3)
-                + &smul(&s_sq, 8),
+                + &smul(&y_four, 8),
         );
 
         // ── Shamir selector ────────────────────────────────────────
@@ -488,19 +450,17 @@ impl Uair<Int<4>> for EcdsaUair {
             + &smul(&not_b1_b2, QY)
             + &smul(&b1b2, PGQY);
 
-        // ── C7: Addition scratch H = T_x·Z_mid² - X_mid ───────────
+        // ── C4: Addition scratch H = T_x·Z_mid² - X_mid ───────────
         let zmid_sq = up[COL_Z_MID].clone() * &up[COL_Z_MID];
         b.assert_zero(
             up[COL_H].clone() - &(t_x * &zmid_sq) + &up[COL_X_MID],
         );
 
-        // ── C8: Addition scratch R_a = T_y·Z_mid³ - Y_mid ─────────
+        // ── Inlined R_a = T_y·Z_mid³ - Y_mid ──────────────────────
         let zmid_cubed = zmid_sq.clone() * &up[COL_Z_MID];
-        b.assert_zero(
-            up[COL_RA].clone() - &(t_y * &zmid_cubed) + &up[COL_Y_MID],
-        );
+        let r_a = t_y * &zmid_cubed - &up[COL_Y_MID];
 
-        // ── C9: Result Z-coordinate ────────────────────────────────
+        // ── C5: Result Z-coordinate ────────────────────────────────
         // Z[t+1] = (1-s)·Z_mid + s·(Z_mid·H)
         let one_minus_s = one - &s;
         let zmid_h = up[COL_Z_MID].clone() * &up[COL_H];
@@ -510,8 +470,10 @@ impl Uair<Int<4>> for EcdsaUair {
                 - &(s.clone() * &zmid_h),
         );
 
-        // ── C10: Result X-coordinate ───────────────────────────────
-        let ra_sq = up[COL_RA].clone() * &up[COL_RA];
+        // ── C6: Result X-coordinate ───────────────────────────────
+        // When s=0: X[t+1] = X_mid
+        // When s=1: X[t+1] = R_a² - H³ - 2·X_mid·H²
+        let ra_sq = r_a.clone() * &r_a;
         let h_sq = up[COL_H].clone() * &up[COL_H];
         let h_cubed = h_sq.clone() * &up[COL_H];
         let xmid_h_sq = up[COL_X_MID].clone() * &h_sq;
@@ -522,9 +484,11 @@ impl Uair<Int<4>> for EcdsaUair {
                 - &(s.clone() * &add_x),
         );
 
-        // ── C11: Result Y-coordinate ───────────────────────────────
+        // ── C7: Result Y-coordinate ───────────────────────────────
+        // When s=0: Y[t+1] = Y_mid
+        // When s=1: Y[t+1] = R_a·(X_mid·H² - X[t+1]) - Y_mid·H³
         let xmid_h_sq_2 = up[COL_X_MID].clone() * &h_sq;
-        let ra_term = up[COL_RA].clone() * &(xmid_h_sq_2 - &down[COL_X]);
+        let ra_term = r_a * &(xmid_h_sq_2 - &down[COL_X]);
         let ymid_h_cubed = up[COL_Y_MID].clone() * &h_cubed;
         let add_y = ra_term - &ymid_h_cubed;
         b.assert_zero(
@@ -544,33 +508,33 @@ mod tests {
     #[test]
     fn correct_dimensions() {
         assert_eq!(NUM_ROWS, 258);
-        assert_eq!(NUM_COLS, 14);
+        assert_eq!(NUM_COLS, 9);
     }
 
     #[test]
     fn i64_constraint_count() {
         let n = count_constraints::<DensePolynomial<i64, 1>, EcdsaUair>();
-        assert_eq!(n, NUM_CONSTRAINTS_I64, "Expected 11 ECDSA i64 constraints");
+        assert_eq!(n, NUM_CONSTRAINTS_I64, "Expected 7 ECDSA i64 constraints");
     }
 
     #[test]
     fn i64_max_degree() {
         let d = count_max_degree::<DensePolynomial<i64, 1>, EcdsaUair>();
-        // C11 has degree 6: s(deg2) * Ra(1) * X_mid(1) * H²(2) = 6
-        assert!(d <= 6, "Max degree should be at most 6, got {d}");
+        // C6 has degree 12: s(deg2) * R_a²(deg10) where R_a = T_y·Z_mid³ − Y_mid (deg5)
+        assert!(d <= 12, "Max degree should be at most 12, got {d}");
         assert!(d >= 4, "Max degree should be at least 4 (doubling formulas), got {d}");
     }
 
     #[test]
     fn int4_constraint_count() {
         let n = count_constraints::<Int<4>, EcdsaUair>();
-        assert_eq!(n, NUM_CONSTRAINTS_INT4, "Expected 11 ECDSA Int<4> constraints");
+        assert_eq!(n, NUM_CONSTRAINTS_INT4, "Expected 7 ECDSA Int<4> constraints");
     }
 
     #[test]
     fn int4_max_degree() {
         let d = count_max_degree::<Int<4>, EcdsaUair>();
-        assert!(d <= 6, "Max degree should be at most 6, got {d}");
+        assert!(d <= 12, "Max degree should be at most 12, got {d}");
         assert!(d >= 4, "Max degree should be at least 4 (doubling formulas), got {d}");
     }
 }

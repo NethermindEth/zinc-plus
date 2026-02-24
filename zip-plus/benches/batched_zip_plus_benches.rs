@@ -107,8 +107,8 @@ type IprsBPolyR4B32<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const 
 
 // ---------- Batched benchmark helpers ----------------------------------------
 
-const BATCH_SIZE: usize = 14;
-const BATCH_SIZE_7: usize = 14;
+const BATCH_SIZE: usize = 9;
+const BATCH_SIZE_7: usize = 9;
 
 fn batched_encode_nrows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
