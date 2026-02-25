@@ -34,7 +34,7 @@ zinc-test-uair = { workspace = true }
 workspace = true
 
 [features]
-parallel = ["dep:rayon", "zinc-utils/parallel", "crypto-primitives/parallel", "zinc-poly/parallel"]
+parallel = ["dep:rayon", "zinc-poly/parallel", "zinc-utils/parallel", "crypto-primitives/parallel"]
 simd = ["zinc-poly/simd"]
 
 [[bench]]
@@ -43,9 +43,5 @@ harness = false
 
 [[bench]]
 name = "ideal_check"
-harness = false
-
-[[bench]]
-name = "combined_poly_resolver"
 harness = false
 

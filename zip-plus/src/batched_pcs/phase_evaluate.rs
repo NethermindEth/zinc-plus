@@ -64,7 +64,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
                 "batched_evaluate",
                 pp.num_vars,
                 pp.num_rows,
-                pp.linear_code.row_len(),
                 &[poly],
                 &[point],
             )?;

@@ -1,8 +1,8 @@
 use crate::{
-    CoefficientProjectable, ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
+    ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
     univariate::{dense::DensePolynomial, prepare_projection},
 };
-use crypto_primitives::{FromWithConfig, PrimeField, Semiring, semiring::boolean::Boolean};
+use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
 use derive_more::{
     Add, AddAssign, AsRef, Display, From, Mul, MulAssign, Product, Sub, SubAssign, Sum,
 };
@@ -13,7 +13,7 @@ use std::{
     hash::Hash,
     iter::{Product, Sum},
     marker::PhantomData,
-    ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
+    ops::{Add, AddAssign, Deref, DerefMut, Mul, MulAssign, Sub, SubAssign},
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
@@ -50,14 +50,6 @@ impl<const DEGREE_PLUS_ONE: usize> BinaryRefPoly<DEGREE_PLUS_ONE> {
     #[inline(always)]
     pub const fn inner(&self) -> &DensePolynomial<Boolean, DEGREE_PLUS_ONE> {
         &self.0
-    }
-
-    pub fn to_u64(&self) -> u64 {
-        self.0
-            .coeffs
-            .iter()
-            .enumerate()
-            .fold(0, |acc, (i, coeff)| acc | (u64::from(*coeff) << i))
     }
 }
 
@@ -248,7 +240,6 @@ impl<const DEGREE_PLUS_ONE: usize> Distribution<BinaryRefPoly<DEGREE_PLUS_ONE>>
 //
 // Zip-specific traits
 //
-
 impl<const DEGREE_PLUS_ONE: usize> Polynomial<Boolean> for BinaryRefPoly<DEGREE_PLUS_ONE> {
     const DEGREE_BOUND: usize = DensePolynomial::<Boolean, DEGREE_PLUS_ONE>::DEGREE_BOUND;
 }
@@ -325,6 +316,34 @@ impl<const DEGREE_PLUS_ONE: usize> From<&BinaryRefPoly<DEGREE_PLUS_ONE>>
     }
 }
 
+impl<const DEGREE_PLUS_ONE: usize> BinaryRefPoly<DEGREE_PLUS_ONE> {
+    #[inline(always)]
+    pub fn iter(&self) -> std::slice::Iter<'_, Boolean> {
+        self.0.iter()
+    }
+
+    #[inline(always)]
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Boolean> {
+        self.0.iter_mut()
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> Deref for BinaryRefPoly<DEGREE_PLUS_ONE> {
+    type Target = [Boolean];
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        self.0.deref()
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> DerefMut for BinaryRefPoly<DEGREE_PLUS_ONE> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.deref_mut()
+    }
+}
+
 pub struct BinaryRefPolyInnerProduct<R, const DEGREE_PLUS_ONE: usize>(PhantomData<R>);
 
 impl<Rhs, Out, const DEGREE_PLUS_ONE: usize> InnerProduct<BinaryRefPoly<DEGREE_PLUS_ONE>, Rhs, Out>
@@ -351,21 +370,6 @@ where
         prepare_projection::<F, Self, _, DEGREE_PLUS_ONE>(sampled_value, |poly, i| {
             poly.0.coeffs[i].inner()
         })
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> CoefficientProjectable<Boolean, DEGREE_PLUS_ONE>
-    for BinaryRefPoly<DEGREE_PLUS_ONE>
-{
-    fn project_coefficients<F: FromWithConfig<Boolean> + 'static>(
-        &self,
-        projecting_element: &F,
-    ) -> DensePolynomial<F, DEGREE_PLUS_ONE> {
-        DensePolynomial {
-            coeffs: array::from_fn(|i| {
-                F::from_with_cfg(self.inner().coeffs[i], projecting_element.cfg())
-            }),
-        }
     }
 }
 

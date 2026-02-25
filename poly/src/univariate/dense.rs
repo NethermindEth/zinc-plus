@@ -1,5 +1,5 @@
 use crate::{
-    CoefficientProjectable, ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
+    ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
     univariate::{binary_ref::BinaryRefPoly, binary_u64::BinaryU64Poly},
 };
 
@@ -16,7 +16,7 @@ use std::{
     hash::Hash,
     iter::{Product, Sum},
     marker::PhantomData,
-    ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
+    ops::{Add, AddAssign, Deref, DerefMut, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
@@ -593,18 +593,26 @@ where
     }
 }
 
-impl<R: Semiring, const DEGREE_PLUS_ONE: usize> CoefficientProjectable<R, DEGREE_PLUS_ONE>
-    for DensePolynomial<R, DEGREE_PLUS_ONE>
-{
-    fn project_coefficients<F: FromWithConfig<R> + 'static>(
-        &self,
-        projecting_element: &F,
-    ) -> DensePolynomial<F, DEGREE_PLUS_ONE> {
-        DensePolynomial {
-            coeffs: array::from_fn(|i| {
-                F::from_with_cfg(self.coeffs[i].clone(), projecting_element.cfg())
-            }),
-        }
+impl<R, const DEGREE_PLUS_ONE: usize> DensePolynomial<R, DEGREE_PLUS_ONE> {
+    #[inline(always)]
+    pub fn iter(&self) -> std::slice::Iter<'_, R> {
+        self.coeffs.iter()
+    }
+
+    #[inline(always)]
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, R> {
+        self.coeffs.iter_mut()
+    }
+}
+
+impl<R, const DEGREE_PLUS_ONE: usize> IntoIterator for DensePolynomial<R, DEGREE_PLUS_ONE> {
+    type Item = R;
+
+    type IntoIter = std::array::IntoIter<R, DEGREE_PLUS_ONE>;
+
+    #[inline(always)]
+    fn into_iter(self) -> Self::IntoIter {
+        self.coeffs.into_iter()
     }
 }
 
@@ -621,6 +629,20 @@ impl<'a, R, const DEGREE_PLUS_ONE: usize> IntoIterator for &'a DensePolynomial<R
 impl<R, const DEGREE_PLUS_ONE: usize> AsRef<[R]> for DensePolynomial<R, DEGREE_PLUS_ONE> {
     fn as_ref(&self) -> &[R] {
         self.coeffs.as_slice()
+    }
+}
+
+impl<R, const DEGREE_PLUS_ONE: usize> Deref for DensePolynomial<R, DEGREE_PLUS_ONE> {
+    type Target = [R];
+
+    fn deref(&self) -> &Self::Target {
+        self.coeffs.as_slice()
+    }
+}
+
+impl<R, const DEGREE_PLUS_ONE: usize> DerefMut for DensePolynomial<R, DEGREE_PLUS_ONE> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.coeffs
     }
 }
 

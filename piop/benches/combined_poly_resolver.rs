@@ -2,94 +2,102 @@ use criterion::{
     AxisScale, BatchSize, BenchmarkGroup, BenchmarkId, Criterion, PlotConfiguration,
     criterion_group, criterion_main, measurement::WallTime,
 };
-use crypto_primitives::{FromPrimitiveWithConfig, crypto_bigint_monty::MontyField};
+use crypto_primitives::{
+    ConstIntSemiring, Field, FromWithConfig, PrimeField, crypto_bigint_int::Int,
+    crypto_bigint_monty::MontyField,
+};
+use zinc_utils::from_ref::FromRef;
 use rand::rng;
 use std::hint::black_box;
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
-    ideal_check::{IdealCheckField, IdealCheckProtocol},
+    ideal_check::IdealCheckProtocol,
+    projections::{project_scalars, project_scalars_to_field, project_trace_coeffs, project_trace_to_field},
 };
-use zinc_poly::univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF};
+use zinc_poly::univariate::dense::DensePolynomial;
 use zinc_primality::{MillerRabin, PrimalityTest};
-use zinc_test_uair::{GenerateWitness, TestAirBinary, TestUairSimpleMultiplication};
-use zinc_transcript::{KeccakTranscript, traits::Transcript};
+use zinc_test_uair::{GenerateSingleTypeWitness, TestAirNoMultiplication};
+use zinc_transcript::{
+    KeccakTranscript,
+    traits::{ConstTranscribable, Transcript},
+};
 use zinc_uair::{
     Uair,
     constraint_counter::count_constraints,
     degree_counter::count_max_degree,
-    ideal::{Ideal, IdealCheck},
-    ideal_collector::IdealOrZero,
 };
 
 const DEGREE_PLUS_ONE: usize = 32;
 
+type WitnessCoeff<const INT_LIMBS: usize> = Int<INT_LIMBS>;
+type Witness<const INT_LIMBS: usize> = DensePolynomial<WitnessCoeff<INT_LIMBS>, DEGREE_PLUS_ONE>;
+type F<const FIELD_LIMBS: usize> = MontyField<FIELD_LIMBS>;
+
 #[allow(clippy::arithmetic_side_effects)]
-fn do_bench<F, Air, IdealOverFFromRef, IdealOverF>(
+fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     group: &mut BenchmarkGroup<WallTime>,
-    bench_title: &str,
     witness_size: usize,
-    ideal_over_f_from_ref: IdealOverFFromRef,
 ) where
-    F: IdealCheckField + FromPrimitiveWithConfig,
-    MillerRabin: PrimalityTest<F::Inner>,
-    Air: Uair<BinaryPoly<DEGREE_PLUS_ONE>> + GenerateWitness<BinaryPoly<DEGREE_PLUS_ONE>>,
-    IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
-    IdealOverFFromRef:
-        Fn(&IdealOrZero<<Air as Uair<BinaryPoly<DEGREE_PLUS_ONE>>>::Ideal>) -> IdealOverF + Copy,
+    <F<FIELD_LIMBS> as Field>::Inner: ConstIntSemiring + ConstTranscribable + FromRef<<F<FIELD_LIMBS> as Field>::Inner>,
+    TestAirNoMultiplication<INT_LIMBS>: Uair<Scalar = Witness<INT_LIMBS>, Ideal = zinc_poly::univariate::ideal::DegreeOneIdeal<WitnessCoeff<INT_LIMBS>>>
+        + GenerateSingleTypeWitness<Witness = Witness<INT_LIMBS>>,
+    MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Inner>,
+    F<FIELD_LIMBS>: FromWithConfig<Int<INT_LIMBS>> + PrimeField + FromRef<F<FIELD_LIMBS>>,
 {
     let mut rng = rng();
     let num_vars = zinc_utils::log2(witness_size) as usize;
-    let trace = Air::generate_witness(num_vars, &mut rng);
+    let trace = TestAirNoMultiplication::generate_witness(num_vars, &mut rng);
 
-    let params = format!("{}/nvars={}", bench_title, num_vars);
+    let params = format!("NoMult/LIMBS={}/nvars={}", FIELD_LIMBS, num_vars);
+
+    let num_constraints = count_constraints::<TestAirNoMultiplication<INT_LIMBS>>();
+    let max_degree = count_max_degree::<TestAirNoMultiplication<INT_LIMBS>>();
 
     let mut prover_transcript = KeccakTranscript::new();
-    let mut verifier_transcript = prover_transcript.clone();
 
-    let prover_field_cfg = prover_transcript.get_random_field_cfg::<F, _, MillerRabin>();
-    let _ = verifier_transcript.get_random_field_cfg::<F, _, MillerRabin>();
+    let prover_field_cfg = prover_transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
 
-    let num_constraints = count_constraints::<BinaryPoly<DEGREE_PLUS_ONE>, Air>();
-    let max_degree = count_max_degree::<BinaryPoly<DEGREE_PLUS_ONE>, Air>();
+    let projected_trace = project_trace_coeffs::<F<FIELD_LIMBS>, _, Int<INT_LIMBS>, DEGREE_PLUS_ONE>(&[], &trace, &[], &prover_field_cfg);
 
-    let (ic_proof, ic_prover_state) =
-        IdealCheckProtocol::<F, DEGREE_PLUS_ONE>::prove_as_subprotocol::<Air>(
+    let projected_scalars =
+        project_scalars::<F<FIELD_LIMBS>, TestAirNoMultiplication<INT_LIMBS>>(|scalar| {
+            scalar
+                .iter()
+                .map(|coeff| F::from_with_cfg(*coeff, &prover_field_cfg))
+                .collect()
+        });
+
+    let (_ic_proof, ic_prover_state) =
+        IdealCheckProtocol::prove_as_subprotocol::<TestAirNoMultiplication<INT_LIMBS>>(
             &mut prover_transcript,
-            &trace,
+            &projected_trace,
+            &projected_scalars,
             num_constraints,
             num_vars,
             &prover_field_cfg,
         )
         .expect("IC Prover failed");
 
-    // let ic_check_subclaim =
-    //     IdealCheckProtocol::<F, DEGREE_PLUS_ONE>::verify_as_subprotocol::<Air, _, _>(
-    //         &mut verifier_transcript,
-    //         ic_proof,
-    //         num_constraints,
-    //         num_vars,
-    //         ideal_over_f_from_ref,
-    //         &prover_field_cfg,
-    //     )
-    //     .expect("IC Verifier failed");
+    let projecting_element: F<FIELD_LIMBS> =
+        prover_transcript.get_field_challenge(&prover_field_cfg);
 
-    // let verifier_transcript_after_ic = verifier_transcript.clone();
+    let projected_scalars_f =
+        project_scalars_to_field(projected_scalars, &projecting_element).unwrap();
+
+    let trace_f = project_trace_to_field::<_, DEGREE_PLUS_ONE>(&[], &projected_trace, &[], &projecting_element);
 
     group.bench_with_input(
         BenchmarkId::new("CPR Prover", &params),
-        &(
-            prover_transcript.clone(),
-            ic_prover_state.projected_scalars.clone(),
-        ),
-        |bench, (transcript, scalars)| {
+        &prover_transcript.clone(),
+        |bench, transcript| {
             bench.iter_batched(
-                || (scalars.clone(), transcript.clone()),
-                |(scalars, mut transcript)| {
-                    let _ = black_box(CombinedPolyResolver::<F>::prove_as_subprotocol::<_, Air>(
+                || transcript.clone(),
+                |mut transcript| {
+                    let _ = black_box(CombinedPolyResolver::<F<FIELD_LIMBS>>::prove_as_subprotocol::<TestAirNoMultiplication<INT_LIMBS>>(
                         &mut transcript,
-                        &ic_prover_state.trace_matrix,
+                        trace_f.clone(),
                         &ic_prover_state.evaluation_point,
-                        scalars.clone(),
+                        &projected_scalars_f,
                         num_constraints,
                         num_vars,
                         max_degree,
@@ -101,33 +109,6 @@ fn do_bench<F, Air, IdealOverFFromRef, IdealOverF>(
             );
         },
     );
-
-    // NOTE: Verifier benchmark and its setup call removed to get clean prover-only profiles.
-    // Restore from git when verifier profiling is needed.
-}
-
-pub fn bench_bin<const FIELD_LIMBS: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-    witness_size: usize,
-) {
-    do_bench::<MontyField<FIELD_LIMBS>, TestAirBinary, _, _>(
-        group,
-        &format!("Binary/LIMBS={FIELD_LIMBS}"),
-        witness_size,
-        |_ideal_over_ring| IdealOrZero::Zero,
-    )
-}
-
-pub fn bench_simple_mul<const FIELD_LIMBS: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-    witness_size: usize,
-) {
-    do_bench::<MontyField<FIELD_LIMBS>, TestUairSimpleMultiplication, _, _>(
-        group,
-        &format!("SimpleMul/LIMBS={FIELD_LIMBS}"),
-        witness_size,
-        |_ideal_over_ring| IdealOrZero::Zero,
-    )
 }
 
 pub fn combined_poly_resolver_benches(c: &mut Criterion) {
@@ -136,19 +117,16 @@ pub fn combined_poly_resolver_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Combined poly resolver benchmarks");
     group.plot_config(plot_config);
 
-    bench_bin::<3>(&mut group, 1 << 13);
-    bench_bin::<4>(&mut group, 1 << 13);
-    bench_bin::<3>(&mut group, 1 << 14);
-    bench_bin::<4>(&mut group, 1 << 14);
-    bench_bin::<3>(&mut group, 1 << 15);
-    bench_bin::<4>(&mut group, 1 << 15);
-    bench_bin::<3>(&mut group, 1 << 16);
-    bench_bin::<4>(&mut group, 1 << 16);
-    bench_bin::<3>(&mut group, 1 << 17);
-    bench_bin::<4>(&mut group, 1 << 17);
-
-    bench_simple_mul::<3>(&mut group, 1 << 2);
-    bench_simple_mul::<4>(&mut group, 1 << 2);
+    bench_no_mult::<5, 3>(&mut group, 1 << 13);
+    bench_no_mult::<5, 4>(&mut group, 1 << 13);
+    bench_no_mult::<5, 3>(&mut group, 1 << 14);
+    bench_no_mult::<5, 4>(&mut group, 1 << 14);
+    bench_no_mult::<5, 3>(&mut group, 1 << 15);
+    bench_no_mult::<5, 4>(&mut group, 1 << 15);
+    bench_no_mult::<5, 3>(&mut group, 1 << 16);
+    bench_no_mult::<5, 4>(&mut group, 1 << 16);
+    bench_no_mult::<5, 3>(&mut group, 1 << 17);
+    bench_no_mult::<5, 4>(&mut group, 1 << 17);
 
     group.finish();
 }

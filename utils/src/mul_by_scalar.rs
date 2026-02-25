@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use crate::from_ref::FromRef;
 use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int};
 use num_traits::{CheckedMul, ConstZero};
@@ -92,4 +94,26 @@ pub trait WideningMulByScalar<Lhs, Rhs>: Clone + Default + Send + Sync {
     type Output;
 
     fn mul_by_scalar_widen(lhs: &Lhs, rhs: &Rhs) -> Self::Output;
+}
+
+/// Widening scalar multiplication: widens the left operand into `Output` via
+/// [`FromRef`], then multiplies by the right operand in the wider type.
+///
+/// Use this as the `MT` parameter of [`IprsCode`] for scalar (non-polynomial)
+/// evaluation types such as `i64` or `Int<N>`.
+#[derive(Clone, Copy, Default)]
+pub struct ScalarWideningMulByScalar<Output>(PhantomData<Output>);
+
+impl<Lhs, Rhs, Output> WideningMulByScalar<Lhs, Rhs> for ScalarWideningMulByScalar<Output>
+where
+    Output: FromRef<Lhs> + for<'a> MulByScalar<&'a Rhs> + Clone + Default + Send + Sync,
+{
+    type Output = Output;
+
+    #[inline(always)]
+    fn mul_by_scalar_widen(lhs: &Lhs, rhs: &Rhs) -> Output {
+        Output::from_ref(lhs)
+            .mul_by_scalar::<false>(rhs)
+            .expect("ScalarWideningMulByScalar: overflow in widening multiplication")
+    }
 }

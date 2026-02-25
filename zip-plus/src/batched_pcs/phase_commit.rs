@@ -59,7 +59,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
                     "batched_commit",
                     pp.num_vars,
                     pp.num_rows,
-                    pp.linear_code.row_len(),
                     &[poly],
                     &[],
                 )?;
@@ -126,12 +125,12 @@ mod tests {
 
         // Single commit
         let (single_hint, single_comm) =
-            crate::pcs::structs::ZipPlus::<Zt, C>::commit(&pp, &poly).unwrap();
+            crate::pcs::structs::ZipPlus::<Zt, C>::commit_single(&pp, &poly).unwrap();
 
         // Roots should match when there's only one polynomial
         assert_eq!(batched_comm.root, single_comm.root);
         assert_eq!(batched_hint.cw_matrices.len(), 1);
-        assert_eq!(batched_hint.cw_matrices[0], single_hint.cw_matrix);
+        assert_eq!(batched_hint.cw_matrices[0], single_hint.cw_matrices[0]);
     }
 
     #[test]
@@ -146,9 +145,9 @@ mod tests {
             TestBatchedZip::commit(&pp, &[poly1.clone(), poly2.clone()]).unwrap();
 
         let (_, comm1) =
-            crate::pcs::structs::ZipPlus::<Zt, C>::commit(&pp, &poly1).unwrap();
+            crate::pcs::structs::ZipPlus::<Zt, C>::commit_single(&pp, &poly1).unwrap();
         let (_, comm2) =
-            crate::pcs::structs::ZipPlus::<Zt, C>::commit(&pp, &poly2).unwrap();
+            crate::pcs::structs::ZipPlus::<Zt, C>::commit_single(&pp, &poly2).unwrap();
 
         // The batched root should differ from either individual root
         assert_ne!(batched_comm.root, comm1.root);

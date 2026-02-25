@@ -1,14 +1,15 @@
-use crate::ideal_check::IdealCheckField;
 use crypto_primitives::PrimeField;
+use std::collections::HashMap;
+
 use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::collections::HashMap;
+
 use zinc_poly::{
     mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero},
-    univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF},
+    univariate::dynamic::over_field::DynamicPolynomialF,
 };
-use zinc_uair::{ConstraintBuilder, Uair, ideal::ImpossibleIdeal};
+use zinc_uair::{ConstraintBuilder, TraceRow, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::{cfg_into_iter, from_ref::FromRef};
 
 /// Given a UAIR `U` and a trace `trace` this function
@@ -16,14 +17,15 @@ use zinc_utils::{cfg_into_iter, from_ref::FromRef};
 /// Since each coefficient is also a univariate polynomial
 /// we split the resulting MLE into coefficient MLEs.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn compute_combined_polynomials<F: IdealCheckField, U, const DEGREE_PLUS_ONE: usize>(
+pub fn compute_combined_polynomials<F, U>(
     trace_matrix: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
-    projected_scalars: &HashMap<BinaryPoly<DEGREE_PLUS_ONE>, DynamicPolynomialF<F>>,
+    projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
     num_constraints: usize,
     field_cfg: &F::Config,
 ) -> Vec<Vec<DenseMultilinearExtension<F::Inner>>>
 where
-    U: Uair<BinaryPoly<DEGREE_PLUS_ONE>>,
+    F: PrimeField,
+    U: Uair,
 {
     let field_zero = F::zero_with_cfg(field_cfg);
 
@@ -42,7 +44,7 @@ where
                     .map(|column| column[row_idx + 1].clone())
                     .collect_vec();
 
-                combine_rows_and_get_max_degree::<F, U, _>(
+                combine_rows_and_get_max_degree::<F, U>(
                     &up,
                     &down,
                     num_constraints,
@@ -80,19 +82,19 @@ where
 /// and compute the maximum degree of resulting polynomials
 /// to pad the resulting vector of MLEs accordingly.
 #[allow(clippy::arithmetic_side_effects)]
-fn combine_rows_and_get_max_degree<F, U, const DEGREE_PLUS_ONE: usize>(
+fn combine_rows_and_get_max_degree<F, U>(
     up: &[DynamicPolynomialF<F>],
     down: &[DynamicPolynomialF<F>],
     num_constraints: usize,
-    projected_scalars: &HashMap<BinaryPoly<DEGREE_PLUS_ONE>, DynamicPolynomialF<F>>,
+    projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
 ) -> (usize, Vec<DynamicPolynomialF<F>>)
 where
-    F: IdealCheckField,
-    U: Uair<BinaryPoly<DEGREE_PLUS_ONE>>,
+    F: PrimeField,
+    U: Uair,
 {
     let mut constraint_builder = CombinedPolyRowBuilder::new(num_constraints);
 
-    let project = |x: &BinaryPoly<DEGREE_PLUS_ONE>| {
+    let project = |x: &U::Scalar| {
         projected_scalars
             .get(x)
             .cloned()
@@ -101,8 +103,8 @@ where
 
     U::constrain_general(
         &mut constraint_builder,
-        up,
-        down,
+        TraceRow::from_slice_with_signature(up, &U::signature()),
+        TraceRow::from_slice_with_signature(down, &U::signature()),
         &project,
         |x, y| Some(project(y) * x),
         ImpossibleIdeal::from_ref,
@@ -123,7 +125,7 @@ where
 
 /// Turn the resulting slice of vectors of dynamic polynomials
 /// into a vector of vectors of coefficient MLEs.
-fn prepare_coefficient_mles<F: IdealCheckField>(
+fn prepare_coefficient_mles<F: PrimeField>(
     num_constraints: usize,
     max_degree: usize,
     max_degrees_and_combined_poly_rows: &[(usize, Vec<DynamicPolynomialF<F>>)],

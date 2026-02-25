@@ -54,32 +54,12 @@ impl<F: PrimeField> DynamicPolynomialF<F> {
         dynamic::trim(&mut self.coeffs, F::is_zero);
     }
 
-    #[allow(clippy::arithmetic_side_effects)]
-    pub fn evaluate_with_powers(&self, powers: &[F]) -> Result<F, EvaluationError> {
-        assert!(
-            powers.len() >= self.coeffs.len(),
-            "not enough precomputed powers: have {}, need {}",
-            powers.len(),
-            self.coeffs.len()
-        );
-
-        let cfg = match self.coeffs.first() {
-            Some(elem) => elem.cfg(),
-            None => {
-                return match powers.first() {
-                    Some(elem) => Ok(F::zero_with_cfg(elem.cfg())),
-                    None => Err(EvaluationError::EmptyPolynomial),
-                };
-            }
-        };
-
-        let zero = F::zero_with_cfg(cfg);
-        Ok(self
-            .coeffs
-            .iter()
-            .zip(powers)
-            .map(|(coeff, power)| coeff.clone() * power)
-            .fold(zero, |acc, term| acc + term))
+    pub fn constant_poly(a: F) -> Self {
+        if F::is_zero(&a) {
+            Self::default()
+        } else {
+            DynamicPolynomialF { coeffs: vec![a] }
+        }
     }
 }
 
@@ -302,6 +282,15 @@ impl<F: PrimeField> EvaluatablePolynomial<F, F> for DynamicPolynomialF<F> {
         }
 
         Ok(result)
+    }
+}
+
+impl<F: PrimeField> FromIterator<F> for DynamicPolynomialF<F> {
+    #[inline(always)]
+    fn from_iter<T: IntoIterator<Item = F>>(iter: T) -> Self {
+        Self {
+            coeffs: iter.into_iter().collect(),
+        }
     }
 }
 

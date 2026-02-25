@@ -1,5 +1,4 @@
 use crypto_primitives::PrimeField;
-use zinc_poly::mle::DenseMultilinearExtension;
 
 use crate::{combined_poly_resolver::CombinedPolyResolverError, sumcheck::SumcheckProof};
 
@@ -41,14 +40,7 @@ impl<F: PrimeField> Proof<F> {
     }
 }
 
-/// Expensive data computed in the course
-/// of the combined polynomial resolver subprotocol
-/// that is passed further to the next subprotocol.
 pub struct ProverState<F: PrimeField> {
-    /// The projected trace columns MLEs.
-    pub up: Vec<DenseMultilinearExtension<F::Inner>>,
-    /// The projected shifted trace columns MLEs.
-    pub down: Vec<DenseMultilinearExtension<F::Inner>>,
     /// The evaluation point yielded by the sumcheck
     /// subprotocol.
     pub evaluation_point: Vec<F>,

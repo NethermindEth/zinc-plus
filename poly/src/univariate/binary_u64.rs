@@ -1,9 +1,9 @@
 use crate::{
-    CoefficientProjectable, ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
+    ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
     univariate::{dense::DensePolynomial, prepare_projection},
 };
 use core::mem::MaybeUninit;
-use crypto_primitives::{FromWithConfig, PrimeField, Semiring, semiring::boolean::Boolean};
+use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
 use derive_more::{AsRef, Display};
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
@@ -31,10 +31,6 @@ impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
     #[inline(always)]
     pub const fn inner(&self) -> &u64 {
         &self.0
-    }
-
-    pub fn to_u64(&self) -> u64 {
-        self.0
     }
 }
 
@@ -372,6 +368,40 @@ impl<const DEGREE_PLUS_ONE: usize> From<&BinaryU64Poly<DEGREE_PLUS_ONE>>
     }
 }
 
+pub struct BinaryU64PolyIter<'a, const DEGREE_PLUS_ONE: usize> {
+    i: usize,
+    poly: &'a BinaryU64Poly<DEGREE_PLUS_ONE>,
+}
+
+impl<'a, const DEGREE_PLUS_ONE: usize> BinaryU64PolyIter<'a, DEGREE_PLUS_ONE> {
+    pub fn new(poly: &'a BinaryU64Poly<DEGREE_PLUS_ONE>) -> Self {
+        Self { i: 0, poly }
+    }
+}
+
+impl<'a, const DEGREE_PLUS_ONE: usize> Iterator for BinaryU64PolyIter<'a, DEGREE_PLUS_ONE> {
+    type Item = Boolean;
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.i < DEGREE_PLUS_ONE {
+            let i = self.i;
+
+            self.i += 1;
+
+            Some((!(self.poly.0 & (1 << i)).is_zero()).into())
+        } else {
+            None
+        }
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
+    pub fn iter(&self) -> BinaryU64PolyIter<'_, DEGREE_PLUS_ONE> {
+        BinaryU64PolyIter::new(self)
+    }
+}
+
 pub struct BinaryU64PolyInnerProduct<R, const DEGREE_PLUS_ONE: usize>(PhantomData<R>);
 
 impl<Rhs, Out, const DEGREE_PLUS_ONE: usize> InnerProduct<BinaryU64Poly<DEGREE_PLUS_ONE>, Rhs, Out>
@@ -420,22 +450,6 @@ where
         prepare_projection::<F, Self, _, DEGREE_PLUS_ONE>(sampled_value, |poly, i| {
             (poly.0 & (1 << i)) != 0
         })
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> CoefficientProjectable<Boolean, DEGREE_PLUS_ONE>
-    for BinaryU64Poly<DEGREE_PLUS_ONE>
-{
-    fn project_coefficients<F: FromWithConfig<Boolean> + 'static>(
-        &self,
-        projecting_element: &F,
-    ) -> DensePolynomial<F, DEGREE_PLUS_ONE> {
-        DensePolynomial {
-            coeffs: array::from_fn(|i| {
-                let coeff = (self.0 & (1 << i)) != 0;
-                F::from_with_cfg(coeff.into(), projecting_element.cfg())
-            }),
-        }
     }
 }
 
