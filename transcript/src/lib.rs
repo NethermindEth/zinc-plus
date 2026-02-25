@@ -93,12 +93,15 @@ impl Transcript for Blake3Transcript {
                     // Unfortunately, `rayon::par_bridge` does not preserve the order of the
                     // iterator, so we use this workaround to get a well-defined
                     // order.
-                    iter.chunks(num_threads * 10).into_iter().find_map(|chunk| {
-                        let chunk = chunk.collect_vec();
-                        chunk
-                            .into_par_iter()
-                            .find_first(|v| T::is_probably_prime(v))
-                    })
+                    iter.chunks(num_threads * 1_000)
+                        .into_iter()
+                        .find_map(|chunk| {
+                            let chunk = chunk.collect_vec();
+                            chunk
+                                .into_par_iter()
+                                .by_exponential_blocks()
+                                .find_first(|v| T::is_probably_prime(v))
+                        })
                 }
 
                 #[cfg(not(feature = "parallel"))]
