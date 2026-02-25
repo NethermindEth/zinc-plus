@@ -321,7 +321,7 @@ fn batched_verify_nrows<
 /// 2^11 = 2048       R4B32 D=2 (rate 1/4)   F65537       2048
 fn batched_pcs_pipeline_suite_bpoly31_1row(c: &mut Criterion) {
     let mut group = c.benchmark_group("Batched PCS Pipeline Suite BPoly31 1row");
-    group.sample_size(10);
+    group.sample_size(100);
 
     // ── Encode ───────────────────────────────────────────────────────
     batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>,  9>(&mut group, 1, BATCH_SIZE);
