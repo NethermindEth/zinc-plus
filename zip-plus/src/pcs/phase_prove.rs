@@ -8,6 +8,7 @@ use crate::{
     }, pcs_transcript::PcsTranscript
 };
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
+use itertools::Itertools;
 use num_traits::{ConstOne, ConstZero, Zero};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -21,6 +22,7 @@ use zinc_utils::{
     projectable_to_field::ProjectableToField,
 };
 
+// References main.pdf for the new Zip+ protocol
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     #[allow(clippy::arithmetic_side_effects)]
     pub fn prove<F, const CHECK_FOR_OVERFLOW: bool>(
@@ -42,7 +44,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let batch_size = polys.len();
         validate_input::<Zt, Lc, _>(
             "prove", pp.num_vars, batch_size,
-            &polys.iter().collect::<Vec<_>>(), &[point],
+            &polys.iter().collect_vec(), &[point],
         )?;
 
         let num_rows = pp.num_rows;
@@ -50,9 +52,10 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let mut transcript = PcsTranscript::new();
         let field_cfg = transcript.fs_transcript.get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
         
+        // TODO Lift q0, q1 back to int and take following dot products on ints instead of MBSInnerProduct in field (see comboned row) 
         // We prove evaluations over the field, so integers need to be mapped to field elements first
         let point = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect::<Vec<F>>();
-        let (q0, q1) = point_to_tensor(num_rows, &point, &field_cfg)?;
+        let (q_0, q_1) = point_to_tensor(num_rows, &point, &field_cfg)?;
 
         let degree_bound = Zt::Comb::DEGREE_BOUND;
         let polys_as_comb_r: Vec<Vec<Zt::CombR>> = polys.iter().map(|poly| {
@@ -62,34 +65,37 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 transcript.fs_transcript.get_challenges(degree_bound + 1)
             };
 
-            poly.evaluations.iter().map(|eval| Zt::EvalDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
+            poly.evaluations.iter().map(|eval| { Zt::EvalDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
                 eval,
                 &alphas,
                 Zt::CombR::ZERO
-            )).collect()
-        }).collect::<Result<_, ZipError>>()?;
+            ).map_err(ZipError::from)
+            }).collect()
+        }).try_collect()?;
         
         // TODO. b_per_poly can be fused with for loop below. Compute b_i, write to transcript and compute eval_i
         let zero_f = F::zero_with_cfg(&field_cfg);
         let b_per_poly: Vec<F> = polys_as_comb_r.iter().flat_map(|poly_comb_r| {
             (0..num_rows).map(|j| {
                 let row_f: Vec<F> = poly_comb_r[j*row_len..(j+1)*row_len].iter().map(|int| int.into_with_cfg(&field_cfg)).collect();
-                // b_j = <row_j, q1> (inner product in field)
+                // Compute b_j = <row_j, q1> (inner product in field)
+                // It is safe to use inner_product_unchecked because we're in a field.
                 MBSInnerProduct::inner_product::<UNCHECKED>(
                     &row_f, 
-                    &q1, 
+                    &q_1, 
                     zero_f.clone()
                 )
             })
-        }).collect::<Result<_, _>>()?;
+        }).try_collect()?;
 
         let mut evals = Vec::with_capacity(batch_size);
         for i in 0..batch_size {
             let b_i = &b_per_poly[i*num_rows..(i+1) * num_rows];
             transcript.write_field_elements(b_i)?;
-            // eval_i = <q_0, b_i> (inner product in field), <q_2, b_i> in paper
+            // Compute eval_i = <q_0, b_i> (inner product in field), <q_2, b_i> in paper
+            // It is safe to use inner_product_unchecked because we're in a field.
             let eval_i = MBSInnerProduct::inner_product::<UNCHECKED>(
-                &q0, 
+                &q_0, 
                 b_i, 
                 zero_f.clone()
             )?;
@@ -138,7 +144,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         Ok((evals, transcript.into()))
     }
 
-    //TODO check this since we optmised merkle by concatenating
     pub(super) fn open_merkle_trees_for_column(
         commit_hint: &ZipPlusHint<Zt::Cw>,
         column_idx: usize,
@@ -179,7 +184,8 @@ mod tests {
     };
     use crypto_bigint::U64;
     use crypto_primitives::{
-        IntoWithConfig, crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int,
+        IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
+        crypto_bigint_int::Int,
     };
     use num_traits::{ConstOne, Zero};
     use zinc_poly::mle::DenseMultilinearExtension;
@@ -301,15 +307,21 @@ mod tests {
         assert_eq!(evals[0], expected_f);
     }
 
+    fn make_batch_polys(num_vars: usize, batch_size: usize) -> Vec<DenseMultilinearExtension<Int<INT_LIMBS>>> {
+        let poly_size = 1 << num_vars;
+        (0..batch_size)
+            .map(|b| {
+                let base = (b * poly_size) as i32;
+                (base + 1..=base + poly_size as i32).map(Int::from).collect()
+            })
+            .collect()
+    }
+
     #[test]
     fn prove_succeeds_for_batch() {
         let num_vars = 4;
         let (pp, _) = setup_test_params(num_vars);
-
-        let polys: Vec<DenseMultilinearExtension<_>> = vec![
-            (1..=16).map(Int::from).collect(),
-            (17..=32).map(Int::from).collect(),
-        ];
+        let polys = make_batch_polys(num_vars, 2);
 
         let (hint, _) = TestZip::commit(&pp, &polys).unwrap();
         let point = test_point(num_vars);
@@ -319,17 +331,26 @@ mod tests {
         assert_eq!(evals.len(), 2);
     }
 
-    /// For TestZipTypes, each batched eval should equal the corresponding
-    /// poly(point) in F.
+    #[test]
+    fn prove_succeeds_for_batch_5() {
+        let num_vars = 4;
+        let (pp, _) = setup_test_params(num_vars);
+        let polys = make_batch_polys(num_vars, 5);
+
+        let (hint, _) = TestZip::commit(&pp, &polys).unwrap();
+        let point = test_point(num_vars);
+
+        let (evals, _) =
+            TestZip::prove::<F, CHECKED>(&pp, &polys, &point, &hint).unwrap();
+        assert_eq!(evals.len(), 5);
+    }
+
+    /// Each batched eval should equal the corresponding poly(point) in F.
     #[test]
     fn prove_returns_correct_evaluations_for_batch() {
         let num_vars = 4;
         let (pp, _) = setup_test_params(num_vars);
-
-        let polys: Vec<DenseMultilinearExtension<_>> = vec![
-            (1..=16).map(Int::from).collect(),
-            (17..=32).map(Int::from).collect(),
-        ];
+        let polys = make_batch_polys(num_vars, 3);
 
         let (hint, _) = TestZip::commit(&pp, &polys).unwrap();
         let point = test_point(num_vars);
@@ -350,5 +371,45 @@ mod tests {
             let expected_f: F = (&expected_int).into_with_cfg(&field_cfg);
             assert_eq!(evals[i], expected_f, "Eval mismatch for poly {i}");
         }
+    }
+
+    #[test]
+    fn prove_with_corrupted_codeword_for_batch() {
+        let num_vars = 4;
+        let (pp, _) = setup_test_params(num_vars);
+        let polys = make_batch_polys(num_vars, 2);
+
+        let (mut hint, _) = TestZip::commit(&pp, &polys).unwrap();
+
+        hint.cw_matrices[0].to_rows_slices_mut()[0][0] += Int::ONE;
+
+        let corrupted_tree = {
+            let all_rows: Vec<&[_]> = hint.cw_matrices.iter()
+                .flat_map(|m| m.as_rows())
+                .collect();
+            MerkleTree::new(&all_rows)
+        };
+        let corrupted_hint = ZipPlusHint::new(hint.cw_matrices, corrupted_tree);
+
+        let point = test_point(num_vars);
+        let result =
+            TestZip::prove::<F, CHECKED>(&pp, &polys, &point, &corrupted_hint);
+        assert!(result.is_ok(), "Prover should not reject corrupted codeword");
+    }
+
+    #[test]
+    fn prove_rejects_oversized_polynomial_in_batch() {
+        let num_vars = 4;
+        let (pp, _) = setup_test_params(num_vars);
+        let oversized: DenseMultilinearExtension<_> =
+            (0..1 << 5).map(Int::from).collect();
+        let normal: DenseMultilinearExtension<_> =
+            (1..=16).map(Int::from).collect();
+        let polys = vec![normal, oversized];
+
+        let (hint, _) = TestZip::commit(&pp, &make_batch_polys(num_vars, 2)).unwrap();
+        let point = test_point(num_vars);
+        let result = TestZip::prove::<F, CHECKED>(&pp, &polys, &point, &hint);
+        assert!(result.is_err());
     }
 }
