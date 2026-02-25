@@ -40,7 +40,7 @@ proptest = { workspace = true }
 workspace = true
 
 [features]
-parallel = ["dep:rayon", "zinc-utils/parallel", "zinc-poly/parallel", "ark-ff/parallel", "ark-poly/parallel"]
+parallel = ["dep:rayon", "zinc-utils/parallel", "zinc-poly/parallel", "zinc-transcript/parallel", "ark-ff/parallel", "ark-poly/parallel"]
 simd = ["zinc-poly/simd"]
 unchecked = []
 
