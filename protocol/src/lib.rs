@@ -17,6 +17,7 @@
 use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig, PrimeField};
 use num_traits::Zero;
 use thiserror::Error;
+use zip_plus::merkle::MtHash;
 use zinc_piop::{
     combined_poly_resolver::{self, CombinedPolyResolver, CombinedPolyResolverError},
     ideal_check::{self, IdealCheckProtocol},
@@ -31,7 +32,10 @@ use zinc_poly::{
     },
 };
 use zinc_primality::{MillerRabin, PrimalityTest};
-use zinc_transcript::traits::{ConstTranscribable, Transcript};
+use zinc_transcript::{
+    KeccakTranscript,
+    traits::{ConstTranscribable, Transcript},
+};
 use zinc_uair::{
     Uair,
     constraint_counter::count_constraints,
@@ -50,6 +54,7 @@ use zinc_utils::{from_ref::FromRef, inner_transparent_field::InnerTransparentFie
 /// - `resolver`: sumcheck proof + trace evaluation claims (Step 4).
 #[derive(Clone, Debug)]
 pub struct Proof<F: PrimeField> {
+    pub commitments: Vec<MtHash>,
     pub ideal_check: ideal_check::Proof<F>,
     pub resolver: combined_poly_resolver::Proof<F>,
 }
@@ -110,13 +115,13 @@ pub enum ProtocolError<F: PrimeField> {
 ///
 /// Returns the proof and auxiliary data (for subclaim resolution without PCS).
 #[allow(clippy::too_many_arguments)]
-pub fn prove<U, F, FMod, PolyCoeff, IntType, ProjectScalar, const D: usize>(
-    transcript: &mut impl Transcript,
+pub fn prove<U, F, FMod, PolyCoeff, IntType, ProjectScalar, CommitFn, const D: usize>(
     binary_poly_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
     arbitrary_poly_trace: &[DenseMultilinearExtension<DensePolynomial<PolyCoeff, D>>],
     int_trace: &[DenseMultilinearExtension<IntType>],
     num_vars: usize,
     project_scalar: ProjectScalar,
+    commit_traces: CommitFn,
 ) -> Result<(Proof<F>, ProverAux<F>), ProtocolError<F>>
 where
     F: InnerTransparentField
@@ -133,8 +138,25 @@ where
     IntType: Clone + Send + Sync,
     U: Uair + 'static,
     ProjectScalar: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
+    CommitFn: FnOnce(
+        &[DenseMultilinearExtension<BinaryPoly<D>>],
+        &[DenseMultilinearExtension<DensePolynomial<PolyCoeff, D>>],
+        &[DenseMultilinearExtension<IntType>],
+    ) -> Vec<MtHash>,
     MillerRabin: PrimalityTest<FMod>,
 {
+    // ── Step 0: Commit to witness traces ────────────────────────
+    // Create a fresh Fiat-Shamir transcript. The prover commits to
+    // all witness columns via Zip+ PCS, then absorbs the Merkle roots
+    // into the transcript before any challenges are derived.
+    let mut transcript = KeccakTranscript::new();
+    let commitments = commit_traces(binary_poly_trace, arbitrary_poly_trace, int_trace);
+    for comm in &commitments {
+        transcript.absorb_slice(&comm);
+    }
+    // TODO: We have to absorb public inputs as well once we add them to the protocol,
+    //       or this will open up a soundness vulnerability!
+
     // ── Step 1: Prime projection (φ_q: Q[X] → F_q[X]) ──────────
     // Sample a random Ω(λ)-bit prime q from the Fiat-Shamir transcript.
     let field_cfg = transcript.get_random_field_cfg::<F, FMod, MillerRabin>();
@@ -157,7 +179,7 @@ where
     // computes MLE evaluations of the combined constraint polynomials
     // at r and sends them. The verifier checks each e_i ∈ p_i'.
     let (ic_proof, ic_prover_state) = IdealCheckProtocol::prove_as_subprotocol::<U>(
-        transcript,
+        &mut transcript,
         &projected_trace,
         &projected_scalars_fx,
         num_constraints,
@@ -188,7 +210,7 @@ where
     // Prove the claim ψ_{q,a}(Σ^{r,e})(ψ_{q,a}(y), ψ_{q,a}(f_0)) = 0
     // in F_q via a sumcheck protocol.
     let (cpr_proof, _) = CombinedPolyResolver::prove_as_subprotocol::<U>(
-        transcript,
+        &mut transcript,
         projected_trace_f.clone(),
         &ic_prover_state.evaluation_point,
         &projected_scalars_f,
@@ -200,6 +222,7 @@ where
 
     Ok((
         Proof {
+            commitments,
             ideal_check: ic_proof,
             resolver: cpr_proof,
         },
@@ -218,7 +241,6 @@ where
 /// evaluation claims to be resolved by the PCS (or directly for testing).
 #[allow(clippy::too_many_arguments)]
 pub fn verify<U, F, FMod, IdealOverF, ProjectScalar, ProjectIdeal, const D: usize>(
-    transcript: &mut impl Transcript,
     proof: Proof<F>,
     num_vars: usize,
     project_scalar: ProjectScalar,
@@ -234,6 +256,14 @@ where
     ProjectIdeal: Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
     MillerRabin: PrimalityTest<FMod>,
 {
+    // ── Step 0: Reconstruct transcript from commitments ─────────
+    // The verifier creates the same fresh transcript and absorbs the
+    // commitments so that all subsequent challenges match the prover's.
+    let mut transcript = KeccakTranscript::new();
+    for comm in &proof.commitments {
+        transcript.absorb_slice(&comm);
+    }
+
     // ── Step 1: Prime projection ────────────────────────────────
     // Both parties derive the same random prime from the transcript.
     let field_cfg = transcript.get_random_field_cfg::<F, FMod, MillerRabin>();
@@ -244,7 +274,7 @@ where
     // Verifier checks that the prover's MLE evaluations belong to the
     // corresponding ideals.
     let ic_subclaim = IdealCheckProtocol::verify_as_subprotocol::<U, IdealOverF, _>(
-        transcript,
+        &mut transcript,
         proof.ideal_check,
         num_constraints,
         num_vars,
@@ -267,7 +297,7 @@ where
 
     // ── Step 4: Verify finite-field PIOP ────────────────────────
     let cpr_subclaim = CombinedPolyResolver::verify_as_subprotocol::<U>(
-        transcript,
+        &mut transcript,
         proof.resolver,
         num_constraints,
         num_vars,
@@ -359,7 +389,6 @@ mod tests {
         BigLinearUair, BinaryDecompositionUair, GenerateMultiTypeWitness,
         GenerateSingleTypeWitness, TestAirNoMultiplication, TestUairSimpleMultiplication,
     };
-    use zinc_transcript::KeccakTranscript;
 
     const INT_LIMBS: usize = 5;
     const FIELD_LIMBS: usize = 4;
@@ -380,6 +409,11 @@ mod tests {
             .collect()
     }
 
+    /// No-op commit closure for tests without real Zip+ PCS.
+    fn no_commit<B, P, I>(_: &[B], _: &[P], _: &[I]) -> Vec<MtHash> {
+        vec![]
+    }
+
     /// End-to-end test: TestAirNoMultiplication.
     ///
     /// UAIR constraint: a + b - c ∈ (X - 2)
@@ -392,10 +426,6 @@ mod tests {
         // Generate a valid witness satisfying the UAIR constraints.
         let trace = TestAirNoMultiplication::<INT_LIMBS>::generate_witness(num_vars, &mut rng);
 
-        // Prover and verifier start with identical transcripts (Fiat-Shamir).
-        let mut prover_transcript = KeccakTranscript::new();
-        let mut verifier_transcript = prover_transcript.clone();
-
         // ── Prover ──
         let (proof, prover_aux) = prove::<
             TestAirNoMultiplication<INT_LIMBS>,
@@ -404,14 +434,15 @@ mod tests {
             Int<INT_LIMBS>,
             Int<INT_LIMBS>,
             _,
+            _,
             DEGREE_PLUS_ONE,
         >(
-            &mut prover_transcript,
             &[],
             &trace,
             &[],
             num_vars,
             project_scalar_fn,
+            no_commit,
         )
         .expect("Prover failed");
 
@@ -425,7 +456,6 @@ mod tests {
             _,
             DEGREE_PLUS_ONE,
         >(
-            &mut verifier_transcript,
             proof,
             num_vars,
             project_scalar_fn,
@@ -456,9 +486,6 @@ mod tests {
         let trace =
             TestUairSimpleMultiplication::<Int<INT_LIMBS>>::generate_witness(num_vars, &mut rng);
 
-        let mut prover_transcript = KeccakTranscript::new();
-        let mut verifier_transcript = prover_transcript.clone();
-
         // ── Prover ──
         let (proof, prover_aux) = prove::<
             TestUairSimpleMultiplication<Int<INT_LIMBS>>,
@@ -467,14 +494,15 @@ mod tests {
             Int<INT_LIMBS>,
             Int<INT_LIMBS>,
             _,
+            _,
             DEGREE_PLUS_ONE,
         >(
-            &mut prover_transcript,
             &[],
             &trace,
             &[],
             num_vars,
             project_scalar_fn,
+            no_commit,
         )
         .expect("Prover failed");
 
@@ -488,7 +516,6 @@ mod tests {
             _,
             DEGREE_PLUS_ONE,
         >(
-            &mut verifier_transcript,
             proof,
             num_vars,
             project_scalar_fn,
@@ -517,9 +544,6 @@ mod tests {
         let (binary_trace, arb_trace, int_trace) =
             BinaryDecompositionUair::generate_witness(num_vars, &mut rng);
 
-        let mut prover_transcript = KeccakTranscript::new();
-        let mut verifier_transcript = prover_transcript.clone();
-
         // BinaryDecompositionUair uses u32 coefficients.
         let project_scalar_u32 = |scalar: &DensePolynomial<u32, 32>,
                                   field_cfg: &<F as PrimeField>::Config|
@@ -531,21 +555,28 @@ mod tests {
         };
 
         // ── Prover ──
-        let (proof, prover_aux) =
-            prove::<BinaryDecompositionUair, F, <F as Field>::Inner, u32, u32, _, DEGREE_PLUS_ONE>(
-                &mut prover_transcript,
-                &binary_trace,
-                &arb_trace,
-                &int_trace,
-                num_vars,
-                project_scalar_u32,
-            )
-            .expect("Prover failed");
+        let (proof, prover_aux) = prove::<
+            BinaryDecompositionUair,
+            F,
+            <F as Field>::Inner,
+            u32,
+            u32,
+            _,
+            _,
+            DEGREE_PLUS_ONE,
+        >(
+            &binary_trace,
+            &arb_trace,
+            &int_trace,
+            num_vars,
+            project_scalar_u32,
+            no_commit,
+        )
+        .expect("Prover failed");
 
         // ── Verifier ──
         let subclaim =
             verify::<BinaryDecompositionUair, F, <F as Field>::Inner, _, _, _, DEGREE_PLUS_ONE>(
-                &mut verifier_transcript,
                 proof,
                 num_vars,
                 project_scalar_u32,
@@ -577,9 +608,6 @@ mod tests {
         let (binary_trace, arb_trace, int_trace) =
             BigLinearUair::generate_witness(num_vars, &mut rng);
 
-        let mut prover_transcript = KeccakTranscript::new();
-        let mut verifier_transcript = prover_transcript.clone();
-
         let project_scalar_u32 = |scalar: &DensePolynomial<u32, 32>,
                                   field_cfg: &<F as PrimeField>::Config|
          -> DynamicPolynomialF<F> {
@@ -590,20 +618,27 @@ mod tests {
         };
 
         // ── Prover ──
-        let (proof, prover_aux) =
-            prove::<BigLinearUair, F, <F as Field>::Inner, u32, u32, _, DEGREE_PLUS_ONE>(
-                &mut prover_transcript,
-                &binary_trace,
-                &arb_trace,
-                &int_trace,
-                num_vars,
-                project_scalar_u32,
-            )
-            .expect("Prover failed");
+        let (proof, prover_aux) = prove::<
+            BigLinearUair,
+            F,
+            <F as Field>::Inner,
+            u32,
+            u32,
+            _,
+            _,
+            DEGREE_PLUS_ONE,
+        >(
+            &binary_trace,
+            &arb_trace,
+            &int_trace,
+            num_vars,
+            project_scalar_u32,
+            no_commit,
+        )
+        .expect("Prover failed");
 
         // ── Verifier ──
         let subclaim = verify::<BigLinearUair, F, <F as Field>::Inner, _, _, _, DEGREE_PLUS_ONE>(
-            &mut verifier_transcript,
             proof,
             num_vars,
             project_scalar_u32,

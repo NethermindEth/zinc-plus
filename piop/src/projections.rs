@@ -15,7 +15,7 @@ use zinc_utils::{
     cfg_extend, cfg_iter, from_ref::FromRef, projectable_to_field::ProjectableToField,
 };
 
-/// Project a multi-typed trace onto F[X].
+/// Project a multi-typed trace onto `F[X]`.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn project_trace_coeffs<F, PolyCoeff, Int, const DEGREE_PLUS_ONE: usize>(
     binary_poly_trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
