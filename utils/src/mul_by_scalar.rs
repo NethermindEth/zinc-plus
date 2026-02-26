@@ -93,3 +93,16 @@ pub trait WideningMulByScalar<Lhs, Rhs>: Clone + Default + Send + Sync {
 
     fn mul_by_scalar_widen(lhs: &Lhs, rhs: &Rhs) -> Self::Output;
 }
+
+#[derive(Copy, Clone, Default)]
+pub struct PrimtiveWideningMulByScalar;
+
+impl WideningMulByScalar<i64, i64>
+for PrimtiveWideningMulByScalar
+{
+    type Output = i128;
+
+    fn mul_by_scalar_widen(lhs: &i64, rhs: &i64) -> Self::Output {
+        todo!()
+    }
+}

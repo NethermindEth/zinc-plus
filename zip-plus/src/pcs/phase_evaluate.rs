@@ -41,6 +41,38 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
         Zt::Eval: ProjectableToField<F>,
     {
+        // We prove evaluations over the field, so integers need to be mapped to field
+        // elements first
+        let point = point
+            .iter()
+            .map(|v| v.into_with_cfg(field_cfg))
+            .collect_vec();
+        Self::evaluate_f::<F, CHECK_FOR_OVERFLOW>(
+            transcript,
+            pp,
+            poly,
+            &point,
+            field_cfg,
+            projecting_element,
+        )
+    }
+
+    pub fn evaluate_f<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsProverTranscript,
+        pp: &ZipPlusParams<Zt, Lc>,
+        poly: &DenseMultilinearExtension<Zt::Eval>,
+        point: &[F],
+        field_cfg: &F::Config,
+        projecting_element: &Zt::Chal,
+    ) -> Result<F, ZipError>
+    where
+        F: PrimeField
+            + for<'a> FromWithConfig<&'a Zt::Chal>
+            + for<'a> MulByScalar<&'a F>
+            + FromRef<F>,
+        F::Inner: FromRef<Zt::Fmod> + Transcribable,
+        Zt::Eval: ProjectableToField<F>,
+    {
         validate_input::<Zt, Lc, _>("evaluate", pp.num_vars, &[poly], &[point])?;
 
         let projecting_element: F = projecting_element.into_with_cfg(field_cfg);
@@ -48,12 +80,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let num_rows = pp.num_rows;
         let row_len = pp.linear_code.row_len();
 
-        // We prove evaluations over the field, so integers need to be mapped to field
-        // elements first
-        let point = point
-            .iter()
-            .map(|v| v.into_with_cfg(field_cfg))
-            .collect_vec();
         let (q_0, q_1) = point_to_tensor(num_rows, &point, field_cfg)?;
 
         let project = Zt::Eval::prepare_projection(&projecting_element);

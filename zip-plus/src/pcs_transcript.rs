@@ -65,6 +65,22 @@ impl PcsProverTranscript {
         Ok(result)
     }
 
+    pub fn new_from_commitments<'a>(
+        comms: impl Iterator<Item = &'a ZipPlusCommitment>,
+    ) -> Result<Self, ZipError> {
+        // TODO: Do we need to take a slice of commitments instead?
+        let mut result = Self {
+            fs_transcript: KeccakTranscript::default(),
+            stream: Cursor::default(),
+        };
+
+        for comm in comms {
+            result.fs_transcript.absorb_slice(&comm.root);
+        }
+
+        Ok(result)
+    }
+
     pub fn reserve_capacity(&mut self, capacity: usize) {
         self.stream.get_mut().reserve(capacity)
     }

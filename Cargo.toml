@@ -29,6 +29,8 @@ zinc-transcript = { path = "transcript/" }
 zinc-uair = { path = "uair/" }
 zinc-utils = { path = "utils/" }
 zinc-poly = { path = "poly/" }
+zinc-piop = { path = "piop/" }
+zip-plus = { path = "zip-plus/" }
 
 [workspace.lints.rust]
 missing_docs = "allow"  # TODO(alex): replace with "deny" once code has been more-or-less stabilized

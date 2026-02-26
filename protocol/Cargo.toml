@@ -12,8 +12,8 @@ crypto-primitives = { workspace = true }
 itertools = { workspace = true }
 num-traits = { workspace = true }
 thiserror = { workspace = true }
-zinc-piop = { path = "../piop" }
-zip-plus = { path = "../zip-plus" }
+zip-plus = { workspace = true }
+zinc-piop = { workspace = true }
 zinc-poly = { workspace = true }
 zinc-primality = { workspace = true }
 zinc-transcript = { workspace = true }
@@ -24,6 +24,7 @@ zinc-utils = { workspace = true }
 crypto-bigint = { workspace = true }
 rand = { workspace = true }
 zinc-test-uair = { workspace = true }
+zip-plus = { workspace = true, features = ["test"] }
 
 [lints]
 workspace = true

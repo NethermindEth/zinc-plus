@@ -38,7 +38,7 @@ use zinc_utils::{
     projectable_to_field::ProjectableToField,
 };
 
-const REPETITION_FACTOR: usize = 4;
+pub const REPETITION_FACTOR: usize = 4;
 
 #[derive(Clone, Copy)]
 pub struct TestRaaConfig;
@@ -64,13 +64,13 @@ impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N
     type ArrCombRDotChal = MBSInnerProduct;
 }
 
-pub struct TestPolyZipTypes<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> {}
+pub struct TestBinPolyZipTypes<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> {}
 impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
-    for TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>
+    for TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>
 {
     const NUM_COLUMN_OPENINGS: usize = 200;
     type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
-    type Cw = DensePolynomial<i32, DEGREE_PLUS_ONE>;
+    type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
     type Fmod = Uint<K>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
@@ -78,6 +78,36 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
     type CombR = Int<M>;
     type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
     type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, DEGREE_PLUS_ONE>;
+    type CombDotChal = DensePolyInnerProduct<
+        Self::CombR,
+        Self::Chal,
+        Self::CombR,
+        MBSInnerProduct,
+        DEGREE_PLUS_ONE,
+    >;
+    type ArrCombRDotChal = MBSInnerProduct;
+}
+
+pub struct TestArbPolyZipTypes<
+    const N: usize,
+    const K: usize,
+    const M: usize,
+    const DEGREE_PLUS_ONE: usize,
+> {}
+impl<const N: usize, const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
+    for TestArbPolyZipTypes<N, K, M, DEGREE_PLUS_ONE>
+{
+    const NUM_COLUMN_OPENINGS: usize = 200;
+    type Eval = DensePolynomial<Int<N>, DEGREE_PLUS_ONE>;
+    type Cw = DensePolynomial<Int<K>, DEGREE_PLUS_ONE>;
+    type Fmod = Uint<K>;
+    type PrimeTest = MillerRabin;
+    type Chal = i128;
+    type Pt = i128;
+    type CombR = Int<M>;
+    type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
+    type EvalDotChal =
+        DensePolyInnerProduct<Int<N>, Self::Chal, Self::CombR, MBSInnerProduct, DEGREE_PLUS_ONE>;
     type CombDotChal = DensePolyInnerProduct<
         Self::CombR,
         Self::Chal,
@@ -108,10 +138,10 @@ pub fn setup_poly_test_params<const K: usize, const M: usize, const DEGREE_PLUS_
     num_vars: usize,
 ) -> (
     ZipPlusParams<
-        TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>,
-        RaaCode<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>, TestRaaConfig, REPETITION_FACTOR>,
+        TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>,
+        RaaCode<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>, TestRaaConfig, REPETITION_FACTOR>,
     >,
-    DenseMultilinearExtension<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Eval>,
+    DenseMultilinearExtension<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Eval>,
 ) {
     setup_test_params_inner(num_vars, |poly_size| {
         let eval_coeffs: Vec<_> = (1..=(poly_size * (DEGREE_PLUS_ONE - 1)) as i8)
@@ -181,8 +211,8 @@ pub fn setup_full_protocol_poly<
     num_vars: usize,
 ) -> (
     ZipPlusParams<
-        TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>,
-        RaaCode<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>, TestRaaConfig, REPETITION_FACTOR>,
+        TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>,
+        RaaCode<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>, TestRaaConfig, REPETITION_FACTOR>,
     >,
     ZipPlusCommitment,
     Vec<F>,
@@ -191,12 +221,13 @@ pub fn setup_full_protocol_poly<
 )
 where
     F: PrimeField
-        + for<'a> FromWithConfig<&'a <TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Chal>
-        + for<'a> FromWithConfig<&'a <TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Chal>
+        + for<'a> FromWithConfig<&'a <TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::CombR>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>
         + 'static,
-    F::Inner: FromRef<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod> + Transcribable,
+    F::Inner:
+        FromRef<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod> + Transcribable,
 {
     setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_poly_test_params, || {
         (0..num_vars).map(|i| i as i128 + 2).collect()
