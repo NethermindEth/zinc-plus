@@ -1,7 +1,7 @@
 //! Minimal batched Zip+ PCS benchmarks for BPoly<31> and BPoly<15> with poly sizes 2^9, 2^10, 2^11.
 //!
-//! Measures Encode, Merkle, Commit, Test, and Verify for batches of 14 polynomials
-//! using a single shared Merkle tree with num_rows=1.
+//! Measures Encode, Merkle, Commit, Test, and Verify for batches of 14 (or 7)
+//! polynomials using a single shared Merkle tree with num_rows=1.
 
 #![allow(non_local_definitions)]
 #![allow(clippy::eq_op, clippy::arithmetic_side_effects, clippy::unwrap_used)]
@@ -108,7 +108,7 @@ type IprsBPolyR4B32<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const 
 // ---------- Batched benchmark helpers ----------------------------------------
 
 const BATCH_SIZE: usize = 14;
-const BATCH_SIZE_7: usize = 14;
+const BATCH_SIZE_7: usize = 7;
 
 fn batched_encode_nrows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
