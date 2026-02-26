@@ -17,7 +17,7 @@ use rayon::prelude::*;
 use zinc_poly::{Polynomial, mle::DenseMultilinearExtension};
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
-    UNCHECKED, cfg_iter_mut,
+    UNCHECKED, cfg_chunks, cfg_iter, cfg_iter_mut,
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProduct},
     mul_by_scalar::MulByScalar,
@@ -76,8 +76,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                     transcript.fs_transcript.get_challenges(degree_bound + 1)
                 };
 
-                poly.evaluations
-                    .iter()
+                cfg_iter!(poly.evaluations)
                     .map(|eval| {
                         Zt::EvalDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
                             eval,
@@ -94,17 +93,17 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let b = polys_as_comb_r.iter().try_fold(
             vec![zero_f.clone(); num_rows],
             |mut acc, poly_comb_r| -> Result<_, ZipError> {
-                for j in 0..num_rows {
-                    let row_f: Vec<F> = poly_comb_r[j * row_len..(j + 1) * row_len]
-                        .iter()
-                        .map(|int| int.into_with_cfg(&field_cfg))
-                        .collect();
-                    // Compute <row_j, q1> for each poly and sum contribution to (inner product in
-                    // field) It is safe to use inner_product_unchecked because
-                    // we're in a field.
-                    acc[j] +=
-                        MBSInnerProduct::inner_product::<UNCHECKED>(&row_f, &q_1, zero_f.clone())?;
-                }
+                let row_dots: Vec<F> = cfg_chunks!(poly_comb_r, row_len)
+                    .map(|row| {
+                        let row_f: Vec<F> = row
+                            .iter()
+                            .map(|int| int.into_with_cfg(&field_cfg))
+                            .collect();
+                        MBSInnerProduct::inner_product::<UNCHECKED>(&row_f, &q_1, zero_f.clone())
+                    })
+                    .collect::<Result<_, _>>()?;
+
+                acc.iter_mut().zip(row_dots).for_each(|(a, d)| *a += d);
 
                 Ok(acc)
             },
