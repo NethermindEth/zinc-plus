@@ -22,7 +22,7 @@ use zinc_utils::{from_ref::FromRef, named::Named, projectable_to_field::Projecta
 use zip_plus::{
     code::LinearCode,
     merkle::MerkleTree,
-    pcs::structs::{ZipPlus, ZipPlusCommitment, ZipTypes},
+    pcs::structs::{ZipPlus, ZipTypes},
     pcs_transcript::PcsProverTranscript,
 };
 
@@ -354,17 +354,19 @@ pub fn verify<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool,
         |b| {
             b.iter_custom(|iters| {
                 let mut total_duration = Duration::ZERO;
-                let mut buf = vec![0; ZipPlusCommitment::NUM_BYTES];
                 for _ in 0..iters {
                     let mut transcript = transcript.clone();
 
                     let timer = Instant::now();
 
-                    // Initializing the verification transcript with the commitment
-                    // is (arguably) verifier's responsibility and should be included in the
-                    // verification time.
-                    ConstTranscribable::write_transcription_bytes(&commitment, &mut buf);
-                    transcript.fs_transcript.absorb_slice(&buf);
+                    // Initializing the verification transcript with the commitment and getting
+                    // field config and projecting element are (arguably) verifier's responsibility
+                    // and should be included in the verification time.
+                    transcript.fs_transcript.absorb_slice(&commitment.root);
+                    let field_cfg = transcript
+                        .fs_transcript
+                        .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+                    let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
 
                     ZipPlus::verify::<_, CHECK_FOR_OVERFLOWS>(
                         &mut transcript,

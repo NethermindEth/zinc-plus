@@ -29,7 +29,7 @@ use zinc_poly::{
     },
 };
 use zinc_primality::MillerRabin;
-use zinc_transcript::traits::{ConstTranscribable, Transcribable, Transcript};
+use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
     CHECKED,
     from_ref::FromRef,
@@ -268,9 +268,7 @@ where
 
     let mut transcript = transcript.into_verification_transcript();
 
-    let mut buf = vec![0; ZipPlusCommitment::NUM_BYTES];
-    ConstTranscribable::write_transcription_bytes(&comm, &mut buf);
-    transcript.fs_transcript.absorb_slice(&buf);
+    transcript.fs_transcript.absorb_slice(&comm.root.0);
 
     (pp, comm, point_f, eval_f, transcript)
 }

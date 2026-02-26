@@ -267,11 +267,29 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 )]
 mod tests {
     use crate::{
-        code::{raa::RaaCode, raa_sign_flip::RaaSignFlippingCode},
-        pcs::{structs::ZipPlus, test_utils::*},
+        ZipError,
+        code::{LinearCode, raa::RaaCode, raa_sign_flip::RaaSignFlippingCode},
+        merkle::MerkleTree,
+        pcs::{
+            structs::{ZipPlus, ZipPlusHint, ZipTypes},
+            test_utils::*,
+        },
+        pcs_transcript::{PcsProverTranscript, PcsVerifierTranscript},
     };
     use crypto_bigint::U64;
-    use crypto_primitives::crypto_bigint_boxed_monty::BoxedMontyField;
+    use crypto_primitives::{
+        Field, FromWithConfig, IntoWithConfig, PrimeField,
+        crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int,
+    };
+    use itertools::Itertools;
+    use num_traits::{ConstOne, ConstZero, Zero};
+    use rand::{Rng, prelude::ThreadRng};
+    use std::mem::size_of;
+    use zinc_poly::{
+        mle::{DenseMultilinearExtension, MultilinearExtensionRand},
+        univariate::binary::BinaryPoly,
+    };
+    use zinc_transcript::traits::{Transcribable, Transcript};
     use zinc_utils::CHECKED;
 
     const INT_LIMBS: usize = U64::LIMBS;
@@ -332,37 +350,43 @@ mod tests {
         }
     }
 
-    /*
     #[test]
     fn verification_fails_with_incorrect_evaluation() {
         let num_vars = 4;
 
         {
-            let (pp, comm, point_f, eval_f, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
-            let cfg = eval_f.cfg().clone();
+            let (pp, comm, point_f, eval_f, mut transcript) =
+                setup_full_protocol::<F, N, K, M>(num_vars);
+            let (field_cfg, projecting_element) =
+                get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
 
             let result = TestZip::verify::<_, CHECKED>(
+                &mut transcript,
                 &pp,
                 &comm,
+                &field_cfg,
+                &projecting_element,
                 &point_f,
-                &(eval_f + F::one_with_cfg(&cfg)),
-                &proof,
+                &(eval_f + F::one_with_cfg(&field_cfg)),
             );
 
             assert!(result.is_err());
         }
 
         {
-            let (pp, comm, point_f, eval_f, proof) =
+            let (pp, comm, point_f, eval_f, mut transcript) =
                 setup_full_protocol_poly::<F, N, K, M, DEGREE_PLUS_ONE>(num_vars);
-            let cfg = eval_f.cfg().clone();
+            let (field_cfg, projecting_element) =
+                get_field_and_projecting_element::<PolyZt, F>(&mut transcript.fs_transcript);
 
             let result = TestPolyZip::verify::<_, CHECKED>(
+                &mut transcript,
                 &pp,
                 &comm,
+                &field_cfg,
+                &projecting_element,
                 &point_f,
-                &(eval_f + F::one_with_cfg(&cfg)),
-                &proof,
+                &(eval_f + F::one_with_cfg(&field_cfg)),
             );
 
             assert!(result.is_err());
@@ -378,18 +402,37 @@ mod tests {
         let num_vars = 4;
 
         {
-            let (pp, comm, point_f, eval, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
-            let tampered = tamper(proof);
-            let result = TestZip::verify::<_, CHECKED>(&mut tampered, &pp, &comm, &point_f, &eval, );
+            let (pp, comm, point_f, eval_f, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
+            let mut tampered = tamper(proof);
+            let (field_cfg, projecting_element) =
+                get_field_and_projecting_element::<Zt, F>(&mut tampered.fs_transcript);
+            let result = TestZip::verify::<_, CHECKED>(
+                &mut tampered,
+                &pp,
+                &comm,
+                &field_cfg,
+                &projecting_element,
+                &point_f,
+                &eval_f,
+            );
             assert!(result.is_err());
         }
 
         {
             let (pp, comm, point_f, eval_f, proof) =
                 setup_full_protocol_poly::<F, N, K, M, DEGREE_PLUS_ONE>(num_vars);
-            let tampered = tamper(proof);
-            let result =
-                TestPolyZip::verify::<_, CHECKED>(&pp, &comm, &point_f, &eval_f, &tampered);
+            let mut tampered = tamper(proof);
+            let (field_cfg, projecting_element) =
+                get_field_and_projecting_element::<PolyZt, F>(&mut tampered.fs_transcript);
+            let result = TestPolyZip::verify::<_, CHECKED>(
+                &mut tampered,
+                &pp,
+                &comm,
+                &field_cfg,
+                &projecting_element,
+                &point_f,
+                &eval_f,
+            );
             assert!(result.is_err());
         }
     }
@@ -398,23 +441,34 @@ mod tests {
     fn verification_fails_with_wrong_commitment() {
         let num_vars = 4;
         {
-            let (pp, _comm_poly1, point_f, eval_f, proof_poly1) =
+            let (pp, _comm_poly1, point_f, eval_f, mut transcript) =
                 setup_full_protocol::<F, N, K, M>(num_vars);
+            let (field_cfg, projecting_element) =
+                get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
 
             let poly2: DenseMultilinearExtension<_> =
                 (20..(20 + (1 << num_vars))).map(Int::from).collect();
 
             let (_, comm_poly2) = TestZip::commit(&pp, &poly2).unwrap();
 
-            let result =
-                TestZip::verify::<_, CHECKED>(&pp, &comm_poly2, &point_f, &eval_f, &proof_poly1);
+            let result = TestZip::verify::<_, CHECKED>(
+                &mut transcript,
+                &pp,
+                &comm_poly2,
+                &field_cfg,
+                &projecting_element,
+                &point_f,
+                &eval_f,
+            );
 
             assert!(result.is_err());
         }
 
         {
-            let (pp, _comm_poly1, point_f, eval_f, proof_poly1) =
+            let (pp, _comm_poly1, point_f, eval_f, mut transcript) =
                 setup_full_protocol_poly::<F, N, K, M, DEGREE_PLUS_ONE>(num_vars);
+            let (field_cfg, projecting_element) =
+                get_field_and_projecting_element::<PolyZt, F>(&mut transcript.fs_transcript);
 
             let different_evals = {
                 let different_eval_coeffs: Vec<_> = (1..=((1 << num_vars)
@@ -435,11 +489,13 @@ mod tests {
             let (_, comm_poly2) = TestPolyZip::commit(&pp, &poly2).unwrap();
 
             let result = TestPolyZip::verify::<_, CHECKED>(
+                &mut transcript,
                 &pp,
                 &comm_poly2,
+                &field_cfg,
+                &projecting_element,
                 &point_f,
                 &eval_f,
-                &proof_poly1,
             );
 
             assert!(result.is_err());
@@ -459,21 +515,41 @@ mod tests {
         };
 
         {
-            let (pp, comm, _point_f, eval_f, proof) =
+            let (pp, comm, _point_f, eval_f, mut transcript) =
                 setup_full_protocol_poly::<F, N, K, M, DEGREE_PLUS_ONE>(num_vars);
+            let (field_cfg, projecting_element) =
+                get_field_and_projecting_element::<PolyZt, F>(&mut transcript.fs_transcript);
             let invalid_point = make_invalid_point(eval_f.cfg());
 
-            let result =
-                TestPolyZip::verify::<_, CHECKED>(&pp, &comm, &invalid_point, &eval_f, &proof);
+            let result = TestPolyZip::verify::<_, CHECKED>(
+                &mut transcript,
+                &pp,
+                &comm,
+                &field_cfg,
+                &projecting_element,
+                &invalid_point,
+                &eval_f,
+            );
 
             assert!(matches!(result, Err(..)));
         }
 
         {
-            let (pp, comm, _point_f, eval_f, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
+            let (pp, comm, _point_f, eval_f, mut transcript) =
+                setup_full_protocol::<F, N, K, M>(num_vars);
+            let (field_cfg, projecting_element) =
+                get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
             let invalid_point = make_invalid_point(eval_f.cfg());
 
-            let result = TestZip::verify::<_, CHECKED>(&pp, &comm, &invalid_point, &eval_f, &proof);
+            let result = TestZip::verify::<_, CHECKED>(
+                &mut transcript,
+                &pp,
+                &comm,
+                &field_cfg,
+                &projecting_element,
+                &invalid_point,
+                &eval_f,
+            );
 
             assert!(matches!(result, Err(..)));
         }
@@ -491,22 +567,42 @@ mod tests {
         let point: Vec<<Zt as ZipTypes>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
 
-        let test_mle2_proof =
-            TestZip::test::<CHECKED>(&pp, &mle2, &data).expect("test phase should succeed");
-        let (eval_f, eval_mle2_proof) =
-            TestZip::evaluate::<F, CHECKED>(&pp, &mle2, &point, test_mle2_proof)
-                .expect("evaluation phase should succeed");
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
+
+        TestZip::test::<CHECKED>(&mut prover_transcript, &pp, &mle2, &data)
+            .expect("test phase should succeed");
+        let _eval_f = TestZip::evaluate::<F, CHECKED>(
+            &mut prover_transcript,
+            &pp,
+            &mle2,
+            &point,
+            &field_cfg,
+            &projecting_element,
+        )
+        .expect("evaluation phase should succeed");
 
         let eval_mle1 = mle1
             .evaluate(&point, Zero::zero())
             .expect("Failed to evaluate polynomial");
-        let field_cfg = eval_f.cfg().clone();
 
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
         let eval_mle1_f = eval_mle1.into_with_cfg(&field_cfg);
 
-        let verification_result =
-            TestZip::verify::<_, CHECKED>(&pp, &comm, &point_f, &eval_mle1_f, &eval_mle2_proof);
+        let mut verifier_transcript = prover_transcript.into_verification_transcript();
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut verifier_transcript.fs_transcript);
+
+        let verification_result = TestZip::verify::<_, CHECKED>(
+            &mut verifier_transcript,
+            &pp,
+            &comm,
+            &field_cfg,
+            &projecting_element,
+            &point_f,
+            &eval_mle1_f,
+        );
 
         assert!(verification_result.is_err());
     }
@@ -536,21 +632,38 @@ mod tests {
         let point: Vec<<Zt as ZipTypes>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
 
-        let test_transcript = TestZip::test::<CHECKED>(&pp, &mle, &corrupted_data)
-            .expect("test phase should succeed");
-        let (eval_f, proof) = TestZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_transcript)
-            .expect("evaluation phase should succeed");
-        let field_cfg = eval_f.cfg().clone();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
 
-        let expected_eval = mle
-            .evaluate(&point, Zero::zero())
-            .expect("Failed to evaluate polynomial");
-        assert_eq!(eval_f, expected_eval.into_with_cfg(&field_cfg));
+        TestZip::test::<CHECKED>(&mut prover_transcript, &pp, &mle, &corrupted_data)
+            .expect("test phase should succeed");
+        let eval_f = TestZip::evaluate::<F, CHECKED>(
+            &mut prover_transcript,
+            &pp,
+            &mle,
+            &point,
+            &field_cfg,
+            &projecting_element,
+        )
+        .expect("evaluation phase should succeed");
 
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
-        let verification_result =
-            TestZip::verify::<_, CHECKED>(&pp, &comm, &point_f, &eval_f, &proof);
+        let mut verifier_transcript = prover_transcript.into_verification_transcript();
+        verifier_transcript.fs_transcript.absorb_slice(&comm.root);
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut verifier_transcript.fs_transcript);
+
+        let verification_result = TestZip::verify::<_, CHECKED>(
+            &mut verifier_transcript,
+            &pp,
+            &comm,
+            &field_cfg,
+            &projecting_element,
+            &point_f,
+            &eval_f,
+        );
 
         assert!(verification_result.is_err());
     }
@@ -565,22 +678,38 @@ mod tests {
         let point: Vec<<Zt as ZipTypes>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
 
-        let test_transcript =
-            TestZip::test::<CHECKED>(&pp, &mle, &data).expect("test phase should succeed");
-        let (correct_eval_f, proof) =
-            TestZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_transcript)
-                .expect("evaluation phase should succeed");
-        let field_cfg = correct_eval_f.cfg().clone();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
+
+        TestZip::test::<CHECKED>(&mut prover_transcript, &pp, &mle, &data)
+            .expect("test phase should succeed");
+        let correct_eval_f = TestZip::evaluate::<F, CHECKED>(
+            &mut prover_transcript,
+            &pp,
+            &mle,
+            &point,
+            &field_cfg,
+            &projecting_element,
+        )
+        .expect("evaluation phase should succeed");
 
         let incorrect_eval_f = correct_eval_f + F::one_with_cfg(&field_cfg);
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
+        let mut verifier_transcript = prover_transcript.into_verification_transcript();
+        verifier_transcript.fs_transcript.absorb_slice(&comm.root);
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut verifier_transcript.fs_transcript);
+
         let verification_result = TestZip::verify::<_, CHECKED>(
+            &mut verifier_transcript,
             &pp,
             &comm,
+            &field_cfg,
+            &projecting_element,
             &point_f,
             &incorrect_eval_f, // Use the wrong evaluation here
-            &proof,
         );
 
         assert!(verification_result.is_err());
@@ -605,12 +734,21 @@ mod tests {
             .collect::<Vec<_>>();
         let eval = mle.evaluate(&point, Zero::zero()).unwrap();
 
-        let test_transcript =
-            TestZip::test::<CHECKED>(&pp, &mle, &data).expect("test phase should succeed");
-        let (eval_f, mut proof) =
-            TestZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_transcript)
-                .expect("evaluation phase should succeed");
-        let field_cfg = eval_f.cfg().clone();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
+
+        TestZip::test::<CHECKED>(&mut prover_transcript, &pp, &mle, &data)
+            .expect("test phase should succeed");
+        let eval_f = TestZip::evaluate::<F, CHECKED>(
+            &mut prover_transcript,
+            &pp,
+            &mle,
+            &point,
+            &field_cfg,
+            &projecting_element,
+        )
+        .expect("evaluation phase should succeed");
 
         assert_eq!(
             eval_f,
@@ -623,15 +761,29 @@ mod tests {
         let row_len = pp.linear_code.row_len();
         let bytes_per_int = M * size_of::<crypto_bigint::Word>();
         let first_combined_row_bytes = row_len * bytes_per_int;
+
+        let mut verifier_transcript = prover_transcript.into_verification_transcript();
         assert!(
-            first_combined_row_bytes <= proof.0.len(),
+            first_combined_row_bytes <= verifier_transcript.stream.get_ref().len(),
             "proof too small to tamper"
         );
 
         let flip_at = bytes_per_int * (row_len / 2);
-        proof.0[flip_at] ^= 0x01;
+        verifier_transcript.stream.get_mut()[flip_at] ^= 0x01;
 
-        let res = TestZip::verify::<_, CHECKED>(&pp, &comm, &point_f, &eval_f, &proof);
+        verifier_transcript.fs_transcript.absorb_slice(&comm.root);
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut verifier_transcript.fs_transcript);
+
+        let res = TestZip::verify::<_, CHECKED>(
+            &mut verifier_transcript,
+            &pp,
+            &comm,
+            &field_cfg,
+            &projecting_element,
+            &point_f,
+            &eval_f,
+        );
 
         match res {
             Err(ZipError::InvalidPcsOpen(msg)) => {
@@ -680,24 +832,47 @@ mod tests {
             .map(|_| <Zt as ZipTypes>::Eval::from(rng.random::<i8>()))
             .collect();
         let point: Vec<_> = (0..n)
-            .map(|_| <Zt as ZipTypes>::Pt::random(&mut rng))
+            .map(|_| rng.random::<<Zt as ZipTypes>::Pt>())
             .collect();
 
         let (mut data, comm) = TestZip::commit(&pp, &mle).unwrap();
         data.cw_matrix.to_rows_slices_mut()[0][0] += Int::ONE;
 
-        let test_transcript = TestZip::test::<CHECKED>(&pp, &mle, &data).unwrap();
-        let (eval_f, proof) =
-            TestZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_transcript).unwrap();
-        let field_cfg = eval_f.cfg().clone();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
+
+        TestZip::test::<CHECKED>(&mut prover_transcript, &pp, &mle, &data).unwrap();
+        let _eval_f = TestZip::evaluate::<F, CHECKED>(
+            &mut prover_transcript,
+            &pp,
+            &mle,
+            &point,
+            &field_cfg,
+            &projecting_element,
+        )
+        .unwrap();
 
         let point_f = point
             .iter()
             .map(|v| v.into_with_cfg(&field_cfg))
             .collect_vec();
         let eval_f = evaluate_in_field(&mle, &point_f, &field_cfg);
-        let verification_result =
-            TestZip::verify::<_, CHECKED>(&pp, &comm, &point_f, &eval_f, &proof);
+
+        let mut verifier_transcript = prover_transcript.into_verification_transcript();
+        verifier_transcript.fs_transcript.absorb_slice(&comm.root);
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut verifier_transcript.fs_transcript);
+
+        let verification_result = TestZip::verify::<_, CHECKED>(
+            &mut verifier_transcript,
+            &pp,
+            &comm,
+            &field_cfg,
+            &projecting_element,
+            &point_f,
+            &eval_f,
+        );
 
         assert!(verification_result.is_err());
     }
@@ -716,10 +891,20 @@ mod tests {
         let point: Vec<<Zt as ZipTypes>::Pt> =
             [0i64, 0i64, 0i64].into_iter().map(Int::from).collect_vec();
 
-        let test_transcript = TestZip::test::<CHECKED>(&pp, &mle, &data).unwrap();
-        let (eval_f, mut proof) =
-            TestZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_transcript).unwrap();
-        let field_cfg = eval_f.cfg().clone();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
+
+        TestZip::test::<CHECKED>(&mut prover_transcript, &pp, &mle, &data).unwrap();
+        let eval_f = TestZip::evaluate::<F, CHECKED>(
+            &mut prover_transcript,
+            &pp,
+            &mle,
+            &point,
+            &field_cfg,
+            &projecting_element,
+        )
+        .unwrap();
 
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
@@ -727,16 +912,33 @@ mod tests {
         // Two elements: one for value and one for module
         let bytes_per_field = eval_f.inner().get_num_bytes() * 2;
         let q0_bytes = row_len * bytes_per_field;
+
+        let mut verifier_transcript = prover_transcript.into_verification_transcript();
+        verifier_transcript.fs_transcript.absorb_slice(&comm.root);
+        let _ = get_field_and_projecting_element::<Zt, F>(&mut verifier_transcript.fs_transcript);
+
         assert!(
-            proof.0.len() >= q0_bytes,
+            verifier_transcript.stream.get_ref().len() >= q0_bytes,
             "proof too small to contain q_0_combined_row"
         );
 
-        let tail_start = proof.0.len() - q0_bytes;
-        let flip_at = tail_start + (bytes_per_field / 4);
-        proof.0[flip_at] ^= 0x01;
+        let tail_start = verifier_transcript.stream.get_ref().len() - q0_bytes;
+        // Field element is serialized as: modulus (get_num_bytes) + value
+        // (get_num_bytes) We want to tamper with the value portion, which
+        // starts at bytes_per_field / 2
+        let value_offset = bytes_per_field / 2;
+        let flip_at = tail_start + value_offset;
+        verifier_transcript.stream.get_mut()[flip_at] ^= 0x01;
 
-        let res = TestZip::verify::<_, CHECKED>(&pp, &comm, &point_f, &eval_f, &proof);
+        let res = TestZip::verify::<_, CHECKED>(
+            &mut verifier_transcript,
+            &pp,
+            &comm,
+            &field_cfg,
+            &projecting_element,
+            &point_f,
+            &eval_f,
+        );
 
         match res {
             Err(ZipError::InvalidPcsOpen(msg)) => {
@@ -760,18 +962,37 @@ mod tests {
         let point: Vec<<Zt as ZipTypes>::Pt> =
             [0i64, 0i64, 0i64].into_iter().map(Int::from).collect_vec();
 
-        let test_transcript = TestZip::test::<CHECKED>(&pp, &mle, &data).unwrap();
-        let (real_eval_f, proof) =
-            TestZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_transcript).unwrap();
-        let field_cfg = real_eval_f.cfg().clone();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
 
-        let eval_f = mle
-            .evaluate(&point, Zero::zero())
-            .unwrap()
-            .into_with_cfg(&field_cfg);
+        TestZip::test::<CHECKED>(&mut prover_transcript, &pp, &mle, &data).unwrap();
+        let eval_f = TestZip::evaluate::<F, CHECKED>(
+            &mut prover_transcript,
+            &pp,
+            &mle,
+            &point,
+            &field_cfg,
+            &projecting_element,
+        )
+        .unwrap();
+
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
-        let res = TestZip::verify::<_, CHECKED>(&pp, &comm, &point_f, &eval_f, &proof);
+        let mut verifier_transcript = prover_transcript.into_verification_transcript();
+        verifier_transcript.fs_transcript.absorb_slice(&comm.root);
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut verifier_transcript.fs_transcript);
+
+        let res = TestZip::verify::<_, CHECKED>(
+            &mut verifier_transcript,
+            &pp,
+            &comm,
+            &field_cfg,
+            &projecting_element,
+            &point_f,
+            &eval_f,
+        );
         assert!(res.is_ok());
     }
 
@@ -789,18 +1010,37 @@ mod tests {
 
         let point: Vec<<Zt as ZipTypes>::Pt> = vec![Int::ZERO; num_vars];
 
-        let test_transcript = TestZip::test::<CHECKED>(&pp, &mle, &data).unwrap();
-        let (real_eval_f, proof) =
-            TestZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_transcript).unwrap();
-        let field_cfg = real_eval_f.cfg().clone();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
 
-        let eval_f = mle
-            .evaluate(&point, Zero::zero())
-            .unwrap()
-            .into_with_cfg(&field_cfg);
+        TestZip::test::<CHECKED>(&mut prover_transcript, &pp, &mle, &data).unwrap();
+        let eval_f = TestZip::evaluate::<F, CHECKED>(
+            &mut prover_transcript,
+            &pp,
+            &mle,
+            &point,
+            &field_cfg,
+            &projecting_element,
+        )
+        .unwrap();
+
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
-        let res = TestZip::verify::<_, CHECKED>(&pp, &comm, &point_f, &eval_f, &proof);
+        let mut verifier_transcript = prover_transcript.into_verification_transcript();
+        verifier_transcript.fs_transcript.absorb_slice(&comm.root);
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut verifier_transcript.fs_transcript);
+
+        let res = TestZip::verify::<_, CHECKED>(
+            &mut verifier_transcript,
+            &pp,
+            &comm,
+            &field_cfg,
+            &projecting_element,
+            &point_f,
+            &eval_f,
+        );
         assert!(res.is_ok());
     }
 
@@ -820,20 +1060,37 @@ mod tests {
         let mut point = vec![<Zt as ZipTypes>::Pt::ZERO; num_vars];
         point[0] = <Zt as ZipTypes>::Pt::ONE;
 
-        let test_transcript = TestZip::test::<CHECKED>(&pp, &poly, &data).unwrap();
-        let (eval_f, proof) =
-            TestZip::evaluate::<F, CHECKED>(&pp, &poly, &point, test_transcript).unwrap();
-        let field_cfg = eval_f.cfg().clone();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
 
-        let expected_eval = poly
-            .evaluate(&point, Zero::zero())
-            .expect("failed to evaluate polynomial");
-        assert_eq!(eval_f, expected_eval.into_with_cfg(&field_cfg));
+        TestZip::test::<CHECKED>(&mut prover_transcript, &pp, &poly, &data).unwrap();
+        let eval_f = TestZip::evaluate::<F, CHECKED>(
+            &mut prover_transcript,
+            &pp,
+            &poly,
+            &point,
+            &field_cfg,
+            &projecting_element,
+        )
+        .unwrap();
 
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
-        let verification_result =
-            TestZip::verify::<_, CHECKED>(&pp, &comm, &point_f, &eval_f, &proof);
+        let mut verifier_transcript = prover_transcript.into_verification_transcript();
+        verifier_transcript.fs_transcript.absorb_slice(&comm.root);
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut verifier_transcript.fs_transcript);
+
+        let verification_result = TestZip::verify::<_, CHECKED>(
+            &mut verifier_transcript,
+            &pp,
+            &comm,
+            &field_cfg,
+            &projecting_element,
+            &point_f,
+            &eval_f,
+        );
 
         assert!(
             verification_result.is_ok(),
@@ -850,20 +1107,37 @@ mod tests {
 
         let point: Vec<<Zt as ZipTypes>::Pt> = vec![Int::from(1), Int::from(2)];
 
-        let test_transcript = TestZip::test::<CHECKED>(&pp, &poly, &hint).unwrap();
-        let (eval_f, proof) =
-            TestZip::evaluate::<F, CHECKED>(&pp, &poly, &point, test_transcript).unwrap();
-        let field_cfg = eval_f.cfg().clone();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
 
-        let expected_eval = poly
-            .evaluate(&point, Zero::zero())
-            .expect("failed to evaluate polynomial");
-        assert_eq!(eval_f, expected_eval.into_with_cfg(&field_cfg));
+        TestZip::test::<CHECKED>(&mut prover_transcript, &pp, &poly, &hint).unwrap();
+        let eval_f = TestZip::evaluate::<F, CHECKED>(
+            &mut prover_transcript,
+            &pp,
+            &poly,
+            &point,
+            &field_cfg,
+            &projecting_element,
+        )
+        .unwrap();
 
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
-        let verification_result =
-            TestZip::verify::<_, CHECKED>(&pp, &comm, &point_f, &eval_f, &proof);
+        let mut verifier_transcript = prover_transcript.into_verification_transcript();
+        verifier_transcript.fs_transcript.absorb_slice(&comm.root);
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut verifier_transcript.fs_transcript);
+
+        let verification_result = TestZip::verify::<_, CHECKED>(
+            &mut verifier_transcript,
+            &pp,
+            &comm,
+            &field_cfg,
+            &projecting_element,
+            &point_f,
+            &eval_f,
+        );
 
         assert!(verification_result.is_ok());
     }
@@ -882,30 +1156,50 @@ mod tests {
         let point: Vec<<Zt as ZipTypes>::Pt> =
             [0i64, 0i64, 0i64].into_iter().map(Int::from).collect_vec();
 
-        let test_transcript = TestZip::test::<CHECKED>(&pp, &mle, &data).unwrap();
-        let (real_eval_f, mut proof) =
-            TestZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_transcript).unwrap();
-        let field_cfg = real_eval_f.cfg().clone();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
 
-        let eval_f = mle
-            .evaluate(&point, Zero::zero())
-            .unwrap()
-            .into_with_cfg(&field_cfg);
+        TestZip::test::<CHECKED>(&mut prover_transcript, &pp, &mle, &data).unwrap();
+        let eval_f = TestZip::evaluate::<F, CHECKED>(
+            &mut prover_transcript,
+            &pp,
+            &mle,
+            &point,
+            &field_cfg,
+            &projecting_element,
+        )
+        .unwrap();
+
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
         let row_len = pp.linear_code.row_len();
         let bytes_per_int = M * 8;
         let first_section_bytes = row_len * bytes_per_int;
+
+        let mut verifier_transcript = prover_transcript.into_verification_transcript();
         assert!(
-            first_section_bytes <= proof.0.len(),
+            first_section_bytes <= verifier_transcript.stream.get_ref().len(),
             "proof too small to tamper u'"
         );
 
-        for b in &mut proof.0[0..bytes_per_int] {
+        for b in &mut verifier_transcript.stream.get_mut()[0..bytes_per_int] {
             *b = 0xFF;
         }
 
-        let res = TestZip::verify::<_, CHECKED>(&pp, &comm, &point_f, &eval_f, &proof);
+        verifier_transcript.fs_transcript.absorb_slice(&comm.root);
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut verifier_transcript.fs_transcript);
+
+        let res = TestZip::verify::<_, CHECKED>(
+            &mut verifier_transcript,
+            &pp,
+            &comm,
+            &field_cfg,
+            &projecting_element,
+            &point_f,
+            &eval_f,
+        );
         assert!(res.is_err());
     }
 
@@ -914,7 +1208,7 @@ mod tests {
     fn bench_p12_verify() {
         fn inner<const P: usize>() {
             let mut rng = ThreadRng::default();
-            // Match the benchmark’s transcript usage for linear code construction
+            // Match the benchmark's transcript usage for linear code construction
             let poly_size = 1 << P;
             let linear_code = C::new(poly_size);
             let pp = TestZip::setup(poly_size, linear_code);
@@ -924,25 +1218,44 @@ mod tests {
 
             // Same point choice as the bench
             let point = vec![1i64; P].iter().map(|v| v.into()).collect_vec();
-            let eval = *mle.last().expect("nonempty evals");
+
+            let mut prover_transcript =
+                PcsProverTranscript::new_from_commitment(&commitment).unwrap();
+            let (field_cfg, projecting_element) =
+                get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
 
             // Prover produces a proof once (exactly as in the bench)
-            let test_transcript = TestZip::test::<CHECKED>(&pp, &mle, &data).unwrap();
-            let (eval_f, proof) =
-                TestZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_transcript).unwrap();
-            let field_cfg = eval_f.cfg().clone();
-
-            assert_eq!(
-                eval_f,
-                eval.into_with_cfg(&field_cfg),
-                "Evaluation mismatch after opening"
-            );
+            TestZip::test::<CHECKED>(&mut prover_transcript, &pp, &mle, &data).unwrap();
+            let eval_f = TestZip::evaluate::<F, CHECKED>(
+                &mut prover_transcript,
+                &pp,
+                &mle,
+                &point,
+                &field_cfg,
+                &projecting_element,
+            )
+            .unwrap();
 
             let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
+            let mut verifier_transcript = prover_transcript.into_verification_transcript();
+            verifier_transcript
+                .fs_transcript
+                .absorb_slice(&commitment.root);
+            let (field_cfg, projecting_element) =
+                get_field_and_projecting_element::<Zt, F>(&mut verifier_transcript.fs_transcript);
+
             // Verifier replays verification from the same proof (also like the bench)
-            TestZip::verify::<_, CHECKED>(&pp, &commitment, &point_f, &eval_f, &proof)
-                .expect("verify");
+            TestZip::verify::<_, CHECKED>(
+                &mut verifier_transcript,
+                &pp,
+                &commitment,
+                &field_cfg,
+                &projecting_element,
+                &point_f,
+                &eval_f,
+            )
+            .expect("verify");
         }
 
         inner::<12>();
@@ -953,7 +1266,7 @@ mod tests {
     fn bench_p12_verify_poly() {
         fn inner<const P: usize>() {
             let mut rng = ThreadRng::default();
-            // Match the benchmark’s transcript usage for linear code construction
+            // Match the benchmark's transcript usage for linear code construction
             let poly_size = 1 << P;
             let linear_code = PolyC::new(poly_size);
             let pp = TestPolyZip::setup(poly_size, linear_code);
@@ -964,20 +1277,46 @@ mod tests {
             // Same point choice as the bench
             let point = vec![1i64; P].iter().map(|v| (*v).into()).collect_vec();
 
+            let mut prover_transcript =
+                PcsProverTranscript::new_from_commitment(&commitment).unwrap();
+            let (field_cfg, projecting_element) =
+                get_field_and_projecting_element::<PolyZt, F>(&mut prover_transcript.fs_transcript);
+
             // Prover produces a proof once (exactly as in the bench)
-            let test_proof = TestPolyZip::test::<CHECKED>(&pp, &mle, &data).unwrap();
-            let (eval_f, eval_proof) =
-                TestPolyZip::evaluate::<F, CHECKED>(&pp, &mle, &point, test_proof).unwrap();
-            let field_cfg = eval_f.cfg().clone();
+            TestPolyZip::test::<CHECKED>(&mut prover_transcript, &pp, &mle, &data).unwrap();
+            let eval_f = TestPolyZip::evaluate::<F, CHECKED>(
+                &mut prover_transcript,
+                &pp,
+                &mle,
+                &point,
+                &field_cfg,
+                &projecting_element,
+            )
+            .unwrap();
 
             let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
+            let mut verifier_transcript = prover_transcript.into_verification_transcript();
+            verifier_transcript
+                .fs_transcript
+                .absorb_slice(&commitment.root);
+            let (field_cfg, projecting_element) = get_field_and_projecting_element::<PolyZt, F>(
+                &mut verifier_transcript.fs_transcript,
+            );
+
             // Verifier replays verification from the same proof (also like the bench)
-            TestPolyZip::verify::<_, CHECKED>(&pp, &commitment, &point_f, &eval_f, &eval_proof)
-                .expect("verify");
+            TestPolyZip::verify::<_, CHECKED>(
+                &mut verifier_transcript,
+                &pp,
+                &commitment,
+                &field_cfg,
+                &projecting_element,
+                &point_f,
+                &eval_f,
+            )
+            .expect("verify");
         }
 
         inner::<19>();
     }
-     */
 }

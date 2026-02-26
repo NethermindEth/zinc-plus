@@ -60,9 +60,7 @@ impl PcsProverTranscript {
             stream: Cursor::default(),
         };
 
-        let mut buf = vec![0; ZipPlusCommitment::NUM_BYTES];
-        ConstTranscribable::write_transcription_bytes(comm, &mut buf);
-        result.fs_transcript.absorb_slice(&buf);
+        result.fs_transcript.absorb_slice(&comm.root);
 
         Ok(result)
     }
@@ -341,9 +339,7 @@ mod tests {
                 .$write_fn(&$original_value)
                 .expect(&format!("Failed to write {}", $assert_msg));
             let mut transcript: PcsVerifierTranscript = transcript.into_verification_transcript();
-            let mut buf = vec![0; ZipPlusCommitment::NUM_BYTES];
-            ConstTranscribable::write_transcription_bytes(&comm, &mut buf);
-            transcript.fs_transcript.absorb_slice(&buf);
+            transcript.fs_transcript.absorb_slice(&comm.root);
             let read_value = transcript
                 .$read_fn()
                 .expect(&format!("Failed to read {}", $assert_msg));
@@ -365,9 +361,7 @@ mod tests {
                 .$write_fn(&$original_values)
                 .expect(&format!("Failed to write {}", $assert_msg));
             let mut transcript: PcsVerifierTranscript = transcript.into_verification_transcript();
-            let mut buf = vec![0; ZipPlusCommitment::NUM_BYTES];
-            ConstTranscribable::write_transcription_bytes(&comm, &mut buf);
-            transcript.fs_transcript.absorb_slice(&buf);
+            transcript.fs_transcript.absorb_slice(&comm.root);
             let read_values = transcript
                 .$read_fn($original_values.len())
                 .expect(&format!("Failed to read {}", $assert_msg));
