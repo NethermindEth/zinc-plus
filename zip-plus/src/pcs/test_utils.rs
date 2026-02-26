@@ -231,13 +231,14 @@ where
     let (hint, comm) = ZipPlus::commit_single(&pp, &poly).unwrap();
     let point: Vec<Zt::Pt> = prepare_evaluation_point();
 
-    let (evals, proof) = ZipPlus::prove::<F, CHECKED>(
-        &pp, std::slice::from_ref(&poly), &point, &hint
-    ).unwrap();
+    let (evals, proof) =
+        ZipPlus::prove::<F, CHECKED>(&pp, std::slice::from_ref(&poly), &point, &hint).unwrap();
 
     let field_cfg = {
         let mut transcript = PcsTranscript::new();
-        transcript.fs_transcript.get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>()
+        transcript
+            .fs_transcript
+            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>()
     };
     let point_f = point
         .iter()

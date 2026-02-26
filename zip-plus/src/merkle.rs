@@ -113,6 +113,7 @@ impl MerkleTree {
 /// and hash them with Blake3 in one `update` call.  This lets Blake3 process
 /// full 1 KiB chunks with SIMD, which is significantly faster than the
 /// per-element `update` approach.
+#[allow(clippy::arithmetic_side_effects)]
 fn hash_column<S: ConstTranscribable>(values: &[S]) -> MtHash {
     let elem_bytes = S::NUM_BYTES;
     let mut buf = vec![0_u8; values.len() * elem_bytes];
@@ -132,6 +133,7 @@ fn hash_column<S: ConstTranscribable>(values: &[S]) -> MtHash {
 /// buffer and feeds it to Blake3 in one `update` call.  This lets Blake3
 /// process full 1 KiB chunks with SIMD, which is significantly faster than
 /// the per-element `update` approach when columns are tall (many rows).
+#[allow(clippy::arithmetic_side_effects)]
 fn hash_leaves<S>(rows: &[&[S]], m_cols: usize) -> Vec<MtHash>
 where
     S: ConstTranscribable + Send + Sync,
