@@ -296,10 +296,10 @@ pub fn verify<
     let (hint, commitment) = ZipPlus::commit(&params, &polys).unwrap();
     let point = vec![Zt::Pt::one(); P];
 
-    let (evals, proof) = ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>(&params, &polys, &point, &hint)
+    let (eval, proof) = ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>(&params, &polys, &point, &hint)
         .expect("Prove failed");
 
-    let field_cfg = *evals[0].cfg();
+    let field_cfg = *eval.cfg();
     let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
     group.bench_function(
@@ -316,7 +316,7 @@ pub fn verify<
                     &params,
                     &commitment,
                     &point_f,
-                    &evals,
+                    &eval,
                     &proof,
                 )
                 .expect("Verification failed");

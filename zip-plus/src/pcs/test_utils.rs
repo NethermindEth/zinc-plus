@@ -155,7 +155,7 @@ pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
     >,
     ZipPlusCommitment,
     Vec<F>,
-    Vec<F>,
+    F,
     ZipPlusProof,
 )
 where
@@ -187,7 +187,7 @@ pub fn setup_full_protocol_poly<
     >,
     ZipPlusCommitment,
     Vec<F>,
-    Vec<F>,
+    F,
     ZipPlusProof,
 )
 where
@@ -212,7 +212,7 @@ fn setup_full_protocol_inner<Zt, Lc, F, const N: usize>(
     ZipPlusParams<Zt, Lc>,
     ZipPlusCommitment,
     Vec<F>,
-    Vec<F>,
+    F,
     ZipPlusProof,
 )
 where
@@ -231,7 +231,7 @@ where
     let (hint, comm) = ZipPlus::commit_single(&pp, &poly).unwrap();
     let point: Vec<Zt::Pt> = prepare_evaluation_point();
 
-    let (evals, proof) =
+    let (eval, proof) =
         ZipPlus::prove::<F, CHECKED>(&pp, std::slice::from_ref(&poly), &point, &hint).unwrap();
 
     let field_cfg = {
@@ -245,5 +245,5 @@ where
         .map(|v| v.into_with_cfg(&field_cfg))
         .collect_vec();
 
-    (pp, comm, point_f, evals, proof)
+    (pp, comm, point_f, eval, proof)
 }

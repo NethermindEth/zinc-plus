@@ -1,5 +1,3 @@
-use std::vec;
-
 use crate::{
     ZipError,
     code::LinearCode,
@@ -23,7 +21,6 @@ use zinc_utils::{
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProduct},
     mul_by_scalar::MulByScalar,
-    projectable_to_field::ProjectableToField,
 };
 
 // References main.pdf for the new Zip+ protocol
@@ -34,7 +31,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         polys: &[DenseMultilinearExtension<Zt::Eval>],
         point: &[Zt::Pt],
         commit_hint: &ZipPlusHint<Zt::Cw>,
-    ) -> Result<(Vec<F>, ZipPlusProof), ZipError>
+    ) -> Result<(F, ZipPlusProof), ZipError>
     where
         F: PrimeField
             + for<'a> FromWithConfig<&'a Zt::CombR>
@@ -43,7 +40,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + for<'a> MulByScalar<&'a F>
             + FromRef<F>,
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
-        Zt::Eval: ProjectableToField<F>,
     {
         let batch_size = polys.len();
         validate_input::<Zt, Lc, _>(
@@ -94,33 +90,30 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             })
             .try_collect()?;
 
-        // TODO. b_per_poly can be fused with for loop below. Compute b_i, write to
-        // transcript and compute eval_i
         let zero_f = F::zero_with_cfg(&field_cfg);
-        let b_per_poly: Vec<F> = polys_as_comb_r
-            .iter()
-            .flat_map(|poly_comb_r| {
-                (0..num_rows).map(|j| {
+        let b = polys_as_comb_r.iter().try_fold(
+            vec![zero_f.clone(); num_rows],
+            |mut acc, poly_comb_r| -> Result<_, ZipError> {
+                for j in 0..num_rows {
                     let row_f: Vec<F> = poly_comb_r[j * row_len..(j + 1) * row_len]
                         .iter()
                         .map(|int| int.into_with_cfg(&field_cfg))
                         .collect();
-                    // Compute b_j = <row_j, q1> (inner product in field)
-                    // It is safe to use inner_product_unchecked because we're in a field.
-                    MBSInnerProduct::inner_product::<UNCHECKED>(&row_f, &q_1, zero_f.clone())
-                })
-            })
-            .try_collect()?;
+                    // Compute <row_j, q1> for each poly and sum contribution to (inner product in
+                    // field) It is safe to use inner_product_unchecked because
+                    // we're in a field.
+                    acc[j] +=
+                        MBSInnerProduct::inner_product::<UNCHECKED>(&row_f, &q_1, zero_f.clone())?;
+                }
 
-        let mut evals = Vec::with_capacity(batch_size);
-        for i in 0..batch_size {
-            let b_i = &b_per_poly[i * num_rows..(i + 1) * num_rows];
-            transcript.write_field_elements(b_i)?;
-            // Compute eval_i = <q_0, b_i> (inner product in field), <q_2, b_i> in paper
-            // It is safe to use inner_product_unchecked because we're in a field.
-            let eval_i = MBSInnerProduct::inner_product::<UNCHECKED>(&q_0, b_i, zero_f.clone())?;
-            evals.push(eval_i)
-        }
+                Ok(acc)
+            },
+        )?;
+
+        transcript.write_field_elements(&b)?;
+        // Compute eval = <q_0, b> (inner product in field), <q_2, b> in paper
+        // It is safe to use inner_product_unchecked because we're in a field.
+        let eval = MBSInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())?;
 
         // combined_row_i[col] = sum_j(s_j * int_rows_i[j][col]) for each column
         // combined_row: Vec<CombR> (length row_len), s_j in paper
@@ -166,7 +159,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             Self::open_merkle_trees_for_column(commit_hint, column_idx, &mut transcript)?;
         }
 
-        Ok((evals, transcript.into()))
+        Ok((eval, transcript.into()))
     }
 
     pub(super) fn open_merkle_trees_for_column(
@@ -245,8 +238,8 @@ mod tests {
         let (hint, _) = TestZip::commit_single(&pp, &poly).unwrap();
         let point = test_point(num_vars);
 
-        let (evals, _proof) = TestZip::prove::<F, CHECKED>(&pp, &[poly], &point, &hint).unwrap();
-        assert_eq!(evals.len(), 1);
+        let result = TestZip::prove::<F, CHECKED>(&pp, &[poly], &point, &hint);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -256,9 +249,8 @@ mod tests {
         let (hint, _) = TestPolyZip::commit_single(&pp, &poly).unwrap();
         let point: Vec<i128> = (0..num_vars).map(|i| i as i128 + 2).collect();
 
-        let (evals, _proof) =
-            TestPolyZip::prove::<F, CHECKED>(&pp, &[poly], &point, &hint).unwrap();
-        assert_eq!(evals.len(), 1);
+        let result = TestPolyZip::prove::<F, CHECKED>(&pp, &[poly], &point, &hint);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -307,7 +299,7 @@ mod tests {
         let (hint, _) = TestZip::commit_single(&pp, &poly).unwrap();
         let point = test_point(num_vars);
 
-        let (evals, _) =
+        let (eval, _) =
             TestZip::prove::<F, CHECKED>(&pp, std::slice::from_ref(&poly), &point, &hint).unwrap();
 
         let field_cfg = {
@@ -321,8 +313,7 @@ mod tests {
         let expected_int = poly_wide.evaluate(&point, Zero::zero()).unwrap();
         let expected_f: F = (&expected_int).into_with_cfg(&field_cfg);
 
-        assert_eq!(evals.len(), 1);
-        assert_eq!(evals[0], expected_f);
+        assert_eq!(eval, expected_f);
     }
 
     fn make_batch_polys(
@@ -349,8 +340,8 @@ mod tests {
         let (hint, _) = TestZip::commit(&pp, &polys).unwrap();
         let point = test_point(num_vars);
 
-        let (evals, _) = TestZip::prove::<F, CHECKED>(&pp, &polys, &point, &hint).unwrap();
-        assert_eq!(evals.len(), 2);
+        let result = TestZip::prove::<F, CHECKED>(&pp, &polys, &point, &hint);
+        assert!(result.is_ok())
     }
 
     #[test]
@@ -362,35 +353,8 @@ mod tests {
         let (hint, _) = TestZip::commit(&pp, &polys).unwrap();
         let point = test_point(num_vars);
 
-        let (evals, _) = TestZip::prove::<F, CHECKED>(&pp, &polys, &point, &hint).unwrap();
-        assert_eq!(evals.len(), 5);
-    }
-
-    /// Each batched eval should equal the corresponding poly(point) in F.
-    #[test]
-    fn prove_returns_correct_evaluations_for_batch() {
-        let num_vars = 4;
-        let (pp, _) = setup_test_params(num_vars);
-        let polys = make_batch_polys(num_vars, 3);
-
-        let (hint, _) = TestZip::commit(&pp, &polys).unwrap();
-        let point = test_point(num_vars);
-
-        let (evals, _) = TestZip::prove::<F, CHECKED>(&pp, &polys, &point, &hint).unwrap();
-
-        let field_cfg = {
-            let mut t = PcsTranscript::new();
-            t.fs_transcript
-                .get_random_field_cfg::<F, <Zt as ZipTypes>::Fmod, <Zt as ZipTypes>::PrimeTest>()
-        };
-
-        for (i, poly) in polys.iter().enumerate() {
-            let poly_wide: DenseMultilinearExtension<Int<M>> =
-                poly.evaluations.iter().map(Int::from_ref).collect();
-            let expected_int = poly_wide.evaluate(&point, Zero::zero()).unwrap();
-            let expected_f: F = (&expected_int).into_with_cfg(&field_cfg);
-            assert_eq!(evals[i], expected_f, "Eval mismatch for poly {i}");
-        }
+        let result = TestZip::prove::<F, CHECKED>(&pp, &polys, &point, &hint);
+        assert!(result.is_ok())
     }
 
     #[test]
@@ -411,10 +375,7 @@ mod tests {
 
         let point = test_point(num_vars);
         let result = TestZip::prove::<F, CHECKED>(&pp, &polys, &point, &corrupted_hint);
-        assert!(
-            result.is_ok(),
-            "Prover should not reject corrupted codeword"
-        );
+        assert!(result.is_ok());
     }
 
     #[test]
