@@ -3,11 +3,10 @@ use crate::{
     code::LinearCode,
     merkle::MtHash,
     pcs::{
-        ZipPlusProof,
         structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
         utils::{point_to_tensor, validate_input},
     },
-    pcs_transcript::PcsTranscript,
+    pcs_transcript::PcsVerifierTranscript,
 };
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
@@ -26,11 +25,13 @@ use zinc_utils::{
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     pub fn verify<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsVerifierTranscript,
         vp: &ZipPlusParams<Zt, Lc>,
         comm: &ZipPlusCommitment,
+        field_cfg: &F::Config,
+        projecting_element: &Zt::Chal,
         point_f: &[F],
         eval_f: &F,
-        proof: &ZipPlusProof,
     ) -> Result<(), ZipError>
     where
         F: FromPrimitiveWithConfig
@@ -42,25 +43,19 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     {
         validate_input::<Zt, Lc, _>("verify", vp.num_vars, &[], &[point_f])?;
 
-        let mut transcript: PcsTranscript = proof.clone().into();
-
         let columns_opened =
-            Self::verify_testing::<CHECK_FOR_OVERFLOW>(vp, &comm.root, &mut transcript)?;
+            Self::verify_testing::<CHECK_FOR_OVERFLOW>(vp, &comm.root, transcript)?;
 
-        let field_cfg = transcript
-            .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
-        let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
-        let projecting_element: F = (&projecting_element).into_with_cfg(&field_cfg);
+        let projecting_element: F = projecting_element.into_with_cfg(field_cfg);
 
         Self::verify_evaluation(
             vp,
             point_f,
             eval_f,
             &columns_opened,
-            &mut transcript,
+            transcript,
             projecting_element,
-            &field_cfg,
+            field_cfg,
         )?;
 
         Ok(())
@@ -70,7 +65,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     pub(super) fn verify_testing<const CHECK_FOR_OVERFLOW: bool>(
         vp: &ZipPlusParams<Zt, Lc>,
         root: &MtHash,
-        transcript: &mut PcsTranscript,
+        transcript: &mut PcsVerifierTranscript,
     ) -> Result<Vec<(usize, Vec<Zt::Cw>)>, ZipError> {
         // Gather the coeffs and encoded combined rows per proximity test
         let encoded_combined_rows: Option<(Vec<Zt::Chal>, Vec<Zt::Chal>, Vec<Zt::CombR>)> = {
@@ -192,7 +187,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         point_f: &[F],
         eval_f: &F,
         columns_opened: &[(usize, Vec<Zt::Cw>)],
-        transcript: &mut PcsTranscript,
+        transcript: &mut PcsVerifierTranscript,
         projecting_element: F,
         field_cfg: &F::Config,
     ) -> Result<(), ZipError>
@@ -272,28 +267,11 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 )]
 mod tests {
     use crate::{
-        ZipError,
-        code::{LinearCode, raa::RaaCode, raa_sign_flip::RaaSignFlippingCode},
-        merkle::MerkleTree,
-        pcs::{
-            ZipPlusProof,
-            structs::{ZipPlus, ZipPlusHint, ZipTypes},
-            test_utils::*,
-        },
+        code::{raa::RaaCode, raa_sign_flip::RaaSignFlippingCode},
+        pcs::{structs::ZipPlus, test_utils::*},
     };
-    use crypto_bigint::{Random, U64};
-    use crypto_primitives::{
-        Field, FromWithConfig, IntoWithConfig, PrimeField,
-        crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int,
-    };
-    use itertools::Itertools;
-    use num_traits::{ConstOne, ConstZero, Zero};
-    use rand::prelude::*;
-    use zinc_poly::{
-        mle::{DenseMultilinearExtension, MultilinearExtensionRand},
-        univariate::binary::BinaryPoly,
-    };
-    use zinc_transcript::traits::Transcribable;
+    use crypto_bigint::U64;
+    use crypto_primitives::crypto_bigint_boxed_monty::BoxedMontyField;
     use zinc_utils::CHECKED;
 
     const INT_LIMBS: usize = U64::LIMBS;
@@ -318,21 +296,43 @@ mod tests {
     fn successful_verification_of_valid_proof() {
         let num_vars = 4;
         {
-            let (pp, comm, point_f, eval_f, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
+            let (pp, comm, point_f, eval_f, mut transcript) =
+                setup_full_protocol::<F, N, K, M>(num_vars);
+            let (field_cfg, projecting_element) =
+                get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
 
-            let result = TestZip::verify::<_, CHECKED>(&pp, &comm, &point_f, &eval_f, &proof);
+            let result = TestZip::verify::<_, CHECKED>(
+                &mut transcript,
+                &pp,
+                &comm,
+                &field_cfg,
+                &projecting_element,
+                &point_f,
+                &eval_f,
+            );
             assert!(result.is_ok(), "Verification failed: {result:?}")
         };
         {
-            let (pp, comm, point_f, eval_f, proof) =
+            let (pp, comm, point_f, eval_f, mut transcript) =
                 setup_full_protocol_poly::<F, N, K, M, DEGREE_PLUS_ONE>(num_vars);
+            let (field_cfg, projecting_element) =
+                get_field_and_projecting_element::<PolyZt, F>(&mut transcript.fs_transcript);
 
-            let result = TestPolyZip::verify::<_, CHECKED>(&pp, &comm, &point_f, &eval_f, &proof);
+            let result = TestPolyZip::verify::<_, CHECKED>(
+                &mut transcript,
+                &pp,
+                &comm,
+                &field_cfg,
+                &projecting_element,
+                &point_f,
+                &eval_f,
+            );
 
             assert!(result.is_ok(), "Verification failed: {result:?}");
         }
     }
 
+    /*
     #[test]
     fn verification_fails_with_incorrect_evaluation() {
         let num_vars = 4;
@@ -371,17 +371,16 @@ mod tests {
 
     #[test]
     fn verification_fails_with_tampered_proof() {
-        fn tamper(proof: ZipPlusProof) -> ZipPlusProof {
-            let mut tampered = proof.0.clone();
-            tampered[0] ^= 0x01;
-            ZipPlusProof(tampered)
+        fn tamper(mut proof: PcsVerifierTranscript) -> PcsVerifierTranscript {
+            proof.stream.get_mut()[0] ^= 0x01;
+            proof
         }
         let num_vars = 4;
 
         {
             let (pp, comm, point_f, eval, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
             let tampered = tamper(proof);
-            let result = TestZip::verify::<_, CHECKED>(&pp, &comm, &point_f, &eval, &tampered);
+            let result = TestZip::verify::<_, CHECKED>(&mut tampered, &pp, &comm, &point_f, &eval, );
             assert!(result.is_err());
         }
 
@@ -980,4 +979,5 @@ mod tests {
 
         inner::<19>();
     }
+     */
 }

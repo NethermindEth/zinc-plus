@@ -4,11 +4,10 @@ use crate::{
     combine_rows,
     merkle::MerkleProof,
     pcs::{
-        ZipPlusTestTranscript,
         structs::{ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
         utils::validate_input,
     },
-    pcs_transcript::PcsTranscript,
+    pcs_transcript::PcsProverTranscript,
 };
 use num_traits::{ConstOne, ConstZero, Zero};
 #[cfg(feature = "parallel")]
@@ -20,12 +19,14 @@ use zinc_utils::{cfg_iter_mut, inner_product::InnerProduct, mul_by_scalar::MulBy
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     #[allow(clippy::arithmetic_side_effects)]
     pub fn test<const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsProverTranscript,
         pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
         commit_hint: &ZipPlusHint<Zt::Cw>,
-    ) -> Result<ZipPlusTestTranscript, ZipError> {
+    ) -> Result<(), ZipError> {
         validate_input::<Zt, Lc, bool>("test", pp.num_vars, &[poly], &[])?;
 
+        let initial_transcript_len = transcript.stream.get_ref().len();
         let estimated_transcript_size =
             // Combined rows
             pp.linear_code.row_len() * Zt::CombR::NUM_BYTES
@@ -36,7 +37,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 // Merkle proof
                 + MerkleProof::estimate_transcribed_size(commit_hint.merkle_tree.height())
             );
-        let mut transcript = PcsTranscript::new_with_capacity(estimated_transcript_size);
+        transcript.reserve_capacity(estimated_transcript_size);
 
         // If we can take linear combinations, perform the proximity test
         if pp.num_rows > 1 {
@@ -81,22 +82,22 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         // Open merkle tree for each column drawn
         for _ in 0..Zt::NUM_COLUMN_OPENINGS {
             let column = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
-            Self::open_merkle_trees_for_column(commit_hint, column, &mut transcript)?;
+            Self::open_merkle_trees_for_column(commit_hint, column, transcript)?;
         }
 
         assert_eq!(
-            transcript.stream.get_ref().len(),
+            transcript.stream.get_ref().len() - initial_transcript_len,
             estimated_transcript_size,
             "PCS transcript capacity was precalculated incorrectly"
         );
 
-        Ok(transcript.into())
+        Ok(())
     }
 
     pub(super) fn open_merkle_trees_for_column(
         commit_hint: &ZipPlusHint<Zt::Cw>,
         column_idx: usize,
-        transcript: &mut PcsTranscript,
+        transcript: &mut PcsProverTranscript,
     ) -> Result<(), ZipError> {
         let column_values = commit_hint.cw_matrix.as_rows().map(|row| &row[column_idx]);
 
@@ -129,6 +130,7 @@ mod tests {
             structs::{ZipPlus, ZipPlusHint},
             test_utils::*,
         },
+        pcs_transcript::PcsProverTranscript,
     };
     use crypto_bigint::U64;
     use crypto_primitives::crypto_bigint_int::Int;
@@ -156,8 +158,9 @@ mod tests {
     fn successful_testing_with_correct_polynomial_and_hint() {
         let num_vars = 4;
         let (pp, poly) = setup_test_params(num_vars);
-        let (hint, _) = TestZip::commit(&pp, &poly).unwrap();
-        let result = TestZip::test::<CHECKED>(&pp, &poly, &hint);
+        let (hint, comm) = TestZip::commit(&pp, &poly).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let result = TestZip::test::<CHECKED>(&mut transcript, &pp, &poly, &hint);
         assert!(result.is_ok());
     }
 
@@ -165,8 +168,9 @@ mod tests {
     fn successful_testing_with_correct_polynomial_and_hint_poly() {
         let num_vars = 4;
         let (pp, poly) = setup_poly_test_params(num_vars);
-        let (hint, _) = TestPolyZip::commit(&pp, &poly).unwrap();
-        let result = TestPolyZip::test::<CHECKED>(&pp, &poly, &hint);
+        let (hint, comm) = TestPolyZip::commit(&pp, &poly).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let result = TestPolyZip::test::<CHECKED>(&mut transcript, &pp, &poly, &hint);
         assert!(result.is_ok());
     }
 
@@ -175,7 +179,8 @@ mod tests {
         let num_vars = 4;
         let (pp, poly) = setup_test_params(num_vars);
 
-        let (mut original_hint, _) = TestZip::commit(&pp, &poly).unwrap();
+        let (mut original_hint, comm) = TestZip::commit(&pp, &poly).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
 
         let mut corrupted_rows = original_hint.cw_matrix.to_rows_slices_mut();
         assert!(!corrupted_rows.is_empty());
@@ -184,7 +189,7 @@ mod tests {
         let corrupted_merkle_tree = MerkleTree::new(&original_hint.cw_matrix.to_rows_slices());
         let corrupted_rows_hint = ZipPlusHint::new(original_hint.cw_matrix, corrupted_merkle_tree);
 
-        let result = TestZip::test::<CHECKED>(&pp, &poly, &corrupted_rows_hint);
+        let result = TestZip::test::<CHECKED>(&mut transcript, &pp, &poly, &corrupted_rows_hint);
 
         assert!(result.is_ok());
     }
@@ -199,9 +204,10 @@ mod tests {
             (0..1 << oversized_num_vars).map(Int::from).collect();
 
         // This hint is for a 4-variable poly, but we need it as a placeholder.
-        let (hint, _) = TestZip::commit(&pp, &setup_test_params::<N, K, M>(num_vars).1).unwrap();
+        let (hint, comm) = TestZip::commit(&pp, &setup_test_params::<N, K, M>(num_vars).1).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
 
-        let result = TestZip::test::<CHECKED>(&pp, &oversized_poly, &hint);
+        let result = TestZip::test::<CHECKED>(&mut transcript, &pp, &oversized_poly, &hint);
 
         assert!(result.is_err());
     }

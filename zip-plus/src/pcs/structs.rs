@@ -125,3 +125,17 @@ pub struct ZipPlusCommitment {
     /// Roots of the merkle tree of entire matrix
     pub root: MtHash,
 }
+
+impl ConstTranscribable for ZipPlusCommitment {
+    const NUM_BYTES: usize = MtHash::NUM_BYTES;
+
+    fn read_transcription_bytes(buf: &[u8]) -> Self {
+        Self {
+            root: MtHash::read_transcription_bytes(buf),
+        }
+    }
+
+    fn write_transcription_bytes(&self, buf: &mut [u8]) {
+        self.root.write_transcription_bytes(buf);
+    }
+}

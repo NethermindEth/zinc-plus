@@ -120,15 +120,33 @@ pub trait Transcript {
     }
 
     /// Absorbs a byte slice into the hash sponge.
-    fn absorb(&mut self, v: &[u8]);
+    /// This updates the internal state of the hasher with the provided data.
+    /// Should not be used directly.
+    fn absorb_inner(&mut self, v: &[u8]);
+
+    /// Absorbs a byte slice into the transcript.
+    fn absorb_slice(&mut self, buf: &[u8]) {
+        self.absorb_inner(&[0x6]);
+        self.absorb_inner(buf);
+        self.absorb_inner(&[0x7]);
+    }
 
     /// Absorbs a field element into the transcript.
-    /// Delegates to the field element's implementation of
-    /// absorb_into_transcript.
     fn absorb_random_field<F>(&mut self, v: &F, buf: &mut [u8])
     where
         F: PrimeField,
-        F::Inner: Transcribable;
+        F::Inner: Transcribable,
+    {
+        self.absorb_inner(&[0x3]);
+        v.modulus().write_transcription_bytes(buf);
+        self.absorb_inner(buf);
+        self.absorb_inner(&[0x5]);
+
+        self.absorb_inner(&[0x1]);
+        v.inner().write_transcription_bytes(buf);
+        self.absorb_inner(buf);
+        self.absorb_inner(&[0x3])
+    }
 
     /// Absorbs a slice of field element into the transcript.
     /// Delegates to the field element's implementation of

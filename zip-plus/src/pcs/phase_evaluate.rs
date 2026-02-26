@@ -3,16 +3,15 @@ use crate::{
     code::LinearCode,
     combine_rows,
     pcs::{
-        ZipPlusProof, ZipPlusTestTranscript,
         structs::{ZipPlus, ZipPlusParams, ZipTypes},
         utils::{point_to_tensor, validate_input},
     },
-    pcs_transcript::PcsTranscript,
+    pcs_transcript::PcsProverTranscript,
 };
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
 use zinc_poly::mle::DenseMultilinearExtension;
-use zinc_transcript::traits::{Transcribable, Transcript};
+use zinc_transcript::traits::Transcribable;
 use zinc_utils::{
     UNCHECKED, cfg_iter, cfg_iter_mut,
     from_ref::FromRef,
@@ -26,11 +25,13 @@ use rayon::prelude::*;
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     pub fn evaluate<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsProverTranscript,
         pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
         point: &[Zt::Pt],
-        test_transcript: ZipPlusTestTranscript,
-    ) -> Result<(F, ZipPlusProof), ZipError>
+        field_cfg: &F::Config,
+        projecting_element: &Zt::Chal,
+    ) -> Result<F, ZipError>
     where
         F: PrimeField
             + for<'a> FromWithConfig<&'a Zt::Chal>
@@ -42,13 +43,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     {
         validate_input::<Zt, Lc, _>("evaluate", pp.num_vars, &[poly], &[point])?;
 
-        let mut transcript: PcsTranscript = test_transcript.into();
-
-        let field_cfg = transcript
-            .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
-        let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
-        let projecting_element: F = (&projecting_element).into_with_cfg(&field_cfg);
+        let projecting_element: F = projecting_element.into_with_cfg(field_cfg);
 
         let num_rows = pp.num_rows;
         let row_len = pp.linear_code.row_len();
@@ -57,9 +52,9 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         // elements first
         let point = point
             .iter()
-            .map(|v| v.into_with_cfg(&field_cfg))
+            .map(|v| v.into_with_cfg(field_cfg))
             .collect_vec();
-        let (q_0, q_1) = point_to_tensor(num_rows, &point, &field_cfg)?;
+        let (q_0, q_1) = point_to_tensor(num_rows, &point, field_cfg)?;
 
         let project = Zt::Eval::prepare_projection(&projecting_element);
         let evaluations: Vec<F> = cfg_iter!(poly).map(project).collect();
@@ -72,7 +67,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 evaluations.iter(),
                 Ok::<_, ZipError>,
                 row_len,
-                F::zero_with_cfg(&field_cfg)
+                F::zero_with_cfg(field_cfg)
             )
         } else {
             // If there is only one row, we have no need to take linear combinations
@@ -85,9 +80,9 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let eval_f = MBSInnerProduct::inner_product::<UNCHECKED>(
             &q_0_combined_row,
             &q_1,
-            F::zero_with_cfg(&field_cfg),
+            F::zero_with_cfg(field_cfg),
         )?;
-        Ok((eval_f, transcript.into()))
+        Ok(eval_f)
     }
 }
 

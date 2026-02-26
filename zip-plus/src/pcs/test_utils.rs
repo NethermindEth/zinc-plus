@@ -12,11 +12,8 @@ use crate::{
         raa::{RaaCode, RaaConfig},
         raa_sign_flip::RaaSignFlippingCode,
     },
-    pcs::{
-        ZipPlusProof,
-        structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
-    },
-    pcs_transcript::PcsTranscript,
+    pcs::structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
+    pcs_transcript::{PcsProverTranscript, PcsVerifierTranscript},
 };
 use crypto_primitives::{
     FromWithConfig, IntSemiring, IntoWithConfig, PrimeField, crypto_bigint_int::Int,
@@ -32,7 +29,7 @@ use zinc_poly::{
     },
 };
 use zinc_primality::MillerRabin;
-use zinc_transcript::traits::{Transcribable, Transcript};
+use zinc_transcript::traits::{ConstTranscribable, Transcribable, Transcript};
 use zinc_utils::{
     CHECKED,
     from_ref::FromRef,
@@ -157,7 +154,7 @@ pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
     ZipPlusCommitment,
     Vec<F>,
     F,
-    ZipPlusProof,
+    PcsVerifierTranscript,
 )
 where
     F: PrimeField
@@ -190,7 +187,7 @@ pub fn setup_full_protocol_poly<
     ZipPlusCommitment,
     Vec<F>,
     F,
-    ZipPlusProof,
+    PcsVerifierTranscript,
 )
 where
     F: PrimeField
@@ -215,7 +212,7 @@ fn setup_full_protocol_inner<Zt, Lc, F, const N: usize>(
     ZipPlusCommitment,
     Vec<F>,
     F,
-    ZipPlusProof,
+    PcsVerifierTranscript,
 )
 where
     Zt: ZipTypes,
@@ -234,21 +231,22 @@ where
 
     let (data, comm) = ZipPlus::commit(&pp, &poly).unwrap();
 
+    let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+    let (field_cfg, projecting_element) =
+        get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
+
     let point: Vec<Zt::Pt> = prepare_evaluation_point();
 
-    let transcript = ZipPlus::test::<CHECKED>(&pp, &poly, &data).unwrap();
-
-    let (field_cfg, projecting_element) = {
-        let mut transcript: PcsTranscript = transcript.clone().into();
-        let field_cfg = transcript
-            .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
-        let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
-        let projecting_element: F = (&projecting_element).into_with_cfg(&field_cfg);
-        (field_cfg, projecting_element)
-    };
-
-    let (eval_f, proof) = ZipPlus::evaluate::<_, CHECKED>(&pp, &poly, &point, transcript).unwrap();
+    ZipPlus::test::<CHECKED>(&mut transcript, &pp, &poly, &data).unwrap();
+    let eval_f = ZipPlus::evaluate::<_, CHECKED>(
+        &mut transcript,
+        &pp,
+        &poly,
+        &point,
+        &field_cfg,
+        &projecting_element,
+    )
+    .unwrap();
 
     // Verify the evaluation is done correctly
     {
@@ -258,7 +256,8 @@ where
         let expected_eval = poly
             .evaluate(&point, Zero::zero())
             .expect("failed to evaluate polynomial");
-        let project = Zt::Comb::prepare_projection(&projecting_element);
+        let projecting_element_f: F = (&projecting_element).into_with_cfg(&field_cfg);
+        let project = Zt::Comb::prepare_projection(&projecting_element_f);
         assert_eq!(eval_f, project(&expected_eval));
     }
 
@@ -267,5 +266,24 @@ where
         .map(|v| v.into_with_cfg(&field_cfg))
         .collect_vec();
 
-    (pp, comm, point_f, eval_f, proof)
+    let mut transcript = transcript.into_verification_transcript();
+
+    let mut buf = vec![0; ZipPlusCommitment::NUM_BYTES];
+    ConstTranscribable::write_transcription_bytes(&comm, &mut buf);
+    transcript.fs_transcript.absorb_slice(&buf);
+
+    (pp, comm, point_f, eval_f, transcript)
+}
+
+pub fn get_field_and_projecting_element<Zt, F>(
+    transcript: &mut impl Transcript,
+) -> (F::Config, Zt::Chal)
+where
+    Zt: ZipTypes,
+    F: PrimeField,
+    F::Inner: FromRef<Zt::Fmod>,
+{
+    let field_cfg = transcript.get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+    let projecting_element: Zt::Chal = transcript.get_challenge();
+    (field_cfg, projecting_element)
 }

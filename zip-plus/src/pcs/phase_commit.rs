@@ -198,6 +198,7 @@ mod tests {
             structs::{ZipPlus, ZipPlusParams, ZipTypes},
             test_utils::*,
         },
+        pcs_transcript::PcsProverTranscript,
     };
     use crypto_bigint::{Random, U64, U256, Word};
     use crypto_primitives::{
@@ -622,10 +623,13 @@ mod tests {
             .map(|_| <Zt as ZipTypes>::Pt::random(&mut rng))
             .collect();
 
-        let (hint, _) = TestZip::commit(&param, &mle).unwrap();
+        let (hint, comm) = TestZip::commit(&param, &mle).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let (field_cfg, projecting_element) =
+            get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
 
-        let test_transcript = TestZip::test::<CHECKED>(&param, &mle, &hint).unwrap();
-        let actual_test_transcript_size_bytes = test_transcript.0.stream.get_ref().len();
+        TestZip::test::<CHECKED>(&mut transcript, &param, &mle, &hint).unwrap();
+        let actual_test_transcript_size_bytes = transcript.stream.get_ref().len();
         let expected_test_transcript_size_bytes =
             calculate_expected_test_transcript_size_bytes(&param);
         assert_eq!(
@@ -633,9 +637,16 @@ mod tests {
             expected_test_transcript_size_bytes
         );
 
-        let (_, proof) =
-            TestZip::evaluate::<F, CHECKED>(&param, &mle, &point, test_transcript).unwrap();
-        let actual_proof_size_bytes = proof.0.len();
+        let _ = TestZip::evaluate::<F, CHECKED>(
+            &mut transcript,
+            &param,
+            &mle,
+            &point,
+            &field_cfg,
+            &projecting_element,
+        )
+        .unwrap();
+        let actual_proof_size_bytes = transcript.stream.get_ref().len();
         let expected_proof_size_bytes = calculate_expected_proof_size_bytes(&param);
         assert_eq!(actual_proof_size_bytes, expected_proof_size_bytes);
     }
