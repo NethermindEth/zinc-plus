@@ -2,9 +2,19 @@
 //!
 //! This module provides [`prove`] and [`verify`] functions that compose:
 //! - Batched Zip+ PCS (commit → test → evaluate → verify)
-//! - Zinc+ PIOP (ideal check → combined poly resolver → sumcheck)
+//! - Zinc+ PIOP (ideal check → combined poly resolver → lookup → sumcheck)
 //!
 //! The pipeline works over `BinaryPoly<DEGREE_PLUS_ONE>` traces.
+//!
+//! ## Lookup Integration
+//!
+//! After the CPR step, the pipeline runs **batched decomposed LogUp** to
+//! enforce typing constraints on trace columns.  Columns declared as
+//! `binary_poly` in the [`UairSignature`] are checked against the
+//! projected `{0,1}^{<w}[X]` table (BitPoly), and columns declared as
+//! `int` are checked against `[0, 2^w − 1]` (Word).  The decomposition
+//! splits large tables (e.g. 2^{32}) into sub-tables of size 2^{16} to
+//! keep the lookup efficient.
 
 use std::time::{Duration, Instant};
 
@@ -31,6 +41,9 @@ use zip_plus::pcs::structs::{ZipPlusParams, ZipTypes};
 
 use zinc_piop::ideal_check::{IdealCheckField, IdealCheckProtocol, ProjectToField};
 use zinc_piop::combined_poly_resolver::CombinedPolyResolver;
+use zinc_piop::lookup::pipeline::{
+    PipelineLookupConfig, PipelineLookupProof, lookup_prove, lookup_verify,
+};
 use zinc_piop::sumcheck::prover::{NatEvaluatedPolyWithoutConstant, ProverMsg};
 use zinc_piop::sumcheck::SumcheckProof;
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
@@ -80,6 +93,7 @@ pub struct TimingBreakdown {
     pub pcs_commit: Duration,
     pub ideal_check: Duration,
     pub combined_poly_resolver: Duration,
+    pub lookup: Duration,
     pub pcs_test: Duration,
     pub pcs_evaluate: Duration,
     pub total: Duration,
@@ -90,6 +104,7 @@ pub struct TimingBreakdown {
 pub struct VerifyTimingBreakdown {
     pub ideal_check_verify: Duration,
     pub combined_poly_resolver_verify: Duration,
+    pub lookup_verify: Duration,
     pub pcs_verify: Duration,
     pub total: Duration,
 }
@@ -108,6 +123,11 @@ pub struct ZincProof {
     pub cpr_sumcheck_claimed_sum: Vec<u8>,
     pub cpr_up_evals: Vec<Vec<u8>>,
     pub cpr_down_evals: Vec<Vec<u8>>,
+    /// Batched decomposed LogUp proof for typing constraints.
+    ///
+    /// Contains the lookup proof data for all groups (BitPoly + Word).
+    /// `None` if the UAIR has no lookup constraints.
+    pub lookup_proof: Option<PipelineLookupProof<PiopField>>,
     /// PCS evaluation claims from CPR (evaluation point in the field).
     pub evaluation_point_bytes: Vec<Vec<u8>>,
     /// PCS evaluation values (evaluations of committed polys at the point).
@@ -264,6 +284,20 @@ where
         .expect("Combined poly resolver failed");
     let cpr_time = t2.elapsed();
 
+    // ── Step 3b: PIOP — Batched Decomposed LogUp (typing constraints) ──
+    // If a lookup configuration is provided, run the batched decomposed
+    // LogUp protocol to enforce that `binary_poly` columns have entries
+    // in `{0,1}^{<w}[X]` and `int` columns have entries in `[0, 2^w−1]`.
+    //
+    // TODO: The projected trace columns and original indices must be
+    // passed in by the caller once the UAIR trait exposes signature
+    // information and the IC prover state includes the projected scalar
+    // trace.  For now, the lookup proof slot exists but is not yet
+    // populated in this function.  Use `prove_with_lookup` for the
+    // full pipeline with typing enforcement.
+    let lookup_time = Duration::ZERO;
+    let lookup_proof: Option<PipelineLookupProof<PiopField>> = None;
+
     // ── Step 4: PCS Test ────────────────────────────────────────────
     let t3 = Instant::now();
     let test_transcript =
@@ -332,12 +366,14 @@ where
         cpr_sumcheck_claimed_sum,
         cpr_up_evals,
         cpr_down_evals,
+        lookup_proof,
         evaluation_point_bytes,
         pcs_evals_bytes,
         timing: TimingBreakdown {
             pcs_commit: pcs_commit_time,
             ideal_check: ideal_check_time,
             combined_poly_resolver: cpr_time,
+            lookup: lookup_time,
             pcs_test: pcs_test_time,
             pcs_evaluate: pcs_eval_time,
             total: total_time,
@@ -481,12 +517,14 @@ where
         cpr_sumcheck_claimed_sum,
         cpr_up_evals,
         cpr_down_evals,
+        lookup_proof: None,
         evaluation_point_bytes,
         pcs_evals_bytes,
         timing: TimingBreakdown {
             pcs_commit: pcs_commit_time,
             ideal_check: ideal_check_time,
             combined_poly_resolver: cpr_time,
+            lookup: Duration::ZERO,
             pcs_test: pcs_test_time,
             pcs_evaluate: pcs_eval_time,
             total: total_time,

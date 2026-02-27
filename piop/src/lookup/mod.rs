@@ -31,10 +31,15 @@
 pub mod batched_decomposition;
 pub mod decomposition;
 pub mod logup;
+pub mod pipeline;
 pub mod structs;
 pub mod tables;
 
 pub use batched_decomposition::BatchedDecompLogupProtocol;
 pub use decomposition::DecompLogupProtocol;
 pub use logup::LogupProtocol;
+pub use pipeline::{
+    LookupConfig, LookupTableKind, PipelineLookupConfig, PipelineLookupProof,
+    PipelineLookupProverState, PipelineLookupVerifierSubClaim,
+};
 pub use structs::*;
