@@ -6,7 +6,7 @@ use crypto_primitives::PrimeField;
 #[cfg(feature = "parallel")]
 use rayon::iter::*;
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
-use zinc_utils::{cfg_into_iter, cfg_iter_mut, inner_transparent_field::InnerTransparentField};
+use zinc_utils::{cfg_iter_mut, inner_transparent_field::InnerTransparentField};
 
 /// Evaluation of a polynomial on natural points without the constant term.
 #[repr(transparent)]
@@ -101,9 +101,18 @@ where
             let i = self.round;
             let r = self.randomness[i - 1].clone();
 
-            cfg_iter_mut!(self.mles).for_each(|multiplicand| {
-                multiplicand.fix_variables_with_config(slice::from_ref(&r), config);
-            });
+            // Only parallelize MLE fixing when each MLE is large enough to amortise
+            // rayon's task-dispatch overhead (≥64 elements per MLE).
+            let mle_size = 1usize << self.num_vars.saturating_sub(i.saturating_sub(1));
+            if mle_size >= 128 {
+                cfg_iter_mut!(self.mles).for_each(|multiplicand| {
+                    multiplicand.fix_variables_with_config(slice::from_ref(&r), config);
+                });
+            } else {
+                self.mles.iter_mut().for_each(|multiplicand| {
+                    multiplicand.fix_variables_with_config(slice::from_ref(&r), config);
+                });
+            }
         } else if self.round > 0 {
             panic!("verifier message is empty");
         }
@@ -145,75 +154,114 @@ where
         #[cfg(feature = "parallel")]
         let zeros = scratch;
 
-        let summer = cfg_into_iter!(0..1 << (nv - i)).fold(zeros, |mut s, b| {
-            let index = b << 1;
+        // Minimum number of fold items to justify rayon dispatch.
+        // Below this threshold, task-spawn overhead dominates the actual work
+        // (especially for GKR's many small inner sumchecks).
+        let half = 1usize << (nv - i);
 
-            // TODO(Alex): Once you have benches set,
-            //             could please try getting rid of vals0 and vals1 fields in the
-            // structs, replacing them with
-            //
-            //             ```rust
-            //             let vals0: Vec<_> = polys.iter().map(|poly|
-            // poly[index].clone()).collect();             let vals1: Vec<_> =
-            // polys.iter().map(|poly| poly[index + 1].clone()).collect();
-            //             ```
-            //             My bet is that it won't affect running time, but better safe than
-            // sorry.
-
-            s.vals0
-                .iter_mut()
-                .zip(polys.iter())
-                .for_each(|(v0, poly)| *v0.inner_mut() = poly[index].clone());
-            s.levals[0] = comb_fn(&s.vals0);
-
-            if degree > 0 {
-                s.vals1
+        #[cfg(feature = "parallel")]
+        let evaluations = if half >= 512 {
+            use rayon::prelude::*;
+            (0..half)
+                .into_par_iter()
+                .fold(zeros, |mut s, b| {
+                    let index = b << 1;
+                    s.vals0
+                        .iter_mut()
+                        .zip(polys.iter())
+                        .for_each(|(v0, poly)| *v0.inner_mut() = poly[index].clone());
+                    s.levals[0] = comb_fn(&s.vals0);
+                    if degree > 0 {
+                        s.vals1
+                            .iter_mut()
+                            .zip(polys.iter())
+                            .for_each(|(v1, poly)| *v1.inner_mut() = poly[index + 1].clone());
+                        s.levals[1] = comb_fn(&s.vals1);
+                        for (i, (v1, v0)) in s.vals1.iter().zip(s.vals0.iter()).enumerate() {
+                            s.steps[i] = v1.clone() - v0.clone();
+                            s.vals[i] = v1.clone();
+                        }
+                        for eval_point in s.levals.iter_mut().take(degree + 1).skip(2) {
+                            for poly_i in 0..polys.len() {
+                                s.vals[poly_i] += &s.steps[poly_i];
+                            }
+                            *eval_point = comb_fn(&s.vals);
+                        }
+                    }
+                    s.evals.iter_mut().zip(s.levals.iter()).for_each(|(e, l)| *e += l);
+                    s
+                })
+                .map(|s| s.evals)
+                .reduce(
+                    || vec![zero.clone(); degree + 1],
+                    |mut evaluations, evals| {
+                        evaluations.iter_mut().zip(evals).for_each(|(e, l)| *e += &l);
+                        evaluations
+                    },
+                )
+        } else {
+            // Sequential fallback: rayon dispatch overhead exceeds work for small folds.
+            let s = (0..half).fold(zeros(), |mut s, b| {
+                let index = b << 1;
+                s.vals0
                     .iter_mut()
                     .zip(polys.iter())
-                    .for_each(|(v1, poly)| *v1.inner_mut() = poly[index + 1].clone());
-                s.levals[1] = comb_fn(&s.vals1);
-
-                for (i, (v1, v0)) in s.vals1.iter().zip(s.vals0.iter()).enumerate() {
-                    s.steps[i] = v1.clone() - v0.clone();
-                    s.vals[i] = v1.clone();
-                }
-
-                for eval_point in s.levals.iter_mut().take(degree + 1).skip(2) {
-                    for poly_i in 0..polys.len() {
-                        s.vals[poly_i] += &s.steps[poly_i];
+                    .for_each(|(v0, poly)| *v0.inner_mut() = poly[index].clone());
+                s.levals[0] = comb_fn(&s.vals0);
+                if degree > 0 {
+                    s.vals1
+                        .iter_mut()
+                        .zip(polys.iter())
+                        .for_each(|(v1, poly)| *v1.inner_mut() = poly[index + 1].clone());
+                    s.levals[1] = comb_fn(&s.vals1);
+                    for (i, (v1, v0)) in s.vals1.iter().zip(s.vals0.iter()).enumerate() {
+                        s.steps[i] = v1.clone() - v0.clone();
+                        s.vals[i] = v1.clone();
                     }
-                    *eval_point = comb_fn(&s.vals);
+                    for eval_point in s.levals.iter_mut().take(degree + 1).skip(2) {
+                        for poly_i in 0..polys.len() {
+                            s.vals[poly_i] += &s.steps[poly_i];
+                        }
+                        *eval_point = comb_fn(&s.vals);
+                    }
                 }
-            }
-
-            // TODO(Alex): It seems that the only thing
-            //             we pass around meaningfully is evals,
-            //             so this loop could be reworked to map/reduce - maybe even without
-            //             #[cfg(feature = "parallel")]. Would help to get benchmarks up and
-            //             running first though.
+                s.evals.iter_mut().zip(s.levals.iter()).for_each(|(e, l)| *e += l);
+                s
+            });
             s.evals
-                .iter_mut()
-                .zip(s.levals.iter())
-                .for_each(|(e, l)| *e += l);
-
-            s
-        });
-
-        // Rayon's fold outputs an iter which still needs to be summed over
-        #[cfg(feature = "parallel")]
-        let evaluations = summer.map(|s| s.evals).reduce(
-            || vec![zero.clone(); degree + 1],
-            |mut evaluations, evals| {
-                evaluations
-                    .iter_mut()
-                    .zip(evals)
-                    .for_each(|(e, l)| *e += &l);
-                evaluations
-            },
-        );
+        };
 
         #[cfg(not(feature = "parallel"))]
-        let evaluations = summer.evals;
+        let evaluations = {
+            let s = (0..half).fold(zeros, |mut s, b| {
+                let index = b << 1;
+                s.vals0
+                    .iter_mut()
+                    .zip(polys.iter())
+                    .for_each(|(v0, poly)| *v0.inner_mut() = poly[index].clone());
+                s.levals[0] = comb_fn(&s.vals0);
+                if degree > 0 {
+                    s.vals1
+                        .iter_mut()
+                        .zip(polys.iter())
+                        .for_each(|(v1, poly)| *v1.inner_mut() = poly[index + 1].clone());
+                    s.levals[1] = comb_fn(&s.vals1);
+                    for (i, (v1, v0)) in s.vals1.iter().zip(s.vals0.iter()).enumerate() {
+                        s.steps[i] = v1.clone() - v0.clone();
+                        s.vals[i] = v1.clone();
+                    }
+                    for eval_point in s.levals.iter_mut().take(degree + 1).skip(2) {
+                        for poly_i in 0..polys.len() {
+                            s.vals[poly_i] += &s.steps[poly_i];
+                        }
+                        *eval_point = comb_fn(&s.vals);
+                    }
+                }
+                s.evals.iter_mut().zip(s.levals.iter()).for_each(|(e, l)| *e += l);
+                s
+            });
+            s.evals
+        };
 
         // Record the claimed sum once during the first round.
         if self.round == 1 {

@@ -30,11 +30,17 @@
 
 pub mod batched_decomposition;
 pub mod decomposition;
+pub mod gkr_decomposition;
+pub mod gkr_logup;
 pub mod logup;
 pub mod structs;
 pub mod tables;
+pub mod gkr_batched_decomposition;
 
 pub use batched_decomposition::BatchedDecompLogupProtocol;
 pub use decomposition::DecompLogupProtocol;
+pub use gkr_decomposition::GkrDecompLogupProtocol;
+pub use gkr_logup::GkrLogupProtocol;
 pub use logup::LogupProtocol;
 pub use structs::*;
+pub use gkr_batched_decomposition::GkrBatchedDecompLogupProtocol;

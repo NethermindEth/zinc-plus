@@ -85,15 +85,28 @@ where
         // if x_0 = 1:   r0 * [b_1, ..., b_k]
 
         let mut res = vec![F::zero_with_cfg(cfg); buf.len() << 1];
-        cfg_iter_mut!(res).enumerate().for_each(|(i, val)| {
-            let bi = buf[i >> 1].clone();
-            let tmp = r[0].clone() * &bi;
-            if (i & 1) == 0 {
-                *val = bi - tmp;
-            } else {
-                *val = tmp;
-            }
-        });
+        // Only parallelise when the array is large enough to justify dispatch overhead.
+        if res.len() >= 256 {
+            cfg_iter_mut!(res).enumerate().for_each(|(i, val)| {
+                let bi = buf[i >> 1].clone();
+                let tmp = r[0].clone() * &bi;
+                if (i & 1) == 0 {
+                    *val = bi - tmp;
+                } else {
+                    *val = tmp;
+                }
+            });
+        } else {
+            res.iter_mut().enumerate().for_each(|(i, val)| {
+                let bi = buf[i >> 1].clone();
+                let tmp = r[0].clone() * &bi;
+                if (i & 1) == 0 {
+                    *val = bi - tmp;
+                } else {
+                    *val = tmp;
+                }
+            });
+        }
         *buf = res;
     }
 
@@ -180,16 +193,30 @@ where
         // if x_0 = 1:   r0 * [b_1, ..., b_k]
 
         let mut res = vec![F::Inner::zero(); buf.len() << 1];
-        cfg_iter_mut!(res).enumerate().for_each(|(i, val)| {
-            let mut bi = F::zero_with_cfg(cfg);
-            *bi.inner_mut() = buf[i >> 1].clone();
-            let tmp = r[0].clone() * &bi;
-            if (i & 1) == 0 {
-                *val = (bi - tmp).inner().clone();
-            } else {
-                *val = tmp.inner().clone();
-            }
-        });
+        // Only parallelise when the array is large enough to justify dispatch overhead.
+        if res.len() >= 256 {
+            cfg_iter_mut!(res).enumerate().for_each(|(i, val)| {
+                let mut bi = F::zero_with_cfg(cfg);
+                *bi.inner_mut() = buf[i >> 1].clone();
+                let tmp = r[0].clone() * &bi;
+                if (i & 1) == 0 {
+                    *val = (bi - tmp).inner().clone();
+                } else {
+                    *val = tmp.inner().clone();
+                }
+            });
+        } else {
+            res.iter_mut().enumerate().for_each(|(i, val)| {
+                let mut bi = F::zero_with_cfg(cfg);
+                *bi.inner_mut() = buf[i >> 1].clone();
+                let tmp = r[0].clone() * &bi;
+                if (i & 1) == 0 {
+                    *val = (bi - tmp).inner().clone();
+                } else {
+                    *val = tmp.inner().clone();
+                }
+            });
+        }
         *buf = res;
     }
 
