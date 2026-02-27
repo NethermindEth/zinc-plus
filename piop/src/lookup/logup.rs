@@ -288,21 +288,17 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> LogupProt
             }
         }
 
-        // Reconstruct witness using batch_inverse (1 inversion + O(W) muls)
-        // instead of per-element division.
+        // Compute d̃(x*) directly: since d[i] = β − w[i] = 1/u[i],
+        // we have d̃(x*) = Σ_j (1/u[j]) · eq(j, x*).
         let u_inv = batch_inverse(&proof.inverse_witness);
-        let witness_reconstructed: Vec<F> = cfg_iter!(u_inv)
-            .map(|inv_u| beta.clone() - inv_u)
-            .collect();
-
-        let w_eval = eval_at_point(&witness_reconstructed);
+        let d_eval = eval_at_point(&u_inv);
         let u_eval = eval_at_point(&proof.inverse_witness);
         let v_eval = eval_at_point(&proof.inverse_table);
         let m_eval = eval_at_point(&proof.multiplicities);
 
         // Recompute the combination function at the subclaim point
         // (matches the prover's 2-identity comb_fn)
-        let id1 = (beta.clone() - &w_eval) * &u_eval - &one;
+        let id1 = d_eval * &u_eval - &one;
         let id2 = u_eval.clone() - &(m_eval * &v_eval);
 
         let batched = id1 + id2 * &gamma;
