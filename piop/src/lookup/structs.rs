@@ -1,0 +1,237 @@
+//! Data structures for the lookup protocol.
+//!
+//! Contains proof types, prover state, verifier sub-claims, and error
+//! definitions for both the core LogUp protocol and the
+//! decomposition-based LogUp protocol for large tables.
+
+use crypto_primitives::PrimeField;
+use thiserror::Error;
+use zinc_poly::{EvaluationError, utils::ArithErrors};
+
+use crate::sumcheck::{SumCheckError, SumcheckProof};
+
+// ---------------------------------------------------------------------------
+// LogUp
+// ---------------------------------------------------------------------------
+
+/// Proof for the LogUp protocol.
+///
+/// Since all auxiliary vectors are sent in the clear, the proof
+/// contains these vectors plus the batched sumcheck proof.
+#[derive(Clone, Debug)]
+pub struct LogupProof<F: PrimeField> {
+    /// Multiplicity vector: `m[j]` counts how many times `T[j]` appears in
+    /// the witness.
+    pub multiplicities: Vec<F>,
+    /// Inverse witness vector: `u[i] = 1 / (β − w[i])`.
+    pub inverse_witness: Vec<F>,
+    /// Inverse table vector: `v[j] = 1 / (β − T[j])`.
+    pub inverse_table: Vec<F>,
+    /// The batched sumcheck proof covering the three LogUp identities.
+    pub sumcheck_proof: SumcheckProof<F>,
+}
+
+/// Prover state after running the LogUp protocol.
+#[derive(Clone, Debug)]
+pub struct LogupProverState<F: PrimeField> {
+    /// The evaluation point produced by the sumcheck.
+    pub evaluation_point: Vec<F>,
+}
+
+/// Verifier sub-claim after verifying the LogUp proof.
+#[derive(Clone, Debug)]
+pub struct LogupVerifierSubClaim<F: PrimeField> {
+    /// The evaluation point produced by the sumcheck verifier.
+    pub evaluation_point: Vec<F>,
+    /// The expected evaluation at the sub-claim point.
+    pub expected_evaluation: F,
+}
+
+// ---------------------------------------------------------------------------
+// Decomposition + LogUp
+// ---------------------------------------------------------------------------
+
+/// Proof for the Decomposition + LogUp protocol.
+///
+/// Used for large tables (e.g. 2^{32}) that are decomposed into two
+/// sub-tables of size 2^{k} each (typically k = 16).
+#[derive(Clone, Debug)]
+pub struct DecompLogupProof<F: PrimeField> {
+    /// Decomposition chunk vectors sent in the clear.
+    /// For a 2-chunk decomposition: `[chunk_lo, chunk_hi]`.
+    pub chunk_vectors: Vec<Vec<F>>,
+    /// The batched sumcheck proof covering the decomposition consistency
+    /// check **and** both LogUp sub-protocol identities.
+    pub sumcheck_proof: SumcheckProof<F>,
+    /// Aggregated multiplicity vector: `m_agg[j] = Σ_k m_k[j]`, where
+    /// `m_k[j]` counts how many times `T[j]` appears in chunk `k`.
+    pub aggregated_multiplicities: Vec<F>,
+    /// Inverse witness vectors for each chunk's LogUp (lo, then hi).
+    pub chunk_inverse_witnesses: Vec<Vec<F>>,
+    /// Inverse table vector (shared between both chunks when the
+    /// sub-table is the same).
+    pub inverse_table: Vec<F>,
+}
+
+/// Prover state after running the Decomposition + LogUp protocol.
+#[derive(Clone, Debug)]
+pub struct DecompLogupProverState<F: PrimeField> {
+    /// The evaluation point produced by the sumcheck.
+    pub evaluation_point: Vec<F>,
+}
+
+/// Verifier sub-claim after verifying the Decomposition + LogUp proof.
+#[derive(Clone, Debug)]
+pub struct DecompLogupVerifierSubClaim<F: PrimeField> {
+    /// The evaluation point produced by the sumcheck verifier.
+    pub evaluation_point: Vec<F>,
+    /// The expected evaluation at the sub-claim point.
+    pub expected_evaluation: F,
+}
+
+/// Describes a decomposition-based lookup instance with K chunks.
+///
+/// The witness is decomposed as:
+/// `w_i = shifts[0]*chunks[0][i] + shifts[1]*chunks[1][i] + … + shifts[K-1]*chunks[K-1][i]`
+///
+/// All chunks look up into the same sub-table.
+#[derive(Clone, Debug)]
+pub struct DecompLookupInstance<F: PrimeField> {
+    /// The witness column (projected trace column).
+    pub witness: Vec<F>,
+    /// The sub-table entries (e.g. projected BitPoly(8) or Word(8)).
+    pub subtable: Vec<F>,
+    /// Shift factors, one per chunk.
+    ///
+    /// For `BitPoly(32)` with 4 chunks of width 8:
+    /// `shifts = [1, a^8, a^16, a^24]`.
+    pub shifts: Vec<F>,
+    /// Precomputed decomposition chunks.
+    ///
+    /// `chunks[k][i]` is the k-th chunk of witness entry `i`.
+    /// Each chunk vector has length equal to the witness length.
+    pub chunks: Vec<Vec<F>>,
+}
+
+// ---------------------------------------------------------------------------
+// Batched Decomposition + LogUp
+// ---------------------------------------------------------------------------
+
+/// Instance for the **batched** Decomposition + LogUp protocol.
+///
+/// Multiple witness vectors (all the same length) all look up into
+/// the same decomposed table.  The shifts and sub-table are shared;
+/// each witness has its own chunk decomposition.
+///
+/// `witnesses[ℓ][i] = Σ_k shifts[k] · chunks[ℓ][k][i]`
+#[derive(Clone, Debug)]
+pub struct BatchedDecompLookupInstance<F: PrimeField> {
+    /// L witness vectors, each of the same length.
+    pub witnesses: Vec<Vec<F>>,
+    /// The shared sub-table entries.
+    pub subtable: Vec<F>,
+    /// Shift factors (K entries, same for every witness).
+    pub shifts: Vec<F>,
+    /// Per-witness chunk decompositions.
+    ///
+    /// `chunks[ℓ][k][i]` = k-th chunk of the ℓ-th witness, entry i.
+    pub chunks: Vec<Vec<Vec<F>>>,
+}
+
+/// Proof for the **batched** Decomposition + LogUp protocol.
+///
+/// A single sumcheck covers all L lookups simultaneously.
+#[derive(Clone, Debug)]
+pub struct BatchedDecompLogupProof<F: PrimeField> {
+    /// Per-witness chunk vectors: `chunk_vectors[ℓ][k]`.
+    pub chunk_vectors: Vec<Vec<Vec<F>>>,
+    /// The single batched sumcheck proof.
+    pub sumcheck_proof: SumcheckProof<F>,
+    /// Per-witness aggregated multiplicity vectors:
+    /// `aggregated_multiplicities[ℓ][j] = Σ_k m_k^(ℓ)[j]`.
+    pub aggregated_multiplicities: Vec<Vec<F>>,
+    /// Per-witness inverse witness vectors: `chunk_inverse_witnesses[ℓ][k]`.
+    pub chunk_inverse_witnesses: Vec<Vec<Vec<F>>>,
+    /// Shared inverse table vector (computed once from β).
+    pub inverse_table: Vec<F>,
+}
+
+/// Prover state after running the batched Decomposition + LogUp protocol.
+#[derive(Clone, Debug)]
+pub struct BatchedDecompLogupProverState<F: PrimeField> {
+    /// The evaluation point produced by the sumcheck.
+    pub evaluation_point: Vec<F>,
+}
+
+/// Verifier sub-claim after verifying the batched Decomposition + LogUp proof.
+#[derive(Clone, Debug)]
+pub struct BatchedDecompLogupVerifierSubClaim<F: PrimeField> {
+    /// The evaluation point produced by the sumcheck verifier.
+    pub evaluation_point: Vec<F>,
+    /// The expected evaluation at the sub-claim point.
+    pub expected_evaluation: F,
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// Errors that can occur during the LogUp or Decomposition + LogUp protocols.
+#[derive(Debug, Error)]
+pub enum LookupError<F: PrimeField> {
+    /// A sumcheck sub-protocol failed.
+    #[error("sumcheck error in lookup: {0}")]
+    SumCheckError(SumCheckError<F>),
+    /// Failed to build the eq polynomial.
+    #[error("failed to build eq polynomial: {0}")]
+    EqBuildError(ArithErrors),
+    /// Failed to evaluate an MLE.
+    #[error("MLE evaluation error: {0}")]
+    MleEvaluationError(EvaluationError),
+    /// A witness entry is not in the lookup table.
+    #[error("witness entry not found in lookup table")]
+    WitnessNotInTable,
+    /// The prover's inverse table vector is incorrect: (β − T_j) · v_j ≠ 1.
+    #[error("table inverse vector is incorrect at index {index}")]
+    TableInverseIncorrect {
+        /// Index of the first failing entry.
+        index: usize,
+    },
+    /// Decomposition consistency failure.
+    #[error("decomposition consistency check failed")]
+    DecompositionInconsistent,
+    /// Multiplicity sum does not match witness length.
+    #[error("multiplicity sum mismatch: expected {expected}, got {got}")]
+    MultiplicitySumMismatch {
+        /// Expected sum (witness length).
+        expected: u64,
+        /// Actual sum.
+        got: u64,
+    },
+    /// The verifier's final evaluation check failed.
+    #[error("final evaluation check failed: expected {expected:?}, got {got:?}")]
+    FinalEvaluationMismatch {
+        /// Expected evaluation.
+        expected: F,
+        /// Actual evaluation.
+        got: F,
+    },
+}
+
+impl<F: PrimeField> From<SumCheckError<F>> for LookupError<F> {
+    fn from(e: SumCheckError<F>) -> Self {
+        Self::SumCheckError(e)
+    }
+}
+
+impl<F: PrimeField> From<ArithErrors> for LookupError<F> {
+    fn from(e: ArithErrors) -> Self {
+        Self::EqBuildError(e)
+    }
+}
+
+impl<F: PrimeField> From<EvaluationError> for LookupError<F> {
+    fn from(e: EvaluationError) -> Self {
+        Self::MleEvaluationError(e)
+    }
+}

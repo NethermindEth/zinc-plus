@@ -45,6 +45,28 @@ impl<F: PrimeField> VerifierState<F> {
             config: config.clone(),
         }
     }
+
+    /// Receive a round's prover message and verifier challenge without
+    /// sampling from the transcript.
+    ///
+    /// Used by the multi-degree sumcheck where a single challenge is
+    /// shared across all degree groups and sampled externally.
+    pub fn receive_round(
+        &mut self,
+        prover_msg: &ProverMsg<F>,
+        challenge: F,
+    ) {
+        if self.finished {
+            panic!("Incorrect verifier state: Verifier is already finished.");
+        }
+        self.randomness.push(challenge);
+        self.polynomials_received.push(prover_msg.0.clone());
+        if self.round == self.nv {
+            self.finished = true;
+        } else {
+            self.round += 1;
+        }
+    }
 }
 
 /// Subclaim when verifier is convinced
