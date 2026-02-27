@@ -4,7 +4,7 @@ Benchmark the full PCS pipeline (Encode, Merkle, Commit, Test, Verify) for
 **Batched** Zip+ with BPoly<31> evaluations, num_rows=1, and depth=2.
 
 This script runs the "Batched PCS Pipeline Suite BPoly31 1row" criterion benchmarks
-and collects the results into a LaTeX table.  The benchmarks batch 5
+and collects the results into a LaTeX table.  The benchmarks batch 14
 polynomials into a single shared Merkle tree, using various IPRS codes.
 
     poly_size (2^P)   Config               Field           row_len
@@ -40,7 +40,7 @@ CARGO_BENCH_CMD = [
 EXPECTED_POLY_EXPS = [9, 10, 11]
 
 # Number of polynomials in the batch (must match the batch_size in benchmarks).
-BATCH_SIZE = 5
+BATCH_SIZE = 14
 
 # The five phases we benchmark
 PHASES = ["Encode", "Merkle", "Commit", "Test", "Verify"]
