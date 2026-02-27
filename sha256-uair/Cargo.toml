@@ -1,0 +1,21 @@
+[package]
+name = "zinc-sha256-uair"
+publish = false
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/NethermindEth/zinc-plus"
+license = "Apache-2.0"
+
+[lib]
+bench = false
+
+[dependencies]
+crypto-primitives = { git = "https://github.com/NethermindEth/crypto-primitives.git", branch = "main", features = ["std", "crypto_bigint", "rand"] }
+num-traits = "0.2"
+rand = "0.9"
+zinc-poly = { path = "../poly" }
+zinc-uair = { path = "../uair" }
+zinc-utils = { path = "../utils" }
+
+[dev-dependencies]
+zinc-uair = { path = "../uair" }

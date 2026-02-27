@@ -1,0 +1,12 @@
+[package]
+name = "zinc-ecdsa-uair"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+crypto-primitives = { git = "https://github.com/NethermindEth/crypto-primitives.git", branch = "main" }
+num-traits = "0.2"
+rand = "0.9"
+zinc-poly = { path = "../poly" }
+zinc-uair = { path = "../uair" }
+zinc-utils = { path = "../utils" }

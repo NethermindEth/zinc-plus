@@ -66,4 +66,36 @@ pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
         F: FromPrimitiveWithConfig + FromRef<F>;
+
+    /// Computes the encoding of `row` only at the given output `positions`.
+    ///
+    /// Returns `positions.len()` values, where the i-th result is the
+    /// codeword element that would appear at `positions[i]` in the full
+    /// encoding of `row`. This is much cheaper than a full `encode_wide`
+    /// when only a small subset of output positions is needed (e.g. for
+    /// verifier spot-checks).
+    ///
+    /// Default implementation falls back to `encode_wide` and indexes.
+    fn encode_wide_at_positions(
+        &self,
+        row: &[Zt::CombR],
+        positions: &[usize],
+    ) -> Vec<Zt::CombR> {
+        let full = self.encode_wide(row);
+        positions.iter().map(|&p| full[p].clone()).collect()
+    }
+
+    /// Computes the field-element encoding of `row` only at the given output
+    /// `positions`.
+    ///
+    /// Returns `positions.len()` values, where the i-th result is the
+    /// codeword element that would appear at `positions[i]` in the full
+    /// encoding of `row`. Default implementation falls back to `encode_f`.
+    fn encode_f_at_positions<F>(&self, row: &[F], positions: &[usize]) -> Vec<F>
+    where
+        F: FromPrimitiveWithConfig + FromRef<F> + Send + Sync,
+    {
+        let full = self.encode_f(row);
+        positions.iter().map(|&p| full[p].clone()).collect()
+    }
 }

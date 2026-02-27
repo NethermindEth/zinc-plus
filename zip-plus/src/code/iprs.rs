@@ -11,13 +11,15 @@ use crate::{
     pcs::structs::ZipTypes,
 };
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
-use num_traits::{CheckedAdd, CheckedMul};
+use num_traits::{CheckedAdd, CheckedMul, ConstZero};
 pub use pntt::radix8::params::{
     PnttConfigF2_16_1,
     PnttConfigF2_16R4B1, PnttConfigF2_16R4B2, PnttConfigF2_16R4B4,
     PnttConfigF2_16R4B16, PnttConfigF2_16R4B32, PnttConfigF2_16R4B64,
     PnttInt, Radix8PnttParams,
 };
+#[cfg(feature = "parallel")]
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{
     fmt::Debug,
     iter::Sum,
@@ -165,5 +167,61 @@ where
         F: FromPrimitiveWithConfig + FromRef<F>,
     {
         self.encode_inner_f(row)
+    }
+
+    /// Compute the encoding at only the given output positions using the
+    /// precomputed encoding matrix. Each output is an inner product of
+    /// one row of the encoding matrix with the input row:
+    ///   `result[k] = Σ_j encoding_matrix[positions[k]][j] * row[j]`
+    #[allow(clippy::arithmetic_side_effects)]
+    fn encode_wide_at_positions(
+        &self,
+        row: &[Zt::CombR],
+        positions: &[usize],
+    ) -> Vec<Zt::CombR> {
+        let matrix = &self.pntt_params.encoding_matrix;
+        let compute = |&pos: &usize| {
+            let mat_row = &matrix[pos];
+            let mut acc = Zt::CombR::ZERO;
+            for (j, coeff) in mat_row.iter().enumerate() {
+                let term = row[j]
+                    .mul_by_scalar::<false>(coeff)
+                    .expect("encode_wide_at_positions: MulByScalar overflow");
+                acc += term;
+            }
+            acc
+        };
+
+        #[cfg(feature = "parallel")]
+        { positions.par_iter().map(compute).collect() }
+
+        #[cfg(not(feature = "parallel"))]
+        { positions.iter().map(compute).collect() }
+    }
+
+    /// Compute the field-element encoding at only the given output positions.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn encode_f_at_positions<F>(&self, row: &[F], positions: &[usize]) -> Vec<F>
+    where
+        F: FromPrimitiveWithConfig + FromRef<F> + Send + Sync,
+    {
+        let matrix = &self.pntt_params.encoding_matrix;
+        let field_cfg = row[0].cfg();
+        let compute = |&pos: &usize| {
+            let mat_row = &matrix[pos];
+            mat_row.iter().enumerate().fold(
+                F::zero_with_cfg(field_cfg),
+                |acc, (j, &coeff)| {
+                    let term = F::from_with_cfg(coeff, field_cfg) * &row[j];
+                    acc + &term
+                },
+            )
+        };
+
+        #[cfg(feature = "parallel")]
+        { positions.par_iter().map(compute).collect() }
+
+        #[cfg(not(feature = "parallel"))]
+        { positions.iter().map(compute).collect() }
     }
 }

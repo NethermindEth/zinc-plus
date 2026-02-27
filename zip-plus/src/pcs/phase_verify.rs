@@ -73,7 +73,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 transcript.fs_transcript.get_challenges(degree_bound + 1)
             };
 
-            let b_i: Vec<F> = transcript.read_field_elements(num_rows)?;
+            let b_i: Vec<F> = transcript.read_field_elements(num_rows, &field_cfg)?;
 
             // Check eval claim: <q_0, b_i> == evals_f[i]
             if MBSInnerProduct::inner_product::<UNCHECKED>(

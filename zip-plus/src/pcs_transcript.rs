@@ -76,7 +76,11 @@ impl PcsTranscript {
         Ok(())
     }
 
-    pub fn read_field_elements<F>(&mut self, n: usize) -> Result<Vec<F>, ZipError>
+    pub fn read_field_elements<F>(
+        &mut self,
+        n: usize,
+        field_cfg: &F::Config,
+    ) -> Result<Vec<F>, ZipError>
     where
         F: PrimeField,
         F::Inner: Transcribable,
@@ -88,7 +92,7 @@ impl PcsTranscript {
 
             let mut buf = vec![0; num_bytes];
             (0..n)
-                .map(|_| self.read_field_element_no_length(&mut buf))
+                .map(|_| self.read_field_element_no_length(&mut buf, field_cfg))
                 .collect::<Result<Vec<_>, _>>()
         } else {
             Ok(vec![])
@@ -99,18 +103,22 @@ impl PcsTranscript {
     /// transcript. Used during proof verification to retrieve and process
     /// field elements.
     ///
+    /// Only the inner value is read; the modulus is derived from the provided
+    /// field_cfg (which the verifier obtained from the Fiat-Shamir transcript).
+    ///
     /// Provided buffer must be of exact size of the field element.
-    fn read_field_element_no_length<F>(&mut self, buf: &mut [u8]) -> Result<F, ZipError>
+    fn read_field_element_no_length<F>(
+        &mut self,
+        buf: &mut [u8],
+        field_cfg: &F::Config,
+    ) -> Result<F, ZipError>
     where
         F: PrimeField,
         F::Inner: Transcribable,
     {
         self.stream.read_exact(buf)?;
         let inner = F::Inner::read_transcription_bytes(buf);
-        self.stream.read_exact(buf)?;
-        let modulus = F::Inner::read_transcription_bytes(buf);
-        let field_cfg = F::make_cfg(&modulus)?;
-        let fe = F::new_unchecked_with_cfg(inner, &field_cfg);
+        let fe = F::new_unchecked_with_cfg(inner, field_cfg);
         self.fs_transcript.absorb_random_field(&fe, buf);
         Ok(fe)
     }
@@ -118,6 +126,9 @@ impl PcsTranscript {
     /// Writes a field element to the proof stream and absorbs it into the
     /// transcript. Used during proof generation to store field elements for
     /// later verification.
+    ///
+    /// Only the inner value is written; the modulus is omitted since the
+    /// verifier derives it from the Fiat-Shamir transcript.
     ///
     /// Field element length must've been written before calling this method.
     fn write_field_element_no_length<F>(&mut self, fe: &F, buf: &mut [u8]) -> Result<(), ZipError>
@@ -128,8 +139,7 @@ impl PcsTranscript {
         self.fs_transcript.absorb_random_field(fe, buf);
         fe.inner().write_transcription_bytes(buf);
         self.stream.write_all(buf)?;
-        fe.modulus().write_transcription_bytes(buf);
-        self.stream.write_all(buf)?;
+        // Modulus is NOT written — verifier derives it from the FS transcript.
         Ok(())
     }
 

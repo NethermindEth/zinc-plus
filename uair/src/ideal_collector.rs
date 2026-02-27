@@ -91,7 +91,8 @@ impl<I: Ideal> FromRef<I> for IdealOrZero<I> {
 
 impl<I: Ideal> IdealCheck<DummySemiring> for IdealOrZero<I> {
     fn contains(&self, _value: &DummySemiring) -> bool {
-        // Do nothing.
+        // The ideal collector only gathers ideals; it never
+        // actually checks values. Always return true.
         true
     }
 }
