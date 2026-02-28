@@ -91,24 +91,6 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16, 5>(group);
 }
 
-pub fn do_bench_prove_only<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(
-    group: &mut BenchmarkGroup<WallTime>,
-) where
-    StandardUniform: Distribution<Zt::Eval>,
-    F: for<'a> FromWithConfig<&'a Zt::CombR>
-        + for<'a> FromWithConfig<&'a Zt::Chal>
-        + for<'a> FromWithConfig<&'a Zt::Pt>
-        + for<'a> MulByScalar<&'a F>,
-    <F as Field>::Inner: FromRef<Zt::Fmod> + Transcribable,
-    Zt::Eval: ProjectableToField<F>,
-{
-    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12, 1>(group);
-    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13, 1>(group);
-    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14, 1>(group);
-    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15, 1>(group);
-    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16, 1>(group);
-}
-
 pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where
@@ -272,10 +254,9 @@ pub fn prove<
                 let mut total_duration = Duration::ZERO;
                 for _ in 0..iters {
                     let timer = Instant::now();
-                    let result = ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>(
-                        &params, &polys, &point, &hint,
-                    )
-                    .expect("Prove failed");
+                    let result =
+                        ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>(&params, &polys, &point, &hint)
+                            .expect("Prove failed");
                     total_duration += timer.elapsed();
                     black_box(result);
                 }
@@ -315,12 +296,10 @@ pub fn verify<
     let (hint, commitment) = ZipPlus::commit(&params, &polys).unwrap();
     let point = vec![Zt::Pt::one(); P];
 
-    let (evals, proof) = ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>(
-        &params, &polys, &point, &hint,
-    )
-    .expect("Prove failed");
+    let (eval, proof) = ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>(&params, &polys, &point, &hint)
+        .expect("Prove failed");
 
-    let field_cfg = *evals[0].cfg();
+    let field_cfg = *eval.cfg();
     let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
     group.bench_function(
@@ -337,7 +316,7 @@ pub fn verify<
                     &params,
                     &commitment,
                     &point_f,
-                    &evals,
+                    &eval,
                     &proof,
                 )
                 .expect("Verification failed");

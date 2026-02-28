@@ -17,8 +17,8 @@ use rayon::prelude::*;
 use zinc_poly::mle::DenseMultilinearExtension;
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
-    /// Creates a commitment to one or more multilinear polynomials using the ZIP PCS
-    /// scheme.
+    /// Creates a commitment to one or more multilinear polynomials using the
+    /// ZIP PCS scheme.
     ///
     /// This function implements the commitment phase of the ZIP polynomial
     /// commitment scheme. It encodes each polynomial's evaluations using a
@@ -32,8 +32,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ///    `pp.num_rows` rows.
     /// 3. Encodes each row using the specified linear code, expanding its
     ///    length from `row_len` to `codeword_len`.
-    /// 4. Constructs a single Merkle tree where
-    ///    `leaf_j = H(poly_1_col_j || poly_2_col_j || ...)`.
+    /// 4. Constructs a single Merkle tree where `leaf_j = H(poly_1_col_j ||
+    ///    poly_2_col_j || ...)`.
     /// 5. Returns the full commitment data (for the prover) and a compact
     ///    commitment (for the verifier).
     ///
@@ -46,8 +46,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     /// A `Result` containing a tuple of:
     /// - `ZipPlusHint`: Per-polynomial encoded rows and the shared Merkle tree,
     ///   kept by the prover for the opening phase.
-    /// - `ZipPlusCommitment`: The compact commitment (Merkle root and batch size),
-    ///   to be sent to the verifier.
+    /// - `ZipPlusCommitment`: The compact commitment (Merkle root and batch
+    ///   size), to be sent to the verifier.
     ///
     /// # Errors
     /// - Returns `Error::InvalidPcsParam` if any polynomial has more variables
@@ -61,7 +61,10 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         pp: &ZipPlusParams<Zt, Lc>,
         polys: &[DenseMultilinearExtension<Zt::Eval>],
     ) -> Result<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment), ZipError> {
-        assert!(!polys.is_empty(), "Batch must contain at least one polynomial");
+        assert!(
+            !polys.is_empty(),
+            "Batch must contain at least one polynomial"
+        );
         let batch_size = polys.len();
         let row_len = pp.linear_code.row_len();
 
@@ -83,9 +86,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             Ok::<_, ZipError>(ZipPlus::<Zt, Lc>::encode_rows(pp, row_len, poly))
         }).try_collect()?;
 
-        let all_rows: Vec<&[Zt::Cw]> = cw_matrices.iter()
-            .flat_map(|m| m.as_rows())
-            .collect();
+        let all_rows: Vec<&[Zt::Cw]> = cw_matrices.iter().flat_map(|m| m.as_rows()).collect();
         let merkle_tree = MerkleTree::new(&all_rows);
         let root = merkle_tree.root();
 
@@ -680,7 +681,7 @@ mod tests {
             // size of CombR in combine row
             let size_of_zt_m = M * size_of::<Word>();
             // size_f = field_value || field_modulus
-            let size_of_f = 2 * U256::LIMBS * size_of::<Word>(); 
+            let size_of_f = 2 * U256::LIMBS * size_of::<Word>();
             let size_of_usize_field = size_of::<u64>();
             let size_of_path_elem = size_of::<MtHash>();
 
@@ -691,7 +692,8 @@ mod tests {
             let b_phase_size = batch_size * (1 + pp.num_rows * size_of_f);
             let combined_row_size = pp.linear_code.row_len() * size_of_zt_m;
 
-            // Column openings: per opening, column values from all cw_matrices + one Merkle proof
+            // Column openings: per opening, column values from all cw_matrices + one Merkle
+            // proof
             let column_values_size = batch_size * pp.num_rows * size_of_zt_k;
             let single_merkle_proof_size =
                 size_of_usize_field * 3 + merkle_depth * size_of_path_elem;
