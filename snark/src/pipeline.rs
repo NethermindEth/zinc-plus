@@ -33,10 +33,18 @@ use zinc_piop::ideal_check::IdealCheckProtocol;
 use zinc_piop::combined_poly_resolver::CombinedPolyResolver;
 use zinc_piop::lookup::{
     GkrPipelineLookupProof, PipelineLookupProof, LookupColumnSpec,
-    prove_gkr_batched_lookup_with_indices,
+    LookupSumcheckGroup,
     prove_batched_lookup_with_indices,
+    prove_gkr_batched_lookup_with_indices,
     verify_gkr_batched_lookup,
     verify_batched_lookup,
+    BatchedDecompLogupProtocol,
+    group_lookup_specs,
+};
+use zinc_piop::lookup::pipeline::{
+    LookupGroupMeta,
+    build_lookup_instance_from_indices_pub,
+    generate_table_and_shifts,
 };
 use zinc_piop::projections::{
     project_trace_coeffs, project_trace_to_field,
@@ -44,6 +52,7 @@ use zinc_piop::projections::{
 };
 use zinc_piop::sumcheck::prover::{NatEvaluatedPolyWithoutConstant, ProverMsg};
 use zinc_piop::sumcheck::SumcheckProof;
+use zinc_piop::sumcheck::multi_degree::{MultiDegreeSumcheck, MultiDegreeSumcheckProof};
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_uair::ideal::{Ideal, IdealCheck};
 use zinc_uair::ideal_collector::IdealOrZero;
@@ -114,6 +123,30 @@ pub enum LookupProofData {
     Gkr(GkrPipelineLookupProof<PiopField>),
     /// Classic batched decomposition (chunks + inverses + sumcheck).
     Classic(PipelineLookupProof<PiopField>),
+    /// CPR + classic lookup sumchecks batched into a multi-degree sumcheck.
+    ///
+    /// Group 0 is the CPR, groups 1..N are the lookup table groups.
+    /// All share the same verifier challenges and evaluation point.
+    BatchedClassic(BatchedCprLookupProof),
+}
+
+/// Combined CPR + Classic lookup proof using multi-degree sumcheck.
+///
+/// The CPR sumcheck (degree `max_degree + 2`) and one or more lookup
+/// sumchecks (degree 2) are run in lockstep with shared verifier
+/// randomness, producing a single evaluation point.
+#[derive(Clone, Debug)]
+pub struct BatchedCprLookupProof {
+    /// Multi-degree sumcheck proof (group 0 = CPR, groups 1.. = lookup).
+    pub md_proof: MultiDegreeSumcheckProof<PiopField>,
+    /// CPR up evaluations at the shared point.
+    pub cpr_up_evals: Vec<PiopField>,
+    /// CPR down evaluations at the shared point.
+    pub cpr_down_evals: Vec<PiopField>,
+    /// Per-group lookup metadata.
+    pub lookup_group_meta: Vec<LookupGroupMeta>,
+    /// Per-group lookup proof data (chunks, mults, inverses — no sumcheck).
+    pub lookup_group_proofs: Vec<zinc_piop::lookup::BatchedDecompLogupProof<PiopField>>,
 }
 
 /// Full proof data produced by the prover.
@@ -216,10 +249,15 @@ fn derive_pcs_point(cpr_evaluation_point: &[PiopField], num_vars: usize) -> Vec<
 /// Returns `(columns, raw_indices, remapped_specs)` where `columns` and
 /// `raw_indices` contain only the needed columns and `remapped_specs` has
 /// column indices adjusted to the 0-based position in `columns`.
-fn project_lookup_columns_bp<const D: usize>(
-    trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+/// Extract lookup columns from an already-projected field trace and compute
+/// raw integer indices from the original BinaryPoly trace.
+///
+/// This avoids redundant field-element projection when the CPR step has
+/// already projected the full trace with the same `projecting_element`.
+fn extract_lookup_columns_from_field_trace<const D: usize>(
+    bp_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    field_trace: &[DenseMultilinearExtension<<PiopField as Field>::Inner>],
     lookup_specs: &[LookupColumnSpec],
-    projecting_element: &PiopField,
     field_cfg: &MontyParams<FIELD_LIMBS>,
 ) -> (Vec<Vec<PiopField>>, Vec<Vec<usize>>, Vec<LookupColumnSpec>) {
     use std::collections::BTreeMap;
@@ -231,40 +269,40 @@ fn project_lookup_columns_bp<const D: usize>(
         needed.entry(spec.column_index).or_insert(next_id);
     }
 
-    // Project only those columns.
     let mut columns: Vec<Vec<PiopField>> = Vec::with_capacity(needed.len());
     let mut raw_indices: Vec<Vec<usize>> = Vec::with_capacity(needed.len());
 
     for &orig_idx in needed.keys() {
-        let col_mle = &trace[orig_idx];
-        let mut col_f = Vec::with_capacity(col_mle.len());
-        let mut col_idx = Vec::with_capacity(col_mle.len());
-        for bp in col_mle.iter() {
-            let mut val = PiopField::zero_with_cfg(field_cfg);
-            let mut power = PiopField::one_with_cfg(field_cfg);
-            let mut idx = 0usize;
-            for (j, coeff) in bp.iter().enumerate() {
-                if coeff.into_inner() {
-                    val += &power;
-                    idx |= 1usize << j;
-                }
-                power *= projecting_element;
-            }
-            col_f.push(val);
-            col_idx.push(idx);
-        }
+        // Wrap Inner values into PiopField.
+        let col_f: Vec<PiopField> = field_trace[orig_idx]
+            .iter()
+            .map(|inner| PiopField::new_unchecked_with_cfg(inner.clone(), field_cfg))
+            .collect();
         columns.push(col_f);
+
+        // Compute raw indices from BinaryPoly (pure bit manipulation, no field ops).
+        let col_idx: Vec<usize> = bp_trace[orig_idx]
+            .iter()
+            .map(|bp| {
+                let mut idx = 0usize;
+                for (j, coeff) in bp.iter().enumerate() {
+                    if coeff.into_inner() {
+                        idx |= 1usize << j;
+                    }
+                }
+                idx
+            })
+            .collect();
         raw_indices.push(col_idx);
     }
 
-    // Re-assign `needed` map values to match final BTreeMap iteration order.
+    // Remap lookup specs to 0-based indices into the projected columns.
     let index_map: BTreeMap<usize, usize> = needed
         .keys()
         .enumerate()
         .map(|(new_idx, &orig_idx)| (orig_idx, new_idx))
         .collect();
 
-    // Remap lookup specs to 0-based indices into the projected columns.
     let remapped_specs: Vec<LookupColumnSpec> = lookup_specs
         .iter()
         .map(|spec| LookupColumnSpec {
@@ -358,7 +396,7 @@ where
 
     // ── Step 3: PIOP — Combined Poly Resolver ───────────────────────
     let t2 = Instant::now();
-    // Get projecting element for F[X]→F projection (shared by CPR prover & verifier).
+    // Get projecting element for F[X]→F projection (shared by CPR and lookup).
     let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
     let field_projected_scalars =
         project_scalars_to_field(projected_scalars, &projecting_element)
@@ -366,6 +404,17 @@ where
     let field_trace = project_trace_to_field::<PiopField, D>(
         trace, &[], &[], &projecting_element,
     );
+
+    // Extract lookup columns from the projected field trace before CPR
+    // consumes it. This reuses the same projecting_element, avoiding a
+    // redundant ~2ms re-projection of the BinaryPoly columns.
+    let lookup_precomputed = if !lookup_specs.is_empty() {
+        let (columns, raw_indices, remapped_specs) =
+            extract_lookup_columns_from_field_trace(trace, &field_trace, lookup_specs, &field_cfg);
+        Some((columns, raw_indices, remapped_specs))
+    } else {
+        None
+    };
 
     let (cpr_proof, cpr_state) =
         CombinedPolyResolver::<PiopField>::prove_as_subprotocol::<U>(
@@ -383,25 +432,18 @@ where
 
     // ── Step 3b: PIOP — Batched Decomposed LogUp (column typing) ────
     let t2b = Instant::now();
-    let lookup_proof = if !lookup_specs.is_empty() {
-        // Derive a lookup-specific projecting element from the transcript.
-        let lookup_projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
-
-        // Project only the columns that have lookup constraints.
-        let (columns, raw_indices, remapped_specs) =
-            project_lookup_columns_bp(trace, lookup_specs, &lookup_projecting_element, &field_cfg);
-
-        let (lk_proof, _lk_state) = prove_gkr_batched_lookup_with_indices(
+    let lookup_proof = if let Some((columns, raw_indices, remapped_specs)) = lookup_precomputed {
+        let (lk_proof, _lk_state) = prove_batched_lookup_with_indices(
             &mut transcript,
             &columns,
             &raw_indices,
             &remapped_specs,
-            &lookup_projecting_element,
+            &projecting_element,
             &field_cfg,
         )
-        .expect("GKR batched lookup prover failed");
+        .expect("Batched lookup prover failed");
 
-        Some(LookupProofData::Gkr(lk_proof))
+        Some(LookupProofData::Classic(lk_proof))
     } else {
         None
     };
@@ -487,9 +529,12 @@ where
 /// Run the full Zinc+ prover pipeline with **classic** batched decomposition
 /// LogUp (chunks + inverses + sumcheck), instead of GKR LogUp.
 ///
-/// Identical to [`prove`] except the lookup step uses
-/// [`prove_batched_lookup_with_indices`] and stores a
-/// [`LookupProofData::Classic`] variant.
+/// Unlike [`prove`], this variant **batches the CPR and lookup sumchecks**
+/// into a single multi-degree sumcheck via
+/// [`MultiDegreeSumcheck::prove_as_subprotocol`]. Group 0 is the CPR
+/// (degree `max_degree + 2`), groups 1..N are the lookup table groups
+/// (degree 2 each). All groups share verifier challenges and produce
+/// a common evaluation point.
 #[allow(clippy::type_complexity)]
 pub fn prove_classic_logup<U, Zt, Lc, const D: usize, const CHECK: bool>(
     params: &ZipPlusParams<Zt, Lc>,
@@ -548,6 +593,7 @@ where
         .expect("Ideal check prover failed");
     let ideal_check_time = t1.elapsed();
 
+    // ── Step 3: Batched CPR + Lookup via multi-degree sumcheck ──────
     let t2 = Instant::now();
     let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
     let field_projected_scalars =
@@ -557,45 +603,191 @@ where
         trace, &[], &[], &projecting_element,
     );
 
-    let (cpr_proof, cpr_state) =
-        CombinedPolyResolver::<PiopField>::prove_as_subprotocol::<U>(
-            &mut transcript,
-            field_trace,
-            &ic_state.evaluation_point,
-            &field_projected_scalars,
-            num_constraints,
-            num_vars,
-            max_degree,
-            &field_cfg,
-        )
-        .expect("Combined poly resolver failed");
-    let cpr_time = t2.elapsed();
-
-    // ── Classic Batched Decomposed LogUp ─────────────────────────────
-    let t2b = Instant::now();
-    let lookup_proof = if !lookup_specs.is_empty() {
-        let lookup_projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
-
-        // Project only the columns that have lookup constraints.
+    // Extract lookup columns before CPR consumes the field trace.
+    let lookup_precomputed = if !lookup_specs.is_empty() {
         let (columns, raw_indices, remapped_specs) =
-            project_lookup_columns_bp(trace, lookup_specs, &lookup_projecting_element, &field_cfg);
-
-        let (lk_proof, _lk_state) = prove_batched_lookup_with_indices(
-            &mut transcript,
-            &columns,
-            &raw_indices,
-            &remapped_specs,
-            &lookup_projecting_element,
-            &field_cfg,
-        )
-        .expect("Classic batched lookup prover failed");
-
-        Some(LookupProofData::Classic(lk_proof))
+            extract_lookup_columns_from_field_trace(trace, &field_trace, lookup_specs, &field_cfg);
+        Some((columns, raw_indices, remapped_specs))
     } else {
         None
     };
-    let lookup_time = t2b.elapsed();
 
+    // ── CPR: build sumcheck group (does NOT run sumcheck) ───────────
+    let mut cpr_group = CombinedPolyResolver::<PiopField>::build_prover_group::<U>(
+        &mut transcript,
+        field_trace,
+        &ic_state.evaluation_point,
+        &field_projected_scalars,
+        num_constraints,
+        num_vars,
+        max_degree,
+        &field_cfg,
+    )
+    .expect("CPR build_prover_group failed");
+    let cpr_num_cols = cpr_group.num_cols;
+
+    // ── Lookup: build sumcheck groups (does NOT run sumchecks) ───────
+    let mut lookup_groups_data: Vec<(LookupSumcheckGroup<PiopField>, LookupGroupMeta)> = Vec::new();
+    if let Some((ref columns, ref raw_indices, ref remapped_specs)) = lookup_precomputed {
+        let groups = group_lookup_specs(remapped_specs);
+        for group in &groups {
+            let instance = build_lookup_instance_from_indices_pub(
+                columns, raw_indices, group, &projecting_element, &field_cfg,
+            )
+            .expect("lookup instance build failed");
+
+            let witness_len = instance.witnesses[0].len();
+
+            let lk_group = BatchedDecompLogupProtocol::<PiopField>::build_prover_group(
+                &mut transcript,
+                &instance,
+                &field_cfg,
+            )
+            .expect("lookup build_prover_group failed");
+
+            let meta = LookupGroupMeta {
+                table_type: group.table_type.clone(),
+                num_columns: group.column_indices.len(),
+                witness_len,
+            };
+            lookup_groups_data.push((lk_group, meta));
+        }
+    }
+
+    // Determine the shared num_vars across CPR and all lookup groups.
+    // If the lookup subtable is larger than the witness, its num_vars
+    // may exceed CPR's. We zero-pad the CPR's MLEs in that case.
+    let shared_num_vars = {
+        let max_lk = lookup_groups_data
+            .iter()
+            .map(|(g, _)| g.num_vars)
+            .max()
+            .unwrap_or(num_vars);
+        num_vars.max(max_lk)
+    };
+
+    // Pad CPR MLEs to shared_num_vars if needed.
+    if shared_num_vars > num_vars {
+        let target_len = 1usize << shared_num_vars;
+        for mle in &mut cpr_group.mles {
+            mle.evaluations
+                .resize(target_len, Default::default());
+            mle.num_vars = shared_num_vars;
+        }
+    }
+
+    // ── Assemble all groups and run multi-degree sumcheck ────────────
+    let has_lookup = !lookup_groups_data.is_empty();
+    let (batched_proof, evaluation_point, cpr_up_evals, cpr_down_evals, _lookup_proof) =
+    if has_lookup {
+        // Build the groups vector: CPR first, then lookup groups.
+        let mut sumcheck_groups: Vec<(
+            usize,
+            Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>>,
+            Box<dyn Fn(&[PiopField]) -> PiopField + Send + Sync>,
+        )> = Vec::with_capacity(1 + lookup_groups_data.len());
+
+        sumcheck_groups.push((cpr_group.degree, cpr_group.mles, cpr_group.comb_fn));
+
+        let mut lookup_pre_data: Vec<(LookupSumcheckGroup<PiopField>, LookupGroupMeta)> = Vec::new();
+        for (lk_group, meta) in lookup_groups_data {
+            sumcheck_groups.push((lk_group.degree, lk_group.mles, lk_group.comb_fn));
+            // We still need the ancillary data; reconstruct a shell.
+            lookup_pre_data.push((LookupSumcheckGroup {
+                degree: 0, // unused after this point
+                mles: vec![], // already moved
+                comb_fn: Box::new(|_: &[PiopField]| unreachable!()),
+                num_vars: 0,
+                chunk_vectors: lk_group.chunk_vectors,
+                aggregated_multiplicities: lk_group.aggregated_multiplicities,
+                chunk_inverse_witnesses: lk_group.chunk_inverse_witnesses,
+                inverse_table: lk_group.inverse_table,
+            }, meta));
+        }
+
+        // Run the combined multi-degree sumcheck.
+        let (md_proof, mut prover_states) =
+            MultiDegreeSumcheck::<PiopField>::prove_as_subprotocol(
+                &mut transcript,
+                sumcheck_groups,
+                shared_num_vars,
+                &field_cfg,
+            );
+
+        // ── CPR finalize: extract up/down evals from group 0's state ──
+        let cpr_prover_state = prover_states.remove(0);
+        let (up_evals, down_evals, cpr_state_final) =
+            CombinedPolyResolver::<PiopField>::finalize_prover(
+                &mut transcript,
+                cpr_prover_state,
+                cpr_num_cols,
+                &field_cfg,
+            )
+            .expect("CPR finalize_prover failed");
+
+        // ── Lookup finalize: build per-group proofs from remaining states ──
+        let mut lookup_group_proofs = Vec::new();
+        let mut lookup_group_meta = Vec::new();
+        for (i, (lk_pre, meta)) in lookup_pre_data.into_iter().enumerate() {
+            // Extract this lookup group's sumcheck proof from the md_proof.
+            let lk_sumcheck_proof = SumcheckProof {
+                messages: md_proof.group_messages[i + 1]
+                    .iter()
+                    .cloned()
+                    .collect(),
+                claimed_sum: md_proof.claimed_sums[i + 1].clone(),
+            };
+            let lk_eval_point = prover_states.remove(0).randomness;
+            let (lk_proof, _lk_state) =
+                BatchedDecompLogupProtocol::<PiopField>::finalize_prover(
+                    lk_pre, lk_sumcheck_proof, lk_eval_point,
+                );
+            lookup_group_proofs.push(lk_proof);
+            lookup_group_meta.push(meta);
+        }
+
+        let batched = BatchedCprLookupProof {
+            md_proof,
+            cpr_up_evals: up_evals.clone(),
+            cpr_down_evals: down_evals.clone(),
+            lookup_group_meta,
+            lookup_group_proofs,
+        };
+
+        (
+            Some(LookupProofData::BatchedClassic(batched)),
+            cpr_state_final.evaluation_point,
+            up_evals,
+            down_evals,
+            true,
+        )
+    } else {
+        // No lookup — run CPR sumcheck alone (falls back to normal path).
+        let groups = vec![(cpr_group.degree, cpr_group.mles, cpr_group.comb_fn)];
+        let (_md_proof, mut prover_states) =
+            MultiDegreeSumcheck::<PiopField>::prove_as_subprotocol(
+                &mut transcript,
+                groups,
+                num_vars,
+                &field_cfg,
+            );
+
+        let cpr_prover_state = prover_states.remove(0);
+        let (up_evals, down_evals, cpr_state_final) =
+            CombinedPolyResolver::<PiopField>::finalize_prover(
+                &mut transcript,
+                cpr_prover_state,
+                cpr_num_cols,
+                &field_cfg,
+            )
+            .expect("CPR finalize_prover failed");
+
+        (None, cpr_state_final.evaluation_point, up_evals, down_evals, false)
+    };
+
+    let cpr_lookup_time = t2.elapsed();
+
+    // ── Step 4: PCS ─────────────────────────────────────────────────
     let t3 = Instant::now();
     let test_transcript =
         BatchedZipPlus::<Zt, Lc>::test::<CHECK>(params, trace, &hint)
@@ -603,7 +795,7 @@ where
     let pcs_test_time = t3.elapsed();
     let t4 = Instant::now();
     let point: Vec<Zt::Pt> = {
-        let i128_point = derive_pcs_point(&cpr_state.evaluation_point, num_vars);
+        let i128_point = derive_pcs_point(&evaluation_point, num_vars);
         i128_point
             .into_iter()
             .map(|v| unsafe { std::mem::transmute_copy(&v) })
@@ -629,16 +821,15 @@ where
         .iter()
         .map(|dpf| dpf.coeffs.iter().flat_map(|c| field_to_bytes(c)).collect())
         .collect();
-    let cpr_sumcheck_messages: Vec<Vec<u8>> = cpr_proof
-        .sumcheck_proof
-        .messages
-        .iter()
-        .map(|msg| msg.0.tail_evaluations.iter().flat_map(|c| field_to_bytes(c)).collect())
-        .collect();
-    let cpr_sumcheck_claimed_sum = field_to_bytes(&cpr_proof.sumcheck_proof.claimed_sum);
-    let cpr_up_evals: Vec<Vec<u8>> = cpr_proof.up_evals.iter().map(field_to_bytes).collect();
-    let cpr_down_evals: Vec<Vec<u8>> = cpr_proof.down_evals.iter().map(field_to_bytes).collect();
-    let evaluation_point_bytes: Vec<Vec<u8>> = cpr_state.evaluation_point.iter().map(field_to_bytes).collect();
+
+    // For the batched path, CPR sumcheck data is embedded in the
+    // BatchedClassic variant; these fields are unused but populated
+    // for the no-lookup fallback case.
+    let cpr_sumcheck_messages = Vec::new();
+    let cpr_sumcheck_claimed_sum = vec![0u8; <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES];
+    let cpr_up_evals_bytes: Vec<Vec<u8>> = cpr_up_evals.iter().map(field_to_bytes).collect();
+    let cpr_down_evals_bytes: Vec<Vec<u8>> = cpr_down_evals.iter().map(field_to_bytes).collect();
+    let evaluation_point_bytes: Vec<Vec<u8>> = evaluation_point.iter().map(field_to_bytes).collect();
     let pcs_evals_bytes: Vec<Vec<u8>> = evals_f.iter().map(field_to_bytes).collect();
 
     ZincProof {
@@ -647,16 +838,16 @@ where
         ic_proof_values,
         cpr_sumcheck_messages,
         cpr_sumcheck_claimed_sum,
-        cpr_up_evals,
-        cpr_down_evals,
-        lookup_proof,
+        cpr_up_evals: cpr_up_evals_bytes,
+        cpr_down_evals: cpr_down_evals_bytes,
+        lookup_proof: batched_proof,
         evaluation_point_bytes,
         pcs_evals_bytes,
         timing: TimingBreakdown {
             pcs_commit: pcs_commit_time,
             ideal_check: ideal_check_time,
-            combined_poly_resolver: cpr_time,
-            lookup: lookup_time,
+            combined_poly_resolver: cpr_lookup_time,
+            lookup: Duration::ZERO,  // included in combined_poly_resolver
             pcs_test: pcs_test_time,
             pcs_evaluate: pcs_eval_time,
             total: total_time,
@@ -816,7 +1007,7 @@ where
             })
             .collect();
 
-        let (lk_proof, _lk_state) = prove_gkr_batched_lookup_with_indices(
+        let (lk_proof, _lk_state) = prove_batched_lookup_with_indices(
             &mut transcript,
             &columns,
             &raw_indices,
@@ -824,9 +1015,9 @@ where
             &lookup_projecting_element,
             &field_cfg,
         )
-        .expect("GKR batched lookup prover failed");
+        .expect("Batched lookup prover failed");
 
-        Some(LookupProofData::Gkr(lk_proof))
+        Some(LookupProofData::Classic(lk_proof))
     } else {
         None
     };
@@ -1078,6 +1269,12 @@ where
             LookupProofData::Classic(proof) => verify_batched_lookup(
                 &mut transcript, proof, &projecting_element, &field_cfg,
             ).map(|_| ()),
+            LookupProofData::BatchedClassic(_) => {
+                unimplemented!(
+                    "BatchedClassic proofs should use `verify` (BinaryPoly), \
+                     not `verify_generic`"
+                );
+            }
         };
         if let Err(e) = result {
             eprintln!("Lookup verification failed (generic): {e:?}");
@@ -1369,113 +1566,297 @@ where
     };
     let ic_verify_time = t0.elapsed();
 
-    // ── Step 2: Deserialize and verify CPR (sumcheck) ───────────────
-    let t1 = Instant::now();
-
-    // Reconstruct CPR proof.
-    let cpr_sumcheck_messages: Vec<ProverMsg<PiopField>> = zinc_proof
-        .cpr_sumcheck_messages
-        .iter()
-        .map(|bytes| {
-            let num_evals = bytes.len() / field_elem_size;
-            let tail_evaluations: Vec<PiopField> = (0..num_evals)
-                .map(|i| field_from_bytes(&bytes[i * field_elem_size..(i + 1) * field_elem_size], &field_cfg))
-                .collect();
-            ProverMsg(NatEvaluatedPolyWithoutConstant::new(tail_evaluations))
-        })
-        .collect();
-
-    let cpr_claimed_sum = field_from_bytes(&zinc_proof.cpr_sumcheck_claimed_sum, &field_cfg);
-    let cpr_up_evals: Vec<PiopField> = zinc_proof.cpr_up_evals.iter()
-        .map(|b| field_from_bytes(b, &field_cfg))
-        .collect();
-    let cpr_down_evals: Vec<PiopField> = zinc_proof.cpr_down_evals.iter()
-        .map(|b| field_from_bytes(b, &field_cfg))
-        .collect();
-
-    let cpr_proof = zinc_piop::combined_poly_resolver::Proof::<PiopField> {
-        sumcheck_proof: SumcheckProof {
-            messages: cpr_sumcheck_messages,
-            claimed_sum: cpr_claimed_sum,
-        },
-        up_evals: cpr_up_evals,
-        down_evals: cpr_down_evals,
-    };
-
-    // Compute projecting element and projected scalars for CPR verify.
-    let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
-    let projected_scalars_coeffs = project_scalars::<PiopField, U>(|scalar| {
-        let one = PiopField::one_with_cfg(&field_cfg);
-        let zero = PiopField::zero_with_cfg(&field_cfg);
-        DynamicPolynomialF::new(
-            scalar.iter().map(|coeff| {
-                if coeff.into_inner() { one.clone() } else { zero.clone() }
-            }).collect::<Vec<_>>()
-        )
-    });
-    let field_projected_scalars =
-        project_scalars_to_field(projected_scalars_coeffs, &projecting_element)
-            .expect("scalar projection failed");
-
-    let cpr_verify_result = CombinedPolyResolver::<PiopField>::verify_as_subprotocol::<U>(
-        &mut transcript,
-        cpr_proof,
-        num_constraints,
-        num_vars,
-        max_degree,
-        &projecting_element,
-        &field_projected_scalars,
-        ic_subclaim,
-        &field_cfg,
+    // ── Step 2+2b: CPR + Lookup verification ──────────────────────
+    //
+    // If the proof uses `BatchedClassic`, the CPR and lookup sumchecks
+    // were batched into a single multi-degree sumcheck. Otherwise, we
+    // fall back to the sequential (non-batched) verification.
+    let is_batched = matches!(
+        zinc_proof.lookup_proof,
+        Some(LookupProofData::BatchedClassic(_))
     );
 
-    let cpr_subclaim = match cpr_verify_result {
-        Ok(subclaim) => subclaim,
-        Err(e) => {
-            eprintln!("CPR verification failed: {e:?}");
-            return VerifyResult {
-                accepted: false,
-                timing: VerifyTimingBreakdown {
-                    ideal_check_verify: ic_verify_time,
-                    combined_poly_resolver_verify: t1.elapsed(),
-                    lookup_verify: Duration::ZERO,
-                    pcs_verify: Duration::ZERO,
-                    total: total_start.elapsed(),
-                },
-            };
-        }
-    };
-    let cpr_verify_time = t1.elapsed();
-
-    // ── Step 2b: Verify Batched Decomposed LogUp (column typing) ────
-    let t1b = Instant::now();
-    if let Some(ref lookup_data) = zinc_proof.lookup_proof {
-        // Derive the same projecting element the prover used.
-        let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
-
-        let result = match lookup_data {
-            LookupProofData::Gkr(proof) => verify_gkr_batched_lookup(
-                &mut transcript, proof, &projecting_element, &field_cfg,
-            ).map(|_| ()),
-            LookupProofData::Classic(proof) => verify_batched_lookup(
-                &mut transcript, proof, &projecting_element, &field_cfg,
-            ).map(|_| ()),
+    let (cpr_subclaim, cpr_verify_time, lookup_verify_time) = if is_batched {
+        let t1 = Instant::now();
+        let batched_proof = match zinc_proof.lookup_proof {
+            Some(LookupProofData::BatchedClassic(ref bp)) => bp,
+            _ => unreachable!(),
         };
-        if let Err(e) = result {
-            eprintln!("Lookup verification failed: {e:?}");
-            return VerifyResult {
-                accepted: false,
-                timing: VerifyTimingBreakdown {
-                    ideal_check_verify: ic_verify_time,
-                    combined_poly_resolver_verify: cpr_verify_time,
-                    lookup_verify: t1b.elapsed(),
-                    pcs_verify: Duration::ZERO,
-                    total: total_start.elapsed(),
-                },
-            };
+
+        // Draw projecting element + compute projected scalars (same as non-batched).
+        let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+        let projected_scalars_coeffs = project_scalars::<PiopField, U>(|scalar| {
+            let one = PiopField::one_with_cfg(&field_cfg);
+            let zero = PiopField::zero_with_cfg(&field_cfg);
+            DynamicPolynomialF::new(
+                scalar.iter().map(|coeff| {
+                    if coeff.into_inner() { one.clone() } else { zero.clone() }
+                }).collect::<Vec<_>>()
+            )
+        });
+        let field_projected_scalars =
+            project_scalars_to_field(projected_scalars_coeffs, &projecting_element)
+                .expect("scalar projection failed");
+
+        // CPR pre-sumcheck: draw α, check claimed_sum against IC.
+        let cpr_pre = match CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<U>(
+            &mut transcript,
+            &batched_proof.md_proof.claimed_sums[0],
+            num_constraints,
+            &projecting_element,
+            &field_projected_scalars,
+            &ic_subclaim,
+            &field_cfg,
+        ) {
+            Ok(pre) => pre,
+            Err(e) => {
+                eprintln!("CPR build_verifier_pre_sumcheck failed: {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        };
+
+        // Lookup pre-sumcheck: for each group, mirror transcript ops.
+        let mut lookup_pres = Vec::new();
+        for (group_proof, meta) in batched_proof.lookup_group_proofs.iter()
+            .zip(batched_proof.lookup_group_meta.iter())
+        {
+            let (subtable, shifts) = generate_table_and_shifts(
+                &meta.table_type,
+                &projecting_element,
+                &field_cfg,
+            );
+            match BatchedDecompLogupProtocol::<PiopField>::build_verifier_pre_sumcheck(
+                &mut transcript,
+                group_proof,
+                &subtable,
+                &shifts,
+                meta.num_columns,
+                meta.witness_len,
+                &field_cfg,
+            ) {
+                Ok(pre) => lookup_pres.push(pre),
+                Err(e) => {
+                    eprintln!("Lookup build_verifier_pre_sumcheck failed: {e:?}");
+                    return VerifyResult {
+                        accepted: false,
+                        timing: VerifyTimingBreakdown {
+                            ideal_check_verify: ic_verify_time,
+                            combined_poly_resolver_verify: t1.elapsed(),
+                            lookup_verify: Duration::ZERO,
+                            pcs_verify: Duration::ZERO,
+                            total: total_start.elapsed(),
+                        },
+                    };
+                }
+            }
         }
-    }
-    let lookup_verify_time = t1b.elapsed();
+
+        // Compute shared_num_vars: max of CPR num_vars and all lookup num_vars.
+        let shared_num_vars = lookup_pres
+            .iter()
+            .map(|p| p.num_vars)
+            .max()
+            .map_or(num_vars, |max_lookup| max_lookup.max(num_vars));
+
+        // Multi-degree sumcheck verify.
+        let md_subclaims = match MultiDegreeSumcheck::<PiopField>::verify_as_subprotocol(
+            &mut transcript,
+            shared_num_vars,
+            &batched_proof.md_proof,
+            &field_cfg,
+        ) {
+            Ok(sc) => sc,
+            Err(e) => {
+                eprintln!("Multi-degree sumcheck verification failed: {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        };
+
+        // CPR finalize: check subclaim[0] against recomputed combination value.
+        let cpr_sub = match CombinedPolyResolver::<PiopField>::finalize_verifier::<U>(
+            &mut transcript,
+            md_subclaims.point.clone(),
+            md_subclaims.expected_evaluations[0].clone(),
+            &cpr_pre,
+            batched_proof.cpr_up_evals.clone(),
+            batched_proof.cpr_down_evals.clone(),
+            num_vars,
+            &field_projected_scalars,
+            &field_cfg,
+        ) {
+            Ok(sub) => sub,
+            Err(e) => {
+                eprintln!("CPR finalize_verifier failed: {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        };
+
+        // Lookup finalize: check subclaim[g+1] for each group.
+        for (g, (lk_pre, group_proof)) in lookup_pres.iter()
+            .zip(batched_proof.lookup_group_proofs.iter())
+            .enumerate()
+        {
+            if let Err(e) = BatchedDecompLogupProtocol::<PiopField>::finalize_verifier(
+                lk_pre,
+                group_proof,
+                &md_subclaims.point,
+                &md_subclaims.expected_evaluations[g + 1],
+                &field_cfg,
+            ) {
+                eprintln!("Lookup finalize_verifier failed (group {g}): {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        }
+
+        let cpr_verify_time = t1.elapsed();
+        // Lookup time is included in CPR time for batched path.
+        (cpr_sub, cpr_verify_time, Duration::ZERO)
+    } else {
+        // ── Sequential (non-batched) CPR + Lookup verification ──────
+        let t1 = Instant::now();
+
+        // Reconstruct CPR proof.
+        let cpr_sumcheck_messages: Vec<ProverMsg<PiopField>> = zinc_proof
+            .cpr_sumcheck_messages
+            .iter()
+            .map(|bytes| {
+                let num_evals = bytes.len() / field_elem_size;
+                let tail_evaluations: Vec<PiopField> = (0..num_evals)
+                    .map(|i| field_from_bytes(&bytes[i * field_elem_size..(i + 1) * field_elem_size], &field_cfg))
+                    .collect();
+                ProverMsg(NatEvaluatedPolyWithoutConstant::new(tail_evaluations))
+            })
+            .collect();
+
+        let cpr_claimed_sum = field_from_bytes(&zinc_proof.cpr_sumcheck_claimed_sum, &field_cfg);
+        let cpr_up_evals: Vec<PiopField> = zinc_proof.cpr_up_evals.iter()
+            .map(|b| field_from_bytes(b, &field_cfg))
+            .collect();
+        let cpr_down_evals: Vec<PiopField> = zinc_proof.cpr_down_evals.iter()
+            .map(|b| field_from_bytes(b, &field_cfg))
+            .collect();
+
+        let cpr_proof = zinc_piop::combined_poly_resolver::Proof::<PiopField> {
+            sumcheck_proof: SumcheckProof {
+                messages: cpr_sumcheck_messages,
+                claimed_sum: cpr_claimed_sum,
+            },
+            up_evals: cpr_up_evals,
+            down_evals: cpr_down_evals,
+        };
+
+        // Compute projecting element and projected scalars for CPR verify.
+        let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+        let projected_scalars_coeffs = project_scalars::<PiopField, U>(|scalar| {
+            let one = PiopField::one_with_cfg(&field_cfg);
+            let zero = PiopField::zero_with_cfg(&field_cfg);
+            DynamicPolynomialF::new(
+                scalar.iter().map(|coeff| {
+                    if coeff.into_inner() { one.clone() } else { zero.clone() }
+                }).collect::<Vec<_>>()
+            )
+        });
+        let field_projected_scalars =
+            project_scalars_to_field(projected_scalars_coeffs, &projecting_element)
+                .expect("scalar projection failed");
+
+        let cpr_verify_result = CombinedPolyResolver::<PiopField>::verify_as_subprotocol::<U>(
+            &mut transcript,
+            cpr_proof,
+            num_constraints,
+            num_vars,
+            max_degree,
+            &projecting_element,
+            &field_projected_scalars,
+            ic_subclaim,
+            &field_cfg,
+        );
+
+        let cpr_subclaim = match cpr_verify_result {
+            Ok(subclaim) => subclaim,
+            Err(e) => {
+                eprintln!("CPR verification failed: {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        };
+        let cpr_verify_time = t1.elapsed();
+
+        // ── Step 2b: Verify Batched Decomposed LogUp (column typing) ──
+        let t1b = Instant::now();
+        if let Some(ref lookup_data) = zinc_proof.lookup_proof {
+            // Reuse the same projecting_element from the CPR step.
+            let result = match lookup_data {
+                LookupProofData::Gkr(proof) => verify_gkr_batched_lookup(
+                    &mut transcript, proof, &projecting_element, &field_cfg,
+                ).map(|_| ()),
+                LookupProofData::Classic(proof) => verify_batched_lookup(
+                    &mut transcript, proof, &projecting_element, &field_cfg,
+                ).map(|_| ()),
+                LookupProofData::BatchedClassic(_) => unreachable!("handled above"),
+            };
+            if let Err(e) = result {
+                eprintln!("Lookup verification failed: {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: cpr_verify_time,
+                        lookup_verify: t1b.elapsed(),
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        }
+        let lookup_verify_time = t1b.elapsed();
+
+        (cpr_subclaim, cpr_verify_time, lookup_verify_time)
+    };
 
     // ── Step 3: PCS Verify ──────────────────────────────────────────
     // The CPR subclaim gives us the evaluation point and expected evaluations.
@@ -1541,9 +1922,9 @@ where
 
 /// Full proof data produced by the dual-ring prover.
 ///
-/// Contains proof material for two IC+CPR passes: one for the primary ring
-/// (BinaryPoly, F₂[X] constraints) and one for a secondary ring
-/// (DensePolynomial<i64, D2>, Q[X] constraints).
+/// Both IC passes share the same evaluation point and projecting element.
+/// Both CPR sumchecks are batched into a single multi-degree sumcheck,
+/// producing one shared evaluation point.
 #[derive(Clone, Debug)]
 pub struct DualRingZincProof {
     /// Serialized PCS proof bytes.
@@ -1551,17 +1932,23 @@ pub struct DualRingZincProof {
     /// PCS commitment.
     pub commitment: BatchedZipPlusCommitment,
 
-    // ── BinaryPoly pass (IC₁ + CPR₁) ───────────────────────────────
+    // ── IC proof values (both passes share the same evaluation point) ──
     pub bp_ic_proof_values: Vec<Vec<u8>>,
-    pub bp_cpr_sumcheck_messages: Vec<Vec<u8>>,
-    pub bp_cpr_sumcheck_claimed_sum: Vec<u8>,
+    pub qx_ic_proof_values: Vec<Vec<u8>>,
+
+    // ── Batched CPR (multi-degree sumcheck: group 0 = BP, group 1 = QX) ──
+    /// Per-group round messages, serialized.
+    /// `md_group_messages[group][round]` → serialized field elements.
+    pub md_group_messages: Vec<Vec<Vec<u8>>>,
+    /// Claimed sum per group.
+    pub md_claimed_sums: Vec<Vec<u8>>,
+    /// Degree per group.
+    pub md_degrees: Vec<usize>,
+
+    /// BP CPR up/down evaluations at the shared sumcheck point.
     pub bp_cpr_up_evals: Vec<Vec<u8>>,
     pub bp_cpr_down_evals: Vec<Vec<u8>>,
-
-    // ── Q[X] pass (IC₂ + CPR₂) ─────────────────────────────────────
-    pub qx_ic_proof_values: Vec<Vec<u8>>,
-    pub qx_cpr_sumcheck_messages: Vec<Vec<u8>>,
-    pub qx_cpr_sumcheck_claimed_sum: Vec<u8>,
+    /// QX CPR up/down evaluations at the shared sumcheck point.
     pub qx_cpr_up_evals: Vec<Vec<u8>>,
     pub qx_cpr_down_evals: Vec<Vec<u8>>,
 
@@ -1572,14 +1959,16 @@ pub struct DualRingZincProof {
     pub timing: TimingBreakdown,
 }
 
-/// Run the dual-ring Zinc+ prover pipeline.
+/// Run the dual-ring Zinc+ prover pipeline with **shared challenges**.
 ///
-/// This runs two IC+CPR passes on the same Fiat-Shamir transcript:
-/// 1. IC₁ + CPR₁ for BinaryPoly<D1> (F₂[X]) constraints
-/// 2. IC₂ + CPR₂ for DensePolynomial<i64, D2> (Q[X]) constraints
+/// Both PIOP passes (BinaryPoly and Q[X]) share:
+/// - The same Fiat-Shamir prime / field configuration
+/// - The same IC evaluation point
+/// - The same F[X]→F projecting element
 ///
-/// The trace is committed once (as BinaryPoly<D1>). The Q[X] trace is
-/// derived via `convert_trace`.
+/// Both CPR sumchecks are batched into a single multi-degree sumcheck
+/// (group 0 = BinaryPoly, group 1 = Q[X]), producing a common
+/// evaluation point for PCS opening.
 ///
 /// # Type parameters
 /// - `U1`: UAIR for BinaryPoly constraints.
@@ -1626,7 +2015,11 @@ where
     let mut transcript = KeccakTranscript::new();
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
-    // ── Step 3: IC₁ (BinaryPoly) ───────────────────────────────────
+    // ── Step 3: Shared IC evaluation point ──────────────────────────
+    let ic_evaluation_point: Vec<PiopField> =
+        transcript.get_field_challenges(num_vars, &field_cfg);
+
+    // ── Step 4: IC₁ (BinaryPoly) — uses shared evaluation point ────
     let t1 = Instant::now();
     let bp_projected_trace = project_trace_coeffs::<PiopField, i64, i64, D1>(
         trace, &[], &[], &field_cfg,
@@ -1641,45 +2034,19 @@ where
         )
     });
 
-    let (bp_ic_proof, bp_ic_state) =
-        IdealCheckProtocol::<PiopField>::prove_as_subprotocol::<U1>(
+    let (bp_ic_proof, _bp_ic_state) =
+        IdealCheckProtocol::<PiopField>::prove_at_point::<U1>(
             &mut transcript,
             &bp_projected_trace,
             &bp_projected_scalars,
             bp_num_constraints,
-            num_vars,
+            &ic_evaluation_point,
             &field_cfg,
         )
         .expect("BinaryPoly ideal check prover failed");
 
-    // ── Step 4: CPR₁ (BinaryPoly) ──────────────────────────────────
-    let bp_projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
-    let bp_field_projected_scalars =
-        project_scalars_to_field(bp_projected_scalars, &bp_projecting_element)
-            .expect("BP scalar projection failed");
-    let bp_field_trace = project_trace_to_field::<PiopField, D1>(
-        trace, &[], &[], &bp_projecting_element,
-    );
-
-    let (bp_cpr_proof, bp_cpr_state) =
-        CombinedPolyResolver::<PiopField>::prove_as_subprotocol::<U1>(
-            &mut transcript,
-            bp_field_trace,
-            &bp_ic_state.evaluation_point,
-            &bp_field_projected_scalars,
-            bp_num_constraints,
-            num_vars,
-            bp_max_degree,
-            &field_cfg,
-        )
-        .expect("BinaryPoly CPR failed");
-    let bp_time = t1.elapsed();
-
-    // ── Step 5: Convert trace to Q[X] ──────────────────────────────
+    // ── Step 5: Convert trace to Q[X] and run IC₂ ──────────────────
     let qx_trace = convert_trace(trace);
-
-    // ── Step 6: IC₂ (Q[X]) ─────────────────────────────────────────
-    let t2 = Instant::now();
     let qx_projected_trace = project_trace_coeffs::<PiopField, i64, i64, D2>(
         &[], &qx_trace, &[], &field_cfg,
     );
@@ -1689,48 +2056,111 @@ where
         )
     });
 
-    let (qx_ic_proof, qx_ic_state) =
-        IdealCheckProtocol::<PiopField>::prove_as_subprotocol::<U2>(
+    let (qx_ic_proof, _qx_ic_state) =
+        IdealCheckProtocol::<PiopField>::prove_at_point::<U2>(
             &mut transcript,
             &qx_projected_trace,
             &qx_projected_scalars,
             qx_num_constraints,
-            num_vars,
+            &ic_evaluation_point,
             &field_cfg,
         )
         .expect("Q[X] ideal check prover failed");
+    let ic_time = t1.elapsed();
 
-    // ── Step 7: CPR₂ (Q[X]) ────────────────────────────────────────
-    let qx_projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
-    let qx_field_projected_scalars =
-        project_scalars_to_field(qx_projected_scalars, &qx_projecting_element)
-            .expect("QX scalar projection failed");
-    let qx_field_trace = project_trace_to_field::<PiopField, D2>(
-        &[], &qx_projected_trace, &[], &qx_projecting_element,
+    // ── Step 6: Shared projecting element + project traces to F_q ───
+    let t2 = Instant::now();
+    let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+
+    let bp_field_projected_scalars =
+        project_scalars_to_field(bp_projected_scalars, &projecting_element)
+            .expect("BP scalar projection failed");
+    let bp_field_trace = project_trace_to_field::<PiopField, D1>(
+        trace, &[], &[], &projecting_element,
     );
 
-    let (qx_cpr_proof, _qx_cpr_state) =
-        CombinedPolyResolver::<PiopField>::prove_as_subprotocol::<U2>(
+    let qx_field_projected_scalars =
+        project_scalars_to_field(qx_projected_scalars, &projecting_element)
+            .expect("QX scalar projection failed");
+    let qx_field_trace = project_trace_to_field::<PiopField, D2>(
+        &[], &qx_projected_trace, &[], &projecting_element,
+    );
+
+    // ── Step 7: Build CPR sumcheck groups (without running sumcheck) ──
+    let bp_cpr_group = CombinedPolyResolver::<PiopField>::build_prover_group::<U1>(
+        &mut transcript,
+        bp_field_trace,
+        &ic_evaluation_point,
+        &bp_field_projected_scalars,
+        bp_num_constraints,
+        num_vars,
+        bp_max_degree,
+        &field_cfg,
+    )
+    .expect("BP CPR build_prover_group failed");
+    let bp_num_cols = bp_cpr_group.num_cols;
+
+    let qx_cpr_group = CombinedPolyResolver::<PiopField>::build_prover_group::<U2>(
+        &mut transcript,
+        qx_field_trace,
+        &ic_evaluation_point,
+        &qx_field_projected_scalars,
+        qx_num_constraints,
+        num_vars,
+        qx_max_degree,
+        &field_cfg,
+    )
+    .expect("QX CPR build_prover_group failed");
+    let qx_num_cols = qx_cpr_group.num_cols;
+
+    // ── Step 8: Run batched multi-degree sumcheck ───────────────────
+    let sumcheck_groups: Vec<(
+        usize,
+        Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>>,
+        Box<dyn Fn(&[PiopField]) -> PiopField + Send + Sync>,
+    )> = vec![
+        (bp_cpr_group.degree, bp_cpr_group.mles, bp_cpr_group.comb_fn),
+        (qx_cpr_group.degree, qx_cpr_group.mles, qx_cpr_group.comb_fn),
+    ];
+
+    let (md_proof, mut prover_states) =
+        MultiDegreeSumcheck::<PiopField>::prove_as_subprotocol(
             &mut transcript,
-            qx_field_trace,
-            &qx_ic_state.evaluation_point,
-            &qx_field_projected_scalars,
-            qx_num_constraints,
+            sumcheck_groups,
             num_vars,
-            qx_max_degree,
+            &field_cfg,
+        );
+
+    // ── Step 9: Finalize both CPR groups ────────────────────────────
+    let bp_prover_state = prover_states.remove(0);
+    let (bp_up_evals, bp_down_evals, bp_cpr_state) =
+        CombinedPolyResolver::<PiopField>::finalize_prover(
+            &mut transcript,
+            bp_prover_state,
+            bp_num_cols,
             &field_cfg,
         )
-        .expect("Q[X] CPR failed");
-    let qx_time = t2.elapsed();
+        .expect("BP CPR finalize_prover failed");
 
-    // ── Step 8: PCS Test ────────────────────────────────────────────
+    let qx_prover_state = prover_states.remove(0);
+    let (qx_up_evals, qx_down_evals, _qx_cpr_state) =
+        CombinedPolyResolver::<PiopField>::finalize_prover(
+            &mut transcript,
+            qx_prover_state,
+            qx_num_cols,
+            &field_cfg,
+        )
+        .expect("QX CPR finalize_prover failed");
+    let cpr_time = t2.elapsed();
+
+    // ── Step 10: PCS Test ───────────────────────────────────────────
     let t3 = Instant::now();
     let test_transcript =
         BatchedZipPlus::<Zt, Lc>::test::<CHECK>(params, trace, &hint)
             .expect("PCS test failed");
     let pcs_test_time = t3.elapsed();
 
-    // ── Step 9: PCS Evaluate ────────────────────────────────────────
+    // ── Step 11: PCS Evaluate ───────────────────────────────────────
     let t4 = Instant::now();
     let point: Vec<Zt::Pt> = {
         let i128_point = derive_pcs_point(&bp_cpr_state.evaluation_point, num_vars);
@@ -1757,41 +2187,40 @@ where
         pcs_transcript.stream.into_inner()
     };
 
-    // Serialize BinaryPoly IC proof
+    // Serialize IC proofs
     let bp_ic_values: Vec<Vec<u8>> = bp_ic_proof
         .combined_mle_values
         .iter()
         .map(|dpf| dpf.coeffs.iter().flat_map(|c| field_to_bytes(c)).collect())
         .collect();
-
-    // Serialize BinaryPoly CPR proof
-    let bp_cpr_msgs: Vec<Vec<u8>> = bp_cpr_proof
-        .sumcheck_proof
-        .messages
-        .iter()
-        .map(|msg| msg.0.tail_evaluations.iter().flat_map(|c| field_to_bytes(c)).collect())
-        .collect();
-    let bp_cpr_sum = field_to_bytes(&bp_cpr_proof.sumcheck_proof.claimed_sum);
-    let bp_cpr_ups: Vec<Vec<u8>> = bp_cpr_proof.up_evals.iter().map(field_to_bytes).collect();
-    let bp_cpr_downs: Vec<Vec<u8>> = bp_cpr_proof.down_evals.iter().map(field_to_bytes).collect();
-
-    // Serialize Q[X] IC proof
     let qx_ic_values: Vec<Vec<u8>> = qx_ic_proof
         .combined_mle_values
         .iter()
         .map(|dpf| dpf.coeffs.iter().flat_map(|c| field_to_bytes(c)).collect())
         .collect();
 
-    // Serialize Q[X] CPR proof
-    let qx_cpr_msgs: Vec<Vec<u8>> = qx_cpr_proof
-        .sumcheck_proof
-        .messages
+    // Serialize multi-degree sumcheck proof
+    let md_group_messages: Vec<Vec<Vec<u8>>> = md_proof
+        .group_messages
         .iter()
-        .map(|msg| msg.0.tail_evaluations.iter().flat_map(|c| field_to_bytes(c)).collect())
+        .map(|group_rounds| {
+            group_rounds
+                .iter()
+                .map(|msg| msg.0.tail_evaluations.iter().flat_map(|c| field_to_bytes(c)).collect())
+                .collect()
+        })
         .collect();
-    let qx_cpr_sum = field_to_bytes(&qx_cpr_proof.sumcheck_proof.claimed_sum);
-    let qx_cpr_ups: Vec<Vec<u8>> = qx_cpr_proof.up_evals.iter().map(field_to_bytes).collect();
-    let qx_cpr_downs: Vec<Vec<u8>> = qx_cpr_proof.down_evals.iter().map(field_to_bytes).collect();
+    let md_claimed_sums: Vec<Vec<u8>> = md_proof
+        .claimed_sums
+        .iter()
+        .map(field_to_bytes)
+        .collect();
+
+    // Serialize up/down evals
+    let bp_cpr_ups: Vec<Vec<u8>> = bp_up_evals.iter().map(field_to_bytes).collect();
+    let bp_cpr_downs: Vec<Vec<u8>> = bp_down_evals.iter().map(field_to_bytes).collect();
+    let qx_cpr_ups: Vec<Vec<u8>> = qx_up_evals.iter().map(field_to_bytes).collect();
+    let qx_cpr_downs: Vec<Vec<u8>> = qx_down_evals.iter().map(field_to_bytes).collect();
 
     // Serialize evaluation data
     let evaluation_point_bytes: Vec<Vec<u8>> =
@@ -1802,22 +2231,21 @@ where
         pcs_proof_bytes: proof_bytes,
         commitment,
         bp_ic_proof_values: bp_ic_values,
-        bp_cpr_sumcheck_messages: bp_cpr_msgs,
-        bp_cpr_sumcheck_claimed_sum: bp_cpr_sum,
+        qx_ic_proof_values: qx_ic_values,
+        md_group_messages,
+        md_claimed_sums,
+        md_degrees: md_proof.degrees,
         bp_cpr_up_evals: bp_cpr_ups,
         bp_cpr_down_evals: bp_cpr_downs,
-        qx_ic_proof_values: qx_ic_values,
-        qx_cpr_sumcheck_messages: qx_cpr_msgs,
-        qx_cpr_sumcheck_claimed_sum: qx_cpr_sum,
         qx_cpr_up_evals: qx_cpr_ups,
         qx_cpr_down_evals: qx_cpr_downs,
         evaluation_point_bytes,
         pcs_evals_bytes,
         timing: TimingBreakdown {
             pcs_commit: pcs_commit_time,
-            ideal_check: bp_time + qx_time,
-            combined_poly_resolver: Duration::ZERO, // included in ideal_check
-            lookup: Duration::ZERO, // no lookup in dual-ring pipeline yet
+            ideal_check: ic_time,
+            combined_poly_resolver: cpr_time,
+            lookup: Duration::ZERO,
             pcs_test: pcs_test_time,
             pcs_evaluate: pcs_eval_time,
             total: total_time,
@@ -1825,10 +2253,11 @@ where
     }
 }
 
-/// Run the dual-ring Zinc+ verifier.
+/// Run the dual-ring Zinc+ verifier with **shared challenges**.
 ///
-/// Verifies both IC+CPR passes (BinaryPoly and Q[X]) on the same
-/// Fiat-Shamir transcript, then verifies the PCS.
+/// Mirrors [`prove_dual_ring`]: draws one IC evaluation point, one
+/// projecting element, and verifies both CPRs via a single multi-degree
+/// sumcheck.
 ///
 /// - The BinaryPoly pass uses `TrivialIdeal` (F₂ constraints don't lift).
 /// - The Q[X] pass uses the caller-provided `qx_ideal_from_ref` closure
@@ -1858,16 +2287,19 @@ where
     let total_start = Instant::now();
 
     let bp_num_constraints = count_constraints::<U1>();
-    let bp_max_degree = count_max_degree::<U1>();
     let qx_num_constraints = count_constraints::<U2>();
-    let qx_max_degree = count_max_degree::<U2>();
+    // Degrees are encoded in the proof (proof.md_degrees) for the verifier.
 
     // ── Reconstruct Fiat-Shamir transcript ──────────────────────────
     let mut transcript = KeccakTranscript::new();
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
     let field_elem_size = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
 
-    // ── Pass 1: IC₁ verify (BinaryPoly, TrivialIdeal) ──────────────
+    // ── Shared IC evaluation point ──────────────────────────────────
+    let ic_evaluation_point: Vec<PiopField> =
+        transcript.get_field_challenges(num_vars, &field_cfg);
+
+    // ── IC₁ verify (BinaryPoly, TrivialIdeal) ──────────────────────
     let t0 = Instant::now();
 
     let bp_ic_combined_mle_values: Vec<DynamicPolynomialF<PiopField>> = proof
@@ -1886,11 +2318,11 @@ where
         combined_mle_values: bp_ic_combined_mle_values,
     };
 
-    let bp_ic_subclaim = match IdealCheckProtocol::<PiopField>::verify_as_subprotocol::<U1, _, _>(
+    let bp_ic_subclaim = match IdealCheckProtocol::<PiopField>::verify_at_point::<U1, _, _>(
         &mut transcript,
         bp_ic_proof,
         bp_num_constraints,
-        num_vars,
+        ic_evaluation_point.clone(),
         |_: &IdealOrZero<U1::Ideal>| TrivialIdeal,
         &field_cfg,
     ) {
@@ -1910,82 +2342,7 @@ where
         }
     };
 
-    // ── Pass 1: CPR₁ verify ────────────────────────────────────────
-    let bp_cpr_sumcheck_messages: Vec<ProverMsg<PiopField>> = proof
-        .bp_cpr_sumcheck_messages
-        .iter()
-        .map(|bytes| {
-            let num_evals = bytes.len() / field_elem_size;
-            let tail_evaluations: Vec<PiopField> = (0..num_evals)
-                .map(|i| field_from_bytes(&bytes[i * field_elem_size..(i + 1) * field_elem_size], &field_cfg))
-                .collect();
-            ProverMsg(NatEvaluatedPolyWithoutConstant::new(tail_evaluations))
-        })
-        .collect();
-
-    let bp_cpr_claimed_sum = field_from_bytes(&proof.bp_cpr_sumcheck_claimed_sum, &field_cfg);
-    let bp_cpr_up_evals: Vec<PiopField> = proof.bp_cpr_up_evals.iter()
-        .map(|b| field_from_bytes(b, &field_cfg))
-        .collect();
-    let bp_cpr_down_evals: Vec<PiopField> = proof.bp_cpr_down_evals.iter()
-        .map(|b| field_from_bytes(b, &field_cfg))
-        .collect();
-
-    let bp_cpr_proof = zinc_piop::combined_poly_resolver::Proof::<PiopField> {
-        sumcheck_proof: SumcheckProof {
-            messages: bp_cpr_sumcheck_messages,
-            claimed_sum: bp_cpr_claimed_sum,
-        },
-        up_evals: bp_cpr_up_evals,
-        down_evals: bp_cpr_down_evals,
-    };
-
-    // Compute BP projecting element and projected scalars for CPR₁ verify.
-    let bp_projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
-    let bp_projected_scalars_coeffs = project_scalars::<PiopField, U1>(|scalar| {
-        let one = PiopField::one_with_cfg(&field_cfg);
-        let zero = PiopField::zero_with_cfg(&field_cfg);
-        DynamicPolynomialF::new(
-            scalar.iter().map(|coeff| {
-                if coeff.into_inner() { one.clone() } else { zero.clone() }
-            }).collect::<Vec<_>>()
-        )
-    });
-    let bp_field_projected_scalars =
-        project_scalars_to_field(bp_projected_scalars_coeffs, &bp_projecting_element)
-            .expect("BP scalar projection failed");
-
-    let bp_cpr_subclaim = match CombinedPolyResolver::<PiopField>::verify_as_subprotocol::<U1>(
-        &mut transcript,
-        bp_cpr_proof,
-        bp_num_constraints,
-        num_vars,
-        bp_max_degree,
-        &bp_projecting_element,
-        &bp_field_projected_scalars,
-        bp_ic_subclaim,
-        &field_cfg,
-    ) {
-        Ok(subclaim) => subclaim,
-        Err(e) => {
-            eprintln!("BinaryPoly CPR verification failed: {e:?}");
-            return VerifyResult {
-                accepted: false,
-                timing: VerifyTimingBreakdown {
-                    ideal_check_verify: t0.elapsed(),
-                    combined_poly_resolver_verify: Duration::ZERO,
-                    lookup_verify: Duration::ZERO,
-                    pcs_verify: Duration::ZERO,
-                    total: total_start.elapsed(),
-                },
-            };
-        }
-    };
-    let bp_verify_time = t0.elapsed();
-
-    // ── Pass 2: IC₂ verify (Q[X], real ideals) ─────────────────────
-    let t1 = Instant::now();
-
+    // ── IC₂ verify (Q[X], real ideals) ──────────────────────────────
     let qx_ic_combined_mle_values: Vec<DynamicPolynomialF<PiopField>> = proof
         .qx_ic_proof_values
         .iter()
@@ -2002,11 +2359,11 @@ where
         combined_mle_values: qx_ic_combined_mle_values,
     };
 
-    let qx_ic_subclaim = match IdealCheckProtocol::<PiopField>::verify_as_subprotocol::<U2, _, _>(
+    let qx_ic_subclaim = match IdealCheckProtocol::<PiopField>::verify_at_point::<U2, _, _>(
         &mut transcript,
         qx_ic_proof,
         qx_num_constraints,
-        num_vars,
+        ic_evaluation_point.clone(),
         &qx_ideal_from_ref,
         &field_cfg,
     ) {
@@ -2016,7 +2373,7 @@ where
             return VerifyResult {
                 accepted: false,
                 timing: VerifyTimingBreakdown {
-                    ideal_check_verify: bp_verify_time + t1.elapsed(),
+                    ideal_check_verify: t0.elapsed(),
                     combined_poly_resolver_verify: Duration::ZERO,
                     lookup_verify: Duration::ZERO,
                     pcs_verify: Duration::ZERO,
@@ -2025,74 +2382,208 @@ where
             };
         }
     };
+    let ic_verify_time = t0.elapsed();
 
-    // ── Pass 2: CPR₂ verify ────────────────────────────────────────
-    let qx_cpr_sumcheck_messages: Vec<ProverMsg<PiopField>> = proof
-        .qx_cpr_sumcheck_messages
-        .iter()
-        .map(|bytes| {
-            let num_evals = bytes.len() / field_elem_size;
-            let tail_evaluations: Vec<PiopField> = (0..num_evals)
-                .map(|i| field_from_bytes(&bytes[i * field_elem_size..(i + 1) * field_elem_size], &field_cfg))
-                .collect();
-            ProverMsg(NatEvaluatedPolyWithoutConstant::new(tail_evaluations))
-        })
-        .collect();
+    // ── Shared projecting element ───────────────────────────────────
+    let t1 = Instant::now();
+    let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
 
-    let qx_cpr_claimed_sum = field_from_bytes(&proof.qx_cpr_sumcheck_claimed_sum, &field_cfg);
-    let qx_cpr_up_evals: Vec<PiopField> = proof.qx_cpr_up_evals.iter()
-        .map(|b| field_from_bytes(b, &field_cfg))
-        .collect();
-    let qx_cpr_down_evals: Vec<PiopField> = proof.qx_cpr_down_evals.iter()
-        .map(|b| field_from_bytes(b, &field_cfg))
-        .collect();
+    // ── CPR₁ pre-sumcheck (draws α₁ from transcript) ───────────────
+    let bp_projected_scalars_coeffs = project_scalars::<PiopField, U1>(|scalar| {
+        let one = PiopField::one_with_cfg(&field_cfg);
+        let zero = PiopField::zero_with_cfg(&field_cfg);
+        DynamicPolynomialF::new(
+            scalar.iter().map(|coeff| {
+                if coeff.into_inner() { one.clone() } else { zero.clone() }
+            }).collect::<Vec<_>>()
+        )
+    });
+    let bp_field_projected_scalars =
+        project_scalars_to_field(bp_projected_scalars_coeffs, &projecting_element)
+            .expect("BP scalar projection failed");
 
-    let qx_cpr_proof = zinc_piop::combined_poly_resolver::Proof::<PiopField> {
-        sumcheck_proof: SumcheckProof {
-            messages: qx_cpr_sumcheck_messages,
-            claimed_sum: qx_cpr_claimed_sum,
-        },
-        up_evals: qx_cpr_up_evals,
-        down_evals: qx_cpr_down_evals,
+    let bp_cpr_pre = match CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<U1>(
+        &mut transcript,
+        &field_from_bytes(&proof.md_claimed_sums[0], &field_cfg),
+        bp_num_constraints,
+        &projecting_element,
+        &bp_field_projected_scalars,
+        &bp_ic_subclaim,
+        &field_cfg,
+    ) {
+        Ok(pre) => pre,
+        Err(e) => {
+            eprintln!("BP CPR pre-sumcheck failed: {e:?}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: ic_verify_time,
+                    combined_poly_resolver_verify: t1.elapsed(),
+                    lookup_verify: Duration::ZERO,
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
     };
 
-    // Compute Q[X] projecting element and projected scalars for CPR₂ verify.
-    let qx_projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+    // ── CPR₂ pre-sumcheck (draws α₂ from transcript) ───────────────
     let qx_projected_scalars_coeffs = project_scalars::<PiopField, U2>(|scalar| {
         DynamicPolynomialF::new(
             scalar.iter().map(|coeff| PiopField::from_with_cfg(*coeff, &field_cfg)).collect::<Vec<_>>()
         )
     });
     let qx_field_projected_scalars =
-        project_scalars_to_field(qx_projected_scalars_coeffs, &qx_projecting_element)
+        project_scalars_to_field(qx_projected_scalars_coeffs, &projecting_element)
             .expect("QX scalar projection failed");
 
-    if let Err(e) = CombinedPolyResolver::<PiopField>::verify_as_subprotocol::<U2>(
+    let qx_cpr_pre = match CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<U2>(
         &mut transcript,
-        qx_cpr_proof,
+        &field_from_bytes(&proof.md_claimed_sums[1], &field_cfg),
         qx_num_constraints,
-        num_vars,
-        qx_max_degree,
-        &qx_projecting_element,
+        &projecting_element,
         &qx_field_projected_scalars,
-        qx_ic_subclaim,
+        &qx_ic_subclaim,
         &field_cfg,
     ) {
-        eprintln!("Q[X] CPR verification failed: {e:?}");
+        Ok(pre) => pre,
+        Err(e) => {
+            eprintln!("QX CPR pre-sumcheck failed: {e:?}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: ic_verify_time,
+                    combined_poly_resolver_verify: t1.elapsed(),
+                    lookup_verify: Duration::ZERO,
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
+    };
+
+    // ── Deserialize multi-degree sumcheck proof ─────────────────────
+    let md_group_messages: Vec<Vec<ProverMsg<PiopField>>> = proof
+        .md_group_messages
+        .iter()
+        .map(|group_rounds| {
+            group_rounds
+                .iter()
+                .map(|bytes| {
+                    let num_evals = bytes.len() / field_elem_size;
+                    let tail_evaluations: Vec<PiopField> = (0..num_evals)
+                        .map(|i| field_from_bytes(&bytes[i * field_elem_size..(i + 1) * field_elem_size], &field_cfg))
+                        .collect();
+                    ProverMsg(NatEvaluatedPolyWithoutConstant::new(tail_evaluations))
+                })
+                .collect()
+        })
+        .collect();
+
+    let md_claimed_sums: Vec<PiopField> = proof
+        .md_claimed_sums
+        .iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+
+    let md_proof = MultiDegreeSumcheckProof {
+        group_messages: md_group_messages,
+        claimed_sums: md_claimed_sums,
+        degrees: proof.md_degrees.clone(),
+    };
+
+    // ── Verify multi-degree sumcheck ────────────────────────────────
+    let md_subclaims = match MultiDegreeSumcheck::<PiopField>::verify_as_subprotocol(
+        &mut transcript,
+        num_vars,
+        &md_proof,
+        &field_cfg,
+    ) {
+        Ok(subclaims) => subclaims,
+        Err(e) => {
+            eprintln!("Multi-degree sumcheck verification failed: {e:?}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: ic_verify_time,
+                    combined_poly_resolver_verify: t1.elapsed(),
+                    lookup_verify: Duration::ZERO,
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
+    };
+
+    // ── Finalize CPR₁ (BinaryPoly) ─────────────────────────────────
+    let bp_up_evals: Vec<PiopField> = proof.bp_cpr_up_evals.iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+    let bp_down_evals: Vec<PiopField> = proof.bp_cpr_down_evals.iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+
+    let bp_cpr_subclaim = match CombinedPolyResolver::<PiopField>::finalize_verifier::<U1>(
+        &mut transcript,
+        md_subclaims.point.clone(),
+        md_subclaims.expected_evaluations[0].clone(),
+        &bp_cpr_pre,
+        bp_up_evals,
+        bp_down_evals,
+        num_vars,
+        &bp_field_projected_scalars,
+        &field_cfg,
+    ) {
+        Ok(subclaim) => subclaim,
+        Err(e) => {
+            eprintln!("BP CPR finalize_verifier failed: {e:?}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: ic_verify_time,
+                    combined_poly_resolver_verify: t1.elapsed(),
+                    lookup_verify: Duration::ZERO,
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
+    };
+
+    // ── Finalize CPR₂ (Q[X]) ───────────────────────────────────────
+    let qx_up_evals: Vec<PiopField> = proof.qx_cpr_up_evals.iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+    let qx_down_evals: Vec<PiopField> = proof.qx_cpr_down_evals.iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+
+    if let Err(e) = CombinedPolyResolver::<PiopField>::finalize_verifier::<U2>(
+        &mut transcript,
+        md_subclaims.point.clone(),
+        md_subclaims.expected_evaluations[1].clone(),
+        &qx_cpr_pre,
+        qx_up_evals,
+        qx_down_evals,
+        num_vars,
+        &qx_field_projected_scalars,
+        &field_cfg,
+    ) {
+        eprintln!("QX CPR finalize_verifier failed: {e:?}");
         return VerifyResult {
             accepted: false,
             timing: VerifyTimingBreakdown {
-                ideal_check_verify: bp_verify_time + t1.elapsed(),
-                combined_poly_resolver_verify: Duration::ZERO,
+                ideal_check_verify: ic_verify_time,
+                combined_poly_resolver_verify: t1.elapsed(),
                 lookup_verify: Duration::ZERO,
                 pcs_verify: Duration::ZERO,
                 total: total_start.elapsed(),
             },
         };
     }
-    let qx_verify_time = t1.elapsed();
+    let cpr_verify_time = t1.elapsed();
 
-    // ── Step 3: PCS Verify ──────────────────────────────────────────
+    // ── PCS Verify ──────────────────────────────────────────────────
     let t2 = Instant::now();
 
     let _pcs_evals: Vec<PiopField> = proof.pcs_evals_bytes.iter()
@@ -2125,13 +2616,11 @@ where
     );
     let pcs_verify_time = t2.elapsed();
 
-    // CPR→PCS binding: same note as in verify() above.
-
     VerifyResult {
         accepted: pcs_result.is_ok(),
         timing: VerifyTimingBreakdown {
-            ideal_check_verify: bp_verify_time + qx_verify_time,
-            combined_poly_resolver_verify: Duration::ZERO,
+            ideal_check_verify: ic_verify_time,
+            combined_poly_resolver_verify: cpr_verify_time,
             lookup_verify: Duration::ZERO,
             pcs_verify: pcs_verify_time,
             total: total_start.elapsed(),

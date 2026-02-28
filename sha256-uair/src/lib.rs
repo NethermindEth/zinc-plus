@@ -63,14 +63,11 @@
 //! 5. **σ₀ shift decomp**: `Ŵ[t−15] = R₀ + X³·S₀`
 //! 6. **σ₁ shift decomp**: `Ŵ[t−2] = R₁ + X¹⁰·S₁`
 //!
-//! ## Q\[X\] constraints (BitPoly lookups & carry propagation)
+//! ## Q\[X\] constraints (carry propagation)
 //!
-//! 7. **Ch (e∧f)**: `ê[t] + ê[t−1] − 2·t̂_ef[t] ∈ BitPoly_w`
-//! 8. **¬e∧g**: `(1_w − ê[t]) + ê[t−2] − 2·t̂_{¬e,g}[t] ∈ BitPoly_w`
-//! 9. **Maj**: `â[t] + â[t−1] + â[t−2] − 2·M̂aj[t] ∈ BitPoly_w`
-//! 10. **a-update**: `â[t+1] − ê[t−3] − Σ̂₁ − Ĉh − K_t − Ŵ − Σ̂₀ − M̂aj + μ_a·X^w ∈ (X−2)`
-//! 11. **e-update**: `ê[t+1] − â[t−3] − ê[t−3] − Σ̂₁ − Ĉh − K_t − Ŵ + μ_e·X^w ∈ (X−2)`
-//! 12. **W schedule**: `Ŵ[t] − Ŵ[t−16] − σ̂₀ − Ŵ[t−7] − σ̂₁ + μ_W·X^w ∈ (X−2)`
+//! 7. **a-update**: `â[t+1] − ê[t−3] − Σ̂₁ − Ĉh − K_t − Ŵ − Σ̂₀ − M̂aj + μ_a·X^w ∈ (X−2)`
+//! 8. **e-update**: `ê[t+1] − â[t−3] − ê[t−3] − Σ̂₁ − Ĉh − K_t − Ŵ + μ_e·X^w ∈ (X−2)`
+//! 9. **W schedule**: `Ŵ[t] − Ŵ[t−16] − σ̂₀ − Ŵ[t−7] − σ̂₁ + μ_W·X^w ∈ (X−2)`
 
 #![allow(clippy::arithmetic_side_effects)] // UAIRs should not care about overflows
 
@@ -402,10 +399,8 @@ impl Uair for Sha256UairBp {
         //
         // The remaining constraints (C7–C12) operate in Q[X] / Z[X] and
         // are defined by `Sha256UairQx`. They use:
-        //   - **BitPoly lookup**: ê[t]+ê[t−1]−2·t̂_ef ∈ BitPoly_w (Ch),
-        //     (1_w−ê[t])+ê[t−2]−2·t̂_¬e,g ∈ BitPoly_w,
-        //     â[t]+â[t−1]+â[t−2]−2·M̂aj ∈ BitPoly_w.
         //   - **(X−2) carry**: a/e-update and W schedule recurrence.
+        //   - **BitPoly** membership is now enforced by lookups, not ideal checks.
         //
         // These require multi-row lookback (t−1, t−2, t−3, t−7, t−15, t−16)
         // which the up/down framework doesn't directly support yet.
@@ -416,73 +411,32 @@ impl Uair for Sha256UairBp {
 
 // ─── Number of Q[X] (integer polynomial) constraints ────────────────────────
 
-/// Number of Q[X] constraints: 3 BitPoly lookups + 3 carry propagation = 6.
+/// Number of Q[X] constraints: 3 carry propagation checks.
 ///
-/// - C7–C9: Ch/Maj decomposition via BitPoly lookups (require multi-row
-///   lookback for ê[t−1], ê[t−2], â[t−1], â[t−2]).
-/// - C10–C11: State update carry propagation via (X−2) ideal (require
+/// - C7–C8: State update carry propagation via (X−2) ideal (require
 ///   lookback to â[t−3], ê[t−3] for the inlined d/h registers, and
 ///   K_t from public input).
-/// - C12: Message schedule recurrence via (X−2) ideal (requires lookback
+/// - C9: Message schedule recurrence via (X−2) ideal (requires lookback
 ///   to Ŵ[t−16], Ŵ[t−7]).
 ///
+/// BitPoly membership (binary coefficient checks) is now enforced by
+/// lookups rather than ideal checks.
+///
 /// Multi-row lookback is not yet supported by the up/down framework;
-/// constraints C7–C12 are currently expressed with the available rows.
-pub const NUM_QX_CONSTRAINTS: usize = 6;
-
-// ─── BitPoly ideal ──────────────────────────────────────────────────────────
-
-/// The BitPoly ideal: polynomials whose coefficients are all in {0, 1}.
-///
-/// A polynomial f(X) ∈ Z[X] has "binary coefficients" iff each coefficient c_i
-/// satisfies c_i(c_i − 1) = 0. After projection to F_p, this becomes the
-/// check that each coefficient is 0 or 1 in the field.
-///
-/// This ideal check is sound when the original integer coefficients are small
-/// (which they are — the constraints produce values with coefficients in
-/// {0, 1, 2, 3} at most, and the BitPoly check verifies they are in {0, 1}).
-#[derive(Clone, Copy, Debug)]
-pub struct BitPolyIdeal;
-
-impl Ideal for BitPolyIdeal {}
-
-impl FromRef<BitPolyIdeal> for BitPolyIdeal {
-    #[inline(always)]
-    fn from_ref(ideal: &BitPolyIdeal) -> Self {
-        *ideal
-    }
-}
-
-impl IdealCheck<DensePolynomial<i64, 64>> for BitPolyIdeal {
-    fn contains(&self, value: &DensePolynomial<i64, 64>) -> bool {
-        value.coeffs.iter().all(|&c| c == 0 || c == 1)
-    }
-}
-
-impl<F: PrimeField> IdealCheck<DynamicPolynomialF<F>> for BitPolyIdeal {
-    /// Check that each coefficient of the projected polynomial is 0 or 1 in F_p.
-    fn contains(&self, value: &DynamicPolynomialF<F>) -> bool {
-        if value.coeffs.is_empty() {
-            return true;
-        }
-        let cfg = value.coeffs[0].cfg();
-        let zero = F::zero_with_cfg(cfg);
-        let one = F::one_with_cfg(cfg);
-        value.coeffs.iter().all(|c| *c == zero || *c == one)
-    }
-}
+/// constraints are currently expressed with the available rows.
+pub const NUM_QX_CONSTRAINTS: usize = 3;
 
 // ─── Q[X] ideal type enum ──────────────────────────────────────────────────
 
 /// Ideal type for the Q[X] SHA-256 UAIR.
 ///
-/// Constraints use either:
-/// - `BitPoly`: coefficient-wise check that all coefficients are in {0, 1}
+/// Constraints use:
 /// - `DegreeOne(2)`: evaluation at X = 2 gives zero (carry propagation)
-/// - `Zero`: exact zero (assert_zero constraints become this)
+///
+/// BitPoly membership (binary coefficient checks) is now enforced by
+/// lookups rather than ideal checks.
 #[derive(Clone, Debug)]
 pub enum Sha256QxIdeal {
-    BitPoly(BitPolyIdeal),
     DegreeOne(DegreeOneIdeal<i64>),
 }
 
@@ -497,7 +451,6 @@ impl FromRef<Sha256QxIdeal> for Sha256QxIdeal {
 impl IdealCheck<DensePolynomial<i64, 64>> for Sha256QxIdeal {
     fn contains(&self, value: &DensePolynomial<i64, 64>) -> bool {
         match self {
-            Sha256QxIdeal::BitPoly(ideal) => ideal.contains(value),
             Sha256QxIdeal::DegreeOne(_ideal) => {
                 // Evaluate at X = 2: f(2) = Σ c_i * 2^i
                 let mut eval: i64 = 0;
@@ -515,19 +468,11 @@ impl IdealCheck<DensePolynomial<i64, 64>> for Sha256QxIdeal {
 /// The Q\[X\] ideal lifted to a prime field for IdealCheck verification.
 ///
 /// This enum maps `Sha256QxIdeal` variants to their field-level equivalents:
-/// - `BitPoly`: always passes in the IC verifier. The BitPoly check (all
-///   coefficients in {0,1}) is NOT an actual ideal — it's not closed under
-///   linear combination. So after the IC protocol's MLE evaluation at a
-///   random point, the combined value won't have binary coefficients even
-///   if each individual row does. Soundness for BitPoly constraints comes
-///   from the sumcheck + PCS, same as the F₂\[X\] cyclotomic constraints.
 /// - `DegreeOne(root)`: evaluation at `root` (= 2) in F_p gives zero.
 ///   This IS a real ideal ((X−2) ⊂ F_p\[X\]) and lifts correctly from Z\[X\].
 /// - `Zero`: exact zero polynomial.
 #[derive(Clone, Debug)]
 pub enum Sha256QxIdealOverF<F: PrimeField> {
-    /// BitPoly constraints: always passes (not a real ideal).
-    BitPoly,
     /// Carry propagation: evaluate at root and check = 0.
     DegreeOne(F),
     /// Exact zero.
@@ -545,9 +490,6 @@ impl<F: PrimeField> FromRef<Sha256QxIdealOverF<F>> for Sha256QxIdealOverF<F> {
 impl<F: PrimeField> IdealCheck<DynamicPolynomialF<F>> for Sha256QxIdealOverF<F> {
     fn contains(&self, value: &DynamicPolynomialF<F>) -> bool {
         match self {
-            // BitPoly is not a real ideal — can't be batch-verified.
-            // Always pass; soundness from sumcheck + PCS.
-            Sha256QxIdealOverF::BitPoly => true,
             Sha256QxIdealOverF::DegreeOne(root) => {
                 if value.coeffs.is_empty() {
                     return true;
@@ -565,24 +507,21 @@ impl<F: PrimeField> IdealCheck<DynamicPolynomialF<F>> for Sha256QxIdealOverF<F> 
 
 /// The SHA-256 UAIR over `DensePolynomial<i64, 64>` (Z[X] with degree < 64).
 ///
-/// This UAIR defines the integer-polynomial constraints (C7–C12) that cannot
-/// be expressed in F₂[X] because the constant 2 is zero in F₂.
+/// This UAIR defines the integer-polynomial carry propagation constraints
+/// that cannot be expressed in F₂[X] because the constant 2 is zero in F₂.
+/// BitPoly membership (binary coefficient checks) is now enforced by lookups.
 ///
 /// Following the paper, registers d and h are eliminated via shift-register
 /// identities (d_t = a_{t−3}, h_t = e_{t−3}), and K_t is a public input.
 ///
-/// - C7:  Ch BitPoly: `ê[t] + ê[t−1] − 2·t̂_ef[t] ∈ BitPoly_w`
-/// - C8:  ¬e∧g BitPoly: `(1_w − ê[t]) + ê[t−2] − 2·t̂_{¬e,g}[t] ∈ BitPoly_w`
-/// - C9:  Maj BitPoly: `â[t] + â[t−1] + â[t−2] − 2·M̂aj[t] ∈ BitPoly_w`
-/// - C10: a-update: `â[t+1] − ê[t−3] − Σ̂₁ − Ĉh − K_t − Ŵ − Σ̂₀ − M̂aj + μ_a·X^w ∈ (X−2)`
-/// - C11: e-update: `ê[t+1] − â[t−3] − ê[t−3] − Σ̂₁ − Ĉh − K_t − Ŵ + μ_e·X^w ∈ (X−2)`
-/// - C12: W schedule: `Ŵ[t] − Ŵ[t−16] − σ̂₀ − Ŵ[t−7] − σ̂₁ + μ_W·X^w ∈ (X−2)`
+/// - C7: a-update: `â[t+1] − ê[t−3] − Σ̂₁ − Ĉh − K_t − Ŵ − Σ̂₀ − M̂aj + μ_a·X^w ∈ (X−2)`
+/// - C8: e-update: `ê[t+1] − â[t−3] − ê[t−3] − Σ̂₁ − Ĉh − K_t − Ŵ + μ_e·X^w ∈ (X−2)`
+/// - C9: W schedule: `Ŵ[t] − Ŵ[t−16] − σ̂₀ − Ŵ[t−7] − σ̂₁ + μ_W·X^w ∈ (X−2)`
 ///
 /// **Note:** The full constraints require multi-row lookback which the up/down
 /// framework does not yet support. The current implementation uses the
-/// available up/down rows as a partial approximation; the BitPoly checks
-/// verify coefficient membership, and the carry checks use the next-row
-/// reference for â[t+1]/ê[t+1].
+/// available up/down rows as a partial approximation; the carry checks use
+/// the next-row reference for â[t+1]/ê[t+1].
 pub struct Sha256UairQx;
 
 impl Uair for Sha256UairQx {
@@ -615,7 +554,6 @@ impl Uair for Sha256UairQx {
         let bp_up = up.binary_poly;
         let int_up = up.int;
         let bp_down = down.binary_poly;
-        let bitpoly_ideal = ideal_from_ref(&Sha256QxIdeal::BitPoly(BitPolyIdeal));
         let carry_ideal = ideal_from_ref(&Sha256QxIdeal::DegreeOne(DegreeOneIdeal::new(2_i64)));
 
         // ── Constant polynomials ────────────────────────────────────────
@@ -628,29 +566,7 @@ impl Uair for Sha256UairQx {
         };
         let x32_expr = from_ref(&x32);
 
-        // ── Constraint 7: Ch BitPoly check ──────────────────────────────
-        //
-        //   Paper: ê[t] + ê[t−1] − 2·t̂_ef[t] ∈ BitPoly_w
-        //
-        // The full constraint requires ê[t−1] (lookback). As a partial
-        // check, we verify that t̂_ef has binary coefficients.
-        b.assert_in_ideal(bp_up[COL_CH_EF_HAT].clone(), &bitpoly_ideal);
-
-        // ── Constraint 8: ¬e∧g BitPoly check ───────────────────────────
-        //
-        //   Paper: (1_w − ê[t]) + ê[t−2] − 2·t̂_{¬e,g}[t] ∈ BitPoly_w
-        //
-        // Partial check: verify t̂_{¬e,g} has binary coefficients.
-        b.assert_in_ideal(bp_up[COL_CH_NEG_EG_HAT].clone(), &bitpoly_ideal);
-
-        // ── Constraint 9: Maj BitPoly check ─────────────────────────────
-        //
-        //   Paper: â[t] + â[t−1] + â[t−2] − 2·M̂aj[t] ∈ BitPoly_w
-        //
-        // Partial check: verify M̂aj has binary coefficients.
-        b.assert_in_ideal(bp_up[COL_MAJ_HAT].clone(), &bitpoly_ideal);
-
-        // ── Constraint 10: a-update carry propagation ───────────────────
+        // ── Constraint 7: a-update carry propagation ────────────────────
         //
         //   Paper: â[t+1] − ê[t−3] − Σ̂₁[t] − Ĉh[t] − K_t − Ŵ[t]
         //          − Σ̂₀[t] − M̂aj[t] + μ_a[t]·X^w ∈ (X−2)
@@ -672,7 +588,7 @@ impl Uair for Sha256UairQx {
             &carry_ideal,
         );
 
-        // ── Constraint 11: e-update carry propagation ───────────────────
+        // ── Constraint 8: e-update carry propagation ────────────────────
         //
         //   Paper: ê[t+1] − â[t−3] − ê[t−3] − Σ̂₁[t] − Ĉh[t] − K_t − Ŵ[t]
         //          + μ_e[t]·X^w ∈ (X−2)
@@ -689,7 +605,7 @@ impl Uair for Sha256UairQx {
             &carry_ideal,
         );
 
-        // ── Constraint 12: Message schedule recurrence ──────────────────
+        // ── Constraint 9: Message schedule recurrence ───────────────────
         //
         //   Paper: Ŵ[t] − Ŵ[t−16] − σ̂₀[t] − Ŵ[t−7] − σ̂₁[t]
         //          + μ_W[t]·X^w ∈ (X−2)
@@ -736,7 +652,7 @@ mod tests {
     fn correct_number_of_qx_constraints() {
         assert_eq!(
             count_constraints::<Sha256UairQx>(),
-            NUM_QX_CONSTRAINTS  // 6
+            NUM_QX_CONSTRAINTS  // 3
         );
     }
 
@@ -751,8 +667,7 @@ mod tests {
 
     #[test]
     fn qx_max_constraint_degree() {
-        // C7–C9 are degree 0 (just the variable, no multiplication)
-        // C10–C12 have degree 1 (variable * X³² constant)
+        // C7–C9 have degree 1 (variable * X³² constant)
         assert_eq!(count_max_degree::<Sha256UairQx>(), 1);
     }
 

@@ -122,7 +122,7 @@ where
 
 /// Evaluate a k-variable MLE (given as evaluations over {0,1}^k in
 /// little-endian order) at a point in F^k.
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, dead_code)]
 pub(super) fn evaluate_mle_at<F: InnerTransparentField>(
     evals: &[F],
     point: &[F],
@@ -288,34 +288,28 @@ where
 
             let s = &sumcheck_prover_state.randomness;
 
-            #[cfg(feature = "parallel")]
-            let (pl_at_s, pr_at_s, ql_at_s, qr_at_s) = if half >= 128 {
-                let ((pl, pr), (ql, qr)) = rayon::join(
-                    || rayon::join(
-                        || evaluate_mle_at(p_left_vals, s, field_cfg),
-                        || evaluate_mle_at(p_right_vals, s, field_cfg),
-                    ),
-                    || rayon::join(
-                        || evaluate_mle_at(q_left_vals, s, field_cfg),
-                        || evaluate_mle_at(q_right_vals, s, field_cfg),
-                    ),
-                );
-                (pl, pr, ql, qr)
-            } else {
-                (
-                    evaluate_mle_at(p_left_vals, s, field_cfg),
-                    evaluate_mle_at(p_right_vals, s, field_cfg),
-                    evaluate_mle_at(q_left_vals, s, field_cfg),
-                    evaluate_mle_at(q_right_vals, s, field_cfg),
-                )
+            // Read final MLE evaluations from the sumcheck prover state
+            // instead of re-computing via evaluate_mle_at (saves O(2^k)
+            // per call × 4 calls per round).
+            //
+            // After k rounds, fix_variables was applied k−1 times (the
+            // last challenge is pushed to randomness but not applied),
+            // leaving each MLE with 2 entries. Interpolate with the last
+            // challenge to get the fully-evaluated scalar.
+            //
+            // MLE layout: [eq, pl, ql, pr, qr].
+            let last_r = s.last().expect("sumcheck should have at least one challenge");
+            let one_minus_last = F::one_with_cfg(field_cfg) - last_r;
+            let interp_mle = |mle: &DenseMultilinearExtension<F::Inner>| -> F {
+                debug_assert_eq!(mle.num_vars, 1, "MLE should have 1 remaining variable");
+                let v0 = F::new_unchecked_with_cfg(mle[0].clone(), field_cfg);
+                let v1 = F::new_unchecked_with_cfg(mle[1].clone(), field_cfg);
+                one_minus_last.clone() * &v0 + &(last_r.clone() * &v1)
             };
-            #[cfg(not(feature = "parallel"))]
-            let (pl_at_s, pr_at_s, ql_at_s, qr_at_s) = (
-                evaluate_mle_at(p_left_vals, s, field_cfg),
-                evaluate_mle_at(p_right_vals, s, field_cfg),
-                evaluate_mle_at(q_left_vals, s, field_cfg),
-                evaluate_mle_at(q_right_vals, s, field_cfg),
-            );
+            let pl_at_s = interp_mle(&sumcheck_prover_state.mles[1]);
+            let ql_at_s = interp_mle(&sumcheck_prover_state.mles[2]);
+            let pr_at_s = interp_mle(&sumcheck_prover_state.mles[3]);
+            let qr_at_s = interp_mle(&sumcheck_prover_state.mles[4]);
 
             transcript.absorb_random_field(&pl_at_s, &mut buf);
             transcript.absorb_random_field(&pr_at_s, &mut buf);

@@ -1,4 +1,5 @@
 use crypto_primitives::PrimeField;
+use zinc_poly::mle::DenseMultilinearExtension;
 
 use crate::{combined_poly_resolver::CombinedPolyResolverError, sumcheck::SumcheckProof};
 
@@ -60,4 +61,30 @@ pub struct VerifierSubclaim<F: PrimeField> {
     pub up_evals: Vec<F>,
     /// Evaluation claims about the shifted trace columns.
     pub down_evals: Vec<F>,
+}
+
+/// Intermediate state from CPR's pre-sumcheck phase.
+///
+/// Contains the sumcheck degree group (degree, MLEs, combination function)
+/// plus metadata needed for finalization after the sumcheck completes.
+pub struct CprSumcheckGroup<F: PrimeField> {
+    /// The degree for this sumcheck group: `max_degree + 2`.
+    pub degree: usize,
+    /// The MLEs: `[selector, eq_r, up_cols..., down_cols...]`.
+    pub mles: Vec<DenseMultilinearExtension<F::Inner>>,
+    /// The combination function (captures α powers, constraint evaluation, etc.).
+    pub comb_fn: Box<dyn Fn(&[F]) -> F + Send + Sync>,
+    /// Number of trace columns (needed to split up/down evals after sumcheck).
+    pub num_cols: usize,
+}
+
+/// Pre-sumcheck verification state for CPR.
+///
+/// Holds data computed before the sumcheck that is needed after
+/// the subclaim is generated.
+pub struct CprVerifierPreSumcheck<F: PrimeField> {
+    /// The α-folding challenge powers.
+    pub folding_challenge_powers: Vec<F>,
+    /// The IC evaluation point (needed for eq_eval).
+    pub ic_evaluation_point: Vec<F>,
 }

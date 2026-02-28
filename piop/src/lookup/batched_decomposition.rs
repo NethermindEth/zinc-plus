@@ -30,6 +30,7 @@ use super::{
     structs::{
         BatchedDecompLogupProof, BatchedDecompLogupProverState,
         BatchedDecompLogupVerifierSubClaim, BatchedDecompLookupInstance, LookupError,
+        LookupSumcheckGroup, LookupVerifierPreSumcheck,
     },
     tables::{batch_inverse_shifted, build_table_index, compute_multiplicities_with_index},
 };
@@ -276,6 +277,422 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
                 evaluation_point: sumcheck_prover_state.randomness,
             },
         ))
+    }
+
+    /// Build the sumcheck degree group for batched LogUp **without**
+    /// running the sumcheck.
+    ///
+    /// Does all pre-sumcheck work (absorb chunks/mults/inverses, draw
+    /// β/γ/r, precompute H) and returns a `(degree, mles, comb_fn)`
+    /// triple plus ancillary data.
+    ///
+    /// After the multi-degree sumcheck completes, call
+    /// [`finalize_prover`] to assemble the final proof.
+    #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+    pub fn build_prover_group(
+        transcript: &mut impl Transcript,
+        instance: &BatchedDecompLookupInstance<F>,
+        field_cfg: &F::Config,
+    ) -> Result<LookupSumcheckGroup<F>, LookupError<F>>
+    where
+        F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    {
+        let witnesses = &instance.witnesses;
+        let subtable = &instance.subtable;
+        let shifts = &instance.shifts;
+        let all_chunks = &instance.chunks;
+
+        let num_lookups = witnesses.len();
+        let num_chunks = shifts.len();
+        let witness_len = witnesses[0].len();
+
+        let zero = F::zero_with_cfg(field_cfg);
+        let one = F::one_with_cfg(field_cfg);
+        let mut buf = vec![0u8; F::Inner::NUM_BYTES];
+
+        // ---- Step 1: Absorb all chunks ----
+        for lookup_chunks in all_chunks {
+            for chunk in lookup_chunks {
+                transcript.absorb_random_field_slice(chunk, &mut buf);
+            }
+        }
+
+        // ---- Step 2: Compute multiplicities ----
+        let table_index = build_table_index(subtable);
+        let all_chunk_multiplicities: Vec<Vec<Vec<F>>> = cfg_iter!(all_chunks)
+            .map(|lookup_chunks| {
+                lookup_chunks
+                    .iter()
+                    .map(|chunk| {
+                        compute_multiplicities_with_index(
+                            chunk, &table_index, subtable.len(), field_cfg,
+                        )
+                        .ok_or(LookupError::WitnessNotInTable)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<_, _>>()?;
+
+        let all_aggregated_multiplicities: Vec<Vec<F>> = all_chunk_multiplicities
+            .iter()
+            .map(|lookup_mults| {
+                let mut agg = vec![zero.clone(); subtable.len()];
+                for m in lookup_mults {
+                    for (a, mk) in agg.iter_mut().zip(m.iter()) {
+                        *a += mk;
+                    }
+                }
+                agg
+            })
+            .collect();
+
+        for agg in &all_aggregated_multiplicities {
+            transcript.absorb_random_field_slice(agg, &mut buf);
+        }
+
+        // ---- Step 3: Shared β challenge ----
+        let beta: F = transcript.get_field_challenge(field_cfg);
+
+        // ---- Step 4: Inverse vectors ----
+        let all_inverse_witnesses: Vec<Vec<Vec<F>>> = cfg_iter!(all_chunks)
+            .map(|lookup_chunks| {
+                lookup_chunks
+                    .iter()
+                    .map(|chunk| batch_inverse_shifted(&beta, chunk))
+                    .collect()
+            })
+            .collect();
+
+        let v_table = batch_inverse_shifted(&beta, subtable);
+
+        for lookup_invs in &all_inverse_witnesses {
+            for u in lookup_invs {
+                transcript.absorb_random_field_slice(u, &mut buf);
+            }
+        }
+        transcript.absorb_random_field_slice(&v_table, &mut buf);
+
+        // ---- Step 5: Batching challenge γ ----
+        let gamma: F = transcript.get_field_challenge(field_cfg);
+
+        // Dimensions
+        let w_num_vars =
+            zinc_utils::log2(witness_len.next_power_of_two()) as usize;
+        let t_num_vars =
+            zinc_utils::log2(subtable.len().next_power_of_two()) as usize;
+        let num_vars = w_num_vars.max(t_num_vars);
+
+        // ---- Step 6: Precompute γ powers ----
+        let num_identities = num_lookups * (num_chunks + 1);
+        let mut gamma_powers = Vec::with_capacity(num_identities);
+        let mut gp = one.clone();
+        for _ in 0..num_identities {
+            gamma_powers.push(gp.clone());
+            gp *= &gamma;
+        }
+
+        // ---- Step 7: Precompute H ----
+        let n = 1usize << num_vars;
+        let subtable_len = subtable.len();
+        let h_evaluations: Vec<F> = cfg_into_iter!(0..n)
+            .map(|j| {
+                let mut acc = zero.clone();
+                let v_j = if j < subtable_len {
+                    &v_table[j]
+                } else {
+                    &zero
+                };
+
+                for ell in 0..num_lookups {
+                    let base_id = ell * (num_chunks + 1);
+
+                    for k_idx in 0..num_chunks {
+                        let c_j = if j < witness_len {
+                            &all_chunks[ell][k_idx][j]
+                        } else {
+                            &zero
+                        };
+                        let u_j = if j < witness_len {
+                            &all_inverse_witnesses[ell][k_idx][j]
+                        } else {
+                            &zero
+                        };
+                        let id = (beta.clone() - c_j) * u_j - &one;
+                        acc += &(id * &gamma_powers[base_id + k_idx]);
+                    }
+
+                    let m_agg_j = if j < subtable_len {
+                        &all_aggregated_multiplicities[ell][j]
+                    } else {
+                        &zero
+                    };
+                    let mut u_sum = if j < witness_len {
+                        all_inverse_witnesses[ell][0][j].clone()
+                    } else {
+                        zero.clone()
+                    };
+                    for k_idx in 1..num_chunks {
+                        if j < witness_len {
+                            u_sum +=
+                                &all_inverse_witnesses[ell][k_idx][j];
+                        }
+                    }
+                    let balance = u_sum - &(m_agg_j.clone() * v_j);
+                    acc += &(balance * &gamma_powers[base_id + num_chunks]);
+                }
+
+                acc
+            })
+            .collect();
+
+        // ---- Step 8: Build MLEs ----
+        let r: Vec<F> =
+            transcript.get_field_challenges(num_vars, field_cfg);
+        let eq_r = build_eq_x_r_inner(&r, field_cfg)?;
+
+        let inner_zero = zero.inner().clone();
+        let h_mle = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            cfg_iter!(h_evaluations)
+                .map(|x| x.inner().clone())
+                .collect(),
+            inner_zero,
+        );
+
+        let mles = vec![eq_r, h_mle];
+
+        let comb_fn: Box<dyn Fn(&[F]) -> F + Send + Sync> =
+            Box::new(move |vals: &[F]| -> F {
+                vals[0].clone() * &vals[1]
+            });
+
+        Ok(LookupSumcheckGroup {
+            degree: 2,
+            mles,
+            comb_fn,
+            num_vars,
+            chunk_vectors: all_chunks.clone(),
+            aggregated_multiplicities: all_aggregated_multiplicities,
+            chunk_inverse_witnesses: all_inverse_witnesses,
+            inverse_table: v_table,
+        })
+    }
+
+    /// Assemble the final lookup proof from the pre-sumcheck data
+    /// and the sumcheck proof extracted from the multi-degree result.
+    pub fn finalize_prover(
+        pre: LookupSumcheckGroup<F>,
+        sumcheck_proof: crate::sumcheck::SumcheckProof<F>,
+        evaluation_point: Vec<F>,
+    ) -> (
+        BatchedDecompLogupProof<F>,
+        BatchedDecompLogupProverState<F>,
+    ) {
+        (
+            BatchedDecompLogupProof {
+                chunk_vectors: pre.chunk_vectors,
+                sumcheck_proof,
+                aggregated_multiplicities: pre.aggregated_multiplicities,
+                chunk_inverse_witnesses: pre.chunk_inverse_witnesses,
+                inverse_table: pre.inverse_table,
+            },
+            BatchedDecompLogupProverState {
+                evaluation_point,
+            },
+        )
+    }
+
+    /// Pre-sumcheck verification for batched LogUp.
+    ///
+    /// Mirrors the prover's transcript operations (absorb chunks,
+    /// mults, inverses; draw β, γ, r) and returns data needed for
+    /// post-sumcheck recomputation of H(x*).
+    #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+    pub fn build_verifier_pre_sumcheck(
+        transcript: &mut impl Transcript,
+        proof: &BatchedDecompLogupProof<F>,
+        subtable: &[F],
+        shifts: &[F],
+        num_lookups: usize,
+        witness_len: usize,
+        field_cfg: &F::Config,
+    ) -> Result<LookupVerifierPreSumcheck<F>, LookupError<F>>
+    where
+        F::Inner: ConstTranscribable + Zero + Default,
+    {
+        let zero = F::zero_with_cfg(field_cfg);
+        let one = F::one_with_cfg(field_cfg);
+        let mut buf = vec![0u8; F::Inner::NUM_BYTES];
+
+        let num_chunks = shifts.len();
+        let all_chunks = &proof.chunk_vectors;
+        let all_agg_mults = &proof.aggregated_multiplicities;
+        let all_inv_w = &proof.chunk_inverse_witnesses;
+        let v_table = &proof.inverse_table;
+
+        // Mirror transcript operations.
+        for lookup_chunks in all_chunks {
+            for chunk in lookup_chunks {
+                transcript.absorb_random_field_slice(chunk, &mut buf);
+            }
+        }
+        for agg in all_agg_mults {
+            transcript.absorb_random_field_slice(agg, &mut buf);
+        }
+
+        let beta: F = transcript.get_field_challenge(field_cfg);
+
+        for lookup_invs in all_inv_w {
+            for u in lookup_invs {
+                transcript.absorb_random_field_slice(u, &mut buf);
+            }
+        }
+        transcript.absorb_random_field_slice(v_table, &mut buf);
+
+        let gamma: F = transcript.get_field_challenge(field_cfg);
+
+        let w_num_vars =
+            zinc_utils::log2(witness_len.next_power_of_two()) as usize;
+        let t_num_vars =
+            zinc_utils::log2(subtable.len().next_power_of_two()) as usize;
+        let num_vars = w_num_vars.max(t_num_vars);
+
+        let r: Vec<F> =
+            transcript.get_field_challenges(num_vars, field_cfg);
+
+        // Verify table inverse correctness.
+        for (j, (t_j, v_j)) in subtable.iter().zip(v_table.iter()).enumerate()
+        {
+            let check = (beta.clone() - t_j) * v_j;
+            if check != one {
+                return Err(LookupError::TableInverseIncorrect { index: j });
+            }
+        }
+
+        // Verify aggregated multiplicity sums.
+        let expected_mult_sum =
+            F::from_with_cfg((num_chunks * witness_len) as u64, field_cfg);
+        for ell in 0..num_lookups {
+            let m_sum: F = all_agg_mults[ell]
+                .iter()
+                .cloned()
+                .fold(zero.clone(), |a, b| a + &b);
+            if m_sum != expected_mult_sum {
+                return Err(LookupError::MultiplicitySumMismatch {
+                    expected: (num_chunks * witness_len) as u64,
+                    got: 0,
+                });
+            }
+        }
+
+        Ok(LookupVerifierPreSumcheck {
+            num_vars,
+            r,
+            beta,
+            gamma,
+            num_lookups,
+            num_chunks,
+            witness_len,
+        })
+    }
+
+    /// Post-sumcheck finalization for the batched LogUp verifier.
+    ///
+    /// Recomputes H(x*) at the subclaim point and checks it matches
+    /// the expected evaluation from the sumcheck.
+    #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+    pub fn finalize_verifier(
+        pre: &LookupVerifierPreSumcheck<F>,
+        proof: &BatchedDecompLogupProof<F>,
+        subclaim_point: &[F],
+        subclaim_expected_evaluation: &F,
+        field_cfg: &F::Config,
+    ) -> Result<BatchedDecompLogupVerifierSubClaim<F>, LookupError<F>>
+    where
+        F::Inner: ConstTranscribable + Zero + Default,
+    {
+        let zero = F::zero_with_cfg(field_cfg);
+        let one = F::one_with_cfg(field_cfg);
+
+        let eq_val =
+            zinc_poly::utils::eq_eval(subclaim_point, &pre.r, one.clone())?;
+
+        let eq_at_point =
+            build_eq_x_r_vec(subclaim_point, field_cfg)?;
+
+        // Recompute H(x*).
+        let num_identities = pre.num_lookups * (pre.num_chunks + 1);
+        let mut gamma_powers = Vec::with_capacity(num_identities);
+        let mut gp = one.clone();
+        for _ in 0..num_identities {
+            gamma_powers.push(gp.clone());
+            gp *= &pre.gamma;
+        }
+
+        let v_table = &proof.inverse_table;
+        let all_inv_w = &proof.chunk_inverse_witnesses;
+        let all_chunks = &proof.chunk_vectors;
+        let all_agg_mults = &proof.aggregated_multiplicities;
+
+        let v_eq: Vec<F> = v_table
+            .iter()
+            .zip(eq_at_point.iter())
+            .map(|(v_j, eq_j)| v_j.clone() * eq_j)
+            .collect();
+
+        let mut h_eval = zero.clone();
+
+        for ell in 0..pre.num_lookups {
+            let base_id = ell * (pre.num_chunks + 1);
+            let mut u_sum_eval = zero.clone();
+
+            for k_idx in 0..pre.num_chunks {
+                let u_eval: F = all_inv_w[ell][k_idx]
+                    .iter()
+                    .zip(eq_at_point.iter())
+                    .fold(zero.clone(), |acc, (u_j, eq_j)| {
+                        acc + &(u_j.clone() * eq_j)
+                    });
+                u_sum_eval += &u_eval;
+
+                let cu_eval: F = all_chunks[ell][k_idx]
+                    .iter()
+                    .zip(all_inv_w[ell][k_idx].iter())
+                    .zip(eq_at_point.iter())
+                    .fold(zero.clone(), |acc, ((c_j, u_j), eq_j)| {
+                        acc + &(c_j.clone() * u_j * eq_j)
+                    });
+
+                let id =
+                    pre.beta.clone() * &u_eval - &cu_eval - &one;
+                h_eval += &(id * &gamma_powers[base_id + k_idx]);
+            }
+
+            let mv_eval: F = all_agg_mults[ell]
+                .iter()
+                .zip(v_eq.iter())
+                .fold(zero.clone(), |acc, (m_j, ve_j)| {
+                    acc + &(m_j.clone() * ve_j)
+                });
+
+            let balance = u_sum_eval - &mv_eval;
+            h_eval +=
+                &(balance * &gamma_powers[base_id + pre.num_chunks]);
+        }
+
+        let expected = h_eval * &eq_val;
+
+        if expected != *subclaim_expected_evaluation {
+            return Err(LookupError::FinalEvaluationMismatch {
+                expected: subclaim_expected_evaluation.clone(),
+                got: expected,
+            });
+        }
+
+        Ok(BatchedDecompLogupVerifierSubClaim {
+            evaluation_point: subclaim_point.to_vec(),
+            expected_evaluation: subclaim_expected_evaluation.clone(),
+        })
     }
 
     /// Verifier for the batched Decomposition + LogUp protocol.

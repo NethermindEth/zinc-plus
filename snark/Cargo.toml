@@ -49,3 +49,11 @@ workspace = true
 [[bench]]
 name = "e2e_sha256"
 harness = false
+
+[[bench]]
+name = "steps_sha256_8x"
+harness = false
+
+[[bench]]
+name = "steps_sha256_8x_ecdsa"
+harness = false

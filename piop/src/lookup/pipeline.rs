@@ -270,6 +270,23 @@ where
 
 /// Build a [`BatchedDecompLookupInstance`] using precomputed raw integer
 /// indices, avoiding the full-table reverse lookup.
+///
+/// Public alias for pipeline integration (used by batched CPR+lookup).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn build_lookup_instance_from_indices_pub<F>(
+    columns: &[Vec<F>],
+    raw_indices: &[Vec<usize>],
+    group: &LookupGroup,
+    projecting_element: &F,
+    field_cfg: &F::Config,
+) -> Result<BatchedDecompLookupInstance<F>, LookupError<F>>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Config: Sync,
+{
+    build_lookup_instance_from_indices(columns, raw_indices, group, projecting_element, field_cfg)
+}
+
 #[allow(clippy::arithmetic_side_effects)]
 fn build_lookup_instance_from_indices<F>(
     columns: &[Vec<F>],
@@ -527,8 +544,10 @@ where
 }
 
 /// Generate the sub-table and shift factors for a given table type.
+///
+/// Public for pipeline integration.
 #[allow(clippy::arithmetic_side_effects)]
-fn generate_table_and_shifts<F>(
+pub fn generate_table_and_shifts<F>(
     table_type: &LookupTableType,
     projecting_element: &F,
     field_cfg: &F::Config,

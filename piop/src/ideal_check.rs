@@ -100,6 +100,110 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
         ))
     }
 
+    /// Like [`prove_as_subprotocol`], but uses a **supplied** evaluation
+    /// point instead of drawing one from the transcript.
+    ///
+    /// This is useful when two or more IC passes should share the same
+    /// evaluation point (e.g. dual-ring pipeline).
+    ///
+    /// **Important:** the caller is responsible for ensuring that
+    /// `evaluation_point` was produced via the transcript *before*
+    /// this function is called so that Fiat-Shamir consistency is
+    /// maintained.
+    #[allow(clippy::type_complexity)]
+    pub fn prove_at_point<U>(
+        transcript: &mut impl Transcript,
+        trace: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
+        projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        evaluation_point: &[F],
+        field_cfg: &F::Config,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
+    where
+        U: Uair,
+        F::Inner: ConstTranscribable,
+    {
+        let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
+            trace,
+            projected_scalars,
+            num_constraints,
+            field_cfg,
+        );
+
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+
+        let combined_mle_values = cfg_iter!(combined_mles)
+            .map(|combined_mle| {
+                Ok(DynamicPolynomialF::new_trimmed(
+                    cfg_iter!(combined_mle)
+                        .map(|coeff_mle| {
+                            coeff_mle.evaluate_with_config(evaluation_point, field_cfg)
+                        })
+                        .collect::<std::result::Result<Vec<_>, _>>()?,
+                ))
+            })
+            .collect::<std::result::Result<Vec<_>, IdealCheckError<_, _>>>()?;
+
+        combined_mle_values.iter().for_each(|combined_mle_value| {
+            transcript
+                .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
+        });
+
+        Ok((
+            Proof {
+                combined_mle_values,
+            },
+            ProverState {
+                evaluation_point: evaluation_point.to_vec(),
+                combined_mles,
+            },
+        ))
+    }
+
+    /// Like [`verify_as_subprotocol`], but uses a **supplied** evaluation
+    /// point instead of drawing one from the transcript.
+    ///
+    /// Mirror of [`prove_at_point`] for the verifier side.
+    #[allow(clippy::type_complexity)]
+    pub fn verify_at_point<U, IdealOverF, IdealOverFFromRef>(
+        transcript: &mut impl Transcript,
+        proof: Proof<F>,
+        num_constraints: usize,
+        evaluation_point: Vec<F>,
+        ideal_over_f_from_ref: IdealOverFFromRef,
+        _field_cfg: &F::Config,
+    ) -> Result<VerifierSubClaim<F>, IdealCheckError<F, IdealOverF>>
+    where
+        U: Uair,
+        F::Inner: ConstTranscribable,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+        IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
+    {
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+
+        let combined_mle_values = proof.combined_mle_values;
+
+        for mle_value in &combined_mle_values {
+            transcript.absorb_random_field_slice(&mle_value.coeffs, &mut transcription_buf);
+        }
+
+        let ideal_collector = collect_ideals::<U>(num_constraints);
+
+        batched_ideal_check(
+            &ideal_collector
+                .ideals
+                .iter()
+                .map(ideal_over_f_from_ref)
+                .collect_vec(),
+            &combined_mle_values,
+        )?;
+
+        Ok(VerifierSubClaim {
+            evaluation_point,
+            values: combined_mle_values,
+        })
+    }
+
     /// The verifier part of the ideal-check subprotocol.
     ///
     /// The verifier samples a random field element

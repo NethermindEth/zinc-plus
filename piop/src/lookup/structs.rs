@@ -172,6 +172,50 @@ pub struct BatchedDecompLogupVerifierSubClaim<F: PrimeField> {
     pub expected_evaluation: F,
 }
 
+/// Intermediate state from the lookup pre-sumcheck phase.
+///
+/// Contains the sumcheck degree group and ancillary data needed to
+/// assemble the final proof after the multi-degree sumcheck.
+pub struct LookupSumcheckGroup<F: PrimeField> {
+    /// Sumcheck degree (always 2 for the precomputed-H variant).
+    pub degree: usize,
+    /// MLEs: `[eq_r, H]`.
+    pub mles: Vec<zinc_poly::mle::DenseMultilinearExtension<F::Inner>>,
+    /// Combination function: `|vals| vals[0] * vals[1]`.
+    pub comb_fn: Box<dyn Fn(&[F]) -> F + Send + Sync>,
+    /// Number of sumcheck variables for this group.
+    pub num_vars: usize,
+    /// Ancillary data — chunk vectors (for proof).
+    pub chunk_vectors: Vec<Vec<Vec<F>>>,
+    /// Ancillary data — aggregated multiplicities (for proof).
+    pub aggregated_multiplicities: Vec<Vec<F>>,
+    /// Ancillary data — chunk inverse witnesses (for proof).
+    pub chunk_inverse_witnesses: Vec<Vec<Vec<F>>>,
+    /// Ancillary data — inverse table (for proof).
+    pub inverse_table: Vec<F>,
+}
+
+/// Pre-sumcheck verification data for batched LogUp.
+///
+/// Holds the transcript challenges and dimensions computed before the
+/// sumcheck that are needed by [`finalize_verifier`].
+pub struct LookupVerifierPreSumcheck<F: PrimeField> {
+    /// Number of sumcheck variables.
+    pub num_vars: usize,
+    /// The random evaluation point `r` drawn for `eq(y, r)`.
+    pub r: Vec<F>,
+    /// The β challenge used for shifted inversions.
+    pub beta: F,
+    /// The γ batching challenge.
+    pub gamma: F,
+    /// Number of lookups (L).
+    pub num_lookups: usize,
+    /// Number of chunks (K).
+    pub num_chunks: usize,
+    /// Witness vector length.
+    pub witness_len: usize,
+}
+
 // ---------------------------------------------------------------------------
 // GKR LogUp
 // ---------------------------------------------------------------------------

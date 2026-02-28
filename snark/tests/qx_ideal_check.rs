@@ -4,9 +4,9 @@
 //! This demonstrates that the multi-ring IdealCheck generalization works:
 //! 1. Generate a valid SHA-256 witness (BinaryPoly<32> trace)
 //! 2. Convert the trace to DensePolynomial<i64, 64> for Q[X] constraints
-//! 3. Run IdealCheck prover on the 5 Q[X] constraints
-//!    - 3 BitPoly checks (ch_ef, ch_neg_eg, Maj ∈ {0,1} coefficients)
-//!    - 2 carry propagation checks (a-update and e-update via (X−2) ideal)
+//! 3. Run IdealCheck prover on the 3 Q[X] carry propagation constraints
+//!    - a-update and e-update via (X−2) ideal
+//!    - W-schedule via (X−2) ideal
 //! 4. Run CombinedPolyResolver
 //! 5. Run IdealCheck verifier with REAL ideal checks (not TrivialIdeal)
 //! 6. Run CPR verifier
@@ -58,7 +58,7 @@ fn qx_ideal_check_succeeds_on_valid_sha256_witness() {
     let max_degree = count_max_degree::<Sha256UairQx>();
 
     println!("SHA-256 Q[X] UAIR: {} constraints, max degree {}", num_constraints, max_degree);
-    assert_eq!(num_constraints, 5, "Expected 5 Q[X] constraints");
+    assert_eq!(num_constraints, 3, "Expected 3 Q[X] constraints");
     assert_eq!(max_degree, 1, "Expected max degree 1");
 
     // Step 3: Project trace and scalars for IdealCheck
@@ -124,7 +124,6 @@ fn qx_ideal_check_succeeds_on_valid_sha256_witness() {
     let qx_ideal_from_ref = |ideal: &IdealOrZero<Sha256QxIdeal>| -> Sha256QxIdealOverF<F> {
         match ideal {
             IdealOrZero::Zero => Sha256QxIdealOverF::Zero,
-            IdealOrZero::Ideal(Sha256QxIdeal::BitPoly(_)) => Sha256QxIdealOverF::BitPoly,
             IdealOrZero::Ideal(Sha256QxIdeal::DegreeOne(_)) => {
                 let two = F::from_with_cfg(2i64, &verify_field_cfg);
                 Sha256QxIdealOverF::DegreeOne(two)
@@ -183,7 +182,6 @@ fn qx_ideal_check_succeeds_on_valid_sha256_witness() {
     );
     println!("Q[X] CombinedPolyResolver verifier PASSED ✓");
 
-    println!("\n✓ Full Q[X] IC + CPR pipeline verified for SHA-256 (5 constraints with REAL ideal checks)");
-    println!("  3 BitPoly checks (ch_ef, ch_neg_eg, Maj have binary coefficients)");
-    println!("  2 carry propagation checks (a-update, e-update via (X−2) ideal)");
+    println!("\n✓ Full Q[X] IC + CPR pipeline verified for SHA-256 (3 constraints with REAL ideal checks)");
+    println!("  3 carry propagation checks (a-update, e-update, W-schedule via (X−2) ideal)");
 }

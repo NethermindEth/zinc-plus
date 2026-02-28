@@ -197,6 +197,305 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         ))
     }
 
+    /// Build the sumcheck degree group for CPR **without** running the
+    /// sumcheck.
+    ///
+    /// This does everything [`prove_as_subprotocol`] does before the
+    /// sumcheck: builds shifted traces, eq, selector, draws α, and
+    /// constructs the combination function. The returned
+    /// [`CprSumcheckGroup`] can be fed into
+    /// [`MultiDegreeSumcheck::prove_as_subprotocol`] together with
+    /// groups from other sub-protocols.
+    ///
+    /// After the multi-degree sumcheck completes, call
+    /// [`finalize_prover`] to extract up/down evaluations.
+    #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+    pub fn build_prover_group<U>(
+        transcript: &mut impl Transcript,
+        trace_matrix: Vec<DenseMultilinearExtension<F::Inner>>,
+        evaluation_point: &[F],
+        projected_scalars: &HashMap<U::Scalar, F>,
+        num_constraints: usize,
+        num_vars: usize,
+        max_degree: usize,
+        field_cfg: &F::Config,
+    ) -> Result<CprSumcheckGroup<F>, CombinedPolyResolverError<F>>
+    where
+        F: 'static,
+        F::Inner: ConstTranscribable + Send + Sync + Zero + Default,
+        U: Uair,
+        U::Scalar: 'static,
+    {
+        let zero = F::zero_with_cfg(field_cfg);
+        let one = F::one_with_cfg(field_cfg);
+
+        let down: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(trace_matrix)
+            .map(|column| column[1..].iter().cloned().collect())
+            .collect();
+
+        let eq_r = build_eq_x_r_inner(evaluation_point, field_cfg)?;
+        let last_row_selector =
+            build_eq_x_r_inner(&vec![one.clone(); num_vars], field_cfg)?;
+
+        let folding_challenge: F = transcript.get_field_challenge(field_cfg);
+        let folding_challenge_powers: Vec<F> =
+            powers(folding_challenge, one.clone(), num_constraints);
+
+        let num_cols = trace_matrix.len();
+
+        let mles: Vec<DenseMultilinearExtension<F::Inner>> = {
+            let mut mles = Vec::with_capacity(2 * num_cols + 2);
+            mles.push(last_row_selector);
+            mles.push(eq_r);
+            mles.extend(trace_matrix);
+            mles.extend(down);
+            mles
+        };
+
+        // Clone what the closure needs to own.
+        let projected_scalars_owned: HashMap<U::Scalar, F> =
+            projected_scalars.clone();
+
+        let degree = max_degree + 2;
+        let comb_fn: Box<dyn Fn(&[F]) -> F + Send + Sync> =
+            Box::new(move |mle_values: &[F]| {
+                let selector = &mle_values[0];
+                let eq_r = &mle_values[1];
+
+                let mut folder =
+                    ConstraintFolder::new(&folding_challenge_powers, &zero);
+
+                let project = |scalar: &U::Scalar| {
+                    projected_scalars_owned
+                        .get(scalar)
+                        .cloned()
+                        .expect("all scalars should have been projected")
+                };
+
+                U::constrain_general(
+                    &mut folder,
+                    TraceRow::from_slice_with_signature(
+                        &mle_values[2..num_cols + 2],
+                        &U::signature(),
+                    ),
+                    TraceRow::from_slice_with_signature(
+                        &mle_values[num_cols + 2..],
+                        &U::signature(),
+                    ),
+                    project,
+                    |x, y| Some(project(y) * x),
+                    ImpossibleIdeal::from_ref,
+                );
+
+                folder.folded_constraints * (one.clone() - selector) * eq_r
+            });
+
+        Ok(CprSumcheckGroup {
+            degree,
+            mles,
+            comb_fn,
+            num_cols,
+        })
+    }
+
+    /// Finalize the CPR prover after a (potentially multi-degree)
+    /// sumcheck has been run.
+    ///
+    /// Takes the sumcheck `ProverState` for the CPR group and
+    /// extracts the up/down MLE evaluations at the final challenge
+    /// point, absorbing them into the transcript.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn finalize_prover(
+        transcript: &mut impl Transcript,
+        sumcheck_prover_state: crate::sumcheck::prover::ProverState<F>,
+        num_cols: usize,
+        field_cfg: &F::Config,
+    ) -> Result<(Vec<F>, Vec<F>, ProverState<F>), CombinedPolyResolverError<F>>
+    where
+        F::Inner: ConstTranscribable,
+    {
+        debug_assert!(
+            sumcheck_prover_state
+                .mles
+                .iter()
+                .all(|mle| mle.num_vars == 1)
+        );
+
+        let last_sumcheck_challenge = sumcheck_prover_state
+            .randomness
+            .last()
+            .expect("sumcheck could not have had 0 rounds");
+
+        let evals: Vec<F> = sumcheck_prover_state.mles[2..]
+            .iter()
+            .map(|mle| {
+                mle.evaluate_with_config(
+                    slice::from_ref(last_sumcheck_challenge),
+                    field_cfg,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        transcript.absorb_random_field_slice(&evals, &mut transcription_buf);
+
+        let up_evals = evals[0..num_cols].to_vec();
+        let down_evals = evals[num_cols..].to_vec();
+        let state = ProverState {
+            evaluation_point: sumcheck_prover_state.randomness,
+        };
+        Ok((up_evals, down_evals, state))
+    }
+
+    /// Pre-sumcheck verification for CPR.
+    ///
+    /// Computes the expected sum from the IC subclaim, verifies it
+    /// against the claimed sum, and draws the α challenge. Returns
+    /// data needed for [`finalize_verifier`].
+    #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+    pub fn build_verifier_pre_sumcheck<U>(
+        transcript: &mut impl Transcript,
+        cpr_claimed_sum: &F,
+        num_constraints: usize,
+        projecting_element: &F,
+        projected_scalars: &HashMap<U::Scalar, F>,
+        ic_check_subclaim: &ideal_check::VerifierSubClaim<F>,
+        field_cfg: &F::Config,
+    ) -> Result<CprVerifierPreSumcheck<F>, CombinedPolyResolverError<F>>
+    where
+        F::Inner: ConstTranscribable,
+        U: Uair,
+    {
+        let _ = projected_scalars; // Used in finalize_verifier, not here.
+        let zero = F::zero_with_cfg(field_cfg);
+        let one = F::one_with_cfg(field_cfg);
+
+        let folding_challenge: F = transcript.get_field_challenge(field_cfg);
+        let folding_challenge_powers: Vec<F> =
+            powers(folding_challenge, one, num_constraints);
+
+        let expected_sum = ic_check_subclaim
+            .values
+            .iter()
+            .zip(&folding_challenge_powers)
+            .map(
+                |(claimed_value, random_coeff)| -> Result<F, CombinedPolyResolverError<F>> {
+                    Ok(claimed_value
+                        .evaluate_at_point(projecting_element)
+                        .map_err(|err| {
+                            CombinedPolyResolverError::ProjectionError(
+                                claimed_value.clone(),
+                                projecting_element.clone(),
+                                err,
+                            )
+                        })?
+                        * random_coeff)
+                },
+            )
+            .try_fold(
+                zero,
+                |acc, next| -> Result<F, CombinedPolyResolverError<F>> { Ok(acc + next?) },
+            )?;
+
+        if *cpr_claimed_sum != expected_sum {
+            return Err(CombinedPolyResolverError::WrongSumcheckSum {
+                got: cpr_claimed_sum.clone(),
+                expected: expected_sum,
+            });
+        }
+
+        Ok(CprVerifierPreSumcheck {
+            folding_challenge_powers,
+            ic_evaluation_point: ic_check_subclaim.evaluation_point.clone(),
+        })
+    }
+
+    /// Post-sumcheck finalization for the CPR verifier.
+    ///
+    /// Takes the subclaim from the (multi-degree) sumcheck at the CPR
+    /// group index and checks that the expected evaluation matches the
+    /// recomputed combination function at the subclaim point.
+    #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+    pub fn finalize_verifier<U>(
+        transcript: &mut impl Transcript,
+        subclaim_point: Vec<F>,
+        subclaim_expected_evaluation: F,
+        pre: &CprVerifierPreSumcheck<F>,
+        up_evals: Vec<F>,
+        down_evals: Vec<F>,
+        num_vars: usize,
+        projected_scalars: &HashMap<U::Scalar, F>,
+        field_cfg: &F::Config,
+    ) -> Result<VerifierSubclaim<F>, CombinedPolyResolverError<F>>
+    where
+        F::Inner: ConstTranscribable,
+        U: Uair,
+    {
+        let zero = F::zero_with_cfg(field_cfg);
+        let one = F::one_with_cfg(field_cfg);
+
+        // When the multi-degree sumcheck uses a shared_num_vars larger than the
+        // CPR's num_vars (e.g. because lookup subtables are bigger), the subclaim
+        // point has more dimensions than the IC evaluation point.  We pad with
+        // zeros, which is consistent with the zero-padding applied to the CPR MLEs
+        // on the prover side.
+        let shared_num_vars = subclaim_point.len();
+        let mut ic_eval_point = pre.ic_evaluation_point.clone();
+        ic_eval_point.resize(shared_num_vars, zero.clone());
+
+        let eq_r_value = eq_eval(
+            &subclaim_point,
+            &ic_eval_point,
+            one.clone(),
+        )?;
+
+        // Selector: eq(x, (1,...,1, 0,...,0)) — ones for the original num_vars
+        // dimensions, zeros for the padded dimensions.
+        let mut selector_ref = vec![one.clone(); num_vars];
+        selector_ref.resize(shared_num_vars, zero.clone());
+        let selector_value =
+            eq_eval(&subclaim_point, &selector_ref, one.clone())?;
+
+        let mut folder =
+            ConstraintFolder::new(&pre.folding_challenge_powers, &zero);
+
+        let project = |scalar: &U::Scalar| {
+            projected_scalars
+                .get(scalar)
+                .cloned()
+                .expect("all scalars should have been projected")
+        };
+
+        U::constrain_general(
+            &mut folder,
+            TraceRow::from_slice_with_signature(&up_evals, &U::signature()),
+            TraceRow::from_slice_with_signature(&down_evals, &U::signature()),
+            project,
+            |x, y| Some(project(y) * x),
+            ImpossibleIdeal::from_ref,
+        );
+
+        let expected_claim_value =
+            eq_r_value * (one - selector_value) * folder.folded_constraints;
+
+        if expected_claim_value != subclaim_expected_evaluation {
+            return Err(CombinedPolyResolverError::ClaimValueDoesNotMatch {
+                got: subclaim_expected_evaluation,
+                expected: expected_claim_value,
+            });
+        }
+
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        transcript.absorb_random_field_slice(&up_evals, &mut transcription_buf);
+        transcript.absorb_random_field_slice(&down_evals, &mut transcription_buf);
+
+        Ok(VerifierSubclaim {
+            up_evals,
+            down_evals,
+            evaluation_point: subclaim_point,
+        })
+    }
+
     /// The verifier part of the combined polynomial resolver
     /// subprotocol.
     ///

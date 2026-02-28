@@ -159,8 +159,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
         w_leaf_p.resize(w_size, zero.clone());
         w_leaf_q.resize(w_size, one.clone());
 
-        let witness_tree = build_fraction_tree(w_leaf_p, w_leaf_q);
-
         // ---- Step 5: Build combined table fraction tree ----
         // Leaves = N (subtable size), padded to next power of 2.
         let t_num_vars = zinc_utils::log2(table_len.next_power_of_two()) as usize;
@@ -182,7 +180,17 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
         t_leaf_p.resize(t_size, zero.clone());
         t_leaf_q.resize(t_size, one.clone());
 
-        let table_tree = build_fraction_tree(t_leaf_p, t_leaf_q);
+        // Build both fraction trees in parallel.
+        #[cfg(feature = "parallel")]
+        let (witness_tree, table_tree) = rayon::join(
+            || build_fraction_tree(w_leaf_p, w_leaf_q),
+            || build_fraction_tree(t_leaf_p, t_leaf_q),
+        );
+        #[cfg(not(feature = "parallel"))]
+        let (witness_tree, table_tree) = (
+            build_fraction_tree(w_leaf_p, w_leaf_q),
+            build_fraction_tree(t_leaf_p, t_leaf_q),
+        );
 
         // ---- Step 6: GKR fractional sumcheck for witness tree ----
         let witness_gkr = gkr_fraction_prove(transcript, &witness_tree, field_cfg);

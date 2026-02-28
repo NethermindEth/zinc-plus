@@ -89,7 +89,7 @@ These are all checked by the verifier — not discarded.
 
 The Q[X] carry constraints (C10, C11) use `DegreeOneIdeal(2)` — the ideal $(X - 2)$. These are exercised by:
 
-1. **`qx_ideal_check_succeeds_on_valid_sha256_witness`** — runs IdealCheck on a real SHA-256 trace projected to `DensePolynomial<i64, 64>`. The IC prover evaluates constraints C7–C11, producing claims that include `DegreeOne(2)` membership tests.
+1. **`qx_ideal_check_succeeds_on_valid_sha256_witness`** — runs IdealCheck on a real SHA-256 trace projected to `DensePolynomial<i64, 64>`. The IC prover evaluates carry constraints C7–C9, producing claims that include `DegreeOne(2)` membership tests.
 
 2. **`dual_ring_pipeline_round_trip`** — the verifier maps `DegreeOneIdeal(2)` to `Sha256QxIdealOverF::DegreeOne(F::from(2))`, which evaluates the polynomial at $X = 2$ in $\mathbb{F}_p$ and checks that the result is zero. This is a **real ideal membership check** that lifts correctly to the PIOP field.
 
@@ -135,7 +135,7 @@ The trace is now 19 real SHA-256 witness columns + 14 random ECDSA-shaped column
 
 3. **Witness generation** — SHA-256 now computes carry columns $c_a$, $c_e$ (via evaluation at $X = 2$), $K_t$ constants (SHA-256 schedule), and shift decompositions (quotient/remainder). ECDSA generates a constant fixed-point trace for testing.
 
-4. **Seven ideal types** — `CyclotomicIdeal` (C1–C4), `BitPolyIdeal` (C7–C9), `DegreeOneIdeal(2)` (C10–C11), `Sha256QxIdeal`/`Sha256QxIdealOverF` (verifier-side enum), `EcdsaIdealOverF` (zero check), `TrivialIdeal` (F₂[X] bypass).
+4. **Six ideal types** — `CyclotomicIdeal` (C1–C4), `DegreeOneIdeal(2)` (C7–C9), `Sha256QxIdeal`/`Sha256QxIdealOverF` (verifier-side enum), `EcdsaIdealOverF` (zero check), `TrivialIdeal` (F₂[X] bypass). BitPoly membership is now enforced by lookups.
 
 ### CPR→PCS binding status
 

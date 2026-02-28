@@ -289,6 +289,9 @@ fn lookup_proof_byte_count(data: &zinc_snark::pipeline::LookupProofData) -> usiz
     match data {
         zinc_snark::pipeline::LookupProofData::Gkr(p) => gkr_lookup_proof_byte_count(p),
         zinc_snark::pipeline::LookupProofData::Classic(p) => classic_lookup_proof_byte_count(p),
+        zinc_snark::pipeline::LookupProofData::BatchedClassic(p) => {
+            batched_classic_lookup_proof_to_bytes(p).len()
+        }
     }
 }
 
@@ -364,11 +367,53 @@ fn classic_lookup_proof_to_bytes(proof: &zinc_piop::lookup::PipelineLookupProof<
     out
 }
 
+/// Serialize a `BatchedCprLookupProof` to bytes.
+fn batched_classic_lookup_proof_to_bytes(proof: &zinc_snark::pipeline::BatchedCprLookupProof) -> Vec<u8> {
+    fn write_fe(buf: &mut Vec<u8>, f: &zinc_snark::pipeline::PiopField) {
+        use zinc_snark::pipeline::FIELD_LIMBS;
+        let fe_size = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+        let start = buf.len();
+        buf.resize(start + fe_size, 0);
+        f.inner().write_transcription_bytes(&mut buf[start..]);
+    }
+
+    let mut out = Vec::new();
+    // Multi-degree sumcheck proof.
+    for group_msgs in &proof.md_proof.group_messages {
+        for msg in group_msgs {
+            for f in &msg.0.tail_evaluations { write_fe(&mut out, f); }
+        }
+    }
+    for cs in &proof.md_proof.claimed_sums { write_fe(&mut out, cs); }
+    // CPR up/down evals.
+    for f in &proof.cpr_up_evals { write_fe(&mut out, f); }
+    for f in &proof.cpr_down_evals { write_fe(&mut out, f); }
+    // Per-group lookup data.
+    for gp in &proof.lookup_group_proofs {
+        for outer in &gp.chunk_vectors {
+            for inner in outer {
+                for f in inner { write_fe(&mut out, f); }
+            }
+        }
+        for v in &gp.aggregated_multiplicities {
+            for f in v { write_fe(&mut out, f); }
+        }
+        for outer in &gp.chunk_inverse_witnesses {
+            for inner in outer {
+                for f in inner { write_fe(&mut out, f); }
+            }
+        }
+        for f in &gp.inverse_table { write_fe(&mut out, f); }
+    }
+    out
+}
+
 /// Dispatch proof serialization on the lookup proof variant.
 fn lookup_proof_to_bytes(data: &zinc_snark::pipeline::LookupProofData) -> Vec<u8> {
     match data {
         zinc_snark::pipeline::LookupProofData::Gkr(p) => gkr_lookup_proof_to_bytes(p),
         zinc_snark::pipeline::LookupProofData::Classic(p) => classic_lookup_proof_to_bytes(p),
+        zinc_snark::pipeline::LookupProofData::BatchedClassic(p) => batched_classic_lookup_proof_to_bytes(p),
     }
 }
 
@@ -1325,10 +1370,18 @@ fn sha256_full_pipeline(c: &mut Criterion) {
 
 // ─── LogUp Comparison Benchmark ─────────────────────────────────────────────
 
-/// Side-by-side comparison of Classic LogUp vs GKR LogUp for 8×SHA-256 + ECDSA.
+/// Side-by-side comparison of LogUp proving strategies for 8×SHA-256 + ECDSA.
 ///
-/// Benchmarks the full pipeline (IC + CPR + Lookup + PCS) for both LogUp
-/// variants. ECDSA columns have no lookup constraints — only SHA-256's 14
+/// Three variants are compared:
+/// 1. **NoLookup** — baseline with no lookup constraints.
+/// 2. **ClassicLogUp** — classic batched decomposition LogUp where CPR and
+///    lookup sumchecks are batched into a single multi-degree sumcheck
+///    (via `prove_classic_logup`).
+/// 3. **SeparateLogUp** — classic batched decomposition LogUp where CPR
+///    and lookup run independent sumchecks sequentially
+///    (via `prove`, separate CPR then lookup).
+///
+/// ECDSA columns have no lookup constraints — only SHA-256's
 /// BinaryPoly columns go through LogUp.
 fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
     use zinc_sha256_uair::CyclotomicIdeal;
@@ -1361,7 +1414,36 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
 
     let sha_lookup_specs = sha256_lookup_specs();
 
-    // ── Classic LogUp Prover ─────────────────────────────────────────
+    // ── No-Lookup Baseline (SHA only, no ECDSA) ────────────────────
+    group.bench_function("NoLookup/SHAProver", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let t = Instant::now();
+                let _sha = zinc_snark::pipeline::prove_classic_logup::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
+                    &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &[],
+                );
+                total += t.elapsed();
+            }
+            total
+        });
+    });
+
+    // ── ClassicLogUp: batched CPR+Lookup multi-degree sumcheck ──────
+    group.bench_function("ClassicLogUp/SHAProver", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let t = Instant::now();
+                let _sha = zinc_snark::pipeline::prove_classic_logup::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
+                    &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
+                );
+                total += t.elapsed();
+            }
+            total
+        });
+    });
+
     group.bench_function("ClassicLogUp/TotalProver", |b| {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
@@ -1381,8 +1463,22 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
         });
     });
 
-    // ── GKR LogUp Prover ─────────────────────────────────────────────
-    group.bench_function("GKRLogUp/TotalProver", |b| {
+    // ── SeparateLogUp: CPR and lookup run independent sumchecks ─────
+    group.bench_function("SeparateLogUp/SHAProver", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let t = Instant::now();
+                let _sha = zinc_snark::pipeline::prove::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
+                    &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
+                );
+                total += t.elapsed();
+            }
+            total
+        });
+    });
+
+    group.bench_function("SeparateLogUp/TotalProver", |b| {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
@@ -1402,10 +1498,10 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
     });
 
     // ── Generate proofs for verifier bench & proof size ──────────────
-    let classic_sha_proof = zinc_snark::pipeline::prove_classic_logup::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
+    let batched_sha_proof = zinc_snark::pipeline::prove_classic_logup::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
         &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
     );
-    let gkr_sha_proof = zinc_snark::pipeline::prove::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
+    let separate_sha_proof = zinc_snark::pipeline::prove::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
         &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
     );
     let ec_proof = zinc_snark::pipeline::prove_generic::<
@@ -1414,11 +1510,11 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
         &ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &[],
     );
 
-    // ── Classic LogUp Verifier ───────────────────────────────────────
+    // ── ClassicLogUp (batched) Verifier ──────────────────────────────
     group.bench_function("ClassicLogUp/TotalVerifier", |b| {
         b.iter(|| {
             let sha_r = zinc_snark::pipeline::verify::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED, _, _>(
-                &sha_params, &classic_sha_proof, SHA256_8X_NUM_VARS,
+                &sha_params, &batched_sha_proof, SHA256_8X_NUM_VARS,
                 |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
             );
             let _ = black_box(sha_r);
@@ -1435,11 +1531,11 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
         });
     });
 
-    // ── GKR LogUp Verifier ───────────────────────────────────────────
-    group.bench_function("GKRLogUp/TotalVerifier", |b| {
+    // ── SeparateLogUp Verifier ───────────────────────────────────────
+    group.bench_function("SeparateLogUp/TotalVerifier", |b| {
         b.iter(|| {
             let sha_r = zinc_snark::pipeline::verify::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED, _, _>(
-                &sha_params, &gkr_sha_proof, SHA256_8X_NUM_VARS,
+                &sha_params, &separate_sha_proof, SHA256_8X_NUM_VARS,
                 |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
             );
             let _ = black_box(sha_r);
@@ -1457,36 +1553,34 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
     });
 
     // ── Proof size & timing comparison ──────────────────────────────
-    let classic_lookup_size = classic_sha_proof.lookup_proof.as_ref().map_or(0, lookup_proof_byte_count);
-    let gkr_lookup_size = gkr_sha_proof.lookup_proof.as_ref().map_or(0, lookup_proof_byte_count);
+    let batched_lookup_size = batched_sha_proof.lookup_proof.as_ref().map_or(0, lookup_proof_byte_count);
+    let separate_lookup_size = separate_sha_proof.lookup_proof.as_ref().map_or(0, lookup_proof_byte_count);
 
     eprintln!("\n=== LogUp Comparison: 8xSHA256+ECDSA ===");
-    eprintln!("  Classic LogUp:");
-    eprintln!("    SHA prover: IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
-        classic_sha_proof.timing.ideal_check,
-        classic_sha_proof.timing.combined_poly_resolver,
-        classic_sha_proof.timing.lookup,
-        classic_sha_proof.timing.pcs_commit,
-        classic_sha_proof.timing.pcs_test,
-        classic_sha_proof.timing.pcs_evaluate,
-        classic_sha_proof.timing.total,
+    eprintln!("  ClassicLogUp (batched CPR+Lookup multi-degree sumcheck):");
+    eprintln!("    SHA prover: IC={:?}, CPR+Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
+        batched_sha_proof.timing.ideal_check,
+        batched_sha_proof.timing.combined_poly_resolver,
+        batched_sha_proof.timing.pcs_commit,
+        batched_sha_proof.timing.pcs_test,
+        batched_sha_proof.timing.pcs_evaluate,
+        batched_sha_proof.timing.total,
     );
-    eprintln!("    Lookup proof size: {} bytes ({:.1} KB)", classic_lookup_size, classic_lookup_size as f64 / 1024.0);
-    eprintln!("  GKR LogUp:");
+    eprintln!("    Lookup proof size: {} bytes ({:.1} KB)", batched_lookup_size, batched_lookup_size as f64 / 1024.0);
+    eprintln!("  SeparateLogUp (CPR and lookup run independent sumchecks):");
     eprintln!("    SHA prover: IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
-        gkr_sha_proof.timing.ideal_check,
-        gkr_sha_proof.timing.combined_poly_resolver,
-        gkr_sha_proof.timing.lookup,
-        gkr_sha_proof.timing.pcs_commit,
-        gkr_sha_proof.timing.pcs_test,
-        gkr_sha_proof.timing.pcs_evaluate,
-        gkr_sha_proof.timing.total,
+        separate_sha_proof.timing.ideal_check,
+        separate_sha_proof.timing.combined_poly_resolver,
+        separate_sha_proof.timing.lookup,
+        separate_sha_proof.timing.pcs_commit,
+        separate_sha_proof.timing.pcs_test,
+        separate_sha_proof.timing.pcs_evaluate,
+        separate_sha_proof.timing.total,
     );
-    eprintln!("    Lookup proof size: {} bytes ({:.1} KB)", gkr_lookup_size, gkr_lookup_size as f64 / 1024.0);
-    if classic_lookup_size > 0 {
-        eprintln!("  Reduction: {:.1}× smaller ({:.1}% savings)",
-            classic_lookup_size as f64 / gkr_lookup_size.max(1) as f64,
-            (1.0 - gkr_lookup_size as f64 / classic_lookup_size as f64) * 100.0);
+    eprintln!("    Lookup proof size: {} bytes ({:.1} KB)", separate_lookup_size, separate_lookup_size as f64 / 1024.0);
+    if separate_lookup_size > 0 && batched_lookup_size > 0 {
+        eprintln!("  Batched vs Separate lookup proof: {:.1}× ratio",
+            separate_lookup_size as f64 / batched_lookup_size as f64);
     }
     eprintln!("  ECDSA prover (shared): IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
         ec_proof.timing.ideal_check,
