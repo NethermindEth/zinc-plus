@@ -399,6 +399,170 @@ where
     result
 }
 
+// ── Column decomposition helpers ────────────────────────────────────────────
+
+/// Decompose a BitPoly column into K chunks of `chunk_width` bits.
+///
+/// Given a column of projected field elements (each being the evaluation
+/// of a binary polynomial of degree < `total_width` at projecting element
+/// `a`), splits each entry into K sub-polynomial evaluations such that:
+///
+/// ```text
+/// witness[i] = Σ_{k=0}^{K-1} shifts[k] · chunks[k][i]
+/// ```
+///
+/// where `shifts[k] = a^{k·chunk_width}` and `chunks[k][i]` is the
+/// evaluation of the k-th chunk of the binary polynomial.
+///
+/// # Arguments
+///
+/// - `witness`: projected column entries (field elements).
+/// - `total_width`: the full width (e.g. 32 for `BitPoly(32)`).
+/// - `chunk_width`: the width of each sub-table (e.g. 16).
+/// - `projecting_element`: the element `a` used for projection.
+/// - `subtable`: the projected BitPoly(chunk_width) sub-table.
+///
+/// # Returns
+///
+/// A vector of K chunk vectors, where K = total_width / chunk_width.
+/// Each chunk[k][i] is the projected evaluation of the k-th sub-polynomial.
+///
+/// Returns `None` if any witness entry is not found in the full
+/// BitPoly(total_width) table.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn decompose_bitpoly_column<F: PrimeField + FromPrimitiveWithConfig + Send + Sync>(
+    witness: &[F],
+    total_width: usize,
+    chunk_width: usize,
+    projecting_element: &F,
+    subtable: &[F],
+) -> Option<Vec<Vec<F>>>
+where
+    F::Config: Sync,
+{
+    let num_chunks = total_width / chunk_width;
+    let mask = (1usize << chunk_width) - 1;
+
+    // Build the full BitPoly table and index to map field elements → indices.
+    let full_table = generate_bitpoly_table(total_width, projecting_element, projecting_element.cfg());
+    let full_index = build_table_index(&full_table);
+
+    let elem_size = std::mem::size_of::<F::Inner>();
+    let mut chunks = vec![Vec::with_capacity(witness.len()); num_chunks];
+
+    for w in witness {
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                w.inner() as *const F::Inner as *const u8,
+                elem_size,
+            )
+        };
+        let &n = full_index.get(bytes)?;
+
+        for k in 0..num_chunks {
+            let sub_idx = (n >> (k * chunk_width)) & mask;
+            chunks[k].push(subtable[sub_idx].clone());
+        }
+    }
+
+    Some(chunks)
+}
+
+/// Decompose a column using precomputed raw integer indices.
+///
+/// Each entry's full-table index is provided directly in `raw_indices`,
+/// avoiding the need to build the full `2^total_width` table for
+/// reverse-mapping.  This is critical for large widths (e.g. 32) where
+/// the full table would be `2^32` entries ≈ 128 GB.
+///
+/// # Arguments
+///
+/// - `raw_indices`: for each row, the integer index in `[0, 2^total_width)`.
+/// - `total_width`: the full lookup width (e.g. 32).
+/// - `chunk_width`: the width of each sub-table chunk (e.g. 8).
+/// - `subtable`: the projected sub-table of size `2^chunk_width`.
+///
+/// # Returns
+///
+/// A vector of K = `total_width / chunk_width` chunk vectors.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn decompose_raw_indices_to_chunks<F: Clone>(
+    raw_indices: &[usize],
+    total_width: usize,
+    chunk_width: usize,
+    subtable: &[F],
+) -> Vec<Vec<F>> {
+    let num_chunks = total_width / chunk_width;
+    let mask = (1usize << chunk_width) - 1;
+    let mut chunks = vec![Vec::with_capacity(raw_indices.len()); num_chunks];
+    for &idx in raw_indices {
+        for k in 0..num_chunks {
+            let sub_idx = (idx >> (k * chunk_width)) & mask;
+            chunks[k].push(subtable[sub_idx].clone());
+        }
+    }
+    chunks
+}
+
+/// Decompose a Word column into K chunks of `chunk_width` bits.
+///
+/// Given a column of projected field elements (each being an integer in
+/// [0, 2^total_width)), splits each entry into K chunks such that:
+///
+/// ```text
+/// witness[i] = Σ_{k=0}^{K-1} 2^{k·chunk_width} · chunks[k][i]
+/// ```
+///
+/// where `chunks[k][i] = (witness_int >> k*chunk_width) & (2^chunk_width - 1)`.
+///
+/// # Implementation
+///
+/// Since `PrimeField` doesn't expose a direct `to_u64()`, we reverse-look up
+/// each witness entry in the Word(total_width) full table to find its integer
+/// index, then extract chunks from that index.
+///
+/// # Returns
+///
+/// A vector of K chunk vectors. Returns `None` if any witness entry is not
+/// a valid Word(total_width) (i.e. not in [0, 2^total_width)).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn decompose_word_column<F: PrimeField + FromPrimitiveWithConfig + Send + Sync>(
+    witness: &[F],
+    total_width: usize,
+    chunk_width: usize,
+    field_cfg: &F::Config,
+) -> Option<Vec<Vec<F>>>
+where
+    F::Config: Sync,
+{
+    let num_chunks = total_width / chunk_width;
+    let mask = (1usize << chunk_width) - 1;
+
+    // Build the full Word table and its index to map field elements → integers.
+    let full_table: Vec<F> = generate_word_table(total_width, field_cfg);
+    let full_index = build_table_index(&full_table);
+
+    let elem_size = std::mem::size_of::<F::Inner>();
+    let mut chunks = vec![Vec::with_capacity(witness.len()); num_chunks];
+
+    for w in witness {
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                w.inner() as *const F::Inner as *const u8,
+                elem_size,
+            )
+        };
+        let &n = full_index.get(bytes)?;
+
+        for k in 0..num_chunks {
+            let chunk_val = (n >> (k * chunk_width)) & mask;
+            chunks[k].push(F::from_with_cfg(chunk_val as u64, field_cfg));
+        }
+    }
+
+    Some(chunks)
+}
+
 /// Parallel variant of [`batch_inverse_shifted`].
 #[cfg(feature = "parallel")]
 #[allow(clippy::arithmetic_side_effects)]

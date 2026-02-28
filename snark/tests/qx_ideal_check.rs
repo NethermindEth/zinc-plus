@@ -20,7 +20,7 @@ use crypto_primitives::{
     Field, FromWithConfig,
 };
 use zinc_poly::univariate::binary::BinaryPoly;
-use zinc_poly::univariate::dense::DensePolynomial;
+use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_primality::MillerRabin;
 use zinc_transcript::traits::Transcript;
 use zinc_uair::constraint_counter::count_constraints;
@@ -28,11 +28,15 @@ use zinc_uair::degree_counter::count_max_degree;
 use zinc_uair::ideal_collector::IdealOrZero;
 
 use zinc_sha256_uair::{
-    Sha256QxIdeal, Sha256QxIdealOverF, Sha256Uair, convert_trace_to_qx,
+    Sha256QxIdeal, Sha256QxIdealOverF, Sha256Uair, Sha256UairQx, convert_trace_to_qx,
     witness::GenerateWitness,
 };
 
 use zinc_piop::ideal_check::IdealCheckProtocol;
+use zinc_piop::projections::{
+    project_trace_coeffs, project_trace_to_field,
+    project_scalars, project_scalars_to_field,
+};
 
 const INT_LIMBS: usize = U64::LIMBS;
 type F = MontyField<{ INT_LIMBS * 4 }>;
@@ -50,21 +54,32 @@ fn qx_ideal_check_succeeds_on_valid_sha256_witness() {
     assert_eq!(qx_trace.len(), bp_trace.len(), "trace column count mismatch");
     assert_eq!(qx_trace[0].evaluations.len(), bp_trace[0].evaluations.len(), "row count mismatch");
 
-    let num_constraints = count_constraints::<DensePolynomial<i64, 64>, Sha256Uair>();
-    let max_degree = count_max_degree::<DensePolynomial<i64, 64>, Sha256Uair>();
+    let num_constraints = count_constraints::<Sha256UairQx>();
+    let max_degree = count_max_degree::<Sha256UairQx>();
 
     println!("SHA-256 Q[X] UAIR: {} constraints, max degree {}", num_constraints, max_degree);
     assert_eq!(num_constraints, 5, "Expected 5 Q[X] constraints");
     assert_eq!(max_degree, 1, "Expected max degree 1");
 
-    // Step 3: IdealCheck prover
+    // Step 3: Project trace and scalars for IdealCheck
     let mut transcript = zinc_transcript::KeccakTranscript::new();
     let field_cfg = transcript.get_random_field_cfg::<F, <F as Field>::Inner, MillerRabin>();
 
+    let projected_trace = project_trace_coeffs::<F, i64, i64, 64>(
+        &[], &qx_trace, &[], &field_cfg,
+    );
+    let projected_scalars = project_scalars::<F, Sha256UairQx>(|scalar| {
+        DynamicPolynomialF::new(
+            scalar.iter().map(|coeff| F::from_with_cfg(*coeff, &field_cfg)).collect::<Vec<_>>()
+        )
+    });
+
+    // Step 4: IdealCheck prover
     let ic_result =
-        IdealCheckProtocol::<F>::prove_as_subprotocol::<DensePolynomial<i64, 64>, Sha256Uair>(
+        IdealCheckProtocol::<F>::prove_as_subprotocol::<Sha256UairQx>(
             &mut transcript,
-            &qx_trace,
+            &projected_trace,
+            &projected_scalars,
             num_constraints,
             num_vars,
             &field_cfg,
@@ -74,16 +89,24 @@ fn qx_ideal_check_succeeds_on_valid_sha256_witness() {
     let (ic_proof, ic_state) = ic_result.unwrap();
     println!("Q[X] IdealCheck prover PASSED ✓ ({num_constraints} constraints)");
 
-    // Step 4: CombinedPolyResolver prover
+    // Step 5: Project to field for CPR
+    let projecting_element: F = transcript.get_field_challenge(&field_cfg);
+    let field_trace = project_trace_to_field::<F, 64>(
+        &[], &projected_trace, &[], &projecting_element,
+    );
+    let field_projected_scalars =
+        project_scalars_to_field(projected_scalars.clone(), &projecting_element)
+            .expect("scalar projection failed");
+
+    // Step 6: CombinedPolyResolver prover
     let cpr_result =
         zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::prove_as_subprotocol::<
-            DensePolynomial<i64, 64>,
-            Sha256Uair,
+            Sha256UairQx,
         >(
             &mut transcript,
-            &ic_state.trace_matrix,
+            field_trace,
             &ic_state.evaluation_point,
-            ic_state.projected_scalars,
+            &field_projected_scalars,
             num_constraints,
             num_vars,
             max_degree,
@@ -94,7 +117,7 @@ fn qx_ideal_check_succeeds_on_valid_sha256_witness() {
     let (cpr_proof, _cpr_state) = cpr_result.unwrap();
     println!("Q[X] CombinedPolyResolver prover PASSED ✓");
 
-    // Step 5: IdealCheck verifier with REAL ideal checks
+    // Step 7: IdealCheck verifier with REAL ideal checks
     let mut verify_transcript = zinc_transcript::KeccakTranscript::new();
     let verify_field_cfg = verify_transcript.get_random_field_cfg::<F, <F as Field>::Inner, MillerRabin>();
 
@@ -110,7 +133,7 @@ fn qx_ideal_check_succeeds_on_valid_sha256_witness() {
     };
 
     let ic_verify_result =
-        IdealCheckProtocol::<F>::verify_as_subprotocol::<DensePolynomial<i64, 64>, Sha256Uair, _, _>(
+        IdealCheckProtocol::<F>::verify_as_subprotocol::<Sha256UairQx, _, _>(
             &mut verify_transcript,
             ic_proof,
             num_constraints,
@@ -127,17 +150,28 @@ fn qx_ideal_check_succeeds_on_valid_sha256_witness() {
     let ic_subclaim = ic_verify_result.unwrap();
     println!("Q[X] IdealCheck verifier PASSED ✓ (real ideal checks!)");
 
-    // Step 6: CPR verifier
+    // Step 8: CPR verifier
+    let verify_projected_scalars_coeffs = project_scalars::<F, Sha256UairQx>(|scalar| {
+        DynamicPolynomialF::new(
+            scalar.iter().map(|coeff| F::from_with_cfg(*coeff, &verify_field_cfg)).collect::<Vec<_>>()
+        )
+    });
+    let verify_projecting_element: F = verify_transcript.get_field_challenge(&verify_field_cfg);
+    let verify_field_projected_scalars =
+        project_scalars_to_field(verify_projected_scalars_coeffs, &verify_projecting_element)
+            .expect("verify scalar projection failed");
+
     let cpr_verify_result =
         zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::verify_as_subprotocol::<
-            DensePolynomial<i64, 64>,
-            Sha256Uair,
+            Sha256UairQx,
         >(
             &mut verify_transcript,
             cpr_proof,
             num_constraints,
             num_vars,
             max_degree,
+            &verify_projecting_element,
+            &verify_field_projected_scalars,
             ic_subclaim,
             &verify_field_cfg,
         );

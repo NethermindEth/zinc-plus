@@ -1,503 +1,456 @@
-//! Pipeline integration for the batched decomposed LogUp protocol.
+//! Pipeline integration for batched decomposed LogUp.
 //!
-//! This module provides the glue between the UAIR type system and the
-//! standalone lookup protocols.  Given a UAIR signature and a projected
-//! trace over F_q, it automatically determines which columns need
-//! lookup constraints, generates the appropriate tables and chunk
-//! decompositions, and runs the [`BatchedDecompLogupProtocol`].
-//!
-//! ## Supported column types
-//!
-//! | UAIR column kind       | Lookup table              | Decomposition            |
-//! |------------------------|---------------------------|--------------------------|
-//! | `binary_poly` (width w)| `{0,1}^{<w}[X]` → 2^w    | K chunks of BitPoly(w/K) |
-//! | `int` (width w)        | `[0, 2^w − 1]`  → 2^w    | K chunks of Word(w/K)    |
-//! | `arbitrary_poly`       | *(none — unconstrained)*  | —                        |
-//!
-//! For tables of size 2^{32} the standard configuration decomposes into
-//! K = 2 sub-tables of size 2^{16}.
+//! This module provides [`prove_batched_lookup`] and
+//! [`verify_batched_lookup`] — high-level functions that the prover /
+//! verifier pipeline calls to enforce typing constraints on trace columns.
 //!
 //! ## Usage
 //!
-//! ```ignore
-//! use zinc_piop::lookup::pipeline::{LookupConfig, lookup_prove, lookup_verify};
+//! The caller supplies:
+//! - A list of [`LookupColumnSpec`]s describing which columns need lookup
+//!   verification and which table type (BitPoly or Word) they should be
+//!   checked against.
+//! - The projected trace columns as `&[Vec<F>]` (one `Vec<F>` per column,
+//!   each element is a field element obtained by evaluating the binary
+//!   polynomial / integer at the projecting element).
+//! - A Fiat-Shamir transcript (shared with the rest of the pipeline).
 //!
-//! // Build configuration from the UAIR signature.
-//! let config = LookupConfig::from_signature::<32>(
-//!     &signature,
-//!     &projecting_element,
-//!     field_cfg,
-//! );
+//! Columns with the same table type are **batched** into a single
+//! [`BatchedDecompLogupProtocol`] instance, amortising the sumcheck cost.
 //!
-//! // Prover: build instance from projected trace columns and run protocol.
-//! let (proof, state) = lookup_prove(
-//!     &mut transcript,
-//!     &config,
-//!     &projected_trace_columns,  // Vec<F> per column
-//!     field_cfg,
-//! )?;
+//! ## Example table types
 //!
-//! // Verifier: replay transcript and verify proof.
-//! let subclaim = lookup_verify(
-//!     &mut transcript,
-//!     &config,
-//!     &proof,
-//!     witness_len,
-//!     field_cfg,
-//! )?;
-//! ```
+//! | Type | Set | Table size | Decomposition |
+//! |------|-----|-----------|---------------|
+/// | `BitPoly { width: 32 }` | `{0,1}^{<32}[X]` | 2^32 → 4 × 2^8 | K=4, chunk_width=8 |
+/// | `Word { width: 32 }` | `[0, 2^32 − 1]` | 2^32 → 4 × 2^8 | K=4, chunk_width=8 |
 
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
+use num_traits::Zero;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_uair::UairSignature;
 use zinc_utils::inner_transparent_field::InnerTransparentField;
 
-use super::{
-    batched_decomposition::BatchedDecompLogupProtocol,
-    structs::{
-        BatchedDecompLogupProof, BatchedDecompLogupProverState,
-        BatchedDecompLogupVerifierSubClaim, BatchedDecompLookupInstance, LookupError,
-    },
-    tables::{bitpoly_shift, generate_bitpoly_table, generate_word_table, word_shift},
+use super::batched_decomposition::BatchedDecompLogupProtocol;
+use super::structs::{
+    BatchedDecompLogupProof,
+    BatchedDecompLogupVerifierSubClaim, BatchedDecompLookupInstance,
+    LookupColumnSpec, LookupError, LookupGroup, LookupTableType,
+    group_lookup_specs,
+};
+use super::tables::{
+    bitpoly_shift,
+    decompose_bitpoly_column, decompose_raw_indices_to_chunks, decompose_word_column,
+    generate_bitpoly_table, generate_word_table,
+    word_shift,
 };
 
-// ─── Configuration ──────────────────────────────────────────────────────────
+// ── Constants ───────────────────────────────────────────────────────────────
 
-/// Describes the column-type of a single lookup group.
-#[derive(Clone, Debug)]
-pub enum LookupTableKind {
-    /// Column stores a binary polynomial of degree < `full_width`.
-    ///
-    /// The projected table is generated at the given projecting element `a`
-    /// and has `2^full_width` entries.  Decomposed into `num_chunks`
-    /// sub-tables of `BitPoly(chunk_width)`.
-    BitPoly {
-        /// Total width, e.g. 32.
-        full_width: usize,
-        /// Width of each sub-table chunk, e.g. 16.
-        chunk_width: usize,
-        /// Number of chunks (= full_width / chunk_width).
-        num_chunks: usize,
-    },
-    /// Column stores an integer in `[0, 2^full_width − 1]`.
-    ///
-    /// Decomposed into `num_chunks` sub-tables of `Word(chunk_width)`.
-    Word {
-        /// Total width, e.g. 32.
-        full_width: usize,
-        /// Width of each sub-table chunk, e.g. 16.
-        chunk_width: usize,
-        /// Number of chunks (= full_width / chunk_width).
-        num_chunks: usize,
-    },
-}
-
-/// Full lookup configuration: table kind, generated sub-table, and shift
-/// factors for the decomposition.
+/// Default chunk width for decomposition.
 ///
-/// A single `LookupConfig` covers **all** columns of the same type
-/// (all `binary_poly` columns share one config, all `int` columns
-/// share another).
-#[derive(Clone, Debug)]
-pub struct LookupConfig<F: PrimeField> {
-    /// Which column indices (0-based in the full trace) belong to this group.
-    pub column_indices: Vec<usize>,
-    /// The table kind (BitPoly or Word).
-    pub kind: LookupTableKind,
-    /// The projected sub-table entries (size `2^chunk_width`).
-    pub subtable: Vec<F>,
-    /// Shift factors for the decomposition (`num_chunks` entries).
-    ///
-    /// For BitPoly: `shifts[k] = a^{k * chunk_width}`.
-    /// For Word:    `shifts[k] = (2^{chunk_width})^k mod q`.
-    pub shifts: Vec<F>,
-}
-
-/// Description of all lookup constraints derived from a UAIR signature.
-#[derive(Clone, Debug)]
-pub struct PipelineLookupConfig<F: PrimeField> {
-    /// Per-group configurations.  Typically at most two groups
-    /// (one BitPoly, one Word), but either may be absent.
-    pub groups: Vec<LookupConfig<F>>,
-}
-
-impl<F: PrimeField + FromPrimitiveWithConfig> PipelineLookupConfig<F>
-where
-    F::Config: Sync,
-{
-    /// Derive the lookup configuration from a [`UairSignature`].
-    ///
-    /// # Arguments
-    ///
-    /// * `signature` — the UAIR column-type counts.
-    /// * `poly_width` — the BinaryPoly width (the const-generic `D`,
-    ///   e.g. 32 for `BinaryPoly<32>`).
-    /// * `int_width` — the integer bit-width (e.g. 32 for `Word(32)`).
-    /// * `num_chunks` — decomposition factor (e.g. 2 → two sub-tables
-    ///   of size `2^{width/2}`).
-    /// * `projecting_element` — the random `a ∈ F_q` used by the
-    ///   BitPoly projection ψ_a.
-    /// * `field_cfg` — field configuration.
-    #[allow(clippy::arithmetic_side_effects)]
-    pub fn from_signature(
-        signature: &UairSignature,
-        poly_width: usize,
-        int_width: usize,
-        num_chunks: usize,
-        projecting_element: &F,
-        field_cfg: &F::Config,
-    ) -> Self {
-        let mut groups = Vec::new();
-
-        // ── BitPoly columns ─────────────────────────────────────────
-        if signature.binary_poly_cols > 0 {
-            let chunk_width = poly_width / num_chunks;
-            debug_assert_eq!(
-                chunk_width * num_chunks,
-                poly_width,
-                "poly_width must be divisible by num_chunks"
-            );
-
-            let subtable =
-                generate_bitpoly_table(chunk_width, projecting_element, field_cfg);
-            let shifts: Vec<F> = (0..num_chunks)
-                .map(|k| bitpoly_shift(k * chunk_width, projecting_element))
-                .collect();
-
-            let column_indices: Vec<usize> =
-                (0..signature.binary_poly_cols).collect();
-
-            groups.push(LookupConfig {
-                column_indices,
-                kind: LookupTableKind::BitPoly {
-                    full_width: poly_width,
-                    chunk_width,
-                    num_chunks,
-                },
-                subtable,
-                shifts,
-            });
-        }
-
-        // ── Int columns ─────────────────────────────────────────────
-        if signature.int_cols > 0 {
-            let chunk_width = int_width / num_chunks;
-            debug_assert_eq!(
-                chunk_width * num_chunks,
-                int_width,
-                "int_width must be divisible by num_chunks"
-            );
-
-            let subtable = generate_word_table(chunk_width, field_cfg);
-            let shifts: Vec<F> = (0..num_chunks)
-                .map(|k| word_shift(k * chunk_width, field_cfg))
-                .collect();
-
-            // Int columns start after binary_poly + arbitrary_poly.
-            let int_start =
-                signature.binary_poly_cols + signature.arbitrary_poly_cols;
-            let column_indices: Vec<usize> =
-                (int_start..int_start + signature.int_cols).collect();
-
-            groups.push(LookupConfig {
-                column_indices,
-                kind: LookupTableKind::Word {
-                    full_width: int_width,
-                    chunk_width,
-                    num_chunks,
-                },
-                subtable,
-                shifts,
-            });
-        }
-
-        Self { groups }
-    }
-
-    /// Returns `true` if there are no lookup constraints (no binary_poly
-    /// or int columns).
-    pub fn is_empty(&self) -> bool {
-        self.groups.is_empty()
-    }
-
-    /// Total number of columns that need lookup.
-    pub fn num_lookup_columns(&self) -> usize {
-        self.groups.iter().map(|g| g.column_indices.len()).sum()
-    }
-}
-
-// ─── Instance builder ───────────────────────────────────────────────────────
-
-/// Build a [`BatchedDecompLookupInstance`] for one group of columns.
+/// Tables of width ≤ `DECOMP_THRESHOLD` are used directly (K=1).
+/// Tables of width > `DECOMP_THRESHOLD` are split into chunks of this width.
 ///
-/// # Arguments
+/// Using chunk_width=8 gives sub-tables of size 2^8 = 256, keeping memory
+/// usage reasonable even with many lookup columns (e.g. 20+ columns would
+/// need ~40 MB of multiplicities at chunk_width=16 vs ~160 KB at 8).
+const DEFAULT_CHUNK_WIDTH: usize = 8;
+
+/// Below this width, no decomposition is needed — the full table fits
+/// comfortably in memory and we use a single-chunk "decomposition" (K=1).
+const DECOMP_THRESHOLD: usize = 8;
+
+// ── Proof container ─────────────────────────────────────────────────────────
+
+/// Complete lookup proof for the pipeline.
 ///
-/// * `config` — the group's lookup configuration.
-/// * `projected_columns` — the projected trace columns over F_q.
-///   `projected_columns[col_idx]` is the flattened evaluations of column
-///   `col_idx`.
-/// * `original_entries_per_column` — for each column, the **original**
-///   integer indices into the full table (before projection).  These are
-///   needed to compute the chunk decomposition.
-///
-///   For `BitPoly(w)` columns: the index `n` means the binary polynomial
-///   whose coefficient bit vector is `n`.
-///   For `Word(w)` columns: the index is simply the integer value.
-///
-/// * `field_cfg` — field configuration.
-#[allow(clippy::arithmetic_side_effects)]
-pub fn build_batched_instance<F: PrimeField + FromPrimitiveWithConfig + Send + Sync>(
-    config: &LookupConfig<F>,
-    projected_columns: &[Vec<F>],
-    original_indices_per_column: &[Vec<usize>],
-    _field_cfg: &F::Config,
-) -> BatchedDecompLookupInstance<F>
-where
-    F::Config: Sync,
-{
-    let num_chunks = config.shifts.len();
-    let chunk_width = match &config.kind {
-        LookupTableKind::BitPoly { chunk_width, .. } => *chunk_width,
-        LookupTableKind::Word { chunk_width, .. } => *chunk_width,
-    };
-    let chunk_mask = (1usize << chunk_width) - 1;
-
-    let num_lookups = config.column_indices.len();
-    let mut witnesses = Vec::with_capacity(num_lookups);
-    let mut all_chunks = Vec::with_capacity(num_lookups);
-
-    for (col_pos, &col_idx) in config.column_indices.iter().enumerate() {
-        let witness = projected_columns[col_idx].clone();
-        let original_indices = &original_indices_per_column[col_pos];
-        let witness_len = witness.len();
-
-        // Decompose each entry into K chunks by extracting bit-fields
-        // from the original index.
-        let chunks: Vec<Vec<F>> = (0..num_chunks)
-            .map(|k| {
-                original_indices
-                    .iter()
-                    .map(|&idx| {
-                        let chunk_idx = (idx >> (k * chunk_width)) & chunk_mask;
-                        config.subtable[chunk_idx].clone()
-                    })
-                    .collect()
-            })
-            .collect();
-
-        debug_assert_eq!(chunks.len(), num_chunks);
-        debug_assert!(chunks.iter().all(|c| c.len() == witness_len));
-
-        witnesses.push(witness);
-        all_chunks.push(chunks);
-    }
-
-    BatchedDecompLookupInstance {
-        witnesses,
-        subtable: config.subtable.clone(),
-        shifts: config.shifts.clone(),
-        chunks: all_chunks,
-    }
-}
-
-/// Build a [`BatchedDecompLookupInstance`] from projected trace columns
-/// when the chunk decomposition is **already known**.
-///
-/// This is the simpler variant when the caller has already computed the
-/// chunk vectors (e.g. because the witness generation step naturally
-/// produces them).
-pub fn build_batched_instance_with_chunks<F: PrimeField>(
-    config: &LookupConfig<F>,
-    projected_columns: &[Vec<F>],
-    precomputed_chunks: Vec<Vec<Vec<F>>>,
-) -> BatchedDecompLookupInstance<F> {
-    let witnesses: Vec<Vec<F>> = config
-        .column_indices
-        .iter()
-        .map(|&col_idx| projected_columns[col_idx].clone())
-        .collect();
-
-    BatchedDecompLookupInstance {
-        witnesses,
-        subtable: config.subtable.clone(),
-        shifts: config.shifts.clone(),
-        chunks: precomputed_chunks,
-    }
-}
-
-// ─── Prover ─────────────────────────────────────────────────────────────────
-
-/// Proof and prover-state for a single lookup group.
-#[derive(Clone, Debug)]
-pub struct LookupGroupProof<F: PrimeField> {
-    /// The batched decomposition + LogUp proof.
-    pub proof: BatchedDecompLogupProof<F>,
-    /// Prover state (mainly the evaluation point from the sumcheck).
-    pub state: BatchedDecompLogupProverState<F>,
-}
-
-/// Aggregated proof across all lookup groups.
+/// Contains one [`BatchedDecompLogupProof`] per lookup group (i.e. per
+/// distinct table type). The groups are ordered deterministically.
 #[derive(Clone, Debug)]
 pub struct PipelineLookupProof<F: PrimeField> {
-    /// One proof per group (in the same order as `PipelineLookupConfig::groups`).
-    pub group_proofs: Vec<LookupGroupProof<F>>,
+    /// Per-group proofs, in the same order as the groups returned by
+    /// [`group_lookup_specs`].
+    pub group_proofs: Vec<BatchedDecompLogupProof<F>>,
+    /// Per-group metadata needed by the verifier: (table_type, column_count, witness_len).
+    pub group_meta: Vec<LookupGroupMeta>,
 }
 
-/// Aggregated prover state.
+/// Metadata for one lookup group (stored in the proof so the verifier
+/// can reconstruct tables and shifts).
+#[derive(Clone, Debug)]
+pub struct LookupGroupMeta {
+    /// The table type for this group.
+    pub table_type: LookupTableType,
+    /// Number of columns (= L, the batch size).
+    pub num_columns: usize,
+    /// Length of each witness vector (= number of rows in the trace).
+    pub witness_len: usize,
+}
+
+/// Prover state returned after running the lookup pipeline step.
 #[derive(Clone, Debug)]
 pub struct PipelineLookupProverState<F: PrimeField> {
     /// Evaluation points from each group's sumcheck.
     pub evaluation_points: Vec<Vec<F>>,
 }
 
-/// Run the batched decomposed LogUp prover for all lookup groups.
+// ── Prover ──────────────────────────────────────────────────────────────────
+
+/// Run the batched decomposed LogUp prover for all specified lookup columns.
 ///
-/// For each group of columns (same table type), this function:
-/// 1. Builds a `BatchedDecompLookupInstance`.
-/// 2. Runs `BatchedDecompLogupProtocol::prove_as_subprotocol`.
-///
-/// All groups share the same Fiat-Shamir transcript, ensuring
-/// soundness across the combined protocol.
+/// Groups columns by table type, generates the decomposed instance for
+/// each group, and calls [`BatchedDecompLogupProtocol::prove_as_subprotocol`].
 ///
 /// # Arguments
 ///
-/// * `transcript` — the shared Fiat-Shamir transcript.
-/// * `config` — the pipeline lookup configuration.
-/// * `projected_columns` — projected trace columns (F_q vectors).
-/// * `original_indices_per_group` — for each group, for each column
-///   in that group, the original table indices.
-/// * `field_cfg` — field configuration.
-pub fn lookup_prove<F>(
+/// - `transcript`: shared Fiat-Shamir transcript.
+/// - `columns`: projected trace columns — `columns[col_idx][row]` is the
+///   field element for column `col_idx`, row `row`. All columns must have
+///   the same length.
+/// - `specs`: lookup specifications (which columns, which table types).
+/// - `projecting_element`: the element `a` used to project BinaryPoly types
+///   to the field. Only needed for `BitPoly` table types; for `Word` types
+///   this is unused.
+/// - `field_cfg`: PIOP field configuration.
+///
+/// # Returns
+///
+/// `(PipelineLookupProof, PipelineLookupProverState)` on success.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+pub fn prove_batched_lookup<F>(
     transcript: &mut impl Transcript,
-    config: &PipelineLookupConfig<F>,
-    projected_columns: &[Vec<F>],
-    original_indices_per_group: &[Vec<Vec<usize>>],
+    columns: &[Vec<F>],
+    specs: &[LookupColumnSpec],
+    projecting_element: &F,
     field_cfg: &F::Config,
 ) -> Result<(PipelineLookupProof<F>, PipelineLookupProverState<F>), LookupError<F>>
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
-    F::Inner: ConstTranscribable + num_traits::Zero + Default + Send + Sync,
+    F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Config: Sync,
 {
-    let mut group_proofs = Vec::with_capacity(config.groups.len());
-    let mut evaluation_points = Vec::with_capacity(config.groups.len());
+    let groups = group_lookup_specs(specs);
+    let mut group_proofs = Vec::with_capacity(groups.len());
+    let mut group_meta = Vec::with_capacity(groups.len());
+    let mut eval_points = Vec::with_capacity(groups.len());
 
-    for (group_idx, group_config) in config.groups.iter().enumerate() {
-        let instance = build_batched_instance(
-            group_config,
-            projected_columns,
-            &original_indices_per_group[group_idx],
+    for group in &groups {
+        let instance = build_lookup_instance(
+            columns,
+            group,
+            projecting_element,
             field_cfg,
-        );
+        )?;
+
+        let witness_len = instance.witnesses[0].len();
 
         let (proof, state) =
             BatchedDecompLogupProtocol::<F>::prove_as_subprotocol(
-                transcript, &instance, field_cfg,
-            )?;
-
-        evaluation_points.push(state.evaluation_point.clone());
-        group_proofs.push(LookupGroupProof { proof, state });
-    }
-
-    Ok((
-        PipelineLookupProof { group_proofs },
-        PipelineLookupProverState { evaluation_points },
-    ))
-}
-
-/// Run the batched decomposed LogUp prover when chunk decompositions
-/// are already available.
-pub fn lookup_prove_with_chunks<F>(
-    transcript: &mut impl Transcript,
-    config: &PipelineLookupConfig<F>,
-    projected_columns: &[Vec<F>],
-    precomputed_chunks_per_group: Vec<Vec<Vec<Vec<F>>>>,
-    field_cfg: &F::Config,
-) -> Result<(PipelineLookupProof<F>, PipelineLookupProverState<F>), LookupError<F>>
-where
-    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
-    F::Inner: ConstTranscribable + num_traits::Zero + Default + Send + Sync,
-{
-    let mut group_proofs = Vec::with_capacity(config.groups.len());
-    let mut evaluation_points = Vec::with_capacity(config.groups.len());
-
-    for (group_idx, group_config) in config.groups.iter().enumerate() {
-        let instance = build_batched_instance_with_chunks(
-            group_config,
-            projected_columns,
-            precomputed_chunks_per_group[group_idx].clone(),
-        );
-
-        let (proof, state) =
-            BatchedDecompLogupProtocol::<F>::prove_as_subprotocol(
-                transcript, &instance, field_cfg,
-            )?;
-
-        evaluation_points.push(state.evaluation_point.clone());
-        group_proofs.push(LookupGroupProof { proof, state });
-    }
-
-    Ok((
-        PipelineLookupProof { group_proofs },
-        PipelineLookupProverState { evaluation_points },
-    ))
-}
-
-// ─── Verifier ───────────────────────────────────────────────────────────────
-
-/// Aggregated verifier sub-claims.
-#[derive(Clone, Debug)]
-pub struct PipelineLookupVerifierSubClaim<F: PrimeField> {
-    /// Per-group sub-claims.
-    pub sub_claims: Vec<BatchedDecompLogupVerifierSubClaim<F>>,
-}
-
-/// Run the batched decomposed LogUp verifier for all lookup groups.
-///
-/// # Arguments
-///
-/// * `transcript` — the shared Fiat-Shamir transcript (must be in the
-///   same state as after the prover's IC + CPR steps).
-/// * `config` — the pipeline lookup configuration.
-/// * `proof` — the aggregated lookup proof.
-/// * `witness_len` — the number of entries per trace column (power of 2).
-/// * `field_cfg` — field configuration.
-pub fn lookup_verify<F>(
-    transcript: &mut impl Transcript,
-    config: &PipelineLookupConfig<F>,
-    proof: &PipelineLookupProof<F>,
-    witness_len: usize,
-    field_cfg: &F::Config,
-) -> Result<PipelineLookupVerifierSubClaim<F>, LookupError<F>>
-where
-    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
-    F::Inner: ConstTranscribable + num_traits::Zero + Default + Send + Sync,
-{
-    let mut sub_claims = Vec::with_capacity(config.groups.len());
-
-    for (group_idx, group_config) in config.groups.iter().enumerate() {
-        let group_proof = &proof.group_proofs[group_idx];
-        let num_lookups = group_config.column_indices.len();
-
-        let sub_claim =
-            BatchedDecompLogupProtocol::<F>::verify_as_subprotocol(
                 transcript,
-                &group_proof.proof,
-                &group_config.subtable,
-                &group_config.shifts,
-                num_lookups,
-                witness_len,
+                &instance,
                 field_cfg,
             )?;
 
-        sub_claims.push(sub_claim);
+        group_proofs.push(proof);
+        group_meta.push(LookupGroupMeta {
+            table_type: group.table_type.clone(),
+            num_columns: group.column_indices.len(),
+            witness_len,
+        });
+        eval_points.push(state.evaluation_point);
     }
 
-    Ok(PipelineLookupVerifierSubClaim { sub_claims })
+    Ok((
+        PipelineLookupProof {
+            group_proofs,
+            group_meta,
+        },
+        PipelineLookupProverState {
+            evaluation_points: eval_points,
+        },
+    ))
+}
+
+/// Like [`prove_batched_lookup`], but accepts precomputed raw integer
+/// indices for each column instead of reverse-mapping from projected
+/// field elements.
+///
+/// This avoids building the full `2^width` lookup table in
+/// [`decompose_bitpoly_column`] / [`decompose_word_column`], which
+/// would be prohibitive for large widths (e.g. 32, where the table
+/// has 4 billion entries).
+///
+/// # Arguments
+///
+/// - `columns`: projected field columns (same as [`prove_batched_lookup`]).
+/// - `raw_indices`: for each column `i`, `raw_indices[i][row]` is the
+///   integer index in `[0, 2^width)` for that cell.
+///
+/// All other arguments are identical to [`prove_batched_lookup`].
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+pub fn prove_batched_lookup_with_indices<F>(
+    transcript: &mut impl Transcript,
+    columns: &[Vec<F>],
+    raw_indices: &[Vec<usize>],
+    specs: &[LookupColumnSpec],
+    projecting_element: &F,
+    field_cfg: &F::Config,
+) -> Result<(PipelineLookupProof<F>, PipelineLookupProverState<F>), LookupError<F>>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Config: Sync,
+{
+    let groups = group_lookup_specs(specs);
+    let mut group_proofs = Vec::with_capacity(groups.len());
+    let mut group_meta = Vec::with_capacity(groups.len());
+    let mut eval_points = Vec::with_capacity(groups.len());
+
+    for group in &groups {
+        let instance = build_lookup_instance_from_indices(
+            columns,
+            raw_indices,
+            group,
+            projecting_element,
+            field_cfg,
+        )?;
+
+        let witness_len = instance.witnesses[0].len();
+
+        let (proof, state) =
+            BatchedDecompLogupProtocol::<F>::prove_as_subprotocol(
+                transcript,
+                &instance,
+                field_cfg,
+            )?;
+
+        group_proofs.push(proof);
+        group_meta.push(LookupGroupMeta {
+            table_type: group.table_type.clone(),
+            num_columns: group.column_indices.len(),
+            witness_len,
+        });
+        eval_points.push(state.evaluation_point);
+    }
+
+    Ok((
+        PipelineLookupProof {
+            group_proofs,
+            group_meta,
+        },
+        PipelineLookupProverState {
+            evaluation_points: eval_points,
+        },
+    ))
+}
+
+/// Build a [`BatchedDecompLookupInstance`] using precomputed raw integer
+/// indices, avoiding the full-table reverse lookup.
+#[allow(clippy::arithmetic_side_effects)]
+fn build_lookup_instance_from_indices<F>(
+    columns: &[Vec<F>],
+    raw_indices: &[Vec<usize>],
+    group: &LookupGroup,
+    projecting_element: &F,
+    field_cfg: &F::Config,
+) -> Result<BatchedDecompLookupInstance<F>, LookupError<F>>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Config: Sync,
+{
+    let (subtable, shifts) = generate_table_and_shifts(
+        &group.table_type,
+        projecting_element,
+        field_cfg,
+    );
+
+    let chunk_width = compute_chunk_width(&group.table_type);
+    let total_width = table_type_width(&group.table_type);
+
+    let mut witnesses = Vec::with_capacity(group.column_indices.len());
+    let mut all_chunks = Vec::with_capacity(group.column_indices.len());
+
+    for &col_idx in &group.column_indices {
+        witnesses.push(columns[col_idx].clone());
+
+        let chunks = decompose_raw_indices_to_chunks(
+            &raw_indices[col_idx],
+            total_width,
+            chunk_width,
+            &subtable,
+        );
+        all_chunks.push(chunks);
+    }
+
+    Ok(BatchedDecompLookupInstance {
+        witnesses,
+        subtable,
+        shifts,
+        chunks: all_chunks,
+    })
+}
+
+// ── Verifier ────────────────────────────────────────────────────────────────
+
+/// Run the batched decomposed LogUp verifier for all lookup groups.
+///
+/// Reconstructs the sub-tables and shifts from the group metadata,
+/// then calls [`BatchedDecompLogupProtocol::verify_as_subprotocol`] for
+/// each group.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+pub fn verify_batched_lookup<F>(
+    transcript: &mut impl Transcript,
+    proof: &PipelineLookupProof<F>,
+    projecting_element: &F,
+    field_cfg: &F::Config,
+) -> Result<Vec<BatchedDecompLogupVerifierSubClaim<F>>, LookupError<F>>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Config: Sync,
+{
+    let mut subclaims = Vec::with_capacity(proof.group_proofs.len());
+
+    for (group_proof, meta) in proof.group_proofs.iter().zip(proof.group_meta.iter()) {
+        let (subtable, shifts) = generate_table_and_shifts(
+            &meta.table_type,
+            projecting_element,
+            field_cfg,
+        );
+
+        let subclaim = BatchedDecompLogupProtocol::<F>::verify_as_subprotocol(
+            transcript,
+            group_proof,
+            &subtable,
+            &shifts,
+            meta.num_columns,
+            meta.witness_len,
+            field_cfg,
+        )?;
+
+        subclaims.push(subclaim);
+    }
+
+    Ok(subclaims)
+}
+
+// ── Internal helpers ────────────────────────────────────────────────────────
+
+/// Build a [`BatchedDecompLookupInstance`] for a single lookup group.
+#[allow(clippy::arithmetic_side_effects)]
+fn build_lookup_instance<F>(
+    columns: &[Vec<F>],
+    group: &LookupGroup,
+    projecting_element: &F,
+    field_cfg: &F::Config,
+) -> Result<BatchedDecompLookupInstance<F>, LookupError<F>>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Config: Sync,
+{
+    let (subtable, shifts) = generate_table_and_shifts(
+        &group.table_type,
+        projecting_element,
+        field_cfg,
+    );
+
+    let chunk_width = compute_chunk_width(&group.table_type);
+    let _total_width = table_type_width(&group.table_type);
+
+    let mut witnesses = Vec::with_capacity(group.column_indices.len());
+    let mut all_chunks = Vec::with_capacity(group.column_indices.len());
+
+    for &col_idx in &group.column_indices {
+        let witness = &columns[col_idx];
+        witnesses.push(witness.clone());
+
+        let chunks = match &group.table_type {
+            LookupTableType::BitPoly { width } => {
+                decompose_bitpoly_column(
+                    witness,
+                    *width,
+                    chunk_width,
+                    projecting_element,
+                    &subtable,
+                )
+                .ok_or(LookupError::WitnessNotInTable)?
+            }
+            LookupTableType::Word { width } => {
+                decompose_word_column(
+                    witness,
+                    *width,
+                    chunk_width,
+                    field_cfg,
+                )
+                .ok_or(LookupError::WitnessNotInTable)?
+            }
+        };
+        all_chunks.push(chunks);
+    }
+
+    Ok(BatchedDecompLookupInstance {
+        witnesses,
+        subtable,
+        shifts,
+        chunks: all_chunks,
+    })
+}
+
+/// Generate the sub-table and shift factors for a given table type.
+#[allow(clippy::arithmetic_side_effects)]
+fn generate_table_and_shifts<F>(
+    table_type: &LookupTableType,
+    projecting_element: &F,
+    field_cfg: &F::Config,
+) -> (Vec<F>, Vec<F>)
+where
+    F: PrimeField + FromPrimitiveWithConfig + Send + Sync,
+    F::Config: Sync,
+{
+    let chunk_width = compute_chunk_width(table_type);
+    let total_width = table_type_width(table_type);
+    let num_chunks = total_width / chunk_width;
+
+    match table_type {
+        LookupTableType::BitPoly { .. } => {
+            let subtable = generate_bitpoly_table(chunk_width, projecting_element, field_cfg);
+            let shifts: Vec<F> = (0..num_chunks)
+                .map(|k| bitpoly_shift(k * chunk_width, projecting_element))
+                .collect();
+            (subtable, shifts)
+        }
+        LookupTableType::Word { .. } => {
+            let subtable = generate_word_table(chunk_width, field_cfg);
+            let shifts: Vec<F> = (0..num_chunks)
+                .map(|k| word_shift(k * chunk_width, field_cfg))
+                .collect();
+            (subtable, shifts)
+        }
+    }
+}
+
+/// Compute the chunk width for a given table type.
+fn compute_chunk_width(table_type: &LookupTableType) -> usize {
+    let total = table_type_width(table_type);
+    if total <= DECOMP_THRESHOLD {
+        total // No decomposition needed; K=1
+    } else {
+        DEFAULT_CHUNK_WIDTH
+    }
+}
+
+/// Extract the total width from a table type.
+fn table_type_width(table_type: &LookupTableType) -> usize {
+    match table_type {
+        LookupTableType::BitPoly { width } => *width,
+        LookupTableType::Word { width } => *width,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lookup::tables::generate_bitpoly_table;
     use crypto_bigint::{U128, const_monty_params};
     use crypto_primitives::crypto_bigint_const_monty::ConstMontyField;
     use zinc_transcript::KeccakTranscript;
@@ -506,200 +459,168 @@ mod tests {
     const_monty_params!(TestParams, U128, "00000000b933426489189cb5b47d567f");
     type F = ConstMontyField<TestParams, N>;
 
-    /// Helper: project a table index `n` into F_q using the BitPoly
-    /// projection at element `a`.
-    fn project_bitpoly_index(n: usize, width: usize, a: &F) -> F {
-        let mut result = F::from(0u32);
-        let mut power = F::from(1u32);
-        for bit in 0..width {
-            if (n >> bit) & 1 == 1 {
-                result += &power;
-            }
-            power *= a;
-        }
-        result
+    /// Helper: generate a column with valid BitPoly entries.
+    fn make_bitpoly_column(
+        indices: &[usize],
+        width: usize,
+        projecting_element: &F,
+    ) -> Vec<F> {
+        let table = generate_bitpoly_table(width, projecting_element, &());
+        indices.iter().map(|&i| table[i].clone()).collect()
+    }
+
+    /// Helper: generate a column with valid Word entries.
+    fn make_word_column(values: &[u32]) -> Vec<F> {
+        values.iter().map(|&v| F::from(v)).collect()
     }
 
     #[test]
-    fn pipeline_bitpoly_lookup_roundtrip() {
+    fn pipeline_single_bitpoly_column() {
         let a = F::from(3u32);
-        let poly_width = 4;
-        let num_chunks = 2;
-        // Build configuration.
-        let sig = UairSignature {
-            binary_poly_cols: 2,
-            arbitrary_poly_cols: 0,
-            int_cols: 0,
-        };
-        let config =
-            PipelineLookupConfig::from_signature(&sig, poly_width, 0, num_chunks, &a, &());
+        // BitPoly(4) — small enough for no decomposition
+        let col = make_bitpoly_column(&[0, 3, 5, 15], 4, &a);
 
-        assert_eq!(config.groups.len(), 1);
-        assert_eq!(config.groups[0].column_indices, vec![0, 1]);
+        let specs = vec![LookupColumnSpec {
+            column_index: 0,
+            table_type: LookupTableType::BitPoly { width: 4 },
+        }];
 
-        // Build a small trace: 2 BitPoly(4) columns, 4 rows each.
-        // Column 0: indices [0, 3, 5, 15]
-        // Column 1: indices [1, 2, 7, 10]
-        let indices_col0: Vec<usize> = vec![0, 3, 5, 15];
-        let indices_col1: Vec<usize> = vec![1, 2, 7, 10];
-
-        let projected_col0: Vec<F> = indices_col0
-            .iter()
-            .map(|&n| project_bitpoly_index(n, poly_width, &a))
-            .collect();
-        let projected_col1: Vec<F> = indices_col1
-            .iter()
-            .map(|&n| project_bitpoly_index(n, poly_width, &a))
-            .collect();
-
-        let projected_columns = vec![projected_col0, projected_col1];
-        let original_indices = vec![vec![indices_col0, indices_col1]];
-
-        // Prove.
         let mut pt = KeccakTranscript::new();
-        let (proof, _state) = lookup_prove(
+        let (proof, _state) = prove_batched_lookup(
             &mut pt,
-            &config,
-            &projected_columns,
-            &original_indices,
+            &[col],
+            &specs,
+            &a,
             &(),
         )
         .expect("prover should succeed");
 
-        // Verify.
+        assert_eq!(proof.group_proofs.len(), 1);
+
         let mut vt = KeccakTranscript::new();
-        let _subclaim = lookup_verify(&mut vt, &config, &proof, 4, &())
+        let subclaims = verify_batched_lookup(
+            &mut vt,
+            &proof,
+            &a,
+            &(),
+        )
+        .expect("verifier should accept");
+
+        assert_eq!(subclaims.len(), 1);
+    }
+
+    #[test]
+    fn pipeline_batched_bitpoly_columns() {
+        let a = F::from(3u32);
+        // Three columns all in BitPoly(4)
+        let col0 = make_bitpoly_column(&[0, 3, 5, 15], 4, &a);
+        let col1 = make_bitpoly_column(&[1, 2, 7, 10], 4, &a);
+        let col2 = make_bitpoly_column(&[15, 15, 0, 8], 4, &a);
+
+        let specs = vec![
+            LookupColumnSpec { column_index: 0, table_type: LookupTableType::BitPoly { width: 4 } },
+            LookupColumnSpec { column_index: 1, table_type: LookupTableType::BitPoly { width: 4 } },
+            LookupColumnSpec { column_index: 2, table_type: LookupTableType::BitPoly { width: 4 } },
+        ];
+
+        let mut pt = KeccakTranscript::new();
+        let (proof, _) = prove_batched_lookup(
+            &mut pt,
+            &[col0, col1, col2],
+            &specs,
+            &a,
+            &(),
+        )
+        .expect("prover should succeed");
+
+        // All 3 columns have the same table type → single group
+        assert_eq!(proof.group_proofs.len(), 1);
+        assert_eq!(proof.group_meta[0].num_columns, 3);
+
+        let mut vt = KeccakTranscript::new();
+        verify_batched_lookup(&mut vt, &proof, &a, &())
             .expect("verifier should accept");
     }
 
     #[test]
-    fn pipeline_word_lookup_roundtrip() {
-        let a = F::from(3u32); // Not used for word tables.
-        let int_width = 4;
-        let num_chunks = 2;
+    fn pipeline_word_column() {
+        let a = F::from(3u32); // Not used for Word, but required
+        // Word(8) — values in [0, 255]
+        let col = make_word_column(&[0, 42, 127, 255]);
 
-        let sig = UairSignature {
-            binary_poly_cols: 0,
-            arbitrary_poly_cols: 0,
-            int_cols: 2,
-        };
-        let config =
-            PipelineLookupConfig::from_signature(&sig, 0, int_width, num_chunks, &a, &());
-
-        assert_eq!(config.groups.len(), 1);
-        assert_eq!(config.groups[0].column_indices, vec![0, 1]);
-
-        // Columns with integer values in [0, 15].
-        let indices_col0: Vec<usize> = vec![0, 5, 10, 15];
-        let indices_col1: Vec<usize> = vec![1, 3, 7, 12];
-
-        // For Word columns, projection is just value mod q.
-        let projected_col0: Vec<F> =
-            indices_col0.iter().map(|&n| F::from(n as u32)).collect();
-        let projected_col1: Vec<F> =
-            indices_col1.iter().map(|&n| F::from(n as u32)).collect();
-
-        let projected_columns = vec![projected_col0, projected_col1];
-        let original_indices = vec![vec![indices_col0, indices_col1]];
+        let specs = vec![LookupColumnSpec {
+            column_index: 0,
+            table_type: LookupTableType::Word { width: 8 },
+        }];
 
         let mut pt = KeccakTranscript::new();
-        let (proof, _state) = lookup_prove(
+        let (proof, _) = prove_batched_lookup(
             &mut pt,
-            &config,
-            &projected_columns,
-            &original_indices,
+            &[col],
+            &specs,
+            &a,
             &(),
         )
         .expect("prover should succeed");
 
         let mut vt = KeccakTranscript::new();
-        let _subclaim = lookup_verify(&mut vt, &config, &proof, 4, &())
+        verify_batched_lookup(&mut vt, &proof, &a, &())
             .expect("verifier should accept");
     }
 
     #[test]
-    fn pipeline_mixed_bitpoly_and_word() {
+    fn pipeline_mixed_table_types() {
         let a = F::from(3u32);
-        let poly_width = 4;
-        let int_width = 4;
-        let num_chunks = 2;
+        // col0: BitPoly(4), col1: Word(8), col2: BitPoly(4)
+        let col0 = make_bitpoly_column(&[0, 3, 5, 15], 4, &a);
+        let col1 = make_word_column(&[0, 42, 127, 255]);
+        let col2 = make_bitpoly_column(&[1, 2, 7, 10], 4, &a);
 
-        let sig = UairSignature {
-            binary_poly_cols: 2,
-            arbitrary_poly_cols: 1, // 1 unconstrained column
-            int_cols: 1,
-        };
-        let config = PipelineLookupConfig::from_signature(
-            &sig,
-            poly_width,
-            int_width,
-            num_chunks,
+        let specs = vec![
+            LookupColumnSpec { column_index: 0, table_type: LookupTableType::BitPoly { width: 4 } },
+            LookupColumnSpec { column_index: 1, table_type: LookupTableType::Word { width: 8 } },
+            LookupColumnSpec { column_index: 2, table_type: LookupTableType::BitPoly { width: 4 } },
+        ];
+
+        let mut pt = KeccakTranscript::new();
+        let (proof, _) = prove_batched_lookup(
+            &mut pt,
+            &[col0, col1, col2],
+            &specs,
+            &a,
+            &(),
+        )
+        .expect("prover should succeed");
+
+        // Two groups: BitPoly(4) with 2 columns, Word(8) with 1 column
+        assert_eq!(proof.group_proofs.len(), 2);
+
+        let mut vt = KeccakTranscript::new();
+        verify_batched_lookup(&mut vt, &proof, &a, &())
+            .expect("verifier should accept");
+    }
+
+    #[test]
+    fn pipeline_invalid_entry_fails() {
+        let a = F::from(3u32);
+        // Put an entry that's not in BitPoly(4) table
+        let mut col = make_bitpoly_column(&[0, 3, 5, 15], 4, &a);
+        col[2] = F::from(999u32); // Invalid
+
+        let specs = vec![LookupColumnSpec {
+            column_index: 0,
+            table_type: LookupTableType::BitPoly { width: 4 },
+        }];
+
+        let mut pt = KeccakTranscript::new();
+        let result = prove_batched_lookup(
+            &mut pt,
+            &[col],
+            &specs,
             &a,
             &(),
         );
 
-        assert_eq!(config.groups.len(), 2);
-        // BitPoly group: columns 0, 1
-        assert_eq!(config.groups[0].column_indices, vec![0, 1]);
-        // Word group: column 3 (after 2 binary_poly + 1 arbitrary_poly)
-        assert_eq!(config.groups[1].column_indices, vec![3]);
-
-        // BitPoly columns.
-        let bp_indices_col0: Vec<usize> = vec![0, 5, 10, 15];
-        let bp_indices_col1: Vec<usize> = vec![3, 7, 12, 1];
-
-        let bp_proj_col0: Vec<F> = bp_indices_col0
-            .iter()
-            .map(|&n| project_bitpoly_index(n, poly_width, &a))
-            .collect();
-        let bp_proj_col1: Vec<F> = bp_indices_col1
-            .iter()
-            .map(|&n| project_bitpoly_index(n, poly_width, &a))
-            .collect();
-
-        // Arbitrary poly column (unconstrained, not in any group).
-        let arb_col: Vec<F> = vec![F::from(99u32); 4];
-
-        // Word column.
-        let word_indices_col3: Vec<usize> = vec![2, 8, 14, 0];
-        let word_proj_col3: Vec<F> =
-            word_indices_col3.iter().map(|&n| F::from(n as u32)).collect();
-
-        // Full projected trace: [bp0, bp1, arb, word]
-        let projected_columns = vec![bp_proj_col0, bp_proj_col1, arb_col, word_proj_col3];
-
-        // Original indices per group.
-        let bitpoly_group_indices = vec![bp_indices_col0, bp_indices_col1];
-        let word_group_indices = vec![word_indices_col3];
-        let original_indices = vec![bitpoly_group_indices, word_group_indices];
-
-        let mut pt = KeccakTranscript::new();
-        let (proof, _state) = lookup_prove(
-            &mut pt,
-            &config,
-            &projected_columns,
-            &original_indices,
-            &(),
-        )
-        .expect("prover should succeed");
-
-        let mut vt = KeccakTranscript::new();
-        let _subclaim = lookup_verify(&mut vt, &config, &proof, 4, &())
-            .expect("verifier should accept");
-    }
-
-    #[test]
-    fn pipeline_empty_signature_no_lookup() {
-        let a = F::from(3u32);
-        let sig = UairSignature {
-            binary_poly_cols: 0,
-            arbitrary_poly_cols: 5,
-            int_cols: 0,
-        };
-        let config =
-            PipelineLookupConfig::from_signature(&sig, 32, 32, 2, &a, &());
-
-        assert!(config.is_empty());
-        assert_eq!(config.num_lookup_columns(), 0);
+        assert!(result.is_err());
     }
 }

@@ -173,6 +173,80 @@ pub struct BatchedDecompLogupVerifierSubClaim<F: PrimeField> {
 }
 
 // ---------------------------------------------------------------------------
+// Lookup specification (pipeline integration)
+// ---------------------------------------------------------------------------
+
+/// Describes the type of lookup table a column should be checked against.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum LookupTableType {
+    /// Column entries are in `{0,1}^{<w}[X]` — binary polynomials of degree
+    /// less than `width`, projected at element `a`.
+    ///
+    /// Full table size = `2^width`; for large `width` (e.g. 32) the table
+    /// is decomposed into `K` sub-tables of size `2^{width/K}`.
+    BitPoly {
+        /// Total width of the binary polynomial (e.g. 32).
+        width: usize,
+    },
+    /// Column entries are in `[0, 2^width − 1]` — unsigned integers that
+    /// fit in `width` bits.
+    ///
+    /// Full table size = `2^width`; for large `width` the table is
+    /// decomposed into `K` sub-tables of size `2^{width/K}`.
+    Word {
+        /// Total bit-width (e.g. 32).
+        width: usize,
+    },
+}
+
+/// Specifies that a particular trace column should be looked up against
+/// a prescribed table.
+#[derive(Clone, Debug)]
+pub struct LookupColumnSpec {
+    /// Index of the trace column (0-based into the projected field-element
+    /// trace, i.e. after projection to `F`).
+    pub column_index: usize,
+    /// The lookup table type this column should be checked against.
+    pub table_type: LookupTableType,
+}
+
+/// A group of columns that all look up into the same decomposed table.
+///
+/// Produced by [`group_lookup_specs`] and consumed by the pipeline
+/// integration layer.
+#[derive(Clone, Debug)]
+pub struct LookupGroup {
+    /// The shared table type.
+    pub table_type: LookupTableType,
+    /// Indices of all columns in this group.
+    pub column_indices: Vec<usize>,
+}
+
+/// Groups a list of [`LookupColumnSpec`]s by their table type.
+///
+/// Columns with the same `LookupTableType` are batched into a single
+/// [`BatchedDecompLogupProtocol`] instance.
+pub fn group_lookup_specs(specs: &[LookupColumnSpec]) -> Vec<LookupGroup> {
+    use std::collections::BTreeMap;
+
+    // Use a deterministic ordering key so the groups are reproducible.
+    let mut map: BTreeMap<String, (LookupTableType, Vec<usize>)> = BTreeMap::new();
+    for spec in specs {
+        let key = format!("{:?}", spec.table_type);
+        map.entry(key)
+            .or_insert_with(|| (spec.table_type.clone(), Vec::new()))
+            .1
+            .push(spec.column_index);
+    }
+    map.into_values()
+        .map(|(table_type, column_indices)| LookupGroup {
+            table_type,
+            column_indices,
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 

@@ -1,7 +1,7 @@
 [workspace]
-members = ["piop", "poly", "primality", "test-uair", "transcript", "uair", "utils", "zip-plus"]
+members = ["ecdsa-uair", "piop", "poly", "primality", "sha256-uair", "snark", "test-uair", "transcript", "uair", "utils", "zip-plus"]
 resolver = "2"
-default-members = ["piop", "poly", "primality", "transcript", "utils", "zip-plus"]
+default-members = ["piop", "poly", "primality", "snark", "transcript", "utils", "zip-plus"]
 # NOTE: snark, ecdsa-uair, and sha256-uair are not in members until they are
 # updated to the current Uair trait interface.  Their source is preserved.
 

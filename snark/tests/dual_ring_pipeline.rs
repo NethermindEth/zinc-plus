@@ -41,7 +41,7 @@ use zip_plus::{
 };
 
 use zinc_sha256_uair::{
-    Sha256QxIdeal, Sha256QxIdealOverF, Sha256Uair, convert_trace_to_qx,
+    Sha256QxIdeal, Sha256QxIdealOverF, Sha256Uair, Sha256UairQx, convert_trace_to_qx,
     witness::GenerateWitness,
 };
 use zinc_snark::pipeline;
@@ -70,7 +70,7 @@ where
     const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = BinaryPoly<D_PLUS_ONE>;
     type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
-    type Fmod = Uint<{ INT_LIMBS * 4 }>;
+    type Fmod = Uint<{ INT_LIMBS * 3 }>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
     type Pt = i128;
@@ -103,7 +103,7 @@ fn dual_ring_pipeline_round_trip() {
     // ── Prove (dual-ring pipeline) ──────────────────────────────────
     let proof = pipeline::prove_dual_ring::<
         Sha256Uair,            // U1: BinaryPoly<32> constraints (6 F₂[X])
-        Sha256Uair,            // U2: DensePolynomial<i64, 64> constraints (5 Q[X])
+        Sha256UairQx,          // U2: DensePolynomial<i64, 64> constraints (5 Q[X])
         Zt, Lc,
         32,                    // D1
         64,                    // D2
@@ -141,7 +141,7 @@ fn dual_ring_pipeline_round_trip() {
 
     let verify_result = pipeline::verify_dual_ring::<
         Sha256Uair,            // U1
-        Sha256Uair,            // U2
+        Sha256UairQx,          // U2
         Zt, Lc,
         32,                    // D1
         64,                    // D2

@@ -39,7 +39,7 @@ pub use batched_decomposition::BatchedDecompLogupProtocol;
 pub use decomposition::DecompLogupProtocol;
 pub use logup::LogupProtocol;
 pub use pipeline::{
-    LookupConfig, LookupTableKind, PipelineLookupConfig, PipelineLookupProof,
-    PipelineLookupProverState, PipelineLookupVerifierSubClaim,
+    PipelineLookupProof, PipelineLookupProverState, LookupGroupMeta,
+    prove_batched_lookup, prove_batched_lookup_with_indices, verify_batched_lookup,
 };
 pub use structs::*;

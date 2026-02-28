@@ -40,7 +40,7 @@ use zip_plus::{
 };
 
 use zinc_ecdsa_uair::{
-    EcdsaIdealOverF, EcdsaUair, NUM_COLS,
+    EcdsaIdealOverF, EcdsaUairInt, NUM_COLS,
 };
 use zinc_snark::pipeline;
 
@@ -59,7 +59,7 @@ impl ZipTypes for EcdsaScalarZipTypes {
     const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = Int<{ INT_LIMBS * 4 }>;          // 256-bit integer
     type Cw = Int<{ INT_LIMBS * 5 }>;            // 320-bit codeword
-    type Fmod = Uint<{ INT_LIMBS * 8 }>;         // 512-bit modulus search
+    type Fmod = Uint<{ INT_LIMBS * 3 }>;         // 192-bit modulus search
     type PrimeTest = MillerRabin;
     type Chal = i128;
     type Pt = i128;
@@ -71,8 +71,8 @@ impl ZipTypes for EcdsaScalarZipTypes {
 }
 
 type Zt = EcdsaScalarZipTypes;
-/// 512-bit PCS field — matches `Zt::Fmod = Uint<8>` and `Zt::CombR = Int<8>`.
-type PcsF = MontyField<{ U64::LIMBS * 8 }>;
+/// 192-bit PCS field — matches pipeline's MontyField<3>.
+type PcsF = MontyField<{ U64::LIMBS * 3 }>;
 type Lc = IprsCode<Zt, PnttConfigF2_16R4B16<1>, ScalarWideningMulByScalar<Int<{ U64::LIMBS * 5 }>>, UNCHECKED>;
 
 #[test]
@@ -100,7 +100,7 @@ fn ecdsa_pipeline_round_trip() {
 
     // ── Prove (single-ring: 11 Int<4> constraints) ──────────────────
     let proof = pipeline::prove_generic::<
-        EcdsaUair,                              // U: Uair<Int<4>>
+        EcdsaUairInt,                           // U: Uair<Scalar=Int<4>>
         Int<{ INT_LIMBS * 4 }>,                 // R = Int<4>
         Zt,
         Lc,
@@ -110,6 +110,7 @@ fn ecdsa_pipeline_round_trip() {
         &params,
         &trace,
         num_vars,
+        &[],
     );
 
     println!("ECDSA Int<4> pipeline prover completed:");
@@ -127,7 +128,7 @@ fn ecdsa_pipeline_round_trip() {
 
     // ── Verify ──────────────────────────────────────────────────────
     let verify_result = pipeline::verify_generic::<
-        EcdsaUair,                              // U: Uair<Int<4>>
+        EcdsaUairInt,                           // U: Uair<Scalar=Int<4>>
         Int<{ INT_LIMBS * 4 }>,                 // R = Int<4>
         Zt,
         Lc,

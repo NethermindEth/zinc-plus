@@ -8,7 +8,7 @@
 //!    This is the target type for the unified ECDSA pipeline where the
 //!    same `Int<4>` is used for PCS commitments, PIOP, and constraints.
 
-use super::{EcdsaUair, NUM_COLS};
+use super::{EcdsaUairBp, EcdsaUairDp, EcdsaUairInt, NUM_COLS};
 use super::{COL_B1, COL_B2, COL_X, COL_Y, COL_Z};
 use super::{COL_X_MID, COL_Y_MID, COL_Z_MID, COL_H};
 use crypto_primitives::crypto_bigint_int::Int;
@@ -21,16 +21,14 @@ use zinc_poly::{
 use zinc_utils::from_ref::FromRef;
 
 /// Witness generation trait (matches SHA-256 crate's pattern).
-pub trait GenerateWitness<R: crypto_primitives::Semiring + 'static>:
-    zinc_uair::Uair<R>
-{
+pub trait GenerateWitness<R: crypto_primitives::Semiring + 'static> {
     fn generate_witness<Rng: RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
     ) -> Vec<DenseMultilinearExtension<R>>;
 }
 
-impl GenerateWitness<BinaryPoly<32>> for EcdsaUair {
+impl GenerateWitness<BinaryPoly<32>> for EcdsaUairBp {
     /// Generate a random ECDSA trace (for PCS benchmarking).
     fn generate_witness<Rng: RngCore + ?Sized>(
         num_vars: usize,
@@ -43,7 +41,7 @@ impl GenerateWitness<BinaryPoly<32>> for EcdsaUair {
     }
 }
 
-impl GenerateWitness<DensePolynomial<i64, 1>> for EcdsaUair {
+impl GenerateWitness<DensePolynomial<i64, 1>> for EcdsaUairDp {
     /// Generate a valid ECDSA trace (constant-row fixed point, integer arithmetic).
     ///
     /// Uses the Jacobian doubling fixed point **(X, Y, Z) = (1, 1, 0)** with
@@ -101,7 +99,7 @@ impl GenerateWitness<DensePolynomial<i64, 1>> for EcdsaUair {
     }
 }
 
-impl GenerateWitness<Int<4>> for EcdsaUair {
+impl GenerateWitness<Int<4>> for EcdsaUairInt {
     /// Generate a valid ECDSA trace using `Int<4>` (256-bit integers).
     ///
     /// Same fixed-point witness as the `DensePolynomial<i64, 1>` generator:
@@ -162,7 +160,7 @@ mod tests {
     fn witness_has_correct_dimensions() {
         let mut rng = rand::rng();
         let trace =
-            <EcdsaUair as GenerateWitness<BinaryPoly<32>>>::generate_witness(9, &mut rng);
+            <EcdsaUairBp as GenerateWitness<BinaryPoly<32>>>::generate_witness(9, &mut rng);
         assert_eq!(trace.len(), NUM_COLS); // 9 columns
         for col in &trace {
             assert_eq!(col.evaluations.len(), 512); // 2^9 = 512 ≥ 258
@@ -173,7 +171,7 @@ mod tests {
     fn i64_witness_fixed_point() {
         let mut rng = rand::rng();
         let num_vars = 4; // 16 rows
-        let trace = <EcdsaUair as GenerateWitness<DensePolynomial<i64, 1>>>::generate_witness(
+        let trace = <EcdsaUairDp as GenerateWitness<DensePolynomial<i64, 1>>>::generate_witness(
             num_vars, &mut rng,
         );
         assert_eq!(trace.len(), NUM_COLS);
@@ -196,7 +194,7 @@ mod tests {
     fn int4_witness_fixed_point() {
         let mut rng = rand::rng();
         let num_vars = 4; // 16 rows
-        let trace = <EcdsaUair as GenerateWitness<Int<4>>>::generate_witness(
+        let trace = <EcdsaUairInt as GenerateWitness<Int<4>>>::generate_witness(
             num_vars, &mut rng,
         );
         assert_eq!(trace.len(), NUM_COLS);

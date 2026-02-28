@@ -1,8 +1,12 @@
-//! Witness generation for the SHA-256 UAIR.
+//! Witness generation for the SHA-256 UAIR⁺.
 //!
-//! Implements [`GenerateWitness<BinaryPoly<32>>`] for [`Sha256Uair`] by
+//! Implements [`GenerateWitness<BinaryPoly<32>>`] for [`Sha256UairBp`] by
 //! running the full SHA-256 compression function on a single-block padded
-//! empty message, recording all 19 column values at each of the 64 rounds.
+//! empty message, recording all 17 column values at each of the 65 rows.
+//!
+//! Following the paper, registers d and h are **not** stored as columns
+//! (they are inlined via shift-register identities d_t = a_{t−3},
+//! h_t = e_{t−3}), and K_t is a public input, not a trace column.
 
 use rand::RngCore;
 use crypto_primitives::crypto_bigint_int::Int;
@@ -13,52 +17,64 @@ use zinc_poly::{
 use zinc_utils::from_ref::FromRef;
 
 use crate::{
-    Sha256Uair,
+    Sha256Uair, Sha256UairBp,
     constants::{H, K},
     NUM_COLS,
 };
 
+// ─── BinaryPoly helper ─────────────────────────────────────────────────────
+
+/// Convert a `BinaryPoly<32>` to its `u64` value (polynomial evaluated at X=2).
+///
+/// Equivalent to interpreting the binary coefficients as bits of an integer.
+fn bp_to_u64(bp: &BinaryPoly<32>) -> u64 {
+    let mut val: u64 = 0;
+    for (i, coeff) in bp.iter().enumerate() {
+        if coeff.into_inner() {
+            val |= 1u64 << i;
+        }
+    }
+    val
+}
+
 // ─── Column classification for split PCS batches ────────────────────────────
 
-/// Column indices that participate in F₂[X] rotation/shift constraints (C1–C6)
-/// and must be committed as `BinaryPoly<32>`.
-pub const POLY_COLUMN_INDICES: [usize; 11] = [0, 1, 2, 3, 4, 8, 9, 15, 16, 17, 18];
+/// Bit-polynomial column indices (0–13): the 10 Q[X] bit-poly columns
+/// plus the 4 F₂[X] columns (S₀, S₁, R₀, R₁).
+pub const POLY_COLUMN_INDICES: [usize; 14] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
 
-/// Column indices that only participate in Q[X] carry/BitPoly constraints (C7–C11)
-/// and can be committed as `Int<1>` (64-bit integer).
-pub const INT_COLUMN_INDICES: [usize; 9] = [5, 6, 7, 10, 11, 12, 13, 14, 19];
+/// Integer column indices (14–16): the 3 carry columns μ_a, μ_e, μ_W.
+pub const INT_COLUMN_INDICES: [usize; 3] = [14, 15, 16];
 
 // ─── GenerateWitness impl ───────────────────────────────────────────────────
 
-/// Marker trait bridging `Uair` + witness generation.
-///
-/// Re-exported from the `test-uair` crate convention so that downstream
-/// code can use a consistent interface. We define a local copy to avoid
-/// a hard dependency on `zinc-test-uair`.
-pub trait GenerateWitness<R: crypto_primitives::Semiring + 'static>:
-    zinc_uair::Uair<R>
-{
+/// Witness generation trait for a specific ring type.
+pub trait GenerateWitness<R: crypto_primitives::Semiring + 'static> {
     fn generate_witness<Rng: RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
     ) -> Vec<DenseMultilinearExtension<R>>;
 }
 
-impl GenerateWitness<BinaryPoly<32>> for Sha256Uair {
+impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
     /// Generate the SHA-256 witness trace.
     ///
-    /// The trace has 64 rows (one per round, `num_vars = 6`). If
-    /// `num_vars > 6` the extra rows are zero-padded.
+    /// The trace has 65 rows (rows 0–63 for rounds, row 64 for final state,
+    /// `num_vars = 7`). If `num_vars > 7` the extra rows are zero-padded.
     ///
     /// The message hashed is the empty string (single 512-bit padded block).
     /// The `rng` parameter is accepted for trait compatibility but unused.
+    ///
+    /// Following the paper, registers d and h are not stored (they are
+    /// inlined via d_t = a_{t−3}, h_t = e_{t−3}), and K_t is a public
+    /// input, not a trace column.
     fn generate_witness<Rng: RngCore + ?Sized>(
         num_vars: usize,
         _rng: &mut Rng,
     ) -> Vec<DenseMultilinearExtension<BinaryPoly<32>>> {
         assert!(
-            num_vars >= 6,
-            "SHA-256 requires at least 6 variables (64 rows), got {num_vars}"
+            num_vars >= 7,
+            "SHA-256 requires at least 7 variables (128 rows ≥ 65), got {num_vars}"
         );
 
         let num_rows: usize = 1 << num_vars;
@@ -94,7 +110,7 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256Uair {
             (0..NUM_COLS).map(|_| vec![BinaryPoly::<32>::from(0u32); num_rows]).collect();
 
         for t in 0..64 {
-            // ── Record current state into columns ───────────────────────
+            // ── Bit-polynomial columns (0–9) ────────────────────────────
             cols[0][t] = BinaryPoly::from(a);                     // a_hat
             cols[1][t] = BinaryPoly::from(e);                     // e_hat
             cols[2][t] = BinaryPoly::from(w[t]);                  // W_hat
@@ -111,20 +127,27 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256Uair {
             }
             // else: already zero from initialization
 
-            cols[10][t] = BinaryPoly::from(d);                    // d_hat
-            cols[11][t] = BinaryPoly::from(h);                    // h_hat
+            // ── F₂[X] columns (10–13): shift quotient/remainder ────────
+            if t >= 16 {
+                // S0: shift quotient = SHR³(W_{t-15}) = W_{t-15} >> 3
+                cols[10][t] = BinaryPoly::from(w[t - 15] >> 3);
+                // S1: shift quotient = SHR¹⁰(W_{t-2}) = W_{t-2} >> 10
+                cols[11][t] = BinaryPoly::from(w[t - 2] >> 10);
 
-            // ── Carry polynomials ───────────────────────────────────────
-            // Computed from the full (non-wrapping) sums of the SHA-256
-            // round function. The carry μ is the integer overflow when
-            // adding 32-bit values: μ = floor(sum / 2³²).
-            //
-            // a-update: a[t+1] = h + Σ₁(e) + Ch(e,f,g) + K_t + W + Σ₀(a) + Maj(a,b,c)
+                // R0 = W_{t-15} mod X³  (bottom 3 bits)
+                cols[12][t] = BinaryPoly::from(w[t - 15] & 0x7);
+                // R1 = W_{t-2} mod X¹⁰  (bottom 10 bits)
+                cols[13][t] = BinaryPoly::from(w[t - 2] & 0x3FF);
+            }
+
+            // ── Integer columns (14–16): carry values ───────────────────
             let sigma1_val = big_sigma1(e);
             let ch_val = ch(e, f, g);
             let sigma0_val = big_sigma0(a);
             let maj_val = maj(a, b, c);
 
+            // μ_a: carry for a-update
+            // a[t+1] = h + Σ₁(e) + Ch(e,f,g) + K_t + W + Σ₀(a) + Maj(a,b,c)
             let sum_a: u64 = h as u64
                 + sigma1_val as u64
                 + ch_val as u64
@@ -133,9 +156,10 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256Uair {
                 + sigma0_val as u64
                 + maj_val as u64;
             let mu_a_val = (sum_a >> 32) as u32;
-            cols[12][t] = BinaryPoly::from(mu_a_val);             // mu_a
+            cols[14][t] = BinaryPoly::from(mu_a_val);             // mu_a
 
-            // e-update: e[t+1] = d + h + Σ₁(e) + Ch(e,f,g) + K_t + W
+            // μ_e: carry for e-update
+            // e[t+1] = d + h + Σ₁(e) + Ch(e,f,g) + K_t + W
             let sum_e: u64 = d as u64
                 + h as u64
                 + sigma1_val as u64
@@ -143,26 +167,17 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256Uair {
                 + K[t] as u64
                 + w[t] as u64;
             let mu_e_val = (sum_e >> 32) as u32;
-            cols[13][t] = BinaryPoly::from(mu_e_val);             // mu_e
+            cols[15][t] = BinaryPoly::from(mu_e_val);             // mu_e
 
-            // μ_W for message schedule (requires multi-row lookback, deferred)
-            // cols[14] already zero
-
-            // Shift quotient / remainder for σ₀ and σ₁.
+            // μ_W: carry for message schedule recurrence (t ≥ 16)
             if t >= 16 {
-                // S0: shift quotient = SHR³(W_{t-15}) = W_{t-15} >> 3
-                cols[15][t] = BinaryPoly::from(w[t - 15] >> 3);
-                // S1: shift quotient = SHR¹⁰(W_{t-2}) = W_{t-2} >> 10
-                cols[16][t] = BinaryPoly::from(w[t - 2] >> 10);
-
-                // R0 = W_{t-15} mod X³  (bottom 3 bits)
-                cols[17][t] = BinaryPoly::from(w[t - 15] & 0x7);
-                // R1 = W_{t-2} mod X¹⁰  (bottom 10 bits)
-                cols[18][t] = BinaryPoly::from(w[t - 2] & 0x3FF);
+                let sum_w: u64 = w[t - 16] as u64
+                    + small_sigma0(w[t - 15]) as u64
+                    + w[t - 7] as u64
+                    + small_sigma1(w[t - 2]) as u64;
+                let mu_w_val = (sum_w >> 32) as u32;
+                cols[16][t] = BinaryPoly::from(mu_w_val);         // mu_W
             }
-
-            // K_t: round constant
-            cols[19][t] = BinaryPoly::from(K[t]);                 // K_t
 
             // ── SHA-256 round function ──────────────────────────────────
             let t1 = h
@@ -182,24 +197,14 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256Uair {
             a = t1.wrapping_add(t2);
         }
 
-        // ── Boundary row: final state at row 64 for down-references ─────
+        // ── Row 64: final state ─────────────────────────────────────────
         //
-        // The carry propagation constraints (C10, C11) use down[COL_A_HAT]
-        // and down[COL_E_HAT] to refer to the round t+1 state. At row 63
-        // (the last SHA-256 round), down references row 64 which would
-        // otherwise be zero-padding. We fill in the final a and e values
-        // so that the carry constraints remain satisfied at the boundary.
-        //
-        // Row 64 must hold the "next a" and "next e" so that the carry
-        // constraints C10/C11 at row 63 (which reference down[COL_A_HAT]
-        // and down[COL_E_HAT]) are satisfied.  We must NOT set COL_D_HAT
-        // or COL_H_HAT here: those appear as up[...] in C10/C11 at row 64,
-        // and non-zero values there would make the carry expression non-zero
-        // (since down[...] at row 65 is zero and carry/K_t/W are zero).
-        if num_rows > 64 {
-            cols[0][64] = BinaryPoly::from(a);   // a after all 64 rounds
-            cols[1][64] = BinaryPoly::from(e);   // e after all 64 rounds
-        }
+        // Row 64 (= row index for the 65th entry) holds the final-state
+        // values â[65] and ê[65] so that the carry constraints C10/C11
+        // at row 63 (which reference down[COL_A_HAT] and down[COL_E_HAT])
+        // are satisfied.
+        cols[0][64] = BinaryPoly::from(a);   // a after all 64 rounds
+        cols[1][64] = BinaryPoly::from(e);   // e after all 64 rounds
 
         // ── Convert column vectors into DenseMultilinearExtensions ──────
         cols.into_iter()
@@ -216,11 +221,9 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256Uair {
 
 // ─── Split witness generators ───────────────────────────────────────────────
 
-/// Generate only the 11 BinaryPoly columns (indices 0–4, 8–9, 15–18) used in
-/// F₂[X] rotation/shift constraints (C1–C6).
-///
-/// The PIOP still operates on the full 20-column trace; this function produces
-/// the subset for a smaller PCS batch.
+/// Generate only the 14 BinaryPoly columns (indices 0–13) used in
+/// both F₂[X] and Q[X] constraints. These include the 10 bit-polynomial
+/// columns and the 4 F₂[X] shift/remainder columns.
 pub fn generate_poly_witness(
     num_vars: usize,
     rng: &mut impl RngCore,
@@ -232,12 +235,12 @@ pub fn generate_poly_witness(
         .collect()
 }
 
-/// Generate the 9 integer columns (indices 5–7, 10–14, 19) used only in Q[X]
-/// carry/BitPoly constraints (C7–C11), encoded as `Int<1>` (64-bit integer).
+/// Generate the 3 integer columns (indices 14–16: μ_a, μ_e, μ_W) used in
+/// Q[X] carry constraints (C10–C12), encoded as `Int<1>` (64-bit integer).
 ///
 /// Each cell value is `BinaryPoly::to_u64() as i64` wrapped in `Int<1>`.
-/// These values are 32-bit unsigned integers (≤ 2³²−1), so they always fit
-/// within a single 64-bit limb.
+/// These carry values are small integers (≤ 6), so they always fit within
+/// a single 64-bit limb.
 pub fn generate_int_witness(
     num_vars: usize,
     rng: &mut impl RngCore,
@@ -250,7 +253,7 @@ pub fn generate_int_witness(
             let evals: Vec<Int<1>> = full[i]
                 .evaluations
                 .iter()
-                .map(|bp| Int::<1>::from_ref(&(bp.to_u64() as i64)))
+                .map(|bp| Int::<1>::from_ref(&(bp_to_u64(bp) as i64)))
                 .collect();
             DenseMultilinearExtension::from_evaluations_vec(
                 num_vars,
@@ -311,47 +314,40 @@ fn maj(a: u32, b: u32, c: u32) -> u32 {
 mod tests {
     use super::*;
 
-    /// Verify that the witness generation produces the correct SHA-256
-    /// hash of the empty string: `e3b0c442…7852b855`.
+    /// num_vars = 7 → 128 rows ≥ 65 needed.
+    const NUM_VARS: usize = 7;
+
+    /// Verify that the witness generation produces a valid trace.
     #[test]
     fn witness_produces_correct_sha256_of_empty_string() {
         let mut rng = rand::rng();
-        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(6, &mut rng);
+        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(NUM_VARS, &mut rng);
 
-        // Verify dimensions: 20 columns, 64 rows each.
+        // Verify dimensions: 17 columns, 128 rows each.
         assert_eq!(trace.len(), NUM_COLS);
         for col in &trace {
-            assert_eq!(col.evaluations.len(), 64);
+            assert_eq!(col.evaluations.len(), 1 << NUM_VARS);
         }
 
-        // After 64 rounds the final a value should equal
-        // H[0] + a_final = 0x6a09e667 + a_64 mod 2^32.
-        // For the empty string: H_final[0] = 0xe3b0c442.
-        //
-        // We can verify the intermediate state at round 0 matches the
-        // initial hash values.
-        let a0 = trace[0].evaluations[0].to_u64() as u32;
-        let e0 = trace[1].evaluations[0].to_u64() as u32;
-        let d0 = trace[10].evaluations[0].to_u64() as u32;
-        let h0 = trace[11].evaluations[0].to_u64() as u32;
+        // Verify initial state at round 0.
+        let a0 = bp_to_u64(&trace[0].evaluations[0]) as u32;
+        let e0 = bp_to_u64(&trace[1].evaluations[0]) as u32;
 
         assert_eq!(a0, 0x6a09e667, "a at round 0 should be H[0]");
         assert_eq!(e0, 0x510e527f, "e at round 0 should be H[4]");
-        assert_eq!(d0, 0xa54ff53a, "d at round 0 should be H[3]");
-        assert_eq!(h0, 0x5be0cd19, "h at round 0 should be H[7]");
     }
 
     /// Verify that Σ₀ and Σ₁ columns are consistent with a and e.
     #[test]
     fn sigma_columns_are_consistent() {
         let mut rng = rand::rng();
-        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(6, &mut rng);
+        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(NUM_VARS, &mut rng);
 
         for t in 0..64 {
-            let a_val = trace[0].evaluations[t].to_u64() as u32;
-            let e_val = trace[1].evaluations[t].to_u64() as u32;
-            let sigma0_val = trace[3].evaluations[t].to_u64() as u32;
-            let sigma1_val = trace[4].evaluations[t].to_u64() as u32;
+            let a_val = bp_to_u64(&trace[0].evaluations[t]) as u32;
+            let e_val = bp_to_u64(&trace[1].evaluations[t]) as u32;
+            let sigma0_val = bp_to_u64(&trace[3].evaluations[t]) as u32;
+            let sigma1_val = bp_to_u64(&trace[4].evaluations[t]) as u32;
 
             assert_eq!(
                 sigma0_val,
@@ -370,13 +366,13 @@ mod tests {
     #[test]
     fn ch_columns_are_consistent() {
         let mut rng = rand::rng();
-        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(6, &mut rng);
+        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(NUM_VARS, &mut rng);
 
         // We can only check ch_ef and ch_neg_eg values at round 0 since
         // we know f = H[5] and g = H[6] at that point.
-        let e0 = trace[1].evaluations[0].to_u64() as u32;
-        let ch_ef0 = trace[6].evaluations[0].to_u64() as u32;
-        let ch_neg_eg0 = trace[7].evaluations[0].to_u64() as u32;
+        let e0 = bp_to_u64(&trace[1].evaluations[0]) as u32;
+        let ch_ef0 = bp_to_u64(&trace[6].evaluations[0]) as u32;
+        let ch_neg_eg0 = bp_to_u64(&trace[7].evaluations[0]) as u32;
 
         let f_init = crate::constants::H[5];
         let g_init = crate::constants::H[6];
@@ -394,13 +390,13 @@ mod tests {
     #[test]
     fn message_schedule_is_correct() {
         let mut rng = rand::rng();
-        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(6, &mut rng);
+        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(NUM_VARS, &mut rng);
 
-        let w0 = trace[2].evaluations[0].to_u64() as u32;
+        let w0 = bp_to_u64(&trace[2].evaluations[0]) as u32;
         assert_eq!(w0, 0x8000_0000, "W[0] should be 0x80000000 for empty msg");
 
         for t in 1..16 {
-            let wt = trace[2].evaluations[t].to_u64() as u32;
+            let wt = bp_to_u64(&trace[2].evaluations[t]) as u32;
             assert_eq!(wt, 0, "W[{t}] should be 0 for empty msg");
         }
     }
@@ -409,31 +405,25 @@ mod tests {
     #[test]
     fn shift_decomposition_is_correct() {
         let mut rng = rand::rng();
-        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(6, &mut rng);
+        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(NUM_VARS, &mut rng);
 
         for t in 16..64 {
-            let _w_t_minus_15 = trace[2].evaluations[t].to_u64() as u32; // W_hat uses current W column
-            // But constraints 5/6 reference W[t-15] and W[t-2], not current row's W.
-            // In the current "same-row" layout the W column stores W_t.
-            // The σ₀ operates on W_{t-15}, and the σ₁ on W_{t-2}.
-            // Let's verify the actual trace column values are consistent.
+            // S0 = SHR³(W_{t-15})   — column 10
+            let s0 = bp_to_u64(&trace[10].evaluations[t]) as u32;
+            // R0 = W_{t-15} mod X³  — column 12
+            let r0 = bp_to_u64(&trace[12].evaluations[t]) as u32;
 
-            // S0 = SHR³(W_{t-15})
-            let s0 = trace[15].evaluations[t].to_u64() as u32;
-            // R0 = W_{t-15} mod X³ (bottom 3 bits)
-            let r0 = trace[17].evaluations[t].to_u64() as u32;
-
-            // w[t-15] — we get this from the W column at row t-15
-            let w_tm15 = trace[2].evaluations[t - 15].to_u64() as u32;
+            // w[t-15] from W column at row t-15
+            let w_tm15 = bp_to_u64(&trace[2].evaluations[t - 15]) as u32;
             assert_eq!(s0, w_tm15 >> 3, "S0 = SHR³(W[t-15]) at round {t}");
             assert_eq!(r0, w_tm15 & 0x7, "R0 = W[t-15] mod X³ at round {t}");
             assert_eq!(w_tm15, r0 | (s0 << 3), "W[t-15] = R0 + X³·S0 at round {t}");
 
-            // S1 = SHR¹⁰(W_{t-2})
-            let s1 = trace[16].evaluations[t].to_u64() as u32;
-            // R1 = W_{t-2} mod X¹⁰ (bottom 10 bits)
-            let r1 = trace[18].evaluations[t].to_u64() as u32;
-            let w_tm2 = trace[2].evaluations[t - 2].to_u64() as u32;
+            // S1 = SHR¹⁰(W_{t-2})  — column 11
+            let s1 = bp_to_u64(&trace[11].evaluations[t]) as u32;
+            // R1 = W_{t-2} mod X¹⁰ — column 13
+            let r1 = bp_to_u64(&trace[13].evaluations[t]) as u32;
+            let w_tm2 = bp_to_u64(&trace[2].evaluations[t - 2]) as u32;
             assert_eq!(s1, w_tm2 >> 10, "S1 = SHR¹⁰(W[t-2]) at round {t}");
             assert_eq!(r1, w_tm2 & 0x3FF, "R1 = W[t-2] mod X¹⁰ at round {t}");
             assert_eq!(w_tm2, r1 | (s1 << 10), "W[t-2] = R1 + X¹⁰·S1 at round {t}");
@@ -444,13 +434,13 @@ mod tests {
     #[test]
     fn small_sigma_columns_are_consistent() {
         let mut rng = rand::rng();
-        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(6, &mut rng);
+        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(NUM_VARS, &mut rng);
 
         for t in 16..64 {
-            let w_tm15 = trace[2].evaluations[t - 15].to_u64() as u32;
-            let w_tm2 = trace[2].evaluations[t - 2].to_u64() as u32;
-            let sigma0_w = trace[8].evaluations[t].to_u64() as u32;
-            let sigma1_w = trace[9].evaluations[t].to_u64() as u32;
+            let w_tm15 = bp_to_u64(&trace[2].evaluations[t - 15]) as u32;
+            let w_tm2 = bp_to_u64(&trace[2].evaluations[t - 2]) as u32;
+            let sigma0_w = bp_to_u64(&trace[8].evaluations[t]) as u32;
+            let sigma1_w = bp_to_u64(&trace[9].evaluations[t]) as u32;
 
             assert_eq!(sigma0_w, small_sigma0(w_tm15), "σ₀(W[t-15]) mismatch at round {t}");
             assert_eq!(sigma1_w, small_sigma1(w_tm2), "σ₁(W[t-2]) mismatch at round {t}");
@@ -464,24 +454,46 @@ mod tests {
     ///   carry:    μ_a = floor(sum_a / 2³²)
     ///   check:    a[t+1] - sum_a + μ_a · 2³² = 0
     ///
-    /// Similarly for the e-update.
+    /// Similarly for the e-update. h_t and d_t are recovered from the
+    /// trace via shift-register identities: h_t = e_{t−3}, d_t = a_{t−3}.
     #[test]
     fn carry_polynomials_are_consistent() {
         let mut rng = rand::rng();
-        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(6, &mut rng);
+        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(NUM_VARS, &mut rng);
 
-        for t in 0..63 {
-            let h_val = trace[11].evaluations[t].to_u64();
-            let sigma1_val = trace[4].evaluations[t].to_u64();
-            let ch_ef_val = trace[6].evaluations[t].to_u64();
-            let ch_neg_eg_val = trace[7].evaluations[t].to_u64();
-            let k_val = trace[19].evaluations[t].to_u64();
-            let w_val = trace[2].evaluations[t].to_u64();
-            let sigma0_val = trace[3].evaluations[t].to_u64();
-            let maj_val = trace[5].evaluations[t].to_u64();
-            let mu_a_val = trace[12].evaluations[t].to_u64();
+        // For t ≥ 3, h_t = e_{t-3} and d_t = a_{t-3}.
+        // For t = 0, 1, 2 we use the initial H values.
+        let h_vals: Vec<u64> = (0..64).map(|t| {
+            if t >= 3 {
+                bp_to_u64(&trace[1].evaluations[t - 3])
+            } else {
+                // h_1=H[7], h_2=g_1=H[6], h_3=f_1=H[5]
+                [H[7] as u64, H[6] as u64, H[5] as u64][t]
+            }
+        }).collect();
 
-            let a_next = trace[0].evaluations[t + 1].to_u64();
+        let d_vals: Vec<u64> = (0..64).map(|t| {
+            if t >= 3 {
+                bp_to_u64(&trace[0].evaluations[t - 3])
+            } else {
+                // d_1=H[3], d_2=c_1=H[2], d_3=b_1=H[1]
+                [H[3] as u64, H[2] as u64, H[1] as u64][t]
+            }
+        }).collect();
+
+        for t in 0..64 {
+            let h_val = h_vals[t];
+            let d_val = d_vals[t];
+            let sigma1_val = bp_to_u64(&trace[4].evaluations[t]);
+            let ch_ef_val = bp_to_u64(&trace[6].evaluations[t]);
+            let ch_neg_eg_val = bp_to_u64(&trace[7].evaluations[t]);
+            let k_val = K[t] as u64;
+            let w_val = bp_to_u64(&trace[2].evaluations[t]);
+            let sigma0_val = bp_to_u64(&trace[3].evaluations[t]);
+            let maj_val = bp_to_u64(&trace[5].evaluations[t]);
+            let mu_a_val = bp_to_u64(&trace[14].evaluations[t]);  // col 14
+
+            let a_next = bp_to_u64(&trace[0].evaluations[t + 1]);
 
             let sum_a = h_val + sigma1_val + ch_ef_val + ch_neg_eg_val
                 + k_val + w_val + sigma0_val + maj_val;
@@ -494,9 +506,8 @@ mod tests {
             );
 
             // e-update carry
-            let d_val = trace[10].evaluations[t].to_u64();
-            let mu_e_val = trace[13].evaluations[t].to_u64();
-            let e_next = trace[1].evaluations[t + 1].to_u64();
+            let mu_e_val = bp_to_u64(&trace[15].evaluations[t]);  // col 15
+            let e_next = bp_to_u64(&trace[1].evaluations[t + 1]);
 
             let sum_e = d_val + h_val + sigma1_val + ch_ef_val
                 + ch_neg_eg_val + k_val + w_val;
@@ -510,15 +521,28 @@ mod tests {
         }
     }
 
-    /// Verify K_t column matches the SHA-256 round constants.
+    /// Verify μ_W carry for message schedule recurrence (t ≥ 16).
     #[test]
-    fn kt_column_is_correct() {
+    fn message_schedule_carry_is_consistent() {
         let mut rng = rand::rng();
-        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(6, &mut rng);
+        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(NUM_VARS, &mut rng);
 
-        for t in 0..64 {
-            let kt = trace[19].evaluations[t].to_u64() as u32;
-            assert_eq!(kt, K[t], "K_t mismatch at round {t}");
+        for t in 16..64 {
+            let w_t = bp_to_u64(&trace[2].evaluations[t]);
+            let w_tm16 = bp_to_u64(&trace[2].evaluations[t - 16]);
+            let sigma0_w = bp_to_u64(&trace[8].evaluations[t]);
+            let w_tm7 = bp_to_u64(&trace[2].evaluations[t - 7]);
+            let sigma1_w = bp_to_u64(&trace[9].evaluations[t]);
+            let mu_w_val = bp_to_u64(&trace[16].evaluations[t]);  // col 16
+
+            let sum_w = w_tm16 + sigma0_w + w_tm7 + sigma1_w;
+
+            assert_eq!(
+                w_t as i64 - sum_w as i64 + (mu_w_val as i64) * (1i64 << 32),
+                0,
+                "W-schedule carry check failed at round {t}: \
+                 w_t={w_t:#x}, sum_w={sum_w:#x}, mu_w={mu_w_val}"
+            );
         }
     }
 }

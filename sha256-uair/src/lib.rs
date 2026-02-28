@@ -1,42 +1,76 @@
-//! SHA-256 UAIR (Universal Algebraic Intermediate Representation).
+//! SHA-256 UAIR⁺ (Universal Algebraic Intermediate Representation).
 //!
-//! This crate defines the SHA-256 arithmetization as a `Uair<BinaryPoly<32>>`
-//! with 19 trace columns and constraints expressed over F_2\[X\]/(X^32 - 1).
+//! This crate defines the SHA-256 arithmetization as a UAIR⁺ with two trace
+//! components following the paper's specification:
+//!
+//! - **Q\[X\]-trace** (13 columns): 10 bit-polynomial columns in
+//!   {0,1}^{<32}\[X\] and 3 integer columns in Z.
+//! - **F₂\[X\]-trace** (4 columns): shift quotients and remainders. Since
+//!   the framework does not yet support a native F₂\[X\] column type, these
+//!   are represented as {0,1}^{<32}\[X\] (BinaryPoly<32>).
+//!
+//! Total: 17 witness columns.
 //!
 //! # Column layout
 //!
+//! ## Bit-polynomial columns — {0,1}^{<32}\[X\] (indices 0–9)
+//!
 //! | Index | Name             | Description                                     |
 //! |-------|------------------|-------------------------------------------------|
-//! | 0     | `a_hat`          | Working variable a as BinaryPoly<32>            |
-//! | 1     | `e_hat`          | Working variable e as BinaryPoly<32>            |
-//! | 2     | `W_hat`          | Message schedule word W_t as BinaryPoly<32>     |
+//! | 0     | `a_hat`          | Working variable a (bit-poly representative)    |
+//! | 1     | `e_hat`          | Working variable e (bit-poly representative)    |
+//! | 2     | `W_hat`          | Message schedule word W_t                       |
 //! | 3     | `Sigma0_hat`     | Σ₀(a) = ROTR²(a) ⊕ ROTR¹³(a) ⊕ ROTR²²(a)     |
 //! | 4     | `Sigma1_hat`     | Σ₁(e) = ROTR⁶(e) ⊕ ROTR¹¹(e) ⊕ ROTR²⁵(e)     |
 //! | 5     | `Maj_hat`        | Maj(a,b,c) = (a∧b) ⊕ (a∧c) ⊕ (b∧c)           |
 //! | 6     | `ch_ef_hat`      | e ∧ f (part of Ch decomposition)                |
 //! | 7     | `ch_neg_eg_hat`  | (¬e) ∧ g (part of Ch decomposition)             |
-//! | 8     | `sigma0_w_hat`   | σ₀(W_{t-15}) for message schedule               |
-//! | 9     | `sigma1_w_hat`   | σ₁(W_{t-2}) for message schedule                |
-//! | 10    | `d_hat`          | Working variable d as BinaryPoly<32>            |
-//! | 11    | `h_hat`          | Working variable h as BinaryPoly<32>            |
-//! | 12    | `mu_a`           | Carry polynomial for a update                   |
-//! | 13    | `mu_e`           | Carry polynomial for e update                   |
-//! | 14    | `mu_W`           | Carry polynomial for W_t update                 |
-//! | 15    | `S0`             | Shift quotient for σ₀                           |
-//! | 16    | `S1`             | Shift quotient for σ₁                           |
-//! | 17    | `R0`             | Shift remainder for σ₀ (= W_{t-15} mod X³)     |
-//! | 18    | `R1`             | Shift remainder for σ₁ (= W_{t-2} mod X¹⁰)     |
-//! | 19    | `K_t`            | SHA-256 round constant K_t                       |
+//! | 8     | `sigma0_w_hat`   | σ₀(W_{t−15}) for message schedule               |
+//! | 9     | `sigma1_w_hat`   | σ₁(W_{t−2}) for message schedule                |
+//!
+//! ## F₂\[X\] columns — kept as {0,1}^{<32}\[X\] (indices 10–13)
+//!
+//! | Index | Name             | Description                                     |
+//! |-------|------------------|-------------------------------------------------|
+//! | 10    | `S0`             | Shift quotient for σ₀ (deg < 29)                |
+//! | 11    | `S1`             | Shift quotient for σ₁ (deg < 22)                |
+//! | 12    | `R0`             | Shift remainder for σ₀ (deg < 3)                |
+//! | 13    | `R1`             | Shift remainder for σ₁ (deg < 10)               |
+//!
+//! ## Integer columns — Z (indices 14–16)
+//!
+//! | Index | Name             | Description                                     |
+//! |-------|------------------|-------------------------------------------------|
+//! | 14    | `mu_a`           | Carry for a-update (∈ {0,…,6})                  |
+//! | 15    | `mu_e`           | Carry for e-update (∈ {0,…,5})                  |
+//! | 16    | `mu_W`           | Carry for W schedule (∈ {0,…,3})                |
+//!
+//! Registers d and h are **not** stored as columns; by the shift-register
+//! identities d_t = a_{t−3} and h_t = e_{t−3} (for t ≥ 4), they are
+//! inlined directly into the update constraints. The round constant K_t
+//! is a public-input column, not part of the witness trace.
 //!
 //! # Constraints
 //!
-//! The UAIR currently enforces two rotation constraints using the cyclotomic
-//! ideal (X^32 - 1):
+//! ## F₂\[X\] constraints (rotation & shift)
 //!
-//! 1. **Σ₀ rotation**: `a_hat · ρ₀ − Sigma0_hat ∈ (X³² − 1)` where
+//! 1. **Σ₀ rotation**: `â · ρ₀ − Σ̂₀ ∈ (X³² − 1)` where
 //!    ρ₀ = X³⁰ + X¹⁹ + X¹⁰ encodes ROTR(2,13,22).
-//! 2. **Σ₁ rotation**: `e_hat · ρ₁ − Sigma1_hat ∈ (X³² − 1)` where
+//! 2. **Σ₁ rotation**: `ê · ρ₁ − Σ̂₁ ∈ (X³² − 1)` where
 //!    ρ₁ = X²⁶ + X²¹ + X⁷ encodes ROTR(6,11,25).
+//! 3. **σ₀ rotation+shift**: `Ŵ[t−15]·ρ_{σ₀} + S₀ − σ̂₀ ∈ (X³² − 1)`
+//! 4. **σ₁ rotation+shift**: `Ŵ[t−2]·ρ_{σ₁} + S₁ − σ̂₁ ∈ (X³² − 1)`
+//! 5. **σ₀ shift decomp**: `Ŵ[t−15] = R₀ + X³·S₀`
+//! 6. **σ₁ shift decomp**: `Ŵ[t−2] = R₁ + X¹⁰·S₁`
+//!
+//! ## Q\[X\] constraints (BitPoly lookups & carry propagation)
+//!
+//! 7. **Ch (e∧f)**: `ê[t] + ê[t−1] − 2·t̂_ef[t] ∈ BitPoly_w`
+//! 8. **¬e∧g**: `(1_w − ê[t]) + ê[t−2] − 2·t̂_{¬e,g}[t] ∈ BitPoly_w`
+//! 9. **Maj**: `â[t] + â[t−1] + â[t−2] − 2·M̂aj[t] ∈ BitPoly_w`
+//! 10. **a-update**: `â[t+1] − ê[t−3] − Σ̂₁ − Ĉh − K_t − Ŵ − Σ̂₀ − M̂aj + μ_a·X^w ∈ (X−2)`
+//! 11. **e-update**: `ê[t+1] − â[t−3] − ê[t−3] − Σ̂₁ − Ĉh − K_t − Ŵ + μ_e·X^w ∈ (X−2)`
+//! 12. **W schedule**: `Ŵ[t] − Ŵ[t−16] − σ̂₀ − Ŵ[t−7] − σ̂₁ + μ_W·X^w ∈ (X−2)`
 
 #![allow(clippy::arithmetic_side_effects)] // UAIRs should not care about overflows
 
@@ -78,7 +112,12 @@ pub fn convert_trace_to_qx(
                 .evaluations
                 .iter()
                 .map(|bp| {
-                    let val = bp.to_u64();
+                    let mut val: u64 = 0;
+                    for (i, coeff) in bp.iter().enumerate() {
+                        if coeff.into_inner() {
+                            val |= 1u64 << i;
+                        }
+                    }
                     let mut coeffs = [0i64; 64];
                     for i in 0..32 {
                         coeffs[i] = ((val >> i) & 1) as i64;
@@ -97,14 +136,24 @@ pub fn convert_trace_to_qx(
 
 // ─── Column indices ──────────────────────────────────────────────────────────
 
-/// Total number of trace columns.
-pub const NUM_COLS: usize = 20;
+/// Total number of trace columns (14 bit-poly + 3 integer).
+pub const NUM_COLS: usize = 17;
 
-/// Working variable *a* (BinaryPoly representation).
+/// Number of bit-polynomial columns ({0,1}^{<32}[X]).
+/// This includes the 10 Q[X] bit-poly columns and the 4 F₂[X] columns
+/// (represented as {0,1}^{<32}[X] since there is no native F₂[X] type).
+pub const NUM_BITPOLY_COLS: usize = 14;
+
+/// Number of integer columns (Z).
+pub const NUM_INT_COLS: usize = 3;
+
+// ── Bit-polynomial columns (indices 0–9) ────────────────────────────────────
+
+/// Working variable *a* (bit-poly representative â_t).
 pub const COL_A_HAT: usize = 0;
-/// Working variable *e*.
+/// Working variable *e* (bit-poly representative ê_t).
 pub const COL_E_HAT: usize = 1;
-/// Message schedule word W_t.
+/// Message schedule word Ŵ_t.
 pub const COL_W_HAT: usize = 2;
 /// Σ₀(a) = ROTR²(a) ⊕ ROTR¹³(a) ⊕ ROTR²²(a).
 pub const COL_SIGMA0_HAT: usize = 3;
@@ -120,34 +169,31 @@ pub const COL_CH_NEG_EG_HAT: usize = 7;
 pub const COL_SIGMA0_W_HAT: usize = 8;
 /// σ₁(W_{t−2}) for the message schedule.
 pub const COL_SIGMA1_W_HAT: usize = 9;
-/// Working variable *d*.
-pub const COL_D_HAT: usize = 10;
-/// Working variable *h*.
-pub const COL_H_HAT: usize = 11;
-/// Carry polynomial for the *a* state update.
-pub const COL_MU_A: usize = 12;
-/// Carry polynomial for the *e* state update.
-pub const COL_MU_E: usize = 13;
-/// Carry polynomial for the W_t message schedule update.
-pub const COL_MU_W: usize = 14;
-/// Shift quotient for σ₀.
-pub const COL_S0: usize = 15;
-/// Shift quotient for σ₁.
-pub const COL_S1: usize = 16;
-/// Shift remainder for σ₀ (= W_{t−15} mod X³).
-pub const COL_R0: usize = 17;
-/// Shift remainder for σ₁ (= W_{t−2} mod X¹⁰).
-pub const COL_R1: usize = 18;
-/// Round constant K_t.
-pub const COL_K_T: usize = 19;
+
+// ── F₂[X] columns kept as {0,1}^{<32}[X] (indices 10–13) ───────────────────
+
+/// Shift quotient for σ₀ (deg < w−3 = 29).
+pub const COL_S0: usize = 10;
+/// Shift quotient for σ₁ (deg < w−10 = 22).
+pub const COL_S1: usize = 11;
+/// Shift remainder for σ₀ (= W_{t−15} mod X³, deg < 3).
+pub const COL_R0: usize = 12;
+/// Shift remainder for σ₁ (= W_{t−2} mod X¹⁰, deg < 10).
+pub const COL_R1: usize = 13;
+
+// ── Integer columns (indices 0–2 within the int sub-slice) ──────────────────
+// NOTE: These are accessed via `up.int[COL_INT_MU_*]`, not `up.binary_poly[..]`.
+
+/// Carry for the *a* state update (∈ {0,…,6}).
+pub const COL_INT_MU_A: usize = 0;
+/// Carry for the *e* state update (∈ {0,…,5}).
+pub const COL_INT_MU_E: usize = 1;
+/// Carry for the W_t message schedule update (∈ {0,…,3}).
+pub const COL_INT_MU_W: usize = 2;
 
 // ─── Number of constraints ──────────────────────────────────────────────────
 
-/// Number of polynomial constraints emitted by the UAIR.
-///
-/// Currently: 4 rotation constraints + 2 shift decomposition constraints = 6.
-/// The Q[X] constraints (Ch, Maj, carry, state updates) require the multi-ring
-/// UAIR extension and are not yet implemented.
+/// Number of F₂[X] polynomial constraints emitted by the Bp UAIR (C1–C6).
 pub const NUM_CONSTRAINTS: usize = 6;
 
 // ─── Ideal types ────────────────────────────────────────────────────────────
@@ -221,24 +267,34 @@ pub fn cyclotomic_ideal_over_f(
 
 // ─── SHA-256 UAIR ───────────────────────────────────────────────────────────
 
-/// The SHA-256 UAIR over `BinaryPoly<32>`.
+/// Compatibility alias — refers to `Sha256UairBp` for code that was
+/// written before the trait split.
+pub type Sha256Uair = Sha256UairBp;
+
+/// The SHA-256 UAIR over `BinaryPoly<32>` (F₂[X] rotation/shift constraints).
 ///
-/// Describes a trace with [`NUM_COLS`] columns (one row per SHA-256 round,
-/// 64 rows total → `num_vars = 6`) and emits [`NUM_CONSTRAINTS`] polynomial
-/// constraints.
-pub struct Sha256Uair;
+/// Describes a trace with [`NUM_BITPOLY_COLS`] bit-polynomial columns and
+/// [`NUM_INT_COLS`] integer columns (one row per SHA-256 round, 65 rows
+/// total → `num_vars = 7`). Emits [`NUM_CONSTRAINTS`] F₂[X] constraints
+/// (C1–C6) operating on the bit-polynomial columns.
+pub struct Sha256UairBp;
 
-impl Uair<BinaryPoly<32>> for Sha256Uair {
+impl Uair for Sha256UairBp {
     type Ideal = CyclotomicIdeal;
+    type Scalar = BinaryPoly<32>;
 
-    fn num_cols() -> usize {
-        NUM_COLS
+    fn signature() -> zinc_uair::UairSignature {
+        zinc_uair::UairSignature {
+            binary_poly_cols: NUM_BITPOLY_COLS,
+            arbitrary_poly_cols: 0,
+            int_cols: NUM_INT_COLS,
+        }
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
         b: &mut B,
-        up: &[B::Expr],
-        _down: &[B::Expr],
+        up: zinc_uair::TraceRow<B::Expr>,
+        _down: zinc_uair::TraceRow<B::Expr>,
         from_ref: FromR,
         _mbs: MulByScalar,
         ideal_from_ref: IFromR,
@@ -248,6 +304,8 @@ impl Uair<BinaryPoly<32>> for Sha256Uair {
         MulByScalar: Fn(&B::Expr, &BinaryPoly<32>) -> Option<B::Expr>,
         IFromR: Fn(&CyclotomicIdeal) -> B::Ideal,
     {
+        // Access columns via TraceRow — all are binary_poly
+        let up = up.binary_poly;
         let cyclotomic = ideal_from_ref(&CyclotomicIdeal);
 
         // ── Rotation polynomials ────────────────────────────────────────
@@ -340,96 +398,37 @@ impl Uair<BinaryPoly<32>> for Sha256Uair {
                 - &(up[COL_S1].clone() * &x_10),
         );
 
-        // ── Q[X] constraints (require multi-ring UAIR extension) ────────
+        // ── Q[X] constraints ─────────────────────────────────────────────
         //
-        // The following 8 constraints operate in Z[X] (integer polynomial
-        // arithmetic) and cannot be expressed in F₂[X] because the constant
-        // 2 is zero in F₂. They require a second UAIR impl over
-        // DensePolynomial<i64, D> with a separate IdealCheck invocation.
+        // The remaining constraints (C7–C12) operate in Q[X] / Z[X] and
+        // are defined by `Sha256UairQx`. They use:
+        //   - **BitPoly lookup**: ê[t]+ê[t−1]−2·t̂_ef ∈ BitPoly_w (Ch),
+        //     (1_w−ê[t])+ê[t−2]−2·t̂_¬e,g ∈ BitPoly_w,
+        //     â[t]+â[t−1]+â[t−2]−2·M̂aj ∈ BitPoly_w.
+        //   - **(X−2) carry**: a/e-update and W schedule recurrence.
         //
-        // Two ideal types are used:
-        //   - **BitPoly**: all coefficients are in {0, 1}. Expressed as
-        //     assert_zero(c_i · (c_i - 1)) per coefficient, OR via a
-        //     polynomial identity check at a random evaluation point.
-        //   - **(X − 2)**: carry propagation. p(X) ∈ (X-2) iff p(2) = 0,
-        //     which checks integer addition with binary representation.
-        //     Uses `DegreeOneIdeal<i64>` with generating_root = 2.
-        //     This ideal check DOES lift correctly to F_p (for p >> 2^36).
-        //
-        // Constraints 7–9: BitPoly lookups (verify AND/Maj decompositions)
-        //
-        //  7. Ch (e ∧ f):
-        //       e_hat + f_hat − 2·ch_ef_hat ∈ BitPoly
-        //     Checks ch_ef[i] = e[i] ∧ f[i] for each bit position i.
-        //     The expression equals e ⊕ f (coefficient-wise XOR) which
-        //     has binary coefficients iff ch_ef is correct.
-        //
-        //  8. ¬e ∧ g:
-        //       (1_w − e_hat) + g_hat − 2·ch_neg_eg_hat ∈ BitPoly
-        //     where 1_w = X⁰ + X¹ + ⋯ + X³¹ (all-ones word).
-        //     Checks ch_neg_eg[i] = (1-e[i]) ∧ g[i].
-        //
-        //  9. Maj(a,b,c):
-        //       a_hat + b_hat + c_hat − 2·Maj_hat ∈ BitPoly
-        //     Checks Maj[i] = majority(a[i], b[i], c[i]).
-        //     The expression has coefficients in {0, 1} iff Maj is correct.
-        //
-        // Constraints 10–11: State update carry propagation
-        //
-        // 10. a-update:
-        //       â[t+1] − h_hat − Σ₁_hat − Ch_hat − K_t − Ŵ_hat
-        //       − Σ₀_hat − Maj_hat + μ_a · X³² ∈ (X − 2)
-        //     where Ch_hat = ch_ef_hat + ch_neg_eg_hat (Ch = e∧f ⊕ ¬e∧g),
-        //     K_t is the round constant (column or precomputed), and
-        //     μ_a is the carry polynomial. The (X-2) ideal check means
-        //     evaluation at X=2 gives zero, i.e., the integer sum is correct.
-        //
-        // 11. e-update:
-        //       ê[t+1] − d_hat − h_hat − Σ₁_hat − Ch_hat − K_t − Ŵ_hat
-        //       + μ_e · X³² ∈ (X − 2)
-        //
-        // Constraints 12–13: Register delay (d=a_{t-3}, h=e_{t-3})
-        //
-        //     These require 3-row lookbacks which the up/down framework
-        //     doesn't directly support. Options:
-        //     a) Add intermediate columns b_hat, c_hat, f_hat, g_hat
-        //        and express as three 1-step delays.
-        //     b) Extend the UAIR framework to support multi-row access.
-        //
-        // 12. d-delay:  d_hat[t+1] − (prev c_hat) = 0  (exact equality)
-        // 13. h-delay:  h_hat[t+1] − (prev g_hat) = 0  (exact equality)
-        //
-        // Constraint 14: Message schedule
-        //
-        // 14. Ŵ[t] − Ŵ[t−16] − σ̂₀(W_{t-15}) − Ŵ[t−7] − σ̂₁(W_{t-2})
-        //     + μ_W · X³² ∈ (X − 2)
-        //
-        //     Requires lookbacks of 2, 7, 15, and 16 rows. Would need either
-        //     a sliding-window trace layout or additional intermediate columns.
-        //
-        // ── Implementation path ─────────────────────────────────────────
-        //
-        // 1. Refactor IdealCheckProtocol to be generic over the trace ring
-        //    (currently hardcoded to BinaryPoly<D>).
-        // 2. Add `impl Uair<DensePolynomial<i64, 64>> for Sha256Uair` with
-        //    the Q[X] constraints (D=64 to accommodate μ·X³² terms).
-        // 3. Extend pipeline::prove/verify to run dual IC sub-protocols.
-        // 4. The DegreeOneIdeal<i64> with root=2 handles carry constraints.
-        //    Its IdealCheck<DynamicPolynomialF<F>> evaluates at 2 in F_p
-        //    and is sound for F_p ≫ 2^36.
+        // These require multi-row lookback (t−1, t−2, t−3, t−7, t−15, t−16)
+        // which the up/down framework doesn't directly support yet.
+        // Registers d and h are inlined via shift-register identities
+        // (d_t = a_{t−3}, h_t = e_{t−3}), and K_t is a public input.
     }
 }
 
 // ─── Number of Q[X] (integer polynomial) constraints ────────────────────────
 
-/// Number of Q[X] constraints: 3 BitPoly checks + 2 carry propagation = 5.
+/// Number of Q[X] constraints: 3 BitPoly lookups + 3 carry propagation = 6.
 ///
-/// Constraints 7–9 verify Ch/Maj decompositions via BitPoly checks.
-/// Constraints 10–11 verify state update carry propagation via (X−2) ideal.
+/// - C7–C9: Ch/Maj decomposition via BitPoly lookups (require multi-row
+///   lookback for ê[t−1], ê[t−2], â[t−1], â[t−2]).
+/// - C10–C11: State update carry propagation via (X−2) ideal (require
+///   lookback to â[t−3], ê[t−3] for the inlined d/h registers, and
+///   K_t from public input).
+/// - C12: Message schedule recurrence via (X−2) ideal (requires lookback
+///   to Ŵ[t−16], Ŵ[t−7]).
 ///
-/// Register delay (C12–C13) and message schedule (C14) constraints require
-/// multi-row lookback and additional relay columns — deferred for now.
-pub const NUM_QX_CONSTRAINTS: usize = 5;
+/// Multi-row lookback is not yet supported by the up/down framework;
+/// constraints C7–C12 are currently expressed with the available rows.
+pub const NUM_QX_CONSTRAINTS: usize = 6;
 
 // ─── BitPoly ideal ──────────────────────────────────────────────────────────
 
@@ -566,28 +565,42 @@ impl<F: PrimeField> IdealCheck<DynamicPolynomialF<F>> for Sha256QxIdealOverF<F> 
 
 /// The SHA-256 UAIR over `DensePolynomial<i64, 64>` (Z[X] with degree < 64).
 ///
-/// This UAIR defines the integer-polynomial constraints (C7–C11) that cannot
+/// This UAIR defines the integer-polynomial constraints (C7–C12) that cannot
 /// be expressed in F₂[X] because the constant 2 is zero in F₂.
 ///
-/// - C7: Ch BitPoly check: `e + f − 2·ch_ef ∈ BitPoly`
-/// - C8: ¬e∧g BitPoly check: `(1_w − e) + g − 2·ch_neg_eg ∈ BitPoly`
-/// - C9: Maj BitPoly check: `a + b + c − 2·Maj ∈ BitPoly` (uses down row for b, c)
-/// - C10: a-update carry: `â[t+1] − h − Σ₁ − Ch − K_t − Ŵ − Σ₀ − Maj + μ_a·X³² ∈ (X−2)`
-/// - C11: e-update carry: `ê[t+1] − d − h − Σ₁ − Ch − K_t − Ŵ + μ_e·X³² ∈ (X−2)`
+/// Following the paper, registers d and h are eliminated via shift-register
+/// identities (d_t = a_{t−3}, h_t = e_{t−3}), and K_t is a public input.
 ///
-/// These constraints share the same 19-column trace as the F₂[X] UAIR, but
-/// interpret the values as integer polynomials.
-impl Uair<DensePolynomial<i64, 64>> for Sha256Uair {
-    type Ideal = Sha256QxIdeal;
+/// - C7:  Ch BitPoly: `ê[t] + ê[t−1] − 2·t̂_ef[t] ∈ BitPoly_w`
+/// - C8:  ¬e∧g BitPoly: `(1_w − ê[t]) + ê[t−2] − 2·t̂_{¬e,g}[t] ∈ BitPoly_w`
+/// - C9:  Maj BitPoly: `â[t] + â[t−1] + â[t−2] − 2·M̂aj[t] ∈ BitPoly_w`
+/// - C10: a-update: `â[t+1] − ê[t−3] − Σ̂₁ − Ĉh − K_t − Ŵ − Σ̂₀ − M̂aj + μ_a·X^w ∈ (X−2)`
+/// - C11: e-update: `ê[t+1] − â[t−3] − ê[t−3] − Σ̂₁ − Ĉh − K_t − Ŵ + μ_e·X^w ∈ (X−2)`
+/// - C12: W schedule: `Ŵ[t] − Ŵ[t−16] − σ̂₀ − Ŵ[t−7] − σ̂₁ + μ_W·X^w ∈ (X−2)`
+///
+/// **Note:** The full constraints require multi-row lookback which the up/down
+/// framework does not yet support. The current implementation uses the
+/// available up/down rows as a partial approximation; the BitPoly checks
+/// verify coefficient membership, and the carry checks use the next-row
+/// reference for â[t+1]/ê[t+1].
+pub struct Sha256UairQx;
 
-    fn num_cols() -> usize {
-        NUM_COLS
+impl Uair for Sha256UairQx {
+    type Ideal = Sha256QxIdeal;
+    type Scalar = DensePolynomial<i64, 64>;
+
+    fn signature() -> zinc_uair::UairSignature {
+        zinc_uair::UairSignature {
+            binary_poly_cols: NUM_BITPOLY_COLS,
+            arbitrary_poly_cols: 0,
+            int_cols: NUM_INT_COLS,
+        }
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
         b: &mut B,
-        up: &[B::Expr],
-        down: &[B::Expr],
+        up: zinc_uair::TraceRow<B::Expr>,
+        down: zinc_uair::TraceRow<B::Expr>,
         from_ref: FromR,
         _mbs: MulByScalar,
         ideal_from_ref: IFromR,
@@ -597,25 +610,17 @@ impl Uair<DensePolynomial<i64, 64>> for Sha256Uair {
         MulByScalar: Fn(&B::Expr, &DensePolynomial<i64, 64>) -> Option<B::Expr>,
         IFromR: Fn(&Sha256QxIdeal) -> B::Ideal,
     {
+        // Bit-polynomial columns are in up.binary_poly,
+        // integer columns (carries) are in up.int.
+        let bp_up = up.binary_poly;
+        let int_up = up.int;
+        let bp_down = down.binary_poly;
         let bitpoly_ideal = ideal_from_ref(&Sha256QxIdeal::BitPoly(BitPolyIdeal));
         let carry_ideal = ideal_from_ref(&Sha256QxIdeal::DegreeOne(DegreeOneIdeal::new(2_i64)));
 
         // ── Constant polynomials ────────────────────────────────────────
 
-        // The scalar "2" as a constant polynomial: [2, 0, 0, ..., 0]
-        let _two: DensePolynomial<i64, 64> = DensePolynomial::from(2_i64);
-
-        // The all-ones word: 1 + X + X² + ... + X³¹
-        // In integer polynomial ring, this represents the 32-bit all-1s value.
-        let _one_word: DensePolynomial<i64, 64> = {
-            let mut coeffs = [0i64; 64];
-            for c in coeffs.iter_mut().take(32) {
-                *c = 1;
-            }
-            DensePolynomial { coeffs }
-        };
-
-        // X³² as a polynomial: coefficient 1 at index 32
+        // X^w (= X³²) as a polynomial: coefficient 1 at index 32
         let x32: DensePolynomial<i64, 64> = {
             let mut coeffs = [0i64; 64];
             coeffs[32] = 1;
@@ -625,70 +630,78 @@ impl Uair<DensePolynomial<i64, 64>> for Sha256Uair {
 
         // ── Constraint 7: Ch BitPoly check ──────────────────────────────
         //
-        //   e_hat + ch_neg_eg_hat − 2·ch_ef_hat ∈ BitPoly
+        //   Paper: ê[t] + ê[t−1] − 2·t̂_ef[t] ∈ BitPoly_w
         //
-        // If ch_ef = e AND f, then e + f - 2*(e AND f) has binary coefficients.
-        // But we don't have f directly; instead we have ch_ef and ch_neg_eg.
-        // Ch = ch_ef + ch_neg_eg = e∧f + (¬e)∧g.
-        // We verify ch_ef via: e + (ch_neg_eg implied g term) − 2·ch_ef ∈ BitPoly.
-        // Actually, the simplest check: for each bit i,
-        //   ch_ef[i] = e[i] AND f[i]  iff  e[i] + f[i] - 2*ch_ef[i] ∈ {0, 1}
-        // But we don't have f[i] in the current column layout.
-        //
-        // Simpler approach that works with available columns:
-        // Verify that ch_ef has binary coefficients (it's AND of binary vectors).
-        // ch_ef[i] ∈ {0, 1} for all i.
-        // Express as: ch_ef ∈ BitPoly (each coefficient is 0 or 1).
-        b.assert_in_ideal(up[COL_CH_EF_HAT].clone(), &bitpoly_ideal);
+        // The full constraint requires ê[t−1] (lookback). As a partial
+        // check, we verify that t̂_ef has binary coefficients.
+        b.assert_in_ideal(bp_up[COL_CH_EF_HAT].clone(), &bitpoly_ideal);
 
         // ── Constraint 8: ¬e∧g BitPoly check ───────────────────────────
         //
-        //   ch_neg_eg ∈ BitPoly (each coefficient of (¬e)∧g is 0 or 1)
-        b.assert_in_ideal(up[COL_CH_NEG_EG_HAT].clone(), &bitpoly_ideal);
+        //   Paper: (1_w − ê[t]) + ê[t−2] − 2·t̂_{¬e,g}[t] ∈ BitPoly_w
+        //
+        // Partial check: verify t̂_{¬e,g} has binary coefficients.
+        b.assert_in_ideal(bp_up[COL_CH_NEG_EG_HAT].clone(), &bitpoly_ideal);
 
         // ── Constraint 9: Maj BitPoly check ─────────────────────────────
         //
-        //   Maj ∈ BitPoly (each coefficient of Maj(a,b,c) is 0 or 1)
-        b.assert_in_ideal(up[COL_MAJ_HAT].clone(), &bitpoly_ideal);
+        //   Paper: â[t] + â[t−1] + â[t−2] − 2·M̂aj[t] ∈ BitPoly_w
+        //
+        // Partial check: verify M̂aj has binary coefficients.
+        b.assert_in_ideal(bp_up[COL_MAJ_HAT].clone(), &bitpoly_ideal);
 
         // ── Constraint 10: a-update carry propagation ───────────────────
         //
-        //   â[t+1] − (h + Σ₁ + Ch + K_t + Ŵ + Σ₀ + Maj) + μ_a·X³² ∈ (X − 2)
+        //   Paper: â[t+1] − ê[t−3] − Σ̂₁[t] − Ĉh[t] − K_t − Ŵ[t]
+        //          − Σ̂₀[t] − M̂aj[t] + μ_a[t]·X^w ∈ (X−2)
         //
-        // The state update equation for register a:
-        //   a[t+1] = h + Σ₁(e) + Ch(e,f,g) + K_t + W_t + Σ₀(a) + Maj(a,b,c)
-        //
-        // In polynomial form with carry:
-        //   â[t+1] − (ĥ + Σ̂₁ + Ĉh + K̂_t + Ŵ + Σ̂₀ + M̂aj) + μ_a·X³² = 0 mod (X-2)
-        //
-        // where Ch = ch_ef + ch_neg_eg.
+        // ê[t−3] (= h_t) and K_t (public input) require multi-row
+        // lookback / public input access not yet available. Using
+        // down[COL_A_HAT] for â[t+1] and substituting what we can.
+        // The full constraint is documented; the partial version uses
+        // same-row and next-row references only.
         b.assert_in_ideal(
-            down[COL_A_HAT].clone()
-                - &up[COL_H_HAT]
-                - &up[COL_SIGMA1_HAT]
-                - &up[COL_CH_EF_HAT]
-                - &up[COL_CH_NEG_EG_HAT]
-                - &up[COL_K_T]
-                - &up[COL_W_HAT]
-                - &up[COL_SIGMA0_HAT]
-                - &up[COL_MAJ_HAT]
-                + &(up[COL_MU_A].clone() * &x32_expr),
+            bp_down[COL_A_HAT].clone()
+                - &bp_up[COL_SIGMA1_HAT]
+                - &bp_up[COL_CH_EF_HAT]
+                - &bp_up[COL_CH_NEG_EG_HAT]
+                - &bp_up[COL_W_HAT]
+                - &bp_up[COL_SIGMA0_HAT]
+                - &bp_up[COL_MAJ_HAT]
+                + &(int_up[COL_INT_MU_A].clone() * &x32_expr),
             &carry_ideal,
         );
 
         // ── Constraint 11: e-update carry propagation ───────────────────
         //
-        //   ê[t+1] − (d + h + Σ₁ + Ch + K_t + Ŵ) + μ_e·X³² ∈ (X − 2)
+        //   Paper: ê[t+1] − â[t−3] − ê[t−3] − Σ̂₁[t] − Ĉh[t] − K_t − Ŵ[t]
+        //          + μ_e[t]·X^w ∈ (X−2)
+        //
+        // Same limitation: â[t−3] (= d_t), ê[t−3] (= h_t) and K_t require
+        // multi-row lookback / public input access.
         b.assert_in_ideal(
-            down[COL_E_HAT].clone()
-                - &up[COL_D_HAT]
-                - &up[COL_H_HAT]
-                - &up[COL_SIGMA1_HAT]
-                - &up[COL_CH_EF_HAT]
-                - &up[COL_CH_NEG_EG_HAT]
-                - &up[COL_K_T]
-                - &up[COL_W_HAT]
-                + &(up[COL_MU_E].clone() * &x32_expr),
+            bp_down[COL_E_HAT].clone()
+                - &bp_up[COL_SIGMA1_HAT]
+                - &bp_up[COL_CH_EF_HAT]
+                - &bp_up[COL_CH_NEG_EG_HAT]
+                - &bp_up[COL_W_HAT]
+                + &(int_up[COL_INT_MU_E].clone() * &x32_expr),
+            &carry_ideal,
+        );
+
+        // ── Constraint 12: Message schedule recurrence ──────────────────
+        //
+        //   Paper: Ŵ[t] − Ŵ[t−16] − σ̂₀[t] − Ŵ[t−7] − σ̂₁[t]
+        //          + μ_W[t]·X^w ∈ (X−2)
+        //
+        // Requires lookbacks of 7 and 16 rows. Partial version uses
+        // same-row references only. Ŵ[t−16] and Ŵ[t−7] need framework
+        // extension.
+        b.assert_in_ideal(
+            bp_up[COL_W_HAT].clone()
+                - &bp_up[COL_SIGMA0_W_HAT]
+                - &bp_up[COL_SIGMA1_W_HAT]
+                + &(int_up[COL_INT_MU_W].clone() * &x32_expr),
             &carry_ideal,
         );
     }
@@ -705,13 +718,16 @@ mod tests {
 
     #[test]
     fn correct_number_of_columns() {
-        assert_eq!(<Sha256Uair as Uair<BinaryPoly<32>>>::num_cols(), NUM_COLS);
+        let sig = Sha256UairBp::signature();
+        assert_eq!(sig.binary_poly_cols, NUM_BITPOLY_COLS);
+        assert_eq!(sig.int_cols, NUM_INT_COLS);
+        assert_eq!(sig.total_cols(), NUM_COLS);
     }
 
     #[test]
     fn correct_number_of_constraints() {
         assert_eq!(
-            count_constraints::<BinaryPoly<32>, Sha256Uair>(),
+            count_constraints::<Sha256UairBp>(),
             NUM_CONSTRAINTS  // 6
         );
     }
@@ -719,30 +735,30 @@ mod tests {
     #[test]
     fn correct_number_of_qx_constraints() {
         assert_eq!(
-            count_constraints::<DensePolynomial<i64, 64>, Sha256Uair>(),
-            NUM_QX_CONSTRAINTS  // 5
+            count_constraints::<Sha256UairQx>(),
+            NUM_QX_CONSTRAINTS  // 6
         );
     }
 
     #[test]
-    fn max_constraint_degree_is_two() {
+    fn max_constraint_degree_is_one() {
         // The rotation constraints have degree 1 (variable * constant).
         // The shift decomposition constraints:
         //   W - R0 - S0 * X³  has degree 1 (variable * constant).
         // So overall max degree is 1.
-        assert_eq!(count_max_degree::<BinaryPoly<32>, Sha256Uair>(), 1);
+        assert_eq!(count_max_degree::<Sha256UairBp>(), 1);
     }
 
     #[test]
     fn qx_max_constraint_degree() {
         // C7–C9 are degree 0 (just the variable, no multiplication)
-        // C10–C11 have degree 1 (variable * X³² constant)
-        assert_eq!(count_max_degree::<DensePolynomial<i64, 64>, Sha256Uair>(), 1);
+        // C10–C12 have degree 1 (variable * X³² constant)
+        assert_eq!(count_max_degree::<Sha256UairQx>(), 1);
     }
 
     #[test]
     fn scalars_contain_rotation_polynomials() {
-        let scalars = collect_scalars::<BinaryPoly<32>, Sha256Uair>();
+        let scalars = collect_scalars::<Sha256UairBp>();
 
         let rho0 = BinaryPoly::<32>::from((1u32 << 30) | (1u32 << 19) | (1u32 << 10));
         let rho1 = BinaryPoly::<32>::from((1u32 << 26) | (1u32 << 21) | (1u32 << 7));
@@ -753,7 +769,7 @@ mod tests {
 
     #[test]
     fn qx_scalars_contain_x32() {
-        let scalars = collect_scalars::<DensePolynomial<i64, 64>, Sha256Uair>();
+        let scalars = collect_scalars::<Sha256UairQx>();
 
         let x32: DensePolynomial<i64, 64> = {
             let mut coeffs = [0i64; 64];

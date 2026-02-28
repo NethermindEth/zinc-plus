@@ -2,19 +2,9 @@
 //!
 //! This module provides [`prove`] and [`verify`] functions that compose:
 //! - Batched Zip+ PCS (commit → test → evaluate → verify)
-//! - Zinc+ PIOP (ideal check → combined poly resolver → lookup → sumcheck)
+//! - Zinc+ PIOP (ideal check → combined poly resolver → sumcheck)
 //!
 //! The pipeline works over `BinaryPoly<DEGREE_PLUS_ONE>` traces.
-//!
-//! ## Lookup Integration
-//!
-//! After the CPR step, the pipeline runs **batched decomposed LogUp** to
-//! enforce typing constraints on trace columns.  Columns declared as
-//! `binary_poly` in the [`UairSignature`] are checked against the
-//! projected `{0,1}^{<w}[X]` table (BitPoly), and columns declared as
-//! `int` are checked against `[0, 2^w − 1]` (Word).  The decomposition
-//! splits large tables (e.g. 2^{32}) into sub-tables of size 2^{16} to
-//! keep the lookup efficient.
 
 use std::time::{Duration, Instant};
 
@@ -39,10 +29,15 @@ use zip_plus::batched_pcs::structs::{BatchedZipPlus, BatchedZipPlusCommitment};
 use zip_plus::code::LinearCode;
 use zip_plus::pcs::structs::{ZipPlusParams, ZipTypes};
 
-use zinc_piop::ideal_check::{IdealCheckField, IdealCheckProtocol, ProjectToField};
+use zinc_piop::ideal_check::IdealCheckProtocol;
 use zinc_piop::combined_poly_resolver::CombinedPolyResolver;
-use zinc_piop::lookup::pipeline::{
-    PipelineLookupConfig, PipelineLookupProof, lookup_prove, lookup_verify,
+use zinc_piop::lookup::{
+    LookupColumnSpec, PipelineLookupProof,
+    prove_batched_lookup_with_indices, verify_batched_lookup,
+};
+use zinc_piop::projections::{
+    project_trace_coeffs, project_trace_to_field,
+    project_scalars, project_scalars_to_field,
 };
 use zinc_piop::sumcheck::prover::{NatEvaluatedPolyWithoutConstant, ProverMsg};
 use zinc_piop::sumcheck::SumcheckProof;
@@ -123,10 +118,8 @@ pub struct ZincProof {
     pub cpr_sumcheck_claimed_sum: Vec<u8>,
     pub cpr_up_evals: Vec<Vec<u8>>,
     pub cpr_down_evals: Vec<Vec<u8>>,
-    /// Batched decomposed LogUp proof for typing constraints.
-    ///
-    /// Contains the lookup proof data for all groups (BitPoly + Word).
-    /// `None` if the UAIR has no lookup constraints.
+    /// Batched decomposed LogUp proof for column typing constraints.
+    /// `None` if no lookup columns were specified.
     pub lookup_proof: Option<PipelineLookupProof<PiopField>>,
     /// PCS evaluation claims from CPR (evaluation point in the field).
     pub evaluation_point_bytes: Vec<Vec<u8>>,
@@ -145,8 +138,8 @@ pub struct VerifyResult {
 
 // ─── Field configuration ────────────────────────────────────────────────────
 
-/// 128-bit Montgomery field (4 × 64-bit limbs) used for the PIOP.
-pub const FIELD_LIMBS: usize = 4;
+/// 192-bit Montgomery field (3 × 64-bit limbs) used for the PIOP.
+pub const FIELD_LIMBS: usize = 3;
 pub type PiopField = MontyField<FIELD_LIMBS>;
 
 /// Returns a fixed configuration for the PIOP field.
@@ -154,7 +147,7 @@ pub type PiopField = MontyField<FIELD_LIMBS>;
 /// Uses a known-good 128-bit prime: 0x860995AE68FC80E1B1BD1E39D54B33.
 pub fn piop_field_config() -> MontyParams<FIELD_LIMBS> {
     let modulus = crypto_bigint::Uint::<FIELD_LIMBS>::from_be_hex(
-        "0000000000000000000000000000000000860995AE68FC80E1B1BD1E39D54B33",
+        "000000000000000000860995AE68FC80E1B1BD1E39D54B33",
     );
     let modulus = Odd::new(modulus).expect("modulus should be odd");
     MontyParams::new(modulus)
@@ -184,7 +177,7 @@ fn piop_field_to_i128(f: &PiopField) -> i128 {
     let uint = f.retrieve();
     let words = uint.as_words();
     debug_assert!(
-        words[2] == 0 && words[3] == 0,
+        words[2] == 0,
         "PIOP field element too large for i128: {:?}",
         words
     );
@@ -222,19 +215,21 @@ fn derive_pcs_point(cpr_evaluation_point: &[PiopField], num_vars: usize) -> Vec<
 /// - `params`: PCS parameters (poly size, num rows, code).
 /// - `trace`: the witness trace as MLEs.
 /// - `num_vars`: log₂(trace length).
+/// - `lookup_specs`: column lookup specifications for batched decomposed
+///   LogUp. Pass `&[]` to skip the lookup step.
 #[allow(clippy::type_complexity)]
 pub fn prove<U, Zt, Lc, const D: usize, const CHECK: bool>(
     params: &ZipPlusParams<Zt, Lc>,
     trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
     num_vars: usize,
+    lookup_specs: &[LookupColumnSpec],
 ) -> ZincProof
 where
-    U: Uair<BinaryPoly<D>>,
+    U: Uair<Scalar = BinaryPoly<D>>,
     Zt: ZipTypes<Eval = BinaryPoly<D>>,
     Lc: LinearCode<Zt>,
     rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<D>>,
-    BinaryPoly<D>: ProjectToField<PiopField>,
-    PiopField: IdealCheckField + FromPrimitiveWithConfig,
+    PiopField: FromPrimitiveWithConfig,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     Zt::Eval: ProjectableToField<PiopField>,
@@ -243,8 +238,8 @@ where
     <PiopField as Field>::Inner: FromRef<Zt::Fmod>,
 {
     let total_start = Instant::now();
-    let num_constraints = count_constraints::<BinaryPoly<D>, U>();
-    let max_degree = count_max_degree::<BinaryPoly<D>, U>();
+    let num_constraints = count_constraints::<U>();
+    let max_degree = count_max_degree::<U>();
 
     // ── Step 1: PCS Commit ──────────────────────────────────────────
     let t0 = Instant::now();
@@ -255,12 +250,27 @@ where
     // ── Step 2: PIOP — Ideal Check ──────────────────────────────────
     let t1 = Instant::now();
     let mut transcript = KeccakTranscript::new();
-    let field_cfg = transcript.get_random_field_cfg::<PiopField, _, MillerRabin>();
+    let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
+
+    // Project trace coefficients to DynamicPolynomialF for IC.
+    let projected_trace = project_trace_coeffs::<PiopField, i64, i64, D>(
+        trace, &[], &[], &field_cfg,
+    );
+    let projected_scalars = project_scalars::<PiopField, U>(|scalar| {
+        let one = PiopField::one_with_cfg(&field_cfg);
+        let zero = PiopField::zero_with_cfg(&field_cfg);
+        DynamicPolynomialF::new(
+            scalar.iter().map(|coeff| {
+                if coeff.into_inner() { one.clone() } else { zero.clone() }
+            }).collect::<Vec<_>>()
+        )
+    });
 
     let (ic_proof, ic_state) =
-        IdealCheckProtocol::<PiopField>::prove_as_subprotocol::<BinaryPoly<D>, U>(
+        IdealCheckProtocol::<PiopField>::prove_as_subprotocol::<U>(
             &mut transcript,
-            trace,
+            &projected_trace,
+            &projected_scalars,
             num_constraints,
             num_vars,
             &field_cfg,
@@ -270,12 +280,21 @@ where
 
     // ── Step 3: PIOP — Combined Poly Resolver ───────────────────────
     let t2 = Instant::now();
+    // Get projecting element for F[X]→F projection (shared by CPR prover & verifier).
+    let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+    let field_projected_scalars =
+        project_scalars_to_field(projected_scalars, &projecting_element)
+            .expect("scalar projection failed");
+    let field_trace = project_trace_to_field::<PiopField, D>(
+        trace, &[], &[], &projecting_element,
+    );
+
     let (cpr_proof, cpr_state) =
-        CombinedPolyResolver::<PiopField>::prove_as_subprotocol::<BinaryPoly<D>, U>(
+        CombinedPolyResolver::<PiopField>::prove_as_subprotocol::<U>(
             &mut transcript,
-            &ic_state.trace_matrix,
+            field_trace,
             &ic_state.evaluation_point,
-            ic_state.projected_scalars,
+            &field_projected_scalars,
             num_constraints,
             num_vars,
             max_degree,
@@ -284,19 +303,54 @@ where
         .expect("Combined poly resolver failed");
     let cpr_time = t2.elapsed();
 
-    // ── Step 3b: PIOP — Batched Decomposed LogUp (typing constraints) ──
-    // If a lookup configuration is provided, run the batched decomposed
-    // LogUp protocol to enforce that `binary_poly` columns have entries
-    // in `{0,1}^{<w}[X]` and `int` columns have entries in `[0, 2^w−1]`.
-    //
-    // TODO: The projected trace columns and original indices must be
-    // passed in by the caller once the UAIR trait exposes signature
-    // information and the IC prover state includes the projected scalar
-    // trace.  For now, the lookup proof slot exists but is not yet
-    // populated in this function.  Use `prove_with_lookup` for the
-    // full pipeline with typing enforcement.
-    let lookup_time = Duration::ZERO;
-    let lookup_proof: Option<PipelineLookupProof<PiopField>> = None;
+    // ── Step 3b: PIOP — Batched Decomposed LogUp (column typing) ────
+    let t2b = Instant::now();
+    let lookup_proof = if !lookup_specs.is_empty() {
+        // Derive a lookup-specific projecting element from the transcript.
+        let lookup_projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+
+        // Project each trace column (BinaryPoly) to field elements and
+        // simultaneously extract raw integer indices from the binary
+        // coefficients.  This avoids building the full 2^D lookup table
+        // (which would be 2^32 ≈ 4 G entries for D=32).
+        let mut columns: Vec<Vec<PiopField>> = Vec::with_capacity(trace.len());
+        let mut raw_indices: Vec<Vec<usize>> = Vec::with_capacity(trace.len());
+        for col_mle in trace {
+            let mut col_f = Vec::with_capacity(col_mle.len());
+            let mut col_idx = Vec::with_capacity(col_mle.len());
+            for bp in col_mle.iter() {
+                let mut val = PiopField::zero_with_cfg(&field_cfg);
+                let mut power = PiopField::one_with_cfg(&field_cfg);
+                let mut idx = 0usize;
+                for (j, coeff) in bp.iter().enumerate() {
+                    if coeff.into_inner() {
+                        val += &power;
+                        idx |= 1usize << j;
+                    }
+                    power *= &lookup_projecting_element;
+                }
+                col_f.push(val);
+                col_idx.push(idx);
+            }
+            columns.push(col_f);
+            raw_indices.push(col_idx);
+        }
+
+        let (lk_proof, _lk_state) = prove_batched_lookup_with_indices(
+            &mut transcript,
+            &columns,
+            &raw_indices,
+            lookup_specs,
+            &lookup_projecting_element,
+            &field_cfg,
+        )
+        .expect("Batched lookup prover failed");
+
+        Some(lk_proof)
+    } else {
+        None
+    };
+    let lookup_time = t2b.elapsed();
 
     // ── Step 4: PCS Test ────────────────────────────────────────────
     let t3 = Instant::now();
@@ -304,12 +358,6 @@ where
         BatchedZipPlus::<Zt, Lc>::test::<CHECK>(params, trace, &hint)
             .expect("PCS test failed");
     let pcs_test_time = t3.elapsed();
-
-    // ── Step 5: PCS Evaluate ────────────────────────────────────────
-    // The CPR evaluation point lives in PiopField (256-bit), but the PCS
-    // takes Zt::Pt (i128). We derive a deterministic i128 evaluation point
-    // from the CPR evaluation point. The verifier reconstructs the same
-    // point via `derive_pcs_point`.
     let t4 = Instant::now();
     let point: Vec<Zt::Pt> = {
         let i128_point = derive_pcs_point(&cpr_state.evaluation_point, num_vars);
@@ -385,7 +433,8 @@ where
 ///
 /// Unlike `prove()` (which is hardcoded to `BinaryPoly<D>`), this function
 /// works with any evaluation ring — `Int<4>`, `DensePolynomial<i64, D>`, etc.
-/// The ring must implement `ProjectToField<PiopField>`.
+/// The ring must implement `ProjectableToField<PiopField>` and
+/// `PiopField: FromWithConfig<R>` (for projecting elements to the PIOP field).
 ///
 /// This is the target pipeline for ECDSA with `Int<4>` throughout:
 /// the same `Int<4>` type is used as PCS evaluation type AND PIOP constraint ring.
@@ -394,13 +443,14 @@ pub fn prove_generic<U, R, Zt, Lc, PcsF, const CHECK: bool>(
     params: &ZipPlusParams<Zt, Lc>,
     trace: &[DenseMultilinearExtension<R>],
     num_vars: usize,
+    lookup_specs: &[LookupColumnSpec],
 ) -> ZincProof
 where
-    R: ProjectToField<PiopField> + Send + Sync + 'static,
-    U: Uair<R>,
+    R: ProjectableToField<PiopField> + crypto_primitives::Semiring + std::fmt::Debug + Clone + Send + Sync + 'static,
+    U: Uair<Scalar = R>,
     Zt: ZipTypes<Eval = R>,
     Lc: LinearCode<Zt>,
-    PiopField: IdealCheckField + FromPrimitiveWithConfig,
+    PiopField: FromPrimitiveWithConfig + FromWithConfig<R>,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     // PCS field (may be wider than PiopField when Zt::Fmod > 128 bits)
@@ -414,8 +464,8 @@ where
     Zt::Eval: ProjectableToField<PcsF>,
 {
     let total_start = Instant::now();
-    let num_constraints = count_constraints::<R, U>();
-    let max_degree = count_max_degree::<R, U>();
+    let num_constraints = count_constraints::<U>();
+    let max_degree = count_max_degree::<U>();
 
     // ── Step 1: PCS Commit ──────────────────────────────────────────
     let t0 = Instant::now();
@@ -426,12 +476,32 @@ where
     // ── Step 2: PIOP — Ideal Check ──────────────────────────────────
     let t1 = Instant::now();
     let mut transcript = KeccakTranscript::new();
-    let field_cfg = transcript.get_random_field_cfg::<PiopField, _, MillerRabin>();
+    let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
+
+    // Project trace: each R element becomes a constant DynamicPolynomialF.
+    let projected_trace: Vec<DenseMultilinearExtension<DynamicPolynomialF<PiopField>>> = trace
+        .iter()
+        .map(|col_mle| {
+            col_mle
+                .iter()
+                .map(|elem| DynamicPolynomialF {
+                    coeffs: vec![PiopField::from_with_cfg(elem.clone(), &field_cfg)],
+                })
+                .collect()
+        })
+        .collect();
+
+    let projected_scalars = project_scalars::<PiopField, U>(|scalar| {
+        DynamicPolynomialF {
+            coeffs: vec![PiopField::from_with_cfg(scalar.clone(), &field_cfg)],
+        }
+    });
 
     let (ic_proof, ic_state) =
-        IdealCheckProtocol::<PiopField>::prove_as_subprotocol::<R, U>(
+        IdealCheckProtocol::<PiopField>::prove_as_subprotocol::<U>(
             &mut transcript,
-            trace,
+            &projected_trace,
+            &projected_scalars,
             num_constraints,
             num_vars,
             &field_cfg,
@@ -441,12 +511,22 @@ where
 
     // ── Step 3: PIOP — Combined Poly Resolver ───────────────────────
     let t2 = Instant::now();
+    let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+    let field_projected_scalars =
+        project_scalars_to_field(projected_scalars, &projecting_element)
+            .expect("scalar projection failed");
+    // For scalar types (Int<N>), evaluating a constant poly at any point
+    // yields the constant. We can use project_trace_to_field with int slot.
+    let field_trace = project_trace_to_field::<PiopField, 1>(
+        &[], &[], &projected_trace, &projecting_element,
+    );
+
     let (cpr_proof, cpr_state) =
-        CombinedPolyResolver::<PiopField>::prove_as_subprotocol::<R, U>(
+        CombinedPolyResolver::<PiopField>::prove_as_subprotocol::<U>(
             &mut transcript,
-            &ic_state.trace_matrix,
+            field_trace,
             &ic_state.evaluation_point,
-            ic_state.projected_scalars,
+            &field_projected_scalars,
             num_constraints,
             num_vars,
             max_degree,
@@ -454,6 +534,52 @@ where
         )
         .expect("Combined poly resolver failed");
     let cpr_time = t2.elapsed();
+
+    // ── Step 3b: PIOP — Batched Decomposed LogUp (column typing) ────
+    let t2b = Instant::now();
+    let lookup_proof = if !lookup_specs.is_empty() {
+        // Derive a lookup-specific projecting element from the transcript.
+        let lookup_projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+
+        // Project each trace column to field elements using ProjectableToField
+        // and extract raw integer indices for the lookup decomposition.
+        //
+        // For Word lookups, the raw index is the plain integer value of the
+        // projected field element (safe because word entries < 2^32 ≪ p).
+        // This avoids building the full 2^width table for reverse-mapping.
+        let projection_fn = R::prepare_projection(&lookup_projecting_element);
+        let mut columns: Vec<Vec<PiopField>> = Vec::with_capacity(trace.len());
+        let mut raw_indices: Vec<Vec<usize>> = Vec::with_capacity(trace.len());
+        for col_mle in trace {
+            let mut col_f = Vec::with_capacity(col_mle.len());
+            let mut col_idx = Vec::with_capacity(col_mle.len());
+            for v in col_mle.iter() {
+                let fv = projection_fn(v);
+                // Retrieve the integer value from Montgomery form.
+                let uint = fv.retrieve();
+                let idx = uint.as_words()[0] as usize;
+                col_f.push(fv);
+                col_idx.push(idx);
+            }
+            columns.push(col_f);
+            raw_indices.push(col_idx);
+        }
+
+        let (lk_proof, _lk_state) = prove_batched_lookup_with_indices(
+            &mut transcript,
+            &columns,
+            &raw_indices,
+            lookup_specs,
+            &lookup_projecting_element,
+            &field_cfg,
+        )
+        .expect("Batched lookup prover failed");
+
+        Some(lk_proof)
+    } else {
+        None
+    };
+    let lookup_time = t2b.elapsed();
 
     // ── Step 4: PCS Test ────────────────────────────────────────────
     let t3 = Instant::now();
@@ -517,14 +643,14 @@ where
         cpr_sumcheck_claimed_sum,
         cpr_up_evals,
         cpr_down_evals,
-        lookup_proof: None,
+        lookup_proof,
         evaluation_point_bytes,
         pcs_evals_bytes,
         timing: TimingBreakdown {
             pcs_commit: pcs_commit_time,
             ideal_check: ideal_check_time,
             combined_poly_resolver: cpr_time,
-            lookup: Duration::ZERO,
+            lookup: lookup_time,
             pcs_test: pcs_test_time,
             pcs_evaluate: pcs_eval_time,
             total: total_time,
@@ -543,11 +669,11 @@ pub fn verify_generic<U, R, Zt, Lc, PcsF, const CHECK: bool, IdealOverF, IdealOv
     ideal_over_f_from_ref: IdealOverFFromRef,
 ) -> VerifyResult
 where
-    R: ProjectToField<PiopField> + Send + Sync + 'static,
-    U: Uair<R>,
+    R: ProjectableToField<PiopField> + crypto_primitives::Semiring + std::fmt::Debug + Clone + Send + Sync + 'static,
+    U: Uair<Scalar = R>,
     Zt: ZipTypes<Eval = R>,
     Lc: LinearCode<Zt>,
-    PiopField: IdealCheckField + FromPrimitiveWithConfig,
+    PiopField: FromPrimitiveWithConfig + FromWithConfig<R>,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     // PCS field (may be wider than PiopField when Zt::Fmod > 128 bits)
@@ -565,12 +691,12 @@ where
 {
     let total_start = Instant::now();
 
-    let num_constraints = count_constraints::<R, U>();
-    let max_degree = count_max_degree::<R, U>();
+    let num_constraints = count_constraints::<U>();
+    let max_degree = count_max_degree::<U>();
 
     // ── Reconstruct Fiat-Shamir transcript ──────────────────────────
     let mut transcript = KeccakTranscript::new();
-    let field_cfg = transcript.get_random_field_cfg::<PiopField, _, MillerRabin>();
+    let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
     let field_elem_size = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
 
@@ -593,7 +719,7 @@ where
         combined_mle_values: ic_combined_mle_values,
     };
 
-    let ic_subclaim = match IdealCheckProtocol::<PiopField>::verify_as_subprotocol::<R, U, _, _>(
+    let ic_subclaim = match IdealCheckProtocol::<PiopField>::verify_as_subprotocol::<U, _, _>(
         &mut transcript,
         ic_proof,
         num_constraints,
@@ -609,6 +735,7 @@ where
                 timing: VerifyTimingBreakdown {
                     ideal_check_verify: t0.elapsed(),
                     combined_poly_resolver_verify: Duration::ZERO,
+                    lookup_verify: Duration::ZERO,
                     pcs_verify: Duration::ZERO,
                     total: total_start.elapsed(),
                 },
@@ -649,12 +776,25 @@ where
         down_evals: cpr_down_evals,
     };
 
-    let cpr_subclaim = match CombinedPolyResolver::<PiopField>::verify_as_subprotocol::<R, U>(
+    // Compute projecting element and projected scalars for CPR verify.
+    let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+    let projected_scalars_coeffs = project_scalars::<PiopField, U>(|scalar| {
+        DynamicPolynomialF {
+            coeffs: vec![PiopField::from_with_cfg(scalar.clone(), &field_cfg)],
+        }
+    });
+    let field_projected_scalars =
+        project_scalars_to_field(projected_scalars_coeffs, &projecting_element)
+            .expect("scalar projection failed");
+
+    let cpr_subclaim = match CombinedPolyResolver::<PiopField>::verify_as_subprotocol::<U>(
         &mut transcript,
         cpr_proof,
         num_constraints,
         num_vars,
         max_degree,
+        &projecting_element,
+        &field_projected_scalars,
         ic_subclaim,
         &field_cfg,
     ) {
@@ -666,6 +806,7 @@ where
                 timing: VerifyTimingBreakdown {
                     ideal_check_verify: ic_verify_time,
                     combined_poly_resolver_verify: t1.elapsed(),
+                    lookup_verify: Duration::ZERO,
                     pcs_verify: Duration::ZERO,
                     total: total_start.elapsed(),
                 },
@@ -673,6 +814,32 @@ where
         }
     };
     let cpr_verify_time = t1.elapsed();
+
+    // ── Step 2b: Verify Batched Decomposed LogUp (column typing) ────
+    let t1b = Instant::now();
+    if let Some(ref lookup_proof) = zinc_proof.lookup_proof {
+        let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+
+        if let Err(e) = verify_batched_lookup(
+            &mut transcript,
+            lookup_proof,
+            &projecting_element,
+            &field_cfg,
+        ) {
+            eprintln!("Lookup verification failed (generic): {e:?}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: ic_verify_time,
+                    combined_poly_resolver_verify: cpr_verify_time,
+                    lookup_verify: t1b.elapsed(),
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
+    }
+    let lookup_verify_time = t1b.elapsed();
 
     // ── Step 3: PCS Verify ──────────────────────────────────────────
     let t2 = Instant::now();
@@ -713,6 +880,7 @@ where
         timing: VerifyTimingBreakdown {
             ideal_check_verify: ic_verify_time,
             combined_poly_resolver_verify: cpr_verify_time,
+            lookup_verify: lookup_verify_time,
             pcs_verify: pcs_verify_time,
             total: total_start.elapsed(),
         },
@@ -786,12 +954,14 @@ where
             cpr_sumcheck_claimed_sum: vec![],
             cpr_up_evals: vec![],
             cpr_down_evals: vec![],
+            lookup_proof: None,
             evaluation_point_bytes: vec![],
             pcs_evals_bytes: vec![],
             timing: TimingBreakdown {
                 pcs_commit: pcs_commit_time,
                 ideal_check: Duration::ZERO,
                 combined_poly_resolver: Duration::ZERO,
+                lookup: Duration::ZERO,
                 pcs_test: pcs_test_time,
                 pcs_evaluate: pcs_eval_time,
                 total: total_time,
@@ -840,6 +1010,7 @@ where
         timing: VerifyTimingBreakdown {
             ideal_check_verify: Duration::ZERO,
             combined_poly_resolver_verify: Duration::ZERO,
+            lookup_verify: Duration::ZERO,
             pcs_verify: pcs_verify_time,
             total: total_time,
         },
@@ -873,11 +1044,10 @@ pub fn verify<U, Zt, Lc, const D: usize, const CHECK: bool, IdealOverF, IdealOve
     ideal_over_f_from_ref: IdealOverFFromRef,
 ) -> VerifyResult
 where
-    U: Uair<BinaryPoly<D>>,
+    U: Uair<Scalar = BinaryPoly<D>>,
     Zt: ZipTypes<Eval = BinaryPoly<D>>,
     Lc: LinearCode<Zt>,
-    BinaryPoly<D>: ProjectToField<PiopField>,
-    PiopField: IdealCheckField + FromPrimitiveWithConfig,
+    PiopField: FromPrimitiveWithConfig,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     Zt::Eval: ProjectableToField<PiopField>,
@@ -889,12 +1059,12 @@ where
 {
     let total_start = Instant::now();
 
-    let num_constraints = count_constraints::<BinaryPoly<D>, U>();
-    let max_degree = count_max_degree::<BinaryPoly<D>, U>();
+    let num_constraints = count_constraints::<U>();
+    let max_degree = count_max_degree::<U>();
 
     // ── Reconstruct Fiat-Shamir transcript (must match prover) ──────
     let mut transcript = KeccakTranscript::new();
-    let field_cfg = transcript.get_random_field_cfg::<PiopField, _, MillerRabin>();
+    let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
     let field_elem_size = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
 
@@ -918,7 +1088,7 @@ where
         combined_mle_values: ic_combined_mle_values,
     };
 
-    let ic_verify_result = IdealCheckProtocol::<PiopField>::verify_as_subprotocol::<BinaryPoly<D>, U, _, _>(
+    let ic_verify_result = IdealCheckProtocol::<PiopField>::verify_as_subprotocol::<U, _, _>(
         &mut transcript,
         ic_proof,
         num_constraints,
@@ -936,6 +1106,7 @@ where
                 timing: VerifyTimingBreakdown {
                     ideal_check_verify: t0.elapsed(),
                     combined_poly_resolver_verify: Duration::ZERO,
+                    lookup_verify: Duration::ZERO,
                     pcs_verify: Duration::ZERO,
                     total: total_start.elapsed(),
                 },
@@ -977,12 +1148,29 @@ where
         down_evals: cpr_down_evals,
     };
 
-    let cpr_verify_result = CombinedPolyResolver::<PiopField>::verify_as_subprotocol::<BinaryPoly<D>, U>(
+    // Compute projecting element and projected scalars for CPR verify.
+    let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+    let projected_scalars_coeffs = project_scalars::<PiopField, U>(|scalar| {
+        let one = PiopField::one_with_cfg(&field_cfg);
+        let zero = PiopField::zero_with_cfg(&field_cfg);
+        DynamicPolynomialF::new(
+            scalar.iter().map(|coeff| {
+                if coeff.into_inner() { one.clone() } else { zero.clone() }
+            }).collect::<Vec<_>>()
+        )
+    });
+    let field_projected_scalars =
+        project_scalars_to_field(projected_scalars_coeffs, &projecting_element)
+            .expect("scalar projection failed");
+
+    let cpr_verify_result = CombinedPolyResolver::<PiopField>::verify_as_subprotocol::<U>(
         &mut transcript,
         cpr_proof,
         num_constraints,
         num_vars,
         max_degree,
+        &projecting_element,
+        &field_projected_scalars,
         ic_subclaim,
         &field_cfg,
     );
@@ -996,6 +1184,7 @@ where
                 timing: VerifyTimingBreakdown {
                     ideal_check_verify: ic_verify_time,
                     combined_poly_resolver_verify: t1.elapsed(),
+                    lookup_verify: Duration::ZERO,
                     pcs_verify: Duration::ZERO,
                     total: total_start.elapsed(),
                 },
@@ -1003,6 +1192,33 @@ where
         }
     };
     let cpr_verify_time = t1.elapsed();
+
+    // ── Step 2b: Verify Batched Decomposed LogUp (column typing) ────
+    let t1b = Instant::now();
+    if let Some(ref lookup_proof) = zinc_proof.lookup_proof {
+        // Derive the same projecting element the prover used.
+        let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+
+        if let Err(e) = verify_batched_lookup(
+            &mut transcript,
+            lookup_proof,
+            &projecting_element,
+            &field_cfg,
+        ) {
+            eprintln!("Lookup verification failed: {e:?}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: ic_verify_time,
+                    combined_poly_resolver_verify: cpr_verify_time,
+                    lookup_verify: t1b.elapsed(),
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
+    }
+    let lookup_verify_time = t1b.elapsed();
 
     // ── Step 3: PCS Verify ──────────────────────────────────────────
     // The CPR subclaim gives us the evaluation point and expected evaluations.
@@ -1057,6 +1273,7 @@ where
         timing: VerifyTimingBreakdown {
             ideal_check_verify: ic_verify_time,
             combined_poly_resolver_verify: cpr_verify_time,
+            lookup_verify: lookup_verify_time,
             pcs_verify: pcs_verify_time,
             total: total_time,
         },
@@ -1121,14 +1338,12 @@ pub fn prove_dual_ring<U1, U2, Zt, Lc, const D1: usize, const D2: usize, const C
     convert_trace: ConvertFn,
 ) -> DualRingZincProof
 where
-    U1: Uair<BinaryPoly<D1>>,
-    U2: Uair<DensePolynomial<i64, D2>>,
+    U1: Uair<Scalar = BinaryPoly<D1>>,
+    U2: Uair<Scalar = DensePolynomial<i64, D2>>,
     Zt: ZipTypes<Eval = BinaryPoly<D1>>,
     Lc: LinearCode<Zt>,
     rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<D1>>,
-    BinaryPoly<D1>: ProjectToField<PiopField>,
-    DensePolynomial<i64, D2>: ProjectToField<PiopField>,
-    PiopField: IdealCheckField + FromPrimitiveWithConfig,
+    PiopField: FromPrimitiveWithConfig + FromWithConfig<i64>,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     Zt::Eval: ProjectableToField<PiopField>,
@@ -1139,10 +1354,10 @@ where
 {
     let total_start = Instant::now();
 
-    let bp_num_constraints = count_constraints::<BinaryPoly<D1>, U1>();
-    let bp_max_degree = count_max_degree::<BinaryPoly<D1>, U1>();
-    let qx_num_constraints = count_constraints::<DensePolynomial<i64, D2>, U2>();
-    let qx_max_degree = count_max_degree::<DensePolynomial<i64, D2>, U2>();
+    let bp_num_constraints = count_constraints::<U1>();
+    let bp_max_degree = count_max_degree::<U1>();
+    let qx_num_constraints = count_constraints::<U2>();
+    let qx_max_degree = count_max_degree::<U2>();
 
     // ── Step 1: PCS Commit ──────────────────────────────────────────
     let t0 = Instant::now();
@@ -1152,14 +1367,28 @@ where
 
     // ── Step 2: Fiat-Shamir transcript + field config ───────────────
     let mut transcript = KeccakTranscript::new();
-    let field_cfg = transcript.get_random_field_cfg::<PiopField, _, MillerRabin>();
+    let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
     // ── Step 3: IC₁ (BinaryPoly) ───────────────────────────────────
     let t1 = Instant::now();
+    let bp_projected_trace = project_trace_coeffs::<PiopField, i64, i64, D1>(
+        trace, &[], &[], &field_cfg,
+    );
+    let bp_projected_scalars = project_scalars::<PiopField, U1>(|scalar| {
+        let one = PiopField::one_with_cfg(&field_cfg);
+        let zero = PiopField::zero_with_cfg(&field_cfg);
+        DynamicPolynomialF::new(
+            scalar.iter().map(|coeff| {
+                if coeff.into_inner() { one.clone() } else { zero.clone() }
+            }).collect::<Vec<_>>()
+        )
+    });
+
     let (bp_ic_proof, bp_ic_state) =
-        IdealCheckProtocol::<PiopField>::prove_as_subprotocol::<BinaryPoly<D1>, U1>(
+        IdealCheckProtocol::<PiopField>::prove_as_subprotocol::<U1>(
             &mut transcript,
-            trace,
+            &bp_projected_trace,
+            &bp_projected_scalars,
             bp_num_constraints,
             num_vars,
             &field_cfg,
@@ -1167,12 +1396,20 @@ where
         .expect("BinaryPoly ideal check prover failed");
 
     // ── Step 4: CPR₁ (BinaryPoly) ──────────────────────────────────
+    let bp_projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+    let bp_field_projected_scalars =
+        project_scalars_to_field(bp_projected_scalars, &bp_projecting_element)
+            .expect("BP scalar projection failed");
+    let bp_field_trace = project_trace_to_field::<PiopField, D1>(
+        trace, &[], &[], &bp_projecting_element,
+    );
+
     let (bp_cpr_proof, bp_cpr_state) =
-        CombinedPolyResolver::<PiopField>::prove_as_subprotocol::<BinaryPoly<D1>, U1>(
+        CombinedPolyResolver::<PiopField>::prove_as_subprotocol::<U1>(
             &mut transcript,
-            &bp_ic_state.trace_matrix,
+            bp_field_trace,
             &bp_ic_state.evaluation_point,
-            bp_ic_state.projected_scalars,
+            &bp_field_projected_scalars,
             bp_num_constraints,
             num_vars,
             bp_max_degree,
@@ -1186,10 +1423,20 @@ where
 
     // ── Step 6: IC₂ (Q[X]) ─────────────────────────────────────────
     let t2 = Instant::now();
+    let qx_projected_trace = project_trace_coeffs::<PiopField, i64, i64, D2>(
+        &[], &qx_trace, &[], &field_cfg,
+    );
+    let qx_projected_scalars = project_scalars::<PiopField, U2>(|scalar| {
+        DynamicPolynomialF::new(
+            scalar.iter().map(|coeff| PiopField::from_with_cfg(*coeff, &field_cfg)).collect::<Vec<_>>()
+        )
+    });
+
     let (qx_ic_proof, qx_ic_state) =
-        IdealCheckProtocol::<PiopField>::prove_as_subprotocol::<DensePolynomial<i64, D2>, U2>(
+        IdealCheckProtocol::<PiopField>::prove_as_subprotocol::<U2>(
             &mut transcript,
-            &qx_trace,
+            &qx_projected_trace,
+            &qx_projected_scalars,
             qx_num_constraints,
             num_vars,
             &field_cfg,
@@ -1197,12 +1444,20 @@ where
         .expect("Q[X] ideal check prover failed");
 
     // ── Step 7: CPR₂ (Q[X]) ────────────────────────────────────────
+    let qx_projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+    let qx_field_projected_scalars =
+        project_scalars_to_field(qx_projected_scalars, &qx_projecting_element)
+            .expect("QX scalar projection failed");
+    let qx_field_trace = project_trace_to_field::<PiopField, D2>(
+        &[], &qx_projected_trace, &[], &qx_projecting_element,
+    );
+
     let (qx_cpr_proof, _qx_cpr_state) =
-        CombinedPolyResolver::<PiopField>::prove_as_subprotocol::<DensePolynomial<i64, D2>, U2>(
+        CombinedPolyResolver::<PiopField>::prove_as_subprotocol::<U2>(
             &mut transcript,
-            &qx_ic_state.trace_matrix,
+            qx_field_trace,
             &qx_ic_state.evaluation_point,
-            qx_ic_state.projected_scalars,
+            &qx_field_projected_scalars,
             qx_num_constraints,
             num_vars,
             qx_max_degree,
@@ -1305,6 +1560,7 @@ where
             pcs_commit: pcs_commit_time,
             ideal_check: bp_time + qx_time,
             combined_poly_resolver: Duration::ZERO, // included in ideal_check
+            lookup: Duration::ZERO, // no lookup in dual-ring pipeline yet
             pcs_test: pcs_test_time,
             pcs_evaluate: pcs_eval_time,
             total: total_time,
@@ -1328,13 +1584,11 @@ pub fn verify_dual_ring<U1, U2, Zt, Lc, const D1: usize, const D2: usize, const 
     qx_ideal_from_ref: QxIdealFromRef,
 ) -> VerifyResult
 where
-    U1: Uair<BinaryPoly<D1>>,
-    U2: Uair<DensePolynomial<i64, D2>>,
+    U1: Uair<Scalar = BinaryPoly<D1>>,
+    U2: Uair<Scalar = DensePolynomial<i64, D2>>,
     Zt: ZipTypes<Eval = BinaryPoly<D1>>,
     Lc: LinearCode<Zt>,
-    BinaryPoly<D1>: ProjectToField<PiopField>,
-    DensePolynomial<i64, D2>: ProjectToField<PiopField>,
-    PiopField: IdealCheckField + FromPrimitiveWithConfig,
+    PiopField: FromPrimitiveWithConfig + FromWithConfig<i64>,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     Zt::Eval: ProjectableToField<PiopField>,
@@ -1346,14 +1600,14 @@ where
 {
     let total_start = Instant::now();
 
-    let bp_num_constraints = count_constraints::<BinaryPoly<D1>, U1>();
-    let bp_max_degree = count_max_degree::<BinaryPoly<D1>, U1>();
-    let qx_num_constraints = count_constraints::<DensePolynomial<i64, D2>, U2>();
-    let qx_max_degree = count_max_degree::<DensePolynomial<i64, D2>, U2>();
+    let bp_num_constraints = count_constraints::<U1>();
+    let bp_max_degree = count_max_degree::<U1>();
+    let qx_num_constraints = count_constraints::<U2>();
+    let qx_max_degree = count_max_degree::<U2>();
 
     // ── Reconstruct Fiat-Shamir transcript ──────────────────────────
     let mut transcript = KeccakTranscript::new();
-    let field_cfg = transcript.get_random_field_cfg::<PiopField, _, MillerRabin>();
+    let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
     let field_elem_size = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
 
     // ── Pass 1: IC₁ verify (BinaryPoly, TrivialIdeal) ──────────────
@@ -1375,7 +1629,7 @@ where
         combined_mle_values: bp_ic_combined_mle_values,
     };
 
-    let bp_ic_subclaim = match IdealCheckProtocol::<PiopField>::verify_as_subprotocol::<BinaryPoly<D1>, U1, _, _>(
+    let bp_ic_subclaim = match IdealCheckProtocol::<PiopField>::verify_as_subprotocol::<U1, _, _>(
         &mut transcript,
         bp_ic_proof,
         bp_num_constraints,
@@ -1391,6 +1645,7 @@ where
                 timing: VerifyTimingBreakdown {
                     ideal_check_verify: t0.elapsed(),
                     combined_poly_resolver_verify: Duration::ZERO,
+                    lookup_verify: Duration::ZERO,
                     pcs_verify: Duration::ZERO,
                     total: total_start.elapsed(),
                 },
@@ -1428,12 +1683,29 @@ where
         down_evals: bp_cpr_down_evals,
     };
 
-    let bp_cpr_subclaim = match CombinedPolyResolver::<PiopField>::verify_as_subprotocol::<BinaryPoly<D1>, U1>(
+    // Compute BP projecting element and projected scalars for CPR₁ verify.
+    let bp_projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+    let bp_projected_scalars_coeffs = project_scalars::<PiopField, U1>(|scalar| {
+        let one = PiopField::one_with_cfg(&field_cfg);
+        let zero = PiopField::zero_with_cfg(&field_cfg);
+        DynamicPolynomialF::new(
+            scalar.iter().map(|coeff| {
+                if coeff.into_inner() { one.clone() } else { zero.clone() }
+            }).collect::<Vec<_>>()
+        )
+    });
+    let bp_field_projected_scalars =
+        project_scalars_to_field(bp_projected_scalars_coeffs, &bp_projecting_element)
+            .expect("BP scalar projection failed");
+
+    let bp_cpr_subclaim = match CombinedPolyResolver::<PiopField>::verify_as_subprotocol::<U1>(
         &mut transcript,
         bp_cpr_proof,
         bp_num_constraints,
         num_vars,
         bp_max_degree,
+        &bp_projecting_element,
+        &bp_field_projected_scalars,
         bp_ic_subclaim,
         &field_cfg,
     ) {
@@ -1445,6 +1717,7 @@ where
                 timing: VerifyTimingBreakdown {
                     ideal_check_verify: t0.elapsed(),
                     combined_poly_resolver_verify: Duration::ZERO,
+                    lookup_verify: Duration::ZERO,
                     pcs_verify: Duration::ZERO,
                     total: total_start.elapsed(),
                 },
@@ -1472,7 +1745,7 @@ where
         combined_mle_values: qx_ic_combined_mle_values,
     };
 
-    let qx_ic_subclaim = match IdealCheckProtocol::<PiopField>::verify_as_subprotocol::<DensePolynomial<i64, D2>, U2, _, _>(
+    let qx_ic_subclaim = match IdealCheckProtocol::<PiopField>::verify_as_subprotocol::<U2, _, _>(
         &mut transcript,
         qx_ic_proof,
         qx_num_constraints,
@@ -1488,6 +1761,7 @@ where
                 timing: VerifyTimingBreakdown {
                     ideal_check_verify: bp_verify_time + t1.elapsed(),
                     combined_poly_resolver_verify: Duration::ZERO,
+                    lookup_verify: Duration::ZERO,
                     pcs_verify: Duration::ZERO,
                     total: total_start.elapsed(),
                 },
@@ -1525,12 +1799,25 @@ where
         down_evals: qx_cpr_down_evals,
     };
 
-    if let Err(e) = CombinedPolyResolver::<PiopField>::verify_as_subprotocol::<DensePolynomial<i64, D2>, U2>(
+    // Compute Q[X] projecting element and projected scalars for CPR₂ verify.
+    let qx_projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+    let qx_projected_scalars_coeffs = project_scalars::<PiopField, U2>(|scalar| {
+        DynamicPolynomialF::new(
+            scalar.iter().map(|coeff| PiopField::from_with_cfg(*coeff, &field_cfg)).collect::<Vec<_>>()
+        )
+    });
+    let qx_field_projected_scalars =
+        project_scalars_to_field(qx_projected_scalars_coeffs, &qx_projecting_element)
+            .expect("QX scalar projection failed");
+
+    if let Err(e) = CombinedPolyResolver::<PiopField>::verify_as_subprotocol::<U2>(
         &mut transcript,
         qx_cpr_proof,
         qx_num_constraints,
         num_vars,
         qx_max_degree,
+        &qx_projecting_element,
+        &qx_field_projected_scalars,
         qx_ic_subclaim,
         &field_cfg,
     ) {
@@ -1540,6 +1827,7 @@ where
             timing: VerifyTimingBreakdown {
                 ideal_check_verify: bp_verify_time + t1.elapsed(),
                 combined_poly_resolver_verify: Duration::ZERO,
+                lookup_verify: Duration::ZERO,
                 pcs_verify: Duration::ZERO,
                 total: total_start.elapsed(),
             },
@@ -1587,6 +1875,7 @@ where
         timing: VerifyTimingBreakdown {
             ideal_check_verify: bp_verify_time + qx_verify_time,
             combined_poly_resolver_verify: Duration::ZERO,
+            lookup_verify: Duration::ZERO,
             pcs_verify: pcs_verify_time,
             total: total_start.elapsed(),
         },

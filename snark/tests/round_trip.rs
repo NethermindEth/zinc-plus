@@ -62,7 +62,7 @@ where
     const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = BinaryPoly<D_PLUS_ONE>;
     type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
-    type Fmod = Uint<{ INT_LIMBS * 4 }>;
+    type Fmod = Uint<{ INT_LIMBS * 3 }>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
     type Pt = i128;

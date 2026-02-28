@@ -17,7 +17,7 @@ use std::marker::PhantomData;
 use std::time::{Duration, Instant};
 
 use criterion::{
-    criterion_group, criterion_main, BenchmarkGroup, Criterion, measurement::WallTime,
+    criterion_group, criterion_main, Criterion,
 };
 use crypto_bigint::U64;
 use crypto_primitives::{
@@ -25,11 +25,8 @@ use crypto_primitives::{
     crypto_bigint_int::Int,
     crypto_bigint_monty::MontyField,
     crypto_bigint_uint::Uint,
-    Field, FixedSemiring, FromWithConfig,
+    Field, FixedSemiring,
 };
-use num_traits::One;
-
-
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
 use zinc_poly::univariate::binary::{
     BinaryPoly, BinaryPolyInnerProduct, BinaryPolyWideningMulByScalar,
@@ -43,28 +40,35 @@ use zinc_utils::{
     inner_product::{MBSInnerProduct, ScalarProduct},
     mul_by_scalar::ScalarWideningMulByScalar,
     named::Named,
-    projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
     batched_pcs::structs::BatchedZipPlus,
     code::{
         LinearCode,
-        iprs::{IprsCode, PnttConfigF2_16R4B16, PnttConfigF2_16R4B32, PnttConfigF2_16R4B64},
+        iprs::{IprsCode, PnttConfigF2_16R4B16, PnttConfigF2_16R4B64},
     },
     pcs::structs::{ZipPlusParams, ZipTypes},
 };
 
-use zinc_ecdsa_uair::EcdsaUair;
+use zinc_ecdsa_uair::EcdsaUairInt;
 use zinc_sha256_uair::{Sha256Uair, witness::GenerateWitness};
 use zinc_sha256_uair::witness::{generate_poly_witness, generate_int_witness};
+use zinc_piop::projections::{
+    project_trace_coeffs, project_trace_to_field,
+    project_scalars, project_scalars_to_field,
+};
+use zinc_piop::lookup::{
+    LookupColumnSpec, LookupTableType,
+};
+use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
+use crypto_primitives::PrimeField;
 
 // ─── Type definitions (matching batched_zip_plus_benches.rs) ────────────────
 
 const INT_LIMBS: usize = U64::LIMBS;
-type F = MontyField<{ INT_LIMBS * 4 }>;
-/// 512-bit field for ECDSA PCS with Int<4> evaluations.
-/// Wider than F because CombR = Int<8> (512-bit) requires Fmod = Uint<8>.
-type FScalar = MontyField<{ INT_LIMBS * 8 }>;
+type F = MontyField<{ INT_LIMBS * 3 }>;
+/// 192-bit field (same as F) for ECDSA PCS with Int<4> evaluations.
+type FScalar = MontyField<{ INT_LIMBS * 3 }>;
 
 struct Sha256ZipTypes<CwCoeff, const D_PLUS_ONE: usize>(PhantomData<CwCoeff>);
 
@@ -83,7 +87,7 @@ where
     const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = BinaryPoly<D_PLUS_ONE>;
     type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
-    type Fmod = Uint<{ INT_LIMBS * 4 }>;
+    type Fmod = Uint<{ INT_LIMBS * 3 }>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
     type Pt = i128;
@@ -107,7 +111,7 @@ impl ZipTypes for EcdsaScalarZipTypes {
     const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = Int<{ INT_LIMBS * 4 }>;      // 256-bit integer
     type Cw = Int<{ INT_LIMBS * 5 }>;        // 320-bit codeword
-    type Fmod = Uint<{ INT_LIMBS * 8 }>;     // 512-bit modulus search
+    type Fmod = Uint<{ INT_LIMBS * 3 }>;     // 192-bit modulus search
     type PrimeTest = MillerRabin;
     type Chal = i128;
     type Pt = i128;
@@ -131,7 +135,7 @@ impl ZipTypes for Sha256IntZipTypes {
     const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = Int<{ INT_LIMBS }>;           // 64-bit integer (Int<1>)
     type Cw = Int<{ INT_LIMBS * 2 }>;         // 128-bit codeword (Int<2>)
-    type Fmod = Uint<{ INT_LIMBS * 4 }>;      // 256-bit modulus search
+    type Fmod = Uint<{ INT_LIMBS * 3 }>;      // 192-bit modulus search
     type PrimeTest = MillerRabin;
     type Chal = i128;
     type Pt = i128;
@@ -155,13 +159,6 @@ type IprsBPoly32R4B16<const DEPTH: usize, const CHECK: bool> = IprsCode<
     BinaryPolyWideningMulByScalar<i64>,
     CHECK,
 >;
-type IprsBPoly32R4B32<const DEPTH: usize, const CHECK: bool> = IprsCode<
-    Sha256ZipTypes<i64, 32>,
-    PnttConfigF2_16R4B32<DEPTH>,
-    BinaryPolyWideningMulByScalar<i64>,
-    CHECK,
->;
-
 // IPRS code types for Int<4> (scalar ECDSA evaluations)
 type IprsInt4R4B64<const DEPTH: usize, const CHECK: bool> = IprsCode<
     EcdsaScalarZipTypes,
@@ -169,13 +166,6 @@ type IprsInt4R4B64<const DEPTH: usize, const CHECK: bool> = IprsCode<
     ScalarWideningMulByScalar<Int<{ INT_LIMBS * 5 }>>,
     CHECK,
 >;
-type IprsInt4R4B16<const DEPTH: usize, const CHECK: bool> = IprsCode<
-    EcdsaScalarZipTypes,
-    PnttConfigF2_16R4B16<DEPTH>,
-    ScalarWideningMulByScalar<Int<{ INT_LIMBS * 5 }>>,
-    CHECK,
->;
-
 // IPRS code types for Int<1> (SHA-256 integer columns)
 type IprsInt1R4B64<const DEPTH: usize, const CHECK: bool> = IprsCode<
     Sha256IntZipTypes,
@@ -189,53 +179,136 @@ type IprsInt1R4B16<const DEPTH: usize, const CHECK: bool> = IprsCode<
     ScalarWideningMulByScalar<Int<{ INT_LIMBS * 2 }>>,
     CHECK,
 >;
-type IprsInt1R4B32<const DEPTH: usize, const CHECK: bool> = IprsCode<
-    Sha256IntZipTypes,
-    PnttConfigF2_16R4B32<DEPTH>,
-    ScalarWideningMulByScalar<Int<{ INT_LIMBS * 2 }>>,
-    CHECK,
->;
-
 // ─── SHA-256 Trace Parameters ───────────────────────────────────────────────
 //
-// SHA-256 has 64 rows × 19 columns.
+// SHA-256 has 64 rows × 17 columns (14 bitpoly + 3 int).
 // ECDSA has 258 rows × 9 columns.
 //
 // IPRS codes need DEPTH ≥ 1 (radix-8 NTT), and row_len = BASE_LEN × 8^DEPTH.
 //
 // Benchmark configurations:
-//   - Single SHA-256: poly_size = 2^7 = 128, 19 polys, R4B16 DEPTH=1 (row_len=128)
+//   - Single SHA-256: poly_size = 2^7 = 128, 17 polys, R4B16 DEPTH=1 (row_len=128)
 //     → 64 real rows + 64 padding = 128 total
-//   - 8× SHA-256 + ECDSA: poly_size = 2^10 = 1024, 33 polys
+//   - 8× SHA-256 + ECDSA: poly_size = 2^10 = 1024, 26 polys
 //     → 8×64=512 SHA rows + 258 ECDSA rows = 770 → pad to 1024
 
 const SHA256_NUM_VARS: usize = 7;        // 2^7 = 128 rows (64 real + 64 padding)
-const SHA256_BATCH_SIZE: usize = 20;      // 20 SHA-256 columns
+const SHA256_BATCH_SIZE: usize = 17;      // 17 SHA-256 columns (14 bitpoly + 3 int)
 
 // Split SHA-256 batch sizes for two-PCS configuration
-const SHA256_POLY_BATCH_SIZE: usize = 11; // 11 BinaryPoly columns (C1–C6)
-const SHA256_INT_BATCH_SIZE: usize = 9;   // 9 Int columns (C7–C11)
+const SHA256_POLY_BATCH_SIZE: usize = 14; // 14 BinaryPoly columns
+const SHA256_INT_BATCH_SIZE: usize = 3;   // 3 Int columns (μ_a, μ_e, μ_W)
 
 // For 8× SHA-256 + ECDSA: two separate PCS batches
 const SHA256_8X_NUM_VARS: usize = 9;           // 2^9 = 512 rows (8 × 64 SHA rounds)
 const ECDSA_NUM_VARS: usize = 9;               // 2^9 = 512 rows (258 ECDSA rows + padding)
 const ECDSA_BATCH_SIZE: usize = 9;             // 9 ECDSA columns
 
+// ─── Lookup column specs ────────────────────────────────────────────────────
+
+/// Lookup specs for SHA-256 trace columns: 14 BinaryPoly<32> columns get
+/// BitPoly { width: 32 } and 3 Int columns get Word { width: 32 }.
+fn sha256_lookup_specs() -> Vec<LookupColumnSpec> {
+    let mut specs: Vec<LookupColumnSpec> = (0..SHA256_POLY_BATCH_SIZE)
+        .map(|i| LookupColumnSpec {
+            column_index: i,
+            table_type: LookupTableType::BitPoly { width: 32 },
+        })
+        .collect();
+    specs.extend((0..SHA256_INT_BATCH_SIZE).map(|i| LookupColumnSpec {
+        column_index: i,
+        table_type: LookupTableType::Word { width: 32 },
+    }));
+    specs
+}
+
+/// Lookup specs for ECDSA trace columns: all 9 columns are 32-bit words,
+/// so each gets a Word { width: 32 } column-typing constraint.
+fn ecdsa_lookup_specs() -> Vec<LookupColumnSpec> {
+    (0..ECDSA_BATCH_SIZE)
+        .map(|i| LookupColumnSpec {
+            column_index: i,
+            table_type: LookupTableType::Word { width: 32 },
+        })
+        .collect()
+}
+
+// ─── Lookup proof size helpers ───────────────────────────────────────────────
+
+/// Compute the serialised byte count of a `PipelineLookupProof`.
+///
+/// Each field element is `PiopField` (128-bit Montgomery field, 32 bytes).
+fn lookup_proof_byte_count(proof: &zinc_piop::lookup::PipelineLookupProof<zinc_snark::pipeline::PiopField>) -> usize {
+    use zinc_snark::pipeline::FIELD_LIMBS;
+    let fe_bytes = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+    let mut count = 0usize;
+    for gp in &proof.group_proofs {
+        // chunk_vectors: Vec<Vec<Vec<F>>>
+        for outer in &gp.chunk_vectors {
+            for inner in outer {
+                count += inner.len();
+            }
+        }
+        // sumcheck_proof: claimed_sum (1) + messages (tail_evaluations per round)
+        count += 1; // claimed_sum
+        for msg in &gp.sumcheck_proof.messages {
+            count += msg.0.tail_evaluations.len();
+        }
+        // aggregated_multiplicities: Vec<Vec<F>>
+        for v in &gp.aggregated_multiplicities {
+            count += v.len();
+        }
+        // chunk_inverse_witnesses: Vec<Vec<Vec<F>>>
+        for outer in &gp.chunk_inverse_witnesses {
+            for inner in outer {
+                count += inner.len();
+            }
+        }
+        // inverse_table: Vec<F>
+        count += gp.inverse_table.len();
+    }
+    count * fe_bytes
+}
+
+/// Serialize all field elements in a `PipelineLookupProof` to a byte vector.
+fn lookup_proof_to_bytes(proof: &zinc_piop::lookup::PipelineLookupProof<zinc_snark::pipeline::PiopField>) -> Vec<u8> {
+    fn write_fe(buf: &mut Vec<u8>, f: &zinc_snark::pipeline::PiopField) {
+        use zinc_snark::pipeline::FIELD_LIMBS;
+        let fe_size = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+        let start = buf.len();
+        buf.resize(start + fe_size, 0);
+        f.inner().write_transcription_bytes(&mut buf[start..]);
+    }
+
+    let mut out = Vec::new();
+    for gp in &proof.group_proofs {
+        for outer in &gp.chunk_vectors {
+            for inner in outer {
+                for f in inner { write_fe(&mut out, f); }
+            }
+        }
+        write_fe(&mut out, &gp.sumcheck_proof.claimed_sum);
+        for msg in &gp.sumcheck_proof.messages {
+            for f in &msg.0.tail_evaluations { write_fe(&mut out, f); }
+        }
+        for v in &gp.aggregated_multiplicities {
+            for f in v { write_fe(&mut out, f); }
+        }
+        for outer in &gp.chunk_inverse_witnesses {
+            for inner in outer {
+                for f in inner { write_fe(&mut out, f); }
+            }
+        }
+        for f in &gp.inverse_table { write_fe(&mut out, f); }
+    }
+    out
+}
+
 // ─── Benchmark helpers ──────────────────────────────────────────────────────
 
 fn generate_sha256_trace(num_vars: usize) -> Vec<DenseMultilinearExtension<BinaryPoly<32>>> {
     let mut rng = rand::rng();
     <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(num_vars, &mut rng)
-}
-
-fn generate_random_trace(
-    num_vars: usize,
-    num_cols: usize,
-) -> Vec<DenseMultilinearExtension<BinaryPoly<32>>> {
-    let mut rng = rand::rng();
-    (0..num_cols)
-        .map(|_| DenseMultilinearExtension::rand(num_vars, &mut rng))
-        .collect()
 }
 
 /// Generate random ECDSA-shaped trace with Int<4> (256-bit scalar) evaluations.
@@ -252,137 +325,46 @@ fn generate_random_scalar_trace(
         .collect()
 }
 
-/// Benchmark the full PCS pipeline (commit + test + evaluate + verify)
-/// for a SHA-256-like trace.
-fn bench_pcs_pipeline<Zt, Lc, const P: usize, const CHECK: bool>(
-    group: &mut BenchmarkGroup<WallTime>,
-    label: &str,
-    num_rows: usize,
-    _batch_size: usize,
-    trace: &[DenseMultilinearExtension<BinaryPoly<32>>],
-) where
-    Zt: ZipTypes<Eval = BinaryPoly<32>>,
-    Lc: LinearCode<Zt>,
-    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
-    <F as Field>::Inner: FromRef<Zt::Fmod>,
-    Zt::Eval: ProjectableToField<F>,
-    Zt::Cw: ProjectableToField<F>,
-{
-    let poly_size = 1 << P;
-    let row_len = poly_size / num_rows;
-    let linear_code = Lc::new(row_len);
-    let params = ZipPlusParams::new(P, num_rows, linear_code);
-
-    // Warm up: commit once
-    let (hint, commitment) = BatchedZipPlus::<Zt, Lc>::commit(&params, trace)
-        .expect("commit failed");
-
-    // ── Prover benchmark (commit + test + evaluate) ─────────────────
-    group.bench_function(format!("{label}/Prover"), |b| {
-        b.iter_custom(|iters| {
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                let t = Instant::now();
-
-                // Commit
-                let (hint, _) = BatchedZipPlus::<Zt, Lc>::commit(&params, trace)
-                    .expect("commit");
-
-                // Test
-                let test_tx = BatchedZipPlus::<Zt, Lc>::test::<CHECK>(&params, trace, &hint)
-                    .expect("test");
-
-                // Evaluate
-                let point: Vec<Zt::Pt> = vec![Zt::Pt::one(); P];
-                let (_evals, _proof) =
-                    BatchedZipPlus::<Zt, Lc>::evaluate::<F, CHECK>(
-                        &params, trace, &point, test_tx,
-                    )
-                    .expect("evaluate");
-
-                total += t.elapsed();
-            }
-            total
-        });
-    });
-
-    // Prepare proof for verifier benchmark
-    let test_tx = BatchedZipPlus::<Zt, Lc>::test::<CHECK>(&params, trace, &hint)
-        .expect("test");
-    let point: Vec<Zt::Pt> = vec![Zt::Pt::one(); P];
-    let (_evals_f, proof) =
-        BatchedZipPlus::<Zt, Lc>::evaluate::<F, CHECK>(&params, trace, &point, test_tx)
-            .expect("evaluate");
-
-    // ── Verifier benchmark ──────────────────────────────────────────
-    group.bench_function(format!("{label}/Verifier"), |b| {
-        b.iter(|| {
-            let result = BatchedZipPlus::<Zt, Lc>::verify::<F, CHECK>(
-                &params,
-                &commitment,
-                &point,
-                &proof,
-            );
-            let _ = black_box(result);
-        });
-    });
-
-    // ── Proof size ──────────────────────────────────────────────────
-    let proof_bytes: Vec<u8> = {
-        let tx: zip_plus::pcs_transcript::PcsTranscript = proof.into();
-        tx.stream.into_inner()
-    };
-    // Measure compressed size (deflate level 6)
-    let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
-    encoder.write_all(&proof_bytes).unwrap();
-    let compressed = encoder.finish().unwrap();
-    eprintln!(
-        "  {label}: proof_size = {} bytes ({:.1} KB), compressed = {} bytes ({:.1} KB, {:.1}× ratio)",
-        proof_bytes.len(),
-        proof_bytes.len() as f64 / 1024.0,
-        compressed.len(),
-        compressed.len() as f64 / 1024.0,
-        proof_bytes.len() as f64 / compressed.len() as f64,
-    );
+/// Generate random ECDSA-shaped trace with values in `[0, 2^32)`.
+///
+/// Generate an all-zero ECDSA trace that trivially satisfies both the
+/// ECDSA UAIR constraints *and* `Word { width: 32 }` lookup constraints.
+///
+/// All seven Jacobian doubling-and-add constraints evaluate to zero when
+/// every column is identically zero (same approach as `ecdsa_pipeline` test).
+/// Zero is also a valid 32-bit word, so lookup decomposition succeeds.
+fn generate_zero_scalar_trace(
+    num_vars: usize,
+    num_cols: usize,
+) -> Vec<DenseMultilinearExtension<Int<{ INT_LIMBS * 4 }>>> {
+    let zero = Int::<{ INT_LIMBS * 4 }>::default();
+    let rows = 1usize << num_vars;
+    (0..num_cols)
+        .map(|_| DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            vec![zero; rows],
+            zero,
+        ))
+        .collect()
 }
 
 // ─── Criterion suites ───────────────────────────────────────────────────────
 
-/// Single SHA-256 compression (64 rows padded to 128 × 19 columns = poly_size 2^7).
+/// Single SHA-256 compression (64 rows padded to 128 × 17 columns = poly_size 2^7).
 ///
 /// Uses R4B16 IPRS codes at rate 1/4 with DEPTH=1 (row_len=128).
-///
-/// Reports both PCS-only and full pipeline (PCS + PIOP) timings so the
-/// paper can cite an honest "total prover time" that includes ideal check
-/// and combined-poly-resolver overhead.
 ///
 /// **Proof size claims are valid for DEPTH=1 configurations only.**
 /// DEPTH≥2 dramatically reduces deflate compressibility (see §4 of review).
 fn sha256_single(c: &mut Criterion) {
-    use zinc_sha256_uair::CyclotomicIdeal;
-    use zinc_uair::ideal_collector::IdealOrZero;
-
     let mut group = c.benchmark_group("SHA-256 Single Compression");
     group.sample_size(20);
 
-    let trace = generate_sha256_trace(SHA256_NUM_VARS);
-
-    // ── PCS-only (component benchmark) ──────────────────────────────
-    // poly_size = 2^7 = 128, num_rows = 1, row_len = 128
-    // R4B16 DEPTH=1 gives row_len = 16 × 8^1 = 128  ✓
-    bench_pcs_pipeline::<Sha256ZipTypes<i64, 32>, IprsBPoly32R4B16<1, UNCHECKED>, 7, UNCHECKED>(
-        &mut group,
-        "1xSHA256/PCS-only",
-        1,
-        SHA256_BATCH_SIZE,
-        &trace,
-    );
-
     // ── Split PCS: BinaryPoly batch + Int batch ─────────────────────
-    // Split the 20 SHA-256 columns into two PCS batches:
-    //   - BinaryPoly batch (11 cols): columns used in F₂[X] rotation constraints
-    //   - Int batch (9 cols): columns only used in Q[X] carry/BitPoly constraints
-    // The PIOP still runs on the full 20-column BinaryPoly<32> trace.
+    // Split the 17 SHA-256 columns into two PCS batches:
+    //   - BinaryPoly batch (14 cols): columns used in F₂[X] rotation constraints
+    //   - Int batch (3 cols): carry columns (μ_a, μ_e, μ_W)
+    // The PIOP still runs on the full 17-column trace.
     {
         let mut rng = rand::rng();
         let poly_trace = generate_poly_witness(SHA256_NUM_VARS, &mut rng);
@@ -503,60 +485,6 @@ fn sha256_single(c: &mut Criterion) {
             all_bytes.len() as f64 / compressed.len() as f64);
     }
 
-    // ── Full pipeline: PCS + PIOP (headline benchmark) ──────────────
-    // This is the honest prover time: IC + CPR + PCS commit + test + evaluate.
-    {
-        type Lc = IprsBPoly32R4B16<1, UNCHECKED>;
-        type Zt = Sha256ZipTypes<i64, 32>;
-        let linear_code = Lc::new(128);
-        let params = ZipPlusParams::new(SHA256_NUM_VARS, 1, linear_code);
-
-        group.bench_function("1xSHA256/FullPipeline/Prover", |b| {
-            b.iter_custom(|iters| {
-                let mut total = Duration::ZERO;
-                for _ in 0..iters {
-                    let t = Instant::now();
-                    let _proof = zinc_snark::pipeline::prove::<Sha256Uair, Zt, Lc, 32, UNCHECKED>(
-                        &params,
-                        &trace,
-                        SHA256_NUM_VARS,
-                    );
-                    total += t.elapsed();
-                }
-                total
-            });
-        });
-
-        // Prepare proof for verifier benchmark
-        let zinc_proof = zinc_snark::pipeline::prove::<Sha256Uair, Zt, Lc, 32, UNCHECKED>(
-            &params,
-            &trace,
-            SHA256_NUM_VARS,
-        );
-
-        group.bench_function("1xSHA256/FullPipeline/Verifier", |b| {
-            b.iter(|| {
-                let result = zinc_snark::pipeline::verify::<Sha256Uair, Zt, Lc, 32, UNCHECKED, _, _>(
-                    &params,
-                    &zinc_proof,
-                    SHA256_NUM_VARS,
-                    |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
-                );
-                black_box(result);
-            });
-        });
-
-        eprintln!(
-            "\n  Full pipeline prover breakdown: IC={:?}, CPR={:?}, PCS commit={:?}, test={:?}, evaluate={:?}, total={:?}",
-            zinc_proof.timing.ideal_check,
-            zinc_proof.timing.combined_poly_resolver,
-            zinc_proof.timing.pcs_commit,
-            zinc_proof.timing.pcs_test,
-            zinc_proof.timing.pcs_evaluate,
-            zinc_proof.timing.total,
-        );
-    }
-
     group.finish();
 }
 
@@ -564,8 +492,8 @@ fn sha256_single(c: &mut Criterion) {
 ///
 /// Uses **two separate PCS batches** with evaluation types matched to the
 /// arithmetic of each UAIR:
-/// - SHA-256:  20 columns × BinaryPoly<32> (polynomial evaluations, 32 binary coefficients)
-/// - ECDSA:    9 columns × Int<4>           (scalar evaluations, 1 × 256-bit integer)
+/// - SHA-256:  14 columns × BinaryPoly<32> + 3 columns × Int<1>
+/// - ECDSA:    9 columns × Int<4>  (scalar evaluations, 1 × 256-bit integer)
 ///
 /// This is ~32× cheaper per cell for the ECDSA columns compared to
 /// BinaryPoly<32>, because the IPRS NTT processes 1 coefficient rather than 32.
@@ -581,13 +509,13 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
     group.sample_size(10);
 
     // ── Build traces ────────────────────────────────────────────────
-    // SHA-256: 20 columns × 512 rows (8 instances × 64 rounds)
+    // SHA-256: 17 columns × 512 rows (8 instances × 64 rounds)
     let sha_trace = generate_sha256_trace(SHA256_8X_NUM_VARS);
     assert_eq!(sha_trace.len(), SHA256_BATCH_SIZE);
 
     // ECDSA: 9 columns × 512 rows (258 real + 254 padding)
-    // Int<4> = 256-bit scalar — matches secp256k1 field element width
-    let ecdsa_trace = generate_random_scalar_trace(ECDSA_NUM_VARS, ECDSA_BATCH_SIZE);
+    // Values are 32-bit words (matching Word{width:32} lookup constraints).
+    let ecdsa_trace = generate_zero_scalar_trace(ECDSA_NUM_VARS, ECDSA_BATCH_SIZE);
     assert_eq!(ecdsa_trace.len(), ECDSA_BATCH_SIZE);
 
     // ── PCS params ──────────────────────────────────────────────────
@@ -605,57 +533,11 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
         ECDSA_NUM_VARS, 1, EcLc::new(512),
     );
 
-    // ── Combined Prover (SHA PCS + ECDSA PCS) ───────────────────────
-    group.bench_function("Combined/PCS/Prover", |b| {
-        b.iter_custom(|iters| {
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                let t = Instant::now();
+    // ── Lookup column specs ──────────────────────────────────────────
+    let sha_lookup_specs = sha256_lookup_specs();
+    let ec_lookup_specs = ecdsa_lookup_specs();
 
-                // SHA PCS: commit + test + evaluate
-                let (sha_hint, _) = BatchedZipPlus::<ShaZt, ShaLc>::commit(
-                    &sha_params, &sha_trace,
-                ).expect("sha commit");
-                let sha_tx = BatchedZipPlus::<ShaZt, ShaLc>::test::<UNCHECKED>(
-                    &sha_params, &sha_trace, &sha_hint,
-                ).expect("sha test");
-                let sha_pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
-                let _ = BatchedZipPlus::<ShaZt, ShaLc>::evaluate::<F, UNCHECKED>(
-                    &sha_params, &sha_trace, &sha_pt, sha_tx,
-                ).expect("sha evaluate");
-
-                // ECDSA PCS: commit + test + evaluate (Int<4> — ~32× cheaper per cell)
-                let (ec_hint, _) = BatchedZipPlus::<EcZt, EcLc>::commit(
-                    &ec_params, &ecdsa_trace,
-                ).expect("ecdsa commit");
-                let ec_tx = BatchedZipPlus::<EcZt, EcLc>::test::<UNCHECKED>(
-                    &ec_params, &ecdsa_trace, &ec_hint,
-                ).expect("ecdsa test");
-                let ec_pt: Vec<i128> = vec![1i128; ECDSA_NUM_VARS];
-                let _ = BatchedZipPlus::<EcZt, EcLc>::evaluate::<FScalar, UNCHECKED>(
-                    &ec_params, &ecdsa_trace, &ec_pt, ec_tx,
-                ).expect("ecdsa evaluate");
-
-                total += t.elapsed();
-            }
-            total
-        });
-    });
-
-    // ── Combined Verifier ───────────────────────────────────────────
-    // Prepare SHA proof
-    let (sha_hint, sha_comm) = BatchedZipPlus::<ShaZt, ShaLc>::commit(
-        &sha_params, &sha_trace,
-    ).expect("commit");
-    let sha_tx = BatchedZipPlus::<ShaZt, ShaLc>::test::<UNCHECKED>(
-        &sha_params, &sha_trace, &sha_hint,
-    ).expect("test");
-    let sha_pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
-    let (_sha_evals_f, sha_proof) = BatchedZipPlus::<ShaZt, ShaLc>::evaluate::<F, UNCHECKED>(
-        &sha_params, &sha_trace, &sha_pt, sha_tx,
-    ).expect("evaluate");
-
-    // Prepare ECDSA proof
+    // ── Prepare ECDSA proof (reused by split PCS verifier) ────────
     let (ec_hint, ec_comm) = BatchedZipPlus::<EcZt, EcLc>::commit(
         &ec_params, &ecdsa_trace,
     ).expect("commit");
@@ -667,121 +549,120 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
         &ec_params, &ecdsa_trace, &ec_pt, ec_tx,
     ).expect("evaluate");
 
-    group.bench_function("Combined/PCS/Verifier", |b| {
-        b.iter(|| {
-            let (sha_r, ec_r) = rayon::join(
-                || {
-                    BatchedZipPlus::<ShaZt, ShaLc>::verify::<F, UNCHECKED>(
-                        &sha_params, &sha_comm, &sha_pt, &sha_proof,
-                    )
-                },
-                || {
-                    BatchedZipPlus::<EcZt, EcLc>::verify::<FScalar, UNCHECKED>(
-                        &ec_params, &ec_comm, &ec_pt, &ec_proof,
-                    )
-                },
-            );
-            let _ = black_box(sha_r);
-            let _ = black_box(ec_r);
+    // ── Full Pipeline Prover (IC + CPR + Lookup + PCS) ──────────────
+    group.bench_function("FullPipeline/Prover", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let t = Instant::now();
+                let _sha_proof = zinc_snark::pipeline::prove::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
+                    &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
+                );
+                let _ec_proof = zinc_snark::pipeline::prove_generic::<
+                    EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED,
+                >(
+                    &ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &ec_lookup_specs,
+                );
+                total += t.elapsed();
+            }
+            total
         });
     });
 
-    // ── Proof sizes (full pipeline: PCS + PIOP) ─────────────────────
+    // ── Proof sizes (full pipeline: PCS + PIOP + Lookup) ────────────
     // Generate full-pipeline proofs for accurate size reporting.
-    // SHA: pipeline::prove (BinaryPoly<32>, single-ring PIOP)
     let sha_zinc_proof = zinc_snark::pipeline::prove::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
-        &sha_params,
-        &sha_trace,
-        SHA256_8X_NUM_VARS,
+        &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
     );
-    // ECDSA: pipeline::prove_generic (Int<4>, single-ring PIOP)
-    let ec_zinc_proof = zinc_snark::pipeline::prove_generic::< 
-        EcdsaUair,
-        Int<{ INT_LIMBS * 4 }>,
-        EcZt,
-        EcLc,
-        FScalar,
-        UNCHECKED,
+    let ec_zinc_proof = zinc_snark::pipeline::prove_generic::<
+        EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED,
     >(
-        &ec_params,
-        &ecdsa_trace,
-        ECDSA_NUM_VARS,
+        &ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &ec_lookup_specs,
     );
 
-    // Helper to compute PIOP proof size from a ZincProof.
+    // ── Full Pipeline Verifier ───────────────────────────────────────
+    {
+        use zinc_sha256_uair::CyclotomicIdeal;
+        use zinc_ecdsa_uair::EcdsaIdealOverF;
+        use zinc_uair::ideal::ImpossibleIdeal;
+        use zinc_uair::ideal_collector::IdealOrZero;
+
+        group.bench_function("FullPipeline/Verifier", |b| {
+            b.iter(|| {
+                let sha_r = zinc_snark::pipeline::verify::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED, _, _>(
+                    &sha_params, &sha_zinc_proof, SHA256_8X_NUM_VARS,
+                    |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                );
+                let _ = black_box(sha_r);
+                let ec_r = zinc_snark::pipeline::verify_generic::<
+                    EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED, EcdsaIdealOverF, _,
+                >(
+                    &ec_params, &ec_zinc_proof, ECDSA_NUM_VARS,
+                    |ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
+                        IdealOrZero::Zero => EcdsaIdealOverF,
+                        IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
+                    },
+                );
+                let _ = black_box(ec_r);
+            });
+        });
+    }
+
+    // ── Prover timing breakdown ─────────────────────────────────────
+    eprintln!("\n=== 8xSHA256+ECDSA Full Pipeline Timing ===");
+    eprintln!("  SHA prover: IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
+        sha_zinc_proof.timing.ideal_check,
+        sha_zinc_proof.timing.combined_poly_resolver,
+        sha_zinc_proof.timing.lookup,
+        sha_zinc_proof.timing.pcs_commit,
+        sha_zinc_proof.timing.pcs_test,
+        sha_zinc_proof.timing.pcs_evaluate,
+        sha_zinc_proof.timing.total,
+    );
+    eprintln!("  ECDSA prover: IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
+        ec_zinc_proof.timing.ideal_check,
+        ec_zinc_proof.timing.combined_poly_resolver,
+        ec_zinc_proof.timing.lookup,
+        ec_zinc_proof.timing.pcs_commit,
+        ec_zinc_proof.timing.pcs_test,
+        ec_zinc_proof.timing.pcs_evaluate,
+        ec_zinc_proof.timing.total,
+    );
+
+    // Helper to compute PIOP + Lookup proof size from a ZincProof.
     fn piop_size(p: &zinc_snark::pipeline::ZincProof) -> usize {
-        p.ic_proof_values.iter().map(|v| v.len()).sum::<usize>()
+        let base = p.ic_proof_values.iter().map(|v| v.len()).sum::<usize>()
             + p.cpr_sumcheck_messages.iter().map(|v| v.len()).sum::<usize>()
             + p.cpr_sumcheck_claimed_sum.len()
             + p.cpr_up_evals.iter().map(|v| v.len()).sum::<usize>()
             + p.cpr_down_evals.iter().map(|v| v.len()).sum::<usize>()
             + p.evaluation_point_bytes.iter().map(|v| v.len()).sum::<usize>()
-            + p.pcs_evals_bytes.iter().map(|v| v.len()).sum::<usize>()
+            + p.pcs_evals_bytes.iter().map(|v| v.len()).sum::<usize>();
+        let lookup = p.lookup_proof.as_ref().map_or(0, lookup_proof_byte_count);
+        base + lookup
     }
 
     let sha_pcs = sha_zinc_proof.pcs_proof_bytes.len();
     let sha_piop = piop_size(&sha_zinc_proof);
+    let sha_lookup = sha_zinc_proof.lookup_proof.as_ref().map_or(0, lookup_proof_byte_count);
     let ec_pcs = ec_zinc_proof.pcs_proof_bytes.len();
     let ec_piop = piop_size(&ec_zinc_proof);
+    let ec_lookup = ec_zinc_proof.lookup_proof.as_ref().map_or(0, lookup_proof_byte_count);
     let total_raw = sha_pcs + sha_piop + ec_pcs + ec_piop;
 
-    // Collect all bytes for compression measurement.
-    let mut all_bytes = Vec::new();
-    for p in [&sha_zinc_proof, &ec_zinc_proof] {
-        all_bytes.extend(&p.pcs_proof_bytes);
-        for v in &p.ic_proof_values { all_bytes.extend(v); }
-        for v in &p.cpr_sumcheck_messages { all_bytes.extend(v); }
-        all_bytes.extend(&p.cpr_sumcheck_claimed_sum);
-        for v in &p.cpr_up_evals { all_bytes.extend(v); }
-        for v in &p.cpr_down_evals { all_bytes.extend(v); }
-        for v in &p.evaluation_point_bytes { all_bytes.extend(v); }
-        for v in &p.pcs_evals_bytes { all_bytes.extend(v); }
-    }
-    let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
-    encoder.write_all(&all_bytes).unwrap();
-    let compressed = encoder.finish().unwrap();
+    eprintln!("\n=== 8xSHA256+ECDSA Full Pipeline Proof Size ===");
+    eprintln!("  SHA: PCS={} B ({:.1} KB), PIOP+Lookup={} B ({:.1} KB) [lookup={} B]",
+        sha_pcs, sha_pcs as f64 / 1024.0, sha_piop, sha_piop as f64 / 1024.0, sha_lookup);
+    eprintln!("  ECDSA: PCS={} B ({:.1} KB), PIOP+Lookup={} B ({:.1} KB) [lookup={} B]",
+        ec_pcs, ec_pcs as f64 / 1024.0, ec_piop, ec_piop as f64 / 1024.0, ec_lookup);
+    eprintln!("  Total raw: {} bytes ({:.1} KB)", total_raw, total_raw as f64 / 1024.0);
 
-    // Compute analytical breakdown of PCS proof components.
-    // PCS proof = proximity_phase + column_opening_phase + eval_phase
-    //   proximity = row_len × CombR_bytes
-    //   column_openings = NUM_OPENINGS × (batch_size × num_rows × Cw_bytes + merkle_proof)
-    //   eval = row_len × PcsF_bytes + batch_size × PcsF_bytes  (+length prefixes)
-    let sha_col_per_opening = SHA256_BATCH_SIZE * 1 * <ShaZt as ZipTypes>::Cw::NUM_BYTES;
-    let ec_col_per_opening = ECDSA_BATCH_SIZE * 1 * <EcZt as ZipTypes>::Cw::NUM_BYTES;
-
-    eprintln!("\n=== 8xSHA256+ECDSA Combined Proof Size (NUM_COLUMN_OPENINGS={}) ===",
-        <ShaZt as ZipTypes>::NUM_COLUMN_OPENINGS);
-    eprintln!("  SHA:   PCS = {} bytes ({:.1} KB), PIOP = {} bytes ({:.1} KB)",
-        sha_pcs, sha_pcs as f64 / 1024.0,
-        sha_piop, sha_piop as f64 / 1024.0,
-    );
-    eprintln!("    column values/opening: {} cols × {} B/cw = {} B",
-        SHA256_BATCH_SIZE, <ShaZt as ZipTypes>::Cw::NUM_BYTES, sha_col_per_opening);
-    eprintln!("    CombR = Int<6> = {} B, PcsF = MontyField<4> ≈ 16 B",
-        <ShaZt as ZipTypes>::CombR::NUM_BYTES);
-    eprintln!("  ECDSA: PCS = {} bytes ({:.1} KB), PIOP = {} bytes ({:.1} KB)",
-        ec_pcs, ec_pcs as f64 / 1024.0,
-        ec_piop, ec_piop as f64 / 1024.0,
-    );
-    eprintln!("    column values/opening: {} cols × {} B/cw = {} B",
-        ECDSA_BATCH_SIZE, <EcZt as ZipTypes>::Cw::NUM_BYTES, ec_col_per_opening);
-    eprintln!("    CombR = Int<8> = {} B, PcsF = MontyField<8> ≈ 64 B",
-        <EcZt as ZipTypes>::CombR::NUM_BYTES);
-    eprintln!("  SHA/ECDSA PCS ratio:  {:.2}×", sha_pcs as f64 / ec_pcs as f64);
-    eprintln!("  Total raw:  {} bytes ({:.1} KB)",
-        total_raw, total_raw as f64 / 1024.0,
-    );
-    eprintln!("  Compressed: {} bytes ({:.1} KB, {:.1}× ratio)",
-        compressed.len(), compressed.len() as f64 / 1024.0,
-        all_bytes.len() as f64 / compressed.len() as f64,
-    );
-
-    // ── Split SHA PCS: BinaryPoly (11 cols) + Int (9 cols) + ECDSA ──
-    // Splits the 20 SHA-256 columns into two PCS batches by column type,
+    // ── Split SHA PCS: BinaryPoly (14 cols) + Int (3 cols) + ECDSA ──
+    // Splits the 17 SHA-256 columns into two PCS batches by column type,
     // keeping the ECDSA batch unchanged.  Three PCS batches total:
-    //   1. SHA BinaryPoly (11 cols) — rotation/shift constraints
-    //   2. SHA Int<1>     (9 cols)  — carry/BitPoly constraints
-    //   3. ECDSA Int<4>   (9 cols) — scalar arithmetic
+    //   1. SHA BinaryPoly (14 cols) — rotation/shift constraints
+    //   2. SHA Int<1>     (3 cols)  — carry columns (μ_a, μ_e, μ_W)
+    //   3. ECDSA Int<4>   (9 cols)  — scalar arithmetic
     {
         let mut rng = rand::rng();
         let sha_poly_trace = generate_poly_witness(SHA256_8X_NUM_VARS, &mut rng);
@@ -926,7 +807,7 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
         split_all.extend(&si_bytes);
         // ECDSA PCS bytes from the full-pipeline proof
         split_all.extend(&ec_zinc_proof.pcs_proof_bytes);
-        // PIOP data for both proofs
+        // PIOP + Lookup data for both proofs
         for p in [&sha_zinc_proof, &ec_zinc_proof] {
             for v in &p.ic_proof_values { split_all.extend(v); }
             for v in &p.cpr_sumcheck_messages { split_all.extend(v); }
@@ -935,6 +816,9 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
             for v in &p.cpr_down_evals { split_all.extend(v); }
             for v in &p.evaluation_point_bytes { split_all.extend(v); }
             for v in &p.pcs_evals_bytes { split_all.extend(v); }
+            if let Some(ref lp) = p.lookup_proof {
+                split_all.extend(lookup_proof_to_bytes(lp));
+            }
         }
         let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
         enc.write_all(&split_all).unwrap();
@@ -977,8 +861,8 @@ fn sha256_piop_only(c: &mut Criterion) {
 
     let trace = generate_sha256_trace(SHA256_NUM_VARS);
     let num_vars = SHA256_NUM_VARS;
-    let num_constraints = zinc_uair::constraint_counter::count_constraints::<BinaryPoly<32>, Sha256Uair>();
-    let max_degree = zinc_uair::degree_counter::count_max_degree::<BinaryPoly<32>, Sha256Uair>();
+    let num_constraints = zinc_uair::constraint_counter::count_constraints::<Sha256Uair>();
+    let max_degree = zinc_uair::degree_counter::count_max_degree::<Sha256Uair>();
 
     // ── Ideal Check prover ──────────────────────────────────────────
     group.bench_function("IdealCheck/Prover", |b| {
@@ -989,12 +873,25 @@ fn sha256_piop_only(c: &mut Criterion) {
                 let field_cfg = transcript.get_random_field_cfg::<
                     F, <F as Field>::Inner, MillerRabin
                 >();
+                let projected_trace = project_trace_coeffs::<F, bool, bool, 32>(
+                    &trace, &[], &[], &field_cfg,
+                );
+                let projected_scalars = project_scalars::<F, Sha256Uair>(|scalar| {
+                    let one = F::one_with_cfg(&field_cfg);
+                    let zero = F::zero_with_cfg(&field_cfg);
+                    DynamicPolynomialF::new(
+                        scalar.iter().map(|coeff| {
+                            if coeff.into_inner() { one.clone() } else { zero.clone() }
+                        }).collect::<Vec<_>>()
+                    )
+                });
                 let t = Instant::now();
                 let _ = zinc_piop::ideal_check::IdealCheckProtocol::<
                     F
-                >::prove_as_subprotocol::<BinaryPoly<32>, Sha256Uair>(
+                >::prove_as_subprotocol::<Sha256Uair>(
                     &mut transcript,
-                    &trace,
+                    &projected_trace,
+                    &projected_scalars,
                     num_constraints,
                     num_vars,
                     &field_cfg,
@@ -1011,17 +908,38 @@ fn sha256_piop_only(c: &mut Criterion) {
     let field_cfg = transcript.get_random_field_cfg::<
         F, <F as Field>::Inner, MillerRabin
     >();
+    let projected_trace = project_trace_coeffs::<F, bool, bool, 32>(
+        &trace, &[], &[], &field_cfg,
+    );
+    let projected_scalars = project_scalars::<F, Sha256Uair>(|scalar| {
+        let one = F::one_with_cfg(&field_cfg);
+        let zero = F::zero_with_cfg(&field_cfg);
+        DynamicPolynomialF::new(
+            scalar.iter().map(|coeff| {
+                if coeff.into_inner() { one.clone() } else { zero.clone() }
+            }).collect::<Vec<_>>()
+        )
+    });
     let (_ic_proof, ic_state) =
         zinc_piop::ideal_check::IdealCheckProtocol::<
             F
-        >::prove_as_subprotocol::<BinaryPoly<32>, Sha256Uair>(
+        >::prove_as_subprotocol::<Sha256Uair>(
             &mut transcript,
-            &trace,
+            &projected_trace,
+            &projected_scalars,
             num_constraints,
             num_vars,
             &field_cfg,
         )
         .expect("IC prover failed");
+
+    let projecting_element: F = transcript.get_field_challenge(&field_cfg);
+    let field_trace = project_trace_to_field::<F, 32>(
+        &trace, &[], &[], &projecting_element,
+    );
+    let field_projected_scalars =
+        project_scalars_to_field(projected_scalars.clone(), &projecting_element)
+            .expect("scalar projection failed");
 
     group.bench_function("CombinedPolyResolver/Prover", |b| {
         b.iter_custom(|iters| {
@@ -1031,11 +949,11 @@ fn sha256_piop_only(c: &mut Criterion) {
                 let t = Instant::now();
                 let _ = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<
                     F
-                >::prove_as_subprotocol::<BinaryPoly<32>, Sha256Uair>(
+                >::prove_as_subprotocol::<Sha256Uair>(
                     &mut tr,
-                    &ic_state.trace_matrix,
+                    field_trace.clone(),
                     &ic_state.evaluation_point,
-                    ic_state.projected_scalars.clone(),
+                    &field_projected_scalars,
                     num_constraints,
                     num_vars,
                     max_degree,
@@ -1051,115 +969,119 @@ fn sha256_piop_only(c: &mut Criterion) {
     group.finish();
 }
 
-/// **True end-to-end benchmark** combining PIOP + PCS for honest total prover time.
+/// **E2E benchmark for 8×SHA-256 + ECDSA** combining PIOP + Lookup + PCS.
 ///
-/// Reports the total wall-clock time for the complete prover:
-///   1. PIOP: IdealCheck + CombinedPolyResolver
-///   2. PCS: Commit + Test + Evaluate
-/// And the total verifier time:
-///   1. PCS: Verify
+/// Uses the full `pipeline::prove` / `pipeline::verify` API which includes:
+///   1. IdealCheck → CombinedPolyResolver → Batched Lookup → PCS (prover)
+///   2. PCS verify → Lookup verify → CPR verify → IC verify (verifier)
 ///
-/// This is the "honest" prover time — not just PCS in isolation.
-fn sha256_end_to_end(c: &mut Criterion) {
-    let mut group = c.benchmark_group("SHA-256 E2E (PIOP+PCS)");
-    group.sample_size(20);
+/// Both SHA-256 and ECDSA sub-protocols carry lookup column-typing constraints.
+///
+/// This is the "honest" combined prover/verifier time for the paper's target configuration.
+fn sha256_8x_ecdsa_end_to_end(c: &mut Criterion) {
+    use zinc_sha256_uair::CyclotomicIdeal;
+    use zinc_ecdsa_uair::EcdsaIdealOverF;
+    use zinc_uair::ideal::ImpossibleIdeal;
+    use zinc_uair::ideal_collector::IdealOrZero;
 
-    let trace = generate_sha256_trace(SHA256_NUM_VARS);
-    let num_vars = SHA256_NUM_VARS;
-    let num_constraints = zinc_uair::constraint_counter::count_constraints::<BinaryPoly<32>, Sha256Uair>();
-    let max_degree = zinc_uair::degree_counter::count_max_degree::<BinaryPoly<32>, Sha256Uair>();
+    let mut group = c.benchmark_group("8xSHA256+ECDSA E2E (PIOP+Lookup+PCS)");
+    group.sample_size(10);
 
-    // ── Total Prover (PIOP + PCS) ────────────────────────────────────
-    group.bench_function("TotalProver/1xSHA256", |b| {
+    // ── Build traces ────────────────────────────────────────────────
+    let sha_trace = generate_sha256_trace(SHA256_8X_NUM_VARS);
+    assert_eq!(sha_trace.len(), SHA256_BATCH_SIZE);
+
+    let ecdsa_trace = generate_zero_scalar_trace(ECDSA_NUM_VARS, ECDSA_BATCH_SIZE);
+    assert_eq!(ecdsa_trace.len(), ECDSA_BATCH_SIZE);
+
+    // ── PCS params ──────────────────────────────────────────────────
+    type ShaZt = Sha256ZipTypes<i64, 32>;
+    type ShaLc = IprsBPoly32R4B64<1, UNCHECKED>;
+    let sha_params = ZipPlusParams::<ShaZt, ShaLc>::new(
+        SHA256_8X_NUM_VARS, 1, ShaLc::new(512),
+    );
+
+    type EcZt = EcdsaScalarZipTypes;
+    type EcLc = IprsInt4R4B64<1, UNCHECKED>;
+    let ec_params = ZipPlusParams::<EcZt, EcLc>::new(
+        ECDSA_NUM_VARS, 1, EcLc::new(512),
+    );
+
+    // ── Lookup specs ────────────────────────────────────────────────
+    let sha_lookup_specs = sha256_lookup_specs();
+    let ec_lookup_specs = ecdsa_lookup_specs();
+
+    // ── Total Prover (IC + CPR + Lookup + PCS for both) ─────────────
+    group.bench_function("TotalProver", |b| {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
                 let t = Instant::now();
-
-                // 1. PIOP: IdealCheck
-                let mut transcript = zinc_transcript::KeccakTranscript::new();
-                let field_cfg = transcript.get_random_field_cfg::<
-                    F, <F as Field>::Inner, MillerRabin
-                >();
-                let (_ic_proof, ic_state) =
-                    zinc_piop::ideal_check::IdealCheckProtocol::<
-                        F
-                    >::prove_as_subprotocol::<BinaryPoly<32>, Sha256Uair>(
-                        &mut transcript,
-                        &trace,
-                        num_constraints,
-                        num_vars,
-                        &field_cfg,
-                    )
-                    .expect("IC prover failed");
-
-                // 2. PIOP: CombinedPolyResolver
-                let _ = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<
-                    F
-                >::prove_as_subprotocol::<BinaryPoly<32>, Sha256Uair>(
-                    &mut transcript,
-                    &ic_state.trace_matrix,
-                    &ic_state.evaluation_point,
-                    ic_state.projected_scalars.clone(),
-                    num_constraints,
-                    num_vars,
-                    max_degree,
-                    &field_cfg,
-                )
-                .expect("CPR prover failed");
-
-                // 3. PCS: Commit + Test + Evaluate
-                type Lc = IprsBPoly32R4B16<1, UNCHECKED>;
-                type Zt = Sha256ZipTypes<i64, 32>;
-                let row_len = 128;
-                let linear_code = Lc::new(row_len);
-                let params = ZipPlusParams::new(SHA256_NUM_VARS, 1, linear_code);
-
-                let (hint, _commitment) = BatchedZipPlus::<Zt, Lc>::commit(&params, &trace)
-                    .expect("commit");
-                let test_tx = BatchedZipPlus::<Zt, Lc>::test::<UNCHECKED>(&params, &trace, &hint)
-                    .expect("test");
-                let point: Vec<<Zt as ZipTypes>::Pt> = vec![<Zt as ZipTypes>::Pt::one(); SHA256_NUM_VARS];
-                let _ = BatchedZipPlus::<Zt, Lc>::evaluate::<F, UNCHECKED>(
-                    &params, &trace, &point, test_tx,
-                )
-                .expect("evaluate");
-
+                let _sha = zinc_snark::pipeline::prove::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
+                    &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
+                );
+                let _ec = zinc_snark::pipeline::prove_generic::<
+                    EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED,
+                >(
+                    &ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &ec_lookup_specs,
+                );
                 total += t.elapsed();
             }
             total
         });
     });
 
-    // ── Total Verifier (PCS only — PIOP verifier is algebraic/negligible) ─────
-    // Prepare a proof for the verifier benchmark
-    {
-        type Lc = IprsBPoly32R4B16<1, UNCHECKED>;
-        type Zt = Sha256ZipTypes<i64, 32>;
-        let linear_code = Lc::new(128);
-        let params = ZipPlusParams::new(SHA256_NUM_VARS, 1, linear_code);
-        let (hint, commitment) = BatchedZipPlus::<Zt, Lc>::commit(&params, &trace)
-            .expect("commit");
-        let test_tx = BatchedZipPlus::<Zt, Lc>::test::<UNCHECKED>(&params, &trace, &hint)
-            .expect("test");
-        let point: Vec<<Zt as ZipTypes>::Pt> = vec![<Zt as ZipTypes>::Pt::one(); SHA256_NUM_VARS];
-        let (_evals_f, proof) = BatchedZipPlus::<Zt, Lc>::evaluate::<F, UNCHECKED>(
-            &params, &trace, &point, test_tx,
-        )
-        .expect("evaluate");
+    // ── Prepare proofs for verifier benchmark ───────────────────────
+    let sha_proof = zinc_snark::pipeline::prove::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
+        &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
+    );
+    let ec_proof = zinc_snark::pipeline::prove_generic::<
+        EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED,
+    >(
+        &ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &ec_lookup_specs,
+    );
 
-        group.bench_function("TotalVerifier/1xSHA256", |b| {
-            b.iter(|| {
-                let result = BatchedZipPlus::<Zt, Lc>::verify::<F, UNCHECKED>(
-                    &params,
-                    &commitment,
-                    &point,
-                    &proof,
-                );
-                let _ = black_box(result);
-            });
+    // ── Total Verifier (IC + CPR + Lookup verify + PCS verify) ──────
+    group.bench_function("TotalVerifier", |b| {
+        b.iter(|| {
+            let sha_r = zinc_snark::pipeline::verify::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED, _, _>(
+                &sha_params, &sha_proof, SHA256_8X_NUM_VARS,
+                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+            );
+            let _ = black_box(sha_r);
+            let ec_r = zinc_snark::pipeline::verify_generic::<
+                EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED, EcdsaIdealOverF, _,
+            >(
+                &ec_params, &ec_proof, ECDSA_NUM_VARS,
+                |ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
+                    IdealOrZero::Zero => EcdsaIdealOverF,
+                    IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
+                },
+            );
+            let _ = black_box(ec_r);
         });
-    }
+    });
+
+    // ── Timing breakdown ────────────────────────────────────────────
+    eprintln!("\n=== 8xSHA256+ECDSA E2E Timing ===");
+    eprintln!("  SHA prover: IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
+        sha_proof.timing.ideal_check,
+        sha_proof.timing.combined_poly_resolver,
+        sha_proof.timing.lookup,
+        sha_proof.timing.pcs_commit,
+        sha_proof.timing.pcs_test,
+        sha_proof.timing.pcs_evaluate,
+        sha_proof.timing.total,
+    );
+    eprintln!("  ECDSA prover: IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
+        ec_proof.timing.ideal_check,
+        ec_proof.timing.combined_poly_resolver,
+        ec_proof.timing.lookup,
+        ec_proof.timing.pcs_commit,
+        ec_proof.timing.pcs_test,
+        ec_proof.timing.pcs_evaluate,
+        ec_proof.timing.total,
+    );
 
     group.finish();
 }
@@ -1192,6 +1114,7 @@ fn sha256_full_pipeline(c: &mut Criterion) {
                     &params,
                     &trace,
                     num_vars,
+                    &[],
                 );
                 total += t.elapsed();
             }
@@ -1204,6 +1127,7 @@ fn sha256_full_pipeline(c: &mut Criterion) {
         &params,
         &trace,
         num_vars,
+        &[],
     );
 
     // ── Full Verifier ───────────────────────────────────────────────
@@ -1252,7 +1176,7 @@ fn sha256_full_pipeline(c: &mut Criterion) {
     eprintln!("  Target limit:  800 KB → {}", if total_size <= 819200 { "✓ UNDER" } else { "✗ OVER" });
 
     // ── Split PCS proof size comparison ─────────────────────────────
-    // Run separate PCS for the BinaryPoly (11 cols) and Int (9 cols) batches
+    // Run separate PCS for the BinaryPoly (14 cols) and Int (3 cols) batches
     // to measure the proof size savings from the column type split.
     // The PIOP proof size is unchanged — only PCS is split.
     {
@@ -1333,5 +1257,5 @@ fn sha256_full_pipeline(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, sha256_single, sha256_8x_ecdsa, sha256_piop_only, sha256_end_to_end, sha256_full_pipeline);
+criterion_group!(benches, sha256_single, sha256_8x_ecdsa, sha256_piop_only, sha256_8x_ecdsa_end_to_end, sha256_full_pipeline);
 criterion_main!(benches);

@@ -188,7 +188,15 @@ pub fn convert_trace_bp_to_i64(
             let evaluations: Vec<DensePolynomial<i64, 1>> = col
                 .evaluations
                 .iter()
-                .map(|bp| DensePolynomial::<i64, 1>::new([bp.to_u64() as i64]))
+                .map(|bp| {
+                    let mut val: u64 = 0;
+                    for (i, coeff) in bp.iter().enumerate() {
+                        if coeff.into_inner() {
+                            val |= 1u64 << i;
+                        }
+                    }
+                    DensePolynomial::<i64, 1>::new([val as i64])
+                })
                 .collect();
             DenseMultilinearExtension::from_evaluations_vec(col.num_vars, evaluations, zero)
         })
@@ -198,21 +206,37 @@ pub fn convert_trace_bp_to_i64(
 // ─── ECDSA UAIR ─────────────────────────────────────────────────────────────
 
 /// The ECDSA verification UAIR.
-pub struct EcdsaUair;
+///
+/// Compatibility alias for `EcdsaUairBp`.
+pub type EcdsaUair = EcdsaUairBp;
+
+/// ECDSA UAIR over `BinaryPoly<32>` (placeholder, no constraints).
+pub struct EcdsaUairBp;
+
+/// ECDSA UAIR over `DensePolynomial<i64, 1>` (7 Jacobian constraints).
+pub struct EcdsaUairDp;
+
+/// ECDSA UAIR over `Int<4>` (7 Jacobian constraints, 256-bit integers).
+pub struct EcdsaUairInt;
 
 // ─── BinaryPoly<32> implementation (placeholder, no constraints) ────────────
 
-impl Uair<BinaryPoly<32>> for EcdsaUair {
+impl Uair for EcdsaUairBp {
     type Ideal = EcdsaIdeal;
+    type Scalar = BinaryPoly<32>;
 
-    fn num_cols() -> usize {
-        NUM_COLS
+    fn signature() -> zinc_uair::UairSignature {
+        zinc_uair::UairSignature {
+            binary_poly_cols: NUM_COLS,
+            arbitrary_poly_cols: 0,
+            int_cols: 0,
+        }
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
         _b: &mut B,
-        _up: &[B::Expr],
-        _down: &[B::Expr],
+        _up: zinc_uair::TraceRow<B::Expr>,
+        _down: zinc_uair::TraceRow<B::Expr>,
         _from_ref: FromR,
         _mbs: MulByScalar,
         _ideal_from_ref: IFromR,
@@ -243,17 +267,22 @@ impl Uair<BinaryPoly<32>> for EcdsaUair {
 /// Number of constraints for the i64 ECDSA UAIR.
 pub const NUM_CONSTRAINTS_I64: usize = 7;
 
-impl Uair<DensePolynomial<i64, 1>> for EcdsaUair {
+impl Uair for EcdsaUairDp {
     type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<i64, 1>;
 
-    fn num_cols() -> usize {
-        NUM_COLS
+    fn signature() -> zinc_uair::UairSignature {
+        zinc_uair::UairSignature {
+            binary_poly_cols: 0,
+            arbitrary_poly_cols: NUM_COLS,
+            int_cols: 0,
+        }
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
         b: &mut B,
-        up: &[B::Expr],
-        down: &[B::Expr],
+        up: zinc_uair::TraceRow<B::Expr>,
+        down: zinc_uair::TraceRow<B::Expr>,
         from_ref: FromR,
         mbs: MulByScalar,
         _ideal_from_ref: IFromR,
@@ -263,6 +292,9 @@ impl Uair<DensePolynomial<i64, 1>> for EcdsaUair {
         MulByScalar: Fn(&B::Expr, &DensePolynomial<i64, 1>) -> Option<B::Expr>,
         IFromR: Fn(&ImpossibleIdeal) -> B::Ideal,
     {
+        // Access columns via TraceRow — all are arbitrary_poly
+        let up = up.arbitrary_poly;
+        let down = down.arbitrary_poly;
         // ── Helpers ─────────────────────────────────────────────────
         let dp = |v: i64| DensePolynomial::<i64, 1>::new([v]);
         let cst = |v: i64| from_ref(&dp(v));
@@ -377,17 +409,22 @@ impl Uair<DensePolynomial<i64, 1>> for EcdsaUair {
 /// Number of constraints for the Int<4> ECDSA UAIR.
 pub const NUM_CONSTRAINTS_INT4: usize = 7;
 
-impl Uair<Int<4>> for EcdsaUair {
+impl Uair for EcdsaUairInt {
     type Ideal = ImpossibleIdeal;
+    type Scalar = Int<4>;
 
-    fn num_cols() -> usize {
-        NUM_COLS
+    fn signature() -> zinc_uair::UairSignature {
+        zinc_uair::UairSignature {
+            binary_poly_cols: 0,
+            arbitrary_poly_cols: 0,
+            int_cols: NUM_COLS,
+        }
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
         b: &mut B,
-        up: &[B::Expr],
-        down: &[B::Expr],
+        up: zinc_uair::TraceRow<B::Expr>,
+        down: zinc_uair::TraceRow<B::Expr>,
         from_ref: FromR,
         mbs: MulByScalar,
         _ideal_from_ref: IFromR,
@@ -397,6 +434,9 @@ impl Uair<Int<4>> for EcdsaUair {
         MulByScalar: Fn(&B::Expr, &Int<4>) -> Option<B::Expr>,
         IFromR: Fn(&ImpossibleIdeal) -> B::Ideal,
     {
+        // Access columns via TraceRow — all are int
+        let up = up.int;
+        let down = down.int;
         // ── Helpers ─────────────────────────────────────────────────
         let int = |v: i64| Int::<4>::from_ref(&v);
         let cst = |v: i64| from_ref(&int(v));
@@ -513,13 +553,13 @@ mod tests {
 
     #[test]
     fn i64_constraint_count() {
-        let n = count_constraints::<DensePolynomial<i64, 1>, EcdsaUair>();
+        let n = count_constraints::<EcdsaUairDp>();
         assert_eq!(n, NUM_CONSTRAINTS_I64, "Expected 7 ECDSA i64 constraints");
     }
 
     #[test]
     fn i64_max_degree() {
-        let d = count_max_degree::<DensePolynomial<i64, 1>, EcdsaUair>();
+        let d = count_max_degree::<EcdsaUairDp>();
         // C6 has degree 12: s(deg2) * R_a²(deg10) where R_a = T_y·Z_mid³ − Y_mid (deg5)
         assert!(d <= 12, "Max degree should be at most 12, got {d}");
         assert!(d >= 4, "Max degree should be at least 4 (doubling formulas), got {d}");
@@ -527,13 +567,13 @@ mod tests {
 
     #[test]
     fn int4_constraint_count() {
-        let n = count_constraints::<Int<4>, EcdsaUair>();
+        let n = count_constraints::<EcdsaUairInt>();
         assert_eq!(n, NUM_CONSTRAINTS_INT4, "Expected 7 ECDSA Int<4> constraints");
     }
 
     #[test]
     fn int4_max_degree() {
-        let d = count_max_degree::<Int<4>, EcdsaUair>();
+        let d = count_max_degree::<EcdsaUairInt>();
         assert!(d <= 12, "Max degree should be at most 12, got {d}");
         assert!(d >= 4, "Max degree should be at least 4 (doubling formulas), got {d}");
     }
