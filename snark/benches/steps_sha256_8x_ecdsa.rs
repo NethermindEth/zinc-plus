@@ -180,12 +180,10 @@ fn generate_zero_scalar_trace(
 ///  15.  SHA/PIOP/Lookup        — lookup sumcheck (standalone, separate from CPR)
 ///  16.  PIOP/BatchedCPR+Lookup — SHA CPR + ECDSA CPR + SHA Lookup in one
 ///                                multi-degree sumcheck (A/B comparison with 13+15)
-///  17.  SHA/PCS/Test
-///  18.  ECDSA/PCS/Test
-///  19.  SHA/PCS/Evaluate
-///  20.  ECDSA/PCS/Evaluate
-///  21.  E2E/Prover  (unified dual-circuit pipeline)
-///  22.  E2E/Verifier (unified dual-circuit pipeline)
+///  17.  SHA/PCS/Prove
+///  18.  ECDSA/PCS/Prove
+///  19.  E2E/Prover  (unified dual-circuit pipeline)
+///  20.  E2E/Verifier (unified dual-circuit pipeline)
 fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     use zinc_sha256_uair::CyclotomicIdeal;
     use zinc_ecdsa_uair::EcdsaIdealOverF;
@@ -769,9 +767,9 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         });
     }
 
-    // ── 17. SHA PCS Test ────────────────────────────────────────────
+    // ── 17. SHA PCS Prove ────────────────────────────────────────────
     let (sha_hint, _) = ZipPlus::<ShaZt, ShaLc>::commit(&sha_params, &sha_trace).expect("commit");
-    group.bench_function("SHA/PCS/Test", |b| {
+    group.bench_function("SHA/PCS/Prove", |b| {
         b.iter(|| {
             let pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
             black_box(
@@ -780,9 +778,9 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         });
     });
 
-    // ── 18. ECDSA PCS Test ──────────────────────────────────────────
+    // ── 18. ECDSA PCS Prove ──────────────────────────────────────────
     let (ec_hint, _) = ZipPlus::<EcZt, EcLc>::commit(&ec_params, &ecdsa_trace).expect("commit");
-    group.bench_function("ECDSA/PCS/Test", |b| {
+    group.bench_function("ECDSA/PCS/Prove", |b| {
         b.iter(|| {
             let pt: Vec<i128> = vec![1i128; ECDSA_NUM_VARS];
             black_box(
@@ -791,29 +789,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         });
     });
 
-    // ── 19. SHA PCS Evaluate ────────────────────────────────────────
-    group.bench_function("SHA/PCS/Evaluate", |b| {
-        b.iter(|| {
-            let pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
-            let r = ZipPlus::<ShaZt, ShaLc>::prove::<F, UNCHECKED>(
-                &sha_params, &sha_trace, &pt, &sha_hint,
-            );
-            let _ = black_box(r);
-        });
-    });
-
-    // ── 20. ECDSA PCS Evaluate ──────────────────────────────────────
-    group.bench_function("ECDSA/PCS/Evaluate", |b| {
-        b.iter(|| {
-            let pt: Vec<i128> = vec![1i128; ECDSA_NUM_VARS];
-            let r = ZipPlus::<EcZt, EcLc>::prove::<FScalar, UNCHECKED>(
-                &ec_params, &ecdsa_trace, &pt, &ec_hint,
-            );
-            let _ = black_box(r);
-        });
-    });
-
-    // ── 21. E2E Total Prover (unified dual-circuit pipeline) ─────
+    // ── 19. E2E Total Prover (unified dual-circuit pipeline) ─────
     //
     // Uses prove_dual_circuit which shares one transcript, one IC eval
     // point, one projecting element, and one multi-degree sumcheck
@@ -844,7 +820,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         });
     });
 
-    // ── 22. E2E Total Verifier (unified dual-circuit pipeline) ──────
+    // ── 20. E2E Total Verifier (unified dual-circuit pipeline) ──────
     let dual_proof = zinc_snark::pipeline::prove_dual_circuit::<
         Sha256Uair,
         EcdsaUairInt,

@@ -119,10 +119,9 @@ fn generate_sha256_trace(num_vars: usize) -> Vec<DenseMultilinearExtension<Binar
 ///   3. PIOP/IdealCheck — Ideal Check prover
 ///   4. PIOP/CPR — Combined Poly Resolver prover
 ///   5. PIOP/Lookup — GKR batched decomposed LogUp prover
-///   6. PCS/Test — Zip+ test (column proximity testing)
-///   7. PCS/Evaluate — Zip+ evaluation opening
-///   8. E2E/Prover — total (pipeline::prove)
-///   9. E2E/Verifier — total (pipeline::verify)
+///   6. PCS/Prove — Zip+ prove (test + evaluation combined)
+///   7. E2E/Prover — total (pipeline::prove)
+///   8. E2E/Verifier — total (pipeline::verify)
 fn sha256_8x_stepwise(c: &mut Criterion) {
     use zinc_sha256_uair::CyclotomicIdeal;
     use zinc_uair::ideal_collector::IdealOrZero;
@@ -318,11 +317,11 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
         });
     }
 
-    // ── 6. PCS Test ─────────────────────────────────────────────────
+    // ── 6. PCS Prove ────────────────────────────────────────────────
     let (sha_hint, _sha_comm) = ZipPlus::<ShaZt, ShaLc>::commit(&sha_params, &sha_trace)
         .expect("commit");
 
-    group.bench_function("PCS/Test", |b| {
+    group.bench_function("PCS/Prove", |b| {
         b.iter(|| {
             let pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
             let r = ZipPlus::<ShaZt, ShaLc>::prove::<F, UNCHECKED>(
@@ -332,18 +331,7 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
         });
     });
 
-    // ── 7. PCS Evaluate ─────────────────────────────────────────────
-    group.bench_function("PCS/Evaluate", |b| {
-        b.iter(|| {
-            let pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
-            let r = ZipPlus::<ShaZt, ShaLc>::prove::<F, UNCHECKED>(
-                &sha_params, &sha_trace, &pt, &sha_hint,
-            );
-            let _ = black_box(r);
-        });
-    });
-
-    // ── 8. E2E Total Prover ─────────────────────────────────────────
+    // ── 7. E2E Total Prover ─────────────────────────────────────────
     group.bench_function("E2E/Prover", |b| {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
@@ -358,7 +346,7 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
         });
     });
 
-    // ── 9. E2E Total Verifier ───────────────────────────────────────
+    // ── 8. E2E Total Verifier ───────────────────────────────────────
     let sha_proof = zinc_snark::pipeline::prove::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
         &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
     );
