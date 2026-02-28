@@ -3,7 +3,9 @@ mod generate_witness;
 
 use std::marker::PhantomData;
 
-use crypto_primitives::{FixedSemiring, Semiring, boolean::Boolean, crypto_bigint_int::Int};
+use crypto_primitives::{
+    ConstSemiring, FixedSemiring, Semiring, boolean::Boolean, crypto_bigint_int::Int,
+};
 use num_traits::Zero;
 use rand::{
     Rng,
@@ -124,11 +126,11 @@ where
     }
 }
 
-pub struct TestAirNoMultiplication<const LIMBS: usize>;
+pub struct TestAirNoMultiplication<R>(PhantomData<R>);
 
-impl<const LIMBS: usize> Uair for TestAirNoMultiplication<LIMBS> {
-    type Ideal = DegreeOneIdeal<Int<LIMBS>>;
-    type Scalar = DensePolynomial<Int<LIMBS>, 32>;
+impl<R: ConstSemiring + From<i32> + 'static> Uair for TestAirNoMultiplication<R> {
+    type Ideal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
 
     fn signature() -> UairSignature {
         UairSignature {
@@ -153,19 +155,21 @@ impl<const LIMBS: usize> Uair for TestAirNoMultiplication<LIMBS> {
 
         b.assert_in_ideal(
             up[0].clone() + &up[1] - &up[2],
-            &ideal_from_ref(&DegreeOneIdeal::new(Int::from(2))),
+            &ideal_from_ref(&DegreeOneIdeal::new(R::from(2))),
         );
     }
 }
 
-impl<const LIMBS: usize> GenerateSingleTypeWitness for TestAirNoMultiplication<LIMBS> {
-    type Witness = DensePolynomial<Int<LIMBS>, 32>;
+impl<R: ConstSemiring + From<i32> + 'static> GenerateSingleTypeWitness
+    for TestAirNoMultiplication<R>
+{
+    type Witness = DensePolynomial<R, 32>;
 
     fn generate_witness<Rng: rand::RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
-    ) -> Vec<DenseMultilinearExtension<DensePolynomial<Int<LIMBS>, 32>>> {
-        let a: DenseMultilinearExtension<DensePolynomial<Int<LIMBS>, 32>> =
+    ) -> Vec<DenseMultilinearExtension<DensePolynomial<R, 32>>> {
+        let a: DenseMultilinearExtension<DensePolynomial<R, 32>> =
             DenseMultilinearExtension::rand(num_vars, rng)
                 .into_iter()
                 .map(|x: u32| {
@@ -190,11 +194,11 @@ impl<const LIMBS: usize> GenerateSingleTypeWitness for TestAirNoMultiplication<L
     }
 }
 
-pub struct TestAirScalarMultiplications<const LIMBS: usize>;
+pub struct TestAirScalarMultiplications<R>(PhantomData<R>);
 
-impl<const LIMBS: usize> Uair for TestAirScalarMultiplications<LIMBS> {
-    type Ideal = DegreeOneIdeal<Int<LIMBS>>;
-    type Scalar = DensePolynomial<Int<LIMBS>, 32>;
+impl<R: ConstSemiring + From<i8> + 'static> Uair for TestAirScalarMultiplications<R> {
+    type Ideal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
 
     fn signature() -> UairSignature {
         UairSignature {
@@ -214,26 +218,26 @@ impl<const LIMBS: usize> Uair for TestAirScalarMultiplications<LIMBS> {
     ) where
         B: ConstraintBuilder,
         IFromR: Fn(&Self::Ideal) -> B::Ideal,
-        FromR: Fn(&DensePolynomial<Int<LIMBS>, 32>) -> B::Expr,
-        MulByScalar: Fn(&B::Expr, &DensePolynomial<Int<LIMBS>, 32>) -> Option<B::Expr>,
+        FromR: Fn(&DensePolynomial<R, 32>) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &DensePolynomial<R, 32>) -> Option<B::Expr>,
     {
         let up = up.arbitrary_poly;
 
         b.assert_in_ideal(
             mbs(
                 &up[0],
-                &DensePolynomial::new([Int::from_i8(-1), Int::from_i8(0), Int::from_i8(1)]),
+                &DensePolynomial::new([R::from(-1), R::from(0), R::from(1)]),
             )
             .expect("arithmetic overflow")
                 + &up[1]
                 - &up[2]
                 + from_ref(&DensePolynomial::new([
-                    Int::from_i8(1),
-                    Int::from_i8(2),
-                    Int::from_i8(3),
-                    Int::from_i8(4),
+                    R::from(1),
+                    R::from(2),
+                    R::from(3),
+                    R::from(4),
                 ])),
-            &ideal_from_ref(&DegreeOneIdeal::new(Int::from(2))),
+            &ideal_from_ref(&DegreeOneIdeal::new(R::from(2))),
         );
     }
 }
@@ -419,7 +423,10 @@ mod tests {
 
     #[test]
     fn test_air_no_multiplication_correct_constraints_number() {
-        assert_eq!(count_constraints::<TestAirNoMultiplication<LIMBS>>(), 1);
+        assert_eq!(
+            count_constraints::<TestAirNoMultiplication<Int<LIMBS>>>(),
+            1
+        );
     }
 
     #[test]
@@ -432,13 +439,13 @@ mod tests {
 
     #[test]
     fn test_air_no_multiplication_correct_max_degree() {
-        assert_eq!(count_max_degree::<TestAirNoMultiplication<LIMBS>>(), 1);
+        assert_eq!(count_max_degree::<TestAirNoMultiplication<Int<LIMBS>>>(), 1);
     }
 
     #[test]
     fn test_air_scalar_multiplications_correct_collect_scalars() {
         assert_eq!(
-            collect_scalars::<TestAirScalarMultiplications<LIMBS>>(),
+            collect_scalars::<TestAirScalarMultiplications<Int<LIMBS>>>(),
             (vec![
                 DensePolynomial::new([Int::from_i8(-1), Int::from_i8(0), Int::from_i8(1)]),
                 DensePolynomial::new([
