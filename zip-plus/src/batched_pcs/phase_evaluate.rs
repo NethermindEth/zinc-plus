@@ -89,54 +89,67 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> BatchedZipPlus<Zt, Lc> {
         let project = Zt::Eval::prepare_projection(&projecting_element);
 
         // Step 1: Compute all per-polynomial combined rows and evaluations
-        let mut per_poly_rows: Vec<Vec<F>> = Vec::with_capacity(polys.len());
-        let mut evals_f = Vec::with_capacity(polys.len());
+        // Parallelised over polynomials; each poly's projection and
+        // combine_rows are themselves internally parallel.
+        let results: Vec<(Vec<F>, F)> = cfg_iter!(polys)
+            .map(|poly| {
+                let evaluations: Vec<F> = cfg_iter!(poly).map(&project).collect();
 
-        for poly in polys {
-            let evaluations: Vec<F> = cfg_iter!(poly).map(&project).collect();
+                let q_0_combined_row = if num_rows > 1 {
+                    combine_rows!(
+                        CHECK_FOR_OVERFLOW,
+                        &q_0,
+                        evaluations.iter(),
+                        Ok::<_, ZipError>,
+                        row_len,
+                        F::zero_with_cfg(&field_cfg)
+                    )
+                } else {
+                    evaluations
+                };
 
-            let q_0_combined_row = if num_rows > 1 {
-                combine_rows!(
-                    CHECK_FOR_OVERFLOW,
-                    &q_0,
-                    evaluations.iter(),
-                    Ok::<_, ZipError>,
-                    row_len,
-                    F::zero_with_cfg(&field_cfg)
-                )
-            } else {
-                evaluations
-            };
+                // It is safe to use unchecked inner product since we are in a field.
+                let eval_f = MBSInnerProduct::inner_product::<UNCHECKED>(
+                    &q_0_combined_row,
+                    &q_1,
+                    F::zero_with_cfg(&field_cfg),
+                )?;
 
-            // It is safe to use unchecked inner product since we are in a field.
-            let eval_f = MBSInnerProduct::inner_product::<UNCHECKED>(
-                &q_0_combined_row,
-                &q_1,
-                F::zero_with_cfg(&field_cfg),
-            )?;
+                Ok((q_0_combined_row, eval_f))
+            })
+            .collect::<Result<Vec<_>, ZipError>>()?;
 
-            per_poly_rows.push(q_0_combined_row);
-            evals_f.push(eval_f);
-        }
+        let (per_poly_rows, evals_f): (Vec<Vec<F>>, Vec<F>) = results.into_iter().unzip();
 
         // Step 2: Sample batching challenge β from Fiat-Shamir transcript
         let beta: Zt::Chal = transcript.fs_transcript.get_challenge();
         let beta: F = (&beta).into_with_cfg(&field_cfg);
 
         // Step 3: Compute batched_row = Σ β^i × r_i
-        let mut batched_row = vec![F::zero_with_cfg(&field_cfg); row_len];
-        let mut beta_power = F::one_with_cfg(&field_cfg);
-        for row in &per_poly_rows {
-            for (acc, val) in batched_row.iter_mut().zip(row.iter()) {
-                let scaled = val
-                    .mul_by_scalar::<UNCHECKED>(&beta_power)
+        // Pre-compute β powers so column accumulation can be parallelised.
+        let beta_powers: Vec<F> = {
+            let mut powers = Vec::with_capacity(per_poly_rows.len());
+            let mut bp = F::one_with_cfg(&field_cfg);
+            for _ in 0..per_poly_rows.len() {
+                powers.push(bp.clone());
+                bp = bp
+                    .mul_by_scalar::<UNCHECKED>(&beta)
                     .expect("Field multiplication cannot overflow");
-                *acc += scaled;
             }
-            beta_power = beta_power
-                .mul_by_scalar::<UNCHECKED>(&beta)
-                .expect("Field multiplication cannot overflow");
-        }
+            powers
+        };
+
+        let mut batched_row = vec![F::zero_with_cfg(&field_cfg); row_len];
+        cfg_iter_mut!(batched_row)
+            .enumerate()
+            .for_each(|(j, acc)| {
+                for (row, bp) in per_poly_rows.iter().zip(beta_powers.iter()) {
+                    let scaled = row[j]
+                        .mul_by_scalar::<UNCHECKED>(bp)
+                        .expect("Field multiplication cannot overflow");
+                    *acc += scaled;
+                }
+            });
 
         // Step 4: Write the single batched row to the transcript.
         transcript.write_field_elements(&batched_row)?;
