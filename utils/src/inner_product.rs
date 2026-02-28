@@ -65,6 +65,42 @@ where
     }
 }
 
+/// Like `MBSInnerProduct`, but widens each `Lhs` element to `Out` before
+/// multiplying by `Rhs`. This avoids overflow when `Lhs` is too narrow
+/// to hold the product (e.g., `i64 * i128`).
+pub struct WideningMBSInnerProduct;
+
+impl<Lhs, Rhs, Out> InnerProduct<[Lhs], Rhs, Out> for WideningMBSInnerProduct
+where
+    Out: FromRef<Lhs> + for<'a> MulByScalar<&'a Rhs> + CheckedAdd,
+{
+    #[allow(clippy::arithmetic_side_effects)] // Used in unchecked mode
+    fn inner_product<const CHECK: bool>(
+        lhs: &[Lhs],
+        rhs: &[Rhs],
+        zero: Out,
+    ) -> Result<Out, InnerProductError> {
+        if lhs.len() != rhs.len() {
+            return Err(InnerProductError::LengthMismatch {
+                lhs: lhs.len(),
+                rhs: rhs.len(),
+            });
+        }
+
+        lhs.iter().zip(rhs).try_fold(zero, |acc, (l, r)| {
+            let widened = Out::from_ref(l);
+            let product = widened
+                .mul_by_scalar::<CHECK>(r)
+                .ok_or(InnerProductError::Overflow)?;
+            if CHECK {
+                acc.checked_add(&product).ok_or(InnerProductError::Overflow)
+            } else {
+                Ok(acc + product)
+            }
+        })
+    }
+}
+
 /// The inner product for vectors of length 1 (a.k.a. scalars).
 /// Uses `mul_by_scalar` to multiply the only components of vectors
 /// to get the result.

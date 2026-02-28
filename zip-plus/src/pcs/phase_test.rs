@@ -29,7 +29,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let initial_transcript_len = transcript.stream.get_ref().len();
         let estimated_transcript_size =
             // Combined rows
-            pp.linear_code.row_len() * Zt::CombR::NUM_BYTES
+            if pp.num_rows > 1 { pp.linear_code.row_len() * Zt::CombR::NUM_BYTES } else { 0 }
             // Column openings
             + Zt::NUM_COLUMN_OPENINGS * (
                 // Column itself

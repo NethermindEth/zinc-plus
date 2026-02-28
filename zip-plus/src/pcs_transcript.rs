@@ -81,8 +81,8 @@ impl PcsProverTranscript {
         Ok(result)
     }
 
-    pub fn reserve_capacity(&mut self, capacity: usize) {
-        self.stream.get_mut().reserve(capacity)
+    pub fn reserve_capacity(&mut self, additional_capacity: usize) {
+        self.stream.get_mut().reserve(additional_capacity)
     }
 
     /// Transform the prover transcript into a verifier transcript by resetting

@@ -95,14 +95,14 @@ pub trait WideningMulByScalar<Lhs, Rhs>: Clone + Default + Send + Sync {
 }
 
 #[derive(Copy, Clone, Default)]
-pub struct PrimtiveWideningMulByScalar;
+pub struct PrimitiveWideningMulByScalar;
 
-impl WideningMulByScalar<i64, i64>
-for PrimtiveWideningMulByScalar
-{
+impl WideningMulByScalar<i64, i64> for PrimitiveWideningMulByScalar {
     type Output = i128;
 
+    #[inline(always)]
+    #[allow(clippy::arithmetic_side_effects)] // Not possible to overflow since we are widening the result to i128
     fn mul_by_scalar_widen(lhs: &i64, rhs: &i64) -> Self::Output {
-        todo!()
+        i128::from(*lhs) * i128::from(*rhs)
     }
 }

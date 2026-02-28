@@ -3,9 +3,7 @@ mod generate_witness;
 
 use std::marker::PhantomData;
 
-use crypto_primitives::{
-    ConstSemiring, FixedSemiring, Semiring, boolean::Boolean, crypto_bigint_int::Int,
-};
+use crypto_primitives::{ConstSemiring, FixedSemiring, Semiring, boolean::Boolean};
 use num_traits::Zero;
 use rand::{
     Rng,
@@ -27,7 +25,10 @@ use zinc_uair::ideal::ImpossibleIdeal;
 
 pub struct TestUairSimpleMultiplication<R>(PhantomData<R>);
 
-impl<R: Semiring + 'static> Uair for TestUairSimpleMultiplication<R> {
+impl<R> Uair for TestUairSimpleMultiplication<R>
+where
+    R: Semiring + 'static,
+{
     type Ideal = ImpossibleIdeal; // Not used
     type Scalar = DensePolynomial<R, 32>;
 
@@ -60,7 +61,7 @@ impl<R: Semiring + 'static> Uair for TestUairSimpleMultiplication<R> {
 
 impl<R> GenerateSingleTypeWitness for TestUairSimpleMultiplication<R>
 where
-    R: FixedSemiring + 'static + FromRef<i8>,
+    R: FixedSemiring + From<i8> + 'static,
     StandardUniform: Distribution<R>,
 {
     type Witness = DensePolynomial<R, 32>;
@@ -69,16 +70,15 @@ where
         num_vars: usize,
         rng: &mut Rng,
     ) -> Vec<DenseMultilinearExtension<DensePolynomial<R, 32>>> {
-        let mut a: Vec<DynamicPolynomialFS<R>> = vec![DynamicPolynomialFS::new(vec![R::from_ref(
-            &rng.random::<i8>(),
-        )])];
+        let mut a: Vec<DynamicPolynomialFS<R>> =
+            vec![DynamicPolynomialFS::new(vec![R::from(rng.random::<i8>())])];
         let mut b: Vec<DynamicPolynomialFS<R>> = vec![DynamicPolynomialFS::new(vec![
             R::zero(),
-            R::from_ref(&rng.random::<i8>()),
+            R::from(rng.random::<i8>()),
         ])];
         let mut c: Vec<DynamicPolynomialFS<R>> = vec![DynamicPolynomialFS::new(vec![
             R::zero(),
-            R::from_ref(&rng.random::<i8>()),
+            R::from(rng.random::<i8>()),
         ])];
 
         for i in 1..1 << num_vars {
@@ -128,7 +128,10 @@ where
 
 pub struct TestAirNoMultiplication<R>(PhantomData<R>);
 
-impl<R: ConstSemiring + From<i32> + 'static> Uair for TestAirNoMultiplication<R> {
+impl<R> Uair for TestAirNoMultiplication<R>
+where
+    R: ConstSemiring + From<i32> + 'static,
+{
     type Ideal = DegreeOneIdeal<R>;
     type Scalar = DensePolynomial<R, 32>;
 
@@ -160,8 +163,9 @@ impl<R: ConstSemiring + From<i32> + 'static> Uair for TestAirNoMultiplication<R>
     }
 }
 
-impl<R: ConstSemiring + From<i32> + 'static> GenerateSingleTypeWitness
-    for TestAirNoMultiplication<R>
+impl<R> GenerateSingleTypeWitness for TestAirNoMultiplication<R>
+where
+    R: ConstSemiring + From<i32> + 'static,
 {
     type Witness = DensePolynomial<R, 32>;
 
@@ -196,7 +200,10 @@ impl<R: ConstSemiring + From<i32> + 'static> GenerateSingleTypeWitness
 
 pub struct TestAirScalarMultiplications<R>(PhantomData<R>);
 
-impl<R: ConstSemiring + From<i8> + 'static> Uair for TestAirScalarMultiplications<R> {
+impl<R> Uair for TestAirScalarMultiplications<R>
+where
+    R: ConstSemiring + From<i8> + 'static,
+{
     type Ideal = DegreeOneIdeal<R>;
     type Scalar = DensePolynomial<R, 32>;
 
@@ -242,11 +249,14 @@ impl<R: ConstSemiring + From<i8> + 'static> Uair for TestAirScalarMultiplication
     }
 }
 
-pub struct BinaryDecompositionUair;
+pub struct BinaryDecompositionUair<R>(PhantomData<R>);
 
-impl Uair for BinaryDecompositionUair {
-    type Ideal = DegreeOneIdeal<u32>;
-    type Scalar = DensePolynomial<u32, 32>;
+impl<R> Uair for BinaryDecompositionUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
 
     fn signature() -> UairSignature {
         UairSignature {
@@ -274,14 +284,17 @@ impl Uair for BinaryDecompositionUair {
 
         b.assert_in_ideal(
             binary_poly_col.clone() - int_col,
-            &ideal_from_ref(&DegreeOneIdeal::new(2)),
+            &ideal_from_ref(&DegreeOneIdeal::new(R::from(2))),
         );
     }
 }
 
-impl GenerateMultiTypeWitness for BinaryDecompositionUair {
-    type PolyCoeff = u32;
-    type Int = u32;
+impl<R> GenerateMultiTypeWitness for BinaryDecompositionUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
 
     fn generate_witness<Rng: rand::RngCore + ?Sized>(
         num_vars: usize,
@@ -291,21 +304,26 @@ impl GenerateMultiTypeWitness for BinaryDecompositionUair {
         Vec<DenseMultilinearExtension<DensePolynomial<Self::PolyCoeff, 32>>>,
         Vec<DenseMultilinearExtension<Self::Int>>,
     ) {
-        let int_col: DenseMultilinearExtension<u32> =
+        let int_col_u32: DenseMultilinearExtension<u32> =
             DenseMultilinearExtension::rand(num_vars, rng);
 
         let binary_poly_col: DenseMultilinearExtension<BinaryPoly<32>> =
-            int_col.iter().map(|i| BinaryPoly::from(*i)).collect();
+            int_col_u32.iter().map(|i| BinaryPoly::from(*i)).collect();
+
+        let int_col = int_col_u32.into_iter().map(R::from).collect();
 
         (vec![binary_poly_col], vec![], vec![int_col])
     }
 }
 
-pub struct BigLinearUair;
+pub struct BigLinearUair<R>(PhantomData<R>);
 
-impl Uair for BigLinearUair {
-    type Ideal = DegreeOneIdeal<u32>;
-    type Scalar = DensePolynomial<u32, 32>;
+impl<R> Uair for BigLinearUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
 
     fn signature() -> UairSignature {
         UairSignature {
@@ -328,6 +346,9 @@ impl Uair for BigLinearUair {
         MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
         IFromR: Fn(&Self::Ideal) -> B::Ideal,
     {
+        let one_ideal = DegreeOneIdeal::new(R::from(1));
+        let two_ideal = DegreeOneIdeal::new(R::from(2));
+
         let sum_of_binary_polys = up.binary_poly[1..]
             .iter()
             .fold(up.binary_poly[0].clone(), |acc, next| acc + next);
@@ -336,13 +357,13 @@ impl Uair for BigLinearUair {
         //      = up.int[0] mod (X - 1)
         b.assert_in_ideal(
             sum_of_binary_polys - &up.int[0],
-            &ideal_from_ref(&DegreeOneIdeal::new(1)),
+            &ideal_from_ref(&one_ideal),
         );
 
         // down.binary_poly[0] = up.int[0] mod (X - 1)
         b.assert_in_ideal(
             down.binary_poly[0].clone() - &up.int[0],
-            &ideal_from_ref(&DegreeOneIdeal::new(2)),
+            &ideal_from_ref(&two_ideal),
         );
 
         // up.binary_poly[i] = down.binary_poly[i], for all i=1,...,15
@@ -355,9 +376,12 @@ impl Uair for BigLinearUair {
     }
 }
 
-impl GenerateMultiTypeWitness for BigLinearUair {
-    type PolyCoeff = u32;
-    type Int = u32;
+impl<R> GenerateMultiTypeWitness for BigLinearUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
 
     fn generate_witness<Rng: rand::RngCore + ?Sized>(
         num_vars: usize,
@@ -369,19 +393,21 @@ impl GenerateMultiTypeWitness for BigLinearUair {
     ) {
         let mut binary_poly_cols: Vec<DenseMultilinearExtension<BinaryPoly<32>>> =
             vec![(0..(1 << num_vars)).map(|_| BinaryPoly::zero()).collect(); 16];
-        let mut int_col: DenseMultilinearExtension<u32> = (0..(1 << num_vars)).map(|_| 0).collect();
+        let mut int_col: DenseMultilinearExtension<Self::Int> =
+            (0..(1 << num_vars)).map(|_| R::ZERO).collect();
 
         binary_poly_cols.iter_mut().for_each(|col| {
             col[0] = rng.random();
         });
 
         for i in 0..(1 << num_vars) - 1 {
-            int_col[i] = binary_poly_cols
+            let int: u32 = binary_poly_cols
                 .iter()
-                .map(|col| col[i].evaluate_at_point(&1u32).expect("should be fine"))
+                .map(|col| col[i].evaluate_at_point(&1_u32).expect("should be fine"))
                 .sum();
+            int_col[i] = R::from(int);
 
-            binary_poly_cols[0][i + 1] = BinaryPoly::from(int_col[i]);
+            binary_poly_cols[0][i + 1] = BinaryPoly::from(int);
             binary_poly_cols[1..].iter_mut().for_each(|col| {
                 col[i + 1] = col[i].clone();
             });
@@ -389,14 +415,16 @@ impl GenerateMultiTypeWitness for BigLinearUair {
 
         let len = int_col.len();
 
-        int_col[len - 1] = binary_poly_cols
-            .iter()
-            .map(|col| {
-                col[len - 1]
-                    .evaluate_at_point(&1u32)
-                    .expect("should be fine")
-            })
-            .sum();
+        int_col[len - 1] = R::from(
+            binary_poly_cols
+                .iter()
+                .map(|col| {
+                    col[len - 1]
+                        .evaluate_at_point(&1_u32)
+                        .expect("should be fine")
+                })
+                .sum::<u32>(),
+        );
 
         (binary_poly_cols, vec![], vec![int_col])
     }

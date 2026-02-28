@@ -15,7 +15,7 @@
 //! these would be resolved by the Zip+ PCS.
 
 use crypto_primitives::{
-    ConstIntRing, ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig, IntoWithConfig,
+    ConstIntRing, ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig,
     PrimeField,
 };
 use num_traits::Zero;
@@ -97,8 +97,8 @@ pub struct ProverAux<F: PrimeField> {
     pub projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
 }
 
-/// Trait bundling the various type parameters for the witness and Zip+ PCS.
-pub trait WitnessZipTypes<const DEGREE_PLUS_ONE: usize> {
+/// Trait bundling the various type parameters for the witness and Zinc+ PIOP.
+pub trait WitnessZincTypes<const DEGREE_PLUS_ONE: usize> {
     type Int: Named + ConstCoeffBitWidth + Default + Clone + Send + Sync;
     type Chal: ConstIntRing + ConstTranscribable + Named;
     type Pt: ConstIntRing;
@@ -166,7 +166,7 @@ pub fn prove<Zt, U, F, ProjectScalar, const D: usize, const CHECK_FOR_OVERFLOW: 
     project_scalar: ProjectScalar,
 ) -> Result<(Proof<F>, ProverAux<F>), ProtocolError<F>>
 where
-    Zt: WitnessZipTypes<D>,
+    Zt: WitnessZincTypes<D>,
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     F: InnerTransparentField
@@ -361,8 +361,8 @@ where
     let zip_proof = pcs_transcript.stream.into_inner();
     let commitments = commitments_bin
         .into_iter()
-        .chain(commitments_arb.into_iter())
-        .chain(commitments_int.into_iter())
+        .chain(commitments_arb)
+        .chain(commitments_int)
         .collect();
 
     Ok((
@@ -384,8 +384,9 @@ where
 
 /// Zinc+ PIOP Verifier (Algorithm 1, verification side, Steps 0–5).
 ///
-/// Verifies all steps and returns a [`Subclaim`] containing
-/// evaluation claims (already verified by the PCS).
+/// Verifies all steps and returns a [`Subclaim`]. The `up_evals` are
+/// already verified by the Zip+ PCS (Step 5); the `down_evals` (shifted
+/// MLE claims) still need to be checked via [`resolve_subclaim`].
 #[allow(clippy::too_many_arguments)]
 pub fn verify<
     Zt,
@@ -408,7 +409,7 @@ pub fn verify<
     project_ideal: ProjectIdeal,
 ) -> Result<Subclaim<F>, ProtocolError<F>>
 where
-    Zt: WitnessZipTypes<D>,
+    Zt: WitnessZincTypes<D>,
     F: InnerTransparentField
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Zt::Chal>
@@ -521,14 +522,15 @@ where
     })
 }
 
-// ─── Subclaim resolution (placeholder for PCS) ─────────────────
-
-/// Resolve the verifier's subclaim by evaluating the actual trace MLEs
-/// and checking they match the claimed evaluations.
+/// Subclaim resolution (shifted-MLE evaluation check)
 ///
-/// In the full Zinc+ protocol, this step would be handled by the
-/// Zip+ PCS (polynomial commitment scheme). Here we verify directly
-/// against the prover's auxiliary data.
+/// Verify the "down" (next-row) MLE evaluation claims from the subclaim.
+///
+/// The "up" evaluations are already verified by the Zip+ PCS inside
+/// [`verify`] (Step 5). The "down" evaluations correspond to the shifted
+/// trace MLE (rows 1..n, zero-padded), which the PCS does not yet open.
+/// Until the PCS is extended to also open shifted MLEs, this function
+/// checks them directly against the prover's auxiliary projected trace.
 pub fn resolve_subclaim<F>(
     subclaim: &Subclaim<F>,
     projected_trace_f: &[DenseMultilinearExtension<F::Inner>],
@@ -540,23 +542,6 @@ where
     DenseMultilinearExtension<F::Inner>: MultilinearExtensionWithConfig<F>,
 {
     let num_cols = projected_trace_f.len();
-
-    // Check "up" evaluations (current row columns).
-    for (i, (mle, expected)) in projected_trace_f
-        .iter()
-        .zip(subclaim.up_evals.iter())
-        .enumerate()
-    {
-        let actual = mle.evaluate_with_config(&subclaim.evaluation_point, field_cfg)?;
-
-        if actual != *expected {
-            return Err(ProtocolError::SubclaimMismatch {
-                column: i,
-                expected: expected.clone(),
-                actual,
-            });
-        }
-    }
 
     // Check "down" evaluations (shifted/next-row columns).
     // The shifted trace drops the first row and zero-pads, matching
@@ -625,12 +610,14 @@ mod tests {
     use crypto_bigint::U64;
 
     use crypto_primitives::{
-        Field, crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
+        crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
     };
     use rand::rng;
-    use zinc_poly::univariate::{binary::BinaryPolyWideningMulByScalar, ideal::DegreeOneIdeal};
-    use zinc_poly::univariate::binary::BinaryPolyInnerProduct;
-    use zinc_poly::univariate::dense::DensePolyInnerProduct;
+    use zinc_poly::univariate::{
+        binary::{BinaryPolyInnerProduct, BinaryPolyWideningMulByScalar},
+        dense::{DensePolyInnerProduct, DensePolyWideningMulByScalar},
+        ideal::DegreeOneIdeal,
+    };
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BinaryDecompositionUair, GenerateMultiTypeWitness,
@@ -638,14 +625,12 @@ mod tests {
     };
     use zinc_utils::{
         CHECKED,
-        mul_by_scalar::{WideningMulByScalar},
+        inner_product::{MBSInnerProduct, ScalarProduct, WideningMBSInnerProduct},
+        mul_by_scalar::{PrimitiveWideningMulByScalar},
     };
-    use zinc_utils::inner_product::{MBSInnerProduct, ScalarProduct};
-    use zinc_utils::mul_by_scalar::PrimtiveWideningMulByScalar;
-    use zip_plus::{
-        code::{
-            iprs::{IprsCode, PnttConfigF2_16_1},
-        },
+    use zip_plus::code::{
+        iprs::{IprsCode, PnttConfigF2_16_1},
+        raa::{RaaCode, RaaConfig},
     };
 
     const INT_LIMBS: usize = U64::LIMBS;
@@ -660,8 +645,7 @@ mod tests {
     const IPRS_DEPTH: usize = 1;
 
     type F = MontyField<FIELD_LIMBS>;
-    type Witness = DensePolynomial<Int<INT_LIMBS>, DEGREE_PLUS_ONE>;
-
+    type Witness = DensePolynomial<i64, DEGREE_PLUS_ONE>;
 
     pub struct BinPolyZipTypes {}
     impl ZipTypes for BinPolyZipTypes {
@@ -685,8 +669,8 @@ mod tests {
         type ArrCombRDotChal = MBSInnerProduct;
     }
 
-    pub struct ArbitraryPolyZipTypes {}
-    impl ZipTypes for ArbitraryPolyZipTypes {
+    pub struct ArbitraryPolyZipTypesIprs {}
+    impl ZipTypes for ArbitraryPolyZipTypesIprs {
         const NUM_COLUMN_OPENINGS: usize = 200;
         type Eval = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
@@ -696,7 +680,43 @@ mod tests {
         type Pt = i128;
         type CombR = Int<M>;
         type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
-        type EvalDotChal = DensePolyInnerProduct<i64, Self::Chal, Self::CombR, MBSInnerProduct, DEGREE_PLUS_ONE>;
+        type EvalDotChal = DensePolyInnerProduct<
+            i64,
+            Self::Chal,
+            Self::CombR,
+            WideningMBSInnerProduct,
+            DEGREE_PLUS_ONE,
+        >;
+        type CombDotChal = DensePolyInnerProduct<
+            Self::CombR,
+            Self::Chal,
+            Self::CombR,
+            MBSInnerProduct,
+            DEGREE_PLUS_ONE,
+        >;
+        type ArrCombRDotChal = MBSInnerProduct;
+    }
+
+    /// Arbitrary poly ZipTypes with wider codewords for RAA encoding.
+    /// RAA accumulation grows the bit-width, so Cw needs more bits than Eval.
+    pub struct ArbitraryPolyZipTypesRaa {}
+    impl ZipTypes for ArbitraryPolyZipTypesRaa {
+        const NUM_COLUMN_OPENINGS: usize = 200;
+        type Eval = DensePolynomial<i64, DEGREE_PLUS_ONE>;
+        type Cw = DensePolynomial<Int<K>, DEGREE_PLUS_ONE>;
+        type Fmod = Uint<K>;
+        type PrimeTest = MillerRabin;
+        type Chal = i128;
+        type Pt = i128;
+        type CombR = Int<M>;
+        type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
+        type EvalDotChal = DensePolyInnerProduct<
+            i64,
+            Self::Chal,
+            Self::CombR,
+            WideningMBSInnerProduct,
+            DEGREE_PLUS_ONE,
+        >;
         type CombDotChal = DensePolyInnerProduct<
             Self::CombR,
             Self::Chal,
@@ -723,9 +743,9 @@ mod tests {
         type ArrCombRDotChal = MBSInnerProduct;
     }
 
-    struct TestWitnessZipTypes;
+    struct TestWitnessZincTypesIprs;
 
-    impl WitnessZipTypes<DEGREE_PLUS_ONE> for TestWitnessZipTypes {
+    impl WitnessZincTypes<DEGREE_PLUS_ONE> for TestWitnessZincTypesIprs {
         type Int = i64;
         type Chal = i128;
         type Pt = i128;
@@ -733,7 +753,7 @@ mod tests {
         type PrimeTest = MillerRabin;
 
         type BinaryZt = BinPolyZipTypes;
-        type ArbitraryZt = ArbitraryPolyZipTypes;
+        type ArbitraryZt = ArbitraryPolyZipTypesIprs;
         type IntZt = IntZipTypes;
 
         type BinaryLc = IprsCode<
@@ -742,13 +762,45 @@ mod tests {
             BinaryPolyWideningMulByScalar<i64>,
             CHECKED,
         >;
-        type ArbitraryLc = ();
+        type ArbitraryLc = IprsCode<
+            Self::ArbitraryZt,
+            PnttConfigF2_16_1<IPRS_DEPTH>,
+            DensePolyWideningMulByScalar,
+            CHECKED,
+        >;
         type IntLc = IprsCode<
             Self::IntZt,
             PnttConfigF2_16_1<IPRS_DEPTH>,
-            PrimtiveWideningMulByScalar,
+            PrimitiveWideningMulByScalar,
             CHECKED,
         >;
+    }
+
+    const RAA_REP: usize = 4;
+
+    #[derive(Copy, Clone)]
+    struct TestRaaConfig;
+    impl RaaConfig for TestRaaConfig {
+        const PERMUTE_IN_PLACE: bool = false;
+        const CHECK_FOR_OVERFLOWS: bool = true;
+    }
+
+    struct TestWitnessZincTypesRaa;
+
+    impl WitnessZincTypes<DEGREE_PLUS_ONE> for TestWitnessZincTypesRaa {
+        type Int = i64;
+        type Chal = i128;
+        type Pt = i128;
+        type Fmod = Uint<K>;
+        type PrimeTest = MillerRabin;
+
+        type BinaryZt = BinPolyZipTypes;
+        type ArbitraryZt = ArbitraryPolyZipTypesRaa;
+        type IntZt = IntZipTypes;
+
+        type BinaryLc = RaaCode<Self::BinaryZt, TestRaaConfig, RAA_REP>;
+        type ArbitraryLc = RaaCode<Self::ArbitraryZt, TestRaaConfig, RAA_REP>;
+        type IntLc = RaaCode<Self::IntZt, TestRaaConfig, RAA_REP>;
     }
 
     /// Helper: project a DensePolynomial scalar to DynamicPolynomialF
@@ -772,7 +824,7 @@ mod tests {
         ZipPlusParams<Wzt::IntZt, Wzt::IntLc>,
     )
     where
-        Wzt: WitnessZipTypes<DEGREE_PLUS_ONE>,
+        Wzt: WitnessZincTypes<DEGREE_PLUS_ONE>,
     {
         let poly_size = 1 << num_vars;
         (
@@ -792,55 +844,38 @@ mod tests {
     ///
     /// UAIR constraint: a + b - c ∈ (X - 2)
     /// (one constraint, no polynomial multiplication, ideal = ⟨X - 2⟩).
-    ///
-    /// NOTE: The witness_columns type (DensePolynomial<Int<5>, 32>) does not
-    /// match Zt::Eval (Int<5>) so this won't compile yet. The protocol
-    /// structure is correct — only the type plumbing needs resolving.
     #[test]
-    fn test_end_to_end_no_multiplication() {
+    fn test_e2e_no_multiplication() {
         let mut rng = rng();
-        let num_vars = 4;
-        let pp = setup_pp(num_vars);
+        let num_vars = 8;
+        let pp = setup_pp::<TestWitnessZincTypesIprs>(num_vars);
+
+        type TestUair = TestAirNoMultiplication<i64>;
 
         // Generate a valid witness satisfying the UAIR constraints.
-        let trace = TestAirNoMultiplication::<INT_LIMBS>::generate_witness(num_vars, &mut rng);
+        let trace = TestUair::generate_witness(num_vars, &mut rng);
 
         // ── Prover ──
         let (proof, prover_aux) = prove::<
-            TestWitnessZipTypes,
-            TestAirNoMultiplication<INT_LIMBS>,
+            TestWitnessZincTypesIprs,
+            TestUair,
             F,
             _,
             DEGREE_PLUS_ONE,
             CHECKED,
-        >(
-            &pp,
-            &[],
-            &trace,
-            &[],
-            num_vars,
-            project_scalar_fn,
-        )
+        >(&pp, &[], &trace, &[], num_vars, project_scalar_fn)
         .expect("Prover failed");
 
         // ── Verifier ──
-        let subclaim = verify::<
-            TestWitnessZipTypes,
-            TestAirNoMultiplication<INT_LIMBS>,
-            F,
-            _,
-            _,
-            _,
-            DEGREE_PLUS_ONE,
-            CHECKED,
-        >(
-            &pp,
-            proof,
-            num_vars,
-            project_scalar_fn,
-            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
-        )
-        .expect("Verifier failed");
+        let subclaim =
+            verify::<TestWitnessZincTypesIprs, TestUair, F, _, _, _, DEGREE_PLUS_ONE, CHECKED>(
+                &pp,
+                proof,
+                num_vars,
+                project_scalar_fn,
+                |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
+            )
+            .expect("Verifier failed");
 
         // ── Subclaim resolution (in lieu of PCS) ──
         resolve_subclaim(
@@ -851,63 +886,48 @@ mod tests {
         .expect("Subclaim resolution failed");
     }
 
-    /*
     /// End-to-end test: TestUairSimpleMultiplication.
     ///
     /// UAIR constraints (3 total, no ideals):
     ///   up[0] * up[1] = down[0]
     ///   up[1] * up[2] = down[1]
     ///   up[0] * up[2] = down[2]
+    ///
+    /// Uses RAA code with small num_vars (2) because chained polynomial
+    /// multiplication causes exponential growth in both degree and coefficient
+    /// magnitude. With num_vars=2 (4 rows), max degree=6 and max coefficient
+    /// ≈ 127^8 ≈ 2^56, which fits in i64.
     #[test]
-    fn test_end_to_end_simple_multiplication() {
+    fn test_e2e_simple_multiplication() {
         let mut rng = rng();
         let num_vars = 2;
-        let pp = setup_pp(num_vars);
+        let pp = setup_pp::<TestWitnessZincTypesRaa>(num_vars);
 
-        let trace =
-            TestUairSimpleMultiplication::<Int<INT_LIMBS>>::generate_witness(num_vars, &mut rng);
+        type TestUair = TestUairSimpleMultiplication<i64>;
+
+        let trace = TestUair::generate_witness(num_vars, &mut rng);
 
         // ── Prover ──
         let (proof, prover_aux) = prove::<
-            Zt,
-            Lc,
-            TestUairSimpleMultiplication<Int<INT_LIMBS>>,
+            TestWitnessZincTypesRaa,
+            TestUair,
             F,
-            Int<INT_LIMBS>,
-            Int<INT_LIMBS>,
             _,
-            CHECKED,
             DEGREE_PLUS_ONE,
-        >(
-            &pp,
-            &trace, // witness_columns — type mismatch with Zt::Eval
-            &[],
-            &trace,
-            &[],
-            num_vars,
-            project_scalar_fn,
-        )
+            CHECKED,
+        >(&pp, &[], &trace, &[], num_vars, project_scalar_fn)
         .expect("Prover failed");
 
         // ── Verifier ──
-        let subclaim = verify::<
-            Zt,
-            Lc,
-            TestUairSimpleMultiplication<Int<INT_LIMBS>>,
-            F,
-            _,
-            _,
-            _,
-            CHECKED,
-            DEGREE_PLUS_ONE,
-        >(
-            &pp,
-            proof,
-            num_vars,
-            project_scalar_fn,
-            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
-        )
-        .expect("Verifier failed");
+        let subclaim =
+            verify::<TestWitnessZincTypesRaa, TestUair, F, _, _, _, DEGREE_PLUS_ONE, CHECKED>(
+                &pp,
+                proof,
+                num_vars,
+                project_scalar_fn,
+                |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            )
+            .expect("Verifier failed");
 
         // ── Subclaim resolution (in lieu of PCS) ──
         resolve_subclaim(
@@ -923,47 +943,34 @@ mod tests {
     /// Uses binary_poly (1 col) and int (1 col) trace types.
     /// UAIR constraint: binary_poly[0] - int[0] ∈ ⟨X - 2⟩
     #[test]
-    fn test_end_to_end_binary_decomposition() {
+    fn test_e2e_binary_decomposition() {
         let mut rng = rng();
-        let num_vars = 4;
-        let pp = setup_pp(num_vars);
+        let num_vars = 8;
+        let pp = setup_pp::<TestWitnessZincTypesIprs>(num_vars);
 
-        let (binary_trace, arb_trace, int_trace) =
-            BinaryDecompositionUair::generate_witness(num_vars, &mut rng);
+        type TestUair = BinaryDecompositionUair<i64>;
 
-        // BinaryDecompositionUair uses u32 coefficients.
-        let project_scalar_u32 = |scalar: &DensePolynomial<u32, 32>,
-                                  field_cfg: &<F as PrimeField>::Config|
-         -> DynamicPolynomialF<F> {
-            scalar
-                .iter()
-                .map(|coeff| F::from_with_cfg(coeff, field_cfg))
-                .collect()
-        };
+        let (binary_trace, arb_trace, int_trace) = TestUair::generate_witness(num_vars, &mut rng);
 
         // ── Prover ──
-        // TODO: witness_columns should come from the original trace columns.
-        // Currently passing empty since we can't convert trace column types
-        // to DenseMultilinearExtension<Zt::Eval> yet.
         let (proof, prover_aux) =
-            prove::<Zt, Lc, BinaryDecompositionUair, F, u32, u32, _, CHECKED, DEGREE_PLUS_ONE>(
+            prove::<TestWitnessZincTypesIprs, TestUair, F, _, DEGREE_PLUS_ONE, CHECKED>(
                 &pp,
-                &[], // witness_columns — empty for now
                 &binary_trace,
                 &arb_trace,
                 &int_trace,
                 num_vars,
-                project_scalar_u32,
+                project_scalar_fn,
             )
             .expect("Prover failed");
 
         // ── Verifier ──
         let subclaim =
-            verify::<Zt, Lc, BinaryDecompositionUair, F, _, _, _, CHECKED, DEGREE_PLUS_ONE>(
+            verify::<TestWitnessZincTypesIprs, TestUair, F, _, _, _, DEGREE_PLUS_ONE, CHECKED>(
                 &pp,
                 proof,
                 num_vars,
-                project_scalar_u32,
+                project_scalar_fn,
                 |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
             )
             .expect("Verifier failed");
@@ -985,45 +992,37 @@ mod tests {
     ///   down.binary_poly[0] - up.int[0] ∈ ⟨X - 2⟩
     ///   up.binary_poly[i] - down.binary_poly[i] = 0, for i=1..15
     #[test]
-    fn test_end_to_end_big_linear() {
+    fn test_e2e_big_linear() {
         let mut rng = rng();
-        let num_vars = 4;
-        let pp = setup_pp(num_vars);
+        let num_vars = 8;
+        let pp = setup_pp::<TestWitnessZincTypesIprs>(num_vars);
 
-        let (binary_trace, arb_trace, int_trace) =
-            BigLinearUair::generate_witness(num_vars, &mut rng);
+        type TestUair = BigLinearUair<i64>;
 
-        let project_scalar_u32 = |scalar: &DensePolynomial<u32, 32>,
-                                  field_cfg: &<F as PrimeField>::Config|
-         -> DynamicPolynomialF<F> {
-            scalar
-                .iter()
-                .map(|coeff| F::from_with_cfg(coeff, field_cfg))
-                .collect()
-        };
+        let (binary_trace, arb_trace, int_trace) = TestUair::generate_witness(num_vars, &mut rng);
 
         // ── Prover ──
         let (proof, prover_aux) =
-            prove::<Zt, Lc, BigLinearUair, F, u32, u32, _, CHECKED, DEGREE_PLUS_ONE>(
+            prove::<TestWitnessZincTypesIprs, TestUair, F, _, DEGREE_PLUS_ONE, CHECKED>(
                 &pp,
-                &[], // witness_columns — empty for now
                 &binary_trace,
                 &arb_trace,
                 &int_trace,
                 num_vars,
-                project_scalar_u32,
+                project_scalar_fn,
             )
             .expect("Prover failed");
 
         // ── Verifier ──
-        let subclaim = verify::<Zt, Lc, BigLinearUair, F, _, _, _, CHECKED, DEGREE_PLUS_ONE>(
-            &pp,
-            proof,
-            num_vars,
-            project_scalar_u32,
-            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
-        )
-        .expect("Verifier failed");
+        let subclaim =
+            verify::<TestWitnessZincTypesIprs, TestUair, F, _, _, _, DEGREE_PLUS_ONE, CHECKED>(
+                &pp,
+                proof,
+                num_vars,
+                project_scalar_fn,
+                |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
+            )
+            .expect("Verifier failed");
 
         // ── Subclaim resolution (in lieu of PCS) ──
         resolve_subclaim(
@@ -1033,5 +1032,4 @@ mod tests {
         )
         .expect("Subclaim resolution failed");
     }
-     */
 }

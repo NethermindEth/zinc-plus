@@ -80,7 +80,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let num_rows = pp.num_rows;
         let row_len = pp.linear_code.row_len();
 
-        let (q_0, q_1) = point_to_tensor(num_rows, &point, field_cfg)?;
+        let (q_0, q_1) = point_to_tensor(num_rows, point, field_cfg)?;
 
         let project = Zt::Eval::prepare_projection(&projecting_element);
         let evaluations: Vec<F> = cfg_iter!(poly).map(project).collect();
