@@ -31,9 +31,12 @@ use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_utils::inner_transparent_field::InnerTransparentField;
 
 use super::batched_decomposition::BatchedDecompLogupProtocol;
+use super::gkr_batched_decomposition::GkrBatchedDecompLogupProtocol;
 use super::structs::{
     BatchedDecompLogupProof,
     BatchedDecompLogupVerifierSubClaim, BatchedDecompLookupInstance,
+    GkrBatchedDecompLogupProof, GkrBatchedDecompLogupProverState,
+    GkrBatchedDecompLogupVerifierSubClaim,
     LookupColumnSpec, LookupError, LookupGroup, LookupTableType,
     group_lookup_specs,
 };
@@ -92,6 +95,27 @@ pub struct LookupGroupMeta {
 pub struct PipelineLookupProverState<F: PrimeField> {
     /// Evaluation points from each group's sumcheck.
     pub evaluation_points: Vec<Vec<F>>,
+}
+
+// ── GKR proof container ─────────────────────────────────────────────────────
+
+/// Complete GKR-based lookup proof for the pipeline.
+///
+/// Contains one [`GkrBatchedDecompLogupProof`] per lookup group.
+/// Chunks are NOT included (assumed committed via PCS).
+#[derive(Clone, Debug)]
+pub struct GkrPipelineLookupProof<F: PrimeField> {
+    /// Per-group GKR proofs.
+    pub group_proofs: Vec<GkrBatchedDecompLogupProof<F>>,
+    /// Per-group metadata.
+    pub group_meta: Vec<LookupGroupMeta>,
+}
+
+/// Prover state returned after running the GKR lookup pipeline step.
+#[derive(Clone, Debug)]
+pub struct GkrPipelineLookupProverState<F: PrimeField> {
+    /// Per-group prover states (contains evaluation points, α, β, etc.).
+    pub group_states: Vec<GkrBatchedDecompLogupProverState<F>>,
 }
 
 // ── Prover ──────────────────────────────────────────────────────────────────
@@ -290,6 +314,70 @@ where
     })
 }
 
+// ── GKR Prover ──────────────────────────────────────────────────────────────
+
+/// Run the GKR batched decomposed LogUp prover for all lookup columns.
+///
+/// Like [`prove_batched_lookup_with_indices`] but uses the GKR fractional
+/// sumcheck variant. Chunks are NOT included in the proof (assumed
+/// committed via PCS).
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+pub fn prove_gkr_batched_lookup_with_indices<F>(
+    transcript: &mut impl Transcript,
+    columns: &[Vec<F>],
+    raw_indices: &[Vec<usize>],
+    specs: &[LookupColumnSpec],
+    projecting_element: &F,
+    field_cfg: &F::Config,
+) -> Result<(GkrPipelineLookupProof<F>, GkrPipelineLookupProverState<F>), LookupError<F>>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Config: Sync,
+{
+    let groups = group_lookup_specs(specs);
+    let mut group_proofs = Vec::with_capacity(groups.len());
+    let mut group_meta = Vec::with_capacity(groups.len());
+    let mut group_states = Vec::with_capacity(groups.len());
+
+    for group in &groups {
+        let instance = build_lookup_instance_from_indices(
+            columns,
+            raw_indices,
+            group,
+            projecting_element,
+            field_cfg,
+        )?;
+
+        let witness_len = instance.witnesses[0].len();
+
+        let (proof, state) =
+            GkrBatchedDecompLogupProtocol::<F>::prove_as_subprotocol(
+                transcript,
+                &instance,
+                field_cfg,
+            )?;
+
+        group_proofs.push(proof);
+        group_meta.push(LookupGroupMeta {
+            table_type: group.table_type.clone(),
+            num_columns: group.column_indices.len(),
+            witness_len,
+        });
+        group_states.push(state);
+    }
+
+    Ok((
+        GkrPipelineLookupProof {
+            group_proofs,
+            group_meta,
+        },
+        GkrPipelineLookupProverState {
+            group_states,
+        },
+    ))
+}
+
 // ── Verifier ────────────────────────────────────────────────────────────────
 
 /// Run the batched decomposed LogUp verifier for all lookup groups.
@@ -319,6 +407,48 @@ where
         );
 
         let subclaim = BatchedDecompLogupProtocol::<F>::verify_as_subprotocol(
+            transcript,
+            group_proof,
+            &subtable,
+            &shifts,
+            meta.num_columns,
+            meta.witness_len,
+            field_cfg,
+        )?;
+
+        subclaims.push(subclaim);
+    }
+
+    Ok(subclaims)
+}
+
+/// Run the GKR batched decomposed LogUp verifier for all lookup groups.
+///
+/// Reconstructs the sub-tables and shifts from the group metadata,
+/// then calls [`GkrBatchedDecompLogupProtocol::verify_as_subprotocol`]
+/// for each group.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+pub fn verify_gkr_batched_lookup<F>(
+    transcript: &mut impl Transcript,
+    proof: &GkrPipelineLookupProof<F>,
+    projecting_element: &F,
+    field_cfg: &F::Config,
+) -> Result<Vec<GkrBatchedDecompLogupVerifierSubClaim<F>>, LookupError<F>>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Config: Sync,
+{
+    let mut subclaims = Vec::with_capacity(proof.group_proofs.len());
+
+    for (group_proof, meta) in proof.group_proofs.iter().zip(proof.group_meta.iter()) {
+        let (subtable, shifts) = generate_table_and_shifts(
+            &meta.table_type,
+            projecting_element,
+            field_cfg,
+        );
+
+        let subclaim = GkrBatchedDecompLogupProtocol::<F>::verify_as_subprotocol(
             transcript,
             group_proof,
             &subtable,

@@ -206,72 +206,132 @@ const ECDSA_BATCH_SIZE: usize = 9;             // 9 ECDSA columns
 
 // ─── Lookup column specs ────────────────────────────────────────────────────
 
-/// Lookup specs for SHA-256 trace columns: 14 BinaryPoly<32> columns get
-/// BitPoly { width: 32 } and 3 Int columns get Word { width: 32 }.
+/// Number of Q[X] bit-polynomial columns that need lookup enforcement.
+///
+/// Only the 10 Q[X] columns (indices 0–9) require `BitPoly { width: 32 }`
+/// lookups.  The 4 F₂[X] columns (S₀, S₁, R₀, R₁, indices 10–13) are
+/// shift quotient/remainder values whose membership is enforced by the
+/// UAIR constraints — no lookup needed.  The 3 integer carry columns
+/// (μ_a, μ_e, μ_W, indices 14–16) are likewise constrained by UAIR.
+const SHA256_LOOKUP_COL_COUNT: usize = 10;
+
 fn sha256_lookup_specs() -> Vec<LookupColumnSpec> {
-    let mut specs: Vec<LookupColumnSpec> = (0..SHA256_POLY_BATCH_SIZE)
+    (0..SHA256_LOOKUP_COL_COUNT)
         .map(|i| LookupColumnSpec {
             column_index: i,
             table_type: LookupTableType::BitPoly { width: 32 },
         })
-        .collect();
-    specs.extend((0..SHA256_INT_BATCH_SIZE).map(|i| LookupColumnSpec {
-        column_index: i,
-        table_type: LookupTableType::Word { width: 32 },
-    }));
-    specs
-}
-
-/// Lookup specs for ECDSA trace columns: all 9 columns are 32-bit words,
-/// so each gets a Word { width: 32 } column-typing constraint.
-fn ecdsa_lookup_specs() -> Vec<LookupColumnSpec> {
-    (0..ECDSA_BATCH_SIZE)
-        .map(|i| LookupColumnSpec {
-            column_index: i,
-            table_type: LookupTableType::Word { width: 32 },
-        })
         .collect()
 }
 
+// ECDSA columns are field elements (opened mod q) — no lookup needed.
+
 // ─── Lookup proof size helpers ───────────────────────────────────────────────
 
-/// Compute the serialised byte count of a `PipelineLookupProof`.
-///
-/// Each field element is `PiopField` (128-bit Montgomery field, 32 bytes).
-fn lookup_proof_byte_count(proof: &zinc_piop::lookup::PipelineLookupProof<zinc_snark::pipeline::PiopField>) -> usize {
+/// Count the field elements in a `GkrFractionProof`.
+fn gkr_fraction_proof_fe_count(proof: &zinc_piop::lookup::GkrFractionProof<zinc_snark::pipeline::PiopField>) -> usize {
+    let mut count = 2usize; // root_p, root_q
+    for lp in &proof.layer_proofs {
+        // 4 child MLE evaluations per layer
+        count += 4;
+        // sumcheck messages (if present)
+        if let Some(ref sc) = lp.sumcheck_proof {
+            count += 1; // claimed_sum
+            for msg in &sc.messages {
+                count += msg.0.tail_evaluations.len();
+            }
+        }
+    }
+    count
+}
+
+/// Compute the serialised byte count of a `GkrPipelineLookupProof`.
+fn gkr_lookup_proof_byte_count(proof: &zinc_piop::lookup::GkrPipelineLookupProof<zinc_snark::pipeline::PiopField>) -> usize {
     use zinc_snark::pipeline::FIELD_LIMBS;
     let fe_bytes = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
     let mut count = 0usize;
     for gp in &proof.group_proofs {
-        // chunk_vectors: Vec<Vec<Vec<F>>>
-        for outer in &gp.chunk_vectors {
-            for inner in outer {
-                count += inner.len();
-            }
+        for v in &gp.aggregated_multiplicities {
+            count += v.len();
         }
-        // sumcheck_proof: claimed_sum (1) + messages (tail_evaluations per round)
+        count += gkr_fraction_proof_fe_count(&gp.witness_gkr);
+        count += gkr_fraction_proof_fe_count(&gp.table_gkr);
+    }
+    count * fe_bytes
+}
+
+/// Compute the serialised byte count of a `PipelineLookupProof` (classic).
+fn classic_lookup_proof_byte_count(proof: &zinc_piop::lookup::PipelineLookupProof<zinc_snark::pipeline::PiopField>) -> usize {
+    use zinc_snark::pipeline::FIELD_LIMBS;
+    let fe_bytes = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+    let mut count = 0usize;
+    for gp in &proof.group_proofs {
+        for outer in &gp.chunk_vectors {
+            for inner in outer { count += inner.len(); }
+        }
         count += 1; // claimed_sum
         for msg in &gp.sumcheck_proof.messages {
             count += msg.0.tail_evaluations.len();
         }
-        // aggregated_multiplicities: Vec<Vec<F>>
         for v in &gp.aggregated_multiplicities {
             count += v.len();
         }
-        // chunk_inverse_witnesses: Vec<Vec<Vec<F>>>
         for outer in &gp.chunk_inverse_witnesses {
-            for inner in outer {
-                count += inner.len();
-            }
+            for inner in outer { count += inner.len(); }
         }
-        // inverse_table: Vec<F>
         count += gp.inverse_table.len();
     }
     count * fe_bytes
 }
 
-/// Serialize all field elements in a `PipelineLookupProof` to a byte vector.
-fn lookup_proof_to_bytes(proof: &zinc_piop::lookup::PipelineLookupProof<zinc_snark::pipeline::PiopField>) -> Vec<u8> {
+/// Dispatch byte count on the lookup proof variant.
+fn lookup_proof_byte_count(data: &zinc_snark::pipeline::LookupProofData) -> usize {
+    match data {
+        zinc_snark::pipeline::LookupProofData::Gkr(p) => gkr_lookup_proof_byte_count(p),
+        zinc_snark::pipeline::LookupProofData::Classic(p) => classic_lookup_proof_byte_count(p),
+    }
+}
+
+/// Serialize all field elements in a `GkrPipelineLookupProof` to a byte vector.
+fn gkr_lookup_proof_to_bytes(proof: &zinc_piop::lookup::GkrPipelineLookupProof<zinc_snark::pipeline::PiopField>) -> Vec<u8> {
+    fn write_fe(buf: &mut Vec<u8>, f: &zinc_snark::pipeline::PiopField) {
+        use zinc_snark::pipeline::FIELD_LIMBS;
+        let fe_size = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+        let start = buf.len();
+        buf.resize(start + fe_size, 0);
+        f.inner().write_transcription_bytes(&mut buf[start..]);
+    }
+
+    fn write_gkr_fraction_proof(buf: &mut Vec<u8>, proof: &zinc_piop::lookup::GkrFractionProof<zinc_snark::pipeline::PiopField>) {
+        write_fe(buf, &proof.root_p);
+        write_fe(buf, &proof.root_q);
+        for lp in &proof.layer_proofs {
+            if let Some(ref sc) = lp.sumcheck_proof {
+                write_fe(buf, &sc.claimed_sum);
+                for msg in &sc.messages {
+                    for f in &msg.0.tail_evaluations { write_fe(buf, f); }
+                }
+            }
+            write_fe(buf, &lp.p_left);
+            write_fe(buf, &lp.p_right);
+            write_fe(buf, &lp.q_left);
+            write_fe(buf, &lp.q_right);
+        }
+    }
+
+    let mut out = Vec::new();
+    for gp in &proof.group_proofs {
+        for v in &gp.aggregated_multiplicities {
+            for f in v { write_fe(&mut out, f); }
+        }
+        write_gkr_fraction_proof(&mut out, &gp.witness_gkr);
+        write_gkr_fraction_proof(&mut out, &gp.table_gkr);
+    }
+    out
+}
+
+/// Serialize all field elements in a classic `PipelineLookupProof` to a byte vector.
+fn classic_lookup_proof_to_bytes(proof: &zinc_piop::lookup::PipelineLookupProof<zinc_snark::pipeline::PiopField>) -> Vec<u8> {
     fn write_fe(buf: &mut Vec<u8>, f: &zinc_snark::pipeline::PiopField) {
         use zinc_snark::pipeline::FIELD_LIMBS;
         let fe_size = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
@@ -302,6 +362,14 @@ fn lookup_proof_to_bytes(proof: &zinc_piop::lookup::PipelineLookupProof<zinc_sna
         for f in &gp.inverse_table { write_fe(&mut out, f); }
     }
     out
+}
+
+/// Dispatch proof serialization on the lookup proof variant.
+fn lookup_proof_to_bytes(data: &zinc_snark::pipeline::LookupProofData) -> Vec<u8> {
+    match data {
+        zinc_snark::pipeline::LookupProofData::Gkr(p) => gkr_lookup_proof_to_bytes(p),
+        zinc_snark::pipeline::LookupProofData::Classic(p) => classic_lookup_proof_to_bytes(p),
+    }
 }
 
 // ─── Benchmark helpers ──────────────────────────────────────────────────────
@@ -535,7 +603,6 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
 
     // ── Lookup column specs ──────────────────────────────────────────
     let sha_lookup_specs = sha256_lookup_specs();
-    let ec_lookup_specs = ecdsa_lookup_specs();
 
     // ── Prepare ECDSA proof (reused by split PCS verifier) ────────
     let (ec_hint, ec_comm) = BatchedZipPlus::<EcZt, EcLc>::commit(
@@ -561,7 +628,7 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
                 let _ec_proof = zinc_snark::pipeline::prove_generic::<
                     EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED,
                 >(
-                    &ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &ec_lookup_specs,
+                    &ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &[],
                 );
                 total += t.elapsed();
             }
@@ -577,7 +644,7 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
     let ec_zinc_proof = zinc_snark::pipeline::prove_generic::<
         EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED,
     >(
-        &ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &ec_lookup_specs,
+        &ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &[],
     );
 
     // ── Full Pipeline Verifier ───────────────────────────────────────
@@ -1009,7 +1076,6 @@ fn sha256_8x_ecdsa_end_to_end(c: &mut Criterion) {
 
     // ── Lookup specs ────────────────────────────────────────────────
     let sha_lookup_specs = sha256_lookup_specs();
-    let ec_lookup_specs = ecdsa_lookup_specs();
 
     // ── Total Prover (IC + CPR + Lookup + PCS for both) ─────────────
     group.bench_function("TotalProver", |b| {
@@ -1023,7 +1089,7 @@ fn sha256_8x_ecdsa_end_to_end(c: &mut Criterion) {
                 let _ec = zinc_snark::pipeline::prove_generic::<
                     EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED,
                 >(
-                    &ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &ec_lookup_specs,
+                    &ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &[],
                 );
                 total += t.elapsed();
             }
@@ -1038,7 +1104,7 @@ fn sha256_8x_ecdsa_end_to_end(c: &mut Criterion) {
     let ec_proof = zinc_snark::pipeline::prove_generic::<
         EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED,
     >(
-        &ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &ec_lookup_specs,
+        &ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &[],
     );
 
     // ── Total Verifier (IC + CPR + Lookup verify + PCS verify) ──────
@@ -1257,5 +1323,183 @@ fn sha256_full_pipeline(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, sha256_single, sha256_8x_ecdsa, sha256_piop_only, sha256_8x_ecdsa_end_to_end, sha256_full_pipeline);
+// ─── LogUp Comparison Benchmark ─────────────────────────────────────────────
+
+/// Side-by-side comparison of Classic LogUp vs GKR LogUp for 8×SHA-256 + ECDSA.
+///
+/// Benchmarks the full pipeline (IC + CPR + Lookup + PCS) for both LogUp
+/// variants. ECDSA columns have no lookup constraints — only SHA-256's 14
+/// BinaryPoly columns go through LogUp.
+fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
+    use zinc_sha256_uair::CyclotomicIdeal;
+    use zinc_ecdsa_uair::EcdsaIdealOverF;
+    use zinc_uair::ideal::ImpossibleIdeal;
+    use zinc_uair::ideal_collector::IdealOrZero;
+
+    let mut group = c.benchmark_group("8xSHA256+ECDSA LogUp Comparison");
+    group.sample_size(10);
+
+    // ── Build traces ────────────────────────────────────────────────
+    let sha_trace = generate_sha256_trace(SHA256_8X_NUM_VARS);
+    assert_eq!(sha_trace.len(), SHA256_BATCH_SIZE);
+
+    let ecdsa_trace = generate_zero_scalar_trace(ECDSA_NUM_VARS, ECDSA_BATCH_SIZE);
+    assert_eq!(ecdsa_trace.len(), ECDSA_BATCH_SIZE);
+
+    // ── PCS params ──────────────────────────────────────────────────
+    type ShaZt = Sha256ZipTypes<i64, 32>;
+    type ShaLc = IprsBPoly32R4B64<1, UNCHECKED>;
+    let sha_params = ZipPlusParams::<ShaZt, ShaLc>::new(
+        SHA256_8X_NUM_VARS, 1, ShaLc::new(512),
+    );
+
+    type EcZt = EcdsaScalarZipTypes;
+    type EcLc = IprsInt4R4B64<1, UNCHECKED>;
+    let ec_params = ZipPlusParams::<EcZt, EcLc>::new(
+        ECDSA_NUM_VARS, 1, EcLc::new(512),
+    );
+
+    let sha_lookup_specs = sha256_lookup_specs();
+
+    // ── Classic LogUp Prover ─────────────────────────────────────────
+    group.bench_function("ClassicLogUp/TotalProver", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let t = Instant::now();
+                let _sha = zinc_snark::pipeline::prove_classic_logup::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
+                    &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
+                );
+                let _ec = zinc_snark::pipeline::prove_generic::<
+                    EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED,
+                >(
+                    &ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &[],
+                );
+                total += t.elapsed();
+            }
+            total
+        });
+    });
+
+    // ── GKR LogUp Prover ─────────────────────────────────────────────
+    group.bench_function("GKRLogUp/TotalProver", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let t = Instant::now();
+                let _sha = zinc_snark::pipeline::prove::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
+                    &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
+                );
+                let _ec = zinc_snark::pipeline::prove_generic::<
+                    EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED,
+                >(
+                    &ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &[],
+                );
+                total += t.elapsed();
+            }
+            total
+        });
+    });
+
+    // ── Generate proofs for verifier bench & proof size ──────────────
+    let classic_sha_proof = zinc_snark::pipeline::prove_classic_logup::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
+        &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
+    );
+    let gkr_sha_proof = zinc_snark::pipeline::prove::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
+        &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
+    );
+    let ec_proof = zinc_snark::pipeline::prove_generic::<
+        EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED,
+    >(
+        &ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &[],
+    );
+
+    // ── Classic LogUp Verifier ───────────────────────────────────────
+    group.bench_function("ClassicLogUp/TotalVerifier", |b| {
+        b.iter(|| {
+            let sha_r = zinc_snark::pipeline::verify::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED, _, _>(
+                &sha_params, &classic_sha_proof, SHA256_8X_NUM_VARS,
+                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+            );
+            let _ = black_box(sha_r);
+            let ec_r = zinc_snark::pipeline::verify_generic::<
+                EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED, EcdsaIdealOverF, _,
+            >(
+                &ec_params, &ec_proof, ECDSA_NUM_VARS,
+                |ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
+                    IdealOrZero::Zero => EcdsaIdealOverF,
+                    IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
+                },
+            );
+            let _ = black_box(ec_r);
+        });
+    });
+
+    // ── GKR LogUp Verifier ───────────────────────────────────────────
+    group.bench_function("GKRLogUp/TotalVerifier", |b| {
+        b.iter(|| {
+            let sha_r = zinc_snark::pipeline::verify::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED, _, _>(
+                &sha_params, &gkr_sha_proof, SHA256_8X_NUM_VARS,
+                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+            );
+            let _ = black_box(sha_r);
+            let ec_r = zinc_snark::pipeline::verify_generic::<
+                EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED, EcdsaIdealOverF, _,
+            >(
+                &ec_params, &ec_proof, ECDSA_NUM_VARS,
+                |ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
+                    IdealOrZero::Zero => EcdsaIdealOverF,
+                    IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
+                },
+            );
+            let _ = black_box(ec_r);
+        });
+    });
+
+    // ── Proof size & timing comparison ──────────────────────────────
+    let classic_lookup_size = classic_sha_proof.lookup_proof.as_ref().map_or(0, lookup_proof_byte_count);
+    let gkr_lookup_size = gkr_sha_proof.lookup_proof.as_ref().map_or(0, lookup_proof_byte_count);
+
+    eprintln!("\n=== LogUp Comparison: 8xSHA256+ECDSA ===");
+    eprintln!("  Classic LogUp:");
+    eprintln!("    SHA prover: IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
+        classic_sha_proof.timing.ideal_check,
+        classic_sha_proof.timing.combined_poly_resolver,
+        classic_sha_proof.timing.lookup,
+        classic_sha_proof.timing.pcs_commit,
+        classic_sha_proof.timing.pcs_test,
+        classic_sha_proof.timing.pcs_evaluate,
+        classic_sha_proof.timing.total,
+    );
+    eprintln!("    Lookup proof size: {} bytes ({:.1} KB)", classic_lookup_size, classic_lookup_size as f64 / 1024.0);
+    eprintln!("  GKR LogUp:");
+    eprintln!("    SHA prover: IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
+        gkr_sha_proof.timing.ideal_check,
+        gkr_sha_proof.timing.combined_poly_resolver,
+        gkr_sha_proof.timing.lookup,
+        gkr_sha_proof.timing.pcs_commit,
+        gkr_sha_proof.timing.pcs_test,
+        gkr_sha_proof.timing.pcs_evaluate,
+        gkr_sha_proof.timing.total,
+    );
+    eprintln!("    Lookup proof size: {} bytes ({:.1} KB)", gkr_lookup_size, gkr_lookup_size as f64 / 1024.0);
+    if classic_lookup_size > 0 {
+        eprintln!("  Reduction: {:.1}× smaller ({:.1}% savings)",
+            classic_lookup_size as f64 / gkr_lookup_size.max(1) as f64,
+            (1.0 - gkr_lookup_size as f64 / classic_lookup_size as f64) * 100.0);
+    }
+    eprintln!("  ECDSA prover (shared): IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
+        ec_proof.timing.ideal_check,
+        ec_proof.timing.combined_poly_resolver,
+        ec_proof.timing.lookup,
+        ec_proof.timing.pcs_commit,
+        ec_proof.timing.pcs_test,
+        ec_proof.timing.pcs_evaluate,
+        ec_proof.timing.total,
+    );
+
+    group.finish();
+}
+
+criterion_group!(benches, sha256_single, sha256_8x_ecdsa, sha256_piop_only, sha256_8x_ecdsa_end_to_end, sha256_full_pipeline, sha256_8x_ecdsa_logup_comparison);
 criterion_main!(benches);

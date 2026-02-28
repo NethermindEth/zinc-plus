@@ -32,8 +32,11 @@ use zip_plus::pcs::structs::{ZipPlusParams, ZipTypes};
 use zinc_piop::ideal_check::IdealCheckProtocol;
 use zinc_piop::combined_poly_resolver::CombinedPolyResolver;
 use zinc_piop::lookup::{
-    LookupColumnSpec, PipelineLookupProof,
-    prove_batched_lookup_with_indices, verify_batched_lookup,
+    GkrPipelineLookupProof, PipelineLookupProof, LookupColumnSpec,
+    prove_gkr_batched_lookup_with_indices,
+    prove_batched_lookup_with_indices,
+    verify_gkr_batched_lookup,
+    verify_batched_lookup,
 };
 use zinc_piop::projections::{
     project_trace_coeffs, project_trace_to_field,
@@ -104,6 +107,15 @@ pub struct VerifyTimingBreakdown {
     pub total: Duration,
 }
 
+/// Lookup proof variant: either GKR-based or classic batched decomposition.
+#[derive(Clone, Debug)]
+pub enum LookupProofData {
+    /// GKR fractional sumcheck based (no chunks/inverses sent).
+    Gkr(GkrPipelineLookupProof<PiopField>),
+    /// Classic batched decomposition (chunks + inverses + sumcheck).
+    Classic(PipelineLookupProof<PiopField>),
+}
+
 /// Full proof data produced by the prover.
 #[derive(Clone, Debug)]
 pub struct ZincProof {
@@ -120,7 +132,7 @@ pub struct ZincProof {
     pub cpr_down_evals: Vec<Vec<u8>>,
     /// Batched decomposed LogUp proof for column typing constraints.
     /// `None` if no lookup columns were specified.
-    pub lookup_proof: Option<PipelineLookupProof<PiopField>>,
+    pub lookup_proof: Option<LookupProofData>,
     /// PCS evaluation claims from CPR (evaluation point in the field).
     pub evaluation_point_bytes: Vec<Vec<u8>>,
     /// PCS evaluation values (evaluations of committed polys at the point).
@@ -196,6 +208,72 @@ fn derive_pcs_point(cpr_evaluation_point: &[PiopField], num_vars: usize) -> Vec<
     (0..num_vars)
         .map(|i| seed.wrapping_add(i as i128))
         .collect()
+}
+
+/// Project only the trace columns referenced by `lookup_specs` to field
+/// elements, extracting raw integer indices at the same time.
+///
+/// Returns `(columns, raw_indices, remapped_specs)` where `columns` and
+/// `raw_indices` contain only the needed columns and `remapped_specs` has
+/// column indices adjusted to the 0-based position in `columns`.
+fn project_lookup_columns_bp<const D: usize>(
+    trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    lookup_specs: &[LookupColumnSpec],
+    projecting_element: &PiopField,
+    field_cfg: &MontyParams<FIELD_LIMBS>,
+) -> (Vec<Vec<PiopField>>, Vec<Vec<usize>>, Vec<LookupColumnSpec>) {
+    use std::collections::BTreeMap;
+
+    // Collect unique column indices (sorted for determinism).
+    let mut needed: BTreeMap<usize, usize> = BTreeMap::new();
+    for spec in lookup_specs {
+        let next_id = needed.len();
+        needed.entry(spec.column_index).or_insert(next_id);
+    }
+
+    // Project only those columns.
+    let mut columns: Vec<Vec<PiopField>> = Vec::with_capacity(needed.len());
+    let mut raw_indices: Vec<Vec<usize>> = Vec::with_capacity(needed.len());
+
+    for &orig_idx in needed.keys() {
+        let col_mle = &trace[orig_idx];
+        let mut col_f = Vec::with_capacity(col_mle.len());
+        let mut col_idx = Vec::with_capacity(col_mle.len());
+        for bp in col_mle.iter() {
+            let mut val = PiopField::zero_with_cfg(field_cfg);
+            let mut power = PiopField::one_with_cfg(field_cfg);
+            let mut idx = 0usize;
+            for (j, coeff) in bp.iter().enumerate() {
+                if coeff.into_inner() {
+                    val += &power;
+                    idx |= 1usize << j;
+                }
+                power *= projecting_element;
+            }
+            col_f.push(val);
+            col_idx.push(idx);
+        }
+        columns.push(col_f);
+        raw_indices.push(col_idx);
+    }
+
+    // Re-assign `needed` map values to match final BTreeMap iteration order.
+    let index_map: BTreeMap<usize, usize> = needed
+        .keys()
+        .enumerate()
+        .map(|(new_idx, &orig_idx)| (orig_idx, new_idx))
+        .collect();
+
+    // Remap lookup specs to 0-based indices into the projected columns.
+    let remapped_specs: Vec<LookupColumnSpec> = lookup_specs
+        .iter()
+        .map(|spec| LookupColumnSpec {
+            column_index: index_map[&spec.column_index],
+            table_type: spec.table_type.clone(),
+        })
+        .collect();
+
+    (columns, raw_indices, remapped_specs)
 }
 
 // ─── Prover ─────────────────────────────────────────────────────────────────
@@ -309,44 +387,21 @@ where
         // Derive a lookup-specific projecting element from the transcript.
         let lookup_projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
 
-        // Project each trace column (BinaryPoly) to field elements and
-        // simultaneously extract raw integer indices from the binary
-        // coefficients.  This avoids building the full 2^D lookup table
-        // (which would be 2^32 ≈ 4 G entries for D=32).
-        let mut columns: Vec<Vec<PiopField>> = Vec::with_capacity(trace.len());
-        let mut raw_indices: Vec<Vec<usize>> = Vec::with_capacity(trace.len());
-        for col_mle in trace {
-            let mut col_f = Vec::with_capacity(col_mle.len());
-            let mut col_idx = Vec::with_capacity(col_mle.len());
-            for bp in col_mle.iter() {
-                let mut val = PiopField::zero_with_cfg(&field_cfg);
-                let mut power = PiopField::one_with_cfg(&field_cfg);
-                let mut idx = 0usize;
-                for (j, coeff) in bp.iter().enumerate() {
-                    if coeff.into_inner() {
-                        val += &power;
-                        idx |= 1usize << j;
-                    }
-                    power *= &lookup_projecting_element;
-                }
-                col_f.push(val);
-                col_idx.push(idx);
-            }
-            columns.push(col_f);
-            raw_indices.push(col_idx);
-        }
+        // Project only the columns that have lookup constraints.
+        let (columns, raw_indices, remapped_specs) =
+            project_lookup_columns_bp(trace, lookup_specs, &lookup_projecting_element, &field_cfg);
 
-        let (lk_proof, _lk_state) = prove_batched_lookup_with_indices(
+        let (lk_proof, _lk_state) = prove_gkr_batched_lookup_with_indices(
             &mut transcript,
             &columns,
             &raw_indices,
-            lookup_specs,
+            &remapped_specs,
             &lookup_projecting_element,
             &field_cfg,
         )
-        .expect("Batched lookup prover failed");
+        .expect("GKR batched lookup prover failed");
 
-        Some(lk_proof)
+        Some(LookupProofData::Gkr(lk_proof))
     } else {
         None
     };
@@ -394,6 +449,186 @@ where
         .map(|dpf| dpf.coeffs.iter().flat_map(|c| field_to_bytes(c)).collect())
         .collect();
 
+    let cpr_sumcheck_messages: Vec<Vec<u8>> = cpr_proof
+        .sumcheck_proof
+        .messages
+        .iter()
+        .map(|msg| msg.0.tail_evaluations.iter().flat_map(|c| field_to_bytes(c)).collect())
+        .collect();
+    let cpr_sumcheck_claimed_sum = field_to_bytes(&cpr_proof.sumcheck_proof.claimed_sum);
+    let cpr_up_evals: Vec<Vec<u8>> = cpr_proof.up_evals.iter().map(field_to_bytes).collect();
+    let cpr_down_evals: Vec<Vec<u8>> = cpr_proof.down_evals.iter().map(field_to_bytes).collect();
+    let evaluation_point_bytes: Vec<Vec<u8>> = cpr_state.evaluation_point.iter().map(field_to_bytes).collect();
+    let pcs_evals_bytes: Vec<Vec<u8>> = evals_f.iter().map(field_to_bytes).collect();
+
+    ZincProof {
+        pcs_proof_bytes: proof_bytes,
+        commitment,
+        ic_proof_values,
+        cpr_sumcheck_messages,
+        cpr_sumcheck_claimed_sum,
+        cpr_up_evals,
+        cpr_down_evals,
+        lookup_proof,
+        evaluation_point_bytes,
+        pcs_evals_bytes,
+        timing: TimingBreakdown {
+            pcs_commit: pcs_commit_time,
+            ideal_check: ideal_check_time,
+            combined_poly_resolver: cpr_time,
+            lookup: lookup_time,
+            pcs_test: pcs_test_time,
+            pcs_evaluate: pcs_eval_time,
+            total: total_time,
+        },
+    }
+}
+
+/// Run the full Zinc+ prover pipeline with **classic** batched decomposition
+/// LogUp (chunks + inverses + sumcheck), instead of GKR LogUp.
+///
+/// Identical to [`prove`] except the lookup step uses
+/// [`prove_batched_lookup_with_indices`] and stores a
+/// [`LookupProofData::Classic`] variant.
+#[allow(clippy::type_complexity)]
+pub fn prove_classic_logup<U, Zt, Lc, const D: usize, const CHECK: bool>(
+    params: &ZipPlusParams<Zt, Lc>,
+    trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    num_vars: usize,
+    lookup_specs: &[LookupColumnSpec],
+) -> ZincProof
+where
+    U: Uair<Scalar = BinaryPoly<D>>,
+    Zt: ZipTypes<Eval = BinaryPoly<D>>,
+    Lc: LinearCode<Zt>,
+    rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<D>>,
+    PiopField: FromPrimitiveWithConfig,
+    <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
+    Zt::Eval: ProjectableToField<PiopField>,
+    Zt::Cw: ProjectableToField<PiopField>,
+    PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
+    <PiopField as Field>::Inner: FromRef<Zt::Fmod>,
+{
+    let total_start = Instant::now();
+    let num_constraints = count_constraints::<U>();
+    let max_degree = count_max_degree::<U>();
+
+    let t0 = Instant::now();
+    let (hint, commitment) = BatchedZipPlus::<Zt, Lc>::commit(params, trace)
+        .expect("PCS commit failed");
+    let pcs_commit_time = t0.elapsed();
+
+    let t1 = Instant::now();
+    let mut transcript = KeccakTranscript::new();
+    let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
+
+    let projected_trace = project_trace_coeffs::<PiopField, i64, i64, D>(
+        trace, &[], &[], &field_cfg,
+    );
+    let projected_scalars = project_scalars::<PiopField, U>(|scalar| {
+        let one = PiopField::one_with_cfg(&field_cfg);
+        let zero = PiopField::zero_with_cfg(&field_cfg);
+        DynamicPolynomialF::new(
+            scalar.iter().map(|coeff| {
+                if coeff.into_inner() { one.clone() } else { zero.clone() }
+            }).collect::<Vec<_>>()
+        )
+    });
+
+    let (ic_proof, ic_state) =
+        IdealCheckProtocol::<PiopField>::prove_as_subprotocol::<U>(
+            &mut transcript,
+            &projected_trace,
+            &projected_scalars,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )
+        .expect("Ideal check prover failed");
+    let ideal_check_time = t1.elapsed();
+
+    let t2 = Instant::now();
+    let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+    let field_projected_scalars =
+        project_scalars_to_field(projected_scalars, &projecting_element)
+            .expect("scalar projection failed");
+    let field_trace = project_trace_to_field::<PiopField, D>(
+        trace, &[], &[], &projecting_element,
+    );
+
+    let (cpr_proof, cpr_state) =
+        CombinedPolyResolver::<PiopField>::prove_as_subprotocol::<U>(
+            &mut transcript,
+            field_trace,
+            &ic_state.evaluation_point,
+            &field_projected_scalars,
+            num_constraints,
+            num_vars,
+            max_degree,
+            &field_cfg,
+        )
+        .expect("Combined poly resolver failed");
+    let cpr_time = t2.elapsed();
+
+    // ── Classic Batched Decomposed LogUp ─────────────────────────────
+    let t2b = Instant::now();
+    let lookup_proof = if !lookup_specs.is_empty() {
+        let lookup_projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+
+        // Project only the columns that have lookup constraints.
+        let (columns, raw_indices, remapped_specs) =
+            project_lookup_columns_bp(trace, lookup_specs, &lookup_projecting_element, &field_cfg);
+
+        let (lk_proof, _lk_state) = prove_batched_lookup_with_indices(
+            &mut transcript,
+            &columns,
+            &raw_indices,
+            &remapped_specs,
+            &lookup_projecting_element,
+            &field_cfg,
+        )
+        .expect("Classic batched lookup prover failed");
+
+        Some(LookupProofData::Classic(lk_proof))
+    } else {
+        None
+    };
+    let lookup_time = t2b.elapsed();
+
+    let t3 = Instant::now();
+    let test_transcript =
+        BatchedZipPlus::<Zt, Lc>::test::<CHECK>(params, trace, &hint)
+            .expect("PCS test failed");
+    let pcs_test_time = t3.elapsed();
+    let t4 = Instant::now();
+    let point: Vec<Zt::Pt> = {
+        let i128_point = derive_pcs_point(&cpr_state.evaluation_point, num_vars);
+        i128_point
+            .into_iter()
+            .map(|v| unsafe { std::mem::transmute_copy(&v) })
+            .collect()
+    };
+    let (evals_f, proof) =
+        BatchedZipPlus::<Zt, Lc>::evaluate::<PiopField, CHECK>(
+            params,
+            trace,
+            &point,
+            test_transcript,
+        )
+        .expect("PCS evaluate failed");
+    let pcs_eval_time = t4.elapsed();
+    let total_time = total_start.elapsed();
+
+    let proof_bytes: Vec<u8> = {
+        let pcs_transcript: zip_plus::pcs_transcript::PcsTranscript = proof.into();
+        pcs_transcript.stream.into_inner()
+    };
+    let ic_proof_values: Vec<Vec<u8>> = ic_proof
+        .combined_mle_values
+        .iter()
+        .map(|dpf| dpf.coeffs.iter().flat_map(|c| field_to_bytes(c)).collect())
+        .collect();
     let cpr_sumcheck_messages: Vec<Vec<u8>> = cpr_proof
         .sumcheck_proof
         .messages
@@ -541,21 +776,23 @@ where
         // Derive a lookup-specific projecting element from the transcript.
         let lookup_projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
 
-        // Project each trace column to field elements using ProjectableToField
-        // and extract raw integer indices for the lookup decomposition.
-        //
-        // For Word lookups, the raw index is the plain integer value of the
-        // projected field element (safe because word entries < 2^32 ≪ p).
-        // This avoids building the full 2^width table for reverse-mapping.
+        // Collect unique column indices referenced by lookup specs.
+        let mut needed: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+        for spec in lookup_specs {
+            let next_id = needed.len();
+            needed.entry(spec.column_index).or_insert(next_id);
+        }
+
+        // Project only the columns that have lookup constraints.
         let projection_fn = R::prepare_projection(&lookup_projecting_element);
-        let mut columns: Vec<Vec<PiopField>> = Vec::with_capacity(trace.len());
-        let mut raw_indices: Vec<Vec<usize>> = Vec::with_capacity(trace.len());
-        for col_mle in trace {
+        let mut columns: Vec<Vec<PiopField>> = Vec::with_capacity(needed.len());
+        let mut raw_indices: Vec<Vec<usize>> = Vec::with_capacity(needed.len());
+        for &orig_idx in needed.keys() {
+            let col_mle = &trace[orig_idx];
             let mut col_f = Vec::with_capacity(col_mle.len());
             let mut col_idx = Vec::with_capacity(col_mle.len());
             for v in col_mle.iter() {
                 let fv = projection_fn(v);
-                // Retrieve the integer value from Montgomery form.
                 let uint = fv.retrieve();
                 let idx = uint.as_words()[0] as usize;
                 col_f.push(fv);
@@ -565,17 +802,31 @@ where
             raw_indices.push(col_idx);
         }
 
-        let (lk_proof, _lk_state) = prove_batched_lookup_with_indices(
+        // Remap lookup specs to 0-based indices into the projected columns.
+        let index_map: std::collections::BTreeMap<usize, usize> = needed
+            .keys()
+            .enumerate()
+            .map(|(new_idx, &orig_idx)| (orig_idx, new_idx))
+            .collect();
+        let remapped_specs: Vec<LookupColumnSpec> = lookup_specs
+            .iter()
+            .map(|spec| LookupColumnSpec {
+                column_index: index_map[&spec.column_index],
+                table_type: spec.table_type.clone(),
+            })
+            .collect();
+
+        let (lk_proof, _lk_state) = prove_gkr_batched_lookup_with_indices(
             &mut transcript,
             &columns,
             &raw_indices,
-            lookup_specs,
+            &remapped_specs,
             &lookup_projecting_element,
             &field_cfg,
         )
-        .expect("Batched lookup prover failed");
+        .expect("GKR batched lookup prover failed");
 
-        Some(lk_proof)
+        Some(LookupProofData::Gkr(lk_proof))
     } else {
         None
     };
@@ -817,15 +1068,18 @@ where
 
     // ── Step 2b: Verify Batched Decomposed LogUp (column typing) ────
     let t1b = Instant::now();
-    if let Some(ref lookup_proof) = zinc_proof.lookup_proof {
+    if let Some(ref lookup_data) = zinc_proof.lookup_proof {
         let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
 
-        if let Err(e) = verify_batched_lookup(
-            &mut transcript,
-            lookup_proof,
-            &projecting_element,
-            &field_cfg,
-        ) {
+        let result = match lookup_data {
+            LookupProofData::Gkr(proof) => verify_gkr_batched_lookup(
+                &mut transcript, proof, &projecting_element, &field_cfg,
+            ).map(|_| ()),
+            LookupProofData::Classic(proof) => verify_batched_lookup(
+                &mut transcript, proof, &projecting_element, &field_cfg,
+            ).map(|_| ()),
+        };
+        if let Err(e) = result {
             eprintln!("Lookup verification failed (generic): {e:?}");
             return VerifyResult {
                 accepted: false,
@@ -1195,16 +1449,19 @@ where
 
     // ── Step 2b: Verify Batched Decomposed LogUp (column typing) ────
     let t1b = Instant::now();
-    if let Some(ref lookup_proof) = zinc_proof.lookup_proof {
+    if let Some(ref lookup_data) = zinc_proof.lookup_proof {
         // Derive the same projecting element the prover used.
         let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
 
-        if let Err(e) = verify_batched_lookup(
-            &mut transcript,
-            lookup_proof,
-            &projecting_element,
-            &field_cfg,
-        ) {
+        let result = match lookup_data {
+            LookupProofData::Gkr(proof) => verify_gkr_batched_lookup(
+                &mut transcript, proof, &projecting_element, &field_cfg,
+            ).map(|_| ()),
+            LookupProofData::Classic(proof) => verify_batched_lookup(
+                &mut transcript, proof, &projecting_element, &field_cfg,
+            ).map(|_| ()),
+        };
+        if let Err(e) = result {
             eprintln!("Lookup verification failed: {e:?}");
             return VerifyResult {
                 accepted: false,

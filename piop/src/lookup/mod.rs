@@ -30,6 +30,8 @@
 
 pub mod batched_decomposition;
 pub mod decomposition;
+pub mod gkr_batched_decomposition;
+pub mod gkr_logup;
 pub mod logup;
 pub mod pipeline;
 pub mod structs;
@@ -37,9 +39,13 @@ pub mod tables;
 
 pub use batched_decomposition::BatchedDecompLogupProtocol;
 pub use decomposition::DecompLogupProtocol;
+pub use gkr_batched_decomposition::GkrBatchedDecompLogupProtocol;
 pub use logup::LogupProtocol;
 pub use pipeline::{
+    GkrPipelineLookupProof, GkrPipelineLookupProverState,
     PipelineLookupProof, PipelineLookupProverState, LookupGroupMeta,
-    prove_batched_lookup, prove_batched_lookup_with_indices, verify_batched_lookup,
+    prove_batched_lookup, prove_batched_lookup_with_indices,
+    prove_gkr_batched_lookup_with_indices,
+    verify_batched_lookup, verify_gkr_batched_lookup,
 };
 pub use structs::*;

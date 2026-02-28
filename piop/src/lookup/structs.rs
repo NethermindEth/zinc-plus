@@ -173,6 +173,103 @@ pub struct BatchedDecompLogupVerifierSubClaim<F: PrimeField> {
 }
 
 // ---------------------------------------------------------------------------
+// GKR LogUp
+// ---------------------------------------------------------------------------
+
+/// Proof for a single GKR fractional sumcheck.
+///
+/// Proves `Σ_{x ∈ {0,1}^d} p(x)/q(x) = root_p/root_q` using a
+/// layer-by-layer GKR protocol with `d` levels.
+#[derive(Clone, Debug)]
+pub struct GkrFractionProof<F: PrimeField> {
+    /// Root numerator `P = Σ p_i · Π_{j≠i} q_j`.
+    pub root_p: F,
+    /// Root denominator `Q = Π q_i`.
+    pub root_q: F,
+    /// Per-layer proofs, one for each GKR level (0..d).
+    pub layer_proofs: Vec<GkrLayerProof<F>>,
+}
+
+/// Proof for a single GKR layer.
+///
+/// At GKR layer `k` (with `2^k` entries), the prover runs a sumcheck
+/// over `k` variables (for `k ≥ 1`) or a direct check (for `k = 0`),
+/// then reveals the four child-MLE evaluations at the subclaim point.
+#[derive(Clone, Debug)]
+pub struct GkrLayerProof<F: PrimeField> {
+    /// Sumcheck proof for this layer (`None` for layer 0 which has 0 variables).
+    pub sumcheck_proof: Option<SumcheckProof<F>>,
+    /// Evaluation of the left-child numerator MLE at the subclaim point.
+    pub p_left: F,
+    /// Evaluation of the right-child numerator MLE at the subclaim point.
+    pub p_right: F,
+    /// Evaluation of the left-child denominator MLE at the subclaim point.
+    pub q_left: F,
+    /// Evaluation of the right-child denominator MLE at the subclaim point.
+    pub q_right: F,
+}
+
+/// Proof for the GKR Batched Decomposition + LogUp protocol.
+///
+/// Replaces [`BatchedDecompLogupProof`] when chunks are committed via
+/// the PCS (not sent in the clear). Only multiplicities and GKR layer
+/// proofs are sent.
+#[derive(Clone, Debug)]
+pub struct GkrBatchedDecompLogupProof<F: PrimeField> {
+    /// Per-lookup aggregated multiplicity vectors:
+    /// `aggregated_multiplicities[ℓ][j] = Σ_k m_k^(ℓ)[j]`.
+    pub aggregated_multiplicities: Vec<Vec<F>>,
+    /// GKR fractional sumcheck proof for the combined witness tree.
+    pub witness_gkr: GkrFractionProof<F>,
+    /// GKR fractional sumcheck proof for the combined table tree.
+    pub table_gkr: GkrFractionProof<F>,
+}
+
+/// Prover state after running the GKR batched decomposition + LogUp protocol.
+#[derive(Clone, Debug)]
+pub struct GkrBatchedDecompLogupProverState<F: PrimeField> {
+    /// Evaluation point at the witness-tree leaf level: `r ∈ F^{d_w}`.
+    ///
+    /// Decomposes as `(r_high, r_low)` where `r_low ∈ F^{log₂(W)}`
+    /// is the point at which chunk column MLEs need to be opened.
+    pub witness_eval_point: Vec<F>,
+    /// Evaluation point at the table-tree leaf level.
+    pub table_eval_point: Vec<F>,
+    /// Number of witness variables (log₂ of padded witness-tree size).
+    pub witness_num_vars: usize,
+    /// Number of table variables.
+    pub table_num_vars: usize,
+    /// Batching challenge α used to combine lookups.
+    pub alpha: F,
+    /// Challenge β.
+    pub beta: F,
+    /// Number of lookups L.
+    pub num_lookups: usize,
+    /// Number of chunks K.
+    pub num_chunks: usize,
+    /// Witness length W (before padding).
+    pub witness_len: usize,
+}
+
+/// Verifier sub-claim after verifying the GKR batched decomposition + LogUp proof.
+#[derive(Clone, Debug)]
+pub struct GkrBatchedDecompLogupVerifierSubClaim<F: PrimeField> {
+    /// The evaluation point at the witness-tree leaf level.
+    pub witness_eval_point: Vec<F>,
+    /// Expected evaluation of the combined chunk MLE at `witness_eval_point`.
+    ///
+    /// The verifier needs `q̃_w(r) = β − combined_chunks(r)`, where
+    /// `combined_chunks(r)` is the MLE of all L·K chunk columns flattened.
+    /// This value must be provided by PCS openings.
+    pub expected_witness_q_eval: F,
+    /// Expected evaluation of the witness numerator MLE (α-weight pattern).
+    /// Computable by the verifier from α and the tree structure.
+    pub expected_witness_p_eval: F,
+    /// The table evaluation point.
+    pub table_eval_point: Vec<F>,
+}
+
+// ---------------------------------------------------------------------------
 // Lookup specification (pipeline integration)
 // ---------------------------------------------------------------------------
 
@@ -288,6 +385,20 @@ pub enum LookupError<F: PrimeField> {
         /// Expected evaluation.
         expected: F,
         /// Actual evaluation.
+        got: F,
+    },
+    /// GKR root cross-check failed: P_w · Q_t ≠ P_t · Q_w.
+    #[error("GKR root cross-check failed")]
+    GkrRootMismatch,
+    /// GKR leaf-level claim mismatch.
+    #[error("GKR leaf-level claim mismatch")]
+    GkrLeafMismatch,
+    /// GKR layer-0 direct check failed.
+    #[error("GKR layer-0 check failed: expected {expected:?}, got {got:?}")]
+    GkrLayer0Mismatch {
+        /// Expected value.
+        expected: F,
+        /// Actual value.
         got: F,
     },
 }
