@@ -116,8 +116,7 @@ fn dual_ring_pipeline_round_trip() {
     println!("  PCS commit:      {:?}", proof.timing.pcs_commit);
     println!("  IC (both):       {:?}", proof.timing.ideal_check);
     println!("  CPR (batched):   {:?}", proof.timing.combined_poly_resolver);
-    println!("  PCS test:        {:?}", proof.timing.pcs_test);
-    println!("  PCS evaluate:    {:?}", proof.timing.pcs_evaluate);
+    println!("  PCS prove:       {:?}", proof.timing.pcs_prove);
     println!("  Total:           {:?}", proof.timing.total);
     println!("  PCS proof size:  {} bytes ({:.1} KB)",
         proof.pcs_proof_bytes.len(),

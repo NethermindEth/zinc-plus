@@ -67,8 +67,8 @@ The end-to-end pipeline takes a witness trace (a matrix of ring elements), commi
 
 | Variant | Prover |  Verifier | Lookup proof size |
 |---------|--------|-----------|-------------------|
-| Classic LogUp (chunks + inverses) | — | — | Larger (sends chunk/inverse vectors) |
-| GKR LogUp (default) | — | — | Smaller (only multiplicities + GKR layer proofs) |
+| Classic LogUp (default in pipeline) | — | — | Larger (sends chunk/inverse vectors) |
+| GKR LogUp (available, not wired in) | — | — | Smaller (only multiplicities + GKR layer proofs) |
 
 ---
 
@@ -108,9 +108,9 @@ The end-to-end pipeline takes a witness trace (a matrix of ring elements), commi
 
 The prover is implemented in `snark/src/pipeline.rs`. There are multiple entry points:
 
-- `prove()` — BinaryPoly-specific, used for SHA-256 single-ring proofs. Includes **GKR LogUp** lookup by default.
-- `prove_classic_logup()` — Same as `prove()` but uses the **classic LogUp** variant with **batched CPR+Lookup multi-degree sumcheck** — the CPR's degree-(max_degree+2) sumcheck and each lookup group's degree-2 sumcheck are fused into a single multi-degree sumcheck pass with shared verifier challenges.
-- `prove_generic()` — parameterized over any projectable ring `R`, used for ECDSA `Int<4>` proofs. Includes GKR LogUp.
+- `prove()` — BinaryPoly-specific, used for SHA-256 single-ring proofs. Includes **classic LogUp** lookup (chunks + inverse vectors, sequential sumchecks).
+- `prove_classic_logup()` — Same as `prove()` but **batches** the CPR and classic lookup sumchecks into a single multi-degree sumcheck pass — the CPR's degree-(max_degree+2) sumcheck and each lookup group's degree-2 sumcheck are fused with shared verifier challenges.
+- `prove_generic()` — parameterized over any projectable ring `R`, used for ECDSA `Int<4>` proofs. Includes classic LogUp.
 - `prove_dual_ring()` — runs two sequential PIOP passes (BinaryPoly + Q[X]) on the same committed trace, used for full SHA-256 proofs.
 - `prove_dual_circuit()` — combines two **independent circuits** (e.g. SHA-256 as `BinaryPoly<32>` + ECDSA as `Int<4>`) into a single proving pipeline with shared Fiat-Shamir challenges, shared IC evaluation point, shared projecting element, and a single multi-degree sumcheck spanning both CPR passes plus lookup. Each circuit retains its own PCS.
 
@@ -188,26 +188,26 @@ The CPR reduces the IC's evaluation claims to claims about individual trace colu
 ### Step 3.5: PIOP — Lookup (LogUp)
 
 ```
-lookup_proof = prove_gkr_batched_lookup_with_indices(
+lookup_proof = prove_batched_lookup_with_indices(
     transcript, columns_f, raw_indices, remapped_specs, projecting_element, field_cfg
 )
 ```
 
-If lookup column specifications are provided, the prover runs a LogUp-based lookup argument to prove that designated trace columns contain only values from prescribed finite lookup tables. The default pipeline uses **GKR Batched Decomposition LogUp**.
+If lookup column specifications are provided, the prover runs a LogUp-based lookup argument to prove that designated trace columns contain only values from prescribed finite lookup tables. The default pipeline (`prove()` and `prove_generic()`) uses **classic Batched Decomposition LogUp** with sequential sumchecks.
 
-1. **Column extraction and projection:** The function `project_lookup_columns_bp()` extracts only the trace columns referenced by the lookup specifications, projects each `BinaryPoly<D>` cell to a field element (evaluating at the `lookup_projecting_element`), and collects raw integer indices for efficient decomposition.
+1. **Column extraction and projection:** The function `extract_lookup_columns_from_field_trace()` extracts only the trace columns referenced by the lookup specifications from the already-projected field trace (using the same `projecting_element` as the CPR), and collects raw integer indices for efficient decomposition.
 
 2. **Grouping by table type:** Columns with the same `LookupTableType` (e.g., `BitPoly { width: 32 }`) are grouped together into a single lookup batch, amortizing the sumcheck cost across all columns in the group.
 
 3. **Decomposition (for large tables):** Tables larger than $2^8$ entries (controlled by `DECOMP_THRESHOLD = 8`) are decomposed Lasso-style: each $K$-bit entry is split into $\lceil K / 8 \rceil$ chunks of 8 bits each. For a `BitPoly { width: 32 }` table ($2^{32}$ entries), each witness value decomposes into 4 sub-table lookups of $2^8 = 256$ entries, with shift factors ensuring consistency: $w_i = \sum_k \text{shifts}[k] \cdot \text{chunks}[k][i]$.
 
-4. **GKR fractional sumcheck:** Instead of sending inverse vectors ($1/(\beta - w_i)$ and $1/(\beta - T_j)$), the GKR variant builds a binary fraction tree and proves the log-derivative identity $\sum_i \frac{1}{\beta - w_i} = \sum_j \frac{m_j}{\beta - T_j}$ layer by layer. Only the aggregated multiplicities $m_j$ are sent; the GKR layer proofs consist of left/right numerator-denominator pairs at each tree level.
+4. **Classic inverse-vector sumcheck:** The prover sends chunk vectors (decomposed sub-table witnesses) and inverse vectors ($1/(\beta - w_i)$ for witness side, $1/(\beta - T_j)$ for table side) explicitly, then runs a sumcheck proving the log-derivative identity $\sum_i \frac{1}{\beta - w_i} = \sum_j \frac{m_j}{\beta - T_j}$. Aggregated multiplicities $m_j$ are also sent.
 
-5. **What this produces:** A `GkrPipelineLookupProof` containing per-group `GkrBatchedDecompLogupProof` structs (aggregated multiplicities + GKR fraction proofs for witness and table sides) plus `LookupGroupMeta` for verification.
+5. **What this produces:** A `LookupProofData::Classic` wrapping per-group `BatchedDecompLogupProof` structs (chunk vectors, inverse vectors, aggregated multiplicities, and sumcheck messages) plus `LookupGroupMeta` for verification.
 
-**Classic LogUp alternative (batched):** The `prove_classic_logup()` entry point uses the non-GKR variant with **batched CPR+Lookup sumchecks**. Instead of running the CPR sumcheck and each lookup sumcheck sequentially (each producing independent transcripts and challenges), the CPR and all lookup groups are fused into a single multi-degree sumcheck pass (see Step 3+3.5 below). The classic variant sends chunk vectors and inverse vectors explicitly, producing larger proofs than GKR, but the batching saves verifier rounds and ensures all sumcheck groups share the same random challenges.
+**Batched CPR+Lookup alternative:** The `prove_classic_logup()` entry point also uses classic LogUp but **batches** the CPR and all lookup sumchecks into a single multi-degree sumcheck pass (see Step 3+3.5 below). Instead of running the CPR sumcheck and each lookup sumcheck sequentially (each producing independent transcripts and challenges), the CPR and all lookup groups are fused with shared verifier challenges. This variant produces `LookupProofData::BatchedClassic`.
 
-For 8×SHA-256 with 10 `BitPoly { width: 32 }` lookup columns, the GKR variant eliminates $O(W + N)$ inverse-vector field elements from the proof, replacing them with $O(\log^2 \max(W, N))$ GKR layer proof elements.
+**GKR LogUp variant:** A GKR-based variant (`prove_gkr_batched_lookup_with_indices`) is implemented in `piop/src/lookup/pipeline.rs` and eliminates the $O(W + N)$ inverse-vector field elements from the proof, replacing them with $O(\log^2 \max(W, N))$ GKR layer proof elements. It is not currently wired into any top-level prover pipeline but can be used directly.
 
 ### Step 3+3.5 (Batched): CPR + Lookup Multi-Degree Sumcheck
 
@@ -247,17 +247,18 @@ The result is a `BatchedCprLookupProof` containing:
 
 When no lookup specifications are provided, `prove_classic_logup()` still uses the multi-degree sumcheck with a single CPR group (at `num_vars`, no padding needed). This path is equivalent to the original sequential CPR sumcheck.
 
-### Step 4: PCS Prove (merged test + evaluate)
+### Step 4: PCS Prove (test + evaluate)
 
 ```
-(evals_f, proof) = ZipPlus::prove(params, polys, point, hint)
+test_transcript = BatchedZipPlus::test(params, trace, &hint)
+(evals_f, proof)  = BatchedZipPlus::evaluate(params, trace, &point, test_transcript)
 ```
 
-The PCS "prove" phase combines the proximity testing and evaluation opening into a single call (previously split into separate `test()` and `evaluate()` methods). The prove phase performs a **single-round direct spot-check proximity test** followed by evaluation proof generation.
+The batched PCS prove phase consists of two sequential calls: **proximity testing** (`test()`) followed by **evaluation opening** (`evaluate()`). The test transcript (containing the Fiat-Shamir sponge state and serialized test-phase data) flows directly into the evaluation call, binding the evaluation-phase randomness to the test-phase data.
 
-Implementation: `ZipPlus::prove()` in `zip-plus/src/pcs/phase_prove.rs`.
+Implementation: `BatchedZipPlus::test()` in `zip-plus/src/batched_pcs/phase_test.rs`, `BatchedZipPlus::evaluate()` in `zip-plus/src/batched_pcs/phase_evaluate.rs`. (The non-batched `ZipPlus::prove()` in `zip-plus/src/pcs/phase_prove.rs` merges both phases into a single call, but the pipeline exclusively uses the batched variant.)
 
-#### Phase 1: Proximity Testing (formerly `test()`)
+#### Phase 1: Proximity Testing (`test()`)
 
 ##### Per-polynomial $\alpha$-projection challenges
 
@@ -316,7 +317,7 @@ If the committed codeword matrices are $\delta$-far from valid codewords, a cons
 
 **What this produces:** A `BatchedZipPlusTestTranscript` wrapping a `PcsTranscript` that contains both the serialized proof bytes and the Fiat-Shamir sponge state. This transcript is passed directly to the evaluation sub-phase, which continues squeezing challenges from the same sponge — binding the evaluation-phase randomness to the test-phase data.
 
-#### Phase 2: Evaluation Opening (formerly `evaluate()`)
+#### Phase 2: Evaluation Opening (`evaluate()`)
 
 ```
 (evals_f, proof) = BatchedZipPlus::evaluate(params, polys, point, test_transcript)
@@ -922,7 +923,7 @@ The implementation provides four LogUp variants, with increasing sophistication:
 | **Core LogUp** | `logup.rs` | Single witness, single table. Proves $\sum_i 1/(\beta - w_i) = \sum_j m_j/(\beta - T_j)$. |
 | **Decomposition + LogUp** | `decomposition.rs` | Large table ($2^{K \cdot c}$) decomposed into $K$ sub-tables of $2^c$. Single sumcheck for consistency + membership. |
 | **Batched Decomposition + LogUp** | `batched_decomposition.rs` | $L$ witnesses, same decomposed table, single degree-2 sumcheck. Precomputed batched identity polynomial $H$. |
-| **GKR Batched Decomposition + LogUp** | `gkr_batched_decomposition.rs` | $L$ witnesses, GKR fractional sumcheck. **No inverse vectors or chunk vectors in proof.** Default in the pipeline. |
+| **GKR Batched Decomposition + LogUp** | `gkr_batched_decomposition.rs` | $L$ witnesses, GKR fractional sumcheck. **No inverse vectors or chunk vectors in proof.** Available but not currently wired into top-level pipelines. |
 
 ### The Log-Derivative Identity
 
@@ -948,7 +949,7 @@ Given $L$ witnesses looking up into the same decomposed table:
 2. **Single sumcheck:** All $L \cdot (K+1)$ identities (one decomposition + $K$ LogUp per witness) are $\gamma$-batched into a single combination function. A precomputed aggregate polynomial $H$ is evaluated pointwise, yielding a degree-2 sumcheck with only 2 MLEs (`eq` and `H`).
 3. **Verification:** The verifier replays the sumcheck, recomputes $H$ at the evaluation point from the provided chunks/inverses, and checks multiplicity sums.
 
-### GKR Batched Decomposition (Default)
+### GKR Batched Decomposition (Available, Not Wired In)
 
 The GKR variant (based on Papini & Haböck, ePrint 2023/1284) eliminates inverse vectors and chunk vectors from the proof:
 
@@ -976,8 +977,9 @@ Table generation functions:
 
 The lookup pipeline (`piop/src/lookup/pipeline.rs`) provides high-level orchestration:
 
-- **`prove_batched_lookup()`** / **`prove_gkr_batched_lookup_with_indices()`** — group columns by table type, build lookup instances, run the protocol.
-- **`verify_batched_lookup()`** / **`verify_gkr_batched_lookup()`** — reconstruct sub-tables from metadata, verify each group.
+- **`prove_batched_lookup()`** / **`prove_batched_lookup_with_indices()`** — group columns by table type, build lookup instances, run the classic protocol. Used by `prove()`, `prove_classic_logup()`, and `prove_generic()`.
+- **`prove_gkr_batched_lookup_with_indices()`** — GKR variant, available but not currently wired into any top-level pipeline.
+- **`verify_batched_lookup()`** / **`verify_gkr_batched_lookup()`** — reconstruct sub-tables from metadata, verify each group (dispatched by proof variant).
 
 Constants:
 - `DEFAULT_CHUNK_WIDTH = 8` (sub-tables of $2^8 = 256$ entries)
@@ -1453,7 +1455,7 @@ zinc-plus-new/
 │   │                   # verify(), verify_generic(), prove_dual_ring(),
 │   │                   # verify_dual_ring(), prove_dual_circuit(),
 │   │                   # verify_dual_circuit(), derive_pcs_point(),
-│   │                   # project_lookup_columns_bp(),
+│   │                   # extract_lookup_columns_from_field_trace(),
 │   │                   # BatchedCprLookupProof, DualCircuitZincProof,
 │   │                   # LookupProofData::BatchedClassic
 │   ├── benches/        # Criterion benchmarks (e2e_sha256: 6 groups,
@@ -1484,7 +1486,7 @@ zinc-plus-new/
 │           │                            # build_verifier_pre_sumcheck(),
 │           │                            # finalize_verifier()
 │           ├── gkr_logup.rs         # GKR fractional sumcheck
-│           ├── gkr_batched_decomposition.rs # GKR + batched decomp (default)
+│           ├── gkr_batched_decomposition.rs # GKR + batched decomp (available, not wired in)
 │           ├── pipeline.rs          # High-level prove/verify orchestration
 │           ├── structs.rs           # Proof types, instances, errors,
 │           │                        # LookupSumcheckGroup,

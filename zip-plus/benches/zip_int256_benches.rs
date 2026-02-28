@@ -231,10 +231,10 @@ fn bench_verify<Lc: LinearCode<IntZipTypes256>, const P: usize>(
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
     let (hint, commitment) = ZipPlus::commit_single(&params, &poly).unwrap();
     let point = vec![<IntZipTypes256 as ZipTypes>::Pt::one(); P];
-    let (evals_f, proof) =
+    let (eval_f, proof) =
         ZipPlus::prove::<F, UNCHECKED>(&params, &[poly.clone()], &point, &hint)
             .expect("Prove failed");
-    let field_cfg = *evals_f[0].cfg();
+    let field_cfg = *eval_f.cfg();
     let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
     group.bench_function(
@@ -251,7 +251,7 @@ fn bench_verify<Lc: LinearCode<IntZipTypes256>, const P: usize>(
                     &params,
                     &commitment,
                     &point_f,
-                    &evals_f,
+                    &eval_f,
                     &proof,
                 )
                 .expect("Verification failed");

@@ -25,7 +25,7 @@ use crypto_primitives::{
     crypto_bigint_int::Int,
     crypto_bigint_monty::MontyField,
     crypto_bigint_uint::Uint,
-    Field, FixedSemiring,
+    Field, FixedSemiring, IntoWithConfig,
 };
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
 use zinc_poly::univariate::binary::{
@@ -42,12 +42,11 @@ use zinc_utils::{
     named::Named,
 };
 use zip_plus::{
-    batched_pcs::structs::BatchedZipPlus,
     code::{
         LinearCode,
         iprs::{IprsCode, PnttConfigF2_16R4B16, PnttConfigF2_16R4B64},
     },
-    pcs::structs::{ZipPlusParams, ZipTypes},
+    pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
 };
 
 use zinc_ecdsa_uair::EcdsaUairInt;
@@ -503,28 +502,22 @@ fn sha256_single(c: &mut Criterion) {
                     let t = Instant::now();
 
                     // BinaryPoly batch
-                    let (poly_hint, _) = BatchedZipPlus::<PolyZt, PolyLc>::commit(
+                    let (poly_hint, _) = ZipPlus::<PolyZt, PolyLc>::commit(
                         &poly_params, &poly_trace,
                     ).expect("poly commit");
-                    let poly_tx = BatchedZipPlus::<PolyZt, PolyLc>::test::<UNCHECKED>(
-                        &poly_params, &poly_trace, &poly_hint,
-                    ).expect("poly test");
                     let poly_pt: Vec<i128> = vec![1i128; SHA256_NUM_VARS];
-                    let _ = BatchedZipPlus::<PolyZt, PolyLc>::evaluate::<F, UNCHECKED>(
-                        &poly_params, &poly_trace, &poly_pt, poly_tx,
-                    ).expect("poly evaluate");
+                    let _ = ZipPlus::<PolyZt, PolyLc>::prove::<F, UNCHECKED>(
+                        &poly_params, &poly_trace, &poly_pt, &poly_hint,
+                    ).expect("poly prove");
 
                     // Int batch
-                    let (int_hint, _) = BatchedZipPlus::<IntZt, IntLc>::commit(
+                    let (int_hint, _) = ZipPlus::<IntZt, IntLc>::commit(
                         &int_params, &int_trace,
                     ).expect("int commit");
-                    let int_tx = BatchedZipPlus::<IntZt, IntLc>::test::<UNCHECKED>(
-                        &int_params, &int_trace, &int_hint,
-                    ).expect("int test");
                     let int_pt: Vec<i128> = vec![1i128; SHA256_NUM_VARS];
-                    let _ = BatchedZipPlus::<IntZt, IntLc>::evaluate::<F, UNCHECKED>(
-                        &int_params, &int_trace, &int_pt, int_tx,
-                    ).expect("int evaluate");
+                    let _ = ZipPlus::<IntZt, IntLc>::prove::<F, UNCHECKED>(
+                        &int_params, &int_trace, &int_pt, &int_hint,
+                    ).expect("int prove");
 
                     total += t.elapsed();
                 }
@@ -533,37 +526,39 @@ fn sha256_single(c: &mut Criterion) {
         });
 
         // Prepare proofs for verifier and size measurement
-        let (poly_hint, poly_comm) = BatchedZipPlus::<PolyZt, PolyLc>::commit(
+        let (poly_hint, poly_comm) = ZipPlus::<PolyZt, PolyLc>::commit(
             &poly_params, &poly_trace,
         ).expect("commit");
-        let poly_tx = BatchedZipPlus::<PolyZt, PolyLc>::test::<UNCHECKED>(
-            &poly_params, &poly_trace, &poly_hint,
-        ).expect("test");
         let poly_pt: Vec<i128> = vec![1i128; SHA256_NUM_VARS];
-        let (_poly_evals, poly_proof) = BatchedZipPlus::<PolyZt, PolyLc>::evaluate::<F, UNCHECKED>(
-            &poly_params, &poly_trace, &poly_pt, poly_tx,
-        ).expect("evaluate");
+        let (poly_eval_f, poly_proof) = ZipPlus::<PolyZt, PolyLc>::prove::<F, UNCHECKED>(
+            &poly_params, &poly_trace, &poly_pt, &poly_hint,
+        ).expect("prove");
 
-        let (int_hint, int_comm) = BatchedZipPlus::<IntZt, IntLc>::commit(
+        let (int_hint, int_comm) = ZipPlus::<IntZt, IntLc>::commit(
             &int_params, &int_trace,
         ).expect("commit");
-        let int_tx = BatchedZipPlus::<IntZt, IntLc>::test::<UNCHECKED>(
-            &int_params, &int_trace, &int_hint,
-        ).expect("test");
         let int_pt: Vec<i128> = vec![1i128; SHA256_NUM_VARS];
-        let (_int_evals, int_proof) = BatchedZipPlus::<IntZt, IntLc>::evaluate::<F, UNCHECKED>(
-            &int_params, &int_trace, &int_pt, int_tx,
-        ).expect("evaluate");
+        let (int_eval_f, int_proof) = ZipPlus::<IntZt, IntLc>::prove::<F, UNCHECKED>(
+            &int_params, &int_trace, &int_pt, &int_hint,
+        ).expect("prove");
+
+        // Convert points to field elements for verify
+        let pcs_field_cfg = {
+            let mut tx = zinc_transcript::KeccakTranscript::default();
+            tx.get_random_field_cfg::<F, <PolyZt as ZipTypes>::Fmod, <PolyZt as ZipTypes>::PrimeTest>()
+        };
+        let poly_pt_f: Vec<F> = poly_pt.iter().map(|v| v.into_with_cfg(&pcs_field_cfg)).collect();
+        let int_pt_f: Vec<F> = int_pt.iter().map(|v| v.into_with_cfg(&pcs_field_cfg)).collect();
 
         // ── Verifier (both batches) ─────────────────────────────────
         group.bench_function("1xSHA256/SplitPCS/Verifier", |b| {
             b.iter(|| {
-                let r1 = BatchedZipPlus::<PolyZt, PolyLc>::verify::<F, UNCHECKED>(
-                    &poly_params, &poly_comm, &poly_pt, &poly_proof,
+                let r1 = ZipPlus::<PolyZt, PolyLc>::verify::<F, UNCHECKED>(
+                    &poly_params, &poly_comm, &poly_pt_f, &poly_eval_f, &poly_proof,
                 );
                 let _ = black_box(r1);
-                let r2 = BatchedZipPlus::<IntZt, IntLc>::verify::<F, UNCHECKED>(
-                    &int_params, &int_comm, &int_pt, &int_proof,
+                let r2 = ZipPlus::<IntZt, IntLc>::verify::<F, UNCHECKED>(
+                    &int_params, &int_comm, &int_pt_f, &int_eval_f, &int_proof,
                 );
                 let _ = black_box(r2);
             });
@@ -650,16 +645,20 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
     let sha_lookup_specs = sha256_lookup_specs();
 
     // ── Prepare ECDSA proof (reused by split PCS verifier) ────────
-    let (ec_hint, ec_comm) = BatchedZipPlus::<EcZt, EcLc>::commit(
+    let (ec_hint, ec_comm) = ZipPlus::<EcZt, EcLc>::commit(
         &ec_params, &ecdsa_trace,
     ).expect("commit");
-    let ec_tx = BatchedZipPlus::<EcZt, EcLc>::test::<UNCHECKED>(
-        &ec_params, &ecdsa_trace, &ec_hint,
-    ).expect("test");
     let ec_pt: Vec<i128> = vec![1i128; ECDSA_NUM_VARS];
-    let (_ec_evals_f, ec_proof) = BatchedZipPlus::<EcZt, EcLc>::evaluate::<FScalar, UNCHECKED>(
-        &ec_params, &ecdsa_trace, &ec_pt, ec_tx,
-    ).expect("evaluate");
+    let (ec_eval_f, ec_proof) = ZipPlus::<EcZt, EcLc>::prove::<FScalar, UNCHECKED>(
+        &ec_params, &ecdsa_trace, &ec_pt, &ec_hint,
+    ).expect("prove");
+
+    // Convert ECDSA point to field for verify
+    let ec_pcs_field_cfg = {
+        let mut tx = zinc_transcript::KeccakTranscript::default();
+        tx.get_random_field_cfg::<FScalar, <EcZt as ZipTypes>::Fmod, <EcZt as ZipTypes>::PrimeTest>()
+    };
+    let ec_pt_f: Vec<FScalar> = ec_pt.iter().map(|v| v.into_with_cfg(&ec_pcs_field_cfg)).collect();
 
     // ── Full Pipeline Prover (IC + CPR + Lookup + PCS) ──────────────
     group.bench_function("FullPipeline/Prover", |b| {
@@ -722,22 +721,20 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
 
     // ── Prover timing breakdown ─────────────────────────────────────
     eprintln!("\n=== 8xSHA256+ECDSA Full Pipeline Timing ===");
-    eprintln!("  SHA prover: IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
+    eprintln!("  SHA prover: IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, prove={:?}), total={:?}",
         sha_zinc_proof.timing.ideal_check,
         sha_zinc_proof.timing.combined_poly_resolver,
         sha_zinc_proof.timing.lookup,
         sha_zinc_proof.timing.pcs_commit,
-        sha_zinc_proof.timing.pcs_test,
-        sha_zinc_proof.timing.pcs_evaluate,
+        sha_zinc_proof.timing.pcs_prove,
         sha_zinc_proof.timing.total,
     );
-    eprintln!("  ECDSA prover: IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
+    eprintln!("  ECDSA prover: IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, prove={:?}), total={:?}",
         ec_zinc_proof.timing.ideal_check,
         ec_zinc_proof.timing.combined_poly_resolver,
         ec_zinc_proof.timing.lookup,
         ec_zinc_proof.timing.pcs_commit,
-        ec_zinc_proof.timing.pcs_test,
-        ec_zinc_proof.timing.pcs_evaluate,
+        ec_zinc_proof.timing.pcs_prove,
         ec_zinc_proof.timing.total,
     );
 
@@ -804,40 +801,31 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
                     let t = Instant::now();
 
                     // SHA BinaryPoly batch
-                    let (h, _) = BatchedZipPlus::<ShaPolyZt, ShaPolyLc>::commit(
+                    let (h, _) = ZipPlus::<ShaPolyZt, ShaPolyLc>::commit(
                         &sha_poly_params, &sha_poly_trace,
                     ).expect("sha poly commit");
-                    let tx = BatchedZipPlus::<ShaPolyZt, ShaPolyLc>::test::<UNCHECKED>(
-                        &sha_poly_params, &sha_poly_trace, &h,
-                    ).expect("sha poly test");
                     let pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
-                    let _ = BatchedZipPlus::<ShaPolyZt, ShaPolyLc>::evaluate::<F, UNCHECKED>(
-                        &sha_poly_params, &sha_poly_trace, &pt, tx,
-                    ).expect("sha poly evaluate");
+                    let _ = ZipPlus::<ShaPolyZt, ShaPolyLc>::prove::<F, UNCHECKED>(
+                        &sha_poly_params, &sha_poly_trace, &pt, &h,
+                    ).expect("sha poly prove");
 
                     // SHA Int batch
-                    let (h, _) = BatchedZipPlus::<ShaIntZt, ShaIntLc>::commit(
+                    let (h, _) = ZipPlus::<ShaIntZt, ShaIntLc>::commit(
                         &sha_int_params, &sha_int_trace,
                     ).expect("sha int commit");
-                    let tx = BatchedZipPlus::<ShaIntZt, ShaIntLc>::test::<UNCHECKED>(
-                        &sha_int_params, &sha_int_trace, &h,
-                    ).expect("sha int test");
                     let pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
-                    let _ = BatchedZipPlus::<ShaIntZt, ShaIntLc>::evaluate::<F, UNCHECKED>(
-                        &sha_int_params, &sha_int_trace, &pt, tx,
-                    ).expect("sha int evaluate");
+                    let _ = ZipPlus::<ShaIntZt, ShaIntLc>::prove::<F, UNCHECKED>(
+                        &sha_int_params, &sha_int_trace, &pt, &h,
+                    ).expect("sha int prove");
 
                     // ECDSA batch (unchanged)
-                    let (h, _) = BatchedZipPlus::<EcZt, EcLc>::commit(
+                    let (h, _) = ZipPlus::<EcZt, EcLc>::commit(
                         &ec_params, &ecdsa_trace,
                     ).expect("ecdsa commit");
-                    let tx = BatchedZipPlus::<EcZt, EcLc>::test::<UNCHECKED>(
-                        &ec_params, &ecdsa_trace, &h,
-                    ).expect("ecdsa test");
                     let pt: Vec<i128> = vec![1i128; ECDSA_NUM_VARS];
-                    let _ = BatchedZipPlus::<EcZt, EcLc>::evaluate::<FScalar, UNCHECKED>(
-                        &ec_params, &ecdsa_trace, &pt, tx,
-                    ).expect("ecdsa evaluate");
+                    let _ = ZipPlus::<EcZt, EcLc>::prove::<FScalar, UNCHECKED>(
+                        &ec_params, &ecdsa_trace, &pt, &h,
+                    ).expect("ecdsa prove");
 
                     total += t.elapsed();
                 }
@@ -846,31 +834,33 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
         });
 
         // Prepare proofs for verifier and size measurement
-        let (sp_h, sp_comm) = BatchedZipPlus::<ShaPolyZt, ShaPolyLc>::commit(
+        let (sp_h, sp_comm) = ZipPlus::<ShaPolyZt, ShaPolyLc>::commit(
             &sha_poly_params, &sha_poly_trace,
         ).expect("commit");
-        let sp_tx = BatchedZipPlus::<ShaPolyZt, ShaPolyLc>::test::<UNCHECKED>(
-            &sha_poly_params, &sha_poly_trace, &sp_h,
-        ).expect("test");
         let sp_pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
-        let (_, sp_proof) = BatchedZipPlus::<ShaPolyZt, ShaPolyLc>::evaluate::<F, UNCHECKED>(
-            &sha_poly_params, &sha_poly_trace, &sp_pt, sp_tx,
-        ).expect("evaluate");
+        let (sp_eval_f, sp_proof) = ZipPlus::<ShaPolyZt, ShaPolyLc>::prove::<F, UNCHECKED>(
+            &sha_poly_params, &sha_poly_trace, &sp_pt, &sp_h,
+        ).expect("prove");
 
-        let (si_h, si_comm) = BatchedZipPlus::<ShaIntZt, ShaIntLc>::commit(
+        let (si_h, si_comm) = ZipPlus::<ShaIntZt, ShaIntLc>::commit(
             &sha_int_params, &sha_int_trace,
         ).expect("commit");
-        let si_tx = BatchedZipPlus::<ShaIntZt, ShaIntLc>::test::<UNCHECKED>(
-            &sha_int_params, &sha_int_trace, &si_h,
-        ).expect("test");
         let si_pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
-        let (_, si_proof) = BatchedZipPlus::<ShaIntZt, ShaIntLc>::evaluate::<F, UNCHECKED>(
-            &sha_int_params, &sha_int_trace, &si_pt, si_tx,
-        ).expect("evaluate");
+        let (si_eval_f, si_proof) = ZipPlus::<ShaIntZt, ShaIntLc>::prove::<F, UNCHECKED>(
+            &sha_int_params, &sha_int_trace, &si_pt, &si_h,
+        ).expect("prove");
 
         // Reuse ECDSA proof from above (ec_comm, ec_pt, ec_proof)
 
         // ── Split Verifier (3 batches) ──────────────────────────────
+        // Convert points to field for verify
+        let split_pcs_field_cfg = {
+            let mut tx = zinc_transcript::KeccakTranscript::default();
+            tx.get_random_field_cfg::<F, <ShaPolyZt as ZipTypes>::Fmod, <ShaPolyZt as ZipTypes>::PrimeTest>()
+        };
+        let sp_pt_f: Vec<F> = sp_pt.iter().map(|v| v.into_with_cfg(&split_pcs_field_cfg)).collect();
+        let si_pt_f: Vec<F> = si_pt.iter().map(|v| v.into_with_cfg(&split_pcs_field_cfg)).collect();
+
         group.bench_function("SplitSHA/PCS/Verifier", |b| {
             b.iter(|| {
                 // Run all 3 verify calls concurrently using rayon::join
@@ -878,20 +868,20 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
                     || {
                         rayon::join(
                             || {
-                                BatchedZipPlus::<ShaPolyZt, ShaPolyLc>::verify::<F, UNCHECKED>(
-                                    &sha_poly_params, &sp_comm, &sp_pt, &sp_proof,
+                                ZipPlus::<ShaPolyZt, ShaPolyLc>::verify::<F, UNCHECKED>(
+                                    &sha_poly_params, &sp_comm, &sp_pt_f, &sp_eval_f, &sp_proof,
                                 )
                             },
                             || {
-                                BatchedZipPlus::<ShaIntZt, ShaIntLc>::verify::<F, UNCHECKED>(
-                                    &sha_int_params, &si_comm, &si_pt, &si_proof,
+                                ZipPlus::<ShaIntZt, ShaIntLc>::verify::<F, UNCHECKED>(
+                                    &sha_int_params, &si_comm, &si_pt_f, &si_eval_f, &si_proof,
                                 )
                             },
                         )
                     },
                     || {
-                        BatchedZipPlus::<EcZt, EcLc>::verify::<FScalar, UNCHECKED>(
-                            &ec_params, &ec_comm, &ec_pt, &ec_proof,
+                        ZipPlus::<EcZt, EcLc>::verify::<FScalar, UNCHECKED>(
+                            &ec_params, &ec_comm, &ec_pt_f, &ec_eval_f, &ec_proof,
                         )
                     },
                 );
@@ -1175,22 +1165,20 @@ fn sha256_8x_ecdsa_end_to_end(c: &mut Criterion) {
 
     // ── Timing breakdown ────────────────────────────────────────────
     eprintln!("\n=== 8xSHA256+ECDSA E2E Timing ===");
-    eprintln!("  SHA prover: IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
+    eprintln!("  SHA prover: IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, prove={:?}), total={:?}",
         sha_proof.timing.ideal_check,
         sha_proof.timing.combined_poly_resolver,
         sha_proof.timing.lookup,
         sha_proof.timing.pcs_commit,
-        sha_proof.timing.pcs_test,
-        sha_proof.timing.pcs_evaluate,
+        sha_proof.timing.pcs_prove,
         sha_proof.timing.total,
     );
-    eprintln!("  ECDSA prover: IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
+    eprintln!("  ECDSA prover: IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, prove={:?}), total={:?}",
         ec_proof.timing.ideal_check,
         ec_proof.timing.combined_poly_resolver,
         ec_proof.timing.lookup,
         ec_proof.timing.pcs_commit,
-        ec_proof.timing.pcs_test,
-        ec_proof.timing.pcs_evaluate,
+        ec_proof.timing.pcs_prove,
         ec_proof.timing.total,
     );
 
@@ -1301,25 +1289,20 @@ fn sha256_full_pipeline(c: &mut Criterion) {
         let int_params = ZipPlusParams::<IntZt, IntLc>::new(num_vars, 1, int_lc);
 
         // BinaryPoly batch PCS
-        let (poly_hint, _) = BatchedZipPlus::<Zt, Lc>::commit(&params, &poly_trace)
+        let (poly_hint, _) = ZipPlus::<Zt, Lc>::commit(&params, &poly_trace)
             .expect("poly commit");
-        let poly_tx = BatchedZipPlus::<Zt, Lc>::test::<UNCHECKED>(&params, &poly_trace, &poly_hint)
-            .expect("poly test");
         let poly_pt: Vec<i128> = vec![1i128; num_vars];
-        let (_, poly_proof) = BatchedZipPlus::<Zt, Lc>::evaluate::<F, UNCHECKED>(
-            &params, &poly_trace, &poly_pt, poly_tx,
-        ).expect("poly evaluate");
+        let (_, poly_proof) = ZipPlus::<Zt, Lc>::prove::<F, UNCHECKED>(
+            &params, &poly_trace, &poly_pt, &poly_hint,
+        ).expect("poly prove");
 
         // Int batch PCS
-        let (int_hint, _) = BatchedZipPlus::<IntZt, IntLc>::commit(&int_params, &int_trace)
+        let (int_hint, _) = ZipPlus::<IntZt, IntLc>::commit(&int_params, &int_trace)
             .expect("int commit");
-        let int_tx = BatchedZipPlus::<IntZt, IntLc>::test::<UNCHECKED>(
-            &int_params, &int_trace, &int_hint,
-        ).expect("int test");
         let int_pt: Vec<i128> = vec![1i128; num_vars];
-        let (_, int_proof) = BatchedZipPlus::<IntZt, IntLc>::evaluate::<F, UNCHECKED>(
-            &int_params, &int_trace, &int_pt, int_tx,
-        ).expect("int evaluate");
+        let (_, int_proof) = ZipPlus::<IntZt, IntLc>::prove::<F, UNCHECKED>(
+            &int_params, &int_trace, &int_pt, &int_hint,
+        ).expect("int prove");
 
         let poly_pcs_bytes: Vec<u8> = {
             let tx: zip_plus::pcs_transcript::PcsTranscript = poly_proof.into();
@@ -1558,23 +1541,21 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
 
     eprintln!("\n=== LogUp Comparison: 8xSHA256+ECDSA ===");
     eprintln!("  ClassicLogUp (batched CPR+Lookup multi-degree sumcheck):");
-    eprintln!("    SHA prover: IC={:?}, CPR+Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
+    eprintln!("    SHA prover: IC={:?}, CPR+Lookup={:?}, PCS(commit={:?}, prove={:?}), total={:?}",
         batched_sha_proof.timing.ideal_check,
         batched_sha_proof.timing.combined_poly_resolver,
         batched_sha_proof.timing.pcs_commit,
-        batched_sha_proof.timing.pcs_test,
-        batched_sha_proof.timing.pcs_evaluate,
+        batched_sha_proof.timing.pcs_prove,
         batched_sha_proof.timing.total,
     );
     eprintln!("    Lookup proof size: {} bytes ({:.1} KB)", batched_lookup_size, batched_lookup_size as f64 / 1024.0);
     eprintln!("  SeparateLogUp (CPR and lookup run independent sumchecks):");
-    eprintln!("    SHA prover: IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
+    eprintln!("    SHA prover: IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, prove={:?}), total={:?}",
         separate_sha_proof.timing.ideal_check,
         separate_sha_proof.timing.combined_poly_resolver,
         separate_sha_proof.timing.lookup,
         separate_sha_proof.timing.pcs_commit,
-        separate_sha_proof.timing.pcs_test,
-        separate_sha_proof.timing.pcs_evaluate,
+        separate_sha_proof.timing.pcs_prove,
         separate_sha_proof.timing.total,
     );
     eprintln!("    Lookup proof size: {} bytes ({:.1} KB)", separate_lookup_size, separate_lookup_size as f64 / 1024.0);
@@ -1582,13 +1563,12 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
         eprintln!("  Batched vs Separate lookup proof: {:.1}× ratio",
             separate_lookup_size as f64 / batched_lookup_size as f64);
     }
-    eprintln!("  ECDSA prover (shared): IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
+    eprintln!("  ECDSA prover (shared): IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, prove={:?}), total={:?}",
         ec_proof.timing.ideal_check,
         ec_proof.timing.combined_poly_resolver,
         ec_proof.timing.lookup,
         ec_proof.timing.pcs_commit,
-        ec_proof.timing.pcs_test,
-        ec_proof.timing.pcs_evaluate,
+        ec_proof.timing.pcs_prove,
         ec_proof.timing.total,
     );
 

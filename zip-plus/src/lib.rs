@@ -1,4 +1,3 @@
-pub mod batched_pcs;
 pub mod code;
 pub mod pcs;
 pub mod pcs_transcript;

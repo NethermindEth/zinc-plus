@@ -33,12 +33,11 @@ use zinc_utils::{
     named::Named,
 };
 use zip_plus::{
-    batched_pcs::structs::BatchedZipPlus,
     code::{
         LinearCode,
         iprs::{IprsCode, PnttConfigF2_16R4B64},
     },
-    pcs::structs::{ZipPlusParams, ZipTypes},
+    pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
 };
 
 use zinc_sha256_uair::{Sha256Uair, witness::GenerateWitness};
@@ -158,7 +157,7 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
     // ── 2. PCS Commit ───────────────────────────────────────────────
     group.bench_function("PCS/Commit", |b| {
         b.iter(|| {
-            let r = BatchedZipPlus::<ShaZt, ShaLc>::commit(&sha_params, &sha_trace);
+            let r = ZipPlus::<ShaZt, ShaLc>::commit(&sha_params, &sha_trace);
             let _ = black_box(r);
         });
     });
@@ -320,13 +319,14 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
     }
 
     // ── 6. PCS Test ─────────────────────────────────────────────────
-    let (sha_hint, _sha_comm) = BatchedZipPlus::<ShaZt, ShaLc>::commit(&sha_params, &sha_trace)
+    let (sha_hint, _sha_comm) = ZipPlus::<ShaZt, ShaLc>::commit(&sha_params, &sha_trace)
         .expect("commit");
 
     group.bench_function("PCS/Test", |b| {
         b.iter(|| {
-            let r = BatchedZipPlus::<ShaZt, ShaLc>::test::<UNCHECKED>(
-                &sha_params, &sha_trace, &sha_hint,
+            let pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
+            let r = ZipPlus::<ShaZt, ShaLc>::prove::<F, UNCHECKED>(
+                &sha_params, &sha_trace, &pt, &sha_hint,
             );
             let _ = black_box(r);
         });
@@ -334,20 +334,12 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
 
     // ── 7. PCS Evaluate ─────────────────────────────────────────────
     group.bench_function("PCS/Evaluate", |b| {
-        b.iter_custom(|iters| {
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                let tx = BatchedZipPlus::<ShaZt, ShaLc>::test::<UNCHECKED>(
-                    &sha_params, &sha_trace, &sha_hint,
-                ).expect("test");
-                let pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
-                let t = Instant::now();
-                let _ = BatchedZipPlus::<ShaZt, ShaLc>::evaluate::<F, UNCHECKED>(
-                    &sha_params, &sha_trace, &pt, tx,
-                ).expect("evaluate");
-                total += t.elapsed();
-            }
-            total
+        b.iter(|| {
+            let pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
+            let r = ZipPlus::<ShaZt, ShaLc>::prove::<F, UNCHECKED>(
+                &sha_params, &sha_trace, &pt, &sha_hint,
+            );
+            let _ = black_box(r);
         });
     });
 
@@ -383,13 +375,12 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
 
     // ── Timing breakdown summary ────────────────────────────────────
     eprintln!("\n=== 8xSHA256 (no ECDSA) Pipeline Timing ===");
-    eprintln!("  IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
+    eprintln!("  IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, prove={:?}), total={:?}",
         sha_proof.timing.ideal_check,
         sha_proof.timing.combined_poly_resolver,
         sha_proof.timing.lookup,
         sha_proof.timing.pcs_commit,
-        sha_proof.timing.pcs_test,
-        sha_proof.timing.pcs_evaluate,
+        sha_proof.timing.pcs_prove,
         sha_proof.timing.total,
     );
 

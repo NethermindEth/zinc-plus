@@ -112,8 +112,7 @@ fn batched_classic_logup_round_trip() {
     println!("  PCS commit:  {:?}", zinc_proof.timing.pcs_commit);
     println!("  IC:          {:?}", zinc_proof.timing.ideal_check);
     println!("  CPR+Lookup:  {:?}", zinc_proof.timing.combined_poly_resolver);
-    println!("  PCS test:    {:?}", zinc_proof.timing.pcs_test);
-    println!("  PCS eval:    {:?}", zinc_proof.timing.pcs_evaluate);
+    println!("  PCS prove:   {:?}", zinc_proof.timing.pcs_prove);
     println!("  Total:       {:?}", zinc_proof.timing.total);
     println!("  Proof size:  {} bytes ({:.1} KB)", zinc_proof.pcs_proof_bytes.len(), zinc_proof.pcs_proof_bytes.len() as f64 / 1024.0);
 

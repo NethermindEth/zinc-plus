@@ -15,6 +15,7 @@ use crypto_primitives::{
     FixedSemiring,
 };
 use num_traits::One;
+use zinc_transcript::traits::Transcript;
 
 use zinc_poly::univariate::binary::{
     BinaryPoly, BinaryPolyInnerProduct, BinaryPolyWideningMulByScalar,
@@ -29,12 +30,12 @@ use zinc_utils::{
     named::Named,
 };
 use zip_plus::{
-    batched_pcs::structs::BatchedZipPlus,
     code::{
         LinearCode,
         iprs::{IprsCode, PnttConfigF2_16R4B16},
     },
-    pcs::structs::{ZipPlusParams, ZipTypes},
+    pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
+    pcs::ZipPlusProof,
 };
 
 use zinc_sha256_uair::{Sha256Uair, witness::GenerateWitness};
@@ -90,15 +91,13 @@ fn round_trip_pcs_sha256() {
     let params = ZipPlusParams::new(num_vars, 1, linear_code);
 
     // ── Prove ────────────────────────────────────────────────────────
-    let (hint, commitment) = BatchedZipPlus::<Zt, Lc>::commit(&params, &trace)
+    let (hint, commitment) = ZipPlus::<Zt, Lc>::commit(&params, &trace)
         .expect("commit failed");
-    let test_tx = BatchedZipPlus::<Zt, Lc>::test::<UNCHECKED>(&params, &trace, &hint)
-        .expect("test failed");
     let point: Vec<i128> = vec![i128::one(); num_vars];
-    let (_evals_f, proof) = BatchedZipPlus::<Zt, Lc>::evaluate::<F, UNCHECKED>(
-        &params, &trace, &point, test_tx,
+    let (eval_f, proof) = ZipPlus::<Zt, Lc>::prove::<F, UNCHECKED>(
+        &params, &trace, &point, &hint,
     )
-    .expect("evaluate failed");
+    .expect("prove failed");
 
     // ── Serialize proof ──────────────────────────────────────────────
     let proof_bytes: Vec<u8> = {
@@ -108,7 +107,15 @@ fn round_trip_pcs_sha256() {
     println!("Proof size: {} bytes ({:.1} KB)", proof_bytes.len(), proof_bytes.len() as f64 / 1024.0);
 
     // ── Deserialize and Verify ───────────────────────────────────────
-    let deserialized_proof: zip_plus::batched_pcs::structs::BatchedZipPlusProof = {
+    // Get PCS field config from a fresh transcript (deterministic).
+    let pcs_field_cfg = zinc_transcript::KeccakTranscript::default()
+        .get_random_field_cfg::<F, <Zt as ZipTypes>::Fmod, <Zt as ZipTypes>::PrimeTest>();
+    let point_f: Vec<F> = point.iter().map(|v| {
+        use crypto_primitives::IntoWithConfig;
+        v.into_with_cfg(&pcs_field_cfg)
+    }).collect();
+
+    let deserialized_proof: ZipPlusProof = {
         let tx = zip_plus::pcs_transcript::PcsTranscript {
             fs_transcript: zinc_transcript::KeccakTranscript::default(),
             stream: std::io::Cursor::new(proof_bytes),
@@ -116,10 +123,11 @@ fn round_trip_pcs_sha256() {
         tx.into()
     };
 
-    let verify_result = BatchedZipPlus::<Zt, Lc>::verify::<F, UNCHECKED>(
+    let verify_result = ZipPlus::<Zt, Lc>::verify::<F, UNCHECKED>(
         &params,
         &commitment,
-        &point,
+        &point_f,
+        &eval_f,
         &deserialized_proof,
     );
 

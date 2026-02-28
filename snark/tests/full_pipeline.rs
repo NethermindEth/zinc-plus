@@ -102,8 +102,7 @@ fn full_pipeline_round_trip() {
     println!("  PCS commit:      {:?}", zinc_proof.timing.pcs_commit);
     println!("  Ideal check:     {:?}", zinc_proof.timing.ideal_check);
     println!("  CPR:             {:?}", zinc_proof.timing.combined_poly_resolver);
-    println!("  PCS test:        {:?}", zinc_proof.timing.pcs_test);
-    println!("  PCS evaluate:    {:?}", zinc_proof.timing.pcs_evaluate);
+    println!("  PCS prove:       {:?}", zinc_proof.timing.pcs_prove);
     println!("  Total:           {:?}", zinc_proof.timing.total);
     println!("  PCS proof size:  {} bytes ({:.1} KB)", zinc_proof.pcs_proof_bytes.len(), zinc_proof.pcs_proof_bytes.len() as f64 / 1024.0);
     println!("  PIOP proof data: IC {} constraints, CPR {} messages, {} up_evals, {} down_evals",

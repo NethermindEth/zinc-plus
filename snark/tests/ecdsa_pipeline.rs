@@ -117,8 +117,7 @@ fn ecdsa_pipeline_round_trip() {
     println!("  PCS commit:      {:?}", proof.timing.pcs_commit);
     println!("  Ideal check:     {:?}", proof.timing.ideal_check);
     println!("  CPR:             {:?}", proof.timing.combined_poly_resolver);
-    println!("  PCS test:        {:?}", proof.timing.pcs_test);
-    println!("  PCS evaluate:    {:?}", proof.timing.pcs_evaluate);
+    println!("  PCS prove:       {:?}", proof.timing.pcs_prove);
     println!("  Total:           {:?}", proof.timing.total);
     println!(
         "  PCS proof size:  {} bytes ({:.1} KB)",

@@ -29,16 +29,15 @@ use zinc_poly::univariate::{
     dense::{DensePolyInnerProduct, DensePolynomial},
 };
 use zinc_primality::MillerRabin;
-use zinc_transcript::traits::ConstTranscribable;
+use zinc_transcript::traits::{ConstTranscribable, Transcribable, Transcript};
 use zinc_utils::{
     UNCHECKED,
     from_ref::FromRef,
     inner_product::MBSInnerProduct,
+    mul_by_scalar::MulByScalar,
     named::Named,
-    projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
-    batched_pcs::structs::BatchedZipPlus,
     code::{
         LinearCode,
         iprs::{
@@ -205,8 +204,8 @@ fn batched_commit_nrows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
                         .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
                         .collect();
                     let timer = Instant::now();
-                    let res = BatchedZipPlus::<Zt, Lc>::commit(&params, &polys)
-                        .expect("Batched commit failed");
+                    let res = ZipPlus::<Zt, Lc>::commit(&params, &polys)
+                        .expect("Commit failed");
                     black_box(res);
                     total_duration += timer.elapsed();
                 }
@@ -227,6 +226,13 @@ fn batched_test_nrows<
     batch_size: usize,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
+    F: for<'a> FromWithConfig<&'a Zt::CombR>
+        + for<'a> FromWithConfig<&'a Zt::Chal>
+        + for<'a> FromWithConfig<&'a Zt::Pt>
+        + for<'a> MulByScalar<&'a F>
+        + FromRef<F>,
+    <F as Field>::Inner: FromRef<Zt::Fmod> + Transcribable,
+    Zt::Pt: One,
 {
     let mut rng = ThreadRng::default();
     let poly_size = 1 << P;
@@ -237,16 +243,17 @@ fn batched_test_nrows<
     let polys: Vec<_> = (0..batch_size)
         .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
         .collect();
-    let (hint, _) = BatchedZipPlus::<Zt, Lc>::commit(&params, &polys).unwrap();
+    let (hint, _) = ZipPlus::<Zt, Lc>::commit(&params, &polys).unwrap();
 
     group.bench_function(
         format!("Test poly_size=2^{P} num_rows={num_rows}"),
         |b| {
             b.iter(|| {
-                let transcript =
-                    BatchedZipPlus::<Zt, Lc>::test::<CHECK_FOR_OVERFLOWS>(&params, &polys, &hint)
-                        .expect("Batched test phase failed");
-                black_box(transcript);
+                let point = vec![Zt::Pt::one(); P];
+                let result =
+                    ZipPlus::<Zt, Lc>::prove::<F, CHECK_FOR_OVERFLOWS>(&params, &polys, &point, &hint)
+                        .expect("Prove failed");
+                black_box(result);
             })
         },
     );
@@ -263,10 +270,14 @@ fn batched_verify_nrows<
     batch_size: usize,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
-    F: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt>,
-    <F as Field>::Inner: FromRef<Zt::Fmod>,
-    Zt::Eval: ProjectableToField<F>,
-    Zt::Cw: ProjectableToField<F>,
+    F: PrimeField
+        + for<'a> FromWithConfig<&'a Zt::CombR>
+        + for<'a> FromWithConfig<&'a Zt::Chal>
+        + for<'a> FromWithConfig<&'a Zt::Pt>
+        + for<'a> MulByScalar<&'a F>
+        + FromRef<F>,
+    <F as Field>::Inner: FromRef<Zt::Fmod> + Transcribable,
+    Zt::Pt: One,
 {
     let mut rng = ThreadRng::default();
     let poly_size = 1 << P;
@@ -277,31 +288,36 @@ fn batched_verify_nrows<
     let polys: Vec<_> = (0..batch_size)
         .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
         .collect();
-    let (hint, commitment) = BatchedZipPlus::<Zt, Lc>::commit(&params, &polys).unwrap();
+    let (hint, commitment) = ZipPlus::<Zt, Lc>::commit(&params, &polys).unwrap();
     let point = vec![Zt::Pt::one(); P];
 
-    let test_transcript =
-        BatchedZipPlus::<Zt, Lc>::test::<CHECK_FOR_OVERFLOWS>(&params, &polys, &hint)
-            .expect("Batched test phase failed");
-    let (_evals_f, proof) = BatchedZipPlus::<Zt, Lc>::evaluate::<F, CHECK_FOR_OVERFLOWS>(
+    let (eval_f, proof) = ZipPlus::<Zt, Lc>::prove::<F, CHECK_FOR_OVERFLOWS>(
         &params,
         &polys,
         &point,
-        test_transcript,
+        &hint,
     )
-    .expect("Batched evaluate failed");
+    .expect("Prove failed");
+
+    // Convert point to field elements for verify
+    let pcs_field_cfg = {
+        let mut tx = zinc_transcript::KeccakTranscript::default();
+        tx.get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>()
+    };
+    let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&pcs_field_cfg)).collect();
 
     group.bench_function(
         format!("Verify poly_size=2^{P} num_rows={num_rows}"),
         |b| {
             b.iter(|| {
-                BatchedZipPlus::<Zt, Lc>::verify::<_, CHECK_FOR_OVERFLOWS>(
+                ZipPlus::<Zt, Lc>::verify::<F, CHECK_FOR_OVERFLOWS>(
                     &params,
                     &commitment,
-                    &point,
+                    &point_f,
+                    &eval_f,
                     &proof,
                 )
-                .expect("Batched verification failed");
+                .expect("Verification failed");
             })
         },
     );
