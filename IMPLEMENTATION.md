@@ -13,6 +13,7 @@
 5. [SHA-256 Arithmetization](#5-sha-256-arithmetization)
 6. [ECDSA Arithmetization](#6-ecdsa-arithmetization)
 7. [The Dual-Ring Pipeline](#7-the-dual-ring-pipeline)
+7b. [The Dual-Circuit Pipeline](#7b-the-dual-circuit-pipeline)
 8. [The Split-Trace Architecture](#8-the-split-trace-architecture)
 9. [Proof Format and Serialization](#9-proof-format-and-serialization)
 10. [Fiat-Shamir Transcript](#10-fiat-shamir-transcript)
@@ -111,6 +112,7 @@ The prover is implemented in `snark/src/pipeline.rs`. There are multiple entry p
 - `prove_classic_logup()` — Same as `prove()` but uses the **classic LogUp** variant with **batched CPR+Lookup multi-degree sumcheck** — the CPR's degree-(max_degree+2) sumcheck and each lookup group's degree-2 sumcheck are fused into a single multi-degree sumcheck pass with shared verifier challenges.
 - `prove_generic()` — parameterized over any projectable ring `R`, used for ECDSA `Int<4>` proofs. Includes GKR LogUp.
 - `prove_dual_ring()` — runs two sequential PIOP passes (BinaryPoly + Q[X]) on the same committed trace, used for full SHA-256 proofs.
+- `prove_dual_circuit()` — combines two **independent circuits** (e.g. SHA-256 as `BinaryPoly<32>` + ECDSA as `Int<4>`) into a single proving pipeline with shared Fiat-Shamir challenges, shared IC evaluation point, shared projecting element, and a single multi-degree sumcheck spanning both CPR passes plus lookup. Each circuit retains its own PCS.
 
 The trace projection is handled by the **decoupled projections module** (`piop/src/projections.rs`), which supports heterogeneous traces with three column types: binary polynomial, arbitrary polynomial, and integer. Projection occurs in two stages: (1) coefficient lifting to $\mathbb{F}_q[X]$ and (2) evaluation at the projecting element to get $\mathbb{F}_q$ scalars.
 
@@ -383,7 +385,7 @@ This holds because $\langle \hat{r}, q_1 \rangle = \sum_i \beta^i \langle r_i, q
 
 ## 4. The Verifier Pipeline in Detail
 
-The verifier is implemented as `verify()` / `verify_generic()` / `verify_dual_ring()` in `pipeline.rs`. It reconstructs the Fiat-Shamir transcript and checks each component:
+The verifier is implemented as `verify()` / `verify_generic()` / `verify_dual_ring()` / `verify_dual_circuit()` in `pipeline.rs`. It reconstructs the Fiat-Shamir transcript and checks each component:
 
 ### Step 1: Ideal Check Verification
 
@@ -648,6 +650,55 @@ Both IC and CPR passes share the same Fiat-Shamir transcript, so the random chal
 
 ---
 
+## 7b. The Dual-Circuit Pipeline
+
+Where the dual-ring pipeline (§7) runs two PIOP passes on the **same** committed trace (same PCS, different rings), the **dual-circuit pipeline** combines two **independent circuits** — each with its own trace and PCS — into a single proving pipeline that shares all PIOP challenges and runs a unified multi-degree sumcheck.
+
+The primary use case is 8×SHA-256 (`BinaryPoly<32>`, 14 columns) + ECDSA (`Int<4>`, 9 columns). Each circuit has different column counts, evaluation types, ZipTypes, and PCS field sizes, but they share a single Fiat-Shamir transcript so that all PIOP randomness is jointly derived.
+
+### Prover: `prove_dual_circuit()`
+
+1. **PCS Commit (both circuits):** Commit circuit 1 (BinaryPoly) and circuit 2 (generic ring) traces independently. Each uses its own `ZipTypes` / `LinearCode` / PCS field.
+2. **Shared transcript + field config:** Initialize a single `KeccakTranscript`. Sample the PIOP field $\mathbb{F}_q$.
+3. **Shared IC evaluation point:** Sample $\mathbf{r} \in \mathbb{F}_q^{\text{num\_vars}}$ from the transcript (once, used by both circuits).
+4. **IC₁ (BinaryPoly)** at the shared point: lift trace to $\mathbb{F}_q[X]$, run IC prover using `prove_at_point`.
+5. **IC₂ (generic ring)** at the same shared point: lift trace, run IC prover using `prove_at_point`.
+6. **Shared projecting element:** A single $\alpha$ is drawn from the transcript for $\mathbb{F}_q[X] \to \mathbb{F}_q$ projection.
+7. **Project both traces** to $\mathbb{F}_q$ scalars using the shared $\alpha$.
+8. **Extract lookup columns** from circuit 1 (if lookup specs are provided).
+9. **Build CPR sumcheck groups:**
+   - **Group 0:** `CombinedPolyResolver::build_prover_group::<BinaryPoly<D>>` for circuit 1 (degree = `c1_max_degree + 2`).
+   - **Group 1:** `CombinedPolyResolver::build_prover_group::<R2>` for circuit 2 (degree = `c2_max_degree + 2`).
+   - **Groups 2..N+2:** One lookup group per lookup spec (degree 2 each).
+10. **Single multi-degree sumcheck** over all groups in lockstep — shared random challenges, single evaluation point.
+11. **Finalize** CPR and lookup proofs: extract `up_evals` / `down_evals` for both CPR groups, finalize lookup groups.
+12. **PCS Test + Evaluate** for both circuits independently (each at the shared evaluation point).
+
+### Verifier: `verify_dual_circuit()`
+
+1. **Shared field setup:** Reconstruct $\mathbb{F}_q$ and the IC evaluation point from a fresh transcript.
+2. **IC₁ verify (BinaryPoly)** at the shared point using `verify_at_point` (uses `TrivialIdeal`).
+3. **IC₂ verify (generic ring)** at the shared point using `verify_at_point` (uses `EcdsaIdealOverF`).
+4. **Shared projecting element** drawn from the transcript (same as prover's).
+5. **CPR₁ pre-sumcheck:** Draws $\alpha_1$, verifies the circuit-1 claimed sum against IC₁'s subclaim.
+6. **CPR₂ pre-sumcheck:** Draws $\alpha_2$, verifies the circuit-2 claimed sum against IC₂'s subclaim.
+7. **Lookup pre-sumcheck:** For each lookup group, verify claimed sums and build verifier state.
+8. **Multi-degree sumcheck verify:** `MultiDegreeSumcheck::verify_as_subprotocol` replays all groups (CPR₁ + CPR₂ + lookup groups) in lockstep.
+9. **CPR₁ finalize + CPR₂ finalize + Lookup finalize:** Verify each group's expected evaluation at the shared point.
+10. **PCS verify** for both circuits independently.
+
+### Key Differences from Dual-Ring (§7)
+
+| | Dual-Ring (§7) | Dual-Circuit (§7b) |
+|---|---|---|
+| **Traces** | Same trace, two ring interpretations | Two independent traces |
+| **PCS** | One PCS commitment | Two PCS commitments (separate types/fields) |
+| **IC passes** | Same columns, different rings | Different columns, different rings |
+| **Sumcheck groups** | 2 (CPR₁ + CPR₂) | 2 + N (CPR₁ + CPR₂ + N lookup groups) |
+| **Use case** | SHA-256 BinaryPoly + Q\[X\] | SHA-256 + ECDSA (cross-circuit) |
+
+---
+
 ## 8. The Split-Trace Architecture
 
 ### Motivation
@@ -752,6 +803,32 @@ Contains two IC proof passes and a **batched multi-degree sumcheck** for the two
 | `timing` | Per-phase timing breakdown | |
 
 The two CPR passes are batched into a single multi-degree sumcheck (group 0 = BinaryPoly, group 1 = Q[X]), sharing verifier challenges and producing a common evaluation point. This replaces the old sequential design where each CPR ran its own independent sumcheck.
+
+### `DualCircuitZincProof`
+
+Contains two independent PCS instances and a **batched multi-degree sumcheck** covering both CPR passes plus lookup groups:
+
+| Field | Content | Notes |
+|-------|---------|-------|
+| `pcs1_proof_bytes` | Serialized PCS transcript (circuit 1 — BinaryPoly) | |
+| `pcs1_commitment` | Merkle root + batch size (circuit 1) | |
+| `pcs2_proof_bytes` | Serialized PCS transcript (circuit 2 — generic ring) | |
+| `pcs2_commitment` | Merkle root + batch size (circuit 2) | |
+| `ic1_proof_values` | IC₁ combined MLE evaluations (circuit 1) | |
+| `ic2_proof_values` | IC₂ combined MLE evaluations (circuit 2) | |
+| `md_group_messages` | Per-group sumcheck round messages | `[0]` = CPR₁, `[1]` = CPR₂, `[2..]` = lookup |
+| `md_claimed_sums` | Claimed sum per group | 2 + N serialized field elements |
+| `md_degrees` | Polynomial degree per group | e.g. `[4, 14, 2, 2, ...]` |
+| `cpr1_up_evals` / `cpr1_down_evals` | Circuit 1 column evaluations at shared point | |
+| `cpr2_up_evals` / `cpr2_down_evals` | Circuit 2 column evaluations at shared point | |
+| `lookup_group_meta` | Per-lookup-group metadata (`LookupGroupMeta`) | Circuit 1 only |
+| `lookup_group_proofs` | Per-lookup-group `BatchedDecompLogupProof` | Circuit 1 only |
+| `evaluation_point_bytes` | Shared sumcheck evaluation point | Common across all groups |
+| `pcs1_evals_bytes` | PCS evaluation values (circuit 1) | |
+| `pcs2_evals_bytes` | PCS evaluation values (circuit 2) | |
+| `timing` | Per-phase timing breakdown | |
+
+The multi-degree sumcheck groups are ordered: group 0 = CPR for circuit 1 (BinaryPoly), group 1 = CPR for circuit 2 (generic ring), groups 2..N+2 = lookup groups for circuit 1. All groups share verifier challenges and produce a single evaluation point used by both PCS instances.
 
 ### PCS Proof Breakdown
 
@@ -1133,7 +1210,7 @@ To integrate the split-trace architecture into the full PIOP pipeline, the IC an
 
 ### 15.12 Parallel Verification Not in Production Pipeline
 
-The parallel PCS verification via `rayon::join` (§14, Phase 2) is only implemented in the benchmark harness. The `verify()`, `verify_generic()`, and `verify_dual_ring()` functions in `pipeline.rs` run PCS verification sequentially. Integrating parallelism would require the pipeline to manage multiple PCS contexts.
+The parallel PCS verification via `rayon::join` (§14, Phase 2) is only implemented in the benchmark harness. The `verify()`, `verify_generic()`, `verify_dual_ring()`, and `verify_dual_circuit()` functions in `pipeline.rs` run PCS verification sequentially. Integrating parallelism would require the pipeline to manage multiple PCS contexts.
 
 ---
 
@@ -1286,10 +1363,10 @@ A separate criterion benchmark file (`snark/benches/steps_sha256_8x_ecdsa.rs`) p
 | 18 | `ECDSA/PCS/Test` | PCS proximity testing (test phase) |
 | 19 | `SHA/PCS/Evaluate` | PCS evaluation opening (eval phase) |
 | 20 | `ECDSA/PCS/Evaluate` | PCS evaluation opening (eval phase) |
-| 21 | `E2E/Prover` | Full prover: `prove_classic_logup` (SHA) + `prove_generic` (ECDSA) |
-| 22 | `E2E/Verifier` | Full verifier: `verify` (SHA) + `verify_generic` (ECDSA) |
+| 21 | `E2E/Prover` | Full prover: `prove_dual_circuit` (SHA + ECDSA shared PIOP + separate PCS) |
+| 22 | `E2E/Verifier` | Full verifier: `verify_dual_circuit` (SHA + ECDSA shared PIOP + separate PCS) |
 
-The E2E/Prover (step 21) uses `prove_classic_logup` which batches the CPR and lookup sumchecks into a single multi-degree sumcheck, matching the paper's proving strategy.
+The E2E/Prover (step 21) uses `prove_dual_circuit` which shares the Fiat-Shamir transcript, IC evaluation point, and projecting element across both circuits, and batches both CPR passes plus lookup groups into a single multi-degree sumcheck. Each circuit retains its own PCS commitment and proof.
 
 Run with: `cargo bench -p zinc-snark --bench steps_sha256_8x_ecdsa --features 'parallel simd asm'`
 
@@ -1374,9 +1451,11 @@ zinc-plus-new/
 ├── snark/              # Top-level pipeline (prove/verify), benchmarks, integration tests
 │   ├── src/pipeline.rs # prove(), prove_classic_logup(), prove_generic(),
 │   │                   # verify(), verify_generic(), prove_dual_ring(),
-│   │                   # verify_dual_ring(), derive_pcs_point(),
+│   │                   # verify_dual_ring(), prove_dual_circuit(),
+│   │                   # verify_dual_circuit(), derive_pcs_point(),
 │   │                   # project_lookup_columns_bp(),
-│   │                   # BatchedCprLookupProof, LookupProofData::BatchedClassic
+│   │                   # BatchedCprLookupProof, DualCircuitZincProof,
+│   │                   # LookupProofData::BatchedClassic
 │   ├── benches/        # Criterion benchmarks (e2e_sha256: 6 groups,
 │   │                   # steps_sha256_8x_ecdsa: 22 granular steps)
 │   └── tests/          # 8 integration tests (incl. batched_classic_logup)

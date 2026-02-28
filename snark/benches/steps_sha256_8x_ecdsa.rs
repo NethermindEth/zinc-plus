@@ -185,8 +185,8 @@ fn generate_zero_scalar_trace(
 ///  18.  ECDSA/PCS/Test
 ///  19.  SHA/PCS/Evaluate
 ///  20.  ECDSA/PCS/Evaluate
-///  21.  E2E/Prover  (combined total)
-///  22.  E2E/Verifier (combined total)
+///  21.  E2E/Prover  (unified dual-circuit pipeline)
+///  22.  E2E/Verifier (unified dual-circuit pipeline)
 fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     use zinc_sha256_uair::CyclotomicIdeal;
     use zinc_ecdsa_uair::EcdsaIdealOverF;
@@ -824,66 +824,94 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         });
     });
 
-    // ── 21. E2E Total Prover ────────────────────────────────────────
+    // ── 21. E2E Total Prover (unified dual-circuit pipeline) ─────
     //
-    // Uses prove_classic_logup which batches CPR + lookup into a single
-    // multi-degree sumcheck (matching the paper's proving strategy).
+    // Uses prove_dual_circuit which shares one transcript, one IC eval
+    // point, one projecting element, and one multi-degree sumcheck
+    // (SHA CPR + ECDSA CPR + SHA lookup) across both circuits.
     group.bench_function("E2E/Prover", |b| {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
                 let t = Instant::now();
-                let _ = zinc_snark::pipeline::prove_classic_logup::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
-                    &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
+                let _ = zinc_snark::pipeline::prove_dual_circuit::<
+                    Sha256Uair,
+                    EcdsaUairInt,
+                    Int<{ INT_LIMBS * 4 }>,
+                    ShaZt, ShaLc,
+                    EcZt, EcLc,
+                    FScalar,
+                    32,
+                    UNCHECKED,
+                >(
+                    &sha_params, &sha_trace,
+                    &ec_params, &ecdsa_trace,
+                    SHA256_8X_NUM_VARS,
+                    &sha_lookup_specs,
                 );
-                let _ = zinc_snark::pipeline::prove_generic::<
-                    EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED,
-                >(&ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &[]);
                 total += t.elapsed();
             }
             total
         });
     });
 
-    // ── 22. E2E Total Verifier ──────────────────────────────────────
-    let sha_proof = zinc_snark::pipeline::prove_classic_logup::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
-        &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
+    // ── 22. E2E Total Verifier (unified dual-circuit pipeline) ──────
+    let dual_proof = zinc_snark::pipeline::prove_dual_circuit::<
+        Sha256Uair,
+        EcdsaUairInt,
+        Int<{ INT_LIMBS * 4 }>,
+        ShaZt, ShaLc,
+        EcZt, EcLc,
+        FScalar,
+        32,
+        UNCHECKED,
+    >(
+        &sha_params, &sha_trace,
+        &ec_params, &ecdsa_trace,
+        SHA256_8X_NUM_VARS,
+        &sha_lookup_specs,
     );
-    let ec_proof = zinc_snark::pipeline::prove_generic::<
-        EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED,
-    >(&ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &[]);
 
     group.bench_function("E2E/Verifier", |b| {
         b.iter(|| {
-            let r1 = zinc_snark::pipeline::verify::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED, _, _>(
-                &sha_params, &sha_proof, SHA256_8X_NUM_VARS,
-                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
-            );
-            let _ = black_box(r1);
-            let r2 = zinc_snark::pipeline::verify_generic::<
-                EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED, EcdsaIdealOverF, _,
+            let r = zinc_snark::pipeline::verify_dual_circuit::<
+                Sha256Uair,
+                EcdsaUairInt,
+                Int<{ INT_LIMBS * 4 }>,
+                ShaZt, ShaLc,
+                EcZt, EcLc,
+                FScalar,
+                32,
+                UNCHECKED,
+                zinc_snark::pipeline::TrivialIdeal, _,
+                EcdsaIdealOverF, _,
             >(
-                &ec_params, &ec_proof, ECDSA_NUM_VARS,
+                &sha_params, &ec_params,
+                &dual_proof,
+                SHA256_8X_NUM_VARS,
+                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
                 |ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
                     IdealOrZero::Zero => EcdsaIdealOverF,
                     IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
                 },
             );
-            let _ = black_box(r2);
+            let _ = black_box(r);
         });
     });
 
     // ── Timing breakdown summary ────────────────────────────────────
-    eprintln!("\n=== 8xSHA256+ECDSA Per-Step Timing ===");
-    eprintln!("  SHA (batched CPR+Lookup): IC={:?}, CPR+Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
-        sha_proof.timing.ideal_check, sha_proof.timing.combined_poly_resolver,
-        sha_proof.timing.pcs_commit,
-        sha_proof.timing.pcs_test, sha_proof.timing.pcs_evaluate, sha_proof.timing.total,
+    eprintln!("\n=== 8xSHA256+ECDSA Per-Step Timing (Unified Dual-Circuit) ===");
+    eprintln!("  Dual-circuit: PCS commit={:?}, IC={:?}, CPR+Lookup={:?}, PCS test={:?}, PCS eval={:?}, total={:?}",
+        dual_proof.timing.pcs_commit,
+        dual_proof.timing.ideal_check,
+        dual_proof.timing.combined_poly_resolver,
+        dual_proof.timing.pcs_test,
+        dual_proof.timing.pcs_evaluate,
+        dual_proof.timing.total,
     );
-    eprintln!("  ECDSA: IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, test={:?}, eval={:?}), total={:?}",
-        ec_proof.timing.ideal_check, ec_proof.timing.combined_poly_resolver,
-        ec_proof.timing.lookup, ec_proof.timing.pcs_commit,
-        ec_proof.timing.pcs_test, ec_proof.timing.pcs_evaluate, ec_proof.timing.total,
+    eprintln!("  Multi-degree sumcheck: {} groups, degrees {:?}",
+        dual_proof.md_degrees.len(),
+        dual_proof.md_degrees,
     );
 
     group.finish();
