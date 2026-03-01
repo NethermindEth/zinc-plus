@@ -81,15 +81,28 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
 
-        // Shifted trace. Just take the trace, drop the first row
-        // and append 0 to the end. Note, that the latter happens
-        // thanks to the FromIterator implementation for `DenseMultilinearExtension`
-        // as it always pads to the next power of two.
-        // It might lead to a problem when `num_vars = 1` but that is not going to
-        // happen on real world traces.
-        let down: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(trace_matrix)
-            .map(|column| column[1..].iter().cloned().collect())
-            .collect();
+        let sig = U::signature();
+        let down_sig = sig.down_signature();
+
+        // Shifted trace: construct based on shift specs or legacy mode.
+        let down: Vec<DenseMultilinearExtension<F::Inner>> = if sig.uses_legacy_shifts() {
+            // Legacy: shift all columns by 1 (drop first row, pad with zero).
+            cfg_iter!(trace_matrix)
+                .map(|column| column[1..].iter().cloned().collect())
+                .collect()
+        } else {
+            // Shift-spec mode: only construct shifted columns for declared
+            // ShiftSpecs.
+            sig.shifts
+                .iter()
+                .map(|spec| {
+                    trace_matrix[spec.source_col][spec.shift_amount..]
+                        .iter()
+                        .cloned()
+                        .collect()
+                })
+                .collect()
+        };
 
         let eq_r = build_eq_x_r_inner(evaluation_point, field_cfg)?;
 
@@ -105,9 +118,10 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             powers(folding_challenge, one.clone(), num_constraints);
 
         let num_cols = trace_matrix.len();
+        let num_down_cols = down.len();
 
         let mles: Vec<DenseMultilinearExtension<F::Inner>> = {
-            let mut mles = Vec::with_capacity(2 * num_cols + 2);
+            let mut mles = Vec::with_capacity(2 + num_cols + num_down_cols);
 
             mles.push(last_row_selector);
             mles.push(eq_r);
@@ -142,11 +156,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
                     &mut folder,
                     TraceRow::from_slice_with_signature(
                         &mle_values[2..num_cols + 2],
-                        &U::signature(),
+                        &sig,
                     ),
                     TraceRow::from_slice_with_signature(
                         &mle_values[num_cols + 2..],
-                        &U::signature(),
+                        &down_sig,
                     ),
                     project,
                     |x, y| Some(project(y) * x),
@@ -229,9 +243,24 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
 
-        let down: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(trace_matrix)
-            .map(|column| column[1..].iter().cloned().collect())
-            .collect();
+        let sig = U::signature();
+        let down_sig = sig.down_signature();
+
+        let down: Vec<DenseMultilinearExtension<F::Inner>> = if sig.uses_legacy_shifts() {
+            cfg_iter!(trace_matrix)
+                .map(|column| column[1..].iter().cloned().collect())
+                .collect()
+        } else {
+            sig.shifts
+                .iter()
+                .map(|spec| {
+                    trace_matrix[spec.source_col][spec.shift_amount..]
+                        .iter()
+                        .cloned()
+                        .collect()
+                })
+                .collect()
+        };
 
         let eq_r = build_eq_x_r_inner(evaluation_point, field_cfg)?;
         let last_row_selector =
@@ -242,9 +271,10 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             powers(folding_challenge, one.clone(), num_constraints);
 
         let num_cols = trace_matrix.len();
+        let num_down_cols = down.len();
 
         let mles: Vec<DenseMultilinearExtension<F::Inner>> = {
-            let mut mles = Vec::with_capacity(2 * num_cols + 2);
+            let mut mles = Vec::with_capacity(2 + num_cols + num_down_cols);
             mles.push(last_row_selector);
             mles.push(eq_r);
             mles.extend(trace_matrix);
@@ -276,11 +306,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
                     &mut folder,
                     TraceRow::from_slice_with_signature(
                         &mle_values[2..num_cols + 2],
-                        &U::signature(),
+                        &sig,
                     ),
                     TraceRow::from_slice_with_signature(
                         &mle_values[num_cols + 2..],
-                        &U::signature(),
+                        &down_sig,
                     ),
                     project,
                     |x, y| Some(project(y) * x),
@@ -434,6 +464,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
 
+        let sig = U::signature();
+        let down_sig = sig.down_signature();
+
         // When the multi-degree sumcheck uses a shared_num_vars larger than the
         // CPR's num_vars (e.g. because lookup subtables are bigger), the subclaim
         // point has more dimensions than the IC evaluation point.  We pad with
@@ -468,8 +501,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         U::constrain_general(
             &mut folder,
-            TraceRow::from_slice_with_signature(&up_evals, &U::signature()),
-            TraceRow::from_slice_with_signature(&down_evals, &U::signature()),
+            TraceRow::from_slice_with_signature(&up_evals, &sig),
+            TraceRow::from_slice_with_signature(&down_evals, &down_sig),
             project,
             |x, y| Some(project(y) * x),
             ImpossibleIdeal::from_ref,
@@ -526,7 +559,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         F::Inner: ConstTranscribable,
         U: Uair,
     {
-        proof.validate_evaluation_sizes(U::signature().total_cols())?;
+        let sig = U::signature();
+        let down_sig = sig.down_signature();
+        proof.validate_evaluation_sizes(sig.total_cols(), down_sig.total_cols())?;
 
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
@@ -596,8 +631,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         U::constrain_general(
             &mut folder,
-            TraceRow::from_slice_with_signature(&proof.up_evals, &U::signature()),
-            TraceRow::from_slice_with_signature(&proof.down_evals, &U::signature()),
+            TraceRow::from_slice_with_signature(&proof.up_evals, &sig),
+            TraceRow::from_slice_with_signature(&proof.down_evals, &down_sig),
             project,
             |x, y| Some(project(y) * x),
             ImpossibleIdeal::from_ref,

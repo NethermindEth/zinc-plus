@@ -17,23 +17,24 @@ pub struct Proof<F: PrimeField> {
 }
 
 impl<F: PrimeField> Proof<F> {
-    /// Check if `up_evals` and `down_evals` vectors
-    /// has the length `num_cols`.
+    /// Check if `up_evals` and `down_evals` vectors have the expected
+    /// lengths.
     pub fn validate_evaluation_sizes(
         &self,
-        num_cols: usize,
+        num_up_cols: usize,
+        num_down_cols: usize,
     ) -> Result<(), CombinedPolyResolverError<F>> {
-        if self.up_evals.len() != num_cols {
+        if self.up_evals.len() != num_up_cols {
             return Err(CombinedPolyResolverError::WrongUpEvalsNumber {
                 got: self.up_evals.len(),
-                expected: num_cols,
+                expected: num_up_cols,
             });
         }
 
-        if self.down_evals.len() != num_cols {
+        if self.down_evals.len() != num_down_cols {
             return Err(CombinedPolyResolverError::WrongDownEvalsNumber {
                 got: self.down_evals.len(),
-                expected: num_cols,
+                expected: num_down_cols,
             });
         }
 

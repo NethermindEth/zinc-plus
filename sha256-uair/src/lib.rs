@@ -285,6 +285,7 @@ impl Uair for Sha256UairBp {
             binary_poly_cols: NUM_BITPOLY_COLS,
             arbitrary_poly_cols: 0,
             int_cols: NUM_INT_COLS,
+            shifts: vec![],
         }
     }
 
@@ -533,6 +534,14 @@ impl Uair for Sha256UairQx {
             binary_poly_cols: NUM_BITPOLY_COLS,
             arbitrary_poly_cols: 0,
             int_cols: NUM_INT_COLS,
+            // Explicit shifts: â[t+1] and ê[t+1] (shift-by-1 of columns 0
+            // and 1). The `down` row seen by `constrain_general` will have
+            // exactly two binary-poly entries at indices 0 and 1
+            // corresponding to the shifted a_hat and e_hat.
+            shifts: vec![
+                zinc_uair::ShiftSpec { source_col: COL_A_HAT, shift_amount: 1 },
+                zinc_uair::ShiftSpec { source_col: COL_E_HAT, shift_amount: 1 },
+            ],
         }
     }
 

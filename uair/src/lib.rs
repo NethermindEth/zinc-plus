@@ -32,6 +32,25 @@ pub trait ConstraintBuilder {
     fn assert_zero(&mut self, expr: Self::Expr);
 }
 
+/// Specifies a shifted column: a view of a normal (committed) column
+/// shifted by a constant number of rows.
+///
+/// For example, `ShiftSpec { source_col: 0, shift_amount: 3 }` means
+/// "create a virtual column whose row `i` is the value of column 0 at
+/// row `i - 3` (zero for `i < 3`)."
+///
+/// Multiple `ShiftSpec`s may reference the same `source_col` with
+/// different shift amounts.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ShiftSpec {
+    /// Index of the normal (committed) column in the flattened trace
+    /// (`binary_poly ++ arbitrary_poly ++ int`, i.e. the same indexing
+    /// used by `TraceRow::from_slice_with_signature`).
+    pub source_col: usize,
+    /// Number of rows to shift by (must be > 0).
+    pub shift_amount: usize,
+}
+
 /// The signature of a UAIR.
 /// Contains the number of columns of
 /// each of the types: binary polynomials,
@@ -44,6 +63,17 @@ pub struct UairSignature {
     pub arbitrary_poly_cols: usize,
     /// Number of columns with integers.
     pub int_cols: usize,
+    /// Shifted columns used by this UAIR's constraints.
+    ///
+    /// Each entry declares a virtual column that is a shift of a
+    /// normal column.  The order here defines the indexing of the
+    /// `down` `TraceRow` passed to `constrain_general`:
+    /// `down.binary_poly[i]` corresponds to `shifts[i]` (for
+    /// `i < shifts.len()`; beyond that the row is empty).
+    ///
+    /// When this is empty, the legacy behaviour applies: `down` is
+    /// a blanket shift-by-1 of all normal columns.
+    pub shifts: Vec<ShiftSpec>,
 }
 
 impl UairSignature {
@@ -64,6 +94,74 @@ impl UairSignature {
     #[allow(clippy::arithmetic_side_effects)] // we don't have that many columns
     pub fn total_cols(&self) -> usize {
         self.binary_poly_cols + self.arbitrary_poly_cols + self.int_cols
+    }
+
+    /// Number of shifted (virtual) columns.
+    pub fn num_shifted_cols(&self) -> usize {
+        self.shifts.len()
+    }
+
+    /// Whether the UAIR uses the legacy blanket shift-by-1 mode
+    /// (no explicit shift specs).
+    pub fn uses_legacy_shifts(&self) -> bool {
+        self.shifts.is_empty()
+    }
+
+    /// Number of columns in the `down` row.
+    ///
+    /// - Legacy mode (empty shifts): same as `total_cols()`.
+    /// - Shift-spec mode: `shifts.len()`.
+    pub fn down_total_cols(&self) -> usize {
+        if self.shifts.is_empty() {
+            self.total_cols()
+        } else {
+            self.shifts.len()
+        }
+    }
+
+    /// Signature describing the layout of the `down` (shifted) row.
+    ///
+    /// In **legacy** mode the layout mirrors the `up` row (all columns
+    /// shifted by 1).
+    ///
+    /// In **shift-spec** mode each `ShiftSpec` contributes one column
+    /// to `down`, categorised by the type of the source column:
+    ///   - source in the binary-poly range  → `binary_poly`
+    ///   - source in the arbitrary-poly range → `arbitrary_poly`
+    ///   - source in the int range           → `int`
+    ///
+    /// The ordering within each bucket follows the order of `shifts`.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn down_signature(&self) -> UairSignature {
+        if self.shifts.is_empty() {
+            UairSignature {
+                binary_poly_cols: self.binary_poly_cols,
+                arbitrary_poly_cols: self.arbitrary_poly_cols,
+                int_cols: self.int_cols,
+                shifts: vec![],
+            }
+        } else {
+            let bp_end = self.binary_poly_cols;
+            let ap_end = bp_end + self.arbitrary_poly_cols;
+            let mut bp = 0usize;
+            let mut ap = 0usize;
+            let mut ic = 0usize;
+            for spec in &self.shifts {
+                if spec.source_col < bp_end {
+                    bp += 1;
+                } else if spec.source_col < ap_end {
+                    ap += 1;
+                } else {
+                    ic += 1;
+                }
+            }
+            UairSignature {
+                binary_poly_cols: bp,
+                arbitrary_poly_cols: ap,
+                int_cols: ic,
+                shifts: vec![],
+            }
+        }
     }
 }
 

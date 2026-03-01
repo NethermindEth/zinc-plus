@@ -52,6 +52,10 @@ use zinc_piop::projections::{
 use zinc_piop::sumcheck::prover::{NatEvaluatedPolyWithoutConstant, ProverMsg};
 use zinc_piop::sumcheck::SumcheckProof;
 use zinc_piop::sumcheck::multi_degree::{MultiDegreeSumcheck, MultiDegreeSumcheckProof};
+use zinc_piop::shift_sumcheck::{
+    ShiftClaim, ShiftSumcheckProof, ShiftRoundPoly,
+    shift_sumcheck_prove, shift_sumcheck_verify,
+};
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_uair::ideal::{Ideal, IdealCheck};
 use zinc_uair::ideal_collector::IdealOrZero;
@@ -164,12 +168,23 @@ pub struct ZincProof {
     /// Batched decomposed LogUp proof for column typing constraints.
     /// `None` if no lookup columns were specified.
     pub lookup_proof: Option<LookupProofData>,
+    /// Shift sumcheck proof. `None` if the UAIR has no explicit shift specs.
+    pub shift_sumcheck: Option<SerializedShiftSumcheckProof>,
     /// PCS evaluation claims from CPR (evaluation point in the field).
     pub evaluation_point_bytes: Vec<Vec<u8>>,
     /// PCS evaluation values (evaluations of committed polys at the point).
     pub pcs_evals_bytes: Vec<Vec<u8>>,
     /// Prover timing breakdown.
     pub timing: TimingBreakdown,
+}
+
+/// Serialized shift sumcheck proof data.
+#[derive(Clone, Debug)]
+pub struct SerializedShiftSumcheckProof {
+    /// Round polynomials, serialized: each round has 3 field element evaluations.
+    pub rounds: Vec<Vec<u8>>,
+    /// Per-claim v_finals (source column evaluations at challenge point).
+    pub v_finals: Vec<Vec<u8>>,
 }
 
 /// Result of the verification.
@@ -414,6 +429,11 @@ where
         None
     };
 
+    // Extract source columns for shift sumcheck before CPR consumes field_trace.
+    let sig = U::signature();
+    let shift_trace_columns: Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>> =
+        sig.shifts.iter().map(|spec| field_trace[spec.source_col].clone()).collect();
+
     let (cpr_proof, cpr_state) =
         CombinedPolyResolver::<PiopField>::prove_as_subprotocol::<U>(
             &mut transcript,
@@ -427,6 +447,29 @@ where
         )
         .expect("Combined poly resolver failed");
     let cpr_time = t2.elapsed();
+
+    // ── Step 3a: Shift Sumcheck (reduce shifted-column claims) ──────
+    let shift_sumcheck_output = if !sig.shifts.is_empty() {
+        let claims: Vec<ShiftClaim<PiopField>> = sig.shifts
+            .iter()
+            .enumerate()
+            .map(|(i, spec)| ShiftClaim {
+                source_col: i,
+                shift_amount: spec.shift_amount,
+                eval_point: cpr_state.evaluation_point.clone(),
+                claimed_eval: cpr_proof.down_evals[i].clone(),
+            })
+            .collect();
+        Some(shift_sumcheck_prove(
+            &mut transcript,
+            &claims,
+            &shift_trace_columns,
+            num_vars,
+            &field_cfg,
+        ))
+    } else {
+        None
+    };
 
     // ── Step 3b: PIOP — Batched Decomposed LogUp (column typing) ────
     let t2b = Instant::now();
@@ -496,6 +539,16 @@ where
     let evaluation_point_bytes: Vec<Vec<u8>> = cpr_state.evaluation_point.iter().map(field_to_bytes).collect();
     let pcs_evals_bytes: Vec<Vec<u8>> = vec![field_to_bytes(&eval_f)];
 
+    // Serialize shift sumcheck proof (if present).
+    let shift_sumcheck = shift_sumcheck_output.map(|output| {
+        SerializedShiftSumcheckProof {
+            rounds: output.proof.rounds.iter().map(|rp| {
+                rp.evals.iter().flat_map(|e| field_to_bytes(e)).collect()
+            }).collect(),
+            v_finals: output.v_finals.iter().map(field_to_bytes).collect(),
+        }
+    });
+
     ZincProof {
         pcs_proof_bytes: proof_bytes,
         commitment,
@@ -505,6 +558,7 @@ where
         cpr_up_evals,
         cpr_down_evals,
         lookup_proof,
+        shift_sumcheck,
         evaluation_point_bytes,
         pcs_evals_bytes,
         timing: TimingBreakdown {
@@ -828,6 +882,7 @@ where
         cpr_up_evals: cpr_up_evals_bytes,
         cpr_down_evals: cpr_down_evals_bytes,
         lookup_proof: batched_proof,
+        shift_sumcheck: None, // classic logup batches CPR+lookup; shift sumcheck not yet integrated
         evaluation_point_bytes,
         pcs_evals_bytes,
         timing: TimingBreakdown {
@@ -934,6 +989,12 @@ where
         &[], &[], &projected_trace, &projecting_element,
     );
 
+    // Extract source columns needed for shift sumcheck before CPR consumes
+    // field_trace. Only done when the UAIR declares explicit shift specs.
+    let sig = U::signature();
+    let shift_trace_columns: Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>> =
+        sig.shifts.iter().map(|spec| field_trace[spec.source_col].clone()).collect();
+
     let (cpr_proof, cpr_state) =
         CombinedPolyResolver::<PiopField>::prove_as_subprotocol::<U>(
             &mut transcript,
@@ -947,6 +1008,29 @@ where
         )
         .expect("Combined poly resolver failed");
     let cpr_time = t2.elapsed();
+
+    // ── Step 3a: Shift Sumcheck (reduce shifted-column claims) ──────
+    let shift_sumcheck_output = if !sig.shifts.is_empty() {
+        let claims: Vec<ShiftClaim<PiopField>> = sig.shifts
+            .iter()
+            .enumerate()
+            .map(|(i, spec)| ShiftClaim {
+                source_col: i,
+                shift_amount: spec.shift_amount,
+                eval_point: cpr_state.evaluation_point.clone(),
+                claimed_eval: cpr_proof.down_evals[i].clone(),
+            })
+            .collect();
+        Some(shift_sumcheck_prove(
+            &mut transcript,
+            &claims,
+            &shift_trace_columns,
+            num_vars,
+            &field_cfg,
+        ))
+    } else {
+        None
+    };
 
     // ── Step 3b: PIOP — Batched Decomposed LogUp (column typing) ────
     let t2b = Instant::now();
@@ -1061,6 +1145,16 @@ where
         vec![buf]
     };
 
+    // Serialize shift sumcheck proof (if present).
+    let shift_sumcheck = shift_sumcheck_output.map(|output| {
+        SerializedShiftSumcheckProof {
+            rounds: output.proof.rounds.iter().map(|rp| {
+                rp.evals.iter().flat_map(|e| field_to_bytes(e)).collect()
+            }).collect(),
+            v_finals: output.v_finals.iter().map(field_to_bytes).collect(),
+        }
+    });
+
     ZincProof {
         pcs_proof_bytes: proof_bytes,
         commitment,
@@ -1070,6 +1164,7 @@ where
         cpr_up_evals,
         cpr_down_evals,
         lookup_proof,
+        shift_sumcheck,
         evaluation_point_bytes,
         pcs_evals_bytes,
         timing: TimingBreakdown {
@@ -1241,6 +1336,67 @@ where
     };
     let cpr_verify_time = t1.elapsed();
 
+    // ── Step 2a: Shift Sumcheck verify ──────────────────────────────
+    let sig = U::signature();
+    if let Some(ref ss_proof_data) = zinc_proof.shift_sumcheck {
+        assert!(!sig.shifts.is_empty(), "shift_sumcheck present but UAIR has no shifts");
+
+        // Reconstruct claims from signature + CPR down_evals + evaluation point.
+        let ss_down_evals: Vec<PiopField> = zinc_proof.cpr_down_evals.iter()
+            .map(|b| field_from_bytes(b, &field_cfg))
+            .collect();
+        let claims: Vec<ShiftClaim<PiopField>> = sig.shifts
+            .iter()
+            .enumerate()
+            .map(|(i, spec)| ShiftClaim {
+                source_col: i,
+                shift_amount: spec.shift_amount,
+                eval_point: cpr_subclaim.evaluation_point.clone(),
+                claimed_eval: ss_down_evals[i].clone(),
+            })
+            .collect();
+
+        // Deserialize proof rounds.
+        let rounds: Vec<ShiftRoundPoly<PiopField>> = ss_proof_data.rounds.iter().map(|bytes| {
+            let n = bytes.len() / field_elem_size;
+            assert_eq!(n, 3, "each shift round poly should have 3 evaluations");
+            ShiftRoundPoly {
+                evals: [
+                    field_from_bytes(&bytes[0..field_elem_size], &field_cfg),
+                    field_from_bytes(&bytes[field_elem_size..2 * field_elem_size], &field_cfg),
+                    field_from_bytes(&bytes[2 * field_elem_size..3 * field_elem_size], &field_cfg),
+                ],
+            }
+        }).collect();
+        let ss_proof = ShiftSumcheckProof { rounds };
+
+        // Deserialize v_finals.
+        let v_finals: Vec<PiopField> = ss_proof_data.v_finals.iter()
+            .map(|b| field_from_bytes(b, &field_cfg))
+            .collect();
+
+        if let Err(e) = shift_sumcheck_verify(
+            &mut transcript,
+            &ss_proof,
+            &claims,
+            &v_finals,
+            num_vars,
+            &field_cfg,
+        ) {
+            eprintln!("Shift sumcheck verification failed: {e}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: ic_verify_time,
+                    combined_poly_resolver_verify: cpr_verify_time,
+                    lookup_verify: Duration::ZERO,
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
+    }
+
     // ── Step 2b: Verify Batched Decomposed LogUp (column typing) ────
     let t1b = Instant::now();
     if let Some(ref lookup_data) = zinc_proof.lookup_proof {
@@ -1393,6 +1549,7 @@ where
             cpr_up_evals: vec![],
             cpr_down_evals: vec![],
             lookup_proof: None,
+            shift_sumcheck: None, // PCS-only: no PIOP
             evaluation_point_bytes: vec![],
             pcs_evals_bytes: vec![field_to_bytes(&eval_f)],
             timing: TimingBreakdown {
@@ -1719,6 +1876,53 @@ where
             }
         };
 
+        // Shift sumcheck verify (batched path): after CPR finalize, before lookup.
+        let sig_batched = U::signature();
+        if let Some(ref ss_proof_data) = zinc_proof.shift_sumcheck {
+            assert!(!sig_batched.shifts.is_empty());
+            let ss_down_evals: Vec<PiopField> = zinc_proof.cpr_down_evals.iter()
+                .map(|b| field_from_bytes(b, &field_cfg))
+                .collect();
+            let claims: Vec<ShiftClaim<PiopField>> = sig_batched.shifts
+                .iter()
+                .enumerate()
+                .map(|(i, spec)| ShiftClaim {
+                    source_col: i,
+                    shift_amount: spec.shift_amount,
+                    eval_point: cpr_sub.evaluation_point.clone(),
+                    claimed_eval: ss_down_evals[i].clone(),
+                })
+                .collect();
+            let rounds: Vec<ShiftRoundPoly<PiopField>> = ss_proof_data.rounds.iter().map(|bytes| {
+                ShiftRoundPoly {
+                    evals: [
+                        field_from_bytes(&bytes[0..field_elem_size], &field_cfg),
+                        field_from_bytes(&bytes[field_elem_size..2 * field_elem_size], &field_cfg),
+                        field_from_bytes(&bytes[2 * field_elem_size..3 * field_elem_size], &field_cfg),
+                    ],
+                }
+            }).collect();
+            let ss_proof = ShiftSumcheckProof { rounds };
+            let v_finals: Vec<PiopField> = ss_proof_data.v_finals.iter()
+                .map(|b| field_from_bytes(b, &field_cfg))
+                .collect();
+            if let Err(e) = shift_sumcheck_verify(
+                &mut transcript, &ss_proof, &claims, &v_finals, num_vars, &field_cfg,
+            ) {
+                eprintln!("Shift sumcheck verification failed (batched): {e}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        }
+
         // Lookup finalize: check subclaim[g+1] for each group.
         for (g, (lk_pre, group_proof)) in lookup_pres.iter()
             .zip(batched_proof.lookup_group_proofs.iter())
@@ -1826,6 +2030,56 @@ where
             }
         };
         let cpr_verify_time = t1.elapsed();
+
+        // ── Step 2a: Shift sumcheck verify (sequential path) ────────
+        let sig = U::signature();
+        if let Some(ref ss_proof_data) = zinc_proof.shift_sumcheck {
+            assert!(!sig.shifts.is_empty(), "shift_sumcheck present but UAIR has no shifts");
+
+            let ss_down_evals: Vec<PiopField> = zinc_proof.cpr_down_evals.iter()
+                .map(|b| field_from_bytes(b, &field_cfg))
+                .collect();
+            let claims: Vec<ShiftClaim<PiopField>> = sig.shifts
+                .iter()
+                .enumerate()
+                .map(|(i, spec)| ShiftClaim {
+                    source_col: i,
+                    shift_amount: spec.shift_amount,
+                    eval_point: cpr_subclaim.evaluation_point.clone(),
+                    claimed_eval: ss_down_evals[i].clone(),
+                })
+                .collect();
+
+            let rounds: Vec<ShiftRoundPoly<PiopField>> = ss_proof_data.rounds.iter().map(|bytes| {
+                ShiftRoundPoly {
+                    evals: [
+                        field_from_bytes(&bytes[0..field_elem_size], &field_cfg),
+                        field_from_bytes(&bytes[field_elem_size..2 * field_elem_size], &field_cfg),
+                        field_from_bytes(&bytes[2 * field_elem_size..3 * field_elem_size], &field_cfg),
+                    ],
+                }
+            }).collect();
+            let ss_proof = ShiftSumcheckProof { rounds };
+            let v_finals: Vec<PiopField> = ss_proof_data.v_finals.iter()
+                .map(|b| field_from_bytes(b, &field_cfg))
+                .collect();
+
+            if let Err(e) = shift_sumcheck_verify(
+                &mut transcript, &ss_proof, &claims, &v_finals, num_vars, &field_cfg,
+            ) {
+                eprintln!("Shift sumcheck verification failed: {e}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: cpr_verify_time,
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        }
 
         // ── Step 2b: Verify Batched Decomposed LogUp (column typing) ──
         let t1b = Instant::now();
@@ -1960,6 +2214,9 @@ pub struct DualRingZincProof {
     /// QX CPR up/down evaluations at the shared sumcheck point.
     pub qx_cpr_up_evals: Vec<Vec<u8>>,
     pub qx_cpr_down_evals: Vec<Vec<u8>>,
+
+    /// Shift sumcheck proof for Q[X] columns. `None` if Q[X] UAIR has no shifts.
+    pub qx_shift_sumcheck: Option<SerializedShiftSumcheckProof>,
 
     // ── PCS evaluation data ─────────────────────────────────────────
     pub evaluation_point_bytes: Vec<Vec<u8>>,
@@ -2096,6 +2353,11 @@ where
     );
 
     // ── Step 7: Build CPR sumcheck groups (without running sumcheck) ──
+    // Extract QX shift trace columns before build_prover_group consumes qx_field_trace.
+    let qx_sig = U2::signature();
+    let qx_shift_trace_columns: Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>> =
+        qx_sig.shifts.iter().map(|spec| qx_field_trace[spec.source_col].clone()).collect();
+
     let bp_cpr_group = CombinedPolyResolver::<PiopField>::build_prover_group::<U1>(
         &mut transcript,
         bp_field_trace,
@@ -2160,6 +2422,30 @@ where
             &field_cfg,
         )
         .expect("QX CPR finalize_prover failed");
+
+    // ── Step 9a: Shift Sumcheck for QX (reduce shifted-column claims) ──
+    let qx_shift_sumcheck_output = if !qx_sig.shifts.is_empty() {
+        let claims: Vec<ShiftClaim<PiopField>> = qx_sig.shifts
+            .iter()
+            .enumerate()
+            .map(|(i, spec)| ShiftClaim {
+                source_col: i,
+                shift_amount: spec.shift_amount,
+                eval_point: bp_cpr_state.evaluation_point.clone(),
+                claimed_eval: qx_down_evals[i].clone(),
+            })
+            .collect();
+        Some(shift_sumcheck_prove(
+            &mut transcript,
+            &claims,
+            &qx_shift_trace_columns,
+            num_vars,
+            &field_cfg,
+        ))
+    } else {
+        None
+    };
+
     let cpr_time = t2.elapsed();
 
     // ── Step 10: PCS Prove (test + evaluate) ──────────────────────
@@ -2224,6 +2510,16 @@ where
     let qx_cpr_ups: Vec<Vec<u8>> = qx_up_evals.iter().map(field_to_bytes).collect();
     let qx_cpr_downs: Vec<Vec<u8>> = qx_down_evals.iter().map(field_to_bytes).collect();
 
+    // Serialize QX shift sumcheck
+    let qx_shift_sumcheck = qx_shift_sumcheck_output.map(|output| {
+        SerializedShiftSumcheckProof {
+            rounds: output.proof.rounds.iter().map(|rp| {
+                rp.evals.iter().flat_map(|c| field_to_bytes(c)).collect()
+            }).collect(),
+            v_finals: output.v_finals.iter().map(field_to_bytes).collect(),
+        }
+    });
+
     // Serialize evaluation data
     let evaluation_point_bytes: Vec<Vec<u8>> =
         bp_cpr_state.evaluation_point.iter().map(field_to_bytes).collect();
@@ -2241,6 +2537,7 @@ where
         bp_cpr_down_evals: bp_cpr_downs,
         qx_cpr_up_evals: qx_cpr_ups,
         qx_cpr_down_evals: qx_cpr_downs,
+        qx_shift_sumcheck,
         evaluation_point_bytes,
         pcs_evals_bytes,
         timing: TimingBreakdown {
@@ -2584,6 +2881,64 @@ where
     }
     let cpr_verify_time = t1.elapsed();
 
+    // ── Step: Shift Sumcheck verify for QX ──────────────────────────
+    let qx_sig = U2::signature();
+    if let Some(ref ss_proof_data) = proof.qx_shift_sumcheck {
+        assert!(!qx_sig.shifts.is_empty(), "qx_shift_sumcheck present but QX UAIR has no shifts");
+
+        let ss_down_evals: Vec<PiopField> = proof.qx_cpr_down_evals.iter()
+            .map(|b| field_from_bytes(b, &field_cfg))
+            .collect();
+        let claims: Vec<ShiftClaim<PiopField>> = qx_sig.shifts
+            .iter()
+            .enumerate()
+            .map(|(i, spec)| ShiftClaim {
+                source_col: i,
+                shift_amount: spec.shift_amount,
+                eval_point: bp_cpr_subclaim.evaluation_point.clone(),
+                claimed_eval: ss_down_evals[i].clone(),
+            })
+            .collect();
+
+        let rounds: Vec<ShiftRoundPoly<PiopField>> = ss_proof_data.rounds.iter().map(|bytes| {
+            let n = bytes.len() / field_elem_size;
+            assert_eq!(n, 3, "each shift round poly should have 3 evaluations");
+            ShiftRoundPoly {
+                evals: [
+                    field_from_bytes(&bytes[0..field_elem_size], &field_cfg),
+                    field_from_bytes(&bytes[field_elem_size..2 * field_elem_size], &field_cfg),
+                    field_from_bytes(&bytes[2 * field_elem_size..3 * field_elem_size], &field_cfg),
+                ],
+            }
+        }).collect();
+        let ss_proof = ShiftSumcheckProof { rounds };
+
+        let v_finals: Vec<PiopField> = ss_proof_data.v_finals.iter()
+            .map(|b| field_from_bytes(b, &field_cfg))
+            .collect();
+
+        if let Err(e) = shift_sumcheck_verify(
+            &mut transcript,
+            &ss_proof,
+            &claims,
+            &v_finals,
+            num_vars,
+            &field_cfg,
+        ) {
+            eprintln!("QX Shift sumcheck verification failed: {e}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: ic_verify_time,
+                    combined_poly_resolver_verify: cpr_verify_time,
+                    lookup_verify: Duration::ZERO,
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
+    }
+
     // ── PCS Verify ──────────────────────────────────────────────────
     let t2 = Instant::now();
 
@@ -2674,6 +3029,10 @@ pub struct DualCircuitZincProof {
     pub cpr1_down_evals: Vec<Vec<u8>>,
     pub cpr2_up_evals: Vec<Vec<u8>>,
     pub cpr2_down_evals: Vec<Vec<u8>>,
+
+    // ── Shift sumcheck for circuit 2 (e.g. ECDSA) ──────────────────
+    /// `None` if circuit 2 has no shift specs.
+    pub c2_shift_sumcheck: Option<SerializedShiftSumcheckProof>,
 
     // ── Lookup (circuit 1 only) ─────────────────────────────────────
     pub lookup_group_meta: Vec<LookupGroupMeta>,
@@ -2913,6 +3272,11 @@ where
     }
 
     // ── Step 10: Build CPR group for circuit 2 ──────────────────────
+    // Extract C2 shift trace columns before build_prover_group consumes c2_field_trace.
+    let c2_sig = U2::signature();
+    let c2_shift_trace_columns: Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>> =
+        c2_sig.shifts.iter().map(|spec| c2_field_trace[spec.source_col].clone()).collect();
+
     let mut c2_cpr_group = CombinedPolyResolver::<PiopField>::build_prover_group::<U2>(
         &mut transcript,
         c2_field_trace,
@@ -3005,6 +3369,29 @@ where
             &field_cfg,
         )
         .expect("C2 CPR finalize_prover failed");
+
+    // ── Step 14a: Shift Sumcheck for circuit 2 ─────────────────────
+    let c2_shift_sumcheck_output = if !c2_sig.shifts.is_empty() {
+        let claims: Vec<ShiftClaim<PiopField>> = c2_sig.shifts
+            .iter()
+            .enumerate()
+            .map(|(i, spec)| ShiftClaim {
+                source_col: i,
+                shift_amount: spec.shift_amount,
+                eval_point: c1_cpr_state.evaluation_point.clone(),
+                claimed_eval: c2_down_evals[i].clone(),
+            })
+            .collect();
+        Some(shift_sumcheck_prove(
+            &mut transcript,
+            &claims,
+            &c2_shift_trace_columns,
+            num_vars,
+            &field_cfg,
+        ))
+    } else {
+        None
+    };
 
     // ── Step 15: Finalize lookup groups ─────────────────────────────
     let mut lookup_group_proofs = Vec::new();
@@ -3107,6 +3494,16 @@ where
     let cpr2_ups: Vec<Vec<u8>> = c2_up_evals.iter().map(field_to_bytes).collect();
     let cpr2_downs: Vec<Vec<u8>> = c2_down_evals.iter().map(field_to_bytes).collect();
 
+    // Serialize C2 shift sumcheck
+    let c2_shift_sumcheck = c2_shift_sumcheck_output.map(|output| {
+        SerializedShiftSumcheckProof {
+            rounds: output.proof.rounds.iter().map(|rp| {
+                rp.evals.iter().flat_map(|c| field_to_bytes(c)).collect()
+            }).collect(),
+            v_finals: output.v_finals.iter().map(field_to_bytes).collect(),
+        }
+    });
+
     let evaluation_point_bytes: Vec<Vec<u8>> =
         c1_cpr_state.evaluation_point.iter().map(field_to_bytes).collect();
     let pcs1_evals: Vec<Vec<u8>> = vec![field_to_bytes(&eval1_f)];
@@ -3131,6 +3528,7 @@ where
         cpr1_down_evals: cpr1_downs,
         cpr2_up_evals: cpr2_ups,
         cpr2_down_evals: cpr2_downs,
+        c2_shift_sumcheck,
         lookup_group_meta,
         lookup_group_proofs,
         evaluation_point_bytes,
@@ -3595,6 +3993,64 @@ where
                 total: total_start.elapsed(),
             },
         };
+    }
+
+    // ── Shift Sumcheck verify for circuit 2 ─────────────────────────
+    let c2_sig = U2::signature();
+    if let Some(ref ss_proof_data) = proof.c2_shift_sumcheck {
+        assert!(!c2_sig.shifts.is_empty(), "c2_shift_sumcheck present but C2 UAIR has no shifts");
+
+        let ss_down_evals: Vec<PiopField> = proof.cpr2_down_evals.iter()
+            .map(|b| field_from_bytes(b, &field_cfg))
+            .collect();
+        let claims: Vec<ShiftClaim<PiopField>> = c2_sig.shifts
+            .iter()
+            .enumerate()
+            .map(|(i, spec)| ShiftClaim {
+                source_col: i,
+                shift_amount: spec.shift_amount,
+                eval_point: c1_cpr_subclaim.evaluation_point.clone(),
+                claimed_eval: ss_down_evals[i].clone(),
+            })
+            .collect();
+
+        let rounds: Vec<ShiftRoundPoly<PiopField>> = ss_proof_data.rounds.iter().map(|bytes| {
+            let n = bytes.len() / field_elem_size;
+            assert_eq!(n, 3, "each shift round poly should have 3 evaluations");
+            ShiftRoundPoly {
+                evals: [
+                    field_from_bytes(&bytes[0..field_elem_size], &field_cfg),
+                    field_from_bytes(&bytes[field_elem_size..2 * field_elem_size], &field_cfg),
+                    field_from_bytes(&bytes[2 * field_elem_size..3 * field_elem_size], &field_cfg),
+                ],
+            }
+        }).collect();
+        let ss_proof = ShiftSumcheckProof { rounds };
+
+        let v_finals: Vec<PiopField> = ss_proof_data.v_finals.iter()
+            .map(|b| field_from_bytes(b, &field_cfg))
+            .collect();
+
+        if let Err(e) = shift_sumcheck_verify(
+            &mut transcript,
+            &ss_proof,
+            &claims,
+            &v_finals,
+            num_vars,
+            &field_cfg,
+        ) {
+            eprintln!("C2 Shift sumcheck verification failed: {e}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: ic_verify_time,
+                    combined_poly_resolver_verify: t1.elapsed(),
+                    lookup_verify: Duration::ZERO,
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
     }
 
     // ── Finalize lookup groups ──────────────────────────────────────

@@ -9,7 +9,7 @@ use zinc_poly::{
     mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero},
     univariate::dynamic::over_field::DynamicPolynomialF,
 };
-use zinc_uair::{ConstraintBuilder, TraceRow, Uair, ideal::ImpossibleIdeal};
+use zinc_uair::{ConstraintBuilder, TraceRow, Uair, UairSignature, ideal::ImpossibleIdeal};
 use zinc_utils::{cfg_into_iter, from_ref::FromRef};
 
 /// Given a UAIR `U` and a trace `trace` this function
@@ -30,6 +30,8 @@ where
     let field_zero = F::zero_with_cfg(field_cfg);
 
     let num_rows = trace_matrix[0].len();
+    let sig = U::signature();
+    let down_sig = sig.down_signature();
 
     let mut max_degrees_and_combined_poly_rows: Vec<(usize, Vec<DynamicPolynomialF<F>>)> =
         cfg_into_iter!(0..num_rows - 1)
@@ -39,16 +41,35 @@ where
                     .map(|column| column[row_idx].clone())
                     .collect_vec();
 
-                let down = trace_matrix
-                    .iter()
-                    .map(|column| column[row_idx + 1].clone())
-                    .collect_vec();
+                let down = if sig.uses_legacy_shifts() {
+                    // Legacy: all columns shifted by 1 (look-ahead).
+                    trace_matrix
+                        .iter()
+                        .map(|column| column[row_idx + 1].clone())
+                        .collect_vec()
+                } else {
+                    // Shift-spec mode: construct only the declared shifted
+                    // columns.
+                    sig.shifts
+                        .iter()
+                        .map(|spec| {
+                            let target = row_idx + spec.shift_amount;
+                            if target < num_rows {
+                                trace_matrix[spec.source_col][target].clone()
+                            } else {
+                                DynamicPolynomialF::new([])
+                            }
+                        })
+                        .collect_vec()
+                };
 
                 combine_rows_and_get_max_degree::<F, U>(
                     &up,
                     &down,
                     num_constraints,
                     projected_scalars,
+                    &sig,
+                    &down_sig,
                 )
             })
             .collect();
@@ -87,6 +108,8 @@ fn combine_rows_and_get_max_degree<F, U>(
     down: &[DynamicPolynomialF<F>],
     num_constraints: usize,
     projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    sig: &UairSignature,
+    down_sig: &UairSignature,
 ) -> (usize, Vec<DynamicPolynomialF<F>>)
 where
     F: PrimeField,
@@ -103,8 +126,8 @@ where
 
     U::constrain_general(
         &mut constraint_builder,
-        TraceRow::from_slice_with_signature(up, &U::signature()),
-        TraceRow::from_slice_with_signature(down, &U::signature()),
+        TraceRow::from_slice_with_signature(up, sig),
+        TraceRow::from_slice_with_signature(down, down_sig),
         &project,
         |x, y| Some(project(y) * x),
         ImpossibleIdeal::from_ref,

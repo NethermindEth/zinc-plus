@@ -34,6 +34,7 @@ impl<R: Semiring + 'static> Uair for TestUairSimpleMultiplication<R> {
             binary_poly_cols: 0,
             arbitrary_poly_cols: 3,
             int_cols: 0,
+            shifts: vec![],
         }
     }
 
@@ -135,6 +136,7 @@ impl<const LIMBS: usize> Uair for TestAirNoMultiplication<LIMBS> {
             binary_poly_cols: 0,
             arbitrary_poly_cols: 3,
             int_cols: 0,
+            shifts: vec![],
         }
     }
 
@@ -201,6 +203,7 @@ impl<const LIMBS: usize> Uair for TestAirScalarMultiplications<LIMBS> {
             binary_poly_cols: 0,
             arbitrary_poly_cols: 3,
             int_cols: 0,
+            shifts: vec![],
         }
     }
 
@@ -249,6 +252,7 @@ impl Uair for BinaryDecompositionUair {
             binary_poly_cols: 1,
             arbitrary_poly_cols: 0,
             int_cols: 1,
+            shifts: vec![],
         }
     }
 
@@ -308,6 +312,7 @@ impl Uair for BigLinearUair {
             binary_poly_cols: 16,
             arbitrary_poly_cols: 0,
             int_cols: 1,
+            shifts: vec![],
         }
     }
 

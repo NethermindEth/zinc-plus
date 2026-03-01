@@ -52,7 +52,10 @@ use zinc_piop::lookup::{
     BatchedDecompLogupProtocol, group_lookup_specs,
 };
 use zinc_piop::lookup::pipeline::build_lookup_instance_from_indices_pub;
+use zinc_piop::shift_sumcheck::{ShiftClaim, shift_sumcheck_prove};
 use zinc_piop::sumcheck::multi_degree::MultiDegreeSumcheck;
+
+use zinc_uair::Uair;
 
 // ─── Type definitions ───────────────────────────────────────────────────────
 
@@ -542,6 +545,108 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                 let _ = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::finalize_prover(
                     &mut tr, ec_ps, ec_num_cols, &sha_fcfg,
                 ).expect("ECDSA finalize_prover");
+                total += t.elapsed();
+            }
+            total
+        });
+    });
+
+    // ── 13a. ECDSA PIOP / Shift Sumcheck ─────────────────────────────
+    //
+    // After the CPR multi-degree sumcheck finalizes, the ECDSA circuit
+    // runs a shift sumcheck to reduce its 3 shifted-column evaluation
+    // claims (X, Y, Z with shift_amount=1) to evaluation claims about
+    // the *unshifted* source columns at a fresh random point.
+    //
+    // Pre-compute the data the shift sumcheck needs: the shift trace
+    // columns (source columns in field form) and the CPR state (eval
+    // point + down_evals).  Only the shift_sumcheck_prove call itself
+    // is timed.
+    let ec_sig = EcdsaUairInt::signature();
+    let ec_shift_trace_columns: Vec<DenseMultilinearExtension<<F as Field>::Inner>> =
+        ec_sig.shifts.iter().map(|spec| ec_field_trace[spec.source_col].clone()).collect();
+
+    // Run a fresh CPR to obtain the evaluation point and down_evals.
+    let (ec_cpr_eval_point, ec_cpr_down_evals) = {
+        let mut tr = unified_tr.clone();
+        let sha_g = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::build_prover_group::<Sha256Uair>(
+            &mut tr, sha_field_trace.clone(), &ic_evaluation_point,
+            &sha_fproj_scalars, sha_num_constraints, num_vars, sha_max_degree, &sha_fcfg,
+        ).expect("SHA build_prover_group");
+        let snc = sha_g.num_cols;
+        let ec_g = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::build_prover_group::<EcdsaUairInt>(
+            &mut tr, ec_field_trace.clone(), &ic_evaluation_point,
+            &ec_fproj_scalars, ecdsa_num_constraints, num_vars, ecdsa_max_degree, &sha_fcfg,
+        ).expect("ECDSA build_prover_group");
+        let enc = ec_g.num_cols;
+        let groups = vec![
+            (sha_g.degree, sha_g.mles, sha_g.comb_fn),
+            (ec_g.degree, ec_g.mles, ec_g.comb_fn),
+        ];
+        let (_, mut ps) = zinc_piop::sumcheck::multi_degree::MultiDegreeSumcheck::<F>::prove_as_subprotocol(
+            &mut tr, groups, num_vars, &sha_fcfg,
+        );
+        let _ = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::finalize_prover(
+            &mut tr, ps.remove(0), snc, &sha_fcfg,
+        ).expect("SHA finalize_prover");
+        let (_, ec_down, ec_cpr_st) = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::finalize_prover(
+            &mut tr, ps.remove(0), enc, &sha_fcfg,
+        ).expect("ECDSA finalize_prover");
+        (ec_cpr_st.evaluation_point, ec_down)
+    };
+
+    // Capture the post-CPR-finalize transcript state for the shift sumcheck.
+    let shift_pre_transcript = {
+        let mut tr = unified_tr.clone();
+        let sha_g = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::build_prover_group::<Sha256Uair>(
+            &mut tr, sha_field_trace.clone(), &ic_evaluation_point,
+            &sha_fproj_scalars, sha_num_constraints, num_vars, sha_max_degree, &sha_fcfg,
+        ).expect("SHA build_prover_group");
+        let snc = sha_g.num_cols;
+        let ec_g = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::build_prover_group::<EcdsaUairInt>(
+            &mut tr, ec_field_trace.clone(), &ic_evaluation_point,
+            &ec_fproj_scalars, ecdsa_num_constraints, num_vars, ecdsa_max_degree, &sha_fcfg,
+        ).expect("ECDSA build_prover_group");
+        let enc = ec_g.num_cols;
+        let groups = vec![
+            (sha_g.degree, sha_g.mles, sha_g.comb_fn),
+            (ec_g.degree, ec_g.mles, ec_g.comb_fn),
+        ];
+        let (_, mut ps) = zinc_piop::sumcheck::multi_degree::MultiDegreeSumcheck::<F>::prove_as_subprotocol(
+            &mut tr, groups, num_vars, &sha_fcfg,
+        );
+        let _ = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::finalize_prover(
+            &mut tr, ps.remove(0), snc, &sha_fcfg,
+        ).expect("SHA finalize_prover");
+        let _ = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::finalize_prover(
+            &mut tr, ps.remove(0), enc, &sha_fcfg,
+        ).expect("ECDSA finalize_prover");
+        tr
+    };
+
+    group.bench_function("ECDSA/PIOP/ShiftSumcheck", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let mut tr = shift_pre_transcript.clone();
+                let claims: Vec<ShiftClaim<F>> = ec_sig.shifts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, spec)| ShiftClaim {
+                        source_col: i,
+                        shift_amount: spec.shift_amount,
+                        eval_point: ec_cpr_eval_point.clone(),
+                        claimed_eval: ec_cpr_down_evals[i].clone(),
+                    })
+                    .collect();
+                let t = Instant::now();
+                let _ = black_box(shift_sumcheck_prove(
+                    &mut tr,
+                    &claims,
+                    &ec_shift_trace_columns,
+                    num_vars,
+                    &sha_fcfg,
+                ));
                 total += t.elapsed();
             }
             total

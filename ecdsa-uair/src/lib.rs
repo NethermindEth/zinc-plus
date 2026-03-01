@@ -98,6 +98,13 @@ pub const COL_Z: usize = 4;
 pub const COL_X_MID: usize = 5;
 pub const COL_Y_MID: usize = 6;
 pub const COL_Z_MID: usize = 7;
+
+// Down-row indices: with explicit shift specs only the shifted columns
+// appear in the down row, so X/Y/Z map to 0/1/2 (not their original column
+// indices).
+const DOWN_X: usize = 0;
+const DOWN_Y: usize = 1;
+const DOWN_Z: usize = 2;
 pub const COL_H: usize = 8;
 
 // ─── Toy curve constants ────────────────────────────────────────────────────
@@ -230,6 +237,7 @@ impl Uair for EcdsaUairBp {
             binary_poly_cols: NUM_COLS,
             arbitrary_poly_cols: 0,
             int_cols: 0,
+            shifts: vec![],
         }
     }
 
@@ -276,6 +284,11 @@ impl Uair for EcdsaUairDp {
             binary_poly_cols: 0,
             arbitrary_poly_cols: NUM_COLS,
             int_cols: 0,
+            shifts: vec![
+                zinc_uair::ShiftSpec { source_col: COL_X, shift_amount: 1 },
+                zinc_uair::ShiftSpec { source_col: COL_Y, shift_amount: 1 },
+                zinc_uair::ShiftSpec { source_col: COL_Z, shift_amount: 1 },
+            ],
         }
     }
 
@@ -363,7 +376,7 @@ impl Uair for EcdsaUairDp {
         let one_minus_s = one - &s;
         let zmid_h = up[COL_Z_MID].clone() * &up[COL_H];
         b.assert_zero(
-            down[COL_Z].clone()
+            down[DOWN_Z].clone()
                 - &(one_minus_s.clone() * &up[COL_Z_MID])
                 - &(s.clone() * &zmid_h),
         );
@@ -377,7 +390,7 @@ impl Uair for EcdsaUairDp {
         let xmid_h_sq = up[COL_X_MID].clone() * &h_sq;
         let add_x = ra_sq - &h_cubed - &smul(&xmid_h_sq, 2);
         b.assert_zero(
-            down[COL_X].clone()
+            down[DOWN_X].clone()
                 - &(one_minus_s.clone() * &up[COL_X_MID])
                 - &(s.clone() * &add_x),
         );
@@ -386,11 +399,11 @@ impl Uair for EcdsaUairDp {
         // When s=0: Y[t+1] = Y_mid
         // When s=1: Y[t+1] = R_a·(X_mid·H² - X[t+1]) - Y_mid·H³
         let xmid_h_sq_2 = up[COL_X_MID].clone() * &h_sq;
-        let ra_term = r_a * &(xmid_h_sq_2 - &down[COL_X]);
+        let ra_term = r_a * &(xmid_h_sq_2 - &down[DOWN_X]);
         let ymid_h_cubed = up[COL_Y_MID].clone() * &h_cubed;
         let add_y = ra_term - &ymid_h_cubed;
         b.assert_zero(
-            down[COL_Y].clone()
+            down[DOWN_Y].clone()
                 - &(one_minus_s * &up[COL_Y_MID])
                 - &(s * &add_y),
         );
@@ -418,6 +431,11 @@ impl Uair for EcdsaUairInt {
             binary_poly_cols: 0,
             arbitrary_poly_cols: 0,
             int_cols: NUM_COLS,
+            shifts: vec![
+                zinc_uair::ShiftSpec { source_col: COL_X, shift_amount: 1 },
+                zinc_uair::ShiftSpec { source_col: COL_Y, shift_amount: 1 },
+                zinc_uair::ShiftSpec { source_col: COL_Z, shift_amount: 1 },
+            ],
         }
     }
 
@@ -505,7 +523,7 @@ impl Uair for EcdsaUairInt {
         let one_minus_s = one - &s;
         let zmid_h = up[COL_Z_MID].clone() * &up[COL_H];
         b.assert_zero(
-            down[COL_Z].clone()
+            down[DOWN_Z].clone()
                 - &(one_minus_s.clone() * &up[COL_Z_MID])
                 - &(s.clone() * &zmid_h),
         );
@@ -519,7 +537,7 @@ impl Uair for EcdsaUairInt {
         let xmid_h_sq = up[COL_X_MID].clone() * &h_sq;
         let add_x = ra_sq - &h_cubed - &smul(&xmid_h_sq, 2);
         b.assert_zero(
-            down[COL_X].clone()
+            down[DOWN_X].clone()
                 - &(one_minus_s.clone() * &up[COL_X_MID])
                 - &(s.clone() * &add_x),
         );
@@ -528,11 +546,11 @@ impl Uair for EcdsaUairInt {
         // When s=0: Y[t+1] = Y_mid
         // When s=1: Y[t+1] = R_a·(X_mid·H² - X[t+1]) - Y_mid·H³
         let xmid_h_sq_2 = up[COL_X_MID].clone() * &h_sq;
-        let ra_term = r_a * &(xmid_h_sq_2 - &down[COL_X]);
+        let ra_term = r_a * &(xmid_h_sq_2 - &down[DOWN_X]);
         let ymid_h_cubed = up[COL_Y_MID].clone() * &h_cubed;
         let add_y = ra_term - &ymid_h_cubed;
         b.assert_zero(
-            down[COL_Y].clone()
+            down[DOWN_Y].clone()
                 - &(one_minus_s * &up[COL_Y_MID])
                 - &(s * &add_y),
         );
