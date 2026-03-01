@@ -20,7 +20,8 @@
 //!   2^10 = 1024 → PnttConfigF2_16R4B16<2>
 
 use zinc_primality::MillerRabin;
-use zinc_transcript::traits::ConstTranscribable;
+use zinc_transcript::traits::{ConstTranscribable, Transcript};
+use zinc_transcript::KeccakTranscript;
 use zinc_utils::{
     UNCHECKED,
     from_ref::FromRef,
@@ -38,7 +39,6 @@ use crypto_primitives::{
     crypto_bigint_monty::MontyField,
     crypto_bigint_uint::Uint,
 };
-use num_traits::One;
 use rand::prelude::*;
 use std::{
     hint::black_box,
@@ -186,7 +186,9 @@ fn bench_prove<Lc: LinearCode<IntZipTypes256>, const P: usize>(
     let mut rng = ThreadRng::default();
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
     let (hint, _) = ZipPlus::commit_single(&params, &poly).unwrap();
-    let point = vec![<IntZipTypes256 as ZipTypes>::Pt::one(); P];
+    let field_cfg = KeccakTranscript::default()
+        .get_random_field_cfg::<F, <IntZipTypes256 as ZipTypes>::Fmod, <IntZipTypes256 as ZipTypes>::PrimeTest>();
+    let point: Vec<F> = vec![F::one_with_cfg(&field_cfg); P];
 
     group.bench_function(
         format!(
@@ -230,12 +232,13 @@ fn bench_verify<Lc: LinearCode<IntZipTypes256>, const P: usize>(
     let mut rng = ThreadRng::default();
     let poly = DenseMultilinearExtension::rand(P, &mut rng);
     let (hint, commitment) = ZipPlus::commit_single(&params, &poly).unwrap();
-    let point = vec![<IntZipTypes256 as ZipTypes>::Pt::one(); P];
+    let field_cfg = KeccakTranscript::default()
+        .get_random_field_cfg::<F, <IntZipTypes256 as ZipTypes>::Fmod, <IntZipTypes256 as ZipTypes>::PrimeTest>();
+    let point: Vec<F> = vec![F::one_with_cfg(&field_cfg); P];
     let (eval_f, proof) =
         ZipPlus::prove::<F, UNCHECKED>(&params, &[poly.clone()], &point, &hint)
             .expect("Prove failed");
-    let field_cfg = *eval_f.cfg();
-    let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
+    let point_f: Vec<F> = point.clone();
 
     group.bench_function(
         format!(

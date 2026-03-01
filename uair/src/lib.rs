@@ -140,6 +140,36 @@ impl UairSignature {
         self.public_columns.contains(&col_idx)
     }
 
+    /// Whether the given flattened column index appears as `source_col`
+    /// in some `ShiftSpec`.  Such columns store shifted / lookback
+    /// copies of another column and are **never committed** to the PCS —
+    /// the shift sumcheck handles their evaluation claims instead.
+    pub fn is_shift_source(&self, col_idx: usize) -> bool {
+        self.shifts.iter().any(|s| s.source_col == col_idx)
+    }
+
+    /// Flattened column indices that are excluded from PCS commitment.
+    ///
+    /// This is the union of:
+    /// - **public columns** (known to the verifier, not committed), and
+    /// - **shift source columns** (whose evaluation claims are resolved
+    ///   by the shift sumcheck protocol, not committed).
+    pub fn pcs_excluded_columns(&self) -> Vec<usize> {
+        let mut excluded = self.public_columns.clone();
+        for s in &self.shifts {
+            if !excluded.contains(&s.source_col) {
+                excluded.push(s.source_col);
+            }
+        }
+        excluded
+    }
+
+    /// Number of columns committed to the PCS (total minus excluded).
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn num_pcs_columns(&self) -> usize {
+        self.total_cols() - self.pcs_excluded_columns().len()
+    }
+
     /// Whether the shift at the given index sources a public column.
     pub fn is_public_shift(&self, shift_idx: usize) -> bool {
         self.shifts

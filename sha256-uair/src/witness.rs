@@ -306,9 +306,10 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
 
 // ─── Split witness generators ───────────────────────────────────────────────
 
-/// Generate only the 14 BinaryPoly columns (indices 0–13) used in
+/// Generate only the 23 BinaryPoly columns (indices 0–22) used in
 /// both F₂[X] and Q[X] constraints. These include the 10 bit-polynomial
-/// columns and the 4 F₂[X] shift/remainder columns.
+/// columns, the 4 F₂[X] shift/remainder columns, 7 lookback columns,
+/// the round-constant column, and 2 selector columns.
 pub fn generate_poly_witness(
     num_vars: usize,
     rng: &mut impl RngCore,
@@ -320,8 +321,8 @@ pub fn generate_poly_witness(
         .collect()
 }
 
-/// Generate the 3 integer columns (indices 14–16: μ_a, μ_e, μ_W) used in
-/// Q[X] carry constraints (C10–C12), encoded as `Int<1>` (64-bit integer).
+/// Generate the 3 integer columns (indices 23–25: μ_a, μ_e, μ_W) used in
+/// Q[X] carry constraints (C13–C15), encoded as `Int<1>` (64-bit integer).
 ///
 /// Each cell value is `BinaryPoly::to_u64() as i64` wrapped in `Int<1>`.
 /// These carry values are small integers (≤ 6), so they always fit within

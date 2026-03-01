@@ -14,7 +14,7 @@ use crypto_primitives::{
     crypto_bigint_uint::Uint,
     FixedSemiring,
 };
-use num_traits::One;
+use crypto_primitives::PrimeField;
 use zinc_transcript::traits::Transcript;
 
 use zinc_poly::univariate::binary::{
@@ -93,7 +93,9 @@ fn round_trip_pcs_sha256() {
     // ── Prove ────────────────────────────────────────────────────────
     let (hint, commitment) = ZipPlus::<Zt, Lc>::commit(&params, &trace)
         .expect("commit failed");
-    let point: Vec<i128> = vec![i128::one(); num_vars];
+    let pcs_field_cfg = zinc_transcript::KeccakTranscript::default()
+        .get_random_field_cfg::<F, <Zt as ZipTypes>::Fmod, <Zt as ZipTypes>::PrimeTest>();
+    let point: Vec<F> = vec![F::one_with_cfg(&pcs_field_cfg); num_vars];
     let (eval_f, proof) = ZipPlus::<Zt, Lc>::prove::<F, UNCHECKED>(
         &params, &trace, &point, &hint,
     )
@@ -107,13 +109,7 @@ fn round_trip_pcs_sha256() {
     println!("Proof size: {} bytes ({:.1} KB)", proof_bytes.len(), proof_bytes.len() as f64 / 1024.0);
 
     // ── Deserialize and Verify ───────────────────────────────────────
-    // Get PCS field config from a fresh transcript (deterministic).
-    let pcs_field_cfg = zinc_transcript::KeccakTranscript::default()
-        .get_random_field_cfg::<F, <Zt as ZipTypes>::Fmod, <Zt as ZipTypes>::PrimeTest>();
-    let point_f: Vec<F> = point.iter().map(|v| {
-        use crypto_primitives::IntoWithConfig;
-        v.into_with_cfg(&pcs_field_cfg)
-    }).collect();
+    let point_f: Vec<F> = point.clone();
 
     let deserialized_proof: ZipPlusProof = {
         let tx = zip_plus::pcs_transcript::PcsTranscript {

@@ -32,7 +32,10 @@ use super::{
         BatchedDecompLogupVerifierSubClaim, BatchedDecompLookupInstance, LookupError,
         LookupSumcheckGroup, LookupVerifierPreSumcheck,
     },
-    tables::{batch_inverse_shifted, build_table_index, compute_multiplicities_with_index},
+    tables::{
+        batch_inverse, batch_inverse_shifted, build_table_index,
+        compute_multiplicities_with_index,
+    },
 };
 
 /// The batched Decomposition + LogUp protocol.
@@ -93,14 +96,12 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
         let one = F::one_with_cfg(field_cfg);
         let mut buf = vec![0u8; F::Inner::NUM_BYTES];
 
-        // ---- Step 1: Absorb all chunks for every lookup ----
-        for lookup_chunks in all_chunks {
-            for chunk in lookup_chunks {
-                transcript.absorb_random_field_slice(chunk, &mut buf);
-            }
-        }
+        // NOTE: Chunk vectors are NOT absorbed into the transcript.
+        // The PCS commitment (already in the transcript) binds the
+        // parent column and hence its unique chunk decomposition.
+        // This allows us to omit chunk vectors from the proof entirely.
 
-        // ---- Step 2: Compute multiplicities per chunk, then aggregate per lookup ----
+        // ---- Step 1: Compute multiplicities per chunk, then aggregate per lookup ----
         let table_index = build_table_index(subtable);
         let all_chunk_multiplicities: Vec<Vec<Vec<F>>> = cfg_iter!(all_chunks)
             .map(|lookup_chunks| {
@@ -267,7 +268,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
 
         Ok((
             BatchedDecompLogupProof {
-                chunk_vectors: all_chunks.clone(),
                 sumcheck_proof,
                 aggregated_multiplicities: all_aggregated_multiplicities,
                 chunk_inverse_witnesses: all_inverse_witnesses,
@@ -310,14 +310,10 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
         let one = F::one_with_cfg(field_cfg);
         let mut buf = vec![0u8; F::Inner::NUM_BYTES];
 
-        // ---- Step 1: Absorb all chunks ----
-        for lookup_chunks in all_chunks {
-            for chunk in lookup_chunks {
-                transcript.absorb_random_field_slice(chunk, &mut buf);
-            }
-        }
+        // NOTE: Chunk vectors are NOT absorbed into the transcript.
+        // The PCS commitment binds the parent column and hence its chunks.
 
-        // ---- Step 2: Compute multiplicities ----
+        // ---- Step 1: Compute multiplicities ----
         let table_index = build_table_index(subtable);
         let all_chunk_multiplicities: Vec<Vec<Vec<F>>> = cfg_iter!(all_chunks)
             .map(|lookup_chunks| {
@@ -471,7 +467,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
             mles,
             comb_fn,
             num_vars,
-            chunk_vectors: all_chunks.clone(),
             aggregated_multiplicities: all_aggregated_multiplicities,
             chunk_inverse_witnesses: all_inverse_witnesses,
             inverse_table: v_table,
@@ -490,7 +485,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
     ) {
         (
             BatchedDecompLogupProof {
-                chunk_vectors: pre.chunk_vectors,
                 sumcheck_proof,
                 aggregated_multiplicities: pre.aggregated_multiplicities,
                 chunk_inverse_witnesses: pre.chunk_inverse_witnesses,
@@ -525,17 +519,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
         let mut buf = vec![0u8; F::Inner::NUM_BYTES];
 
         let num_chunks = shifts.len();
-        let all_chunks = &proof.chunk_vectors;
         let all_agg_mults = &proof.aggregated_multiplicities;
         let all_inv_w = &proof.chunk_inverse_witnesses;
         let v_table = &proof.inverse_table;
 
-        // Mirror transcript operations.
-        for lookup_chunks in all_chunks {
-            for chunk in lookup_chunks {
-                transcript.absorb_random_field_slice(chunk, &mut buf);
-            }
-        }
+        // NOTE: Chunk vectors are not absorbed — binding comes from PCS.
         for agg in all_agg_mults {
             transcript.absorb_random_field_slice(agg, &mut buf);
         }
@@ -593,19 +581,31 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
             num_lookups,
             num_chunks,
             witness_len,
+            shifts: shifts.to_vec(),
         })
     }
 
     /// Post-sumcheck finalization for the batched LogUp verifier.
     ///
-    /// Recomputes H(x*) at the subclaim point and checks it matches
-    /// the expected evaluation from the sumcheck.
+    /// Reconstructs chunk vectors from inverse witnesses (`c_k[j] = β − 1/u_k[j]`),
+    /// recomputes H(x*) at the subclaim point, checks it matches the expected
+    /// evaluation from the sumcheck, and verifies the decomposition consistency
+    /// against the PCS-committed parent column evaluations.
+    ///
+    /// # Arguments
+    ///
+    /// - `parent_column_evals`: for each lookup ℓ, the MLE evaluation of the
+    ///   parent (projected) column at the subclaim point. Used for the
+    ///   decomposition check: `Σ_k shift_k · c̃_k(x*) = parent_eval(x*)`.
+    ///   Pass an empty slice to skip the decomposition check (e.g. in tests
+    ///   without a PCS).
     #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
     pub fn finalize_verifier(
         pre: &LookupVerifierPreSumcheck<F>,
         proof: &BatchedDecompLogupProof<F>,
         subclaim_point: &[F],
         subclaim_expected_evaluation: &F,
+        parent_column_evals: &[F],
         field_cfg: &F::Config,
     ) -> Result<BatchedDecompLogupVerifierSubClaim<F>, LookupError<F>>
     where
@@ -620,18 +620,59 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
         let eq_at_point =
             build_eq_x_r_vec(subclaim_point, field_cfg)?;
 
-        // Recompute H(x*).
-        let num_identities = pre.num_lookups * (pre.num_chunks + 1);
-        let mut gamma_powers = Vec::with_capacity(num_identities);
-        let mut gp = one.clone();
-        for _ in 0..num_identities {
-            gamma_powers.push(gp.clone());
+        // ── Recompute H(x*) ──────────────────────────────────────────
+        //
+        // The prover's combination function has L*(K+1) identities:
+        //   - L*K inverse-correctness identities (one per chunk per lookup)
+        //   - L   balance identities (one per lookup)
+        //
+        // The inverse-correctness identity evaluates to 0 at every
+        // j < witness_len (where c_k[j] = β − 1/u_k[j]). At padding
+        // positions j >= witness_len, the identity evaluates to −1.
+        // Its MLE evaluation at x* is therefore:
+        //   ĩd_k(x*) = 0 · eq_sum_W + (−1)·(1 − eq_sum_W) = eq_sum_W − 1
+        // where eq_sum_W = Σ_{j<W} eq(j, x*).
+        //
+        // This is the SAME value for all chunks k and lookups ℓ, so
+        // the total inverse-correctness contribution is:
+        //   (eq_sum_W − 1) · Σ_{ℓ,k} γ^(ℓ*(K+1) + k)
+        //
+        // When witness_len == 2^num_vars (no padding), eq_sum_W = 1
+        // and the contribution is 0.
+
+        let n = eq_at_point.len();
+        let w = pre.witness_len;
+
+        // Compute gamma powers for balance identities:
+        //   gamma^(ell*(K+1) + K) for ell = 0..L
+        let mut gamma_balance_powers = Vec::with_capacity(pre.num_lookups);
+        // Also accumulate Σ_{ℓ,k} γ^(ℓ*(K+1)+k) for the padding correction.
+        let mut inv_corr_gamma_sum = zero.clone();
+        {
+            let mut gp = one.clone();
+            // S_K = Σ_{k=0}^{K-1} γ^k  (partial sum of first K powers within a stride)
+            let mut s_k = one.clone();
+            for _ in 1..pre.num_chunks {
+                gp *= &pre.gamma;
+                s_k += &gp;
+            }
+            // gp is now γ^(K-1); multiply once more for γ^K
             gp *= &pre.gamma;
+            // γ^(K+1)
+            let gamma_stride = gp.clone() * &pre.gamma;
+
+            // For each lookup ℓ, record the balance power and accumulate
+            // the inverse-correctness gamma sum.
+            let mut stride_power = one.clone(); // γ^(ℓ*(K+1))
+            for _ in 0..pre.num_lookups {
+                gamma_balance_powers.push(stride_power.clone() * &gp); // γ^(ℓ*(K+1)+K)
+                inv_corr_gamma_sum += &(stride_power.clone() * &s_k); // Σ_k γ^(ℓ*(K+1)+k)
+                stride_power *= &gamma_stride;
+            }
         }
 
         let v_table = &proof.inverse_table;
         let all_inv_w = &proof.chunk_inverse_witnesses;
-        let all_chunks = &proof.chunk_vectors;
         let all_agg_mults = &proof.aggregated_multiplicities;
 
         let v_eq: Vec<F> = v_table
@@ -640,34 +681,61 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
             .map(|(v_j, eq_j)| v_j.clone() * eq_j)
             .collect();
 
+        // Helper: inner product of data with eq_at_point.
+        let eval_at_point = |data: &[F]| -> F {
+            data.iter()
+                .zip(eq_at_point.iter())
+                .fold(zero.clone(), |acc, (d, e)| acc + &(d.clone() * e))
+        };
+
+        // eq_sum_W = Σ_{j<W} eq(j, x*).  Equals 1 when W = 2^num_vars.
+        let eq_sum_w: F = if w < n {
+            eq_at_point[..w]
+                .iter()
+                .fold(zero.clone(), |acc, e| acc + e)
+        } else {
+            one.clone()
+        };
+
         let mut h_eval = zero.clone();
 
+        // Inverse-correctness padding correction.
+        // ĩd_k(x*) = eq_sum_W − 1 for every chunk k and lookup ℓ.
+        if w < n {
+            let id_pad = eq_sum_w.clone() - &one;
+            h_eval += &(id_pad * &inv_corr_gamma_sum);
+        }
+
+        // For each lookup, also accumulate per-chunk MLE evaluations
+        // for the decomposition check.
+        let mut all_chunk_evals: Vec<Vec<F>> = Vec::with_capacity(pre.num_lookups);
+
         for ell in 0..pre.num_lookups {
-            let base_id = ell * (pre.num_chunks + 1);
             let mut u_sum_eval = zero.clone();
+            let mut chunk_evals_for_ell = Vec::with_capacity(pre.num_chunks);
 
             for k_idx in 0..pre.num_chunks {
-                let u_eval: F = all_inv_w[ell][k_idx]
-                    .iter()
-                    .zip(eq_at_point.iter())
-                    .fold(zero.clone(), |acc, (u_j, eq_j)| {
-                        acc + &(u_j.clone() * eq_j)
-                    });
+                let u_k = &all_inv_w[ell][k_idx];
+
+                // ũ_k(x*) = Σ_j u_k[j] · eq(j, x*)
+                let u_eval = eval_at_point(u_k);
                 u_sum_eval += &u_eval;
 
-                let cu_eval: F = all_chunks[ell][k_idx]
-                    .iter()
-                    .zip(all_inv_w[ell][k_idx].iter())
-                    .zip(eq_at_point.iter())
-                    .fold(zero.clone(), |acc, ((c_j, u_j), eq_j)| {
-                        acc + &(c_j.clone() * u_j * eq_j)
-                    });
-
-                let id =
-                    pre.beta.clone() * &u_eval - &cu_eval - &one;
-                h_eval += &(id * &gamma_powers[base_id + k_idx]);
+                // c̃_k(x*) for the decomposition check.
+                // c_k[j] = β − 1/u_k[j], so
+                // c̃_k(x*) = β · eq_sum_W − Σ_{j<W} eq_j/u_k[j]
+                //
+                // Use batch_inverse (Montgomery's trick) instead of
+                // per-element divisions.
+                let inv_u_k = batch_inverse(u_k);
+                let inv_u_eval = eval_at_point(&inv_u_k);
+                let c_eval = pre.beta.clone() * &eq_sum_w - &inv_u_eval;
+                chunk_evals_for_ell.push(c_eval);
             }
 
+            all_chunk_evals.push(chunk_evals_for_ell);
+
+            // Balance identity: u_sum_eval − mv_eval
             let mv_eval: F = all_agg_mults[ell]
                 .iter()
                 .zip(v_eq.iter())
@@ -676,8 +744,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
                 });
 
             let balance = u_sum_eval - &mv_eval;
-            h_eval +=
-                &(balance * &gamma_powers[base_id + pre.num_chunks]);
+            h_eval += &(balance * &gamma_balance_powers[ell]);
         }
 
         let expected = h_eval * &eq_val;
@@ -689,6 +756,23 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
             });
         }
 
+        // ── Decomposition consistency check ─────────────────────────
+        //
+        // For each lookup ℓ, verify that the reconstructed chunk
+        // evaluations are consistent with the PCS-committed parent
+        // column: Σ_k shift_k · c̃_k^(ℓ)(x*) = parent_eval_ℓ(x*).
+        if !parent_column_evals.is_empty() {
+            for (ell, parent_eval) in parent_column_evals.iter().enumerate() {
+                let mut recomposed = zero.clone();
+                for (k_idx, shift_k) in pre.shifts.iter().enumerate() {
+                    recomposed += &(shift_k.clone() * &all_chunk_evals[ell][k_idx]);
+                }
+                if recomposed != *parent_eval {
+                    return Err(LookupError::DecompositionInconsistent);
+                }
+            }
+        }
+
         Ok(BatchedDecompLogupVerifierSubClaim {
             evaluation_point: subclaim_point.to_vec(),
             expected_evaluation: subclaim_expected_evaluation.clone(),
@@ -696,6 +780,10 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
     }
 
     /// Verifier for the batched Decomposition + LogUp protocol.
+    ///
+    /// Reconstructs chunk vectors from inverse witnesses.
+    /// Does NOT perform the decomposition consistency check against
+    /// PCS parent evaluations (use `finalize_verifier` for that).
     #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
     pub fn verify_as_subprotocol(
         transcript: &mut impl Transcript,
@@ -714,17 +802,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
         let mut buf = vec![0u8; F::Inner::NUM_BYTES];
 
         let num_chunks = shifts.len();
-        let all_chunks = &proof.chunk_vectors;
         let all_agg_mults = &proof.aggregated_multiplicities;
         let all_inv_w = &proof.chunk_inverse_witnesses;
         let v_table = &proof.inverse_table;
 
-        // ---- Mirror transcript operations ----
-        for lookup_chunks in all_chunks {
-            for chunk in lookup_chunks {
-                transcript.absorb_random_field_slice(chunk, &mut buf);
-            }
-        }
+        // ---- Mirror transcript operations (no chunk absorption) ----
         for agg in all_agg_mults {
             transcript.absorb_random_field_slice(agg, &mut buf);
         }
@@ -772,65 +854,63 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
             }
         }
 
-        // ---- Recompute H(x*) at the subclaim point ----
+        // ---- Recompute H(x*) using chunks reconstructed from inverses ----
         //
-        // The prover's sumcheck proves  Σ_x eq(x,r)·H(x) = claimed_sum
-        // where H[j] = Σ identities evaluated pointwise at j.
-        //
-        // Using MLE linearity we have:
-        //   H(x*) = Σ_{ℓ,k} γ^{…} · (β·ũ_k(x*) − (c̃_k·ũ_k)^~(x*) − 1)
-        //         + Σ_{ℓ}   γ^{…} · (Σ_k ũ_k(x*) − (m̃_agg·ṽ)^~(x*))
-        //
-        // where f̃(x*) = Σ_j f[j]·eq(j,x*) and (f·g)^~(x*) = Σ_j f[j]·g[j]·eq(j,x*)
-        // are evaluated via inner products with the precomputed eq vector.
-        let num_identities = num_lookups * (num_chunks + 1);
-        let mut gamma_powers = Vec::with_capacity(num_identities);
-        let mut gp = one.clone();
-        for _ in 0..num_identities {
-            gamma_powers.push(gp.clone());
-            gp *= &gamma;
+        // The inverse-correctness identities evaluate to 0 at actual
+        // witness positions and −1 at padding positions.
+        let n = eq_at_point.len();
+        let mut gamma_balance_powers = Vec::with_capacity(num_lookups);
+        let mut inv_corr_gamma_sum = zero.clone();
+        {
+            let mut gp = one.clone();
+            let mut s_k = one.clone();
+            for _ in 1..num_chunks {
+                gp *= &gamma;
+                s_k += &gp;
+            }
+            gp *= &gamma; // γ^K
+            let gamma_stride = gp.clone() * &gamma; // γ^(K+1)
+
+            let mut stride_power = one.clone();
+            for _ in 0..num_lookups {
+                gamma_balance_powers.push(stride_power.clone() * &gp);
+                inv_corr_gamma_sum += &(stride_power.clone() * &s_k);
+                stride_power *= &gamma_stride;
+            }
         }
 
-        // Precompute v_eq[j] = v[j] · eq(j, x*) once for the balance
-        // identity (shared across all lookups).
         let v_eq: Vec<F> = v_table
             .iter()
             .zip(eq_at_point.iter())
             .map(|(v_j, eq_j)| v_j.clone() * eq_j)
             .collect();
 
+        let eval_at_point = |data: &[F]| -> F {
+            data.iter()
+                .zip(eq_at_point.iter())
+                .fold(zero.clone(), |acc, (d, e)| acc + &(d.clone() * e))
+        };
+
         let mut h_eval = zero.clone();
 
+        // Padding correction for inverse-correctness identities.
+        if witness_len < n {
+            let eq_sum_w: F = eq_at_point[..witness_len]
+                .iter()
+                .fold(zero.clone(), |acc, e| acc + e);
+            let id_pad = eq_sum_w - &one;
+            h_eval += &(id_pad * &inv_corr_gamma_sum);
+        }
+
         for ell in 0..num_lookups {
-            let base_id = ell * (num_chunks + 1);
             let mut u_sum_eval = zero.clone();
 
             for k_idx in 0..num_chunks {
-                // ũ_k(x*) = Σ_j u_k[j] · eq(j, x*)
-                let u_eval: F = all_inv_w[ell][k_idx]
-                    .iter()
-                    .zip(eq_at_point.iter())
-                    .fold(zero.clone(), |acc, (u_j, eq_j)| {
-                        acc + &(u_j.clone() * eq_j)
-                    });
-
+                let u_k = &all_inv_w[ell][k_idx];
+                let u_eval = eval_at_point(u_k);
                 u_sum_eval += &u_eval;
-
-                // (c̃_k · ũ_k)^~(x*) = Σ_j c_k[j] · u_k[j] · eq(j, x*)
-                let cu_eval: F = all_chunks[ell][k_idx]
-                    .iter()
-                    .zip(all_inv_w[ell][k_idx].iter())
-                    .zip(eq_at_point.iter())
-                    .fold(zero.clone(), |acc, ((c_j, u_j), eq_j)| {
-                        acc + &(c_j.clone() * u_j * eq_j)
-                    });
-
-                // identity: β · ũ_k(x*) − (c_k · u_k)^~(x*) − 1
-                let id = beta.clone() * &u_eval - &cu_eval - &one;
-                h_eval += &(id * &gamma_powers[base_id + k_idx]);
             }
 
-            // (m̃_agg · ṽ)^~(x*) = Σ_j m_agg[j] · v_eq[j]
             let mv_eval: F = all_agg_mults[ell]
                 .iter()
                 .zip(v_eq.iter())
@@ -839,7 +919,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
                 });
 
             let balance = u_sum_eval - &mv_eval;
-            h_eval += &(balance * &gamma_powers[base_id + num_chunks]);
+            h_eval += &(balance * &gamma_balance_powers[ell]);
         }
 
         let expected = h_eval * &eq_val;

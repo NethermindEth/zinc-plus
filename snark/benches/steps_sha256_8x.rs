@@ -9,6 +9,8 @@ use std::hint::black_box;
 use std::marker::PhantomData;
 use std::time::{Duration, Instant};
 
+use zinc_utils::peak_mem::MemoryTracker;
+
 use criterion::{criterion_group, criterion_main, Criterion};
 use crypto_bigint::U64;
 use crypto_primitives::{
@@ -92,7 +94,7 @@ type IprsBPoly32R4B64<const DEPTH: usize, const CHECK: bool> = IprsCode<
 // ─── Parameters ─────────────────────────────────────────────────────────────
 
 const SHA256_8X_NUM_VARS: usize = 9;      // 2^9 = 512 rows (8 × 64 SHA rounds)
-const SHA256_BATCH_SIZE: usize = 17;       // 17 SHA-256 columns
+const SHA256_BATCH_SIZE: usize = 26;       // 26 SHA-256 columns
 const SHA256_LOOKUP_COL_COUNT: usize = 10; // 10 Q[X] columns need lookup
 
 fn sha256_lookup_specs() -> Vec<LookupColumnSpec> {
@@ -115,7 +117,7 @@ fn generate_sha256_trace(num_vars: usize) -> Vec<DenseMultilinearExtension<Binar
 /// 8×SHA-256 compressions (**no** ECDSA).
 ///
 /// Steps benchmarked:
-///   1. WitnessGen — generate the 17-column BinaryPoly trace (512 rows)
+///   1. WitnessGen — generate the 26-column BinaryPoly trace (512 rows)
 ///   2. PCS/Commit — Zip+ commit (Merkle tree construction)
 ///   3. PIOP/IdealCheck — Ideal Check prover
 ///   4. PIOP/CPR — Combined Poly Resolver prover
@@ -127,6 +129,8 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
     use zinc_sha256_uair::CyclotomicIdeal;
     use zinc_uair::ideal_collector::IdealOrZero;
     use zinc_piop::lookup::prove_batched_lookup_with_indices;
+
+    let mem_tracker = MemoryTracker::start();
 
     let mut group = c.benchmark_group("8xSHA256 Steps");
     group.sample_size(10);
@@ -325,14 +329,30 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
     }
 
     // ── 6. PCS Prove ────────────────────────────────────────────────
+    // Use the CPR evaluation point directly as the PCS evaluation point (r_PCS = r_CPR).
+    let sha_pcs_point: Vec<F> = {
+        let mut tr = transcript_for_cpr.clone();
+        let (_, cpr_state) =
+            zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::prove_as_subprotocol::<Sha256Uair>(
+                &mut tr,
+                field_trace_cpr.clone(),
+                &ic_state_cpr.evaluation_point,
+                &field_projected_scalars_cpr,
+                num_constraints,
+                SHA256_8X_NUM_VARS,
+                max_degree,
+                &field_cfg_cpr,
+            ).expect("CPR prover failed");
+        cpr_state.evaluation_point
+    };
+
     let (sha_hint, _sha_comm) = ZipPlus::<ShaZt, ShaLc>::commit(&sha_params, &sha_pcs_trace)
         .expect("commit");
 
     group.bench_function("PCS/Prove", |b| {
         b.iter(|| {
-            let pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
             let r = ZipPlus::<ShaZt, ShaLc>::prove::<F, UNCHECKED>(
-                &sha_params, &sha_pcs_trace, &pt, &sha_hint,
+                &sha_params, &sha_pcs_trace, &sha_pcs_point, &sha_hint,
             );
             let _ = black_box(r);
         });
@@ -358,10 +378,9 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
         &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
     );
 
-    let sha_public_cols = vec![
-        sha_trace[zinc_sha256_uair::COL_W_HAT].clone(),
-        sha_trace[zinc_sha256_uair::COL_K_HAT].clone(),
-    ];
+    let sha_sig_pub = Sha256Uair::signature();
+    let sha_public_cols: Vec<_> = sha_sig_pub.public_columns.iter()
+        .map(|&i| sha_trace[i].clone()).collect();
 
     group.bench_function("E2E/Verifier", |b| {
         b.iter(|| {
@@ -384,6 +403,9 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
         sha_proof.timing.pcs_prove,
         sha_proof.timing.total,
     );
+
+    let mem_snapshot = mem_tracker.stop();
+    eprintln!("  {mem_snapshot}");
 
     group.finish();
 }

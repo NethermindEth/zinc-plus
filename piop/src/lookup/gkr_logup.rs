@@ -35,6 +35,7 @@ use zinc_utils::{cfg_into_iter, inner_transparent_field::InnerTransparentField};
 use crate::sumcheck::MLSumcheck;
 
 use super::structs::{
+    BatchedGkrFractionProof, BatchedGkrLayerProof,
     GkrFractionProof, GkrLayerProof, LookupError,
 };
 
@@ -122,7 +123,7 @@ where
 
 /// Evaluate a k-variable MLE (given as evaluations over {0,1}^k in
 /// little-endian order) at a point in F^k.
-#[allow(clippy::arithmetic_side_effects, dead_code)]
+#[allow(clippy::arithmetic_side_effects)]
 pub(super) fn evaluate_mle_at<F: InnerTransparentField>(
     evals: &[F],
     point: &[F],
@@ -157,16 +158,18 @@ pub(super) fn evaluate_mle_at<F: InnerTransparentField>(
 /// Run the GKR prover for a single fractional sumcheck.
 ///
 /// Proves `Σ_{x ∈ {0,1}^d} p(x)/q(x) = root_p/root_q` and returns
-/// a `GkrFractionProof`.
+/// a `(GkrFractionProof, eval_point)` pair.  The evaluation point is
+/// tracked during the prove so callers don't need to re-derive it.
 #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
 pub(super) fn gkr_fraction_prove<F>(
     transcript: &mut impl Transcript,
     layers: &[FractionLayer<F>], // [leaves, ..., root]
     field_cfg: &F::Config,
-) -> GkrFractionProof<F>
+) -> (GkrFractionProof<F>, Vec<F>)
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Config: Sync,
 {
     let d = layers.len() - 1; // number of GKR levels
     let root = layers.last().expect("tree is non-empty");
@@ -179,11 +182,11 @@ where
     transcript.absorb_random_field(&root_q, &mut buf);
 
     if d == 0 {
-        return GkrFractionProof {
+        return (GkrFractionProof {
             root_p,
             root_q,
             layer_proofs: vec![],
-        };
+        }, vec![]);
     }
 
     let mut layer_proofs = Vec::with_capacity(d);
@@ -263,6 +266,11 @@ where
 
             let mles = vec![eq_r, pl_mle, ql_mle, pr_mle, qr_mle];
 
+            // Optimized combination function: rewrite
+            //   eq * (pl*qr + pr*ql + α*ql*qr)
+            // as
+            //   eq * ((pl + α*ql)*qr + pr*ql)
+            // saving one multiplication per evaluation point.
             let alpha_clone = alpha.clone();
             let comb_fn = move |vals: &[F]| -> F {
                 let eq_val = &vals[0];
@@ -271,9 +279,8 @@ where
                 let pr_val = &vals[3];
                 let qr_val = &vals[4];
 
-                let cross = pl_val.clone() * qr_val + &(pr_val.clone() * ql_val);
-                let prod = ql_val.clone() * qr_val;
-                let inner = cross + &(alpha_clone.clone() * &prod);
+                let pl_plus_alpha_ql = pl_val.clone() + &(alpha_clone.clone() * ql_val);
+                let inner = pl_plus_alpha_ql * qr_val + &(pr_val.clone() * ql_val);
                 eq_val.clone() * &inner
             };
 
@@ -288,16 +295,11 @@ where
 
             let s = &sumcheck_prover_state.randomness;
 
-            // Read final MLE evaluations from the sumcheck prover state
-            // instead of re-computing via evaluate_mle_at (saves O(2^k)
-            // per call × 4 calls per round).
-            //
+            // Read final MLE evaluations from the sumcheck prover state.
             // After k rounds, fix_variables was applied k−1 times (the
             // last challenge is pushed to randomness but not applied),
-            // leaving each MLE with 2 entries. Interpolate with the last
-            // challenge to get the fully-evaluated scalar.
-            //
-            // MLE layout: [eq, pl, ql, pr, qr].
+            // leaving each MLE with 2 entries.  Interpolate with the
+            // last challenge to get the fully-evaluated scalar.
             let last_r = s.last().expect("sumcheck should have at least one challenge");
             let one_minus_last = F::one_with_cfg(field_cfg) - last_r;
             let interp_mle = |mle: &DenseMultilinearExtension<F::Inner>| -> F {
@@ -334,11 +336,11 @@ where
         }
     }
 
-    GkrFractionProof {
+    (GkrFractionProof {
         root_p,
         root_q,
         layer_proofs,
-    }
+    }, r_k)
 }
 
 /// Result of verifying a GKR fractional sumcheck.
@@ -485,6 +487,458 @@ where
     })
 }
 
+// ---------------------------------------------------------------------------
+// Batched GKR fractional sumcheck (L trees, layer-wise batching)
+// ---------------------------------------------------------------------------
+
+/// Result of the batched GKR fractional sumcheck prover.
+pub(super) struct BatchedGkrFractionProveResult<F: PrimeField> {
+    /// The proof containing per-tree roots and batched layer proofs.
+    pub(super) proof: BatchedGkrFractionProof<F>,
+    /// The shared evaluation point at the leaf layer: `r ∈ F^d`.
+    pub(super) eval_point: Vec<F>,
+}
+
+/// Run the batched GKR prover for L fraction trees simultaneously.
+///
+/// All L trees must have the same depth `d`. The prover processes one
+/// GKR layer at a time, batching the L per-tree sumchecks into a single
+/// sumcheck with `1 + 4L` MLEs at degree 3.
+///
+/// Returns `(BatchedGkrFractionProof, eval_point)`.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+pub(super) fn batched_gkr_fraction_prove<F>(
+    transcript: &mut impl Transcript,
+    all_layers: &[Vec<FractionLayer<F>>], // L trees, each [leaves, ..., root]
+    field_cfg: &F::Config,
+) -> BatchedGkrFractionProveResult<F>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Config: Sync,
+{
+    let num_trees = all_layers.len(); // L
+    let d = all_layers[0].len() - 1; // number of GKR levels
+
+    // Collect per-tree roots.
+    let roots_p: Vec<F> = all_layers
+        .iter()
+        .map(|layers| layers.last().expect("tree non-empty").p[0].clone())
+        .collect();
+    let roots_q: Vec<F> = all_layers
+        .iter()
+        .map(|layers| layers.last().expect("tree non-empty").q[0].clone())
+        .collect();
+
+    // Absorb all roots into transcript.
+    let mut buf = vec![0u8; F::Inner::NUM_BYTES];
+    for ell in 0..num_trees {
+        transcript.absorb_random_field(&roots_p[ell], &mut buf);
+        transcript.absorb_random_field(&roots_q[ell], &mut buf);
+    }
+
+    if d == 0 {
+        return BatchedGkrFractionProveResult {
+            proof: BatchedGkrFractionProof {
+                roots_p,
+                roots_q,
+                layer_proofs: vec![],
+            },
+            eval_point: vec![],
+        };
+    }
+
+    let mut layer_proofs = Vec::with_capacity(d);
+    let inner_zero = F::zero_with_cfg(field_cfg).inner().clone();
+
+    // Per-tree running values.
+    let mut v_ps: Vec<F> = roots_p.clone();
+    let mut v_qs: Vec<F> = roots_q.clone();
+    let mut r_k: Vec<F> = Vec::new();
+
+    for round in 0..d {
+        let k = round;
+        let half = 1usize << k;
+
+        // Collect per-tree child arrays for this layer.
+        let child_layer_idx = d - (round + 1);
+        let per_tree: Vec<(&[F], &[F], &[F], &[F])> = all_layers
+            .iter()
+            .map(|layers| {
+                let cl = &layers[child_layer_idx];
+                (
+                    &cl.p[..half],
+                    &cl.p[half..],
+                    &cl.q[..half],
+                    &cl.q[half..],
+                )
+            })
+            .collect();
+
+        // Get batching challenges: α_layer (cross-product) and δ (tree batching).
+        let alpha: F = transcript.get_field_challenge(field_cfg);
+        let delta: F = transcript.get_field_challenge(field_cfg);
+
+        // Precompute δ powers: δ^0, δ^1, ..., δ^{L-1}
+        let one = F::one_with_cfg(field_cfg);
+        let mut delta_powers = Vec::with_capacity(num_trees);
+        let mut dp = one.clone();
+        for _ in 0..num_trees {
+            delta_powers.push(dp.clone());
+            dp *= &delta;
+        }
+
+        if k == 0 {
+            // Round 0: zero sumcheck variables — direct algebraic check per tree.
+            let mut p_lefts = Vec::with_capacity(num_trees);
+            let mut p_rights = Vec::with_capacity(num_trees);
+            let mut q_lefts = Vec::with_capacity(num_trees);
+            let mut q_rights = Vec::with_capacity(num_trees);
+
+            for ell in 0..num_trees {
+                let (pl_vals, pr_vals, ql_vals, qr_vals) = per_tree[ell];
+                let pl = pl_vals[0].clone();
+                let pr = pr_vals[0].clone();
+                let ql = ql_vals[0].clone();
+                let qr = qr_vals[0].clone();
+
+                transcript.absorb_random_field(&pl, &mut buf);
+                transcript.absorb_random_field(&pr, &mut buf);
+                transcript.absorb_random_field(&ql, &mut buf);
+                transcript.absorb_random_field(&qr, &mut buf);
+
+                debug_assert!({
+                    let lhs = v_ps[ell].clone() + &(alpha.clone() * &v_qs[ell]);
+                    let cross = pl.clone() * &qr + &(pr.clone() * &ql);
+                    let prod = ql.clone() * &qr;
+                    let rhs = cross + &(alpha.clone() * &prod);
+                    lhs == rhs
+                });
+
+                p_lefts.push(pl);
+                p_rights.push(pr);
+                q_lefts.push(ql);
+                q_rights.push(qr);
+            }
+
+            layer_proofs.push(BatchedGkrLayerProof {
+                sumcheck_proof: None,
+                p_lefts: p_lefts.clone(),
+                p_rights: p_rights.clone(),
+                q_lefts: q_lefts.clone(),
+                q_rights: q_rights.clone(),
+            });
+
+            let lambda: F = transcript.get_field_challenge(field_cfg);
+            let one_minus_lambda = one.clone() - &lambda;
+            for ell in 0..num_trees {
+                v_ps[ell] = one_minus_lambda.clone() * &p_lefts[ell]
+                    + &(lambda.clone() * &p_rights[ell]);
+                v_qs[ell] = one_minus_lambda.clone() * &q_lefts[ell]
+                    + &(lambda.clone() * &q_rights[ell]);
+            }
+            r_k = vec![lambda];
+        } else {
+            // Round k ≥ 1: batched sumcheck over k variables.
+            // The combined claim = Σ_ℓ δ^ℓ · (v_p[ℓ] + α · v_q[ℓ])
+            //
+            // The combination function for the batched sumcheck with 1 + 4L MLEs:
+            //   f(eq, pl_0, ql_0, pr_0, qr_0, ..., pl_{L-1}, ql_{L-1}, pr_{L-1}, qr_{L-1})
+            //     = eq · Σ_ℓ δ^ℓ · ((pl_ℓ + α·ql_ℓ)·qr_ℓ + pr_ℓ·ql_ℓ)
+
+            let eq_r = build_eq_x_r_inner(&r_k, field_cfg)
+                .expect("eq polynomial construction should succeed");
+
+            let mk_mle = |data: &[F]| -> DenseMultilinearExtension<F::Inner> {
+                DenseMultilinearExtension::from_evaluations_vec(
+                    k,
+                    data.iter().map(|x| x.inner().clone()).collect(),
+                    inner_zero.clone(),
+                )
+            };
+
+            // Build MLEs: [eq, pl_0, ql_0, pr_0, qr_0, ..., pl_{L-1}, ql_{L-1}, pr_{L-1}, qr_{L-1}]
+            let mut mles = Vec::with_capacity(1 + 4 * num_trees);
+            mles.push(eq_r);
+            for ell in 0..num_trees {
+                let (pl_vals, pr_vals, ql_vals, qr_vals) = per_tree[ell];
+                mles.push(mk_mle(pl_vals));
+                mles.push(mk_mle(ql_vals));
+                mles.push(mk_mle(pr_vals));
+                mles.push(mk_mle(qr_vals));
+            }
+
+            let alpha_clone = alpha.clone();
+            let delta_powers_clone = delta_powers.clone();
+            let nt = num_trees;
+            let comb_fn = move |vals: &[F]| -> F {
+                let eq_val = &vals[0];
+                let mut acc = vals[0].clone() - eq_val; // zero, preserves type
+                for ell in 0..nt {
+                    let base = 1 + 4 * ell;
+                    let pl_val = &vals[base];
+                    let ql_val = &vals[base + 1];
+                    let pr_val = &vals[base + 2];
+                    let qr_val = &vals[base + 3];
+                    let pl_plus_alpha_ql =
+                        pl_val.clone() + &(alpha_clone.clone() * ql_val);
+                    let inner = pl_plus_alpha_ql * qr_val + &(pr_val.clone() * ql_val);
+                    acc += &(delta_powers_clone[ell].clone() * &inner);
+                }
+                eq_val.clone() * &acc
+            };
+
+            let (sumcheck_proof, sumcheck_prover_state) =
+                MLSumcheck::prove_as_subprotocol(
+                    transcript,
+                    mles,
+                    k,
+                    3,
+                    comb_fn,
+                    field_cfg,
+                );
+
+            let s = &sumcheck_prover_state.randomness;
+            let last_r = s.last().expect("sumcheck should have ≥1 challenge");
+            let one_minus_last = F::one_with_cfg(field_cfg) - last_r;
+
+            let interp_mle =
+                |mle: &DenseMultilinearExtension<F::Inner>| -> F {
+                    debug_assert_eq!(mle.num_vars, 1);
+                    let v0 = F::new_unchecked_with_cfg(mle[0].clone(), field_cfg);
+                    let v1 = F::new_unchecked_with_cfg(mle[1].clone(), field_cfg);
+                    one_minus_last.clone() * &v0 + &(last_r.clone() * &v1)
+                };
+
+            let mut p_lefts = Vec::with_capacity(num_trees);
+            let mut p_rights = Vec::with_capacity(num_trees);
+            let mut q_lefts = Vec::with_capacity(num_trees);
+            let mut q_rights = Vec::with_capacity(num_trees);
+
+            for ell in 0..num_trees {
+                let base = 1 + 4 * ell;
+                let pl = interp_mle(&sumcheck_prover_state.mles[base]);
+                let ql = interp_mle(&sumcheck_prover_state.mles[base + 1]);
+                let pr = interp_mle(&sumcheck_prover_state.mles[base + 2]);
+                let qr = interp_mle(&sumcheck_prover_state.mles[base + 3]);
+
+                transcript.absorb_random_field(&pl, &mut buf);
+                transcript.absorb_random_field(&pr, &mut buf);
+                transcript.absorb_random_field(&ql, &mut buf);
+                transcript.absorb_random_field(&qr, &mut buf);
+
+                p_lefts.push(pl);
+                p_rights.push(pr);
+                q_lefts.push(ql);
+                q_rights.push(qr);
+            }
+
+            layer_proofs.push(BatchedGkrLayerProof {
+                sumcheck_proof: Some(sumcheck_proof),
+                p_lefts: p_lefts.clone(),
+                p_rights: p_rights.clone(),
+                q_lefts: q_lefts.clone(),
+                q_rights: q_rights.clone(),
+            });
+
+            let lambda: F = transcript.get_field_challenge(field_cfg);
+            let one_minus_lambda = one.clone() - &lambda;
+            for ell in 0..num_trees {
+                v_ps[ell] = one_minus_lambda.clone() * &p_lefts[ell]
+                    + &(lambda.clone() * &p_rights[ell]);
+                v_qs[ell] = one_minus_lambda.clone() * &q_lefts[ell]
+                    + &(lambda.clone() * &q_rights[ell]);
+            }
+            r_k = s.clone();
+            r_k.push(lambda);
+        }
+    }
+
+    BatchedGkrFractionProveResult {
+        proof: BatchedGkrFractionProof {
+            roots_p,
+            roots_q,
+            layer_proofs,
+        },
+        eval_point: r_k,
+    }
+}
+
+/// Result of verifying a batched GKR fractional sumcheck.
+pub(super) struct BatchedGkrFractionVerifyResult<F> {
+    /// The shared evaluation point at the leaf layer.
+    pub(super) point: Vec<F>,
+    /// Per-tree expected numerator MLE evaluations: `expected_ps[ℓ]`.
+    pub(super) expected_ps: Vec<F>,
+    /// Per-tree expected denominator MLE evaluations: `expected_qs[ℓ]`.
+    pub(super) expected_qs: Vec<F>,
+}
+
+/// Run the batched GKR verifier for L fraction trees simultaneously.
+///
+/// Returns the shared leaf-layer point and per-tree expected (p, q) values.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+pub(super) fn batched_gkr_fraction_verify<F>(
+    transcript: &mut impl Transcript,
+    proof: &BatchedGkrFractionProof<F>,
+    num_vars: usize,
+    field_cfg: &F::Config,
+) -> Result<BatchedGkrFractionVerifyResult<F>, LookupError<F>>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Inner: ConstTranscribable + Zero,
+{
+    let d = num_vars;
+    let num_trees = proof.roots_p.len();
+    let one = F::one_with_cfg(field_cfg);
+
+    let mut buf = vec![0u8; F::Inner::NUM_BYTES];
+    for ell in 0..num_trees {
+        transcript.absorb_random_field(&proof.roots_p[ell], &mut buf);
+        transcript.absorb_random_field(&proof.roots_q[ell], &mut buf);
+    }
+
+    if d == 0 {
+        return Ok(BatchedGkrFractionVerifyResult {
+            point: vec![],
+            expected_ps: proof.roots_p.clone(),
+            expected_qs: proof.roots_q.clone(),
+        });
+    }
+
+    if proof.layer_proofs.len() != d {
+        return Err(LookupError::GkrLeafMismatch);
+    }
+
+    let mut v_ps: Vec<F> = proof.roots_p.clone();
+    let mut v_qs: Vec<F> = proof.roots_q.clone();
+    let mut r_k: Vec<F> = Vec::new();
+
+    for round in 0..d {
+        let k = round;
+        let layer_proof = &proof.layer_proofs[round];
+
+        let alpha: F = transcript.get_field_challenge(field_cfg);
+        let delta: F = transcript.get_field_challenge(field_cfg);
+
+        let mut delta_powers = Vec::with_capacity(num_trees);
+        let mut dp = one.clone();
+        for _ in 0..num_trees {
+            delta_powers.push(dp.clone());
+            dp *= &delta;
+        }
+
+        if k == 0 {
+            for ell in 0..num_trees {
+                let pl = &layer_proof.p_lefts[ell];
+                let pr = &layer_proof.p_rights[ell];
+                let ql = &layer_proof.q_lefts[ell];
+                let qr = &layer_proof.q_rights[ell];
+
+                transcript.absorb_random_field(pl, &mut buf);
+                transcript.absorb_random_field(pr, &mut buf);
+                transcript.absorb_random_field(ql, &mut buf);
+                transcript.absorb_random_field(qr, &mut buf);
+
+                let lhs = v_ps[ell].clone() + &(alpha.clone() * &v_qs[ell]);
+                let cross = pl.clone() * qr + &(pr.clone() * ql);
+                let prod = ql.clone() * qr;
+                let rhs = cross + &(alpha.clone() * &prod);
+
+                if lhs != rhs {
+                    return Err(LookupError::GkrLayer0Mismatch {
+                        expected: lhs,
+                        got: rhs,
+                    });
+                }
+            }
+
+            let lambda: F = transcript.get_field_challenge(field_cfg);
+            let one_minus_lambda = one.clone() - &lambda;
+            for ell in 0..num_trees {
+                v_ps[ell] = one_minus_lambda.clone() * &layer_proof.p_lefts[ell]
+                    + &(lambda.clone() * &layer_proof.p_rights[ell]);
+                v_qs[ell] = one_minus_lambda.clone() * &layer_proof.q_lefts[ell]
+                    + &(lambda.clone() * &layer_proof.q_rights[ell]);
+            }
+            r_k = vec![lambda];
+        } else {
+            let sumcheck_proof = layer_proof
+                .sumcheck_proof
+                .as_ref()
+                .ok_or(LookupError::GkrLeafMismatch)?;
+
+            // Batched claimed sum = Σ_ℓ δ^ℓ · (v_p[ℓ] + α · v_q[ℓ])
+            let mut claimed_sum = F::zero_with_cfg(field_cfg);
+            for ell in 0..num_trees {
+                let term = v_ps[ell].clone() + &(alpha.clone() * &v_qs[ell]);
+                claimed_sum += &(delta_powers[ell].clone() * &term);
+            }
+            if sumcheck_proof.claimed_sum != claimed_sum {
+                return Err(LookupError::FinalEvaluationMismatch {
+                    expected: claimed_sum,
+                    got: sumcheck_proof.claimed_sum.clone(),
+                });
+            }
+
+            let subclaim = MLSumcheck::verify_as_subprotocol(
+                transcript,
+                k,
+                3,
+                sumcheck_proof,
+                field_cfg,
+            )?;
+
+            let s = &subclaim.point;
+
+            // Absorb per-tree evaluations and check combined final eval.
+            let eq_val = zinc_poly::utils::eq_eval(s, &r_k, one.clone())?;
+            let mut combined_inner = F::zero_with_cfg(field_cfg);
+
+            for ell in 0..num_trees {
+                let pl = &layer_proof.p_lefts[ell];
+                let pr = &layer_proof.p_rights[ell];
+                let ql = &layer_proof.q_lefts[ell];
+                let qr = &layer_proof.q_rights[ell];
+
+                transcript.absorb_random_field(pl, &mut buf);
+                transcript.absorb_random_field(pr, &mut buf);
+                transcript.absorb_random_field(ql, &mut buf);
+                transcript.absorb_random_field(qr, &mut buf);
+
+                let pl_plus_alpha_ql = pl.clone() + &(alpha.clone() * ql);
+                let inner = pl_plus_alpha_ql * qr + &(pr.clone() * ql);
+                combined_inner += &(delta_powers[ell].clone() * &inner);
+            }
+
+            let expected = eq_val * &combined_inner;
+            if expected != subclaim.expected_evaluation {
+                return Err(LookupError::FinalEvaluationMismatch {
+                    expected: subclaim.expected_evaluation,
+                    got: expected,
+                });
+            }
+
+            let lambda: F = transcript.get_field_challenge(field_cfg);
+            let one_minus_lambda = one.clone() - &lambda;
+            for ell in 0..num_trees {
+                v_ps[ell] = one_minus_lambda.clone() * &layer_proof.p_lefts[ell]
+                    + &(lambda.clone() * &layer_proof.p_rights[ell]);
+                v_qs[ell] = one_minus_lambda.clone() * &layer_proof.q_lefts[ell]
+                    + &(lambda.clone() * &layer_proof.q_rights[ell]);
+            }
+            r_k = s.clone();
+            r_k.push(lambda);
+        }
+    }
+
+    Ok(BatchedGkrFractionVerifyResult {
+        point: r_k,
+        expected_ps: v_ps,
+        expected_qs: v_qs,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,13 +994,14 @@ mod tests {
         let tree = build_fraction_tree(p, q);
 
         let mut pt = KeccakTranscript::new();
-        let proof = gkr_fraction_prove(&mut pt, &tree, &());
+        let (proof, eval_point) = gkr_fraction_prove(&mut pt, &tree, &());
 
         let mut vt = KeccakTranscript::new();
         let result = gkr_fraction_verify(&mut vt, &proof, 1, &())
             .expect("verifier should accept");
 
         assert_eq!(result.point.len(), 1);
+        assert_eq!(eval_point.len(), 1);
     }
 
     #[test]
@@ -556,12 +1011,13 @@ mod tests {
         let tree = build_fraction_tree(p, q);
 
         let mut pt = KeccakTranscript::new();
-        let proof = gkr_fraction_prove(&mut pt, &tree, &());
+        let (proof, eval_point) = gkr_fraction_prove(&mut pt, &tree, &());
 
         let mut vt = KeccakTranscript::new();
         let result = gkr_fraction_verify(&mut vt, &proof, 3, &())
             .expect("verifier should accept");
 
         assert_eq!(result.point.len(), 3);
+        assert_eq!(eval_point.len(), 3);
     }
 }

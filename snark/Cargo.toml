@@ -25,6 +25,7 @@ zip-plus = { path = "../zip-plus" }
 itertools = { workspace = true }
 num-traits = { workspace = true }
 rand = { workspace = true }
+rayon = { workspace = true, optional = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
@@ -35,6 +36,7 @@ zinc-test-uair = { workspace = true }
 
 [features]
 parallel = [
+    "dep:rayon",
     "zinc-piop/parallel",
     "zinc-poly/parallel",
     "zinc-utils/parallel",

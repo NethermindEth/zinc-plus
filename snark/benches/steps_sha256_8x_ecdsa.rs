@@ -9,6 +9,8 @@ use std::hint::black_box;
 use std::marker::PhantomData;
 use std::time::{Duration, Instant};
 
+use zinc_utils::peak_mem::MemoryTracker;
+
 use criterion::{criterion_group, criterion_main, Criterion};
 use crypto_bigint::U64;
 use crypto_primitives::{
@@ -52,8 +54,18 @@ use zinc_piop::lookup::{
     BatchedDecompLogupProtocol, group_lookup_specs,
 };
 use zinc_piop::lookup::pipeline::build_lookup_instance_from_indices_pub;
-use zinc_piop::shift_sumcheck::{ShiftClaim, shift_sumcheck_prove};
-use zinc_piop::sumcheck::multi_degree::MultiDegreeSumcheck;
+use zinc_piop::shift_sumcheck::{
+    ShiftClaim, ShiftSumcheckProof, ShiftRoundPoly,
+    shift_sumcheck_prove, shift_sumcheck_verify,
+    shift_sumcheck_verify_pre, shift_sumcheck_verify_finalize,
+};
+use zinc_piop::sumcheck::multi_degree::{MultiDegreeSumcheck, MultiDegreeSumcheckProof};
+use zinc_piop::sumcheck::prover::{NatEvaluatedPolyWithoutConstant, ProverMsg};
+use zinc_piop::ideal_check::IdealCheckProtocol;
+use zinc_piop::combined_poly_resolver::CombinedPolyResolver;
+use zinc_piop::lookup::pipeline::generate_table_and_shifts;
+use zinc_utils::projectable_to_field::ProjectableToField;
+use zip_plus::pcs::ZipPlusProof;
 
 use zinc_uair::Uair;
 
@@ -126,7 +138,7 @@ type IprsInt4R4B64<const DEPTH: usize, const CHECK: bool> = IprsCode<
 // ─── Parameters ─────────────────────────────────────────────────────────────
 
 const SHA256_8X_NUM_VARS: usize = 9;
-const SHA256_BATCH_SIZE: usize = 17;
+const SHA256_BATCH_SIZE: usize = 26;
 const ECDSA_NUM_VARS: usize = 9;
 const ECDSA_BATCH_SIZE: usize = 9;
 const SHA256_LOOKUP_COL_COUNT: usize = 10;
@@ -160,13 +172,25 @@ fn generate_zero_scalar_trace(
         .collect()
 }
 
+/// Interpret a `BinaryPoly<32>` as a 32-bit unsigned integer (polynomial
+/// evaluated at X = 2, equivalently the little-endian bit interpretation).
+fn bp_to_u32(bp: &BinaryPoly<32>) -> u32 {
+    let mut val: u32 = 0;
+    for (i, coeff) in bp.iter().enumerate() {
+        if coeff.into_inner() {
+            val |= 1u32 << i;
+        }
+    }
+    val
+}
+
 // ─── Benchmark ──────────────────────────────────────────────────────────────
 
 /// Measures each main step of the E2E proving stack individually for
 /// 8×SHA-256 compressions **plus** ECDSA verification.
 ///
 /// Steps benchmarked (for each sub-protocol and combined):
-///   1.  SHA/WitnessGen        — SHA-256 trace (17 cols × 512 rows)
+///   1.  SHA/WitnessGen        — SHA-256 trace (26 cols × 512 rows)
 ///   2.  ECDSA/WitnessGen      — ECDSA trace (9 cols × 512 rows)
 ///   3.  SHA/PCS/Commit        — Zip+ commit for SHA batch
 ///   4.  ECDSA/PCS/Commit      — Zip+ commit for ECDSA batch
@@ -193,6 +217,8 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     use zinc_uair::ideal::ImpossibleIdeal;
     use zinc_uair::ideal_collector::IdealOrZero;
     use zinc_piop::lookup::prove_batched_lookup_with_indices;
+
+    let mem_tracker = MemoryTracker::start();
 
     let mut group = c.benchmark_group("8xSHA256+ECDSA Steps");
     group.sample_size(10);
@@ -226,15 +252,18 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     let sha_trace = generate_sha256_trace(SHA256_8X_NUM_VARS);
     let ecdsa_trace = generate_zero_scalar_trace(ECDSA_NUM_VARS, ECDSA_BATCH_SIZE);
 
-    // Build private (non-public) traces for PCS – public columns are
-    // not committed.
+    // Build PCS traces — exclude public columns AND shift source
+    // columns (whose evaluation claims are resolved by the shift
+    // sumcheck, not the PCS).
     let sha_sig = Sha256Uair::signature();
     let ec_sig_int = EcdsaUairInt::signature();
+    let sha_excluded = sha_sig.pcs_excluded_columns();
+    let ec_excluded = ec_sig_int.pcs_excluded_columns();
     let sha_pcs_trace: Vec<_> = sha_trace.iter().enumerate()
-        .filter(|(i, _)| !sha_sig.public_columns.contains(i))
+        .filter(|(i, _)| !sha_excluded.contains(i))
         .map(|(_, c)| c.clone()).collect();
     let ecdsa_pcs_trace: Vec<_> = ecdsa_trace.iter().enumerate()
-        .filter(|(i, _)| !ec_sig_int.public_columns.contains(i))
+        .filter(|(i, _)| !ec_excluded.contains(i))
         .map(|(_, c)| c.clone()).collect();
 
     // ── 3. SHA PCS Commit ───────────────────────────────────────────
@@ -916,12 +945,19 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     }
 
     // ── 17. SHA PCS Prove ────────────────────────────────────────────
+    // Derive the real PCS evaluation point from the CPR evaluation point.
+    let sha_pcs_point: Vec<i128> =
+        zinc_snark::pipeline::derive_pcs_point(&cpr_eval_point, SHA256_8X_NUM_VARS);
+    // ECDSA shares the same CPR eval point (multi-degree sumcheck) but
+    // may have a different num_vars.
+    let ecdsa_pcs_point: Vec<i128> =
+        zinc_snark::pipeline::derive_pcs_point(&cpr_eval_point, ECDSA_NUM_VARS);
+
     let (sha_hint, _) = ZipPlus::<ShaZt, ShaLc>::commit(&sha_params, &sha_pcs_trace).expect("commit");
     group.bench_function("SHA/PCS/Prove", |b| {
         b.iter(|| {
-            let pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
             black_box(
-                ZipPlus::<ShaZt, ShaLc>::prove::<F, UNCHECKED>(&sha_params, &sha_pcs_trace, &pt, &sha_hint)
+                ZipPlus::<ShaZt, ShaLc>::prove::<F, UNCHECKED>(&sha_params, &sha_pcs_trace, &sha_pcs_point, &sha_hint)
             )
         });
     });
@@ -930,9 +966,8 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     let (ec_hint, _) = ZipPlus::<EcZt, EcLc>::commit(&ec_params, &ecdsa_pcs_trace).expect("commit");
     group.bench_function("ECDSA/PCS/Prove", |b| {
         b.iter(|| {
-            let pt: Vec<i128> = vec![1i128; ECDSA_NUM_VARS];
             black_box(
-                ZipPlus::<EcZt, EcLc>::prove::<FScalar, UNCHECKED>(&ec_params, &ecdsa_pcs_trace, &pt, &ec_hint)
+                ZipPlus::<EcZt, EcLc>::prove::<FScalar, UNCHECKED>(&ec_params, &ecdsa_pcs_trace, &ecdsa_pcs_point, &ec_hint)
             )
         });
     });
@@ -985,6 +1020,14 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         &sha_lookup_specs,
     );
 
+    // Build public column data for the verifier.
+    let sha_public_column_data: Vec<_> = sha_sig.public_columns.iter()
+        .map(|&i| sha_trace[i].clone())
+        .collect();
+    let ecdsa_public_column_data: Vec<_> = ec_sig_int.public_columns.iter()
+        .map(|&i| ecdsa_trace[i].clone())
+        .collect();
+
     group.bench_function("E2E/Verifier", |b| {
         b.iter(|| {
             let r = zinc_snark::pipeline::verify_dual_circuit::<
@@ -1007,10 +1050,916 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                     IdealOrZero::Zero => EcdsaIdealOverF,
                     IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
                 },
+                &sha_public_column_data,
+                &ecdsa_public_column_data,
             );
             let _ = black_box(r);
+
+            // Feed-forward: compute SHA-256 digest from trace.
+            let digest = black_box(feed_forward(&sha_trace, 0));
+
+            // Hash→ECDSA connection: reconstruct u₁ from b₁ bits.
+            let u1 = black_box(reconstruct_u1(&ecdsa_trace));
         });
     });
+
+    // ══════════════════════════════════════════════════════════════════
+    // ── Verifier Step-by-Step Breakdown ──────────────────────────────
+    // ══════════════════════════════════════════════════════════════════
+    //
+    // Replays the verify_dual_circuit logic piece by piece so that each
+    // verifier sub-cost can be measured independently via Criterion.
+    //
+    // Each benchmark function replays the Fiat-Shamir transcript from
+    // scratch to the relevant stage, then times only the target step.
+    // This matches what the real verifier does (all sequential, all
+    // deterministic).
+
+    {
+        use zinc_snark::pipeline::{
+            FIELD_LIMBS, PiopField,
+            field_from_bytes, reconstruct_up_evals, TrivialIdeal,
+        };
+        use zinc_uair::ideal::ImpossibleIdeal;
+        use zinc_poly::mle::MultilinearExtensionWithConfig;
+
+        let field_elem_size =
+            <Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+
+        // Shorthand: deserialize a vector of IC proof values.
+        let deser_ic = |proof_values: &[Vec<u8>], fcfg: &<PiopField as PrimeField>::Config| -> Vec<DynamicPolynomialF<PiopField>> {
+            proof_values.iter().map(|bytes| {
+                let n = bytes.len() / field_elem_size;
+                DynamicPolynomialF::new(
+                    (0..n).map(|i| field_from_bytes(
+                        &bytes[i * field_elem_size..(i + 1) * field_elem_size], fcfg,
+                    )).collect::<Vec<_>>()
+                )
+            }).collect()
+        };
+
+        // Shorthand: deserialize multi-degree sumcheck proof.
+        let deser_md = |fcfg: &<PiopField as PrimeField>::Config| -> MultiDegreeSumcheckProof<PiopField> {
+            let md_msgs: Vec<Vec<ProverMsg<PiopField>>> = dual_proof
+                .md_group_messages.iter().map(|grp| {
+                    grp.iter().map(|bytes| {
+                        let n = bytes.len() / field_elem_size;
+                        ProverMsg(NatEvaluatedPolyWithoutConstant::new(
+                            (0..n).map(|i| field_from_bytes(
+                                &bytes[i * field_elem_size..(i + 1) * field_elem_size], fcfg,
+                            )).collect()
+                        ))
+                    }).collect()
+                }).collect();
+            let md_sums: Vec<PiopField> = dual_proof
+                .md_claimed_sums.iter().map(|b| field_from_bytes(b, fcfg)).collect();
+            MultiDegreeSumcheckProof {
+                group_messages: md_msgs,
+                claimed_sums: md_sums,
+                degrees: dual_proof.md_degrees.clone(),
+            }
+        };
+
+        // ── V1. Verifier / Field Setup ──────────────────────────────
+        //
+        // Transcript init + random field config + IC evaluation point.
+        group.bench_function("V/FieldSetup", |b| {
+            b.iter(|| {
+                let mut transcript = zinc_transcript::KeccakTranscript::new();
+                let field_cfg = transcript.get_random_field_cfg::<
+                    PiopField, <PiopField as Field>::Inner, MillerRabin
+                >();
+                let ic_pt: Vec<PiopField> =
+                    transcript.get_field_challenges(num_vars, &field_cfg);
+                black_box((&field_cfg, ic_pt));
+            });
+        });
+
+        // ── V2. Verifier / Ideal Check ──────────────────────────────
+        //
+        // Deserialize IC proof values + verify both IC₁ (SHA) and IC₂
+        // (ECDSA). Transcript setup overhead is excluded by using
+        // iter_custom with manual timing.
+        group.bench_function("V/IC", |b| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let mut tr = zinc_transcript::KeccakTranscript::new();
+                    let fcfg = tr.get_random_field_cfg::<
+                        PiopField, <PiopField as Field>::Inner, MillerRabin
+                    >();
+                    let ic_pt: Vec<PiopField> = tr.get_field_challenges(num_vars, &fcfg);
+
+                    let t = Instant::now();
+
+                    // IC₁ verify.
+                    let c1_proof = zinc_piop::ideal_check::Proof::<PiopField> {
+                        combined_mle_values: deser_ic(&dual_proof.ic1_proof_values, &fcfg),
+                    };
+                    let _ = IdealCheckProtocol::<PiopField>::verify_at_point::<Sha256Uair, _, _>(
+                        &mut tr, c1_proof, sha_num_constraints, ic_pt.clone(),
+                        &|_: &IdealOrZero<CyclotomicIdeal>| TrivialIdeal,
+                        &fcfg,
+                    ).expect("C1 IC verify");
+
+                    // IC₂ verify.
+                    let c2_proof = zinc_piop::ideal_check::Proof::<PiopField> {
+                        combined_mle_values: deser_ic(&dual_proof.ic2_proof_values, &fcfg),
+                    };
+                    let _ = IdealCheckProtocol::<PiopField>::verify_at_point::<EcdsaUairInt, _, _>(
+                        &mut tr, c2_proof, ecdsa_num_constraints, ic_pt,
+                        &|ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
+                            IdealOrZero::Zero => EcdsaIdealOverF,
+                            IdealOrZero::Ideal(_) => panic!("no non-zero ideal"),
+                        },
+                        &fcfg,
+                    ).expect("C2 IC verify");
+
+                    total += t.elapsed();
+                }
+                total
+            });
+        });
+
+        // ── V3. Verifier / CPR + Lookup Pre-Sumcheck ────────────────
+        //
+        // Projecting element + CPR₁ pre + lookup pre + CPR₂ pre.
+        group.bench_function("V/CPR+LookupPre", |b| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    // Replay transcript state to end of IC.
+                    let mut tr = zinc_transcript::KeccakTranscript::new();
+                    let fcfg = tr.get_random_field_cfg::<
+                        PiopField, <PiopField as Field>::Inner, MillerRabin
+                    >();
+                    let ic_pt: Vec<PiopField> = tr.get_field_challenges(num_vars, &fcfg);
+                    let c1_proof = zinc_piop::ideal_check::Proof::<PiopField> {
+                        combined_mle_values: deser_ic(&dual_proof.ic1_proof_values, &fcfg),
+                    };
+                    let c1_sub = IdealCheckProtocol::<PiopField>::verify_at_point::<Sha256Uair, _, _>(
+                        &mut tr, c1_proof, sha_num_constraints, ic_pt.clone(),
+                        &|_: &IdealOrZero<CyclotomicIdeal>| TrivialIdeal, &fcfg,
+                    ).expect("C1 IC");
+                    let c2_proof = zinc_piop::ideal_check::Proof::<PiopField> {
+                        combined_mle_values: deser_ic(&dual_proof.ic2_proof_values, &fcfg),
+                    };
+                    let c2_sub = IdealCheckProtocol::<PiopField>::verify_at_point::<EcdsaUairInt, _, _>(
+                        &mut tr, c2_proof, ecdsa_num_constraints, ic_pt,
+                        &|ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
+                            IdealOrZero::Zero => EcdsaIdealOverF,
+                            IdealOrZero::Ideal(_) => panic!("no non-zero ideal"),
+                        }, &fcfg,
+                    ).expect("C2 IC");
+
+                    // ── Timed section ──
+                    let t = Instant::now();
+
+                    let proj_elem: PiopField = tr.get_field_challenge(&fcfg);
+
+                    // CPR₁ pre-sumcheck.
+                    let c1_psc = project_scalars::<PiopField, Sha256Uair>(|scalar| {
+                        let one = PiopField::one_with_cfg(&fcfg);
+                        let zero = PiopField::zero_with_cfg(&fcfg);
+                        DynamicPolynomialF::new(
+                            scalar.iter().map(|c| if c.into_inner() { one.clone() } else { zero.clone() }).collect::<Vec<_>>()
+                        )
+                    });
+                    let c1_fps = project_scalars_to_field(c1_psc, &proj_elem).unwrap();
+
+                    let _ = CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<Sha256Uair>(
+                        &mut tr,
+                        &field_from_bytes(&dual_proof.md_claimed_sums[0], &fcfg),
+                        sha_num_constraints, &proj_elem, &c1_fps, &c1_sub, &fcfg,
+                    ).expect("C1 CPR pre");
+
+                    // Lookup pre-sumcheck.
+                    for (gp, meta) in dual_proof.lookup_group_proofs.iter()
+                        .zip(dual_proof.lookup_group_meta.iter())
+                    {
+                        let (subtable, shifts) = generate_table_and_shifts(
+                            &meta.table_type, &proj_elem, &fcfg,
+                        );
+                        let _ = BatchedDecompLogupProtocol::<PiopField>::build_verifier_pre_sumcheck(
+                            &mut tr, gp, &subtable, &shifts,
+                            meta.num_columns, meta.witness_len, &fcfg,
+                        ).expect("lookup pre");
+                    }
+
+                    // CPR₂ pre-sumcheck.
+                    let c2_psc = project_scalars::<PiopField, EcdsaUairInt>(|scalar| {
+                        DynamicPolynomialF { coeffs: vec![PiopField::from_with_cfg(scalar.clone(), &fcfg)] }
+                    });
+                    let c2_fps = project_scalars_to_field(c2_psc, &proj_elem).unwrap();
+
+                    let _ = CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<EcdsaUairInt>(
+                        &mut tr,
+                        &field_from_bytes(&dual_proof.md_claimed_sums[1], &fcfg),
+                        ecdsa_num_constraints, &proj_elem, &c2_fps, &c2_sub, &fcfg,
+                    ).expect("C2 CPR pre");
+
+                    total += t.elapsed();
+                }
+                total
+            });
+        });
+
+        // ── V4. Verifier / Multi-Degree Sumcheck ────────────────────
+        //
+        // Deserialize + verify the batched sumcheck proof.
+        group.bench_function("V/MDSumcheck", |b| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    // Replay to end of pre-sumcheck stage.
+                    let mut tr = zinc_transcript::KeccakTranscript::new();
+                    let fcfg = tr.get_random_field_cfg::<
+                        PiopField, <PiopField as Field>::Inner, MillerRabin
+                    >();
+                    let ic_pt: Vec<PiopField> = tr.get_field_challenges(num_vars, &fcfg);
+                    let c1_sub = IdealCheckProtocol::<PiopField>::verify_at_point::<Sha256Uair, _, _>(
+                        &mut tr,
+                        zinc_piop::ideal_check::Proof { combined_mle_values: deser_ic(&dual_proof.ic1_proof_values, &fcfg) },
+                        sha_num_constraints, ic_pt.clone(),
+                        &|_: &IdealOrZero<CyclotomicIdeal>| TrivialIdeal, &fcfg,
+                    ).unwrap();
+                    let c2_sub = IdealCheckProtocol::<PiopField>::verify_at_point::<EcdsaUairInt, _, _>(
+                        &mut tr,
+                        zinc_piop::ideal_check::Proof { combined_mle_values: deser_ic(&dual_proof.ic2_proof_values, &fcfg) },
+                        ecdsa_num_constraints, ic_pt,
+                        &|ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
+                            IdealOrZero::Zero => EcdsaIdealOverF, IdealOrZero::Ideal(_) => panic!("no non-zero ideal"),
+                        }, &fcfg,
+                    ).unwrap();
+                    let proj_elem: PiopField = tr.get_field_challenge(&fcfg);
+                    let c1_psc = project_scalars::<PiopField, Sha256Uair>(|s| {
+                        let one = PiopField::one_with_cfg(&fcfg); let zero = PiopField::zero_with_cfg(&fcfg);
+                        DynamicPolynomialF::new(s.iter().map(|c| if c.into_inner() { one.clone() } else { zero.clone() }).collect::<Vec<_>>())
+                    });
+                    let c1_fps = project_scalars_to_field(c1_psc, &proj_elem).unwrap();
+                    let _ = CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<Sha256Uair>(
+                        &mut tr, &field_from_bytes(&dual_proof.md_claimed_sums[0], &fcfg),
+                        sha_num_constraints, &proj_elem, &c1_fps, &c1_sub, &fcfg,
+                    ).unwrap();
+                    let mut lk_pres = Vec::new();
+                    for (gp, meta) in dual_proof.lookup_group_proofs.iter().zip(dual_proof.lookup_group_meta.iter()) {
+                        let (subtable, shifts) = generate_table_and_shifts(&meta.table_type, &proj_elem, &fcfg);
+                        lk_pres.push(BatchedDecompLogupProtocol::<PiopField>::build_verifier_pre_sumcheck(
+                            &mut tr, gp, &subtable, &shifts, meta.num_columns, meta.witness_len, &fcfg,
+                        ).unwrap());
+                    }
+                    let c2_psc = project_scalars::<PiopField, EcdsaUairInt>(|s| {
+                        DynamicPolynomialF { coeffs: vec![PiopField::from_with_cfg(s.clone(), &fcfg)] }
+                    });
+                    let c2_fps = project_scalars_to_field(c2_psc, &proj_elem).unwrap();
+                    let _ = CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<EcdsaUairInt>(
+                        &mut tr, &field_from_bytes(&dual_proof.md_claimed_sums[1], &fcfg),
+                        ecdsa_num_constraints, &proj_elem, &c2_fps, &c2_sub, &fcfg,
+                    ).unwrap();
+
+                    let shared_nv = lk_pres.iter().map(|p| p.num_vars).max()
+                        .map_or(num_vars, |m| m.max(num_vars));
+
+                    // ── Timed section ──
+                    let md_proof = deser_md(&fcfg);
+                    let t = Instant::now();
+                    let _ = MultiDegreeSumcheck::<PiopField>::verify_as_subprotocol(
+                        &mut tr, shared_nv, &md_proof, &fcfg,
+                    ).expect("MD sumcheck verify");
+                    total += t.elapsed();
+                }
+                total
+            });
+        });
+
+        // ── V5. Verifier / CPR Finalize ─────────────────────────────
+        //
+        // Finalize CPR for both circuits (includes public column MLE eval).
+        group.bench_function("V/CPRFinalize", |b| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    // Replay through MD sumcheck.
+                    let mut tr = zinc_transcript::KeccakTranscript::new();
+                    let fcfg = tr.get_random_field_cfg::<
+                        PiopField, <PiopField as Field>::Inner, MillerRabin
+                    >();
+                    let ic_pt: Vec<PiopField> = tr.get_field_challenges(num_vars, &fcfg);
+                    let c1_sub = IdealCheckProtocol::<PiopField>::verify_at_point::<Sha256Uair, _, _>(
+                        &mut tr,
+                        zinc_piop::ideal_check::Proof { combined_mle_values: deser_ic(&dual_proof.ic1_proof_values, &fcfg) },
+                        sha_num_constraints, ic_pt.clone(),
+                        &|_: &IdealOrZero<CyclotomicIdeal>| TrivialIdeal, &fcfg,
+                    ).unwrap();
+                    let c2_sub = IdealCheckProtocol::<PiopField>::verify_at_point::<EcdsaUairInt, _, _>(
+                        &mut tr,
+                        zinc_piop::ideal_check::Proof { combined_mle_values: deser_ic(&dual_proof.ic2_proof_values, &fcfg) },
+                        ecdsa_num_constraints, ic_pt,
+                        &|ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
+                            IdealOrZero::Zero => EcdsaIdealOverF, IdealOrZero::Ideal(_) => panic!("no non-zero ideal"),
+                        }, &fcfg,
+                    ).unwrap();
+                    let proj_elem: PiopField = tr.get_field_challenge(&fcfg);
+                    let c1_psc = project_scalars::<PiopField, Sha256Uair>(|s| {
+                        let one = PiopField::one_with_cfg(&fcfg); let zero = PiopField::zero_with_cfg(&fcfg);
+                        DynamicPolynomialF::new(s.iter().map(|c| if c.into_inner() { one.clone() } else { zero.clone() }).collect::<Vec<_>>())
+                    });
+                    let c1_fps = project_scalars_to_field(c1_psc, &proj_elem).unwrap();
+                    let c1_cpr_pre = CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<Sha256Uair>(
+                        &mut tr, &field_from_bytes(&dual_proof.md_claimed_sums[0], &fcfg),
+                        sha_num_constraints, &proj_elem, &c1_fps, &c1_sub, &fcfg,
+                    ).unwrap();
+                    let mut lk_pres = Vec::new();
+                    for (gp, meta) in dual_proof.lookup_group_proofs.iter().zip(dual_proof.lookup_group_meta.iter()) {
+                        let (subtable, shifts) = generate_table_and_shifts(&meta.table_type, &proj_elem, &fcfg);
+                        lk_pres.push(BatchedDecompLogupProtocol::<PiopField>::build_verifier_pre_sumcheck(
+                            &mut tr, gp, &subtable, &shifts, meta.num_columns, meta.witness_len, &fcfg,
+                        ).unwrap());
+                    }
+                    let c2_psc = project_scalars::<PiopField, EcdsaUairInt>(|s| {
+                        DynamicPolynomialF { coeffs: vec![PiopField::from_with_cfg(s.clone(), &fcfg)] }
+                    });
+                    let c2_fps = project_scalars_to_field(c2_psc, &proj_elem).unwrap();
+                    let c2_cpr_pre = CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<EcdsaUairInt>(
+                        &mut tr, &field_from_bytes(&dual_proof.md_claimed_sums[1], &fcfg),
+                        ecdsa_num_constraints, &proj_elem, &c2_fps, &c2_sub, &fcfg,
+                    ).unwrap();
+                    let shared_nv = lk_pres.iter().map(|p| p.num_vars).max()
+                        .map_or(num_vars, |m| m.max(num_vars));
+                    let md_proof = deser_md(&fcfg);
+                    let md_sub = MultiDegreeSumcheck::<PiopField>::verify_as_subprotocol(
+                        &mut tr, shared_nv, &md_proof, &fcfg,
+                    ).unwrap();
+
+                    // ── Timed section ──
+                    let t = Instant::now();
+
+                    // CPR₁ finalize.
+                    let c1_priv_up: Vec<PiopField> = dual_proof.cpr1_up_evals.iter()
+                        .map(|b| field_from_bytes(b, &fcfg)).collect();
+                    let c1_down: Vec<PiopField> = dual_proof.cpr1_down_evals.iter()
+                        .map(|b| field_from_bytes(b, &fcfg)).collect();
+                    let c1_sig_v = Sha256Uair::signature();
+                    let c1_up = if c1_sig_v.public_columns.is_empty() {
+                        c1_priv_up
+                    } else {
+                        let bin_proj = BinaryPoly::<32>::prepare_projection(&proj_elem);
+                        let c1_pub: Vec<PiopField> = sha_public_column_data.iter().map(|col| {
+                            let mut mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                                col.iter().map(|bp| bin_proj(bp).inner().clone()).collect();
+                            if md_sub.point.len() > mle.num_vars {
+                                mle.evaluations.resize(1 << md_sub.point.len(), Default::default());
+                                mle.num_vars = md_sub.point.len();
+                            }
+                            mle.evaluate_with_config(&md_sub.point, &fcfg).unwrap()
+                        }).collect();
+                        reconstruct_up_evals(&c1_priv_up, &c1_pub, &c1_sig_v.public_columns, c1_sig_v.total_cols())
+                    };
+                    let _ = CombinedPolyResolver::<PiopField>::finalize_verifier::<Sha256Uair>(
+                        &mut tr, md_sub.point.clone(), md_sub.expected_evaluations[0].clone(),
+                        &c1_cpr_pre, c1_up, c1_down, num_vars, &c1_fps, &fcfg,
+                    ).expect("C1 CPR finalize");
+
+                    // CPR₂ finalize.
+                    let c2_priv_up: Vec<PiopField> = dual_proof.cpr2_up_evals.iter()
+                        .map(|b| field_from_bytes(b, &fcfg)).collect();
+                    let c2_down: Vec<PiopField> = dual_proof.cpr2_down_evals.iter()
+                        .map(|b| field_from_bytes(b, &fcfg)).collect();
+                    let c2_sig_v = EcdsaUairInt::signature();
+                    let c2_up = if c2_sig_v.public_columns.is_empty() {
+                        c2_priv_up
+                    } else {
+                        let c2_pub: Vec<PiopField> = ecdsa_public_column_data.iter().map(|col| {
+                            let proj_col: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                                col.iter().map(|v| PiopField::from_with_cfg(v.clone(), &fcfg).inner().clone()).collect();
+                            proj_col.evaluate_with_config(&md_sub.point, &fcfg).unwrap()
+                        }).collect();
+                        reconstruct_up_evals(&c2_priv_up, &c2_pub, &c2_sig_v.public_columns, c2_sig_v.total_cols())
+                    };
+                    let _ = CombinedPolyResolver::<PiopField>::finalize_verifier::<EcdsaUairInt>(
+                        &mut tr, md_sub.point.clone(), md_sub.expected_evaluations[1].clone(),
+                        &c2_cpr_pre, c2_up, c2_down, num_vars, &c2_fps, &fcfg,
+                    ).expect("C2 CPR finalize");
+
+                    total += t.elapsed();
+                }
+                total
+            });
+        });
+
+        // ── V6. Verifier / Unified Eval Sumcheck ────────────────────
+        group.bench_function("V/UnifiedEvalSC", |b| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    // Replay through CPR finalize.
+                    let mut tr = zinc_transcript::KeccakTranscript::new();
+                    let fcfg = tr.get_random_field_cfg::<
+                        PiopField, <PiopField as Field>::Inner, MillerRabin
+                    >();
+                    let ic_pt: Vec<PiopField> = tr.get_field_challenges(num_vars, &fcfg);
+                    let c1_sub = IdealCheckProtocol::<PiopField>::verify_at_point::<Sha256Uair, _, _>(
+                        &mut tr,
+                        zinc_piop::ideal_check::Proof { combined_mle_values: deser_ic(&dual_proof.ic1_proof_values, &fcfg) },
+                        sha_num_constraints, ic_pt.clone(),
+                        &|_: &IdealOrZero<CyclotomicIdeal>| TrivialIdeal, &fcfg,
+                    ).unwrap();
+                    let c2_sub = IdealCheckProtocol::<PiopField>::verify_at_point::<EcdsaUairInt, _, _>(
+                        &mut tr,
+                        zinc_piop::ideal_check::Proof { combined_mle_values: deser_ic(&dual_proof.ic2_proof_values, &fcfg) },
+                        ecdsa_num_constraints, ic_pt,
+                        &|ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
+                            IdealOrZero::Zero => EcdsaIdealOverF, IdealOrZero::Ideal(_) => panic!("no non-zero ideal"),
+                        }, &fcfg,
+                    ).unwrap();
+                    let proj_elem: PiopField = tr.get_field_challenge(&fcfg);
+                    let c1_psc = project_scalars::<PiopField, Sha256Uair>(|s| {
+                        let one = PiopField::one_with_cfg(&fcfg); let zero = PiopField::zero_with_cfg(&fcfg);
+                        DynamicPolynomialF::new(s.iter().map(|c| if c.into_inner() { one.clone() } else { zero.clone() }).collect::<Vec<_>>())
+                    });
+                    let c1_fps = project_scalars_to_field(c1_psc, &proj_elem).unwrap();
+                    let c1_cpr_pre = CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<Sha256Uair>(
+                        &mut tr, &field_from_bytes(&dual_proof.md_claimed_sums[0], &fcfg),
+                        sha_num_constraints, &proj_elem, &c1_fps, &c1_sub, &fcfg,
+                    ).unwrap();
+                    let mut lk_pres = Vec::new();
+                    for (gp, meta) in dual_proof.lookup_group_proofs.iter().zip(dual_proof.lookup_group_meta.iter()) {
+                        let (subtable, shifts) = generate_table_and_shifts(&meta.table_type, &proj_elem, &fcfg);
+                        lk_pres.push(BatchedDecompLogupProtocol::<PiopField>::build_verifier_pre_sumcheck(
+                            &mut tr, gp, &subtable, &shifts, meta.num_columns, meta.witness_len, &fcfg,
+                        ).unwrap());
+                    }
+                    let c2_psc = project_scalars::<PiopField, EcdsaUairInt>(|s| {
+                        DynamicPolynomialF { coeffs: vec![PiopField::from_with_cfg(s.clone(), &fcfg)] }
+                    });
+                    let c2_fps = project_scalars_to_field(c2_psc, &proj_elem).unwrap();
+                    let c2_cpr_pre = CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<EcdsaUairInt>(
+                        &mut tr, &field_from_bytes(&dual_proof.md_claimed_sums[1], &fcfg),
+                        ecdsa_num_constraints, &proj_elem, &c2_fps, &c2_sub, &fcfg,
+                    ).unwrap();
+                    let shared_nv = lk_pres.iter().map(|p| p.num_vars).max().map_or(num_vars, |m| m.max(num_vars));
+                    let md_proof = deser_md(&fcfg);
+                    let md_sub = MultiDegreeSumcheck::<PiopField>::verify_as_subprotocol(
+                        &mut tr, shared_nv, &md_proof, &fcfg,
+                    ).unwrap();
+
+                    // CPR₁ finalize.
+                    let c1_priv_up: Vec<PiopField> = dual_proof.cpr1_up_evals.iter().map(|b| field_from_bytes(b, &fcfg)).collect();
+                    let c1_down: Vec<PiopField> = dual_proof.cpr1_down_evals.iter().map(|b| field_from_bytes(b, &fcfg)).collect();
+                    let c1_sig_v = Sha256Uair::signature();
+                    let c1_up = if c1_sig_v.public_columns.is_empty() { c1_priv_up.clone() } else {
+                        let bp = BinaryPoly::<32>::prepare_projection(&proj_elem);
+                        let pe: Vec<PiopField> = sha_public_column_data.iter().map(|col| {
+                            let mut mle: DenseMultilinearExtension<<PiopField as Field>::Inner> = col.iter().map(|v| bp(v).inner().clone()).collect();
+                            if md_sub.point.len() > mle.num_vars { mle.evaluations.resize(1 << md_sub.point.len(), Default::default()); mle.num_vars = md_sub.point.len(); }
+                            mle.evaluate_with_config(&md_sub.point, &fcfg).unwrap()
+                        }).collect();
+                        reconstruct_up_evals(&c1_priv_up, &pe, &c1_sig_v.public_columns, c1_sig_v.total_cols())
+                    };
+                    let c1_up_saved = c1_up.clone();
+                    let c1_cpr_subclaim = CombinedPolyResolver::<PiopField>::finalize_verifier::<Sha256Uair>(
+                        &mut tr, md_sub.point.clone(), md_sub.expected_evaluations[0].clone(),
+                        &c1_cpr_pre, c1_up, c1_down, num_vars, &c1_fps, &fcfg,
+                    ).unwrap();
+
+                    let c2_priv_up: Vec<PiopField> = dual_proof.cpr2_up_evals.iter().map(|b| field_from_bytes(b, &fcfg)).collect();
+                    let c2_down: Vec<PiopField> = dual_proof.cpr2_down_evals.iter().map(|b| field_from_bytes(b, &fcfg)).collect();
+                    let c2_sig_v = EcdsaUairInt::signature();
+                    let c2_up = if c2_sig_v.public_columns.is_empty() { c2_priv_up.clone() } else {
+                        let pe: Vec<PiopField> = ecdsa_public_column_data.iter().map(|col| {
+                            let pc: DenseMultilinearExtension<<PiopField as Field>::Inner> = col.iter().map(|v| PiopField::from_with_cfg(v.clone(), &fcfg).inner().clone()).collect();
+                            pc.evaluate_with_config(&md_sub.point, &fcfg).unwrap()
+                        }).collect();
+                        reconstruct_up_evals(&c2_priv_up, &pe, &c2_sig_v.public_columns, c2_sig_v.total_cols())
+                    };
+                    let c2_up_saved = c2_up.clone();
+                    let c2_down_saved = c2_down.clone();
+                    let _ = CombinedPolyResolver::<PiopField>::finalize_verifier::<EcdsaUairInt>(
+                        &mut tr, md_sub.point.clone(), md_sub.expected_evaluations[1].clone(),
+                        &c2_cpr_pre, c2_up, c2_down, num_vars, &c2_fps, &fcfg,
+                    ).unwrap();
+
+                    // ── Timed section ──
+                    let t = Instant::now();
+
+                    if let Some(ref ss_data) = dual_proof.unified_eval_sumcheck {
+                        let c1_num_up = c1_up_saved.len();
+                        let c2_num_up = c2_up_saved.len();
+                        let mut claims: Vec<ShiftClaim<PiopField>> = Vec::new();
+                        for i in 0..c1_num_up {
+                            claims.push(ShiftClaim {
+                                source_col: i, shift_amount: 0,
+                                eval_point: c1_cpr_subclaim.evaluation_point.clone(),
+                                claimed_eval: c1_up_saved[i].clone(),
+                            });
+                        }
+                        for j in 0..c2_num_up {
+                            claims.push(ShiftClaim {
+                                source_col: c1_num_up + j, shift_amount: 0,
+                                eval_point: c1_cpr_subclaim.evaluation_point.clone(),
+                                claimed_eval: c2_up_saved[j].clone(),
+                            });
+                        }
+                        for (k, spec) in c2_sig_v.shifts.iter().enumerate() {
+                            claims.push(ShiftClaim {
+                                source_col: c1_num_up + spec.source_col,
+                                shift_amount: spec.shift_amount,
+                                eval_point: c1_cpr_subclaim.evaluation_point.clone(),
+                                claimed_eval: c2_down_saved[k].clone(),
+                            });
+                        }
+                        let rounds: Vec<ShiftRoundPoly<PiopField>> = ss_data.rounds.iter().map(|bytes| {
+                            ShiftRoundPoly {
+                                evals: [
+                                    field_from_bytes(&bytes[0..field_elem_size], &fcfg),
+                                    field_from_bytes(&bytes[field_elem_size..2*field_elem_size], &fcfg),
+                                    field_from_bytes(&bytes[2*field_elem_size..3*field_elem_size], &fcfg),
+                                ],
+                            }
+                        }).collect();
+                        let ss_proof = ShiftSumcheckProof { rounds };
+
+                        // Determine public unified claims.
+                        let is_pub_unified = |idx: usize| -> bool {
+                            if idx < c1_num_up {
+                                c1_sig_v.is_public_column(idx)
+                            } else if idx < c1_num_up + c2_num_up {
+                                c2_sig_v.is_public_column(idx - c1_num_up)
+                            } else {
+                                c2_sig_v.is_public_shift(idx - c1_num_up - c2_num_up)
+                            }
+                        };
+                        let has_public = (0..claims.len()).any(&is_pub_unified);
+
+                        if has_public {
+                            let ss_pre = shift_sumcheck_verify_pre(
+                                &mut tr, &ss_proof, &claims, num_vars, &fcfg,
+                            ).expect("eval SC pre-verify");
+                            let challenge_point_le: Vec<PiopField> =
+                                ss_pre.challenge_point.iter().rev().cloned().collect();
+                            let bp = BinaryPoly::<32>::prepare_projection(&proj_elem);
+                            let private_v_finals: Vec<PiopField> = ss_data.v_finals.iter()
+                                .map(|b| field_from_bytes(b, &fcfg)).collect();
+                            let total_claims = claims.len();
+                            let mut full_v_finals = Vec::with_capacity(total_claims);
+                            let mut priv_idx = 0usize;
+                            for idx in 0..total_claims {
+                                if is_pub_unified(idx) {
+                                    let v = if idx < c1_num_up {
+                                        let pcd_idx = c1_sig_v.public_columns.iter()
+                                            .position(|&c| c == idx).unwrap();
+                                        let mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                                            sha_public_column_data[pcd_idx].iter()
+                                                .map(|v| bp(v).inner().clone()).collect();
+                                        mle.evaluate_with_config(&challenge_point_le, &fcfg).unwrap()
+                                    } else if idx < c1_num_up + c2_num_up {
+                                        let col_idx = idx - c1_num_up;
+                                        let pcd_idx = c2_sig_v.public_columns.iter()
+                                            .position(|&c| c == col_idx).unwrap();
+                                        let pc: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                                            ecdsa_public_column_data[pcd_idx].iter()
+                                                .map(|v| PiopField::from_with_cfg(v.clone(), &fcfg).inner().clone()).collect();
+                                        pc.evaluate_with_config(&challenge_point_le, &fcfg).unwrap()
+                                    } else {
+                                        let shift_idx = idx - c1_num_up - c2_num_up;
+                                        let spec = &c2_sig_v.shifts[shift_idx];
+                                        let pcd_idx = c2_sig_v.public_columns.iter()
+                                            .position(|&c| c == spec.source_col).unwrap();
+                                        let pc: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                                            ecdsa_public_column_data[pcd_idx].iter()
+                                                .map(|v| PiopField::from_with_cfg(v.clone(), &fcfg).inner().clone()).collect();
+                                        pc.evaluate_with_config(&challenge_point_le, &fcfg).unwrap()
+                                    };
+                                    full_v_finals.push(v);
+                                } else {
+                                    full_v_finals.push(private_v_finals[priv_idx].clone());
+                                    priv_idx += 1;
+                                }
+                            }
+                            let _ = shift_sumcheck_verify_finalize(
+                                &mut tr, &ss_pre, &claims, &full_v_finals, &fcfg,
+                            ).expect("eval SC verify");
+                        } else {
+                            let v_finals: Vec<PiopField> = ss_data.v_finals.iter()
+                                .map(|b| field_from_bytes(b, &fcfg)).collect();
+                            let _ = shift_sumcheck_verify(
+                                &mut tr, &ss_proof, &claims, &v_finals, num_vars, &fcfg,
+                            ).expect("eval SC verify");
+                        }
+                    }
+
+                    total += t.elapsed();
+                }
+                total
+            });
+        });
+
+        // ── V7. Verifier / Lookup Finalize ──────────────────────────
+        group.bench_function("V/LookupFinalize", |b| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    // Full replay through unified eval sumcheck.
+                    let mut tr = zinc_transcript::KeccakTranscript::new();
+                    let fcfg = tr.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
+                    let ic_pt: Vec<PiopField> = tr.get_field_challenges(num_vars, &fcfg);
+                    let c1_sub = IdealCheckProtocol::<PiopField>::verify_at_point::<Sha256Uair, _, _>(
+                        &mut tr, zinc_piop::ideal_check::Proof { combined_mle_values: deser_ic(&dual_proof.ic1_proof_values, &fcfg) },
+                        sha_num_constraints, ic_pt.clone(), &|_: &IdealOrZero<CyclotomicIdeal>| TrivialIdeal, &fcfg,
+                    ).unwrap();
+                    let c2_sub = IdealCheckProtocol::<PiopField>::verify_at_point::<EcdsaUairInt, _, _>(
+                        &mut tr, zinc_piop::ideal_check::Proof { combined_mle_values: deser_ic(&dual_proof.ic2_proof_values, &fcfg) },
+                        ecdsa_num_constraints, ic_pt, &|ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
+                            IdealOrZero::Zero => EcdsaIdealOverF, IdealOrZero::Ideal(_) => panic!("no non-zero ideal"),
+                        }, &fcfg,
+                    ).unwrap();
+                    let proj_elem: PiopField = tr.get_field_challenge(&fcfg);
+                    let c1_fps = project_scalars_to_field(project_scalars::<PiopField, Sha256Uair>(|s| {
+                        let one = PiopField::one_with_cfg(&fcfg); let zero = PiopField::zero_with_cfg(&fcfg);
+                        DynamicPolynomialF::new(s.iter().map(|c| if c.into_inner() { one.clone() } else { zero.clone() }).collect::<Vec<_>>())
+                    }), &proj_elem).unwrap();
+                    let c1_cpr_pre = CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<Sha256Uair>(
+                        &mut tr, &field_from_bytes(&dual_proof.md_claimed_sums[0], &fcfg),
+                        sha_num_constraints, &proj_elem, &c1_fps, &c1_sub, &fcfg,
+                    ).unwrap();
+                    let mut lk_pres = Vec::new();
+                    for (gp, meta) in dual_proof.lookup_group_proofs.iter().zip(dual_proof.lookup_group_meta.iter()) {
+                        let (st, sh) = generate_table_and_shifts(&meta.table_type, &proj_elem, &fcfg);
+                        lk_pres.push(BatchedDecompLogupProtocol::<PiopField>::build_verifier_pre_sumcheck(
+                            &mut tr, gp, &st, &sh, meta.num_columns, meta.witness_len, &fcfg,
+                        ).unwrap());
+                    }
+                    let c2_fps = project_scalars_to_field(project_scalars::<PiopField, EcdsaUairInt>(|s| {
+                        DynamicPolynomialF { coeffs: vec![PiopField::from_with_cfg(s.clone(), &fcfg)] }
+                    }), &proj_elem).unwrap();
+                    let c2_cpr_pre = CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<EcdsaUairInt>(
+                        &mut tr, &field_from_bytes(&dual_proof.md_claimed_sums[1], &fcfg),
+                        ecdsa_num_constraints, &proj_elem, &c2_fps, &c2_sub, &fcfg,
+                    ).unwrap();
+                    let shared_nv = lk_pres.iter().map(|p| p.num_vars).max().map_or(num_vars, |m| m.max(num_vars));
+                    let md_sub = MultiDegreeSumcheck::<PiopField>::verify_as_subprotocol(
+                        &mut tr, shared_nv, &deser_md(&fcfg), &fcfg,
+                    ).unwrap();
+
+                    // CPR finalize (both).
+                    let c1_priv_up: Vec<PiopField> = dual_proof.cpr1_up_evals.iter().map(|b| field_from_bytes(b, &fcfg)).collect();
+                    let c1_down: Vec<PiopField> = dual_proof.cpr1_down_evals.iter().map(|b| field_from_bytes(b, &fcfg)).collect();
+                    let c1_sig_v = Sha256Uair::signature();
+                    let c1_up = if c1_sig_v.public_columns.is_empty() { c1_priv_up } else {
+                        let bp = BinaryPoly::<32>::prepare_projection(&proj_elem);
+                        let pe: Vec<PiopField> = sha_public_column_data.iter().map(|col| {
+                            let mut mle: DenseMultilinearExtension<<PiopField as Field>::Inner> = col.iter().map(|v| bp(v).inner().clone()).collect();
+                            if md_sub.point.len() > mle.num_vars { mle.evaluations.resize(1 << md_sub.point.len(), Default::default()); mle.num_vars = md_sub.point.len(); }
+                            mle.evaluate_with_config(&md_sub.point, &fcfg).unwrap()
+                        }).collect();
+                        reconstruct_up_evals(&c1_priv_up, &pe, &c1_sig_v.public_columns, c1_sig_v.total_cols())
+                    };
+                    let c1_up_saved = c1_up.clone();
+                    let c1_cpr_subclaim = CombinedPolyResolver::<PiopField>::finalize_verifier::<Sha256Uair>(
+                        &mut tr, md_sub.point.clone(), md_sub.expected_evaluations[0].clone(),
+                        &c1_cpr_pre, c1_up, c1_down, num_vars, &c1_fps, &fcfg,
+                    ).unwrap();
+                    let c2_priv_up: Vec<PiopField> = dual_proof.cpr2_up_evals.iter().map(|b| field_from_bytes(b, &fcfg)).collect();
+                    let c2_down: Vec<PiopField> = dual_proof.cpr2_down_evals.iter().map(|b| field_from_bytes(b, &fcfg)).collect();
+                    let c2_sig_v = EcdsaUairInt::signature();
+                    let c2_up = if c2_sig_v.public_columns.is_empty() { c2_priv_up } else {
+                        let pe: Vec<PiopField> = ecdsa_public_column_data.iter().map(|col| {
+                            let pc: DenseMultilinearExtension<<PiopField as Field>::Inner> = col.iter().map(|v| PiopField::from_with_cfg(v.clone(), &fcfg).inner().clone()).collect();
+                            pc.evaluate_with_config(&md_sub.point, &fcfg).unwrap()
+                        }).collect();
+                        reconstruct_up_evals(&c2_priv_up, &pe, &c2_sig_v.public_columns, c2_sig_v.total_cols())
+                    };
+                    let c2_up_saved = c2_up.clone();
+                    let c2_down_saved = c2_down.clone();
+                    let _ = CombinedPolyResolver::<PiopField>::finalize_verifier::<EcdsaUairInt>(
+                        &mut tr, md_sub.point.clone(), md_sub.expected_evaluations[1].clone(),
+                        &c2_cpr_pre, c2_up, c2_down, num_vars, &c2_fps, &fcfg,
+                    ).unwrap();
+
+                    // Unified eval sumcheck.
+                    if let Some(ref ss_data) = dual_proof.unified_eval_sumcheck {
+                        let c1_num_up = c1_up_saved.len();
+                        let c2_num_up = c2_up_saved.len();
+                        let mut claims: Vec<ShiftClaim<PiopField>> = Vec::new();
+                        for i in 0..c1_num_up { claims.push(ShiftClaim { source_col: i, shift_amount: 0, eval_point: c1_cpr_subclaim.evaluation_point.clone(), claimed_eval: c1_up_saved[i].clone() }); }
+                        for j in 0..c2_num_up { claims.push(ShiftClaim { source_col: c1_num_up + j, shift_amount: 0, eval_point: c1_cpr_subclaim.evaluation_point.clone(), claimed_eval: c2_up_saved[j].clone() }); }
+                        for (k, spec) in c2_sig_v.shifts.iter().enumerate() { claims.push(ShiftClaim { source_col: c1_num_up + spec.source_col, shift_amount: spec.shift_amount, eval_point: c1_cpr_subclaim.evaluation_point.clone(), claimed_eval: c2_down_saved[k].clone() }); }
+                        let rounds: Vec<ShiftRoundPoly<PiopField>> = ss_data.rounds.iter().map(|bytes| ShiftRoundPoly { evals: [
+                            field_from_bytes(&bytes[0..field_elem_size], &fcfg),
+                            field_from_bytes(&bytes[field_elem_size..2*field_elem_size], &fcfg),
+                            field_from_bytes(&bytes[2*field_elem_size..3*field_elem_size], &fcfg),
+                        ]}).collect();
+                        let is_pub_unified = |idx: usize| -> bool {
+                            if idx < c1_num_up {
+                                c1_sig_v.is_public_column(idx)
+                            } else if idx < c1_num_up + c2_num_up {
+                                c2_sig_v.is_public_column(idx - c1_num_up)
+                            } else {
+                                c2_sig_v.is_public_shift(idx - c1_num_up - c2_num_up)
+                            }
+                        };
+                        let has_public = (0..claims.len()).any(&is_pub_unified);
+                        let ss_proof = ShiftSumcheckProof { rounds };
+
+                        if has_public {
+                            let ss_pre = shift_sumcheck_verify_pre(
+                                &mut tr, &ss_proof, &claims, num_vars, &fcfg,
+                            ).unwrap();
+                            let challenge_point_le: Vec<PiopField> =
+                                ss_pre.challenge_point.iter().rev().cloned().collect();
+                            let bp = BinaryPoly::<32>::prepare_projection(&proj_elem);
+                            let private_v_finals: Vec<PiopField> = ss_data.v_finals.iter()
+                                .map(|b| field_from_bytes(b, &fcfg)).collect();
+                            let total_claims = claims.len();
+                            let mut full_v_finals = Vec::with_capacity(total_claims);
+                            let mut priv_idx = 0usize;
+                            for idx in 0..total_claims {
+                                if is_pub_unified(idx) {
+                                    let v = if idx < c1_num_up {
+                                        let pcd_idx = c1_sig_v.public_columns.iter()
+                                            .position(|&c| c == idx).unwrap();
+                                        let mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                                            sha_public_column_data[pcd_idx].iter()
+                                                .map(|v| bp(v).inner().clone()).collect();
+                                        mle.evaluate_with_config(&challenge_point_le, &fcfg).unwrap()
+                                    } else if idx < c1_num_up + c2_num_up {
+                                        let col_idx = idx - c1_num_up;
+                                        let pcd_idx = c2_sig_v.public_columns.iter()
+                                            .position(|&c| c == col_idx).unwrap();
+                                        let pc: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                                            ecdsa_public_column_data[pcd_idx].iter()
+                                                .map(|v| PiopField::from_with_cfg(v.clone(), &fcfg).inner().clone()).collect();
+                                        pc.evaluate_with_config(&challenge_point_le, &fcfg).unwrap()
+                                    } else {
+                                        let shift_idx = idx - c1_num_up - c2_num_up;
+                                        let spec = &c2_sig_v.shifts[shift_idx];
+                                        let pcd_idx = c2_sig_v.public_columns.iter()
+                                            .position(|&c| c == spec.source_col).unwrap();
+                                        let pc: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                                            ecdsa_public_column_data[pcd_idx].iter()
+                                                .map(|v| PiopField::from_with_cfg(v.clone(), &fcfg).inner().clone()).collect();
+                                        pc.evaluate_with_config(&challenge_point_le, &fcfg).unwrap()
+                                    };
+                                    full_v_finals.push(v);
+                                } else {
+                                    full_v_finals.push(private_v_finals[priv_idx].clone());
+                                    priv_idx += 1;
+                                }
+                            }
+                            let _ = shift_sumcheck_verify_finalize(
+                                &mut tr, &ss_pre, &claims, &full_v_finals, &fcfg,
+                            ).unwrap();
+                        } else {
+                            let v_finals: Vec<PiopField> = ss_data.v_finals.iter()
+                                .map(|b| field_from_bytes(b, &fcfg)).collect();
+                            let _ = shift_sumcheck_verify(
+                                &mut tr, &ss_proof, &claims, &v_finals, num_vars, &fcfg,
+                            ).unwrap();
+                        }
+                    }
+
+                    // ── Timed section ──
+                    let t = Instant::now();
+                    for (g, (lk_pre, gp)) in lk_pres.iter()
+                        .zip(dual_proof.lookup_group_proofs.iter()).enumerate()
+                    {
+                        let parent_evals: Vec<PiopField> = dual_proof.lookup_group_meta[g]
+                            .original_column_indices.iter()
+                            .map(|&orig_col| c1_up_saved[orig_col].clone())
+                            .collect();
+                        BatchedDecompLogupProtocol::<PiopField>::finalize_verifier(
+                            lk_pre, gp, &md_sub.point,
+                            &md_sub.expected_evaluations[g + 2],
+                            &parent_evals,
+                            &fcfg,
+                        ).expect("lookup finalize");
+                    }
+                    total += t.elapsed();
+                }
+                total
+            });
+        });
+
+        // ── V8. Verifier / PCS Verify ───────────────────────────────
+        //
+        // Verify both PCS proofs. This does NOT require replaying the
+        // PIOP transcript — the PCS verifier uses its own independent
+        // transcript and the committed evaluation point.
+        group.bench_function("V/PCSVerify", |b| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    // We only need the evaluation point to verify PCS.
+                    // Replay just enough to derive it.
+                    let mut tr = zinc_transcript::KeccakTranscript::new();
+                    let fcfg = tr.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
+                    let ic_pt: Vec<PiopField> = tr.get_field_challenges(num_vars, &fcfg);
+                    let c1_sub = IdealCheckProtocol::<PiopField>::verify_at_point::<Sha256Uair, _, _>(
+                        &mut tr, zinc_piop::ideal_check::Proof { combined_mle_values: deser_ic(&dual_proof.ic1_proof_values, &fcfg) },
+                        sha_num_constraints, ic_pt.clone(), &|_: &IdealOrZero<CyclotomicIdeal>| TrivialIdeal, &fcfg,
+                    ).unwrap();
+                    let c2_sub = IdealCheckProtocol::<PiopField>::verify_at_point::<EcdsaUairInt, _, _>(
+                        &mut tr, zinc_piop::ideal_check::Proof { combined_mle_values: deser_ic(&dual_proof.ic2_proof_values, &fcfg) },
+                        ecdsa_num_constraints, ic_pt, &|ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
+                            IdealOrZero::Zero => EcdsaIdealOverF, IdealOrZero::Ideal(_) => panic!("no non-zero ideal"),
+                        }, &fcfg,
+                    ).unwrap();
+                    let proj_elem: PiopField = tr.get_field_challenge(&fcfg);
+                    let c1_fps = project_scalars_to_field(project_scalars::<PiopField, Sha256Uair>(|s| {
+                        let one = PiopField::one_with_cfg(&fcfg); let zero = PiopField::zero_with_cfg(&fcfg);
+                        DynamicPolynomialF::new(s.iter().map(|c| if c.into_inner() { one.clone() } else { zero.clone() }).collect::<Vec<_>>())
+                    }), &proj_elem).unwrap();
+                    let _c1_cpr_pre = CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<Sha256Uair>(
+                        &mut tr, &field_from_bytes(&dual_proof.md_claimed_sums[0], &fcfg),
+                        sha_num_constraints, &proj_elem, &c1_fps, &c1_sub, &fcfg,
+                    ).unwrap();
+                    for (gp, meta) in dual_proof.lookup_group_proofs.iter().zip(dual_proof.lookup_group_meta.iter()) {
+                        let (st, sh) = generate_table_and_shifts(&meta.table_type, &proj_elem, &fcfg);
+                        let _ = BatchedDecompLogupProtocol::<PiopField>::build_verifier_pre_sumcheck(
+                            &mut tr, gp, &st, &sh, meta.num_columns, meta.witness_len, &fcfg,
+                        ).unwrap();
+                    }
+                    let c2_fps = project_scalars_to_field(project_scalars::<PiopField, EcdsaUairInt>(|s| {
+                        DynamicPolynomialF { coeffs: vec![PiopField::from_with_cfg(s.clone(), &fcfg)] }
+                    }), &proj_elem).unwrap();
+                    let _ = CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<EcdsaUairInt>(
+                        &mut tr, &field_from_bytes(&dual_proof.md_claimed_sums[1], &fcfg),
+                        ecdsa_num_constraints, &proj_elem, &c2_fps, &c2_sub, &fcfg,
+                    ).unwrap();
+                    // Derive PCS eval point from the proof's stored evaluation point.
+                    let cpr_eval_pt: Vec<PiopField> = dual_proof.evaluation_point_bytes.iter()
+                        .map(|b| field_from_bytes(b, &fcfg)).collect();
+                    let pcs_i128_point = zinc_snark::pipeline::derive_pcs_point(&cpr_eval_pt, num_vars);
+
+                    // ── Timed section ──
+                    let t = Instant::now();
+
+                    // PCS₁ verify (SHA).
+                    {
+                        let pcs1_fcfg = zinc_transcript::KeccakTranscript::default()
+                            .get_random_field_cfg::<PiopField, <Sha256ZipTypes<i64, 32> as ZipTypes>::Fmod, <Sha256ZipTypes<i64, 32> as ZipTypes>::PrimeTest>();
+                        let pt1_f: Vec<PiopField> = pcs_i128_point.iter()
+                            .map(|v| crypto_primitives::IntoWithConfig::into_with_cfg(v, &pcs1_fcfg)).collect();
+                        let eval1_f: PiopField = PiopField::new_unchecked_with_cfg(
+                            <Uint<{INT_LIMBS * 3}> as ConstTranscribable>::read_transcription_bytes(&dual_proof.pcs1_evals_bytes[0]),
+                            &pcs1_fcfg,
+                        );
+                        let pcs1_tr = zip_plus::pcs_transcript::PcsTranscript {
+                            fs_transcript: zinc_transcript::KeccakTranscript::default(),
+                            stream: std::io::Cursor::new(dual_proof.pcs1_proof_bytes.clone()),
+                        };
+                        let pcs1_proof: ZipPlusProof = pcs1_tr.into();
+                        ZipPlus::<ShaZt, ShaLc>::verify::<PiopField, UNCHECKED>(
+                            &sha_params, &dual_proof.pcs1_commitment, &pt1_f, &eval1_f, &pcs1_proof,
+                        ).expect("PCS1 verify");
+                    }
+
+                    // PCS₂ verify (ECDSA).
+                    {
+                        let pcs2_fcfg = zinc_transcript::KeccakTranscript::default()
+                            .get_random_field_cfg::<FScalar, <EcdsaScalarZipTypes as ZipTypes>::Fmod, <EcdsaScalarZipTypes as ZipTypes>::PrimeTest>();
+                        let pt2_f: Vec<FScalar> = pcs_i128_point.iter()
+                            .map(|v| crypto_primitives::IntoWithConfig::into_with_cfg(v, &pcs2_fcfg)).collect();
+                        let eval2_f: FScalar = FScalar::new_unchecked_with_cfg(
+                            <Uint<{INT_LIMBS * 3}> as ConstTranscribable>::read_transcription_bytes(&dual_proof.pcs2_evals_bytes[0]),
+                            &pcs2_fcfg,
+                        );
+                        let pcs2_tr = zip_plus::pcs_transcript::PcsTranscript {
+                            fs_transcript: zinc_transcript::KeccakTranscript::default(),
+                            stream: std::io::Cursor::new(dual_proof.pcs2_proof_bytes.clone()),
+                        };
+                        let pcs2_proof: ZipPlusProof = pcs2_tr.into();
+                        ZipPlus::<EcZt, EcLc>::verify::<FScalar, UNCHECKED>(
+                            &ec_params, &dual_proof.pcs2_commitment, &pt2_f, &eval2_f, &pcs2_proof,
+                        ).expect("PCS2 verify");
+                    }
+
+                    total += t.elapsed();
+                }
+                total
+            });
+        });
+
+        // ── V9. Verifier / Feed-Forward + Hash→ECDSA Connection ──────
+        //
+        // Measures the verifier-side computation that bridges the proved
+        // SHA-256 compression with the proved ECDSA verification:
+        //   (A) SHA-256 feed-forward: extract 8 final working variables,
+        //       add initial hash values H[0..7]  →  8 wrapping adds.
+        //   (B) Reconstruct scalar u₁ from ECDSA public column b₁ bits.
+        //   (C) (In production) compare u₁ with hash · s⁻¹ mod n.
+        //
+        // Cost is O(N_sha + N_ecdsa) field-element reads + negligible
+        // arithmetic, dominated by the b₁ bit scan (256 iterations).
+        group.bench_function("V/FeedFwd+Connect", |b| {
+            b.iter(|| {
+                // (A) Feed-forward for SHA instance 0.
+                let digest = black_box(feed_forward(&sha_trace, 0));
+                // (B) Reconstruct u₁ from ECDSA b₁ bits.
+                let u1 = black_box(reconstruct_u1(&ecdsa_trace));
+            });
+        });
+    }
 
     // ── Timing breakdown summary ────────────────────────────────────
     eprintln!("\n=== 8xSHA256+ECDSA Per-Step Timing (Unified Dual-Circuit) ===");
@@ -1025,6 +1974,140 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         dual_proof.md_degrees.len(),
         dual_proof.md_degrees,
     );
+
+    // ── Proof size breakdown ────────────────────────────────────────
+    {
+        use zinc_snark::pipeline::FIELD_LIMBS;
+        use crypto_primitives::crypto_bigint_uint::Uint;
+        let fe_bytes = <Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+
+        // PCS proof bytes (raw serialized).
+        let pcs1_bytes = dual_proof.pcs1_proof_bytes.len();
+        let pcs2_bytes = dual_proof.pcs2_proof_bytes.len();
+
+        // IC proof values.
+        let ic1_bytes: usize = dual_proof.ic1_proof_values.iter().map(|v| v.len()).sum();
+        let ic2_bytes: usize = dual_proof.ic2_proof_values.iter().map(|v| v.len()).sum();
+
+        // Multi-degree sumcheck messages + claimed sums.
+        let md_msg_bytes: usize = dual_proof.md_group_messages.iter()
+            .flat_map(|grp| grp.iter())
+            .map(|v| v.len())
+            .sum();
+        let md_sum_bytes: usize = dual_proof.md_claimed_sums.iter().map(|v| v.len()).sum();
+        let md_total = md_msg_bytes + md_sum_bytes;
+
+        // CPR up/down evaluations.
+        let cpr1_up: usize = dual_proof.cpr1_up_evals.iter().map(|v| v.len()).sum();
+        let cpr1_dn: usize = dual_proof.cpr1_down_evals.iter().map(|v| v.len()).sum();
+        let cpr2_up: usize = dual_proof.cpr2_up_evals.iter().map(|v| v.len()).sum();
+        let cpr2_dn: usize = dual_proof.cpr2_down_evals.iter().map(|v| v.len()).sum();
+        let cpr_total = cpr1_up + cpr1_dn + cpr2_up + cpr2_dn;
+
+        // Unified evaluation sumcheck (eq + shift claims).
+        let eval_sc_bytes: usize = dual_proof.unified_eval_sumcheck.as_ref().map_or(0, |sc| {
+            let rounds: usize = sc.rounds.iter().map(|v| v.len()).sum();
+            let finals: usize = sc.v_finals.iter().map(|v| v.len()).sum();
+            rounds + finals
+        });
+
+        // Lookup data.
+        let lookup_bytes: usize = {
+            let _meta: usize = dual_proof.lookup_group_meta.len() * std::mem::size_of::<zinc_piop::lookup::LookupGroupMeta>();
+            let proofs: usize = dual_proof.lookup_group_proofs.iter().map(|gp| {
+                let mults: usize = gp.aggregated_multiplicities.iter().map(|v| v.len()).sum();
+                let inv_w: usize = gp.chunk_inverse_witnesses.iter()
+                    .flat_map(|outer| outer.iter())
+                    .map(|inner| inner.len())
+                    .sum();
+                let inv_t = gp.inverse_table.len();
+                (mults + inv_w + inv_t) * fe_bytes
+            }).sum();
+            proofs
+        };
+
+        // Evaluation point + PCS evals.
+        let eval_pt_bytes: usize = dual_proof.evaluation_point_bytes.iter().map(|v| v.len()).sum();
+        let pcs1_eval_bytes: usize = dual_proof.pcs1_evals_bytes.iter().map(|v| v.len()).sum();
+        let pcs2_eval_bytes: usize = dual_proof.pcs2_evals_bytes.iter().map(|v| v.len()).sum();
+
+        let piop_total = ic1_bytes + ic2_bytes + md_total + cpr_total
+            + eval_sc_bytes + lookup_bytes + eval_pt_bytes
+            + pcs1_eval_bytes + pcs2_eval_bytes;
+        let total_raw = pcs1_bytes + pcs2_bytes + piop_total;
+
+        // Compressed size (deflate).
+        let mut all_bytes = Vec::with_capacity(total_raw);
+        all_bytes.extend(&dual_proof.pcs1_proof_bytes);
+        all_bytes.extend(&dual_proof.pcs2_proof_bytes);
+        for v in &dual_proof.ic1_proof_values { all_bytes.extend(v); }
+        for v in &dual_proof.ic2_proof_values { all_bytes.extend(v); }
+        for grp in &dual_proof.md_group_messages {
+            for v in grp { all_bytes.extend(v); }
+        }
+        for v in &dual_proof.md_claimed_sums { all_bytes.extend(v); }
+        for v in &dual_proof.cpr1_up_evals { all_bytes.extend(v); }
+        for v in &dual_proof.cpr1_down_evals { all_bytes.extend(v); }
+        for v in &dual_proof.cpr2_up_evals { all_bytes.extend(v); }
+        for v in &dual_proof.cpr2_down_evals { all_bytes.extend(v); }
+        if let Some(ref sc) = dual_proof.unified_eval_sumcheck {
+            for v in &sc.rounds { all_bytes.extend(v); }
+            for v in &sc.v_finals { all_bytes.extend(v); }
+        }
+        // Lookup field elements (serialize inline).
+        for gp in &dual_proof.lookup_group_proofs {
+            fn write_fe(buf: &mut Vec<u8>, f: &zinc_snark::pipeline::PiopField) {
+                use zinc_snark::pipeline::FIELD_LIMBS;
+                let sz = <Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+                let start = buf.len();
+                buf.resize(start + sz, 0);
+                f.inner().write_transcription_bytes(&mut buf[start..]);
+            }
+            for v in &gp.aggregated_multiplicities {
+                for f in v { write_fe(&mut all_bytes, f); }
+            }
+            for outer in &gp.chunk_inverse_witnesses {
+                for inner in outer {
+                    for f in inner { write_fe(&mut all_bytes, f); }
+                }
+            }
+            for f in &gp.inverse_table { write_fe(&mut all_bytes, f); }
+        }
+        for v in &dual_proof.evaluation_point_bytes { all_bytes.extend(v); }
+        for v in &dual_proof.pcs1_evals_bytes { all_bytes.extend(v); }
+        for v in &dual_proof.pcs2_evals_bytes { all_bytes.extend(v); }
+
+        let compressed = {
+            use std::io::Write;
+            let mut encoder = flate2::write::DeflateEncoder::new(
+                Vec::new(), flate2::Compression::default(),
+            );
+            encoder.write_all(&all_bytes).unwrap();
+            encoder.finish().unwrap()
+        };
+
+        eprintln!("\n=== 8xSHA256+ECDSA Dual-Circuit Proof Size ===");
+        eprintln!("  PCS (SHA):      {:>6} B  ({:.1} KB)", pcs1_bytes, pcs1_bytes as f64 / 1024.0);
+        eprintln!("  PCS (ECDSA):    {:>6} B  ({:.1} KB)", pcs2_bytes, pcs2_bytes as f64 / 1024.0);
+        eprintln!("  IC  (SHA):      {:>6} B", ic1_bytes);
+        eprintln!("  IC  (ECDSA):    {:>6} B", ic2_bytes);
+        eprintln!("  MD sumcheck:    {:>6} B  (msgs={}, sums={})", md_total, md_msg_bytes, md_sum_bytes);
+        eprintln!("  CPR evals:      {:>6} B  (c1_up={}, c1_dn={}, c2_up={}, c2_dn={})",
+            cpr_total, cpr1_up, cpr1_dn, cpr2_up, cpr2_dn);
+        eprintln!("  Eval sumcheck:  {:>6} B", eval_sc_bytes);
+        eprintln!("  Lookup:         {:>6} B  ({} groups)", lookup_bytes, dual_proof.lookup_group_proofs.len());
+        eprintln!("  Eval point:     {:>6} B", eval_pt_bytes);
+        eprintln!("  PCS evals:      {:>6} B  (c1={}, c2={})", pcs1_eval_bytes + pcs2_eval_bytes, pcs1_eval_bytes, pcs2_eval_bytes);
+        eprintln!("  ─────────────────────────");
+        eprintln!("  PIOP total:     {:>6} B  ({:.1} KB)", piop_total, piop_total as f64 / 1024.0);
+        eprintln!("  Total raw:      {:>6} B  ({:.1} KB)", total_raw, total_raw as f64 / 1024.0);
+        eprintln!("  Compressed:     {:>6} B  ({:.1} KB, {:.1}x ratio)",
+            compressed.len(), compressed.len() as f64 / 1024.0,
+            all_bytes.len() as f64 / compressed.len() as f64);
+    }
+
+    let mem_snapshot = mem_tracker.stop();
+    eprintln!("  {mem_snapshot}");
 
     group.finish();
 }

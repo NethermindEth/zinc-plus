@@ -7,18 +7,18 @@
 use criterion::{BenchmarkGroup, measurement::WallTime};
 use crypto_bigint::U64;
 use crypto_primitives::{
-    DenseRowMatrix, Field, FromPrimitiveWithConfig, FromWithConfig, IntoWithConfig, PrimeField,
+    DenseRowMatrix, Field, FromPrimitiveWithConfig, FromWithConfig, PrimeField,
     crypto_bigint_monty::MontyField,
 };
 use itertools::Itertools;
-use num_traits::One;
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
     hint::black_box,
     time::{Duration, Instant},
 };
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
-use zinc_transcript::traits::{ConstTranscribable, Transcribable};
+use zinc_transcript::traits::{ConstTranscribable, Transcribable, Transcript};
+use zinc_transcript::KeccakTranscript;
 use zinc_utils::{
     from_ref::FromRef, mul_by_scalar::MulByScalar, named::Named,
     projectable_to_field::ProjectableToField,
@@ -40,7 +40,6 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
         + FromRef<F>
         + for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> FromWithConfig<&'a Zt::Chal>
-        + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>,
     <F as Field>::Inner: FromRef<Zt::Fmod> + Transcribable,
     Zt::Eval: ProjectableToField<F>,
@@ -224,7 +223,6 @@ pub fn prove<
     StandardUniform: Distribution<Zt::Eval>,
     F: for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> FromWithConfig<&'a Zt::Chal>
-        + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>,
     <F as Field>::Inner: FromRef<Zt::Fmod> + Transcribable,
     Zt::Eval: ProjectableToField<F>,
@@ -239,7 +237,9 @@ pub fn prove<
         .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
         .collect();
     let (hint, _) = ZipPlus::commit(&params, &polys).unwrap();
-    let point = vec![Zt::Pt::one(); P];
+    let field_cfg = KeccakTranscript::default()
+        .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+    let point: Vec<F> = vec![F::one_with_cfg(&field_cfg); P];
 
     group.bench_function(
         format!(
@@ -280,7 +280,6 @@ pub fn verify<
         + FromRef<F>
         + for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> FromWithConfig<&'a Zt::Chal>
-        + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>,
     <F as Field>::Inner: FromRef<Zt::Fmod> + Transcribable,
     Zt::Eval: ProjectableToField<F>,
@@ -294,13 +293,14 @@ pub fn verify<
         .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
         .collect();
     let (hint, commitment) = ZipPlus::commit(&params, &polys).unwrap();
-    let point = vec![Zt::Pt::one(); P];
+    let field_cfg = KeccakTranscript::default()
+        .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+    let point: Vec<F> = vec![F::one_with_cfg(&field_cfg); P];
 
     let (eval, proof) = ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>(&params, &polys, &point, &hint)
         .expect("Prove failed");
 
-    let field_cfg = *eval.cfg();
-    let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
+    let point_f: Vec<F> = point.clone();
 
     group.bench_function(
         format!(

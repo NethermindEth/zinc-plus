@@ -29,14 +29,13 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     pub fn prove<F, const CHECK_FOR_OVERFLOW: bool>(
         pp: &ZipPlusParams<Zt, Lc>,
         polys: &[DenseMultilinearExtension<Zt::Eval>],
-        point: &[Zt::Pt],
+        point: &[F],
         commit_hint: &ZipPlusHint<Zt::Cw>,
     ) -> Result<(F, ZipPlusProof), ZipError>
     where
         F: PrimeField
             + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> FromWithConfig<&'a Zt::Chal>
-            + for<'a> FromWithConfig<&'a Zt::Pt>
             + for<'a> MulByScalar<&'a F>
             + FromRef<F>,
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
@@ -57,14 +56,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             .fs_transcript
             .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
 
-        // TODO Lift q0, q1 back to int and take following dot products on ints instead
-        // of MBSInnerProduct in field (see comboned row) We prove evaluations
-        // over the field, so integers need to be mapped to field elements first
-        let point = point
-            .iter()
-            .map(|v| v.into_with_cfg(&field_cfg))
-            .collect::<Vec<F>>();
-        let (q_0, q_1) = point_to_tensor(num_rows, &point, &field_cfg)?;
+        let (q_0, q_1) = point_to_tensor(num_rows, point, &field_cfg)?;
 
         let degree_bound = Zt::Comb::DEGREE_BOUND;
         let polys_as_comb_r: Vec<Vec<Zt::CombR>> = polys

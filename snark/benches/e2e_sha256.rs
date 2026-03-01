@@ -16,6 +16,8 @@ use std::io::Write;
 use std::marker::PhantomData;
 use std::time::{Duration, Instant};
 
+use zinc_utils::peak_mem::MemoryTracker;
+
 use criterion::{
     criterion_group, criterion_main, Criterion,
 };
@@ -52,6 +54,7 @@ use zip_plus::{
 use zinc_ecdsa_uair::EcdsaUairInt;
 use zinc_sha256_uair::{Sha256Uair, witness::GenerateWitness};
 use zinc_sha256_uair::witness::{generate_poly_witness, generate_int_witness};
+use zinc_uair::Uair;
 use zinc_piop::projections::{
     project_trace_coeffs, project_trace_to_field,
     project_scalars, project_scalars_to_field,
@@ -180,28 +183,28 @@ type IprsInt1R4B16<const DEPTH: usize, const CHECK: bool> = IprsCode<
 >;
 // ─── SHA-256 Trace Parameters ───────────────────────────────────────────────
 //
-// SHA-256 has 64 rows × 17 columns (14 bitpoly + 3 int).
-// ECDSA has 258 rows × 9 columns.
+// SHA-256 has 64 rows × 26 columns (23 bitpoly + 3 int, 8 public).
+// ECDSA has 258 rows × 9 columns (2 public).
 //
 // IPRS codes need DEPTH ≥ 1 (radix-8 NTT), and row_len = BASE_LEN × 8^DEPTH.
 //
 // Benchmark configurations:
-//   - Single SHA-256: poly_size = 2^7 = 128, 17 polys, R4B16 DEPTH=1 (row_len=128)
+//   - Single SHA-256: poly_size = 2^7 = 128, 26 polys, R4B16 DEPTH=1 (row_len=128)
 //     → 64 real rows + 64 padding = 128 total
-//   - 8× SHA-256 + ECDSA: poly_size = 2^10 = 1024, 26 polys
+//   - 8× SHA-256 + ECDSA: poly_size = 2^10 = 1024, 35 polys
 //     → 8×64=512 SHA rows + 258 ECDSA rows = 770 → pad to 1024
 
 const SHA256_NUM_VARS: usize = 7;        // 2^7 = 128 rows (64 real + 64 padding)
-const SHA256_BATCH_SIZE: usize = 17;      // 17 SHA-256 columns (14 bitpoly + 3 int)
+const SHA256_BATCH_SIZE: usize = 26;      // 26 SHA-256 columns (23 bitpoly + 3 int)
 
 // Split SHA-256 batch sizes for two-PCS configuration
-const SHA256_POLY_BATCH_SIZE: usize = 14; // 14 BinaryPoly columns
+const SHA256_POLY_BATCH_SIZE: usize = 23; // 23 BinaryPoly columns
 const SHA256_INT_BATCH_SIZE: usize = 3;   // 3 Int columns (μ_a, μ_e, μ_W)
 
 // For 8× SHA-256 + ECDSA: two separate PCS batches
 const SHA256_8X_NUM_VARS: usize = 9;           // 2^9 = 512 rows (8 × 64 SHA rounds)
 const ECDSA_NUM_VARS: usize = 9;               // 2^9 = 512 rows (258 ECDSA rows + padding)
-const ECDSA_BATCH_SIZE: usize = 9;             // 9 ECDSA columns
+const ECDSA_BATCH_SIZE: usize = 11;             // 11 ECDSA columns (9 data + 2 selector)
 
 // ─── Lookup column specs ────────────────────────────────────────────────────
 
@@ -265,9 +268,6 @@ fn classic_lookup_proof_byte_count(proof: &zinc_piop::lookup::PipelineLookupProo
     let fe_bytes = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
     let mut count = 0usize;
     for gp in &proof.group_proofs {
-        for outer in &gp.chunk_vectors {
-            for inner in outer { count += inner.len(); }
-        }
         count += 1; // claimed_sum
         for msg in &gp.sumcheck_proof.messages {
             count += msg.0.tail_evaluations.len();
@@ -344,11 +344,6 @@ fn classic_lookup_proof_to_bytes(proof: &zinc_piop::lookup::PipelineLookupProof<
 
     let mut out = Vec::new();
     for gp in &proof.group_proofs {
-        for outer in &gp.chunk_vectors {
-            for inner in outer {
-                for f in inner { write_fe(&mut out, f); }
-            }
-        }
         write_fe(&mut out, &gp.sumcheck_proof.claimed_sum);
         for msg in &gp.sumcheck_proof.messages {
             for f in &msg.0.tail_evaluations { write_fe(&mut out, f); }
@@ -389,11 +384,6 @@ fn batched_classic_lookup_proof_to_bytes(proof: &zinc_snark::pipeline::BatchedCp
     for f in &proof.cpr_down_evals { write_fe(&mut out, f); }
     // Per-group lookup data.
     for gp in &proof.lookup_group_proofs {
-        for outer in &gp.chunk_vectors {
-            for inner in outer {
-                for f in inner { write_fe(&mut out, f); }
-            }
-        }
         for v in &gp.aggregated_multiplicities {
             for f in v { write_fe(&mut out, f); }
         }
@@ -462,7 +452,7 @@ fn generate_zero_scalar_trace(
 
 // ─── Criterion suites ───────────────────────────────────────────────────────
 
-/// Single SHA-256 compression (64 rows padded to 128 × 17 columns = poly_size 2^7).
+/// Single SHA-256 compression (64 rows padded to 128 × 26 columns = poly_size 2^7).
 ///
 /// Uses R4B16 IPRS codes at rate 1/4 with DEPTH=1 (row_len=128).
 ///
@@ -473,10 +463,10 @@ fn sha256_single(c: &mut Criterion) {
     group.sample_size(20);
 
     // ── Split PCS: BinaryPoly batch + Int batch ─────────────────────
-    // Split the 17 SHA-256 columns into two PCS batches:
-    //   - BinaryPoly batch (14 cols): columns used in F₂[X] rotation constraints
+    // Split the 26 SHA-256 columns into two PCS batches:
+    //   - BinaryPoly batch (23 cols): columns used in F₂[X] rotation constraints
     //   - Int batch (3 cols): carry columns (μ_a, μ_e, μ_W)
-    // The PIOP still runs on the full 17-column trace.
+    // The PIOP still runs on the full 26-column trace.
     {
         let mut rng = rand::rng();
         let poly_trace = generate_poly_witness(SHA256_NUM_VARS, &mut rng);
@@ -494,6 +484,19 @@ fn sha256_single(c: &mut Criterion) {
         let int_lc = IntLc::new(128);
         let int_params = ZipPlusParams::<IntZt, IntLc>::new(SHA256_NUM_VARS, 1, int_lc);
 
+        // Derive the real PCS evaluation point from a full pipeline proof.
+        // Generate a full 26-column SHA-256 trace, run pipeline, extract the
+        // CPR evaluation point used by the PIOP.  Both split batches share
+        // this point since they originate from the same PIOP.
+        let split_pcs_pt: Vec<F> = {
+            let full_trace = generate_sha256_trace(SHA256_NUM_VARS);
+            let full_params = ZipPlusParams::<PolyZt, PolyLc>::new(SHA256_NUM_VARS, 1, PolyLc::new(128));
+            let full_proof = zinc_snark::pipeline::prove::< Sha256Uair, PolyZt, PolyLc, 32, UNCHECKED>(
+                &full_params, &full_trace, SHA256_NUM_VARS, &sha256_lookup_specs(),
+            );
+            zinc_snark::pipeline::pcs_point_from_proof(&full_proof)
+        };
+
         // ── Prover (both batches) ───────────────────────────────────
         group.bench_function("1xSHA256/SplitPCS/Prover", |b| {
             b.iter_custom(|iters| {
@@ -505,18 +508,16 @@ fn sha256_single(c: &mut Criterion) {
                     let (poly_hint, _) = ZipPlus::<PolyZt, PolyLc>::commit(
                         &poly_params, &poly_trace,
                     ).expect("poly commit");
-                    let poly_pt: Vec<i128> = vec![1i128; SHA256_NUM_VARS];
                     let _ = ZipPlus::<PolyZt, PolyLc>::prove::<F, UNCHECKED>(
-                        &poly_params, &poly_trace, &poly_pt, &poly_hint,
+                        &poly_params, &poly_trace, &split_pcs_pt, &poly_hint,
                     ).expect("poly prove");
 
                     // Int batch
                     let (int_hint, _) = ZipPlus::<IntZt, IntLc>::commit(
                         &int_params, &int_trace,
                     ).expect("int commit");
-                    let int_pt: Vec<i128> = vec![1i128; SHA256_NUM_VARS];
                     let _ = ZipPlus::<IntZt, IntLc>::prove::<F, UNCHECKED>(
-                        &int_params, &int_trace, &int_pt, &int_hint,
+                        &int_params, &int_trace, &split_pcs_pt, &int_hint,
                     ).expect("int prove");
 
                     total += t.elapsed();
@@ -529,7 +530,7 @@ fn sha256_single(c: &mut Criterion) {
         let (poly_hint, poly_comm) = ZipPlus::<PolyZt, PolyLc>::commit(
             &poly_params, &poly_trace,
         ).expect("commit");
-        let poly_pt: Vec<i128> = vec![1i128; SHA256_NUM_VARS];
+        let poly_pt = split_pcs_pt.clone();
         let (poly_eval_f, poly_proof) = ZipPlus::<PolyZt, PolyLc>::prove::<F, UNCHECKED>(
             &poly_params, &poly_trace, &poly_pt, &poly_hint,
         ).expect("prove");
@@ -537,18 +538,14 @@ fn sha256_single(c: &mut Criterion) {
         let (int_hint, int_comm) = ZipPlus::<IntZt, IntLc>::commit(
             &int_params, &int_trace,
         ).expect("commit");
-        let int_pt: Vec<i128> = vec![1i128; SHA256_NUM_VARS];
+        let int_pt = split_pcs_pt.clone();
         let (int_eval_f, int_proof) = ZipPlus::<IntZt, IntLc>::prove::<F, UNCHECKED>(
             &int_params, &int_trace, &int_pt, &int_hint,
         ).expect("prove");
 
-        // Convert points to field elements for verify
-        let pcs_field_cfg = {
-            let mut tx = zinc_transcript::KeccakTranscript::default();
-            tx.get_random_field_cfg::<F, <PolyZt as ZipTypes>::Fmod, <PolyZt as ZipTypes>::PrimeTest>()
-        };
-        let poly_pt_f: Vec<F> = poly_pt.iter().map(|v| v.into_with_cfg(&pcs_field_cfg)).collect();
-        let int_pt_f: Vec<F> = int_pt.iter().map(|v| v.into_with_cfg(&pcs_field_cfg)).collect();
+        // Points are already Vec<F>, no conversion needed
+        let poly_pt_f: Vec<F> = poly_pt.clone();
+        let int_pt_f: Vec<F> = int_pt.clone();
 
         // ── Verifier (both batches) ─────────────────────────────────
         group.bench_function("1xSHA256/SplitPCS/Verifier", |b| {
@@ -600,7 +597,7 @@ fn sha256_single(c: &mut Criterion) {
 ///
 /// Uses **two separate PCS batches** with evaluation types matched to the
 /// arithmetic of each UAIR:
-/// - SHA-256:  14 columns × BinaryPoly<32> + 3 columns × Int<1>
+/// - SHA-256:  23 columns × BinaryPoly<32> + 3 columns × Int<1>
 /// - ECDSA:    9 columns × Int<4>  (scalar evaluations, 1 × 256-bit integer)
 ///
 /// This is ~32× cheaper per cell for the ECDSA columns compared to
@@ -613,11 +610,13 @@ fn sha256_single(c: &mut Criterion) {
 ///   - Combined prover:  < 30 ms (or just above)
 ///   - Combined verifier: < 5 ms
 fn sha256_8x_ecdsa(c: &mut Criterion) {
+    let mem_tracker = MemoryTracker::start();
+
     let mut group = c.benchmark_group("8xSHA256+ECDSA");
     group.sample_size(10);
 
     // ── Build traces ────────────────────────────────────────────────
-    // SHA-256: 17 columns × 512 rows (8 instances × 64 rounds)
+    // SHA-256: 26 columns × 512 rows (8 instances × 64 rounds)
     let sha_trace = generate_sha256_trace(SHA256_8X_NUM_VARS);
     assert_eq!(sha_trace.len(), SHA256_BATCH_SIZE);
 
@@ -628,10 +627,9 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
 
     // Public columns for ECDSA verifier (b_1 = col 0, b_2 = col 1).
     let ec_public_cols = vec![ecdsa_trace[0].clone(), ecdsa_trace[1].clone()];
-    let sha_public_cols = vec![
-        sha_trace[zinc_sha256_uair::COL_W_HAT].clone(),
-        sha_trace[zinc_sha256_uair::COL_K_HAT].clone(),
-    ];
+    let sha_sig_pub = Sha256Uair::signature();
+    let sha_public_cols: Vec<_> = sha_sig_pub.public_columns.iter()
+        .map(|&i| sha_trace[i].clone()).collect();
 
     // ── PCS params ──────────────────────────────────────────────────
     // SHA: BinaryPoly<32>, R4B64 DEPTH=1 → row_len = 64 × 8 = 512 ✓
@@ -651,21 +649,32 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
     // ── Lookup column specs ──────────────────────────────────────────
     let sha_lookup_specs = sha256_lookup_specs();
 
+    // ── Proof sizes (full pipeline: PCS + PIOP + Lookup) ────────────
+    // Generate full-pipeline proofs for accurate size reporting and to
+    // derive real PCS evaluation points for standalone PCS benchmarks.
+    let sha_zinc_proof = zinc_snark::pipeline::prove::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
+        &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
+    );
+    let ec_zinc_proof = zinc_snark::pipeline::prove_generic::< EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED,
+    >(
+        &ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &[],
+    );
+
+    // Derive real PCS evaluation points from the PIOP-generated CPR points.
+    let sha_pcs_pt: Vec<F> = zinc_snark::pipeline::pcs_point_from_proof(&sha_zinc_proof);
+    let ec_pcs_pt: Vec<F> = zinc_snark::pipeline::pcs_point_from_proof(&ec_zinc_proof);
+
     // ── Prepare ECDSA proof (reused by split PCS verifier) ────────
     let (ec_hint, ec_comm) = ZipPlus::<EcZt, EcLc>::commit(
         &ec_params, &ecdsa_trace,
     ).expect("commit");
-    let ec_pt: Vec<i128> = vec![1i128; ECDSA_NUM_VARS];
+    let ec_pt = ec_pcs_pt.clone();
     let (ec_eval_f, ec_proof) = ZipPlus::<EcZt, EcLc>::prove::<FScalar, UNCHECKED>(
         &ec_params, &ecdsa_trace, &ec_pt, &ec_hint,
     ).expect("prove");
 
-    // Convert ECDSA point to field for verify
-    let ec_pcs_field_cfg = {
-        let mut tx = zinc_transcript::KeccakTranscript::default();
-        tx.get_random_field_cfg::<FScalar, <EcZt as ZipTypes>::Fmod, <EcZt as ZipTypes>::PrimeTest>()
-    };
-    let ec_pt_f: Vec<FScalar> = ec_pt.iter().map(|v| v.into_with_cfg(&ec_pcs_field_cfg)).collect();
+    // ec_pt is already Vec<F> = Vec<FScalar>, no conversion needed
+    let ec_pt_f: Vec<FScalar> = ec_pt.clone();
 
     // ── Full Pipeline Prover (IC + CPR + Lookup + PCS) ──────────────
     group.bench_function("FullPipeline/Prover", |b| {
@@ -686,17 +695,6 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
             total
         });
     });
-
-    // ── Proof sizes (full pipeline: PCS + PIOP + Lookup) ────────────
-    // Generate full-pipeline proofs for accurate size reporting.
-    let sha_zinc_proof = zinc_snark::pipeline::prove::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
-        &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
-    );
-    let ec_zinc_proof = zinc_snark::pipeline::prove_generic::<
-        EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED,
-    >(
-        &ec_params, &ecdsa_trace, ECDSA_NUM_VARS, &[],
-    );
 
     // ── Full Pipeline Verifier ───────────────────────────────────────
     {
@@ -775,10 +773,10 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
         ec_pcs, ec_pcs as f64 / 1024.0, ec_piop, ec_piop as f64 / 1024.0, ec_lookup);
     eprintln!("  Total raw: {} bytes ({:.1} KB)", total_raw, total_raw as f64 / 1024.0);
 
-    // ── Split SHA PCS: BinaryPoly (14 cols) + Int (3 cols) + ECDSA ──
-    // Splits the 17 SHA-256 columns into two PCS batches by column type,
+    // ── Split SHA PCS: BinaryPoly (23 cols) + Int (3 cols) + ECDSA ──
+    // Splits the 26 SHA-256 columns into two PCS batches by column type,
     // keeping the ECDSA batch unchanged.  Three PCS batches total:
-    //   1. SHA BinaryPoly (14 cols) — rotation/shift constraints
+    //   1. SHA BinaryPoly (23 cols) — rotation/shift constraints
     //   2. SHA Int<1>     (3 cols)  — carry columns (μ_a, μ_e, μ_W)
     //   3. ECDSA Int<4>   (9 cols)  — scalar arithmetic
     {
@@ -813,27 +811,24 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
                     let (h, _) = ZipPlus::<ShaPolyZt, ShaPolyLc>::commit(
                         &sha_poly_params, &sha_poly_trace,
                     ).expect("sha poly commit");
-                    let pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
                     let _ = ZipPlus::<ShaPolyZt, ShaPolyLc>::prove::<F, UNCHECKED>(
-                        &sha_poly_params, &sha_poly_trace, &pt, &h,
+                        &sha_poly_params, &sha_poly_trace, &sha_pcs_pt, &h,
                     ).expect("sha poly prove");
 
                     // SHA Int batch
                     let (h, _) = ZipPlus::<ShaIntZt, ShaIntLc>::commit(
                         &sha_int_params, &sha_int_trace,
                     ).expect("sha int commit");
-                    let pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
                     let _ = ZipPlus::<ShaIntZt, ShaIntLc>::prove::<F, UNCHECKED>(
-                        &sha_int_params, &sha_int_trace, &pt, &h,
+                        &sha_int_params, &sha_int_trace, &sha_pcs_pt, &h,
                     ).expect("sha int prove");
 
-                    // ECDSA batch (unchanged)
+                    // ECDSA batch
                     let (h, _) = ZipPlus::<EcZt, EcLc>::commit(
                         &ec_params, &ecdsa_trace,
                     ).expect("ecdsa commit");
-                    let pt: Vec<i128> = vec![1i128; ECDSA_NUM_VARS];
                     let _ = ZipPlus::<EcZt, EcLc>::prove::<FScalar, UNCHECKED>(
-                        &ec_params, &ecdsa_trace, &pt, &h,
+                        &ec_params, &ecdsa_trace, &ec_pcs_pt, &h,
                     ).expect("ecdsa prove");
 
                     total += t.elapsed();
@@ -846,7 +841,7 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
         let (sp_h, sp_comm) = ZipPlus::<ShaPolyZt, ShaPolyLc>::commit(
             &sha_poly_params, &sha_poly_trace,
         ).expect("commit");
-        let sp_pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
+        let sp_pt = sha_pcs_pt.clone();
         let (sp_eval_f, sp_proof) = ZipPlus::<ShaPolyZt, ShaPolyLc>::prove::<F, UNCHECKED>(
             &sha_poly_params, &sha_poly_trace, &sp_pt, &sp_h,
         ).expect("prove");
@@ -854,7 +849,7 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
         let (si_h, si_comm) = ZipPlus::<ShaIntZt, ShaIntLc>::commit(
             &sha_int_params, &sha_int_trace,
         ).expect("commit");
-        let si_pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
+        let si_pt = sha_pcs_pt.clone();
         let (si_eval_f, si_proof) = ZipPlus::<ShaIntZt, ShaIntLc>::prove::<F, UNCHECKED>(
             &sha_int_params, &sha_int_trace, &si_pt, &si_h,
         ).expect("prove");
@@ -862,13 +857,9 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
         // Reuse ECDSA proof from above (ec_comm, ec_pt, ec_proof)
 
         // ── Split Verifier (3 batches) ──────────────────────────────
-        // Convert points to field for verify
-        let split_pcs_field_cfg = {
-            let mut tx = zinc_transcript::KeccakTranscript::default();
-            tx.get_random_field_cfg::<F, <ShaPolyZt as ZipTypes>::Fmod, <ShaPolyZt as ZipTypes>::PrimeTest>()
-        };
-        let sp_pt_f: Vec<F> = sp_pt.iter().map(|v| v.into_with_cfg(&split_pcs_field_cfg)).collect();
-        let si_pt_f: Vec<F> = si_pt.iter().map(|v| v.into_with_cfg(&split_pcs_field_cfg)).collect();
+        // Points are already Vec<F>, no conversion needed
+        let sp_pt_f: Vec<F> = sp_pt.clone();
+        let si_pt_f: Vec<F> = si_pt.clone();
 
         group.bench_function("SplitSHA/PCS/Verifier", |b| {
             b.iter(|| {
@@ -960,6 +951,9 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
             split_compressed.len(), split_compressed.len() as f64 / 1024.0,
             split_all.len() as f64 / split_compressed.len() as f64);
     }
+
+    let mem_snapshot = mem_tracker.stop();
+    eprintln!("  {mem_snapshot}");
 
     group.finish();
 }
@@ -1105,10 +1099,9 @@ fn sha256_8x_ecdsa_end_to_end(c: &mut Criterion) {
     let ecdsa_trace = generate_zero_scalar_trace(ECDSA_NUM_VARS, ECDSA_BATCH_SIZE);
     assert_eq!(ecdsa_trace.len(), ECDSA_BATCH_SIZE);
     let ec_public_cols = vec![ecdsa_trace[0].clone(), ecdsa_trace[1].clone()];
-    let sha_public_cols = vec![
-        sha_trace[zinc_sha256_uair::COL_W_HAT].clone(),
-        sha_trace[zinc_sha256_uair::COL_K_HAT].clone(),
-    ];
+    let sha_sig_pub = Sha256Uair::signature();
+    let sha_public_cols: Vec<_> = sha_sig_pub.public_columns.iter()
+        .map(|&i| sha_trace[i].clone()).collect();
 
     // ── PCS params ──────────────────────────────────────────────────
     type ShaZt = Sha256ZipTypes<i64, 32>;
@@ -1206,6 +1199,8 @@ fn sha256_8x_ecdsa_end_to_end(c: &mut Criterion) {
 /// This measures the actual end-to-end pipeline including PIOP proof serialization/deserialization,
 /// and reports total proof sizes (PCS + PIOP data).
 fn sha256_full_pipeline(c: &mut Criterion) {
+    let mem_tracker = MemoryTracker::start();
+
     use zinc_sha256_uair::CyclotomicIdeal;
     use zinc_uair::ideal_collector::IdealOrZero;
     type Lc = IprsBPoly32R4B16<1, UNCHECKED>;
@@ -1215,10 +1210,9 @@ fn sha256_full_pipeline(c: &mut Criterion) {
     group.sample_size(20);
 
     let trace = generate_sha256_trace(SHA256_NUM_VARS);
-    let sha_public_cols = vec![
-        trace[zinc_sha256_uair::COL_W_HAT].clone(),
-        trace[zinc_sha256_uair::COL_K_HAT].clone(),
-    ];
+    let sha_sig = Sha256Uair::signature();
+    let sha_public_cols: Vec<_> = sha_sig.public_columns.iter()
+        .map(|&i| trace[i].clone()).collect();
     let num_vars = SHA256_NUM_VARS;
     let linear_code = Lc::new(128);
     let params = ZipPlusParams::new(num_vars, 1, linear_code);
@@ -1296,7 +1290,7 @@ fn sha256_full_pipeline(c: &mut Criterion) {
     eprintln!("  Target limit:  800 KB → {}", if total_size <= 819200 { "✓ UNDER" } else { "✗ OVER" });
 
     // ── Split PCS proof size comparison ─────────────────────────────
-    // Run separate PCS for the BinaryPoly (14 cols) and Int (3 cols) batches
+    // Run separate PCS for the BinaryPoly (23 cols) and Int (3 cols) batches
     // to measure the proof size savings from the column type split.
     // The PIOP proof size is unchanged — only PCS is split.
     {
@@ -1309,20 +1303,21 @@ fn sha256_full_pipeline(c: &mut Criterion) {
         let int_lc = IntLc::new(128);
         let int_params = ZipPlusParams::<IntZt, IntLc>::new(num_vars, 1, int_lc);
 
+        // Derive the real PCS evaluation point from the full pipeline proof.
+        let split_pt: Vec<F> = zinc_snark::pipeline::pcs_point_from_proof(&zinc_proof);
+
         // BinaryPoly batch PCS
         let (poly_hint, _) = ZipPlus::<Zt, Lc>::commit(&params, &poly_trace)
             .expect("poly commit");
-        let poly_pt: Vec<i128> = vec![1i128; num_vars];
         let (_, poly_proof) = ZipPlus::<Zt, Lc>::prove::<F, UNCHECKED>(
-            &params, &poly_trace, &poly_pt, &poly_hint,
+            &params, &poly_trace, &split_pt, &poly_hint,
         ).expect("poly prove");
 
         // Int batch PCS
         let (int_hint, _) = ZipPlus::<IntZt, IntLc>::commit(&int_params, &int_trace)
             .expect("int commit");
-        let int_pt: Vec<i128> = vec![1i128; num_vars];
         let (_, int_proof) = ZipPlus::<IntZt, IntLc>::prove::<F, UNCHECKED>(
-            &int_params, &int_trace, &int_pt, &int_hint,
+            &int_params, &int_trace, &split_pt, &int_hint,
         ).expect("int prove");
 
         let poly_pcs_bytes: Vec<u8> = {
@@ -1369,6 +1364,9 @@ fn sha256_full_pipeline(c: &mut Criterion) {
             split_bytes.len() as f64 / split_compressed.len() as f64);
     }
 
+    let mem_snapshot = mem_tracker.stop();
+    eprintln!("  {mem_snapshot}");
+
     group.finish();
 }
 
@@ -1403,10 +1401,9 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
     let ecdsa_trace = generate_zero_scalar_trace(ECDSA_NUM_VARS, ECDSA_BATCH_SIZE);
     assert_eq!(ecdsa_trace.len(), ECDSA_BATCH_SIZE);
     let ec_public_cols = vec![ecdsa_trace[0].clone(), ecdsa_trace[1].clone()];
-    let sha_public_cols = vec![
-        sha_trace[zinc_sha256_uair::COL_W_HAT].clone(),
-        sha_trace[zinc_sha256_uair::COL_K_HAT].clone(),
-    ];
+    let sha_sig_pub = Sha256Uair::signature();
+    let sha_public_cols: Vec<_> = sha_sig_pub.public_columns.iter()
+        .map(|&i| sha_trace[i].clone()).collect();
 
     // ── PCS params ──────────────────────────────────────────────────
     type ShaZt = Sha256ZipTypes<i64, 32>;

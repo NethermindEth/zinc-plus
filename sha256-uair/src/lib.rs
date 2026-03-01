@@ -358,7 +358,11 @@ impl Uair for Sha256UairBp {
                 zinc_uair::ShiftSpec { source_col: COL_W_TM15, shift_amount: 15 },
                 zinc_uair::ShiftSpec { source_col: COL_W_TM16, shift_amount: 16 },
             ],
-            public_columns: vec![COL_W_HAT, COL_K_HAT],
+            public_columns: vec![
+                COL_W_HAT, COL_K_HAT,
+                COL_W_TM2, COL_W_TM7, COL_W_TM15, COL_W_TM16,
+                COL_SEL_ROUND, COL_SEL_SCHED,
+            ],
         }
     }
 
@@ -614,7 +618,11 @@ impl Uair for Sha256UairQx {
                 zinc_uair::ShiftSpec { source_col: COL_A_HAT, shift_amount: 1 },
                 zinc_uair::ShiftSpec { source_col: COL_E_HAT, shift_amount: 1 },
             ],
-            public_columns: vec![COL_W_HAT, COL_K_HAT],
+            public_columns: vec![
+                COL_W_HAT, COL_K_HAT,
+                COL_W_TM2, COL_W_TM7, COL_W_TM15, COL_W_TM16,
+                COL_SEL_ROUND, COL_SEL_SCHED,
+            ],
         }
     }
 

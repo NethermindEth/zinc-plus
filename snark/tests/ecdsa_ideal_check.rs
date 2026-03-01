@@ -1,13 +1,13 @@
 //! Test that the ECDSA IC + CPR pipeline succeeds on a valid witness.
 //!
-//! All 7 ECDSA DensePolynomial constraints use `assert_zero` (ImpossibleIdeal),
+//! All 9 ECDSA DensePolynomial constraints use `assert_zero` (ImpossibleIdeal),
 //! so the verifier only needs to check that each combined MLE value is exactly
 //! zero (no non-trivial ideal membership).
 //!
 //! Steps:
 //! 1. Generate a valid DensePolynomial<i64, 1> witness (constant-row fixed point)
 //! 2. Project trace and scalars for IdealCheck
-//! 3. Run IdealCheck prover (7 constraints, max degree ≤ 6)
+//! 3. Run IdealCheck prover (9 constraints, max degree ≤ 12)
 //! 4. Project to field for CombinedPolyResolver
 //! 5. Run CombinedPolyResolver prover
 //! 6. Run IdealCheck verifier with zero-only ideal checks
@@ -82,7 +82,6 @@ fn ecdsa_ideal_check_succeeds_on_valid_witness() {
     );
     assert_eq!(num_constraints, NUM_CONSTRAINTS_I64);
     assert!(max_degree >= 4 && max_degree <= 12);
-
     // Step 2: Project trace and scalars for IdealCheck.
     let mut transcript = zinc_transcript::KeccakTranscript::new();
     let field_cfg = transcript.get_random_field_cfg::<F, <F as Field>::Inner, MillerRabin>();
@@ -213,5 +212,5 @@ fn ecdsa_ideal_check_succeeds_on_valid_witness() {
     );
     println!("ECDSA CombinedPolyResolver verifier PASSED ✓");
 
-    println!("\n✓ Full ECDSA IC + CPR pipeline verified (7 assert_zero constraints, max degree {max_degree})");
+    println!("\n✓ Full ECDSA IC + CPR pipeline verified (9 assert_zero constraints, max degree {max_degree})");
 }

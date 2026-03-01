@@ -24,28 +24,30 @@
 //! - Rows 2–257: Shamir's trick double-and-add loop (256 scalar bits)
 //! - Row 258: Final verification (inverse, affine conversion, sig check)
 //!
-//! # Column layout (9 columns)
+//! # Column layout (11 columns)
 //!
-//! | Index | Name  | Description                                |
-//! |-------|-------|--------------------------------------------|
-//! | 0     | b₁    | Bit of scalar u₁ (bit-index 257-t)         |
-//! | 1     | b₂    | Bit of scalar u₂ (bit-index 257-t)         |
-//! | 2     | X     | Accumulator x-coord (Jacobian)             |
-//! | 3     | Y     | Accumulator y-coord (Jacobian)             |
-//! | 4     | Z     | Accumulator z-coord (Jacobian)             |
-//! | 5     | X_mid | Doubled point 2P x-coord (Jacobian)        |
-//! | 6     | Y_mid | Doubled point 2P y-coord (Jacobian)        |
-//! | 7     | Z_mid | Doubled point 2P z-coord (Jacobian)        |
-//! | 8     | H     | Addition scratch: chord x-diff             |
+//! | Index | Name       | Description                                |
+//! |-------|------------|--------------------------------------------|
+//! | 0     | b₁         | Bit of scalar u₁ (bit-index 257-t)         |
+//! | 1     | b₂         | Bit of scalar u₂ (bit-index 257-t)         |
+//! | 2     | X          | Accumulator x-coord (Jacobian)             |
+//! | 3     | Y          | Accumulator y-coord (Jacobian)             |
+//! | 4     | Z          | Accumulator z-coord (Jacobian)             |
+//! | 5     | X_mid      | Doubled point 2P x-coord (Jacobian)        |
+//! | 6     | Y_mid      | Doubled point 2P y-coord (Jacobian)        |
+//! | 7     | Z_mid      | Doubled point 2P z-coord (Jacobian)        |
+//! | 8     | H          | Addition scratch: chord x-diff             |
+//! | 9     | sel_init   | Boundary selector: 1 at row 0 (public)     |
+//! | 10    | sel_final  | Boundary selector: 1 at row 257 (public)   |
 //!
-//! # Constraints (7 non-boundary)
+//! # Constraints (7 non-boundary + 4 boundary = 11 total)
 //!
 //! The ECDSA verification constraints operate in F_p, not in F₂\[X\].
 //! Since the current Zinc+ UAIR framework only supports a single ring
 //! per UAIR, and the PCS/PIOP operate on BinaryPoly traces, this crate
 //! provides:
 //!
-//! - Correct trace dimensions for benchmarking (258 rows × 9 columns)
+//! - Correct trace dimensions for benchmarking (258 rows × 11 columns)
 //! - Random witness generation (valid for PCS timing, not constraint-sound)
 //! - The UAIR struct with constraint specifications
 //!
@@ -79,14 +81,20 @@ use zinc_uair::{
 };
 use zinc_utils::from_ref::FromRef;
 
-/// Total number of trace columns (from the paper: 9).
-pub const NUM_COLS: usize = 9;
+/// Total number of trace columns: 9 data + 2 selector = 11.
+pub const NUM_COLS: usize = 11;
 
 /// Number of trace rows: 1 (precomp) + 256 (scalar mul) + 1 (final check) = 258.
 pub const NUM_ROWS: usize = 258;
 
 /// Number of non-boundary constraints (from the paper: 7).
 pub const NUM_CONSTRAINTS: usize = 0; // Placeholder — constraints require F_p ring
+
+/// Number of boundary constraints enforced in the constraint system:
+/// 2 (init Z=0, final signature check).
+/// Booleanity of b₁/b₂ is checked by the verifier directly on the public
+/// column data, so it does not cost constraint-system degrees.
+pub const NUM_BOUNDARY_CONSTRAINTS: usize = 2;
 
 // ─── Column indices ──────────────────────────────────────────────────────────
 
@@ -106,6 +114,13 @@ const DOWN_X: usize = 0;
 const DOWN_Y: usize = 1;
 const DOWN_Z: usize = 2;
 pub const COL_H: usize = 8;
+
+// ─── Selector columns (boundary constraints) ───────────────────────────────
+
+/// Initialization selector: 1 at row 0, 0 elsewhere (public).
+pub const COL_SEL_INIT: usize = 9;
+/// Finalization selector: 1 at row NUM_ROWS−1 (row 257), 0 elsewhere (public).
+pub const COL_SEL_FINAL: usize = 10;
 
 // ─── Toy curve constants ────────────────────────────────────────────────────
 // Curve: y² = x³ + 7 over F_101 (same equation as secp256k1, small prime)
@@ -128,6 +143,14 @@ pub const QY: i64 = 7;
 pub const PGQX: i64 = 35;
 /// Precomputed (G+Q) y-coordinate.
 pub const PGQY: i64 = 82;
+
+/// Expected signature verification result: r_sig = k·n + r.
+///
+/// For the toy fixed-point witness (Z=0 everywhere, identity result),
+/// this value is unused because the final-check constraint is guarded
+/// by Z (vacuously satisfied when Z=0). For a non-trivial witness,
+/// set this to the actual k·n + r value.
+pub const R_SIG: i64 = 0;
 
 // ─── Ideal types ────────────────────────────────────────────────────────────
 
@@ -220,10 +243,10 @@ pub type EcdsaUair = EcdsaUairBp;
 /// ECDSA UAIR over `BinaryPoly<32>` (placeholder, no constraints).
 pub struct EcdsaUairBp;
 
-/// ECDSA UAIR over `DensePolynomial<i64, 1>` (7 Jacobian constraints).
+/// ECDSA UAIR over `DensePolynomial<i64, 1>` (9 constraints: 7 Jacobian + 2 boundary).
 pub struct EcdsaUairDp;
 
-/// ECDSA UAIR over `Int<4>` (7 Jacobian constraints, 256-bit integers).
+/// ECDSA UAIR over `Int<4>` (9 constraints: 7 Jacobian + 2 boundary, 256-bit integers).
 pub struct EcdsaUairInt;
 
 // ─── BinaryPoly<32> implementation (placeholder, no constraints) ────────────
@@ -238,7 +261,7 @@ impl Uair for EcdsaUairBp {
             arbitrary_poly_cols: 0,
             int_cols: 0,
             shifts: vec![],
-            public_columns: vec![COL_B1, COL_B2],
+            public_columns: vec![COL_B1, COL_B2, COL_SEL_INIT, COL_SEL_FINAL],
         }
     }
 
@@ -260,7 +283,7 @@ impl Uair for EcdsaUairBp {
     }
 }
 
-// ─── DensePolynomial<i64, 1> implementation (7 constraints) ─────────────────
+// ─── DensePolynomial<i64, 1> implementation (9 constraints) ────────────────
 //
 // Ring: degree-0 integer polynomials (effectively i64 scalars).
 // All constraints are assert_zero (exact integer equality).
@@ -271,10 +294,14 @@ impl Uair for EcdsaUairBp {
 // (not separate columns). u₁, u₂ are public inputs (no trace columns).
 // k is boundary-only (no trace column).
 //
+// Constraints C1–C7 are non-boundary (doubling + addition).
+// Constraints B3–B4 are boundary (init, final check).
+// Booleanity of b₁/b₂ is verified outside the constraint system.
+//
 // For real secp256k1, a proper 256-bit field type would be needed.
 
-/// Number of constraints for the i64 ECDSA UAIR.
-pub const NUM_CONSTRAINTS_I64: usize = 7;
+/// Number of constraints for the i64 ECDSA UAIR: 7 non-boundary + 2 boundary.
+pub const NUM_CONSTRAINTS_I64: usize = 9;
 
 impl Uair for EcdsaUairDp {
     type Ideal = ImpossibleIdeal;
@@ -290,7 +317,7 @@ impl Uair for EcdsaUairDp {
                 zinc_uair::ShiftSpec { source_col: COL_Y, shift_amount: 1 },
                 zinc_uair::ShiftSpec { source_col: COL_Z, shift_amount: 1 },
             ],
-            public_columns: vec![COL_B1, COL_B2],
+            public_columns: vec![COL_B1, COL_B2, COL_SEL_INIT, COL_SEL_FINAL],
         }
     }
 
@@ -375,7 +402,7 @@ impl Uair for EcdsaUairDp {
 
         // ── C5: Result Z-coordinate ────────────────────────────────
         // Z[t+1] = (1-s)·Z_mid + s·(Z_mid·H)
-        let one_minus_s = one - &s;
+        let one_minus_s = one.clone() - &s;
         let zmid_h = up[COL_Z_MID].clone() * &up[COL_H];
         b.assert_zero(
             down[DOWN_Z].clone()
@@ -409,10 +436,40 @@ impl Uair for EcdsaUairDp {
                 - &(one_minus_s * &up[COL_Y_MID])
                 - &(s * &add_y),
         );
+
+        // ═══════════════════════════════════════════════════════════
+        //  Boundary constraints (B3–B4)
+        //
+        //  NOTE: Booleanity of b₁/b₂ (former B1/B2) is NOT enforced
+        //  here. The verifier checks it directly on the public column
+        //  data, saving 2 constraint-system degrees.
+        // ═══════════════════════════════════════════════════════════
+
+        // ── B3: Initialization: sel_init · Z = 0 ───────────────────
+        // At row 0 the accumulator must be the identity (Z=0 in
+        // Jacobian coordinates). Elsewhere sel_init=0 → vacuous.
+        b.assert_zero(
+            up[COL_SEL_INIT].clone() * &up[COL_Z],
+        );
+
+        // ── B4: Final signature check (guarded): ───────────────────
+        //   sel_final · Z · (X − R_SIG · Z²) = 0
+        //
+        // When Z≠0 this enforces X = R_SIG·Z² (i.e. the affine
+        // x-coordinate X/Z² equals R_SIG = k·n + r).
+        // When Z=0 (identity / point at infinity) the constraint is
+        // vacuously satisfied — a separate non-degeneracy check
+        // would be needed to prove Z≠0 in a production system.
+        let z_sq = up[COL_Z].clone() * &up[COL_Z];
+        b.assert_zero(
+            up[COL_SEL_FINAL].clone()
+                * &up[COL_Z]
+                * &(up[COL_X].clone() - &smul(&z_sq, R_SIG)),
+        );
     }
 }
 
-// ─── Int<4> implementation (7 constraints, 256-bit integer arithmetic) ───────
+// ─── Int<4> implementation (9 constraints, 256-bit integer arithmetic) ──────
 //
 // Ring: Int<4> (256-bit signed integers). Identical constraint algebra to the
 // DensePolynomial<i64, 1> implementation above, but using Int<4> which can
@@ -421,8 +478,8 @@ impl Uair for EcdsaUairDp {
 // This is the target ring for the unified ECDSA pipeline: the same Int<4>
 // type is used for PCS commitments, PIOP constraints, and witness values.
 
-/// Number of constraints for the Int<4> ECDSA UAIR.
-pub const NUM_CONSTRAINTS_INT4: usize = 7;
+/// Number of constraints for the Int<4> ECDSA UAIR: 7 non-boundary + 2 boundary.
+pub const NUM_CONSTRAINTS_INT4: usize = 9;
 
 impl Uair for EcdsaUairInt {
     type Ideal = ImpossibleIdeal;
@@ -438,7 +495,7 @@ impl Uair for EcdsaUairInt {
                 zinc_uair::ShiftSpec { source_col: COL_Y, shift_amount: 1 },
                 zinc_uair::ShiftSpec { source_col: COL_Z, shift_amount: 1 },
             ],
-            public_columns: vec![COL_B1, COL_B2],
+            public_columns: vec![COL_B1, COL_B2, COL_SEL_INIT, COL_SEL_FINAL],
         }
     }
 
@@ -523,7 +580,7 @@ impl Uair for EcdsaUairInt {
 
         // ── C5: Result Z-coordinate ────────────────────────────────
         // Z[t+1] = (1-s)·Z_mid + s·(Z_mid·H)
-        let one_minus_s = one - &s;
+        let one_minus_s = one.clone() - &s;
         let zmid_h = up[COL_Z_MID].clone() * &up[COL_H];
         b.assert_zero(
             down[DOWN_Z].clone()
@@ -557,6 +614,36 @@ impl Uair for EcdsaUairInt {
                 - &(one_minus_s * &up[COL_Y_MID])
                 - &(s * &add_y),
         );
+
+        // ═══════════════════════════════════════════════════════════
+        //  Boundary constraints (B3–B4)
+        //
+        //  NOTE: Booleanity of b₁/b₂ (former B1/B2) is NOT enforced
+        //  here. The verifier checks it directly on the public column
+        //  data, saving 2 constraint-system degrees.
+        // ═══════════════════════════════════════════════════════════
+
+        // ── B3: Initialization: sel_init · Z = 0 ───────────────────
+        // At row 0 the accumulator must be the identity (Z=0 in
+        // Jacobian coordinates). Elsewhere sel_init=0 → vacuous.
+        b.assert_zero(
+            up[COL_SEL_INIT].clone() * &up[COL_Z],
+        );
+
+        // ── B4: Final signature check (guarded): ───────────────────
+        //   sel_final · Z · (X − R_SIG · Z²) = 0
+        //
+        // When Z≠0 this enforces X = R_SIG·Z² (i.e. the affine
+        // x-coordinate X/Z² equals R_SIG = k·n + r).
+        // When Z=0 (identity / point at infinity) the constraint is
+        // vacuously satisfied — a separate non-degeneracy check
+        // would be needed to prove Z≠0 in a production system.
+        let z_sq = up[COL_Z].clone() * &up[COL_Z];
+        b.assert_zero(
+            up[COL_SEL_FINAL].clone()
+                * &up[COL_Z]
+                * &(up[COL_X].clone() - &smul(&z_sq, R_SIG)),
+        );
     }
 }
 
@@ -569,13 +656,13 @@ mod tests {
     #[test]
     fn correct_dimensions() {
         assert_eq!(NUM_ROWS, 258);
-        assert_eq!(NUM_COLS, 9);
+        assert_eq!(NUM_COLS, 11);
     }
 
     #[test]
     fn i64_constraint_count() {
         let n = count_constraints::<EcdsaUairDp>();
-        assert_eq!(n, NUM_CONSTRAINTS_I64, "Expected 7 ECDSA i64 constraints");
+        assert_eq!(n, NUM_CONSTRAINTS_I64, "Expected 9 ECDSA i64 constraints");
     }
 
     #[test]
@@ -589,7 +676,7 @@ mod tests {
     #[test]
     fn int4_constraint_count() {
         let n = count_constraints::<EcdsaUairInt>();
-        assert_eq!(n, NUM_CONSTRAINTS_INT4, "Expected 7 ECDSA Int<4> constraints");
+        assert_eq!(n, NUM_CONSTRAINTS_INT4, "Expected 9 ECDSA Int<4> constraints");
     }
 
     #[test]

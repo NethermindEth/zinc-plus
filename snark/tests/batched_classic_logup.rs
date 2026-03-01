@@ -21,6 +21,7 @@ use zinc_poly::univariate::binary::{
 use zinc_poly::univariate::dense::{DensePolyInnerProduct, DensePolynomial};
 use zinc_primality::MillerRabin;
 use zinc_transcript::traits::ConstTranscribable;
+use zinc_uair::Uair;
 use zinc_uair::ideal_collector::IdealOrZero;
 use zinc_utils::{
     UNCHECKED,
@@ -123,11 +124,11 @@ fn batched_classic_logup_round_trip() {
     );
 
     // ── Verify ─────────────────────────────────────────────────────
-    // Public columns (W_hat = col 2, K_hat = col 20).
-    let sha_public_cols = vec![
-        trace[zinc_sha256_uair::COL_W_HAT].clone(),
-        trace[zinc_sha256_uair::COL_K_HAT].clone(),
-    ];
+    // Public columns from the UAIR signature.
+    let sha_sig = Sha256Uair::signature();
+    let sha_public_cols: Vec<_> = sha_sig.public_columns.iter()
+        .map(|&i| trace[i].clone())
+        .collect();
 
     let verify_result = pipeline::verify::<Sha256Uair, Zt, Lc, 32, UNCHECKED, _, _>(
         &params,

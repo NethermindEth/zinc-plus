@@ -8,9 +8,10 @@
 //!    This is the target type for the unified ECDSA pipeline where the
 //!    same `Int<4>` is used for PCS commitments, PIOP, and constraints.
 
-use super::{EcdsaUairBp, EcdsaUairDp, EcdsaUairInt, NUM_COLS};
+use super::{EcdsaUairBp, EcdsaUairDp, EcdsaUairInt, NUM_COLS, NUM_ROWS};
 use super::{COL_B1, COL_B2, COL_X, COL_Y, COL_Z};
 use super::{COL_X_MID, COL_Y_MID, COL_Z_MID, COL_H};
+use super::{COL_SEL_INIT, COL_SEL_FINAL};
 use crypto_primitives::crypto_bigint_int::Int;
 use rand::RngCore;
 use zinc_poly::{
@@ -45,15 +46,17 @@ impl GenerateWitness<DensePolynomial<i64, 1>> for EcdsaUairDp {
     /// Generate a valid ECDSA trace (constant-row fixed point, integer arithmetic).
     ///
     /// Uses the Jacobian doubling fixed point **(X, Y, Z) = (1, 1, 0)** with
-    /// `b₁ = b₂ = 0` (pure doubling, no addition). Every row is identical:
+    /// `b₁ = b₂ = 0` (pure doubling, no addition). Every row is identical
+    /// for the data columns; selector columns `sel_init` and `sel_final`
+    /// are 1 at row 0 and row NUM_ROWS−1 respectively.
     ///
     /// - Z_mid = 2·Y·Z = 0
     /// - X_mid = 9X⁴ − 8X·Y² = 9 − 8 = 1
     /// - Y_mid = 12X³·Y² − 3X²·X_mid − 8Y⁴ = 12 − 3 − 8 = 1
     /// - H = T_x·Z_mid² − X_mid = 0 − 1 = −1 (T_x=0 when b₁=b₂=0)
     ///
-    /// Since every row is the same, the wrap-around (last row → row 0) is
-    /// automatically consistent and all 7 constraints evaluate to zero at
+    /// Since every row is the same (data-wise), the wrap-around (last row → row 0)
+    /// is automatically consistent and all 11 constraints evaluate to zero at
     /// every hypercube point.
     fn generate_witness<Rng: RngCore + ?Sized>(
         num_vars: usize,
@@ -62,7 +65,7 @@ impl GenerateWitness<DensePolynomial<i64, 1>> for EcdsaUairDp {
         let dp = |v: i64| DensePolynomial::<i64, 1>::new([v]);
         let num_rows: usize = 1 << num_vars;
 
-        // Pre-allocate columns (9 columns × num_rows), default = 0.
+        // Pre-allocate columns (11 columns × num_rows), default = 0.
         let mut cols: Vec<Vec<DensePolynomial<i64, 1>>> =
             (0..NUM_COLS).map(|_| vec![dp(0); num_rows]).collect();
 
@@ -84,6 +87,16 @@ impl GenerateWitness<DensePolynomial<i64, 1>> for EcdsaUairDp {
 
             // Addition intermediate: H = -X_mid.
             cols[COL_H][t] = dp(-1);
+
+            // Selectors (default 0).
+            cols[COL_SEL_INIT][t] = dp(0);
+            cols[COL_SEL_FINAL][t] = dp(0);
+        }
+
+        // Set boundary selectors.
+        cols[COL_SEL_INIT][0] = dp(1);
+        if NUM_ROWS.saturating_sub(1) < num_rows {
+            cols[COL_SEL_FINAL][NUM_ROWS - 1] = dp(1);
         }
 
         // Convert to MLEs.
@@ -103,8 +116,11 @@ impl GenerateWitness<Int<4>> for EcdsaUairInt {
     /// Generate a valid ECDSA trace using `Int<4>` (256-bit integers).
     ///
     /// Same fixed-point witness as the `DensePolynomial<i64, 1>` generator:
-    /// **(X, Y, Z) = (1, 1, 0)** with `b₁ = b₂ = 0`. All 7 constraints
+    /// **(X, Y, Z) = (1, 1, 0)** with `b₁ = b₂ = 0`. All 11 constraints
     /// evaluate to zero at every hypercube point.
+    ///
+    /// Selector columns `sel_init` and `sel_final` are set to 1 at row 0
+    /// and row NUM_ROWS−1 respectively.
     ///
     /// This is the target witness type for the unified ECDSA pipeline where
     /// `Int<4>` is used for PCS commitments, PIOP constraints, and witness.
@@ -115,7 +131,7 @@ impl GenerateWitness<Int<4>> for EcdsaUairInt {
         let iv = |v: i64| Int::<4>::from_ref(&v);
         let num_rows: usize = 1 << num_vars;
 
-        // Pre-allocate columns (9 columns × num_rows), default = 0.
+        // Pre-allocate columns (11 columns × num_rows), default = 0.
         let mut cols: Vec<Vec<Int<4>>> =
             (0..NUM_COLS).map(|_| vec![iv(0); num_rows]).collect();
 
@@ -137,6 +153,16 @@ impl GenerateWitness<Int<4>> for EcdsaUairInt {
 
             // Addition intermediate: H = -X_mid.
             cols[COL_H][t] = iv(-1);
+
+            // Selectors (default 0).
+            cols[COL_SEL_INIT][t] = iv(0);
+            cols[COL_SEL_FINAL][t] = iv(0);
+        }
+
+        // Set boundary selectors.
+        cols[COL_SEL_INIT][0] = iv(1);
+        if NUM_ROWS.saturating_sub(1) < num_rows {
+            cols[COL_SEL_FINAL][NUM_ROWS - 1] = iv(1);
         }
 
         // Convert to MLEs.
@@ -161,7 +187,7 @@ mod tests {
         let mut rng = rand::rng();
         let trace =
             <EcdsaUairBp as GenerateWitness<BinaryPoly<32>>>::generate_witness(9, &mut rng);
-        assert_eq!(trace.len(), NUM_COLS); // 9 columns
+        assert_eq!(trace.len(), NUM_COLS); // 11 columns
         for col in &trace {
             assert_eq!(col.evaluations.len(), 512); // 2^9 = 512 ≥ 258
         }
@@ -170,15 +196,15 @@ mod tests {
     #[test]
     fn i64_witness_fixed_point() {
         let mut rng = rand::rng();
-        let num_vars = 4; // 16 rows
+        let num_vars = 9; // 512 rows (≥ 258)
         let trace = <EcdsaUairDp as GenerateWitness<DensePolynomial<i64, 1>>>::generate_witness(
             num_vars, &mut rng,
         );
         assert_eq!(trace.len(), NUM_COLS);
-        assert_eq!(trace[0].evaluations.len(), 16);
+        assert_eq!(trace[0].evaluations.len(), 512);
 
-        // Every row should have the same fixed-point values.
-        for t in 0..16 {
+        // Data columns: every row has the same fixed-point values.
+        for t in 0..512 {
             let val = |col: usize| trace[col].evaluations[t].coeffs[0];
             assert_eq!(val(COL_X), 1, "X should be 1 at row {t}");
             assert_eq!(val(COL_Y), 1, "Y should be 1 at row {t}");
@@ -188,22 +214,31 @@ mod tests {
             assert_eq!(val(COL_Y_MID), 1, "Y_mid should be 1 at row {t}");
             assert_eq!(val(COL_H), -1, "H should be -X_mid=-1 at row {t}");
         }
+
+        // Selector columns.
+        assert_eq!(trace[COL_SEL_INIT].evaluations[0].coeffs[0], 1, "sel_init should be 1 at row 0");
+        assert_eq!(trace[COL_SEL_INIT].evaluations[1].coeffs[0], 0, "sel_init should be 0 at row 1");
+        assert_eq!(
+            trace[COL_SEL_FINAL].evaluations[NUM_ROWS - 1].coeffs[0], 1,
+            "sel_final should be 1 at row {}", NUM_ROWS - 1,
+        );
+        assert_eq!(trace[COL_SEL_FINAL].evaluations[0].coeffs[0], 0, "sel_final should be 0 at row 0");
     }
 
     #[test]
     fn int4_witness_fixed_point() {
         let mut rng = rand::rng();
-        let num_vars = 4; // 16 rows
+        let num_vars = 9; // 512 rows (≥ 258)
         let trace = <EcdsaUairInt as GenerateWitness<Int<4>>>::generate_witness(
             num_vars, &mut rng,
         );
         assert_eq!(trace.len(), NUM_COLS);
-        assert_eq!(trace[0].evaluations.len(), 16);
+        assert_eq!(trace[0].evaluations.len(), 512);
 
         let iv = |v: i64| Int::<4>::from_ref(&v);
 
-        // Every row should have the same fixed-point values.
-        for t in 0..16 {
+        // Data columns: every row has the same fixed-point values.
+        for t in 0..512 {
             let val = |col: usize| trace[col].evaluations[t];
             assert_eq!(val(COL_X), iv(1), "X should be 1 at row {t}");
             assert_eq!(val(COL_Y), iv(1), "Y should be 1 at row {t}");
@@ -213,5 +248,14 @@ mod tests {
             assert_eq!(val(COL_Y_MID), iv(1), "Y_mid should be 1 at row {t}");
             assert_eq!(val(COL_H), iv(-1), "H should be -X_mid=-1 at row {t}");
         }
+
+        // Selector columns.
+        assert_eq!(trace[COL_SEL_INIT].evaluations[0], iv(1), "sel_init should be 1 at row 0");
+        assert_eq!(trace[COL_SEL_INIT].evaluations[1], iv(0), "sel_init should be 0 at row 1");
+        assert_eq!(
+            trace[COL_SEL_FINAL].evaluations[NUM_ROWS - 1], iv(1),
+            "sel_final should be 1 at row {}", NUM_ROWS - 1,
+        );
+        assert_eq!(trace[COL_SEL_FINAL].evaluations[0], iv(0), "sel_final should be 0 at row 0");
     }
 }

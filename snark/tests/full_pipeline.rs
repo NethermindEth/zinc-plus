@@ -24,6 +24,7 @@ use zinc_poly::univariate::binary::{
 use zinc_poly::univariate::dense::{DensePolyInnerProduct, DensePolynomial};
 use zinc_primality::MillerRabin;
 use zinc_transcript::traits::ConstTranscribable;
+use zinc_uair::Uair;
 use zinc_uair::ideal_collector::IdealOrZero;
 use zinc_utils::{
     UNCHECKED,
@@ -118,12 +119,12 @@ fn full_pipeline_round_trip() {
     // Soundness comes from the sumcheck/CPR + PCS, not from re-checking
     // ideal membership over the PIOP field. This matches the existing
     // piop crate tests which always use IdealOrZero::Zero.
-    // Public columns (W_hat = col 2, K_hat = col 20) — the verifier
-    // must supply these to reconstruct the full evaluation set.
-    let sha_public_cols = vec![
-        trace[zinc_sha256_uair::COL_W_HAT].clone(),
-        trace[zinc_sha256_uair::COL_K_HAT].clone(),
-    ];
+    // Public columns — the verifier must supply MLE data for every
+    // column listed in the UAIR signature's `public_columns`.
+    let sha_sig = Sha256Uair::signature();
+    let sha_public_cols: Vec<_> = sha_sig.public_columns.iter()
+        .map(|&i| trace[i].clone())
+        .collect();
 
     let verify_result = pipeline::verify::<Sha256Uair, Zt, Lc, 32, UNCHECKED, _, _>(
         &params,

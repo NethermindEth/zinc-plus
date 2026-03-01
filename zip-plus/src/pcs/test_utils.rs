@@ -168,8 +168,10 @@ where
     F::Inner: FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod> + Transcribable,
     <TestZipTypes<N, K, M> as ZipTypes>::Eval: ProjectableToField<F>,
 {
-    setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_test_params, || {
-        (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect()
+    setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_test_params, |cfg| {
+        (0..num_vars)
+            .map(|i| (&Int::from(i as i32 + 2)).into_with_cfg(cfg))
+            .collect()
     })
 }
 
@@ -200,15 +202,17 @@ where
         + 'static,
     F::Inner: FromRef<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod> + Transcribable,
 {
-    setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_poly_test_params, || {
-        (0..num_vars).map(|i| i as i128 + 2).collect()
+    setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_poly_test_params, |cfg| {
+        (0..num_vars)
+            .map(|i| (&(i as i128 + 2)).into_with_cfg(cfg))
+            .collect()
     })
 }
 
 fn setup_full_protocol_inner<Zt, Lc, F, const N: usize>(
     num_vars: usize,
     setup: impl FnOnce(usize) -> (ZipPlusParams<Zt, Lc>, DenseMultilinearExtension<Zt::Eval>),
-    prepare_evaluation_point: impl FnOnce() -> Vec<Zt::Pt>,
+    prepare_evaluation_point: impl FnOnce(&F::Config) -> Vec<F>,
 ) -> (
     ZipPlusParams<Zt, Lc>,
     ZipPlusCommitment,
@@ -222,7 +226,6 @@ where
     F: PrimeField
         + for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> FromWithConfig<&'a Zt::Chal>
-        + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>,
     F::Inner: FromRef<Zt::Fmod> + Transcribable,
@@ -230,10 +233,6 @@ where
 {
     let (pp, poly) = setup(num_vars);
     let (hint, comm) = ZipPlus::commit_single(&pp, &poly).unwrap();
-    let point: Vec<Zt::Pt> = prepare_evaluation_point();
-
-    let (eval, proof) =
-        ZipPlus::prove::<F, CHECKED>(&pp, std::slice::from_ref(&poly), &point, &hint).unwrap();
 
     let field_cfg = {
         let mut transcript = PcsTranscript::new();
@@ -241,10 +240,10 @@ where
             .fs_transcript
             .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>()
     };
-    let point_f = point
-        .iter()
-        .map(|v| v.into_with_cfg(&field_cfg))
-        .collect_vec();
+    let point_f: Vec<F> = prepare_evaluation_point(&field_cfg);
+
+    let (eval, proof) =
+        ZipPlus::prove::<F, CHECKED>(&pp, std::slice::from_ref(&poly), &point_f, &hint).unwrap();
 
     (pp, comm, point_f, eval, proof)
 }

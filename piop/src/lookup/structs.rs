@@ -141,10 +141,14 @@ pub struct BatchedDecompLookupInstance<F: PrimeField> {
 /// Proof for the **batched** Decomposition + LogUp protocol.
 ///
 /// A single sumcheck covers all L lookups simultaneously.
+///
+/// Chunk vectors are **not** included — the verifier reconstructs
+/// them from the inverse witnesses: `c_k[j] = β − 1/u_k[j]`.
+/// Soundness follows from the PCS commitment binding the parent
+/// column (and hence its chunks), combined with the decomposition
+/// check `Σ_k shift_k · c̃_k(x*) = parent_eval(x*)`.
 #[derive(Clone, Debug)]
 pub struct BatchedDecompLogupProof<F: PrimeField> {
-    /// Per-witness chunk vectors: `chunk_vectors[ℓ][k]`.
-    pub chunk_vectors: Vec<Vec<Vec<F>>>,
     /// The single batched sumcheck proof.
     pub sumcheck_proof: SumcheckProof<F>,
     /// Per-witness aggregated multiplicity vectors:
@@ -185,8 +189,6 @@ pub struct LookupSumcheckGroup<F: PrimeField> {
     pub comb_fn: Box<dyn Fn(&[F]) -> F + Send + Sync>,
     /// Number of sumcheck variables for this group.
     pub num_vars: usize,
-    /// Ancillary data — chunk vectors (for proof).
-    pub chunk_vectors: Vec<Vec<Vec<F>>>,
     /// Ancillary data — aggregated multiplicities (for proof).
     pub aggregated_multiplicities: Vec<Vec<F>>,
     /// Ancillary data — chunk inverse witnesses (for proof).
@@ -214,6 +216,8 @@ pub struct LookupVerifierPreSumcheck<F: PrimeField> {
     pub num_chunks: usize,
     /// Witness vector length.
     pub witness_len: usize,
+    /// Shift factors (K entries) — needed for decomposition check.
+    pub shifts: Vec<F>,
 }
 
 // ---------------------------------------------------------------------------
@@ -258,15 +262,52 @@ pub struct GkrLayerProof<F: PrimeField> {
 /// Replaces [`BatchedDecompLogupProof`] when chunks are committed via
 /// the PCS (not sent in the clear). Only multiplicities and GKR layer
 /// proofs are sent.
+///
+/// The witness side uses **L separate fraction trees** (one per lookup)
+/// with layer-wise batched sumchecks, while the table side uses a
+/// single α-batched tree.
 #[derive(Clone, Debug)]
 pub struct GkrBatchedDecompLogupProof<F: PrimeField> {
     /// Per-lookup aggregated multiplicity vectors:
     /// `aggregated_multiplicities[ℓ][j] = Σ_k m_k^(ℓ)[j]`.
     pub aggregated_multiplicities: Vec<Vec<F>>,
-    /// GKR fractional sumcheck proof for the combined witness tree.
-    pub witness_gkr: GkrFractionProof<F>,
+    /// Batched GKR fractional sumcheck proof for L witness trees.
+    pub witness_gkr: BatchedGkrFractionProof<F>,
     /// GKR fractional sumcheck proof for the combined table tree.
     pub table_gkr: GkrFractionProof<F>,
+}
+
+/// Proof for L batched GKR fractional sumchecks run layer-by-layer.
+///
+/// All L trees share the same depth and challenge trajectory; the
+/// per-layer sumcheck is batched into a single sumcheck over 1 + 4L
+/// MLEs at degree 3.
+#[derive(Clone, Debug)]
+pub struct BatchedGkrFractionProof<F: PrimeField> {
+    /// Per-tree root numerators: `roots_p[ℓ]`.
+    pub roots_p: Vec<F>,
+    /// Per-tree root denominators: `roots_q[ℓ]`.
+    pub roots_q: Vec<F>,
+    /// Per-layer proofs, one for each GKR level (0..d).
+    pub layer_proofs: Vec<BatchedGkrLayerProof<F>>,
+}
+
+/// Proof for a single layer of the batched GKR protocol.
+///
+/// At layer k, the L trees share one sumcheck proof (for k ≥ 1) or a
+/// direct check (k = 0), and each tree contributes 4 evaluations.
+#[derive(Clone, Debug)]
+pub struct BatchedGkrLayerProof<F: PrimeField> {
+    /// Shared sumcheck proof for this layer (`None` for k = 0).
+    pub sumcheck_proof: Option<SumcheckProof<F>>,
+    /// Per-tree left-child numerator evaluations: `p_lefts[ℓ]`.
+    pub p_lefts: Vec<F>,
+    /// Per-tree right-child numerator evaluations: `p_rights[ℓ]`.
+    pub p_rights: Vec<F>,
+    /// Per-tree left-child denominator evaluations: `q_lefts[ℓ]`.
+    pub q_lefts: Vec<F>,
+    /// Per-tree right-child denominator evaluations: `q_rights[ℓ]`.
+    pub q_rights: Vec<F>,
 }
 
 /// Prover state after running the GKR batched decomposition + LogUp protocol.

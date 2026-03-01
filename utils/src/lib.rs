@@ -6,6 +6,7 @@ pub mod mul_by_scalar;
 pub mod named;
 pub mod ops_macros;
 pub mod parallel;
+pub mod peak_mem;
 pub mod projectable_to_field;
 
 use crypto_primitives::Semiring;

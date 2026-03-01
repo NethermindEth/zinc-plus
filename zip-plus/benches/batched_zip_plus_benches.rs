@@ -20,7 +20,6 @@ use crypto_primitives::{
     crypto_bigint_uint::Uint,
     crypto_bigint_monty::MontyField,
 };
-use num_traits::One;
 use rand::{distr::StandardUniform, prelude::*};
 
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
@@ -228,11 +227,9 @@ fn batched_test_nrows<
     StandardUniform: Distribution<Zt::Eval>,
     F: for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> FromWithConfig<&'a Zt::Chal>
-        + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>,
     <F as Field>::Inner: FromRef<Zt::Fmod> + Transcribable,
-    Zt::Pt: One,
 {
     let mut rng = ThreadRng::default();
     let poly_size = 1 << P;
@@ -249,7 +246,9 @@ fn batched_test_nrows<
         format!("Test poly_size=2^{P} num_rows={num_rows}"),
         |b| {
             b.iter(|| {
-                let point = vec![Zt::Pt::one(); P];
+                let field_cfg = zinc_transcript::KeccakTranscript::default()
+                    .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+                let point: Vec<F> = vec![F::one_with_cfg(&field_cfg); P];
                 let result =
                     ZipPlus::<Zt, Lc>::prove::<F, CHECK_FOR_OVERFLOWS>(&params, &polys, &point, &hint)
                         .expect("Prove failed");
@@ -273,11 +272,9 @@ fn batched_verify_nrows<
     F: PrimeField
         + for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> FromWithConfig<&'a Zt::Chal>
-        + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>,
     <F as Field>::Inner: FromRef<Zt::Fmod> + Transcribable,
-    Zt::Pt: One,
 {
     let mut rng = ThreadRng::default();
     let poly_size = 1 << P;
@@ -289,7 +286,9 @@ fn batched_verify_nrows<
         .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
         .collect();
     let (hint, commitment) = ZipPlus::<Zt, Lc>::commit(&params, &polys).unwrap();
-    let point = vec![Zt::Pt::one(); P];
+    let pcs_field_cfg = zinc_transcript::KeccakTranscript::default()
+        .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+    let point: Vec<F> = vec![F::one_with_cfg(&pcs_field_cfg); P];
 
     let (eval_f, proof) = ZipPlus::<Zt, Lc>::prove::<F, CHECK_FOR_OVERFLOWS>(
         &params,
@@ -299,12 +298,7 @@ fn batched_verify_nrows<
     )
     .expect("Prove failed");
 
-    // Convert point to field elements for verify
-    let pcs_field_cfg = {
-        let mut tx = zinc_transcript::KeccakTranscript::default();
-        tx.get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>()
-    };
-    let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&pcs_field_cfg)).collect();
+    let point_f: Vec<F> = point.clone();
 
     group.bench_function(
         format!("Verify poly_size=2^{P} num_rows={num_rows}"),

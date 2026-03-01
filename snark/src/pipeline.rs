@@ -12,7 +12,6 @@ use crypto_bigint::modular::MontyParams;
 use crypto_bigint::Odd;
 use crypto_primitives::crypto_bigint_monty::MontyField;
 use crypto_primitives::{Field, FromPrimitiveWithConfig, FromWithConfig, IntoWithConfig, PrimeField};
-use num_traits::One;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_poly::mle::MultilinearExtensionWithConfig;
 use zinc_poly::univariate::binary::BinaryPoly;
@@ -58,6 +57,10 @@ use zinc_piop::shift_sumcheck::{
     shift_sumcheck_prove, shift_sumcheck_verify,
     shift_sumcheck_verify_pre, shift_sumcheck_verify_finalize,
 };
+#[cfg(feature = "parallel")]
+use rayon::join as rayon_join;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_uair::ideal::{Ideal, IdealCheck};
 use zinc_uair::ideal_collector::IdealOrZero;
@@ -222,7 +225,7 @@ fn field_to_bytes(f: &PiopField) -> Vec<u8> {
 }
 
 /// Deserialize a PiopField element from bytes (Montgomery representation).
-fn field_from_bytes(bytes: &[u8], cfg: &<PiopField as PrimeField>::Config) -> PiopField {
+pub fn field_from_bytes(bytes: &[u8], cfg: &<PiopField as PrimeField>::Config) -> PiopField {
     let inner = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::read_transcription_bytes(bytes);
     PiopField::from_montgomery(inner, cfg)
 }
@@ -247,34 +250,44 @@ fn private_trace<T: Clone>(
         .collect()
 }
 
-/// Convert a PiopField element (modular integer) to the PCS point type Zt::Pt.
+/// Convert a `PiopField` evaluation point to an arbitrary PCS field `F` by
+/// going through the canonical unsigned integer representation.
 ///
-/// The PIOP field prime is ~120 bits, so retrieved values always fit in i128.
-/// We use `retrieve()` to get the true integer value from Montgomery form.
-/// Kept for reference / future use.
-#[allow(dead_code)]
-fn piop_field_to_i128(f: &PiopField) -> i128 {
-    let uint = f.retrieve();
-    let words = uint.as_words();
-    debug_assert!(
-        words[2] == 0,
-        "PIOP field element too large for i128: {:?}",
-        words
-    );
-    (words[0] as i128) | ((words[1] as i128) << 64)
+/// The PIOP field modulus is ~120 bits, so every coordinate fits in `u128`.
+/// This is used only in generic pipeline functions where `PcsF` may (in
+/// principle) differ from `PiopField`.
+fn piop_point_to_pcs_field<F: PrimeField + FromPrimitiveWithConfig>(
+    piop_point: &[PiopField],
+    pcs_cfg: &F::Config,
+) -> Vec<F> {
+    piop_point
+        .iter()
+        .map(|f| {
+            let uint = f.retrieve();
+            let words = uint.as_words();
+            debug_assert!(
+                words[2] == 0,
+                "PIOP field element too large for u128: {words:?}"
+            );
+            let canonical = (words[0] as u128) | ((words[1] as u128) << 64);
+            canonical.into_with_cfg(pcs_cfg)
+        })
+        .collect()
 }
 
-/// Derives a deterministic PCS evaluation point (Vec<i128>) from the CPR
-/// evaluation point. Used by both prover and verifier to ensure they agree
-/// on the same evaluation point for the batched PCS.
-fn derive_pcs_point(cpr_evaluation_point: &[PiopField], num_vars: usize) -> Vec<i128> {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for f in cpr_evaluation_point {
-        std::hash::Hash::hash(f.inner().as_words(), &mut hasher);
-    }
-    let seed = std::hash::Hasher::finish(&hasher) as i128;
-    (0..num_vars)
-        .map(|i| seed.wrapping_add(i as i128))
+/// Convert PiopField elements to PcsF elements using canonical u128 representation.
+/// Reconstruct the PCS evaluation point from a [`ZincProof`]'s serialized
+/// `evaluation_point_bytes` as `PiopField` elements.
+///
+/// This is a convenience wrapper so that benchmarks that hold a proof
+/// object can recover the real CPR evaluation point (which is now used
+/// directly as the PCS evaluation point) without re-running the PIOP.
+pub fn pcs_point_from_proof(proof: &ZincProof) -> Vec<PiopField> {
+    let cfg = piop_field_config();
+    proof
+        .evaluation_point_bytes
+        .iter()
+        .map(|b| field_from_bytes(b, &cfg))
         .collect()
 }
 
@@ -287,7 +300,7 @@ fn derive_pcs_point(cpr_evaluation_point: &[PiopField], num_vars: usize) -> Vec<
 /// The result is a vector of length `total_cols` with each evaluation
 /// placed at its correct flattened column index.
 #[allow(clippy::arithmetic_side_effects)]
-fn reconstruct_up_evals(
+pub fn reconstruct_up_evals(
     private_evals: &[PiopField],
     public_evals: &[PiopField],
     public_columns: &[usize],
@@ -353,12 +366,15 @@ fn reconstruct_shift_v_finals(
 ///
 /// This avoids redundant field-element projection when the CPR step has
 /// already projected the full trace with the same `projecting_element`.
+///
+/// Returns `(columns, raw_indices, remapped_specs, reverse_index_map)` where
+/// `reverse_index_map[remapped_idx]` is the original trace column index.
 fn extract_lookup_columns_from_field_trace<const D: usize>(
     bp_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
     field_trace: &[DenseMultilinearExtension<<PiopField as Field>::Inner>],
     lookup_specs: &[LookupColumnSpec],
     field_cfg: &MontyParams<FIELD_LIMBS>,
-) -> (Vec<Vec<PiopField>>, Vec<Vec<usize>>, Vec<LookupColumnSpec>) {
+) -> (Vec<Vec<PiopField>>, Vec<Vec<usize>>, Vec<LookupColumnSpec>, Vec<usize>) {
     use std::collections::BTreeMap;
 
     // Collect unique column indices (sorted for determinism).
@@ -371,13 +387,15 @@ fn extract_lookup_columns_from_field_trace<const D: usize>(
     let mut columns: Vec<Vec<PiopField>> = Vec::with_capacity(needed.len());
     let mut raw_indices: Vec<Vec<usize>> = Vec::with_capacity(needed.len());
 
-    for &orig_idx in needed.keys() {
+    // Build the reverse map: remapped_index → original trace index.
+    let mut reverse_index_map: Vec<usize> = vec![0; needed.len()];
+
+    for (&orig_idx, &remapped_idx) in &needed {
         // Wrap Inner values into PiopField.
         let col_f: Vec<PiopField> = field_trace[orig_idx]
             .iter()
             .map(|inner| PiopField::new_unchecked_with_cfg(inner.clone(), field_cfg))
             .collect();
-        columns.push(col_f);
 
         // Compute raw indices from BinaryPoly (pure bit manipulation, no field ops).
         let col_idx: Vec<usize> = bp_trace[orig_idx]
@@ -392,7 +410,15 @@ fn extract_lookup_columns_from_field_trace<const D: usize>(
                 idx
             })
             .collect();
-        raw_indices.push(col_idx);
+
+        // BTreeMap iterates in key order, so we must place at remapped_idx.
+        if remapped_idx >= columns.len() {
+            columns.resize_with(remapped_idx + 1, Vec::new);
+            raw_indices.resize_with(remapped_idx + 1, Vec::new);
+        }
+        columns[remapped_idx] = col_f;
+        raw_indices[remapped_idx] = col_idx;
+        reverse_index_map[remapped_idx] = orig_idx;
     }
 
     // Remap lookup specs to 0-based indices into the projected columns.
@@ -410,7 +436,7 @@ fn extract_lookup_columns_from_field_trace<const D: usize>(
         })
         .collect();
 
-    (columns, raw_indices, remapped_specs)
+    (columns, raw_indices, remapped_specs, reverse_index_map)
 }
 
 // ─── Prover ─────────────────────────────────────────────────────────────────
@@ -449,7 +475,7 @@ where
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     Zt::Eval: ProjectableToField<PiopField>,
     Zt::Cw: ProjectableToField<PiopField>,
-    PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt> + for<'a> FromWithConfig<&'a Zt::CombR>,
+    PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::CombR>,
     <PiopField as Field>::Inner: FromRef<Zt::Fmod>,
 {
     let total_start = Instant::now();
@@ -458,10 +484,10 @@ where
     let max_degree = count_max_degree::<U>();
 
     // ── Step 1: PCS Commit ──────────────────────────────────────────
-    // Only commit private (non-public) columns — the verifier knows the
-    // public columns and can reconstruct their evaluations directly.
+    // Only commit columns that are neither public (known to verifier)
+    // nor shift sources (whose claims are resolved by shift sumcheck).
     let t0 = Instant::now();
-    let pcs_trace = private_trace(trace, &sig.public_columns);
+    let pcs_trace = private_trace(trace, &sig.pcs_excluded_columns());
     let (hint, commitment) = ZipPlus::<Zt, Lc>::commit(params, &pcs_trace)
         .expect("PCS commit failed");
     let pcs_commit_time = t0.elapsed();
@@ -512,9 +538,9 @@ where
     // consumes it. This reuses the same projecting_element, avoiding a
     // redundant ~2ms re-projection of the BinaryPoly columns.
     let lookup_precomputed = if !lookup_specs.is_empty() {
-        let (columns, raw_indices, remapped_specs) =
+        let (columns, raw_indices, remapped_specs, reverse_index_map) =
             extract_lookup_columns_from_field_trace(trace, &field_trace, lookup_specs, &field_cfg);
-        Some((columns, raw_indices, remapped_specs))
+        Some((columns, raw_indices, remapped_specs, reverse_index_map))
     } else {
         None
     };
@@ -562,7 +588,7 @@ where
 
     // ── Step 3b: PIOP — Batched Decomposed LogUp (column typing) ────
     let t2b = Instant::now();
-    let lookup_proof = if let Some((columns, raw_indices, remapped_specs)) = lookup_precomputed {
+    let lookup_proof = if let Some((columns, raw_indices, remapped_specs, _reverse_index_map)) = lookup_precomputed {
         let (lk_proof, _lk_state) = prove_batched_lookup_with_indices(
             &mut transcript,
             &columns,
@@ -580,22 +606,13 @@ where
     let lookup_time = t2b.elapsed();
 
     // ── Step 4: PCS Prove (test + evaluate) ────────────────────────
+    // r_PCS = r_CPR: pass the CPR evaluation point directly to the PCS.
     let t3 = Instant::now();
-    let point: Vec<Zt::Pt> = {
-        let i128_point = derive_pcs_point(&cpr_state.evaluation_point, num_vars);
-        i128_point
-            .into_iter()
-            .map(|v| {
-                // SAFETY: Zt::Pt is i128 in all current instantiations.
-                unsafe { std::mem::transmute_copy(&v) }
-            })
-            .collect()
-    };
     let (eval_f, proof) =
         ZipPlus::<Zt, Lc>::prove::<PiopField, CHECK>(
             params,
             &pcs_trace,
-            &point,
+            &cpr_state.evaluation_point,
             &hint,
         )
         .expect("PCS prove failed");
@@ -695,7 +712,7 @@ where
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     Zt::Eval: ProjectableToField<PiopField>,
     Zt::Cw: ProjectableToField<PiopField>,
-    PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt> + for<'a> FromWithConfig<&'a Zt::CombR>,
+    PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::CombR>,
     <PiopField as Field>::Inner: FromRef<Zt::Fmod>,
 {
     let total_start = Instant::now();
@@ -704,7 +721,7 @@ where
     let max_degree = count_max_degree::<U>();
 
     let t0 = Instant::now();
-    let pcs_trace = private_trace(trace, &sig.public_columns);
+    let pcs_trace = private_trace(trace, &sig.pcs_excluded_columns());
     let (hint, commitment) = ZipPlus::<Zt, Lc>::commit(params, &pcs_trace)
         .expect("PCS commit failed");
     let pcs_commit_time = t0.elapsed();
@@ -750,9 +767,9 @@ where
 
     // Extract lookup columns before CPR consumes the field trace.
     let lookup_precomputed = if !lookup_specs.is_empty() {
-        let (columns, raw_indices, remapped_specs) =
+        let (columns, raw_indices, remapped_specs, reverse_index_map) =
             extract_lookup_columns_from_field_trace(trace, &field_trace, lookup_specs, &field_cfg);
-        Some((columns, raw_indices, remapped_specs))
+        Some((columns, raw_indices, remapped_specs, reverse_index_map))
     } else {
         None
     };
@@ -773,7 +790,7 @@ where
 
     // ── Lookup: build sumcheck groups (does NOT run sumchecks) ───────
     let mut lookup_groups_data: Vec<(LookupSumcheckGroup<PiopField>, LookupGroupMeta)> = Vec::new();
-    if let Some((ref columns, ref raw_indices, ref remapped_specs)) = lookup_precomputed {
+    if let Some((ref columns, ref raw_indices, ref remapped_specs, ref reverse_index_map)) = lookup_precomputed {
         let groups = group_lookup_specs(remapped_specs);
         for group in &groups {
             let instance = build_lookup_instance_from_indices_pub(
@@ -794,6 +811,9 @@ where
                 table_type: group.table_type.clone(),
                 num_columns: group.column_indices.len(),
                 witness_len,
+                original_column_indices: group.column_indices.iter()
+                    .map(|&remapped| reverse_index_map[remapped])
+                    .collect(),
             };
             lookup_groups_data.push((lk_group, meta));
         }
@@ -843,7 +863,6 @@ where
                 mles: vec![], // already moved
                 comb_fn: Box::new(|_: &[PiopField]| unreachable!()),
                 num_vars: 0,
-                chunk_vectors: lk_group.chunk_vectors,
                 aggregated_multiplicities: lk_group.aggregated_multiplicities,
                 chunk_inverse_witnesses: lk_group.chunk_inverse_witnesses,
                 inverse_table: lk_group.inverse_table,
@@ -940,19 +959,15 @@ where
     let cpr_lookup_time = t2.elapsed();
 
     // ── Step 4: PCS Prove (test + evaluate) ────────────────────────
+    // r_PCS = r_CPR: pass the CPR evaluation point directly to the PCS.
+    // When lookup is present, the sumcheck may have shared_num_vars > num_vars;
+    // truncate to num_vars since PCS polynomials only have num_vars variables.
     let t3 = Instant::now();
-    let point: Vec<Zt::Pt> = {
-        let i128_point = derive_pcs_point(&evaluation_point, num_vars);
-        i128_point
-            .into_iter()
-            .map(|v| unsafe { std::mem::transmute_copy(&v) })
-            .collect()
-    };
     let (eval_f, proof) =
         ZipPlus::<Zt, Lc>::prove::<PiopField, CHECK>(
             params,
             &pcs_trace,
-            &point,
+            &evaluation_point[..num_vars],
             &hint,
         )
         .expect("PCS prove failed");
@@ -1036,7 +1051,6 @@ where
     PcsF: PrimeField
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Zt::Chal>
-        + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF>
         + FromRef<PcsF>,
@@ -1050,7 +1064,7 @@ where
 
     // ── Step 1: PCS Commit ──────────────────────────────────────────
     let t0 = Instant::now();
-    let pcs_trace = private_trace(trace, &sig.public_columns);
+    let pcs_trace = private_trace(trace, &sig.pcs_excluded_columns());
     let (hint, commitment) = ZipPlus::<Zt, Lc>::commit(params, &pcs_trace)
         .expect("PCS commit failed");
     let pcs_commit_time = t0.elapsed();
@@ -1208,14 +1222,11 @@ where
     let lookup_time = t2b.elapsed();
 
     // ── Step 4: PCS Prove (test + evaluate) ────────────────────────
+    // r_PCS = r_CPR: convert the CPR evaluation point to PcsF.
     let t3 = Instant::now();
-    let point: Vec<Zt::Pt> = {
-        let i128_point = derive_pcs_point(&cpr_state.evaluation_point, num_vars);
-        i128_point
-            .into_iter()
-            .map(|v| unsafe { std::mem::transmute_copy(&v) })
-            .collect()
-    };
+    let pcs_field_cfg = KeccakTranscript::default()
+        .get_random_field_cfg::<PcsF, Zt::Fmod, Zt::PrimeTest>();
+    let point: Vec<PcsF> = piop_point_to_pcs_field(&cpr_state.evaluation_point, &pcs_field_cfg);
     let (_eval_f, proof) =
         ZipPlus::<Zt, Lc>::prove::<PcsF, CHECK>(
             params,
@@ -1326,7 +1337,6 @@ where
     PcsF: PrimeField
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Zt::Chal>
-        + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF>
         + FromRef<PcsF>,
@@ -1488,8 +1498,12 @@ where
     let full_up_evals = if sig.public_columns.is_empty() {
         cpr_up_evals
     } else {
-        let public_evals: Vec<PiopField> = public_column_data.iter()
-            .map(|col| {
+        let public_evals: Vec<PiopField> = {
+            #[cfg(feature = "parallel")]
+            let iter = public_column_data.par_iter();
+            #[cfg(not(feature = "parallel"))]
+            let iter = public_column_data.iter();
+            iter.map(|col| {
                 let mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
                     col.iter()
                         .map(|val| PiopField::from_with_cfg(val.clone(), &field_cfg).into_inner())
@@ -1497,7 +1511,8 @@ where
                 mle.evaluate_with_config(&sumcheck_subclaim.point, &field_cfg)
                     .expect("public column MLE evaluation should succeed")
             })
-            .collect();
+            .collect()
+        };
         reconstruct_up_evals(
             &cpr_up_evals,
             &public_evals,
@@ -1637,15 +1652,8 @@ where
     let pcs_field_cfg = KeccakTranscript::default()
         .get_random_field_cfg::<PcsF, Zt::Fmod, Zt::PrimeTest>();
 
-    // Convert integer point to PcsF field elements.
-    let pcs_point: Vec<Zt::Pt> = {
-        let i128_point = derive_pcs_point(&cpr_subclaim.evaluation_point, num_vars);
-        i128_point
-            .into_iter()
-            .map(|v| unsafe { std::mem::transmute_copy(&v) })
-            .collect()
-    };
-    let point_f: Vec<PcsF> = pcs_point.iter().map(|v| v.into_with_cfg(&pcs_field_cfg)).collect();
+    // r_PCS = r_CPR: convert the CPR evaluation point to PcsF.
+    let point_f: Vec<PcsF> = piop_point_to_pcs_field(&cpr_subclaim.evaluation_point, &pcs_field_cfg);
 
     // Deserialize PcsF eval.
     let eval_inner = <PcsF::Inner as ConstTranscribable>::read_transcription_bytes(
@@ -1702,7 +1710,7 @@ where
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner>,
     Zt::Eval: ProjectableToField<PiopField>,
     Zt::Cw: ProjectableToField<PiopField>,
-    PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt> + for<'a> FromWithConfig<&'a Zt::CombR>,
+    PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::CombR>,
     <PiopField as Field>::Inner: FromRef<Zt::Fmod>,
 {
     let total_start = Instant::now();
@@ -1715,7 +1723,9 @@ where
 
     // ── Step 2: PCS Prove (test + evaluate) ────────────────────────
     let t1 = Instant::now();
-    let point: Vec<Zt::Pt> = vec![Zt::Pt::one(); num_vars];
+    let pcs_field_cfg = KeccakTranscript::default()
+        .get_random_field_cfg::<PiopField, Zt::Fmod, Zt::PrimeTest>();
+    let point: Vec<PiopField> = vec![PiopField::one_with_cfg(&pcs_field_cfg); num_vars];
     let (eval_f, proof) =
         ZipPlus::<Zt, Lc>::prove::<PiopField, CHECK>(
             params,
@@ -1733,8 +1743,7 @@ where
         pcs_transcript.stream.into_inner()
     };
 
-    let field_cfg = eval_f.cfg().clone();
-    let point_f: Vec<PiopField> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
+    let point_f = point;
 
     (
         ZincProof {
@@ -1766,7 +1775,7 @@ where
 pub fn verify_pcs_only<Zt, Lc, const D: usize, const CHECK: bool>(
     params: &ZipPlusParams<Zt, Lc>,
     commitment: &ZipPlusCommitment,
-    point: &[Zt::Pt],
+    point: &[PiopField],
     eval_bytes: &[u8],
     proof_bytes: &[u8],
 ) -> VerifyResult
@@ -1775,7 +1784,7 @@ where
     Lc: LinearCode<Zt>,
     Zt::Eval: ProjectableToField<PiopField>,
     Zt::Cw: ProjectableToField<PiopField>,
-    PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt> + for<'a> FromWithConfig<&'a Zt::CombR>,
+    PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::CombR>,
     <PiopField as Field>::Inner: FromRef<Zt::Fmod> + ConstTranscribable,
 {
     let total_start = Instant::now();
@@ -1783,9 +1792,6 @@ where
     // Derive PiopField config from a fresh PCS transcript.
     let pcs_field_cfg = KeccakTranscript::default()
         .get_random_field_cfg::<PiopField, Zt::Fmod, Zt::PrimeTest>();
-
-    // Convert integer point to field elements.
-    let point_f: Vec<PiopField> = point.iter().map(|v| v.into_with_cfg(&pcs_field_cfg)).collect();
 
     // Deserialize eval.
     let eval_f: PiopField = PiopField::new_unchecked_with_cfg(
@@ -1803,7 +1809,7 @@ where
     let result = ZipPlus::<Zt, Lc>::verify::<PiopField, CHECK>(
         params,
         commitment,
-        &point_f,
+        point,
         &eval_f,
         &proof,
     );
@@ -1867,7 +1873,7 @@ where
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     Zt::Eval: ProjectableToField<PiopField>,
     Zt::Cw: ProjectableToField<PiopField>,
-    PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt> + for<'a> FromWithConfig<&'a Zt::CombR>,
+    PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::CombR>,
     <PiopField as Field>::Inner: FromRef<Zt::Fmod>,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<PiopField>>,
     IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
@@ -2062,8 +2068,12 @@ where
         } else {
             let binary_poly_projection =
                 BinaryPoly::<D>::prepare_projection(&projecting_element);
-            let public_evals: Vec<PiopField> = public_column_data.iter()
-                .map(|col| {
+            let public_evals: Vec<PiopField> = {
+                #[cfg(feature = "parallel")]
+                let iter = public_column_data.par_iter();
+                #[cfg(not(feature = "parallel"))]
+                let iter = public_column_data.iter();
+                iter.map(|col| {
                     let mut mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
                         col.iter()
                             .map(|bp| binary_poly_projection(bp).inner().clone())
@@ -2078,7 +2088,8 @@ where
                     mle.evaluate_with_config(&md_subclaims.point, &field_cfg)
                         .expect("public column MLE evaluation should succeed")
                 })
-                .collect();
+                .collect()
+            };
             reconstruct_up_evals(
                 &batched_proof.cpr_up_evals,
                 &public_evals,
@@ -2086,6 +2097,7 @@ where
                 sig.total_cols(),
             )
         };
+        let batched_full_up_evals_saved = batched_full_up_evals.clone();
         let cpr_sub = match CombinedPolyResolver::<PiopField>::finalize_verifier::<U>(
             &mut transcript,
             md_subclaims.point.clone(),
@@ -2174,23 +2186,28 @@ where
                 // BE → LE for MLE evaluation.
                 let challenge_point_le: Vec<PiopField> =
                     ss_pre.challenge_point.iter().rev().cloned().collect();
-                let mut public_v_finals: Vec<PiopField> = Vec::new();
-                for spec in &sig_batched.shifts {
-                    if !sig_batched.is_public_column(spec.source_col) {
-                        continue;
-                    }
-                    let pcd_idx = sig_batched.public_columns.iter()
-                        .position(|&c| c == spec.source_col)
-                        .expect("public shift source_col not found in public_columns");
-                    let col = &public_column_data[pcd_idx];
-                    let mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
-                        col.iter()
-                            .map(|bp| binary_poly_projection(bp).inner().clone())
-                            .collect();
-                    let eval = mle.evaluate_with_config(&challenge_point_le, &field_cfg)
-                        .expect("public shift MLE evaluation should succeed");
-                    public_v_finals.push(eval);
-                }
+                let public_shift_specs: Vec<&zinc_uair::ShiftSpec> = sig_batched.shifts.iter()
+                    .filter(|spec| sig_batched.is_public_column(spec.source_col))
+                    .collect();
+                let public_v_finals: Vec<PiopField> = {
+                    #[cfg(feature = "parallel")]
+                    let iter = public_shift_specs.par_iter();
+                    #[cfg(not(feature = "parallel"))]
+                    let iter = public_shift_specs.iter();
+                    iter.map(|spec| {
+                        let pcd_idx = sig_batched.public_columns.iter()
+                            .position(|&c| c == spec.source_col)
+                            .expect("public shift source_col not found in public_columns");
+                        let col = &public_column_data[pcd_idx];
+                        let mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                            col.iter()
+                                .map(|bp| binary_poly_projection(bp).inner().clone())
+                                .collect();
+                        mle.evaluate_with_config(&challenge_point_le, &field_cfg)
+                            .expect("public shift MLE evaluation should succeed")
+                    })
+                    .collect()
+                };
 
                 let full_v_finals = reconstruct_shift_v_finals(
                     &private_v_finals,
@@ -2235,15 +2252,22 @@ where
         }
 
         // Lookup finalize: check subclaim[g+1] for each group.
-        for (g, (lk_pre, group_proof)) in lookup_pres.iter()
+        for (g, ((lk_pre, group_proof), meta)) in lookup_pres.iter()
             .zip(batched_proof.lookup_group_proofs.iter())
+            .zip(batched_proof.lookup_group_meta.iter())
             .enumerate()
         {
+            // Collect parent column evaluations from CPR up_evals using
+            // the original column index mapping stored in the group metadata.
+            let parent_evals: Vec<PiopField> = meta.original_column_indices.iter()
+                .map(|&orig_col| batched_full_up_evals_saved[orig_col].clone())
+                .collect();
             if let Err(e) = BatchedDecompLogupProtocol::<PiopField>::finalize_verifier(
                 lk_pre,
                 group_proof,
                 &md_subclaims.point,
                 &md_subclaims.expected_evaluations[g + 1],
+                &parent_evals,
                 &field_cfg,
             ) {
                 eprintln!("Lookup finalize_verifier failed (group {g}): {e:?}");
@@ -2370,8 +2394,12 @@ where
         } else {
             let binary_poly_projection =
                 BinaryPoly::<D>::prepare_projection(&projecting_element);
-            let public_evals: Vec<PiopField> = public_column_data.iter()
-                .map(|col| {
+            let public_evals: Vec<PiopField> = {
+                #[cfg(feature = "parallel")]
+                let iter = public_column_data.par_iter();
+                #[cfg(not(feature = "parallel"))]
+                let iter = public_column_data.iter();
+                iter.map(|col| {
                     let mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
                         col.iter()
                             .map(|bp| binary_poly_projection(bp).inner().clone())
@@ -2379,7 +2407,8 @@ where
                     mle.evaluate_with_config(&subclaim.point, &field_cfg)
                         .expect("public column MLE evaluation should succeed")
                 })
-                .collect();
+                .collect()
+            };
             reconstruct_up_evals(
                 &private_up_evals,
                 &public_evals,
@@ -2485,24 +2514,28 @@ where
                     ss_pre.challenge_point.iter().rev().cloned().collect();
 
                 // Collect the public v_finals in shift order.
-                let mut public_v_finals: Vec<PiopField> = Vec::new();
-                for spec in &sig.shifts {
-                    if !sig.is_public_column(spec.source_col) {
-                        continue;
-                    }
-                    // Find which public_column_data entry this source_col maps to.
-                    let pcd_idx = sig.public_columns.iter()
-                        .position(|&c| c == spec.source_col)
-                        .expect("public shift source_col not found in public_columns");
-                    let col = &public_column_data[pcd_idx];
-                    let mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
-                        col.iter()
-                            .map(|bp| binary_poly_projection(bp).inner().clone())
-                            .collect();
-                    let eval = mle.evaluate_with_config(&challenge_point_le, &field_cfg)
-                        .expect("public shift MLE evaluation should succeed");
-                    public_v_finals.push(eval);
-                }
+                let public_shift_specs: Vec<&zinc_uair::ShiftSpec> = sig.shifts.iter()
+                    .filter(|spec| sig.is_public_column(spec.source_col))
+                    .collect();
+                let public_v_finals: Vec<PiopField> = {
+                    #[cfg(feature = "parallel")]
+                    let iter = public_shift_specs.par_iter();
+                    #[cfg(not(feature = "parallel"))]
+                    let iter = public_shift_specs.iter();
+                    iter.map(|spec| {
+                        let pcd_idx = sig.public_columns.iter()
+                            .position(|&c| c == spec.source_col)
+                            .expect("public shift source_col not found in public_columns");
+                        let col = &public_column_data[pcd_idx];
+                        let mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                            col.iter()
+                                .map(|bp| binary_poly_projection(bp).inner().clone())
+                                .collect();
+                        mle.evaluate_with_config(&challenge_point_le, &field_cfg)
+                            .expect("public shift MLE evaluation should succeed")
+                    })
+                    .collect()
+                };
 
                 let full_v_finals = reconstruct_shift_v_finals(
                     &private_v_finals,
@@ -2593,18 +2626,9 @@ where
         &pcs_field_cfg,
     );
 
-    // Derive the same hash-based PCS evaluation point that the prover used.
-    let pcs_point: Vec<Zt::Pt> = {
-        let i128_point = derive_pcs_point(&cpr_subclaim.evaluation_point, num_vars);
-        i128_point
-            .into_iter()
-            .map(|v| {
-                // SAFETY: Zt::Pt is i128 in all current instantiations.
-                unsafe { std::mem::transmute_copy(&v) }
-            })
-            .collect()
-    };
-    let point_f: Vec<PiopField> = pcs_point.iter().map(|v| v.into_with_cfg(&pcs_field_cfg)).collect();
+    // r_PCS = r_CPR: use the CPR evaluation point directly.
+    // Truncate to num_vars since the sumcheck may have shared_num_vars > num_vars when lookup is present.
+    let point_f: Vec<PiopField> = cpr_subclaim.evaluation_point[..num_vars].to_vec();
 
     // Deserialize PCS proof.
     let pcs_transcript = zip_plus::pcs_transcript::PcsTranscript {
@@ -2627,12 +2651,6 @@ where
 
     let pcs_verify_time = t2.elapsed();
     let total_time = total_start.elapsed();
-
-    // ── CPR→PCS binding note ────────────────────────────────────────
-    // The PCS evaluates at a deterministic hash-derived point (derived
-    // from the CPR evaluation point). Full binding would require the
-    // PCS to open at the CPR's actual point; for now the hash-derived
-    // point is used consistently by both prover and verifier.
 
     VerifyResult {
         accepted: pcs_result.is_ok(),
@@ -2725,9 +2743,10 @@ where
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     Zt::Eval: ProjectableToField<PiopField>,
     Zt::Cw: ProjectableToField<PiopField>,
-    PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt> + for<'a> FromWithConfig<&'a Zt::CombR>,
+    PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::CombR>,
     <PiopField as Field>::Inner: FromRef<Zt::Fmod>,
     ConvertFn: Fn(&[DenseMultilinearExtension<BinaryPoly<D1>>]) -> Vec<DenseMultilinearExtension<DensePolynomial<i64, D2>>>,
+
 {
     let total_start = Instant::now();
 
@@ -2739,7 +2758,7 @@ where
 
     // ── Step 1: PCS Commit ──────────────────────────────────────────
     let t0 = Instant::now();
-    let pcs_trace = private_trace(trace, &sig_bp.public_columns);
+    let pcs_trace = private_trace(trace, &sig_bp.pcs_excluded_columns());
     let (hint, commitment) = ZipPlus::<Zt, Lc>::commit(params, &pcs_trace)
         .expect("PCS commit failed");
     let pcs_commit_time = t0.elapsed();
@@ -2916,19 +2935,14 @@ where
     let cpr_time = t2.elapsed();
 
     // ── Step 10: PCS Prove (test + evaluate) ──────────────────────
+    // r_PCS = r_CPR: pass the CPR evaluation point directly to the PCS.
+    // Truncate to num_vars since the sumcheck may have shared_num_vars > num_vars when lookup is present.
     let t3 = Instant::now();
-    let point: Vec<Zt::Pt> = {
-        let i128_point = derive_pcs_point(&bp_cpr_state.evaluation_point, num_vars);
-        i128_point
-            .into_iter()
-            .map(|v| unsafe { std::mem::transmute_copy(&v) })
-            .collect()
-    };
     let (eval_f, proof) =
         ZipPlus::<Zt, Lc>::prove::<PiopField, CHECK>(
             params,
             &pcs_trace,
-            &point,
+            &bp_cpr_state.evaluation_point[..num_vars],
             &hint,
         )
         .expect("PCS prove failed");
@@ -3050,7 +3064,7 @@ where
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     Zt::Eval: ProjectableToField<PiopField>,
     Zt::Cw: ProjectableToField<PiopField>,
-    PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::Pt> + for<'a> FromWithConfig<&'a Zt::CombR>,
+    PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::CombR>,
     <PiopField as Field>::Inner: FromRef<Zt::Fmod>,
     QxIdealOverF: Ideal + IdealCheck<DynamicPolynomialF<PiopField>>,
     QxIdealFromRef: Fn(&IdealOrZero<U2::Ideal>) -> QxIdealOverF,
@@ -3425,18 +3439,9 @@ where
         &pcs_field_cfg,
     );
 
-    // Derive the same hash-based PCS evaluation point that the prover used.
-    let pcs_point: Vec<Zt::Pt> = {
-        let i128_point = derive_pcs_point(&bp_cpr_subclaim.evaluation_point, num_vars);
-        i128_point
-            .into_iter()
-            .map(|v| {
-                // SAFETY: Zt::Pt is i128 in all current instantiations.
-                unsafe { std::mem::transmute_copy(&v) }
-            })
-            .collect()
-    };
-    let point_f: Vec<PiopField> = pcs_point.iter().map(|v| v.into_with_cfg(&pcs_field_cfg)).collect();
+    // r_PCS = r_CPR: use the CPR evaluation point directly.
+    // Truncate to num_vars since the sumcheck may have shared_num_vars > num_vars when lookup is present.
+    let point_f: Vec<PiopField> = bp_cpr_subclaim.evaluation_point[..num_vars].to_vec();
 
     let pcs_transcript = zip_plus::pcs_transcript::PcsTranscript {
         fs_transcript: KeccakTranscript::default(),
@@ -3554,7 +3559,7 @@ where
     rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<D>>,
     Zt1::Eval: ProjectableToField<PiopField>,
     Zt1::Cw: ProjectableToField<PiopField>,
-    PiopField: for<'a> FromWithConfig<&'a Zt1::Chal> + for<'a> FromWithConfig<&'a Zt1::Pt> + for<'a> FromWithConfig<&'a Zt1::CombR>,
+    PiopField: for<'a> FromWithConfig<&'a Zt1::Chal> + for<'a> FromWithConfig<&'a Zt1::CombR>,
     <PiopField as Field>::Inner: FromRef<Zt1::Fmod>,
     // Circuit 2 (generic ring R2):
     R2: ProjectableToField<PiopField>
@@ -3571,7 +3576,6 @@ where
     PcsF2: PrimeField
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Zt2::Chal>
-        + for<'a> FromWithConfig<&'a Zt2::Pt>
         + for<'a> FromWithConfig<&'a Zt2::CombR>
         + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF2>
         + FromRef<PcsF2>,
@@ -3598,8 +3602,8 @@ where
 
     // ── Step 1: PCS Commit (both circuits) ──────────────────────────
     let t0 = Instant::now();
-    let pcs_trace1 = private_trace(trace1, &sig1.public_columns);
-    let pcs_trace2 = private_trace(trace2, &sig2.public_columns);
+    let pcs_trace1 = private_trace(trace1, &sig1.pcs_excluded_columns());
+    let pcs_trace2 = private_trace(trace2, &sig2.pcs_excluded_columns());
     let (hint1, commitment1) = ZipPlus::<Zt1, Lc1>::commit(params1, &pcs_trace1)
         .expect("PCS1 commit failed");
     let (hint2, commitment2) = ZipPlus::<Zt2, Lc2>::commit(params2, &pcs_trace2)
@@ -3699,9 +3703,9 @@ where
 
     // ── Step 7: Extract lookup columns from circuit 1's field trace ──
     let lookup_precomputed = if !lookup_specs.is_empty() {
-        let (columns, raw_indices, remapped_specs) =
+        let (columns, raw_indices, remapped_specs, reverse_index_map) =
             extract_lookup_columns_from_field_trace(trace1, &c1_field_trace, lookup_specs, &field_cfg);
-        Some((columns, raw_indices, remapped_specs))
+        Some((columns, raw_indices, remapped_specs, reverse_index_map))
     } else {
         None
     };
@@ -3727,7 +3731,7 @@ where
     // ── Step 9: Build lookup groups for circuit 1 ───────────────────
     let mut lookup_groups_data: Vec<(LookupSumcheckGroup<PiopField>, LookupGroupMeta)> =
         Vec::new();
-    if let Some((ref columns, ref raw_indices, ref remapped_specs)) = lookup_precomputed {
+    if let Some((ref columns, ref raw_indices, ref remapped_specs, ref reverse_index_map)) = lookup_precomputed {
         let groups = group_lookup_specs(remapped_specs);
         for group in &groups {
             let instance = build_lookup_instance_from_indices_pub(
@@ -3752,6 +3756,9 @@ where
                 table_type: group.table_type.clone(),
                 num_columns: group.column_indices.len(),
                 witness_len,
+                original_column_indices: group.column_indices.iter()
+                    .map(|&remapped| reverse_index_map[remapped])
+                    .collect(),
             };
             lookup_groups_data.push((lk_group, meta));
         }
@@ -3816,7 +3823,6 @@ where
                 mles: vec![],
                 comb_fn: Box::new(|_: &[PiopField]| unreachable!()),
                 num_vars: 0,
-                chunk_vectors: lk_group.chunk_vectors,
                 aggregated_multiplicities: lk_group.aggregated_multiplicities,
                 chunk_inverse_witnesses: lk_group.chunk_inverse_witnesses,
                 inverse_table: lk_group.inverse_table,
@@ -3936,25 +3942,22 @@ where
     let cpr_lookup_time = t2.elapsed();
 
     // ── Step 16: PCS Prove (both circuits) ────────────────────────
+    // r_PCS = r_CPR: pass the CPR evaluation point directly.
+    // Circuit 1 uses PiopField; circuit 2 converts to PcsF2.
+    // Truncate to num_vars since the sumcheck may have shared_num_vars > num_vars when lookup is present.
     let t3 = Instant::now();
-    let pcs_i128_point = derive_pcs_point(&c1_cpr_state.evaluation_point, num_vars);
-    let point1: Vec<Zt1::Pt> = pcs_i128_point
-        .iter()
-        .map(|v| unsafe { std::mem::transmute_copy(v) })
-        .collect();
     let (eval1_f, proof1) =
         ZipPlus::<Zt1, Lc1>::prove::<PiopField, CHECK>(
             params1,
             &pcs_trace1,
-            &point1,
+            &c1_cpr_state.evaluation_point[..num_vars],
             &hint1,
         )
         .expect("PCS1 prove failed");
 
-    let point2: Vec<Zt2::Pt> = pcs_i128_point
-        .iter()
-        .map(|v| unsafe { std::mem::transmute_copy(v) })
-        .collect();
+    let pcs2_field_cfg = KeccakTranscript::default()
+        .get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>();
+    let point2: Vec<PcsF2> = piop_point_to_pcs_field(&c1_cpr_state.evaluation_point[..num_vars], &pcs2_field_cfg);
     let (eval2_f, proof2) =
         ZipPlus::<Zt2, Lc2>::prove::<PcsF2, CHECK>(
             params2,
@@ -4010,17 +4013,42 @@ where
         .map(field_to_bytes)
         .collect();
 
-    let cpr1_ups: Vec<Vec<u8>> = c1_up_evals.iter().map(field_to_bytes).collect();
+    // Only serialize non-public column evaluations — the verifier
+    // computes public column MLE evaluations from the known public data.
+    let cpr1_ups: Vec<Vec<u8>> = c1_up_evals.iter()
+        .enumerate()
+        .filter(|(i, _)| !sig1.is_public_column(*i))
+        .map(|(_, v)| field_to_bytes(v))
+        .collect();
     let cpr1_downs: Vec<Vec<u8>> = c1_down_evals.iter().map(field_to_bytes).collect();
-    let cpr2_ups: Vec<Vec<u8>> = c2_up_evals.iter().map(field_to_bytes).collect();
+    let cpr2_ups: Vec<Vec<u8>> = c2_up_evals.iter()
+        .enumerate()
+        .filter(|(i, _)| !sig2.is_public_column(*i))
+        .map(|(_, v)| field_to_bytes(v))
+        .collect();
     let cpr2_downs: Vec<Vec<u8>> = c2_down_evals.iter().map(field_to_bytes).collect();
 
-    // Serialize unified evaluation sumcheck
+    // Serialize unified evaluation sumcheck.
+    // Filter out v_finals for public columns / public shift sources.
+    // The indexing is: [c1_eq_0..c1_eq_{m1-1}, c2_eq_0..c2_eq_{m2-1}, c2_shift_0..]
+    let is_public_unified_claim = |idx: usize| -> bool {
+        if idx < c1_num_up {
+            sig1.is_public_column(idx)
+        } else if idx < c1_num_up + c2_num_up {
+            sig2.is_public_column(idx - c1_num_up)
+        } else {
+            sig2.is_public_shift(idx - c1_num_up - c2_num_up)
+        }
+    };
     let unified_eval_sumcheck = Some(SerializedShiftSumcheckProof {
         rounds: unified_eval_output.proof.rounds.iter().map(|rp| {
             rp.evals.iter().flat_map(|c| field_to_bytes(c)).collect()
         }).collect(),
-        v_finals: unified_eval_output.v_finals.iter().map(field_to_bytes).collect(),
+        v_finals: unified_eval_output.v_finals.iter()
+            .enumerate()
+            .filter(|(i, _)| !is_public_unified_claim(*i))
+            .map(|(_, v)| field_to_bytes(v))
+            .collect(),
     });
 
     let evaluation_point_bytes: Vec<Vec<u8>> =
@@ -4090,6 +4118,8 @@ pub fn verify_dual_circuit<
     num_vars: usize,
     ideal_from_ref1: IdealFromRef1,
     ideal_from_ref2: IdealFromRef2,
+    c1_public_column_data: &[zinc_poly::mle::DenseMultilinearExtension<BinaryPoly<D>>],
+    c2_public_column_data: &[zinc_poly::mle::DenseMultilinearExtension<R2>],
 ) -> VerifyResult
 where
     // Circuit 1 (BinaryPoly<D>):
@@ -4098,7 +4128,7 @@ where
     Lc1: LinearCode<Zt1>,
     Zt1::Eval: ProjectableToField<PiopField>,
     Zt1::Cw: ProjectableToField<PiopField>,
-    PiopField: for<'a> FromWithConfig<&'a Zt1::Chal> + for<'a> FromWithConfig<&'a Zt1::Pt> + for<'a> FromWithConfig<&'a Zt1::CombR>,
+    PiopField: for<'a> FromWithConfig<&'a Zt1::Chal> + for<'a> FromWithConfig<&'a Zt1::CombR>,
     <PiopField as Field>::Inner: FromRef<Zt1::Fmod>,
     IdealOverF1: Ideal + IdealCheck<DynamicPolynomialF<PiopField>>,
     IdealFromRef1: Fn(&IdealOrZero<U1::Ideal>) -> IdealOverF1,
@@ -4117,7 +4147,6 @@ where
     PcsF2: PrimeField
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Zt2::Chal>
-        + for<'a> FromWithConfig<&'a Zt2::Pt>
         + for<'a> FromWithConfig<&'a Zt2::CombR>
         + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF2>
         + FromRef<PcsF2>,
@@ -4439,7 +4468,9 @@ where
     };
 
     // ── Finalize CPR₁ ───────────────────────────────────────────────
-    let c1_up_evals: Vec<PiopField> = proof
+    // Deserialize private (non-public) up_evals from the proof;
+    // compute public column evaluations from c1_public_column_data.
+    let c1_private_up_evals: Vec<PiopField> = proof
         .cpr1_up_evals
         .iter()
         .map(|b| field_from_bytes(b, &field_cfg))
@@ -4449,6 +4480,40 @@ where
         .iter()
         .map(|b| field_from_bytes(b, &field_cfg))
         .collect();
+
+    let c1_sig = U1::signature();
+    let c1_up_evals = if c1_sig.public_columns.is_empty() {
+        c1_private_up_evals
+    } else {
+        let binary_poly_projection =
+            BinaryPoly::<D>::prepare_projection(&projecting_element);
+        let c1_public_evals: Vec<PiopField> = {
+            #[cfg(feature = "parallel")]
+            let iter = c1_public_column_data.par_iter();
+            #[cfg(not(feature = "parallel"))]
+            let iter = c1_public_column_data.iter();
+            iter.map(|col| {
+                let mut mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                    col.iter()
+                        .map(|bp| binary_poly_projection(bp).inner().clone())
+                        .collect();
+                let target_nv = md_subclaims.point.len();
+                if target_nv > mle.num_vars {
+                    mle.evaluations.resize(1 << target_nv, Default::default());
+                    mle.num_vars = target_nv;
+                }
+                mle.evaluate_with_config(&md_subclaims.point, &field_cfg)
+                    .expect("C1 public column MLE evaluation should succeed")
+            })
+            .collect()
+        };
+        reconstruct_up_evals(
+            &c1_private_up_evals,
+            &c1_public_evals,
+            &c1_sig.public_columns,
+            c1_sig.total_cols(),
+        )
+    };
     // Save for unified eval sumcheck (finalize_verifier consumes the Vecs).
     let c1_up_evals_saved = c1_up_evals.clone();
 
@@ -4481,7 +4546,9 @@ where
         };
 
     // ── Finalize CPR₂ ───────────────────────────────────────────────
-    let c2_up_evals: Vec<PiopField> = proof
+    // Deserialize private (non-public) up_evals from the proof;
+    // compute public column evaluations from c2_public_column_data.
+    let c2_private_up_evals: Vec<PiopField> = proof
         .cpr2_up_evals
         .iter()
         .map(|b| field_from_bytes(b, &field_cfg))
@@ -4491,6 +4558,33 @@ where
         .iter()
         .map(|b| field_from_bytes(b, &field_cfg))
         .collect();
+
+    let c2_sig = U2::signature();
+    let c2_up_evals = if c2_sig.public_columns.is_empty() {
+        c2_private_up_evals
+    } else {
+        let c2_public_evals: Vec<PiopField> = {
+            #[cfg(feature = "parallel")]
+            let iter = c2_public_column_data.par_iter();
+            #[cfg(not(feature = "parallel"))]
+            let iter = c2_public_column_data.iter();
+            iter.map(|col| {
+                let projected_col: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                    col.iter()
+                        .map(|v| PiopField::from_with_cfg(v.clone(), &field_cfg).inner().clone())
+                        .collect();
+                projected_col.evaluate_with_config(&md_subclaims.point, &field_cfg)
+                    .expect("C2 public column MLE evaluation should succeed")
+            })
+            .collect()
+        };
+        reconstruct_up_evals(
+            &c2_private_up_evals,
+            &c2_public_evals,
+            &c2_sig.public_columns,
+            c2_sig.total_cols(),
+        )
+    };
     // Save for unified eval sumcheck.
     let c2_up_evals_saved = c2_up_evals.clone();
     let c2_down_evals_saved = c2_down_evals.clone();
@@ -4520,7 +4614,6 @@ where
     }
 
     // ── Unified evaluation sumcheck verify ──────────────────────────
-    let c2_sig = U2::signature();
     if let Some(ref ss_proof_data) = proof.unified_eval_sumcheck {
         let c1_num_up = c1_up_evals_saved.len();
         let c2_num_up = c2_up_evals_saved.len();
@@ -4570,43 +4663,190 @@ where
         }).collect();
         let ss_proof = ShiftSumcheckProof { rounds };
 
-        let v_finals: Vec<PiopField> = ss_proof_data.v_finals.iter()
-            .map(|b| field_from_bytes(b, &field_cfg))
-            .collect();
+        // Determine which unified claims are public so we can
+        // identify verifier-computed v_finals.
+        let is_public_unified = |idx: usize| -> bool {
+            if idx < c1_num_up {
+                c1_sig.is_public_column(idx)
+            } else if idx < c1_num_up + c2_num_up {
+                c2_sig.is_public_column(idx - c1_num_up)
+            } else {
+                c2_sig.is_public_shift(idx - c1_num_up - c2_num_up)
+            }
+        };
 
-        if let Err(e) = shift_sumcheck_verify(
-            &mut transcript,
-            &ss_proof,
-            &unified_claims,
-            &v_finals,
-            num_vars,
-            &field_cfg,
-        ) {
-            eprintln!("Unified evaluation sumcheck verification failed: {e}");
-            return VerifyResult {
-                accepted: false,
-                timing: VerifyTimingBreakdown {
-                    ideal_check_verify: ic_verify_time,
-                    combined_poly_resolver_verify: t1.elapsed(),
-                    lookup_verify: Duration::ZERO,
-                    pcs_verify: Duration::ZERO,
-                    total: total_start.elapsed(),
-                },
+        let has_public = (0..unified_claims.len()).any(&is_public_unified);
+
+        if has_public {
+            // Use split API: replay sumcheck to get challenge point s,
+            // then compute public v_finals before finalizing.
+            let ss_pre = match shift_sumcheck_verify_pre(
+                &mut transcript, &ss_proof, &unified_claims, num_vars, &field_cfg,
+            ) {
+                Ok(pre) => pre,
+                Err(e) => {
+                    eprintln!("Unified eval sumcheck pre-verify failed: {e}");
+                    return VerifyResult {
+                        accepted: false,
+                        timing: VerifyTimingBreakdown {
+                            ideal_check_verify: ic_verify_time,
+                            combined_poly_resolver_verify: t1.elapsed(),
+                            lookup_verify: Duration::ZERO,
+                            pcs_verify: Duration::ZERO,
+                            total: total_start.elapsed(),
+                        },
+                    };
+                }
             };
+
+            // The challenge point is in BE (sumcheck convention);
+            // MLE evaluate_with_config expects LE ordering.
+            let challenge_point_le: Vec<PiopField> =
+                ss_pre.challenge_point.iter().rev().cloned().collect();
+
+            // Prepare BinaryPoly projection for circuit 1 public columns.
+            let binary_poly_projection =
+                BinaryPoly::<D>::prepare_projection(&projecting_element);
+
+            // Compute v_finals for public columns; interleave with private.
+            let private_v_finals: Vec<PiopField> = ss_proof_data.v_finals.iter()
+                .map(|b| field_from_bytes(b, &field_cfg))
+                .collect();
+
+            let total_claims = unified_claims.len();
+
+            // Identify public indices and evaluate their MLEs (parallelizable).
+            let public_indices: Vec<usize> = (0..total_claims)
+                .filter(|&idx| is_public_unified(idx))
+                .collect();
+
+            let public_evals: Vec<PiopField> = {
+                #[cfg(feature = "parallel")]
+                let iter = public_indices.par_iter();
+                #[cfg(not(feature = "parallel"))]
+                let iter = public_indices.iter();
+                iter.map(|&idx| {
+                    if idx < c1_num_up {
+                        // C1 public column.
+                        let pcd_idx = c1_sig.public_columns.iter()
+                            .position(|&c| c == idx)
+                            .expect("C1 public column not found");
+                        let col = &c1_public_column_data[pcd_idx];
+                        let mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                            col.iter()
+                                .map(|bp| binary_poly_projection(bp).inner().clone())
+                                .collect();
+                        mle.evaluate_with_config(&challenge_point_le, &field_cfg)
+                            .expect("C1 public v_final MLE eval failed")
+                    } else if idx < c1_num_up + c2_num_up {
+                        // C2 public column (eq claim).
+                        let col_idx = idx - c1_num_up;
+                        let pcd_idx = c2_sig.public_columns.iter()
+                            .position(|&c| c == col_idx)
+                            .expect("C2 public column not found");
+                        let col = &c2_public_column_data[pcd_idx];
+                        let projected_col: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                            col.iter()
+                                .map(|v| PiopField::from_with_cfg(v.clone(), &field_cfg).inner().clone())
+                                .collect();
+                        projected_col.evaluate_with_config(&challenge_point_le, &field_cfg)
+                            .expect("C2 public v_final MLE eval failed")
+                    } else {
+                        // C2 public shift source.
+                        let shift_idx = idx - c1_num_up - c2_num_up;
+                        let spec = &c2_sig.shifts[shift_idx];
+                        let pcd_idx = c2_sig.public_columns.iter()
+                            .position(|&c| c == spec.source_col)
+                            .expect("C2 public shift source not found in public_columns");
+                        let col = &c2_public_column_data[pcd_idx];
+                        let projected_col: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                            col.iter()
+                                .map(|v| PiopField::from_with_cfg(v.clone(), &field_cfg).inner().clone())
+                                .collect();
+                        projected_col.evaluate_with_config(&challenge_point_le, &field_cfg)
+                            .expect("C2 public shift v_final MLE eval failed")
+                    }
+                })
+                .collect()
+            };
+
+            // Interleave public and private v_finals in order.
+            let mut full_v_finals = Vec::with_capacity(total_claims);
+            let mut priv_idx = 0usize;
+            let mut pub_idx = 0usize;
+            for idx in 0..total_claims {
+                if is_public_unified(idx) {
+                    full_v_finals.push(public_evals[pub_idx].clone());
+                    pub_idx += 1;
+                } else {
+                    full_v_finals.push(private_v_finals[priv_idx].clone());
+                    priv_idx += 1;
+                }
+            }
+            debug_assert_eq!(priv_idx, private_v_finals.len());
+            debug_assert_eq!(pub_idx, public_evals.len());
+
+            if let Err(e) = shift_sumcheck_verify_finalize(
+                &mut transcript, &ss_pre, &unified_claims, &full_v_finals, &field_cfg,
+            ) {
+                eprintln!("Unified eval sumcheck finalize failed: {e}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        } else {
+            // No public claims: use monolithic verify with all v_finals from proof.
+            let v_finals: Vec<PiopField> = ss_proof_data.v_finals.iter()
+                .map(|b| field_from_bytes(b, &field_cfg))
+                .collect();
+
+            if let Err(e) = shift_sumcheck_verify(
+                &mut transcript,
+                &ss_proof,
+                &unified_claims,
+                &v_finals,
+                num_vars,
+                &field_cfg,
+            ) {
+                eprintln!("Unified evaluation sumcheck verification failed: {e}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
         }
     }
 
     // ── Finalize lookup groups ──────────────────────────────────────
-    for (g, (lk_pre, group_proof)) in lookup_pres
+    for (g, ((lk_pre, group_proof), meta)) in lookup_pres
         .iter()
         .zip(proof.lookup_group_proofs.iter())
+        .zip(proof.lookup_group_meta.iter())
         .enumerate()
     {
+        // Collect parent column evaluations from C1 CPR up_evals.
+        let parent_evals: Vec<PiopField> = meta.original_column_indices.iter()
+            .map(|&orig_col| c1_up_evals_saved[orig_col].clone())
+            .collect();
         if let Err(e) = BatchedDecompLogupProtocol::<PiopField>::finalize_verifier(
             lk_pre,
             group_proof,
             &md_subclaims.point,
             &md_subclaims.expected_evaluations[g + 2],
+            &parent_evals,
             &field_cfg,
         ) {
             eprintln!("Lookup finalize_verifier failed (group {g}): {e:?}");
@@ -4624,70 +4864,68 @@ where
     }
     let cpr_verify_time = t1.elapsed();
 
-    // ── PCS Verify (both circuits) ──────────────────────────────────
+    // ── PCS Verify (both circuits, parallelized) ─────────────────
     let t2 = Instant::now();
 
-    let pcs_i128_point = derive_pcs_point(&c1_cpr_subclaim.evaluation_point, num_vars);
+    // r_PCS = r_CPR: both circuits share the same evaluation point.
+    let verify_pcs1 = || {
+        let pcs1_field_cfg = KeccakTranscript::default()
+            .get_random_field_cfg::<PiopField, Zt1::Fmod, Zt1::PrimeTest>();
+        let point1_f: Vec<PiopField> = c1_cpr_subclaim.evaluation_point[..num_vars].to_vec();
+        let eval1_f: PiopField = PiopField::new_unchecked_with_cfg(
+            <PiopField as Field>::Inner::read_transcription_bytes(&proof.pcs1_evals_bytes[0]),
+            &pcs1_field_cfg,
+        );
+        let pcs1_transcript = zip_plus::pcs_transcript::PcsTranscript {
+            fs_transcript: KeccakTranscript::default(),
+            stream: std::io::Cursor::new(proof.pcs1_proof_bytes.clone()),
+        };
+        let pcs1_proof: ZipPlusProof = pcs1_transcript.into();
 
-    // PCS1 verify (PiopField)
-    let pcs1_field_cfg = KeccakTranscript::default()
-        .get_random_field_cfg::<PiopField, Zt1::Fmod, Zt1::PrimeTest>();
-    let pcs1_point: Vec<Zt1::Pt> = pcs_i128_point
-        .iter()
-        .map(|v| unsafe { std::mem::transmute_copy(v) })
-        .collect();
-    let point1_f: Vec<PiopField> = pcs1_point.iter().map(|v| v.into_with_cfg(&pcs1_field_cfg)).collect();
-    let eval1_f: PiopField = PiopField::new_unchecked_with_cfg(
-        <PiopField as Field>::Inner::read_transcription_bytes(&proof.pcs1_evals_bytes[0]),
-        &pcs1_field_cfg,
-    );
-    let pcs1_transcript = zip_plus::pcs_transcript::PcsTranscript {
-        fs_transcript: KeccakTranscript::default(),
-        stream: std::io::Cursor::new(proof.pcs1_proof_bytes.clone()),
+        let result = ZipPlus::<Zt1, Lc1>::verify::<PiopField, CHECK>(
+            params1,
+            &proof.pcs1_commitment,
+            &point1_f,
+            &eval1_f,
+            &pcs1_proof,
+        );
+        if let Err(ref e) = result {
+            eprintln!("PCS1 verification failed: {e:?}");
+        }
+        result
     };
-    let pcs1_proof: ZipPlusProof =
-        pcs1_transcript.into();
 
-    let pcs1_result = ZipPlus::<Zt1, Lc1>::verify::<PiopField, CHECK>(
-        params1,
-        &proof.pcs1_commitment,
-        &point1_f,
-        &eval1_f,
-        &pcs1_proof,
-    );
-    if let Err(ref e) = pcs1_result {
-        eprintln!("PCS1 verification failed: {e:?}");
-    }
+    let verify_pcs2 = || {
+        let pcs2_field_cfg = KeccakTranscript::default()
+            .get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>();
+        let point2_f: Vec<PcsF2> = piop_point_to_pcs_field(&c1_cpr_subclaim.evaluation_point[..num_vars], &pcs2_field_cfg);
+        let eval2_f: PcsF2 = PcsF2::new_unchecked_with_cfg(
+            <PcsF2::Inner as ConstTranscribable>::read_transcription_bytes(&proof.pcs2_evals_bytes[0]),
+            &pcs2_field_cfg,
+        );
+        let pcs2_transcript = zip_plus::pcs_transcript::PcsTranscript {
+            fs_transcript: KeccakTranscript::default(),
+            stream: std::io::Cursor::new(proof.pcs2_proof_bytes.clone()),
+        };
+        let pcs2_proof: ZipPlusProof = pcs2_transcript.into();
 
-    // PCS2 verify (PcsF2)
-    let pcs2_field_cfg = KeccakTranscript::default()
-        .get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>();
-    let pcs2_point: Vec<Zt2::Pt> = pcs_i128_point
-        .iter()
-        .map(|v| unsafe { std::mem::transmute_copy(v) })
-        .collect();
-    let point2_f: Vec<PcsF2> = pcs2_point.iter().map(|v| v.into_with_cfg(&pcs2_field_cfg)).collect();
-    let eval2_f: PcsF2 = PcsF2::new_unchecked_with_cfg(
-        <PcsF2::Inner as ConstTranscribable>::read_transcription_bytes(&proof.pcs2_evals_bytes[0]),
-        &pcs2_field_cfg,
-    );
-    let pcs2_transcript = zip_plus::pcs_transcript::PcsTranscript {
-        fs_transcript: KeccakTranscript::default(),
-        stream: std::io::Cursor::new(proof.pcs2_proof_bytes.clone()),
+        let result = ZipPlus::<Zt2, Lc2>::verify::<PcsF2, CHECK>(
+            params2,
+            &proof.pcs2_commitment,
+            &point2_f,
+            &eval2_f,
+            &pcs2_proof,
+        );
+        if let Err(ref e) = result {
+            eprintln!("PCS2 verification failed: {e:?}");
+        }
+        result
     };
-    let pcs2_proof: ZipPlusProof =
-        pcs2_transcript.into();
 
-    let pcs2_result = ZipPlus::<Zt2, Lc2>::verify::<PcsF2, CHECK>(
-        params2,
-        &proof.pcs2_commitment,
-        &point2_f,
-        &eval2_f,
-        &pcs2_proof,
-    );
-    if let Err(ref e) = pcs2_result {
-        eprintln!("PCS2 verification failed: {e:?}");
-    }
+    #[cfg(feature = "parallel")]
+    let (pcs1_result, pcs2_result) = rayon_join(verify_pcs1, verify_pcs2);
+    #[cfg(not(feature = "parallel"))]
+    let (pcs1_result, pcs2_result) = (verify_pcs1(), verify_pcs2());
 
     let pcs_verify_time = t2.elapsed();
 

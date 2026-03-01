@@ -88,6 +88,13 @@ pub struct LookupGroupMeta {
     pub num_columns: usize,
     /// Length of each witness vector (= number of rows in the trace).
     pub witness_len: usize,
+    /// Original trace column indices for each witness in the group.
+    ///
+    /// `original_column_indices[ℓ]` is the index into the full trace
+    /// (and therefore into the CPR `up_evals`) of the ℓ-th lookup column
+    /// in this group.  The verifier uses this to extract parent column
+    /// evaluations for the decomposition consistency check.
+    pub original_column_indices: Vec<usize>,
 }
 
 /// Prover state returned after running the lookup pipeline step.
@@ -180,6 +187,7 @@ where
             table_type: group.table_type.clone(),
             num_columns: group.column_indices.len(),
             witness_len,
+            original_column_indices: group.column_indices.clone(),
         });
         eval_points.push(state.evaluation_point);
     }
@@ -253,6 +261,7 @@ where
             table_type: group.table_type.clone(),
             num_columns: group.column_indices.len(),
             witness_len,
+            original_column_indices: group.column_indices.clone(),
         });
         eval_points.push(state.evaluation_point);
     }
@@ -380,6 +389,7 @@ where
             table_type: group.table_type.clone(),
             num_columns: group.column_indices.len(),
             witness_len,
+            original_column_indices: group.column_indices.clone(),
         });
         group_states.push(state);
     }

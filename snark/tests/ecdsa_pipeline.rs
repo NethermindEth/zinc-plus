@@ -4,13 +4,13 @@
 //! using `Int<4>` throughout — the same 256-bit integer type is used as
 //! PCS evaluation type AND PIOP constraint ring (single-ring pipeline).
 //!
-//! 1. Generate an all-zero `Int<4>` trace (14 columns × 128 rows)
+//! 1. Generate an all-zero `Int<4>` trace (11 columns × 128 rows)
 //! 2. Commit the trace via PCS (using `EcdsaScalarZipTypes`)
-//! 3. Run PIOP: IdealCheck (11 constraints) + CombinedPolyResolver
+//! 3. Run PIOP: IdealCheck (9 constraints) + CombinedPolyResolver
 //! 4. PCS test + evaluate
 //! 5. Verify IC, CPR, and PCS
 //!
-//! All-zero `Int<4>` trivially satisfies all 11 constraints.
+//! All-zero `Int<4>` trivially satisfies all 9 constraints.
 //! For non-trivial constraint testing, see `ecdsa_ideal_check.rs`.
 
 #![allow(clippy::arithmetic_side_effects)]
@@ -41,6 +41,7 @@ use zip_plus::{
 
 use zinc_ecdsa_uair::{
     EcdsaIdealOverF, EcdsaUairInt, NUM_COLS,
+    COL_B1, COL_B2, COL_SEL_INIT, COL_SEL_FINAL,
 };
 use zinc_snark::pipeline;
 
@@ -80,8 +81,8 @@ fn ecdsa_pipeline_round_trip() {
     // Use num_vars=7 (128 rows) to match PCS config (row_len=128, DEPTH=1).
     let num_vars = 7;
 
-    // Generate all-zero Int<4> trace (14 columns × 128 rows).
-    // All-zero trivially satisfies all 11 ECDSA constraints.
+    // Generate all-zero Int<4> trace (11 columns × 128 rows).
+    // All-zero trivially satisfies all 9 ECDSA constraints.
     let zero = Int::<{ INT_LIMBS * 4 }>::default();
     let trace: Vec<DenseMultilinearExtension<Int<{ INT_LIMBS * 4 }>>> = (0..NUM_COLS)
         .map(|_| {
@@ -98,7 +99,7 @@ fn ecdsa_pipeline_round_trip() {
     let linear_code = Lc::new(row_len);
     let params = ZipPlusParams::new(num_vars, 1, linear_code);
 
-    // ── Prove (single-ring: 11 Int<4> constraints) ──────────────────
+    // ── Prove (single-ring: 9 Int<4> constraints) ──────────────────
     let proof = pipeline::prove_generic::<
         EcdsaUairInt,                           // U: Uair<Scalar=Int<4>>
         Int<{ INT_LIMBS * 4 }>,                 // R = Int<4>
@@ -126,11 +127,13 @@ fn ecdsa_pipeline_round_trip() {
     );
 
     // ── Verify ──────────────────────────────────────────────────────
-    // Public columns b_1 (col 0) and b_2 (col 1) — the verifier
+    // Public columns: b_1, b_2, sel_init, sel_final — the verifier
     // must supply these to reconstruct the full evaluation set.
     let public_column_data: Vec<DenseMultilinearExtension<Int<{ INT_LIMBS * 4 }>>> = vec![
-        trace[0].clone(),  // b_1
-        trace[1].clone(),  // b_2
+        trace[COL_B1].clone(),        // b_1
+        trace[COL_B2].clone(),        // b_2
+        trace[COL_SEL_INIT].clone(),  // sel_init
+        trace[COL_SEL_FINAL].clone(), // sel_final
     ];
 
     let verify_result = pipeline::verify_generic::<
@@ -169,6 +172,6 @@ fn ecdsa_pipeline_round_trip() {
         "ECDSA Int<4> pipeline verification FAILED"
     );
     println!(
-        "\n✓ ECDSA Int<4> single-ring pipeline round-trip PASSED (11 assert_zero constraints)"
+        "\n✓ ECDSA Int<4> single-ring pipeline round-trip PASSED (9 assert_zero constraints)"
     );
 }

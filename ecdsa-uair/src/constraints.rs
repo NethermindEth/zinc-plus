@@ -9,7 +9,7 @@
 //! - F_p = secp256k1 base field (256-bit prime)
 //! - Jacobian coordinates: affine (x, y) ↔ (X : Y : Z) where x = X/Z², y = Y/Z³
 //!
-//! # Column layout (9 columns)
+//! # Column layout (11 columns)
 //!
 //! | Index | Name  | Description                                |
 //! |-------|-------|--------------------------------------------|
@@ -18,6 +18,8 @@
 //! | 2–4   | X,Y,Z | Accumulator point (Jacobian)               |
 //! | 5–7   | X_mid, Y_mid, Z_mid | Doubled point (Jacobian)    |
 //! | 8     | H     | Addition scratch: chord x-difference       |
+//! | 9     | sel_init  | Selector: 1 at row 0 (public)          |
+//! | 10    | sel_final | Selector: 1 at row 257 (public)        |
 //!
 //! The scalars u₁ = e·s⁻¹ and u₂ = r·s⁻¹ are public inputs (not in the
 //! trace). The quotient bit k is boundary-only. The auxiliary values
@@ -99,27 +101,61 @@
 //! with Shamir selector for the (0,0) case.
 //! Max degree 10 due to s(deg2) × R_a(deg5) × (X_mid·H²)(deg3).
 //!
-//! # Boundary Constraints
+//! # Boundary Constraints (B3–B4)
 //!
 //! In addition to the 7 non-boundary constraints above, the ECDSA
-//! verification requires boundary constraints on the first and last rows:
+//! verification requires 2 boundary constraints using selector columns:
 //!
-//! - **Row 1**: Initial accumulator = identity point,
-//!   Q on curve (Qy² = Qx³ + 7), precompute T = G+Q
-//! - **Row 258**: Final check: X_final / Z_final² ≡ r (mod n),
-//!   k·n + r = X_final/Z_final² (quotient bit k is boundary-only),
-//!   u₁ = e·s⁻¹ (mod n), u₂ = r·s⁻¹ (mod n) (verified from public inputs)
+//! ## Booleanity of b₁, b₂ (verified outside the constraint system)
+//!
+//! The scalar-bit columns b₁ and b₂ must be in {0, 1} at every row.
+//! Because these columns are **public**, the verifier checks booleanity
+//! directly on the raw column data — an O(N) scan of values — rather
+//! than imposing two degree-2 algebraic constraints.  This saves
+//! constraint-system cost without weakening soundness.
+//!
+//! ## Constraint B3: Initialization (selector-gated)
+//!
+//! ```text
+//! sel_init · Z = 0
+//! ```
+//!
+//! At row 0 (`sel_init = 1`) this forces Z = 0, meaning the initial
+//! accumulator is the Jacobian identity point. At all other rows
+//! `sel_init = 0` makes the constraint vacuous.
+//!
+//! ## Constraint B4: Final signature check (guarded)
+//!
+//! ```text
+//! sel_final · Z · (X − R_SIG · Z²) = 0
+//! ```
+//!
+//! At the final row (`sel_final = 1`), when Z ≠ 0 this enforces
+//! X/Z² = R_SIG (i.e. the affine x-coordinate equals k·n + r).
+//! When Z = 0 (identity / point at infinity) the constraint is
+//! vacuously satisfied — a separate non-degeneracy check (Z ≠ 0)
+//! would be needed in a production system.
+//!
+//! # Column layout (11 columns)
+//!
+//! | Index | Name       | Description                                 |
+//! |-------|------------|---------------------------------------------|
+//! | 0     | b₁         | Bit of scalar u₁                            |
+//! | 1     | b₂         | Bit of scalar u₂                            |
+//! | 2–4   | X,Y,Z      | Accumulator point (Jacobian)                |
+//! | 5–7   | X_mid, Y_mid, Z_mid | Doubled point (Jacobian)         |
+//! | 8     | H          | Addition scratch: chord x-difference        |
+//! | 9     | sel_init   | Selector: 1 at row 0, 0 elsewhere (public)  |
+//! | 10    | sel_final  | Selector: 1 at row 257, 0 elsewhere (public)|
 //!
 //! # Implementation Status
 //!
-//! These constraints require the multi-ring UAIR extension because:
-//! 1. F_p arithmetic (256-bit Montgomery multiplication) cannot be
-//!    expressed in BinaryPoly<32> (which uses F₂ coefficient arithmetic)
-//! 2. Different columns use different rings (F_p vs Q)
-//! 3. The Shamir selector expressions require multiplying ring elements
-//!    by boolean selectors, which needs an appropriate embedding
+//! The non-boundary constraints (C1–C7) and boundary constraints (B3–B4)
+//! are fully implemented for `DensePolynomial<i64, 1>` and `Int<4>` rings.
+//! Booleanity of b₁/b₂ is enforced by the verifier on public column data.
+//! The `BinaryPoly<32>` variant remains a placeholder (0 constraints)
+//! because F_p arithmetic cannot be expressed in F₂[X].
 //!
-//! The implementation path follows Option D from the architecture analysis:
-//! - Define `impl Uair<Fp256Poly> for EcdsaUair` using 256-bit field polynomials
-//! - Run a second IdealCheck + CPR protocol for the F_p constraints
-//! - Combine both sub-protocol transcripts in the pipeline
+//! The constraints use plain integer arithmetic (no modular reduction),
+//! which works for the toy curve (F₁₀₁) but would require 256-bit
+//! Montgomery field arithmetic for real secp256k1.

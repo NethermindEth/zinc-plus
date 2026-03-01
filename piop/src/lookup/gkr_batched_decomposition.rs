@@ -2,8 +2,9 @@
 //!
 //! Given L witness vectors that all look up into the same decomposed
 //! table (e.g. BitPoly(32) → K sub-tables of BitPoly(8)), this
-//! protocol proves all L·K chunk lookups using **two GKR fractional
-//! sumchecks** — one combined witness tree and one combined table tree.
+//! protocol proves all L·K chunk lookups using a **batched GKR
+//! fractional sumcheck** — L separate per-lookup witness trees with
+//! layer-wise batched sumchecks, plus one combined table tree.
 //!
 //! ## Key advantage over [`super::batched_decomposition`]
 //!
@@ -17,12 +18,15 @@
 //!
 //! 1. Prover sends aggregated multiplicities `m_agg^(ℓ)` for each lookup.
 //! 2. Challenges β (shift) and α (batching) are derived.
-//! 3. A combined witness fraction tree is built:
-//!    leaf `(ℓ, k, i)` → numerator `α^ℓ`, denominator `β − c_k^(ℓ)[i]`.
+//! 3. For each lookup ℓ, a per-lookup witness fraction tree is built:
+//!    leaf `(k, i)` → numerator `1`, denominator `β − c_k^(ℓ)[i]`.
 //! 4. A combined table fraction tree is built:
 //!    leaf `j` → numerator `Σ_ℓ α^ℓ · m_agg^(ℓ)[j]`, denominator `β − T[j]`.
-//! 5. Two GKR fractional sumchecks prove the sums match (root cross-check).
-//! 6. Verifier leaf-check reduces to chunk MLE evaluations (provided by PCS).
+//! 5. A batched GKR fractional sumcheck processes all L witness trees
+//!    layer-by-layer in a single combined sumcheck per layer.
+//! 6. A single GKR fractional sumcheck proves the table tree.
+//! 7. Cross-check: `Σ_ℓ α^ℓ · P_w^(ℓ)/Q_w^(ℓ) == P_t/Q_t`.
+//! 8. Verifier leaf-check reduces to chunk MLE evaluations (provided by PCS).
 
 use crypto_primitives::FromPrimitiveWithConfig;
 use num_traits::Zero;
@@ -31,10 +35,11 @@ use rayon::prelude::*;
 use std::marker::PhantomData;
 use zinc_poly::utils::build_eq_x_r_vec;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_utils::{cfg_iter, inner_transparent_field::InnerTransparentField};
+use zinc_utils::{cfg_iter, cfg_into_iter, inner_transparent_field::InnerTransparentField};
 
 use super::gkr_logup::{
     build_fraction_tree, gkr_fraction_prove, gkr_fraction_verify,
+    batched_gkr_fraction_prove, batched_gkr_fraction_verify,
 };
 use super::structs::{
     BatchedDecompLookupInstance, GkrBatchedDecompLogupProof,
@@ -135,29 +140,30 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
             ap *= &alpha;
         }
 
-        // ---- Step 4: Build combined witness fraction tree ----
-        // Total leaves = L * K * W, padded to next power of 2.
-        let total_witness_leaves = num_lookups * num_chunks * witness_len;
-        let w_num_vars = zinc_utils::log2(total_witness_leaves.next_power_of_two()) as usize;
+        // ---- Step 4: Build L per-lookup witness fraction trees ----
+        // Each tree has K*W leaves (padded to next power of 2).
+        // leaf_p[(k, i)] = 1   (numerators are all 1 per-tree)
+        // leaf_q[(k, i)] = β − chunks[ℓ][k][i]
+        let per_lookup_leaves = num_chunks * witness_len; // K * W
+        let w_num_vars = zinc_utils::log2(per_lookup_leaves.next_power_of_two()) as usize;
         let w_size = 1usize << w_num_vars;
 
-        // Leaf ordering: flat index = ℓ * (K * W) + k * W + i
-        // leaf_p[idx] = α^ℓ
-        // leaf_q[idx] = β - chunks[ℓ][k][i]
-        let mut w_leaf_p = Vec::with_capacity(w_size);
-        let mut w_leaf_q = Vec::with_capacity(w_size);
-
-        for ell in 0..num_lookups {
-            for k in 0..num_chunks {
-                for i in 0..witness_len {
-                    w_leaf_p.push(alpha_powers[ell].clone());
-                    w_leaf_q.push(beta.clone() - &all_chunks[ell][k][i]);
+        let witness_trees: Vec<_> = (0..num_lookups)
+            .map(|ell| {
+                let mut leaf_p = Vec::with_capacity(w_size);
+                let mut leaf_q = Vec::with_capacity(w_size);
+                for k in 0..num_chunks {
+                    for i in 0..witness_len {
+                        leaf_p.push(one.clone());
+                        leaf_q.push(beta.clone() - &all_chunks[ell][k][i]);
+                    }
                 }
-            }
-        }
-        // Pad with (0, 1) — zero fraction, doesn't affect the sum.
-        w_leaf_p.resize(w_size, zero.clone());
-        w_leaf_q.resize(w_size, one.clone());
+                // Pad with (0, 1) — zero fraction.
+                leaf_p.resize(w_size, zero.clone());
+                leaf_q.resize(w_size, one.clone());
+                build_fraction_tree(leaf_p, leaf_q)
+            })
+            .collect();
 
         // ---- Step 5: Build combined table fraction tree ----
         // Leaves = N (subtable size), padded to next power of 2.
@@ -166,42 +172,51 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
 
         // leaf_p[j] = Σ_ℓ α^ℓ · m_agg^(ℓ)[j]
         // leaf_q[j] = β - T[j]
-        let mut t_leaf_p = Vec::with_capacity(t_size);
-        let mut t_leaf_q = Vec::with_capacity(t_size);
-
-        for j in 0..table_len {
-            let mut combined_mult = zero.clone();
-            for ell in 0..num_lookups {
-                combined_mult += &(alpha_powers[ell].clone() * &all_aggregated_multiplicities[ell][j]);
-            }
-            t_leaf_p.push(combined_mult);
-            t_leaf_q.push(beta.clone() - &subtable[j]);
-        }
+        let (mut t_leaf_p, mut t_leaf_q): (Vec<F>, Vec<F>) =
+            cfg_into_iter!(0..table_len, 256)
+                .map(|j| {
+                    let mut combined_mult = zero.clone();
+                    for ell in 0..num_lookups {
+                        combined_mult += &(alpha_powers[ell].clone()
+                            * &all_aggregated_multiplicities[ell][j]);
+                    }
+                    (combined_mult, beta.clone() - &subtable[j])
+                })
+                .unzip();
         t_leaf_p.resize(t_size, zero.clone());
         t_leaf_q.resize(t_size, one.clone());
 
-        // Build both fraction trees in parallel.
-        #[cfg(feature = "parallel")]
-        let (witness_tree, table_tree) = rayon::join(
-            || build_fraction_tree(w_leaf_p, w_leaf_q),
-            || build_fraction_tree(t_leaf_p, t_leaf_q),
-        );
-        #[cfg(not(feature = "parallel"))]
-        let (witness_tree, table_tree) = (
-            build_fraction_tree(w_leaf_p, w_leaf_q),
-            build_fraction_tree(t_leaf_p, t_leaf_q),
-        );
+        let table_tree = build_fraction_tree(t_leaf_p, t_leaf_q);
 
-        // ---- Step 6: GKR fractional sumcheck for witness tree ----
-        let witness_gkr = gkr_fraction_prove(transcript, &witness_tree, field_cfg);
+        // ---- Step 6: Batched GKR fractional sumcheck for L witness trees ----
+        let witness_result =
+            batched_gkr_fraction_prove(transcript, &witness_trees, field_cfg);
+        let witness_eval_point = witness_result.eval_point;
 
         // ---- Step 7: GKR fractional sumcheck for table tree ----
-        let table_gkr = gkr_fraction_prove(transcript, &table_tree, field_cfg);
+        let (table_gkr, table_eval_point) =
+            gkr_fraction_prove(transcript, &table_tree, field_cfg);
 
         // ---- Step 8: Prover-side root cross-check (debug) ----
+        // Σ_ℓ α^ℓ · P_w^(ℓ)/Q_w^(ℓ) == P_t/Q_t
+        // ⟺  (Σ_ℓ α^ℓ · P_w^(ℓ) · Π_{j≠ℓ} Q_w^(j)) · Q_t == P_t · Π_ℓ Q_w^(ℓ)
         debug_assert!({
-            let lhs = witness_gkr.root_p.clone() * &table_gkr.root_q;
-            let rhs = table_gkr.root_p.clone() * &witness_gkr.root_q;
+            // Simple form: cross-multiply with all Q_w and Q_t
+            let witness_gkr = &witness_result.proof;
+            let q_w_product: F = witness_gkr.roots_q.iter().cloned()
+                .fold(one.clone(), |acc, q| acc * &q);
+            let mut lhs = zero.clone();
+            for ell in 0..num_lookups {
+                let mut others_q = one.clone();
+                for j in 0..num_lookups {
+                    if j != ell {
+                        others_q *= &witness_gkr.roots_q[j];
+                    }
+                }
+                lhs += &(alpha_powers[ell].clone() * &witness_gkr.roots_p[ell] * &others_q);
+            }
+            lhs *= &table_gkr.root_q;
+            let rhs = table_gkr.root_p.clone() * &q_w_product;
             lhs == rhs
         });
 
@@ -214,29 +229,10 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
             })
         });
 
-        // ---- Recover evaluation points from GKR ----
-        // The prover re-runs the verifier logic to extract the evaluation
-        // points. We use a separate transcript re-derive (or just track
-        // them during the prove).  For now, we return empty and let the
-        // caller re-derive via the verifier.
-        //
-        // Actually, the prover needs these for PCS integration, so we
-        // re-derive them by running the verifier-side challenge extraction
-        // in a cloned transcript.  But since the prover already built the
-        // trees, we can extract the points directly by tracking r_k during
-        // the prove loop.  The gkr_fraction_prove function doesn't return
-        // r_k, so we re-derive it here.
-        //
-        // For efficiency, we reconstruct by re-running the verification
-        // on the already-produced proofs with a fresh transcript that tracks
-        // the same state.
-        let witness_eval_point = recover_eval_point_from_proof(&witness_gkr, w_num_vars, field_cfg);
-        let table_eval_point = recover_eval_point_from_proof(&table_gkr, t_num_vars, field_cfg);
-
         Ok((
             GkrBatchedDecompLogupProof {
                 aggregated_multiplicities: all_aggregated_multiplicities,
-                witness_gkr,
+                witness_gkr: witness_result.proof,
                 table_gkr,
             },
             GkrBatchedDecompLogupProverState {
@@ -255,6 +251,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
 
     /// Verifier for the batched GKR Decomposition + LogUp protocol.
     ///
+    /// Uses L separate per-lookup witness trees (batched layer-wise)
+    /// and a single α-batched table tree.
+    ///
     /// # Arguments
     ///
     /// - `transcript`: Fiat-Shamir transcript.
@@ -267,8 +266,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
     ///
     /// # Returns
     ///
-    /// `GkrBatchedDecompLogupVerifierSubClaim` on success, reducing the
-    /// lookup verification to chunk MLE evaluations that the PCS must provide.
+    /// `GkrBatchedDecompLogupVerifierSubClaim` on success.
     #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
     pub fn verify_as_subprotocol(
         transcript: &mut impl Transcript,
@@ -308,12 +306,12 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
         }
 
         // ---- Step 3: Compute tree dimensions ----
-        let total_witness_leaves = num_lookups * num_chunks * witness_len;
-        let w_num_vars = zinc_utils::log2(total_witness_leaves.next_power_of_two()) as usize;
+        let per_lookup_leaves = num_chunks * witness_len; // K * W per-tree
+        let w_num_vars = zinc_utils::log2(per_lookup_leaves.next_power_of_two()) as usize;
         let t_num_vars = zinc_utils::log2(table_len.next_power_of_two()) as usize;
 
-        // ---- Step 4: Verify witness-side GKR ----
-        let witness_result = gkr_fraction_verify(
+        // ---- Step 4: Verify witness-side batched GKR (L trees) ----
+        let witness_result = batched_gkr_fraction_verify(
             transcript,
             &proof.witness_gkr,
             w_num_vars,
@@ -329,18 +327,30 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
         )?;
 
         // ---- Step 6: Cross-check roots ----
-        // P_w · Q_t == P_t · Q_w  ⟺  P_w/Q_w == P_t/Q_t
-        let lhs = proof.witness_gkr.root_p.clone() * &proof.table_gkr.root_q;
-        let rhs = proof.table_gkr.root_p.clone() * &proof.witness_gkr.root_q;
-        if lhs != rhs {
-            return Err(LookupError::GkrRootMismatch);
+        // Σ_ℓ α^ℓ · P_w^(ℓ)/Q_w^(ℓ) == P_t/Q_t
+        // ⟺  (Σ_ℓ α^ℓ · P_w^(ℓ) · Π_{j≠ℓ} Q_w^(j)) · Q_t == P_t · Π_ℓ Q_w^(ℓ)
+        {
+            let q_w_product: F = proof.witness_gkr.roots_q.iter().cloned()
+                .fold(one.clone(), |acc, q| acc * &q);
+            let mut lhs = zero.clone();
+            for ell in 0..num_lookups {
+                let mut others_q = one.clone();
+                for j in 0..num_lookups {
+                    if j != ell {
+                        others_q *= &proof.witness_gkr.roots_q[j];
+                    }
+                }
+                lhs += &(alpha_powers[ell].clone() * &proof.witness_gkr.roots_p[ell] * &others_q);
+            }
+            lhs *= &proof.table_gkr.root_q;
+            let rhs = proof.table_gkr.root_p.clone() * &q_w_product;
+            if lhs != rhs {
+                return Err(LookupError::GkrRootMismatch);
+            }
         }
 
         // ---- Step 7: Verify table-side leaf claims ----
-        // Table leaves: p_j = Σ_ℓ α^ℓ · m_agg^(ℓ)[j], q_j = β − T[j]
-        // The verifier can compute these directly.
         if table_result.point.is_empty() {
-            // 0-variable case: single entry.
             let expected_p = {
                 let mut val = zero.clone();
                 for ell in 0..num_lookups {
@@ -349,14 +359,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
                 val
             };
             let expected_q = beta.clone() - &subtable[0];
-
             if expected_p != table_result.expected_p || expected_q != table_result.expected_q {
                 return Err(LookupError::GkrLeafMismatch);
             }
         } else {
             let eq_at_t = build_eq_x_r_vec(&table_result.point, field_cfg)?;
-
-            // p̃_t(r_t) = Σ_j eq(j, r_t) · [Σ_ℓ α^ℓ · m_agg^(ℓ)[j]]
             let mut p_eval = zero.clone();
             for j in 0..table_len {
                 let mut combined_mult = zero.clone();
@@ -365,18 +372,13 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
                 }
                 p_eval += &(combined_mult * &eq_at_t[j]);
             }
-            // Pad entries contribute 0 to p.
-
-            // q̃_t(r_t) = Σ_j eq(j, r_t) · (β − T[j]) + Σ_{j≥N} eq(j, r_t) · 1
             let mut q_eval = zero.clone();
             for j in 0..table_len {
                 q_eval += &((beta.clone() - &subtable[j]) * &eq_at_t[j]);
             }
-            // Padding entries have q = 1.
             for j in table_len..eq_at_t.len() {
                 q_eval += &eq_at_t[j];
             }
-
             if p_eval != table_result.expected_p {
                 return Err(LookupError::GkrLeafMismatch);
             }
@@ -397,43 +399,40 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
             }
         }
 
-        // ---- Step 9: Witness-side leaf subclaim ----
-        // Witness leaves: p = α^ℓ (structured), q = β − chunk value.
-        // The verifier can compute the expected p̃_w(r_w) from α and the
-        // tree structure.  For q̃_w(r_w), the verifier needs the combined
-        // chunk MLE evaluation from PCS.
+        // ---- Step 9: Witness-side leaf subclaims ----
+        // Each per-lookup tree ℓ has:
+        //   p^(ℓ)[(k, i)] = 1                 (all-ones numerator)
+        //   q^(ℓ)[(k, i)] = β − c_k^(ℓ)[i]   (data), 1 (padding)
         //
-        // p̃_w(r_w):
-        // Leaf ordering: flat idx = ℓ*(K*W) + k*W + i, padded to 2^{d_w}.
-        // p[idx] = α^ℓ for idx in [ℓ*K*W, (ℓ+1)*K*W), and 0 for padding.
+        // The verifier can compute expected_p^(ℓ)(r) = MLE of all-ones
+        // over the K*W data region = Σ_{j < K*W} eq(j, r).
         //
-        // This is a structured MLE: each α^ℓ is repeated K*W times.
-        // We can evaluate it using eq weights over the 'ℓ' coordinates.
-        let expected_p_eval = compute_witness_p_eval(
+        // For q̃^(ℓ)(r), the verifier needs the combined chunk MLE
+        // evaluation from PCS (returned as the expected value).
+        //
+        // All trees share the same point r, so we compute the expected
+        // p once and check it against every tree's expected_p.
+        let expected_witness_p = compute_witness_ones_p_eval(
             &witness_result.point,
-            &alpha_powers,
-            num_lookups,
             num_chunks,
             witness_len,
             w_num_vars,
             field_cfg,
         );
 
-        if expected_p_eval != witness_result.expected_p {
-            return Err(LookupError::GkrLeafMismatch);
+        for ell in 0..num_lookups {
+            if expected_witness_p != witness_result.expected_ps[ell] {
+                return Err(LookupError::GkrLeafMismatch);
+            }
         }
 
-        // q̃_w(r_w) = β · (sum of eq weights over data region) - combined_chunk_eval
-        //           + (sum of eq weights over padding region)     [padding has q=1]
-        //
-        // The combined_chunk_eval is what the PCS must provide.
-        // We return the expected q value so the pipeline can derive the
-        // chunk evaluation from it.
-
+        // Return the first tree's q evaluation as the expected q value.
+        // All trees share the same r point, so the PCS needs to provide
+        // chunk MLE evaluations at this shared point.
         Ok(GkrBatchedDecompLogupVerifierSubClaim {
             witness_eval_point: witness_result.point,
-            expected_witness_q_eval: witness_result.expected_q,
-            expected_witness_p_eval: witness_result.expected_p,
+            expected_witness_q_eval: witness_result.expected_qs[0].clone(),
+            expected_witness_p_eval: witness_result.expected_ps[0].clone(),
             table_eval_point: table_result.point,
         })
     }
@@ -443,16 +442,17 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Compute the expected evaluation of the witness numerator MLE p̃_w(r).
+/// Compute the expected evaluation of the per-tree witness numerator MLE.
 ///
-/// The witness numerator is structured: p[ℓ*K*W + k*W + i] = α^ℓ for
-/// data entries, 0 for padding.  This is evaluated efficiently using
-/// the structure.
+/// Each per-tree witness numerator has `p[j] = 1` for `j < K*W` (data
+/// region) and `0` for padding.  The MLE evaluation at point `r` is:
+///   p̃(r) = Σ_{j < K*W} eq(j, r)
+///
+/// This is independent of the tree index ℓ — all trees share the same
+/// structure and the same point.
 #[allow(clippy::arithmetic_side_effects)]
-fn compute_witness_p_eval<F>(
+fn compute_witness_ones_p_eval<F>(
     point: &[F],
-    alpha_powers: &[F],
-    num_lookups: usize,
     num_chunks: usize,
     witness_len: usize,
     num_vars: usize,
@@ -460,58 +460,29 @@ fn compute_witness_p_eval<F>(
 ) -> F
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Inner: Clone + Send + Sync,
     F::Config: Sync,
 {
-    let zero = F::zero_with_cfg(field_cfg);
+    let one = F::one_with_cfg(field_cfg);
 
     if point.is_empty() {
-        // 0-variable: single leaf, return α^0 = 1 (if there's data)
-        return if num_lookups > 0 { alpha_powers[0].clone() } else { zero };
+        // 0-variable: single leaf = 1 (if there's data)
+        return if num_chunks * witness_len > 0 { one } else { F::zero_with_cfg(field_cfg) };
     }
 
-    // Build the full eq vector and sum over data positions.
+    let data_entries = num_chunks * witness_len; // K * W
     let total_size = 1usize << num_vars;
-    let block_size = num_chunks * witness_len; // K * W entries per lookup
+    debug_assert!(data_entries <= total_size);
 
     let eq_vec = build_eq_x_r_vec(point, field_cfg)
         .expect("eq vector construction should succeed");
 
-    let mut result = zero;
-    for ell in 0..num_lookups {
-        let base = ell * block_size;
-        let end = base + block_size;
-        if end > total_size {
-            break;
-        }
-        let mut block_sum = F::zero_with_cfg(field_cfg);
-        for j in base..end {
-            block_sum += &eq_vec[j];
-        }
-        result += &(alpha_powers[ell].clone() * &block_sum);
+    // Sum eq weights over data entries.
+    let mut result = F::zero_with_cfg(field_cfg);
+    for j in 0..data_entries {
+        result += &eq_vec[j];
     }
-
     result
-}
-
-/// Recover the evaluation point from a GKR fraction proof by replaying
-/// the transcript challenge derivation.
-///
-/// The evaluation point is built round-by-round: for round 0, it's `(λ_0)`;
-/// for round k ≥ 1, it's `(sumcheck_randomness, λ_k)`.
-/// Since we don't have the transcript state, we extract from the proof
-/// structure by noting that the sumcheck proofs contain their randomness
-/// implicitly (the verifier derives it from the proof messages).
-///
-/// For now, we return an empty vector; the prover can re-derive by
-/// running verify on the same transcript state.  The pipeline integration
-/// handles this by running verify after prove.
-#[allow(dead_code)]
-fn recover_eval_point_from_proof<F: InnerTransparentField + FromPrimitiveWithConfig>(
-    _proof: &super::structs::GkrFractionProof<F>,
-    _num_vars: usize,
-    _field_cfg: &F::Config,
-) -> Vec<F> {
-    Vec::new()
 }
 
 #[cfg(test)]
