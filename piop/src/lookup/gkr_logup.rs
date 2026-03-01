@@ -21,7 +21,7 @@
 //! using sumchecks.  At the leaves, the verifier checks evaluations against
 //! the known input polynomials.
 
-use crypto_primitives::FromPrimitiveWithConfig;
+use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use num_traits::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;

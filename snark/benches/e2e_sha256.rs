@@ -60,7 +60,7 @@ use zinc_piop::projections::{
     project_scalars, project_scalars_to_field,
 };
 use zinc_piop::lookup::{
-    LookupColumnSpec, LookupTableType,
+    LookupColumnSpec, LookupTableType, AffineLookupSpec,
 };
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use crypto_primitives::PrimeField;
@@ -226,6 +226,32 @@ fn sha256_lookup_specs() -> Vec<LookupColumnSpec> {
         .collect()
 }
 
+/// Affine-combination lookup specs for Ch and Maj.
+fn sha256_affine_lookup_specs() -> Vec<AffineLookupSpec> {
+    use zinc_sha256_uair::{
+        COL_E_HAT, COL_E_TM1, COL_CH_EF_HAT, COL_E_TM2, COL_CH_NEG_EG_HAT,
+        COL_A_HAT, COL_A_TM1, COL_A_TM2, COL_MAJ_HAT,
+    };
+    let bp32 = LookupTableType::BitPoly { width: 32 };
+    vec![
+        AffineLookupSpec {
+            terms: vec![(COL_E_HAT, 1), (COL_E_TM1, 1), (COL_CH_EF_HAT, -2)],
+            constant_offset_bits: 0,
+            table_type: bp32.clone(),
+        },
+        AffineLookupSpec {
+            terms: vec![(COL_E_HAT, -1), (COL_E_TM2, 1), (COL_CH_NEG_EG_HAT, -2)],
+            constant_offset_bits: 0xFFFF_FFFF,
+            table_type: bp32.clone(),
+        },
+        AffineLookupSpec {
+            terms: vec![(COL_A_HAT, 1), (COL_A_TM1, 1), (COL_A_TM2, 1), (COL_MAJ_HAT, -2)],
+            constant_offset_bits: 0,
+            table_type: bp32,
+        },
+    ]
+}
+
 // ECDSA columns are field elements (opened mod q) — no lookup needed.
 
 // ─── Lookup proof size helpers ───────────────────────────────────────────────
@@ -247,6 +273,23 @@ fn gkr_fraction_proof_fe_count(proof: &zinc_piop::lookup::GkrFractionProof<zinc_
     count
 }
 
+/// Count the field elements in a `BatchedGkrFractionProof`.
+fn batched_gkr_fraction_proof_fe_count(proof: &zinc_piop::lookup::BatchedGkrFractionProof<zinc_snark::pipeline::PiopField>) -> usize {
+    let num_trees = proof.roots_p.len();
+    let mut count = 2 * num_trees; // roots_p + roots_q
+    for lp in &proof.layer_proofs {
+        // 4L child MLE evaluations per layer
+        count += 4 * num_trees;
+        if let Some(ref sc) = lp.sumcheck_proof {
+            count += 1;
+            for msg in &sc.messages {
+                count += msg.0.tail_evaluations.len();
+            }
+        }
+    }
+    count
+}
+
 /// Compute the serialised byte count of a `GkrPipelineLookupProof`.
 fn gkr_lookup_proof_byte_count(proof: &zinc_piop::lookup::GkrPipelineLookupProof<zinc_snark::pipeline::PiopField>) -> usize {
     use zinc_snark::pipeline::FIELD_LIMBS;
@@ -256,7 +299,7 @@ fn gkr_lookup_proof_byte_count(proof: &zinc_piop::lookup::GkrPipelineLookupProof
         for v in &gp.aggregated_multiplicities {
             count += v.len();
         }
-        count += gkr_fraction_proof_fe_count(&gp.witness_gkr);
+        count += batched_gkr_fraction_proof_fe_count(&gp.witness_gkr);
         count += gkr_fraction_proof_fe_count(&gp.table_gkr);
     }
     count * fe_bytes
@@ -321,12 +364,29 @@ fn gkr_lookup_proof_to_bytes(proof: &zinc_piop::lookup::GkrPipelineLookupProof<z
         }
     }
 
+    fn write_batched_gkr_fraction_proof(buf: &mut Vec<u8>, proof: &zinc_piop::lookup::BatchedGkrFractionProof<zinc_snark::pipeline::PiopField>) {
+        for f in &proof.roots_p { write_fe(buf, f); }
+        for f in &proof.roots_q { write_fe(buf, f); }
+        for lp in &proof.layer_proofs {
+            if let Some(ref sc) = lp.sumcheck_proof {
+                write_fe(buf, &sc.claimed_sum);
+                for msg in &sc.messages {
+                    for f in &msg.0.tail_evaluations { write_fe(buf, f); }
+                }
+            }
+            for f in &lp.p_lefts { write_fe(buf, f); }
+            for f in &lp.p_rights { write_fe(buf, f); }
+            for f in &lp.q_lefts { write_fe(buf, f); }
+            for f in &lp.q_rights { write_fe(buf, f); }
+        }
+    }
+
     let mut out = Vec::new();
     for gp in &proof.group_proofs {
         for v in &gp.aggregated_multiplicities {
             for f in v { write_fe(&mut out, f); }
         }
-        write_gkr_fraction_proof(&mut out, &gp.witness_gkr);
+        write_batched_gkr_fraction_proof(&mut out, &gp.witness_gkr);
         write_gkr_fraction_proof(&mut out, &gp.table_gkr);
     }
     out
@@ -460,7 +520,7 @@ fn generate_zero_scalar_trace(
 /// DEPTH≥2 dramatically reduces deflate compressibility (see §4 of review).
 fn sha256_single(c: &mut Criterion) {
     let mut group = c.benchmark_group("SHA-256 Single Compression");
-    group.sample_size(20);
+    group.sample_size(100);
 
     // ── Split PCS: BinaryPoly batch + Int batch ─────────────────────
     // Split the 26 SHA-256 columns into two PCS batches:
@@ -613,7 +673,7 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
     let mem_tracker = MemoryTracker::start();
 
     let mut group = c.benchmark_group("8xSHA256+ECDSA");
-    group.sample_size(10);
+    group.sample_size(100);
 
     // ── Build traces ────────────────────────────────────────────────
     // SHA-256: 26 columns × 512 rows (8 instances × 64 rounds)
@@ -962,7 +1022,7 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
 /// for the SHA-256 UAIR trace.
 fn sha256_piop_only(c: &mut Criterion) {
     let mut group = c.benchmark_group("SHA-256 PIOP");
-    group.sample_size(20);
+    group.sample_size(100);
 
     let trace = generate_sha256_trace(SHA256_NUM_VARS);
     let num_vars = SHA256_NUM_VARS;
@@ -1090,7 +1150,7 @@ fn sha256_8x_ecdsa_end_to_end(c: &mut Criterion) {
     use zinc_uair::ideal_collector::IdealOrZero;
 
     let mut group = c.benchmark_group("8xSHA256+ECDSA E2E (PIOP+Lookup+PCS)");
-    group.sample_size(10);
+    group.sample_size(100);
 
     // ── Build traces ────────────────────────────────────────────────
     let sha_trace = generate_sha256_trace(SHA256_8X_NUM_VARS);
@@ -1207,7 +1267,7 @@ fn sha256_full_pipeline(c: &mut Criterion) {
     type Zt = Sha256ZipTypes<i64, 32>;
 
     let mut group = c.benchmark_group("SHA-256 Full Pipeline");
-    group.sample_size(20);
+    group.sample_size(100);
 
     let trace = generate_sha256_trace(SHA256_NUM_VARS);
     let sha_sig = Sha256Uair::signature();
@@ -1392,7 +1452,7 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
     use zinc_uair::ideal_collector::IdealOrZero;
 
     let mut group = c.benchmark_group("8xSHA256+ECDSA LogUp Comparison");
-    group.sample_size(10);
+    group.sample_size(100);
 
     // ── Build traces ────────────────────────────────────────────────
     let sha_trace = generate_sha256_trace(SHA256_8X_NUM_VARS);
@@ -1419,6 +1479,7 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
     );
 
     let sha_lookup_specs = sha256_lookup_specs();
+    let sha_affine_specs = sha256_affine_lookup_specs();
 
     // ── No-Lookup Baseline (SHA only, no ECDSA) ────────────────────
     group.bench_function("NoLookup/SHAProver", |b| {
@@ -1427,7 +1488,7 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
             for _ in 0..iters {
                 let t = Instant::now();
                 let _sha = zinc_snark::pipeline::prove_classic_logup::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
-                    &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &[],
+                    &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &[], &[],
                 );
                 total += t.elapsed();
             }
@@ -1442,7 +1503,7 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
             for _ in 0..iters {
                 let t = Instant::now();
                 let _sha = zinc_snark::pipeline::prove_classic_logup::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
-                    &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
+                    &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs, &sha_affine_specs,
                 );
                 total += t.elapsed();
             }
@@ -1456,7 +1517,7 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
             for _ in 0..iters {
                 let t = Instant::now();
                 let _sha = zinc_snark::pipeline::prove_classic_logup::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
-                    &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
+                    &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs, &sha_affine_specs,
                 );
                 let _ec = zinc_snark::pipeline::prove_generic::<
                     EcdsaUairInt, Int<{ INT_LIMBS * 4 }>, EcZt, EcLc, FScalar, UNCHECKED,
@@ -1505,7 +1566,7 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
 
     // ── Generate proofs for verifier bench & proof size ──────────────
     let batched_sha_proof = zinc_snark::pipeline::prove_classic_logup::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
-        &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
+        &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs, &sha_affine_specs,
     );
     let separate_sha_proof = zinc_snark::pipeline::prove::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED>(
         &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,

@@ -49,7 +49,7 @@ use zinc_piop::projections::{
     project_trace_coeffs, project_trace_to_field,
     project_scalars, project_scalars_to_field,
 };
-use zinc_piop::lookup::{LookupColumnSpec, LookupTableType};
+use zinc_piop::lookup::{LookupColumnSpec, LookupTableType, LookupWitnessSource, AffineLookupSpec};
 use zinc_piop::lookup::{
     BatchedDecompLogupProtocol, group_lookup_specs,
 };
@@ -140,7 +140,7 @@ type IprsInt4R4B64<const DEPTH: usize, const CHECK: bool> = IprsCode<
 const SHA256_8X_NUM_VARS: usize = 9;
 const SHA256_BATCH_SIZE: usize = 26;
 const ECDSA_NUM_VARS: usize = 9;
-const ECDSA_BATCH_SIZE: usize = 9;
+const ECDSA_BATCH_SIZE: usize = zinc_ecdsa_uair::NUM_COLS;
 const SHA256_LOOKUP_COL_COUNT: usize = 10;
 
 fn sha256_lookup_specs() -> Vec<LookupColumnSpec> {
@@ -150,6 +150,31 @@ fn sha256_lookup_specs() -> Vec<LookupColumnSpec> {
             table_type: LookupTableType::BitPoly { width: 32 },
         })
         .collect()
+}
+
+fn sha256_affine_lookup_specs() -> Vec<AffineLookupSpec> {
+    use zinc_sha256_uair::{
+        COL_E_HAT, COL_E_TM1, COL_CH_EF_HAT, COL_E_TM2, COL_CH_NEG_EG_HAT,
+        COL_A_HAT, COL_A_TM1, COL_A_TM2, COL_MAJ_HAT,
+    };
+    let bp32 = LookupTableType::BitPoly { width: 32 };
+    vec![
+        AffineLookupSpec {
+            terms: vec![(COL_E_HAT, 1), (COL_E_TM1, 1), (COL_CH_EF_HAT, -2)],
+            constant_offset_bits: 0,
+            table_type: bp32.clone(),
+        },
+        AffineLookupSpec {
+            terms: vec![(COL_E_HAT, -1), (COL_E_TM2, 1), (COL_CH_NEG_EG_HAT, -2)],
+            constant_offset_bits: 0xFFFF_FFFF,
+            table_type: bp32.clone(),
+        },
+        AffineLookupSpec {
+            terms: vec![(COL_A_HAT, 1), (COL_A_TM1, 1), (COL_A_TM2, 1), (COL_MAJ_HAT, -2)],
+            constant_offset_bits: 0,
+            table_type: bp32,
+        },
+    ]
 }
 
 fn generate_sha256_trace(num_vars: usize) -> Vec<DenseMultilinearExtension<BinaryPoly<32>>> {
@@ -191,7 +216,7 @@ fn bp_to_u32(bp: &BinaryPoly<32>) -> u32 {
 ///
 /// Steps benchmarked (for each sub-protocol and combined):
 ///   1.  SHA/WitnessGen        — SHA-256 trace (26 cols × 512 rows)
-///   2.  ECDSA/WitnessGen      — ECDSA trace (9 cols × 512 rows)
+///   2.  ECDSA/WitnessGen      — ECDSA trace (11 cols × 512 rows)
 ///   3.  SHA/PCS/Commit        — Zip+ commit for SHA batch
 ///   4.  ECDSA/PCS/Commit      — Zip+ commit for ECDSA batch
 ///   5.  SHA/PIOP/FieldSetup   — transcript + random field config
@@ -217,11 +242,12 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     use zinc_uair::ideal::ImpossibleIdeal;
     use zinc_uair::ideal_collector::IdealOrZero;
     use zinc_piop::lookup::prove_batched_lookup_with_indices;
+    use zinc_piop::lookup::prove_gkr_batched_lookup_with_indices;
 
     let mem_tracker = MemoryTracker::start();
 
     let mut group = c.benchmark_group("8xSHA256+ECDSA Steps");
-    group.sample_size(10);
+    group.sample_size(100);
 
     type ShaZt = Sha256ZipTypes<i64, 32>;
     type ShaLc = IprsBPoly32R4B64<1, UNCHECKED>;
@@ -232,6 +258,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     let ec_params  = ZipPlusParams::<EcZt, EcLc>::new(ECDSA_NUM_VARS, 1, EcLc::new(512));
 
     let sha_lookup_specs = sha256_lookup_specs();
+    let sha_affine_specs = sha256_affine_lookup_specs();
 
     let sha_num_constraints  = zinc_uair::constraint_counter::count_constraints::<Sha256Uair>();
     let sha_max_degree       = zinc_uair::degree_counter::count_max_degree::<Sha256Uair>();
@@ -807,6 +834,23 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                 total
             });
         });
+
+        // GKR variant for comparison.
+        group.bench_function("SHA/PIOP/GkrLookup", |b| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let mut tr = sha_tr_lk.clone();
+                    let t = Instant::now();
+                    let _ = prove_gkr_batched_lookup_with_indices(
+                        &mut tr, &columns, &raw_indices, &remapped,
+                        &sha_proj_elem, &sha_fcfg,
+                    ).expect("gkr lookup");
+                    total += t.elapsed();
+                }
+                total
+            });
+        });
     }
 
     // ── 16. PIOP / Batched CPR+Lookup (multi-degree sumcheck A/B) ──
@@ -945,13 +989,11 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     }
 
     // ── 17. SHA PCS Prove ────────────────────────────────────────────
-    // Derive the real PCS evaluation point from the CPR evaluation point.
-    let sha_pcs_point: Vec<i128> =
-        zinc_snark::pipeline::derive_pcs_point(&cpr_eval_point, SHA256_8X_NUM_VARS);
+    // r_PCS = r_CPR (truncated to num_vars).
+    let sha_pcs_point: Vec<F> = cpr_eval_point[..SHA256_8X_NUM_VARS].to_vec();
     // ECDSA shares the same CPR eval point (multi-degree sumcheck) but
     // may have a different num_vars.
-    let ecdsa_pcs_point: Vec<i128> =
-        zinc_snark::pipeline::derive_pcs_point(&cpr_eval_point, ECDSA_NUM_VARS);
+    let ecdsa_pcs_point: Vec<F> = cpr_eval_point[..ECDSA_NUM_VARS].to_vec();
 
     let (sha_hint, _) = ZipPlus::<ShaZt, ShaLc>::commit(&sha_params, &sha_pcs_trace).expect("commit");
     group.bench_function("SHA/PCS/Prove", |b| {
@@ -996,6 +1038,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                     &ec_params, &ecdsa_trace,
                     SHA256_8X_NUM_VARS,
                     &sha_lookup_specs,
+                    &sha_affine_specs,
                 );
                 total += t.elapsed();
             }
@@ -1018,6 +1061,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         &ec_params, &ecdsa_trace,
         SHA256_8X_NUM_VARS,
         &sha_lookup_specs,
+        &sha_affine_specs,
     );
 
     // Build public column data for the verifier.
@@ -1027,6 +1071,120 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     let ecdsa_public_column_data: Vec<_> = ec_sig_int.public_columns.iter()
         .map(|&i| ecdsa_trace[i].clone())
         .collect();
+
+    // ── Verifier-side booleanity check on public columns b1, b2 ────
+    //
+    // The ECDSA UAIR declares b1 and b2 as public columns.  Instead of
+    // burning two algebraic constraints (degree-2 each) to enforce
+    // booleanity inside the constraint system, the verifier checks it
+    // directly on the raw column data.  This is sound because the
+    // columns are public: the verifier already possesses every
+    // evaluation, so a per-element {0,1} check is O(N) field
+    // comparisons -- negligible compared to PCS verification.
+    let check_boolean_column = |col: &DenseMultilinearExtension<Int<{ INT_LIMBS * 4 }>>| {
+        let zero = Int::<{ INT_LIMBS * 4 }>::default();
+        let one  = Int::<{ INT_LIMBS * 4 }>::from_ref(&1i64);
+        for (i, v) in col.evaluations.iter().enumerate() {
+            assert!(
+                *v == zero || *v == one,
+                "ECDSA public column not boolean at row {i}: {v:?}"
+            );
+        }
+    };
+    // public_columns = [COL_B1, COL_B2, COL_SEL_INIT, COL_SEL_FINAL]
+    check_boolean_column(&ecdsa_public_column_data[0]);
+    check_boolean_column(&ecdsa_public_column_data[1]);
+
+    // ── SHA-256 Feed-Forward & Hash-to-ECDSA Connection ─────────────
+    //
+    // Two verifier-side computations that close the gap between the
+    // proved SHA-256 compression and the proved ECDSA verification:
+    //
+    //  (A) **Feed-forward**: the SHA-256 UAIR proves the 64-round state
+    //      update.  The final hash digest additionally requires:
+    //        digest[i] = H_init[i] + state_final[i]  (wrapping mod 2^32)
+    //      The verifier extracts the 8 final working variables from the
+    //      trace and performs 8 wrapping additions per SHA instance.
+    //
+    //  (B) **Hash-to-ECDSA connection**: the ECDSA UAIR uses scalars
+    //      u1 = e * s^{-1} mod n and u2 = r * s^{-1} mod n, where e is
+    //      the message hash output by SHA-256.  The verifier:
+    //        1. Reconstructs u1 from the public b1 column bits.
+    //        2. Computes expected u1 = digest * s^{-1} mod n.
+    //        3. Asserts equality.
+    //
+    // In a production deployment the SHA trace rows storing the final
+    // working variables would be made public or opened via additional
+    // PCS queries.  Here we benchmark the raw computational cost.
+
+    /// SHA-256 feed-forward for one instance starting at `base` row.
+    ///
+    /// Final working variables after 64 rounds:
+    ///   a = col_a[base+64], b = col_a[base+63], c = col_a[base+62], d = col_a[base+61]
+    ///   e = col_e[base+64], f = col_e[base+63], g = col_e[base+62], h = col_e[base+61]
+    let feed_forward = |trace: &[DenseMultilinearExtension<BinaryPoly<32>>],
+                         base: usize| -> [u32; 8] {
+        use zinc_sha256_uair::constants::H as SHA_H;
+        [
+            SHA_H[0].wrapping_add(bp_to_u32(&trace[0].evaluations[base + 64])),
+            SHA_H[1].wrapping_add(bp_to_u32(&trace[0].evaluations[base + 63])),
+            SHA_H[2].wrapping_add(bp_to_u32(&trace[0].evaluations[base + 62])),
+            SHA_H[3].wrapping_add(bp_to_u32(&trace[0].evaluations[base + 61])),
+            SHA_H[4].wrapping_add(bp_to_u32(&trace[1].evaluations[base + 64])),
+            SHA_H[5].wrapping_add(bp_to_u32(&trace[1].evaluations[base + 63])),
+            SHA_H[6].wrapping_add(bp_to_u32(&trace[1].evaluations[base + 62])),
+            SHA_H[7].wrapping_add(bp_to_u32(&trace[1].evaluations[base + 61])),
+        ]
+    };
+
+    /// Reconstruct u1 scalar from ECDSA b1 column bits as 32 big-endian bytes.
+    ///
+    /// The ECDSA scalar-mul loop rows (0-indexed 1..256) process bits
+    /// 256..1 of u1.  Bit-index at row t is (257 - t).
+    let reconstruct_u1 = |ec_trace: &[DenseMultilinearExtension<Int<{ INT_LIMBS * 4 }>>]| -> [u8; 32] {
+        let zero_int = Int::<{ INT_LIMBS * 4 }>::default();
+        let mut scalar = [0u8; 32];
+        let n = ec_trace[zinc_ecdsa_uair::COL_B1].evaluations.len();
+        for t in 1..257.min(n) {
+            if ec_trace[zinc_ecdsa_uair::COL_B1].evaluations[t] != zero_int {
+                let bit_idx = 257 - t; // 256 down to 1
+                if bit_idx > 0 && bit_idx <= 256 {
+                    let byte_pos = (bit_idx - 1) / 8;
+                    let bit_pos  = (bit_idx - 1) % 8;
+                    scalar[31 - byte_pos] |= 1u8 << bit_pos;
+                }
+            }
+        }
+        scalar
+    };
+
+    // Pre-compute feed-forward for instance 0.
+    let sha_digest = feed_forward(&sha_trace, 0);
+
+    // Sanity check: SHA-256("") = e3b0c442 98fc1c14 9afbf4c8 996fb924
+    //                              27ae41e4 649b934c a495991b 7852b855
+    {
+        let expected: [u32; 8] = [
+            0xe3b0c442, 0x98fc1c14, 0x9afbf4c8, 0x996fb924,
+            0x27ae41e4, 0x649b934c, 0xa495991b, 0x7852b855,
+        ];
+        assert_eq!(
+            sha_digest, expected,
+            "SHA-256 feed-forward sanity check failed"
+        );
+    }
+
+    // Reconstruct ECDSA u1 from b1 bits.
+    let ecdsa_u1 = reconstruct_u1(&ecdsa_trace);
+
+    // In a real deployment the verifier would also check:
+    //   u1 == sha_digest_as_scalar * s^{-1}  (mod secp256k1 order)
+    // using the public signature parameter s.  The current benchmark
+    // uses a zero ECDSA trace, so we skip the modular-arithmetic
+    // assertion and only measure the extraction + reconstruction cost.
+    eprintln!("  SHA-256 digest (instance 0): {:08x?}", sha_digest);
+    eprintln!("  ECDSA u1 (from b1 bits):    {}",
+        ecdsa_u1.iter().map(|b| format!("{b:02x}")).collect::<String>());
 
     group.bench_function("E2E/Verifier", |b| {
         b.iter(|| {
@@ -1823,9 +1981,30 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                     for (g, (lk_pre, gp)) in lk_pres.iter()
                         .zip(dual_proof.lookup_group_proofs.iter()).enumerate()
                     {
-                        let parent_evals: Vec<PiopField> = dual_proof.lookup_group_meta[g]
-                            .original_column_indices.iter()
-                            .map(|&orig_col| c1_up_saved[orig_col].clone())
+                        let meta = &dual_proof.lookup_group_meta[g];
+                        // eq_sum_w for domain-scaling of affine constant offsets.
+                        let eq_sum_w = {
+                            let one = PiopField::one_with_cfg(&fcfg);
+                            let w_nv = zinc_utils::log2(meta.witness_len.next_power_of_two()) as usize;
+                            let mut prod = one.clone();
+                            for i in w_nv..md_sub.point.len() {
+                                prod *= one.clone() - &md_sub.point[i];
+                            }
+                            prod
+                        };
+                        let parent_evals: Vec<PiopField> = meta
+                            .witness_sources.iter()
+                            .map(|ws| match ws {
+                                LookupWitnessSource::Column { column_index } =>
+                                    c1_up_saved[*column_index].clone(),
+                                LookupWitnessSource::Affine { terms, constant_offset_bits } =>
+                                    zinc_snark::pipeline::eval_affine_parent::<32>(
+                                        terms, *constant_offset_bits,
+                                        &c1_up_saved,
+                                        &proj_elem, &eq_sum_w,
+                                        &fcfg,
+                                    ),
+                            })
                             .collect();
                         BatchedDecompLogupProtocol::<PiopField>::finalize_verifier(
                             lk_pre, gp, &md_sub.point,
@@ -1889,7 +2068,6 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                     // Derive PCS eval point from the proof's stored evaluation point.
                     let cpr_eval_pt: Vec<PiopField> = dual_proof.evaluation_point_bytes.iter()
                         .map(|b| field_from_bytes(b, &fcfg)).collect();
-                    let pcs_i128_point = zinc_snark::pipeline::derive_pcs_point(&cpr_eval_pt, num_vars);
 
                     // ── Timed section ──
                     let t = Instant::now();
@@ -1898,8 +2076,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                     {
                         let pcs1_fcfg = zinc_transcript::KeccakTranscript::default()
                             .get_random_field_cfg::<PiopField, <Sha256ZipTypes<i64, 32> as ZipTypes>::Fmod, <Sha256ZipTypes<i64, 32> as ZipTypes>::PrimeTest>();
-                        let pt1_f: Vec<PiopField> = pcs_i128_point.iter()
-                            .map(|v| crypto_primitives::IntoWithConfig::into_with_cfg(v, &pcs1_fcfg)).collect();
+                        let pt1_f: Vec<PiopField> = cpr_eval_pt[..num_vars].to_vec();
                         let eval1_f: PiopField = PiopField::new_unchecked_with_cfg(
                             <Uint<{INT_LIMBS * 3}> as ConstTranscribable>::read_transcription_bytes(&dual_proof.pcs1_evals_bytes[0]),
                             &pcs1_fcfg,
@@ -1918,8 +2095,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                     {
                         let pcs2_fcfg = zinc_transcript::KeccakTranscript::default()
                             .get_random_field_cfg::<FScalar, <EcdsaScalarZipTypes as ZipTypes>::Fmod, <EcdsaScalarZipTypes as ZipTypes>::PrimeTest>();
-                        let pt2_f: Vec<FScalar> = pcs_i128_point.iter()
-                            .map(|v| crypto_primitives::IntoWithConfig::into_with_cfg(v, &pcs2_fcfg)).collect();
+                        let pt2_f: Vec<FScalar> = zinc_snark::pipeline::piop_point_to_pcs_field(&cpr_eval_pt[..num_vars], &pcs2_fcfg);
                         let eval2_f: FScalar = FScalar::new_unchecked_with_cfg(
                             <Uint<{INT_LIMBS * 3}> as ConstTranscribable>::read_transcription_bytes(&dual_proof.pcs2_evals_bytes[0]),
                             &pcs2_fcfg,
@@ -1963,11 +2139,12 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
 
     // ── Timing breakdown summary ────────────────────────────────────
     eprintln!("\n=== 8xSHA256+ECDSA Per-Step Timing (Unified Dual-Circuit) ===");
-    eprintln!("  Dual-circuit: PCS commit={:?}, IC={:?}, CPR+Lookup={:?}, PCS prove={:?}, total={:?}",
+    eprintln!("  Dual-circuit: PCS commit={:?}, IC={:?}, CPR+Lookup={:?}, PCS prove={:?}, serialize={:?}, total={:?}",
         dual_proof.timing.pcs_commit,
         dual_proof.timing.ideal_check,
         dual_proof.timing.combined_poly_resolver,
         dual_proof.timing.pcs_prove,
+        dual_proof.timing.serialize,
         dual_proof.timing.total,
     );
     eprintln!("  Multi-degree sumcheck: {} groups, degrees {:?}",
@@ -2104,6 +2281,172 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         eprintln!("  Compressed:     {:>6} B  ({:.1} KB, {:.1}x ratio)",
             compressed.len(), compressed.len() as f64 / 1024.0,
             all_bytes.len() as f64 / compressed.len() as f64);
+
+        // ── GKR lookup proof size comparison ────────────────────────
+        //
+        // Run the GKR lookup prover on the same data and compare proof
+        // sizes with the classic lookup proof produced by prove_dual_circuit.
+        {
+            // Re-extract lookup columns (same as step 15).
+            let mut needed: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+            for spec in &sha_lookup_specs {
+                let next = needed.len();
+                needed.entry(spec.column_index).or_insert(next);
+            }
+            let mut lk_columns: Vec<Vec<F>> = Vec::with_capacity(needed.len());
+            let mut lk_raw_indices: Vec<Vec<usize>> = Vec::with_capacity(needed.len());
+            for &orig_idx in needed.keys() {
+                let col_f: Vec<F> = sha_field_trace[orig_idx].iter()
+                    .map(|inner| F::new_unchecked_with_cfg(inner.clone(), &sha_fcfg)).collect();
+                lk_columns.push(col_f);
+                let col_idx: Vec<usize> = sha_trace[orig_idx].iter().map(|bp| {
+                    let mut idx = 0usize;
+                    for (j, coeff) in bp.iter().enumerate() {
+                        if coeff.into_inner() { idx |= 1usize << j; }
+                    }
+                    idx
+                }).collect();
+                lk_raw_indices.push(col_idx);
+            }
+            let index_map: std::collections::BTreeMap<usize, usize> = needed.keys()
+                .enumerate().map(|(n, &o)| (o, n)).collect();
+            let lk_remapped: Vec<LookupColumnSpec> = sha_lookup_specs.iter()
+                .map(|s| LookupColumnSpec { column_index: index_map[&s.column_index], table_type: s.table_type.clone() })
+                .collect();
+
+            // Run GKR lookup prover.
+            let mut gkr_tr = unified_tr_post_cpr.clone();
+            let (gkr_proof, _gkr_state) = prove_gkr_batched_lookup_with_indices(
+                &mut gkr_tr,
+                &lk_columns,
+                &lk_raw_indices,
+                &lk_remapped,
+                &sha_proj_elem,
+                &sha_fcfg,
+            ).expect("GKR lookup proof failed");
+
+            // Serialize GKR lookup proof to bytes.
+            fn write_fe_gkr(buf: &mut Vec<u8>, f: &zinc_snark::pipeline::PiopField) {
+                use zinc_snark::pipeline::FIELD_LIMBS;
+                let sz = <Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+                let start = buf.len();
+                buf.resize(start + sz, 0);
+                f.inner().write_transcription_bytes(&mut buf[start..]);
+            }
+            let mut gkr_bytes = Vec::new();
+            for gp in &gkr_proof.group_proofs {
+                // Aggregated multiplicities (same as classic).
+                for v in &gp.aggregated_multiplicities {
+                    for f in v { write_fe_gkr(&mut gkr_bytes, f); }
+                }
+                // Batched witness GKR proof.
+                for f in &gp.witness_gkr.roots_p { write_fe_gkr(&mut gkr_bytes, f); }
+                for f in &gp.witness_gkr.roots_q { write_fe_gkr(&mut gkr_bytes, f); }
+                for lp in &gp.witness_gkr.layer_proofs {
+                    if let Some(ref sc) = lp.sumcheck_proof {
+                        write_fe_gkr(&mut gkr_bytes, &sc.claimed_sum);
+                        for msg in &sc.messages {
+                            for f in &msg.0.tail_evaluations { write_fe_gkr(&mut gkr_bytes, f); }
+                        }
+                    }
+                    for f in &lp.p_lefts { write_fe_gkr(&mut gkr_bytes, f); }
+                    for f in &lp.p_rights { write_fe_gkr(&mut gkr_bytes, f); }
+                    for f in &lp.q_lefts { write_fe_gkr(&mut gkr_bytes, f); }
+                    for f in &lp.q_rights { write_fe_gkr(&mut gkr_bytes, f); }
+                }
+                // Table GKR proof.
+                write_fe_gkr(&mut gkr_bytes, &gp.table_gkr.root_p);
+                write_fe_gkr(&mut gkr_bytes, &gp.table_gkr.root_q);
+                for lp in &gp.table_gkr.layer_proofs {
+                    if let Some(ref sc) = lp.sumcheck_proof {
+                        write_fe_gkr(&mut gkr_bytes, &sc.claimed_sum);
+                        for msg in &sc.messages {
+                            for f in &msg.0.tail_evaluations { write_fe_gkr(&mut gkr_bytes, f); }
+                        }
+                    }
+                    write_fe_gkr(&mut gkr_bytes, &lp.p_left);
+                    write_fe_gkr(&mut gkr_bytes, &lp.p_right);
+                    write_fe_gkr(&mut gkr_bytes, &lp.q_left);
+                    write_fe_gkr(&mut gkr_bytes, &lp.q_right);
+                }
+            }
+            let gkr_lookup_bytes = gkr_bytes.len();
+
+            // The classic lookup also includes a sumcheck proof (messages) that
+            // is part of the MD sumcheck in the dual pipeline. Compute the
+            // classic lookup-only bytes by adding the MD lookup group messages.
+            let classic_lookup_md_bytes: usize = if dual_proof.md_group_messages.len() > 2 {
+                dual_proof.md_group_messages[2..].iter()
+                    .flat_map(|grp| grp.iter())
+                    .map(|v| v.len())
+                    .sum::<usize>()
+                + dual_proof.md_claimed_sums[2..].iter()
+                    .map(|v| v.len())
+                    .sum::<usize>()
+            } else {
+                0
+            };
+            let classic_lookup_total = lookup_bytes + classic_lookup_md_bytes;
+
+            // Build GKR version of all_bytes: replace classic lookup data
+            // with GKR lookup data.
+            let mut gkr_all_bytes = Vec::with_capacity(total_raw);
+            gkr_all_bytes.extend(&dual_proof.pcs1_proof_bytes);
+            gkr_all_bytes.extend(&dual_proof.pcs2_proof_bytes);
+            for v in &dual_proof.ic1_proof_values { gkr_all_bytes.extend(v); }
+            for v in &dual_proof.ic2_proof_values { gkr_all_bytes.extend(v); }
+            // MD sumcheck: only include CPR groups (0, 1), skip lookup groups.
+            for (i, grp) in dual_proof.md_group_messages.iter().enumerate() {
+                if i < 2 { for v in grp { gkr_all_bytes.extend(v); } }
+            }
+            for (i, v) in dual_proof.md_claimed_sums.iter().enumerate() {
+                if i < 2 { gkr_all_bytes.extend(v); }
+            }
+            for v in &dual_proof.cpr1_up_evals { gkr_all_bytes.extend(v); }
+            for v in &dual_proof.cpr1_down_evals { gkr_all_bytes.extend(v); }
+            for v in &dual_proof.cpr2_up_evals { gkr_all_bytes.extend(v); }
+            for v in &dual_proof.cpr2_down_evals { gkr_all_bytes.extend(v); }
+            if let Some(ref sc) = dual_proof.unified_eval_sumcheck {
+                for v in &sc.rounds { gkr_all_bytes.extend(v); }
+                for v in &sc.v_finals { gkr_all_bytes.extend(v); }
+            }
+            // GKR lookup bytes instead of classic.
+            gkr_all_bytes.extend(&gkr_bytes);
+            for v in &dual_proof.evaluation_point_bytes { gkr_all_bytes.extend(v); }
+            for v in &dual_proof.pcs1_evals_bytes { gkr_all_bytes.extend(v); }
+            for v in &dual_proof.pcs2_evals_bytes { gkr_all_bytes.extend(v); }
+
+            let gkr_total_raw = gkr_all_bytes.len();
+
+            let gkr_compressed = {
+                use std::io::Write;
+                let mut encoder = flate2::write::DeflateEncoder::new(
+                    Vec::new(), flate2::Compression::default(),
+                );
+                encoder.write_all(&gkr_all_bytes).unwrap();
+                encoder.finish().unwrap()
+            };
+
+            eprintln!("\n=== Classic vs GKR Lookup Proof Size ===");
+            eprintln!("  Classic lookup: {:>6} B  ({:.1} KB)  [data={}, MD sumcheck={}]",
+                classic_lookup_total, classic_lookup_total as f64 / 1024.0,
+                lookup_bytes, classic_lookup_md_bytes);
+            eprintln!("  GKR lookup:     {:>6} B  ({:.1} KB)",
+                gkr_lookup_bytes, gkr_lookup_bytes as f64 / 1024.0);
+            eprintln!("  Lookup savings: {:>6} B  ({:.1} KB, {:.1}x smaller)",
+                classic_lookup_total - gkr_lookup_bytes,
+                (classic_lookup_total - gkr_lookup_bytes) as f64 / 1024.0,
+                classic_lookup_total as f64 / gkr_lookup_bytes as f64);
+            eprintln!("  ─────────────────────────");
+            eprintln!("  Classic total raw:  {:>7} B  ({:.1} KB)", total_raw, total_raw as f64 / 1024.0);
+            eprintln!("  GKR total raw:      {:>7} B  ({:.1} KB)", gkr_total_raw, gkr_total_raw as f64 / 1024.0);
+            eprintln!("  Classic compressed: {:>7} B  ({:.1} KB)", compressed.len(), compressed.len() as f64 / 1024.0);
+            eprintln!("  GKR compressed:     {:>7} B  ({:.1} KB)", gkr_compressed.len(), gkr_compressed.len() as f64 / 1024.0);
+            eprintln!("  Compressed savings: {:>7} B  ({:.1} KB, {:.1}x smaller)",
+                compressed.len() - gkr_compressed.len(),
+                (compressed.len() - gkr_compressed.len()) as f64 / 1024.0,
+                compressed.len() as f64 / gkr_compressed.len() as f64);
+        }
     }
 
     let mem_snapshot = mem_tracker.stop();

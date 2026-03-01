@@ -37,7 +37,7 @@ use super::structs::{
     BatchedDecompLogupVerifierSubClaim, BatchedDecompLookupInstance,
     GkrBatchedDecompLogupProof, GkrBatchedDecompLogupProverState,
     GkrBatchedDecompLogupVerifierSubClaim,
-    LookupColumnSpec, LookupError, LookupGroup, LookupTableType,
+    LookupColumnSpec, LookupError, LookupGroup, LookupTableType, LookupWitnessSource,
     group_lookup_specs,
 };
 use super::tables::{
@@ -88,13 +88,12 @@ pub struct LookupGroupMeta {
     pub num_columns: usize,
     /// Length of each witness vector (= number of rows in the trace).
     pub witness_len: usize,
-    /// Original trace column indices for each witness in the group.
+    /// Per-witness source descriptors: how the verifier computes the
+    /// parent evaluation for each lookup witness.
     ///
-    /// `original_column_indices[ℓ]` is the index into the full trace
-    /// (and therefore into the CPR `up_evals`) of the ℓ-th lookup column
-    /// in this group.  The verifier uses this to extract parent column
-    /// evaluations for the decomposition consistency check.
-    pub original_column_indices: Vec<usize>,
+    /// For standard column lookups, this is `LookupWitnessSource::Column`.
+    /// For affine-combination lookups, this is `LookupWitnessSource::Affine`.
+    pub witness_sources: Vec<LookupWitnessSource>,
 }
 
 /// Prover state returned after running the lookup pipeline step.
@@ -187,7 +186,9 @@ where
             table_type: group.table_type.clone(),
             num_columns: group.column_indices.len(),
             witness_len,
-            original_column_indices: group.column_indices.clone(),
+            witness_sources: group.column_indices.iter()
+                .map(|&idx| LookupWitnessSource::Column { column_index: idx })
+                .collect(),
         });
         eval_points.push(state.evaluation_point);
     }
@@ -261,7 +262,9 @@ where
             table_type: group.table_type.clone(),
             num_columns: group.column_indices.len(),
             witness_len,
-            original_column_indices: group.column_indices.clone(),
+            witness_sources: group.column_indices.iter()
+                .map(|&idx| LookupWitnessSource::Column { column_index: idx })
+                .collect(),
         });
         eval_points.push(state.evaluation_point);
     }
@@ -389,7 +392,9 @@ where
             table_type: group.table_type.clone(),
             num_columns: group.column_indices.len(),
             witness_len,
-            original_column_indices: group.column_indices.clone(),
+            witness_sources: group.column_indices.iter()
+                .map(|&idx| LookupWitnessSource::Column { column_index: idx })
+                .collect(),
         });
         group_states.push(state);
     }

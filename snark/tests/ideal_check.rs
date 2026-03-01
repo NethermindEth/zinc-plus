@@ -42,7 +42,7 @@ fn ideal_check_succeeds_on_valid_sha256_witness() {
     let max_degree = count_max_degree::<Sha256Uair>();
 
     println!("SHA-256 UAIR: {} constraints, max degree {}", num_constraints, max_degree);
-    assert_eq!(num_constraints, 12, "Expected 12 F₂[X] constraints (6 rot/shift + 6 linking)");
+    assert_eq!(num_constraints, 16, "Expected 16 F₂[X] constraints (6 rot/shift + 6 linking + 4 Ch/Maj linking)");
     assert_eq!(max_degree, 1, "Expected max degree 1 (linear constraints)");
 
     // ── Projection: trace & scalars → DynamicPolynomialF ────────────

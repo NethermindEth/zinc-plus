@@ -193,7 +193,8 @@ mod tests {
     };
     use crypto_bigint::U64;
     use crypto_primitives::{
-        IntoWithConfig, crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int,
+        IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
+        crypto_bigint_int::Int,
     };
     use num_traits::{ConstOne, Zero};
     use zinc_poly::mle::DenseMultilinearExtension;
@@ -222,12 +223,26 @@ mod tests {
         (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect()
     }
 
+    fn field_cfg() -> <F as PrimeField>::Config {
+        let mut t = PcsTranscript::new();
+        t.fs_transcript
+            .get_random_field_cfg::<F, <Zt as ZipTypes>::Fmod, <Zt as ZipTypes>::PrimeTest>()
+    }
+
+    fn test_point_f(num_vars: usize) -> Vec<F> {
+        let cfg = field_cfg();
+        test_point(num_vars)
+            .iter()
+            .map(|v| v.into_with_cfg(&cfg))
+            .collect()
+    }
+
     #[test]
     fn prove_succeeds_for_single_poly() {
         let num_vars = 4;
         let (pp, poly) = setup_test_params(num_vars);
         let (hint, _) = TestZip::commit_single(&pp, &poly).unwrap();
-        let point = test_point(num_vars);
+        let point = test_point_f(num_vars);
 
         let result = TestZip::prove::<F, CHECKED>(&pp, &[poly], &point, &hint);
         assert!(result.is_ok());
@@ -238,7 +253,10 @@ mod tests {
         let num_vars = 4;
         let (pp, poly) = setup_poly_test_params(num_vars);
         let (hint, _) = TestPolyZip::commit_single(&pp, &poly).unwrap();
-        let point: Vec<i128> = (0..num_vars).map(|i| i as i128 + 2).collect();
+        let cfg = field_cfg();
+        let point: Vec<F> = (0..num_vars)
+            .map(|i| (&(i as i128 + 2)).into_with_cfg(&cfg))
+            .collect();
 
         let result = TestPolyZip::prove::<F, CHECKED>(&pp, &[poly], &point, &hint);
         assert!(result.is_ok());
@@ -262,7 +280,7 @@ mod tests {
         };
         let corrupted_hint = ZipPlusHint::new(hint.cw_matrices, corrupted_tree);
 
-        let point = test_point(num_vars);
+        let point = test_point_f(num_vars);
         let result = TestZip::prove::<F, CHECKED>(&pp, &[poly], &point, &corrupted_hint);
         assert!(result.is_ok());
     }
@@ -276,7 +294,7 @@ mod tests {
         let (hint, _) =
             TestZip::commit_single(&pp, &setup_test_params::<N, K, M>(num_vars).1).unwrap();
 
-        let point = test_point(num_vars);
+        let point = test_point_f(num_vars);
         let result = TestZip::prove::<F, CHECKED>(&pp, &[oversized_poly], &point, &hint);
         assert!(result.is_err());
     }
@@ -288,21 +306,18 @@ mod tests {
         let num_vars = 4;
         let (pp, poly) = setup_test_params(num_vars);
         let (hint, _) = TestZip::commit_single(&pp, &poly).unwrap();
-        let point = test_point(num_vars);
+        let int_point = test_point(num_vars);
+        let cfg = field_cfg();
+        let point_f: Vec<F> = int_point.iter().map(|v| v.into_with_cfg(&cfg)).collect();
 
         let (eval, _) =
-            TestZip::prove::<F, CHECKED>(&pp, std::slice::from_ref(&poly), &point, &hint).unwrap();
-
-        let field_cfg = {
-            let mut t = PcsTranscript::new();
-            t.fs_transcript
-                .get_random_field_cfg::<F, <Zt as ZipTypes>::Fmod, <Zt as ZipTypes>::PrimeTest>()
-        };
+            TestZip::prove::<F, CHECKED>(&pp, std::slice::from_ref(&poly), &point_f, &hint)
+                .unwrap();
 
         let poly_wide: DenseMultilinearExtension<Int<M>> =
             poly.evaluations.iter().map(Int::from_ref).collect();
-        let expected_int = poly_wide.evaluate(&point, Zero::zero()).unwrap();
-        let expected_f: F = (&expected_int).into_with_cfg(&field_cfg);
+        let expected_int = poly_wide.evaluate(&int_point, Zero::zero()).unwrap();
+        let expected_f: F = (&expected_int).into_with_cfg(&cfg);
 
         assert_eq!(eval, expected_f);
     }
@@ -329,7 +344,7 @@ mod tests {
         let polys = make_batch_polys(num_vars, 2);
 
         let (hint, _) = TestZip::commit(&pp, &polys).unwrap();
-        let point = test_point(num_vars);
+        let point = test_point_f(num_vars);
 
         let result = TestZip::prove::<F, CHECKED>(&pp, &polys, &point, &hint);
         assert!(result.is_ok())
@@ -342,7 +357,7 @@ mod tests {
         let polys = make_batch_polys(num_vars, 5);
 
         let (hint, _) = TestZip::commit(&pp, &polys).unwrap();
-        let point = test_point(num_vars);
+        let point = test_point_f(num_vars);
 
         let result = TestZip::prove::<F, CHECKED>(&pp, &polys, &point, &hint);
         assert!(result.is_ok())
@@ -364,7 +379,7 @@ mod tests {
         };
         let corrupted_hint = ZipPlusHint::new(hint.cw_matrices, corrupted_tree);
 
-        let point = test_point(num_vars);
+        let point = test_point_f(num_vars);
         let result = TestZip::prove::<F, CHECKED>(&pp, &polys, &point, &corrupted_hint);
         assert!(result.is_ok());
     }
@@ -378,7 +393,7 @@ mod tests {
         let polys = vec![normal, oversized];
 
         let (hint, _) = TestZip::commit(&pp, &make_batch_polys(num_vars, 2)).unwrap();
-        let point = test_point(num_vars);
+        let point = test_point_f(num_vars);
         let result = TestZip::prove::<F, CHECKED>(&pp, &polys, &point, &hint);
         assert!(result.is_err());
     }

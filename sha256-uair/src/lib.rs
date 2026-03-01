@@ -156,13 +156,13 @@ pub fn convert_trace_to_qx(
 
 // ─── Column indices ──────────────────────────────────────────────────────────
 
-/// Total number of trace columns (23 bit-poly + 3 integer).
-pub const NUM_COLS: usize = 26;
+/// Total number of trace columns (27 bit-poly + 3 integer).
+pub const NUM_COLS: usize = 30;
 
 /// Number of bit-polynomial columns ({0,1}^{<32}[X]).
 /// Includes the 10 Q[X] bit-poly columns, 4 F₂[X] columns, 7 auxiliary
-/// lookback columns, and 2 selector columns.
-pub const NUM_BITPOLY_COLS: usize = 23;
+/// lookback columns, 4 Ch/Maj lookback columns, and 2 selector columns.
+pub const NUM_BITPOLY_COLS: usize = 27;
 
 /// Number of integer columns (Z).
 pub const NUM_INT_COLS: usize = 3;
@@ -218,18 +218,28 @@ pub const COL_W_TM16: usize = 19;
 /// Round constant K_t as a bit-polynomial.
 pub const COL_K_HAT: usize = 20;
 
-// ── Selector columns (indices 21–22) ────────────────────────────────────────
+// ── Ch/Maj lookback columns (indices 21–24) ─────────────────────────────
+
+/// a[t−1] = b_t (lookback for Maj affine lookup).
+pub const COL_A_TM1: usize = 21;
+/// a[t−2] = c_t (lookback for Maj affine lookup).
+pub const COL_A_TM2: usize = 22;
+/// e[t−1] = f_t (lookback for Ch affine lookup).
+pub const COL_E_TM1: usize = 23;
+/// e[t−2] = g_t (lookback for Ch affine lookup).
+pub const COL_E_TM2: usize = 24;
+
+// ── Selector columns (indices 25–26) ────────────────────────────────────
 
 /// Round selector: 1 for t ∈ [0, 63], 0 otherwise.
 /// Gates carry propagation constraints C7/C8.
-pub const COL_SEL_ROUND: usize = 21;
+pub const COL_SEL_ROUND: usize = 25;
 /// Schedule selector: 1 for t ∈ [16, 63], 0 otherwise.
 /// Gates the message schedule recurrence C9.
-pub const COL_SEL_SCHED: usize = 22;
+pub const COL_SEL_SCHED: usize = 26;
 
 // ── Integer columns (indices 0–2 within the int sub-slice) ──────────────────
-// NOTE: These are accessed via `up.int[COL_INT_MU_*]`, not `up.binary_poly[..]`.
-
+// NOTE: These are accessed via `up.int[COL_INT_MU_*]`, not `up.binary_poly[..]`.// Absolute indices are 27–29.
 /// Carry for the *a* state update (∈ {0,…,6}).
 pub const COL_INT_MU_A: usize = 0;
 /// Carry for the *e* state update (∈ {0,…,5}).
@@ -240,8 +250,9 @@ pub const COL_INT_MU_W: usize = 2;
 // ─── Number of constraints ──────────────────────────────────────────────────
 
 /// Number of F₂[X] polynomial constraints emitted by the Bp UAIR.
-/// C1–C6 (rotation + shift) + C7–C12 (6 linking constraints).
-pub const NUM_CONSTRAINTS: usize = 12;
+/// C1–C6 (rotation + shift) + C7–C16 (10 linking constraints:
+/// 6 existing + 4 for Ch/Maj lookback columns).
+pub const NUM_CONSTRAINTS: usize = 16;
 
 // ─── Ideal types ────────────────────────────────────────────────────────────
 
@@ -331,14 +342,19 @@ pub type Sha256Uair = Sha256UairBp;
 pub struct Sha256UairBp;
 
 // Down-row indices for the Bp UAIR's shifted columns.
-// The shifts are: d(3), h(3), W_tm2(2), W_tm7(7), W_tm15(15), W_tm16(16).
-// All source columns are binary_poly, so they map to down.binary_poly[0..6].
+// The shifts are: d(3), h(3), W_tm2(2), W_tm7(7), W_tm15(15), W_tm16(16),
+// a_tm1(1), a_tm2(2), e_tm1(1), e_tm2(2).
+// All source columns are binary_poly, so they map to down.binary_poly[0..10].
 const DOWN_BP_D: usize = 0;
 const DOWN_BP_H: usize = 1;
 const DOWN_BP_W_TM2: usize = 2;
 const DOWN_BP_W_TM7: usize = 3;
 const DOWN_BP_W_TM15: usize = 4;
 const DOWN_BP_W_TM16: usize = 5;
+const DOWN_BP_A_TM1: usize = 6;
+const DOWN_BP_A_TM2: usize = 7;
+const DOWN_BP_E_TM1: usize = 8;
+const DOWN_BP_E_TM2: usize = 9;
 
 impl Uair for Sha256UairBp {
     type Ideal = CyclotomicIdeal;
@@ -357,10 +373,16 @@ impl Uair for Sha256UairBp {
                 zinc_uair::ShiftSpec { source_col: COL_W_TM7,  shift_amount: 7 },
                 zinc_uair::ShiftSpec { source_col: COL_W_TM15, shift_amount: 15 },
                 zinc_uair::ShiftSpec { source_col: COL_W_TM16, shift_amount: 16 },
+                // Linking shifts for Ch/Maj affine-combination lookback columns.
+                zinc_uair::ShiftSpec { source_col: COL_A_TM1,  shift_amount: 1 },
+                zinc_uair::ShiftSpec { source_col: COL_A_TM2,  shift_amount: 2 },
+                zinc_uair::ShiftSpec { source_col: COL_E_TM1,  shift_amount: 1 },
+                zinc_uair::ShiftSpec { source_col: COL_E_TM2,  shift_amount: 2 },
             ],
             public_columns: vec![
                 COL_W_HAT, COL_K_HAT,
                 COL_W_TM2, COL_W_TM7, COL_W_TM15, COL_W_TM16,
+                COL_A_TM1, COL_A_TM2, COL_E_TM1, COL_E_TM2,
                 COL_SEL_ROUND, COL_SEL_SCHED,
             ],
         }
@@ -489,6 +511,30 @@ impl Uair for Sha256UairBp {
         //   W_tm16[t+16] = W[t]
         b.assert_zero(
             bp_down[DOWN_BP_W_TM16].clone() - &up[COL_W_HAT],
+        );
+
+        // ── Constraint 13: a_tm1-link (shift-by-1) ─────────────────────
+        //   a_tm1[t+1] = a[t]
+        b.assert_zero(
+            bp_down[DOWN_BP_A_TM1].clone() - &up[COL_A_HAT],
+        );
+
+        // ── Constraint 14: a_tm2-link (shift-by-2) ─────────────────────
+        //   a_tm2[t+2] = a[t]
+        b.assert_zero(
+            bp_down[DOWN_BP_A_TM2].clone() - &up[COL_A_HAT],
+        );
+
+        // ── Constraint 15: e_tm1-link (shift-by-1) ─────────────────────
+        //   e_tm1[t+1] = e[t]
+        b.assert_zero(
+            bp_down[DOWN_BP_E_TM1].clone() - &up[COL_E_HAT],
+        );
+
+        // ── Constraint 16: e_tm2-link (shift-by-2) ─────────────────────
+        //   e_tm2[t+2] = e[t]
+        b.assert_zero(
+            bp_down[DOWN_BP_E_TM2].clone() - &up[COL_E_HAT],
         );
     }
 }
@@ -621,6 +667,7 @@ impl Uair for Sha256UairQx {
             public_columns: vec![
                 COL_W_HAT, COL_K_HAT,
                 COL_W_TM2, COL_W_TM7, COL_W_TM15, COL_W_TM16,
+                COL_A_TM1, COL_A_TM2, COL_E_TM1, COL_E_TM2,
                 COL_SEL_ROUND, COL_SEL_SCHED,
             ],
         }

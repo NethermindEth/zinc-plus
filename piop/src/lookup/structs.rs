@@ -392,6 +392,58 @@ pub struct LookupColumnSpec {
     pub table_type: LookupTableType,
 }
 
+/// Specifies an **affine-combination lookup**: an integer-linear combination
+/// of trace columns whose result should lie in a prescribed lookup table.
+///
+/// The lookup expression evaluated at each row is:
+///
+/// ```text
+/// Σ_j (terms[j].1 · trace[terms[j].0][row]) + constant_offset
+/// ```
+///
+/// where `constant_offset` is the field projection of a constant
+/// bit-polynomial (0 for no offset).
+///
+/// For example, the SHA-256 Ch lookup:
+///   `ê[t] + ê[t−1] − 2·ch_ef_hat[t] ∈ BitPoly{32}`
+/// is expressed as terms = [(COL_E_HAT, 1), (COL_E_TM1, 1), (COL_CH_EF_HAT, -2)]
+/// with constant_offset_bits = 0.
+#[derive(Clone, Debug)]
+pub struct AffineLookupSpec {
+    /// `(column_index, coefficient)` pairs. Column indices are 0-based
+    /// into the full trace.
+    pub terms: Vec<(usize, i64)>,
+    /// Constant bit-polynomial offset, as a u32 where bit `k` represents
+    /// the coefficient of `X^k`. Set to 0 for no offset. For the SHA-256
+    /// "ones" polynomial `1_w = Σ_{i=0}^{31} X^i`, use `0xFFFF_FFFF`.
+    pub constant_offset_bits: u32,
+    /// The lookup table type this combination should be checked against.
+    pub table_type: LookupTableType,
+}
+
+/// Describes how a lookup verifier obtains the "parent evaluation" for
+/// the decomposition consistency check.
+///
+/// For standard column lookups, the parent eval is simply the CPR
+/// evaluation of that trace column. For affine-combination lookups,
+/// the parent eval is the same affine combination applied to the CPR
+/// evaluations.
+#[derive(Clone, Debug)]
+pub enum LookupWitnessSource {
+    /// Standard column lookup — parent eval = `up_evals[column_index]`.
+    Column {
+        /// Original trace column index.
+        column_index: usize,
+    },
+    /// Affine-combination lookup — parent eval = `Σ coeff·up_evals[col] + offset`.
+    Affine {
+        /// `(column_index, coefficient)` pairs.
+        terms: Vec<(usize, i64)>,
+        /// Constant bit-polynomial offset (u32 bit pattern).
+        constant_offset_bits: u32,
+    },
+}
+
 /// A group of columns that all look up into the same decomposed table.
 ///
 /// Produced by [`group_lookup_specs`] and consumed by the pipeline

@@ -170,7 +170,7 @@ where
 {
     setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_test_params, |cfg| {
         (0..num_vars)
-            .map(|i| (&Int::from(i as i32 + 2)).into_with_cfg(cfg))
+            .map(|i| (&Int::<N>::from(i as i32 + 2)).into_with_cfg(cfg))
             .collect()
     })
 }

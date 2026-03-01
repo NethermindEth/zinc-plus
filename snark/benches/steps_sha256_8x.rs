@@ -133,7 +133,7 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
     let mem_tracker = MemoryTracker::start();
 
     let mut group = c.benchmark_group("8xSHA256 Steps");
-    group.sample_size(10);
+    group.sample_size(100);
 
     type ShaZt = Sha256ZipTypes<i64, 32>;
     type ShaLc = IprsBPoly32R4B64<1, UNCHECKED>;

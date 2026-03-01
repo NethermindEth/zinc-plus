@@ -39,12 +39,14 @@ use zinc_piop::lookup::{
     verify_batched_lookup,
     BatchedDecompLogupProtocol,
     group_lookup_specs,
+    AffineLookupSpec,
 };
 use zinc_piop::lookup::pipeline::{
     LookupGroupMeta,
     build_lookup_instance_from_indices_pub,
     generate_table_and_shifts,
 };
+use zinc_piop::lookup::LookupWitnessSource;
 use zinc_piop::projections::{
     project_trace_coeffs, project_trace_to_field,
     project_scalars, project_scalars_to_field,
@@ -110,6 +112,7 @@ pub struct TimingBreakdown {
     pub combined_poly_resolver: Duration,
     pub lookup: Duration,
     pub pcs_prove: Duration,
+    pub serialize: Duration,
     pub total: Duration,
 }
 
@@ -204,6 +207,8 @@ pub struct VerifyResult {
 /// 192-bit Montgomery field (3 × 64-bit limbs) used for the PIOP.
 pub const FIELD_LIMBS: usize = 3;
 pub type PiopField = MontyField<FIELD_LIMBS>;
+/// Unsigned integer type matching the PIOP field's internal representation.
+type PiopUint = crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS>;
 
 /// Returns a fixed configuration for the PIOP field.
 ///
@@ -253,29 +258,46 @@ fn private_trace<T: Clone>(
 /// Convert a `PiopField` evaluation point to an arbitrary PCS field `F` by
 /// going through the canonical unsigned integer representation.
 ///
-/// The PIOP field modulus is ~120 bits, so every coordinate fits in `u128`.
-/// This is used only in generic pipeline functions where `PcsF` may (in
-/// principle) differ from `PiopField`.
-fn piop_point_to_pcs_field<F: PrimeField + FromPrimitiveWithConfig>(
+/// Uses `Uint<FIELD_LIMBS>` as the intermediate representation, which can
+/// hold any value in the PIOP field regardless of the modulus size.
+/// This is used only in generic pipeline functions where `PcsF` may differ
+/// from `PiopField`.
+pub fn piop_point_to_pcs_field<F>(
     piop_point: &[PiopField],
     pcs_cfg: &F::Config,
-) -> Vec<F> {
+) -> Vec<F>
+where
+    F: PrimeField + FromWithConfig<PiopUint>,
+{
     piop_point
+        .iter()
+        .map(|f| {
+            let uint = f.retrieve(); // canonical Uint<FIELD_LIMBS>
+            uint.into_with_cfg(pcs_cfg)
+        })
+        .collect()
+}
+
+/// Derive the PCS evaluation point from a CPR evaluation point.
+///
+/// Takes the first `num_vars` coordinates of the CPR evaluation point and
+/// converts them to `i128` (the PCS field for standard 128-bit pipelines).
+/// This is used by benchmarks that run individual pipeline steps.
+pub fn derive_pcs_point(cpr_eval_point: &[PiopField], num_vars: usize) -> Vec<i128> {
+    cpr_eval_point[..num_vars]
         .iter()
         .map(|f| {
             let uint = f.retrieve();
             let words = uint.as_words();
             debug_assert!(
                 words[2] == 0,
-                "PIOP field element too large for u128: {words:?}"
+                "PIOP field element too large for i128: {words:?}"
             );
-            let canonical = (words[0] as u128) | ((words[1] as u128) << 64);
-            canonical.into_with_cfg(pcs_cfg)
+            (words[0] as i128) | ((words[1] as i128) << 64)
         })
         .collect()
 }
 
-/// Convert PiopField elements to PcsF elements using canonical u128 representation.
 /// Reconstruct the PCS evaluation point from a [`ZincProof`]'s serialized
 /// `evaluation_point_bytes` as `PiopField` elements.
 ///
@@ -437,6 +459,114 @@ fn extract_lookup_columns_from_field_trace<const D: usize>(
         .collect();
 
     (columns, raw_indices, remapped_specs, reverse_index_map)
+}
+
+/// Build projected field values and raw integer indices for affine virtual
+/// columns, and append them to the existing lookup column arrays.
+///
+/// Returns a `witness_source_map` that maps each remapped column index to
+/// the corresponding [`LookupWitnessSource`].
+fn append_affine_virtual_columns<const D: usize>(
+    bp_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    affine_specs: &[AffineLookupSpec],
+    projecting_element: &PiopField,
+    _field_cfg: &MontyParams<FIELD_LIMBS>,
+    num_vars: usize,
+    // in / out:
+    columns: &mut Vec<Vec<PiopField>>,
+    raw_indices: &mut Vec<Vec<usize>>,
+    remapped_specs: &mut Vec<LookupColumnSpec>,
+    reverse_index_map: &[usize],
+) -> Vec<LookupWitnessSource>
+where
+    BinaryPoly<D>: ProjectableToField<PiopField> + From<u32>,
+{
+    let num_rows = 1usize << num_vars;
+    let projection = BinaryPoly::<D>::prepare_projection(projecting_element);
+
+    // Build the witness source map for all existing (column) entries.
+    let mut ws_map: Vec<LookupWitnessSource> = reverse_index_map
+        .iter()
+        .map(|&orig| LookupWitnessSource::Column { column_index: orig })
+        .collect();
+
+    for spec in affine_specs {
+        let mut col_f = Vec::with_capacity(num_rows);
+        let mut col_idx = Vec::with_capacity(num_rows);
+
+        for t in 0..num_rows {
+            let mut val: i64 = spec.constant_offset_bits as i64;
+            for &(col_index, coeff) in &spec.terms {
+                let bp = &bp_trace[col_index].evaluations[t];
+                let mut bp_val: i64 = 0;
+                for (j, c) in bp.iter().enumerate() {
+                    if c.into_inner() {
+                        bp_val |= 1i64 << j;
+                    }
+                }
+                val += coeff * bp_val;
+            }
+            let val_u32 = val as u32;
+            col_f.push(projection(&BinaryPoly::<D>::from(val_u32)));
+            col_idx.push(val_u32 as usize);
+        }
+
+        let remapped_idx = columns.len();
+        columns.push(col_f);
+        raw_indices.push(col_idx);
+
+        remapped_specs.push(LookupColumnSpec {
+            column_index: remapped_idx,
+            table_type: spec.table_type.clone(),
+        });
+
+        ws_map.push(LookupWitnessSource::Affine {
+            terms: spec.terms.clone(),
+            constant_offset_bits: spec.constant_offset_bits,
+        });
+    }
+
+    ws_map
+}
+
+/// Compute the parent evaluation for an affine witness source.
+///
+/// `parent_eval = eq_sum_w · π(constant_offset) + Σ coeff · up_evals[col_idx]`.
+///
+/// The carry-free identity `π(v[t]) = π(offset) + Σ coeff · π(col[t])` holds
+/// at every witness row.  When the lookup protocol's `num_vars` exceeds the
+/// witness's `num_vars` (because the subtable is larger), the MLE of the
+/// constant offset function over the witness domain evaluates to
+/// `π(offset) · eq_sum_w` rather than `π(offset)`, where `eq_sum_w` =
+/// `Σ_{j < witness_len} eq(j, x*)`.  Pass `eq_sum_w` to account for this.
+pub fn eval_affine_parent<const D: usize>(
+    terms: &[(usize, i64)],
+    constant_offset_bits: u32,
+    up_evals: &[PiopField],
+    projecting_element: &PiopField,
+    eq_sum_w: &PiopField,
+    field_cfg: &MontyParams<FIELD_LIMBS>,
+) -> PiopField
+where
+    BinaryPoly<D>: ProjectableToField<PiopField> + From<u32>,
+{
+    let projection = BinaryPoly::<D>::prepare_projection(projecting_element);
+    let mut result = eq_sum_w.clone() * projection(&BinaryPoly::<D>::from(constant_offset_bits));
+
+    let one = PiopField::one_with_cfg(field_cfg);
+    for &(col_idx, coeff) in terms {
+        // Build the field-element coefficient from the i64 value.
+        let abs = coeff.unsigned_abs();
+        let mut c = PiopField::zero_with_cfg(field_cfg);
+        for _ in 0..abs {
+            c += &one;
+        }
+        if coeff < 0 {
+            c = PiopField::zero_with_cfg(field_cfg) - c;
+        }
+        result += c * up_evals[col_idx].clone();
+    }
+    result
 }
 
 // ─── Prover ─────────────────────────────────────────────────────────────────
@@ -681,6 +811,7 @@ where
             combined_poly_resolver: cpr_time,
             lookup: lookup_time,
             pcs_prove: pcs_prove_time,
+            serialize: Duration::ZERO,
             total: total_time,
         },
     }
@@ -701,12 +832,14 @@ pub fn prove_classic_logup<U, Zt, Lc, const D: usize, const CHECK: bool>(
     trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
     num_vars: usize,
     lookup_specs: &[LookupColumnSpec],
+    affine_lookup_specs: &[AffineLookupSpec],
 ) -> ZincProof
 where
     U: Uair<Scalar = BinaryPoly<D>>,
     Zt: ZipTypes<Eval = BinaryPoly<D>>,
     Lc: LinearCode<Zt>,
     rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<D>>,
+    BinaryPoly<D>: From<u32>,
     PiopField: FromPrimitiveWithConfig,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
@@ -766,10 +899,19 @@ where
     );
 
     // Extract lookup columns before CPR consumes the field trace.
-    let lookup_precomputed = if !lookup_specs.is_empty() {
-        let (columns, raw_indices, remapped_specs, reverse_index_map) =
-            extract_lookup_columns_from_field_trace(trace, &field_trace, lookup_specs, &field_cfg);
-        Some((columns, raw_indices, remapped_specs, reverse_index_map))
+    let has_lookups = !lookup_specs.is_empty() || !affine_lookup_specs.is_empty();
+    let lookup_precomputed = if has_lookups {
+        let (mut columns, mut raw_indices, mut remapped_specs, reverse_index_map) =
+            if !lookup_specs.is_empty() {
+                extract_lookup_columns_from_field_trace(trace, &field_trace, lookup_specs, &field_cfg)
+            } else {
+                (vec![], vec![], vec![], vec![])
+            };
+        let ws_map = append_affine_virtual_columns::<D>(
+            trace, affine_lookup_specs, &projecting_element, &field_cfg, num_vars,
+            &mut columns, &mut raw_indices, &mut remapped_specs, &reverse_index_map,
+        );
+        Some((columns, raw_indices, remapped_specs, ws_map))
     } else {
         None
     };
@@ -790,7 +932,7 @@ where
 
     // ── Lookup: build sumcheck groups (does NOT run sumchecks) ───────
     let mut lookup_groups_data: Vec<(LookupSumcheckGroup<PiopField>, LookupGroupMeta)> = Vec::new();
-    if let Some((ref columns, ref raw_indices, ref remapped_specs, ref reverse_index_map)) = lookup_precomputed {
+    if let Some((ref columns, ref raw_indices, ref remapped_specs, ref ws_map)) = lookup_precomputed {
         let groups = group_lookup_specs(remapped_specs);
         for group in &groups {
             let instance = build_lookup_instance_from_indices_pub(
@@ -811,8 +953,8 @@ where
                 table_type: group.table_type.clone(),
                 num_columns: group.column_indices.len(),
                 witness_len,
-                original_column_indices: group.column_indices.iter()
-                    .map(|&remapped| reverse_index_map[remapped])
+                witness_sources: group.column_indices.iter()
+                    .map(|&remapped| ws_map[remapped].clone())
                     .collect(),
             };
             lookup_groups_data.push((lk_group, meta));
@@ -1018,6 +1160,7 @@ where
             combined_poly_resolver: cpr_lookup_time,
             lookup: Duration::ZERO,  // included in combined_poly_resolver
             pcs_prove: pcs_prove_time,
+            serialize: Duration::ZERO,
             total: total_time,
         },
     }
@@ -1050,6 +1193,7 @@ where
     // PCS field (may be wider than PiopField when Zt::Fmod > 128 bits)
     PcsF: PrimeField
         + FromPrimitiveWithConfig
+        + FromWithConfig<PiopUint>
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF>
@@ -1309,6 +1453,7 @@ where
             combined_poly_resolver: cpr_time,
             lookup: lookup_time,
             pcs_prove: pcs_prove_time,
+            serialize: Duration::ZERO,
             total: total_time,
         },
     }
@@ -1336,6 +1481,7 @@ where
     // PCS field (may be wider than PiopField when Zt::Fmod > 128 bits)
     PcsF: PrimeField
         + FromPrimitiveWithConfig
+        + FromWithConfig<PiopUint>
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF>
@@ -1764,6 +1910,7 @@ where
                 combined_poly_resolver: Duration::ZERO,
                 lookup: Duration::ZERO,
                 pcs_prove: pcs_prove_time,
+                serialize: Duration::ZERO,
                 total: total_time,
             },
         },
@@ -1868,6 +2015,7 @@ where
     U: Uair<Scalar = BinaryPoly<D>>,
     Zt: ZipTypes<Eval = BinaryPoly<D>>,
     Lc: LinearCode<Zt>,
+    BinaryPoly<D>: From<u32>,
     PiopField: FromPrimitiveWithConfig,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
@@ -2257,10 +2405,33 @@ where
             .zip(batched_proof.lookup_group_meta.iter())
             .enumerate()
         {
+            // Compute eq_sum_w = Σ_{j < witness_len} eq(j, x*).
+            // When witness_len = 2^w_nv < 2^point_nv, this equals
+            // Π_{i = w_nv}^{point_len-1} (1 - x*[i]).
+            let eq_sum_w = {
+                let one = PiopField::one_with_cfg(&field_cfg);
+                let w_nv = zinc_utils::log2(meta.witness_len.next_power_of_two()) as usize;
+                let mut prod = one.clone();
+                for i in w_nv..md_subclaims.point.len() {
+                    prod *= one.clone() - &md_subclaims.point[i];
+                }
+                prod
+            };
+
             // Collect parent column evaluations from CPR up_evals using
-            // the original column index mapping stored in the group metadata.
-            let parent_evals: Vec<PiopField> = meta.original_column_indices.iter()
-                .map(|&orig_col| batched_full_up_evals_saved[orig_col].clone())
+            // the witness source mapping stored in the group metadata.
+            let parent_evals: Vec<PiopField> = meta.witness_sources.iter()
+                .map(|ws| match ws {
+                    LookupWitnessSource::Column { column_index } =>
+                        batched_full_up_evals_saved[*column_index].clone(),
+                    LookupWitnessSource::Affine { terms, constant_offset_bits } =>
+                        eval_affine_parent::<D>(
+                            terms, *constant_offset_bits,
+                            &batched_full_up_evals_saved,
+                            &projecting_element, &eq_sum_w,
+                            &field_cfg,
+                        ),
+                })
                 .collect();
             if let Err(e) = BatchedDecompLogupProtocol::<PiopField>::finalize_verifier(
                 lk_pre,
@@ -3033,6 +3204,7 @@ where
             combined_poly_resolver: cpr_time,
             lookup: Duration::ZERO,
             pcs_prove: pcs_prove_time,
+            serialize: Duration::ZERO,
             total: total_time,
         },
     }
@@ -3550,6 +3722,7 @@ pub fn prove_dual_circuit<U1, U2, R2, Zt1, Lc1, Zt2, Lc2, PcsF2, const D: usize,
     trace2: &[DenseMultilinearExtension<R2>],
     num_vars: usize,
     lookup_specs: &[LookupColumnSpec],
+    affine_lookup_specs: &[AffineLookupSpec],
 ) -> DualCircuitZincProof
 where
     // Circuit 1 (BinaryPoly<D>):
@@ -3557,6 +3730,7 @@ where
     Zt1: ZipTypes<Eval = BinaryPoly<D>>,
     Lc1: LinearCode<Zt1>,
     rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<D>>,
+    BinaryPoly<D>: From<u32>,
     Zt1::Eval: ProjectableToField<PiopField>,
     Zt1::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a Zt1::Chal> + for<'a> FromWithConfig<&'a Zt1::CombR>,
@@ -3575,6 +3749,7 @@ where
     PiopField: FromWithConfig<R2>,
     PcsF2: PrimeField
         + FromPrimitiveWithConfig
+        + FromWithConfig<PiopUint>
         + for<'a> FromWithConfig<&'a Zt2::Chal>
         + for<'a> FromWithConfig<&'a Zt2::CombR>
         + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF2>
@@ -3702,10 +3877,19 @@ where
     );
 
     // ── Step 7: Extract lookup columns from circuit 1's field trace ──
-    let lookup_precomputed = if !lookup_specs.is_empty() {
-        let (columns, raw_indices, remapped_specs, reverse_index_map) =
-            extract_lookup_columns_from_field_trace(trace1, &c1_field_trace, lookup_specs, &field_cfg);
-        Some((columns, raw_indices, remapped_specs, reverse_index_map))
+    let has_lookups = !lookup_specs.is_empty() || !affine_lookup_specs.is_empty();
+    let lookup_precomputed = if has_lookups {
+        let (mut columns, mut raw_indices, mut remapped_specs, reverse_index_map) =
+            if !lookup_specs.is_empty() {
+                extract_lookup_columns_from_field_trace(trace1, &c1_field_trace, lookup_specs, &field_cfg)
+            } else {
+                (vec![], vec![], vec![], vec![])
+            };
+        let ws_map = append_affine_virtual_columns::<D>(
+            trace1, affine_lookup_specs, &projecting_element, &field_cfg, num_vars,
+            &mut columns, &mut raw_indices, &mut remapped_specs, &reverse_index_map,
+        );
+        Some((columns, raw_indices, remapped_specs, ws_map))
     } else {
         None
     };
@@ -3731,7 +3915,7 @@ where
     // ── Step 9: Build lookup groups for circuit 1 ───────────────────
     let mut lookup_groups_data: Vec<(LookupSumcheckGroup<PiopField>, LookupGroupMeta)> =
         Vec::new();
-    if let Some((ref columns, ref raw_indices, ref remapped_specs, ref reverse_index_map)) = lookup_precomputed {
+    if let Some((ref columns, ref raw_indices, ref remapped_specs, ref ws_map)) = lookup_precomputed {
         let groups = group_lookup_specs(remapped_specs);
         for group in &groups {
             let instance = build_lookup_instance_from_indices_pub(
@@ -3756,8 +3940,8 @@ where
                 table_type: group.table_type.clone(),
                 num_columns: group.column_indices.len(),
                 witness_len,
-                original_column_indices: group.column_indices.iter()
-                    .map(|&remapped| reverse_index_map[remapped])
+                witness_sources: group.column_indices.iter()
+                    .map(|&remapped| ws_map[remapped].clone())
                     .collect(),
             };
             lookup_groups_data.push((lk_group, meta));
@@ -3971,6 +4155,7 @@ where
     let total_time = total_start.elapsed();
 
     // ── Serialize ───────────────────────────────────────────────────
+    let t_ser = Instant::now();
     let proof1_bytes: Vec<u8> = {
         let t: zip_plus::pcs_transcript::PcsTranscript = proof1.into();
         t.stream.into_inner()
@@ -4060,6 +4245,7 @@ where
         eval2_f.inner().write_transcription_bytes(&mut buf);
         vec![buf]
     };
+    let serialize_time = t_ser.elapsed();
 
     DualCircuitZincProof {
         pcs1_proof_bytes: proof1_bytes,
@@ -4087,6 +4273,7 @@ where
             combined_poly_resolver: cpr_lookup_time,
             lookup: Duration::ZERO, // included in combined_poly_resolver
             pcs_prove: pcs_prove_time,
+            serialize: serialize_time,
             total: total_time,
         },
     }
@@ -4126,6 +4313,7 @@ where
     U1: Uair<Scalar = BinaryPoly<D>>,
     Zt1: ZipTypes<Eval = BinaryPoly<D>>,
     Lc1: LinearCode<Zt1>,
+    BinaryPoly<D>: From<u32>,
     Zt1::Eval: ProjectableToField<PiopField>,
     Zt1::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a Zt1::Chal> + for<'a> FromWithConfig<&'a Zt1::CombR>,
@@ -4146,6 +4334,7 @@ where
     PiopField: FromWithConfig<R2>,
     PcsF2: PrimeField
         + FromPrimitiveWithConfig
+        + FromWithConfig<PiopUint>
         + for<'a> FromWithConfig<&'a Zt2::Chal>
         + for<'a> FromWithConfig<&'a Zt2::CombR>
         + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF2>
@@ -4837,9 +5026,30 @@ where
         .zip(proof.lookup_group_meta.iter())
         .enumerate()
     {
+        // Compute eq_sum_w for domain-scaling of affine constant offsets.
+        let eq_sum_w = {
+            let one = PiopField::one_with_cfg(&field_cfg);
+            let w_nv = zinc_utils::log2(meta.witness_len.next_power_of_two()) as usize;
+            let mut prod = one.clone();
+            for i in w_nv..md_subclaims.point.len() {
+                prod *= one.clone() - &md_subclaims.point[i];
+            }
+            prod
+        };
+
         // Collect parent column evaluations from C1 CPR up_evals.
-        let parent_evals: Vec<PiopField> = meta.original_column_indices.iter()
-            .map(|&orig_col| c1_up_evals_saved[orig_col].clone())
+        let parent_evals: Vec<PiopField> = meta.witness_sources.iter()
+            .map(|ws| match ws {
+                LookupWitnessSource::Column { column_index } =>
+                    c1_up_evals_saved[*column_index].clone(),
+                LookupWitnessSource::Affine { terms, constant_offset_bits } =>
+                    eval_affine_parent::<D>(
+                        terms, *constant_offset_bits,
+                        &c1_up_evals_saved,
+                        &projecting_element, &eq_sum_w,
+                        &field_cfg,
+                    ),
+            })
             .collect();
         if let Err(e) = BatchedDecompLogupProtocol::<PiopField>::finalize_verifier(
             lk_pre,

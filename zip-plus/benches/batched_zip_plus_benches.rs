@@ -367,7 +367,7 @@ fn batched_pcs_pipeline_suite_bpoly31_1row(c: &mut Criterion) {
 /// 2^11 = 2048       R4B16 D=2 (rate 1/4)   F65537       1024
 fn batched_pcs_pipeline_suite_bpoly31_2row(c: &mut Criterion) {
     let mut group = c.benchmark_group("Batched PCS Pipeline Suite BPoly31 2row");
-    group.sample_size(10);
+    group.sample_size(100);
 
     // ── Encode ───────────────────────────────────────────────────────
     batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 1, 32, UNCHECKED>,  9>(&mut group, 2, BATCH_SIZE);
@@ -406,7 +406,7 @@ fn batched_pcs_pipeline_suite_bpoly31_2row(c: &mut Criterion) {
 /// 2^11 = 2048       R4B32 D=2 (rate 1/4)   F65537       2048
 fn batched_pcs_pipeline_suite_bpoly31_1row_batch7(c: &mut Criterion) {
     let mut group = c.benchmark_group("Batched PCS Pipeline Suite BPoly31 1row batch7");
-    group.sample_size(10);
+    group.sample_size(100);
 
     // ── Encode ───────────────────────────────────────────────────────
     batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B64<i64, 1, 32, UNCHECKED>,  9>(&mut group, 1, BATCH_SIZE_7);
@@ -445,7 +445,7 @@ fn batched_pcs_pipeline_suite_bpoly31_1row_batch7(c: &mut Criterion) {
 /// 2^11 = 2048       R4B16 D=2 (rate 1/4)   F65537       1024
 fn batched_pcs_pipeline_suite_bpoly31_2row_batch7(c: &mut Criterion) {
     let mut group = c.benchmark_group("Batched PCS Pipeline Suite BPoly31 2row batch7");
-    group.sample_size(10);
+    group.sample_size(100);
 
     // ── Encode ───────────────────────────────────────────────────────
     batched_encode_nrows::<BenchZipPlusTypes<i64, 32>, IprsBPolyR4B32<i64, 1, 32, UNCHECKED>,  9>(&mut group, 2, BATCH_SIZE_7);
@@ -484,7 +484,7 @@ fn batched_pcs_pipeline_suite_bpoly31_2row_batch7(c: &mut Criterion) {
 /// 2^11 = 2048       R4B32 D=2 (rate 1/4)   F65537       2048
 fn batched_pcs_pipeline_suite_bpoly15_1row(c: &mut Criterion) {
     let mut group = c.benchmark_group("Batched PCS Pipeline Suite BPoly15 1row");
-    group.sample_size(10);
+    group.sample_size(100);
 
     // ── Encode ───────────────────────────────────────────────────────
     batched_encode_nrows::<BenchZipPlusTypes<i64, 16>, IprsBPolyR4B64<i64, 1, 16, UNCHECKED>,  9>(&mut group, 1, BATCH_SIZE);
@@ -523,7 +523,7 @@ fn batched_pcs_pipeline_suite_bpoly15_1row(c: &mut Criterion) {
 /// 2^11 = 2048       R4B16 D=2 (rate 1/4)   F65537       1024
 fn batched_pcs_pipeline_suite_bpoly15_2row(c: &mut Criterion) {
     let mut group = c.benchmark_group("Batched PCS Pipeline Suite BPoly15 2row");
-    group.sample_size(10);
+    group.sample_size(100);
 
     // ── Encode ───────────────────────────────────────────────────────
     batched_encode_nrows::<BenchZipPlusTypes<i64, 16>, IprsBPolyR4B32<i64, 1, 16, UNCHECKED>,  9>(&mut group, 2, BATCH_SIZE);
@@ -562,7 +562,7 @@ fn batched_pcs_pipeline_suite_bpoly15_2row(c: &mut Criterion) {
 /// 2^11 = 2048       R4B32 D=2 (rate 1/4)   F65537       2048
 fn batched_pcs_pipeline_suite_bpoly15_1row_batch7(c: &mut Criterion) {
     let mut group = c.benchmark_group("Batched PCS Pipeline Suite BPoly15 1row batch7");
-    group.sample_size(10);
+    group.sample_size(100);
 
     // ── Encode ───────────────────────────────────────────────────────
     batched_encode_nrows::<BenchZipPlusTypes<i64, 16>, IprsBPolyR4B64<i64, 1, 16, UNCHECKED>,  9>(&mut group, 1, BATCH_SIZE_7);
@@ -601,7 +601,7 @@ fn batched_pcs_pipeline_suite_bpoly15_1row_batch7(c: &mut Criterion) {
 /// 2^11 = 2048       R4B16 D=2 (rate 1/4)   F65537       1024
 fn batched_pcs_pipeline_suite_bpoly15_2row_batch7(c: &mut Criterion) {
     let mut group = c.benchmark_group("Batched PCS Pipeline Suite BPoly15 2row batch7");
-    group.sample_size(10);
+    group.sample_size(100);
 
     // ── Encode ───────────────────────────────────────────────────────
     batched_encode_nrows::<BenchZipPlusTypes<i64, 16>, IprsBPolyR4B32<i64, 1, 16, UNCHECKED>,  9>(&mut group, 2, BATCH_SIZE_7);

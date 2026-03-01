@@ -189,16 +189,18 @@ mod tests {
             structs::{ZipPlus, ZipPlusParams, ZipTypes},
             test_utils::*,
         },
+        pcs_transcript::PcsTranscript,
     };
     use crypto_bigint::{Random, U64, U256, Word};
     use crypto_primitives::{
-        Matrix, boolean::Boolean, crypto_bigint_boxed_monty::BoxedMontyField,
-        crypto_bigint_int::Int,
+        IntoWithConfig, Matrix, boolean::Boolean,
+        crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int,
     };
     use itertools::Itertools;
     use num_traits::Zero;
     use rand::{Rng, rng};
     use zinc_poly::{mle::DenseMultilinearExtension, univariate::binary::BinaryPoly};
+    use zinc_transcript::traits::Transcript;
     use zinc_utils::CHECKED;
 
     const INT_LIMBS: usize = U64::LIMBS;
@@ -255,7 +257,7 @@ mod tests {
 
     #[test]
     fn commit_succeeds_for_small_polynomial() {
-        let code = C::new(16);
+        let code = C::new(4);
         let pp = ZipPlusParams::new(4, 4, code);
 
         let evaluations = vec![Int::from(42); 16];
@@ -267,7 +269,7 @@ mod tests {
 
     #[test]
     fn commit_succeeds_for_two_variables() {
-        let code = C::new(4);
+        let code = C::new(2);
         let pp = ZipPlusParams::new(2, 2, code);
 
         let evaluations = vec![Int::from(1), Int::from(2), Int::from(3), Int::from(4)];
@@ -680,8 +682,8 @@ mod tests {
             let size_of_zt_k = K * size_of::<Word>();
             // size of CombR in combine row
             let size_of_zt_m = M * size_of::<Word>();
-            // size_f = field_value || field_modulus
-            let size_of_f = 2 * U256::LIMBS * size_of::<Word>();
+            // size_f = field_value only (modulus is NOT written to proof)
+            let size_of_f = U256::LIMBS * size_of::<Word>();
             let size_of_usize_field = size_of::<u64>();
             let size_of_path_elem = size_of::<MtHash>();
 
@@ -715,9 +717,15 @@ mod tests {
             .collect();
         let mle =
             DenseMultilinearExtension::from_evaluations_slice(num_vars, &evaluations, Zero::zero());
-        let point: Vec<_> = (0..num_vars)
+        let int_point: Vec<_> = (0..num_vars)
             .map(|_| <Zt as ZipTypes>::Pt::random(&mut rng))
             .collect();
+        let field_cfg = {
+            let mut t = PcsTranscript::new();
+            t.fs_transcript
+                .get_random_field_cfg::<F, <Zt as ZipTypes>::Fmod, <Zt as ZipTypes>::PrimeTest>()
+        };
+        let point: Vec<F> = int_point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
         let (hint, _) = TestZip::commit_single(&param, &mle).unwrap();
 

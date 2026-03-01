@@ -39,15 +39,16 @@ fn bp_to_u64(bp: &BinaryPoly<32>) -> u64 {
 
 // ─── Column classification for split PCS batches ────────────────────────────
 
-/// Bit-polynomial column indices (0–22): the 10 Q[X] bit-poly columns,
-/// 4 F₂[X] columns, 7 auxiliary lookback columns, and 2 selector columns.
-pub const POLY_COLUMN_INDICES: [usize; 23] = [
+/// Bit-polynomial column indices (0–26): the 10 Q[X] bit-poly columns,
+/// 4 F₂[X] columns, 7 auxiliary lookback columns, 4 Ch/Maj lookback
+/// columns, and 2 selector columns.
+pub const POLY_COLUMN_INDICES: [usize; 27] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
-    14, 15, 16, 17, 18, 19, 20, 21, 22,
+    14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
 ];
 
-/// Integer column indices (23–25): the 3 carry columns μ_a, μ_e, μ_W.
-pub const INT_COLUMN_INDICES: [usize; 3] = [23, 24, 25];
+/// Integer column indices (27–29): the 3 carry columns μ_a, μ_e, μ_W.
+pub const INT_COLUMN_INDICES: [usize; 3] = [27, 28, 29];
 
 // ─── GenerateWitness impl ───────────────────────────────────────────────────
 
@@ -153,13 +154,39 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
             // K_hat (round constant)
             cols[20][t] = BinaryPoly::from(K[t]);
 
-            // ── Selector columns (21–22) ────────────────────────────────
-            cols[21][t] = BinaryPoly::from(1u32);  // sel_round = 1 for t < 64
-            if t >= 16 {
-                cols[22][t] = BinaryPoly::from(1u32);  // sel_sched = 1 for t >= 16
+            // ── Ch/Maj lookback columns (21–24) ─────────────────────────
+            // a_tm1[t] = a[t−1]
+            if t >= 1 {
+                cols[21][t] = BinaryPoly::from(bp_to_u64(&cols[0][t - 1]) as u32);
+            } else {
+                cols[21][t] = BinaryPoly::from(H[1]); // b_init
+            }
+            // a_tm2[t] = a[t−2]
+            if t >= 2 {
+                cols[22][t] = BinaryPoly::from(bp_to_u64(&cols[0][t - 2]) as u32);
+            } else {
+                cols[22][t] = BinaryPoly::from([H[2], H[1]][t]); // c_init, b_init
+            }
+            // e_tm1[t] = e[t−1]
+            if t >= 1 {
+                cols[23][t] = BinaryPoly::from(bp_to_u64(&cols[1][t - 1]) as u32);
+            } else {
+                cols[23][t] = BinaryPoly::from(H[5]); // f_init
+            }
+            // e_tm2[t] = e[t−2]
+            if t >= 2 {
+                cols[24][t] = BinaryPoly::from(bp_to_u64(&cols[1][t - 2]) as u32);
+            } else {
+                cols[24][t] = BinaryPoly::from([H[6], H[5]][t]); // g_init, f_init
             }
 
-            // ── Integer columns (23–25): carry values ───────────────────
+            // ── Selector columns (25–26) ────────────────────────────────
+            cols[25][t] = BinaryPoly::from(1u32);  // sel_round = 1 for t < 64
+            if t >= 16 {
+                cols[26][t] = BinaryPoly::from(1u32);  // sel_sched = 1 for t >= 16
+            }
+
+            // ── Integer columns (27–29): carry values ───────────────────
             let sigma1_val = big_sigma1(e);
             let ch_val = ch(e, f_reg, g_reg);
             let sigma0_val = big_sigma0(a);
@@ -174,7 +201,7 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
                 + sigma0_val as u64
                 + maj_val as u64;
             let mu_a_val = (sum_a >> 32) as u32;
-            cols[23][t] = BinaryPoly::from(mu_a_val);
+            cols[27][t] = BinaryPoly::from(mu_a_val);
 
             // μ_e: carry for e-update
             let sum_e: u64 = d_reg as u64
@@ -184,7 +211,7 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
                 + K[t] as u64
                 + w[t] as u64;
             let mu_e_val = (sum_e >> 32) as u32;
-            cols[24][t] = BinaryPoly::from(mu_e_val);
+            cols[28][t] = BinaryPoly::from(mu_e_val);
 
             // μ_W: carry for message schedule recurrence (t ≥ 16)
             if t >= 16 {
@@ -193,7 +220,7 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
                     + w[t - 7] as u64
                     + small_sigma1(w[t - 2]) as u64;
                 let mu_w_val = (sum_w >> 32) as u32;
-                cols[25][t] = BinaryPoly::from(mu_w_val);
+                cols[29][t] = BinaryPoly::from(mu_w_val);
             }
 
             // ── SHA-256 round function ──────────────────────────────────
@@ -222,12 +249,19 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
         cols[3][64] = BinaryPoly::from(big_sigma0(a));
         cols[4][64] = BinaryPoly::from(big_sigma1(e));
 
+        // Ch/Maj at row 64 are deferred until after the lookback extension
+        // loops below populate a_tm1/a_tm2/e_tm1/e_tm2 at row 64.
+
         // ── Extended auxiliary columns beyond row 64 ─────────────────────
         // The linking constraints require auxiliary columns to be populated
         // beyond the 65 active rows. We extend each auxiliary column to
         // cover shifted references:
         //   d_hat[t] for t up to 67 (shift-by-3 at t=64)
         //   h_hat[t] for t up to 67
+        //   a_tm1[t] for t up to 65 (shift-by-1)
+        //   a_tm2[t] for t up to 66 (shift-by-2)
+        //   e_tm1[t] for t up to 65
+        //   e_tm2[t] for t up to 66
         //   W_tm2[t]  for t up to 65
         //   W_tm7[t]  for t up to 70
         //   W_tm15[t] for t up to 78
@@ -248,6 +282,68 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
                 cols[15][t] = BinaryPoly::from(bp_to_u64(&cols[1][t - 3]) as u32);
             }
         }
+        // a_tm1: a[t-1] for t=64..65
+        for t in 64..66.min(num_rows) {
+            if t >= 1 {
+                cols[21][t] = BinaryPoly::from(bp_to_u64(&cols[0][t - 1]) as u32);
+            }
+        }
+        // a_tm2: a[t-2] for t=64..66
+        for t in 64..67.min(num_rows) {
+            if t >= 2 {
+                cols[22][t] = BinaryPoly::from(bp_to_u64(&cols[0][t - 2]) as u32);
+            }
+        }
+        // e_tm1: e[t-1] for t=64..65
+        for t in 64..66.min(num_rows) {
+            if t >= 1 {
+                cols[23][t] = BinaryPoly::from(bp_to_u64(&cols[1][t - 1]) as u32);
+            }
+        }
+        // e_tm2: e[t-2] for t=64..66
+        for t in 64..67.min(num_rows) {
+            if t >= 2 {
+                cols[24][t] = BinaryPoly::from(bp_to_u64(&cols[1][t - 2]) as u32);
+            }
+        }
+
+        // ── Row 64 deferred: Ch/Maj working columns for carry-freedom ──
+        // Now that lookback columns are populated at row 64 we can compute
+        // the three working columns whose affine sums must be carry-free.
+        {
+            let e64  = bp_to_u64(&cols[1][64]) as u32;
+            let f64  = bp_to_u64(&cols[23][64]) as u32; // e_tm1[64] = e[63]
+            let g64  = bp_to_u64(&cols[24][64]) as u32; // e_tm2[64] = e[62]
+            let a64  = bp_to_u64(&cols[0][64]) as u32;
+            let b64  = bp_to_u64(&cols[21][64]) as u32; // a_tm1[64] = a[63]
+            let c64  = bp_to_u64(&cols[22][64]) as u32; // a_tm2[64] = a[62]
+
+            cols[6][64] = BinaryPoly::from(e64 & f64);             // ch_ef
+            cols[7][64] = BinaryPoly::from((!e64) & g64);          // ch_neg_eg
+            cols[5][64] = BinaryPoly::from((a64 & b64) | (a64 & c64) | (b64 & c64)); // Maj
+        }
+
+        // ── Extend working columns needed for affine lookup carry-freedom ──
+        // At padded rows beyond 64, the affine sums (for Ch/Maj lookups)
+        // must remain carry-free at every bit position. This requires
+        // ch_neg_eg[t] = (¬e[t]) ∧ e_tm2[t] and Maj[t] = maj(a[t], a_tm1[t], a_tm2[t])
+        // to be populated wherever the lookback columns a_tm1/a_tm2/e_tm1/e_tm2
+        // are non-zero.
+        //
+        // For t > 64: e[t]=0, a[t]=0, so:
+        //   ch_ef[t] = e[t] ∧ e_tm1[t] = 0 (already fine)
+        //   ch_neg_eg[t] = (¬0) ∧ e_tm2[t] = e_tm2[t]
+        //   Maj[t] = majority(0, a_tm1[t], a_tm2[t]) = a_tm1[t] ∧ a_tm2[t]
+        for t in 65..67.min(num_rows) {
+            let g_val = bp_to_u64(&cols[24][t]) as u32; // e_tm2[t]
+            cols[7][t] = BinaryPoly::from(g_val);       // ch_neg_eg = e_tm2
+        }
+        if 65 < num_rows {
+            let b_val = bp_to_u64(&cols[21][65]) as u32; // a_tm1[65]
+            let c_val = bp_to_u64(&cols[22][65]) as u32; // a_tm2[65]
+            cols[5][65] = BinaryPoly::from(b_val & c_val); // Maj = a_tm1 AND a_tm2
+        }
+
         // W_tm2: W[t-2] for t=64..65
         for t in 64..66.min(num_rows) {
             if t >= 2 && t - 2 < 64 {
@@ -306,10 +402,11 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
 
 // ─── Split witness generators ───────────────────────────────────────────────
 
-/// Generate only the 23 BinaryPoly columns (indices 0–22) used in
+/// Generate only the 27 BinaryPoly columns (indices 0–26) used in
 /// both F₂[X] and Q[X] constraints. These include the 10 bit-polynomial
 /// columns, the 4 F₂[X] shift/remainder columns, 7 lookback columns,
-/// the round-constant column, and 2 selector columns.
+/// the round-constant column, 4 Ch/Maj lookback columns, and 2 selector
+/// columns.
 pub fn generate_poly_witness(
     num_vars: usize,
     rng: &mut impl RngCore,
@@ -321,7 +418,7 @@ pub fn generate_poly_witness(
         .collect()
 }
 
-/// Generate the 3 integer columns (indices 23–25: μ_a, μ_e, μ_W) used in
+/// Generate the 3 integer columns (indices 27–29: μ_a, μ_e, μ_W) used in
 /// Q[X] carry constraints (C13–C15), encoded as `Int<1>` (64-bit integer).
 ///
 /// Each cell value is `BinaryPoly::to_u64() as i64` wrapped in `Int<1>`.
@@ -576,7 +673,7 @@ mod tests {
             let w_val = bp_to_u64(&trace[2].evaluations[t]);
             let sigma0_val = bp_to_u64(&trace[3].evaluations[t]);
             let maj_val = bp_to_u64(&trace[5].evaluations[t]);
-            let mu_a_val = bp_to_u64(&trace[23].evaluations[t]);  // col 23
+            let mu_a_val = bp_to_u64(&trace[27].evaluations[t]);  // col 27
 
             let a_next = bp_to_u64(&trace[0].evaluations[t + 1]);
 
@@ -591,7 +688,7 @@ mod tests {
             );
 
             // e-update carry
-            let mu_e_val = bp_to_u64(&trace[24].evaluations[t]);  // col 24
+            let mu_e_val = bp_to_u64(&trace[28].evaluations[t]);  // col 28
             let e_next = bp_to_u64(&trace[1].evaluations[t + 1]);
 
             let sum_e = d_val + h_val + sigma1_val + ch_ef_val
@@ -618,7 +715,7 @@ mod tests {
             let sigma0_w = bp_to_u64(&trace[8].evaluations[t]);
             let w_tm7 = bp_to_u64(&trace[2].evaluations[t - 7]);
             let sigma1_w = bp_to_u64(&trace[9].evaluations[t]);
-            let mu_w_val = bp_to_u64(&trace[25].evaluations[t]);  // col 25
+            let mu_w_val = bp_to_u64(&trace[29].evaluations[t]);  // col 29
 
             let sum_w = w_tm16 + sigma0_w + w_tm7 + sigma1_w;
 
@@ -628,6 +725,87 @@ mod tests {
                 "W-schedule carry check failed at round {t}: \
                  w_t={w_t:#x}, sum_w={sum_w:#x}, mu_w={mu_w_val}"
             );
+        }
+    }
+
+    /// Verify carry-freedom of all three affine lookup virtual columns
+    /// at every row (including padded rows beyond 64).
+    #[test]
+    fn affine_lookup_carry_freedom() {
+        use super::*;
+        use crate::{
+            COL_A_HAT, COL_A_TM1, COL_A_TM2,
+            COL_E_HAT, COL_E_TM1, COL_E_TM2,
+            COL_CH_EF_HAT, COL_CH_NEG_EG_HAT, COL_MAJ_HAT,
+        };
+
+        let mut rng = rand::rng();
+        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(NUM_VARS, &mut rng);
+        let num_rows = 1usize << NUM_VARS;
+
+        for t in 0..num_rows {
+            let e     = bp_to_u64(&trace[COL_E_HAT].evaluations[t]) as i64;
+            let e_tm1 = bp_to_u64(&trace[COL_E_TM1].evaluations[t]) as i64;
+            let e_tm2 = bp_to_u64(&trace[COL_E_TM2].evaluations[t]) as i64;
+            let ch_ef = bp_to_u64(&trace[COL_CH_EF_HAT].evaluations[t]) as i64;
+            let ch_ne = bp_to_u64(&trace[COL_CH_NEG_EG_HAT].evaluations[t]) as i64;
+            let a     = bp_to_u64(&trace[COL_A_HAT].evaluations[t]) as i64;
+            let a_tm1 = bp_to_u64(&trace[COL_A_TM1].evaluations[t]) as i64;
+            let a_tm2 = bp_to_u64(&trace[COL_A_TM2].evaluations[t]) as i64;
+            let maj   = bp_to_u64(&trace[COL_MAJ_HAT].evaluations[t]) as i64;
+
+            // Ch1: e + e_tm1 - 2*ch_ef  must be in [0, 2^32-1] with no carries
+            let ch1 = e + e_tm1 - 2 * ch_ef;
+            assert!(
+                ch1 >= 0 && ch1 <= 0xFFFF_FFFF,
+                "Ch1 out of range at row {t}: ch1={ch1} (e={e:#x}, e_tm1={e_tm1:#x}, ch_ef={ch_ef:#x})"
+            );
+            // Each bit must be 0 or 1 (no carries)
+            for bit in 0..32 {
+                let e_b = (e >> bit) & 1;
+                let f_b = (e_tm1 >> bit) & 1;
+                let ce  = (ch_ef >> bit) & 1;
+                let val = e_b + f_b - 2 * ce;
+                assert!(
+                    val == 0 || val == 1,
+                    "Ch1 carry at row {t} bit {bit}: e_b={e_b}, f_b={f_b}, ch_ef_b={ce}, val={val}"
+                );
+            }
+
+            // Ch2: 0xFFFF_FFFF - e + e_tm2 - 2*ch_neg_eg
+            let ch2 = 0xFFFF_FFFFi64 - e + e_tm2 - 2 * ch_ne;
+            assert!(
+                ch2 >= 0 && ch2 <= 0xFFFF_FFFF,
+                "Ch2 out of range at row {t}: ch2={ch2} (e={e:#x}, e_tm2={e_tm2:#x}, ch_ne={ch_ne:#x})"
+            );
+            for bit in 0..32 {
+                let ne_b = 1 - ((e >> bit) & 1);   // NOT e
+                let g_b  = (e_tm2 >> bit) & 1;
+                let ce   = (ch_ne >> bit) & 1;
+                let val  = ne_b + g_b - 2 * ce;
+                assert!(
+                    val == 0 || val == 1,
+                    "Ch2 carry at row {t} bit {bit}: ne_b={ne_b}, g_b={g_b}, ch_ne_b={ce}, val={val}"
+                );
+            }
+
+            // Maj: a + a_tm1 + a_tm2 - 2*Maj
+            let maj_sum = a + a_tm1 + a_tm2 - 2 * maj;
+            assert!(
+                maj_sum >= 0 && maj_sum <= 0xFFFF_FFFF,
+                "Maj out of range at row {t}: maj_sum={maj_sum} (a={a:#x}, a_tm1={a_tm1:#x}, a_tm2={a_tm2:#x}, maj={maj:#x})"
+            );
+            for bit in 0..32 {
+                let ab = (a >> bit) & 1;
+                let bb = (a_tm1 >> bit) & 1;
+                let cb = (a_tm2 >> bit) & 1;
+                let mb = (maj >> bit) & 1;
+                let val = ab + bb + cb - 2 * mb;
+                assert!(
+                    val == 0 || val == 1,
+                    "Maj carry at row {t} bit {bit}: a={ab}, b={bb}, c={cb}, maj={mb}, val={val}"
+                );
+            }
         }
     }
 }

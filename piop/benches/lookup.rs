@@ -15,7 +15,7 @@ use num_traits::Zero;
 use rand::{Rng, rng};
 use zinc_piop::lookup::{
     BatchedDecompLogupProtocol, BatchedDecompLookupInstance, DecompLogupProtocol,
-    DecompLookupInstance, LogupProtocol,
+    DecompLookupInstance, GkrBatchedDecompLogupProtocol, LogupProtocol,
     tables::{bitpoly_shift, generate_bitpoly_table, generate_word_table},
 };
 use zinc_transcript::{KeccakTranscript, traits::ConstTranscribable};
@@ -357,6 +357,129 @@ fn bench_batched_decomp_logup<F, const LIMBS: usize>(
 }
 
 // ---------------------------------------------------------------------------
+// GKR Batched Decomposition + LogUp benchmark
+// ---------------------------------------------------------------------------
+
+/// Benchmark the GKR batched Decomposition + LogUp protocol with L
+/// lookups into a shared BitPoly(chunk_width * num_chunks) table.
+#[allow(clippy::arithmetic_side_effects)]
+fn bench_gkr_batched_decomp_logup<F, const LIMBS: usize>(
+    group: &mut BenchmarkGroup<WallTime>,
+    chunk_width: usize,
+    num_chunks: usize,
+    num_lookups: usize,
+    witness_size: usize,
+    field_cfg: &F::Config,
+) where
+    F: InnerTransparentField + FromPrimitiveWithConfig + PrimeField + Send + Sync + 'static,
+    F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Config: Sync,
+{
+    let mut rng = rng();
+    let base_transcript = KeccakTranscript::new();
+
+    let a = F::from_with_cfg(3u32, field_cfg);
+    let full_width = chunk_width * num_chunks;
+
+    let subtable = generate_bitpoly_table(chunk_width, &a, field_cfg);
+    let shifts: Vec<F> = (0..num_chunks)
+        .map(|k| bitpoly_shift(k * chunk_width, &a))
+        .collect();
+
+    let mut witnesses = Vec::with_capacity(num_lookups);
+    let mut all_chunks = Vec::with_capacity(num_lookups);
+    for _ in 0..num_lookups {
+        let chunks: Vec<Vec<F>> = (0..num_chunks)
+            .map(|_| {
+                (0..witness_size)
+                    .map(|_| subtable[rng.random_range(0..subtable.len())].clone())
+                    .collect()
+            })
+            .collect();
+        let witness: Vec<F> = (0..witness_size)
+            .map(|i| {
+                let mut val = F::zero_with_cfg(field_cfg);
+                for k in 0..num_chunks {
+                    val = val + &(shifts[k].clone() * &chunks[k][i]);
+                }
+                val
+            })
+            .collect();
+        witnesses.push(witness);
+        all_chunks.push(chunks);
+    }
+
+    let nvars = zinc_utils::log2(witness_size.next_power_of_two()) as usize;
+    let params = format!(
+        "LIMBS={}/bpoly={}/L={}/nvars={}",
+        LIMBS, full_width, num_lookups, nvars
+    );
+
+    let instance = BatchedDecompLookupInstance {
+        witnesses: witnesses.clone(),
+        subtable: subtable.clone(),
+        shifts: shifts.clone(),
+        chunks: all_chunks,
+    };
+
+    // ---- Prover benchmark ----
+    group.bench_with_input(
+        BenchmarkId::new("GKR Batched Prover", &params),
+        &base_transcript,
+        |bench, transcript| {
+            bench.iter_batched(
+                || transcript.clone(),
+                |mut transcript| {
+                    black_box(
+                        GkrBatchedDecompLogupProtocol::<F>::prove_as_subprotocol(
+                            &mut transcript,
+                            &instance,
+                            field_cfg,
+                        )
+                        .expect("prover failed"),
+                    );
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
+
+    // Produce a proof for the verifier benchmark.
+    let proof = {
+        let mut t = base_transcript.clone();
+        GkrBatchedDecompLogupProtocol::<F>::prove_as_subprotocol(&mut t, &instance, field_cfg)
+            .expect("prover failed")
+            .0
+    };
+
+    // ---- Verifier benchmark ----
+    group.bench_with_input(
+        BenchmarkId::new("GKR Batched Verifier", &params),
+        &(proof, base_transcript),
+        |bench, (proof, transcript)| {
+            bench.iter_batched(
+                || (proof.clone(), transcript.clone()),
+                |(proof, mut transcript)| {
+                    black_box(
+                        GkrBatchedDecompLogupProtocol::<F>::verify_as_subprotocol(
+                            &mut transcript,
+                            &proof,
+                            &subtable,
+                            &shifts,
+                            num_lookups,
+                            witness_size,
+                            field_cfg,
+                        )
+                        .expect("verifier failed"),
+                    );
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Benchmark entry points
 // ---------------------------------------------------------------------------
 
@@ -395,6 +518,17 @@ pub fn lookup_benches(c: &mut Criterion) {
         bench_batched_decomp_logup::<BenchField, 3>(&mut group, 8, 4, 10, 1 << 10, &());
         // bench_batched_decomp_logup::<BenchField, 3>(&mut group, 8, 4, 10, 1 << 14, &());
         // bench_batched_decomp_logup::<BenchField, 3>(&mut group, 8, 4, 20, 1 << 10, &());
+
+        group.finish();
+    }
+
+    // --- GKR Batched benchmarks (same config as classic) ---
+    {
+        let mut group = c.benchmark_group("GKR Batched Decomp+LogUp BitPoly(32)");
+        group.plot_config(PlotConfiguration::default().summary_scale(AxisScale::Logarithmic));
+
+        bench_gkr_batched_decomp_logup::<BenchField, 3>(&mut group, 8, 4, 5, 1 << 10, &());
+        bench_gkr_batched_decomp_logup::<BenchField, 3>(&mut group, 8, 4, 10, 1 << 10, &());
 
         group.finish();
     }

@@ -48,7 +48,7 @@ In many SNARKs the execution trace is a matrix where every cell holds a value fr
 | **Arbitrary polynomial** | `DensePolynomial<C, D>` | $\mathbb{Z}^{<D}[X]$ — polynomials with arbitrary integer coefficients | ECDSA field elements over $\mathbb{F}_q[X]$ |
 | **Integer** | `Int<N>` | $\mathbb{Z}$ (small bounded integers) | Carry values (e.g. `mu_a`, `mu_e`) |
 
-Each trace row is represented by a `TraceRow` struct that holds three slices — one per category — so constraint logic can operate on all column types in a uniform way. For example, the SHA-256 UAIR has a signature of 23 binary-polynomial columns + 0 arbitrary-polynomial columns + 3 integer columns = 26 total (of which 8 are public).
+Each trace row is represented by a `TraceRow` struct that holds three slices — one per category — so constraint logic can operate on all column types in a uniform way. For example, the SHA-256 UAIR has a signature of 27 binary-polynomial columns + 0 arbitrary-polynomial columns + 3 integer columns = 30 total (of which 12 are public).
 
 This heterogeneity matters because constraints are formulated in the *native ring* of each column type (e.g. bitwise rotation/XOR constraints live naturally in $\mathbb{Z}[X]$, while carry constraints are plain integer equations). Before the PCS can commit and open, every cell is **projected** to $\mathbb{F}_q$: binary and arbitrary polynomials are first coefficient-lifted to $\mathbb{F}_q[X]$ and then evaluated at a random challenge $\alpha$, while integers are directly embedded into $\mathbb{F}_q$. This projection is handled by the decoupled projections module (`piop/src/projections.rs`).
 
@@ -97,7 +97,7 @@ The end-to-end pipeline takes a witness trace (a matrix of ring elements), commi
 
 - `zinc-snark` — the top-level pipeline (`pipeline.rs`), glues everything together
 - `zinc-piop` — Ideal Check, Combined Poly Resolver, Sumcheck protocols, **LogUp lookup protocol** (classic + GKR variants, decomposition, batched decomposition), decoupled projections
-- `zinc-sha256-uair` — SHA-256 constraint system and witness generation (26 columns: 23 BinaryPoly + 3 Int, of which 8 are public)
+- `zinc-sha256-uair` — SHA-256 constraint system and witness generation (30 columns: 27 BinaryPoly + 3 Int, of which 12 are public)
 - `zinc-ecdsa-uair` — ECDSA constraint system and witness generation (11 columns: 9 data + 2 selectors, of which 4 are public)
 - `zinc-uair` — abstract UAIR trait with heterogeneous trace support (`UairSignature`, `TraceRow`), constraint builders, ideal collectors
 - `zinc-poly` — polynomial types: `BinaryPoly<D>`, `DensePolynomial<C, D>`, MLEs
@@ -112,10 +112,10 @@ The end-to-end pipeline takes a witness trace (a matrix of ring elements), commi
 The prover is implemented in `snark/src/pipeline.rs`. There are multiple entry points:
 
 - `prove()` — BinaryPoly-specific, used for SHA-256 single-ring proofs. Includes **classic LogUp** lookup (chunks + inverse vectors, sequential sumchecks).
-- `prove_classic_logup()` — Same as `prove()` but **batches** the CPR and classic lookup sumchecks into a single multi-degree sumcheck pass — the CPR's degree-(max_degree+2) sumcheck and each lookup group's degree-2 sumcheck are fused with shared verifier challenges.
+- `prove_classic_logup()` — Same as `prove()` but **batches** the CPR and classic lookup sumchecks into a single multi-degree sumcheck pass — the CPR's degree-(max_degree+2) sumcheck and each lookup group's degree-2 sumcheck are fused with shared verifier challenges. Accepts both direct `lookup_specs` and `affine_lookup_specs` (see §12a).
 - `prove_generic()` — parameterized over any projectable ring `R`, used for ECDSA `Int<4>` proofs. Includes classic LogUp.
 - `prove_dual_ring()` — runs two sequential PIOP passes (BinaryPoly + Q[X]) on the same committed trace, used for full SHA-256 proofs.
-- `prove_dual_circuit()` — combines two **independent circuits** (e.g. SHA-256 as `BinaryPoly<32>` + ECDSA as `Int<4>`) into a single proving pipeline with shared Fiat-Shamir challenges, shared IC evaluation point, shared projecting element, and a single multi-degree sumcheck spanning both CPR passes plus lookup. Each circuit retains its own PCS.
+- `prove_dual_circuit()` — combines two **independent circuits** (e.g. SHA-256 as `BinaryPoly<32>` + ECDSA as `Int<4>`) into a single proving pipeline with shared Fiat-Shamir challenges, shared IC evaluation point, shared projecting element, and a single multi-degree sumcheck spanning both CPR passes plus lookup. Each circuit retains its own PCS. Accepts `affine_lookup_specs` for affine-combination lookups (§12a).
 
 The trace projection is handled by the **decoupled projections module** (`piop/src/projections.rs`), which supports heterogeneous traces with three column types: binary polynomial, arbitrary polynomial, and integer. Projection occurs in two stages: (1) coefficient lifting to $\mathbb{F}_q[X]$ and (2) evaluation at the projecting element to get $\mathbb{F}_q$ scalars.
 
@@ -371,7 +371,7 @@ For $m$ polynomials:
 - **Without batching:** $m$ combined rows → $m \times \text{row\_len}$ field elements.
 - **With batching:** 1 batched row + $m$ scalars → $\text{row\_len} + m$ field elements.
 
-For the 16-column SHA-256 PCS batch (26 total minus 10 excluded): $16 \times 512 = 8{,}192$ elements → $512 + 16 = 528$ elements (**15× reduction**). At 32 bytes per `MontyField<4>` element: ~256 KB → ~17 KB.
+For the 16-column SHA-256 PCS batch (30 total minus 14 excluded): $16 \times 512 = 8{,}192$ elements → $512 + 16 = 528$ elements (**15× reduction**). At 32 bytes per `MontyField<4>` element: ~256 KB → ~17 KB.
 
 #### Consistency relation (verified by the verifier)
 
@@ -379,9 +379,9 @@ The verifier checks:
 $$\langle \hat{r}, q_1 \rangle = \sum_{i=0}^{m-1} \beta^i \cdot v_i$$
 This holds because $\langle \hat{r}, q_1 \rangle = \sum_i \beta^i \langle r_i, q_1 \rangle = \sum_i \beta^i v_i$, by linearity of inner products.
 
-**Important note on the evaluation point:** The PCS evaluation point is derived by hashing the CPR's evaluation point into `i128` values via `derive_pcs_point()`. Both prover and verifier call this function to agree on the same deterministic point. This is NOT the same point as the CPR evaluation point (which lives in $\mathbb{F}_q$). See §15 for why this matters.
+**Important note on the evaluation point:** The PCS evaluation point is the CPR's evaluation point itself (truncated to `num_vars` coordinates when lookup adds an extra variable, since `shared_num_vars = num_vars + 1` in that case). That is, $\mathbf{r}_{\text{PCS}} = \mathbf{r}_{\text{CPR}}[0..\text{num\_vars}]$. Both prover and verifier extract this point from the CPR subclaim. This eliminates the previous indirection through `derive_pcs_point()` and ensures the PCS evaluates at the same point the CPR's sumcheck reduced to.
 
-**Important note on field context:** The PCS samples its own field configuration from its internal Fiat-Shamir transcript via `get_random_field_cfg()`. The evaluation point is passed as raw integers (`&[Zt::Pt]`) and converted to field elements using this PCS-local field config. This field config is independent of the PIOP's field config.
+**Important note on field context:** The PCS samples its own field configuration from its internal Fiat-Shamir transcript via `get_random_field_cfg()`. The evaluation point is passed as field elements (`&[F]`) in the PIOP field and converted to the PCS field via `piop_point_to_pcs_field()`, which extracts the canonical `Uint<FIELD_LIMBS>` representation and re-encodes it under the PCS field config. The PCS field config is independent of the PIOP's field config.
 
 **What this produces:** A `BatchedZipPlusProof` (serialized into `ZincProof.pcs_proof_bytes`) containing the test-phase data, the batched row, and the per-polynomial scalars.
 
@@ -509,11 +509,11 @@ The verifier returns `accepted: pcs_result.is_ok()`. Both the IC and CPR verific
 
 ### Trace Layout
 
-The SHA-256 witness is a 64-row × 26-column matrix, split into 23 binary polynomial columns and 3 integer columns. Each binary polynomial cell is a `BinaryPoly<32>` — a polynomial in $\\{0,1\\}^{<32}[X] \\subset \\mathbb{Z}[X]$, representing a 32-bit word as $w = \\sum_{i=0}^{31} w_i X^i$ where $w_i \\in \\{0, 1\\}$.
+The SHA-256 witness is a 64-row × 30-column matrix, split into 27 binary polynomial columns and 3 integer columns. Each binary polynomial cell is a `BinaryPoly<32>` — a polynomial in $\\{0,1\\}^{<32}[X] \\subset \\mathbb{Z}[X]$, representing a 32-bit word as $w = \\sum_{i=0}^{31} w_i X^i$ where $w_i \\in \\{0, 1\\}$.
 
 > **Notation.** $\\{0,1\\}^{<32}[X]$ denotes the set of polynomials over $\\mathbb{Z}$ with binary coefficients ($0$ or $1$) of degree $< 32$. This is a subset of $\\mathbb{Z}[X]$, **not** $\\mathbb{F}_2[X]$. The distinction is critical: in $\\mathbb{Z}[X]$ we have $1 + 1 = 2$, whereas in $\\mathbb{F}_2[X]$ we would have $1 + 1 = 0$. The SHA-256 constraints (even the rotation/XOR constraints C1–C6) are formulated over $\\mathbb{Z}[X]$ throughout this system; the projection to $\\mathbb{F}_p[X]$ preserves integer arithmetic.
 
-Of the 26 columns, **8 are public** (known to the verifier, excluded from PCS commitment): `W_hat` (col 2), `W_tm2`–`W_tm16` (cols 16–19), `K_hat` (col 20), `sel_round` (col 21), and `sel_sched` (col 22). Additionally, 6 columns are **shift source columns** (cols 14–19) whose evaluation claims are verified by the shift sumcheck rather than the PCS. Columns 16–19 are both public and shift sources. The union of public and shift source columns gives 10 excluded columns ({2, 14, 15, 16, 17, 18, 19, 20, 21, 22}), reducing the PCS batch size from 26 to **16 committed columns**.
+Of the 30 columns, **12 are public** (known to the verifier, excluded from PCS commitment): `W_hat` (col 2), `W_tm2`–`W_tm16` (cols 16–19), `K_hat` (col 20), `a_tm1`–`e_tm2` (cols 21–24), `sel_round` (col 25), and `sel_sched` (col 26). Additionally, 10 columns are **shift source columns** (cols 14–19, 21–24) whose evaluation claims are verified by the shift sumcheck rather than the PCS. Columns 16–19 and 21–24 are both public and shift sources. The union of public and shift source columns gives 14 excluded columns ({2, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26}), reducing the PCS batch size from 30 to **16 committed columns**.
 
 | Col | Type | Name | Public? | Description |
 |-----|------|------|---------|-------------|
@@ -538,17 +538,21 @@ Of the 26 columns, **8 are public** (known to the verifier, excluded from PCS co
 | 18 | BinaryPoly | `W_tm15` | ✓ | Lookback: $W_{t-15}$ (shift source) |
 | 19 | BinaryPoly | `W_tm16` | ✓ | Lookback: $W_{t-16}$ (shift source) |
 | 20 | BinaryPoly | `K_hat` | ✓ | Round constant $K_t$ (public input) |
-| 21 | BinaryPoly | `sel_round` | ✓ | Selector: 1 for $t \\in [0, 63]$, gates C7/C8 |
-| 22 | BinaryPoly | `sel_sched` | ✓ | Selector: 1 for $t \\in [16, 63]$, gates C9 |
+| 21 | BinaryPoly | `a_tm1` | ✓ | Lookback: $a_{t-1} = b_t$ (shift source, for Maj affine lookup) |
+| 22 | BinaryPoly | `a_tm2` | ✓ | Lookback: $a_{t-2} = c_t$ (shift source, for Maj affine lookup) |
+| 23 | BinaryPoly | `e_tm1` | ✓ | Lookback: $e_{t-1} = f_t$ (shift source, for Ch affine lookup) |
+| 24 | BinaryPoly | `e_tm2` | ✓ | Lookback: $e_{t-2} = g_t$ (shift source, for Ch affine lookup) |
+| 25 | BinaryPoly | `sel_round` | ✓ | Selector: 1 for $t \\in [0, 63]$, gates C17/C18 |
+| 26 | BinaryPoly | `sel_sched` | ✓ | Selector: 1 for $t \\in [16, 63]$, gates C19 |
 | — | Int | `mu_a` (int 0) | | Carry for $a$ update ($\\in \\{0..6\\}$) |
 | — | Int | `mu_e` (int 1) | | Carry for $e$ update ($\\in \\{0..5\\}$) |
 | — | Int | `mu_W` (int 2) | | Carry for $W$ schedule update ($\\in \\{0..3\\}$) |
 
-**Expanded from the previous 17-column layout:** The new layout adds auxiliary lookback columns (`d_hat`, `h_hat`, `W_tm2`, `W_tm7`, `W_tm15`, `W_tm16`) that hold shifted copies of source columns (resolved by the shift sumcheck protocol), a round constant column (`K_hat`) as a public input, and two selector columns (`sel_round`, `sel_sched`) that gate carry constraints to valid round rows. All 8 new columns plus `W_hat` are marked public, so they do not increase PCS commitment cost.
+**Expanded from the previous 17-column layout:** The new layout adds auxiliary lookback columns (`d_hat`, `h_hat`, `W_tm2`, `W_tm7`, `W_tm15`, `W_tm16`) that hold shifted copies of source columns (resolved by the shift sumcheck protocol), a round constant column (`K_hat`) as a public input, two selector columns (`sel_round`, `sel_sched`) that gate carry constraints to valid round rows, and four Ch/Maj lookback columns (`a_tm1`, `a_tm2`, `e_tm1`, `e_tm2`) that hold shifted copies of $a$ and $e$ for the affine-combination lookup argument (see §12). All 12 public columns do not increase PCS commitment cost.
 
 ### Shift Specifications
 
-The Bp UAIR declares 6 forward shifts via `ShiftSpec`:
+The Bp UAIR declares 10 forward shifts via `ShiftSpec`:
 
 | Shift | Source column | Amount | Purpose |
 |-------|--------------|--------|---------|
@@ -558,16 +562,32 @@ The Bp UAIR declares 6 forward shifts via `ShiftSpec`:
 | `W_tm7` (col 17) | `W_hat` (col 2) | 7 | $W_{t-7}$ for schedule |
 | `W_tm15` (col 18) | `W_hat` (col 2) | 15 | $W_{t-15}$ for $\\sigma_0$ |
 | `W_tm16` (col 19) | `W_hat` (col 2) | 16 | $W_{t-16}$ for schedule |
+| `a_tm1` (col 21) | `a_hat` (col 0) | 1 | $a_{t-1} = b_t$ for Maj affine lookup |
+| `a_tm2` (col 22) | `a_hat` (col 0) | 2 | $a_{t-2} = c_t$ for Maj affine lookup |
+| `e_tm1` (col 23) | `e_hat` (col 1) | 1 | $e_{t-1} = f_t$ for Ch affine lookup |
+| `e_tm2` (col 24) | `e_hat` (col 1) | 2 | $e_{t-2} = g_t$ for Ch affine lookup |
 
-The shift source columns (cols 14–19) store the shifted copies in the trace. Their evaluation claims are verified by the **shift sumcheck protocol** rather than the PCS — see §2a. Because these columns are also declared as public, the verifier can compute their MLE evaluations directly.
+The shift source columns (cols 14–19, 21–24) store the shifted copies in the trace. Their evaluation claims are verified by the **shift sumcheck protocol** rather than the PCS — see §2a. Because these columns are also declared as public (except cols 14–15), the verifier can compute their MLE evaluations directly.
 
 ### Lookup Specifications
 
-10 of the 23 binary polynomial columns (indices 0–9) are designated as lookup columns with `LookupTableType::BitPoly { width: 32 }`. The lookup argument (§12) proves that every cell in these columns is a valid binary polynomial — i.e., all coefficients are in $\\{0, 1\\}$. The 4 shift/remainder columns (`S0`, `S1`, `R0`, `R1`), the 6 auxiliary lookback columns (cols 14–19), the constant column `K_hat` (col 20), the 2 selector columns (cols 21–22), and the 3 integer columns do not receive lookup constraints. (The lookback and selector columns are public and verified by the shift sumcheck or the verifier directly.)
+10 of the 27 binary polynomial columns (indices 0–9) are designated as **direct lookup columns** with `LookupTableType::BitPoly { width: 32 }`. The lookup argument (§12) proves that every cell in these columns is a valid binary polynomial — i.e., all coefficients are in $\\{0, 1\\}$.
 
-### Implemented Constraints (15 of 15)
+Additionally, 3 **affine-combination lookups** (`AffineLookupSpec`) enforce carry-free integer identities for Ch and Maj (see §12a):
 
-All 15 SHA-256 constraints are now implemented: 12 in the BinaryPoly UAIR (`Sha256UairBp`) and 3 in the Q[X] UAIR (`Sha256UairQx`). The previously missing multi-row lookback constraints (d-delay, h-delay, full W schedule) are now addressed by 6 linking constraints that tie the auxiliary lookback columns to their source columns via the shift sumcheck protocol.
+| # | Identity | Expression | Table |
+|---|----------|-----------|-------|
+| A1 | Ch (e AND f) | $\\hat{e}[t] + \\hat{e}[t{-}1] - 2 \\cdot \\widehat{ch\\_{ef}}[t]$ | BitPoly{32} |
+| A2 | Ch (¬e AND g) | $(\\mathbf{1}_w - \\hat{e}[t]) + \\hat{e}[t{-}2] - 2 \\cdot \\widehat{ch\\_{\\neg e,g}}[t]$ | BitPoly{32} |
+| A3 | Maj(a,b,c) | $\\hat{a}[t] + \\hat{a}[t{-}1] + \\hat{a}[t{-}2] - 2 \\cdot \\widehat{Maj}[t]$ | BitPoly{32} |
+
+The carry-freedom property guarantees these sums have binary coefficients: for any binary polynomials $p, q$ and their bitwise AND $p \\wedge q$, the expression $p + q - 2(p \\wedge q) = p \\oplus q$ is an XOR, and all its coefficients are in $\\{0,1\\}$. The affine lookup verifies this membership without additional constraints. The constant $\\mathbf{1}_w = \\sum_{i=0}^{31} X^i$ (`0xFFFF_FFFF`) in A2 accounts for bitwise negation: $\\mathbf{1}_w - \\hat{e} = \\neg \\hat{e}$ (coefficient-wise NOT).
+
+The 4 shift/remainder columns (`S0`, `S1`, `R0`, `R1`), the 10 auxiliary lookback columns (cols 14–19, 21–24), the constant column `K_hat` (col 20), the 2 selector columns (cols 25–26), and the 3 integer columns do not receive direct lookup constraints. (The lookback and selector columns are public and verified by the shift sumcheck or the verifier directly.)
+
+### Implemented Constraints (19 of 19)
+
+All 19 SHA-256 constraints are now implemented: 16 in the BinaryPoly UAIR (`Sha256UairBp`) and 3 in the Q[X] UAIR (`Sha256UairQx`). The previously missing multi-row lookback constraints (d-delay, h-delay, full W schedule) are addressed by 6 linking constraints (C7–C12) that tie the auxiliary lookback columns to their source columns via the shift sumcheck protocol. Four additional linking constraints (C13–C16) handle the Ch/Maj lookback columns used by the affine-combination lookups. BitPoly membership for Ch, ¬e∧g, and Maj is enforced by the affine lookup argument (§12a) rather than ideal checks.
 
 #### {0,1}^{<32}[X] rotation/shift constraints (6) — enforced via `Uair<BinaryPoly<32>>` (`Sha256UairBp`)
 
@@ -588,7 +608,7 @@ The rotation polynomials encode ROTR via multiplication by powers of $X$ modulo 
 - $\\rho_{\\sigma_0} = X^{25} + X^{14}$ encodes ROTR(7, 18) for $\\sigma_0$
 - $\\rho_{\\sigma_1} = X^{15} + X^{13}$ encodes ROTR(17, 19) for $\\sigma_1$
 
-#### {0,1}^{<32}[X] linking constraints (6) — enforced via `Uair<BinaryPoly<32>>` (`Sha256UairBp`)
+#### {0,1}^{<32}[X] linking constraints (10) — enforced via `Uair<BinaryPoly<32>>` (`Sha256UairBp`)
 
 These constraints tie each auxiliary lookback column to its source column. The shift sumcheck protocol (§2a) verifies that the shift relation holds across the entire trace; these constraints express the same relation pointwise using the `down` (shifted) row provided by the `ShiftSpec` declarations.
 
@@ -600,28 +620,32 @@ These constraints tie each auxiliary lookback column to its source column. The s
 | C10 | W\_tm7-link (shift-by-7) | $\hat{W}_{t-7}[t{+}7] - \hat{W}[t] = 0$ | Zero (exact) |
 | C11 | W\_tm15-link (shift-by-15) | $\hat{W}_{t-15}[t{+}15] - \hat{W}[t] = 0$ | Zero (exact) |
 | C12 | W\_tm16-link (shift-by-16) | $\hat{W}_{t-16}[t{+}16] - \hat{W}[t] = 0$ | Zero (exact) |
+| C13 | a\_tm1-link (shift-by-1) | $\hat{a}_{t-1}[t{+}1] - \hat{a}[t] = 0$ | Zero (exact) |
+| C14 | a\_tm2-link (shift-by-2) | $\hat{a}_{t-2}[t{+}2] - \hat{a}[t] = 0$ | Zero (exact) |
+| C15 | e\_tm1-link (shift-by-1) | $\hat{e}_{t-1}[t{+}1] - \hat{e}[t] = 0$ | Zero (exact) |
+| C16 | e\_tm2-link (shift-by-2) | $\hat{e}_{t-2}[t{+}2] - \hat{e}[t] = 0$ | Zero (exact) |
 
-Each linking constraint accesses `down.binary_poly[k]` where `k` is the positional index of the shift's destination column in the `ShiftSpec` list. The shift sumcheck resolves these `down` references to the correct shifted row automatically.
+Each linking constraint accesses `down.binary_poly[k]` where `k` is the positional index of the shift's destination column in the `ShiftSpec` list. The shift sumcheck resolves these `down` references to the correct shifted row automatically. Constraints C13–C16 support the affine-combination lookups (§12a) by making the lookback values $a_{t-1}, a_{t-2}, e_{t-1}, e_{t-2}$ available as trace columns.
 
 #### Q[X] constraints (3) — enforced via `Uair<DensePolynomial<i64, 64>>` (`Sha256UairQx`)
 
 These operate in $\mathbb{Z}[X]$ (integer coefficient polynomials, degree < 64). They require viewing the same trace as integer polynomials rather than binary polynomials, because the constant 2 is zero in $\mathbb{F}_2$. All cross-row references (d\_hat, h\_hat, W\_tm2/7/15/16, K\_hat) are resolved via the auxiliary lookback columns verified by the Bp UAIR's linking constraints above. The constraints are **selector-gated** to handle boundary rows.
 
-BitPoly membership (binary coefficient checks for Ch, ¬e∧g, Maj) is now enforced by lookups rather than ideal checks.
+BitPoly membership (binary coefficient checks for Ch, ¬e∧g, Maj) is now enforced by affine-combination lookups (§12a) rather than ideal checks.
 
 | # | Name | Expression | Ideal |
 |---|------|-----------|-------|
-| C13 | a-update carry | $\text{sel\_round} \cdot (\hat{a}[t{+}1] - \hat{h} - \hat{\Sigma}_1 - \widehat{ch_{ef}} - \widehat{ch_{neg}} - \hat{K}_t - \hat{W} - \hat{\Sigma}_0 - \hat{Maj} + \mu_a \cdot X^{32}) \in (X - 2)$ | DegreeOne(2) |
-| C14 | e-update carry | $\text{sel\_round} \cdot (\hat{e}[t{+}1] - \hat{d} - \hat{h} - \hat{\Sigma}_1 - \widehat{ch_{ef}} - \widehat{ch_{neg}} - \hat{K}_t - \hat{W} + \mu_e \cdot X^{32}) \in (X - 2)$ | DegreeOne(2) |
-| C15 | W-schedule carry | $\text{sel\_sched} \cdot (\hat{W} - \hat{W}_{t-16} - \widehat{\sigma_0 w} - \hat{W}_{t-7} - \widehat{\sigma_1 w} + \mu_W \cdot X^{32}) \in (X - 2)$ | DegreeOne(2) |
+| C17 | a-update carry | $\text{sel\_round} \cdot (\hat{a}[t{+}1] - \hat{h} - \hat{\Sigma}_1 - \widehat{ch_{ef}} - \widehat{ch_{neg}} - \hat{K}_t - \hat{W} - \hat{\Sigma}_0 - \hat{Maj} + \mu_a \cdot X^{32}) \in (X - 2)$ | DegreeOne(2) |
+| C18 | e-update carry | $\text{sel\_round} \cdot (\hat{e}[t{+}1] - \hat{d} - \hat{h} - \hat{\Sigma}_1 - \widehat{ch_{ef}} - \widehat{ch_{neg}} - \hat{K}_t - \hat{W} + \mu_e \cdot X^{32}) \in (X - 2)$ | DegreeOne(2) |
+| C19 | W-schedule carry | $\text{sel\_sched} \cdot (\hat{W} - \hat{W}_{t-16} - \widehat{\sigma_0 w} - \hat{W}_{t-7} - \widehat{\sigma_1 w} + \mu_W \cdot X^{32}) \in (X - 2)$ | DegreeOne(2) |
 
 The carry constraints use the $(X - 2)$ ideal: a polynomial $p(X) \in (X - 2)$ iff $p(2) = 0$. Since evaluating a binary-coefficient polynomial at $X = 2$ gives the integer value of the 32-bit word ($\sum c_i \cdot 2^i$), this ideal check verifies that the modular addition with carry is correct as an integer equation.
 
 The **selector gating** ensures:
-- `sel_round` (col 21) is 1 for $t \in [0, 63]$ and 0 elsewhere, gating C13/C14 so carry constraints are only active during valid compression rounds.
-- `sel_sched` (col 22) is 1 for $t \in [16, 63]$ and 0 elsewhere, gating C15 so the schedule recurrence only applies when all lookback columns ($W_{t-2}, W_{t-7}, W_{t-15}, W_{t-16}$) are available.
+- `sel_round` (col 25) is 1 for $t \in [0, 63]$ and 0 elsewhere, gating C17/C18 so carry constraints are only active during valid compression rounds.
+- `sel_sched` (col 26) is 1 for $t \in [16, 63]$ and 0 elsewhere, gating C19 so the schedule recurrence only applies when all lookback columns ($W_{t-2}, W_{t-7}, W_{t-15}, W_{t-16}$) are available.
 
-The Qx UAIR declares 2 forward shifts via `ShiftSpec` for `a_hat` and `e_hat` (shift amount 1), providing access to $\hat{a}[t+1]$ and $\hat{e}[t+1]$ in C13/C14.
+The Qx UAIR declares 2 forward shifts via `ShiftSpec` for `a_hat` and `e_hat` (shift amount 1), providing access to $\hat{a}[t+1]$ and $\hat{e}[t+1]$ in C17/C18.
 
 ---
 
@@ -705,14 +729,14 @@ Where $s = b_1 + b_2 - b_1 b_2$ (Shamir selector: $s = 1$ iff any bit is set), a
 
 ## 7. The Dual-Ring Pipeline
 
-SHA-256 constraints live in two different rings: {0,1}^{<32}[X] (for bitwise/rotation operations and linking) and Q[X] (for integer carry propagation). The **dual-ring pipeline** (`prove_dual_ring` / `verify_dual_ring`) handles this by running two sequential PIOP passes on the same committed trace. Both passes operate on **all 23 BinaryPoly columns** — the first interprets them as {0,1}^{<32}[X], the second converts them to Q[X] (DensePolynomial<i64, 64>). The 3 integer carry columns participate only in the Q[X] pass:
+SHA-256 constraints live in two different rings: {0,1}^{<32}[X] (for bitwise/rotation operations and linking) and Q[X] (for integer carry propagation). The **dual-ring pipeline** (`prove_dual_ring` / `verify_dual_ring`) handles this by running two sequential PIOP passes on the same committed trace. Both passes operate on **all 27 BinaryPoly columns** — the first interprets them as {0,1}^{<32}[X], the second converts them to Q[X] (DensePolynomial<i64, 64>). The 3 integer carry columns participate only in the Q[X] pass:
 
 ### Prover: `prove_dual_ring()`
 
 1. **PCS Commit** the `BinaryPoly<32>` trace (once).
 2. **Shared field setup:** Sample a PIOP field $\mathbb{F}_q$ and a shared IC evaluation point from the transcript.
-3. **IC₁** over `BinaryPoly<32>` ring (constraints C1–C12: 6 rotation/shift + 6 linking) — evaluated at the shared point.
-4. **IC₂** over `DensePolynomial<i64, 64>` ring (constraints C13–C15: selector-gated carry): convert trace via `convert_trace_to_qx()`, then run IC at the same shared point.
+3. **IC₁** over `BinaryPoly<32>` ring (constraints C1–C16: 6 rotation/shift + 10 linking) — evaluated at the shared point.
+4. **IC₂** over `DensePolynomial<i64, 64>` ring (constraints C17–C19: selector-gated carry): convert trace via `convert_trace_to_qx()`, then run IC at the same shared point.
 5. **Shared projecting element:** A single $\alpha$ challenge is drawn from the transcript and used for both passes.
 6. **Batched CPR via multi-degree sumcheck:** Both CPR passes are batched into a single `MultiDegreeSumcheck::prove_as_subprotocol` call:
    - **Group 0 (BinaryPoly):** `CombinedPolyResolver::build_prover_group::<BinaryPoly<32>>` constructs the CPR combination function (degree = `bp_max_degree + 2`) without running the sumcheck.
@@ -727,7 +751,7 @@ Both IC and CPR passes share the same Fiat-Shamir transcript, so the random chal
 
 1. **Shared field setup:** Reconstruct $\mathbb{F}_q$ and the IC evaluation point from a fresh transcript.
 2. **IC₁ verify (BinaryPoly)** — uses `TrivialIdeal` (always passes; see §11). Evaluated at the shared point via `verify_at_point`.
-3. **IC₂ verify (Q[X])** — uses real ideals: `DegreeOneIdeal(2)` for C13–C15. Evaluated at the same shared point.
+3. **IC₂ verify (Q[X])** — uses real ideals: `DegreeOneIdeal(2)` for C17–C19. Evaluated at the same shared point.
 4. **Shared projecting element** drawn from the transcript (same as prover's).
 5. **CPR₁ pre-sumcheck:** Draws $\alpha_1$, verifies the BP claimed sum against IC₁'s subclaim.
 6. **CPR₂ pre-sumcheck:** Draws $\alpha_2$, verifies the QX claimed sum against IC₂'s subclaim.
@@ -742,7 +766,7 @@ Both IC and CPR passes share the same Fiat-Shamir transcript, so the random chal
 
 Where the dual-ring pipeline (§7) runs two PIOP passes on the **same** committed trace (same PCS, different rings), the **dual-circuit pipeline** combines two **independent circuits** — each with its own trace and PCS — into a single proving pipeline that shares all PIOP challenges and runs a unified multi-degree sumcheck.
 
-The primary use case is 8×SHA-256 (`BinaryPoly<32>`, 26 columns, 16 PCS-committed) + ECDSA (`Int<4>`, 11 columns, 4 PCS-committed). Each circuit has different column counts, evaluation types, ZipTypes, and PCS field sizes, but they share a single Fiat-Shamir transcript so that all PIOP randomness is jointly derived.
+The primary use case is 8×SHA-256 (`BinaryPoly<32>`, 30 columns, 16 PCS-committed) + ECDSA (`Int<4>`, 11 columns, 4 PCS-committed). Each circuit has different column counts, evaluation types, ZipTypes, and PCS field sizes, but they share a single Fiat-Shamir transcript so that all PIOP randomness is jointly derived.
 
 ### Prover: `prove_dual_circuit()`
 
@@ -800,23 +824,23 @@ The verifier receives public column data as additional parameters (`c1_public_co
 
 ### Motivation
 
-The 26 SHA-256 trace columns use two different evaluation types: {0,1}^{<32}[X] rotation/shift/linking constraints (C1–C12) and Q[X] carry constraints (C13–C15) both need `BinaryPoly<32>` evaluations for the 23 binary polynomial columns, while the 3 carry columns only need integer evaluations. By splitting the trace into two PCS batches, the 3 integer-only columns can be committed as `Int<1>` (64-bit) instead of `BinaryPoly<32>` (32 coefficients × 8 bytes = 256 bytes per codeword element). This shrinks the column-opening data for these columns from 256 bytes to 16 bytes per element — a **16× reduction per column**.
+The 30 SHA-256 trace columns use two different evaluation types: {0,1}^{<32}[X] rotation/shift/linking constraints (C1–C16) and Q[X] carry constraints (C17–C19) both need `BinaryPoly<32>` evaluations for the 27 binary polynomial columns, while the 3 carry columns only need integer evaluations. By splitting the trace into two PCS batches, the 3 integer-only columns can be committed as `Int<1>` (64-bit) instead of `BinaryPoly<32>` (32 coefficients × 8 bytes = 256 bytes per codeword element). This shrinks the column-opening data for these columns from 256 bytes to 16 bytes per element — a **16× reduction per column**.
 
-Note: With public columns, the effective PCS batch sizes are further reduced. Of the 23 BinaryPoly columns, 8 are public and 6 are shift sources (with 4 overlapping), giving 10 excluded from PCS commitment. This leaves **13 committed BinaryPoly columns** + **3 committed Int columns** = 16 PCS columns total.
+Note: With public columns, the effective PCS batch sizes are further reduced. Of the 27 BinaryPoly columns, 12 are public and 10 are shift sources (with 8 overlapping), giving 14 excluded from PCS commitment. This leaves **13 committed BinaryPoly columns** + **3 committed Int columns** = 16 PCS columns total.
 
 ### Column Classification
 
 The split is defined in `sha256-uair/src/witness.rs`:
 
-**BinaryPoly batch (23 columns)** — `POLY_COLUMN_INDICES = [0..22]`:
-- These participate in {0,1}^{<32}[X] rotation/shift/linking constraints (C1–C12) and/or Q[X] constraints (C13–C15).
+**BinaryPoly batch (27 columns)** — `POLY_COLUMN_INDICES = [0..26]`:
+- These participate in {0,1}^{<32}[X] rotation/shift/linking constraints (C1–C16) and/or Q[X] constraints (C17–C19).
 - Committed as `BinaryPoly<32>` using `Sha256ZipTypes<i64, 32>`.
 - Codeword element: `DensePolynomial<i64, 32>` = 256 bytes.
 - CombR: `Int<6>` = 48 bytes (384-bit).
-- Columns: a\_hat (0), e\_hat (1), W\_hat (2✓), Σ0\_hat (3), Σ1\_hat (4), Maj\_hat (5), ch\_ef\_hat (6), ch\_neg\_eg\_hat (7), σ0\_w\_hat (8), σ1\_w\_hat (9), S0 (10), S1 (11), R0 (12), R1 (13), d\_hat (14†), h\_hat (15†), W\_tm2 (16✓†), W\_tm7 (17✓†), W\_tm15 (18✓†), W\_tm16 (19✓†), K\_hat (20✓), sel\_round (21✓), sel\_sched (22✓). (✓ = public, † = shift source, both excluded from PCS commit.)
+- Columns: a\_hat (0), e\_hat (1), W\_hat (2✓), Σ0\_hat (3), Σ1\_hat (4), Maj\_hat (5), ch\_ef\_hat (6), ch\_neg\_eg\_hat (7), σ0\_w\_hat (8), σ1\_w\_hat (9), S0 (10), S1 (11), R0 (12), R1 (13), d\_hat (14†), h\_hat (15†), W\_tm2 (16✓†), W\_tm7 (17✓†), W\_tm15 (18✓†), W\_tm16 (19✓†), K\_hat (20✓), a\_tm1 (21✓†), a\_tm2 (22✓†), e\_tm1 (23✓†), e\_tm2 (24✓†), sel\_round (25✓), sel\_sched (26✓). (✓ = public, † = shift source, both excluded from PCS commit.)
 
-**Int batch (3 columns)** — `INT_COLUMN_INDICES = [23, 24, 25]`:
-- These only participate as carry values in Q[X] constraints (C13–C15).
+**Int batch (3 columns)** — `INT_COLUMN_INDICES = [27, 28, 29]`:
+- These only participate as carry values in Q[X] constraints (C17–C19).
 - Committed as `Int<1>` (64-bit integer) using `Sha256IntZipTypes`.
 - Codeword element: `Int<2>` = 16 bytes (128-bit).
 - CombR: `Int<4>` = 32 bytes (256-bit).
@@ -826,8 +850,8 @@ The split is defined in `sha256-uair/src/witness.rs`:
 
 Two functions in `sha256-uair/src/witness.rs`:
 
-- **`generate_poly_witness(num_vars, rng)`** → `Vec<DenseMultilinearExtension<BinaryPoly<32>>>`: Generates the full 26-column trace, then extracts only the 23 `POLY_COLUMN_INDICES` columns.
-- **`generate_int_witness(num_vars, rng)`** → `Vec<DenseMultilinearExtension<Int<1>>>`: Generates the full trace, then for each of the 3 `INT_COLUMN_INDICES` (23–25), converts each `BinaryPoly<32>` cell to `Int<1>` via `bp.to_u64() as i64`. All values are small integers that fit in a single u64 limb.
+- **`generate_poly_witness(num_vars, rng)`** → `Vec<DenseMultilinearExtension<BinaryPoly<32>>>`: Generates the full 30-column trace, then extracts only the 27 `POLY_COLUMN_INDICES` columns.
+- **`generate_int_witness(num_vars, rng)`** → `Vec<DenseMultilinearExtension<Int<1>>>`: Generates the full trace, then for each of the 3 `INT_COLUMN_INDICES` (27–29), converts each `BinaryPoly<32>` cell to `Int<1>` via `bp.to_u64() as i64`. All values are small integers that fit in a single u64 limb.
 
 ### Proof Size Impact
 
@@ -835,8 +859,8 @@ For 1×SHA-256 (1 compression, 128-row trace with `num_vars = 7`):
 
 | Configuration | PCS Raw | Compressed |
 |--------------|---------|------------|
-| Monolithic (26 cols, 16 PCS-committed) | ~700 KB | ~340 KB |
-| Split (23 BPoly + 3 Int, 16 PCS-committed) | ~490 KB | ~240 KB |
+| Monolithic (30 cols, 16 PCS-committed) | ~700 KB | ~340 KB |
+| Split (27 BPoly + 3 Int, 16 PCS-committed) | ~490 KB | ~240 KB |
 | **Reduction** | **~1.4×** | **~1.4×** |
 
 For 8×SHA-256 + ECDSA (512-row trace with `num_vars = 9`):
@@ -939,7 +963,7 @@ The PCS proof transcript is the dominant contributor to proof size. Its structur
 - 1 combined row (`row_len × CombR::NUM_BYTES`): e.g., 512 × 48 = 24,576 bytes (BinaryPoly batch) or 512 × 64 = 32,768 bytes (ECDSA batch).
 - `NUM_COLUMN_OPENINGS` (147) column openings, each containing:
   - Column index (8 bytes).
-  - Per-polynomial column values: `batch_size × num_rows × Cw::NUM_BYTES` per opening. For SHA BinaryPoly: 13 committed × 1 × 256 = 3,328 bytes (23 bitpoly minus 10 excluded); for SHA Int: 3 × 1 × 16 = 48 bytes; for ECDSA: 4 committed × 1 × 40 = 160 bytes (11 total minus 7 excluded).
+  - Per-polynomial column values: `batch_size × num_rows × Cw::NUM_BYTES` per opening. For SHA BinaryPoly: 13 committed × 1 × 256 = 3,328 bytes (27 bitpoly minus 14 excluded); for SHA Int: 3 × 1 × 16 = 48 bytes; for ECDSA: 4 committed × 1 × 40 = 160 bytes (11 total minus 7 excluded).
   - Merkle proof: ~11 blake3 hashes (~352 bytes per proof for tree depth ≈ log₂(2048) = 11).
 
 **Eval phase (batched):**
@@ -983,7 +1007,7 @@ The system defines six ideal types, each handling a different kind of constraint
 
 ### `DegreeOneIdeal(2)` — $(X - 2)$
 
-- **Used by:** C13–C15 (SHA-256 carry propagation)
+- **Used by:** C17–C19 (SHA-256 carry propagation)
 - **Prover-side check:** Evaluates $p(2) = \sum c_i \cdot 2^i$ and checks it equals zero.
 - **Verifier-side check (`DynamicPolynomialF`):** Evaluates the polynomial at $X = 2$ in $\mathbb{F}_p$ and checks the result is zero. **This IS a real ideal that lifts correctly:** $(X - 2)$ is an ideal in both $\mathbb{Z}[X]$ and $\mathbb{F}_p[X]$ (for $p > 2$), and the evaluation-at-2 check is preserved under the projection from $\mathbb{Z}[X]$ to $\mathbb{F}_p[X]$.
 
@@ -1098,6 +1122,61 @@ This is used in two contexts:
 1. **Within a single lookup protocol:** Different identity groups (decomposition consistency vs. LogUp fraction checks) may have different degrees.
 2. **Batched CPR + Lookup (§3 Step 3+3.5):** The CPR sumcheck (degree $\\text{max\\_degree} + 2$, e.g., 4 for SHA-256) and each classic lookup sumcheck (degree 2) are fused into a single multi-degree sumcheck. The CPR group occupies slot 0 and the lookup groups occupy slots 1..$G$. When the lookup sub-table has more variables than the CPR trace (e.g., 8 vs. 7), the CPR MLEs are zero-padded and a `shared_num_vars` is used for the sumcheck; the verifier similarly pads the IC evaluation point and selector reference in `finalize_verifier`.
 
+### 12a. Affine-Combination Lookups
+
+Standard column lookups verify that individual trace columns contain valid table entries. **Affine-combination lookups** extend this to verify that a *linear combination* of trace columns belongs to the table. This is used for SHA-256 to enforce carry-free Ch and Maj relations without dedicated algebraic constraints.
+
+#### Motivation
+
+The SHA-256 Ch and Maj functions are defined bitwise:
+- $\text{Ch}(e, f, g) = (e \wedge f) \oplus (\neg e \wedge g)$
+- $\text{Maj}(a, b, c) = (a \wedge b) \oplus (a \wedge c) \oplus (b \wedge c)$
+
+The intermediate values $\text{ch\_ef} = e \wedge f$, $\text{ch\_neg\_eg} = \neg e \wedge g$, and $\text{Maj}$ appear in trace columns 6, 7, and 5 respectively. Rather than adding algebraic constraints to verify these Boolean functions, the implementation exploits a **carry-freedom** property: for binary polynomials $p, q$ with $p \wedge q$ being their bitwise AND, the expression $p + q - 2(p \wedge q) = p \oplus q$ has all coefficients in $\{0, 1\}$ (because each bit position independently computes $p_i + q_i - 2(p_i \wedge q_i) = p_i \oplus q_i \in \{0, 1\}$). Therefore, if the affine combination lies in `BitPoly{32}`, the AND relation must hold.
+
+#### `AffineLookupSpec` and `LookupWitnessSource`
+
+Two new types in `piop/src/lookup/structs.rs`:
+
+```rust
+pub struct AffineLookupSpec {
+    pub terms: Vec<(usize, i64)>,       // (column_index, coefficient) pairs
+    pub constant_offset_bits: u32,       // constant bit-polynomial offset (u32 bit pattern)
+    pub table_type: LookupTableType,     // lookup table type
+}
+
+pub enum LookupWitnessSource {
+    Column { column_index: usize },
+    Affine { terms: Vec<(usize, i64)>, constant_offset_bits: u32 },
+}
+```
+
+`AffineLookupSpec` defines the affine expression $\sum_j c_j \cdot \text{trace}[j][t] + \text{offset}$ that should be checked against the table. `LookupWitnessSource` tells the verifier how to reconstruct the "parent evaluation" for the decomposition consistency check — either from a single column's CPR evaluation (`Column`) or from an affine combination of CPR evaluations (`Affine`).
+
+#### SHA-256 Affine Lookup Instances
+
+Three affine lookups are declared for SHA-256:
+
+| # | Identity | Terms | Offset | Table |
+|---|----------|-------|--------|-------|
+| A1 | Ch ($e \wedge f$) | `[(COL_E_HAT, 1), (COL_E_TM1, 1), (COL_CH_EF_HAT, -2)]` | 0 | BitPoly{32} |
+| A2 | Ch ($\neg e \wedge g$) | `[(COL_E_HAT, -1), (COL_E_TM2, 1), (COL_CH_NEG_EG_HAT, -2)]` | `0xFFFF_FFFF` | BitPoly{32} |
+| A3 | Maj(a,b,c) | `[(COL_A_HAT, 1), (COL_A_TM1, 1), (COL_A_TM2, 1), (COL_MAJ_HAT, -2)]` | 0 | BitPoly{32} |
+
+The `constant_offset_bits = 0xFFFF_FFFF` in A2 encodes $\mathbf{1}_w = \sum_{i=0}^{31} X^i$, so the expression becomes $(\mathbf{1}_w - \hat{e}) + \hat{e}_{t-2} - 2 \cdot \widehat{ch\_{\neg e,g}} = \neg\hat{e} + \hat{g} - 2(\neg\hat{e} \wedge \hat{g})$, which equals $\neg\hat{e} \oplus \hat{g} \in \text{BitPoly}\{32\}$.
+
+#### Prover-Side Handling
+
+In `snark/src/pipeline.rs`, the function `append_affine_virtual_columns()` materializes each affine expression as a **virtual field-element column**: at every row, it evaluates $\sum c_j \cdot \text{trace}[j][t] + \text{offset}$, projects the resulting `BinaryPoly` to the field, and appends the virtual column to the lookup column list. A `LookupColumnSpec` is created for it, and a `LookupWitnessSource::Affine` entry is recorded in the metadata so the verifier can reconstruct the parent evaluation without receiving the virtual column.
+
+#### Verifier-Side Handling
+
+The verifier reconstructs each affine lookup's "parent evaluation" (the value that the decomposition consistency check compares against) by computing:
+
+$$\text{parent\_eval} = \mathtt{eq\_sum\_w} \cdot \pi(\text{offset}) + \sum_j c_j \cdot \text{up\_evals}[\text{col}_j]$$
+
+where $\pi(\text{offset})$ is the field projection of the constant bit-polynomial offset and $\mathtt{eq\_sum\_w}$ is the sumcheck's equality polynomial sum (needed because the constant offset must be scaled by the number of witness rows when the sub-table domain is larger than the witness domain). This is implemented in `eval_affine_parent()`. No additional PCS opening is needed — the verifier reuses the CPR's column evaluations.
+
 ## 13. Witness Generation
 
 ### SHA-256 (`sha256-uair/src/witness.rs`)
@@ -1105,16 +1184,17 @@ This is used in two contexts:
 The witness generator:
 
 1. Runs the full SHA-256 compression function on the empty-string message (single 512-bit padded block).
-2. At each of the 64 rounds, records all 26 column values:
+2. At each of the 64 rounds, records all 30 column values:
    - Working variables $a, e$ directly from the SHA-256 state (columns 0–1).
    - Derived values $\Sigma_0, \Sigma_1, \text{Maj}, \text{ch\_ef}, \text{ch\_neg\_eg}$ computed from the state (columns 3–7).
    - Message schedule entries $W_t$ and small-sigma values $\sigma_0, \sigma_1$ (columns 2, 8, 9; for $t \geq 16$).
    - Shift decompositions: $S_0 = W_{t-15} \gg 3$, $R_0 = W_{t-15} \& \text{0x7}$, etc. (columns 10–13).
    - Auxiliary lookback columns: $d_t = a_{t-3}$ (col 14), $h_t = e_{t-3}$ (col 15), $W_{t-2}$ (col 16), $W_{t-7}$ (col 17), $W_{t-15}$ (col 18), $W_{t-16}$ (col 19). These store shifted copies of source columns for the shift sumcheck.
    - Round constants $K_t$ (col 20) — a public input column.
-   - Selector columns: `sel_round` = 1 for $t \in [0, 63]$ (col 21), `sel_sched` = 1 for $t \in [16, 63]$ (col 22).
-   - Carry values $\mu_a, \mu_e, \mu_W$ computed as `floor(sum / 2^32)` from the non-wrapping integer sum (int columns 0–2, trace indices 23–25).
-3. Sets a boundary row at index 64 with the final $a, e$ values (so that carry constraints at row 63 can reference `down[COL_A_HAT]` and `down[COL_E_HAT]` correctly).
+   - Ch/Maj lookback columns: $a_{t-1} = b_t$ (col 21), $a_{t-2} = c_t$ (col 22), $e_{t-1} = f_t$ (col 23), $e_{t-2} = g_t$ (col 24). These store shifted copies of $a$ and $e$ for the affine-combination lookup argument (§12a). For $t = 0$ the initial hash values ($H[1], H[2], H[5], H[6]$) are used; for $t = 1$ the boundary values use the appropriate mix of initial and round-0 state.
+   - Selector columns: `sel_round` = 1 for $t \in [0, 63]$ (col 25), `sel_sched` = 1 for $t \in [16, 63]$ (col 26).
+   - Carry values $\mu_a, \mu_e, \mu_W$ computed as `floor(sum / 2^32)` from the non-wrapping integer sum (int columns 0–2, trace indices 27–29).
+3. Sets a boundary row at index 64 with the final $a, e$ values (so that carry constraints at row 63 can reference `down[COL_A_HAT]` and `down[COL_E_HAT]` correctly). **Carry-freedom extension:** Row 64 also populates `ch_ef`, `ch_neg_eg`, and `Maj` using the lookback values $f_{64} = e_{63}$, $g_{64} = e_{62}$, $b_{64} = a_{63}$, $c_{64} = a_{62}$. This ensures the affine-combination lookups evaluate correctly at the boundary. Rows 65–66 extend the lookback columns further (`a_tm1`, `a_tm2`, `e_tm1`, `e_tm2`) and set `ch_neg_eg` and `Maj` for the padded rows where $a = e = 0$.
 4. Zero-pads remaining rows to $2^{\text{num\_vars}}$.
 
 The witness is verified against NIST test vectors (the hash of the empty string matches `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`).
@@ -1122,8 +1202,8 @@ The witness is verified against NIST test vectors (the hash of the empty string 
 ### SHA-256 Split Witnesses
 
 Two additional generators extract subsets of the full trace:
-- `generate_poly_witness()` → 23-column `BinaryPoly<32>` trace for the BinaryPoly batch (cols 0–22).
-- `generate_int_witness()` → 3-column `Int<1>` trace for the Int batch (cols 23–25). Each carry value is converted to its integer representation via `bp.to_u64() as i64`.
+- `generate_poly_witness()` → 27-column `BinaryPoly<32>` trace for the BinaryPoly batch (cols 0–26).
+- `generate_int_witness()` → 3-column `Int<1>` trace for the Int batch (cols 27–29). Each carry value is converted to its integer representation via `bp.to_u64() as i64`.
 
 ### ECDSA (`ecdsa-uair/src/witness.rs`)
 
@@ -1298,19 +1378,15 @@ The verifier now spends its time roughly as:
 
 ## 15. What the Implementation Does NOT Do
 
-### 15.1 CPR→PCS Binding Gap
+### 15.1 ~~CPR→PCS Binding Gap~~ — **PARTIALLY RESOLVED**
 
-**The most significant architectural gap.** The CPR produces evaluation claims: "column $i$ of the committed trace evaluates to `up_evals[i]` at the sumcheck point $\mathbf{s}$, and to `down_evals[i]` at the shifted point." The PCS independently verifies that the committed polynomials pass proximity testing and evaluation consistency at a *different* point (derived by hashing the CPR point into `i128` values via `derive_pcs_point()`).
+The PCS now evaluates at the CPR's sumcheck point (truncated to `num_vars` coordinates): $\mathbf{r}_{\text{PCS}} = \mathbf{r}_{\text{CPR}}[0..\text{num\_vars}]$. Previously the PCS evaluated at a *different* point derived by hashing the CPR point into `i128` values via `derive_pcs_point()`. This hash indirection has been removed.
 
-**What's missing:** There is no check that the PCS-evaluated values are consistent with the CPR's claimed `up_evals` or `down_evals`. Both vectors are prover-supplied values that the CPR verifier plugs into the constraint expression to check algebraic consistency with the sumcheck terminal claim — but neither is verified against the PCS commitment. The CPR operates on projected $\mathbb{F}_q$ values at the sumcheck point; the PCS evaluates committed `BinaryPoly<32>` polynomials at an `i128` point in a different coordinate system.
+**What was fixed:** The PCS `prove()` now accepts `&[F]` (field elements) instead of `&[Zt::Pt]` (raw integers). The pipeline passes the CPR evaluation point directly to PCS, converting through `piop_point_to_pcs_field()` (which extracts canonical `Uint<FIELD_LIMBS>` and re-encodes into the PCS field). This ensures the PCS evaluates the committed polynomials at the same point the CPR reduced to.
 
-Specifically for `down_evals`: the "down" (shifted) trace is never separately committed. The prover constructs it by dropping the first row and appending a zero row (`column[1..].iter().cloned().collect()`), but only the original unshifted trace is committed via the PCS. The `down_evals` are absorbed into the Fiat-Shamir transcript (maintaining transcript consistency) but are otherwise taken on faith.
+**What remains:** The `up_evals` and `down_evals` binding is still not fully verified. While the PCS now evaluates at the correct point, the verifier does not yet explicitly check that `up_evals[i] == pcs_opened_value[i]`. The `down_evals` (shifted trace) are still taken on faith — the "down" trace is never separately committed; the prover constructs it by dropping the first row and appending a zero row, but only the unshifted trace is committed via PCS.
 
-**Impact:** The IC, CPR, and PCS each independently verify their respective claims, but nothing cryptographically binds the CPR's column-evaluation claims (`up_evals` and `down_evals`) to the PCS's committed polynomials. A malicious prover could (in theory) commit one trace via PCS, run the PIOP on a different trace, and both would pass independently.
-
-**What would fix it:** Either (a) the PCS must evaluate at the CPR's sumcheck point $\mathbf{s}$ and the verifier checks `up_evals[i] == pcs_opened_value[i]` (and derives `down_evals` from the committed polynomials evaluated at the appropriately shifted point), or (b) a secondary sumcheck reduces the CPR claims to a single evaluation claim that the PCS can verify directly.
-
-This is documented in `pipeline.rs` with a detailed comment block.
+**Truncation note:** When lookup is present, the CPR operates on `shared_num_vars = max(num_vars, lookup_num_vars)` variables (typically `num_vars + 1`). The PCS polynomials have only `num_vars` variables, so the evaluation point is truncated: `&evaluation_point[..num_vars]`.
 
 ### 15.2 Sumcheck Structure
 
@@ -1320,12 +1396,13 @@ In the **batched classic LogUp path** (`prove_classic_logup()`), the sumcheck is
 
 ### 15.3 ~~Three SHA-256 Constraints Missing~~ — **RESOLVED**
 
-All 15 SHA-256 constraints are now implemented. The previously missing multi-row lookback constraints (d-delay, h-delay, full message schedule) have been resolved by introducing:
+All 19 SHA-256 constraints are now implemented. The previously missing multi-row lookback constraints (d-delay, h-delay, full message schedule) have been resolved by introducing:
 
 1. **Auxiliary lookback columns** (`d_hat`, `h_hat`, `W_tm2`, `W_tm7`, `W_tm15`, `W_tm16`) that store shifted copies of source columns.
-2. **Linking constraints** (C7–C12 in the Bp UAIR) that tie each lookback column to its source via `assert_zero(down[k] - up[source])`.
+2. **Linking constraints** (C7–C16 in the Bp UAIR) that tie each lookback column to its source via `assert_zero(down[k] - up[source])`.
 3. **Shift sumcheck protocol** that verifies the shifted relationship across the entire trace, making the `down` references in the linking constraints valid.
-4. **Selector-gated Qx constraints** (C13–C15) that use the lookback columns directly, with `sel_round` and `sel_sched` gates to handle boundary rows.
+4. **Selector-gated Qx constraints** (C17–C19) that use the lookback columns directly, with `sel_round` and `sel_sched` gates to handle boundary rows.
+5. **Affine-combination lookups** (§12a) that enforce carry-free Ch and Maj relations via 4 additional lookback columns (`a_tm1`, `a_tm2`, `e_tm1`, `e_tm2`) and 3 `AffineLookupSpec` instances.
 
 See §5 for the full constraint specification.
 
@@ -1363,13 +1440,23 @@ The PCS is instantiated with `CHECK = false` (the `UNCHECKED` constant). This sk
 
 ### 15.11 Split-Trace PIOP Not Integrated
 
-The split-trace architecture (§8) currently only operates at the **PCS level** — the two SHA-256 batches are committed and verified independently. The split-trace benchmarks measure PCS-only commit/verify/proof-size, but do **not** run the PIOP (Ideal Check + CPR) on split traces. The full pipeline still uses the monolithic 26-column trace for the PIOP and only supports the non-split PCS.
+The split-trace architecture (§8) currently only operates at the **PCS level** — the two SHA-256 batches are committed and verified independently. The split-trace benchmarks measure PCS-only commit/verify/proof-size, but do **not** run the PIOP (Ideal Check + CPR) on split traces. The full pipeline still uses the monolithic 30-column trace for the PIOP and only supports the non-split PCS.
 
-To integrate the split-trace architecture into the full PIOP pipeline, the IC and CPR would need to be run separately on each batch (BinaryPoly constraints on the 23-column batch, Q[X] constraints on the 3-column batch) with appropriate column index remapping.
+To integrate the split-trace architecture into the full PIOP pipeline, the IC and CPR would need to be run separately on each batch (BinaryPoly constraints on the 27-column batch, Q[X] constraints on the 3-column batch) with appropriate column index remapping.
 
 ### 15.12 Parallel PCS Verification — **RESOLVED**
 
 `verify_dual_circuit()` in `pipeline.rs` now uses `rayon::join` (guarded by `#[cfg(feature = "parallel")]`) to verify both PCS proofs concurrently. See §14, Phase 4 and the implementation at the end of `verify_dual_circuit`.
+
+### 15.13 SHA-256 Feed-Forward and Hash→ECDSA Connection — **RESOLVED**
+
+The 8×SHA-256+ECDSA benchmarks now include two verifier-side computations that close the gap between the proved SHA-256 compression and the proved ECDSA signature verification:
+
+1. **SHA-256 feed-forward.** The SHA-256 UAIR proves the 64-round state update but not the final feed-forward addition. The verifier extracts the 8 final working variables (a, b, c, d, e, f, g, h) from the trace and computes `digest[i] = H_init[i] + state_final[i]` (wrapping mod 2³²). This is 8 wrapping additions per SHA instance — negligible cost. A sanity check against the known SHA-256("") digest is included.
+
+2. **Hash→ECDSA scalar reconstruction.** The ECDSA UAIR uses scalars u₁ = e·s⁻¹ mod n (where e is the message hash). The verifier reconstructs u₁ from the public b₁ column bits (256-bit scan over ECDSA rows 1–256). In a production deployment, the verifier would then check that u₁ equals the SHA digest multiplied by the public signature parameter s⁻¹ modulo the secp256k1 group order.
+
+Both computations are included in the `E2E/Verifier` benchmark (step 21) and also measured independently as `V/FeedFwd+Connect` (step V9) in the verifier step-by-step breakdown.
 
 ---
 
@@ -1381,7 +1468,7 @@ To integrate the split-trace architecture into the full PIOP pipeline, the IC an
 
 Each `DensePolynomial<i64, 32>` codeword element (used for BinaryPoly columns) serializes as 32 × 8 = 256 bytes. However, for DEPTH=1 IPRS codes, the coefficient bitbound is ~45 bits, so each coefficient fits in 6 bytes. Serializing at 6 bytes per coefficient would give 32 × 6 = 192 bytes per codeword element — a 25% reduction on column-opening data.
 
-After eval-phase batching, column openings dominate the test-phase proof. For 147 openings × 13 committed BinaryPoly columns (23 total minus 8 public minus 2 shift-source-only):
+After eval-phase batching, column openings dominate the test-phase proof. For 147 openings × 13 committed BinaryPoly columns (27 total minus 12 public minus 2 shift-source-only):
 - Current: 147 × 13 × 256 ≈ 490 KB
 - Compact: 147 × 13 × 192 ≈ 367 KB
 - **Savings: ~123 KB**
@@ -1412,16 +1499,16 @@ The inner-product kernels (`MBSInnerProduct`, `ScalarProduct`, `CombDotChal`) ma
 ### 16.6 Full Split-Trace Pipeline Integration
 
 Integrating the split-trace architecture into the full PIOP pipeline (not just PCS) would require:
-1. Running IC₁ + CPR₁ on the 23-column BinaryPoly batch ({0,1}^{<32}[X] constraints C1–C12).
-2. Running IC₂ + CPR₂ on the 3-column Int batch (Q[X] constraints C13–C15).
-3. Column index remapping between the UAIR constraint expressions (which reference the original 26-column layout) and the split batches.
+1. Running IC₁ + CPR₁ on the 27-column BinaryPoly batch ({0,1}^{<32}[X] constraints C1–C16).
+2. Running IC₂ + CPR₂ on the 3-column Int batch (Q[X] constraints C17–C19).
+3. Column index remapping between the UAIR constraint expressions (which reference the original 30-column layout) and the split batches.
 4. Separate PCS test + evaluate for each batch.
 
 This would yield the split-trace proof size benefits in the full end-to-end pipeline.
 
 ### 16.7 ~~Multi-Row UAIR Access~~ — **RESOLVED via Shift Sumcheck**
 
-The shift sumcheck protocol and auxiliary lookback columns now provide arbitrary-offset row access without extending the UAIR trait. The 6 `ShiftSpec` declarations in `Sha256UairBp` cover offsets of 2, 3, 7, 15, and 16 rows. All 15 SHA-256 constraints are fully implemented (see §5). The `up`/`down` framework is extended by the shift sumcheck, which provides `down` references at the declared shift offsets.
+The shift sumcheck protocol and auxiliary lookback columns now provide arbitrary-offset row access without extending the UAIR trait. The 10 `ShiftSpec` declarations in `Sha256UairBp` cover offsets of 1, 2, 3, 7, 15, and 16 rows. All 19 SHA-256 constraints are fully implemented (see §5). The `up`/`down` framework is extended by the shift sumcheck, which provides `down` references at the declared shift offsets.
 
 For other UAIRs that need different shift patterns, the same mechanism applies: declare `ShiftSpec` entries in `signature()` and add linking constraints.
 
@@ -1448,11 +1535,11 @@ Ten integration tests in `snark/tests/`:
 | Test | What it exercises |
 |------|------------------|
 | `round_trip_pcs_sha256` | PCS-only: commit → test → evaluate → verify. Proves the PCS works in isolation. |
-| `ideal_check_succeeds_on_valid_sha256_witness` | IC prover on real SHA-256 trace. Verifies that the IC produces a valid proof for the 12 {0,1}^{<32}[X] constraints (6 rotation/shift + 6 linking). Does NOT run verification. |
+| `ideal_check_succeeds_on_valid_sha256_witness` | IC prover on real SHA-256 trace. Verifies that the IC produces a valid proof for the 16 {0,1}^{<32}[X] constraints (6 rotation/shift + 10 linking). Does NOT run verification. |
 | `qx_ideal_check_succeeds_on_valid_sha256_witness` | IC prover on Q[X]-projected SHA-256 trace. Verifies the 3 selector-gated Q[X] carry constraints (including the $(X-2)$ ideal). Does NOT run verification. |
-| `full_pipeline_round_trip` | Single-ring: `prove()` → `verify()` with TrivialIdeal. Full IC + CPR + PCS round-trip for the 12 {0,1}^{<32}[X] constraints. |
-| `batched_classic_logup_round_trip` | Batched CPR+Lookup: `prove_classic_logup()` → `verify()` with `BatchedClassic` proof. IC + batched multi-degree sumcheck (CPR degree-4 + lookup degree-2) + PCS round-trip. Uses 10 `BitPoly(32)` lookup columns with `shared_num_vars = 8` (sub-table 256 > trace 128). Verifies the proof is `BatchedClassic` variant and that verification accepts. |
-| `dual_ring_pipeline_round_trip` | Dual-ring: `prove_dual_ring()` → `verify_dual_ring()`. BP pass (12 constraints, TrivialIdeal) + QX pass (3 constraints, real DegreeOne(2) ideal) + PCS. **This is the most comprehensive test.** |
+| `full_pipeline_round_trip` | Single-ring: `prove()` → `verify()` with TrivialIdeal. Full IC + CPR + PCS round-trip for the 16 {0,1}^{<32}[X] constraints. |
+| `batched_classic_logup_round_trip` | Batched CPR+Lookup: `prove_classic_logup()` → `verify()` with `BatchedClassic` proof. IC + batched multi-degree sumcheck (CPR degree-4 + lookup degree-2) + PCS round-trip. Uses 10 direct `BitPoly(32)` lookup columns + 3 affine-combination lookups (Ch/Maj) with `shared_num_vars = 8` (sub-table 256 > trace 128). Verifies the proof is `BatchedClassic` variant and that verification accepts. |
+| `dual_ring_pipeline_round_trip` | Dual-ring: `prove_dual_ring()` → `verify_dual_ring()`. BP pass (16 constraints, TrivialIdeal) + QX pass (3 constraints, real DegreeOne(2) ideal) + PCS. **This is the most comprehensive test.** |
 | `ecdsa_ideal_check_succeeds_on_valid_witness` | ECDSA IC prover on the constant fixed-point trace. Verifies the 9 constraints (7 non-boundary + 2 boundary) produce a valid IC proof. |
 | `ecdsa_pipeline_round_trip` | ECDSA single-ring `Int<4>` pipeline: `prove_generic()` → `verify_generic()`. All 9 constraints checked in `Int<4>` ring with `EcdsaScalarZipTypes` (PCS field = `MontyField<8>`). Full IC + CPR + PCS round-trip on a zero trace. |
 | `public_column_round_trip` | Public columns: `prove()` → `verify()` using `PublicColumnTestUair` (2 binary-poly columns, column 1 public). Verifies the prover strips the public column's `up_eval` from the proof and the verifier recomputes it. |
@@ -1475,7 +1562,7 @@ Six criterion benchmark groups in `snark/benches/e2e_sha256.rs`:
 
 | Suite | What it measures |
 |-------|-----------------|
-| `sha256_single` | **Headline benchmark.** PCS-only prover/verifier + full-pipeline (`pipeline::prove`/`pipeline::verify`) prover/verifier + proof size for single SHA-256 (26 cols, 16 PCS-committed after excluding 8 public + 2 shift-source-only columns, DEPTH=1). Reports split-PCS proof sizes (23 BPoly + 3 Int). |
+| `sha256_single` | **Headline benchmark.** PCS-only prover/verifier + full-pipeline (`pipeline::prove`/`pipeline::verify`) prover/verifier + proof size for single SHA-256 (30 cols, 16 PCS-committed after excluding 12 public + 2 shift-source-only columns, DEPTH=1). Reports split-PCS proof sizes (27 BPoly + 3 Int). |
 | `sha256_8x_ecdsa` | **Paper target benchmark.** Two separate PCS batches: SHA-256 columns as `BinaryPoly<32>` + 11 ECDSA columns (4 PCS-committed) as `Int<4>` (256-bit scalar), both at DEPTH=1 (512 rows). Reports combined prover/verifier timing, proof sizes (monolithic and split-SHA variants), and parallel verification. |
 | `sha256_piop_only` | IC and CPR prover in isolation (no PCS). |
 | `sha256_8x_ecdsa_end_to_end` | Full E2E including PIOP + Lookup + PCS for 8×SHA-256 + ECDSA. |
@@ -1488,8 +1575,8 @@ Compares three LogUp strategies for 8×SHA-256 + ECDSA:
 
 | Variant | Pipeline function | Description |
 |---------|-------------------|-------------|
-| **NoLookup** | `prove_classic_logup(..., &[])` | Baseline with no lookup constraints. Runs the batched multi-degree sumcheck with CPR only. |
-| **ClassicLogUp** | `prove_classic_logup(..., &sha_lookup_specs)` | Classic batched decomposition LogUp where the CPR sumcheck and all lookup sumchecks are **batched into a single multi-degree sumcheck** (shared challenges, single evaluation point). |
+| **NoLookup** | `prove_classic_logup(..., &[], &[])` | Baseline with no lookup constraints. Runs the batched multi-degree sumcheck with CPR only. |
+| **ClassicLogUp** | `prove_classic_logup(..., &sha_lookup_specs, &sha_affine_specs)` | Classic batched decomposition LogUp where the CPR sumcheck and all lookup sumchecks are **batched into a single multi-degree sumcheck** (shared challenges, single evaluation point). Includes affine-combination lookups for Ch/Maj. |
 | **SeparateLogUp** | `prove(..., &sha_lookup_specs)` | Classic batched decomposition LogUp where the CPR and lookup run **independent sequential sumchecks** (separate challenges, separate evaluation points). |
 
 Benchmark functions for each variant:
@@ -1501,7 +1588,7 @@ Also reports lookup proof sizes and the batched-vs-separate size ratio.
 
 Run with: `cargo bench -p zinc-snark --bench e2e_sha256 --features 'parallel simd asm' -- 'LogUp Comparison'`
 
-### `steps_sha256_8x_ecdsa` (30 benchmark functions)
+### `steps_sha256_8x_ecdsa` (31 benchmark functions)
 
 A separate criterion benchmark file (`snark/benches/steps_sha256_8x_ecdsa.rs`) providing a **per-step timing breakdown** for the 8×SHA-256 + ECDSA proving stack. Each pipeline phase is isolated into its own benchmark function so that individual step timings sum to the E2E total.
 
@@ -1509,15 +1596,15 @@ A separate criterion benchmark file (`snark/benches/steps_sha256_8x_ecdsa.rs`) p
 
 | # | Step | Description |
 |---|------|-------------|
-| 1 | `SHA/WitnessGen` | Generate the 8×SHA-256 trace (26 columns × 512 rows) |
+| 1 | `SHA/WitnessGen` | Generate the 8×SHA-256 trace (30 columns × 512 rows) |
 | 2 | `ECDSA/WitnessGen` | Generate the ECDSA trace (11 columns × 512 rows) |
-| 3 | `SHA/PCS/Commit` | PCS commit the 16 SHA-256 private columns (26 total − 10 excluded) |
+| 3 | `SHA/PCS/Commit` | PCS commit the 16 SHA-256 private columns (30 total − 14 excluded) |
 | 4 | `ECDSA/PCS/Commit` | PCS commit the 4 ECDSA private columns (11 total − 7 excluded) |
 | 5 | `SHA/PIOP/FieldSetup` | Sample PIOP field, IC evaluation point, lift trace coefficients to $\mathbb{F}_q[X]$ |
 | 6 | `SHA/PIOP/ProjectIC` | Project lifted $\mathbb{F}_q[X]$ trace to $\mathbb{F}_q$ scalars for IC |
 | 7 | `ECDSA/PIOP/FieldSetup` | Same for ECDSA |
 | 8 | `ECDSA/PIOP/ProjectIC` | Same for ECDSA |
-| 9 | `SHA/PIOP/IdealCheck` | Run IC prover (12 constraints) |
+| 9 | `SHA/PIOP/IdealCheck` | Run IC prover (16 constraints) |
 | 10 | `ECDSA/PIOP/IdealCheck` | Run IC prover (9 constraints: 7 non-boundary + 2 boundary) |
 | 11 | `SHA/PIOP/ProjectCPR` | Draw $\alpha$, project scalars, project trace to $\mathbb{F}_q$ for CPR |
 | 12 | `ECDSA/PIOP/ProjectCPR` | Same for ECDSA |
@@ -1530,9 +1617,9 @@ A separate criterion benchmark file (`snark/benches/steps_sha256_8x_ecdsa.rs`) p
 | 18 | `SHA/PCS/Prove` | PCS prove for SHA-256 (merged test + evaluate phases) |
 | 19 | `ECDSA/PCS/Prove` | PCS prove for ECDSA (merged test + evaluate phases) |
 | 20 | `E2E/Prover` | Full prover: `prove_dual_circuit` (SHA + ECDSA shared PIOP + separate PCS) |
-| 21 | `E2E/Verifier` | Full verifier: `verify_dual_circuit` (SHA + ECDSA shared PIOP + separate PCS) |
+| 21 | `E2E/Verifier` | Full verifier: `verify_dual_circuit` + SHA-256 feed-forward + hash→ECDSA scalar reconstruction |
 
-**Verifier steps (8):**
+**Verifier steps (9):**
 
 | # | Step | Description |
 |---|------|-------------|
@@ -1544,6 +1631,7 @@ A separate criterion benchmark file (`snark/benches/steps_sha256_8x_ecdsa.rs`) p
 | V6 | `V/UnifiedEvalSC` | Verify the unified evaluation sumcheck (eq + shift claims, interleaving public MLE evaluations) |
 | V7 | `V/LookupFinalize` | Finalize all lookup groups (collect parent column evaluations from CPR up_evals) |
 | V8 | `V/PCSVerify` | Verify both PCS proofs (parallelized via `rayon::join` with `parallel` feature) |
+| V9 | `V/FeedFwd+Connect` | SHA-256 feed-forward (8 wrapping additions per instance) + reconstruct ECDSA scalar u₁ from public b₁ bits (256-iteration scan) |
 
 The E2E/Prover (step 20) uses `prove_dual_circuit` which shares the Fiat-Shamir transcript, IC evaluation point, and projecting element across both circuits, and batches both CPR passes plus lookup groups into a single multi-degree sumcheck. Each circuit retains its own PCS commitment and proof.
 
@@ -1571,8 +1659,8 @@ Run with: `cargo bench -p zinc-snark --bench steps_sha256_8x_ecdsa --features 'p
 SHA256_NUM_VARS        = 7    // 128 rows (64 real + 64 padding)
 SHA256_8X_NUM_VARS     = 9    // 512 rows (8 × 64 rounds)
 ECDSA_NUM_VARS         = 9    // 512 rows (258 real + 254 padding)
-SHA256_BATCH_SIZE      = 26   // 26 SHA-256 columns (monolithic: 23 bitpoly + 3 int)
-SHA256_POLY_BATCH_SIZE = 23   // BinaryPoly columns (split)
+SHA256_BATCH_SIZE      = 30   // 30 SHA-256 columns (monolithic: 27 bitpoly + 3 int)
+SHA256_POLY_BATCH_SIZE = 27   // BinaryPoly columns (split)
 SHA256_INT_BATCH_SIZE  = 3    // Int columns (split)
 ECDSA_BATCH_SIZE       = 11   // 11 ECDSA columns (9 data + 2 selectors)
 SHA256_LOOKUP_COL_COUNT = 10  // Q[X] bitpoly columns 0–9 with LogUp
@@ -1673,14 +1761,16 @@ zinc-plus-new/
 │   ├── src/pipeline.rs # prove(), prove_classic_logup(), prove_generic(),
 │   │                   # verify(), verify_generic(), prove_dual_ring(),
 │   │                   # verify_dual_ring(), prove_dual_circuit(),
-│   │                   # verify_dual_circuit(), derive_pcs_point(),
+│   │                   # verify_dual_circuit(), piop_point_to_pcs_field(),
 │   │                   # private_trace(), reconstruct_up_evals(),
 │   │                   # reconstruct_shift_v_finals(),
 │   │                   # extract_lookup_columns_from_field_trace(),
+│   │                   # append_affine_virtual_columns(),
+│   │                   # eval_affine_parent(),
 │   │                   # BatchedCprLookupProof, DualCircuitZincProof,
 │   │                   # LookupProofData::BatchedClassic
 │   ├── benches/        # Criterion benchmarks (e2e_sha256: 6 groups,
-│   │                   # steps_sha256_8x_ecdsa: 30 benchmark functions)
+│   │                   # steps_sha256_8x_ecdsa: 31 benchmark functions)
 │   └── tests/          # 10 integration tests (incl. batched_classic_logup,
 │   │                   # public_column_round_trip, public_shift_column_round_trip)
 ├── piop/               # PIOP protocols
@@ -1712,17 +1802,18 @@ zinc-plus-new/
 │           ├── pipeline.rs          # High-level prove/verify orchestration
 │           ├── structs.rs           # Proof types, instances, errors,
 │           │                        # LookupSumcheckGroup,
-│           │                        # LookupVerifierPreSumcheck
+│           │                        # LookupVerifierPreSumcheck,
+│           │                        # AffineLookupSpec, LookupWitnessSource
 │           └── tables.rs            # Table generation (BitPoly, Word),
 │                                    # decomposition, multiplicity computation
-├── sha256-uair/        # SHA-256 UAIR + witness (26 columns: 23 BPoly + 3 Int, 8 public)
+├── sha256-uair/        # SHA-256 UAIR + witness (30 columns: 27 BPoly + 3 Int, 12 public)
 │   └── src/
-│       ├── lib.rs      # 12 {0,1}^{<32}[X] (6 rotation + 6 linking) + 3 Q[X]
-│       │               # constraints, shift specs, public columns,
+│       ├── lib.rs      # 16 {0,1}^{<32}[X] (6 rotation + 10 linking) + 3 Q[X]
+│       │               # constraints, shift specs (10 Bp + 2 Qx), public columns,
 │       │               # Sha256UairBp + Sha256UairQx
 │       ├── witness.rs  # Generates 64-row SHA-256 trace, split witnesses
 │       │               # (generate_poly_witness, generate_int_witness),
-│       │               # POLY_COLUMN_INDICES[23], INT_COLUMN_INDICES[3]
+│       │               # POLY_COLUMN_INDICES[27], INT_COLUMN_INDICES[3]
 │       └── constants.rs # H[], K[] SHA-256 constants
 ├── ecdsa-uair/         # ECDSA UAIR + witness (11 columns: 9 data + 2 selectors,
 │   └── src/            # 4 public: b₁, b₂, sel_init, sel_final)
