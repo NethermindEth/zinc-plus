@@ -238,6 +238,7 @@ impl Uair for EcdsaUairBp {
             arbitrary_poly_cols: 0,
             int_cols: 0,
             shifts: vec![],
+            public_columns: vec![COL_B1, COL_B2],
         }
     }
 
@@ -289,6 +290,7 @@ impl Uair for EcdsaUairDp {
                 zinc_uair::ShiftSpec { source_col: COL_Y, shift_amount: 1 },
                 zinc_uair::ShiftSpec { source_col: COL_Z, shift_amount: 1 },
             ],
+            public_columns: vec![COL_B1, COL_B2],
         }
     }
 
@@ -436,6 +438,7 @@ impl Uair for EcdsaUairInt {
                 zinc_uair::ShiftSpec { source_col: COL_Y, shift_amount: 1 },
                 zinc_uair::ShiftSpec { source_col: COL_Z, shift_amount: 1 },
             ],
+            public_columns: vec![COL_B1, COL_B2],
         }
     }
 

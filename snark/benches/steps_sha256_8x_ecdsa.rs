@@ -226,17 +226,28 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     let sha_trace = generate_sha256_trace(SHA256_8X_NUM_VARS);
     let ecdsa_trace = generate_zero_scalar_trace(ECDSA_NUM_VARS, ECDSA_BATCH_SIZE);
 
+    // Build private (non-public) traces for PCS – public columns are
+    // not committed.
+    let sha_sig = Sha256Uair::signature();
+    let ec_sig_int = EcdsaUairInt::signature();
+    let sha_pcs_trace: Vec<_> = sha_trace.iter().enumerate()
+        .filter(|(i, _)| !sha_sig.public_columns.contains(i))
+        .map(|(_, c)| c.clone()).collect();
+    let ecdsa_pcs_trace: Vec<_> = ecdsa_trace.iter().enumerate()
+        .filter(|(i, _)| !ec_sig_int.public_columns.contains(i))
+        .map(|(_, c)| c.clone()).collect();
+
     // ── 3. SHA PCS Commit ───────────────────────────────────────────
     group.bench_function("SHA/PCS/Commit", |b| {
         b.iter(|| black_box(
-            ZipPlus::<ShaZt, ShaLc>::commit(&sha_params, &sha_trace).expect("commit")
+            ZipPlus::<ShaZt, ShaLc>::commit(&sha_params, &sha_pcs_trace).expect("commit")
         ));
     });
 
     // ── 4. ECDSA PCS Commit ─────────────────────────────────────────
     group.bench_function("ECDSA/PCS/Commit", |b| {
         b.iter(|| black_box(
-            ZipPlus::<EcZt, EcLc>::commit(&ec_params, &ecdsa_trace).expect("commit")
+            ZipPlus::<EcZt, EcLc>::commit(&ec_params, &ecdsa_pcs_trace).expect("commit")
         ));
     });
 
@@ -551,23 +562,21 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         });
     });
 
-    // ── 13a. ECDSA PIOP / Shift Sumcheck ─────────────────────────────
+    // ── 13a. Unified Eval Sumcheck (eq + shift) ──────────────────────
     //
-    // After the CPR multi-degree sumcheck finalizes, the ECDSA circuit
-    // runs a shift sumcheck to reduce its 3 shifted-column evaluation
-    // claims (X, Y, Z with shift_amount=1) to evaluation claims about
-    // the *unshifted* source columns at a fresh random point.
+    // After the CPR multi-degree sumcheck finalizes, a unified batched
+    // sumcheck reduces ALL column evaluation claims to a single random
+    // point ("point unification"):
+    //   • eq-based claims for every SHA-256 up-eval column (shift=0)
+    //   • eq-based claims for every ECDSA up-eval column   (shift=0)
+    //   • genuine shift claims for ECDSA shifted columns   (shift=1)
     //
-    // Pre-compute the data the shift sumcheck needs: the shift trace
-    // columns (source columns in field form) and the CPR state (eval
-    // point + down_evals).  Only the shift_sumcheck_prove call itself
-    // is timed.
+    // Pre-compute CPR state (eval point, up/down evals) and field
+    // trace columns.  Only the shift_sumcheck_prove call is timed.
     let ec_sig = EcdsaUairInt::signature();
-    let ec_shift_trace_columns: Vec<DenseMultilinearExtension<<F as Field>::Inner>> =
-        ec_sig.shifts.iter().map(|spec| ec_field_trace[spec.source_col].clone()).collect();
 
-    // Run a fresh CPR to obtain the evaluation point and down_evals.
-    let (ec_cpr_eval_point, ec_cpr_down_evals) = {
+    // Run a fresh CPR to obtain the evaluation point, up_evals and down_evals.
+    let (cpr_eval_point, sha_up_evals, ec_up_evals, ec_down_evals) = {
         let mut tr = unified_tr.clone();
         let sha_g = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::build_prover_group::<Sha256Uair>(
             &mut tr, sha_field_trace.clone(), &ic_evaluation_point,
@@ -586,17 +595,17 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         let (_, mut ps) = zinc_piop::sumcheck::multi_degree::MultiDegreeSumcheck::<F>::prove_as_subprotocol(
             &mut tr, groups, num_vars, &sha_fcfg,
         );
-        let _ = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::finalize_prover(
+        let (sha_up, _, sha_st) = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::finalize_prover(
             &mut tr, ps.remove(0), snc, &sha_fcfg,
         ).expect("SHA finalize_prover");
-        let (_, ec_down, ec_cpr_st) = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::finalize_prover(
+        let (ec_up, ec_down, _) = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::finalize_prover(
             &mut tr, ps.remove(0), enc, &sha_fcfg,
         ).expect("ECDSA finalize_prover");
-        (ec_cpr_st.evaluation_point, ec_down)
+        (sha_st.evaluation_point, sha_up, ec_up, ec_down)
     };
 
-    // Capture the post-CPR-finalize transcript state for the shift sumcheck.
-    let shift_pre_transcript = {
+    // Capture the post-CPR-finalize transcript state.
+    let unified_eval_pre_transcript = {
         let mut tr = unified_tr.clone();
         let sha_g = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::build_prover_group::<Sha256Uair>(
             &mut tr, sha_field_trace.clone(), &ic_evaluation_point,
@@ -624,26 +633,60 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         tr
     };
 
-    group.bench_function("ECDSA/PIOP/ShiftSumcheck", |b| {
+    // Pre-build the unified trace columns array:
+    //   [sha_col_0 … sha_col_{m1-1}, ec_col_0 … ec_col_{m2-1}]
+    let c1_num_up = sha_up_evals.len();
+    let c2_num_up = ec_up_evals.len();
+    let unified_trace_columns: Vec<DenseMultilinearExtension<<F as Field>::Inner>> = {
+        let mut v = Vec::with_capacity(c1_num_up + c2_num_up);
+        v.extend(sha_field_trace.iter().cloned());
+        v.extend(ec_field_trace.iter().cloned());
+        v
+    };
+
+    // Pre-build the unified claims.
+    let unified_claims: Vec<ShiftClaim<F>> = {
+        let mut claims = Vec::with_capacity(c1_num_up + c2_num_up + ec_sig.shifts.len());
+        // Eq claims for SHA-256 columns.
+        for i in 0..c1_num_up {
+            claims.push(ShiftClaim {
+                source_col: i,
+                shift_amount: 0,
+                eval_point: cpr_eval_point.clone(),
+                claimed_eval: sha_up_evals[i].clone(),
+            });
+        }
+        // Eq claims for ECDSA columns.
+        for j in 0..c2_num_up {
+            claims.push(ShiftClaim {
+                source_col: c1_num_up + j,
+                shift_amount: 0,
+                eval_point: cpr_eval_point.clone(),
+                claimed_eval: ec_up_evals[j].clone(),
+            });
+        }
+        // Shift claims for ECDSA shifted columns.
+        for (k, spec) in ec_sig.shifts.iter().enumerate() {
+            claims.push(ShiftClaim {
+                source_col: c1_num_up + spec.source_col,
+                shift_amount: spec.shift_amount,
+                eval_point: cpr_eval_point.clone(),
+                claimed_eval: ec_down_evals[k].clone(),
+            });
+        }
+        claims
+    };
+
+    group.bench_function("PIOP/UnifiedEvalSumcheck", |b| {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
-                let mut tr = shift_pre_transcript.clone();
-                let claims: Vec<ShiftClaim<F>> = ec_sig.shifts
-                    .iter()
-                    .enumerate()
-                    .map(|(i, spec)| ShiftClaim {
-                        source_col: i,
-                        shift_amount: spec.shift_amount,
-                        eval_point: ec_cpr_eval_point.clone(),
-                        claimed_eval: ec_cpr_down_evals[i].clone(),
-                    })
-                    .collect();
+                let mut tr = unified_eval_pre_transcript.clone();
                 let t = Instant::now();
                 let _ = black_box(shift_sumcheck_prove(
                     &mut tr,
-                    &claims,
-                    &ec_shift_trace_columns,
+                    &unified_claims,
+                    &unified_trace_columns,
                     num_vars,
                     &sha_fcfg,
                 ));
@@ -873,23 +916,23 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     }
 
     // ── 17. SHA PCS Prove ────────────────────────────────────────────
-    let (sha_hint, _) = ZipPlus::<ShaZt, ShaLc>::commit(&sha_params, &sha_trace).expect("commit");
+    let (sha_hint, _) = ZipPlus::<ShaZt, ShaLc>::commit(&sha_params, &sha_pcs_trace).expect("commit");
     group.bench_function("SHA/PCS/Prove", |b| {
         b.iter(|| {
             let pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
             black_box(
-                ZipPlus::<ShaZt, ShaLc>::prove::<F, UNCHECKED>(&sha_params, &sha_trace, &pt, &sha_hint)
+                ZipPlus::<ShaZt, ShaLc>::prove::<F, UNCHECKED>(&sha_params, &sha_pcs_trace, &pt, &sha_hint)
             )
         });
     });
 
     // ── 18. ECDSA PCS Prove ──────────────────────────────────────────
-    let (ec_hint, _) = ZipPlus::<EcZt, EcLc>::commit(&ec_params, &ecdsa_trace).expect("commit");
+    let (ec_hint, _) = ZipPlus::<EcZt, EcLc>::commit(&ec_params, &ecdsa_pcs_trace).expect("commit");
     group.bench_function("ECDSA/PCS/Prove", |b| {
         b.iter(|| {
             let pt: Vec<i128> = vec![1i128; ECDSA_NUM_VARS];
             black_box(
-                ZipPlus::<EcZt, EcLc>::prove::<FScalar, UNCHECKED>(&ec_params, &ecdsa_trace, &pt, &ec_hint)
+                ZipPlus::<EcZt, EcLc>::prove::<FScalar, UNCHECKED>(&ec_params, &ecdsa_pcs_trace, &pt, &ec_hint)
             )
         });
     });

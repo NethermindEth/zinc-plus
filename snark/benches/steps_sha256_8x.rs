@@ -41,6 +41,7 @@ use zip_plus::{
 };
 
 use zinc_sha256_uair::{Sha256Uair, witness::GenerateWitness};
+use zinc_uair::Uair;
 use zinc_piop::projections::{
     project_trace_coeffs, project_trace_to_field,
     project_scalars, project_scalars_to_field,
@@ -150,13 +151,19 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
     let sha_trace = generate_sha256_trace(SHA256_8X_NUM_VARS);
     assert_eq!(sha_trace.len(), SHA256_BATCH_SIZE);
 
+    // Build private trace (exclude public columns) for PCS.
+    let sha_sig = Sha256Uair::signature();
+    let sha_pcs_trace: Vec<_> = sha_trace.iter().enumerate()
+        .filter(|(i, _)| !sha_sig.public_columns.contains(i))
+        .map(|(_, c)| c.clone()).collect();
+
     let num_constraints = zinc_uair::constraint_counter::count_constraints::<Sha256Uair>();
     let max_degree = zinc_uair::degree_counter::count_max_degree::<Sha256Uair>();
 
     // ── 2. PCS Commit ───────────────────────────────────────────────
     group.bench_function("PCS/Commit", |b| {
         b.iter(|| {
-            let r = ZipPlus::<ShaZt, ShaLc>::commit(&sha_params, &sha_trace);
+            let r = ZipPlus::<ShaZt, ShaLc>::commit(&sha_params, &sha_pcs_trace);
             let _ = black_box(r);
         });
     });
@@ -318,14 +325,14 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
     }
 
     // ── 6. PCS Prove ────────────────────────────────────────────────
-    let (sha_hint, _sha_comm) = ZipPlus::<ShaZt, ShaLc>::commit(&sha_params, &sha_trace)
+    let (sha_hint, _sha_comm) = ZipPlus::<ShaZt, ShaLc>::commit(&sha_params, &sha_pcs_trace)
         .expect("commit");
 
     group.bench_function("PCS/Prove", |b| {
         b.iter(|| {
             let pt: Vec<i128> = vec![1i128; SHA256_8X_NUM_VARS];
             let r = ZipPlus::<ShaZt, ShaLc>::prove::<F, UNCHECKED>(
-                &sha_params, &sha_trace, &pt, &sha_hint,
+                &sha_params, &sha_pcs_trace, &pt, &sha_hint,
             );
             let _ = black_box(r);
         });
@@ -351,11 +358,17 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
         &sha_params, &sha_trace, SHA256_8X_NUM_VARS, &sha_lookup_specs,
     );
 
+    let sha_public_cols = vec![
+        sha_trace[zinc_sha256_uair::COL_W_HAT].clone(),
+        sha_trace[zinc_sha256_uair::COL_K_HAT].clone(),
+    ];
+
     group.bench_function("E2E/Verifier", |b| {
         b.iter(|| {
             let r = zinc_snark::pipeline::verify::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED, _, _>(
                 &sha_params, &sha_proof, SHA256_8X_NUM_VARS,
                 |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                &sha_public_cols,
             );
             black_box(r);
         });

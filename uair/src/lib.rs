@@ -74,6 +74,16 @@ pub struct UairSignature {
     /// When this is empty, the legacy behaviour applies: `down` is
     /// a blanket shift-by-1 of all normal columns.
     pub shifts: Vec<ShiftSpec>,
+    /// Indices (in the flattened trace layout: `binary_poly ++ arbitrary_poly
+    /// ++ int`) of columns designated as **public inputs**.
+    ///
+    /// Public columns participate in constraints exactly like private ones.
+    /// The difference surfaces at evaluation-claim time: the prover does
+    /// *not* include their MLE evaluations in the proof — instead, the
+    /// verifier computes those evaluations itself from the known public data.
+    ///
+    /// When empty, all columns are treated as private (the default).
+    pub public_columns: Vec<usize>,
 }
 
 impl UairSignature {
@@ -119,6 +129,24 @@ impl UairSignature {
         }
     }
 
+    /// Number of private (non-public) columns.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn num_private_cols(&self) -> usize {
+        self.total_cols() - self.public_columns.len()
+    }
+
+    /// Whether the given flattened column index is a public column.
+    pub fn is_public_column(&self, col_idx: usize) -> bool {
+        self.public_columns.contains(&col_idx)
+    }
+
+    /// Whether the shift at the given index sources a public column.
+    pub fn is_public_shift(&self, shift_idx: usize) -> bool {
+        self.shifts
+            .get(shift_idx)
+            .is_some_and(|spec| self.is_public_column(spec.source_col))
+    }
+
     /// Signature describing the layout of the `down` (shifted) row.
     ///
     /// In **legacy** mode the layout mirrors the `up` row (all columns
@@ -139,6 +167,7 @@ impl UairSignature {
                 arbitrary_poly_cols: self.arbitrary_poly_cols,
                 int_cols: self.int_cols,
                 shifts: vec![],
+                public_columns: vec![],
             }
         } else {
             let bp_end = self.binary_poly_cols;
@@ -160,6 +189,7 @@ impl UairSignature {
                 arbitrary_poly_cols: ap,
                 int_cols: ic,
                 shifts: vec![],
+                public_columns: vec![],
             }
         }
     }

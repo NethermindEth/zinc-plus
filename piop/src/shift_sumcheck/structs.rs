@@ -6,11 +6,17 @@ use crypto_primitives::PrimeField;
 ///
 /// Represents: `MLE[shift_c(v)](r) = claimed_eval`, where `v` is a
 /// committed column (identified by `source_col`) and `c` is the shift.
+///
+/// When `shift_amount == 0` this degenerates to a plain MLE evaluation
+/// claim: `MLE[v](r) = claimed_eval`, proven via the identity
+/// `sum_b MLE[v](b) · eq(b, r) = v(r)`.  This allows batching ordinary
+/// evaluation claims together with genuine shift claims in a single
+/// sumcheck instance ("point unification").
 #[derive(Clone, Debug)]
 pub struct ShiftClaim<F: PrimeField> {
     /// Index of the source column in the flattened trace.
     pub source_col: usize,
-    /// The shift amount (> 0).
+    /// The shift amount (≥ 0).  Use 0 for plain MLE evaluation claims.
     pub shift_amount: usize,
     /// The evaluation point `r ∈ F^m` at which the shifted MLE was
     /// claimed to evaluate. This is typically the CPR sumcheck point.

@@ -14,6 +14,7 @@ use crypto_primitives::crypto_bigint_monty::MontyField;
 use crypto_primitives::{Field, FromPrimitiveWithConfig, FromWithConfig, IntoWithConfig, PrimeField};
 use num_traits::One;
 use zinc_poly::mle::DenseMultilinearExtension;
+use zinc_poly::mle::MultilinearExtensionWithConfig;
 use zinc_poly::univariate::binary::BinaryPoly;
 use zinc_poly::univariate::dense::DensePolynomial;
 use zinc_primality::{MillerRabin, PrimalityTest};
@@ -50,11 +51,12 @@ use zinc_piop::projections::{
     project_scalars, project_scalars_to_field,
 };
 use zinc_piop::sumcheck::prover::{NatEvaluatedPolyWithoutConstant, ProverMsg};
-use zinc_piop::sumcheck::SumcheckProof;
+use zinc_piop::sumcheck::{MLSumcheck, SumcheckProof};
 use zinc_piop::sumcheck::multi_degree::{MultiDegreeSumcheck, MultiDegreeSumcheckProof};
 use zinc_piop::shift_sumcheck::{
     ShiftClaim, ShiftSumcheckProof, ShiftRoundPoly,
     shift_sumcheck_prove, shift_sumcheck_verify,
+    shift_sumcheck_verify_pre, shift_sumcheck_verify_finalize,
 };
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_uair::ideal::{Ideal, IdealCheck};
@@ -225,6 +227,26 @@ fn field_from_bytes(bytes: &[u8], cfg: &<PiopField as PrimeField>::Config) -> Pi
     PiopField::from_montgomery(inner, cfg)
 }
 
+/// Filter a trace to keep only private (non-public) columns.
+///
+/// Public columns are known to the verifier and need not be committed via the
+/// PCS. Dropping them before `ZipPlus::commit` / `ZipPlus::prove` reduces
+/// the Merkle-tree size and encoding work.
+fn private_trace<T: Clone>(
+    trace: &[DenseMultilinearExtension<T>],
+    public_columns: &[usize],
+) -> Vec<DenseMultilinearExtension<T>> {
+    if public_columns.is_empty() {
+        return trace.to_vec();
+    }
+    trace
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !public_columns.contains(i))
+        .map(|(_, col)| col.clone())
+        .collect()
+}
+
 /// Convert a PiopField element (modular integer) to the PCS point type Zt::Pt.
 ///
 /// The PIOP field prime is ~120 bits, so retrieved values always fit in i128.
@@ -254,6 +276,70 @@ fn derive_pcs_point(cpr_evaluation_point: &[PiopField], num_vars: usize) -> Vec<
     (0..num_vars)
         .map(|i| seed.wrapping_add(i as i128))
         .collect()
+}
+
+/// Reconstruct the full `up_evals` vector from private (prover-supplied)
+/// and public (verifier-computed) column evaluations.
+///
+/// `private_evals` contains evaluations for non-public columns in order.
+/// `public_evals` contains evaluations for public columns, aligned with
+/// `public_columns` indices.
+/// The result is a vector of length `total_cols` with each evaluation
+/// placed at its correct flattened column index.
+#[allow(clippy::arithmetic_side_effects)]
+fn reconstruct_up_evals(
+    private_evals: &[PiopField],
+    public_evals: &[PiopField],
+    public_columns: &[usize],
+    total_cols: usize,
+) -> Vec<PiopField> {
+    let mut full = Vec::with_capacity(total_cols);
+    let public_set: std::collections::HashMap<usize, usize> = public_columns
+        .iter()
+        .enumerate()
+        .map(|(i, &col)| (col, i))
+        .collect();
+    let mut private_idx = 0usize;
+    for col in 0..total_cols {
+        if let Some(&pub_idx) = public_set.get(&col) {
+            full.push(public_evals[pub_idx].clone());
+        } else {
+            full.push(private_evals[private_idx].clone());
+            private_idx += 1;
+        }
+    }
+    debug_assert_eq!(private_idx, private_evals.len());
+    full
+}
+
+/// Reconstruct the full `v_finals` array for a shift sumcheck from
+/// private (prover-supplied) and public (verifier-computed) entries.
+///
+/// `is_public_shift` returns `true` for shift indices whose source column
+/// is public.  Private entries are consumed in order from `private_v_finals`;
+/// public entries are consumed in order from `public_v_finals`.
+#[allow(clippy::arithmetic_side_effects)]
+fn reconstruct_shift_v_finals(
+    private_v_finals: &[PiopField],
+    public_v_finals: &[PiopField],
+    num_shifts: usize,
+    is_public_shift: impl Fn(usize) -> bool,
+) -> Vec<PiopField> {
+    let mut full = Vec::with_capacity(num_shifts);
+    let mut priv_idx = 0usize;
+    let mut pub_idx = 0usize;
+    for i in 0..num_shifts {
+        if is_public_shift(i) {
+            full.push(public_v_finals[pub_idx].clone());
+            pub_idx += 1;
+        } else {
+            full.push(private_v_finals[priv_idx].clone());
+            priv_idx += 1;
+        }
+    }
+    debug_assert_eq!(priv_idx, private_v_finals.len());
+    debug_assert_eq!(pub_idx, public_v_finals.len());
+    full
 }
 
 /// Project only the trace columns referenced by `lookup_specs` to field
@@ -367,12 +453,16 @@ where
     <PiopField as Field>::Inner: FromRef<Zt::Fmod>,
 {
     let total_start = Instant::now();
+    let sig = U::signature();
     let num_constraints = count_constraints::<U>();
     let max_degree = count_max_degree::<U>();
 
     // ── Step 1: PCS Commit ──────────────────────────────────────────
+    // Only commit private (non-public) columns — the verifier knows the
+    // public columns and can reconstruct their evaluations directly.
     let t0 = Instant::now();
-    let (hint, commitment) = ZipPlus::<Zt, Lc>::commit(params, trace)
+    let pcs_trace = private_trace(trace, &sig.public_columns);
+    let (hint, commitment) = ZipPlus::<Zt, Lc>::commit(params, &pcs_trace)
         .expect("PCS commit failed");
     let pcs_commit_time = t0.elapsed();
 
@@ -430,7 +520,6 @@ where
     };
 
     // Extract source columns for shift sumcheck before CPR consumes field_trace.
-    let sig = U::signature();
     let shift_trace_columns: Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>> =
         sig.shifts.iter().map(|spec| field_trace[spec.source_col].clone()).collect();
 
@@ -505,7 +594,7 @@ where
     let (eval_f, proof) =
         ZipPlus::<Zt, Lc>::prove::<PiopField, CHECK>(
             params,
-            trace,
+            &pcs_trace,
             &point,
             &hint,
         )
@@ -534,7 +623,13 @@ where
         .map(|msg| msg.0.tail_evaluations.iter().flat_map(|c| field_to_bytes(c)).collect())
         .collect();
     let cpr_sumcheck_claimed_sum = field_to_bytes(&cpr_proof.sumcheck_proof.claimed_sum);
-    let cpr_up_evals: Vec<Vec<u8>> = cpr_proof.up_evals.iter().map(field_to_bytes).collect();
+    // Only serialize non-public column evaluations — the verifier
+    // computes public column MLE evaluations from the known public data.
+    let cpr_up_evals: Vec<Vec<u8>> = cpr_proof.up_evals.iter()
+        .enumerate()
+        .filter(|(i, _)| !sig.is_public_column(*i))
+        .map(|(_, v)| field_to_bytes(v))
+        .collect();
     let cpr_down_evals: Vec<Vec<u8>> = cpr_proof.down_evals.iter().map(field_to_bytes).collect();
     let evaluation_point_bytes: Vec<Vec<u8>> = cpr_state.evaluation_point.iter().map(field_to_bytes).collect();
     let pcs_evals_bytes: Vec<Vec<u8>> = vec![field_to_bytes(&eval_f)];
@@ -545,7 +640,9 @@ where
             rounds: output.proof.rounds.iter().map(|rp| {
                 rp.evals.iter().flat_map(|e| field_to_bytes(e)).collect()
             }).collect(),
-            v_finals: output.v_finals.iter().map(field_to_bytes).collect(),
+            v_finals: output.v_finals.iter().enumerate()
+                .filter(|(i, _)| !sig.is_public_shift(*i))
+                .map(|(_, v)| field_to_bytes(v)).collect(),
         }
     });
 
@@ -602,11 +699,13 @@ where
     <PiopField as Field>::Inner: FromRef<Zt::Fmod>,
 {
     let total_start = Instant::now();
+    let sig = U::signature();
     let num_constraints = count_constraints::<U>();
     let max_degree = count_max_degree::<U>();
 
     let t0 = Instant::now();
-    let (hint, commitment) = ZipPlus::<Zt, Lc>::commit(params, trace)
+    let pcs_trace = private_trace(trace, &sig.public_columns);
+    let (hint, commitment) = ZipPlus::<Zt, Lc>::commit(params, &pcs_trace)
         .expect("PCS commit failed");
     let pcs_commit_time = t0.elapsed();
 
@@ -794,7 +893,14 @@ where
 
         let batched = BatchedCprLookupProof {
             md_proof,
-            cpr_up_evals: up_evals.clone(),
+            // Only include non-public column evaluations.
+            cpr_up_evals: {
+                up_evals.iter()
+                    .enumerate()
+                    .filter(|(i, _)| !sig.is_public_column(*i))
+                    .map(|(_, v)| v.clone())
+                    .collect()
+            },
             cpr_down_evals: down_evals.clone(),
             lookup_group_meta,
             lookup_group_proofs,
@@ -845,7 +951,7 @@ where
     let (eval_f, proof) =
         ZipPlus::<Zt, Lc>::prove::<PiopField, CHECK>(
             params,
-            trace,
+            &pcs_trace,
             &point,
             &hint,
         )
@@ -868,7 +974,13 @@ where
     // for the no-lookup fallback case.
     let cpr_sumcheck_messages = Vec::new();
     let cpr_sumcheck_claimed_sum = vec![0u8; <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES];
-    let cpr_up_evals_bytes: Vec<Vec<u8>> = cpr_up_evals.iter().map(field_to_bytes).collect();
+    // Only serialize non-public column evaluations — the verifier
+    // computes public column MLE evaluations from the known public data.
+    let cpr_up_evals_bytes: Vec<Vec<u8>> = cpr_up_evals.iter()
+        .enumerate()
+        .filter(|(i, _)| !sig.is_public_column(*i))
+        .map(|(_, v)| field_to_bytes(v))
+        .collect();
     let cpr_down_evals_bytes: Vec<Vec<u8>> = cpr_down_evals.iter().map(field_to_bytes).collect();
     let evaluation_point_bytes: Vec<Vec<u8>> = evaluation_point.iter().map(field_to_bytes).collect();
     let pcs_evals_bytes: Vec<Vec<u8>> = vec![field_to_bytes(&eval_f)];
@@ -932,12 +1044,14 @@ where
     Zt::Eval: ProjectableToField<PcsF>,
 {
     let total_start = Instant::now();
+    let sig = U::signature();
     let num_constraints = count_constraints::<U>();
     let max_degree = count_max_degree::<U>();
 
     // ── Step 1: PCS Commit ──────────────────────────────────────────
     let t0 = Instant::now();
-    let (hint, commitment) = ZipPlus::<Zt, Lc>::commit(params, trace)
+    let pcs_trace = private_trace(trace, &sig.public_columns);
+    let (hint, commitment) = ZipPlus::<Zt, Lc>::commit(params, &pcs_trace)
         .expect("PCS commit failed");
     let pcs_commit_time = t0.elapsed();
 
@@ -991,7 +1105,6 @@ where
 
     // Extract source columns needed for shift sumcheck before CPR consumes
     // field_trace. Only done when the UAIR declares explicit shift specs.
-    let sig = U::signature();
     let shift_trace_columns: Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>> =
         sig.shifts.iter().map(|spec| field_trace[spec.source_col].clone()).collect();
 
@@ -1106,7 +1219,7 @@ where
     let (_eval_f, proof) =
         ZipPlus::<Zt, Lc>::prove::<PcsF, CHECK>(
             params,
-            trace,
+            &pcs_trace,
             &point,
             &hint,
         )
@@ -1134,7 +1247,13 @@ where
         .map(|msg| msg.0.tail_evaluations.iter().flat_map(|c| field_to_bytes(c)).collect())
         .collect();
     let cpr_sumcheck_claimed_sum = field_to_bytes(&cpr_proof.sumcheck_proof.claimed_sum);
-    let cpr_up_evals: Vec<Vec<u8>> = cpr_proof.up_evals.iter().map(field_to_bytes).collect();
+    // Only serialize non-public column evaluations — the verifier
+    // computes public column MLE evaluations from the known public data.
+    let cpr_up_evals: Vec<Vec<u8>> = cpr_proof.up_evals.iter()
+        .enumerate()
+        .filter(|(i, _)| !sig.is_public_column(*i))
+        .map(|(_, v)| field_to_bytes(v))
+        .collect();
     let cpr_down_evals: Vec<Vec<u8>> = cpr_proof.down_evals.iter().map(field_to_bytes).collect();
     let evaluation_point_bytes: Vec<Vec<u8>> = cpr_state.evaluation_point.iter().map(field_to_bytes).collect();
     // PCS evals are in PcsF (potentially wider than PiopField); serialize
@@ -1146,12 +1265,18 @@ where
     };
 
     // Serialize shift sumcheck proof (if present).
+    // Skip v_finals entries whose source column is public — the
+    // verifier will recompute those MLE evaluations itself.
     let shift_sumcheck = shift_sumcheck_output.map(|output| {
         SerializedShiftSumcheckProof {
             rounds: output.proof.rounds.iter().map(|rp| {
                 rp.evals.iter().flat_map(|e| field_to_bytes(e)).collect()
             }).collect(),
-            v_finals: output.v_finals.iter().map(field_to_bytes).collect(),
+            v_finals: output.v_finals.iter()
+                .enumerate()
+                .filter(|(i, _)| !sig.is_public_shift(*i))
+                .map(|(_, v)| field_to_bytes(v))
+                .collect(),
         }
     });
 
@@ -1187,6 +1312,7 @@ pub fn verify_generic<U, R, Zt, Lc, PcsF, const CHECK: bool, IdealOverF, IdealOv
     zinc_proof: &ZincProof,
     num_vars: usize,
     ideal_over_f_from_ref: IdealOverFFromRef,
+    public_column_data: &[DenseMultilinearExtension<R>],
 ) -> VerifyResult
 where
     R: ProjectableToField<PiopField> + crypto_primitives::Semiring + std::fmt::Debug + Clone + Send + Sync + 'static,
@@ -1288,13 +1414,9 @@ where
         .map(|b| field_from_bytes(b, &field_cfg))
         .collect();
 
-    let cpr_proof = zinc_piop::combined_poly_resolver::Proof::<PiopField> {
-        sumcheck_proof: SumcheckProof {
-            messages: cpr_sumcheck_messages,
-            claimed_sum: cpr_claimed_sum,
-        },
-        up_evals: cpr_up_evals,
-        down_evals: cpr_down_evals,
+    let cpr_sumcheck_proof = SumcheckProof {
+        messages: cpr_sumcheck_messages,
+        claimed_sum: cpr_claimed_sum.clone(),
     };
 
     // Compute projecting element and projected scalars for CPR verify.
@@ -1308,15 +1430,91 @@ where
         project_scalars_to_field(projected_scalars_coeffs, &projecting_element)
             .expect("scalar projection failed");
 
-    let cpr_subclaim = match CombinedPolyResolver::<PiopField>::verify_as_subprotocol::<U>(
+    let sig = U::signature();
+
+    // Split CPR verification: pre-sumcheck → sumcheck → reconstruct
+    // public evals → finalize.  We need the sumcheck point before we
+    // can evaluate the public column MLEs.
+    let cpr_pre = match CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<U>(
         &mut transcript,
-        cpr_proof,
+        &cpr_claimed_sum,
         num_constraints,
-        num_vars,
-        max_degree,
         &projecting_element,
         &field_projected_scalars,
-        ic_subclaim,
+        &ic_subclaim,
+        &field_cfg,
+    ) {
+        Ok(pre) => pre,
+        Err(e) => {
+            eprintln!("CPR pre-sumcheck failed: {e:?}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: ic_verify_time,
+                    combined_poly_resolver_verify: t1.elapsed(),
+                    lookup_verify: Duration::ZERO,
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
+    };
+
+    let sumcheck_subclaim = match MLSumcheck::<PiopField>::verify_as_subprotocol(
+        &mut transcript,
+        num_vars,
+        max_degree + 2,
+        &cpr_sumcheck_proof,
+        &field_cfg,
+    ) {
+        Ok(sc) => sc,
+        Err(e) => {
+            eprintln!("CPR sumcheck verification failed: {e:?}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: ic_verify_time,
+                    combined_poly_resolver_verify: t1.elapsed(),
+                    lookup_verify: Duration::ZERO,
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
+    };
+
+    // Reconstruct full up_evals: insert public column evaluations
+    // computed from known public data at the sumcheck challenge point.
+    let full_up_evals = if sig.public_columns.is_empty() {
+        cpr_up_evals
+    } else {
+        let public_evals: Vec<PiopField> = public_column_data.iter()
+            .map(|col| {
+                let mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                    col.iter()
+                        .map(|val| PiopField::from_with_cfg(val.clone(), &field_cfg).into_inner())
+                        .collect();
+                mle.evaluate_with_config(&sumcheck_subclaim.point, &field_cfg)
+                    .expect("public column MLE evaluation should succeed")
+            })
+            .collect();
+        reconstruct_up_evals(
+            &cpr_up_evals,
+            &public_evals,
+            &sig.public_columns,
+            sig.total_cols(),
+        )
+    };
+
+    let cpr_subclaim = match CombinedPolyResolver::<PiopField>::finalize_verifier::<U>(
+        &mut transcript,
+        sumcheck_subclaim.point,
+        sumcheck_subclaim.expected_evaluation,
+        &cpr_pre,
+        full_up_evals,
+        cpr_down_evals,
+        num_vars,
+        &field_projected_scalars,
         &field_cfg,
     ) {
         Ok(subclaim) => subclaim,
@@ -1337,7 +1535,6 @@ where
     let cpr_verify_time = t1.elapsed();
 
     // ── Step 2a: Shift Sumcheck verify ──────────────────────────────
-    let sig = U::signature();
     if let Some(ref ss_proof_data) = zinc_proof.shift_sumcheck {
         assert!(!sig.shifts.is_empty(), "shift_sumcheck present but UAIR has no shifts");
 
@@ -1645,12 +1842,21 @@ where
 /// - `CHECK`: overflow checking flag.
 /// - `IdealOverF`: the field-level ideal type for verification.
 /// - `IdealOverFFromRef`: maps from `IdealOrZero<U::Ideal>` to `IdealOverF`.
+///
+/// # Public columns
+///
+/// `public_column_data` provides the raw BinaryPoly data for columns
+/// declared as public in `U::signature().public_columns`. The verifier
+/// projects these columns to the PIOP field and evaluates their MLEs at
+/// the CPR subclaim point, rather than trusting the prover's claimed
+/// evaluations. Pass `&[]` when the UAIR has no public columns.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn verify<U, Zt, Lc, const D: usize, const CHECK: bool, IdealOverF, IdealOverFFromRef>(
     params: &ZipPlusParams<Zt, Lc>,
     zinc_proof: &ZincProof,
     num_vars: usize,
     ideal_over_f_from_ref: IdealOverFFromRef,
+    public_column_data: &[zinc_poly::mle::DenseMultilinearExtension<BinaryPoly<D>>],
 ) -> VerifyResult
 where
     U: Uair<Scalar = BinaryPoly<D>>,
@@ -1848,13 +2054,44 @@ where
             }
         };
 
-        // CPR finalize: check subclaim[0] against recomputed combination value.
+        // CPR finalize: reconstruct full up_evals (inserting public column
+        // evaluations computed by the verifier) and check the subclaim.
+        let sig = U::signature();
+        let batched_full_up_evals = if sig.public_columns.is_empty() {
+            batched_proof.cpr_up_evals.clone()
+        } else {
+            let binary_poly_projection =
+                BinaryPoly::<D>::prepare_projection(&projecting_element);
+            let public_evals: Vec<PiopField> = public_column_data.iter()
+                .map(|col| {
+                    let mut mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                        col.iter()
+                            .map(|bp| binary_poly_projection(bp).inner().clone())
+                            .collect();
+                    // Pad MLE to shared_num_vars so it matches the batched
+                    // sumcheck point length (lookup may extend by 1 variable).
+                    let target_nv = md_subclaims.point.len();
+                    if target_nv > mle.num_vars {
+                        mle.evaluations.resize(1 << target_nv, Default::default());
+                        mle.num_vars = target_nv;
+                    }
+                    mle.evaluate_with_config(&md_subclaims.point, &field_cfg)
+                        .expect("public column MLE evaluation should succeed")
+                })
+                .collect();
+            reconstruct_up_evals(
+                &batched_proof.cpr_up_evals,
+                &public_evals,
+                &sig.public_columns,
+                sig.total_cols(),
+            )
+        };
         let cpr_sub = match CombinedPolyResolver::<PiopField>::finalize_verifier::<U>(
             &mut transcript,
             md_subclaims.point.clone(),
             md_subclaims.expected_evaluations[0].clone(),
             &cpr_pre,
-            batched_proof.cpr_up_evals.clone(),
+            batched_full_up_evals,
             batched_proof.cpr_down_evals.clone(),
             num_vars,
             &field_projected_scalars,
@@ -1903,23 +2140,97 @@ where
                 }
             }).collect();
             let ss_proof = ShiftSumcheckProof { rounds };
-            let v_finals: Vec<PiopField> = ss_proof_data.v_finals.iter()
+
+            // Deserialize only the private (non-public) v_finals from the proof.
+            let private_v_finals: Vec<PiopField> = ss_proof_data.v_finals.iter()
                 .map(|b| field_from_bytes(b, &field_cfg))
                 .collect();
-            if let Err(e) = shift_sumcheck_verify(
-                &mut transcript, &ss_proof, &claims, &v_finals, num_vars, &field_cfg,
-            ) {
-                eprintln!("Shift sumcheck verification failed (batched): {e}");
-                return VerifyResult {
-                    accepted: false,
-                    timing: VerifyTimingBreakdown {
-                        ideal_check_verify: ic_verify_time,
-                        combined_poly_resolver_verify: t1.elapsed(),
-                        lookup_verify: Duration::ZERO,
-                        pcs_verify: Duration::ZERO,
-                        total: total_start.elapsed(),
-                    },
+
+            let has_public_shifts = sig_batched.shifts.iter()
+                .any(|spec| sig_batched.is_public_column(spec.source_col));
+            if has_public_shifts {
+                let ss_pre = match shift_sumcheck_verify_pre(
+                    &mut transcript, &ss_proof, &claims, num_vars, &field_cfg,
+                ) {
+                    Ok(pre) => pre,
+                    Err(e) => {
+                        eprintln!("Shift sumcheck pre-verify failed (batched): {e}");
+                        return VerifyResult {
+                            accepted: false,
+                            timing: VerifyTimingBreakdown {
+                                ideal_check_verify: ic_verify_time,
+                                combined_poly_resolver_verify: t1.elapsed(),
+                                lookup_verify: Duration::ZERO,
+                                pcs_verify: Duration::ZERO,
+                                total: total_start.elapsed(),
+                            },
+                        };
+                    }
                 };
+
+                // Compute MLE evaluations for public source columns at challenge point s.
+                let binary_poly_projection =
+                    BinaryPoly::<D>::prepare_projection(&projecting_element);
+                // BE → LE for MLE evaluation.
+                let challenge_point_le: Vec<PiopField> =
+                    ss_pre.challenge_point.iter().rev().cloned().collect();
+                let mut public_v_finals: Vec<PiopField> = Vec::new();
+                for spec in &sig_batched.shifts {
+                    if !sig_batched.is_public_column(spec.source_col) {
+                        continue;
+                    }
+                    let pcd_idx = sig_batched.public_columns.iter()
+                        .position(|&c| c == spec.source_col)
+                        .expect("public shift source_col not found in public_columns");
+                    let col = &public_column_data[pcd_idx];
+                    let mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                        col.iter()
+                            .map(|bp| binary_poly_projection(bp).inner().clone())
+                            .collect();
+                    let eval = mle.evaluate_with_config(&challenge_point_le, &field_cfg)
+                        .expect("public shift MLE evaluation should succeed");
+                    public_v_finals.push(eval);
+                }
+
+                let full_v_finals = reconstruct_shift_v_finals(
+                    &private_v_finals,
+                    &public_v_finals,
+                    sig_batched.shifts.len(),
+                    |i| sig_batched.is_public_shift(i),
+                );
+
+                if let Err(e) = shift_sumcheck_verify_finalize(
+                    &mut transcript, &ss_pre, &claims, &full_v_finals, &field_cfg,
+                ) {
+                    eprintln!("Shift sumcheck finalize failed (batched): {e}");
+                    return VerifyResult {
+                        accepted: false,
+                        timing: VerifyTimingBreakdown {
+                            ideal_check_verify: ic_verify_time,
+                            combined_poly_resolver_verify: t1.elapsed(),
+                            lookup_verify: Duration::ZERO,
+                            pcs_verify: Duration::ZERO,
+                            total: total_start.elapsed(),
+                        },
+                    };
+                }
+            } else {
+                // No public shifts: use monolithic verify.
+                if let Err(e) = shift_sumcheck_verify(
+                    &mut transcript, &ss_proof, &claims, &private_v_finals, num_vars, &field_cfg,
+                ) {
+                    eprintln!("Shift sumcheck verification failed (batched): {e}");
+                    return VerifyResult {
+                        accepted: false,
+                        timing: VerifyTimingBreakdown {
+                            ideal_check_verify: ic_verify_time,
+                            combined_poly_resolver_verify: t1.elapsed(),
+                            lookup_verify: Duration::ZERO,
+                            pcs_verify: Duration::ZERO,
+                            total: total_start.elapsed(),
+                        },
+                    };
+                }
             }
         }
 
@@ -1956,7 +2267,7 @@ where
         // ── Sequential (non-batched) CPR + Lookup verification ──────
         let t1 = Instant::now();
 
-        // Reconstruct CPR proof.
+        // Reconstruct CPR sumcheck proof.
         let cpr_sumcheck_messages: Vec<ProverMsg<PiopField>> = zinc_proof
             .cpr_sumcheck_messages
             .iter()
@@ -1970,20 +2281,17 @@ where
             .collect();
 
         let cpr_claimed_sum = field_from_bytes(&zinc_proof.cpr_sumcheck_claimed_sum, &field_cfg);
-        let cpr_up_evals: Vec<PiopField> = zinc_proof.cpr_up_evals.iter()
+        // Deserialize private (non-public) up_evals from the proof.
+        let private_up_evals: Vec<PiopField> = zinc_proof.cpr_up_evals.iter()
             .map(|b| field_from_bytes(b, &field_cfg))
             .collect();
         let cpr_down_evals: Vec<PiopField> = zinc_proof.cpr_down_evals.iter()
             .map(|b| field_from_bytes(b, &field_cfg))
             .collect();
 
-        let cpr_proof = zinc_piop::combined_poly_resolver::Proof::<PiopField> {
-            sumcheck_proof: SumcheckProof {
-                messages: cpr_sumcheck_messages,
-                claimed_sum: cpr_claimed_sum,
-            },
-            up_evals: cpr_up_evals,
-            down_evals: cpr_down_evals,
+        let cpr_sumcheck_proof = SumcheckProof {
+            messages: cpr_sumcheck_messages,
+            claimed_sum: cpr_claimed_sum,
         };
 
         // Compute projecting element and projected scalars for CPR verify.
@@ -2001,22 +2309,100 @@ where
             project_scalars_to_field(projected_scalars_coeffs, &projecting_element)
                 .expect("scalar projection failed");
 
-        let cpr_verify_result = CombinedPolyResolver::<PiopField>::verify_as_subprotocol::<U>(
+        // Use the split CPR API so we can inject public column MLE
+        // evaluations between the sumcheck and the constraint check.
+
+        // Phase 1: pre-sumcheck (draws α, checks claimed_sum vs IC).
+        let cpr_pre = match CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<U>(
             &mut transcript,
-            cpr_proof,
+            &cpr_sumcheck_proof.claimed_sum,
             num_constraints,
-            num_vars,
-            max_degree,
             &projecting_element,
             &field_projected_scalars,
-            ic_subclaim,
+            &ic_subclaim,
             &field_cfg,
-        );
-
-        let cpr_subclaim = match cpr_verify_result {
-            Ok(subclaim) => subclaim,
+        ) {
+            Ok(pre) => pre,
             Err(e) => {
-                eprintln!("CPR verification failed: {e:?}");
+                eprintln!("CPR build_verifier_pre_sumcheck failed: {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        };
+
+        // Phase 2: sumcheck verify → subclaim with evaluation point.
+        let subclaim = match MLSumcheck::<PiopField>::verify_as_subprotocol(
+            &mut transcript,
+            num_vars,
+            max_degree + 2,
+            &cpr_sumcheck_proof,
+            &field_cfg,
+        ) {
+            Ok(sc) => sc,
+            Err(e) => {
+                eprintln!("CPR sumcheck verification failed: {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        };
+
+        // Phase 2b: compute public column MLE evaluations at the
+        // subclaim point and reconstruct full up_evals.
+        let sig = U::signature();
+        let full_up_evals = if sig.public_columns.is_empty() {
+            private_up_evals
+        } else {
+            let binary_poly_projection =
+                BinaryPoly::<D>::prepare_projection(&projecting_element);
+            let public_evals: Vec<PiopField> = public_column_data.iter()
+                .map(|col| {
+                    let mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                        col.iter()
+                            .map(|bp| binary_poly_projection(bp).inner().clone())
+                            .collect();
+                    mle.evaluate_with_config(&subclaim.point, &field_cfg)
+                        .expect("public column MLE evaluation should succeed")
+                })
+                .collect();
+            reconstruct_up_evals(
+                &private_up_evals,
+                &public_evals,
+                &sig.public_columns,
+                sig.total_cols(),
+            )
+        };
+
+        // Phase 3: finalize CPR verifier (checks constraint, absorbs evals).
+        let cpr_subclaim = match CombinedPolyResolver::<PiopField>::finalize_verifier::<U>(
+            &mut transcript,
+            subclaim.point,
+            subclaim.expected_evaluation,
+            &cpr_pre,
+            full_up_evals,
+            cpr_down_evals,
+            num_vars,
+            &field_projected_scalars,
+            &field_cfg,
+        ) {
+            Ok(sub) => sub,
+            Err(e) => {
+                eprintln!("CPR finalize_verifier failed: {e:?}");
                 return VerifyResult {
                     accepted: false,
                     timing: VerifyTimingBreakdown {
@@ -2032,7 +2418,6 @@ where
         let cpr_verify_time = t1.elapsed();
 
         // ── Step 2a: Shift sumcheck verify (sequential path) ────────
-        let sig = U::signature();
         if let Some(ref ss_proof_data) = zinc_proof.shift_sumcheck {
             assert!(!sig.shifts.is_empty(), "shift_sumcheck present but UAIR has no shifts");
 
@@ -2060,24 +2445,104 @@ where
                 }
             }).collect();
             let ss_proof = ShiftSumcheckProof { rounds };
-            let v_finals: Vec<PiopField> = ss_proof_data.v_finals.iter()
+
+            // Deserialize only the private (non-public) v_finals from the proof.
+            let private_v_finals: Vec<PiopField> = ss_proof_data.v_finals.iter()
                 .map(|b| field_from_bytes(b, &field_cfg))
                 .collect();
 
-            if let Err(e) = shift_sumcheck_verify(
-                &mut transcript, &ss_proof, &claims, &v_finals, num_vars, &field_cfg,
-            ) {
-                eprintln!("Shift sumcheck verification failed: {e}");
-                return VerifyResult {
-                    accepted: false,
-                    timing: VerifyTimingBreakdown {
-                        ideal_check_verify: ic_verify_time,
-                        combined_poly_resolver_verify: cpr_verify_time,
-                        lookup_verify: Duration::ZERO,
-                        pcs_verify: Duration::ZERO,
-                        total: total_start.elapsed(),
-                    },
+            // Use split API: replay sumcheck to get challenge point s,
+            // then compute public v_finals before finalizing.
+            let has_public_shifts = sig.shifts.iter().any(|spec| sig.is_public_column(spec.source_col));
+            if has_public_shifts {
+                let ss_pre = match shift_sumcheck_verify_pre(
+                    &mut transcript, &ss_proof, &claims, num_vars, &field_cfg,
+                ) {
+                    Ok(pre) => pre,
+                    Err(e) => {
+                        eprintln!("Shift sumcheck pre-verify failed: {e}");
+                        return VerifyResult {
+                            accepted: false,
+                            timing: VerifyTimingBreakdown {
+                                ideal_check_verify: ic_verify_time,
+                                combined_poly_resolver_verify: cpr_verify_time,
+                                lookup_verify: Duration::ZERO,
+                                pcs_verify: Duration::ZERO,
+                                total: total_start.elapsed(),
+                            },
+                        };
+                    }
                 };
+
+                // Compute MLE evaluations for public source columns
+                // at the shift sumcheck challenge point s.
+                let binary_poly_projection =
+                    BinaryPoly::<D>::prepare_projection(&projecting_element);
+
+                // The challenge point is in BE (sumcheck convention);
+                // MLE evaluate_with_config expects LE ordering.
+                let challenge_point_le: Vec<PiopField> =
+                    ss_pre.challenge_point.iter().rev().cloned().collect();
+
+                // Collect the public v_finals in shift order.
+                let mut public_v_finals: Vec<PiopField> = Vec::new();
+                for spec in &sig.shifts {
+                    if !sig.is_public_column(spec.source_col) {
+                        continue;
+                    }
+                    // Find which public_column_data entry this source_col maps to.
+                    let pcd_idx = sig.public_columns.iter()
+                        .position(|&c| c == spec.source_col)
+                        .expect("public shift source_col not found in public_columns");
+                    let col = &public_column_data[pcd_idx];
+                    let mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                        col.iter()
+                            .map(|bp| binary_poly_projection(bp).inner().clone())
+                            .collect();
+                    let eval = mle.evaluate_with_config(&challenge_point_le, &field_cfg)
+                        .expect("public shift MLE evaluation should succeed");
+                    public_v_finals.push(eval);
+                }
+
+                let full_v_finals = reconstruct_shift_v_finals(
+                    &private_v_finals,
+                    &public_v_finals,
+                    sig.shifts.len(),
+                    |i| sig.is_public_shift(i),
+                );
+
+                if let Err(e) = shift_sumcheck_verify_finalize(
+                    &mut transcript, &ss_pre, &claims, &full_v_finals, &field_cfg,
+                ) {
+                    eprintln!("Shift sumcheck finalize failed: {e}");
+                    return VerifyResult {
+                        accepted: false,
+                        timing: VerifyTimingBreakdown {
+                            ideal_check_verify: ic_verify_time,
+                            combined_poly_resolver_verify: cpr_verify_time,
+                            lookup_verify: Duration::ZERO,
+                            pcs_verify: Duration::ZERO,
+                            total: total_start.elapsed(),
+                        },
+                    };
+                }
+            } else {
+                // No public shifts: use monolithic verify with all v_finals from proof.
+                if let Err(e) = shift_sumcheck_verify(
+                    &mut transcript, &ss_proof, &claims, &private_v_finals, num_vars, &field_cfg,
+                ) {
+                    eprintln!("Shift sumcheck verification failed: {e}");
+                    return VerifyResult {
+                        accepted: false,
+                        timing: VerifyTimingBreakdown {
+                            ideal_check_verify: ic_verify_time,
+                            combined_poly_resolver_verify: cpr_verify_time,
+                            lookup_verify: Duration::ZERO,
+                            pcs_verify: Duration::ZERO,
+                            total: total_start.elapsed(),
+                        },
+                    };
+                }
             }
         }
 
@@ -2266,6 +2731,7 @@ where
 {
     let total_start = Instant::now();
 
+    let sig_bp = U1::signature();
     let bp_num_constraints = count_constraints::<U1>();
     let bp_max_degree = count_max_degree::<U1>();
     let qx_num_constraints = count_constraints::<U2>();
@@ -2273,7 +2739,8 @@ where
 
     // ── Step 1: PCS Commit ──────────────────────────────────────────
     let t0 = Instant::now();
-    let (hint, commitment) = ZipPlus::<Zt, Lc>::commit(params, trace)
+    let pcs_trace = private_trace(trace, &sig_bp.public_columns);
+    let (hint, commitment) = ZipPlus::<Zt, Lc>::commit(params, &pcs_trace)
         .expect("PCS commit failed");
     let pcs_commit_time = t0.elapsed();
 
@@ -2460,7 +2927,7 @@ where
     let (eval_f, proof) =
         ZipPlus::<Zt, Lc>::prove::<PiopField, CHECK>(
             params,
-            trace,
+            &pcs_trace,
             &point,
             &hint,
         )
@@ -2511,12 +2978,18 @@ where
     let qx_cpr_downs: Vec<Vec<u8>> = qx_down_evals.iter().map(field_to_bytes).collect();
 
     // Serialize QX shift sumcheck
+    // Skip v_finals entries whose source column is public — the
+    // verifier will recompute those MLE evaluations itself.
     let qx_shift_sumcheck = qx_shift_sumcheck_output.map(|output| {
         SerializedShiftSumcheckProof {
             rounds: output.proof.rounds.iter().map(|rp| {
                 rp.evals.iter().flat_map(|c| field_to_bytes(c)).collect()
             }).collect(),
-            v_finals: output.v_finals.iter().map(field_to_bytes).collect(),
+            v_finals: output.v_finals.iter()
+                .enumerate()
+                .filter(|(i, _)| !qx_sig.is_public_shift(*i))
+                .map(|(_, v)| field_to_bytes(v))
+                .collect(),
         }
     });
 
@@ -3031,8 +3504,13 @@ pub struct DualCircuitZincProof {
     pub cpr2_down_evals: Vec<Vec<u8>>,
 
     // ── Shift sumcheck for circuit 2 (e.g. ECDSA) ──────────────────
-    /// `None` if circuit 2 has no shift specs.
-    pub c2_shift_sumcheck: Option<SerializedShiftSumcheckProof>,
+    // ── Unified evaluation sumcheck (eq + shift claims) ─────────────
+    /// Batched sumcheck that unifies all column evaluation claims
+    /// (from both circuits) at a single random point.  Contains eq
+    /// claims for every up-eval column and shift claims for every
+    /// explicit-shift down-eval column.  `None` only when there are
+    /// zero columns (should never happen in practice).
+    pub unified_eval_sumcheck: Option<SerializedShiftSumcheckProof>,
 
     // ── Lookup (circuit 1 only) ─────────────────────────────────────
     pub lookup_group_meta: Vec<LookupGroupMeta>,
@@ -3111,6 +3589,8 @@ where
 {
     let total_start = Instant::now();
 
+    let sig1 = U1::signature();
+    let sig2 = U2::signature();
     let c1_num_constraints = count_constraints::<U1>();
     let c1_max_degree = count_max_degree::<U1>();
     let c2_num_constraints = count_constraints::<U2>();
@@ -3118,9 +3598,11 @@ where
 
     // ── Step 1: PCS Commit (both circuits) ──────────────────────────
     let t0 = Instant::now();
-    let (hint1, commitment1) = ZipPlus::<Zt1, Lc1>::commit(params1, trace1)
+    let pcs_trace1 = private_trace(trace1, &sig1.public_columns);
+    let pcs_trace2 = private_trace(trace2, &sig2.public_columns);
+    let (hint1, commitment1) = ZipPlus::<Zt1, Lc1>::commit(params1, &pcs_trace1)
         .expect("PCS1 commit failed");
-    let (hint2, commitment2) = ZipPlus::<Zt2, Lc2>::commit(params2, trace2)
+    let (hint2, commitment2) = ZipPlus::<Zt2, Lc2>::commit(params2, &pcs_trace2)
         .expect("PCS2 commit failed");
     let pcs_commit_time = t0.elapsed();
 
@@ -3225,6 +3707,10 @@ where
     };
 
     // ── Step 8: Build CPR group for circuit 1 ───────────────────────
+    // Clone the field traces before build_prover_group consumes them —
+    // the unified evaluation sumcheck (step 14a) needs the raw MLE
+    // columns to fold during its sumcheck rounds.
+    let c1_field_trace_for_eval = c1_field_trace.clone();
     let mut c1_cpr_group = CombinedPolyResolver::<PiopField>::build_prover_group::<U1>(
         &mut transcript,
         c1_field_trace,
@@ -3272,10 +3758,9 @@ where
     }
 
     // ── Step 10: Build CPR group for circuit 2 ──────────────────────
-    // Extract C2 shift trace columns before build_prover_group consumes c2_field_trace.
-    let c2_sig = U2::signature();
-    let c2_shift_trace_columns: Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>> =
-        c2_sig.shifts.iter().map(|spec| c2_field_trace[spec.source_col].clone()).collect();
+    // Clone ALL c2 field trace columns for the unified eval sumcheck.
+    let c2_field_trace_for_eval: Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>> =
+        c2_field_trace.clone();
 
     let mut c2_cpr_group = CombinedPolyResolver::<PiopField>::build_prover_group::<U2>(
         &mut transcript,
@@ -3370,28 +3855,64 @@ where
         )
         .expect("C2 CPR finalize_prover failed");
 
-    // ── Step 14a: Shift Sumcheck for circuit 2 ─────────────────────
-    let c2_shift_sumcheck_output = if !c2_sig.shifts.is_empty() {
-        let claims: Vec<ShiftClaim<PiopField>> = c2_sig.shifts
-            .iter()
-            .enumerate()
-            .map(|(i, spec)| ShiftClaim {
-                source_col: i,
-                shift_amount: spec.shift_amount,
-                eval_point: c1_cpr_state.evaluation_point.clone(),
-                claimed_eval: c2_down_evals[i].clone(),
-            })
-            .collect();
-        Some(shift_sumcheck_prove(
-            &mut transcript,
-            &claims,
-            &c2_shift_trace_columns,
-            num_vars,
-            &field_cfg,
-        ))
-    } else {
-        None
-    };
+    // ── Step 14a: Unified evaluation sumcheck ───────────────────────
+    //
+    // Batch together:
+    //   • eq-based MLE evaluation claims for EVERY up-eval column from
+    //     both circuits  (shift_amount = 0),
+    //   • genuine shift claims for circuit 2's explicit ShiftSpecs
+    //     (shift_amount > 0).
+    //
+    // After the sumcheck the verifier obtains evaluation claims for all
+    // column MLEs at a single fresh random point ("point unification").
+    let c1_num_up = c1_up_evals.len();
+    let c2_num_up = c2_up_evals.len();
+
+    let mut unified_claims: Vec<ShiftClaim<PiopField>> =
+        Vec::with_capacity(c1_num_up + c2_num_up + sig2.shifts.len());
+
+    // Eq claims for circuit 1 columns.
+    for i in 0..c1_num_up {
+        unified_claims.push(ShiftClaim {
+            source_col: i,
+            shift_amount: 0,
+            eval_point: c1_cpr_state.evaluation_point.clone(),
+            claimed_eval: c1_up_evals[i].clone(),
+        });
+    }
+    // Eq claims for circuit 2 columns.
+    for j in 0..c2_num_up {
+        unified_claims.push(ShiftClaim {
+            source_col: c1_num_up + j,
+            shift_amount: 0,
+            eval_point: c1_cpr_state.evaluation_point.clone(),
+            claimed_eval: c2_up_evals[j].clone(),
+        });
+    }
+    // Shift claims for circuit 2's explicit ShiftSpecs.
+    for (k, spec) in sig2.shifts.iter().enumerate() {
+        unified_claims.push(ShiftClaim {
+            source_col: c1_num_up + spec.source_col,
+            shift_amount: spec.shift_amount,
+            eval_point: c1_cpr_state.evaluation_point.clone(),
+            claimed_eval: c2_down_evals[k].clone(),
+        });
+    }
+
+    // Assemble the combined trace column array:
+    //   [c1_col_0 … c1_col_{m1-1}, c2_col_0 … c2_col_{m2-1}]
+    let mut unified_trace_columns: Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>> =
+        Vec::with_capacity(c1_num_up + c2_num_up);
+    unified_trace_columns.extend(c1_field_trace_for_eval);
+    unified_trace_columns.extend(c2_field_trace_for_eval);
+
+    let unified_eval_output = shift_sumcheck_prove(
+        &mut transcript,
+        &unified_claims,
+        &unified_trace_columns,
+        num_vars,
+        &field_cfg,
+    );
 
     // ── Step 15: Finalize lookup groups ─────────────────────────────
     let mut lookup_group_proofs = Vec::new();
@@ -3424,7 +3945,7 @@ where
     let (eval1_f, proof1) =
         ZipPlus::<Zt1, Lc1>::prove::<PiopField, CHECK>(
             params1,
-            trace1,
+            &pcs_trace1,
             &point1,
             &hint1,
         )
@@ -3437,7 +3958,7 @@ where
     let (eval2_f, proof2) =
         ZipPlus::<Zt2, Lc2>::prove::<PcsF2, CHECK>(
             params2,
-            trace2,
+            &pcs_trace2,
             &point2,
             &hint2,
         )
@@ -3494,14 +4015,12 @@ where
     let cpr2_ups: Vec<Vec<u8>> = c2_up_evals.iter().map(field_to_bytes).collect();
     let cpr2_downs: Vec<Vec<u8>> = c2_down_evals.iter().map(field_to_bytes).collect();
 
-    // Serialize C2 shift sumcheck
-    let c2_shift_sumcheck = c2_shift_sumcheck_output.map(|output| {
-        SerializedShiftSumcheckProof {
-            rounds: output.proof.rounds.iter().map(|rp| {
-                rp.evals.iter().flat_map(|c| field_to_bytes(c)).collect()
-            }).collect(),
-            v_finals: output.v_finals.iter().map(field_to_bytes).collect(),
-        }
+    // Serialize unified evaluation sumcheck
+    let unified_eval_sumcheck = Some(SerializedShiftSumcheckProof {
+        rounds: unified_eval_output.proof.rounds.iter().map(|rp| {
+            rp.evals.iter().flat_map(|c| field_to_bytes(c)).collect()
+        }).collect(),
+        v_finals: unified_eval_output.v_finals.iter().map(field_to_bytes).collect(),
     });
 
     let evaluation_point_bytes: Vec<Vec<u8>> =
@@ -3528,7 +4047,7 @@ where
         cpr1_down_evals: cpr1_downs,
         cpr2_up_evals: cpr2_ups,
         cpr2_down_evals: cpr2_downs,
-        c2_shift_sumcheck,
+        unified_eval_sumcheck,
         lookup_group_meta,
         lookup_group_proofs,
         evaluation_point_bytes,
@@ -3930,6 +4449,8 @@ where
         .iter()
         .map(|b| field_from_bytes(b, &field_cfg))
         .collect();
+    // Save for unified eval sumcheck (finalize_verifier consumes the Vecs).
+    let c1_up_evals_saved = c1_up_evals.clone();
 
     let c1_cpr_subclaim =
         match CombinedPolyResolver::<PiopField>::finalize_verifier::<U1>(
@@ -3970,6 +4491,9 @@ where
         .iter()
         .map(|b| field_from_bytes(b, &field_cfg))
         .collect();
+    // Save for unified eval sumcheck.
+    let c2_up_evals_saved = c2_up_evals.clone();
+    let c2_down_evals_saved = c2_down_evals.clone();
 
     if let Err(e) = CombinedPolyResolver::<PiopField>::finalize_verifier::<U2>(
         &mut transcript,
@@ -3995,28 +4519,47 @@ where
         };
     }
 
-    // ── Shift Sumcheck verify for circuit 2 ─────────────────────────
+    // ── Unified evaluation sumcheck verify ──────────────────────────
     let c2_sig = U2::signature();
-    if let Some(ref ss_proof_data) = proof.c2_shift_sumcheck {
-        assert!(!c2_sig.shifts.is_empty(), "c2_shift_sumcheck present but C2 UAIR has no shifts");
+    if let Some(ref ss_proof_data) = proof.unified_eval_sumcheck {
+        let c1_num_up = c1_up_evals_saved.len();
+        let c2_num_up = c2_up_evals_saved.len();
 
-        let ss_down_evals: Vec<PiopField> = proof.cpr2_down_evals.iter()
-            .map(|b| field_from_bytes(b, &field_cfg))
-            .collect();
-        let claims: Vec<ShiftClaim<PiopField>> = c2_sig.shifts
-            .iter()
-            .enumerate()
-            .map(|(i, spec)| ShiftClaim {
+        let mut unified_claims: Vec<ShiftClaim<PiopField>> =
+            Vec::with_capacity(c1_num_up + c2_num_up + c2_sig.shifts.len());
+
+        // Eq claims for circuit 1 columns.
+        for i in 0..c1_num_up {
+            unified_claims.push(ShiftClaim {
                 source_col: i,
+                shift_amount: 0,
+                eval_point: c1_cpr_subclaim.evaluation_point.clone(),
+                claimed_eval: c1_up_evals_saved[i].clone(),
+            });
+        }
+        // Eq claims for circuit 2 columns.
+        for j in 0..c2_num_up {
+            unified_claims.push(ShiftClaim {
+                source_col: c1_num_up + j,
+                shift_amount: 0,
+                eval_point: c1_cpr_subclaim.evaluation_point.clone(),
+                claimed_eval: c2_up_evals_saved[j].clone(),
+            });
+        }
+        // Shift claims for circuit 2's explicit ShiftSpecs.
+        for (k, spec) in c2_sig.shifts.iter().enumerate() {
+            unified_claims.push(ShiftClaim {
+                source_col: c1_num_up + spec.source_col,
                 shift_amount: spec.shift_amount,
                 eval_point: c1_cpr_subclaim.evaluation_point.clone(),
-                claimed_eval: ss_down_evals[i].clone(),
-            })
-            .collect();
+                claimed_eval: c2_down_evals_saved[k].clone(),
+            });
+        }
 
+        // Deserialize proof rounds.
         let rounds: Vec<ShiftRoundPoly<PiopField>> = ss_proof_data.rounds.iter().map(|bytes| {
             let n = bytes.len() / field_elem_size;
-            assert_eq!(n, 3, "each shift round poly should have 3 evaluations");
+            assert_eq!(n, 3, "each unified eval round poly should have 3 evaluations");
             ShiftRoundPoly {
                 evals: [
                     field_from_bytes(&bytes[0..field_elem_size], &field_cfg),
@@ -4034,12 +4577,12 @@ where
         if let Err(e) = shift_sumcheck_verify(
             &mut transcript,
             &ss_proof,
-            &claims,
+            &unified_claims,
             &v_finals,
             num_vars,
             &field_cfg,
         ) {
-            eprintln!("C2 Shift sumcheck verification failed: {e}");
+            eprintln!("Unified evaluation sumcheck verification failed: {e}");
             return VerifyResult {
                 accepted: false,
                 timing: VerifyTimingBreakdown {

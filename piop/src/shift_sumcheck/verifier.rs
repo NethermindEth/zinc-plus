@@ -130,3 +130,149 @@ where
         v_finals: v_finals.to_vec(),
     })
 }
+
+// ─── Split API ──────────────────────────────────────────────────────────────
+
+/// Intermediate state after replaying the shift sumcheck rounds but
+/// **before** absorbing `v_finals` or checking the final claim.
+///
+/// Use [`shift_sumcheck_verify_pre`] to produce this, then supply
+/// the full `v_finals` (including any verifier-computed entries for
+/// public columns) to [`shift_sumcheck_verify_finalize`].
+#[derive(Clone, Debug)]
+pub struct ShiftSumcheckPreOutput<F: PrimeField> {
+    /// The random challenge point `s ∈ F^m` reconstructed by replaying
+    /// the sumcheck rounds.
+    pub challenge_point: Vec<F>,
+    /// The sumcheck-reduced claim after all rounds.
+    pub current_claim: F,
+    /// The batching coefficients α_i drawn at the start of the protocol.
+    pub alphas: Vec<F>,
+}
+
+/// First phase of the split shift-sumcheck verifier.
+///
+/// Replays the sumcheck rounds (drawing α_i, checking `p(0)+p(1)`,
+/// drawing challenges) and returns the challenge point `s` together
+/// with the reduced claim.  The transcript is advanced exactly as in
+/// the monolithic [`shift_sumcheck_verify`], but `v_finals` are NOT
+/// yet absorbed — the caller can compute public-column entries at `s`
+/// before calling [`shift_sumcheck_verify_finalize`].
+#[allow(clippy::arithmetic_side_effects)]
+pub fn shift_sumcheck_verify_pre<F>(
+    transcript: &mut impl Transcript,
+    proof: &ShiftSumcheckProof<F>,
+    claims: &[ShiftClaim<F>],
+    num_vars: usize,
+    field_cfg: &F::Config,
+) -> Result<ShiftSumcheckPreOutput<F>, String>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Inner: ConstTranscribable + Send + Sync + num_traits::Zero,
+{
+    let k = claims.len();
+    if proof.rounds.len() != num_vars {
+        return Err(format!(
+            "expected {} round polynomials, got {}",
+            num_vars,
+            proof.rounds.len()
+        ));
+    }
+
+    // Draw the same batching coefficients.
+    let alphas: Vec<F> = (0..k)
+        .map(|_| transcript.get_field_challenge(field_cfg))
+        .collect();
+
+    // Combined claim.
+    let combined_claim: F = alphas
+        .iter()
+        .zip(claims.iter())
+        .map(|(a, c)| a.clone() * &c.claimed_eval)
+        .fold(F::zero_with_cfg(field_cfg), |acc, x| acc + &x);
+
+    // Replay the sumcheck rounds.
+    let mut current_claim = combined_claim;
+    let mut challenges = Vec::with_capacity(num_vars);
+    let mut buf = vec![0u8; F::Inner::NUM_BYTES];
+
+    for round_poly in &proof.rounds {
+        let sum = round_poly.evals[0].clone() + &round_poly.evals[1];
+        if sum != current_claim {
+            return Err("round polynomial check failed: p(0) + p(1) != claim".into());
+        }
+        for eval in &round_poly.evals {
+            transcript.absorb_random_field(eval, &mut buf);
+        }
+        let s: F = transcript.get_field_challenge(field_cfg);
+        current_claim = round_poly.evaluate(&s);
+        challenges.push(s);
+    }
+
+    Ok(ShiftSumcheckPreOutput {
+        challenge_point: challenges,
+        current_claim,
+        alphas,
+    })
+}
+
+/// Second phase of the split shift-sumcheck verifier.
+///
+/// Absorbs `v_finals` into the transcript and checks the final claim:
+///
+///   `current_claim == Σ_i α_i · S_{c_i}(s, r_i) · v_i(s)`
+///
+/// `v_finals` must contain one entry per claim, in the same order.
+/// For public source columns, the caller should have computed the
+/// entries from the known column data before calling this function.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn shift_sumcheck_verify_finalize<F>(
+    transcript: &mut impl Transcript,
+    pre: &ShiftSumcheckPreOutput<F>,
+    claims: &[ShiftClaim<F>],
+    v_finals: &[F],
+    field_cfg: &F::Config,
+) -> Result<ShiftSumcheckVerifierOutput<F>, String>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Inner: ConstTranscribable + Send + Sync + num_traits::Zero,
+{
+    let k = claims.len();
+    if v_finals.len() != k {
+        return Err(format!(
+            "expected {} v_finals, got {}",
+            k,
+            v_finals.len()
+        ));
+    }
+
+    // Absorb the v_finals into the transcript.
+    let mut buf = vec![0u8; F::Inner::NUM_BYTES];
+    for v in v_finals {
+        transcript.absorb_random_field(v, &mut buf);
+    }
+
+    // Compute expected final claim:
+    //   final == Σ_i α_i · S_{c_i}(s, r_i) · v_i(s)
+    let mut expected_final = F::zero_with_cfg(field_cfg);
+    for i in 0..k {
+        let eval_point_rev: Vec<F> = claims[i].eval_point.iter().rev().cloned().collect();
+        let h_val = eval_left_shift_predicate(
+            &pre.challenge_point,
+            &eval_point_rev,
+            claims[i].shift_amount,
+        );
+        expected_final =
+            expected_final + &(pre.alphas[i].clone() * &h_val * &v_finals[i]);
+    }
+
+    if pre.current_claim != expected_final {
+        return Err("final claim mismatch: sumcheck reduced value != Σ αᵢ·Sᵢ·vᵢ".into());
+    }
+
+    Ok(ShiftSumcheckVerifierOutput {
+        challenge_point: pre.challenge_point.clone(),
+        source_cols: claims.iter().map(|c| c.source_col).collect(),
+        v_finals: v_finals.to_vec(),
+    })
+}

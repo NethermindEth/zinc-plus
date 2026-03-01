@@ -39,12 +39,15 @@ fn bp_to_u64(bp: &BinaryPoly<32>) -> u64 {
 
 // ─── Column classification for split PCS batches ────────────────────────────
 
-/// Bit-polynomial column indices (0–13): the 10 Q[X] bit-poly columns
-/// plus the 4 F₂[X] columns (S₀, S₁, R₀, R₁).
-pub const POLY_COLUMN_INDICES: [usize; 14] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+/// Bit-polynomial column indices (0–22): the 10 Q[X] bit-poly columns,
+/// 4 F₂[X] columns, 7 auxiliary lookback columns, and 2 selector columns.
+pub const POLY_COLUMN_INDICES: [usize; 23] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+    14, 15, 16, 17, 18, 19, 20, 21, 22,
+];
 
-/// Integer column indices (14–16): the 3 carry columns μ_a, μ_e, μ_W.
-pub const INT_COLUMN_INDICES: [usize; 3] = [14, 15, 16];
+/// Integer column indices (23–25): the 3 carry columns μ_a, μ_e, μ_W.
+pub const INT_COLUMN_INDICES: [usize; 3] = [23, 24, 25];
 
 // ─── GenerateWitness impl ───────────────────────────────────────────────────
 
@@ -80,16 +83,8 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
         let num_rows: usize = 1 << num_vars;
 
         // ── Prepare message block (padded empty message) ────────────────
-        //
-        // For the empty string:
-        //   byte 0   = 0x80
-        //   bytes 1‥55 = 0x00
-        //   bytes 56‥63 = 64-bit big-endian length = 0
-        //
-        // As 32-bit big-endian words:
         let mut msg_block = [0u32; 16];
         msg_block[0] = 0x8000_0000;
-        // msg_block[15] already 0 (length = 0 bits)
 
         // ── Message schedule ────────────────────────────────────────────
         let mut w = [0u32; 64];
@@ -102,8 +97,8 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
         }
 
         // ── Compression: run 64 rounds, recording trace ─────────────────
-        let (mut a, mut b, mut c, mut d) = (H[0], H[1], H[2], H[3]);
-        let (mut e, mut f, mut g, mut h) = (H[4], H[5], H[6], H[7]);
+        let (mut a, mut b_reg, mut c_reg, mut d_reg) = (H[0], H[1], H[2], H[3]);
+        let (mut e, mut f_reg, mut g_reg, mut h_reg) = (H[4], H[5], H[6], H[7]);
 
         // One Vec per column, pre-allocated to num_rows.
         let mut cols: Vec<Vec<BinaryPoly<32>>> =
@@ -116,39 +111,62 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
             cols[2][t] = BinaryPoly::from(w[t]);                  // W_hat
             cols[3][t] = BinaryPoly::from(big_sigma0(a));         // Sigma0_hat
             cols[4][t] = BinaryPoly::from(big_sigma1(e));         // Sigma1_hat
-            cols[5][t] = BinaryPoly::from(maj(a, b, c));          // Maj_hat
-            cols[6][t] = BinaryPoly::from(e & f);                 // ch_ef_hat
-            cols[7][t] = BinaryPoly::from((!e) & g);              // ch_neg_eg_hat
+            cols[5][t] = BinaryPoly::from(maj(a, b_reg, c_reg)); // Maj_hat
+            cols[6][t] = BinaryPoly::from(e & f_reg);            // ch_ef_hat
+            cols[7][t] = BinaryPoly::from((!e) & g_reg);         // ch_neg_eg_hat
 
-            // σ₀ and σ₁ for message schedule (meaningful for t ≥ 16)
-            if t >= 16 {
-                cols[8][t] = BinaryPoly::from(small_sigma0(w[t - 15]));  // sigma0_w_hat
-                cols[9][t] = BinaryPoly::from(small_sigma1(w[t - 2]));   // sigma1_w_hat
+            // σ₀(W_{t−15}) and σ₁(W_{t−2}) for message schedule
+            if t >= 15 {
+                cols[8][t] = BinaryPoly::from(small_sigma0(w[t - 15]));
             }
-            // else: already zero from initialization
+            if t >= 2 {
+                cols[9][t] = BinaryPoly::from(small_sigma1(w[t - 2]));
+            }
 
             // ── F₂[X] columns (10–13): shift quotient/remainder ────────
-            if t >= 16 {
-                // S0: shift quotient = SHR³(W_{t-15}) = W_{t-15} >> 3
-                cols[10][t] = BinaryPoly::from(w[t - 15] >> 3);
-                // S1: shift quotient = SHR¹⁰(W_{t-2}) = W_{t-2} >> 10
-                cols[11][t] = BinaryPoly::from(w[t - 2] >> 10);
-
-                // R0 = W_{t-15} mod X³  (bottom 3 bits)
-                cols[12][t] = BinaryPoly::from(w[t - 15] & 0x7);
-                // R1 = W_{t-2} mod X¹⁰  (bottom 10 bits)
-                cols[13][t] = BinaryPoly::from(w[t - 2] & 0x3FF);
+            if t >= 15 {
+                cols[10][t] = BinaryPoly::from(w[t - 15] >> 3);      // S0
+                cols[12][t] = BinaryPoly::from(w[t - 15] & 0x7);     // R0
+            }
+            if t >= 2 {
+                cols[11][t] = BinaryPoly::from(w[t - 2] >> 10);      // S1
+                cols[13][t] = BinaryPoly::from(w[t - 2] & 0x3FF);    // R1
             }
 
-            // ── Integer columns (14–16): carry values ───────────────────
+            // ── Auxiliary lookback columns (14–20) ──────────────────────
+            // d_hat = a_{t-3}, h_hat = e_{t-3}
+            if t >= 3 {
+                cols[14][t] = BinaryPoly::from(bp_to_u64(&cols[0][t - 3]) as u32);
+                cols[15][t] = BinaryPoly::from(bp_to_u64(&cols[1][t - 3]) as u32);
+            } else {
+                // t = 0,1,2: use initial H values for d and h
+                cols[14][t] = BinaryPoly::from([H[3], H[2], H[1]][t]); // d: H[3],c,b
+                cols[15][t] = BinaryPoly::from([H[7], H[6], H[5]][t]); // h: H[7],g,f
+            }
+
+            // W lookbacks
+            if t >= 2  { cols[16][t] = BinaryPoly::from(w[t - 2]); }
+            if t >= 7  { cols[17][t] = BinaryPoly::from(w[t - 7]); }
+            if t >= 15 { cols[18][t] = BinaryPoly::from(w[t - 15]); }
+            if t >= 16 { cols[19][t] = BinaryPoly::from(w[t - 16]); }
+
+            // K_hat (round constant)
+            cols[20][t] = BinaryPoly::from(K[t]);
+
+            // ── Selector columns (21–22) ────────────────────────────────
+            cols[21][t] = BinaryPoly::from(1u32);  // sel_round = 1 for t < 64
+            if t >= 16 {
+                cols[22][t] = BinaryPoly::from(1u32);  // sel_sched = 1 for t >= 16
+            }
+
+            // ── Integer columns (23–25): carry values ───────────────────
             let sigma1_val = big_sigma1(e);
-            let ch_val = ch(e, f, g);
+            let ch_val = ch(e, f_reg, g_reg);
             let sigma0_val = big_sigma0(a);
-            let maj_val = maj(a, b, c);
+            let maj_val = maj(a, b_reg, c_reg);
 
             // μ_a: carry for a-update
-            // a[t+1] = h + Σ₁(e) + Ch(e,f,g) + K_t + W + Σ₀(a) + Maj(a,b,c)
-            let sum_a: u64 = h as u64
+            let sum_a: u64 = h_reg as u64
                 + sigma1_val as u64
                 + ch_val as u64
                 + K[t] as u64
@@ -156,18 +174,17 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
                 + sigma0_val as u64
                 + maj_val as u64;
             let mu_a_val = (sum_a >> 32) as u32;
-            cols[14][t] = BinaryPoly::from(mu_a_val);             // mu_a
+            cols[23][t] = BinaryPoly::from(mu_a_val);
 
             // μ_e: carry for e-update
-            // e[t+1] = d + h + Σ₁(e) + Ch(e,f,g) + K_t + W
-            let sum_e: u64 = d as u64
-                + h as u64
+            let sum_e: u64 = d_reg as u64
+                + h_reg as u64
                 + sigma1_val as u64
                 + ch_val as u64
                 + K[t] as u64
                 + w[t] as u64;
             let mu_e_val = (sum_e >> 32) as u32;
-            cols[15][t] = BinaryPoly::from(mu_e_val);             // mu_e
+            cols[24][t] = BinaryPoly::from(mu_e_val);
 
             // μ_W: carry for message schedule recurrence (t ≥ 16)
             if t >= 16 {
@@ -176,35 +193,103 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
                     + w[t - 7] as u64
                     + small_sigma1(w[t - 2]) as u64;
                 let mu_w_val = (sum_w >> 32) as u32;
-                cols[16][t] = BinaryPoly::from(mu_w_val);         // mu_W
+                cols[25][t] = BinaryPoly::from(mu_w_val);
             }
 
             // ── SHA-256 round function ──────────────────────────────────
-            let t1 = h
+            let t1 = h_reg
                 .wrapping_add(sigma1_val)
                 .wrapping_add(ch_val)
                 .wrapping_add(K[t])
                 .wrapping_add(w[t]);
             let t2 = sigma0_val.wrapping_add(maj_val);
 
-            h = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(t1);
-            d = c;
-            c = b;
-            b = a;
+            h_reg = g_reg;
+            g_reg = f_reg;
+            f_reg = e;
+            e = d_reg.wrapping_add(t1);
+            d_reg = c_reg;
+            c_reg = b_reg;
+            b_reg = a;
             a = t1.wrapping_add(t2);
         }
 
         // ── Row 64: final state ─────────────────────────────────────────
+        cols[0][64] = BinaryPoly::from(a);
+        cols[1][64] = BinaryPoly::from(e);
+
+        // Populate Σ₀/Σ₁ at row 64 so C1/C2 hold there.
+        cols[3][64] = BinaryPoly::from(big_sigma0(a));
+        cols[4][64] = BinaryPoly::from(big_sigma1(e));
+
+        // ── Extended auxiliary columns beyond row 64 ─────────────────────
+        // The linking constraints require auxiliary columns to be populated
+        // beyond the 65 active rows. We extend each auxiliary column to
+        // cover shifted references:
+        //   d_hat[t] for t up to 67 (shift-by-3 at t=64)
+        //   h_hat[t] for t up to 67
+        //   W_tm2[t]  for t up to 65
+        //   W_tm7[t]  for t up to 70
+        //   W_tm15[t] for t up to 78
+        //   W_tm16[t] for t up to 79
         //
-        // Row 64 (= row index for the 65th entry) holds the final-state
-        // values â[65] and ê[65] so that the carry constraints C10/C11
-        // at row 63 (which reference down[COL_A_HAT] and down[COL_E_HAT])
-        // are satisfied.
-        cols[0][64] = BinaryPoly::from(a);   // a after all 64 rounds
-        cols[1][64] = BinaryPoly::from(e);   // e after all 64 rounds
+        // Also extend σ₀_w, σ₁_w, S₀, S₁, R₀, R₁ to cover
+        // the range where their W lookback source is valid.
+
+        // d_hat: d[t] = a[t-3] for t=64..67
+        for t in 64..68.min(num_rows) {
+            if t >= 3 {
+                cols[14][t] = BinaryPoly::from(bp_to_u64(&cols[0][t - 3]) as u32);
+            }
+        }
+        // h_hat: h[t] = e[t-3] for t=64..67
+        for t in 64..68.min(num_rows) {
+            if t >= 3 {
+                cols[15][t] = BinaryPoly::from(bp_to_u64(&cols[1][t - 3]) as u32);
+            }
+        }
+        // W_tm2: W[t-2] for t=64..65
+        for t in 64..66.min(num_rows) {
+            if t >= 2 && t - 2 < 64 {
+                cols[16][t] = BinaryPoly::from(w[t - 2]);
+            }
+        }
+        // W_tm7: W[t-7] for t=64..70
+        for t in 64..71.min(num_rows) {
+            if t >= 7 && t - 7 < 64 {
+                cols[17][t] = BinaryPoly::from(w[t - 7]);
+            }
+        }
+        // W_tm15: W[t-15] for t=64..78
+        for t in 64..79.min(num_rows) {
+            if t >= 15 && t - 15 < 64 {
+                cols[18][t] = BinaryPoly::from(w[t - 15]);
+            }
+        }
+        // W_tm16: W[t-16] for t=64..79
+        for t in 64..80.min(num_rows) {
+            if t >= 16 && t - 16 < 64 {
+                cols[19][t] = BinaryPoly::from(w[t - 16]);
+            }
+        }
+        // σ₀_w, S₀, R₀: extend to cover W_tm15 range (t=64..78)
+        for t in 64..79.min(num_rows) {
+            if t >= 15 && t - 15 < 64 {
+                let wback = w[t - 15];
+                cols[8][t]  = BinaryPoly::from(small_sigma0(wback));
+                cols[10][t] = BinaryPoly::from(wback >> 3);
+                cols[12][t] = BinaryPoly::from(wback & 0x7);
+            }
+        }
+        // σ₁_w, S₁, R₁: extend to cover W_tm2 range (t=64..65)
+        for t in 64..66.min(num_rows) {
+            if t >= 2 && t - 2 < 64 {
+                let wback = w[t - 2];
+                cols[9][t]  = BinaryPoly::from(small_sigma1(wback));
+                cols[11][t] = BinaryPoly::from(wback >> 10);
+                cols[13][t] = BinaryPoly::from(wback & 0x3FF);
+            }
+        }
 
         // ── Convert column vectors into DenseMultilinearExtensions ──────
         cols.into_iter()
@@ -323,7 +408,7 @@ mod tests {
         let mut rng = rand::rng();
         let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(NUM_VARS, &mut rng);
 
-        // Verify dimensions: 17 columns, 128 rows each.
+        // Verify dimensions: 26 columns, 128 rows each.
         assert_eq!(trace.len(), NUM_COLS);
         for col in &trace {
             assert_eq!(col.evaluations.len(), 1 << NUM_VARS);
@@ -407,21 +492,19 @@ mod tests {
         let mut rng = rand::rng();
         let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(NUM_VARS, &mut rng);
 
-        for t in 16..64 {
-            // S0 = SHR³(W_{t-15})   — column 10
+        // σ₀ decomposition: populated from t=15 (where W[t-15] exists)
+        for t in 15..64 {
             let s0 = bp_to_u64(&trace[10].evaluations[t]) as u32;
-            // R0 = W_{t-15} mod X³  — column 12
             let r0 = bp_to_u64(&trace[12].evaluations[t]) as u32;
-
-            // w[t-15] from W column at row t-15
             let w_tm15 = bp_to_u64(&trace[2].evaluations[t - 15]) as u32;
             assert_eq!(s0, w_tm15 >> 3, "S0 = SHR³(W[t-15]) at round {t}");
             assert_eq!(r0, w_tm15 & 0x7, "R0 = W[t-15] mod X³ at round {t}");
             assert_eq!(w_tm15, r0 | (s0 << 3), "W[t-15] = R0 + X³·S0 at round {t}");
+        }
 
-            // S1 = SHR¹⁰(W_{t-2})  — column 11
+        // σ₁ decomposition: populated from t=2 (where W[t-2] exists)
+        for t in 2..64 {
             let s1 = bp_to_u64(&trace[11].evaluations[t]) as u32;
-            // R1 = W_{t-2} mod X¹⁰ — column 13
             let r1 = bp_to_u64(&trace[13].evaluations[t]) as u32;
             let w_tm2 = bp_to_u64(&trace[2].evaluations[t - 2]) as u32;
             assert_eq!(s1, w_tm2 >> 10, "S1 = SHR¹⁰(W[t-2]) at round {t}");
@@ -436,13 +519,14 @@ mod tests {
         let mut rng = rand::rng();
         let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(NUM_VARS, &mut rng);
 
-        for t in 16..64 {
+        for t in 15..64 {
             let w_tm15 = bp_to_u64(&trace[2].evaluations[t - 15]) as u32;
-            let w_tm2 = bp_to_u64(&trace[2].evaluations[t - 2]) as u32;
             let sigma0_w = bp_to_u64(&trace[8].evaluations[t]) as u32;
-            let sigma1_w = bp_to_u64(&trace[9].evaluations[t]) as u32;
-
             assert_eq!(sigma0_w, small_sigma0(w_tm15), "σ₀(W[t-15]) mismatch at round {t}");
+        }
+        for t in 2..64 {
+            let w_tm2 = bp_to_u64(&trace[2].evaluations[t - 2]) as u32;
+            let sigma1_w = bp_to_u64(&trace[9].evaluations[t]) as u32;
             assert_eq!(sigma1_w, small_sigma1(w_tm2), "σ₁(W[t-2]) mismatch at round {t}");
         }
     }
@@ -491,7 +575,7 @@ mod tests {
             let w_val = bp_to_u64(&trace[2].evaluations[t]);
             let sigma0_val = bp_to_u64(&trace[3].evaluations[t]);
             let maj_val = bp_to_u64(&trace[5].evaluations[t]);
-            let mu_a_val = bp_to_u64(&trace[14].evaluations[t]);  // col 14
+            let mu_a_val = bp_to_u64(&trace[23].evaluations[t]);  // col 23
 
             let a_next = bp_to_u64(&trace[0].evaluations[t + 1]);
 
@@ -506,7 +590,7 @@ mod tests {
             );
 
             // e-update carry
-            let mu_e_val = bp_to_u64(&trace[15].evaluations[t]);  // col 15
+            let mu_e_val = bp_to_u64(&trace[24].evaluations[t]);  // col 24
             let e_next = bp_to_u64(&trace[1].evaluations[t + 1]);
 
             let sum_e = d_val + h_val + sigma1_val + ch_ef_val
@@ -533,7 +617,7 @@ mod tests {
             let sigma0_w = bp_to_u64(&trace[8].evaluations[t]);
             let w_tm7 = bp_to_u64(&trace[2].evaluations[t - 7]);
             let sigma1_w = bp_to_u64(&trace[9].evaluations[t]);
-            let mu_w_val = bp_to_u64(&trace[16].evaluations[t]);  // col 16
+            let mu_w_val = bp_to_u64(&trace[25].evaluations[t]);  // col 25
 
             let sum_w = w_tm16 + sigma0_w + w_tm7 + sigma1_w;
 

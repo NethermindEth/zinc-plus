@@ -59,7 +59,7 @@ fn qx_ideal_check_succeeds_on_valid_sha256_witness() {
 
     println!("SHA-256 Q[X] UAIR: {} constraints, max degree {}", num_constraints, max_degree);
     assert_eq!(num_constraints, 3, "Expected 3 Q[X] constraints");
-    assert_eq!(max_degree, 1, "Expected max degree 1");
+    assert_eq!(max_degree, 2, "Expected max degree 2 (selector * carry)");
 
     // Step 3: Project trace and scalars for IdealCheck
     let mut transcript = zinc_transcript::KeccakTranscript::new();

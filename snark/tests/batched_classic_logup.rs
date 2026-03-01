@@ -123,11 +123,18 @@ fn batched_classic_logup_round_trip() {
     );
 
     // ── Verify ─────────────────────────────────────────────────────
+    // Public columns (W_hat = col 2, K_hat = col 20).
+    let sha_public_cols = vec![
+        trace[zinc_sha256_uair::COL_W_HAT].clone(),
+        trace[zinc_sha256_uair::COL_K_HAT].clone(),
+    ];
+
     let verify_result = pipeline::verify::<Sha256Uair, Zt, Lc, 32, UNCHECKED, _, _>(
         &params,
         &zinc_proof,
         num_vars,
         |_ideal: &IdealOrZero<CyclotomicIdeal>| pipeline::TrivialIdeal,
+        &sha_public_cols,
     );
 
     println!("\nBatched classic LogUp verifier completed:");

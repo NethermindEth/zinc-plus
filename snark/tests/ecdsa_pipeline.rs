@@ -126,6 +126,13 @@ fn ecdsa_pipeline_round_trip() {
     );
 
     // ── Verify ──────────────────────────────────────────────────────
+    // Public columns b_1 (col 0) and b_2 (col 1) — the verifier
+    // must supply these to reconstruct the full evaluation set.
+    let public_column_data: Vec<DenseMultilinearExtension<Int<{ INT_LIMBS * 4 }>>> = vec![
+        trace[0].clone(),  // b_1
+        trace[1].clone(),  // b_2
+    ];
+
     let verify_result = pipeline::verify_generic::<
         EcdsaUairInt,                           // U: Uair<Scalar=Int<4>>
         Int<{ INT_LIMBS * 4 }>,                 // R = Int<4>
@@ -145,6 +152,7 @@ fn ecdsa_pipeline_round_trip() {
                 IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
             }
         },
+        &public_column_data,
     );
 
     println!("\nECDSA Int<4> pipeline verifier completed:");

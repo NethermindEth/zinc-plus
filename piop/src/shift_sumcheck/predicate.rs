@@ -219,7 +219,16 @@ where
 {
     let m = r.len();
     let n = 1usize << m;
-    assert!(c > 0 && c < n, "shift c must satisfy 0 < c < 2^m");
+
+    // shift_amount = 0: the "shift" is the identity, so the table is
+    // just eq*(r, ·).  This allows MLE evaluation claims  sum_b MLE[v](b)·eq(b,r)=v(r)
+    // to participate in the same batched sumcheck as genuine shift claims.
+    if c == 0 {
+        return build_eq_x_r_inner(r, field_cfg)
+            .expect("build_eq_x_r_inner should succeed");
+    }
+
+    assert!(c < n, "shift c must satisfy c < 2^m");
 
     let eq_table = build_eq_x_r_inner(r, field_cfg)
         .expect("build_eq_x_r_inner should succeed");
@@ -249,6 +258,10 @@ pub fn eval_left_shift_predicate<F: PrimeField>(
     y: &[F],
     c: usize,
 ) -> F {
+    // shift_amount = 0: the predicate is simply eq*(x, y).
+    if c == 0 {
+        return eval_eq_poly(x, y);
+    }
     // L_c(x, y) = S_c(y, x)
     eval_shift_predicate(y, x, c)
 }

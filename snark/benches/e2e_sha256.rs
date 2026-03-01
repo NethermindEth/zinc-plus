@@ -626,6 +626,13 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
     let ecdsa_trace = generate_zero_scalar_trace(ECDSA_NUM_VARS, ECDSA_BATCH_SIZE);
     assert_eq!(ecdsa_trace.len(), ECDSA_BATCH_SIZE);
 
+    // Public columns for ECDSA verifier (b_1 = col 0, b_2 = col 1).
+    let ec_public_cols = vec![ecdsa_trace[0].clone(), ecdsa_trace[1].clone()];
+    let sha_public_cols = vec![
+        sha_trace[zinc_sha256_uair::COL_W_HAT].clone(),
+        sha_trace[zinc_sha256_uair::COL_K_HAT].clone(),
+    ];
+
     // ── PCS params ──────────────────────────────────────────────────
     // SHA: BinaryPoly<32>, R4B64 DEPTH=1 → row_len = 64 × 8 = 512 ✓
     type ShaZt = Sha256ZipTypes<i64, 32>;
@@ -703,6 +710,7 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
                 let sha_r = zinc_snark::pipeline::verify::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED, _, _>(
                     &sha_params, &sha_zinc_proof, SHA256_8X_NUM_VARS,
                     |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                    &sha_public_cols,
                 );
                 let _ = black_box(sha_r);
                 let ec_r = zinc_snark::pipeline::verify_generic::<
@@ -713,6 +721,7 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
                         IdealOrZero::Zero => EcdsaIdealOverF,
                         IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
                     },
+                    &ec_public_cols,
                 );
                 let _ = black_box(ec_r);
             });
@@ -1095,6 +1104,11 @@ fn sha256_8x_ecdsa_end_to_end(c: &mut Criterion) {
 
     let ecdsa_trace = generate_zero_scalar_trace(ECDSA_NUM_VARS, ECDSA_BATCH_SIZE);
     assert_eq!(ecdsa_trace.len(), ECDSA_BATCH_SIZE);
+    let ec_public_cols = vec![ecdsa_trace[0].clone(), ecdsa_trace[1].clone()];
+    let sha_public_cols = vec![
+        sha_trace[zinc_sha256_uair::COL_W_HAT].clone(),
+        sha_trace[zinc_sha256_uair::COL_K_HAT].clone(),
+    ];
 
     // ── PCS params ──────────────────────────────────────────────────
     type ShaZt = Sha256ZipTypes<i64, 32>;
@@ -1148,6 +1162,7 @@ fn sha256_8x_ecdsa_end_to_end(c: &mut Criterion) {
             let sha_r = zinc_snark::pipeline::verify::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED, _, _>(
                 &sha_params, &sha_proof, SHA256_8X_NUM_VARS,
                 |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                &sha_public_cols,
             );
             let _ = black_box(sha_r);
             let ec_r = zinc_snark::pipeline::verify_generic::<
@@ -1158,6 +1173,7 @@ fn sha256_8x_ecdsa_end_to_end(c: &mut Criterion) {
                     IdealOrZero::Zero => EcdsaIdealOverF,
                     IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
                 },
+                &ec_public_cols,
             );
             let _ = black_box(ec_r);
         });
@@ -1199,6 +1215,10 @@ fn sha256_full_pipeline(c: &mut Criterion) {
     group.sample_size(20);
 
     let trace = generate_sha256_trace(SHA256_NUM_VARS);
+    let sha_public_cols = vec![
+        trace[zinc_sha256_uair::COL_W_HAT].clone(),
+        trace[zinc_sha256_uair::COL_K_HAT].clone(),
+    ];
     let num_vars = SHA256_NUM_VARS;
     let linear_code = Lc::new(128);
     let params = ZipPlusParams::new(num_vars, 1, linear_code);
@@ -1237,6 +1257,7 @@ fn sha256_full_pipeline(c: &mut Criterion) {
                 &zinc_proof,
                 num_vars,
                 |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                &sha_public_cols,
             );
             black_box(result);
         });
@@ -1381,6 +1402,11 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
 
     let ecdsa_trace = generate_zero_scalar_trace(ECDSA_NUM_VARS, ECDSA_BATCH_SIZE);
     assert_eq!(ecdsa_trace.len(), ECDSA_BATCH_SIZE);
+    let ec_public_cols = vec![ecdsa_trace[0].clone(), ecdsa_trace[1].clone()];
+    let sha_public_cols = vec![
+        sha_trace[zinc_sha256_uair::COL_W_HAT].clone(),
+        sha_trace[zinc_sha256_uair::COL_K_HAT].clone(),
+    ];
 
     // ── PCS params ──────────────────────────────────────────────────
     type ShaZt = Sha256ZipTypes<i64, 32>;
@@ -1499,6 +1525,7 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
             let sha_r = zinc_snark::pipeline::verify::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED, _, _>(
                 &sha_params, &batched_sha_proof, SHA256_8X_NUM_VARS,
                 |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                &sha_public_cols,
             );
             let _ = black_box(sha_r);
             let ec_r = zinc_snark::pipeline::verify_generic::<
@@ -1509,6 +1536,7 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
                     IdealOrZero::Zero => EcdsaIdealOverF,
                     IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
                 },
+                &ec_public_cols,
             );
             let _ = black_box(ec_r);
         });
@@ -1520,6 +1548,7 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
             let sha_r = zinc_snark::pipeline::verify::<Sha256Uair, ShaZt, ShaLc, 32, UNCHECKED, _, _>(
                 &sha_params, &separate_sha_proof, SHA256_8X_NUM_VARS,
                 |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                &sha_public_cols,
             );
             let _ = black_box(sha_r);
             let ec_r = zinc_snark::pipeline::verify_generic::<
@@ -1530,6 +1559,7 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
                     IdealOrZero::Zero => EcdsaIdealOverF,
                     IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
                 },
+                &ec_public_cols,
             );
             let _ = black_box(ec_r);
         });

@@ -17,7 +17,7 @@ use zinc_poly::{
         dynamic::over_fixed_semiring::DynamicPolynomialFS, ideal::DegreeOneIdeal,
     },
 };
-use zinc_uair::{ConstraintBuilder, TraceRow, Uair, UairSignature};
+use zinc_uair::{ConstraintBuilder, ShiftSpec, TraceRow, Uair, UairSignature};
 use zinc_utils::from_ref::FromRef;
 
 pub use generate_witness::*;
@@ -35,6 +35,7 @@ impl<R: Semiring + 'static> Uair for TestUairSimpleMultiplication<R> {
             arbitrary_poly_cols: 3,
             int_cols: 0,
             shifts: vec![],
+            public_columns: vec![],
         }
     }
 
@@ -137,6 +138,7 @@ impl<const LIMBS: usize> Uair for TestAirNoMultiplication<LIMBS> {
             arbitrary_poly_cols: 3,
             int_cols: 0,
             shifts: vec![],
+            public_columns: vec![],
         }
     }
 
@@ -204,6 +206,7 @@ impl<const LIMBS: usize> Uair for TestAirScalarMultiplications<LIMBS> {
             arbitrary_poly_cols: 3,
             int_cols: 0,
             shifts: vec![],
+            public_columns: vec![],
         }
     }
 
@@ -253,6 +256,7 @@ impl Uair for BinaryDecompositionUair {
             arbitrary_poly_cols: 0,
             int_cols: 1,
             shifts: vec![],
+            public_columns: vec![],
         }
     }
 
@@ -313,6 +317,7 @@ impl Uair for BigLinearUair {
             arbitrary_poly_cols: 0,
             int_cols: 1,
             shifts: vec![],
+            public_columns: vec![],
         }
     }
 
@@ -400,6 +405,148 @@ impl GenerateMultiTypeWitness for BigLinearUair {
             .sum();
 
         (binary_poly_cols, vec![], vec![int_col])
+    }
+}
+
+/// A simple UAIR with one public column for testing the public-inputs
+/// pipeline.
+///
+/// Layout: 2 binary_poly columns.
+/// - Column 0 (`a`): private witness.
+/// - Column 1 (`b`): public input.
+///
+/// Single constraint: `a - b = 0` (i.e. `a = b`).
+/// In F₂\[X\], subtraction is the same as addition (XOR).
+pub struct PublicColumnTestUair;
+
+impl Uair for PublicColumnTestUair {
+    type Ideal = ImpossibleIdeal;
+    type Scalar = BinaryPoly<32>;
+
+    fn signature() -> UairSignature {
+        UairSignature {
+            binary_poly_cols: 2,
+            arbitrary_poly_cols: 0,
+            int_cols: 0,
+            shifts: vec![],
+            // Column 1 is public.
+            public_columns: vec![1],
+        }
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        // a = b
+        b.assert_zero(up.binary_poly[0].clone() - &up.binary_poly[1]);
+    }
+}
+
+impl GenerateMultiTypeWitness for PublicColumnTestUair {
+    type PolyCoeff = u32;
+    type Int = u32;
+
+    fn generate_witness<R: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut R,
+    ) -> (
+        Vec<DenseMultilinearExtension<BinaryPoly<32>>>,
+        Vec<DenseMultilinearExtension<DensePolynomial<Self::PolyCoeff, 32>>>,
+        Vec<DenseMultilinearExtension<Self::Int>>,
+    ) {
+        // Both columns have identical values (satisfying a = b).
+        let col: DenseMultilinearExtension<BinaryPoly<32>> =
+            (0..(1 << num_vars)).map(|_| rng.random()).collect();
+        let col_copy = col.clone();
+        (vec![col, col_copy], vec![], vec![])
+    }
+}
+
+/// A UAIR that exercises **shifted public columns**.
+///
+/// Layout: 2 binary_poly columns.
+/// - Column 0 (`a`): private witness.
+/// - Column 1 (`b`): public input.
+///
+/// One shift: left-shift-by-1 of column 1.
+///   `shift_1(b)[i] = b[i+1]` for `i < N−1`, `0` for `i = N−1`.
+///
+/// Constraint: `a - shift_1(b) = 0` (i.e. `a[i] = b[i+1]`).
+///
+/// The verifier must evaluate the MLE of the (unshifted) source column
+/// `b` at the shift sumcheck challenge point by itself, since column 1
+/// is public.
+pub struct PublicShiftTestUair;
+
+impl Uair for PublicShiftTestUair {
+    type Ideal = ImpossibleIdeal;
+    type Scalar = BinaryPoly<32>;
+
+    fn signature() -> UairSignature {
+        UairSignature {
+            binary_poly_cols: 2,
+            arbitrary_poly_cols: 0,
+            int_cols: 0,
+            // Shift-by-1 of column 1 (the public column).
+            shifts: vec![ShiftSpec {
+                source_col: 1,
+                shift_amount: 1,
+            }],
+            // Column 1 is public.
+            public_columns: vec![1],
+        }
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        // a = shift_1(b)
+        // down.binary_poly[0] is the shift-by-1 of column 1.
+        b.assert_zero(up.binary_poly[0].clone() - &down.binary_poly[0]);
+    }
+}
+
+impl GenerateMultiTypeWitness for PublicShiftTestUair {
+    type PolyCoeff = u32;
+    type Int = u32;
+
+    fn generate_witness<R: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut R,
+    ) -> (
+        Vec<DenseMultilinearExtension<BinaryPoly<32>>>,
+        Vec<DenseMultilinearExtension<DensePolynomial<Self::PolyCoeff, 32>>>,
+        Vec<DenseMultilinearExtension<Self::Int>>,
+    ) {
+        let n = 1usize << num_vars;
+        // Column b: random public input.
+        let b_vals: Vec<BinaryPoly<32>> = (0..n).map(|_| rng.random()).collect();
+        // Column a: a[i] = b[i+1] for i < N-1, a[N-1] = 0.
+        let mut a_vals: Vec<BinaryPoly<32>> = Vec::with_capacity(n);
+        for i in 0..n {
+            if i + 1 < n {
+                a_vals.push(b_vals[i + 1].clone());
+            } else {
+                a_vals.push(BinaryPoly::zero());
+            }
+        }
+        let col_a: DenseMultilinearExtension<BinaryPoly<32>> = a_vals.into_iter().collect();
+        let col_b: DenseMultilinearExtension<BinaryPoly<32>> = b_vals.into_iter().collect();
+        (vec![col_a, col_b], vec![], vec![])
     }
 }
 

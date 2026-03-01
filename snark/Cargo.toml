@@ -31,6 +31,7 @@ thiserror = { workspace = true }
 criterion = { workspace = true }
 flate2 = "1.1"
 rayon = { workspace = true }
+zinc-test-uair = { workspace = true }
 
 [features]
 parallel = [
