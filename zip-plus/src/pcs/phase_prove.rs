@@ -53,6 +53,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let num_rows = pp.num_rows;
         let row_len = pp.linear_code.row_len();
         let mut transcript = PcsTranscript::new();
+        // TODO: field config must be derived after absorbing the witness commitments
         let field_cfg = transcript
             .fs_transcript
             .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
