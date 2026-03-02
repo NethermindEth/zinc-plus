@@ -87,7 +87,8 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             &[],
             &projecting_element,
         );
-        let scalars_f = project_scalars_to_field(projected_scalars, &projecting_element).unwrap();
+        let scalars_f = project_scalars_to_field(projected_scalars, &projecting_element)
+            .expect("failed to project scalars to field");
 
         let (cpr_proof, cpr_state) =
             CombinedPolyResolver::prove_as_subprotocol::<TestAirNoMultiplication<INT_LIMBS>>(
@@ -243,7 +244,8 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             &[],
             &projecting_element,
         );
-        let scalars_f = project_scalars_to_field(projected_scalars, &projecting_element).unwrap();
+        let scalars_f = project_scalars_to_field(projected_scalars, &projecting_element)
+            .expect("failed to project scalars to field");
 
         let (cpr_proof, cpr_state) = CombinedPolyResolver::prove_as_subprotocol::<
             TestUairSimpleMultiplication<Int<INT_LIMBS>>,
