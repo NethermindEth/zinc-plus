@@ -1,5 +1,4 @@
 use crypto_primitives::{FromWithConfig, PrimeField, Semiring};
-use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::collections::HashMap;

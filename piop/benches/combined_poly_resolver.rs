@@ -1,133 +1,326 @@
+use std::hint::black_box;
+
 use criterion::{
     AxisScale, BatchSize, BenchmarkGroup, BenchmarkId, Criterion, PlotConfiguration,
     criterion_group, criterion_main, measurement::WallTime,
 };
-use crypto_primitives::{FromPrimitiveWithConfig, crypto_bigint_monty::MontyField};
+use crypto_primitives::{
+    ConstIntSemiring, Field, FromWithConfig, PrimeField, crypto_bigint_int::Int,
+    crypto_bigint_monty::MontyField,
+};
 use rand::rng;
-use std::hint::black_box;
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
-    ideal_check::{IdealCheckField, IdealCheckProtocol},
+    ideal_check::IdealCheckProtocol,
+    projections::{project_scalars, project_scalars_to_field, project_trace_coeffs, project_trace_to_field},
 };
-use zinc_poly::univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF};
+use zinc_poly::univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal};
 use zinc_primality::{MillerRabin, PrimalityTest};
-use zinc_test_uair::{GenerateWitness, TestAirBinary, TestUairSimpleMultiplication};
-use zinc_transcript::{KeccakTranscript, traits::Transcript};
+use zinc_test_uair::{
+    GenerateSingleTypeWitness, TestAirNoMultiplication, TestUairSimpleMultiplication,
+};
+use zinc_transcript::{
+    KeccakTranscript,
+    traits::{ConstTranscribable, Transcript},
+};
 use zinc_uair::{
-    Uair,
-    constraint_counter::count_constraints,
-    degree_counter::count_max_degree,
-    ideal::{Ideal, IdealCheck},
+    Uair, constraint_counter::count_constraints, degree_counter::count_max_degree,
     ideal_collector::IdealOrZero,
 };
 
 const DEGREE_PLUS_ONE: usize = 32;
 
+type WitnessCoeff<const INT_LIMBS: usize> = Int<INT_LIMBS>;
+type Witness<const INT_LIMBS: usize> = DensePolynomial<WitnessCoeff<INT_LIMBS>, DEGREE_PLUS_ONE>;
+type F<const FIELD_LIMBS: usize> = MontyField<FIELD_LIMBS>;
+
 #[allow(clippy::arithmetic_side_effects)]
-fn do_bench<F, Air, IdealOverFFromRef, IdealOverF>(
+fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     group: &mut BenchmarkGroup<WallTime>,
-    bench_title: &str,
     witness_size: usize,
-    ideal_over_f_from_ref: IdealOverFFromRef,
 ) where
-    F: IdealCheckField + FromPrimitiveWithConfig,
-    MillerRabin: PrimalityTest<F::Inner>,
-    Air: Uair<BinaryPoly<DEGREE_PLUS_ONE>> + GenerateWitness<BinaryPoly<DEGREE_PLUS_ONE>>,
-    IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
-    IdealOverFFromRef:
-        Fn(&IdealOrZero<<Air as Uair<BinaryPoly<DEGREE_PLUS_ONE>>>::Ideal>) -> IdealOverF + Copy,
+    <F<FIELD_LIMBS> as Field>::Inner: ConstIntSemiring + ConstTranscribable,
+    TestAirNoMultiplication<INT_LIMBS>: Uair<Scalar = Witness<INT_LIMBS>, Ideal = DegreeOneIdeal<WitnessCoeff<INT_LIMBS>>>
+        + GenerateSingleTypeWitness<Witness = Witness<INT_LIMBS>>,
+    MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Inner>,
 {
     let mut rng = rng();
     let num_vars = zinc_utils::log2(witness_size) as usize;
-    let trace = Air::generate_witness(num_vars, &mut rng);
+    let trace = TestAirNoMultiplication::generate_witness(num_vars, &mut rng);
 
-    let params = format!("{}/nvars={}", bench_title, num_vars);
+    let params = format!("NoMult/LIMBS={}/nvars={}", FIELD_LIMBS, num_vars);
 
-    let mut prover_transcript = KeccakTranscript::new();
-    let mut verifier_transcript = prover_transcript.clone();
+    let num_constraints = count_constraints::<TestAirNoMultiplication<INT_LIMBS>>();
+    let max_degree = count_max_degree::<TestAirNoMultiplication<INT_LIMBS>>();
 
-    let prover_field_cfg = prover_transcript.get_random_field_cfg::<F, _, MillerRabin>();
-    let _ = verifier_transcript.get_random_field_cfg::<F, _, MillerRabin>();
+    let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
+                     trace: &[_],
+                     transcript: &mut KeccakTranscript| {
+        let projected_trace =
+            project_trace_coeffs::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
 
-    let num_constraints = count_constraints::<BinaryPoly<DEGREE_PLUS_ONE>, Air>();
-    let max_degree = count_max_degree::<BinaryPoly<DEGREE_PLUS_ONE>, Air>();
+        let projected_scalars =
+            project_scalars::<F<FIELD_LIMBS>, TestAirNoMultiplication<INT_LIMBS>>(|scalar| {
+                scalar
+                    .iter()
+                    .map(|coeff| F::from_with_cfg(coeff, field_cfg))
+                    .collect()
+            });
 
-    let (ic_proof, ic_prover_state) =
-        IdealCheckProtocol::<F, DEGREE_PLUS_ONE>::prove_as_subprotocol::<Air>(
-            &mut prover_transcript,
-            &trace,
+        let (ic_proof, ic_prover_state) =
+            IdealCheckProtocol::prove_as_subprotocol::<TestAirNoMultiplication<INT_LIMBS>>(
+                transcript,
+                &projected_trace,
+                &projected_scalars,
+                num_constraints,
+                num_vars,
+                field_cfg,
+            )
+            .expect("IC Prover failed");
+
+        let projecting_element: F<FIELD_LIMBS> =
+            transcript.get_field_challenge(field_cfg);
+
+        let trace_f = project_trace_to_field::<_, DEGREE_PLUS_ONE>(
+            &[], &projected_trace, &[], &projecting_element,
+        );
+        let scalars_f =
+            project_scalars_to_field(projected_scalars, &projecting_element).unwrap();
+
+        let (cpr_proof, cpr_state) = CombinedPolyResolver::prove_as_subprotocol::<
+            TestAirNoMultiplication<INT_LIMBS>,
+        >(
+            transcript,
+            trace_f,
+            &ic_prover_state.evaluation_point,
+            &scalars_f,
             num_constraints,
             num_vars,
-            &prover_field_cfg,
+            max_degree,
+            field_cfg,
         )
-        .expect("IC Prover failed");
+        .expect("CPR Prover failed");
 
-    // let ic_check_subclaim =
-    //     IdealCheckProtocol::<F, DEGREE_PLUS_ONE>::verify_as_subprotocol::<Air, _, _>(
-    //         &mut verifier_transcript,
-    //         ic_proof,
-    //         num_constraints,
-    //         num_vars,
-    //         ideal_over_f_from_ref,
-    //         &prover_field_cfg,
-    //     )
-    //     .expect("IC Verifier failed");
-
-    // let verifier_transcript_after_ic = verifier_transcript.clone();
+        (ic_proof, cpr_proof, cpr_state, scalars_f, projecting_element)
+    };
 
     group.bench_with_input(
         BenchmarkId::new("CPR Prover", &params),
-        &(
-            prover_transcript.clone(),
-            ic_prover_state.projected_scalars.clone(),
-        ),
-        |bench, (transcript, scalars)| {
+        &trace,
+        |bench, trace| {
+            let mut transcript = KeccakTranscript::new();
+            let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
             bench.iter_batched(
-                || (scalars.clone(), transcript.clone()),
-                |(scalars, mut transcript)| {
-                    let _ = black_box(CombinedPolyResolver::<F>::prove_as_subprotocol::<_, Air>(
-                        &mut transcript,
-                        &ic_prover_state.trace_matrix,
-                        &ic_prover_state.evaluation_point,
-                        scalars.clone(),
-                        num_constraints,
-                        num_vars,
-                        max_degree,
-                        &prover_field_cfg,
-                    ))
-                    .expect("CPR Prover failed");
+                || (trace, transcript.clone()),
+                |(trace, mut transcript)| {
+                    let _ = black_box(prove_cpr(&field_cfg, trace, &mut transcript));
                 },
                 BatchSize::SmallInput,
             );
         },
     );
 
-    // NOTE: Verifier benchmark and its setup call removed to get clean prover-only profiles.
-    // Restore from git when verifier profiling is needed.
+    group.bench_with_input(
+        BenchmarkId::new("CPR Verifier", &params),
+        &trace,
+        |bench, trace| {
+            let mut prover_transcript = KeccakTranscript::new();
+            let mut verifier_transcript = prover_transcript.clone();
+            let field_cfg =
+                prover_transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
+            let _ = verifier_transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
+
+            let (ic_proof, cpr_proof, _, scalars_f, _) =
+                prove_cpr(&field_cfg, trace, &mut prover_transcript);
+
+            let ic_check_subclaim = IdealCheckProtocol::verify_as_subprotocol::<
+                TestAirNoMultiplication<INT_LIMBS>,
+                _,
+                _,
+            >(
+                &mut verifier_transcript,
+                ic_proof,
+                num_constraints,
+                num_vars,
+                |ideal_over_ring| {
+                    ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg))
+                },
+                &field_cfg,
+            )
+            .expect("IC Verifier failed");
+
+            let verifier_projecting_element: F<FIELD_LIMBS> =
+                verifier_transcript.get_field_challenge(&field_cfg);
+
+            bench.iter_batched(
+                || (cpr_proof.clone(), ic_check_subclaim.clone(), verifier_transcript.clone()),
+                |(proof, subclaim, mut transcript)| {
+                    let _ = black_box(
+                        CombinedPolyResolver::verify_as_subprotocol::<
+                            TestAirNoMultiplication<INT_LIMBS>,
+                        >(
+                            &mut transcript,
+                            proof,
+                            num_constraints,
+                            num_vars,
+                            max_degree,
+                            &verifier_projecting_element,
+                            &scalars_f,
+                            subclaim,
+                            &field_cfg,
+                        ),
+                    )
+                    .expect("CPR Verifier failed");
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
 }
 
-pub fn bench_bin<const FIELD_LIMBS: usize>(
+#[allow(clippy::arithmetic_side_effects)]
+fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     group: &mut BenchmarkGroup<WallTime>,
     witness_size: usize,
-) {
-    do_bench::<MontyField<FIELD_LIMBS>, TestAirBinary, _, _>(
-        group,
-        &format!("Binary/LIMBS={FIELD_LIMBS}"),
-        witness_size,
-        |_ideal_over_ring| IdealOrZero::Zero,
-    )
-}
+) where
+    <F<FIELD_LIMBS> as Field>::Inner: ConstIntSemiring + ConstTranscribable,
+    TestUairSimpleMultiplication<Int<INT_LIMBS>>:
+        Uair<Scalar = Witness<INT_LIMBS>> + GenerateSingleTypeWitness<Witness = Witness<INT_LIMBS>>,
+    MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Inner>,
+{
+    let mut rng = rng();
+    let num_vars = zinc_utils::log2(witness_size) as usize;
+    let trace = TestUairSimpleMultiplication::generate_witness(num_vars, &mut rng);
 
-pub fn bench_simple_mul<const FIELD_LIMBS: usize>(
-    group: &mut BenchmarkGroup<WallTime>,
-    witness_size: usize,
-) {
-    do_bench::<MontyField<FIELD_LIMBS>, TestUairSimpleMultiplication, _, _>(
-        group,
-        &format!("SimpleMul/LIMBS={FIELD_LIMBS}"),
-        witness_size,
-        |_ideal_over_ring| IdealOrZero::Zero,
-    )
+    let params = format!("SimpleMult/LIMBS={}/nvars={}", FIELD_LIMBS, num_vars);
+
+    let num_constraints = count_constraints::<TestUairSimpleMultiplication<Int<INT_LIMBS>>>();
+    let max_degree = count_max_degree::<TestUairSimpleMultiplication<Int<INT_LIMBS>>>();
+
+    let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
+                     trace: &[_],
+                     transcript: &mut KeccakTranscript| {
+        let projected_trace =
+            project_trace_coeffs::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
+
+        let projected_scalars = project_scalars::<
+            F<FIELD_LIMBS>,
+            TestUairSimpleMultiplication<Int<INT_LIMBS>>,
+        >(|scalar| {
+            scalar
+                .iter()
+                .map(|coeff| F::from_with_cfg(coeff, field_cfg))
+                .collect()
+        });
+
+        let (ic_proof, ic_prover_state) = IdealCheckProtocol::prove_as_subprotocol::<
+            TestUairSimpleMultiplication<Int<INT_LIMBS>>,
+        >(
+            transcript,
+            &projected_trace,
+            &projected_scalars,
+            num_constraints,
+            num_vars,
+            field_cfg,
+        )
+        .expect("IC Prover failed");
+
+        let projecting_element: F<FIELD_LIMBS> =
+            transcript.get_field_challenge(field_cfg);
+
+        let trace_f = project_trace_to_field::<_, DEGREE_PLUS_ONE>(
+            &[], &projected_trace, &[], &projecting_element,
+        );
+        let scalars_f =
+            project_scalars_to_field(projected_scalars, &projecting_element).unwrap();
+
+        let (cpr_proof, cpr_state) = CombinedPolyResolver::prove_as_subprotocol::<
+            TestUairSimpleMultiplication<Int<INT_LIMBS>>,
+        >(
+            transcript,
+            trace_f,
+            &ic_prover_state.evaluation_point,
+            &scalars_f,
+            num_constraints,
+            num_vars,
+            max_degree,
+            field_cfg,
+        )
+        .expect("CPR Prover failed");
+
+        (ic_proof, cpr_proof, cpr_state, scalars_f, projecting_element)
+    };
+
+    group.bench_with_input(
+        BenchmarkId::new("CPR Prover", &params),
+        &trace,
+        |bench, trace| {
+            let mut transcript = KeccakTranscript::new();
+            let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
+            bench.iter_batched(
+                || (trace, transcript.clone()),
+                |(trace, mut transcript)| {
+                    let _ = black_box(prove_cpr(&field_cfg, trace, &mut transcript));
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new("CPR Verifier", &params),
+        &trace,
+        |bench, trace| {
+            let mut prover_transcript = KeccakTranscript::new();
+            let mut verifier_transcript = prover_transcript.clone();
+            let field_cfg =
+                prover_transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
+            let _ = verifier_transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
+
+            let (ic_proof, cpr_proof, _, scalars_f, _) =
+                prove_cpr(&field_cfg, trace, &mut prover_transcript);
+
+            let ic_check_subclaim = IdealCheckProtocol::verify_as_subprotocol::<
+                TestUairSimpleMultiplication<Int<INT_LIMBS>>,
+                _,
+                _,
+            >(
+                &mut verifier_transcript,
+                ic_proof,
+                num_constraints,
+                num_vars,
+                |_ideal_over_ring| IdealOrZero::zero(),
+                &field_cfg,
+            )
+            .expect("IC Verifier failed");
+
+            let verifier_projecting_element: F<FIELD_LIMBS> =
+                verifier_transcript.get_field_challenge(&field_cfg);
+
+            bench.iter_batched(
+                || (cpr_proof.clone(), ic_check_subclaim.clone(), verifier_transcript.clone()),
+                |(proof, subclaim, mut transcript)| {
+                    let _ = black_box(
+                        CombinedPolyResolver::verify_as_subprotocol::<
+                            TestUairSimpleMultiplication<Int<INT_LIMBS>>,
+                        >(
+                            &mut transcript,
+                            proof,
+                            num_constraints,
+                            num_vars,
+                            max_degree,
+                            &verifier_projecting_element,
+                            &scalars_f,
+                            subclaim,
+                            &field_cfg,
+                        ),
+                    )
+                    .expect("CPR Verifier failed");
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
 }
 
 pub fn combined_poly_resolver_benches(c: &mut Criterion) {
@@ -136,19 +329,17 @@ pub fn combined_poly_resolver_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Combined poly resolver benchmarks");
     group.plot_config(plot_config);
 
-    bench_bin::<3>(&mut group, 1 << 13);
-    bench_bin::<4>(&mut group, 1 << 13);
-    bench_bin::<3>(&mut group, 1 << 14);
-    bench_bin::<4>(&mut group, 1 << 14);
-    bench_bin::<3>(&mut group, 1 << 15);
-    bench_bin::<4>(&mut group, 1 << 15);
-    bench_bin::<3>(&mut group, 1 << 16);
-    bench_bin::<4>(&mut group, 1 << 16);
-    bench_bin::<3>(&mut group, 1 << 17);
-    bench_bin::<4>(&mut group, 1 << 17);
+    bench_no_mult::<3, 4>(&mut group, 1 << 14);
+    bench_no_mult::<4, 5>(&mut group, 1 << 14);
+    bench_no_mult::<3, 4>(&mut group, 1 << 15);
+    bench_no_mult::<4, 5>(&mut group, 1 << 15);
+    bench_no_mult::<3, 4>(&mut group, 1 << 16);
+    bench_no_mult::<4, 5>(&mut group, 1 << 16);
+    bench_no_mult::<3, 4>(&mut group, 1 << 17);
+    bench_no_mult::<4, 5>(&mut group, 1 << 17);
 
-    bench_simple_mul::<3>(&mut group, 1 << 2);
-    bench_simple_mul::<4>(&mut group, 1 << 2);
+    bench_simple_mult::<3, 4>(&mut group, 1 << 2);
+    bench_simple_mult::<4, 5>(&mut group, 1 << 2);
 
     group.finish();
 }
