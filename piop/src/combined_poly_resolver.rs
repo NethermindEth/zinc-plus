@@ -82,7 +82,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
 
-
         // Shifted trace. Just take the trace, drop the first row
         // and append 0 to the end. Note, that the latter happens
         // thanks to the FromIterator implementation for `DenseMultilinearExtension`

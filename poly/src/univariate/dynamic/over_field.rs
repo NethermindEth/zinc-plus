@@ -62,7 +62,8 @@ impl<F: PrimeField> DynamicPolynomialF<F> {
         }
     }
 
-    /// No bounds check — caller must ensure `powers.len() >= self.coeffs.len()`.
+    /// No bounds check — caller must ensure `powers.len() >=
+    /// self.coeffs.len()`.
     #[inline(always)]
     #[allow(clippy::arithmetic_side_effects)]
     pub fn dot_with_powers(&self, powers: &[F], zero: F) -> F {

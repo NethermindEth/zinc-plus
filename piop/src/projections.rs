@@ -101,8 +101,8 @@ pub fn project_trace_to_field<F: PrimeField + FromRef<F> + 'static, const DEGREE
 where
     F::Inner: Default,
 {
-    let zero = F::zero_with_cfg(&projecting_element.cfg());
-    let one = F::one_with_cfg(&projecting_element.cfg());
+    let zero = F::zero_with_cfg(projecting_element.cfg());
+    let one = F::one_with_cfg(projecting_element.cfg());
 
     let max_coeffs_len = arbitrary_poly_trace
         .iter()
@@ -187,8 +187,8 @@ pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
     // TODO(Ilia): Parallelising this might be good for big UAIRs.
     //             We'd conditionally route between sequential and parallel
     //             projection depending on how many scalars the UAIR has.
-    let one = F::one_with_cfg(&projecting_element.cfg());
-    let zero = F::zero_with_cfg(&projecting_element.cfg());
+    let one = F::one_with_cfg(projecting_element.cfg());
+    let zero = F::zero_with_cfg(projecting_element.cfg());
 
     let max_coeffs_len = scalars
         .values()
@@ -202,7 +202,10 @@ pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
     Ok(scalars
         .into_iter()
         .map(|(scalar, value)| {
-            (scalar, value.dot_with_powers(&projection_powers, zero.clone()))
+            (
+                scalar,
+                value.dot_with_powers(&projection_powers, zero.clone()),
+            )
         })
         .collect())
 }

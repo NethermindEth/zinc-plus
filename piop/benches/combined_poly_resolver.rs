@@ -12,7 +12,9 @@ use rand::rng;
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
-    projections::{project_scalars, project_scalars_to_field, project_trace_coeffs, project_trace_to_field},
+    projections::{
+        project_scalars, project_scalars_to_field, project_trace_coeffs, project_trace_to_field,
+    },
 };
 use zinc_poly::univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal};
 use zinc_primality::{MillerRabin, PrimalityTest};
@@ -56,8 +58,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
                      trace: &[_],
                      transcript: &mut KeccakTranscript| {
-        let projected_trace =
-            project_trace_coeffs::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
+        let projected_trace = project_trace_coeffs::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
 
         let projected_scalars =
             project_scalars::<F<FIELD_LIMBS>, TestAirNoMultiplication<INT_LIMBS>>(|scalar| {
@@ -78,30 +79,36 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             )
             .expect("IC Prover failed");
 
-        let projecting_element: F<FIELD_LIMBS> =
-            transcript.get_field_challenge(field_cfg);
+        let projecting_element: F<FIELD_LIMBS> = transcript.get_field_challenge(field_cfg);
 
         let trace_f = project_trace_to_field::<_, DEGREE_PLUS_ONE>(
-            &[], &projected_trace, &[], &projecting_element,
+            &[],
+            &projected_trace,
+            &[],
+            &projecting_element,
         );
-        let scalars_f =
-            project_scalars_to_field(projected_scalars, &projecting_element).unwrap();
+        let scalars_f = project_scalars_to_field(projected_scalars, &projecting_element).unwrap();
 
-        let (cpr_proof, cpr_state) = CombinedPolyResolver::prove_as_subprotocol::<
-            TestAirNoMultiplication<INT_LIMBS>,
-        >(
-            transcript,
-            trace_f,
-            &ic_prover_state.evaluation_point,
-            &scalars_f,
-            num_constraints,
-            num_vars,
-            max_degree,
-            field_cfg,
+        let (cpr_proof, cpr_state) =
+            CombinedPolyResolver::prove_as_subprotocol::<TestAirNoMultiplication<INT_LIMBS>>(
+                transcript,
+                trace_f,
+                &ic_prover_state.evaluation_point,
+                &scalars_f,
+                num_constraints,
+                num_vars,
+                max_degree,
+                field_cfg,
+            )
+            .expect("CPR Prover failed");
+
+        (
+            ic_proof,
+            cpr_proof,
+            cpr_state,
+            scalars_f,
+            projecting_element,
         )
-        .expect("CPR Prover failed");
-
-        (ic_proof, cpr_proof, cpr_state, scalars_f, projecting_element)
     };
 
     group.bench_with_input(
@@ -153,23 +160,27 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 verifier_transcript.get_field_challenge(&field_cfg);
 
             bench.iter_batched(
-                || (cpr_proof.clone(), ic_check_subclaim.clone(), verifier_transcript.clone()),
-                |(proof, subclaim, mut transcript)| {
-                    let _ = black_box(
-                        CombinedPolyResolver::verify_as_subprotocol::<
-                            TestAirNoMultiplication<INT_LIMBS>,
-                        >(
-                            &mut transcript,
-                            proof,
-                            num_constraints,
-                            num_vars,
-                            max_degree,
-                            &verifier_projecting_element,
-                            &scalars_f,
-                            subclaim,
-                            &field_cfg,
-                        ),
+                || {
+                    (
+                        cpr_proof.clone(),
+                        ic_check_subclaim.clone(),
+                        verifier_transcript.clone(),
                     )
+                },
+                |(proof, subclaim, mut transcript)| {
+                    let _ = black_box(CombinedPolyResolver::verify_as_subprotocol::<
+                        TestAirNoMultiplication<INT_LIMBS>,
+                    >(
+                        &mut transcript,
+                        proof,
+                        num_constraints,
+                        num_vars,
+                        max_degree,
+                        &verifier_projecting_element,
+                        &scalars_f,
+                        subclaim,
+                        &field_cfg,
+                    ))
                     .expect("CPR Verifier failed");
                 },
                 BatchSize::SmallInput,
@@ -200,8 +211,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
                      trace: &[_],
                      transcript: &mut KeccakTranscript| {
-        let projected_trace =
-            project_trace_coeffs::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
+        let projected_trace = project_trace_coeffs::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
 
         let projected_scalars = project_scalars::<
             F<FIELD_LIMBS>,
@@ -225,14 +235,15 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         )
         .expect("IC Prover failed");
 
-        let projecting_element: F<FIELD_LIMBS> =
-            transcript.get_field_challenge(field_cfg);
+        let projecting_element: F<FIELD_LIMBS> = transcript.get_field_challenge(field_cfg);
 
         let trace_f = project_trace_to_field::<_, DEGREE_PLUS_ONE>(
-            &[], &projected_trace, &[], &projecting_element,
+            &[],
+            &projected_trace,
+            &[],
+            &projecting_element,
         );
-        let scalars_f =
-            project_scalars_to_field(projected_scalars, &projecting_element).unwrap();
+        let scalars_f = project_scalars_to_field(projected_scalars, &projecting_element).unwrap();
 
         let (cpr_proof, cpr_state) = CombinedPolyResolver::prove_as_subprotocol::<
             TestUairSimpleMultiplication<Int<INT_LIMBS>>,
@@ -248,7 +259,13 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         )
         .expect("CPR Prover failed");
 
-        (ic_proof, cpr_proof, cpr_state, scalars_f, projecting_element)
+        (
+            ic_proof,
+            cpr_proof,
+            cpr_state,
+            scalars_f,
+            projecting_element,
+        )
     };
 
     group.bench_with_input(
@@ -298,23 +315,27 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 verifier_transcript.get_field_challenge(&field_cfg);
 
             bench.iter_batched(
-                || (cpr_proof.clone(), ic_check_subclaim.clone(), verifier_transcript.clone()),
-                |(proof, subclaim, mut transcript)| {
-                    let _ = black_box(
-                        CombinedPolyResolver::verify_as_subprotocol::<
-                            TestUairSimpleMultiplication<Int<INT_LIMBS>>,
-                        >(
-                            &mut transcript,
-                            proof,
-                            num_constraints,
-                            num_vars,
-                            max_degree,
-                            &verifier_projecting_element,
-                            &scalars_f,
-                            subclaim,
-                            &field_cfg,
-                        ),
+                || {
+                    (
+                        cpr_proof.clone(),
+                        ic_check_subclaim.clone(),
+                        verifier_transcript.clone(),
                     )
+                },
+                |(proof, subclaim, mut transcript)| {
+                    let _ = black_box(CombinedPolyResolver::verify_as_subprotocol::<
+                        TestUairSimpleMultiplication<Int<INT_LIMBS>>,
+                    >(
+                        &mut transcript,
+                        proof,
+                        num_constraints,
+                        num_vars,
+                        max_degree,
+                        &verifier_projecting_element,
+                        &scalars_f,
+                        subclaim,
+                        &field_cfg,
+                    ))
                     .expect("CPR Verifier failed");
                 },
                 BatchSize::SmallInput,
