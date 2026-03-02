@@ -93,6 +93,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             .collect();
 
         let eq_r = build_eq_x_r_inner(evaluation_point, field_cfg)?;
+        // To get the constraints on the last row ignored
+        // we multiply each constraint polynomial
+        // by the selector (1 - eq(1,...,1, x))
         let last_row_selector = DenseMultilinearExtension {
             num_vars,
             evaluations: {
