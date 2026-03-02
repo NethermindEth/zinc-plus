@@ -174,11 +174,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             .last()
             .expect("sumcheck could not have had 0 rounds");
 
-        let evals: Vec<F> = sumcheck_prover_state.mles[2..]
-            .iter()
+        let mut mles = sumcheck_prover_state.mles;
+        let evals: Vec<F> = mles
+            .drain(2..)
             .map(|mle| {
-                mle.clone()
-                    .evaluate_with_config(slice::from_ref(last_sumcheck_challenge), field_cfg)
+                mle.evaluate_with_config(slice::from_ref(last_sumcheck_challenge), field_cfg)
             })
             .try_collect()?;
 

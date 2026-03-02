@@ -134,7 +134,7 @@ fn prepare_coefficient_mles<F: PrimeField>(
     num_constraints: usize,
     max_degree: usize,
     max_degrees_and_combined_poly_rows: &[(usize, Vec<DynamicPolynomialF<F>>)],
-    field_zero_inner: &F::Inner,
+    zero_as_field_inner: &F::Inner,
     skip_constraints: &[bool],
 ) -> Vec<Vec<DenseMultilinearExtension<F::Inner>>> {
     cfg_into_iter!(0..num_constraints)
@@ -145,18 +145,18 @@ fn prepare_coefficient_mles<F: PrimeField>(
             if skip_constraints[constraint] {
                 return vec![];
             }
-            cfg_into_iter!(0..=max_degree)
+            (0..=max_degree)
                 .map(|coeff| {
                     max_degrees_and_combined_poly_rows
                         .iter()
                         .map(|(_, row)| {
                             if coeff >= row[constraint].coeffs.len() {
-                                field_zero_inner.clone()
+                                zero_as_field_inner.clone()
                             } else {
                                 row[constraint].coeffs[coeff].inner().clone()
                             }
                         })
-                        .collect_dense_mle_with_zero(field_zero_inner)
+                        .collect_dense_mle_with_zero(zero_as_field_inner)
                 })
                 .collect()
         })
