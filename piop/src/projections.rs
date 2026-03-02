@@ -4,7 +4,7 @@ use itertools::Itertools;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use zinc_poly::{
-    EvaluatablePolynomial, EvaluationError,
+    EvaluationError,
     mle::DenseMultilinearExtension,
     univariate::{
         binary::BinaryPoly, dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF,
@@ -12,7 +12,7 @@ use zinc_poly::{
 };
 use zinc_uair::{Uair, collect_scalars::collect_scalars};
 use zinc_utils::{
-    cfg_extend, cfg_iter, from_ref::FromRef, projectable_to_field::ProjectableToField,
+    cfg_extend, cfg_iter, from_ref::FromRef, powers, projectable_to_field::ProjectableToField,
 };
 
 /// Project a multi-typed trace onto F[X].
@@ -102,6 +102,18 @@ pub fn project_trace_to_field<F: PrimeField + FromRef<F> + 'static, const DEGREE
 where
     F::Inner: Default,
 {
+    let zero = F::zero_with_cfg(&projecting_element.cfg());
+    let one = F::one_with_cfg(&projecting_element.cfg());
+
+    let max_coeffs_len = arbitrary_poly_trace
+        .iter()
+        .flat_map(|col| col.iter())
+        .map(|poly| poly.coeffs.len())
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let projection_powers: Vec<F> = powers(projecting_element.clone(), one, max_coeffs_len);
+
     let binary_poly_projection =
         BinaryPoly::<DEGREE_PLUS_ONE>::prepare_projection(projecting_element);
 
@@ -122,8 +134,7 @@ where
         cfg_iter!(arbitrary_poly_trace).map(|column| {
             cfg_iter!(column)
                 .map(|poly| {
-                    poly.evaluate_at_point(projecting_element)
-                        .expect("dynamic poly evaluation does not fail")
+                    poly.dot_with_powers(&projection_powers, zero.clone())
                         .inner()
                         .clone()
                 })
@@ -177,17 +188,22 @@ pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
     // TODO(Ilia): Parallelising this might be good for big UAIRs.
     //             We'd conditionally route between sequential and parallel
     //             projection depending on how many scalars the UAIR has.
-    scalars
+    let one = F::one_with_cfg(&projecting_element.cfg());
+    let zero = F::zero_with_cfg(&projecting_element.cfg());
+
+    let max_coeffs_len = scalars
+        .values()
+        .map(|poly| poly.coeffs.len())
+        .max()
+        .unwrap_or(0)
+        .max(1);
+
+    let projection_powers: Vec<F> = powers(projecting_element.clone(), one, max_coeffs_len);
+
+    Ok(scalars
         .into_iter()
-        .map(
-            |(scalar, value)| -> Result<(R, F), (R, F, EvaluationError)> {
-                Ok((
-                    scalar.clone(),
-                    value
-                        .evaluate_at_point(projecting_element)
-                        .map_err(|err| (scalar.clone(), projecting_element.clone(), err))?,
-                ))
-            },
-        )
-        .try_collect()
+        .map(|(scalar, value)| {
+            (scalar, value.dot_with_powers(&projection_powers, zero.clone()))
+        })
+        .collect())
 }

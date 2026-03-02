@@ -62,32 +62,14 @@ impl<F: PrimeField> DynamicPolynomialF<F> {
         }
     }
 
+    /// No bounds check — caller must ensure `powers.len() >= self.coeffs.len()`.
+    #[inline(always)]
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn evaluate_with_powers(&self, powers: &[F]) -> Result<F, EvaluationError> {
-        assert!(
-            powers.len() >= self.coeffs.len(),
-            "not enough precomputed powers: have {}, need {}",
-            powers.len(),
-            self.coeffs.len()
-        );
-
-        let cfg = match self.coeffs.first() {
-            Some(elem) => elem.cfg(),
-            None => {
-                return match powers.first() {
-                    Some(elem) => Ok(F::zero_with_cfg(elem.cfg())),
-                    None => Err(EvaluationError::EmptyPolynomial),
-                };
-            }
-        };
-
-        let zero = F::zero_with_cfg(cfg);
-        Ok(self
-            .coeffs
+    pub fn dot_with_powers(&self, powers: &[F], zero: F) -> F {
+        self.coeffs
             .iter()
             .zip(powers)
-            .map(|(coeff, power)| coeff.clone() * power)
-            .fold(zero, |acc, term| acc + term))
+            .fold(zero, |acc, (coeff, power)| acc + coeff.clone() * power)
     }
 }
 

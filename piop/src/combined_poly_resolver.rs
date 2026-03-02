@@ -261,24 +261,10 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             .values
             .iter()
             .zip(&folding_challenge_powers)
-            .map(
-                |(claimed_value, random_coeff)| -> Result<F, CombinedPolyResolverError<F>> {
-                    Ok(claimed_value
-                        .evaluate_with_powers(&projection_powers)
-                        .map_err(|err| {
-                            CombinedPolyResolverError::ProjectionError(
-                                claimed_value.clone(),
-                                projecting_element.clone(),
-                                err,
-                            )
-                        })?
-                        * random_coeff)
-                },
-            )
-            .try_fold(
-                zero.clone(),
-                |acc, next| -> Result<F, CombinedPolyResolverError<F>> { Ok(acc + next?) },
-            )?;
+            .map(|(claimed_value, random_coeff)| {
+                claimed_value.dot_with_powers(&projection_powers, zero.clone()) * random_coeff
+            })
+            .fold(zero.clone(), |acc, term| acc + term);
 
         if proof.sumcheck_proof.claimed_sum != expected_sum {
             return Err(CombinedPolyResolverError::WrongSumcheckSum {
