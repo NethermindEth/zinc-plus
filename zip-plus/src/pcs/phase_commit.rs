@@ -1,3 +1,5 @@
+use std::slice::from_ref;
+
 use crate::{
     ZipError,
     code::LinearCode,
@@ -67,13 +69,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         );
         let batch_size = polys.len();
         let row_len = pp.linear_code.row_len();
-        validate_input::<Zt, Lc, bool>(
-            "commit",
-            pp.num_vars,
-            batch_size,
-            &polys.iter().collect_vec(),
-            &[],
-        )?;
+        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, batch_size, polys, &[])?;
 
         let expected_num_evals = pp.num_rows * row_len;
         let cw_matrices: Vec<DenseRowMatrix<Zt::Cw>> = polys.iter().map(|poly| {
@@ -118,7 +114,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
     ) -> Result<DenseRowMatrix<Zt::Cw>, ZipError> {
-        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, 1, &[poly], &[])?;
+        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, 1, from_ref(poly), &[])?;
 
         let row_len = pp.linear_code.row_len();
 

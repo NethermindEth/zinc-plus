@@ -17,7 +17,7 @@ pub(super) fn validate_input<Zt: ZipTypes, Lc: LinearCode<Zt>, Pt>(
     function: &str,
     param_num_vars: usize,
     batch_size: usize,
-    polys: &[&DenseMultilinearExtension<Zt::Eval>],
+    polys: &[DenseMultilinearExtension<Zt::Eval>],
     points: &[&[Pt]],
 ) -> Result<(), ZipError> {
     // Check bit-width of the linear combinations
