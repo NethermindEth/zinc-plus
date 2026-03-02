@@ -627,10 +627,6 @@ where
     let mut transcript = KeccakTranscript::new();
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
-    // Project trace coefficients to DynamicPolynomialF for IC.
-    let projected_trace = project_trace_coeffs::<PiopField, i64, i64, D>(
-        trace, &[], &[], &field_cfg,
-    );
     let projected_scalars = project_scalars::<PiopField, U>(|scalar| {
         let one = PiopField::one_with_cfg(&field_cfg);
         let zero = PiopField::zero_with_cfg(&field_cfg);
@@ -641,7 +637,24 @@ where
         )
     });
 
-    let (ic_proof, ic_state) =
+    let (ic_proof, ic_state) = if max_degree == 1 {
+        // MLE-first path: evaluate column MLEs at the random point
+        // directly from native BinaryPoly trace, avoiding full
+        // trace projection to DynamicPolynomialF.
+        IdealCheckProtocol::<PiopField>::prove_mle_first::<U, D>(
+            &mut transcript,
+            trace,
+            &projected_scalars,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )
+        .expect("Ideal check prover failed")
+    } else {
+        // Generic path for non-linear constraints.
+        let projected_trace = project_trace_coeffs::<PiopField, i64, i64, D>(
+            trace, &[], &[], &field_cfg,
+        );
         IdealCheckProtocol::<PiopField>::prove_as_subprotocol::<U>(
             &mut transcript,
             &projected_trace,
@@ -650,7 +663,8 @@ where
             num_vars,
             &field_cfg,
         )
-        .expect("Ideal check prover failed");
+        .expect("Ideal check prover failed")
+    };
     let ideal_check_time = t1.elapsed();
 
     // ── Step 3: PIOP — Combined Poly Resolver ───────────────────────
@@ -863,9 +877,6 @@ where
     let mut transcript = KeccakTranscript::new();
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
-    let projected_trace = project_trace_coeffs::<PiopField, i64, i64, D>(
-        trace, &[], &[], &field_cfg,
-    );
     let projected_scalars = project_scalars::<PiopField, U>(|scalar| {
         let one = PiopField::one_with_cfg(&field_cfg);
         let zero = PiopField::zero_with_cfg(&field_cfg);
@@ -876,7 +887,20 @@ where
         )
     });
 
-    let (ic_proof, ic_state) =
+    let (ic_proof, ic_state) = if max_degree == 1 {
+        IdealCheckProtocol::<PiopField>::prove_mle_first::<U, D>(
+            &mut transcript,
+            trace,
+            &projected_scalars,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )
+        .expect("Ideal check prover failed")
+    } else {
+        let projected_trace = project_trace_coeffs::<PiopField, i64, i64, D>(
+            trace, &[], &[], &field_cfg,
+        );
         IdealCheckProtocol::<PiopField>::prove_as_subprotocol::<U>(
             &mut transcript,
             &projected_trace,
@@ -885,7 +909,8 @@ where
             num_vars,
             &field_cfg,
         )
-        .expect("Ideal check prover failed");
+        .expect("Ideal check prover failed")
+    };
     let ideal_check_time = t1.elapsed();
 
     // ── Step 3: Batched CPR + Lookup via multi-degree sumcheck ──────

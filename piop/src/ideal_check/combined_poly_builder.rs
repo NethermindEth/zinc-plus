@@ -6,11 +6,15 @@ use itertools::Itertools;
 use rayon::prelude::*;
 
 use zinc_poly::{
-    mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero},
-    univariate::dynamic::over_field::DynamicPolynomialF,
+    EvaluationError,
+    mle::{
+        DenseMultilinearExtension, MultilinearExtensionWithConfig,
+        dense::CollectDenseMleWithZero,
+    },
+    univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF},
 };
 use zinc_uair::{ConstraintBuilder, TraceRow, Uair, UairSignature, ideal::ImpossibleIdeal};
-use zinc_utils::{cfg_into_iter, from_ref::FromRef};
+use zinc_utils::{cfg_into_iter, cfg_iter, from_ref::FromRef};
 
 /// Given a UAIR `U` and a trace `trace` this function
 /// obtains the combined polynomials' MLE coefficients.
@@ -174,6 +178,133 @@ fn prepare_coefficient_mles<F: PrimeField>(
         .collect()
 }
 
+/// For linear UAIRs (max constraint degree ≤ 1), evaluate the combined
+/// polynomials directly at the given evaluation point without constructing
+/// intermediate combined polynomial MLEs.
+///
+/// Instead of computing constraint expressions row-by-row (which involves
+/// `DynamicPolynomialF` arithmetic per row), this function:
+/// 1. Splits each trace column into per-coefficient MLEs for "up" and "down"
+///    views.
+/// 2. Evaluates each coefficient MLE at the evaluation point.
+/// 3. Reconstructs `DynamicPolynomialF<F>` per column from the evaluated
+///    coefficients.
+/// 4. Applies the linear constraint expressions once on the evaluated column
+///    values.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn evaluate_combined_polynomials_linear<F, U>(
+    trace_matrix: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
+    projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    evaluation_point: &[F],
+    num_constraints: usize,
+    field_cfg: &F::Config,
+) -> Result<Vec<DynamicPolynomialF<F>>, EvaluationError>
+where
+    F: PrimeField + zinc_utils::inner_transparent_field::InnerTransparentField,
+    U: Uair,
+{
+    let num_rows = trace_matrix[0].len();
+    let inner_zero = F::zero_with_cfg(field_cfg).inner().clone();
+
+    // Find max polynomial degree across all column entries.
+    let max_coeff_len = trace_matrix
+        .iter()
+        .flat_map(|col| col.iter())
+        .map(|poly| poly.coeffs.len())
+        .max()
+        .unwrap_or(0);
+
+    // Evaluate "up" and "down" column MLEs at the evaluation point.
+    // up[col][j]   = trace[col][j]     for j = 0..N-2, then 0 for j = N-1
+    // down[col][j] = trace[col][j + 1] for j = 0..N-2, then 0 for j = N-1
+    //
+    // We split each column into per-coefficient MLEs over F::Inner
+    // and evaluate them, avoiding row-by-row DynamicPolynomialF arithmetic.
+    let column_evals: Vec<(DynamicPolynomialF<F>, DynamicPolynomialF<F>)> = cfg_iter!(
+        trace_matrix
+    )
+    .map(|col| {
+        let mut up_coeffs = Vec::with_capacity(max_coeff_len);
+        let mut down_coeffs = Vec::with_capacity(max_coeff_len);
+
+        for d in 0..max_coeff_len {
+            // up coefficient MLE: col[j].coeffs[d] for j < N-1, zero for j = N-1
+            let up_coeff_evals: Vec<_> = (0..num_rows)
+                .map(|j| {
+                    if j < num_rows - 1 {
+                        col[j]
+                            .coeffs
+                            .get(d)
+                            .map_or_else(|| inner_zero.clone(), |c| c.inner().clone())
+                    } else {
+                        inner_zero.clone()
+                    }
+                })
+                .collect();
+
+            let up_mle = DenseMultilinearExtension::from_evaluations_vec(
+                evaluation_point.len(),
+                up_coeff_evals,
+                inner_zero.clone(),
+            );
+            up_coeffs.push(up_mle.evaluate_with_config(evaluation_point, field_cfg)?);
+
+            // down coefficient MLE: col[j+1].coeffs[d] for j < N-1, zero for j = N-1
+            let down_coeff_evals: Vec<_> = (0..num_rows)
+                .map(|j| {
+                    if j < num_rows - 1 {
+                        col[j + 1]
+                            .coeffs
+                            .get(d)
+                            .map_or_else(|| inner_zero.clone(), |c| c.inner().clone())
+                    } else {
+                        inner_zero.clone()
+                    }
+                })
+                .collect();
+
+            let down_mle = DenseMultilinearExtension::from_evaluations_vec(
+                evaluation_point.len(),
+                down_coeff_evals,
+                inner_zero.clone(),
+            );
+            down_coeffs.push(down_mle.evaluate_with_config(evaluation_point, field_cfg)?);
+        }
+
+        Ok((
+            DynamicPolynomialF::new_trimmed(up_coeffs),
+            DynamicPolynomialF::new_trimmed(down_coeffs),
+        ))
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+
+    let (up_evals, down_evals): (Vec<_>, Vec<_>) = column_evals.into_iter().unzip();
+
+    // Apply constraint expressions to the evaluated column values.
+    let mut builder = CombinedPolyRowBuilder::new(num_constraints);
+
+    let project = |x: &U::Scalar| {
+        projected_scalars
+            .get(x)
+            .cloned()
+            .expect("all scalars should have been projected at this point")
+    };
+
+    U::constrain_general(
+        &mut builder,
+        TraceRow::from_slice_with_signature(&up_evals, &U::signature()),
+        TraceRow::from_slice_with_signature(&down_evals, &U::signature()),
+        &project,
+        |x, y| Some(project(y) * x),
+        ImpossibleIdeal::from_ref,
+    );
+
+    let mut combined_evaluations = builder.combined_evaluations;
+    combined_evaluations.iter_mut().for_each(|eval| eval.trim());
+
+    Ok(combined_evaluations)
+}
+
 pub struct CombinedPolyRowBuilder<F: PrimeField> {
     combined_evaluations: Vec<DynamicPolynomialF<F>>,
 }
@@ -197,4 +328,287 @@ impl<F: PrimeField> CombinedPolyRowBuilder<F> {
             combined_evaluations: Vec::with_capacity(num_constraints),
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// MLE-first path (linear constraints only)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// MLE-first computation of combined polynomial values for linear UAIRs
+/// with binary-polynomial trace columns.
+///
+/// Instead of projecting the full trace to `DynamicPolynomialF<F>` and then
+/// evaluating constraints row-by-row, this function:
+///
+/// 1. Evaluates each column MLE at the random point by processing one
+///    polynomial-coefficient position at a time (avoiding full trace
+///    projection).
+/// 2. Evaluates shifted ("down") column MLEs similarly.
+/// 3. Applies the UAIR constraints once on the resulting values.
+/// 4. Subtracts the last-row contribution (selector correction).
+///
+/// This is valid **only** when the UAIR constraints are linear
+/// (`max_degree == 1`).  The result is identical to
+/// [`compute_combined_polynomials`] followed by coefficient-MLE
+/// evaluation.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn compute_combined_values_mle_first<F, U, const D: usize>(
+    binary_poly_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    evaluation_point: &[F],
+    num_constraints: usize,
+    field_cfg: &F::Config,
+) -> Vec<DynamicPolynomialF<F>>
+where
+    F: PrimeField + zinc_utils::inner_transparent_field::InnerTransparentField,
+    F::Inner: Default + Send + Sync,
+    U: Uair,
+{
+    let sig = U::signature();
+    let down_sig = sig.down_signature();
+    let num_rows = binary_poly_trace[0].len();
+
+    // ── Step 1. Evaluate "up" column MLEs at point ──────────────────
+    let up_values: Vec<DynamicPolynomialF<F>> = cfg_iter!(binary_poly_trace)
+        .map(|col| {
+            evaluate_binary_poly_column_mle::<F, D>(col, evaluation_point, field_cfg)
+        })
+        .collect();
+
+    // ── Step 2. Evaluate "down" (shifted) column MLEs at point ──────
+    let down_values: Vec<DynamicPolynomialF<F>> = if sig.uses_legacy_shifts() {
+        cfg_iter!(binary_poly_trace)
+            .map(|col| {
+                evaluate_shifted_binary_poly_column_mle::<F, D>(
+                    col, 1, evaluation_point, field_cfg,
+                )
+            })
+            .collect()
+    } else {
+        sig.shifts
+            .iter()
+            .map(|spec| {
+                evaluate_shifted_binary_poly_column_mle::<F, D>(
+                    &binary_poly_trace[spec.source_col],
+                    spec.shift_amount,
+                    evaluation_point,
+                    field_cfg,
+                )
+            })
+            .collect()
+    };
+
+    // ── Step 3. Compute L_{N-1}(r) = eq(r, (1,…,1)) = ∏ r_i ───────
+    let one = F::one_with_cfg(field_cfg);
+    let zero = F::zero_with_cfg(field_cfg);
+    let last_row_lagrange: F =
+        evaluation_point.iter().fold(one.clone(), |acc, r_i| acc * r_i);
+
+    // ── Step 4. Project last-row native values for correction ───────
+    let last_row_up: Vec<DynamicPolynomialF<F>> = binary_poly_trace
+        .iter()
+        .map(|col| project_binary_poly_to_dynamic(&col[num_rows - 1], &one, &zero))
+        .collect();
+
+    let last_row_down: Vec<DynamicPolynomialF<F>> = if sig.uses_legacy_shifts() {
+        // Legacy: down(N-1) would need trace[c][N], out of bounds → zero.
+        vec![DynamicPolynomialF::new([]); binary_poly_trace.len()]
+    } else {
+        sig.shifts
+            .iter()
+            .map(|spec| {
+                let target = (num_rows - 1) + spec.shift_amount;
+                if target < num_rows {
+                    project_binary_poly_to_dynamic(
+                        &binary_poly_trace[spec.source_col][target],
+                        &one,
+                        &zero,
+                    )
+                } else {
+                    DynamicPolynomialF::new([])
+                }
+            })
+            .collect()
+    };
+
+    // ── Step 5. Apply constraints on full MLE-evaluated values ──────
+    let mut full_builder = CombinedPolyRowBuilder::new(num_constraints);
+    {
+        let project = |x: &U::Scalar| {
+            projected_scalars
+                .get(x)
+                .cloned()
+                .expect("all scalars should have been projected at this point")
+        };
+        U::constrain_general(
+            &mut full_builder,
+            TraceRow::from_slice_with_signature(&up_values, &sig),
+            TraceRow::from_slice_with_signature(&down_values, &down_sig),
+            &project,
+            |x, y| Some(project(y) * x),
+            ImpossibleIdeal::from_ref,
+        );
+    }
+
+    // ── Step 6. Apply constraints on last-row values ────────────────
+    let mut last_row_builder = CombinedPolyRowBuilder::new(num_constraints);
+    {
+        let project = |x: &U::Scalar| {
+            projected_scalars
+                .get(x)
+                .cloned()
+                .expect("all scalars should have been projected at this point")
+        };
+        U::constrain_general(
+            &mut last_row_builder,
+            TraceRow::from_slice_with_signature(&last_row_up, &sig),
+            TraceRow::from_slice_with_signature(&last_row_down, &down_sig),
+            &project,
+            |x, y| Some(project(y) * x),
+            ImpossibleIdeal::from_ref,
+        );
+    }
+
+    // ── Step 7. Correct: C̄_j(r) = full_j − L_{N-1}(r) · last_j ───
+    full_builder
+        .combined_evaluations
+        .into_iter()
+        .zip(last_row_builder.combined_evaluations)
+        .map(|(mut full, last)| {
+            // Scalar-multiply each coefficient of `last` by L_{N-1}(r).
+            let correction = DynamicPolynomialF {
+                coeffs: last
+                    .coeffs
+                    .iter()
+                    .map(|c| c.clone() * &last_row_lagrange)
+                    .collect(),
+            };
+            full -= &correction;
+            full.trim();
+            full
+        })
+        .collect()
+}
+
+/// Evaluate a `DenseMultilinearExtension<BinaryPoly<D>>` at a field
+/// point by processing one polynomial-coefficient position at a time.
+///
+/// For each coefficient position `d` in `0..D`, extracts the boolean
+/// MLE (entries are 0 or 1 in `F`), evaluates at `point`, and
+/// assembles the results into a `DynamicPolynomialF<F>`.
+fn evaluate_binary_poly_column_mle<F, const D: usize>(
+    column: &DenseMultilinearExtension<BinaryPoly<D>>,
+    point: &[F],
+    field_cfg: &F::Config,
+) -> DynamicPolynomialF<F>
+where
+    F: PrimeField + zinc_utils::inner_transparent_field::InnerTransparentField,
+    F::Inner: Default + Send + Sync,
+{
+    let zero_inner = F::zero_with_cfg(field_cfg).inner().clone();
+    let one_inner = F::one_with_cfg(field_cfg).inner().clone();
+    let n = column.len();
+    let num_vars = point.len();
+
+    // Transpose: for each coefficient position d, collect boolean values
+    // across all rows into a single MLE over F::Inner.
+    let mut coeff_buffers: Vec<Vec<F::Inner>> =
+        (0..D).map(|_| Vec::with_capacity(n)).collect();
+
+    for b in 0..n {
+        for (d, bit) in column[b].iter().enumerate() {
+            coeff_buffers[d].push(if bit.into_inner() {
+                one_inner.clone()
+            } else {
+                zero_inner.clone()
+            });
+        }
+    }
+
+    let coeffs: Vec<F> = coeff_buffers
+        .into_iter()
+        .map(|evals| {
+            let mle = DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                evals,
+                zero_inner.clone(),
+            );
+            mle.evaluate_with_config(point, field_cfg)
+                .expect("MLE evaluation should succeed")
+        })
+        .collect();
+
+    DynamicPolynomialF::new_trimmed(coeffs)
+}
+
+/// Like [`evaluate_binary_poly_column_mle`], but for a shifted column:
+/// entry `b` is `column[b + shift_amount]` when in bounds, else zero.
+fn evaluate_shifted_binary_poly_column_mle<F, const D: usize>(
+    column: &DenseMultilinearExtension<BinaryPoly<D>>,
+    shift_amount: usize,
+    point: &[F],
+    field_cfg: &F::Config,
+) -> DynamicPolynomialF<F>
+where
+    F: PrimeField + zinc_utils::inner_transparent_field::InnerTransparentField,
+    F::Inner: Default + Send + Sync,
+{
+    let zero_inner = F::zero_with_cfg(field_cfg).inner().clone();
+    let one_inner = F::one_with_cfg(field_cfg).inner().clone();
+    let num_vars = point.len();
+    let n = 1usize << num_vars;
+
+    let mut coeff_buffers: Vec<Vec<F::Inner>> =
+        (0..D).map(|_| Vec::with_capacity(n)).collect();
+
+    for b in 0..n {
+        let target = b + shift_amount;
+        if target < column.len() {
+            for (d, bit) in column[target].iter().enumerate() {
+                coeff_buffers[d].push(if bit.into_inner() {
+                    one_inner.clone()
+                } else {
+                    zero_inner.clone()
+                });
+            }
+        } else {
+            for d in 0..D {
+                coeff_buffers[d].push(zero_inner.clone());
+            }
+        }
+    }
+
+    let coeffs: Vec<F> = coeff_buffers
+        .into_iter()
+        .map(|evals| {
+            let mle = DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                evals,
+                zero_inner.clone(),
+            );
+            mle.evaluate_with_config(point, field_cfg)
+                .expect("MLE evaluation should succeed")
+        })
+        .collect();
+
+    DynamicPolynomialF::new_trimmed(coeffs)
+}
+
+/// Project a single `BinaryPoly<D>` into `DynamicPolynomialF<F>`.
+fn project_binary_poly_to_dynamic<F: PrimeField, const D: usize>(
+    bp: &BinaryPoly<D>,
+    one: &F,
+    zero: &F,
+) -> DynamicPolynomialF<F> {
+    DynamicPolynomialF::new_trimmed(
+        bp.iter()
+            .map(|b| {
+                if b.into_inner() {
+                    one.clone()
+                } else {
+                    zero.clone()
+                }
+            })
+            .collect::<Vec<_>>(),
+    )
 }

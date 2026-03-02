@@ -195,7 +195,7 @@ type IprsInt1R4B16<const DEPTH: usize, const CHECK: bool> = IprsCode<
 //     → 8×64=512 SHA rows + 258 ECDSA rows = 770 → pad to 1024
 
 const SHA256_NUM_VARS: usize = 7;        // 2^7 = 128 rows (64 real + 64 padding)
-const SHA256_BATCH_SIZE: usize = 26;      // 26 SHA-256 columns (23 bitpoly + 3 int)
+const SHA256_BATCH_SIZE: usize = 30;      // 30 SHA-256 columns (27 bitpoly + 3 int)
 
 // Split SHA-256 batch sizes for two-PCS configuration
 const SHA256_POLY_BATCH_SIZE: usize = 23; // 23 BinaryPoly columns

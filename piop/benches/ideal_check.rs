@@ -472,7 +472,8 @@ pub fn ideal_check_benches(c: &mut Criterion) {
     bench_binary_decomposition::<3>(&mut group, 1 << 17);
     bench_binary_decomposition::<4>(&mut group, 1 << 17);
 
-    bench_big_linear_uair::<3>(&mut group, 1 << 12);
+
+    bench_big_linear_uair::<3>(&mut group, 1 << 10);
     bench_big_linear_uair::<4>(&mut group, 1 << 12);
     bench_big_linear_uair::<3>(&mut group, 1 << 13);
     bench_big_linear_uair::<4>(&mut group, 1 << 13);

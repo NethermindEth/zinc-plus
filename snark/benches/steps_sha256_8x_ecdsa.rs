@@ -138,7 +138,7 @@ type IprsInt4R4B64<const DEPTH: usize, const CHECK: bool> = IprsCode<
 // ─── Parameters ─────────────────────────────────────────────────────────────
 
 const SHA256_8X_NUM_VARS: usize = 9;
-const SHA256_BATCH_SIZE: usize = 26;
+const SHA256_BATCH_SIZE: usize = 30;       // 30 SHA-256 columns (27 bitpoly + 3 int)
 const ECDSA_NUM_VARS: usize = 9;
 const ECDSA_BATCH_SIZE: usize = zinc_ecdsa_uair::NUM_COLS;
 const SHA256_LOOKUP_COL_COUNT: usize = 10;

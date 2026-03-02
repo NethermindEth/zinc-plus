@@ -48,7 +48,18 @@ use zinc_piop::projections::{
     project_trace_coeffs, project_trace_to_field,
     project_scalars, project_scalars_to_field,
 };
-use zinc_piop::lookup::{LookupColumnSpec, LookupTableType};
+use zinc_piop::lookup::{LookupColumnSpec, LookupTableType, LookupWitnessSource, AffineLookupSpec};
+use zinc_piop::lookup::{
+    BatchedDecompLogupProtocol, group_lookup_specs,
+};
+use zinc_piop::lookup::pipeline::build_lookup_instance_from_indices_pub;
+use zinc_piop::lookup::pipeline::generate_table_and_shifts;
+use zinc_piop::sumcheck::multi_degree::{MultiDegreeSumcheck, MultiDegreeSumcheckProof};
+use zinc_piop::sumcheck::prover::{NatEvaluatedPolyWithoutConstant, ProverMsg};
+use zinc_piop::ideal_check::IdealCheckProtocol;
+use zinc_piop::combined_poly_resolver::CombinedPolyResolver;
+use zinc_utils::projectable_to_field::ProjectableToField;
+use zip_plus::pcs::ZipPlusProof;
 
 // ─── Type definitions ───────────────────────────────────────────────────────
 
@@ -94,7 +105,7 @@ type IprsBPoly32R4B64<const DEPTH: usize, const CHECK: bool> = IprsCode<
 // ─── Parameters ─────────────────────────────────────────────────────────────
 
 const SHA256_8X_NUM_VARS: usize = 9;      // 2^9 = 512 rows (8 × 64 SHA rounds)
-const SHA256_BATCH_SIZE: usize = 26;       // 26 SHA-256 columns
+const SHA256_BATCH_SIZE: usize = 30;       // 30 SHA-256 columns (27 bitpoly + 3 int)
 const SHA256_LOOKUP_COL_COUNT: usize = 10; // 10 Q[X] columns need lookup
 
 fn sha256_lookup_specs() -> Vec<LookupColumnSpec> {
@@ -117,7 +128,7 @@ fn generate_sha256_trace(num_vars: usize) -> Vec<DenseMultilinearExtension<Binar
 /// 8×SHA-256 compressions (**no** ECDSA).
 ///
 /// Steps benchmarked:
-///   1. WitnessGen — generate the 26-column BinaryPoly trace (512 rows)
+///   1. WitnessGen — generate the 30-column BinaryPoly trace (512 rows)
 ///   2. PCS/Commit — Zip+ commit (Merkle tree construction)
 ///   3. PIOP/IdealCheck — Ideal Check prover
 ///   4. PIOP/CPR — Combined Poly Resolver prover

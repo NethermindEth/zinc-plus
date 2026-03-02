@@ -15,11 +15,12 @@ use thiserror::Error;
 use zinc_poly::{
     EvaluationError,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::dynamic::over_field::DynamicPolynomialF,
+    univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF},
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     Uair,
+    degree_counter::count_max_degree,
     ideal::{Ideal, IdealCheck},
     ideal_collector::{IdealOrZero, collect_ideals},
 };
@@ -61,28 +62,48 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
         U: Uair,
         F::Inner: ConstTranscribable,
     {
-        let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
-            trace,
-            projected_scalars,
-            num_constraints,
-            field_cfg,
-        );
-
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
-        let combined_mle_values = cfg_iter!(combined_mles)
-            .map(|combined_mle| {
-                Ok(DynamicPolynomialF::new_trimmed(
-                    cfg_iter!(combined_mle)
-                        .map(|coeff_mle| {
-                            coeff_mle.evaluate_with_config(&evaluation_point, field_cfg)
-                        })
-                        .collect::<std::result::Result<Vec<_>, _>>()?,
-                ))
-            })
-            .collect::<std::result::Result<Vec<_>, IdealCheckError<_, _>>>()?;
+        let max_constraint_degree = count_max_degree::<U>();
+
+        let (combined_mle_values, combined_mles) = if max_constraint_degree <= 1 {
+            // For linear constraints (degree ≤ 1), evaluate column MLEs first
+            // and then apply the linear combination, avoiding row-by-row
+            // DynamicPolynomialF arithmetic.
+            let values =
+                combined_poly_builder::evaluate_combined_polynomials_linear::<_, U>(
+                    trace,
+                    projected_scalars,
+                    &evaluation_point,
+                    num_constraints,
+                    field_cfg,
+                )?;
+            (values, vec![])
+        } else {
+            let mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
+                trace,
+                projected_scalars,
+                num_constraints,
+                field_cfg,
+            );
+
+            let values = cfg_iter!(mles)
+                .map(|combined_mle| {
+                    Ok(DynamicPolynomialF::new_trimmed(
+                        cfg_iter!(combined_mle)
+                            .map(|coeff_mle| {
+                                coeff_mle
+                                    .evaluate_with_config(&evaluation_point, field_cfg)
+                            })
+                            .collect::<std::result::Result<Vec<_>, _>>()?,
+                    ))
+                })
+                .collect::<std::result::Result<Vec<_>, IdealCheckError<_, _>>>()?;
+
+            (values, mles)
+        };
 
         combined_mle_values.iter().for_each(|combined_mle_value| {
             transcript
@@ -96,6 +117,100 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
             ProverState {
                 evaluation_point,
                 combined_mles,
+            },
+        ))
+    }
+
+    /// MLE-first prover for ideal-check on binary-polynomial traces.
+    ///
+    /// When the UAIR `U` has only linear constraints (`max_degree == 1`)
+    /// and all trace columns are `BinaryPoly<D>`, this method evaluates
+    /// each column MLE at the random point **before** projecting to F,
+    /// then applies the constraints once.  This avoids the O(N × C × D)
+    /// full trace projection and the O(N × num_constraints × D)
+    /// row-by-row constraint evaluation.
+    ///
+    /// The Fiat-Shamir transcript and `Proof` format are identical to
+    /// [`prove_as_subprotocol`]; the verifier is unchanged.
+    #[allow(clippy::type_complexity)]
+    pub fn prove_mle_first<U, const D: usize>(
+        transcript: &mut impl Transcript,
+        binary_poly_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
+    where
+        U: Uair,
+        F::Inner: ConstTranscribable + Default + Send + Sync,
+    {
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+
+        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+
+        let combined_mle_values =
+            combined_poly_builder::compute_combined_values_mle_first::<F, U, D>(
+                binary_poly_trace,
+                projected_scalars,
+                &evaluation_point,
+                num_constraints,
+                field_cfg,
+            );
+
+        combined_mle_values.iter().for_each(|combined_mle_value| {
+            transcript
+                .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
+        });
+
+        Ok((
+            Proof {
+                combined_mle_values,
+            },
+            ProverState {
+                evaluation_point,
+                combined_mles: vec![],
+            },
+        ))
+    }
+
+    /// Like [`prove_mle_first`], but uses a **supplied** evaluation point.
+    #[allow(clippy::type_complexity)]
+    pub fn prove_mle_first_at_point<U, const D: usize>(
+        transcript: &mut impl Transcript,
+        binary_poly_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        evaluation_point: &[F],
+        field_cfg: &F::Config,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
+    where
+        U: Uair,
+        F::Inner: ConstTranscribable + Default + Send + Sync,
+    {
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+
+        let combined_mle_values =
+            combined_poly_builder::compute_combined_values_mle_first::<F, U, D>(
+                binary_poly_trace,
+                projected_scalars,
+                evaluation_point,
+                num_constraints,
+                field_cfg,
+            );
+
+        combined_mle_values.iter().for_each(|combined_mle_value| {
+            transcript
+                .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
+        });
+
+        Ok((
+            Proof {
+                combined_mle_values,
+            },
+            ProverState {
+                evaluation_point: evaluation_point.to_vec(),
+                combined_mles: vec![],
             },
         ))
     }
