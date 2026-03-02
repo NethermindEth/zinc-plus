@@ -60,3 +60,6 @@ debug = true
 inherits = "release"
 debug = true
 lto = false
+
+[patch."https://github.com/NethermindEth/crypto-primitives.git"]
+crypto-primitives = { path = "crypto-primitives" }

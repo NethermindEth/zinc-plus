@@ -218,6 +218,9 @@ pub struct LookupVerifierPreSumcheck<F: PrimeField> {
     pub witness_len: usize,
     /// Shift factors (K entries) — needed for decomposition check.
     pub shifts: Vec<F>,
+    /// Raw subtable values (T entries) — used by the optimized
+    /// decomposition check to avoid `batch_inverse` in the verifier.
+    pub subtable: Vec<F>,
 }
 
 // ---------------------------------------------------------------------------

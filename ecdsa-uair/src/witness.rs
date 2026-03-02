@@ -3,10 +3,9 @@
 //! Provides three witness generators:
 //! 1. `BinaryPoly<32>`: Random trace for PCS benchmarking.
 //! 2. `DensePolynomial<i64, 1>`: Valid Jacobian doubling trace for
-//!    IC+CPR testing (toy curve, integer arithmetic, no modular reduction).
-//! 3. `Int<4>`: Valid Jacobian doubling trace using 256-bit integers.
-//!    This is the target type for the unified ECDSA pipeline where the
-//!    same `Int<4>` is used for PCS commitments, PIOP, and constraints.
+//!    IC+CPR testing (toy curve over F_101, integer arithmetic, no modular reduction).
+//! 3. `Int<4>`: Valid Jacobian doubling trace using 256-bit integers
+//!    with secp256k1 curve constants.
 
 use super::{EcdsaUairBp, EcdsaUairDp, EcdsaUairInt, NUM_COLS, NUM_ROWS};
 use super::{COL_B1, COL_B2, COL_X, COL_Y, COL_Z};

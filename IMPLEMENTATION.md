@@ -446,7 +446,7 @@ If the proof contains a lookup component (`LookupProofData`), the verifier dispa
    4. Computes `shared_num_vars` = $\\max(\\text{num\\_vars}, \\max_g \\text{lookup\\_num\\_vars}_g)$ from the lookup pre-sumcheck data.
    5. Calls `MultiDegreeSumcheck::verify_as_subprotocol()` with `shared_num_vars`, verifying all groups in lockstep — each round checks per-group univariate polynomials against the running claims, and a single shared random challenge is drawn.
    6. **CPR finalize:** If `public_columns` is non-empty, the verifier first reconstructs the full `up_evals` by computing public column MLE evaluations at the shared sumcheck point. When `shared_num_vars > num_vars` (i.e., lookup extended the sumcheck dimension), public column MLEs are zero-padded from $2^{\\text{num\\_vars}}$ to $2^{\\text{shared\\_num\\_vars}}$ evaluations before evaluation — matching the prover's zero-padding of CPR MLEs. The private (proof-supplied) and public (verifier-computed) evaluations are interleaved via `reconstruct_up_evals()`. Then calls `CombinedPolyResolver::finalize_verifier()` with the shared evaluation point and the CPR's expected evaluation. The finalize method pads the IC evaluation point and selector reference with zeros to match `shared_num_vars` dimensions, recomputes the combination function at the evaluation point, and verifies it matches the subclaim.
-   7. **Lookup finalize:** For each lookup group, calls `BatchedDecompLogupProtocol::finalize_verifier()` with the shared evaluation point and the group's expected evaluation. Recomputes the batched identity polynomial $H$ at the evaluation point and verifies consistency.
+   7. **Lookup finalize:** For each lookup group, calls `BatchedDecompLogupProtocol::finalize_verifier()` with the shared evaluation point and the group's expected evaluation. Uses a **bucket-accumulation** strategy (see §12b) to recompute the batched identity polynomial $H$ and chunk MLE evaluations at the evaluation point, then verifies consistency.
 
 ### Step 3: PCS Verification (Batched)
 
@@ -1071,7 +1071,7 @@ Given $L$ witnesses looking up into the same decomposed table:
 
 1. **Chunks and inverses sent:** For each of $L$ witnesses: $K$ chunk vectors ($L \cdot K \cdot W$ field elements) plus inverse vectors ($L \cdot K$ inverse-witness vectors + 1 inverse-table vector).
 2. **Single sumcheck:** All $L \cdot (K+1)$ identities (one decomposition + $K$ LogUp per witness) are $\gamma$-batched into a single combination function. A precomputed aggregate polynomial $H$ is evaluated pointwise, yielding a degree-2 sumcheck with only 2 MLEs (`eq` and `H`).
-3. **Verification:** The verifier replays the sumcheck, recomputes $H$ at the evaluation point from the provided chunks/inverses, and checks multiplicity sums.
+3. **Verification:** The verifier replays the sumcheck, recomputes $H$ at the evaluation point using bucket accumulation (§12b), and checks multiplicity sums.
 
 ### GKR Batched Decomposition (Available, Not Wired In)
 
@@ -1176,6 +1176,40 @@ The verifier reconstructs each affine lookup's "parent evaluation" (the value th
 $$\text{parent\_eval} = \mathtt{eq\_sum\_w} \cdot \pi(\text{offset}) + \sum_j c_j \cdot \text{up\_evals}[\text{col}_j]$$
 
 where $\pi(\text{offset})$ is the field projection of the constant bit-polynomial offset and $\mathtt{eq\_sum\_w}$ is the sumcheck's equality polynomial sum (needed because the constant offset must be scaled by the number of witness rows when the sub-table domain is larger than the witness domain). This is implemented in `eval_affine_parent()`. No additional PCS opening is needed — the verifier reuses the CPR's column evaluations.
+
+### 12b. Bucket-Accumulation Optimization in `finalize_verifier`
+
+The verifier's `finalize_verifier()` hot path must evaluate chunk MLEs $\tilde{u}_k(x^*)$ and sub-table-value MLEs $\tilde{c}_k(x^*)$ at the shared sumcheck point for each of the $L \times K$ chunk vectors ($L$ lookups, $K$ chunks each). For 8×SHA-256 with $L = 13$ lookups and $K = 4$ chunks at $W = 512$ rows, this involves $13 \times 4 = 52$ inner products of length 512.
+
+#### Previous approach
+
+The original implementation evaluated each chunk directly:
+
+1. Compute $\tilde{u}_k(x^*) = \sum_{j=0}^{W-1} u_k[j] \cdot \text{eq}(j, x^*)$ — $W$ field multiplications per chunk.
+2. Use `batch_inverse` to recover $c_k[j] = \beta - 1/u_k[j]$ — one batch inversion ($3W$ muls) per chunk.
+3. Compute $\tilde{c}_k(x^*) = \sum_{j=0}^{W-1} c_k[j] \cdot \text{eq}(j, x^*)$ — another $W$ field multiplications.
+
+Total: $\sim 2 \times L \times K \times W$ multiplications plus $L \times K$ batch inversions $\approx 130$K field multiplications for the SHA-256 workload.
+
+#### Bucket-accumulation approach
+
+Since every inverse-witness value $u_k[j]$ must equal some table entry $v_{\text{table}}[t]$ (one of $T = 256$ sub-table entries), we can **bucket** the equality weights and compute the inner products over the smaller table domain:
+
+1. **Build a lookup map** from $v_{\text{table}}[t]$'s `Field::Inner` representation to index $t$, using a `HashMap<F::Inner, usize>` (requires `Hash` on `Field::Inner`).
+2. **Bucket accumulation:** For each chunk $k$, classify each $u_k[j]$ by its table index $t$ and accumulate:
+   $$\text{bucket}[t] \mathrel{+}= \text{eq}(j, x^*)$$
+   This is $W$ field *additions* (not multiplications).
+3. **Compute $\tilde{u}_k(x^*)$ and $\tilde{c}_k(x^*)$ from buckets:**
+   $$\tilde{u}_k(x^*) = \sum_{t=0}^{T-1} v_{\text{table}}[t] \cdot \text{bucket}[t], \qquad \tilde{c}_k(x^*) = \sum_{t=0}^{T-1} \text{subtable}[t] \cdot \text{bucket}[t]$$
+   Each sum is only $T = 256$ multiplications.
+
+Total: $L \times K \times (W \text{ adds} + 2T \text{ muls}) \approx 52 \times 512$ additions $+ 52 \times 512$ multiplications $\approx 27$K field multiplications — roughly a **5× reduction** in the dominant cost.
+
+#### Implementation details
+
+- The `subtable` raw values (the actual field-element table entries, as opposed to the inverse-table $v_{\text{table}} = 1/(\beta - T[t])$) are stored in the `LookupVerifierPreSumcheck` struct during `build_verifier_pre_sumcheck()`, avoiding recomputation.
+- The `Hash` bound was added to the `Field::Inner` associated type in `crypto-primitives/src/field.rs`. All existing `Inner` types (`Uint<LIMBS>`, `BoxedUint`, `BigInt<N>`, ark-ff fields) already implement `Hash`.
+- The `eq_bucket` vector is allocated once and reused across all $L \times K$ chunks to avoid repeated allocation.
 
 ## 13. Witness Generation
 
@@ -1514,11 +1548,12 @@ For other UAIRs that need different shift patterns, the same mechanism applies: 
 
 ### 16.8 Verifier Target: Sub-5ms
 
-The dual-circuit E2E verifier currently runs at ~5.5 ms (parallel, MacBook Air M4), down from ~7.3 ms after Phase 4 pipeline parallelization (see §14). To reach the <5 ms target:
+The single-circuit SHA-256 E2E verifier currently runs at ~3.9 ms (parallel, MacBook Air M4), down from ~5 ms before the bucket-accumulation optimization in `finalize_verifier` (§12b). The previous regression from ~3.5 ms to ~5 ms was primarily caused by the expansion from 26→30 columns and 10→13 lookups (addition of 3 affine-combination lookups for Ch/Maj), not a SIMD bug.
+
+Further improvements toward sub-3 ms:
 - Narrowing ECDSA to `MontyField<4>` would speed up the ECDSA batch (faster field ops, smaller data).
 - Batch Merkle verification could save ~0.3 ms.
 - SIMD inner products could save ~0.3 ms.
-- Together these could bring the combined time below 5 ms.
 
 ### 16.9 ~~Production Pipeline Parallelism~~ — **RESOLVED**
 

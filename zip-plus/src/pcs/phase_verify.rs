@@ -40,20 +40,49 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + for<'a> MulByScalar<&'a F>,
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
     {
+        let mut transcript: PcsTranscript = proof.clone().into();
+        let field_cfg = transcript
+            .fs_transcript
+            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+        Self::verify_with_field_cfg::<F, CHECK_FOR_OVERFLOW>(
+            vp, comm, point_f, eval_f, transcript, &field_cfg,
+        )
+    }
+
+    /// Like [`Self::verify`], but accepts a pre-computed `field_cfg` and a
+    /// [`PcsTranscript`] whose `fs_transcript` has already been advanced
+    /// past `get_random_field_cfg`.
+    ///
+    /// This avoids the redundant MillerRabin primality search when the
+    /// caller already holds the PCS field configuration (e.g. because it
+    /// derived `eval_f` / `point_f` from the same deterministic transcript).
+    #[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
+    pub fn verify_with_field_cfg<F, const CHECK_FOR_OVERFLOW: bool>(
+        vp: &ZipPlusParams<Zt, Lc>,
+        comm: &ZipPlusCommitment,
+        point_f: &[F],
+        eval_f: &F,
+        mut transcript: PcsTranscript,
+        field_cfg: &F::Config,
+    ) -> Result<(), ZipError>
+    where
+        F: FromPrimitiveWithConfig
+            + FromRef<F>
+            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> FromWithConfig<&'a Zt::Chal>
+            + for<'a> MulByScalar<&'a F>,
+        F::Inner: FromRef<Zt::Fmod> + Transcribable,
+    {
         let batch_size = comm.batch_size;
         validate_input::<Zt, Lc, _>("verify", vp.num_vars, batch_size, &[], &[point_f])?;
 
         let num_rows = vp.num_rows;
         let row_len = vp.linear_code.row_len();
-        let mut transcript: PcsTranscript = proof.clone().into();
-        let field_cfg = transcript
-            .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
 
         // TODO Lift q0, q1 back to int and take following dot products on ints instead
         // of MBSInnerProduct in field (see comboned row)
-        let (q_0, q_1) = point_to_tensor(vp.num_rows, point_f, &field_cfg)?;
-        let zero_f = F::zero_with_cfg(&field_cfg);
+        let (q_0, q_1) = point_to_tensor(vp.num_rows, point_f, field_cfg)?;
+        let zero_f = F::zero_with_cfg(field_cfg);
 
         let degree_bound = Zt::Comb::DEGREE_BOUND;
         let mut per_poly_alphas: Vec<Vec<Zt::Chal>> = Vec::with_capacity(batch_size);
@@ -68,7 +97,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             per_poly_alphas.push(alphas);
         }
 
-        let b: Vec<F> = transcript.read_field_elements(num_rows, &field_cfg)?;
+        let b: Vec<F> = transcript.read_field_elements(num_rows, field_cfg)?;
 
         // Check eval claim: <q_0, b> == evals_f
         if MBSInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())? != *eval_f {
@@ -96,14 +125,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             &combined_row,
             &q_1,
             zero_f.clone(),
-            |cr| cr.into_with_cfg(&field_cfg),
+            |cr| cr.into_with_cfg(field_cfg),
         )?;
 
         let rhs = MBSInnerProduct::mapped_inner_product::<_, _, _, _, UNCHECKED>(
             &coeffs,
             &b,
             zero_f.clone(),
-            |cr| cr.into_with_cfg(&field_cfg),
+            |cr| cr.into_with_cfg(field_cfg),
         )?;
 
         if lhs != rhs {

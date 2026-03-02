@@ -27,7 +27,6 @@ use zinc_utils::projectable_to_field::ProjectableToField;
 
 use zip_plus::code::LinearCode;
 use zip_plus::pcs::structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes};
-use zip_plus::pcs::ZipPlusProof;
 
 use zinc_piop::ideal_check::IdealCheckProtocol;
 use zinc_piop::combined_poly_resolver::CombinedPolyResolver;
@@ -1818,9 +1817,15 @@ where
     // ── Step 3: PCS Verify ──────────────────────────────────────────
     let t2 = Instant::now();
 
-    // Derive PcsF field config (same as what ZipPlus::verify will derive
-    // internally from a fresh transcript).
-    let pcs_field_cfg = KeccakTranscript::default()
+    // Derive PcsF field config from the PCS transcript (which starts from
+    // default). Reuse the same transcript for verify_with_field_cfg so the
+    // verifier does not repeat the expensive MillerRabin prime search.
+    let mut pcs_transcript = zip_plus::pcs_transcript::PcsTranscript {
+        fs_transcript: KeccakTranscript::default(),
+        stream: std::io::Cursor::new(zinc_proof.pcs_proof_bytes.clone()),
+    };
+    let pcs_field_cfg = pcs_transcript
+        .fs_transcript
         .get_random_field_cfg::<PcsF, Zt::Fmod, Zt::PrimeTest>();
 
     // r_PCS = r_CPR: convert the CPR evaluation point to PcsF.
@@ -1832,18 +1837,13 @@ where
     );
     let eval_f: PcsF = PcsF::new_unchecked_with_cfg(eval_inner, &pcs_field_cfg);
 
-    let pcs_transcript = zip_plus::pcs_transcript::PcsTranscript {
-        fs_transcript: KeccakTranscript::default(),
-        stream: std::io::Cursor::new(zinc_proof.pcs_proof_bytes.clone()),
-    };
-    let pcs_proof: ZipPlusProof = pcs_transcript.into();
-
-    let pcs_result = ZipPlus::<Zt, Lc>::verify::<PcsF, CHECK>(
+    let pcs_result = ZipPlus::<Zt, Lc>::verify_with_field_cfg::<PcsF, CHECK>(
         params,
         &zinc_proof.commitment,
         &point_f,
         &eval_f,
-        &pcs_proof,
+        pcs_transcript,
+        &pcs_field_cfg,
     );
 
     if let Err(ref e) = pcs_result {
@@ -1961,8 +1961,13 @@ where
 {
     let total_start = Instant::now();
 
-    // Derive PiopField config from a fresh PCS transcript.
-    let pcs_field_cfg = KeccakTranscript::default()
+    // Derive PiopField config from the PCS transcript and reuse it.
+    let mut pcs_transcript = zip_plus::pcs_transcript::PcsTranscript {
+        fs_transcript: KeccakTranscript::default(),
+        stream: std::io::Cursor::new(proof_bytes.to_vec()),
+    };
+    let pcs_field_cfg = pcs_transcript
+        .fs_transcript
         .get_random_field_cfg::<PiopField, Zt::Fmod, Zt::PrimeTest>();
 
     // Deserialize eval.
@@ -1971,19 +1976,14 @@ where
         &pcs_field_cfg,
     );
 
-    let pcs_transcript = zip_plus::pcs_transcript::PcsTranscript {
-        fs_transcript: KeccakTranscript::default(),
-        stream: std::io::Cursor::new(proof_bytes.to_vec()),
-    };
-    let proof: ZipPlusProof = pcs_transcript.into();
-
     let t0 = Instant::now();
-    let result = ZipPlus::<Zt, Lc>::verify::<PiopField, CHECK>(
+    let result = ZipPlus::<Zt, Lc>::verify_with_field_cfg::<PiopField, CHECK>(
         params,
         commitment,
         point,
         &eval_f,
-        &proof,
+        pcs_transcript,
+        &pcs_field_cfg,
     );
     let pcs_verify_time = t0.elapsed();
 
@@ -2812,8 +2812,13 @@ where
     // Verify that the PCS proof is consistent with these claims.
     let t2 = Instant::now();
 
-    // Derive PiopField config from a fresh PCS transcript.
-    let pcs_field_cfg = KeccakTranscript::default()
+    // Derive PiopField config from the PCS transcript and reuse it.
+    let mut pcs_transcript = zip_plus::pcs_transcript::PcsTranscript {
+        fs_transcript: KeccakTranscript::default(),
+        stream: std::io::Cursor::new(zinc_proof.pcs_proof_bytes.clone()),
+    };
+    let pcs_field_cfg = pcs_transcript
+        .fs_transcript
         .get_random_field_cfg::<PiopField, Zt::Fmod, Zt::PrimeTest>();
 
     // Deserialize the claimed evaluation.
@@ -2826,19 +2831,13 @@ where
     // Truncate to num_vars since the sumcheck may have shared_num_vars > num_vars when lookup is present.
     let point_f: Vec<PiopField> = cpr_subclaim.evaluation_point[..num_vars].to_vec();
 
-    // Deserialize PCS proof.
-    let pcs_transcript = zip_plus::pcs_transcript::PcsTranscript {
-        fs_transcript: KeccakTranscript::default(),
-        stream: std::io::Cursor::new(zinc_proof.pcs_proof_bytes.clone()),
-    };
-    let pcs_proof: ZipPlusProof = pcs_transcript.into();
-
-    let pcs_result = ZipPlus::<Zt, Lc>::verify::<PiopField, CHECK>(
+    let pcs_result = ZipPlus::<Zt, Lc>::verify_with_field_cfg::<PiopField, CHECK>(
         params,
         &zinc_proof.commitment,
         &point_f,
         &eval_f,
-        &pcs_proof,
+        pcs_transcript,
+        &pcs_field_cfg,
     );
 
     if let Err(ref e) = pcs_result {
@@ -3627,7 +3626,12 @@ where
     let t2 = Instant::now();
 
     // Derive PiopField config from a fresh PCS transcript.
-    let pcs_field_cfg = KeccakTranscript::default()
+    let mut pcs_transcript = zip_plus::pcs_transcript::PcsTranscript {
+        fs_transcript: KeccakTranscript::default(),
+        stream: std::io::Cursor::new(proof.pcs_proof_bytes.clone()),
+    };
+    let pcs_field_cfg = pcs_transcript
+        .fs_transcript
         .get_random_field_cfg::<PiopField, Zt::Fmod, Zt::PrimeTest>();
 
     // Deserialize the claimed evaluation.
@@ -3640,18 +3644,13 @@ where
     // Truncate to num_vars since the sumcheck may have shared_num_vars > num_vars when lookup is present.
     let point_f: Vec<PiopField> = bp_cpr_subclaim.evaluation_point[..num_vars].to_vec();
 
-    let pcs_transcript = zip_plus::pcs_transcript::PcsTranscript {
-        fs_transcript: KeccakTranscript::default(),
-        stream: std::io::Cursor::new(proof.pcs_proof_bytes.clone()),
-    };
-    let pcs_proof: ZipPlusProof = pcs_transcript.into();
-
-    let pcs_result = ZipPlus::<Zt, Lc>::verify::<PiopField, CHECK>(
+    let pcs_result = ZipPlus::<Zt, Lc>::verify_with_field_cfg::<PiopField, CHECK>(
         params,
         &proof.commitment,
         &point_f,
         &eval_f,
-        &pcs_proof,
+        pcs_transcript,
+        &pcs_field_cfg,
     );
     let pcs_verify_time = t2.elapsed();
 
@@ -5103,26 +5102,32 @@ where
     let t2 = Instant::now();
 
     // r_PCS = r_CPR: both circuits share the same evaluation point.
+    //
+    // Each PCS uses an independent transcript starting from default.
+    // We derive the field config once per circuit and pass it into
+    // `verify_with_field_cfg` to avoid a redundant MillerRabin
+    // primality search inside the verifier.
     let verify_pcs1 = || {
-        let pcs1_field_cfg = KeccakTranscript::default()
+        let mut pcs1_transcript = zip_plus::pcs_transcript::PcsTranscript {
+            fs_transcript: KeccakTranscript::default(),
+            stream: std::io::Cursor::new(proof.pcs1_proof_bytes.clone()),
+        };
+        let pcs1_field_cfg = pcs1_transcript
+            .fs_transcript
             .get_random_field_cfg::<PiopField, Zt1::Fmod, Zt1::PrimeTest>();
         let point1_f: Vec<PiopField> = c1_cpr_subclaim.evaluation_point[..num_vars].to_vec();
         let eval1_f: PiopField = PiopField::new_unchecked_with_cfg(
             <PiopField as Field>::Inner::read_transcription_bytes(&proof.pcs1_evals_bytes[0]),
             &pcs1_field_cfg,
         );
-        let pcs1_transcript = zip_plus::pcs_transcript::PcsTranscript {
-            fs_transcript: KeccakTranscript::default(),
-            stream: std::io::Cursor::new(proof.pcs1_proof_bytes.clone()),
-        };
-        let pcs1_proof: ZipPlusProof = pcs1_transcript.into();
 
-        let result = ZipPlus::<Zt1, Lc1>::verify::<PiopField, CHECK>(
+        let result = ZipPlus::<Zt1, Lc1>::verify_with_field_cfg::<PiopField, CHECK>(
             params1,
             &proof.pcs1_commitment,
             &point1_f,
             &eval1_f,
-            &pcs1_proof,
+            pcs1_transcript,
+            &pcs1_field_cfg,
         );
         if let Err(ref e) = result {
             eprintln!("PCS1 verification failed: {e:?}");
@@ -5131,25 +5136,26 @@ where
     };
 
     let verify_pcs2 = || {
-        let pcs2_field_cfg = KeccakTranscript::default()
+        let mut pcs2_transcript = zip_plus::pcs_transcript::PcsTranscript {
+            fs_transcript: KeccakTranscript::default(),
+            stream: std::io::Cursor::new(proof.pcs2_proof_bytes.clone()),
+        };
+        let pcs2_field_cfg = pcs2_transcript
+            .fs_transcript
             .get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>();
         let point2_f: Vec<PcsF2> = piop_point_to_pcs_field(&c1_cpr_subclaim.evaluation_point[..num_vars], &pcs2_field_cfg);
         let eval2_f: PcsF2 = PcsF2::new_unchecked_with_cfg(
             <PcsF2::Inner as ConstTranscribable>::read_transcription_bytes(&proof.pcs2_evals_bytes[0]),
             &pcs2_field_cfg,
         );
-        let pcs2_transcript = zip_plus::pcs_transcript::PcsTranscript {
-            fs_transcript: KeccakTranscript::default(),
-            stream: std::io::Cursor::new(proof.pcs2_proof_bytes.clone()),
-        };
-        let pcs2_proof: ZipPlusProof = pcs2_transcript.into();
 
-        let result = ZipPlus::<Zt2, Lc2>::verify::<PcsF2, CHECK>(
+        let result = ZipPlus::<Zt2, Lc2>::verify_with_field_cfg::<PcsF2, CHECK>(
             params2,
             &proof.pcs2_commitment,
             &point2_f,
             &eval2_f,
-            &pcs2_proof,
+            pcs2_transcript,
+            &pcs2_field_cfg,
         );
         if let Err(ref e) = result {
             eprintln!("PCS2 verification failed: {e:?}");

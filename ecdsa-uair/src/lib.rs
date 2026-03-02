@@ -122,35 +122,57 @@ pub const COL_SEL_INIT: usize = 9;
 /// Finalization selector: 1 at row NUM_ROWS−1 (row 257), 0 elsewhere (public).
 pub const COL_SEL_FINAL: usize = 10;
 
-// ─── Toy curve constants ────────────────────────────────────────────────────
-// Curve: y² = x³ + 7 over F_101 (same equation as secp256k1, small prime)
-// G  = (15, 7)   — generator
-// Q  = (15, 7)   — public key (= G for simplicity)
-// G+Q= (35, 82)  — precomputed table point (= 2G affine)
-//
-// Constants are provided as both i64 (for DensePolynomial<i64, 1> constraints)
-// and Int<4> (for Int<4> constraints). The values are identical.
+// ─── secp256k1 curve constants ──────────────────────────────────────────────
+// Curve: y² = x³ + 7 over F_p
+// p  = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+// G  = (Gx, Gy) — secp256k1 generator
+// Q  = (Gx, Gy) — public key (= G for benchmark fixed-point witness)
+// G+Q= 2G affine = (PGQx, PGQy) — precomputed table point
 
-/// Generator x-coordinate.
-pub const GX: i64 = 15;
-/// Generator y-coordinate.
-pub const GY: i64 = 7;
-/// Public key x-coordinate (= G for the toy case).
-pub const QX: i64 = 15;
+/// Generator x-coordinate (secp256k1).
+/// 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
+pub const GX: Int<4> = Int::from_words([
+    0x59F2815B16F81798,
+    0x029BFCDB2DCE28D9,
+    0x55A06295CE870B07,
+    0x79BE667EF9DCBBAC,
+]);
+/// Generator y-coordinate (secp256k1).
+/// 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
+pub const GY: Int<4> = Int::from_words([
+    0x9C47D08FFB10D4B8,
+    0xFD17B448A6855419,
+    0x5DA4FBFC0E1108A8,
+    0x483ADA7726A3C465,
+]);
+/// Public key x-coordinate (= G for the benchmark case).
+pub const QX: Int<4> = GX;
 /// Public key y-coordinate.
-pub const QY: i64 = 7;
-/// Precomputed (G+Q) x-coordinate (= 2G affine).
-pub const PGQX: i64 = 35;
-/// Precomputed (G+Q) y-coordinate.
-pub const PGQY: i64 = 82;
+pub const QY: Int<4> = GY;
+/// Precomputed (G+Q) x-coordinate (= 2G affine on secp256k1).
+/// 0xC6047F9441ED7D6D3045406E95C07CD85C778E4B8CEF3CA7ABAC09B95C709EE5
+pub const PGQX: Int<4> = Int::from_words([
+    0xABAC09B95C709EE5,
+    0x5C778E4B8CEF3CA7,
+    0x3045406E95C07CD8,
+    0xC6047F9441ED7D6D,
+]);
+/// Precomputed (G+Q) y-coordinate (= 2G affine on secp256k1).
+/// 0x1AE168FEA63DC339A3C58419466CEAE1032688D15F9C819DE7C68DE6B1BBACD8
+pub const PGQY: Int<4> = Int::from_words([
+    0xE7C68DE6B1BBACD8,
+    0x032688D15F9C819D,
+    0xA3C58419466CEAE1,
+    0x1AE168FEA63DC339,
+]);
 
 /// Expected signature verification result: r_sig = k·n + r.
 ///
-/// For the toy fixed-point witness (Z=0 everywhere, identity result),
+/// For the fixed-point witness (Z=0 everywhere, identity result),
 /// this value is unused because the final-check constraint is guarded
 /// by Z (vacuously satisfied when Z=0). For a non-trivial witness,
 /// set this to the actual k·n + r value.
-pub const R_SIG: i64 = 0;
+pub const R_SIG: Int<4> = Int::from_words([0, 0, 0, 0]);
 
 // ─── Ideal types ────────────────────────────────────────────────────────────
 
@@ -290,6 +312,10 @@ impl Uair for EcdsaUairBp {
 // The witness uses integer arithmetic without modular reduction,
 // so only works for small values where products don't overflow i64.
 //
+// This implementation uses a toy curve (y² = x³ + 7 over F_101) because
+// secp256k1 coordinates overflow i64.  The Int<4> implementation below
+// uses the real secp256k1 constants.
+//
 // S = Y² and R_a = T_y·Z_mid³ − Y_mid are inlined as sub-expressions
 // (not separate columns). u₁, u₂ are public inputs (no trace columns).
 // k is boundary-only (no trace column).
@@ -297,8 +323,6 @@ impl Uair for EcdsaUairBp {
 // Constraints C1–C7 are non-boundary (doubling + addition).
 // Constraints B3–B4 are boundary (init, final check).
 // Booleanity of b₁/b₂ is verified outside the constraint system.
-//
-// For real secp256k1, a proper 256-bit field type would be needed.
 
 /// Number of constraints for the i64 ECDSA UAIR: 7 non-boundary + 2 boundary.
 pub const NUM_CONSTRAINTS_I64: usize = 9;
@@ -377,18 +401,28 @@ impl Uair for EcdsaUairDp {
         let b1b2 = up[COL_B1].clone() * &up[COL_B2];
         let s = up[COL_B1].clone() + &up[COL_B2] - &b1b2;
 
+        // Toy curve constants (F_101): y² = x³ + 7
+        // G = (15, 7), Q = G, G+Q = 2G = (35, 82)
+        let gx: i64 = 15;
+        let gy: i64 = 7;
+        let qx: i64 = 15;
+        let qy: i64 = 7;
+        let pgqx: i64 = 35;
+        let pgqy: i64 = 82;
+        let r_sig: i64 = 0;
+
         // Table point selection:
         // T_x = b1·(1-b2)·Gx + (1-b1)·b2·Qx + b1·b2·PGQx
         let one_minus_b2 = one.clone() - &up[COL_B2];
         let one_minus_b1 = one.clone() - &up[COL_B1];
         let b1_not_b2 = up[COL_B1].clone() * &one_minus_b2;
         let not_b1_b2 = one_minus_b1 * &up[COL_B2];
-        let t_x = smul(&b1_not_b2, GX)
-            + &smul(&not_b1_b2, QX)
-            + &smul(&b1b2, PGQX);
-        let t_y = smul(&b1_not_b2, GY)
-            + &smul(&not_b1_b2, QY)
-            + &smul(&b1b2, PGQY);
+        let t_x = smul(&b1_not_b2, gx)
+            + &smul(&not_b1_b2, qx)
+            + &smul(&b1b2, pgqx);
+        let t_y = smul(&b1_not_b2, gy)
+            + &smul(&not_b1_b2, qy)
+            + &smul(&b1b2, pgqy);
 
         // ── C4: Addition scratch H = T_x·Z_mid² - X_mid ───────────
         let zmid_sq = up[COL_Z_MID].clone() * &up[COL_Z_MID];
@@ -464,16 +498,15 @@ impl Uair for EcdsaUairDp {
         b.assert_zero(
             up[COL_SEL_FINAL].clone()
                 * &up[COL_Z]
-                * &(up[COL_X].clone() - &smul(&z_sq, R_SIG)),
+                * &(up[COL_X].clone() - &smul(&z_sq, r_sig)),
         );
     }
 }
 
 // ─── Int<4> implementation (9 constraints, 256-bit integer arithmetic) ──────
 //
-// Ring: Int<4> (256-bit signed integers). Identical constraint algebra to the
-// DensePolynomial<i64, 1> implementation above, but using Int<4> which can
-// represent full secp256k1 field elements without overflow.
+// Ring: Int<4> (256-bit signed integers). Uses the real secp256k1 curve
+// constants (generator G, public key Q = G, precomputed 2G).
 //
 // This is the target ring for the unified ECDSA pipeline: the same Int<4>
 // type is used for PCS commitments, PIOP constraints, and witness values.
@@ -519,6 +552,7 @@ impl Uair for EcdsaUairInt {
         let int = |v: i64| Int::<4>::from_ref(&v);
         let cst = |v: i64| from_ref(&int(v));
         let smul = |e: &B::Expr, v: i64| mbs(e, &int(v)).unwrap();
+        let smul_c = |e: &B::Expr, c: &Int<4>| mbs(e, c).unwrap();
 
         let one = cst(1);
 
@@ -561,12 +595,12 @@ impl Uair for EcdsaUairInt {
         let one_minus_b1 = one.clone() - &up[COL_B1];
         let b1_not_b2 = up[COL_B1].clone() * &one_minus_b2;
         let not_b1_b2 = one_minus_b1 * &up[COL_B2];
-        let t_x = smul(&b1_not_b2, GX)
-            + &smul(&not_b1_b2, QX)
-            + &smul(&b1b2, PGQX);
-        let t_y = smul(&b1_not_b2, GY)
-            + &smul(&not_b1_b2, QY)
-            + &smul(&b1b2, PGQY);
+        let t_x = smul_c(&b1_not_b2, &GX)
+            + &smul_c(&not_b1_b2, &QX)
+            + &smul_c(&b1b2, &PGQX);
+        let t_y = smul_c(&b1_not_b2, &GY)
+            + &smul_c(&not_b1_b2, &QY)
+            + &smul_c(&b1b2, &PGQY);
 
         // ── C4: Addition scratch H = T_x·Z_mid² - X_mid ───────────
         let zmid_sq = up[COL_Z_MID].clone() * &up[COL_Z_MID];
@@ -642,7 +676,7 @@ impl Uair for EcdsaUairInt {
         b.assert_zero(
             up[COL_SEL_FINAL].clone()
                 * &up[COL_Z]
-                * &(up[COL_X].clone() - &smul(&z_sq, R_SIG)),
+                * &(up[COL_X].clone() - &smul_c(&z_sq, &R_SIG)),
         );
     }
 }

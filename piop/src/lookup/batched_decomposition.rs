@@ -582,6 +582,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
             num_chunks,
             witness_len,
             shifts: shifts.to_vec(),
+            subtable: subtable.to_vec(),
         })
     }
 
@@ -706,34 +707,85 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
             h_eval += &(id_pad * &inv_corr_gamma_sum);
         }
 
-        // For each lookup, also accumulate per-chunk MLE evaluations
+        // ── Build v→subtable index for fast decomposition check ────
+        //
+        // Instead of calling batch_inverse(u_k) for each of the L×K
+        // chunk vectors, we exploit that every u_k[j] must equal some
+        // v_table[t].  A HashMap keyed on F::Inner lets us recover
+        // the subtable index in O(1).
+        //
+        // Together with bucket accumulation, this replaces 2×L×K×n
+        // field multiplications with L×K×n additions + L×K×T muls
+        // (T = table_size ≤ 256), a ~2× speedup on the hot loop.
+        let need_decomp = !parent_column_evals.is_empty();
+        let table_size = v_table.len();
+        let v_to_idx: std::collections::HashMap<F::Inner, usize> = {
+            let mut map = std::collections::HashMap::with_capacity(table_size);
+            for (t, v_t) in v_table.iter().enumerate() {
+                map.insert(v_t.inner().clone(), t);
+            }
+            map
+        };
+
+        // For each lookup, accumulate per-chunk MLE evaluations
         // for the decomposition check.
-        let mut all_chunk_evals: Vec<Vec<F>> = Vec::with_capacity(pre.num_lookups);
+        let mut all_chunk_evals: Vec<Vec<F>> = if need_decomp {
+            Vec::with_capacity(pre.num_lookups)
+        } else {
+            Vec::new()
+        };
+
+        // Reusable bucket vector for eq accumulation: bucket[t] = Σ_{j: u_k[j]=v_table[t]} eq(j, x*)
+        let mut eq_bucket = vec![zero.clone(); table_size];
 
         for ell in 0..pre.num_lookups {
             let mut u_sum_eval = zero.clone();
-            let mut chunk_evals_for_ell = Vec::with_capacity(pre.num_chunks);
+            let mut chunk_evals_for_ell: Vec<F> = if need_decomp {
+                Vec::with_capacity(pre.num_chunks)
+            } else {
+                Vec::new()
+            };
 
             for k_idx in 0..pre.num_chunks {
                 let u_k = &all_inv_w[ell][k_idx];
 
-                // ũ_k(x*) = Σ_j u_k[j] · eq(j, x*)
-                let u_eval = eval_at_point(u_k);
+                // Bucket accumulation: classify each u_k[j] by its
+                // table index and accumulate eq(j, x*) into that bucket.
+                // Then compute both ũ_k(x*) and c̃_k(x*) from buckets.
+                for val in eq_bucket.iter_mut() {
+                    *val = zero.clone();
+                }
+                for (j, u_j) in u_k.iter().enumerate() {
+                    let t = *v_to_idx.get(u_j.inner()).ok_or(
+                        LookupError::DecompositionInconsistent,
+                    )?;
+                    eq_bucket[t] += &eq_at_point[j];
+                }
+
+                // ũ_k(x*) = Σ_t v_table[t] · bucket[t]
+                let u_eval: F = v_table
+                    .iter()
+                    .zip(eq_bucket.iter())
+                    .fold(zero.clone(), |acc, (v_t, b_t)| {
+                        acc + &(v_t.clone() * b_t)
+                    });
                 u_sum_eval += &u_eval;
 
-                // c̃_k(x*) for the decomposition check.
-                // c_k[j] = β − 1/u_k[j], so
-                // c̃_k(x*) = β · eq_sum_W − Σ_{j<W} eq_j/u_k[j]
-                //
-                // Use batch_inverse (Montgomery's trick) instead of
-                // per-element divisions.
-                let inv_u_k = batch_inverse(u_k);
-                let inv_u_eval = eval_at_point(&inv_u_k);
-                let c_eval = pre.beta.clone() * &eq_sum_w - &inv_u_eval;
-                chunk_evals_for_ell.push(c_eval);
+                // c̃_k(x*) = Σ_t subtable[t] · bucket[t]
+                if need_decomp {
+                    let c_eval: F = pre.subtable
+                        .iter()
+                        .zip(eq_bucket.iter())
+                        .fold(zero.clone(), |acc, (s_t, b_t)| {
+                            acc + &(s_t.clone() * b_t)
+                        });
+                    chunk_evals_for_ell.push(c_eval);
+                }
             }
 
-            all_chunk_evals.push(chunk_evals_for_ell);
+            if need_decomp {
+                all_chunk_evals.push(chunk_evals_for_ell);
+            }
 
             // Balance identity: u_sum_eval − mv_eval
             let mv_eval: F = all_agg_mults[ell]

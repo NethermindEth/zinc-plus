@@ -65,7 +65,6 @@ use zinc_piop::ideal_check::IdealCheckProtocol;
 use zinc_piop::combined_poly_resolver::CombinedPolyResolver;
 use zinc_piop::lookup::pipeline::generate_table_and_shifts;
 use zinc_utils::projectable_to_field::ProjectableToField;
-use zip_plus::pcs::ZipPlusProof;
 
 use zinc_uair::Uair;
 
@@ -323,15 +322,15 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
 
     // ── 6. SHA PIOP / Project Trace for Ideal Check ─────────────────
     //
-    // project_trace_coeffs + project_scalars — transforms BinaryPoly
-    // witness into DynamicPolynomialF over the PIOP field.
+    // With MLE-first (max_degree == 1), the pipeline skips the full
+    // project_trace_coeffs and only calls project_scalars.  Measure
+    // the actual cost seen in the E2E pipeline.
     group.bench_function("SHA/PIOP/ProjectIC", |b| {
         let mut tr_setup = zinc_transcript::KeccakTranscript::new();
         let fcfg = tr_setup.get_random_field_cfg::<F, <F as Field>::Inner, MillerRabin>();
+        assert_eq!(sha_max_degree, 1, "SHA-256 UAIR should have max_degree == 1 (MLE-first path)");
         b.iter(|| {
-            let projected_trace = project_trace_coeffs::<F, bool, bool, 32>(
-                &sha_trace, &[], &[], &fcfg,
-            );
+            // MLE-first path: only project scalars; no trace projection needed.
             let projected_scalars = project_scalars::<F, Sha256Uair>(|scalar| {
                 let one = F::one_with_cfg(&fcfg);
                 let zero = F::zero_with_cfg(&fcfg);
@@ -341,7 +340,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                     }).collect::<Vec<_>>()
                 )
             });
-            black_box((&projected_trace, &projected_scalars));
+            black_box(&projected_scalars);
         });
     });
 
@@ -385,9 +384,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                 let field_cfg = transcript.get_random_field_cfg::<
                     F, <F as Field>::Inner, MillerRabin
                 >();
-                let projected_trace = project_trace_coeffs::<F, bool, bool, 32>(
-                    &sha_trace, &[], &[], &field_cfg,
-                );
+                // MLE-first path: only project scalars, not the trace.
                 let projected_scalars = project_scalars::<F, Sha256Uair>(|scalar| {
                     let one = F::one_with_cfg(&field_cfg);
                     let zero = F::zero_with_cfg(&field_cfg);
@@ -398,8 +395,8 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                     )
                 });
                 let t = Instant::now();
-                let _ = zinc_piop::ideal_check::IdealCheckProtocol::<F>::prove_as_subprotocol::<Sha256Uair>(
-                    &mut transcript, &projected_trace, &projected_scalars,
+                let _ = zinc_piop::ideal_check::IdealCheckProtocol::<F>::prove_mle_first::<Sha256Uair, 32>(
+                    &mut transcript, &sha_trace, &projected_scalars,
                     sha_num_constraints, SHA256_8X_NUM_VARS, &field_cfg,
                 ).expect("IC");
                 total += t.elapsed();
@@ -505,10 +502,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     let ic_evaluation_point: Vec<F> =
         unified_tr.get_field_challenges(num_vars, &sha_fcfg);
 
-    // SHA IC (at shared point).
-    let sha_proj_trace = project_trace_coeffs::<F, bool, bool, 32>(
-        &sha_trace, &[], &[], &sha_fcfg,
-    );
+    // SHA IC (at shared point) — MLE-first path for max_degree == 1.
     let sha_proj_scalars = project_scalars::<F, Sha256Uair>(|scalar| {
         let one = F::one_with_cfg(&sha_fcfg);
         let zero = F::zero_with_cfg(&sha_fcfg);
@@ -516,8 +510,8 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
             scalar.iter().map(|c| if c.into_inner() { one.clone() } else { zero.clone() }).collect::<Vec<_>>()
         )
     });
-    let _ = zinc_piop::ideal_check::IdealCheckProtocol::<F>::prove_at_point::<Sha256Uair>(
-        &mut unified_tr, &sha_proj_trace, &sha_proj_scalars,
+    let _ = zinc_piop::ideal_check::IdealCheckProtocol::<F>::prove_mle_first_at_point::<Sha256Uair, 32>(
+        &mut unified_tr, &sha_trace, &sha_proj_scalars,
         sha_num_constraints, &ic_evaluation_point, &sha_fcfg,
     ).expect("SHA IC");
 
@@ -2072,43 +2066,42 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                     // ── Timed section ──
                     let t = Instant::now();
 
-                    // PCS₁ verify (SHA).
-                    {
-                        let pcs1_fcfg = zinc_transcript::KeccakTranscript::default()
+                    // PCS₁ + PCS₂ verify in parallel (matches verify_dual_circuit).
+                    let verify_pcs1 = || {
+                        let mut pcs1_tr = zip_plus::pcs_transcript::PcsTranscript {
+                            fs_transcript: zinc_transcript::KeccakTranscript::default(),
+                            stream: std::io::Cursor::new(dual_proof.pcs1_proof_bytes.clone()),
+                        };
+                        let pcs1_fcfg = pcs1_tr.fs_transcript
                             .get_random_field_cfg::<PiopField, <Sha256ZipTypes<i64, 32> as ZipTypes>::Fmod, <Sha256ZipTypes<i64, 32> as ZipTypes>::PrimeTest>();
                         let pt1_f: Vec<PiopField> = cpr_eval_pt[..num_vars].to_vec();
                         let eval1_f: PiopField = PiopField::new_unchecked_with_cfg(
                             <Uint<{INT_LIMBS * 3}> as ConstTranscribable>::read_transcription_bytes(&dual_proof.pcs1_evals_bytes[0]),
                             &pcs1_fcfg,
                         );
-                        let pcs1_tr = zip_plus::pcs_transcript::PcsTranscript {
-                            fs_transcript: zinc_transcript::KeccakTranscript::default(),
-                            stream: std::io::Cursor::new(dual_proof.pcs1_proof_bytes.clone()),
-                        };
-                        let pcs1_proof: ZipPlusProof = pcs1_tr.into();
-                        ZipPlus::<ShaZt, ShaLc>::verify::<PiopField, UNCHECKED>(
-                            &sha_params, &dual_proof.pcs1_commitment, &pt1_f, &eval1_f, &pcs1_proof,
+                        ZipPlus::<ShaZt, ShaLc>::verify_with_field_cfg::<PiopField, UNCHECKED>(
+                            &sha_params, &dual_proof.pcs1_commitment, &pt1_f, &eval1_f, pcs1_tr, &pcs1_fcfg,
                         ).expect("PCS1 verify");
-                    }
+                    };
 
-                    // PCS₂ verify (ECDSA).
-                    {
-                        let pcs2_fcfg = zinc_transcript::KeccakTranscript::default()
+                    let verify_pcs2 = || {
+                        let mut pcs2_tr = zip_plus::pcs_transcript::PcsTranscript {
+                            fs_transcript: zinc_transcript::KeccakTranscript::default(),
+                            stream: std::io::Cursor::new(dual_proof.pcs2_proof_bytes.clone()),
+                        };
+                        let pcs2_fcfg = pcs2_tr.fs_transcript
                             .get_random_field_cfg::<FScalar, <EcdsaScalarZipTypes as ZipTypes>::Fmod, <EcdsaScalarZipTypes as ZipTypes>::PrimeTest>();
                         let pt2_f: Vec<FScalar> = zinc_snark::pipeline::piop_point_to_pcs_field(&cpr_eval_pt[..num_vars], &pcs2_fcfg);
                         let eval2_f: FScalar = FScalar::new_unchecked_with_cfg(
                             <Uint<{INT_LIMBS * 3}> as ConstTranscribable>::read_transcription_bytes(&dual_proof.pcs2_evals_bytes[0]),
                             &pcs2_fcfg,
                         );
-                        let pcs2_tr = zip_plus::pcs_transcript::PcsTranscript {
-                            fs_transcript: zinc_transcript::KeccakTranscript::default(),
-                            stream: std::io::Cursor::new(dual_proof.pcs2_proof_bytes.clone()),
-                        };
-                        let pcs2_proof: ZipPlusProof = pcs2_tr.into();
-                        ZipPlus::<EcZt, EcLc>::verify::<FScalar, UNCHECKED>(
-                            &ec_params, &dual_proof.pcs2_commitment, &pt2_f, &eval2_f, &pcs2_proof,
+                        ZipPlus::<EcZt, EcLc>::verify_with_field_cfg::<FScalar, UNCHECKED>(
+                            &ec_params, &dual_proof.pcs2_commitment, &pt2_f, &eval2_f, pcs2_tr, &pcs2_fcfg,
                         ).expect("PCS2 verify");
-                    }
+                    };
+
+                    rayon::join(verify_pcs1, verify_pcs2);
 
                     total += t.elapsed();
                 }

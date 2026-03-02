@@ -150,42 +150,69 @@ where
         let half = h_tables[0].len() / 2;
 
         // Accumulate round-polynomial evaluations across groups.
-        let mut total_e0 = F::zero_with_cfg(field_cfg);
-        let mut total_e1 = F::zero_with_cfg(field_cfg);
-        let mut total_e2 = F::zero_with_cfg(field_cfg);
-
-        for g in 0..num_groups {
-            let (h_lo, h_hi) = h_tables[g].split_at(half);
-            let (w_lo, w_hi) = w_tables[g].split_at(half);
-
-            // Parallel fold over j ∈ [0, half).
+        // Each group's contribution is computed independently (with
+        // inner parallelism over j), then summed.
+        #[cfg(feature = "parallel")]
+        let (total_e0, total_e1, total_e2) = {
+            let per_group: Vec<(F, F, F)> = h_tables
+                .par_iter()
+                .zip(w_tables.par_iter())
+                .map(|(h_table, w_table)| {
+                    let (h_lo, h_hi) = h_table.split_at(half);
+                    let (w_lo, w_hi) = w_table.split_at(half);
+                    let zero = F::zero_with_cfg(field_cfg);
+                    let folded = (0..half)
+                        .into_par_iter()
+                        .fold(
+                            || (zero.clone(), zero.clone(), zero.clone()),
+                            |(mut e0, mut e1, mut e2), j| {
+                                e0 = e0 + &(h_lo[j].clone() * &w_lo[j]);
+                                e1 = e1 + &(h_hi[j].clone() * &w_hi[j]);
+                                let h2 = h_hi[j].clone() + &h_hi[j] - &h_lo[j];
+                                let w2 = w_hi[j].clone() + &w_hi[j] - &w_lo[j];
+                                e2 = e2 + &(h2 * &w2);
+                                (e0, e1, e2)
+                            },
+                        )
+                        .reduce(
+                            || (zero.clone(), zero.clone(), zero.clone()),
+                            |(a0, a1, a2), (b0, b1, b2)| (a0 + &b0, a1 + &b1, a2 + &b2),
+                        );
+                    folded
+                })
+                .collect();
             let zero = F::zero_with_cfg(field_cfg);
-            #[cfg(not(feature = "parallel"))]
-            let init = (zero.clone(), zero.clone(), zero.clone());
-            #[cfg(feature = "parallel")]
-            let init = || (zero.clone(), zero.clone(), zero.clone());
-
-            let folded = cfg_into_iter!(0..half).fold(init, |(mut e0, mut e1, mut e2), j| {
-                e0 = e0 + &(h_lo[j].clone() * &w_lo[j]);
-                e1 = e1 + &(h_hi[j].clone() * &w_hi[j]);
-                let h2 = h_hi[j].clone() + &h_hi[j] - &h_lo[j];
-                let w2 = w_hi[j].clone() + &w_hi[j] - &w_lo[j];
-                e2 = e2 + &(h2 * &w2);
-                (e0, e1, e2)
-            });
-
-            #[cfg(feature = "parallel")]
-            let (e0, e1, e2) = folded.reduce(
-                || (zero.clone(), zero.clone(), zero.clone()),
+            per_group.into_iter().fold(
+                (zero.clone(), zero.clone(), zero.clone()),
                 |(a0, a1, a2), (b0, b1, b2)| (a0 + &b0, a1 + &b1, a2 + &b2),
-            );
-            #[cfg(not(feature = "parallel"))]
-            let (e0, e1, e2) = folded;
+            )
+        };
 
-            total_e0 = total_e0 + &e0;
-            total_e1 = total_e1 + &e1;
-            total_e2 = total_e2 + &e2;
-        }
+        #[cfg(not(feature = "parallel"))]
+        let (total_e0, total_e1, total_e2) = {
+            let mut total_e0 = F::zero_with_cfg(field_cfg);
+            let mut total_e1 = F::zero_with_cfg(field_cfg);
+            let mut total_e2 = F::zero_with_cfg(field_cfg);
+            for g in 0..num_groups {
+                let (h_lo, h_hi) = h_tables[g].split_at(half);
+                let (w_lo, w_hi) = w_tables[g].split_at(half);
+                let (e0, e1, e2) = (0..half).fold(
+                    (F::zero_with_cfg(field_cfg), F::zero_with_cfg(field_cfg), F::zero_with_cfg(field_cfg)),
+                    |(mut e0, mut e1, mut e2), j| {
+                        e0 = e0 + &(h_lo[j].clone() * &w_lo[j]);
+                        e1 = e1 + &(h_hi[j].clone() * &w_hi[j]);
+                        let h2 = h_hi[j].clone() + &h_hi[j] - &h_lo[j];
+                        let w2 = w_hi[j].clone() + &w_hi[j] - &w_lo[j];
+                        e2 = e2 + &(h2 * &w2);
+                        (e0, e1, e2)
+                    },
+                );
+                total_e0 = total_e0 + &e0;
+                total_e1 = total_e1 + &e1;
+                total_e2 = total_e2 + &e2;
+            }
+            (total_e0, total_e1, total_e2)
+        };
 
         let rp = ShiftRoundPoly {
             evals: [total_e0, total_e1, total_e2],
@@ -203,24 +230,50 @@ where
         challenges.push(s.clone());
 
         // Fold group tables: new[j] = (1−s)·old[j] + s·old[j+half].
+        // Groups are independent — fold them in parallel.
         let one_minus_s = one.clone() - &s;
-        for g in 0..num_groups {
-            let half_len = h_tables[g].len() / 2;
-            let (h_src, w_src) = (&h_tables[g], &w_tables[g]);
+        #[cfg(feature = "parallel")]
+        {
+            h_tables
+                .par_iter_mut()
+                .zip(w_tables.par_iter_mut())
+                .for_each(|(h_table, w_table)| {
+                    let half_len = h_table.len() / 2;
+                    let new_hw: Vec<(F, F)> = (0..half_len)
+                        .into_par_iter()
+                        .map(|j| {
+                            let h = h_table[j].clone() * &one_minus_s
+                                + &(h_table[half_len + j].clone() * &s);
+                            let w = w_table[j].clone() * &one_minus_s
+                                + &(w_table[half_len + j].clone() * &s);
+                            (h, w)
+                        })
+                        .collect();
+                    let (new_h, new_w): (Vec<F>, Vec<F>) = new_hw.into_iter().unzip();
+                    *h_table = new_h;
+                    *w_table = new_w;
+                });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for g in 0..num_groups {
+                let half_len = h_tables[g].len() / 2;
+                let (h_src, w_src) = (&h_tables[g], &w_tables[g]);
 
-            let new_hw: Vec<(F, F)> = cfg_into_iter!(0..half_len)
-                .map(|j| {
-                    let h = h_src[j].clone() * &one_minus_s
-                        + &(h_src[half_len + j].clone() * &s);
-                    let w = w_src[j].clone() * &one_minus_s
-                        + &(w_src[half_len + j].clone() * &s);
-                    (h, w)
-                })
-                .collect();
+                let new_hw: Vec<(F, F)> = (0..half_len)
+                    .map(|j| {
+                        let h = h_src[j].clone() * &one_minus_s
+                            + &(h_src[half_len + j].clone() * &s);
+                        let w = w_src[j].clone() * &one_minus_s
+                            + &(w_src[half_len + j].clone() * &s);
+                        (h, w)
+                    })
+                    .collect();
 
-            let (new_h, new_w): (Vec<F>, Vec<F>) = new_hw.into_iter().unzip();
-            h_tables[g] = new_h;
-            w_tables[g] = new_w;
+                let (new_h, new_w): (Vec<F>, Vec<F>) = new_hw.into_iter().unzip();
+                h_tables[g] = new_h;
+                w_tables[g] = new_w;
+            }
         }
 
         rounds.push(rp);

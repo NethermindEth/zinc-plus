@@ -141,13 +141,27 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
             vec![Vec::with_capacity(num_vars); num_groups];
 
         for _ in 0..num_vars {
-            // Each group computes its round polynomial.
-            for g in 0..num_groups {
-                let msg = prover_states[g].prove_round(
-                    &verifier_msg,
-                    &*comb_fns[g],
-                    config,
-                );
+            // Compute all groups' round polynomials in parallel (each
+            // group's prove_round mutates only its own ProverState).
+            // Absorb results sequentially to keep transcript deterministic.
+            #[cfg(feature = "parallel")]
+            let round_msgs: Vec<ProverMsg<F>> = {
+                use rayon::prelude::*;
+                prover_states
+                    .par_iter_mut()
+                    .zip(comb_fns.par_iter())
+                    .map(|(state, cfn)| state.prove_round(&verifier_msg, &**cfn, config))
+                    .collect()
+            };
+            #[cfg(not(feature = "parallel"))]
+            let round_msgs: Vec<ProverMsg<F>> = prover_states
+                .iter_mut()
+                .zip(comb_fns.iter())
+                .map(|(state, cfn)| state.prove_round(&verifier_msg, &**cfn, config))
+                .collect();
+
+            // Absorb round messages in deterministic order.
+            for (g, msg) in round_msgs.into_iter().enumerate() {
                 transcript.absorb_random_field_slice(
                     &msg.0.tail_evaluations,
                     &mut buf,

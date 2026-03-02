@@ -45,7 +45,7 @@ use zip_plus::{
 use zinc_sha256_uair::{Sha256Uair, witness::GenerateWitness};
 use zinc_uair::Uair;
 use zinc_piop::projections::{
-    project_trace_coeffs, project_trace_to_field,
+    project_trace_to_field,
     project_scalars, project_scalars_to_field,
 };
 use zinc_piop::lookup::{LookupColumnSpec, LookupTableType, LookupWitnessSource, AffineLookupSpec};
@@ -183,7 +183,8 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
         });
     });
 
-    // ── 3. PIOP / Ideal Check ───────────────────────────────────────
+    // ── 3. PIOP / Ideal Check (MLE-first for max_degree == 1) ────────
+    assert_eq!(max_degree, 1, "SHA-256 UAIR should have max_degree == 1 (MLE-first path)");
     group.bench_function("PIOP/IdealCheck", |b| {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
@@ -192,9 +193,6 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
                 let field_cfg = transcript.get_random_field_cfg::<
                     F, <F as Field>::Inner, MillerRabin
                 >();
-                let projected_trace = project_trace_coeffs::<F, bool, bool, 32>(
-                    &sha_trace, &[], &[], &field_cfg,
-                );
                 let projected_scalars = project_scalars::<F, Sha256Uair>(|scalar| {
                     let one = F::one_with_cfg(&field_cfg);
                     let zero = F::zero_with_cfg(&field_cfg);
@@ -205,9 +203,9 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
                     )
                 });
                 let t = Instant::now();
-                let _ = zinc_piop::ideal_check::IdealCheckProtocol::<F>::prove_as_subprotocol::<Sha256Uair>(
+                let _ = zinc_piop::ideal_check::IdealCheckProtocol::<F>::prove_mle_first::<Sha256Uair, 32>(
                     &mut transcript,
-                    &projected_trace,
+                    &sha_trace,
                     &projected_scalars,
                     num_constraints,
                     SHA256_8X_NUM_VARS,
@@ -224,9 +222,6 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
     let field_cfg_cpr = transcript_for_cpr.get_random_field_cfg::<
         F, <F as Field>::Inner, MillerRabin
     >();
-    let projected_trace_cpr = project_trace_coeffs::<F, bool, bool, 32>(
-        &sha_trace, &[], &[], &field_cfg_cpr,
-    );
     let projected_scalars_cpr = project_scalars::<F, Sha256Uair>(|scalar| {
         let one = F::one_with_cfg(&field_cfg_cpr);
         let zero = F::zero_with_cfg(&field_cfg_cpr);
@@ -237,9 +232,9 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
         )
     });
     let (_ic_proof_cpr, ic_state_cpr) =
-        zinc_piop::ideal_check::IdealCheckProtocol::<F>::prove_as_subprotocol::<Sha256Uair>(
+        zinc_piop::ideal_check::IdealCheckProtocol::<F>::prove_mle_first::<Sha256Uair, 32>(
             &mut transcript_for_cpr,
-            &projected_trace_cpr,
+            &sha_trace,
             &projected_scalars_cpr,
             num_constraints,
             SHA256_8X_NUM_VARS,

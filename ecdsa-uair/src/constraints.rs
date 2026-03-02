@@ -157,5 +157,6 @@
 //! because F_p arithmetic cannot be expressed in F₂[X].
 //!
 //! The constraints use plain integer arithmetic (no modular reduction),
-//! which works for the toy curve (F₁₀₁) but would require 256-bit
-//! Montgomery field arithmetic for real secp256k1.
+//! which works for small values (the `DensePolynomial<i64, 1>` variant
+//! uses a toy curve over F₁₀₁) or 256-bit integers (the `Int<4>` variant
+//! uses the real secp256k1 curve constants).
