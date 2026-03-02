@@ -67,14 +67,16 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         );
         let batch_size = polys.len();
         let row_len = pp.linear_code.row_len();
+        validate_input::<Zt, Lc, bool>(
+            "commit",
+            pp.num_vars,
+            batch_size,
+            &polys.iter().collect_vec(),
+            &[],
+        )?;
 
         let expected_num_evals = pp.num_rows * row_len;
         let cw_matrices: Vec<DenseRowMatrix<Zt::Cw>> = polys.iter().map(|poly| {
-            validate_input::<Zt, Lc, bool>(
-                "commit", pp.num_vars, batch_size,
-                &[poly], &[],
-            )?;
-
             assert_eq!(
                 poly.len(),
                 expected_num_evals,
