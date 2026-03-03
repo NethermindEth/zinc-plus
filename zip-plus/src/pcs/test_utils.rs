@@ -4,7 +4,7 @@
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::type_complexity,
-    clippy::unwrap_used,
+    clippy::unwrap_used
 )]
 
 use crate::{
@@ -228,8 +228,7 @@ where
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>
         + 'static,
-    F::Inner:
-       Transcribable,
+    F::Inner: Transcribable,
     F::Modulus:
         FromRef<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod> + Transcribable,
 {

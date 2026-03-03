@@ -4,7 +4,7 @@
 //! Section 2.2 "Combining the three steps" of the paper:
 //!
 //! ```text
-//! Q[X]  ──φ_q──>  F_q[X]  ──MLE eval──>  F_q[X]  ──ψ_a──>  F_q
+//! Q[X]  --φ_q-->  F_q[X]  --MLE eval-->  F_q[X]  --ψ_a-->  F_q
 //!       Step 1             Step 2                  Step 3
 //! ```
 //!
@@ -15,15 +15,14 @@
 //! these would be resolved by the Zip+ PCS.
 
 use crypto_primitives::{
-    ConstIntRing, ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig,
-    PrimeField,
+    ConstIntRing, ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig, PrimeField,
 };
 use num_traits::Zero;
 use std::io::Cursor;
 use thiserror::Error;
 use zinc_piop::{
     combined_poly_resolver::{self, CombinedPolyResolver, CombinedPolyResolverError},
-    ideal_check::{self, IdealCheckProtocol},
+    ideal_check::{self, IdealCheckError, IdealCheckProtocol},
     projections::{
         project_scalars, project_scalars_to_field, project_trace_coeffs, project_trace_to_field,
     },
@@ -164,7 +163,7 @@ pub fn prove<Zt, U, F, ProjectScalar, const D: usize, const CHECK_FOR_OVERFLOW: 
     trace_int: &[DenseMultilinearExtension<<Zt::IntZt as ZipTypes>::Eval>],
     num_vars: usize,
     project_scalar: ProjectScalar,
-) -> Result<(Proof<F>, ProverAux<F>), ProtocolError<F>>
+) -> Result<(Proof<F>, ProverAux<F>), ProtocolError<F, U::Ideal>>
 where
     Zt: WitnessZincTypes<D>,
     Zt::Int: ProjectableToField<F>,
@@ -181,6 +180,7 @@ where
         + 'static,
     F::Inner:
         ConstIntSemiring + ConstTranscribable + FromRef<Zt::Fmod> + Send + Sync + Zero + Default,
+    F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
     U: Uair + 'static,
     ProjectScalar: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
 {
@@ -239,7 +239,7 @@ where
 
     let num_constraints = count_constraints::<U>();
 
-    // ── Step 2: Randomized ideal check ──────────────────────────
+    // === Step 2: Randomized ideal check ===
     let (ic_proof, ic_prover_state) = IdealCheckProtocol::prove_as_subprotocol::<U>(
         &mut pcs_transcript.fs_transcript,
         &projected_trace,
@@ -247,8 +247,7 @@ where
         num_constraints,
         num_vars,
         &field_cfg,
-    )
-    .map_err(|e| ProtocolError::IdealCheck(format!("{e:?}")))?;
+    )?;
 
     // === Step 3: Evaluation projection (ψ_a: F_q[X] → F_q) ===
     // Sample the projecting element as Zt::Chal (matching the Zip+ PCS convention),
@@ -262,7 +261,7 @@ where
 
     // Project scalars from F_q[X] to F_q.
     let projected_scalars_f = project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
-        .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(format!("{e:?}")))?;
+        .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
     let max_degree = count_max_degree::<U>();
 
@@ -290,7 +289,7 @@ where
     //       public data. The PCS only covers witness columns.
     let eval_point = &cpr_prover_state.evaluation_point;
 
-    fn pcs_prove_witness_evaluations<Zt, Lc, F, const CHECK_FOR_OVERFLOW: bool>(
+    fn pcs_prove_witness_evaluations<Zt, Lc, F, I, const CHECK_FOR_OVERFLOW: bool>(
         pcs_transcript: &mut PcsProverTranscript,
         pp: &ZipPlusParams<Zt, Lc>,
         witness: &[DenseMultilinearExtension<Zt::Eval>],
@@ -299,7 +298,7 @@ where
         eval_point: &[F],
         field_cfg: &F::Config,
         projecting_element: &Zt::Chal,
-    ) -> Result<(), ProtocolError<F>>
+    ) -> Result<(), ProtocolError<F, I>>
     where
         Zt: ZipTypes,
         Zt::Eval: ProjectableToField<F>,
@@ -308,7 +307,9 @@ where
             + for<'a> FromWithConfig<&'a Zt::Chal>
             + for<'a> MulByScalar<&'a F>
             + FromRef<F>,
-        F::Inner: FromRef<Zt::Fmod> + Transcribable,
+        F::Inner: Transcribable,
+        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
+        I: Ideal,
     {
         for ((hint, col), _comm) in hints.iter().zip(witness.iter()).zip(commitments.iter()) {
             // Proximity test
@@ -327,7 +328,7 @@ where
         Ok(())
     }
 
-    pcs_prove_witness_evaluations::<Zt::BinaryZt, Zt::BinaryLc, F, CHECK_FOR_OVERFLOW>(
+    pcs_prove_witness_evaluations::<Zt::BinaryZt, Zt::BinaryLc, _, _, CHECK_FOR_OVERFLOW>(
         &mut pcs_transcript,
         pp_bin,
         trace_bin_poly,
@@ -337,7 +338,7 @@ where
         &field_cfg,
         &projecting_element,
     )?;
-    pcs_prove_witness_evaluations::<Zt::ArbitraryZt, Zt::ArbitraryLc, F, CHECK_FOR_OVERFLOW>(
+    pcs_prove_witness_evaluations::<Zt::ArbitraryZt, Zt::ArbitraryLc, _, _, CHECK_FOR_OVERFLOW>(
         &mut pcs_transcript,
         pp_arb,
         trace_arb_poly,
@@ -347,7 +348,7 @@ where
         &field_cfg,
         &projecting_element,
     )?;
-    pcs_prove_witness_evaluations::<Zt::IntZt, Zt::IntLc, F, CHECK_FOR_OVERFLOW>(
+    pcs_prove_witness_evaluations::<Zt::IntZt, Zt::IntLc, _, _, CHECK_FOR_OVERFLOW>(
         &mut pcs_transcript,
         pp_int,
         trace_int,
@@ -380,7 +381,9 @@ where
     ))
 }
 
-// ─── Verifier ───────────────────────────────────────────────────
+//
+// Verifier
+//
 
 /// Zinc+ PIOP Verifier (Algorithm 1, verification side, Steps 0–5).
 ///
@@ -407,7 +410,7 @@ pub fn verify<
     num_vars: usize,
     project_scalar: ProjectScalar,
     project_ideal: ProjectIdeal,
-) -> Result<Subclaim<F>, ProtocolError<F>>
+) -> Result<Subclaim<F>, ProtocolError<F, IdealOverF>>
 where
     Zt: WitnessZincTypes<D>,
     F: InnerTransparentField
@@ -421,8 +424,8 @@ where
     <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
-    F::Inner:
-        ConstIntSemiring + ConstTranscribable + FromRef<Zt::Fmod> + Send + Sync + Zero + Default,
+    F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
+    F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
     U: Uair + 'static,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
     ProjectScalar: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
@@ -453,8 +456,7 @@ where
         num_vars,
         |ideal| project_ideal(ideal, &field_cfg),
         &field_cfg,
-    )
-    .map_err(|e| ProtocolError::IdealCheck(format!("{e:?}")))?;
+    )?;
 
     // === Step 3: Evaluation projection ===
     // Sample projecting element as Zt::Chal (matching the prover).
@@ -464,7 +466,7 @@ where
     // Verifier independently computes projected scalars (public data).
     let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
     let projected_scalars_f = project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
-        .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(format!("{e:?}")))?;
+        .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
     let max_degree = count_max_degree::<U>();
 
@@ -531,15 +533,16 @@ where
 /// trace MLE (rows 1..n, zero-padded), which the PCS does not yet open.
 /// Until the PCS is extended to also open shifted MLEs, this function
 /// checks them directly against the prover's auxiliary projected trace.
-pub fn resolve_subclaim<F>(
+pub fn resolve_subclaim<F, I>(
     subclaim: &Subclaim<F>,
     projected_trace_f: &[DenseMultilinearExtension<F::Inner>],
     field_cfg: &F::Config,
-) -> Result<(), ProtocolError<F>>
+) -> Result<(), ProtocolError<F, I>>
 where
     F: InnerTransparentField,
     F::Inner: ConstTranscribable + Send + Sync + Zero + Default,
     DenseMultilinearExtension<F::Inner>: MultilinearExtensionWithConfig<F>,
+    I: Ideal,
 {
     let num_cols = projected_trace_f.len();
 
@@ -553,7 +556,9 @@ where
     {
         let shifted: DenseMultilinearExtension<F::Inner> = mle.iter().skip(1).cloned().collect();
 
-        let actual = shifted.evaluate_with_config(&subclaim.evaluation_point, field_cfg)?;
+        let actual = shifted
+            .evaluate_with_config(&subclaim.evaluation_point, field_cfg)
+            .map_err(ProtocolError::MleEvaluation)?;
 
         if actual != *expected {
             return Err(ProtocolError::SubclaimMismatch {
@@ -571,17 +576,16 @@ where
 // Error type and conversion
 //
 
-// TODO: Convert other error types to proper wrappers
 #[derive(Debug, Error)]
-pub enum ProtocolError<F: PrimeField> {
+pub enum ProtocolError<F: PrimeField, I: Ideal> {
     #[error("ideal check failed: {0}")]
-    IdealCheck(String),
+    IdealCheck(#[from] IdealCheckError<F, I>),
     #[error("combined poly resolver failed: {0}")]
     Resolver(#[from] CombinedPolyResolverError<F>),
     #[error("scalar projection failed: {0}")]
-    ScalarProjection(String),
+    ScalarProjection(zinc_poly::EvaluationError),
     #[error("subclaim resolution: MLE evaluation failed: {0}")]
-    MleEvaluation(#[from] zinc_poly::EvaluationError),
+    MleEvaluation(zinc_poly::EvaluationError),
     #[error("subclaim mismatch at column {column}: expected {expected:?}, got {actual:?}")]
     SubclaimMismatch {
         column: usize,
@@ -589,15 +593,9 @@ pub enum ProtocolError<F: PrimeField> {
         actual: F,
     },
     #[error("PCS error: {0}")]
-    Pcs(ZipError),
+    Pcs(#[from] ZipError),
     #[error("PCS verification failed at column {0}: {1}")]
     PcsVerification(usize, ZipError),
-}
-
-impl<F: PrimeField> From<ZipError> for ProtocolError<F> {
-    fn from(e: ZipError) -> Self {
-        ProtocolError::Pcs(e)
-    }
 }
 
 //
@@ -626,7 +624,7 @@ mod tests {
     use zinc_utils::{
         CHECKED,
         inner_product::{MBSInnerProduct, ScalarProduct, WideningMBSInnerProduct},
-        mul_by_scalar::{PrimitiveWideningMulByScalar},
+        mul_by_scalar::PrimitiveWideningMulByScalar,
     };
     use zip_plus::code::{
         iprs::{IprsCode, PnttConfigF2_16_1},
@@ -855,7 +853,7 @@ mod tests {
         // Generate a valid witness satisfying the UAIR constraints.
         let trace = TestUair::generate_witness(num_vars, &mut rng);
 
-        // ── Prover ──
+        // Prover
         let (proof, prover_aux) = prove::<
             TestWitnessZincTypesIprs,
             TestUair,
@@ -866,7 +864,7 @@ mod tests {
         >(&pp, &[], &trace, &[], num_vars, project_scalar_fn)
         .expect("Prover failed");
 
-        // ── Verifier ──
+        // Verifier
         let subclaim =
             verify::<TestWitnessZincTypesIprs, TestUair, F, _, _, _, DEGREE_PLUS_ONE, CHECKED>(
                 &pp,
@@ -877,8 +875,8 @@ mod tests {
             )
             .expect("Verifier failed");
 
-        // ── Subclaim resolution (in lieu of PCS) ──
-        resolve_subclaim(
+        // Subclaim resolution (in lieu of PCS)
+        resolve_subclaim::<_, <TestUair as Uair>::Ideal>(
             &subclaim,
             &prover_aux.projected_trace_f,
             &prover_aux.field_cfg,
@@ -907,7 +905,7 @@ mod tests {
 
         let trace = TestUair::generate_witness(num_vars, &mut rng);
 
-        // ── Prover ──
+        // Prover
         let (proof, prover_aux) = prove::<
             TestWitnessZincTypesRaa,
             TestUair,
@@ -918,7 +916,7 @@ mod tests {
         >(&pp, &[], &trace, &[], num_vars, project_scalar_fn)
         .expect("Prover failed");
 
-        // ── Verifier ──
+        // Verifier
         let subclaim =
             verify::<TestWitnessZincTypesRaa, TestUair, F, _, _, _, DEGREE_PLUS_ONE, CHECKED>(
                 &pp,
@@ -929,8 +927,8 @@ mod tests {
             )
             .expect("Verifier failed");
 
-        // ── Subclaim resolution (in lieu of PCS) ──
-        resolve_subclaim(
+        // Subclaim resolution (in lieu of PCS)
+        resolve_subclaim::<_, <TestUair as Uair>::Ideal>(
             &subclaim,
             &prover_aux.projected_trace_f,
             &prover_aux.field_cfg,
@@ -952,7 +950,7 @@ mod tests {
 
         let (binary_trace, arb_trace, int_trace) = TestUair::generate_witness(num_vars, &mut rng);
 
-        // ── Prover ──
+        // Prover
         let (proof, prover_aux) =
             prove::<TestWitnessZincTypesIprs, TestUair, F, _, DEGREE_PLUS_ONE, CHECKED>(
                 &pp,
@@ -964,7 +962,7 @@ mod tests {
             )
             .expect("Prover failed");
 
-        // ── Verifier ──
+        // Verifier
         let subclaim =
             verify::<TestWitnessZincTypesIprs, TestUair, F, _, _, _, DEGREE_PLUS_ONE, CHECKED>(
                 &pp,
@@ -975,8 +973,8 @@ mod tests {
             )
             .expect("Verifier failed");
 
-        // ── Subclaim resolution (in lieu of PCS) ──
-        resolve_subclaim(
+        // Subclaim resolution (in lieu of PCS)
+        resolve_subclaim::<_, <TestUair as Uair>::Ideal>(
             &subclaim,
             &prover_aux.projected_trace_f,
             &prover_aux.field_cfg,
@@ -1001,7 +999,7 @@ mod tests {
 
         let (binary_trace, arb_trace, int_trace) = TestUair::generate_witness(num_vars, &mut rng);
 
-        // ── Prover ──
+        // Prover
         let (proof, prover_aux) =
             prove::<TestWitnessZincTypesIprs, TestUair, F, _, DEGREE_PLUS_ONE, CHECKED>(
                 &pp,
@@ -1013,7 +1011,7 @@ mod tests {
             )
             .expect("Prover failed");
 
-        // ── Verifier ──
+        // Verifier
         let subclaim =
             verify::<TestWitnessZincTypesIprs, TestUair, F, _, _, _, DEGREE_PLUS_ONE, CHECKED>(
                 &pp,
@@ -1024,8 +1022,8 @@ mod tests {
             )
             .expect("Verifier failed");
 
-        // ── Subclaim resolution (in lieu of PCS) ──
-        resolve_subclaim(
+        // Subclaim resolution (in lieu of PCS)
+        resolve_subclaim::<_, <TestUair as Uair>::Ideal>(
             &subclaim,
             &prover_aux.projected_trace_f,
             &prover_aux.field_cfg,
