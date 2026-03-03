@@ -31,49 +31,9 @@ pub struct MBSInnerProduct;
 
 impl<Lhs, Rhs, Out> InnerProduct<[Lhs], Rhs, Out> for MBSInnerProduct
 where
-    Lhs: for<'a> MulByScalar<&'a Rhs>,
-    Out: FromRef<Lhs> + CheckedAdd,
-{
-    /// The mul-by-scalar inner product.
-    #[allow(clippy::arithmetic_side_effects)] // Used in unchecked mode
-    fn inner_product<const CHECK: bool>(
-        lhs: &[Lhs],
-        rhs: &[Rhs],
-        zero: Out,
-    ) -> Result<Out, InnerProductError> {
-        if lhs.len() != rhs.len() {
-            return Err(InnerProductError::LengthMismatch {
-                lhs: lhs.len(),
-                rhs: rhs.len(),
-            });
-        }
-
-        lhs.iter()
-            .zip(rhs)
-            .map(|(lhs, rhs)| {
-                lhs.mul_by_scalar::<CHECK>(rhs)
-                    .ok_or(InnerProductError::Overflow)
-            })
-            .try_fold(zero, |acc, product| {
-                let product = Out::from_ref(&product?);
-                if CHECK {
-                    acc.checked_add(&product).ok_or(InnerProductError::Overflow)
-                } else {
-                    Ok(acc + product)
-                }
-            })
-    }
-}
-
-/// Like `MBSInnerProduct`, but widens each `Lhs` element to `Out` before
-/// multiplying by `Rhs`. This avoids overflow when `Lhs` is too narrow
-/// to hold the product (e.g., `i64 * i128`).
-pub struct WideningMBSInnerProduct;
-
-impl<Lhs, Rhs, Out> InnerProduct<[Lhs], Rhs, Out> for WideningMBSInnerProduct
-where
     Out: FromRef<Lhs> + for<'a> MulByScalar<&'a Rhs> + CheckedAdd,
 {
+    /// The mul-by-scalar inner product.
     #[allow(clippy::arithmetic_side_effects)] // Used in unchecked mode
     fn inner_product<const CHECK: bool>(
         lhs: &[Lhs],

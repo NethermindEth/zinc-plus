@@ -623,7 +623,7 @@ mod tests {
     };
     use zinc_utils::{
         CHECKED,
-        inner_product::{MBSInnerProduct, ScalarProduct, WideningMBSInnerProduct},
+        inner_product::{MBSInnerProduct, ScalarProduct},
         mul_by_scalar::PrimitiveWideningMulByScalar,
     };
     use zip_plus::code::{
@@ -682,7 +682,7 @@ mod tests {
             i64,
             Self::Chal,
             Self::CombR,
-            WideningMBSInnerProduct,
+            MBSInnerProduct,
             DEGREE_PLUS_ONE,
         >;
         type CombDotChal = DensePolyInnerProduct<
@@ -712,7 +712,7 @@ mod tests {
             i64,
             Self::Chal,
             Self::CombR,
-            WideningMBSInnerProduct,
+            MBSInnerProduct,
             DEGREE_PLUS_ONE,
         >;
         type CombDotChal = DensePolyInnerProduct<
