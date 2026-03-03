@@ -28,6 +28,7 @@ use zinc_utils::projectable_to_field::ProjectableToField;
 use zinc_utils::{cfg_iter, cfg_into_iter};
 
 use zip_plus::code::LinearCode;
+use zip_plus::merkle::HASH_OUT_LEN;
 use zip_plus::pcs::structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes};
 use zip_plus::pcs::folding::{
     split_columns, fold_claims_prove, fold_claims_verify, compute_alpha_power,
@@ -710,6 +711,10 @@ where
     // ── Step 2: PIOP — Ideal Check ──────────────────────────────────
     let t1 = Instant::now();
     let mut transcript = KeccakTranscript::new();
+    // Absorb the PCS commitment root so the prime depends on it.
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
     let projected_scalars = project_scalars::<PiopField, U>(|scalar| {
@@ -838,11 +843,12 @@ where
     // r_PCS = r_CPR: pass the CPR evaluation point directly to the PCS.
     let t3 = Instant::now();
     let (eval_f, proof) =
-        ZipPlus::<Zt, Lc>::prove::<PiopField, CHECK>(
+        ZipPlus::<Zt, Lc>::prove_with_seed::<PiopField, CHECK>(
             params,
             &pcs_trace,
             &cpr_state.evaluation_point,
             &hint,
+            &root_buf,
         )
         .expect("PCS prove failed");
     let pcs_prove_time = t3.elapsed();
@@ -960,6 +966,10 @@ where
 
     let t1 = Instant::now();
     let mut transcript = KeccakTranscript::new();
+    // Absorb the PCS commitment root so the prime depends on it.
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
     let projected_scalars = project_scalars::<PiopField, U>(|scalar| {
@@ -1219,11 +1229,12 @@ where
     // truncate to num_vars since PCS polynomials only have num_vars variables.
     let t3 = Instant::now();
     let (eval_f, proof) =
-        ZipPlus::<Zt, Lc>::prove::<PiopField, CHECK>(
+        ZipPlus::<Zt, Lc>::prove_with_seed::<PiopField, CHECK>(
             params,
             &pcs_trace,
             &evaluation_point[..num_vars],
             &hint,
+            &root_buf,
         )
         .expect("PCS prove failed");
     let pcs_prove_time = t3.elapsed();
@@ -1342,6 +1353,10 @@ where
     // ── Step 2: Ideal Check (on original BinaryPoly<D> trace) ───────
     let t1 = Instant::now();
     let mut transcript = KeccakTranscript::new();
+    // Absorb the PCS commitment root so the prime depends on it.
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
     let projected_scalars = project_scalars::<PiopField, U>(|scalar| {
@@ -1621,11 +1636,12 @@ where
     // ── Step 5: PCS Prove (over split columns at extended point) ────
     let t3 = Instant::now();
     let (eval_f, proof) =
-        ZipPlus::<PcsZt, PcsLc>::prove::<PiopField, CHECK>(
+        ZipPlus::<PcsZt, PcsLc>::prove_with_seed::<PiopField, CHECK>(
             pcs_params,
             &split_trace,
             &folding_output.new_point,
             &hint,
+            &root_buf,
         )
         .expect("PCS prove failed (folded)");
     let pcs_prove_time = t3.elapsed();
@@ -1749,6 +1765,10 @@ where
     // ── Step 2: Ideal Check (on original BinaryPoly<D> trace) ────────
     let t1 = Instant::now();
     let mut transcript = KeccakTranscript::new();
+    // Absorb the PCS commitment root so the prime depends on it.
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
     let projected_scalars = project_scalars::<PiopField, U>(|scalar| {
@@ -2028,11 +2048,12 @@ where
     // ── Step 5: PCS Prove at (r ‖ γ₁ ‖ γ₂) over QUARTER_D columns ───
     let t3 = Instant::now();
     let (eval_f, proof) =
-        ZipPlus::<PcsZt, PcsLc>::prove::<PiopField, CHECK>(
+        ZipPlus::<PcsZt, PcsLc>::prove_with_seed::<PiopField, CHECK>(
             pcs_params,
             &split_trace_quarter,
             &fold2_output.new_point,
             &hint,
+            &root_buf,
         )
         .expect("PCS prove failed (4x folded)");
     let pcs_prove_time = t3.elapsed();
@@ -2153,6 +2174,10 @@ where
     // ── Step 2: Ideal Check (on original BinaryPoly<D> trace) ───────
     let t1 = Instant::now();
     let mut transcript = KeccakTranscript::new();
+    // Absorb the PCS commitment root so the prime depends on it.
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
     let projected_scalars = project_scalars::<PiopField, U>(|scalar| {
@@ -2269,11 +2294,12 @@ where
     // ── Step 5: PCS Prove (over split columns at extended point) ────
     let t3 = Instant::now();
     let (eval_f, proof) =
-        ZipPlus::<PcsZt, PcsLc>::prove::<PiopField, CHECK>(
+        ZipPlus::<PcsZt, PcsLc>::prove_with_seed::<PiopField, CHECK>(
             pcs_params,
             &split_trace,
             &folding_output.new_point,
             &hint,
+            &root_buf,
         )
         .expect("PCS prove failed (GKR folded)");
     let pcs_prove_time = t3.elapsed();
@@ -2374,6 +2400,10 @@ where
 
     // ── Reconstruct Fiat-Shamir transcript (must match prover) ──────
     let mut transcript = KeccakTranscript::new();
+    // Absorb the PCS commitment root so the prime depends on it.
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    folded_proof.commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
     let field_elem_size = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
@@ -2957,6 +2987,10 @@ where
         fs_transcript: KeccakTranscript::default(),
         stream: std::io::Cursor::new(folded_proof.pcs_proof_bytes.clone()),
     };
+    // Absorb PCS commitment root so the PCS prime matches the PIOP prime.
+    let mut pcs_root_buf = [0u8; HASH_OUT_LEN];
+    folded_proof.commitment.root.write_transcription_bytes(&mut pcs_root_buf);
+    pcs_transcript.fs_transcript.absorb(&pcs_root_buf);
     let pcs_field_cfg = pcs_transcript
         .fs_transcript
         .get_random_field_cfg::<PiopField, PcsZt::Fmod, PcsZt::PrimeTest>();
@@ -3041,6 +3075,10 @@ where
 
     // ── Reconstruct Fiat-Shamir transcript (must match prover) ──────
     let mut transcript = KeccakTranscript::new();
+    // Absorb the PCS commitment root so the prime depends on it.
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    folded_proof.commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
     let field_elem_size = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
@@ -3617,6 +3655,10 @@ where
         fs_transcript: KeccakTranscript::default(),
         stream: std::io::Cursor::new(folded_proof.pcs_proof_bytes.clone()),
     };
+    // Absorb PCS commitment root so the PCS prime matches the PIOP prime.
+    let mut pcs_root_buf = [0u8; HASH_OUT_LEN];
+    folded_proof.commitment.root.write_transcription_bytes(&mut pcs_root_buf);
+    pcs_transcript.fs_transcript.absorb(&pcs_root_buf);
     let pcs_field_cfg = pcs_transcript
         .fs_transcript
         .get_random_field_cfg::<PiopField, PcsZt::Fmod, PcsZt::PrimeTest>();
@@ -3709,6 +3751,10 @@ where
     // ── Step 2: PIOP — Ideal Check ──────────────────────────────────
     let t1 = Instant::now();
     let mut transcript = KeccakTranscript::new();
+    // Absorb the PCS commitment root so the prime depends on it.
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
     // Project trace: each R element becomes a constant DynamicPolynomialF.
@@ -3865,11 +3911,12 @@ where
         .get_random_field_cfg::<PcsF, Zt::Fmod, Zt::PrimeTest>();
     let point: Vec<PcsF> = piop_point_to_pcs_field(&cpr_state.evaluation_point, &pcs_field_cfg);
     let (_eval_f, proof) =
-        ZipPlus::<Zt, Lc>::prove::<PcsF, CHECK>(
+        ZipPlus::<Zt, Lc>::prove_with_seed::<PcsF, CHECK>(
             params,
             &pcs_trace,
             &point,
             &hint,
+            &root_buf,
         )
         .expect("PCS prove failed");
     let pcs_prove_time = t3.elapsed();
@@ -3992,6 +4039,10 @@ where
 
     // ── Reconstruct Fiat-Shamir transcript ──────────────────────────
     let mut transcript = KeccakTranscript::new();
+    // Absorb the PCS commitment root so the prime depends on it.
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    zinc_proof.commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
     let field_elem_size = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
@@ -4293,6 +4344,10 @@ where
         fs_transcript: KeccakTranscript::default(),
         stream: std::io::Cursor::new(zinc_proof.pcs_proof_bytes.clone()),
     };
+    // Absorb PCS commitment root so the PCS prime matches the PIOP prime.
+    let mut pcs_root_buf = [0u8; HASH_OUT_LEN];
+    zinc_proof.commitment.root.write_transcription_bytes(&mut pcs_root_buf);
+    pcs_transcript.fs_transcript.absorb(&pcs_root_buf);
     let pcs_field_cfg = pcs_transcript
         .fs_transcript
         .get_random_field_cfg::<PcsF, Zt::Fmod, Zt::PrimeTest>();
@@ -4363,15 +4418,20 @@ where
 
     // ── Step 2: PCS Prove (test + evaluate) ────────────────────────
     let t1 = Instant::now();
-    let pcs_field_cfg = KeccakTranscript::default()
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    commitment.root.write_transcription_bytes(&mut root_buf);
+    let mut pcs_transcript_tmp = KeccakTranscript::default();
+    pcs_transcript_tmp.absorb(&root_buf);
+    let pcs_field_cfg = pcs_transcript_tmp
         .get_random_field_cfg::<PiopField, Zt::Fmod, Zt::PrimeTest>();
     let point: Vec<PiopField> = vec![PiopField::one_with_cfg(&pcs_field_cfg); num_vars];
     let (eval_f, proof) =
-        ZipPlus::<Zt, Lc>::prove::<PiopField, CHECK>(
+        ZipPlus::<Zt, Lc>::prove_with_seed::<PiopField, CHECK>(
             params,
             trace,
             &point,
             &hint,
+            &root_buf,
         )
         .expect("PCS prove failed");
     let pcs_prove_time = t1.elapsed();
@@ -4435,6 +4495,10 @@ where
         fs_transcript: KeccakTranscript::default(),
         stream: std::io::Cursor::new(proof_bytes.to_vec()),
     };
+    // Absorb PCS commitment root so the PCS prime matches the PIOP prime.
+    let mut pcs_root_buf = [0u8; HASH_OUT_LEN];
+    commitment.root.write_transcription_bytes(&mut pcs_root_buf);
+    pcs_transcript.fs_transcript.absorb(&pcs_root_buf);
     let pcs_field_cfg = pcs_transcript
         .fs_transcript
         .get_random_field_cfg::<PiopField, Zt::Fmod, Zt::PrimeTest>();
@@ -4527,6 +4591,10 @@ where
 
     // ── Reconstruct Fiat-Shamir transcript (must match prover) ──────
     let mut transcript = KeccakTranscript::new();
+    // Absorb the PCS commitment root so the prime depends on it.
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    zinc_proof.commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
     let field_elem_size = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
@@ -5286,6 +5354,10 @@ where
         fs_transcript: KeccakTranscript::default(),
         stream: std::io::Cursor::new(zinc_proof.pcs_proof_bytes.clone()),
     };
+    // Absorb PCS commitment root so the PCS prime matches the PIOP prime.
+    let mut pcs_root_buf = [0u8; HASH_OUT_LEN];
+    zinc_proof.commitment.root.write_transcription_bytes(&mut pcs_root_buf);
+    pcs_transcript.fs_transcript.absorb(&pcs_root_buf);
     let pcs_field_cfg = pcs_transcript
         .fs_transcript
         .get_random_field_cfg::<PiopField, Zt::Fmod, Zt::PrimeTest>();
@@ -5429,6 +5501,10 @@ where
 
     // ── Step 2: Fiat-Shamir transcript + field config ───────────────
     let mut transcript = KeccakTranscript::new();
+    // Absorb the PCS commitment root so the prime depends on it.
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
     // ── Step 3: Shared IC evaluation point ──────────────────────────
@@ -5603,11 +5679,12 @@ where
     // Truncate to num_vars since the sumcheck may have shared_num_vars > num_vars when lookup is present.
     let t3 = Instant::now();
     let (eval_f, proof) =
-        ZipPlus::<Zt, Lc>::prove::<PiopField, CHECK>(
+        ZipPlus::<Zt, Lc>::prove_with_seed::<PiopField, CHECK>(
             params,
             &pcs_trace,
             &bp_cpr_state.evaluation_point[..num_vars],
             &hint,
+            &root_buf,
         )
         .expect("PCS prove failed");
     let pcs_prove_time = t3.elapsed();
@@ -5742,6 +5819,10 @@ where
 
     // ── Reconstruct Fiat-Shamir transcript ──────────────────────────
     let mut transcript = KeccakTranscript::new();
+    // Absorb the PCS commitment root so the prime depends on it.
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    proof.commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
     let field_elem_size = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
 
@@ -6099,6 +6180,10 @@ where
         fs_transcript: KeccakTranscript::default(),
         stream: std::io::Cursor::new(proof.pcs_proof_bytes.clone()),
     };
+    // Absorb PCS commitment root so the PCS prime matches the PIOP prime.
+    let mut pcs_root_buf = [0u8; HASH_OUT_LEN];
+    proof.commitment.root.write_transcription_bytes(&mut pcs_root_buf);
+    pcs_transcript.fs_transcript.absorb(&pcs_root_buf);
     let pcs_field_cfg = pcs_transcript
         .fs_transcript
         .get_random_field_cfg::<PiopField, Zt::Fmod, Zt::PrimeTest>();
@@ -6396,6 +6481,14 @@ where
 
     // ── Step 2: Shared transcript + field config ────────────────────
     let mut transcript = KeccakTranscript::new();
+    // Absorb the PCS commitment root so the prime depends on it.
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    commitment1.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
+    let root_buf1 = root_buf;
+    commitment2.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
+    let root_buf2 = root_buf;
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
     // ── Step 3: Shared IC evaluation point ──────────────────────────
@@ -6740,11 +6833,12 @@ where
     // Truncate to num_vars since the sumcheck may have shared_num_vars > num_vars when lookup is present.
     let t3 = Instant::now();
     let (eval1_f, proof1) =
-        ZipPlus::<Zt1, Lc1>::prove::<PiopField, CHECK>(
+        ZipPlus::<Zt1, Lc1>::prove_with_seed::<PiopField, CHECK>(
             params1,
             &pcs_trace1,
             &c1_cpr_state.evaluation_point[..num_vars],
             &hint1,
+            &root_buf1,
         )
         .expect("PCS1 prove failed");
 
@@ -6752,11 +6846,12 @@ where
         .get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>();
     let point2: Vec<PcsF2> = piop_point_to_pcs_field(&c1_cpr_state.evaluation_point[..num_vars], &pcs2_field_cfg);
     let (eval2_f, proof2) =
-        ZipPlus::<Zt2, Lc2>::prove::<PcsF2, CHECK>(
+        ZipPlus::<Zt2, Lc2>::prove_with_seed::<PcsF2, CHECK>(
             params2,
             &pcs_trace2,
             &point2,
             &hint2,
+            &root_buf2,
         )
         .expect("PCS2 prove failed");
     let pcs_prove_time = t3.elapsed();
@@ -6985,6 +7080,14 @@ where
 
     // ── Step 2: Shared transcript + field config ─────────────────────
     let mut transcript = KeccakTranscript::new();
+    // Absorb the PCS commitment root so the prime depends on it.
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    commitment1.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
+    let root_buf1 = root_buf;
+    commitment2.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
+    let root_buf2 = root_buf;
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
     // ── Step 3: Shared IC evaluation point ──────────────────────────
@@ -7323,11 +7426,12 @@ where
     // Circuit 2: prove on original pcs_trace2 at the CPR eval point.
     let t3 = Instant::now();
     let (eval1_f, proof1) =
-        ZipPlus::<PcsZt1, PcsLc1>::prove::<PiopField, CHECK>(
+        ZipPlus::<PcsZt1, PcsLc1>::prove_with_seed::<PiopField, CHECK>(
             params1,
             &split_trace1,
             &folding_output.new_point,
             &hint1,
+            &root_buf1,
         )
         .expect("PCS1 prove (folded) failed");
 
@@ -7335,11 +7439,12 @@ where
         .get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>();
     let point2: Vec<PcsF2> = piop_point_to_pcs_field(&c1_cpr_state.evaluation_point[..num_vars], &pcs2_field_cfg);
     let (eval2_f, proof2) =
-        ZipPlus::<Zt2, Lc2>::prove::<PcsF2, CHECK>(
+        ZipPlus::<Zt2, Lc2>::prove_with_seed::<PcsF2, CHECK>(
             params2,
             &pcs_trace2,
             &point2,
             &hint2,
+            &root_buf2,
         )
         .expect("PCS2 prove failed (folded dual circuit)");
     let pcs_prove_time = t3.elapsed();
@@ -7575,6 +7680,14 @@ where
 
     // ── Step 2: Shared transcript + field config ─────────────────────
     let mut transcript = KeccakTranscript::new();
+    // Absorb the PCS commitment root so the prime depends on it.
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    commitment1.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
+    let root_buf1 = root_buf;
+    commitment2.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
+    let root_buf2 = root_buf;
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
     // ── Step 3: Shared IC evaluation point ──────────────────────────
@@ -7923,11 +8036,12 @@ where
     // Circuit 2: prove on original pcs_trace2 at the CPR eval point.
     let t3 = Instant::now();
     let (eval1_f, proof1) =
-        ZipPlus::<PcsZt1, PcsLc1>::prove::<PiopField, CHECK>(
+        ZipPlus::<PcsZt1, PcsLc1>::prove_with_seed::<PiopField, CHECK>(
             params1,
             &split_trace1_quarter,
             &fold2_output.new_point,
             &hint1,
+            &root_buf1,
         )
         .expect("PCS1 prove (4x folded) failed");
 
@@ -7935,11 +8049,12 @@ where
         .get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>();
     let point2: Vec<PcsF2> = piop_point_to_pcs_field(&c1_cpr_state.evaluation_point[..num_vars], &pcs2_field_cfg);
     let (eval2_f, proof2) =
-        ZipPlus::<Zt2, Lc2>::prove::<PcsF2, CHECK>(
+        ZipPlus::<Zt2, Lc2>::prove_with_seed::<PcsF2, CHECK>(
             params2,
             &pcs_trace2,
             &point2,
             &hint2,
+            &root_buf2,
         )
         .expect("PCS2 prove failed (4x folded dual circuit)");
     let pcs_prove_time = t3.elapsed();
@@ -8162,6 +8277,12 @@ where
 
     // ── Reconstruct Fiat-Shamir transcript ──────────────────────────
     let mut transcript = KeccakTranscript::new();
+    // Absorb the PCS commitment root so the prime depends on it.
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    proof.pcs1_commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
+    proof.pcs2_commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
     let field_elem_size =
         <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
@@ -8889,6 +9010,10 @@ where
             fs_transcript: KeccakTranscript::default(),
             stream: std::io::Cursor::new(proof.pcs1_proof_bytes.clone()),
         };
+        // Absorb PCS commitment root so the PCS prime matches the PIOP prime.
+        let mut pcs_root_buf = [0u8; HASH_OUT_LEN];
+        proof.pcs1_commitment.root.write_transcription_bytes(&mut pcs_root_buf);
+        pcs1_transcript.fs_transcript.absorb(&pcs_root_buf);
         let pcs1_field_cfg = pcs1_transcript
             .fs_transcript
             .get_random_field_cfg::<PiopField, Zt1::Fmod, Zt1::PrimeTest>();
@@ -8917,6 +9042,10 @@ where
             fs_transcript: KeccakTranscript::default(),
             stream: std::io::Cursor::new(proof.pcs2_proof_bytes.clone()),
         };
+        // Absorb PCS commitment root so the PCS prime matches the PIOP prime.
+        let mut pcs_root_buf = [0u8; HASH_OUT_LEN];
+        proof.pcs2_commitment.root.write_transcription_bytes(&mut pcs_root_buf);
+        pcs2_transcript.fs_transcript.absorb(&pcs_root_buf);
         let pcs2_field_cfg = pcs2_transcript
             .fs_transcript
             .get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>();
@@ -9045,6 +9174,12 @@ where
 
     // ── Reconstruct Fiat-Shamir transcript ──────────────────────────
     let mut transcript = KeccakTranscript::new();
+    // Absorb the PCS commitment root so the prime depends on it.
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    proof.pcs1_commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
+    proof.pcs2_commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
     let field_elem_size =
         <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
@@ -9818,6 +9953,10 @@ where
             fs_transcript: KeccakTranscript::default(),
             stream: std::io::Cursor::new(proof.pcs1_proof_bytes.clone()),
         };
+        // Absorb PCS commitment root so the PCS prime matches the PIOP prime.
+        let mut pcs_root_buf = [0u8; HASH_OUT_LEN];
+        proof.pcs1_commitment.root.write_transcription_bytes(&mut pcs_root_buf);
+        pcs1_transcript.fs_transcript.absorb(&pcs_root_buf);
         let pcs1_field_cfg = pcs1_transcript
             .fs_transcript
             .get_random_field_cfg::<PiopField, PcsZt1::Fmod, PcsZt1::PrimeTest>();
@@ -9850,6 +9989,10 @@ where
             fs_transcript: KeccakTranscript::default(),
             stream: std::io::Cursor::new(proof.pcs2_proof_bytes.clone()),
         };
+        // Absorb PCS commitment root so the PCS prime matches the PIOP prime.
+        let mut pcs_root_buf = [0u8; HASH_OUT_LEN];
+        proof.pcs2_commitment.root.write_transcription_bytes(&mut pcs_root_buf);
+        pcs2_transcript.fs_transcript.absorb(&pcs_root_buf);
         let pcs2_field_cfg = pcs2_transcript
             .fs_transcript
             .get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>();
@@ -9980,6 +10123,12 @@ where
 
     // ── Reconstruct Fiat-Shamir transcript ──────────────────────────
     let mut transcript = KeccakTranscript::new();
+    // Absorb the PCS commitment root so the prime depends on it.
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    proof.pcs1_commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
+    proof.pcs2_commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
     let field_elem_size =
         <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
@@ -10794,6 +10943,10 @@ where
             fs_transcript: KeccakTranscript::default(),
             stream: std::io::Cursor::new(proof.pcs1_proof_bytes.clone()),
         };
+        // Absorb PCS commitment root so the PCS prime matches the PIOP prime.
+        let mut pcs_root_buf = [0u8; HASH_OUT_LEN];
+        proof.pcs1_commitment.root.write_transcription_bytes(&mut pcs_root_buf);
+        pcs1_transcript.fs_transcript.absorb(&pcs_root_buf);
         let pcs1_field_cfg = pcs1_transcript
             .fs_transcript
             .get_random_field_cfg::<PiopField, PcsZt1::Fmod, PcsZt1::PrimeTest>();
@@ -10826,6 +10979,10 @@ where
             fs_transcript: KeccakTranscript::default(),
             stream: std::io::Cursor::new(proof.pcs2_proof_bytes.clone()),
         };
+        // Absorb PCS commitment root so the PCS prime matches the PIOP prime.
+        let mut pcs_root_buf = [0u8; HASH_OUT_LEN];
+        proof.pcs2_commitment.root.write_transcription_bytes(&mut pcs_root_buf);
+        pcs2_transcript.fs_transcript.absorb(&pcs_root_buf);
         let pcs2_field_cfg = pcs2_transcript
             .fs_transcript
             .get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>();
