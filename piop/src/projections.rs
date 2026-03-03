@@ -112,7 +112,7 @@ where
         result,
         cfg_iter!(binary_poly_trace).map(|column| {
             cfg_iter!(column)
-                .map(|poly| binary_poly_projection(poly).inner().clone())
+                .map(|poly| binary_poly_projection(poly).into_inner())
                 .collect()
         })
     );

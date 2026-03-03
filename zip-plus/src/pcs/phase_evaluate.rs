@@ -38,7 +38,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + for<'a> FromWithConfig<&'a Zt::Pt>
             + for<'a> MulByScalar<&'a F>
             + FromRef<F>,
-        F::Inner: FromRef<Zt::Fmod> + Transcribable,
+        F::Inner: Transcribable,
+        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
         Zt::Eval: ProjectableToField<F>,
     {
         // We prove evaluations over the field, so integers need to be mapped to field
