@@ -1,9 +1,9 @@
 use crypto_primitives::{PrimeField, Semiring};
 use derive_more::From;
-use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, ConstZero, Zero};
+use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, ConstZero, Euclid, Zero};
 use std::{
     fmt::Display,
-    ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
+    ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, Rem, Sub, SubAssign},
 };
 use zinc_utils::UNCHECKED;
 
@@ -52,6 +52,14 @@ impl<F: PrimeField> DynamicPolynomialF<F> {
     #[inline(always)]
     pub fn trim(&mut self) {
         dynamic::trim(&mut self.coeffs, F::is_zero);
+    }
+
+    pub fn constant_poly(a: F) -> Self {
+        if F::is_zero(&a) {
+            Self::default()
+        } else {
+            DynamicPolynomialF { coeffs: vec![a] }
+        }
     }
 }
 
@@ -243,6 +251,81 @@ impl<F: PrimeField> MulAssign<&Self> for DynamicPolynomialF<F> {
 
 impl<F: PrimeField> Semiring for DynamicPolynomialF<F> {}
 
+impl<F: PrimeField> Div for DynamicPolynomialF<F> {
+    type Output = Self;
+
+    fn div(self, rhs: Self) -> Self::Output {
+        self.div_rem_euclid(&rhs).0
+    }
+}
+
+impl<F: PrimeField> Rem for DynamicPolynomialF<F> {
+    type Output = Self;
+
+    fn rem(self, rhs: Self) -> Self::Output {
+        self.div_rem_euclid(&rhs).1
+    }
+}
+
+impl<F: PrimeField> Euclid for DynamicPolynomialF<F> {
+    fn div_euclid(&self, v: &Self) -> Self {
+        self.div_rem_euclid(v).0
+    }
+
+    fn rem_euclid(&self, v: &Self) -> Self {
+        self.div_rem_euclid(v).1
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn div_rem_euclid(&self, divisor: &Self) -> (Self, Self) {
+        let zero_poly = DynamicPolynomialF::zero();
+
+        let divisor_deg = divisor.degree().expect("division by zero polynomial");
+
+        let Some(dividend_deg) = self.degree() else {
+            return (zero_poly.clone(), zero_poly);
+        };
+
+        let cfg = self.coeffs[0].cfg();
+        let zero = F::zero_with_cfg(cfg);
+
+        if dividend_deg < divisor_deg {
+            return (zero_poly.clone(), self.clone());
+        }
+
+        // Copy dividend as working remainder
+        let mut remainder = self.coeffs.clone();
+        let quotient_len = dividend_deg - divisor_deg + 1;
+        let mut quotient = vec![zero.clone(); quotient_len];
+
+        let divisor_lead_inv = F::one_with_cfg(cfg) / divisor.coeffs[divisor_deg].clone();
+
+        for i in (0..quotient_len).rev() {
+            let rem_idx = i + divisor_deg;
+            if remainder[rem_idx] == zero {
+                continue;
+            }
+
+            // Compute quotient coefficient
+            let coeff = remainder[rem_idx].clone() * &divisor_lead_inv;
+
+            // Subtract coeff * x^i * divisor from remainder (skip leading term)
+            for j in 0..divisor_deg {
+                remainder[i + j] -= coeff.clone() * &divisor.coeffs[j];
+            }
+            // Leading coefficient is guaranteed to be zero
+            remainder[rem_idx] = zero.clone();
+
+            quotient[i] = coeff;
+        }
+
+        (
+            DynamicPolynomialF { coeffs: quotient },
+            DynamicPolynomialF { coeffs: remainder },
+        )
+    }
+}
+
 impl<F: PrimeField, const DEGFEE_PLUS_ONE: usize> From<DensePolynomial<F, DEGFEE_PLUS_ONE>>
     for DynamicPolynomialF<F>
 {
@@ -277,10 +360,22 @@ impl<F: PrimeField> EvaluatablePolynomial<F, F> for DynamicPolynomialF<F> {
     }
 }
 
+impl<F: PrimeField> FromIterator<F> for DynamicPolynomialF<F> {
+    #[inline(always)]
+    fn from_iter<T: IntoIterator<Item = F>>(iter: T) -> Self {
+        Self {
+            coeffs: iter.into_iter().collect(),
+        }
+    }
+}
+
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects)]
 mod tests {
     use crypto_bigint::{Odd, modular::MontyParams};
     use crypto_primitives::{FromWithConfig, crypto_bigint_monty::F256};
+    use proptest::prelude::*;
+    use rand::Rng;
 
     use super::*;
 
@@ -577,5 +672,154 @@ mod tests {
             DynamicPolynomialF::<F>::ZERO.evaluate_at_point(&F::one_with_cfg(&test_config())),
             Ok(F::zero_with_cfg(&test_config()))
         )
+    }
+
+    fn f(v: u64) -> F {
+        F::from_with_cfg(v, &test_config())
+    }
+
+    #[test]
+    #[should_panic(expected = "division by zero polynomial")]
+    fn test_div_rem_zero_divisor() {
+        let dividend = DynamicPolynomialF {
+            coeffs: vec![f(1), f(1)],
+        };
+        let divisor = DynamicPolynomialF {
+            coeffs: vec![f(0), f(0)],
+        };
+
+        let _ = dividend.div_rem_euclid(&divisor);
+    }
+
+    #[test]
+    fn test_div_euclid_and_rem_euclid() {
+        let dividend = DynamicPolynomialF {
+            coeffs: vec![f(1), f(2), f(1)],
+        };
+        let divisor = DynamicPolynomialF {
+            coeffs: vec![f(1), f(1)],
+        };
+
+        let (q, r) = dividend.div_rem_euclid(&divisor);
+        let q2 = dividend.div_euclid(&divisor);
+        let r2 = dividend.rem_euclid(&divisor);
+
+        assert_eq!(q, q2);
+        assert_eq!(r, r2);
+    }
+
+    fn any_f() -> impl Strategy<Value = F> {
+        let cfg = test_config();
+        any::<u64>().prop_map(move |v| F::from_with_cfg(v, &cfg))
+    }
+
+    fn any_poly(max_degree: usize) -> impl Strategy<Value = DynamicPolynomialF<F>> {
+        let cfg = test_config();
+        (0usize..=max_degree).prop_flat_map(move |degree| {
+            let cfg = cfg;
+            prop::collection::vec(any_f(), degree + 1).prop_map(move |mut coeffs| {
+                let mut rng = rand::rngs::ThreadRng::default();
+                let zero = F::from_with_cfg(0, &cfg);
+                while coeffs[degree] == zero {
+                    let val: u64 = rng.random();
+                    coeffs[degree] = F::from_with_cfg(val, &cfg);
+                }
+                DynamicPolynomialF { coeffs }
+            })
+        })
+    }
+
+    fn sparse_poly(max_degree: usize) -> impl Strategy<Value = DynamicPolynomialF<F>> {
+        let cfg = test_config();
+        (1usize..=max_degree).prop_flat_map(move |degree| {
+            let cfg = cfg;
+            let num_nonzero = std::cmp::min(3, degree);
+            (
+                prop::collection::vec(0usize..degree, num_nonzero),
+                prop::collection::vec(any_f(), num_nonzero + 1),
+            )
+                .prop_map(move |(positions, values)| {
+                    let mut rng = rand::rngs::ThreadRng::default();
+                    let zero = F::from_with_cfg(0, &cfg);
+                    let mut coeffs = vec![zero.clone(); degree + 1];
+                    positions
+                        .iter()
+                        .zip(values.iter())
+                        .for_each(|(p, v)| coeffs[*p] = v.clone());
+                    coeffs[degree] = values.last().unwrap().clone();
+                    while coeffs[degree] == zero {
+                        let val: u64 = rng.random();
+                        coeffs[degree] = F::from_with_cfg(val, &cfg);
+                    }
+                    DynamicPolynomialF { coeffs }
+                })
+        })
+    }
+
+    fn small_coeff_poly(max_degree: usize) -> impl Strategy<Value = DynamicPolynomialF<F>> {
+        let cfg = test_config();
+        (0usize..=max_degree).prop_flat_map(move |degree| {
+            let cfg = cfg;
+            prop::collection::vec(0u64..=2, degree + 1).prop_map(move |raw| {
+                let mut rng = rand::rngs::ThreadRng::default();
+                let zero = F::from_with_cfg(0, &cfg);
+                let mut coeffs: Vec<F> = raw.iter().map(|&v| F::from_with_cfg(v, &cfg)).collect();
+                while coeffs[degree] == zero {
+                    let val: u64 = rng.random::<u64>() % 2 + 1;
+                    coeffs[degree] = F::from_with_cfg(val, &cfg);
+                }
+                DynamicPolynomialF { coeffs }
+            })
+        })
+    }
+
+    fn any_poly_varied(max_degree: usize) -> impl Strategy<Value = DynamicPolynomialF<F>> {
+        prop_oneof![
+            2 => any_poly(max_degree),
+            1 => sparse_poly(max_degree),
+            1 => small_coeff_poly(max_degree),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(500))]
+
+        #[test]
+        fn prop_div_rem_random(
+            dividend in any_poly_varied(50),
+            divisor in any_poly_varied(50)
+        ) {
+            let (quotient, remainder) = dividend.div_rem_euclid(&divisor);
+
+            let product = &quotient * &divisor;
+            let reconstructed = product + &remainder;
+
+            let mut dividend_trimmed = dividend.clone();
+            let mut reconstructed_trimmed = reconstructed;
+            dividend_trimmed.trim();
+            reconstructed_trimmed.trim();
+
+            prop_assert_eq!(dividend_trimmed, reconstructed_trimmed);
+        }
+
+        #[test]
+        fn prop_div_rem_exact_division(
+            q in any_poly_varied(25),
+            d in any_poly_varied(25)
+        ) {
+            let dividend = &q * &d;
+            let (quotient, remainder) = dividend.div_rem_euclid(&d);
+
+            let mut remainder_trimmed = remainder;
+            let mut quotient_trimmed = quotient;
+            remainder_trimmed.trim();
+            quotient_trimmed.trim();
+
+            let mut q_trimmed = q.clone();
+            q_trimmed.trim();
+
+            prop_assert_eq!(remainder_trimmed, DynamicPolynomialF::ZERO);
+            prop_assert_eq!(quotient_trimmed, q_trimmed);
+        }
     }
 }
