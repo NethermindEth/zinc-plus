@@ -165,7 +165,8 @@ where
         + for<'a> FromWithConfig<&'a <TestZipTypes<N, K, M> as ZipTypes>::CombR>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>,
-    F::Inner: FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod> + Transcribable,
+    F::Inner: Transcribable,
+    F::Modulus: FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod> + Transcribable,
     <TestZipTypes<N, K, M> as ZipTypes>::Eval: ProjectableToField<F>,
     <TestZipTypes<N, K, M> as ZipTypes>::Comb: ProjectableToField<F>,
 {
@@ -199,7 +200,9 @@ where
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>
         + 'static,
-    F::Inner: FromRef<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod> + Transcribable,
+    F::Inner: Transcribable,
+    F::Modulus:
+        FromRef<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod> + Transcribable,
 {
     setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_poly_test_params, || {
         (0..num_vars).map(|i| i as i128 + 2).collect()
@@ -225,7 +228,8 @@ where
         + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>,
-    F::Inner: FromRef<Zt::Fmod> + Transcribable,
+    F::Inner: Transcribable,
+    F::Modulus: FromRef<Zt::Fmod> + Transcribable,
     Zt::Comb: for<'a> MulByScalar<&'a Zt::Pt>,
     Zt::Eval: ProjectableToField<F>,
     Zt::Comb: ProjectableToField<F>,
