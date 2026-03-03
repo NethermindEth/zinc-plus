@@ -39,9 +39,12 @@ use zinc_piop::combined_poly_resolver::CombinedPolyResolver;
 use zinc_piop::lookup::{
     GkrPipelineLookupProof, PipelineLookupProof, LookupColumnSpec,
     LookupSumcheckGroup,
+    HybridGkrPipelineLookupProof,
     prove_batched_lookup_with_indices,
     prove_gkr_batched_lookup_with_indices,
+    prove_hybrid_gkr_batched_lookup_with_indices,
     verify_gkr_batched_lookup,
+    verify_hybrid_gkr_batched_lookup,
     verify_batched_lookup,
     BatchedDecompLogupProtocol,
     group_lookup_specs,
@@ -137,6 +140,8 @@ pub struct VerifyTimingBreakdown {
 pub enum LookupProofData {
     /// GKR fractional sumcheck based (no chunks/inverses sent).
     Gkr(GkrPipelineLookupProof<PiopField>),
+    /// Hybrid GKR fractional sumcheck (GKR for top `c` layers, classic below).
+    HybridGkr(HybridGkrPipelineLookupProof<PiopField>),
     /// Classic batched decomposition (chunks + inverses + sumcheck).
     Classic(PipelineLookupProof<PiopField>),
     /// CPR + classic lookup sumchecks batched into a multi-degree sumcheck.
@@ -434,7 +439,7 @@ pub fn reconstruct_up_evals(
 /// is public.  Private entries are consumed in order from `private_v_finals`;
 /// public entries are consumed in order from `public_v_finals`.
 #[allow(clippy::arithmetic_side_effects)]
-fn reconstruct_shift_v_finals(
+pub fn reconstruct_shift_v_finals(
     private_v_finals: &[PiopField],
     public_v_finals: &[PiopField],
     num_shifts: usize,
@@ -2363,6 +2368,274 @@ where
     }
 }
 
+/// Run the 4×-folded Zinc+ prover pipeline with **hybrid GKR** batched
+/// decomposition LogUp.
+///
+/// This is the 4×-folded counterpart of the (hypothetical) 2×-folded hybrid
+/// GKR prover. It combines:
+/// - 4× column splitting (D → HALF_D → QUARTER_D),
+/// - A standalone CPR sumcheck (not batched with lookup), and
+/// - The hybrid GKR lookup protocol (GKR for the top `cutoff` layers,
+///   classic chunk inverse witnesses below).
+///
+/// The resulting proof uses `LookupProofData::HybridGkr(...)` and is
+/// verified by the HybridGkr path in [`verify_classic_logup_4x_folded`].
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+pub fn prove_hybrid_gkr_logup_4x_folded<U, PcsZt, PcsLc, const D: usize, const HALF_D: usize, const QUARTER_D: usize, const CHECK: bool>(
+    pcs_params: &ZipPlusParams<PcsZt, PcsLc>,
+    trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    num_vars: usize,
+    lookup_specs: &[LookupColumnSpec],
+    affine_lookup_specs: &[AffineLookupSpec],
+    cutoff: usize,
+) -> Folded4xZincProof
+where
+    U: Uair<Scalar = BinaryPoly<D>>,
+    PcsZt: ZipTypes<Eval = BinaryPoly<QUARTER_D>>,
+    PcsLc: LinearCode<PcsZt>,
+    rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<D>>,
+    rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<HALF_D>>,
+    rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<QUARTER_D>>,
+    BinaryPoly<D>: From<u32>,
+    BinaryPoly<D>: ProjectableToField<PiopField>,
+    BinaryPoly<HALF_D>: ProjectableToField<PiopField>,
+    BinaryPoly<QUARTER_D>: ProjectableToField<PiopField>,
+    PiopField: FromPrimitiveWithConfig,
+    <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
+    PcsZt::Eval: ProjectableToField<PiopField>,
+    PcsZt::Cw: ProjectableToField<PiopField>,
+    PiopField: for<'a> FromWithConfig<&'a PcsZt::Chal> + for<'a> FromWithConfig<&'a PcsZt::CombR>,
+    <PiopField as Field>::Inner: FromRef<PcsZt::Fmod>,
+    PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
+{
+    let total_start = Instant::now();
+    let sig = U::signature();
+    let num_constraints = count_constraints::<U>();
+    let max_degree = count_max_degree::<U>();
+
+    // ── Step 0: Double-split columns ─────────────────────────────────
+    let pcs_excluded = sig.pcs_excluded_columns();
+    let pcs_trace_original = private_trace(trace, &pcs_excluded);
+    let split_trace_half: Vec<DenseMultilinearExtension<BinaryPoly<HALF_D>>> =
+        split_columns::<D, HALF_D>(&pcs_trace_original);
+    let split_trace_quarter: Vec<DenseMultilinearExtension<BinaryPoly<QUARTER_D>>> =
+        split_columns::<HALF_D, QUARTER_D>(&split_trace_half);
+
+    // ── Step 1: PCS Commit (over 4×-split QUARTER_D columns) ─────────
+    let t0 = Instant::now();
+    let (hint, commitment) = ZipPlus::<PcsZt, PcsLc>::commit(pcs_params, &split_trace_quarter)
+        .expect("PCS commit failed (hybrid GKR 4x folded)");
+    let pcs_commit_time = t0.elapsed();
+
+    // ── Step 2: Ideal Check (on original BinaryPoly<D> trace) ────────
+    let t1 = Instant::now();
+    let mut transcript = KeccakTranscript::new();
+    // Absorb the PCS commitment root so the prime depends on it.
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
+    let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
+
+    let projected_scalars = project_scalars::<PiopField, U>(|scalar| {
+        let one = PiopField::one_with_cfg(&field_cfg);
+        let zero = PiopField::zero_with_cfg(&field_cfg);
+        DynamicPolynomialF::new(
+            scalar.iter().map(|coeff| {
+                if coeff.into_inner() { one.clone() } else { zero.clone() }
+            }).collect::<Vec<_>>()
+        )
+    });
+
+    let (ic_proof, ic_state) = if max_degree == 1 {
+        IdealCheckProtocol::<PiopField>::prove_mle_first::<U, D>(
+            &mut transcript,
+            trace,
+            &projected_scalars,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )
+        .expect("Ideal check prover failed")
+    } else {
+        let projected_trace = project_trace_coeffs::<PiopField, i64, i64, D>(
+            trace, &[], &[], &field_cfg,
+        );
+        IdealCheckProtocol::<PiopField>::prove_as_subprotocol::<U>(
+            &mut transcript,
+            &projected_trace,
+            &projected_scalars,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )
+        .expect("Ideal check prover failed")
+    };
+    let ideal_check_time = t1.elapsed();
+
+    // ── Step 3: CPR (standalone sumcheck, not batched with lookup) ───
+    let t2 = Instant::now();
+    let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+    let field_projected_scalars =
+        project_scalars_to_field(projected_scalars, &projecting_element)
+            .expect("scalar projection failed");
+    let field_trace = project_trace_to_field::<PiopField, D>(
+        trace, &[], &[], &projecting_element,
+    );
+
+    // Pre-extract lookup columns before CPR consumes the field trace.
+    let has_lookups = !lookup_specs.is_empty() || !affine_lookup_specs.is_empty();
+    let lookup_precomputed = if has_lookups {
+        let (mut columns, mut raw_indices, mut remapped_specs, reverse_index_map) =
+            if !lookup_specs.is_empty() {
+                extract_lookup_columns_from_field_trace(trace, &field_trace, lookup_specs, &field_cfg)
+            } else {
+                (vec![], vec![], vec![], vec![])
+            };
+        if !affine_lookup_specs.is_empty() {
+            let _ws_map = append_affine_virtual_columns::<D>(
+                trace, affine_lookup_specs, &projecting_element, &field_cfg, num_vars,
+                &mut columns, &mut raw_indices, &mut remapped_specs, &reverse_index_map,
+            );
+        }
+        Some((columns, raw_indices, remapped_specs))
+    } else {
+        None
+    };
+
+    let (cpr_proof, cpr_state) =
+        CombinedPolyResolver::<PiopField>::prove_as_subprotocol::<U>(
+            &mut transcript,
+            field_trace,
+            &ic_state.evaluation_point,
+            &field_projected_scalars,
+            num_constraints,
+            num_vars,
+            max_degree,
+            &field_cfg,
+        )
+        .expect("Combined poly resolver failed");
+    let cpr_time = t2.elapsed();
+
+    // ── Step 3b: Hybrid GKR batched decomposed LogUp ────────────────
+    let t2b = Instant::now();
+    let lookup_proof = if let Some((columns, raw_indices, remapped_specs)) = lookup_precomputed {
+        let (lk_proof, _lk_state) = prove_hybrid_gkr_batched_lookup_with_indices(
+            &mut transcript,
+            &columns,
+            &raw_indices,
+            &remapped_specs,
+            &projecting_element,
+            cutoff,
+            &field_cfg,
+        )
+        .expect("Hybrid GKR batched lookup prover failed");
+
+        Some(LookupProofData::HybridGkr(lk_proof))
+    } else {
+        None
+    };
+    let lookup_time = t2b.elapsed();
+
+    // ── Step 4: Two-round folding protocol ────────────────────────────
+    let evaluation_point = cpr_state.evaluation_point.clone();
+    let piop_point = &evaluation_point[..num_vars];
+
+    let fold1_output = fold_claims_prove::<PiopField, _, HALF_D>(
+        &mut transcript,
+        &split_trace_half,
+        piop_point,
+        &projecting_element,
+        &field_cfg,
+    )
+    .expect("Folding round 1 failed (hybrid GKR 4x folded)");
+
+    let fold2_output = fold_claims_prove::<PiopField, _, QUARTER_D>(
+        &mut transcript,
+        &split_trace_quarter,
+        &fold1_output.new_point,
+        &projecting_element,
+        &field_cfg,
+    )
+    .expect("Folding round 2 failed (hybrid GKR 4x folded)");
+
+    // ── Step 5: PCS Prove at (r ‖ γ₁ ‖ γ₂) over QUARTER_D columns ───
+    let t3 = Instant::now();
+    let (eval_f, proof) =
+        ZipPlus::<PcsZt, PcsLc>::prove_with_seed::<PiopField, CHECK>(
+            pcs_params,
+            &split_trace_quarter,
+            &fold2_output.new_point,
+            &hint,
+            &root_buf,
+        )
+        .expect("PCS prove failed (hybrid GKR 4x folded)");
+    let pcs_prove_time = t3.elapsed();
+    let total_time = total_start.elapsed();
+
+    // ── Serialize ─────────────────────────────────────────────────────
+    let proof_bytes: Vec<u8> = {
+        let pcs_transcript: zip_plus::pcs_transcript::PcsTranscript = proof.into();
+        pcs_transcript.stream.into_inner()
+    };
+    let ic_proof_values: Vec<Vec<u8>> = ic_proof
+        .combined_mle_values
+        .iter()
+        .map(|dpf| dpf.coeffs.iter().flat_map(|c| field_to_bytes(c)).collect())
+        .collect();
+
+    // CPR sumcheck messages (non-batched: stored in proof)
+    let cpr_sumcheck_messages: Vec<Vec<u8>> = cpr_proof
+        .sumcheck_proof
+        .messages
+        .iter()
+        .map(|msg| msg.0.tail_evaluations.iter().flat_map(|c| field_to_bytes(c)).collect())
+        .collect();
+    let cpr_sumcheck_claimed_sum = field_to_bytes(&cpr_proof.sumcheck_proof.claimed_sum);
+    let cpr_up_evals_bytes: Vec<Vec<u8>> = cpr_proof.up_evals.iter()
+        .enumerate()
+        .filter(|(i, _)| !sig.is_public_column(*i))
+        .map(|(_, v)| field_to_bytes(v))
+        .collect();
+    let cpr_down_evals_bytes: Vec<Vec<u8>> = cpr_proof.down_evals.iter().map(field_to_bytes).collect();
+    let evaluation_point_bytes: Vec<Vec<u8>> = evaluation_point.iter().map(field_to_bytes).collect();
+    let pcs_evals_bytes: Vec<Vec<u8>> = vec![field_to_bytes(&eval_f)];
+
+    // fold1: c1s / c2s  (round 1, D → HALF_D)
+    let folding_c1s_bytes: Vec<Vec<u8>> = fold1_output.c1s.iter().map(field_to_bytes).collect();
+    let folding_c2s_bytes: Vec<Vec<u8>> = fold1_output.c2s.iter().map(field_to_bytes).collect();
+    // fold2: c3s / c4s  (round 2, HALF_D → QUARTER_D)
+    let folding_c3s_bytes: Vec<Vec<u8>> = fold2_output.c1s.iter().map(field_to_bytes).collect();
+    let folding_c4s_bytes: Vec<Vec<u8>> = fold2_output.c2s.iter().map(field_to_bytes).collect();
+
+    Folded4xZincProof {
+        pcs_proof_bytes: proof_bytes,
+        commitment,
+        ic_proof_values,
+        cpr_sumcheck_messages,
+        cpr_sumcheck_claimed_sum,
+        cpr_up_evals: cpr_up_evals_bytes,
+        cpr_down_evals: cpr_down_evals_bytes,
+        lookup_proof,
+        shift_sumcheck: None,
+        evaluation_point_bytes,
+        pcs_evals_bytes,
+        folding_c1s_bytes,
+        folding_c2s_bytes,
+        folding_c3s_bytes,
+        folding_c4s_bytes,
+        timing: TimingBreakdown {
+            pcs_commit: pcs_commit_time,
+            ideal_check: ideal_check_time,
+            combined_poly_resolver: cpr_time,
+            lookup: lookup_time,
+            pcs_prove: pcs_prove_time,
+            serialize: Duration::ZERO,
+            total: total_time,
+        },
+    }
+}
+
 /// Verify a Zinc+ proof produced by [`prove_classic_logup_folded`].
 ///
 /// Re-runs the PIOP verification (IC, CPR, lookup), then the folding
@@ -2837,6 +3110,9 @@ where
         if let Some(ref lookup_data) = folded_proof.lookup_proof {
             let result = match lookup_data {
                 LookupProofData::Gkr(proof) => verify_gkr_batched_lookup(
+                    &mut transcript, proof, &projecting_element, &field_cfg,
+                ).map(|_| ()),
+                LookupProofData::HybridGkr(proof) => verify_hybrid_gkr_batched_lookup(
                     &mut transcript, proof, &projecting_element, &field_cfg,
                 ).map(|_| ()),
                 LookupProofData::Classic(proof) => verify_batched_lookup(
@@ -3508,6 +3784,9 @@ where
         if let Some(ref lookup_data) = folded_proof.lookup_proof {
             let result = match lookup_data {
                 LookupProofData::Gkr(proof) => verify_gkr_batched_lookup(
+                    &mut transcript, proof, &projecting_element, &field_cfg,
+                ).map(|_| ()),
+                LookupProofData::HybridGkr(proof) => verify_hybrid_gkr_batched_lookup(
                     &mut transcript, proof, &projecting_element, &field_cfg,
                 ).map(|_| ()),
                 LookupProofData::Classic(proof) => verify_batched_lookup(
@@ -4306,6 +4585,9 @@ where
 
         let result = match lookup_data {
             LookupProofData::Gkr(proof) => verify_gkr_batched_lookup(
+                &mut transcript, proof, &projecting_element, &field_cfg,
+            ).map(|_| ()),
+            LookupProofData::HybridGkr(proof) => verify_hybrid_gkr_batched_lookup(
                 &mut transcript, proof, &projecting_element, &field_cfg,
             ).map(|_| ()),
             LookupProofData::Classic(proof) => verify_batched_lookup(
@@ -5318,6 +5600,9 @@ where
             // Reuse the same projecting_element from the CPR step.
             let result = match lookup_data {
                 LookupProofData::Gkr(proof) => verify_gkr_batched_lookup(
+                    &mut transcript, proof, &projecting_element, &field_cfg,
+                ).map(|_| ()),
+                LookupProofData::HybridGkr(proof) => verify_hybrid_gkr_batched_lookup(
                     &mut transcript, proof, &projecting_element, &field_cfg,
                 ).map(|_| ()),
                 LookupProofData::Classic(proof) => verify_batched_lookup(

@@ -815,63 +815,6 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
         });
     });
 
-    // ── 24. E2E Total Prover (Hybrid GKR c=2, folded) ─────────────
-    group.bench_function("E2E/Prover (Hybrid GKR c=2 folded)", |b| {
-        b.iter_custom(|iters| {
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                let t = Instant::now();
-                let _ = zinc_snark::pipeline::prove_hybrid_gkr_logup_folded::<
-                    Sha256UairBpUnderconstrained, FoldedZt, FoldedLc, 32, 16, UNCHECKED,
-                >(
-                    &folded_params, &sha_trace, SHA256_8X_NUM_VARS,
-                    &sha_lookup_specs, &sha_affine_specs, 2,
-                );
-                total += t.elapsed();
-            }
-            total
-        });
-    });
-
-    // ── 25. E2E Total Verifier (Hybrid GKR c=2, folded) ────────────
-    let hybrid_gkr_folded_proof = zinc_snark::pipeline::prove_hybrid_gkr_logup_folded::<
-        Sha256UairBpUnderconstrained, FoldedZt, FoldedLc, 32, 16, UNCHECKED,
-    >(
-        &folded_params, &sha_trace, SHA256_8X_NUM_VARS,
-        &sha_lookup_specs, &sha_affine_specs, 2,
-    );
-
-    {
-        let r = zinc_snark::pipeline::verify_classic_logup_folded::<
-            Sha256UairBpUnderconstrained, FoldedZt, FoldedLc, 32, 16, UNCHECKED, _, _,
-        >(
-            &folded_params, &hybrid_gkr_folded_proof, SHA256_8X_NUM_VARS,
-            |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
-            &sha_public_cols,
-        );
-        let t = &r.timing;
-        println!("\n── Verifier step timing (UC Hybrid GKR c=2 folded) ──────");
-        println!("  IC verify:           {:>8.3} ms", t.ideal_check_verify.as_secs_f64() * 1000.0);
-        println!("  CPR+Lookup verify:   {:>8.3} ms", t.combined_poly_resolver_verify.as_secs_f64() * 1000.0);
-        println!("  Lookup verify:       {:>8.3} ms", t.lookup_verify.as_secs_f64() * 1000.0);
-        println!("  PCS verify:          {:>8.3} ms", t.pcs_verify.as_secs_f64() * 1000.0);
-        println!("  Total:               {:>8.3} ms", t.total.as_secs_f64() * 1000.0);
-        println!("─────────────────────────────────────────────────────────\n");
-    }
-
-    group.bench_function("E2E/Verifier (Hybrid GKR c=2 folded)", |b| {
-        b.iter(|| {
-            let r = zinc_snark::pipeline::verify_classic_logup_folded::<
-                Sha256UairBpUnderconstrained, FoldedZt, FoldedLc, 32, 16, UNCHECKED, _, _,
-            >(
-                &folded_params, &hybrid_gkr_folded_proof, SHA256_8X_NUM_VARS,
-                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
-                &sha_public_cols,
-            );
-            black_box(r);
-        });
-    });
-
     // ── 20. E2E Total Prover (4x folded pipeline) ───────────────────
     group.bench_function("E2E/Prover (4x folded)", |b| {
         b.iter_custom(|iters| {
@@ -1064,15 +1007,6 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
         gkr_folded_proof.timing.pcs_commit,
         gkr_folded_proof.timing.pcs_prove,
         gkr_folded_proof.timing.total,
-    );
-    eprintln!("  Hybrid GKR c=2 pipeline timing:");
-    eprintln!("  IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, prove={:?}), total={:?}",
-        hybrid_gkr_folded_proof.timing.ideal_check,
-        hybrid_gkr_folded_proof.timing.combined_poly_resolver,
-        hybrid_gkr_folded_proof.timing.lookup,
-        hybrid_gkr_folded_proof.timing.pcs_commit,
-        hybrid_gkr_folded_proof.timing.pcs_prove,
-        hybrid_gkr_folded_proof.timing.total,
     );
     eprintln!("  4x Hybrid GKR c=2 4-chunk pipeline timing:");
     eprintln!("  IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, prove={:?}), total={:?}",
@@ -1516,9 +1450,6 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
         // ── GKR folded, 8-chunk ───────────────────────────────────────
         let (raw_gkr_2x, compr_gkr_2x) = proof_size_2x(&gkr_folded_proof, "UC GKR Folded 8-chunk (8×2^4)", fe_bytes);
 
-        // ── Hybrid GKR c=2, folded ───────────────────────────────────
-        let (raw_hybrid_2x, compr_hybrid_2x) = proof_size_2x(&hybrid_gkr_folded_proof, "UC Hybrid GKR c=2 Folded", fe_bytes);
-
         // ── 4x folded, 8-chunk (default) ──────────────────────────────
         let (raw_4x_8c, compr_4x_8c) = proof_size_4x(&folded_4x_proof, "UC 4x Folded 8-chunk (8×2^4)", fe_bytes);
 
@@ -1596,8 +1527,6 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
             raw_2x_8c, raw_2x_8c as f64 / 1024.0, compr_2x_8c as f64 / 1024.0);
         eprintln!("  {:35}  {:>8}  {:>8.1}  {:>8.1}", "GKR folded, 8-chunk (8×2^4)",
             raw_gkr_2x, raw_gkr_2x as f64 / 1024.0, compr_gkr_2x as f64 / 1024.0);
-        eprintln!("  {:35}  {:>8}  {:>8.1}  {:>8.1}", "Hybrid GKR c=2, folded",
-            raw_hybrid_2x, raw_hybrid_2x as f64 / 1024.0, compr_hybrid_2x as f64 / 1024.0);
         eprintln!("  {:35}  {:>8}  {:>8.1}  {:>8.1}", "4x folded, 8-chunk (8×2^4)",
             raw_4x_8c, raw_4x_8c as f64 / 1024.0, compr_4x_8c as f64 / 1024.0);
         eprintln!("  {:35}  {:>8}  {:>8.1}  {:>8.1}", "4x folded, 4-chunk (4×2^8)",
@@ -1605,8 +1534,8 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
         eprintln!("  {:35}  {:>8}  {:>8.1}  {:>8.1}", "4x Hybrid GKR c=2, 4-chunk",
             raw_hybrid_4x, raw_hybrid_4x as f64 / 1024.0, compr_hybrid_4x as f64 / 1024.0);
         eprintln!("  (* = default configuration)");
-        let best_raw = raw_4x_4c.min(raw_4x_8c).min(raw_2x_8c).min(raw_gkr_2x).min(raw_hybrid_2x).min(raw_hybrid_4x);
-        let best_compr = compr_4x_4c.min(compr_4x_8c).min(compr_2x_8c).min(compr_gkr_2x).min(compr_hybrid_2x).min(compr_hybrid_4x);
+        let best_raw = raw_4x_4c.min(raw_4x_8c).min(raw_2x_8c).min(raw_gkr_2x).min(raw_hybrid_4x);
+        let best_compr = compr_4x_4c.min(compr_4x_8c).min(compr_2x_8c).min(compr_gkr_2x).min(compr_hybrid_4x);
         let savings_raw = orig_total_raw as i64 - best_raw as i64;
         let savings_compr = orig_compressed_len as i64 - best_compr as i64;
         eprintln!("  Best raw savings vs original:     {:>+6} B ({:+.1} KB, {:.2}x)",

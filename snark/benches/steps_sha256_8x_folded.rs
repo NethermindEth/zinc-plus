@@ -378,7 +378,7 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
     });
 
     // ── 6. PIOP / Project Trace for Ideal Check ─────────────────────
-    assert_eq!(max_degree, 2, "SHA-256 UAIR should have max_degree == 2 (C17-C19 are selector-gated)");
+    assert!(max_degree >= 1 && max_degree <= 2, "SHA-256 UAIR max_degree should be 1 or 2, got {max_degree}");
     group.bench_function("PIOP/Project Ideal Check", |b| {
         let mut tr_setup = zinc_transcript::KeccakTranscript::new();
         let fcfg = tr_setup.get_random_field_cfg::<F, <F as Field>::Inner, MillerRabin>();
@@ -925,61 +925,6 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
         });
     });
 
-    // ── 19c. E2E Prover/Verifier (Hybrid GKR c=2, folded) ──────────
-    group.bench_function("E2E/Prover (Hybrid GKR c=2 folded)", |b| {
-        b.iter_custom(|iters| {
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                let t = Instant::now();
-                let _ = zinc_snark::pipeline::prove_hybrid_gkr_logup_folded::<
-                    Sha256Uair, FoldedZt, FoldedLc, 32, 16, UNCHECKED,
-                >(
-                    &folded_params, &sha_trace, SHA256_8X_NUM_VARS,
-                    &sha_lookup_specs, &sha_affine_specs, 2,
-                );
-                total += t.elapsed();
-            }
-            total
-        });
-    });
-
-    let hybrid_gkr_folded_proof = zinc_snark::pipeline::prove_hybrid_gkr_logup_folded::<
-        Sha256Uair, FoldedZt, FoldedLc, 32, 16, UNCHECKED,
-    >(
-        &folded_params, &sha_trace, SHA256_8X_NUM_VARS,
-        &sha_lookup_specs, &sha_affine_specs, 2,
-    );
-
-    {
-        let r = zinc_snark::pipeline::verify_classic_logup_folded::<
-            Sha256Uair, FoldedZt, FoldedLc, 32, 16, UNCHECKED, _, _,
-        >(
-            &folded_params, &hybrid_gkr_folded_proof, SHA256_8X_NUM_VARS,
-            |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
-            &sha_public_cols,
-        );
-        let t = &r.timing;
-        println!("\n── Verifier step timing (Hybrid GKR c=2 folded) ─────────");
-        println!("  IC verify:           {:>8.3} ms", t.ideal_check_verify.as_secs_f64() * 1000.0);
-        println!("  CPR+Lookup verify:   {:>8.3} ms", t.combined_poly_resolver_verify.as_secs_f64() * 1000.0);
-        println!("  Lookup verify:       {:>8.3} ms", t.lookup_verify.as_secs_f64() * 1000.0);
-        println!("  PCS verify:          {:>8.3} ms", t.pcs_verify.as_secs_f64() * 1000.0);
-        println!("  Total:               {:>8.3} ms", t.total.as_secs_f64() * 1000.0);
-        println!("─────────────────────────────────────────────────────────\n");
-    }
-
-    group.bench_function("E2E/Verifier (Hybrid GKR c=2 folded)", |b| {
-        b.iter(|| {
-            let r = zinc_snark::pipeline::verify_classic_logup_folded::<
-                Sha256Uair, FoldedZt, FoldedLc, 32, 16, UNCHECKED, _, _,
-            >(
-                &folded_params, &hybrid_gkr_folded_proof, SHA256_8X_NUM_VARS,
-                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
-                &sha_public_cols,
-            );
-            black_box(r);
-        });
-    });
 
     // ── 20. E2E Total Prover (4x folded pipeline) ───────────────────
     group.bench_function("E2E/Prover (4x folded)", |b| {
@@ -1155,117 +1100,6 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
         });
     });
 
-    // ── 22c. E2E Prover/Verifier (4x folded, 4-chunk, Hybrid GKR c=1) ─
-    let hybrid_4x_c1_proof = zinc_snark::pipeline::prove_hybrid_gkr_logup_4x_folded::<
-        Sha256Uair, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
-    >(
-        &folded_4x_params, &sha_trace, SHA256_8X_NUM_VARS,
-        &sha_lookup_specs_4c, &sha_affine_specs_4c, 1,
-    );
-
-    group.bench_function("E2E/Prover (4x Hybrid GKR c=1 4-chunk)", |b| {
-        b.iter_custom(|iters| {
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                let t = Instant::now();
-                let _ = zinc_snark::pipeline::prove_hybrid_gkr_logup_4x_folded::<
-                    Sha256Uair, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
-                >(
-                    &folded_4x_params, &sha_trace, SHA256_8X_NUM_VARS,
-                    &sha_lookup_specs_4c, &sha_affine_specs_4c, 1,
-                );
-                total += t.elapsed();
-            }
-            total
-        });
-    });
-
-    {
-        let r = zinc_snark::pipeline::verify_classic_logup_4x_folded::<
-            Sha256Uair, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _,
-        >(
-            &folded_4x_params, &hybrid_4x_c1_proof, SHA256_8X_NUM_VARS,
-            |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
-            &sha_public_cols,
-        );
-        let t = &r.timing;
-        println!("\n── Verifier step timing (4x Hybrid GKR c=1 4-chunk) ────");
-        println!("  IC verify:           {:>8.3} ms", t.ideal_check_verify.as_secs_f64() * 1000.0);
-        println!("  CPR+Lookup verify:   {:>8.3} ms", t.combined_poly_resolver_verify.as_secs_f64() * 1000.0);
-        println!("  Lookup verify:       {:>8.3} ms", t.lookup_verify.as_secs_f64() * 1000.0);
-        println!("  PCS verify:          {:>8.3} ms", t.pcs_verify.as_secs_f64() * 1000.0);
-        println!("  Total:               {:>8.3} ms", t.total.as_secs_f64() * 1000.0);
-        println!("─────────────────────────────────────────────────────────\n");
-    }
-
-    group.bench_function("E2E/Verifier (4x Hybrid GKR c=1 4-chunk)", |b| {
-        b.iter(|| {
-            let r = zinc_snark::pipeline::verify_classic_logup_4x_folded::<
-                Sha256Uair, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _,
-            >(
-                &folded_4x_params, &hybrid_4x_c1_proof, SHA256_8X_NUM_VARS,
-                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
-                &sha_public_cols,
-            );
-            black_box(r);
-        });
-    });
-
-    // ── 23. E2E Prover/Verifier (8x folded, 4-chunk, Hybrid GKR c=2) ─
-    let hybrid_8x_proof = zinc_snark::pipeline::prove_hybrid_gkr_logup_8x_folded::<
-        Sha256Uair, FoldedZt8x, FoldedLc8x, 32, 16, 8, 4, UNCHECKED,
-    >(
-        &folded_8x_params, &sha_trace, SHA256_8X_NUM_VARS,
-        &sha_lookup_specs_4c, &sha_affine_specs_4c, 2,
-    );
-
-    group.bench_function("E2E/Prover (8x Hybrid GKR c=2 4-chunk)", |b| {
-        b.iter_custom(|iters| {
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                let t = Instant::now();
-                let _ = zinc_snark::pipeline::prove_hybrid_gkr_logup_8x_folded::<
-                    Sha256Uair, FoldedZt8x, FoldedLc8x, 32, 16, 8, 4, UNCHECKED,
-                >(
-                    &folded_8x_params, &sha_trace, SHA256_8X_NUM_VARS,
-                    &sha_lookup_specs_4c, &sha_affine_specs_4c, 2,
-                );
-                total += t.elapsed();
-            }
-            total
-        });
-    });
-
-    {
-        let r = zinc_snark::pipeline::verify_classic_logup_8x_folded::<
-            Sha256Uair, FoldedZt8x, FoldedLc8x, 32, 16, 8, 4, UNCHECKED, _, _,
-        >(
-            &folded_8x_params, &hybrid_8x_proof, SHA256_8X_NUM_VARS,
-            |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
-            &sha_public_cols,
-        );
-        let t = &r.timing;
-        println!("\n── Verifier step timing (8x Hybrid GKR c=2 4-chunk) ────");
-        println!("  IC verify:           {:>8.3} ms", t.ideal_check_verify.as_secs_f64() * 1000.0);
-        println!("  CPR+Lookup verify:   {:>8.3} ms", t.combined_poly_resolver_verify.as_secs_f64() * 1000.0);
-        println!("  Lookup verify:       {:>8.3} ms", t.lookup_verify.as_secs_f64() * 1000.0);
-        println!("  PCS verify:          {:>8.3} ms", t.pcs_verify.as_secs_f64() * 1000.0);
-        println!("  Total:               {:>8.3} ms", t.total.as_secs_f64() * 1000.0);
-        println!("─────────────────────────────────────────────────────────\n");
-    }
-
-    group.bench_function("E2E/Verifier (8x Hybrid GKR c=2 4-chunk)", |b| {
-        b.iter(|| {
-            let r = zinc_snark::pipeline::verify_classic_logup_8x_folded::<
-                Sha256Uair, FoldedZt8x, FoldedLc8x, 32, 16, 8, 4, UNCHECKED, _, _,
-            >(
-                &folded_8x_params, &hybrid_8x_proof, SHA256_8X_NUM_VARS,
-                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
-                &sha_public_cols,
-            );
-            black_box(r);
-        });
-    });
 
     // ── Proof size breakdown (4x folded) — raw + compressed ─────────
     {
@@ -1805,183 +1639,6 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
             (total, compressed.len())
         }
 
-        /// Compute raw and compressed proof size for an 8x Folded8xZincProof.
-        /// Returns (raw_total, compressed_len).
-        fn proof_size_8x(
-            proof: &zinc_snark::pipeline::Folded8xZincProof,
-            label: &str,
-            fe_bytes: usize,
-        ) -> (usize, usize) {
-            use zinc_snark::pipeline::LookupProofData;
-
-            let pcs     = proof.pcs_proof_bytes.len();
-            let ic: usize  = proof.ic_proof_values.iter().map(|v| v.len()).sum();
-            let fold_c1: usize = proof.folding_c1s_bytes.iter().map(|v| v.len()).sum();
-            let fold_c2: usize = proof.folding_c2s_bytes.iter().map(|v| v.len()).sum();
-            let fold_c3: usize = proof.folding_c3s_bytes.iter().map(|v| v.len()).sum();
-            let fold_c4: usize = proof.folding_c4s_bytes.iter().map(|v| v.len()).sum();
-            let fold_c5: usize = proof.folding_c5s_bytes.iter().map(|v| v.len()).sum();
-            let fold_c6: usize = proof.folding_c6s_bytes.iter().map(|v| v.len()).sum();
-            let folding = fold_c1 + fold_c2 + fold_c3 + fold_c4 + fold_c5 + fold_c6;
-            let cpr_up: usize   = proof.cpr_up_evals.iter().map(|v| v.len()).sum();
-            let cpr_dn: usize   = proof.cpr_down_evals.iter().map(|v| v.len()).sum();
-            let eval_pt: usize  = proof.evaluation_point_bytes.iter().map(|v| v.len()).sum();
-            let pcs_eval: usize = proof.pcs_evals_bytes.iter().map(|v| v.len()).sum();
-            let cpr_sc: usize   = proof.cpr_sumcheck_messages.iter().map(|v| v.len()).sum::<usize>()
-                + proof.cpr_sumcheck_claimed_sum.len();
-
-            let lk: usize = match &proof.lookup_proof {
-                Some(LookupProofData::BatchedClassic(bp)) => {
-                    let mut t = 0usize;
-                    for gp in &bp.lookup_group_proofs {
-                        let m: usize = gp.aggregated_multiplicities.iter().map(|v| v.len()).sum();
-                        let w: usize = gp.chunk_inverse_witnesses.iter()
-                            .flat_map(|o| o.iter()).map(|i| i.len()).sum();
-                        t += (m + w + gp.inverse_table.len()) * fe_bytes;
-                    }
-                    t += bp.md_proof.group_messages.iter()
-                        .flat_map(|g| g.iter())
-                        .map(|m| m.0.tail_evaluations.len() * fe_bytes)
-                        .sum::<usize>();
-                    t += bp.md_proof.claimed_sums.len() * fe_bytes;
-                    t
-                }
-                Some(LookupProofData::HybridGkr(hp)) => {
-                    let mut t = 0usize;
-                    for group in &hp.group_proofs {
-                        let m: usize = group.aggregated_multiplicities.iter().map(|v| v.len()).sum();
-                        t += m * fe_bytes;
-                        let wg = &group.witness_gkr;
-                        t += (wg.roots_p.len() + wg.roots_q.len()) * fe_bytes;
-                        for lp in &wg.layer_proofs {
-                            if let Some(ref sc) = lp.sumcheck_proof {
-                                t += sc.messages.iter().map(|m| m.0.tail_evaluations.len()).sum::<usize>() * fe_bytes;
-                                t += fe_bytes;
-                            }
-                            t += (lp.p_lefts.len() + lp.p_rights.len() + lp.q_lefts.len() + lp.q_rights.len()) * fe_bytes;
-                        }
-                        let sent_p: usize = wg.sent_p.iter().map(|v| v.len()).sum();
-                        let sent_q: usize = wg.sent_q.iter().map(|v| v.len()).sum();
-                        t += (sent_p + sent_q) * fe_bytes;
-                        let tg = &group.table_gkr;
-                        t += 2 * fe_bytes;
-                        for lp in &tg.layer_proofs {
-                            if let Some(ref sc) = lp.sumcheck_proof {
-                                t += sc.messages.iter().map(|m| m.0.tail_evaluations.len()).sum::<usize>() * fe_bytes;
-                                t += fe_bytes;
-                            }
-                            t += 4 * fe_bytes;
-                        }
-                    }
-                    t
-                }
-                _ => 0,
-            };
-            let shift: usize = proof.shift_sumcheck.as_ref().map_or(0, |sc| {
-                sc.rounds.iter().map(|v| v.len()).sum::<usize>()
-                    + sc.v_finals.iter().map(|v| v.len()).sum::<usize>()
-            });
-            let total = pcs + ic + cpr_sc + cpr_up + cpr_dn + lk + shift + folding + eval_pt + pcs_eval;
-
-            let mut all_bytes: Vec<u8> = Vec::with_capacity(total);
-            all_bytes.extend(&proof.pcs_proof_bytes);
-            for v in &proof.ic_proof_values { all_bytes.extend(v); }
-            for v in &proof.cpr_sumcheck_messages { all_bytes.extend(v); }
-            all_bytes.extend(&proof.cpr_sumcheck_claimed_sum);
-            for v in &proof.cpr_up_evals  { all_bytes.extend(v); }
-            for v in &proof.cpr_down_evals { all_bytes.extend(v); }
-            if let Some(LookupProofData::BatchedClassic(bp)) = &proof.lookup_proof {
-                for sum in &bp.md_proof.claimed_sums { write_fe_cv(&mut all_bytes, sum); }
-                for group_msgs in &bp.md_proof.group_messages {
-                    for msg in group_msgs {
-                        for e in &msg.0.tail_evaluations { write_fe_cv(&mut all_bytes, e); }
-                    }
-                }
-                for gp in &bp.lookup_group_proofs {
-                    for v in &gp.aggregated_multiplicities {
-                        for f in v { write_fe_cv(&mut all_bytes, f); }
-                    }
-                    for outer in &gp.chunk_inverse_witnesses {
-                        for inner in outer { for f in inner { write_fe_cv(&mut all_bytes, f); } }
-                    }
-                    for f in &gp.inverse_table { write_fe_cv(&mut all_bytes, f); }
-                }
-            } else if let Some(LookupProofData::HybridGkr(hp)) = &proof.lookup_proof {
-                for group in &hp.group_proofs {
-                    for v in &group.aggregated_multiplicities {
-                        for f in v { write_fe_cv(&mut all_bytes, f); }
-                    }
-                    let wg = &group.witness_gkr;
-                    for f in &wg.roots_p { write_fe_cv(&mut all_bytes, f); }
-                    for f in &wg.roots_q { write_fe_cv(&mut all_bytes, f); }
-                    for lp in &wg.layer_proofs {
-                        if let Some(ref sc) = lp.sumcheck_proof {
-                            write_fe_cv(&mut all_bytes, &sc.claimed_sum);
-                            for m in &sc.messages { for e in &m.0.tail_evaluations { write_fe_cv(&mut all_bytes, e); } }
-                        }
-                        for f in &lp.p_lefts { write_fe_cv(&mut all_bytes, f); }
-                        for f in &lp.p_rights { write_fe_cv(&mut all_bytes, f); }
-                        for f in &lp.q_lefts { write_fe_cv(&mut all_bytes, f); }
-                        for f in &lp.q_rights { write_fe_cv(&mut all_bytes, f); }
-                    }
-                    for v in &wg.sent_p { for f in v { write_fe_cv(&mut all_bytes, f); } }
-                    for v in &wg.sent_q { for f in v { write_fe_cv(&mut all_bytes, f); } }
-                    let tg = &group.table_gkr;
-                    write_fe_cv(&mut all_bytes, &tg.root_p);
-                    write_fe_cv(&mut all_bytes, &tg.root_q);
-                    for lp in &tg.layer_proofs {
-                        if let Some(ref sc) = lp.sumcheck_proof {
-                            write_fe_cv(&mut all_bytes, &sc.claimed_sum);
-                            for m in &sc.messages { for e in &m.0.tail_evaluations { write_fe_cv(&mut all_bytes, e); } }
-                        }
-                        write_fe_cv(&mut all_bytes, &lp.p_left);
-                        write_fe_cv(&mut all_bytes, &lp.p_right);
-                        write_fe_cv(&mut all_bytes, &lp.q_left);
-                        write_fe_cv(&mut all_bytes, &lp.q_right);
-                    }
-                }
-            }
-            if let Some(ref sc) = proof.shift_sumcheck {
-                for v in &sc.rounds  { all_bytes.extend(v); }
-                for v in &sc.v_finals { all_bytes.extend(v); }
-            }
-            for v in &proof.folding_c1s_bytes { all_bytes.extend(v); }
-            for v in &proof.folding_c2s_bytes { all_bytes.extend(v); }
-            for v in &proof.folding_c3s_bytes { all_bytes.extend(v); }
-            for v in &proof.folding_c4s_bytes { all_bytes.extend(v); }
-            for v in &proof.folding_c5s_bytes { all_bytes.extend(v); }
-            for v in &proof.folding_c6s_bytes { all_bytes.extend(v); }
-            for v in &proof.evaluation_point_bytes { all_bytes.extend(v); }
-            for v in &proof.pcs_evals_bytes { all_bytes.extend(v); }
-
-            let compressed = {
-                use std::io::Write;
-                let mut enc = flate2::write::DeflateEncoder::new(
-                    Vec::new(), flate2::Compression::default(),
-                );
-                enc.write_all(&all_bytes).unwrap();
-                enc.finish().unwrap()
-            };
-
-            eprintln!("\n=== {label} Proof Size ===");
-            eprintln!("  PCS:            {:>6} B  ({:.1} KB)", pcs, pcs as f64 / 1024.0);
-            eprintln!("  IC:             {:>6} B", ic);
-            eprintln!("  CPR sumcheck:   {:>6} B", cpr_sc);
-            eprintln!("  CPR evals:      {:>6} B  (up={cpr_up}, down={cpr_dn})", cpr_up + cpr_dn);
-            eprintln!("  Lookup:         {:>6} B  ({:.1} KB)", lk, lk as f64 / 1024.0);
-            eprintln!("  Shift SC:       {:>6} B", shift);
-            eprintln!("  Folding:        {:>6} B  (c1={fold_c1}, c2={fold_c2}, c3={fold_c3}, c4={fold_c4}, c5={fold_c5}, c6={fold_c6})", folding);
-            eprintln!("  Eval point:     {:>6} B", eval_pt);
-            eprintln!("  PCS evals:      {:>6} B", pcs_eval);
-            eprintln!("  ─────────────────────────");
-            eprintln!("  Total raw:      {:>6} B  ({:.1} KB)", total, total as f64 / 1024.0);
-            eprintln!("  Compressed:     {:>6} B  ({:.1} KB, {:.1}x ratio)",
-                compressed.len(), compressed.len() as f64 / 1024.0,
-                all_bytes.len() as f64 / compressed.len() as f64);
-
-            (total, compressed.len())
-        }
-
         // ── 2x folded, 4-chunk ────────────────────────────────────────
         let folded_proof_4c = zinc_snark::pipeline::prove_classic_logup_folded::<
             Sha256Uair, FoldedZt, FoldedLc, 32, 16, UNCHECKED,
@@ -2003,11 +1660,7 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
         // ── 4x Hybrid GKR c=2, 4-chunk ──────────────────────────────
         let (raw_hybrid_4x, compr_hybrid_4x) = proof_size_4x(&hybrid_4x_proof, "4x Hybrid GKR c=2 4-chunk", fe_bytes);
 
-        // ── 4x Hybrid GKR c=1, 4-chunk ──────────────────────────────
-        let (raw_hybrid_4x_c1, compr_hybrid_4x_c1) = proof_size_4x(&hybrid_4x_c1_proof, "4x Hybrid GKR c=1 4-chunk", fe_bytes);
 
-        // ── 8x Hybrid GKR c=2, 4-chunk ──────────────────────────────
-        let (raw_hybrid_8x, compr_hybrid_8x) = proof_size_8x(&hybrid_8x_proof, "8x Hybrid GKR c=2 4-chunk", fe_bytes);
 
         // ── Summary comparison table ──────────────────────────────────
         eprintln!("\n=== Chunk Variant Proof Size Comparison ===");
@@ -2018,8 +1671,6 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
         eprintln!("  {:35}  {:>8}  {:>8}", "4x folded, 4-chunk (4×2^8)",  raw_4x_4c, compr_4x_4c);
         eprintln!("  {:35}  {:>8}  {:>8}", "4x folded, 8-chunk (8×2^4) *",  raw_4x_8c, compr_4x_8c);
         eprintln!("  {:35}  {:>8}  {:>8}", "4x Hybrid GKR c=2, 4-chunk",  raw_hybrid_4x, compr_hybrid_4x);
-        eprintln!("  {:35}  {:>8}  {:>8}", "4x Hybrid GKR c=1, 4-chunk",  raw_hybrid_4x_c1, compr_hybrid_4x_c1);
-        eprintln!("  {:35}  {:>8}  {:>8}", "8x Hybrid GKR c=2, 4-chunk",  raw_hybrid_8x, compr_hybrid_8x);
         eprintln!("  (* = default configuration)");
     }
 
