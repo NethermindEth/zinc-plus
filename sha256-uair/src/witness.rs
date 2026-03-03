@@ -1,8 +1,19 @@
 //! Witness generation for the SHA-256 UAIR⁺.
 //!
 //! Implements [`GenerateWitness<BinaryPoly<32>>`] for [`Sha256UairBp`] by
-//! running the full SHA-256 compression function on a single-block padded
-//! empty message, recording all 17 column values at each of the 65 rows.
+//! running chained SHA-256 compression functions on multiple message blocks,
+//! filling all `2^{num_vars}` rows with non-trivial computational data.
+//!
+//! When `num_vars ≥ 7` (≥ 128 rows), the trace is populated with
+//! `⌊num_rows / 64⌋` chained compressions. Compression 0 hashes the
+//! padded empty message; compressions 1+ use deterministic non-trivial
+//! message blocks. The round-function state flows directly from one
+//! compression to the next (without the SHA-256 post-processing
+//! H-addition), so all linking constraints are naturally satisfied.
+//!
+//! The last few rows are deactivated due to shift zero-padding at the
+//! trace boundary (shift-by-16 forces W=0 for the last 15 rows;
+//! shift-by-3 forces a/e=0 for the last 2 checked rows).
 //!
 //! Following the paper, registers d and h are **not** stored as columns
 //! (they are inlined via shift-register identities d_t = a_{t−3},
@@ -61,17 +72,24 @@ pub trait GenerateWitness<R: crypto_primitives::Semiring + 'static> {
 }
 
 impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
-    /// Generate the SHA-256 witness trace.
+    /// Generate the SHA-256 witness trace with chained compressions.
     ///
-    /// The trace has 65 rows (rows 0–63 for rounds, row 64 for final state,
-    /// `num_vars = 7`). If `num_vars > 7` the extra rows are zero-padded.
+    /// The trace has `2^{num_vars}` rows, populated with
+    /// `num_rows / 64` chained compressions. Compression 0 hashes the
+    /// padded empty message; compressions 1+ use deterministic message
+    /// blocks. The round-function state flows from one compression to
+    /// the next without the SHA-256 H-addition post-processing step,
+    /// so all linking constraints are naturally satisfied across
+    /// compression boundaries.
     ///
-    /// The message hashed is the empty string (single 512-bit padded block).
+    /// Due to shift zero-padding at the trace tail:
+    /// - `sel_round = 0` for the last 4 rows (shift-by-3 forces a/e = 0
+    ///   at rows N−3, N−2; the carry constraint at N−4 would conflict).
+    /// - `sel_sched = 0` for the last 16 rows (shift-by-16 forces W = 0).
+    /// - The last compression is therefore partial (60 active rounds
+    ///   instead of 64, schedule active for rounds 16–47 only).
+    ///
     /// The `rng` parameter is accepted for trait compatibility but unused.
-    ///
-    /// Following the paper, registers d and h are not stored (they are
-    /// inlined via d_t = a_{t−3}, h_t = e_{t−3}), and K_t is a public
-    /// input, not a trace column.
     fn generate_witness<Rng: RngCore + ?Sized>(
         num_vars: usize,
         _rng: &mut Rng,
@@ -82,308 +100,263 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
         );
 
         let num_rows: usize = 1 << num_vars;
+        let num_compressions = num_rows / 64;
 
-        // ── Prepare message block (padded empty message) ────────────────
-        let mut msg_block = [0u32; 16];
-        msg_block[0] = 0x8000_0000;
+        // ── Generate message blocks ─────────────────────────────────────
+        // Block 0: padded empty message (preserves original SHA-256 trace).
+        // Blocks 1+: deterministic non-trivial patterns.
+        let msg_blocks: Vec<[u32; 16]> = (0..num_compressions)
+            .map(|k| {
+                if k == 0 {
+                    let mut block = [0u32; 16];
+                    block[0] = 0x8000_0000;
+                    block
+                } else {
+                    let mut block = [0u32; 16];
+                    for i in 0..16 {
+                        // Mix block index and word index for variety
+                        block[i] = ((k as u32) << 16) | (i as u32 + 1);
+                    }
+                    block
+                }
+            })
+            .collect();
 
-        // ── Message schedule ────────────────────────────────────────────
-        let mut w = [0u32; 64];
-        w[..16].copy_from_slice(&msg_block);
-        for t in 16..64 {
-            w[t] = small_sigma1(w[t - 2])
-                .wrapping_add(w[t - 7])
-                .wrapping_add(small_sigma0(w[t - 15]))
-                .wrapping_add(w[t - 16]);
+        // ── Compute message schedules ───────────────────────────────────
+        let schedules: Vec<[u32; 64]> = msg_blocks
+            .iter()
+            .map(|block| {
+                let mut w = [0u32; 64];
+                w[..16].copy_from_slice(block);
+                for t in 16..64 {
+                    w[t] = small_sigma1(w[t - 2])
+                        .wrapping_add(w[t - 7])
+                        .wrapping_add(small_sigma0(w[t - 15]))
+                        .wrapping_add(w[t - 16]);
+                }
+                w
+            })
+            .collect();
+
+        // ── Build global W and K arrays ─────────────────────────────────
+        // W is forced to 0 for the last 16 rows by the W_tm16 linking
+        // constraint's shift zero-padding.
+        let w_zero_start = num_rows.saturating_sub(16);
+        let w_global: Vec<u32> = (0..num_rows)
+            .map(|t| {
+                if t >= w_zero_start {
+                    0
+                } else {
+                    schedules[t / 64][t % 64]
+                }
+            })
+            .collect();
+
+        // K repeats every 64 rounds (one per compression).
+        let k_global: Vec<u32> = (0..num_rows)
+            .map(|t| K[t % 64])
+            .collect();
+
+        // ── Boundary thresholds ─────────────────────────────────────────
+        // The CPR excludes row N−1 from constraint checking.
+        // Shift-by-3 (d/h links) forces a_hat, e_hat = 0 at rows N−3, N−2.
+        // The carry constraint at row t references a[t+1], so:
+        //   sel_round at row N−4 would need a[N−3] = round_output,
+        //   but a[N−3] = 0 (forced) → sel_round must be 0 at N−4.
+        // Last sel_round = 1 row: N−5.
+        // Last sel_sched = 1 row: N−17 (W forced to 0 at N−16).
+        let last_sel_round_row = num_rows.saturating_sub(5);
+        let last_sel_sched_row = num_rows.saturating_sub(17);
+
+        // ── Phase 1: Run round function, record a/e for all rows ────────
+        let mut a_vals = vec![0u32; num_rows];
+        let mut e_vals = vec![0u32; num_rows];
+
+        {
+            let (mut a, mut b_reg, mut c_reg, mut d_reg) =
+                (H[0], H[1], H[2], H[3]);
+            let (mut e, mut f_reg, mut g_reg, mut h_reg) =
+                (H[4], H[5], H[6], H[7]);
+
+            for t in 0..num_rows {
+                a_vals[t] = a;
+                e_vals[t] = e;
+
+                if t <= last_sel_round_row {
+                    // Run round function
+                    let sigma1_val = big_sigma1(e);
+                    let ch_val = ch(e, f_reg, g_reg);
+                    let sigma0_val = big_sigma0(a);
+                    let maj_val = maj(a, b_reg, c_reg);
+
+                    let t1 = h_reg
+                        .wrapping_add(sigma1_val)
+                        .wrapping_add(ch_val)
+                        .wrapping_add(k_global[t])
+                        .wrapping_add(w_global[t]);
+                    let t2 = sigma0_val.wrapping_add(maj_val);
+
+                    h_reg = g_reg;
+                    g_reg = f_reg;
+                    f_reg = e;
+                    e = d_reg.wrapping_add(t1);
+                    d_reg = c_reg;
+                    c_reg = b_reg;
+                    b_reg = a;
+                    a = t1.wrapping_add(t2);
+                }
+                // After last_sel_round_row, state stops updating.
+                // The next iteration writes the final state, then
+                // boundary zeros override.
+            }
         }
 
-        // ── Compression: run 64 rounds, recording trace ─────────────────
-        let (mut a, mut b_reg, mut c_reg, mut d_reg) = (H[0], H[1], H[2], H[3]);
-        let (mut e, mut f_reg, mut g_reg, mut h_reg) = (H[4], H[5], H[6], H[7]);
+        // Force a/e to zero at boundary rows (N−3, N−2, N−1).
+        // These are forced by the shift-by-3 linking zero-padding.
+        for t in num_rows.saturating_sub(3)..num_rows {
+            a_vals[t] = 0;
+            e_vals[t] = 0;
+        }
 
-        // One Vec per column, pre-allocated to num_rows.
+        // ── Helper: get a value with initial-state fallback ─────────────
+        // For lookback indices < 0, return the corresponding initial H value.
+        let get_a = |t: isize| -> u32 {
+            if t >= 0 && (t as usize) < num_rows {
+                a_vals[t as usize]
+            } else if t == -1 {
+                H[1] // b_init
+            } else if t == -2 {
+                H[2] // c_init
+            } else if t == -3 {
+                H[3] // d_init
+            } else {
+                0
+            }
+        };
+        let get_e = |t: isize| -> u32 {
+            if t >= 0 && (t as usize) < num_rows {
+                e_vals[t as usize]
+            } else if t == -1 {
+                H[5] // f_init
+            } else if t == -2 {
+                H[6] // g_init
+            } else if t == -3 {
+                H[7] // h_init
+            } else {
+                0
+            }
+        };
+
+        // ── Phase 2: Populate all 30 columns ────────────────────────────
         let mut cols: Vec<Vec<BinaryPoly<32>>> =
             (0..NUM_COLS).map(|_| vec![BinaryPoly::<32>::from(0u32); num_rows]).collect();
 
-        for t in 0..64 {
+        for t in 0..num_rows {
+            let ti = t as isize;
+            let round = t % 64;
+
+            let a = a_vals[t];
+            let e = e_vals[t];
+            let b = get_a(ti - 1);
+            let c = get_a(ti - 2);
+            let d = get_a(ti - 3);
+            let f = get_e(ti - 1);
+            let g = get_e(ti - 2);
+            let h = get_e(ti - 3);
+            let w_val = w_global[t];
+
             // ── Bit-polynomial columns (0–9) ────────────────────────────
-            cols[0][t] = BinaryPoly::from(a);                     // a_hat
-            cols[1][t] = BinaryPoly::from(e);                     // e_hat
-            cols[2][t] = BinaryPoly::from(w[t]);                  // W_hat
-            cols[3][t] = BinaryPoly::from(big_sigma0(a));         // Sigma0_hat
-            cols[4][t] = BinaryPoly::from(big_sigma1(e));         // Sigma1_hat
-            cols[5][t] = BinaryPoly::from(maj(a, b_reg, c_reg)); // Maj_hat
-            cols[6][t] = BinaryPoly::from(e & f_reg);            // ch_ef_hat
-            cols[7][t] = BinaryPoly::from((!e) & g_reg);         // ch_neg_eg_hat
+            cols[0][t] = BinaryPoly::from(a);                  // a_hat
+            cols[1][t] = BinaryPoly::from(e);                  // e_hat
+            cols[2][t] = BinaryPoly::from(w_val);              // W_hat
+            cols[3][t] = BinaryPoly::from(big_sigma0(a));      // Sigma0_hat
+            cols[4][t] = BinaryPoly::from(big_sigma1(e));      // Sigma1_hat
+            cols[5][t] = BinaryPoly::from(maj(a, b, c));       // Maj_hat
+            cols[6][t] = BinaryPoly::from(e & f);              // ch_ef_hat
+            cols[7][t] = BinaryPoly::from((!e) & g);           // ch_neg_eg_hat
 
             // σ₀(W_{t−15}) and σ₁(W_{t−2}) for message schedule
             if t >= 15 {
-                cols[8][t] = BinaryPoly::from(small_sigma0(w[t - 15]));
+                cols[8][t] = BinaryPoly::from(small_sigma0(w_global[t - 15]));
             }
             if t >= 2 {
-                cols[9][t] = BinaryPoly::from(small_sigma1(w[t - 2]));
+                cols[9][t] = BinaryPoly::from(small_sigma1(w_global[t - 2]));
             }
 
             // ── F₂[X] columns (10–13): shift quotient/remainder ────────
             if t >= 15 {
-                cols[10][t] = BinaryPoly::from(w[t - 15] >> 3);      // S0
-                cols[12][t] = BinaryPoly::from(w[t - 15] & 0x7);     // R0
+                let wback = w_global[t - 15];
+                cols[10][t] = BinaryPoly::from(wback >> 3);      // S0
+                cols[12][t] = BinaryPoly::from(wback & 0x7);     // R0
             }
             if t >= 2 {
-                cols[11][t] = BinaryPoly::from(w[t - 2] >> 10);      // S1
-                cols[13][t] = BinaryPoly::from(w[t - 2] & 0x3FF);    // R1
+                let wback = w_global[t - 2];
+                cols[11][t] = BinaryPoly::from(wback >> 10);     // S1
+                cols[13][t] = BinaryPoly::from(wback & 0x3FF);   // R1
             }
 
             // ── Auxiliary lookback columns (14–20) ──────────────────────
-            // d_hat = a_{t-3}, h_hat = e_{t-3}
-            if t >= 3 {
-                cols[14][t] = BinaryPoly::from(bp_to_u64(&cols[0][t - 3]) as u32);
-                cols[15][t] = BinaryPoly::from(bp_to_u64(&cols[1][t - 3]) as u32);
-            } else {
-                // t = 0,1,2: use initial H values for d and h
-                cols[14][t] = BinaryPoly::from([H[3], H[2], H[1]][t]); // d: H[3],c,b
-                cols[15][t] = BinaryPoly::from([H[7], H[6], H[5]][t]); // h: H[7],g,f
-            }
+            cols[14][t] = BinaryPoly::from(d);                    // d_hat = a[t−3]
+            cols[15][t] = BinaryPoly::from(h);                    // h_hat = e[t−3]
 
-            // W lookbacks
-            if t >= 2  { cols[16][t] = BinaryPoly::from(w[t - 2]); }
-            if t >= 7  { cols[17][t] = BinaryPoly::from(w[t - 7]); }
-            if t >= 15 { cols[18][t] = BinaryPoly::from(w[t - 15]); }
-            if t >= 16 { cols[19][t] = BinaryPoly::from(w[t - 16]); }
+            if t >= 2  { cols[16][t] = BinaryPoly::from(w_global[t - 2]); }
+            if t >= 7  { cols[17][t] = BinaryPoly::from(w_global[t - 7]); }
+            if t >= 15 { cols[18][t] = BinaryPoly::from(w_global[t - 15]); }
+            if t >= 16 { cols[19][t] = BinaryPoly::from(w_global[t - 16]); }
 
-            // K_hat (round constant)
-            cols[20][t] = BinaryPoly::from(K[t]);
+            // K_hat (round constant, repeating every 64 rounds)
+            cols[20][t] = BinaryPoly::from(k_global[t]);
 
             // ── Ch/Maj lookback columns (21–24) ─────────────────────────
-            // a_tm1[t] = a[t−1]
-            if t >= 1 {
-                cols[21][t] = BinaryPoly::from(bp_to_u64(&cols[0][t - 1]) as u32);
-            } else {
-                cols[21][t] = BinaryPoly::from(H[1]); // b_init
-            }
-            // a_tm2[t] = a[t−2]
-            if t >= 2 {
-                cols[22][t] = BinaryPoly::from(bp_to_u64(&cols[0][t - 2]) as u32);
-            } else {
-                cols[22][t] = BinaryPoly::from([H[2], H[1]][t]); // c_init, b_init
-            }
-            // e_tm1[t] = e[t−1]
-            if t >= 1 {
-                cols[23][t] = BinaryPoly::from(bp_to_u64(&cols[1][t - 1]) as u32);
-            } else {
-                cols[23][t] = BinaryPoly::from(H[5]); // f_init
-            }
-            // e_tm2[t] = e[t−2]
-            if t >= 2 {
-                cols[24][t] = BinaryPoly::from(bp_to_u64(&cols[1][t - 2]) as u32);
-            } else {
-                cols[24][t] = BinaryPoly::from([H[6], H[5]][t]); // g_init, f_init
-            }
+            cols[21][t] = BinaryPoly::from(b);                    // a_tm1 = a[t−1]
+            cols[22][t] = BinaryPoly::from(c);                    // a_tm2 = a[t−2]
+            cols[23][t] = BinaryPoly::from(f);                    // e_tm1 = e[t−1]
+            cols[24][t] = BinaryPoly::from(g);                    // e_tm2 = e[t−2]
 
             // ── Selector columns (25–26) ────────────────────────────────
-            cols[25][t] = BinaryPoly::from(1u32);  // sel_round = 1 for t < 64
-            if t >= 16 {
-                cols[26][t] = BinaryPoly::from(1u32);  // sel_sched = 1 for t >= 16
-            }
+            let round_active = t <= last_sel_round_row;
+            let sched_active = round >= 16 && t <= last_sel_sched_row;
+
+            cols[25][t] = BinaryPoly::from(if round_active { 1u32 } else { 0u32 });
+            cols[26][t] = BinaryPoly::from(if sched_active { 1u32 } else { 0u32 });
 
             // ── Integer columns (27–29): carry values ───────────────────
-            let sigma1_val = big_sigma1(e);
-            let ch_val = ch(e, f_reg, g_reg);
-            let sigma0_val = big_sigma0(a);
-            let maj_val = maj(a, b_reg, c_reg);
+            if round_active {
+                let sigma1_val = big_sigma1(e);
+                let ch_val = ch(e, f, g);
+                let sigma0_val = big_sigma0(a);
+                let maj_val = maj(a, b, c);
 
-            // μ_a: carry for a-update
-            let sum_a: u64 = h_reg as u64
-                + sigma1_val as u64
-                + ch_val as u64
-                + K[t] as u64
-                + w[t] as u64
-                + sigma0_val as u64
-                + maj_val as u64;
-            let mu_a_val = (sum_a >> 32) as u32;
-            cols[27][t] = BinaryPoly::from(mu_a_val);
+                // μ_a: carry for a-update
+                let sum_a: u64 = h as u64
+                    + sigma1_val as u64
+                    + ch_val as u64
+                    + k_global[t] as u64
+                    + w_val as u64
+                    + sigma0_val as u64
+                    + maj_val as u64;
+                let mu_a_val = (sum_a >> 32) as u32;
+                cols[27][t] = BinaryPoly::from(mu_a_val);
 
-            // μ_e: carry for e-update
-            let sum_e: u64 = d_reg as u64
-                + h_reg as u64
-                + sigma1_val as u64
-                + ch_val as u64
-                + K[t] as u64
-                + w[t] as u64;
-            let mu_e_val = (sum_e >> 32) as u32;
-            cols[28][t] = BinaryPoly::from(mu_e_val);
+                // μ_e: carry for e-update
+                let sum_e: u64 = d as u64
+                    + h as u64
+                    + sigma1_val as u64
+                    + ch_val as u64
+                    + k_global[t] as u64
+                    + w_val as u64;
+                let mu_e_val = (sum_e >> 32) as u32;
+                cols[28][t] = BinaryPoly::from(mu_e_val);
+            }
 
-            // μ_W: carry for message schedule recurrence (t ≥ 16)
-            if t >= 16 {
-                let sum_w: u64 = w[t - 16] as u64
-                    + small_sigma0(w[t - 15]) as u64
-                    + w[t - 7] as u64
-                    + small_sigma1(w[t - 2]) as u64;
+            if sched_active {
+                // μ_W: carry for message schedule recurrence
+                let sum_w: u64 = w_global[t - 16] as u64
+                    + small_sigma0(w_global[t - 15]) as u64
+                    + w_global[t - 7] as u64
+                    + small_sigma1(w_global[t - 2]) as u64;
                 let mu_w_val = (sum_w >> 32) as u32;
                 cols[29][t] = BinaryPoly::from(mu_w_val);
-            }
-
-            // ── SHA-256 round function ──────────────────────────────────
-            let t1 = h_reg
-                .wrapping_add(sigma1_val)
-                .wrapping_add(ch_val)
-                .wrapping_add(K[t])
-                .wrapping_add(w[t]);
-            let t2 = sigma0_val.wrapping_add(maj_val);
-
-            h_reg = g_reg;
-            g_reg = f_reg;
-            f_reg = e;
-            e = d_reg.wrapping_add(t1);
-            d_reg = c_reg;
-            c_reg = b_reg;
-            b_reg = a;
-            a = t1.wrapping_add(t2);
-        }
-
-        // ── Row 64: final state ─────────────────────────────────────────
-        cols[0][64] = BinaryPoly::from(a);
-        cols[1][64] = BinaryPoly::from(e);
-
-        // Populate Σ₀/Σ₁ at row 64 so C1/C2 hold there.
-        cols[3][64] = BinaryPoly::from(big_sigma0(a));
-        cols[4][64] = BinaryPoly::from(big_sigma1(e));
-
-        // Ch/Maj at row 64 are deferred until after the lookback extension
-        // loops below populate a_tm1/a_tm2/e_tm1/e_tm2 at row 64.
-
-        // ── Extended auxiliary columns beyond row 64 ─────────────────────
-        // The linking constraints require auxiliary columns to be populated
-        // beyond the 65 active rows. We extend each auxiliary column to
-        // cover shifted references:
-        //   d_hat[t] for t up to 67 (shift-by-3 at t=64)
-        //   h_hat[t] for t up to 67
-        //   a_tm1[t] for t up to 65 (shift-by-1)
-        //   a_tm2[t] for t up to 66 (shift-by-2)
-        //   e_tm1[t] for t up to 65
-        //   e_tm2[t] for t up to 66
-        //   W_tm2[t]  for t up to 65
-        //   W_tm7[t]  for t up to 70
-        //   W_tm15[t] for t up to 78
-        //   W_tm16[t] for t up to 79
-        //
-        // Also extend σ₀_w, σ₁_w, S₀, S₁, R₀, R₁ to cover
-        // the range where their W lookback source is valid.
-
-        // d_hat: d[t] = a[t-3] for t=64..67
-        for t in 64..68.min(num_rows) {
-            if t >= 3 {
-                cols[14][t] = BinaryPoly::from(bp_to_u64(&cols[0][t - 3]) as u32);
-            }
-        }
-        // h_hat: h[t] = e[t-3] for t=64..67
-        for t in 64..68.min(num_rows) {
-            if t >= 3 {
-                cols[15][t] = BinaryPoly::from(bp_to_u64(&cols[1][t - 3]) as u32);
-            }
-        }
-        // a_tm1: a[t-1] for t=64..65
-        for t in 64..66.min(num_rows) {
-            if t >= 1 {
-                cols[21][t] = BinaryPoly::from(bp_to_u64(&cols[0][t - 1]) as u32);
-            }
-        }
-        // a_tm2: a[t-2] for t=64..66
-        for t in 64..67.min(num_rows) {
-            if t >= 2 {
-                cols[22][t] = BinaryPoly::from(bp_to_u64(&cols[0][t - 2]) as u32);
-            }
-        }
-        // e_tm1: e[t-1] for t=64..65
-        for t in 64..66.min(num_rows) {
-            if t >= 1 {
-                cols[23][t] = BinaryPoly::from(bp_to_u64(&cols[1][t - 1]) as u32);
-            }
-        }
-        // e_tm2: e[t-2] for t=64..66
-        for t in 64..67.min(num_rows) {
-            if t >= 2 {
-                cols[24][t] = BinaryPoly::from(bp_to_u64(&cols[1][t - 2]) as u32);
-            }
-        }
-
-        // ── Row 64 deferred: Ch/Maj working columns for carry-freedom ──
-        // Now that lookback columns are populated at row 64 we can compute
-        // the three working columns whose affine sums must be carry-free.
-        {
-            let e64  = bp_to_u64(&cols[1][64]) as u32;
-            let f64  = bp_to_u64(&cols[23][64]) as u32; // e_tm1[64] = e[63]
-            let g64  = bp_to_u64(&cols[24][64]) as u32; // e_tm2[64] = e[62]
-            let a64  = bp_to_u64(&cols[0][64]) as u32;
-            let b64  = bp_to_u64(&cols[21][64]) as u32; // a_tm1[64] = a[63]
-            let c64  = bp_to_u64(&cols[22][64]) as u32; // a_tm2[64] = a[62]
-
-            cols[6][64] = BinaryPoly::from(e64 & f64);             // ch_ef
-            cols[7][64] = BinaryPoly::from((!e64) & g64);          // ch_neg_eg
-            cols[5][64] = BinaryPoly::from((a64 & b64) | (a64 & c64) | (b64 & c64)); // Maj
-        }
-
-        // ── Extend working columns needed for affine lookup carry-freedom ──
-        // At padded rows beyond 64, the affine sums (for Ch/Maj lookups)
-        // must remain carry-free at every bit position. This requires
-        // ch_neg_eg[t] = (¬e[t]) ∧ e_tm2[t] and Maj[t] = maj(a[t], a_tm1[t], a_tm2[t])
-        // to be populated wherever the lookback columns a_tm1/a_tm2/e_tm1/e_tm2
-        // are non-zero.
-        //
-        // For t > 64: e[t]=0, a[t]=0, so:
-        //   ch_ef[t] = e[t] ∧ e_tm1[t] = 0 (already fine)
-        //   ch_neg_eg[t] = (¬0) ∧ e_tm2[t] = e_tm2[t]
-        //   Maj[t] = majority(0, a_tm1[t], a_tm2[t]) = a_tm1[t] ∧ a_tm2[t]
-        for t in 65..67.min(num_rows) {
-            let g_val = bp_to_u64(&cols[24][t]) as u32; // e_tm2[t]
-            cols[7][t] = BinaryPoly::from(g_val);       // ch_neg_eg = e_tm2
-        }
-        if 65 < num_rows {
-            let b_val = bp_to_u64(&cols[21][65]) as u32; // a_tm1[65]
-            let c_val = bp_to_u64(&cols[22][65]) as u32; // a_tm2[65]
-            cols[5][65] = BinaryPoly::from(b_val & c_val); // Maj = a_tm1 AND a_tm2
-        }
-
-        // W_tm2: W[t-2] for t=64..65
-        for t in 64..66.min(num_rows) {
-            if t >= 2 && t - 2 < 64 {
-                cols[16][t] = BinaryPoly::from(w[t - 2]);
-            }
-        }
-        // W_tm7: W[t-7] for t=64..70
-        for t in 64..71.min(num_rows) {
-            if t >= 7 && t - 7 < 64 {
-                cols[17][t] = BinaryPoly::from(w[t - 7]);
-            }
-        }
-        // W_tm15: W[t-15] for t=64..78
-        for t in 64..79.min(num_rows) {
-            if t >= 15 && t - 15 < 64 {
-                cols[18][t] = BinaryPoly::from(w[t - 15]);
-            }
-        }
-        // W_tm16: W[t-16] for t=64..79
-        for t in 64..80.min(num_rows) {
-            if t >= 16 && t - 16 < 64 {
-                cols[19][t] = BinaryPoly::from(w[t - 16]);
-            }
-        }
-        // σ₀_w, S₀, R₀: extend to cover W_tm15 range (t=64..78)
-        for t in 64..79.min(num_rows) {
-            if t >= 15 && t - 15 < 64 {
-                let wback = w[t - 15];
-                cols[8][t]  = BinaryPoly::from(small_sigma0(wback));
-                cols[10][t] = BinaryPoly::from(wback >> 3);
-                cols[12][t] = BinaryPoly::from(wback & 0x7);
-            }
-        }
-        // σ₁_w, S₁, R₁: extend to cover W_tm2 range (t=64..65)
-        for t in 64..66.min(num_rows) {
-            if t >= 2 && t - 2 < 64 {
-                let wback = w[t - 2];
-                cols[9][t]  = BinaryPoly::from(small_sigma1(wback));
-                cols[11][t] = BinaryPoly::from(wback >> 10);
-                cols[13][t] = BinaryPoly::from(wback & 0x3FF);
             }
         }
 
@@ -806,6 +779,234 @@ mod tests {
                     "Maj carry at row {t} bit {bit}: a={ab}, b={bb}, c={cb}, maj={mb}, val={val}"
                 );
             }
+        }
+    }
+
+    // ── Multi-compression tests ─────────────────────────────────────
+
+    /// num_vars = 9 → 512 rows = 8 compressions.
+    const NUM_VARS_8X: usize = 9;
+
+    /// Verify that the 8× trace has non-trivial data in all compressions.
+    #[test]
+    fn multi_compression_populates_all_blocks() {
+        let mut rng = rand::rng();
+        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(NUM_VARS_8X, &mut rng);
+        let num_rows = 1usize << NUM_VARS_8X; // 512
+
+        // Check that all 8 compressions have non-zero a_hat at their first row
+        for comp in 0..8 {
+            let t = comp * 64;
+            let a_val = bp_to_u64(&trace[0].evaluations[t]) as u32;
+            assert_ne!(
+                a_val, 0,
+                "Compression {comp} has zero a_hat at row {t}"
+            );
+        }
+
+        // Check that W_hat has non-zero values in each compression's first 16 words
+        for comp in 0..8 {
+            let mut has_nonzero = false;
+            for round in 0..16 {
+                let t = comp * 64 + round;
+                if t >= num_rows.saturating_sub(16) { break; }
+                let w_val = bp_to_u64(&trace[2].evaluations[t]) as u32;
+                if w_val != 0 { has_nonzero = true; break; }
+            }
+            // Last compression may have W forced to zero early, that's expected
+            if comp < 7 {
+                assert!(
+                    has_nonzero,
+                    "Compression {comp} has no non-zero W_hat values in first 16 words"
+                );
+            }
+        }
+
+        // Compression 1 should have a different message block than compression 0
+        let w0_comp0 = bp_to_u64(&trace[2].evaluations[0]) as u32;
+        let w0_comp1 = bp_to_u64(&trace[2].evaluations[64]) as u32;
+        assert_ne!(
+            w0_comp0, w0_comp1,
+            "Compressions 0 and 1 have the same W[0]: both are {w0_comp0:#x}"
+        );
+    }
+
+    /// Verify that selectors are active for the correct rows in 8× mode.
+    #[test]
+    fn multi_compression_selectors_are_correct() {
+        let mut rng = rand::rng();
+        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(NUM_VARS_8X, &mut rng);
+        let num_rows = 1usize << NUM_VARS_8X;
+        let last_sel_round = num_rows - 5; // 507
+        let last_sel_sched = num_rows - 17; // 495
+
+        for t in 0..num_rows {
+            let round = t % 64;
+            let sel_round = bp_to_u64(&trace[25].evaluations[t]) as u32;
+            let sel_sched = bp_to_u64(&trace[26].evaluations[t]) as u32;
+
+            let expected_round = if t <= last_sel_round { 1u32 } else { 0u32 };
+            let expected_sched = if round >= 16 && t <= last_sel_sched { 1u32 } else { 0u32 };
+
+            assert_eq!(
+                sel_round, expected_round,
+                "sel_round mismatch at row {t}"
+            );
+            assert_eq!(
+                sel_sched, expected_sched,
+                "sel_sched mismatch at row {t}"
+            );
+        }
+    }
+
+    /// Verify the carry constraint holds across ALL active rows in the 8× trace.
+    #[test]
+    fn multi_compression_carry_polynomials() {
+        let mut rng = rand::rng();
+        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(NUM_VARS_8X, &mut rng);
+        let num_rows = 1usize << NUM_VARS_8X;
+        let last_sel_round = num_rows - 5;
+
+        for t in 0..=last_sel_round {
+            let a_val = bp_to_u64(&trace[0].evaluations[t]);
+            let e_val = bp_to_u64(&trace[1].evaluations[t]);
+            let h_val = bp_to_u64(&trace[15].evaluations[t]); // h_hat = e[t-3]
+            let d_val = bp_to_u64(&trace[14].evaluations[t]); // d_hat = a[t-3]
+            let sigma1_val = bp_to_u64(&trace[4].evaluations[t]);
+            let ch_ef_val = bp_to_u64(&trace[6].evaluations[t]);
+            let ch_neg_eg_val = bp_to_u64(&trace[7].evaluations[t]);
+            let k_val = bp_to_u64(&trace[20].evaluations[t]);
+            let w_val = bp_to_u64(&trace[2].evaluations[t]);
+            let sigma0_val = bp_to_u64(&trace[3].evaluations[t]);
+            let maj_val = bp_to_u64(&trace[5].evaluations[t]);
+            let mu_a_val = bp_to_u64(&trace[27].evaluations[t]);
+            let mu_e_val = bp_to_u64(&trace[28].evaluations[t]);
+
+            let a_next = bp_to_u64(&trace[0].evaluations[t + 1]);
+            let e_next = bp_to_u64(&trace[1].evaluations[t + 1]);
+
+            // a-update carry
+            let sum_a = h_val + sigma1_val + ch_ef_val + ch_neg_eg_val
+                + k_val + w_val + sigma0_val + maj_val;
+            assert_eq!(
+                a_next as i64 - sum_a as i64 + (mu_a_val as i64) * (1i64 << 32),
+                0,
+                "a-update carry check failed at row {t}: \
+                 a_next={a_next:#x}, sum_a={sum_a:#x}, mu_a={mu_a_val}"
+            );
+
+            // e-update carry
+            let sum_e = d_val + h_val + sigma1_val + ch_ef_val
+                + ch_neg_eg_val + k_val + w_val;
+            assert_eq!(
+                e_next as i64 - sum_e as i64 + (mu_e_val as i64) * (1i64 << 32),
+                0,
+                "e-update carry check failed at row {t}: \
+                 e_next={e_next:#x}, sum_e={sum_e:#x}, mu_e={mu_e_val}"
+            );
+        }
+    }
+
+    /// Verify carry-freedom at all 512 rows in the 8× trace.
+    #[test]
+    fn multi_compression_affine_lookup_carry_freedom() {
+        use crate::{
+            COL_A_HAT, COL_A_TM1, COL_A_TM2,
+            COL_E_HAT, COL_E_TM1, COL_E_TM2,
+            COL_CH_EF_HAT, COL_CH_NEG_EG_HAT, COL_MAJ_HAT,
+        };
+
+        let mut rng = rand::rng();
+        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(NUM_VARS_8X, &mut rng);
+        let num_rows = 1usize << NUM_VARS_8X;
+
+        for t in 0..num_rows {
+            let e     = bp_to_u64(&trace[COL_E_HAT].evaluations[t]) as i64;
+            let e_tm1 = bp_to_u64(&trace[COL_E_TM1].evaluations[t]) as i64;
+            let e_tm2 = bp_to_u64(&trace[COL_E_TM2].evaluations[t]) as i64;
+            let ch_ef = bp_to_u64(&trace[COL_CH_EF_HAT].evaluations[t]) as i64;
+            let ch_ne = bp_to_u64(&trace[COL_CH_NEG_EG_HAT].evaluations[t]) as i64;
+            let a     = bp_to_u64(&trace[COL_A_HAT].evaluations[t]) as i64;
+            let a_tm1 = bp_to_u64(&trace[COL_A_TM1].evaluations[t]) as i64;
+            let a_tm2 = bp_to_u64(&trace[COL_A_TM2].evaluations[t]) as i64;
+            let maj   = bp_to_u64(&trace[COL_MAJ_HAT].evaluations[t]) as i64;
+
+            // Ch1
+            for bit in 0..32 {
+                let val = ((e >> bit) & 1) + ((e_tm1 >> bit) & 1) - 2 * ((ch_ef >> bit) & 1);
+                assert!(
+                    val == 0 || val == 1,
+                    "Ch1 carry at row {t} bit {bit}"
+                );
+            }
+            // Ch2
+            for bit in 0..32 {
+                let val = (1 - ((e >> bit) & 1)) + ((e_tm2 >> bit) & 1) - 2 * ((ch_ne >> bit) & 1);
+                assert!(
+                    val == 0 || val == 1,
+                    "Ch2 carry at row {t} bit {bit}"
+                );
+            }
+            // Maj
+            for bit in 0..32 {
+                let val = ((a >> bit) & 1) + ((a_tm1 >> bit) & 1) + ((a_tm2 >> bit) & 1) - 2 * ((maj >> bit) & 1);
+                assert!(
+                    val == 0 || val == 1,
+                    "Maj carry at row {t} bit {bit}"
+                );
+            }
+        }
+    }
+
+    /// Verify linking constraints hold across the full 8× trace.
+    /// Checks: d_hat[t] = a_hat[t-3], h_hat[t] = e_hat[t-3],
+    /// a_tm1[t] = a_hat[t-1], a_tm2[t] = a_hat[t-2],
+    /// e_tm1[t] = e_hat[t-1], e_tm2[t] = e_hat[t-2].
+    #[test]
+    fn multi_compression_linking_constraints() {
+        use crate::{
+            COL_A_HAT, COL_E_HAT, COL_D_HAT, COL_H_HAT,
+            COL_A_TM1, COL_A_TM2, COL_E_TM1, COL_E_TM2,
+        };
+
+        let mut rng = rand::rng();
+        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(NUM_VARS_8X, &mut rng);
+
+        // d_hat[t] = a_hat[t-3] for t >= 3
+        for t in 3..512 {
+            let d = bp_to_u64(&trace[COL_D_HAT].evaluations[t]) as u32;
+            let a_back = bp_to_u64(&trace[COL_A_HAT].evaluations[t - 3]) as u32;
+            assert_eq!(d, a_back, "d-link failed at row {t}");
+        }
+        // h_hat[t] = e_hat[t-3] for t >= 3
+        for t in 3..512 {
+            let h = bp_to_u64(&trace[COL_H_HAT].evaluations[t]) as u32;
+            let e_back = bp_to_u64(&trace[COL_E_HAT].evaluations[t - 3]) as u32;
+            assert_eq!(h, e_back, "h-link failed at row {t}");
+        }
+        // a_tm1[t] = a_hat[t-1] for t >= 1
+        for t in 1..512 {
+            let at1 = bp_to_u64(&trace[COL_A_TM1].evaluations[t]) as u32;
+            let a_back = bp_to_u64(&trace[COL_A_HAT].evaluations[t - 1]) as u32;
+            assert_eq!(at1, a_back, "a_tm1-link failed at row {t}");
+        }
+        // a_tm2[t] = a_hat[t-2] for t >= 2
+        for t in 2..512 {
+            let at2 = bp_to_u64(&trace[COL_A_TM2].evaluations[t]) as u32;
+            let a_back = bp_to_u64(&trace[COL_A_HAT].evaluations[t - 2]) as u32;
+            assert_eq!(at2, a_back, "a_tm2-link failed at row {t}");
+        }
+        // e_tm1[t] = e_hat[t-1] for t >= 1
+        for t in 1..512 {
+            let et1 = bp_to_u64(&trace[COL_E_TM1].evaluations[t]) as u32;
+            let e_back = bp_to_u64(&trace[COL_E_HAT].evaluations[t - 1]) as u32;
+            assert_eq!(et1, e_back, "e_tm1-link failed at row {t}");
+        }
+        // e_tm2[t] = e_hat[t-2] for t >= 2
+        for t in 2..512 {
+            let et2 = bp_to_u64(&trace[COL_E_TM2].evaluations[t]) as u32;
+            let e_back = bp_to_u64(&trace[COL_E_HAT].evaluations[t - 2]) as u32;
+            assert_eq!(et2, e_back, "e_tm2-link failed at row {t}");
         }
     }
 }

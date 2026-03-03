@@ -123,7 +123,7 @@ where
 
 /// Evaluate a k-variable MLE (given as evaluations over {0,1}^k in
 /// little-endian order) at a point in F^k.
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, dead_code)]
 pub(super) fn evaluate_mle_at<F: InnerTransparentField>(
     evals: &[F],
     point: &[F],

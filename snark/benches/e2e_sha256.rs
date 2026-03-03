@@ -69,8 +69,8 @@ use crypto_primitives::PrimeField;
 
 const INT_LIMBS: usize = U64::LIMBS;
 type F = MontyField<{ INT_LIMBS * 3 }>;
-/// 192-bit field (same as F) for ECDSA PCS with Int<4> evaluations.
-type FScalar = MontyField<{ INT_LIMBS * 3 }>;
+/// 256-bit PCS field for ECDSA — matches the secp256k1 PIOP field size.
+type FScalar = MontyField<{ INT_LIMBS * 4 }>;
 
 struct Sha256ZipTypes<CwCoeff, const D_PLUS_ONE: usize>(PhantomData<CwCoeff>);
 
@@ -113,7 +113,7 @@ impl ZipTypes for EcdsaScalarZipTypes {
     const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = Int<{ INT_LIMBS * 4 }>;      // 256-bit integer
     type Cw = Int<{ INT_LIMBS * 5 }>;        // 320-bit codeword
-    type Fmod = Uint<{ INT_LIMBS * 3 }>;     // 192-bit modulus search
+    type Fmod = Uint<{ INT_LIMBS * 4 }>;     // 256-bit modulus search (secp256k1 sized)
     type PrimeTest = MillerRabin;
     type Chal = i128;
     type Pt = i128;
@@ -221,7 +221,7 @@ fn sha256_lookup_specs() -> Vec<LookupColumnSpec> {
     (0..SHA256_LOOKUP_COL_COUNT)
         .map(|i| LookupColumnSpec {
             column_index: i,
-            table_type: LookupTableType::BitPoly { width: 32 },
+            table_type: LookupTableType::BitPoly { width: 32, chunk_width: None },
         })
         .collect()
 }
@@ -232,7 +232,7 @@ fn sha256_affine_lookup_specs() -> Vec<AffineLookupSpec> {
         COL_E_HAT, COL_E_TM1, COL_CH_EF_HAT, COL_E_TM2, COL_CH_NEG_EG_HAT,
         COL_A_HAT, COL_A_TM1, COL_A_TM2, COL_MAJ_HAT,
     };
-    let bp32 = LookupTableType::BitPoly { width: 32 };
+    let bp32 = LookupTableType::BitPoly { width: 32, chunk_width: None };
     vec![
         AffineLookupSpec {
             terms: vec![(COL_E_HAT, 1), (COL_E_TM1, 1), (COL_CH_EF_HAT, -2)],
@@ -439,7 +439,7 @@ fn batched_classic_lookup_proof_to_bytes(proof: &zinc_snark::pipeline::BatchedCp
         }
     }
     for cs in &proof.md_proof.claimed_sums { write_fe(&mut out, cs); }
-    // CPR up/down evals.
+    // Main field sumcheck up/down evals.
     for f in &proof.cpr_up_evals { write_fe(&mut out, f); }
     for f in &proof.cpr_down_evals { write_fe(&mut out, f); }
     // Per-group lookup data.
@@ -487,14 +487,13 @@ fn generate_random_scalar_trace(
         .collect()
 }
 
-/// Generate random ECDSA-shaped trace with values in `[0, 2^32)`.
+/// Generate an all-zero ECDSA scalar trace.
 ///
-/// Generate an all-zero ECDSA trace that trivially satisfies both the
-/// ECDSA UAIR constraints *and* `Word { width: 32 }` lookup constraints.
-///
-/// All seven Jacobian doubling-and-add constraints evaluate to zero when
-/// every column is identically zero (same approach as `ecdsa_pipeline` test).
-/// Zero is also a valid 32-bit word, so lookup decomposition succeeds.
+/// The real F_p witness (secp256k1) satisfies constraints mod p but NOT as
+/// integer polynomial identities, so it fails the PIOP ideal check when
+/// projected to the small verification field.  Until the multi-ring UAIR
+/// extension adds quotient-witness columns, use the zero trace which
+/// trivially satisfies all constraints.
 fn generate_zero_scalar_trace(
     num_vars: usize,
     num_cols: usize,
@@ -546,7 +545,7 @@ fn sha256_single(c: &mut Criterion) {
 
         // Derive the real PCS evaluation point from a full pipeline proof.
         // Generate a full 26-column SHA-256 trace, run pipeline, extract the
-        // CPR evaluation point used by the PIOP.  Both split batches share
+        // Main field sumcheck evaluation point used by the PIOP.  Both split batches share
         // this point since they originate from the same PIOP.
         let split_pcs_pt: Vec<F> = {
             let full_trace = generate_sha256_trace(SHA256_NUM_VARS);
@@ -1061,7 +1060,7 @@ fn sha256_piop_only(c: &mut Criterion) {
                     num_vars,
                     &field_cfg,
                 )
-                .expect("IC prover failed");
+                .expect("Ideal Check prover failed");
                 total += t.elapsed();
             }
             total
@@ -1096,7 +1095,7 @@ fn sha256_piop_only(c: &mut Criterion) {
             num_vars,
             &field_cfg,
         )
-        .expect("IC prover failed");
+        .expect("Ideal Check prover failed");
 
     let projecting_element: F = transcript.get_field_challenge(&field_cfg);
     let field_trace = project_trace_to_field::<F, 32>(
@@ -1124,7 +1123,7 @@ fn sha256_piop_only(c: &mut Criterion) {
                     max_degree,
                     &field_cfg,
                 )
-                .expect("CPR prover failed");
+                .expect("Main field sumcheck prover failed");
                 total += t.elapsed();
             }
             total

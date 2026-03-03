@@ -163,6 +163,7 @@ where
                     let zero = F::zero_with_cfg(field_cfg);
                     let folded = (0..half)
                         .into_par_iter()
+                        .with_min_len(256)
                         .fold(
                             || (zero.clone(), zero.clone(), zero.clone()),
                             |(mut e0, mut e1, mut e2), j| {
@@ -241,6 +242,7 @@ where
                     let half_len = h_table.len() / 2;
                     let new_hw: Vec<(F, F)> = (0..half_len)
                         .into_par_iter()
+                        .with_min_len(256)
                         .map(|j| {
                             let h = h_table[j].clone() * &one_minus_s
                                 + &(h_table[half_len + j].clone() * &s);

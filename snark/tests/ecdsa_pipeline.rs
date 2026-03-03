@@ -60,7 +60,7 @@ impl ZipTypes for EcdsaScalarZipTypes {
     const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = Int<{ INT_LIMBS * 4 }>;          // 256-bit integer
     type Cw = Int<{ INT_LIMBS * 5 }>;            // 320-bit codeword
-    type Fmod = Uint<{ INT_LIMBS * 3 }>;         // 192-bit modulus search
+    type Fmod = Uint<{ INT_LIMBS * 4 }>;         // 256-bit modulus search (secp256k1 sized)
     type PrimeTest = MillerRabin;
     type Chal = i128;
     type Pt = i128;
@@ -72,8 +72,8 @@ impl ZipTypes for EcdsaScalarZipTypes {
 }
 
 type Zt = EcdsaScalarZipTypes;
-/// 192-bit PCS field — matches pipeline's MontyField<3>.
-type PcsF = MontyField<{ U64::LIMBS * 3 }>;
+/// 256-bit PCS field — matches the secp256k1 PIOP field size.
+type PcsF = MontyField<{ U64::LIMBS * 4 }>;
 type Lc = IprsCode<Zt, PnttConfigF2_16R4B16<1>, ScalarWideningMulByScalar<Int<{ U64::LIMBS * 5 }>>, UNCHECKED>;
 
 #[test]

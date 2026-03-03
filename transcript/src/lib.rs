@@ -38,7 +38,7 @@ impl Blake3Transcript {
     /// finalising the clone in XOF (extendable output function) mode.
     ///
     /// Note that this does NOT update the internal hasher state.
-    fn fill_with_random_bytes(&self, buf: &mut [u8]) {
+    pub fn fill_with_random_bytes(&self, buf: &mut [u8]) {
         let mut output_reader = self.hasher.clone().finalize_xof();
         output_reader.fill(buf);
     }
@@ -135,6 +135,41 @@ impl Transcript for Blake3Transcript {
             elem.inner()
                 .write_transcription_bytes(&mut combined[off + 3 + n..off + 3 + 2 * n]);
             combined[off + 3 + 2 * n] = 0x3;
+        }
+        self.hasher.update(&combined);
+    }
+
+    /// Absorbs multiple slices of field elements in a single allocation and
+    /// `update` call. Equivalent to calling `absorb_random_field_slice` on
+    /// each sub-slice in order, but avoids repeated heap allocations.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn absorb_random_field_many_slices<F>(&mut self, slices: &[&[F]], buf: &mut [u8])
+    where
+        F: PrimeField,
+        F::Inner: Transcribable,
+    {
+        let n = buf.len();
+        let per_elem = 2 * n + 4;
+        let total_elems: usize = slices.iter().map(|s| s.len()).sum();
+        if total_elems == 0 {
+            return;
+        }
+        let total = per_elem * total_elems;
+        let mut combined = vec![0u8; total];
+        let mut idx = 0;
+        for slice in slices {
+            for elem in *slice {
+                let off = idx * per_elem;
+                combined[off] = 0x3;
+                elem.modulus()
+                    .write_transcription_bytes(&mut combined[off + 1..off + 1 + n]);
+                combined[off + 1 + n] = 0x5;
+                combined[off + 2 + n] = 0x1;
+                elem.inner()
+                    .write_transcription_bytes(&mut combined[off + 3 + n..off + 3 + 2 * n]);
+                combined[off + 3 + 2 * n] = 0x3;
+                idx += 1;
+            }
         }
         self.hasher.update(&combined);
     }

@@ -113,7 +113,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         };
 
         let combined_row: Vec<Zt::CombR> = transcript.read_const_many(row_len)?;
-        let encoded_combined_row: Vec<Zt::CombR> = vp.linear_code.encode_wide(&combined_row);
 
         // Check: <w, q_1> = <s, b>
         // It is safe to use inner_product_unchecked because we're in a field.
@@ -141,6 +140,11 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             ));
         }
 
+        // ── Grinding verification ─────────────────────────────────────
+        // Must happen before squeezing column indices so the FS state matches.
+        transcript.verify_grind(Zt::GRINDING_BITS)?;
+
+        // Read column openings sequentially (transcript-dependent).
         let columns_and_proofs: Vec<_> = (0..Zt::NUM_COLUMN_OPENINGS)
             .map(|_| -> Result<_, ZipError> {
                 let column_idx = transcript.squeeze_challenge_idx(vp.linear_code.codeword_len());
@@ -153,27 +157,43 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             })
             .try_collect()?;
 
-        cfg_into_iter!(columns_and_proofs).try_for_each(
-            |(column_idx, column_values, proof)| -> Result<(), ZipError> {
-                Self::verify_column_testing_batched::<CHECK_FOR_OVERFLOW>(
-                    &per_poly_alphas,
-                    &coeffs,
-                    &encoded_combined_row,
-                    &column_values,
-                    column_idx,
-                    vp.num_rows,
-                    batch_size,
-                )?;
+        // ── Proximity check ─────────────────────────────────────────
+        // Encode the combined row only at the opened positions instead
+        // of computing the full codeword (encode_wide uses checked
+        // arithmetic and produces all OUTPUT_LEN values).  This uses the
+        // precomputed encoding matrix with unchecked scalar multiplication
+        // and is parallelised across positions.
+        let column_indices: Vec<usize> = columns_and_proofs
+            .iter()
+            .map(|(idx, _, _)| *idx)
+            .collect();
+        let encoded_at_positions: Vec<Zt::CombR> =
+            vp.linear_code.encode_wide_at_positions(&combined_row, &column_indices);
 
-                proof
-                    .verify(&comm.root, &column_values, column_idx)
-                    .map_err(|e| {
-                        ZipError::InvalidPcsOpen(format!("Column opening verification failed: {e}"))
-                    })?;
+        cfg_into_iter!(columns_and_proofs)
+            .zip(cfg_into_iter!(encoded_at_positions))
+            .try_for_each(
+                |((column_idx, column_values, proof), expected_encoded)| -> Result<(), ZipError> {
+                    Self::verify_column_testing_batched::<CHECK_FOR_OVERFLOW>(
+                        &per_poly_alphas,
+                        &coeffs,
+                        &expected_encoded,
+                        &column_values,
+                        num_rows,
+                        batch_size,
+                    )?;
 
-                Ok(())
-            },
-        )?;
+                    proof
+                        .verify(&comm.root, &column_values, column_idx)
+                        .map_err(|e| {
+                            ZipError::InvalidPcsOpen(format!(
+                                "Column opening verification failed: {e}"
+                            ))
+                        })?;
+
+                    Ok(())
+                },
+            )?;
 
         Ok(())
     }
@@ -181,15 +201,15 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     // Proximity check: M * w[column] = sum_m(sum_j(s_j * sum_i(r_i * v_i)[column]))
     // v_i are encoded rows, r_i are alphas and where j = (0..k2) i.e. over rows
     // and m is number of polys batched
-    pub(super) fn verify_column_testing_batched<const CHECK_FOR_OVERFLOW: bool>(
+    //
+    // Returns the CombR result of the column testing computation.
+    pub(super) fn compute_column_testing_batched<const CHECK_FOR_OVERFLOW: bool>(
         per_poly_alphas: &[Vec<Zt::Chal>],
         coeffs: &[Zt::Chal],
-        encoded_combined_row: &[Zt::CombR],
         all_column_entries: &[Zt::Cw],
-        column: usize,
         num_rows: usize,
         batch_size: usize,
-    ) -> Result<(), ZipError> {
+    ) -> Result<Zt::CombR, ZipError> {
         #[allow(clippy::arithmetic_side_effects)]
         let all_column_entries_comb =
             (0..batch_size).try_fold(Zt::CombR::ZERO, |acc, i| -> Result<_, ZipError> {
@@ -213,10 +233,24 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                     )?)
             })?;
 
-        if all_column_entries_comb != encoded_combined_row[column] {
+        Ok(all_column_entries_comb)
+    }
+
+    /// Convenience wrapper: compute column testing and verify against expected.
+    pub(super) fn verify_column_testing_batched<const CHECK_FOR_OVERFLOW: bool>(
+        per_poly_alphas: &[Vec<Zt::Chal>],
+        coeffs: &[Zt::Chal],
+        expected_encoded: &Zt::CombR,
+        all_column_entries: &[Zt::Cw],
+        num_rows: usize,
+        batch_size: usize,
+    ) -> Result<(), ZipError> {
+        let result = Self::compute_column_testing_batched::<CHECK_FOR_OVERFLOW>(
+            per_poly_alphas, coeffs, all_column_entries, num_rows, batch_size,
+        )?;
+        if result != *expected_encoded {
             return Err(ZipError::InvalidPcsOpen("Proximity failure".into()));
         }
-
         Ok(())
     }
 

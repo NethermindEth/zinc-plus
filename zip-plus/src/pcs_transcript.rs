@@ -253,6 +253,102 @@ impl PcsTranscript {
         self.write_const_many(&proof.siblings)?;
         Ok(())
     }
+
+    // ── Grinding (proof-of-work) ──────────────────────────────────────
+
+    /// Size in bytes of the grinding nonce written to the proof stream.
+    pub const GRINDING_NONCE_BYTES: usize = 8; // u64
+
+    /// Prover: search for a 64-bit nonce such that
+    /// `BLAKE3(transcript_state ‖ nonce)` has at least `grinding_bits`
+    /// leading zero bits, then write the nonce to the proof stream and
+    /// absorb it into the Fiat-Shamir transcript.
+    ///
+    /// If `grinding_bits == 0` this is a no-op (no bytes written).
+    pub fn grind(&mut self, grinding_bits: usize) -> Result<(), ZipError> {
+        if grinding_bits == 0 {
+            return Ok(());
+        }
+        assert!(
+            grinding_bits <= 64,
+            "grinding_bits must be <= 64, got {grinding_bits}"
+        );
+
+        // Snapshot the current FS state: clone the hasher, then squeeze
+        // a 32-byte challenge seed that commits to everything absorbed so far.
+        let seed: [u8; 32] = {
+            let mut buf = [0u8; 32];
+            self.fs_transcript.fill_with_random_bytes(&mut buf);
+            buf
+        };
+
+        // Search for a valid nonce.
+        let nonce = (0u64..).find(|&n| {
+            let hash = blake3::hash(&[&seed[..], &n.to_le_bytes()].concat());
+            leading_zeros(hash.as_bytes()) >= grinding_bits
+        }).expect("grinding search exhausted u64 range (unreachable in practice)");
+
+        // Write nonce to proof stream.
+        self.write_const(&nonce)?;
+        // Absorb nonce into FS transcript so subsequent challenges depend on it.
+        self.fs_transcript.absorb(&nonce.to_le_bytes());
+
+        Ok(())
+    }
+
+    /// Verifier: read the grinding nonce from the proof stream and verify
+    /// that `BLAKE3(transcript_state ‖ nonce)` has at least `grinding_bits`
+    /// leading zero bits. Absorbs the nonce into the FS transcript.
+    ///
+    /// If `grinding_bits == 0` this is a no-op (no bytes read).
+    pub fn verify_grind(&mut self, grinding_bits: usize) -> Result<(), ZipError> {
+        if grinding_bits == 0 {
+            return Ok(());
+        }
+        assert!(
+            grinding_bits <= 64,
+            "grinding_bits must be <= 64, got {grinding_bits}"
+        );
+
+        // Reproduce the same seed the prover used.
+        let seed: [u8; 32] = {
+            let mut buf = [0u8; 32];
+            self.fs_transcript.fill_with_random_bytes(&mut buf);
+            buf
+        };
+
+        // Read the nonce from the proof stream.
+        let nonce: u64 = self.read_const()?;
+
+        // Verify the proof-of-work.
+        let hash = blake3::hash(&[&seed[..], &nonce.to_le_bytes()].concat());
+        if leading_zeros(hash.as_bytes()) < grinding_bits {
+            return Err(ZipError::InvalidPcsOpen(
+                format!(
+                    "Grinding verification failed: expected >= {grinding_bits} leading zero bits"
+                ),
+            ));
+        }
+
+        // Absorb nonce into FS transcript (must match prover).
+        self.fs_transcript.absorb(&nonce.to_le_bytes());
+
+        Ok(())
+    }
+}
+
+/// Count the number of leading zero bits in a byte slice (big-endian).
+fn leading_zeros(bytes: &[u8]) -> usize {
+    let mut count = 0;
+    for &b in bytes {
+        if b == 0 {
+            count += 8;
+        } else {
+            count += b.leading_zeros() as usize;
+            break;
+        }
+    }
+    count
 }
 
 /// Perform a bounds-checked read from the stream for a length, and

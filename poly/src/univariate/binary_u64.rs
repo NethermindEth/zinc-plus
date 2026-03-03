@@ -1,6 +1,6 @@
 use crate::{
     ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
-    univariate::{dense::DensePolynomial, prepare_projection},
+    univariate::dense::DensePolynomial,
 };
 use core::mem::MaybeUninit;
 use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
@@ -447,9 +447,23 @@ where
     F: PrimeField + FromRef<F> + 'static,
 {
     fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static {
-        prepare_projection::<F, Self, _, DEGREE_PLUS_ONE>(sampled_value, |poly, i| {
-            (poly.0 & (1 << i)) != 0
-        })
+        use crate::univariate::{PROJ_CHUNK_BITS, build_projection_tables};
+        let field_cfg = sampled_value.cfg().clone();
+        let tables = build_projection_tables::<F, DEGREE_PLUS_ONE>(sampled_value);
+        let num_chunks = tables.len();
+
+        move |poly: &Self| {
+            let bits = poly.0;
+            let mut acc = F::zero_with_cfg(&field_cfg);
+            for chunk_idx in 0..num_chunks {
+                let start = chunk_idx * PROJ_CHUNK_BITS;
+                let chunk_width = std::cmp::min(PROJ_CHUNK_BITS, DEGREE_PLUS_ONE - start);
+                let mask = (1u64 << chunk_width) - 1;
+                let byte_val = ((bits >> start) & mask) as usize;
+                acc += tables[chunk_idx][byte_val].clone();
+            }
+            acc
+        }
     }
 }
 

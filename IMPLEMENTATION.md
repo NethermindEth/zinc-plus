@@ -21,6 +21,7 @@
 12. [The Lookup Protocol (LogUp)](#12-the-lookup-protocol-logup)
 13. [Witness Generation](#13-witness-generation)
 14. [PCS Verifier Optimizations](#14-pcs-verifier-optimizations)
+14b. [PCS Prover Parallelism Optimizations](#14b-pcs-prover-parallelism-optimizations)
 15. [What the Implementation Does NOT Do](#15-what-the-implementation-does-not-do)
 16. [Optimization Opportunities](#16-optimization-opportunities)
 17. [Test Coverage](#17-test-coverage)
@@ -1217,21 +1218,18 @@ Total: $L \times K \times (W \text{ adds} + 2T \text{ muls}) \approx 52 \times 5
 
 The witness generator:
 
-1. Runs the full SHA-256 compression function on the empty-string message (single 512-bit padded block).
-2. At each of the 64 rounds, records all 30 column values:
+1. Generates `num_rows / 64` chained SHA-256 compressions. Compression 0 hashes the padded empty-string message (single 512-bit block); compressions 1+ use deterministic non-trivial message blocks. The round-function state flows directly from one compression to the next (without the SHA-256 post-processing H-addition), so all linking constraints are naturally satisfied across compression boundaries.
+2. At each of the active rows, records all 30 column values:
    - Working variables $a, e$ directly from the SHA-256 state (columns 0–1).
    - Derived values $\Sigma_0, \Sigma_1, \text{Maj}, \text{ch\_ef}, \text{ch\_neg\_eg}$ computed from the state (columns 3–7).
    - Message schedule entries $W_t$ and small-sigma values $\sigma_0, \sigma_1$ (columns 2, 8, 9; for $t \geq 16$).
    - Shift decompositions: $S_0 = W_{t-15} \gg 3$, $R_0 = W_{t-15} \& \text{0x7}$, etc. (columns 10–13).
    - Auxiliary lookback columns: $d_t = a_{t-3}$ (col 14), $h_t = e_{t-3}$ (col 15), $W_{t-2}$ (col 16), $W_{t-7}$ (col 17), $W_{t-15}$ (col 18), $W_{t-16}$ (col 19). These store shifted copies of source columns for the shift sumcheck.
-   - Round constants $K_t$ (col 20) — a public input column.
+   - Round constants $K_t$ (col 20) — a public input column, repeating every 64 rounds.
    - Ch/Maj lookback columns: $a_{t-1} = b_t$ (col 21), $a_{t-2} = c_t$ (col 22), $e_{t-1} = f_t$ (col 23), $e_{t-2} = g_t$ (col 24). These store shifted copies of $a$ and $e$ for the affine-combination lookup argument (§12a). For $t = 0$ the initial hash values ($H[1], H[2], H[5], H[6]$) are used; for $t = 1$ the boundary values use the appropriate mix of initial and round-0 state.
-   - Selector columns: `sel_round` = 1 for $t \in [0, 63]$ (col 25), `sel_sched` = 1 for $t \in [16, 63]$ (col 26).
+   - Selector columns: `sel_round` = 1 for rows up to $N - 5$ (col 25), `sel_sched` = 1 for round-local $t \in [16, 63]$ up to row $N - 17$ (col 26). The selectors deactivate near the trace tail where shift zero-padding would produce inconsistencies.
    - Carry values $\mu_a, \mu_e, \mu_W$ computed as `floor(sum / 2^32)` from the non-wrapping integer sum (int columns 0–2, trace indices 27–29).
-3. Sets a boundary row at index 64 with the final $a, e$ values (so that carry constraints at row 63 can reference `down[COL_A_HAT]` and `down[COL_E_HAT]` correctly). **Carry-freedom extension:** Row 64 also populates `ch_ef`, `ch_neg_eg`, and `Maj` using the lookback values $f_{64} = e_{63}$, $g_{64} = e_{62}$, $b_{64} = a_{63}$, $c_{64} = a_{62}$. This ensures the affine-combination lookups evaluate correctly at the boundary. Rows 65–66 extend the lookback columns further (`a_tm1`, `a_tm2`, `e_tm1`, `e_tm2`) and set `ch_neg_eg` and `Maj` for the padded rows where $a = e = 0$.
-4. Zero-pads remaining rows to $2^{\text{num\_vars}}$.
-
-The witness is verified against NIST test vectors (the hash of the empty string matches `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`).
+3. Due to shift zero-padding at the trace boundary, `a_hat` and `e_hat` are forced to zero for the last 3 rows ($N-3$ through $N-1$), and `W_hat` is forced to zero for the last 16 rows. The last compression is therefore slightly truncated (60 active round rows, schedule active for rounds 16–47 only).
 
 ### SHA-256 Split Witnesses
 
@@ -1323,23 +1321,39 @@ This overlaps the verification work across CPU cores. On the MacBook Air M4 (10 
 
 **Note:** The benchmark harness uses `rayon::join` directly. For the production pipeline, see Phase 4 below, which integrates parallel PCS verification into `verify_dual_circuit()`.
 
-### Phase 3: Optimized `Int<N>` × `i64` Multiply
+### Phase 3: Mixed-Width `Int<N>` × Primitive Multiply
 
-**Problem:** The spot-check encoding hot path performs ~75,264 multiplications of `Int<LIMBS> × i64` per batch. The generic `MulByScalar` implementation for `Int<N> × Int<M>` uses full-width $N \times M$ schoolbook multiplication ($\text{LIMBS}^2$ limb multiplications for equal-size operands). Since the IPRS encoding matrix entries are `PnttInt = i64` (a single limb), this wastes $(N-1)$ multiplications per term.
+**Problem:** The generic `MulByScalar` implementations for `Int<LIMBS>` widened all primitive scalars (`i8`–`i128`) to `Int<LIMBS>` before multiplying, resulting in $\text{LIMBS}^2$ word multiplications even when the scalar occupies far fewer limbs. For example, `Int<6> × i64` (1 limb) performed 36 word multiplications instead of 6, and `Int<6> × i128` (2 limbs) performed 36 instead of 12.
 
-**Solution:** A specialized `MulByScalar<&i64>` implementation for `Int<LIMBS>` in `utils/src/mul_by_scalar.rs`:
+**Solution:** Three changes in `utils/src/mul_by_scalar.rs` and `crypto-primitives/src/ring/crypto_bigint_int.rs`:
 
-1. **Reinterpret** the `i64` scalar as `u64` (two's complement representation).
-2. **LIMBS × 1 schoolbook:** For each of the `LIMBS` limbs of `self`, perform a 64×64 → 128 widening multiply with the scalar, propagating carry through the limbs.
-3. **Sign correction:** If the scalar is negative, its `u64` representation is $2^{64} - |s|$. The schoolbook therefore computes `self * (2^64 - |s|)` = `self * 2^64 - self * |s|`. The unwanted `self * 2^64` term shifts `self` up by one limb position (into limbs `1..LIMBS`). This extra contribution is subtracted back with a borrow chain: for each limb $i \in [1, \text{LIMBS})$, subtract `self.words[i-1]` with borrow propagation.
+1. **New helper methods on `Int<LIMBS>`:** `wrapping_mul_narrow<RHS_LIMBS>()` and `checked_mul_narrow<RHS_LIMBS>()` delegate to `crypto_bigint::Int<LIMBS>::wrapping_mul<RHS_LIMBS>()` and `CheckedMul::checked_mul()` respectively. The underlying `crypto_bigint` library already implements mixed-width multiplication using `LIMBS × RHS_LIMBS` word multiplications (schoolbook for small sizes, Karatsuba for larger).
 
-**Speedup:** `LIMBS` limb-multiplications instead of `LIMBS²`:
-- `Int<6>` (SHA CombR): 6 muls instead of 36 → **~6× faster**
-- `Int<8>` (ECDSA CombR): 8 muls instead of 64 → **~8× faster**
+2. **Specialized `MulByScalar` for `i64` and `i128`:** Instead of using the macro-generated widen-then-multiply path, dedicated implementations convert the scalar to a narrow `Int<1>` (for `i64`) or `Int<2>` (for `i128`) and call `wrapping_mul_narrow` / `checked_mul_narrow`:
 
-This optimization benefits both the new spot-check encoding hot path and the existing full PNTT butterfly stages (where twiddles are also PnttInt = i64).
+    ```rust
+    impl<const LIMBS: usize> MulByScalar<&i64> for Int<LIMBS> {
+        fn mul_by_scalar<const CHECK: bool>(&self, rhs: &i64) -> Option<Self> {
+            let rhs_narrow = Int::<1>::from(*rhs);
+            if CHECK { self.checked_mul_narrow(&rhs_narrow) }
+            else { Some(self.wrapping_mul_narrow(&rhs_narrow)) }
+        }
+    }
+    // Analogous for i128 → Int<2>
+    ```
 
-Three targeted correctness tests verify the implementation for `Int<2>`, `Int<4>`, `Int<6>`, `Int<8>` against naive full-width multiply, including edge cases (`i64::MAX`, `i64::MIN`, `0`, `-1`).
+3. **Generic `Int<LIMBS> × Int<LIMBS2>` also uses narrow multiply:** The blanket `MulByScalar<&Int<LIMBS2>> for Int<LIMBS>` was updated to call `checked_mul_narrow` / `wrapping_mul_narrow` instead of resizing `rhs` to `Int<LIMBS>` and doing same-width multiply.
+
+**Speedup (word multiplications per scalar multiply):**
+
+| Operation | Before (widen + LIMBS²) | After (LIMBS × RHS_LIMBS) | Reduction |
+|-----------|------------------------|--------------------------|----------|
+| `Int<6> × i64` | 36 | 6 | 6× |
+| `Int<6> × i128` | 36 | 12 | 3× |
+| `Int<8> × i64` | 64 | 8 | 8× |
+| `Int<8> × i128` | 64 | 16 | 4× |
+
+This optimization benefits spot-check encoding (IPRS twiddles are `i64`), column testing inner products (challenges `Chal = i128`), the PNTT butterfly stages, and all `MulByScalar`-based inner products throughout the codebase.
 
 ### Phase 4: Pipeline-Level Verifier Parallelization
 
@@ -1393,20 +1407,148 @@ When `parallel` is disabled, all code paths fall back to sequential execution wi
 
 ### Combined Impact
 
-| Metric | Before all optimizations | After Phases 1–3 | After Phase 4 | Total improvement |
-|--------|--------------------------|-------------------|---------------|-------------------|
-| Combined PCS verifier (parallel) | ~17.9 ms | ~6.8 ms | ~6.8 ms | 62% faster |
-| SHA PCS verifier (alone) | ~8–10 ms | ~5 ms | ~5 ms | ~50% faster |
-| ECDSA PCS verifier (alone) | ~4–6 ms | ~3 ms | ~3 ms | ~50% faster |
-| Dual-circuit E2E verifier | — | ~7.3 ms | ~5.5 ms | ~25% faster (Phase 4) |
+| Metric | Before all optimizations | After Phases 1–3 | After Phase 4 | After Phase 5 | After Phase 6 | Total improvement |
+|--------|--------------------------|-------------------|---------------|---------------|---------------|-------------------|
+| Combined PCS verifier (parallel) | ~17.9 ms | ~6.8 ms | ~6.8 ms | — | — | 62% faster |
+| SHA PCS verifier (alone) | ~8–10 ms | ~5 ms | ~5 ms | — | — | ~50% faster |
+| ECDSA PCS verifier (alone) | ~4–6 ms | ~3 ms | ~3 ms | — | — | ~50% faster |
+| Dual-circuit E2E verifier | — | ~7.3 ms | ~5.5 ms | — | — | ~25% faster (Phase 4) |
+| Single-circuit E2E verifier (8×SHA) | — | ~4.2 ms | ~4.2 ms | ~2.9 ms | — | ~31% faster (Phase 5) |
+| PCS Verify, 2×folded (8×SHA) | — | — | — | ~1.28 ms | ~1.02 ms | ~20% faster (Phase 6) |
+| PCS Prove, 2×folded (8×SHA) | — | — | — | ~1.29 ms | ~1.26 ms | ~2% faster (Phase 6) |
 
 Phase 4's impact is most visible on the dual-circuit end-to-end verifier (`8xSHA256+ECDSA Steps/E2E/Verifier`), which dropped from ~7.3 ms to ~5.5 ms (~25% reduction) due to overlapping PCS1 and PCS2 verification and parallelizing the public-column MLE evaluations.
 
+Phase 5's impact is most visible on the single-circuit verifier (`8xSHA256 Steps/E2E/Verifier`), which dropped from ~4.2 ms to ~2.9 ms (~25–31% reduction) by replacing the full 2,048-element PNTT encoding with spot-check encoding at only the 147 opened positions.
+
+Phase 6's impact is most visible on the 2×-folded SHA-256 PCS verifier (`8xSHA256 Folded Steps/V/PCSVerify (folded)`), which dropped from ~1.28 ms to ~1.02 ms (**−20%**) by using mixed-width `Int<6> × Int<2>` multiplication (12 word mults) instead of full-width `Int<6> × Int<6>` (36 word mults) for the challenge-scalar multiplications.
+
 The verifier now spends its time roughly as:
-- Spot-check encoding (147 dot products × `row_len`): ~40%
-- Merkle proof verification (147 blake3 hash walks): ~25%
-- Column testing inner products: ~20%
-- Transcript deserialization + challenge sampling: ~15%
+- Column testing inner products (`Int<6> × i128`): ~45%
+- Spot-check encoding (147 dot products × `row_len`, `Int<6> × i64`): ~25%
+- Merkle proof verification (147 blake3 hash walks): ~20%
+- Transcript deserialization + challenge sampling: ~10%
+
+### Phase 5: Deferred Spot-Check Encoding in `verify_with_field_cfg()`
+
+**Problem:** Despite the Phase 1 introduction of `encode_wide_at_positions`, the `verify_with_field_cfg()` method in `zip-plus/src/pcs/phase_verify.rs` was still calling `encode_wide(&combined_row)` — the **full** PNTT encoding producing all 2,048 codeword positions — before entering the column-opening loop. Only 147 positions were actually needed.
+
+**Solution:** Replace the full `encode_wide` call with `encode_wide_at_positions`, computing only the 147 values corresponding to the opened column indices.
+
+The implementation:
+1. **Read** all 147 column openings sequentially from the transcript (sequential, as the `squeeze_challenge_idx` / `read_const_many` / `read_merkle_proof` calls depend on transcript state).
+2. **Collect** the 147 column indices into a `Vec<usize>`.
+3. **Call** `encode_wide_at_positions(&combined_row, &column_indices)` — computes only the 147 needed encoding positions using the precomputed encoding matrix, parallelized across positions via `par_iter`.
+4. **Zip** the encoded values into the parallel column verification loop (`cfg_into_iter!`), passing each expected encoded value directly to `verify_column_testing_batched` instead of the entire 2,048-element array + column index.
+
+The `verify_column_testing_batched` signature was simplified accordingly: it now accepts `expected_encoded: &Zt::CombR` (a single value) instead of `encoded_combined_row: &[Zt::CombR]` + `column: usize`.
+
+**Cost reduction:** 147 × 512 = 75,264 multiplications vs 143,360 for full PNTT — identical to Phase 1's analysis, but this change ensures the spot-check path is actually used by `verify_with_field_cfg()` (not just the standalone benchmark harness).
+
+**Impact (8×SHA-256 E2E/Verifier):** 4.2 ms → 2.9 ms (**−25% to −31%**).
+
+### Phase 6: Mixed-Width Multiply for `i128` Challenge Scalars
+
+**Problem:** Column testing (the `compute_column_testing_batched` inner loop) dominates the 2×-folded PCS verifier: 147 column openings × `batch_size` × `num_rows` × `D_PLUS_ONE` inner-product terms, each performing `Int<6> × i128` (`CombR × Chal`). With the previous implementation, the `i128` scalar was widened to `Int<6>` and multiplied with full-width 6×6 = 36 word multiplications. Since `i128` occupies only 2 limbs, this wastes 24 word multiplications per term.
+
+**The PCS verifier was roughly as expensive as the PCS prover** (~1.28 ms each for the 2×-folded 8×SHA-256 benchmark), which is unexpected since the verifier should be cheaper.
+
+**Solution:** Phase 3's mixed-width multiply optimization (see above) directly addresses this. The specialized `MulByScalar<&i128> for Int<LIMBS>` converts the challenge to `Int<2>` and calls `wrapping_mul_narrow`, performing only `LIMBS × 2 = 12` word multiplications instead of 36. This benefits:
+
+- **Column testing:** `CombDotChal::inner_product` computes `DensePolynomial<Int<6>, D+1>` dot `[i128; D+1]` — each coefficient multiply is now `Int<6> × Int<2>` (12 muls).
+- **`ArrCombRDotChal::inner_product`:** `[Int<6>] × [i128]` — same improvement.
+- **Spot-check encoding:** `Int<6> × i64` — `Int<6> × Int<1>` (6 muls, unchanged from Phase 3).
+- **Generic `Int × Int` path:** `MulByScalar<&Int<LIMBS2>>` also uses `wrapping_mul_narrow` / `checked_mul_narrow` instead of widening both operands to the same size.
+
+**Cost analysis (per column opening, 2×-folded, `D_PLUS_ONE=16`, `batch_size≈60`, `num_rows=1`):**
+
+| Component | Multiplies per column | Word mults before | Word mults after | Reduction |
+|-----------|-----------------------|-------------------|------------------|-----------|
+| CombDotChal (D+1 terms × batch) | 60 × 16 = 960 | 960 × 36 = 34,560 | 960 × 12 = 11,520 | 3× |
+| ArrCombRDotChal (batch terms) | 60 | 60 × 36 = 2,160 | 60 × 12 = 720 | 3× |
+| Encoding (row_len dot product) | 1,024 | 1,024 × 6 = 6,144 | 1,024 × 6 = 6,144 | (same) |
+| **Total per column** | | **42,864** | **18,384** | **2.3×** |
+| **× 147 columns** | | **~6.3M** | **~2.7M** | **2.3×** |
+
+**Impact (8×SHA-256 2×-folded `V/PCSVerify`):** 1.28 ms → 1.02 ms (**−20%**, p = 0.00).
+
+The **PCS verifier is now meaningfully cheaper than the PCS prover** (1.02 ms vs 1.26 ms), as expected.
+
+---
+
+## 14b. PCS Prover Parallelism Optimizations
+
+Three optimizations in `ZipPlus::prove()` (`zip-plus/src/pcs/phase_prove.rs`) exploit inter-polynomial parallelism and eliminate sequential bottlenecks in the Fiat-Shamir challenge derivation. A fourth optimization in `piop/src/projections.rs` removes harmful nested parallelism.
+
+### Optimization 1: Pre-Squeezed Alphas + Parallel `polys_as_comb_r`
+
+**Problem:** The original code looped over polynomials sequentially, squeezing `DEGREE_BOUND + 1` Fiat-Shamir challenges per polynomial and then computing inner products over all evaluations. The FS squeeze is inherently sequential (transcript state dependency), but interleaving it with rayon parallel sections for each polynomial's evaluations created sequential gaps between rayon batch launches.
+
+**Solution:** Pre-squeeze **all** per-polynomial alpha vectors up-front in a single sequential pass, then launch **one** parallel section across all polynomials:
+
+```rust
+let all_alphas: Vec<Vec<Zt::Chal>> = polys.iter().map(|_| {
+    transcript.fs_transcript.get_challenges(degree_bound + 1)
+}).collect();
+
+let polys_as_comb_r: Vec<Vec<Zt::CombR>> = cfg_iter!(polys)
+    .zip(cfg_iter!(all_alphas))
+    .map(|(poly, alphas)| { /* inner products */ })
+    .collect::<Result<Vec<_>, _>>()?;
+```
+
+This eliminates the sequential gap between polynomial batches while preserving identical Fiat-Shamir transcript progression.
+
+### Optimization 2: Parallel `b` Computation
+
+**Problem:** The `b` vector (length `num_rows`) was computed as a sequential `try_fold` over polynomials, accumulating per-row dot products.
+
+**Solution:** Parallel map over polynomials to compute each polynomial's per-row dot products independently, then sequential reduce:
+
+```rust
+let per_poly_dots: Vec<Vec<F>> = cfg_iter!(polys_as_comb_r)
+    .map(|poly_comb_r| { /* parallel row dot products */ })
+    .collect::<Result<Vec<_>, _>>()?;
+
+let b = per_poly_dots.into_iter().fold(vec![zero; num_rows], |mut acc, dots| {
+    acc.iter_mut().zip(dots).for_each(|(a, d)| *a += d);
+    acc
+});
+```
+
+**Note:** With `num_rows = 1` (the 8×SHA-256 configuration), this is effectively a no-op since there is only one row to accumulate.
+
+### Optimization 3: Parallel `combined_row` Computation
+
+**Problem:** The `combined_row` (length `row_len`) was computed as a sequential `try_fold` calling the `combine_rows!` macro for each polynomial.
+
+**Solution:** Same pattern — parallel map across polynomials, sequential reduce:
+
+```rust
+let per_poly_rows: Vec<Vec<Zt::CombR>> = cfg_iter!(polys_as_comb_r)
+    .map(|poly| -> Result<_, ZipError> {
+        Ok(combine_rows!(/* ... */))
+    }).collect::<Result<Vec<_>, _>>()?;
+
+let combined_row = per_poly_rows.into_iter().fold(vec![ZERO; row_len], |mut acc, row| {
+    acc.iter_mut().zip(row.iter()).for_each(|(a, r)| *a += r);
+    acc
+});
+```
+
+**Note:** With `num_rows = 1`, `coeffs = [1]` and the `combine_rows!` macro degenerates to an identity copy, so this optimization also has minimal effect for the 8×SHA-256 configuration.
+
+### Optimization 4: Removal of Nested Parallelism in Trace Projection
+
+In `piop/src/projections.rs`, both `project_trace_coeffs()` and `project_trace_to_field()` used **nested** `cfg_iter!` — outer parallelism over columns and inner parallelism over evaluations within each column. For the BinaryPoly paths, the inner loop body is trivially cheap (boolean → field copy or fast projection table lookup), so the nested rayon task scheduling overhead exceeded the computation cost.
+
+**Solution:** Replace inner `cfg_iter!(column)` with sequential `column.iter()` for the BinaryPoly paths, retaining only the outer column-level parallelism which is sufficient to saturate cores.
+
+### Combined Prover Impact
+
+**PCS/Prove (8×SHA-256, `num_rows = 1`, 18 committed columns):** 3.66 ms → 1.05 ms (**−71%**)
+
+The dominant speedup comes from Optimization 1 (eliminating sequential FS gaps between polynomial batches). With 18 polynomials × 512 evaluations each, the parallel inner-product computation across all polynomials simultaneously is substantially faster than 18 sequential rayon launches.
 
 ---
 
@@ -1440,11 +1582,29 @@ All 19 SHA-256 constraints are now implemented. The previously missing multi-row
 
 See §5 for the full constraint specification.
 
-### 15.4 ECDSA Not Over Real secp256k1 Field
+### 15.4 ECDSA Not Over Real secp256k1 Field — **RESOLVED**
 
-The ECDSA constraints operate on `Int<4>` (256-bit integers) in the unified pipeline and `DensePolynomial<i64, 1>` (64-bit integers) in the legacy formulation, both using a toy curve over $\mathbb{F}_{101}$, not the real secp256k1 base field (256-bit prime). The constraint *algebra* is correct (it correctly describes Jacobian-coordinate point doubling and addition with Shamir's trick), but:
-- The witness values are from $\mathbb{F}_{101}$, not $\mathbb{F}_p$.
-- The `Int<4>` pipeline uses `prove_generic`/`verify_generic` with `EcdsaScalarZipTypes` (`Eval = Int<4>`, `CombR = Int<8>`, `PcsF = MontyField<8>`), avoiding the dual-ring architecture entirely.
+The `EcdsaUairInt` (Int<4>) implementation now operates over the real secp256k1 base field $\mathbb{F}_p$, with $p = 2^{256} - 2^{32} - 977$. Key changes:
+
+1. **F_p arithmetic helpers.** `fp_mul`, `fp_add`, `fp_sub`, `fp_smul`, `fp_inv`, `fp_pow` implement modular arithmetic over $\mathbb{F}_p$ using wide `Int<8>` intermediates to avoid overflow. These are used by both the witness generator and the `R_SIG` computation.
+
+2. **Real witness generation.** `GenerateWitness<Int<4>>` computes a valid Jacobian double-and-add chain in $\mathbb{F}_p$:
+   - Row 0: accumulator initialized to G (affine, Z=1) with b₁=1, b₂=0.
+   - Rows 1–256: pure Jacobian doubling (b₁=b₂=0) with full F_p reduction at each step.
+   - Row 257: final accumulator. B4 verifies the affine x-coordinate against `R_SIG`.
+   - Rows ≥258: zero padding (safe because C5–C7 are gated by `1 − sel_final`).
+
+3. **Transition gating.** Constraints C5–C7 (the shift/transition constraints linking row $t$ to $t+1$) are multiplied by `(1 − sel_final)`. At the final row (257), `sel_final = 1` so the transition to the padding region is not enforced. This increases the maximum constraint degree from 12 to 13. At padding rows, all data is zero and C1–C4 hold trivially; C5–C7 also hold because `(1 − sel_final) = 1` and the shifted ("down") values are also zero.
+
+4. **B3 initialization.** For `EcdsaUairInt`, B3 is split into three constraints:
+   - B3a: `sel_init · (X − T_x) = 0` — init X to the table point x-coordinate.
+   - B3b: `sel_init · (Y − T_y) = 0` — init Y to the table point y-coordinate.
+   - B3c: `sel_init · (Z − 1) = 0` — init Z to 1 (affine → Jacobian lift).
+   The table point is selected by bits b₁[0], b₂[0] using the same formula as C4.
+
+5. **`R_SIG` as `LazyLock`.** The expected affine x-coordinate is computed lazily (Fermat-inversion in $\mathbb{F}_p$) on first access, matching the benchmark witness trace.
+
+**Remaining limitation:** The `EcdsaUairDp` (DensePolynomial<i64, 1>) implementation still uses the toy curve over $\mathbb{F}_{101}$ with the identity-based fixed-point witness. Only the `Int<4>` pipeline uses real secp256k1 constants.
 
 ### 15.5 ~~ECDSA Boundary Constraints~~ — **RESOLVED**
 
@@ -1688,6 +1848,88 @@ After step 21, the benchmark prints a **proof size breakdown** to stderr, decomp
 
 Run with: `cargo bench -p zinc-snark --bench steps_sha256_8x_ecdsa --features 'parallel simd asm'`
 
+### `steps_sha256_8x_folded` (32 benchmark functions)
+
+A separate criterion benchmark file (`snark/benches/steps_sha256_8x_folded.rs`) providing a **per-step timing breakdown** for the 8×SHA-256 proving stack with **folded PCS** (BinaryPoly<32> → BinaryPoly<16> split columns). Uses the full `Sha256Uair` (30 columns, 16 Bp + 3 Qx constraints). Compares folded vs original (non-folded) PCS at each step, and includes 2×/4× folded, GKR, and 2/3/4-chunk lookup variants.
+
+**Prover steps (25):**
+
+| # | Step | Description |
+|---|------|-------------|
+| 1 | `WitnessGen` | Generate the 8×SHA-256 trace (30 columns × 512 rows) |
+| 2 | `Folding/SplitColumns` | Split BinaryPoly<32> → two BinaryPoly<16> halves per column |
+| 3 | `PCS/Commit (folded)` | PCS commit over BinaryPoly<16> split columns |
+| 4 | `PCS/Commit (original)` | PCS commit over BinaryPoly<32> (comparison) |
+| 5 | `PIOP/FieldSetup` | Transcript init + random field config |
+| 6 | `PIOP/Project Ideal Check` | Project scalars for IC |
+| 7 | `PIOP/IdealCheck` | IC prover (MLE-first) |
+| 8 | `PIOP/Project Main field sumcheck` | Project scalars+trace to field for CPR |
+| 9 | `PIOP/Main field sumcheck` | CPR prover |
+| 10 | `PIOP/LookupExtract` | Extract lookup columns from field trace |
+| 11 | `PIOP/Lookup` | Classic batched decomposed LogUp prover |
+| 12 | `PCS/Prove (folded)` | PCS prove over BinaryPoly<16> |
+| 13 | `PCS/Prove (original)` | PCS prove over BinaryPoly<32> (comparison) |
+| 14 | `E2E/Prover (folded)` | `prove_classic_logup_folded` full pipeline |
+| 15 | `E2E/Prover (original)` | `prove` full pipeline (comparison) |
+| 16 | `E2E/Verifier (folded)` | `verify_classic_logup_folded` |
+| 17 | `E2E/Verifier (original)` | `verify` (comparison) |
+| 18–19 | `E2E/Prover/Verifier (GKR folded)` | GKR lookup + 2× folded |
+| 20–21 | `E2E/Prover/Verifier (GKR folded 4-chunk)` | GKR lookup, 4-chunk, 2× folded |
+| 22–23 | `E2E/Prover/Verifier (4x folded)` | 4× folded (BinaryPoly<8>) |
+| 24–25 | `E2E/Prover/Verifier (4x folded 4-chunk)` | 4× folded, 4-chunk |
+
+**Verifier steps (7):**
+
+| # | Step | Description |
+|---|------|-------------|
+| V1 | `V/FieldSetup` | Transcript init + field config |
+| V2 | `V/Ideal Check` | IC verify |
+| V3 | `V/Main field sumcheck Pre` | CPR + Lookup pre-sumcheck |
+| V4 | `V/MDSumcheck` | Multi-degree sumcheck verify |
+| V5 | `V/Main field sumcheck Finalize` | CPR finalize |
+| V6 | `V/FoldingVerify` | Folding protocol verification |
+| V7 | `V/PCSVerify (folded)` | PCS verify over folded columns |
+
+Also reports detailed **proof size breakdown** (PCS, IC, CPR, lookup, folding, eval point, compressed sizes) and **2× vs 4× folded comparison**.
+
+Run with: `cargo bench --bench steps_sha256_8x_folded -p zinc-snark --features 'parallel simd asm'`
+
+### `steps_sha256_8x_uc_folded` (21 benchmark functions)
+
+A criterion benchmark file (`snark/benches/steps_sha256_8x_uc_folded.rs`) providing a **per-step timing breakdown** for the 8×SHA-256 proving stack with the **underconstrained UAIR** (`Sha256UairBpUnderconstrained`) and **folded PCS**. The underconstrained UAIR removes the 4 F₂[X]-typed columns (S₀, S₁, R₀, R₁ at indices 10–13) and their 4 associated constraints, yielding 26 columns (23 bitpoly + 3 int) instead of 30 (27 + 3).
+
+This benchmark is used to measure the performance impact of removing the F₂[X] columns, which were the most expensive to constrain. The 10 lookup columns (indices 0–9) are unchanged.
+
+**Prover steps (21):**
+
+| # | Step | Description |
+|---|------|-------------|
+| 1 | `WitnessGen` | Generate the underconstrained 8×SHA-256 trace (26 columns × 512 rows) |
+| 2 | `Folding/SplitColumns` | Split BinaryPoly<32> → two BinaryPoly<16> halves |
+| 3 | `PCS/Commit (folded)` | PCS commit (BinaryPoly<16>) |
+| 4 | `PCS/Commit (original)` | PCS commit (BinaryPoly<32>, comparison) |
+| 5 | `PIOP/FieldSetup` | Transcript init + field config |
+| 6 | `PIOP/Project Ideal Check` | Project scalars for IC |
+| 7 | `PIOP/IdealCheck` | IC prover (MLE-first, 12 Bp constraints) |
+| 8 | `PIOP/Project Main field sumcheck` | Project trace to field for CPR |
+| 9 | `PIOP/Main field sumcheck` | CPR prover |
+| 10 | `PIOP/LookupExtract` | Extract 10 lookup columns |
+| 11 | `PIOP/Lookup` | Classic batched decomposed LogUp |
+| 12 | `PCS/Prove (folded)` | PCS prove (BinaryPoly<16>) |
+| 13 | `PCS/Prove (original)` | PCS prove (BinaryPoly<32>, comparison) |
+| 14 | `E2E/Prover (folded)` | `prove_classic_logup_folded` |
+| 15 | `E2E/Prover (original)` | `prove` (comparison) |
+| 16 | `E2E/Verifier (folded)` | `verify_classic_logup_folded` |
+| 17 | `E2E/Verifier (original)` | `verify` (comparison) |
+| 18 | `E2E/Prover (GKR folded)` | GKR lookup + 2× folded |
+| 19 | `E2E/Verifier (GKR folded)` | GKR verifier |
+| 20 | `E2E/Prover (4x folded)` | 4× folded (BinaryPoly<8>) |
+| 21 | `E2E/Verifier (4x folded)` | 4× folded verifier |
+
+Also reports **proof size breakdown** and **folded vs original comparison** (both raw and compressed).
+
+Run with: `cargo bench --bench steps_sha256_8x_uc_folded -p zinc-snark --features 'parallel simd asm'`
+
 ### Benchmark Constants
 
 ```
@@ -1695,6 +1937,7 @@ SHA256_NUM_VARS        = 7    // 128 rows (64 real + 64 padding)
 SHA256_8X_NUM_VARS     = 9    // 512 rows (8 × 64 rounds)
 ECDSA_NUM_VARS         = 9    // 512 rows (258 real + 254 padding)
 SHA256_BATCH_SIZE      = 30   // 30 SHA-256 columns (monolithic: 27 bitpoly + 3 int)
+SHA256_UC_BATCH_SIZE   = 26   // 26 underconstrained columns (23 bitpoly + 3 int, no F₂[X])
 SHA256_POLY_BATCH_SIZE = 27   // BinaryPoly columns (split)
 SHA256_INT_BATCH_SIZE  = 3    // Int columns (split)
 ECDSA_BATCH_SIZE       = 11   // 11 ECDSA columns (9 data + 2 selectors)
@@ -1775,6 +2018,8 @@ Benchmarks report peak memory (RSS) alongside timing via the `zinc_utils::peak_m
 | `e2e_sha256.rs` | `sha256_full_pipeline` |
 | `steps_sha256_8x.rs` | `sha256_8x_stepwise` |
 | `steps_sha256_8x_ecdsa.rs` | `sha256_8x_ecdsa_stepwise` |
+| `steps_sha256_8x_folded.rs` | `sha256_8x_folded_stepwise` |
+| `steps_sha256_8x_uc_folded.rs` | `uc_sha256_8x_folded_stepwise` |
 
 Run all e2e benchmarks:
 ```bash
@@ -1805,7 +2050,9 @@ zinc-plus-new/
 │   │                   # BatchedCprLookupProof, DualCircuitZincProof,
 │   │                   # LookupProofData::BatchedClassic
 │   ├── benches/        # Criterion benchmarks (e2e_sha256: 6 groups,
-│   │                   # steps_sha256_8x_ecdsa: 31 benchmark functions)
+│   │                   # steps_sha256_8x_ecdsa: 31 functions,
+│   │                   # steps_sha256_8x_folded: 32 functions,
+│   │                   # steps_sha256_8x_uc_folded: 21 functions)
 │   └── tests/          # 10 integration tests (incl. batched_classic_logup,
 │   │                   # public_column_round_trip, public_shift_column_round_trip)
 ├── piop/               # PIOP protocols
@@ -1846,6 +2093,9 @@ zinc-plus-new/
 │       ├── lib.rs      # 16 {0,1}^{<32}[X] (6 rotation + 10 linking) + 3 Q[X]
 │       │               # constraints, shift specs (10 Bp + 2 Qx), public columns,
 │       │               # Sha256UairBp + Sha256UairQx
+│       ├── underconstrained.rs  # Underconstrained UAIR (26 cols: 23 BPoly + 3 Int),
+│       │               # removes 4 F₂[X] columns (S₀,S₁,R₀,R₁) and 4 constraints,
+│       │               # Sha256UairBpUnderconstrained + Sha256UairQxUnderconstrained
 │       ├── witness.rs  # Generates 64-row SHA-256 trace, split witnesses
 │       │               # (generate_poly_witness, generate_int_witness),
 │       │               # POLY_COLUMN_INDICES[27], INT_COLUMN_INDICES[3]

@@ -143,7 +143,7 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
     ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
     where
         U: Uair,
-        F::Inner: ConstTranscribable + Default + Send + Sync,
+        F::Inner: ConstTranscribable + Default + Send + Sync + num_traits::Zero,
     {
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
@@ -186,7 +186,7 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
     ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
     where
         U: Uair,
-        F::Inner: ConstTranscribable + Default + Send + Sync,
+        F::Inner: ConstTranscribable + Default + Send + Sync + num_traits::Zero,
     {
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
@@ -317,6 +317,36 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
             evaluation_point,
             values: combined_mle_values,
         })
+    }
+
+    /// Like [`verify_at_point`] but skips the ideal membership check.
+    ///
+    /// Absorbs the proof values into the transcript (keeping it in sync
+    /// with the prover) and returns the sub-claim directly.  This is
+    /// useful when the ideal check is known to fail due to field
+    /// mismatch (e.g. ECDSA constraints evaluated over a different
+    /// prime) but the rest of the PIOP still needs to proceed.
+    pub fn verify_at_point_absorb_only(
+        transcript: &mut impl Transcript,
+        proof: Proof<F>,
+        evaluation_point: Vec<F>,
+        _field_cfg: &F::Config,
+    ) -> VerifierSubClaim<F>
+    where
+        F::Inner: ConstTranscribable,
+    {
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+
+        let combined_mle_values = proof.combined_mle_values;
+
+        for mle_value in &combined_mle_values {
+            transcript.absorb_random_field_slice(&mle_value.coeffs, &mut transcription_buf);
+        }
+
+        VerifierSubClaim {
+            evaluation_point,
+            values: combined_mle_values,
+        }
     }
 
     /// The verifier part of the ideal-check subprotocol.

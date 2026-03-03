@@ -15,6 +15,17 @@ use zinc_utils::{
 pub trait ZipTypes: Send + Sync {
     const NUM_COLUMN_OPENINGS: usize;
 
+    /// Number of bits of proof-of-work (grinding) the prover must perform.
+    ///
+    /// Grinding adds `GRINDING_BITS` bits of security, allowing
+    /// `NUM_COLUMN_OPENINGS` to be reduced accordingly. The prover searches
+    /// for a 64-bit nonce such that `H(transcript_state ‖ nonce)` has at
+    /// least `GRINDING_BITS` leading zero bits. The verifier checks this in
+    /// constant time.
+    ///
+    /// Set to 0 to disable grinding (default).
+    const GRINDING_BITS: usize = 0;
+
     /// Semiring of witness/polynomial evaluations on boolean hypercube
     type Eval: Named + ConstCoeffBitWidth + Default + Clone + Send + Sync;
 

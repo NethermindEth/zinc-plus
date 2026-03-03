@@ -60,3 +60,11 @@ harness = false
 [[bench]]
 name = "steps_sha256_8x_ecdsa"
 harness = false
+
+[[bench]]
+name = "steps_sha256_8x_folded"
+harness = false
+
+[[bench]]
+name = "steps_sha256_8x_uc_folded"
+harness = false

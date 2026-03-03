@@ -33,7 +33,7 @@ use super::{
         LookupSumcheckGroup, LookupVerifierPreSumcheck,
     },
     tables::{
-        batch_inverse, batch_inverse_shifted, build_table_index,
+        batch_inverse_shifted, build_table_index,
         compute_multiplicities_with_index,
     },
 };
@@ -130,9 +130,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
             })
             .collect();
 
-        for agg in &all_aggregated_multiplicities {
-            transcript.absorb_random_field_slice(agg, &mut buf);
-        }
+        // Bulk-absorb all aggregated multiplicities in a single allocation.
+        let agg_slices: Vec<&[F]> = all_aggregated_multiplicities.iter().map(|a| a.as_slice()).collect();
+        transcript.absorb_random_field_many_slices(&agg_slices, &mut buf);
 
         // ---- Step 3: Shared β challenge ----
         let beta: F = transcript.get_field_challenge(field_cfg);
@@ -149,12 +149,13 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
 
         let v_table = batch_inverse_shifted(&beta, subtable);
 
-        for lookup_invs in &all_inverse_witnesses {
-            for u in lookup_invs {
-                transcript.absorb_random_field_slice(u, &mut buf);
-            }
-        }
-        transcript.absorb_random_field_slice(&v_table, &mut buf);
+        // Bulk-absorb all inverse witnesses + v_table in a single allocation.
+        let mut inv_slices: Vec<&[F]> = all_inverse_witnesses
+            .iter()
+            .flat_map(|lookup_invs| lookup_invs.iter().map(|u| u.as_slice()))
+            .collect();
+        inv_slices.push(&v_table);
+        transcript.absorb_random_field_many_slices(&inv_slices, &mut buf);
 
         // ---- Step 5: Batching challenge γ ----
         let gamma: F = transcript.get_field_challenge(field_cfg);
@@ -342,9 +343,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
             })
             .collect();
 
-        for agg in &all_aggregated_multiplicities {
-            transcript.absorb_random_field_slice(agg, &mut buf);
-        }
+        // Bulk-absorb all aggregated multiplicities in a single allocation.
+        let agg_slices: Vec<&[F]> = all_aggregated_multiplicities.iter().map(|a| a.as_slice()).collect();
+        transcript.absorb_random_field_many_slices(&agg_slices, &mut buf);
 
         // ---- Step 3: Shared β challenge ----
         let beta: F = transcript.get_field_challenge(field_cfg);
@@ -361,12 +362,13 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
 
         let v_table = batch_inverse_shifted(&beta, subtable);
 
-        for lookup_invs in &all_inverse_witnesses {
-            for u in lookup_invs {
-                transcript.absorb_random_field_slice(u, &mut buf);
-            }
-        }
-        transcript.absorb_random_field_slice(&v_table, &mut buf);
+        // Bulk-absorb all inverse witnesses + v_table in a single allocation.
+        let mut inv_slices: Vec<&[F]> = all_inverse_witnesses
+            .iter()
+            .flat_map(|lookup_invs| lookup_invs.iter().map(|u| u.as_slice()))
+            .collect();
+        inv_slices.push(&v_table);
+        transcript.absorb_random_field_many_slices(&inv_slices, &mut buf);
 
         // ---- Step 5: Batching challenge γ ----
         let gamma: F = transcript.get_field_challenge(field_cfg);
@@ -524,18 +526,19 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
         let v_table = &proof.inverse_table;
 
         // NOTE: Chunk vectors are not absorbed — binding comes from PCS.
-        for agg in all_agg_mults {
-            transcript.absorb_random_field_slice(agg, &mut buf);
-        }
+        // Bulk-absorb all aggregated multiplicities in a single allocation.
+        let agg_slices: Vec<&[F]> = all_agg_mults.iter().map(|a| a.as_slice()).collect();
+        transcript.absorb_random_field_many_slices(&agg_slices, &mut buf);
 
         let beta: F = transcript.get_field_challenge(field_cfg);
 
-        for lookup_invs in all_inv_w {
-            for u in lookup_invs {
-                transcript.absorb_random_field_slice(u, &mut buf);
-            }
-        }
-        transcript.absorb_random_field_slice(v_table, &mut buf);
+        // Bulk-absorb all chunk inverse witnesses + v_table in a single allocation.
+        let mut inv_slices: Vec<&[F]> = all_inv_w
+            .iter()
+            .flat_map(|lookup_invs| lookup_invs.iter().map(|u| u.as_slice()))
+            .collect();
+        inv_slices.push(v_table);
+        transcript.absorb_random_field_many_slices(&inv_slices, &mut buf);
 
         let gamma: F = transcript.get_field_challenge(field_cfg);
 
@@ -601,10 +604,17 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
     ///   Pass an empty slice to skip the decomposition check (e.g. in tests
     ///   without a PCS).
     #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
-    pub fn finalize_verifier(
+    /// Finalize the verifier using a pre-computed `eq_at_point` vector.
+    ///
+    /// This is the core implementation. Use this variant when verifying multiple
+    /// lookup groups that share the same `subclaim_point` so that
+    /// `eq_at_point = build_eq_x_r_vec(subclaim_point)` is computed only once.
+    #[allow(clippy::too_many_arguments)]
+    pub fn finalize_verifier_with_precomputed_eq(
         pre: &LookupVerifierPreSumcheck<F>,
         proof: &BatchedDecompLogupProof<F>,
         subclaim_point: &[F],
+        eq_at_point: &[F],
         subclaim_expected_evaluation: &F,
         parent_column_evals: &[F],
         field_cfg: &F::Config,
@@ -617,9 +627,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
 
         let eq_val =
             zinc_poly::utils::eq_eval(subclaim_point, &pre.r, one.clone())?;
-
-        let eq_at_point =
-            build_eq_x_r_vec(subclaim_point, field_cfg)?;
 
         // ── Recompute H(x*) ──────────────────────────────────────────
         //
@@ -676,6 +683,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
         let all_inv_w = &proof.chunk_inverse_witnesses;
         let all_agg_mults = &proof.aggregated_multiplicities;
 
+
         let v_eq: Vec<F> = v_table
             .iter()
             .zip(eq_at_point.iter())
@@ -683,7 +691,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
             .collect();
 
         // Helper: inner product of data with eq_at_point.
-        let eval_at_point = |data: &[F]| -> F {
+        let _eval_at_point = |data: &[F]| -> F {
             data.iter()
                 .zip(eq_at_point.iter())
                 .fold(zero.clone(), |acc, (d, e)| acc + &(d.clone() * e))
@@ -736,8 +744,10 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
         };
 
         // Reusable bucket vector for eq accumulation: bucket[t] = Σ_{j: u_k[j]=v_table[t]} eq(j, x*)
+        #[cfg(not(feature = "parallel"))]
         let mut eq_bucket = vec![zero.clone(); table_size];
 
+        #[cfg(not(feature = "parallel"))]
         for ell in 0..pre.num_lookups {
             let mut u_sum_eval = zero.clone();
             let mut chunk_evals_for_ell: Vec<F> = if need_decomp {
@@ -799,6 +809,73 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
             h_eval += &(balance * &gamma_balance_powers[ell]);
         }
 
+        // ── Parallel path: each lookup computes its own balance
+        //    contribution and chunk evaluations independently. ──
+        #[cfg(feature = "parallel")]
+        {
+            let par_results: Result<Vec<(F, Vec<F>)>, LookupError<F>> =
+                (0..pre.num_lookups).into_par_iter().map(|ell| {
+                    let mut eq_bucket = vec![zero.clone(); table_size];
+                    let mut u_sum_eval = zero.clone();
+                    let mut chunk_evals_for_ell: Vec<F> = if need_decomp {
+                        Vec::with_capacity(pre.num_chunks)
+                    } else {
+                        Vec::new()
+                    };
+
+                    for k_idx in 0..pre.num_chunks {
+                        let u_k = &all_inv_w[ell][k_idx];
+                        for val in eq_bucket.iter_mut() {
+                            *val = zero.clone();
+                        }
+                        for (j, u_j) in u_k.iter().enumerate() {
+                            let t = *v_to_idx.get(u_j.inner()).ok_or(
+                                LookupError::DecompositionInconsistent,
+                            )?;
+                            eq_bucket[t] += &eq_at_point[j];
+                        }
+
+                        let u_eval: F = v_table
+                            .iter()
+                            .zip(eq_bucket.iter())
+                            .fold(zero.clone(), |acc, (v_t, b_t)| {
+                                acc + &(v_t.clone() * b_t)
+                            });
+                        u_sum_eval += &u_eval;
+
+                        if need_decomp {
+                            let c_eval: F = pre.subtable
+                                .iter()
+                                .zip(eq_bucket.iter())
+                                .fold(zero.clone(), |acc, (s_t, b_t)| {
+                                    acc + &(s_t.clone() * b_t)
+                                });
+                            chunk_evals_for_ell.push(c_eval);
+                        }
+                    }
+
+                    let mv_eval: F = all_agg_mults[ell]
+                        .iter()
+                        .zip(v_eq.iter())
+                        .fold(zero.clone(), |acc, (m_j, ve_j)| {
+                            acc + &(m_j.clone() * ve_j)
+                        });
+
+                    let balance = u_sum_eval - &mv_eval;
+                    let h_contrib = balance * &gamma_balance_powers[ell];
+
+                    Ok((h_contrib, chunk_evals_for_ell))
+                }).collect();
+
+            let par_results = par_results?;
+            for (h_contrib, chunk_evals) in par_results {
+                h_eval += &h_contrib;
+                if need_decomp {
+                    all_chunk_evals.push(chunk_evals);
+                }
+            }
+        }
+
         let expected = h_eval * &eq_val;
 
         if expected != *subclaim_expected_evaluation {
@@ -831,6 +908,34 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
         })
     }
 
+    /// Finalize the verifier, automatically computing the eq-at-point vector.
+    ///
+    /// When verifying multiple lookup groups that share the same `subclaim_point`,
+    /// prefer [`finalize_verifier_with_precomputed_eq`] to avoid recomputing the
+    /// eq vector for each group.
+    pub fn finalize_verifier(
+        pre: &LookupVerifierPreSumcheck<F>,
+        proof: &BatchedDecompLogupProof<F>,
+        subclaim_point: &[F],
+        subclaim_expected_evaluation: &F,
+        parent_column_evals: &[F],
+        field_cfg: &F::Config,
+    ) -> Result<BatchedDecompLogupVerifierSubClaim<F>, LookupError<F>>
+    where
+        F::Inner: ConstTranscribable + Zero + Default,
+    {
+        let eq_at_point = build_eq_x_r_vec(subclaim_point, field_cfg)?;
+        Self::finalize_verifier_with_precomputed_eq(
+            pre,
+            proof,
+            subclaim_point,
+            &eq_at_point,
+            subclaim_expected_evaluation,
+            parent_column_evals,
+            field_cfg,
+        )
+    }
+
     /// Verifier for the batched Decomposition + LogUp protocol.
     ///
     /// Reconstructs chunk vectors from inverse witnesses.
@@ -859,18 +964,19 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
         let v_table = &proof.inverse_table;
 
         // ---- Mirror transcript operations (no chunk absorption) ----
-        for agg in all_agg_mults {
-            transcript.absorb_random_field_slice(agg, &mut buf);
-        }
+        // Bulk-absorb all aggregated multiplicities in a single allocation.
+        let agg_slices: Vec<&[F]> = all_agg_mults.iter().map(|a| a.as_slice()).collect();
+        transcript.absorb_random_field_many_slices(&agg_slices, &mut buf);
 
         let beta: F = transcript.get_field_challenge(field_cfg);
 
-        for lookup_invs in all_inv_w {
-            for u in lookup_invs {
-                transcript.absorb_random_field_slice(u, &mut buf);
-            }
-        }
-        transcript.absorb_random_field_slice(v_table, &mut buf);
+        // Bulk-absorb all inverse witnesses + v_table in a single allocation.
+        let mut inv_slices: Vec<&[F]> = all_inv_w
+            .iter()
+            .flat_map(|lookup_invs| lookup_invs.iter().map(|u| u.as_slice()))
+            .collect();
+        inv_slices.push(v_table);
+        transcript.absorb_random_field_many_slices(&inv_slices, &mut buf);
 
         let gamma: F = transcript.get_field_challenge(field_cfg);
 

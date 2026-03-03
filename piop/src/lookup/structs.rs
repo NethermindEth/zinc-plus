@@ -372,6 +372,10 @@ pub enum LookupTableType {
     BitPoly {
         /// Total width of the binary polynomial (e.g. 32).
         width: usize,
+        /// Optional override for the chunk width used during decomposition.
+        /// When `None`, the default chunk width (8) is used for tables
+        /// wider than the decomposition threshold.
+        chunk_width: Option<usize>,
     },
     /// Column entries are in `[0, 2^width − 1]` — unsigned integers that
     /// fit in `width` bits.
@@ -381,6 +385,9 @@ pub enum LookupTableType {
     Word {
         /// Total bit-width (e.g. 32).
         width: usize,
+        /// Optional override for the chunk width used during decomposition.
+        /// When `None`, the default chunk width (8) is used.
+        chunk_width: Option<usize>,
     },
 }
 

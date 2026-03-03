@@ -3,6 +3,7 @@ use zinc_transcript::KeccakTranscript;
 use crate::pcs_transcript::PcsTranscript;
 use std::io::Cursor;
 
+pub mod folding;
 mod phase_commit;
 mod phase_prove;
 mod phase_verify;

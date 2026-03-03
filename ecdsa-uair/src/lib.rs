@@ -71,6 +71,7 @@ pub mod constraints;
 pub mod witness;
 
 use crypto_primitives::crypto_bigint_int::Int;
+use crypto_primitives::semiring::crypto_bigint_uint::Uint;
 use zinc_poly::univariate::binary::BinaryPoly;
 use zinc_poly::univariate::dense::DensePolynomial;
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
@@ -91,10 +92,10 @@ pub const NUM_ROWS: usize = 258;
 pub const NUM_CONSTRAINTS: usize = 0; // Placeholder — constraints require F_p ring
 
 /// Number of boundary constraints enforced in the constraint system:
-/// 2 (init Z=0, final signature check).
+/// 4 (init X/Y/Z to first table point + final signature check).
 /// Booleanity of b₁/b₂ is checked by the verifier directly on the public
 /// column data, so it does not cost constraint-system degrees.
-pub const NUM_BOUNDARY_CONSTRAINTS: usize = 2;
+pub const NUM_BOUNDARY_CONSTRAINTS: usize = 4;
 
 // ─── Column indices ──────────────────────────────────────────────────────────
 
@@ -128,6 +129,102 @@ pub const COL_SEL_FINAL: usize = 10;
 // G  = (Gx, Gy) — secp256k1 generator
 // Q  = (Gx, Gy) — public key (= G for benchmark fixed-point witness)
 // G+Q= 2G affine = (PGQx, PGQy) — precomputed table point
+
+/// secp256k1 base field prime.
+/// p = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+pub const SECP256K1_P: Int<4> = Int::from_words([
+    0xFFFFFFFEFFFFFC2F,
+    0xFFFFFFFFFFFFFFFF,
+    0xFFFFFFFFFFFFFFFF,
+    0xFFFFFFFFFFFFFFFF,
+]);
+
+/// Euclidean remainder: result in [0, p-1].
+///
+/// All field elements and p are treated as **unsigned** 256-bit values
+/// to avoid misinterpreting p > 2^255 as negative.
+#[inline]
+pub fn fp_mod(a: Int<4>, p: Int<4>) -> Int<4> {
+    let a_u: Uint<8> = a.as_uint().resize();
+    let p_u: Uint<8> = p.as_uint().resize();
+    let r = a_u % p_u;
+    *r.checked_resize::<4>().expect("fp_mod result should fit").as_int()
+}
+
+/// Modular multiplication: (a * b) mod p.
+///
+/// Uses unsigned 512-bit widening to avoid both overflow and the
+/// sign-extension bug (secp256k1's p > 2^255 is negative as `Int<4>`).
+#[inline]
+pub fn fp_mul(a: Int<4>, b: Int<4>, p: Int<4>) -> Int<4> {
+    let a_u: Uint<8> = a.as_uint().resize();
+    let b_u: Uint<8> = b.as_uint().resize();
+    let p_u: Uint<8> = p.as_uint().resize();
+    let product = a_u * b_u;
+    let r = product % p_u;
+    *r.checked_resize::<4>().expect("fp_mul result should fit").as_int()
+}
+
+/// Modular addition: (a + b) mod p, assuming a, b in [0, p-1].
+#[inline]
+pub fn fp_add(a: Int<4>, b: Int<4>, p: Int<4>) -> Int<4> {
+    let a_u: Uint<8> = a.as_uint().resize();
+    let b_u: Uint<8> = b.as_uint().resize();
+    let p_u: Uint<8> = p.as_uint().resize();
+    let sum = a_u + b_u;
+    let r = sum % p_u;
+    *r.checked_resize::<4>().expect("fp_add result should fit").as_int()
+}
+
+/// Modular subtraction: (a - b) mod p, assuming a, b in [0, p-1].
+#[inline]
+pub fn fp_sub(a: Int<4>, b: Int<4>, p: Int<4>) -> Int<4> {
+    let a_u: Uint<8> = a.as_uint().resize();
+    let b_u: Uint<8> = b.as_uint().resize();
+    let p_u: Uint<8> = p.as_uint().resize();
+    // Add p before subtracting to prevent unsigned underflow.
+    let diff = a_u + p_u - b_u;
+    let r = diff % p_u;
+    *r.checked_resize::<4>().expect("fp_sub result should fit").as_int()
+}
+
+/// Modular scalar multiplication: (a * small) mod p.
+#[inline]
+pub fn fp_smul(a: Int<4>, small: i64, p: Int<4>) -> Int<4> {
+    fp_mul(a, Int::<4>::from_ref(&small), p)
+}
+
+/// Modular inverse via Fermat's little theorem: a^{p-2} mod p.
+///
+/// Uses binary exponentiation. Panics if a ≡ 0 (mod p).
+pub fn fp_inv(a: Int<4>, p: Int<4>) -> Int<4> {
+    // exp = p - 2
+    let two = Int::<4>::from_ref(&2i64);
+    let exp = p - two;
+    fp_pow(a, exp, p)
+}
+
+/// Modular exponentiation: base^exp mod p via square-and-multiply.
+///
+/// The exponent is treated as an unsigned 256-bit value.
+pub fn fp_pow(base: Int<4>, exp: Int<4>, p: Int<4>) -> Int<4> {
+    let one = Int::<4>::from_ref(&1i64);
+    let zero_u = Uint::<4>::from(0u64);
+    let one_u = Uint::<4>::from(1u64);
+    let mut result = one;
+    let mut b = fp_mod(base, p);
+    // Treat the exponent as unsigned to handle exp > 2^255 (e.g., p-2).
+    let mut e: Uint<4> = *exp.as_uint();
+    while e > zero_u {
+        // Check if LSB is set
+        if (e % Uint::<4>::from(2u64)) == one_u {
+            result = fp_mul(result, b, p);
+        }
+        b = fp_mul(b, b, p);
+        e = e >> 1u32;
+    }
+    result
+}
 
 /// Generator x-coordinate (secp256k1).
 /// 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
@@ -166,13 +263,82 @@ pub const PGQY: Int<4> = Int::from_words([
     0x1AE168FEA63DC339,
 ]);
 
-/// Expected signature verification result: r_sig = k·n + r.
+/// Expected signature verification result: the affine x-coordinate of the
+/// final accumulator point u₁·G + u₂·Q (mod p).
 ///
-/// For the fixed-point witness (Z=0 everywhere, identity result),
-/// this value is unused because the final-check constraint is guarded
-/// by Z (vacuously satisfied when Z=0). For a non-trivial witness,
-/// set this to the actual k·n + r value.
-pub const R_SIG: Int<4> = Int::from_words([0, 0, 0, 0]);
+/// This value is witness-dependent. For the benchmark case (Q = G,
+/// b₁\[0\]=1 all other bits zero), the trace computes 3·2^256·G and
+/// R_SIG = (3·2^256·G).x  (affine x-coordinate on secp256k1).
+///
+/// The constraint B4 checks:
+///   sel_final · Z · (X − R_SIG · Z²) = 0
+///
+/// Computed lazily via F_p arithmetic on first access.
+pub static R_SIG: std::sync::LazyLock<Int<4>> = std::sync::LazyLock::new(compute_r_sig);
+
+/// Compute R_SIG = affine x-coordinate of the result of the benchmark
+/// ECDSA trace (init G, double+add at row 0, then 256 pure doublings).
+fn compute_r_sig() -> Int<4> {
+    let p = SECP256K1_P;
+    let (mut x, mut y, mut z) = (GX, GY, Int::<4>::from_ref(&1i64));
+
+    // Row 0: double (GX, GY, 1) then add G (mixed addition with s=1)
+    let z_mid = fp_smul(fp_mul(y, z, p), 2, p);
+    let x_sq = fp_mul(x, x, p);
+    let x_four = fp_mul(x_sq, x_sq, p);
+    let y_sq = fp_mul(y, y, p);
+    let x_y_sq = fp_mul(x, y_sq, p);
+    let x_mid = fp_sub(fp_smul(x_four, 9, p), fp_smul(x_y_sq, 8, p), p);
+    let x_cubed = fp_mul(x_sq, x, p);
+    let x_cubed_y_sq = fp_mul(x_cubed, y_sq, p);
+    let x_sq_xmid = fp_mul(x_sq, x_mid, p);
+    let y_four = fp_mul(y_sq, y_sq, p);
+    let y_mid = fp_sub(
+        fp_sub(fp_smul(x_cubed_y_sq, 12, p), fp_smul(x_sq_xmid, 3, p), p),
+        fp_smul(y_four, 8, p),
+        p,
+    );
+    // T = G for b1=1, b2=0
+    let zmid_sq = fp_mul(z_mid, z_mid, p);
+    let h = fp_sub(fp_mul(GX, zmid_sq, p), x_mid, p);
+    let zmid_cubed = fp_mul(zmid_sq, z_mid, p);
+    let r_a = fp_sub(fp_mul(GY, zmid_cubed, p), y_mid, p);
+    let h_sq = fp_mul(h, h, p);
+    let h_cubed = fp_mul(h_sq, h, p);
+    let ra_sq = fp_mul(r_a, r_a, p);
+    let xmid_h_sq = fp_mul(x_mid, h_sq, p);
+    z = fp_mul(z_mid, h, p); // next Z
+    x = fp_sub(fp_sub(ra_sq, h_cubed, p), fp_smul(xmid_h_sq, 2, p), p); // next X
+    let diff = fp_sub(xmid_h_sq, x, p);
+    y = fp_sub(fp_mul(r_a, diff, p), fp_mul(y_mid, h_cubed, p), p); // next Y
+
+    // Rows 1-256: pure doubling (s=0 → next = mid)
+    for _ in 1..257 {
+        let z_mid = fp_smul(fp_mul(y, z, p), 2, p);
+        let x_sq = fp_mul(x, x, p);
+        let x_four = fp_mul(x_sq, x_sq, p);
+        let y_sq = fp_mul(y, y, p);
+        let x_y_sq = fp_mul(x, y_sq, p);
+        let x_mid = fp_sub(fp_smul(x_four, 9, p), fp_smul(x_y_sq, 8, p), p);
+        let x_cubed = fp_mul(x_sq, x, p);
+        let x_cubed_y_sq = fp_mul(x_cubed, y_sq, p);
+        let x_sq_xmid = fp_mul(x_sq, x_mid, p);
+        let y_four = fp_mul(y_sq, y_sq, p);
+        let y_mid = fp_sub(
+            fp_sub(fp_smul(x_cubed_y_sq, 12, p), fp_smul(x_sq_xmid, 3, p), p),
+            fp_smul(y_four, 8, p),
+            p,
+        );
+        x = x_mid;
+        y = y_mid;
+        z = z_mid;
+    }
+    // At this point (x, y, z) is the Jacobian point at row 257.
+    // R_SIG = X / Z² (affine x-coordinate)
+    let z_sq = fp_mul(z, z, p);
+    let z_sq_inv = fp_inv(z_sq, p);
+    fp_mul(x, z_sq_inv, p)
+}
 
 // ─── Ideal types ────────────────────────────────────────────────────────────
 
@@ -434,41 +600,49 @@ impl Uair for EcdsaUairDp {
         let zmid_cubed = zmid_sq.clone() * &up[COL_Z_MID];
         let r_a = t_y * &zmid_cubed - &up[COL_Y_MID];
 
+        // ── Transition gating ───────────────────────────────────────
+        // C5–C7 are gated by (1 − sel_final) so the transition from
+        // the final row (257) to padding zeros is not enforced.
+        // At padding rows sel_final=0 so (1−sel_final)=1, and the
+        // all-zero data satisfies C5–C7 trivially.
+        let one_minus_sf = one.clone() - &up[COL_SEL_FINAL];
+
         // ── C5: Result Z-coordinate ────────────────────────────────
-        // Z[t+1] = (1-s)·Z_mid + s·(Z_mid·H)
+        // (1-sel_final) · (Z[t+1] − (1-s)·Z_mid − s·(Z_mid·H)) = 0
         let one_minus_s = one.clone() - &s;
         let zmid_h = up[COL_Z_MID].clone() * &up[COL_H];
         b.assert_zero(
-            down[DOWN_Z].clone()
-                - &(one_minus_s.clone() * &up[COL_Z_MID])
-                - &(s.clone() * &zmid_h),
+            one_minus_sf.clone()
+                * &(down[DOWN_Z].clone()
+                    - &(one_minus_s.clone() * &up[COL_Z_MID])
+                    - &(s.clone() * &zmid_h)),
         );
 
         // ── C6: Result X-coordinate ───────────────────────────────
-        // When s=0: X[t+1] = X_mid
-        // When s=1: X[t+1] = R_a² - H³ - 2·X_mid·H²
+        // (1-sel_final) · (X[t+1] − (1-s)·X_mid − s·(R_a² − H³ − 2·X_mid·H²)) = 0
         let ra_sq = r_a.clone() * &r_a;
         let h_sq = up[COL_H].clone() * &up[COL_H];
         let h_cubed = h_sq.clone() * &up[COL_H];
         let xmid_h_sq = up[COL_X_MID].clone() * &h_sq;
         let add_x = ra_sq - &h_cubed - &smul(&xmid_h_sq, 2);
         b.assert_zero(
-            down[DOWN_X].clone()
-                - &(one_minus_s.clone() * &up[COL_X_MID])
-                - &(s.clone() * &add_x),
+            one_minus_sf.clone()
+                * &(down[DOWN_X].clone()
+                    - &(one_minus_s.clone() * &up[COL_X_MID])
+                    - &(s.clone() * &add_x)),
         );
 
         // ── C7: Result Y-coordinate ───────────────────────────────
-        // When s=0: Y[t+1] = Y_mid
-        // When s=1: Y[t+1] = R_a·(X_mid·H² - X[t+1]) - Y_mid·H³
+        // (1-sel_final) · (Y[t+1] − (1-s)·Y_mid − s·(R_a·(X_mid·H² − X[t+1]) − Y_mid·H³)) = 0
         let xmid_h_sq_2 = up[COL_X_MID].clone() * &h_sq;
         let ra_term = r_a * &(xmid_h_sq_2 - &down[DOWN_X]);
         let ymid_h_cubed = up[COL_Y_MID].clone() * &h_cubed;
         let add_y = ra_term - &ymid_h_cubed;
         b.assert_zero(
-            down[DOWN_Y].clone()
-                - &(one_minus_s * &up[COL_Y_MID])
-                - &(s * &add_y),
+            one_minus_sf
+                * &(down[DOWN_Y].clone()
+                    - &(one_minus_s * &up[COL_Y_MID])
+                    - &(s * &add_y)),
         );
 
         // ═══════════════════════════════════════════════════════════
@@ -511,8 +685,8 @@ impl Uair for EcdsaUairDp {
 // This is the target ring for the unified ECDSA pipeline: the same Int<4>
 // type is used for PCS commitments, PIOP constraints, and witness values.
 
-/// Number of constraints for the Int<4> ECDSA UAIR: 7 non-boundary + 2 boundary.
-pub const NUM_CONSTRAINTS_INT4: usize = 9;
+/// Number of constraints for the Int<4> ECDSA UAIR: 7 non-boundary + 4 boundary.
+pub const NUM_CONSTRAINTS_INT4: usize = 11;
 
 impl Uair for EcdsaUairInt {
     type Ideal = ImpossibleIdeal;
@@ -602,6 +776,11 @@ impl Uair for EcdsaUairInt {
             + &smul_c(&not_b1_b2, &QY)
             + &smul_c(&b1b2, &PGQY);
 
+        // Save copies for boundary constraints B3a/B3b (before t_x/t_y are consumed)
+        let t_x_for_init = t_x.clone();
+        let t_y_for_init = t_y.clone();
+        let one_expr = one.clone();
+
         // ── C4: Addition scratch H = T_x·Z_mid² - X_mid ───────────
         let zmid_sq = up[COL_Z_MID].clone() * &up[COL_Z_MID];
         b.assert_zero(
@@ -612,56 +791,76 @@ impl Uair for EcdsaUairInt {
         let zmid_cubed = zmid_sq.clone() * &up[COL_Z_MID];
         let r_a = t_y * &zmid_cubed - &up[COL_Y_MID];
 
+        // ── Transition gating ───────────────────────────────────────
+        // C5–C7 are gated by (1 − sel_final) so the transition from
+        // the final row (257) to padding zeros is not enforced.
+        let one_minus_sf = one.clone() - &up[COL_SEL_FINAL];
+
         // ── C5: Result Z-coordinate ────────────────────────────────
-        // Z[t+1] = (1-s)·Z_mid + s·(Z_mid·H)
+        // (1-sel_final) · (Z[t+1] − (1-s)·Z_mid − s·(Z_mid·H)) = 0
         let one_minus_s = one.clone() - &s;
         let zmid_h = up[COL_Z_MID].clone() * &up[COL_H];
         b.assert_zero(
-            down[DOWN_Z].clone()
-                - &(one_minus_s.clone() * &up[COL_Z_MID])
-                - &(s.clone() * &zmid_h),
+            one_minus_sf.clone()
+                * &(down[DOWN_Z].clone()
+                    - &(one_minus_s.clone() * &up[COL_Z_MID])
+                    - &(s.clone() * &zmid_h)),
         );
 
         // ── C6: Result X-coordinate ───────────────────────────────
-        // When s=0: X[t+1] = X_mid
-        // When s=1: X[t+1] = R_a² - H³ - 2·X_mid·H²
+        // (1-sel_final) · (X[t+1] − (1-s)·X_mid − s·(R_a² − H³ − 2·X_mid·H²)) = 0
         let ra_sq = r_a.clone() * &r_a;
         let h_sq = up[COL_H].clone() * &up[COL_H];
         let h_cubed = h_sq.clone() * &up[COL_H];
         let xmid_h_sq = up[COL_X_MID].clone() * &h_sq;
         let add_x = ra_sq - &h_cubed - &smul(&xmid_h_sq, 2);
         b.assert_zero(
-            down[DOWN_X].clone()
-                - &(one_minus_s.clone() * &up[COL_X_MID])
-                - &(s.clone() * &add_x),
+            one_minus_sf.clone()
+                * &(down[DOWN_X].clone()
+                    - &(one_minus_s.clone() * &up[COL_X_MID])
+                    - &(s.clone() * &add_x)),
         );
 
         // ── C7: Result Y-coordinate ───────────────────────────────
-        // When s=0: Y[t+1] = Y_mid
-        // When s=1: Y[t+1] = R_a·(X_mid·H² - X[t+1]) - Y_mid·H³
+        // (1-sel_final) · (Y[t+1] − (1-s)·Y_mid − s·(R_a·(X_mid·H² − X[t+1]) − Y_mid·H³)) = 0
         let xmid_h_sq_2 = up[COL_X_MID].clone() * &h_sq;
         let ra_term = r_a * &(xmid_h_sq_2 - &down[DOWN_X]);
         let ymid_h_cubed = up[COL_Y_MID].clone() * &h_cubed;
         let add_y = ra_term - &ymid_h_cubed;
         b.assert_zero(
-            down[DOWN_Y].clone()
-                - &(one_minus_s * &up[COL_Y_MID])
-                - &(s * &add_y),
+            one_minus_sf
+                * &(down[DOWN_Y].clone()
+                    - &(one_minus_s * &up[COL_Y_MID])
+                    - &(s * &add_y)),
         );
 
         // ═══════════════════════════════════════════════════════════
-        //  Boundary constraints (B3–B4)
+        //  Boundary constraints (B3a–B3c, B4)
+        //
+        //  B3a–B3c: Initialize the accumulator to the first table
+        //  point (affine, Z=1). The table point is selected by the
+        //  first scalar bits b₁[0], b₂[0] using the same T_x, T_y
+        //  formulas as C4.
         //
         //  NOTE: Booleanity of b₁/b₂ (former B1/B2) is NOT enforced
         //  here. The verifier checks it directly on the public column
         //  data, saving 2 constraint-system degrees.
         // ═══════════════════════════════════════════════════════════
 
-        // ── B3: Initialization: sel_init · Z = 0 ───────────────────
-        // At row 0 the accumulator must be the identity (Z=0 in
-        // Jacobian coordinates). Elsewhere sel_init=0 → vacuous.
+        // ── B3a: Initialization X: sel_init · (X - T_x) = 0 ───────
         b.assert_zero(
-            up[COL_SEL_INIT].clone() * &up[COL_Z],
+            up[COL_SEL_INIT].clone() * &(up[COL_X].clone() - &t_x_for_init),
+        );
+
+        // ── B3b: Initialization Y: sel_init · (Y - T_y) = 0 ───────
+        b.assert_zero(
+            up[COL_SEL_INIT].clone() * &(up[COL_Y].clone() - &t_y_for_init),
+        );
+
+        // ── B3c: Initialization Z: sel_init · (Z - 1) = 0 ─────────
+        // An affine point has Z = 1 in Jacobian coordinates.
+        b.assert_zero(
+            up[COL_SEL_INIT].clone() * &(up[COL_Z].clone() - &one_expr),
         );
 
         // ── B4: Final signature check (guarded): ───────────────────
@@ -676,7 +875,7 @@ impl Uair for EcdsaUairInt {
         b.assert_zero(
             up[COL_SEL_FINAL].clone()
                 * &up[COL_Z]
-                * &(up[COL_X].clone() - &smul_c(&z_sq, &R_SIG)),
+                * &(up[COL_X].clone() - &smul_c(&z_sq, &*R_SIG)),
         );
     }
 }
@@ -702,21 +901,22 @@ mod tests {
     #[test]
     fn i64_max_degree() {
         let d = count_max_degree::<EcdsaUairDp>();
-        // C6 has degree 12: s(deg2) * R_a²(deg10) where R_a = T_y·Z_mid³ − Y_mid (deg5)
-        assert!(d <= 12, "Max degree should be at most 12, got {d}");
+        // C6 has degree 13: (1-sel_final) * s(deg2) * R_a²(deg10)
+        assert!(d <= 13, "Max degree should be at most 13, got {d}");
         assert!(d >= 4, "Max degree should be at least 4 (doubling formulas), got {d}");
     }
 
     #[test]
     fn int4_constraint_count() {
         let n = count_constraints::<EcdsaUairInt>();
-        assert_eq!(n, NUM_CONSTRAINTS_INT4, "Expected 9 ECDSA Int<4> constraints");
+        assert_eq!(n, NUM_CONSTRAINTS_INT4, "Expected 11 ECDSA Int<4> constraints");
     }
 
     #[test]
     fn int4_max_degree() {
         let d = count_max_degree::<EcdsaUairInt>();
-        assert!(d <= 12, "Max degree should be at most 12, got {d}");
+        // C6: (1-sel_final) * (... degree 12 ...) → degree 13
+        assert!(d <= 13, "Max degree should be at most 13, got {d}");
         assert!(d >= 4, "Max degree should be at least 4 (doubling formulas), got {d}");
     }
 }

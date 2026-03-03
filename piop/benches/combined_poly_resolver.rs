@@ -76,7 +76,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             num_vars,
             &prover_field_cfg,
         )
-        .expect("IC Prover failed");
+        .expect("Ideal Check Prover failed");
 
     let projecting_element: F<FIELD_LIMBS> =
         prover_transcript.get_field_challenge(&prover_field_cfg);
@@ -87,7 +87,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     let trace_f = project_trace_to_field::<_, DEGREE_PLUS_ONE>(&[], &projected_trace, &[], &projecting_element);
 
     group.bench_with_input(
-        BenchmarkId::new("CPR Prover", &params),
+        BenchmarkId::new("Main field sumcheck Prover", &params),
         &prover_transcript.clone(),
         |bench, transcript| {
             bench.iter_batched(
@@ -103,7 +103,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                         max_degree,
                         &prover_field_cfg,
                     ))
-                    .expect("CPR Prover failed");
+                    .expect("Main field sumcheck Prover failed");
                 },
                 BatchSize::SmallInput,
             );

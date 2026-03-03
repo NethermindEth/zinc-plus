@@ -140,6 +140,19 @@ pub trait Transcript {
     {
         v.iter().for_each(|x| self.absorb_random_field(x, buf));
     }
+
+    /// Absorbs multiple slices of field elements in sequence.
+    /// Default implementation calls `absorb_random_field_slice` per slice;
+    /// concrete transcripts may override for a single-allocation fast-path.
+    fn absorb_random_field_many_slices<F>(&mut self, slices: &[&[F]], buf: &mut [u8])
+    where
+        F: PrimeField,
+        F::Inner: Transcribable,
+    {
+        for s in slices {
+            self.absorb_random_field_slice(s, buf);
+        }
+    }
 }
 
 //

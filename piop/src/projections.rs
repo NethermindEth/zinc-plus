@@ -1,5 +1,4 @@
 use crypto_primitives::{FromWithConfig, PrimeField, Semiring};
-use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -39,7 +38,11 @@ where
     cfg_extend!(
         result,
         cfg_iter!(binary_poly_trace).map(|column| {
-            cfg_iter!(column)
+            // Sequential inner loop: each BinaryPoly→F[X] conversion is cheap
+            // (only boolean→field copies). Outer column-level parallelism is
+            // sufficient; nested rayon tasks add scheduling overhead.
+            column
+                .iter()
                 .map(|binary_poly| {
                     binary_poly
                         .iter()
@@ -111,7 +114,10 @@ where
     cfg_extend!(
         result,
         cfg_iter!(binary_poly_trace).map(|column| {
-            cfg_iter!(column)
+            // Sequential inner loop: the projection is a fast table lookup;
+            // outer column-level parallelism saturates cores.
+            column
+                .iter()
                 .map(|poly| binary_poly_projection(poly).inner().clone())
                 .collect()
         })
@@ -131,40 +137,36 @@ where
         })
     );
 
-    result.extend(int_trace.iter().map(|column| {
-        column
-            .iter()
-            .map(|i| {
-                if i.coeffs.is_empty() {
-                    F::Inner::default()
-                } else {
-                    i.coeffs[0].inner().clone()
-                }
-            })
-            .collect()
-    }));
+    cfg_extend!(
+        result,
+        cfg_iter!(int_trace).map(|column| {
+            column
+                .iter()
+                .map(|i| {
+                    if i.coeffs.is_empty() {
+                        F::Inner::default()
+                    } else {
+                        i.coeffs[0].inner().clone()
+                    }
+                })
+                .collect()
+        })
+    );
 
     result
 }
 
 /// Project scalars of a UAIR onto F[X].
 pub fn project_scalars<F: PrimeField, U: Uair>(
-    project: impl Fn(&U::Scalar) -> DynamicPolynomialF<F>,
+    project: impl Fn(&U::Scalar) -> DynamicPolynomialF<F> + Sync,
 ) -> HashMap<U::Scalar, DynamicPolynomialF<F>> {
-    let uair_scalars = collect_scalars::<U>();
+    let uair_scalars: Vec<_> = collect_scalars::<U>().into_iter().collect();
 
-    // TODO(Ilia): if there's a lot of scalars
-    //             we should do this in parallel probably.
-    uair_scalars
-        .into_iter()
+    cfg_iter!(uair_scalars)
         .map(|scalar| {
-            (scalar.clone(), {
-                let mut dynamic_poly = project(&scalar);
-
-                dynamic_poly.trim();
-
-                dynamic_poly
-            })
+            let mut dynamic_poly = project(scalar);
+            dynamic_poly.trim();
+            (scalar.clone(), dynamic_poly)
         })
         .collect()
 }
@@ -174,11 +176,8 @@ pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
     scalars: HashMap<R, DynamicPolynomialF<F>>,
     projecting_element: &F,
 ) -> Result<HashMap<R, F>, (R, F, EvaluationError)> {
-    // TODO(Ilia): Parallelising this might be good for big UAIRs.
-    //             We'd conditionally route between sequential and parallel
-    //             projection depending on how many scalars the UAIR has.
-    scalars
-        .into_iter()
+    let entries: Vec<_> = scalars.into_iter().collect();
+    cfg_iter!(entries)
         .map(
             |(scalar, value)| -> Result<(R, F), (R, F, EvaluationError)> {
                 Ok((
@@ -189,5 +188,5 @@ pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
                 ))
             },
         )
-        .try_collect()
+        .collect::<Result<HashMap<R, F>, _>>()
 }

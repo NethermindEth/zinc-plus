@@ -31,15 +31,16 @@ macro_rules! impl_mul_by_scalar_for_primitives {
 impl_mul_by_scalar_for_primitives!(i8, i16, i32, i64, i128);
 
 impl<const LIMBS: usize, const LIMBS2: usize> MulByScalar<&Int<LIMBS2>> for Int<LIMBS> {
+    #[inline(always)]
     #[allow(clippy::arithmetic_side_effects)] // By design
     fn mul_by_scalar<const CHECK: bool>(&self, rhs: &Int<LIMBS2>) -> Option<Self> {
         if LIMBS < LIMBS2 {
             return None; // Cannot multiply if the left operand has fewer limbs than the right
         }
         if CHECK {
-            self.checked_mul(&rhs.resize())
+            self.checked_mul_narrow(rhs)
         } else {
-            Some(*self * rhs.resize())
+            Some(self.wrapping_mul_narrow(rhs))
         }
     }
 }
@@ -62,7 +63,37 @@ macro_rules! impl_mul_int_by_primitive_scalar {
     };
 }
 
-impl_mul_int_by_primitive_scalar!(i8, i16, i32, i64, i128);
+// i8–i32: widened to Int<LIMBS> (negligible cost for ≤1 limb).
+// i64 and i128 are specialised below to use narrow (mixed-width)
+// multiplication that does only LIMBS×1 or LIMBS×2 word mults
+// instead of LIMBS².
+impl_mul_int_by_primitive_scalar!(i8, i16, i32);
+
+impl<const LIMBS: usize> MulByScalar<&i64> for Int<LIMBS> {
+    #[inline(always)]
+    #[allow(clippy::arithmetic_side_effects)]
+    fn mul_by_scalar<const CHECK: bool>(&self, rhs: &i64) -> Option<Self> {
+        let rhs_narrow = Int::<1>::from(*rhs);
+        if CHECK {
+            self.checked_mul_narrow(&rhs_narrow)
+        } else {
+            Some(self.wrapping_mul_narrow(&rhs_narrow))
+        }
+    }
+}
+
+impl<const LIMBS: usize> MulByScalar<&i128> for Int<LIMBS> {
+    #[inline(always)]
+    #[allow(clippy::arithmetic_side_effects)]
+    fn mul_by_scalar<const CHECK: bool>(&self, rhs: &i128) -> Option<Self> {
+        let rhs_narrow = Int::<2>::from(*rhs);
+        if CHECK {
+            self.checked_mul_narrow(&rhs_narrow)
+        } else {
+            Some(self.wrapping_mul_narrow(&rhs_narrow))
+        }
+    }
+}
 
 impl<T> MulByScalar<&Boolean> for T
 where

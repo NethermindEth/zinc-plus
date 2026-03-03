@@ -40,6 +40,30 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + FromRef<F>,
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
     {
+        Self::prove_with_seed::<F, CHECK_FOR_OVERFLOW>(pp, polys, point, commit_hint, &[])
+    }
+
+    /// Like [`Self::prove`], but absorbs `seed` bytes into the PCS
+    /// Fiat-Shamir transcript **before** deriving the field configuration.
+    ///
+    /// Pipeline callers pass the Merkle commitment root so the PCS prime
+    /// matches the PIOP prime (both absorb the same commitment).
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn prove_with_seed<F, const CHECK_FOR_OVERFLOW: bool>(
+        pp: &ZipPlusParams<Zt, Lc>,
+        polys: &[DenseMultilinearExtension<Zt::Eval>],
+        point: &[F],
+        commit_hint: &ZipPlusHint<Zt::Cw>,
+        seed: &[u8],
+    ) -> Result<(F, ZipPlusProof), ZipError>
+    where
+        F: PrimeField
+            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> FromWithConfig<&'a Zt::Chal>
+            + for<'a> MulByScalar<&'a F>
+            + FromRef<F>,
+        F::Inner: FromRef<Zt::Fmod> + Transcribable,
+    {
         let batch_size = polys.len();
         validate_input::<Zt, Lc, _>(
             "prove",
@@ -52,40 +76,55 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let num_rows = pp.num_rows;
         let row_len = pp.linear_code.row_len();
         let mut transcript = PcsTranscript::new();
+        if !seed.is_empty() {
+            transcript.fs_transcript.absorb(seed);
+        }
         let field_cfg = transcript
             .fs_transcript
             .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
 
         let (q_0, q_1) = point_to_tensor(num_rows, point, &field_cfg)?;
 
+        // ── 1. Combine each polynomial's evaluations with FS challenges ──
+        // Pre-squeeze all per-polynomial alpha vectors up-front so the FS
+        // transcript advances identically to the original sequential code,
+        // then evaluate the inner products across *all* polynomials in one
+        // parallel section (avoids sequential gaps between rayon batches).
         let degree_bound = Zt::Comb::DEGREE_BOUND;
-        let polys_as_comb_r: Vec<Vec<Zt::CombR>> = polys
+        let all_alphas: Vec<Vec<Zt::Chal>> = polys
             .iter()
-            .map(|poly| {
-                let alphas = if degree_bound.is_zero() {
+            .map(|_| {
+                if degree_bound.is_zero() {
                     vec![Zt::Chal::ONE]
                 } else {
                     transcript.fs_transcript.get_challenges(degree_bound + 1)
-                };
+                }
+            })
+            .collect();
 
-                cfg_iter!(poly.evaluations)
+        let polys_as_comb_r: Vec<Vec<Zt::CombR>> = cfg_iter!(polys)
+            .zip(cfg_iter!(all_alphas))
+            .map(|(poly, alphas)| {
+                poly.evaluations
+                    .iter()
                     .map(|eval| {
                         Zt::EvalDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
                             eval,
-                            &alphas,
+                            alphas,
                             Zt::CombR::ZERO,
                         )
                         .map_err(ZipError::from)
                     })
-                    .collect()
+                    .collect::<Result<Vec<_>, _>>()
             })
-            .try_collect()?;
+            .collect::<Result<Vec<_>, _>>()?;
 
+        // ── 2. Compute b = Σ_poly <row, q_1> per row ──────────────────
+        // Parallel map across polynomials, then sequential reduce.
         let zero_f = F::zero_with_cfg(&field_cfg);
-        let b = polys_as_comb_r.iter().try_fold(
-            vec![zero_f.clone(); num_rows],
-            |mut acc, poly_comb_r| -> Result<_, ZipError> {
-                let row_dots: Vec<F> = cfg_chunks!(poly_comb_r, row_len)
+        let per_poly_dots: Vec<Vec<F>> = cfg_iter!(polys_as_comb_r)
+            .map(|poly_comb_r| {
+                cfg_chunks!(poly_comb_r, row_len)
                     .map(|row| {
                         let row_f: Vec<F> = row
                             .iter()
@@ -93,19 +132,23 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                             .collect();
                         MBSInnerProduct::inner_product::<UNCHECKED>(&row_f, &q_1, zero_f.clone())
                     })
-                    .collect::<Result<_, _>>()?;
+                    .collect::<Result<_, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
-                acc.iter_mut().zip(row_dots).for_each(|(a, d)| *a += d);
-
-                Ok(acc)
-            },
-        )?;
+        let b = per_poly_dots
+            .into_iter()
+            .fold(vec![zero_f.clone(); num_rows], |mut acc, dots| {
+                acc.iter_mut().zip(dots).for_each(|(a, d)| *a += d);
+                acc
+            });
 
         transcript.write_field_elements(&b)?;
         // Compute eval = <q_0, b> (inner product in field), <q_2, b> in paper
         // It is safe to use inner_product_unchecked because we're in a field.
         let eval = MBSInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())?;
 
+        // ── 3. Compute combined_row ────────────────────────────────────
         // combined_row_i[col] = sum_j(s_j * int_rows_i[j][col]) for each column
         // combined_row: Vec<CombR> (length row_len), s_j in paper
         let coeffs = if pp.num_rows == 1 {
@@ -116,18 +159,23 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 .get_challenges::<Zt::Chal>(num_rows)
         };
 
-        let combined_row: Vec<Zt::CombR> = polys_as_comb_r.iter().try_fold(
-            vec![Zt::CombR::ZERO; row_len],
-            |mut acc, poly| -> Result<_, ZipError> {
-                let row = combine_rows!(
+        // Parallel map across polys, sequential reduce.
+        let per_poly_rows: Vec<Vec<Zt::CombR>> = cfg_iter!(polys_as_comb_r)
+            .map(|poly| -> Result<_, ZipError> {
+                Ok(combine_rows!(
                     CHECK_FOR_OVERFLOW,
                     &coeffs,
                     poly.iter(),
                     |eval: &Zt::CombR| Ok::<_, ZipError>(eval.clone()),
                     row_len,
                     Zt::CombR::ZERO
-                );
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
+        let combined_row: Vec<Zt::CombR> = per_poly_rows.into_iter().fold(
+            vec![Zt::CombR::ZERO; row_len],
+            |mut acc, row| {
                 acc.iter_mut().zip(row.iter()).for_each(|(a, r)| {
                     if CHECK_FOR_OVERFLOW {
                         *a = zinc_utils::add!(
@@ -139,14 +187,24 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                         *a += r;
                     }
                 });
-
-                Ok(acc)
+                acc
             },
-        )?;
+        );
 
+        // ── 4. Column openings ─────────────────────────────────────────
+        // Pre-squeeze all column indices (FS-only, no stream dependency),
+        // then write openings sequentially to preserve byte-stream order.
         transcript.write_const_many(&combined_row)?;
-        for _ in 0..Zt::NUM_COLUMN_OPENINGS {
-            let column_idx = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
+
+        // ── 4a. Grinding (proof-of-work) ──────────────────────────────
+        // If GRINDING_BITS > 0, the prover searches for a nonce that
+        // commits extra bits of security, allowing fewer column openings.
+        transcript.grind(Zt::GRINDING_BITS)?;
+
+        let column_indices: Vec<usize> = (0..Zt::NUM_COLUMN_OPENINGS)
+            .map(|_| transcript.squeeze_challenge_idx(pp.linear_code.codeword_len()))
+            .collect();
+        for column_idx in column_indices {
             Self::open_merkle_trees_for_column(commit_hint, column_idx, &mut transcript)?;
         }
 

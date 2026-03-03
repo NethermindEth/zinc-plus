@@ -456,6 +456,307 @@ impl<const DEPTH: usize> Config for PnttConfigF2_16R4B64<DEPTH> {
     }
 }
 
+// ==================== F12289 field definition ==============================
+
+mod fq12289 {
+    #![allow(non_local_definitions)]
+    use ark_ff::{Fp64, MontBackend, MontConfig};
+
+    /// F12289: the smallest prime p such that p - 1 is divisible by 2^11.
+    /// p = 12289, p - 1 = 12288 = 2^12 × 3.
+    /// TWO_ADICITY = 12, so radix-2 NTT domains up to 2^12 = 4096 are supported.
+    /// Generator of F_p*: 11.
+    #[derive(MontConfig)]
+    #[modulus = "12289"]
+    #[generator = "11"]
+    pub struct Fq12289Config;
+
+    pub type Fq12289Backend = MontBackend<Fq12289Config, 1>;
+    pub type Fq12289 = Fp64<Fq12289Backend>;
+
+    #[allow(clippy::cast_possible_truncation)]
+    pub const MODULUS: u32 = Fq12289Config::MODULUS.0[0] as u32;
+}
+
+// ==================== F40961 field definition ==============================
+
+mod fq40961 {
+    #![allow(non_local_definitions)]
+    use ark_ff::{Fp64, MontBackend, MontConfig};
+
+    /// F40961: the smallest prime p such that p - 1 is divisible by 2^13.
+    /// p = 40961, p - 1 = 40960 = 2^13 × 5.
+    /// TWO_ADICITY = 13, so radix-2 NTT domains up to 2^13 = 8192 are supported.
+    /// Generator of F_p*: 3.
+    #[derive(MontConfig)]
+    #[modulus = "40961"]
+    #[generator = "3"]
+    pub struct Fq40961Config;
+
+    pub type Fq40961Backend = MontBackend<Fq40961Config, 1>;
+    pub type Fq40961 = Fp64<Fq40961Backend>;
+
+    #[allow(clippy::cast_possible_truncation)]
+    pub const MODULUS: u32 = Fq40961Config::MODULUS.0[0] as u32;
+}
+
+// ==================== F12289 rate 1/4 configurations =======================
+//
+// Field: F12289, p - 1 = 2^12 × 3.
+// Radix-8, 8th roots of unity: [1, -4043, 1479, 5146, -1, 4043, -1479, -5146].
+// Max NTT domain = 2^12 = 4096, so log2(BASE_DIM) + 3*DEPTH ≤ 12.
+
+/// Pseudo NTT configuration for F12289 with BASE_LEN=1, BASE_DIM=4 (rate 1/4).
+/// Row lengths: 8 (D=1), 64 (D=2), 512 (D=3).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF12289R4B1<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F12289 with BASE_LEN=2, BASE_DIM=8 (rate 1/4).
+/// Row lengths: 16 (D=1), 128 (D=2), 1024 (D=3).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF12289R4B2<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F12289 with BASE_LEN=4, BASE_DIM=16 (rate 1/4).
+/// Row lengths: 32 (D=1), 256 (D=2).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF12289R4B4<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F12289 with BASE_LEN=16, BASE_DIM=64 (rate 1/4).
+/// Row lengths: 128 (D=1), 1024 (D=2).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF12289R4B16<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F12289 with BASE_LEN=32, BASE_DIM=128 (rate 1/4).
+/// Row lengths: 256 (D=1).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF12289R4B32<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F12289 with BASE_LEN=64, BASE_DIM=256 (rate 1/4).
+/// Row lengths: 512 (D=1).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF12289R4B64<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F12289 with BASE_LEN=128, BASE_DIM=512 (rate 1/4).
+/// Row lengths: 1024 (D=1).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF12289R4B128<const DEPTH: usize>;
+
+// ==================== F12289 rate 1/2 configuration ========================
+//
+// Rate 1/4 is impossible for INPUT_LEN=2048 over F12289 because
+// OUTPUT_LEN = 8192 > 2^12 = 4096 (max NTT domain).
+// Rate 1/2 with BASE_LEN=4, BASE_DIM=8 at DEPTH=3 gives INPUT=2048, OUTPUT=4096.
+
+/// Pseudo NTT configuration for F12289 with BASE_LEN=4, BASE_DIM=8 (rate 1/2).
+/// Row lengths: 32 (D=1), 256 (D=2), 2048 (D=3).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF12289R2B4<const DEPTH: usize>;
+
+// ── F12289 rate 1/4 trait implementations ───────────────────────────────────
+
+impl<const DEPTH: usize> Config for PnttConfigF12289R4B1<DEPTH> {
+    type Field = fq12289::Fq12289;
+    const FIELD_MODULUS: u32 = fq12289::MODULUS;
+    const BASE_LEN: usize = 1;
+    const BASE_DIM: usize = 4;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, -4043, 1479, 5146, -1, 4043, -1479, -5146];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq12289::Fq12289Backend::into_bigint(x);
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+
+    fn assert_depth_valid() {
+        assert!(
+            DEPTH <= 3,
+            "DEPTH {DEPTH} exceeds max 3 for F12289 PNTT (BASE_DIM=4)"
+        );
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF12289R4B2<DEPTH> {
+    type Field = fq12289::Fq12289;
+    const FIELD_MODULUS: u32 = fq12289::MODULUS;
+    const BASE_LEN: usize = 2;
+    const BASE_DIM: usize = 8;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, -4043, 1479, 5146, -1, 4043, -1479, -5146];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq12289::Fq12289Backend::into_bigint(x);
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+
+    fn assert_depth_valid() {
+        assert!(
+            DEPTH <= 3,
+            "DEPTH {DEPTH} exceeds max 3 for F12289 PNTT (BASE_DIM=8)"
+        );
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF12289R4B4<DEPTH> {
+    type Field = fq12289::Fq12289;
+    const FIELD_MODULUS: u32 = fq12289::MODULUS;
+    const BASE_LEN: usize = 4;
+    const BASE_DIM: usize = 16;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, -4043, 1479, 5146, -1, 4043, -1479, -5146];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq12289::Fq12289Backend::into_bigint(x);
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+
+    fn assert_depth_valid() {
+        assert!(
+            DEPTH <= 2,
+            "DEPTH {DEPTH} exceeds max 2 for F12289 PNTT (BASE_DIM=16)"
+        );
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF12289R4B16<DEPTH> {
+    type Field = fq12289::Fq12289;
+    const FIELD_MODULUS: u32 = fq12289::MODULUS;
+    const BASE_LEN: usize = 16;
+    const BASE_DIM: usize = 64;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, -4043, 1479, 5146, -1, 4043, -1479, -5146];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq12289::Fq12289Backend::into_bigint(x);
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+
+    fn assert_depth_valid() {
+        assert!(
+            DEPTH <= 2,
+            "DEPTH {DEPTH} exceeds max 2 for F12289 PNTT (BASE_DIM=64)"
+        );
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF12289R4B32<DEPTH> {
+    type Field = fq12289::Fq12289;
+    const FIELD_MODULUS: u32 = fq12289::MODULUS;
+    const BASE_LEN: usize = 32;
+    const BASE_DIM: usize = 128;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, -4043, 1479, 5146, -1, 4043, -1479, -5146];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq12289::Fq12289Backend::into_bigint(x);
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+
+    fn assert_depth_valid() {
+        assert!(
+            DEPTH <= 1,
+            "DEPTH {DEPTH} exceeds max 1 for F12289 PNTT (BASE_DIM=128)"
+        );
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF12289R4B64<DEPTH> {
+    type Field = fq12289::Fq12289;
+    const FIELD_MODULUS: u32 = fq12289::MODULUS;
+    const BASE_LEN: usize = 64;
+    const BASE_DIM: usize = 256;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, -4043, 1479, 5146, -1, 4043, -1479, -5146];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq12289::Fq12289Backend::into_bigint(x);
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+
+    fn assert_depth_valid() {
+        assert!(
+            DEPTH <= 1,
+            "DEPTH {DEPTH} exceeds max 1 for F12289 PNTT (BASE_DIM=256)"
+        );
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF12289R4B128<DEPTH> {
+    type Field = fq12289::Fq12289;
+    const FIELD_MODULUS: u32 = fq12289::MODULUS;
+    const BASE_LEN: usize = 128;
+    const BASE_DIM: usize = 512;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, -4043, 1479, 5146, -1, 4043, -1479, -5146];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq12289::Fq12289Backend::into_bigint(x);
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+
+    fn assert_depth_valid() {
+        assert!(
+            DEPTH <= 1,
+            "DEPTH {DEPTH} exceeds max 1 for F12289 PNTT (BASE_DIM=512)"
+        );
+    }
+}
+
+// ==================== F40961 rate 1/4 configurations =======================
+//
+// Field: F40961, p - 1 = 2^13 × 5.
+// Radix-8, 8th roots of unity: [1, -9282, 14541, -3067, -1, 9282, -14541, 3067].
+// Max NTT domain = 2^13 = 8192, so log2(BASE_DIM) + 3*DEPTH ≤ 13.
+
+/// Pseudo NTT configuration for F40961 with BASE_LEN=32, BASE_DIM=128 (rate 1/4).
+/// Row lengths: 256 (D=1), 2048 (D=2).
+/// At D=2: OUTPUT_LEN = 128 × 64 = 8192 = 2^13, which exactly fills the NTT domain.
+#[derive(Clone, Copy)]
+pub struct PnttConfigF40961R4B32<const DEPTH: usize>;
+
+impl<const DEPTH: usize> Config for PnttConfigF40961R4B32<DEPTH> {
+    type Field = fq40961::Fq40961;
+    const FIELD_MODULUS: u32 = fq40961::MODULUS;
+    const BASE_LEN: usize = 32;
+    const BASE_DIM: usize = 128;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, -9282, 14541, -3067, -1, 9282, -14541, 3067];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq40961::Fq40961Backend::into_bigint(x);
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+
+    fn assert_depth_valid() {
+        assert!(
+            DEPTH <= 2,
+            "DEPTH {DEPTH} exceeds max 2 for F40961 PNTT (BASE_DIM=128)"
+        );
+    }
+}
+
+// ── F12289 rate 1/2 trait implementation ────────────────────────────────────
+
+impl<const DEPTH: usize> Config for PnttConfigF12289R2B4<DEPTH> {
+    type Field = fq12289::Fq12289;
+    const FIELD_MODULUS: u32 = fq12289::MODULUS;
+    const BASE_LEN: usize = 4;
+    const BASE_DIM: usize = 8;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, -4043, 1479, 5146, -1, 4043, -1479, -5146];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq12289::Fq12289Backend::into_bigint(x);
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+
+    fn assert_depth_valid() {
+        assert!(
+            DEPTH <= 3,
+            "DEPTH {DEPTH} exceeds max 3 for F12289 PNTT (BASE_DIM=8, rate 1/2)"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,5 +779,22 @@ mod tests {
         check_twiddles_generic::<PnttConfigF2_16R4B16<1>>();
         check_twiddles_generic::<PnttConfigF2_16R4B32<1>>();
         check_twiddles_generic::<PnttConfigF2_16R4B64<1>>();
+    }
+
+    #[test]
+    fn check_twiddles_f12289() {
+        check_twiddles_generic::<PnttConfigF12289R4B1<1>>();
+        check_twiddles_generic::<PnttConfigF12289R4B2<1>>();
+        check_twiddles_generic::<PnttConfigF12289R4B4<1>>();
+        check_twiddles_generic::<PnttConfigF12289R4B16<1>>();
+        check_twiddles_generic::<PnttConfigF12289R4B32<1>>();
+        check_twiddles_generic::<PnttConfigF12289R4B64<1>>();
+        check_twiddles_generic::<PnttConfigF12289R4B128<1>>();
+        check_twiddles_generic::<PnttConfigF12289R2B4<1>>();
+    }
+
+    #[test]
+    fn check_twiddles_f40961() {
+        check_twiddles_generic::<PnttConfigF40961R4B32<1>>();
     }
 }

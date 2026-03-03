@@ -16,6 +16,10 @@ pub use pntt::radix8::params::{
     PnttConfigF2_16_1,
     PnttConfigF2_16R4B1, PnttConfigF2_16R4B2, PnttConfigF2_16R4B4,
     PnttConfigF2_16R4B16, PnttConfigF2_16R4B32, PnttConfigF2_16R4B64,
+    PnttConfigF12289R4B1, PnttConfigF12289R4B2, PnttConfigF12289R4B4,
+    PnttConfigF12289R4B16, PnttConfigF12289R4B32, PnttConfigF12289R4B64,
+    PnttConfigF12289R4B128, PnttConfigF12289R2B4,
+    PnttConfigF40961R4B32,
     PnttInt, Radix8PnttParams,
 };
 #[cfg(feature = "parallel")]

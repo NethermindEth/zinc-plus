@@ -86,7 +86,7 @@ fn sha256_lookup_specs() -> Vec<LookupColumnSpec> {
     (0..10)
         .map(|i| LookupColumnSpec {
             column_index: i,
-            table_type: LookupTableType::BitPoly { width: 32 },
+            table_type: LookupTableType::BitPoly { width: 32, chunk_width: None },
         })
         .collect()
 }
@@ -97,7 +97,7 @@ fn sha256_lookup_specs() -> Vec<LookupColumnSpec> {
 /// valid BitPoly{32}, which enforces the correctness of the AND/Maj
 /// operations without F₂ multiplication gates.
 fn sha256_affine_lookup_specs() -> Vec<AffineLookupSpec> {
-    let bp32 = LookupTableType::BitPoly { width: 32 };
+    let bp32 = LookupTableType::BitPoly { width: 32, chunk_width: None };
     vec![
         // Ch lookup 1: ê[t] + ê[t−1] − 2·ch_ef[t] ∈ BitPoly{32}
         AffineLookupSpec {

@@ -38,12 +38,14 @@ use zinc_utils::{
 use zip_plus::{
     code::{
         LinearCode,
-        iprs::{IprsCode, PnttConfigF2_16R4B64},
+        iprs::{IprsCode, PnttConfigF2_16R4B4, PnttConfigF2_16R4B16, PnttConfigF2_16R4B64},
     },
     pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
+    pcs::folding::split_columns,
 };
 
 use zinc_ecdsa_uair::EcdsaUairInt;
+use zinc_ecdsa_uair::witness::GenerateWitness as EcdsaGenerateWitness;
 use zinc_sha256_uair::{Sha256Uair, witness::GenerateWitness};
 use zinc_piop::projections::{
     project_trace_coeffs, project_trace_to_field,
@@ -72,7 +74,23 @@ use zinc_uair::Uair;
 
 const INT_LIMBS: usize = U64::LIMBS;
 type F = MontyField<{ INT_LIMBS * 3 }>;
-type FScalar = MontyField<{ INT_LIMBS * 3 }>;
+/// 256-bit PCS field for ECDSA — matches the secp256k1 PIOP field size.
+type FScalar = MontyField<{ INT_LIMBS * 4 }>;
+
+/// 256-bit Montgomery field for ECDSA-specific PIOP steps.
+///
+/// The ECDSA constraints hold mod secp256k1's base field prime p,
+/// so the PIOP field for ECDSA uses p directly (no random prime).
+type EcdsaField = MontyField<{ INT_LIMBS * 4 }>;
+
+/// Field config for ECDSA PIOP steps: secp256k1 base field p.
+fn secp256k1_field_config() -> crypto_bigint::modular::MontyParams<{ U64::LIMBS * 4 }> {
+    let modulus = crypto_bigint::Uint::<{ U64::LIMBS * 4 }>::from_be_hex(
+        "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",
+    );
+    let modulus = crypto_bigint::Odd::new(modulus).expect("secp256k1 p is odd");
+    crypto_bigint::modular::MontyParams::new(modulus)
+}
 
 struct Sha256ZipTypes<CwCoeff, const D_PLUS_ONE: usize>(PhantomData<CwCoeff>);
 
@@ -109,7 +127,7 @@ impl ZipTypes for EcdsaScalarZipTypes {
     const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = Int<{ INT_LIMBS * 4 }>;
     type Cw = Int<{ INT_LIMBS * 5 }>;
-    type Fmod = Uint<{ INT_LIMBS * 3 }>;
+    type Fmod = Uint<{ INT_LIMBS * 4 }>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
     type Pt = i128;
@@ -134,19 +152,39 @@ type IprsInt4R4B64<const DEPTH: usize, const CHECK: bool> = IprsCode<
     CHECK,
 >;
 
+// ── Folded SHA-256 PCS type (BinaryPoly<16>, half the width of BinaryPoly<32>) ──
+//
+// Uses PnttConfigF2_16R4B16<2> (DEPTH=2) which gives INPUT_LEN = 16 × 8² = 1024,
+// matching a row_len of 1024.  Each split column has 2× the original column length
+// so the commitment row fits in a single BinaryPoly<16> opening instead of two.
+type FoldedShaZt = Sha256ZipTypes<i64, 16>;
+type FoldedShaLc = IprsCode<FoldedShaZt, PnttConfigF2_16R4B16<2>, BinaryPolyWideningMulByScalar<i64>, UNCHECKED>;
+
+// ── 4x Folded SHA-256 PCS type (BinaryPoly<8>, a quarter the width of BinaryPoly<32>) ──
+//
+// Uses PnttConfigF2_16R4B4<3> (BASE_LEN=4, DEPTH=3) which gives
+// INPUT_LEN = 4 × 2^9 = 2048, matching a row_len of 2048.  Each 4x-split
+// column has 4× the original column length, so the commitment row fits in a
+// single BinaryPoly<8> opening instead of four.
+type FoldedSha4xZt = Sha256ZipTypes<i64, 8>;
+type FoldedSha4xLc = IprsCode<FoldedSha4xZt, PnttConfigF2_16R4B4<3>, BinaryPolyWideningMulByScalar<i64>, UNCHECKED>;
+
 // ─── Parameters ─────────────────────────────────────────────────────────────
 
 const SHA256_8X_NUM_VARS: usize = 9;
 const SHA256_BATCH_SIZE: usize = 30;       // 30 SHA-256 columns (27 bitpoly + 3 int)
 const ECDSA_NUM_VARS: usize = 9;
-const ECDSA_BATCH_SIZE: usize = zinc_ecdsa_uair::NUM_COLS;
 const SHA256_LOOKUP_COL_COUNT: usize = 10;
 
+/// Default lookup specs: 8 chunks of 2^4 each (chunk_width=4, total_width=32).
+///
+/// 32 / 4 = 8 chunks, each with a subtable of size 2^4 = 16 entries.
+/// This gives the smallest compressed proof size.
 fn sha256_lookup_specs() -> Vec<LookupColumnSpec> {
     (0..SHA256_LOOKUP_COL_COUNT)
         .map(|i| LookupColumnSpec {
             column_index: i,
-            table_type: LookupTableType::BitPoly { width: 32 },
+            table_type: LookupTableType::BitPoly { width: 32, chunk_width: Some(4) },
         })
         .collect()
 }
@@ -156,7 +194,42 @@ fn sha256_affine_lookup_specs() -> Vec<AffineLookupSpec> {
         COL_E_HAT, COL_E_TM1, COL_CH_EF_HAT, COL_E_TM2, COL_CH_NEG_EG_HAT,
         COL_A_HAT, COL_A_TM1, COL_A_TM2, COL_MAJ_HAT,
     };
-    let bp32 = LookupTableType::BitPoly { width: 32 };
+    let bp32 = LookupTableType::BitPoly { width: 32, chunk_width: Some(4) };
+    vec![
+        AffineLookupSpec {
+            terms: vec![(COL_E_HAT, 1), (COL_E_TM1, 1), (COL_CH_EF_HAT, -2)],
+            constant_offset_bits: 0,
+            table_type: bp32.clone(),
+        },
+        AffineLookupSpec {
+            terms: vec![(COL_E_HAT, -1), (COL_E_TM2, 1), (COL_CH_NEG_EG_HAT, -2)],
+            constant_offset_bits: 0xFFFF_FFFF,
+            table_type: bp32.clone(),
+        },
+        AffineLookupSpec {
+            terms: vec![(COL_A_HAT, 1), (COL_A_TM1, 1), (COL_A_TM2, 1), (COL_MAJ_HAT, -2)],
+            constant_offset_bits: 0,
+            table_type: bp32,
+        },
+    ]
+}
+
+/// Lookup specs with 4 chunks of 2^8 each (chunk_width=8, total_width=32).
+fn sha256_lookup_specs_4chunks() -> Vec<LookupColumnSpec> {
+    (0..SHA256_LOOKUP_COL_COUNT)
+        .map(|i| LookupColumnSpec {
+            column_index: i,
+            table_type: LookupTableType::BitPoly { width: 32, chunk_width: Some(8) },
+        })
+        .collect()
+}
+
+fn sha256_affine_lookup_specs_4chunks() -> Vec<AffineLookupSpec> {
+    use zinc_sha256_uair::{
+        COL_E_HAT, COL_E_TM1, COL_CH_EF_HAT, COL_E_TM2, COL_CH_NEG_EG_HAT,
+        COL_A_HAT, COL_A_TM1, COL_A_TM2, COL_MAJ_HAT,
+    };
+    let bp32 = LookupTableType::BitPoly { width: 32, chunk_width: Some(8) };
     vec![
         AffineLookupSpec {
             terms: vec![(COL_E_HAT, 1), (COL_E_TM1, 1), (COL_CH_EF_HAT, -2)],
@@ -181,19 +254,12 @@ fn generate_sha256_trace(num_vars: usize) -> Vec<DenseMultilinearExtension<Binar
     <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(num_vars, &mut rng)
 }
 
-fn generate_zero_scalar_trace(
+/// Generate a valid ECDSA trace with real F_p witness (secp256k1).
+fn generate_ecdsa_trace(
     num_vars: usize,
-    num_cols: usize,
 ) -> Vec<DenseMultilinearExtension<Int<{ INT_LIMBS * 4 }>>> {
-    let zero = Int::<{ INT_LIMBS * 4 }>::default();
-    let rows = 1usize << num_vars;
-    (0..num_cols)
-        .map(|_| DenseMultilinearExtension::from_evaluations_vec(
-            num_vars,
-            vec![zero; rows],
-            zero,
-        ))
-        .collect()
+    let mut rng = rand::rng();
+    <EcdsaUairInt as EcdsaGenerateWitness<Int<4>>>::generate_witness(num_vars, &mut rng)
 }
 
 /// Interpret a `BinaryPoly<32>` as a 32-bit unsigned integer (polynomial
@@ -219,17 +285,17 @@ fn bp_to_u32(bp: &BinaryPoly<32>) -> u32 {
 ///   3.  SHA/PCS/Commit        — Zip+ commit for SHA batch
 ///   4.  ECDSA/PCS/Commit      — Zip+ commit for ECDSA batch
 ///   5.  SHA/PIOP/FieldSetup   — transcript + random field config
-///   6.  SHA/PIOP/ProjectIC    — project_trace_coeffs + project_scalars
+///   6.  SHA/PIOP/Project Ideal Check    — project_trace_coeffs + project_scalars
 ///   7.  ECDSA/PIOP/FieldSetup — transcript + random field config
-///   8.  ECDSA/PIOP/ProjectIC  — project ECDSA trace to DynamicPolynomialF
+///   8.  ECDSA/PIOP/Project Ideal Check  — project ECDSA trace to DynamicPolynomialF
 ///   9.  SHA/PIOP/IdealCheck
 ///  10.  ECDSA/PIOP/IdealCheck
-///  11.  SHA/PIOP/ProjectCPR   — project_scalars_to_field + project_trace_to_field
-///  12.  ECDSA/PIOP/ProjectCPR — same for ECDSA
-///  13.  PIOP/CPR              — unified multi-degree sumcheck (SHA + ECDSA CPR only)
+///  11.  SHA/PIOP/Project Main field sumcheck   — project_scalars_to_field + project_trace_to_field
+///  12.  ECDSA/PIOP/Project Main field sumcheck — same for ECDSA
+///  13.  PIOP/Main field sumcheck              — unified multi-degree sumcheck
 ///  14.  SHA/PIOP/LookupExtract — extract lookup columns from field trace
-///  15.  SHA/PIOP/Lookup        — lookup sumcheck (standalone, separate from CPR)
-///  16.  PIOP/BatchedCPR+Lookup — SHA CPR + ECDSA CPR + SHA Lookup in one
+///  15.  SHA/PIOP/Lookup        — lookup sumcheck (standalone)
+///  16.  PIOP/Batched Main field sumcheck+Lookup — all main field sumchecks + SHA Lookup in one
 ///                                multi-degree sumcheck (A/B comparison with 13+15)
 ///  17.  SHA/PCS/Prove
 ///  18.  ECDSA/PCS/Prove
@@ -256,6 +322,22 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     let sha_params = ZipPlusParams::<ShaZt, ShaLc>::new(SHA256_8X_NUM_VARS, 1, ShaLc::new(512));
     let ec_params  = ZipPlusParams::<EcZt, EcLc>::new(ECDSA_NUM_VARS, 1, EcLc::new(512));
 
+    // Folded SHA params: split columns are BinaryPoly<16> with 2× original row length
+    // (1024 entries per column after splitting), so row_len = 1024 and num_rows = 1.
+    let folded_sha_params = ZipPlusParams::<FoldedShaZt, FoldedShaLc>::new(
+        SHA256_8X_NUM_VARS + 1, // folded columns have num_vars + 1
+        1,
+        FoldedShaLc::new(1024),
+    );
+
+    // 4x-Folded SHA params: split columns are BinaryPoly<8> with 4× original row length
+    // (2048 entries per column after two splits), so row_len = 2048 and num_rows = 1.
+    let folded_4x_sha_params = ZipPlusParams::<FoldedSha4xZt, FoldedSha4xLc>::new(
+        SHA256_8X_NUM_VARS + 2, // 4x-folded columns have num_vars + 2
+        1,
+        FoldedSha4xLc::new(2048),
+    );
+
     let sha_lookup_specs = sha256_lookup_specs();
     let sha_affine_specs = sha256_affine_lookup_specs();
 
@@ -271,12 +353,18 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
 
     // ── 2. ECDSA Witness Generation ─────────────────────────────────
     group.bench_function("ECDSA/WitnessGen", |b| {
-        b.iter(|| black_box(generate_zero_scalar_trace(ECDSA_NUM_VARS, ECDSA_BATCH_SIZE)));
+        b.iter(|| black_box(generate_ecdsa_trace(ECDSA_NUM_VARS)));
     });
 
     // Pre-generate traces for subsequent steps.
     let sha_trace = generate_sha256_trace(SHA256_8X_NUM_VARS);
-    let ecdsa_trace = generate_zero_scalar_trace(ECDSA_NUM_VARS, ECDSA_BATCH_SIZE);
+    // Real F_p witness for ECDSA-only steps (constraints hold mod secp256k1 p).
+    let ecdsa_real_trace = generate_ecdsa_trace(ECDSA_NUM_VARS);
+    // Real ECDSA witness for combined SHA+ECDSA steps.  The values are
+    // the same Int<4> elements as ecdsa_real_trace; constraint checks
+    // in the 192-bit PIOP field won't hold (they require secp256k1 p),
+    // but the PCS proof size is realistic.
+    let ecdsa_trace = generate_ecdsa_trace(ECDSA_NUM_VARS);
 
     // Build PCS traces — exclude public columns AND shift source
     // columns (whose evaluation claims are resolved by the shift
@@ -292,10 +380,31 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         .filter(|(i, _)| !ec_excluded.contains(i))
         .map(|(_, c)| c.clone()).collect();
 
-    // ── 3. SHA PCS Commit ───────────────────────────────────────────
+    // ── 2b. SHA Folding / Split Columns ─────────────────────────────
+    //
+    // Measures the cost of splitting BinaryPoly<32> → BinaryPoly<16>
+    // (2x folding) for the SHA PCS-committed columns.
+    group.bench_function("SHA/Folding/SplitColumns", |b| {
+        b.iter(|| {
+            let split = split_columns::<32, 16>(&sha_pcs_trace);
+            black_box(split);
+        });
+    });
+
+    let sha_split_trace: Vec<DenseMultilinearExtension<BinaryPoly<16>>> =
+        split_columns::<32, 16>(&sha_pcs_trace);
+
+    // ── 3. SHA PCS Commit (original — BinaryPoly<32>) ───────────────
     group.bench_function("SHA/PCS/Commit", |b| {
         b.iter(|| black_box(
             ZipPlus::<ShaZt, ShaLc>::commit(&sha_params, &sha_pcs_trace).expect("commit")
+        ));
+    });
+
+    // ── 3b. SHA PCS Commit (folded — BinaryPoly<16>) ────────────────
+    group.bench_function("SHA/PCS/Commit (folded)", |b| {
+        b.iter(|| black_box(
+            ZipPlus::<FoldedShaZt, FoldedShaLc>::commit(&folded_sha_params, &sha_split_trace).expect("commit")
         ));
     });
 
@@ -325,7 +434,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     // With MLE-first (max_degree == 1), the pipeline skips the full
     // project_trace_coeffs and only calls project_scalars.  Measure
     // the actual cost seen in the E2E pipeline.
-    group.bench_function("SHA/PIOP/ProjectIC", |b| {
+    group.bench_function("SHA/PIOP/Project Ideal Check", |b| {
         let mut tr_setup = zinc_transcript::KeccakTranscript::new();
         let fcfg = tr_setup.get_random_field_cfg::<F, <F as Field>::Inner, MillerRabin>();
         assert_eq!(sha_max_degree, 1, "SHA-256 UAIR should have max_degree == 1 (MLE-first path)");
@@ -345,31 +454,31 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     });
 
     // ── 7. ECDSA PIOP / Field Setup ─────────────────────────────────
+    //
+    // For ECDSA the PIOP field is secp256k1's base-field p (fixed, 256-bit).
+    // No random prime is sampled from the transcript.
     group.bench_function("ECDSA/PIOP/FieldSetup", |b| {
         b.iter(|| {
-            let mut transcript = zinc_transcript::KeccakTranscript::new();
-            let field_cfg = transcript.get_random_field_cfg::<
-                F, <F as Field>::Inner, MillerRabin
-            >();
+            let field_cfg = secp256k1_field_config();
             black_box(field_cfg);
         });
     });
 
     // ── 8. ECDSA PIOP / Project Trace for Ideal Check ───────────────
     //
-    // Convert Int<4> trace to DynamicPolynomialF + project_scalars.
-    group.bench_function("ECDSA/PIOP/ProjectIC", |b| {
-        let mut tr_setup = zinc_transcript::KeccakTranscript::new();
-        let fcfg = tr_setup.get_random_field_cfg::<F, <F as Field>::Inner, MillerRabin>();
+    // Convert Int<4> trace to DynamicPolynomialF<EcdsaField> + project_scalars.
+    // Uses secp256k1 p so that Int<4> → field reduction preserves F_p arithmetic.
+    group.bench_function("ECDSA/PIOP/Project Ideal Check", |b| {
+        let fcfg = secp256k1_field_config();
         b.iter(|| {
-            let projected_trace: Vec<DenseMultilinearExtension<DynamicPolynomialF<F>>> =
-                ecdsa_trace.iter().map(|col_mle| {
+            let projected_trace: Vec<DenseMultilinearExtension<DynamicPolynomialF<EcdsaField>>> =
+                ecdsa_real_trace.iter().map(|col_mle| {
                     col_mle.iter().map(|elem|
-                        DynamicPolynomialF { coeffs: vec![F::from_with_cfg(elem.clone(), &fcfg)] }
+                        DynamicPolynomialF { coeffs: vec![EcdsaField::from_with_cfg(elem.clone(), &fcfg)] }
                     ).collect()
                 }).collect();
-            let projected_scalars = project_scalars::<F, EcdsaUairInt>(|scalar| {
-                DynamicPolynomialF { coeffs: vec![F::from_with_cfg(scalar.clone(), &fcfg)] }
+            let projected_scalars = project_scalars::<EcdsaField, EcdsaUairInt>(|scalar| {
+                DynamicPolynomialF { coeffs: vec![EcdsaField::from_with_cfg(scalar.clone(), &fcfg)] }
             });
             black_box((&projected_trace, &projected_scalars));
         });
@@ -398,7 +507,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                 let _ = zinc_piop::ideal_check::IdealCheckProtocol::<F>::prove_mle_first::<Sha256Uair, 32>(
                     &mut transcript, &sha_trace, &projected_scalars,
                     sha_num_constraints, SHA256_8X_NUM_VARS, &field_cfg,
-                ).expect("IC");
+                ).expect("Ideal Check");
                 total += t.elapsed();
             }
             total
@@ -406,39 +515,40 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     });
 
     // ── 10. ECDSA PIOP / Ideal Check ───────────────────────────────
+    //
+    // Runs over EcdsaField (secp256k1 p, 256-bit) so that Int<4>
+    // constraint identities hold after field reduction.
     group.bench_function("ECDSA/PIOP/IdealCheck", |b| {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
                 let mut transcript = zinc_transcript::KeccakTranscript::new();
-                let field_cfg = transcript.get_random_field_cfg::<
-                    F, <F as Field>::Inner, MillerRabin
-                >();
-                let projected_trace: Vec<DenseMultilinearExtension<DynamicPolynomialF<F>>> =
-                    ecdsa_trace.iter().map(|col_mle| {
+                let field_cfg = secp256k1_field_config();
+                let projected_trace: Vec<DenseMultilinearExtension<DynamicPolynomialF<EcdsaField>>> =
+                    ecdsa_real_trace.iter().map(|col_mle| {
                         col_mle.iter().map(|elem|
-                            DynamicPolynomialF { coeffs: vec![F::from_with_cfg(elem.clone(), &field_cfg)] }
+                            DynamicPolynomialF { coeffs: vec![EcdsaField::from_with_cfg(elem.clone(), &field_cfg)] }
                         ).collect()
                     }).collect();
-                let projected_scalars = project_scalars::<F, EcdsaUairInt>(|scalar| {
-                    DynamicPolynomialF { coeffs: vec![F::from_with_cfg(scalar.clone(), &field_cfg)] }
+                let projected_scalars = project_scalars::<EcdsaField, EcdsaUairInt>(|scalar| {
+                    DynamicPolynomialF { coeffs: vec![EcdsaField::from_with_cfg(scalar.clone(), &field_cfg)] }
                 });
                 let t = Instant::now();
-                let _ = zinc_piop::ideal_check::IdealCheckProtocol::<F>::prove_as_subprotocol::<EcdsaUairInt>(
+                let _ = zinc_piop::ideal_check::IdealCheckProtocol::<EcdsaField>::prove_as_subprotocol::<EcdsaUairInt>(
                     &mut transcript, &projected_trace, &projected_scalars,
                     ecdsa_num_constraints, ECDSA_NUM_VARS, &field_cfg,
-                ).expect("IC");
+                ).expect("Ideal Check");
                 total += t.elapsed();
             }
             total
         });
     });
 
-    // ── 11. SHA PIOP / Project Trace for CPR ────────────────────────
+    // ── 11. SHA PIOP / Project Trace for Main field sumcheck ────────────────────────
     //
     // project_scalars_to_field + project_trace_to_field — the F[X]→F
-    // specialisation that pipeline::prove includes in cpr_time.
-    group.bench_function("SHA/PIOP/ProjectCPR", |b| {
+    // specialisation that pipeline::prove includes in main_field_sumcheck_time.
+    group.bench_function("SHA/PIOP/Project Main field sumcheck", |b| {
         let mut tr_setup = zinc_transcript::KeccakTranscript::new();
         let fcfg = tr_setup.get_random_field_cfg::<F, <F as Field>::Inner, MillerRabin>();
         let proj_elem: F = tr_setup.get_field_challenge(&fcfg);
@@ -461,34 +571,39 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         });
     });
 
-    // ── 12. ECDSA PIOP / Project Trace for CPR ──────────────────────
-    group.bench_function("ECDSA/PIOP/ProjectCPR", |b| {
-        let mut tr_setup = zinc_transcript::KeccakTranscript::new();
-        let fcfg = tr_setup.get_random_field_cfg::<F, <F as Field>::Inner, MillerRabin>();
-        let proj_elem: F = tr_setup.get_field_challenge(&fcfg);
-        let ec_proj_trace_bench: Vec<DenseMultilinearExtension<DynamicPolynomialF<F>>> =
-            ecdsa_trace.iter().map(|col_mle| {
+    // ── 12. ECDSA PIOP / Project Trace for Main field sumcheck ──────────────────────
+    //
+    // EcdsaField (secp256k1 p). Degree-0 polynomials, so evaluation
+    // at any projection element is trivially the constant.
+    group.bench_function("ECDSA/PIOP/Project Main field sumcheck", |b| {
+        let fcfg = secp256k1_field_config();
+        let proj_elem: EcdsaField = {
+            let mut tr_setup = zinc_transcript::KeccakTranscript::new();
+            tr_setup.get_field_challenge(&fcfg)
+        };
+        let ec_proj_trace_bench: Vec<DenseMultilinearExtension<DynamicPolynomialF<EcdsaField>>> =
+            ecdsa_real_trace.iter().map(|col_mle| {
                 col_mle.iter().map(|elem|
-                    DynamicPolynomialF { coeffs: vec![F::from_with_cfg(elem.clone(), &fcfg)] }
+                    DynamicPolynomialF { coeffs: vec![EcdsaField::from_with_cfg(elem.clone(), &fcfg)] }
                 ).collect()
             }).collect();
-        let proj_scalars_setup = project_scalars::<F, EcdsaUairInt>(|scalar| {
-            DynamicPolynomialF { coeffs: vec![F::from_with_cfg(scalar.clone(), &fcfg)] }
+        let proj_scalars_setup = project_scalars::<EcdsaField, EcdsaUairInt>(|scalar| {
+            DynamicPolynomialF { coeffs: vec![EcdsaField::from_with_cfg(scalar.clone(), &fcfg)] }
         });
         b.iter(|| {
             let fproj_scalars =
                 project_scalars_to_field(proj_scalars_setup.clone(), &proj_elem)
                     .expect("scalar projection");
-            let field_trace = project_trace_to_field::<F, 1>(
+            let field_trace = project_trace_to_field::<EcdsaField, 1>(
                 &[], &[], &ec_proj_trace_bench, &proj_elem,
             );
             black_box((&fproj_scalars, &field_trace));
         });
     });
 
-    // ── 13. Unified PIOP / CPR (SHA + ECDSA) ────────────────────────
+    // ── 13. Unified PIOP / Main field sumcheck (SHA + ECDSA) ────────────────────────
     //
-    // Both CPR sumcheck groups are batched into a single multi-degree
+    // Both main field sumcheck groups are batched into a single multi-degree
     // sumcheck.  One shared transcript, IC evaluation point, and
     // projecting element — matching the unified pipeline.
     assert_eq!(SHA256_8X_NUM_VARS, ECDSA_NUM_VARS,
@@ -545,7 +660,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     let ec_fproj_scalars = project_scalars_to_field(ec_proj_scalars.clone(), &sha_proj_elem)
         .expect("ECDSA scalar projection failed");
 
-    // Pre-compute the post-CPR transcript state (needed by lookup benchmarks).
+    // Pre-compute the post-main-field-sumcheck transcript state (needed by lookup benchmarks).
     let unified_tr_post_cpr = {
         let mut tr = unified_tr.clone();
         let sg = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::build_prover_group::<Sha256Uair>(
@@ -574,7 +689,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         tr
     };
 
-    group.bench_function("PIOP/CPR", |b| {
+    group.bench_function("PIOP/Main field sumcheck", |b| {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
@@ -614,18 +729,18 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
 
     // ── 13a. Unified Eval Sumcheck (eq + shift) ──────────────────────
     //
-    // After the CPR multi-degree sumcheck finalizes, a unified batched
+    // After the main field sumcheck multi-degree sumcheck finalizes, a unified batched
     // sumcheck reduces ALL column evaluation claims to a single random
     // point ("point unification"):
     //   • eq-based claims for every SHA-256 up-eval column (shift=0)
     //   • eq-based claims for every ECDSA up-eval column   (shift=0)
     //   • genuine shift claims for ECDSA shifted columns   (shift=1)
     //
-    // Pre-compute CPR state (eval point, up/down evals) and field
+    // Pre-compute main field sumcheck state (eval point, up/down evals) and field
     // trace columns.  Only the shift_sumcheck_prove call is timed.
     let ec_sig = EcdsaUairInt::signature();
 
-    // Run a fresh CPR to obtain the evaluation point, up_evals and down_evals.
+    // Run a fresh main field sumcheck to obtain the evaluation point, up_evals and down_evals.
     let (cpr_eval_point, sha_up_evals, ec_up_evals, ec_down_evals) = {
         let mut tr = unified_tr.clone();
         let sha_g = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::build_prover_group::<Sha256Uair>(
@@ -654,7 +769,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         (sha_st.evaluation_point, sha_up, ec_up, ec_down)
     };
 
-    // Capture the post-CPR-finalize transcript state.
+    // Capture the post-main-field-sumcheck-finalize transcript state.
     let unified_eval_pre_transcript = {
         let mut tr = unified_tr.clone();
         let sha_g = zinc_piop::combined_poly_resolver::CombinedPolyResolver::<F>::build_prover_group::<Sha256Uair>(
@@ -749,7 +864,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     // ── 14. SHA PIOP / Lookup Extract ────────────────────────────────
     //
     // Extract lookup columns from the projected field trace. In
-    // the pipeline this cost is included in cpr_time.
+    // the pipeline this cost is included in main_field_sumcheck_time.
     {
         group.bench_function("SHA/PIOP/LookupExtract", |b| {
             b.iter(|| {
@@ -847,7 +962,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         });
     }
 
-    // ── 16. PIOP / Batched CPR+Lookup (multi-degree sumcheck A/B) ──
+    // ── 16. PIOP / Batched Main field sumcheck+Lookup (multi-degree sumcheck A/B) ──
     //
     // Direct comparison: batches SHA CPR + ECDSA CPR + SHA Lookup into
     // a single multi-degree sumcheck (matching prove_classic_logup
@@ -886,7 +1001,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
             .collect();
         let lk_groups_def = group_lookup_specs(&remapped_b);
 
-        group.bench_function("PIOP/BatchedCPR+Lookup", |b| {
+        group.bench_function("PIOP/Batched Main field sumcheck+Lookup", |b| {
             b.iter_custom(|iters| {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
@@ -987,7 +1102,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     let sha_pcs_point: Vec<F> = cpr_eval_point[..SHA256_8X_NUM_VARS].to_vec();
     // ECDSA shares the same CPR eval point (multi-degree sumcheck) but
     // may have a different num_vars.
-    let ecdsa_pcs_point: Vec<F> = cpr_eval_point[..ECDSA_NUM_VARS].to_vec();
+    let _ecdsa_pcs_point: Vec<F> = cpr_eval_point[..ECDSA_NUM_VARS].to_vec();
 
     let (sha_hint, _) = ZipPlus::<ShaZt, ShaLc>::commit(&sha_params, &sha_pcs_trace).expect("commit");
     group.bench_function("SHA/PCS/Prove", |b| {
@@ -999,11 +1114,43 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     });
 
     // ── 18. ECDSA PCS Prove ──────────────────────────────────────────
+    // The ECDSA PCS operates over FScalar (256-bit MontyField<4>), not the
+    // 192-bit PiopField F.  Convert the shared eval point via the same
+    // path used by the dual-circuit pipeline (piop_point_to_pcs_field).
+    let ecdsa_pcs_point_f2: Vec<FScalar> = {
+        let pcs2_fcfg = zinc_transcript::KeccakTranscript::default()
+            .get_random_field_cfg::<FScalar, <EcdsaScalarZipTypes as ZipTypes>::Fmod, <EcdsaScalarZipTypes as ZipTypes>::PrimeTest>();
+        zinc_snark::pipeline::piop_point_to_pcs_field(&cpr_eval_point[..ECDSA_NUM_VARS], &pcs2_fcfg)
+    };
     let (ec_hint, _) = ZipPlus::<EcZt, EcLc>::commit(&ec_params, &ecdsa_pcs_trace).expect("commit");
     group.bench_function("ECDSA/PCS/Prove", |b| {
         b.iter(|| {
             black_box(
-                ZipPlus::<EcZt, EcLc>::prove::<FScalar, UNCHECKED>(&ec_params, &ecdsa_pcs_trace, &ecdsa_pcs_point, &ec_hint)
+                ZipPlus::<EcZt, EcLc>::prove::<FScalar, UNCHECKED>(&ec_params, &ecdsa_pcs_trace, &ecdsa_pcs_point_f2, &ec_hint)
+            )
+        });
+    });
+
+    // ── 18b. SHA PCS Prove (folded — BinaryPoly<16>) ──────────────
+    //
+    // For the folded PCS, the evaluation point has one extra coordinate
+    // (γ from the folding protocol). We append a dummy extra coordinate.
+    let folded_sha_pcs_point: Vec<F> = {
+        let mut pt = sha_pcs_point.clone();
+        pt.push(F::one_with_cfg(&sha_fcfg)); // placeholder γ
+        pt
+    };
+
+    let (folded_sha_hint, _) = ZipPlus::<FoldedShaZt, FoldedShaLc>::commit(
+        &folded_sha_params, &sha_split_trace,
+    ).expect("commit");
+
+    group.bench_function("SHA/PCS/Prove (folded)", |b| {
+        b.iter(|| {
+            black_box(
+                ZipPlus::<FoldedShaZt, FoldedShaLc>::prove::<F, UNCHECKED>(
+                    &folded_sha_params, &sha_split_trace, &folded_sha_pcs_point, &folded_sha_hint,
+                )
             )
         });
     });
@@ -1173,9 +1320,9 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
 
     // In a real deployment the verifier would also check:
     //   u1 == sha_digest_as_scalar * s^{-1}  (mod secp256k1 order)
-    // using the public signature parameter s.  The current benchmark
-    // uses a zero ECDSA trace, so we skip the modular-arithmetic
-    // assertion and only measure the extraction + reconstruction cost.
+    // using the public signature parameter s.  We skip the modular-
+    // arithmetic assertion and only measure the extraction +
+    // reconstruction cost.
     eprintln!("  SHA-256 digest (instance 0): {:08x?}", sha_digest);
     eprintln!("  ECDSA u1 (from b1 bits):    {}",
         ecdsa_u1.iter().map(|b| format!("{b:02x}")).collect::<String>());
@@ -1214,6 +1361,1797 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
             let u1 = black_box(reconstruct_u1(&ecdsa_trace));
         });
     });
+
+    // ── 21. E2E Total Prover (folded SHA PCS) ────────────────────
+    //
+    // Same as E2E/Prover but uses prove_dual_circuit_folded, which
+    // commits the SHA trace as split BinaryPoly<16> columns (folding
+    // BinaryPoly<32>→BinaryPoly<16>) so each PCS opening is ~2× smaller.
+    group.bench_function("E2E/Prover (folded SHA)", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let t = Instant::now();
+                let _ = zinc_snark::pipeline::prove_dual_circuit_folded::<
+                    Sha256Uair,
+                    EcdsaUairInt,
+                    Int<{ INT_LIMBS * 4 }>,
+                    FoldedShaZt, FoldedShaLc,
+                    EcZt, EcLc,
+                    FScalar,
+                    32, 16,
+                    UNCHECKED,
+                >(
+                    &folded_sha_params, &sha_trace,
+                    &ec_params, &ecdsa_trace,
+                    SHA256_8X_NUM_VARS,
+                    &sha_lookup_specs,
+                    &sha_affine_specs,
+                );
+                total += t.elapsed();
+            }
+            total
+        });
+    });
+
+    // ── 22. E2E Total Verifier (folded SHA PCS) ───────────────────
+    let folded_dual_proof = zinc_snark::pipeline::prove_dual_circuit_folded::<
+        Sha256Uair,
+        EcdsaUairInt,
+        Int<{ INT_LIMBS * 4 }>,
+        FoldedShaZt, FoldedShaLc,
+        EcZt, EcLc,
+        FScalar,
+        32, 16,
+        UNCHECKED,
+    >(
+        &folded_sha_params, &sha_trace,
+        &ec_params, &ecdsa_trace,
+        SHA256_8X_NUM_VARS,
+        &sha_lookup_specs,
+        &sha_affine_specs,
+    );
+
+    group.bench_function("E2E/Verifier (folded SHA)", |b| {
+        b.iter(|| {
+            let r = zinc_snark::pipeline::verify_dual_circuit_folded::<
+                Sha256Uair,
+                EcdsaUairInt,
+                Int<{ INT_LIMBS * 4 }>,
+                FoldedShaZt, FoldedShaLc,
+                EcZt, EcLc,
+                FScalar,
+                32, 16,
+                UNCHECKED,
+                zinc_snark::pipeline::TrivialIdeal, _,
+                EcdsaIdealOverF, _,
+            >(
+                &folded_sha_params, &ec_params,
+                &folded_dual_proof,
+                SHA256_8X_NUM_VARS,
+                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                |ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
+                    IdealOrZero::Zero => EcdsaIdealOverF,
+                    IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
+                },
+                &sha_public_column_data,
+                &ecdsa_public_column_data,
+            );
+            // IC₂ absorb-only: ECDSA constraints hold mod secp256k1 p,
+            // not the 192-bit PIOP prime, so we absorb but skip the
+            // ideal membership check.  All other verification steps
+            // (PCS, CPR, lookup) still execute normally.
+            let _ = black_box(r);
+
+            // Feed-forward: compute SHA-256 digest from trace.
+            let digest = black_box(feed_forward(&sha_trace, 0));
+
+            // Hash→ECDSA connection: reconstruct u₁ from b₁ bits.
+            let u1 = black_box(reconstruct_u1(&ecdsa_trace));
+        });
+    });
+
+    // ── Folded SHA proof size breakdown + comparison ─────────────
+    {
+        use zinc_snark::pipeline::FIELD_LIMBS;
+        use crypto_primitives::crypto_bigint_uint::Uint;
+        let fe_bytes = <Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+
+        fn write_fe_folded(buf: &mut Vec<u8>, f: &zinc_snark::pipeline::PiopField) {
+            use zinc_snark::pipeline::FIELD_LIMBS;
+            use crypto_primitives::crypto_bigint_uint::Uint;
+            use zinc_transcript::traits::ConstTranscribable;
+            let sz = <Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+            let start = buf.len();
+            buf.resize(start + sz, 0);
+            f.inner().write_transcription_bytes(&mut buf[start..]);
+        }
+
+        // PCS bytes.
+        let orig_pcs1  = dual_proof.pcs1_proof_bytes.len();
+        let folded_pcs1 = folded_dual_proof.pcs1_proof_bytes.len();
+        let pcs2_bytes  = folded_dual_proof.pcs2_proof_bytes.len(); // unchanged
+
+        // Folding overhead (c1s + c2s).
+        let folding_bytes: usize =
+            folded_dual_proof.pcs1_folding_c1s_bytes.iter().map(|v| v.len()).sum::<usize>()
+            + folded_dual_proof.pcs1_folding_c2s_bytes.iter().map(|v| v.len()).sum::<usize>();
+
+        // IC bytes (same PIOP, identical to original).
+        let ic1_bytes: usize = folded_dual_proof.ic1_proof_values.iter().map(|v| v.len()).sum();
+        let ic2_bytes: usize = folded_dual_proof.ic2_proof_values.iter().map(|v| v.len()).sum();
+
+        // MD sumcheck (same).
+        let md_msg_bytes: usize = folded_dual_proof.md_group_messages.iter()
+            .flat_map(|grp| grp.iter()).map(|v| v.len()).sum();
+        let md_sum_bytes: usize = folded_dual_proof.md_claimed_sums.iter().map(|v| v.len()).sum();
+        let md_total = md_msg_bytes + md_sum_bytes;
+
+        // CPR evals (same).
+        let cpr1_up: usize = folded_dual_proof.cpr1_up_evals.iter().map(|v| v.len()).sum();
+        let cpr1_dn: usize = folded_dual_proof.cpr1_down_evals.iter().map(|v| v.len()).sum();
+        let cpr2_up: usize = folded_dual_proof.cpr2_up_evals.iter().map(|v| v.len()).sum();
+        let cpr2_dn: usize = folded_dual_proof.cpr2_down_evals.iter().map(|v| v.len()).sum();
+        let cpr_total = cpr1_up + cpr1_dn + cpr2_up + cpr2_dn;
+
+        // Unified eval sumcheck (same).
+        let eval_sc_bytes: usize = folded_dual_proof.unified_eval_sumcheck.as_ref().map_or(0, |sc| {
+            sc.rounds.iter().map(|v| v.len()).sum::<usize>()
+                + sc.v_finals.iter().map(|v| v.len()).sum::<usize>()
+        });
+
+        // Lookup (same).
+        let lookup_bytes: usize = folded_dual_proof.lookup_group_proofs.iter().map(|gp| {
+            let mults: usize = gp.aggregated_multiplicities.iter().map(|v| v.len()).sum();
+            let inv_w: usize = gp.chunk_inverse_witnesses.iter()
+                .flat_map(|outer| outer.iter()).map(|inner| inner.len()).sum();
+            let inv_t = gp.inverse_table.len();
+            (mults + inv_w + inv_t) * fe_bytes
+        }).sum();
+
+        // Eval point + PCS evals.
+        let eval_pt_bytes: usize = folded_dual_proof.evaluation_point_bytes.iter().map(|v| v.len()).sum();
+        let pcs1_eval_bytes: usize = folded_dual_proof.pcs1_evals_bytes.iter().map(|v| v.len()).sum();
+        let pcs2_eval_bytes: usize = folded_dual_proof.pcs2_evals_bytes.iter().map(|v| v.len()).sum();
+
+        let piop_total = ic1_bytes + ic2_bytes + md_total + cpr_total
+            + eval_sc_bytes + lookup_bytes + eval_pt_bytes
+            + pcs1_eval_bytes + pcs2_eval_bytes + folding_bytes;
+        let total_raw = folded_pcs1 + pcs2_bytes + piop_total;
+
+        // Serialize all folded proof bytes for compression.
+        let mut folded_all_bytes = Vec::with_capacity(total_raw);
+        folded_all_bytes.extend(&folded_dual_proof.pcs1_proof_bytes);
+        folded_all_bytes.extend(&folded_dual_proof.pcs2_proof_bytes);
+        for v in &folded_dual_proof.ic1_proof_values  { folded_all_bytes.extend(v); }
+        for v in &folded_dual_proof.ic2_proof_values  { folded_all_bytes.extend(v); }
+        for grp in &folded_dual_proof.md_group_messages {
+            for v in grp { folded_all_bytes.extend(v); }
+        }
+        for v in &folded_dual_proof.md_claimed_sums { folded_all_bytes.extend(v); }
+        for v in &folded_dual_proof.cpr1_up_evals   { folded_all_bytes.extend(v); }
+        for v in &folded_dual_proof.cpr1_down_evals  { folded_all_bytes.extend(v); }
+        for v in &folded_dual_proof.cpr2_up_evals   { folded_all_bytes.extend(v); }
+        for v in &folded_dual_proof.cpr2_down_evals  { folded_all_bytes.extend(v); }
+        if let Some(ref sc) = folded_dual_proof.unified_eval_sumcheck {
+            for v in &sc.rounds   { folded_all_bytes.extend(v); }
+            for v in &sc.v_finals { folded_all_bytes.extend(v); }
+        }
+        for gp in &folded_dual_proof.lookup_group_proofs {
+            for v in &gp.aggregated_multiplicities {
+                for f in v { write_fe_folded(&mut folded_all_bytes, f); }
+            }
+            for outer in &gp.chunk_inverse_witnesses {
+                for inner in outer {
+                    for f in inner { write_fe_folded(&mut folded_all_bytes, f); }
+                }
+            }
+            for f in &gp.inverse_table { write_fe_folded(&mut folded_all_bytes, f); }
+        }
+        for v in &folded_dual_proof.evaluation_point_bytes { folded_all_bytes.extend(v); }
+        for v in &folded_dual_proof.pcs1_evals_bytes  { folded_all_bytes.extend(v); }
+        for v in &folded_dual_proof.pcs2_evals_bytes  { folded_all_bytes.extend(v); }
+        for v in &folded_dual_proof.pcs1_folding_c1s_bytes { folded_all_bytes.extend(v); }
+        for v in &folded_dual_proof.pcs1_folding_c2s_bytes { folded_all_bytes.extend(v); }
+
+        let folded_compressed = {
+            use std::io::Write;
+            let mut enc = flate2::write::DeflateEncoder::new(
+                Vec::new(), flate2::Compression::default(),
+            );
+            enc.write_all(&folded_all_bytes).unwrap();
+            enc.finish().unwrap()
+        };
+
+        // We need the original totals too — fetch from the outer scope.
+        // Recompute them here from dual_proof to keep the block self-contained.
+        let orig_pcs2 = dual_proof.pcs2_proof_bytes.len();
+        let orig_ic1: usize  = dual_proof.ic1_proof_values.iter().map(|v| v.len()).sum();
+        let orig_ic2: usize  = dual_proof.ic2_proof_values.iter().map(|v| v.len()).sum();
+        let orig_md: usize   = dual_proof.md_group_messages.iter().flat_map(|g| g.iter()).map(|v| v.len()).sum::<usize>()
+                              + dual_proof.md_claimed_sums.iter().map(|v| v.len()).sum::<usize>();
+        let orig_cpr: usize  = dual_proof.cpr1_up_evals.iter().map(|v| v.len()).sum::<usize>()
+                              + dual_proof.cpr1_down_evals.iter().map(|v| v.len()).sum::<usize>()
+                              + dual_proof.cpr2_up_evals.iter().map(|v| v.len()).sum::<usize>()
+                              + dual_proof.cpr2_down_evals.iter().map(|v| v.len()).sum::<usize>();
+        let orig_eval_sc: usize = dual_proof.unified_eval_sumcheck.as_ref().map_or(0, |sc| {
+            sc.rounds.iter().map(|v| v.len()).sum::<usize>()
+                + sc.v_finals.iter().map(|v| v.len()).sum::<usize>()
+        });
+        let orig_lookup: usize = dual_proof.lookup_group_proofs.iter().map(|gp| {
+            let mults: usize = gp.aggregated_multiplicities.iter().map(|v| v.len()).sum();
+            let inv_w: usize = gp.chunk_inverse_witnesses.iter()
+                .flat_map(|outer| outer.iter()).map(|inner| inner.len()).sum();
+            (mults + inv_w + gp.inverse_table.len()) * fe_bytes
+        }).sum();
+        let orig_eval_pt: usize = dual_proof.evaluation_point_bytes.iter().map(|v| v.len()).sum();
+        let orig_pcs_evals: usize = dual_proof.pcs1_evals_bytes.iter().map(|v| v.len()).sum::<usize>()
+                                  + dual_proof.pcs2_evals_bytes.iter().map(|v| v.len()).sum::<usize>();
+        let orig_piop = orig_ic1 + orig_ic2 + orig_md + orig_cpr + orig_eval_sc
+                      + orig_lookup + orig_eval_pt + orig_pcs_evals;
+        let orig_total_raw = orig_pcs1 + orig_pcs2 + orig_piop;
+
+        eprintln!("\n=== Folded SHA Dual-Circuit Proof Size ===");
+        eprintln!("  PCS (SHA folded):  {:>7} B  ({:.1} KB)   [was {} B / {:.1} KB]",
+            folded_pcs1, folded_pcs1 as f64 / 1024.0, orig_pcs1, orig_pcs1 as f64 / 1024.0);
+        eprintln!("  PCS (ECDSA):       {:>7} B  ({:.1} KB)", pcs2_bytes, pcs2_bytes as f64 / 1024.0);
+        eprintln!("  Folding overhead:  {:>7} B  (c1s+c2s)", folding_bytes);
+        eprintln!("  IC (SHA):          {:>7} B", ic1_bytes);
+        eprintln!("  IC (ECDSA):        {:>7} B", ic2_bytes);
+        eprintln!("  MD sumcheck:       {:>7} B  (msgs={}, sums={})", md_total, md_msg_bytes, md_sum_bytes);
+        eprintln!("  CPR evals:         {:>7} B  (c1_up={}, c1_dn={}, c2_up={}, c2_dn={})",
+            cpr_total, cpr1_up, cpr1_dn, cpr2_up, cpr2_dn);
+        eprintln!("  Eval sumcheck:     {:>7} B", eval_sc_bytes);
+        eprintln!("  Lookup:            {:>7} B  ({} groups)", lookup_bytes, folded_dual_proof.lookup_group_proofs.len());
+        eprintln!("  Eval point:        {:>7} B", eval_pt_bytes);
+        eprintln!("  PCS evals:         {:>7} B  (c1={}, c2={})", pcs1_eval_bytes + pcs2_eval_bytes, pcs1_eval_bytes, pcs2_eval_bytes);
+        eprintln!("  ─────────────────────────────────────────");
+        eprintln!("  PIOP total:        {:>7} B  ({:.1} KB)", piop_total, piop_total as f64 / 1024.0);
+        eprintln!("  Total raw:         {:>7} B  ({:.1} KB)   [was {} B / {:.1} KB]",
+            total_raw, total_raw as f64 / 1024.0, orig_total_raw, orig_total_raw as f64 / 1024.0);
+        eprintln!("  Compressed:        {:>7} B  ({:.1} KB, {:.1}x ratio)",
+            folded_compressed.len(), folded_compressed.len() as f64 / 1024.0,
+            folded_all_bytes.len() as f64 / folded_compressed.len() as f64);
+        let raw_savings    = orig_total_raw as i64 - total_raw as i64;
+        eprintln!("  ─────────────────────────────────────────");
+        eprintln!("  Raw savings:       {:>+7} B  ({:+.1} KB, {:.2}x ratio)",
+            raw_savings, raw_savings as f64 / 1024.0,
+            orig_total_raw as f64 / total_raw as f64);
+    }
+
+    // ── 23. E2E Total Prover (4x-folded SHA PCS) ─────────────────
+    //
+    // Same as E2E/Prover (folded SHA) but applies two rounds of
+    // fold_claims_prove and commits the SHA trace as BinaryPoly<8>
+    // columns (BinaryPoly<32>→BinaryPoly<16>→BinaryPoly<8>).
+    group.bench_function("E2E/Prover (4x-folded SHA)", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let t = Instant::now();
+                let _ = zinc_snark::pipeline::prove_dual_circuit_4x_folded::<
+                    Sha256Uair,
+                    EcdsaUairInt,
+                    Int<{ INT_LIMBS * 4 }>,
+                    FoldedSha4xZt, FoldedSha4xLc,
+                    EcZt, EcLc,
+                    FScalar,
+                    32, 16, 8,
+                    UNCHECKED,
+                >(
+                    &folded_4x_sha_params, &sha_trace,
+                    &ec_params, &ecdsa_trace,
+                    SHA256_8X_NUM_VARS,
+                    &sha_lookup_specs,
+                    &sha_affine_specs,
+                );
+                total += t.elapsed();
+            }
+            total
+        });
+    });
+
+    // ── 24. E2E Total Verifier (4x-folded SHA PCS) ───────────────
+    let folded_4x_dual_proof = zinc_snark::pipeline::prove_dual_circuit_4x_folded::<
+        Sha256Uair,
+        EcdsaUairInt,
+        Int<{ INT_LIMBS * 4 }>,
+        FoldedSha4xZt, FoldedSha4xLc,
+        EcZt, EcLc,
+        FScalar,
+        32, 16, 8,
+        UNCHECKED,
+    >(
+        &folded_4x_sha_params, &sha_trace,
+        &ec_params, &ecdsa_trace,
+        SHA256_8X_NUM_VARS,
+        &sha_lookup_specs,
+        &sha_affine_specs,
+    );
+
+    group.bench_function("E2E/Verifier (4x-folded SHA)", |b| {
+        b.iter(|| {
+            let r = zinc_snark::pipeline::verify_dual_circuit_4x_folded::<
+                Sha256Uair,
+                EcdsaUairInt,
+                Int<{ INT_LIMBS * 4 }>,
+                FoldedSha4xZt, FoldedSha4xLc,
+                EcZt, EcLc,
+                FScalar,
+                32, 16, 8,
+                UNCHECKED,
+                zinc_snark::pipeline::TrivialIdeal, _,
+                EcdsaIdealOverF, _,
+            >(
+                &folded_4x_sha_params, &ec_params,
+                &folded_4x_dual_proof,
+                SHA256_8X_NUM_VARS,
+                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                |ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
+                    IdealOrZero::Zero => EcdsaIdealOverF,
+                    IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
+                },
+                &sha_public_column_data,
+                &ecdsa_public_column_data,
+            );
+            let _ = black_box(r);
+
+            // Feed-forward: compute SHA-256 digest from trace.
+            let digest = black_box(feed_forward(&sha_trace, 0));
+
+            // Hash→ECDSA connection: reconstruct u₁ from b₁ bits.
+            let u1 = black_box(reconstruct_u1(&ecdsa_trace));
+        });
+    });
+
+    // ── 24b. E2E Prover/Verifier (folded SHA, 4-chunk lookup) ──────
+    //
+    // Same as E2E/Prover (folded SHA) but with chunk_width=8 → 4 chunks
+    // of 256 entries each (vs. the default 8 chunks of 16).
+    let sha_lookup_specs_4c = sha256_lookup_specs_4chunks();
+    let sha_affine_specs_4c = sha256_affine_lookup_specs_4chunks();
+
+    group.bench_function("E2E/Prover (folded SHA 4-chunk)", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let t = Instant::now();
+                let _ = zinc_snark::pipeline::prove_dual_circuit_folded::<
+                    Sha256Uair,
+                    EcdsaUairInt,
+                    Int<{ INT_LIMBS * 4 }>,
+                    FoldedShaZt, FoldedShaLc,
+                    EcZt, EcLc,
+                    FScalar,
+                    32, 16,
+                    UNCHECKED,
+                >(
+                    &folded_sha_params, &sha_trace,
+                    &ec_params, &ecdsa_trace,
+                    SHA256_8X_NUM_VARS,
+                    &sha_lookup_specs_4c,
+                    &sha_affine_specs_4c,
+                );
+                total += t.elapsed();
+            }
+            total
+        });
+    });
+
+    let folded_dual_proof_4c = zinc_snark::pipeline::prove_dual_circuit_folded::<
+        Sha256Uair,
+        EcdsaUairInt,
+        Int<{ INT_LIMBS * 4 }>,
+        FoldedShaZt, FoldedShaLc,
+        EcZt, EcLc,
+        FScalar,
+        32, 16,
+        UNCHECKED,
+    >(
+        &folded_sha_params, &sha_trace,
+        &ec_params, &ecdsa_trace,
+        SHA256_8X_NUM_VARS,
+        &sha_lookup_specs_4c,
+        &sha_affine_specs_4c,
+    );
+
+    group.bench_function("E2E/Verifier (folded SHA 4-chunk)", |b| {
+        b.iter(|| {
+            let r = zinc_snark::pipeline::verify_dual_circuit_folded::<
+                Sha256Uair,
+                EcdsaUairInt,
+                Int<{ INT_LIMBS * 4 }>,
+                FoldedShaZt, FoldedShaLc,
+                EcZt, EcLc,
+                FScalar,
+                32, 16,
+                UNCHECKED,
+                zinc_snark::pipeline::TrivialIdeal, _,
+                EcdsaIdealOverF, _,
+            >(
+                &folded_sha_params, &ec_params,
+                &folded_dual_proof_4c,
+                SHA256_8X_NUM_VARS,
+                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                |ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
+                    IdealOrZero::Zero => EcdsaIdealOverF,
+                    IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
+                },
+                &sha_public_column_data,
+                &ecdsa_public_column_data,
+            );
+            let _ = black_box(r);
+
+            // Feed-forward: compute SHA-256 digest from trace.
+            let digest = black_box(feed_forward(&sha_trace, 0));
+
+            // Hash→ECDSA connection: reconstruct u₁ from b₁ bits.
+            let u1 = black_box(reconstruct_u1(&ecdsa_trace));
+        });
+    });
+
+    // ── 24c. E2E Prover/Verifier (4x-folded SHA, 4-chunk lookup) ───
+    group.bench_function("E2E/Prover (4x-folded SHA 4-chunk)", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let t = Instant::now();
+                let _ = zinc_snark::pipeline::prove_dual_circuit_4x_folded::<
+                    Sha256Uair,
+                    EcdsaUairInt,
+                    Int<{ INT_LIMBS * 4 }>,
+                    FoldedSha4xZt, FoldedSha4xLc,
+                    EcZt, EcLc,
+                    FScalar,
+                    32, 16, 8,
+                    UNCHECKED,
+                >(
+                    &folded_4x_sha_params, &sha_trace,
+                    &ec_params, &ecdsa_trace,
+                    SHA256_8X_NUM_VARS,
+                    &sha_lookup_specs_4c,
+                    &sha_affine_specs_4c,
+                );
+                total += t.elapsed();
+            }
+            total
+        });
+    });
+
+    let folded_4x_dual_proof_4c = zinc_snark::pipeline::prove_dual_circuit_4x_folded::<
+        Sha256Uair,
+        EcdsaUairInt,
+        Int<{ INT_LIMBS * 4 }>,
+        FoldedSha4xZt, FoldedSha4xLc,
+        EcZt, EcLc,
+        FScalar,
+        32, 16, 8,
+        UNCHECKED,
+    >(
+        &folded_4x_sha_params, &sha_trace,
+        &ec_params, &ecdsa_trace,
+        SHA256_8X_NUM_VARS,
+        &sha_lookup_specs_4c,
+        &sha_affine_specs_4c,
+    );
+
+    group.bench_function("E2E/Verifier (4x-folded SHA 4-chunk)", |b| {
+        b.iter(|| {
+            let r = zinc_snark::pipeline::verify_dual_circuit_4x_folded::<
+                Sha256Uair,
+                EcdsaUairInt,
+                Int<{ INT_LIMBS * 4 }>,
+                FoldedSha4xZt, FoldedSha4xLc,
+                EcZt, EcLc,
+                FScalar,
+                32, 16, 8,
+                UNCHECKED,
+                zinc_snark::pipeline::TrivialIdeal, _,
+                EcdsaIdealOverF, _,
+            >(
+                &folded_4x_sha_params, &ec_params,
+                &folded_4x_dual_proof_4c,
+                SHA256_8X_NUM_VARS,
+                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                |ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
+                    IdealOrZero::Zero => EcdsaIdealOverF,
+                    IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
+                },
+                &sha_public_column_data,
+                &ecdsa_public_column_data,
+            );
+            let _ = black_box(r);
+
+            // Feed-forward: compute SHA-256 digest from trace.
+            let digest = black_box(feed_forward(&sha_trace, 0));
+
+            // Hash→ECDSA connection: reconstruct u₁ from b₁ bits.
+            let u1 = black_box(reconstruct_u1(&ecdsa_trace));
+        });
+    });
+
+    // ── 24d. E2E Prover/Verifier (4x folded, 4-chunk, Hybrid GKR c=2)
+    //
+    // SHA-256 single-circuit prover benchmark + dual-circuit (SHA + ECDSA)
+    // verifier benchmark, both using the hybrid GKR lookup protocol with
+    // cutoff c=2 and 4-chunk decomposition.
+    let hybrid_4x_proof = zinc_snark::pipeline::prove_hybrid_gkr_logup_4x_folded::<
+        Sha256Uair, FoldedSha4xZt, FoldedSha4xLc, 32, 16, 8, UNCHECKED,
+    >(
+        &folded_4x_sha_params, &sha_trace, SHA256_8X_NUM_VARS,
+        &sha_lookup_specs_4c, &sha_affine_specs_4c, 2,
+    );
+
+    group.bench_function("E2E/Prover (4x Hybrid GKR c=2 4-chunk)", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let t = Instant::now();
+                let _ = zinc_snark::pipeline::prove_hybrid_gkr_logup_4x_folded::<
+                    Sha256Uair, FoldedSha4xZt, FoldedSha4xLc, 32, 16, 8, UNCHECKED,
+                >(
+                    &folded_4x_sha_params, &sha_trace, SHA256_8X_NUM_VARS,
+                    &sha_lookup_specs_4c, &sha_affine_specs_4c, 2,
+                );
+                total += t.elapsed();
+            }
+            total
+        });
+    });
+
+    // Generate the dual-circuit (SHA-256 + ECDSA) hybrid GKR proof,
+    // used by the verifier benchmark below and the proof size breakdown.
+    let hybrid_gkr_dual_proof = zinc_snark::pipeline::prove_dual_circuit_hybrid_gkr_4x_folded::<
+        Sha256Uair,
+        EcdsaUairInt,
+        Int<{ INT_LIMBS * 4 }>,
+        FoldedSha4xZt, FoldedSha4xLc,
+        EcZt, EcLc,
+        FScalar,
+        32, 16, 8,
+        UNCHECKED,
+    >(
+        &folded_4x_sha_params, &sha_trace,
+        &ec_params, &ecdsa_trace,
+        SHA256_8X_NUM_VARS,
+        &sha_lookup_specs_4c,
+        &sha_affine_specs_4c,
+        2, // cutoff = 2 for hybrid GKR
+        &secp256k1_field_config(),
+        |elem: &Int<{ INT_LIMBS * 4 }>, cfg: &_| FScalar::from_with_cfg(elem.as_uint(), cfg),
+        |elem: &FScalar, new_cfg: &_| FScalar::from_with_cfg(elem.retrieve(), new_cfg),
+    );
+
+    {
+        let r = zinc_snark::pipeline::verify_dual_circuit_hybrid_gkr_4x_folded::<
+            Sha256Uair,
+            EcdsaUairInt,
+            Int<{ INT_LIMBS * 4 }>,
+            FoldedSha4xZt, FoldedSha4xLc,
+            EcZt, EcLc,
+            FScalar,
+            32, 16, 8,
+            UNCHECKED,
+            zinc_snark::pipeline::TrivialIdeal, _,
+            EcdsaIdealOverF, _,
+        >(
+            &folded_4x_sha_params, &ec_params,
+            &hybrid_gkr_dual_proof,
+            SHA256_8X_NUM_VARS,
+            |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+            |ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
+                IdealOrZero::Zero => EcdsaIdealOverF,
+                IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
+            },
+            &sha_public_column_data,
+            &ecdsa_public_column_data,
+            &secp256k1_field_config(),
+            |elem: &Int<{ INT_LIMBS * 4 }>, cfg: &_| FScalar::from_with_cfg(elem.as_uint(), cfg),
+            |elem: &FScalar, new_cfg: &_| FScalar::from_with_cfg(elem.retrieve(), new_cfg),
+        );
+        let t = &r.timing;
+        eprintln!("\n── Verifier step timing (4x Hybrid GKR c=2 4-chunk) ────");
+        eprintln!("  IC verify:           {:>8.3} ms", t.ideal_check_verify.as_secs_f64() * 1000.0);
+        eprintln!("  CPR+Lookup verify:   {:>8.3} ms", t.combined_poly_resolver_verify.as_secs_f64() * 1000.0);
+        eprintln!("  Lookup verify:       {:>8.3} ms", t.lookup_verify.as_secs_f64() * 1000.0);
+        eprintln!("  PCS verify:          {:>8.3} ms", t.pcs_verify.as_secs_f64() * 1000.0);
+        eprintln!("  Total:               {:>8.3} ms", t.total.as_secs_f64() * 1000.0);
+        eprintln!("─────────────────────────────────────────────────────────\n");
+    }
+
+    group.bench_function("E2E/Verifier (4x Hybrid GKR c=2 4-chunk)", |b| {
+        b.iter(|| {
+            let r = zinc_snark::pipeline::verify_dual_circuit_hybrid_gkr_4x_folded::<
+                Sha256Uair,
+                EcdsaUairInt,
+                Int<{ INT_LIMBS * 4 }>,
+                FoldedSha4xZt, FoldedSha4xLc,
+                EcZt, EcLc,
+                FScalar,
+                32, 16, 8,
+                UNCHECKED,
+                zinc_snark::pipeline::TrivialIdeal, _,
+                EcdsaIdealOverF, _,
+            >(
+                &folded_4x_sha_params, &ec_params,
+                &hybrid_gkr_dual_proof,
+                SHA256_8X_NUM_VARS,
+                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                |ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
+                    IdealOrZero::Zero => EcdsaIdealOverF,
+                    IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
+                },
+                &sha_public_column_data,
+                &ecdsa_public_column_data,
+                &secp256k1_field_config(),
+                |elem: &Int<{ INT_LIMBS * 4 }>, cfg: &_| FScalar::from_with_cfg(elem.as_uint(), cfg),
+                |elem: &FScalar, new_cfg: &_| FScalar::from_with_cfg(elem.retrieve(), new_cfg),
+            );
+            let _ = black_box(r);
+
+            // Feed-forward: compute SHA-256 digest from trace.
+            let digest = black_box(feed_forward(&sha_trace, 0));
+
+            // Hash→ECDSA connection: reconstruct u₁ from b₁ bits.
+            let u1 = black_box(reconstruct_u1(&ecdsa_trace));
+        });
+    });
+
+    // ── 24e. E2E Prover (4x folded, 4-chunk, Dual-Circuit Hybrid GKR c=2)
+    //
+    // Dual-circuit (SHA-256 + ECDSA) prover benchmark using the hybrid GKR
+    // lookup protocol with cutoff c=2 and 4-chunk decomposition.
+    // CPR sumchecks are run separately for each circuit.
+    group.bench_function("E2E/Prover (4x Dual Hybrid GKR c=2 4-chunk)", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let t = Instant::now();
+                let _ = zinc_snark::pipeline::prove_dual_circuit_hybrid_gkr_4x_folded::<
+                    Sha256Uair,
+                    EcdsaUairInt,
+                    Int<{ INT_LIMBS * 4 }>,
+                    FoldedSha4xZt, FoldedSha4xLc,
+                    EcZt, EcLc,
+                    FScalar,
+                    32, 16, 8,
+                    UNCHECKED,
+                >(
+                    &folded_4x_sha_params, &sha_trace,
+                    &ec_params, &ecdsa_trace,
+                    SHA256_8X_NUM_VARS,
+                    &sha_lookup_specs_4c,
+                    &sha_affine_specs_4c,
+                    2,
+                    &secp256k1_field_config(),
+                    |elem: &Int<{ INT_LIMBS * 4 }>, cfg: &_| FScalar::from_with_cfg(elem.as_uint(), cfg),
+                    |elem: &FScalar, new_cfg: &_| FScalar::from_with_cfg(elem.retrieve(), new_cfg),
+                );
+                total += t.elapsed();
+            }
+            total
+        });
+    });
+
+    // ── Dual Hybrid GKR proof size breakdown ─────────────────────
+    {
+        use zinc_snark::pipeline::{FIELD_LIMBS, LookupProofData};
+        use crypto_primitives::crypto_bigint_uint::Uint;
+        let fe_bytes = <Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+
+        fn write_fe_hgkr(buf: &mut Vec<u8>, f: &zinc_snark::pipeline::PiopField) {
+            use zinc_snark::pipeline::FIELD_LIMBS;
+            use crypto_primitives::crypto_bigint_uint::Uint;
+            use zinc_transcript::traits::ConstTranscribable;
+            let sz = <Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+            let start = buf.len();
+            buf.resize(start + sz, 0);
+            f.inner().write_transcription_bytes(&mut buf[start..]);
+        }
+
+        let p = &hybrid_gkr_dual_proof;
+        let pcs1 = p.pcs1_proof_bytes.len();
+        let pcs2 = p.pcs2_proof_bytes.len();
+        let ic1: usize = p.ic1_proof_values.iter().map(|v| v.len()).sum();
+        let ic2: usize = p.ic2_proof_values.iter().map(|v| v.len()).sum();
+        let cpr1_sc: usize = p.cpr1_sumcheck_messages.iter().map(|v| v.len()).sum::<usize>()
+            + p.cpr1_sumcheck_claimed_sum.len();
+        let cpr1_up: usize = p.cpr1_up_evals.iter().map(|v| v.len()).sum();
+        let cpr1_dn: usize = p.cpr1_down_evals.iter().map(|v| v.len()).sum();
+        let cpr2_sc: usize = p.cpr2_sumcheck_messages.iter().map(|v| v.len()).sum::<usize>()
+            + p.cpr2_sumcheck_claimed_sum.len();
+        let cpr2_up: usize = p.cpr2_up_evals.iter().map(|v| v.len()).sum();
+        let cpr2_dn: usize = p.cpr2_down_evals.iter().map(|v| v.len()).sum();
+        let folding: usize =
+            p.pcs1_folding_c1s_bytes.iter().map(|v| v.len()).sum::<usize>()
+            + p.pcs1_folding_c2s_bytes.iter().map(|v| v.len()).sum::<usize>()
+            + p.pcs1_folding_c3s_bytes.iter().map(|v| v.len()).sum::<usize>()
+            + p.pcs1_folding_c4s_bytes.iter().map(|v| v.len()).sum::<usize>();
+        let eval_sc: usize = {
+            let c1 = p.c1_eval_sumcheck.as_ref().map_or(0, |sc| {
+                sc.rounds.iter().map(|v| v.len()).sum::<usize>()
+                    + sc.v_finals.iter().map(|v| v.len()).sum::<usize>()
+            });
+            let c2 = p.c2_eval_sumcheck.as_ref().map_or(0, |sc| {
+                sc.rounds.iter().map(|v| v.len()).sum::<usize>()
+                    + sc.v_finals.iter().map(|v| v.len()).sum::<usize>()
+            });
+            c1 + c2
+        };
+        let c2_eval_pt: usize = p.c2_evaluation_point_bytes.iter().map(|v| v.len()).sum();
+        let eval_pt: usize = p.evaluation_point_bytes.iter().map(|v| v.len()).sum();
+        let pcs1_eval: usize = p.pcs1_evals_bytes.iter().map(|v| v.len()).sum();
+        let pcs2_eval: usize = p.pcs2_evals_bytes.iter().map(|v| v.len()).sum();
+
+        let lookup_bytes: usize = match &p.lookup_proof {
+            Some(LookupProofData::HybridGkr(hp)) => {
+                let mut t = 0usize;
+                for group in &hp.group_proofs {
+                    let m: usize = group.aggregated_multiplicities.iter().map(|v| v.len()).sum();
+                    t += m * fe_bytes;
+                    let wg = &group.witness_gkr;
+                    t += (wg.roots_p.len() + wg.roots_q.len()) * fe_bytes;
+                    for lp in &wg.layer_proofs {
+                        if let Some(ref sc) = lp.sumcheck_proof {
+                            t += sc.messages.iter().map(|m| m.0.tail_evaluations.len()).sum::<usize>() * fe_bytes;
+                            t += fe_bytes;
+                        }
+                        t += (lp.p_lefts.len() + lp.p_rights.len() + lp.q_lefts.len() + lp.q_rights.len()) * fe_bytes;
+                    }
+                    let sent_p: usize = wg.sent_p.iter().map(|v| v.len()).sum();
+                    let sent_q: usize = wg.sent_q.iter().map(|v| v.len()).sum();
+                    t += (sent_p + sent_q) * fe_bytes;
+                    let tg = &group.table_gkr;
+                    t += 2 * fe_bytes;
+                    for lp in &tg.layer_proofs {
+                        if let Some(ref sc) = lp.sumcheck_proof {
+                            t += sc.messages.iter().map(|m| m.0.tail_evaluations.len()).sum::<usize>() * fe_bytes;
+                            t += fe_bytes;
+                        }
+                        t += 4 * fe_bytes;
+                    }
+                }
+                t
+            }
+            Some(LookupProofData::Gkr(gkr)) => {
+                let mut t = 0usize;
+                for gp in &gkr.group_proofs {
+                    let m: usize = gp.aggregated_multiplicities.iter().map(|v| v.len()).sum();
+                    t += m * fe_bytes;
+                    let wg = &gp.witness_gkr;
+                    t += (wg.roots_p.len() + wg.roots_q.len()) * fe_bytes;
+                    for lp in &wg.layer_proofs {
+                        if let Some(ref sc) = lp.sumcheck_proof {
+                            t += sc.messages.iter().map(|m| m.0.tail_evaluations.len()).sum::<usize>() * fe_bytes;
+                            t += fe_bytes;
+                        }
+                        t += (lp.p_lefts.len() + lp.p_rights.len() + lp.q_lefts.len() + lp.q_rights.len()) * fe_bytes;
+                    }
+                    let tg = &gp.table_gkr;
+                    t += 2 * fe_bytes;
+                    for lp in &tg.layer_proofs {
+                        if let Some(ref sc) = lp.sumcheck_proof {
+                            t += sc.messages.iter().map(|m| m.0.tail_evaluations.len()).sum::<usize>() * fe_bytes;
+                            t += fe_bytes;
+                        }
+                        t += 4 * fe_bytes;
+                    }
+                }
+                t
+            }
+            _ => 0,
+        };
+
+        let piop_total = ic1 + ic2 + cpr1_sc + cpr1_up + cpr1_dn
+            + cpr2_sc + cpr2_up + cpr2_dn + lookup_bytes
+            + eval_sc + eval_pt + c2_eval_pt + folding + pcs1_eval + pcs2_eval;
+        let total_raw = pcs1 + pcs2 + piop_total;
+
+        // Serialize for compression.
+        let mut all_bytes = Vec::with_capacity(total_raw);
+        all_bytes.extend(&p.pcs1_proof_bytes);
+        all_bytes.extend(&p.pcs2_proof_bytes);
+        for v in &p.ic1_proof_values { all_bytes.extend(v); }
+        for v in &p.ic2_proof_values { all_bytes.extend(v); }
+        for v in &p.cpr1_sumcheck_messages { all_bytes.extend(v); }
+        all_bytes.extend(&p.cpr1_sumcheck_claimed_sum);
+        for v in &p.cpr1_up_evals { all_bytes.extend(v); }
+        for v in &p.cpr1_down_evals { all_bytes.extend(v); }
+        for v in &p.cpr2_sumcheck_messages { all_bytes.extend(v); }
+        all_bytes.extend(&p.cpr2_sumcheck_claimed_sum);
+        for v in &p.cpr2_up_evals { all_bytes.extend(v); }
+        for v in &p.cpr2_down_evals { all_bytes.extend(v); }
+        if let Some(ref sc) = p.c1_eval_sumcheck {
+            for v in &sc.rounds { all_bytes.extend(v); }
+            for v in &sc.v_finals { all_bytes.extend(v); }
+        }
+        if let Some(ref sc) = p.c2_eval_sumcheck {
+            for v in &sc.rounds { all_bytes.extend(v); }
+            for v in &sc.v_finals { all_bytes.extend(v); }
+        }
+        for v in &p.c2_evaluation_point_bytes { all_bytes.extend(v); }
+        if let Some(LookupProofData::HybridGkr(hp)) = &p.lookup_proof {
+            for group in &hp.group_proofs {
+                for v in &group.aggregated_multiplicities {
+                    for f in v { write_fe_hgkr(&mut all_bytes, f); }
+                }
+                let wg = &group.witness_gkr;
+                for f in &wg.roots_p { write_fe_hgkr(&mut all_bytes, f); }
+                for f in &wg.roots_q { write_fe_hgkr(&mut all_bytes, f); }
+                for lp in &wg.layer_proofs {
+                    if let Some(ref sc) = lp.sumcheck_proof {
+                        write_fe_hgkr(&mut all_bytes, &sc.claimed_sum);
+                        for m in &sc.messages { for e in &m.0.tail_evaluations { write_fe_hgkr(&mut all_bytes, e); } }
+                    }
+                    for f in &lp.p_lefts { write_fe_hgkr(&mut all_bytes, f); }
+                    for f in &lp.p_rights { write_fe_hgkr(&mut all_bytes, f); }
+                    for f in &lp.q_lefts { write_fe_hgkr(&mut all_bytes, f); }
+                    for f in &lp.q_rights { write_fe_hgkr(&mut all_bytes, f); }
+                }
+                for v in &wg.sent_p { for f in v { write_fe_hgkr(&mut all_bytes, f); } }
+                for v in &wg.sent_q { for f in v { write_fe_hgkr(&mut all_bytes, f); } }
+                let tg = &group.table_gkr;
+                write_fe_hgkr(&mut all_bytes, &tg.root_p);
+                write_fe_hgkr(&mut all_bytes, &tg.root_q);
+                for lp in &tg.layer_proofs {
+                    if let Some(ref sc) = lp.sumcheck_proof {
+                        write_fe_hgkr(&mut all_bytes, &sc.claimed_sum);
+                        for m in &sc.messages { for e in &m.0.tail_evaluations { write_fe_hgkr(&mut all_bytes, e); } }
+                    }
+                    write_fe_hgkr(&mut all_bytes, &lp.p_left);
+                    write_fe_hgkr(&mut all_bytes, &lp.p_right);
+                    write_fe_hgkr(&mut all_bytes, &lp.q_left);
+                    write_fe_hgkr(&mut all_bytes, &lp.q_right);
+                }
+            }
+        } else if let Some(LookupProofData::Gkr(gkr)) = &p.lookup_proof {
+            for gp in &gkr.group_proofs {
+                for v in &gp.aggregated_multiplicities {
+                    for f in v { write_fe_hgkr(&mut all_bytes, f); }
+                }
+                let wg = &gp.witness_gkr;
+                for f in &wg.roots_p { write_fe_hgkr(&mut all_bytes, f); }
+                for f in &wg.roots_q { write_fe_hgkr(&mut all_bytes, f); }
+                for lp in &wg.layer_proofs {
+                    if let Some(ref sc) = lp.sumcheck_proof {
+                        write_fe_hgkr(&mut all_bytes, &sc.claimed_sum);
+                        for m in &sc.messages { for e in &m.0.tail_evaluations { write_fe_hgkr(&mut all_bytes, e); } }
+                    }
+                    for f in &lp.p_lefts { write_fe_hgkr(&mut all_bytes, f); }
+                    for f in &lp.p_rights { write_fe_hgkr(&mut all_bytes, f); }
+                    for f in &lp.q_lefts { write_fe_hgkr(&mut all_bytes, f); }
+                    for f in &lp.q_rights { write_fe_hgkr(&mut all_bytes, f); }
+                }
+                let tg = &gp.table_gkr;
+                write_fe_hgkr(&mut all_bytes, &tg.root_p);
+                write_fe_hgkr(&mut all_bytes, &tg.root_q);
+                for lp in &tg.layer_proofs {
+                    if let Some(ref sc) = lp.sumcheck_proof {
+                        write_fe_hgkr(&mut all_bytes, &sc.claimed_sum);
+                        for m in &sc.messages { for e in &m.0.tail_evaluations { write_fe_hgkr(&mut all_bytes, e); } }
+                    }
+                    write_fe_hgkr(&mut all_bytes, &lp.p_left);
+                    write_fe_hgkr(&mut all_bytes, &lp.p_right);
+                    write_fe_hgkr(&mut all_bytes, &lp.q_left);
+                    write_fe_hgkr(&mut all_bytes, &lp.q_right);
+                }
+            }
+        }
+        for v in &p.evaluation_point_bytes { all_bytes.extend(v); }
+        for v in &p.pcs1_evals_bytes { all_bytes.extend(v); }
+        for v in &p.pcs2_evals_bytes { all_bytes.extend(v); }
+        for v in &p.pcs1_folding_c1s_bytes { all_bytes.extend(v); }
+        for v in &p.pcs1_folding_c2s_bytes { all_bytes.extend(v); }
+        for v in &p.pcs1_folding_c3s_bytes { all_bytes.extend(v); }
+        for v in &p.pcs1_folding_c4s_bytes { all_bytes.extend(v); }
+
+        let compressed = {
+            use std::io::Write;
+            let mut enc = flate2::write::DeflateEncoder::new(
+                Vec::new(), flate2::Compression::default(),
+            );
+            enc.write_all(&all_bytes).unwrap();
+            enc.finish().unwrap()
+        };
+
+        eprintln!("\n=== Dual-Circuit Hybrid GKR c=2 Proof Size (4x folded, 4-chunk) ===");
+        eprintln!("  PCS (SHA 4x-folded): {:>7} B  ({:.1} KB)", pcs1, pcs1 as f64 / 1024.0);
+        eprintln!("  PCS (ECDSA):         {:>7} B  ({:.1} KB)", pcs2, pcs2 as f64 / 1024.0);
+        eprintln!("  IC (SHA):            {:>7} B", ic1);
+        eprintln!("  IC (ECDSA):          {:>7} B", ic2);
+        eprintln!("  CPR₁ sumcheck:       {:>7} B", cpr1_sc);
+        eprintln!("  CPR₁ evals:          {:>7} B  (up={cpr1_up}, down={cpr1_dn})", cpr1_up + cpr1_dn);
+        eprintln!("  CPR₂ sumcheck:       {:>7} B", cpr2_sc);
+        eprintln!("  CPR₂ evals:          {:>7} B  (up={cpr2_up}, down={cpr2_dn})", cpr2_up + cpr2_dn);
+        eprintln!("  Lookup (hybrid GKR): {:>7} B  ({:.1} KB)", lookup_bytes, lookup_bytes as f64 / 1024.0);
+        eprintln!("  Eval sumcheck:       {:>7} B", eval_sc);
+        eprintln!("  Folding overhead:    {:>7} B", folding);
+        eprintln!("  Eval point (C1):     {:>7} B", eval_pt);
+        eprintln!("  Eval point (C2):     {:>7} B", c2_eval_pt);
+        eprintln!("  PCS evals:           {:>7} B  (c1={pcs1_eval}, c2={pcs2_eval})", pcs1_eval + pcs2_eval);
+        eprintln!("  ─────────────────────────────────────────");
+        eprintln!("  PIOP total:          {:>7} B  ({:.1} KB)", piop_total, piop_total as f64 / 1024.0);
+        eprintln!("  Total raw:           {:>7} B  ({:.1} KB)", total_raw, total_raw as f64 / 1024.0);
+        eprintln!("  Compressed:          {:>7} B  ({:.1} KB, {:.1}x ratio)",
+            compressed.len(), compressed.len() as f64 / 1024.0,
+            all_bytes.len() as f64 / compressed.len() as f64);
+
+        eprintln!("  Prover timing: PCS commit={:?}, IC={:?}, CPR+Lookup={:?}, PCS prove={:?}, total={:?}",
+            p.timing.pcs_commit,
+            p.timing.ideal_check,
+            p.timing.combined_poly_resolver,
+            p.timing.pcs_prove,
+            p.timing.total,
+        );
+    }
+
+    // ── 4x-Folded SHA proof size breakdown + comparison ──────────
+    {
+        use zinc_snark::pipeline::FIELD_LIMBS;
+        use crypto_primitives::crypto_bigint_uint::Uint;
+        let fe_bytes = <Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+
+        fn write_fe_4x(buf: &mut Vec<u8>, f: &zinc_snark::pipeline::PiopField) {
+            use zinc_snark::pipeline::FIELD_LIMBS;
+            use crypto_primitives::crypto_bigint_uint::Uint;
+            use zinc_transcript::traits::ConstTranscribable;
+            let sz = <Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+            let start = buf.len();
+            buf.resize(start + sz, 0);
+            f.inner().write_transcription_bytes(&mut buf[start..]);
+        }
+
+        let orig_pcs1_4x = dual_proof.pcs1_proof_bytes.len();
+        let pcs1_4x      = folded_4x_dual_proof.pcs1_proof_bytes.len();
+        let pcs2_4x      = folded_4x_dual_proof.pcs2_proof_bytes.len();
+
+        // Folding overhead: all four folding byte vecs.
+        let folding_bytes_4x: usize =
+            folded_4x_dual_proof.pcs1_folding_c1s_bytes.iter().map(|v| v.len()).sum::<usize>()
+            + folded_4x_dual_proof.pcs1_folding_c2s_bytes.iter().map(|v| v.len()).sum::<usize>()
+            + folded_4x_dual_proof.pcs1_folding_c3s_bytes.iter().map(|v| v.len()).sum::<usize>()
+            + folded_4x_dual_proof.pcs1_folding_c4s_bytes.iter().map(|v| v.len()).sum::<usize>();
+
+        let ic1_4x: usize = folded_4x_dual_proof.ic1_proof_values.iter().map(|v| v.len()).sum();
+        let ic2_4x: usize = folded_4x_dual_proof.ic2_proof_values.iter().map(|v| v.len()).sum();
+
+        let md_msg_4x: usize = folded_4x_dual_proof.md_group_messages.iter()
+            .flat_map(|grp| grp.iter()).map(|v| v.len()).sum();
+        let md_sum_4x: usize = folded_4x_dual_proof.md_claimed_sums.iter().map(|v| v.len()).sum();
+        let md_total_4x = md_msg_4x + md_sum_4x;
+
+        let cpr1_up_4x: usize = folded_4x_dual_proof.cpr1_up_evals.iter().map(|v| v.len()).sum();
+        let cpr1_dn_4x: usize = folded_4x_dual_proof.cpr1_down_evals.iter().map(|v| v.len()).sum();
+        let cpr2_up_4x: usize = folded_4x_dual_proof.cpr2_up_evals.iter().map(|v| v.len()).sum();
+        let cpr2_dn_4x: usize = folded_4x_dual_proof.cpr2_down_evals.iter().map(|v| v.len()).sum();
+        let cpr_total_4x = cpr1_up_4x + cpr1_dn_4x + cpr2_up_4x + cpr2_dn_4x;
+
+        let eval_sc_4x: usize = folded_4x_dual_proof.unified_eval_sumcheck.as_ref().map_or(0, |sc| {
+            sc.rounds.iter().map(|v| v.len()).sum::<usize>()
+                + sc.v_finals.iter().map(|v| v.len()).sum::<usize>()
+        });
+
+        let lookup_4x: usize = folded_4x_dual_proof.lookup_group_proofs.iter().map(|gp| {
+            let mults: usize = gp.aggregated_multiplicities.iter().map(|v| v.len()).sum();
+            let inv_w: usize = gp.chunk_inverse_witnesses.iter()
+                .flat_map(|outer| outer.iter()).map(|inner| inner.len()).sum();
+            let inv_t = gp.inverse_table.len();
+            (mults + inv_w + inv_t) * fe_bytes
+        }).sum();
+
+        let eval_pt_4x: usize = folded_4x_dual_proof.evaluation_point_bytes.iter().map(|v| v.len()).sum();
+        let pcs1_eval_4x: usize = folded_4x_dual_proof.pcs1_evals_bytes.iter().map(|v| v.len()).sum();
+        let pcs2_eval_4x: usize = folded_4x_dual_proof.pcs2_evals_bytes.iter().map(|v| v.len()).sum();
+
+        let piop_total_4x = ic1_4x + ic2_4x + md_total_4x + cpr_total_4x
+            + eval_sc_4x + lookup_4x + eval_pt_4x
+            + pcs1_eval_4x + pcs2_eval_4x + folding_bytes_4x;
+        let total_raw_4x = pcs1_4x + pcs2_4x + piop_total_4x;
+
+        // Serialize all 4x-folded proof bytes for compression.
+        let mut all_bytes_4x = Vec::with_capacity(total_raw_4x);
+        all_bytes_4x.extend(&folded_4x_dual_proof.pcs1_proof_bytes);
+        all_bytes_4x.extend(&folded_4x_dual_proof.pcs2_proof_bytes);
+        for v in &folded_4x_dual_proof.ic1_proof_values  { all_bytes_4x.extend(v); }
+        for v in &folded_4x_dual_proof.ic2_proof_values  { all_bytes_4x.extend(v); }
+        for grp in &folded_4x_dual_proof.md_group_messages {
+            for v in grp { all_bytes_4x.extend(v); }
+        }
+        for v in &folded_4x_dual_proof.md_claimed_sums { all_bytes_4x.extend(v); }
+        for v in &folded_4x_dual_proof.cpr1_up_evals   { all_bytes_4x.extend(v); }
+        for v in &folded_4x_dual_proof.cpr1_down_evals  { all_bytes_4x.extend(v); }
+        for v in &folded_4x_dual_proof.cpr2_up_evals   { all_bytes_4x.extend(v); }
+        for v in &folded_4x_dual_proof.cpr2_down_evals  { all_bytes_4x.extend(v); }
+        if let Some(ref sc) = folded_4x_dual_proof.unified_eval_sumcheck {
+            for v in &sc.rounds   { all_bytes_4x.extend(v); }
+            for v in &sc.v_finals { all_bytes_4x.extend(v); }
+        }
+        for gp in &folded_4x_dual_proof.lookup_group_proofs {
+            for v in &gp.aggregated_multiplicities {
+                for f in v { write_fe_4x(&mut all_bytes_4x, f); }
+            }
+            for outer in &gp.chunk_inverse_witnesses {
+                for inner in outer {
+                    for f in inner { write_fe_4x(&mut all_bytes_4x, f); }
+                }
+            }
+            for f in &gp.inverse_table { write_fe_4x(&mut all_bytes_4x, f); }
+        }
+        for v in &folded_4x_dual_proof.evaluation_point_bytes { all_bytes_4x.extend(v); }
+        for v in &folded_4x_dual_proof.pcs1_evals_bytes  { all_bytes_4x.extend(v); }
+        for v in &folded_4x_dual_proof.pcs2_evals_bytes  { all_bytes_4x.extend(v); }
+        for v in &folded_4x_dual_proof.pcs1_folding_c1s_bytes { all_bytes_4x.extend(v); }
+        for v in &folded_4x_dual_proof.pcs1_folding_c2s_bytes { all_bytes_4x.extend(v); }
+        for v in &folded_4x_dual_proof.pcs1_folding_c3s_bytes { all_bytes_4x.extend(v); }
+        for v in &folded_4x_dual_proof.pcs1_folding_c4s_bytes { all_bytes_4x.extend(v); }
+
+        let compressed_4x = {
+            use std::io::Write;
+            let mut enc = flate2::write::DeflateEncoder::new(
+                Vec::new(), flate2::Compression::default(),
+            );
+            enc.write_all(&all_bytes_4x).unwrap();
+            enc.finish().unwrap()
+        };
+
+        // Original totals for comparison (recomputed from dual_proof).
+        let orig_pcs2 = dual_proof.pcs2_proof_bytes.len();
+        let orig_ic1_4x: usize  = dual_proof.ic1_proof_values.iter().map(|v| v.len()).sum();
+        let orig_ic2_4x: usize  = dual_proof.ic2_proof_values.iter().map(|v| v.len()).sum();
+        let orig_md_4x: usize   = dual_proof.md_group_messages.iter().flat_map(|g| g.iter()).map(|v| v.len()).sum::<usize>()
+                                + dual_proof.md_claimed_sums.iter().map(|v| v.len()).sum::<usize>();
+        let orig_cpr_4x: usize  = dual_proof.cpr1_up_evals.iter().map(|v| v.len()).sum::<usize>()
+                                + dual_proof.cpr1_down_evals.iter().map(|v| v.len()).sum::<usize>()
+                                + dual_proof.cpr2_up_evals.iter().map(|v| v.len()).sum::<usize>()
+                                + dual_proof.cpr2_down_evals.iter().map(|v| v.len()).sum::<usize>();
+        let orig_eval_sc_4x: usize = dual_proof.unified_eval_sumcheck.as_ref().map_or(0, |sc| {
+            sc.rounds.iter().map(|v| v.len()).sum::<usize>()
+                + sc.v_finals.iter().map(|v| v.len()).sum::<usize>()
+        });
+        let orig_lookup_4x: usize = dual_proof.lookup_group_proofs.iter().map(|gp| {
+            let mults: usize = gp.aggregated_multiplicities.iter().map(|v| v.len()).sum();
+            let inv_w: usize = gp.chunk_inverse_witnesses.iter()
+                .flat_map(|outer| outer.iter()).map(|inner| inner.len()).sum();
+            (mults + inv_w + gp.inverse_table.len()) * fe_bytes
+        }).sum();
+        let orig_eval_pt_4x: usize = dual_proof.evaluation_point_bytes.iter().map(|v| v.len()).sum();
+        let orig_pcs_evals_4x: usize = dual_proof.pcs1_evals_bytes.iter().map(|v| v.len()).sum::<usize>()
+                                     + dual_proof.pcs2_evals_bytes.iter().map(|v| v.len()).sum::<usize>();
+        let orig_piop_4x = orig_ic1_4x + orig_ic2_4x + orig_md_4x + orig_cpr_4x + orig_eval_sc_4x
+                         + orig_lookup_4x + orig_eval_pt_4x + orig_pcs_evals_4x;
+        let orig_total_raw_4x = orig_pcs1_4x + orig_pcs2 + orig_piop_4x;
+
+        eprintln!("\n=== 4x-Folded SHA Dual-Circuit Proof Size ===");
+        eprintln!("  PCS (SHA 4x-folded): {:>7} B  ({:.1} KB)   [was {} B / {:.1} KB]",
+            pcs1_4x, pcs1_4x as f64 / 1024.0, orig_pcs1_4x, orig_pcs1_4x as f64 / 1024.0);
+        eprintln!("  PCS (ECDSA):         {:>7} B  ({:.1} KB)", pcs2_4x, pcs2_4x as f64 / 1024.0);
+        eprintln!("  Folding overhead:    {:>7} B  (c1s+c2s+c3s+c4s)", folding_bytes_4x);
+        eprintln!("  IC (SHA):            {:>7} B", ic1_4x);
+        eprintln!("  IC (ECDSA):          {:>7} B", ic2_4x);
+        eprintln!("  MD sumcheck:         {:>7} B  (msgs={}, sums={})", md_total_4x, md_msg_4x, md_sum_4x);
+        eprintln!("  CPR evals:           {:>7} B  (c1_up={}, c1_dn={}, c2_up={}, c2_dn={})",
+            cpr_total_4x, cpr1_up_4x, cpr1_dn_4x, cpr2_up_4x, cpr2_dn_4x);
+        eprintln!("  Eval sumcheck:       {:>7} B", eval_sc_4x);
+        eprintln!("  Lookup:              {:>7} B  ({} groups)", lookup_4x, folded_4x_dual_proof.lookup_group_proofs.len());
+        eprintln!("  Eval point:          {:>7} B", eval_pt_4x);
+        eprintln!("  PCS evals:           {:>7} B  (c1={}, c2={})", pcs1_eval_4x + pcs2_eval_4x, pcs1_eval_4x, pcs2_eval_4x);
+        eprintln!("  ─────────────────────────────────────────");
+        eprintln!("  PIOP total:          {:>7} B  ({:.1} KB)", piop_total_4x, piop_total_4x as f64 / 1024.0);
+        eprintln!("  Total raw:           {:>7} B  ({:.1} KB)   [was {} B / {:.1} KB]",
+            total_raw_4x, total_raw_4x as f64 / 1024.0, orig_total_raw_4x, orig_total_raw_4x as f64 / 1024.0);
+        eprintln!("  Compressed:          {:>7} B  ({:.1} KB, {:.1}x ratio)",
+            compressed_4x.len(), compressed_4x.len() as f64 / 1024.0,
+            all_bytes_4x.len() as f64 / compressed_4x.len() as f64);
+        let raw_savings_4x = orig_total_raw_4x as i64 - total_raw_4x as i64;
+        eprintln!("  ─────────────────────────────────────────");
+        eprintln!("  Raw savings (vs orig): {:>+7} B  ({:+.1} KB, {:.2}x ratio)",
+            raw_savings_4x, raw_savings_4x as f64 / 1024.0,
+            orig_total_raw_4x as f64 / total_raw_4x as f64);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // ── Fixed-C2 Dual-Circuit Pipeline (ECDSA over secp256k1 field) ─
+    // ══════════════════════════════════════════════════════════════════
+    //
+    // NOTE: prove_dual_circuit_fixed_c2 / verify_dual_circuit_fixed_c2
+    // are not yet implemented in the pipeline.  The benchmarks below are
+    // commented out until those functions are added.
+    //
+    // type ShaZtFC2 = Sha256ZipTypes<i64, 32>;
+    // type ShaLcFC2 = IprsBPoly32R4B64<1, UNCHECKED>;
+    // type EcZtFC2 = EcdsaScalarZipTypes;
+    // type EcLcFC2 = IprsInt4R4B64<1, UNCHECKED>;
+    // let c2_field_cfg = secp256k1_field_config();
+    /*
+
+    // ── 25. E2E Total Prover (fixed C2) ──────────────────────────────
+    group.bench_function("E2E/Prover (fixed C2)", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let t = Instant::now();
+                let _ = zinc_snark::pipeline::prove_dual_circuit_fixed_c2::<
+                    Sha256Uair,
+                    EcdsaUairInt,
+                    Int<{ INT_LIMBS * 4 }>,
+                    ShaZtFC2, ShaLcFC2,
+                    EcZtFC2, EcLcFC2,
+                    EcdsaField,
+                    32,
+                    UNCHECKED,
+                >(
+                    &sha_params, &sha_trace,
+                    &ec_params, &ecdsa_trace,
+                    SHA256_8X_NUM_VARS,
+                    &sha_lookup_specs,
+                    &sha_affine_specs,
+                    &c2_field_cfg,
+                );
+                total += t.elapsed();
+            }
+            total
+        });
+    });
+
+    // ── 26. E2E Total Verifier (fixed C2) ────────────────────────────
+    let fixed_c2_proof = zinc_snark::pipeline::prove_dual_circuit_fixed_c2::<
+        Sha256Uair,
+        EcdsaUairInt,
+        Int<{ INT_LIMBS * 4 }>,
+        ShaZtFC2, ShaLcFC2,
+        EcZtFC2, EcLcFC2,
+        EcdsaField,
+        32,
+        UNCHECKED,
+    >(
+        &sha_params, &sha_trace,
+        &ec_params, &ecdsa_trace,
+        SHA256_8X_NUM_VARS,
+        &sha_lookup_specs,
+        &sha_affine_specs,
+        &c2_field_cfg,
+    );
+
+    group.bench_function("E2E/Verifier (fixed C2)", |b| {
+        b.iter(|| {
+            let r = zinc_snark::pipeline::verify_dual_circuit_fixed_c2::<
+                Sha256Uair,
+                EcdsaUairInt,
+                Int<{ INT_LIMBS * 4 }>,
+                ShaZtFC2, ShaLcFC2,
+                EcZtFC2, EcLcFC2,
+                EcdsaField,
+                32,
+                UNCHECKED,
+                zinc_snark::pipeline::TrivialIdeal, _,
+                EcdsaIdealOverF, _,
+            >(
+                &sha_params, &ec_params,
+                &fixed_c2_proof,
+                SHA256_8X_NUM_VARS,
+                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                |ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
+                    IdealOrZero::Zero => EcdsaIdealOverF,
+                    IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
+                },
+                &sha_public_column_data,
+                &ecdsa_public_column_data,
+                &c2_field_cfg,
+            );
+            assert!(r.accepted, "Fixed-C2 dual-circuit verification must succeed");
+            let _ = black_box(r);
+
+            // Feed-forward: compute SHA-256 digest from trace.
+            let digest = black_box(feed_forward(&sha_trace, 0));
+
+            // Hash→ECDSA connection: reconstruct u₁ from b₁ bits.
+            let u1 = black_box(reconstruct_u1(&ecdsa_trace));
+        });
+    });
+
+    // ── Fixed-C2 proof size breakdown ────────────────────────────────
+    {
+        use zinc_snark::pipeline::FIELD_LIMBS;
+        use crypto_primitives::crypto_bigint_uint::Uint;
+        let piop_fe_bytes = <Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+        let _c2f_fe_bytes = <Uint<{ INT_LIMBS * 4 }> as ConstTranscribable>::NUM_BYTES;
+
+        let pcs1_bytes = fixed_c2_proof.pcs1_proof_bytes.len();
+        let pcs2_bytes = fixed_c2_proof.pcs2_proof_bytes.len();
+
+        let ic1_bytes: usize = fixed_c2_proof.ic1_proof_values.iter().map(|v| v.len()).sum();
+        let ic2_bytes: usize = fixed_c2_proof.ic2_proof_values.iter().map(|v| v.len()).sum();
+
+        // C1 MD sumcheck (PiopField).
+        let c1_md_msg: usize = fixed_c2_proof.c1_md_group_messages.iter()
+            .flat_map(|g| g.iter()).map(|v| v.len()).sum();
+        let c1_md_sum: usize = fixed_c2_proof.c1_md_claimed_sums.iter().map(|v| v.len()).sum();
+        let c1_md_total = c1_md_msg + c1_md_sum;
+
+        // C2 MD sumcheck (C2F).
+        let c2_md_msg: usize = fixed_c2_proof.c2_md_group_messages.iter()
+            .flat_map(|g| g.iter()).map(|v| v.len()).sum();
+        let c2_md_sum: usize = fixed_c2_proof.c2_md_claimed_sums.iter().map(|v| v.len()).sum();
+        let c2_md_total = c2_md_msg + c2_md_sum;
+
+        // CPR evals.
+        let cpr1_up: usize = fixed_c2_proof.cpr1_up_evals.iter().map(|v| v.len()).sum();
+        let cpr1_dn: usize = fixed_c2_proof.cpr1_down_evals.iter().map(|v| v.len()).sum();
+        let cpr2_up: usize = fixed_c2_proof.cpr2_up_evals.iter().map(|v| v.len()).sum();
+        let cpr2_dn: usize = fixed_c2_proof.cpr2_down_evals.iter().map(|v| v.len()).sum();
+        let cpr_total = cpr1_up + cpr1_dn + cpr2_up + cpr2_dn;
+
+        // Eval sumchecks.
+        let c1_eval_sc: usize = fixed_c2_proof.c1_eval_sumcheck.as_ref().map_or(0, |sc| {
+            sc.rounds.iter().map(|v| v.len()).sum::<usize>()
+                + sc.v_finals.iter().map(|v| v.len()).sum::<usize>()
+        });
+        let c2_eval_sc: usize = fixed_c2_proof.c2_eval_sumcheck.as_ref().map_or(0, |sc| {
+            sc.rounds.iter().map(|v| v.len()).sum::<usize>()
+                + sc.v_finals.iter().map(|v| v.len()).sum::<usize>()
+        });
+
+        // Lookup.
+        let lookup_bytes: usize = fixed_c2_proof.lookup_group_proofs.iter().map(|gp| {
+            let mults: usize = gp.aggregated_multiplicities.iter().map(|v| v.len()).sum();
+            let inv_w: usize = gp.chunk_inverse_witnesses.iter()
+                .flat_map(|o| o.iter()).map(|i| i.len()).sum();
+            let inv_t = gp.inverse_table.len();
+            (mults + inv_w + inv_t) * piop_fe_bytes
+        }).sum();
+
+        // Eval points.
+        let c1_eval_pt: usize = fixed_c2_proof.c1_evaluation_point_bytes.iter().map(|v| v.len()).sum();
+        let c2_eval_pt: usize = fixed_c2_proof.c2_evaluation_point_bytes.iter().map(|v| v.len()).sum();
+
+        // PCS evals.
+        let pcs1_eval: usize = fixed_c2_proof.pcs1_evals_bytes.iter().map(|v| v.len()).sum();
+        let pcs2_eval: usize = fixed_c2_proof.pcs2_evals_bytes.iter().map(|v| v.len()).sum();
+
+        let piop_total = ic1_bytes + ic2_bytes + c1_md_total + c2_md_total
+            + cpr_total + c1_eval_sc + c2_eval_sc + lookup_bytes
+            + c1_eval_pt + c2_eval_pt + pcs1_eval + pcs2_eval;
+        let total_raw = pcs1_bytes + pcs2_bytes + piop_total;
+
+        // Compressed.
+        let mut all_bytes = Vec::with_capacity(total_raw);
+        all_bytes.extend(&fixed_c2_proof.pcs1_proof_bytes);
+        all_bytes.extend(&fixed_c2_proof.pcs2_proof_bytes);
+        for v in &fixed_c2_proof.ic1_proof_values { all_bytes.extend(v); }
+        for v in &fixed_c2_proof.ic2_proof_values { all_bytes.extend(v); }
+        for grp in &fixed_c2_proof.c1_md_group_messages { for v in grp { all_bytes.extend(v); } }
+        for v in &fixed_c2_proof.c1_md_claimed_sums { all_bytes.extend(v); }
+        for grp in &fixed_c2_proof.c2_md_group_messages { for v in grp { all_bytes.extend(v); } }
+        for v in &fixed_c2_proof.c2_md_claimed_sums { all_bytes.extend(v); }
+        for v in &fixed_c2_proof.cpr1_up_evals { all_bytes.extend(v); }
+        for v in &fixed_c2_proof.cpr1_down_evals { all_bytes.extend(v); }
+        for v in &fixed_c2_proof.cpr2_up_evals { all_bytes.extend(v); }
+        for v in &fixed_c2_proof.cpr2_down_evals { all_bytes.extend(v); }
+        if let Some(ref sc) = fixed_c2_proof.c1_eval_sumcheck {
+            for v in &sc.rounds { all_bytes.extend(v); }
+            for v in &sc.v_finals { all_bytes.extend(v); }
+        }
+        if let Some(ref sc) = fixed_c2_proof.c2_eval_sumcheck {
+            for v in &sc.rounds { all_bytes.extend(v); }
+            for v in &sc.v_finals { all_bytes.extend(v); }
+        }
+        // Lookup field elements.
+        {
+            fn write_fe_fc2(buf: &mut Vec<u8>, f: &zinc_snark::pipeline::PiopField) {
+                use zinc_snark::pipeline::FIELD_LIMBS;
+                use crypto_primitives::crypto_bigint_uint::Uint;
+                use zinc_transcript::traits::ConstTranscribable;
+                let sz = <Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+                let start = buf.len();
+                buf.resize(start + sz, 0);
+                f.inner().write_transcription_bytes(&mut buf[start..]);
+            }
+            for gp in &fixed_c2_proof.lookup_group_proofs {
+                for v in &gp.aggregated_multiplicities {
+                    for f in v { write_fe_fc2(&mut all_bytes, f); }
+                }
+                for outer in &gp.chunk_inverse_witnesses {
+                    for inner in outer {
+                        for f in inner { write_fe_fc2(&mut all_bytes, f); }
+                    }
+                }
+                for f in &gp.inverse_table { write_fe_fc2(&mut all_bytes, f); }
+            }
+        }
+        for v in &fixed_c2_proof.c1_evaluation_point_bytes { all_bytes.extend(v); }
+        for v in &fixed_c2_proof.c2_evaluation_point_bytes { all_bytes.extend(v); }
+        for v in &fixed_c2_proof.pcs1_evals_bytes { all_bytes.extend(v); }
+        for v in &fixed_c2_proof.pcs2_evals_bytes { all_bytes.extend(v); }
+
+        let compressed = {
+            use std::io::Write;
+            let mut enc = flate2::write::DeflateEncoder::new(
+                Vec::new(), flate2::Compression::default(),
+            );
+            enc.write_all(&all_bytes).unwrap();
+            enc.finish().unwrap()
+        };
+
+        eprintln!("\n=== Fixed-C2 Dual-Circuit Proof Size (ECDSA over secp256k1) ===");
+        eprintln!("  PCS (SHA):           {:>7} B  ({:.1} KB)", pcs1_bytes, pcs1_bytes as f64 / 1024.0);
+        eprintln!("  PCS (ECDSA/C2F):     {:>7} B  ({:.1} KB)", pcs2_bytes, pcs2_bytes as f64 / 1024.0);
+        eprintln!("  IC (SHA/PiopField):  {:>7} B", ic1_bytes);
+        eprintln!("  IC (ECDSA/C2F):      {:>7} B", ic2_bytes);
+        eprintln!("  C1 MD sumcheck:      {:>7} B  (msgs={}, sums={})", c1_md_total, c1_md_msg, c1_md_sum);
+        eprintln!("  C2 MD sumcheck:      {:>7} B  (msgs={}, sums={})", c2_md_total, c2_md_msg, c2_md_sum);
+        eprintln!("  CPR evals:           {:>7} B  (c1_up={}, c1_dn={}, c2_up={}, c2_dn={})",
+            cpr_total, cpr1_up, cpr1_dn, cpr2_up, cpr2_dn);
+        eprintln!("  C1 eval sumcheck:    {:>7} B", c1_eval_sc);
+        eprintln!("  C2 eval sumcheck:    {:>7} B", c2_eval_sc);
+        eprintln!("  Lookup:              {:>7} B  ({} groups)", lookup_bytes, fixed_c2_proof.lookup_group_proofs.len());
+        eprintln!("  C1 eval point:       {:>7} B", c1_eval_pt);
+        eprintln!("  C2 eval point:       {:>7} B", c2_eval_pt);
+        eprintln!("  PCS evals:           {:>7} B  (c1={}, c2={})", pcs1_eval + pcs2_eval, pcs1_eval, pcs2_eval);
+        eprintln!("  ─────────────────────────────────────────");
+        eprintln!("  PIOP total:          {:>7} B  ({:.1} KB)", piop_total, piop_total as f64 / 1024.0);
+        eprintln!("  Total raw:           {:>7} B  ({:.1} KB)", total_raw, total_raw as f64 / 1024.0);
+        eprintln!("  Compressed:          {:>7} B  ({:.1} KB, {:.1}x ratio)",
+            compressed.len(), compressed.len() as f64 / 1024.0,
+            all_bytes.len() as f64 / compressed.len() as f64);
+
+        // Timing breakdown.
+        eprintln!("\n  Fixed-C2 timing: PCS commit={:?}, IC={:?}, CPR+Lookup={:?}, PCS prove={:?}, total={:?}",
+            fixed_c2_proof.timing.pcs_commit,
+            fixed_c2_proof.timing.ideal_check,
+            fixed_c2_proof.timing.combined_poly_resolver,
+            fixed_c2_proof.timing.pcs_prove,
+            fixed_c2_proof.timing.total,
+        );
+    }
+    */ // end of commented-out Fixed-C2 section
+
+    // ══════════════════════════════════════════════════════════════════
+    // ── Chunk Variant Proof Size Comparison (folded dual-circuit) ────
+    // ══════════════════════════════════════════════════════════════════
+    //
+    // Computes raw + compressed proof sizes for every (folding x chunk)
+    // combination and prints a summary table.
+    {
+        use zinc_snark::pipeline::FIELD_LIMBS;
+        use crypto_primitives::crypto_bigint_uint::Uint;
+        let fe_bytes = <Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+
+        fn write_fe_cv(buf: &mut Vec<u8>, f: &zinc_snark::pipeline::PiopField) {
+            use zinc_snark::pipeline::FIELD_LIMBS;
+            use crypto_primitives::crypto_bigint_uint::Uint;
+            use zinc_transcript::traits::ConstTranscribable;
+            let sz = <Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+            let start = buf.len();
+            buf.resize(start + sz, 0);
+            f.inner().write_transcription_bytes(&mut buf[start..]);
+        }
+
+        // Helper: serialise & compress a folded (2x) dual-circuit proof.
+        let proof_size_folded = |proof: &zinc_snark::pipeline::FoldedDualCircuitZincProof,
+                                  label: &str,
+                                  _fe_bytes: usize|
+            -> (usize, usize)
+        {
+            let mut all_bytes = Vec::new();
+            all_bytes.extend(&proof.pcs1_proof_bytes);
+            all_bytes.extend(&proof.pcs2_proof_bytes);
+            for v in &proof.ic1_proof_values  { all_bytes.extend(v); }
+            for v in &proof.ic2_proof_values  { all_bytes.extend(v); }
+            for grp in &proof.md_group_messages { for v in grp { all_bytes.extend(v); } }
+            for v in &proof.md_claimed_sums   { all_bytes.extend(v); }
+            for v in &proof.cpr1_up_evals     { all_bytes.extend(v); }
+            for v in &proof.cpr1_down_evals   { all_bytes.extend(v); }
+            for v in &proof.cpr2_up_evals     { all_bytes.extend(v); }
+            for v in &proof.cpr2_down_evals   { all_bytes.extend(v); }
+            if let Some(ref sc) = proof.unified_eval_sumcheck {
+                for v in &sc.rounds   { all_bytes.extend(v); }
+                for v in &sc.v_finals { all_bytes.extend(v); }
+            }
+            for gp in &proof.lookup_group_proofs {
+                for v in &gp.aggregated_multiplicities {
+                    for f in v { write_fe_cv(&mut all_bytes, f); }
+                }
+                for outer in &gp.chunk_inverse_witnesses {
+                    for inner in outer { for f in inner { write_fe_cv(&mut all_bytes, f); } }
+                }
+                for f in &gp.inverse_table { write_fe_cv(&mut all_bytes, f); }
+            }
+            for v in &proof.evaluation_point_bytes { all_bytes.extend(v); }
+            for v in &proof.pcs1_evals_bytes       { all_bytes.extend(v); }
+            for v in &proof.pcs2_evals_bytes       { all_bytes.extend(v); }
+            for v in &proof.pcs1_folding_c1s_bytes { all_bytes.extend(v); }
+            for v in &proof.pcs1_folding_c2s_bytes { all_bytes.extend(v); }
+
+            let compressed = {
+                use std::io::Write;
+                let mut enc = flate2::write::DeflateEncoder::new(
+                    Vec::new(), flate2::Compression::default(),
+                );
+                enc.write_all(&all_bytes).unwrap();
+                enc.finish().unwrap()
+            };
+
+            eprintln!("\n=== {label} Proof Size ===");
+            eprintln!("  Total raw:      {:>7} B  ({:.1} KB)", all_bytes.len(), all_bytes.len() as f64 / 1024.0);
+            eprintln!("  Compressed:     {:>7} B  ({:.1} KB, {:.1}x ratio)",
+                compressed.len(), compressed.len() as f64 / 1024.0,
+                all_bytes.len() as f64 / compressed.len() as f64);
+
+            (all_bytes.len(), compressed.len())
+        };
+
+        // Helper: serialise & compress a 4x-folded dual-circuit proof.
+        let proof_size_4x = |proof: &zinc_snark::pipeline::FoldedDualCircuit4xZincProof,
+                              label: &str,
+                              _fe_bytes: usize|
+            -> (usize, usize)
+        {
+            let mut all_bytes = Vec::new();
+            all_bytes.extend(&proof.pcs1_proof_bytes);
+            all_bytes.extend(&proof.pcs2_proof_bytes);
+            for v in &proof.ic1_proof_values  { all_bytes.extend(v); }
+            for v in &proof.ic2_proof_values  { all_bytes.extend(v); }
+            for grp in &proof.md_group_messages { for v in grp { all_bytes.extend(v); } }
+            for v in &proof.md_claimed_sums   { all_bytes.extend(v); }
+            for v in &proof.cpr1_up_evals     { all_bytes.extend(v); }
+            for v in &proof.cpr1_down_evals   { all_bytes.extend(v); }
+            for v in &proof.cpr2_up_evals     { all_bytes.extend(v); }
+            for v in &proof.cpr2_down_evals   { all_bytes.extend(v); }
+            if let Some(ref sc) = proof.unified_eval_sumcheck {
+                for v in &sc.rounds   { all_bytes.extend(v); }
+                for v in &sc.v_finals { all_bytes.extend(v); }
+            }
+            for gp in &proof.lookup_group_proofs {
+                for v in &gp.aggregated_multiplicities {
+                    for f in v { write_fe_cv(&mut all_bytes, f); }
+                }
+                for outer in &gp.chunk_inverse_witnesses {
+                    for inner in outer { for f in inner { write_fe_cv(&mut all_bytes, f); } }
+                }
+                for f in &gp.inverse_table { write_fe_cv(&mut all_bytes, f); }
+            }
+            for v in &proof.evaluation_point_bytes     { all_bytes.extend(v); }
+            for v in &proof.pcs1_evals_bytes           { all_bytes.extend(v); }
+            for v in &proof.pcs2_evals_bytes           { all_bytes.extend(v); }
+            for v in &proof.pcs1_folding_c1s_bytes     { all_bytes.extend(v); }
+            for v in &proof.pcs1_folding_c2s_bytes     { all_bytes.extend(v); }
+            for v in &proof.pcs1_folding_c3s_bytes     { all_bytes.extend(v); }
+            for v in &proof.pcs1_folding_c4s_bytes     { all_bytes.extend(v); }
+
+            let compressed = {
+                use std::io::Write;
+                let mut enc = flate2::write::DeflateEncoder::new(
+                    Vec::new(), flate2::Compression::default(),
+                );
+                enc.write_all(&all_bytes).unwrap();
+                enc.finish().unwrap()
+            };
+
+            eprintln!("\n=== {label} Proof Size ===");
+            eprintln!("  Total raw:      {:>7} B  ({:.1} KB)", all_bytes.len(), all_bytes.len() as f64 / 1024.0);
+            eprintln!("  Compressed:     {:>7} B  ({:.1} KB, {:.1}x ratio)",
+                compressed.len(), compressed.len() as f64 / 1024.0,
+                all_bytes.len() as f64 / compressed.len() as f64);
+
+            (all_bytes.len(), compressed.len())
+        };
+
+        // Helper: serialise & compress a single-circuit 4x-folded proof
+        // (Folded4xZincProof), including HybridGkr lookup data.
+        let proof_size_hybrid_4x = |proof: &zinc_snark::pipeline::Folded4xZincProof,
+                                     label: &str,
+                                     fe_bytes: usize|
+            -> (usize, usize)
+        {
+            use zinc_snark::pipeline::LookupProofData;
+
+            let pcs      = proof.pcs_proof_bytes.len();
+            let ic: usize  = proof.ic_proof_values.iter().map(|v| v.len()).sum();
+            let fold_c1: usize = proof.folding_c1s_bytes.iter().map(|v| v.len()).sum();
+            let fold_c2: usize = proof.folding_c2s_bytes.iter().map(|v| v.len()).sum();
+            let fold_c3: usize = proof.folding_c3s_bytes.iter().map(|v| v.len()).sum();
+            let fold_c4: usize = proof.folding_c4s_bytes.iter().map(|v| v.len()).sum();
+            let folding  = fold_c1 + fold_c2 + fold_c3 + fold_c4;
+            let cpr_up: usize   = proof.cpr_up_evals.iter().map(|v| v.len()).sum();
+            let cpr_dn: usize   = proof.cpr_down_evals.iter().map(|v| v.len()).sum();
+            let eval_pt: usize  = proof.evaluation_point_bytes.iter().map(|v| v.len()).sum();
+            let pcs_eval: usize = proof.pcs_evals_bytes.iter().map(|v| v.len()).sum();
+            let cpr_sc: usize   = proof.cpr_sumcheck_messages.iter().map(|v| v.len()).sum::<usize>()
+                + proof.cpr_sumcheck_claimed_sum.len();
+
+            let lk: usize = match &proof.lookup_proof {
+                Some(LookupProofData::BatchedClassic(bp)) => {
+                    let mut t = 0usize;
+                    for gp in &bp.lookup_group_proofs {
+                        let m: usize = gp.aggregated_multiplicities.iter().map(|v| v.len()).sum();
+                        let w: usize = gp.chunk_inverse_witnesses.iter()
+                            .flat_map(|o| o.iter()).map(|i| i.len()).sum();
+                        t += (m + w + gp.inverse_table.len()) * fe_bytes;
+                    }
+                    t += bp.md_proof.group_messages.iter()
+                        .flat_map(|g| g.iter())
+                        .map(|m| m.0.tail_evaluations.len() * fe_bytes)
+                        .sum::<usize>();
+                    t += bp.md_proof.claimed_sums.len() * fe_bytes;
+                    t
+                }
+                Some(LookupProofData::HybridGkr(hp)) => {
+                    let mut t = 0usize;
+                    for group in &hp.group_proofs {
+                        let m: usize = group.aggregated_multiplicities.iter().map(|v| v.len()).sum();
+                        t += m * fe_bytes;
+                        let wg = &group.witness_gkr;
+                        t += (wg.roots_p.len() + wg.roots_q.len()) * fe_bytes;
+                        for lp in &wg.layer_proofs {
+                            if let Some(ref sc) = lp.sumcheck_proof {
+                                t += sc.messages.iter().map(|m| m.0.tail_evaluations.len()).sum::<usize>() * fe_bytes;
+                                t += fe_bytes; // claimed_sum
+                            }
+                            t += (lp.p_lefts.len() + lp.p_rights.len() + lp.q_lefts.len() + lp.q_rights.len()) * fe_bytes;
+                        }
+                        let sent_p: usize = wg.sent_p.iter().map(|v| v.len()).sum();
+                        let sent_q: usize = wg.sent_q.iter().map(|v| v.len()).sum();
+                        t += (sent_p + sent_q) * fe_bytes;
+                        let tg = &group.table_gkr;
+                        t += 2 * fe_bytes; // root_p, root_q
+                        for lp in &tg.layer_proofs {
+                            if let Some(ref sc) = lp.sumcheck_proof {
+                                t += sc.messages.iter().map(|m| m.0.tail_evaluations.len()).sum::<usize>() * fe_bytes;
+                                t += fe_bytes; // claimed_sum
+                            }
+                            t += 4 * fe_bytes; // p_left, p_right, q_left, q_right
+                        }
+                    }
+                    t
+                }
+                _ => 0,
+            };
+            let shift: usize = proof.shift_sumcheck.as_ref().map_or(0, |sc| {
+                sc.rounds.iter().map(|v| v.len()).sum::<usize>()
+                    + sc.v_finals.iter().map(|v| v.len()).sum::<usize>()
+            });
+            let total = pcs + ic + cpr_sc + cpr_up + cpr_dn + lk + shift + folding + eval_pt + pcs_eval;
+
+            // Serialise all fields for compression measurement.
+            let mut all_bytes: Vec<u8> = Vec::with_capacity(total);
+            all_bytes.extend(&proof.pcs_proof_bytes);
+            for v in &proof.ic_proof_values { all_bytes.extend(v); }
+            for v in &proof.cpr_sumcheck_messages { all_bytes.extend(v); }
+            all_bytes.extend(&proof.cpr_sumcheck_claimed_sum);
+            for v in &proof.cpr_up_evals  { all_bytes.extend(v); }
+            for v in &proof.cpr_down_evals { all_bytes.extend(v); }
+            if let Some(LookupProofData::BatchedClassic(bp)) = &proof.lookup_proof {
+                for sum in &bp.md_proof.claimed_sums { write_fe_cv(&mut all_bytes, sum); }
+                for group_msgs in &bp.md_proof.group_messages {
+                    for msg in group_msgs {
+                        for e in &msg.0.tail_evaluations { write_fe_cv(&mut all_bytes, e); }
+                    }
+                }
+                for gp in &bp.lookup_group_proofs {
+                    for v in &gp.aggregated_multiplicities {
+                        for f in v { write_fe_cv(&mut all_bytes, f); }
+                    }
+                    for outer in &gp.chunk_inverse_witnesses {
+                        for inner in outer { for f in inner { write_fe_cv(&mut all_bytes, f); } }
+                    }
+                    for f in &gp.inverse_table { write_fe_cv(&mut all_bytes, f); }
+                }
+            } else if let Some(LookupProofData::HybridGkr(hp)) = &proof.lookup_proof {
+                for group in &hp.group_proofs {
+                    for v in &group.aggregated_multiplicities {
+                        for f in v { write_fe_cv(&mut all_bytes, f); }
+                    }
+                    let wg = &group.witness_gkr;
+                    for f in &wg.roots_p { write_fe_cv(&mut all_bytes, f); }
+                    for f in &wg.roots_q { write_fe_cv(&mut all_bytes, f); }
+                    for lp in &wg.layer_proofs {
+                        if let Some(ref sc) = lp.sumcheck_proof {
+                            write_fe_cv(&mut all_bytes, &sc.claimed_sum);
+                            for m in &sc.messages { for e in &m.0.tail_evaluations { write_fe_cv(&mut all_bytes, e); } }
+                        }
+                        for f in &lp.p_lefts { write_fe_cv(&mut all_bytes, f); }
+                        for f in &lp.p_rights { write_fe_cv(&mut all_bytes, f); }
+                        for f in &lp.q_lefts { write_fe_cv(&mut all_bytes, f); }
+                        for f in &lp.q_rights { write_fe_cv(&mut all_bytes, f); }
+                    }
+                    for v in &wg.sent_p { for f in v { write_fe_cv(&mut all_bytes, f); } }
+                    for v in &wg.sent_q { for f in v { write_fe_cv(&mut all_bytes, f); } }
+                    let tg = &group.table_gkr;
+                    write_fe_cv(&mut all_bytes, &tg.root_p);
+                    write_fe_cv(&mut all_bytes, &tg.root_q);
+                    for lp in &tg.layer_proofs {
+                        if let Some(ref sc) = lp.sumcheck_proof {
+                            write_fe_cv(&mut all_bytes, &sc.claimed_sum);
+                            for m in &sc.messages { for e in &m.0.tail_evaluations { write_fe_cv(&mut all_bytes, e); } }
+                        }
+                        write_fe_cv(&mut all_bytes, &lp.p_left);
+                        write_fe_cv(&mut all_bytes, &lp.p_right);
+                        write_fe_cv(&mut all_bytes, &lp.q_left);
+                        write_fe_cv(&mut all_bytes, &lp.q_right);
+                    }
+                }
+            }
+            if let Some(ref sc) = proof.shift_sumcheck {
+                for v in &sc.rounds  { all_bytes.extend(v); }
+                for v in &sc.v_finals { all_bytes.extend(v); }
+            }
+            for v in &proof.folding_c1s_bytes { all_bytes.extend(v); }
+            for v in &proof.folding_c2s_bytes { all_bytes.extend(v); }
+            for v in &proof.folding_c3s_bytes { all_bytes.extend(v); }
+            for v in &proof.folding_c4s_bytes { all_bytes.extend(v); }
+            for v in &proof.evaluation_point_bytes { all_bytes.extend(v); }
+            for v in &proof.pcs_evals_bytes { all_bytes.extend(v); }
+
+            let compressed = {
+                use std::io::Write;
+                let mut enc = flate2::write::DeflateEncoder::new(
+                    Vec::new(), flate2::Compression::default(),
+                );
+                enc.write_all(&all_bytes).unwrap();
+                enc.finish().unwrap()
+            };
+
+            eprintln!("\n=== {label} Proof Size ===");
+            eprintln!("  PCS:            {:>7} B  ({:.1} KB)", pcs, pcs as f64 / 1024.0);
+            eprintln!("  IC:             {:>7} B", ic);
+            eprintln!("  CPR sumcheck:   {:>7} B", cpr_sc);
+            eprintln!("  CPR evals:      {:>7} B  (up={cpr_up}, down={cpr_dn})", cpr_up + cpr_dn);
+            eprintln!("  Lookup:         {:>7} B  ({:.1} KB)", lk, lk as f64 / 1024.0);
+            eprintln!("  Shift SC:       {:>7} B", shift);
+            eprintln!("  Folding:        {:>7} B  (c1={fold_c1}, c2={fold_c2}, c3={fold_c3}, c4={fold_c4})", folding);
+            eprintln!("  Eval point:     {:>7} B", eval_pt);
+            eprintln!("  PCS evals:      {:>7} B", pcs_eval);
+            eprintln!("  ─────────────────────────────");
+            eprintln!("  Total raw:      {:>7} B  ({:.1} KB)", total, total as f64 / 1024.0);
+            eprintln!("  Compressed:     {:>7} B  ({:.1} KB, {:.1}x ratio)",
+                compressed.len(), compressed.len() as f64 / 1024.0,
+                all_bytes.len() as f64 / compressed.len() as f64);
+
+            (total, compressed.len())
+        };
+
+        // ── Compute all configurations ────────────────────────────────
+        let (raw_2x_8c, compr_2x_8c) = proof_size_folded(&folded_dual_proof,    "2x Folded 8-chunk (8×2^4)", fe_bytes);
+        let (raw_2x_4c, compr_2x_4c) = proof_size_folded(&folded_dual_proof_4c, "2x Folded 4-chunk (4×2^8)", fe_bytes);
+        let (raw_4x_8c, compr_4x_8c) = proof_size_4x(&folded_4x_dual_proof,    "4x Folded 8-chunk (8×2^4)", fe_bytes);
+        let (raw_4x_4c, compr_4x_4c) = proof_size_4x(&folded_4x_dual_proof_4c, "4x Folded 4-chunk (4×2^8)", fe_bytes);
+
+        // ── Hybrid GKR c=2 (single-circuit SHA only) ────────────────
+        let (raw_hybrid_4x, compr_hybrid_4x) = proof_size_hybrid_4x(&hybrid_4x_proof, "4x Hybrid GKR c=2 4-chunk (SHA)", fe_bytes);
+
+        // ── Hybrid GKR c=2 (dual-circuit SHA+ECDSA) ─────────────────
+        let (raw_hybrid_dual, compr_hybrid_dual) = {
+            use zinc_snark::pipeline::LookupProofData;
+
+            let p = &hybrid_gkr_dual_proof;
+            let mut all_bytes: Vec<u8> = Vec::new();
+            all_bytes.extend(&p.pcs1_proof_bytes);
+            all_bytes.extend(&p.pcs2_proof_bytes);
+            for v in &p.ic1_proof_values { all_bytes.extend(v); }
+            for v in &p.ic2_proof_values { all_bytes.extend(v); }
+            for v in &p.cpr1_sumcheck_messages { all_bytes.extend(v); }
+            all_bytes.extend(&p.cpr1_sumcheck_claimed_sum);
+            for v in &p.cpr1_up_evals { all_bytes.extend(v); }
+            for v in &p.cpr1_down_evals { all_bytes.extend(v); }
+            for v in &p.cpr2_sumcheck_messages { all_bytes.extend(v); }
+            all_bytes.extend(&p.cpr2_sumcheck_claimed_sum);
+            for v in &p.cpr2_up_evals { all_bytes.extend(v); }
+            for v in &p.cpr2_down_evals { all_bytes.extend(v); }
+            if let Some(ref sc) = p.c1_eval_sumcheck {
+                for v in &sc.rounds { all_bytes.extend(v); }
+                for v in &sc.v_finals { all_bytes.extend(v); }
+            }
+            if let Some(ref sc) = p.c2_eval_sumcheck {
+                for v in &sc.rounds { all_bytes.extend(v); }
+                for v in &sc.v_finals { all_bytes.extend(v); }
+            }
+            for v in &p.c2_evaluation_point_bytes { all_bytes.extend(v); }
+            if let Some(LookupProofData::HybridGkr(ref hp)) = p.lookup_proof {
+                for group in &hp.group_proofs {
+                    for v in &group.aggregated_multiplicities {
+                        for f in v { write_fe_cv(&mut all_bytes, f); }
+                    }
+                    let wg = &group.witness_gkr;
+                    for f in &wg.roots_p { write_fe_cv(&mut all_bytes, f); }
+                    for f in &wg.roots_q { write_fe_cv(&mut all_bytes, f); }
+                    for lp in &wg.layer_proofs {
+                        if let Some(ref sc) = lp.sumcheck_proof {
+                            write_fe_cv(&mut all_bytes, &sc.claimed_sum);
+                            for m in &sc.messages { for e in &m.0.tail_evaluations { write_fe_cv(&mut all_bytes, e); } }
+                        }
+                        for f in &lp.p_lefts { write_fe_cv(&mut all_bytes, f); }
+                        for f in &lp.p_rights { write_fe_cv(&mut all_bytes, f); }
+                        for f in &lp.q_lefts { write_fe_cv(&mut all_bytes, f); }
+                        for f in &lp.q_rights { write_fe_cv(&mut all_bytes, f); }
+                    }
+                    for v in &wg.sent_p { for f in v { write_fe_cv(&mut all_bytes, f); } }
+                    for v in &wg.sent_q { for f in v { write_fe_cv(&mut all_bytes, f); } }
+                    let tg = &group.table_gkr;
+                    write_fe_cv(&mut all_bytes, &tg.root_p);
+                    write_fe_cv(&mut all_bytes, &tg.root_q);
+                    for lp in &tg.layer_proofs {
+                        if let Some(ref sc) = lp.sumcheck_proof {
+                            write_fe_cv(&mut all_bytes, &sc.claimed_sum);
+                            for m in &sc.messages { for e in &m.0.tail_evaluations { write_fe_cv(&mut all_bytes, e); } }
+                        }
+                        write_fe_cv(&mut all_bytes, &lp.p_left);
+                        write_fe_cv(&mut all_bytes, &lp.p_right);
+                        write_fe_cv(&mut all_bytes, &lp.q_left);
+                        write_fe_cv(&mut all_bytes, &lp.q_right);
+                    }
+                }
+            } else if let Some(LookupProofData::Gkr(ref gkr)) = p.lookup_proof {
+                for gp in &gkr.group_proofs {
+                    for v in &gp.aggregated_multiplicities {
+                        for f in v { write_fe_cv(&mut all_bytes, f); }
+                    }
+                    let wg = &gp.witness_gkr;
+                    for f in &wg.roots_p { write_fe_cv(&mut all_bytes, f); }
+                    for f in &wg.roots_q { write_fe_cv(&mut all_bytes, f); }
+                    for lp in &wg.layer_proofs {
+                        if let Some(ref sc) = lp.sumcheck_proof {
+                            write_fe_cv(&mut all_bytes, &sc.claimed_sum);
+                            for m in &sc.messages { for e in &m.0.tail_evaluations { write_fe_cv(&mut all_bytes, e); } }
+                        }
+                        for f in &lp.p_lefts { write_fe_cv(&mut all_bytes, f); }
+                        for f in &lp.p_rights { write_fe_cv(&mut all_bytes, f); }
+                        for f in &lp.q_lefts { write_fe_cv(&mut all_bytes, f); }
+                        for f in &lp.q_rights { write_fe_cv(&mut all_bytes, f); }
+                    }
+                    let tg = &gp.table_gkr;
+                    write_fe_cv(&mut all_bytes, &tg.root_p);
+                    write_fe_cv(&mut all_bytes, &tg.root_q);
+                    for lp in &tg.layer_proofs {
+                        if let Some(ref sc) = lp.sumcheck_proof {
+                            write_fe_cv(&mut all_bytes, &sc.claimed_sum);
+                            for m in &sc.messages { for e in &m.0.tail_evaluations { write_fe_cv(&mut all_bytes, e); } }
+                        }
+                        write_fe_cv(&mut all_bytes, &lp.p_left);
+                        write_fe_cv(&mut all_bytes, &lp.p_right);
+                        write_fe_cv(&mut all_bytes, &lp.q_left);
+                        write_fe_cv(&mut all_bytes, &lp.q_right);
+                    }
+                }
+            }
+            for v in &p.evaluation_point_bytes { all_bytes.extend(v); }
+            for v in &p.pcs1_evals_bytes { all_bytes.extend(v); }
+            for v in &p.pcs2_evals_bytes { all_bytes.extend(v); }
+            for v in &p.pcs1_folding_c1s_bytes { all_bytes.extend(v); }
+            for v in &p.pcs1_folding_c2s_bytes { all_bytes.extend(v); }
+            for v in &p.pcs1_folding_c3s_bytes { all_bytes.extend(v); }
+            for v in &p.pcs1_folding_c4s_bytes { all_bytes.extend(v); }
+
+            let raw = all_bytes.len();
+            let compressed = {
+                use std::io::Write;
+                let mut enc = flate2::write::DeflateEncoder::new(
+                    Vec::new(), flate2::Compression::default(),
+                );
+                enc.write_all(&all_bytes).unwrap();
+                enc.finish().unwrap()
+            };
+
+            eprintln!("\n=== 4x Dual Hybrid GKR c=2 4-chunk Proof Size ===");
+            eprintln!("  Total raw:      {:>7} B  ({:.1} KB)", raw, raw as f64 / 1024.0);
+            eprintln!("  Compressed:     {:>7} B  ({:.1} KB, {:.1}x ratio)",
+                compressed.len(), compressed.len() as f64 / 1024.0,
+                raw as f64 / compressed.len() as f64);
+
+            (raw, compressed.len())
+        };
+
+        // ── Summary comparison table ──────────────────────────────────
+        eprintln!("\n=== Chunk Variant Proof Size Comparison (Dual-Circuit + Hybrid) ===");
+        eprintln!("  {:42}  {:>8}  {:>8}", "Configuration", "Raw (B)", "Compr (B)");
+        eprintln!("  {}", "─".repeat(62));
+        eprintln!("  {:42}  {:>8}  {:>8}", "2x folded, 8-chunk (8×2^4) *",  raw_2x_8c, compr_2x_8c);
+        eprintln!("  {:42}  {:>8}  {:>8}", "2x folded, 4-chunk (4×2^8)",    raw_2x_4c, compr_2x_4c);
+        eprintln!("  {:42}  {:>8}  {:>8}", "4x folded, 8-chunk (8×2^4) *",  raw_4x_8c, compr_4x_8c);
+        eprintln!("  {:42}  {:>8}  {:>8}", "4x folded, 4-chunk (4×2^8)",    raw_4x_4c, compr_4x_4c);
+        eprintln!("  {:42}  {:>8}  {:>8}", "4x Hybrid GKR c=2, 4-chunk (SHA only)", raw_hybrid_4x, compr_hybrid_4x);
+        eprintln!("  {:42}  {:>8}  {:>8}", "4x Dual Hybrid GKR c=2, 4-chunk", raw_hybrid_dual, compr_hybrid_dual);
+        eprintln!("  (* = default configuration)");
+    }
 
     // ══════════════════════════════════════════════════════════════════
     // ── Verifier Step-by-Step Breakdown ──────────────────────────────
@@ -1292,7 +3230,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         // Deserialize IC proof values + verify both IC₁ (SHA) and IC₂
         // (ECDSA). Transcript setup overhead is excluded by using
         // iter_custom with manual timing.
-        group.bench_function("V/IC", |b| {
+        group.bench_function("V/Ideal Check", |b| {
             b.iter_custom(|iters| {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
@@ -1336,7 +3274,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         // ── V3. Verifier / CPR + Lookup Pre-Sumcheck ────────────────
         //
         // Projecting element + CPR₁ pre + lookup pre + CPR₂ pre.
-        group.bench_function("V/CPR+LookupPre", |b| {
+        group.bench_function("V/Main field sumcheck+LookupPre", |b| {
             b.iter_custom(|iters| {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
@@ -1484,10 +3422,10 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
             });
         });
 
-        // ── V5. Verifier / CPR Finalize ─────────────────────────────
+        // ── V5. Verifier / Main field sumcheck Finalize ─────────────────────────────
         //
         // Finalize CPR for both circuits (includes public column MLE eval).
-        group.bench_function("V/CPRFinalize", |b| {
+        group.bench_function("V/Main field sumcheck Finalize", |b| {
             b.iter_custom(|iters| {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
@@ -2093,7 +4031,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                             .get_random_field_cfg::<FScalar, <EcdsaScalarZipTypes as ZipTypes>::Fmod, <EcdsaScalarZipTypes as ZipTypes>::PrimeTest>();
                         let pt2_f: Vec<FScalar> = zinc_snark::pipeline::piop_point_to_pcs_field(&cpr_eval_pt[..num_vars], &pcs2_fcfg);
                         let eval2_f: FScalar = FScalar::new_unchecked_with_cfg(
-                            <Uint<{INT_LIMBS * 3}> as ConstTranscribable>::read_transcription_bytes(&dual_proof.pcs2_evals_bytes[0]),
+                            <Uint<{INT_LIMBS * 4}> as ConstTranscribable>::read_transcription_bytes(&dual_proof.pcs2_evals_bytes[0]),
                             &pcs2_fcfg,
                         );
                         ZipPlus::<EcZt, EcLc>::verify_with_field_cfg::<FScalar, UNCHECKED>(
@@ -2167,7 +4105,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
         let md_sum_bytes: usize = dual_proof.md_claimed_sums.iter().map(|v| v.len()).sum();
         let md_total = md_msg_bytes + md_sum_bytes;
 
-        // CPR up/down evaluations.
+        // Main field sumcheck up/down evaluations.
         let cpr1_up: usize = dual_proof.cpr1_up_evals.iter().map(|v| v.len()).sum();
         let cpr1_dn: usize = dual_proof.cpr1_down_evals.iter().map(|v| v.len()).sum();
         let cpr2_up: usize = dual_proof.cpr2_up_evals.iter().map(|v| v.len()).sum();
@@ -2256,9 +4194,33 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
             encoder.finish().unwrap()
         };
 
+        // Compress PCS (SHA) and PCS (ECDSA) individually.
+        let pcs1_compressed = {
+            use std::io::Write;
+            let mut encoder = flate2::write::DeflateEncoder::new(
+                Vec::new(), flate2::Compression::default(),
+            );
+            encoder.write_all(&dual_proof.pcs1_proof_bytes).unwrap();
+            encoder.finish().unwrap()
+        };
+        let pcs2_compressed = {
+            use std::io::Write;
+            let mut encoder = flate2::write::DeflateEncoder::new(
+                Vec::new(), flate2::Compression::default(),
+            );
+            encoder.write_all(&dual_proof.pcs2_proof_bytes).unwrap();
+            encoder.finish().unwrap()
+        };
+
         eprintln!("\n=== 8xSHA256+ECDSA Dual-Circuit Proof Size ===");
-        eprintln!("  PCS (SHA):      {:>6} B  ({:.1} KB)", pcs1_bytes, pcs1_bytes as f64 / 1024.0);
-        eprintln!("  PCS (ECDSA):    {:>6} B  ({:.1} KB)", pcs2_bytes, pcs2_bytes as f64 / 1024.0);
+        eprintln!("  PCS (SHA):      {:>6} B  ({:.1} KB)  compressed: {} B ({:.1} KB, {:.1}x)",
+            pcs1_bytes, pcs1_bytes as f64 / 1024.0,
+            pcs1_compressed.len(), pcs1_compressed.len() as f64 / 1024.0,
+            pcs1_bytes as f64 / pcs1_compressed.len() as f64);
+        eprintln!("  PCS (ECDSA):    {:>6} B  ({:.1} KB)  compressed: {} B ({:.1} KB, {:.1}x)",
+            pcs2_bytes, pcs2_bytes as f64 / 1024.0,
+            pcs2_compressed.len(), pcs2_compressed.len() as f64 / 1024.0,
+            pcs2_bytes as f64 / pcs2_compressed.len() as f64);
         eprintln!("  IC  (SHA):      {:>6} B", ic1_bytes);
         eprintln!("  IC  (ECDSA):    {:>6} B", ic2_bytes);
         eprintln!("  MD sumcheck:    {:>6} B  (msgs={}, sums={})", md_total, md_msg_bytes, md_sum_bytes);

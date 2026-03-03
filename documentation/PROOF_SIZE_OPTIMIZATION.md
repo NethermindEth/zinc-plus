@@ -350,6 +350,9 @@ so 354 KB raw → ~220 KB compressed. Task A alone may suffice.*
 | `zip-plus/src/merkle.rs` | Merkle proof serialization |
 | `poly/src/univariate/dense.rs` | `DensePolynomial` ConstTranscribable impl |
 | `snark/benches/e2e_sha256.rs` | Benchmark that measures proof size |
+| `snark/benches/steps_sha256_8x_folded.rs` | Per-step folded SHA-256 benchmark (full UAIR, 30 cols) |
+| `snark/benches/steps_sha256_8x_uc_folded.rs` | Per-step folded SHA-256 benchmark (**underconstrained** UAIR, 26 cols) |
+| `sha256-uair/src/underconstrained.rs` | Underconstrained UAIR (removes 4 F₂[X] columns + constraints) |
 | `snark/tests/round_trip.rs` | Round-trip proof test |
 | `snark/tests/full_pipeline.rs` | Full PIOP+PCS pipeline test |
 | `snark/tests/dual_ring_pipeline.rs` | Dual-ring (SHA+ECDSA) pipeline test |

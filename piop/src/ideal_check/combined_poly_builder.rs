@@ -12,6 +12,7 @@ use zinc_poly::{
         dense::CollectDenseMleWithZero,
     },
     univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF},
+    utils::build_eq_x_r_inner,
 };
 use zinc_uair::{ConstraintBuilder, TraceRow, Uair, UairSignature, ideal::ImpossibleIdeal};
 use zinc_utils::{cfg_into_iter, cfg_iter, from_ref::FromRef};
@@ -361,17 +362,23 @@ pub fn compute_combined_values_mle_first<F, U, const D: usize>(
 ) -> Vec<DynamicPolynomialF<F>>
 where
     F: PrimeField + zinc_utils::inner_transparent_field::InnerTransparentField,
-    F::Inner: Default + Send + Sync,
+    F::Inner: Default + Send + Sync + num_traits::Zero,
     U: Uair,
 {
     let sig = U::signature();
     let down_sig = sig.down_signature();
     let num_rows = binary_poly_trace[0].len();
+    let num_vars = evaluation_point.len();
+
+    // Pre-compute eq(r, ·) table once; used for all MLE evaluations below.
+    let eq_table = build_eq_x_r_inner::<F>(evaluation_point, field_cfg)
+        .expect("build_eq_x_r_inner should succeed");
+    let eq_evals = &eq_table.evaluations;
 
     // ── Step 1. Evaluate "up" column MLEs at point ──────────────────
     let up_values: Vec<DynamicPolynomialF<F>> = cfg_iter!(binary_poly_trace)
         .map(|col| {
-            evaluate_binary_poly_column_mle::<F, D>(col, evaluation_point, field_cfg)
+            evaluate_binary_poly_column_mle_with_eq::<F, D>(col, eq_evals, field_cfg)
         })
         .collect();
 
@@ -379,19 +386,19 @@ where
     let down_values: Vec<DynamicPolynomialF<F>> = if sig.uses_legacy_shifts() {
         cfg_iter!(binary_poly_trace)
             .map(|col| {
-                evaluate_shifted_binary_poly_column_mle::<F, D>(
-                    col, 1, evaluation_point, field_cfg,
+                evaluate_shifted_binary_poly_column_mle_with_eq::<F, D>(
+                    col, 1, eq_evals, num_vars, field_cfg,
                 )
             })
             .collect()
     } else {
-        sig.shifts
-            .iter()
+        cfg_iter!(sig.shifts)
             .map(|spec| {
-                evaluate_shifted_binary_poly_column_mle::<F, D>(
+                evaluate_shifted_binary_poly_column_mle_with_eq::<F, D>(
                     &binary_poly_trace[spec.source_col],
                     spec.shift_amount,
-                    evaluation_point,
+                    eq_evals,
+                    num_vars,
                     field_cfg,
                 )
             })
@@ -589,6 +596,83 @@ where
             mle.evaluate_with_config(point, field_cfg)
                 .expect("MLE evaluation should succeed")
         })
+        .collect();
+
+    DynamicPolynomialF::new_trimmed(coeffs)
+}
+
+/// Like [`evaluate_binary_poly_column_mle`], but uses a precomputed
+/// `eq(r, ·)` table to evaluate each coefficient MLE via a single
+/// conditional-addition pass instead of the O(n)-folding approach.
+///
+/// For D coefficient positions, the result is:
+///   coeff_d = Σ_{j : bit_d(column[j]) = true} eq_table[j]
+///
+/// This avoids D independent MLE folding passes (each cloning and
+/// halving a full buffer) and replaces them with D running sums
+/// accumulated in one pass over the column.
+fn evaluate_binary_poly_column_mle_with_eq<F, const D: usize>(
+    column: &DenseMultilinearExtension<BinaryPoly<D>>,
+    eq_table: &[F::Inner],
+    field_cfg: &F::Config,
+) -> DynamicPolynomialF<F>
+where
+    F: PrimeField + zinc_utils::inner_transparent_field::InnerTransparentField,
+    F::Inner: Default + Send + Sync,
+{
+    let n = column.len();
+    let zero_inner = F::zero_with_cfg(field_cfg).inner().clone();
+    let mut coeff_sums: Vec<F::Inner> = vec![zero_inner; D];
+
+    for j in 0..n {
+        for (d, bit) in column[j].iter().enumerate() {
+            if bit.into_inner() {
+                coeff_sums[d] = F::add_inner(&coeff_sums[d], &eq_table[j], field_cfg);
+            }
+        }
+    }
+
+    let coeffs: Vec<F> = coeff_sums
+        .into_iter()
+        .map(|s| F::new_unchecked_with_cfg(s, field_cfg))
+        .collect();
+
+    DynamicPolynomialF::new_trimmed(coeffs)
+}
+
+/// Like [`evaluate_shifted_binary_poly_column_mle`], but uses a
+/// precomputed `eq(r, ·)` table for efficient evaluation.
+///
+/// Entry `b` is `column[b + shift_amount]` when in bounds, else zero.
+fn evaluate_shifted_binary_poly_column_mle_with_eq<F, const D: usize>(
+    column: &DenseMultilinearExtension<BinaryPoly<D>>,
+    shift_amount: usize,
+    eq_table: &[F::Inner],
+    num_vars: usize,
+    field_cfg: &F::Config,
+) -> DynamicPolynomialF<F>
+where
+    F: PrimeField + zinc_utils::inner_transparent_field::InnerTransparentField,
+    F::Inner: Default + Send + Sync,
+{
+    let n = 1usize << num_vars;
+    let zero_inner = F::zero_with_cfg(field_cfg).inner().clone();
+    let mut coeff_sums: Vec<F::Inner> = vec![zero_inner; D];
+
+    for j in 0..n {
+        let target = j + shift_amount;
+        if target < column.len() {
+            for (d, bit) in column[target].iter().enumerate() {
+                if bit.into_inner() {
+                    coeff_sums[d] = F::add_inner(&coeff_sums[d], &eq_table[j], field_cfg);
+                }
+            }
+        }
+    }
+
+    let coeffs: Vec<F> = coeff_sums
+        .into_iter()
+        .map(|s| F::new_unchecked_with_cfg(s, field_cfg))
         .collect();
 
     DynamicPolynomialF::new_trimmed(coeffs)

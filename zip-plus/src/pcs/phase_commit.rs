@@ -10,7 +10,7 @@ use crate::{
 use crypto_primitives::DenseRowMatrix;
 use itertools::Itertools;
 use uninit::out_ref::Out;
-use zinc_utils::{cfg_chunks, cfg_chunks_mut};
+use zinc_utils::{cfg_chunks, cfg_chunks_mut, cfg_iter};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -69,7 +69,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let row_len = pp.linear_code.row_len();
 
         let expected_num_evals = pp.num_rows * row_len;
-        let cw_matrices: Vec<DenseRowMatrix<Zt::Cw>> = polys.iter().map(|poly| {
+        let cw_matrices: Vec<DenseRowMatrix<Zt::Cw>> = cfg_iter!(polys).map(|poly| {
             validate_input::<Zt, Lc, bool>(
                 "commit", pp.num_vars, batch_size,
                 &[poly], &[],
@@ -84,7 +84,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             );
 
             Ok::<_, ZipError>(ZipPlus::<Zt, Lc>::encode_rows(pp, row_len, poly))
-        }).try_collect()?;
+        }).collect::<Result<Vec<_>, _>>()?;
 
         let all_rows: Vec<&[Zt::Cw]> = cw_matrices.iter().flat_map(|m| m.as_rows()).collect();
         let merkle_tree = MerkleTree::new(&all_rows);
@@ -702,7 +702,14 @@ mod tests {
             let column_opening_phase_size =
                 Zt::NUM_COLUMN_OPENINGS * (column_values_size + single_merkle_proof_size);
 
-            b_phase_size + combined_row_size + column_opening_phase_size
+            // Grinding nonce (8 bytes if GRINDING_BITS > 0, 0 otherwise)
+            let grinding_nonce_size = if Zt::GRINDING_BITS > 0 {
+                crate::pcs_transcript::PcsTranscript::GRINDING_NONCE_BYTES
+            } else {
+                0
+            };
+
+            b_phase_size + combined_row_size + grinding_nonce_size + column_opening_phase_size
         }
 
         type F = BoxedMontyField;

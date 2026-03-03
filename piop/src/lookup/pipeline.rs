@@ -496,6 +496,121 @@ where
     Ok(subclaims)
 }
 
+// ── Hybrid GKR Prover ───────────────────────────────────────────────────────
+
+/// Run the **hybrid** GKR batched decomposed LogUp prover for all lookup
+/// columns with a given cutoff depth.
+///
+/// Identical to [`prove_gkr_batched_lookup_with_indices`] but uses the
+/// hybrid GKR protocol: the first `cutoff` GKR layers run from root, then
+/// the intermediate values are sent in the clear and the bottom portion
+/// runs as a fresh GKR.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+pub fn prove_hybrid_gkr_batched_lookup_with_indices<F>(
+    transcript: &mut impl Transcript,
+    columns: &[Vec<F>],
+    raw_indices: &[Vec<usize>],
+    specs: &[LookupColumnSpec],
+    projecting_element: &F,
+    cutoff: usize,
+    field_cfg: &F::Config,
+) -> Result<
+    (
+        super::HybridGkrPipelineLookupProof<F>,
+        super::HybridGkrPipelineLookupProverState<F>,
+    ),
+    LookupError<F>,
+>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Config: Sync,
+{
+    let groups = group_lookup_specs(specs);
+    let mut group_proofs = Vec::with_capacity(groups.len());
+    let mut group_meta = Vec::with_capacity(groups.len());
+    let mut group_states = Vec::with_capacity(groups.len());
+
+    for group in &groups {
+        let instance = build_lookup_instance_from_indices(
+            columns,
+            raw_indices,
+            group,
+            projecting_element,
+            field_cfg,
+        )?;
+
+        let witness_len = instance.witnesses[0].len();
+
+        let (proof, state) =
+            super::HybridGkrBatchedDecompLogupProtocol::<F>::prove_as_subprotocol(
+                transcript,
+                &instance,
+                cutoff,
+                field_cfg,
+            )?;
+
+        group_proofs.push(proof);
+        group_meta.push(LookupGroupMeta {
+            table_type: group.table_type.clone(),
+            num_columns: group.column_indices.len(),
+            witness_len,
+            witness_sources: group.column_indices.iter()
+                .map(|&idx| LookupWitnessSource::Column { column_index: idx })
+                .collect(),
+        });
+        group_states.push(state);
+    }
+
+    Ok((
+        super::HybridGkrPipelineLookupProof {
+            group_proofs,
+            group_meta,
+        },
+        super::HybridGkrPipelineLookupProverState {
+            group_states,
+        },
+    ))
+}
+
+/// Run the hybrid GKR batched decomposed LogUp verifier for all lookup groups.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+pub fn verify_hybrid_gkr_batched_lookup<F>(
+    transcript: &mut impl Transcript,
+    proof: &super::HybridGkrPipelineLookupProof<F>,
+    projecting_element: &F,
+    field_cfg: &F::Config,
+) -> Result<Vec<super::HybridGkrVerifierSubClaim<F>>, LookupError<F>>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Config: Sync,
+{
+    let mut subclaims = Vec::with_capacity(proof.group_proofs.len());
+
+    for (group_proof, meta) in proof.group_proofs.iter().zip(proof.group_meta.iter()) {
+        let (subtable, shifts) = generate_table_and_shifts(
+            &meta.table_type,
+            projecting_element,
+            field_cfg,
+        );
+
+        let subclaim = super::HybridGkrBatchedDecompLogupProtocol::<F>::verify_as_subprotocol(
+            transcript,
+            group_proof,
+            &subtable,
+            &shifts,
+            meta.num_columns,
+            meta.witness_len,
+            field_cfg,
+        )?;
+
+        subclaims.push(subclaim);
+    }
+
+    Ok(subclaims)
+}
+
 // ── Internal helpers ────────────────────────────────────────────────────────
 
 /// Build a [`BatchedDecompLookupInstance`] for a single lookup group.
@@ -527,7 +642,7 @@ where
         witnesses.push(witness.clone());
 
         let chunks = match &group.table_type {
-            LookupTableType::BitPoly { width } => {
+            LookupTableType::BitPoly { width, .. } => {
                 decompose_bitpoly_column(
                     witness,
                     *width,
@@ -537,7 +652,7 @@ where
                 )
                 .ok_or(LookupError::WitnessNotInTable)?
             }
-            LookupTableType::Word { width } => {
+            LookupTableType::Word { width, .. } => {
                 decompose_word_column(
                     witness,
                     *width,
@@ -583,6 +698,7 @@ where
                 .collect();
             (subtable, shifts)
         }
+        #[allow(unused_variables)]
         LookupTableType::Word { .. } => {
             let subtable = generate_word_table(chunk_width, field_cfg);
             let shifts: Vec<F> = (0..num_chunks)
@@ -595,6 +711,14 @@ where
 
 /// Compute the chunk width for a given table type.
 fn compute_chunk_width(table_type: &LookupTableType) -> usize {
+    // If the table type specifies a custom chunk width, use it.
+    let custom = match table_type {
+        LookupTableType::BitPoly { chunk_width, .. } => *chunk_width,
+        LookupTableType::Word { chunk_width, .. } => *chunk_width,
+    };
+    if let Some(cw) = custom {
+        return cw;
+    }
     let total = table_type_width(table_type);
     if total <= DECOMP_THRESHOLD {
         total // No decomposition needed; K=1
@@ -606,8 +730,8 @@ fn compute_chunk_width(table_type: &LookupTableType) -> usize {
 /// Extract the total width from a table type.
 fn table_type_width(table_type: &LookupTableType) -> usize {
     match table_type {
-        LookupTableType::BitPoly { width } => *width,
-        LookupTableType::Word { width } => *width,
+        LookupTableType::BitPoly { width, .. } => *width,
+        LookupTableType::Word { width, .. } => *width,
     }
 }
 
@@ -646,7 +770,7 @@ mod tests {
 
         let specs = vec![LookupColumnSpec {
             column_index: 0,
-            table_type: LookupTableType::BitPoly { width: 4 },
+            table_type: LookupTableType::BitPoly { width: 4, chunk_width: None },
         }];
 
         let mut pt = KeccakTranscript::new();
@@ -682,9 +806,9 @@ mod tests {
         let col2 = make_bitpoly_column(&[15, 15, 0, 8], 4, &a);
 
         let specs = vec![
-            LookupColumnSpec { column_index: 0, table_type: LookupTableType::BitPoly { width: 4 } },
-            LookupColumnSpec { column_index: 1, table_type: LookupTableType::BitPoly { width: 4 } },
-            LookupColumnSpec { column_index: 2, table_type: LookupTableType::BitPoly { width: 4 } },
+            LookupColumnSpec { column_index: 0, table_type: LookupTableType::BitPoly { width: 4, chunk_width: None } },
+            LookupColumnSpec { column_index: 1, table_type: LookupTableType::BitPoly { width: 4, chunk_width: None } },
+            LookupColumnSpec { column_index: 2, table_type: LookupTableType::BitPoly { width: 4, chunk_width: None } },
         ];
 
         let mut pt = KeccakTranscript::new();
@@ -714,7 +838,7 @@ mod tests {
 
         let specs = vec![LookupColumnSpec {
             column_index: 0,
-            table_type: LookupTableType::Word { width: 8 },
+            table_type: LookupTableType::Word { width: 8, chunk_width: None },
         }];
 
         let mut pt = KeccakTranscript::new();
@@ -741,9 +865,9 @@ mod tests {
         let col2 = make_bitpoly_column(&[1, 2, 7, 10], 4, &a);
 
         let specs = vec![
-            LookupColumnSpec { column_index: 0, table_type: LookupTableType::BitPoly { width: 4 } },
-            LookupColumnSpec { column_index: 1, table_type: LookupTableType::Word { width: 8 } },
-            LookupColumnSpec { column_index: 2, table_type: LookupTableType::BitPoly { width: 4 } },
+            LookupColumnSpec { column_index: 0, table_type: LookupTableType::BitPoly { width: 4, chunk_width: None } },
+            LookupColumnSpec { column_index: 1, table_type: LookupTableType::Word { width: 8, chunk_width: None } },
+            LookupColumnSpec { column_index: 2, table_type: LookupTableType::BitPoly { width: 4, chunk_width: None } },
         ];
 
         let mut pt = KeccakTranscript::new();
@@ -773,7 +897,7 @@ mod tests {
 
         let specs = vec![LookupColumnSpec {
             column_index: 0,
-            table_type: LookupTableType::BitPoly { width: 4 },
+            table_type: LookupTableType::BitPoly { width: 4, chunk_width: None },
         }];
 
         let mut pt = KeccakTranscript::new();

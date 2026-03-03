@@ -8,7 +8,54 @@ pub mod dynamic;
 pub mod ideal;
 pub mod nat_evaluation;
 
-/// Shared projection helper for binary polynomials.
+/// Chunk size (in bits) for table-based binary projection.
+pub(crate) const PROJ_CHUNK_BITS: usize = 8;
+
+/// Build the lookup tables for chunked binary-poly projection.
+///
+/// Returns `num_chunks` tables, each of size `2^chunk_width`, where
+/// `tables[k][b] = Σ_{j ∈ set-bits(b)} α^{k·CHUNK + j}`.
+/// Uses the recursive structure `T[n + 2^j] = T[n] + α^{start+j}`.
+pub(crate) fn build_projection_tables<F: PrimeField + FromRef<F>, const N: usize>(
+    sampled_value: &F,
+) -> Vec<Vec<F>> {
+    let field_cfg = sampled_value.cfg().clone();
+
+    // Precompute powers α^0, α^1, …, α^{N-1}.
+    let mut powers = Vec::with_capacity(N);
+    let mut curr = F::one_with_cfg(&field_cfg);
+    powers.push(curr.clone());
+    for _ in 1..N {
+        curr *= sampled_value;
+        powers.push(curr.clone());
+    }
+
+    let num_chunks = (N + PROJ_CHUNK_BITS - 1) / PROJ_CHUNK_BITS;
+    (0..num_chunks)
+        .map(|chunk| {
+            let start = chunk * PROJ_CHUNK_BITS;
+            let chunk_width = std::cmp::min(PROJ_CHUNK_BITS, N - start);
+            let chunk_size = 1usize << chunk_width;
+            let mut table = vec![F::zero_with_cfg(&field_cfg); chunk_size];
+            // Recursive build: T[n + 2^k] = T[n] + α^{start+k}
+            for k in 0..chunk_width {
+                let step = 1usize << k;
+                for n in 0..step {
+                    table[n + step] = table[n].clone() + &powers[start + k];
+                }
+            }
+            table
+        })
+        .collect()
+}
+
+/// Shared projection helper for binary polynomials (table-based).
+///
+/// Splits the N coefficients into chunks of [`PROJ_CHUNK_BITS`] bits,
+/// builds a 2^CHUNK lookup table per chunk, then evaluates each poly
+/// with `num_chunks` table lookups + `num_chunks − 1` field additions
+/// (instead of N conditional additions).
+///
 /// `get_coeff` should return true if the i-th coefficient is 1.
 fn prepare_projection<F, P, GetCoeff, const N: usize>(
     sampled_value: &F,
@@ -19,22 +66,20 @@ where
     GetCoeff: Fn(&P, usize) -> bool + 'static,
 {
     let field_cfg = sampled_value.cfg().clone();
-    let r_powers = {
-        let mut r_powers = Vec::with_capacity(N);
-        let mut curr = F::one_with_cfg(&field_cfg);
-        r_powers.push(curr.clone());
-        for _ in 1..N {
-            curr *= sampled_value;
-            r_powers.push(curr.clone());
-        }
-        r_powers
-    };
+    let tables = build_projection_tables::<F, N>(sampled_value);
+
     move |poly: &P| {
         let mut acc = F::zero_with_cfg(&field_cfg);
-        for (i, r) in r_powers.iter().enumerate() {
-            if get_coeff(poly, i) {
-                acc += r.clone();
+        for (chunk_idx, table) in tables.iter().enumerate() {
+            let start = chunk_idx * PROJ_CHUNK_BITS;
+            let chunk_width = std::cmp::min(PROJ_CHUNK_BITS, N - start);
+            let mut byte_val = 0usize;
+            for bit in 0..chunk_width {
+                if get_coeff(poly, start + bit) {
+                    byte_val |= 1 << bit;
+                }
             }
+            acc += table[byte_val].clone();
         }
         acc
     }
