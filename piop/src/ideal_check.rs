@@ -60,6 +60,7 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
     where
         U: Uair,
         F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
     {
         let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
             trace,
@@ -136,6 +137,7 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
     where
         U: Uair,
         F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
