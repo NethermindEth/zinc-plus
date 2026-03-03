@@ -22,7 +22,7 @@ use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
     from_ref::FromRef,
     inner_product::{InnerProduct, InnerProductError},
-    mul_by_scalar::{MulByScalar, WideningMulByScalar},
+    mul_by_scalar::MulByScalar,
     named::Named,
     projectable_to_field::ProjectableToField,
 };
@@ -667,24 +667,5 @@ where
         zero: Out,
     ) -> Result<Out, InnerProductError> {
         I::inner_product::<CHECK>(&lhs.coeffs, rhs, zero)
-    }
-}
-
-/// Wraps `DensePolynomial::mul_by_scalar` as a `WideningMulByScalar`.
-/// Used when `Eval` and `Cw` are the same `DensePolynomial` type
-/// (i.e., no actual widening of the coefficient type).
-#[derive(Clone, Copy, Default)]
-pub struct DensePolyWideningMulByScalar;
-
-impl<R, S, const DEGREE_PLUS_ONE: usize> WideningMulByScalar<DensePolynomial<R, DEGREE_PLUS_ONE>, S>
-    for DensePolyWideningMulByScalar
-where
-    R: FixedSemiring + for<'a> MulByScalar<&'a S>,
-{
-    type Output = DensePolynomial<R, DEGREE_PLUS_ONE>;
-
-    fn mul_by_scalar_widen(lhs: &DensePolynomial<R, DEGREE_PLUS_ONE>, rhs: &S) -> Self::Output {
-        lhs.mul_by_scalar::<false>(rhs)
-            .expect("unchecked multiplication should not fail")
     }
 }

@@ -19,7 +19,7 @@ use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
     from_ref::FromRef,
     inner_product::{BooleanInnerProductAdd, InnerProduct, InnerProductError},
-    mul_by_scalar::WideningMulByScalar,
+    mul_by_scalar::MulByScalar,
     named::Named,
     projectable_to_field::ProjectableToField,
 };
@@ -373,40 +373,25 @@ where
     }
 }
 
-#[derive(Clone, Copy, Default)]
-pub struct BinaryRefPolyWideningMulByScalar<Output>(PhantomData<Output>);
-
-impl<Rhs, Output, const DEGREE_PLUS_ONE: usize>
-    WideningMulByScalar<BinaryRefPoly<DEGREE_PLUS_ONE>, Rhs>
-    for BinaryRefPolyWideningMulByScalar<Output>
-where
-    Rhs: Copy,
-    Output: From<Rhs> + Send + Sync + Default + Copy + Zero,
+// This could've been more generic, but keeping implementation consistent with
+// `BinaryU64Poly`.
+impl<const DEGREE_PLUS_ONE: usize> MulByScalar<&i64, DensePolynomial<i64, DEGREE_PLUS_ONE>>
+    for BinaryRefPoly<DEGREE_PLUS_ONE>
 {
-    type Output = DensePolynomial<Output, DEGREE_PLUS_ONE>;
-
-    fn mul_by_scalar_widen(lhs: &BinaryRefPoly<DEGREE_PLUS_ONE>, rhs: &Rhs) -> Self::Output {
-        let mut coeffs: [Output; DEGREE_PLUS_ONE] = [Output::zero(); DEGREE_PLUS_ONE];
+    fn mul_by_scalar<const CHECK: bool>(
+        &self,
+        rhs: &i64,
+    ) -> Option<DensePolynomial<i64, DEGREE_PLUS_ONE>> {
+        let mut coeffs: [i64; DEGREE_PLUS_ONE] = [0_i64; DEGREE_PLUS_ONE];
 
         coeffs.iter_mut().enumerate().for_each(|(i, out)| {
-            if lhs.0.coeffs[i].inner() {
-                *out = (*rhs).into();
+            if self.0.coeffs[i].inner() {
+                *out = *rhs;
             }
         });
 
-        DensePolynomial { coeffs }
+        Some(DensePolynomial { coeffs })
     }
-}
-
-pub fn widen_ref<const DEGREE_PLUS_ONE: usize, Rhs, Output>(
-    poly: &BinaryRefPoly<DEGREE_PLUS_ONE>,
-    scalar: Rhs,
-) -> DensePolynomial<Output, DEGREE_PLUS_ONE>
-where
-    Rhs: Copy,
-    Output: From<Rhs> + Send + Sync + Default + Copy + Zero,
-{
-    BinaryRefPolyWideningMulByScalar::<Output>::mul_by_scalar_widen(poly, &scalar)
 }
 
 #[cfg(test)]

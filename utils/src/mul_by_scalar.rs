@@ -2,11 +2,11 @@ use crate::from_ref::FromRef;
 use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int};
 use num_traits::{CheckedMul, ConstZero};
 
-pub trait MulByScalar<Rhs>: Sized {
+pub trait MulByScalar<Rhs, Out = Self>: Sized {
     /// Multiplies the current element by a scalar from the right (usually - a
     /// coefficient to obtain a linear combination).
     /// Returns `None` if the multiplication would overflow.
-    fn mul_by_scalar<const CHECK: bool>(&self, rhs: Rhs) -> Option<Self>;
+    fn mul_by_scalar<const CHECK: bool>(&self, rhs: Rhs) -> Option<Out>;
 }
 
 macro_rules! impl_mul_by_scalar_for_primitives {
@@ -78,7 +78,7 @@ where
 impl MulByScalar<&i64> for i128 {
     #[inline(always)]
     #[allow(clippy::arithmetic_side_effects)] // By design
-    fn mul_by_scalar<const CHECK: bool>(&self, rhs: &i64) -> Option<Self> {
+    fn mul_by_scalar<const CHECK: bool>(&self, rhs: &i64) -> Option<i128> {
         let rhs = i128::from(*rhs);
         if CHECK {
             self.checked_mul(&rhs)
@@ -88,21 +88,10 @@ impl MulByScalar<&i64> for i128 {
     }
 }
 
-pub trait WideningMulByScalar<Lhs, Rhs>: Clone + Default + Send + Sync {
-    type Output;
-
-    fn mul_by_scalar_widen(lhs: &Lhs, rhs: &Rhs) -> Self::Output;
-}
-
-#[derive(Copy, Clone, Default)]
-pub struct PrimitiveWideningMulByScalar;
-
-impl WideningMulByScalar<i64, i64> for PrimitiveWideningMulByScalar {
-    type Output = i128;
-
+impl MulByScalar<&i64, i128> for i64 {
     #[inline(always)]
     #[allow(clippy::arithmetic_side_effects)] // Not possible to overflow since we are widening the result to i128
-    fn mul_by_scalar_widen(lhs: &i64, rhs: &i64) -> Self::Output {
-        i128::from(*lhs) * i128::from(*rhs)
+    fn mul_by_scalar<const CHECK: bool>(&self, rhs: &i64) -> Option<i128> {
+        Some(i128::from(*self) * i128::from(*rhs))
     }
 }

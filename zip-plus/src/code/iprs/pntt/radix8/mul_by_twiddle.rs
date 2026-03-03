@@ -1,12 +1,13 @@
 use crypto_primitives::{FromWithConfig, PrimeField};
 use std::marker::PhantomData;
 
-use zinc_utils::mul_by_scalar::{MulByScalar, WideningMulByScalar};
+use zinc_utils::mul_by_scalar::MulByScalar;
 
 /// A helper trait that allows to provide
 /// the pseudo NTT algorithm a means to
 /// multiply output by twiddles.
 // TODO(alex): Can we get away with using just MulByScalar?
+// TODO(alex): Yes we can! Make a follow-up PR that removes this.
 pub(crate) trait MulByTwiddle<Lhs, Twiddle>: Clone + Send + Sync {
     type Output;
 
@@ -52,16 +53,19 @@ where
 }
 
 #[derive(Clone, Default, Copy)]
-pub struct WideningMulByTwiddle<WM>(PhantomData<WM>);
+pub struct WideningMulByTwiddle<Out, const CHECK: bool>(PhantomData<Out>);
 
-impl<Lhs, Twiddle, Inner> MulByTwiddle<Lhs, Twiddle> for WideningMulByTwiddle<Inner>
+impl<Lhs, Twiddle, Out, const CHECK: bool> MulByTwiddle<Lhs, Twiddle>
+    for WideningMulByTwiddle<Out, CHECK>
 where
-    Inner: WideningMulByScalar<Lhs, Twiddle>,
+    Lhs: for<'a> MulByScalar<&'a Twiddle, Out>,
+    Out: Clone + Send + Sync,
 {
-    type Output = Inner::Output;
+    type Output = Out;
 
     #[inline(always)]
-    fn mul_by_twiddle(lhs: &Lhs, twiddle: &Twiddle) -> Self::Output {
-        Inner::mul_by_scalar_widen(lhs, twiddle)
+    fn mul_by_twiddle(lhs: &Lhs, twiddle: &Twiddle) -> Out {
+        lhs.mul_by_scalar::<CHECK>(twiddle)
+            .expect("Multiplication by twiddle factor should not overflow")
     }
 }

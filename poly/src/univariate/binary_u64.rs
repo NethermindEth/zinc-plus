@@ -18,7 +18,7 @@ use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{
     from_ref::FromRef,
     inner_product::{InnerProduct, InnerProductError},
-    mul_by_scalar::WideningMulByScalar,
+    mul_by_scalar::MulByScalar,
     named::Named,
     projectable_to_field::ProjectableToField,
 };
@@ -453,16 +453,14 @@ where
     }
 }
 
-#[derive(Clone, Copy, Default)]
-pub struct BinaryU64PolyWideningMulByScalar<Output>(PhantomData<Output>);
-
-impl<const DEGREE_PLUS_ONE: usize> WideningMulByScalar<BinaryU64Poly<DEGREE_PLUS_ONE>, i64>
-    for BinaryU64PolyWideningMulByScalar<i64>
+impl<const DEGREE_PLUS_ONE: usize> MulByScalar<&i64, DensePolynomial<i64, DEGREE_PLUS_ONE>>
+    for BinaryU64Poly<DEGREE_PLUS_ONE>
 {
-    type Output = DensePolynomial<i64, DEGREE_PLUS_ONE>;
-
-    fn mul_by_scalar_widen(lhs: &BinaryU64Poly<DEGREE_PLUS_ONE>, rhs: &i64) -> Self::Output {
-        widen_simd::<DEGREE_PLUS_ONE>(lhs, *rhs)
+    fn mul_by_scalar<const CHECK: bool>(
+        &self,
+        rhs: &i64,
+    ) -> Option<DensePolynomial<i64, DEGREE_PLUS_ONE>> {
+        Some(widen_simd::<DEGREE_PLUS_ONE>(self, *rhs))
     }
 }
 
@@ -675,7 +673,8 @@ unsafe fn widen_fill_avx512<const N: usize>(mask_ref: &u64, out_ptr: *mut i64, s
 
 #[cfg(test)]
 mod tests {
-    use crate::univariate::binary_ref::{BinaryRefPoly, BinaryRefPolyWideningMulByScalar};
+    use crate::univariate::binary_ref::BinaryRefPoly;
+    use zinc_utils::CHECKED;
 
     use super::*;
 
@@ -729,9 +728,7 @@ mod tests {
             for scalar in [1, 42, -7, 100, -100, i64::MAX, i64::MIN] {
                 let result_simd_ref = widen_ref(&poly, scalar);
                 let result_simd = widen_simd(&poly, scalar);
-                let result_ref = BinaryRefPolyWideningMulByScalar::<i64>::mul_by_scalar_widen(
-                    &poly_ref, &scalar,
-                );
+                let result_ref = poly_ref.mul_by_scalar::<CHECKED>(&scalar).unwrap();
 
                 assert_eq!(
                     result_simd_ref.coeffs, result_simd.coeffs,
@@ -760,8 +757,7 @@ mod tests {
         for scalar in [1, 42, -7, 100, -100] {
             let result_simd_ref = widen_ref(&poly32, scalar);
             let result_simd = widen_simd(&poly32, scalar);
-            let result_ref =
-                BinaryRefPolyWideningMulByScalar::<i64>::mul_by_scalar_widen(&poly32_ref, &scalar);
+            let result_ref = poly32_ref.mul_by_scalar::<CHECKED>(&scalar).unwrap();
             assert_eq!(
                 result_simd_ref.coeffs, result_simd.coeffs,
                 "Mismatch for degree 32 with scalar {}",

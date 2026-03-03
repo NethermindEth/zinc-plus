@@ -612,9 +612,7 @@ mod tests {
     };
     use rand::rng;
     use zinc_poly::univariate::{
-        binary::{BinaryPolyInnerProduct, BinaryPolyWideningMulByScalar},
-        dense::{DensePolyInnerProduct, DensePolyWideningMulByScalar},
-        ideal::DegreeOneIdeal,
+        binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct, ideal::DegreeOneIdeal,
     };
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
@@ -624,7 +622,6 @@ mod tests {
     use zinc_utils::{
         CHECKED,
         inner_product::{MBSInnerProduct, ScalarProduct},
-        mul_by_scalar::PrimitiveWideningMulByScalar,
     };
     use zip_plus::code::{
         iprs::{IprsCode, PnttConfigF2_16_1},
@@ -678,13 +675,8 @@ mod tests {
         type Pt = i128;
         type CombR = Int<M>;
         type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
-        type EvalDotChal = DensePolyInnerProduct<
-            i64,
-            Self::Chal,
-            Self::CombR,
-            MBSInnerProduct,
-            DEGREE_PLUS_ONE,
-        >;
+        type EvalDotChal =
+            DensePolyInnerProduct<i64, Self::Chal, Self::CombR, MBSInnerProduct, DEGREE_PLUS_ONE>;
         type CombDotChal = DensePolyInnerProduct<
             Self::CombR,
             Self::Chal,
@@ -708,13 +700,8 @@ mod tests {
         type Pt = i128;
         type CombR = Int<M>;
         type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
-        type EvalDotChal = DensePolyInnerProduct<
-            i64,
-            Self::Chal,
-            Self::CombR,
-            MBSInnerProduct,
-            DEGREE_PLUS_ONE,
-        >;
+        type EvalDotChal =
+            DensePolyInnerProduct<i64, Self::Chal, Self::CombR, MBSInnerProduct, DEGREE_PLUS_ONE>;
         type CombDotChal = DensePolyInnerProduct<
             Self::CombR,
             Self::Chal,
@@ -754,24 +741,9 @@ mod tests {
         type ArbitraryZt = ArbitraryPolyZipTypesIprs;
         type IntZt = IntZipTypes;
 
-        type BinaryLc = IprsCode<
-            Self::BinaryZt,
-            PnttConfigF2_16_1<IPRS_DEPTH>,
-            BinaryPolyWideningMulByScalar<i64>,
-            CHECKED,
-        >;
-        type ArbitraryLc = IprsCode<
-            Self::ArbitraryZt,
-            PnttConfigF2_16_1<IPRS_DEPTH>,
-            DensePolyWideningMulByScalar,
-            CHECKED,
-        >;
-        type IntLc = IprsCode<
-            Self::IntZt,
-            PnttConfigF2_16_1<IPRS_DEPTH>,
-            PrimitiveWideningMulByScalar,
-            CHECKED,
-        >;
+        type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF2_16_1<IPRS_DEPTH>, CHECKED>;
+        type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF2_16_1<IPRS_DEPTH>, CHECKED>;
+        type IntLc = IprsCode<Self::IntZt, PnttConfigF2_16_1<IPRS_DEPTH>, CHECKED>;
     }
 
     const RAA_REP: usize = 4;
