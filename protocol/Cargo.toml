@@ -24,7 +24,6 @@ zinc-utils = { workspace = true }
 crypto-bigint = { workspace = true }
 rand = { workspace = true }
 zinc-test-uair = { workspace = true }
-zip-plus = { workspace = true, features = ["test"] }
 
 [lints]
 workspace = true

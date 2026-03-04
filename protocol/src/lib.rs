@@ -47,8 +47,8 @@ use zinc_uair::{
     ideal_collector::IdealOrZero,
 };
 use zinc_utils::{
-    from_ref::FromRef, inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
-    named::Named, projectable_to_field::ProjectableToField,
+    add, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
+    mul_by_scalar::MulByScalar, named::Named, projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
     ZipError,
@@ -151,7 +151,7 @@ pub trait WitnessZincTypes<const DEGREE_PLUS_ONE: usize> {
 ///    witness MLE evaluations at the sumcheck challenge point.
 ///
 /// Returns the proof and auxiliary data (for subclaim resolution without PCS).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn prove<Zt, U, F, ProjectScalar, const D: usize, const CHECK_FOR_OVERFLOW: bool>(
     (pp_bin, pp_arb, pp_int): &(
         ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
@@ -321,8 +321,8 @@ where
                 pp,
                 col,
                 eval_point,
-                &field_cfg,
-                &projecting_element,
+                field_cfg,
+                projecting_element,
             )?;
         }
         Ok(())
@@ -390,7 +390,7 @@ where
 /// Verifies all steps and returns a [`Subclaim`]. The `up_evals` are
 /// already verified by the Zip+ PCS (Step 5); the `down_evals` (shifted
 /// MLE claims) still need to be checked via [`resolve_subclaim`].
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn verify<
     Zt,
     U,
@@ -510,7 +510,7 @@ where
 
         if i < proof.num_witness_cols.0 {
             zip_verify!(BinaryZt, BinaryLc, vp_bin);
-        } else if i < proof.num_witness_cols.0 + proof.num_witness_cols.1 {
+        } else if i < add!(proof.num_witness_cols.0, proof.num_witness_cols.1) {
             zip_verify!(ArbitraryZt, ArbitraryLc, vp_arb);
         } else {
             zip_verify!(IntZt, IntLc, vp_int);
@@ -562,7 +562,7 @@ where
 
         if actual != *expected {
             return Err(ProtocolError::SubclaimMismatch {
-                column: num_cols + i,
+                column: add!(num_cols, i),
                 expected: expected.clone(),
                 actual,
             });
@@ -634,7 +634,6 @@ mod tests {
 
     // Zip+ type parameters.
 
-    const N: usize = INT_LIMBS;
     const K: usize = INT_LIMBS * 4;
     const M: usize = INT_LIMBS * 8;
     const IPRS_DEPTH: usize = 1;
@@ -786,6 +785,7 @@ mod tests {
     }
 
     /// Set up Zip+ PCS parameters for a given number of MLE variables.
+    #[allow(clippy::type_complexity)]
     fn setup_pp<Wzt>(
         num_vars: usize,
     ) -> (

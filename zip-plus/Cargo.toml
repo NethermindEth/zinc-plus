@@ -40,7 +40,6 @@ workspace = true
 parallel = ["dep:rayon", "zinc-utils/parallel", "zinc-poly/parallel", "ark-ff/parallel", "ark-poly/parallel"]
 asm = ["zinc-transcript/asm"]
 simd = ["zinc-poly/simd"]
-test = []
 
 [[bench]]
 name = "zip_benches"

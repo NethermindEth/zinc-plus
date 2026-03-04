@@ -39,7 +39,7 @@ use zinc_utils::{
     projectable_to_field::ProjectableToField,
 };
 
-pub const REPETITION_FACTOR: usize = 4;
+const REPETITION_FACTOR: usize = 4;
 
 #[derive(Clone, Copy)]
 pub struct TestRaaConfig;
@@ -71,7 +71,7 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
 {
     const NUM_COLUMN_OPENINGS: usize = 200;
     type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
-    type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
+    type Cw = DensePolynomial<i32, DEGREE_PLUS_ONE>;
     type Fmod = Uint<K>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
@@ -79,36 +79,6 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
     type CombR = Int<M>;
     type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
     type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, DEGREE_PLUS_ONE>;
-    type CombDotChal = DensePolyInnerProduct<
-        Self::CombR,
-        Self::Chal,
-        Self::CombR,
-        MBSInnerProduct,
-        DEGREE_PLUS_ONE,
-    >;
-    type ArrCombRDotChal = MBSInnerProduct;
-}
-
-pub struct TestArbPolyZipTypes<
-    const N: usize,
-    const K: usize,
-    const M: usize,
-    const DEGREE_PLUS_ONE: usize,
-> {}
-impl<const N: usize, const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
-    for TestArbPolyZipTypes<N, K, M, DEGREE_PLUS_ONE>
-{
-    const NUM_COLUMN_OPENINGS: usize = 200;
-    type Eval = DensePolynomial<Int<N>, DEGREE_PLUS_ONE>;
-    type Cw = DensePolynomial<Int<K>, DEGREE_PLUS_ONE>;
-    type Fmod = Uint<K>;
-    type PrimeTest = MillerRabin;
-    type Chal = i128;
-    type Pt = i128;
-    type CombR = Int<M>;
-    type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
-    type EvalDotChal =
-        DensePolyInnerProduct<Int<N>, Self::Chal, Self::CombR, MBSInnerProduct, DEGREE_PLUS_ONE>;
     type CombDotChal = DensePolyInnerProduct<
         Self::CombR,
         Self::Chal,
