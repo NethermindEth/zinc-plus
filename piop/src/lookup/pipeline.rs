@@ -27,8 +27,10 @@
 
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use num_traits::Zero;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_utils::inner_transparent_field::InnerTransparentField;
+use zinc_utils::{cfg_iter, inner_transparent_field::InnerTransparentField};
 
 use super::batched_decomposition::BatchedDecompLogupProtocol;
 use super::gkr_batched_decomposition::GkrBatchedDecompLogupProtocol;
@@ -320,20 +322,22 @@ where
     let chunk_width = compute_chunk_width(&group.table_type);
     let total_width = table_type_width(&group.table_type);
 
-    let mut witnesses = Vec::with_capacity(group.column_indices.len());
-    let mut all_chunks = Vec::with_capacity(group.column_indices.len());
+    // Build witnesses and chunks per column in parallel.
+    let per_col: Vec<(Vec<F>, Vec<Vec<F>>)> = cfg_iter!(group.column_indices)
+        .map(|&col_idx| {
+            let w = columns[col_idx].clone();
+            let chunks = decompose_raw_indices_to_chunks(
+                &raw_indices[col_idx],
+                total_width,
+                chunk_width,
+                &subtable,
+            );
+            (w, chunks)
+        })
+        .collect();
 
-    for &col_idx in &group.column_indices {
-        witnesses.push(columns[col_idx].clone());
-
-        let chunks = decompose_raw_indices_to_chunks(
-            &raw_indices[col_idx],
-            total_width,
-            chunk_width,
-            &subtable,
-        );
-        all_chunks.push(chunks);
-    }
+    let (witnesses, all_chunks): (Vec<Vec<F>>, Vec<Vec<Vec<F>>>) =
+        per_col.into_iter().unzip();
 
     Ok(BatchedDecompLookupInstance {
         witnesses,

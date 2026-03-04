@@ -117,8 +117,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
             })
             .collect::<Result<_, _>>()?;
 
-        let all_aggregated_multiplicities: Vec<Vec<F>> = all_chunk_multiplicities
-            .iter()
+        let all_aggregated_multiplicities: Vec<Vec<F>> = cfg_iter!(all_chunk_multiplicities)
             .map(|lookup_mults| {
                 let mut agg = vec![zero.clone(); subtable.len()];
                 for m in lookup_mults {
@@ -330,8 +329,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
             })
             .collect::<Result<_, _>>()?;
 
-        let all_aggregated_multiplicities: Vec<Vec<F>> = all_chunk_multiplicities
-            .iter()
+        let all_aggregated_multiplicities: Vec<Vec<F>> = cfg_iter!(all_chunk_multiplicities)
             .map(|lookup_mults| {
                 let mut agg = vec![zero.clone(); subtable.len()];
                 for m in lookup_mults {

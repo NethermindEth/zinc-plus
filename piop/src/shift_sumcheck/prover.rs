@@ -163,7 +163,7 @@ where
                     let zero = F::zero_with_cfg(field_cfg);
                     let folded = (0..half)
                         .into_par_iter()
-                        .with_min_len(256)
+                        .with_min_len(64)
                         .fold(
                             || (zero.clone(), zero.clone(), zero.clone()),
                             |(mut e0, mut e1, mut e2), j| {
@@ -240,41 +240,29 @@ where
                 .zip(w_tables.par_iter_mut())
                 .for_each(|(h_table, w_table)| {
                     let half_len = h_table.len() / 2;
-                    let new_hw: Vec<(F, F)> = (0..half_len)
-                        .into_par_iter()
-                        .with_min_len(256)
-                        .map(|j| {
-                            let h = h_table[j].clone() * &one_minus_s
-                                + &(h_table[half_len + j].clone() * &s);
-                            let w = w_table[j].clone() * &one_minus_s
-                                + &(w_table[half_len + j].clone() * &s);
-                            (h, w)
-                        })
-                        .collect();
-                    let (new_h, new_w): (Vec<F>, Vec<F>) = new_hw.into_iter().unzip();
-                    *h_table = new_h;
-                    *w_table = new_w;
+                    // Fold in-place: overwrite first half, then truncate.
+                    for j in 0..half_len {
+                        h_table[j] = h_table[j].clone() * &one_minus_s
+                            + &(h_table[half_len + j].clone() * &s);
+                        w_table[j] = w_table[j].clone() * &one_minus_s
+                            + &(w_table[half_len + j].clone() * &s);
+                    }
+                    h_table.truncate(half_len);
+                    w_table.truncate(half_len);
                 });
         }
         #[cfg(not(feature = "parallel"))]
         {
             for g in 0..num_groups {
                 let half_len = h_tables[g].len() / 2;
-                let (h_src, w_src) = (&h_tables[g], &w_tables[g]);
-
-                let new_hw: Vec<(F, F)> = (0..half_len)
-                    .map(|j| {
-                        let h = h_src[j].clone() * &one_minus_s
-                            + &(h_src[half_len + j].clone() * &s);
-                        let w = w_src[j].clone() * &one_minus_s
-                            + &(w_src[half_len + j].clone() * &s);
-                        (h, w)
-                    })
-                    .collect();
-
-                let (new_h, new_w): (Vec<F>, Vec<F>) = new_hw.into_iter().unzip();
-                h_tables[g] = new_h;
-                w_tables[g] = new_w;
+                for j in 0..half_len {
+                    h_tables[g][j] = h_tables[g][j].clone() * &one_minus_s
+                        + &(h_tables[g][half_len + j].clone() * &s);
+                    w_tables[g][j] = w_tables[g][j].clone() * &one_minus_s
+                        + &(w_tables[g][half_len + j].clone() * &s);
+                }
+                h_tables[g].truncate(half_len);
+                w_tables[g].truncate(half_len);
             }
         }
 
@@ -299,15 +287,21 @@ where
     let eq_at_s = build_eq_x_r_inner(&challenges_le, field_cfg)
         .expect("build_eq_x_r_inner should succeed");
 
+    // Pre-lift eq table to F once — avoids redundant per-claim conversions.
+    let eq_lifted: Vec<F> = eq_at_s
+        .evaluations
+        .iter()
+        .map(|e| F::new_unchecked_with_cfg(e.clone(), field_cfg))
+        .collect();
+
     let v_finals: Vec<F> = cfg_into_iter!(0..k)
         .map(|i| {
             let col = &trace_columns[claims[i].source_col].evaluations;
             col.iter()
-                .zip(eq_at_s.evaluations.iter())
-                .map(|(v, eq)| {
+                .zip(eq_lifted.iter())
+                .map(|(v, eq_f)| {
                     let v_f = F::new_unchecked_with_cfg(v.clone(), field_cfg);
-                    let eq_f = F::new_unchecked_with_cfg(eq.clone(), field_cfg);
-                    v_f * &eq_f
+                    v_f * eq_f
                 })
                 .fold(F::zero_with_cfg(field_cfg), |acc, x| acc + &x)
         })

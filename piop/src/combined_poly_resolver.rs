@@ -92,9 +92,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
                 .collect()
         } else {
             // Shift-spec mode: only construct shifted columns for declared
-            // ShiftSpecs.
-            sig.shifts
-                .iter()
+            // ShiftSpecs.  Each shift is independent — parallelise.
+            cfg_iter!(sig.shifts)
                 .map(|spec| {
                     trace_matrix[spec.source_col][spec.shift_amount..]
                         .iter()

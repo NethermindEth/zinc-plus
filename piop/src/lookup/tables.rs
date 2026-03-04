@@ -486,7 +486,7 @@ where
 ///
 /// A vector of K = `total_width / chunk_width` chunk vectors.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn decompose_raw_indices_to_chunks<F: Clone>(
+pub fn decompose_raw_indices_to_chunks<F: Clone + Send + Sync>(
     raw_indices: &[usize],
     total_width: usize,
     chunk_width: usize,
@@ -494,14 +494,18 @@ pub fn decompose_raw_indices_to_chunks<F: Clone>(
 ) -> Vec<Vec<F>> {
     let num_chunks = total_width / chunk_width;
     let mask = (1usize << chunk_width) - 1;
-    let mut chunks = vec![Vec::with_capacity(raw_indices.len()); num_chunks];
-    for &idx in raw_indices {
-        for k in 0..num_chunks {
-            let sub_idx = (idx >> (k * chunk_width)) & mask;
-            chunks[k].push(subtable[sub_idx].clone());
-        }
-    }
-    chunks
+    // Build each chunk independently — enables per-chunk parallelism.
+    cfg_into_iter!(0..num_chunks)
+        .map(|k| {
+            raw_indices
+                .iter()
+                .map(|&idx| {
+                    let sub_idx = (idx >> (k * chunk_width)) & mask;
+                    subtable[sub_idx].clone()
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Decompose a Word column into K chunks of `chunk_width` bits.
