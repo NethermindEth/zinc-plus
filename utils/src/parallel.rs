@@ -116,3 +116,20 @@ macro_rules! cfg_chunks_mut {
         result
     }};
 }
+
+/// Conditionally extend a collection from an iterator.
+///
+/// When the "parallel" feature is enabled, uses `par_extend()` from rayon.
+/// Otherwise, uses standard `extend()`.
+#[macro_export]
+macro_rules! cfg_extend {
+    ($e:expr, $i:expr) => {{
+        #[cfg(feature = "parallel")]
+        let result = $e.par_extend($i);
+
+        #[cfg(not(feature = "parallel"))]
+        let result = $e.extend($i);
+
+        result
+    }};
+}

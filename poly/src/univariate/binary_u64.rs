@@ -368,6 +368,40 @@ impl<const DEGREE_PLUS_ONE: usize> From<&BinaryU64Poly<DEGREE_PLUS_ONE>>
     }
 }
 
+pub struct BinaryU64PolyIter<'a, const DEGREE_PLUS_ONE: usize> {
+    i: usize,
+    poly: &'a BinaryU64Poly<DEGREE_PLUS_ONE>,
+}
+
+impl<'a, const DEGREE_PLUS_ONE: usize> BinaryU64PolyIter<'a, DEGREE_PLUS_ONE> {
+    pub fn new(poly: &'a BinaryU64Poly<DEGREE_PLUS_ONE>) -> Self {
+        Self { i: 0, poly }
+    }
+}
+
+impl<'a, const DEGREE_PLUS_ONE: usize> Iterator for BinaryU64PolyIter<'a, DEGREE_PLUS_ONE> {
+    type Item = Boolean;
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.i < DEGREE_PLUS_ONE {
+            let i = self.i;
+
+            self.i += 1;
+
+            Some((!(self.poly.0 & (1 << i)).is_zero()).into())
+        } else {
+            None
+        }
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
+    pub fn iter(&self) -> BinaryU64PolyIter<'_, DEGREE_PLUS_ONE> {
+        BinaryU64PolyIter::new(self)
+    }
+}
+
 pub struct BinaryU64PolyInnerProduct<R, const DEGREE_PLUS_ONE: usize>(PhantomData<R>);
 
 impl<Rhs, Out, const DEGREE_PLUS_ONE: usize> InnerProduct<BinaryU64Poly<DEGREE_PLUS_ONE>, Rhs, Out>
