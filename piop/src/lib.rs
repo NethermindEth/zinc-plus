@@ -1,3 +1,4 @@
+pub mod batched_shift;
 pub mod combined_poly_resolver;
 pub mod ideal_check;
 pub mod projections;
