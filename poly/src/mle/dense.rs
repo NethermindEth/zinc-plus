@@ -478,7 +478,7 @@ pub fn project_coeffs<F: PrimeField, R: ProjectableToField<F> + Send + Sync>(
 
     DenseMultilinearExtension {
         evaluations: cfg_into_iter!(mle.evaluations)
-            .map(|x| projection(&x).inner().clone())
+            .map(|x| projection(&x).into_inner())
             .collect(),
         num_vars: mle.num_vars,
     }

@@ -92,11 +92,19 @@ impl Transcript for KeccakTranscript {
     /// Absorbs a field element into the transcript.
     /// Delegates to the field element's implementation of
     /// absorb_into_transcript.
+    // Note: Currently this only works for fields whose modulus and inner element
+    // have the same byte length
     fn absorb_random_field<F>(&mut self, v: &F, buf: &mut [u8])
     where
         F: PrimeField,
         F::Inner: Transcribable,
+        F::Modulus: Transcribable,
     {
+        debug_assert_eq!(F::Inner::LENGTH_NUM_BYTES, F::Modulus::LENGTH_NUM_BYTES);
+        debug_assert_eq!(
+            F::Inner::get_num_bytes(v.inner()),
+            F::Modulus::get_num_bytes(&v.modulus())
+        );
         self.absorb(&[0x3]);
         v.modulus().write_transcription_bytes(buf);
         self.absorb(buf);

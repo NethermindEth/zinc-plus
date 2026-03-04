@@ -37,7 +37,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + FromRef<F>
             + for<'a> FromWithConfig<&'a Zt::Chal>
             + for<'a> MulByScalar<&'a F>,
-        F::Inner: FromRef<Zt::Fmod> + Transcribable,
+        F::Inner: Transcribable,
+        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
         Zt::Cw: ProjectableToField<F>,
     {
         validate_input::<Zt, Lc, _>("verify", vp.num_vars, &[], &[point_f])?;
@@ -198,7 +199,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ) -> Result<(), ZipError>
     where
         F: FromPrimitiveWithConfig + FromRef<F> + for<'a> MulByScalar<&'a F>,
-        F::Inner: FromRef<Zt::Fmod> + Transcribable,
+        F::Inner: Transcribable,
+        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
         Zt::Cw: ProjectableToField<F>,
     {
         let q_0_combined_row = transcript.read_field_elements(vp.linear_code.row_len())?;

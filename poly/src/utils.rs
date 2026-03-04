@@ -169,7 +169,7 @@ where
         return Err(ArithErrors::InvalidParameters("r length is 0".into()));
     } else if r.len() == 1 {
         // initializing the buffer with [1-r_0, r_0]
-        buf.push((one - &r[0]).inner().clone());
+        buf.push((one - &r[0]).into_inner());
         buf.push(r[0].inner().clone());
     } else {
         build_eq_x_r_inner_helper(&r[1..], buf, cfg)?;
@@ -186,9 +186,9 @@ where
                 *bi.inner_mut() = buf[i >> 1].clone();
                 let tmp = r[0].clone() * &bi;
                 if (i & 1) == 0 {
-                    (bi.clone() - &tmp).inner().clone()
+                    (bi.clone() - &tmp).into_inner()
                 } else {
-                    tmp.inner().clone()
+                    tmp.into_inner()
                 }
             })
             .collect();
