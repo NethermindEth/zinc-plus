@@ -133,7 +133,7 @@ In the unified `prove_dual_circuit` pipeline, **both** circuits operate over the
 | **PCS₁** (SHA-256) | `BinaryPoly<32>` | 12 | `DensePolynomial<i64, 32>` | `MontyField<3>` (random) |
 | **PCS₂** (ECDSA) | `Int<4>` (256-bit) | 4 | `Int<5>` (320-bit) | `MontyField<4>` (secp256k1 $p$) |
 
-Both use `IprsCode` with `PnttConfigF2_16R4B64<1>`, `row_len = 512`, `NUM_COLUMN_OPENINGS = 147`, rate 1/4.
+Both use `IprsCode` with `PnttConfigF2_16R4B64<1>`, `row_len = 512`, `NUM_COLUMN_OPENINGS = 131`, `GRINDING_BITS = 8`, rate 1/4 (96-bit security, matching Binius64).
 
 ### Shared vs Separate
 
@@ -392,7 +392,7 @@ Benchmarked as an A/B comparison with steps 13+15 run separately.
 
 > See [BENCHMARK_STEPS_SHA256_8X_FOLDED.md §12 "PCS/Prove (folded)"](BENCHMARK_STEPS_SHA256_8X_FOLDED.md) and §13 for original.
 
-**Parameters**: 12 committed `BinaryPoly<32>` columns, `row_len = 512`, `DEGREE_BOUND = 31` → squeezes 33 $\alpha$ challenges per polynomial, projecting to `Int<6>`. 147 column openings. PCS evaluation point is $\vec{s}' \in \mathbb{F}_q^9$ (the unified eval sumcheck output point).
+**Parameters**: 12 committed `BinaryPoly<32>` columns, `row_len = 512`, `DEGREE_BOUND = 31` → squeezes 33 $\alpha$ challenges per polynomial, projecting to `Int<6>`. 131 column openings. PCS evaluation point is $\vec{s}' \in \mathbb{F}_q^9$ (the unified eval sumcheck output point).
 
 ### 18. `ECDSA/PCS/Prove`
 
@@ -408,7 +408,7 @@ Opens the 4 committed `Int<4>` columns at $\vec{s}'$ (projected from $\mathbb{F}
 
 **Phase 4 — Combined row $u'$**: 512 `Int<8>` values (512 × 64 bytes = 32,768 bytes).
 
-**Phase 5 — Column openings (147×)**: 4 polynomials × `Int<5>` (40 bytes) = 160 bytes codeword data + ~344 bytes Merkle proof ≈ 504 bytes per opening. Total: ~74 KB.
+**Phase 5 — Column openings (131×)**: 4 polynomials × `Int<5>` (40 bytes) = 160 bytes codeword data + ~344 bytes Merkle proof ≈ 504 bytes per opening. Total: ~66 KB.
 
 **PCS₂ proof total**: ~33 KB (combined row) + ~74 KB (openings) ≈ **107 KB**.
 
@@ -532,8 +532,8 @@ $$\text{final\_claim} = \sum_{i=0}^{43} \alpha_i \cdot S_{c_i}(\vec{s}', \vec{r}
 
 **Both** PCS₁ and PCS₂ verifications run in **parallel** via `rayon::join`:
 
-- **PCS₁ (SHA-256)**: Opens at the evaluation point from the eval sumcheck (9 dimensions for non-folded, 10/11 for 2×/4× folded). Verifies 147 column openings + Merkle paths + proximity test.
-- **PCS₂ (ECDSA)**: Opens at $\vec{s}'$ projected to `FScalar`. Verifies 147 column openings for 4 `Int<4>` committed columns.
+- **PCS₁ (SHA-256)**: Opens at the evaluation point from the eval sumcheck (9 dimensions for non-folded, 10/11 for 2×/4× folded). Verifies 131 column openings + Merkle paths + proximity test.
+- **PCS₂ (ECDSA)**: Opens at $\vec{s}'$ projected to `FScalar`. Verifies 131 column openings for 4 `Int<4>` committed columns.
 
 Running both in parallel is a natural optimization since they have independent transcripts and commitments.
 

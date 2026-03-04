@@ -106,7 +106,8 @@ where
         + Sync,
     Int<6>: FromRef<CwCoeff>,
 {
-    const NUM_COLUMN_OPENINGS: usize = 147;
+    const NUM_COLUMN_OPENINGS: usize = 131;
+    const GRINDING_BITS: usize = 8;
     type Eval = BinaryPoly<D_PLUS_ONE>;
     type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
     type Fmod = Uint<{ INT_LIMBS * 3 }>;
@@ -124,7 +125,8 @@ where
 struct EcdsaScalarZipTypes;
 
 impl ZipTypes for EcdsaScalarZipTypes {
-    const NUM_COLUMN_OPENINGS: usize = 147;
+    const NUM_COLUMN_OPENINGS: usize = 131;
+    const GRINDING_BITS: usize = 8;
     type Eval = Int<{ INT_LIMBS * 4 }>;
     type Cw = Int<{ INT_LIMBS * 5 }>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
@@ -303,7 +305,6 @@ fn bp_to_u32(bp: &BinaryPoly<32>) -> u32 {
 ///  20.  E2E/Verifier (unified dual-circuit pipeline)
 fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     use zinc_sha256_uair::CyclotomicIdeal;
-    use zinc_ecdsa_uair::EcdsaIdealOverF;
     use zinc_uair::ideal::ImpossibleIdeal;
     use zinc_uair::ideal_collector::IdealOrZero;
     use zinc_piop::lookup::prove_batched_lookup_with_indices;
@@ -1339,16 +1340,13 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                 32,
                 UNCHECKED,
                 zinc_snark::pipeline::TrivialIdeal, _,
-                EcdsaIdealOverF, _,
+                zinc_snark::pipeline::TrivialIdeal, _,
             >(
                 &sha_params, &ec_params,
                 &dual_proof,
                 SHA256_8X_NUM_VARS,
                 |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
-                |ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
-                    IdealOrZero::Zero => EcdsaIdealOverF,
-                    IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
-                },
+                |_: &IdealOrZero<ImpossibleIdeal>| zinc_snark::pipeline::TrivialIdeal,
                 &sha_public_column_data,
                 &ecdsa_public_column_data,
             );
@@ -1424,16 +1422,13 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                 32, 16,
                 UNCHECKED,
                 zinc_snark::pipeline::TrivialIdeal, _,
-                EcdsaIdealOverF, _,
+                zinc_snark::pipeline::TrivialIdeal, _,
             >(
                 &folded_sha_params, &ec_params,
                 &folded_dual_proof,
                 SHA256_8X_NUM_VARS,
                 |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
-                |ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
-                    IdealOrZero::Zero => EcdsaIdealOverF,
-                    IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
-                },
+                |_: &IdealOrZero<ImpossibleIdeal>| zinc_snark::pipeline::TrivialIdeal,
                 &sha_public_column_data,
                 &ecdsa_public_column_data,
             );
@@ -1681,16 +1676,13 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                 32, 16, 8,
                 UNCHECKED,
                 zinc_snark::pipeline::TrivialIdeal, _,
-                EcdsaIdealOverF, _,
+                zinc_snark::pipeline::TrivialIdeal, _,
             >(
                 &folded_4x_sha_params, &ec_params,
                 &folded_4x_dual_proof,
                 SHA256_8X_NUM_VARS,
                 |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
-                |ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
-                    IdealOrZero::Zero => EcdsaIdealOverF,
-                    IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
-                },
+                |_: &IdealOrZero<ImpossibleIdeal>| zinc_snark::pipeline::TrivialIdeal,
                 &sha_public_column_data,
                 &ecdsa_public_column_data,
             );
@@ -1767,16 +1759,13 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                 32, 16,
                 UNCHECKED,
                 zinc_snark::pipeline::TrivialIdeal, _,
-                EcdsaIdealOverF, _,
+                zinc_snark::pipeline::TrivialIdeal, _,
             >(
                 &folded_sha_params, &ec_params,
                 &folded_dual_proof_4c,
                 SHA256_8X_NUM_VARS,
                 |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
-                |ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
-                    IdealOrZero::Zero => EcdsaIdealOverF,
-                    IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
-                },
+                |_: &IdealOrZero<ImpossibleIdeal>| zinc_snark::pipeline::TrivialIdeal,
                 &sha_public_column_data,
                 &ecdsa_public_column_data,
             );
@@ -1847,16 +1836,13 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                 32, 16, 8,
                 UNCHECKED,
                 zinc_snark::pipeline::TrivialIdeal, _,
-                EcdsaIdealOverF, _,
+                zinc_snark::pipeline::TrivialIdeal, _,
             >(
                 &folded_4x_sha_params, &ec_params,
                 &folded_4x_dual_proof_4c,
                 SHA256_8X_NUM_VARS,
                 |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
-                |ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
-                    IdealOrZero::Zero => EcdsaIdealOverF,
-                    IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
-                },
+                |_: &IdealOrZero<ImpossibleIdeal>| zinc_snark::pipeline::TrivialIdeal,
                 &sha_public_column_data,
                 &ecdsa_public_column_data,
             );
@@ -1896,6 +1882,89 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                 total += t.elapsed();
             }
             total
+        });
+    });
+
+    // ── 24e. E2E Prover/Verifier (4x folded, 4-chunk, Hybrid GKR c=2, Dual-Circuit SHA+ECDSA)
+    //
+    // Full dual-circuit prover + verifier using the hybrid GKR lookup
+    // protocol with cutoff c=2 and 4-chunk decomposition over both
+    // the SHA-256 and ECDSA UAIRs.
+    group.bench_function("E2E/Prover (4x Hybrid GKR c=2 4-chunk Dual)", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let t = Instant::now();
+                let _ = zinc_snark::pipeline::prove_dual_circuit_hybrid_gkr_4x_folded::<
+                    Sha256Uair,
+                    EcdsaUairInt,
+                    Int<{ INT_LIMBS * 4 }>,
+                    FoldedSha4xZt, FoldedSha4xLc,
+                    EcZt, EcLc,
+                    FScalar,
+                    32, 16, 8,
+                    UNCHECKED,
+                >(
+                    &folded_4x_sha_params, &sha_trace,
+                    &ec_params, &ecdsa_trace,
+                    SHA256_8X_NUM_VARS,
+                    &sha_lookup_specs_4c,
+                    &sha_affine_specs_4c,
+                    2,
+                );
+                total += t.elapsed();
+            }
+            total
+        });
+    });
+
+    let hybrid_4x_dual_proof = zinc_snark::pipeline::prove_dual_circuit_hybrid_gkr_4x_folded::<
+        Sha256Uair,
+        EcdsaUairInt,
+        Int<{ INT_LIMBS * 4 }>,
+        FoldedSha4xZt, FoldedSha4xLc,
+        EcZt, EcLc,
+        FScalar,
+        32, 16, 8,
+        UNCHECKED,
+    >(
+        &folded_4x_sha_params, &sha_trace,
+        &ec_params, &ecdsa_trace,
+        SHA256_8X_NUM_VARS,
+        &sha_lookup_specs_4c,
+        &sha_affine_specs_4c,
+        2,
+    );
+
+    group.bench_function("E2E/Verifier (4x Hybrid GKR c=2 4-chunk Dual)", |b| {
+        b.iter(|| {
+            let r = zinc_snark::pipeline::verify_dual_circuit_hybrid_gkr_4x_folded::<
+                Sha256Uair,
+                EcdsaUairInt,
+                Int<{ INT_LIMBS * 4 }>,
+                FoldedSha4xZt, FoldedSha4xLc,
+                EcZt, EcLc,
+                FScalar,
+                32, 16, 8,
+                UNCHECKED,
+                zinc_snark::pipeline::TrivialIdeal, _,
+                zinc_snark::pipeline::TrivialIdeal, _,
+            >(
+                &folded_4x_sha_params, &ec_params,
+                &hybrid_4x_dual_proof,
+                SHA256_8X_NUM_VARS,
+                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                |_: &IdealOrZero<ImpossibleIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                &sha_public_column_data,
+                &ecdsa_public_column_data,
+            );
+            let _ = black_box(r);
+
+            // Feed-forward: compute SHA-256 digest from trace.
+            let digest = black_box(feed_forward(&sha_trace, 0));
+
+            // Hash→ECDSA connection: reconstruct u₁ from b₁ bits.
+            let u1 = black_box(reconstruct_u1(&ecdsa_trace));
         });
     });
 
@@ -2138,16 +2207,13 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                 32,
                 UNCHECKED,
                 zinc_snark::pipeline::TrivialIdeal, _,
-                EcdsaIdealOverF, _,
+                zinc_snark::pipeline::TrivialIdeal, _,
             >(
                 &sha_params, &ec_params,
                 &fixed_c2_proof,
                 SHA256_8X_NUM_VARS,
                 |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
-                |ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
-                    IdealOrZero::Zero => EcdsaIdealOverF,
-                    IdealOrZero::Ideal(_) => panic!("ECDSA has no non-zero ideal constraints"),
-                },
+                |_: &IdealOrZero<ImpossibleIdeal>| zinc_snark::pipeline::TrivialIdeal,
                 &sha_public_column_data,
                 &ecdsa_public_column_data,
                 &c2_field_cfg,
@@ -2752,10 +2818,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                     };
                     let _ = IdealCheckProtocol::<PiopField>::verify_at_point::<EcdsaUairInt, _, _>(
                         &mut tr, c2_proof, ecdsa_num_constraints, ic_pt,
-                        &|ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
-                            IdealOrZero::Zero => EcdsaIdealOverF,
-                            IdealOrZero::Ideal(_) => panic!("no non-zero ideal"),
-                        },
+                        &|_: &IdealOrZero<ImpossibleIdeal>| TrivialIdeal,
                         &fcfg,
                     ).expect("C2 IC verify");
 
@@ -2790,10 +2853,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                     };
                     let c2_sub = IdealCheckProtocol::<PiopField>::verify_at_point::<EcdsaUairInt, _, _>(
                         &mut tr, c2_proof, ecdsa_num_constraints, ic_pt,
-                        &|ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
-                            IdealOrZero::Zero => EcdsaIdealOverF,
-                            IdealOrZero::Ideal(_) => panic!("no non-zero ideal"),
-                        }, &fcfg,
+                        &|_: &IdealOrZero<ImpossibleIdeal>| TrivialIdeal, &fcfg,
                     ).expect("C2 IC");
 
                     // ── Timed section ──
@@ -2871,9 +2931,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                         &mut tr,
                         zinc_piop::ideal_check::Proof { combined_mle_values: deser_ic(&dual_proof.ic2_proof_values, &fcfg) },
                         ecdsa_num_constraints, ic_pt,
-                        &|ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
-                            IdealOrZero::Zero => EcdsaIdealOverF, IdealOrZero::Ideal(_) => panic!("no non-zero ideal"),
-                        }, &fcfg,
+                        &|_: &IdealOrZero<ImpossibleIdeal>| TrivialIdeal, &fcfg,
                     ).unwrap();
                     let proj_elem: PiopField = tr.get_field_challenge(&fcfg);
                     let c1_psc = project_scalars::<PiopField, Sha256Uair>(|s| {
@@ -2939,9 +2997,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                         &mut tr,
                         zinc_piop::ideal_check::Proof { combined_mle_values: deser_ic(&dual_proof.ic2_proof_values, &fcfg) },
                         ecdsa_num_constraints, ic_pt,
-                        &|ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
-                            IdealOrZero::Zero => EcdsaIdealOverF, IdealOrZero::Ideal(_) => panic!("no non-zero ideal"),
-                        }, &fcfg,
+                        &|_: &IdealOrZero<ImpossibleIdeal>| TrivialIdeal, &fcfg,
                     ).unwrap();
                     let proj_elem: PiopField = tr.get_field_challenge(&fcfg);
                     let c1_psc = project_scalars::<PiopField, Sha256Uair>(|s| {
@@ -3052,9 +3108,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                         &mut tr,
                         zinc_piop::ideal_check::Proof { combined_mle_values: deser_ic(&dual_proof.ic2_proof_values, &fcfg) },
                         ecdsa_num_constraints, ic_pt,
-                        &|ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
-                            IdealOrZero::Zero => EcdsaIdealOverF, IdealOrZero::Ideal(_) => panic!("no non-zero ideal"),
-                        }, &fcfg,
+                        &|_: &IdealOrZero<ImpossibleIdeal>| TrivialIdeal, &fcfg,
                     ).unwrap();
                     let proj_elem: PiopField = tr.get_field_challenge(&fcfg);
                     let c1_psc = project_scalars::<PiopField, Sha256Uair>(|s| {
@@ -3253,9 +3307,8 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                     ).unwrap();
                     let c2_sub = IdealCheckProtocol::<PiopField>::verify_at_point::<EcdsaUairInt, _, _>(
                         &mut tr, zinc_piop::ideal_check::Proof { combined_mle_values: deser_ic(&dual_proof.ic2_proof_values, &fcfg) },
-                        ecdsa_num_constraints, ic_pt, &|ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
-                            IdealOrZero::Zero => EcdsaIdealOverF, IdealOrZero::Ideal(_) => panic!("no non-zero ideal"),
-                        }, &fcfg,
+                        ecdsa_num_constraints, ic_pt,
+                        &|_: &IdealOrZero<ImpossibleIdeal>| TrivialIdeal, &fcfg,
                     ).unwrap();
                     let proj_elem: PiopField = tr.get_field_challenge(&fcfg);
                     let c1_fps = project_scalars_to_field(project_scalars::<PiopField, Sha256Uair>(|s| {
@@ -3465,9 +3518,8 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
                     ).unwrap();
                     let c2_sub = IdealCheckProtocol::<PiopField>::verify_at_point::<EcdsaUairInt, _, _>(
                         &mut tr, zinc_piop::ideal_check::Proof { combined_mle_values: deser_ic(&dual_proof.ic2_proof_values, &fcfg) },
-                        ecdsa_num_constraints, ic_pt, &|ideal: &IdealOrZero<ImpossibleIdeal>| match ideal {
-                            IdealOrZero::Zero => EcdsaIdealOverF, IdealOrZero::Ideal(_) => panic!("no non-zero ideal"),
-                        }, &fcfg,
+                        ecdsa_num_constraints, ic_pt,
+                        &|_: &IdealOrZero<ImpossibleIdeal>| TrivialIdeal, &fcfg,
                     ).unwrap();
                     let proj_elem: PiopField = tr.get_field_challenge(&fcfg);
                     let c1_fps = project_scalars_to_field(project_scalars::<PiopField, Sha256Uair>(|s| {

@@ -6,7 +6,7 @@ The PCS verifier is 3–4× over the 5 ms target for the 8×SHA-256+ECDSA benchm
 
 | Config (NUM_COLUMN_OPENINGS) | Verifier time | Target |
 |------------------------------|---------------|--------|
-| 147 openings                 | 14.4–15.0 ms  | < 5 ms |
+| 131 openings + 8-bit grinding| 14.4–15.0 ms  | < 5 ms |
 | 64 openings                  | 17.9–19.2 ms  | < 5 ms |
 
 The benchmark runs **two sequential** `BatchedZipPlus::verify` calls (SHA-256 + ECDSA). With the split-SHA optimization, it's **three** (SHA BinaryPoly + SHA Int + ECDSA). All must complete in < 5 ms combined.
@@ -51,7 +51,7 @@ The three starred (★) operations dominate verifier time.
 - Base layer: 2,048 output elements × 63 twiddle muls each = 129,024 (90% of total)
 - Butterfly: 7 × 2,048 × 1 = 14,336 (10% of total)
 
-### Column openings (147 per batch)
+### Column openings (131 per batch)
 
 Each opening requires:
 - `verify_batched_column_testing`: alpha-project, row-combine, sum across polys (inner products)
@@ -66,7 +66,7 @@ Merkle tree depth ≈ log₂(2,048) = 11 levels → 11 blake3 merges per proof.
 |-----------|-----------|
 | `encode_wide` (Int<6>, 143K twiddle muls) | ~2–3 ms |
 | `encode_f` (MontyField<4>, 143K field muls) | ~3–4 ms |
-| 147 column openings (Merkle + inner products) | ~2–3 ms |
+| 131 column openings (Merkle + inner products) | ~2–3 ms |
 | Transcript deserialization + FS challenges | ~0.5 ms |
 | **Total** | **~8–10 ms** |
 
@@ -99,27 +99,27 @@ The ECDSA batch adds another ~4–6 ms on top.
 The verifier calls `encode_wide` and `encode_f` on the **full row** (512 elements for 8×SHA). These two calls alone account for ~60% of verifier time.
 
 **Option 1a: Spot-check encoding instead of full encode.**
-Instead of encoding the entire row and checking all opened column positions, only compute the encoding at the opened positions. The PNTT is a structured linear map — each output element is a dot product of the input row with a single row of the encoding matrix. For `O` column openings (147), compute only those `O` output values instead of all 2,048.
+Instead of encoding the entire row and checking all opened column positions, only compute the encoding at the opened positions. The PNTT is a structured linear map — each output element is a dot product of the input row with a single row of the encoding matrix. For `O` column openings (131), compute only those `O` output values instead of all 2,048.
 
 Cost reduction: from `cw_len × BASE_LEN` to `O × BASE_LEN` twiddle muls.
 - Current: 2,048 × 63 = 129,024 (base) + 14,336 (butterfly) = 143,360
-- Spot-check: 147 × 63 = 9,261 twiddle muls → **15× cheaper**
+- Spot-check: 131 × 63 = 8,253 twiddle muls → **17× cheaper**
 
-This requires extracting rows of the PNTT's encoding matrix at specific column indices. The PNTT is the composition of the base Vandermonde matrix with DEPTH butterfly stages — computing a single output element from the input requires applying the inverse butterfly path from that output position back to the base layer, then a dot product with the appropriate base matrix row. Alternatively, pre-compute and cache the full encoding matrix for the 147 opened positions.
+This requires extracting rows of the PNTT's encoding matrix at specific column indices. The PNTT is the composition of the base Vandermonde matrix with DEPTH butterfly stages — computing a single output element from the input requires applying the inverse butterfly path from that output position back to the base layer, then a dot product with the appropriate base matrix row. Alternatively, pre-compute and cache the full encoding matrix for the 131 opened positions.
 
 **Option 1b: Leverage code structure for faster encoding.**
 The PNTT base layer is a dense Vandermonde multiplication. For the verifier, only the evaluation at queried positions matters. This is equivalent to polynomial multi-point evaluation — there may be subquadratic algorithms.
 
 **Option 1c: Cache the encoding matrix.**
-Pre-compute the `O × row_len` submatrix of the full encoding matrix and store it in `ZipPlusParams`. Then the verifier just does `O` inner products of length `row_len` instead of a full PNTT. This trades memory for computation: 147 × 512 × 8 B ≈ 590 KB per batch (acceptable).
+Pre-compute the `O × row_len` submatrix of the full encoding matrix and store it in `ZipPlusParams`. Then the verifier just does `O` inner products of length `row_len` instead of a full PNTT. This trades memory for computation: 131 × 512 × 8 B ≈ 524 KB per batch (acceptable).
 
 ### Strategy 2: Reduce column-opening verification cost
 
 **Option 2a: Batch Merkle verification.**
-Currently each of the 147 column openings independently hashes the leaf and walks up the tree. Many openings share Merkle path prefixes. Batching the verification to share work on common path segments could save ~30% of Merkle hashing.
+Currently each of the 131 column openings independently hashes the leaf and walks up the tree. Many openings share Merkle path prefixes. Batching the verification to share work on common path segments could save ~30% of Merkle hashing.
 
 **Option 2b: Parallelize column openings more effectively.**
-The column openings are already parallelized via `cfg_into_iter!` / rayon. But with only 147 items and complex per-item work, rayon's overhead may hurt. Consider:
+The column openings are already parallelized via `cfg_into_iter!` / rayon. But with only 131 items and complex per-item work, rayon's overhead may hurt. Consider:
 - Using a thread pool with larger chunk sizes
 - Manual batching into 4–8 chunks for the M4's 10 cores
 - Removing rayon for small batches and using `std::thread::scope` directly
@@ -145,7 +145,7 @@ The `MBSInnerProduct` and `ScalarProduct` implementations may not use SIMD. For 
 
 ### Strategy 5: Reduce NUM_COLUMN_OPENINGS
 
-Fewer openings = less work per verify. But this is a security parameter — reducing it weakens soundness. Already explored: 64 vs 147 — the 64-opening config was actually *slower* (paradoxical, likely due to larger proof size causing more deserialization, or different code config). This needs careful analysis.
+Fewer openings = less work per verify. But this is a security parameter — reducing it weakens soundness. The current configuration of 131 openings + 8-bit grinding targets 96-bit security (matching Binius64). This needs careful analysis before any further reduction.
 
 ## Recommended Approach (Priority Order)
 

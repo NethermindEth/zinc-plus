@@ -5797,10 +5797,11 @@ where
         transcript.get_field_challenges(num_vars, &field_cfg);
 
     // ── Step 4: IC₁ (BinaryPoly) — uses shared evaluation point ────
+    // Use the MLE-first path for max_degree == 1 UAIRs: evaluates column
+    // MLEs directly from the native BinaryPoly trace, avoiding the
+    // expensive project_trace_coeffs + row-by-row constraint evaluation
+    // done by prove_at_point.
     let t1 = Instant::now();
-    let bp_projected_trace = project_trace_coeffs::<PiopField, i64, i64, D1>(
-        trace, &[], &[], &field_cfg,
-    );
     let bp_projected_scalars = project_scalars::<PiopField, U1>(|scalar| {
         let one = PiopField::one_with_cfg(&field_cfg);
         let zero = PiopField::zero_with_cfg(&field_cfg);
@@ -5812,9 +5813,9 @@ where
     });
 
     let (bp_ic_proof, _bp_ic_state) =
-        IdealCheckProtocol::<PiopField>::prove_at_point::<U1>(
+        IdealCheckProtocol::<PiopField>::prove_mle_first_at_point::<U1, D1>(
             &mut transcript,
-            &bp_projected_trace,
+            trace,
             &bp_projected_scalars,
             bp_num_constraints,
             &ic_evaluation_point,
@@ -6660,6 +6661,10 @@ pub struct FoldedDualCircuit4xZincProof {
     pub lookup_group_meta: Vec<LookupGroupMeta>,
     pub lookup_group_proofs: Vec<zinc_piop::lookup::BatchedDecompLogupProof<PiopField>>,
 
+    /// Standalone lookup proof (used by hybrid GKR pipelines instead of
+    /// the batched lookup groups above).
+    pub lookup_proof: Option<LookupProofData>,
+
     // ── Shared evaluation point + PCS evals ─────────────────────────
     pub evaluation_point_bytes: Vec<Vec<u8>>,
     pub pcs1_evals_bytes: Vec<Vec<u8>>,
@@ -6781,10 +6786,10 @@ where
         transcript.get_field_challenges(num_vars, &field_cfg);
 
     // ── Step 4: IC₁ (BinaryPoly) at shared point ───────────────────
+    // Use the MLE-first path for max_degree == 1 UAIRs: evaluates column
+    // MLEs directly from the native BinaryPoly trace, avoiding the
+    // expensive project_trace_coeffs + row-by-row constraint evaluation.
     let t1 = Instant::now();
-    let c1_projected_trace = project_trace_coeffs::<PiopField, i64, i64, D>(
-        trace1, &[], &[], &field_cfg,
-    );
     let c1_projected_scalars = project_scalars::<PiopField, U1>(|scalar| {
         let one = PiopField::one_with_cfg(&field_cfg);
         let zero = PiopField::zero_with_cfg(&field_cfg);
@@ -6803,9 +6808,9 @@ where
     });
 
     let (c1_ic_proof, _c1_ic_state) =
-        IdealCheckProtocol::<PiopField>::prove_at_point::<U1>(
+        IdealCheckProtocol::<PiopField>::prove_mle_first_at_point::<U1, D>(
             &mut transcript,
-            &c1_projected_trace,
+            trace1,
             &c1_projected_scalars,
             c1_num_constraints,
             &ic_evaluation_point,
@@ -6904,25 +6909,24 @@ where
         Vec::new();
     if let Some((ref columns, ref raw_indices, ref remapped_specs, ref ws_map)) = lookup_precomputed {
         let groups = group_lookup_specs(remapped_specs);
-        for group in &groups {
-            let instance = build_lookup_instance_from_indices_pub(
-                columns,
-                raw_indices,
-                group,
-                &projecting_element,
-                &field_cfg,
-            )
-            .expect("lookup instance build failed");
-
+        // Build all lookup instances in parallel (no transcript interaction).
+        let instances: Vec<_> = cfg_iter!(groups)
+            .map(|group| {
+                build_lookup_instance_from_indices_pub(
+                    columns, raw_indices, group, &projecting_element, &field_cfg,
+                )
+                .expect("lookup instance build failed")
+            })
+            .collect();
+        // Build prover groups sequentially (Fiat-Shamir transcript order).
+        for (group, instance) in groups.iter().zip(instances.iter()) {
             let witness_len = instance.witnesses[0].len();
-
             let lk_group = BatchedDecompLogupProtocol::<PiopField>::build_prover_group(
                 &mut transcript,
                 &instance,
                 &field_cfg,
             )
             .expect("lookup build_prover_group failed");
-
             let meta = LookupGroupMeta {
                 table_type: group.table_type.clone(),
                 num_columns: group.column_indices.len(),
@@ -7380,10 +7384,10 @@ where
         transcript.get_field_challenges(num_vars, &field_cfg);
 
     // ── Step 4: IC₁ (BinaryPoly<D>) at shared point ────────────────
+    // Use the MLE-first path for max_degree == 1 UAIRs: evaluates column
+    // MLEs directly from the native BinaryPoly trace, avoiding the
+    // expensive project_trace_coeffs + row-by-row constraint evaluation.
     let t1 = Instant::now();
-    let c1_projected_trace = project_trace_coeffs::<PiopField, i64, i64, D>(
-        trace1, &[], &[], &field_cfg,
-    );
     let c1_projected_scalars = project_scalars::<PiopField, U1>(|scalar| {
         let one = PiopField::one_with_cfg(&field_cfg);
         let zero = PiopField::zero_with_cfg(&field_cfg);
@@ -7402,9 +7406,9 @@ where
     });
 
     let (c1_ic_proof, _c1_ic_state) =
-        IdealCheckProtocol::<PiopField>::prove_at_point::<U1>(
+        IdealCheckProtocol::<PiopField>::prove_mle_first_at_point::<U1, D>(
             &mut transcript,
-            &c1_projected_trace,
+            trace1,
             &c1_projected_scalars,
             c1_num_constraints,
             &ic_evaluation_point,
@@ -7500,25 +7504,24 @@ where
         Vec::new();
     if let Some((ref columns, ref raw_indices, ref remapped_specs, ref ws_map)) = lookup_precomputed {
         let groups = group_lookup_specs(remapped_specs);
-        for group in &groups {
-            let instance = build_lookup_instance_from_indices_pub(
-                columns,
-                raw_indices,
-                group,
-                &projecting_element,
-                &field_cfg,
-            )
-            .expect("lookup instance build failed (folded)");
-
+        // Build all lookup instances in parallel (no transcript interaction).
+        let instances: Vec<_> = cfg_iter!(groups)
+            .map(|group| {
+                build_lookup_instance_from_indices_pub(
+                    columns, raw_indices, group, &projecting_element, &field_cfg,
+                )
+                .expect("lookup instance build failed (folded)")
+            })
+            .collect();
+        // Build prover groups sequentially (Fiat-Shamir transcript order).
+        for (group, instance) in groups.iter().zip(instances.iter()) {
             let witness_len = instance.witnesses[0].len();
-
             let lk_group = BatchedDecompLogupProtocol::<PiopField>::build_prover_group(
                 &mut transcript,
                 &instance,
                 &field_cfg,
             )
             .expect("lookup build_prover_group failed (folded)");
-
             let meta = LookupGroupMeta {
                 table_type: group.table_type.clone(),
                 num_columns: group.column_indices.len(),
@@ -7980,10 +7983,10 @@ where
         transcript.get_field_challenges(num_vars, &field_cfg);
 
     // ── Step 4: IC₁ (BinaryPoly<D>) at shared point ────────────────
+    // Use the MLE-first path for max_degree == 1 UAIRs: evaluates column
+    // MLEs directly from the native BinaryPoly trace, avoiding the
+    // expensive project_trace_coeffs + row-by-row constraint evaluation.
     let t1 = Instant::now();
-    let c1_projected_trace = project_trace_coeffs::<PiopField, i64, i64, D>(
-        trace1, &[], &[], &field_cfg,
-    );
     let c1_projected_scalars = project_scalars::<PiopField, U1>(|scalar| {
         let one = PiopField::one_with_cfg(&field_cfg);
         let zero = PiopField::zero_with_cfg(&field_cfg);
@@ -8002,9 +8005,9 @@ where
     });
 
     let (c1_ic_proof, _c1_ic_state) =
-        IdealCheckProtocol::<PiopField>::prove_at_point::<U1>(
+        IdealCheckProtocol::<PiopField>::prove_mle_first_at_point::<U1, D>(
             &mut transcript,
-            &c1_projected_trace,
+            trace1,
             &c1_projected_scalars,
             c1_num_constraints,
             &ic_evaluation_point,
@@ -8101,25 +8104,24 @@ where
         Vec::new();
     if let Some((ref columns, ref raw_indices, ref remapped_specs, ref ws_map)) = lookup_precomputed {
         let groups = group_lookup_specs(remapped_specs);
-        for group in &groups {
-            let instance = build_lookup_instance_from_indices_pub(
-                columns,
-                raw_indices,
-                group,
-                &projecting_element,
-                &field_cfg,
-            )
-            .expect("lookup instance build failed (4x folded)");
-
+        // Build all lookup instances in parallel (no transcript interaction).
+        let instances: Vec<_> = cfg_iter!(groups)
+            .map(|group| {
+                build_lookup_instance_from_indices_pub(
+                    columns, raw_indices, group, &projecting_element, &field_cfg,
+                )
+                .expect("lookup instance build failed (4x folded)")
+            })
+            .collect();
+        // Build prover groups sequentially (Fiat-Shamir transcript order).
+        for (group, instance) in groups.iter().zip(instances.iter()) {
             let witness_len = instance.witnesses[0].len();
-
             let lk_group = BatchedDecompLogupProtocol::<PiopField>::build_prover_group(
                 &mut transcript,
                 &instance,
                 &field_cfg,
             )
             .expect("lookup build_prover_group failed (4x folded)");
-
             let meta = LookupGroupMeta {
                 table_type: group.table_type.clone(),
                 num_columns: group.column_indices.len(),
@@ -8461,6 +8463,7 @@ where
         unified_eval_sumcheck,
         lookup_group_meta,
         lookup_group_proofs,
+        lookup_proof: None,
         evaluation_point_bytes,
         pcs1_evals_bytes: pcs1_evals,
         pcs2_evals_bytes: pcs2_evals,
@@ -8473,6 +8476,531 @@ where
             ideal_check: ic_time,
             combined_poly_resolver: cpr_lookup_time,
             lookup: Duration::ZERO,
+            pcs_prove: pcs_prove_time,
+            serialize: serialize_time,
+            total: total_time,
+        },
+    }
+}
+
+/// Dual-circuit prover with **hybrid GKR lookup** and 4x-folded PCS.
+///
+/// Identical to [`prove_dual_circuit_4x_folded`] except that the lookup
+/// argument uses the hybrid GKR protocol (`prove_hybrid_gkr_batched_lookup_with_indices`)
+/// instead of the standard `BatchedDecompLogupProtocol` inside the multi-degree
+/// sumcheck.  The multi-degree sumcheck runs only the two CPR groups;
+/// the lookup is proved as a standalone sub-protocol afterwards.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+pub fn prove_dual_circuit_hybrid_gkr_4x_folded<U1, U2, R2, PcsZt1, PcsLc1, Zt2, Lc2, PcsF2,
+    const D: usize, const HALF_D: usize, const QUARTER_D: usize, const CHECK: bool>(
+    params1: &ZipPlusParams<PcsZt1, PcsLc1>,
+    trace1: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    params2: &ZipPlusParams<Zt2, Lc2>,
+    trace2: &[DenseMultilinearExtension<R2>],
+    num_vars: usize,
+    lookup_specs: &[LookupColumnSpec],
+    affine_lookup_specs: &[AffineLookupSpec],
+    cutoff: usize,
+) -> FoldedDualCircuit4xZincProof
+where
+    // Circuit 1 PIOP (BinaryPoly<D>):
+    U1: Uair<Scalar = BinaryPoly<D>>,
+    rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<D>>,
+    rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<HALF_D>>,
+    rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<QUARTER_D>>,
+    BinaryPoly<D>: From<u32>,
+    BinaryPoly<D>: ProjectableToField<PiopField>,
+    BinaryPoly<HALF_D>: ProjectableToField<PiopField>,
+    // Circuit 1 PCS (4x folded BinaryPoly<QUARTER_D>):
+    PcsZt1: ZipTypes<Eval = BinaryPoly<QUARTER_D>>,
+    PcsLc1: LinearCode<PcsZt1>,
+    BinaryPoly<QUARTER_D>: ProjectableToField<PiopField>,
+    PcsZt1::Eval: ProjectableToField<PiopField>,
+    PcsZt1::Cw: ProjectableToField<PiopField>,
+    PiopField: for<'a> FromWithConfig<&'a PcsZt1::Chal> + for<'a> FromWithConfig<&'a PcsZt1::CombR>,
+    <PiopField as Field>::Inner: FromRef<PcsZt1::Fmod>,
+    PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
+    // Circuit 2 (generic ring R2):
+    R2: ProjectableToField<PiopField>
+        + crypto_primitives::Semiring
+        + std::fmt::Debug
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    U2: Uair<Scalar = R2>,
+    Zt2: ZipTypes<Eval = R2>,
+    Lc2: LinearCode<Zt2>,
+    PiopField: FromWithConfig<R2>,
+    PcsF2: PrimeField
+        + FromPrimitiveWithConfig
+        + FromWithConfig<PiopUint>
+        + for<'a> FromWithConfig<&'a Zt2::Chal>
+        + for<'a> FromWithConfig<&'a Zt2::CombR>
+        + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF2>
+        + FromRef<PcsF2>,
+    PcsF2::Inner: FromRef<Zt2::Fmod> + ConstTranscribable,
+    Zt2::Eval: ProjectableToField<PcsF2>,
+    // Shared:
+    PiopField: FromPrimitiveWithConfig,
+    <PiopField as Field>::Inner: ConstTranscribable
+        + FromRef<<PiopField as Field>::Inner>
+        + Send
+        + Sync
+        + Default
+        + num_traits::Zero,
+    MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
+{
+    let total_start = Instant::now();
+
+    let sig1 = U1::signature();
+    let sig2 = U2::signature();
+    let c1_num_constraints = count_constraints::<U1>();
+    let c1_max_degree = count_max_degree::<U1>();
+    let c2_num_constraints = count_constraints::<U2>();
+    let c2_max_degree = count_max_degree::<U2>();
+
+    // ── Step 1: Double-split PCS trace1 and commit (4x folded) ──────
+    let t0 = Instant::now();
+    let pcs_trace1 = private_trace(trace1, &sig1.pcs_excluded_columns());
+    let pcs_trace2 = private_trace(trace2, &sig2.pcs_excluded_columns());
+    let split_trace1_half: Vec<DenseMultilinearExtension<BinaryPoly<HALF_D>>> =
+        split_columns::<D, HALF_D>(&pcs_trace1);
+    let split_trace1_quarter: Vec<DenseMultilinearExtension<BinaryPoly<QUARTER_D>>> =
+        split_columns::<HALF_D, QUARTER_D>(&split_trace1_half);
+    let (hint1, commitment1) = ZipPlus::<PcsZt1, PcsLc1>::commit(params1, &split_trace1_quarter)
+        .expect("PCS1 commit (hybrid GKR 4x folded dual) failed");
+    let (hint2, commitment2) = ZipPlus::<Zt2, Lc2>::commit(params2, &pcs_trace2)
+        .expect("PCS2 commit (hybrid GKR 4x folded dual) failed");
+    let pcs_commit_time = t0.elapsed();
+
+    // ── Step 2: Shared transcript + field config ─────────────────────
+    let mut transcript = KeccakTranscript::new();
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    commitment1.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
+    let root_buf1 = root_buf;
+    commitment2.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
+    let root_buf2 = root_buf;
+    let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
+
+    // ── Step 3: Shared IC evaluation point ──────────────────────────
+    let ic_evaluation_point: Vec<PiopField> =
+        transcript.get_field_challenges(num_vars, &field_cfg);
+
+    // ── Step 4: IC₁ (BinaryPoly<D>) at shared point ────────────────
+    // Use the MLE-first path for max_degree == 1 UAIRs: evaluates column
+    // MLEs directly from the native BinaryPoly trace, avoiding the
+    // expensive project_trace_coeffs + row-by-row constraint evaluation.
+    let t1 = Instant::now();
+    let c1_projected_scalars = project_scalars::<PiopField, U1>(|scalar| {
+        let one = PiopField::one_with_cfg(&field_cfg);
+        let zero = PiopField::zero_with_cfg(&field_cfg);
+        DynamicPolynomialF::new(
+            scalar
+                .iter()
+                .map(|coeff| {
+                    if coeff.into_inner() { one.clone() } else { zero.clone() }
+                })
+                .collect::<Vec<_>>(),
+        )
+    });
+
+    let (c1_ic_proof, _c1_ic_state) =
+        IdealCheckProtocol::<PiopField>::prove_mle_first_at_point::<U1, D>(
+            &mut transcript,
+            trace1,
+            &c1_projected_scalars,
+            c1_num_constraints,
+            &ic_evaluation_point,
+            &field_cfg,
+        )
+        .expect("BinaryPoly ideal check prover failed (hybrid GKR 4x folded dual)");
+
+    // ── Step 5: IC₂ (generic R) at shared point ─────────────────────
+    let c2_projected_trace: Vec<DenseMultilinearExtension<DynamicPolynomialF<PiopField>>> =
+        trace2
+            .iter()
+            .map(|col_mle| {
+                col_mle
+                    .iter()
+                    .map(|elem| DynamicPolynomialF {
+                        coeffs: vec![PiopField::from_with_cfg(elem.clone(), &field_cfg)],
+                    })
+                    .collect()
+            })
+            .collect();
+
+    let c2_projected_scalars = project_scalars::<PiopField, U2>(|scalar| {
+        DynamicPolynomialF {
+            coeffs: vec![PiopField::from_with_cfg(scalar.clone(), &field_cfg)],
+        }
+    });
+
+    let (c2_ic_proof, _c2_ic_state) =
+        IdealCheckProtocol::<PiopField>::prove_at_point::<U2>(
+            &mut transcript,
+            &c2_projected_trace,
+            &c2_projected_scalars,
+            c2_num_constraints,
+            &ic_evaluation_point,
+            &field_cfg,
+        )
+        .expect("Generic ideal check prover failed (hybrid GKR 4x folded dual)");
+
+    let ic_time = t1.elapsed();
+
+    // ── Step 6: Shared projecting element ───────────────────────────
+    let t2 = Instant::now();
+    let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+
+    let c1_field_projected_scalars =
+        project_scalars_to_field(c1_projected_scalars, &projecting_element)
+            .expect("C1 scalar projection failed (hybrid GKR 4x folded dual)");
+    let c1_field_trace = project_trace_to_field::<PiopField, D>(
+        trace1, &[], &[], &projecting_element,
+    );
+
+    let c2_field_projected_scalars =
+        project_scalars_to_field(c2_projected_scalars, &projecting_element)
+            .expect("C2 scalar projection failed (hybrid GKR 4x folded dual)");
+    let c2_field_trace = project_trace_to_field::<PiopField, 1>(
+        &[], &[], &c2_projected_trace, &projecting_element,
+    );
+
+    // ── Step 7: Extract lookup columns ──────────────────────────────
+    let has_lookups = !lookup_specs.is_empty() || !affine_lookup_specs.is_empty();
+    let lookup_precomputed = if has_lookups {
+        let (mut columns, mut raw_indices, mut remapped_specs, reverse_index_map) =
+            if !lookup_specs.is_empty() {
+                extract_lookup_columns_from_field_trace(trace1, &c1_field_trace, lookup_specs, &field_cfg)
+            } else {
+                (vec![], vec![], vec![], vec![])
+            };
+        if !affine_lookup_specs.is_empty() {
+            let _ws_map = append_affine_virtual_columns::<D>(
+                trace1, affine_lookup_specs, &projecting_element, &field_cfg, num_vars,
+                &mut columns, &mut raw_indices, &mut remapped_specs, &reverse_index_map,
+            );
+        }
+        Some((columns, raw_indices, remapped_specs))
+    } else {
+        None
+    };
+
+    // ── Step 8: Build CPR group for circuit 1 ───────────────────────
+    let c1_field_trace_for_eval = c1_field_trace.clone();
+    let mut c1_cpr_group = CombinedPolyResolver::<PiopField>::build_prover_group::<U1>(
+        &mut transcript,
+        c1_field_trace,
+        &ic_evaluation_point,
+        &c1_field_projected_scalars,
+        c1_num_constraints,
+        num_vars,
+        c1_max_degree,
+        &field_cfg,
+    )
+    .expect("C1 CPR build_prover_group failed (hybrid GKR 4x folded dual)");
+    let c1_num_cols = c1_cpr_group.num_cols;
+
+    // ── Step 9: Build CPR group for circuit 2 (NO lookup groups) ────
+    let c2_field_trace_for_eval: Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>> =
+        c2_field_trace.clone();
+
+    let mut c2_cpr_group = CombinedPolyResolver::<PiopField>::build_prover_group::<U2>(
+        &mut transcript,
+        c2_field_trace,
+        &ic_evaluation_point,
+        &c2_field_projected_scalars,
+        c2_num_constraints,
+        num_vars,
+        c2_max_degree,
+        &field_cfg,
+    )
+    .expect("C2 CPR build_prover_group failed (hybrid GKR 4x folded dual)");
+    let c2_num_cols = c2_cpr_group.num_cols;
+
+    // ── Step 10: Multi-degree sumcheck (CPR₁ + CPR₂ only) ───────────
+    let sumcheck_groups: Vec<(
+        usize,
+        Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>>,
+        Box<dyn Fn(&[PiopField]) -> PiopField + Send + Sync>,
+    )> = vec![
+        (c1_cpr_group.degree, c1_cpr_group.mles, c1_cpr_group.comb_fn),
+        (c2_cpr_group.degree, c2_cpr_group.mles, c2_cpr_group.comb_fn),
+    ];
+
+    let (md_proof, mut prover_states) =
+        MultiDegreeSumcheck::<PiopField>::prove_as_subprotocol(
+            &mut transcript,
+            sumcheck_groups,
+            num_vars,
+            &field_cfg,
+        );
+
+    // ── Step 11: Finalize CPR₁ ───────────────────────────────────────
+    let c1_prover_state = prover_states.remove(0);
+    let (c1_up_evals, c1_down_evals, c1_cpr_state) =
+        CombinedPolyResolver::<PiopField>::finalize_prover(
+            &mut transcript,
+            c1_prover_state,
+            c1_num_cols,
+            &field_cfg,
+        )
+        .expect("C1 CPR finalize_prover failed (hybrid GKR 4x folded dual)");
+
+    // ── Step 11b: Two-round folding protocol for circuit 1 ───────────
+    let piop_point = &c1_cpr_state.evaluation_point[..num_vars];
+    let fold1_output = fold_claims_prove::<PiopField, _, HALF_D>(
+        &mut transcript,
+        &split_trace1_half,
+        piop_point,
+        &projecting_element,
+        &field_cfg,
+    )
+    .expect("fold_claims_prove round 1 failed (hybrid GKR 4x folded dual)");
+
+    let fold2_output = fold_claims_prove::<PiopField, _, QUARTER_D>(
+        &mut transcript,
+        &split_trace1_quarter,
+        &fold1_output.new_point,
+        &projecting_element,
+        &field_cfg,
+    )
+    .expect("fold_claims_prove round 2 failed (hybrid GKR 4x folded dual)");
+
+    // ── Step 12: Finalize CPR₂ ───────────────────────────────────────
+    let c2_prover_state = prover_states.remove(0);
+    let (c2_up_evals, c2_down_evals, _c2_cpr_state) =
+        CombinedPolyResolver::<PiopField>::finalize_prover(
+            &mut transcript,
+            c2_prover_state,
+            c2_num_cols,
+            &field_cfg,
+        )
+        .expect("C2 CPR finalize_prover failed (hybrid GKR 4x folded dual)");
+
+    // ── Step 12a: Unified evaluation sumcheck ────────────────────────
+    let c1_num_up = c1_up_evals.len();
+    let c2_num_up = c2_up_evals.len();
+
+    let mut unified_claims: Vec<ShiftClaim<PiopField>> =
+        Vec::with_capacity(c1_num_up + c2_num_up + sig2.shifts.len());
+
+    for i in 0..c1_num_up {
+        unified_claims.push(ShiftClaim {
+            source_col: i,
+            shift_amount: 0,
+            eval_point: c1_cpr_state.evaluation_point.clone(),
+            claimed_eval: c1_up_evals[i].clone(),
+        });
+    }
+    for j in 0..c2_num_up {
+        unified_claims.push(ShiftClaim {
+            source_col: c1_num_up + j,
+            shift_amount: 0,
+            eval_point: c1_cpr_state.evaluation_point.clone(),
+            claimed_eval: c2_up_evals[j].clone(),
+        });
+    }
+    for (k, spec) in sig2.shifts.iter().enumerate() {
+        unified_claims.push(ShiftClaim {
+            source_col: c1_num_up + spec.source_col,
+            shift_amount: spec.shift_amount,
+            eval_point: c1_cpr_state.evaluation_point.clone(),
+            claimed_eval: c2_down_evals[k].clone(),
+        });
+    }
+
+    let mut unified_trace_columns: Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>> =
+        Vec::with_capacity(c1_num_up + c2_num_up);
+    unified_trace_columns.extend(c1_field_trace_for_eval);
+    unified_trace_columns.extend(c2_field_trace_for_eval);
+
+    let unified_eval_output = shift_sumcheck_prove(
+        &mut transcript,
+        &unified_claims,
+        &unified_trace_columns,
+        num_vars,
+        &field_cfg,
+    );
+
+    // ── Step 13: Hybrid GKR lookup (standalone, not in MD sumcheck) ──
+    let t2b = Instant::now();
+    let lookup_proof = if let Some((columns, raw_indices, remapped_specs)) = lookup_precomputed {
+        let (lk_proof, _lk_state) = prove_hybrid_gkr_batched_lookup_with_indices(
+            &mut transcript,
+            &columns,
+            &raw_indices,
+            &remapped_specs,
+            &projecting_element,
+            cutoff,
+            &field_cfg,
+        )
+        .expect("Hybrid GKR batched lookup prover failed (dual circuit)");
+
+        Some(LookupProofData::HybridGkr(lk_proof))
+    } else {
+        None
+    };
+    let lookup_time = t2b.elapsed();
+    let cpr_lookup_time = t2.elapsed();
+
+    // ── Step 14: PCS prove ───────────────────────────────────────────
+    let t3 = Instant::now();
+    let (eval1_f, proof1) =
+        ZipPlus::<PcsZt1, PcsLc1>::prove_with_seed::<PiopField, CHECK>(
+            params1,
+            &split_trace1_quarter,
+            &fold2_output.new_point,
+            &hint1,
+            &root_buf1,
+        )
+        .expect("PCS1 prove (hybrid GKR 4x folded dual) failed");
+
+    let pcs2_field_cfg = KeccakTranscript::default()
+        .get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>();
+    let point2: Vec<PcsF2> = piop_point_to_pcs_field(&c1_cpr_state.evaluation_point[..num_vars], &pcs2_field_cfg);
+    let (eval2_f, proof2) =
+        ZipPlus::<Zt2, Lc2>::prove_with_seed::<PcsF2, CHECK>(
+            params2,
+            &pcs_trace2,
+            &point2,
+            &hint2,
+            &root_buf2,
+        )
+        .expect("PCS2 prove (hybrid GKR 4x folded dual) failed");
+    let pcs_prove_time = t3.elapsed();
+
+    let total_time = total_start.elapsed();
+
+    // ── Serialize ────────────────────────────────────────────────────
+    let t_ser = Instant::now();
+    let proof1_bytes: Vec<u8> = {
+        let t: zip_plus::pcs_transcript::PcsTranscript = proof1.into();
+        t.stream.into_inner()
+    };
+    let proof2_bytes: Vec<u8> = {
+        let t: zip_plus::pcs_transcript::PcsTranscript = proof2.into();
+        t.stream.into_inner()
+    };
+
+    let ic1_values: Vec<Vec<u8>> = c1_ic_proof
+        .combined_mle_values
+        .iter()
+        .map(|dpf| dpf.coeffs.iter().flat_map(|c| field_to_bytes(c)).collect())
+        .collect();
+    let ic2_values: Vec<Vec<u8>> = c2_ic_proof
+        .combined_mle_values
+        .iter()
+        .map(|dpf| dpf.coeffs.iter().flat_map(|c| field_to_bytes(c)).collect())
+        .collect();
+
+    let md_group_messages: Vec<Vec<Vec<u8>>> = md_proof
+        .group_messages
+        .iter()
+        .map(|group_rounds| {
+            group_rounds
+                .iter()
+                .map(|msg| {
+                    msg.0
+                        .tail_evaluations
+                        .iter()
+                        .flat_map(|c| field_to_bytes(c))
+                        .collect()
+                })
+                .collect()
+        })
+        .collect();
+    let md_claimed_sums: Vec<Vec<u8>> = md_proof
+        .claimed_sums
+        .iter()
+        .map(field_to_bytes)
+        .collect();
+
+    let cpr1_ups: Vec<Vec<u8>> = c1_up_evals.iter()
+        .enumerate()
+        .filter(|(i, _)| !sig1.is_public_column(*i))
+        .map(|(_, v)| field_to_bytes(v))
+        .collect();
+    let cpr1_downs: Vec<Vec<u8>> = c1_down_evals.iter().map(field_to_bytes).collect();
+    let cpr2_ups: Vec<Vec<u8>> = c2_up_evals.iter()
+        .enumerate()
+        .filter(|(i, _)| !sig2.is_public_column(*i))
+        .map(|(_, v)| field_to_bytes(v))
+        .collect();
+    let cpr2_downs: Vec<Vec<u8>> = c2_down_evals.iter().map(field_to_bytes).collect();
+
+    let is_public_unified_claim = |idx: usize| -> bool {
+        if idx < c1_num_up {
+            sig1.is_public_column(idx)
+        } else if idx < c1_num_up + c2_num_up {
+            sig2.is_public_column(idx - c1_num_up)
+        } else {
+            sig2.is_public_shift(idx - c1_num_up - c2_num_up)
+        }
+    };
+    let unified_eval_sumcheck = Some(SerializedShiftSumcheckProof {
+        rounds: unified_eval_output.proof.rounds.iter().map(|rp| {
+            rp.evals.iter().flat_map(|e| field_to_bytes(e)).collect()
+        }).collect(),
+        v_finals: unified_eval_output.v_finals.iter()
+            .enumerate()
+            .filter(|(i, _)| !is_public_unified_claim(*i))
+            .map(|(_, v)| field_to_bytes(v)).collect(),
+    });
+
+    let evaluation_point_bytes: Vec<Vec<u8>> =
+        c1_cpr_state.evaluation_point.iter().map(field_to_bytes).collect();
+    let pcs1_evals: Vec<Vec<u8>> = vec![field_to_bytes(&eval1_f)];
+    let pcs2_evals: Vec<Vec<u8>> = {
+        let mut buf = vec![0u8; <PcsF2::Inner as ConstTranscribable>::NUM_BYTES];
+        eval2_f.inner().write_transcription_bytes(&mut buf);
+        vec![buf]
+    };
+
+    let pcs1_folding_c1s_bytes: Vec<Vec<u8>> =
+        fold1_output.c1s.iter().map(field_to_bytes).collect();
+    let pcs1_folding_c2s_bytes: Vec<Vec<u8>> =
+        fold1_output.c2s.iter().map(field_to_bytes).collect();
+    let pcs1_folding_c3s_bytes: Vec<Vec<u8>> =
+        fold2_output.c1s.iter().map(field_to_bytes).collect();
+    let pcs1_folding_c4s_bytes: Vec<Vec<u8>> =
+        fold2_output.c2s.iter().map(field_to_bytes).collect();
+
+    let serialize_time = t_ser.elapsed();
+
+    FoldedDualCircuit4xZincProof {
+        pcs1_proof_bytes: proof1_bytes,
+        pcs1_commitment: commitment1,
+        pcs2_proof_bytes: proof2_bytes,
+        pcs2_commitment: commitment2,
+        ic1_proof_values: ic1_values,
+        ic2_proof_values: ic2_values,
+        md_group_messages,
+        md_claimed_sums,
+        md_degrees: md_proof.degrees,
+        cpr1_up_evals: cpr1_ups,
+        cpr1_down_evals: cpr1_downs,
+        cpr2_up_evals: cpr2_ups,
+        cpr2_down_evals: cpr2_downs,
+        unified_eval_sumcheck,
+        lookup_group_meta: vec![],
+        lookup_group_proofs: vec![],
+        lookup_proof,
+        evaluation_point_bytes,
+        pcs1_evals_bytes: pcs1_evals,
+        pcs2_evals_bytes: pcs2_evals,
+        pcs1_folding_c1s_bytes,
+        pcs1_folding_c2s_bytes,
+        pcs1_folding_c3s_bytes,
+        pcs1_folding_c4s_bytes,
+        timing: TimingBreakdown {
+            pcs_commit: pcs_commit_time,
+            ideal_check: ic_time,
+            combined_poly_resolver: cpr_lookup_time,
+            lookup: lookup_time,
             pcs_prove: pcs_prove_time,
             serialize: serialize_time,
             total: total_time,
@@ -11304,6 +11832,876 @@ where
             ideal_check_verify: ic_verify_time,
             combined_poly_resolver_verify: cpr_verify_time,
             lookup_verify: Duration::ZERO, // included in CPR
+            pcs_verify: pcs_verify_time,
+            total: total_start.elapsed(),
+        },
+    }
+}
+
+/// Dual-circuit verifier for proofs produced by
+/// [`prove_dual_circuit_hybrid_gkr_4x_folded`].
+///
+/// Mirrors the hybrid GKR prover: the multi-degree sumcheck contains only
+/// two groups (CPR₁ + CPR₂); the lookup is verified as a standalone
+/// hybrid GKR sub-protocol.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+pub fn verify_dual_circuit_hybrid_gkr_4x_folded<
+    U1, U2, R2,
+    PcsZt1, PcsLc1, Zt2, Lc2, PcsF2,
+    const D: usize, const HALF_D: usize, const QUARTER_D: usize, const CHECK: bool,
+    IdealOverF1, IdealFromRef1,
+    IdealOverF2, IdealFromRef2,
+>(
+    params1: &ZipPlusParams<PcsZt1, PcsLc1>,
+    params2: &ZipPlusParams<Zt2, Lc2>,
+    proof: &FoldedDualCircuit4xZincProof,
+    num_vars: usize,
+    ideal_from_ref1: IdealFromRef1,
+    ideal_from_ref2: IdealFromRef2,
+    c1_public_column_data: &[zinc_poly::mle::DenseMultilinearExtension<BinaryPoly<D>>],
+    c2_public_column_data: &[zinc_poly::mle::DenseMultilinearExtension<R2>],
+) -> VerifyResult
+where
+    // Circuit 1 PIOP (BinaryPoly<D>):
+    U1: Uair<Scalar = BinaryPoly<D>>,
+    BinaryPoly<D>: From<u32>,
+    BinaryPoly<D>: ProjectableToField<PiopField>,
+    IdealOverF1: Ideal + IdealCheck<DynamicPolynomialF<PiopField>>,
+    IdealFromRef1: Fn(&IdealOrZero<U1::Ideal>) -> IdealOverF1,
+    BinaryPoly<HALF_D>: ProjectableToField<PiopField>,
+    // Circuit 1 PCS (4x folded BinaryPoly<QUARTER_D>):
+    PcsZt1: ZipTypes<Eval = BinaryPoly<QUARTER_D>>,
+    PcsLc1: LinearCode<PcsZt1>,
+    BinaryPoly<QUARTER_D>: ProjectableToField<PiopField>,
+    PcsZt1::Eval: ProjectableToField<PiopField>,
+    PcsZt1::Cw: ProjectableToField<PiopField>,
+    PiopField: for<'a> FromWithConfig<&'a PcsZt1::Chal> + for<'a> FromWithConfig<&'a PcsZt1::CombR>,
+    <PiopField as Field>::Inner: FromRef<PcsZt1::Fmod>,
+    PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
+    rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<HALF_D>>,
+    rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<QUARTER_D>>,
+    // Circuit 2 (generic ring R2):
+    R2: ProjectableToField<PiopField>
+        + crypto_primitives::Semiring
+        + std::fmt::Debug
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    U2: Uair<Scalar = R2>,
+    Zt2: ZipTypes<Eval = R2>,
+    Lc2: LinearCode<Zt2>,
+    PiopField: FromWithConfig<R2>,
+    PcsF2: PrimeField
+        + FromPrimitiveWithConfig
+        + FromWithConfig<PiopUint>
+        + for<'a> FromWithConfig<&'a Zt2::Chal>
+        + for<'a> FromWithConfig<&'a Zt2::CombR>
+        + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF2>
+        + FromRef<PcsF2>,
+    PcsF2::Inner: FromRef<Zt2::Fmod> + ConstTranscribable,
+    Zt2::Eval: ProjectableToField<PcsF2>,
+    Zt2::Cw: ProjectableToField<PcsF2>,
+    IdealOverF2: Ideal + IdealCheck<DynamicPolynomialF<PiopField>>,
+    IdealFromRef2: Fn(&IdealOrZero<U2::Ideal>) -> IdealOverF2,
+    // Shared:
+    PiopField: FromPrimitiveWithConfig,
+    <PiopField as Field>::Inner: ConstTranscribable
+        + FromRef<<PiopField as Field>::Inner>
+        + Send
+        + Sync
+        + Default
+        + num_traits::Zero,
+    MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
+{
+    let total_start = Instant::now();
+
+    let c1_num_constraints = count_constraints::<U1>();
+    let c2_num_constraints = count_constraints::<U2>();
+
+    // ── Reconstruct Fiat-Shamir transcript ──────────────────────────
+    let mut transcript = KeccakTranscript::new();
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    proof.pcs1_commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
+    proof.pcs2_commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
+    let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
+    let field_elem_size =
+        <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+
+    // ── Shared IC evaluation point ──────────────────────────────────
+    let ic_evaluation_point: Vec<PiopField> =
+        transcript.get_field_challenges(num_vars, &field_cfg);
+
+    // ── IC₁ verify (BinaryPoly) ─────────────────────────────────────
+    let t0 = Instant::now();
+
+    let c1_ic_combined: Vec<DynamicPolynomialF<PiopField>> = proof
+        .ic1_proof_values
+        .iter()
+        .map(|bytes| {
+            let num_coeffs = bytes.len() / field_elem_size;
+            let coeffs: Vec<PiopField> = (0..num_coeffs)
+                .map(|i| {
+                    field_from_bytes(
+                        &bytes[i * field_elem_size..(i + 1) * field_elem_size],
+                        &field_cfg,
+                    )
+                })
+                .collect();
+            DynamicPolynomialF::new(coeffs)
+        })
+        .collect();
+
+    let c1_ic_proof = zinc_piop::ideal_check::Proof::<PiopField> {
+        combined_mle_values: c1_ic_combined,
+    };
+
+    let c1_ic_subclaim =
+        match IdealCheckProtocol::<PiopField>::verify_at_point::<U1, _, _>(
+            &mut transcript,
+            c1_ic_proof,
+            c1_num_constraints,
+            ic_evaluation_point.clone(),
+            &ideal_from_ref1,
+            &field_cfg,
+        ) {
+            Ok(sc) => sc,
+            Err(e) => {
+                eprintln!("C1 IdealCheck verification failed (hybrid GKR 4x dual): {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: t0.elapsed(),
+                        combined_poly_resolver_verify: Duration::ZERO,
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        };
+
+    // ── IC₂ verify (generic R) ─────────────────────────────────────
+    let c2_ic_combined: Vec<DynamicPolynomialF<PiopField>> = proof
+        .ic2_proof_values
+        .iter()
+        .map(|bytes| {
+            let num_coeffs = bytes.len() / field_elem_size;
+            let coeffs: Vec<PiopField> = (0..num_coeffs)
+                .map(|i| {
+                    field_from_bytes(
+                        &bytes[i * field_elem_size..(i + 1) * field_elem_size],
+                        &field_cfg,
+                    )
+                })
+                .collect();
+            DynamicPolynomialF::new(coeffs)
+        })
+        .collect();
+
+    let c2_ic_proof = zinc_piop::ideal_check::Proof::<PiopField> {
+        combined_mle_values: c2_ic_combined,
+    };
+
+    let c2_ic_subclaim =
+        match IdealCheckProtocol::<PiopField>::verify_at_point::<U2, _, _>(
+            &mut transcript,
+            c2_ic_proof,
+            c2_num_constraints,
+            ic_evaluation_point.clone(),
+            &ideal_from_ref2,
+            &field_cfg,
+        ) {
+            Ok(sc) => sc,
+            Err(e) => {
+                eprintln!("C2 IdealCheck verification failed (hybrid GKR 4x dual): {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: t0.elapsed(),
+                        combined_poly_resolver_verify: Duration::ZERO,
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        };
+    let ic_verify_time = t0.elapsed();
+
+    // ── Shared projecting element ────────────────────────────────────
+    let t1 = Instant::now();
+    let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+
+    // ── CPR₁ pre-sumcheck ────────────────────────────────────────────
+    let c1_projected_scalars_coeffs = project_scalars::<PiopField, U1>(|scalar| {
+        let one = PiopField::one_with_cfg(&field_cfg);
+        let zero = PiopField::zero_with_cfg(&field_cfg);
+        DynamicPolynomialF::new(
+            scalar
+                .iter()
+                .map(|coeff| {
+                    if coeff.into_inner() { one.clone() } else { zero.clone() }
+                })
+                .collect::<Vec<_>>(),
+        )
+    });
+    let c1_field_projected_scalars =
+        project_scalars_to_field(c1_projected_scalars_coeffs, &projecting_element)
+            .expect("C1 scalar projection failed (hybrid GKR 4x dual)");
+
+    let c1_cpr_pre =
+        match CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<U1>(
+            &mut transcript,
+            &field_from_bytes(&proof.md_claimed_sums[0], &field_cfg),
+            c1_num_constraints,
+            &projecting_element,
+            &c1_field_projected_scalars,
+            &c1_ic_subclaim,
+            &field_cfg,
+        ) {
+            Ok(pre) => pre,
+            Err(e) => {
+                eprintln!("C1 CPR pre-sumcheck failed (hybrid GKR 4x dual): {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        };
+
+    // ── CPR₂ pre-sumcheck (NO lookup pre-sumcheck) ──────────────────
+    let c2_projected_scalars_coeffs = project_scalars::<PiopField, U2>(|scalar| {
+        DynamicPolynomialF {
+            coeffs: vec![PiopField::from_with_cfg(scalar.clone(), &field_cfg)],
+        }
+    });
+    let c2_field_projected_scalars =
+        project_scalars_to_field(c2_projected_scalars_coeffs, &projecting_element)
+            .expect("C2 scalar projection failed (hybrid GKR 4x dual)");
+
+    let c2_cpr_pre =
+        match CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<U2>(
+            &mut transcript,
+            &field_from_bytes(&proof.md_claimed_sums[1], &field_cfg),
+            c2_num_constraints,
+            &projecting_element,
+            &c2_field_projected_scalars,
+            &c2_ic_subclaim,
+            &field_cfg,
+        ) {
+            Ok(pre) => pre,
+            Err(e) => {
+                eprintln!("C2 CPR pre-sumcheck failed (hybrid GKR 4x dual): {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        };
+
+    // ── Deserialize + verify multi-degree sumcheck (2 groups only) ───
+    let md_group_messages: Vec<Vec<ProverMsg<PiopField>>> = proof
+        .md_group_messages
+        .iter()
+        .map(|group_rounds| {
+            group_rounds
+                .iter()
+                .map(|bytes| {
+                    let num_evals = bytes.len() / field_elem_size;
+                    let tail_evaluations: Vec<PiopField> = (0..num_evals)
+                        .map(|i| {
+                            field_from_bytes(
+                                &bytes[i * field_elem_size..(i + 1) * field_elem_size],
+                                &field_cfg,
+                            )
+                        })
+                        .collect();
+                    ProverMsg(NatEvaluatedPolyWithoutConstant::new(tail_evaluations))
+                })
+                .collect()
+        })
+        .collect();
+
+    let md_claimed_sums: Vec<PiopField> = proof
+        .md_claimed_sums
+        .iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+
+    let md_proof_deserialized = MultiDegreeSumcheckProof {
+        group_messages: md_group_messages,
+        claimed_sums: md_claimed_sums,
+        degrees: proof.md_degrees.clone(),
+    };
+
+    let md_subclaims = match MultiDegreeSumcheck::<PiopField>::verify_as_subprotocol(
+        &mut transcript,
+        num_vars,
+        &md_proof_deserialized,
+        &field_cfg,
+    ) {
+        Ok(sc) => sc,
+        Err(e) => {
+            eprintln!("Multi-degree sumcheck verification failed (hybrid GKR 4x dual): {e:?}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: ic_verify_time,
+                    combined_poly_resolver_verify: t1.elapsed(),
+                    lookup_verify: Duration::ZERO,
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
+    };
+
+    // ── Finalize CPR₁ ───────────────────────────────────────────────
+    let c1_private_up_evals: Vec<PiopField> = proof
+        .cpr1_up_evals
+        .iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+    let c1_down_evals: Vec<PiopField> = proof
+        .cpr1_down_evals
+        .iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+
+    let c1_sig = U1::signature();
+    let c1_up_evals = if c1_sig.public_columns.is_empty() {
+        c1_private_up_evals
+    } else {
+        let binary_poly_projection =
+            BinaryPoly::<D>::prepare_projection(&projecting_element);
+        let c1_public_evals: Vec<PiopField> = {
+            #[cfg(feature = "parallel")]
+            let iter = c1_public_column_data.par_iter();
+            #[cfg(not(feature = "parallel"))]
+            let iter = c1_public_column_data.iter();
+            iter.map(|col| {
+                let mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                    col.iter()
+                        .map(|bp| binary_poly_projection(bp).inner().clone())
+                        .collect();
+                mle.evaluate_with_config(&md_subclaims.point, &field_cfg)
+                    .expect("C1 public column MLE evaluation should succeed (hybrid GKR 4x dual)")
+            })
+            .collect()
+        };
+        reconstruct_up_evals(
+            &c1_private_up_evals,
+            &c1_public_evals,
+            &c1_sig.public_columns,
+            c1_sig.total_cols(),
+        )
+    };
+    let c1_up_evals_saved = c1_up_evals.clone();
+
+    let c1_cpr_subclaim =
+        match CombinedPolyResolver::<PiopField>::finalize_verifier::<U1>(
+            &mut transcript,
+            md_subclaims.point.clone(),
+            md_subclaims.expected_evaluations[0].clone(),
+            &c1_cpr_pre,
+            c1_up_evals,
+            c1_down_evals,
+            num_vars,
+            &c1_field_projected_scalars,
+            &field_cfg,
+        ) {
+            Ok(sc) => sc,
+            Err(e) => {
+                eprintln!("C1 CPR finalize_verifier failed (hybrid GKR 4x dual): {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        };
+
+    // ── Two-round folding verification for circuit 1 ─────────────────
+    let c1_pcs_excluded = c1_sig.pcs_excluded_columns();
+    let original_evals: Vec<PiopField> = (0..c1_sig.total_cols())
+        .filter(|&i| !c1_pcs_excluded.contains(&i))
+        .map(|i| c1_up_evals_saved[i].clone())
+        .collect();
+
+    let c1s: Vec<PiopField> = proof
+        .pcs1_folding_c1s_bytes
+        .iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+    let c2s: Vec<PiopField> = proof
+        .pcs1_folding_c2s_bytes
+        .iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+
+    let alpha_power_half = compute_alpha_power::<PiopField>(&projecting_element, HALF_D);
+    let piop_point = &c1_cpr_subclaim.evaluation_point[..num_vars];
+
+    let fold1_verifier_output = match fold_claims_verify::<PiopField, _>(
+        &mut transcript,
+        &c1s,
+        &c2s,
+        &original_evals,
+        &alpha_power_half,
+        piop_point,
+        &field_cfg,
+    ) {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("Folding round 1 verification failed (hybrid GKR 4x dual): {e:?}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: ic_verify_time,
+                    combined_poly_resolver_verify: t1.elapsed(),
+                    lookup_verify: Duration::ZERO,
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
+    };
+
+    let c3s: Vec<PiopField> = proof
+        .pcs1_folding_c3s_bytes
+        .iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+    let c4s: Vec<PiopField> = proof
+        .pcs1_folding_c4s_bytes
+        .iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+
+    let alpha_power_quarter = compute_alpha_power::<PiopField>(&projecting_element, QUARTER_D);
+
+    let fold2_verifier_output = match fold_claims_verify::<PiopField, _>(
+        &mut transcript,
+        &c3s,
+        &c4s,
+        &fold1_verifier_output.new_evals,
+        &alpha_power_quarter,
+        &fold1_verifier_output.new_point,
+        &field_cfg,
+    ) {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("Folding round 2 verification failed (hybrid GKR 4x dual): {e:?}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: ic_verify_time,
+                    combined_poly_resolver_verify: t1.elapsed(),
+                    lookup_verify: Duration::ZERO,
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
+    };
+
+    // ── Finalize CPR₂ ───────────────────────────────────────────────
+    let c2_private_up_evals: Vec<PiopField> = proof
+        .cpr2_up_evals
+        .iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+    let c2_down_evals: Vec<PiopField> = proof
+        .cpr2_down_evals
+        .iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+
+    let c2_sig = U2::signature();
+    let c2_up_evals = if c2_sig.public_columns.is_empty() {
+        c2_private_up_evals
+    } else {
+        let c2_public_evals: Vec<PiopField> = {
+            #[cfg(feature = "parallel")]
+            let iter = c2_public_column_data.par_iter();
+            #[cfg(not(feature = "parallel"))]
+            let iter = c2_public_column_data.iter();
+            iter.map(|col| {
+                let projected_col: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                    col.iter()
+                        .map(|v| PiopField::from_with_cfg(v.clone(), &field_cfg).inner().clone())
+                        .collect();
+                projected_col.evaluate_with_config(&md_subclaims.point, &field_cfg)
+                    .expect("C2 public column MLE evaluation should succeed (hybrid GKR 4x dual)")
+            })
+            .collect()
+        };
+        reconstruct_up_evals(
+            &c2_private_up_evals,
+            &c2_public_evals,
+            &c2_sig.public_columns,
+            c2_sig.total_cols(),
+        )
+    };
+    let c2_up_evals_saved = c2_up_evals.clone();
+    let c2_down_evals_saved = c2_down_evals.clone();
+
+    if let Err(e) = CombinedPolyResolver::<PiopField>::finalize_verifier::<U2>(
+        &mut transcript,
+        md_subclaims.point.clone(),
+        md_subclaims.expected_evaluations[1].clone(),
+        &c2_cpr_pre,
+        c2_up_evals,
+        c2_down_evals,
+        num_vars,
+        &c2_field_projected_scalars,
+        &field_cfg,
+    ) {
+        eprintln!("C2 CPR finalize_verifier failed (hybrid GKR 4x dual): {e:?}");
+        return VerifyResult {
+            accepted: false,
+            timing: VerifyTimingBreakdown {
+                ideal_check_verify: ic_verify_time,
+                combined_poly_resolver_verify: t1.elapsed(),
+                lookup_verify: Duration::ZERO,
+                pcs_verify: Duration::ZERO,
+                total: total_start.elapsed(),
+            },
+        };
+    }
+
+    // ── Unified evaluation sumcheck verify ───────────────────────────
+    if let Some(ref ss_proof_data) = proof.unified_eval_sumcheck {
+        let c1_num_up = c1_up_evals_saved.len();
+        let c2_num_up = c2_up_evals_saved.len();
+
+        let mut unified_claims: Vec<ShiftClaim<PiopField>> =
+            Vec::with_capacity(c1_num_up + c2_num_up + c2_sig.shifts.len());
+
+        for i in 0..c1_num_up {
+            unified_claims.push(ShiftClaim {
+                source_col: i,
+                shift_amount: 0,
+                eval_point: c1_cpr_subclaim.evaluation_point.clone(),
+                claimed_eval: c1_up_evals_saved[i].clone(),
+            });
+        }
+        for j in 0..c2_num_up {
+            unified_claims.push(ShiftClaim {
+                source_col: c1_num_up + j,
+                shift_amount: 0,
+                eval_point: c1_cpr_subclaim.evaluation_point.clone(),
+                claimed_eval: c2_up_evals_saved[j].clone(),
+            });
+        }
+        for (k, spec) in c2_sig.shifts.iter().enumerate() {
+            unified_claims.push(ShiftClaim {
+                source_col: c1_num_up + spec.source_col,
+                shift_amount: spec.shift_amount,
+                eval_point: c1_cpr_subclaim.evaluation_point.clone(),
+                claimed_eval: c2_down_evals_saved[k].clone(),
+            });
+        }
+
+        let rounds: Vec<ShiftRoundPoly<PiopField>> = ss_proof_data.rounds.iter().map(|bytes| {
+            let n = bytes.len() / field_elem_size;
+            assert_eq!(n, 3, "each unified eval round poly should have 3 evaluations (hybrid GKR 4x dual)");
+            ShiftRoundPoly {
+                evals: [
+                    field_from_bytes(&bytes[0..field_elem_size], &field_cfg),
+                    field_from_bytes(&bytes[field_elem_size..2 * field_elem_size], &field_cfg),
+                    field_from_bytes(&bytes[2 * field_elem_size..3 * field_elem_size], &field_cfg),
+                ],
+            }
+        }).collect();
+        let ss_proof = ShiftSumcheckProof { rounds };
+
+        let is_public_unified = |idx: usize| -> bool {
+            if idx < c1_num_up {
+                c1_sig.is_public_column(idx)
+            } else if idx < c1_num_up + c2_num_up {
+                c2_sig.is_public_column(idx - c1_num_up)
+            } else {
+                c2_sig.is_public_shift(idx - c1_num_up - c2_num_up)
+            }
+        };
+
+        let has_public = (0..unified_claims.len()).any(&is_public_unified);
+
+        if has_public {
+            let ss_pre = match shift_sumcheck_verify_pre(
+                &mut transcript, &ss_proof, &unified_claims, num_vars, &field_cfg,
+            ) {
+                Ok(pre) => pre,
+                Err(e) => {
+                    eprintln!("Unified eval sumcheck pre-verify failed (hybrid GKR 4x dual): {e}");
+                    return VerifyResult {
+                        accepted: false,
+                        timing: VerifyTimingBreakdown {
+                            ideal_check_verify: ic_verify_time,
+                            combined_poly_resolver_verify: t1.elapsed(),
+                            lookup_verify: Duration::ZERO,
+                            pcs_verify: Duration::ZERO,
+                            total: total_start.elapsed(),
+                        },
+                    };
+                }
+            };
+
+            let challenge_point_le: Vec<PiopField> =
+                ss_pre.challenge_point.iter().rev().cloned().collect();
+
+            let binary_poly_projection =
+                BinaryPoly::<D>::prepare_projection(&projecting_element);
+
+            let private_v_finals: Vec<PiopField> = ss_proof_data.v_finals.iter()
+                .map(|b| field_from_bytes(b, &field_cfg))
+                .collect();
+
+            let total_claims = unified_claims.len();
+
+            let public_indices: Vec<usize> = (0..total_claims)
+                .filter(|&idx| is_public_unified(idx))
+                .collect();
+
+            let public_evals: Vec<PiopField> = {
+                #[cfg(feature = "parallel")]
+                let iter = public_indices.par_iter();
+                #[cfg(not(feature = "parallel"))]
+                let iter = public_indices.iter();
+                iter.map(|&idx| {
+                    if idx < c1_num_up {
+                        let pcd_idx = c1_sig.public_columns.iter()
+                            .position(|&c| c == idx)
+                            .expect("C1 public column not found (hybrid GKR 4x dual)");
+                        let col = &c1_public_column_data[pcd_idx];
+                        let mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                            col.iter()
+                                .map(|bp| binary_poly_projection(bp).inner().clone())
+                                .collect();
+                        mle.evaluate_with_config(&challenge_point_le, &field_cfg)
+                            .expect("C1 public v_final MLE eval failed (hybrid GKR 4x dual)")
+                    } else if idx < c1_num_up + c2_num_up {
+                        let col_idx = idx - c1_num_up;
+                        let pcd_idx = c2_sig.public_columns.iter()
+                            .position(|&c| c == col_idx)
+                            .expect("C2 public column not found (hybrid GKR 4x dual)");
+                        let col = &c2_public_column_data[pcd_idx];
+                        let projected_col: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                            col.iter()
+                                .map(|v| PiopField::from_with_cfg(v.clone(), &field_cfg).inner().clone())
+                                .collect();
+                        projected_col.evaluate_with_config(&challenge_point_le, &field_cfg)
+                            .expect("C2 public v_final MLE eval failed (hybrid GKR 4x dual)")
+                    } else {
+                        let shift_idx = idx - c1_num_up - c2_num_up;
+                        let spec = &c2_sig.shifts[shift_idx];
+                        let pcd_idx = c2_sig.public_columns.iter()
+                            .position(|&c| c == spec.source_col)
+                            .expect("C2 public shift source not found (hybrid GKR 4x dual)");
+                        let col = &c2_public_column_data[pcd_idx];
+                        let projected_col: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                            col.iter()
+                                .map(|v| PiopField::from_with_cfg(v.clone(), &field_cfg).inner().clone())
+                                .collect();
+                        projected_col.evaluate_with_config(&challenge_point_le, &field_cfg)
+                            .expect("C2 public shift v_final MLE eval failed (hybrid GKR 4x dual)")
+                    }
+                })
+                .collect()
+            };
+
+            let mut full_v_finals = Vec::with_capacity(total_claims);
+            let mut priv_idx = 0usize;
+            let mut pub_idx = 0usize;
+            for idx in 0..total_claims {
+                if is_public_unified(idx) {
+                    full_v_finals.push(public_evals[pub_idx].clone());
+                    pub_idx += 1;
+                } else {
+                    full_v_finals.push(private_v_finals[priv_idx].clone());
+                    priv_idx += 1;
+                }
+            }
+            debug_assert_eq!(priv_idx, private_v_finals.len());
+            debug_assert_eq!(pub_idx, public_evals.len());
+
+            if let Err(e) = shift_sumcheck_verify_finalize(
+                &mut transcript, &ss_pre, &unified_claims, &full_v_finals, &field_cfg,
+            ) {
+                eprintln!("Unified eval sumcheck finalize failed (hybrid GKR 4x dual): {e}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        } else {
+            let v_finals: Vec<PiopField> = ss_proof_data.v_finals.iter()
+                .map(|b| field_from_bytes(b, &field_cfg))
+                .collect();
+
+            if let Err(e) = shift_sumcheck_verify(
+                &mut transcript,
+                &ss_proof,
+                &unified_claims,
+                &v_finals,
+                num_vars,
+                &field_cfg,
+            ) {
+                eprintln!("Unified evaluation sumcheck verification failed (hybrid GKR 4x dual): {e}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        }
+    }
+
+    // ── Hybrid GKR lookup verify (standalone) ────────────────────────
+    let t_lk = Instant::now();
+    if let Some(ref lookup_data) = proof.lookup_proof {
+        let result = match lookup_data {
+            LookupProofData::HybridGkr(lk_proof) => verify_hybrid_gkr_batched_lookup(
+                &mut transcript, lk_proof, &projecting_element, &field_cfg,
+            ).map(|_| ()),
+            LookupProofData::Gkr(lk_proof) => verify_gkr_batched_lookup(
+                &mut transcript, lk_proof, &projecting_element, &field_cfg,
+            ).map(|_| ()),
+            LookupProofData::Classic(lk_proof) => verify_batched_lookup(
+                &mut transcript, lk_proof, &projecting_element, &field_cfg,
+            ).map(|_| ()),
+            LookupProofData::BatchedClassic(_) => unreachable!("not used in hybrid GKR dual-circuit"),
+        };
+        if let Err(e) = result {
+            eprintln!("Hybrid GKR lookup verification failed (4x dual): {e:?}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: ic_verify_time,
+                    combined_poly_resolver_verify: t1.elapsed(),
+                    lookup_verify: t_lk.elapsed(),
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
+    }
+    let lookup_verify_time = t_lk.elapsed();
+    let cpr_verify_time = t1.elapsed();
+
+    // ── PCS Verify (both circuits) ───────────────────────────────────
+    let t2 = Instant::now();
+
+    let verify_pcs1 = || {
+        let mut pcs1_transcript = zip_plus::pcs_transcript::PcsTranscript {
+            fs_transcript: KeccakTranscript::default(),
+            stream: std::io::Cursor::new(proof.pcs1_proof_bytes.clone()),
+        };
+        let mut pcs_root_buf = [0u8; HASH_OUT_LEN];
+        proof.pcs1_commitment.root.write_transcription_bytes(&mut pcs_root_buf);
+        pcs1_transcript.fs_transcript.absorb(&pcs_root_buf);
+        let pcs1_field_cfg = pcs1_transcript
+            .fs_transcript
+            .get_random_field_cfg::<PiopField, PcsZt1::Fmod, PcsZt1::PrimeTest>();
+
+        let point1_f: Vec<PiopField> = fold2_verifier_output.new_point.iter()
+            .map(|p| PiopField::new_unchecked_with_cfg(p.inner().clone(), &pcs1_field_cfg))
+            .collect();
+        let eval1_f: PiopField = PiopField::new_unchecked_with_cfg(
+            <PiopField as Field>::Inner::read_transcription_bytes(&proof.pcs1_evals_bytes[0]),
+            &pcs1_field_cfg,
+        );
+
+        let result = ZipPlus::<PcsZt1, PcsLc1>::verify_with_field_cfg::<PiopField, CHECK>(
+            params1,
+            &proof.pcs1_commitment,
+            &point1_f,
+            &eval1_f,
+            pcs1_transcript,
+            &pcs1_field_cfg,
+        );
+        if let Err(ref e) = result {
+            eprintln!("PCS1 (hybrid GKR 4x folded dual) verification failed: {e:?}");
+        }
+        result
+    };
+
+    let verify_pcs2 = || {
+        let mut pcs2_transcript = zip_plus::pcs_transcript::PcsTranscript {
+            fs_transcript: KeccakTranscript::default(),
+            stream: std::io::Cursor::new(proof.pcs2_proof_bytes.clone()),
+        };
+        let mut pcs_root_buf = [0u8; HASH_OUT_LEN];
+        proof.pcs2_commitment.root.write_transcription_bytes(&mut pcs_root_buf);
+        pcs2_transcript.fs_transcript.absorb(&pcs_root_buf);
+        let pcs2_field_cfg = pcs2_transcript
+            .fs_transcript
+            .get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>();
+        let point2_f: Vec<PcsF2> = piop_point_to_pcs_field(&c1_cpr_subclaim.evaluation_point[..num_vars], &pcs2_field_cfg);
+        let eval2_f: PcsF2 = PcsF2::new_unchecked_with_cfg(
+            <PcsF2::Inner as ConstTranscribable>::read_transcription_bytes(&proof.pcs2_evals_bytes[0]),
+            &pcs2_field_cfg,
+        );
+
+        let result = ZipPlus::<Zt2, Lc2>::verify_with_field_cfg::<PcsF2, CHECK>(
+            params2,
+            &proof.pcs2_commitment,
+            &point2_f,
+            &eval2_f,
+            pcs2_transcript,
+            &pcs2_field_cfg,
+        );
+        if let Err(ref e) = result {
+            eprintln!("PCS2 verification failed (hybrid GKR 4x dual): {e:?}");
+        }
+        result
+    };
+
+    #[cfg(feature = "parallel")]
+    let (pcs1_result, pcs2_result) = rayon_join(verify_pcs1, verify_pcs2);
+    #[cfg(not(feature = "parallel"))]
+    let (pcs1_result, pcs2_result) = (verify_pcs1(), verify_pcs2());
+
+    let pcs_verify_time = t2.elapsed();
+
+    VerifyResult {
+        accepted: pcs1_result.is_ok() && pcs2_result.is_ok(),
+        timing: VerifyTimingBreakdown {
+            ideal_check_verify: ic_verify_time,
+            combined_poly_resolver_verify: cpr_verify_time,
+            lookup_verify: lookup_verify_time,
             pcs_verify: pcs_verify_time,
             total: total_start.elapsed(),
         },

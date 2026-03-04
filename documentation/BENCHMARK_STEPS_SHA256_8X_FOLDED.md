@@ -57,9 +57,84 @@ Each cell is a `BinaryPoly<32>` — a polynomial in $\mathbb{F}_2[X]$ of degree 
 | `SHA256_BATCH_SIZE` | 30 | 27 bit-poly + 3 integer columns |
 | `SHA256_LOOKUP_COL_COUNT` | 10 | 10 $Q[X]$ columns requiring lookup |
 | `max_degree` | 2 | Carry constraints are degree 2 (selector × expression); standard IC path |
+| `NUM_COLUMN_OPENINGS` | 131 | PCS proximity-test column openings (96-bit security) |
+| `GRINDING_BITS` | 8 | Proof-of-work bits (reduces required column openings) |
 | Lookup chunk config (default) | 8 chunks × $2^4$ | `chunk_width=4`, `width=32` → 8 sub-tables of 16 entries each |
 | Lookup chunk config (4-chunk) | 4 chunks × $2^8$ | `chunk_width=8`, `width=32` → 4 sub-tables of 256 entries each |
 | Affine lookups | 3 | Ch, neg-Ch, Maj computed as affine combinations of trace columns |
+
+**Security level:** These benchmarks target **96-bit security**, matching the configuration used by Binius64. With rate $\rho = 1/4$ and unique decoding radius $\delta = (1 - \rho)/2 = 3/8$, each column opening provides $\log_2(1/(1 - \delta)) = \log_2(8/5) \approx 0.678$ bits of security. Combined with 8 bits of grinding: $131 \times 0.678 + 8 \approx 96.8$ bits.
+
+### UAIR Constraints
+
+The SHA-256 UAIR is split into two sub-UAIRs plus lookup constraints, totaling **19 polynomial constraints** and **13 lookup constraints** (32 constraint checks).
+
+#### Sub-UAIR #1: $\mathbb{F}_2[X]$ constraints (`Sha256UairBp`) — 16 constraints, max degree 1
+
+**Rotation constraints (C1–C4)** — ideal $(X^{32} - 1)$, degree 1:
+
+| # | Name | Formula |
+|---|------|---------|
+| C1 | $\Sigma_0$ rotation | $\hat{a} \cdot \rho_0 - \hat{\Sigma}_0 \in (X^{32}-1)$ |
+| C2 | $\Sigma_1$ rotation | $\hat{e} \cdot \rho_1 - \hat{\Sigma}_1 \in (X^{32}-1)$ |
+| C3 | $\sigma_0$ rotation+shift | $\hat{W}_{t-15} \cdot \rho_{\sigma_0} + S_0 - \hat{\sigma}_{0,w} \in (X^{32}-1)$ |
+| C4 | $\sigma_1$ rotation+shift | $\hat{W}_{t-2} \cdot \rho_{\sigma_1} + S_1 - \hat{\sigma}_{1,w} \in (X^{32}-1)$ |
+
+where $\rho_0 = X^{30}+X^{19}+X^{10}$ (ROTR 2,13,22), $\rho_1 = X^{26}+X^{21}+X^7$ (ROTR 6,11,25), $\rho_{\sigma_0} = X^{25}+X^{14}$ (ROTR 7,18), $\rho_{\sigma_1} = X^{15}+X^{13}$ (ROTR 17,19).
+
+**Shift decomposition constraints (C5–C6)** — zero ideal (exact equality), degree 1:
+
+| # | Name | Formula |
+|---|------|---------|
+| C5 | $\sigma_0$ shift decomp | $\hat{W}_{t-15} = R_0 + X^3 \cdot S_0$ |
+| C6 | $\sigma_1$ shift decomp | $\hat{W}_{t-2} = R_1 + X^{10} \cdot S_1$ |
+
+**Linking constraints (C7–C16)** — zero ideal (exact equality), degree 0:
+
+| # | Source → Aux | Shift | Meaning |
+|---|---|---|---|
+| C7 | `a_hat` → `d_hat` | 3 | $\hat{d}[t{+}3] = \hat{a}[t]$ |
+| C8 | `e_hat` → `h_hat` | 3 | $\hat{h}[t{+}3] = \hat{e}[t]$ |
+| C9 | `W_hat` → `W_tm2` | 2 | $\hat{W}_{t-2}[t{+}2] = \hat{W}[t]$ |
+| C10 | `W_hat` → `W_tm7` | 7 | $\hat{W}_{t-7}[t{+}7] = \hat{W}[t]$ |
+| C11 | `W_hat` → `W_tm15` | 15 | $\hat{W}_{t-15}[t{+}15] = \hat{W}[t]$ |
+| C12 | `W_hat` → `W_tm16` | 16 | $\hat{W}_{t-16}[t{+}16] = \hat{W}[t]$ |
+| C13 | `a_hat` → `a_tm1` | 1 | $\hat{a}_{t-1}[t{+}1] = \hat{a}[t]$ |
+| C14 | `a_hat` → `a_tm2` | 2 | $\hat{a}_{t-2}[t{+}2] = \hat{a}[t]$ |
+| C15 | `e_hat` → `e_tm1` | 1 | $\hat{e}_{t-1}[t{+}1] = \hat{e}[t]$ |
+| C16 | `e_hat` → `e_tm2` | 2 | $\hat{e}_{t-2}[t{+}2] = \hat{e}[t]$ |
+
+#### Sub-UAIR #2: $\mathbb{Q}[X]$ carry-propagation constraints (`Sha256UairQx`) — 3 constraints, max degree 2
+
+These use the ideal $(X - 2)$ and are **gated by selectors** (`sel_round` or `sel_sched`), making them degree 2 (selector × inner expression). At $X = 2$, bit-polynomial coefficients become binary place values, so membership in $(X-2)$ encodes correct modular-$2^{32}$ arithmetic.
+
+| # | Name | Formula | Gate |
+|---|------|---------|------|
+| C17 | a-update | $\text{sel\_round} \cdot \bigl(\hat{a}[t{+}1] - \hat{h} - \hat{\Sigma}_1 - \widehat{ch\_ef} - \widehat{ch\_\neg eg} - \hat{K} - \hat{W} - \hat{\Sigma}_0 - \widehat{Maj} + \mu_a \cdot X^{32}\bigr) \in (X{-}2)$ | `sel_round` |
+| C18 | e-update | $\text{sel\_round} \cdot \bigl(\hat{e}[t{+}1] - \hat{d} - \hat{h} - \hat{\Sigma}_1 - \widehat{ch\_ef} - \widehat{ch\_\neg eg} - \hat{K} - \hat{W} + \mu_e \cdot X^{32}\bigr) \in (X{-}2)$ | `sel_round` |
+| C19 | W-schedule | $\text{sel\_sched} \cdot \bigl(\hat{W} - \hat{W}_{t-16} - \hat{\sigma}_{0,w} - \hat{W}_{t-7} - \hat{\sigma}_{1,w} + \mu_W \cdot X^{32}\bigr) \in (X{-}2)$ | `sel_sched` |
+
+#### Why only the carry constraints are gated
+
+**C1–C6 (rotation & shift decomposition)** reference only same-row columns. The witness generator zeros out all related columns in sync: when the lookback data doesn't exist (e.g., `W_{t-15}` at $t < 15$), all of `W_tm15`, `sigma0_w_hat`, `S0`, and `R0` remain at their default zero. So at $t = 1$, C3 evaluates as $0 \cdot \rho_{\sigma_0} + 0 - 0 = 0$, which trivially satisfies the constraint with no gating needed.
+
+**C7–C16 (linking)** are enforced via the shift sumcheck, which inherently handles boundary rows: the shifted column is zero-padded beyond the trace boundary by definition.
+
+**C17–C19 (carry propagation)** are fundamentally different: they reference **next-row values** via shift-by-1 (`â[t+1]`, `ê[t+1]`). At boundary rows near the trace tail, the next-row values are forced to zero by zero-padding, but the *current-row* values ($\hat{h}, \hat{\Sigma}_1, \hat{K}, \hat{W}$, etc.) are non-zero — they hold valid data from the last active SHA-256 round. Without the selector, the constraint would demand $0 = h_t + \Sigma_1(e_t) + \text{Ch}(e_t,f_t,g_t) + K_t + W_t + \Sigma_0(a_t) + \text{Maj}(a_t,b_t,c_t) - \mu_a \cdot 2^{32}$, which is false. Multiplying by `sel_round = 0` at those rows makes the constraint trivially $0 \in (X{-}2)$.
+
+Concretely: `sel_round = 0` for the last 4 rows (N−4 to N−1), because `d_hat`/`h_hat` use shift-3 and the resulting zero-padded next-row state cannot satisfy the round recurrence. `sel_sched = 0` for the last 16 rows, because `W_{t-16}` uses shift-16.
+
+#### Lookup constraints (13 total)
+
+**Column lookups (10)**: Columns 0–9 (all 10 primary $Q[X]$ columns) must have every entry in the `BitPoly{32}` table, enforcing that each value is a valid binary polynomial with all coefficients in $\{0,1\}$.
+
+**Affine-combination lookups (3)**: These enforce Ch and Maj correctness by checking that affine linear combinations of trace columns are also valid binary polynomials. For binary vectors $x, y$: $x + y - 2(x \wedge y) = x \oplus y \in \{0,1\}^{<32}[X]$.
+
+| # | Name | Affine expression | Constant |
+|---|------|-------------------|----------|
+| L1 | Ch part 1 | $\hat{e} + \hat{f} - 2 \cdot \widehat{ch\_ef}$ | 0 |
+| L2 | Ch part 2 | $-\hat{e} + \hat{g} - 2 \cdot \widehat{ch\_\neg eg}$ | $\sum_{i=0}^{31} X^i$ |
+| L3 | Maj | $\hat{a} + \hat{b} + \hat{c} - 2 \cdot \widehat{Maj}$ | 0 |
 
 ---
 
@@ -474,7 +549,7 @@ Opens the committed `BinaryPoly<16>` columns at the extended evaluation point $(
 
 7. **Grinding**: `transcript.grind(GRINDING_BITS)` — proof-of-work nonce search. The prover searches for a nonce that makes `H(transcript_state \| nonce)` have the required number of leading zero bits, adding computational security. In this benchmark configuration `GRINDING_BITS = 8`, so the prover searches for a nonce producing 8 leading zero bits.
 
-8. **Column openings**: Squeeze `NUM_COLUMN_OPENINGS = 142` random column indices from the transcript. For each index, open the Merkle path (authentication siblings from leaf to root) and include the column values from all committed polynomial codeword matrices. The verifier will check: (a) the Merkle path is valid, (b) the column values are consistent with the combined row, (c) the combined row is a valid codeword.
+8. **Column openings**: Squeeze `NUM_COLUMN_OPENINGS = 131` random column indices from the transcript. For each index, open the Merkle path (authentication siblings from leaf to root) and include the column values from all committed polynomial codeword matrices. The verifier will check: (a) the Merkle path is valid, (b) the column values are consistent with the combined row, (c) the combined row is a valid codeword.
 
 **Output**: `(F, ZipPlusProof)` — the claimed evaluation and the serialized proof (transcript bytes including Merkle paths, column data, and grinding nonce).
 
@@ -486,7 +561,7 @@ Same algorithm as step 12, but operating on the original `BinaryPoly<32>` column
 - Point is 9-dimensional (no folding extension).
 - Codeword elements are `BinaryPoly<32>` (256 B each, vs. 128 B for folded).
 - Merkle tree depth is 11 (2048 leaves).
-- Each of the 142 column openings reveals `BinaryPoly<32>` values, which are 2× larger.
+- Each of the 131 column openings reveals `BinaryPoly<32>` values, which are 2× larger.
 
 This is benchmarked to measure the PCS proving time difference attributable to column folding. The folded variant has more evaluations (1024 vs 512, i.e. `row_len` doubles) but smaller elements, and the Merkle paths are deeper (12 vs 11) but narrower per leaf. Both variants have `num_rows = 1`.
 
@@ -677,7 +752,7 @@ Verifies the Zip+ PCS opening proof — confirming that the committed polynomial
 
 5. **Verify grinding**: Check that the proof-of-work nonce produces the required number of leading zero bits.
 
-6. **Column openings** (the main verification cost): Squeeze 142 random column indices. For each:
+6. **Column openings** (the main verification cost): Squeeze 131 random column indices. For each:
    - Read the Merkle authentication path and the column values for all committed polynomials.
    - **Verify Merkle path**: Hash the leaf data and check siblings up to the root. The root must match the commitment.
    - **Consistency check**: Verify that the column values, combined with the PCS FS challenges, produce the same combined-row value that the prover claimed.

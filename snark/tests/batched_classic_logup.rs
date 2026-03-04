@@ -63,7 +63,8 @@ where
         + Sync,
     Int<6>: FromRef<CwCoeff>,
 {
-    const NUM_COLUMN_OPENINGS: usize = 147;
+    const NUM_COLUMN_OPENINGS: usize = 131;
+    const GRINDING_BITS: usize = 8;
     type Eval = BinaryPoly<D_PLUS_ONE>;
     type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
     type Fmod = Uint<{ INT_LIMBS * 3 }>;

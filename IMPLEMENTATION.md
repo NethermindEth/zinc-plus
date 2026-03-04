@@ -293,7 +293,7 @@ For each of `NUM_COLUMN_OPENINGS` iterations:
    - For each codeword matrix in the batch, write the full column at `column_idx`: all `num_rows` values of type `Zt::Cw`. This gives the verifier the raw codeword entries it needs to recompute the proximity check.
    - Write a **single** Merkle authentication path from the shared tree: `commit_hint.merkle_tree.prove(column_idx)` builds a sibling path by walking up the tree layers. The proof is serialized as `(leaf_index: u64, leaf_count: u64, path_length: u64, siblings: [Blake3Hash; path_length])`, where each hash is 32 bytes.
 
-The number of column openings is a compile-time constant: `NUM_COLUMN_OPENINGS = 147` in the standard configuration (set in the `ZipTypes` trait). This is the primary soundness amplification parameter: each column opening is an independent spot-check, and the linear code's distance guarantees that a codeword far from valid will disagree at a constant fraction of positions. With 147 random spot-checks at code rate $\rho = 1/4$, the false-accept probability is $\leq (1 - \delta)^{147}$ where $\delta$ is the relative distance.
+The number of column openings is a compile-time constant: `NUM_COLUMN_OPENINGS = 131` in the standard configuration (set in the `ZipTypes` trait), with `GRINDING_BITS = 8` bits of proof-of-work. These parameters target **96-bit security**, matching the Binius64 configuration. Each column opening is an independent spot-check, and the linear code's distance guarantees that a codeword far from valid will disagree at a constant fraction of positions. With rate $\rho = 1/4$ and unique decoding radius $\delta = (1 - \rho)/2 = 3/8$, each opening provides $\log_2(8/5) \approx 0.678$ bits of security; combined with 8 bits of grinding: $131 \times 0.678 + 8 \approx 96.8$ bits.
 
 #### Proof byte layout
 
@@ -302,7 +302,7 @@ The transcript is pre-allocated to the exact size:
 | Section | Content | Size |
 |---------|---------|------|
 | Combined row $u'$ | `row_len` elements of `Zt::CombR` | `row_len × CombR::NUM_BYTES` |
-| Column opening $\times 147$ | `batch_size × num_rows` codeword elements + 1 Merkle proof | `147 × (batch_size × num_rows × Cw::NUM_BYTES + 3×8 + (tree_height-1)×32)` |
+| Column opening $\times 131$ | `batch_size × num_rows` codeword elements + 1 Merkle proof | `131 × (batch_size × num_rows × Cw::NUM_BYTES + 3×8 + (tree_height-1)×32)` |
 
 An assertion at the end of `test()` checks that the actual byte count matches the pre-calculated estimate — a compile-time sanity check against serialization bugs.
 
@@ -317,7 +317,7 @@ During `verify_testing()`, the verifier:
 5. For each opened column $j$: alpha-projects and row-combines the column codeword values using the same $\boldsymbol{\alpha}_i$ and $\gamma_k$, and checks that the result equals the encoded value of $u'$ at position $j$.
 6. Verifies the Merkle proof against the committed root (the leaf is the Blake3 hash of the concatenated column values across all polynomials and rows).
 
-If the committed codeword matrices are $\delta$-far from valid codewords, a constant fraction of columns will fail the proximity check, and the probability that all 147 random spot-checks miss every disagreement is negligible.
+If the committed codeword matrices are $\delta$-far from valid codewords, a constant fraction of columns will fail the proximity check, and the probability that all 131 random spot-checks miss every disagreement is negligible.
 
 **What this produces:** A `BatchedZipPlusTestTranscript` wrapping a `PcsTranscript` that contains both the serialized proof bytes and the Fiat-Shamir sponge state. This transcript is passed directly to the evaluation sub-phase, which continues squeezing challenges from the same sponge — binding the evaluation-phase randomness to the test-phase data.
 
@@ -463,12 +463,12 @@ The testing phase checks that the committed codeword matrices are close to valid
 
 2. **Read the combined row** from the proof transcript: a vector of `row_len` `CombR` elements. On the prover side (Step 4), this is computed as the sum over all polynomials of the alpha-projected, row-combined encoded rows.
 
-3. **Read `NUM_COLUMN_OPENINGS`** (147) column openings from the proof transcript. For each opening $t \in [0, 147)$:
+3. **Read `NUM_COLUMN_OPENINGS`** (131) column openings from the proof transcript. For each opening $t \in [0, 131)$:
    - A column index $j_t \in [0, \text{cw\_len})$ squeezed from the Fiat-Shamir transcript.
    - For each polynomial $i \in [0, m)$: the column values $\text{cw}_i[0][j_t], \ldots, \text{cw}_i[\text{num\_rows}-1][j_t]$ — one `Cw`-element per row — totalling $m \times \text{num\_rows}$ `Cw`-elements per opening.
    - A Merkle proof (sibling path from leaf $j_t$ to the root).
 
-4. **Spot-check encoding:** Collect the 147 opened positions $\{j_0, \ldots, j_{146}\}$ and call `encode_wide_at_positions(&combined_row, &positions)`. This computes the IPRS linear-code encoding of the combined row **only** at the 147 opened positions (not the full `cw_len`-element codeword), using the precomputed encoding matrix (see §14). Result: 147 `CombR` values.
+4. **Spot-check encoding:** Collect the 131 opened positions $\{j_0, \ldots, j_{130}\}$ and call `encode_wide_at_positions(&combined_row, &positions)`. This computes the IPRS linear-code encoding of the combined row **only** at the 131 opened positions (not the full `cw_len`-element codeword), using the precomputed encoding matrix (see §14). Result: 131 `CombR` values.
 
 5. **Per-column proximity check** (`verify_batched_column_testing`): For each opened column $j_t$:
    - For each polynomial $i$: alpha-project the `Cw`-column entries into `CombR` integers via inner product with $(\alpha_i^{(0)}, \ldots, \alpha_i^{(D)})$, then combine across rows via inner product with $(c_0, \ldots, c_{\text{num\_rows}-1})$. This produces one `CombR` value per polynomial.
@@ -491,7 +491,7 @@ The evaluation phase checks that the prover's claimed polynomial evaluations $v_
 
 4. **Batched evaluation consistency:** Verify $\langle \hat{r}, q_1 \rangle = \sum_{i=0}^{m-1} \beta^i \cdot v_i$. Both sides are computed in the PCS's field. The left side is a standard inner product of the batched row with $q_1$. The right side accumulates $\beta$-weighted scalars.
 
-5. **Spot-check encoding in field:** Call `encode_f_at_positions(&batched_row, &positions)` to compute the field-level IPRS encoding of $\hat{r}$ at the same 147 opened positions. This uses the same precomputed encoding matrix as the testing phase, but operates in the Montgomery field rather than on `CombR` integers.
+5. **Spot-check encoding in field:** Call `encode_f_at_positions(&batched_row, &positions)` to compute the field-level IPRS encoding of $\hat{r}$ at the same 131 opened positions. This uses the same precomputed encoding matrix as the testing phase, but operates in the Montgomery field rather than on `CombR` integers.
 
 6. **Per-column evaluation proximity:** For each opened column $j_t$:
    - For each polynomial $i$: project its `Cw`-column entries to field elements via the projection closure, then combine across rows via inner product with $q_0$. This produces one field element per polynomial.
@@ -962,7 +962,7 @@ The PCS proof transcript is the dominant contributor to proof size. Its structur
 
 **Test phase:**
 - 1 combined row (`row_len × CombR::NUM_BYTES`): e.g., 512 × 48 = 24,576 bytes (BinaryPoly batch) or 512 × 64 = 32,768 bytes (ECDSA batch).
-- `NUM_COLUMN_OPENINGS` (147) column openings, each containing:
+- `NUM_COLUMN_OPENINGS` (131) column openings, each containing:
   - Column index (8 bytes).
   - Per-polynomial column values: `batch_size × num_rows × Cw::NUM_BYTES` per opening. For SHA BinaryPoly: 13 committed × 1 × 256 = 3,328 bytes (27 bitpoly minus 14 excluded); for SHA Int: 3 × 1 × 16 = 48 bytes; for ECDSA: 4 committed × 1 × 40 = 160 bytes (11 total minus 7 excluded).
   - Merkle proof: ~11 blake3 hashes (~352 bytes per proof for tree depth ≈ log₂(2048) = 11).
@@ -1253,7 +1253,7 @@ Three complementary optimizations were applied to reduce the PCS verifier time f
 
 ### Phase 1: Spot-Check Encoding via Precomputed Encoding Matrix
 
-**Problem:** The PCS verifier's dominant cost was two full PNTT encodings per batch: `encode_wide()` (over CombR integers) and `encode_f()` (over Montgomery field elements). Each encodes the full `row_len` → `cw_len` expansion (512 → 2,048 elements), requiring ~143,360 twiddle multiplications, even though the verifier only needs the encoding at the 147 opened column positions.
+**Problem:** The PCS verifier's dominant cost was two full PNTT encodings per batch: `encode_wide()` (over CombR integers) and `encode_f()` (over Montgomery field elements). Each encodes the full `row_len` → `cw_len` expansion (512 → 2,048 elements), requiring ~143,360 twiddle multiplications, even though the verifier only needs the encoding at the 131 opened column positions.
 
 **PNTT cost breakdown (PnttConfigF2\_16R4B64<1>):**
 - Base layer: 2,048 output elements × 63 twiddle muls each = 129,024 (90%)
@@ -1292,7 +1292,7 @@ For `encode_wide_at_positions`, each element multiplication is `CombR::mul_by_sc
 
 Both methods are parallelized via `rayon::par_iter` when the `parallel` feature is enabled.
 
-**Cost reduction:** 147 dot products of length 512 = 75,264 multiplications, versus ~143,360 twiddle multiplications for the full PNTT. This is a **~1.9× reduction** in raw multiplication count, but the actual speedup is larger because each dot product is fully independent (better parallelism), avoids butterfly bookkeeping overhead, and benefits from the Phase 3 multiplication optimization.
+**Cost reduction:** 131 dot products of length 512 = 67,072 multiplications, versus ~143,360 twiddle multiplications for the full PNTT. This is a **~2.1× reduction** in raw multiplication count, but the actual speedup is larger because each dot product is fully independent (better parallelism), avoids butterfly bookkeeping overhead, and benefits from the Phase 3 multiplication optimization.
 
 ### Phase 2: Parallel Verification of Independent PCS Batches
 
@@ -1419,37 +1419,37 @@ When `parallel` is disabled, all code paths fall back to sequential execution wi
 
 Phase 4's impact is most visible on the dual-circuit end-to-end verifier (`8xSHA256+ECDSA Steps/E2E/Verifier`), which dropped from ~7.3 ms to ~5.5 ms (~25% reduction) due to overlapping PCS1 and PCS2 verification and parallelizing the public-column MLE evaluations.
 
-Phase 5's impact is most visible on the single-circuit verifier (`8xSHA256 Steps/E2E/Verifier`), which dropped from ~4.2 ms to ~2.9 ms (~25–31% reduction) by replacing the full 2,048-element PNTT encoding with spot-check encoding at only the 147 opened positions.
+Phase 5's impact is most visible on the single-circuit verifier (`8xSHA256 Steps/E2E/Verifier`), which dropped from ~4.2 ms to ~2.9 ms (~25–31% reduction) by replacing the full 2,048-element PNTT encoding with spot-check encoding at only the 131 opened positions.
 
 Phase 6's impact is most visible on the 2×-folded SHA-256 PCS verifier (`8xSHA256 Folded Steps/V/PCSVerify (folded)`), which dropped from ~1.28 ms to ~1.02 ms (**−20%**) by using mixed-width `Int<6> × Int<2>` multiplication (12 word mults) instead of full-width `Int<6> × Int<6>` (36 word mults) for the challenge-scalar multiplications.
 
 The verifier now spends its time roughly as:
 - Column testing inner products (`Int<6> × i128`): ~45%
-- Spot-check encoding (147 dot products × `row_len`, `Int<6> × i64`): ~25%
-- Merkle proof verification (147 blake3 hash walks): ~20%
+- Spot-check encoding (131 dot products × `row_len`, `Int<6> × i64`): ~25%
+- Merkle proof verification (131 blake3 hash walks): ~20%
 - Transcript deserialization + challenge sampling: ~10%
 
 ### Phase 5: Deferred Spot-Check Encoding in `verify_with_field_cfg()`
 
-**Problem:** Despite the Phase 1 introduction of `encode_wide_at_positions`, the `verify_with_field_cfg()` method in `zip-plus/src/pcs/phase_verify.rs` was still calling `encode_wide(&combined_row)` — the **full** PNTT encoding producing all 2,048 codeword positions — before entering the column-opening loop. Only 147 positions were actually needed.
+**Problem:** Despite the Phase 1 introduction of `encode_wide_at_positions`, the `verify_with_field_cfg()` method in `zip-plus/src/pcs/phase_verify.rs` was still calling `encode_wide(&combined_row)` — the **full** PNTT encoding producing all 2,048 codeword positions — before entering the column-opening loop. Only 131 positions were actually needed.
 
-**Solution:** Replace the full `encode_wide` call with `encode_wide_at_positions`, computing only the 147 values corresponding to the opened column indices.
+**Solution:** Replace the full `encode_wide` call with `encode_wide_at_positions`, computing only the 131 values corresponding to the opened column indices.
 
 The implementation:
-1. **Read** all 147 column openings sequentially from the transcript (sequential, as the `squeeze_challenge_idx` / `read_const_many` / `read_merkle_proof` calls depend on transcript state).
-2. **Collect** the 147 column indices into a `Vec<usize>`.
-3. **Call** `encode_wide_at_positions(&combined_row, &column_indices)` — computes only the 147 needed encoding positions using the precomputed encoding matrix, parallelized across positions via `par_iter`.
+1. **Read** all 131 column openings sequentially from the transcript (sequential, as the `squeeze_challenge_idx` / `read_const_many` / `read_merkle_proof` calls depend on transcript state).
+2. **Collect** the 131 column indices into a `Vec<usize>`.
+3. **Call** `encode_wide_at_positions(&combined_row, &column_indices)` — computes only the 131 needed encoding positions using the precomputed encoding matrix, parallelized across positions via `par_iter`.
 4. **Zip** the encoded values into the parallel column verification loop (`cfg_into_iter!`), passing each expected encoded value directly to `verify_column_testing_batched` instead of the entire 2,048-element array + column index.
 
 The `verify_column_testing_batched` signature was simplified accordingly: it now accepts `expected_encoded: &Zt::CombR` (a single value) instead of `encoded_combined_row: &[Zt::CombR]` + `column: usize`.
 
-**Cost reduction:** 147 × 512 = 75,264 multiplications vs 143,360 for full PNTT — identical to Phase 1's analysis, but this change ensures the spot-check path is actually used by `verify_with_field_cfg()` (not just the standalone benchmark harness).
+**Cost reduction:** 131 × 512 = 67,072 multiplications vs 143,360 for full PNTT — identical to Phase 1's analysis, but this change ensures the spot-check path is actually used by `verify_with_field_cfg()` (not just the standalone benchmark harness).
 
 **Impact (8×SHA-256 E2E/Verifier):** 4.2 ms → 2.9 ms (**−25% to −31%**).
 
 ### Phase 6: Mixed-Width Multiply for `i128` Challenge Scalars
 
-**Problem:** Column testing (the `compute_column_testing_batched` inner loop) dominates the 2×-folded PCS verifier: 147 column openings × `batch_size` × `num_rows` × `D_PLUS_ONE` inner-product terms, each performing `Int<6> × i128` (`CombR × Chal`). With the previous implementation, the `i128` scalar was widened to `Int<6>` and multiplied with full-width 6×6 = 36 word multiplications. Since `i128` occupies only 2 limbs, this wastes 24 word multiplications per term.
+**Problem:** Column testing (the `compute_column_testing_batched` inner loop) dominates the 2×-folded PCS verifier: 131 column openings × `batch_size` × `num_rows` × `D_PLUS_ONE` inner-product terms, each performing `Int<6> × i128` (`CombR × Chal`). With the previous implementation, the `i128` scalar was widened to `Int<6>` and multiplied with full-width 6×6 = 36 word multiplications. Since `i128` occupies only 2 limbs, this wastes 24 word multiplications per term.
 
 **The PCS verifier was roughly as expensive as the PCS prover** (~1.28 ms each for the 2×-folded 8×SHA-256 benchmark), which is unexpected since the verifier should be cheaper.
 
@@ -1468,7 +1468,7 @@ The `verify_column_testing_batched` signature was simplified accordingly: it now
 | ArrCombRDotChal (batch terms) | 60 | 60 × 36 = 2,160 | 60 × 12 = 720 | 3× |
 | Encoding (row_len dot product) | 1,024 | 1,024 × 6 = 6,144 | 1,024 × 6 = 6,144 | (same) |
 | **Total per column** | | **42,864** | **18,384** | **2.3×** |
-| **× 147 columns** | | **~6.3M** | **~2.7M** | **2.3×** |
+| **× 131 columns** | | **~5.6M** | **~2.4M** | **2.3×** |
 
 **Impact (8×SHA-256 2×-folded `V/PCSVerify`):** 1.28 ms → 1.02 ms (**−20%**, p = 0.00).
 
@@ -1662,10 +1662,10 @@ Both computations are included in the `E2E/Verifier` benchmark (step 21) and als
 
 Each `DensePolynomial<i64, 32>` codeword element (used for BinaryPoly columns) serializes as 32 × 8 = 256 bytes. However, for DEPTH=1 IPRS codes, the coefficient bitbound is ~45 bits, so each coefficient fits in 6 bytes. Serializing at 6 bytes per coefficient would give 32 × 6 = 192 bytes per codeword element — a 25% reduction on column-opening data.
 
-After eval-phase batching, column openings dominate the test-phase proof. For 147 openings × 13 committed BinaryPoly columns (27 total minus 12 public minus 2 shift-source-only):
-- Current: 147 × 13 × 256 ≈ 490 KB
-- Compact: 147 × 13 × 192 ≈ 367 KB
-- **Savings: ~123 KB**
+After eval-phase batching, column openings dominate the test-phase proof. For 131 openings × 13 committed BinaryPoly columns (27 total minus 12 public minus 2 shift-source-only):
+- Current: 131 × 13 × 256 ≈ 436 KB
+- Compact: 131 × 13 × 192 ≈ 327 KB
+- **Savings: ~109 KB**
 
 ### 16.2 Narrowing the ECDSA Field (Proof Size + Verifier Speed)
 
@@ -1680,7 +1680,7 @@ Currently ECDSA uses `CombR = Int<8>` (512-bit) which forces `PcsF = MontyField<
 
 **Estimated savings: ~10–20% of Merkle verification time.**
 
-Currently each of the 147 column openings independently hashes the leaf and walks up the Merkle tree (~11 hash levels). Many openings share Merkle path prefixes. Batching the verification to share work on common path segments could save duplicate hash computations.
+Currently each of the 131 column openings independently hashes the leaf and walks up the Merkle tree (~11 hash levels). Many openings share Merkle path prefixes. Batching the verification to share work on common path segments could save duplicate hash computations.
 
 ### 16.4 SIMD-Accelerated Inner Products (Verifier Speed)
 
@@ -1688,7 +1688,7 @@ The inner-product kernels (`MBSInnerProduct`, `ScalarProduct`, `CombDotChal`) ma
 
 ### 16.5 Reducing NUM_COLUMN_OPENINGS (Proof Size + Verifier Speed)
 
-`NUM_COLUMN_OPENINGS = 147` is a security parameter. Reducing it would proportionally decrease both proof size and verifier time. A formal analysis of the soundness trade-off (proximity testing false-accept probability vs. number of openings) could determine the minimum safe value for the target security level.
+`NUM_COLUMN_OPENINGS = 131` with `GRINDING_BITS = 8` targets 96-bit security (matching the Binius64 configuration). Adjusting these parameters trades proof size and verifier time against the security level.
 
 ### 16.6 Full Split-Trace Pipeline Integration
 

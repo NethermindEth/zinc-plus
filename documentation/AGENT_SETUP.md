@@ -118,7 +118,7 @@ Split the SHA-256 trace into two PCS batches: one with `BinaryPoly<32>` for colu
 
 ### The Problem
 
-Today, all 20 SHA-256 columns are committed together with `Eval = BinaryPoly<32>`, `Cw = DensePolynomial<i64, 32>` (256 bytes/codeword). But many columns never appear in rotation constraints — they only appear in integer addition carry constraints (C10–C11) and BitPoly checks (C7–C9). Committing those as 256-byte polynomials wastes ~2,016 bytes per column opening (9 cols × 256 B – 9 cols × 32 B = ~2,016 B), which at 147 column openings is ~289 KB of waste.
+Today, all 20 SHA-256 columns are committed together with `Eval = BinaryPoly<32>`, `Cw = DensePolynomial<i64, 32>` (256 bytes/codeword). But many columns never appear in rotation constraints — they only appear in integer addition carry constraints (C10–C11) and BitPoly checks (C7–C9). Committing those as 256-byte polynomials wastes ~2,016 bytes per column opening (9 cols × 256 B – 9 cols × 32 B = ~2,016 B), which at 131 column openings is ~264 KB of waste.
 
 ### Column Classification
 
@@ -156,7 +156,7 @@ After split:
 - Int batch: 9 cols × 8 B = 72 B per opening (Cw = Int<1+> ≈ 8–16 B)
 - Total per opening: ~2,888 B vs 5,120 B → **1.77× smaller**
 
-At 147 column openings: saves ~328 KB raw in a single SHA-256 proof.
+At 131 column openings: saves ~292 KB raw in a single SHA-256 proof.
 
 ### Implementation Plan
 
@@ -173,7 +173,8 @@ In `snark/benches/e2e_sha256.rs` (and eventually a shared types module):
 ```rust
 struct Sha256IntZipTypes;
 impl ZipTypes for Sha256IntZipTypes {
-    const NUM_COLUMN_OPENINGS: usize = 147;
+    const NUM_COLUMN_OPENINGS: usize = 131;
+    const GRINDING_BITS: usize = 8;
     type Eval = Int<1>;     // 64-bit integer
     type Cw = Int<2>;       // 128-bit codeword (to avoid overflow in NTT)
     type Fmod = Uint<4>;    // 256-bit modulus search
