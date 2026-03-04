@@ -28,7 +28,7 @@ use zip_plus::{
 
 impl<Zt, U, F, const D: usize> ZincPlusPiop<Zt, U, F, D>
 where
-    Zt: WitnessZincTypes<D>,
+    Zt: ZincTypes<D>,
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     F: InnerTransparentField
@@ -46,9 +46,9 @@ where
     F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
     U: Uair + 'static,
 {
-    /// Zinc+ PIOP Prover (Algorithm 1 from the paper, Steps 1–5).
+    /// Zinc+ full PIOP Prover.
     ///
-    /// # Protocol flow (paper Section 2.2 "Combining the three steps"):
+    /// # Protocol flow:
     ///
     /// 0. **Commit**: commit each witness column via Zip+ PCS, absorb roots.
     /// 1. **Prime projection** (φ_q: Q\[X\] → F_q\[X\]): sample random prime q
@@ -112,14 +112,14 @@ where
         // TODO: Absorb public inputs as well once they are part of the protocol,
         //       or this will open up a soundness vulnerability!
 
-        // === Step 1: Prime projection (φ_q: Q[X] → F_q[X]) ===
+        // === Step 1: Prime projection (φ_q: Z[X] → F_q[X]) ===
 
         // Sample a random prime modulus from the Fiat-Shamir transcript.
         let field_cfg = pcs_transcript
             .fs_transcript
             .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
 
-        // Project the witness trace from Q[X] to F_q[X].
+        // Project the witness trace from Z[X] to F_q[X].
         let projected_trace = project_trace_coeffs::<F, Zt::Int, Zt::Int, D>(
             trace_bin_poly,
             trace_arb_poly,
@@ -127,7 +127,7 @@ where
             &field_cfg,
         );
 
-        // Project UAIR scalars from Q[X] to F_q[X].
+        // Project UAIR scalars from Z[X] to F_q[X].
         let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
 
         let num_constraints = count_constraints::<U>();
@@ -224,10 +224,10 @@ where
         Ok((
             Proof {
                 num_witness_cols: (trace_bin_poly.len(), trace_arb_poly.len(), trace_int.len()),
-                zip_commitments: commitments,
+                commitments,
                 ideal_check: ic_proof,
                 resolver: cpr_proof,
-                zip_proof,
+                zip: zip_proof,
             },
             ProverAux {
                 field_cfg,

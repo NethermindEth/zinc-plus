@@ -33,7 +33,7 @@ use zip_plus::{
 
 impl<Zt, U, F, const D: usize> ZincPlusPiop<Zt, U, F, D>
 where
-    Zt: WitnessZincTypes<D>,
+    Zt: ZincTypes<D>,
     Zt::Int: ProjectableToField<F>,
     <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
@@ -53,7 +53,7 @@ where
     F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
     U: Uair + 'static,
 {
-    /// Zinc+ PIOP Verifier (Algorithm 1, verification side, Steps 0–5).
+    /// Zinc+ full PIOP Verifier.
     ///
     /// Verifies all steps and returns a [`Subclaim`]. The `up_evals` are
     /// already verified by the Zip+ PCS (Step 5); the `down_evals` (shifted
@@ -77,9 +77,9 @@ where
         // The verifier creates a PcsVerifierTranscript from the PCS proof bytes.
         let mut pcs_transcript = PcsVerifierTranscript {
             fs_transcript: KeccakTranscript::default(),
-            stream: Cursor::new(proof.zip_proof),
+            stream: Cursor::new(proof.zip),
         };
-        for comm in &proof.zip_commitments {
+        for comm in &proof.commitments {
             pcs_transcript.fs_transcript.absorb_slice(&comm.root);
         }
 
@@ -135,7 +135,7 @@ where
         //       at cpr_subclaim.evaluation_point directly from public data here,
         //       then include them in the constraint recomputation check.
 
-        for (i, comm) in proof.zip_commitments.iter().enumerate() {
+        for (i, comm) in proof.commitments.iter().enumerate() {
             macro_rules! zip_verify {
                 ($zt:ident, $lc:ident, $vp:ident) => {
                     ZipPlus::<Zt::$zt, Zt::$lc>::verify::<F, CHECK_FOR_OVERFLOW>(

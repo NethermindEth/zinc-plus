@@ -1,18 +1,17 @@
 //! Zinc+ PIOP for UCS — end-to-end protocol (without PCS).
 //!
-//! Implements the four steps of the Zinc+ compiler from
-//! Section 2.2 "Combining the three steps" of the paper:
+//! Implements the four steps of the Zinc+ compiler:
 //!
 //! ```text
-//! Q[X]  --φ_q-->  F_q[X]  --MLE eval-->  F_q[X]  --ψ_a-->  F_q
+//! Z[X]  --φ_q-->  F_q[X]  --MLE eval-->  F_q[X]  --ψ_a-->  F_q
 //!       Step 1             Step 2                  Step 3
 //! ```
 //!
 //! Step 4 runs a finite-field PIOP (sumcheck) over F_q.
 //!
-//! The verifier's output is a [`Subclaim`] containing evaluation
-//! claims about the trace column MLEs. In the full protocol,
-//! these would be resolved by the Zip+ PCS.
+//! The verifier's output is a [`Subclaim`] containing evaluation claims about
+//! the trace column MLEs. In the full protocol, these would be resolved by the
+//! Zip+ PCS - this will be addressed in the follow-up PR.
 
 pub mod prover;
 pub mod verifier;
@@ -21,8 +20,8 @@ use crypto_primitives::{ConstIntRing, ConstIntSemiring, PrimeField};
 use std::marker::PhantomData;
 use thiserror::Error;
 use zinc_piop::{
-    combined_poly_resolver, combined_poly_resolver::CombinedPolyResolverError, ideal_check,
-    ideal_check::IdealCheckError,
+    combined_poly_resolver::{CombinedPolyResolverError, Proof as CombinedPolyResolverProof},
+    ideal_check::{IdealCheckError, Proof as IdealCheckProof},
 };
 use zinc_poly::{
     ConstCoeffBitWidth,
@@ -43,22 +42,29 @@ use zip_plus::{
 // Data structures
 //
 
-/// Proof produced by the Zinc+ PIOP for UCS (without PCS).
+/// Proof produced by the Zinc+ PIOP for UCS.
 ///
 /// Contains the two subproofs from Steps 2 and 4:
 /// - `ideal_check`: MLE evaluations in F_q\[X\] (Step 2).
 /// - `resolver`: sumcheck proof + trace evaluation claims (Step 4).
 #[derive(Clone, Debug)]
 pub struct Proof<F: PrimeField> {
+    /// Number of witness columns of each type (binary polynomials, arbitrary
+    /// polynomials, integers).
     pub num_witness_cols: (usize, usize, usize),
-    pub zip_commitments: Vec<ZipPlusCommitment>,
+    /// Zip+ commitments to the witness columns.
+    pub commitments: Vec<ZipPlusCommitment>,
     /// Serialized PCS proof data (Zip+ proving transcripts).
-    pub zip_proof: Vec<u8>,
-    pub ideal_check: ideal_check::Proof<F>,
-    pub resolver: combined_poly_resolver::Proof<F>,
+    pub zip: Vec<u8>,
+    /// Randomized ideal check proof: MLE evaluations in F_q[X] and ideal
+    /// membership claims.
+    pub ideal_check: IdealCheckProof<F>,
+    /// Combined polynomial resolver proof: sumcheck proof + trace evaluation
+    pub resolver: CombinedPolyResolverProof<F>,
 }
 
-/// Subclaim returned by the verifier, to be resolved by PCS.
+/// Subclaim returned by the verifier. This will be replaced by the PCS proof in
+/// the full protocol.
 ///
 /// Contains evaluation claims: "the trace column MLEs, evaluated at
 /// `evaluation_point`, should yield `up_evals` (current row) and
@@ -71,21 +77,37 @@ pub struct Subclaim<F: PrimeField> {
 }
 
 /// Prover auxiliary data for subclaim resolution without PCS.
+/// To be removed in the full protocol.
 pub struct ProverAux<F: PrimeField> {
-    /// The random field configuration (derived from transcript in Step 1).
+    /// The random field configuration (derived from transcript).
     pub field_cfg: F::Config,
-    /// The trace projected to F_q (after Steps 1 and 3).
+    /// The trace projected to F_q.
     pub projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
 }
 
-/// Trait bundling the various type parameters for the witness and Zinc+ PIOP.
-pub trait WitnessZincTypes<const DEGREE_PLUS_ONE: usize> {
+/// Trait bundling the various type parameters for the public inputs (NYI),
+/// witness and Zinc+ PIOP.
+pub trait ZincTypes<const DEGREE_PLUS_ONE: usize> {
+    /// Main integer type for the protocol, used as a coefficient type for the
+    /// arbitrary polynomial trace columns and for the integer trace columns.
     type Int: Named + ConstCoeffBitWidth + Default + Clone + Send + Sync;
+
+    /// Projecting element to project Zip+ evaluations and UAIR scalars to the
+    /// field.
     type Chal: ConstIntRing + ConstTranscribable + Named;
+
+    /// Evaluation point type, used for all column types in Zip+ to evaluate
+    /// multilinear polynomials.
     type Pt: ConstIntRing;
+
+    /// Randomly sampled field modulus type, used throughout the protocol for
+    /// finite field operations.
     type Fmod: ConstIntSemiring + ConstTranscribable + Named;
+
+    /// Primality test for the field modulus.
     type PrimeTest: PrimalityTest<Self::Fmod>;
 
+    /// Zip+ types for the binary polynomial trace columns.
     type BinaryZt: ZipTypes<
             Eval = BinaryPoly<DEGREE_PLUS_ONE>,
             Chal = Self::Chal,
@@ -93,6 +115,8 @@ pub trait WitnessZincTypes<const DEGREE_PLUS_ONE: usize> {
             Fmod = Self::Fmod,
             PrimeTest = Self::PrimeTest,
         >;
+
+    /// Zip+ types for the arbitrary polynomial trace columns.
     type ArbitraryZt: ZipTypes<
             Eval = DensePolynomial<Self::Int, DEGREE_PLUS_ONE>,
             Chal = Self::Chal,
@@ -100,6 +124,8 @@ pub trait WitnessZincTypes<const DEGREE_PLUS_ONE: usize> {
             Fmod = Self::Fmod,
             PrimeTest = Self::PrimeTest,
         >;
+
+    /// Zip+ types for the integer trace columns.
     type IntZt: ZipTypes<
             Eval = Self::Int,
             Chal = Self::Chal,
@@ -108,23 +134,30 @@ pub trait WitnessZincTypes<const DEGREE_PLUS_ONE: usize> {
             PrimeTest = Self::PrimeTest,
         >;
 
+    /// Linear code used in Zip+ for the binary polynomial trace columns.
     type BinaryLc: LinearCode<Self::BinaryZt>;
+
+    /// Linear code used in Zip+ for the arbitrary polynomial trace columns.
     type ArbitraryLc: LinearCode<Self::ArbitraryZt>;
+
+    /// Linear code used in Zip+ for the integer trace columns.
     type IntLc: LinearCode<Self::IntZt>;
 }
 
-/// Main struct for the Zinc+ PIOP.
+/// Main struct for the Zinc+ PIOP. The protocol is implemented as associated
+/// functions on it.
+///
+/// Note that type parameters are further constrained in the impl blocks for the
+/// prover and verifier.
 #[derive(Copy, Clone, Default, Debug)]
-pub struct ZincPlusPiop<Wzt, U, F, const DEGREE_PLUS_ONE: usize>(PhantomData<(Wzt, U, F)>)
+pub struct ZincPlusPiop<Zt, U, F, const DEGREE_PLUS_ONE: usize>(PhantomData<(Zt, U, F)>)
 where
-    Wzt: WitnessZincTypes<DEGREE_PLUS_ONE>,
+    Zt: ZincTypes<DEGREE_PLUS_ONE>,
     U: Uair,
     F: PrimeField;
 
-//
-// Error type and conversion
-//
-
+/// Error type for error happening during the protocol execution (prover and
+/// verifier).
 #[derive(Debug, Error)]
 pub enum ProtocolError<F: PrimeField, I: Ideal> {
     #[error("ideal check failed: {0}")]
@@ -280,9 +313,9 @@ mod tests {
         type ArrCombRDotChal = MBSInnerProduct;
     }
 
-    struct TestWitnessZincTypesIprs;
+    struct TestZincTypesIprs;
 
-    impl WitnessZincTypes<DEGREE_PLUS_ONE> for TestWitnessZincTypesIprs {
+    impl ZincTypes<DEGREE_PLUS_ONE> for TestZincTypesIprs {
         type Int = i64;
         type Chal = i128;
         type Pt = i128;
@@ -307,9 +340,9 @@ mod tests {
         const CHECK_FOR_OVERFLOWS: bool = true;
     }
 
-    struct TestWitnessZincTypesRaa;
+    struct TestZincTypesRaa;
 
-    impl WitnessZincTypes<DEGREE_PLUS_ONE> for TestWitnessZincTypesRaa {
+    impl ZincTypes<DEGREE_PLUS_ONE> for TestZincTypesRaa {
         type Int = i64;
         type Chal = i128;
         type Pt = i128;
@@ -350,7 +383,7 @@ mod tests {
         ZipPlusParams<Wzt::IntZt, Wzt::IntLc>,
     )
     where
-        Wzt: WitnessZincTypes<DEGREE_PLUS_ONE>,
+        Wzt: ZincTypes<DEGREE_PLUS_ONE>,
     {
         let poly_size = 1 << num_vars;
         (
@@ -374,11 +407,11 @@ mod tests {
     fn test_e2e_no_multiplication() {
         let mut rng = rng();
         let num_vars = 8;
-        let pp = setup_pp::<TestWitnessZincTypesIprs>(num_vars);
+        let pp = setup_pp::<TestZincTypesIprs>(num_vars);
 
         type TestUair = TestAirNoMultiplication<i64>;
 
-        type Piop = ZincPlusPiop<TestWitnessZincTypesIprs, TestUair, F, DEGREE_PLUS_ONE>;
+        type Piop = ZincPlusPiop<TestZincTypesIprs, TestUair, F, DEGREE_PLUS_ONE>;
 
         // Generate a valid witness satisfying the UAIR constraints.
         let trace = TestUair::generate_witness(num_vars, &mut rng);
@@ -422,12 +455,13 @@ mod tests {
     fn test_e2e_simple_multiplication() {
         let mut rng = rng();
         let num_vars = 2;
-        let pp = setup_pp::<TestWitnessZincTypesRaa>(num_vars);
+        let pp = setup_pp::<TestZincTypesRaa>(num_vars);
 
         type TestUair = TestUairSimpleMultiplication<i64>;
 
-        type Piop = ZincPlusPiop<TestWitnessZincTypesRaa, TestUair, F, DEGREE_PLUS_ONE>;
+        type Piop = ZincPlusPiop<TestZincTypesRaa, TestUair, F, DEGREE_PLUS_ONE>;
 
+        // Generate a valid witness satisfying the UAIR constraints.
         let trace = TestUair::generate_witness(num_vars, &mut rng);
 
         // Prover
@@ -462,12 +496,13 @@ mod tests {
     fn test_e2e_binary_decomposition() {
         let mut rng = rng();
         let num_vars = 8;
-        let pp = setup_pp::<TestWitnessZincTypesIprs>(num_vars);
+        let pp = setup_pp::<TestZincTypesIprs>(num_vars);
 
         type TestUair = BinaryDecompositionUair<i64>;
 
-        type Piop = ZincPlusPiop<TestWitnessZincTypesIprs, TestUair, F, DEGREE_PLUS_ONE>;
+        type Piop = ZincPlusPiop<TestZincTypesIprs, TestUair, F, DEGREE_PLUS_ONE>;
 
+        // Generate a valid witness satisfying the UAIR constraints.
         let (binary_trace, arb_trace, int_trace) = TestUair::generate_witness(num_vars, &mut rng);
 
         // Prover
@@ -511,12 +546,13 @@ mod tests {
     fn test_e2e_big_linear() {
         let mut rng = rng();
         let num_vars = 8;
-        let pp = setup_pp::<TestWitnessZincTypesIprs>(num_vars);
+        let pp = setup_pp::<TestZincTypesIprs>(num_vars);
 
         type TestUair = BigLinearUair<i64>;
 
-        type Piop = ZincPlusPiop<TestWitnessZincTypesIprs, TestUair, F, DEGREE_PLUS_ONE>;
+        type Piop = ZincPlusPiop<TestZincTypesIprs, TestUair, F, DEGREE_PLUS_ONE>;
 
+        // Generate a valid witness satisfying the UAIR constraints.
         let (binary_trace, arb_trace, int_trace) = TestUair::generate_witness(num_vars, &mut rng);
 
         // Prover
