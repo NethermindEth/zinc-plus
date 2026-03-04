@@ -432,6 +432,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crypto_primitives::crypto_bigint_int::Int;
     use zinc_uair::{
         collect_scalars::collect_scalars, constraint_counter::count_constraints,
         degree_counter::count_max_degree,
