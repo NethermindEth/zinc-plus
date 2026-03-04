@@ -337,6 +337,9 @@ fn lookup_proof_byte_count(data: &zinc_snark::pipeline::LookupProofData) -> usiz
         zinc_snark::pipeline::LookupProofData::BatchedClassic(p) => {
             batched_classic_lookup_proof_to_bytes(p).len()
         }
+        zinc_snark::pipeline::LookupProofData::HybridGkr(_) => {
+            todo!("HybridGkr proof byte count not yet implemented")
+        }
     }
 }
 
@@ -466,6 +469,9 @@ fn lookup_proof_to_bytes(data: &zinc_snark::pipeline::LookupProofData) -> Vec<u8
         zinc_snark::pipeline::LookupProofData::Gkr(p) => gkr_lookup_proof_to_bytes(p),
         zinc_snark::pipeline::LookupProofData::Classic(p) => classic_lookup_proof_to_bytes(p),
         zinc_snark::pipeline::LookupProofData::BatchedClassic(p) => batched_classic_lookup_proof_to_bytes(p),
+        zinc_snark::pipeline::LookupProofData::HybridGkr(_) => {
+            todo!("HybridGkr proof serialization not yet implemented")
+        }
     }
 }
 
@@ -724,7 +730,12 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
 
     // Derive real PCS evaluation points from the PIOP-generated CPR points.
     let sha_pcs_pt: Vec<F> = zinc_snark::pipeline::pcs_point_from_proof(&sha_zinc_proof);
-    let ec_pcs_pt: Vec<F> = zinc_snark::pipeline::pcs_point_from_proof(&ec_zinc_proof);
+    let ec_pcs_pt_piop: Vec<F> = zinc_snark::pipeline::pcs_point_from_proof(&ec_zinc_proof);
+    let ec_pcs_pt: Vec<FScalar> = {
+        let pcs_cfg = zinc_transcript::KeccakTranscript::default()
+            .get_random_field_cfg::<FScalar, <EcZt as zip_plus::pcs::structs::ZipTypes>::Fmod, <EcZt as zip_plus::pcs::structs::ZipTypes>::PrimeTest>();
+        zinc_snark::pipeline::piop_point_to_pcs_field(&ec_pcs_pt_piop, &pcs_cfg)
+    };
 
     // ── Prepare ECDSA proof (reused by split PCS verifier) ────────
     let (ec_hint, ec_comm) = ZipPlus::<EcZt, EcLc>::commit(
@@ -735,7 +746,6 @@ fn sha256_8x_ecdsa(c: &mut Criterion) {
         &ec_params, &ecdsa_trace, &ec_pt, &ec_hint,
     ).expect("prove");
 
-    // ec_pt is already Vec<F> = Vec<FScalar>, no conversion needed
     let ec_pt_f: Vec<FScalar> = ec_pt.clone();
 
     // ── Full Pipeline Prover (IC + CPR + Lookup + PCS) ──────────────
@@ -1432,8 +1442,8 @@ fn sha256_full_pipeline(c: &mut Criterion) {
     group.finish();
 }
 
-// ─── LogUp Comparison Benchmark ─────────────────────────────────────────────
-
+// ─── LogUp Comparison Benchmark (commented out: classic logup only) ──────────
+/*
 /// Side-by-side comparison of LogUp proving strategies for 8×SHA-256 + ECDSA.
 ///
 /// Three variants are compared:
@@ -1664,6 +1674,7 @@ fn sha256_8x_ecdsa_logup_comparison(c: &mut Criterion) {
 
     group.finish();
 }
+*/ // end of commented-out sha256_8x_ecdsa_logup_comparison
 
-criterion_group!(benches, sha256_single, sha256_8x_ecdsa, sha256_piop_only, sha256_8x_ecdsa_end_to_end, sha256_full_pipeline, sha256_8x_ecdsa_logup_comparison);
+criterion_group!(benches, sha256_single, sha256_8x_ecdsa, sha256_piop_only, sha256_8x_ecdsa_end_to_end, sha256_full_pipeline);
 criterion_main!(benches);

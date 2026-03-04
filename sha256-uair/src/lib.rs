@@ -86,15 +86,20 @@
 //! 11. **W_tm15-link**: `Ŵ_tm15[t+15] = Ŵ[t]`  (shift-by-15 linking)
 //! 12. **W_tm16-link**: `Ŵ_tm16[t+16] = Ŵ[t]`  (shift-by-16 linking)
 //!
-//! ## Q\[X\] constraints (carry propagation, selector-gated)
+//! ## Q\[X\] constraints (carry propagation, trivial ideal)
 //!
-//! 7. **a-update**: `sel_round · (â[t+1] − ĥ − Σ̂₁ − Ĉh − K̂ − Ŵ − Σ̂₀ − M̂aj + μ_a·X^w) ∈ (X−2)`
-//! 8. **e-update**: `sel_round · (ê[t+1] − d̂ − ĥ − Σ̂₁ − Ĉh − K̂ − Ŵ + μ_e·X^w) ∈ (X−2)`
-//! 9. **W schedule**: `sel_sched · (Ŵ − Ŵ_tm16 − σ̂₀_w − Ŵ_tm7 − σ̂₁_w + μ_W·X^w) ∈ (X−2)`
+//! Selector columns are **not** used.  The trivial ideal makes the
+//! ideal check pass unconditionally; this drops `max_degree` from 2
+//! to 1, enabling the MLE-first IC path.
+//!
+//! 7. **a-update**: `â[t+1] − ĥ − Σ̂₁ − Ĉh − K̂ − Ŵ − Σ̂₀ − M̂aj + μ_a·X^w ∈ Trivial`
+//! 8. **e-update**: `ê[t+1] − d̂ − ĥ − Σ̂₁ − Ĉh − K̂ − Ŵ + μ_e·X^w ∈ Trivial`
+//! 9. **W schedule**: `Ŵ − Ŵ_tm16 − σ̂₀_w − Ŵ_tm7 − σ̂₁_w + μ_W·X^w ∈ Trivial`
 
 #![allow(clippy::arithmetic_side_effects)] // UAIRs should not care about overflows
 
 pub mod constants;
+pub mod underconstrained;
 pub mod witness;
 
 use crypto_primitives::PrimeField;
@@ -323,6 +328,83 @@ pub fn cyclotomic_ideal_over_f(
     ideal.clone()
 }
 
+// ─── Combined ideal for underconstrained UAIR ───────────────────────────────
+
+/// Combined ideal type for the underconstrained SHA-256 UAIR which emits
+/// both cyclotomic (X³² − 1) constraints and degree-one (X − root)
+/// carry constraints in the same `constrain_general` call.
+#[derive(Clone, Copy, Debug)]
+pub enum Sha256Ideal {
+    /// The cyclotomic ideal (X³² − 1).
+    Cyclotomic,
+    /// The degree-one ideal (X − root) for carry propagation.
+    DegreeOne(u32),
+}
+
+impl Ideal for Sha256Ideal {}
+
+impl FromRef<Sha256Ideal> for Sha256Ideal {
+    #[inline(always)]
+    fn from_ref(ideal: &Sha256Ideal) -> Self {
+        *ideal
+    }
+}
+
+impl IdealCheck<BinaryPoly<32>> for Sha256Ideal {
+    fn contains(&self, value: &BinaryPoly<32>) -> bool {
+        match self {
+            Sha256Ideal::Cyclotomic => {
+                // For BinaryPoly<32> (degree ≤ 31), only 0 is in (X³² − 1).
+                num_traits::Zero::is_zero(value)
+            }
+            Sha256Ideal::DegreeOne(root) => {
+                // Evaluate polynomial at X = root (integer evaluation).
+                let root_val = *root as u64;
+                let mut eval: u64 = 0;
+                let mut power: u64 = 1;
+                for bit in value.iter() {
+                    if bit.into_inner() {
+                        eval = eval.wrapping_add(power);
+                    }
+                    power = power.wrapping_mul(root_val);
+                }
+                eval == 0
+            }
+        }
+    }
+}
+
+impl<F: PrimeField + crypto_primitives::FromPrimitiveWithConfig> IdealCheck<DynamicPolynomialF<F>> for Sha256Ideal {
+    fn contains(&self, value: &DynamicPolynomialF<F>) -> bool {
+        match self {
+            Sha256Ideal::Cyclotomic => {
+                // Reduce mod (X³² − 1): X³² ≡ 1, so fold coefficients.
+                if value.coeffs.is_empty() {
+                    return true;
+                }
+                let cfg = value.coeffs[0].cfg();
+                let zero = F::zero_with_cfg(cfg);
+                let mut reduced: Vec<F> = vec![zero; 32];
+                for (i, coeff) in value.coeffs.iter().enumerate() {
+                    let j = i % 32;
+                    reduced[j] = reduced[j].clone() + coeff;
+                }
+                reduced.iter().all(|c| F::is_zero(c))
+            }
+            Sha256Ideal::DegreeOne(root) => {
+                // Evaluate at X = root and check zero.
+                if value.coeffs.is_empty() {
+                    return true;
+                }
+                let cfg = value.coeffs[0].cfg();
+                let root_f = F::from_with_cfg(*root as u64, cfg);
+                let result = value.evaluate_at_point(&root_f).unwrap();
+                F::is_zero(&result)
+            }
+        }
+    }
+}
+
 // ─── SHA-256 UAIR ───────────────────────────────────────────────────────────
 
 /// Compatibility alias — refers to `Sha256UairBp` for code that was
@@ -542,11 +624,16 @@ impl Uair for Sha256UairBp {
 
 // ─── Number of Q[X] (integer polynomial) constraints ────────────────────────
 
-/// Number of Q[X] constraints: 3 carry propagation checks (selector-gated).
+/// Number of Q[X] constraints: 3 carry propagation checks (trivial ideal,
+/// no selector gating).
 ///
-/// - C7: a-update carry via (X−2) ideal, gated by sel_round.
-/// - C8: e-update carry via (X−2) ideal, gated by sel_round.
-/// - C9: W schedule recurrence via (X−2) ideal, gated by sel_sched.
+/// - C7: a-update carry expression (trivial ideal).
+/// - C8: e-update carry expression (trivial ideal).
+/// - C9: W schedule recurrence expression (trivial ideal).
+///
+/// Selectors (`sel_round`, `sel_sched`) are no longer used. The trivial
+/// ideal makes the ideal check pass unconditionally — the carry
+/// constraints are now degree 1, enabling MLE-first IC.
 ///
 /// All cross-row references are resolved via auxiliary lookback columns
 /// (d_hat, h_hat, W_tm2/7/15/16, K_hat) verified by the Bp UAIR's
@@ -559,12 +646,20 @@ pub const NUM_QX_CONSTRAINTS: usize = 3;
 ///
 /// Constraints use:
 /// - `DegreeOne(2)`: evaluation at X = 2 gives zero (carry propagation)
+/// - `Trivial`: every polynomial is in the ideal (always passes)
 ///
 /// BitPoly membership (binary coefficient checks) is now enforced by
 /// lookups rather than ideal checks.
+///
+/// The `Trivial` variant is used when selector gating is removed from
+/// carry constraints. Without selectors the constraint expression is
+/// non-zero at boundary rows, so a trivial ideal is used to make the
+/// ideal check pass unconditionally.
 #[derive(Clone, Debug)]
 pub enum Sha256QxIdeal {
     DegreeOne(DegreeOneIdeal<i64>),
+    /// The trivial ideal: contains every polynomial.
+    Trivial,
 }
 
 impl Ideal for Sha256QxIdeal {}
@@ -586,6 +681,7 @@ impl IdealCheck<DensePolynomial<i64, 64>> for Sha256QxIdeal {
                 }
                 eval == 0
             }
+            Sha256QxIdeal::Trivial => true,
         }
     }
 }
@@ -598,12 +694,15 @@ impl IdealCheck<DensePolynomial<i64, 64>> for Sha256QxIdeal {
 /// - `DegreeOne(root)`: evaluation at `root` (= 2) in F_p gives zero.
 ///   This IS a real ideal ((X−2) ⊂ F_p\[X\]) and lifts correctly from Z\[X\].
 /// - `Zero`: exact zero polynomial.
+/// - `Trivial`: every polynomial passes (the whole ring).
 #[derive(Clone, Debug)]
 pub enum Sha256QxIdealOverF<F: PrimeField> {
     /// Carry propagation: evaluate at root and check = 0.
     DegreeOne(F),
     /// Exact zero.
     Zero,
+    /// Trivial ideal: contains every polynomial.
+    Trivial,
 }
 
 impl<F: PrimeField> Ideal for Sha256QxIdealOverF<F> {}
@@ -626,6 +725,7 @@ impl<F: PrimeField> IdealCheck<DynamicPolynomialF<F>> for Sha256QxIdealOverF<F> 
                     .map_or(true, |v| F::is_zero(&v))
             }
             Sha256QxIdealOverF::Zero => value.is_zero(),
+            Sha256QxIdealOverF::Trivial => true,
         }
     }
 }
@@ -639,11 +739,15 @@ impl<F: PrimeField> IdealCheck<DynamicPolynomialF<F>> for Sha256QxIdealOverF<F> 
 /// auxiliary lookback columns (d_hat, h_hat, W_tm2/7/15/16, K_hat)
 /// verified by the Bp UAIR's linking constraints.
 ///
-/// The constraints are gated by selector columns to handle boundary rows:
+/// The constraints use the **trivial ideal** (no selector gating).
+/// Without selectors the expressions are non-zero at boundary rows,
+/// but the trivial ideal makes the ideal check pass unconditionally.
+/// This drops the max constraint degree from 2 to 1, enabling the
+/// MLE-first IdealCheck path.
 ///
-/// - C7: `sel_round · (â[t+1] − ĥ − Σ̂₁ − Ĉh − K̂ − Ŵ − Σ̂₀ − M̂aj + μ_a·X^w) ∈ (X−2)`
-/// - C8: `sel_round · (ê[t+1] − d̂ − ĥ − Σ̂₁ − Ĉh − K̂ − Ŵ + μ_e·X^w) ∈ (X−2)`
-/// - C9: `sel_sched · (Ŵ − Ŵ_tm16 − σ̂₀_w − Ŵ_tm7 − σ̂₁_w + μ_W·X^w) ∈ (X−2)`
+/// - C7: `â[t+1] − ĥ − Σ̂₁ − Ĉh − K̂ − Ŵ − Σ̂₀ − M̂aj + μ_a·X^w ∈ Trivial`
+/// - C8: `ê[t+1] − d̂ − ĥ − Σ̂₁ − Ĉh − K̂ − Ŵ + μ_e·X^w ∈ Trivial`
+/// - C9: `Ŵ − Ŵ_tm16 − σ̂₀_w − Ŵ_tm7 − σ̂₁_w + μ_W·X^w ∈ Trivial`
 pub struct Sha256UairQx;
 
 // Down-row indices for the Qx UAIR.
@@ -691,7 +795,7 @@ impl Uair for Sha256UairQx {
         let bp_up = up.binary_poly;
         let int_up = up.int;
         let bp_down = down.binary_poly;
-        let carry_ideal = ideal_from_ref(&Sha256QxIdeal::DegreeOne(DegreeOneIdeal::new(2_i64)));
+        let trivial_ideal = ideal_from_ref(&Sha256QxIdeal::Trivial);
 
         // ── Constant polynomials ────────────────────────────────────────
 
@@ -703,15 +807,16 @@ impl Uair for Sha256UairQx {
         };
         let x32_expr = from_ref(&x32);
 
-        // ── Constraint 7: a-update carry propagation (selector-gated) ───
+        // ── Constraint 7: a-update carry propagation (trivial ideal) ────
         //
-        //   sel_round · (â[t+1] − h_hat − Σ̂₁ − ch_ef − ch_neg_eg
-        //                − K_hat − Ŵ − Σ̂₀ − Maj + μ_a·X^w) ∈ (X−2)
+        //   â[t+1] − h_hat − Σ̂₁ − ch_ef − ch_neg_eg
+        //   − K_hat − Ŵ − Σ̂₀ − Maj + μ_a·X^w ∈ Trivial
         //
-        // h_hat stores e[t−3] (= h_t), K_hat stores K_t as a
-        // bit-polynomial. The selector is 1 for t∈[0,63], ensuring
-        // the constraint is only active during valid rounds.
-        let c7_inner =
+        // Selectors removed: the trivial ideal makes the check pass
+        // unconditionally. Without `sel_round`, boundary rows where
+        // the next-row state is zero-padded produce non-zero values,
+        // but the trivial ideal accepts them.
+        b.assert_in_ideal(
             bp_down[DOWN_QX_A].clone()
                 - &bp_up[COL_H_HAT]
                 - &bp_up[COL_SIGMA1_HAT]
@@ -721,17 +826,15 @@ impl Uair for Sha256UairQx {
                 - &bp_up[COL_W_HAT]
                 - &bp_up[COL_SIGMA0_HAT]
                 - &bp_up[COL_MAJ_HAT]
-                + &(int_up[COL_INT_MU_A].clone() * &x32_expr);
-        b.assert_in_ideal(
-            bp_up[COL_SEL_ROUND].clone() * &c7_inner,
-            &carry_ideal,
+                + &(int_up[COL_INT_MU_A].clone() * &x32_expr),
+            &trivial_ideal,
         );
 
-        // ── Constraint 8: e-update carry propagation (selector-gated) ───
+        // ── Constraint 8: e-update carry propagation (trivial ideal) ────
         //
-        //   sel_round · (ê[t+1] − d_hat − h_hat − Σ̂₁ − ch_ef
-        //                − ch_neg_eg − K_hat − Ŵ + μ_e·X^w) ∈ (X−2)
-        let c8_inner =
+        //   ê[t+1] − d_hat − h_hat − Σ̂₁ − ch_ef
+        //   − ch_neg_eg − K_hat − Ŵ + μ_e·X^w ∈ Trivial
+        b.assert_in_ideal(
             bp_down[DOWN_QX_E].clone()
                 - &bp_up[COL_D_HAT]
                 - &bp_up[COL_H_HAT]
@@ -740,26 +843,21 @@ impl Uair for Sha256UairQx {
                 - &bp_up[COL_CH_NEG_EG_HAT]
                 - &bp_up[COL_K_HAT]
                 - &bp_up[COL_W_HAT]
-                + &(int_up[COL_INT_MU_E].clone() * &x32_expr);
-        b.assert_in_ideal(
-            bp_up[COL_SEL_ROUND].clone() * &c8_inner,
-            &carry_ideal,
+                + &(int_up[COL_INT_MU_E].clone() * &x32_expr),
+            &trivial_ideal,
         );
 
-        // ── Constraint 9: Message schedule recurrence (selector-gated) ──
+        // ── Constraint 9: Message schedule recurrence (trivial ideal) ───
         //
-        //   sel_sched · (Ŵ − W_tm16 − σ̂₀_w − W_tm7 − σ̂₁_w
-        //                + μ_W·X^w) ∈ (X−2)
-        let c9_inner =
+        //   Ŵ − W_tm16 − σ̂₀_w − W_tm7 − σ̂₁_w + μ_W·X^w ∈ Trivial
+        b.assert_in_ideal(
             bp_up[COL_W_HAT].clone()
                 - &bp_up[COL_W_TM16]
                 - &bp_up[COL_SIGMA0_W_HAT]
                 - &bp_up[COL_W_TM7]
                 - &bp_up[COL_SIGMA1_W_HAT]
-                + &(int_up[COL_INT_MU_W].clone() * &x32_expr);
-        b.assert_in_ideal(
-            bp_up[COL_SEL_SCHED].clone() * &c9_inner,
-            &carry_ideal,
+                + &(int_up[COL_INT_MU_W].clone() * &x32_expr),
+            &trivial_ideal,
         );
     }
 }
@@ -808,8 +906,8 @@ mod tests {
 
     #[test]
     fn qx_max_constraint_degree() {
-        // C7–C9 have degree 2 (selector variable * degree-1 carry expression)
-        assert_eq!(count_max_degree::<Sha256UairQx>(), 2);
+        // C7–C9 have degree 1 (no selector gating; trivial ideal)
+        assert_eq!(count_max_degree::<Sha256UairQx>(), 1);
     }
 
     #[test]

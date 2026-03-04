@@ -35,6 +35,7 @@ rayon = { workspace = true }
 zinc-test-uair = { workspace = true }
 
 [features]
+qx-constraints = []
 parallel = [
     "dep:rayon",
     "zinc-piop/parallel",

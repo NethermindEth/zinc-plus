@@ -46,7 +46,7 @@ use zip_plus::{
 
 use zinc_ecdsa_uair::EcdsaUairInt;
 use zinc_ecdsa_uair::witness::GenerateWitness as EcdsaGenerateWitness;
-use zinc_sha256_uair::{Sha256Uair, witness::GenerateWitness};
+use zinc_sha256_uair::{Sha256Uair, Sha256UairQx, witness::GenerateWitness};
 use zinc_piop::projections::{
     project_trace_coeffs, project_trace_to_field,
     project_scalars, project_scalars_to_field,
@@ -1862,7 +1862,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
     // verifier benchmark, both using the hybrid GKR lookup protocol with
     // cutoff c=2 and 4-chunk decomposition.
     let hybrid_4x_proof = zinc_snark::pipeline::prove_hybrid_gkr_logup_4x_folded::<
-        Sha256Uair, FoldedSha4xZt, FoldedSha4xLc, 32, 16, 8, UNCHECKED,
+        Sha256Uair, Sha256UairQx, FoldedSha4xZt, FoldedSha4xLc, 32, 16, 8, UNCHECKED,
     >(
         &folded_4x_sha_params, &sha_trace, SHA256_8X_NUM_VARS,
         &sha_lookup_specs_4c, &sha_affine_specs_4c, 2,
@@ -1874,7 +1874,7 @@ fn sha256_8x_ecdsa_stepwise(c: &mut Criterion) {
             for _ in 0..iters {
                 let t = Instant::now();
                 let _ = zinc_snark::pipeline::prove_hybrid_gkr_logup_4x_folded::<
-                    Sha256Uair, FoldedSha4xZt, FoldedSha4xLc, 32, 16, 8, UNCHECKED,
+                    Sha256Uair, Sha256UairQx, FoldedSha4xZt, FoldedSha4xLc, 32, 16, 8, UNCHECKED,
                 >(
                     &folded_4x_sha_params, &sha_trace, SHA256_8X_NUM_VARS,
                     &sha_lookup_specs_4c, &sha_affine_specs_4c, 2,

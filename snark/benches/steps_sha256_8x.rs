@@ -923,6 +923,9 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
                             LookupProofData::BatchedClassic(_) => {
                                 panic!("single-circuit prove should not produce BatchedClassic");
                             }
+                            LookupProofData::HybridGkr(_) => {
+                                panic!("single-circuit prove should not produce HybridGkr");
+                            }
                         }
                     }
                     total += t.elapsed();
@@ -1015,7 +1018,7 @@ fn sha256_8x_stepwise(c: &mut Criterion) {
                 }
                 total_lk
             }
-            Some(LookupProofData::Gkr(_)) | Some(LookupProofData::BatchedClassic(_)) => 0,
+            Some(LookupProofData::Gkr(_)) | Some(LookupProofData::BatchedClassic(_)) | Some(LookupProofData::HybridGkr(_)) => 0,
             None => 0,
         };
 

@@ -61,7 +61,8 @@ use zinc_sha256_uair::underconstrained::{
     UC_COL_CH_EF_HAT, UC_COL_CH_NEG_EG_HAT,
     UC_COL_A_TM1, UC_COL_A_TM2, UC_COL_MAJ_HAT,
 };
-use zinc_sha256_uair::CyclotomicIdeal;
+use zinc_sha256_uair::Sha256Ideal;
+use zinc_sha256_uair::Sha256UairQx;
 use zinc_sha256_uair::witness::GenerateWitness;
 use zinc_uair::Uair;
 use zinc_piop::projections::{
@@ -651,6 +652,9 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
         });
     });
 
+    // ── E2E benchmarks: only Hybrid GKR c=2 regime is active.
+    // ── Classic logup / non-hybrid GKR / original pipeline commented out.
+    /*
     // ── 14. E2E Total Prover (folded pipeline) ──────────────────────
     group.bench_function("E2E/Prover (folded)", |b| {
         b.iter_custom(|iters| {
@@ -691,17 +695,19 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
         &folded_params, &sha_trace, SHA256_8X_NUM_VARS,
         &sha_lookup_specs, &sha_affine_specs,
     );
+    */
 
     let sha_sig_pub = Sha256UairBpUnderconstrained::signature();
     let sha_public_cols: Vec<_> = sha_sig_pub.public_columns.iter()
         .map(|&i| sha_trace[i].clone()).collect();
 
+    /*
     {
         let r = zinc_snark::pipeline::verify_classic_logup_folded::<
             Sha256UairBpUnderconstrained, FoldedZt, FoldedLc, 32, 16, UNCHECKED, _, _,
         >(
             &folded_params, &folded_proof, SHA256_8X_NUM_VARS,
-            |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+            |_: &IdealOrZero<Sha256Ideal>| zinc_snark::pipeline::TrivialIdeal,
             &sha_public_cols,
         );
         let t = &r.timing;
@@ -720,7 +726,7 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
                 Sha256UairBpUnderconstrained, FoldedZt, FoldedLc, 32, 16, UNCHECKED, _, _,
             >(
                 &folded_params, &folded_proof, SHA256_8X_NUM_VARS,
-                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                |_: &IdealOrZero<Sha256Ideal>| zinc_snark::pipeline::TrivialIdeal,
                 &sha_public_cols,
             );
             black_box(r);
@@ -735,7 +741,7 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
     {
         let r = zinc_snark::pipeline::verify::<Sha256UairBpUnderconstrained, OrigZt, OrigLc, 32, UNCHECKED, _, _>(
             &orig_params, &orig_proof, SHA256_8X_NUM_VARS,
-            |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+            |_: &IdealOrZero<Sha256Ideal>| zinc_snark::pipeline::TrivialIdeal,
             &sha_public_cols,
         );
         let t = &r.timing;
@@ -752,7 +758,7 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
         b.iter(|| {
             let r = zinc_snark::pipeline::verify::<Sha256UairBpUnderconstrained, OrigZt, OrigLc, 32, UNCHECKED, _, _>(
                 &orig_params, &orig_proof, SHA256_8X_NUM_VARS,
-                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                |_: &IdealOrZero<Sha256Ideal>| zinc_snark::pipeline::TrivialIdeal,
                 &sha_public_cols,
             );
             black_box(r);
@@ -790,7 +796,7 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
             Sha256UairBpUnderconstrained, FoldedZt, FoldedLc, 32, 16, UNCHECKED, _, _,
         >(
             &folded_params, &gkr_folded_proof, SHA256_8X_NUM_VARS,
-            |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+            |_: &IdealOrZero<Sha256Ideal>| zinc_snark::pipeline::TrivialIdeal,
             &sha_public_cols,
         );
         let t = &r.timing;
@@ -809,7 +815,7 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
                 Sha256UairBpUnderconstrained, FoldedZt, FoldedLc, 32, 16, UNCHECKED, _, _,
             >(
                 &folded_params, &gkr_folded_proof, SHA256_8X_NUM_VARS,
-                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                |_: &IdealOrZero<Sha256Ideal>| zinc_snark::pipeline::TrivialIdeal,
                 &sha_public_cols,
             );
             black_box(r);
@@ -823,7 +829,7 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
             for _ in 0..iters {
                 let t = Instant::now();
                 let _ = zinc_snark::pipeline::prove_classic_logup_4x_folded::<
-                    Sha256UairBpUnderconstrained, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
+                    Sha256UairBpUnderconstrained, Sha256UairQx, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
                 >(
                     &folded_4x_params, &sha_trace, SHA256_8X_NUM_VARS,
                     &sha_lookup_specs, &sha_affine_specs,
@@ -836,7 +842,7 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
 
     // ── 21. E2E Total Verifier (4x folded) ──────────────────────────
     let folded_4x_proof = zinc_snark::pipeline::prove_classic_logup_4x_folded::<
-        Sha256UairBpUnderconstrained, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
+        Sha256UairBpUnderconstrained, Sha256UairQx, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
     >(
         &folded_4x_params, &sha_trace, SHA256_8X_NUM_VARS,
         &sha_lookup_specs, &sha_affine_specs,
@@ -844,10 +850,11 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
 
     {
         let r = zinc_snark::pipeline::verify_classic_logup_4x_folded::<
-            Sha256UairBpUnderconstrained, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _,
+            Sha256UairBpUnderconstrained, Sha256UairQx, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _, _, _,
         >(
             &folded_4x_params, &folded_4x_proof, SHA256_8X_NUM_VARS,
-            |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+            |_: &IdealOrZero<Sha256Ideal>| zinc_snark::pipeline::TrivialIdeal,
+            |_| zinc_snark::pipeline::TrivialIdeal,
             &sha_public_cols,
         );
         let t = &r.timing;
@@ -863,10 +870,11 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
     group.bench_function("E2E/Verifier (4x folded)", |b| {
         b.iter(|| {
             let r = zinc_snark::pipeline::verify_classic_logup_4x_folded::<
-                Sha256UairBpUnderconstrained, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _,
+                Sha256UairBpUnderconstrained, Sha256UairQx, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _, _, _,
             >(
                 &folded_4x_params, &folded_4x_proof, SHA256_8X_NUM_VARS,
-                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                |_: &IdealOrZero<Sha256Ideal>| zinc_snark::pipeline::TrivialIdeal,
+                |_| zinc_snark::pipeline::TrivialIdeal,
                 &sha_public_cols,
             );
             black_box(r);
@@ -875,11 +883,13 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
 
     // ── 22. E2E Total Prover (4x folded 4-chunk) ────────────────────
     // Uses chunk_width=8, width=32 → 4 chunks of 2^8 = 256 entries each.
+    */
     let sha_lookup_specs_4c = uc_sha256_lookup_specs_4chunks();
     let sha_affine_specs_4c = uc_sha256_affine_lookup_specs_4chunks();
+    /*
 
     let folded_4x_proof_4c = zinc_snark::pipeline::prove_classic_logup_4x_folded::<
-        Sha256UairBpUnderconstrained, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
+        Sha256UairBpUnderconstrained, Sha256UairQx, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
     >(
         &folded_4x_params, &sha_trace, SHA256_8X_NUM_VARS,
         &sha_lookup_specs_4c, &sha_affine_specs_4c,
@@ -891,7 +901,7 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
             for _ in 0..iters {
                 let t = Instant::now();
                 let _ = zinc_snark::pipeline::prove_classic_logup_4x_folded::<
-                    Sha256UairBpUnderconstrained, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
+                    Sha256UairBpUnderconstrained, Sha256UairQx, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
                 >(
                     &folded_4x_params, &sha_trace, SHA256_8X_NUM_VARS,
                     &sha_lookup_specs_4c, &sha_affine_specs_4c,
@@ -905,10 +915,11 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
     // ── 23. E2E Total Verifier (4x folded 4-chunk) ──────────────────
     {
         let r = zinc_snark::pipeline::verify_classic_logup_4x_folded::<
-            Sha256UairBpUnderconstrained, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _,
+            Sha256UairBpUnderconstrained, Sha256UairQx, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _, _, _,
         >(
             &folded_4x_params, &folded_4x_proof_4c, SHA256_8X_NUM_VARS,
-            |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+            |_: &IdealOrZero<Sha256Ideal>| zinc_snark::pipeline::TrivialIdeal,
+            |_| zinc_snark::pipeline::TrivialIdeal,
             &sha_public_cols,
         );
         let t = &r.timing;
@@ -924,19 +935,21 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
     group.bench_function("E2E/Verifier (4x folded 4-chunk)", |b| {
         b.iter(|| {
             let r = zinc_snark::pipeline::verify_classic_logup_4x_folded::<
-                Sha256UairBpUnderconstrained, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _,
+                Sha256UairBpUnderconstrained, Sha256UairQx, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _, _, _,
             >(
                 &folded_4x_params, &folded_4x_proof_4c, SHA256_8X_NUM_VARS,
-                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                |_: &IdealOrZero<Sha256Ideal>| zinc_snark::pipeline::TrivialIdeal,
+                |_| zinc_snark::pipeline::TrivialIdeal,
                 &sha_public_cols,
             );
             black_box(r);
         });
     });
+    */ // end of commented-out classic logup / non-hybrid GKR benchmarks
 
     // ── 26. E2E Prover/Verifier (4x folded, 4-chunk, Hybrid GKR c=2) ─
     let hybrid_4x_proof = zinc_snark::pipeline::prove_hybrid_gkr_logup_4x_folded::<
-        Sha256UairBpUnderconstrained, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
+        Sha256UairBpUnderconstrained, Sha256UairQx, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
     >(
         &folded_4x_params, &sha_trace, SHA256_8X_NUM_VARS,
         &sha_lookup_specs_4c, &sha_affine_specs_4c, 2,
@@ -948,7 +961,7 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
             for _ in 0..iters {
                 let t = Instant::now();
                 let _ = zinc_snark::pipeline::prove_hybrid_gkr_logup_4x_folded::<
-                    Sha256UairBpUnderconstrained, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
+                    Sha256UairBpUnderconstrained, Sha256UairQx, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
                 >(
                     &folded_4x_params, &sha_trace, SHA256_8X_NUM_VARS,
                     &sha_lookup_specs_4c, &sha_affine_specs_4c, 2,
@@ -961,10 +974,11 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
 
     {
         let r = zinc_snark::pipeline::verify_classic_logup_4x_folded::<
-            Sha256UairBpUnderconstrained, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _,
+            Sha256UairBpUnderconstrained, Sha256UairQx, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _, _, _,
         >(
             &folded_4x_params, &hybrid_4x_proof, SHA256_8X_NUM_VARS,
-            |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+            |_: &IdealOrZero<Sha256Ideal>| zinc_snark::pipeline::TrivialIdeal,
+            |_| zinc_snark::pipeline::TrivialIdeal,
             &sha_public_cols,
         );
         let t = &r.timing;
@@ -980,16 +994,21 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
     group.bench_function("E2E/Verifier (4x Hybrid GKR c=2 4-chunk)", |b| {
         b.iter(|| {
             let r = zinc_snark::pipeline::verify_classic_logup_4x_folded::<
-                Sha256UairBpUnderconstrained, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _,
+                Sha256UairBpUnderconstrained, Sha256UairQx, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _, _, _,
             >(
                 &folded_4x_params, &hybrid_4x_proof, SHA256_8X_NUM_VARS,
-                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                |_: &IdealOrZero<Sha256Ideal>| zinc_snark::pipeline::TrivialIdeal,
+                |_| zinc_snark::pipeline::TrivialIdeal,
                 &sha_public_cols,
             );
             black_box(r);
         });
     });
 
+    // ── Timing breakdown + proof-size sections commented out:
+    // ── they reference folded_proof / gkr_folded_proof / orig_proof
+    // ── which are no longer generated.
+    /*
     // ── Timing breakdown summary ────────────────────────────────────
     eprintln!("\n=== 8xSHA256 UC Folded Pipeline Timing (Classic Lookup) ===");
     eprintln!("  IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, prove={:?}), total={:?}",
@@ -1544,6 +1563,18 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
         eprintln!("  Best compr savings vs original:   {:>+6} B ({:+.1} KB, {:.2}x)",
             savings_compr, savings_compr as f64 / 1024.0, orig_compressed_len as f64 / best_compr as f64);
     }
+    */ // end of commented-out timing / proof-size sections
+
+    // ── Hybrid GKR timing ───────────────────────────────────────────
+    eprintln!("\n=== 8xSHA256 UC 4x Hybrid GKR c=2 Pipeline Timing ===");
+    eprintln!("  IC={:?}, CPR={:?}, Lookup={:?}, PCS(commit={:?}, prove={:?}), total={:?}",
+        hybrid_4x_proof.timing.ideal_check,
+        hybrid_4x_proof.timing.combined_poly_resolver,
+        hybrid_4x_proof.timing.lookup,
+        hybrid_4x_proof.timing.pcs_commit,
+        hybrid_4x_proof.timing.pcs_prove,
+        hybrid_4x_proof.timing.total,
+    );
 
     let mem_snapshot = mem_tracker.stop();
     eprintln!("\n=== Peak Memory ===");

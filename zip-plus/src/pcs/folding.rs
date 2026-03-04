@@ -525,8 +525,8 @@ mod tests {
         // First 4 entries are low halves (bits 0..15)
         // Last 4 entries are high halves (bits 16..31)
         // For 0x0001_0002: lo = 0x0002, hi = 0x0001
-        let lo_0: &[Boolean] = &split.evaluations[0];
-        let hi_0: &[Boolean] = &split.evaluations[4];
+        let lo_0: Vec<Boolean> = split.evaluations[0].iter().collect();
+        let hi_0: Vec<Boolean> = split.evaluations[4].iter().collect();
 
         // bit 1 of lo should be set (0x0002 = ...0010)
         assert!(lo_0[1].into_inner());
