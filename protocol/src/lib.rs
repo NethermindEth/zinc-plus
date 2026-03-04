@@ -14,47 +14,29 @@
 //! claims about the trace column MLEs. In the full protocol,
 //! these would be resolved by the Zip+ PCS.
 
-use crypto_primitives::{
-    ConstIntRing, ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig, PrimeField,
-};
-use num_traits::Zero;
-use std::io::Cursor;
+pub mod prover;
+pub mod verifier;
+
+use crypto_primitives::{ConstIntRing, ConstIntSemiring, PrimeField};
+use std::marker::PhantomData;
 use thiserror::Error;
 use zinc_piop::{
-    combined_poly_resolver::{self, CombinedPolyResolver, CombinedPolyResolverError},
-    ideal_check::{self, IdealCheckError, IdealCheckProtocol},
-    projections::{
-        project_scalars, project_scalars_to_field, project_trace_coeffs, project_trace_to_field,
-    },
+    combined_poly_resolver, combined_poly_resolver::CombinedPolyResolverError, ideal_check,
+    ideal_check::IdealCheckError,
 };
 use zinc_poly::{
     ConstCoeffBitWidth,
-    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::{
-        binary::BinaryPoly, dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF,
-    },
+    mle::DenseMultilinearExtension,
+    univariate::{binary::BinaryPoly, dense::DensePolynomial},
 };
 use zinc_primality::PrimalityTest;
-use zinc_transcript::{
-    KeccakTranscript,
-    traits::{ConstTranscribable, Transcribable, Transcript},
-};
-use zinc_uair::{
-    Uair,
-    constraint_counter::count_constraints,
-    degree_counter::count_max_degree,
-    ideal::{Ideal, IdealCheck},
-    ideal_collector::IdealOrZero,
-};
-use zinc_utils::{
-    add, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
-    mul_by_scalar::MulByScalar, named::Named, projectable_to_field::ProjectableToField,
-};
+use zinc_transcript::traits::ConstTranscribable;
+use zinc_uair::{Uair, ideal::Ideal};
+use zinc_utils::named::Named;
 use zip_plus::{
     ZipError,
     code::LinearCode,
-    pcs::structs::{ZipPlus, ZipPlusCommitment, ZipPlusHint, ZipPlusParams, ZipTypes},
-    pcs_transcript::{PcsProverTranscript, PcsVerifierTranscript},
+    pcs::structs::{ZipPlusCommitment, ZipTypes},
 };
 
 //
@@ -131,446 +113,13 @@ pub trait WitnessZincTypes<const DEGREE_PLUS_ONE: usize> {
     type IntLc: LinearCode<Self::IntZt>;
 }
 
-//
-// Prover
-//
-
-/// Zinc+ PIOP Prover (Algorithm 1 from the paper, Steps 1–5).
-///
-/// # Protocol flow (paper Section 2.2 "Combining the three steps"):
-///
-/// 0. **Commit**: commit each witness column via Zip+ PCS, absorb roots.
-/// 1. **Prime projection** (φ_q: Q\[X\] → F_q\[X\]): sample random prime q from
-///    transcript, project trace and scalars.
-/// 2. **Ideal check**: sample r ∈ F_q^μ, prover sends MLE evaluations, verifier
-///    checks ideal membership.
-/// 3. **Evaluation projection** (ψ_a: F_q\[X\] → F_q): sample a ∈ F_q, evaluate
-///    polynomials at X = a.
-/// 4. **Finite-field PIOP**: sumcheck over F_q to prove the projected claim.
-/// 5. **PCS open**: Zip+ test + evaluate for each committed column, proving
-///    witness MLE evaluations at the sumcheck challenge point.
-///
-/// Returns the proof and auxiliary data (for subclaim resolution without PCS).
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub fn prove<Zt, U, F, ProjectScalar, const D: usize, const CHECK_FOR_OVERFLOW: bool>(
-    (pp_bin, pp_arb, pp_int): &(
-        ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
-        ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
-        ZipPlusParams<Zt::IntZt, Zt::IntLc>,
-    ),
-    trace_bin_poly: &[DenseMultilinearExtension<<Zt::BinaryZt as ZipTypes>::Eval>],
-    trace_arb_poly: &[DenseMultilinearExtension<<Zt::ArbitraryZt as ZipTypes>::Eval>],
-    trace_int: &[DenseMultilinearExtension<<Zt::IntZt as ZipTypes>::Eval>],
-    num_vars: usize,
-    project_scalar: ProjectScalar,
-) -> Result<(Proof<F>, ProverAux<F>), ProtocolError<F, U::Ideal>>
+/// Main struct for the Zinc+ PIOP.
+#[derive(Copy, Clone, Default, Debug)]
+pub struct ZincPlusPiop<Wzt, U, F, const DEGREE_PLUS_ONE: usize>(PhantomData<(Wzt, U, F)>)
 where
-    Zt: WitnessZincTypes<D>,
-    Zt::Int: ProjectableToField<F>,
-    <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
-    F: InnerTransparentField
-        + FromPrimitiveWithConfig
-        + FromWithConfig<Zt::Int>
-        + for<'a> FromWithConfig<&'a Zt::Chal>
-        + for<'a> FromWithConfig<&'a Zt::Pt>
-        + for<'a> MulByScalar<&'a F>
-        + FromRef<F>
-        + Send
-        + Sync
-        + 'static,
-    F::Inner:
-        ConstIntSemiring + ConstTranscribable + FromRef<Zt::Fmod> + Send + Sync + Zero + Default,
-    F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
-    U: Uair + 'static,
-    ProjectScalar: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
-{
-    // === Step 0: Commit to witness traces ===
-
-    // Commit each witness column via Zip+ PCS.
-    fn pcs_commit_witness<Zt, Lc>(
-        pp: &ZipPlusParams<Zt, Lc>,
-        witness: &[DenseMultilinearExtension<Zt::Eval>],
-    ) -> Result<(Vec<ZipPlusHint<Zt::Cw>>, Vec<ZipPlusCommitment>), ZipError>
-    where
-        Zt: ZipTypes,
-        Lc: LinearCode<Zt>,
-    {
-        let mut hints = Vec::with_capacity(witness.len());
-        let mut commitments = Vec::with_capacity(witness.len());
-        for col in witness {
-            let (hint, comm) = ZipPlus::<Zt, Lc>::commit(pp, col)?;
-            hints.push(hint);
-            commitments.push(comm);
-        }
-        Ok((hints, commitments))
-    }
-
-    let (hints_bin, commitments_bin) = pcs_commit_witness(pp_bin, trace_bin_poly)?;
-    let (hints_arb, commitments_arb) = pcs_commit_witness(pp_arb, trace_arb_poly)?;
-    let (hints_int, commitments_int) = pcs_commit_witness(pp_int, trace_int)?;
-
-    // Create the main transcript
-    let mut pcs_transcript = PcsProverTranscript::new_from_commitments(
-        commitments_bin
-            .iter()
-            .chain(commitments_arb.iter())
-            .chain(commitments_int.iter()),
-    )?;
-    // TODO: Absorb public inputs as well once they are part of the protocol,
-    //       or this will open up a soundness vulnerability!
-
-    // === Step 1: Prime projection (φ_q: Q[X] → F_q[X]) ===
-
-    // Sample a random prime modulus from the Fiat-Shamir transcript.
-    let field_cfg = pcs_transcript
-        .fs_transcript
-        .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
-
-    // Project the witness trace from Q[X] to F_q[X].
-    let projected_trace = project_trace_coeffs::<F, Zt::Int, Zt::Int, D>(
-        trace_bin_poly,
-        trace_arb_poly,
-        trace_int,
-        &field_cfg,
-    );
-
-    // Project UAIR scalars from Q[X] to F_q[X].
-    let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
-
-    let num_constraints = count_constraints::<U>();
-
-    // === Step 2: Randomized ideal check ===
-    let (ic_proof, ic_prover_state) = IdealCheckProtocol::prove_as_subprotocol::<U>(
-        &mut pcs_transcript.fs_transcript,
-        &projected_trace,
-        &projected_scalars_fx,
-        num_constraints,
-        num_vars,
-        &field_cfg,
-    )?;
-
-    // === Step 3: Evaluation projection (ψ_a: F_q[X] → F_q) ===
-    // Sample the projecting element as Zt::Chal (matching the Zip+ PCS convention),
-    // then convert to F for PIOP use.
-    let projecting_element: Zt::Chal = pcs_transcript.fs_transcript.get_challenge();
-    let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
-
-    // Project trace from F_q[X] to F_q by evaluating each polynomial at X = a.
-    let projected_trace_f =
-        project_trace_to_field::<F, D>(&[], &projected_trace, &[], &projecting_element_f);
-
-    // Project scalars from F_q[X] to F_q.
-    let projected_scalars_f = project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
-        .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
-
-    let max_degree = count_max_degree::<U>();
-
-    // === Step 4: Finite-field PIOP (sumcheck over F_q) ===
-    let (cpr_proof, cpr_prover_state) = CombinedPolyResolver::prove_as_subprotocol::<U>(
-        &mut pcs_transcript.fs_transcript,
-        projected_trace_f.clone(),
-        &ic_prover_state.evaluation_point,
-        &projected_scalars_f,
-        num_constraints,
-        num_vars,
-        max_degree,
-        &field_cfg,
-    )?;
-
-    // === Step 5: PCS open (prove witness MLE evaluations) ===
-    // After the sumcheck, the prover must prove that the committed
-    // witness MLEs evaluate to the claimed values (up_evals / down_evals)
-    // at the sumcheck challenge point r'.
-    // This corresponds to Step 12 "Oracle evaluations at sumcheck point"
-    // in the AirZinc protocol (rolled_out_argument.tex).
-    //
-    // TODO: Once we add public inputs, the verifier will compute public
-    //       input MLE evaluations at the sumcheck point directly from
-    //       public data. The PCS only covers witness columns.
-    let eval_point = &cpr_prover_state.evaluation_point;
-
-    fn pcs_prove_witness_evaluations<Zt, Lc, F, I, const CHECK_FOR_OVERFLOW: bool>(
-        pcs_transcript: &mut PcsProverTranscript,
-        pp: &ZipPlusParams<Zt, Lc>,
-        witness: &[DenseMultilinearExtension<Zt::Eval>],
-        hints: &[ZipPlusHint<Zt::Cw>],
-        commitments: &[ZipPlusCommitment],
-        eval_point: &[F],
-        field_cfg: &F::Config,
-        projecting_element: &Zt::Chal,
-    ) -> Result<(), ProtocolError<F, I>>
-    where
-        Zt: ZipTypes,
-        Zt::Eval: ProjectableToField<F>,
-        Lc: LinearCode<Zt>,
-        F: PrimeField
-            + for<'a> FromWithConfig<&'a Zt::Chal>
-            + for<'a> MulByScalar<&'a F>
-            + FromRef<F>,
-        F::Inner: Transcribable,
-        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
-        I: Ideal,
-    {
-        for ((hint, col), _comm) in hints.iter().zip(witness.iter()).zip(commitments.iter()) {
-            // Proximity test
-            ZipPlus::<Zt, Lc>::test::<CHECK_FOR_OVERFLOW>(pcs_transcript, pp, col, hint)?;
-
-            // Evaluation proof
-            let _eval_f: F = ZipPlus::<Zt, Lc>::evaluate_f::<F, CHECK_FOR_OVERFLOW>(
-                pcs_transcript,
-                pp,
-                col,
-                eval_point,
-                field_cfg,
-                projecting_element,
-            )?;
-        }
-        Ok(())
-    }
-
-    pcs_prove_witness_evaluations::<Zt::BinaryZt, Zt::BinaryLc, _, _, CHECK_FOR_OVERFLOW>(
-        &mut pcs_transcript,
-        pp_bin,
-        trace_bin_poly,
-        &hints_bin,
-        &commitments_bin,
-        eval_point,
-        &field_cfg,
-        &projecting_element,
-    )?;
-    pcs_prove_witness_evaluations::<Zt::ArbitraryZt, Zt::ArbitraryLc, _, _, CHECK_FOR_OVERFLOW>(
-        &mut pcs_transcript,
-        pp_arb,
-        trace_arb_poly,
-        &hints_arb,
-        &commitments_arb,
-        eval_point,
-        &field_cfg,
-        &projecting_element,
-    )?;
-    pcs_prove_witness_evaluations::<Zt::IntZt, Zt::IntLc, _, _, CHECK_FOR_OVERFLOW>(
-        &mut pcs_transcript,
-        pp_int,
-        trace_int,
-        &hints_int,
-        &commitments_int,
-        eval_point,
-        &field_cfg,
-        &projecting_element,
-    )?;
-
-    let zip_proof = pcs_transcript.stream.into_inner();
-    let commitments = commitments_bin
-        .into_iter()
-        .chain(commitments_arb)
-        .chain(commitments_int)
-        .collect();
-
-    Ok((
-        Proof {
-            num_witness_cols: (trace_bin_poly.len(), trace_arb_poly.len(), trace_int.len()),
-            zip_commitments: commitments,
-            ideal_check: ic_proof,
-            resolver: cpr_proof,
-            zip_proof,
-        },
-        ProverAux {
-            field_cfg,
-            projected_trace_f,
-        },
-    ))
-}
-
-//
-// Verifier
-//
-
-/// Zinc+ PIOP Verifier (Algorithm 1, verification side, Steps 0–5).
-///
-/// Verifies all steps and returns a [`Subclaim`]. The `up_evals` are
-/// already verified by the Zip+ PCS (Step 5); the `down_evals` (shifted
-/// MLE claims) still need to be checked via [`resolve_subclaim`].
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub fn verify<
-    Zt,
-    U,
-    F,
-    IdealOverF,
-    ProjectScalar,
-    ProjectIdeal,
-    const D: usize,
-    const CHECK_FOR_OVERFLOW: bool,
->(
-    (vp_bin, vp_arb, vp_int): &(
-        ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
-        ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
-        ZipPlusParams<Zt::IntZt, Zt::IntLc>,
-    ),
-    proof: Proof<F>,
-    num_vars: usize,
-    project_scalar: ProjectScalar,
-    project_ideal: ProjectIdeal,
-) -> Result<Subclaim<F>, ProtocolError<F, IdealOverF>>
-where
-    Zt: WitnessZincTypes<D>,
-    F: InnerTransparentField
-        + FromPrimitiveWithConfig
-        + for<'a> FromWithConfig<&'a Zt::Chal>
-        + for<'a> MulByScalar<&'a F>
-        + FromRef<F>
-        + Send
-        + Sync
-        + 'static,
-    <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
-    <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
-    <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
-    F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
-    F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
-    U: Uair + 'static,
-    IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
-    ProjectScalar: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
-    ProjectIdeal: Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
-{
-    // === Step 0: Reconstruct transcript from commitments ===
-    // The verifier creates a PcsVerifierTranscript from the PCS proof bytes.
-    let mut pcs_transcript = PcsVerifierTranscript {
-        fs_transcript: KeccakTranscript::default(),
-        stream: Cursor::new(proof.zip_proof),
-    };
-    for comm in &proof.zip_commitments {
-        pcs_transcript.fs_transcript.absorb_slice(&comm.root);
-    }
-
-    // === Step 1: Prime projection ===
-    let field_cfg = pcs_transcript
-        .fs_transcript
-        .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
-
-    let num_constraints = count_constraints::<U>();
-
-    // === Step 2: Verify ideal check ===
-    let ic_subclaim = IdealCheckProtocol::verify_as_subprotocol::<U, IdealOverF, _>(
-        &mut pcs_transcript.fs_transcript,
-        proof.ideal_check,
-        num_constraints,
-        num_vars,
-        |ideal| project_ideal(ideal, &field_cfg),
-        &field_cfg,
-    )?;
-
-    // === Step 3: Evaluation projection ===
-    // Sample projecting element as Zt::Chal (matching the prover).
-    let projecting_element: Zt::Chal = pcs_transcript.fs_transcript.get_challenge();
-    let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
-
-    // Verifier independently computes projected scalars (public data).
-    let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
-    let projected_scalars_f = project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
-        .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
-
-    let max_degree = count_max_degree::<U>();
-
-    // === Step 4: Verify finite-field PIOP ===
-    let cpr_subclaim = CombinedPolyResolver::verify_as_subprotocol::<U>(
-        &mut pcs_transcript.fs_transcript,
-        proof.resolver,
-        num_constraints,
-        num_vars,
-        max_degree,
-        &projecting_element_f,
-        &projected_scalars_f,
-        ic_subclaim,
-        &field_cfg,
-    )?;
-
-    // === Step 5: PCS verify (check witness MLE evaluation claims) ====
-    // After the sumcheck, the verifier uses the Zip+ PCS to confirm
-    // that the committed witness MLEs actually evaluate to the claimed
-    // up_evals at the sumcheck challenge point.
-    //
-    // TODO: Once we add public inputs, compute public input MLE evaluations
-    //       at cpr_subclaim.evaluation_point directly from public data here,
-    //       then include them in the constraint recomputation check.
-
-    for (i, comm) in proof.zip_commitments.iter().enumerate() {
-        macro_rules! zip_verify {
-            ($zt:ident, $lc:ident, $vp:ident) => {
-                ZipPlus::<Zt::$zt, Zt::$lc>::verify::<F, CHECK_FOR_OVERFLOW>(
-                    &mut pcs_transcript,
-                    $vp,
-                    comm,
-                    &field_cfg,
-                    &projecting_element,
-                    &cpr_subclaim.evaluation_point,
-                    &cpr_subclaim.up_evals[i],
-                )
-                .map_err(|e| ProtocolError::PcsVerification(i, e))?;
-            };
-        }
-
-        if i < proof.num_witness_cols.0 {
-            zip_verify!(BinaryZt, BinaryLc, vp_bin);
-        } else if i < add!(proof.num_witness_cols.0, proof.num_witness_cols.1) {
-            zip_verify!(ArbitraryZt, ArbitraryLc, vp_arb);
-        } else {
-            zip_verify!(IntZt, IntLc, vp_int);
-        }
-    }
-
-    Ok(Subclaim {
-        evaluation_point: cpr_subclaim.evaluation_point,
-        up_evals: cpr_subclaim.up_evals,
-        down_evals: cpr_subclaim.down_evals,
-    })
-}
-
-/// Subclaim resolution (shifted-MLE evaluation check)
-///
-/// Verify the "down" (next-row) MLE evaluation claims from the subclaim.
-///
-/// The "up" evaluations are already verified by the Zip+ PCS inside
-/// [`verify`] (Step 5). The "down" evaluations correspond to the shifted
-/// trace MLE (rows 1..n, zero-padded), which the PCS does not yet open.
-/// Until the PCS is extended to also open shifted MLEs, this function
-/// checks them directly against the prover's auxiliary projected trace.
-pub fn resolve_subclaim<F, I>(
-    subclaim: &Subclaim<F>,
-    projected_trace_f: &[DenseMultilinearExtension<F::Inner>],
-    field_cfg: &F::Config,
-) -> Result<(), ProtocolError<F, I>>
-where
-    F: InnerTransparentField,
-    F::Inner: ConstTranscribable + Send + Sync + Zero + Default,
-    DenseMultilinearExtension<F::Inner>: MultilinearExtensionWithConfig<F>,
-    I: Ideal,
-{
-    let num_cols = projected_trace_f.len();
-
-    // Check "down" evaluations (shifted/next-row columns).
-    // The shifted trace drops the first row and zero-pads, matching
-    // the CombinedPolyResolver's convention.
-    for (i, (mle, expected)) in projected_trace_f
-        .iter()
-        .zip(subclaim.down_evals.iter())
-        .enumerate()
-    {
-        let shifted: DenseMultilinearExtension<F::Inner> = mle.iter().skip(1).cloned().collect();
-
-        let actual = shifted
-            .evaluate_with_config(&subclaim.evaluation_point, field_cfg)
-            .map_err(ProtocolError::MleEvaluation)?;
-
-        if actual != *expected {
-            return Err(ProtocolError::SubclaimMismatch {
-                column: add!(num_cols, i),
-                expected: expected.clone(),
-                actual,
-            });
-        }
-    }
-
-    Ok(())
-}
+    Wzt: WitnessZincTypes<DEGREE_PLUS_ONE>,
+    U: Uair,
+    F: PrimeField;
 
 //
 // Error type and conversion
@@ -606,26 +155,31 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
 mod tests {
     use super::*;
     use crypto_bigint::U64;
-
     use crypto_primitives::{
-        crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
+        FromWithConfig, crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
+        crypto_bigint_uint::Uint,
     };
     use rand::rng;
     use zinc_poly::univariate::{
-        binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct, ideal::DegreeOneIdeal,
+        binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct,
+        dynamic::over_field::DynamicPolynomialF, ideal::DegreeOneIdeal,
     };
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BinaryDecompositionUair, GenerateMultiTypeWitness,
         GenerateSingleTypeWitness, TestAirNoMultiplication, TestUairSimpleMultiplication,
     };
+    use zinc_uair::ideal_collector::IdealOrZero;
     use zinc_utils::{
         CHECKED,
         inner_product::{MBSInnerProduct, ScalarProduct},
     };
-    use zip_plus::code::{
-        iprs::{IprsCode, PnttConfigF2_16_1},
-        raa::{RaaCode, RaaConfig},
+    use zip_plus::{
+        code::{
+            iprs::{IprsCode, PnttConfigF2_16_1},
+            raa::{RaaCode, RaaConfig},
+        },
+        pcs::structs::{ZipPlus, ZipPlusParams},
     };
 
     const INT_LIMBS: usize = U64::LIMBS;
@@ -639,7 +193,6 @@ mod tests {
     const IPRS_DEPTH: usize = 1;
 
     type F = MontyField<FIELD_LIMBS>;
-    type Witness = DensePolynomial<i64, DEGREE_PLUS_ONE>;
 
     pub struct BinPolyZipTypes {}
     impl ZipTypes for BinPolyZipTypes {
@@ -774,10 +327,13 @@ mod tests {
 
     /// Helper: project a DensePolynomial scalar to DynamicPolynomialF
     /// by projecting each coefficient via φ_q.
-    fn project_scalar_fn(
-        scalar: &Witness,
+    fn project_scalar_fn<R>(
+        scalar: &DensePolynomial<R, 32>,
         field_cfg: &<F as PrimeField>::Config,
-    ) -> DynamicPolynomialF<F> {
+    ) -> DynamicPolynomialF<F>
+    where
+        F: for<'a> FromWithConfig<&'a R>,
+    {
         scalar
             .iter()
             .map(|coeff| F::from_with_cfg(coeff, field_cfg))
@@ -822,33 +378,28 @@ mod tests {
 
         type TestUair = TestAirNoMultiplication<i64>;
 
+        type Piop = ZincPlusPiop<TestWitnessZincTypesIprs, TestUair, F, DEGREE_PLUS_ONE>;
+
         // Generate a valid witness satisfying the UAIR constraints.
         let trace = TestUair::generate_witness(num_vars, &mut rng);
 
         // Prover
-        let (proof, prover_aux) = prove::<
-            TestWitnessZincTypesIprs,
-            TestUair,
-            F,
-            _,
-            DEGREE_PLUS_ONE,
-            CHECKED,
-        >(&pp, &[], &trace, &[], num_vars, project_scalar_fn)
-        .expect("Prover failed");
+        let (proof, prover_aux) =
+            Piop::prove::<CHECKED>(&pp, &[], &trace, &[], num_vars, project_scalar_fn)
+                .expect("Prover failed");
 
         // Verifier
-        let subclaim =
-            verify::<TestWitnessZincTypesIprs, TestUair, F, _, _, _, DEGREE_PLUS_ONE, CHECKED>(
-                &pp,
-                proof,
-                num_vars,
-                project_scalar_fn,
-                |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
-            )
-            .expect("Verifier failed");
+        let subclaim = Piop::verify::<_, CHECKED>(
+            &pp,
+            proof,
+            num_vars,
+            project_scalar_fn,
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
+        )
+        .expect("Verifier failed");
 
         // Subclaim resolution (in lieu of PCS)
-        resolve_subclaim::<_, <TestUair as Uair>::Ideal>(
+        Piop::resolve_subclaim(
             &subclaim,
             &prover_aux.projected_trace_f,
             &prover_aux.field_cfg,
@@ -875,32 +426,27 @@ mod tests {
 
         type TestUair = TestUairSimpleMultiplication<i64>;
 
+        type Piop = ZincPlusPiop<TestWitnessZincTypesRaa, TestUair, F, DEGREE_PLUS_ONE>;
+
         let trace = TestUair::generate_witness(num_vars, &mut rng);
 
         // Prover
-        let (proof, prover_aux) = prove::<
-            TestWitnessZincTypesRaa,
-            TestUair,
-            F,
-            _,
-            DEGREE_PLUS_ONE,
-            CHECKED,
-        >(&pp, &[], &trace, &[], num_vars, project_scalar_fn)
-        .expect("Prover failed");
+        let (proof, prover_aux) =
+            Piop::prove::<CHECKED>(&pp, &[], &trace, &[], num_vars, project_scalar_fn)
+                .expect("Prover failed");
 
         // Verifier
-        let subclaim =
-            verify::<TestWitnessZincTypesRaa, TestUair, F, _, _, _, DEGREE_PLUS_ONE, CHECKED>(
-                &pp,
-                proof,
-                num_vars,
-                project_scalar_fn,
-                |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
-            )
-            .expect("Verifier failed");
+        let subclaim = Piop::verify::<_, CHECKED>(
+            &pp,
+            proof,
+            num_vars,
+            project_scalar_fn,
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+        )
+        .expect("Verifier failed");
 
         // Subclaim resolution (in lieu of PCS)
-        resolve_subclaim::<_, <TestUair as Uair>::Ideal>(
+        Piop::resolve_subclaim(
             &subclaim,
             &prover_aux.projected_trace_f,
             &prover_aux.field_cfg,
@@ -920,33 +466,33 @@ mod tests {
 
         type TestUair = BinaryDecompositionUair<i64>;
 
+        type Piop = ZincPlusPiop<TestWitnessZincTypesIprs, TestUair, F, DEGREE_PLUS_ONE>;
+
         let (binary_trace, arb_trace, int_trace) = TestUair::generate_witness(num_vars, &mut rng);
 
         // Prover
-        let (proof, prover_aux) =
-            prove::<TestWitnessZincTypesIprs, TestUair, F, _, DEGREE_PLUS_ONE, CHECKED>(
-                &pp,
-                &binary_trace,
-                &arb_trace,
-                &int_trace,
-                num_vars,
-                project_scalar_fn,
-            )
-            .expect("Prover failed");
+        let (proof, prover_aux) = Piop::prove::<CHECKED>(
+            &pp,
+            &binary_trace,
+            &arb_trace,
+            &int_trace,
+            num_vars,
+            project_scalar_fn,
+        )
+        .expect("Prover failed");
 
         // Verifier
-        let subclaim =
-            verify::<TestWitnessZincTypesIprs, TestUair, F, _, _, _, DEGREE_PLUS_ONE, CHECKED>(
-                &pp,
-                proof,
-                num_vars,
-                project_scalar_fn,
-                |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
-            )
-            .expect("Verifier failed");
+        let subclaim = Piop::verify::<_, CHECKED>(
+            &pp,
+            proof,
+            num_vars,
+            project_scalar_fn,
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
+        )
+        .expect("Verifier failed");
 
         // Subclaim resolution (in lieu of PCS)
-        resolve_subclaim::<_, <TestUair as Uair>::Ideal>(
+        Piop::resolve_subclaim(
             &subclaim,
             &prover_aux.projected_trace_f,
             &prover_aux.field_cfg,
@@ -969,33 +515,33 @@ mod tests {
 
         type TestUair = BigLinearUair<i64>;
 
+        type Piop = ZincPlusPiop<TestWitnessZincTypesIprs, TestUair, F, DEGREE_PLUS_ONE>;
+
         let (binary_trace, arb_trace, int_trace) = TestUair::generate_witness(num_vars, &mut rng);
 
         // Prover
-        let (proof, prover_aux) =
-            prove::<TestWitnessZincTypesIprs, TestUair, F, _, DEGREE_PLUS_ONE, CHECKED>(
-                &pp,
-                &binary_trace,
-                &arb_trace,
-                &int_trace,
-                num_vars,
-                project_scalar_fn,
-            )
-            .expect("Prover failed");
+        let (proof, prover_aux) = Piop::prove::<CHECKED>(
+            &pp,
+            &binary_trace,
+            &arb_trace,
+            &int_trace,
+            num_vars,
+            project_scalar_fn,
+        )
+        .expect("Prover failed");
 
         // Verifier
-        let subclaim =
-            verify::<TestWitnessZincTypesIprs, TestUair, F, _, _, _, DEGREE_PLUS_ONE, CHECKED>(
-                &pp,
-                proof,
-                num_vars,
-                project_scalar_fn,
-                |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
-            )
-            .expect("Verifier failed");
+        let subclaim = Piop::verify::<_, CHECKED>(
+            &pp,
+            proof,
+            num_vars,
+            project_scalar_fn,
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
+        )
+        .expect("Verifier failed");
 
         // Subclaim resolution (in lieu of PCS)
-        resolve_subclaim::<_, <TestUair as Uair>::Ideal>(
+        Piop::resolve_subclaim(
             &subclaim,
             &prover_aux.projected_trace_f,
             &prover_aux.field_cfg,

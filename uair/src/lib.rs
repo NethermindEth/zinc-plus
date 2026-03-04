@@ -110,6 +110,8 @@ pub trait Uair {
     /// The type of scalars of the UAIR.
     /// For now, we assume they are of
     /// the type "arbitrary polynomials".
+    // Note: This is usually Z_32[X] (i.e. DensePolynomial<Ring, 32>), but according
+    // to @agareta, this in not always the case.
     type Scalar: Semiring;
 
     /// Signature of the UAIR.
