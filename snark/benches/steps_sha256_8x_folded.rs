@@ -152,29 +152,6 @@ fn sha256_affine_lookup_specs_4chunks() -> Vec<AffineLookupSpec> {
     ]
 }
 
-// ─── Benchmark ──────────────────────────────────────────────────────────────
-
-/// Measures each main step of the **folded** E2E proving stack individually
-/// for 8×SHA-256 compressions (**no** ECDSA).
-///
-/// Prover steps benchmarked:
-///   1.  WitnessGen — generate the 30-column BinaryPoly<32> trace (512 rows)
-///   2.  Folding/SplitColumns — split BinaryPoly<32> to BinaryPoly<16> halves
-///   3.  PCS/Commit (folded) — Zip+ commit over BinaryPoly<16> split columns
-///   4.  PCS/Commit (original) — Zip+ commit over BinaryPoly<32> (comparison)
-///   5.  PIOP/FieldSetup — transcript init + random field config
-///   6.  PIOP/Project Ideal Check — project_scalars for Ideal Check
-///   7.  PIOP/IdealCheck — Ideal Check prover (MLE-first, on original trace)
-///   8.  PIOP/Project Main field sumcheck — project_scalars_to_field + project_trace_to_field
-///   9.  PIOP/Main field sumcheck — Combined Poly Resolver prover
-///  10.  PIOP/LookupExtract — extract lookup columns from field trace
-///  11.  PIOP/Lookup — classic batched decomposed LogUp prover
-///  12.  PCS/Prove (folded) — Zip+ prove over BinaryPoly<16> split columns
-///  13.  PCS/Prove (original) — Zip+ prove over BinaryPoly<32> (comparison)
-///  14.  E2E/Prover (folded) — total (prove_classic_logup_folded)
-///  15.  E2E/Prover (original) — total (pipeline::prove)
-///  16.  E2E/Verifier (folded)
-
 fn generate_sha256_trace(num_vars: usize) -> Vec<DenseMultilinearExtension<BinaryPoly<32>>> {
     let mut rng = rand::rng();
     <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(num_vars, &mut rng)
@@ -187,23 +164,65 @@ fn generate_sha256_trace(num_vars: usize) -> Vec<DenseMultilinearExtension<Binar
 ///
 /// Uses the 4x-folded pipeline with 4-chunk lookups (chunk_width=8).
 ///
-/// Prover steps benchmarked:
+/// ## E2E prover pipeline (`prove_hybrid_gkr_logup_4x_folded`)
+///
+/// The E2E pipeline executes the following steps in order:
+///   0.  Double-split columns: BinaryPoly<32> -> BinaryPoly<16> -> BinaryPoly<8>
+///   1.  PCS/Commit (4x-folded) over BinaryPoly<8>
+///   2.  Transcript init + absorb PCS commitment root + derive random field config
+///   2b. IC (BinaryPoly, Sha256Uair) — MLE-first path for max_degree==1
+///   2c. QX IC (Sha256UairQx, trivial ideal) — prove_from_binary_poly_at_point
+///   3.  Draw projecting element α; project scalars + trace to field
+///       Pre-extract lookup columns + append affine virtual columns (13 total)
+///       Extract shift trace source columns
+///   3a. CPR (Sha256Uair) — standalone MLSumcheck, degree 3
+///   3b. QX CPR (Sha256UairQx) — standalone MLSumcheck, degree 3
+///   3c. Hybrid GKR batched lookup (cutoff=2) on 13 columns (10 base + 3 affine)
+///   3d. Shift sumcheck — reduce shifted-column claims to unshifted MLE claims
+///   4.  Two-round folding: fold_claims_prove D→HALF_D then HALF_D→QUARTER_D
+///   5.  PCS/Prove at (r ‖ γ₁ ‖ γ₂) over BinaryPoly<8> columns
+///
+/// ## Individual bench steps
+///
+/// The following steps are benchmarked individually. They exercise the same
+/// algorithms as the E2E pipeline but with independent transcript state
+/// (see fidelity notes in the documentation).
+///
 ///   1.  WitnessGen -- generate the 30-column BinaryPoly<32> trace (512 rows)
 ///   2.  Folding/SplitColumns -- double split BinaryPoly<32> -> BinaryPoly<16> -> BinaryPoly<8>
 ///   3.  PCS/Commit (4x-folded) -- Zip+ commit over BinaryPoly<8> split columns
-///   4.  PIOP/FieldSetup -- transcript init + random field config
+///   4.  PIOP/FieldSetup -- transcript init + random field config (no root absorption)
 ///   5.  PIOP/Project Ideal Check -- project_scalars for Ideal Check
 ///   6.  PIOP/IdealCheck -- Ideal Check prover (MLE-first, on original trace)
 ///   7.  PIOP/Project Main field sumcheck -- project_scalars_to_field + project_trace_to_field
 ///   8.  PIOP/Main field sumcheck -- Combined Poly Resolver prover
-///   9.  PIOP/LookupExtract -- extract lookup columns from field trace
-///  10.  PIOP/Lookup -- classic batched decomposed LogUp prover (4-chunk)
+///   9.  PIOP/LookupExtract -- extract lookup columns from field trace (10 base only)
+///  10.  PIOP/Lookup -- classic batched decomposed LogUp prover (10 columns, 4-chunk)
 ///  11.  PIOP/ShiftSumcheck -- shift sumcheck prover
-///  12.  PCS/Prove (4x-folded) -- Zip+ prove over BinaryPoly<8> split columns
-///  13.  E2E/Prover -- total (prove_hybrid_gkr_logup_4x_folded, Hybrid GKR c=2)
-///  14.  E2E/Verifier -- total (verify_classic_logup_4x_folded)
+///  12.  Folding/FoldClaims (2-round) -- two-round column folding protocol
+///  13.  PCS/Prove (4x-folded) -- Zip+ prove over BinaryPoly<8> split columns
+///  14.  E2E/Prover -- total (prove_hybrid_gkr_logup_4x_folded, Hybrid GKR c=2)
+///  15.  E2E/Verifier -- total (verify_classic_logup_4x_folded)
+///
+/// ## Notable differences between individual steps and E2E
+///
+/// - Step 4: The E2E absorbs the PCS commitment root before deriving the
+///   field config; the individual step does not. This means all Fiat-Shamir
+///   challenges diverge from the E2E (but timing is statistically equivalent).
+/// - Step 10: The individual step uses **classic** batched LogUp on 10 base
+///   columns; the E2E uses **Hybrid GKR** LogUp on 13 columns (10 base + 3
+///   affine). The classic step is kept as a comparison baseline.
+/// - Steps 9-10: The individual steps do NOT include affine virtual column
+///   construction (`append_affine_virtual_columns`) — only the 10 base
+///   lookups are extracted.
+/// - Step 13: The individual step uses `prove()` (no seed); the E2E uses
+///   `prove_with_seed(&root_buf)` which absorbs the root into the PCS
+///   transcript.
+/// - No individual steps exist for: QX IC, QX CPR, or affine column
+///   construction. These are only measured via the E2E prover (step 14).
 ///
 /// Also reports:
+///  - Proof size breakdown (raw + compressed)
 ///  - Peak memory usage
 fn sha256_8x_folded_stepwise(c: &mut Criterion) {
     use zinc_sha256_uair::CyclotomicIdeal;
