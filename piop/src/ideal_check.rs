@@ -215,6 +215,143 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
         ))
     }
 
+    /// Prove ideal-check for constraints of **any degree** directly from
+    /// a `BinaryPoly<D>` trace, without a separate projection pass.
+    ///
+    /// Combines `project_trace_coeffs` + eq-weighted constraint evaluation
+    /// into a single fused pass:
+    ///
+    /// 1. Draws an evaluation point from the transcript.
+    /// 2. Precomputes `eq(r, j)` weights.
+    /// 3. For each row: projects `BinaryPoly<D>` values to
+    ///    `DynamicPolynomialF<F>` inline, evaluates constraints, and
+    ///    accumulates the eq-weighted result.
+    ///
+    /// This avoids:
+    /// - Allocating the full projected trace matrix.
+    /// - Intermediate combined-polynomial MLEs.
+    /// - A separate MLE evaluation pass.
+    ///
+    /// The Fiat-Shamir transcript and [`Proof`] format are identical to
+    /// [`prove_as_subprotocol`]; the verifier is unchanged.
+    #[allow(clippy::type_complexity)]
+    pub fn prove_from_binary_poly<U, const D: usize>(
+        transcript: &mut impl Transcript,
+        binary_poly_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
+    where
+        U: Uair,
+        F::Inner: ConstTranscribable + Default + Send + Sync + num_traits::Zero,
+    {
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+
+        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+
+        let max_constraint_degree = count_max_degree::<U>();
+
+        let combined_mle_values = if max_constraint_degree <= 1 {
+            // For linear constraints: use MLE-first path.
+            combined_poly_builder::compute_combined_values_mle_first::<F, U, D>(
+                binary_poly_trace,
+                projected_scalars,
+                &evaluation_point,
+                num_constraints,
+                field_cfg,
+            )
+        } else {
+            // For higher-degree constraints: fused projection +
+            // row-by-row evaluation + eq-weighted accumulation.
+            combined_poly_builder::compute_combined_evals_from_binary_poly_with_eq::<F, U, D>(
+                binary_poly_trace,
+                projected_scalars,
+                &evaluation_point,
+                num_constraints,
+                field_cfg,
+            )
+        };
+
+        combined_mle_values.iter().for_each(|combined_mle_value| {
+            transcript
+                .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
+        });
+
+        Ok((
+            Proof {
+                combined_mle_values,
+            },
+            ProverState {
+                evaluation_point,
+                combined_mles: vec![],
+            },
+        ))
+    }
+
+    /// Like [`prove_from_binary_poly`], but uses a **supplied** evaluation
+    /// point instead of drawing one from the transcript.
+    ///
+    /// This is the fused BinaryPoly path for pipelines that share a
+    /// single evaluation point across multiple IC passes (e.g.
+    /// dual-ring pipeline).
+    ///
+    /// **Important:** the caller is responsible for ensuring that
+    /// `evaluation_point` was produced via the transcript *before*
+    /// this function is called so that Fiat-Shamir consistency is
+    /// maintained.
+    #[allow(clippy::type_complexity)]
+    pub fn prove_from_binary_poly_at_point<U, const D: usize>(
+        transcript: &mut impl Transcript,
+        binary_poly_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        evaluation_point: &[F],
+        field_cfg: &F::Config,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
+    where
+        U: Uair,
+        F::Inner: ConstTranscribable + Default + Send + Sync + num_traits::Zero,
+    {
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+
+        let max_constraint_degree = count_max_degree::<U>();
+
+        let combined_mle_values = if max_constraint_degree <= 1 {
+            combined_poly_builder::compute_combined_values_mle_first::<F, U, D>(
+                binary_poly_trace,
+                projected_scalars,
+                evaluation_point,
+                num_constraints,
+                field_cfg,
+            )
+        } else {
+            combined_poly_builder::compute_combined_evals_from_binary_poly_with_eq::<F, U, D>(
+                binary_poly_trace,
+                projected_scalars,
+                evaluation_point,
+                num_constraints,
+                field_cfg,
+            )
+        };
+
+        combined_mle_values.iter().for_each(|combined_mle_value| {
+            transcript
+                .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
+        });
+
+        Ok((
+            Proof {
+                combined_mle_values,
+            },
+            ProverState {
+                evaluation_point: evaluation_point.to_vec(),
+                combined_mles: vec![],
+            },
+        ))
+    }
+
     /// Like [`prove_as_subprotocol`], but uses a **supplied** evaluation
     /// point instead of drawing one from the transcript.
     ///
@@ -238,26 +375,33 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
         U: Uair,
         F::Inner: ConstTranscribable,
     {
-        let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
-            trace,
-            projected_scalars,
-            num_constraints,
-            field_cfg,
-        );
+        let max_constraint_degree = count_max_degree::<U>();
+
+        let combined_mle_values = if max_constraint_degree <= 1 {
+            // For linear constraints: evaluate column MLEs first, then apply
+            // the linear constraint once.  Avoids row-by-row
+            // DynamicPolynomialF arithmetic entirely.
+            combined_poly_builder::evaluate_combined_polynomials_at_point::<_, U>(
+                trace,
+                projected_scalars,
+                evaluation_point,
+                num_constraints,
+                field_cfg,
+            )?
+        } else {
+            // For higher-degree constraints: evaluate row-by-row but
+            // accumulate with eq-weights directly, avoiding intermediate
+            // combined-MLE storage and the separate evaluation pass.
+            combined_poly_builder::compute_combined_polynomial_evals_with_eq::<_, U>(
+                trace,
+                projected_scalars,
+                evaluation_point,
+                num_constraints,
+                field_cfg,
+            )
+        };
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
-
-        let combined_mle_values = cfg_iter!(combined_mles)
-            .map(|combined_mle| {
-                Ok(DynamicPolynomialF::new_trimmed(
-                    cfg_iter!(combined_mle)
-                        .map(|coeff_mle| {
-                            coeff_mle.evaluate_with_config(evaluation_point, field_cfg)
-                        })
-                        .collect::<std::result::Result<Vec<_>, _>>()?,
-                ))
-            })
-            .collect::<std::result::Result<Vec<_>, IdealCheckError<_, _>>>()?;
 
         combined_mle_values.iter().for_each(|combined_mle_value| {
             transcript
@@ -270,7 +414,7 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
             },
             ProverState {
                 evaluation_point: evaluation_point.to_vec(),
-                combined_mles,
+                combined_mles: vec![],
             },
         ))
     }
