@@ -107,7 +107,9 @@ These use the **trivial ideal** (every polynomial passes). Selector gating (`sel
 | C18 | e-update | $\hat{e}[t{+}1] - \hat{d} - \hat{h} - \hat{\Sigma}_1 - \widehat{ch\_ef} - \widehat{ch\_\neg eg} - \hat{K} - \hat{W} + \mu_e \cdot X^{32} \in \text{Trivial}$ | Trivial |
 | C19 | W-schedule | $\hat{W} - \hat{W}_{t-16} - \hat{\sigma}_{0,w} - \hat{W}_{t-7} - \hat{\sigma}_{1,w} + \mu_W \cdot X^{32} \in \text{Trivial}$ | Trivial |
 
-#### Why selectors were removed
+#### Why selectors were removed (placeholder)
+
+> **Note:** The trivial ideal for `Sha256UairQx` is a **placeholder**. The intention is to replace it with a proper ideal that enforces carry correctness once the appropriate ideal is determined. The current trivial ideal is used to unblock benchmarking and pipeline integration.
 
 With the trivial ideal, the carry constraints emit the raw linear expression without selector multiplication. This reduces the max constraint degree from 2 to 1, enabling the more efficient MLE-first IdealCheck path (which avoids projecting the full trace to $F[Y]$). The tradeoff is that the ideal check for these constraints is vacuous — correctness of the carry propagation is not enforced by the PIOP. In practice, carry correctness can be verified by other means (e.g., lookups or direct evaluation at $X=2$) if needed.
 
@@ -311,13 +313,13 @@ These are absorbed into the transcript and included in the proof.
 - `Proof<F>` containing `sumcheck_proof` (9 round messages), `up_evals`, `down_evals`.
 - `ProverState<F>` containing `evaluation_point` — the sumcheck randomness $\mathbf{s}$.
 
-### 9a. Shift Sumcheck (`PIOP/ShiftSumcheck` / `V/ShiftSumcheckVerify`)
+### 8a. Shift Sumcheck (`PIOP/ShiftSumcheck`)
 
-> **Pipeline status**: The shift sumcheck is active in **all** pipeline variants — both the original non-folded pipeline (`pipeline::prove` / `pipeline::verify`) and all folded/batched variants (`prove_classic_logup_folded`, `prove_classic_logup_4x_folded`, `prove_gkr_logup_folded`, `prove_hybrid_gkr_logup_4x_folded`). In the batched path, it runs after CPR + Lookup finalize and before folding. In the non-batched path, it runs after CPR and before lookup. The shift sumcheck is only exercised as part of the E2E pipeline — there is no standalone prover or verifier bench step for it. The shift sumcheck verification is performed as part of the replay inside `V/FoldingVerify` (V6). At the code level the placement comment is "Step 3a" in [snark/src/pipeline.rs](snark/src/pipeline.rs).
+> **Pipeline status**: The shift sumcheck is active in the `prove_hybrid_gkr_logup_4x_folded` pipeline. In the pipeline it runs after CPR + Lookup finalize and before folding. The shift sumcheck is benchmarked both as a **standalone bench step** (step 11) and as part of the E2E pipeline. This section documents the shift sumcheck prover algorithm for reference.
 
 #### Purpose
 
-The main field sumcheck (step 9) produces **`down_evals`** — one claimed evaluation $\text{MLE}[\text{shift}_{c_i}(v_i)](\mathbf{r})$ per shifted column. These are evaluations of *shifted* versions of committed source columns, but the PCS only commits to the *unshifted* source columns. The **shift sumcheck** bridges this gap: it reduces each shifted-column evaluation claim to a plain MLE evaluation claim on the unshifted source column at a *new* random point $\mathbf{s}$, which the PCS can then open directly.
+The main field sumcheck (step 8) produces **`down_evals`** — one claimed evaluation $\text{MLE}[\text{shift}_{c_i}(v_i)](\mathbf{r})$ per shifted column. These are evaluations of *shifted* versions of committed source columns, but the PCS only commits to the *unshifted* source columns. The **shift sumcheck** bridges this gap: it reduces each shifted-column evaluation claim to a plain MLE evaluation claim on the unshifted source column at a *new* random point $\mathbf{s}$, which the PCS can then open directly.
 
 Formally, for a source column $v$ with left-shift amount $c$, the shifted column is $\text{left}_c(v)[i] = v[i+c]$ for $i < n-c$, zero otherwise. The CPR outputs $\text{MLE}[\text{left}_c(v)](\mathbf{r}) = d$ as a claimed evaluation. The shift sumcheck proves this is consistent with $\text{MLE}[v](\mathbf{s}) = v_{\text{final}}$ at a verifier-chosen point $\mathbf{s}$.
 
@@ -388,11 +390,11 @@ where:
 
 The **split API** (`shift_sumcheck_verify_pre` / `shift_sumcheck_verify_finalize`) is used when some shift sources are public columns. It advances the transcript through sumcheck rounds first (yielding $\mathbf{s}$), then the verifier computes public `v_finals` at $\mathbf{s}$ before calling finalize. This matches the CPR pre/finalize pattern.
 
-### 10. `PIOP/LookupExtract`
+### 9. `PIOP/LookupExtract`
 
 This step prepares the data needed by the lookup protocol. Two operations per lookup column:
 
-1. **Field columns**: Extract the 10 lookup-relevant columns from `field_trace` (the field-projected trace from step 8). Each is a `Vec<F>` of 512 elements.
+1. **Field columns**: Extract the 10 lookup-relevant columns from `field_trace` (the field-projected trace from step 7). Each is a `Vec<F>` of 512 elements.
 
 2. **Raw integer indices**: Convert each `BinaryPoly<32>` entry from the original trace into a `usize` index by interpreting the 32 Boolean coefficients as a bit-packed integer: $\text{idx} = \sum_{j=0}^{31} b_j \cdot 2^j$. This avoids building a $2^{32}$-entry reverse-lookup table, which would be prohibitive.
 
@@ -400,19 +402,19 @@ This step prepares the data needed by the lookup protocol. Two operations per lo
 
 **Output**: `(Vec<Vec<F>>, Vec<Vec<usize>>, Vec<LookupColumnSpec>)` — deduplicated field columns, raw indices, and remapped specs.
 
-### 11. `PIOP/Lookup`
+### 10. `PIOP/Lookup`
 
 **Function**: `prove_batched_lookup_with_indices(&mut transcript, &columns, &raw_indices, &specs, &projecting_element, &field_cfg)`
 
-Proves that each lookup column's values belong to the declared subtable, using the **batched decomposed LogUp** protocol (classic variant). The protocol works as follows. (For the alternative GKR-based lookup used in the GKR and Hybrid GKR pipeline variants, see the [GKR and Hybrid GKR Lookup Protocols](#gkr-and-hybrid-gkr-lookup-protocols) section.)
+Proves that each lookup column's values belong to the declared subtable, using the **batched decomposed LogUp** protocol (classic variant). This individual step benchmarks the classic batched prover; the E2E pipeline (step 14) uses the Hybrid GKR c=2 lookup instead. For the GKR-based lookup used in the E2E pipeline, see the [GKR and Hybrid GKR Lookup Protocols](#gkr-and-hybrid-gkr-lookup-protocols) section.
 
-**Grouping**: Specs are grouped by `LookupTableType`. For 8×SHA-256 with default configuration, all 10 column lookups use `BitPoly { width: 32, chunk_width: 4 }` and form a single group. (Note: the 3 affine lookups — Ch, neg-Ch, Maj — are **not** included in this individual benchmark step; they are only incorporated in the E2E pipeline via `append_affine_virtual_columns`, which adds them as additional virtual columns before calling the lookup prover.)
+**Grouping**: Specs are grouped by `LookupTableType`. For 8×SHA-256 with 4-chunk configuration, all 10 column lookups use `BitPoly { width: 32, chunk_width: Some(8) }` and form a single group. (Note: the 3 affine lookups — Ch, neg-Ch, Maj — are **not** included in this individual benchmark step; they are only incorporated in the E2E pipeline via `append_affine_virtual_columns`, which adds them as additional virtual columns before calling the lookup prover.)
 
 **For each group**, `BatchedDecompLogupProtocol::prove_as_subprotocol` runs:
 
-1. **Subtable generation**: `generate_bitpoly_table(chunk_width=4, α)` builds a subtable of $2^4 = 16$ entries, where entry $t$ is $\sum_{j=0}^{3} b_j \cdot \alpha^j$ (the projection of a 4-bit polynomial at $\alpha$). The 8 shifts are $\alpha^0, \alpha^4, \alpha^8, \ldots, \alpha^{28}$.
+1. **Subtable generation**: `generate_bitpoly_table(chunk_width=8, α)` builds a subtable of $2^8 = 256$ entries, where entry $t$ is $\sum_{j=0}^{7} b_j \cdot \alpha^j$ (the projection of an 8-bit polynomial at $\alpha$). The 4 shifts are $\alpha^0, \alpha^8, \alpha^{16}, \alpha^{24}$.
 
-2. **Chunk decomposition**: Each 32-bit index is decomposed into $K = 8$ chunks of 4 bits each. For column $\ell$ and row $i$, chunk $k$ maps to subtable index $\lfloor \text{idx}_i / 2^{4k} \rfloor \bmod 16$. The field-level chunk value is looked up as $c_k^{(\ell)}[i] = \text{subtable}[\text{chunk\_idx}]$.
+2. **Chunk decomposition**: Each 32-bit index is decomposed into $K = 4$ chunks of 8 bits each. For column $\ell$ and row $i$, chunk $k$ maps to subtable index $\lfloor \text{idx}_i / 2^{8k} \rfloor \bmod 256$. The field-level chunk value is looked up as $c_k^{(\ell)}[i] = \text{subtable}[\text{chunk\_idx}]$.
 
 3. **Multiplicities**: For each column $\ell$ and chunk $k$, compute the multiplicity vector $m_k^{(\ell)}[t]$ = number of times subtable entry $t$ appears. Aggregate across chunks: $m_{\text{agg}}^{(\ell)}[t] = \sum_k m_k^{(\ell)}[t]$. Absorb all aggregated multiplicities.
 
@@ -431,18 +433,18 @@ $$H[i] = \sum_\ell \Bigl[ \sum_{k} \gamma^{\ell(K+1)+k} \cdot \bigl((\beta - c_k
 8. **Sumcheck** (degree 2): Build just two MLEs — `eq_r` and `H` — and run `MLSumcheck::prove` with combination function $f = \text{eq\_r} \cdot H$. The key optimization: by precomputing $H$ outside the sumcheck loop, the number of MLEs drops from $2 + L(2K+1)$ to just 2 and the degree from 3 to 2.
 
 **Proof data** (serialized into the proof):
-- `aggregated_multiplicities`: $L \times T$ field elements ($L$ columns × 16 subtable entries).
-- `chunk_inverse_witnesses`: $L \times K \times N$ field elements ($L$ columns × 8 chunks × 512 rows). This is the dominant proof component.
-- `inverse_table`: $T = 16$ field elements.
+- `aggregated_multiplicities`: $L \times T$ field elements ($L$ columns × 256 subtable entries).
+- `chunk_inverse_witnesses`: $L \times K \times N$ field elements ($L$ columns × 4 chunks × 512 rows). This is the dominant proof component.
+- `inverse_table`: $T = 256$ field elements.
 - Sumcheck proof: 9 round messages (degree-2 univariates).
 
-### 11b. Shift Sumcheck (algorithm detail, not a standalone bench step)
+### 11. `PIOP/ShiftSumcheck`
 
-> **Note:** There is no standalone `PIOP/ShiftSumcheck` benchmark step in `steps_sha256_8x_folded`. The shift sumcheck is only exercised as part of the E2E pipeline. This section documents the shift sumcheck prover algorithm for reference.
+> **Note:** The shift sumcheck is now a **standalone benchmark step** in `steps_sha256_8x_folded`. It benchmarks the shift sumcheck prover independently (after replaying CPR to get the correct transcript state). This step is described in full generality in §8a above; below we detail the algorithm steps.
 
 **Function**: `shift_sumcheck_prove(&mut transcript, &shift_claims, &shift_trace_columns, num_vars, &field_cfg)`
 
-The shift sumcheck reduces the shifted-column evaluation claims from the CPR `down_evals` to plain MLE evaluation claims on the unshifted source columns at a new random point $\mathbf{s}$, which the PCS can then open directly. This step is described in full generality in §9a above; below we detail the algorithm steps.
+The shift sumcheck reduces the shifted-column evaluation claims from the CPR `down_evals` to plain MLE evaluation claims on the unshifted source columns at a new random point $\mathbf{s}$, which the PCS can then open directly.
 
 #### Setup
 
@@ -510,19 +512,33 @@ The prover executes the following steps (all timed):
 
 The dominant cost is the 9 sumcheck rounds. Each round processes 6 group tables of decreasing size. The total work across all rounds is proportional to $6 \times (512 + 256 + 128 + \cdots + 1) = 6 \times 1023 \approx 6{,}138$ multiply-accumulate pairs for the round polynomial, plus the same for folding. The `v_finals` computation is an additional $12 \times 512 = 6{,}144$ inner-product terms. All inner loops are parallelized with rayon when the `parallel` feature is active.
 
-### 12. `PCS/Prove (folded)`
+### 12. `Folding/FoldClaims (2-round)`
 
-**Function**: `ZipPlus::<FoldedZt, FoldedLc>::prove::<F, UNCHECKED>(&folded_params, &split_trace, &folded_pcs_point, &folded_hint)`
+**Function**: `fold_claims_prove::<F, _, 16>(&mut tr, &half_trace, fold_piop_point, &projecting_elem, &field_cfg)` followed by `fold_claims_prove::<F, _, 8>(&mut tr, &split_trace, &fold1.new_point, &projecting_elem, &field_cfg)`
 
-Opens the committed `BinaryPoly<16>` columns at the extended evaluation point $(\mathbf{r} \| \gamma)$ — a 10-dimensional point derived from the PIOP sumcheck point (9 dims) plus the folding challenge $\gamma$.
+After the PIOP produces evaluation claims on the original `BinaryPoly<32>` columns, the two-round folding protocol reduces them to claims on the double-split `BinaryPoly<8>` columns:
+
+**Round 1 (32→16)**: For each committed column $j$, the prover sends $c_1[j] = \text{MLE}[v'_j](\mathbf{r} \| 0)$ and $c_2[j] = \text{MLE}[v'_j](\mathbf{r} \| 1)$ (the low/high half evaluations at the CPR sumcheck point extended by 0 and 1). The verifier checks $c_1[j] + \alpha^{16} \cdot c_2[j] = \text{original\_eval}[j]$, then draws $\gamma_1$ to collapse to $\text{MLE}[v'_j](\mathbf{r} \| \gamma_1)$.
+
+**Round 2 (16→8)**: Same procedure on the `BinaryPoly<8>` split trace, producing $c_3[j], c_4[j]$ and drawing $\gamma_2$.
+
+The final PCS point is $(\mathbf{r} \| \gamma_1 \| \gamma_2)$ — an 11-dimensional point for the 4× folded PCS.
+
+**Output**: The folding proof values ($c_1, c_2, c_3, c_4$ per column) and the extended evaluation point.
+
+### 13. `PCS/Prove (4x-folded)`
+
+**Function**: `ZipPlus::<FoldedZt4x, FoldedLc4x>::prove::<F, UNCHECKED>(&folded_4x_params, &split_trace, &folded_4x_pcs_point, &folded_4x_hint)`
+
+Opens the committed `BinaryPoly<8>` columns at the extended evaluation point $(\mathbf{r} \| \gamma_1 \| \gamma_2)$ — an 11-dimensional point derived from the PIOP sumcheck point (9 dims) plus the two folding challenges $\gamma_1, \gamma_2$.
 
 **Steps**:
 
 1. **Create PCS transcript**: Initialize a separate `PcsTranscript` (Keccak sponge + byte stream), squeeze its own random field configuration.
 
-2. **Tensor decomposition**: Split the 10-dimensional point into a row-selector $\mathbf{q}_0$ (empty, since `num_rows = 1`) and a column-selector $\mathbf{q}_1$ (all 10 coordinates).
+2. **Tensor decomposition**: Split the 11-dimensional point into a row-selector $\mathbf{q}_0$ (empty, since `num_rows = 1`) and a column-selector $\mathbf{q}_1$ (all 11 coordinates).
 
-3. **FS challenge combination**: For each committed polynomial, squeeze `degree_bound + 1` challenges $\boldsymbol{\alpha}$ from the PCS transcript. Compute a combined ring element per codeword cell: $\text{CombR}[i] = \langle \text{BinaryPoly<16>}[i], \boldsymbol{\alpha} \rangle$ (inner product of the 16 coefficients with the challenges, projecting `BinaryPoly<16>` to a scalar).
+3. **FS challenge combination**: For each committed polynomial, squeeze `degree_bound + 1` challenges $\boldsymbol{\alpha}$ from the PCS transcript. Compute a combined ring element per codeword cell: $\text{CombR}[i] = \langle \text{BinaryPoly<8>}[i], \boldsymbol{\alpha} \rangle$ (inner product of the 8 coefficients with the challenges, projecting `BinaryPoly<8>` to a scalar).
 
 4. **Compute $\mathbf{b}$**: For each row, $b[\text{row}] = \sum_{\text{poly}} \langle \text{CombR}[\text{row}], \mathbf{q}_1 \rangle$ — inner product of the combined row with the column-selector, summed across polynomials. Absorb $\mathbf{b}$.
 
@@ -530,23 +546,11 @@ Opens the committed `BinaryPoly<16>` columns at the extended evaluation point $(
 
 6. **Combined row**: Squeeze `num_rows` coefficients $s_j$ (just 1 here), compute the combined codeword row across all polynomials, write to transcript.
 
-7. **Grinding**: `transcript.grind(GRINDING_BITS)` — proof-of-work nonce search. The prover searches for a nonce that makes `H(transcript_state \| nonce)` have the required number of leading zero bits, adding computational security. In this benchmark configuration `GRINDING_BITS = 0` (default, not overridden), so grinding is a no-op.
+7. **Grinding**: `transcript.grind(GRINDING_BITS=8)` — proof-of-work nonce search. The prover searches for a nonce that makes `H(transcript_state \| nonce)` have 8 leading zero bits, adding 8 bits of computational security.
 
-8. **Column openings**: Squeeze `NUM_COLUMN_OPENINGS = 147` random column indices from the transcript. For each index, open the Merkle path (authentication siblings from leaf to root) and include the column values from all committed polynomial codeword matrices. The verifier will check: (a) the Merkle path is valid, (b) the column values are consistent with the combined row, (c) the combined row is a valid codeword.
+8. **Column openings**: Squeeze `NUM_COLUMN_OPENINGS = 131` random column indices from the transcript. For each index, open the Merkle path (authentication siblings from leaf to root, depth 13) and include the column values from all committed polynomial codeword matrices. The verifier will check: (a) the Merkle path is valid, (b) the column values are consistent with the combined row, (c) the combined row is a valid codeword.
 
 **Output**: `(F, ZipPlusProof)` — the claimed evaluation and the serialized proof (transcript bytes including Merkle paths, column data, and grinding nonce).
-
-### 13. `PCS/Prove (original)` *(comparison)*
-
-**Function**: `ZipPlus::<OrigZt, OrigLc>::prove::<F, UNCHECKED>(&orig_params, &sha_pcs_trace, &orig_pcs_point, &orig_hint)`
-
-Same algorithm as step 12, but operating on the original `BinaryPoly<32>` columns with the non-folded parameters:
-- Point is 9-dimensional (no folding extension).
-- Codeword elements are `BinaryPoly<32>` (256 B each, vs. 128 B for folded).
-- Merkle tree depth is 11 (2048 leaves).
-- Each of the 147 column openings reveals `BinaryPoly<32>` values, which are 2× larger.
-
-This is benchmarked to measure the PCS proving time difference attributable to column folding. The folded variant has more evaluations (1024 vs 512, i.e. `row_len` doubles) but smaller elements, and the Merkle paths are deeper (12 vs 11) but narrower per leaf. Both variants have `num_rows = 1`.
 
 ---
 
@@ -556,231 +560,61 @@ This is benchmarked to measure the PCS proving time difference attributable to c
 
 | # | Benchmark ID | What it runs |
 |---|---|---|
-| 14 | `E2E/Prover (folded)` | `prove_classic_logup_folded` — full 2× folded pipeline (split → commit → IC → batched CPR+Lookup MD-sumcheck → fold → PCS prove), default chunk. *CPR = CombinedPolyResolver = "Main field sumcheck" in the per-step breakdown.* |
-| 15 | `E2E/Prover (original)` | `pipeline::prove` — non-folded baseline (commit → IC → CPR → lookup → PCS prove) |
-| 18 | `E2E/Prover (GKR folded)` | `prove_gkr_logup_folded` — 2× folded with GKR lookup (separate CPR sumcheck + GKR fractional-sumcheck, no multi-degree batching), default chunk |
-| 20 | `E2E/Prover (4x folded)` | `prove_classic_logup_4x_folded` — 4× folded with classic lookup, default chunk |
-| 22a | `E2E/Prover (folded 2-chunk)` | `prove_classic_logup_folded` — 2× folded, 2 chunks × $2^{16}$ |
-| 22b | `E2E/Prover (folded 3-chunk)` | `prove_classic_logup_folded` — 2× folded, 3 chunks × $2^{11}$ |
-| 22c | `E2E/Prover (4x folded 3-chunk)` | `prove_classic_logup_4x_folded` — 4× folded, 3 chunks × $2^{11}$ |
-| 22d | `E2E/Prover (4x folded 4-chunk)` | `prove_classic_logup_4x_folded` — 4× folded, 4 chunks × $2^{8}$ |
-| 22e | `E2E/Prover (folded 8-chunk)` | `prove_classic_logup_folded` — 2× folded, 8 chunks × $2^{4}$ |
-| 22f | `E2E/Prover (4x folded 8-chunk)` | `prove_classic_logup_4x_folded` — 4× folded, 8 chunks × $2^{4}$ |
+| 14 | `E2E/Prover (4x Hybrid GKR c=2 4-chunk)` | `prove_hybrid_gkr_logup_4x_folded::<Sha256Uair, Sha256UairQx, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED>` — full 4× folded pipeline (double-split → commit → IC (BP) → QX IC → CPR → QX CPR → Hybrid GKR Lookup → Shift SC → QX Shift SC → Fold (2-round) → PCS prove), 4-chunk. |
 
 ### Verifier benchmarks
 
-Each prover variant has a corresponding verifier:
-
 | # | Benchmark ID | Verifier function |
 |---|---|---|
-| 16 | `E2E/Verifier (folded)` | `verify_classic_logup_folded` |
-| 17 | `E2E/Verifier (original)` | `pipeline::verify` |
-| 19 | `E2E/Verifier (GKR folded)` | `verify_classic_logup_folded` (same verifier handles both classic and GKR proof formats) |
-| 21 | `E2E/Verifier (4x folded)` | `verify_classic_logup_4x_folded` |
-| 22a | `E2E/Verifier (folded 2-chunk)` | `verify_classic_logup_folded` |
-| 22b | `E2E/Verifier (folded 3-chunk)` | `verify_classic_logup_folded` |
-| 22c | `E2E/Verifier (4x folded 3-chunk)` | `verify_classic_logup_4x_folded` |
-| 22d | `E2E/Verifier (4x folded 4-chunk)` | `verify_classic_logup_4x_folded` |
-| 22e | `E2E/Verifier (folded 8-chunk)` | `verify_classic_logup_folded` |
-| 22f | `E2E/Verifier (4x folded 8-chunk)` | `verify_classic_logup_4x_folded` |
+| 15 | `E2E/Verifier (4x Hybrid GKR c=2 4-chunk)` | `verify_classic_logup_4x_folded::<Sha256Uair, Sha256UairQx, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, ...>` |
 
-For each verifier run, a one-shot timing breakdown is printed to stdout showing: IC verify, CPR+Lookup verify (CPR = CombinedPolyResolver, i.e. Main field sumcheck), Lookup verify, PCS verify, and total.
+For the verifier run, a one-shot timing breakdown is printed to stdout showing: IC verify, CPR+Lookup verify, Lookup verify, PCS verify, and total.
 
 ---
 
-## Verifier Step-by-Step Breakdown (2× Folded)
+## Verifier
 
-Beyond the end-to-end verifier timings, the benchmark dissects the 2× folded verifier into 7 individual steps (V1–V7). Each step replays the Fiat-Shamir transcript through all preceding steps (untimed) before timing the target step, ensuring transcript state is correct.
+The benchmark does **not** include individual verifier step breakdowns (the previous V1–V7 per-step breakdown has been removed). Verifier timing is measured only via the **E2E/Verifier** benchmark (step 15), which runs `verify_classic_logup_4x_folded`.
 
-### V1. `V/FieldSetup`
+A one-shot timing breakdown is printed to stdout after each verifier run, showing:
+- IC verify
+- CPR+Lookup verify
+- Lookup verify
+- PCS verify
+- Total
 
-**Function**: `KeccakTranscript::new()` + `transcript.get_random_field_cfg::<PiopField, _, MillerRabin>()`
-
-Identical to prover step 5. Initializes a fresh Keccak transcript and derives the PIOP field configuration by squeezing a candidate prime and running Miller-Rabin. The verifier must derive the **same** field as the prover (deterministic from the empty transcript state). This is the verifier's "cold start" cost.
-
-### V2. `V/Ideal Check`
-
-**Function**: `IdealCheckProtocol::<PiopField>::verify_as_subprotocol::<Sha256Uair, _, _>(...)`
-
-Verifies the Ideal Check proof (the combined MLE values produced by prover step 7):
-
-1. **Draw evaluation point $\mathbf{r}$**: Squeeze the same $n = 9$ field challenges from the transcript. Since the transcript is in the same state as the prover's at this point, the verifier gets the identical random point.
-
-2. **Absorb proof values**: Read the `combined_mle_values` from the proof (one `DynamicPolynomialF<PiopField>` per constraint group) and absorb them into the transcript in the same order as the prover.
-
-3. **Collect ideals**: `collect_ideals::<Sha256Uair>(num_constraints)` enumerates all ideals from the UAIR definition (for SHA-256, the cyclotomic ideal $\langle X^{32} + 1 \rangle$, the degree-one ideal $\langle X - 2 \rangle$ for carry propagation, and the zero ideal).
-
-4. **Batched ideal membership check**: For each combined MLE value $p(Y)$, verify that $p(Y) \equiv 0 \pmod{I}$ where $I$ is the corresponding ideal. For the cyclotomic ideal, this means checking that $p(Y)$ is divisible by $Y^{32} + 1$ when viewed as a polynomial in the quotient ring. For the degree-one ideal $\langle Y - 2 \rangle$, this means $p(2) = 0$ (evaluation at the root). For the zero ideal, this means $p(Y) = 0$. This is a **cheap algebraic check** — no trace data is needed, just polynomial arithmetic on the short proof values.
-
-5. **Return subclaim**: `VerifierSubClaim { evaluation_point: r, values: combined_mle_values }` — the claim that the main field sumcheck must resolve.
-
-### V3. `V/Main field sumcheck Pre`
-
-**Function**: `CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<Sha256Uair>(...)`
-
-Prepares the verifier's state for the multi-degree sumcheck that batches the main field sumcheck (CPR) and lookup:
-
-1. **Draw batching challenge $\alpha_{\text{fold}}$**: Squeeze from transcript (same as prover's folding challenge in step 9).
-
-2. **Project IC subclaim values**: The IC subclaim contains `DynamicPolynomialF` values. These are evaluated at the projecting element $\alpha$ to produce scalar expected evaluations. The scalars from step 6 (`project_scalars`) are similarly specialized.
-
-3. **Compute expected claimed sum**: $\text{expected} = \sum_i \alpha_{\text{fold}}^i \cdot v_i(\alpha)$, where $v_i$ are the IC combined MLE values projected to $F$.
-
-4. **Verify claimed sum**: Check that the batched proof's `claimed_sums[0]` matches `expected`. This ensures the prover's sumcheck claim is consistent with the Ideal Check output.
-
-5. **Also prepares lookup**: `replay_lookup_pre()` is called, which for each lookup group:
-   - Regenerates the subtable and shifts from the `LookupTableType` and the projecting element $\alpha$.
-   - Calls `BatchedDecompLogupProtocol::build_verifier_pre_sumcheck()`, which:
-     - Reads and absorbs the group's aggregated multiplicities from the proof.
-     - Squeezes the $\beta$ challenge, reads and absorbs the chunk inverse witnesses and table inverses.
-     - Squeezes the $\gamma$ challenge.
-     - Returns a `LookupVerifierPreSumcheck` containing all the verifier state needed to finalize after the shared sumcheck.
-
-**Output**: `CprVerifierPreSumcheck { folding_challenge_powers, ic_evaluation_point }` plus the lookup pre-sumcheck states and the shared `num_vars` for the multi-degree sumcheck.
-
-### V4. `V/MDSumcheck`
-
-**Function**: `MultiDegreeSumcheck::<PiopField>::verify_as_subprotocol(&mut transcript, shared_nv, &batched_proof.md_proof, &field_cfg)`
-
-Verifies the **multi-degree sumcheck** — a single sumcheck that batches the CPR (degree 3) and lookup (degree 2) into one protocol with shared random challenges:
-
-1. **Absorb metadata**: number of variables, number of degree groups, each group's degree. Must exactly mirror the prover's absorptions.
-
-2. **For each of `shared_nv` rounds** ($= 9$ for SHA-256):
-   - For each degree group $g$: read the round message (a degree-$d_g$ univariate polynomial, represented by its $d_g$ "tail evaluations" at points $2, 3, \ldots, d_g$; the evaluation at 0 and 1 are implicit from the running sum).
-   - **Squeeze one shared challenge $r_i$**: a single random field element shared across all groups. This is what makes degrees "share" randomness — each group gets the same challenge but uses different degree polynomials.
-   - Update each group's running sum: verify $P_g(0) + P_g(1) = \text{running\_sum}_g$, then set $\text{running\_sum}_g \leftarrow P_g(r_i)$.
-
-3. **Generate subclaims**: After all rounds, for each group, check the final round consistency and output the expected evaluation at the shared point $\mathbf{s} = (r_0, r_1, \ldots, r_8)$.
-
-**Output**: `MultiDegreeSubClaims { point, expected_evaluations }` — the shared evaluation point and one expected evaluation per degree group (group 0 = CPR, group 1+ = lookup groups).
-
-### V5. `V/Main field sumcheck Finalize`
-
-**Function**: `CombinedPolyResolver::<PiopField>::finalize_verifier::<Sha256Uair>(...)`
-
-Checks that the CPR subclaim is consistent with the prover-supplied column evaluations:
-
-1. **Reconstruct public column evaluations**: The UAIR declares 12 public columns (known to the verifier in full). For each public column, the verifier: (a) projects all $2^9 = 512$ `BinaryPoly<32>` entries to $F$ using the precomputed projection closure, (b) builds a `DenseMultilinearExtension<F>` from the projected values, and (c) evaluates the MLE at the sumcheck point $\mathbf{s}$. Each MLE evaluation costs $O(2^9)$ field operations. With the `parallel` feature, these 12 evaluations run concurrently via Rayon. The results are merged with the prover-supplied `up_evals` (inserting public evals at the correct column indices via `reconstruct_up_evals`) to form `full_up_evals`.
-
-2. **Compute `eq_r` at $\mathbf{s}$**: Evaluate $\text{eq}(\mathbf{r}, \mathbf{s})$ — this is a single product of linear terms: $\prod_{i=0}^{n-1} (r_i \cdot s_i + (1-r_i)(1-s_i))$. If the sumcheck point is longer than `num_vars` (due to multi-degree padding), extra coordinates are accounted for.
-
-3. **Compute last-row selector at $\mathbf{s}$**: $\text{sel}(\mathbf{s}) = \prod_{i=0}^{n-1} s_i$ (the eq function at the all-ones point).
-
-4. **Re-evaluate constraints**: Apply `ConstraintFolder` to the prover-supplied `up_evals` and `down_evals`, using the projected scalars from the pre-sumcheck phase. This computes $\sum_i \alpha_{\text{fold}}^i \cdot g_i(\text{up\_evals}, \text{down\_evals})$.
-
-5. **Check the identity**: Verify that $\text{eq\_r} \cdot (1 - \text{sel}) \cdot \text{folded\_constraints} = \text{expected\_evaluation}$ (from the sumcheck subclaim). If this fails, the proof is invalid.
-
-6. **Absorb `up_evals` and `down_evals`** into the transcript (must match prover's absorption order).
-
-**Output**: The verifier now holds per-column evaluation claims (`up_evals[j]` = the claimed value of $\text{MLE}[\text{col}_j](\mathbf{s})$), which will be checked by the PCS via the folding protocol.
-
-### V5b. Shift Sumcheck Verify (algorithm detail, exercised in E2E pipeline only)
-
-> **Note:** This is not a standalone benchmark step and is **not** part of the V6 (`V/FoldingVerify`) bench replay either. The shift sumcheck verification is exercised only within the E2E pipeline functions. It is documented here for completeness of the protocol description.
-
-After CPR and lookup finalization, if `FoldedZincProof.shift_sumcheck` is `Some`, the verifier:
-
-1. **Reconstructs shift claims**: For each of the 12 `ShiftSpec` entries in the UAIR signature, builds a `ShiftClaim<F>` from the CPR `down_evals` (as claimed evaluations) and the CPR evaluation point.
-
-2. **Deserializes the proof**: Parses `SerializedShiftSumcheckProof.rounds` into `ShiftRoundPoly<F>` (3 field elements each) and `v_finals` into field elements.
-
-3. **Dispatches to the appropriate verifier**:
-   - **If public shifts exist** (4 out of 12 for SHA-256: shifts sourcing `W_TM2`, `W_TM7`, `W_TM15`, `W_TM16`): uses the **split API**. Calls `shift_sumcheck_verify_pre()` to replay sumcheck rounds and obtain the challenge point $\mathbf{s}$. Then computes the 4 public `v_finals` by evaluating public source column MLEs at $\mathbf{s}$. Reconstructs full `v_finals` via `reconstruct_shift_v_finals()` (interleaving 8 private + 4 public entries). Calls `shift_sumcheck_verify_finalize()` to check the final claim.
-   - **Otherwise**: calls the monolithic `shift_sumcheck_verify()` with all `v_finals` from the proof.
-
-4. The resulting `ShiftSumcheckVerifierOutput.v_finals` provides evaluation claims on the unshifted source columns at $\mathbf{s}$, which must be verified by the PCS.
-
-### V6. `V/FoldingVerify`
-
-**Function**: `fold_claims_verify(&mut transcript, &c1s, &c2s, &original_evals, &alpha_power, &cpr_point, &field_cfg)`
-
-**Transcript replay**: Before timing, the benchmark replays through IC → CPR pre → Lookup pre → MD-sumcheck → CPR finalize → Lookup finalize. All these are untimed; only the folding verify itself is measured.
-
-This is the step that connects the PIOP claims to the PCS commitment. After the PIOP produces an evaluation claim on the original `BinaryPoly<32>` columns, the folding protocol reduces it to a claim on the split `BinaryPoly<16>` columns:
-
-1. **Deserialize $c_1, c_2$**: Read one pair $(c_1[j], c_2[j])$ per committed column from the proof bytes.
-
-2. **Filter and collect original evals**: From the full `up_evals`, extract only the PCS-committed columns (exclude public and shift-source columns that are not committed).
-
-3. **Precompute $\alpha^{16}$**: `compute_alpha_power(&projecting_element, 16)` — computes $\alpha^{16}$ via repeated squaring (efficient since 16 = $2^4$).
-
-4. **Consistency check** (per column $j$):
-   $$c_1[j] + \alpha^{16} \cdot c_2[j] \stackrel{?}{=} \text{original\_eval}[j]$$
-   This verifies that the split is valid: the low-half MLE evaluation ($c_1$) plus $X^{16}$ (evaluated at $\alpha$) times the high-half MLE evaluation ($c_2$) reconstructs the original column MLE evaluation. If any check fails, the proof is rejected.
-
-5. **Absorb** all $c_1, c_2$ values into the transcript (same order as the prover).
-
-6. **Squeeze $\beta$**: Random challenge from transcript (advances state but not directly used in 2× folding).
-
-7. **Squeeze $\gamma$**: The folding random challenge.
-
-8. **Build extended PCS point**: $\mathbf{r}_{\text{pcs}} = (s_0, s_1, \ldots, s_8, \gamma)$ — the 10-dimensional point at which the PCS will be opened.
-
-9. **Compute new claimed evaluations**: $d[j] = (1 - \gamma) \cdot c_1[j] + \gamma \cdot c_2[j]$ — the linear interpolation, which equals $\text{MLE}[v'_j](\mathbf{r}_\text{pcs})$.
-
-**Output**: `FoldingVerifierOutput { new_point, new_evals }` — the PCS point and the per-column claims that the PCS opening must match.
-
-### V7. `V/PCSVerify (folded)`
-
-**Function**: `ZipPlus::<FoldedZt, FoldedLc>::verify_with_field_cfg::<PiopField, UNCHECKED>(...)`
-
-Verifies the Zip+ PCS opening proof — confirming that the committed polynomials do indeed evaluate to the claimed values at the point $\mathbf{r}_\text{pcs} = (\mathbf{s} \| \gamma)$:
-
-1. **Create PCS transcript**: Initialize a `PcsTranscript` from the serialized proof bytes (`pcs_proof_bytes`). Squeeze the PCS field configuration (must match the prover's PCS transcript).
-
-2. **Read $\mathbf{b}$ from proof stream**: The prover's combined row-selector inner products. Absorb into PCS transcript.
-
-3. **Recompute evaluation**: $\text{eval} = \langle \mathbf{q}_0, \mathbf{b} \rangle$ (with `num_rows = 1`, this is just $b[0]$). Verify it matches the claimed evaluation from the proof.
-
-4. **Read combined row**: The prover sent one combined codeword row (a vector of 4096 combined coefficients). Absorb it.
-
-5. **Verify grinding**: Check that the proof-of-work nonce produces the required number of leading zero bits.
-
-6. **Column openings** (the main verification cost): Squeeze 147 random column indices. For each:
-   - Read the Merkle authentication path and the column values for all committed polynomials.
-   - **Verify Merkle path**: Hash the leaf data and check siblings up to the root. The root must match the commitment.
-   - **Consistency check**: Verify that the column values, combined with the PCS FS challenges, produce the same combined-row value that the prover claimed.
-   - **Proximity check**: The combined row is verified to be a valid codeword of the linear code. This is done by checking the opened column positions against the linear code's parity structure.
-
-The PCS verification does **not** need the original polynomial data — it works entirely from the commitment (Merkle root), the proof, and the claimed evaluation point.
-
-**Output**: `Ok(())` if all checks pass; error otherwise. If this step succeeds, the verifier is convinced that the committed polynomials evaluate to the claimed values at $\mathbf{r}_\text{pcs}$, which (via the folding protocol and PIOP) implies the original trace satisfies all UAIR constraints.
+The verifier internally performs: field setup → IC verify (BP + QX) → CPR verify (BP + QX, standalone sumchecks) → Hybrid GKR lookup verify → shift sumcheck verify (BP + QX) → two-round folding verify → PCS verify. All QX-specific verification steps (QX IC, QX CPR, QX shift sumcheck) run as part of the same pipeline.
 
 ---
 
 ## Proof Size Analysis
 
-The benchmark computes and prints detailed proof size breakdowns for every pipeline variant. The components measured are:
+The benchmark computes and prints a detailed proof size breakdown for the **4× folded Hybrid GKR c=2** pipeline variant. The proof type is `Folded4xZincProof`. The components measured are:
 
 | Component | Description |
 |---|---|
-| **PCS** | Zip+ opening proof bytes (Merkle paths, column data, consistency hashes) |
-| **IC** | Ideal Check proof (combined MLE values at the random point) |
-| **CPR sumcheck** | Main field sumcheck round messages + claimed sum |
-| **CPR evals** | Up-evaluations (column evals at the sumcheck point) and down-evaluations (shifted trace evals) |
-| **Lookup** | Aggregated multiplicities, chunk inverse witnesses (classic) or GKR proof data (GKR/Hybrid) |
-| **Shift SC** | Shift sumcheck proof — $m$ degree-2 round polynomials (3 field elements each) + per-claim `v_finals` (source column MLE evaluations at the shift sumcheck challenge point). Present in all pipeline variants benchmarked here (both original and all folded/batched variants). For SHA-256, 12 shift claims produce 9 round polys and 8 private `v_finals` (4 are public and excluded). See §9a for details. |
-| **Folding** | $c_1, c_2$ values per column (2× folding) or $c_1, c_2, c_3, c_4$ (4× folding) |
+| **PCS** | Zip+ opening proof bytes (Merkle paths, column data, consistency hashes, grinding nonce) |
+| **IC** | Ideal Check proof for `Sha256Uair` (BP constraints) — combined MLE values at the random point |
+| **QX IC** | Ideal Check proof for `Sha256UairQx` (Q[X] carry constraints, trivial ideal) |
+| **CPR sumcheck** | Main field sumcheck round messages + claimed sum (standalone `MLSumcheck`, degree 3) |
+| **CPR evals** | Up-evaluations and down-evaluations for `Sha256Uair` |
+| **QX CPR** | Standalone sumcheck + evals for `Sha256UairQx` |
+| **Lookup** | Hybrid GKR c=2 proof data: aggregated multiplicities, witness-side GKR (roots, layer proofs, sent intermediates at cutoff), table-side GKR (root, layer proofs) |
+| **Shift SC** | Shift sumcheck proof for `Sha256Uair` — $m$ degree-2 round polynomials + per-claim `v_finals`. For SHA-256, 12 shift claims produce 9 round polys and 8 private `v_finals` (4 are public and excluded). See §8a for details. |
+| **QX Shift SC** | Shift sumcheck proof for `Sha256UairQx` |
+| **Folding** | $c_1, c_2$ values per column (round 1: 32→16) + $c_3, c_4$ values per column (round 2: 16→8) |
 | **Eval point** | Serialized evaluation point coordinates |
 | **PCS evals** | Serialized claimed PCS evaluation values |
 
-All bytes are concatenated and compressed with Deflate (default compression level) to show the **compressed proof size**, which is the metric that matters for transmission.
-
-### Comparison tables printed
-
-1. **4× folded vs 2× folded** — raw and compressed, showing PCS and total savings
-2. **Chunk variant comparison** — 2×/4× × 2/3/4/8-chunk configurations (7 entries)
-3. **Folded vs original** — total proof size reduction from folding
-4. **Classic vs GKR lookup** — lookup-specific and total proof size differences
+All bytes are concatenated and compressed with Deflate (default compression level) to show the **compressed proof size**, which is the metric that matters for transmission. A single breakdown table is printed (no multi-variant comparison tables).
 
 ---
 
 ## GKR and Hybrid GKR Lookup Protocols
 
-The **GKR lookup** and its **Hybrid GKR** optimisation are alternative lookup protocols that replace the classic batched decomposition LogUp described in Step 11. They are based on the GKR fractional sumcheck from *Papini & Haböck, "Improving logarithmic derivative lookups using GKR"* ([ePrint 2023/1284](https://eprint.iacr.org/2023/1284)).
+The **GKR lookup** and its **Hybrid GKR** optimisation are alternative lookup protocols that replace the classic batched decomposition LogUp described in Step 10. They are based on the GKR fractional sumcheck from *Papini & Haböck, "Improving logarithmic derivative lookups using GKR"* ([ePrint 2023/1284](https://eprint.iacr.org/2023/1284)).
 
-### How the GKR lookup differs from classic LogUp (Step 11)
+### How the GKR lookup differs from classic LogUp (Step 10)
 
 In the **classic** variant (`BatchedDecompLogupProtocol`), the prover sends three families of auxiliary vectors in the clear:
 
@@ -794,7 +628,7 @@ The identity $H[i] = 0$ (batching inverse-correctness and balance checks) is the
 
 In the **GKR** variant (`GkrBatchedDecompLogupProtocol`), the inverse vectors $u_k, v$ are **eliminated entirely**. Only the aggregated multiplicities are sent. Instead, the prover constructs a binary **fraction tree** and runs a layer-by-layer GKR sumcheck to prove that the fractional sums balance. The resulting GKR proof is $O(L \cdot d^2)$ field elements where $d = \log_2(K \cdot W)$, which is much smaller than the classic $O(L \cdot K \cdot W)$ inverse vectors for large traces.
 
-A key architectural difference: **the GKR lookup runs as a separate sumcheck**, not batched with CPR in the multi-degree sumcheck. The pipeline function `prove_gkr_logup_folded` (and its hybrid variant) runs CPR as a standalone degree-3 `MLSumcheck` first, then runs the GKR fractional sumcheck independently. This is reflected in the E2E tables: row 18 says "separate CPR sumcheck + GKR fractional-sumcheck, no multi-degree batching".
+A key architectural difference: **the GKR lookup runs as a separate sumcheck**, not batched with CPR in the multi-degree sumcheck. The pipeline function `prove_hybrid_gkr_logup_4x_folded` runs CPR as a standalone degree-3 `MLSumcheck` first, then runs the Hybrid GKR fractional sumcheck independently.
 
 ### The GKR fractional-sum tree
 
@@ -921,48 +755,44 @@ All defined in [piop/src/lookup/hybrid_gkr.rs](piop/src/lookup/hybrid_gkr.rs).
 
 ### Pipeline integration
 
-Two pipeline entry points use GKR-based lookup, each running CPR as a standalone sumcheck followed by GKR lookup as a separate step (no multi-degree batching):
+This benchmark uses a single pipeline entry point:
 
 | Pipeline function | Folding | Lookup variant | Proof type |
 |---|---|---|---|
-| `prove_gkr_logup_folded` | 2× | Full GKR | `LookupProofData::Gkr` |
-| `prove_hybrid_gkr_logup_4x_folded` | 4× | Hybrid GKR (cutoff $c$) | `LookupProofData::HybridGkr` |
+| `prove_hybrid_gkr_logup_4x_folded` | 4× | Hybrid GKR (cutoff $c = 2$) | `Folded4xZincProof` with `LookupProofData::HybridGkr` |
 
-Both share the same verifier dispatch: `verify_classic_logup_folded` (for 2×) and `verify_classic_logup_4x_folded` (for 4×) match on the `LookupProofData` enum and call `verify_gkr_batched_lookup` or `verify_hybrid_gkr_batched_lookup` accordingly. These are defined in [piop/src/lookup/pipeline.rs](piop/src/lookup/pipeline.rs) and integrated in [snark/src/pipeline.rs](snark/src/pipeline.rs).
+The verifier is `verify_classic_logup_4x_folded`, which matches on the `LookupProofData` enum and dispatches to `verify_hybrid_gkr_batched_lookup`. These are defined in [piop/src/lookup/pipeline.rs](piop/src/lookup/pipeline.rs) and integrated in [snark/src/pipeline.rs](snark/src/pipeline.rs).
 
-The pipeline step sequence for GKR/Hybrid GKR folded variants is:
+The pipeline step sequence for the 4× folded Hybrid GKR c=2 variant is:
 
-1. Split columns → 2. PCS Commit → 3. Ideal Check → 4. CPR (standalone `MLSumcheck`, degree 3) → 5. GKR/Hybrid GKR Lookup (separate `GkrBatchedDecompLogupProtocol` or `HybridGkrBatchedDecompLogupProtocol`) → 6. Folding → 7. PCS Prove.
+1. Double-split columns (32→16→8) → 2. PCS Commit (4x-folded) → 3. IC (BinaryPoly, `Sha256Uair`) → 4. QX IC (`Sha256UairQx`, trivial ideal) → 5. CPR (standalone `MLSumcheck`, degree 3) → 6. QX CPR (standalone) → 7. Hybrid GKR Lookup → 8. Shift sumcheck (BP) → 9. QX Shift sumcheck → 10. Folding (2-round) → 11. PCS Prove.
 
-Compare with classic folded: steps 4 and 5 are merged into a single `MultiDegreeSumcheck` (CPR at degree 3, lookup at degree 2). The GKR variants sacrifice this batching in exchange for the much smaller lookup proof size.
+The Hybrid GKR c=2 approach runs CPR as a standalone sumcheck followed by the Hybrid GKR lookup as a separate step (no multi-degree batching). The QX sub-UAIR (`Sha256UairQx`) gets its own IC, CPR, and shift sumcheck — all running independently from the BinaryPoly sub-UAIR.
 
-### Concrete numbers for SHA-256 8× (13 lookup columns, 8 chunks width-4, 512 rows)
+### Concrete numbers for SHA-256 8× (13 lookup columns, 4 chunks width-8, 512 rows)
 
-The E2E pipeline includes 10 base $Q[X]$ lookups plus 3 affine lookups (Ch, neg-Ch, Maj), giving $L = 13$ total lookup columns. The individual step 11 benchmark uses only the 10 base lookups.
+The E2E pipeline includes 10 base $Q[X]$ lookups plus 3 affine lookups (Ch, neg-Ch, Maj), giving $L = 13$ total lookup columns. The individual step 10 benchmark uses only the 10 base lookups.
 
 | Parameter | Value |
 |---|---|
 | $L$ (lookup columns, E2E) | 13 (10 base + 3 affine) |
-| $K$ (chunks) | 8 (default) or 4 (4-chunk variant) |
+| $K$ (chunks) | 4 (`chunk_width=8`) |
 | $W$ (witness rows) | 512 |
-| Leaf count per witness tree | $K \times W = 4096$ (8-chunk) or $2048$ (4-chunk), padded to $2^{12}$ / $2^{11}$ |
-| Witness tree depth $d_w$ | 12 (8-chunk) or 11 (4-chunk) |
-| Subtable size $T$ | $2^4 = 16$ (8-chunk) or $2^8 = 256$ (4-chunk) |
-| Table tree depth $d_t$ | 4 (8-chunk) or 8 (4-chunk) |
-| Classic lookup inverse witnesses | $13 \times 8 \times 512 = 53{,}248$ field elements (E2E, 8-chunk) |
-| Full GKR witness sumcheck rounds | $\frac{12 \times 11}{2} = 66$ (8-chunk) |
+| Leaf count per witness tree | $K \times W = 2048$, padded to $2^{11}$ |
+| Witness tree depth $d_w$ | 11 |
+| Subtable size $T$ | $2^8 = 256$ |
+| Table tree depth $d_t$ | 8 |
 | Hybrid GKR ($c = 2$) top rounds | $1$ (layer 1 only; layer 0 is a direct check) |
-| Hybrid GKR ($c = 2$) bottom fresh depth | 10, bottom rounds $= 45$ |
+| Hybrid GKR ($c = 2$) bottom fresh depth | $11 - 2 = 9$, bottom rounds $= \frac{9 \times 8}{2} = 36$ |
 | Hybrid GKR ($c = 2$) sent intermediates | $2 \times 13 \times 4 = 104$ field elements |
-| Hybrid GKR ($c = 2$) total rounds | $1 + 45 = 46$ (vs 66 for full GKR) |
-| Hybrid GKR ($c = 1$) sent intermediates | $2 \times 13 \times 2 = 52$ field elements |
-| Hybrid GKR ($c = 1$) total rounds | $0 + 55 = 55$ |
+| Hybrid GKR ($c = 2$) total witness rounds | $1 + 36 = 37$ |
+| Table GKR total rounds | $\frac{8 \times 7}{2} = 28$ |
 
 ---
 
 ## Hybrid GKR Cost Analysis
 
-> **Note:** This section documents the hybrid GKR cost model for reference. The `steps_sha256_8x_folded` benchmark does **not** include a standalone hybrid GKR cost analysis or hybrid GKR microbenchmarks. The hybrid GKR pipeline function `prove_hybrid_gkr_logup_4x_folded` is not instantiated in this benchmark file; however, the full GKR variant `prove_gkr_logup_folded` IS benchmarked (see E2E Prover/Verifier rows 18–19). See [BENCHMARK_SHA256_8X_ECDSA.md](BENCHMARK_SHA256_8X_ECDSA.md) for benchmarks that exercise hybrid GKR.
+> **Note:** This section documents the hybrid GKR cost model for reference. The `steps_sha256_8x_folded` benchmark exercises the Hybrid GKR c=2 pipeline via `prove_hybrid_gkr_logup_4x_folded` in the E2E prover (step 14) and verifier (step 15).
 
 The general cost model for the hybrid GKR LogUp tradeoff described in the preceding section is as follows:
 
@@ -977,7 +807,7 @@ The benchmark:
 
 ## Implementation Optimizations
 
-The following optimizations have been applied to the proving stack. All affect shared library code and therefore benefit **every pipeline variant** benchmarked here (original, 2× folded, 4× folded, classic, and GKR). The same optimizations also apply to the dual-circuit benchmark ([BENCHMARK_SHA256_8X_ECDSA.md](BENCHMARK_SHA256_8X_ECDSA.md)).
+The following optimizations have been applied to the proving stack. All affect shared library code and therefore benefit the **4× folded Hybrid GKR c=2** pipeline benchmarked here. The same optimizations also apply to the dual-circuit benchmark ([BENCHMARK_SHA256_8X_ECDSA.md](BENCHMARK_SHA256_8X_ECDSA.md)).
 
 ### 1. Ideal Check: shared $\text{eq}(\mathbf{r}, \cdot)$ table
 
@@ -1034,14 +864,16 @@ The three features specified on the command line affect performance:
 | `simd` | Enables SIMD-accelerated `BinaryPoly` arithmetic (XOR, AND, shifts) and inner product operations. |
 | `asm` | Enables assembly-optimized routines for field arithmetic and hashing (e.g., SHA-256 intrinsics for the Merkle tree, AES-NI for transcript). |
 
+Additionally, the `Sha256UairQx` carry-propagation constraints are gated behind the `qx-constraints` feature flag in the `sha256-uair` crate.
+
 ---
 
 ## Criterion Configuration
 
 - **Sample size**: 100 (set via `group.sample_size(100)`)
-- **Benchmark group**: `"8xSHA256 Folded Steps"`
+- **Benchmark group**: `"8xSHA256 4x-Folded Hybrid GKR c=2 Steps"`
 - **Harness**: Custom (`harness = false` in `Cargo.toml`)
-- **Timing method**: Most step benchmarks use standard `iter` (WitnessGen, SplitColumns, Commit, FieldSetup, Project Ideal Check, Project Main field sumcheck, LookupExtract, PCS/Prove, and all E2E Verifier benchmarks). Stateful steps that need transcript replay setup outside the timed region (IdealCheck, Main field sumcheck, Lookup) and E2E Prover benchmarks use `iter_custom`.
+- **Timing method**: Most step benchmarks use standard `iter` (WitnessGen, SplitColumns, Commit, FieldSetup, Project Ideal Check, Project Main field sumcheck, LookupExtract, PCS/Prove, and E2E Verifier). Stateful steps that need transcript replay setup outside the timed region (IdealCheck, Main field sumcheck, Lookup, ShiftSumcheck, Folding/FoldClaims) and E2E Prover benchmarks use `iter_custom`.
 
 ---
 
@@ -1050,6 +882,6 @@ The three features specified on the command line affect performance:
 Running the benchmark produces:
 
 1. **Criterion statistical output** (stdout) — for each benchmark function, reports mean time, standard deviation, throughput, and regression detection vs. any saved baseline.
-2. **Stdout diagnostic output** — verifier step timing breakdowns (printed via `println!` after each E2E Verifier variant).
-3. **Stderr diagnostic output** — detailed proof size tables, pipeline timing summaries, and peak memory usage (printed via `eprintln!`).
-4. **Criterion HTML reports** — saved to `target/criterion/8xSHA256 Folded Steps/` for interactive visualization.
+2. **Stdout diagnostic output** — verifier step timing breakdown (printed via `println!` after the E2E Verifier run).
+3. **Stderr diagnostic output** — prover pipeline timing breakdown, proof size table, and peak memory usage (printed via `eprintln!`).
+4. **Criterion HTML reports** — saved to `target/criterion/8xSHA256 4x-Folded Hybrid GKR c=2 Steps/` for interactive visualization.
