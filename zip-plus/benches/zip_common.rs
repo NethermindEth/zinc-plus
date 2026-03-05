@@ -62,11 +62,16 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     merkle_root::<Zt, 15>(group);
     merkle_root::<Zt, 16>(group);
 
-    commit::<Zt, Lc, 12>(group);
-    commit::<Zt, Lc, 13>(group);
-    commit::<Zt, Lc, 14>(group);
-    commit::<Zt, Lc, 15>(group);
-    commit::<Zt, Lc, 16>(group);
+    commit::<Zt, Lc, 12, 1>(group);
+    commit::<Zt, Lc, 13, 1>(group);
+    commit::<Zt, Lc, 14, 1>(group);
+    commit::<Zt, Lc, 15, 1>(group);
+    commit::<Zt, Lc, 16, 1>(group);
+
+    commit::<Zt, Lc, 14, 2>(group);
+    commit::<Zt, Lc, 14, 5>(group);
+    commit::<Zt, Lc, 16, 2>(group);
+    commit::<Zt, Lc, 16, 5>(group);
 
     prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12, 1>(group);
     prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13, 1>(group);
@@ -178,7 +183,7 @@ where
     );
 }
 
-pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
+pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize, const BATCH: usize>(
     group: &mut BenchmarkGroup<WallTime>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
@@ -190,7 +195,7 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
 
     group.bench_function(
         format!(
-            "Commit: Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
+            "Commit(batch={BATCH}): Eval={}, Cw={}, Comb={}, poly_size=2^{P}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name(),
             Zt::Comb::type_name()
@@ -199,13 +204,14 @@ pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
             b.iter_custom(|iters| {
                 let mut total_duration = Duration::ZERO;
                 for _ in 0..iters {
-                    let poly = DenseMultilinearExtension::rand(P, &mut rng);
+                    let polys: Vec<_> = (0..BATCH)
+                        .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
+                        .collect();
                     let timer = Instant::now();
-                    let res = ZipPlus::commit_single(&params, &poly).expect("Failed to commit");
+                    let res = ZipPlus::commit(&params, &polys).expect("Failed to commit");
                     black_box(res);
                     total_duration += timer.elapsed();
                 }
-
                 total_duration
             })
         },
