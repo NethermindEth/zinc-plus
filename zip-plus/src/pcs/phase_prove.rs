@@ -23,8 +23,67 @@ use zinc_utils::{
     mul_by_scalar::MulByScalar,
 };
 
-// References main.pdf for the new Zip+ protocol
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
+    /// Generates an opening proof for one or more committed multilinear
+    /// polynomials at an evaluation point, using the Zip+ protocol.
+    ///
+    /// This replaces the old two-phase (test + evaluate) approach with a single
+    /// merged phase. The key idea: alpha-projection (Eval → CombR) is used for
+    /// *both* the proximity argument and the evaluation claim, eliminating the
+    /// separate field-domain projection via `projecting_element` γ.
+    ///
+    /// # Algorithm
+    /// 1. Computes points: `(q_0, q_1) = point_to_tensor(point)` where `q_0`
+    ///    (length `num_rows`) combines rows and `q_1` (length `row_len`)
+    ///    combines columns.
+    /// 2. Per polynomial, samples random challenges `alphas` (`[α_0, …, α_d]`).
+    ///    For each decoded row `w_j` takes the inner product `<entry, alphas>`
+    ///    of every entry in the row, producing `w'_j` — a row of `CombR`
+    ///    integers.
+    /// 3. Computes `b` (length `num_rows`), accumulated across all polys: `b_j
+    ///    += <w'_j, q_1>` for each row `j`.
+    /// 4. Writes `b` to the transcript and computes `eval = <q_0, b>`.
+    /// 5. Samples combination coefficients `betas` (or hardcodes `[1]` when
+    ///    `num_rows == 1`) and computes `combined_row` (CombR, length
+    ///    `row_len`) = `sum_i(sum_j(s_j * w'_ij))`, accumulated across all
+    ///    polynomials
+    /// 6. Writes `combined_row` to the transcript.
+    /// 7. Opens `NUM_COLUMN_OPENINGS` Merkle columns: for each, squeezes a
+    ///    column index, writes per-polynomial column values (Cw entries), and
+    ///    appends the Merkle proof.
+    ///
+    /// # Transcript layout
+    /// ```text
+    /// [field_cfg sampled]
+    /// [per-poly alphas sampled]
+    /// [b written as F elements]
+    /// [coeffs s sampled (or hardcoded [1])]
+    /// [combined_row written as CombR]
+    /// [column openings: idx, per-poly column values, merkle proof] × NUM_COLUMN_OPENINGS
+    /// ```
+    ///
+    /// # Parameters
+    /// - `pp`: Public parameters containing `num_vars`, `num_rows`, and the
+    ///   linear code configuration.
+    /// - `polys`: Slice of multilinear polynomials (batch). All must have
+    ///   `num_vars` variables matching `pp`.
+    /// - `point`: The evaluation point (in `Zt::Pt` coordinates, length
+    ///   `num_vars`).
+    /// - `commit_hint`: The `ZipPlusHint` returned by `commit`, containing
+    ///   per-polynomial codeword matrices and the shared Merkle tree.
+    ///
+    /// # Returns
+    /// A `Result` containing:
+    /// - `F`: The combined evaluation `<q_0, b>`, which equals
+    ///   `sum_i(alpha_projected_eval_i(point))` across all batched polys.
+    /// - `ZipPlusProof`: The serialized transcript (b, combined_row, column
+    ///   openings + Merkle proofs) for the verifier.
+    ///
+    /// # Errors
+    /// - Returns `ZipError::InvalidPcsParam` if any polynomial has more
+    ///   variables than `pp` supports.
+    /// - Returns `ZipError::OverflowError` (when `CHECK_FOR_OVERFLOW` is true)
+    ///   if intermediate CombR sums exceed the integer precision.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn prove<F, const CHECK_FOR_OVERFLOW: bool>(
         pp: &ZipPlusParams<Zt, Lc>,
@@ -109,8 +168,9 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         // It is safe to use inner_product_unchecked because we're in a field.
         let eval = MBSInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())?;
 
-        // combined_row_i[col] = sum_j(s_j * int_rows_i[j][col]) for each column
-        // combined_row: Vec<CombR> (length row_len), s_j in paper
+        // combined_row[col] = sum_i( sum_j( s_j * w'_ij[col] ) ) over all polys i, rows
+        // j Inner: combine_rows! computes sum_j(s_j * w'_ij) per poly
+        // Outer: try_fold accumulates across polys
         let coeffs = if pp.num_rows == 1 {
             vec![Zt::Chal::ONE]
         } else {
