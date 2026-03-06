@@ -317,8 +317,7 @@ mod tests {
         let point = test_point(num_vars);
 
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
-        let (field_cfg, projecting_element) =
-            get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let result = TestZip::prove_single::<F, CHECKED>(
             &mut transcript,
@@ -339,8 +338,7 @@ mod tests {
         let point: Vec<i128> = (0..num_vars).map(|i| i as i128 + 2).collect();
 
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
-        let (field_cfg, projecting_element) =
-            get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let result = TestPolyZip::prove_single::<F, CHECKED>(
             &mut transcript,
@@ -374,8 +372,7 @@ mod tests {
         let point = test_point(num_vars);
 
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
-        let (field_cfg, projecting_element) =
-            get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let result = TestZip::prove_single::<F, CHECKED>(
             &mut transcript,
@@ -400,8 +397,7 @@ mod tests {
         let point = test_point(num_vars);
 
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
-        let (field_cfg, projecting_element) =
-            get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let result = TestZip::prove_single::<F, CHECKED>(
             &mut transcript,
@@ -424,8 +420,7 @@ mod tests {
         let point = test_point(num_vars);
 
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
-        let (field_cfg, projecting_element) =
-            get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let eval_f = TestZip::prove_single::<F, CHECKED>(
             &mut transcript,
@@ -470,8 +465,7 @@ mod tests {
         let point = test_point(num_vars);
 
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
-        let (field_cfg, projecting_element) =
-            get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let result =
             TestZip::prove::<F, CHECKED>(&mut transcript, &pp, &polys, &point, &hint, &field_cfg);
@@ -488,8 +482,7 @@ mod tests {
         let point = test_point(num_vars);
 
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
-        let (field_cfg, projecting_element) =
-            get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let result =
             TestZip::prove::<F, CHECKED>(&mut transcript, &pp, &polys, &point, &hint, &field_cfg);
@@ -515,8 +508,7 @@ mod tests {
         let point = test_point(num_vars);
 
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
-        let (field_cfg, projecting_element) =
-            get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let result = TestZip::prove::<F, CHECKED>(
             &mut transcript,
@@ -542,8 +534,7 @@ mod tests {
         let point = test_point(num_vars);
 
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
-        let (field_cfg, projecting_element) =
-            get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let result =
             TestZip::prove::<F, CHECKED>(&mut transcript, &pp, &polys, &point, &hint, &field_cfg);

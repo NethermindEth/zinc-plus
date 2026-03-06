@@ -232,11 +232,10 @@ where
     let (hint, comm) = ZipPlus::commit_single(&pp, &poly).unwrap();
 
     let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
-    let (field_cfg, projecting_element) =
-        get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
+    let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
     let point: Vec<Zt::Pt> = prepare_evaluation_point();
 
-    let eval =
+    let eval_f =
         ZipPlus::prove_single::<F, CHECKED>(&mut transcript, &pp, &poly, &point, &hint, &field_cfg)
             .unwrap();
 
@@ -249,18 +248,14 @@ where
 
     transcript.fs_transcript.absorb_slice(&comm.root.0);
 
-    (pp, comm, point_f, eval, transcript)
+    (pp, comm, point_f, eval_f, transcript)
 }
 
-pub fn get_field_and_projecting_element<Zt, F>(
-    transcript: &mut impl Transcript,
-) -> (F::Config, Zt::Chal)
+pub fn get_field_cfg<Zt, F>(transcript: &mut impl Transcript) -> F::Config
 where
     Zt: ZipTypes,
     F: PrimeField,
     F::Modulus: FromRef<Zt::Fmod>,
 {
-    let field_cfg = transcript.get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
-    let projecting_element: Zt::Chal = transcript.get_challenge();
-    (field_cfg, projecting_element)
+    transcript.get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>()
 }

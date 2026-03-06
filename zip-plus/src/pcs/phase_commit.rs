@@ -720,8 +720,7 @@ mod tests {
 
         let (hint, comm) = TestZip::commit_single(&param, &mle).unwrap();
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
-        let (field_cfg, projecting_element) =
-            get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let _eval_f = TestZip::prove_single::<F, CHECKED>(
             &mut transcript,

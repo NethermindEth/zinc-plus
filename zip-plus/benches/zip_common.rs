@@ -251,7 +251,6 @@ pub fn prove<
     let field_cfg = transcript
         .fs_transcript
         .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
-    let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
 
     let point = vec![Zt::Pt::one(); P];
 
@@ -320,7 +319,6 @@ pub fn verify<
     let field_cfg = transcript
         .fs_transcript
         .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
-    let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
     let point = vec![Zt::Pt::one(); P];
 
     let eval_f = ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>(
@@ -360,7 +358,6 @@ pub fn verify<
                     let field_cfg = transcript
                         .fs_transcript
                         .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
-                    let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
 
                     ZipPlus::verify::<F, CHECK_FOR_OVERFLOWS>(
                         &mut transcript,
