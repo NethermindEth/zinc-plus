@@ -17,5 +17,8 @@ zinc-poly = { path = "../poly" }
 zinc-uair = { path = "../uair" }
 zinc-utils = { path = "../utils" }
 
+[features]
+no-f2x = []
+
 [dev-dependencies]
 zinc-uair = { path = "../uair" }

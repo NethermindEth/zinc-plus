@@ -121,6 +121,108 @@ where
     layers
 }
 
+/// Like [`build_fraction_tree`], but optimised for the common LogUp case
+/// where **every** leaf numerator is `one` (multiplicity-1 witness lookups).
+///
+/// At the first (leaf) level of the tree the standard formula
+///   `p_parent = p_l·q_r + p_r·q_l`
+/// simplifies to `p_parent = q_l + q_r` because `p_l = p_r = 1`.
+/// This replaces 2 field multiplications with 1 addition per node at
+/// the widest layer, saving ~⅔ of the first-level work.
+///
+/// **Pre-condition**: `leaf_q.len()` must be a power of 2 and every
+/// leaf `p` value is `one`.  Callers must ensure there is no padding
+/// (i.e. `data_len == 2^d`) or that padding entries also satisfy `p=1`.
+#[allow(clippy::arithmetic_side_effects)]
+pub(super) fn build_fraction_tree_ones_leaf<F: InnerTransparentField + Send + Sync>(
+    one: F,
+    leaf_q: Vec<F>,
+) -> Vec<FractionLayer<F>>
+where
+    F::Config: Sync,
+{
+    let d = zinc_utils::log2(leaf_q.len()) as usize;
+    debug_assert_eq!(leaf_q.len(), 1 << d);
+
+    let leaf_p = vec![one; 1 << d];
+
+    let mut layers = Vec::with_capacity(d + 1);
+    layers.push(FractionLayer {
+        p: leaf_p,
+        q: leaf_q,
+    });
+
+    if d == 0 {
+        return layers;
+    }
+
+    // First level: exploit p_leaf == 1 everywhere.
+    // p_parent = 1·q_r + 1·q_l = q_l + q_r   (saves 2 muls per node)
+    // q_parent = q_l · q_r                     (unchanged)
+    {
+        let child = layers.last().expect("tree is non-empty");
+        let half = 1usize << (d - 1);
+
+        let (parent_p, parent_q): (Vec<F>, Vec<F>) = if half >= 64 {
+            cfg_into_iter!(0..half)
+                .map(|i| {
+                    let ql = &child.q[i];
+                    let qr = &child.q[i + half];
+                    (ql.clone() + qr, ql.clone() * qr)
+                })
+                .unzip()
+        } else {
+            (0..half)
+                .map(|i| {
+                    let ql = &child.q[i];
+                    let qr = &child.q[i + half];
+                    (ql.clone() + qr, ql.clone() * qr)
+                })
+                .unzip()
+        };
+
+        layers.push(FractionLayer {
+            p: parent_p,
+            q: parent_q,
+        });
+    }
+
+    // Remaining levels: standard formula.
+    for level in (0..d.saturating_sub(1)).rev() {
+        let child = layers.last().expect("tree is non-empty during construction");
+        let half = 1usize << level;
+
+        let (parent_p, parent_q): (Vec<F>, Vec<F>) = if half >= 64 {
+            cfg_into_iter!(0..half)
+                .map(|i| {
+                    let pl = &child.p[i];
+                    let ql = &child.q[i];
+                    let pr = &child.p[i + half];
+                    let qr = &child.q[i + half];
+                    (pl.clone() * qr + &(pr.clone() * ql), ql.clone() * qr)
+                })
+                .unzip()
+        } else {
+            (0..half)
+                .map(|i| {
+                    let pl = &child.p[i];
+                    let ql = &child.q[i];
+                    let pr = &child.p[i + half];
+                    let qr = &child.q[i + half];
+                    (pl.clone() * qr + &(pr.clone() * ql), ql.clone() * qr)
+                })
+                .unzip()
+        };
+
+        layers.push(FractionLayer {
+            p: parent_p,
+            q: parent_q,
+        });
+    }
+
+    layers
+}
+
 /// Evaluate a k-variable MLE (given as evaluations over {0,1}^k in
 /// little-endian order) at a point in F^k.
 #[allow(clippy::arithmetic_side_effects, dead_code)]

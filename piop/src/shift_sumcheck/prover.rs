@@ -240,12 +240,21 @@ where
                 .zip(w_tables.par_iter_mut())
                 .for_each(|(h_table, w_table)| {
                     let half_len = h_table.len() / 2;
-                    // Fold in-place: overwrite first half, then truncate.
-                    for j in 0..half_len {
-                        h_table[j] = h_table[j].clone() * &one_minus_s
-                            + &(h_table[half_len + j].clone() * &s);
-                        w_table[j] = w_table[j].clone() * &one_minus_s
-                            + &(w_table[half_len + j].clone() * &s);
+                    // Fold in-place: inner parallelism via split_at_mut
+                    // lets multiple cores handle large tables.
+                    {
+                        let (h_lo, h_hi) = h_table.split_at_mut(half_len);
+                        let (w_lo, w_hi) = w_table.split_at_mut(half_len);
+                        h_lo.par_iter_mut()
+                            .zip(h_hi.par_iter())
+                            .zip(w_lo.par_iter_mut().zip(w_hi.par_iter()))
+                            .with_min_len(128)
+                            .for_each(|((hl, hh), (wl, wh))| {
+                                *hl = hl.clone() * &one_minus_s
+                                    + &(hh.clone() * &s);
+                                *wl = wl.clone() * &one_minus_s
+                                    + &(wh.clone() * &s);
+                            });
                     }
                     h_table.truncate(half_len);
                     w_table.truncate(half_len);

@@ -4,6 +4,164 @@
 cargo bench --bench steps_sha256_8x_folded -p zinc-snark --features "parallel simd asm"
 ```
 
+### `no-f2x` variant
+
+To benchmark the **no-F₂[X]** UAIR variant, add the `no-f2x` feature:
+
+```
+cargo bench --bench steps_sha256_8x_folded -p zinc-snark --features "parallel simd asm no-f2x"
+```
+
+This switches the dual UAIR from `Sha256Uair`/`Sha256UairQx` to `Sha256UairBpNoF2x`/`Sha256UairQxNoF2x`. The trace grows from 30 to 38 columns (8 new μ decomposition columns). See [sha256-uair/src/no_f2x.rs](sha256-uair/src/no_f2x.rs) for details.
+
+#### Motivation
+
+In the standard UAIR, the 4 rotation constraints (C1–C4) are expressed as ideal membership tests over $\mathbb{F}_2[X]$:
+
+$$Q(\ldots) \in (X^{32} - 1) \quad \text{over } \mathbb{F}_2[X]$$
+
+Because $\mathbb{F}_2[X]$ has characteristic 2, there is no carry when multiplying binary polynomials — each coefficient is automatically reduced mod 2. This naturally handles the "carries that vanish mod 2" produced by the bilinear products $\hat{a} \cdot \rho_0$, etc.
+
+The **no-F₂[X] variant** eliminates the reliance on $\mathbb{F}_2[X]$ arithmetic by explicitly accounting for the carries. The constraints become:
+
+$$Q(\ldots) - 2\mu \in (X^{32} - 1) \quad \text{over } \mathbb{Z}[X]$$
+
+where $\mu$ is a **quotient vector** — the polynomial of carry coefficients that vanishes when the constraint is evaluated mod 2. The quotient $\mu$ satisfies $Q(\ldots) \equiv 0 \pmod{2, X^{32}-1}$, and the correction term $2\mu$ absorbs the non-binary coefficients produced by polynomial multiplication over $\mathbb{Z}[X]$.
+
+#### Mathematical derivation
+
+Consider constraint C1: $\hat{a} \cdot \rho_0 - \hat{\Sigma}_0 \in (X^{32}-1)$ over $\mathbb{F}_2[X]$, where $\rho_0 = X^{30} + X^{19} + X^{10}$.
+
+When evaluated over $\mathbb{Z}[X]$, the product $\hat{a} \cdot \rho_0$ may have coefficients $\in \{0, 1, 2, 3\}$ (since $\rho_0$ has 3 nonzero terms and $\hat{a}$ is binary). After subtracting $\hat{\Sigma}_0$ (binary), the residue $R = \hat{a} \cdot \rho_0 - \hat{\Sigma}_0$ reduced mod $(X^{32}-1)$ has even coefficients (because $R \equiv 0 \pmod{2}$ by the original $\mathbb{F}_2[X]$ constraint). Define:
+
+$$\mu = R / 2 \quad (\text{coefficient-wise integer division})$$
+
+The coefficients of $\mu$ are in $\{0, 1, 2, 3\}$ for C1–C2 (3-term rotation polynomial) and $\{0, 1\}$ for C3–C4 (2-term rotation polynomial). In all cases, $\mu$ can be decomposed into two binary polynomials:
+
+$$\mu = \mu_{\text{lo}} + 2 \cdot \mu_{\text{hi}}, \qquad \mu_{\text{lo}}, \mu_{\text{hi}} \in \{0,1\}^{<32}[X]$$
+
+> **Why degree < 32 (not < 64)?** The unreduced product $\hat{a} \cdot \rho_0$ has degree up to $31 + 30 = 61$, so naïvely $\mu$ would live in $\mathbb{Z}[X]_{<62}$. However, the constraint requires membership in the ideal $(X^{32}-1)$, which means we reduce modulo $X^{32} \equiv 1$. This cyclotomic reduction folds coefficient $i$ onto position $i \bmod 32$:
+>
+> $$\mu[j] \;=\; \frac{1}{2}\!\left(\sum_{i \,\equiv\, j \!\!\pmod{32}} (\hat{a} \cdot \rho_0)[i] \;-\; \hat{\Sigma}_0[j]\right), \qquad j = 0,\ldots,31$$
+>
+> Since the product has at most 62 nonzero coefficients (positions 0–61), each position $j$ accumulates at most two values: coefficient $j$ and coefficient $j+32$. The result lives in degree < 32 — it is a representative of the quotient ring $\mathbb{Z}[X]/(X^{32}-1)$, not an element of the free polynomial ring. This is why each $\mu_{\text{lo}}, \mu_{\text{hi}}$ fits in a `BinaryPoly<32>` column.
+
+The constraint becomes:
+
+$$\hat{a} \cdot \rho_0 - \hat{\Sigma}_0 - 2 \cdot \mu_{\text{lo}} - 4 \cdot \mu_{\text{hi}} \in (X^{32}-1) \quad \text{over } \mathbb{Z}[X]$$
+
+This is a degree-1 constraint (linear in the trace columns) and can be checked via the standard cyclotomic ideal check over the integers (or over $\mathbb{F}_p[X]$ after field projection).
+
+#### Why C5–C6 (shift decomposition) do not need μ columns
+
+The shift decomposition constraints C5 and C6 are:
+- C5: $\hat{W}_{t-15} = R_0 + X^3 \cdot S_0$
+- C6: $\hat{W}_{t-2} = R_1 + X^{10} \cdot S_1$
+
+These involve monomial multiplication ($X^k \cdot S$) rather than multi-term polynomial multiplication. Since $S$ is binary and the monomial $X^k$ has a single nonzero coefficient, the product $X^k \cdot S$ has non-overlapping support with $R$ by construction (the shift and remainder occupy disjoint coefficient ranges). No coefficient exceeds 1, so no carry occurs and the constraint is identical over $\mathbb{F}_2[X]$ and $\mathbb{Z}[X]$.
+
+#### Column layout (38 total: 35 bit-poly + 3 integer)
+
+Columns 0–26 and int columns 0–2 are **identical** to the standard UAIR. The 8 new μ columns are appended at bit-poly positions 27–34:
+
+| Index | Name | Description |
+|-------|------|-------------|
+| 27 | `mu_c1_lo` | $\Sigma_0$ rotation quotient μ₁, low bit ($\mu_{\text{lo}}$) |
+| 28 | `mu_c1_hi` | $\Sigma_0$ rotation quotient μ₁, high bit ($\mu_{\text{hi}}$) |
+| 29 | `mu_c2_lo` | $\Sigma_1$ rotation quotient μ₂, low bit |
+| 30 | `mu_c2_hi` | $\Sigma_1$ rotation quotient μ₂, high bit |
+| 31 | `mu_c3_lo` | $\sigma_0$ rotation+shift quotient μ₃, low bit |
+| 32 | `mu_c3_hi` | $\sigma_0$ rotation+shift quotient μ₃, high bit |
+| 33 | `mu_c4_lo` | $\sigma_1$ rotation+shift quotient μ₄, low bit |
+| 34 | `mu_c4_hi` | $\sigma_1$ rotation+shift quotient μ₄, high bit |
+
+Each cell is a `BinaryPoly<32>` with Boolean coefficients, enforced by lookup (the same BitPoly lookup table that enforces columns 0–9). The total column count increases from 30 to 38 (35 bit-poly + 3 integer).
+
+#### Constraint redistribution
+
+The 19 original SHA-256 UAIR constraints are redistributed between the two sub-UAIRs:
+
+**Standard UAIR** (Bp: 16 constraints, Qx: 3 constraints):
+- Bp: C1–C4 (rotation, cyclotomic) + C5–C6 (shift decomp, zero) + C7–C16 (linking, zero)
+- Qx: C17–C19 (carry propagation, trivial)
+
+**No-F₂[X] UAIR** (Bp: 12 constraints, Qx: 7 constraints):
+- Bp (`Sha256UairBpNoF2x`): C5–C6 (shift decomp, zero) + C7–C16 (linking, zero)
+- Qx (`Sha256UairQxNoF2x`): C1–C4 (rotation with μ, **cyclotomic**) + C17–C19 (carry propagation, trivial)
+
+The 4 rotation constraints move from the Bp sub-UAIR (where they used `CyclotomicIdeal` over $\mathbb{F}_2[X]$) to the Qx sub-UAIR (where they use `Sha256QxNoF2xIdeal::Cyclotomic` over $\mathbb{Z}[X]$). The Qx sub-UAIR now has a **non-trivial ideal** for C1–C4 (cyclotomic) while retaining the trivial ideal for C17–C19 (carry propagation).
+
+#### Qx constraint formulas (no-F₂[X])
+
+| # | Name | Formula | Ideal |
+|---|------|---------|-------|
+| C1 | $\Sigma_0$ rotation | $\hat{a} \cdot \rho_0 - \hat{\Sigma}_0 - 2 \cdot \mu_{1,\text{lo}} - 4 \cdot \mu_{1,\text{hi}} \in (X^{32}-1)$ | Cyclotomic |
+| C2 | $\Sigma_1$ rotation | $\hat{e} \cdot \rho_1 - \hat{\Sigma}_1 - 2 \cdot \mu_{2,\text{lo}} - 4 \cdot \mu_{2,\text{hi}} \in (X^{32}-1)$ | Cyclotomic |
+| C3 | $\sigma_0$ rot+shift | $\hat{W}_{t-15} \cdot \rho_{\sigma_0} + S_0 - \hat{\sigma}_{0,w} - 2 \cdot \mu_{3,\text{lo}} - 4 \cdot \mu_{3,\text{hi}} \in (X^{32}-1)$ | Cyclotomic |
+| C4 | $\sigma_1$ rot+shift | $\hat{W}_{t-2} \cdot \rho_{\sigma_1} + S_1 - \hat{\sigma}_{1,w} - 2 \cdot \mu_{4,\text{lo}} - 4 \cdot \mu_{4,\text{hi}} \in (X^{32}-1)$ | Cyclotomic |
+| C17 | a-update carry | $\hat{a}[t{+}1] - \hat{h} - \hat{\Sigma}_1 - \widehat{ch\_ef} - \widehat{ch\_\neg eg} - \hat{K} - \hat{W} - \hat{\Sigma}_0 - \widehat{Maj} + \mu_a \cdot X^{32} \in \text{Trivial}$ | Trivial |
+| C18 | e-update carry | $\hat{e}[t{+}1] - \hat{d} - \hat{h} - \hat{\Sigma}_1 - \widehat{ch\_ef} - \widehat{ch\_\neg eg} - \hat{K} - \hat{W} + \mu_e \cdot X^{32} \in \text{Trivial}$ | Trivial |
+| C19 | W-schedule carry | $\hat{W} - \hat{W}_{t-16} - \hat{\sigma}_{0,w} - \hat{W}_{t-7} - \hat{\sigma}_{1,w} + \mu_W \cdot X^{32} \in \text{Trivial}$ | Trivial |
+
+All 7 constraints are degree 1, enabling MLE-first IC.
+
+#### Ideal types
+
+| Type | Purpose | Contains check |
+|------|---------|----------------|
+| `Sha256QxNoF2xIdeal::Cyclotomic` | C1–C4 over $\mathbb{Z}[X]$ | Reduce mod $(X^{32}-1)$: fold coefficients at positions $i$ and $i+32$, check all 32 reduced coefficients are zero |
+| `Sha256QxNoF2xIdeal::Trivial` | C17–C19 carry propagation | Always passes |
+| `Sha256QxNoF2xIdealOverF::Cyclotomic` | C1–C4 after field projection | Same fold-and-check in $\mathbb{F}_p[X]$ |
+| `Sha256QxNoF2xIdealOverF::Trivial` | C17–C19 after field projection | Always passes |
+
+#### Witness generation
+
+`generate_no_f2x_witness(num_vars, rng)` generates the 38-column trace:
+
+1. **Delegate to base**: Calls the standard `Sha256UairBp::generate_witness()` to produce the 30-column base trace (columns 0–26 bit-poly + 3 integer).
+2. **Compute μ columns**: For each row $t$ and each rotation constraint $C_k$ ($k = 1, \ldots, 4$):
+   - Perform integer polynomial multiplication of the operand by the rotation polynomial (as `i32[64]` coefficient arrays).
+   - Add/subtract additional polynomial terms (e.g., $-\hat{\Sigma}_0$, $+S_0$).
+   - Reduce mod $(X^{32}-1)$ by folding: `reduced[i % 32] += coeffs[i]`.
+   - Divide each reduced coefficient by 2 (asserted to be even).
+   - Decompose: $\mu_j = \mu_{\text{lo},j} + 2 \cdot \mu_{\text{hi},j}$ (asserted $0 \leq \mu_j < 4$).
+   - Pack $\mu_{\text{lo}}$ and $\mu_{\text{hi}}$ as `BinaryPoly<32>` values.
+3. **Assemble**: Concatenate `bp[0..27]` (original bit-poly) + `bp[27..35]` (8 new μ columns) + `int[0..3]` (original integer columns) → 38-column trace.
+
+The computation is implemented in the `compute_mu(poly_a, rho_positions, terms)` helper function in [sha256-uair/src/no_f2x.rs](sha256-uair/src/no_f2x.rs).
+
+#### Benchmark integration
+
+The `no-f2x` feature flag propagates through the crate dependency chain:
+
+- `zinc-snark/Cargo.toml`: `no-f2x = ["zinc-sha256-uair/no-f2x"]`
+- `zinc-sha256-uair/Cargo.toml`: `no-f2x = []`
+
+In the benchmark file ([snark/benches/steps_sha256_8x_folded.rs](snark/benches/steps_sha256_8x_folded.rs)), the following are `cfg`-gated on `feature = "no-f2x"`:
+
+| Symbol | Without `no-f2x` | With `no-f2x` |
+|--------|-------------------|---------------|
+| `BenchBpUair` | `Sha256Uair` | `Sha256UairBpNoF2x` |
+| `BenchQxUair` | `Sha256UairQx` | `Sha256UairQxNoF2x` |
+| `SHA256_BATCH_SIZE` | 30 | 38 (`NO_F2X_NUM_COLS`) |
+| `generate_sha256_trace()` | `Sha256UairBp::generate_witness(9, rng)` | `generate_no_f2x_witness(9, rng)` |
+
+All 15 benchmark functions use the `BenchBpUair`/`BenchQxUair` type aliases, so the same benchmark binary exercises either the standard or no-F₂[X] UAIR depending on the feature flag. The pipeline function, PCS configuration, and folding parameters are unchanged.
+
+#### Impact on proof structure
+
+| Component | Standard | No-F₂[X] | Change |
+|-----------|----------|-----------|--------|
+| Trace columns | 30 (27 bp + 3 int) | 38 (35 bp + 3 int) | +8 bp columns |
+| Bp UAIR constraints | 16 | 12 | −4 (C1–C4 moved) |
+| Qx UAIR constraints | 3 (trivial ideal) | 7 (4 cyclotomic + 3 trivial) | +4 (C1–C4 gained) |
+| Qx ideal | Trivial only | Cyclotomic + Trivial | Non-trivial ideal check |
+| Lookup columns | 10 base + 3 affine = 13 | 10 base + 3 affine = 13 | Unchanged (μ columns need lookup too, but are not in the rotation-value set) |
+| PCS-committed columns | 10 | 18 | +8 (μ cols are private, not public, not shift-source) |
+| Shift specs (Bp) | 12 | 10 | −2 (â[t+1], ê[t+1] shifts moved to Qx) |
+| Shift specs (Qx) | 2 | 2 | Unchanged |
+| `max_degree` | 1 (both) | 1 (both) | Unchanged |
+
 ## Overview
 
 This benchmark provides a **fine-grained, step-by-step timing breakdown** of the Zinc+ proving stack applied to the **8×SHA-256** workload (8 SHA-256 compressions in parallel) using **4× column folding** and the **Hybrid GKR c=2** lookup protocol to reduce proof size. It uses the [Criterion](https://bheisler.github.io/criterion.rs/book/) framework with a custom harness.
@@ -632,7 +790,8 @@ A one-shot timing breakdown is printed to stdout after the verifier run, coverin
 
 1. `KeccakTranscript::new()` — fresh Fiat-Shamir transcript.
 2. Absorb the PCS commitment root from `folded_proof.commitment.root` (`HASH_OUT_LEN` bytes).
-3. `get_random_field_cfg::<PiopField, _, MillerRabin>()` — derive the same 192-bit prime $p$ the prover used (because the root is identical).
+3. `get_random_field_cfg::<PiopField, _, MillerRabin>()` — derive the same 192-bit prime $p$ the prover used (because the root is identical). Primality testing uses trial division by 15 small primes (3–53) as a pre-filter before the Miller-Rabin base-2 test (see [§"Verifier Optimizations"](#verifier-optimizations), V4).
+4. `transcript_after_prime = transcript.clone()` — snapshot the FS transcript state immediately after prime derivation, for reuse in V6 (see [§"Verifier Optimizations"](#verifier-optimizations), V1).
 
 This mirrors the prover's step 2. All subsequent transcript operations produce the same challenges as the prover.
 
@@ -739,9 +898,8 @@ Dispatches to `verify_hybrid_gkr_batched_lookup` based on the `LookupProofData::
 
 **Timer**: `pcs_verify`
 
-1. **Reconstruct PCS transcript**: Create `PcsTranscript { fs_transcript: KeccakTranscript, stream: Cursor<proof_bytes> }`.
-2. **Absorb root**: `pcs_transcript.fs_transcript.absorb(&root_buf)` — ensures PCS field config matches the prover's.
-3. **Derive PCS field config**: `get_random_field_cfg::<PiopField, PcsZt::Fmod, PcsZt::PrimeTest>()`.
+1. **Reuse transcript snapshot**: Create `PcsTranscript { fs_transcript: transcript_after_prime, stream: Cursor<proof_bytes> }`, reusing the FS transcript state saved in V0 step 4 (see [§"Verifier Optimizations"](#verifier-optimizations), V1). This skips the redundant primality search that would otherwise cost ~0.3–0.4 ms.
+2. **Reuse field config**: `pcs_field_cfg = field_cfg.clone()` — the PIOP and PCS field configs are identical since both transcripts derive the same prime from the same initial state.
 4. **Lift point and eval**: Convert `fold2_output.new_point` (11 coordinates) and the deserialized evaluation to the PCS field's Montgomery representation.
 5. **Verify**: `ZipPlus::<PcsZt, PcsLc>::verify_with_field_cfg::<PiopField, CHECK>(pcs_params, &commitment, &point_f, &eval_f, pcs_transcript, &pcs_field_cfg)`:
    - Reads `NUM_COLUMN_OPENINGS` (131) column indices from the proof stream.
@@ -1023,6 +1181,258 @@ The PCS commitment (Merkle root, `HASH_OUT_LEN` bytes) is now absorbed into **bo
 
 Because both PIOP and PCS transcripts absorb the same root bytes from the same initial (empty) state, they deterministically derive the **same** prime. This preserves the existing invariant that PIOP and PCS field elements share a common Montgomery representation.
 
+### 6. Lookup: fraction tree leaf-level optimization for all-ones multiplicities
+
+**Location**: `piop/src/lookup/gkr_logup.rs` — new function `build_fraction_tree_ones_leaf`; callers in `piop/src/lookup/hybrid_gkr.rs` and `piop/src/lookup/gkr_batched_decomposition.rs`.
+
+In the GKR-based LogUp protocol, each lookup column builds a **fraction tree** of depth $d$ from leaf fractions $p_i / q_i$, where $p_i$ is the multiplicity and $q_i = \beta - w_i$ is the denominator. At each internal node, the combination formula is:
+
+$$p_{\text{parent}} = p_L \cdot q_R + p_R \cdot q_L, \qquad q_{\text{parent}} = q_L \cdot q_R$$
+
+This costs **3 field multiplications + 1 addition** per node. The leaf level (layer 0 → layer 1) is the widest, containing $2^{d-1}$ nodes — half the total tree work.
+
+For LogUp witness trees, each witness element appears with multiplicity 1, so **all leaf $p$-values are identically one** (when no zero-padding is needed, i.e. when the leaf count $K \times W$ is already a power of two). In this case the leaf-level formula simplifies:
+
+$$p_{\text{parent}} = 1 \cdot q_R + 1 \cdot q_L = q_L + q_R, \qquad q_{\text{parent}} = q_L \cdot q_R$$
+
+This replaces 2 field multiplications with a single addition at every leaf-level node, reducing the cost to **1 multiplication + 1 addition** per node — a 2× speedup at the widest tree layer.
+
+The new function `build_fraction_tree_ones_leaf(one, leaf_q)` implements this optimization. It applies the simplified formula for the first tree level and falls back to the standard formula for all subsequent levels (where $p$ values are non-trivial sums). The callers in `hybrid_gkr.rs` and `gkr_batched_decomposition.rs` detect when `per_lookup_leaves == w_size` (no padding) and use the optimized path.
+
+For SHA-256 with $L = 13$ lookup columns, $K = 4$ chunks, $W = 512$ rows: leaf count $= 4 \times 512 = 2048 = 2^{11}$ (exactly a power of two, no padding). Each tree has $2^{10} = 1024$ leaf-level nodes. Savings: $1024 \times 2 = 2048$ Montgomery multiplications saved per tree, across 13 trees.
+
+**Impact**: Lookup prover time reduced by ~1.5 ms (from ~4.9 ms to ~3.4 ms in single-run timing).
+
+### 7. Hybrid GKR: proper zero construction in combination function
+
+**Location**: `piop/src/lookup/hybrid_gkr.rs` — `prove_as_subprotocol`, combination function closure.
+
+The GKR sumcheck combination function computes $\text{comb}(\mathbf{vals}) = \sum_{\ell} p_\ell \cdot q_{\ell+1} \cdots q_L - q_\ell \cdot (\ldots)$. The initial accumulator was computed as `vals[0].clone() - eq_val`, which relies on the algebraic identity that `eq_val - eq_val == 0`. This was replaced with an explicit `F::zero_with_cfg(field_cfg)` construction, avoiding one unnecessary field subtraction per evaluation point and improving code clarity.
+
+### 8. Hybrid GKR: clone avoidance in layer proof construction
+
+**Location**: `piop/src/lookup/hybrid_gkr.rs` — `prove_as_subprotocol`, layer proof assembly (both $k = 0$ and $k \geq 1$ branches).
+
+When building each GKR layer proof, the vectors `p_lefts`, `p_rights`, `q_lefts`, `q_rights` were previously **cloned** into the `GkrLayerProof` struct before being used to update the running state (`v_ps`, `v_qs`). Since the state update only reads these vectors (via `evaluate_mle_from_table`), the code was restructured to:
+
+1. Compute the `v_ps`/`v_qs` updates **first** (consuming read references).
+2. **Move** the vectors into `GkrLayerProof` (no allocation, no copy).
+
+This eliminates 4 vector clones per GKR layer. For cutoff $c = 2$ with 1 top sumcheck layer, this saves 4 clones of vectors sized $2^{d-c} = 2^9 = 512$ per lookup column.
+
+### 9. Shift sumcheck: parallel inner folding loop
+
+**Location**: `piop/src/shift_sumcheck/prover.rs` — `shift_sumcheck_prove`, table folding step.
+
+After each sumcheck round, the predicate tables $h$ and $w$ are folded by the challenge value $s$:
+
+$$h[j] \leftarrow (1 - s) \cdot h[j] + s \cdot h[j + \text{half}], \qquad j = 0, \ldots, \text{half} - 1$$
+
+Previously, the inner folding loop over $j$ was sequential within each group, even when the `parallel` feature was enabled (only the 2-way group-level parallelism was exploited). The inner loop was restructured using `split_at_mut` + `par_iter_mut` with `.with_min_len(128)` to enable Rayon work-stealing across the table elements. This allows additional cores to participate during early rounds when tables are large (half = 256 at round 0 for $n = 9$).
+
+### 10. Pipeline: parallel shifted-column evaluation
+
+**Location**: `snark/src/pipeline.rs` — `prove_hybrid_gkr_logup_4x_folded`, down-evals computation.
+
+The MLE evaluations for shifted trace columns (`down_evals`) were computed sequentially via `sig.shifts.iter()`. This was changed to `cfg_iter!(sig.shifts)` to parallelize across the 10 shift specifications. Each shifted evaluation constructs a sub-slice of the original column and evaluates the MLE at the IC evaluation point — these are independent and embarrassingly parallel.
+
+### Cumulative Impact
+
+The optimizations 6–10 were applied together and benchmarked against the prior state (which already included optimizations 1–5):
+
+| Metric | Before (opts 1–5) | After (opts 1–10) | Change |
+|--------|-------------------|-------------------|--------|
+| Criterion median | 15.34 ms | 14.62 ms | **−4.6%** |
+| Criterion 95% CI | [15.14, 15.53] ms | [14.52, 14.73] ms | p = 0.00 |
+
+Single-run timing breakdown comparison (representative, not averaged):
+
+| Step | Before | After | Δ |
+|------|--------|-------|---|
+| Split columns | 0.671 ms | 0.640 ms | −31 µs |
+| PCS commit | 4.526 ms | 4.218 ms | −308 µs |
+| Ideal Check | 1.761 ms | 1.521 ms | −240 µs |
+| Proj+Eval | 0.560 ms | 0.500 ms | −60 µs |
+| **Lookup** | **4.888 ms** | **3.374 ms** | **−1514 µs** |
+| Shift SC | 1.836 ms | 2.121 ms | +285 µs |
+| Folding | 0.400 ms | 0.490 ms | +90 µs |
+| PCS prove | 2.714 ms | 2.882 ms | +168 µs |
+| **Total (criterion)** | **15.34 ms** | **14.62 ms** | **−720 µs** |
+
+> **Note:** The single-run timing breakdown is from a single warm-up execution and is noisy; only the Criterion statistical result (100 samples, 400 iterations) should be used for regression comparisons. The lookup improvement from optimization 6 is the dominant contributor.
+
+---
+
+## Verifier Optimizations
+
+The following optimizations target the E2E verifier (`verify_classic_logup_4x_folded` and related `verify_*` functions). The verifier's baseline cost is dominated by two operations: the **PCS verify** (~60% of total time, mainly `encode_wide_at_positions` and Merkle proof verification) and the **Hybrid GKR lookup verify** (~33%). The remaining ~7% covers IC verify, CPR verify, shift sumcheck verify, and folding verify.
+
+An additional hidden cost is the **Miller-Rabin primality search** in `get_random_field_cfg`, which takes ~0.3–0.4 ms per call. In the original code, both the PIOP transcript and the PCS transcript independently derive the same 192-bit prime from the same initial state (empty transcript + absorbed commitment root), resulting in a redundant primality search. For dual-circuit verifiers that use two separate PCS instances, each with its own root, up to 3 independent primality searches occur.
+
+### V1. Eliminate duplicate primality search (transcript snapshot reuse)
+
+**Location**: `snark/src/pipeline.rs` — `verify_classic_logup_4x_folded`, `verify_classic_logup_folded`, `verify`, `verify_dual_ring`.
+
+**Problem**: The verifier constructs two independent Fiat-Shamir transcripts — one for the PIOP and one for the PCS. Both start from `KeccakTranscript::new()` (= `Blake3Transcript::default()`), absorb the same PCS commitment root (`HASH_OUT_LEN` bytes), and then call `get_random_field_cfg()`, which invokes the rejection-sampling loop in `get_prime()`. Since Blake3 is deterministic, both transcripts reach identical internal states and derive the **same** prime $p$. The second call is pure waste (~0.3–0.4 ms of Miller-Rabin modular exponentiations on 192-bit candidates).
+
+**Solution**: Immediately after the first `get_random_field_cfg()` call on the PIOP transcript, clone the transcript state:
+
+```rust
+let field_cfg = transcript.get_random_field_cfg::<PiopField, _, MillerRabin>();
+let transcript_after_prime = transcript.clone();
+```
+
+Then, when constructing the PCS transcript (much later, after IC/CPR/lookup/shift/folding verify), reuse the snapshot instead of building a fresh transcript + primality search:
+
+```rust
+let mut pcs_transcript = PcsTranscript {
+    fs_transcript: transcript_after_prime,  // reuse snapshot
+    stream: Cursor::new(proof.pcs_proof_bytes.clone()),
+};
+let pcs_field_cfg = field_cfg.clone();  // same prime, no search needed
+```
+
+**Correctness**: Both transcripts start from `Blake3Transcript::new()`, absorb identical root bytes, and call `get_random_field_cfg()` with the same type parameters. The Blake3 hasher is deterministic, so the snapshot after the first call is byte-identical to the state the PCS transcript would have reached after its own call. The PCS prover (`prove_with_seed`) follows the same sequence (absorb root → get_random_field_cfg), so the reused snapshot is also compatible with the prover's transcript state.
+
+**Applicability**: This optimization applies to verifiers where the PIOP and PCS transcripts share the same commitment root and use the same field type (`PiopField`). It has been applied to:
+
+| Function | PCS field | Same root? | Applied? |
+|---|---|---|---|
+| `verify_classic_logup_4x_folded` | `PiopField` | Yes (1 root) | **Yes** |
+| `verify_classic_logup_folded` | `PiopField` | Yes (1 root) | **Yes** |
+| `verify` | `PiopField` | Yes (1 root) | **Yes** |
+| `verify_dual_ring` | `PiopField` | Yes (1 root) | **Yes** |
+| `verify_generic` | `PcsF` (generic, may differ) | Yes (1 root) | **No** — `PcsF` may differ from `PiopField` |
+| `verify_pcs_only` | — | — | **N/A** — no PIOP phase, single search |
+| `verify_dual_circuit` (×4 variants) | PCS1=`PiopField`, PCS2=`PcsF2` | No (2 roots, different states) | **No** — PIOP absorbs both roots, PCS1/PCS2 each absorb only their own |
+
+For the dual-circuit verifiers, the three primality searches (PIOP, PCS1, PCS2) derive different primes from different transcript states, so the searches are genuinely independent and cannot be deduplicated.
+
+**Impact**: Saves ~0.3–0.4 ms per single-PCS verify call. For the SHA-256 benchmark, PCS verify dropped from ~1.55 ms to ~1.19 ms (−23%), with the primality search accounting for most of the difference.
+
+### V2. O(L) cross-check via prefix/suffix products
+
+**Location**: `piop/src/lookup/hybrid_gkr.rs` — `HybridGkrBatchedDecompLogupProtocol::verify_as_subprotocol`, Step 6; and `piop/src/lookup/gkr_batched_decomposition.rs` — `GkrBatchedDecompLogupProtocol::verify_as_subprotocol`, same step.
+
+**Problem**: After the GKR verification produces per-lookup root values $(P_w^{(\ell)}, Q_w^{(\ell)})$ and the table root $(P_t, Q_t)$, the verifier must check the **cross-check identity**:
+
+$$\Bigl(\sum_\ell \alpha^\ell \cdot P_w^{(\ell)} \cdot \prod_{j \neq \ell} Q_w^{(j)}\Bigr) \cdot Q_t = P_t \cdot \prod_\ell Q_w^{(\ell)}$$
+
+The original implementation computed $\prod_{j \neq \ell} Q_w^{(j)}$ for each $\ell$ via a nested loop:
+
+```rust
+for ell in 0..L {
+    let mut others_q = one.clone();
+    for j in 0..L {
+        if j != ell { others_q *= &roots_q[j]; }
+    }
+    // use others_q ...
+}
+```
+
+This costs $O(L^2)$ field multiplications. For $L = 13$ lookup columns, that's 156 multiplications.
+
+**Solution**: Replace with **prefix/suffix product arrays** computed in $O(L)$:
+
+```rust
+let mut prefix = vec![one.clone(); L];
+for i in 1..L { prefix[i] = prefix[i-1].clone() * &roots_q[i-1]; }
+let mut suffix = vec![one.clone(); L];
+for i in (0..L-1).rev() { suffix[i] = suffix[i+1].clone() * &roots_q[i+1]; }
+// others_q[ell] = prefix[ell] * suffix[ell]
+```
+
+This costs $2(L-1) = 24$ multiplications instead of 156 — a 6.5× reduction for $L = 13$.
+
+**Impact**: Small but measurable reduction in lookup verify time. The cross-check itself is a minor fraction of the total lookup verify, but the $O(L^2) \to O(L)$ improvement eliminates a quadratic scaling risk for larger $L$.
+
+### V3. Fused table leaf + multiplicity verification
+
+**Location**: same files as V2, Steps 7 and 8 of `verify_as_subprotocol`.
+
+**Problem**: The GKR verifier performs two separate traversals over the subtable:
+
+- **Step 7 (table leaf check)**: For each subtable entry $j \in [T]$, compute $p_\text{eval} = \sum_\ell \alpha^\ell \cdot m_\ell[j]$ and $q_\text{eval} = \beta - \text{table}[j]$, then dot with $\text{eq}(\mathbf{r}_t, j)$.
+- **Step 8 (multiplicity sum check)**: For each lookup $\ell$, verify $\sum_j m_\ell[j] = W$ (each lookup column has exactly $W$ entries). This requires a separate $O(T \times L)$ traversal.
+
+The original code also cloned `alpha_powers` inside the inner loop of Step 7.
+
+**Solution**: Fuse both steps into a single pass over the subtable:
+
+1. **Precompute `combined_mults[j]`**: In one transposed pass (loop over $\ell$, then $j$), compute $\text{combined\_mults}[j] = \sum_\ell \alpha^\ell \cdot m_\ell[j]$ while simultaneously accumulating the multiplicity sums $\text{mult\_sum}[\ell] = \sum_j m_\ell[j]$.
+
+2. **Check multiplicity sums** immediately after the accumulation — no separate Step 8 traversal needed.
+
+3. **Dot with eq-table**: Use the precomputed `combined_mults[j]` directly in the $p_\text{eval}$ dot product:
+
+```rust
+for j in 0..table_len {
+    p_eval += &(combined_mults[j].clone() * &eq_at_t[j]);
+    q_eval += &((beta.clone() - &table[j]) * &eq_at_t[j]);
+}
+```
+
+This eliminates one full $O(T \times L)$ traversal and removes all `alpha_powers` cloning from the hot inner loop.
+
+**Impact**: Lookup verify dropped from ~0.85 ms to ~0.51–0.70 ms (−18–40%, depending on run). The fused traversal is particularly beneficial because $T = 256$ and $L = 13$, so the eliminated traversal was 3328 multiply-add operations.
+
+### V4. Trial division pre-filter for Miller-Rabin primality testing
+
+**Location**: `primality/src/lib.rs` — `MillerRabin::is_probably_prime`.
+
+**Problem**: The `get_prime()` function in the Fiat-Shamir transcript performs a rejection-sampling loop: it squeezes random 192-bit candidates, makes them odd, and tests each with `MillerRabin::is_probably_prime()`. By the prime number theorem, roughly 1 in $\ln(2^{192}) \approx 133$ odd candidates is prime, so the loop runs ~67 iterations on average. Each failing iteration invokes a full Miller-Rabin base-2 test, which requires a modular exponentiation on a 192-bit integer — approximately $192 \times 3^2 = 1728$ 64-bit multiply-add operations (using schoolbook multiplication on 3-limb integers).
+
+**Solution**: Before the expensive Miller-Rabin test, perform **trial division** by the first 15 small primes (3, 5, 7, …, 53). This is done efficiently in two steps:
+
+1. **Single big-integer remainder**: Compute $r = \text{candidate} \bmod P$, where $P = 3 \times 5 \times 7 \times \cdots \times 53$ (fits in a `u64`). This is one multi-precision division.
+
+2. **15 native u64 checks**: For each small prime $p_i$, check if $r \bmod p_i = 0$. If so, the candidate is composite (unless it *is* $p_i$ itself, which cannot happen for 192-bit candidates).
+
+The probability that a random odd integer is divisible by at least one of {3, 5, …, 53} is:
+
+$$1 - \prod_{p \in \{3, 5, \ldots, 53\}} \frac{p - 1}{p} \approx 77.4\%$$
+
+So ~77% of composite candidates are rejected by trial division alone, skipping the expensive modular exponentiation entirely. The remaining ~23% still fall through to Miller-Rabin.
+
+**Cost**: One `Uint<3> % Uint<3>` operation (≈3 64-bit divisions) plus 15 native `u64 % u64` operations — negligible compared to a Miller-Rabin test.
+
+**Impact**: Speeds up every `get_random_field_cfg()` call across the entire codebase (both prover and verifier, all pipeline variants). For the verifier, where the primality search is a larger fraction of total time, this provides an additional ~3% (0.06 ms) criterion improvement on top of V1. Combined with V1 (which eliminates one of the two searches), the total primality-related savings for the 4x-folded verifier is ~0.4 ms.
+
+### Cumulative Verifier Impact
+
+Baseline (before any verifier optimizations): **2.55 ms** (criterion).
+
+| Optimization batch | Criterion | Step timing (single-run) |
+|---|---|---|
+| V1 (transcript snapshot) + V2 (O(L) cross-check) + V3 (fused table/mult) | **2.26 ms** | 2.31 ms |
+| + V4 (trial division pre-filter) | **2.20 ms** | 2.39 ms |
+| **Total improvement** | **−14%** | |
+
+Per-component breakdown (single-run, representative):
+
+| Component | Before | After V1–V3 | After V1–V4 |
+|---|---|---|---|
+| IC verify | 0.092 ms | 0.052 ms | 0.120 ms (noise) |
+| CPR+Lookup verify | 0.080 ms | 0.118 ms | 0.152 ms (noise) |
+| Lookup verify | 0.854 ms | 0.510 ms | 0.637 ms |
+| PCS verify | 1.546 ms | 1.187 ms | 1.193 ms |
+| **Total (step timing)** | **3.046 ms** | **2.305 ms** | **2.698 ms** |
+| **Total (criterion)** | **2.55 ms** | **2.26 ms** | **2.20 ms** |
+
+> **Note:** The single-run step timings are from individual warm-up executions and are noisy. The Criterion statistical results (100 samples) are the authoritative measurement. The step-timing "Total" is often higher than the Criterion median due to cold-cache effects in the single warm-up run.
+
+### Remaining Verifier Hot Spots
+
+After V1–V4, the verifier's remaining cost (~2.2 ms) is dominated by:
+
+1. **PCS verify `encode_wide_at_positions`** (~0.5–0.7 ms): Evaluates the IPRS linear code at 131 opened column positions. Each evaluation is a `CombR` dot product of the 2048-element message against code coefficients — 131 × 2048 = ~269K `Int<6>` multiply-add operations. Already parallelized via Rayon. An existing `TODO` in the codebase suggests lifting the dot products to integer arithmetic to reduce Montgomery overhead.
+
+2. **Merkle proof verification** (~0.3–0.5 ms): 131 authentication paths of depth 13. Each path verification requires 13 Blake3 hash invocations.
+
+3. **Primality search** (~0.2–0.3 ms): The single remaining `get_random_field_cfg()` call (the one that cannot be eliminated). Accelerated by trial division (V4) but still requires ~15 Miller-Rabin tests for the ~23% of candidates that pass trial division.
+
+4. **Lookup verify GKR sumcheck replay** (~0.3–0.5 ms): The verifier replays the GKR layer sumchecks (37 witness rounds + 28 table rounds). Each round involves deserializing round messages, checking $p(0) + p(1) = \text{claim}$, absorbing data into the transcript, and squeezing a challenge.
+
 ---
 
 ## Feature Flags
@@ -1034,6 +1444,7 @@ The three features specified on the command line affect performance:
 | `parallel` | Enables Rayon-based parallelism for column splitting, Merkle hashing, NTT encoding, sumcheck, MLE evaluation, etc. |
 | `simd` | Enables SIMD-accelerated `BinaryPoly` arithmetic (XOR, AND, shifts) and inner product operations. |
 | `asm` | Enables assembly-optimized routines for field arithmetic and hashing (e.g., SHA-256 intrinsics for the Merkle tree, AES-NI for transcript). |
+| `no-f2x` | Switches the dual UAIR to the no-F₂[X] variant: 4 rotation constraints move from Bp to Qx with explicit μ quotient columns, trace grows from 30 to 38 columns. See [§"no-f2x variant"](#no-f2x-variant). |
 
 Additionally, the `Sha256UairQx` carry-propagation constraints are gated behind the `qx-constraints` feature flag in the `sha256-uair` crate.
 

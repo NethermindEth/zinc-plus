@@ -55,7 +55,7 @@ use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_utils::{cfg_iter, cfg_into_iter, inner_transparent_field::InnerTransparentField};
 
 use super::gkr_logup::{
-    build_fraction_tree, FractionLayer,
+    build_fraction_tree, build_fraction_tree_ones_leaf, FractionLayer,
     gkr_fraction_prove, gkr_fraction_verify,
 };
 use super::structs::{
@@ -377,9 +377,10 @@ where
             let alpha_clone = alpha.clone();
             let delta_powers_clone = delta_powers.clone();
             let nt = num_trees;
+            let zero_f = F::zero_with_cfg(field_cfg);
             let comb_fn = move |vals: &[F]| -> F {
                 let eq_val = &vals[0];
-                let mut acc = vals[0].clone() - eq_val; // zero
+                let mut acc = zero_f.clone();
                 for ell in 0..nt {
                     let base = 1 + 4 * ell;
                     let pl_val = &vals[base];
@@ -439,14 +440,6 @@ where
                 q_rights.push(qr);
             }
 
-            layer_proofs.push(HybridBatchedGkrLayerProof {
-                sumcheck_proof: Some(sumcheck_proof),
-                p_lefts: p_lefts.clone(),
-                p_rights: p_rights.clone(),
-                q_lefts: q_lefts.clone(),
-                q_rights: q_rights.clone(),
-            });
-
             let lambda: F = transcript.get_field_challenge(field_cfg);
             let one_minus_lambda = one.clone() - &lambda;
             for ell in 0..num_trees {
@@ -457,6 +450,15 @@ where
             }
             r_k = s.clone();
             r_k.push(lambda);
+
+            // Move vectors into the proof (avoids cloning after v_ps/v_qs update).
+            layer_proofs.push(HybridBatchedGkrLayerProof {
+                sumcheck_proof: Some(sumcheck_proof),
+                p_lefts,
+                p_rights,
+                q_lefts,
+                q_rights,
+            });
         }
     }
 
@@ -736,8 +738,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
             })
             .collect::<Result<_, _>>()?;
 
-        let all_aggregated_multiplicities: Vec<Vec<F>> = all_chunk_multiplicities
-            .iter()
+        let all_aggregated_multiplicities: Vec<Vec<F>> = cfg_iter!(all_chunk_multiplicities)
             .map(|lookup_mults| {
                 let mut agg = vec![zero.clone(); table_len];
                 for m in lookup_mults {
@@ -770,19 +771,24 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
         let w_num_vars = zinc_utils::log2(per_lookup_leaves.next_power_of_two()) as usize;
         let w_size = 1usize << w_num_vars;
 
-        let witness_trees: Vec<_> = (0..num_lookups)
+        let leaf_p_all_ones = per_lookup_leaves == w_size;
+        let witness_trees: Vec<_> = cfg_into_iter!(0..num_lookups)
             .map(|ell| {
-                let mut leaf_p = Vec::with_capacity(w_size);
                 let mut leaf_q = Vec::with_capacity(w_size);
                 for k in 0..num_chunks {
                     for i in 0..witness_len {
-                        leaf_p.push(one.clone());
                         leaf_q.push(beta.clone() - &all_chunks[ell][k][i]);
                     }
                 }
-                leaf_p.resize(w_size, zero.clone());
-                leaf_q.resize(w_size, one.clone());
-                build_fraction_tree(leaf_p, leaf_q)
+                if leaf_p_all_ones {
+                    // All leaf numerators are 1 — use optimised first layer.
+                    build_fraction_tree_ones_leaf(one.clone(), leaf_q)
+                } else {
+                    let mut leaf_p = vec![one.clone(); per_lookup_leaves];
+                    leaf_p.resize(w_size, zero.clone());
+                    leaf_q.resize(w_size, one.clone());
+                    build_fraction_tree(leaf_p, leaf_q)
+                }
             })
             .collect();
 
@@ -917,18 +923,32 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
         )?;
 
         // ---- Step 6: Cross-check roots ----
+        // Uses prefix/suffix products for O(L) instead of O(L²) multiplications.
         {
-            let q_w_product: F = proof.witness_gkr.roots_q.iter().cloned()
+            let roots_q = &proof.witness_gkr.roots_q;
+            let q_w_product: F = roots_q.iter().cloned()
                 .fold(one.clone(), |acc, q| acc * &q);
             let mut lhs = zero.clone();
-            for ell in 0..num_lookups {
-                let mut others_q = one.clone();
-                for j in 0..num_lookups {
-                    if j != ell {
-                        others_q *= &proof.witness_gkr.roots_q[j];
-                    }
+            if num_lookups <= 1 {
+                // Single lookup: others_q = 1
+                if num_lookups == 1 {
+                    lhs += &(alpha_powers[0].clone() * &proof.witness_gkr.roots_p[0]);
                 }
-                lhs += &(alpha_powers[ell].clone() * &proof.witness_gkr.roots_p[ell] * &others_q);
+            } else {
+                // Build prefix and suffix products of roots_q for O(L) cross-check.
+                let mut prefix = Vec::with_capacity(num_lookups);
+                prefix.push(one.clone());
+                for i in 1..num_lookups {
+                    prefix.push(prefix[i - 1].clone() * &roots_q[i - 1]);
+                }
+                let mut suffix = vec![one.clone(); num_lookups];
+                for i in (0..num_lookups - 1).rev() {
+                    suffix[i] = suffix[i + 1].clone() * &roots_q[i + 1];
+                }
+                for ell in 0..num_lookups {
+                    let others_q = prefix[ell].clone() * &suffix[ell];
+                    lhs += &(alpha_powers[ell].clone() * &proof.witness_gkr.roots_p[ell] * &others_q);
+                }
             }
             lhs *= &proof.table_gkr.root_q;
             let rhs = proof.table_gkr.root_p.clone() * &q_w_product;
@@ -937,15 +957,32 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
             }
         }
 
-        // ---- Step 7: Verify table-side leaf claims ----
-        if table_result.point.is_empty() {
-            let expected_p = {
-                let mut val = zero.clone();
-                for ell in 0..num_lookups {
-                    val += &(alpha_powers[ell].clone() * &all_agg_mults[ell][0]);
+        // ---- Step 7 + 8: Verify table-side leaf claims and multiplicity sums ----
+        // Precompute combined multiplicities: combined[j] = Σ_ℓ α^ℓ · m_ℓ[j].
+        // Also accumulate per-lookup sums to avoid a separate pass in Step 8.
+        let expected_mult_sum = F::from_with_cfg((num_chunks * witness_len) as u64, field_cfg);
+        let combined_mults: Vec<F> = {
+            let mut combined = vec![zero.clone(); table_len];
+            for ell in 0..num_lookups {
+                let alpha_ell = &alpha_powers[ell];
+                let mut m_sum = zero.clone();
+                for j in 0..table_len {
+                    let scaled = alpha_ell.clone() * &all_agg_mults[ell][j];
+                    combined[j] += &scaled;
+                    m_sum += &all_agg_mults[ell][j];
                 }
-                val
-            };
+                if m_sum != expected_mult_sum {
+                    return Err(LookupError::MultiplicitySumMismatch {
+                        expected: (num_chunks * witness_len) as u64,
+                        got: 0,
+                    });
+                }
+            }
+            combined
+        };
+
+        if table_result.point.is_empty() {
+            let expected_p = if table_len > 0 { combined_mults[0].clone() } else { zero.clone() };
             let expected_q = beta.clone() - &subtable[0];
             if expected_p != table_result.expected_p || expected_q != table_result.expected_q {
                 return Err(LookupError::GkrLeafMismatch);
@@ -953,15 +990,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
         } else {
             let eq_at_t = build_eq_x_r_vec(&table_result.point, field_cfg)?;
             let mut p_eval = zero.clone();
-            for j in 0..table_len {
-                let mut combined_mult = zero.clone();
-                for ell in 0..num_lookups {
-                    combined_mult += &(alpha_powers[ell].clone() * &all_agg_mults[ell][j]);
-                }
-                p_eval += &(combined_mult * &eq_at_t[j]);
-            }
             let mut q_eval = zero.clone();
             for j in 0..table_len {
+                p_eval += &(combined_mults[j].clone() * &eq_at_t[j]);
                 q_eval += &((beta.clone() - &subtable[j]) * &eq_at_t[j]);
             }
             for j in table_len..eq_at_t.len() {
@@ -972,18 +1003,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
             }
             if q_eval != table_result.expected_q {
                 return Err(LookupError::GkrLeafMismatch);
-            }
-        }
-
-        // ---- Step 8: Verify multiplicity sums ----
-        let expected_sum = F::from_with_cfg((num_chunks * witness_len) as u64, field_cfg);
-        for ell in 0..num_lookups {
-            let m_sum: F = all_agg_mults[ell].iter().cloned().fold(zero.clone(), |a, b| a + &b);
-            if m_sum != expected_sum {
-                return Err(LookupError::MultiplicitySumMismatch {
-                    expected: (num_chunks * witness_len) as u64,
-                    got: 0,
-                });
             }
         }
 

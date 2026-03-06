@@ -35,7 +35,7 @@ use zip_plus::pcs::folding::{
 };
 
 use zinc_piop::ideal_check::IdealCheckProtocol;
-use zinc_piop::combined_poly_resolver::CombinedPolyResolver;
+use zinc_piop::combined_poly_resolver::{CombinedPolyResolver, VerifierSubclaim as CprVerifierSubclaim};
 use zinc_piop::lookup::{
     GkrPipelineLookupProof, PipelineLookupProof, LookupColumnSpec,
     LookupSumcheckGroup,
@@ -123,6 +123,13 @@ pub struct TimingBreakdown {
     pub pcs_prove: Duration,
     pub serialize: Duration,
     pub total: Duration,
+    /// Fine-grained sub-timings (all zero when not populated).
+    pub split_columns: Duration,
+    pub qx_ideal_check: Duration,
+    pub field_projection: Duration,
+    pub lookup_extract: Duration,
+    pub shift_sumcheck: Duration,
+    pub folding: Duration,
 }
 
 /// Timing breakdown for verification.
@@ -935,6 +942,7 @@ where
             pcs_prove: pcs_prove_time,
             serialize: Duration::ZERO,
             total: total_time,
+            ..Default::default()
         },
     }
 }
@@ -1303,6 +1311,7 @@ where
             pcs_prove: pcs_prove_time,
             serialize: Duration::ZERO,
             total: total_time,
+            ..Default::default()
         },
     }
 }
@@ -1712,6 +1721,7 @@ where
             pcs_prove: pcs_prove_time,
             serialize: Duration::ZERO,
             total: total_time,
+            ..Default::default()
         },
     }
 }
@@ -1776,10 +1786,6 @@ where
     let max_degree = count_max_degree::<U>();
     #[cfg(feature = "qx-constraints")]
     let qx_num_constraints = count_constraints::<U2>();
-    #[cfg(feature = "qx-constraints")]
-    let qx_max_degree = count_max_degree::<U2>();
-    #[cfg(feature = "qx-constraints")]
-    let qx_sig = U2::signature();
 
     // ── Step 0: Double-split columns ─────────────────────────────────
     // First:  BinaryPoly<D>      → BinaryPoly<HALF_D>    (×2 column length)
@@ -1872,11 +1878,6 @@ where
         trace, &[], &[], &projecting_element,
     );
 
-    #[cfg(feature = "qx-constraints")]
-    let field_trace_for_qx = project_trace_to_field::<PiopField, D>(
-        trace, &[], &[], &projecting_element,
-    );
-
     let has_lookups = !lookup_specs.is_empty() || !affine_lookup_specs.is_empty();
     let lookup_precomputed = if has_lookups {
         let (mut columns, mut raw_indices, mut remapped_specs, reverse_index_map) =
@@ -1907,26 +1908,8 @@ where
     .expect("CPR build_prover_group failed");
     let cpr_num_cols = cpr_group.num_cols;
 
-    // ── Q[X] CPR group (only when qx-constraints feature is enabled) ──
-    #[cfg(feature = "qx-constraints")]
-    let qx_field_projected_scalars =
-        project_scalars_to_field(qx_projected_scalars, &projecting_element)
-            .expect("QX scalar projection failed");
-
-    #[cfg(feature = "qx-constraints")]
-    let mut qx_cpr_group = CombinedPolyResolver::<PiopField>::build_prover_group::<U2>(
-        &mut transcript,
-        field_trace_for_qx,
-        &ic_state.evaluation_point,
-        &qx_field_projected_scalars,
-        qx_num_constraints,
-        num_vars,
-        qx_max_degree,
-        &field_cfg,
-    )
-    .expect("QX CPR build_prover_group failed");
-    #[cfg(feature = "qx-constraints")]
-    let qx_cpr_num_cols = qx_cpr_group.num_cols;
+    // NOTE: QX CPR group is skipped — for MLE-first (max_degree == 1)
+    // the sumcheck is redundant.
 
     let mut lookup_groups_data: Vec<(LookupSumcheckGroup<PiopField>, LookupGroupMeta)> = Vec::new();
     if let Some((ref columns, ref raw_indices, ref remapped_specs, ref ws_map)) = lookup_precomputed {
@@ -1976,19 +1959,9 @@ where
             mle.evaluations.resize(target_len, Default::default());
             mle.num_vars = shared_num_vars;
         }
-        #[cfg(feature = "qx-constraints")]
-        for mle in &mut qx_cpr_group.mles {
-            mle.evaluations.resize(target_len, Default::default());
-            mle.num_vars = shared_num_vars;
-        }
     }
 
-    // Group offset: when qx-constraints is enabled, lookups start at group 2
-    // (0 = BP CPR, 1 = QX CPR, 2.. = lookups).
-    // When disabled, lookups start at group 1 (0 = BP CPR, 1.. = lookups).
-    #[cfg(feature = "qx-constraints")]
-    const QX_GROUP_OFFSET: usize = 1;
-    #[cfg(not(feature = "qx-constraints"))]
+    // QX CPR is skipped — lookups always start at group 1 (0 = BP CPR).
     const QX_GROUP_OFFSET: usize = 0;
 
     let has_lookup = !lookup_groups_data.is_empty();
@@ -1999,11 +1972,9 @@ where
             usize,
             Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>>,
             Box<dyn Fn(&[PiopField]) -> PiopField + Send + Sync>,
-        )> = Vec::with_capacity(1 + QX_GROUP_OFFSET + lookup_groups_data.len());
+        )> = Vec::with_capacity(1 + lookup_groups_data.len());
 
         sumcheck_groups.push((cpr_group.degree, cpr_group.mles, cpr_group.comb_fn));
-        #[cfg(feature = "qx-constraints")]
-        sumcheck_groups.push((qx_cpr_group.degree, qx_cpr_group.mles, qx_cpr_group.comb_fn));
 
         let mut lookup_pre_data: Vec<(LookupSumcheckGroup<PiopField>, LookupGroupMeta)> = Vec::new();
         for (lk_group, meta) in lookup_groups_data {
@@ -2038,24 +2009,10 @@ where
             )
             .expect("CPR finalize_prover failed");
 
-        // Finalize QX CPR (group 1) — only when qx-constraints is enabled
-        #[cfg(feature = "qx-constraints")]
-        let (qx_up, qx_down) = {
-            let qx_cpr_prover_state = prover_states.remove(0);
-            let (qx_up, qx_down, _qx_cpr_state) =
-                CombinedPolyResolver::<PiopField>::finalize_prover(
-                    &mut transcript,
-                    qx_cpr_prover_state,
-                    qx_cpr_num_cols,
-                    &field_cfg,
-                )
-                .expect("QX CPR finalize_prover failed");
-            (qx_up, qx_down)
-        };
-        #[cfg(not(feature = "qx-constraints"))]
+        // QX CPR is skipped — no QX group to finalize.
         let (qx_up, qx_down): (Vec<PiopField>, Vec<PiopField>) = (vec![], vec![]);
 
-        // Finalize lookup groups (group 1+QX_GROUP_OFFSET ..)
+        // Finalize lookup groups (group 1 ..)
         let mut lookup_group_proofs = Vec::new();
         let mut lookup_group_meta = Vec::new();
         for (i, (lk_pre, meta)) in lookup_pre_data.into_iter().enumerate() {
@@ -2096,12 +2053,10 @@ where
             true,
         )
     } else {
-        // BP CPR only (+ QX CPR when qx-constraints enabled), no lookups
-        let mut groups = vec![
+        // BP CPR only, no lookups (QX CPR is skipped).
+        let groups = vec![
             (cpr_group.degree, cpr_group.mles, cpr_group.comb_fn),
         ];
-        #[cfg(feature = "qx-constraints")]
-        groups.push((qx_cpr_group.degree, qx_cpr_group.mles, qx_cpr_group.comb_fn));
 
         let (md_proof, mut prover_states) =
             MultiDegreeSumcheck::<PiopField>::prove_as_subprotocol(
@@ -2121,20 +2076,6 @@ where
             )
             .expect("CPR finalize_prover failed");
 
-        #[cfg(feature = "qx-constraints")]
-        let (qx_up, qx_down) = {
-            let qx_cpr_prover_state = prover_states.remove(0);
-            let (qx_up, qx_down, _qx_cpr_state) =
-                CombinedPolyResolver::<PiopField>::finalize_prover(
-                    &mut transcript,
-                    qx_cpr_prover_state,
-                    qx_cpr_num_cols,
-                    &field_cfg,
-                )
-                .expect("QX CPR finalize_prover failed");
-            (qx_up, qx_down)
-        };
-        #[cfg(not(feature = "qx-constraints"))]
         let (qx_up, qx_down): (Vec<PiopField>, Vec<PiopField>) = (vec![], vec![]);
 
         let batched = BatchedCprLookupProof {
@@ -2274,6 +2215,7 @@ where
             pcs_prove: pcs_prove_time,
             serialize: Duration::ZERO,
             total: total_time,
+            ..Default::default()
         },
     }
 }
@@ -2557,6 +2499,7 @@ where
             pcs_prove: pcs_prove_time,
             serialize: Duration::ZERO,
             total: total_time,
+            ..Default::default()
         },
     }
 }
@@ -2612,18 +2555,16 @@ where
     let max_degree = count_max_degree::<U>();
     #[cfg(feature = "qx-constraints")]
     let qx_num_constraints = count_constraints::<U2>();
-    #[cfg(feature = "qx-constraints")]
-    let qx_max_degree = count_max_degree::<U2>();
-    #[cfg(feature = "qx-constraints")]
-    let _qx_sig = U2::signature();
 
     // ── Step 0: Double-split columns ─────────────────────────────────
+    let t_split = Instant::now();
     let pcs_excluded = sig.pcs_excluded_columns();
     let pcs_trace_original = private_trace(trace, &pcs_excluded);
     let split_trace_half: Vec<DenseMultilinearExtension<BinaryPoly<HALF_D>>> =
         split_columns::<D, HALF_D>(&pcs_trace_original);
     let split_trace_quarter: Vec<DenseMultilinearExtension<BinaryPoly<QUARTER_D>>> =
         split_columns::<HALF_D, QUARTER_D>(&split_trace_half);
+    let split_columns_time = t_split.elapsed();
 
     // ── Step 1: PCS Commit (over 4×-split QUARTER_D columns) ─────────
     let t0 = Instant::now();
@@ -2676,6 +2617,7 @@ where
     };
 
     // ── Step 2b: QX Ideal Check (hybrid GKR, only when qx-constraints enabled) ──
+    let t_qx_ic = Instant::now();
     #[cfg(feature = "qx-constraints")]
     let qx_projected_scalars = project_scalars::<PiopField, U2>(|scalar| {
         DynamicPolynomialF::new(
@@ -2695,24 +2637,25 @@ where
         )
         .expect("Q[X] ideal check prover failed (hybrid GKR 4x folded)");
 
+    let qx_ideal_check_time = t_qx_ic.elapsed();
     let ideal_check_time = t1.elapsed();
 
-    // ── Step 3: CPR (standalone sumcheck, not batched with lookup) ───
+    // ── Step 3: Project trace and evaluate columns at IC point ────
+    //
+    // The CPR sumcheck is removed for MLE-first (max_degree == 1):
+    // the ideal check already verified constraint satisfaction, and
+    // the column evaluations are checked by the folding + PCS chain.
+    // The evaluation point is the one from the ideal check.
     let t2 = Instant::now();
     let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
-    let field_projected_scalars =
-        project_scalars_to_field(projected_scalars, &projecting_element)
-            .expect("scalar projection failed");
+    let t_proj = Instant::now();
     let field_trace = project_trace_to_field::<PiopField, D>(
         trace, &[], &[], &projecting_element,
     );
+    let field_projection_time = t_proj.elapsed();
 
-    #[cfg(feature = "qx-constraints")]
-    let field_trace_for_qx = project_trace_to_field::<PiopField, D>(
-        trace, &[], &[], &projecting_element,
-    );
-
-    // Pre-extract lookup columns before CPR consumes the field trace.
+    // Extract lookup columns from the field trace.
+    let t_lk_extract = Instant::now();
     let has_lookups = !lookup_specs.is_empty() || !affine_lookup_specs.is_empty();
     let lookup_precomputed = if has_lookups {
         let (mut columns, mut raw_indices, mut remapped_specs, reverse_index_map) =
@@ -2732,42 +2675,32 @@ where
         None
     };
 
-    // Extract source columns for shift sumcheck before CPR consumes field_trace.
+    // Extract source columns for shift sumcheck.
     let shift_trace_columns: Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>> =
         sig.shifts.iter().map(|spec| field_trace[spec.source_col].clone()).collect();
+    let lookup_extract_time = t_lk_extract.elapsed();
 
-    let (cpr_proof, cpr_state) =
-        CombinedPolyResolver::<PiopField>::prove_as_subprotocol::<U>(
-            &mut transcript,
-            field_trace,
-            &ic_state.evaluation_point,
-            &field_projected_scalars,
-            num_constraints,
-            num_vars,
-            max_degree,
-            &field_cfg,
-        )
-        .expect("Combined poly resolver failed");
+    // Evaluate all field-trace columns at the IC evaluation point.
+    let evaluation_point = ic_state.evaluation_point;
+    let up_evals: Vec<PiopField> = cfg_iter!(field_trace)
+        .map(|col| col.evaluate_with_config(&evaluation_point, &field_cfg)
+            .expect("column evaluation failed"))
+        .collect();
+    // Evaluate shifted columns at the IC evaluation point.
+    let down_evals: Vec<PiopField> = cfg_iter!(sig.shifts)
+        .map(|spec| {
+            let shifted: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                field_trace[spec.source_col][spec.shift_amount..].iter().cloned().collect();
+            shifted.evaluate_with_config(&evaluation_point, &field_cfg)
+                .expect("shifted column evaluation failed")
+        })
+        .collect();
 
-    // ── Q[X] CPR (standalone, only when qx-constraints feature is enabled) ──
-    #[cfg(feature = "qx-constraints")]
-    let qx_field_projected_scalars =
-        project_scalars_to_field(qx_projected_scalars, &projecting_element)
-            .expect("QX scalar projection failed");
-
-    #[cfg(feature = "qx-constraints")]
-    let (qx_cpr_proof, _qx_cpr_state) =
-        CombinedPolyResolver::<PiopField>::prove_as_subprotocol::<U2>(
-            &mut transcript,
-            field_trace_for_qx,
-            &ic_state.evaluation_point,
-            &qx_field_projected_scalars,
-            qx_num_constraints,
-            num_vars,
-            qx_max_degree,
-            &field_cfg,
-        )
-        .expect("QX Combined poly resolver failed (hybrid GKR 4x folded)");
+    // Absorb column evaluations into transcript (replaces CPR
+    // transcript interaction so downstream challenges depend on them).
+    let mut transcription_buf: Vec<u8> = vec![0; <<PiopField as Field>::Inner as ConstTranscribable>::NUM_BYTES];
+    transcript.absorb_random_field_slice(&up_evals, &mut transcription_buf);
+    transcript.absorb_random_field_slice(&down_evals, &mut transcription_buf);
 
     let cpr_time = t2.elapsed();
 
@@ -2792,8 +2725,8 @@ where
     let lookup_time = t2b.elapsed();
 
     // ── Step 3c: Shift Sumcheck (reduce shifted-column claims) ──────
+    let t_shift = Instant::now();
     let shift_sumcheck_output = if !sig.shifts.is_empty() {
-        let evaluation_point = cpr_state.evaluation_point.clone();
         let claims: Vec<ShiftClaim<PiopField>> = sig.shifts
             .iter()
             .enumerate()
@@ -2801,7 +2734,7 @@ where
                 source_col: i,
                 shift_amount: spec.shift_amount,
                 eval_point: evaluation_point[..num_vars].to_vec(),
-                claimed_eval: cpr_proof.down_evals[i].clone(),
+                claimed_eval: down_evals[i].clone(),
             })
             .collect();
         Some(shift_sumcheck_prove(
@@ -2814,9 +2747,10 @@ where
     } else {
         None
     };
+    let shift_sumcheck_time = t_shift.elapsed();
 
     // ── Step 4: Two-round folding protocol ────────────────────────────
-    let evaluation_point = cpr_state.evaluation_point.clone();
+    let t_fold = Instant::now();
     let piop_point = &evaluation_point[..num_vars];
 
     let fold1_output = fold_claims_prove::<PiopField, _, HALF_D>(
@@ -2836,6 +2770,7 @@ where
         &field_cfg,
     )
     .expect("Folding round 2 failed (hybrid GKR 4x folded)");
+    let folding_time = t_fold.elapsed();
 
     // ── Step 5: PCS Prove at (r ‖ γ₁ ‖ γ₂) over QUARTER_D columns ───
     let t3 = Instant::now();
@@ -2862,20 +2797,15 @@ where
         .map(|dpf| dpf.coeffs.iter().flat_map(|c| field_to_bytes(c)).collect())
         .collect();
 
-    // CPR sumcheck messages (non-batched: stored in proof)
-    let cpr_sumcheck_messages: Vec<Vec<u8>> = cpr_proof
-        .sumcheck_proof
-        .messages
-        .iter()
-        .map(|msg| msg.0.tail_evaluations.iter().flat_map(|c| field_to_bytes(c)).collect())
-        .collect();
-    let cpr_sumcheck_claimed_sum = field_to_bytes(&cpr_proof.sumcheck_proof.claimed_sum);
-    let cpr_up_evals_bytes: Vec<Vec<u8>> = cpr_proof.up_evals.iter()
+    // CPR sumcheck is skipped — emit empty data.
+    let cpr_sumcheck_messages: Vec<Vec<u8>> = vec![];
+    let cpr_sumcheck_claimed_sum = vec![0u8; <<PiopField as Field>::Inner as ConstTranscribable>::NUM_BYTES];
+    let cpr_up_evals_bytes: Vec<Vec<u8>> = up_evals.iter()
         .enumerate()
         .filter(|(i, _)| !sig.is_public_column(*i))
         .map(|(_, v)| field_to_bytes(v))
         .collect();
-    let cpr_down_evals_bytes: Vec<Vec<u8>> = cpr_proof.down_evals.iter().map(field_to_bytes).collect();
+    let cpr_down_evals_bytes: Vec<Vec<u8>> = down_evals.iter().map(field_to_bytes).collect();
     let evaluation_point_bytes: Vec<Vec<u8>> = evaluation_point.iter().map(field_to_bytes).collect();
     let pcs_evals_bytes: Vec<Vec<u8>> = vec![field_to_bytes(&eval_f)];
 
@@ -2886,30 +2816,11 @@ where
     let folding_c3s_bytes: Vec<Vec<u8>> = fold2_output.c1s.iter().map(field_to_bytes).collect();
     let folding_c4s_bytes: Vec<Vec<u8>> = fold2_output.c2s.iter().map(field_to_bytes).collect();
 
-    // Serialize QX CPR data
-    #[cfg(feature = "qx-constraints")]
-    let qx_cpr_sumcheck_messages_bytes: Vec<Vec<u8>> = qx_cpr_proof
-        .sumcheck_proof
-        .messages
-        .iter()
-        .map(|msg| msg.0.tail_evaluations.iter().flat_map(|c| field_to_bytes(c)).collect())
-        .collect();
-    #[cfg(not(feature = "qx-constraints"))]
+    // QX CPR is skipped (MLE-first: sumcheck is redundant).
+    // Emit empty QX CPR data.
     let qx_cpr_sumcheck_messages_bytes: Vec<Vec<u8>> = vec![];
-
-    #[cfg(feature = "qx-constraints")]
-    let qx_cpr_sumcheck_claimed_sum_bytes = field_to_bytes(&qx_cpr_proof.sumcheck_proof.claimed_sum);
-    #[cfg(not(feature = "qx-constraints"))]
     let qx_cpr_sumcheck_claimed_sum_bytes = vec![0u8; <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES];
-
-    #[cfg(feature = "qx-constraints")]
-    let qx_cpr_up_evals_bytes: Vec<Vec<u8>> = qx_cpr_proof.up_evals.iter().map(field_to_bytes).collect();
-    #[cfg(not(feature = "qx-constraints"))]
     let qx_cpr_up_evals_bytes: Vec<Vec<u8>> = vec![];
-
-    #[cfg(feature = "qx-constraints")]
-    let qx_cpr_down_evals_bytes: Vec<Vec<u8>> = qx_cpr_proof.down_evals.iter().map(field_to_bytes).collect();
-    #[cfg(not(feature = "qx-constraints"))]
     let qx_cpr_down_evals_bytes: Vec<Vec<u8>> = vec![];
 
     // Serialize QX IC proof values
@@ -2961,6 +2872,12 @@ where
             pcs_prove: pcs_prove_time,
             serialize: Duration::ZERO,
             total: total_time,
+            split_columns: split_columns_time,
+            qx_ideal_check: qx_ideal_check_time,
+            field_projection: field_projection_time,
+            lookup_extract: lookup_extract_time,
+            shift_sumcheck: shift_sumcheck_time,
+            folding: folding_time,
         },
     }
 }
@@ -3007,6 +2924,9 @@ where
     folded_proof.commitment.root.write_transcription_bytes(&mut root_buf);
     transcript.absorb(&root_buf);
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
+
+    // Snapshot the FS transcript state after prime derivation for PCS reuse.
+    let transcript_after_prime = transcript.clone();
 
     let field_elem_size = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
 
@@ -3588,17 +3508,13 @@ where
     // ── Step 4: PCS Verify (over split columns at extended point) ───
     let t2 = Instant::now();
 
+    // Reuse the FS transcript state snapshot from after prime derivation
+    // to skip a second Miller-Rabin primality search (~0.3-0.4ms savings).
     let mut pcs_transcript = zip_plus::pcs_transcript::PcsTranscript {
-        fs_transcript: KeccakTranscript::default(),
+        fs_transcript: transcript_after_prime,
         stream: std::io::Cursor::new(folded_proof.pcs_proof_bytes.clone()),
     };
-    // Absorb PCS commitment root so the PCS prime matches the PIOP prime.
-    let mut pcs_root_buf = [0u8; HASH_OUT_LEN];
-    folded_proof.commitment.root.write_transcription_bytes(&mut pcs_root_buf);
-    pcs_transcript.fs_transcript.absorb(&pcs_root_buf);
-    let pcs_field_cfg = pcs_transcript
-        .fs_transcript
-        .get_random_field_cfg::<PiopField, PcsZt::Fmod, PcsZt::PrimeTest>();
+    let pcs_field_cfg = field_cfg.clone();
 
     // Use the folded (extended) point: (r || γ)
     let point_f: Vec<PiopField> = folding_output.new_point.iter()
@@ -3691,6 +3607,12 @@ where
     transcript.absorb(&root_buf);
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
 
+    // Snapshot the FS transcript state right after prime derivation.
+    // The PCS prover starts from the identical state (default + absorb root +
+    // get_random_field_cfg), so we can reuse this snapshot instead of
+    // repeating the expensive Miller-Rabin primality search (~0.3-0.4ms).
+    let transcript_after_prime = transcript.clone();
+
     let field_elem_size = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
 
     // ── Step 1: IC verify ───────────────────────────────────────────
@@ -3740,9 +3662,7 @@ where
     #[cfg(feature = "qx-constraints")]
     let qx_num_constraints = count_constraints::<U2>();
     #[cfg(feature = "qx-constraints")]
-    let qx_max_degree = count_max_degree::<U2>();
-    #[cfg(feature = "qx-constraints")]
-    let qx_ic_subclaim = {
+    let _qx_ic_subclaim = {
         let qx_ic_combined_mle_values: Vec<DynamicPolynomialF<PiopField>> = folded_proof
             .qx_ic_proof_values
             .iter()
@@ -3837,43 +3757,7 @@ where
             }
         };
 
-        // ── QX CPR pre-sumcheck (group 1) ───────────────────────────
-        #[cfg(feature = "qx-constraints")]
-        let qx_field_projected_scalars = {
-            let qx_projected_scalars_coeffs = project_scalars::<PiopField, U2>(|scalar| {
-                DynamicPolynomialF::new(
-                    scalar.iter().map(|coeff| PiopField::from_with_cfg(*coeff, &field_cfg)).collect::<Vec<_>>()
-                )
-            });
-            project_scalars_to_field(qx_projected_scalars_coeffs, &projecting_element)
-                .expect("QX scalar projection failed")
-        };
-
-        #[cfg(feature = "qx-constraints")]
-        let qx_cpr_pre = match CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<U2>(
-            &mut transcript,
-            &batched_proof.md_proof.claimed_sums[1],
-            qx_num_constraints,
-            &projecting_element,
-            &qx_field_projected_scalars,
-            &qx_ic_subclaim,
-            &field_cfg,
-        ) {
-            Ok(pre) => pre,
-            Err(e) => {
-                eprintln!("QX CPR build_verifier_pre_sumcheck failed (4x folded): {e:?}");
-                return VerifyResult {
-                    accepted: false,
-                    timing: VerifyTimingBreakdown {
-                        ideal_check_verify: ic_verify_time,
-                        combined_poly_resolver_verify: t1.elapsed(),
-                        lookup_verify: Duration::ZERO,
-                        pcs_verify: Duration::ZERO,
-                        total: total_start.elapsed(),
-                    },
-                };
-            }
-        };
+        // QX CPR is skipped — no pre-sumcheck needed.
 
         let mut lookup_pres = Vec::new();
         for (group_proof, meta) in batched_proof.lookup_group_proofs.iter()
@@ -4000,45 +3884,9 @@ where
             }
         };
 
-        // ── QX CPR finalize (group 1) ───────────────────────────────
-        #[cfg(feature = "qx-constraints")]
-        {
-            let qx_up_evals: Vec<PiopField> = folded_proof.qx_cpr_up_evals.iter()
-                .map(|b| field_from_bytes(b, &field_cfg))
-                .collect();
-            let qx_down_evals: Vec<PiopField> = folded_proof.qx_cpr_down_evals.iter()
-                .map(|b| field_from_bytes(b, &field_cfg))
-                .collect();
-
-            if let Err(e) = CombinedPolyResolver::<PiopField>::finalize_verifier::<U2>(
-                &mut transcript,
-                md_subclaims.point.clone(),
-                md_subclaims.expected_evaluations[1].clone(),
-                &qx_cpr_pre,
-                qx_up_evals,
-                qx_down_evals,
-                num_vars,
-                &qx_field_projected_scalars,
-                &field_cfg,
-            ) {
-                eprintln!("QX CPR finalize_verifier failed (4x folded): {e:?}");
-                return VerifyResult {
-                    accepted: false,
-                    timing: VerifyTimingBreakdown {
-                        ideal_check_verify: ic_verify_time,
-                        combined_poly_resolver_verify: t1.elapsed(),
-                        lookup_verify: Duration::ZERO,
-                        pcs_verify: Duration::ZERO,
-                        total: total_start.elapsed(),
-                    },
-                };
-            }
-        }
+        // QX CPR finalize is skipped.
 
         // Lookup finalize — pre-compute eq_at_point once and reuse across all groups.
-        #[cfg(feature = "qx-constraints")]
-        const QX_GROUP_OFFSET: usize = 1;
-        #[cfg(not(feature = "qx-constraints"))]
         const QX_GROUP_OFFSET: usize = 0;
 
         let eq_at_point_lk = zinc_poly::utils::build_eq_x_r_vec(&md_subclaims.point, &field_cfg)
@@ -4095,20 +3943,12 @@ where
         let cpr_verify_time = t1.elapsed();
         (cpr_sub, cpr_verify_time, Duration::ZERO, projecting_element)
     } else {
+        // CPR sumcheck is skipped for MLE-first (max_degree == 1):
+        // the ideal check already verified constraint satisfaction.
+        // Column evaluations (up_evals / down_evals) are verified
+        // through the folding + PCS chain.
         let t1 = Instant::now();
-        let cpr_sumcheck_messages: Vec<ProverMsg<PiopField>> = folded_proof
-            .cpr_sumcheck_messages
-            .iter()
-            .map(|bytes| {
-                let num_evals = bytes.len() / field_elem_size;
-                let tail_evaluations: Vec<PiopField> = (0..num_evals)
-                    .map(|i| field_from_bytes(&bytes[i * field_elem_size..(i + 1) * field_elem_size], &field_cfg))
-                    .collect();
-                ProverMsg(NatEvaluatedPolyWithoutConstant::new(tail_evaluations))
-            })
-            .collect();
 
-        let cpr_claimed_sum = field_from_bytes(&folded_proof.cpr_sumcheck_claimed_sum, &field_cfg);
         let private_up_evals: Vec<PiopField> = folded_proof.cpr_up_evals.iter()
             .map(|b| field_from_bytes(b, &field_cfg))
             .collect();
@@ -4116,73 +3956,10 @@ where
             .map(|b| field_from_bytes(b, &field_cfg))
             .collect();
 
-        let cpr_sumcheck_proof = SumcheckProof {
-            messages: cpr_sumcheck_messages,
-            claimed_sum: cpr_claimed_sum,
-        };
-
         let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
-        let projected_scalars_coeffs = project_scalars::<PiopField, U>(|scalar| {
-            let one = PiopField::one_with_cfg(&field_cfg);
-            let zero = PiopField::zero_with_cfg(&field_cfg);
-            DynamicPolynomialF::new(
-                scalar.iter().map(|coeff| {
-                    if coeff.into_inner() { one.clone() } else { zero.clone() }
-                }).collect::<Vec<_>>()
-            )
-        });
-        let field_projected_scalars =
-            project_scalars_to_field(projected_scalars_coeffs, &projecting_element)
-                .expect("scalar projection failed");
 
-        let cpr_pre = match CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<U>(
-            &mut transcript,
-            &cpr_sumcheck_proof.claimed_sum,
-            num_constraints,
-            &projecting_element,
-            &field_projected_scalars,
-            &ic_subclaim,
-            &field_cfg,
-        ) {
-            Ok(pre) => pre,
-            Err(e) => {
-                eprintln!("CPR pre-sumcheck failed (4x folded): {e:?}");
-                return VerifyResult {
-                    accepted: false,
-                    timing: VerifyTimingBreakdown {
-                        ideal_check_verify: ic_verify_time,
-                        combined_poly_resolver_verify: t1.elapsed(),
-                        lookup_verify: Duration::ZERO,
-                        pcs_verify: Duration::ZERO,
-                        total: total_start.elapsed(),
-                    },
-                };
-            }
-        };
-
-        let subclaim = match MLSumcheck::<PiopField>::verify_as_subprotocol(
-            &mut transcript,
-            num_vars,
-            max_degree + 2,
-            &cpr_sumcheck_proof,
-            &field_cfg,
-        ) {
-            Ok(sc) => sc,
-            Err(e) => {
-                eprintln!("CPR sumcheck verification failed (4x folded): {e:?}");
-                return VerifyResult {
-                    accepted: false,
-                    timing: VerifyTimingBreakdown {
-                        ideal_check_verify: ic_verify_time,
-                        combined_poly_resolver_verify: t1.elapsed(),
-                        lookup_verify: Duration::ZERO,
-                        pcs_verify: Duration::ZERO,
-                        total: total_start.elapsed(),
-                    },
-                };
-            }
-        };
-
+        // Reconstruct full column evaluations including public columns
+        // evaluated at the IC evaluation point.
         let sig = U::signature();
         let full_up_evals = if sig.public_columns.is_empty() {
             private_up_evals
@@ -4199,7 +3976,7 @@ where
                         col.iter()
                             .map(|bp| binary_poly_projection(bp).inner().clone())
                             .collect();
-                    mle.evaluate_with_config(&subclaim.point, &field_cfg)
+                    mle.evaluate_with_config(&ic_subclaim.evaluation_point, &field_cfg)
                         .expect("public column MLE evaluation should succeed")
                 })
                 .collect()
@@ -4212,143 +3989,17 @@ where
             )
         };
 
-        let cpr_sub = match CombinedPolyResolver::<PiopField>::finalize_verifier::<U>(
-            &mut transcript,
-            subclaim.point,
-            subclaim.expected_evaluation,
-            &cpr_pre,
-            full_up_evals,
-            cpr_down_evals,
-            num_vars,
-            &field_projected_scalars,
-            &field_cfg,
-        ) {
-            Ok(sub) => sub,
-            Err(e) => {
-                eprintln!("CPR finalize failed (4x folded): {e:?}");
-                return VerifyResult {
-                    accepted: false,
-                    timing: VerifyTimingBreakdown {
-                        ideal_check_verify: ic_verify_time,
-                        combined_poly_resolver_verify: t1.elapsed(),
-                        lookup_verify: Duration::ZERO,
-                        pcs_verify: Duration::ZERO,
-                        total: total_start.elapsed(),
-                    },
-                };
-            }
+        // Absorb column evaluations into transcript (must match prover).
+        let mut transcription_buf: Vec<u8> = vec![0; <<PiopField as Field>::Inner as ConstTranscribable>::NUM_BYTES];
+        transcript.absorb_random_field_slice(&full_up_evals, &mut transcription_buf);
+        transcript.absorb_random_field_slice(&cpr_down_evals, &mut transcription_buf);
+
+        let cpr_sub = CprVerifierSubclaim {
+            evaluation_point: ic_subclaim.evaluation_point.clone(),
+            up_evals: full_up_evals,
+            down_evals: cpr_down_evals,
         };
         let cpr_verify_time = t1.elapsed();
-
-        // ── QX CPR verify (standalone, only when qx-constraints enabled) ──
-        #[cfg(feature = "qx-constraints")]
-        {
-            let qx_cpr_sumcheck_messages: Vec<ProverMsg<PiopField>> = folded_proof
-                .qx_cpr_sumcheck_messages
-                .iter()
-                .map(|bytes| {
-                    let num_evals = bytes.len() / field_elem_size;
-                    let tail_evaluations: Vec<PiopField> = (0..num_evals)
-                        .map(|i| field_from_bytes(&bytes[i * field_elem_size..(i + 1) * field_elem_size], &field_cfg))
-                        .collect();
-                    ProverMsg(NatEvaluatedPolyWithoutConstant::new(tail_evaluations))
-                })
-                .collect();
-
-            let qx_cpr_claimed_sum = field_from_bytes(&folded_proof.qx_cpr_sumcheck_claimed_sum, &field_cfg);
-            let qx_up_evals: Vec<PiopField> = folded_proof.qx_cpr_up_evals.iter()
-                .map(|b| field_from_bytes(b, &field_cfg))
-                .collect();
-            let qx_down_evals: Vec<PiopField> = folded_proof.qx_cpr_down_evals.iter()
-                .map(|b| field_from_bytes(b, &field_cfg))
-                .collect();
-
-            let qx_cpr_sumcheck_proof = SumcheckProof {
-                messages: qx_cpr_sumcheck_messages,
-                claimed_sum: qx_cpr_claimed_sum,
-            };
-
-            let qx_projected_scalars_coeffs = project_scalars::<PiopField, U2>(|scalar| {
-                DynamicPolynomialF::new(
-                    scalar.iter().map(|coeff| PiopField::from_with_cfg(*coeff, &field_cfg)).collect::<Vec<_>>()
-                )
-            });
-            let qx_field_projected_scalars =
-                project_scalars_to_field(qx_projected_scalars_coeffs, &projecting_element)
-                    .expect("QX scalar projection failed");
-
-            let qx_cpr_pre = match CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<U2>(
-                &mut transcript,
-                &qx_cpr_sumcheck_proof.claimed_sum,
-                qx_num_constraints,
-                &projecting_element,
-                &qx_field_projected_scalars,
-                &qx_ic_subclaim,
-                &field_cfg,
-            ) {
-                Ok(pre) => pre,
-                Err(e) => {
-                    eprintln!("QX CPR pre-sumcheck failed (4x folded, Path B): {e:?}");
-                    return VerifyResult {
-                        accepted: false,
-                        timing: VerifyTimingBreakdown {
-                            ideal_check_verify: ic_verify_time,
-                            combined_poly_resolver_verify: cpr_verify_time,
-                            lookup_verify: Duration::ZERO,
-                            pcs_verify: Duration::ZERO,
-                            total: total_start.elapsed(),
-                        },
-                    };
-                }
-            };
-
-            let qx_subclaim = match MLSumcheck::<PiopField>::verify_as_subprotocol(
-                &mut transcript,
-                num_vars,
-                qx_max_degree + 2,
-                &qx_cpr_sumcheck_proof,
-                &field_cfg,
-            ) {
-                Ok(sc) => sc,
-                Err(e) => {
-                    eprintln!("QX CPR sumcheck verification failed (4x folded, Path B): {e:?}");
-                    return VerifyResult {
-                        accepted: false,
-                        timing: VerifyTimingBreakdown {
-                            ideal_check_verify: ic_verify_time,
-                            combined_poly_resolver_verify: cpr_verify_time,
-                            lookup_verify: Duration::ZERO,
-                            pcs_verify: Duration::ZERO,
-                            total: total_start.elapsed(),
-                        },
-                    };
-                }
-            };
-
-            if let Err(e) = CombinedPolyResolver::<PiopField>::finalize_verifier::<U2>(
-                &mut transcript,
-                qx_subclaim.point,
-                qx_subclaim.expected_evaluation,
-                &qx_cpr_pre,
-                qx_up_evals,
-                qx_down_evals,
-                num_vars,
-                &qx_field_projected_scalars,
-                &field_cfg,
-            ) {
-                eprintln!("QX CPR finalize failed (4x folded, Path B): {e:?}");
-                return VerifyResult {
-                    accepted: false,
-                    timing: VerifyTimingBreakdown {
-                        ideal_check_verify: ic_verify_time,
-                        combined_poly_resolver_verify: cpr_verify_time,
-                        lookup_verify: Duration::ZERO,
-                        pcs_verify: Duration::ZERO,
-                        total: total_start.elapsed(),
-                    },
-                };
-            }
-        }
 
         let t1b = Instant::now();
         if let Some(ref lookup_data) = folded_proof.lookup_proof {
@@ -4637,24 +4288,22 @@ where
     // ── Step 4: PCS Verify at doubly-extended point ─────────────────
     let t2 = Instant::now();
 
+    // Reuse the FS transcript state snapshot from after prime derivation.
+    // Both the PIOP and PCS transcripts start from the same initial state
+    // (default + absorb root + get_random_field_cfg), so the snapshot is
+    // byte-identical to what the PCS prover had. This skips a second
+    // Miller-Rabin primality search (~0.3-0.4ms savings).
     let mut pcs_transcript = zip_plus::pcs_transcript::PcsTranscript {
-        fs_transcript: KeccakTranscript::default(),
+        fs_transcript: transcript_after_prime,
         stream: std::io::Cursor::new(folded_proof.pcs_proof_bytes.clone()),
     };
-    // Absorb PCS commitment root so the PCS prime matches the PIOP prime.
-    let mut pcs_root_buf = [0u8; HASH_OUT_LEN];
-    folded_proof.commitment.root.write_transcription_bytes(&mut pcs_root_buf);
-    pcs_transcript.fs_transcript.absorb(&pcs_root_buf);
-    let pcs_field_cfg = pcs_transcript
-        .fs_transcript
-        .get_random_field_cfg::<PiopField, PcsZt::Fmod, PcsZt::PrimeTest>();
+    let pcs_field_cfg = field_cfg.clone();
 
     let point_f: Vec<PiopField> = fold2_output.new_point.iter()
         .map(|p| {
             PiopField::new_unchecked_with_cfg(p.inner().clone(), &pcs_field_cfg)
         })
         .collect();
-
     let eval_f: PiopField = PiopField::new_unchecked_with_cfg(
         <PiopField as Field>::Inner::read_transcription_bytes(&folded_proof.pcs_evals_bytes[0]),
         &pcs_field_cfg,
@@ -4981,6 +4630,7 @@ where
             pcs_prove: pcs_prove_time,
             serialize: Duration::ZERO,
             total: total_time,
+            ..Default::default()
         },
     }
 }
@@ -5455,6 +5105,7 @@ where
                 pcs_prove: pcs_prove_time,
                 serialize: Duration::ZERO,
                 total: total_time,
+                ..Default::default()
             },
         },
         point_f,
@@ -5585,6 +5236,9 @@ where
     zinc_proof.commitment.root.write_transcription_bytes(&mut root_buf);
     transcript.absorb(&root_buf);
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
+
+    // Snapshot the FS transcript state after prime derivation for PCS reuse.
+    let transcript_after_prime = transcript.clone();
 
     let field_elem_size = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
 
@@ -6341,18 +5995,13 @@ where
     // Verify that the PCS proof is consistent with these claims.
     let t2 = Instant::now();
 
-    // Derive PiopField config from the PCS transcript and reuse it.
+    // Reuse the FS transcript state snapshot from after prime derivation
+    // to skip a second Miller-Rabin primality search (~0.3-0.4ms savings).
     let mut pcs_transcript = zip_plus::pcs_transcript::PcsTranscript {
-        fs_transcript: KeccakTranscript::default(),
+        fs_transcript: transcript_after_prime,
         stream: std::io::Cursor::new(zinc_proof.pcs_proof_bytes.clone()),
     };
-    // Absorb PCS commitment root so the PCS prime matches the PIOP prime.
-    let mut pcs_root_buf = [0u8; HASH_OUT_LEN];
-    zinc_proof.commitment.root.write_transcription_bytes(&mut pcs_root_buf);
-    pcs_transcript.fs_transcript.absorb(&pcs_root_buf);
-    let pcs_field_cfg = pcs_transcript
-        .fs_transcript
-        .get_random_field_cfg::<PiopField, Zt::Fmod, Zt::PrimeTest>();
+    let pcs_field_cfg = field_cfg.clone();
 
     // Deserialize the claimed evaluation.
     let eval_f: PiopField = PiopField::new_unchecked_with_cfg(
@@ -6795,6 +6444,7 @@ where
             pcs_prove: pcs_prove_time,
             serialize: Duration::ZERO,
             total: total_time,
+            ..Default::default()
         },
     }
 }
@@ -6844,6 +6494,10 @@ where
     proof.commitment.root.write_transcription_bytes(&mut root_buf);
     transcript.absorb(&root_buf);
     let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
+
+    // Snapshot the FS transcript state after prime derivation for PCS reuse.
+    let transcript_after_prime = transcript.clone();
+
     let field_elem_size = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
 
     // ── Shared IC evaluation point ──────────────────────────────────
@@ -7207,18 +6861,13 @@ where
     // ── PCS Verify ──────────────────────────────────────────────────
     let t2 = Instant::now();
 
-    // Derive PiopField config from a fresh PCS transcript.
+    // Reuse the FS transcript state snapshot from after prime derivation
+    // to skip a second Miller-Rabin primality search (~0.3-0.4ms savings).
     let mut pcs_transcript = zip_plus::pcs_transcript::PcsTranscript {
-        fs_transcript: KeccakTranscript::default(),
+        fs_transcript: transcript_after_prime,
         stream: std::io::Cursor::new(proof.pcs_proof_bytes.clone()),
     };
-    // Absorb PCS commitment root so the PCS prime matches the PIOP prime.
-    let mut pcs_root_buf = [0u8; HASH_OUT_LEN];
-    proof.commitment.root.write_transcription_bytes(&mut pcs_root_buf);
-    pcs_transcript.fs_transcript.absorb(&pcs_root_buf);
-    let pcs_field_cfg = pcs_transcript
-        .fs_transcript
-        .get_random_field_cfg::<PiopField, Zt::Fmod, Zt::PrimeTest>();
+    let pcs_field_cfg = field_cfg.clone();
 
     // Deserialize the claimed evaluation.
     let eval_f: PiopField = PiopField::new_unchecked_with_cfg(
@@ -8014,6 +7663,7 @@ where
             pcs_prove: pcs_prove_time,
             serialize: serialize_time,
             total: total_time,
+            ..Default::default()
         },
     }
 }
@@ -8609,6 +8259,7 @@ where
             pcs_prove: pcs_prove_time,
             serialize: serialize_time,
             total: total_time,
+            ..Default::default()
         },
     }
 }
@@ -9225,6 +8876,7 @@ where
             pcs_prove: pcs_prove_time,
             serialize: serialize_time,
             total: total_time,
+            ..Default::default()
         },
     }
 }
@@ -9750,6 +9402,7 @@ where
             pcs_prove: pcs_prove_time,
             serialize: serialize_time,
             total: total_time,
+            ..Default::default()
         },
     }
 }

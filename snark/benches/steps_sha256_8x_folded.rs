@@ -51,8 +51,34 @@ use zip_plus::{
     pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
     pcs::folding::{split_columns, fold_claims_prove},
 };
-use zinc_sha256_uair::{Sha256Uair, Sha256UairQx, witness::GenerateWitness};
+#[allow(unused_imports)]
+use zinc_sha256_uair::witness::GenerateWitness;
 use zinc_uair::Uair;
+
+// ─── Feature-gated UAIR type selection ──────────────────────────────────────
+
+#[cfg(not(feature = "no-f2x"))]
+use zinc_sha256_uair::{Sha256Uair, Sha256UairQx};
+
+#[cfg(not(feature = "no-f2x"))]
+type BenchBpUair = Sha256Uair;
+#[cfg(not(feature = "no-f2x"))]
+type BenchQxUair = Sha256UairQx;
+#[cfg(not(feature = "no-f2x"))]
+const SHA256_BATCH_SIZE: usize = 30; // 27 bitpoly + 3 int
+
+#[cfg(feature = "no-f2x")]
+use zinc_sha256_uair::no_f2x::{
+    Sha256UairBpNoF2x, Sha256UairQxNoF2x,
+    NO_F2X_NUM_COLS,
+};
+
+#[cfg(feature = "no-f2x")]
+type BenchBpUair = Sha256UairBpNoF2x;
+#[cfg(feature = "no-f2x")]
+type BenchQxUair = Sha256UairQxNoF2x;
+#[cfg(feature = "no-f2x")]
+const SHA256_BATCH_SIZE: usize = NO_F2X_NUM_COLS; // 38 = 35 bitpoly + 3 int
 use zinc_piop::projections::{
     project_trace_to_field,
     project_scalars, project_scalars_to_field,
@@ -115,7 +141,7 @@ type FoldedLc4x = IprsCode<
 // ─── Parameters ─────────────────────────────────────────────────────────────
 
 const SHA256_8X_NUM_VARS: usize = 9;      // 2^9 = 512 rows (8 × 64 SHA rounds)
-const SHA256_BATCH_SIZE: usize = 30;       // 30 SHA-256 columns (27 bitpoly + 3 int)
+// SHA256_BATCH_SIZE is defined above based on the no-f2x feature flag.
 const SHA256_LOOKUP_COL_COUNT: usize = 10; // 10 Q[X] columns need lookup
 
 fn sha256_lookup_specs_4chunks() -> Vec<LookupColumnSpec> {
@@ -154,7 +180,14 @@ fn sha256_affine_lookup_specs_4chunks() -> Vec<AffineLookupSpec> {
 
 fn generate_sha256_trace(num_vars: usize) -> Vec<DenseMultilinearExtension<BinaryPoly<32>>> {
     let mut rng = rand::rng();
-    <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(num_vars, &mut rng)
+    #[cfg(not(feature = "no-f2x"))]
+    {
+        <zinc_sha256_uair::Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(num_vars, &mut rng)
+    }
+    #[cfg(feature = "no-f2x")]
+    {
+        zinc_sha256_uair::no_f2x::generate_no_f2x_witness(num_vars, &mut rng)
+    }
 }
 
 // ─── Benchmark ────────────────────────────────────────────────────────────
@@ -246,8 +279,8 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
     let sha_lookup_specs = sha256_lookup_specs_4chunks();
     let sha_affine_specs = sha256_affine_lookup_specs_4chunks();
 
-    let num_constraints = zinc_uair::constraint_counter::count_constraints::<Sha256Uair>();
-    let max_degree = zinc_uair::degree_counter::count_max_degree::<Sha256Uair>();
+    let num_constraints = zinc_uair::constraint_counter::count_constraints::<BenchBpUair>();
+    let max_degree = zinc_uair::degree_counter::count_max_degree::<BenchBpUair>();
 
     // ── 1. Witness Generation ───────────────────────────────────────
     group.bench_function("WitnessGen", |b| {
@@ -262,7 +295,7 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
     assert_eq!(sha_trace.len(), SHA256_BATCH_SIZE);
 
     // Build private (PCS-committed) trace — exclude public + shift-source columns.
-    let sha_sig = Sha256Uair::signature();
+    let sha_sig = BenchBpUair::signature();
     let sha_excluded = sha_sig.pcs_excluded_columns();
     let sha_pcs_trace: Vec<_> = sha_trace.iter().enumerate()
         .filter(|(i, _)| !sha_excluded.contains(i))
@@ -307,7 +340,7 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
         let mut tr_setup = zinc_transcript::KeccakTranscript::new();
         let fcfg = tr_setup.get_random_field_cfg::<F, <F as Field>::Inner, MillerRabin>();
         b.iter(|| {
-            let projected_scalars = project_scalars::<F, Sha256Uair>(|scalar| {
+            let projected_scalars = project_scalars::<F, BenchBpUair>(|scalar| {
                 let one = F::one_with_cfg(&fcfg);
                 let zero = F::zero_with_cfg(&fcfg);
                 DynamicPolynomialF::new(
@@ -329,7 +362,7 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
                 let field_cfg = transcript.get_random_field_cfg::<
                     F, <F as Field>::Inner, MillerRabin
                 >();
-                let projected_scalars = project_scalars::<F, Sha256Uair>(|scalar| {
+                let projected_scalars = project_scalars::<F, BenchBpUair>(|scalar| {
                     let one = F::one_with_cfg(&field_cfg);
                     let zero = F::zero_with_cfg(&field_cfg);
                     DynamicPolynomialF::new(
@@ -339,7 +372,7 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
                     )
                 });
                 let t = Instant::now();
-                let _ = IdealCheckProtocol::<F>::prove_mle_first::<Sha256Uair, 32>(
+                let _ = IdealCheckProtocol::<F>::prove_mle_first::<BenchBpUair, 32>(
                     &mut transcript,
                     &sha_trace,
                     &projected_scalars,
@@ -358,7 +391,7 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
     let field_cfg_cpr = transcript_for_cpr.get_random_field_cfg::<
         F, <F as Field>::Inner, MillerRabin
     >();
-    let projected_scalars_cpr = project_scalars::<F, Sha256Uair>(|scalar| {
+    let projected_scalars_cpr = project_scalars::<F, BenchBpUair>(|scalar| {
         let one = F::one_with_cfg(&field_cfg_cpr);
         let zero = F::zero_with_cfg(&field_cfg_cpr);
         DynamicPolynomialF::new(
@@ -368,7 +401,7 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
         )
     });
     let (_ic_proof_cpr, ic_state_cpr) =
-        IdealCheckProtocol::<F>::prove_mle_first::<Sha256Uair, 32>(
+        IdealCheckProtocol::<F>::prove_mle_first::<BenchBpUair, 32>(
             &mut transcript_for_cpr,
             &sha_trace,
             &projected_scalars_cpr,
@@ -405,7 +438,7 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
             for _ in 0..iters {
                 let mut tr = transcript_for_cpr.clone();
                 let t = Instant::now();
-                let _ = CombinedPolyResolver::<F>::prove_as_subprotocol::<Sha256Uair>(
+                let _ = CombinedPolyResolver::<F>::prove_as_subprotocol::<BenchBpUair>(
                     &mut tr,
                     field_trace_cpr.clone(),
                     &ic_state_cpr.evaluation_point,
@@ -456,7 +489,7 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
     // ── 10. PIOP / Lookup (classic) ─────────────────────────────────
     {
         let mut transcript_lk = transcript_for_cpr.clone();
-        let _ = CombinedPolyResolver::<F>::prove_as_subprotocol::<Sha256Uair>(
+        let _ = CombinedPolyResolver::<F>::prove_as_subprotocol::<BenchBpUair>(
             &mut transcript_lk,
             field_trace_cpr.clone(),
             &ic_state_cpr.evaluation_point,
@@ -524,7 +557,7 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
         // Re-run CPR to get the state we need for the shift sumcheck.
         let mut transcript_ss = transcript_for_cpr.clone();
         let (cpr_proof_ss, cpr_state_ss) =
-            CombinedPolyResolver::<F>::prove_as_subprotocol::<Sha256Uair>(
+            CombinedPolyResolver::<F>::prove_as_subprotocol::<BenchBpUair>(
                 &mut transcript_ss,
                 field_trace_cpr.clone(),
                 &ic_state_cpr.evaluation_point,
@@ -537,7 +570,7 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
             .expect("CPR prove failed for shift sumcheck bench");
 
         // Extract source columns for the shift claims.
-        let sha_sig_ss = Sha256Uair::signature();
+        let sha_sig_ss = BenchBpUair::signature();
         let shift_trace_columns: Vec<DenseMultilinearExtension<<F as Field>::Inner>> =
             sha_sig_ss.shifts.iter()
                 .map(|spec| field_trace_cpr[spec.source_col].clone())
@@ -582,7 +615,7 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
     {
         let mut transcript_fold = transcript_for_cpr.clone();
         let (_cpr_proof_fold, cpr_state_fold) =
-            CombinedPolyResolver::<F>::prove_as_subprotocol::<Sha256Uair>(
+            CombinedPolyResolver::<F>::prove_as_subprotocol::<BenchBpUair>(
                 &mut transcript_fold,
                 field_trace_cpr.clone(),
                 &ic_state_cpr.evaluation_point,
@@ -619,7 +652,7 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
     // ── 13. PCS Prove (4x-folded — BinaryPoly<8> split columns) ───
     let folded_4x_pcs_point: Vec<F> = {
         let mut tr = transcript_for_cpr.clone();
-        let (_, cpr_state) = CombinedPolyResolver::<F>::prove_as_subprotocol::<Sha256Uair>(
+        let (_, cpr_state) = CombinedPolyResolver::<F>::prove_as_subprotocol::<BenchBpUair>(
             &mut tr,
             field_trace_cpr.clone(),
             &ic_state_cpr.evaluation_point,
@@ -651,7 +684,7 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
 
     // ── 14. E2E Total Prover (4x Hybrid GKR c=2 4-chunk) ───────────
     let hybrid_4x_proof = zinc_snark::pipeline::prove_hybrid_gkr_logup_4x_folded::<
-        Sha256Uair, Sha256UairQx, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
+        BenchBpUair, BenchQxUair, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
     >(
         &folded_4x_params, &sha_trace, SHA256_8X_NUM_VARS,
         &sha_lookup_specs, &sha_affine_specs, 2,
@@ -661,15 +694,22 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
     {
         let t = &hybrid_4x_proof.timing;
         eprintln!("\n── Hybrid 4x GKR c=2 Prover Pipeline Timing ──────────");
+        eprintln!("  Split columns: {:>8.3} ms", t.split_columns.as_secs_f64() * 1000.0);
         eprintln!("  PCS commit:    {:>8.3} ms", t.pcs_commit.as_secs_f64() * 1000.0);
-        eprintln!("  Ideal Check:   {:>8.3} ms", t.ideal_check.as_secs_f64() * 1000.0);
-        eprintln!("  CPR (incl proj+extract): {:>8.3} ms", t.combined_poly_resolver.as_secs_f64() * 1000.0);
+        eprintln!("  Ideal Check:   {:>8.3} ms  (QX IC: {:.3} ms)", t.ideal_check.as_secs_f64() * 1000.0, t.qx_ideal_check.as_secs_f64() * 1000.0);
+        eprintln!("  Field proj:    {:>8.3} ms", t.field_projection.as_secs_f64() * 1000.0);
+        eprintln!("  Lookup extract:{:>8.3} ms", t.lookup_extract.as_secs_f64() * 1000.0);
+        eprintln!("  Col eval:      {:>8.3} ms", (t.combined_poly_resolver - t.field_projection - t.lookup_extract).as_secs_f64() * 1000.0);
+        eprintln!("  Proj+Eval:     {:>8.3} ms", t.combined_poly_resolver.as_secs_f64() * 1000.0);
         eprintln!("  Lookup:        {:>8.3} ms", t.lookup.as_secs_f64() * 1000.0);
+        eprintln!("  Shift SC:      {:>8.3} ms", t.shift_sumcheck.as_secs_f64() * 1000.0);
+        eprintln!("  Folding:       {:>8.3} ms", t.folding.as_secs_f64() * 1000.0);
         eprintln!("  PCS prove:     {:>8.3} ms", t.pcs_prove.as_secs_f64() * 1000.0);
         eprintln!("  Total:         {:>8.3} ms", t.total.as_secs_f64() * 1000.0);
-        let accounted = t.pcs_commit + t.ideal_check + t.combined_poly_resolver + t.lookup + t.pcs_prove;
+        let accounted = t.split_columns + t.pcs_commit + t.ideal_check
+            + t.combined_poly_resolver + t.lookup + t.shift_sumcheck + t.folding + t.pcs_prove;
         let unaccounted = t.total.saturating_sub(accounted);
-        eprintln!("  Unaccounted:   {:>8.3} ms (split+fold+shift+serialize)", unaccounted.as_secs_f64() * 1000.0);
+        eprintln!("  Unaccounted:   {:>8.3} ms (serialize only)", unaccounted.as_secs_f64() * 1000.0);
         eprintln!("────────────────────────────────────────────────────────\n");
     }
 
@@ -887,8 +927,10 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
         if qx_ic_bytes > 0 {
             eprintln!("  QX IC:            {:>6} B", qx_ic_bytes);
         }
-        eprintln!("  CPR sumcheck:     {:>6} B  (msgs={cpr_msg_bytes}, sum={cpr_sum_bytes})", cpr_sc_total);
-        eprintln!("  CPR evals:        {:>6} B  (up={cpr_up}, down={cpr_dn})", cpr_eval_total);
+        if cpr_sc_total > 0 {
+            eprintln!("  CPR sumcheck:     {:>6} B  (msgs={cpr_msg_bytes}, sum={cpr_sum_bytes})", cpr_sc_total);
+        }
+        eprintln!("  Col evals:        {:>6} B  (up={cpr_up}, down={cpr_dn})", cpr_eval_total);
         if qx_cpr_total > 0 {
             eprintln!("  QX CPR:           {:>6} B", qx_cpr_total);
         }
@@ -913,11 +955,13 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
+                // Generate a fresh witness each iteration (not timed).
+                let trace = generate_sha256_trace(SHA256_8X_NUM_VARS);
                 let t = Instant::now();
                 let _ = zinc_snark::pipeline::prove_hybrid_gkr_logup_4x_folded::<
-                    Sha256Uair, Sha256UairQx, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
+                    BenchBpUair, BenchQxUair, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
                 >(
-                    &folded_4x_params, &sha_trace, SHA256_8X_NUM_VARS,
+                    &folded_4x_params, &trace, SHA256_8X_NUM_VARS,
                     &sha_lookup_specs, &sha_affine_specs, 2,
                 );
                 total += t.elapsed();
@@ -927,13 +971,13 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
     });
 
     // ── 15. E2E Total Verifier (4x Hybrid GKR c=2 4-chunk) ─────────
-    let sha_sig_pub = Sha256Uair::signature();
+    let sha_sig_pub = BenchBpUair::signature();
     let sha_public_cols: Vec<_> = sha_sig_pub.public_columns.iter()
         .map(|&i| sha_trace[i].clone()).collect();
 
     {
         let r = zinc_snark::pipeline::verify_classic_logup_4x_folded::<
-            Sha256Uair, Sha256UairQx, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _, _, _,
+            BenchBpUair, BenchQxUair, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _, _, _,
         >(
             &folded_4x_params, &hybrid_4x_proof, SHA256_8X_NUM_VARS,
             |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
@@ -953,7 +997,7 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
     group.bench_function("E2E/Verifier (4x Hybrid GKR c=2 4-chunk)", |b| {
         b.iter(|| {
             let r = zinc_snark::pipeline::verify_classic_logup_4x_folded::<
-                Sha256Uair, Sha256UairQx, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _, _, _,
+                BenchBpUair, BenchQxUair, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _, _, _,
             >(
                 &folded_4x_params, &hybrid_4x_proof, SHA256_8X_NUM_VARS,
                 |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
