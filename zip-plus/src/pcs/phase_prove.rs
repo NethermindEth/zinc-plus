@@ -98,7 +98,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + for<'a> FromWithConfig<&'a Zt::Pt>
             + for<'a> MulByScalar<&'a F>
             + FromRef<F>,
-        F::Inner: FromRef<Zt::Fmod> + Transcribable,
+        F::Inner: Transcribable,
+        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
     {
         let batch_size = polys.len();
         validate_input::<Zt, Lc, _>("prove", pp.num_vars, batch_size, polys, &[point])?;

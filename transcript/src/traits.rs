@@ -111,12 +111,12 @@ pub trait Transcript {
     where
         F: PrimeField,
         FMod: ConstTranscribable + ConstIntSemiring,
-        F::Inner: FromRef<FMod>,
+        F::Modulus: FromRef<FMod>,
         T: PrimalityTest<FMod>,
     {
         let prime = self.get_prime::<FMod, T>();
 
-        F::make_cfg(&F::Inner::from_ref(&prime)).expect("prime is guaranteed to be prime")
+        F::make_cfg(&F::Modulus::from_ref(&prime)).expect("prime is guaranteed to be prime")
     }
 
     /// Absorbs a byte slice into the hash sponge.
@@ -128,7 +128,8 @@ pub trait Transcript {
     fn absorb_random_field<F>(&mut self, v: &F, buf: &mut [u8])
     where
         F: PrimeField,
-        F::Inner: Transcribable;
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable;
 
     /// Absorbs a slice of field element into the transcript.
     /// Delegates to the field element's implementation of
@@ -137,6 +138,7 @@ pub trait Transcript {
     where
         F: PrimeField,
         F::Inner: Transcribable,
+        F::Modulus: Transcribable,
     {
         v.iter().for_each(|x| self.absorb_random_field(x, buf));
     }

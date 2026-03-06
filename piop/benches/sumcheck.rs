@@ -30,7 +30,8 @@ pub fn bench_simple_product<F, const LIMBS: usize>(
 ) where
     F: FromPrimitiveWithConfig + InnerTransparentField + FromRef<F> + 'static,
     F::Inner: FromRef<F::Inner> + ConstTranscribable + ConstIntSemiring,
-    MillerRabin: PrimalityTest<F::Inner>,
+    F::Modulus: FromRef<F::Modulus> + ConstTranscribable + ConstIntSemiring,
+    MillerRabin: PrimalityTest<F::Modulus>,
     for<'a> &'a F: Mul<&'a F, Output = F>,
 {
     let mut rng = rng();
@@ -66,7 +67,7 @@ pub fn bench_simple_product<F, const LIMBS: usize>(
     let transcript = KeccakTranscript::new();
 
     let prove = |(a, b, c, mut transcript):(_,_,_,KeccakTranscript)| -> RFSumcheckProof<F, BinaryPoly<32>> {
-        let field_cfg = transcript.get_random_field_cfg::<F, <F as Field>::Inner, MillerRabin>();
+        let field_cfg = transcript.get_random_field_cfg::<F, <F as Field>::Modulus, MillerRabin>();
 
         let eq_r = build_eq_x_r_inner(&vec![F::from_with_cfg(2u32, &field_cfg); nvars], &field_cfg)
             .expect("Failed to build eq_r");
@@ -107,7 +108,7 @@ pub fn bench_simple_product<F, const LIMBS: usize>(
                 || (proof.clone(), transcript.clone()),
                 |(proof, mut transcript)| {
                     let field_cfg =
-                        transcript.get_random_field_cfg::<F, <F as Field>::Inner, MillerRabin>();
+                        transcript.get_random_field_cfg::<F, <F as Field>::Modulus, MillerRabin>();
 
                     let _ = black_box(
                         RFSumcheck::<F, _>::verify_as_subprotocol(

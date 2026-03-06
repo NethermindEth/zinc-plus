@@ -52,14 +52,20 @@ impl PcsTranscript {
         }
     }
 
+    // Note: Currently this only works for fields whose modulus and inner element
+    // have the same byte length
+    //
     // TODO if we change this to an iterator we may be able to save some memory
     pub fn write_field_elements<F>(&mut self, elems: &[F]) -> Result<(), ZipError>
     where
         F: PrimeField,
         F::Inner: Transcribable,
+        F::Modulus: Transcribable,
     {
         if !elems.is_empty() {
+            debug_assert_eq!(F::Inner::LENGTH_NUM_BYTES, F::Modulus::LENGTH_NUM_BYTES);
             let num_bytes = F::Inner::get_num_bytes(elems[0].inner());
+            debug_assert_eq!(num_bytes, F::Modulus::get_num_bytes(&elems[0].modulus()));
             let num_bytes_arr = num_bytes
                 .to_le_bytes()
                 .into_iter()
@@ -76,15 +82,20 @@ impl PcsTranscript {
         Ok(())
     }
 
+    // Note: Currently this only works for fields whose modulus and inner element
+    // have the same byte length
     pub fn read_field_elements<F>(&mut self, n: usize) -> Result<Vec<F>, ZipError>
     where
         F: PrimeField,
         F::Inner: Transcribable,
+        F::Modulus: Transcribable,
     {
         if n > 0 {
+            debug_assert_eq!(F::Inner::LENGTH_NUM_BYTES, F::Modulus::LENGTH_NUM_BYTES);
             let mut buf = vec![0; F::Inner::LENGTH_NUM_BYTES];
             self.stream.read_exact(&mut buf)?;
             let num_bytes = F::Inner::read_num_bytes(&buf);
+            debug_assert_eq!(num_bytes, F::Modulus::read_num_bytes(&buf));
 
             let mut buf = vec![0; num_bytes];
             (0..n)
@@ -104,11 +115,12 @@ impl PcsTranscript {
     where
         F: PrimeField,
         F::Inner: Transcribable,
+        F::Modulus: Transcribable,
     {
         self.stream.read_exact(buf)?;
         let inner = F::Inner::read_transcription_bytes(buf);
         self.stream.read_exact(buf)?;
-        let modulus = F::Inner::read_transcription_bytes(buf);
+        let modulus = F::Modulus::read_transcription_bytes(buf);
         let field_cfg = F::make_cfg(&modulus)?;
         let fe = F::new_unchecked_with_cfg(inner, &field_cfg);
         self.fs_transcript.absorb_random_field(&fe, buf);
@@ -124,6 +136,7 @@ impl PcsTranscript {
     where
         F: PrimeField,
         F::Inner: Transcribable,
+        F::Modulus: Transcribable,
     {
         self.fs_transcript.absorb_random_field(fe, buf);
         fe.inner().write_transcription_bytes(buf);

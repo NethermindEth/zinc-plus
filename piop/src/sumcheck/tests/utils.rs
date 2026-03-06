@@ -47,7 +47,7 @@ pub(crate) fn rand_poly<F: PrimeField + Random, Rn: RngCore>(
             evaluations: mle
                 .evaluations
                 .into_iter()
-                .map(|x| x.inner().clone())
+                .map(|x| x.into_inner())
                 .collect(),
             num_vars: mle.num_vars,
         })
