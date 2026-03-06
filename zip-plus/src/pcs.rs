@@ -4,8 +4,7 @@ use crate::pcs_transcript::PcsTranscript;
 use std::io::Cursor;
 
 mod phase_commit;
-mod phase_evaluate;
-mod phase_test;
+mod phase_prove;
 mod phase_verify;
 pub mod structs;
 #[cfg(test)]
