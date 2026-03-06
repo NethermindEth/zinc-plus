@@ -564,10 +564,10 @@ mod tests {
         let (field_cfg, projecting_element) =
             get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
 
-        let _eval_f = TestZip::prove::<F, CHECKED>(
+        let _eval_f = TestZip::prove_single::<F, CHECKED>(
             &mut prover_transcript,
             &pp,
-            std::slice::from_ref(&mle2),
+            &mle2,
             &point,
             &hint,
             &field_cfg,
@@ -623,10 +623,10 @@ mod tests {
         let (field_cfg, projecting_element) =
             get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
 
-        let eval_f = TestZip::prove::<F, CHECKED>(
+        let eval_f = TestZip::prove_single::<F, CHECKED>(
             &mut prover_transcript,
             &pp,
-            std::slice::from_ref(&mle),
+            &mle,
             &point,
             &corrupted_hint,
             &field_cfg,
@@ -666,10 +666,10 @@ mod tests {
         let (field_cfg, projecting_element) =
             get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
 
-        let eval_f = TestZip::prove::<F, CHECKED>(
+        let eval_f = TestZip::prove_single::<F, CHECKED>(
             &mut prover_transcript,
             &pp,
-            std::slice::from_ref(&mle),
+            &mle,
             &point,
             &hint,
             &field_cfg,
@@ -718,10 +718,10 @@ mod tests {
         let (field_cfg, projecting_element) =
             get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
 
-        let eval_f = TestZip::prove::<F, CHECKED>(
+        let eval_f = TestZip::prove_single::<F, CHECKED>(
             &mut prover_transcript,
             &pp,
-            std::slice::from_ref(&mle),
+            &mle,
             &point,
             &hint,
             &field_cfg,
@@ -789,10 +789,10 @@ mod tests {
         let (field_cfg, projecting_element) =
             get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
 
-        let eval_f = TestZip::prove::<F, CHECKED>(
+        let eval_f = TestZip::prove_single::<F, CHECKED>(
             &mut prover_transcript,
             &pp,
-            std::slice::from_ref(&mle),
+            &mle,
             &point,
             &hint,
             &field_cfg,
@@ -851,10 +851,10 @@ mod tests {
         let (field_cfg, projecting_element) =
             get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
 
-        let eval_f = TestZip::prove::<F, CHECKED>(
+        let eval_f = TestZip::prove_single::<F, CHECKED>(
             &mut prover_transcript,
             &pp,
-            std::slice::from_ref(&mle),
+            &mle,
             &point,
             &hint,
             &field_cfg,
@@ -897,10 +897,10 @@ mod tests {
         let (field_cfg, projecting_element) =
             get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
 
-        let eval_f = TestZip::prove::<F, CHECKED>(
+        let eval_f = TestZip::prove_single::<F, CHECKED>(
             &mut prover_transcript,
             &pp,
-            std::slice::from_ref(&mle),
+            &mle,
             &point,
             &hint,
             &field_cfg,
@@ -944,10 +944,10 @@ mod tests {
         let (field_cfg, projecting_element) =
             get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
 
-        let eval_f = TestZip::prove::<F, CHECKED>(
+        let eval_f = TestZip::prove_single::<F, CHECKED>(
             &mut prover_transcript,
             &pp,
-            std::slice::from_ref(&poly),
+            &poly,
             &point,
             &hint,
             &field_cfg,
@@ -989,10 +989,10 @@ mod tests {
         let (field_cfg, projecting_element) =
             get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
 
-        let eval_f = TestZip::prove::<F, CHECKED>(
+        let eval_f = TestZip::prove_single::<F, CHECKED>(
             &mut prover_transcript,
             &pp,
-            std::slice::from_ref(&poly),
+            &poly,
             &point,
             &hint,
             &field_cfg,
@@ -1035,10 +1035,10 @@ mod tests {
         let (field_cfg, projecting_element) =
             get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
 
-        let eval_f = TestZip::prove::<F, CHECKED>(
+        let eval_f = TestZip::prove_single::<F, CHECKED>(
             &mut prover_transcript,
             &pp,
-            std::slice::from_ref(&mle),
+            &mle,
             &point,
             &hint,
             &field_cfg,
@@ -1099,10 +1099,10 @@ mod tests {
             let (field_cfg, projecting_element) =
                 get_field_and_projecting_element::<Zt, F>(&mut prover_transcript.fs_transcript);
 
-            let eval_f = TestZip::prove::<F, CHECKED>(
+            let eval_f = TestZip::prove_single::<F, CHECKED>(
                 &mut prover_transcript,
                 &pp,
-                std::slice::from_ref(&mle),
+                &mle,
                 &point,
                 &hint,
                 &field_cfg,
@@ -1160,10 +1160,10 @@ mod tests {
             let (field_cfg, projecting_element) =
                 get_field_and_projecting_element::<PolyZt, F>(&mut prover_transcript.fs_transcript);
 
-            let eval_f = TestPolyZip::prove::<F, CHECKED>(
+            let eval_f = TestPolyZip::prove_single::<F, CHECKED>(
                 &mut prover_transcript,
                 &pp,
-                std::slice::from_ref(&mle),
+                &mle,
                 &point,
                 &hint,
                 &field_cfg,

@@ -211,6 +211,36 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         Ok(eval)
     }
 
+    /// See [`Self::prove`] for details.
+    #[inline(always)]
+    pub fn prove_single<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsProverTranscript,
+        pp: &ZipPlusParams<Zt, Lc>,
+        poly: &DenseMultilinearExtension<Zt::Eval>,
+        point: &[Zt::Pt],
+        commit_hint: &ZipPlusHint<Zt::Cw>,
+        field_cfg: &F::Config,
+    ) -> Result<F, ZipError>
+    where
+        F: PrimeField
+            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> FromWithConfig<&'a Zt::Chal>
+            + for<'a> FromWithConfig<&'a Zt::Pt>
+            + for<'a> MulByScalar<&'a F>
+            + FromRef<F>,
+        F::Inner: Transcribable,
+        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
+    {
+        Self::prove::<F, CHECK_FOR_OVERFLOW>(
+            transcript,
+            pp,
+            std::slice::from_ref(poly),
+            point,
+            commit_hint,
+            field_cfg,
+        )
+    }
+
     pub(super) fn open_merkle_trees_for_column(
         transcript: &mut PcsProverTranscript,
         commit_hint: &ZipPlusHint<Zt::Cw>,
@@ -290,8 +320,14 @@ mod tests {
         let (field_cfg, projecting_element) =
             get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
 
-        let result =
-            TestZip::prove::<F, CHECKED>(&mut transcript, &pp, &[poly], &point, &hint, &field_cfg);
+        let result = TestZip::prove_single::<F, CHECKED>(
+            &mut transcript,
+            &pp,
+            &poly,
+            &point,
+            &hint,
+            &field_cfg,
+        );
         assert!(result.is_ok());
     }
 
@@ -306,10 +342,10 @@ mod tests {
         let (field_cfg, projecting_element) =
             get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
 
-        let result = TestPolyZip::prove::<F, CHECKED>(
+        let result = TestPolyZip::prove_single::<F, CHECKED>(
             &mut transcript,
             &pp,
-            &[poly],
+            &poly,
             &point,
             &hint,
             &field_cfg,
@@ -341,10 +377,10 @@ mod tests {
         let (field_cfg, projecting_element) =
             get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
 
-        let result = TestZip::prove::<F, CHECKED>(
+        let result = TestZip::prove_single::<F, CHECKED>(
             &mut transcript,
             &pp,
-            &[poly],
+            &poly,
             &point,
             &corrupted_hint,
             &field_cfg,
@@ -367,10 +403,10 @@ mod tests {
         let (field_cfg, projecting_element) =
             get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
 
-        let result = TestZip::prove::<F, CHECKED>(
+        let result = TestZip::prove_single::<F, CHECKED>(
             &mut transcript,
             &pp,
-            &[oversized_poly],
+            &oversized_poly,
             &point,
             &hint,
             &field_cfg,
@@ -391,10 +427,10 @@ mod tests {
         let (field_cfg, projecting_element) =
             get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
 
-        let eval_f = TestZip::prove::<F, CHECKED>(
+        let eval_f = TestZip::prove_single::<F, CHECKED>(
             &mut transcript,
             &pp,
-            std::slice::from_ref(&poly),
+            &poly,
             &point,
             &hint,
             &field_cfg,

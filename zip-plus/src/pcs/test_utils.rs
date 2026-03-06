@@ -236,15 +236,9 @@ where
         get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
     let point: Vec<Zt::Pt> = prepare_evaluation_point();
 
-    let eval = ZipPlus::prove::<F, CHECKED>(
-        &mut transcript,
-        &pp,
-        std::slice::from_ref(&poly),
-        &point,
-        &hint,
-        &field_cfg,
-    )
-    .unwrap();
+    let eval =
+        ZipPlus::prove_single::<F, CHECKED>(&mut transcript, &pp, &poly, &point, &hint, &field_cfg)
+            .unwrap();
 
     let point_f = point
         .iter()

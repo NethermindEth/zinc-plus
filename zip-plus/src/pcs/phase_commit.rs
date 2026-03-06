@@ -178,8 +178,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     clippy::cast_possible_wrap
 )]
 mod tests {
-    use std::slice::from_ref;
-
     use crate::{
         code::{LinearCode, raa::RaaCode, raa_sign_flip::RaaSignFlippingCode},
         merkle::{MerkleTree, MtHash},
@@ -375,7 +373,8 @@ mod tests {
     fn batch_commit_single_poly_matches_single_commit() {
         let (pp, poly) = setup_test_params(3);
 
-        let (batched_hint, batched_comm) = TestZip::commit(&pp, from_ref(&poly)).unwrap();
+        let polys = std::slice::from_ref(&poly);
+        let (batched_hint, batched_comm) = TestZip::commit(&pp, polys).unwrap();
         let (single_hint, single_comm) = TestZip::commit_single(&pp, &poly).unwrap();
 
         assert_eq!(batched_comm.root, single_comm.root);
@@ -631,7 +630,8 @@ mod tests {
     fn batch_commit_poly_single_matches_commit_single() {
         let (pp, poly) = setup_poly_test_params::<K, M, DEGREE_PLUS_ONE>(4);
 
-        let (batched_hint, batched_comm) = TestPolyZip::commit(&pp, from_ref(&poly)).unwrap();
+        let polys = std::slice::from_ref(&poly);
+        let (batched_hint, batched_comm) = TestPolyZip::commit(&pp, polys).unwrap();
         let (single_hint, single_comm) = TestPolyZip::commit_single(&pp, &poly).unwrap();
 
         assert_eq!(batched_comm.root, single_comm.root);
@@ -723,10 +723,10 @@ mod tests {
         let (field_cfg, projecting_element) =
             get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
 
-        let _eval_f = TestZip::prove::<F, CHECKED>(
+        let _eval_f = TestZip::prove_single::<F, CHECKED>(
             &mut transcript,
             &param,
-            from_ref(&mle),
+            &mle,
             &point,
             &hint,
             &field_cfg,
