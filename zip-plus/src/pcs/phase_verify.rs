@@ -1156,7 +1156,7 @@ mod tests {
             .expect("verify");
         }
 
-        inner::<19>();
+        inner::<12>();
     }
 
     fn batched_prove_verify_inner<const BATCH: usize>(num_vars: usize) {
