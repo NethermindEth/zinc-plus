@@ -20,7 +20,6 @@ use crypto_primitives::{
     crypto_bigint_uint::Uint,
 };
 use itertools::Itertools;
-use num_traits::Zero;
 use zinc_poly::{
     mle::DenseMultilinearExtension,
     univariate::{
@@ -165,7 +164,6 @@ where
     F::Inner: Transcribable,
     F::Modulus: FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod> + Transcribable,
     <TestZipTypes<N, K, M> as ZipTypes>::Eval: ProjectableToField<F>,
-    <TestZipTypes<N, K, M> as ZipTypes>::Comb: ProjectableToField<F>,
 {
     setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_test_params, || {
         (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect()
@@ -221,49 +219,32 @@ where
     Zt: ZipTypes,
     Lc: LinearCode<Zt>,
     F: PrimeField
+        + for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>,
     F::Inner: Transcribable,
     F::Modulus: FromRef<Zt::Fmod> + Transcribable,
-    Zt::Comb: for<'a> MulByScalar<&'a Zt::Pt>,
     Zt::Eval: ProjectableToField<F>,
-    Zt::Comb: ProjectableToField<F>,
 {
     let (pp, poly) = setup(num_vars);
-
-    let (data, comm) = ZipPlus::commit(&pp, &poly).unwrap();
+    let (hint, comm) = ZipPlus::commit_single(&pp, &poly).unwrap();
 
     let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
     let (field_cfg, projecting_element) =
         get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
-
     let point: Vec<Zt::Pt> = prepare_evaluation_point();
 
-    ZipPlus::test::<CHECKED>(&mut transcript, &pp, &poly, &data).unwrap();
-    let eval_f = ZipPlus::evaluate::<_, CHECKED>(
+    let eval = ZipPlus::prove::<F, CHECKED>(
         &mut transcript,
         &pp,
-        &poly,
+        std::slice::from_ref(&poly),
         &point,
+        &hint,
         &field_cfg,
-        &projecting_element,
     )
     .unwrap();
-
-    // Verify the evaluation is done correctly
-    {
-        // Widen up polynomial for evaluation
-        let poly: DenseMultilinearExtension<_> = poly.iter().map(Zt::Comb::from_ref).collect();
-
-        let expected_eval = poly
-            .evaluate(&point, Zero::zero())
-            .expect("failed to evaluate polynomial");
-        let projecting_element_f: F = (&projecting_element).into_with_cfg(&field_cfg);
-        let project = Zt::Comb::prepare_projection(&projecting_element_f);
-        assert_eq!(eval_f, project(&expected_eval));
-    }
 
     let point_f = point
         .iter()
@@ -274,7 +255,7 @@ where
 
     transcript.fs_transcript.absorb_slice(&comm.root.0);
 
-    (pp, comm, point_f, eval_f, transcript)
+    (pp, comm, point_f, eval, transcript)
 }
 
 pub fn get_field_and_projecting_element<Zt, F>(
