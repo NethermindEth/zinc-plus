@@ -22,8 +22,78 @@ use zinc_utils::{
     mul_by_scalar::MulByScalar,
 };
 
-// References main.pdf for the new Zip+ protocol
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
+    /// Verifies an opening proof for one or more committed multilinear
+    /// polynomials at an evaluation point, using the Zip+ protocol.
+    ///
+    /// This replaces the old two-phase (verify_testing + verify_evaluation)
+    /// approach. The old protocol performed two proximity checks (one in CombR,
+    /// one in F via a separate `projecting_element` γ) and one eval consistency
+    /// check. The merged protocol eliminates the F-domain proximity check
+    /// entirely, replacing it with a coherence check between `b` and `w`
+    /// that ties the single CombR proximity check to the evaluation claim.
+    ///
+    /// # Verification checks (4 total)
+    ///
+    /// 1. **Eval consistency**: `<q_0, b> == eval_f`. Ensures the claimed
+    ///    evaluation matches the `b` vector written by the prover, where `b_j =
+    ///    sum_i(<w'_ij, q_1>)` and `w'_ij` is the j-th decoded row of poly i
+    ///    after taking the random linear combination `<entry, alphas_i>` of
+    ///    every entry.
+    ///
+    /// 2. **Coherence** (b-w): `<w, q_1> == <s, b>`. Ensures `b` and `w` are
+    ///    derived from the same underlying rows `w'_j`, tying the
+    ///    proximity-tested `w` to the eval-tested `b`.
+    ///
+    /// 3. **Proximity** (per opened column, batched across polys): `Enc(w)[col]
+    ///    == sum_i(sum_j(s_j * <v_ij[col], alphas_i>))`. For each poly i and
+    ///    row j, takes the random linear combination `<v_ij[col], alphas_i>` of
+    ///    the Cw column entry to get a CombR value, combines rows with
+    ///    coefficients `s`, sums across polys. Compares against the encoded
+    ///    combined row.
+    ///
+    /// 4. **Merkle proof** (per opened column): verifies the column values
+    ///    against `comm.root`, ensuring that the data matches what was
+    ///    committed.
+    ///
+    /// Chain of trust: Merkle (check 4) → column data authentic → proximity
+    /// (check 3) → `w` is a valid codeword consistent with columns →
+    /// coherence (check 2) → `b` is consistent with `w` →
+    /// eval consistency (check 1) → `eval_f` is correct.
+    ///
+    /// # Algorithm
+    /// 1. Computes `(q_0, q_1) = point_to_tensor(point_f)`.
+    /// 2. Per polynomial, re-derives `alphas` from the transcript.
+    /// 3. Reads `b` (length `num_rows`) from the transcript.
+    /// 4. **Check 1**: asserts `<q_0, b> == eval_f`.
+    /// 5. Re-derives combination coefficients `s` (or `[1]` when `num_rows ==
+    ///    1`).
+    /// 6. Reads combined row `w` (CombR, length `row_len`) and encodes it.
+    /// 7. **Check 2**: asserts `<w, q_1> == <s, b>`.
+    /// 8. For each of `NUM_COLUMN_OPENINGS`: a. Squeezes column index, reads
+    ///    per-poly column values + Merkle proof. b. **Check 3**:
+    ///    `verify_column_testing_batched`. c. **Check 4**:
+    ///    `proof.verify(comm.root, column_values, col)`.
+    ///
+    /// # Parameters
+    /// - `vp`: Public parameters (same as prover's `pp`).
+    /// - `comm`: The `ZipPlusCommitment` (Merkle root + batch size) from the
+    ///   commit phase.
+    /// - `point_f`: The evaluation point in field `F` (length `num_vars`).
+    /// - `eval_f`: The claimed combined evaluation `<q_0, b>`.
+    /// - `proof`: The `ZipPlusProof` produced by `prove`.
+    ///
+    /// # Returns
+    /// `Ok(())` if all four checks pass.
+    ///
+    /// # Errors
+    /// - `ZipError::InvalidPcsParam` if inputs are malformed.
+    /// - `ZipError::InvalidPcsOpen("Evaluation consistency failure")` if check
+    ///   1 fails.
+    /// - `ZipError::InvalidPcsOpen("Coherence failure")` if check 2 fails.
+    /// - `ZipError::InvalidPcsOpen("Proximity failure")` if check 3 fails.
+    /// - `ZipError::InvalidPcsOpen("Column opening verification failed: ...")`
+    ///   if check 4 (Merkle) fails.
     #[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
     pub fn verify<F, const CHECK_FOR_OVERFLOW: bool>(
         vp: &ZipPlusParams<Zt, Lc>,
@@ -51,7 +121,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
 
         // TODO Lift q0, q1 back to int and take following dot products on ints instead
-        // of MBSInnerProduct in field (see comboned row)
+        // of MBSInnerProduct in field (see combined_row)
         let (q_0, q_1) = point_to_tensor(vp.num_rows, point_f, &field_cfg)?;
         let zero_f = F::zero_with_cfg(&field_cfg);
 
@@ -70,7 +140,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
         let b: Vec<F> = transcript.read_field_elements(num_rows)?;
 
-        // Check eval claim: <q_0, b> == evals_f
+        // Check 1: <q_0, b> == eval_f
         if MBSInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())? != *eval_f {
             return Err(ZipError::InvalidPcsOpen(
                 "Evaluation consistency failure".into(),
@@ -86,8 +156,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let combined_row: Vec<Zt::CombR> = transcript.read_const_many(row_len)?;
         let encoded_combined_row: Vec<Zt::CombR> = vp.linear_code.encode_wide(&combined_row);
 
-        // Check: <w, q_1> = <s, b>
-        // It is safe to use inner_product_unchecked because we're in a field.
+        // Check 2: <w, q_1> == <s, b>
+        // Ensures b and w are derived from the same underlying rows w'_j.
         // NOTE: CombR entries (Int<M>) can exceed the field's bit-width, so the
         // CombR→F lift must reduce mod p before truncating limbs.
         // MontyField's FromWithConfig does this; BoxedMontyField's does not and will
@@ -107,9 +177,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         )?;
 
         if lhs != rhs {
-            return Err(ZipError::InvalidPcsOpen(
-                "Eval-proximity link failure".into(),
-            ));
+            return Err(ZipError::InvalidPcsOpen("Coherence failure".into()));
         }
 
         let columns_and_proofs: Vec<_> = (0..Zt::NUM_COLUMN_OPENINGS)
@@ -149,9 +217,10 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         Ok(())
     }
 
-    // Proximity check: M * w[column] = sum_m(sum_j(s_j * sum_i(r_i * v_i)[column]))
-    // v_i are encoded rows, r_i are alphas and where j = (0..k2) i.e. over rows
-    // and m is number of polys batched
+    // Check 3: Enc(w)[col] == sum_i( sum_j( s_j * <v_ij[col], alphas_i> ) )
+    // For each poly i and row j, takes the random linear combination
+    // <v_ij[col], alphas_i> of the Cw column entry to CombR,
+    // combines rows with coefficients s, sums across polys.
     pub(super) fn verify_column_testing_batched<const CHECK_FOR_OVERFLOW: bool>(
         per_poly_alphas: &[Vec<Zt::Chal>],
         coeffs: &[Zt::Chal],
