@@ -108,8 +108,8 @@ where
         + Sync,
     Int<6>: FromRef<CwCoeff>,
 {
-    const NUM_COLUMN_OPENINGS: usize = 131;
-    const GRINDING_BITS: usize = 8;
+    const NUM_COLUMN_OPENINGS: usize = 118;
+    const GRINDING_BITS: usize = 16;
     type Eval = BinaryPoly<D_PLUS_ONE>;
     type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
     type Fmod = Uint<{ INT_LIMBS * 3 }>;
@@ -264,7 +264,10 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
 
     let mem_tracker = MemoryTracker::start();
 
-    let mut group = c.benchmark_group("8xSHA256 4x-Folded Hybrid GKR c=2 Steps");
+    let mut group = c.benchmark_group(format!(
+        "8xSHA256 4x-Folded Hybrid GKR c=2 Steps (grind={})",
+        <FoldedZt4x as ZipTypes>::GRINDING_BITS,
+    ));
     group.sample_size(100);
 
     // -- 4x-folded PCS params ----------------------------------------
