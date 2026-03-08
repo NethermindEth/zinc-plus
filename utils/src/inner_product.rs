@@ -61,6 +61,43 @@ where
     }
 }
 
+impl MBSInnerProduct {
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn mapped_inner_product<A, Lhs, Rhs, Out, const CHECK: bool>(
+        lhs: &[A],
+        rhs: &[Rhs],
+        zero: Out,
+        map_fn: impl Fn(&A) -> Lhs,
+    ) -> Result<Out, InnerProductError>
+    where
+        Lhs: for<'a> MulByScalar<&'a Rhs>,
+        Out: FromRef<Lhs> + CheckedAdd,
+    {
+        if lhs.len() != rhs.len() {
+            return Err(InnerProductError::LengthMismatch {
+                lhs: lhs.len(),
+                rhs: rhs.len(),
+            });
+        }
+
+        lhs.iter()
+            .zip(rhs)
+            .map(|(a, r)| {
+                map_fn(a)
+                    .mul_by_scalar::<CHECK>(r)
+                    .ok_or(InnerProductError::Overflow)
+            })
+            .try_fold(zero, |acc, product| {
+                let product = Out::from_ref(&product?);
+                if CHECK {
+                    acc.checked_add(&product).ok_or(InnerProductError::Overflow)
+                } else {
+                    Ok(acc + product)
+                }
+            })
+    }
+}
+
 /// The inner product for vectors of length 1 (a.k.a. scalars).
 /// Uses `mul_by_scalar` to multiply the only components of vectors
 /// to get the result.

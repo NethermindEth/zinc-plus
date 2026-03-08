@@ -1,3 +1,5 @@
+use std::slice::from_ref;
+
 use crate::{
     ZipError,
     code::LinearCode,
@@ -8,6 +10,7 @@ use crate::{
     },
 };
 use crypto_primitives::DenseRowMatrix;
+use itertools::Itertools;
 use uninit::out_ref::Out;
 use zinc_utils::{cfg_chunks, cfg_chunks_mut};
 
@@ -16,78 +19,78 @@ use rayon::prelude::*;
 use zinc_poly::mle::DenseMultilinearExtension;
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
-    /// Creates a commitment to a multilinear polynomial using the ZIP PCS
-    /// scheme.
+    /// Creates a commitment to one or more multilinear polynomials using the
+    /// ZIP PCS scheme.
     ///
     /// This function implements the commitment phase of the ZIP polynomial
-    /// commitment scheme. It encodes the polynomial's evaluations using a
-    /// linear error-correcting code and then creates Merkle tree
-    /// commitments to the encoded rows.
+    /// commitment scheme. It encodes each polynomial's evaluations using a
+    /// linear error-correcting code and then creates a single Merkle tree
+    /// commitment over the interleaved columns.
     ///
     /// # Algorithm
-    /// 1. Validates that the polynomial's number of variables matches the
+    /// 1. Validates that each polynomial's number of variables matches the
     ///    parameters.
-    /// 2. Arranges the polynomial's evaluations into a matrix with
+    /// 2. Arranges each polynomial's evaluations into a matrix with
     ///    `pp.num_rows` rows.
     /// 3. Encodes each row using the specified linear code, expanding its
     ///    length from `row_len` to `codeword_len`.
-    /// 4. Constructs a Merkle tree for each encoded row to produce a root hash.
+    /// 4. Constructs a single Merkle tree where `leaf_j = H(poly_1_col_j ||
+    ///    poly_2_col_j || ...)`.
     /// 5. Returns the full commitment data (for the prover) and a compact
     ///    commitment (for the verifier).
-    ///
-    /// # Type Parameters
-    /// - `F`: A generic [`Field`] type used for validation purposes, though not
-    ///   for the commitment itself, which operates on integers.
     ///
     /// # Parameters
     /// - `pp`: Public parameters (`ZipPlusParams`) containing the configuration
     ///   for the commitment scheme.
-    /// - `poly`: The multilinear polynomial (`DenseMultilinearExtension`) to be
-    ///   committed to.
+    /// - `polys`: Slice of multilinear polynomials to be committed to.
     ///
     /// # Returns
     /// A `Result` containing a tuple of:
-    /// - `ZipPlusHint`: Full data including encoded rows and Merkle tree, kept
-    ///   by the prover for the opening phase.
-    /// - `ZipPlusCommitment`: The compact commitment, consisting of only the
-    ///   Merkle roots, to be sent to the verifier.
+    /// - `ZipPlusHint`: Per-polynomial encoded rows and the shared Merkle tree,
+    ///   kept by the prover for the opening phase.
+    /// - `ZipPlusCommitment`: The compact commitment (Merkle root and batch
+    ///   size), to be sent to the verifier.
     ///
     /// # Errors
-    /// - Returns `Error::InvalidPcsParam` if the polynomial has more variables
+    /// - Returns `Error::InvalidPcsParam` if any polynomial has more variables
     ///   than the parameters support.
     ///
     /// # Panics
-    /// - Panics if the number of polynomial evaluations does not perfectly
-    ///   match the expected matrix size (`pp.num_rows *
-    ///   pp.linear_code.row_len()`).
-    /// - Panics if the number of generated Merkle trees does not match
-    ///   `pp.num_rows`, indicating an internal logic error.
+    /// - Panics if any polynomial's evaluation count does not match
+    ///   `pp.num_rows * pp.linear_code.row_len()`.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn commit(
         pp: &ZipPlusParams<Zt, Lc>,
-        poly: &DenseMultilinearExtension<Zt::Eval>,
+        polys: &[DenseMultilinearExtension<Zt::Eval>],
     ) -> Result<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment), ZipError> {
-        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, &[poly], &[])?;
-
-        let expected_num_evals = pp.num_rows * pp.linear_code.row_len();
-        assert_eq!(
-            poly.len(),
-            expected_num_evals,
-            "Polynomial has an incorrect number of evaluations ({}) for the expected matrix size ({})",
-            poly.len(),
-            expected_num_evals
+        assert!(
+            !polys.is_empty(),
+            "Batch must contain at least one polynomial"
         );
-
+        let batch_size = polys.len();
         let row_len = pp.linear_code.row_len();
+        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, batch_size, polys, &[])?;
 
-        let cw_matrix = Self::encode_rows(pp, row_len, poly);
+        let expected_num_evals = pp.num_rows * row_len;
+        let cw_matrices: Vec<DenseRowMatrix<Zt::Cw>> = polys.iter().map(|poly| {
+            assert_eq!(
+                poly.len(),
+                expected_num_evals,
+                "Polynomial has an incorrect number of evaluations ({}) for the expected matrix size ({})",
+                poly.len(),
+                expected_num_evals
+            );
 
-        let merkle_tree = MerkleTree::new(&cw_matrix.to_rows_slices());
+            Ok::<_, ZipError>(ZipPlus::<Zt, Lc>::encode_rows(pp, row_len, poly))
+        }).try_collect()?;
+
+        let all_rows: Vec<&[Zt::Cw]> = cw_matrices.iter().flat_map(|m| m.as_rows()).collect();
+        let merkle_tree = MerkleTree::new(&all_rows);
         let root = merkle_tree.root();
 
         Ok((
-            ZipPlusHint::new(cw_matrix, merkle_tree),
-            ZipPlusCommitment { root },
+            ZipPlusHint::new(cw_matrices, merkle_tree),
+            ZipPlusCommitment { root, batch_size },
         ))
     }
 
@@ -111,7 +114,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
     ) -> Result<DenseRowMatrix<Zt::Cw>, ZipError> {
-        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, &[poly], &[])?;
+        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, 1, from_ref(poly), &[])?;
 
         let row_len = pp.linear_code.row_len();
 
@@ -119,26 +122,11 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         Ok(rows)
     }
 
-    /// Commits to a batch of multilinear polynomials.
-    ///
-    /// This function iterates through a slice of polynomials and calls
-    /// [`commit`] on each one, collecting the results into a vector.
-    ///
-    /// # Parameters
-    /// - `pp`: Public parameters (`ZipPlusParams`) shared across all
-    ///   commitments.
-    /// - `polys`: A slice of `DenseMultilinearExtension` polynomials to commit
-    ///   to.
-    ///
-    /// # Returns
-    /// A `Result` containing a `Vec` of commitment tuples, where each tuple
-    /// corresponds to a polynomial in the input slice.
-    #[allow(clippy::type_complexity)]
-    pub fn batch_commit(
+    pub fn commit_single(
         pp: &ZipPlusParams<Zt, Lc>,
-        polys: &[DenseMultilinearExtension<Zt::Eval>],
-    ) -> Result<Vec<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment)>, ZipError> {
-        polys.iter().map(|poly| Self::commit(pp, poly)).collect()
+        poly: &DenseMultilinearExtension<Zt::Eval>,
+    ) -> Result<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment), ZipError> {
+        Self::commit(pp, std::slice::from_ref(poly))
     }
 
     /// Encodes the evaluations of a polynomial by arranging them into rows and
@@ -182,6 +170,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     }
 }
 
+//TODO. Review and add proper test
 #[cfg(test)]
 #[allow(
     clippy::arithmetic_side_effects,
@@ -189,8 +178,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     clippy::cast_possible_wrap
 )]
 mod tests {
-    use std::slice::from_ref;
-
     use crate::{
         code::{LinearCode, raa::RaaCode, raa_sign_flip::RaaSignFlippingCode},
         merkle::{MerkleTree, MtHash},
@@ -234,7 +221,7 @@ mod tests {
         // Create polynomial with 4 variables (which is > 3)
         let poly: DenseMultilinearExtension<_> = (1..=16).map(Int::from).collect();
 
-        let result = TestZip::commit(&pp, &poly);
+        let result = TestZip::commit_single(&pp, &poly);
         assert!(result.is_err());
     }
 
@@ -242,8 +229,8 @@ mod tests {
     fn commit_is_deterministic() {
         let (pp, poly) = setup_test_params(3);
 
-        let result1 = TestZip::commit(&pp, &poly).unwrap();
-        let result2 = TestZip::commit(&pp, &poly).unwrap();
+        let result1 = TestZip::commit_single(&pp, &poly).unwrap();
+        let result2 = TestZip::commit_single(&pp, &poly).unwrap();
 
         assert_eq!(result1.1.root, result2.1.root);
     }
@@ -257,8 +244,8 @@ mod tests {
         let poly2 =
             DenseMultilinearExtension::from_evaluations_vec(3, vec![Int::from(2); 8], Zero::zero());
 
-        let (_, commitment1) = TestZip::commit(&pp, &poly1).unwrap();
-        let (_, commitment2) = TestZip::commit(&pp, &poly2).unwrap();
+        let (_, commitment1) = TestZip::commit_single(&pp, &poly1).unwrap();
+        let (_, commitment2) = TestZip::commit_single(&pp, &poly2).unwrap();
 
         assert_ne!(commitment1.root, commitment2.root);
     }
@@ -271,7 +258,7 @@ mod tests {
         let evaluations = vec![Int::from(42); 16];
         let poly = DenseMultilinearExtension::from_evaluations_vec(4, evaluations, Zero::zero());
 
-        let result = TestZip::commit(&pp, &poly);
+        let result = TestZip::commit_single(&pp, &poly);
         assert!(result.is_ok());
     }
 
@@ -283,25 +270,55 @@ mod tests {
         let evaluations = vec![Int::from(1), Int::from(2), Int::from(3), Int::from(4)];
         let poly = DenseMultilinearExtension::from_evaluations_vec(2, evaluations, Zero::zero());
 
-        let result = TestZip::commit(&pp, &poly);
+        let result = TestZip::commit_single(&pp, &poly);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn batch_commit_succeeds() {
-        let (pp, _) = setup_test_params(3);
+    fn batch_commit_produces_different_root_than_individual_commits() {
+        let num_vars = 4;
+        let (pp, _) = setup_test_params(num_vars);
 
-        let polys = vec![
-            (1..=8).map(Int::from).collect(),
-            (9..=16).map(Int::from).collect(),
-        ];
+        let poly1: DenseMultilinearExtension<_> = (1..=16).map(Int::from).collect();
+        let poly2: DenseMultilinearExtension<_> = (17..=32).map(Int::from).collect();
 
-        let results = TestZip::batch_commit(&pp, &polys);
-        assert!(results.is_ok());
+        let (_, batched_comm) = TestZip::commit(&pp, &[poly1.clone(), poly2.clone()]).unwrap();
+        let (_, comm1) = TestZip::commit_single(&pp, &poly1).unwrap();
+        let (_, comm2) = TestZip::commit_single(&pp, &poly2).unwrap();
 
-        let outputs = results.unwrap();
-        assert_eq!(outputs.len(), 2);
-        assert_ne!(outputs[0].1.root, outputs[1].1.root);
+        assert_ne!(batched_comm.root, comm1.root);
+        assert_ne!(batched_comm.root, comm2.root);
+    }
+
+    #[test]
+    fn batch_commit_is_deterministic() {
+        let num_vars = 4;
+        let (pp, _) = setup_test_params(num_vars);
+
+        let poly1: DenseMultilinearExtension<_> = (1..=16).map(Int::from).collect();
+        let poly2: DenseMultilinearExtension<_> = (17..=32).map(Int::from).collect();
+
+        let (_, comm_a) = TestZip::commit(&pp, &[poly1.clone(), poly2.clone()]).unwrap();
+        let (_, comm_b) = TestZip::commit(&pp, &[poly1, poly2]).unwrap();
+
+        assert_eq!(comm_a.root, comm_b.root);
+    }
+
+    #[test]
+    fn batch_commit_batch_size_is_correct() {
+        let num_vars = 4;
+        let (pp, _) = setup_test_params(num_vars);
+
+        let polys: Vec<DenseMultilinearExtension<_>> = (0..5)
+            .map(|offset| {
+                let start = offset * 16 + 1;
+                (start..start + 16).map(Int::from).collect()
+            })
+            .collect();
+
+        let (hint, comm) = TestZip::commit(&pp, &polys).unwrap();
+        assert_eq!(comm.batch_size, 5);
+        assert_eq!(hint.cw_matrices.len(), 5);
     }
 
     #[test]
@@ -338,10 +355,10 @@ mod tests {
     #[test]
     fn corrupted_encoding_changes_merkle_root() {
         let (pp, poly) = setup_test_params(3);
-        let (data, commitment) = TestZip::commit(&pp, &poly).unwrap();
+        let (data, commitment) = TestZip::commit_single(&pp, &poly).unwrap();
 
-        assert!(!data.cw_matrix.is_empty());
-        let mut cw_matrix = data.cw_matrix.to_rows();
+        assert!(!data.cw_matrices[0].is_empty());
+        let mut cw_matrix = data.cw_matrices[0].to_rows();
         cw_matrix[0][0] = Int::from(999999);
         let corrupted_row = cw_matrix[0].clone();
         let new_tree = MerkleTree::new(&[corrupted_row.as_slice()]);
@@ -353,18 +370,16 @@ mod tests {
     }
 
     #[test]
-    fn batch_commit_with_single_polynomial_is_consistent() {
+    fn batch_commit_single_poly_matches_single_commit() {
         let (pp, poly) = setup_test_params(3);
 
-        let batch_result = TestZip::batch_commit(&pp, from_ref(&poly));
-        let mut batch_outputs = batch_result.unwrap();
-        let (batch_data, batch_commitment) = batch_outputs.remove(0);
+        let polys = std::slice::from_ref(&poly);
+        let (batched_hint, batched_comm) = TestZip::commit(&pp, polys).unwrap();
+        let (single_hint, single_comm) = TestZip::commit_single(&pp, &poly).unwrap();
 
-        let single_result = TestZip::commit(&pp, &poly);
-        let (single_data, single_commitment) = single_result.unwrap();
-
-        assert_eq!(batch_commitment.root, single_commitment.root);
-        assert_eq!(batch_data.cw_matrix, single_data.cw_matrix);
+        assert_eq!(batched_comm.root, single_comm.root);
+        assert_eq!(batched_hint.cw_matrices.len(), 1);
+        assert_eq!(batched_hint.cw_matrices[0], single_hint.cw_matrices[0]);
     }
 
     #[test]
@@ -386,10 +401,10 @@ mod tests {
     #[test]
     fn commit_produces_correct_merkle_tree_count() {
         let (pp, poly) = setup_test_params(3);
-        let (hint, _) = TestZip::commit(&pp, &poly).unwrap();
+        let (hint, _) = TestZip::commit_single(&pp, &poly).unwrap();
 
-        assert_eq!(hint.cw_matrix.num_rows, pp.num_rows);
-        assert_eq!(hint.cw_matrix.num_cols, pp.linear_code.codeword_len());
+        assert_eq!(hint.cw_matrices[0].num_rows, pp.num_rows);
+        assert_eq!(hint.cw_matrices[0].num_cols, pp.linear_code.codeword_len());
     }
 
     #[test]
@@ -430,7 +445,7 @@ mod tests {
         let (pp, _) = setup_test_params(3);
         let zero_poly =
             DenseMultilinearExtension::from_evaluations_vec(3, vec![Int::from(0); 8], Zero::zero());
-        let result = TestZip::commit(&pp, &zero_poly);
+        let result = TestZip::commit_single(&pp, &zero_poly);
         assert!(result.is_ok());
     }
 
@@ -441,17 +456,16 @@ mod tests {
             .map(|i| Int::from(if i % 2 == 0 { 1 } else { -1 }))
             .collect();
         let poly = DenseMultilinearExtension::from_evaluations_vec(3, alternating, Zero::zero());
-        let result = TestZip::commit(&pp, &poly);
+        let result = TestZip::commit_single(&pp, &poly);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn batch_commit_on_empty_slice_is_ok() {
+    #[should_panic(expected = "Batch must contain at least one polynomial")]
+    fn batch_commit_on_empty_slice_panics() {
         let (pp, _) = setup_test_params(3);
         let empty_polys: Vec<DenseMultilinearExtension<Int<INT_LIMBS>>> = vec![];
-        let results = TestZip::batch_commit(&pp, &empty_polys);
-        assert!(results.is_ok());
-        assert!(results.unwrap().is_empty());
+        let _ = TestZip::commit(&pp, &empty_polys);
     }
 
     #[test]
@@ -492,7 +506,7 @@ mod tests {
 
             let (pp, poly) = setup_test_params(num_vars);
             assert_eq!(pp.num_rows, expected_rows);
-            let result = TestZip::commit(&pp, &poly);
+            let result = TestZip::commit_single(&pp, &poly);
             assert!(result.is_ok());
         }
     }
@@ -502,7 +516,7 @@ mod tests {
     fn reject_incompatible_dimensions() {
         let (pp, poly) = setup_test_params(3);
         let incompatible_pp = ZipPlusParams::new(3, 3, pp.linear_code);
-        let _ = TestZip::commit(&incompatible_pp, &poly);
+        let _ = TestZip::commit_single(&incompatible_pp, &poly);
     }
 
     #[test]
@@ -534,7 +548,7 @@ mod tests {
         let (pp, mut poly) = setup_test_params(4);
         poly.evaluations.truncate(15);
         assert_eq!(poly.evaluations.len(), 15);
-        let _ = TestZip::commit(&pp, &poly);
+        let _ = TestZip::commit_single(&pp, &poly);
     }
 
     #[test]
@@ -542,7 +556,7 @@ mod tests {
         let num_vars = 16;
         let (pp, poly) = setup_test_params(num_vars);
         assert_eq!(pp.num_vars, num_vars);
-        let result = TestZip::commit(&pp, &poly);
+        let result = TestZip::commit_single(&pp, &poly);
         assert!(result.is_ok());
     }
 
@@ -551,7 +565,7 @@ mod tests {
         let (pp, poly) = setup_test_params(2);
         assert_eq!(pp.num_rows, 2);
         assert_eq!(pp.linear_code.row_len(), 2);
-        let result = TestZip::commit(&pp, &poly);
+        let result = TestZip::commit_single(&pp, &poly);
         assert!(result.is_ok());
     }
 
@@ -573,38 +587,119 @@ mod tests {
         let _ = MerkleTree::new(&[leaves_data.as_slice()]);
     }
 
+    fn make_poly_batch(
+        num_vars: usize,
+        batch_size: usize,
+    ) -> Vec<DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>> {
+        let poly_size = 1 << num_vars;
+        let d = DEGREE_PLUS_ONE - 1;
+        (0..batch_size)
+            .map(|b| {
+                let coeffs: Vec<Boolean> = (0..poly_size * d)
+                    .map(|i| ((i + b * 7) % 3 != 0).into())
+                    .collect();
+                let evals = coeffs.chunks_exact(d).map(BinaryPoly::new).collect_vec();
+                DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, Zero::zero())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn batch_commit_poly_succeeds() {
+        let num_vars = 4;
+        let (pp, _) = setup_poly_test_params::<K, M, DEGREE_PLUS_ONE>(num_vars);
+        let polys = make_poly_batch(num_vars, 3);
+
+        let (hint, comm) = TestPolyZip::commit(&pp, &polys).unwrap();
+        assert_eq!(comm.batch_size, 3);
+        assert_eq!(hint.cw_matrices.len(), 3);
+    }
+
+    #[test]
+    fn batch_commit_poly_is_deterministic() {
+        let num_vars = 4;
+        let (pp, _) = setup_poly_test_params::<K, M, DEGREE_PLUS_ONE>(num_vars);
+        let polys = make_poly_batch(num_vars, 2);
+
+        let (_, comm_a) = TestPolyZip::commit(&pp, &polys).unwrap();
+        let (_, comm_b) = TestPolyZip::commit(&pp, &polys).unwrap();
+        assert_eq!(comm_a.root, comm_b.root);
+    }
+
+    #[test]
+    fn batch_commit_poly_single_matches_commit_single() {
+        let (pp, poly) = setup_poly_test_params::<K, M, DEGREE_PLUS_ONE>(4);
+
+        let polys = std::slice::from_ref(&poly);
+        let (batched_hint, batched_comm) = TestPolyZip::commit(&pp, polys).unwrap();
+        let (single_hint, single_comm) = TestPolyZip::commit_single(&pp, &poly).unwrap();
+
+        assert_eq!(batched_comm.root, single_comm.root);
+        assert_eq!(batched_hint.cw_matrices.len(), 1);
+        assert_eq!(batched_hint.cw_matrices[0], single_hint.cw_matrices[0]);
+    }
+
+    #[test]
+    fn batch_commit_poly_different_polys_produce_different_roots() {
+        let num_vars = 4;
+        let (pp, _) = setup_poly_test_params::<K, M, DEGREE_PLUS_ONE>(num_vars);
+        let polys = make_poly_batch(num_vars, 2);
+
+        let (_, batched) = TestPolyZip::commit(&pp, &polys).unwrap();
+        let (_, single0) = TestPolyZip::commit_single(&pp, &polys[0]).unwrap();
+        let (_, single1) = TestPolyZip::commit_single(&pp, &polys[1]).unwrap();
+
+        assert_ne!(batched.root, single0.root);
+        assert_ne!(batched.root, single1.root);
+    }
+
+    #[test]
+    fn batch_commit_cw_matrices_are_distinct_per_poly() {
+        let num_vars = 4;
+        let (pp, _) = setup_test_params(num_vars);
+        let polys: Vec<DenseMultilinearExtension<_>> = vec![
+            (1..=16).map(Int::from).collect(),
+            (17..=32).map(Int::from).collect(),
+        ];
+
+        let (hint, _) = TestZip::commit(&pp, &polys).unwrap();
+        assert_eq!(hint.cw_matrices.len(), 2);
+        assert_ne!(hint.cw_matrices[0], hint.cw_matrices[1]);
+    }
+
     #[test]
     fn proof_size_is_correct_for_parameters() {
-        fn calculate_expected_test_transcript_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
+        use std::mem::size_of;
+
+        fn calculate_expected_proof_size_bytes(
+            pp: &ZipPlusParams<Zt, C>,
+            batch_size: usize,
+        ) -> usize {
+            // size of a single entry of cw_matrix
             let size_of_zt_k = K * size_of::<Word>();
+            // size of CombR in combine row
             let size_of_zt_m = M * size_of::<Word>();
-            let size_of_path_len = size_of::<u64>();
+            // size_f = field_value || field_modulus
+            let size_of_f = 2 * U256::LIMBS * size_of::<Word>();
+            let size_of_usize_field = size_of::<u64>();
             let size_of_path_elem = size_of::<MtHash>();
-            let size_of_dimension = size_of::<u64>();
 
             let codeword_len = pp.linear_code.codeword_len();
             let merkle_depth = codeword_len.next_power_of_two().ilog2() as usize;
 
-            let proximity_phase_size = pp.linear_code.row_len() * size_of_zt_m;
+            // b vectors: per poly, 1-byte length prefix + num_rows field elements
+            let b_phase_size = batch_size * (1 + pp.num_rows * size_of_f);
+            let combined_row_size = pp.linear_code.row_len() * size_of_zt_m;
 
-            let column_values_size = pp.num_rows * size_of_zt_k;
+            // Column openings: per opening, column values from all cw_matrices + one Merkle
+            // proof
+            let column_values_size = batch_size * pp.num_rows * size_of_zt_k;
             let single_merkle_proof_size =
-                size_of_dimension * 2 + size_of_path_len + merkle_depth * size_of_path_elem;
+                size_of_usize_field * 3 + merkle_depth * size_of_path_elem;
             let column_opening_phase_size =
                 Zt::NUM_COLUMN_OPENINGS * (column_values_size + single_merkle_proof_size);
 
-            proximity_phase_size + column_opening_phase_size
-        }
-
-        fn calculate_expected_proof_size_bytes(pp: &ZipPlusParams<Zt, C>) -> usize {
-            // F stored as `(value, modulus)` where both `value` and `modulus` are of
-            // length `len`.
-            // `len` itself is stored only once at the beginning of the F list.
-            // For BoxedMontyField, length of `len` itself is 1 byte.
-            let size_of_f = 2 * U256::LIMBS * size_of::<Word>();
-            let evaluation_phase_size = 1 + pp.linear_code.row_len() * size_of_f;
-
-            calculate_expected_test_transcript_size_bytes(pp) + evaluation_phase_size
+            b_phase_size + combined_row_size + column_opening_phase_size
         }
 
         type F = BoxedMontyField;
@@ -623,31 +718,21 @@ mod tests {
             .map(|_| <Zt as ZipTypes>::Pt::random(&mut rng))
             .collect();
 
-        let (hint, comm) = TestZip::commit(&param, &mle).unwrap();
+        let (hint, comm) = TestZip::commit_single(&param, &mle).unwrap();
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
-        let (field_cfg, projecting_element) =
-            get_field_and_projecting_element::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
-        TestZip::test::<CHECKED>(&mut transcript, &param, &mle, &hint).unwrap();
-        let actual_test_transcript_size_bytes = transcript.stream.get_ref().len();
-        let expected_test_transcript_size_bytes =
-            calculate_expected_test_transcript_size_bytes(&param);
-        assert_eq!(
-            actual_test_transcript_size_bytes,
-            expected_test_transcript_size_bytes
-        );
-
-        let _ = TestZip::evaluate::<F, CHECKED>(
+        let _eval_f = TestZip::prove_single::<F, CHECKED>(
             &mut transcript,
             &param,
             &mle,
             &point,
+            &hint,
             &field_cfg,
-            &projecting_element,
         )
         .unwrap();
         let actual_proof_size_bytes = transcript.stream.get_ref().len();
-        let expected_proof_size_bytes = calculate_expected_proof_size_bytes(&param);
+        let expected_proof_size_bytes = calculate_expected_proof_size_bytes(&param, 1);
         assert_eq!(actual_proof_size_bytes, expected_proof_size_bytes);
     }
 }

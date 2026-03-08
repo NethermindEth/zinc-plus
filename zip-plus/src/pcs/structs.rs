@@ -104,15 +104,15 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlusParams<Zt, Lc> {
 pub struct ZipPlusHint<R> {
     /// The encoded rows of the polynomial matrix representation, referred to as
     /// "u-hat" in the Zinc paper
-    pub cw_matrix: DenseRowMatrix<R>,
+    pub cw_matrices: Vec<DenseRowMatrix<R>>,
     /// Merkle trees of entire matrix
     pub merkle_tree: MerkleTree,
 }
 
 impl<R> ZipPlusHint<R> {
-    pub fn new(cw_matrix: DenseRowMatrix<R>, merkle_tree: MerkleTree) -> ZipPlusHint<R> {
+    pub fn new(cw_matrices: Vec<DenseRowMatrix<R>>, merkle_tree: MerkleTree) -> ZipPlusHint<R> {
         ZipPlusHint {
-            cw_matrix,
+            cw_matrices,
             merkle_tree,
         }
     }
@@ -124,4 +124,5 @@ impl<R> ZipPlusHint<R> {
 pub struct ZipPlusCommitment {
     /// Roots of the merkle tree of entire matrix
     pub root: MtHash,
+    pub batch_size: usize,
 }
