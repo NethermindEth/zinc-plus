@@ -283,10 +283,9 @@ impl PcsTranscript {
         };
 
         // Search for a valid nonce.
-        let nonce = (0u64..).find(|&n| {
-            let hash = blake3::hash(&[&seed[..], &n.to_le_bytes()].concat());
-            leading_zeros(hash.as_bytes()) >= grinding_bits
-        }).expect("grinding search exhausted u64 range (unreachable in practice)");
+        // With `parallel` feature, search in parallel using rayon to divide
+        // wall-clock time by the number of available cores.
+        let nonce = Self::find_grinding_nonce(&seed, grinding_bits);
 
         // Write nonce to proof stream.
         self.write_const(&nonce)?;
@@ -294,6 +293,61 @@ impl PcsTranscript {
         self.fs_transcript.absorb(&nonce.to_le_bytes());
 
         Ok(())
+    }
+
+    /// Find the smallest nonce such that `BLAKE3(seed ‖ nonce)` has at least
+    /// `grinding_bits` leading zero bits.
+    ///
+    /// When the `parallel` feature is enabled, threads search interleaved
+    /// nonce positions (thread *t* checks *t*, *t+T*, *t+2T*, …) so the
+    /// wall-clock cost is ≈ sequential / num_threads.  The result is always
+    /// the globally-smallest qualifying nonce, so proofs are identical
+    /// regardless of parallelism.
+    fn find_grinding_nonce(seed: &[u8; 32], grinding_bits: usize) -> u64 {
+        let check = |n: u64| -> bool {
+            let hash = blake3::hash(&[&seed[..], &n.to_le_bytes()].concat());
+            leading_zeros(hash.as_bytes()) >= grinding_bits
+        };
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            use std::sync::atomic::{AtomicU64, Ordering};
+
+            let num_threads = rayon::current_num_threads() as u64;
+            // Shared upper bound — once any thread finds a valid nonce the
+            // others can stop as soon as they've scanned up to that point.
+            let upper = AtomicU64::new(u64::MAX);
+
+            (0..num_threads).into_par_iter().for_each(|t| {
+                let mut n = t;
+                loop {
+                    if n >= upper.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if check(n) {
+                        upper.fetch_min(n, Ordering::Relaxed);
+                        return;
+                    }
+                    n += num_threads;
+                }
+            });
+
+            let result = upper.load(Ordering::SeqCst);
+            assert_ne!(
+                result,
+                u64::MAX,
+                "grinding search exhausted (unreachable in practice)"
+            );
+            result
+        }
+
+        #[cfg(not(feature = "parallel"))]
+        {
+            (0u64..)
+                .find(|&n| check(n))
+                .expect("grinding search exhausted u64 range (unreachable in practice)")
+        }
     }
 
     /// Verifier: read the grinding nonce from the proof stream and verify

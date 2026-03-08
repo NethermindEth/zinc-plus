@@ -467,7 +467,6 @@ impl Uair for Sha256UairBp {
                 COL_W_HAT, COL_K_HAT,
                 COL_S0, COL_S1, COL_R0, COL_R1,
                 COL_W_TM2, COL_W_TM7, COL_W_TM15, COL_W_TM16,
-                COL_A_TM1, COL_A_TM2, COL_E_TM1, COL_E_TM2,
                 COL_SEL_ROUND, COL_SEL_SCHED,
             ],
         }
@@ -775,7 +774,6 @@ impl Uair for Sha256UairQx {
                 COL_W_HAT, COL_K_HAT,
                 COL_S0, COL_S1, COL_R0, COL_R1,
                 COL_W_TM2, COL_W_TM7, COL_W_TM15, COL_W_TM16,
-                COL_A_TM1, COL_A_TM2, COL_E_TM1, COL_E_TM2,
                 COL_SEL_ROUND, COL_SEL_SCHED,
             ],
         }

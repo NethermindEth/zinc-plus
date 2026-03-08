@@ -7516,18 +7516,30 @@ where
     // Circuit 1 uses PiopField; circuit 2 converts to PcsF2.
     // Truncate to num_vars since the sumcheck may have shared_num_vars > num_vars when lookup is present.
     let t3 = Instant::now();
+    // Convert eval point from PIOP Montgomery form to PCS1 Montgomery form.
+    let pcs1_point: Vec<PiopField> = {
+        let mut t = KeccakTranscript::default();
+        t.absorb(&root_buf1);
+        let pcs1_cfg = t.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
+        c1_cpr_state.evaluation_point[..num_vars].iter()
+            .map(|p| p.retrieve().into_with_cfg(&pcs1_cfg))
+            .collect()
+    };
     let (eval1_f, proof1) =
         ZipPlus::<Zt1, Lc1>::prove_with_seed::<PiopField, CHECK>(
             params1,
             &pcs_trace1,
-            &c1_cpr_state.evaluation_point[..num_vars],
+            &pcs1_point,
             &hint1,
             &root_buf1,
         )
         .expect("PCS1 prove failed");
 
-    let pcs2_field_cfg = KeccakTranscript::default()
-        .get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>();
+    let pcs2_field_cfg = {
+        let mut t = KeccakTranscript::default();
+        t.absorb(&root_buf2);
+        t.get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>()
+    };
     let point2: Vec<PcsF2> = piop_point_to_pcs_field(&c1_cpr_state.evaluation_point[..num_vars], &pcs2_field_cfg);
     let (eval2_f, proof2) =
         ZipPlus::<Zt2, Lc2>::prove_with_seed::<PcsF2, CHECK>(
@@ -8109,18 +8121,30 @@ where
     // Circuit 1: prove on split_trace1 at the extended point r ‖ γ.
     // Circuit 2: prove on original pcs_trace2 at the CPR eval point.
     let t3 = Instant::now();
+    // Convert folded point from PIOP Montgomery form to PCS1 Montgomery form.
+    let pcs1_point: Vec<PiopField> = {
+        let mut t = KeccakTranscript::default();
+        t.absorb(&root_buf1);
+        let pcs1_cfg = t.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
+        folding_output.new_point.iter()
+            .map(|p| p.retrieve().into_with_cfg(&pcs1_cfg))
+            .collect()
+    };
     let (eval1_f, proof1) =
         ZipPlus::<PcsZt1, PcsLc1>::prove_with_seed::<PiopField, CHECK>(
             params1,
             &split_trace1,
-            &folding_output.new_point,
+            &pcs1_point,
             &hint1,
             &root_buf1,
         )
         .expect("PCS1 prove (folded) failed");
 
-    let pcs2_field_cfg = KeccakTranscript::default()
-        .get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>();
+    let pcs2_field_cfg = {
+        let mut t = KeccakTranscript::default();
+        t.absorb(&root_buf2);
+        t.get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>()
+    };
     let point2: Vec<PcsF2> = piop_point_to_pcs_field(&c1_cpr_state.evaluation_point[..num_vars], &pcs2_field_cfg);
     let (eval2_f, proof2) =
         ZipPlus::<Zt2, Lc2>::prove_with_seed::<PcsF2, CHECK>(
@@ -8719,18 +8743,30 @@ where
     // Circuit 1: prove on split_trace1_quarter at the extended point r ‖ γ₁ ‖ γ₂.
     // Circuit 2: prove on original pcs_trace2 at the CPR eval point.
     let t3 = Instant::now();
+    // Convert doubly-folded point from PIOP Montgomery form to PCS1 Montgomery form.
+    let pcs1_point: Vec<PiopField> = {
+        let mut t = KeccakTranscript::default();
+        t.absorb(&root_buf1);
+        let pcs1_cfg = t.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
+        fold2_output.new_point.iter()
+            .map(|p| p.retrieve().into_with_cfg(&pcs1_cfg))
+            .collect()
+    };
     let (eval1_f, proof1) =
         ZipPlus::<PcsZt1, PcsLc1>::prove_with_seed::<PiopField, CHECK>(
             params1,
             &split_trace1_quarter,
-            &fold2_output.new_point,
+            &pcs1_point,
             &hint1,
             &root_buf1,
         )
         .expect("PCS1 prove (4x folded) failed");
 
-    let pcs2_field_cfg = KeccakTranscript::default()
-        .get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>();
+    let pcs2_field_cfg = {
+        let mut t = KeccakTranscript::default();
+        t.absorb(&root_buf2);
+        t.get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>()
+    };
     let point2: Vec<PcsF2> = piop_point_to_pcs_field(&c1_cpr_state.evaluation_point[..num_vars], &pcs2_field_cfg);
     let (eval2_f, proof2) =
         ZipPlus::<Zt2, Lc2>::prove_with_seed::<PcsF2, CHECK>(
@@ -9247,18 +9283,33 @@ where
 
     // ── Step 14: PCS prove ───────────────────────────────────────────
     let t3 = Instant::now();
+    // Re-lift the folded eval point from the PIOP field to the PCS1 field.
+    // The PCS transcript absorbs the commitment root before deriving the
+    // field prime, so the PCS1 modulus differs from the PIOP modulus.
+    // Convert through the canonical integer to avoid mixing Montgomery forms.
+    let pcs1_point: Vec<PiopField> = {
+        let mut t = KeccakTranscript::default();
+        t.absorb(&root_buf1);
+        let pcs1_cfg = t.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
+        fold2_output.new_point.iter()
+            .map(|p| p.retrieve().into_with_cfg(&pcs1_cfg))
+            .collect()
+    };
     let (eval1_f, proof1) =
         ZipPlus::<PcsZt1, PcsLc1>::prove_with_seed::<PiopField, CHECK>(
             params1,
             &split_trace1_quarter,
-            &fold2_output.new_point,
+            &pcs1_point,
             &hint1,
             &root_buf1,
         )
         .expect("PCS1 prove (hybrid GKR 4x folded dual) failed");
 
-    let pcs2_field_cfg = KeccakTranscript::default()
-        .get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>();
+    let pcs2_field_cfg = {
+        let mut t = KeccakTranscript::default();
+        t.absorb(&root_buf2);
+        t.get_random_field_cfg::<PcsF2, Zt2::Fmod, Zt2::PrimeTest>()
+    };
     let point2: Vec<PcsF2> = piop_point_to_pcs_field(&c1_cpr_state.evaluation_point[..num_vars], &pcs2_field_cfg);
     let (eval2_f, proof2) =
         ZipPlus::<Zt2, Lc2>::prove_with_seed::<PcsF2, CHECK>(
@@ -10229,7 +10280,9 @@ where
         let pcs1_field_cfg = pcs1_transcript
             .fs_transcript
             .get_random_field_cfg::<PiopField, Zt1::Fmod, Zt1::PrimeTest>();
-        let point1_f: Vec<PiopField> = c1_cpr_subclaim.evaluation_point[..num_vars].to_vec();
+        let point1_f: Vec<PiopField> = c1_cpr_subclaim.evaluation_point[..num_vars].iter()
+            .map(|p| p.retrieve().into_with_cfg(&pcs1_field_cfg))
+            .collect();
         let eval1_f: PiopField = PiopField::new_unchecked_with_cfg(
             <PiopField as Field>::Inner::read_transcription_bytes(&proof.pcs1_evals_bytes[0]),
             &pcs1_field_cfg,
@@ -11175,7 +11228,7 @@ where
 
         // Use the folded (extended) point: r ‖ γ
         let point1_f: Vec<PiopField> = folding_output.new_point.iter()
-            .map(|p| PiopField::new_unchecked_with_cfg(p.inner().clone(), &pcs1_field_cfg))
+            .map(|p| p.retrieve().into_with_cfg(&pcs1_field_cfg))
             .collect();
         let eval1_f: PiopField = PiopField::new_unchecked_with_cfg(
             <PiopField as Field>::Inner::read_transcription_bytes(&proof.pcs1_evals_bytes[0]),
@@ -12165,7 +12218,7 @@ where
 
         // Use the doubly-extended point: r ‖ γ₁ ‖ γ₂
         let point1_f: Vec<PiopField> = fold2_verifier_output.new_point.iter()
-            .map(|p| PiopField::new_unchecked_with_cfg(p.inner().clone(), &pcs1_field_cfg))
+            .map(|p| p.retrieve().into_with_cfg(&pcs1_field_cfg))
             .collect();
         let eval1_f: PiopField = PiopField::new_unchecked_with_cfg(
             <PiopField as Field>::Inner::read_transcription_bytes(&proof.pcs1_evals_bytes[0]),
@@ -13036,7 +13089,7 @@ where
             .get_random_field_cfg::<PiopField, PcsZt1::Fmod, PcsZt1::PrimeTest>();
 
         let point1_f: Vec<PiopField> = fold2_verifier_output.new_point.iter()
-            .map(|p| PiopField::new_unchecked_with_cfg(p.inner().clone(), &pcs1_field_cfg))
+            .map(|p| p.retrieve().into_with_cfg(&pcs1_field_cfg))
             .collect();
         let eval1_f: PiopField = PiopField::new_unchecked_with_cfg(
             <PiopField as Field>::Inner::read_transcription_bytes(&proof.pcs1_evals_bytes[0]),
