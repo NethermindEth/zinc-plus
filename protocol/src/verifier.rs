@@ -41,9 +41,8 @@ where
     <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
     F: InnerTransparentField
         + FromPrimitiveWithConfig
-        + FromWithConfig<Zt::Int>
+        + for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> FromWithConfig<&'a Zt::Chal>
-        + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>
         + Send
@@ -79,7 +78,11 @@ where
             fs_transcript: KeccakTranscript::default(),
             stream: Cursor::new(proof.zip),
         };
-        for comm in &proof.commitments {
+        for comm in [
+            &proof.commitments.0,
+            &proof.commitments.1,
+            &proof.commitments.2,
+        ] {
             pcs_transcript.fs_transcript.absorb_slice(&comm.root);
         }
 
@@ -135,29 +138,40 @@ where
         //       at cpr_subclaim.evaluation_point directly from public data here,
         //       then include them in the constraint recomputation check.
 
-        for (i, comm) in proof.commitments.iter().enumerate() {
-            macro_rules! zip_verify {
-                ($zt:ident, $lc:ident, $vp:ident) => {
-                    ZipPlus::<Zt::$zt, Zt::$lc>::verify::<F, CHECK_FOR_OVERFLOW>(
-                        &mut pcs_transcript,
-                        $vp,
-                        comm,
-                        &field_cfg,
-                        &projecting_element,
-                        &cpr_subclaim.evaluation_point,
-                        &cpr_subclaim.up_evals[i],
-                    )
-                    .map_err(|e| ProtocolError::PcsVerification(i, e))?;
-                };
-            }
+        if proof.commitments.0.batch_size > 0 {
+            ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::verify::<F, CHECK_FOR_OVERFLOW>(
+                &mut pcs_transcript,
+                vp_bin,
+                &proof.commitments.0,
+                &field_cfg,
+                &cpr_subclaim.evaluation_point,
+                &cpr_subclaim.up_evals[0],
+            )
+            .map_err(|e| ProtocolError::PcsVerification(0, e))?;
+        }
 
-            if i < proof.num_witness_cols.0 {
-                zip_verify!(BinaryZt, BinaryLc, vp_bin);
-            } else if i < add!(proof.num_witness_cols.0, proof.num_witness_cols.1) {
-                zip_verify!(ArbitraryZt, ArbitraryLc, vp_arb);
-            } else {
-                zip_verify!(IntZt, IntLc, vp_int);
-            }
+        if proof.commitments.1.batch_size > 0 {
+            ZipPlus::<Zt::ArbitraryZt, Zt::ArbitraryLc>::verify::<F, CHECK_FOR_OVERFLOW>(
+                &mut pcs_transcript,
+                vp_arb,
+                &proof.commitments.1,
+                &field_cfg,
+                &cpr_subclaim.evaluation_point,
+                &cpr_subclaim.up_evals[1],
+            )
+            .map_err(|e| ProtocolError::PcsVerification(1, e))?;
+        }
+
+        if proof.commitments.2.batch_size > 0 {
+            ZipPlus::<Zt::IntZt, Zt::IntLc>::verify::<F, CHECK_FOR_OVERFLOW>(
+                &mut pcs_transcript,
+                vp_int,
+                &proof.commitments.2,
+                &field_cfg,
+                &cpr_subclaim.evaluation_point,
+                &cpr_subclaim.up_evals[2],
+            )
+            .map_err(|e| ProtocolError::PcsVerification(2, e))?;
         }
 
         Ok(Subclaim {

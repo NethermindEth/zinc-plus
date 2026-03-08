@@ -1,5 +1,5 @@
 use super::*;
-use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig, PrimeField};
+use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::Zero;
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
@@ -11,18 +11,14 @@ use zinc_piop::{
 use zinc_poly::{
     mle::DenseMultilinearExtension, univariate::dynamic::over_field::DynamicPolynomialF,
 };
-use zinc_transcript::traits::{ConstTranscribable, Transcribable, Transcript};
-use zinc_uair::{
-    Uair, constraint_counter::count_constraints, degree_counter::count_max_degree, ideal::Ideal,
-};
+use zinc_transcript::traits::{ConstTranscribable, Transcript};
+use zinc_uair::{Uair, constraint_counter::count_constraints, degree_counter::count_max_degree};
 use zinc_utils::{
     from_ref::FromRef, inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
     projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
-    ZipError,
-    code::LinearCode,
-    pcs::structs::{ZipPlus, ZipPlusCommitment, ZipPlusHint, ZipPlusParams, ZipTypes},
+    pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
     pcs_transcript::PcsProverTranscript,
 };
 
@@ -34,6 +30,7 @@ where
     F: InnerTransparentField
         + FromPrimitiveWithConfig
         + FromWithConfig<Zt::Int>
+        + for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>
@@ -80,34 +77,26 @@ where
         // === Step 0: Commit to witness traces ===
 
         // Commit each witness column via Zip+ PCS.
-        fn pcs_commit_witness<Zt, Lc>(
-            pp: &ZipPlusParams<Zt, Lc>,
-            witness: &[DenseMultilinearExtension<Zt::Eval>],
-        ) -> Result<(Vec<ZipPlusHint<Zt::Cw>>, Vec<ZipPlusCommitment>), ZipError>
-        where
-            Zt: ZipTypes,
-            Lc: LinearCode<Zt>,
-        {
-            let mut hints = Vec::with_capacity(witness.len());
-            let mut commitments = Vec::with_capacity(witness.len());
-            for col in witness {
-                let (hint, comm) = ZipPlus::<Zt, Lc>::commit(pp, col)?;
-                hints.push(hint);
-                commitments.push(comm);
-            }
-            Ok((hints, commitments))
+        macro_rules! commit_optionally {
+            ($pp:expr, $trace:expr) => {
+                if $trace.is_empty() {
+                    (None, ZipPlusCommitment {
+                        root: Default::default(),
+                        batch_size: 0,
+                    })
+                } else {
+                    let (hint, commitment) = ZipPlus::commit($pp, $trace)?;
+                    (Some(hint), commitment)
+                }
+            };
         }
-
-        let (hints_bin, commitments_bin) = pcs_commit_witness(pp_bin, trace_bin_poly)?;
-        let (hints_arb, commitments_arb) = pcs_commit_witness(pp_arb, trace_arb_poly)?;
-        let (hints_int, commitments_int) = pcs_commit_witness(pp_int, trace_int)?;
+        let (hint_bin, commitment_bin) = commit_optionally!(pp_bin, trace_bin_poly);
+        let (hint_arb, commitment_arb) = commit_optionally!(pp_arb, trace_arb_poly);
+        let (hint_int, commitment_int) = commit_optionally!(pp_int, trace_int);
 
         // Create the main transcript
         let mut pcs_transcript = PcsProverTranscript::new_from_commitments(
-            commitments_bin
-                .iter()
-                .chain(commitments_arb.iter())
-                .chain(commitments_int.iter()),
+            [&commitment_bin, &commitment_arb, &commitment_int].into_iter(),
         )?;
         // TODO: Absorb public inputs as well once they are part of the protocol,
         //       or this will open up a soundness vulnerability!
@@ -183,43 +172,39 @@ where
         //       public data. The PCS only covers witness columns.
         let eval_point = &cpr_prover_state.evaluation_point;
 
-        pcs_prove_witness_evaluations::<Zt::BinaryZt, Zt::BinaryLc, _, _, CHECK_FOR_OVERFLOW>(
-            &mut pcs_transcript,
-            pp_bin,
-            trace_bin_poly,
-            &hints_bin,
-            &commitments_bin,
-            eval_point,
-            &field_cfg,
-            &projecting_element,
-        )?;
-        pcs_prove_witness_evaluations::<Zt::ArbitraryZt, Zt::ArbitraryLc, _, _, CHECK_FOR_OVERFLOW>(
-            &mut pcs_transcript,
-            pp_arb,
-            trace_arb_poly,
-            &hints_arb,
-            &commitments_arb,
-            eval_point,
-            &field_cfg,
-            &projecting_element,
-        )?;
-        pcs_prove_witness_evaluations::<Zt::IntZt, Zt::IntLc, _, _, CHECK_FOR_OVERFLOW>(
-            &mut pcs_transcript,
-            pp_int,
-            trace_int,
-            &hints_int,
-            &commitments_int,
-            eval_point,
-            &field_cfg,
-            &projecting_element,
-        )?;
+        if let Some(hint_bin) = &hint_bin {
+            let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                &mut pcs_transcript,
+                pp_bin,
+                trace_bin_poly,
+                eval_point,
+                hint_bin,
+                &field_cfg,
+            )?;
+        }
+        if let Some(hint_arb) = &hint_arb {
+            let _ = ZipPlus::<Zt::ArbitraryZt, Zt::ArbitraryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                &mut pcs_transcript,
+                pp_arb,
+                trace_arb_poly,
+                eval_point,
+                &hint_arb,
+                &field_cfg,
+            )?;
+        }
+        if let Some(hint_int) = &hint_int {
+            let _ = ZipPlus::<Zt::IntZt, Zt::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                &mut pcs_transcript,
+                pp_int,
+                trace_int,
+                eval_point,
+                &hint_int,
+                &field_cfg,
+            )?;
+        }
 
         let zip_proof = pcs_transcript.stream.into_inner();
-        let commitments = commitments_bin
-            .into_iter()
-            .chain(commitments_arb)
-            .chain(commitments_int)
-            .collect();
+        let commitments = (commitment_bin, commitment_arb, commitment_int);
 
         Ok((
             Proof {
@@ -235,41 +220,4 @@ where
             },
         ))
     }
-}
-
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn pcs_prove_witness_evaluations<Zt, Lc, F, I, const CHECK_FOR_OVERFLOW: bool>(
-    pcs_transcript: &mut PcsProverTranscript,
-    pp: &ZipPlusParams<Zt, Lc>,
-    witness: &[DenseMultilinearExtension<Zt::Eval>],
-    hints: &[ZipPlusHint<Zt::Cw>],
-    commitments: &[ZipPlusCommitment],
-    eval_point: &[F],
-    field_cfg: &F::Config,
-    projecting_element: &Zt::Chal,
-) -> Result<(), ProtocolError<F, I>>
-where
-    Zt: ZipTypes,
-    Zt::Eval: ProjectableToField<F>,
-    Lc: LinearCode<Zt>,
-    F: PrimeField + for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> MulByScalar<&'a F> + FromRef<F>,
-    F::Inner: Transcribable,
-    F::Modulus: FromRef<Zt::Fmod> + Transcribable,
-    I: Ideal,
-{
-    for ((hint, col), _comm) in hints.iter().zip(witness.iter()).zip(commitments.iter()) {
-        // Proximity test
-        ZipPlus::<Zt, Lc>::test::<CHECK_FOR_OVERFLOW>(pcs_transcript, pp, col, hint)?;
-
-        // Evaluation proof
-        let _eval_f: F = ZipPlus::<Zt, Lc>::evaluate_f::<F, CHECK_FOR_OVERFLOW>(
-            pcs_transcript,
-            pp,
-            col,
-            eval_point,
-            field_cfg,
-            projecting_element,
-        )?;
-    }
-    Ok(())
 }

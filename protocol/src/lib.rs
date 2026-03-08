@@ -53,7 +53,7 @@ pub struct Proof<F: PrimeField> {
     /// polynomials, integers).
     pub num_witness_cols: (usize, usize, usize),
     /// Zip+ commitments to the witness columns.
-    pub commitments: Vec<ZipPlusCommitment>,
+    pub commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     /// Serialized PCS proof data (Zip+ proving transcripts).
     pub zip: Vec<u8>,
     /// Randomized ideal check proof: MLE evaluations in F_q[X] and ideal
@@ -100,6 +100,8 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize> {
     /// multilinear polynomials.
     type Pt: ConstIntRing;
 
+    type CombR;
+
     /// Randomly sampled field modulus type, used throughout the protocol for
     /// finite field operations.
     type Fmod: ConstIntSemiring + ConstTranscribable + Named;
@@ -112,6 +114,7 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize> {
             Eval = BinaryPoly<DEGREE_PLUS_ONE>,
             Chal = Self::Chal,
             Pt = Self::Pt,
+            CombR = Self::CombR,
             Fmod = Self::Fmod,
             PrimeTest = Self::PrimeTest,
         >;
@@ -121,6 +124,7 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize> {
             Eval = DensePolynomial<Self::Int, DEGREE_PLUS_ONE>,
             Chal = Self::Chal,
             Pt = Self::Pt,
+            CombR = Self::CombR,
             Fmod = Self::Fmod,
             PrimeTest = Self::PrimeTest,
         >;
@@ -130,6 +134,7 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize> {
             Eval = Self::Int,
             Chal = Self::Chal,
             Pt = Self::Pt,
+            CombR = Self::CombR,
             Fmod = Self::Fmod,
             PrimeTest = Self::PrimeTest,
         >;
@@ -319,6 +324,7 @@ mod tests {
         type Int = i64;
         type Chal = i128;
         type Pt = i128;
+        type CombR = Int<M>;
         type Fmod = Uint<K>;
         type PrimeTest = MillerRabin;
 
@@ -346,6 +352,7 @@ mod tests {
         type Int = i64;
         type Chal = i128;
         type Pt = i128;
+        type CombR = Int<M>;
         type Fmod = Uint<K>;
         type PrimeTest = MillerRabin;
 
