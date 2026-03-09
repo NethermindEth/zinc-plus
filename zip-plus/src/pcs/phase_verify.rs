@@ -13,9 +13,12 @@ use num_traits::{ConstOne, ConstZero, Zero};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use zinc_poly::Polynomial;
-use zinc_transcript::traits::{Transcribable, Transcript};
+use zinc_transcript::{
+    KeccakTranscript,
+    traits::{Transcribable, Transcript},
+};
 use zinc_utils::{
-    UNCHECKED, cfg_into_iter,
+    UNCHECKED, add, cfg_into_iter,
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProduct},
     mul_by_scalar::MulByScalar,
@@ -111,6 +114,44 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         F::Inner: Transcribable,
         F::Modulus: FromRef<Zt::Fmod> + Transcribable,
     {
+        let per_poly_alphas = Self::sample_alphas(&mut transcript.fs_transcript, comm.batch_size);
+        Self::verify_with_alphas::<F, CHECK_FOR_OVERFLOW>(
+            transcript,
+            vp,
+            comm,
+            field_cfg,
+            point_f,
+            eval_f,
+            &per_poly_alphas,
+        )
+    }
+
+    /// Like [`Self::verify`], but accepts pre-sampled alpha challenges.
+    ///
+    /// The caller is responsible for sampling `per_poly_alphas` from the
+    /// transcript before calling this (typically via [`Self::sample_alphas`]).
+    /// This allows computing `eval_f` externally from the alphas (e.g. via
+    /// alpha-projection of polynomial MLE evaluations in the lift-and-project
+    /// flow).
+    #[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
+    pub fn verify_with_alphas<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsVerifierTranscript,
+        vp: &ZipPlusParams<Zt, Lc>,
+        comm: &ZipPlusCommitment,
+        field_cfg: &F::Config,
+        point_f: &[F],
+        eval_f: &F,
+        per_poly_alphas: &[Vec<Zt::Chal>],
+    ) -> Result<(), ZipError>
+    where
+        F: FromPrimitiveWithConfig
+            + FromRef<F>
+            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> FromWithConfig<&'a Zt::Chal>
+            + for<'a> MulByScalar<&'a F>,
+        F::Inner: Transcribable,
+        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
+    {
         let batch_size = comm.batch_size;
         validate_input::<Zt, Lc, _>("verify", vp.num_vars, batch_size, &[], &[point_f])?;
 
@@ -121,19 +162,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         // of MBSInnerProduct in field (see combined_row)
         let (q_0, q_1) = point_to_tensor(vp.num_rows, point_f, field_cfg)?;
         let zero_f = F::zero_with_cfg(field_cfg);
-
-        let degree_bound = Zt::Comb::DEGREE_BOUND;
-        let mut per_poly_alphas: Vec<Vec<Zt::Chal>> = Vec::with_capacity(batch_size);
-
-        for _ in 0..batch_size {
-            let alphas: Vec<Zt::Chal> = if degree_bound.is_zero() {
-                vec![Zt::Chal::ONE]
-            } else {
-                transcript.fs_transcript.get_challenges(degree_bound + 1)
-            };
-
-            per_poly_alphas.push(alphas);
-        }
 
         let b: Vec<F> = transcript.read_field_elements(num_rows)?;
 
@@ -192,7 +220,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         cfg_into_iter!(columns_and_proofs).try_for_each(
             |(column_idx, column_values, proof)| -> Result<(), ZipError> {
                 Self::verify_column_testing_batched::<CHECK_FOR_OVERFLOW>(
-                    &per_poly_alphas,
+                    per_poly_alphas,
                     &coeffs,
                     &encoded_combined_row,
                     &column_values,
@@ -212,6 +240,28 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         )?;
 
         Ok(())
+    }
+
+    /// Samples per-polynomial alpha challenges from the transcript.
+    ///
+    /// This is the same sampling logic used internally by [`Self::verify`].
+    /// Exposed so that callers (e.g. the Zinc+ PIOP verifier) can sample
+    /// alphas, perform alpha-projection externally, and then call
+    /// [`Self::verify_with_alphas`].
+    pub fn sample_alphas(
+        transcript: &mut KeccakTranscript,
+        batch_size: usize,
+    ) -> Vec<Vec<Zt::Chal>> {
+        let degree_bound = Zt::Comb::DEGREE_BOUND;
+        (0..batch_size)
+            .map(|_| {
+                if degree_bound.is_zero() {
+                    vec![Zt::Chal::ONE]
+                } else {
+                    transcript.get_challenges(add!(degree_bound, 1))
+                }
+            })
+            .collect()
     }
 
     // Check 3: Enc(w)[col] == sum_i( sum_j( s_j * <v_ij[col], alphas_i> ) )

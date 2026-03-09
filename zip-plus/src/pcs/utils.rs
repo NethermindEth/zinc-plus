@@ -98,13 +98,13 @@ where
     let q_0 = if !lo.is_empty() {
         build_eq_x_r(lo, cfg).unwrap()
     } else {
-        DenseMultilinearExtension::zero_vars(F::zero_with_cfg(cfg))
+        DenseMultilinearExtension::zero_vars(F::one_with_cfg(cfg))
     };
 
     let q_1 = if !hi.is_empty() {
         build_eq_x_r(hi, cfg).unwrap()
     } else {
-        DenseMultilinearExtension::zero_vars(F::zero_with_cfg(cfg))
+        DenseMultilinearExtension::zero_vars(F::one_with_cfg(cfg))
     };
 
     Ok((q_0.evaluations, q_1.evaluations))

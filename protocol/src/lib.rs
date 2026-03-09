@@ -26,7 +26,9 @@ use zinc_piop::{
 use zinc_poly::{
     ConstCoeffBitWidth,
     mle::DenseMultilinearExtension,
-    univariate::{binary::BinaryPoly, dense::DensePolynomial},
+    univariate::{
+        binary::BinaryPoly, dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF,
+    },
 };
 use zinc_primality::PrimalityTest;
 use zinc_transcript::traits::ConstTranscribable;
@@ -61,6 +63,12 @@ pub struct Proof<F: PrimeField> {
     pub ideal_check: IdealCheckProof<F>,
     /// Combined polynomial resolver proof: sumcheck proof + trace evaluation
     pub resolver: CombinedPolyResolverProof<F>,
+    /// Per-column unprojected polynomial MLE evaluations at the sumcheck point
+    /// (lift-and-project). Each entry is the MLE evaluation of the
+    /// `\phi_q`-projected column in `F_q[X]` (before `\psi_a`), so the
+    /// verifier can check `\psi_a(lifted_eval_j) == up_eval_j` and supply
+    /// these to the Zip+ PCS for alpha-projection.
+    pub lifted_evals: Vec<DynamicPolynomialF<F>>,
 }
 
 /// Subclaim returned by the verifier. This will be replaced by the PCS proof in
@@ -175,6 +183,14 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     MleEvaluation(zinc_poly::EvaluationError),
     #[error("subclaim mismatch at column {column}: expected {expected:?}, got {actual:?}")]
     SubclaimMismatch {
+        column: usize,
+        expected: F,
+        actual: F,
+    },
+    #[error("lifted eval ψ_a projection failed: {0}")]
+    LiftedEvalProjection(zinc_poly::EvaluationError),
+    #[error("lifted eval ψ_a mismatch at column {column}: expected {expected:?}, got {actual:?}")]
+    LiftedEvalMismatch {
         column: usize,
         expected: F,
         actual: F,

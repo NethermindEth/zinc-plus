@@ -8,6 +8,7 @@ use zinc_piop::{
     projections::{project_scalars, project_scalars_to_field},
 };
 use zinc_poly::{
+    EvaluatablePolynomial,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
     univariate::dynamic::over_field::DynamicPolynomialF,
 };
@@ -129,6 +130,35 @@ where
             &field_cfg,
         )?;
 
+        // === Step 4.5: Lift-and-project verification ===
+        // Absorb the prover's lifted_evals into the transcript (matching
+        // prover Step 4.5). Then check ψ_a consistency: evaluating each
+        // lifted_eval_j(X) at the projecting element must recover up_eval_j.
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        for bar_u in &proof.lifted_evals {
+            pcs_transcript
+                .fs_transcript
+                .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
+        }
+
+        for (j, (bar_u, up_eval)) in proof
+            .lifted_evals
+            .iter()
+            .zip(cpr_subclaim.up_evals.iter())
+            .enumerate()
+        {
+            let psi_a_val = bar_u
+                .evaluate_at_point(&projecting_element_f)
+                .map_err(ProtocolError::LiftedEvalProjection)?;
+            if psi_a_val != *up_eval {
+                return Err(ProtocolError::LiftedEvalMismatch {
+                    column: j,
+                    expected: up_eval.clone(),
+                    actual: psi_a_val,
+                });
+            }
+        }
+
         // === Step 5: PCS verify (check witness MLE evaluation claims) ====
         // After the sumcheck, the verifier uses the Zip+ PCS to confirm
         // that the committed witness MLEs actually evaluate to the claimed
@@ -138,41 +168,49 @@ where
         //       at cpr_subclaim.evaluation_point directly from public data here,
         //       then include them in the constraint recomputation check.
 
-        if proof.commitments.0.batch_size > 0 {
-            ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::verify::<F, CHECK_FOR_OVERFLOW>(
-                &mut pcs_transcript,
-                vp_bin,
-                &proof.commitments.0,
-                &field_cfg,
-                &cpr_subclaim.evaluation_point,
-                &cpr_subclaim.up_evals[0],
-            )
-            .map_err(|e| ProtocolError::PcsVerification(0, e))?;
+        macro_rules! verify_pcs_batch {
+            ($Zt:ty, $Lc:ty, $vp:expr, $idx:tt, [$evals_range:expr]) => {{
+                let comm = &proof.commitments.$idx;
+                if comm.batch_size > 0 {
+                    let per_poly_alphas = ZipPlus::<$Zt, $Lc>::sample_alphas(
+                        &mut pcs_transcript.fs_transcript,
+                        comm.batch_size,
+                    );
+                    let mut eval_f = F::zero_with_cfg(&field_cfg);
+                    for (bar_u, alphas) in proof.lifted_evals[$evals_range]
+                        .iter()
+                        .zip(per_poly_alphas.iter())
+                    {
+                        for (coeff, alpha) in bar_u.coeffs.iter().zip(alphas.iter()) {
+                            let mut term = F::from_with_cfg(alpha, &field_cfg);
+                            term *= coeff;
+                            eval_f += &term;
+                        }
+                    }
+                    ZipPlus::<$Zt, $Lc>::verify_with_alphas::<F, CHECK_FOR_OVERFLOW>(
+                        &mut pcs_transcript,
+                        $vp,
+                        comm,
+                        &field_cfg,
+                        &cpr_subclaim.evaluation_point,
+                        &eval_f,
+                        &per_poly_alphas,
+                    )
+                    .map_err(|e| ProtocolError::PcsVerification($idx, e))?;
+                }
+            }};
         }
 
-        if proof.commitments.1.batch_size > 0 {
-            ZipPlus::<Zt::ArbitraryZt, Zt::ArbitraryLc>::verify::<F, CHECK_FOR_OVERFLOW>(
-                &mut pcs_transcript,
-                vp_arb,
-                &proof.commitments.1,
-                &field_cfg,
-                &cpr_subclaim.evaluation_point,
-                &cpr_subclaim.up_evals[1],
-            )
-            .map_err(|e| ProtocolError::PcsVerification(1, e))?;
-        }
-
-        if proof.commitments.2.batch_size > 0 {
-            ZipPlus::<Zt::IntZt, Zt::IntLc>::verify::<F, CHECK_FOR_OVERFLOW>(
-                &mut pcs_transcript,
-                vp_int,
-                &proof.commitments.2,
-                &field_cfg,
-                &cpr_subclaim.evaluation_point,
-                &cpr_subclaim.up_evals[2],
-            )
-            .map_err(|e| ProtocolError::PcsVerification(2, e))?;
-        }
+        let (n_bin, n_arb, _n_int) = proof.num_witness_cols;
+        verify_pcs_batch!(Zt::BinaryZt, Zt::BinaryLc, vp_bin, 0, [..n_bin]);
+        verify_pcs_batch!(
+            Zt::ArbitraryZt,
+            Zt::ArbitraryLc,
+            vp_arb,
+            1,
+            [n_bin..add!(n_bin, n_arb)]
+        );
+        verify_pcs_batch!(Zt::IntZt, Zt::IntLc, vp_int, 2, [add!(n_bin, n_arb)..]);
 
         Ok(Subclaim {
             evaluation_point: cpr_subclaim.evaluation_point,

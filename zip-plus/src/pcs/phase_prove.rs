@@ -142,7 +142,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         // TODO Lift q0, q1 back to int and take following dot products on ints instead
         // of MBSInnerProduct in field (see comboned row) We prove evaluations
         // over the field, so integers need to be mapped to field elements first
-        let (q_0, q_1) = point_to_tensor(num_rows, &point, field_cfg)?;
+        let (q_0, q_1) = point_to_tensor(num_rows, point, field_cfg)?;
 
         let degree_bound = Zt::Comb::DEGREE_BOUND;
         let polys_as_comb_r: Vec<Vec<Zt::CombR>> = polys

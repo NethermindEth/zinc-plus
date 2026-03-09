@@ -9,7 +9,8 @@ use zinc_piop::{
     },
 };
 use zinc_poly::{
-    mle::DenseMultilinearExtension, univariate::dynamic::over_field::DynamicPolynomialF,
+    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
+    univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{Uair, constraint_counter::count_constraints, degree_counter::count_max_degree};
@@ -80,10 +81,13 @@ where
         macro_rules! commit_optionally {
             ($pp:expr, $trace:expr) => {
                 if $trace.is_empty() {
-                    (None, ZipPlusCommitment {
-                        root: Default::default(),
-                        batch_size: 0,
-                    })
+                    (
+                        None,
+                        ZipPlusCommitment {
+                            root: Default::default(),
+                            batch_size: 0,
+                        },
+                    )
                 } else {
                     let (hint, commitment) = ZipPlus::commit($pp, $trace)?;
                     (Some(hint), commitment)
@@ -160,17 +164,68 @@ where
             &field_cfg,
         )?;
 
+        // === Step 4.5: Lift-and-project (oracle evaluations at sumcheck point) ===
+        // Compute per-column unprojected polynomial MLE evaluations at the
+        // sumcheck challenge point. These are in F_q[X] (after \phi_q but before
+        // \psi_a), so the verifier can check \psi_a(lifted_eval_j) == up_eval_j and
+        // supply them to the Zip+ PCS for alpha-projection.
+        //
+        // For each column, we evaluate the MLE coefficient-by-coefficient:
+        //   lifted_eval_j = Σ_ℓ (Σ_b eq(b, r') * c_{j,b,ℓ}) * X^ℓ
+        // where c_{j,b,ℓ} is the ℓ-th coefficient of the φ_q-projected entry
+        // at position b.
+        let eval_point = &cpr_prover_state.evaluation_point;
+        let zero_inner = F::zero_with_cfg(&field_cfg).into_inner();
+
+        let lifted_evals: Vec<DynamicPolynomialF<F>> = projected_trace
+            .iter()
+            .map(|col_mle| {
+                let max_degree = col_mle
+                    .iter()
+                    .flat_map(|entry| entry.degree())
+                    .max()
+                    .unwrap_or(0);
+
+                let coeffs: Vec<F> = (0..=max_degree)
+                    .map(|l| {
+                        let coeff_mle: DenseMultilinearExtension<F::Inner> = col_mle
+                            .iter()
+                            .map(|entry| {
+                                entry
+                                    .coeffs
+                                    .get(l)
+                                    .map(|f| f.inner().clone())
+                                    .unwrap_or_else(|| zero_inner.clone())
+                            })
+                            .collect();
+
+                        coeff_mle
+                            .evaluate_with_config(eval_point, &field_cfg)
+                            .expect("lifted eval: coefficient MLE evaluation failed")
+                    })
+                    .collect();
+
+                DynamicPolynomialF { coeffs }
+            })
+            .collect();
+
+        // Absorb lifted_evals into the Fiat-Shamir transcript before PCS.
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        for bar_u in &lifted_evals {
+            pcs_transcript
+                .fs_transcript
+                .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
+        }
+
         // === Step 5: PCS open (prove witness MLE evaluations) ===
-        // After the sumcheck, the prover must prove that the committed
-        // witness MLEs evaluate to the claimed values (up_evals / down_evals)
-        // at the sumcheck challenge point r'.
-        // This corresponds to Step 12 "Oracle evaluations at sumcheck point"
-        // in the AirZinc protocol (rolled_out_argument.tex).
+        // The Zip+ PCS proves that the committed polynomial-valued traces
+        // evaluate (under alpha-projection) consistently with the lifted_evals.
+        // The verifier checks ψ_a(lifted_eval_j) == up_eval_j to tie back to
+        // the sumcheck.
         //
         // TODO: Once we add public inputs, the verifier will compute public
         //       input MLE evaluations at the sumcheck point directly from
         //       public data. The PCS only covers witness columns.
-        let eval_point = &cpr_prover_state.evaluation_point;
 
         if let Some(hint_bin) = &hint_bin {
             let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
@@ -188,7 +243,7 @@ where
                 pp_arb,
                 trace_arb_poly,
                 eval_point,
-                &hint_arb,
+                hint_arb,
                 &field_cfg,
             )?;
         }
@@ -198,7 +253,7 @@ where
                 pp_int,
                 trace_int,
                 eval_point,
-                &hint_int,
+                hint_int,
                 &field_cfg,
             )?;
         }
@@ -213,6 +268,7 @@ where
                 ideal_check: ic_proof,
                 resolver: cpr_proof,
                 zip: zip_proof,
+                lifted_evals,
             },
             ProverAux {
                 field_cfg,
