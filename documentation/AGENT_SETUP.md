@@ -173,8 +173,8 @@ In `snark/benches/e2e_sha256.rs` (and eventually a shared types module):
 ```rust
 struct Sha256IntZipTypes;
 impl ZipTypes for Sha256IntZipTypes {
-    const NUM_COLUMN_OPENINGS: usize = 131;
-    const GRINDING_BITS: usize = 8;
+    const NUM_COLUMN_OPENINGS: usize = 118;
+    const GRINDING_BITS: usize = 16;
     type Eval = Int<1>;     // 64-bit integer
     type Cw = Int<2>;       // 128-bit codeword (to avoid overflow in NTT)
     type Fmod = Uint<4>;    // 256-bit modulus search

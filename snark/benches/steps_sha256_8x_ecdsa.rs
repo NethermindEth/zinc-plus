@@ -125,7 +125,7 @@ where
 struct EcdsaScalarZipTypes;
 
 impl ZipTypes for EcdsaScalarZipTypes {
-    const NUM_COLUMN_OPENINGS: usize = 147;
+    const NUM_COLUMN_OPENINGS: usize = 118;
     const GRINDING_BITS: usize = 16;
     type Eval = Int<{ INT_LIMBS * 4 }>;
     type Cw = Int<{ INT_LIMBS * 5 }>;

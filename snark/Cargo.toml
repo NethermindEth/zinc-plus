@@ -37,6 +37,7 @@ zinc-test-uair = { workspace = true }
 [features]
 qx-constraints = []
 no-f2x = ["zinc-sha256-uair/no-f2x"]
+true-ideal = ["zinc-sha256-uair/true-ideal"]
 parallel = [
     "dep:rayon",
     "zinc-piop/parallel",

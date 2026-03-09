@@ -60,7 +60,7 @@ use zinc_utils::from_ref::FromRef;
 
 use crate::{CyclotomicIdeal, witness::GenerateWitness};
 use crate::{
-    // Original column indices (unchanged 0–26)
+    // Original column indices (unchanged 0–24)
     COL_A_HAT, COL_E_HAT, COL_W_HAT,
     COL_SIGMA0_HAT, COL_SIGMA1_HAT, COL_MAJ_HAT,
     COL_CH_EF_HAT, COL_CH_NEG_EG_HAT,
@@ -70,38 +70,57 @@ use crate::{
     COL_W_TM2, COL_W_TM7, COL_W_TM15, COL_W_TM16,
     COL_K_HAT,
     COL_A_TM1, COL_A_TM2, COL_E_TM1, COL_E_TM2,
-    COL_SEL_ROUND, COL_SEL_SCHED,
     COL_INT_MU_A, COL_INT_MU_E, COL_INT_MU_W,
 };
 
-// ─── New column indices (27–34) ─────────────────────────────────────────────
+// ─── New column indices (25–32) ─────────────────────────────────────────────
 
 /// Σ₀ rotation quotient, low bit of binary decomposition.
-pub const COL_MU_C1_LO: usize = 27;
+pub const COL_MU_C1_LO: usize = 25;
 /// Σ₀ rotation quotient, high bit of binary decomposition.
-pub const COL_MU_C1_HI: usize = 28;
+pub const COL_MU_C1_HI: usize = 26;
 /// Σ₁ rotation quotient, low bit of binary decomposition.
-pub const COL_MU_C2_LO: usize = 29;
+pub const COL_MU_C2_LO: usize = 27;
 /// Σ₁ rotation quotient, high bit of binary decomposition.
-pub const COL_MU_C2_HI: usize = 30;
+pub const COL_MU_C2_HI: usize = 28;
 /// σ₀ rotation+shift quotient, low bit of binary decomposition.
-pub const COL_MU_C3_LO: usize = 31;
+pub const COL_MU_C3_LO: usize = 29;
 /// σ₀ rotation+shift quotient, high bit of binary decomposition.
-pub const COL_MU_C3_HI: usize = 32;
+pub const COL_MU_C3_HI: usize = 30;
 /// σ₁ rotation+shift quotient, low bit of binary decomposition.
-pub const COL_MU_C4_LO: usize = 33;
+pub const COL_MU_C4_LO: usize = 31;
 /// σ₁ rotation+shift quotient, high bit of binary decomposition.
-pub const COL_MU_C4_HI: usize = 34;
+pub const COL_MU_C4_HI: usize = 32;
+
+// ─── Correction column indices (33–35, only with `true-ideal`) ──────────────
+
+/// Correction column for C7 (a-update carry). Public, zero except at
+/// boundary rows where the shifted a[t+1] is incorrect.
+#[cfg(feature = "true-ideal")]
+pub const COL_CORR_C7: usize = 33;
+/// Correction column for C8 (e-update carry). Public, zero except at
+/// boundary rows where the shifted e[t+1] is incorrect.
+#[cfg(feature = "true-ideal")]
+pub const COL_CORR_C8: usize = 34;
+/// Correction column for C9 (W-schedule). Public, zero except at rows
+/// where the schedule recurrence does not hold.
+#[cfg(feature = "true-ideal")]
+pub const COL_CORR_C9: usize = 35;
 
 // ─── Counts ─────────────────────────────────────────────────────────────────
 
-/// Number of bit-polynomial columns (35 = original 27 + 8 μ).
-pub const NO_F2X_NUM_BITPOLY_COLS: usize = 35;
+/// Number of bit-polynomial columns without true-ideal (33 = original 25 + 8 μ).
+#[cfg(not(feature = "true-ideal"))]
+pub const NO_F2X_NUM_BITPOLY_COLS: usize = 33;
+
+/// Number of bit-polynomial columns with true-ideal (36 = original 25 + 8 μ + 3 correction).
+#[cfg(feature = "true-ideal")]
+pub const NO_F2X_NUM_BITPOLY_COLS: usize = 36;
 
 /// Number of integer columns (unchanged: 3).
 pub const NO_F2X_NUM_INT_COLS: usize = 3;
 
-/// Total number of trace columns (35 + 3 = 38).
+/// Total number of trace columns.
 pub const NO_F2X_NUM_COLS: usize = NO_F2X_NUM_BITPOLY_COLS + NO_F2X_NUM_INT_COLS;
 
 /// Number of constraints in the Bp no-F₂[X] UAIR.
@@ -122,6 +141,9 @@ pub const NO_F2X_QX_NUM_CONSTRAINTS: usize = 7;
 pub enum Sha256QxNoF2xIdeal {
     /// The cyclotomic ideal (X³² − 1).
     Cyclotomic,
+    /// The degree-one ideal (X − 2): p(2) = 0.
+    #[cfg(feature = "true-ideal")]
+    DegreeOne,
     /// The trivial ideal: contains every polynomial.
     Trivial,
 }
@@ -146,6 +168,15 @@ impl IdealCheck<DensePolynomial<i64, 64>> for Sha256QxNoF2xIdeal {
                 }
                 reduced.iter().all(|&c| c == 0)
             }
+            #[cfg(feature = "true-ideal")]
+            Sha256QxNoF2xIdeal::DegreeOne => {
+                // Evaluate at X = 2: f(2) = Σ c_i · 2^i
+                let mut eval: i64 = 0;
+                for (i, &c) in value.coeffs.iter().enumerate() {
+                    eval = eval.wrapping_add(c.wrapping_mul(1i64.wrapping_shl(i as u32)));
+                }
+                eval == 0
+            }
             Sha256QxNoF2xIdeal::Trivial => true,
         }
     }
@@ -158,6 +189,9 @@ impl IdealCheck<DensePolynomial<i64, 64>> for Sha256QxNoF2xIdeal {
 pub enum Sha256QxNoF2xIdealOverF {
     /// Cyclotomic (X³² − 1) check over F_p\[X\].
     Cyclotomic,
+    /// Degree-one ideal (X − 2): evaluate p(2) and check = 0.
+    #[cfg(feature = "true-ideal")]
+    DegreeOne,
     /// Trivial ideal.
     Trivial,
 }
@@ -187,6 +221,21 @@ impl<F: PrimeField> IdealCheck<DynamicPolynomialF<F>> for Sha256QxNoF2xIdealOver
                     reduced[j] = reduced[j].clone() + coeff;
                 }
                 reduced.iter().all(|c| F::is_zero(c))
+            }
+            #[cfg(feature = "true-ideal")]
+            Sha256QxNoF2xIdealOverF::DegreeOne => {
+                // Evaluate p(X) at X = 2 in F_p.
+                if value.coeffs.is_empty() {
+                    return true;
+                }
+                let cfg = value.coeffs[0].cfg();
+                let mut result = F::zero_with_cfg(cfg);
+                let mut power = F::one_with_cfg(cfg);
+                for coeff in &value.coeffs {
+                    result = result + &(coeff.clone() * &power);
+                    power = power.clone() + &power; // power *= 2
+                }
+                F::is_zero(&result)
             }
             Sha256QxNoF2xIdealOverF::Trivial => true,
         }
@@ -238,12 +287,20 @@ impl Uair for Sha256UairBpNoF2x {
                 zinc_uair::ShiftSpec { source_col: COL_E_TM1,  shift_amount: 1 },
                 zinc_uair::ShiftSpec { source_col: COL_E_TM2,  shift_amount: 2 },
             ],
-            public_columns: vec![
-                COL_W_HAT, COL_K_HAT,
-                COL_S0, COL_S1, COL_R0, COL_R1,
-                COL_W_TM2, COL_W_TM7, COL_W_TM15, COL_W_TM16,
-                COL_SEL_ROUND, COL_SEL_SCHED,
-            ],
+            public_columns: {
+                let mut cols = vec![
+                    COL_W_HAT, COL_K_HAT,
+                    COL_S0, COL_S1, COL_R0, COL_R1,
+                    COL_W_TM2, COL_W_TM7, COL_W_TM15, COL_W_TM16,
+                ];
+                #[cfg(feature = "true-ideal")]
+                {
+                    cols.push(COL_CORR_C7);
+                    cols.push(COL_CORR_C8);
+                    cols.push(COL_CORR_C9);
+                }
+                cols
+            },
         }
     }
 
@@ -343,12 +400,20 @@ impl Uair for Sha256UairQxNoF2x {
                 zinc_uair::ShiftSpec { source_col: COL_A_HAT, shift_amount: 1 },
                 zinc_uair::ShiftSpec { source_col: COL_E_HAT, shift_amount: 1 },
             ],
-            public_columns: vec![
-                COL_W_HAT, COL_K_HAT,
-                COL_S0, COL_S1, COL_R0, COL_R1,
-                COL_W_TM2, COL_W_TM7, COL_W_TM15, COL_W_TM16,
-                COL_SEL_ROUND, COL_SEL_SCHED,
-            ],
+            public_columns: {
+                let mut cols = vec![
+                    COL_W_HAT, COL_K_HAT,
+                    COL_S0, COL_S1, COL_R0, COL_R1,
+                    COL_W_TM2, COL_W_TM7, COL_W_TM15, COL_W_TM16,
+                ];
+                #[cfg(feature = "true-ideal")]
+                {
+                    cols.push(COL_CORR_C7);
+                    cols.push(COL_CORR_C8);
+                    cols.push(COL_CORR_C9);
+                }
+                cols
+            },
         }
     }
 
@@ -369,6 +434,7 @@ impl Uair for Sha256UairQxNoF2x {
         let int_up = up.int;
         let bp_down = down.binary_poly;
         let cyclotomic = ideal_from_ref(&Sha256QxNoF2xIdeal::Cyclotomic);
+        #[cfg(not(feature = "true-ideal"))]
         let trivial = ideal_from_ref(&Sha256QxNoF2xIdeal::Trivial);
 
         // ── Helpers: small integer constants as DensePolynomial ──────────
@@ -463,8 +529,15 @@ impl Uair for Sha256UairQxNoF2x {
         // X^32 as a polynomial
         let x32 = from_ref(&mono_poly(32));
 
-        // ── Constraint C7: a-update carry propagation (trivial ideal) ───
-        b.assert_in_ideal(
+        // ── Carry constraints C7–C9 ─────────────────────────────────────
+        //
+        // Without `true-ideal` (default): trivial ideal, degree 1,
+        // enabling the MLE-first IC path.
+        //
+        // With `true-ideal`: (X − 2) ideal with correction columns,
+        // degree 1, enabling the MLE-first IC path.
+
+        let c7_inner =
             bp_down[NF2X_DOWN_QX_A].clone()
                 - &bp_up[COL_H_HAT]
                 - &bp_up[COL_SIGMA1_HAT]
@@ -474,12 +547,9 @@ impl Uair for Sha256UairQxNoF2x {
                 - &bp_up[COL_W_HAT]
                 - &bp_up[COL_SIGMA0_HAT]
                 - &bp_up[COL_MAJ_HAT]
-                + &(int_up[COL_INT_MU_A].clone() * &x32),
-            &trivial,
-        );
+                + &(int_up[COL_INT_MU_A].clone() * &x32);
 
-        // ── Constraint C8: e-update carry propagation (trivial ideal) ───
-        b.assert_in_ideal(
+        let c8_inner =
             bp_down[NF2X_DOWN_QX_E].clone()
                 - &bp_up[COL_D_HAT]
                 - &bp_up[COL_H_HAT]
@@ -488,20 +558,50 @@ impl Uair for Sha256UairQxNoF2x {
                 - &bp_up[COL_CH_NEG_EG_HAT]
                 - &bp_up[COL_K_HAT]
                 - &bp_up[COL_W_HAT]
-                + &(int_up[COL_INT_MU_E].clone() * &x32),
-            &trivial,
-        );
+                + &(int_up[COL_INT_MU_E].clone() * &x32);
 
-        // ── Constraint C9: Message schedule recurrence (trivial ideal) ──
-        b.assert_in_ideal(
+        let c9_inner =
             bp_up[COL_W_HAT].clone()
                 - &bp_up[COL_W_TM16]
                 - &bp_up[COL_SIGMA0_W_HAT]
                 - &bp_up[COL_W_TM7]
                 - &bp_up[COL_SIGMA1_W_HAT]
-                + &(int_up[COL_INT_MU_W].clone() * &x32),
-            &trivial,
-        );
+                + &(int_up[COL_INT_MU_W].clone() * &x32);
+
+        #[cfg(not(feature = "true-ideal"))]
+        {
+            // ── C7: a-update carry propagation (trivial ideal) ──────────
+            b.assert_in_ideal(c7_inner, &trivial);
+
+            // ── C8: e-update carry propagation (trivial ideal) ──────────
+            b.assert_in_ideal(c8_inner, &trivial);
+
+            // ── C9: Message schedule recurrence (trivial ideal) ─────────
+            b.assert_in_ideal(c9_inner, &trivial);
+        }
+
+        #[cfg(feature = "true-ideal")]
+        {
+            let degree_one = ideal_from_ref(&Sha256QxNoF2xIdeal::DegreeOne);
+
+            // ── C7: (a-update + correction) ∈ (X − 2) ──────────────────
+            b.assert_in_ideal(
+                c7_inner + &bp_up[COL_CORR_C7],
+                &degree_one,
+            );
+
+            // ── C8: (e-update + correction) ∈ (X − 2) ──────────────────
+            b.assert_in_ideal(
+                c8_inner + &bp_up[COL_CORR_C8],
+                &degree_one,
+            );
+
+            // ── C9: (W-schedule + correction) ∈ (X − 2) ────────────────
+            b.assert_in_ideal(
+                c9_inner + &bp_up[COL_CORR_C9],
+                &degree_one,
+            );
+        }
     }
 }
 
@@ -572,38 +672,122 @@ fn compute_mu(
     (mu_lo, mu_hi)
 }
 
-/// Generate the full 38-column witness for the no-F₂\[X\] variant.
+/// Compute the 3 correction columns for the `true-ideal` feature.
 ///
-/// Delegates to the base `Sha256UairBp` witness generator for columns 0–29,
-/// then computes the 8 μ quotient decomposition columns (27–34) from
+/// Each correction column is a `BinaryPoly<32>` polynomial column that is zero
+/// at rows where the corresponding carry constraint (C7/C8/C9) naturally holds,
+/// and takes whatever value is needed to make the constraint evaluate to zero
+/// at X=2 at the remaining rows.
+///
+/// For C7 (a-update) and C8 (e-update): the constraint fails at boundary rows
+/// where the shifted a[t+1] or e[t+1] equals zero (due to shift zero-padding or
+/// the Bp linking constraints forcing boundary values to zero).
+///
+/// For C9 (W-schedule): the constraint fails at rows where the schedule recurrence
+/// does not naturally hold (round < 16 within each 64-row compression, plus the
+/// tail rows where W is forced to zero by shift padding).
+///
+/// The μ_a / μ_e / μ_W carry values are set at boundary rows to absorb
+/// the high bits, so the correction value always fits in 32 bits.
+#[cfg(feature = "true-ideal")]
+fn compute_correction_columns(
+    base: &[DenseMultilinearExtension<BinaryPoly<32>>],
+    num_vars: usize,
+) -> [Vec<BinaryPoly<32>>; 3] {
+    let num_rows = 1usize << num_vars;
+
+    let bp_val = |col: usize, t: usize| -> u64 {
+        let bp = &base[col].evaluations[t];
+        let mut val = 0u64;
+        for (i, coeff) in bp.iter().enumerate() {
+            if coeff.into_inner() {
+                val |= 1u64 << i;
+            }
+        }
+        val
+    };
+
+    // Int column indices within the base trace (after NUM_BITPOLY_COLS).
+    let int_mu_a_col = crate::NUM_BITPOLY_COLS + COL_INT_MU_A;
+    let int_mu_e_col = crate::NUM_BITPOLY_COLS + COL_INT_MU_E;
+    let int_mu_w_col = crate::NUM_BITPOLY_COLS + COL_INT_MU_W;
+
+    let mut corr_c7 = vec![BinaryPoly::<32>::from(0u32); num_rows];
+    let mut corr_c8 = vec![BinaryPoly::<32>::from(0u32); num_rows];
+    let mut corr_c9 = vec![BinaryPoly::<32>::from(0u32); num_rows];
+
+    for t in 0..num_rows {
+        // The Qx UAIR shift-by-1 gives a_hat[t+1] for C7, e_hat[t+1] for C8.
+        let a_next = if t + 1 < num_rows { bp_val(COL_A_HAT, t + 1) } else { 0 };
+        let e_next = if t + 1 < num_rows { bp_val(COL_E_HAT, t + 1) } else { 0 };
+
+        let h_val = bp_val(COL_H_HAT, t);
+        let sigma1_val = bp_val(COL_SIGMA1_HAT, t);
+        let ch_ef_val = bp_val(COL_CH_EF_HAT, t);
+        let ch_neg_eg_val = bp_val(COL_CH_NEG_EG_HAT, t);
+        let k_val = bp_val(COL_K_HAT, t);
+        let w_val = bp_val(COL_W_HAT, t);
+        let sigma0_val = bp_val(COL_SIGMA0_HAT, t);
+        let maj_val = bp_val(COL_MAJ_HAT, t);
+        let d_val = bp_val(COL_D_HAT, t);
+        let mu_a = bp_val(int_mu_a_col, t);
+        let mu_e = bp_val(int_mu_e_col, t);
+
+        // C7: a[t+1] - h - Σ₁ - ch_ef - ch_neg_eg - K - W - Σ₀ - Maj + μ_a * 2^32
+        // evaluated at X=2: all BinaryPoly values become their u32 integer values.
+        let c7_sum = h_val + sigma1_val + ch_ef_val + ch_neg_eg_val
+            + k_val + w_val + sigma0_val + maj_val;
+        let c7_eval: i64 = a_next as i64 - c7_sum as i64 + (mu_a as i64) * (1i64 << 32);
+        if c7_eval != 0 {
+            // correction(2) = -c7_eval, must fit in [0, 2^32)
+            let corr = ((-c7_eval) as u64) & 0xFFFF_FFFF;
+            corr_c7[t] = BinaryPoly::from(corr as u32);
+        }
+
+        // C8: e[t+1] - d - h - Σ₁ - ch_ef - ch_neg_eg - K - W + μ_e * 2^32
+        let c8_sum = d_val + h_val + sigma1_val + ch_ef_val
+            + ch_neg_eg_val + k_val + w_val;
+        let c8_eval: i64 = e_next as i64 - c8_sum as i64 + (mu_e as i64) * (1i64 << 32);
+        if c8_eval != 0 {
+            let corr = ((-c8_eval) as u64) & 0xFFFF_FFFF;
+            corr_c8[t] = BinaryPoly::from(corr as u32);
+        }
+
+        // C9: W - W_tm16 - σ₀_w - W_tm7 - σ₁_w + μ_W * 2^32
+        let w_tm16_val = bp_val(COL_W_TM16, t);
+        let sigma0_w_val = bp_val(COL_SIGMA0_W_HAT, t);
+        let w_tm7_val = bp_val(COL_W_TM7, t);
+        let sigma1_w_val = bp_val(COL_SIGMA1_W_HAT, t);
+        let mu_w = bp_val(int_mu_w_col, t);
+        let c9_eval: i64 = w_val as i64 - w_tm16_val as i64 - sigma0_w_val as i64
+            - w_tm7_val as i64 - sigma1_w_val as i64
+            + (mu_w as i64) * (1i64 << 32);
+        if c9_eval != 0 {
+            let corr = ((-c9_eval) as u64) & 0xFFFF_FFFF;
+            corr_c9[t] = BinaryPoly::from(corr as u32);
+        }
+    }
+
+    [corr_c7, corr_c8, corr_c9]
+}
+
+/// Generate the full witness for the no-F₂\[X\] variant.
+///
+/// Delegates to the base `Sha256UairBp` witness generator for columns 0–27,
+/// then computes the 8 μ quotient decomposition columns (25–32) from
 /// the existing trace data.
 ///
-/// Note: columns 27–29 in the base trace are the integer carry columns
-/// μ_a, μ_e, μ_W (encoded as BinaryPoly).  After extending, the base
-/// columns 27–29 shift to positions 30–34.  Actually no—we INSERT the
-/// 8 new columns at positions 27–34 and move the int columns to 35–37.
-///
-/// Wait—that would change the int column indices.  Instead, we keep
-/// the original 30 columns (0–29) intact and **append** the 8 new μ
-/// columns at positions 30–37.
-///
-/// Hmm, but the spec says columns 27–34 for the μ and the int columns
-/// stay at their original indices (27–29 in the int sub-slice).
-/// The total layout is: `binary_poly[0..35]` || `int[0..3]`.
-/// In the flattened trace vector: `bp[0..35]` then `int[0..3]` = 38 entries.
-///
-/// The existing trace has `bp[0..27]` then `int[0..3]` encoded as
-/// BinaryPoly = 30 entries.  For no-f2x we produce:
-///   bp[0..27] (original) + bp[27..35] (new μ cols) + int[0..3] = 38 entries.
+/// The total layout is: `binary_poly[0..33]` || `int[0..3]`.
+/// With `true-ideal`, 3 correction columns are appended: `binary_poly[0..36]` || `int[0..3]`.
 pub fn generate_no_f2x_witness(
     num_vars: usize,
     rng: &mut impl RngCore,
 ) -> Vec<DenseMultilinearExtension<BinaryPoly<32>>> {
-    // Generate the base 30-column trace.
+    // Generate the base 28-column trace.
     let base = <crate::Sha256UairBp as GenerateWitness<BinaryPoly<32>>>::generate_witness(
         num_vars, rng,
     );
-    assert_eq!(base.len(), crate::NUM_COLS); // 30
+    assert_eq!(base.len(), crate::NUM_COLS); // 28
 
     let num_rows = 1usize << num_vars;
     // Helper to extract u32 bit pattern from a BinaryPoly column at row t.
@@ -660,19 +844,16 @@ pub fn generate_no_f2x_witness(
         mu_cols[7][t] = BinaryPoly::from(c4_hi);
     }
 
-    // Build the 38-column trace:
-    //   positions 0–26: original bit-poly columns
-    //   positions 27–34: new μ columns
-    //   positions 35–37: original int columns (were at 27–29)
+    // Build the trace.
     let mut result: Vec<DenseMultilinearExtension<BinaryPoly<32>>> =
         Vec::with_capacity(NO_F2X_NUM_COLS);
 
-    // Original bit-poly columns (0–26).
+    // Original bit-poly columns (0–24).
     for i in 0..crate::NUM_BITPOLY_COLS {
         result.push(base[i].clone());
     }
 
-    // New μ columns (27–34).
+    // New μ columns (25–32).
     for col in mu_cols {
         result.push(DenseMultilinearExtension::from_evaluations_vec(
             num_vars,
@@ -681,7 +862,20 @@ pub fn generate_no_f2x_witness(
         ));
     }
 
-    // Original int columns (moved to 35–37).
+    // Correction columns (33–35) when true-ideal is enabled.
+    #[cfg(feature = "true-ideal")]
+    {
+        let corr_cols = compute_correction_columns(&base, num_vars);
+        for col in corr_cols {
+            result.push(DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                col,
+                BinaryPoly::<32>::from(0u32),
+            ));
+        }
+    }
+
+    // Original int columns.
     for i in crate::NUM_BITPOLY_COLS..crate::NUM_COLS {
         result.push(base[i].clone());
     }
@@ -690,7 +884,7 @@ pub fn generate_no_f2x_witness(
     result
 }
 
-/// Generate only the 35 BinaryPoly columns (indices 0–34).
+/// Generate only the BinaryPoly columns (indices 0 to NO_F2X_NUM_BITPOLY_COLS-1).
 pub fn generate_no_f2x_poly_witness(
     num_vars: usize,
     rng: &mut impl RngCore,
@@ -748,8 +942,15 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "selector"))]
     fn qx_max_degree_is_one() {
         assert_eq!(count_max_degree::<Sha256UairQxNoF2x>(), 1);
+    }
+
+    #[test]
+    #[cfg(feature = "selector")]
+    fn qx_max_degree_is_two_with_selector() {
+        assert_eq!(count_max_degree::<Sha256UairQxNoF2x>(), 2);
     }
 
     #[test]

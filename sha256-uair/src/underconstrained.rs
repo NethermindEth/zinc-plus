@@ -11,7 +11,7 @@
 //! - C3–C8:  linking constraints (d, h, W_tm2, W_tm7, W_tm15, W_tm16)
 //! - C9–C12: Ch/Maj lookback links (a_tm1, a_tm2, e_tm1, e_tm2)
 //!
-//! # Column layout (26 total: 23 bit-poly + 3 integer)
+//! # Column layout (24 total: 21 bit-poly + 3 integer)
 //!
 //! ## Bit-polynomial columns — {0,1}^{<32}\[X\] (indices 0–9)
 //!
@@ -49,20 +49,13 @@
 //! | 19    | `e_tm1`          | e[t−1] = f_t                                     |
 //! | 20    | `e_tm2`          | e[t−2] = g_t                                     |
 //!
-//! ## Selector columns (indices 21–22)
+//! ## Integer columns — Z (indices 21–23 in flattened trace)
 //!
 //! | Index | Name             | Description                                     |
 //! |-------|------------------|-------------------------------------------------|
-//! | 21    | `sel_round`      | 1 for t ∈ [0, 63], 0 otherwise                  |
-//! | 22    | `sel_sched`      | 1 for t ∈ [16, 63], 0 otherwise                 |
-//!
-//! ## Integer columns — Z (indices 23–25 in flattened trace)
-//!
-//! | Index | Name             | Description                                     |
-//! |-------|------------------|-------------------------------------------------|
-//! | 23    | `mu_a`           | Carry for a-update (∈ {0,…,6})                  |
-//! | 24    | `mu_e`           | Carry for e-update (∈ {0,…,5})                  |
-//! | 25    | `mu_W`           | Carry for W schedule (∈ {0,…,3})                |
+//! | 21    | `mu_a`           | Carry for a-update (∈ {0,…,6})                  |
+//! | 22    | `mu_e`           | Carry for e-update (∈ {0,…,5})                  |
+//! | 23    | `mu_W`           | Carry for W schedule (∈ {0,…,3})                |
 
 use crypto_primitives::crypto_bigint_int::Int;
 use rand::RngCore;
@@ -77,11 +70,11 @@ use crate::witness::GenerateWitness;
 
 // ─── Column counts ──────────────────────────────────────────────────────────
 
-/// Total number of trace columns (23 bit-poly + 3 integer).
-pub const UC_NUM_COLS: usize = 26;
+/// Total number of trace columns (21 bit-poly + 3 integer).
+pub const UC_NUM_COLS: usize = 24;
 
 /// Number of bit-polynomial columns.
-pub const UC_NUM_BITPOLY_COLS: usize = 23;
+pub const UC_NUM_BITPOLY_COLS: usize = 21;
 
 /// Number of integer columns (Z).
 pub const UC_NUM_INT_COLS: usize = 3;
@@ -138,12 +131,6 @@ pub const UC_COL_E_TM1: usize = 19;
 /// e[t−2] = g_t.
 pub const UC_COL_E_TM2: usize = 20;
 
-// ── Selector columns (indices 21–22) ────────────────────────────────────────
-
-/// Round selector: 1 for t ∈ [0, 63], 0 otherwise.
-pub const UC_COL_SEL_ROUND: usize = 21;
-/// Schedule selector: 1 for t ∈ [16, 63], 0 otherwise.
-pub const UC_COL_SEL_SCHED: usize = 22;
 
 // ── Integer columns (indices 0–2 within the int sub-slice) ──────────────────
 
@@ -214,7 +201,6 @@ impl Uair for Sha256UairBpUnderconstrained {
             public_columns: vec![
                 UC_COL_W_HAT, UC_COL_K_HAT,
                 UC_COL_W_TM2, UC_COL_W_TM7, UC_COL_W_TM15, UC_COL_W_TM16,
-                UC_COL_SEL_ROUND, UC_COL_SEL_SCHED,
             ],
         }
     }
@@ -334,15 +320,15 @@ impl Uair for Sha256UairBpUnderconstrained {
         // X^32 is expressed as X^16 * X^16 since BinaryPoly<32> cannot
         // represent degree 32 directly.
 
-        let carry_ideal = ideal_from_ref(&Sha256Ideal::DegreeOne(2));
+        let trivial_ideal = ideal_from_ref(&Sha256Ideal::Trivial);
 
         let x16 = from_ref(&BinaryPoly::from(1u32 << 16));
         let x32_expr = x16.clone() * &x16;
 
-        // ── Constraint 13: a-update carry propagation ───────────────────
-        //   sel_round · (â[t+1] − ĥ − Σ̂₁ − ch_ef − ch_neg_eg
-        //                − K̂ − Ŵ − Σ̂₀ − Maj + μ_a·X^32) ∈ (X−2)
-        let c13_inner =
+        // ── Constraint 13: a-update carry propagation (trivial) ─────────
+        //   â[t+1] − ĥ − Σ̂₁ − ch_ef − ch_neg_eg
+        //   − K̂ − Ŵ − Σ̂₀ − Maj + μ_a·X^32 ∈ Trivial
+        b.assert_in_ideal(
             bp_down[UC_DOWN_BP_A_NEXT].clone()
                 - &up[UC_COL_H_HAT]
                 - &up[UC_COL_SIGMA1_HAT]
@@ -352,16 +338,14 @@ impl Uair for Sha256UairBpUnderconstrained {
                 - &up[UC_COL_W_HAT]
                 - &up[UC_COL_SIGMA0_HAT]
                 - &up[UC_COL_MAJ_HAT]
-                + &(int_up[UC_COL_INT_MU_A].clone() * &x32_expr);
-        b.assert_in_ideal(
-            up[UC_COL_SEL_ROUND].clone() * &c13_inner,
-            &carry_ideal,
+                + &(int_up[UC_COL_INT_MU_A].clone() * &x32_expr),
+            &trivial_ideal,
         );
 
-        // ── Constraint 14: e-update carry propagation ───────────────────
-        //   sel_round · (ê[t+1] − d̂ − ĥ − Σ̂₁ − ch_ef − ch_neg_eg
-        //                − K̂ − Ŵ + μ_e·X^32) ∈ (X−2)
-        let c14_inner =
+        // ── Constraint 14: e-update carry propagation (trivial) ─────────
+        //   ê[t+1] − d̂ − ĥ − Σ̂₁ − ch_ef − ch_neg_eg
+        //   − K̂ − Ŵ + μ_e·X^32 ∈ Trivial
+        b.assert_in_ideal(
             bp_down[UC_DOWN_BP_E_NEXT].clone()
                 - &up[UC_COL_D_HAT]
                 - &up[UC_COL_H_HAT]
@@ -370,25 +354,21 @@ impl Uair for Sha256UairBpUnderconstrained {
                 - &up[UC_COL_CH_NEG_EG_HAT]
                 - &up[UC_COL_K_HAT]
                 - &up[UC_COL_W_HAT]
-                + &(int_up[UC_COL_INT_MU_E].clone() * &x32_expr);
-        b.assert_in_ideal(
-            up[UC_COL_SEL_ROUND].clone() * &c14_inner,
-            &carry_ideal,
+                + &(int_up[UC_COL_INT_MU_E].clone() * &x32_expr),
+            &trivial_ideal,
         );
 
-        // ── Constraint 15: message schedule carry propagation ───────────
-        //   sel_sched · (Ŵ − Ŵ_tm16 − σ̂₀_w − Ŵ_tm7 − σ̂₁_w
-        //                + μ_W·X^32) ∈ (X−2)
-        let c15_inner =
+        // ── Constraint 15: message schedule carry propagation (trivial) ─
+        //   Ŵ − Ŵ_tm16 − σ̂₀_w − Ŵ_tm7 − σ̂₁_w
+        //   + μ_W·X^32 ∈ Trivial
+        b.assert_in_ideal(
             up[UC_COL_W_HAT].clone()
                 - &up[UC_COL_W_TM16]
                 - &up[UC_COL_SIGMA0_W_HAT]
                 - &up[UC_COL_W_TM7]
                 - &up[UC_COL_SIGMA1_W_HAT]
-                + &(int_up[UC_COL_INT_MU_W].clone() * &x32_expr);
-        b.assert_in_ideal(
-            up[UC_COL_SEL_SCHED].clone() * &c15_inner,
-            &carry_ideal,
+                + &(int_up[UC_COL_INT_MU_W].clone() * &x32_expr),
+            &trivial_ideal,
         );
     }
 }
@@ -400,14 +380,13 @@ impl Uair for Sha256UairBpUnderconstrained {
 /// Mapping from underconstrained column indices to full UAIR column indices.
 ///
 /// Full UAIR columns 10–13 (S0, S1, R0, R1) are skipped.
-/// Full column:  0  1  2  3  4  5  6  7  8  9  14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29
-/// UC column:    0  1  2  3  4  5  6  7  8  9  10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25
+/// Full column:  0  1  2  3  4  5  6  7  8  9  14 15 16 17 18 19 20 21 22 23 24 25 26 27
+/// UC column:    0  1  2  3  4  5  6  7  8  9  10 11 12 13 14 15 16 17 18 19 20 21 22 23
 const UC_TO_FULL_COL: [usize; UC_NUM_COLS] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9,      // bit-poly (same)
     14, 15, 16, 17, 18, 19, 20,          // aux lookback (was 14–20)
     21, 22, 23, 24,                       // Ch/Maj lookback (was 21–24)
-    25, 26,                               // selectors (was 25–26)
-    27, 28, 29,                           // integer (was 27–29)
+    25, 26, 27,                           // integer (was 25–27)
 ];
 
 impl GenerateWitness<BinaryPoly<32>> for Sha256UairBpUnderconstrained {
@@ -430,7 +409,7 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBpUnderconstrained {
     }
 }
 
-/// Generate only the 23 BinaryPoly columns (indices 0–22) used in the
+/// Generate only the 21 BinaryPoly columns (indices 0–20) used in the
 /// underconstrained UAIR.
 pub fn generate_uc_poly_witness(
     num_vars: usize,
@@ -458,16 +437,16 @@ pub fn generate_uc_int_witness(
 
 // ─── Column classification for split PCS batches ────────────────────────────
 
-/// Bit-polynomial column indices (0–22): the 10 Q[X] bit-poly columns,
-/// 7 auxiliary lookback columns, 4 Ch/Maj lookback columns, and 2 selector
-/// columns. (No F₂[X] columns.)
-pub const UC_POLY_COLUMN_INDICES: [usize; 23] = [
+/// Bit-polynomial column indices (0–20): the 10 Q[X] bit-poly columns,
+/// 7 auxiliary lookback columns, and 4 Ch/Maj lookback columns.
+/// (No F₂[X] columns.)
+pub const UC_POLY_COLUMN_INDICES: [usize; 21] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
-    10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+    10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
 ];
 
-/// Integer column indices (23–25): the 3 carry columns μ_a, μ_e, μ_W.
-pub const UC_INT_COLUMN_INDICES: [usize; 3] = [23, 24, 25];
+/// Integer column indices (21–23): the 3 carry columns μ_a, μ_e, μ_W.
+pub const UC_INT_COLUMN_INDICES: [usize; 3] = [21, 22, 23];
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
@@ -497,9 +476,10 @@ mod tests {
     }
 
     #[test]
-    fn max_constraint_degree_is_two() {
-        // Carry constraints have degree 2 (selector * degree-1 expression).
-        assert_eq!(count_max_degree::<Sha256UairBpUnderconstrained>(), 2);
+    fn max_constraint_degree_is_one() {
+        // Rotation constraints use mul_by_scalar (degree 1); carry
+        // constraints are now degree 1 (trivial ideal, no selectors).
+        assert_eq!(count_max_degree::<Sha256UairBpUnderconstrained>(), 1);
     }
 
     #[test]

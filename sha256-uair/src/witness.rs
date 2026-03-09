@@ -50,16 +50,16 @@ fn bp_to_u64(bp: &BinaryPoly<32>) -> u64 {
 
 // ─── Column classification for split PCS batches ────────────────────────────
 
-/// Bit-polynomial column indices (0–26): the 10 Q[X] bit-poly columns,
-/// 4 F₂[X] columns, 7 auxiliary lookback columns, 4 Ch/Maj lookback
-/// columns, and 2 selector columns.
-pub const POLY_COLUMN_INDICES: [usize; 27] = [
+/// Bit-polynomial column indices (0–24): the 10 Q[X] bit-poly columns,
+/// 4 F₂[X] columns, 7 auxiliary lookback columns, and 4 Ch/Maj lookback
+/// columns.
+pub const POLY_COLUMN_INDICES: [usize; 25] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
-    14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+    14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
 ];
 
-/// Integer column indices (27–29): the 3 carry columns μ_a, μ_e, μ_W.
-pub const INT_COLUMN_INDICES: [usize; 3] = [27, 28, 29];
+/// Integer column indices (25–27): the 3 carry columns μ_a, μ_e, μ_W.
+pub const INT_COLUMN_INDICES: [usize; 3] = [25, 26, 27];
 
 // ─── GenerateWitness impl ───────────────────────────────────────────────────
 
@@ -247,7 +247,7 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
             }
         };
 
-        // ── Phase 2: Populate all 30 columns ────────────────────────────
+        // ── Phase 2: Populate all 28 columns ────────────────────────────
         let mut cols: Vec<Vec<BinaryPoly<32>>> =
             (0..NUM_COLS).map(|_| vec![BinaryPoly::<32>::from(0u32); num_rows]).collect();
 
@@ -313,14 +313,10 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
             cols[23][t] = BinaryPoly::from(f);                    // e_tm1 = e[t−1]
             cols[24][t] = BinaryPoly::from(g);                    // e_tm2 = e[t−2]
 
-            // ── Selector columns (25–26) ────────────────────────────────
+            // ── Integer columns (25–27): carry values ───────────────────
             let round_active = t <= last_sel_round_row;
             let sched_active = round >= 16 && t <= last_sel_sched_row;
 
-            cols[25][t] = BinaryPoly::from(if round_active { 1u32 } else { 0u32 });
-            cols[26][t] = BinaryPoly::from(if sched_active { 1u32 } else { 0u32 });
-
-            // ── Integer columns (27–29): carry values ───────────────────
             if round_active {
                 let sigma1_val = big_sigma1(e);
                 let ch_val = ch(e, f, g);
@@ -336,7 +332,7 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
                     + sigma0_val as u64
                     + maj_val as u64;
                 let mu_a_val = (sum_a >> 32) as u32;
-                cols[27][t] = BinaryPoly::from(mu_a_val);
+                cols[25][t] = BinaryPoly::from(mu_a_val);
 
                 // μ_e: carry for e-update
                 let sum_e: u64 = d as u64
@@ -346,7 +342,7 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
                     + k_global[t] as u64
                     + w_val as u64;
                 let mu_e_val = (sum_e >> 32) as u32;
-                cols[28][t] = BinaryPoly::from(mu_e_val);
+                cols[26][t] = BinaryPoly::from(mu_e_val);
             }
 
             if sched_active {
@@ -356,7 +352,7 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
                     + w_global[t - 7] as u64
                     + small_sigma1(w_global[t - 2]) as u64;
                 let mu_w_val = (sum_w >> 32) as u32;
-                cols[29][t] = BinaryPoly::from(mu_w_val);
+                cols[27][t] = BinaryPoly::from(mu_w_val);
             }
         }
 
@@ -375,11 +371,10 @@ impl GenerateWitness<BinaryPoly<32>> for Sha256UairBp {
 
 // ─── Split witness generators ───────────────────────────────────────────────
 
-/// Generate only the 27 BinaryPoly columns (indices 0–26) used in
+/// Generate only the 25 BinaryPoly columns (indices 0–24) used in
 /// both F₂[X] and Q[X] constraints. These include the 10 bit-polynomial
 /// columns, the 4 F₂[X] shift/remainder columns, 7 lookback columns,
-/// the round-constant column, 4 Ch/Maj lookback columns, and 2 selector
-/// columns.
+/// the round-constant column, and 4 Ch/Maj lookback columns.
 pub fn generate_poly_witness(
     num_vars: usize,
     rng: &mut impl RngCore,
@@ -391,7 +386,7 @@ pub fn generate_poly_witness(
         .collect()
 }
 
-/// Generate the 3 integer columns (indices 27–29: μ_a, μ_e, μ_W) used in
+/// Generate the 3 integer columns (indices 25–27: μ_a, μ_e, μ_W) used in
 /// Q[X] carry constraints (C13–C15), encoded as `Int<1>` (64-bit integer).
 ///
 /// Each cell value is `BinaryPoly::to_u64() as i64` wrapped in `Int<1>`.
@@ -646,7 +641,7 @@ mod tests {
             let w_val = bp_to_u64(&trace[2].evaluations[t]);
             let sigma0_val = bp_to_u64(&trace[3].evaluations[t]);
             let maj_val = bp_to_u64(&trace[5].evaluations[t]);
-            let mu_a_val = bp_to_u64(&trace[27].evaluations[t]);  // col 27
+            let mu_a_val = bp_to_u64(&trace[25].evaluations[t]);  // col 25
 
             let a_next = bp_to_u64(&trace[0].evaluations[t + 1]);
 
@@ -661,7 +656,7 @@ mod tests {
             );
 
             // e-update carry
-            let mu_e_val = bp_to_u64(&trace[28].evaluations[t]);  // col 28
+            let mu_e_val = bp_to_u64(&trace[26].evaluations[t]);  // col 26
             let e_next = bp_to_u64(&trace[1].evaluations[t + 1]);
 
             let sum_e = d_val + h_val + sigma1_val + ch_ef_val
@@ -688,7 +683,7 @@ mod tests {
             let sigma0_w = bp_to_u64(&trace[8].evaluations[t]);
             let w_tm7 = bp_to_u64(&trace[2].evaluations[t - 7]);
             let sigma1_w = bp_to_u64(&trace[9].evaluations[t]);
-            let mu_w_val = bp_to_u64(&trace[29].evaluations[t]);  // col 29
+            let mu_w_val = bp_to_u64(&trace[27].evaluations[t]);  // col 27
 
             let sum_w = w_tm16 + sigma0_w + w_tm7 + sigma1_w;
 
@@ -831,34 +826,6 @@ mod tests {
         );
     }
 
-    /// Verify that selectors are active for the correct rows in 8× mode.
-    #[test]
-    fn multi_compression_selectors_are_correct() {
-        let mut rng = rand::rng();
-        let trace = <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(NUM_VARS_8X, &mut rng);
-        let num_rows = 1usize << NUM_VARS_8X;
-        let last_sel_round = num_rows - 5; // 507
-        let last_sel_sched = num_rows - 17; // 495
-
-        for t in 0..num_rows {
-            let round = t % 64;
-            let sel_round = bp_to_u64(&trace[25].evaluations[t]) as u32;
-            let sel_sched = bp_to_u64(&trace[26].evaluations[t]) as u32;
-
-            let expected_round = if t <= last_sel_round { 1u32 } else { 0u32 };
-            let expected_sched = if round >= 16 && t <= last_sel_sched { 1u32 } else { 0u32 };
-
-            assert_eq!(
-                sel_round, expected_round,
-                "sel_round mismatch at row {t}"
-            );
-            assert_eq!(
-                sel_sched, expected_sched,
-                "sel_sched mismatch at row {t}"
-            );
-        }
-    }
-
     /// Verify the carry constraint holds across ALL active rows in the 8× trace.
     #[test]
     fn multi_compression_carry_polynomials() {
@@ -879,8 +846,8 @@ mod tests {
             let w_val = bp_to_u64(&trace[2].evaluations[t]);
             let sigma0_val = bp_to_u64(&trace[3].evaluations[t]);
             let maj_val = bp_to_u64(&trace[5].evaluations[t]);
-            let mu_a_val = bp_to_u64(&trace[27].evaluations[t]);
-            let mu_e_val = bp_to_u64(&trace[28].evaluations[t]);
+            let mu_a_val = bp_to_u64(&trace[25].evaluations[t]);
+            let mu_e_val = bp_to_u64(&trace[26].evaluations[t]);
 
             let a_next = bp_to_u64(&trace[0].evaluations[t + 1]);
             let e_next = bp_to_u64(&trace[1].evaluations[t + 1]);

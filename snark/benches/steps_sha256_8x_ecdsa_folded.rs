@@ -67,8 +67,27 @@ use zip_plus::{
     pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
     pcs::folding::{split_columns, fold_claims_prove},
 };
-use zinc_sha256_uair::{Sha256Uair, witness::GenerateWitness};
+#[cfg(not(feature = "no-f2x"))]
+use zinc_sha256_uair::witness::GenerateWitness;
 use zinc_uair::Uair;
+
+// ─── Feature-gated UAIR type selection ──────────────────────────────────────
+
+#[cfg(not(feature = "no-f2x"))]
+use zinc_sha256_uair::Sha256Uair;
+
+#[cfg(not(feature = "no-f2x"))]
+type BenchShaUair = Sha256Uair;
+#[cfg(not(feature = "no-f2x"))]
+const SHA256_BATCH_SIZE: usize = 30; // 27 bitpoly + 3 int
+
+#[cfg(feature = "no-f2x")]
+use zinc_sha256_uair::no_f2x::{Sha256UairBpNoF2x, NO_F2X_NUM_COLS};
+
+#[cfg(feature = "no-f2x")]
+type BenchShaUair = Sha256UairBpNoF2x;
+#[cfg(feature = "no-f2x")]
+const SHA256_BATCH_SIZE: usize = NO_F2X_NUM_COLS;
 use zinc_piop::projections::{
     project_trace_to_field,
     project_scalars, project_scalars_to_field,
@@ -131,7 +150,7 @@ where
 struct EcdsaScalarZipTypes;
 
 impl ZipTypes for EcdsaScalarZipTypes {
-    const NUM_COLUMN_OPENINGS: usize = 147;
+    const NUM_COLUMN_OPENINGS: usize = 118;
     const GRINDING_BITS: usize = 16;
     type Eval = Int<{ INT_LIMBS * 4 }>;
     type Cw = Int<{ INT_LIMBS * 5 }>;
@@ -170,7 +189,6 @@ type EcLc = IprsCode<
 // ─── Parameters ─────────────────────────────────────────────────────────────
 
 const SHA256_8X_NUM_VARS: usize = 9;      // 2^9 = 512 rows (8 × 64 SHA rounds)
-const SHA256_BATCH_SIZE: usize = 30;       // 30 SHA-256 columns (27 bitpoly + 3 int)
 const SHA256_LOOKUP_COL_COUNT: usize = 10; // 10 Q[X] columns need lookup
 const ECDSA_NUM_VARS: usize = 9;           // 2^9 = 512 rows (matches SHA for shared eval point)
 
@@ -210,7 +228,14 @@ fn sha256_affine_lookup_specs_4chunks() -> Vec<AffineLookupSpec> {
 
 fn generate_sha256_trace(num_vars: usize) -> Vec<DenseMultilinearExtension<BinaryPoly<32>>> {
     let mut rng = rand::rng();
-    <Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(num_vars, &mut rng)
+    #[cfg(not(feature = "no-f2x"))]
+    {
+        <zinc_sha256_uair::Sha256Uair as GenerateWitness<BinaryPoly<32>>>::generate_witness(num_vars, &mut rng)
+    }
+    #[cfg(feature = "no-f2x")]
+    {
+        zinc_sha256_uair::no_f2x::generate_no_f2x_witness(num_vars, &mut rng)
+    }
 }
 
 /// Generate a valid ECDSA trace with real secp256k1 Int<4> witness.
@@ -297,8 +322,8 @@ fn sha256_8x_ecdsa_folded_stepwise(c: &mut Criterion) {
     let sha_lookup_specs = sha256_lookup_specs_4chunks();
     let sha_affine_specs = sha256_affine_lookup_specs_4chunks();
 
-    let sha_num_constraints = zinc_uair::constraint_counter::count_constraints::<Sha256Uair>();
-    let sha_max_degree = zinc_uair::degree_counter::count_max_degree::<Sha256Uair>();
+    let sha_num_constraints = zinc_uair::constraint_counter::count_constraints::<BenchShaUair>();
+    let sha_max_degree = zinc_uair::degree_counter::count_max_degree::<BenchShaUair>();
     let ecdsa_num_constraints = zinc_uair::constraint_counter::count_constraints::<EcdsaUairInt>();
     let ecdsa_max_degree = zinc_uair::degree_counter::count_max_degree::<EcdsaUairInt>();
     let num_vars = SHA256_8X_NUM_VARS;
@@ -326,7 +351,7 @@ fn sha256_8x_ecdsa_folded_stepwise(c: &mut Criterion) {
     assert_eq!(ecdsa_trace.len(), zinc_ecdsa_uair::NUM_COLS);
 
     // Build PCS traces — exclude public + shift-source columns.
-    let sha_sig = Sha256Uair::signature();
+    let sha_sig = BenchShaUair::signature();
     let ec_sig_int = EcdsaUairInt::signature();
     let sha_excluded = sha_sig.pcs_excluded_columns();
     let ec_excluded = ec_sig_int.pcs_excluded_columns();
@@ -387,7 +412,7 @@ fn sha256_8x_ecdsa_folded_stepwise(c: &mut Criterion) {
                 let field_cfg = transcript.get_random_field_cfg::<
                     F, <F as Field>::Inner, MillerRabin
                 >();
-                let projected_scalars = project_scalars::<F, Sha256Uair>(|scalar| {
+                let projected_scalars = project_scalars::<F, BenchShaUair>(|scalar| {
                     let one = F::one_with_cfg(&field_cfg);
                     let zero = F::zero_with_cfg(&field_cfg);
                     DynamicPolynomialF::new(
@@ -397,7 +422,7 @@ fn sha256_8x_ecdsa_folded_stepwise(c: &mut Criterion) {
                     )
                 });
                 let t = Instant::now();
-                let _ = IdealCheckProtocol::<F>::prove_mle_first::<Sha256Uair, 32>(
+                let _ = IdealCheckProtocol::<F>::prove_mle_first::<BenchShaUair, 32>(
                     &mut transcript,
                     &sha_trace,
                     &projected_scalars,
@@ -471,14 +496,14 @@ fn sha256_8x_ecdsa_folded_stepwise(c: &mut Criterion) {
         unified_tr.get_field_challenges(num_vars, &sha_fcfg);
 
     // SHA IC (at shared point) — MLE-first path.
-    let sha_proj_scalars = project_scalars::<F, Sha256Uair>(|scalar| {
+    let sha_proj_scalars = project_scalars::<F, BenchShaUair>(|scalar| {
         let one = F::one_with_cfg(&sha_fcfg);
         let zero = F::zero_with_cfg(&sha_fcfg);
         DynamicPolynomialF::new(
             scalar.iter().map(|c| if c.into_inner() { one.clone() } else { zero.clone() }).collect::<Vec<_>>()
         )
     });
-    let _ = IdealCheckProtocol::<F>::prove_mle_first_at_point::<Sha256Uair, 32>(
+    let _ = IdealCheckProtocol::<F>::prove_mle_first_at_point::<BenchShaUair, 32>(
         &mut unified_tr, &sha_trace, &sha_proj_scalars,
         sha_num_constraints, &ic_evaluation_point, &sha_fcfg,
     ).expect("SHA IC");
@@ -537,7 +562,7 @@ fn sha256_8x_ecdsa_folded_stepwise(c: &mut Criterion) {
             for _ in 0..iters {
                 let mut tr = unified_tr.clone();
                 let t = Instant::now();
-                let sha_group = CombinedPolyResolver::<F>::build_prover_group::<Sha256Uair>(
+                let sha_group = CombinedPolyResolver::<F>::build_prover_group::<BenchShaUair>(
                     &mut tr, sha_field_trace.clone(), &ic_evaluation_point,
                     &sha_fproj_scalars, sha_num_constraints, num_vars, sha_max_degree, &sha_fcfg,
                 ).expect("SHA build_prover_group");
@@ -570,7 +595,7 @@ fn sha256_8x_ecdsa_folded_stepwise(c: &mut Criterion) {
     // Pre-compute the post-CPR transcript state for lookup/shift benchmarks.
     let (unified_tr_post_cpr, cpr_eval_point, sha_cpr_proof, ec_cpr_proof) = {
         let mut tr = unified_tr.clone();
-        let sg = CombinedPolyResolver::<F>::build_prover_group::<Sha256Uair>(
+        let sg = CombinedPolyResolver::<F>::build_prover_group::<BenchShaUair>(
             &mut tr, sha_field_trace.clone(), &ic_evaluation_point,
             &sha_fproj_scalars, sha_num_constraints, num_vars, sha_max_degree, &sha_fcfg,
         ).expect("SHA build_prover_group");
@@ -851,7 +876,7 @@ fn sha256_8x_ecdsa_folded_stepwise(c: &mut Criterion) {
     // ── 16. E2E Total Prover ────────────────────────────────────────
 
     let dual_proof = zinc_snark::pipeline::prove_dual_circuit_hybrid_gkr_4x_folded::<
-        Sha256Uair,
+        BenchShaUair,
         EcdsaUairInt,
         Int<{ INT_LIMBS * 4 }>,
         FoldedZt4x,
@@ -896,7 +921,7 @@ fn sha256_8x_ecdsa_folded_stepwise(c: &mut Criterion) {
             for _ in 0..iters {
                 let t = Instant::now();
                 let _ = zinc_snark::pipeline::prove_dual_circuit_hybrid_gkr_4x_folded::<
-                    Sha256Uair,
+                    BenchShaUair,
                     EcdsaUairInt,
                     Int<{ INT_LIMBS * 4 }>,
                     FoldedZt4x,
@@ -954,7 +979,7 @@ fn sha256_8x_ecdsa_folded_stepwise(c: &mut Criterion) {
     // Print one verifier run timing.
     {
         let r = zinc_snark::pipeline::verify_dual_circuit_hybrid_gkr_4x_folded::<
-            Sha256Uair,
+            BenchShaUair,
             EcdsaUairInt,
             Int<{ INT_LIMBS * 4 }>,
             FoldedZt4x,
@@ -998,7 +1023,7 @@ fn sha256_8x_ecdsa_folded_stepwise(c: &mut Criterion) {
     group.bench_function("E2E/Verifier", |b| {
         b.iter(|| {
             let r = zinc_snark::pipeline::verify_dual_circuit_hybrid_gkr_4x_folded::<
-                Sha256Uair,
+                BenchShaUair,
                 EcdsaUairInt,
                 Int<{ INT_LIMBS * 4 }>,
                 FoldedZt4x,

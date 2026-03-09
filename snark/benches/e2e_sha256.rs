@@ -86,8 +86,8 @@ where
         + Sync,
     Int<6>: FromRef<CwCoeff>,
 {
-    const NUM_COLUMN_OPENINGS: usize = 131;
-    const GRINDING_BITS: usize = 8;
+    const NUM_COLUMN_OPENINGS: usize = 118;
+    const GRINDING_BITS: usize = 16;
     type Eval = BinaryPoly<D_PLUS_ONE>;
     type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
     type Fmod = Uint<{ INT_LIMBS * 3 }>;
@@ -111,8 +111,8 @@ where
 struct EcdsaScalarZipTypes;
 
 impl ZipTypes for EcdsaScalarZipTypes {
-    const NUM_COLUMN_OPENINGS: usize = 131;
-    const GRINDING_BITS: usize = 8;
+    const NUM_COLUMN_OPENINGS: usize = 118;
+    const GRINDING_BITS: usize = 16;
     type Eval = Int<{ INT_LIMBS * 4 }>;      // 256-bit integer
     type Cw = Int<{ INT_LIMBS * 5 }>;        // 320-bit codeword
     type Fmod = Uint<{ INT_LIMBS * 4 }>;     // 256-bit modulus search (secp256k1 sized)
@@ -136,8 +136,8 @@ impl ZipTypes for EcdsaScalarZipTypes {
 struct Sha256IntZipTypes;
 
 impl ZipTypes for Sha256IntZipTypes {
-    const NUM_COLUMN_OPENINGS: usize = 131;
-    const GRINDING_BITS: usize = 8;
+    const NUM_COLUMN_OPENINGS: usize = 118;
+    const GRINDING_BITS: usize = 16;
     type Eval = Int<{ INT_LIMBS }>;           // 64-bit integer (Int<1>)
     type Cw = Int<{ INT_LIMBS * 2 }>;         // 128-bit codeword (Int<2>)
     type Fmod = Uint<{ INT_LIMBS * 3 }>;      // 192-bit modulus search

@@ -163,13 +163,13 @@ pub fn convert_trace_to_qx(
 
 // ─── Column indices ──────────────────────────────────────────────────────────
 
-/// Total number of trace columns (27 bit-poly + 3 integer).
-pub const NUM_COLS: usize = 30;
+/// Total number of trace columns (25 bit-poly + 3 integer).
+pub const NUM_COLS: usize = 28;
 
 /// Number of bit-polynomial columns ({0,1}^{<32}[X]).
 /// Includes the 10 Q[X] bit-poly columns, 4 F₂[X] columns, 7 auxiliary
-/// lookback columns, 4 Ch/Maj lookback columns, and 2 selector columns.
-pub const NUM_BITPOLY_COLS: usize = 27;
+/// lookback columns, and 4 Ch/Maj lookback columns.
+pub const NUM_BITPOLY_COLS: usize = 25;
 
 /// Number of integer columns (Z).
 pub const NUM_INT_COLS: usize = 3;
@@ -235,15 +235,6 @@ pub const COL_A_TM2: usize = 22;
 pub const COL_E_TM1: usize = 23;
 /// e[t−2] = g_t (lookback for Ch affine lookup).
 pub const COL_E_TM2: usize = 24;
-
-// ── Selector columns (indices 25–26) ────────────────────────────────────
-
-/// Round selector: 1 for t ∈ [0, 63], 0 otherwise.
-/// Gates carry propagation constraints C7/C8.
-pub const COL_SEL_ROUND: usize = 25;
-/// Schedule selector: 1 for t ∈ [16, 63], 0 otherwise.
-/// Gates the message schedule recurrence C9.
-pub const COL_SEL_SCHED: usize = 26;
 
 // ── Integer columns (indices 0–2 within the int sub-slice) ──────────────────
 // NOTE: These are accessed via `up.int[COL_INT_MU_*]`, not `up.binary_poly[..]`.// Absolute indices are 27–29.
@@ -341,6 +332,8 @@ pub enum Sha256Ideal {
     Cyclotomic,
     /// The degree-one ideal (X − root) for carry propagation.
     DegreeOne(u32),
+    /// The trivial ideal: contains every polynomial.
+    Trivial,
 }
 
 impl Ideal for Sha256Ideal {}
@@ -372,6 +365,7 @@ impl IdealCheck<BinaryPoly<32>> for Sha256Ideal {
                 }
                 eval == 0
             }
+            Sha256Ideal::Trivial => true,
         }
     }
 }
@@ -403,6 +397,7 @@ impl<F: PrimeField + crypto_primitives::FromPrimitiveWithConfig> IdealCheck<Dyna
                 let result = value.evaluate_at_point(&root_f).unwrap();
                 F::is_zero(&result)
             }
+            Sha256Ideal::Trivial => true,
         }
     }
 }
@@ -467,7 +462,6 @@ impl Uair for Sha256UairBp {
                 COL_W_HAT, COL_K_HAT,
                 COL_S0, COL_S1, COL_R0, COL_R1,
                 COL_W_TM2, COL_W_TM7, COL_W_TM15, COL_W_TM16,
-                COL_SEL_ROUND, COL_SEL_SCHED,
             ],
         }
     }
@@ -774,7 +768,6 @@ impl Uair for Sha256UairQx {
                 COL_W_HAT, COL_K_HAT,
                 COL_S0, COL_S1, COL_R0, COL_R1,
                 COL_W_TM2, COL_W_TM7, COL_W_TM15, COL_W_TM16,
-                COL_SEL_ROUND, COL_SEL_SCHED,
             ],
         }
     }

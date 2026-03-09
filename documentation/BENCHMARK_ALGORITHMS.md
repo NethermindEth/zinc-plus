@@ -591,7 +591,7 @@ The PIOP transcript operations, in exact order:
    ⋮       (GKR internal absorbs/squeezes)               §4.6
  [Squeeze] Shift batching coefficients ξ₁, ..., ξ₁₀     §4.7
    ⋮       (9 sumcheck rounds: absorb pᵢ, squeeze sᵢ)   §4.7
- [Absorb]  v_finals (2 private Fp elements)              §4.7
+ [Absorb]  v_finals (6 private Fp elements)              §4.7
  [Absorb]  Folding round 1: c₁,c₂ for 20 columns        §4.8
  [Squeeze] Folding challenge γ₁                          §4.8
  [Absorb]  Folding round 2: c₃,c₄ for 20 columns        §4.8
@@ -834,3 +834,546 @@ Completeness (honest execution leads to acceptance) follows from:
 3. The shift sumcheck round polynomials are correctly computed from the committed trace.
 4. The folding identities $c_1 + \alpha^{D/2} \cdot c_2 = e$ hold algebraically by the split construction.
 5. The PCS codewords are valid encodings (the IPRS code is applied to the actual committed data).
+
+---
+---
+
+# Part II — Zinc+ SHA-256 8× + ECDSA Dual-Circuit Benchmark: Algorithmic Specification
+
+> **Benchmark covered:**
+> ```
+> cargo bench --bench steps_sha256_8x_ecdsa_folded -p zinc-snark --features "parallel simd asm qx-constraints no-f2x"
+> ```
+>
+> **Important: feature flags have no effect on this benchmark.** Unlike the SHA-256-only benchmark (Part I),
+> this dual-circuit benchmark does **not** use `no-f2x` or `qx-constraints` feature gating.
+> It unconditionally uses:
+>
+> | Circuit | UAIR type | Ring | Columns | Constraints |
+> |---------|-----------|------|---------|-------------|
+> | **SHA-256** | `Sha256Uair` (standard Bp UAIR) | `BinaryPoly<32>` | 30 (27 bitpoly + 3 integer) | 16 (C1–C4 cyclotomic + C5–C16 zero) |
+> | **ECDSA** | `EcdsaUairInt` | `Int<4>` (256-bit) | 11 | 11 (all `assert_zero`) |
+>
+> The `no-f2x` feature flag activates the `sha256-uair::no_f2x` module but the benchmark never imports
+> `Sha256UairBpNoF2x` or `Sha256UairQxNoF2x`. The `qx-constraints` flag is similarly unused — the
+> dual-circuit pipeline function `prove_dual_circuit_hybrid_gkr_4x_folded` contains no Qx code path.
+>
+> This document provides a precise mathematical description of the algorithms
+> executed in the dual-circuit E2E prover and E2E verifier benchmarks for a
+> cryptographer audience.
+
+---
+
+## Table of Contents (Part II)
+
+1. [Overview](#ii1-overview)
+2. [ECDSA Algebraic Domains](#ii2-ecdsa-algebraic-domains)
+3. [The ECDSA UAIR Trace](#ii3-the-ecdsa-uair-trace)
+4. [Dual-Circuit E2E Prover Pipeline](#ii4-dual-circuit-e2e-prover-pipeline)
+5. [Dual-Circuit E2E Verifier Pipeline](#ii5-dual-circuit-e2e-verifier-pipeline)
+6. [Appendix E: ECDSA Column Layout](#appendix-e-ecdsa-column-layout)
+7. [Appendix F: ECDSA Constraint Catalogue](#appendix-f-ecdsa-constraint-catalogue)
+8. [Appendix G: Dual-Circuit Concrete Parameters](#appendix-g-dual-circuit-concrete-parameters)
+9. [Appendix H: Dual-Circuit Security Analysis](#appendix-h-dual-circuit-security-analysis)
+
+---
+
+## II.1. Overview
+
+The dual-circuit benchmark proves a **combined statement** consisting of:
+
+1. **SHA-256**: 8 chained SHA-256 compressions (identical to Part I, but using the *standard* `Sha256Uair` — 30 columns, 16 constraints including 4 cyclotomic).
+2. **ECDSA**: A secp256k1 Shamir multi-scalar multiplication over 257 steps, verifying an ECDSA signature.
+
+The two circuits are **independent UAIRs** in different scalar rings (`BinaryPoly<32>` for SHA, `Int<4>` for ECDSA) unified through a shared Fiat-Shamir transcript and shared PIOP evaluation point. They share:
+
+- A **single Keccak transcript** (both commitment roots absorbed sequentially).
+- A **shared IC evaluation point** (one random $\mathbf{r} \in \mathbb{F}_p^n$ used for both Ideal Checks).
+- A **shared projecting element** $\alpha$ (one random $\alpha \in \mathbb{F}_p$ for field projection of both circuits).
+- A **single multi-degree sumcheck** (both CPR groups batched with shared verifier challenges).
+- A **unified evaluation sumcheck** (all column evaluation claims from both circuits).
+
+They have **separate**:
+
+- **PCS commitments and proofs** (SHA uses 4×-folded `BinaryPoly<8>` over 192-bit PCS field; ECDSA uses unfolded `Int<4>` over 256-bit PCS field).
+- **Ideal Check proofs** (SHA uses MLE-first path; ECDSA uses the general `prove_at_point` path).
+- **Folding** (SHA only — 2-round protocol; ECDSA columns are not folded).
+- **Lookup** (SHA only — Hybrid GKR batched lookup; ECDSA has no lookup requirements).
+
+### Notation
+
+All notation from Part I §1 carries over. Additional notation:
+
+| Symbol | Meaning |
+|--------|---------|
+| $\mathbb{F}_q$ | secp256k1 base field, $q = 2^{256} - 2^{32} - 977$ |
+| $\mathrm{Int}\langle 4 \rangle$ | 256-bit signed integer (4 × 64-bit limbs), representing elements of $\mathbb{F}_q$ |
+| $(X, Y, Z)$ | Jacobian projective coordinates on secp256k1 |
+| $G = (G_x, G_y)$ | secp256k1 generator point (affine) |
+| $Q = (Q_x, Q_y)$ | Public key (affine); set to $G$ in the benchmark |
+| $G+Q = (PGQ_x, PGQ_y)$ | Precomputed sum $G + Q$ (affine) |
+| $b_1, b_2 \in \{0,1\}$ | Scalar bits of $u_1, u_2$ at each step |
+| $R_{\mathrm{SIG}}$ | Expected affine $x$-coordinate of the result point |
+| $\mathbb{F}_p$ | PIOP field (192-bit prime, same as Part I) |
+| $\mathbb{F}_s$ | ECDSA PCS field (256-bit prime, $s \approx 2^{256}$) |
+
+---
+
+## II.2. ECDSA Algebraic Domains
+
+### II.2.1. The secp256k1 Curve
+
+The ECDSA circuit operates over secp256k1: $y^2 = x^3 + 7$ over $\mathbb{F}_q$ where $q = 2^{256} - 2^{32} - 977$. All trace column values and constraint arithmetic are performed in $\mathbb{F}_q$, represented as `Int<4>` (256-bit integers with modular reduction).
+
+The Jacobian coordinate system represents a point $(x, y)$ in affine coordinates as $(X, Y, Z)$ where $x = X/Z^2$ and $y = Y/Z^3$.
+
+### II.2.2. Scalar Ring `Int<4>`
+
+`Int<4>` is a 256-bit signed integer type (4 × 64-bit limbs). Arithmetic is performed modulo $q$ (the secp256k1 base field prime). Unlike `BinaryPoly<32>`, which is a polynomial ring, `Int<4>` is a scalar (degree-0) type — each trace cell holds a single field element, not a polynomial.
+
+When the PIOP projects `Int<4>` trace values to $\mathbb{F}_p$, each `Int<4>` value $v$ becomes a degree-0 `DynamicPolynomialF<F>` with a single coefficient $v \bmod p$. The projection $\pi_\alpha$ is trivially the identity on scalars (no polynomial evaluation needed).
+
+### II.2.3. PIOP and PCS Fields
+
+The dual-circuit pipeline uses **three different prime fields**:
+
+| Field | Size | Role |
+|-------|------|------|
+| $\mathbb{F}_p$ (`MontyField<3>`) | 192-bit | Shared PIOP field for both circuits: IC, CPR sumcheck, eval sumcheck |
+| $\mathbb{F}_{p_1}$ (`MontyField<3>`) | 192-bit | SHA PCS field (independent prime derived from SHA commitment root) |
+| $\mathbb{F}_s$ (`MontyField<4>`) | 256-bit | ECDSA PCS field (independent prime derived from ECDSA commitment root) |
+
+The PIOP operates entirely over $\mathbb{F}_p$. Each PCS creates its own transcript, absorbs only its own Merkle root, and derives its own independent prime modulus.
+
+---
+
+## II.3. The ECDSA UAIR Trace
+
+### II.3.1. Trace Dimensions
+
+The ECDSA trace has $N = 2^9 = 512$ rows and **11 columns** (all `Int<4>`). The logical computation spans 258 rows (rows 0–257):
+
+- **Row 0**: Initialisation — set accumulator to the table point selected by $(b_1[0], b_2[0])$, then double-and-conditionally-add.
+- **Rows 1–256**: Pure doubling (all $b_1 = b_2 = 0$ in the benchmark witness).
+- **Row 257**: Final accumulator — boundary constraint B4 verifies $X/Z^2 = R_{\mathrm{SIG}}$.
+- **Rows 258–511**: Zero padding.
+
+### II.3.2. Column Layout
+
+| Index | Name | Description | PCS? | Public? |
+|-------|------|-------------|------|---------|
+| 0 | `b1` | Scalar bit of $u_1$ | | ✓ |
+| 1 | `b2` | Scalar bit of $u_2$ | | ✓ |
+| 2 | `X` | Accumulator $x$-coordinate (Jacobian) | | (shift src) |
+| 3 | `Y` | Accumulator $y$-coordinate (Jacobian) | | (shift src) |
+| 4 | `Z` | Accumulator $z$-coordinate (Jacobian) | | (shift src) |
+| 5 | `X_mid` | Doubled point $2P$ $x$-coordinate | ✓ | |
+| 6 | `Y_mid` | Doubled point $2P$ $y$-coordinate | ✓ | |
+| 7 | `Z_mid` | Doubled point $2P$ $z$-coordinate | ✓ | |
+| 8 | `H` | Addition scratch: chord $x$-difference | ✓ | |
+| 9 | `sel_init` | Boundary selector: $1$ at row $0$ | | ✓ |
+| 10 | `sel_final` | Boundary selector: $1$ at row $257$ | | ✓ |
+
+Column partition:
+- **4 PCS-committed columns**: indices 5–8 (`X_mid`, `Y_mid`, `Z_mid`, `H`).
+- **4 public columns**: indices 0, 1, 9, 10 (`b1`, `b2`, `sel_init`, `sel_final`).
+- **3 shift-source-only columns**: indices 2, 3, 4 (`X`, `Y`, `Z`) — not public, not PCS-committed. Their evaluation claims are resolved by the unified eval sumcheck.
+
+Thus: 4 committed + 4 public + 3 shift-source-only = 11 total.
+
+### II.3.3. Shift Specifications
+
+| Source column | Shift amount | Produces |
+|---------------|-------------|----------|
+| `X` (index 2) | 1 | $X[t+1]$ |
+| `Y` (index 3) | 1 | $Y[t+1]$ |
+| `Z` (index 4) | 1 | $Z[t+1]$ |
+
+All 3 shifts are "genuine" shift claims (non-zero shift amount) that enter the unified evaluation sumcheck.
+
+### II.3.4. Constraint System: `EcdsaUairInt` (11 constraints, all `assert_zero`)
+
+All constraints use the trivial `ImpossibleIdeal` — only zero is in the ideal. The maximum constraint degree is **13** (dominated by C6).
+
+**Shamir selector:** $s = b_1 + b_2 - b_1 b_2$ (logical OR: $s = 1$ iff any bit is set).
+
+**Table point selection** (degree 2 in trace columns, since $G_x, G_y, Q_x, Q_y, PGQ_x, PGQ_y$ are degree-0 constants):
+$$T_x = b_1(1-b_2) \cdot G_x + (1-b_1)b_2 \cdot Q_x + b_1 b_2 \cdot PGQ_x$$
+$$T_y = b_1(1-b_2) \cdot G_y + (1-b_1)b_2 \cdot Q_y + b_1 b_2 \cdot PGQ_y$$
+
+where $G_x, G_y, Q_x, Q_y, PGQ_x, PGQ_y$ are hardcoded secp256k1 constants embedded via `smul_c` (scalar multiply by constant).
+
+**Doubling constraints (C1–C4):**
+
+| # | Name | Expression | Degree |
+|---|------|------------|--------|
+| C1 | $Z_{\mathrm{mid}}$ | $Z_{\mathrm{mid}} - 2YZ = 0$ | 2 |
+| C2 | $X_{\mathrm{mid}}$ | $X_{\mathrm{mid}} - 9X^4 + 8XY^2 = 0$ | 4 |
+| C3 | $Y_{\mathrm{mid}}$ | $Y_{\mathrm{mid}} - 12X^3Y^2 + 3X^2 X_{\mathrm{mid}} + 8Y^4 = 0$ | 5 |
+| C4 | $H$ | $H - T_x Z_{\mathrm{mid}}^2 + X_{\mathrm{mid}} = 0$ | 4 |
+
+These compute the intermediate doubled point $2P = (X_{\mathrm{mid}}, Y_{\mathrm{mid}}, Z_{\mathrm{mid}})$ and the addition scratch $H$ using the standard Jacobian doubling formulas with curve parameter $a = 0$ (secp256k1).
+
+**Transition constraints (C5–C7, gated by $1 - \mathrm{sel\_final}$):**
+
+Let $R_a = T_y \cdot Z_{\mathrm{mid}}^3 - Y_{\mathrm{mid}}$ (inlined, degree 5 in columns).
+
+| # | Name | Expression | Degree |
+|---|------|------------|--------|
+| C5 | $Z[t{+}1]$ | $(1-\mathrm{sel\_final}) \cdot \bigl(Z[t{+}1] - (1{-}s) Z_{\mathrm{mid}} - s \cdot Z_{\mathrm{mid}} H\bigr) = 0$ | 5 |
+| C6 | $X[t{+}1]$ | $(1-\mathrm{sel\_final}) \cdot \bigl(X[t{+}1] - (1{-}s) X_{\mathrm{mid}} - s \cdot (R_a^2 - H^3 - 2 X_{\mathrm{mid}} H^2)\bigr) = 0$ | **13** |
+| C7 | $Y[t{+}1]$ | $(1-\mathrm{sel\_final}) \cdot \bigl(Y[t{+}1] - (1{-}s) Y_{\mathrm{mid}} - s \cdot (R_a (X_{\mathrm{mid}} H^2 - X[t{+}1]) - Y_{\mathrm{mid}} H^3)\bigr) = 0$ | 11 |
+
+These enforce the conditional point addition using Shamir's trick: when $s = 0$, the next point is $2P$ (pure doubling); when $s = 1$, the next point is $2P + T$ (double-and-add).
+
+**Boundary constraints (B3a–B3c, B4):**
+
+| # | Name | Expression | Degree |
+|---|------|------------|--------|
+| B3a | Init $X$ | $\mathrm{sel\_init} \cdot (X - T_x) = 0$ | 3 |
+| B3b | Init $Y$ | $\mathrm{sel\_init} \cdot (Y - T_y) = 0$ | 3 |
+| B3c | Init $Z$ | $\mathrm{sel\_init} \cdot (Z - 1) = 0$ | 2 |
+| B4 | Final sig | $\mathrm{sel\_final} \cdot Z \cdot (X - R_{\mathrm{SIG}} \cdot Z^2) = 0$ | 4 |
+
+B3a–B3c enforce the initial accumulator at row 0 equals the table point for $(b_1[0], b_2[0])$ in Jacobian form $(T_x, T_y, 1)$. B4 verifies the final affine $x$-coordinate $X/Z^2 = R_{\mathrm{SIG}}$, rewritten projectively to avoid inversion.
+
+> **Note:** Booleanity of $b_1, b_2$ is **not** enforced algebraically — these are public columns checked directly by the verifier.
+
+### II.3.5. Lookup Requirements
+
+The ECDSA UAIR has **no lookup requirements** — all constraints are algebraic. Lookups apply only to the SHA-256 circuit.
+
+---
+
+## II.4. Dual-Circuit E2E Prover Pipeline
+
+The prover function is `prove_dual_circuit_hybrid_gkr_4x_folded`. The pipeline has the same structure as Part I but with two circuits processed in a unified transcript.
+
+### II.4.0. Witness Generation
+
+Two independent witnesses are generated:
+
+| Circuit | Function | Trace dimensions | Ring |
+|---------|----------|-----------------|------|
+| SHA-256 | `Sha256Uair::generate_witness(9, rng)` | 512 rows × 30 columns | `BinaryPoly<32>` |
+| ECDSA | `EcdsaUairInt::generate_witness(9, rng)` | 512 rows × 11 columns | `Int<4>` |
+
+The ECDSA witness generates a **valid secp256k1 trace**: initialises at $G$ (row 0, $b_1=1, b_2=0$), performs one double-and-add, then 256 pure doublings ($b_1 = b_2 = 0$), computing $3 \cdot 2^{256} \cdot G$. The final $R_{\mathrm{SIG}}$ is lazily computed via the full 257-step trace in $\mathbb{F}_q$ arithmetic, with affine recovery $X/Z^2$ via Fermat inversion.
+
+### II.4.1. Step 0: Double-Split Columns (SHA only)
+
+Identical to Part I §4.0. Only SHA `BinaryPoly<32>` columns are split:
+1. `split_columns::<32, 16>`: 12 committed columns × 512 → 12 columns × 1024 in `BinaryPoly<16>`
+2. `split_columns::<16, 8>`: 12 columns × 1024 → 12 columns × 2048 in `BinaryPoly<8>`
+
+The ECDSA `Int<4>` columns are **not** split or folded — they enter PCS directly.
+
+### II.4.2. Step 1: PCS Commit (both circuits)
+
+Two independent PCS commitments:
+
+| Circuit | Input | PCS code | Merkle root |
+|---------|-------|----------|-------------|
+| SHA-256 | 12 `BinaryPoly<8>` columns × 2048 | IPRS `PnttConfigF2_16R4B4<3>`: rate 1/4, input 2048, output 8192 | `commitment1.root` |
+| ECDSA | 4 `Int<4>` columns × 512 | IPRS `PnttConfigF2_16R4B64<1>`: rate 1/4, input 512, output 2048 | `commitment2.root` |
+
+Both roots are absorbed into the shared transcript in order: SHA root first, then ECDSA root.
+
+### II.4.3. Step 2: Transcript Init & Field Setup
+
+The shared Keccak transcript absorbs both Merkle roots and derives:
+1. **PIOP field config**: A random 192-bit prime $p$ via `get_random_field_cfg` (same mechanism as Part I §4.2).
+2. **Shared IC evaluation point**: $\mathbf{r} = (r_1, \ldots, r_9) \in \mathbb{F}_p^9$, squeezed from the transcript.
+
+This single point $\mathbf{r}$ is used for both the SHA and ECDSA Ideal Checks.
+
+### II.4.4. Step 2a: Ideal Check — SHA-256 (BinaryPoly UAIR)
+
+The SHA IC uses `IdealCheckProtocol::prove_mle_first_at_point` — the MLE-first path optimised for `BinaryPoly<D>` traces. This is identical to Part I §4.3 but now with the **standard** `Sha256Uair` (16 constraints: 4 cyclotomic + 12 zero), since `no-f2x` is not active.
+
+The IC proof contains 4 non-trivial cyclotomic check values (for C1–C4) and 12 zero values (for C5–C16).
+
+### II.4.5. Step 2b: Ideal Check — ECDSA
+
+The ECDSA IC uses `IdealCheckProtocol::prove_at_point` — the general path for non-BinaryPoly traces.
+
+**Pre-processing:** Each `Int<4>` trace cell $v$ is wrapped as a degree-0 `DynamicPolynomialF<F>` with a single coefficient $v \bmod p$. The projected ECDSA trace is a matrix of $\mathbb{F}_p$ elements.
+
+Since all 11 ECDSA constraints use `assert_zero` with `ImpossibleIdeal`, the IC simply evaluates each constraint polynomial at the shared point $\mathbf{r}$ using multilinear extensions. Because $\mathrm{max\_degree} > 1$ (degree 13), the IC uses the row-by-row evaluation path: for each row $\mathbf{w} \in \{0,1\}^9$, it computes the eq-weight $\mathrm{eq}(\mathbf{r}, \mathbf{w})$ and accumulates the weighted constraint values.
+
+The IC proof for ECDSA is a vector of 11 field elements — all should be zero for a valid witness.
+
+### II.4.6. Step 3a: Shared Projection
+
+A single projecting element $\alpha \in \mathbb{F}_p$ is squeezed from the transcript. Both circuits' scalar types are projected to $\mathbb{F}_p$:
+
+- **SHA**: Each `BinaryPoly<32>` coefficient vector $(c_0, \ldots, c_{31})$ is evaluated at $\alpha$: $\pi_\alpha(\hat{v}) = \sum_{i=0}^{31} c_i \alpha^i$.
+- **ECDSA**: Each `Int<4>` value $v$ becomes $v \bmod p$ (trivial projection — scalars are degree 0).
+
+### II.4.7. Step 3b: Combined Poly Resolver (Multi-Degree Sumcheck)
+
+Both circuits' CPR groups are constructed independently, then batched into a **single multi-degree sumcheck**.
+
+**CPR Group 1 (SHA-256):** Builds the shifted traces (10 shift specs), constructs the eq polynomial, draws a folding challenge, and produces a `(degree, mles, comb_fn)` tuple. SHA constraints have $\mathrm{max\_degree} = 1$.
+
+**CPR Group 2 (ECDSA):** Same process for ECDSA's 3 shift specs. ECDSA constraints have $\mathrm{max\_degree} \leq 13$.
+
+**Multi-degree sumcheck:** `MultiDegreeSumcheck::prove_as_subprotocol` runs $n = 9$ rounds with exactly 2 groups. In each round:
+1. Each group computes its own round polynomial of degree $d_i$ (SHA: low degree, ECDSA: up to 13).
+2. Round polynomials are absorbed into the transcript **sequentially** (group 0 first, then group 1).
+3. A **single shared challenge** $r_i$ is squeezed and applied to both groups.
+
+This produces a shared evaluation point $\mathbf{r}_{\mathrm{cpr}} \in \mathbb{F}_p^9$.
+
+### II.4.8. Step 3c: Finalise CPR & Folding (SHA only)
+
+**SHA CPR finalisation:** Extract `up_evals` (30 values) and `down_evals` (10 shifted column evaluations) at $\mathbf{r}_{\mathrm{cpr}}$.
+
+**Two-round folding protocol** (SHA only, identical to Part I §4.8):
+- Round 1: Fold 12 `BinaryPoly<16>` split columns at $\mathbf{r}_{\mathrm{cpr}}$, squeeze $\gamma_1$, extend point.
+- Round 2: Fold 12 `BinaryPoly<8>` split columns, squeeze $\gamma_2$, extend point.
+- Final PCS point = $(\mathbf{r}_{\mathrm{cpr}}, \gamma_1, \gamma_2) \in \mathbb{F}_p^{11}$.
+
+ECDSA columns are **not folded** — PCS point = $\mathbf{r}_{\mathrm{cpr}} \in \mathbb{F}_p^9$.
+
+### II.4.9. Step 3d: ECDSA CPR Finalisation
+
+Extract ECDSA `up_evals` (11 values) and `down_evals` (3 shifted column evaluations) at $\mathbf{r}_{\mathrm{cpr}}$.
+
+### II.4.10. Step 3e: Unified Evaluation Sumcheck
+
+All column evaluation claims from both circuits are combined into a **single** `shift_sumcheck_prove`:
+
+| Claim type | Count | Source |
+|------------|-------|--------|
+| SHA `up_evals` (eq claims, shift amount 0) | 30 | Circuit 1 non-shifted columns |
+| ECDSA `up_evals` (eq claims, shift amount 0) | 11 | Circuit 2 non-shifted columns |
+| ECDSA `down_evals` (genuine shifts) | 3 | Circuit 2 columns X, Y, Z (shift amount 1) |
+
+Total: **44 claims** in the unified eval sumcheck ($n = 9$ rounds, degree 2).
+
+> **SHA shift claims** (10 specs) are handled separately — they are resolved during CPR finalisation via the SHA-specific shift mechanism, not in this unified eval sumcheck.
+
+**Proof size:** $3n + k_{\mathrm{private}}$ field elements. Here $k_{\mathrm{private}}$ includes all private (non-public, non-PCS) source columns whose final evaluations the prover must send:
+- SHA: 6 shift-source-only columns (indices 14, 15, 21–24)
+- ECDSA: 3 shift-source-only columns (indices 2, 3, 4)
+- Total: $k_{\mathrm{private}} = 9$
+
+Proof size: $3 \times 9 + 9 = 36$ field elements.
+
+### II.4.11. Step 4: Hybrid GKR Batched Lookup (SHA only)
+
+Identical to Part I §4.6. The lookup operates only on SHA-256's 10 base columns + 3 affine virtual columns. It runs as a standalone sub-protocol **outside** the multi-degree sumcheck.
+
+### II.4.12. Step 5: PCS Prove (both circuits, separate)
+
+Two independent PCS proofs, each with its own transcript:
+
+| Circuit | PCS data | Eval point | PCS field | Code |
+|---------|----------|-----------|-----------|------|
+| SHA-256 | 12 `BinaryPoly<8>` cols × 2048 | $(\mathbf{r}_{\mathrm{cpr}}, \gamma_1, \gamma_2) \in \mathbb{F}_p^{11}$ | $\mathbb{F}_{p_1}$ (192-bit) | IPRS `PnttConfigF2_16R4B4<3>` |
+| ECDSA | 4 `Int<4>` cols × 512 | $\mathbf{r}_{\mathrm{cpr}} \in \mathbb{F}_p^9$ | $\mathbb{F}_s$ (256-bit) | IPRS `PnttConfigF2_16R4B64<1>` |
+
+Each PCS proof creates its own Keccak transcript, absorbs only its own Merkle root, derives its own field config (via `get_random_field_cfg`), converts the PIOP evaluation point to its own field's representation, and calls `ZipPlus::prove_with_seed`.
+
+**PCS transcript isolation:** The PIOP transcript and PCS transcripts are completely decoupled. The PCS modulus can differ from the PIOP modulus — the PIOP operates over 192-bit $\mathbb{F}_p$ while the ECDSA PCS operates over 256-bit $\mathbb{F}_s$ (since `Int<4>` elements require a 256-bit modulus).
+
+### II.4.13. Fiat-Shamir Transcript Flow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ SHARED PIOP TRANSCRIPT (Keccak-256)                             │
+├─────────────────────────────────────────────────────────────────┤
+│ Absorb: commitment1.root (32 bytes)                             │
+│ Absorb: commitment2.root (32 bytes)                             │
+│ Squeeze: field_cfg (random 192-bit prime p)                     │
+│ Squeeze: ic_evaluation_point r ∈ F_p^9                          │
+│ [IC₁ SHA: absorb combined MLE values]                           │
+│ [IC₂ ECDSA: absorb combined MLE values]                         │
+│ Squeeze: projecting element α ∈ F_p                             │
+│ [CPR₁ build: squeeze SHA folding challenge]                     │
+│ [CPR₂ build: squeeze ECDSA folding challenge]                   │
+│ [Multi-degree sumcheck: 9 rounds × (absorb 2 round polys       │
+│   + squeeze 1 shared challenge)]                                │
+│ [CPR₁ finalise: absorb up/down evals]                           │
+│ [Fold round 1: absorb c1s/c2s; squeeze γ₁]                     │
+│ [Fold round 2: absorb c3s/c4s; squeeze γ₂]                     │
+│ [CPR₂ finalise: absorb up/down evals]                           │
+│ [Unified eval sumcheck: 9 rounds]                               │
+│ [Hybrid GKR lookup: standalone sub-protocol]                    │
+├─────────────────────────────────────────────────────────────────┤
+│ PCS₁ TRANSCRIPT (independent Keccak)                            │
+│ Absorb: commitment1.root → derive F_{p₁} → prove               │
+├─────────────────────────────────────────────────────────────────┤
+│ PCS₂ TRANSCRIPT (independent Keccak)                            │
+│ Absorb: commitment2.root → derive F_s (256-bit) → prove        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## II.5. Dual-Circuit E2E Verifier Pipeline
+
+The verifier function is `verify_dual_circuit_hybrid_gkr_4x_folded`. It replays the shared transcript and verifies each sub-protocol.
+
+### II.5.1. Transcript Replay & IC Verify
+
+1. **Reconstruct transcript:** Absorb both Merkle roots, derive PIOP field config and shared IC point $\mathbf{r}$.
+2. **IC₁ verify (SHA):** Deserialise proof, call `IdealCheckProtocol::verify_at_point::<Sha256Uair>`. Verifies 4 cyclotomic ideal membership checks + 12 zero checks.
+3. **IC₂ verify (ECDSA):** Deserialise proof, call `IdealCheckProtocol::verify_at_point::<EcdsaUairInt>`. Verifies all 11 constraint evaluations are zero.
+4. **Squeeze** shared projecting element $\alpha$.
+
+### II.5.2. Multi-Degree Sumcheck Verify
+
+1. **Build CPR₁ verifier state** (SHA): Reconstruct combination function, compute claimed sum.
+2. **Build CPR₂ verifier state** (ECDSA): Same for ECDSA.
+3. **Verify multi-degree sumcheck**: Check 2 groups × 9 rounds. Each round: verify $P_i(0) + P_i(1) = \text{claim}_i$ for each group, apply shared challenge.
+
+### II.5.3. CPR Finalisation & Folding Verify
+
+1. **Finalise CPR₁:** Reconstruct public column evaluations (12 public SHA columns). Merge private `up_evals` from proof with verifier-computed public values. Run `finalize_verifier::<Sha256Uair>`.
+2. **Two-round folding verify (SHA only):**
+   - Round 1: Verify $c_{1,j} + \alpha^{16} \cdot c_{2,j} = e_j$ for each of 12 SHA columns.
+   - Round 2: Verify $c_{3,j} + \alpha^{8} \cdot c_{4,j} = d_j$ for each of 12 columns.
+3. **Finalise CPR₂:** Reconstruct public column evaluations (4 public ECDSA columns). Run `finalize_verifier::<EcdsaUairInt>`.
+
+### II.5.4. Unified Eval Sumcheck Verify
+
+Reconstruct all 44 claims (30 SHA eq + 11 ECDSA eq + 3 ECDSA shift). Verify the shift sumcheck proof. For public shift sources, compute $v_i^{\mathrm{final}}$ from known data; for private sources, use prover-supplied values.
+
+### II.5.5. Lookup Verify (SHA only)
+
+Verify the standalone Hybrid GKR batched lookup proof for SHA-256's 13 lookup columns.
+
+### II.5.6. PCS Verify (both circuits, parallel)
+
+Two independent PCS verifications (parallelised with `#[cfg(feature = "parallel")]`):
+
+1. **PCS₁ (SHA):** Create transcript from `commitment1.root`, derive 192-bit PCS field, convert folded point, call `ZipPlus::verify_with_field_cfg`.
+2. **PCS₂ (ECDSA):** Create transcript from `commitment2.root`, derive 256-bit PCS field, convert point, call `ZipPlus::verify_with_field_cfg`.
+
+> **Note:** The verifier benchmark passes `TrivialIdeal` for both IC closures, skipping ideal membership checks during timing. This means the reported verifier time **underestimates** the cost of a production verifier by the time of 4 cyclotomic membership checks (SHA) + 11 zero checks (ECDSA).
+
+---
+
+## Appendix E: ECDSA Column Layout
+
+| Index | Name | Ring | Role | PCS? | Public? |
+|-------|------|------|------|------|---------|
+| 0 | `b1` | $\mathrm{Int}\langle 4 \rangle$ | Scalar bit of $u_1$ (bit-index $257-t$) | | ✓ |
+| 1 | `b2` | $\mathrm{Int}\langle 4 \rangle$ | Scalar bit of $u_2$ (bit-index $257-t$) | | ✓ |
+| 2 | `X` | $\mathrm{Int}\langle 4 \rangle$ | Accumulator $x$-coord (Jacobian) | | (shift src) |
+| 3 | `Y` | $\mathrm{Int}\langle 4 \rangle$ | Accumulator $y$-coord (Jacobian) | | (shift src) |
+| 4 | `Z` | $\mathrm{Int}\langle 4 \rangle$ | Accumulator $z$-coord (Jacobian) | | (shift src) |
+| 5 | `X_mid` | $\mathrm{Int}\langle 4 \rangle$ | Doubled point $x$-coord | ✓ | |
+| 6 | `Y_mid` | $\mathrm{Int}\langle 4 \rangle$ | Doubled point $y$-coord | ✓ | |
+| 7 | `Z_mid` | $\mathrm{Int}\langle 4 \rangle$ | Doubled point $z$-coord | ✓ | |
+| 8 | `H` | $\mathrm{Int}\langle 4 \rangle$ | Addition scratch: chord $x$-diff | ✓ | |
+| 9 | `sel_init` | $\mathrm{Int}\langle 4 \rangle$ | Boundary selector ($1$ at row 0) | | ✓ |
+| 10 | `sel_final` | $\mathrm{Int}\langle 4 \rangle$ | Boundary selector ($1$ at row 257) | | ✓ |
+
+---
+
+## Appendix F: ECDSA Constraint Catalogue
+
+All 11 constraints use `assert_zero` with `ImpossibleIdeal`.
+
+### Non-boundary constraints (C1–C7)
+
+| # | Target | Degree | Formula |
+|---|--------|--------|---------|
+| C1 | $Z_{\mathrm{mid}}$ | 2 | $Z_{\mathrm{mid}} - 2YZ$ |
+| C2 | $X_{\mathrm{mid}}$ | 4 | $X_{\mathrm{mid}} - 9X^4 + 8XY^2$ |
+| C3 | $Y_{\mathrm{mid}}$ | 5 | $Y_{\mathrm{mid}} - 12X^3Y^2 + 3X^2 X_{\mathrm{mid}} + 8Y^4$ |
+| C4 | $H$ | 4 | $H - T_x Z_{\mathrm{mid}}^2 + X_{\mathrm{mid}}$ |
+| C5 | $Z[t{+}1]$ | 5 | $(1-\mathrm{sf}) \bigl(Z[t{+}1] - (1{-}s) Z_{\mathrm{mid}} - s \cdot Z_{\mathrm{mid}} H\bigr)$ |
+| C6 | $X[t{+}1]$ | **13** | $(1-\mathrm{sf}) \bigl(X[t{+}1] - (1{-}s) X_{\mathrm{mid}} - s (R_a^2 - H^3 - 2 X_{\mathrm{mid}} H^2)\bigr)$ |
+| C7 | $Y[t{+}1]$ | 11 | $(1-\mathrm{sf}) \bigl(Y[t{+}1] - (1{-}s) Y_{\mathrm{mid}} - s (R_a (X_{\mathrm{mid}} H^2 - X[t{+}1]) - Y_{\mathrm{mid}} H^3)\bigr)$ |
+
+Where: $s = b_1 + b_2 - b_1 b_2$, $\mathrm{sf} = \mathrm{sel\_final}$, $R_a = T_y \cdot Z_{\mathrm{mid}}^3 - Y_{\mathrm{mid}}$.
+
+### Boundary constraints (B3a–B3c, B4)
+
+| # | Target | Degree | Formula |
+|---|--------|--------|---------|
+| B3a | Init $X$ | 3 | $\mathrm{sel\_init} \cdot (X - T_x)$ |
+| B3b | Init $Y$ | 3 | $\mathrm{sel\_init} \cdot (Y - T_y)$ |
+| B3c | Init $Z$ | 2 | $\mathrm{sel\_init} \cdot (Z - 1)$ |
+| B4 | Final sig | 4 | $\mathrm{sel\_final} \cdot Z \cdot (X - R_{\mathrm{SIG}} Z^2)$ |
+
+### secp256k1 Constants
+
+| Constant | Value |
+|----------|-------|
+| $G_x$ | `0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798` |
+| $G_y$ | `0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8` |
+| $Q$ | $= G$ (benchmark uses $Q = G$ for simplicity) |
+| $G+Q$ | $= 2G$ (precomputed) |
+| $R_{\mathrm{SIG}}$ | Lazily computed: run 257-step trace in $\mathbb{F}_q$, recover $X/Z^2$ via Fermat inversion |
+
+---
+
+## Appendix G: Dual-Circuit Concrete Parameters
+
+| Parameter | SHA-256 (Circuit 1) | ECDSA (Circuit 2) |
+|-----------|--------------------|--------------------|
+| **Trace rows** | $N = 2^9 = 512$ | $N = 2^9 = 512$ (258 logical + 254 padding) |
+| **Total columns** | 30 (27 bitpoly + 3 int) | 11 (all `Int<4>`) |
+| **PCS-committed columns** | 12 | 4 |
+| **Public columns** | 12 | 4 |
+| **Shift-source-only columns** | 6 | 3 |
+| **Shift specs (Bp)** | 10 | 3 |
+| **Constraints** | 16 (4 cyclotomic + 12 zero) | 11 (all zero) |
+| **Max constraint degree** | 1 | 13 |
+| **PIOP field** | $\mathbb{F}_p$ (192-bit) | $\mathbb{F}_p$ (192-bit, shared) |
+| **PCS field** | $\mathbb{F}_{p_1}$ (192-bit) | $\mathbb{F}_s$ (256-bit) |
+| **Trace ring** | `BinaryPoly<32>` | `Int<4>` |
+| **PCS eval ring** | `BinaryPoly<8>` (after 4× folding) | `Int<4>` (no folding) |
+| **PCS code** | IPRS `PnttConfigF2_16R4B4<3>`: rate 1/4, input 2048, output 8192 | IPRS `PnttConfigF2_16R4B64<1>`: rate 1/4, input 512, output 2048 |
+| **PCS code field** | $\mathbb{F}_{65537}$ | $\mathbb{F}_{65537}$ |
+| **Column openings** | 118 | 118 |
+| **Grinding bits** | 16 | 16 |
+| **Lookup columns** | 13 (10 base + 3 affine) | 0 |
+| **Folding rounds** | 2 (BP<32>→<16>→<8>) | 0 (no folding) |
+
+### Shared Parameters
+
+| Parameter | Value |
+|-----------|-------|
+| **num_vars** | 9 (shared) |
+| **IC evaluation point** | 1 shared point $\mathbf{r} \in \mathbb{F}_p^9$ |
+| **Projecting element** | 1 shared $\alpha \in \mathbb{F}_p$ |
+| **Multi-degree sumcheck groups** | 2 (SHA deg 1 + ECDSA deg ≤13) |
+| **Multi-degree sumcheck rounds** | 9 |
+| **Unified eval sumcheck claims** | 44 (30 SHA eq + 11 ECDSA eq + 3 ECDSA shift) |
+
+---
+
+## Appendix H: Dual-Circuit Security Analysis
+
+| Sub-protocol | Soundness error | Notes |
+|-------------|----------------|-------|
+| **IC₁ (SHA)** | $\leq n / |\mathbb{F}_p|$ per constraint | 16 constraints (4 cyclotomic + 12 zero) |
+| **IC₁ ideal membership** | $\leq 31 / |\mathbb{F}_p|$ per cyclotomic constraint | 4 cyclotomic constraints check $(X^{32}-1)$ membership after projection |
+| **IC₂ (ECDSA)** | $\leq n / |\mathbb{F}_p|$ per constraint | 11 constraints, all zero — IC proof is trivially zero-valued |
+| **Multi-degree sumcheck** | $\leq d_{\max} \cdot n / |\mathbb{F}_p|$ | $d_{\max} = 13$ (ECDSA C6), $n = 9$; standard sumcheck error per group |
+| **Lookup (LogUp)** | $\leq (K \cdot N) / |\mathbb{F}_p|$ per column | SHA only; $K = 4$ chunks, $N = 512$ |
+| **Unified eval sumcheck** | $\leq 2n / |\mathbb{F}_p|$ | Degree-2, $n = 9$ rounds |
+| **Eval batching** | $\leq 44 / |\mathbb{F}_p|$ | 44 claims batched with random $\xi_i$ |
+| **Folding (SHA)** | $\leq 1 / |\mathbb{F}_p|$ per column per round | 12 columns × 2 rounds = 24 checks |
+| **PCS₁ proximity** | $\leq (1 - \delta)^{118} \cdot 2^{-16}$ | 118 openings + 16 grinding bits |
+| **PCS₂ proximity** | $\leq (1 - \delta')^{118} \cdot 2^{-16}$ | 118 openings + 16 grinding bits; $\delta'$ is the ECDSA IPRS code distance |
+| **Miller-Rabin** | $\leq 2^{-64}$ (heuristic) | Base-2 test on 192-bit (PIOP) and 256-bit (ECDSA PCS) primes |
+
+### Overall Security
+
+By a union bound, the total PIOP soundness error is $O(\mathrm{poly}(N, d_{\max}) / 2^{192})$, which is negligible. The PCS proximity terms dominate the overall soundness. The target security level is approximately **128 bits**.
+
+### Completeness
+
+Completeness follows from:
+1. The SHA witness satisfies all 16 constraints (identical to Part I).
+2. The ECDSA witness is a valid secp256k1 scalar multiplication trace — all 11 constraints are satisfied by construction.
+3. The shared IC point, shared projecting element, and multi-degree sumcheck challenges are all consistently derived from the same transcript.
+4. The two PCS proofs are valid encodings of the committed data on their respective fields.
+5. Folding identities hold algebraically for the SHA split construction.

@@ -57,8 +57,8 @@ const INT_LIMBS: usize = U64::LIMBS;
 struct EcdsaScalarZipTypes;
 
 impl ZipTypes for EcdsaScalarZipTypes {
-    const NUM_COLUMN_OPENINGS: usize = 131;
-    const GRINDING_BITS: usize = 8;
+    const NUM_COLUMN_OPENINGS: usize = 118;
+    const GRINDING_BITS: usize = 16;
     type Eval = Int<{ INT_LIMBS * 4 }>;          // 256-bit integer
     type Cw = Int<{ INT_LIMBS * 5 }>;            // 320-bit codeword
     type Fmod = Uint<{ INT_LIMBS * 4 }>;         // 256-bit modulus search (secp256k1 sized)

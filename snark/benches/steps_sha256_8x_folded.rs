@@ -70,8 +70,11 @@ const SHA256_BATCH_SIZE: usize = 30; // 27 bitpoly + 3 int
 #[cfg(feature = "no-f2x")]
 use zinc_sha256_uair::no_f2x::{
     Sha256UairBpNoF2x, Sha256UairQxNoF2x,
+    Sha256QxNoF2xIdeal,
     NO_F2X_NUM_COLS,
 };
+#[cfg(all(feature = "no-f2x", feature = "true-ideal"))]
+use zinc_sha256_uair::no_f2x::Sha256QxNoF2xIdealOverF;
 
 #[cfg(feature = "no-f2x")]
 type BenchBpUair = Sha256UairBpNoF2x;
@@ -979,12 +982,26 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
         .map(|&i| sha_trace[i].clone()).collect();
 
     {
+        #[cfg(not(feature = "selector"))]
+        fn qx_ideal_closure(_: &IdealOrZero<Sha256QxNoF2xIdeal>) -> zinc_snark::pipeline::TrivialIdeal {
+            zinc_snark::pipeline::TrivialIdeal
+        }
+        #[cfg(feature = "selector")]
+        let qx_ideal_closure = |ideal: &IdealOrZero<Sha256QxNoF2xIdeal>| -> Sha256QxNoF2xIdealOverF {
+            match ideal {
+                IdealOrZero::Zero => Sha256QxNoF2xIdealOverF::Cyclotomic,
+                IdealOrZero::Ideal(Sha256QxNoF2xIdeal::Cyclotomic) => Sha256QxNoF2xIdealOverF::Cyclotomic,
+                #[cfg(feature = "selector")]
+                IdealOrZero::Ideal(Sha256QxNoF2xIdeal::DegreeOne) => Sha256QxNoF2xIdealOverF::DegreeOne,
+                IdealOrZero::Ideal(Sha256QxNoF2xIdeal::Trivial) => Sha256QxNoF2xIdealOverF::Trivial,
+            }
+        };
         let r = zinc_snark::pipeline::verify_classic_logup_4x_folded::<
             BenchBpUair, BenchQxUair, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _, _, _,
         >(
             &folded_4x_params, &hybrid_4x_proof, SHA256_8X_NUM_VARS,
             |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
-            |_| zinc_snark::pipeline::TrivialIdeal,
+            qx_ideal_closure,
             &sha_public_cols,
         );
         let t = &r.timing;
@@ -999,12 +1016,26 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
 
     group.bench_function("E2E/Verifier (4x Hybrid GKR c=2 4-chunk)", |b| {
         b.iter(|| {
+            #[cfg(not(feature = "selector"))]
+            fn qx_ideal_closure(_: &IdealOrZero<Sha256QxNoF2xIdeal>) -> zinc_snark::pipeline::TrivialIdeal {
+                zinc_snark::pipeline::TrivialIdeal
+            }
+            #[cfg(feature = "selector")]
+            let qx_ideal_closure = |ideal: &IdealOrZero<Sha256QxNoF2xIdeal>| -> Sha256QxNoF2xIdealOverF {
+                match ideal {
+                    IdealOrZero::Zero => Sha256QxNoF2xIdealOverF::Cyclotomic,
+                    IdealOrZero::Ideal(Sha256QxNoF2xIdeal::Cyclotomic) => Sha256QxNoF2xIdealOverF::Cyclotomic,
+                    #[cfg(feature = "selector")]
+                    IdealOrZero::Ideal(Sha256QxNoF2xIdeal::DegreeOne) => Sha256QxNoF2xIdealOverF::DegreeOne,
+                    IdealOrZero::Ideal(Sha256QxNoF2xIdeal::Trivial) => Sha256QxNoF2xIdealOverF::Trivial,
+                }
+            };
             let r = zinc_snark::pipeline::verify_classic_logup_4x_folded::<
                 BenchBpUair, BenchQxUair, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _, _, _,
             >(
                 &folded_4x_params, &hybrid_4x_proof, SHA256_8X_NUM_VARS,
                 |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
-                |_| zinc_snark::pipeline::TrivialIdeal,
+                qx_ideal_closure,
                 &sha_public_cols,
             );
             black_box(r);
