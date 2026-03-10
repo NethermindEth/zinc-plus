@@ -56,7 +56,8 @@ pub trait IdealCheckProtocol: Uair {
     ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, Self::Ideal>>
     where
         F: InnerTransparentField,
-        F::Inner: ConstTranscribable;
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable;
 
     /// Prover for any UAIR using combined polynomial construction.
     ///
@@ -84,7 +85,8 @@ pub trait IdealCheckProtocol: Uair {
     ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, Self::Ideal>>
     where
         F: InnerTransparentField,
-        F::Inner: ConstTranscribable;
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable;
 
     /// The verifier part of the ideal-check subprotocol.
     ///
@@ -122,6 +124,7 @@ pub trait IdealCheckProtocol: Uair {
     where
         F: InnerTransparentField,
         F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
         IdealOverFFromRef: Fn(&IdealOrZero<Self::Ideal>) -> IdealOverF;
 }
@@ -142,6 +145,7 @@ where
     where
         F: InnerTransparentField,
         F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
     {
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
@@ -182,6 +186,7 @@ where
     where
         F: InnerTransparentField,
         F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
     {
         // Collect ideals to identify assert_zero constraints whose
         // combined polynomial is zero by construction (for honest provers).
@@ -246,6 +251,7 @@ where
     where
         F: InnerTransparentField,
         F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {

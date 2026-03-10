@@ -23,7 +23,6 @@ use crypto_primitives::{
     crypto_bigint_uint::Uint,
 };
 use itertools::Itertools;
-use num_traits::Zero;
 use zinc_poly::{
     mle::DenseMultilinearExtension,
     univariate::{
@@ -165,9 +164,9 @@ where
         + for<'a> FromWithConfig<&'a <TestZipTypes<N, K, M> as ZipTypes>::CombR>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>,
-    F::Inner: FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod> + Transcribable,
+    F::Inner: Transcribable,
+    F::Modulus: FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod> + Transcribable,
     <TestZipTypes<N, K, M> as ZipTypes>::Eval: ProjectableToField<F>,
-    <TestZipTypes<N, K, M> as ZipTypes>::Comb: ProjectableToField<F>,
 {
     setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_test_params, || {
         (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect()
@@ -199,7 +198,9 @@ where
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>
         + 'static,
-    F::Inner: FromRef<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod> + Transcribable,
+    F::Inner: Transcribable,
+    F::Modulus:
+        FromRef<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod> + Transcribable,
 {
     setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_poly_test_params, || {
         (0..num_vars).map(|i| i as i128 + 2).collect()
@@ -221,51 +222,32 @@ where
     Zt: ZipTypes,
     Lc: LinearCode<Zt>,
     F: PrimeField
+        + for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>,
-    F::Inner: FromRef<Zt::Fmod> + Transcribable,
-    Zt::Comb: for<'a> MulByScalar<&'a Zt::Pt>,
+    F::Inner: Transcribable,
+    F::Modulus: FromRef<Zt::Fmod> + Transcribable,
     Zt::Eval: ProjectableToField<F>,
-    Zt::Comb: ProjectableToField<F>,
 {
     let (pp, poly) = setup(num_vars);
-
-    let (data, comm) = ZipPlus::commit(&pp, &poly).unwrap();
-
+    let (hint, comm) = ZipPlus::commit_single(&pp, &poly).unwrap();
     let point: Vec<Zt::Pt> = prepare_evaluation_point();
 
-    let transcript = ZipPlus::test::<CHECKED>(&pp, &poly, &data).unwrap();
+    let (eval, proof) =
+        ZipPlus::prove::<F, CHECKED>(&pp, std::slice::from_ref(&poly), &point, &hint).unwrap();
 
-    let (field_cfg, projecting_element) = {
-        let mut transcript: PcsTranscript = transcript.clone().into();
-        let field_cfg = transcript
+    let field_cfg = {
+        let mut transcript = PcsTranscript::new();
+        transcript
             .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
-        let projecting_element: Zt::Chal = transcript.fs_transcript.get_challenge();
-        let projecting_element: F = (&projecting_element).into_with_cfg(&field_cfg);
-        (field_cfg, projecting_element)
+            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>()
     };
-
-    let (eval_f, proof) = ZipPlus::evaluate::<_, CHECKED>(&pp, &poly, &point, transcript).unwrap();
-
-    // Verify the evaluation is done correctly
-    {
-        // Widen up polynomial for evaluation
-        let poly: DenseMultilinearExtension<_> = poly.iter().map(Zt::Comb::from_ref).collect();
-
-        let expected_eval = poly
-            .evaluate(&point, Zero::zero())
-            .expect("failed to evaluate polynomial");
-        let project = Zt::Comb::prepare_projection(&projecting_element);
-        assert_eq!(eval_f, project(&expected_eval));
-    }
-
     let point_f = point
         .iter()
         .map(|v| v.into_with_cfg(&field_cfg))
         .collect_vec();
 
-    (pp, comm, point_f, eval_f, proof)
+    (pp, comm, point_f, eval, proof)
 }

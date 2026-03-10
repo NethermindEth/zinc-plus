@@ -1,4 +1,4 @@
-use crypto_primitives::{PrimeField, Semiring};
+use crypto_primitives::{Field, PrimeField, Semiring};
 use num_traits::Zero;
 use thiserror::Error;
 use zinc_utils::cfg_iter_mut;
@@ -6,7 +6,7 @@ use zinc_utils::cfg_iter_mut;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use crate::mle::DenseMultilinearExtension;
+use crate::mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero};
 
 /// A `enum` specifying the possible failure modes of the arithmetics.
 #[derive(displaydoc::Display, Debug, Error)]
@@ -169,7 +169,7 @@ where
         return Err(ArithErrors::InvalidParameters("r length is 0".into()));
     } else if r.len() == 1 {
         // initializing the buffer with [1-r_0, r_0]
-        buf.push((one - &r[0]).inner().clone());
+        buf.push((one - &r[0]).into_inner());
         buf.push(r[0].inner().clone());
     } else {
         build_eq_x_r_inner_helper(&r[1..], buf, cfg)?;
@@ -186,9 +186,9 @@ where
                 *bi.inner_mut() = buf[i >> 1].clone();
                 let tmp = r[0].clone() * &bi;
                 if (i & 1) == 0 {
-                    (bi.clone() - &tmp).inner().clone()
+                    (bi.clone() - &tmp).into_inner()
                 } else {
-                    tmp.inner().clone()
+                    tmp.into_inner()
                 }
             })
             .collect();
@@ -213,4 +213,218 @@ pub fn eq_eval<R: Semiring>(x: &[R], y: &[R], one: R) -> Result<R, ArithErrors> 
     }
 
     Ok(res)
+}
+
+/// Returns a multilinear polynomial in 2n variables that evaluates to 1
+/// if and only if the second n-bit vector is equal to the first vector plus one
+#[allow(clippy::arithmetic_side_effects)]
+pub fn next_mle_inner<F: Field>(
+    num_vars: u32,
+    zero: F,
+    one: F,
+) -> Result<DenseMultilinearExtension<F::Inner>, ArithErrors> {
+    if !num_vars.is_multiple_of(2) {
+        return Err(ArithErrors::InvalidParameters(
+            "num_vars must be even".to_string(),
+        ));
+    }
+
+    let mut mle = (0..1 << num_vars)
+        .map(|_| zero.inner().clone())
+        .collect_dense_mle_with_zero(zero.inner());
+
+    let half_vars = num_vars / 2;
+
+    for i in 0usize..(1 << half_vars) - 1 {
+        let next = i + 1;
+
+        let i_concat_next = (next << half_vars) | i;
+
+        mle[i_concat_next] = one.inner().clone();
+    }
+
+    Ok(mle)
+}
+
+/// Evaluates the next MLE at the point `point` in log-time.
+///
+/// # Arguments
+/// - `point`: A slice of 2n field elements representing two n-bit vectors
+///   concatenated. The first n elements are `x` (original vector), the last n
+///   are `y` (candidate successor).
+///
+/// # Behavior
+/// Constructs a polynomial P(x, y) such that:
+/// \begin{equation}
+///     P(x, y) = 1 \quad \text{if and only if} \quad y = x + 1.
+/// \end{equation}
+///
+/// The polynomial sums contributions for each possible carry position `k`,
+/// ensuring that:
+/// 1. Bits to the left of `k` (more significant) match.
+/// 2. Bit at position `k` transitions from 0 (in x) to 1 (in y).
+/// 3. Bits to the right of `k` are 1 in x and 0 in y (simulating the carry
+///    propagation).
+///
+/// # Panics
+/// Panics if `point.len()` is not even.
+///
+/// # Returns
+/// Field element: 1 if y = x + 1, 0 otherwise.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn next_mle_eval<R: Semiring>(point: &[R], zero: R, one: R) -> R {
+    // Check that the point length is even: we split into x and y of equal length.
+    assert_eq!(
+        point.len() % 2,
+        0,
+        "Input point must have an even number of variables."
+    );
+    let n = point.len() / 2;
+
+    // Split point into x (first n) and y (last n).
+    let (x, y) = point.split_at(n);
+
+    // Sum contributions for each possible carry position k = 0..n-1.
+    (0..n)
+        .map(|k| {
+            // Term 1: bits to the left of k match
+            //
+            // For i > k, enforce x_i == y_i.
+            // Using equality polynomial: x_i * y_i + (1 - x_i)*(1 - y_i).
+            let eq_high_bits = (k + 1..n)
+                .map(|i| x[i].clone() * &y[i] + (one.clone() - &x[i]) * (one.clone() - &y[i]))
+                .fold(one.clone(), |acc, next| acc * next);
+
+            // Term 2: carry bit at position k
+            //
+            // Enforce x_k = 0 and y_k = 1.
+            // Condition: (1 - x_k) * y_k.
+            let carry_bit = (one.clone() - &x[k]) * &y[k];
+
+            // Term 3: bits to the right of k are 1 in x and 0 in y
+            //
+            // For i < k, enforce x_i = 1 and y_i = 0.
+            // Condition: x_i * (1 - y_i).
+            let low_bits_are_one_zero = (0..k)
+                .map(|i| (one.clone() - &y[i]) * &x[i])
+                .fold(one.clone(), |acc, next| acc * next);
+
+            // Multiply the three terms for this k, representing one "carry pattern".
+            eq_high_bits * carry_bit * low_bits_are_one_zero
+        })
+        // Sum over all carry positions: any valid "k" gives contribution 1.
+        .fold(zero, |acc, next| acc + next)
+}
+
+#[cfg(test)]
+mod tests {
+    use crypto_bigint::{U128, const_monty_params};
+    use crypto_primitives::{IntoWithConfig, crypto_bigint_const_monty::ConstMontyField};
+    use num_traits::One;
+    use proptest::{prelude::*, proptest};
+
+    use crate::mle::MultilinearExtensionWithConfig;
+
+    use super::*;
+
+    const N: usize = 2;
+
+    const_monty_params!(Params, U128, "00000000b933426489189cb5b47d567f");
+
+    type F = ConstMontyField<Params, N>;
+
+    const NUM_VARS: u32 = 8;
+
+    #[test]
+    fn next_mle_is_one_on_successors() {
+        let next_mle = next_mle_inner(NUM_VARS, F::zero(), F::one()).unwrap();
+
+        for i in 0..(1 << ((NUM_VARS / 2) - 1)) {
+            let mut point: Vec<F> = (0..(NUM_VARS / 2))
+                .map(|j| {
+                    if i & (1 << j) == 0 {
+                        F::zero()
+                    } else {
+                        F::one()
+                    }
+                })
+                .collect();
+
+            point.extend((0..(NUM_VARS / 2)).map(|j| {
+                if (i + 1) & (1 << j) == 0 {
+                    F::zero()
+                } else {
+                    F::one()
+                }
+            }));
+
+            assert_eq!(
+                next_mle.clone().evaluate_with_config(&point, &()),
+                Ok(F::one())
+            );
+        }
+    }
+
+    #[test]
+    fn next_mle_is_one_only_on_successors() {
+        let next_mle = next_mle_inner(NUM_VARS, F::zero(), F::one()).unwrap();
+
+        // The number of successors is (1 << (num_vars / 2)) - 1
+        // and we know the mle is one on them. So we need to check
+        // that it is one only on that many points.
+        assert_eq!(
+            next_mle.evaluations.iter().filter(|x| !x.is_zero()).count(),
+            (1 << (NUM_VARS / 2)) - 1
+        );
+    }
+
+    fn any_f(cfg: <F as PrimeField>::Config) -> impl Strategy<Value = F> + 'static {
+        any::<u128>().prop_map(move |v| v.into_with_cfg(&cfg))
+    }
+
+    fn point_n(n: usize) -> impl Strategy<Value = Vec<F>> {
+        prop::collection::vec(any_f(()), n)
+    }
+
+    #[test]
+    fn next_mle_eval_coincides_with_next_mle_evaluated_at_successors() {
+        let next_mle = next_mle_inner(NUM_VARS, F::zero(), F::one()).unwrap();
+
+        for i in 0..(1 << ((NUM_VARS / 2) - 1)) {
+            let mut point: Vec<F> = (0..(NUM_VARS / 2))
+                .map(|j| {
+                    if i & (1 << j) == 0 {
+                        F::zero()
+                    } else {
+                        F::one()
+                    }
+                })
+                .collect();
+
+            point.extend((0..(NUM_VARS / 2)).map(|j| {
+                if (i + 1) & (1 << j) == 0 {
+                    F::zero()
+                } else {
+                    F::one()
+                }
+            }));
+
+            assert_eq!(
+                next_mle.clone().evaluate_with_config(&point, &()),
+                Ok(next_mle_eval(&point, F::zero(), F::one()))
+            );
+        }
+    }
+
+    proptest! {
+    #[test]
+    fn prop_next_mle_eval_coincides_with_next_mle_evaluate_at_point(r in point_n(NUM_VARS as usize)) {
+        let next_mle = next_mle_inner(NUM_VARS, F::zero(), F::one()).unwrap();
+
+        prop_assert_eq!(
+            next_mle.evaluate_with_config(&r, &()),
+            Ok(next_mle_eval(&r, F::zero(), F::one()))
+        );
+    }
+    }
 }

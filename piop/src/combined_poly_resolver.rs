@@ -70,6 +70,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ) -> Result<(Proof<F>, ProverState<F>), CombinedPolyResolverError<F>>
     where
         F::Inner: ConstTranscribable + Send + Sync + Zero + Default,
+        F::Modulus: ConstTranscribable,
         U: Uair,
     {
         debug_assert_ne!(
@@ -225,6 +226,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ) -> Result<VerifierSubclaim<F>, CombinedPolyResolverError<F>>
     where
         F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
         U: Uair,
     {
         proof.validate_evaluation_sizes(U::signature().total_cols())?;
