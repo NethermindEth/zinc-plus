@@ -242,41 +242,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         Ok(())
     }
 
-    /// Verify an evaluation claim at a new point without re-running the
-    /// proximity test.  Used by the batched shift protocol: the proximity
-    /// test for the commitment was already performed in `verify`, so here
-    /// we only check that the evaluation proof is consistent with the
-    /// claimed value.
-    pub fn verify_evaluate_only<F, const CHECK_FOR_OVERFLOW: bool>(
-        transcript: &mut PcsVerifierTranscript,
-        vp: &ZipPlusParams<Zt, Lc>,
-        field_cfg: &F::Config,
-        point_f: &[F],
-        eval_f: &F,
-    ) -> Result<(), ZipError>
-    where
-        F: FromPrimitiveWithConfig + FromRef<F> + for<'a> MulByScalar<&'a F>,
-        F::Inner: Transcribable,
-        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
-    {
-        let q_0_combined_row: Vec<F> = transcript.read_field_elements(vp.linear_code.row_len())?;
-        let (_, q_1) = point_to_tensor(vp.num_rows, point_f, field_cfg)?;
-
-        // It is safe to use inner_product_unchecked because we're in a field.
-        if MBSInnerProduct::inner_product::<UNCHECKED>(
-            &q_0_combined_row,
-            &q_1,
-            F::zero_with_cfg(field_cfg),
-        )? != *eval_f
-        {
-            return Err(ZipError::InvalidPcsOpen(
-                "Shift evaluation consistency failure".into(),
-            ));
-        }
-
-        Ok(())
-    }
-
     /// Samples per-polynomial alpha challenges from the transcript.
     ///
     /// This is the same sampling logic used internally by [`Self::verify`].

@@ -1,7 +1,7 @@
 use crypto_primitives::{Field, PrimeField, Semiring};
 use num_traits::Zero;
 use thiserror::Error;
-use zinc_utils::{cfg_iter_mut, inner_transparent_field::InnerTransparentField};
+use zinc_utils::{cfg_iter_mut, inner_transparent_field::InnerTransparentField, sub};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -197,6 +197,40 @@ where
     Ok(())
 }
 
+/// Build the shift selector MLE `next_tilde(r, *)` with the first `num_vars`
+/// variables fixed to `r`.
+///
+/// For each `b \in {0,1}^{num_vars}`:
+///   `next_r(b) = next_tilde(r, b)`
+///
+/// Uses the identity `next_tilde(r, b) = eq(r, b-1)` for `b > 0` and
+/// `0` for `b = 0`.
+pub fn build_next_r_mle<F>(
+    r: &[F],
+    field_cfg: &F::Config,
+) -> Result<DenseMultilinearExtension<F::Inner>, ArithErrors>
+where
+    F: PrimeField,
+    F::Inner: Zero,
+{
+    let num_vars = r.len();
+    let n = 1 << num_vars;
+    let zero_inner = F::zero_with_cfg(field_cfg).into_inner();
+
+    let eq_r = build_eq_x_r_inner(r, field_cfg)?;
+
+    // next_tilde(r, 0) = 0
+    // next_tilde(r, b) = eq(r, b-1) for b > 0
+    let mut evaluations = Vec::with_capacity(n);
+    evaluations.push(zero_inner);
+    evaluations.extend_from_slice(&eq_r.evaluations[..sub!(n, 1)]);
+
+    Ok(DenseMultilinearExtension {
+        num_vars,
+        evaluations,
+    })
+}
+
 /// Evaluate eq polynomial.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn eq_eval<R: Semiring>(x: &[R], y: &[R], one: R) -> Result<R, ArithErrors> {
@@ -218,7 +252,7 @@ pub fn eq_eval<R: Semiring>(x: &[R], y: &[R], one: R) -> Result<R, ArithErrors> 
 /// Evaluate an MLE at a point using a precomputed eq table.
 ///
 /// Given `evaluations[b]` (in `F::Inner` form) and `eq_table[b] = eq(b, r)`
-/// (precomputed via [`build_eq_x_r_vec`]), returns `Σ_b eq_table[b] ·
+/// (precomputed via [`build_eq_x_r_vec`]), returns `\sum_{b} eq_table[b] *
 /// evaluations[b]`.
 ///
 /// This is equivalent to `DenseMultilinearExtension::evaluate_with_config`

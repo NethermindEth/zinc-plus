@@ -1,15 +1,20 @@
-//! Zinc+ PIOP for UCS — end-to-end protocol (without PCS).
+//! Zinc+ PIOP for UCS - end-to-end protocol.
 //!
-//! Implements the four steps of the Zinc+ compiler:
+//! Implements the Zinc+ compiler pipeline (cf. paper, Section "Zinc+
+//! Compiler"):
 //!
 //! ```text
-//! Z[X]  --φ_q-->  F_q[X]  --MLE eval-->  F_q[X]  --ψ_a-->  F_q
-//!       Step 1             Step 2                  Step 3
+//! Z[X]  --\phi_q-->  F_q[X]  --MLE eval-->  F_q[X]  --\psi_a-->  F_q
+//!         Step 1               Step 2                  Step 3
 //! ```
 //!
-//! Step 4 runs a finite-field PIOP (sumcheck) over F_q.
-//! Step 4.5 reduces shifted-MLE claims via the batched shift protocol.
-//! Step 5 opens witness MLEs via the Zip+ PCS.
+//! After the three compiler steps, the protocol continues with:
+//!
+//! - Step 4: finite-field sumcheck over F_q
+//! - Step 5: multi-point evaluation sumcheck (combines up/down evals at r' into
+//!   a single evaluation point r_0)
+//! - Step 6: lift-and-project (unprojected MLE evaluations at r_0)
+//! - Step 7: Zip+ PCS open/verify at r_0
 
 pub mod prover;
 pub mod verifier;
@@ -18,9 +23,9 @@ use crypto_primitives::{ConstIntRing, ConstIntSemiring, FromWithConfig, PrimeFie
 use std::marker::PhantomData;
 use thiserror::Error;
 use zinc_piop::{
-    batched_shift::{BatchedShiftError, Proof as BatchedShiftProof},
     combined_poly_resolver::{CombinedPolyResolverError, Proof as CombinedPolyResolverProof},
     ideal_check::{IdealCheckError, Proof as IdealCheckProof},
+    multipoint_eval::{MultipointEvalError, Proof as MultipointEvalProof},
 };
 use zinc_poly::{
     ConstCoeffBitWidth,
@@ -44,38 +49,34 @@ use zip_plus::{
 
 /// Proof produced by the Zinc+ PIOP for UCS.
 ///
-/// Contains the subproofs from Steps 2, 4, and 4.5:
-/// - `ideal_check`: MLE evaluations in F_q\[X\] (Step 2).
-/// - `resolver`: sumcheck proof + trace evaluation claims (Step 4).
-/// - `batched_shift`: shift sumcheck reducing down_evals to shift_evals at ρ
-///   (Step 4.5).
+/// Contains subproofs from Steps 2, 4, 5, 6, and 7:
+/// - `ideal_check`:    MLE evaluations in F_q[X] and ideal membership (Step 2)
+/// - `resolver`:       F_q sumcheck proof + up/down evaluation claims (Step 4)
+/// - `multipoint_eval`: multi-point eval sumcheck reducing claims to r_0 (Step
+///   5)
+/// - `lifted_evals`:   unprojected polynomial MLE evaluations at r_0 (Step 6)
+/// - `zip`:            Zip+ PCS proof at r_0 (Step 7)
 #[derive(Clone, Debug)]
 pub struct Proof<F: PrimeField> {
-    /// Number of witness columns of each type (binary polynomials, arbitrary
-    /// polynomials, integers).
+    /// Number of witness columns of each type: (binary_poly, arbitrary_poly,
+    /// integer).
     pub num_witness_cols: (usize, usize, usize),
     /// Zip+ commitments to the witness columns.
     pub commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     /// Serialized PCS proof data (Zip+ proving transcripts).
     pub zip: Vec<u8>,
-    /// Randomized ideal check proof: MLE evaluations in F_q[X] and ideal
-    /// membership claims.
+    /// Step 2: randomized ideal check proof.
     pub ideal_check: IdealCheckProof<F>,
-    /// Combined polynomial resolver proof: sumcheck proof + trace evaluation
+    /// Step 4: combined polynomial resolver proof (F_q sumcheck).
     pub resolver: CombinedPolyResolverProof<F>,
-    /// Per-column unprojected polynomial MLE evaluations at the sumcheck point
-    /// r' (lift-and-project). Each entry is the MLE evaluation of the
-    /// `\phi_q`-projected column in `F_q[X]` (before `\psi_a`), so the
-    /// verifier can check `\psi_a(lifted_eval_j) == up_eval_j` and supply
-    /// these to the Zip+ PCS for alpha-projection.
+    /// Step 5: multi-point evaluation proof (sumcheck combining up_evals and
+    /// down_evals at r' into open_evals at the single point r_0).
+    pub multipoint_eval: MultipointEvalProof<F>,
+    /// Step 6: per-column polynomial MLE evaluations at r_0 in F_q[X]
+    /// (after \phi_q, before \psi_a). The verifier checks
+    /// \psi_a(lifted_eval_j) == open_eval_j, then supplies these to Zip+
+    /// for alpha-projection.
     pub lifted_evals: Vec<DynamicPolynomialF<F>>,
-    pub batched_shift: BatchedShiftProof<F>,
-    /// Per-column unprojected polynomial MLE evaluations at the shift point ρ.
-    /// Analogous to `lifted_evals` but at the batched-shift challenge point,
-    /// so the verifier can check `\psi_a(lifted_evals_shift_j) ==
-    /// shift_eval_j` and supply these to the Zip+ PCS for
-    /// alpha-projection in the evaluate-only step.
-    pub lifted_evals_shift: Vec<DynamicPolynomialF<F>>,
 }
 
 /// Trait bundling the various type parameters for the public inputs (NYI),
@@ -164,22 +165,12 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     Resolver(#[from] CombinedPolyResolverError<F>),
     #[error("scalar projection failed: {0}")]
     ScalarProjection(zinc_poly::EvaluationError),
-    #[error("batched shift failed: {0}")]
-    BatchedShift(#[from] BatchedShiftError<F>),
-    #[error("lifted eval ψ_a projection failed: {0}")]
+    #[error("multi-point evaluation failed: {0}")]
+    MultipointEval(#[from] MultipointEvalError<F>),
+    #[error("lifted eval psi_a projection failed: {0}")]
     LiftedEvalProjection(zinc_poly::EvaluationError),
-    #[error("lifted eval ψ_a mismatch at column {column}: expected {expected:?}, got {actual:?}")]
+    #[error("lifted eval psi_a mismatch at column {column}: expected {expected:?}, got {actual:?}")]
     LiftedEvalMismatch {
-        column: usize,
-        expected: F,
-        actual: F,
-    },
-    #[error("shift lifted eval ψ_a projection failed: {0}")]
-    ShiftLiftedEvalProjection(zinc_poly::EvaluationError),
-    #[error(
-        "shift lifted eval ψ_a mismatch at column {column}: expected {expected:?}, got {actual:?}"
-    )]
-    ShiftLiftedEvalMismatch {
         column: usize,
         expected: F,
         actual: F,
@@ -191,7 +182,7 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
 }
 
 /// Helper: project a DensePolynomial scalar to DynamicPolynomialF
-/// by projecting each coefficient via φ_q.
+/// by projecting each coefficient via \phi_q.
 pub fn project_scalar_fn<R, F, const D: usize>(
     scalar: &DensePolynomial<R, D>,
     field_cfg: &F::Config,
@@ -411,8 +402,8 @@ mod tests {
 
     /// End-to-end test: TestAirNoMultiplication.
     ///
-    /// UAIR constraint: a + b - c ∈ (X - 2)
-    /// (one constraint, no polynomial multiplication, ideal = ⟨X - 2⟩).
+    /// UAIR constraint: a + b - c \in (X - 2)
+    /// (one constraint, no polynomial multiplication, ideal = <X - 2>).
     #[test]
     fn test_e2e_no_multiplication() {
         let mut rng = rng();
@@ -451,7 +442,7 @@ mod tests {
     /// Uses RAA code with small num_vars (2) because chained polynomial
     /// multiplication causes exponential growth in both degree and coefficient
     /// magnitude. With num_vars=2 (4 rows), max degree=6 and max coefficient
-    /// ≈ 127^8 ≈ 2^56, which fits in i64.
+    /// ~= 127^8 ~= 2^56, which fits in i64.
     #[test]
     fn test_e2e_simple_multiplication() {
         let mut rng = rng();
@@ -483,7 +474,7 @@ mod tests {
     /// End-to-end test: BinaryDecompositionUair.
     ///
     /// Uses binary_poly (1 col) and int (1 col) trace types.
-    /// UAIR constraint: binary_poly[0] - int[0] ∈ ⟨X - 2⟩
+    /// UAIR constraint: binary_poly[0] - int[0] \in <X - 2>
     #[test]
     fn test_e2e_binary_decomposition() {
         let mut rng = rng();
@@ -523,8 +514,8 @@ mod tests {
     ///
     /// Uses 16 binary_poly cols and 1 int col.
     /// UAIR constraints:
-    ///   sum(up.binary_poly[0..16]) - up.int[0] ∈ ⟨X - 1⟩
-    ///   down.binary_poly[0] - up.int[0] ∈ ⟨X - 2⟩
+    ///   sum(up.binary_poly[0..16]) - up.int[0] \in <X - 1>
+    ///   down.binary_poly[0] - up.int[0] \in <X - 2>
     ///   up.binary_poly[i] - down.binary_poly[i] = 0, for i=1..15
     #[test]
     fn test_e2e_big_linear() {
