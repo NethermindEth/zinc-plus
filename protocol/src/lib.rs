@@ -192,8 +192,8 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
 
 /// Helper: project a DensePolynomial scalar to DynamicPolynomialF
 /// by projecting each coefficient via φ_q.
-pub fn project_scalar_fn<R, F>(
-    scalar: &DensePolynomial<R, 32>,
+pub fn project_scalar_fn<R, F, const D: usize>(
+    scalar: &DensePolynomial<R, D>,
     field_cfg: &F::Config,
 ) -> DynamicPolynomialF<F>
 where
