@@ -20,10 +20,18 @@ zinc-transcript = { workspace = true }
 zinc-uair = { workspace = true }
 zinc-utils = { workspace = true }
 
+[lib]
+bench = false
+
 [dev-dependencies]
+criterion = { workspace = true }
 crypto-bigint = { workspace = true }
 rand = { workspace = true }
 zinc-test-uair = { workspace = true }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "e2e"
+harness = false

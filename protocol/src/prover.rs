@@ -13,7 +13,7 @@ use zinc_poly::{
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
     univariate::dynamic::over_field::DynamicPolynomialF,
 };
-use zinc_transcript::traits::{ConstTranscribable, Transcribable, Transcript};
+use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{Uair, constraint_counter::count_constraints, degree_counter::count_max_degree};
 use zinc_utils::{
     from_ref::FromRef, inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
@@ -59,11 +59,13 @@ where
     /// 4. **Finite-field PIOP**: sumcheck over F_q to prove the projected
     ///    claim. 4.5. **Batched shift**: sumcheck reducing shifted-MLE claims
     ///    to standard MLE claims at a new point ρ.
-    /// 5. ?????
+    /// 5. **Lift-and-project**: compute per-column unprojected polynomial MLE
+    ///    evaluations at the sumcheck challenge point r' (lifted_evals) and at
+    ///    the shift point ρ (lifted_evals_shift). Absorb into transcript.
     /// 6a. **PCS open**: Zip+ test + evaluate for each committed column at the
     ///     sumcheck challenge point r'.
     /// 6b. **PCS evaluate-only**: Zip+ evaluate for each committed column at
-    ///     the shift point ρ (proximity already established in 5a).
+    ///     the shift point ρ (proximity already established in 6a).
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn prove<const CHECK_FOR_OVERFLOW: bool>(
         (pp_bin, pp_arb, pp_int): &(
@@ -274,34 +276,83 @@ where
         }
 
         // === Step 6b: PCS evaluate-only at shift point ρ ===
-        // Proximity was already established in Step 5a, so we only need
-        // evaluation consistency proofs at the new point ρ.
+        // Compute per-column lifted evaluations at ρ (same approach as
+        // Step 4.5 but at the shift point instead of the sumcheck point).
         let shift_point = &bs_prover_state.shift_point;
 
-        pcs_prove_shift_evaluations::<Zt::BinaryZt, Zt::BinaryLc, _, _, CHECK_FOR_OVERFLOW>(
-            &mut pcs_transcript,
-            pp_bin,
-            trace_bin_poly,
-            shift_point,
-            &field_cfg,
-            &projecting_element,
-        )?;
-        pcs_prove_shift_evaluations::<Zt::ArbitraryZt, Zt::ArbitraryLc, _, _, CHECK_FOR_OVERFLOW>(
-            &mut pcs_transcript,
-            pp_arb,
-            trace_arb_poly,
-            shift_point,
-            &field_cfg,
-            &projecting_element,
-        )?;
-        pcs_prove_shift_evaluations::<Zt::IntZt, Zt::IntLc, _, _, CHECK_FOR_OVERFLOW>(
-            &mut pcs_transcript,
-            pp_int,
-            trace_int,
-            shift_point,
-            &field_cfg,
-            &projecting_element,
-        )?;
+        let lifted_evals_shift: Vec<DynamicPolynomialF<F>> = projected_trace
+            .iter()
+            .map(|col_mle| {
+                let max_degree = col_mle
+                    .iter()
+                    .flat_map(|entry| entry.degree())
+                    .max()
+                    .unwrap_or(0);
+
+                let coeffs: Vec<F> = (0..=max_degree)
+                    .map(|l| {
+                        let coeff_mle: DenseMultilinearExtension<F::Inner> = col_mle
+                            .iter()
+                            .map(|entry| {
+                                entry
+                                    .coeffs
+                                    .get(l)
+                                    .map(|f| f.inner().clone())
+                                    .unwrap_or_else(|| zero_inner.clone())
+                            })
+                            .collect();
+
+                        coeff_mle
+                            .evaluate_with_config(shift_point, &field_cfg)
+                            .expect("shift lifted eval: coefficient MLE evaluation failed")
+                    })
+                    .collect();
+
+                DynamicPolynomialF { coeffs }
+            })
+            .collect();
+
+        // Absorb lifted_evals_shift into transcript before PCS evaluate-only.
+        for bar_u in &lifted_evals_shift {
+            pcs_transcript
+                .fs_transcript
+                .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
+        }
+
+        // Prove evaluate-only for each committed batch at ρ.
+        if let Some(_hint_bin) = &hint_bin {
+            let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_evaluate_only_f::<
+                _,
+                CHECK_FOR_OVERFLOW,
+            >(
+                &mut pcs_transcript,
+                pp_bin,
+                trace_bin_poly,
+                shift_point,
+                &field_cfg,
+            )?;
+        }
+        if let Some(_hint_arb) = &hint_arb {
+            let _ = ZipPlus::<Zt::ArbitraryZt, Zt::ArbitraryLc>::prove_evaluate_only_f::<
+                _,
+                CHECK_FOR_OVERFLOW,
+            >(
+                &mut pcs_transcript,
+                pp_arb,
+                trace_arb_poly,
+                shift_point,
+                &field_cfg,
+            )?;
+        }
+        if let Some(_hint_int) = &hint_int {
+            let _ = ZipPlus::<Zt::IntZt, Zt::IntLc>::prove_evaluate_only_f::<_, CHECK_FOR_OVERFLOW>(
+                &mut pcs_transcript,
+                pp_int,
+                trace_int,
+                shift_point,
+                &field_cfg,
+            )?;
+        }
 
         let zip_proof = pcs_transcript.stream.into_inner();
         let commitments = (commitment_bin, commitment_arb, commitment_int);
@@ -312,39 +363,9 @@ where
             ideal_check: ic_proof,
             resolver: cpr_proof,
             batched_shift: bs_proof,
-                zip: zip_proof,
-                lifted_evals,
-            })
+            zip: zip_proof,
+            lifted_evals,
+            lifted_evals_shift,
+        })
     }
-}
-
-fn pcs_prove_shift_evaluations<Zt, Lc, F, I, const CHECK_FOR_OVERFLOW: bool>(
-    pcs_transcript: &mut PcsProverTranscript,
-    pp: &ZipPlusParams<Zt, Lc>,
-    witness: &[DenseMultilinearExtension<Zt::Eval>],
-    shift_point: &[F],
-    field_cfg: &F::Config,
-    projecting_element: &Zt::Chal,
-) -> Result<(), ProtocolError<F, I>>
-where
-    Zt: ZipTypes,
-    Zt::Eval: ProjectableToField<F>,
-    Lc: LinearCode<Zt>,
-    F: PrimeField + for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> MulByScalar<&'a F> + FromRef<F>,
-    F::Inner: Transcribable,
-    F::Modulus: FromRef<Zt::Fmod> + Transcribable,
-    I: Ideal,
-{
-    for col in witness {
-        // Evaluate-only (no proximity test needed)
-        let _eval_f: F = ZipPlus::<Zt, Lc>::evaluate_f::<F, CHECK_FOR_OVERFLOW>(
-            pcs_transcript,
-            pp,
-            col,
-            shift_point,
-            field_cfg,
-            projecting_element,
-        )?;
-    }
-    Ok(())
 }

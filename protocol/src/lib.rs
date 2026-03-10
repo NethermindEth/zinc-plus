@@ -14,7 +14,7 @@
 pub mod prover;
 pub mod verifier;
 
-use crypto_primitives::{ConstIntRing, ConstIntSemiring, PrimeField};
+use crypto_primitives::{ConstIntRing, ConstIntSemiring, FromWithConfig, PrimeField};
 use std::marker::PhantomData;
 use thiserror::Error;
 use zinc_piop::{
@@ -64,12 +64,18 @@ pub struct Proof<F: PrimeField> {
     /// Combined polynomial resolver proof: sumcheck proof + trace evaluation
     pub resolver: CombinedPolyResolverProof<F>,
     /// Per-column unprojected polynomial MLE evaluations at the sumcheck point
-    /// (lift-and-project). Each entry is the MLE evaluation of the
+    /// r' (lift-and-project). Each entry is the MLE evaluation of the
     /// `\phi_q`-projected column in `F_q[X]` (before `\psi_a`), so the
     /// verifier can check `\psi_a(lifted_eval_j) == up_eval_j` and supply
     /// these to the Zip+ PCS for alpha-projection.
     pub lifted_evals: Vec<DynamicPolynomialF<F>>,
     pub batched_shift: BatchedShiftProof<F>,
+    /// Per-column unprojected polynomial MLE evaluations at the shift point ρ.
+    /// Analogous to `lifted_evals` but at the batched-shift challenge point,
+    /// so the verifier can check `\psi_a(lifted_evals_shift_j) ==
+    /// shift_eval_j` and supply these to the Zip+ PCS for
+    /// alpha-projection in the evaluate-only step.
+    pub lifted_evals_shift: Vec<DynamicPolynomialF<F>>,
 }
 
 /// Trait bundling the various type parameters for the public inputs (NYI),
@@ -168,10 +174,35 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
         expected: F,
         actual: F,
     },
+    #[error("shift lifted eval ψ_a projection failed: {0}")]
+    ShiftLiftedEvalProjection(zinc_poly::EvaluationError),
+    #[error(
+        "shift lifted eval ψ_a mismatch at column {column}: expected {expected:?}, got {actual:?}"
+    )]
+    ShiftLiftedEvalMismatch {
+        column: usize,
+        expected: F,
+        actual: F,
+    },
     #[error("PCS error: {0}")]
     Pcs(#[from] ZipError),
     #[error("PCS verification failed at column {0}: {1}")]
     PcsVerification(usize, ZipError),
+}
+
+/// Helper: project a DensePolynomial scalar to DynamicPolynomialF
+/// by projecting each coefficient via φ_q.
+pub fn project_scalar_fn<R, F>(
+    scalar: &DensePolynomial<R, 32>,
+    field_cfg: &F::Config,
+) -> DynamicPolynomialF<F>
+where
+    F: PrimeField + for<'a> FromWithConfig<&'a R>,
+{
+    scalar
+        .iter()
+        .map(|coeff| F::from_with_cfg(coeff, field_cfg))
+        .collect()
 }
 
 //
@@ -183,13 +214,11 @@ mod tests {
     use super::*;
     use crypto_bigint::U64;
     use crypto_primitives::{
-        FromWithConfig, crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
-        crypto_bigint_uint::Uint,
+        crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
     };
     use rand::rng;
     use zinc_poly::univariate::{
-        binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct,
-        dynamic::over_field::DynamicPolynomialF, ideal::DegreeOneIdeal,
+        binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct, ideal::DegreeOneIdeal,
     };
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
@@ -352,21 +381,6 @@ mod tests {
         type BinaryLc = RaaCode<Self::BinaryZt, TestRaaConfig, RAA_REP>;
         type ArbitraryLc = RaaCode<Self::ArbitraryZt, TestRaaConfig, RAA_REP>;
         type IntLc = RaaCode<Self::IntZt, TestRaaConfig, RAA_REP>;
-    }
-
-    /// Helper: project a DensePolynomial scalar to DynamicPolynomialF
-    /// by projecting each coefficient via φ_q.
-    fn project_scalar_fn<R>(
-        scalar: &DensePolynomial<R, 32>,
-        field_cfg: &<F as PrimeField>::Config,
-    ) -> DynamicPolynomialF<F>
-    where
-        F: for<'a> FromWithConfig<&'a R>,
-    {
-        scalar
-            .iter()
-            .map(|coeff| F::from_with_cfg(coeff, field_cfg))
-            .collect()
     }
 
     /// Set up Zip+ PCS parameters for a given number of MLE variables.

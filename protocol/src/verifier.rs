@@ -8,11 +8,7 @@ use zinc_piop::{
     ideal_check::IdealCheckProtocol,
     projections::{project_scalars, project_scalars_to_field},
 };
-use zinc_poly::{
-    EvaluatablePolynomial,
-    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::dynamic::over_field::DynamicPolynomialF,
-};
+use zinc_poly::{EvaluatablePolynomial, univariate::dynamic::over_field::DynamicPolynomialF};
 use zinc_transcript::{
     KeccakTranscript,
     traits::{ConstTranscribable, Transcript},
@@ -225,30 +221,73 @@ where
         verify_pcs_batch!(Zt::IntZt, Zt::IntLc, vp_int, 2, [add!(n_bin, n_arb)..]);
 
         // === Step 5b: PCS verify evaluate-only at shift point ρ ===
-        // Proximity was already established in Step 5a, so we only need
-        // to verify evaluation consistency at the new point ρ.
-        for i in 0..proof.commitments.len() {
-            macro_rules! zip_verify_shift {
-                ($zt:ident, $lc:ident, $vp:ident) => {
-                    ZipPlus::<Zt::$zt, Zt::$lc>::verify_evaluate_only::<F, CHECK_FOR_OVERFLOW>(
+        // Absorb lifted_evals_shift (matching prover Step 6b).
+        for bar_u in &proof.lifted_evals_shift {
+            pcs_transcript
+                .fs_transcript
+                .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
+        }
+
+        // Check ψ_a consistency: ψ_a(lifted_evals_shift_j) == shift_eval_j.
+        for (j, (bar_u, shift_eval)) in proof
+            .lifted_evals_shift
+            .iter()
+            .zip(bs_subclaim.shift_evals.iter())
+            .enumerate()
+        {
+            let psi_a_val = bar_u
+                .evaluate_at_point(&projecting_element_f)
+                .map_err(ProtocolError::ShiftLiftedEvalProjection)?;
+            if psi_a_val != *shift_eval {
+                return Err(ProtocolError::ShiftLiftedEvalMismatch {
+                    column: j,
+                    expected: shift_eval.clone(),
+                    actual: psi_a_val,
+                });
+            }
+        }
+
+        // Verify evaluate-only for each committed batch at ρ.
+        macro_rules! verify_pcs_eval_only_batch {
+            ($Zt:ty, $Lc:ty, $vp:expr, $idx:tt, [$evals_range:expr]) => {{
+                let comm = &proof.commitments.$idx;
+                if comm.batch_size > 0 {
+                    let per_poly_alphas = ZipPlus::<$Zt, $Lc>::sample_alphas(
+                        &mut pcs_transcript.fs_transcript,
+                        comm.batch_size,
+                    );
+                    let mut eval_f = F::zero_with_cfg(&field_cfg);
+                    for (bar_u, alphas) in proof.lifted_evals_shift[$evals_range]
+                        .iter()
+                        .zip(per_poly_alphas.iter())
+                    {
+                        for (coeff, alpha) in bar_u.coeffs.iter().zip(alphas.iter()) {
+                            let mut term = F::from_with_cfg(alpha, &field_cfg);
+                            term *= coeff;
+                            eval_f += &term;
+                        }
+                    }
+                    ZipPlus::<$Zt, $Lc>::verify_evaluate_only::<F, CHECK_FOR_OVERFLOW>(
                         &mut pcs_transcript,
                         $vp,
                         &field_cfg,
                         &bs_subclaim.shift_point,
-                        &bs_subclaim.shift_evals[i],
+                        &eval_f,
                     )
-                    .map_err(|e| ProtocolError::PcsVerification(i, e))?;
-                };
-            }
-
-            if i < proof.num_witness_cols.0 {
-                zip_verify_shift!(BinaryZt, BinaryLc, vp_bin);
-            } else if i < add!(proof.num_witness_cols.0, proof.num_witness_cols.1) {
-                zip_verify_shift!(ArbitraryZt, ArbitraryLc, vp_arb);
-            } else {
-                zip_verify_shift!(IntZt, IntLc, vp_int);
-            }
+                    .map_err(|e| ProtocolError::PcsVerification($idx, e))?;
+                }
+            }};
         }
+
+        verify_pcs_eval_only_batch!(Zt::BinaryZt, Zt::BinaryLc, vp_bin, 0, [..n_bin]);
+        verify_pcs_eval_only_batch!(
+            Zt::ArbitraryZt,
+            Zt::ArbitraryLc,
+            vp_arb,
+            1,
+            [n_bin..add!(n_bin, n_arb)]
+        );
+        verify_pcs_eval_only_batch!(Zt::IntZt, Zt::IntLc, vp_int, 2, [add!(n_bin, n_arb)..]);
 
         Ok(())
     }
