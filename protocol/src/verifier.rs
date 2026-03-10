@@ -3,6 +3,7 @@ use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfi
 use num_traits::Zero;
 use std::io::Cursor;
 use zinc_piop::{
+    batched_shift::BatchedShift,
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
     projections::{project_scalars, project_scalars_to_field},
@@ -55,9 +56,10 @@ where
 {
     /// Zinc+ full PIOP Verifier.
     ///
-    /// Verifies all steps and returns a [`Subclaim`]. The `up_evals` are
-    /// already verified by the Zip+ PCS (Step 5); the `down_evals` (shifted
-    /// MLE claims) still need to be checked via [`resolve_subclaim`].
+    /// Verifies all steps. Both `up_evals` and `down_evals` (shifted MLE
+    /// claims) are fully verified: `up_evals` by the Zip+ PCS (Step 5a),
+    /// `down_evals` via the batched shift protocol (Step 4.5) and PCS
+    /// evaluate-only (Step 5b).
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn verify<IdealOverF, const CHECK_FOR_OVERFLOW: bool>(
         (vp_bin, vp_arb, vp_int): &(
@@ -69,7 +71,7 @@ where
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
-    ) -> Result<Subclaim<F>, ProtocolError<F, IdealOverF>>
+    ) -> Result<(), ProtocolError<F, IdealOverF>>
     where
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
     {
@@ -159,7 +161,17 @@ where
             }
         }
 
-        // === Step 5: PCS verify (check witness MLE evaluation claims) ====
+        // === Step 4.5: Verify batched shift ===
+        let bs_subclaim = BatchedShift::verify_as_subprotocol(
+            &mut pcs_transcript.fs_transcript,
+            proof.batched_shift,
+            &cpr_subclaim.evaluation_point,
+            &cpr_subclaim.down_evals,
+            num_vars,
+            &field_cfg,
+        )?;
+
+        // === Step 5a: PCS verify (check witness MLE evaluation claims at r') ====
         // After the sumcheck, the verifier uses the Zip+ PCS to confirm
         // that the committed witness MLEs actually evaluate to the claimed
         // up_evals at the sumcheck challenge point.
@@ -212,53 +224,29 @@ where
         );
         verify_pcs_batch!(Zt::IntZt, Zt::IntLc, vp_int, 2, [add!(n_bin, n_arb)..]);
 
-        Ok(Subclaim {
-            evaluation_point: cpr_subclaim.evaluation_point,
-            up_evals: cpr_subclaim.up_evals,
-            down_evals: cpr_subclaim.down_evals,
-        })
-    }
+        // === Step 5b: PCS verify evaluate-only at shift point ρ ===
+        // Proximity was already established in Step 5a, so we only need
+        // to verify evaluation consistency at the new point ρ.
+        for i in 0..proof.commitments.len() {
+            macro_rules! zip_verify_shift {
+                ($zt:ident, $lc:ident, $vp:ident) => {
+                    ZipPlus::<Zt::$zt, Zt::$lc>::verify_evaluate_only::<F, CHECK_FOR_OVERFLOW>(
+                        &mut pcs_transcript,
+                        $vp,
+                        &field_cfg,
+                        &bs_subclaim.shift_point,
+                        &bs_subclaim.shift_evals[i],
+                    )
+                    .map_err(|e| ProtocolError::PcsVerification(i, e))?;
+                };
+            }
 
-    /// Subclaim resolution (shifted-MLE evaluation check)
-    ///
-    /// Verify the "down" (next-row) MLE evaluation claims from the subclaim.
-    ///
-    /// The "up" evaluations are already verified by the Zip+ PCS inside
-    /// [`verify`] (Step 5). The "down" evaluations correspond to the shifted
-    /// trace MLE (rows 1..n, zero-padded), which the PCS does not yet open.
-    /// Until the PCS is extended to also open shifted MLEs, this function
-    /// checks them directly against the prover's auxiliary projected trace.
-    pub fn resolve_subclaim(
-        subclaim: &Subclaim<F>,
-        projected_trace_f: &[DenseMultilinearExtension<F::Inner>],
-        field_cfg: &F::Config,
-    ) -> Result<(), ProtocolError<F, U::Ideal>>
-    where
-        DenseMultilinearExtension<F::Inner>: MultilinearExtensionWithConfig<F>,
-    {
-        let num_cols = projected_trace_f.len();
-
-        // Check "down" evaluations (shifted/next-row columns).
-        // The shifted trace drops the first row and zero-pads, matching
-        // the CombinedPolyResolver's convention.
-        for (i, (mle, expected)) in projected_trace_f
-            .iter()
-            .zip(subclaim.down_evals.iter())
-            .enumerate()
-        {
-            let shifted: DenseMultilinearExtension<F::Inner> =
-                mle.iter().skip(1).cloned().collect();
-
-            let actual = shifted
-                .evaluate_with_config(&subclaim.evaluation_point, field_cfg)
-                .map_err(ProtocolError::MleEvaluation)?;
-
-            if actual != *expected {
-                return Err(ProtocolError::SubclaimMismatch {
-                    column: add!(num_cols, i),
-                    expected: expected.clone(),
-                    actual,
-                });
+            if i < proof.num_witness_cols.0 {
+                zip_verify_shift!(BinaryZt, BinaryLc, vp_bin);
+            } else if i < add!(proof.num_witness_cols.0, proof.num_witness_cols.1) {
+                zip_verify_shift!(ArbitraryZt, ArbitraryLc, vp_arb);
+            } else {
+                zip_verify_shift!(IntZt, IntLc, vp_int);
             }
         }
 

@@ -8,10 +8,8 @@
 //! ```
 //!
 //! Step 4 runs a finite-field PIOP (sumcheck) over F_q.
-//!
-//! The verifier's output is a [`Subclaim`] containing evaluation claims about
-//! the trace column MLEs. In the full protocol, these would be resolved by the
-//! Zip+ PCS - this will be addressed in the follow-up PR.
+//! Step 4.5 reduces shifted-MLE claims via the batched shift protocol.
+//! Step 5 opens witness MLEs via the Zip+ PCS.
 
 pub mod prover;
 pub mod verifier;
@@ -20,12 +18,12 @@ use crypto_primitives::{ConstIntRing, ConstIntSemiring, PrimeField};
 use std::marker::PhantomData;
 use thiserror::Error;
 use zinc_piop::{
+    batched_shift::{BatchedShiftError, Proof as BatchedShiftProof},
     combined_poly_resolver::{CombinedPolyResolverError, Proof as CombinedPolyResolverProof},
     ideal_check::{IdealCheckError, Proof as IdealCheckProof},
 };
 use zinc_poly::{
     ConstCoeffBitWidth,
-    mle::DenseMultilinearExtension,
     univariate::{
         binary::BinaryPoly, dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF,
     },
@@ -46,9 +44,11 @@ use zip_plus::{
 
 /// Proof produced by the Zinc+ PIOP for UCS.
 ///
-/// Contains the two subproofs from Steps 2 and 4:
+/// Contains the subproofs from Steps 2, 4, and 4.5:
 /// - `ideal_check`: MLE evaluations in F_q\[X\] (Step 2).
 /// - `resolver`: sumcheck proof + trace evaluation claims (Step 4).
+/// - `batched_shift`: shift sumcheck reducing down_evals to shift_evals at ρ
+///   (Step 4.5).
 #[derive(Clone, Debug)]
 pub struct Proof<F: PrimeField> {
     /// Number of witness columns of each type (binary polynomials, arbitrary
@@ -69,28 +69,7 @@ pub struct Proof<F: PrimeField> {
     /// verifier can check `\psi_a(lifted_eval_j) == up_eval_j` and supply
     /// these to the Zip+ PCS for alpha-projection.
     pub lifted_evals: Vec<DynamicPolynomialF<F>>,
-}
-
-/// Subclaim returned by the verifier. This will be replaced by the PCS proof in
-/// the full protocol.
-///
-/// Contains evaluation claims: "the trace column MLEs, evaluated at
-/// `evaluation_point`, should yield `up_evals` (current row) and
-/// `down_evals` (next row)."
-#[derive(Clone, Debug)]
-pub struct Subclaim<F: PrimeField> {
-    pub evaluation_point: Vec<F>,
-    pub up_evals: Vec<F>,
-    pub down_evals: Vec<F>,
-}
-
-/// Prover auxiliary data for subclaim resolution without PCS.
-/// To be removed in the full protocol.
-pub struct ProverAux<F: PrimeField> {
-    /// The random field configuration (derived from transcript).
-    pub field_cfg: F::Config,
-    /// The trace projected to F_q.
-    pub projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
+    pub batched_shift: BatchedShiftProof<F>,
 }
 
 /// Trait bundling the various type parameters for the public inputs (NYI),
@@ -179,14 +158,8 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     Resolver(#[from] CombinedPolyResolverError<F>),
     #[error("scalar projection failed: {0}")]
     ScalarProjection(zinc_poly::EvaluationError),
-    #[error("subclaim resolution: MLE evaluation failed: {0}")]
-    MleEvaluation(zinc_poly::EvaluationError),
-    #[error("subclaim mismatch at column {column}: expected {expected:?}, got {actual:?}")]
-    SubclaimMismatch {
-        column: usize,
-        expected: F,
-        actual: F,
-    },
+    #[error("batched shift failed: {0}")]
+    BatchedShift(#[from] BatchedShiftError<F>),
     #[error("lifted eval ψ_a projection failed: {0}")]
     LiftedEvalProjection(zinc_poly::EvaluationError),
     #[error("lifted eval ψ_a mismatch at column {column}: expected {expected:?}, got {actual:?}")]
@@ -440,12 +413,11 @@ mod tests {
         let trace = TestUair::generate_witness(num_vars, &mut rng);
 
         // Prover
-        let (proof, prover_aux) =
-            Piop::prove::<CHECKED>(&pp, &[], &trace, &[], num_vars, project_scalar_fn)
-                .expect("Prover failed");
+        let proof = Piop::prove::<CHECKED>(&pp, &[], &trace, &[], num_vars, project_scalar_fn)
+            .expect("Prover failed");
 
         // Verifier
-        let subclaim = Piop::verify::<_, CHECKED>(
+        Piop::verify::<_, CHECKED>(
             &pp,
             proof,
             num_vars,
@@ -453,14 +425,6 @@ mod tests {
             |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
         )
         .expect("Verifier failed");
-
-        // Subclaim resolution (in lieu of PCS)
-        Piop::resolve_subclaim(
-            &subclaim,
-            &prover_aux.projected_trace_f,
-            &prover_aux.field_cfg,
-        )
-        .expect("Subclaim resolution failed");
     }
 
     /// End-to-end test: TestUairSimpleMultiplication.
@@ -488,12 +452,11 @@ mod tests {
         let trace = TestUair::generate_witness(num_vars, &mut rng);
 
         // Prover
-        let (proof, prover_aux) =
-            Piop::prove::<CHECKED>(&pp, &[], &trace, &[], num_vars, project_scalar_fn)
-                .expect("Prover failed");
+        let proof = Piop::prove::<CHECKED>(&pp, &[], &trace, &[], num_vars, project_scalar_fn)
+            .expect("Prover failed");
 
         // Verifier
-        let subclaim = Piop::verify::<_, CHECKED>(
+        Piop::verify::<_, CHECKED>(
             &pp,
             proof,
             num_vars,
@@ -501,14 +464,6 @@ mod tests {
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
         )
         .expect("Verifier failed");
-
-        // Subclaim resolution (in lieu of PCS)
-        Piop::resolve_subclaim(
-            &subclaim,
-            &prover_aux.projected_trace_f,
-            &prover_aux.field_cfg,
-        )
-        .expect("Subclaim resolution failed");
     }
 
     /// End-to-end test: BinaryDecompositionUair.
@@ -529,7 +484,7 @@ mod tests {
         let (binary_trace, arb_trace, int_trace) = TestUair::generate_witness(num_vars, &mut rng);
 
         // Prover
-        let (proof, prover_aux) = Piop::prove::<CHECKED>(
+        let proof = Piop::prove::<CHECKED>(
             &pp,
             &binary_trace,
             &arb_trace,
@@ -540,7 +495,7 @@ mod tests {
         .expect("Prover failed");
 
         // Verifier
-        let subclaim = Piop::verify::<_, CHECKED>(
+        Piop::verify::<_, CHECKED>(
             &pp,
             proof,
             num_vars,
@@ -548,14 +503,6 @@ mod tests {
             |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
         )
         .expect("Verifier failed");
-
-        // Subclaim resolution (in lieu of PCS)
-        Piop::resolve_subclaim(
-            &subclaim,
-            &prover_aux.projected_trace_f,
-            &prover_aux.field_cfg,
-        )
-        .expect("Subclaim resolution failed");
     }
 
     /// End-to-end test: BigLinearUair.
@@ -579,7 +526,7 @@ mod tests {
         let (binary_trace, arb_trace, int_trace) = TestUair::generate_witness(num_vars, &mut rng);
 
         // Prover
-        let (proof, prover_aux) = Piop::prove::<CHECKED>(
+        let proof = Piop::prove::<CHECKED>(
             &pp,
             &binary_trace,
             &arb_trace,
@@ -590,7 +537,7 @@ mod tests {
         .expect("Prover failed");
 
         // Verifier
-        let subclaim = Piop::verify::<_, CHECKED>(
+        Piop::verify::<_, CHECKED>(
             &pp,
             proof,
             num_vars,
@@ -598,13 +545,5 @@ mod tests {
             |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
         )
         .expect("Verifier failed");
-
-        // Subclaim resolution (in lieu of PCS)
-        Piop::resolve_subclaim(
-            &subclaim,
-            &prover_aux.projected_trace_f,
-            &prover_aux.field_cfg,
-        )
-        .expect("Subclaim resolution failed");
     }
 }
