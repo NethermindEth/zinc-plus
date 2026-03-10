@@ -571,6 +571,7 @@ mod tests {
         let eval_mle1_f = eval_mle1.into_with_cfg(&field_cfg);
 
         let mut verifier_transcript = prover_transcript.into_verification_transcript();
+        verifier_transcript.fs_transcript.absorb_slice(&comm.root);
         let field_cfg = get_field_cfg::<Zt, F>(&mut verifier_transcript.fs_transcript);
 
         let verification_result = TestZip::verify::<_, CHECKED>(
