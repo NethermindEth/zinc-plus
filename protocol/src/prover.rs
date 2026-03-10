@@ -44,21 +44,23 @@ where
     F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
     U: Uair + 'static,
 {
-    /// Zinc+ full PIOP Prover.
+    /// Zinc+ full PIOP prover.
     ///
-    /// # Protocol flow:
+    /// # Protocol steps
     ///
     /// 0. **Commit**: commit each witness column via Zip+ PCS, absorb roots.
-    /// 1. **Prime projection** (φ_q: Q\[X\] → F_q\[X\]): sample random prime q
-    ///    from transcript, project trace and scalars.
-    /// 2. **Ideal check**: sample r ∈ F_q^μ, prover sends MLE evaluations,
+    /// 1. **Prime projection** (`\phi_q`: `Z[X] -> F_q[X]`): sample random
+    ///    prime q, project trace and scalars.
+    /// 2. **Ideal check**: sample `r in F_q^mu`, prover sends MLE evaluations,
     ///    verifier checks ideal membership.
-    /// 3. **Evaluation projection** (ψ_a: F_q\[X\] → F_q): sample a ∈ F_q,
-    ///    evaluate polynomials at X = a.
-    /// 4. **Finite-field PIOP**: sumcheck over F_q to prove the projected
-    ///    claim.
-    /// 5. **PCS open**: Zip+ test + evaluate for each committed column, proving
-    ///    witness MLE evaluations at the sumcheck challenge point.
+    /// 3. **Evaluation projection** (`\psi_a`: `F_q[X] -> F_q`): sample `a in
+    ///    F_q`, evaluate polynomials at `X = a`.
+    /// 4. **F_q sumcheck**: finite-field sumcheck proving the projected
+    ///    constraint claim. Produces `up_evals` and `down_evals` at point `r'`.
+    /// 5. **Lift-and-project**: compute per-column polynomial MLE evaluations
+    ///    at `r'` (in `F_q[X]`, before `\psi_a`). Absorb into transcript.
+    /// 7. **PCS open**: Zip+ prove for each committed column, proving witness
+    ///    MLE evaluations at the sumcheck challenge point.
     ///
     /// Returns the proof and auxiliary data (for subclaim resolution without
     /// PCS).
@@ -75,9 +77,7 @@ where
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
     ) -> Result<(Proof<F>, ProverAux<F>), ProtocolError<F, U::Ideal>> {
-        // === Step 0: Commit to witness traces ===
-
-        // Commit each witness column via Zip+ PCS.
+        // === Step 0: Commit ===
         macro_rules! commit_optionally {
             ($pp:expr, $trace:expr) => {
                 if $trace.is_empty() {
@@ -98,21 +98,18 @@ where
         let (hint_arb, commitment_arb) = commit_optionally!(pp_arb, trace_arb_poly);
         let (hint_int, commitment_int) = commit_optionally!(pp_int, trace_int);
 
-        // Create the main transcript
         let mut pcs_transcript = PcsProverTranscript::new_from_commitments(
             [&commitment_bin, &commitment_arb, &commitment_int].into_iter(),
         )?;
         // TODO: Absorb public inputs as well once they are part of the protocol,
         //       or this will open up a soundness vulnerability!
 
-        // === Step 1: Prime projection (φ_q: Z[X] → F_q[X]) ===
+        // === Step 1: Prime projection (\phi_q: Z[X] -> F_q[X]) ===
 
-        // Sample a random prime modulus from the Fiat-Shamir transcript.
         let field_cfg = pcs_transcript
             .fs_transcript
             .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
 
-        // Project the witness trace from Z[X] to F_q[X].
         let projected_trace = project_trace_coeffs::<F, Zt::Int, Zt::Int, D>(
             trace_bin_poly,
             trace_arb_poly,
@@ -120,12 +117,10 @@ where
             &field_cfg,
         );
 
-        // Project UAIR scalars from Z[X] to F_q[X].
         let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
-
         let num_constraints = count_constraints::<U>();
 
-        // === Step 2: Randomized ideal check ===
+        // === Step 2: Ideal check ===
         let (ic_proof, ic_prover_state) = IdealCheckProtocol::prove_as_subprotocol::<U>(
             &mut pcs_transcript.fs_transcript,
             &projected_trace,
@@ -135,9 +130,7 @@ where
             &field_cfg,
         )?;
 
-        // === Step 3: Evaluation projection (ψ_a: F_q[X] → F_q) ===
-        // Sample the projecting element as Zt::Chal (matching the Zip+ PCS convention),
-        // then convert to F for PIOP use.
+        // === Step 3: Evaluation projection (\psi_a: F_q[X] -> F_q) ===
         let projecting_element: Zt::Chal = pcs_transcript.fs_transcript.get_challenge();
         let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
 
@@ -152,7 +145,7 @@ where
 
         let max_degree = count_max_degree::<U>();
 
-        // === Step 4: Finite-field PIOP (sumcheck over F_q) ===
+        // === Step 4: Sumcheck over F_q ===
         let (cpr_proof, cpr_prover_state) = CombinedPolyResolver::prove_as_subprotocol::<U>(
             &mut pcs_transcript.fs_transcript,
             projected_trace_f.clone(),
@@ -164,15 +157,15 @@ where
             &field_cfg,
         )?;
 
-        // === Step 4.5: Lift-and-project (oracle evaluations at sumcheck point) ===
+        // === Step 5: Lift-and-project (oracle evaluations at sumcheck point) ===
         // Compute per-column unprojected polynomial MLE evaluations at the
         // sumcheck challenge point. These are in F_q[X] (after \phi_q but before
         // \psi_a), so the verifier can check \psi_a(lifted_eval_j) == up_eval_j and
         // supply them to the Zip+ PCS for alpha-projection.
         //
         // For each column, we evaluate the MLE coefficient-by-coefficient:
-        //   lifted_eval_j = Σ_ℓ (Σ_b eq(b, r') * c_{j,b,ℓ}) * X^ℓ
-        // where c_{j,b,ℓ} is the ℓ-th coefficient of the φ_q-projected entry
+        //   lifted_eval_j = \sum_{k} (\sum_{b} eq(b, r') * c_{j,b,k}) * X^k
+        // where c_{j,b,k} is the k-th coefficient of the \phi_q-projected entry
         // at position b.
         let eval_point = &cpr_prover_state.evaluation_point;
         let zero_inner = F::zero_with_cfg(&field_cfg).into_inner();
@@ -217,10 +210,10 @@ where
                 .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
         }
 
-        // === Step 5: PCS open (prove witness MLE evaluations) ===
+        // === Step 6: PCS open (prove witness MLE evaluations) ===
         // The Zip+ PCS proves that the committed polynomial-valued traces
         // evaluate (under alpha-projection) consistently with the lifted_evals.
-        // The verifier checks ψ_a(lifted_eval_j) == up_eval_j to tie back to
+        // The verifier checks \psi_a(lifted_eval_j) == up_eval_j to tie back to
         // the sumcheck.
         //
         // TODO: Once we add public inputs, the verifier will compute public

@@ -53,10 +53,10 @@ where
     F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
     U: Uair + 'static,
 {
-    /// Zinc+ full PIOP Verifier.
+    /// Zinc+ full PIOP verifier.
     ///
     /// Verifies all steps and returns a [`Subclaim`]. The `up_evals` are
-    /// already verified by the Zip+ PCS (Step 5); the `down_evals` (shifted
+    /// already verified by the Zip+ PCS (Step 6); the `down_evals` (shifted
     /// MLE claims) still need to be checked via [`resolve_subclaim`].
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn verify<IdealOverF, const CHECK_FOR_OVERFLOW: bool>(
@@ -74,7 +74,6 @@ where
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
     {
         // === Step 0: Reconstruct transcript from commitments ===
-        // The verifier creates a PcsVerifierTranscript from the PCS proof bytes.
         let mut pcs_transcript = PcsVerifierTranscript {
             fs_transcript: KeccakTranscript::default(),
             stream: Cursor::new(proof.zip),
@@ -94,7 +93,7 @@ where
 
         let num_constraints = count_constraints::<U>();
 
-        // === Step 2: Verify ideal check ===
+        // === Step 2: Ideal check ===
         let ic_subclaim = IdealCheckProtocol::verify_as_subprotocol::<U, IdealOverF, _>(
             &mut pcs_transcript.fs_transcript,
             proof.ideal_check,
@@ -104,8 +103,7 @@ where
             &field_cfg,
         )?;
 
-        // === Step 3: Evaluation projection ===
-        // Sample projecting element as Zt::Chal (matching the prover).
+        // === Step 3: Evaluation projection (\psi_a) ===
         let projecting_element: Zt::Chal = pcs_transcript.fs_transcript.get_challenge();
         let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
 
@@ -117,7 +115,7 @@ where
 
         let max_degree = count_max_degree::<U>();
 
-        // === Step 4: Verify finite-field PIOP ===
+        // === Step 4: Sumcheck over F_q ===
         let cpr_subclaim = CombinedPolyResolver::verify_as_subprotocol::<U>(
             &mut pcs_transcript.fs_transcript,
             proof.resolver,
@@ -130,10 +128,9 @@ where
             &field_cfg,
         )?;
 
-        // === Step 4.5: Lift-and-project verification ===
-        // Absorb the prover's lifted_evals into the transcript (matching
-        // prover Step 4.5). Then check ψ_a consistency: evaluating each
-        // lifted_eval_j(X) at the projecting element must recover up_eval_j.
+        // === Step 5: Lift-and-project at r' ===
+        // Absorb lifted_evals, then check \psi_a consistency:
+        // \psi_a(lifted_eval_j) must equal open_eval_j.
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
         for bar_u in &proof.lifted_evals {
             pcs_transcript
@@ -159,10 +156,7 @@ where
             }
         }
 
-        // === Step 5: PCS verify (check witness MLE evaluation claims) ====
-        // After the sumcheck, the verifier uses the Zip+ PCS to confirm
-        // that the committed witness MLEs actually evaluate to the claimed
-        // up_evals at the sumcheck challenge point.
+        // === Step 6: PCS verify ===
         //
         // TODO: Once we add public inputs, compute public input MLE evaluations
         //       at cpr_subclaim.evaluation_point directly from public data here,

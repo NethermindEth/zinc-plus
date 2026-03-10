@@ -1,13 +1,14 @@
-//! Zinc+ PIOP for UCS — end-to-end protocol (without PCS).
+//! Zinc+ PIOP for UCS - end-to-end protocol (without PCS).
 //!
-//! Implements the four steps of the Zinc+ compiler:
+//! Implements the Zinc+ compiler pipeline (cf. paper, Section "Zinc+
+//! Compiler"):
 //!
 //! ```text
-//! Z[X]  --φ_q-->  F_q[X]  --MLE eval-->  F_q[X]  --ψ_a-->  F_q
-//!       Step 1             Step 2                  Step 3
+//! Z[X]  --\phi_q-->  F_q[X]  --MLE eval-->  F_q[X]  --\psi_a-->  F_q
+//!         Step 1               Step 2                  Step 3
 //! ```
 //!
-//! Step 4 runs a finite-field PIOP (sumcheck) over F_q.
+//! After the three compiler steps, the protocol runs a sumcheck over F_q.
 //!
 //! The verifier's output is a [`Subclaim`] containing evaluation claims about
 //! the trace column MLEs. In the full protocol, these would be resolved by the
