@@ -128,6 +128,7 @@ fn qx_ideal_check_succeeds_on_valid_sha256_witness() {
                 let two = F::from_with_cfg(2i64, &verify_field_cfg);
                 Sha256QxIdealOverF::DegreeOne(two)
             }
+            IdealOrZero::Ideal(Sha256QxIdeal::Trivial) => Sha256QxIdealOverF::Trivial,
         }
     };
 

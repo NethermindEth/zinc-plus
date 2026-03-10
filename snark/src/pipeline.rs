@@ -32,6 +32,7 @@ use zip_plus::merkle::HASH_OUT_LEN;
 use zip_plus::pcs::structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes};
 use zip_plus::pcs::folding::{
     split_columns, fold_claims_prove, fold_claims_verify, compute_alpha_power,
+    FoldingProverOutput,
 };
 
 use zinc_piop::ideal_check::IdealCheckProtocol;
@@ -64,7 +65,7 @@ use zinc_piop::sumcheck::prover::{NatEvaluatedPolyWithoutConstant, ProverMsg};
 use zinc_piop::sumcheck::{MLSumcheck, SumcheckProof};
 use zinc_piop::sumcheck::multi_degree::{MultiDegreeSumcheck, MultiDegreeSumcheckProof};
 use zinc_piop::shift_sumcheck::{
-    ShiftClaim, ShiftSumcheckProof, ShiftRoundPoly,
+    ShiftClaim, ShiftSumcheckProof, ShiftSumcheckProverOutput, ShiftRoundPoly,
     shift_sumcheck_prove, shift_sumcheck_verify,
     shift_sumcheck_verify_pre, shift_sumcheck_verify_finalize,
 };
@@ -130,6 +131,7 @@ pub struct TimingBreakdown {
     pub lookup_extract: Duration,
     pub shift_sumcheck: Duration,
     pub folding: Duration,
+    pub lifting: Duration,
 }
 
 /// Timing breakdown for verification.
@@ -276,6 +278,18 @@ pub struct Folded4xZincProof {
     /// Q\[X\] CPR up/down evaluations (when a second UAIR is present).
     pub qx_cpr_up_evals: Vec<Vec<u8>>,
     pub qx_cpr_down_evals: Vec<Vec<u8>>,
+    /// Boundary IdealCheck proof values (degree-2 assert_zero constraints).
+    /// Empty when compiled without the `boundary` feature.
+    pub bdry_ic_proof_values: Vec<Vec<u8>>,
+    /// Boundary CPR sumcheck messages and claimed sum.
+    /// When the boundary feature is active the prover emits a multi-degree
+    /// sumcheck that bundles BP CPR and boundary CPR into a single
+    /// evaluation point. Empty when compiled without `boundary`.
+    pub bdry_cpr_sumcheck_messages: Vec<Vec<u8>>,
+    pub bdry_cpr_sumcheck_claimed_sum: Vec<u8>,
+    /// Boundary CPR up/down evaluations at the CPR sumcheck point.
+    pub bdry_cpr_up_evals: Vec<Vec<u8>>,
+    pub bdry_cpr_down_evals: Vec<Vec<u8>>,
     /// Batched decomposed LogUp proof.
     pub lookup_proof: Option<LookupProofData>,
     /// Shift sumcheck proof (for BP UAIR shifts).
@@ -294,6 +308,14 @@ pub struct Folded4xZincProof {
     pub folding_c3s_bytes: Vec<Vec<u8>>,
     /// Fold round 2 (`HALF_D → QUARTER_D`): per-column `c₄ = MLE[q_j](r ‖ γ₁)`.
     pub folding_c4s_bytes: Vec<Vec<u8>>,
+    /// Ring-valued MLE evaluations at the doubly-folded point `r ‖ γ₁ ‖ γ₂`.
+    ///
+    /// For each PCS-committed column `j`, `ring_evals_bytes[j]` encodes the
+    /// `QUARTER_D` coefficients `v_{j,0}, …, v_{j,QUARTER_D-1}` of the
+    /// ring element `ṽ_j(r₂) ∈ F_p[X] / (X^QUARTER_D)`.
+    /// The verifier uses these to bridge PIOP claims (via α-projection) to
+    /// the PCS evaluation claim (via independent α_{j,k} challenges).
+    pub ring_evals_bytes: Vec<Vec<u8>>,
     /// Prover timing breakdown.
     pub timing: TimingBreakdown,
 }
@@ -479,6 +501,307 @@ pub fn reconstruct_shift_v_finals(
     debug_assert_eq!(priv_idx, private_v_finals.len());
     debug_assert_eq!(pub_idx, public_v_finals.len());
     full
+}
+
+/// Eq-polynomial-based folding evaluation for split columns.
+///
+/// Computes `(c₁, c₂)` for each split `BinaryPoly<HALF_D>` column using
+/// the eq-polynomial accumulation trick (same approach as `compute_ring_evals`),
+/// avoiding the project→allocate→clone→MLE-evaluate chain.
+///
+/// For each column `v' = u || w` (length `2n`):
+///   c₁ = MLE[proj(u)](point) = Σ_i proj(u[i]) · eq(point, i)
+///   c₂ = MLE[proj(w)](point) = Σ_i proj(w[i]) · eq(point, i)
+///
+/// Instead of projecting all entries to field, building MLEs, cloning,
+/// and evaluating, we:
+/// 1. Precompute eq(point, i) for all i (one allocation, shared)
+/// 2. For each column, accumulate eq[i] into per-bit accumulators
+/// 3. Combine with α powers: c₁ = Σ_k α^k · accum_lo[k]
+fn compute_folding_evals_eq<const HALF_D: usize>(
+    split_polys: &[DenseMultilinearExtension<BinaryPoly<HALF_D>>],
+    point: &[PiopField],
+    projecting_element: &PiopField,
+    field_cfg: &<PiopField as PrimeField>::Config,
+) -> (Vec<PiopField>, Vec<PiopField>) {
+    use zinc_utils::inner_transparent_field::InnerTransparentField;
+
+    let num_vars = point.len();
+    let n: usize = 1 << num_vars;
+    let zero_inner = <PiopField as Field>::Inner::default();
+    let one_inner = PiopField::one_with_cfg(field_cfg).inner().clone();
+
+    // ── Precompute eq-polynomial tensor eq(point, x) for x ∈ {0,1}^num_vars ──
+    let eq: Vec<<PiopField as Field>::Inner> = {
+        let mut eq = vec![zero_inner.clone(); n];
+        eq[0] = one_inner.clone();
+        for i in 0..num_vars {
+            let r_inner = point[i].inner();
+            let one_minus_r = PiopField::sub_inner(&one_inner, r_inner, field_cfg);
+            let half = 1usize << i;
+            for b in (0..half).rev() {
+                let mut tmp = PiopField::new_unchecked_with_cfg(eq[b].clone(), field_cfg);
+                tmp.mul_assign_by_inner(r_inner);
+                eq[b + half] = tmp.inner().clone();
+
+                let mut tmp2 = PiopField::new_unchecked_with_cfg(eq[b].clone(), field_cfg);
+                tmp2.mul_assign_by_inner(&one_minus_r);
+                eq[b] = tmp2.inner().clone();
+            }
+        }
+        eq
+    };
+
+    // ── Precompute α powers: α^0, α^1, …, α^{HALF_D-1} ──
+    let alpha_powers: Vec<<PiopField as Field>::Inner> = {
+        let mut powers = Vec::with_capacity(HALF_D);
+        let mut curr = PiopField::one_with_cfg(field_cfg);
+        powers.push(curr.inner().clone());
+        for _ in 1..HALF_D {
+            curr *= projecting_element;
+            powers.push(curr.inner().clone());
+        }
+        powers
+    };
+
+    // ── Per-column accumulation ──
+    #[cfg(feature = "parallel")]
+    let col_iter = split_polys.par_iter();
+    #[cfg(not(feature = "parallel"))]
+    let col_iter = split_polys.iter();
+
+    let pairs: Vec<(PiopField, PiopField)> = col_iter
+        .map(|poly| {
+            // accum_lo[k] = Σ_{i: bit_k(u[i])=1} eq[i]
+            // accum_hi[k] = Σ_{i: bit_k(w[i])=1} eq[i]
+            let mut accum_lo: Vec<<PiopField as Field>::Inner> =
+                vec![zero_inner.clone(); HALF_D];
+            let mut accum_hi: Vec<<PiopField as Field>::Inner> =
+                vec![zero_inner.clone(); HALF_D];
+
+            // u = first n entries, w = last n entries
+            for (i, entry) in poly.evaluations[..n].iter().enumerate() {
+                let mut bits: u64 = 0;
+                for (k, coeff) in entry.iter().enumerate().take(HALF_D) {
+                    if coeff.into_inner() {
+                        bits |= 1u64 << k;
+                    }
+                }
+                if bits == 0 {
+                    continue;
+                }
+                let eq_i = &eq[i];
+                let mut remaining = bits;
+                while remaining != 0 {
+                    let k = remaining.trailing_zeros() as usize;
+                    accum_lo[k] = PiopField::add_inner(&accum_lo[k], eq_i, field_cfg);
+                    remaining &= remaining - 1;
+                }
+            }
+
+            for (i, entry) in poly.evaluations[n..].iter().enumerate() {
+                let mut bits: u64 = 0;
+                for (k, coeff) in entry.iter().enumerate().take(HALF_D) {
+                    if coeff.into_inner() {
+                        bits |= 1u64 << k;
+                    }
+                }
+                if bits == 0 {
+                    continue;
+                }
+                let eq_i = &eq[i];
+                let mut remaining = bits;
+                while remaining != 0 {
+                    let k = remaining.trailing_zeros() as usize;
+                    accum_hi[k] = PiopField::add_inner(&accum_hi[k], eq_i, field_cfg);
+                    remaining &= remaining - 1;
+                }
+            }
+
+            // c1 = Σ_k α^k · accum_lo[k]
+            let mut c1_inner = zero_inner.clone();
+            for k in 0..HALF_D {
+                if accum_lo[k] != zero_inner {
+                    let mut tmp = PiopField::new_unchecked_with_cfg(accum_lo[k].clone(), field_cfg);
+                    tmp.mul_assign_by_inner(&alpha_powers[k]);
+                    c1_inner = PiopField::add_inner(&c1_inner, tmp.inner(), field_cfg);
+                }
+            }
+
+            // c2 = Σ_k α^k · accum_hi[k]
+            let mut c2_inner = zero_inner.clone();
+            for k in 0..HALF_D {
+                if accum_hi[k] != zero_inner {
+                    let mut tmp = PiopField::new_unchecked_with_cfg(accum_hi[k].clone(), field_cfg);
+                    tmp.mul_assign_by_inner(&alpha_powers[k]);
+                    c2_inner = PiopField::add_inner(&c2_inner, tmp.inner(), field_cfg);
+                }
+            }
+
+            (
+                PiopField::new_unchecked_with_cfg(c1_inner, field_cfg),
+                PiopField::new_unchecked_with_cfg(c2_inner, field_cfg),
+            )
+        })
+        .collect();
+
+    pairs.into_iter().unzip()
+}
+
+/// Execute a folding round using the eq-polynomial-based evaluation.
+///
+/// Same protocol as `fold_claims_prove`, but uses `compute_folding_evals_eq`
+/// for the c₁/c₂ computation (faster for concrete `PiopField`).
+fn fold_claims_prove_eq<const HALF_D: usize>(
+    transcript: &mut KeccakTranscript,
+    split_polys: &[DenseMultilinearExtension<BinaryPoly<HALF_D>>],
+    point: &[PiopField],
+    projecting_element: &PiopField,
+    field_cfg: &<PiopField as PrimeField>::Config,
+) -> FoldingProverOutput<PiopField> {
+    let (c1s, c2s) = compute_folding_evals_eq::<HALF_D>(
+        split_polys, point, projecting_element, field_cfg,
+    );
+
+    // Absorb c₁, c₂ into transcript
+    let mut buf = vec![0u8; <<PiopField as Field>::Inner as ConstTranscribable>::NUM_BYTES];
+    for c in &c1s {
+        transcript.absorb_random_field(c, &mut buf);
+    }
+    for c in &c2s {
+        transcript.absorb_random_field(c, &mut buf);
+    }
+
+    // Squeeze β (consumed but unused by prover)
+    let _beta: PiopField = transcript.get_field_challenge(field_cfg);
+
+    // Squeeze γ
+    let gamma: PiopField = transcript.get_field_challenge(field_cfg);
+
+    // New point = (r ‖ γ)
+    let mut new_point = point.to_vec();
+    new_point.push(gamma.clone());
+
+    // New claimed evals: d[j] = (1 − γ)·c₁[j] + γ·c₂[j]
+    let one = PiopField::one_with_cfg(field_cfg);
+    let one_minus_gamma = one - gamma.clone();
+    let new_evals: Vec<PiopField> = c1s
+        .iter()
+        .zip(&c2s)
+        .map(|(c1, c2)| {
+            let mut d = one_minus_gamma.clone();
+            d *= c1.clone();
+            let mut g_c2 = gamma.clone();
+            g_c2 *= c2.clone();
+            d += g_c2;
+            d
+        })
+        .collect();
+
+    FoldingProverOutput {
+        c1s,
+        c2s,
+        new_point,
+        new_evals,
+    }
+}
+
+/// Compute the ring-valued MLE evaluations for each committed
+/// `BinaryPoly<QUARTER_D>` column at a given point.
+///
+/// For each column `j` and each coefficient index `k ∈ {0, …, QUARTER_D-1}`,
+/// let `coeff_k(f_j)` denote the vector of k-th coefficients of all entries
+/// in column `j`. Then:
+///
+///   `v_{j,k} = MLE[coeff_k(f_j)](point)`
+///
+/// Returns a flat list of field elements: for column `j` the values
+/// `v_{j,0}, …, v_{j,QUARTER_D-1}` appear at positions
+/// `j * QUARTER_D .. (j+1) * QUARTER_D`.
+pub fn compute_ring_evals<const QUARTER_D: usize>(
+    split_trace_quarter: &[DenseMultilinearExtension<BinaryPoly<QUARTER_D>>],
+    point: &[PiopField],
+    field_cfg: &<PiopField as PrimeField>::Config,
+) -> Vec<PiopField> {
+    use zinc_utils::inner_transparent_field::InnerTransparentField;
+
+    let num_cols = split_trace_quarter.len();
+    let num_vars = point.len();
+    let n: usize = 1 << num_vars;
+    let zero_inner = <PiopField as Field>::Inner::default();
+    let one_inner = PiopField::one_with_cfg(field_cfg).inner().clone();
+
+    // Precompute the eq-polynomial tensor eq(r, x) for all x ∈ {0,1}^num_vars.
+    // eq[b] = ∏_i (r_i · x_i + (1−r_i)(1−x_i))  where b encodes x with
+    // variable 0 as the least-significant bit.
+    let eq: Vec<<PiopField as Field>::Inner> = {
+        let mut eq = vec![zero_inner.clone(); n];
+        eq[0] = one_inner.clone();
+
+        for i in 0..num_vars {
+            let r_inner = point[i].inner();
+            let one_minus_r = PiopField::sub_inner(&one_inner, r_inner, field_cfg);
+            let half = 1usize << i;
+
+            for b in (0..half).rev() {
+                // eq[b + half] = eq[b] · r_i   (x_i = 1)
+                let mut tmp = PiopField::new_unchecked_with_cfg(eq[b].clone(), field_cfg);
+                tmp.mul_assign_by_inner(r_inner);
+                eq[b + half] = tmp.inner().clone();
+
+                // eq[b] = eq[b] · (1 − r_i)    (x_i = 0)
+                let mut tmp2 = PiopField::new_unchecked_with_cfg(eq[b].clone(), field_cfg);
+                tmp2.mul_assign_by_inner(&one_minus_r);
+                eq[b] = tmp2.inner().clone();
+            }
+        }
+        eq
+    };
+
+    // For each column, accumulate Σ_{x: bit_k(entry[x])=1} eq[x] per channel k.
+    #[cfg(feature = "parallel")]
+    let iter = split_trace_quarter.par_iter();
+    #[cfg(not(feature = "parallel"))]
+    let iter = split_trace_quarter.iter();
+
+    let per_col: Vec<Vec<PiopField>> = iter
+        .map(|col| {
+            let mut accum: Vec<<PiopField as Field>::Inner> =
+                vec![zero_inner.clone(); QUARTER_D];
+
+            for (b, entry) in col.evaluations.iter().enumerate().take(n) {
+                // Pack Boolean coefficients into a u64 bitmask.
+                let mut bits: u64 = 0;
+                for (k, coeff) in entry.iter().enumerate().take(QUARTER_D) {
+                    if coeff.into_inner() {
+                        bits |= 1u64 << k;
+                    }
+                }
+                if bits == 0 {
+                    continue;
+                }
+                let eq_b = &eq[b];
+                let mut remaining = bits;
+                while remaining != 0 {
+                    let k = remaining.trailing_zeros() as usize;
+                    accum[k] = PiopField::add_inner(&accum[k], eq_b, field_cfg);
+                    remaining &= remaining - 1;
+                }
+            }
+
+            accum
+                .into_iter()
+                .map(|v| PiopField::new_unchecked_with_cfg(v, field_cfg))
+                .collect()
+        })
+        .collect();
+
+    // Flatten into a single Vec: [v_{0,0}, …, v_{0,Q-1}, v_{1,0}, …]
+    let mut out = Vec::with_capacity(num_cols * QUARTER_D);
+    for col_evals in per_col {
+        out.extend(col_evals);
+    }
+    out
 }
 
 /// Project only the trace columns referenced by `lookup_specs` to field
@@ -1868,6 +2191,112 @@ where
         .expect("Q[X] ideal check prover failed");
     let ideal_check_time = t1.elapsed();
 
+    // ── Step 2c: Boundary Ideal Check (sparse) ─────────────────────
+    #[cfg(feature = "boundary")]
+    let bdry_num_constraints = zinc_sha256_uair::boundary::BDRY_NUM_CONSTRAINTS;
+
+    #[cfg(feature = "boundary")]
+    let bdry_ic_proof = {
+        use zinc_sha256_uair::{
+            COL_A_HAT, COL_E_HAT, COL_W_HAT,
+            COL_D_HAT, COL_H_HAT,
+            COL_A_TM1, COL_A_TM2, COL_E_TM1, COL_E_TM2,
+            constants::H,
+        };
+
+        let num_rows: usize = 1 << num_vars;
+        let one_f = PiopField::one_with_cfg(&field_cfg);
+        let zero_f = PiopField::zero_with_cfg(&field_cfg);
+
+        let eq_weights = zinc_poly::utils::build_eq_x_r_vec(
+            &ic_state.evaluation_point, &field_cfg,
+        ).expect("build eq weights for boundary IC");
+
+        let project_bp = |bp: &BinaryPoly<D>| -> DynamicPolynomialF<PiopField> {
+            DynamicPolynomialF::new_trimmed(
+                bp.iter()
+                    .map(|b| if b.into_inner() { one_f.clone() } else { zero_f.clone() })
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        let last_active = num_rows.saturating_sub(5);
+        let mut combined = vec![DynamicPolynomialF::<PiopField>::new([]); bdry_num_constraints];
+
+        let mut accumulate = |result: &mut DynamicPolynomialF<PiopField>,
+                              row: usize,
+                              poly: DynamicPolynomialF<PiopField>| {
+            if row < num_rows - 1 && !poly.coeffs.is_empty() {
+                let scaled = DynamicPolynomialF::new_trimmed(
+                    poly.coeffs.iter().map(|c| c.clone() * &eq_weights[row]).collect::<Vec<_>>(),
+                );
+                *result += &scaled;
+            }
+        };
+
+        // B1–B8
+        {
+            let cols_h: [(usize, u32); 8] = [
+                (COL_A_HAT, H[0]), (COL_E_HAT, H[4]),
+                (COL_D_HAT, H[3]), (COL_H_HAT, H[7]),
+                (COL_A_TM1, H[1]), (COL_A_TM2, H[2]),
+                (COL_E_TM1, H[5]), (COL_E_TM2, H[6]),
+            ];
+            for (k, &(ci, hv)) in cols_h.iter().enumerate() {
+                let expr = project_bp(&trace[ci][0])
+                    - &project_bp(&BinaryPoly::<D>::from(hv));
+                accumulate(&mut combined[k], 0, expr);
+            }
+        }
+
+        // B9–B10
+        for offset in 0..4u32 {
+            let row = last_active.saturating_sub(offset as usize);
+            let a_expr = project_bp(&trace[COL_A_HAT][row])
+                - &project_bp(&trace[COL_A_HAT][row]);
+            let e_expr = project_bp(&trace[COL_E_HAT][row])
+                - &project_bp(&trace[COL_E_HAT][row]);
+            accumulate(&mut combined[8], row, a_expr);
+            accumulate(&mut combined[9], row, e_expr);
+        }
+
+        // B11
+        for t in 0..16usize.min(num_rows.saturating_sub(1)) {
+            let expr = project_bp(&trace[COL_W_HAT][t])
+                - &project_bp(&trace[COL_W_HAT][t]);
+            accumulate(&mut combined[10], t, expr);
+        }
+
+        // B12–B13
+        for t in num_rows.saturating_sub(3)..num_rows.saturating_sub(1) {
+            accumulate(&mut combined[11], t, project_bp(&trace[COL_A_HAT][t]));
+            accumulate(&mut combined[12], t, project_bp(&trace[COL_E_HAT][t]));
+        }
+
+        combined.iter_mut().for_each(|p| p.trim());
+
+        let mut tb: Vec<u8> = vec![
+            0;
+            <<PiopField as Field>::Inner as ConstTranscribable>::NUM_BYTES
+        ];
+        for v in &combined {
+            transcript.absorb_random_field_slice(&v.coeffs, &mut tb);
+        }
+
+        zinc_piop::ideal_check::Proof { combined_mle_values: combined }
+    };
+
+    #[cfg(feature = "boundary")]
+    let bdry_projected_scalars = project_scalars::<PiopField, zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x>(|scalar| {
+        let one = PiopField::one_with_cfg(&field_cfg);
+        let zero = PiopField::zero_with_cfg(&field_cfg);
+        DynamicPolynomialF::new(
+            scalar.iter().map(|coeff| {
+                if coeff.into_inner() { one.clone() } else { zero.clone() }
+            }).collect::<Vec<_>>()
+        )
+    });
+
     // ── Step 3: Batched CPR + Lookup via multi-degree sumcheck ───────
     let t2 = Instant::now();
     let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
@@ -1895,6 +2324,10 @@ where
         None
     };
 
+    // Clone base field trace for boundary CPR before BP CPR consumes it.
+    #[cfg(feature = "boundary")]
+    let base_field_trace_for_bdry = field_trace.clone();
+
     let mut cpr_group = CombinedPolyResolver::<PiopField>::build_prover_group::<U>(
         &mut transcript,
         field_trace,
@@ -1910,6 +2343,52 @@ where
 
     // NOTE: QX CPR group is skipped — for MLE-first (max_degree == 1)
     // the sumcheck is redundant.
+
+    // ── Boundary CPR group (degree 4 = constraint degree 2 + CPR overhead 2) ──
+    #[cfg(feature = "boundary")]
+    let bdry_field_projected_scalars = {
+        project_scalars_to_field(bdry_projected_scalars, &projecting_element)
+            .expect("boundary scalar projection failed")
+    };
+
+    #[cfg(feature = "boundary")]
+    let bdry_field_trace = {
+        let bdry_only_cols = zinc_sha256_uair::boundary::generate_boundary_columns_only::<D>(
+            trace, num_vars,
+        );
+        let bdry_only_projected = project_trace_to_field::<PiopField, D>(
+            &bdry_only_cols, &[], &[], &projecting_element,
+        );
+        let base_bp_count = zinc_sha256_uair::no_f2x::NO_F2X_NUM_BITPOLY_COLS;
+        let mut t: Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>> =
+            Vec::with_capacity(
+                zinc_sha256_uair::boundary::BDRY_NUM_BITPOLY_COLS
+                + zinc_sha256_uair::no_f2x::NO_F2X_NUM_INT_COLS,
+            );
+        t.extend(base_field_trace_for_bdry[..base_bp_count].iter().cloned());
+        t.extend(bdry_only_projected);
+        t.extend(base_field_trace_for_bdry[base_bp_count..].iter().cloned());
+        t
+    };
+
+    #[cfg(feature = "boundary")]
+    let bdry_max_degree = count_max_degree::<zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x>();
+
+    #[cfg(feature = "boundary")]
+    let bdry_cpr_group = CombinedPolyResolver::<PiopField>::build_prover_group::<zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x>(
+        &mut transcript,
+        bdry_field_trace,
+        &ic_state.evaluation_point,
+        &bdry_field_projected_scalars,
+        bdry_num_constraints,
+        num_vars,
+        bdry_max_degree,
+        &field_cfg,
+    )
+    .expect("Boundary CPR build_prover_group failed");
+
+    #[cfg(feature = "boundary")]
+    let bdry_cpr_num_cols = bdry_cpr_group.num_cols;
 
     let mut lookup_groups_data: Vec<(LookupSumcheckGroup<PiopField>, LookupGroupMeta)> = Vec::new();
     if let Some((ref columns, ref raw_indices, ref remapped_specs, ref ws_map)) = lookup_precomputed {
@@ -1961,10 +2440,25 @@ where
         }
     }
 
-    // QX CPR is skipped — lookups always start at group 1 (0 = BP CPR).
-    const QX_GROUP_OFFSET: usize = 0;
+    // QX CPR is skipped.  When boundary is enabled, the boundary CPR group
+    // sits at index 1 and lookups start at index 2.  Otherwise lookups
+    // start at index 1.
+    #[cfg(feature = "boundary")]
+    let bdry_group_offset: usize = 1;
+    #[cfg(not(feature = "boundary"))]
+    let bdry_group_offset: usize = 0;
 
     let has_lookup = !lookup_groups_data.is_empty();
+
+    // Boundary CPR up/down evals — populated from within the multi-degree
+    // sumcheck branches below when boundary is enabled.
+    #[cfg(feature = "boundary")]
+    #[allow(unused_assignments)]
+    let mut bdry_up_evals_out: Vec<PiopField> = vec![];
+    #[cfg(feature = "boundary")]
+    #[allow(unused_assignments)]
+    let mut bdry_down_evals_out: Vec<PiopField> = vec![];
+
     let (batched_proof, evaluation_point, cpr_up_evals, cpr_down_evals,
          qx_up_evals, qx_down_evals, _lookup_proof) =
     if has_lookup {
@@ -1972,9 +2466,12 @@ where
             usize,
             Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>>,
             Box<dyn Fn(&[PiopField]) -> PiopField + Send + Sync>,
-        )> = Vec::with_capacity(1 + lookup_groups_data.len());
+        )> = Vec::with_capacity(1 + bdry_group_offset + lookup_groups_data.len());
 
         sumcheck_groups.push((cpr_group.degree, cpr_group.mles, cpr_group.comb_fn));
+
+        #[cfg(feature = "boundary")]
+        sumcheck_groups.push((bdry_cpr_group.degree, bdry_cpr_group.mles, bdry_cpr_group.comb_fn));
 
         let mut lookup_pre_data: Vec<(LookupSumcheckGroup<PiopField>, LookupGroupMeta)> = Vec::new();
         for (lk_group, meta) in lookup_groups_data {
@@ -2009,16 +2506,32 @@ where
             )
             .expect("CPR finalize_prover failed");
 
+        // Finalize boundary CPR (group 1, if boundary enabled).
+        #[cfg(feature = "boundary")]
+        {
+            let bdry_prover_state = prover_states.remove(0);
+            let (bdry_up, bdry_down, _) =
+                CombinedPolyResolver::<PiopField>::finalize_prover(
+                    &mut transcript,
+                    bdry_prover_state,
+                    bdry_cpr_num_cols,
+                    &field_cfg,
+                )
+                .expect("Boundary CPR finalize_prover failed");
+            bdry_up_evals_out = bdry_up;
+            bdry_down_evals_out = bdry_down;
+        }
+
         // QX CPR is skipped — no QX group to finalize.
         let (qx_up, qx_down): (Vec<PiopField>, Vec<PiopField>) = (vec![], vec![]);
 
-        // Finalize lookup groups (group 1 ..)
+        // Finalize lookup groups (group 1+bdry_offset ..)
         let mut lookup_group_proofs = Vec::new();
         let mut lookup_group_meta = Vec::new();
         for (i, (lk_pre, meta)) in lookup_pre_data.into_iter().enumerate() {
             let lk_sumcheck_proof = SumcheckProof {
-                messages: md_proof.group_messages[i + 1 + QX_GROUP_OFFSET].iter().cloned().collect(),
-                claimed_sum: md_proof.claimed_sums[i + 1 + QX_GROUP_OFFSET].clone(),
+                messages: md_proof.group_messages[i + 1 + bdry_group_offset].iter().cloned().collect(),
+                claimed_sum: md_proof.claimed_sums[i + 1 + bdry_group_offset].clone(),
             };
             let lk_eval_point = prover_states.remove(0).randomness;
             let (lk_proof, _lk_state) =
@@ -2053,10 +2566,13 @@ where
             true,
         )
     } else {
-        // BP CPR only, no lookups (QX CPR is skipped).
-        let groups = vec![
+        // BP CPR (+ boundary CPR if enabled), no lookups.
+        let mut groups = vec![
             (cpr_group.degree, cpr_group.mles, cpr_group.comb_fn),
         ];
+
+        #[cfg(feature = "boundary")]
+        groups.push((bdry_cpr_group.degree, bdry_cpr_group.mles, bdry_cpr_group.comb_fn));
 
         let (md_proof, mut prover_states) =
             MultiDegreeSumcheck::<PiopField>::prove_as_subprotocol(
@@ -2075,6 +2591,21 @@ where
                 &field_cfg,
             )
             .expect("CPR finalize_prover failed");
+
+        #[cfg(feature = "boundary")]
+        {
+            let bdry_prover_state = prover_states.remove(0);
+            let (bdry_up, bdry_down, _) =
+                CombinedPolyResolver::<PiopField>::finalize_prover(
+                    &mut transcript,
+                    bdry_prover_state,
+                    bdry_cpr_num_cols,
+                    &field_cfg,
+                )
+                .expect("Boundary CPR finalize_prover failed");
+            bdry_up_evals_out = bdry_up;
+            bdry_down_evals_out = bdry_down;
+        }
 
         let (qx_up, qx_down): (Vec<PiopField>, Vec<PiopField>) = (vec![], vec![]);
 
@@ -2140,6 +2671,15 @@ where
         )
         .expect("PCS prove failed (4x folded)");
     let pcs_prove_time = t3.elapsed();
+
+    // Ring-valued MLE evaluations (PIOP↔PCS bridge).
+    let t_lift = Instant::now();
+    let ring_evals: Vec<PiopField> = compute_ring_evals::<QUARTER_D>(
+        &split_trace_quarter,
+        &fold2_output.new_point,
+        &field_cfg,
+    );
+    let lifting_time = t_lift.elapsed();
     let total_time = total_start.elapsed();
 
     // ── Serialize ─────────────────────────────────────────────────────
@@ -2171,6 +2711,8 @@ where
     let folding_c3s_bytes: Vec<Vec<u8>> = fold2_output.c1s.iter().map(field_to_bytes).collect();
     let folding_c4s_bytes: Vec<Vec<u8>> = fold2_output.c2s.iter().map(field_to_bytes).collect();
 
+    let ring_evals_bytes: Vec<Vec<u8>> = ring_evals.iter().map(field_to_bytes).collect();
+
     // Serialize QX CPR evals
     let qx_cpr_up_evals_bytes: Vec<Vec<u8>> = qx_up_evals.iter().map(field_to_bytes).collect();
     let qx_cpr_down_evals_bytes: Vec<Vec<u8>> = qx_down_evals.iter().map(field_to_bytes).collect();
@@ -2185,6 +2727,33 @@ where
     #[cfg(not(feature = "qx-constraints"))]
     let qx_ic_values: Vec<Vec<u8>> = vec![];
 
+    // Serialize boundary IC proof values
+    #[cfg(feature = "boundary")]
+    let bdry_ic_values: Vec<Vec<u8>> = bdry_ic_proof
+        .combined_mle_values
+        .iter()
+        .map(|dpf| dpf.coeffs.iter().flat_map(|c| field_to_bytes(c)).collect())
+        .collect();
+    #[cfg(not(feature = "boundary"))]
+    let bdry_ic_values: Vec<Vec<u8>> = vec![];
+
+    // Serialize boundary CPR up/down evals
+    #[cfg(feature = "boundary")]
+    let bdry_cpr_up_evals_bytes: Vec<Vec<u8>> = {
+        let bdry_sig = zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x::signature();
+        bdry_up_evals_out.iter()
+            .enumerate()
+            .filter(|(i, _)| !bdry_sig.is_public_column(*i))
+            .map(|(_, v)| field_to_bytes(v))
+            .collect()
+    };
+    #[cfg(not(feature = "boundary"))]
+    let bdry_cpr_up_evals_bytes: Vec<Vec<u8>> = vec![];
+    #[cfg(feature = "boundary")]
+    let bdry_cpr_down_evals_bytes: Vec<Vec<u8>> = bdry_down_evals_out.iter().map(field_to_bytes).collect();
+    #[cfg(not(feature = "boundary"))]
+    let bdry_cpr_down_evals_bytes: Vec<Vec<u8>> = vec![];
+
     Folded4xZincProof {
         pcs_proof_bytes: proof_bytes,
         commitment,
@@ -2198,6 +2767,11 @@ where
         qx_cpr_down_evals: qx_cpr_down_evals_bytes,
         qx_cpr_sumcheck_messages: vec![],
         qx_cpr_sumcheck_claimed_sum: vec![0u8; <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES],
+        bdry_ic_proof_values: bdry_ic_values,
+        bdry_cpr_sumcheck_messages: vec![],
+        bdry_cpr_sumcheck_claimed_sum: vec![0u8; <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES],
+        bdry_cpr_up_evals: bdry_cpr_up_evals_bytes,
+        bdry_cpr_down_evals: bdry_cpr_down_evals_bytes,
         lookup_proof: batched_proof,
         shift_sumcheck: None,
         qx_shift_sumcheck: None,
@@ -2207,6 +2781,7 @@ where
         folding_c2s_bytes,
         folding_c3s_bytes,
         folding_c4s_bytes,
+        ring_evals_bytes,
         timing: TimingBreakdown {
             pcs_commit: pcs_commit_time,
             ideal_check: ideal_check_time,
@@ -2215,6 +2790,7 @@ where
             pcs_prove: pcs_prove_time,
             serialize: Duration::ZERO,
             total: total_time,
+            lifting: lifting_time,
             ..Default::default()
         },
     }
@@ -2638,14 +3214,127 @@ where
         .expect("Q[X] ideal check prover failed (hybrid GKR 4x folded)");
 
     let qx_ideal_check_time = t_qx_ic.elapsed();
+
+    // ── Step 2c: Boundary Ideal Check (hybrid GKR, sparse) ─────────
+    //
+    // Boundary constraints are all `sel · expr` where selectors are
+    // sparse (1 at ~22 rows out of 512).  Instead of evaluating all
+    // 511 rows × 40+ columns through the generic IC prover, we only
+    // process the ~22 active rows and project only the 1-2 columns
+    // each constraint actually references.
+    #[cfg(feature = "boundary")]
+    let bdry_num_constraints = zinc_sha256_uair::boundary::BDRY_NUM_CONSTRAINTS;
+
+    #[cfg(feature = "boundary")]
+    let bdry_ic_proof = {
+        use zinc_sha256_uair::{
+            COL_A_HAT, COL_E_HAT, COL_W_HAT,
+            COL_D_HAT, COL_H_HAT,
+            COL_A_TM1, COL_A_TM2, COL_E_TM1, COL_E_TM2,
+            constants::H,
+        };
+
+        let num_rows: usize = 1 << num_vars;
+        let one_f = PiopField::one_with_cfg(&field_cfg);
+        let zero_f = PiopField::zero_with_cfg(&field_cfg);
+
+        let eq_weights = zinc_poly::utils::build_eq_x_r_vec(
+            &ic_state.evaluation_point, &field_cfg,
+        ).expect("build eq weights for boundary IC");
+
+        let project_bp = |bp: &BinaryPoly<D>| -> DynamicPolynomialF<PiopField> {
+            DynamicPolynomialF::new_trimmed(
+                bp.iter()
+                    .map(|b| if b.into_inner() { one_f.clone() } else { zero_f.clone() })
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        let last_active = num_rows.saturating_sub(5);
+        let mut combined = vec![DynamicPolynomialF::<PiopField>::new([]); bdry_num_constraints];
+
+        // Scale a DynamicPolynomialF by a field element and accumulate.
+        let mut accumulate = |result: &mut DynamicPolynomialF<PiopField>,
+                              row: usize,
+                              poly: DynamicPolynomialF<PiopField>| {
+            if row < num_rows - 1 && !poly.coeffs.is_empty() {
+                let scaled = DynamicPolynomialF::new_trimmed(
+                    poly.coeffs.iter().map(|c| c.clone() * &eq_weights[row]).collect::<Vec<_>>(),
+                );
+                *result += &scaled;
+            }
+        };
+
+        // B1–B8: sel_init(row=0) × (col − H[i])
+        {
+            let cols_h: [(usize, u32); 8] = [
+                (COL_A_HAT, H[0]), (COL_E_HAT, H[4]),
+                (COL_D_HAT, H[3]), (COL_H_HAT, H[7]),
+                (COL_A_TM1, H[1]), (COL_A_TM2, H[2]),
+                (COL_E_TM1, H[5]), (COL_E_TM2, H[6]),
+            ];
+            for (k, &(ci, hv)) in cols_h.iter().enumerate() {
+                let expr = project_bp(&trace[ci][0])
+                    - &project_bp(&BinaryPoly::<D>::from(hv));
+                accumulate(&mut combined[k], 0, expr);
+            }
+        }
+
+        // B9: sel_final_any × (â − out_a)  |  B10: ... × (ê − out_e)
+        // out_{a,e}[row] ≡ trace[COL_{A,E}_HAT][row] by witness construction.
+        for offset in 0..4u32 {
+            let row = last_active.saturating_sub(offset as usize);
+            let a_expr = project_bp(&trace[COL_A_HAT][row])
+                - &project_bp(&trace[COL_A_HAT][row]);
+            let e_expr = project_bp(&trace[COL_E_HAT][row])
+                - &project_bp(&trace[COL_E_HAT][row]);
+            accumulate(&mut combined[8], row, a_expr);
+            accumulate(&mut combined[9], row, e_expr);
+        }
+
+        // B11: sel_msg × (W_hat − msg_expected)
+        // msg_expected[t] ≡ trace[COL_W_HAT][t] by witness construction.
+        for t in 0..16usize.min(num_rows.saturating_sub(1)) {
+            let expr = project_bp(&trace[COL_W_HAT][t])
+                - &project_bp(&trace[COL_W_HAT][t]);
+            accumulate(&mut combined[10], t, expr);
+        }
+
+        // B12: sel_zero × â  |  B13: sel_zero × ê
+        // Active rows: N−3, N−2 (N−1 excluded, matching generic IC row limit).
+        for t in num_rows.saturating_sub(3)..num_rows.saturating_sub(1) {
+            accumulate(&mut combined[11], t, project_bp(&trace[COL_A_HAT][t]));
+            accumulate(&mut combined[12], t, project_bp(&trace[COL_E_HAT][t]));
+        }
+
+        combined.iter_mut().for_each(|p| p.trim());
+
+        // Absorb into transcript (mirrors prove_from_binary_poly_at_point).
+        let mut tb: Vec<u8> = vec![
+            0;
+            <<PiopField as Field>::Inner as ConstTranscribable>::NUM_BYTES
+        ];
+        for v in &combined {
+            transcript.absorb_random_field_slice(&v.coeffs, &mut tb);
+        }
+
+        zinc_piop::ideal_check::Proof { combined_mle_values: combined }
+    };
+
+    #[cfg(feature = "boundary")]
+    let bdry_projected_scalars = project_scalars::<PiopField, zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x>(|scalar| {
+        let one = PiopField::one_with_cfg(&field_cfg);
+        let zero = PiopField::zero_with_cfg(&field_cfg);
+        DynamicPolynomialF::new(
+            scalar.iter().map(|coeff| {
+                if coeff.into_inner() { one.clone() } else { zero.clone() }
+            }).collect::<Vec<_>>()
+        )
+    });
+
     let ideal_check_time = t1.elapsed();
 
-    // ── Step 3: Project trace and evaluate columns at IC point ────
-    //
-    // The CPR sumcheck is removed for MLE-first (max_degree == 1):
-    // the ideal check already verified constraint satisfaction, and
-    // the column evaluations are checked by the folding + PCS chain.
-    // The evaluation point is the one from the ideal check.
+    // ── Step 3: Column evaluations at IC/CPR point ────
     let t2 = Instant::now();
     let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
     let t_proj = Instant::now();
@@ -2675,18 +3364,21 @@ where
         None
     };
 
-    // Extract source columns for shift sumcheck.
-    let shift_trace_columns: Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>> =
-        sig.shifts.iter().map(|spec| field_trace[spec.source_col].clone()).collect();
     let lookup_extract_time = t_lk_extract.elapsed();
 
-    // Evaluate all field-trace columns at the IC evaluation point.
+    // ── Path A (no boundary): direct column eval + absorb ──────────
+    //
+    // When boundary is NOT enabled, the CPR sumcheck is skipped for
+    // MLE-first (max_degree == 1).  Column evaluations at the IC point
+    // are verified through the folding + PCS chain.
+    #[cfg(not(feature = "boundary"))]
     let evaluation_point = ic_state.evaluation_point;
+    #[cfg(not(feature = "boundary"))]
     let up_evals: Vec<PiopField> = cfg_iter!(field_trace)
         .map(|col| col.evaluate_with_config(&evaluation_point, &field_cfg)
             .expect("column evaluation failed"))
         .collect();
-    // Evaluate shifted columns at the IC evaluation point.
+    #[cfg(not(feature = "boundary"))]
     let down_evals: Vec<PiopField> = cfg_iter!(sig.shifts)
         .map(|spec| {
             let shifted: DenseMultilinearExtension<<PiopField as Field>::Inner> =
@@ -2695,12 +3387,125 @@ where
                 .expect("shifted column evaluation failed")
         })
         .collect();
+    #[cfg(not(feature = "boundary"))]
+    {
+        let mut transcription_buf: Vec<u8> = vec![0; <<PiopField as Field>::Inner as ConstTranscribable>::NUM_BYTES];
+        transcript.absorb_random_field_slice(&up_evals, &mut transcription_buf);
+        transcript.absorb_random_field_slice(&down_evals, &mut transcription_buf);
+    }
 
-    // Absorb column evaluations into transcript (replaces CPR
-    // transcript interaction so downstream challenges depend on them).
-    let mut transcription_buf: Vec<u8> = vec![0; <<PiopField as Field>::Inner as ConstTranscribable>::NUM_BYTES];
-    transcript.absorb_random_field_slice(&up_evals, &mut transcription_buf);
-    transcript.absorb_random_field_slice(&down_evals, &mut transcription_buf);
+    // ── Path B (boundary): CPR multi-degree sumcheck ──────────────
+    //
+    // When boundary IS enabled, we run a multi-degree sumcheck over
+    // [BP CPR, boundary CPR] to produce column evaluations at the
+    // sumcheck point s.  The CPR handles shifts internally, so the
+    // shift sumcheck is skipped.
+    //
+    // The boundary CPR field trace is constructed by cloning the
+    // already-projected base field trace and appending only the 7
+    // newly projected boundary columns.  This avoids re-projecting
+    // 33 base columns from BinaryPoly<D>.
+    #[cfg(feature = "boundary")]
+    let (evaluation_point, up_evals, down_evals,
+         bdry_up_evals_out, bdry_down_evals_out,
+         md_proof_for_serialization) = {
+        let field_projected_scalars =
+            project_scalars_to_field(projected_scalars, &projecting_element)
+                .expect("scalar projection failed (hybrid GKR boundary)");
+
+        // Clone base field trace for boundary CPR before BP CPR consumes it.
+        let base_field_trace_for_bdry = field_trace.clone();
+
+        let cpr_group = CombinedPolyResolver::<PiopField>::build_prover_group::<U>(
+            &mut transcript,
+            field_trace,
+            &ic_state.evaluation_point,
+            &field_projected_scalars,
+            num_constraints,
+            num_vars,
+            max_degree,
+            &field_cfg,
+        )
+        .expect("CPR build_prover_group failed (hybrid GKR boundary)");
+        let cpr_num_cols = cpr_group.num_cols;
+
+        // Boundary CPR group (degree 4 = constraint degree 2 + CPR overhead 2).
+        let bdry_field_projected_scalars =
+            project_scalars_to_field(bdry_projected_scalars, &projecting_element)
+                .expect("boundary scalar projection failed (hybrid GKR)");
+
+        // Construct boundary field trace: reuse projected base columns,
+        // project only the 7 new boundary columns.
+        let bdry_only_cols = zinc_sha256_uair::boundary::generate_boundary_columns_only::<D>(
+            trace, num_vars,
+        );
+        let bdry_only_projected = project_trace_to_field::<PiopField, D>(
+            &bdry_only_cols, &[], &[], &projecting_element,
+        );
+        let base_bp_count = zinc_sha256_uair::no_f2x::NO_F2X_NUM_BITPOLY_COLS;
+        let bdry_field_trace = {
+            let mut t: Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>> =
+                Vec::with_capacity(
+                    zinc_sha256_uair::boundary::BDRY_NUM_BITPOLY_COLS
+                    + zinc_sha256_uair::no_f2x::NO_F2X_NUM_INT_COLS,
+                );
+            t.extend(base_field_trace_for_bdry[..base_bp_count].iter().cloned());
+            t.extend(bdry_only_projected);
+            t.extend(base_field_trace_for_bdry[base_bp_count..].iter().cloned());
+            t
+        };
+
+        let bdry_max_degree = count_max_degree::<zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x>();
+        let bdry_cpr_group = CombinedPolyResolver::<PiopField>::build_prover_group::<zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x>(
+            &mut transcript,
+            bdry_field_trace,
+            &ic_state.evaluation_point,
+            &bdry_field_projected_scalars,
+            bdry_num_constraints,
+            num_vars,
+            bdry_max_degree,
+            &field_cfg,
+        )
+        .expect("Boundary CPR build_prover_group failed (hybrid GKR)");
+        let bdry_cpr_num_cols = bdry_cpr_group.num_cols;
+
+        // Multi-degree sumcheck [BP CPR, boundary CPR].
+        let groups = vec![
+            (cpr_group.degree, cpr_group.mles, cpr_group.comb_fn),
+            (bdry_cpr_group.degree, bdry_cpr_group.mles, bdry_cpr_group.comb_fn),
+        ];
+        let (md_proof, mut prover_states) =
+            MultiDegreeSumcheck::<PiopField>::prove_as_subprotocol(
+                &mut transcript,
+                groups,
+                num_vars,
+                &field_cfg,
+            );
+
+        // Finalize BP CPR (group 0).
+        let cpr_prover_state = prover_states.remove(0);
+        let (up_ev, down_ev, cpr_state_final) =
+            CombinedPolyResolver::<PiopField>::finalize_prover(
+                &mut transcript,
+                cpr_prover_state,
+                cpr_num_cols,
+                &field_cfg,
+            )
+            .expect("CPR finalize_prover failed (hybrid GKR boundary)");
+
+        // Finalize boundary CPR (group 1).
+        let bdry_prover_state = prover_states.remove(0);
+        let (bdry_up, bdry_down, _) =
+            CombinedPolyResolver::<PiopField>::finalize_prover(
+                &mut transcript,
+                bdry_prover_state,
+                bdry_cpr_num_cols,
+                &field_cfg,
+            )
+            .expect("Boundary CPR finalize_prover failed (hybrid GKR)");
+
+        (cpr_state_final.evaluation_point, up_ev, down_ev, bdry_up, bdry_down, md_proof)
+    };
 
     let cpr_time = t2.elapsed();
 
@@ -2725,8 +3530,14 @@ where
     let lookup_time = t2b.elapsed();
 
     // ── Step 3c: Shift Sumcheck (reduce shifted-column claims) ──────
+    //
+    // When boundary is enabled, the CPR sumcheck handles shifts
+    // internally via down_evals — no separate shift sumcheck needed.
     let t_shift = Instant::now();
+    #[cfg(not(feature = "boundary"))]
     let shift_sumcheck_output = if !sig.shifts.is_empty() {
+        let shift_trace_columns: Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>> =
+            sig.shifts.iter().map(|spec| field_trace[spec.source_col].clone()).collect();
         let claims: Vec<ShiftClaim<PiopField>> = sig.shifts
             .iter()
             .enumerate()
@@ -2747,6 +3558,8 @@ where
     } else {
         None
     };
+    #[cfg(feature = "boundary")]
+    let shift_sumcheck_output: Option<ShiftSumcheckProverOutput<PiopField>> = None;
     let shift_sumcheck_time = t_shift.elapsed();
 
     // ── Step 4: Two-round folding protocol ────────────────────────────
@@ -2771,6 +3584,15 @@ where
     )
     .expect("Folding round 2 failed (hybrid GKR 4x folded)");
     let folding_time = t_fold.elapsed();
+
+    // ── Step 4b: Ring-valued MLE evaluations (PIOP↔PCS bridge) ───────
+    let t_lift = Instant::now();
+    let ring_evals: Vec<PiopField> = compute_ring_evals::<QUARTER_D>(
+        &split_trace_quarter,
+        &fold2_output.new_point,
+        &field_cfg,
+    );
+    let lifting_time = t_lift.elapsed();
 
     // ── Step 5: PCS Prove at (r ‖ γ₁ ‖ γ₂) over QUARTER_D columns ───
     let t3 = Instant::now();
@@ -2797,9 +3619,19 @@ where
         .map(|dpf| dpf.coeffs.iter().flat_map(|c| field_to_bytes(c)).collect())
         .collect();
 
-    // CPR sumcheck is skipped — emit empty data.
+    // CPR serialization: when boundary is enabled, serialize the
+    // multi-degree sumcheck proof per group.  Otherwise emit empty data.
+    #[cfg(not(feature = "boundary"))]
     let cpr_sumcheck_messages: Vec<Vec<u8>> = vec![];
+    #[cfg(not(feature = "boundary"))]
     let cpr_sumcheck_claimed_sum = vec![0u8; <<PiopField as Field>::Inner as ConstTranscribable>::NUM_BYTES];
+    #[cfg(feature = "boundary")]
+    let cpr_sumcheck_messages: Vec<Vec<u8>> = md_proof_for_serialization.group_messages[0]
+        .iter()
+        .map(|rp| rp.0.tail_evaluations.iter().flat_map(|e| field_to_bytes(e)).collect())
+        .collect();
+    #[cfg(feature = "boundary")]
+    let cpr_sumcheck_claimed_sum = field_to_bytes(&md_proof_for_serialization.claimed_sums[0]);
     let cpr_up_evals_bytes: Vec<Vec<u8>> = up_evals.iter()
         .enumerate()
         .filter(|(i, _)| !sig.is_public_column(*i))
@@ -2815,6 +3647,9 @@ where
     // fold2: c3s / c4s  (round 2, HALF_D → QUARTER_D)
     let folding_c3s_bytes: Vec<Vec<u8>> = fold2_output.c1s.iter().map(field_to_bytes).collect();
     let folding_c4s_bytes: Vec<Vec<u8>> = fold2_output.c2s.iter().map(field_to_bytes).collect();
+
+    // Ring-valued evaluations: QUARTER_D field elements per column.
+    let ring_evals_bytes: Vec<Vec<u8>> = ring_evals.iter().map(field_to_bytes).collect();
 
     // QX CPR is skipped (MLE-first: sumcheck is redundant).
     // Emit empty QX CPR data.
@@ -2833,6 +3668,44 @@ where
     #[cfg(not(feature = "qx-constraints"))]
     let qx_ic_values: Vec<Vec<u8>> = vec![];
 
+    // Serialize boundary IC proof values
+    #[cfg(feature = "boundary")]
+    let bdry_ic_values: Vec<Vec<u8>> = bdry_ic_proof
+        .combined_mle_values
+        .iter()
+        .map(|dpf| dpf.coeffs.iter().flat_map(|c| field_to_bytes(c)).collect())
+        .collect();
+    #[cfg(not(feature = "boundary"))]
+    let bdry_ic_values: Vec<Vec<u8>> = vec![];
+
+    // Serialize boundary CPR sumcheck messages and up/down evals.
+    #[cfg(feature = "boundary")]
+    let bdry_cpr_sumcheck_messages_bytes: Vec<Vec<u8>> = md_proof_for_serialization.group_messages[1]
+        .iter()
+        .map(|rp| rp.0.tail_evaluations.iter().flat_map(|e| field_to_bytes(e)).collect())
+        .collect();
+    #[cfg(not(feature = "boundary"))]
+    let bdry_cpr_sumcheck_messages_bytes: Vec<Vec<u8>> = vec![];
+    #[cfg(feature = "boundary")]
+    let bdry_cpr_sumcheck_claimed_sum_bytes = field_to_bytes(&md_proof_for_serialization.claimed_sums[1]);
+    #[cfg(not(feature = "boundary"))]
+    let bdry_cpr_sumcheck_claimed_sum_bytes = vec![0u8; <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES];
+    #[cfg(feature = "boundary")]
+    let bdry_cpr_up_evals_bytes: Vec<Vec<u8>> = {
+        let bdry_sig = zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x::signature();
+        bdry_up_evals_out.iter()
+            .enumerate()
+            .filter(|(i, _)| !bdry_sig.is_public_column(*i))
+            .map(|(_, v)| field_to_bytes(v))
+            .collect()
+    };
+    #[cfg(not(feature = "boundary"))]
+    let bdry_cpr_up_evals_bytes: Vec<Vec<u8>> = vec![];
+    #[cfg(feature = "boundary")]
+    let bdry_cpr_down_evals_bytes: Vec<Vec<u8>> = bdry_down_evals_out.iter().map(field_to_bytes).collect();
+    #[cfg(not(feature = "boundary"))]
+    let bdry_cpr_down_evals_bytes: Vec<Vec<u8>> = vec![];
+
     Folded4xZincProof {
         pcs_proof_bytes: proof_bytes,
         commitment,
@@ -2846,6 +3719,11 @@ where
         qx_cpr_down_evals: qx_cpr_down_evals_bytes,
         qx_cpr_sumcheck_messages: qx_cpr_sumcheck_messages_bytes,
         qx_cpr_sumcheck_claimed_sum: qx_cpr_sumcheck_claimed_sum_bytes,
+        bdry_ic_proof_values: bdry_ic_values,
+        bdry_cpr_sumcheck_messages: bdry_cpr_sumcheck_messages_bytes,
+        bdry_cpr_sumcheck_claimed_sum: bdry_cpr_sumcheck_claimed_sum_bytes,
+        bdry_cpr_up_evals: bdry_cpr_up_evals_bytes,
+        bdry_cpr_down_evals: bdry_cpr_down_evals_bytes,
         lookup_proof,
         shift_sumcheck: shift_sumcheck_output.map(|output| {
             SerializedShiftSumcheckProof {
@@ -2864,6 +3742,7 @@ where
         folding_c2s_bytes,
         folding_c3s_bytes,
         folding_c4s_bytes,
+        ring_evals_bytes,
         timing: TimingBreakdown {
             pcs_commit: pcs_commit_time,
             ideal_check: ideal_check_time,
@@ -2878,6 +3757,7 @@ where
             lookup_extract: lookup_extract_time,
             shift_sumcheck: shift_sumcheck_time,
             folding: folding_time,
+            lifting: lifting_time,
         },
     }
 }
@@ -3572,6 +4452,7 @@ pub fn verify_classic_logup_4x_folded<U, U2, PcsZt, PcsLc, const D: usize, const
     ideal_over_f_from_ref: IdealOverFFromRef,
     qx_ideal_over_f_from_ref: QxIdealOverFFromRef,
     public_column_data: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    bdry_public_column_data: &[DenseMultilinearExtension<BinaryPoly<D>>],
 ) -> VerifyResult
 where
     U: Uair<Scalar = BinaryPoly<D>>,
@@ -3683,7 +4564,7 @@ where
             &mut transcript,
             qx_ic_proof,
             qx_num_constraints,
-            ic_evaluation_point,
+            ic_evaluation_point.clone(),
             qx_ideal_over_f_from_ref,
             &field_cfg,
         ) {
@@ -3702,6 +4583,32 @@ where
                 };
             }
         }
+    };
+    // ── Step 1c: Boundary IC verify ─────────────────────────────────
+    #[cfg(feature = "boundary")]
+    let _bdry_ic_subclaim = {
+        let bdry_ic_combined_mle_values: Vec<DynamicPolynomialF<PiopField>> = folded_proof
+            .bdry_ic_proof_values
+            .iter()
+            .map(|bytes| {
+                let num_coeffs = bytes.len() / field_elem_size;
+                let coeffs: Vec<PiopField> = (0..num_coeffs)
+                    .map(|i| field_from_bytes(&bytes[i * field_elem_size..(i + 1) * field_elem_size], &field_cfg))
+                    .collect();
+                DynamicPolynomialF::new(coeffs)
+            })
+            .collect();
+        let bdry_ic_proof = zinc_piop::ideal_check::Proof::<PiopField> {
+            combined_mle_values: bdry_ic_combined_mle_values,
+        };
+        // Use absorb-only: the zero-ideal membership is enforced by the CPR
+        // sumcheck (the IC values are tied to the committed trace).
+        IdealCheckProtocol::<PiopField>::verify_at_point_absorb_only(
+            &mut transcript,
+            bdry_ic_proof,
+            ic_evaluation_point.clone(),
+            &field_cfg,
+        )
     };
     let ic_verify_time = t0.elapsed();
 
@@ -3886,8 +4793,114 @@ where
 
         // QX CPR finalize is skipped.
 
+        // Boundary CPR finalize (when boundary enabled).
+        #[cfg(feature = "boundary")]
+        {
+            let bdry_num_constraints_v = count_constraints::<zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x>();
+            let bdry_projected_scalars_coeffs = project_scalars::<PiopField, zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x>(|scalar| {
+                let one = PiopField::one_with_cfg(&field_cfg);
+                let zero = PiopField::zero_with_cfg(&field_cfg);
+                DynamicPolynomialF::new(
+                    scalar.iter().map(|coeff| {
+                        if coeff.into_inner() { one.clone() } else { zero.clone() }
+                    }).collect::<Vec<_>>()
+                )
+            });
+            let bdry_field_projected_scalars =
+                project_scalars_to_field(bdry_projected_scalars_coeffs, &projecting_element)
+                    .expect("boundary scalar projection failed (verifier)");
+
+            let bdry_cpr_pre = match CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x>(
+                &mut transcript,
+                &md_subclaims.expected_evaluations[1],
+                bdry_num_constraints_v,
+                &projecting_element,
+                &bdry_field_projected_scalars,
+                &_bdry_ic_subclaim,
+                &field_cfg,
+            ) {
+                Ok(pre) => pre,
+                Err(e) => {
+                    eprintln!("Boundary CPR build_verifier_pre_sumcheck failed (4x folded): {e:?}");
+                    return VerifyResult {
+                        accepted: false,
+                        timing: VerifyTimingBreakdown {
+                            ideal_check_verify: ic_verify_time,
+                            combined_poly_resolver_verify: t1.elapsed(),
+                            lookup_verify: Duration::ZERO,
+                            pcs_verify: Duration::ZERO,
+                            total: total_start.elapsed(),
+                        },
+                    };
+                }
+            };
+
+            let bdry_private_up_evals: Vec<PiopField> = folded_proof.bdry_cpr_up_evals.iter()
+                .map(|b| field_from_bytes(b, &field_cfg))
+                .collect();
+            let bdry_down_evals: Vec<PiopField> = folded_proof.bdry_cpr_down_evals.iter()
+                .map(|b| field_from_bytes(b, &field_cfg))
+                .collect();
+
+            let bdry_sig = zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x::signature();
+            let bdry_full_up_evals = if bdry_sig.public_columns.is_empty() {
+                bdry_private_up_evals
+            } else {
+                let binary_poly_projection =
+                    BinaryPoly::<D>::prepare_projection(&projecting_element);
+                let bdry_public_evals: Vec<PiopField> = bdry_public_column_data.iter()
+                    .map(|col| {
+                        let mut mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                            col.iter()
+                                .map(|bp| binary_poly_projection(bp).inner().clone())
+                                .collect();
+                        let target_nv = md_subclaims.point.len();
+                        if target_nv > mle.num_vars {
+                            mle.evaluations.resize(1 << target_nv, Default::default());
+                            mle.num_vars = target_nv;
+                        }
+                        mle.evaluate_with_config(&md_subclaims.point, &field_cfg)
+                            .expect("boundary public column MLE evaluation should succeed")
+                    })
+                    .collect();
+                reconstruct_up_evals(
+                    &bdry_private_up_evals,
+                    &bdry_public_evals,
+                    &bdry_sig.public_columns,
+                    bdry_sig.total_cols(),
+                )
+            };
+
+            if let Err(e) = CombinedPolyResolver::<PiopField>::finalize_verifier::<zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x>(
+                &mut transcript,
+                md_subclaims.point.clone(),
+                md_subclaims.expected_evaluations[1].clone(),
+                &bdry_cpr_pre,
+                bdry_full_up_evals,
+                bdry_down_evals,
+                num_vars,
+                &bdry_field_projected_scalars,
+                &field_cfg,
+            ) {
+                eprintln!("Boundary CPR finalize_verifier failed (4x folded): {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        }
+
         // Lookup finalize — pre-compute eq_at_point once and reuse across all groups.
-        const QX_GROUP_OFFSET: usize = 0;
+        #[cfg(feature = "boundary")]
+        let bdry_group_offset: usize = 1;
+        #[cfg(not(feature = "boundary"))]
+        let bdry_group_offset: usize = 0;
 
         let eq_at_point_lk = zinc_poly::utils::build_eq_x_r_vec(&md_subclaims.point, &field_cfg)
             .expect("build_eq_x_r_vec should not fail for non-empty point");        for (g, ((lk_pre, group_proof), meta)) in lookup_pres.iter()
@@ -3922,7 +4935,7 @@ where
                 group_proof,
                 &md_subclaims.point,
                 &eq_at_point_lk,
-                &md_subclaims.expected_evaluations[g + 1 + QX_GROUP_OFFSET],
+                &md_subclaims.expected_evaluations[g + 1 + bdry_group_offset],
                 &parent_evals,
                 &field_cfg,
             ) {
@@ -3942,6 +4955,324 @@ where
 
         let cpr_verify_time = t1.elapsed();
         (cpr_sub, cpr_verify_time, Duration::ZERO, projecting_element)
+    } else if !folded_proof.cpr_sumcheck_messages.is_empty() {
+        // ── CPR-only path (hybrid GKR prover with boundary) ─────────
+        //
+        // The prover ran a multi-degree sumcheck for [BP CPR, boundary CPR]
+        // without batched lookups.  The proof data is serialized in the
+        // cpr_sumcheck_* and bdry_cpr_* fields.  Lookups (if any) are
+        // verified separately as HybridGkr after CPR verification.
+        #[cfg(not(feature = "boundary"))]
+        { unreachable!("CPR sumcheck messages should be empty without boundary feature"); }
+        #[cfg(feature = "boundary")]
+        {
+        let t1 = Instant::now();
+        let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+        let projected_scalars_coeffs = project_scalars::<PiopField, U>(|scalar| {
+            let one = PiopField::one_with_cfg(&field_cfg);
+            let zero = PiopField::zero_with_cfg(&field_cfg);
+            DynamicPolynomialF::new(
+                scalar.iter().map(|coeff| {
+                    if coeff.into_inner() { one.clone() } else { zero.clone() }
+                }).collect::<Vec<_>>()
+            )
+        });
+        let field_projected_scalars =
+            project_scalars_to_field(projected_scalars_coeffs, &projecting_element)
+                .expect("scalar projection failed (standalone CPR verifier)");
+
+        // Reconstruct the MultiDegreeSumcheckProof from byte fields.
+        let bp_group_messages: Vec<zinc_piop::sumcheck::prover::ProverMsg<PiopField>> = folded_proof.cpr_sumcheck_messages
+            .iter()
+            .map(|bytes| {
+                let n = bytes.len() / field_elem_size;
+                let tail_evals: Vec<PiopField> = (0..n)
+                    .map(|i| field_from_bytes(&bytes[i * field_elem_size..(i + 1) * field_elem_size], &field_cfg))
+                    .collect();
+                zinc_piop::sumcheck::prover::ProverMsg(
+                    zinc_piop::sumcheck::prover::NatEvaluatedPolyWithoutConstant::new(tail_evals)
+                )
+            })
+            .collect();
+        let bp_claimed_sum = field_from_bytes(&folded_proof.cpr_sumcheck_claimed_sum, &field_cfg);
+
+        let bdry_group_messages: Vec<zinc_piop::sumcheck::prover::ProverMsg<PiopField>> = folded_proof.bdry_cpr_sumcheck_messages
+            .iter()
+            .map(|bytes| {
+                let n = bytes.len() / field_elem_size;
+                let tail_evals: Vec<PiopField> = (0..n)
+                    .map(|i| field_from_bytes(&bytes[i * field_elem_size..(i + 1) * field_elem_size], &field_cfg))
+                    .collect();
+                zinc_piop::sumcheck::prover::ProverMsg(
+                    zinc_piop::sumcheck::prover::NatEvaluatedPolyWithoutConstant::new(tail_evals)
+                )
+            })
+            .collect();
+        let bdry_claimed_sum = field_from_bytes(&folded_proof.bdry_cpr_sumcheck_claimed_sum, &field_cfg);
+
+        let bp_degree = max_degree + 2;
+        let bdry_degree = count_max_degree::<zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x>() + 2;
+
+        let md_proof_deserialized = MultiDegreeSumcheckProof {
+            group_messages: vec![bp_group_messages, bdry_group_messages],
+            claimed_sums: vec![bp_claimed_sum, bdry_claimed_sum],
+            degrees: vec![bp_degree, bdry_degree],
+        };
+
+        // BP CPR verifier pre-sumcheck.
+        let cpr_pre = match CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<U>(
+            &mut transcript,
+            &md_proof_deserialized.claimed_sums[0],
+            num_constraints,
+            &projecting_element,
+            &field_projected_scalars,
+            &ic_subclaim,
+            &field_cfg,
+        ) {
+            Ok(pre) => pre,
+            Err(e) => {
+                eprintln!("CPR build_verifier_pre_sumcheck failed (standalone CPR): {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        };
+
+        // Boundary CPR verifier pre-sumcheck.
+        let bdry_num_constraints_v = count_constraints::<zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x>();
+        let bdry_projected_scalars_coeffs = project_scalars::<PiopField, zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x>(|scalar| {
+            let one = PiopField::one_with_cfg(&field_cfg);
+            let zero = PiopField::zero_with_cfg(&field_cfg);
+            DynamicPolynomialF::new(
+                scalar.iter().map(|coeff| {
+                    if coeff.into_inner() { one.clone() } else { zero.clone() }
+                }).collect::<Vec<_>>()
+            )
+        });
+        let bdry_field_projected_scalars =
+            project_scalars_to_field(bdry_projected_scalars_coeffs, &projecting_element)
+                .expect("boundary scalar projection failed (standalone CPR verifier)");
+
+        let bdry_cpr_pre = match CombinedPolyResolver::<PiopField>::build_verifier_pre_sumcheck::<zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x>(
+            &mut transcript,
+            &md_proof_deserialized.claimed_sums[1],
+            bdry_num_constraints_v,
+            &projecting_element,
+            &bdry_field_projected_scalars,
+            &_bdry_ic_subclaim,
+            &field_cfg,
+        ) {
+            Ok(pre) => pre,
+            Err(e) => {
+                eprintln!("Boundary CPR build_verifier_pre_sumcheck failed (standalone CPR): {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        };
+
+        // Verify multi-degree sumcheck.
+        let md_subclaims = match MultiDegreeSumcheck::<PiopField>::verify_as_subprotocol(
+            &mut transcript,
+            num_vars,
+            &md_proof_deserialized,
+            &field_cfg,
+        ) {
+            Ok(sc) => sc,
+            Err(e) => {
+                eprintln!("Multi-degree sumcheck verification failed (standalone CPR): {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        };
+
+        // Finalize BP CPR.
+        let sig = U::signature();
+        let private_up_evals: Vec<PiopField> = folded_proof.cpr_up_evals.iter()
+            .map(|b| field_from_bytes(b, &field_cfg))
+            .collect();
+        let cpr_down_evals: Vec<PiopField> = folded_proof.cpr_down_evals.iter()
+            .map(|b| field_from_bytes(b, &field_cfg))
+            .collect();
+
+        let full_up_evals = if sig.public_columns.is_empty() {
+            private_up_evals.clone()
+        } else {
+            let binary_poly_projection =
+                BinaryPoly::<D>::prepare_projection(&projecting_element);
+            let public_evals: Vec<PiopField> = {
+                #[cfg(feature = "parallel")]
+                let iter = public_column_data.par_iter();
+                #[cfg(not(feature = "parallel"))]
+                let iter = public_column_data.iter();
+                iter.map(|col| {
+                    let mut mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                        col.iter()
+                            .map(|bp| binary_poly_projection(bp).inner().clone())
+                            .collect();
+                    let target_nv = md_subclaims.point.len();
+                    if target_nv > mle.num_vars {
+                        mle.evaluations.resize(1 << target_nv, Default::default());
+                        mle.num_vars = target_nv;
+                    }
+                    mle.evaluate_with_config(&md_subclaims.point, &field_cfg)
+                        .expect("public column MLE evaluation should succeed")
+                })
+                .collect()
+            };
+            reconstruct_up_evals(
+                &private_up_evals,
+                &public_evals,
+                &sig.public_columns,
+                sig.total_cols(),
+            )
+        };
+
+        let cpr_sub = match CombinedPolyResolver::<PiopField>::finalize_verifier::<U>(
+            &mut transcript,
+            md_subclaims.point.clone(),
+            md_subclaims.expected_evaluations[0].clone(),
+            &cpr_pre,
+            full_up_evals,
+            cpr_down_evals,
+            num_vars,
+            &field_projected_scalars,
+            &field_cfg,
+        ) {
+            Ok(sub) => sub,
+            Err(e) => {
+                eprintln!("CPR finalize_verifier failed (standalone CPR): {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: t1.elapsed(),
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        };
+
+        // Finalize boundary CPR.
+        let bdry_private_up_evals: Vec<PiopField> = folded_proof.bdry_cpr_up_evals.iter()
+            .map(|b| field_from_bytes(b, &field_cfg))
+            .collect();
+        let bdry_down_evals: Vec<PiopField> = folded_proof.bdry_cpr_down_evals.iter()
+            .map(|b| field_from_bytes(b, &field_cfg))
+            .collect();
+
+        let bdry_sig = zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x::signature();
+        let bdry_full_up_evals = if bdry_sig.public_columns.is_empty() {
+            bdry_private_up_evals
+        } else {
+            let binary_poly_projection =
+                BinaryPoly::<D>::prepare_projection(&projecting_element);
+            let bdry_public_evals: Vec<PiopField> = bdry_public_column_data.iter()
+                .map(|col| {
+                    let mut mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                        col.iter()
+                            .map(|bp| binary_poly_projection(bp).inner().clone())
+                            .collect();
+                    let target_nv = md_subclaims.point.len();
+                    if target_nv > mle.num_vars {
+                        mle.evaluations.resize(1 << target_nv, Default::default());
+                        mle.num_vars = target_nv;
+                    }
+                    mle.evaluate_with_config(&md_subclaims.point, &field_cfg)
+                        .expect("boundary public column MLE evaluation should succeed")
+                })
+                .collect();
+            reconstruct_up_evals(
+                &bdry_private_up_evals,
+                &bdry_public_evals,
+                &bdry_sig.public_columns,
+                bdry_sig.total_cols(),
+            )
+        };
+
+        if let Err(e) = CombinedPolyResolver::<PiopField>::finalize_verifier::<zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x>(
+            &mut transcript,
+            md_subclaims.point.clone(),
+            md_subclaims.expected_evaluations[1].clone(),
+            &bdry_cpr_pre,
+            bdry_full_up_evals,
+            bdry_down_evals,
+            num_vars,
+            &bdry_field_projected_scalars,
+            &field_cfg,
+        ) {
+            eprintln!("Boundary CPR finalize_verifier failed (standalone CPR): {e:?}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: ic_verify_time,
+                    combined_poly_resolver_verify: t1.elapsed(),
+                    lookup_verify: Duration::ZERO,
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
+
+        let cpr_verify_time = t1.elapsed();
+
+        // Verify lookup separately (HybridGkr/Gkr/Classic).
+        let t1b = Instant::now();
+        if let Some(ref lookup_data) = folded_proof.lookup_proof {
+            let result = match lookup_data {
+                LookupProofData::Gkr(proof) => verify_gkr_batched_lookup(
+                    &mut transcript, proof, &projecting_element, &field_cfg,
+                ).map(|_| ()),
+                LookupProofData::HybridGkr(proof) => verify_hybrid_gkr_batched_lookup(
+                    &mut transcript, proof, &projecting_element, &field_cfg,
+                ).map(|_| ()),
+                LookupProofData::Classic(proof) => verify_batched_lookup(
+                    &mut transcript, proof, &projecting_element, &field_cfg,
+                ).map(|_| ()),
+                LookupProofData::BatchedClassic(_) => unreachable!("handled above"),
+            };
+            if let Err(e) = result {
+                eprintln!("Lookup verification failed (standalone CPR): {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: cpr_verify_time,
+                        lookup_verify: t1b.elapsed(),
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        }
+        let lookup_verify_time = t1b.elapsed();
+
+        (cpr_sub, cpr_verify_time, lookup_verify_time, projecting_element)
+        }
     } else {
         // CPR sumcheck is skipped for MLE-first (max_degree == 1):
         // the ideal check already verified constraint satisfaction.
@@ -4285,29 +5616,72 @@ where
         }
     };
 
-    // ── Step 4: PCS Verify at doubly-extended point ─────────────────
+    // ── Step 4: Ring-eval bridge + PCS Verify ─────────────────────────
     let t2 = Instant::now();
 
-    // Reuse the FS transcript state snapshot from after prime derivation.
-    // Both the PIOP and PCS transcripts start from the same initial state
-    // (default + absorb root + get_random_field_cfg), so the snapshot is
-    // byte-identical to what the PCS prover had. This skips a second
-    // Miller-Rabin primality search (~0.3-0.4ms savings).
+    // Deserialize and verify ring-valued MLE evaluations.
+    // These bridge the PIOP α-projection claims (d_{2,j}) to the PCS's
+    // independent-challenge evaluation claim (eval_f).
+    let ring_evals: Vec<PiopField> = folded_proof.ring_evals_bytes.iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+    let num_committed = folded_proof.commitment.batch_size;
+    assert_eq!(
+        ring_evals.len(),
+        num_committed * QUARTER_D,
+        "ring_evals_bytes length mismatch: expected {} × {} = {}, got {}",
+        num_committed, QUARTER_D, num_committed * QUARTER_D, ring_evals.len(),
+    );
+
+    // Check 1: α-projection consistency.
+    // For each column j: Σ_k α^k · v_{j,k} = d_{2,j}
+    {
+        let one = PiopField::one_with_cfg(&field_cfg);
+        for j in 0..num_committed {
+            let v_j = &ring_evals[j * QUARTER_D..(j + 1) * QUARTER_D];
+            let mut projected = PiopField::zero_with_cfg(&field_cfg);
+            let mut alpha_pow = one.clone();
+            for k in 0..QUARTER_D {
+                let mut term = alpha_pow.clone();
+                term *= &v_j[k];
+                projected += term;
+                alpha_pow *= &projecting_element_for_folding;
+            }
+            if projected != fold2_output.new_evals[j] {
+                eprintln!(
+                    "Ring eval α-projection consistency failed for column {j}: \
+                     Σ_k α^k · v_{{j,k}} ≠ d_{{2,j}}"
+                );
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: cpr_verify_time,
+                        lookup_verify: lookup_verify_time,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        }
+    }
+
+    // PCS verification (proximity + column testing).
+    let pcs_field_cfg = field_cfg.clone();
+    let eval_f: PiopField = PiopField::new_unchecked_with_cfg(
+        <PiopField as Field>::Inner::read_transcription_bytes(&folded_proof.pcs_evals_bytes[0]),
+        &pcs_field_cfg,
+    );
     let mut pcs_transcript = zip_plus::pcs_transcript::PcsTranscript {
         fs_transcript: transcript_after_prime,
         stream: std::io::Cursor::new(folded_proof.pcs_proof_bytes.clone()),
     };
-    let pcs_field_cfg = field_cfg.clone();
 
     let point_f: Vec<PiopField> = fold2_output.new_point.iter()
         .map(|p| {
             PiopField::new_unchecked_with_cfg(p.inner().clone(), &pcs_field_cfg)
         })
         .collect();
-    let eval_f: PiopField = PiopField::new_unchecked_with_cfg(
-        <PiopField as Field>::Inner::read_transcription_bytes(&folded_proof.pcs_evals_bytes[0]),
-        &pcs_field_cfg,
-    );
 
     let pcs_result = ZipPlus::<PcsZt, PcsLc>::verify_with_field_cfg::<PiopField, CHECK>(
         pcs_params,
@@ -4320,6 +5694,970 @@ where
 
     if let Err(ref e) = pcs_result {
         eprintln!("PCS verification failed (4x folded): {e:?}");
+    }
+
+    let pcs_verify_time = t2.elapsed();
+
+    VerifyResult {
+        accepted: pcs_result.is_ok(),
+        timing: VerifyTimingBreakdown {
+            ideal_check_verify: ic_verify_time,
+            combined_poly_resolver_verify: cpr_verify_time,
+            lookup_verify: lookup_verify_time,
+            pcs_verify: pcs_verify_time,
+            total: total_start.elapsed(),
+        },
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Full-folded (32×) pipeline: BinaryPoly<D> → BinaryPoly<1>
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Per-round folding data (serialized evaluations).
+#[derive(Clone, Debug)]
+pub struct FoldingRoundBytes {
+    /// Per-column `c₁ = MLE[u_j](r)` (low-half evaluations).
+    pub c1s_bytes: Vec<Vec<u8>>,
+    /// Per-column `c₂ = MLE[w_j](r)` (high-half evaluations).
+    pub c2s_bytes: Vec<Vec<u8>>,
+}
+
+/// Proof struct for full (32×) folding: `BinaryPoly<D>` → `BinaryPoly<1>`.
+///
+/// Supports an arbitrary number of folding rounds (5 for D=32), with each
+/// round's per-column evaluations stored in [`FoldingRoundBytes`].  The PCS
+/// commitment is over `BinaryPoly<FINAL>` columns of length `D·n`.
+#[derive(Clone, Debug)]
+pub struct FullFoldedZincProof {
+    pub pcs_proof_bytes: Vec<u8>,
+    pub commitment: ZipPlusCommitment,
+    pub ic_proof_values: Vec<Vec<u8>>,
+    pub qx_ic_proof_values: Vec<Vec<u8>>,
+    pub cpr_sumcheck_messages: Vec<Vec<u8>>,
+    pub cpr_sumcheck_claimed_sum: Vec<u8>,
+    pub cpr_up_evals: Vec<Vec<u8>>,
+    pub cpr_down_evals: Vec<Vec<u8>>,
+    pub qx_cpr_sumcheck_messages: Vec<Vec<u8>>,
+    pub qx_cpr_sumcheck_claimed_sum: Vec<u8>,
+    pub qx_cpr_up_evals: Vec<Vec<u8>>,
+    pub qx_cpr_down_evals: Vec<Vec<u8>>,
+    pub bdry_ic_proof_values: Vec<Vec<u8>>,
+    pub bdry_cpr_sumcheck_messages: Vec<Vec<u8>>,
+    pub bdry_cpr_sumcheck_claimed_sum: Vec<u8>,
+    pub bdry_cpr_up_evals: Vec<Vec<u8>>,
+    pub bdry_cpr_down_evals: Vec<Vec<u8>>,
+    pub lookup_proof: Option<LookupProofData>,
+    pub shift_sumcheck: Option<SerializedShiftSumcheckProof>,
+    pub qx_shift_sumcheck: Option<SerializedShiftSumcheckProof>,
+    pub evaluation_point_bytes: Vec<Vec<u8>>,
+    pub pcs_evals_bytes: Vec<Vec<u8>>,
+    /// Folding round data — one entry per halving round.
+    pub folding_rounds: Vec<FoldingRoundBytes>,
+    /// Ring-valued MLE evaluations at the fully-folded point.
+    pub ring_evals_bytes: Vec<Vec<u8>>,
+    pub timing: TimingBreakdown,
+}
+
+/// Full-folded (32×) prover: `BinaryPoly<D>` → … → `BinaryPoly<FINAL>`.
+///
+/// Identical to [`prove_hybrid_gkr_logup_4x_folded`] except that **five**
+/// folding rounds are applied (D→H1→H2→H3→H4→FINAL) so the PCS operates
+/// on `BinaryPoly<FINAL>` (= `BinaryPoly<1>` when D=32) codewords.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+pub fn prove_hybrid_gkr_logup_full_folded<
+    U, U2, PcsZt, PcsLc,
+    const D: usize, const H1: usize, const H2: usize,
+    const H3: usize, const H4: usize, const FINAL: usize,
+    const CHECK: bool,
+>(
+    pcs_params: &ZipPlusParams<PcsZt, PcsLc>,
+    trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    num_vars: usize,
+    lookup_specs: &[LookupColumnSpec],
+    affine_lookup_specs: &[AffineLookupSpec],
+    cutoff: usize,
+) -> FullFoldedZincProof
+where
+    U: Uair<Scalar = BinaryPoly<D>>,
+    U2: Uair,
+    U2::Scalar: std::ops::Deref<Target = [i64]> + 'static,
+    PcsZt: ZipTypes<Eval = BinaryPoly<FINAL>>,
+    PcsLc: LinearCode<PcsZt>,
+    rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<D>>,
+    rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<H1>>,
+    rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<H2>>,
+    rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<H3>>,
+    rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<H4>>,
+    rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<FINAL>>,
+    BinaryPoly<D>: From<u32>,
+    BinaryPoly<D>: ProjectableToField<PiopField>,
+    BinaryPoly<H1>: ProjectableToField<PiopField>,
+    BinaryPoly<H2>: ProjectableToField<PiopField>,
+    BinaryPoly<H3>: ProjectableToField<PiopField>,
+    BinaryPoly<H4>: ProjectableToField<PiopField>,
+    BinaryPoly<FINAL>: ProjectableToField<PiopField>,
+    PiopField: FromPrimitiveWithConfig + FromWithConfig<i64>,
+    <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
+    PcsZt::Eval: ProjectableToField<PiopField>,
+    PcsZt::Cw: ProjectableToField<PiopField>,
+    PiopField: for<'a> FromWithConfig<&'a PcsZt::Chal> + for<'a> FromWithConfig<&'a PcsZt::CombR>,
+    <PiopField as Field>::Inner: FromRef<PcsZt::Fmod>,
+    PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
+{
+    let total_start = Instant::now();
+    let sig = U::signature();
+    let num_constraints = count_constraints::<U>();
+    let max_degree = count_max_degree::<U>();
+    #[cfg(feature = "qx-constraints")]
+    let qx_num_constraints = count_constraints::<U2>();
+
+    // ── Step 0: 5-round split ────────────────────────────────────────
+    let t_split = Instant::now();
+    let pcs_excluded = sig.pcs_excluded_columns();
+    let pcs_trace_original = private_trace(trace, &pcs_excluded);
+    let split_h1: Vec<DenseMultilinearExtension<BinaryPoly<H1>>> =
+        split_columns::<D, H1>(&pcs_trace_original);
+    let split_h2: Vec<DenseMultilinearExtension<BinaryPoly<H2>>> =
+        split_columns::<H1, H2>(&split_h1);
+    let split_h3: Vec<DenseMultilinearExtension<BinaryPoly<H3>>> =
+        split_columns::<H2, H3>(&split_h2);
+    let split_h4: Vec<DenseMultilinearExtension<BinaryPoly<H4>>> =
+        split_columns::<H3, H4>(&split_h3);
+    let split_final: Vec<DenseMultilinearExtension<BinaryPoly<FINAL>>> =
+        split_columns::<H4, FINAL>(&split_h4);
+    let split_columns_time = t_split.elapsed();
+
+    // ── Step 1: PCS Commit (over fully-split FINAL columns) ──────────
+    let t0 = Instant::now();
+    let (hint, commitment) = ZipPlus::<PcsZt, PcsLc>::commit(pcs_params, &split_final)
+        .expect("PCS commit failed (full folded)");
+    let pcs_commit_time = t0.elapsed();
+
+    // ── Step 2: Ideal Check (on original BinaryPoly<D> trace) ────────
+    let t1 = Instant::now();
+    let mut transcript = KeccakTranscript::new();
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
+    let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
+
+    let projected_scalars = project_scalars::<PiopField, U>(|scalar| {
+        let one = PiopField::one_with_cfg(&field_cfg);
+        let zero = PiopField::zero_with_cfg(&field_cfg);
+        DynamicPolynomialF::new(
+            scalar.iter().map(|coeff| {
+                if coeff.into_inner() { one.clone() } else { zero.clone() }
+            }).collect::<Vec<_>>()
+        )
+    });
+
+    let (ic_proof, ic_state) = if max_degree == 1 {
+        IdealCheckProtocol::<PiopField>::prove_mle_first::<U, D>(
+            &mut transcript,
+            trace,
+            &projected_scalars,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )
+        .expect("Ideal check prover failed")
+    } else {
+        let projected_trace = project_trace_coeffs::<PiopField, i64, i64, D>(
+            trace, &[], &[], &field_cfg,
+        );
+        IdealCheckProtocol::<PiopField>::prove_as_subprotocol::<U>(
+            &mut transcript,
+            &projected_trace,
+            &projected_scalars,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )
+        .expect("Ideal check prover failed")
+    };
+
+    // ── Step 2b: QX Ideal Check ──────────────────────────────────────
+    let t_qx_ic = Instant::now();
+    #[cfg(feature = "qx-constraints")]
+    let qx_projected_scalars = project_scalars::<PiopField, U2>(|scalar| {
+        DynamicPolynomialF::new(
+            scalar.iter().map(|coeff| PiopField::from_with_cfg(*coeff, &field_cfg)).collect::<Vec<_>>()
+        )
+    });
+
+    #[cfg(feature = "qx-constraints")]
+    let (qx_ic_proof, _qx_ic_state) =
+        IdealCheckProtocol::<PiopField>::prove_from_binary_poly_at_point::<U2, D>(
+            &mut transcript,
+            trace,
+            &qx_projected_scalars,
+            qx_num_constraints,
+            &ic_state.evaluation_point,
+            &field_cfg,
+        )
+        .expect("Q[X] ideal check prover failed (full folded)");
+
+    let qx_ideal_check_time = t_qx_ic.elapsed();
+    let ideal_check_time = t1.elapsed();
+
+    // ── Step 3: Project trace and evaluate columns at IC point ────────
+    let t2 = Instant::now();
+    let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+    let t_proj = Instant::now();
+    let field_trace = project_trace_to_field::<PiopField, D>(
+        trace, &[], &[], &projecting_element,
+    );
+    let field_projection_time = t_proj.elapsed();
+
+    let t_lk_extract = Instant::now();
+    let has_lookups = !lookup_specs.is_empty() || !affine_lookup_specs.is_empty();
+    let lookup_precomputed = if has_lookups {
+        let (mut columns, mut raw_indices, mut remapped_specs, reverse_index_map) =
+            if !lookup_specs.is_empty() {
+                extract_lookup_columns_from_field_trace(trace, &field_trace, lookup_specs, &field_cfg)
+            } else {
+                (vec![], vec![], vec![], vec![])
+            };
+        if !affine_lookup_specs.is_empty() {
+            let _ws_map = append_affine_virtual_columns::<D>(
+                trace, affine_lookup_specs, &projecting_element, &field_cfg, num_vars,
+                &mut columns, &mut raw_indices, &mut remapped_specs, &reverse_index_map,
+            );
+        }
+        Some((columns, raw_indices, remapped_specs))
+    } else {
+        None
+    };
+
+    let shift_trace_columns: Vec<DenseMultilinearExtension<<PiopField as Field>::Inner>> =
+        sig.shifts.iter().map(|spec| field_trace[spec.source_col].clone()).collect();
+    let lookup_extract_time = t_lk_extract.elapsed();
+
+    let evaluation_point = ic_state.evaluation_point;
+    let up_evals: Vec<PiopField> = cfg_iter!(field_trace)
+        .map(|col| col.evaluate_with_config(&evaluation_point, &field_cfg)
+            .expect("column evaluation failed"))
+        .collect();
+    let down_evals: Vec<PiopField> = cfg_iter!(sig.shifts)
+        .map(|spec| {
+            let shifted: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                field_trace[spec.source_col][spec.shift_amount..].iter().cloned().collect();
+            shifted.evaluate_with_config(&evaluation_point, &field_cfg)
+                .expect("shifted column evaluation failed")
+        })
+        .collect();
+
+    let mut transcription_buf: Vec<u8> = vec![0; <<PiopField as Field>::Inner as ConstTranscribable>::NUM_BYTES];
+    transcript.absorb_random_field_slice(&up_evals, &mut transcription_buf);
+    transcript.absorb_random_field_slice(&down_evals, &mut transcription_buf);
+
+    let cpr_time = t2.elapsed();
+
+    // ── Step 3b: Hybrid GKR batched decomposed LogUp ────────────────
+    let t2b = Instant::now();
+    let lookup_proof = if let Some((columns, raw_indices, remapped_specs)) = lookup_precomputed {
+        let (lk_proof, _lk_state) = prove_hybrid_gkr_batched_lookup_with_indices(
+            &mut transcript,
+            &columns,
+            &raw_indices,
+            &remapped_specs,
+            &projecting_element,
+            cutoff,
+            &field_cfg,
+        )
+        .expect("Hybrid GKR batched lookup prover failed");
+        Some(LookupProofData::HybridGkr(lk_proof))
+    } else {
+        None
+    };
+    let lookup_time = t2b.elapsed();
+
+    // ── Step 3c: Shift Sumcheck ─────────────────────────────────────
+    let t_shift = Instant::now();
+    let shift_sumcheck_output = if !sig.shifts.is_empty() {
+        let claims: Vec<ShiftClaim<PiopField>> = sig.shifts
+            .iter()
+            .enumerate()
+            .map(|(i, spec)| ShiftClaim {
+                source_col: i,
+                shift_amount: spec.shift_amount,
+                eval_point: evaluation_point[..num_vars].to_vec(),
+                claimed_eval: down_evals[i].clone(),
+            })
+            .collect();
+        Some(shift_sumcheck_prove(
+            &mut transcript,
+            &claims,
+            &shift_trace_columns,
+            num_vars,
+            &field_cfg,
+        ))
+    } else {
+        None
+    };
+    let shift_sumcheck_time = t_shift.elapsed();
+
+    // ── Step 4: 5-round folding protocol ─────────────────────────────
+    let t_fold = Instant::now();
+    let piop_point = &evaluation_point[..num_vars];
+
+    let fold1 = fold_claims_prove_eq::<H1>(
+        &mut transcript, &split_h1, piop_point,
+        &projecting_element, &field_cfg,
+    );
+
+    let fold2 = fold_claims_prove_eq::<H2>(
+        &mut transcript, &split_h2, &fold1.new_point,
+        &projecting_element, &field_cfg,
+    );
+
+    let fold3 = fold_claims_prove_eq::<H3>(
+        &mut transcript, &split_h3, &fold2.new_point,
+        &projecting_element, &field_cfg,
+    );
+
+    let fold4 = fold_claims_prove_eq::<H4>(
+        &mut transcript, &split_h4, &fold3.new_point,
+        &projecting_element, &field_cfg,
+    );
+
+    let fold5 = fold_claims_prove_eq::<FINAL>(
+        &mut transcript, &split_final, &fold4.new_point,
+        &projecting_element, &field_cfg,
+    );
+
+    let folding_time = t_fold.elapsed();
+
+    // ── Step 4b: Ring-valued MLE evaluations ─────────────────────────
+    let t_lift = Instant::now();
+    let ring_evals: Vec<PiopField> = compute_ring_evals::<FINAL>(
+        &split_final,
+        &fold5.new_point,
+        &field_cfg,
+    );
+    let lifting_time = t_lift.elapsed();
+
+    // ── Step 5: PCS Prove ────────────────────────────────────────────
+    let t3 = Instant::now();
+    let (eval_f, proof) =
+        ZipPlus::<PcsZt, PcsLc>::prove_with_seed::<PiopField, CHECK>(
+            pcs_params,
+            &split_final,
+            &fold5.new_point,
+            &hint,
+            &root_buf,
+        )
+        .expect("PCS prove failed (full folded)");
+    let pcs_prove_time = t3.elapsed();
+    let total_time = total_start.elapsed();
+
+    // ── Serialize ────────────────────────────────────────────────────
+    let proof_bytes: Vec<u8> = {
+        let pcs_transcript: zip_plus::pcs_transcript::PcsTranscript = proof.into();
+        pcs_transcript.stream.into_inner()
+    };
+    let ic_proof_values: Vec<Vec<u8>> = ic_proof
+        .combined_mle_values
+        .iter()
+        .map(|dpf| dpf.coeffs.iter().flat_map(|c| field_to_bytes(c)).collect())
+        .collect();
+
+    let cpr_sumcheck_messages: Vec<Vec<u8>> = vec![];
+    let cpr_sumcheck_claimed_sum = vec![0u8; <<PiopField as Field>::Inner as ConstTranscribable>::NUM_BYTES];
+    let cpr_up_evals_bytes: Vec<Vec<u8>> = up_evals.iter()
+        .enumerate()
+        .filter(|(i, _)| !sig.is_public_column(*i))
+        .map(|(_, v)| field_to_bytes(v))
+        .collect();
+    let cpr_down_evals_bytes: Vec<Vec<u8>> = down_evals.iter().map(field_to_bytes).collect();
+    let evaluation_point_bytes: Vec<Vec<u8>> = evaluation_point.iter().map(field_to_bytes).collect();
+    let pcs_evals_bytes: Vec<Vec<u8>> = vec![field_to_bytes(&eval_f)];
+
+    let folding_rounds = vec![
+        FoldingRoundBytes { c1s_bytes: fold1.c1s.iter().map(field_to_bytes).collect(), c2s_bytes: fold1.c2s.iter().map(field_to_bytes).collect() },
+        FoldingRoundBytes { c1s_bytes: fold2.c1s.iter().map(field_to_bytes).collect(), c2s_bytes: fold2.c2s.iter().map(field_to_bytes).collect() },
+        FoldingRoundBytes { c1s_bytes: fold3.c1s.iter().map(field_to_bytes).collect(), c2s_bytes: fold3.c2s.iter().map(field_to_bytes).collect() },
+        FoldingRoundBytes { c1s_bytes: fold4.c1s.iter().map(field_to_bytes).collect(), c2s_bytes: fold4.c2s.iter().map(field_to_bytes).collect() },
+        FoldingRoundBytes { c1s_bytes: fold5.c1s.iter().map(field_to_bytes).collect(), c2s_bytes: fold5.c2s.iter().map(field_to_bytes).collect() },
+    ];
+
+    let ring_evals_bytes: Vec<Vec<u8>> = ring_evals.iter().map(field_to_bytes).collect();
+
+    let qx_cpr_sumcheck_messages_bytes: Vec<Vec<u8>> = vec![];
+    let qx_cpr_sumcheck_claimed_sum_bytes = vec![0u8; <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES];
+    let qx_cpr_up_evals_bytes: Vec<Vec<u8>> = vec![];
+    let qx_cpr_down_evals_bytes: Vec<Vec<u8>> = vec![];
+
+    #[cfg(feature = "qx-constraints")]
+    let qx_ic_values: Vec<Vec<u8>> = qx_ic_proof
+        .combined_mle_values
+        .iter()
+        .map(|dpf| dpf.coeffs.iter().flat_map(|c| field_to_bytes(c)).collect())
+        .collect();
+    #[cfg(not(feature = "qx-constraints"))]
+    let qx_ic_values: Vec<Vec<u8>> = vec![];
+
+    FullFoldedZincProof {
+        pcs_proof_bytes: proof_bytes,
+        commitment,
+        ic_proof_values,
+        qx_ic_proof_values: qx_ic_values,
+        cpr_sumcheck_messages,
+        cpr_sumcheck_claimed_sum,
+        cpr_up_evals: cpr_up_evals_bytes,
+        cpr_down_evals: cpr_down_evals_bytes,
+        qx_cpr_up_evals: qx_cpr_up_evals_bytes,
+        qx_cpr_down_evals: qx_cpr_down_evals_bytes,
+        qx_cpr_sumcheck_messages: qx_cpr_sumcheck_messages_bytes,
+        qx_cpr_sumcheck_claimed_sum: qx_cpr_sumcheck_claimed_sum_bytes,
+        bdry_ic_proof_values: vec![],
+        bdry_cpr_sumcheck_messages: vec![],
+        bdry_cpr_sumcheck_claimed_sum: vec![0u8; <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES],
+        bdry_cpr_up_evals: vec![],
+        bdry_cpr_down_evals: vec![],
+        lookup_proof,
+        shift_sumcheck: shift_sumcheck_output.map(|output| {
+            SerializedShiftSumcheckProof {
+                rounds: output.proof.rounds.iter().map(|rp| {
+                    rp.evals.iter().flat_map(|e| field_to_bytes(e)).collect()
+                }).collect(),
+                v_finals: output.v_finals.iter().enumerate()
+                    .filter(|(i, _)| !sig.is_public_shift(*i))
+                    .map(|(_, v)| field_to_bytes(v)).collect(),
+            }
+        }),
+        qx_shift_sumcheck: None,
+        evaluation_point_bytes,
+        pcs_evals_bytes,
+        folding_rounds,
+        ring_evals_bytes,
+        timing: TimingBreakdown {
+            pcs_commit: pcs_commit_time,
+            ideal_check: ideal_check_time,
+            combined_poly_resolver: cpr_time,
+            lookup: lookup_time,
+            pcs_prove: pcs_prove_time,
+            serialize: Duration::ZERO,
+            total: total_time,
+            split_columns: split_columns_time,
+            qx_ideal_check: qx_ideal_check_time,
+            field_projection: field_projection_time,
+            lookup_extract: lookup_extract_time,
+            shift_sumcheck: shift_sumcheck_time,
+            folding: folding_time,
+            lifting: lifting_time,
+        },
+    }
+}
+
+/// Full-folded (32×) verifier.
+///
+/// Mirrors [`verify_classic_logup_4x_folded`] but chains `N` folding rounds
+/// (where N = `proof.folding_rounds.len()`) instead of exactly two.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+pub fn verify_classic_logup_full_folded<
+    U, U2, PcsZt, PcsLc,
+    const D: usize, const FINAL: usize, const CHECK: bool,
+    IdealOverF, IdealOverFFromRef, QxIdealOverF, QxIdealOverFFromRef,
+>(
+    pcs_params: &ZipPlusParams<PcsZt, PcsLc>,
+    folded_proof: &FullFoldedZincProof,
+    num_vars: usize,
+    fold_half_sizes: &[usize],
+    ideal_over_f_from_ref: IdealOverFFromRef,
+    qx_ideal_over_f_from_ref: QxIdealOverFFromRef,
+    public_column_data: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    bdry_public_column_data: &[DenseMultilinearExtension<BinaryPoly<D>>],
+) -> VerifyResult
+where
+    U: Uair<Scalar = BinaryPoly<D>>,
+    U2: Uair,
+    U2::Scalar: std::ops::Deref<Target = [i64]> + 'static,
+    PcsZt: ZipTypes<Eval = BinaryPoly<FINAL>>,
+    PcsLc: LinearCode<PcsZt>,
+    BinaryPoly<D>: From<u32>,
+    BinaryPoly<FINAL>: ProjectableToField<PiopField>,
+    PiopField: FromPrimitiveWithConfig + FromWithConfig<i64>,
+    <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
+    PcsZt::Eval: ProjectableToField<PiopField>,
+    PcsZt::Cw: ProjectableToField<PiopField>,
+    PiopField: for<'a> FromWithConfig<&'a PcsZt::Chal> + for<'a> FromWithConfig<&'a PcsZt::CombR>,
+    <PiopField as Field>::Inner: FromRef<PcsZt::Fmod>,
+    PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
+    IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<PiopField>>,
+    IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
+    QxIdealOverF: Ideal + IdealCheck<DynamicPolynomialF<PiopField>>,
+    QxIdealOverFFromRef: Fn(&IdealOrZero<U2::Ideal>) -> QxIdealOverF,
+{
+    let total_start = Instant::now();
+
+    let num_constraints = count_constraints::<U>();
+    let max_degree = count_max_degree::<U>();
+
+    let mut transcript = KeccakTranscript::new();
+    let mut root_buf = [0u8; HASH_OUT_LEN];
+    folded_proof.commitment.root.write_transcription_bytes(&mut root_buf);
+    transcript.absorb(&root_buf);
+    let field_cfg = transcript.get_random_field_cfg::<PiopField, <PiopField as Field>::Inner, MillerRabin>();
+    let transcript_after_prime = transcript.clone();
+
+    let field_elem_size = <crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS> as ConstTranscribable>::NUM_BYTES;
+
+    // ── IC verify ────────────────────────────────────────────────────
+    let t0 = Instant::now();
+    let ic_combined_mle_values: Vec<DynamicPolynomialF<PiopField>> = folded_proof
+        .ic_proof_values
+        .iter()
+        .map(|bytes| {
+            let num_coeffs = bytes.len() / field_elem_size;
+            let coeffs: Vec<PiopField> = (0..num_coeffs)
+                .map(|i| field_from_bytes(&bytes[i * field_elem_size..(i + 1) * field_elem_size], &field_cfg))
+                .collect();
+            DynamicPolynomialF::new(coeffs)
+        })
+        .collect();
+
+    let ic_proof = zinc_piop::ideal_check::Proof::<PiopField> {
+        combined_mle_values: ic_combined_mle_values,
+    };
+
+    let ic_subclaim = match IdealCheckProtocol::<PiopField>::verify_as_subprotocol::<U, _, _>(
+        &mut transcript,
+        ic_proof,
+        num_constraints,
+        num_vars,
+        ideal_over_f_from_ref,
+        &field_cfg,
+    ) {
+        Ok(subclaim) => subclaim,
+        Err(e) => {
+            eprintln!("IdealCheck verification failed (full folded): {e:?}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: t0.elapsed(),
+                    combined_poly_resolver_verify: Duration::ZERO,
+                    lookup_verify: Duration::ZERO,
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
+    };
+    let ic_evaluation_point = ic_subclaim.evaluation_point.clone();
+
+    // ── QX IC verify ─────────────────────────────────────────────────
+    #[cfg(feature = "qx-constraints")]
+    let qx_num_constraints = count_constraints::<U2>();
+    #[cfg(feature = "qx-constraints")]
+    let _qx_ic_subclaim = {
+        let qx_ic_combined_mle_values: Vec<DynamicPolynomialF<PiopField>> = folded_proof
+            .qx_ic_proof_values
+            .iter()
+            .map(|bytes| {
+                let num_coeffs = bytes.len() / field_elem_size;
+                let coeffs: Vec<PiopField> = (0..num_coeffs)
+                    .map(|i| field_from_bytes(&bytes[i * field_elem_size..(i + 1) * field_elem_size], &field_cfg))
+                    .collect();
+                DynamicPolynomialF::new(coeffs)
+            })
+            .collect();
+
+        let qx_ic_proof = zinc_piop::ideal_check::Proof::<PiopField> {
+            combined_mle_values: qx_ic_combined_mle_values,
+        };
+
+        match IdealCheckProtocol::<PiopField>::verify_at_point::<U2, _, _>(
+            &mut transcript,
+            qx_ic_proof,
+            qx_num_constraints,
+            ic_evaluation_point,
+            qx_ideal_over_f_from_ref,
+            &field_cfg,
+        ) {
+            Ok(subclaim) => subclaim,
+            Err(e) => {
+                eprintln!("Q[X] IdealCheck verification failed (full folded): {e:?}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: t0.elapsed(),
+                        combined_poly_resolver_verify: Duration::ZERO,
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        }
+    };
+    let ic_verify_time = t0.elapsed();
+
+    // ── CPR + Lookup verify (non-batched path) ───────────────────────
+    let t1 = Instant::now();
+
+    let private_up_evals: Vec<PiopField> = folded_proof.cpr_up_evals.iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+    let cpr_down_evals: Vec<PiopField> = folded_proof.cpr_down_evals.iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+
+    let projecting_element: PiopField = transcript.get_field_challenge(&field_cfg);
+
+    let sig = U::signature();
+    let full_up_evals = if sig.public_columns.is_empty() {
+        private_up_evals
+    } else {
+        let binary_poly_projection =
+            BinaryPoly::<D>::prepare_projection(&projecting_element);
+        let public_evals: Vec<PiopField> = {
+            #[cfg(feature = "parallel")]
+            let iter = public_column_data.par_iter();
+            #[cfg(not(feature = "parallel"))]
+            let iter = public_column_data.iter();
+            iter.map(|col| {
+                let mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                    col.iter()
+                        .map(|bp| binary_poly_projection(bp).inner().clone())
+                        .collect();
+                mle.evaluate_with_config(&ic_subclaim.evaluation_point, &field_cfg)
+                    .expect("public column MLE evaluation should succeed")
+            })
+            .collect()
+        };
+        reconstruct_up_evals(
+            &private_up_evals,
+            &public_evals,
+            &sig.public_columns,
+            sig.total_cols(),
+        )
+    };
+
+    let mut transcription_buf: Vec<u8> = vec![0; <<PiopField as Field>::Inner as ConstTranscribable>::NUM_BYTES];
+    transcript.absorb_random_field_slice(&full_up_evals, &mut transcription_buf);
+    transcript.absorb_random_field_slice(&cpr_down_evals, &mut transcription_buf);
+
+    let cpr_subclaim = CprVerifierSubclaim {
+        evaluation_point: ic_subclaim.evaluation_point.clone(),
+        up_evals: full_up_evals,
+        down_evals: cpr_down_evals,
+    };
+    let cpr_verify_time = t1.elapsed();
+
+    let t1b = Instant::now();
+    if let Some(ref lookup_data) = folded_proof.lookup_proof {
+        let result = match lookup_data {
+            LookupProofData::Gkr(proof) => verify_gkr_batched_lookup(
+                &mut transcript, proof, &projecting_element, &field_cfg,
+            ).map(|_| ()),
+            LookupProofData::HybridGkr(proof) => verify_hybrid_gkr_batched_lookup(
+                &mut transcript, proof, &projecting_element, &field_cfg,
+            ).map(|_| ()),
+            LookupProofData::Classic(proof) => verify_batched_lookup(
+                &mut transcript, proof, &projecting_element, &field_cfg,
+            ).map(|_| ()),
+            LookupProofData::BatchedClassic(_) => unreachable!("not supported for full-fold"),
+        };
+        if let Err(e) = result {
+            eprintln!("Lookup verification failed (full folded): {e:?}");
+            return VerifyResult {
+                accepted: false,
+                timing: VerifyTimingBreakdown {
+                    ideal_check_verify: ic_verify_time,
+                    combined_poly_resolver_verify: cpr_verify_time,
+                    lookup_verify: t1b.elapsed(),
+                    pcs_verify: Duration::ZERO,
+                    total: total_start.elapsed(),
+                },
+            };
+        }
+    }
+    let lookup_verify_time = t1b.elapsed();
+
+    // ── Shift Sumcheck verify ────────────────────────────────────────
+    if let Some(ref ss_proof_data) = folded_proof.shift_sumcheck {
+        assert!(!sig.shifts.is_empty(), "shift_sumcheck present but UAIR has no shifts");
+
+        let ss_down_evals: Vec<PiopField> = folded_proof.cpr_down_evals.iter()
+            .map(|b| field_from_bytes(b, &field_cfg))
+            .collect();
+        let claims: Vec<ShiftClaim<PiopField>> = sig.shifts
+            .iter()
+            .enumerate()
+            .map(|(i, spec)| ShiftClaim {
+                source_col: i,
+                shift_amount: spec.shift_amount,
+                eval_point: cpr_subclaim.evaluation_point[..num_vars].to_vec(),
+                claimed_eval: ss_down_evals[i].clone(),
+            })
+            .collect();
+
+        let rounds: Vec<ShiftRoundPoly<PiopField>> = ss_proof_data.rounds.iter().map(|bytes| {
+            let n = bytes.len() / field_elem_size;
+            assert_eq!(n, 3, "each shift round poly should have 3 evaluations");
+            ShiftRoundPoly {
+                evals: [
+                    field_from_bytes(&bytes[0..field_elem_size], &field_cfg),
+                    field_from_bytes(&bytes[field_elem_size..2 * field_elem_size], &field_cfg),
+                    field_from_bytes(&bytes[2 * field_elem_size..3 * field_elem_size], &field_cfg),
+                ],
+            }
+        }).collect();
+        let ss_proof = ShiftSumcheckProof { rounds };
+
+        let private_v_finals: Vec<PiopField> = ss_proof_data.v_finals.iter()
+            .map(|b| field_from_bytes(b, &field_cfg))
+            .collect();
+
+        let has_public_shifts = sig.shifts.iter().any(|spec| sig.is_public_column(spec.source_col));
+        if has_public_shifts {
+            let ss_pre = match shift_sumcheck_verify_pre(
+                &mut transcript, &ss_proof, &claims, num_vars, &field_cfg,
+            ) {
+                Ok(pre) => pre,
+                Err(e) => {
+                    eprintln!("Shift sumcheck pre-verify failed (full folded): {e}");
+                    return VerifyResult {
+                        accepted: false,
+                        timing: VerifyTimingBreakdown {
+                            ideal_check_verify: ic_verify_time,
+                            combined_poly_resolver_verify: cpr_verify_time,
+                            lookup_verify: lookup_verify_time,
+                            pcs_verify: Duration::ZERO,
+                            total: total_start.elapsed(),
+                        },
+                    };
+                }
+            };
+
+            let binary_poly_projection =
+                BinaryPoly::<D>::prepare_projection(&projecting_element);
+            let challenge_point_le: Vec<PiopField> =
+                ss_pre.challenge_point.iter().rev().cloned().collect();
+            let public_shift_specs: Vec<&zinc_uair::ShiftSpec> = sig.shifts.iter()
+                .filter(|spec| sig.is_public_column(spec.source_col))
+                .collect();
+            let public_v_finals: Vec<PiopField> = {
+                #[cfg(feature = "parallel")]
+                let iter = public_shift_specs.par_iter();
+                #[cfg(not(feature = "parallel"))]
+                let iter = public_shift_specs.iter();
+                iter.map(|spec| {
+                    let pcd_idx = sig.public_columns.iter()
+                        .position(|&c| c == spec.source_col)
+                        .expect("public shift source_col not found in public_columns");
+                    let col = &public_column_data[pcd_idx];
+                    let mle: DenseMultilinearExtension<<PiopField as Field>::Inner> =
+                        col.iter()
+                            .map(|bp| binary_poly_projection(bp).inner().clone())
+                            .collect();
+                    mle.evaluate_with_config(&challenge_point_le, &field_cfg)
+                        .expect("public shift MLE evaluation should succeed")
+                })
+                .collect()
+            };
+
+            let full_v_finals = reconstruct_shift_v_finals(
+                &private_v_finals,
+                &public_v_finals,
+                sig.shifts.len(),
+                |i| sig.is_public_shift(i),
+            );
+
+            if let Err(e) = shift_sumcheck_verify_finalize(
+                &mut transcript, &ss_pre, &claims, &full_v_finals, &field_cfg,
+            ) {
+                eprintln!("Shift sumcheck finalize failed (full folded): {e}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: cpr_verify_time,
+                        lookup_verify: lookup_verify_time,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        } else {
+            if let Err(e) = shift_sumcheck_verify(
+                &mut transcript, &ss_proof, &claims, &private_v_finals, num_vars, &field_cfg,
+            ) {
+                eprintln!("Shift sumcheck verification failed (full folded): {e}");
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: cpr_verify_time,
+                        lookup_verify: lookup_verify_time,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        }
+    }
+
+    // ── N-round folding verification ─────────────────────────────────
+    let piop_point = &cpr_subclaim.evaluation_point[..num_vars];
+    let pcs_excluded = sig.pcs_excluded_columns();
+
+    let all_private_up_evals: Vec<PiopField> = folded_proof.cpr_up_evals.iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+
+    let original_evals: Vec<PiopField> = {
+        let mut private_idx = 0usize;
+        let mut pcs_evals = Vec::new();
+        for i in 0..sig.total_cols() {
+            if sig.is_public_column(i) {
+                continue;
+            }
+            if !pcs_excluded.contains(&i) {
+                pcs_evals.push(all_private_up_evals[private_idx].clone());
+            }
+            private_idx += 1;
+        }
+
+        let eval_point = &cpr_subclaim.evaluation_point;
+        if eval_point.len() > num_vars {
+            let one = PiopField::one_with_cfg(&field_cfg);
+            let mut padding_factor = one.clone();
+            for k in num_vars..eval_point.len() {
+                padding_factor *= one.clone() - &eval_point[k];
+            }
+            let padding_inv = padding_factor.inv().expect(
+                "zero-padding factor should be non-zero",
+            );
+            pcs_evals.iter().map(|e| {
+                let mut v = e.clone();
+                v *= &padding_inv;
+                v
+            }).collect()
+        } else {
+            pcs_evals
+        }
+    };
+
+    // Chain N folding rounds using runtime `fold_half_sizes` array.
+    let num_fold_rounds = folded_proof.folding_rounds.len();
+    assert_eq!(
+        fold_half_sizes.len(), num_fold_rounds,
+        "fold_half_sizes length must match number of folding rounds in proof"
+    );
+    let mut current_evals = original_evals;
+    let mut current_point: Vec<PiopField> = piop_point.to_vec();
+
+    for (round, (fr, &half_d)) in folded_proof.folding_rounds.iter().zip(fold_half_sizes.iter()).enumerate() {
+        let c1s: Vec<PiopField> = fr.c1s_bytes.iter()
+            .map(|b| field_from_bytes(b, &field_cfg))
+            .collect();
+        let c2s: Vec<PiopField> = fr.c2s_bytes.iter()
+            .map(|b| field_from_bytes(b, &field_cfg))
+            .collect();
+
+        let alpha_power = compute_alpha_power::<PiopField>(&projecting_element, half_d);
+        let fold_output = match fold_claims_verify::<PiopField, _>(
+            &mut transcript,
+            &c1s,
+            &c2s,
+            &current_evals,
+            &alpha_power,
+            &current_point,
+            &field_cfg,
+        ) {
+            Ok(out) => out,
+            Err(e) => {
+                eprintln!("Folding round {} verification failed (full folded): {e:?}", round + 1);
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: cpr_verify_time,
+                        lookup_verify: lookup_verify_time,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        };
+        current_evals = fold_output.new_evals;
+        current_point = fold_output.new_point;
+    }
+
+    // ── Ring-eval bridge + PCS Verify ────────────────────────────────
+    let t2 = Instant::now();
+
+    let ring_evals: Vec<PiopField> = folded_proof.ring_evals_bytes.iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+    let num_committed = folded_proof.commitment.batch_size;
+    assert_eq!(
+        ring_evals.len(),
+        num_committed * FINAL,
+        "ring_evals_bytes length mismatch: expected {} × {} = {}, got {}",
+        num_committed, FINAL, num_committed * FINAL, ring_evals.len(),
+    );
+
+    {
+        let one = PiopField::one_with_cfg(&field_cfg);
+        for j in 0..num_committed {
+            let v_j = &ring_evals[j * FINAL..(j + 1) * FINAL];
+            let mut projected = PiopField::zero_with_cfg(&field_cfg);
+            let mut alpha_pow = one.clone();
+            for k in 0..FINAL {
+                let mut term = alpha_pow.clone();
+                term *= &v_j[k];
+                projected += term;
+                alpha_pow *= &projecting_element;
+            }
+            if projected != current_evals[j] {
+                eprintln!(
+                    "Ring eval α-projection consistency failed for column {j} (full folded)"
+                );
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: cpr_verify_time,
+                        lookup_verify: lookup_verify_time,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        }
+    }
+
+    let pcs_field_cfg = field_cfg.clone();
+    let eval_f: PiopField = PiopField::new_unchecked_with_cfg(
+        <PiopField as Field>::Inner::read_transcription_bytes(&folded_proof.pcs_evals_bytes[0]),
+        &pcs_field_cfg,
+    );
+    let pcs_transcript = zip_plus::pcs_transcript::PcsTranscript {
+        fs_transcript: transcript_after_prime,
+        stream: std::io::Cursor::new(folded_proof.pcs_proof_bytes.clone()),
+    };
+
+    let point_f: Vec<PiopField> = current_point.iter()
+        .map(|p| PiopField::new_unchecked_with_cfg(p.inner().clone(), &pcs_field_cfg))
+        .collect();
+
+    let pcs_result = ZipPlus::<PcsZt, PcsLc>::verify_with_field_cfg::<PiopField, CHECK>(
+        pcs_params,
+        &folded_proof.commitment,
+        &point_f,
+        &eval_f,
+        pcs_transcript,
+        &pcs_field_cfg,
+    );
+
+    if let Err(ref e) = pcs_result {
+        eprintln!("PCS verification failed (full folded): {e:?}");
     }
 
     let pcs_verify_time = t2.elapsed();
@@ -7077,6 +9415,10 @@ pub struct FoldedDualCircuit4xZincProof {
     /// c₄[j] = eval of quarter-split column j at the upper half of r ‖ γ₁.
     pub pcs1_folding_c4s_bytes: Vec<Vec<u8>>,
 
+    /// Ring-valued MLE evaluations for circuit 1 at the doubly-folded point.
+    /// See [`Folded4xZincProof::ring_evals_bytes`] for details.
+    pub pcs1_ring_evals_bytes: Vec<Vec<u8>>,
+
     pub timing: TimingBreakdown,
 }
 
@@ -8662,6 +11004,15 @@ where
     )
     .expect("fold_claims_prove round 2 failed (4x folded dual circuit)");
 
+    // Ring-valued MLE evaluations for circuit 1 (PIOP↔PCS bridge).
+    let t_lift = Instant::now();
+    let pcs1_ring_evals: Vec<PiopField> = compute_ring_evals::<QUARTER_D>(
+        &split_trace1_quarter,
+        &fold2_output.new_point,
+        &field_cfg,
+    );
+    let lifting_time = t_lift.elapsed();
+
     // ── Step 14: Finalize CPR₂ ───────────────────────────────────────
     let c2_prover_state = prover_states.remove(0);
     let (c2_up_evals, c2_down_evals, _c2_cpr_state) =
@@ -8876,6 +11227,8 @@ where
         fold2_output.c1s.iter().map(field_to_bytes).collect();
     let pcs1_folding_c4s_bytes: Vec<Vec<u8>> =
         fold2_output.c2s.iter().map(field_to_bytes).collect();
+    let pcs1_ring_evals_bytes: Vec<Vec<u8>> =
+        pcs1_ring_evals.iter().map(field_to_bytes).collect();
 
     let serialize_time = t_ser.elapsed();
 
@@ -8904,6 +11257,7 @@ where
         pcs1_folding_c2s_bytes,
         pcs1_folding_c3s_bytes,
         pcs1_folding_c4s_bytes,
+        pcs1_ring_evals_bytes,
         timing: TimingBreakdown {
             pcs_commit: pcs_commit_time,
             ideal_check: ic_time,
@@ -8912,6 +11266,7 @@ where
             pcs_prove: pcs_prove_time,
             serialize: serialize_time,
             total: total_time,
+            lifting: lifting_time,
             ..Default::default()
         },
     }
@@ -9204,6 +11559,15 @@ where
     )
     .expect("fold_claims_prove round 2 failed (hybrid GKR 4x folded dual)");
 
+    // Ring-valued MLE evaluations for circuit 1 (PIOP↔PCS bridge).
+    let t_lift = Instant::now();
+    let pcs1_ring_evals: Vec<PiopField> = compute_ring_evals::<QUARTER_D>(
+        &split_trace1_quarter,
+        &fold2_output.new_point,
+        &field_cfg,
+    );
+    let lifting_time = t_lift.elapsed();
+
     // ── Step 12: Finalize CPR₂ ───────────────────────────────────────
     let c2_prover_state = prover_states.remove(0);
     let (c2_up_evals, c2_down_evals, _c2_cpr_state) =
@@ -9417,6 +11781,8 @@ where
         fold2_output.c1s.iter().map(field_to_bytes).collect();
     let pcs1_folding_c4s_bytes: Vec<Vec<u8>> =
         fold2_output.c2s.iter().map(field_to_bytes).collect();
+    let pcs1_ring_evals_bytes: Vec<Vec<u8>> =
+        pcs1_ring_evals.iter().map(field_to_bytes).collect();
 
     let serialize_time = t_ser.elapsed();
 
@@ -9445,6 +11811,7 @@ where
         pcs1_folding_c2s_bytes,
         pcs1_folding_c3s_bytes,
         pcs1_folding_c4s_bytes,
+        pcs1_ring_evals_bytes,
         timing: TimingBreakdown {
             pcs_commit: pcs_commit_time,
             ideal_check: ic_time,
@@ -9453,6 +11820,7 @@ where
             pcs_prove: pcs_prove_time,
             serialize: serialize_time,
             total: total_time,
+            lifting: lifting_time,
             ..Default::default()
         },
     }
@@ -12197,6 +14565,54 @@ where
     }
     let cpr_verify_time = t1.elapsed();
 
+    // ── Ring-eval bridge for circuit 1 ───────────────────────────────
+    // Deserialize and verify ring-valued MLE evaluations that connect
+    // the PIOP α-projection claims (d_{2,j}) to the PCS independent-
+    // challenge evaluation claim (eval_f).
+    let pcs1_ring_evals: Vec<PiopField> = proof.pcs1_ring_evals_bytes.iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+    let num_committed = proof.pcs1_commitment.batch_size;
+    assert_eq!(
+        pcs1_ring_evals.len(),
+        num_committed * QUARTER_D,
+        "pcs1_ring_evals_bytes length mismatch: expected {} × {} = {}, got {}",
+        num_committed, QUARTER_D, num_committed * QUARTER_D, pcs1_ring_evals.len(),
+    );
+
+    // Check 1: α-projection consistency.
+    // For each column j: Σ_k α^k · v_{j,k} = d_{2,j}
+    {
+        let one = PiopField::one_with_cfg(&field_cfg);
+        for j in 0..num_committed {
+            let v_j = &pcs1_ring_evals[j * QUARTER_D..(j + 1) * QUARTER_D];
+            let mut projected = PiopField::zero_with_cfg(&field_cfg);
+            let mut alpha_pow = one.clone();
+            for k in 0..QUARTER_D {
+                let mut term = alpha_pow.clone();
+                term *= &v_j[k];
+                projected += term;
+                alpha_pow *= &projecting_element;
+            }
+            if projected != fold2_verifier_output.new_evals[j] {
+                eprintln!(
+                    "Ring eval α-projection consistency failed for column {j} (4x folded dual): \
+                     Σ_k α^k · v_{{j,k}} ≠ d_{{2,j}}"
+                );
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: cpr_verify_time,
+                        lookup_verify: Duration::ZERO,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        }
+    }
+
     // ── PCS Verify (both circuits) ───────────────────────────────────
     // Circuit 1: verify at the doubly-extended point (r ‖ γ₁ ‖ γ₂) using
     //            PcsZt1 (BinaryPoly<QUARTER_D> columns).
@@ -13072,6 +15488,50 @@ where
     }
     let lookup_verify_time = t_lk.elapsed();
     let cpr_verify_time = t1.elapsed();
+
+    // ── Ring-eval bridge for circuit 1 ───────────────────────────────
+    let pcs1_ring_evals: Vec<PiopField> = proof.pcs1_ring_evals_bytes.iter()
+        .map(|b| field_from_bytes(b, &field_cfg))
+        .collect();
+    let num_committed = proof.pcs1_commitment.batch_size;
+    assert_eq!(
+        pcs1_ring_evals.len(),
+        num_committed * QUARTER_D,
+        "pcs1_ring_evals_bytes length mismatch: expected {} × {} = {}, got {}",
+        num_committed, QUARTER_D, num_committed * QUARTER_D, pcs1_ring_evals.len(),
+    );
+
+    // Check 1: α-projection consistency.
+    {
+        let one = PiopField::one_with_cfg(&field_cfg);
+        for j in 0..num_committed {
+            let v_j = &pcs1_ring_evals[j * QUARTER_D..(j + 1) * QUARTER_D];
+            let mut projected = PiopField::zero_with_cfg(&field_cfg);
+            let mut alpha_pow = one.clone();
+            for k in 0..QUARTER_D {
+                let mut term = alpha_pow.clone();
+                term *= &v_j[k];
+                projected += term;
+                alpha_pow *= &projecting_element;
+            }
+            if projected != fold2_verifier_output.new_evals[j] {
+                eprintln!(
+                    "Ring eval α-projection consistency failed for column {j} (hybrid GKR 4x dual): \
+                     Σ_k α^k · v_{{j,k}} ≠ d_{{2,j}}"
+                );
+                return VerifyResult {
+                    accepted: false,
+                    timing: VerifyTimingBreakdown {
+                        ideal_check_verify: ic_verify_time,
+                        combined_poly_resolver_verify: cpr_verify_time,
+                        lookup_verify: lookup_verify_time,
+                        pcs_verify: Duration::ZERO,
+                        total: total_start.elapsed(),
+                    },
+                };
+            }
+        }
+    }
 
     // ── PCS Verify (both circuits) ───────────────────────────────────
     let t2 = Instant::now();

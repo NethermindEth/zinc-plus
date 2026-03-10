@@ -20,6 +20,7 @@ zinc-utils = { path = "../utils" }
 [features]
 no-f2x = []
 true-ideal = []
+boundary = []
 
 [dev-dependencies]
 zinc-uair = { path = "../uair" }

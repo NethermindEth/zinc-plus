@@ -20,21 +20,32 @@
 //! Enable with `--features no-f2x` on the `zinc-sha256-uair` crate
 //! (or `zinc-snark/no-f2x` which forwards the flag).
 //!
-//! # Column layout (38 total: 35 bit-poly + 3 integer)
+//! # Column layout (36 base + 3 integer; 42 with `true-ideal`)
 //!
-//! Columns 0–26 and int 0–2 are **identical** to the full UAIR.
-//! Columns 27–34 are the new μ quotient decompositions:
+//! Columns 0–24 and int 0–2 are **identical** to the full UAIR.
+//! Columns 25–32 are the new μ quotient decompositions:
 //!
 //! | Index | Name        | Description                              |
 //! |-------|-------------|------------------------------------------|
-//! | 27    | `mu_c1_lo`  | Σ₀ rotation quotient, low bit            |
-//! | 28    | `mu_c1_hi`  | Σ₀ rotation quotient, high bit           |
-//! | 29    | `mu_c2_lo`  | Σ₁ rotation quotient, low bit            |
-//! | 30    | `mu_c2_hi`  | Σ₁ rotation quotient, high bit           |
-//! | 31    | `mu_c3_lo`  | σ₀ rotation+shift quotient, low bit      |
-//! | 32    | `mu_c3_hi`  | σ₀ rotation+shift quotient, high bit     |
-//! | 33    | `mu_c4_lo`  | σ₁ rotation+shift quotient, low bit      |
-//! | 34    | `mu_c4_hi`  | σ₁ rotation+shift quotient, high bit     |
+//! | 25    | `mu_c1_lo`  | Σ₀ rotation quotient, low bit            |
+//! | 26    | `mu_c1_hi`  | Σ₀ rotation quotient, high bit           |
+//! | 27    | `mu_c2_lo`  | Σ₁ rotation quotient, low bit            |
+//! | 28    | `mu_c2_hi`  | Σ₁ rotation quotient, high bit           |
+//! | 29    | `mu_c3_lo`  | σ₀ rotation+shift quotient, low bit      |
+//! | 30    | `mu_c3_hi`  | σ₀ rotation+shift quotient, high bit     |
+//! | 31    | `mu_c4_lo`  | σ₁ rotation+shift quotient, low bit      |
+//! | 32    | `mu_c4_hi`  | σ₁ rotation+shift quotient, high bit     |
+//!
+//! With `true-ideal`, 6 correction columns are added (33–38):
+//!
+//! | Index | Name            | Description                          |
+//! |-------|-----------------|--------------------------------------|
+//! | 33    | `corr_add_c7`   | Additive correction for C7           |
+//! | 34    | `corr_add_c8`   | Additive correction for C8           |
+//! | 35    | `corr_add_c9`   | Additive correction for C9           |
+//! | 36    | `corr_sub_c7`   | Subtractive correction for C7        |
+//! | 37    | `corr_sub_c8`   | Subtractive correction for C8        |
+//! | 38    | `corr_sub_c9`   | Subtractive correction for C9        |
 //!
 //! # Constraint split
 //!
@@ -44,7 +55,7 @@
 //!
 //! **Qx UAIR** (`Sha256UairQxNoF2x`, 7 constraints):
 //!   C1–C4 (rotation / shift, cyclotomic ideal over Z\[X\], with μ correction) +
-//!   C7–C9 (carry propagation, trivial ideal).
+//!   C7–C9 (carry propagation, trivial or DegreeOne ideal).
 
 use crypto_primitives::PrimeField;
 use rand::RngCore;
@@ -92,20 +103,36 @@ pub const COL_MU_C4_LO: usize = 31;
 /// σ₁ rotation+shift quotient, high bit of binary decomposition.
 pub const COL_MU_C4_HI: usize = 32;
 
-// ─── Correction column indices (33–35, only with `true-ideal`) ──────────────
+// ─── Correction column indices (33–38, only with `true-ideal`) ──────────────
+//
+// Each carry constraint (C7–C9) needs TWO correction columns:
+// - `CORR_ADD_*`: added to the constraint (handles negative c_eval)
+// - `CORR_SUB_*`: subtracted from the constraint (handles positive c_eval)
+//
+// A single BinaryPoly<32> column can only represent non-negative values at
+// X=2 (in [0, 2^32−1]).  The constraint violation c_eval can be positive or
+// negative, so we need:
+//     c_inner + corr_add − corr_sub ∈ (X − 2)
+// with corr_add = max(−c_eval, 0) and corr_sub = max(c_eval, 0).
 
-/// Correction column for C7 (a-update carry). Public, zero except at
-/// boundary rows where the shifted a[t+1] is incorrect.
+/// Additive correction column for C7 (a-update carry).
 #[cfg(feature = "true-ideal")]
-pub const COL_CORR_C7: usize = 33;
-/// Correction column for C8 (e-update carry). Public, zero except at
-/// boundary rows where the shifted e[t+1] is incorrect.
+pub const COL_CORR_ADD_C7: usize = 33;
+/// Additive correction column for C8 (e-update carry).
 #[cfg(feature = "true-ideal")]
-pub const COL_CORR_C8: usize = 34;
-/// Correction column for C9 (W-schedule). Public, zero except at rows
-/// where the schedule recurrence does not hold.
+pub const COL_CORR_ADD_C8: usize = 34;
+/// Additive correction column for C9 (W-schedule).
 #[cfg(feature = "true-ideal")]
-pub const COL_CORR_C9: usize = 35;
+pub const COL_CORR_ADD_C9: usize = 35;
+/// Subtractive correction column for C7 (a-update carry).
+#[cfg(feature = "true-ideal")]
+pub const COL_CORR_SUB_C7: usize = 36;
+/// Subtractive correction column for C8 (e-update carry).
+#[cfg(feature = "true-ideal")]
+pub const COL_CORR_SUB_C8: usize = 37;
+/// Subtractive correction column for C9 (W-schedule).
+#[cfg(feature = "true-ideal")]
+pub const COL_CORR_SUB_C9: usize = 38;
 
 // ─── Counts ─────────────────────────────────────────────────────────────────
 
@@ -113,9 +140,9 @@ pub const COL_CORR_C9: usize = 35;
 #[cfg(not(feature = "true-ideal"))]
 pub const NO_F2X_NUM_BITPOLY_COLS: usize = 33;
 
-/// Number of bit-polynomial columns with true-ideal (36 = original 25 + 8 μ + 3 correction).
+/// Number of bit-polynomial columns with true-ideal (39 = original 25 + 8 μ + 6 correction).
 #[cfg(feature = "true-ideal")]
-pub const NO_F2X_NUM_BITPOLY_COLS: usize = 36;
+pub const NO_F2X_NUM_BITPOLY_COLS: usize = 39;
 
 /// Number of integer columns (unchanged: 3).
 pub const NO_F2X_NUM_INT_COLS: usize = 3;
@@ -295,9 +322,12 @@ impl Uair for Sha256UairBpNoF2x {
                 ];
                 #[cfg(feature = "true-ideal")]
                 {
-                    cols.push(COL_CORR_C7);
-                    cols.push(COL_CORR_C8);
-                    cols.push(COL_CORR_C9);
+                    cols.push(COL_CORR_ADD_C7);
+                    cols.push(COL_CORR_ADD_C8);
+                    cols.push(COL_CORR_ADD_C9);
+                    cols.push(COL_CORR_SUB_C7);
+                    cols.push(COL_CORR_SUB_C8);
+                    cols.push(COL_CORR_SUB_C9);
                 }
                 cols
             },
@@ -408,9 +438,12 @@ impl Uair for Sha256UairQxNoF2x {
                 ];
                 #[cfg(feature = "true-ideal")]
                 {
-                    cols.push(COL_CORR_C7);
-                    cols.push(COL_CORR_C8);
-                    cols.push(COL_CORR_C9);
+                    cols.push(COL_CORR_ADD_C7);
+                    cols.push(COL_CORR_ADD_C8);
+                    cols.push(COL_CORR_ADD_C9);
+                    cols.push(COL_CORR_SUB_C7);
+                    cols.push(COL_CORR_SUB_C8);
+                    cols.push(COL_CORR_SUB_C9);
                 }
                 cols
             },
@@ -584,21 +617,21 @@ impl Uair for Sha256UairQxNoF2x {
         {
             let degree_one = ideal_from_ref(&Sha256QxNoF2xIdeal::DegreeOne);
 
-            // ── C7: (a-update + correction) ∈ (X − 2) ──────────────────
+            // ── C7: (a-update + corr_add − corr_sub) ∈ (X − 2) ─────────
             b.assert_in_ideal(
-                c7_inner + &bp_up[COL_CORR_C7],
+                c7_inner + &bp_up[COL_CORR_ADD_C7] - &bp_up[COL_CORR_SUB_C7],
                 &degree_one,
             );
 
-            // ── C8: (e-update + correction) ∈ (X − 2) ──────────────────
+            // ── C8: (e-update + corr_add − corr_sub) ∈ (X − 2) ─────────
             b.assert_in_ideal(
-                c8_inner + &bp_up[COL_CORR_C8],
+                c8_inner + &bp_up[COL_CORR_ADD_C8] - &bp_up[COL_CORR_SUB_C8],
                 &degree_one,
             );
 
-            // ── C9: (W-schedule + correction) ∈ (X − 2) ────────────────
+            // ── C9: (W-schedule + corr_add − corr_sub) ∈ (X − 2) ───────
             b.assert_in_ideal(
-                c9_inner + &bp_up[COL_CORR_C9],
+                c9_inner + &bp_up[COL_CORR_ADD_C9] - &bp_up[COL_CORR_SUB_C9],
                 &degree_one,
             );
         }
@@ -672,28 +705,33 @@ fn compute_mu(
     (mu_lo, mu_hi)
 }
 
-/// Compute the 3 correction columns for the `true-ideal` feature.
+/// Compute the 6 correction columns and 3 corrected carry columns for `true-ideal`.
 ///
-/// Each correction column is a `BinaryPoly<32>` polynomial column that is zero
-/// at rows where the corresponding carry constraint (C7/C8/C9) naturally holds,
-/// and takes whatever value is needed to make the constraint evaluate to zero
-/// at X=2 at the remaining rows.
+/// Each carry constraint (C7/C8/C9) needs TWO correction columns:
+/// - `corr_add`: added to the constraint expression (handles negative residual)
+/// - `corr_sub`: subtracted from the constraint expression (handles positive residual)
 ///
-/// For C7 (a-update) and C8 (e-update): the constraint fails at boundary rows
-/// where the shifted a[t+1] or e[t+1] equals zero (due to shift zero-padding or
-/// the Bp linking constraints forcing boundary values to zero).
+/// The base trace only sets carry values (μ_a, μ_e, μ_W) at active rows.
+/// At inactive boundary rows the carries are 0, making the constraint
+/// violation potentially exceed `2^32`, which overflows a `BinaryPoly<32>`.
 ///
-/// For C9 (W-schedule): the constraint fails at rows where the schedule recurrence
-/// does not naturally hold (round < 16 within each 64-row compression, plus the
-/// tail rows where W is forced to zero by shift padding).
+/// This function recomputes the carry at **every** row so that the
+/// residual always fits in a `u32`:
+///     μ = ⌊max(sum − next, 0) / 2^32⌋
+///     residual = next − sum + μ · 2^32   (fits in [−(2^32−1), 2^32−1])
 ///
-/// The μ_a / μ_e / μ_W carry values are set at boundary rows to absorb
-/// the high bits, so the correction value always fits in 32 bits.
+/// The corrected constraint is:
+///     c_inner + corr_add − corr_sub ∈ (X − 2)
+///
+/// Returns `(corrections, corrected_carries)`:
+/// - corrections: `[corr_add_c7, corr_add_c8, corr_add_c9,
+///                  corr_sub_c7, corr_sub_c8, corr_sub_c9]`
+/// - corrected_carries: `[mu_a, mu_e, mu_w]` (for ALL rows)
 #[cfg(feature = "true-ideal")]
-fn compute_correction_columns(
+fn compute_corrections_and_carries(
     base: &[DenseMultilinearExtension<BinaryPoly<32>>],
     num_vars: usize,
-) -> [Vec<BinaryPoly<32>>; 3] {
+) -> ([Vec<BinaryPoly<32>>; 6], [Vec<BinaryPoly<32>>; 3]) {
     let num_rows = 1usize << num_vars;
 
     let bp_val = |col: usize, t: usize| -> u64 {
@@ -707,14 +745,35 @@ fn compute_correction_columns(
         val
     };
 
-    // Int column indices within the base trace (after NUM_BITPOLY_COLS).
-    let int_mu_a_col = crate::NUM_BITPOLY_COLS + COL_INT_MU_A;
-    let int_mu_e_col = crate::NUM_BITPOLY_COLS + COL_INT_MU_E;
-    let int_mu_w_col = crate::NUM_BITPOLY_COLS + COL_INT_MU_W;
+    let mut corr_add_c7 = vec![BinaryPoly::<32>::from(0u32); num_rows];
+    let mut corr_add_c8 = vec![BinaryPoly::<32>::from(0u32); num_rows];
+    let mut corr_add_c9 = vec![BinaryPoly::<32>::from(0u32); num_rows];
+    let mut corr_sub_c7 = vec![BinaryPoly::<32>::from(0u32); num_rows];
+    let mut corr_sub_c8 = vec![BinaryPoly::<32>::from(0u32); num_rows];
+    let mut corr_sub_c9 = vec![BinaryPoly::<32>::from(0u32); num_rows];
 
-    let mut corr_c7 = vec![BinaryPoly::<32>::from(0u32); num_rows];
-    let mut corr_c8 = vec![BinaryPoly::<32>::from(0u32); num_rows];
-    let mut corr_c9 = vec![BinaryPoly::<32>::from(0u32); num_rows];
+    let mut mu_a_col = vec![BinaryPoly::<32>::from(0u32); num_rows];
+    let mut mu_e_col = vec![BinaryPoly::<32>::from(0u32); num_rows];
+    let mut mu_w_col = vec![BinaryPoly::<32>::from(0u32); num_rows];
+
+    /// Compute the carry and residual for a single constraint.
+    ///
+    /// Given `next` (the "a_next" or "e_next" value) and `sum` (the sum
+    /// of the other terms), returns `(mu, residual)` where:
+    ///   mu = ⌊max(sum − next, 0) / 2^32⌋
+    ///   residual = next − sum + mu · 2^32
+    /// The residual is guaranteed to fit in `i64` with `|residual| < 2^32`.
+    fn carry_and_residual(next: u64, sum: u64) -> (u32, i64) {
+        if sum > next {
+            let diff = sum - next;
+            let mu = (diff >> 32) as u32;
+            let residual = next as i64 - sum as i64 + (mu as i64) * (1i64 << 32);
+            (mu, residual)
+        } else {
+            // sum <= next: residual = next - sum >= 0, fits in u32
+            (0, next as i64 - sum as i64)
+        }
+    }
 
     for t in 0..num_rows {
         // The Qx UAIR shift-by-1 gives a_hat[t+1] for C7, e_hat[t+1] for C8.
@@ -730,45 +789,49 @@ fn compute_correction_columns(
         let sigma0_val = bp_val(COL_SIGMA0_HAT, t);
         let maj_val = bp_val(COL_MAJ_HAT, t);
         let d_val = bp_val(COL_D_HAT, t);
-        let mu_a = bp_val(int_mu_a_col, t);
-        let mu_e = bp_val(int_mu_e_col, t);
 
-        // C7: a[t+1] - h - Σ₁ - ch_ef - ch_neg_eg - K - W - Σ₀ - Maj + μ_a * 2^32
-        // evaluated at X=2: all BinaryPoly values become their u32 integer values.
+        // C7: a[t+1] - (h + Σ₁ + ch_ef + ch_neg_eg + K + W + Σ₀ + Maj) + μ_a · 2^32
         let c7_sum = h_val + sigma1_val + ch_ef_val + ch_neg_eg_val
             + k_val + w_val + sigma0_val + maj_val;
-        let c7_eval: i64 = a_next as i64 - c7_sum as i64 + (mu_a as i64) * (1i64 << 32);
-        if c7_eval != 0 {
-            // correction(2) = -c7_eval, must fit in [0, 2^32)
-            let corr = ((-c7_eval) as u64) & 0xFFFF_FFFF;
-            corr_c7[t] = BinaryPoly::from(corr as u32);
+        let (mu_a, c7_residual) = carry_and_residual(a_next, c7_sum);
+        mu_a_col[t] = BinaryPoly::from(mu_a);
+        if c7_residual < 0 {
+            corr_add_c7[t] = BinaryPoly::from((-c7_residual) as u32);
+        } else if c7_residual > 0 {
+            corr_sub_c7[t] = BinaryPoly::from(c7_residual as u32);
         }
 
-        // C8: e[t+1] - d - h - Σ₁ - ch_ef - ch_neg_eg - K - W + μ_e * 2^32
+        // C8: e[t+1] - (d + h + Σ₁ + ch_ef + ch_neg_eg + K + W) + μ_e · 2^32
         let c8_sum = d_val + h_val + sigma1_val + ch_ef_val
             + ch_neg_eg_val + k_val + w_val;
-        let c8_eval: i64 = e_next as i64 - c8_sum as i64 + (mu_e as i64) * (1i64 << 32);
-        if c8_eval != 0 {
-            let corr = ((-c8_eval) as u64) & 0xFFFF_FFFF;
-            corr_c8[t] = BinaryPoly::from(corr as u32);
+        let (mu_e, c8_residual) = carry_and_residual(e_next, c8_sum);
+        mu_e_col[t] = BinaryPoly::from(mu_e);
+        if c8_residual < 0 {
+            corr_add_c8[t] = BinaryPoly::from((-c8_residual) as u32);
+        } else if c8_residual > 0 {
+            corr_sub_c8[t] = BinaryPoly::from(c8_residual as u32);
         }
 
-        // C9: W - W_tm16 - σ₀_w - W_tm7 - σ₁_w + μ_W * 2^32
+        // C9: W - (W_tm16 + σ₀_w + W_tm7 + σ₁_w) + μ_W · 2^32
         let w_tm16_val = bp_val(COL_W_TM16, t);
         let sigma0_w_val = bp_val(COL_SIGMA0_W_HAT, t);
         let w_tm7_val = bp_val(COL_W_TM7, t);
         let sigma1_w_val = bp_val(COL_SIGMA1_W_HAT, t);
-        let mu_w = bp_val(int_mu_w_col, t);
-        let c9_eval: i64 = w_val as i64 - w_tm16_val as i64 - sigma0_w_val as i64
-            - w_tm7_val as i64 - sigma1_w_val as i64
-            + (mu_w as i64) * (1i64 << 32);
-        if c9_eval != 0 {
-            let corr = ((-c9_eval) as u64) & 0xFFFF_FFFF;
-            corr_c9[t] = BinaryPoly::from(corr as u32);
+        let c9_sum = w_tm16_val + sigma0_w_val + w_tm7_val + sigma1_w_val;
+        let (mu_w, c9_residual) = carry_and_residual(w_val, c9_sum);
+        mu_w_col[t] = BinaryPoly::from(mu_w);
+        if c9_residual < 0 {
+            corr_add_c9[t] = BinaryPoly::from((-c9_residual) as u32);
+        } else if c9_residual > 0 {
+            corr_sub_c9[t] = BinaryPoly::from(c9_residual as u32);
         }
     }
 
-    [corr_c7, corr_c8, corr_c9]
+    (
+        [corr_add_c7, corr_add_c8, corr_add_c9,
+         corr_sub_c7, corr_sub_c8, corr_sub_c9],
+        [mu_a_col, mu_e_col, mu_w_col],
+    )
 }
 
 /// Generate the full witness for the no-F₂\[X\] variant.
@@ -778,7 +841,7 @@ fn compute_correction_columns(
 /// the existing trace data.
 ///
 /// The total layout is: `binary_poly[0..33]` || `int[0..3]`.
-/// With `true-ideal`, 3 correction columns are appended: `binary_poly[0..36]` || `int[0..3]`.
+/// With `true-ideal`, 6 correction columns are appended: `binary_poly[0..39]` || `int[0..3]`.
 pub fn generate_no_f2x_witness(
     num_vars: usize,
     rng: &mut impl RngCore,
@@ -862,10 +925,10 @@ pub fn generate_no_f2x_witness(
         ));
     }
 
-    // Correction columns (33–35) when true-ideal is enabled.
+    // Correction columns (33–38) and corrected int columns when true-ideal is enabled.
     #[cfg(feature = "true-ideal")]
-    {
-        let corr_cols = compute_correction_columns(&base, num_vars);
+    let corrected_int_cols = {
+        let (corr_cols, int_cols) = compute_corrections_and_carries(&base, num_vars);
         for col in corr_cols {
             result.push(DenseMultilinearExtension::from_evaluations_vec(
                 num_vars,
@@ -873,11 +936,25 @@ pub fn generate_no_f2x_witness(
                 BinaryPoly::<32>::from(0u32),
             ));
         }
-    }
+        Some(int_cols)
+    };
+    #[cfg(not(feature = "true-ideal"))]
+    let corrected_int_cols: Option<[Vec<BinaryPoly<32>>; 3]> = None;
 
-    // Original int columns.
-    for i in crate::NUM_BITPOLY_COLS..crate::NUM_COLS {
-        result.push(base[i].clone());
+    // Int columns: use corrected carries when true-ideal is enabled,
+    // otherwise clone from the base trace.
+    if let Some(int_cols) = corrected_int_cols {
+        for col in int_cols {
+            result.push(DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                col,
+                BinaryPoly::<32>::from(0u32),
+            ));
+        }
+    } else {
+        for i in crate::NUM_BITPOLY_COLS..crate::NUM_COLS {
+            result.push(base[i].clone());
+        }
     }
 
     assert_eq!(result.len(), NO_F2X_NUM_COLS);

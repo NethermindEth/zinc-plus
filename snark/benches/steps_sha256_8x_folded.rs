@@ -81,7 +81,7 @@ type BenchBpUair = Sha256UairBpNoF2x;
 #[cfg(feature = "no-f2x")]
 type BenchQxUair = Sha256UairQxNoF2x;
 #[cfg(feature = "no-f2x")]
-const SHA256_BATCH_SIZE: usize = NO_F2X_NUM_COLS; // 38 = 35 bitpoly + 3 int
+const SHA256_BATCH_SIZE: usize = NO_F2X_NUM_COLS;
 use zinc_piop::projections::{
     project_trace_to_field,
     project_scalars, project_scalars_to_field,
@@ -133,10 +133,26 @@ where
 ///   OUTPUT_LEN = 128 × 64 = 8192 (rate 1/4).
 /// Field: F65537 (2^16+1, TWO_ADICITY=16), which has small twiddles (max 4096)
 /// giving max codeword coefficient ~2^50, vs ~2^62 at depth 3.
+#[cfg(not(feature = "full-fold"))]
 type FoldedZt4x = Sha256ZipTypes<i64, 8>;
+#[cfg(not(feature = "full-fold"))]
 type FoldedLc4x = IprsCode<
     FoldedZt4x,
     PnttConfigF2_16R4B32<2>,
+    BinaryPolyWideningMulByScalar<i64>,
+    UNCHECKED,
+>;
+
+/// 32x Full-folded PCS types — BinaryPoly<1> codewords.
+/// Uses PnttConfigF2_16R4B32<3> (BASE_LEN=32, DEPTH=3):
+///   INPUT_LEN = 32 × 512 = 16384 rows,
+///   OUTPUT_LEN = 128 × 512 = 65536 (rate 1/4).
+#[cfg(feature = "full-fold")]
+type FoldedZt4x = Sha256ZipTypes<i64, 1>;
+#[cfg(feature = "full-fold")]
+type FoldedLc4x = IprsCode<
+    FoldedZt4x,
+    PnttConfigF2_16R4B32<3>,
     BinaryPolyWideningMulByScalar<i64>,
     UNCHECKED,
 >;
@@ -267,19 +283,29 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
 
     let mem_tracker = MemoryTracker::start();
 
+    #[cfg(not(feature = "full-fold"))]
+    let fold_label = "4x-Folded";
+    #[cfg(feature = "full-fold")]
+    let fold_label = "32x Full-Folded";
+
     let mut group = c.benchmark_group(format!(
-        "8xSHA256 4x-Folded Hybrid GKR c=2 Steps (grind={})",
+        "8xSHA256 {} Hybrid GKR c=2 Steps (grind={})",
+        fold_label,
         <FoldedZt4x as ZipTypes>::GRINDING_BITS,
     ));
     group.sample_size(100);
 
-    // -- 4x-folded PCS params ----------------------------------------
-    // Two splits -> num_vars + 2, row_len = 2048, num_rows = 1
-    let folded_4x_num_vars = SHA256_8X_NUM_VARS + 2; // 11
-    let row_len_4x = 2048;
-    let folded_4x_lc = FoldedLc4x::new(row_len_4x);
-    let folded_4x_params = ZipPlusParams::<FoldedZt4x, FoldedLc4x>::new(
-        folded_4x_num_vars, 1, folded_4x_lc,
+    // -- Folded PCS params -------------------------------------------
+    #[cfg(not(feature = "full-fold"))]
+    let folded_extra_vars: usize = 2; // Two splits -> num_vars + 2
+    #[cfg(feature = "full-fold")]
+    let folded_extra_vars: usize = 5; // Five splits -> num_vars + 5
+
+    let folded_num_vars = SHA256_8X_NUM_VARS + folded_extra_vars;
+    let folded_row_len = 1usize << folded_num_vars;
+    let folded_lc = FoldedLc4x::new(folded_row_len);
+    let folded_params = ZipPlusParams::<FoldedZt4x, FoldedLc4x>::new(
+        folded_num_vars, 1, folded_lc,
     );
 
     let sha_lookup_specs = sha256_lookup_specs_4chunks();
@@ -307,7 +333,8 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
         .filter(|(i, _)| !sha_excluded.contains(i))
         .map(|(_, c)| c.clone()).collect();
 
-    // ── 2. Folding / Double Split Columns ───────────────────────────
+    // ── 2. Folding / Split Columns ───────────────────────────────────
+    #[cfg(not(feature = "full-fold"))]
     group.bench_function("Folding/SplitColumns", |b| {
         b.iter(|| {
             let half = split_columns::<32, 16>(&sha_pcs_trace);
@@ -316,15 +343,54 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
         });
     });
 
+    #[cfg(feature = "full-fold")]
+    group.bench_function("Folding/SplitColumns (5-round)", |b| {
+        b.iter(|| {
+            let s16 = split_columns::<32, 16>(&sha_pcs_trace);
+            let s8 = split_columns::<16, 8>(&s16);
+            let s4 = split_columns::<8, 4>(&s8);
+            let s2 = split_columns::<4, 2>(&s4);
+            let s1 = split_columns::<2, 1>(&s2);
+            black_box(s1);
+        });
+    });
+
+    #[cfg(not(feature = "full-fold"))]
     let half_trace: Vec<DenseMultilinearExtension<BinaryPoly<16>>> =
         split_columns::<32, 16>(&sha_pcs_trace);
+    #[cfg(not(feature = "full-fold"))]
     let split_trace: Vec<DenseMultilinearExtension<BinaryPoly<8>>> =
         split_columns::<16, 8>(&half_trace);
 
-    // ── 3. PCS Commit (4x-folded — BinaryPoly<8>) ──────────────────
+    #[cfg(feature = "full-fold")]
+    let split16: Vec<DenseMultilinearExtension<BinaryPoly<16>>> =
+        split_columns::<32, 16>(&sha_pcs_trace);
+    #[cfg(feature = "full-fold")]
+    let split8: Vec<DenseMultilinearExtension<BinaryPoly<8>>> =
+        split_columns::<16, 8>(&split16);
+    #[cfg(feature = "full-fold")]
+    let split4: Vec<DenseMultilinearExtension<BinaryPoly<4>>> =
+        split_columns::<8, 4>(&split8);
+    #[cfg(feature = "full-fold")]
+    let split2: Vec<DenseMultilinearExtension<BinaryPoly<2>>> =
+        split_columns::<4, 2>(&split4);
+    #[cfg(feature = "full-fold")]
+    let split1: Vec<DenseMultilinearExtension<BinaryPoly<1>>> =
+        split_columns::<2, 1>(&split2);
+
+    // ── 3. PCS Commit ───────────────────────────────────────────────
+    #[cfg(not(feature = "full-fold"))]
     group.bench_function("PCS/Commit (4x-folded)", |b| {
         b.iter(|| {
-            let r = ZipPlus::<FoldedZt4x, FoldedLc4x>::commit(&folded_4x_params, &split_trace);
+            let r = ZipPlus::<FoldedZt4x, FoldedLc4x>::commit(&folded_params, &split_trace);
+            let _ = black_box(r);
+        });
+    });
+
+    #[cfg(feature = "full-fold")]
+    group.bench_function("PCS/Commit (32x full-folded)", |b| {
+        b.iter(|| {
+            let r = ZipPlus::<FoldedZt4x, FoldedLc4x>::commit(&folded_params, &split1);
             let _ = black_box(r);
         });
     });
@@ -634,6 +700,7 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
             .expect("CPR prove failed for folding bench");
         let fold_piop_point = &cpr_state_fold.evaluation_point[..SHA256_8X_NUM_VARS];
 
+        #[cfg(not(feature = "full-fold"))]
         group.bench_function("Folding/FoldClaims (2-round)", |b| {
             b.iter_custom(|iters| {
                 let mut total = Duration::ZERO;
@@ -653,10 +720,43 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
                 total
             });
         });
+
+        #[cfg(feature = "full-fold")]
+        group.bench_function("Folding/FoldClaims (5-round)", |b| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let mut tr = transcript_fold.clone();
+                    let t = Instant::now();
+                    let f1 = fold_claims_prove::<F, _, 16>(
+                        &mut tr, &split16, fold_piop_point,
+                        &projecting_elem_cpr, &field_cfg_cpr,
+                    ).expect("fold1 failed");
+                    let f2 = fold_claims_prove::<F, _, 8>(
+                        &mut tr, &split8, &f1.new_point,
+                        &projecting_elem_cpr, &field_cfg_cpr,
+                    ).expect("fold2 failed");
+                    let f3 = fold_claims_prove::<F, _, 4>(
+                        &mut tr, &split4, &f2.new_point,
+                        &projecting_elem_cpr, &field_cfg_cpr,
+                    ).expect("fold3 failed");
+                    let f4 = fold_claims_prove::<F, _, 2>(
+                        &mut tr, &split2, &f3.new_point,
+                        &projecting_elem_cpr, &field_cfg_cpr,
+                    ).expect("fold4 failed");
+                    let _f5 = fold_claims_prove::<F, _, 1>(
+                        &mut tr, &split1, &f4.new_point,
+                        &projecting_elem_cpr, &field_cfg_cpr,
+                    ).expect("fold5 failed");
+                    total += t.elapsed();
+                }
+                total
+            });
+        });
     }
 
-    // ── 13. PCS Prove (4x-folded — BinaryPoly<8> split columns) ───
-    let folded_4x_pcs_point: Vec<F> = {
+    // ── 13. PCS Prove ──────────────────────────────────────────────
+    let folded_pcs_point: Vec<F> = {
         let mut tr = transcript_for_cpr.clone();
         let (_, cpr_state) = CombinedPolyResolver::<F>::prove_as_subprotocol::<BenchBpUair>(
             &mut tr,
@@ -668,31 +768,84 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
             max_degree,
             &field_cfg_cpr,
         ).expect("Main field sumcheck prover failed");
-        // The 4x-folded PCS point extends the main field sumcheck eval point
-        // by two extra coordinates (γ₁, γ₂ from the double folding protocol).
         let mut pt = cpr_state.evaluation_point;
-        pt.push(F::one_with_cfg(&field_cfg_cpr)); // placeholder γ₁
-        pt.push(F::one_with_cfg(&field_cfg_cpr)); // placeholder γ₂
+        for _ in 0..folded_extra_vars {
+            pt.push(F::one_with_cfg(&field_cfg_cpr)); // placeholder γ
+        }
         pt
     };
 
-    let (folded_4x_hint, _) = ZipPlus::<FoldedZt4x, FoldedLc4x>::commit(&folded_4x_params, &split_trace)
+    #[cfg(not(feature = "full-fold"))]
+    let (folded_hint, _) = ZipPlus::<FoldedZt4x, FoldedLc4x>::commit(&folded_params, &split_trace)
+        .expect("commit");
+    #[cfg(feature = "full-fold")]
+    let (folded_hint, _) = ZipPlus::<FoldedZt4x, FoldedLc4x>::commit(&folded_params, &split1)
         .expect("commit");
 
+    // ── 12b. Lifting: Ring-valued MLE evaluations ─────────────────
+    #[cfg(not(feature = "full-fold"))]
+    group.bench_function("Lifting/RingEvals (4x-folded)", |b| {
+        b.iter(|| {
+            let r = zinc_snark::pipeline::compute_ring_evals::<8>(
+                &split_trace, &folded_pcs_point, &field_cfg_cpr,
+            );
+            black_box(r);
+        });
+    });
+
+    #[cfg(feature = "full-fold")]
+    group.bench_function("Lifting/RingEvals (32x full-folded)", |b| {
+        b.iter(|| {
+            let r = zinc_snark::pipeline::compute_ring_evals::<1>(
+                &split1, &folded_pcs_point, &field_cfg_cpr,
+            );
+            black_box(r);
+        });
+    });
+
+    #[cfg(not(feature = "full-fold"))]
     group.bench_function("PCS/Prove (4x-folded)", |b| {
         b.iter(|| {
             let r = ZipPlus::<FoldedZt4x, FoldedLc4x>::prove::<F, UNCHECKED>(
-                &folded_4x_params, &split_trace, &folded_4x_pcs_point, &folded_4x_hint,
+                &folded_params, &split_trace, &folded_pcs_point, &folded_hint,
             );
             let _ = black_box(r);
         });
     });
 
-    // ── 14. E2E Total Prover (4x Hybrid GKR c=2 4-chunk) ───────────
+    #[cfg(feature = "full-fold")]
+    group.bench_function("PCS/Prove (32x full-folded)", |b| {
+        b.iter(|| {
+            let r = ZipPlus::<FoldedZt4x, FoldedLc4x>::prove::<F, UNCHECKED>(
+                &folded_params, &split1, &folded_pcs_point, &folded_hint,
+            );
+            let _ = black_box(r);
+        });
+    });
+
+    // ── 14. E2E Total Prover ─────────────────────────────────────────
+
+    // Shared: public columns for verifier
+    let sha_sig_pub = BenchBpUair::signature();
+    let sha_public_cols: Vec<_> = sha_sig_pub.public_columns.iter()
+        .map(|&i| sha_trace[i].clone()).collect();
+
+    #[cfg(feature = "boundary")]
+    let bdry_public_cols: Vec<_> = {
+        let bdry_trace = zinc_sha256_uair::boundary::generate_boundary_witness::<32>(&sha_trace, SHA256_8X_NUM_VARS);
+        let bdry_sig = zinc_sha256_uair::boundary::Sha256UairBoundaryNoF2x::signature();
+        bdry_sig.public_columns.iter()
+            .map(|&i| bdry_trace[i].clone()).collect()
+    };
+    #[cfg(not(feature = "boundary"))]
+    let bdry_public_cols: Vec<zinc_poly::mle::DenseMultilinearExtension<BinaryPoly<32>>> = vec![];
+
+    #[cfg(not(feature = "full-fold"))]
+    {
     let hybrid_4x_proof = zinc_snark::pipeline::prove_hybrid_gkr_logup_4x_folded::<
         BenchBpUair, BenchQxUair, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
     >(
-        &folded_4x_params, &sha_trace, SHA256_8X_NUM_VARS,
+        &folded_params, &sha_trace, SHA256_8X_NUM_VARS,
         &sha_lookup_specs, &sha_affine_specs, 2,
     );
 
@@ -710,10 +863,11 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
         eprintln!("  Lookup:        {:>8.3} ms", t.lookup.as_secs_f64() * 1000.0);
         eprintln!("  Shift SC:      {:>8.3} ms", t.shift_sumcheck.as_secs_f64() * 1000.0);
         eprintln!("  Folding:       {:>8.3} ms", t.folding.as_secs_f64() * 1000.0);
+        eprintln!("  Lifting:       {:>8.3} ms", t.lifting.as_secs_f64() * 1000.0);
         eprintln!("  PCS prove:     {:>8.3} ms", t.pcs_prove.as_secs_f64() * 1000.0);
         eprintln!("  Total:         {:>8.3} ms", t.total.as_secs_f64() * 1000.0);
         let accounted = t.split_columns + t.pcs_commit + t.ideal_check
-            + t.combined_poly_resolver + t.lookup + t.shift_sumcheck + t.folding + t.pcs_prove;
+            + t.combined_poly_resolver + t.lookup + t.shift_sumcheck + t.folding + t.lifting + t.pcs_prove;
         let unaccounted = t.total.saturating_sub(accounted);
         eprintln!("  Unaccounted:   {:>8.3} ms (serialize only)", unaccounted.as_secs_f64() * 1000.0);
         eprintln!("────────────────────────────────────────────────────────\n");
@@ -732,40 +886,27 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
             f.inner().write_transcription_bytes(&mut buf[start..]);
         }
 
-        // PCS proof bytes.
         let pcs_bytes = hybrid_4x_proof.pcs_proof_bytes.len();
-
-        // IC proof values (BP UAIR).
         let ic_bytes: usize = hybrid_4x_proof.ic_proof_values.iter().map(|v| v.len()).sum();
-        // QX IC proof values.
         let qx_ic_bytes: usize = hybrid_4x_proof.qx_ic_proof_values.iter().map(|v| v.len()).sum();
-
-        // CPR sumcheck messages + claimed sum.
         let cpr_msg_bytes: usize = hybrid_4x_proof.cpr_sumcheck_messages.iter().map(|v| v.len()).sum();
         let cpr_sum_bytes = hybrid_4x_proof.cpr_sumcheck_claimed_sum.len();
         let cpr_sc_total = cpr_msg_bytes + cpr_sum_bytes;
-
-        // CPR up/down evaluations.
         let cpr_up: usize = hybrid_4x_proof.cpr_up_evals.iter().map(|v| v.len()).sum();
         let cpr_dn: usize = hybrid_4x_proof.cpr_down_evals.iter().map(|v| v.len()).sum();
         let cpr_eval_total = cpr_up + cpr_dn;
-
-        // QX CPR (standalone sumcheck + evals).
         let qx_cpr_msg: usize = hybrid_4x_proof.qx_cpr_sumcheck_messages.iter().map(|v| v.len()).sum();
         let qx_cpr_sum = hybrid_4x_proof.qx_cpr_sumcheck_claimed_sum.len();
         let qx_cpr_up: usize = hybrid_4x_proof.qx_cpr_up_evals.iter().map(|v| v.len()).sum();
         let qx_cpr_dn: usize = hybrid_4x_proof.qx_cpr_down_evals.iter().map(|v| v.len()).sum();
         let qx_cpr_total = qx_cpr_msg + qx_cpr_sum + qx_cpr_up + qx_cpr_dn;
 
-        // Lookup data (Hybrid GKR).
         let lookup_bytes: usize = match &hybrid_4x_proof.lookup_proof {
             Some(LookupProofData::HybridGkr(proof)) => {
                 let mut t = 0usize;
                 for gp in &proof.group_proofs {
-                    // Aggregated multiplicities.
                     let m: usize = gp.aggregated_multiplicities.iter()
                         .map(|v| v.len()).sum::<usize>() * fe_bytes;
-                    // Witness GKR: roots + layer proofs + sent intermediates.
                     let w_roots = (gp.witness_gkr.roots_p.len()
                         + gp.witness_gkr.roots_q.len()) * fe_bytes;
                     let mut w_layers = 0usize;
@@ -780,14 +921,13 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
                     let w_sent: usize = (gp.witness_gkr.sent_p.iter()
                         .chain(gp.witness_gkr.sent_q.iter())
                         .map(|v| v.len()).sum::<usize>()) * fe_bytes;
-                    // Table GKR: root + layer proofs.
                     let t_root = 2 * fe_bytes;
                     let mut t_layers = 0usize;
                     for lp in &gp.table_gkr.layer_proofs {
                         let sc_fe: usize = lp.sumcheck_proof.as_ref().map_or(0, |sc| {
                             sc.messages.iter().map(|msg| msg.0.tail_evaluations.len()).sum::<usize>() + 1
                         });
-                        let child_fe = 4; // p_left, p_right, q_left, q_right
+                        let child_fe = 4;
                         t_layers += (sc_fe + child_fe) * fe_bytes;
                     }
                     t += m + w_roots + w_layers + w_sent + t_root + t_layers;
@@ -807,25 +947,20 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
             _ => 0,
         };
 
-        // Shift sumcheck data.
         let shift_sc_bytes: usize = hybrid_4x_proof.shift_sumcheck.as_ref().map_or(0, |sc| {
             let rounds: usize = sc.rounds.iter().map(|v| v.len()).sum();
             let finals: usize = sc.v_finals.iter().map(|v| v.len()).sum();
             rounds + finals
         });
-
-        // QX shift sumcheck.
         let qx_shift_sc_bytes: usize = hybrid_4x_proof.qx_shift_sumcheck.as_ref().map_or(0, |sc| {
             let rounds: usize = sc.rounds.iter().map(|v| v.len()).sum();
             let finals: usize = sc.v_finals.iter().map(|v| v.len()).sum();
             rounds + finals
         });
 
-        // Evaluation point + PCS evals.
         let eval_pt_bytes: usize = hybrid_4x_proof.evaluation_point_bytes.iter().map(|v| v.len()).sum();
         let pcs_eval_bytes: usize = hybrid_4x_proof.pcs_evals_bytes.iter().map(|v| v.len()).sum();
 
-        // Folding evals (c₁, c₂ for round 1; c₃, c₄ for round 2).
         let fold_c1: usize = hybrid_4x_proof.folding_c1s_bytes.iter().map(|v| v.len()).sum();
         let fold_c2: usize = hybrid_4x_proof.folding_c2s_bytes.iter().map(|v| v.len()).sum();
         let fold_c3: usize = hybrid_4x_proof.folding_c3s_bytes.iter().map(|v| v.len()).sum();
@@ -837,7 +972,6 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
             + eval_pt_bytes + pcs_eval_bytes + folding_total;
         let total_raw = pcs_bytes + piop_total;
 
-        // Build serialized byte buffer and compress with deflate.
         let mut all_bytes = Vec::with_capacity(total_raw);
         all_bytes.extend(&hybrid_4x_proof.pcs_proof_bytes);
         for v in &hybrid_4x_proof.ic_proof_values { all_bytes.extend(v); }
@@ -961,13 +1095,12 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
-                // Generate a fresh witness each iteration (not timed).
                 let trace = generate_sha256_trace(SHA256_8X_NUM_VARS);
                 let t = Instant::now();
                 let _ = zinc_snark::pipeline::prove_hybrid_gkr_logup_4x_folded::<
                     BenchBpUair, BenchQxUair, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED,
                 >(
-                    &folded_4x_params, &trace, SHA256_8X_NUM_VARS,
+                    &folded_params, &trace, SHA256_8X_NUM_VARS,
                     &sha_lookup_specs, &sha_affine_specs, 2,
                 );
                 total += t.elapsed();
@@ -977,21 +1110,17 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
     });
 
     // ── 15. E2E Total Verifier (4x Hybrid GKR c=2 4-chunk) ─────────
-    let sha_sig_pub = BenchBpUair::signature();
-    let sha_public_cols: Vec<_> = sha_sig_pub.public_columns.iter()
-        .map(|&i| sha_trace[i].clone()).collect();
-
     {
-        #[cfg(not(feature = "selector"))]
+        #[cfg(not(feature = "true-ideal"))]
         fn qx_ideal_closure(_: &IdealOrZero<Sha256QxNoF2xIdeal>) -> zinc_snark::pipeline::TrivialIdeal {
             zinc_snark::pipeline::TrivialIdeal
         }
-        #[cfg(feature = "selector")]
+        #[cfg(feature = "true-ideal")]
         let qx_ideal_closure = |ideal: &IdealOrZero<Sha256QxNoF2xIdeal>| -> Sha256QxNoF2xIdealOverF {
             match ideal {
                 IdealOrZero::Zero => Sha256QxNoF2xIdealOverF::Cyclotomic,
                 IdealOrZero::Ideal(Sha256QxNoF2xIdeal::Cyclotomic) => Sha256QxNoF2xIdealOverF::Cyclotomic,
-                #[cfg(feature = "selector")]
+                #[cfg(feature = "true-ideal")]
                 IdealOrZero::Ideal(Sha256QxNoF2xIdeal::DegreeOne) => Sha256QxNoF2xIdealOverF::DegreeOne,
                 IdealOrZero::Ideal(Sha256QxNoF2xIdeal::Trivial) => Sha256QxNoF2xIdealOverF::Trivial,
             }
@@ -999,11 +1128,13 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
         let r = zinc_snark::pipeline::verify_classic_logup_4x_folded::<
             BenchBpUair, BenchQxUair, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _, _, _,
         >(
-            &folded_4x_params, &hybrid_4x_proof, SHA256_8X_NUM_VARS,
+            &folded_params, &hybrid_4x_proof, SHA256_8X_NUM_VARS,
             |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
             qx_ideal_closure,
             &sha_public_cols,
+            &bdry_public_cols,
         );
+        assert!(r.accepted, "Verifier rejected the proof (4x Hybrid GKR c=2 4-chunk)");
         let t = &r.timing;
         println!("\n── Verifier step timing (4x Hybrid GKR c=2 4-chunk) ────");
         println!("  IC verify:           {:>8.3} ms", t.ideal_check_verify.as_secs_f64() * 1000.0);
@@ -1016,16 +1147,16 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
 
     group.bench_function("E2E/Verifier (4x Hybrid GKR c=2 4-chunk)", |b| {
         b.iter(|| {
-            #[cfg(not(feature = "selector"))]
+            #[cfg(not(feature = "true-ideal"))]
             fn qx_ideal_closure(_: &IdealOrZero<Sha256QxNoF2xIdeal>) -> zinc_snark::pipeline::TrivialIdeal {
                 zinc_snark::pipeline::TrivialIdeal
             }
-            #[cfg(feature = "selector")]
+            #[cfg(feature = "true-ideal")]
             let qx_ideal_closure = |ideal: &IdealOrZero<Sha256QxNoF2xIdeal>| -> Sha256QxNoF2xIdealOverF {
                 match ideal {
                     IdealOrZero::Zero => Sha256QxNoF2xIdealOverF::Cyclotomic,
                     IdealOrZero::Ideal(Sha256QxNoF2xIdeal::Cyclotomic) => Sha256QxNoF2xIdealOverF::Cyclotomic,
-                    #[cfg(feature = "selector")]
+                    #[cfg(feature = "true-ideal")]
                     IdealOrZero::Ideal(Sha256QxNoF2xIdeal::DegreeOne) => Sha256QxNoF2xIdealOverF::DegreeOne,
                     IdealOrZero::Ideal(Sha256QxNoF2xIdeal::Trivial) => Sha256QxNoF2xIdealOverF::Trivial,
                 }
@@ -1033,14 +1164,168 @@ fn sha256_8x_folded_stepwise(c: &mut Criterion) {
             let r = zinc_snark::pipeline::verify_classic_logup_4x_folded::<
                 BenchBpUair, BenchQxUair, FoldedZt4x, FoldedLc4x, 32, 16, 8, UNCHECKED, _, _, _, _,
             >(
-                &folded_4x_params, &hybrid_4x_proof, SHA256_8X_NUM_VARS,
+                &folded_params, &hybrid_4x_proof, SHA256_8X_NUM_VARS,
                 |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
                 qx_ideal_closure,
                 &sha_public_cols,
+                &bdry_public_cols,
             );
             black_box(r);
         });
     });
+    } // end #[cfg(not(feature = "full-fold"))]
+
+    #[cfg(feature = "full-fold")]
+    {
+    let full_proof = zinc_snark::pipeline::prove_hybrid_gkr_logup_full_folded::<
+        BenchBpUair, BenchQxUair, FoldedZt4x, FoldedLc4x, 32, 16, 8, 4, 2, 1, UNCHECKED,
+    >(
+        &folded_params, &sha_trace, SHA256_8X_NUM_VARS,
+        &sha_lookup_specs, &sha_affine_specs, 2,
+    );
+
+    // Print prover pipeline timing breakdown.
+    {
+        let t = &full_proof.timing;
+        eprintln!("\n── Hybrid 32x Full-Folded GKR c=2 Prover Pipeline Timing ──");
+        eprintln!("  Split columns: {:>8.3} ms", t.split_columns.as_secs_f64() * 1000.0);
+        eprintln!("  PCS commit:    {:>8.3} ms", t.pcs_commit.as_secs_f64() * 1000.0);
+        eprintln!("  Ideal Check:   {:>8.3} ms  (QX IC: {:.3} ms)", t.ideal_check.as_secs_f64() * 1000.0, t.qx_ideal_check.as_secs_f64() * 1000.0);
+        eprintln!("  Field proj:    {:>8.3} ms", t.field_projection.as_secs_f64() * 1000.0);
+        eprintln!("  Lookup extract:{:>8.3} ms", t.lookup_extract.as_secs_f64() * 1000.0);
+        eprintln!("  Col eval:      {:>8.3} ms", (t.combined_poly_resolver - t.field_projection - t.lookup_extract).as_secs_f64() * 1000.0);
+        eprintln!("  Proj+Eval:     {:>8.3} ms", t.combined_poly_resolver.as_secs_f64() * 1000.0);
+        eprintln!("  Lookup:        {:>8.3} ms", t.lookup.as_secs_f64() * 1000.0);
+        eprintln!("  Shift SC:      {:>8.3} ms", t.shift_sumcheck.as_secs_f64() * 1000.0);
+        eprintln!("  Folding:       {:>8.3} ms", t.folding.as_secs_f64() * 1000.0);
+        eprintln!("  Lifting:       {:>8.3} ms", t.lifting.as_secs_f64() * 1000.0);
+        eprintln!("  PCS prove:     {:>8.3} ms", t.pcs_prove.as_secs_f64() * 1000.0);
+        eprintln!("  Total:         {:>8.3} ms", t.total.as_secs_f64() * 1000.0);
+        let accounted = t.split_columns + t.pcs_commit + t.ideal_check
+            + t.combined_poly_resolver + t.lookup + t.shift_sumcheck + t.folding + t.lifting + t.pcs_prove;
+        let unaccounted = t.total.saturating_sub(accounted);
+        eprintln!("  Unaccounted:   {:>8.3} ms (serialize only)", unaccounted.as_secs_f64() * 1000.0);
+        eprintln!("────────────────────────────────────────────────────────────\n");
+    }
+
+    // ── Proof size (simplified for full-fold) ───────────────────────
+    {
+        let pcs_bytes = full_proof.pcs_proof_bytes.len();
+        let piop_bytes: usize = full_proof.ic_proof_values.iter().map(|v| v.len()).sum::<usize>()
+            + full_proof.qx_ic_proof_values.iter().map(|v| v.len()).sum::<usize>()
+            + full_proof.cpr_up_evals.iter().map(|v| v.len()).sum::<usize>()
+            + full_proof.cpr_down_evals.iter().map(|v| v.len()).sum::<usize>()
+            + full_proof.evaluation_point_bytes.iter().map(|v| v.len()).sum::<usize>()
+            + full_proof.pcs_evals_bytes.iter().map(|v| v.len()).sum::<usize>()
+            + full_proof.ring_evals_bytes.iter().map(|v| v.len()).sum::<usize>();
+        let folding_bytes: usize = full_proof.folding_rounds.iter()
+            .map(|fr| {
+                fr.c1s_bytes.iter().map(|v| v.len()).sum::<usize>()
+                + fr.c2s_bytes.iter().map(|v| v.len()).sum::<usize>()
+            })
+            .sum();
+        let shift_bytes: usize = full_proof.shift_sumcheck.as_ref().map_or(0, |sc| {
+            sc.rounds.iter().map(|v| v.len()).sum::<usize>()
+            + sc.v_finals.iter().map(|v| v.len()).sum::<usize>()
+        });
+        let total_raw = pcs_bytes + piop_bytes + folding_bytes + shift_bytes;
+        eprintln!("\n=== 32x Full-Folded Hybrid GKR c=2 Proof Size ===");
+        eprintln!("  PCS:     {:>6} B  ({:.1} KB)", pcs_bytes, pcs_bytes as f64 / 1024.0);
+        eprintln!("  PIOP:    {:>6} B  ({:.1} KB)", piop_bytes, piop_bytes as f64 / 1024.0);
+        eprintln!("  Folding: {:>6} B  ({} rounds)", folding_bytes, full_proof.folding_rounds.len());
+        eprintln!("  Shift:   {:>6} B", shift_bytes);
+        eprintln!("  Total:   {:>6} B  ({:.1} KB)", total_raw, total_raw as f64 / 1024.0);
+        eprintln!("═══════════════════════════════════════════════════\n");
+    }
+
+    group.bench_function("E2E/Prover (32x Full-Folded Hybrid GKR c=2 4-chunk)", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let trace = generate_sha256_trace(SHA256_8X_NUM_VARS);
+                let t = Instant::now();
+                let _ = zinc_snark::pipeline::prove_hybrid_gkr_logup_full_folded::<
+                    BenchBpUair, BenchQxUair, FoldedZt4x, FoldedLc4x, 32, 16, 8, 4, 2, 1, UNCHECKED,
+                >(
+                    &folded_params, &trace, SHA256_8X_NUM_VARS,
+                    &sha_lookup_specs, &sha_affine_specs, 2,
+                );
+                total += t.elapsed();
+            }
+            total
+        });
+    });
+
+    // ── 15. E2E Total Verifier (32x Full-Folded) ────────────────────
+    {
+        #[cfg(not(feature = "true-ideal"))]
+        fn qx_ideal_closure(_: &IdealOrZero<Sha256QxNoF2xIdeal>) -> zinc_snark::pipeline::TrivialIdeal {
+            zinc_snark::pipeline::TrivialIdeal
+        }
+        #[cfg(feature = "true-ideal")]
+        let qx_ideal_closure = |ideal: &IdealOrZero<Sha256QxNoF2xIdeal>| -> Sha256QxNoF2xIdealOverF {
+            match ideal {
+                IdealOrZero::Zero => Sha256QxNoF2xIdealOverF::Cyclotomic,
+                IdealOrZero::Ideal(Sha256QxNoF2xIdeal::Cyclotomic) => Sha256QxNoF2xIdealOverF::Cyclotomic,
+                #[cfg(feature = "true-ideal")]
+                IdealOrZero::Ideal(Sha256QxNoF2xIdeal::DegreeOne) => Sha256QxNoF2xIdealOverF::DegreeOne,
+                IdealOrZero::Ideal(Sha256QxNoF2xIdeal::Trivial) => Sha256QxNoF2xIdealOverF::Trivial,
+            }
+        };
+        // fold_half_sizes: after each split, the "half" size.
+        // D=32→16→8→4→2→1
+        let fold_half_sizes = &[16usize, 8, 4, 2, 1];
+        let r = zinc_snark::pipeline::verify_classic_logup_full_folded::<
+            BenchBpUair, BenchQxUair, FoldedZt4x, FoldedLc4x, 32, 1, UNCHECKED, _, _, _, _,
+        >(
+            &folded_params, &full_proof, SHA256_8X_NUM_VARS,
+            fold_half_sizes,
+            |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+            qx_ideal_closure,
+            &sha_public_cols,
+            &bdry_public_cols,
+        );
+        let t = &r.timing;
+        println!("\n── Verifier step timing (32x Full-Folded Hybrid GKR c=2) ──");
+        println!("  IC verify:           {:>8.3} ms", t.ideal_check_verify.as_secs_f64() * 1000.0);
+        println!("  CPR+Lookup verify:   {:>8.3} ms", t.combined_poly_resolver_verify.as_secs_f64() * 1000.0);
+        println!("  Lookup verify:       {:>8.3} ms", t.lookup_verify.as_secs_f64() * 1000.0);
+        println!("  PCS verify:          {:>8.3} ms", t.pcs_verify.as_secs_f64() * 1000.0);
+        println!("  Total:               {:>8.3} ms", t.total.as_secs_f64() * 1000.0);
+        println!("──────────────────────────────────────────────────────────────\n");
+    }
+
+    group.bench_function("E2E/Verifier (32x Full-Folded Hybrid GKR c=2 4-chunk)", |b| {
+        b.iter(|| {
+            #[cfg(not(feature = "true-ideal"))]
+            fn qx_ideal_closure(_: &IdealOrZero<Sha256QxNoF2xIdeal>) -> zinc_snark::pipeline::TrivialIdeal {
+                zinc_snark::pipeline::TrivialIdeal
+            }
+            #[cfg(feature = "true-ideal")]
+            let qx_ideal_closure = |ideal: &IdealOrZero<Sha256QxNoF2xIdeal>| -> Sha256QxNoF2xIdealOverF {
+                match ideal {
+                    IdealOrZero::Zero => Sha256QxNoF2xIdealOverF::Cyclotomic,
+                    IdealOrZero::Ideal(Sha256QxNoF2xIdeal::Cyclotomic) => Sha256QxNoF2xIdealOverF::Cyclotomic,
+                    #[cfg(feature = "true-ideal")]
+                    IdealOrZero::Ideal(Sha256QxNoF2xIdeal::DegreeOne) => Sha256QxNoF2xIdealOverF::DegreeOne,
+                    IdealOrZero::Ideal(Sha256QxNoF2xIdeal::Trivial) => Sha256QxNoF2xIdealOverF::Trivial,
+                }
+            };
+            let fold_half_sizes = &[16usize, 8, 4, 2, 1];
+            let r = zinc_snark::pipeline::verify_classic_logup_full_folded::<
+                BenchBpUair, BenchQxUair, FoldedZt4x, FoldedLc4x, 32, 1, UNCHECKED, _, _, _, _,
+            >(
+                &folded_params, &full_proof, SHA256_8X_NUM_VARS,
+                fold_half_sizes,
+                |_: &IdealOrZero<CyclotomicIdeal>| zinc_snark::pipeline::TrivialIdeal,
+                qx_ideal_closure,
+                &sha_public_cols,
+                &bdry_public_cols,
+            );
+            black_box(r);
+        });
+    });
+    } // end #[cfg(feature = "full-fold")]
 
     let mem_snapshot = mem_tracker.stop();
     eprintln!("\n=== Peak Memory ===");

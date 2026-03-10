@@ -52,6 +52,9 @@ use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_utils::mul_by_scalar::MulByScalar;
 use zinc_utils::projectable_to_field::ProjectableToField;
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 /// Split a column of `BinaryPoly<D>` entries into a concatenated column
 /// of `BinaryPoly<HALF_D>` entries.
 ///
@@ -116,6 +119,92 @@ pub fn split_columns<const D: usize, const HALF_D: usize>(
         return columns.par_iter().map(|col| split_column::<D, HALF_D>(col)).collect();
     }
     columns.iter().map(|col| split_column::<D, HALF_D>(col)).collect()
+}
+
+/// Split a column of `BinaryPoly<D>` entries directly to `BinaryPoly<1>`.
+///
+/// Instead of chaining `log₂(D)` intermediate split_column calls (D→D/2→…→1),
+/// this function extracts all D individual bits of each entry in a single pass,
+/// producing a column of length `D·n` with `BinaryPoly<1>` entries.
+///
+/// The layout is: for each successive halving round, the "low" and "high"
+/// halves are concatenated. The final ordering matches what `log₂(D)` repeated
+/// applications of [`split_column`] would produce:
+///
+/// For D=32 (5 splits): bit order in the final `32·n` array is determined by
+/// the recursive halving — bit `b` of entry `i` ends up at index
+/// `i + n · reverse_bit_order(b)`, where `reverse_bit_order` reverses the 5-bit
+/// index represented by which half is chosen at each split round.
+///
+/// # Panics
+/// Panics if `D` is not a power of two or if `FINAL != 1`.
+pub fn split_column_to_final<const D: usize>(
+    column: &DenseMultilinearExtension<BinaryPoly<D>>,
+) -> DenseMultilinearExtension<BinaryPoly<1>> {
+    assert!(D.is_power_of_two(), "D ({D}) must be a power of two");
+    assert!(D >= 2, "D ({D}) must be at least 2");
+
+    let n = column.evaluations.len();
+    let log_d = D.trailing_zeros() as usize; // number of splits
+    let total_len = n * D; // = n << log_d
+
+    // We'll store results in the exact order that repeated split_column produces.
+    // split_column takes [lo_bits || hi_bits] at each step, so the recursive
+    // structure means: at the final level, bit `b` at entry `i` maps to
+    // position `i + n * bit_reverse(b, log_d)`, where bit_reverse reverses
+    // the log_d-bit representation of b.
+    //
+    // The bit-reversal comes from the fact that split_column puts lo (bit 0) in
+    // the first half and hi (bit 1) in the second half at each level.
+
+    let mut result = vec![BinaryPoly::<1>::zero(); total_len];
+
+    let one = BinaryPoly::<1>::new([Boolean::new(true)]);
+
+    for (i, entry) in column.evaluations.iter().enumerate() {
+        for b in 0..D {
+            if entry.iter().nth(b).map_or(false, |c| c.into_inner()) {
+                // Compute the position in the final split array.
+                // bit_reverse(b, log_d): reverse the log_d least-significant bits of b.
+                let reversed = bit_reverse(b, log_d);
+                result[i + n * reversed] = one.clone();
+            }
+        }
+    }
+
+    DenseMultilinearExtension::from_evaluations_vec(
+        column.num_vars + log_d,
+        result,
+        BinaryPoly::zero(),
+    )
+}
+
+/// Split all columns of `BinaryPoly<D>` entries directly to `BinaryPoly<1>`.
+///
+/// See [`split_column_to_final`] for details.
+#[allow(unreachable_code)]
+pub fn split_columns_to_final<const D: usize>(
+    columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
+) -> Vec<DenseMultilinearExtension<BinaryPoly<1>>> {
+    #[cfg(feature = "parallel")]
+    {
+        return columns.par_iter().map(|col| split_column_to_final::<D>(col)).collect();
+    }
+    columns.iter().map(|col| split_column_to_final::<D>(col)).collect()
+}
+
+/// Reverse the lowest `num_bits` of `val`.
+///
+/// E.g. `bit_reverse(0b10110, 5)` = `0b01101`.
+#[inline]
+fn bit_reverse(val: usize, num_bits: usize) -> usize {
+    let mut result = 0;
+    let mut v = val;
+    for _ in 0..num_bits {
+        result = (result << 1) | (v & 1);
+        v >>= 1;
+    }
+    result
 }
 
 /// Prover-side: compute the folding evaluations `c₁` and `c₂` for each

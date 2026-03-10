@@ -99,6 +99,8 @@
 #![allow(clippy::arithmetic_side_effects)] // UAIRs should not care about overflows
 
 pub mod constants;
+#[cfg(all(feature = "boundary", feature = "no-f2x"))]
+pub mod boundary;
 #[cfg(feature = "no-f2x")]
 pub mod no_f2x;
 pub mod underconstrained;

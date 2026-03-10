@@ -856,6 +856,7 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
             |_: &IdealOrZero<Sha256Ideal>| zinc_snark::pipeline::TrivialIdeal,
             |_| zinc_snark::pipeline::TrivialIdeal,
             &sha_public_cols,
+            &[],
         );
         let t = &r.timing;
         println!("\n── Verifier step timing (UC 4x folded) ──────────────────");
@@ -876,6 +877,7 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
                 |_: &IdealOrZero<Sha256Ideal>| zinc_snark::pipeline::TrivialIdeal,
                 |_| zinc_snark::pipeline::TrivialIdeal,
                 &sha_public_cols,
+                &[],
             );
             black_box(r);
         });
@@ -921,6 +923,7 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
             |_: &IdealOrZero<Sha256Ideal>| zinc_snark::pipeline::TrivialIdeal,
             |_| zinc_snark::pipeline::TrivialIdeal,
             &sha_public_cols,
+            &[],
         );
         let t = &r.timing;
         println!("\n── Verifier step timing (UC 4x folded 4-chunk) ──────────");
@@ -941,6 +944,7 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
                 |_: &IdealOrZero<Sha256Ideal>| zinc_snark::pipeline::TrivialIdeal,
                 |_| zinc_snark::pipeline::TrivialIdeal,
                 &sha_public_cols,
+                &[],
             );
             black_box(r);
         });
@@ -980,6 +984,7 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
             |_: &IdealOrZero<Sha256Ideal>| zinc_snark::pipeline::TrivialIdeal,
             |_| zinc_snark::pipeline::TrivialIdeal,
             &sha_public_cols,
+            &[],
         );
         let t = &r.timing;
         println!("\n── Verifier step timing (UC 4x Hybrid GKR c=2 4-chunk) ──");
@@ -1000,6 +1005,7 @@ fn uc_sha256_8x_folded_stepwise(c: &mut Criterion) {
                 |_: &IdealOrZero<Sha256Ideal>| zinc_snark::pipeline::TrivialIdeal,
                 |_| zinc_snark::pipeline::TrivialIdeal,
                 &sha_public_cols,
+                &[],
             );
             black_box(r);
         });

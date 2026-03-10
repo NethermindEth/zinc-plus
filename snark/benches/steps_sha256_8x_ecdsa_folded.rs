@@ -907,9 +907,10 @@ fn sha256_8x_ecdsa_folded_stepwise(c: &mut Criterion) {
         eprintln!("  Ideal Check:   {:>8.3} ms", t.ideal_check.as_secs_f64() * 1000.0);
         eprintln!("  CPR (batched): {:>8.3} ms", t.combined_poly_resolver.as_secs_f64() * 1000.0);
         eprintln!("  Lookup:        {:>8.3} ms", t.lookup.as_secs_f64() * 1000.0);
+        eprintln!("  Lifting:       {:>8.3} ms", t.lifting.as_secs_f64() * 1000.0);
         eprintln!("  PCS prove:     {:>8.3} ms", t.pcs_prove.as_secs_f64() * 1000.0);
         eprintln!("  Total:         {:>8.3} ms", t.total.as_secs_f64() * 1000.0);
-        let accounted = t.pcs_commit + t.ideal_check + t.combined_poly_resolver + t.lookup + t.pcs_prove;
+        let accounted = t.pcs_commit + t.ideal_check + t.combined_poly_resolver + t.lookup + t.lifting + t.pcs_prove;
         let unaccounted = t.total.saturating_sub(accounted);
         eprintln!("  Unaccounted:   {:>8.3} ms (split+fold+shift+serialize)", unaccounted.as_secs_f64() * 1000.0);
         eprintln!("────────────────────────────────────────────────────────\n");

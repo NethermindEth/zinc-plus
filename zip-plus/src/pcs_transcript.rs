@@ -304,10 +304,21 @@ impl PcsTranscript {
     /// the globally-smallest qualifying nonce, so proofs are identical
     /// regardless of parallelism.
     fn find_grinding_nonce(seed: &[u8; 32], grinding_bits: usize) -> u64 {
-        let check = |n: u64| -> bool {
-            let hash = blake3::hash(&[&seed[..], &n.to_le_bytes()].concat());
-            leading_zeros(hash.as_bytes()) >= grinding_bits
-        };
+        // Check whether nonce `n` satisfies the proof-of-work.
+        // Uses a caller-provided stack buffer to avoid heap allocation.
+        #[inline(always)]
+        fn check(buf: &mut [u8; 40], n: u64, grinding_bits: usize) -> bool {
+            buf[32..].copy_from_slice(&n.to_le_bytes());
+            let hash = blake3::hash(buf);
+            // Fast leading-zero test: read the first 8 bytes as a big-endian
+            // u64 and use hardware `lzcnt`.  Valid for grinding_bits <= 64.
+            let head = u64::from_be_bytes(
+                hash.as_bytes()[..8]
+                    .try_into()
+                    .expect("blake3 output is 32 bytes"),
+            );
+            head.leading_zeros() as usize >= grinding_bits
+        }
 
         #[cfg(feature = "parallel")]
         {
@@ -320,12 +331,14 @@ impl PcsTranscript {
             let upper = AtomicU64::new(u64::MAX);
 
             (0..num_threads).into_par_iter().for_each(|t| {
+                let mut buf = [0u8; 40];
+                buf[..32].copy_from_slice(seed);
                 let mut n = t;
                 loop {
                     if n >= upper.load(Ordering::Relaxed) {
                         return;
                     }
-                    if check(n) {
+                    if check(&mut buf, n, grinding_bits) {
                         upper.fetch_min(n, Ordering::Relaxed);
                         return;
                     }
@@ -344,8 +357,10 @@ impl PcsTranscript {
 
         #[cfg(not(feature = "parallel"))]
         {
+            let mut buf = [0u8; 40];
+            buf[..32].copy_from_slice(seed);
             (0u64..)
-                .find(|&n| check(n))
+                .find(|&n| check(&mut buf, n, grinding_bits))
                 .expect("grinding search exhausted u64 range (unreachable in practice)")
         }
     }
@@ -375,7 +390,10 @@ impl PcsTranscript {
         let nonce: u64 = self.read_const()?;
 
         // Verify the proof-of-work.
-        let hash = blake3::hash(&[&seed[..], &nonce.to_le_bytes()].concat());
+        let mut buf = [0u8; 40];
+        buf[..32].copy_from_slice(&seed);
+        buf[32..].copy_from_slice(&nonce.to_le_bytes());
+        let hash = blake3::hash(&buf);
         if leading_zeros(hash.as_bytes()) < grinding_bits {
             return Err(ZipError::InvalidPcsOpen(
                 format!(
@@ -393,16 +411,42 @@ impl PcsTranscript {
 
 /// Count the number of leading zero bits in a byte slice (big-endian).
 fn leading_zeros(bytes: &[u8]) -> usize {
-    let mut count = 0;
-    for &b in bytes {
-        if b == 0 {
-            count += 8;
-        } else {
-            count += b.leading_zeros() as usize;
-            break;
+    // Fast path: check the first 8 bytes as a single u64 using hardware
+    // `lzcnt`.  For blake3 output (always 32 bytes) this covers up to 64
+    // leading zero bits, which is the maximum grinding_bits we support.
+    if bytes.len() >= 8 {
+        let head = u64::from_be_bytes(
+            bytes[..8]
+                .try_into()
+                .expect("slice is >= 8 bytes"),
+        );
+        if head != 0 {
+            return head.leading_zeros() as usize;
         }
+        // Extremely rare: first 64 bits all zero.  Fall through to count
+        // the remaining bytes.
+        let mut count = 64;
+        for &b in &bytes[8..] {
+            if b == 0 {
+                count += 8;
+            } else {
+                count += b.leading_zeros() as usize;
+                break;
+            }
+        }
+        count
+    } else {
+        let mut count = 0;
+        for &b in bytes {
+            if b == 0 {
+                count += 8;
+            } else {
+                count += b.leading_zeros() as usize;
+                break;
+            }
+        }
+        count
     }
-    count
 }
 
 /// Perform a bounds-checked read from the stream for a length, and
