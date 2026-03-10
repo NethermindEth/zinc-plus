@@ -1,7 +1,7 @@
 use crypto_primitives::{Field, PrimeField, Semiring};
 use num_traits::Zero;
 use thiserror::Error;
-use zinc_utils::cfg_iter_mut;
+use zinc_utils::{cfg_iter_mut, inner_transparent_field::InnerTransparentField};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -42,7 +42,7 @@ where
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub(crate) fn build_eq_x_r_vec<F>(r: &[F], cfg: &F::Config) -> Result<Vec<F>, ArithErrors>
+pub fn build_eq_x_r_vec<F>(r: &[F], cfg: &F::Config) -> Result<Vec<F>, ArithErrors>
 where
     F: PrimeField,
 {
@@ -213,6 +213,31 @@ pub fn eq_eval<R: Semiring>(x: &[R], y: &[R], one: R) -> Result<R, ArithErrors> 
     }
 
     Ok(res)
+}
+
+/// Evaluate an MLE at a point using a precomputed eq table.
+///
+/// Given `evaluations[b]` (in `F::Inner` form) and `eq_table[b] = eq(b, r)`
+/// (precomputed via [`build_eq_x_r_vec`]), returns `Σ_b eq_table[b] ·
+/// evaluations[b]`.
+///
+/// This is equivalent to `DenseMultilinearExtension::evaluate_with_config`
+/// but avoids cloning the evaluation vector (the fix-variables algorithm is
+/// destructive). When multiple MLEs share the same evaluation point, build the
+/// eq table once and call this function for each MLE.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn mle_eval_with_eq_table<F: InnerTransparentField>(
+    evaluations: &[F::Inner],
+    eq_table: &[F],
+    cfg: &F::Config,
+) -> F {
+    let mut acc = F::zero_with_cfg(cfg);
+    for (eval, eq_val) in evaluations.iter().zip(eq_table.iter()) {
+        let mut term = eq_val.clone();
+        term.mul_assign_by_inner(eval);
+        acc += &term;
+    }
+    acc
 }
 
 /// Returns a multilinear polynomial in 2n variables that evaluates to 1

@@ -10,8 +10,7 @@ use zinc_piop::{
     },
 };
 use zinc_poly::{
-    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::dynamic::over_field::DynamicPolynomialF,
+    mle::DenseMultilinearExtension, univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{Uair, constraint_counter::count_constraints, degree_counter::count_max_degree};
@@ -179,39 +178,9 @@ where
         // where c_{j,b,ℓ} is the ℓ-th coefficient of the φ_q-projected entry
         // at position b.
         let eval_point = &cpr_prover_state.evaluation_point;
-        let zero_inner = F::zero_with_cfg(&field_cfg).into_inner();
 
-        let lifted_evals: Vec<DynamicPolynomialF<F>> = projected_trace
-            .iter()
-            .map(|col_mle| {
-                let max_degree = col_mle
-                    .iter()
-                    .flat_map(|entry| entry.degree())
-                    .max()
-                    .unwrap_or(0);
-
-                let coeffs: Vec<F> = (0..=max_degree)
-                    .map(|l| {
-                        let coeff_mle: DenseMultilinearExtension<F::Inner> = col_mle
-                            .iter()
-                            .map(|entry| {
-                                entry
-                                    .coeffs
-                                    .get(l)
-                                    .map(|f| f.inner().clone())
-                                    .unwrap_or_else(|| zero_inner.clone())
-                            })
-                            .collect();
-
-                        coeff_mle
-                            .evaluate_with_config(eval_point, &field_cfg)
-                            .expect("lifted eval: coefficient MLE evaluation failed")
-                    })
-                    .collect();
-
-                DynamicPolynomialF { coeffs }
-            })
-            .collect();
+        let lifted_evals =
+            compute_lifted_evals::<F, D>(eval_point, trace_bin_poly, &projected_trace, &field_cfg);
 
         // Absorb lifted_evals into the Fiat-Shamir transcript before PCS.
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
@@ -280,37 +249,8 @@ where
         // Step 4.5 but at the shift point instead of the sumcheck point).
         let shift_point = &bs_prover_state.shift_point;
 
-        let lifted_evals_shift: Vec<DynamicPolynomialF<F>> = projected_trace
-            .iter()
-            .map(|col_mle| {
-                let max_degree = col_mle
-                    .iter()
-                    .flat_map(|entry| entry.degree())
-                    .max()
-                    .unwrap_or(0);
-
-                let coeffs: Vec<F> = (0..=max_degree)
-                    .map(|l| {
-                        let coeff_mle: DenseMultilinearExtension<F::Inner> = col_mle
-                            .iter()
-                            .map(|entry| {
-                                entry
-                                    .coeffs
-                                    .get(l)
-                                    .map(|f| f.inner().clone())
-                                    .unwrap_or_else(|| zero_inner.clone())
-                            })
-                            .collect();
-
-                        coeff_mle
-                            .evaluate_with_config(shift_point, &field_cfg)
-                            .expect("shift lifted eval: coefficient MLE evaluation failed")
-                    })
-                    .collect();
-
-                DynamicPolynomialF { coeffs }
-            })
-            .collect();
+        let lifted_evals_shift =
+            compute_lifted_evals::<F, D>(shift_point, trace_bin_poly, &projected_trace, &field_cfg);
 
         // Absorb lifted_evals_shift into transcript before PCS evaluate-only.
         for bar_u in &lifted_evals_shift {
@@ -368,4 +308,65 @@ where
             lifted_evals_shift,
         })
     }
+}
+
+/// Compute per-column lifted MLE evaluations at `point`, with optimizations:
+///
+/// - **Binary columns** (first `trace_bin_poly.len()` entries): the inner
+///   product with the eq table is computed with conditional additions only (no
+///   multiplications), exploiting the fact that every coefficient is 0 or 1.
+/// - **Non-binary columns** (remaining entries in `projected_trace`): standard
+///   multiply-accumulate against the precomputed eq table, avoiding the
+///   clone-heavy `evaluate_with_config` path.
+///
+/// The eq(point, *) table is built once and reused across all columns.
+#[allow(clippy::arithmetic_side_effects)]
+fn compute_lifted_evals<F, const D: usize>(
+    point: &[F],
+    trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    projected_trace: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
+    field_cfg: &F::Config,
+) -> Vec<DynamicPolynomialF<F>>
+where
+    F: InnerTransparentField,
+{
+    let eq_table = zinc_poly::utils::build_eq_x_r_vec(point, field_cfg)
+        .expect("compute_lifted_evals: eq table build failed");
+
+    let n_bin = trace_bin_poly.len();
+    let zero = F::zero_with_cfg(field_cfg);
+
+    let mut result = Vec::with_capacity(projected_trace.len());
+
+    for col in trace_bin_poly {
+        let mut coeffs = vec![zero.clone(); D];
+        for (b, entry) in col.iter().enumerate() {
+            for (l, coeff) in entry.iter().enumerate() {
+                if coeff.into_inner() {
+                    coeffs[l] += &eq_table[b];
+                }
+            }
+        }
+        result.push(DynamicPolynomialF::new_trimmed(coeffs));
+    }
+
+    for col_mle in &projected_trace[n_bin..] {
+        let num_coeffs = col_mle
+            .iter()
+            .map(|entry| entry.coeffs.len())
+            .max()
+            .unwrap_or(0);
+
+        let mut coeffs = vec![zero.clone(); num_coeffs];
+        for (b, entry) in col_mle.iter().enumerate() {
+            for (l, coeff) in entry.coeffs.iter().enumerate() {
+                let mut term = eq_table[b].clone();
+                term *= coeff;
+                coeffs[l] += &term;
+            }
+        }
+        result.push(DynamicPolynomialF::new_trimmed(coeffs));
+    }
+
+    result
 }

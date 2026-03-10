@@ -13,9 +13,8 @@ use std::{collections::HashMap, marker::PhantomData};
 pub use structs::*;
 use thiserror::Error;
 use zinc_poly::{
-    EvaluationError,
-    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::dynamic::over_field::DynamicPolynomialF,
+    EvaluationError, mle::DenseMultilinearExtension,
+    univariate::dynamic::over_field::DynamicPolynomialF, utils::build_eq_x_r_vec,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
@@ -73,17 +72,25 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
 
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
+        let eq_table =
+            build_eq_x_r_vec(&evaluation_point, field_cfg).expect("build_eq_x_r_vec failed");
+
         let combined_mle_values = cfg_iter!(combined_mles)
             .map(|combined_mle| {
-                Ok(DynamicPolynomialF::new_trimmed(
-                    cfg_iter!(combined_mle)
+                DynamicPolynomialF::new_trimmed(
+                    combined_mle
+                        .iter()
                         .map(|coeff_mle| {
-                            coeff_mle.evaluate_with_config(&evaluation_point, field_cfg)
+                            zinc_poly::utils::mle_eval_with_eq_table(
+                                &coeff_mle.evaluations,
+                                &eq_table,
+                                field_cfg,
+                            )
                         })
-                        .collect::<std::result::Result<Vec<_>, _>>()?,
-                ))
+                        .collect::<Vec<_>>(),
+                )
             })
-            .collect::<std::result::Result<Vec<_>, IdealCheckError<_, _>>>()?;
+            .collect::<Vec<_>>();
 
         combined_mle_values.iter().for_each(|combined_mle_value| {
             transcript
