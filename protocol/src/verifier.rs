@@ -164,6 +164,11 @@ where
         }
 
         // === Step 7: PCS verify at r_0 ===
+        //
+        // TODO: Once we add public inputs, compute public input MLE evaluations
+        //       at cpr_subclaim.evaluation_point directly from public data here,
+        //       then include them in the constraint recomputation check.
+
         macro_rules! verify_pcs_batch {
             ($Zt:ty, $Lc:ty, $vp:expr, $idx:tt, [$evals_range:expr]) => {{
                 let comm = &proof.commitments.$idx;

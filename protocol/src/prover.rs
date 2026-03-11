@@ -144,7 +144,7 @@ where
 
         let max_degree = count_max_degree::<U>();
 
-        // === Step 4: sumcheck over F_q ===
+        // === Step 4: Sumcheck over F_q ===
         let (cpr_proof, cpr_prover_state) = CombinedPolyResolver::prove_as_subprotocol::<U>(
             &mut pcs_transcript.fs_transcript,
             projected_trace_f.clone(),
@@ -186,6 +186,10 @@ where
         }
 
         // === Step 7: PCS open at r_0 ===
+        //
+        // TODO: Once we add public inputs, the verifier will compute public
+        //       input MLE evaluations at the sumcheck point directly from
+        //       public data. The PCS only covers witness columns.
         if let Some(hint_bin) = &hint_bin {
             let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
                 &mut pcs_transcript,

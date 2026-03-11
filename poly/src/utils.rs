@@ -330,6 +330,8 @@ pub fn next_mle_inner<F: Field>(
 ///
 /// # Returns
 /// Field element: 1 if y = x + 1, 0 otherwise.
+///
+/// Adapted from <https://github.com/TomWambsgans/Whirlaway/blob/9e3592b5b5c3702fe3a1728be758506a7ee9283b/crates/air/src/utils.rs#L92>
 #[allow(clippy::arithmetic_side_effects)]
 pub fn next_mle_eval<R: Semiring>(point: &[R], zero: R, one: R) -> R {
     // Check that the point length is even: we split into x and y of equal length.
