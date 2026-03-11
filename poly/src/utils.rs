@@ -9,9 +9,9 @@ use rayon::prelude::*;
 use crate::mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero};
 
 /// A `enum` specifying the possible failure modes of the arithmetics.
-#[derive(displaydoc::Display, Debug, Error)]
+#[derive(Debug, Error)]
 pub enum ArithErrors {
-    /// Invalid parameters: {0}
+    #[error("Invalid parameters: {0}")]
     InvalidParameters(String),
 }
 

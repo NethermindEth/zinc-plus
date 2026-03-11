@@ -58,8 +58,9 @@ where
     /// 4. **F_q sumcheck**: finite-field sumcheck proving the projected
     ///    constraint claim. Produces `up_evals` and `down_evals` at point `r'`.
     /// 5. **Multi-point evaluation sumcheck**: single sumcheck combining
-    ///    `up_evals` and `down_evals` at `r'` into `open_evals` at new point
-    ///    `r_0`.
+    ///    `up_evals` and `down_evals` at `r'` into a single evaluation point
+    ///    `r_0`. Only the sumcheck proof is sent; scalar evaluations at `r_0`
+    ///    are derived from the polynomial-valued `lifted_evals` in Step 6.
     /// 6. **Lift-and-project**: compute per-column polynomial MLE evaluations
     ///    at `r_0` (in `F_q[X]`, before `\psi_a`). Absorb into transcript.
     /// 7. **PCS open**: Zip+ prove for each committed column at `r_0`.
@@ -157,8 +158,8 @@ where
         )?;
 
         // === Step 5: Multi-point evaluation sumcheck ===
-        // Combines up_evals and down_evals at r' into open_evals at r_0
-        // via a single sumcheck, replacing the separate batched shift.
+        // Combines up_evals and down_evals at r' into a single evaluation
+        // point r_0 via one sumcheck.
         let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
             &mut pcs_transcript.fs_transcript,
             &projected_trace_f,
@@ -169,10 +170,10 @@ where
         )?;
 
         // === Step 6: Lift-and-project at r_0 ===
-        // Compute per-column unprojected polynomial MLE evaluations at the
-        // combined point r_0. These are in F_q[X] (after \phi_q but before
-        // \psi_a), so the verifier can check \psi_a(lifted_eval_j) ==
-        // open_eval_j and supply them to the Zip+ PCS for alpha-projection.
+        // Compute per-column polynomial MLE evaluations at r_0 in F_q[X]
+        // (after \phi_q but before \psi_a). The verifier derives the scalar
+        // open_evals via \psi_a for the sumcheck consistency check, and
+        // supplies these to the Zip+ PCS for alpha-projection.
         let r_0 = &mp_prover_state.eval_point;
 
         let lifted_evals =

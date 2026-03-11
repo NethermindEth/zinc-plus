@@ -69,13 +69,13 @@ pub struct Proof<F: PrimeField> {
     pub ideal_check: IdealCheckProof<F>,
     /// Step 4: combined polynomial resolver proof (F_q sumcheck).
     pub resolver: CombinedPolyResolverProof<F>,
-    /// Step 5: multi-point evaluation proof (sumcheck combining up_evals and
-    /// down_evals at r' into open_evals at the single point r_0).
+    /// Step 5: multi-point evaluation sumcheck proof (combines up_evals and
+    /// down_evals at r' into a single evaluation point r_0).
     pub multipoint_eval: MultipointEvalProof<F>,
     /// Step 6: per-column polynomial MLE evaluations at r_0 in F_q[X]
-    /// (after \phi_q, before \psi_a). The verifier checks
-    /// \psi_a(lifted_eval_j) == open_eval_j, then supplies these to Zip+
-    /// for alpha-projection.
+    /// (after \phi_q, before \psi_a). The verifier derives scalar
+    /// open_eval_j = \psi_a(lifted_eval_j) for the sumcheck consistency
+    /// check, then supplies these to Zip+ for alpha-projection.
     pub lifted_evals: Vec<DynamicPolynomialF<F>>,
 }
 
@@ -169,12 +169,6 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     MultipointEval(#[from] MultipointEvalError<F>),
     #[error("lifted eval psi_a projection failed: {0}")]
     LiftedEvalProjection(zinc_poly::EvaluationError),
-    #[error("lifted eval psi_a mismatch at column {column}: expected {expected:?}, got {actual:?}")]
-    LiftedEvalMismatch {
-        column: usize,
-        expected: F,
-        actual: F,
-    },
     #[error("PCS error: {0}")]
     Pcs(#[from] ZipError),
     #[error("PCS verification failed at column {0}: {1}")]

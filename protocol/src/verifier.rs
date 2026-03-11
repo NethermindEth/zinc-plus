@@ -53,8 +53,11 @@ where
     /// Zinc+ full PIOP verifier.
     ///
     /// `up_evals` and `down_evals` from the F_q sumcheck (Step 4) are reduced
-    /// via the multi-point evaluation sumcheck (Step 5) to `open_evals` at
-    /// `r_0`, verified by a single Zip+ PCS invocation (Step 7).
+    /// via the multi-point evaluation sumcheck (Step 5) to a single evaluation
+    /// point `r_0`. The scalar `open_evals` at `r_0` are derived from the
+    /// polynomial-valued `lifted_evals` via `\psi_a`, then used
+    /// to check the sumcheck consistency. A single Zip+ PCS invocation
+    /// (Step 6) confirms the `lifted_evals`.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn verify<IdealOverF, const CHECK_FOR_OVERFLOW: bool>(
         (vp_bin, vp_arb, vp_int): &(
@@ -125,19 +128,27 @@ where
         )?;
 
         // === Step 5: Multi-point evaluation sumcheck ===
+        // Derive scalar open_evals from lifted_evals via \psi_a, then pass
+        // them to the multipoint eval verifier for the consistency check.
+        let open_evals: Vec<F> = proof
+            .lifted_evals
+            .iter()
+            .map(|bar_u| bar_u.evaluate_at_point(&projecting_element_f))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProtocolError::LiftedEvalProjection)?;
+
         let mp_subclaim = MultipointEval::verify_as_subprotocol(
             &mut pcs_transcript.fs_transcript,
             proof.multipoint_eval,
             &cpr_subclaim.evaluation_point,
             &cpr_subclaim.up_evals,
             &cpr_subclaim.down_evals,
+            &open_evals,
             num_vars,
             &field_cfg,
         )?;
 
-        // === Step 6: Lift-and-project at r_0 ===
-        // Absorb lifted_evals, then check \psi_a consistency:
-        // \psi_a(lifted_eval_j) must equal open_eval_j.
+        // Absorb lifted_evals into transcript
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
         for bar_u in &proof.lifted_evals {
             pcs_transcript
@@ -145,25 +156,7 @@ where
                 .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
         }
 
-        for (j, (bar_u, open_eval)) in proof
-            .lifted_evals
-            .iter()
-            .zip(mp_subclaim.open_evals.iter())
-            .enumerate()
-        {
-            let psi_a_val = bar_u
-                .evaluate_at_point(&projecting_element_f)
-                .map_err(ProtocolError::LiftedEvalProjection)?;
-            if psi_a_val != *open_eval {
-                return Err(ProtocolError::LiftedEvalMismatch {
-                    column: j,
-                    expected: open_eval.clone(),
-                    actual: psi_a_val,
-                });
-            }
-        }
-
-        // === Step 7: PCS verify at r_0 ===
+        // === Step 6: PCS verify at r_0 ===
         //
         // TODO: Once we add public inputs, compute public input MLE evaluations
         //       at cpr_subclaim.evaluation_point directly from public data here,
