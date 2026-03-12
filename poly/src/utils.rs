@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use crate::mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero};
 
 /// A `enum` specifying the possible failure modes of the arithmetics.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum ArithErrors {
     #[error("Invalid parameters: {0}")]
     InvalidParameters(String),
@@ -266,6 +266,11 @@ pub fn mle_eval_with_eq_table<F: InnerTransparentField>(
     cfg: &F::Config,
 ) -> F {
     let mut acc = F::zero_with_cfg(cfg);
+    assert_eq!(
+        evaluations.len(),
+        eq_table.len(),
+        "evaluations and eq_table must have the same length"
+    );
     for (eval, eq_val) in evaluations.iter().zip(eq_table.iter()) {
         let mut term = eq_val.clone();
         term.mul_assign_by_inner(eval);

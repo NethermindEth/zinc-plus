@@ -5,7 +5,6 @@ mod structs;
 
 use batched_ideal_check::*;
 use crypto_primitives::PrimeField;
-use derive_more::From;
 use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -13,8 +12,10 @@ use std::{collections::HashMap, marker::PhantomData};
 pub use structs::*;
 use thiserror::Error;
 use zinc_poly::{
-    EvaluationError, mle::DenseMultilinearExtension,
-    univariate::dynamic::over_field::DynamicPolynomialF, utils::build_eq_x_r_vec,
+    EvaluationError,
+    mle::DenseMultilinearExtension,
+    univariate::dynamic::over_field::DynamicPolynomialF,
+    utils::{ArithErrors as PolyArithErrors, build_eq_x_r_vec},
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
@@ -72,8 +73,7 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
 
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
-        let eq_table =
-            build_eq_x_r_vec(&evaluation_point, field_cfg).expect("build_eq_x_r_vec failed");
+        let eq_table = build_eq_x_r_vec(&evaluation_point, field_cfg)?;
 
         let combined_mle_values = cfg_iter!(combined_mles)
             .map(|combined_mle| {
@@ -176,12 +176,14 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
     }
 }
 
-#[derive(Clone, Debug, From, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum IdealCheckError<F: PrimeField, I> {
     #[error("ideal check prover failed to evaluate an mle: {0}")]
-    MleEvaluationError(EvaluationError),
+    MleEvaluationError(#[from] EvaluationError),
     #[error("mle evaluation ideal check failure: {0}")]
-    IdealCollectorError(BatchedIdealCheckError<DynamicPolynomialF<F>, I>),
+    IdealCollectorError(#[from] BatchedIdealCheckError<DynamicPolynomialF<F>, I>),
+    #[error("`eq` polynomial construction failure: {0}")]
+    EqPolyConstructionError(#[from] PolyArithErrors),
 }
 
 #[cfg(test)]
