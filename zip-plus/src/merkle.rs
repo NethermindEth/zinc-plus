@@ -3,6 +3,7 @@ use itertools::Itertools;
 use std::{
     fmt,
     fmt::{Display, Formatter},
+    ops::Deref,
 };
 use thiserror::Error;
 use zinc_transcript::traits::ConstTranscribable;
@@ -20,6 +21,14 @@ pub struct MtHash(pub(crate) [u8; HASH_OUT_LEN]);
 impl Default for MtHash {
     fn default() -> Self {
         MtHash([0; HASH_OUT_LEN])
+    }
+}
+
+impl Deref for MtHash {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 

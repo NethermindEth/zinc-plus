@@ -429,7 +429,7 @@ fn subclaim_changes_if_transcript_is_tampered() {
     .unwrap();
 
     let mut tampered_transcript = KeccakTranscript::default();
-    tampered_transcript.absorb(b"tampering the transcript");
+    tampered_transcript.absorb_slice(b"tampering the transcript");
     let tampered_res = MLSumcheck::verify_as_subprotocol(
         &mut tampered_transcript,
         num_vars,

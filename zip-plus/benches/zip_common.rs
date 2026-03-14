@@ -7,7 +7,7 @@
 use criterion::{BenchmarkGroup, measurement::WallTime};
 use crypto_bigint::U64;
 use crypto_primitives::{
-    DenseRowMatrix, Field, FromPrimitiveWithConfig, FromWithConfig, IntoWithConfig, PrimeField,
+    DenseRowMatrix, Field, FromPrimitiveWithConfig, FromWithConfig, IntoWithConfig,
     crypto_bigint_monty::MontyField,
 };
 use itertools::Itertools;
@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
-use zinc_transcript::traits::{ConstTranscribable, Transcribable};
+use zinc_transcript::traits::{ConstTranscribable, Transcribable, Transcript};
 use zinc_utils::{
     from_ref::FromRef, mul_by_scalar::MulByScalar, named::Named,
     projectable_to_field::ProjectableToField,
@@ -27,6 +27,7 @@ use zip_plus::{
     code::LinearCode,
     merkle::MerkleTree,
     pcs::structs::{ZipPlus, ZipTypes},
+    pcs_transcript::PcsProverTranscript,
 };
 
 const INT_LIMBS: usize = U64::LIMBS;
@@ -244,7 +245,13 @@ pub fn prove<
     let polys: Vec<_> = (0..BATCH)
         .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
         .collect();
-    let (hint, _) = ZipPlus::commit(&params, &polys).unwrap();
+    let (hint, commitment) = ZipPlus::commit(&params, &polys).unwrap();
+
+    let mut transcript = PcsProverTranscript::new_from_commitment(&commitment).unwrap();
+    let field_cfg = transcript
+        .fs_transcript
+        .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+
     let point = vec![Zt::Pt::one(); P];
 
     group.bench_function(
@@ -259,10 +266,17 @@ pub fn prove<
             b.iter_custom(|iters| {
                 let mut total_duration = Duration::ZERO;
                 for _ in 0..iters {
+                    let mut transcript = transcript.clone();
                     let timer = Instant::now();
-                    let result =
-                        ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>(&params, &polys, &point, &hint)
-                            .expect("Prove failed");
+                    let result = ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>(
+                        &mut transcript,
+                        &params,
+                        &polys,
+                        &point,
+                        &hint,
+                        &field_cfg,
+                    )
+                    .expect("Prove failed");
                     total_duration += timer.elapsed();
                     black_box(result);
                 }
@@ -300,13 +314,26 @@ pub fn verify<
         .map(|_| DenseMultilinearExtension::rand(P, &mut rng))
         .collect();
     let (hint, commitment) = ZipPlus::commit(&params, &polys).unwrap();
+
+    let mut transcript = PcsProverTranscript::new_from_commitment(&commitment).unwrap();
+    let field_cfg = transcript
+        .fs_transcript
+        .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
     let point = vec![Zt::Pt::one(); P];
 
-    let (eval, proof) = ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>(&params, &polys, &point, &hint)
-        .expect("Prove failed");
+    let eval_f = ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>(
+        &mut transcript,
+        &params,
+        &polys,
+        &point,
+        &hint,
+        &field_cfg,
+    )
+    .expect("Prove failed");
 
-    let field_cfg = *eval.cfg();
     let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
+
+    let transcript = transcript.into_verification_transcript();
 
     group.bench_function(
         format!(
@@ -317,15 +344,34 @@ pub fn verify<
             Zt::Fmod::NUM_BYTES * 8
         ),
         |b| {
-            b.iter(|| {
-                ZipPlus::verify::<F, CHECK_FOR_OVERFLOWS>(
-                    &params,
-                    &commitment,
-                    &point_f,
-                    &eval,
-                    &proof,
-                )
-                .expect("Verification failed");
+            b.iter_custom(|iters| {
+                let mut total_duration = Duration::ZERO;
+                for _ in 0..iters {
+                    let mut transcript = transcript.clone();
+
+                    let timer = Instant::now();
+
+                    // Initializing the verification transcript with the commitment and getting
+                    // field config and projecting element are (arguably) verifier's responsibility
+                    // and should be included in the verification time.
+                    transcript.fs_transcript.absorb_slice(&commitment.root);
+                    let field_cfg = transcript
+                        .fs_transcript
+                        .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+
+                    ZipPlus::verify::<F, CHECK_FOR_OVERFLOWS>(
+                        &mut transcript,
+                        &params,
+                        &commitment,
+                        &field_cfg,
+                        &point_f,
+                        &eval_f,
+                    )
+                    .expect("Verification failed");
+                    total_duration += timer.elapsed();
+                    black_box(transcript);
+                }
+                total_duration
             })
         },
     );

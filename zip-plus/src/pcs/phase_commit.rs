@@ -178,8 +178,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     clippy::cast_possible_wrap
 )]
 mod tests {
-    use std::slice::from_ref;
-
     use crate::{
         code::{LinearCode, raa::RaaCode, raa_sign_flip::RaaSignFlippingCode},
         merkle::{MerkleTree, MtHash},
@@ -187,6 +185,7 @@ mod tests {
             structs::{ZipPlus, ZipPlusParams, ZipTypes},
             test_utils::*,
         },
+        pcs_transcript::PcsProverTranscript,
     };
     use crypto_bigint::{Random, U64, U256, Word};
     use crypto_primitives::{
@@ -374,7 +373,8 @@ mod tests {
     fn batch_commit_single_poly_matches_single_commit() {
         let (pp, poly) = setup_test_params(3);
 
-        let (batched_hint, batched_comm) = TestZip::commit(&pp, from_ref(&poly)).unwrap();
+        let polys = std::slice::from_ref(&poly);
+        let (batched_hint, batched_comm) = TestZip::commit(&pp, polys).unwrap();
         let (single_hint, single_comm) = TestZip::commit_single(&pp, &poly).unwrap();
 
         assert_eq!(batched_comm.root, single_comm.root);
@@ -630,7 +630,8 @@ mod tests {
     fn batch_commit_poly_single_matches_commit_single() {
         let (pp, poly) = setup_poly_test_params::<K, M, DEGREE_PLUS_ONE>(4);
 
-        let (batched_hint, batched_comm) = TestPolyZip::commit(&pp, from_ref(&poly)).unwrap();
+        let polys = std::slice::from_ref(&poly);
+        let (batched_hint, batched_comm) = TestPolyZip::commit(&pp, polys).unwrap();
         let (single_hint, single_comm) = TestPolyZip::commit_single(&pp, &poly).unwrap();
 
         assert_eq!(batched_comm.root, single_comm.root);
@@ -717,11 +718,20 @@ mod tests {
             .map(|_| <Zt as ZipTypes>::Pt::random(&mut rng))
             .collect();
 
-        let (hint, _) = TestZip::commit_single(&param, &mle).unwrap();
+        let (hint, comm) = TestZip::commit_single(&param, &mle).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
-        let (_, proof) =
-            TestZip::prove::<F, CHECKED>(&param, from_ref(&mle), &point, &hint).unwrap();
-        let actual_proof_size_bytes = proof.0.len();
+        let _eval_f = TestZip::prove_single::<F, CHECKED>(
+            &mut transcript,
+            &param,
+            &mle,
+            &point,
+            &hint,
+            &field_cfg,
+        )
+        .unwrap();
+        let actual_proof_size_bytes = transcript.stream.get_ref().len();
         let expected_proof_size_bytes = calculate_expected_proof_size_bytes(&param, 1);
         assert_eq!(actual_proof_size_bytes, expected_proof_size_bytes);
     }

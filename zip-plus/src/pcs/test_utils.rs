@@ -12,11 +12,8 @@ use crate::{
         raa::{RaaCode, RaaConfig},
         raa_sign_flip::RaaSignFlippingCode,
     },
-    pcs::{
-        ZipPlusProof,
-        structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
-    },
-    pcs_transcript::PcsTranscript,
+    pcs::structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
+    pcs_transcript::{PcsProverTranscript, PcsVerifierTranscript},
 };
 use crypto_primitives::{
     FromWithConfig, IntSemiring, IntoWithConfig, PrimeField, crypto_bigint_int::Int,
@@ -156,7 +153,7 @@ pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
     ZipPlusCommitment,
     Vec<F>,
     F,
-    ZipPlusProof,
+    PcsVerifierTranscript,
 )
 where
     F: PrimeField
@@ -189,7 +186,7 @@ pub fn setup_full_protocol_poly<
     ZipPlusCommitment,
     Vec<F>,
     F,
-    ZipPlusProof,
+    PcsVerifierTranscript,
 )
 where
     F: PrimeField
@@ -216,7 +213,7 @@ fn setup_full_protocol_inner<Zt, Lc, F, const N: usize>(
     ZipPlusCommitment,
     Vec<F>,
     F,
-    ZipPlusProof,
+    PcsVerifierTranscript,
 )
 where
     Zt: ZipTypes,
@@ -233,21 +230,32 @@ where
 {
     let (pp, poly) = setup(num_vars);
     let (hint, comm) = ZipPlus::commit_single(&pp, &poly).unwrap();
+
+    let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+    let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
     let point: Vec<Zt::Pt> = prepare_evaluation_point();
 
-    let (eval, proof) =
-        ZipPlus::prove::<F, CHECKED>(&pp, std::slice::from_ref(&poly), &point, &hint).unwrap();
+    let eval_f =
+        ZipPlus::prove_single::<F, CHECKED>(&mut transcript, &pp, &poly, &point, &hint, &field_cfg)
+            .unwrap();
 
-    let field_cfg = {
-        let mut transcript = PcsTranscript::new();
-        transcript
-            .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>()
-    };
     let point_f = point
         .iter()
         .map(|v| v.into_with_cfg(&field_cfg))
         .collect_vec();
 
-    (pp, comm, point_f, eval, proof)
+    let mut transcript = transcript.into_verification_transcript();
+
+    transcript.fs_transcript.absorb_slice(&comm.root.0);
+
+    (pp, comm, point_f, eval_f, transcript)
+}
+
+pub fn get_field_cfg<Zt, F>(transcript: &mut impl Transcript) -> F::Config
+where
+    Zt: ZipTypes,
+    F: PrimeField,
+    F::Modulus: FromRef<Zt::Fmod>,
+{
+    transcript.get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>()
 }

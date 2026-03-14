@@ -3,11 +3,10 @@ use crate::{
     code::LinearCode,
     combine_rows,
     pcs::{
-        ZipPlusProof,
         structs::{ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
         utils::{point_to_tensor, validate_input},
     },
-    pcs_transcript::PcsTranscript,
+    pcs_transcript::PcsProverTranscript,
 };
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
@@ -86,11 +85,13 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ///   if intermediate CombR sums exceed the integer precision.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn prove<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsProverTranscript,
         pp: &ZipPlusParams<Zt, Lc>,
         polys: &[DenseMultilinearExtension<Zt::Eval>],
         point: &[Zt::Pt],
         commit_hint: &ZipPlusHint<Zt::Cw>,
-    ) -> Result<(F, ZipPlusProof), ZipError>
+        field_cfg: &F::Config,
+    ) -> Result<F, ZipError>
     where
         F: PrimeField
             + for<'a> FromWithConfig<&'a Zt::CombR>
@@ -106,20 +107,15 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
         let num_rows = pp.num_rows;
         let row_len = pp.linear_code.row_len();
-        let mut transcript = PcsTranscript::new();
-        // TODO: field config must be derived after absorbing the witness commitments
-        let field_cfg = transcript
-            .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
 
         // TODO Lift q0, q1 back to int and take following dot products on ints instead
         // of MBSInnerProduct in field (see comboned row) We prove evaluations
         // over the field, so integers need to be mapped to field elements first
         let point = point
             .iter()
-            .map(|v| v.into_with_cfg(&field_cfg))
+            .map(|v| v.into_with_cfg(field_cfg))
             .collect::<Vec<F>>();
-        let (q_0, q_1) = point_to_tensor(num_rows, &point, &field_cfg)?;
+        let (q_0, q_1) = point_to_tensor(num_rows, &point, field_cfg)?;
 
         let degree_bound = Zt::Comb::DEGREE_BOUND;
         let polys_as_comb_r: Vec<Vec<Zt::CombR>> = polys
@@ -144,16 +140,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             })
             .try_collect()?;
 
-        let zero_f = F::zero_with_cfg(&field_cfg);
+        let zero_f = F::zero_with_cfg(field_cfg);
         let b = polys_as_comb_r.iter().try_fold(
             vec![zero_f.clone(); num_rows],
             |mut acc, poly_comb_r| -> Result<_, ZipError> {
                 let row_dots: Vec<F> = cfg_chunks!(poly_comb_r, row_len)
                     .map(|row| {
-                        let row_f: Vec<F> = row
-                            .iter()
-                            .map(|int| int.into_with_cfg(&field_cfg))
-                            .collect();
+                        let row_f: Vec<F> =
+                            row.iter().map(|int| int.into_with_cfg(field_cfg)).collect();
                         MBSInnerProduct::inner_product::<UNCHECKED>(&row_f, &q_1, zero_f.clone())
                     })
                     .collect::<Result<_, _>>()?;
@@ -211,16 +205,46 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         transcript.write_const_many(&combined_row)?;
         for _ in 0..Zt::NUM_COLUMN_OPENINGS {
             let column_idx = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
-            Self::open_merkle_trees_for_column(commit_hint, column_idx, &mut transcript)?;
+            Self::open_merkle_trees_for_column(transcript, commit_hint, column_idx)?;
         }
 
-        Ok((eval, transcript.into()))
+        Ok(eval)
+    }
+
+    /// See [`Self::prove`] for details.
+    #[inline(always)]
+    pub fn prove_single<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsProverTranscript,
+        pp: &ZipPlusParams<Zt, Lc>,
+        poly: &DenseMultilinearExtension<Zt::Eval>,
+        point: &[Zt::Pt],
+        commit_hint: &ZipPlusHint<Zt::Cw>,
+        field_cfg: &F::Config,
+    ) -> Result<F, ZipError>
+    where
+        F: PrimeField
+            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> FromWithConfig<&'a Zt::Chal>
+            + for<'a> FromWithConfig<&'a Zt::Pt>
+            + for<'a> MulByScalar<&'a F>
+            + FromRef<F>,
+        F::Inner: Transcribable,
+        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
+    {
+        Self::prove::<F, CHECK_FOR_OVERFLOW>(
+            transcript,
+            pp,
+            std::slice::from_ref(poly),
+            point,
+            commit_hint,
+            field_cfg,
+        )
     }
 
     pub(super) fn open_merkle_trees_for_column(
+        transcript: &mut PcsProverTranscript,
         commit_hint: &ZipPlusHint<Zt::Cw>,
         column_idx: usize,
-        transcript: &mut PcsTranscript,
     ) -> Result<(), ZipError> {
         for cw_matrix in &commit_hint.cw_matrices {
             let column_values = cw_matrix.as_rows().map(|row| &row[column_idx]);
@@ -250,10 +274,10 @@ mod tests {
         code::{raa::RaaCode, raa_sign_flip::RaaSignFlippingCode},
         merkle::MerkleTree,
         pcs::{
-            structs::{ZipPlus, ZipPlusHint, ZipTypes},
+            structs::{ZipPlus, ZipPlusHint},
             test_utils::*,
         },
-        pcs_transcript::PcsTranscript,
+        pcs_transcript::PcsProverTranscript,
     };
     use crypto_bigint::U64;
     use crypto_primitives::{
@@ -261,7 +285,6 @@ mod tests {
     };
     use num_traits::{ConstOne, Zero};
     use zinc_poly::mle::DenseMultilinearExtension;
-    use zinc_transcript::traits::Transcript;
     use zinc_utils::{CHECKED, from_ref::FromRef};
 
     const INT_LIMBS: usize = U64::LIMBS;
@@ -290,10 +313,20 @@ mod tests {
     fn prove_succeeds_for_single_poly() {
         let num_vars = 4;
         let (pp, poly) = setup_test_params(num_vars);
-        let (hint, _) = TestZip::commit_single(&pp, &poly).unwrap();
+        let (hint, comm) = TestZip::commit_single(&pp, &poly).unwrap();
         let point = test_point(num_vars);
 
-        let result = TestZip::prove::<F, CHECKED>(&pp, &[poly], &point, &hint);
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+
+        let result = TestZip::prove_single::<F, CHECKED>(
+            &mut transcript,
+            &pp,
+            &poly,
+            &point,
+            &hint,
+            &field_cfg,
+        );
         assert!(result.is_ok());
     }
 
@@ -301,10 +334,20 @@ mod tests {
     fn prove_succeeds_for_poly_type() {
         let num_vars = 4;
         let (pp, poly) = setup_poly_test_params(num_vars);
-        let (hint, _) = TestPolyZip::commit_single(&pp, &poly).unwrap();
+        let (hint, comm) = TestPolyZip::commit_single(&pp, &poly).unwrap();
         let point: Vec<i128> = (0..num_vars).map(|i| i as i128 + 2).collect();
 
-        let result = TestPolyZip::prove::<F, CHECKED>(&pp, &[poly], &point, &hint);
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+
+        let result = TestPolyZip::prove_single::<F, CHECKED>(
+            &mut transcript,
+            &pp,
+            &poly,
+            &point,
+            &hint,
+            &field_cfg,
+        );
         assert!(result.is_ok());
     }
 
@@ -312,7 +355,7 @@ mod tests {
     fn prove_succeeds_with_corrupted_codeword() {
         let num_vars = 4;
         let (pp, poly) = setup_test_params(num_vars);
-        let (mut hint, _) = TestZip::commit_single(&pp, &poly).unwrap();
+        let (mut hint, comm) = TestZip::commit_single(&pp, &poly).unwrap();
 
         {
             let mut rows = hint.cw_matrices[0].to_rows_slices_mut();
@@ -327,7 +370,18 @@ mod tests {
         let corrupted_hint = ZipPlusHint::new(hint.cw_matrices, corrupted_tree);
 
         let point = test_point(num_vars);
-        let result = TestZip::prove::<F, CHECKED>(&pp, &[poly], &point, &corrupted_hint);
+
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+
+        let result = TestZip::prove_single::<F, CHECKED>(
+            &mut transcript,
+            &pp,
+            &poly,
+            &point,
+            &corrupted_hint,
+            &field_cfg,
+        );
         assert!(result.is_ok());
     }
 
@@ -337,11 +391,22 @@ mod tests {
         let (pp, _) = setup_test_params(num_vars);
         let oversized_poly: DenseMultilinearExtension<_> = (0..1 << 5).map(Int::from).collect();
 
-        let (hint, _) =
+        let (hint, comm) =
             TestZip::commit_single(&pp, &setup_test_params::<N, K, M>(num_vars).1).unwrap();
 
         let point = test_point(num_vars);
-        let result = TestZip::prove::<F, CHECKED>(&pp, &[oversized_poly], &point, &hint);
+
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+
+        let result = TestZip::prove_single::<F, CHECKED>(
+            &mut transcript,
+            &pp,
+            &oversized_poly,
+            &point,
+            &hint,
+            &field_cfg,
+        );
         assert!(result.is_err());
     }
 
@@ -351,24 +416,28 @@ mod tests {
     fn prove_returns_correct_evaluation() {
         let num_vars = 4;
         let (pp, poly) = setup_test_params(num_vars);
-        let (hint, _) = TestZip::commit_single(&pp, &poly).unwrap();
+        let (hint, comm) = TestZip::commit_single(&pp, &poly).unwrap();
         let point = test_point(num_vars);
 
-        let (eval, _) =
-            TestZip::prove::<F, CHECKED>(&pp, std::slice::from_ref(&poly), &point, &hint).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
-        let field_cfg = {
-            let mut t = PcsTranscript::new();
-            t.fs_transcript
-                .get_random_field_cfg::<F, <Zt as ZipTypes>::Fmod, <Zt as ZipTypes>::PrimeTest>()
-        };
+        let eval_f = TestZip::prove_single::<F, CHECKED>(
+            &mut transcript,
+            &pp,
+            &poly,
+            &point,
+            &hint,
+            &field_cfg,
+        )
+        .unwrap();
 
         let poly_wide: DenseMultilinearExtension<Int<M>> =
             poly.evaluations.iter().map(Int::from_ref).collect();
         let expected_int = poly_wide.evaluate(&point, Zero::zero()).unwrap();
         let expected_f: F = (&expected_int).into_with_cfg(&field_cfg);
 
-        assert_eq!(eval, expected_f);
+        assert_eq!(eval_f, expected_f);
     }
 
     fn make_batch_polys(
@@ -392,10 +461,14 @@ mod tests {
         let (pp, _) = setup_test_params(num_vars);
         let polys = make_batch_polys(num_vars, 2);
 
-        let (hint, _) = TestZip::commit(&pp, &polys).unwrap();
+        let (hint, comm) = TestZip::commit(&pp, &polys).unwrap();
         let point = test_point(num_vars);
 
-        let result = TestZip::prove::<F, CHECKED>(&pp, &polys, &point, &hint);
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+
+        let result =
+            TestZip::prove::<F, CHECKED>(&mut transcript, &pp, &polys, &point, &hint, &field_cfg);
         assert!(result.is_ok())
     }
 
@@ -405,10 +478,14 @@ mod tests {
         let (pp, _) = setup_test_params(num_vars);
         let polys = make_batch_polys(num_vars, 5);
 
-        let (hint, _) = TestZip::commit(&pp, &polys).unwrap();
+        let (hint, comm) = TestZip::commit(&pp, &polys).unwrap();
         let point = test_point(num_vars);
 
-        let result = TestZip::prove::<F, CHECKED>(&pp, &polys, &point, &hint);
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+
+        let result =
+            TestZip::prove::<F, CHECKED>(&mut transcript, &pp, &polys, &point, &hint, &field_cfg);
         assert!(result.is_ok())
     }
 
@@ -418,7 +495,7 @@ mod tests {
         let (pp, _) = setup_test_params(num_vars);
         let polys = make_batch_polys(num_vars, 2);
 
-        let (mut hint, _) = TestZip::commit(&pp, &polys).unwrap();
+        let (mut hint, comm) = TestZip::commit(&pp, &polys).unwrap();
 
         hint.cw_matrices[0].to_rows_slices_mut()[0][0] += Int::ONE;
 
@@ -429,7 +506,18 @@ mod tests {
         let corrupted_hint = ZipPlusHint::new(hint.cw_matrices, corrupted_tree);
 
         let point = test_point(num_vars);
-        let result = TestZip::prove::<F, CHECKED>(&pp, &polys, &point, &corrupted_hint);
+
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+
+        let result = TestZip::prove::<F, CHECKED>(
+            &mut transcript,
+            &pp,
+            &polys,
+            &point,
+            &corrupted_hint,
+            &field_cfg,
+        );
         assert!(result.is_ok());
     }
 
@@ -441,9 +529,15 @@ mod tests {
         let normal: DenseMultilinearExtension<_> = (1..=16).map(Int::from).collect();
         let polys = vec![normal, oversized];
 
-        let (hint, _) = TestZip::commit(&pp, &make_batch_polys(num_vars, 2)).unwrap();
+        let (hint, comm) = TestZip::commit(&pp, &make_batch_polys(num_vars, 2)).unwrap();
+
         let point = test_point(num_vars);
-        let result = TestZip::prove::<F, CHECKED>(&pp, &polys, &point, &hint);
+
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+
+        let result =
+            TestZip::prove::<F, CHECKED>(&mut transcript, &pp, &polys, &point, &hint, &field_cfg);
         assert!(result.is_err());
     }
 }

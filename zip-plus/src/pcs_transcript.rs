@@ -1,4 +1,4 @@
-use crate::{ZipError, merkle::MerkleProof};
+use crate::{ZipError, merkle::MerkleProof, pcs::structs::ZipPlusCommitment};
 use crypto_primitives::PrimeField;
 use itertools::Itertools;
 use std::io::{Cursor, ErrorKind, Read, Write};
@@ -23,11 +23,25 @@ macro_rules! safe_cast {
     };
 }
 
+macro_rules! common_methods {
+    () => {
+        /// Generates a pseudorandom index based on the current transcript state.
+        /// Used to create deterministic challenges for zero-knowledge protocols.
+        /// Returns an index between 0 and cap-1.
+        #[allow(clippy::unwrap_used)]
+        pub fn squeeze_challenge_idx(&mut self, cap: usize) -> usize {
+            let num = safe_cast!(self.fs_transcript.get_challenge::<u32>(), u32, usize)
+                .expect("Conversion from u32 to usize should never fail");
+            rem!(num, cap, "Challenge cap is zero")
+        }
+    };
+}
+
 /// A transcript for Polynomial Commitment Scheme (PCS) operations.
 /// Manages both Fiat-Shamir transformations and serialization/deserialization
 /// of proof data.
-#[derive(Debug, Clone, Default)]
-pub struct PcsTranscript {
+#[derive(Debug, Clone)]
+pub struct PcsProverTranscript {
     /// Handles Fiat-Shamir transformations for non-interactive zero-knowledge
     /// proofs. Used to absorb field elements and generate cryptographic
     /// challenges.
@@ -38,19 +52,39 @@ pub struct PcsTranscript {
     pub stream: Cursor<Vec<u8>>,
 }
 
-impl PcsTranscript {
-    pub fn new() -> Self {
-        Self::default()
+impl PcsProverTranscript {
+    pub fn new_from_commitment(comm: &ZipPlusCommitment) -> Result<Self, ZipError> {
+        // TODO: Do we need to take a slice of commitments instead?
+        let mut result = Self {
+            fs_transcript: KeccakTranscript::default(),
+            stream: Cursor::default(),
+        };
+
+        result.fs_transcript.absorb_slice(&comm.root);
+
+        Ok(result)
     }
 
-    pub fn new_with_capacity(capacity: usize) -> Self {
-        // We zero-initialize the stream vector in advance to avoid dealing with
-        // MaybeUninit
-        Self {
-            fs_transcript: Default::default(),
-            stream: Cursor::new(vec![0; capacity]),
-        }
+    pub fn reserve_capacity(&mut self, capacity: usize) {
+        self.stream.get_mut().reserve(capacity)
     }
+
+    /// Transform the prover transcript into a verifier transcript by resetting
+    /// the stream. Note that the commitment must be absorbed again it into
+    /// the transcript for the verifier. This would normally be done by the
+    /// verifier, but this allows us more flexibility in how we
+    /// use the transcript.
+    pub fn into_verification_transcript(self) -> PcsVerifierTranscript {
+        let mut result = PcsVerifierTranscript {
+            fs_transcript: KeccakTranscript::default(),
+            stream: self.stream,
+        };
+        result.stream.set_position(0);
+
+        result
+    }
+
+    common_methods!();
 
     // Note: Currently this only works for fields whose modulus and inner element
     // have the same byte length
@@ -82,51 +116,6 @@ impl PcsTranscript {
         Ok(())
     }
 
-    // Note: Currently this only works for fields whose modulus and inner element
-    // have the same byte length
-    pub fn read_field_elements<F>(&mut self, n: usize) -> Result<Vec<F>, ZipError>
-    where
-        F: PrimeField,
-        F::Inner: Transcribable,
-        F::Modulus: Transcribable,
-    {
-        if n > 0 {
-            debug_assert_eq!(F::Inner::LENGTH_NUM_BYTES, F::Modulus::LENGTH_NUM_BYTES);
-            let mut buf = vec![0; F::Inner::LENGTH_NUM_BYTES];
-            self.stream.read_exact(&mut buf)?;
-            let num_bytes = F::Inner::read_num_bytes(&buf);
-            debug_assert_eq!(num_bytes, F::Modulus::read_num_bytes(&buf));
-
-            let mut buf = vec![0; num_bytes];
-            (0..n)
-                .map(|_| self.read_field_element_no_length(&mut buf))
-                .collect::<Result<Vec<_>, _>>()
-        } else {
-            Ok(vec![])
-        }
-    }
-
-    /// Reads a field element from the proof stream and absorbs it into the
-    /// transcript. Used during proof verification to retrieve and process
-    /// field elements.
-    ///
-    /// Provided buffer must be of exact size of the field element.
-    fn read_field_element_no_length<F>(&mut self, buf: &mut [u8]) -> Result<F, ZipError>
-    where
-        F: PrimeField,
-        F::Inner: Transcribable,
-        F::Modulus: Transcribable,
-    {
-        self.stream.read_exact(buf)?;
-        let inner = F::Inner::read_transcription_bytes(buf);
-        self.stream.read_exact(buf)?;
-        let modulus = F::Modulus::read_transcription_bytes(buf);
-        let field_cfg = F::make_cfg(&modulus)?;
-        let fe = F::new_unchecked_with_cfg(inner, &field_cfg);
-        self.fs_transcript.absorb_random_field(&fe, buf);
-        Ok(fe)
-    }
-
     /// Writes a field element to the proof stream and absorbs it into the
     /// transcript. Used during proof generation to store field elements for
     /// later verification.
@@ -139,9 +128,9 @@ impl PcsTranscript {
         F::Modulus: Transcribable,
     {
         self.fs_transcript.absorb_random_field(fe, buf);
-        fe.inner().write_transcription_bytes(buf);
-        self.stream.write_all(buf)?;
         fe.modulus().write_transcription_bytes(buf);
+        self.stream.write_all(buf)?;
+        fe.inner().write_transcription_bytes(buf);
         self.stream.write_all(buf)?;
         Ok(())
     }
@@ -197,6 +186,86 @@ impl PcsTranscript {
         Ok(())
     }
 
+    fn write_usize(&mut self, value: usize) -> Result<(), ZipError> {
+        let value_u64 = safe_cast!(value, usize, u64)?;
+        self.write_const(&value_u64)
+    }
+
+    pub fn write_merkle_proof(&mut self, proof: &MerkleProof) -> Result<(), ZipError> {
+        // Write the dimensions of matrix used to construct the Merkle tree
+        self.write_usize(proof.leaf_index)?;
+        self.write_usize(proof.leaf_count)?;
+
+        // Write the length of the merkle path first
+        self.write_usize(proof.siblings.len())?;
+
+        // Write each element of the merkle path
+        self.write_const_many(&proof.siblings)?;
+        Ok(())
+    }
+}
+
+/// Version of [[PcsProverTranscript]] used for proof verification.
+#[derive(Debug, Clone)]
+pub struct PcsVerifierTranscript {
+    /// Handles Fiat-Shamir transformations for non-interactive zero-knowledge
+    /// proofs. Used to absorb field elements and generate cryptographic
+    /// challenges.
+    pub fs_transcript: KeccakTranscript,
+
+    /// Manages serialization and deserialization of proof data as a byte
+    /// stream.
+    pub stream: Cursor<Vec<u8>>,
+}
+
+impl PcsVerifierTranscript {
+    common_methods!();
+
+    // Note: Currently this only works for fields whose modulus and inner element
+    // have the same byte length
+    pub fn read_field_elements<F>(&mut self, n: usize) -> Result<Vec<F>, ZipError>
+    where
+        F: PrimeField,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+    {
+        if n > 0 {
+            debug_assert_eq!(F::Inner::LENGTH_NUM_BYTES, F::Modulus::LENGTH_NUM_BYTES);
+            let mut buf = vec![0; F::Inner::LENGTH_NUM_BYTES];
+            self.stream.read_exact(&mut buf)?;
+            let num_bytes = F::Inner::read_num_bytes(&buf);
+            debug_assert_eq!(num_bytes, F::Modulus::read_num_bytes(&buf));
+
+            let mut buf = vec![0; num_bytes];
+            (0..n)
+                .map(|_| self.read_field_element_no_length(&mut buf))
+                .collect::<Result<Vec<_>, _>>()
+        } else {
+            Ok(vec![])
+        }
+    }
+
+    /// Reads a field element from the proof stream and absorbs it into the
+    /// transcript. Used during proof verification to retrieve and process
+    /// field elements.
+    ///
+    /// Provided buffer must be of exact size of the field element.
+    fn read_field_element_no_length<F>(&mut self, buf: &mut [u8]) -> Result<F, ZipError>
+    where
+        F: PrimeField,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+    {
+        self.stream.read_exact(buf)?;
+        let modulus = F::Modulus::read_transcription_bytes(buf);
+        self.stream.read_exact(buf)?;
+        let inner = F::Inner::read_transcription_bytes(buf);
+        let field_cfg = F::make_cfg(&modulus)?;
+        let fe = F::new_unchecked_with_cfg(inner, &field_cfg);
+        self.fs_transcript.absorb_random_field(&fe, buf);
+        Ok(fe)
+    }
+
     pub fn read_const<T: ConstTranscribable>(&mut self) -> Result<T, ZipError> {
         read_stream_slice(&mut self.stream, T::NUM_BYTES, |slice| {
             Ok(T::read_transcription_bytes(slice))
@@ -212,22 +281,9 @@ impl PcsTranscript {
         })
     }
 
-    fn write_usize(&mut self, value: usize) -> Result<(), ZipError> {
-        let value_u64 = safe_cast!(value, usize, u64)?;
-        self.write_const(&value_u64)
-    }
-
     fn read_usize(&mut self) -> Result<usize, ZipError> {
-        safe_cast!(self.read_const::<u64>()?, u64, usize)
-    }
-
-    /// Generates a pseudorandom index based on the current transcript state.
-    /// Used to create deterministic challenges for zero-knowledge protocols.
-    /// Returns an index between 0 and cap-1.
-    #[allow(clippy::unwrap_used)]
-    pub fn squeeze_challenge_idx(&mut self, cap: usize) -> usize {
-        let num = self.fs_transcript.get_challenge::<u32>() as usize;
-        rem!(num, cap, "Challenge cap is zero")
+        let value = self.read_const::<u64>()?;
+        safe_cast!(value, u64, usize)
     }
 
     pub fn read_merkle_proof(&mut self) -> Result<MerkleProof, ZipError> {
@@ -242,19 +298,6 @@ impl PcsTranscript {
         let merkle_path = self.read_const_many(path_length)?;
 
         Ok(MerkleProof::new(leaf_index, leaf_count, merkle_path))
-    }
-
-    pub fn write_merkle_proof(&mut self, proof: &MerkleProof) -> Result<(), ZipError> {
-        // Write the dimensions of matrix used to construct the Merkle tree
-        self.write_usize(proof.leaf_index)?;
-        self.write_usize(proof.leaf_count)?;
-
-        // Write the length of the merkle path first
-        self.write_usize(proof.siblings.len())?;
-
-        // Write each element of the merkle path
-        self.write_const_many(&proof.siblings)?;
-        Ok(())
     }
 }
 
@@ -297,18 +340,19 @@ impl From<std::io::Error> for ZipError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{merkle::MtHash, pcs::ZipPlusProof};
+    use crate::merkle::MtHash;
 
     #[allow(unused_macros)]
     macro_rules! test_read_write {
         // TODO: N is magic
         ($write_fn:ident, $read_fn:ident, $original_value:expr, $assert_msg:expr) => {{
-            let mut transcript = PcsTranscript::new();
+            let comm = ZipPlusCommitment::default();
+            let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
             transcript
                 .$write_fn(&$original_value)
                 .expect(&format!("Failed to write {}", $assert_msg));
-            let proof: ZipPlusProof = transcript.into();
-            let mut transcript: PcsTranscript = proof.into();
+            let mut transcript: PcsVerifierTranscript = transcript.into_verification_transcript();
+            transcript.fs_transcript.absorb_slice(&comm.root);
             let read_value = transcript
                 .$read_fn()
                 .expect(&format!("Failed to read {}", $assert_msg));
@@ -324,12 +368,13 @@ mod tests {
     macro_rules! test_read_write_vec {
         // TODO: N is magic
         ($write_fn:ident, $read_fn:ident, $original_values:expr, $assert_msg:expr) => {{
-            let mut transcript = PcsTranscript::new();
+            let comm = ZipPlusCommitment::default();
+            let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
             transcript
                 .$write_fn(&$original_values)
                 .expect(&format!("Failed to write {}", $assert_msg));
-            let proof: ZipPlusProof = transcript.into();
-            let mut transcript: PcsTranscript = proof.into();
+            let mut transcript: PcsVerifierTranscript = transcript.into_verification_transcript();
+            transcript.fs_transcript.absorb_slice(&comm.root);
             let read_values = transcript
                 .$read_fn($original_values.len())
                 .expect(&format!("Failed to read {}", $assert_msg));
@@ -343,17 +388,17 @@ mod tests {
 
     #[test]
     fn test_pcs_transcript_read_write() {
-        // Test commitment
-        let original_commitment = MtHash::default();
-        test_read_write!(write_const, read_const, original_commitment, "commitment");
+        // Test hash
+        let original_hash = MtHash::default();
+        test_read_write!(write_const, read_const, original_hash, "hash");
 
-        // Test vector of commitments
-        let original_commitments = vec![MtHash::default(); 1024];
+        // Test vector of hashed
+        let original_hashes = vec![MtHash::default(); 1024];
         test_read_write_vec!(
             write_const_many,
             read_const_many,
-            original_commitments,
-            "commitments vector"
+            original_hashes,
+            "hashes vector"
         );
     }
 }

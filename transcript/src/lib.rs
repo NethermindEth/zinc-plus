@@ -1,7 +1,7 @@
 pub mod traits;
 
-use crate::traits::{ConstTranscribable, Transcribable, Transcript};
-use crypto_primitives::{ConstIntSemiring, PrimeField};
+use crate::traits::{ConstTranscribable, Transcript};
+use crypto_primitives::ConstIntSemiring;
 use sha3::{Digest, Keccak256};
 use zinc_primality::PrimalityTest;
 
@@ -51,7 +51,7 @@ impl KeccakTranscript {
 
     fn gen_random<R: ConstTranscribable>(&mut self, buf: &mut [u8]) -> R {
         self.fill_with_random_bytes(buf);
-        self.absorb(buf);
+        self.absorb_inner(buf);
         R::read_transcription_bytes(buf)
     }
 }
@@ -83,36 +83,7 @@ impl Transcript for KeccakTranscript {
         }
     }
 
-    /// Absorbs arbitrary bytes into the transcript.
-    /// This updates the internal state of the hasher with the provided data.
-    fn absorb(&mut self, v: &[u8]) {
+    fn absorb_inner(&mut self, v: &[u8]) {
         self.hasher.update(v);
-    }
-
-    /// Absorbs a field element into the transcript.
-    /// Delegates to the field element's implementation of
-    /// absorb_into_transcript.
-    // Note: Currently this only works for fields whose modulus and inner element
-    // have the same byte length
-    fn absorb_random_field<F>(&mut self, v: &F, buf: &mut [u8])
-    where
-        F: PrimeField,
-        F::Inner: Transcribable,
-        F::Modulus: Transcribable,
-    {
-        debug_assert_eq!(F::Inner::LENGTH_NUM_BYTES, F::Modulus::LENGTH_NUM_BYTES);
-        debug_assert_eq!(
-            F::Inner::get_num_bytes(v.inner()),
-            F::Modulus::get_num_bytes(&v.modulus())
-        );
-        self.absorb(&[0x3]);
-        v.modulus().write_transcription_bytes(buf);
-        self.absorb(buf);
-        self.absorb(&[0x5]);
-
-        self.absorb(&[0x1]);
-        v.inner().write_transcription_bytes(buf);
-        self.absorb(buf);
-        self.absorb(&[0x3])
     }
 }
