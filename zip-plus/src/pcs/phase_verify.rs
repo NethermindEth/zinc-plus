@@ -277,7 +277,7 @@ mod tests {
     };
     use crypto_bigint::U64;
     use crypto_primitives::{
-        FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_int::Int,
+        Field, FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_int::Int,
         crypto_bigint_monty::MontyField,
     };
     use itertools::Itertools;
@@ -288,7 +288,7 @@ mod tests {
         mle::{DenseMultilinearExtension, MultilinearExtensionRand},
         univariate::binary::BinaryPoly,
     };
-    use zinc_transcript::traits::{Transcribable, Transcript};
+    use zinc_transcript::traits::{ConstTranscribable, Transcribable, Transcript};
     use zinc_utils::CHECKED;
 
     const INT_LIMBS: usize = U64::LIMBS;
@@ -389,9 +389,18 @@ mod tests {
     #[test]
     fn verification_fails_with_tampered_proof() {
         fn tamper(mut proof: PcsVerifierTranscript) -> PcsVerifierTranscript {
-            // Byte 0 is the 1-byte LENGTH_NUM_BYTES prefix for b field elements.
-            // Flip byte 1 (first byte of the first b element's VALUE) instead.
-            proof.stream.get_mut()[0] ^= 0x01;
+            let original_f0: F = proof.clone().read_field_elements(1).unwrap().remove(0);
+            // Skipping over LENGTH_NUM_BYTES prefix for b field elements, and the modulus
+            // bytes, to flip a byte in the VALUE part of the first b element.
+            type Mod = <F as Field>::Modulus;
+            let offset = Mod::LENGTH_NUM_BYTES + Mod::NUM_BYTES;
+            proof.stream.get_mut()[offset] ^= 0x01;
+
+            // Sanity check that we didn't mess up the tampering
+            let tampered_f0: F = proof.clone().read_field_elements(1).unwrap().remove(0);
+            assert_eq!(original_f0.modulus(), tampered_f0.modulus());
+            assert_ne!(original_f0, tampered_f0);
+
             proof
         }
         let num_vars = 4;
