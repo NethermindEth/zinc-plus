@@ -360,7 +360,10 @@ mod tests {
                 }
             }));
 
-            assert_eq!(next_mle.evaluate_with_config(&point, &()), Ok(F::one()));
+            assert_eq!(
+                next_mle.clone().evaluate_with_config(&point, &()),
+                Ok(F::one())
+            );
         }
     }
 
@@ -409,7 +412,7 @@ mod tests {
             }));
 
             assert_eq!(
-                next_mle.evaluate_with_config(&point, &()),
+                next_mle.clone().evaluate_with_config(&point, &()),
                 Ok(next_mle_eval(&point, F::zero(), F::one()))
             );
         }
