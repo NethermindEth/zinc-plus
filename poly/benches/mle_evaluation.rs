@@ -73,7 +73,7 @@ fn bench_dense_mle_evaluation(
             &v,
             |b, v| {
                 b.iter(|| {
-                    let _ = black_box(v.evaluate_with_config(&point, config));
+                    let _ = black_box(v.clone().evaluate_with_config(&point, config));
                 });
             },
         );
