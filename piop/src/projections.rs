@@ -6,12 +6,15 @@ use zinc_poly::{
     EvaluationError,
     mle::DenseMultilinearExtension,
     univariate::{
-        binary::BinaryPoly, dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF,
+        binary::BinaryPoly,
+        dense::DensePolynomial,
+        dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
     },
 };
 use zinc_uair::{Uair, collect_scalars::collect_scalars};
 use zinc_utils::{
-    cfg_extend, cfg_iter, from_ref::FromRef, powers, projectable_to_field::ProjectableToField,
+    UNCHECKED, cfg_extend, cfg_iter, from_ref::FromRef, inner_product::InnerProduct, powers,
+    projectable_to_field::ProjectableToField,
 };
 
 /// Project a multi-typed trace onto F[X].
@@ -107,7 +110,7 @@ where
     let max_coeffs_len = arbitrary_poly_trace
         .iter()
         .flat_map(|col| col.iter())
-        .map(|poly| poly.coeffs.len())
+        .map(|poly| poly.degree().map_or(0, |d| d + 1))
         .max()
         .unwrap_or(0)
         .max(1);
@@ -133,9 +136,15 @@ where
         cfg_iter!(arbitrary_poly_trace).map(|column| {
             cfg_iter!(column)
                 .map(|poly| {
-                    poly.dot_with_powers(&projection_powers, zero.clone())
-                        .inner()
-                        .clone()
+                    let deg = poly.degree().map_or(0, |d| d + 1);
+                    DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
+                        &poly.coeffs[..deg],
+                        &projection_powers[..deg],
+                        zero.clone(),
+                    )
+                    .expect("inner product cannot fail here")
+                    .inner()
+                    .clone()
                 })
                 .collect()
         })
@@ -180,6 +189,7 @@ pub fn project_scalars<F: PrimeField, U: Uair>(
 }
 
 /// Project scalars of a UAIR along F[X] -> F.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
     scalars: HashMap<R, DynamicPolynomialF<F>>,
     projecting_element: &F,
@@ -192,7 +202,7 @@ pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
 
     let max_coeffs_len = scalars
         .values()
-        .map(|poly| poly.coeffs.len())
+        .map(|poly| poly.degree().map_or(0, |d| d + 1))
         .max()
         .unwrap_or(0)
         .max(1);
@@ -202,9 +212,15 @@ pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
     Ok(scalars
         .into_iter()
         .map(|(scalar, value)| {
+            let deg = value.degree().map_or(0, |d| d + 1);
             (
                 scalar,
-                value.dot_with_powers(&projection_powers, zero.clone()),
+                DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
+                    &value.coeffs[..deg],
+                    &projection_powers[..deg],
+                    zero.clone(),
+                )
+                .expect("inner product cannot fail here"),
             )
         })
         .collect())

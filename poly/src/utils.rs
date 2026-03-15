@@ -181,7 +181,7 @@ where
 
         let mut res = vec![F::Inner::zero(); buf.len() << 1];
         cfg_iter_mut!(res).enumerate().for_each(|(i, val)| {
-            let bi = F::new_with_cfg(buf[i >> 1].clone(), cfg);
+            let bi = F::new_unchecked_with_cfg(buf[i >> 1].clone(), cfg);
             let tmp = r[0].clone() * &bi;
             if (i & 1) == 0 {
                 *val = (bi - tmp).into_inner();

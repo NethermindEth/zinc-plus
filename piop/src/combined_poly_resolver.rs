@@ -13,13 +13,14 @@ use thiserror::Error;
 use zinc_poly::{
     EvaluationError,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::dynamic::over_field::DynamicPolynomialF,
+    univariate::dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
     utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{TraceRow, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::{
-    cfg_iter, from_ref::FromRef, inner_transparent_field::InnerTransparentField, powers,
+    UNCHECKED, cfg_iter, from_ref::FromRef, inner_product::InnerProduct,
+    inner_transparent_field::InnerTransparentField, powers,
 };
 
 use crate::{
@@ -245,7 +246,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             let max_coeffs_len = ic_check_subclaim
                 .values
                 .iter()
-                .map(|poly| poly.coeffs.len())
+                .map(|poly| poly.degree().map_or(0, |d| d + 1))
                 .max()
                 .unwrap_or(0)
                 .max(1);
@@ -264,7 +265,14 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             .iter()
             .zip(&folding_challenge_powers)
             .map(|(claimed_value, random_coeff)| {
-                claimed_value.dot_with_powers(&projection_powers, zero.clone()) * random_coeff
+                let deg = claimed_value.degree().map_or(0, |d| d + 1);
+                DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
+                    &claimed_value.coeffs[..deg],
+                    &projection_powers[..deg],
+                    zero.clone(),
+                )
+                .expect("inner product cannot fail here")
+                    * random_coeff
             })
             .fold(zero.clone(), |acc, term| acc + term);
 
