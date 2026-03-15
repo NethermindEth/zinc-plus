@@ -736,8 +736,8 @@ mod tests {
                     i, scalar
                 );
                 assert_eq!(
-                    result_ref.coeffs, result_ref.coeffs,
-                    "Mismatch for pattern {} with scalar {} between ref and BinaryRefPolyWideningMulByScalar",
+                    result_simd_ref.coeffs, result_ref.coeffs,
+                    "Mismatch for pattern {} with scalar {} between ref and MulByScalar",
                     i, scalar
                 );
             }
@@ -764,8 +764,8 @@ mod tests {
                 scalar
             );
             assert_eq!(
-                result_ref.coeffs, result_ref.coeffs,
-                "Mismatch for degree 32 with scalar {} between ref and BinaryRefPolyWideningMulByScalar",
+                result_simd_ref.coeffs, result_ref.coeffs,
+                "Mismatch for degree 32 with scalar {} between ref and MulByScalar",
                 scalar
             );
         }

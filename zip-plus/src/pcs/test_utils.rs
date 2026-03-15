@@ -232,7 +232,7 @@ where
     let (pp, poly) = setup(num_vars);
     let (hint, comm) = ZipPlus::commit_single(&pp, &poly).unwrap();
 
-    let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+    let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
     let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
     let point: Vec<Zt::Pt> = prepare_evaluation_point();
 

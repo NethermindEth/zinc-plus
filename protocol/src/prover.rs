@@ -60,7 +60,7 @@ where
     ///    constraint claim. Produces `up_evals` and `down_evals` at point `r'`.
     /// 5. **Lift-and-project**: compute per-column polynomial MLE evaluations
     ///    at `r'` (in `F_q[X]`, before `\psi_a`). Absorb into transcript.
-    /// 7. **PCS open**: Zip+ prove for each committed column, proving witness
+    /// 6. **PCS open**: Zip+ prove for each committed column, proving witness
     ///    MLE evaluations at the sumcheck challenge point.
     ///
     /// Returns the proof and auxiliary data (for subclaim resolution without
@@ -101,7 +101,7 @@ where
 
         let mut pcs_transcript = PcsProverTranscript::new_from_commitments(
             [&commitment_bin, &commitment_arb, &commitment_int].into_iter(),
-        )?;
+        );
         // TODO: Absorb public inputs as well once they are part of the protocol,
         //       or this will open up a soundness vulnerability!
 
