@@ -13,10 +13,11 @@ use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
     projections::{
-        project_scalars, project_scalars_to_field, project_trace_coeffs, project_trace_to_field,
+        evaluate_trace_to_column_mles, project_scalars, project_scalars_to_field,
+        project_trace_coeffs_row_major,
     },
 };
-use zinc_poly::univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal};
+use zinc_poly::univariate::dense::DensePolynomial;
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_test_uair::{
     GenerateSingleTypeWitness, TestAirNoMultiplication, TestUairSimpleMultiplication,
@@ -27,7 +28,7 @@ use zinc_transcript::{
 };
 use zinc_uair::{
     Uair, constraint_counter::count_constraints, degree_counter::count_max_degree,
-    ideal_collector::IdealOrZero,
+    ideal::degree_one::DegreeOneIdeal, ideal_collector::IdealOrZero,
 };
 
 const DEGREE_PLUS_ONE: usize = 32;
@@ -58,7 +59,8 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
                      trace: &[_],
                      transcript: &mut KeccakTranscript| {
-        let projected_trace = project_trace_coeffs::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
+        let projected_trace =
+            project_trace_coeffs_row_major::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
 
         let projected_scalars =
             project_scalars::<F<FIELD_LIMBS>, TestAirNoMultiplication<INT_LIMBS>>(|scalar| {
@@ -69,7 +71,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             });
 
         let (ic_proof, ic_prover_state) =
-            IdealCheckProtocol::prove_as_subprotocol::<TestAirNoMultiplication<INT_LIMBS>>(
+            <TestAirNoMultiplication<INT_LIMBS> as IdealCheckProtocol>::prove_combined(
                 transcript,
                 &projected_trace,
                 &projected_scalars,
@@ -81,12 +83,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
         let projecting_element: F<FIELD_LIMBS> = transcript.get_field_challenge(field_cfg);
 
-        let trace_f = project_trace_to_field::<_, DEGREE_PLUS_ONE>(
-            &[],
-            &projected_trace,
-            &[],
-            &projecting_element,
-        );
+        let trace_f = evaluate_trace_to_column_mles(&projected_trace, &projecting_element);
         let scalars_f = project_scalars_to_field(projected_scalars, &projecting_element)
             .expect("failed to project scalars to field");
 
@@ -141,21 +138,22 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             let (ic_proof, cpr_proof, _, scalars_f, _) =
                 prove_cpr(&field_cfg, trace, &mut prover_transcript);
 
-            let ic_check_subclaim = IdealCheckProtocol::verify_as_subprotocol::<
-                TestAirNoMultiplication<INT_LIMBS>,
-                _,
-                _,
-            >(
-                &mut verifier_transcript,
-                ic_proof,
-                num_constraints,
-                num_vars,
-                |ideal_over_ring| {
-                    ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg))
-                },
-                &field_cfg,
-            )
-            .expect("IC Verifier failed");
+            let ic_check_subclaim =
+                <TestAirNoMultiplication<INT_LIMBS> as IdealCheckProtocol>::verify_as_subprotocol::<
+                    F<FIELD_LIMBS>,
+                    _,
+                    _,
+                >(
+                    &mut verifier_transcript,
+                    ic_proof,
+                    num_constraints,
+                    num_vars,
+                    |ideal_over_ring| {
+                        ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg))
+                    },
+                    &field_cfg,
+                )
+                .expect("IC Verifier failed");
 
             let verifier_projecting_element: F<FIELD_LIMBS> =
                 verifier_transcript.get_field_challenge(&field_cfg);
@@ -212,7 +210,8 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
                      trace: &[_],
                      transcript: &mut KeccakTranscript| {
-        let projected_trace = project_trace_coeffs::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
+        let projected_trace =
+            project_trace_coeffs_row_major::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
 
         let projected_scalars = project_scalars::<
             F<FIELD_LIMBS>,
@@ -224,26 +223,20 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 .collect()
         });
 
-        let (ic_proof, ic_prover_state) = IdealCheckProtocol::prove_as_subprotocol::<
-            TestUairSimpleMultiplication<Int<INT_LIMBS>>,
-        >(
-            transcript,
-            &projected_trace,
-            &projected_scalars,
-            num_constraints,
-            num_vars,
-            field_cfg,
-        )
-        .expect("IC Prover failed");
+        let (ic_proof, ic_prover_state) =
+            <TestUairSimpleMultiplication<Int<INT_LIMBS>> as IdealCheckProtocol>::prove_combined(
+                transcript,
+                &projected_trace,
+                &projected_scalars,
+                num_constraints,
+                num_vars,
+                field_cfg,
+            )
+            .expect("IC Prover failed");
 
         let projecting_element: F<FIELD_LIMBS> = transcript.get_field_challenge(field_cfg);
 
-        let trace_f = project_trace_to_field::<_, DEGREE_PLUS_ONE>(
-            &[],
-            &projected_trace,
-            &[],
-            &projecting_element,
-        );
+        let trace_f = evaluate_trace_to_column_mles(&projected_trace, &projecting_element);
         let scalars_f = project_scalars_to_field(projected_scalars, &projecting_element)
             .expect("failed to project scalars to field");
 
@@ -299,19 +292,20 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             let (ic_proof, cpr_proof, _, scalars_f, _) =
                 prove_cpr(&field_cfg, trace, &mut prover_transcript);
 
-            let ic_check_subclaim = IdealCheckProtocol::verify_as_subprotocol::<
-                TestUairSimpleMultiplication<Int<INT_LIMBS>>,
-                _,
-                _,
-            >(
-                &mut verifier_transcript,
-                ic_proof,
-                num_constraints,
-                num_vars,
-                |_ideal_over_ring| IdealOrZero::zero(),
-                &field_cfg,
-            )
-            .expect("IC Verifier failed");
+            let ic_check_subclaim =
+                <TestUairSimpleMultiplication<Int<INT_LIMBS>> as IdealCheckProtocol>::verify_as_subprotocol::<
+                    F<FIELD_LIMBS>,
+                    _,
+                    _,
+                >(
+                    &mut verifier_transcript,
+                    ic_proof,
+                    num_constraints,
+                    num_vars,
+                    |_ideal_over_ring| IdealOrZero::zero(),
+                    &field_cfg,
+                )
+                .expect("IC Verifier failed");
 
             let verifier_projecting_element: F<FIELD_LIMBS> =
                 verifier_transcript.get_field_challenge(&field_cfg);

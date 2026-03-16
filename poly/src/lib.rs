@@ -33,4 +33,6 @@ pub enum EvaluationError {
     Overflow,
     #[error("Empty polynomials are not allowed to be evaluate")]
     EmptyPolynomial,
+    #[error("Unsupported constraint degrees: {degrees:?}")]
+    UnsupportedConstraintDegrees { degrees: Vec<usize> },
 }

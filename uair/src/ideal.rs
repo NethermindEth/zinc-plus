@@ -1,6 +1,7 @@
-use std::fmt::Debug;
+pub mod degree_one;
 
 use crypto_primitives::Semiring;
+use std::fmt::Debug;
 use zinc_utils::from_ref::FromRef;
 
 /// A trait for types describing ideals.

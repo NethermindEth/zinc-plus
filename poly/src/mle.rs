@@ -59,7 +59,7 @@ pub trait MultilinearExtensionWithConfig<F: PrimeField> {
 
     /// Evaluate the MLE in full. Asserts that the `point.len()`
     /// is equal the `self.num_vars`.
-    fn evaluate_with_config(&self, point: &[F], config: &F::Config) -> Result<F, EvaluationError>;
+    fn evaluate_with_config(self, point: &[F], config: &F::Config) -> Result<F, EvaluationError>;
 }
 
 pub trait MultilinearExtensionRand<T> {

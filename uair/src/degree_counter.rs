@@ -11,7 +11,17 @@ use crate::{ConstraintBuilder, TraceRow, Uair, ideal::ImpossibleIdeal};
 /// Compute the maximum number of multiplicands
 /// in products of witness elements in the UAIR `U`.
 pub fn count_max_degree<U: Uair>() -> usize {
-    let mut dc = DegreeCounter::new();
+    count_constraint_degrees::<U>()
+        .into_iter()
+        .max()
+        .unwrap_or(0)
+}
+
+/// Compute the degree of each individual constraint in the UAIR `U`.
+/// Returns a `Vec<usize>` where the i-th element is the degree
+/// of the i-th constraint.
+pub fn count_constraint_degrees<U: Uair>() -> Vec<usize> {
+    let mut dc = ConstraintDegreeCollector::default();
 
     let up_and_down = vec![DegreeCountingSemiring::var(); U::signature().max_cols()];
 
@@ -30,28 +40,26 @@ pub fn count_max_degree<U: Uair>() -> usize {
         |_| ImpossibleIdeal,
     );
 
-    dc.0
+    dc.degrees
 }
 
-pub(crate) struct DegreeCounter(usize);
-
-impl DegreeCounter {
-    pub fn new() -> Self {
-        Self(0)
-    }
+/// Collects the degree of each constraint in a UAIR by implementing the
+/// `ConstraintBuilder` trait.
+#[derive(Debug, Default)]
+pub(crate) struct ConstraintDegreeCollector {
+    degrees: Vec<usize>,
 }
 
-impl ConstraintBuilder for DegreeCounter {
+impl ConstraintBuilder for ConstraintDegreeCollector {
     type Expr = DegreeCountingSemiring;
-
     type Ideal = ImpossibleIdeal;
 
     fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {
-        self.0 = std::cmp::max(self.0, expr.0);
+        self.degrees.push(expr.0);
     }
 
     fn assert_zero(&mut self, expr: Self::Expr) {
-        self.0 = std::cmp::max(self.0, expr.0);
+        self.degrees.push(expr.0);
     }
 }
 

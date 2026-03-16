@@ -3,6 +3,13 @@
 mod folder;
 mod structs;
 
+pub use structs::*;
+
+use crate::{
+    combined_poly_resolver::folder::ConstraintFolder,
+    ideal_check,
+    sumcheck::{MLSumcheck, SumCheckError},
+};
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use itertools::Itertools;
 use num_traits::Zero;
@@ -22,14 +29,6 @@ use zinc_utils::{
     UNCHECKED, cfg_iter, from_ref::FromRef, inner_product::InnerProduct,
     inner_transparent_field::InnerTransparentField, powers,
 };
-
-use crate::{
-    combined_poly_resolver::folder::ConstraintFolder,
-    ideal_check,
-    sumcheck::{MLSumcheck, SumCheckError},
-};
-
-pub use structs::*;
 
 pub struct CombinedPolyResolver<F: InnerTransparentField>(PhantomData<F>);
 
@@ -183,8 +182,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             .last()
             .expect("sumcheck could not have had 0 rounds");
 
-        let evals: Vec<F> = sumcheck_prover_state.mles[2..]
-            .iter()
+        let mut mles = sumcheck_prover_state.mles;
+        let evals: Vec<F> = mles
+            .drain(2..)
             .map(|mle| {
                 mle.evaluate_with_config(slice::from_ref(last_sumcheck_challenge), field_cfg)
             })
@@ -228,7 +228,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         max_degree: usize,
         projecting_element: &F,
         projected_scalars: &HashMap<U::Scalar, F>,
-        ic_check_subclaim: ideal_check::VerifierSubClaim<F>,
+        ic_check_subclaim: ideal_check::VerifierSubclaim<F>,
         field_cfg: &F::Config,
     ) -> Result<VerifierSubclaim<F>, CombinedPolyResolverError<F>>
     where
@@ -379,9 +379,14 @@ impl<F: PrimeField> From<SumCheckError<F>> for CombinedPolyResolverError<F> {
 
 #[cfg(test)]
 mod tests {
+    use crate::{
+        ideal_check::IdealCheckProtocol,
+        projections::{evaluate_trace_to_column_mles, project_scalars_to_field},
+        test_utils::{LIMBS, run_ideal_check_prover_combined, test_config},
+    };
     use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
     use rand::rng;
-    use zinc_poly::univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal};
+    use zinc_poly::univariate::dense::DensePolynomial;
     use zinc_test_uair::{
         GenerateSingleTypeWitness, TestAirNoMultiplication, TestUairSimpleMultiplication,
     };
@@ -389,14 +394,8 @@ mod tests {
     use zinc_uair::{
         constraint_counter::count_constraints,
         degree_counter::count_max_degree,
-        ideal::{Ideal, IdealCheck},
+        ideal::{Ideal, IdealCheck, degree_one::DegreeOneIdeal},
         ideal_collector::IdealOrZero,
-    };
-
-    use crate::{
-        ideal_check::IdealCheckProtocol,
-        projections::{project_scalars_to_field, project_trace_to_field},
-        test_utils::{LIMBS, run_ideal_check_prover_single_type, test_config},
     };
 
     use super::*;
@@ -415,7 +414,8 @@ mod tests {
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
         U: GenerateSingleTypeWitness<Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
-            + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>,
+            + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+            + IdealCheckProtocol,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
@@ -427,7 +427,7 @@ mod tests {
         let trace = U::generate_witness(num_vars, &mut rng);
 
         let (ic_proof, ic_prover_state, projected_scalars, projected_trace) =
-            run_ideal_check_prover_single_type::<U, DEGREE_PLUS_ONE>(
+            run_ideal_check_prover_combined::<U, DEGREE_PLUS_ONE>(
                 num_vars,
                 &trace,
                 &mut prover_transcript,
@@ -435,7 +435,7 @@ mod tests {
 
         let num_constraints = count_constraints::<U>();
 
-        let ic_check_subclaim = IdealCheckProtocol::verify_as_subprotocol::<U, _, _>(
+        let ic_check_subclaim = U::verify_as_subprotocol(
             &mut verifier_transcript,
             ic_proof,
             num_constraints,
@@ -455,7 +455,7 @@ mod tests {
 
         let (proof, _) = CombinedPolyResolver::prove_as_subprotocol::<U>(
             &mut prover_transcript,
-            project_trace_to_field::<_, 32>(&[], &projected_trace, &[], &projecting_element),
+            evaluate_trace_to_column_mles(&projected_trace, &projecting_element),
             &ic_prover_state.evaluation_point,
             &projected_scalars,
             num_constraints,

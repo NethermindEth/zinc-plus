@@ -15,6 +15,7 @@ crypto-primitives = { workspace = true }
 thiserror = { workspace = true }
 num-traits = { workspace = true }
 rayon = { workspace = true, optional = true }
+zinc-poly = { workspace = true }
 zinc-utils = { workspace = true }
 
 [dev-dependencies]
@@ -27,5 +28,5 @@ rand = { workspace = true }
 workspace = true
 
 [features]
-parallel = ["dep:rayon"]
+parallel = ["dep:rayon", "zinc-utils/parallel"]
 
