@@ -5,7 +5,8 @@ use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
     projections::{
-        project_scalars, project_scalars_to_field, project_trace_coeffs, project_trace_to_field,
+        evaluate_trace_to_column_mles, project_scalars, project_scalars_to_field,
+        project_trace_coeffs_row_major,
     },
 };
 use zinc_poly::{
@@ -110,18 +111,18 @@ where
             .fs_transcript
             .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
 
-        let projected_trace = project_trace_coeffs::<F, Zt::Int, Zt::Int, D>(
+        let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
+        let num_constraints = count_constraints::<U>();
+
+        let projected_trace = project_trace_coeffs_row_major::<F, Zt::Int, Zt::Int, D>(
             trace_bin_poly,
             trace_arb_poly,
             trace_int,
             &field_cfg,
         );
 
-        let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
-        let num_constraints = count_constraints::<U>();
-
         // === Step 2: Ideal check ===
-        let (ic_proof, ic_prover_state) = IdealCheckProtocol::prove_as_subprotocol::<U>(
+        let (ic_proof, ic_prover_state) = U::prove_combined(
             &mut pcs_transcript.fs_transcript,
             &projected_trace,
             &projected_scalars_fx,
@@ -136,7 +137,7 @@ where
 
         // Project trace from F_q[X] to F_q by evaluating each polynomial at X = a.
         let projected_trace_f =
-            project_trace_to_field::<F, D>(&[], &projected_trace, &[], &projecting_element_f);
+            evaluate_trace_to_column_mles(&projected_trace, &projecting_element_f);
 
         // Project scalars from F_q[X] to F_q.
         let projected_scalars_f =
@@ -170,21 +171,21 @@ where
         let eval_point = &cpr_prover_state.evaluation_point;
         let zero_inner = F::zero_with_cfg(&field_cfg).into_inner();
 
-        let lifted_evals: Vec<DynamicPolynomialF<F>> = projected_trace
-            .iter()
-            .map(|col_mle| {
-                let max_degree = col_mle
-                    .iter()
-                    .flat_map(|entry| entry.degree())
+        let num_rows = projected_trace.len();
+        let num_cols = projected_trace.first().map(|r| r.len()).unwrap_or(0);
+
+        let lifted_evals: Vec<DynamicPolynomialF<F>> = (0..num_cols)
+            .map(|col_idx| {
+                let max_degree = (0..num_rows)
+                    .flat_map(|row_idx| projected_trace[row_idx][col_idx].degree())
                     .max()
                     .unwrap_or(0);
 
                 let coeffs: Vec<F> = (0..=max_degree)
                     .map(|l| {
-                        let coeff_mle: DenseMultilinearExtension<F::Inner> = col_mle
-                            .iter()
-                            .map(|entry| {
-                                entry
+                        let coeff_mle: DenseMultilinearExtension<F::Inner> = (0..num_rows)
+                            .map(|row_idx| {
+                                projected_trace[row_idx][col_idx]
                                     .coeffs
                                     .get(l)
                                     .map(|f| f.inner().clone())

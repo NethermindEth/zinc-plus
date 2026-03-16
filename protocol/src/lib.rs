@@ -217,14 +217,14 @@ mod tests {
     use rand::rng;
     use zinc_poly::univariate::{
         binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct,
-        dynamic::over_field::DynamicPolynomialF, ideal::DegreeOneIdeal,
+        dynamic::over_field::DynamicPolynomialF,
     };
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BinaryDecompositionUair, GenerateMultiTypeWitness,
         GenerateSingleTypeWitness, TestAirNoMultiplication, TestUairSimpleMultiplication,
     };
-    use zinc_uair::ideal_collector::IdealOrZero;
+    use zinc_uair::{ideal::degree_one::DegreeOneIdeal, ideal_collector::IdealOrZero};
     use zinc_utils::{
         CHECKED,
         inner_product::{MBSInnerProduct, ScalarProduct},

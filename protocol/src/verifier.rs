@@ -94,7 +94,7 @@ where
         let num_constraints = count_constraints::<U>();
 
         // === Step 2: Ideal check ===
-        let ic_subclaim = IdealCheckProtocol::verify_as_subprotocol::<U, IdealOverF, _>(
+        let ic_subclaim = U::verify_as_subprotocol::<F, IdealOverF, _>(
             &mut pcs_transcript.fs_transcript,
             proof.ideal_check,
             num_constraints,

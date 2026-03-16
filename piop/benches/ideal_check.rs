@@ -11,9 +11,11 @@ use crypto_primitives::{
 use rand::rng;
 use zinc_piop::{
     ideal_check::{IdealCheckProtocol, Proof},
-    projections::{project_scalars, project_trace_coeffs},
+    projections::{
+        project_scalars, project_trace_coeffs_column_major, project_trace_coeffs_row_major,
+    },
 };
-use zinc_poly::univariate::{dense::DensePolynomial, ideal::DegreeOneIdeal};
+use zinc_poly::univariate::dense::DensePolynomial;
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_test_uair::{
     BigLinearUair, BinaryDecompositionUair, GenerateMultiTypeWitness, GenerateSingleTypeWitness,
@@ -23,7 +25,10 @@ use zinc_transcript::{
     KeccakTranscript,
     traits::{ConstTranscribable, Transcript},
 };
-use zinc_uair::{Uair, constraint_counter::count_constraints, ideal_collector::IdealOrZero};
+use zinc_uair::{
+    Uair, constraint_counter::count_constraints, ideal::degree_one::DegreeOneIdeal,
+    ideal_collector::IdealOrZero,
+};
 
 const DEGREE_PLUS_ONE: usize = 32;
 
@@ -37,7 +42,8 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 ) where
     <F<FIELD_LIMBS> as Field>::Inner: ConstIntSemiring + ConstTranscribable,
     TestAirNoMultiplication<Int<INT_LIMBS>>: Uair<Scalar = Witness<INT_LIMBS>, Ideal = DegreeOneIdeal<Int<INT_LIMBS>>>
-        + GenerateSingleTypeWitness<Witness = Witness<INT_LIMBS>>,
+        + GenerateSingleTypeWitness<Witness = Witness<INT_LIMBS>>
+        + IdealCheckProtocol,
     MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Inner>,
 {
     let mut rng = rng();
@@ -52,7 +58,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                  trace: &[_],
                  transcript: &mut KeccakTranscript|
      -> Proof<F<FIELD_LIMBS>> {
-        let trace = project_trace_coeffs::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
+        let trace = project_trace_coeffs_row_major::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
 
         let projected_scalars =
             project_scalars::<F<FIELD_LIMBS>, TestAirNoMultiplication<Int<INT_LIMBS>>>(|scalar| {
@@ -62,7 +68,9 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                     .collect()
             });
 
-        IdealCheckProtocol::prove_as_subprotocol::<TestAirNoMultiplication<Int<INT_LIMBS>>>(
+        // Even though this UAIR is linear, using prove_combined yields much better
+        // prover performance for it.
+        TestAirNoMultiplication::prove_combined(
             transcript,
             &trace,
             &projected_scalars,
@@ -101,11 +109,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             bench.iter_batched(
                 || (proof.clone(), transcript.clone()),
                 |(proof, mut transcript)| {
-                    let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<
-                        TestAirNoMultiplication<Int<INT_LIMBS>>,
-                        _,
-                        _,
-                    >(
+                    let _ = black_box(TestAirNoMultiplication::verify_as_subprotocol(
                         &mut transcript,
                         proof,
                         num_constraints,
@@ -137,8 +141,9 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     witness_size: usize,
 ) where
     <F<FIELD_LIMBS> as Field>::Inner: ConstIntSemiring + ConstTranscribable,
-    TestUairSimpleMultiplication<Int<INT_LIMBS>>:
-        Uair<Scalar = Witness<INT_LIMBS>> + GenerateSingleTypeWitness<Witness = Witness<INT_LIMBS>>,
+    TestUairSimpleMultiplication<Int<INT_LIMBS>>: Uair<Scalar = Witness<INT_LIMBS>>
+        + GenerateSingleTypeWitness<Witness = Witness<INT_LIMBS>>
+        + IdealCheckProtocol,
     MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Inner>,
 {
     let mut rng = rng();
@@ -153,7 +158,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                  trace: &[_],
                  transcript: &mut KeccakTranscript|
      -> Proof<F<FIELD_LIMBS>> {
-        let trace = project_trace_coeffs::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
+        let trace = project_trace_coeffs_row_major::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
 
         let projected_scalars = project_scalars::<
             F<FIELD_LIMBS>,
@@ -165,7 +170,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 .collect()
         });
 
-        IdealCheckProtocol::prove_as_subprotocol::<TestUairSimpleMultiplication<Int<INT_LIMBS>>>(
+        TestUairSimpleMultiplication::prove_combined(
             transcript,
             &trace,
             &projected_scalars,
@@ -204,11 +209,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             bench.iter_batched(
                 || (proof.clone(), transcript.clone()),
                 |(proof, mut transcript)| {
-                    let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<
-                        TestUairSimpleMultiplication<Int<INT_LIMBS>>,
-                        _,
-                        _,
-                    >(
+                    let _ = black_box(TestUairSimpleMultiplication::verify_as_subprotocol(
                         &mut transcript,
                         proof,
                         num_constraints,
@@ -257,8 +258,12 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
                  int_trace: &[_],
                  transcript: &mut KeccakTranscript|
      -> Proof<F<FIELD_LIMBS>> {
-        let trace =
-            project_trace_coeffs::<_, u32, u32, _>(binary_poly_trace, &[], int_trace, field_cfg);
+        let trace = project_trace_coeffs_row_major::<_, u32, u32, _>(
+            binary_poly_trace,
+            &[],
+            int_trace,
+            field_cfg,
+        );
 
         let projected_scalars =
             project_scalars::<F<FIELD_LIMBS>, BinaryDecompositionUair<u32>>(|scalar| {
@@ -268,7 +273,7 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
                     .collect()
             });
 
-        IdealCheckProtocol::prove_as_subprotocol::<BinaryDecompositionUair<u32>>(
+        BinaryDecompositionUair::prove_combined(
             transcript,
             &trace,
             &projected_scalars,
@@ -312,11 +317,7 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
             bench.iter_batched(
                 || (proof.clone(), transcript.clone()),
                 |(proof, mut transcript)| {
-                    let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<
-                        BinaryDecompositionUair<u32>,
-                        _,
-                        _,
-                    >(
+                    let _ = black_box(BinaryDecompositionUair::<u32>::verify_as_subprotocol(
                         &mut transcript,
                         proof,
                         num_constraints,
@@ -352,87 +353,104 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
 
     let num_constraints = count_constraints::<BigLinearUair<u32>>();
 
-    let prove = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
-                 binary_poly_trace: &[_],
-                 int_trace: &[_],
-                 transcript: &mut KeccakTranscript|
-     -> Proof<F<FIELD_LIMBS>> {
-        let trace =
-            project_trace_coeffs::<_, u32, u32, _>(binary_poly_trace, &[], int_trace, field_cfg);
+    macro_rules! prove {
+        ($transcript:expr, $field_cfg:expr, $gen_trace:ident, $prove_fn:ident) => {{
+            let trace =
+                $gen_trace::<_, u32, u32, _>(&binary_poly_trace, &[], &int_trace, $field_cfg);
 
-        let projected_scalars = project_scalars::<F<FIELD_LIMBS>, BigLinearUair<u32>>(|scalar| {
-            scalar
-                .iter()
-                .map(|coeff| F::from_with_cfg(coeff, field_cfg))
-                .collect()
-        });
+            let projected_scalars =
+                project_scalars::<F<FIELD_LIMBS>, BigLinearUair<u32>>(|scalar| {
+                    scalar
+                        .iter()
+                        .map(|coeff| F::from_with_cfg(coeff, $field_cfg))
+                        .collect()
+                });
 
-        IdealCheckProtocol::prove_as_subprotocol::<BigLinearUair<u32>>(
-            transcript,
-            &trace,
-            &projected_scalars,
-            num_constraints,
-            num_vars,
-            field_cfg,
-        )
-        .expect("Prover failed")
-        .0
-    };
+            BigLinearUair::$prove_fn(
+                $transcript,
+                &trace,
+                &projected_scalars,
+                num_constraints,
+                num_vars,
+                $field_cfg,
+            )
+            .expect("Prover failed")
+            .0
+        }};
+    }
 
-    group.bench_with_input(
-        BenchmarkId::new("Ideal Check Prover", &params),
-        &(&binary_poly_trace, &int_trace),
-        |bench, (binary_poly_trace, int_trace)| {
+    group.bench_function(
+        BenchmarkId::new("Ideal Check Prover (MLE-first)", &params),
+        |bench| {
             let mut transcript = KeccakTranscript::new();
             let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
             bench.iter_batched(
-                || (&field_cfg, binary_poly_trace, int_trace, transcript.clone()),
-                |(field_cfg, binary_poly_trace, int_trace, mut transcript)| {
-                    let _ = black_box(prove(
+                || (&field_cfg, transcript.clone()),
+                |(field_cfg, mut transcript)| {
+                    let proof = prove!(
+                        &mut transcript,
                         field_cfg,
-                        binary_poly_trace,
-                        int_trace,
-                        &mut transcript,
-                    ));
+                        project_trace_coeffs_column_major,
+                        prove_linear
+                    );
+                    black_box(proof);
                 },
                 BatchSize::SmallInput,
             );
         },
     );
 
-    group.bench_with_input(
-        BenchmarkId::new("Ideal Check Verifier", &params),
-        &(&binary_poly_trace, &int_trace),
-        |bench, (binary_poly_trace, int_trace)| {
+    group.bench_function(
+        BenchmarkId::new("Ideal Check Prover (Combined)", &params),
+        |bench| {
             let mut transcript = KeccakTranscript::new();
             let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
-            let proof = prove(&field_cfg, binary_poly_trace, int_trace, &mut transcript);
-
             bench.iter_batched(
-                || (proof.clone(), transcript.clone()),
-                |(proof, mut transcript)| {
-                    let _ = black_box(IdealCheckProtocol::verify_as_subprotocol::<
-                        BigLinearUair<u32>,
-                        _,
-                        _,
-                    >(
+                || (&field_cfg, transcript.clone()),
+                |(field_cfg, mut transcript)| {
+                    let proof = prove!(
                         &mut transcript,
-                        proof,
-                        num_constraints,
-                        num_vars,
-                        |ideal_over_ring| {
-                            ideal_over_ring.map(|ideal_over_ring| {
-                                DegreeOneIdeal::from_with_cfg(ideal_over_ring, &field_cfg)
-                            })
-                        },
-                        &field_cfg,
-                    ))
-                    .expect("Failed to verify");
+                        field_cfg,
+                        project_trace_coeffs_row_major,
+                        prove_combined
+                    );
+                    black_box(proof);
                 },
                 BatchSize::SmallInput,
             );
         },
     );
+
+    let mut transcript = KeccakTranscript::new();
+    let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
+    let proof = prove!(
+        &mut transcript,
+        &field_cfg,
+        project_trace_coeffs_column_major,
+        prove_linear
+    );
+
+    group.bench_function(BenchmarkId::new("Ideal Check Verifier", &params), |bench| {
+        bench.iter_batched(
+            || (proof.clone(), transcript.clone()),
+            |(proof, mut transcript)| {
+                let _ = black_box(BigLinearUair::<u32>::verify_as_subprotocol(
+                    &mut transcript,
+                    proof,
+                    num_constraints,
+                    num_vars,
+                    |ideal_over_ring| {
+                        ideal_over_ring.map(|ideal_over_ring| {
+                            DegreeOneIdeal::from_with_cfg(ideal_over_ring, &field_cfg)
+                        })
+                    },
+                    &field_cfg,
+                ))
+                .expect("Failed to verify");
+            },
+            BatchSize::SmallInput,
+        );
+    });
 }
 
 /// Before/after diff for combined_poly_builder (parallel vs sequential):
