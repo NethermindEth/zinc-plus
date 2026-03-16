@@ -1,3 +1,6 @@
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 use super::*;
 use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::Zero;
@@ -16,8 +19,8 @@ use zinc_poly::{
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{Uair, constraint_counter::count_constraints, degree_counter::count_max_degree};
 use zinc_utils::{
-    from_ref::FromRef, inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
-    projectable_to_field::ProjectableToField,
+    cfg_into_iter, cfg_iter, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
+    mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
     pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
@@ -261,38 +264,36 @@ where
     let num_cols = projected_trace.first().map(|r| r.len()).unwrap_or(0);
     let zero = F::zero_with_cfg(field_cfg);
 
-    let mut result = Vec::with_capacity(num_cols);
-
-    for col in trace_bin_poly {
-        let mut coeffs = vec![zero.clone(); D];
-        for (b, entry) in col.iter().enumerate() {
-            for (l, coeff) in entry.iter().enumerate() {
-                if coeff.into_inner() {
-                    coeffs[l] += &eq_table[b];
+    cfg_iter!(trace_bin_poly)
+        .map(|col| {
+            let mut coeffs = vec![zero.clone(); D];
+            for (b, entry) in col.iter().enumerate() {
+                for (l, coeff) in entry.iter().enumerate() {
+                    if coeff.into_inner() {
+                        coeffs[l] += &eq_table[b];
+                    }
                 }
             }
-        }
-        result.push(DynamicPolynomialF::new_trimmed(coeffs));
-    }
+            coeffs
+        })
+        .chain(cfg_into_iter!(n_bin..num_cols).map(|col_idx| {
+            let num_coeffs = projected_trace
+                .iter()
+                .map(|row| row[col_idx].coeffs.len())
+                .max()
+                .unwrap_or(0);
 
-    for col_idx in n_bin..num_cols {
-        let num_coeffs = projected_trace
-            .iter()
-            .map(|row| row[col_idx].coeffs.len())
-            .max()
-            .unwrap_or(0);
-
-        let mut coeffs = vec![zero.clone(); num_coeffs];
-        for (b, row) in projected_trace.iter().enumerate() {
-            let entry = &row[col_idx];
-            for (l, coeff) in entry.coeffs.iter().enumerate() {
-                let mut term = eq_table[b].clone();
-                term *= coeff;
-                coeffs[l] += &term;
+            let mut coeffs = vec![zero.clone(); num_coeffs];
+            for (b, row) in projected_trace.iter().enumerate() {
+                let entry = &row[col_idx];
+                for (l, coeff) in entry.coeffs.iter().enumerate() {
+                    let mut term = eq_table[b].clone();
+                    term *= coeff;
+                    coeffs[l] += &term;
+                }
             }
-        }
-        result.push(DynamicPolynomialF::new_trimmed(coeffs));
-    }
-
-    result
+            coeffs
+        }))
+        .map(DynamicPolynomialF::new_trimmed)
+        .collect()
 }
