@@ -52,9 +52,6 @@ use zip_plus::{
 /// - `resolver`: sumcheck proof + trace evaluation claims (Step 4).
 #[derive(Clone, Debug)]
 pub struct Proof<F: PrimeField> {
-    /// Number of witness columns of each type (binary polynomials, arbitrary
-    /// polynomials, integers).
-    pub num_witness_cols: (usize, usize, usize),
     /// Zip+ commitments to the witness columns.
     pub commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     /// Serialized PCS proof data (Zip+ proving transcripts).
@@ -607,5 +604,71 @@ mod tests {
             &prover_aux.field_cfg,
         )
         .expect("Subclaim resolution failed");
+    }
+
+    //
+    // Negative tests for BigLinearUair: verify that proof tampering is detected.
+    //
+
+    fn big_linear_verify_tampered(tamper: impl FnOnce(&mut Proof<F>)) {
+        let mut rng = rng();
+        let num_vars = 8;
+        let pp = setup_pp::<TestZincTypesIprs>(num_vars);
+
+        type TestUair = BigLinearUair<i64>;
+
+        type Piop = ZincPlusPiop<TestZincTypesIprs, TestUair, F, DEGREE_PLUS_ONE>;
+
+        let (bin, arb, int) = BigLinearUair::<i64>::generate_witness(num_vars, &mut rng);
+
+        let (mut proof, _) =
+            Piop::prove::<CHECKED>(&pp, &bin, &arb, &int, num_vars, project_scalar_fn)
+                .expect("Prover failed");
+
+        tamper(&mut proof);
+
+        Piop::verify::<_, CHECKED>(
+            &pp,
+            proof,
+            num_vars,
+            project_scalar_fn,
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
+        )
+        .expect_err("Verifier should have rejected tampered proof");
+    }
+
+    #[test]
+    fn test_big_linear_tamper_lifted_evals() {
+        big_linear_verify_tampered(|proof| {
+            proof.lifted_evals.swap(0, 1);
+        });
+    }
+
+    #[test]
+    fn test_big_linear_tamper_up_evals() {
+        big_linear_verify_tampered(|proof| {
+            proof.resolver.up_evals.swap(0, 1);
+        });
+    }
+
+    #[test]
+    fn test_big_linear_tamper_down_evals() {
+        big_linear_verify_tampered(|proof| {
+            proof.resolver.down_evals.swap(0, 1);
+        });
+    }
+
+    #[test]
+    fn test_big_linear_tamper_commitment() {
+        big_linear_verify_tampered(|proof| {
+            proof.commitments.0.root = Default::default();
+        });
+    }
+
+    #[test]
+    fn test_big_linear_tamper_ideal_check() {
+        big_linear_verify_tampered(|proof| {
+            proof.ideal_check.combined_mle_values.swap(0, 1);
+        });
     }
 }

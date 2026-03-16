@@ -257,7 +257,6 @@ where
 
         Ok((
             Proof {
-                num_witness_cols: (trace_bin_poly.len(), trace_arb_poly.len(), trace_int.len()),
                 commitments,
                 ideal_check: ic_proof,
                 resolver: cpr_proof,
