@@ -18,7 +18,6 @@ use zinc_poly::{
         binary::{BinaryPoly, BinaryPolyInnerProduct},
         dense::{DensePolyInnerProduct, DensePolynomial},
         dynamic::over_field::DynamicPolynomialF,
-        ideal::DegreeOneIdeal,
     },
 };
 use zinc_primality::{MillerRabin, PrimalityTest};
@@ -30,7 +29,7 @@ use zinc_test_uair::{
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
     Uair,
-    ideal::{Ideal, IdealCheck},
+    ideal::{Ideal, IdealCheck, degree_one::DegreeOneIdeal},
     ideal_collector::IdealOrZero,
 };
 use zinc_utils::{
@@ -314,7 +313,6 @@ fn bench_prove_verify<Zt, U, IdealOverF>(
     <F as Field>::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
     U: Uair + 'static,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
-    U: Uair + 'static,
 {
     let pp = setup(num_vars);
     let params = format!("{label}/nvars={num_vars}");

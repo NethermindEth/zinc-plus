@@ -58,9 +58,6 @@ use zip_plus::{
 /// - `zip`:            Zip+ PCS proof at r_0 (Step 7)
 #[derive(Clone, Debug)]
 pub struct Proof<F: PrimeField> {
-    /// Number of witness columns of each type: (binary_poly, arbitrary_poly,
-    /// integer).
-    pub num_witness_cols: (usize, usize, usize),
     /// Zip+ commitments to the witness columns.
     pub commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     /// Serialized PCS proof data (Zip+ proving transcripts).
@@ -202,15 +199,13 @@ mod tests {
         crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
     };
     use rand::rng;
-    use zinc_poly::univariate::{
-        binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct, ideal::DegreeOneIdeal,
-    };
+    use zinc_poly::univariate::{binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct};
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BinaryDecompositionUair, GenerateMultiTypeWitness,
         GenerateSingleTypeWitness, TestAirNoMultiplication, TestUairSimpleMultiplication,
     };
-    use zinc_uair::ideal_collector::IdealOrZero;
+    use zinc_uair::{ideal::degree_one::DegreeOneIdeal, ideal_collector::IdealOrZero};
     use zinc_utils::{
         CHECKED,
         inner_product::{MBSInnerProduct, ScalarProduct},
@@ -544,5 +539,70 @@ mod tests {
             |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
         )
         .expect("Verifier failed");
+    }
+
+    //
+    // Negative tests for BigLinearUair: verify that proof tampering is detected.
+    //
+
+    fn big_linear_verify_tampered(tamper: impl FnOnce(&mut Proof<F>)) {
+        let mut rng = rng();
+        let num_vars = 8;
+        let pp = setup_pp::<TestZincTypesIprs>(num_vars);
+
+        type TestUair = BigLinearUair<i64>;
+
+        type Piop = ZincPlusPiop<TestZincTypesIprs, TestUair, F, DEGREE_PLUS_ONE>;
+
+        let (bin, arb, int) = BigLinearUair::<i64>::generate_witness(num_vars, &mut rng);
+
+        let mut proof = Piop::prove::<CHECKED>(&pp, &bin, &arb, &int, num_vars, project_scalar_fn)
+            .expect("Prover failed");
+
+        tamper(&mut proof);
+
+        Piop::verify::<_, CHECKED>(
+            &pp,
+            proof,
+            num_vars,
+            project_scalar_fn,
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
+        )
+        .expect_err("Verifier should have rejected tampered proof");
+    }
+
+    #[test]
+    fn test_big_linear_tamper_lifted_evals() {
+        big_linear_verify_tampered(|proof| {
+            proof.lifted_evals.swap(0, 1);
+        });
+    }
+
+    #[test]
+    fn test_big_linear_tamper_up_evals() {
+        big_linear_verify_tampered(|proof| {
+            proof.resolver.up_evals.swap(0, 1);
+        });
+    }
+
+    #[test]
+    fn test_big_linear_tamper_down_evals() {
+        big_linear_verify_tampered(|proof| {
+            proof.resolver.down_evals.swap(0, 1);
+        });
+    }
+
+    #[test]
+    fn test_big_linear_tamper_commitment() {
+        big_linear_verify_tampered(|proof| {
+            proof.commitments.0.root = Default::default();
+        });
+    }
+
+    #[test]
+    fn test_big_linear_tamper_ideal_check() {
+        big_linear_verify_tampered(|proof| {
+            proof.ideal_check.combined_mle_values.swap(0, 1);
+        });
     }
 }

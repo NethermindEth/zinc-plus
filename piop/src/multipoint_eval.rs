@@ -330,7 +330,7 @@ mod tests {
 
         let up_evals: Vec<F> = trace_mles
             .iter()
-            .map(|mle| mle.evaluate_with_config(&eval_point, &()).unwrap())
+            .map(|mle| mle.clone().evaluate_with_config(&eval_point, &()).unwrap())
             .collect();
 
         let down_evals: Vec<F> = trace_mles
@@ -372,9 +372,7 @@ mod tests {
         let r_0 = &prover_state.eval_point;
         let open_evals: Vec<F> = trace_mles
             .iter()
-            .map(|mle| {
-                MultilinearExtensionWithConfig::<F>::evaluate_with_config(mle, r_0, &()).unwrap()
-            })
+            .map(|mle| mle.clone().evaluate_with_config(r_0, &()).unwrap())
             .collect();
 
         ProverMessage { proof, open_evals }

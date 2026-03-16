@@ -6,7 +6,8 @@ use zinc_piop::{
     ideal_check::IdealCheckProtocol,
     multipoint_eval::MultipointEval,
     projections::{
-        project_scalars, project_scalars_to_field, project_trace_coeffs, project_trace_to_field,
+        RowMajorTrace, evaluate_trace_to_column_mles, project_scalars, project_scalars_to_field,
+        project_trace_coeffs_row_major,
     },
 };
 use zinc_poly::{
@@ -100,7 +101,7 @@ where
 
         let mut pcs_transcript = PcsProverTranscript::new_from_commitments(
             [&commitment_bin, &commitment_arb, &commitment_int].into_iter(),
-        )?;
+        );
         // TODO: Absorb public inputs as well once they are part of the protocol,
         //       or this will open up a soundness vulnerability!
 
@@ -110,18 +111,18 @@ where
             .fs_transcript
             .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
 
-        let projected_trace = project_trace_coeffs::<F, Zt::Int, Zt::Int, D>(
+        let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
+        let num_constraints = count_constraints::<U>();
+
+        let projected_trace = project_trace_coeffs_row_major::<F, Zt::Int, Zt::Int, D>(
             trace_bin_poly,
             trace_arb_poly,
             trace_int,
             &field_cfg,
         );
 
-        let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
-        let num_constraints = count_constraints::<U>();
-
         // === Step 2: Ideal check ===
-        let (ic_proof, ic_prover_state) = IdealCheckProtocol::prove_as_subprotocol::<U>(
+        let (ic_proof, ic_prover_state) = U::prove_combined(
             &mut pcs_transcript.fs_transcript,
             &projected_trace,
             &projected_scalars_fx,
@@ -136,7 +137,7 @@ where
 
         // Project trace from F_q[X] to F_q by evaluating each polynomial at X = a.
         let projected_trace_f =
-            project_trace_to_field::<F, D>(&[], &projected_trace, &[], &projecting_element_f);
+            evaluate_trace_to_column_mles(&projected_trace, &projecting_element_f);
 
         // Project scalars from F_q[X] to F_q.
         let projected_scalars_f =
@@ -226,7 +227,6 @@ where
         let commitments = (commitment_bin, commitment_arb, commitment_int);
 
         Ok(Proof {
-            num_witness_cols: (trace_bin_poly.len(), trace_arb_poly.len(), trace_int.len()),
             commitments,
             ideal_check: ic_proof,
             resolver: cpr_proof,
@@ -248,7 +248,7 @@ where
 fn compute_lifted_evals<F, const D: usize>(
     point: &[F],
     trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
-    projected_trace: &[DenseMultilinearExtension<DynamicPolynomialF<F>>],
+    projected_trace: &RowMajorTrace<F>,
     field_cfg: &F::Config,
 ) -> Vec<DynamicPolynomialF<F>>
 where
@@ -258,9 +258,10 @@ where
         .expect("compute_lifted_evals: eq table build failed");
 
     let n_bin = trace_bin_poly.len();
+    let num_cols = projected_trace.first().map(|r| r.len()).unwrap_or(0);
     let zero = F::zero_with_cfg(field_cfg);
 
-    let mut result = Vec::with_capacity(projected_trace.len());
+    let mut result = Vec::with_capacity(num_cols);
 
     for col in trace_bin_poly {
         let mut coeffs = vec![zero.clone(); D];
@@ -274,15 +275,16 @@ where
         result.push(DynamicPolynomialF::new_trimmed(coeffs));
     }
 
-    for col_mle in &projected_trace[n_bin..] {
-        let num_coeffs = col_mle
+    for col_idx in n_bin..num_cols {
+        let num_coeffs = projected_trace
             .iter()
-            .map(|entry| entry.coeffs.len())
+            .map(|row| row[col_idx].coeffs.len())
             .max()
             .unwrap_or(0);
 
         let mut coeffs = vec![zero.clone(); num_coeffs];
-        for (b, entry) in col_mle.iter().enumerate() {
+        for (b, row) in projected_trace.iter().enumerate() {
+            let entry = &row[col_idx];
             for (l, coeff) in entry.coeffs.iter().enumerate() {
                 let mut term = eq_table[b].clone();
                 term *= coeff;
