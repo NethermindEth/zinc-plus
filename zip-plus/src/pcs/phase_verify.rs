@@ -7,7 +7,7 @@ use crate::{
     },
     pcs_transcript::PcsVerifierTranscript,
 };
-use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, IntoWithConfig};
+use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use itertools::Itertools;
 use num_traits::{ConstOne, ConstZero, Zero};
 #[cfg(feature = "parallel")]
@@ -187,19 +187,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         // CombR→F lift must reduce mod p before truncating limbs.
         // MontyField's FromWithConfig does this; BoxedMontyField's does not and will
         // panic.
-        let lhs = MBSInnerProduct::mapped_inner_product::<_, _, _, _, UNCHECKED>(
-            &combined_row,
-            &q_1,
-            zero_f.clone(),
-            |cr| cr.into_with_cfg(field_cfg),
-        )?;
-
-        let rhs = MBSInnerProduct::mapped_inner_product::<_, _, _, _, UNCHECKED>(
-            &coeffs,
-            &b,
-            zero_f.clone(),
-            |cr| cr.into_with_cfg(field_cfg),
-        )?;
+        let lhs = MBSInnerProduct::inner_product_field(&combined_row, &q_1, zero_f.clone())?;
+        let rhs = MBSInnerProduct::inner_product_field(&coeffs, &b, zero_f.clone())?;
 
         if lhs != rhs {
             return Err(ZipError::InvalidPcsOpen("Coherence failure".into()));
