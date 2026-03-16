@@ -94,7 +94,7 @@ where
         let num_constraints = count_constraints::<U>();
 
         // === Step 2: Ideal check ===
-        let ic_subclaim = IdealCheckProtocol::verify_as_subprotocol::<U, IdealOverF, _>(
+        let ic_subclaim = U::verify_as_subprotocol::<F, IdealOverF, _>(
             &mut pcs_transcript.fs_transcript,
             proof.ideal_check,
             num_constraints,
@@ -195,7 +195,8 @@ where
             }};
         }
 
-        let (n_bin, n_arb, _n_int) = proof.num_witness_cols;
+        let sig = U::signature();
+        let (n_bin, n_arb, _n_int) = (sig.binary_poly_cols, sig.arbitrary_poly_cols, sig.int_cols);
         verify_pcs_batch!(Zt::BinaryZt, Zt::BinaryLc, vp_bin, 0, [..n_bin]);
         verify_pcs_batch!(
             Zt::ArbitraryZt,

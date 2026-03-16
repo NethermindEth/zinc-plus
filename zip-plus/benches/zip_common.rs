@@ -247,7 +247,7 @@ pub fn prove<
         .collect();
     let (hint, commitment) = ZipPlus::commit(&params, &polys).unwrap();
 
-    let mut transcript = PcsProverTranscript::new_from_commitment(&commitment).unwrap();
+    let mut transcript = PcsProverTranscript::new_from_commitment(&commitment);
     let field_cfg = transcript
         .fs_transcript
         .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
@@ -315,7 +315,7 @@ pub fn verify<
         .collect();
     let (hint, commitment) = ZipPlus::commit(&params, &polys).unwrap();
 
-    let mut transcript = PcsProverTranscript::new_from_commitment(&commitment).unwrap();
+    let mut transcript = PcsProverTranscript::new_from_commitment(&commitment);
     let field_cfg = transcript
         .fs_transcript
         .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();

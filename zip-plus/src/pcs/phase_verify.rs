@@ -7,7 +7,7 @@ use crate::{
     },
     pcs_transcript::PcsVerifierTranscript,
 };
-use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, IntoWithConfig};
+use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use itertools::Itertools;
 use num_traits::{ConstOne, ConstZero, Zero};
 #[cfg(feature = "parallel")]
@@ -187,19 +187,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         // CombR→F lift must reduce mod p before truncating limbs.
         // MontyField's FromWithConfig does this; BoxedMontyField's does not and will
         // panic.
-        let lhs = MBSInnerProduct::mapped_inner_product::<_, _, _, _, UNCHECKED>(
-            &combined_row,
-            &q_1,
-            zero_f.clone(),
-            |cr| cr.into_with_cfg(field_cfg),
-        )?;
-
-        let rhs = MBSInnerProduct::mapped_inner_product::<_, _, _, _, UNCHECKED>(
-            &coeffs,
-            &b,
-            zero_f.clone(),
-            |cr| cr.into_with_cfg(field_cfg),
-        )?;
+        let lhs = MBSInnerProduct::inner_product_field(&combined_row, &q_1, zero_f.clone())?;
+        let rhs = MBSInnerProduct::inner_product_field(&coeffs, &b, zero_f.clone())?;
 
         if lhs != rhs {
             return Err(ZipError::InvalidPcsOpen("Coherence failure".into()));
@@ -609,7 +598,7 @@ mod tests {
         let point: Vec<<Zt as ZipTypes>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
 
-        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut prover_transcript.fs_transcript);
 
         let _eval_f = TestZip::prove_single::<F, CHECKED>(
@@ -667,7 +656,7 @@ mod tests {
         let point: Vec<<Zt as ZipTypes>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
 
-        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut prover_transcript.fs_transcript);
 
         let eval_f = TestZip::prove_single::<F, CHECKED>(
@@ -708,7 +697,7 @@ mod tests {
         let point: Vec<<Zt as ZipTypes>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
 
-        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut prover_transcript.fs_transcript);
 
         let eval_f = TestZip::prove_single::<F, CHECKED>(
@@ -758,7 +747,7 @@ mod tests {
             .map(Int::<1>::from)
             .collect::<Vec<_>>();
 
-        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut prover_transcript.fs_transcript);
 
         let eval_f = TestZip::prove_single::<F, CHECKED>(
@@ -827,7 +816,7 @@ mod tests {
 
         let point: Vec<<Zt as ZipTypes>::Pt> = [0, 0, 0].into_iter().map(Int::from).collect_vec();
 
-        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut prover_transcript.fs_transcript);
 
         let eval_f = TestZip::prove_single::<F, CHECKED>(
@@ -888,7 +877,7 @@ mod tests {
 
         let point: Vec<<Zt as ZipTypes>::Pt> = [0, 0, 0].into_iter().map(Int::from).collect_vec();
 
-        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut prover_transcript.fs_transcript);
 
         let eval_f = TestZip::prove_single::<F, CHECKED>(
@@ -932,7 +921,7 @@ mod tests {
 
         let point: Vec<<Zt as ZipTypes>::Pt> = vec![Int::ZERO; num_vars];
 
-        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut prover_transcript.fs_transcript);
 
         let eval_f = TestZip::prove_single::<F, CHECKED>(
@@ -977,7 +966,7 @@ mod tests {
         let mut point = vec![<Zt as ZipTypes>::Pt::ZERO; num_vars];
         point[0] = <Zt as ZipTypes>::Pt::ONE;
 
-        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut prover_transcript.fs_transcript);
 
         let eval_f = TestZip::prove_single::<F, CHECKED>(
@@ -1020,7 +1009,7 @@ mod tests {
 
         let point: Vec<<Zt as ZipTypes>::Pt> = vec![Int::from(1), Int::from(2)];
 
-        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut prover_transcript.fs_transcript);
 
         let eval_f = TestZip::prove_single::<F, CHECKED>(
@@ -1064,7 +1053,7 @@ mod tests {
 
         let point: Vec<<Zt as ZipTypes>::Pt> = [0, 0, 0].into_iter().map(Int::from).collect_vec();
 
-        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut prover_transcript.fs_transcript);
 
         let eval_f = TestZip::prove_single::<F, CHECKED>(
@@ -1125,8 +1114,7 @@ mod tests {
 
             let point = vec![1i64; P].iter().map(|v| v.into()).collect_vec();
 
-            let mut prover_transcript =
-                PcsProverTranscript::new_from_commitment(&commitment).unwrap();
+            let mut prover_transcript = PcsProverTranscript::new_from_commitment(&commitment);
             let field_cfg = get_field_cfg::<Zt, F>(&mut prover_transcript.fs_transcript);
 
             let eval_f = TestZip::prove_single::<F, CHECKED>(
@@ -1185,7 +1173,7 @@ mod tests {
 
             let point = vec![1i64; P].iter().map(|v| (*v).into()).collect_vec();
 
-            let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+            let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
             let field_cfg = get_field_cfg::<PolyZt, F>(&mut prover_transcript.fs_transcript);
 
             let eval_f = TestPolyZip::prove_single::<F, CHECKED>(
@@ -1237,7 +1225,7 @@ mod tests {
         let point: Vec<<Zt as ZipTypes>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
 
-        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<PolyZt, F>(&mut prover_transcript.fs_transcript);
 
         let eval_f = TestZip::prove::<F, CHECKED>(
@@ -1300,7 +1288,7 @@ mod tests {
         let (hint, comm) = TestZip::commit(&pp, &polys).unwrap();
         let point: Vec<<Zt as ZipTypes>::Pt> = (0..num_vars).map(|i| Int::from(i + 2)).collect();
 
-        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<PolyZt, F>(&mut prover_transcript.fs_transcript);
 
         let eval_f = TestZip::prove::<F, CHECKED>(

@@ -53,22 +53,11 @@ pub struct PcsProverTranscript {
 }
 
 impl PcsProverTranscript {
-    pub fn new_from_commitment(comm: &ZipPlusCommitment) -> Result<Self, ZipError> {
-        // TODO: Do we need to take a slice of commitments instead?
-        let mut result = Self {
-            fs_transcript: KeccakTranscript::default(),
-            stream: Cursor::default(),
-        };
-
-        result.fs_transcript.absorb_slice(&comm.root);
-
-        Ok(result)
+    pub fn new_from_commitment(comm: &ZipPlusCommitment) -> Self {
+        Self::new_from_commitments(std::slice::from_ref(comm).iter())
     }
 
-    pub fn new_from_commitments<'a>(
-        comms: impl Iterator<Item = &'a ZipPlusCommitment>,
-    ) -> Result<Self, ZipError> {
-        // TODO: Do we need to take a slice of commitments instead?
+    pub fn new_from_commitments<'a>(comms: impl Iterator<Item = &'a ZipPlusCommitment>) -> Self {
         let mut result = Self {
             fs_transcript: KeccakTranscript::default(),
             stream: Cursor::default(),
@@ -78,7 +67,7 @@ impl PcsProverTranscript {
             result.fs_transcript.absorb_slice(&comm.root);
         }
 
-        Ok(result)
+        result
     }
 
     pub fn reserve_capacity(&mut self, additional_capacity: usize) {
@@ -86,10 +75,9 @@ impl PcsProverTranscript {
     }
 
     /// Transform the prover transcript into a verifier transcript by resetting
-    /// the stream. Note that the commitment must be absorbed again it into
-    /// the transcript for the verifier. This would normally be done by the
-    /// verifier, but this allows us more flexibility in how we
-    /// use the transcript.
+    /// the stream. Note that the commitment must be absorbed again into the
+    /// verifier transcript. This would normally be done by the verifier, but
+    /// this allows us more flexibility in how we use the transcript.
     pub fn into_verification_transcript(self) -> PcsVerifierTranscript {
         let mut result = PcsVerifierTranscript {
             fs_transcript: KeccakTranscript::default(),
@@ -363,7 +351,7 @@ mod tests {
         // TODO: N is magic
         ($write_fn:ident, $read_fn:ident, $original_value:expr, $assert_msg:expr) => {{
             let comm = ZipPlusCommitment::default();
-            let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+            let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
             transcript
                 .$write_fn(&$original_value)
                 .expect(&format!("Failed to write {}", $assert_msg));
@@ -385,7 +373,7 @@ mod tests {
         // TODO: N is magic
         ($write_fn:ident, $read_fn:ident, $original_values:expr, $assert_msg:expr) => {{
             let comm = ZipPlusCommitment::default();
-            let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+            let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
             transcript
                 .$write_fn(&$original_values)
                 .expect(&format!("Failed to write {}", $assert_msg));
