@@ -43,7 +43,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     witness_size: usize,
 ) where
     <F<FIELD_LIMBS> as Field>::Inner: ConstIntSemiring + ConstTranscribable,
-    TestAirNoMultiplication<INT_LIMBS>: Uair<Scalar = Witness<INT_LIMBS>, Ideal = DegreeOneIdeal<WitnessCoeff<INT_LIMBS>>>
+    TestAirNoMultiplication<Int<INT_LIMBS>>: Uair<Scalar = Witness<INT_LIMBS>, Ideal = DegreeOneIdeal<WitnessCoeff<INT_LIMBS>>>
         + GenerateSingleTypeWitness<Witness = Witness<INT_LIMBS>>,
     MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Inner>,
 {
@@ -53,8 +53,8 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
     let params = format!("NoMult/LIMBS={}/nvars={}", FIELD_LIMBS, num_vars);
 
-    let num_constraints = count_constraints::<TestAirNoMultiplication<INT_LIMBS>>();
-    let max_degree = count_max_degree::<TestAirNoMultiplication<INT_LIMBS>>();
+    let num_constraints = count_constraints::<TestAirNoMultiplication<Int<INT_LIMBS>>>();
+    let max_degree = count_max_degree::<TestAirNoMultiplication<Int<INT_LIMBS>>>();
 
     let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
                      trace: &[_],
@@ -63,7 +63,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             project_trace_coeffs_row_major::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
 
         let projected_scalars =
-            project_scalars::<F<FIELD_LIMBS>, TestAirNoMultiplication<INT_LIMBS>>(|scalar| {
+            project_scalars::<F<FIELD_LIMBS>, TestAirNoMultiplication<_>>(|scalar| {
                 scalar
                     .iter()
                     .map(|coeff| F::from_with_cfg(coeff, field_cfg))
@@ -71,7 +71,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             });
 
         let (ic_proof, ic_prover_state) =
-            <TestAirNoMultiplication<INT_LIMBS> as IdealCheckProtocol>::prove_combined(
+            <TestAirNoMultiplication<_> as IdealCheckProtocol>::prove_combined(
                 transcript,
                 &projected_trace,
                 &projected_scalars,
@@ -88,7 +88,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             .expect("failed to project scalars to field");
 
         let (cpr_proof, cpr_state) =
-            CombinedPolyResolver::prove_as_subprotocol::<TestAirNoMultiplication<INT_LIMBS>>(
+            CombinedPolyResolver::prove_as_subprotocol::<TestAirNoMultiplication<_>>(
                 transcript,
                 trace_f,
                 &ic_prover_state.evaluation_point,
@@ -139,7 +139,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 prove_cpr(&field_cfg, trace, &mut prover_transcript);
 
             let ic_check_subclaim =
-                <TestAirNoMultiplication<INT_LIMBS> as IdealCheckProtocol>::verify_as_subprotocol::<
+                <TestAirNoMultiplication<_> as IdealCheckProtocol>::verify_as_subprotocol::<
                     F<FIELD_LIMBS>,
                     _,
                     _,
@@ -168,7 +168,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 },
                 |(proof, subclaim, mut transcript)| {
                     let _ = black_box(CombinedPolyResolver::verify_as_subprotocol::<
-                        TestAirNoMultiplication<INT_LIMBS>,
+                        TestAirNoMultiplication<_>,
                     >(
                         &mut transcript,
                         proof,
