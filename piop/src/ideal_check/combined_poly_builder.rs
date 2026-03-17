@@ -97,6 +97,7 @@ where
     F: PrimeField,
     U: Uair,
 {
+    let sig = U::signature();
     let mut constraint_builder = CombinedPolyRowBuilder::new(num_constraints);
 
     let project = |x: &U::Scalar| {
@@ -108,8 +109,8 @@ where
 
     U::constrain_general(
         &mut constraint_builder,
-        TraceRow::from_slice_with_signature(up, &U::signature()),
-        TraceRow::from_slice_with_signature(down, &U::signature()),
+        TraceRow::from_slice_with_signature(up, &sig),
+        TraceRow::from_slice_with_signature(down, &sig),
         &project,
         |x, y| Some(project(y) * x),
         ImpossibleIdeal::from_ref,
@@ -191,6 +192,7 @@ where
     let zero_inner = field_zero.inner().clone();
     let num_rows = trace_matrix.first().map(|c| c.len()).unwrap_or(0);
     let num_vars = evaluation_point.len();
+    let sig = U::signature();
 
     // Sanity check: this approach only works for linear constraints
     if count_max_degree::<U>() > 1 {
@@ -266,8 +268,8 @@ where
 
     U::constrain_general(
         &mut constraint_builder,
-        TraceRow::from_slice_with_signature(&up_evals, &U::signature()),
-        TraceRow::from_slice_with_signature(&down_evals, &U::signature()),
+        TraceRow::from_slice_with_signature(&up_evals, &sig),
+        TraceRow::from_slice_with_signature(&down_evals, &sig),
         &project,
         |x, y| Some(project(y) * x),
         ImpossibleIdeal::from_ref,
