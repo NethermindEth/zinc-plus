@@ -29,7 +29,7 @@ use zinc_piop::{
     combined_poly_resolver::{CombinedPolyResolverError, Proof as CombinedPolyResolverProof},
     ideal_check::{IdealCheckError, Proof as IdealCheckProof},
     multipoint_eval::{MultipointEvalError, Proof as MultipointEvalProof},
-    projections::RowMajorTrace,
+    projections::ProjectedTrace,
 };
 use zinc_poly::{
     ConstCoeffBitWidth, EvaluationError as PolyEvaluationError,
@@ -41,7 +41,7 @@ use zinc_poly::{
 use zinc_primality::PrimalityTest;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{Uair, ideal::Ideal};
-use zinc_utils::{cfg_into_iter, cfg_iter, named::Named};
+use zinc_utils::{cfg_extend, cfg_into_iter, cfg_iter, named::Named};
 use zip_plus::{
     ZipError,
     code::LinearCode,
@@ -204,7 +204,8 @@ fn absorb_public_columns<T: ConstTranscribable>(
 /// Compute per-column lifted MLE evaluations at `point`.
 ///
 /// For each column j, returns `\sum_b eq(b, point) * v_j(b)` as a polynomial
-/// in `F_q[X]` (coefficient-wise MLE evaluation).
+/// in `F_q[X]` (coefficient-wise MLE evaluation). Dispatches on the trace
+/// layout internally.
 ///
 /// Binary columns exploit the 0/1 structure for conditional additions only.
 /// The `eq(point, *)` table is built once and reused across all columns.
@@ -212,17 +213,17 @@ fn absorb_public_columns<T: ConstTranscribable>(
 fn compute_lifted_evals<F: PrimeField, const D: usize>(
     point: &[F],
     trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
-    projected_trace: &RowMajorTrace<F>,
+    projected_trace: &ProjectedTrace<F>,
     field_cfg: &F::Config,
 ) -> Vec<DynamicPolynomialF<F>> {
     let eq_table = zinc_poly::utils::build_eq_x_r_vec(point, field_cfg)
         .expect("compute_lifted_evals: eq table build failed");
 
     let n_bin = trace_bin_poly.len();
-    let num_cols = projected_trace.first().map(|r| r.len()).unwrap_or(0);
     let zero = F::zero_with_cfg(field_cfg);
 
-    cfg_iter!(trace_bin_poly)
+    // Binary columns: exploit 0/1 structure for conditional additions.
+    let mut result: Vec<DynamicPolynomialF<F>> = cfg_iter!(trace_bin_poly)
         .map(|col| {
             let mut coeffs = vec![zero.clone(); D];
             for (b, entry) in col.iter().enumerate() {
@@ -232,28 +233,53 @@ fn compute_lifted_evals<F: PrimeField, const D: usize>(
                     }
                 }
             }
-            coeffs
+            DynamicPolynomialF::new_trimmed(coeffs)
         })
-        .chain(cfg_into_iter!(n_bin..num_cols).map(|col_idx| {
-            let num_coeffs = projected_trace
-                .iter()
-                .map(|row| row[col_idx].coeffs.len())
-                .max()
-                .unwrap_or(0);
+        .collect();
 
-            let mut coeffs = vec![zero.clone(); num_coeffs];
-            for (b, row) in projected_trace.iter().enumerate() {
-                let entry = &row[col_idx];
-                for (l, coeff) in entry.coeffs.iter().enumerate() {
-                    let mut term = eq_table[b].clone();
-                    term *= coeff;
-                    coeffs[l] += &term;
-                }
+    // Non-binary columns: coefficient-wise eq-weighted sum.
+    fn weighted_eq_sum<'a, F2: PrimeField + 'a>(
+        col: impl Iterator<Item = &'a DynamicPolynomialF<F2>> + Clone,
+        eq_table: &[F2],
+        zero: &F2,
+    ) -> DynamicPolynomialF<F2> {
+        let num_coeffs = col.clone().map(|e| e.coeffs.len()).max().unwrap_or(0);
+        let mut coeffs = vec![zero.clone(); num_coeffs];
+        for (b, entry) in col.enumerate() {
+            for (l, coeff) in entry.coeffs.iter().enumerate() {
+                let mut term = eq_table[b].clone();
+                term *= coeff;
+                coeffs[l] += &term;
             }
-            coeffs
-        }))
-        .map(DynamicPolynomialF::new_trimmed)
-        .collect()
+        }
+        DynamicPolynomialF::new_trimmed(coeffs)
+    }
+
+    match projected_trace {
+        ProjectedTrace::RowMajor(t) => {
+            let num_cols = t.first().map(|r| r.len()).unwrap_or(0);
+            cfg_extend!(
+                result,
+                cfg_into_iter!(n_bin..num_cols).map(|col_idx| weighted_eq_sum(
+                    t.iter().map(|row| &row[col_idx]),
+                    &eq_table,
+                    &zero,
+                ))
+            );
+        }
+        ProjectedTrace::ColumnMajor(t) => {
+            cfg_extend!(
+                result,
+                cfg_iter!(t[n_bin..]).map(|col_mle| weighted_eq_sum(
+                    col_mle.iter(),
+                    &eq_table,
+                    &zero,
+                ))
+            );
+        }
+    }
+
+    result
 }
 
 /// Project a DensePolynomial scalar to DynamicPolynomialF by projecting each
@@ -289,7 +315,10 @@ mod tests {
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
         TestAirNoMultiplication, TestUairSimpleMultiplication,
     };
-    use zinc_uair::{ideal::degree_one::DegreeOneIdeal, ideal_collector::IdealOrZero};
+    use zinc_uair::{
+        degree_counter::count_max_degree, ideal::degree_one::DegreeOneIdeal,
+        ideal_collector::IdealOrZero,
+    };
     use zinc_utils::{
         CHECKED,
         from_ref::FromRef,
@@ -474,16 +503,23 @@ mod tests {
         )
     }
 
+    macro_rules! default_project_ideal {
+        () => {
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg))
+        };
+    }
+
     #[allow(clippy::result_large_err)]
     fn do_test<Zt, U>(
         num_vars: usize,
         project_ideal: impl Fn(
             &IdealOrZero<U::Ideal>,
             &<F as PrimeField>::Config,
-        ) -> IdealOrZero<DegreeOneIdeal<F>>,
-        tamper: impl FnOnce(&mut Proof<F>),
-    ) -> Result<(), ProtocolError<F, IdealOrZero<DegreeOneIdeal<F>>>>
-    where
+        ) -> IdealOrZero<DegreeOneIdeal<F>>
+        + Copy,
+        tamper: impl Fn(&mut Proof<F>),
+        check_verification: impl Fn(Result<(), ProtocolError<F, IdealOrZero<DegreeOneIdeal<F>>>>),
+    ) where
         Zt: ZincTypes<DEGREE_PLUS_ONE>,
         <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
         <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
@@ -507,32 +543,35 @@ mod tests {
         let sig = U::signature();
         let public_trace = trace.public(&sig);
 
-        // Prover: pass full trace (public first, then witness)
-        let mut proof = ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::prove::<CHECKED>(
-            &pp,
-            &trace,
-            num_vars,
-            project_scalar_fn,
-        )
-        .expect("Prover failed");
+        macro_rules! run_protocol {
+            ($mle_first:ident) => {
+                let mut proof = ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::prove::<
+                    { $mle_first },
+                    CHECKED,
+                >(&pp, &trace, num_vars, project_scalar_fn)
+                .expect("Prover failed");
 
-        tamper(&mut proof);
+                tamper(&mut proof);
 
-        // Verifier: pass only public columns separately
-        ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::verify::<_, CHECKED>(
-            &pp,
-            proof,
-            &public_trace,
-            num_vars,
-            project_scalar_fn,
-            project_ideal,
-        )
-    }
+                let verification_result =
+                    ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::verify::<_, CHECKED>(
+                        &pp,
+                        proof,
+                        &public_trace,
+                        num_vars,
+                        project_scalar_fn,
+                        project_ideal,
+                    );
+                check_verification(verification_result);
+            };
+        }
 
-    macro_rules! default_project_ideal {
-        () => {
-            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg))
-        };
+        run_protocol!(false);
+
+        if count_max_degree::<U>() <= 1 {
+            // For linear constraints, also test the MLE-first ideal check approach.
+            run_protocol!(true);
+        }
     }
 
     /// End-to-end test: TestAirNoMultiplication.
@@ -545,8 +584,8 @@ mod tests {
             8,
             default_project_ideal!(),
             |_| {},
-        )
-        .unwrap();
+            |res| res.unwrap(),
+        );
     }
 
     /// End-to-end test: TestUairSimpleMultiplication.
@@ -566,8 +605,8 @@ mod tests {
             2,
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
             |_| {},
-        )
-        .unwrap();
+            |res| res.unwrap(),
+        );
     }
 
     /// End-to-end test: BinaryDecompositionUair.
@@ -580,8 +619,8 @@ mod tests {
             8,
             default_project_ideal!(),
             |_| {},
-        )
-        .unwrap();
+            |res| res.unwrap(),
+        );
     }
 
     /// End-to-end test: BigLinearUair.
@@ -593,8 +632,12 @@ mod tests {
     ///   up.binary_poly[i] - down.binary_poly[i] = 0, for i=1..15
     #[test]
     fn test_e2e_big_linear() {
-        do_test::<TestZincTypesIprs, BigLinearUair<ZtInt>>(8, default_project_ideal!(), |_| {})
-            .unwrap();
+        do_test::<TestZincTypesIprs, BigLinearUair<ZtInt>>(
+            8,
+            default_project_ideal!(),
+            |_| {},
+            |res| res.unwrap(),
+        );
     }
 
     /// End-to-end test: BigLinearUairWithPublicInput.
@@ -607,8 +650,8 @@ mod tests {
             8,
             default_project_ideal!(),
             |_| {},
-        )
-        .unwrap();
+            |res| res.unwrap(),
+        );
     }
 
     //
@@ -621,8 +664,10 @@ mod tests {
             8,
             default_project_ideal!(),
             |proof| proof.witness_lifted_evals.swap(0, 1),
-        )
-        .unwrap_err();
+            |res| {
+                res.unwrap_err();
+            },
+        );
     }
 
     #[test]
@@ -631,8 +676,10 @@ mod tests {
             8,
             default_project_ideal!(),
             |proof| proof.resolver.up_evals.swap(0, 1),
-        )
-        .unwrap_err();
+            |res| {
+                res.unwrap_err();
+            },
+        );
     }
 
     #[test]
@@ -641,8 +688,10 @@ mod tests {
             8,
             default_project_ideal!(),
             |proof| proof.resolver.down_evals.swap(0, 1),
-        )
-        .unwrap_err();
+            |res| {
+                res.unwrap_err();
+            },
+        );
     }
 
     #[test]
@@ -651,8 +700,10 @@ mod tests {
             8,
             default_project_ideal!(),
             |proof| proof.commitments.0.root = Default::default(),
-        )
-        .unwrap_err();
+            |res| {
+                res.unwrap_err();
+            },
+        );
     }
 
     #[test]
@@ -661,7 +712,9 @@ mod tests {
             8,
             default_project_ideal!(),
             |proof| proof.ideal_check.combined_mle_values.swap(0, 1),
-        )
-        .unwrap_err();
+            |res| {
+                res.unwrap_err();
+            },
+        );
     }
 }

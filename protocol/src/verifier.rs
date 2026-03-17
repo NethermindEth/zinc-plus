@@ -6,7 +6,9 @@ use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
     multipoint_eval::MultipointEval,
-    projections::{project_scalars, project_scalars_to_field, project_trace_coeffs_row_major},
+    projections::{
+        ProjectedTrace, project_scalars, project_scalars_to_field, project_trace_coeffs_row_major,
+    },
 };
 use zinc_poly::{EvaluatablePolynomial, univariate::dynamic::over_field::DynamicPolynomialF};
 use zinc_transcript::{
@@ -173,7 +175,7 @@ where
             compute_lifted_evals::<F, D>(
                 r_0,
                 &public_trace.binary_poly,
-                &projected_public,
+                &ProjectedTrace::RowMajor(projected_public),
                 &field_cfg,
             )
         } else {

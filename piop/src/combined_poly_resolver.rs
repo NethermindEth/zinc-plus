@@ -382,7 +382,7 @@ mod tests {
     use super::*;
     use crate::{
         ideal_check::IdealCheckProtocol,
-        projections::{evaluate_trace_to_column_mles, project_scalars_to_field},
+        projections::{ProjectedTrace, evaluate_trace_to_column_mles, project_scalars_to_field},
         test_utils::{LIMBS, run_ideal_check_prover_combined, test_config},
     };
     use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
@@ -454,7 +454,10 @@ mod tests {
 
         let (proof, _) = CombinedPolyResolver::prove_as_subprotocol::<U>(
             &mut prover_transcript,
-            evaluate_trace_to_column_mles(&projected_trace, &projecting_element),
+            evaluate_trace_to_column_mles(
+                &ProjectedTrace::RowMajor(projected_trace),
+                &projecting_element,
+            ),
             &ic_prover_state.evaluation_point,
             &projected_scalars,
             num_constraints,

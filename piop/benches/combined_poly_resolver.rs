@@ -13,7 +13,7 @@ use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
     projections::{
-        evaluate_trace_to_column_mles, project_scalars, project_scalars_to_field,
+        ProjectedTrace, evaluate_trace_to_column_mles, project_scalars, project_scalars_to_field,
         project_trace_coeffs_row_major,
     },
 };
@@ -80,7 +80,10 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
         let projecting_element: F<FIELD_LIMBS> = transcript.get_field_challenge(field_cfg);
 
-        let trace_f = evaluate_trace_to_column_mles(&projected_trace, &projecting_element);
+        let trace_f = evaluate_trace_to_column_mles(
+            &ProjectedTrace::RowMajor(projected_trace),
+            &projecting_element,
+        );
         let scalars_f = project_scalars_to_field(projected_scalars, &projecting_element)
             .expect("failed to project scalars to field");
 
@@ -223,7 +226,10 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
         let projecting_element: F<FIELD_LIMBS> = transcript.get_field_challenge(field_cfg);
 
-        let trace_f = evaluate_trace_to_column_mles(&projected_trace, &projecting_element);
+        let trace_f = evaluate_trace_to_column_mles(
+            &ProjectedTrace::RowMajor(projected_trace),
+            &projecting_element,
+        );
         let scalars_f = project_scalars_to_field(projected_scalars, &projecting_element)
             .expect("failed to project scalars to field");
 
