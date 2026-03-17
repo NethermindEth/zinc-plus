@@ -164,7 +164,7 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     #[error("multi-point evaluation failed: {0}")]
     MultipointEval(#[from] MultipointEvalError<F>),
     #[error("lifted eval psi_a projection failed: {0}")]
-    LiftedEvalProjection(#[from] PolyEvaluationError),
+    LiftedEvalProjection(PolyEvaluationError),
     #[error("PCS error: {0}")]
     Pcs(#[from] ZipError),
     #[error("PCS verification failed at column {0}: {1}")]

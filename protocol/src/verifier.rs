@@ -193,7 +193,8 @@ where
         let open_evals: Vec<F> = all_lifted_evals
             .iter()
             .map(|bar_u| bar_u.evaluate_at_point(&projecting_element_f))
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProtocolError::LiftedEvalProjection)?;
 
         MultipointEval::<F>::verify_subclaim(&mp_subclaim, &open_evals, &field_cfg)?;
 
