@@ -1,13 +1,7 @@
 mod pntt;
 
 use crate::{
-    code::{
-        LinearCode,
-        iprs::pntt::radix8::{
-            FieldMulByTwiddle, MBSMulByTwiddle, MulByTwiddle, WideningMulByTwiddle,
-            params::Config as PnttConfig,
-        },
-    },
+    code::{LinearCode, iprs::pntt::radix8::params::Config as PnttConfig},
     pcs::structs::ZipTypes,
 };
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
@@ -19,26 +13,26 @@ use std::{
     marker::PhantomData,
     ops::{Add, AddAssign},
 };
-use zinc_utils::{CHECKED, UNCHECKED, from_ref::FromRef, mul_by_scalar::MulByScalar};
+use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 
 /// Pseudo Reed-Solomon encoder over the integers. Internally uses a
 /// radix-8 NTT-style recursion with a base Vandermonde matrix sized
 /// `base_len x base_dim` (defaults to 64x32).
 #[derive(Debug, Clone)]
-pub struct IprsCode<Zt: ZipTypes, Config: PnttConfig, const CHECK_ADDITION: bool> {
+pub struct IprsCode<Zt: ZipTypes, Config: PnttConfig, const CHECK: bool> {
     pntt_params: Radix8PnttParams<Config>,
     _phantom: PhantomData<Zt>,
 }
 
-impl<Zt, Config, const CHECK_ADDITION: bool> IprsCode<Zt, Config, CHECK_ADDITION>
+impl<Zt, Config, const CHECK: bool> IprsCode<Zt, Config, CHECK>
 where
     Zt: ZipTypes,
     Config: PnttConfig,
 {
     /// Encode without modular reduction, purely over the integers.
-    fn encode_inner<In, Out, M>(&self, row: &[In]) -> Vec<Out>
+    fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
     where
-        In: Clone + Send + Sync,
+        In: for<'a> MulByScalar<&'a PnttInt, Out> + Clone + Send + Sync,
         Out: CheckedAdd
             + for<'a> AddAssign<&'a Out>
             + for<'a> Add<&'a Out, Output = Out>
@@ -50,7 +44,6 @@ where
             + Debug
             + Send
             + Sync,
-        M: MulByTwiddle<In, PnttInt, Output = Out>,
     {
         assert_eq!(
             row.len(),
@@ -60,10 +53,16 @@ where
             Config::INPUT_LEN
         );
 
-        pntt::radix8::pntt::<_, _, _, M, MBSMulByTwiddle<CHECKED>, CHECK_ADDITION>(
-            row,
-            &self.pntt_params,
-        )
+        macro_rules! mul_fn {
+            () => {
+                |v, tw| {
+                    v.mul_by_scalar::<CHECK>(tw)
+                        .expect("Multiplication by twiddle should not overflow")
+                }
+            };
+        }
+
+        pntt::radix8::pntt::<_, _, _, CHECK>(row, &self.pntt_params, mul_fn!(), mul_fn!())
     }
 
     // Do the encoding but make use of the fact
@@ -80,19 +79,13 @@ where
             Config::INPUT_LEN
         );
 
-        pntt::radix8::pntt::<
-            _,
-            _,
-            _,
-            FieldMulByTwiddle<_, PnttInt>,
-            FieldMulByTwiddle<_, PnttInt>,
-            CHECK_ADDITION,
-        >(row, &self.pntt_params)
+        let mul_fn = |f: &F, tw: &PnttInt| f.clone() * F::from_with_cfg(*tw, f.cfg());
+
+        pntt::radix8::pntt::<_, _, _, CHECK>(row, &self.pntt_params, mul_fn, mul_fn)
     }
 }
 
-impl<Zt: ZipTypes, Config, const CHECK_ADDITION: bool> LinearCode<Zt>
-    for IprsCode<Zt, Config, CHECK_ADDITION>
+impl<Zt: ZipTypes, Config, const CHECK: bool> LinearCode<Zt> for IprsCode<Zt, Config, CHECK>
 where
     Zt: ZipTypes,
     Config: PnttConfig,
@@ -136,7 +129,7 @@ where
             Config::INPUT_LEN
         );
 
-        self.encode_inner::<_, _, WideningMulByTwiddle<Zt::Cw, UNCHECKED>>(row)
+        self.encode_inner(row)
     }
 
     fn row_len(&self) -> usize {
@@ -148,7 +141,7 @@ where
     }
 
     fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {
-        self.encode_inner::<_, _, MBSMulByTwiddle<CHECKED>>(row)
+        self.encode_inner(row)
     }
 
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>

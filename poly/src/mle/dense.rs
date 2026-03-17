@@ -709,7 +709,7 @@ mod tests {
             ],
             F::zero_with_cfg(&cfg),
         );
-        let d_fixed = d.fixed_variables(&[], F::zero_with_cfg(&cfg));
+        let d_fixed = d.fixed_variables::<F>(&[], F::zero_with_cfg(&cfg));
         assert_eq!(d_fixed.num_vars, 2);
         assert_eq!(
             d_fixed.evaluations,
