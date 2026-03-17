@@ -2,18 +2,21 @@
 use rayon::prelude::*;
 
 use crypto_primitives::{FromWithConfig, PrimeField, Semiring};
-use itertools::Itertools;
-use num_traits::Zero;
 use std::{collections::HashMap, iter};
 use zinc_poly::{
-    EvaluatablePolynomial, EvaluationError,
+    EvaluationError,
     mle::DenseMultilinearExtension,
     univariate::{
-        binary::BinaryPoly, dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF,
+        binary::BinaryPoly,
+        dense::DensePolynomial,
+        dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
     },
 };
 use zinc_uair::{Uair, collect_scalars::collect_scalars};
-use zinc_utils::{cfg_extend, cfg_into_iter, cfg_iter, cfg_iter_mut};
+use zinc_utils::{
+    UNCHECKED, cfg_extend, cfg_into_iter, cfg_iter, cfg_iter_mut, inner_product::InnerProduct,
+    powers,
+};
 
 /// Row-indexed trace matrix: `trace[row][col]`.
 /// Each row contains all column values for that row.
@@ -232,7 +235,17 @@ pub fn evaluate_trace_to_column_mles<F: PrimeField + 'static>(
     let num_rows = trace.len();
     let num_cols = trace.first().map(|r| r.len()).unwrap_or(0);
     let num_vars = num_rows.next_power_of_two().trailing_zeros() as usize;
-    let zero = F::zero_with_cfg(projecting_element.cfg()).inner().clone();
+    let zero = F::zero_with_cfg(projecting_element.cfg());
+    let one = F::one_with_cfg(projecting_element.cfg());
+
+    let max_coeffs_len = trace
+        .iter()
+        .flat_map(|row| row.iter())
+        .map(|poly| poly.degree().map_or(0, |d| d + 1))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let projection_powers: Vec<F> = powers(projecting_element.clone(), one, max_coeffs_len);
 
     // Build column-indexed MLEs from row-indexed trace
     cfg_into_iter!(0..num_cols)
@@ -240,17 +253,22 @@ pub fn evaluate_trace_to_column_mles<F: PrimeField + 'static>(
             let evaluations: Vec<F::Inner> = (0..num_rows)
                 .map(|row_idx| {
                     let poly = &trace[row_idx][col_idx];
-                    if poly.is_zero() {
-                        zero.clone()
-                    } else {
-                        poly.evaluate_at_point(projecting_element)
-                            .expect("dynamic poly evaluation does not fail")
-                            .inner()
-                            .clone()
-                    }
+                    let deg = poly.degree().map_or(0, |d| d + 1);
+                    DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
+                        &poly.coeffs[..deg],
+                        &projection_powers[..deg],
+                        zero.clone(),
+                    )
+                    .expect("inner product cannot fail here")
+                    .inner()
+                    .clone()
                 })
                 .collect();
-            DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations, zero.clone())
+            DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                evaluations,
+                zero.inner().clone(),
+            )
         })
         .collect()
 }
@@ -278,6 +296,7 @@ pub fn project_scalars<F: PrimeField, U: Uair>(
 }
 
 /// Project scalars of a UAIR along F[X] -> F.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
     scalars: HashMap<R, DynamicPolynomialF<F>>,
     projecting_element: &F,
@@ -285,17 +304,31 @@ pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
     // TODO(Ilia): Parallelising this might be good for big UAIRs.
     //             We'd conditionally route between sequential and parallel
     //             projection depending on how many scalars the UAIR has.
-    scalars
+    let one = F::one_with_cfg(projecting_element.cfg());
+    let zero = F::zero_with_cfg(projecting_element.cfg());
+
+    let max_coeffs_len = scalars
+        .values()
+        .map(|poly| poly.degree().map_or(0, |d| d + 1))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+
+    let projection_powers: Vec<F> = powers(projecting_element.clone(), one, max_coeffs_len);
+
+    Ok(scalars
         .into_iter()
-        .map(
-            |(scalar, value)| -> Result<(R, F), (R, F, EvaluationError)> {
-                Ok((
-                    scalar.clone(),
-                    value
-                        .evaluate_at_point(projecting_element)
-                        .map_err(|err| (scalar.clone(), projecting_element.clone(), err))?,
-                ))
-            },
-        )
-        .try_collect()
+        .map(|(scalar, value)| {
+            let deg = value.degree().map_or(0, |d| d + 1);
+            (
+                scalar,
+                DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
+                    &value.coeffs[..deg],
+                    &projection_powers[..deg],
+                    zero.clone(),
+                )
+                .expect("inner product cannot fail here"),
+            )
+        })
+        .collect())
 }

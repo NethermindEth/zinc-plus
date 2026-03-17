@@ -18,15 +18,16 @@ use rayon::prelude::*;
 use std::{collections::HashMap, marker::PhantomData, slice};
 use thiserror::Error;
 use zinc_poly::{
-    EvaluatablePolynomial, EvaluationError,
+    EvaluationError,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::dynamic::over_field::DynamicPolynomialF,
+    univariate::dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
     utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{TraceRow, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::{
-    cfg_iter, from_ref::FromRef, inner_transparent_field::InnerTransparentField, powers,
+    UNCHECKED, cfg_iter, from_ref::FromRef, inner_product::InnerProduct,
+    inner_transparent_field::InnerTransparentField, powers,
 };
 
 pub struct CombinedPolyResolver<F: InnerTransparentField>(PhantomData<F>);
@@ -92,11 +93,17 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             .collect();
 
         let eq_r = build_eq_x_r_inner(evaluation_point, field_cfg)?;
-
         // To get the constraints on the last row ignored
         // we multiply each constraint polynomial
         // by the selector (1 - eq(1,...,1, x))
-        let last_row_selector = build_eq_x_r_inner(&vec![one.clone(); num_vars], field_cfg)?;
+        let last_row_selector = DenseMultilinearExtension {
+            num_vars,
+            evaluations: {
+                let mut evals = vec![zero.inner().clone(); 1 << num_vars];
+                evals[(1 << num_vars) - 1] = one.inner().clone();
+                evals
+            },
+        };
 
         // The challenge '\alpha' to batch multiple evaluation claims
         let folding_challenge: F = transcript.get_field_challenge(field_cfg);
@@ -234,6 +241,18 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
 
+        // Precompute powers of the projecting element for batch evaluation.
+        let projection_powers: Vec<F> = {
+            let max_coeffs_len = ic_check_subclaim
+                .values
+                .iter()
+                .map(|poly| poly.degree().map_or(0, |d| d + 1))
+                .max()
+                .unwrap_or(0)
+                .max(1);
+            powers(projecting_element.clone(), one.clone(), max_coeffs_len)
+        };
+
         let folding_challenge: F = transcript.get_field_challenge(field_cfg);
 
         let folding_challenge_powers: Vec<F> =
@@ -245,24 +264,17 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             .values
             .iter()
             .zip(&folding_challenge_powers)
-            .map(
-                |(claimed_value, random_coeff)| -> Result<F, CombinedPolyResolverError<F>> {
-                    Ok(claimed_value
-                        .evaluate_at_point(projecting_element)
-                        .map_err(|err| {
-                            CombinedPolyResolverError::ProjectionError(
-                                claimed_value.clone(),
-                                projecting_element.clone(),
-                                err,
-                            )
-                        })?
-                        * random_coeff)
-                },
-            )
-            .try_fold(
-                zero.clone(),
-                |acc, next| -> Result<F, CombinedPolyResolverError<F>> { Ok(acc + next?) },
-            )?;
+            .map(|(claimed_value, random_coeff)| {
+                let deg = claimed_value.degree().map_or(0, |d| d + 1);
+                DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
+                    &claimed_value.coeffs[..deg],
+                    &projection_powers[..deg],
+                    zero.clone(),
+                )
+                .expect("inner product cannot fail here")
+                    * random_coeff
+            })
+            .fold(zero.clone(), |acc, term| acc + term);
 
         if proof.sumcheck_proof.claimed_sum != expected_sum {
             return Err(CombinedPolyResolverError::WrongSumcheckSum {

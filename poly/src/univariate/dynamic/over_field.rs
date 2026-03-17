@@ -5,7 +5,10 @@ use std::{
     fmt::Display,
     ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, Rem, Sub, SubAssign},
 };
-use zinc_utils::UNCHECKED;
+use zinc_utils::{
+    UNCHECKED,
+    inner_product::{InnerProduct, InnerProductError},
+};
 
 use crate::{
     EvaluatablePolynomial, EvaluationError, Polynomial,
@@ -60,6 +63,23 @@ impl<F: PrimeField> DynamicPolynomialF<F> {
         } else {
             DynamicPolynomialF { coeffs: vec![a] }
         }
+    }
+}
+
+/// Inner product for dynamic polynomials over a prime field.
+pub struct DynamicPolyFInnerProduct;
+
+impl<F: PrimeField> InnerProduct<[F], F, F> for DynamicPolyFInnerProduct {
+    #[allow(clippy::arithmetic_side_effects)]
+    fn inner_product<const CHECK: bool>(
+        lhs: &[F],
+        rhs: &[F],
+        zero: F,
+    ) -> Result<F, InnerProductError> {
+        Ok(lhs
+            .iter()
+            .zip(rhs)
+            .fold(zero, |acc, (coeff, power)| acc + coeff.clone() * power))
     }
 }
 
