@@ -9,6 +9,11 @@ pub mod ideal;
 pub mod ideal_collector;
 
 use crypto_primitives::Semiring;
+use std::borrow::Cow;
+use zinc_poly::{
+    mle::DenseMultilinearExtension,
+    univariate::{binary::BinaryPoly, dense::DensePolynomial},
+};
 use zinc_utils::{UNCHECKED, from_ref::FromRef, mul_by_scalar::MulByScalar};
 
 use crate::ideal::{Ideal, IdealCheck};
@@ -91,6 +96,38 @@ impl UairSignature {
     /// The sum of the numbers of columns across all types (public + witness).
     pub fn total_cols(&self) -> usize {
         self.total_binary_poly_cols() + self.total_arbitrary_poly_cols() + self.total_int_cols()
+    }
+}
+
+/// The trace of a UAIR execution (pre-projection).
+/// If owned, it contains the full trace, otherwise it contains a view on the
+/// full trace (e.g. only public columns).
+#[derive(Debug, Clone, Default)]
+pub struct UairTrace<'a, PolyCoeff: Clone, Int: Clone, const D: usize> {
+    pub binary_poly: Cow<'a, [DenseMultilinearExtension<BinaryPoly<D>>]>,
+    pub arbitrary_poly: Cow<'a, [DenseMultilinearExtension<DensePolynomial<PolyCoeff, D>>]>,
+    pub int: Cow<'a, [DenseMultilinearExtension<Int>]>,
+}
+
+impl<PolyCoeff: Clone, Int: Clone, const D: usize> UairTrace<'static, PolyCoeff, Int, D> {
+    /// Returns a sub-trace containing only public columns.
+    /// Returned trace is borrowed from the full trace.
+    pub fn public(&self, sig: &UairSignature) -> UairTrace<'_, PolyCoeff, Int, D> {
+        UairTrace {
+            binary_poly: Cow::Borrowed(&self.binary_poly[0..sig.public_binary_poly_cols]),
+            arbitrary_poly: Cow::Borrowed(&self.arbitrary_poly[0..sig.public_arbitrary_poly_cols]),
+            int: Cow::Borrowed(&self.int[0..sig.public_int_cols]),
+        }
+    }
+
+    /// Returns a sub-trace containing only witness columns.
+    /// Returned trace is borrowed from the full trace.
+    pub fn witness(&self, sig: &UairSignature) -> UairTrace<'_, PolyCoeff, Int, D> {
+        UairTrace {
+            binary_poly: Cow::Borrowed(&self.binary_poly[sig.public_binary_poly_cols..]),
+            arbitrary_poly: Cow::Borrowed(&self.arbitrary_poly[sig.public_arbitrary_poly_cols..]),
+            int: Cow::Borrowed(&self.int[sig.public_int_cols..]),
+        }
     }
 }
 

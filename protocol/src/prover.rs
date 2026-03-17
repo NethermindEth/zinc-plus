@@ -10,11 +10,11 @@ use zinc_piop::{
         project_trace_coeffs_row_major,
     },
 };
-use zinc_poly::{
-    mle::DenseMultilinearExtension, univariate::dynamic::over_field::DynamicPolynomialF,
-};
+use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_uair::{Uair, constraint_counter::count_constraints, degree_counter::count_max_degree};
+use zinc_uair::{
+    Uair, UairTrace, constraint_counter::count_constraints, degree_counter::count_max_degree,
+};
 use zinc_utils::{
     add, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
     mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
@@ -31,7 +31,7 @@ where
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     F: InnerTransparentField
         + FromPrimitiveWithConfig
-        + FromWithConfig<Zt::Int>
+        + for<'a> FromWithConfig<&'a Zt::Int>
         + for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> FromWithConfig<&'a Zt::Pt>
@@ -77,20 +77,13 @@ where
             ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
             ZipPlusParams<Zt::IntZt, Zt::IntLc>,
         ),
-        trace_bin_poly: &[DenseMultilinearExtension<<Zt::BinaryZt as ZipTypes>::Eval>],
-        trace_arb_poly: &[DenseMultilinearExtension<<Zt::ArbitraryZt as ZipTypes>::Eval>],
-        trace_int: &[DenseMultilinearExtension<<Zt::IntZt as ZipTypes>::Eval>],
+        trace: &UairTrace<'static, Zt::Int, Zt::Int, D>,
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
     ) -> Result<Proof<F>, ProtocolError<F, U::Ideal>> {
         let sig = U::signature();
-        let num_pub_bin = sig.public_binary_poly_cols;
-        let num_pub_arb = sig.public_arbitrary_poly_cols;
-        let num_pub_int = sig.public_int_cols;
-
-        let witness_bin = &trace_bin_poly[num_pub_bin..];
-        let witness_arb = &trace_arb_poly[num_pub_arb..];
-        let witness_int = &trace_int[num_pub_int..];
+        let public_trace = trace.public(&sig);
+        let witness_trace = trace.witness(&sig);
 
         // === Step 0: Commit only witness columns ===
         macro_rules! commit_optionally {
@@ -109,23 +102,20 @@ where
                 }
             };
         }
-        let (hint_bin, commitment_bin) = commit_optionally!(pp_bin, witness_bin);
-        let (hint_arb, commitment_arb) = commit_optionally!(pp_arb, witness_arb);
-        let (hint_int, commitment_int) = commit_optionally!(pp_int, witness_int);
+        let (hint_bin, commitment_bin) = commit_optionally!(pp_bin, &witness_trace.binary_poly);
+        let (hint_arb, commitment_arb) = commit_optionally!(pp_arb, &witness_trace.arbitrary_poly);
+        let (hint_int, commitment_int) = commit_optionally!(pp_int, &witness_trace.int);
 
         let mut pcs_transcript = PcsProverTranscript::new_from_commitments(
             [&commitment_bin, &commitment_arb, &commitment_int].into_iter(),
         );
 
+        absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.binary_poly);
         absorb_public_columns(
             &mut pcs_transcript.fs_transcript,
-            &trace_bin_poly[..num_pub_bin],
+            &public_trace.arbitrary_poly,
         );
-        absorb_public_columns(
-            &mut pcs_transcript.fs_transcript,
-            &trace_arb_poly[..num_pub_arb],
-        );
-        absorb_public_columns(&mut pcs_transcript.fs_transcript, &trace_int[..num_pub_int]);
+        absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
 
         // === Step 1: Prime projection (\phi_q: Z[X] -> F_q[X]) ===
 
@@ -136,12 +126,7 @@ where
         let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
         let num_constraints = count_constraints::<U>();
 
-        let projected_trace = project_trace_coeffs_row_major::<F, Zt::Int, Zt::Int, D>(
-            trace_bin_poly,
-            trace_arb_poly,
-            trace_int,
-            &field_cfg,
-        );
+        let projected_trace = project_trace_coeffs_row_major(trace, &field_cfg);
 
         // === Step 2: Ideal check ===
         let (ic_proof, ic_prover_state) = U::prove_combined(
@@ -200,7 +185,7 @@ where
         let r_0 = &mp_prover_state.eval_point;
 
         let lifted_evals =
-            compute_lifted_evals::<F, D>(r_0, trace_bin_poly, &projected_trace, &field_cfg);
+            compute_lifted_evals::<F, D>(r_0, &trace.binary_poly, &projected_trace, &field_cfg);
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
         for bar_u in &lifted_evals {
@@ -214,7 +199,7 @@ where
             let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
                 &mut pcs_transcript,
                 pp_bin,
-                witness_bin,
+                &witness_trace.binary_poly,
                 r_0,
                 hint_bin,
                 &field_cfg,
@@ -224,7 +209,7 @@ where
             let _ = ZipPlus::<Zt::ArbitraryZt, Zt::ArbitraryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
                 &mut pcs_transcript,
                 pp_arb,
-                witness_arb,
+                &witness_trace.arbitrary_poly,
                 r_0,
                 hint_arb,
                 &field_cfg,
@@ -234,7 +219,7 @@ where
             let _ = ZipPlus::<Zt::IntZt, Zt::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
                 &mut pcs_transcript,
                 pp_int,
-                witness_int,
+                &witness_trace.int,
                 r_0,
                 hint_int,
                 &field_cfg,
@@ -245,6 +230,9 @@ where
         let commitments = (commitment_bin, commitment_arb, commitment_int);
 
         // Remember that the public columns come first in the input trace arrays
+        let num_pub_bin = sig.public_binary_poly_cols;
+        let num_pub_arb = sig.public_arbitrary_poly_cols;
+        let num_pub_int = sig.public_int_cols;
         let num_total_bin = sig.total_binary_poly_cols();
         let num_total_arb = sig.total_arbitrary_poly_cols();
         let witness_arb_offset = add!(num_total_bin, num_pub_arb);

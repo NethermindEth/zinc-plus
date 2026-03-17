@@ -1,7 +1,7 @@
 #![allow(clippy::arithmetic_side_effects)] // UAIRs should not care about overflows
-mod generate_witness;
+mod generate_trace;
 
-use std::marker::PhantomData;
+pub use generate_trace::*;
 
 use crypto_primitives::{ConstSemiring, FixedSemiring, Semiring, boolean::Boolean};
 use num_traits::Zero;
@@ -9,6 +9,7 @@ use rand::{
     distr::{Distribution, StandardUniform},
     prelude::*,
 };
+use std::marker::PhantomData;
 use zinc_poly::{
     EvaluatablePolynomial,
     mle::{DenseMultilinearExtension, MultilinearExtensionRand},
@@ -18,12 +19,10 @@ use zinc_poly::{
     },
 };
 use zinc_uair::{
-    ConstraintBuilder, TraceRow, Uair, UairSignature, ideal::degree_one::DegreeOneIdeal,
+    ConstraintBuilder, TraceRow, Uair, UairSignature, UairTrace,
+    ideal::{ImpossibleIdeal, degree_one::DegreeOneIdeal},
 };
 use zinc_utils::from_ref::FromRef;
-
-pub use generate_witness::*;
-use zinc_uair::ideal::ImpossibleIdeal;
 
 pub struct TestUairSimpleMultiplication<R>(PhantomData<R>);
 
@@ -60,17 +59,18 @@ where
     }
 }
 
-impl<R> GenerateSingleTypeWitness for TestUairSimpleMultiplication<R>
+impl<R> GenerateRandomTrace<32> for TestUairSimpleMultiplication<R>
 where
     R: FixedSemiring + From<i8> + 'static,
     StandardUniform: Distribution<R>,
 {
-    type Witness = DensePolynomial<R, 32>;
+    type PolyCoeff = R;
+    type Int = R;
 
-    fn generate_witness<Rng: rand::RngCore + ?Sized>(
+    fn generate_random_trace<Rng: RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
-    ) -> Vec<DenseMultilinearExtension<DensePolynomial<R, 32>>> {
+    ) -> UairTrace<'static, R, R, 32> {
         let mut a: Vec<DynamicPolynomialFS<R>> =
             vec![DynamicPolynomialFS::new(vec![R::from(rng.random::<i8>())])];
         let mut b: Vec<DynamicPolynomialFS<R>> = vec![DynamicPolynomialFS::new(vec![
@@ -92,7 +92,7 @@ where
             c.push(prev_a * prev_c);
         }
 
-        vec![
+        let arbitrary_poly = vec![
             a.into_iter()
                 .map(|x| {
                     assert!(
@@ -124,6 +124,11 @@ where
                 })
                 .collect(),
         ]
+        .into();
+        UairTrace {
+            arbitrary_poly,
+            ..Default::default()
+        }
     }
 }
 
@@ -163,16 +168,17 @@ where
     }
 }
 
-impl<R> GenerateSingleTypeWitness for TestAirNoMultiplication<R>
+impl<R> GenerateRandomTrace<32> for TestAirNoMultiplication<R>
 where
     R: ConstSemiring + From<i32> + 'static,
 {
-    type Witness = DensePolynomial<R, 32>;
+    type PolyCoeff = R;
+    type Int = R;
 
-    fn generate_witness<Rng: rand::RngCore + ?Sized>(
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
-    ) -> Vec<DenseMultilinearExtension<DensePolynomial<R, 32>>> {
+    ) -> UairTrace<'static, R, R, 32> {
         let a: DenseMultilinearExtension<DensePolynomial<R, 32>> =
             DenseMultilinearExtension::rand(num_vars, rng)
                 .into_iter()
@@ -194,7 +200,10 @@ where
 
         let c = a.clone() + b.clone();
 
-        vec![a, b, c]
+        UairTrace {
+            arbitrary_poly: vec![a, b, c].into(),
+            ..Default::default()
+        }
     }
 }
 
@@ -288,21 +297,17 @@ where
     }
 }
 
-impl<R> GenerateMultiTypeWitness for BinaryDecompositionUair<R>
+impl<R> GenerateRandomTrace<32> for BinaryDecompositionUair<R>
 where
     R: ConstSemiring + From<u32> + 'static,
 {
     type PolyCoeff = R;
     type Int = R;
 
-    fn generate_witness<Rng: rand::RngCore + ?Sized>(
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
-    ) -> (
-        Vec<DenseMultilinearExtension<BinaryPoly<32>>>,
-        Vec<DenseMultilinearExtension<DensePolynomial<Self::PolyCoeff, 32>>>,
-        Vec<DenseMultilinearExtension<Self::Int>>,
-    ) {
+    ) -> UairTrace<'static, R, R, 32> {
         let int_col_u32: DenseMultilinearExtension<u32> =
             DenseMultilinearExtension::rand(num_vars, rng);
 
@@ -311,7 +316,11 @@ where
 
         let int_col = int_col_u32.into_iter().map(R::from).collect();
 
-        (vec![binary_poly_col], vec![], vec![int_col])
+        UairTrace {
+            binary_poly: vec![binary_poly_col].into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![int_col].into(),
+        }
     }
 }
 
@@ -375,21 +384,17 @@ where
     }
 }
 
-impl<R> GenerateMultiTypeWitness for BigLinearUair<R>
+impl<R> GenerateRandomTrace<32> for BigLinearUair<R>
 where
     R: ConstSemiring + From<u32> + 'static,
 {
     type PolyCoeff = R;
     type Int = R;
 
-    fn generate_witness<Rng: rand::RngCore + ?Sized>(
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
-    ) -> (
-        Vec<DenseMultilinearExtension<BinaryPoly<32>>>,
-        Vec<DenseMultilinearExtension<DensePolynomial<Self::PolyCoeff, 32>>>,
-        Vec<DenseMultilinearExtension<Self::Int>>,
-    ) {
+    ) -> UairTrace<'static, R, R, 32> {
         let mut binary_poly_cols: Vec<DenseMultilinearExtension<BinaryPoly<32>>> =
             vec![(0..(1 << num_vars)).map(|_| BinaryPoly::zero()).collect(); 16];
         let mut int_col: DenseMultilinearExtension<Self::Int> =
@@ -425,7 +430,11 @@ where
                 .sum::<u32>(),
         );
 
-        (binary_poly_cols, vec![], vec![int_col])
+        UairTrace {
+            binary_poly: binary_poly_cols.into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![int_col].into(),
+        }
     }
 }
 
@@ -466,22 +475,18 @@ where
     }
 }
 
-impl<R> GenerateMultiTypeWitness for BigLinearUairWithPublicInput<R>
+impl<R> GenerateRandomTrace<32> for BigLinearUairWithPublicInput<R>
 where
     R: ConstSemiring + From<u32> + 'static,
 {
-    type PolyCoeff = <BigLinearUair<R> as GenerateMultiTypeWitness>::PolyCoeff;
-    type Int = <BigLinearUair<R> as GenerateMultiTypeWitness>::Int;
+    type PolyCoeff = <BigLinearUair<R> as GenerateRandomTrace<32>>::PolyCoeff;
+    type Int = <BigLinearUair<R> as GenerateRandomTrace<32>>::Int;
 
-    fn generate_witness<Rng: RngCore + ?Sized>(
+    fn generate_random_trace<Rng: RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
-    ) -> (
-        Vec<DenseMultilinearExtension<BinaryPoly<32>>>,
-        Vec<DenseMultilinearExtension<DensePolynomial<Self::PolyCoeff, 32>>>,
-        Vec<DenseMultilinearExtension<Self::Int>>,
-    ) {
-        BigLinearUair::<R>::generate_witness(num_vars, rng)
+    ) -> UairTrace<'static, Self::PolyCoeff, Self::Int, 32> {
+        BigLinearUair::<R>::generate_random_trace(num_vars, rng)
     }
 }
 
