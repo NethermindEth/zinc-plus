@@ -5,13 +5,10 @@ use std::io::Cursor;
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
+    multipoint_eval::MultipointEval,
     projections::{project_scalars, project_scalars_to_field},
 };
-use zinc_poly::{
-    EvaluatablePolynomial,
-    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::dynamic::over_field::DynamicPolynomialF,
-};
+use zinc_poly::{EvaluatablePolynomial, univariate::dynamic::over_field::DynamicPolynomialF};
 use zinc_transcript::{
     KeccakTranscript,
     traits::{ConstTranscribable, Transcript},
@@ -55,9 +52,12 @@ where
 {
     /// Zinc+ full PIOP verifier.
     ///
-    /// Verifies all steps and returns a [`Subclaim`]. The `up_evals` are
-    /// already verified by the Zip+ PCS (Step 6); the `down_evals` (shifted
-    /// MLE claims) still need to be checked via [`resolve_subclaim`].
+    /// `up_evals` and `down_evals` from the F_q sumcheck (Step 4) are reduced
+    /// via the multi-point evaluation sumcheck (Step 5) to a single evaluation
+    /// point `r_0`. The scalar `open_evals` at `r_0` are derived from the
+    /// polynomial-valued `lifted_evals` via `\psi_a`, then used
+    /// to check the sumcheck consistency. A single Zip+ PCS invocation
+    /// (Step 6) confirms the `lifted_evals`.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn verify<IdealOverF, const CHECK_FOR_OVERFLOW: bool>(
         (vp_bin, vp_arb, vp_int): &(
@@ -69,7 +69,7 @@ where
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
-    ) -> Result<Subclaim<F>, ProtocolError<F, IdealOverF>>
+    ) -> Result<(), ProtocolError<F, IdealOverF>>
     where
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
     {
@@ -107,7 +107,6 @@ where
         let projecting_element: Zt::Chal = pcs_transcript.fs_transcript.get_challenge();
         let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
 
-        // Verifier independently computes projected scalars (public data).
         let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
         let projected_scalars_f =
             project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
@@ -128,9 +127,28 @@ where
             &field_cfg,
         )?;
 
-        // === Step 5: Lift-and-project at r' ===
-        // Absorb lifted_evals, then check \psi_a consistency:
-        // \psi_a(lifted_eval_j) must equal open_eval_j.
+        // === Step 5: Multi-point evaluation sumcheck ===
+        // Derive scalar open_evals from lifted_evals via \psi_a, then pass
+        // them to the multipoint eval verifier for the consistency check.
+        let open_evals: Vec<F> = proof
+            .lifted_evals
+            .iter()
+            .map(|bar_u| bar_u.evaluate_at_point(&projecting_element_f))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProtocolError::LiftedEvalProjection)?;
+
+        let mp_subclaim = MultipointEval::verify_as_subprotocol(
+            &mut pcs_transcript.fs_transcript,
+            proof.multipoint_eval,
+            &cpr_subclaim.evaluation_point,
+            &cpr_subclaim.up_evals,
+            &cpr_subclaim.down_evals,
+            &open_evals,
+            num_vars,
+            &field_cfg,
+        )?;
+
+        // Absorb lifted_evals into transcript
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
         for bar_u in &proof.lifted_evals {
             pcs_transcript
@@ -138,25 +156,7 @@ where
                 .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
         }
 
-        for (j, (bar_u, up_eval)) in proof
-            .lifted_evals
-            .iter()
-            .zip(cpr_subclaim.up_evals.iter())
-            .enumerate()
-        {
-            let psi_a_val = bar_u
-                .evaluate_at_point(&projecting_element_f)
-                .map_err(ProtocolError::LiftedEvalProjection)?;
-            if psi_a_val != *up_eval {
-                return Err(ProtocolError::LiftedEvalMismatch {
-                    column: j,
-                    expected: up_eval.clone(),
-                    actual: psi_a_val,
-                });
-            }
-        }
-
-        // === Step 6: PCS verify ===
+        // === Step 6: PCS verify at r_0 ===
         //
         // TODO: Once we add public inputs, compute public input MLE evaluations
         //       at cpr_subclaim.evaluation_point directly from public data here,
@@ -186,7 +186,7 @@ where
                         $vp,
                         comm,
                         &field_cfg,
-                        &cpr_subclaim.evaluation_point,
+                        &mp_subclaim.eval_point,
                         &eval_f,
                         &per_poly_alphas,
                     )
@@ -206,56 +206,6 @@ where
             [n_bin..add!(n_bin, n_arb)]
         );
         verify_pcs_batch!(Zt::IntZt, Zt::IntLc, vp_int, 2, [add!(n_bin, n_arb)..]);
-
-        Ok(Subclaim {
-            evaluation_point: cpr_subclaim.evaluation_point,
-            up_evals: cpr_subclaim.up_evals,
-            down_evals: cpr_subclaim.down_evals,
-        })
-    }
-
-    /// Subclaim resolution (shifted-MLE evaluation check)
-    ///
-    /// Verify the "down" (next-row) MLE evaluation claims from the subclaim.
-    ///
-    /// The "up" evaluations are already verified by the Zip+ PCS inside
-    /// [`verify`] (Step 5). The "down" evaluations correspond to the shifted
-    /// trace MLE (rows 1..n, zero-padded), which the PCS does not yet open.
-    /// Until the PCS is extended to also open shifted MLEs, this function
-    /// checks them directly against the prover's auxiliary projected trace.
-    pub fn resolve_subclaim(
-        subclaim: &Subclaim<F>,
-        projected_trace_f: &[DenseMultilinearExtension<F::Inner>],
-        field_cfg: &F::Config,
-    ) -> Result<(), ProtocolError<F, U::Ideal>>
-    where
-        DenseMultilinearExtension<F::Inner>: MultilinearExtensionWithConfig<F>,
-    {
-        let num_cols = projected_trace_f.len();
-
-        // Check "down" evaluations (shifted/next-row columns).
-        // The shifted trace drops the first row and zero-pads, matching
-        // the CombinedPolyResolver's convention.
-        for (i, (mle, expected)) in projected_trace_f
-            .iter()
-            .zip(subclaim.down_evals.iter())
-            .enumerate()
-        {
-            let shifted: DenseMultilinearExtension<F::Inner> =
-                mle.iter().skip(1).cloned().collect();
-
-            let actual = shifted
-                .evaluate_with_config(&subclaim.evaluation_point, field_cfg)
-                .map_err(ProtocolError::MleEvaluation)?;
-
-            if actual != *expected {
-                return Err(ProtocolError::SubclaimMismatch {
-                    column: add!(num_cols, i),
-                    expected: expected.clone(),
-                    actual,
-                });
-            }
-        }
 
         Ok(())
     }

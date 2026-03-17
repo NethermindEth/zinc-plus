@@ -544,23 +544,29 @@ impl<const DEGREE_PLUS_ONE: usize> FromRef<i64> for DensePolynomial<i128, DEGREE
     }
 }
 
-impl<'a, R, S, const DEGREE_PLUS_ONE: usize> MulByScalar<&'a S>
+impl<'a, R, S, Out, const DEGREE_PLUS_ONE: usize>
+    MulByScalar<&'a S, DensePolynomial<Out, DEGREE_PLUS_ONE>>
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 where
-    R: FixedSemiring + MulByScalar<&'a S>,
+    R: FixedSemiring + MulByScalar<&'a S, Out>,
+    Out: FixedSemiring + Copy,
 {
-    fn mul_by_scalar<const CHECK: bool>(&self, rhs: &'a S) -> Option<Self> {
-        let mut coeffs = self.coeffs.clone();
+    fn mul_by_scalar<const CHECK: bool>(
+        &self,
+        rhs: &'a S,
+    ) -> Option<DensePolynomial<Out, DEGREE_PLUS_ONE>> {
+        let mut coeffs = [Out::default(); DEGREE_PLUS_ONE];
 
         coeffs
             .iter_mut()
-            .filter(|coeff| !coeff.is_zero())
-            .try_for_each(|x| {
-                *x = x.mul_by_scalar::<CHECK>(rhs)?;
+            .zip(self.coeffs.iter())
+            .filter(|(_, coeff)| !coeff.is_zero())
+            .try_for_each(|(out, x)| {
+                *out = x.mul_by_scalar::<CHECK>(rhs)?;
                 Some(())
             })?;
 
-        Some(Self { coeffs })
+        Some(DensePolynomial { coeffs })
     }
 }
 

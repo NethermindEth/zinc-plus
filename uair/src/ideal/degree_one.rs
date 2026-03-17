@@ -36,10 +36,10 @@ impl<F: PrimeField> DegreeOneIdeal<F> {
     pub fn from_with_cfg<R>(ideal_over_ring: &DegreeOneIdeal<R>, field_cfg: &F::Config) -> Self
     where
         R: Semiring,
-        F: FromWithConfig<R>,
+        F: for<'a> FromWithConfig<&'a R>,
     {
         Self {
-            generating_root: F::from_with_cfg(ideal_over_ring.generating_root.clone(), field_cfg),
+            generating_root: F::from_with_cfg(&ideal_over_ring.generating_root, field_cfg),
         }
     }
 }

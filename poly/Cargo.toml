@@ -18,7 +18,6 @@ itertools = { workspace = true }
 derive_more = { workspace = true }
 thiserror = { workspace = true }
 crypto-bigint = { workspace = true }
-displaydoc = "0.2"
 num-traits = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }

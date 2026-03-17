@@ -1,23 +1,26 @@
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 use super::*;
 use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::Zero;
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
+    multipoint_eval::MultipointEval,
     projections::{
-        evaluate_trace_to_column_mles, project_scalars, project_scalars_to_field,
+        RowMajorTrace, evaluate_trace_to_column_mles, project_scalars, project_scalars_to_field,
         project_trace_coeffs_row_major,
     },
 };
 use zinc_poly::{
-    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::dynamic::over_field::DynamicPolynomialF,
+    mle::DenseMultilinearExtension, univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{Uair, constraint_counter::count_constraints, degree_counter::count_max_degree};
 use zinc_utils::{
-    from_ref::FromRef, inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
-    projectable_to_field::ProjectableToField,
+    cfg_into_iter, cfg_iter, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
+    mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
     pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
@@ -58,13 +61,13 @@ where
     ///    F_q`, evaluate polynomials at `X = a`.
     /// 4. **F_q sumcheck**: finite-field sumcheck proving the projected
     ///    constraint claim. Produces `up_evals` and `down_evals` at point `r'`.
-    /// 5. **Lift-and-project**: compute per-column polynomial MLE evaluations
-    ///    at `r'` (in `F_q[X]`, before `\psi_a`). Absorb into transcript.
-    /// 6. **PCS open**: Zip+ prove for each committed column, proving witness
-    ///    MLE evaluations at the sumcheck challenge point.
-    ///
-    /// Returns the proof and auxiliary data (for subclaim resolution without
-    /// PCS).
+    /// 5. **Multi-point evaluation sumcheck**: single sumcheck combining
+    ///    `up_evals` and `down_evals` at `r'` into a single evaluation point
+    ///    `r_0`. Only the sumcheck proof is sent; scalar evaluations at `r_0`
+    ///    are derived from the polynomial-valued `lifted_evals` in Step 6.
+    /// 6. **Lift-and-project**: compute per-column polynomial MLE evaluations
+    ///    at `r_0` (in `F_q[X]`, before `\psi_a`). Absorb into transcript.
+    /// 7. **PCS open**: Zip+ prove for each committed column at `r_0`.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn prove<const CHECK_FOR_OVERFLOW: bool>(
         (pp_bin, pp_arb, pp_int): &(
@@ -77,7 +80,7 @@ where
         trace_int: &[DenseMultilinearExtension<<Zt::IntZt as ZipTypes>::Eval>],
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
-    ) -> Result<(Proof<F>, ProverAux<F>), ProtocolError<F, U::Ideal>> {
+    ) -> Result<Proof<F>, ProtocolError<F, U::Ideal>> {
         // === Step 0: Commit ===
         macro_rules! commit_optionally {
             ($pp:expr, $trace:expr) => {
@@ -158,52 +161,28 @@ where
             &field_cfg,
         )?;
 
-        // === Step 5: Lift-and-project (oracle evaluations at sumcheck point) ===
-        // Compute per-column unprojected polynomial MLE evaluations at the
-        // sumcheck challenge point. These are in F_q[X] (after \phi_q but before
-        // \psi_a), so the verifier can check \psi_a(lifted_eval_j) == up_eval_j and
-        // supply them to the Zip+ PCS for alpha-projection.
-        //
-        // For each column, we evaluate the MLE coefficient-by-coefficient:
-        //   lifted_eval_j = \sum_{k} (\sum_{b} eq(b, r') * c_{j,b,k}) * X^k
-        // where c_{j,b,k} is the k-th coefficient of the \phi_q-projected entry
-        // at position b.
-        let eval_point = &cpr_prover_state.evaluation_point;
-        let zero_inner = F::zero_with_cfg(&field_cfg).into_inner();
+        // === Step 5: Multi-point evaluation sumcheck ===
+        // Combines up_evals and down_evals at r' into a single evaluation
+        // point r_0 via one sumcheck.
+        let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
+            &mut pcs_transcript.fs_transcript,
+            &projected_trace_f,
+            &cpr_prover_state.evaluation_point,
+            &cpr_proof.up_evals,
+            &cpr_proof.down_evals,
+            &field_cfg,
+        )?;
 
-        let num_rows = projected_trace.len();
-        let num_cols = projected_trace.first().map(|r| r.len()).unwrap_or(0);
+        // === Step 6: Lift-and-project at r_0 ===
+        // Compute per-column polynomial MLE evaluations at r_0 in F_q[X]
+        // (after \phi_q but before \psi_a). The verifier derives the scalar
+        // open_evals via \psi_a for the sumcheck consistency check, and
+        // supplies these to the Zip+ PCS for alpha-projection.
+        let r_0 = &mp_prover_state.eval_point;
 
-        let lifted_evals: Vec<DynamicPolynomialF<F>> = (0..num_cols)
-            .map(|col_idx| {
-                let max_degree = (0..num_rows)
-                    .flat_map(|row_idx| projected_trace[row_idx][col_idx].degree())
-                    .max()
-                    .unwrap_or(0);
+        let lifted_evals =
+            compute_lifted_evals::<F, D>(r_0, trace_bin_poly, &projected_trace, &field_cfg);
 
-                let coeffs: Vec<F> = (0..=max_degree)
-                    .map(|l| {
-                        let coeff_mle: DenseMultilinearExtension<F::Inner> = (0..num_rows)
-                            .map(|row_idx| {
-                                projected_trace[row_idx][col_idx]
-                                    .coeffs
-                                    .get(l)
-                                    .map(|f| f.inner().clone())
-                                    .unwrap_or_else(|| zero_inner.clone())
-                            })
-                            .collect();
-
-                        coeff_mle
-                            .evaluate_with_config(eval_point, &field_cfg)
-                            .expect("lifted eval: coefficient MLE evaluation failed")
-                    })
-                    .collect();
-
-                DynamicPolynomialF { coeffs }
-            })
-            .collect();
-
-        // Absorb lifted_evals into the Fiat-Shamir transcript before PCS.
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
         for bar_u in &lifted_evals {
             pcs_transcript
@@ -211,22 +190,17 @@ where
                 .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
         }
 
-        // === Step 6: PCS open (prove witness MLE evaluations) ===
-        // The Zip+ PCS proves that the committed polynomial-valued traces
-        // evaluate (under alpha-projection) consistently with the lifted_evals.
-        // The verifier checks \psi_a(lifted_eval_j) == up_eval_j to tie back to
-        // the sumcheck.
+        // === Step 7: PCS open at r_0 ===
         //
         // TODO: Once we add public inputs, the verifier will compute public
         //       input MLE evaluations at the sumcheck point directly from
         //       public data. The PCS only covers witness columns.
-
         if let Some(hint_bin) = &hint_bin {
             let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
                 &mut pcs_transcript,
                 pp_bin,
                 trace_bin_poly,
-                eval_point,
+                r_0,
                 hint_bin,
                 &field_cfg,
             )?;
@@ -236,7 +210,7 @@ where
                 &mut pcs_transcript,
                 pp_arb,
                 trace_arb_poly,
-                eval_point,
+                r_0,
                 hint_arb,
                 &field_cfg,
             )?;
@@ -246,7 +220,7 @@ where
                 &mut pcs_transcript,
                 pp_int,
                 trace_int,
-                eval_point,
+                r_0,
                 hint_int,
                 &field_cfg,
             )?;
@@ -255,18 +229,71 @@ where
         let zip_proof = pcs_transcript.stream.into_inner();
         let commitments = (commitment_bin, commitment_arb, commitment_int);
 
-        Ok((
-            Proof {
-                commitments,
-                ideal_check: ic_proof,
-                resolver: cpr_proof,
-                zip: zip_proof,
-                lifted_evals,
-            },
-            ProverAux {
-                field_cfg,
-                projected_trace_f,
-            },
-        ))
+        Ok(Proof {
+            commitments,
+            ideal_check: ic_proof,
+            resolver: cpr_proof,
+            multipoint_eval: mp_proof,
+            zip: zip_proof,
+            lifted_evals,
+        })
     }
+}
+
+/// Compute per-column lifted MLE evaluations at `point`.
+///
+/// For each column j, returns `\sum_b eq(b, point) * v_j(b)` as a polynomial
+/// in `F_q[X]` (coefficient-wise MLE evaluation).
+///
+/// Binary columns exploit the 0/1 structure for conditional additions only.
+/// The `eq(point, *)` table is built once and reused across all columns.
+#[allow(clippy::arithmetic_side_effects)]
+fn compute_lifted_evals<F, const D: usize>(
+    point: &[F],
+    trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    projected_trace: &RowMajorTrace<F>,
+    field_cfg: &F::Config,
+) -> Vec<DynamicPolynomialF<F>>
+where
+    F: InnerTransparentField,
+{
+    let eq_table = zinc_poly::utils::build_eq_x_r_vec(point, field_cfg)
+        .expect("compute_lifted_evals: eq table build failed");
+
+    let n_bin = trace_bin_poly.len();
+    let num_cols = projected_trace.first().map(|r| r.len()).unwrap_or(0);
+    let zero = F::zero_with_cfg(field_cfg);
+
+    cfg_iter!(trace_bin_poly)
+        .map(|col| {
+            let mut coeffs = vec![zero.clone(); D];
+            for (b, entry) in col.iter().enumerate() {
+                for (l, coeff) in entry.iter().enumerate() {
+                    if coeff.into_inner() {
+                        coeffs[l] += &eq_table[b];
+                    }
+                }
+            }
+            coeffs
+        })
+        .chain(cfg_into_iter!(n_bin..num_cols).map(|col_idx| {
+            let num_coeffs = projected_trace
+                .iter()
+                .map(|row| row[col_idx].coeffs.len())
+                .max()
+                .unwrap_or(0);
+
+            let mut coeffs = vec![zero.clone(); num_coeffs];
+            for (b, row) in projected_trace.iter().enumerate() {
+                let entry = &row[col_idx];
+                for (l, coeff) in entry.coeffs.iter().enumerate() {
+                    let mut term = eq_table[b].clone();
+                    term *= coeff;
+                    coeffs[l] += &term;
+                }
+            }
+            coeffs
+        }))
+        .map(DynamicPolynomialF::new_trimmed)
+        .collect()
 }

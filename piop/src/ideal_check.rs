@@ -11,13 +11,13 @@ use rayon::prelude::*;
 use crate::projections::{ColumnMajorTrace, RowMajorTrace};
 use batched_ideal_check::*;
 use crypto_primitives::PrimeField;
-use derive_more::From;
 use num_traits::ConstZero;
 use std::collections::HashMap;
 use thiserror::Error;
 use zinc_poly::{
-    EvaluationError, mle::MultilinearExtensionWithConfig,
+    EvaluationError,
     univariate::dynamic::over_field::DynamicPolynomialF,
+    utils::{ArithErrors as PolyArithErrors, build_eq_x_r_vec},
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
@@ -208,6 +208,8 @@ where
             &is_zero_ideal,
         );
 
+        let eq_table = build_eq_x_r_vec(&evaluation_point, field_cfg)?;
+
         // Evaluate coefficient MLEs at the evaluation point.
         let combined_mle_values: Vec<DynamicPolynomialF<F>> = cfg_into_iter!(combined_mles)
             .enumerate()
@@ -215,15 +217,21 @@ where
                 // Skip zero-ideal constraints: their combined polynomial
                 // is zero for an honest prover.
                 if is_zero_ideal[i] {
-                    return Ok(DynamicPolynomialF::ZERO);
+                    return DynamicPolynomialF::ZERO;
                 }
                 let coeffs = coeff_mles
                     .into_iter()
-                    .map(|coeff_mle| coeff_mle.evaluate_with_config(&evaluation_point, field_cfg))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(DynamicPolynomialF::new_trimmed(coeffs))
+                    .map(|coeff_mle| {
+                        zinc_poly::utils::mle_eval_with_eq_table(
+                            &coeff_mle.evaluations,
+                            &eq_table,
+                            field_cfg,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                DynamicPolynomialF::new_trimmed(coeffs)
             })
-            .collect::<Result<Vec<_>, EvaluationError>>()?;
+            .collect::<Vec<_>>();
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
@@ -289,12 +297,14 @@ where
     }
 }
 
-#[derive(Clone, Debug, From, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum IdealCheckError<F: PrimeField, I> {
     #[error("ideal check prover failed to evaluate an mle: {0}")]
-    MleEvaluationError(EvaluationError),
+    MleEvaluationError(#[from] EvaluationError),
     #[error("mle evaluation ideal check failure: {0}")]
-    IdealCollectorError(BatchedIdealCheckError<DynamicPolynomialF<F>, I>),
+    IdealCollectorError(#[from] BatchedIdealCheckError<DynamicPolynomialF<F>, I>),
+    #[error("`eq` polynomial construction failure: {0}")]
+    EqPolyConstructionError(#[from] PolyArithErrors),
 }
 
 #[cfg(test)]

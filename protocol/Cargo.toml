@@ -8,7 +8,7 @@ license.workspace = true
 
 [dependencies]
 crypto-primitives = { workspace = true }
-
+rayon = { workspace = true, optional = true }
 itertools = { workspace = true }
 num-traits = { workspace = true }
 thiserror = { workspace = true }
@@ -20,10 +20,22 @@ zinc-transcript = { workspace = true }
 zinc-uair = { workspace = true }
 zinc-utils = { workspace = true }
 
+[lib]
+bench = false
+
 [dev-dependencies]
+criterion = { workspace = true }
 crypto-bigint = { workspace = true }
 rand = { workspace = true }
 zinc-test-uair = { workspace = true }
 
 [lints]
 workspace = true
+
+
+[features]
+parallel = ["dep:rayon", "zinc-piop/parallel", "zinc-poly/parallel", "zinc-uair/parallel", "zinc-utils/parallel"]
+
+[[bench]]
+name = "e2e"
+harness = false

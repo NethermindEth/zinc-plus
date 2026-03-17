@@ -1,7 +1,7 @@
 use crypto_primitives::{Field, PrimeField, Semiring};
 use num_traits::Zero;
 use thiserror::Error;
-use zinc_utils::cfg_iter_mut;
+use zinc_utils::{cfg_iter_mut, inner_transparent_field::InnerTransparentField, sub};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -9,9 +9,9 @@ use rayon::prelude::*;
 use crate::mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero};
 
 /// A `enum` specifying the possible failure modes of the arithmetics.
-#[derive(displaydoc::Display, Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum ArithErrors {
-    /// Invalid parameters: {0}
+    #[error("Invalid parameters: {0}")]
     InvalidParameters(String),
 }
 
@@ -42,7 +42,7 @@ where
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub(crate) fn build_eq_x_r_vec<F>(r: &[F], cfg: &F::Config) -> Result<Vec<F>, ArithErrors>
+pub fn build_eq_x_r_vec<F>(r: &[F], cfg: &F::Config) -> Result<Vec<F>, ArithErrors>
 where
     F: PrimeField,
 {
@@ -197,6 +197,40 @@ where
     Ok(())
 }
 
+/// Build the shift selector MLE `next_tilde(r, *)` with the first `num_vars`
+/// variables fixed to `r`.
+///
+/// For each `b \in {0,1}^{num_vars}`:
+///   `next_r(b) = next_tilde(r, b)`
+///
+/// Uses the identity `next_tilde(r, b) = eq(r, b-1)` for `b > 0` and
+/// `0` for `b = 0`.
+pub fn build_next_r_mle<F>(
+    r: &[F],
+    field_cfg: &F::Config,
+) -> Result<DenseMultilinearExtension<F::Inner>, ArithErrors>
+where
+    F: PrimeField,
+    F::Inner: Zero,
+{
+    let num_vars = r.len();
+    let n = 1 << num_vars;
+    let zero_inner = F::zero_with_cfg(field_cfg).into_inner();
+
+    let eq_r = build_eq_x_r_inner(r, field_cfg)?;
+
+    // next_tilde(r, 0) = 0
+    // next_tilde(r, b) = eq(r, b-1) for b > 0
+    let mut evaluations = Vec::with_capacity(n);
+    evaluations.push(zero_inner);
+    evaluations.extend_from_slice(&eq_r.evaluations[..sub!(n, 1)]);
+
+    Ok(DenseMultilinearExtension {
+        num_vars,
+        evaluations,
+    })
+}
+
 /// Evaluate eq polynomial.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn eq_eval<R: Semiring>(x: &[R], y: &[R], one: R) -> Result<R, ArithErrors> {
@@ -213,6 +247,36 @@ pub fn eq_eval<R: Semiring>(x: &[R], y: &[R], one: R) -> Result<R, ArithErrors> 
     }
 
     Ok(res)
+}
+
+/// Evaluate an MLE at a point using a precomputed eq table.
+///
+/// Given `evaluations[b]` (in `F::Inner` form) and `eq_table[b] = eq(b, r)`
+/// (precomputed via [`build_eq_x_r_vec`]), returns `\sum_{b} eq_table[b] *
+/// evaluations[b]`.
+///
+/// This is equivalent to `DenseMultilinearExtension::evaluate_with_config`
+/// but avoids cloning the evaluation vector (the fix-variables algorithm is
+/// destructive). When multiple MLEs share the same evaluation point, build the
+/// eq table once and call this function for each MLE.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn mle_eval_with_eq_table<F: InnerTransparentField>(
+    evaluations: &[F::Inner],
+    eq_table: &[F],
+    cfg: &F::Config,
+) -> F {
+    let mut acc = F::zero_with_cfg(cfg);
+    assert_eq!(
+        evaluations.len(),
+        eq_table.len(),
+        "evaluations and eq_table must have the same length"
+    );
+    for (eval, eq_val) in evaluations.iter().zip(eq_table.iter()) {
+        let mut term = eq_val.clone();
+        term.mul_assign_by_inner(eval);
+        acc += &term;
+    }
+    acc
 }
 
 /// Returns a multilinear polynomial in 2n variables that evaluates to 1

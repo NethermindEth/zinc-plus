@@ -1,4 +1,4 @@
-//! Zinc+ PIOP for UCS - end-to-end protocol (without PCS).
+//! Zinc+ PIOP for UCS - end-to-end protocol.
 //!
 //! Implements the Zinc+ compiler pipeline (cf. paper, Section "Zinc+
 //! Compiler"):
@@ -8,25 +8,27 @@
 //!         Step 1               Step 2                  Step 3
 //! ```
 //!
-//! After the three compiler steps, the protocol runs a sumcheck over F_q.
+//! After the three compiler steps, the protocol continues with:
 //!
-//! The verifier's output is a [`Subclaim`] containing evaluation claims about
-//! the trace column MLEs. In the full protocol, these would be resolved by the
-//! Zip+ PCS - this will be addressed in the follow-up PR.
+//! - Step 4: finite-field sumcheck over F_q
+//! - Step 5: multi-point evaluation sumcheck (combines up/down evals at r' into
+//!   a single evaluation point r_0)
+//! - Step 6: lift-and-project (unprojected MLE evaluations at r_0)
+//! - Step 7: Zip+ PCS open/verify at r_0
 
 pub mod prover;
 pub mod verifier;
 
-use crypto_primitives::{ConstIntRing, ConstIntSemiring, PrimeField};
+use crypto_primitives::{ConstIntRing, ConstIntSemiring, FromWithConfig, PrimeField};
 use std::marker::PhantomData;
 use thiserror::Error;
 use zinc_piop::{
     combined_poly_resolver::{CombinedPolyResolverError, Proof as CombinedPolyResolverProof},
     ideal_check::{IdealCheckError, Proof as IdealCheckProof},
+    multipoint_eval::{MultipointEvalError, Proof as MultipointEvalProof},
 };
 use zinc_poly::{
     ConstCoeffBitWidth,
-    mle::DenseMultilinearExtension,
     univariate::{
         binary::BinaryPoly, dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF,
     },
@@ -47,48 +49,31 @@ use zip_plus::{
 
 /// Proof produced by the Zinc+ PIOP for UCS.
 ///
-/// Contains the two subproofs from Steps 2 and 4:
-/// - `ideal_check`: MLE evaluations in F_q\[X\] (Step 2).
-/// - `resolver`: sumcheck proof + trace evaluation claims (Step 4).
+/// Contains subproofs from Steps 2, 4, 5, 6, and 7:
+/// - `ideal_check`:    MLE evaluations in F_q[X] and ideal membership (Step 2)
+/// - `resolver`:       F_q sumcheck proof + up/down evaluation claims (Step 4)
+/// - `multipoint_eval`: multi-point eval sumcheck reducing claims to r_0 (Step
+///   5)
+/// - `lifted_evals`:   unprojected polynomial MLE evaluations at r_0 (Step 6)
+/// - `zip`:            Zip+ PCS proof at r_0 (Step 7)
 #[derive(Clone, Debug)]
 pub struct Proof<F: PrimeField> {
     /// Zip+ commitments to the witness columns.
     pub commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     /// Serialized PCS proof data (Zip+ proving transcripts).
     pub zip: Vec<u8>,
-    /// Randomized ideal check proof: MLE evaluations in F_q[X] and ideal
-    /// membership claims.
+    /// Step 2: randomized ideal check proof.
     pub ideal_check: IdealCheckProof<F>,
-    /// Combined polynomial resolver proof: sumcheck proof + trace evaluation
+    /// Step 4: combined polynomial resolver proof (F_q sumcheck).
     pub resolver: CombinedPolyResolverProof<F>,
-    /// Per-column unprojected polynomial MLE evaluations at the sumcheck point
-    /// (lift-and-project). Each entry is the MLE evaluation of the
-    /// `\phi_q`-projected column in `F_q[X]` (before `\psi_a`), so the
-    /// verifier can check `\psi_a(lifted_eval_j) == up_eval_j` and supply
-    /// these to the Zip+ PCS for alpha-projection.
+    /// Step 5: multi-point evaluation sumcheck proof (combines up_evals and
+    /// down_evals at r' into a single evaluation point r_0).
+    pub multipoint_eval: MultipointEvalProof<F>,
+    /// Step 6: per-column polynomial MLE evaluations at r_0 in F_q[X]
+    /// (after \phi_q, before \psi_a). The verifier derives scalar
+    /// open_eval_j = \psi_a(lifted_eval_j) for the sumcheck consistency
+    /// check, then supplies these to Zip+ for alpha-projection.
     pub lifted_evals: Vec<DynamicPolynomialF<F>>,
-}
-
-/// Subclaim returned by the verifier. This will be replaced by the PCS proof in
-/// the full protocol.
-///
-/// Contains evaluation claims: "the trace column MLEs, evaluated at
-/// `evaluation_point`, should yield `up_evals` (current row) and
-/// `down_evals` (next row)."
-#[derive(Clone, Debug)]
-pub struct Subclaim<F: PrimeField> {
-    pub evaluation_point: Vec<F>,
-    pub up_evals: Vec<F>,
-    pub down_evals: Vec<F>,
-}
-
-/// Prover auxiliary data for subclaim resolution without PCS.
-/// To be removed in the full protocol.
-pub struct ProverAux<F: PrimeField> {
-    /// The random field configuration (derived from transcript).
-    pub field_cfg: F::Config,
-    /// The trace projected to F_q.
-    pub projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
 }
 
 /// Trait bundling the various type parameters for the public inputs (NYI),
@@ -177,26 +162,29 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     Resolver(#[from] CombinedPolyResolverError<F>),
     #[error("scalar projection failed: {0}")]
     ScalarProjection(zinc_poly::EvaluationError),
-    #[error("subclaim resolution: MLE evaluation failed: {0}")]
-    MleEvaluation(zinc_poly::EvaluationError),
-    #[error("subclaim mismatch at column {column}: expected {expected:?}, got {actual:?}")]
-    SubclaimMismatch {
-        column: usize,
-        expected: F,
-        actual: F,
-    },
-    #[error("lifted eval ψ_a projection failed: {0}")]
+    #[error("multi-point evaluation failed: {0}")]
+    MultipointEval(#[from] MultipointEvalError<F>),
+    #[error("lifted eval psi_a projection failed: {0}")]
     LiftedEvalProjection(zinc_poly::EvaluationError),
-    #[error("lifted eval ψ_a mismatch at column {column}: expected {expected:?}, got {actual:?}")]
-    LiftedEvalMismatch {
-        column: usize,
-        expected: F,
-        actual: F,
-    },
     #[error("PCS error: {0}")]
     Pcs(#[from] ZipError),
     #[error("PCS verification failed at column {0}: {1}")]
     PcsVerification(usize, ZipError),
+}
+
+/// Helper: project a DensePolynomial scalar to DynamicPolynomialF
+/// by projecting each coefficient via \phi_q.
+pub fn project_scalar_fn<R, F, const D: usize>(
+    scalar: &DensePolynomial<R, D>,
+    field_cfg: &F::Config,
+) -> DynamicPolynomialF<F>
+where
+    F: PrimeField + for<'a> FromWithConfig<&'a R>,
+{
+    scalar
+        .iter()
+        .map(|coeff| F::from_with_cfg(coeff, field_cfg))
+        .collect()
 }
 
 //
@@ -208,14 +196,10 @@ mod tests {
     use super::*;
     use crypto_bigint::U64;
     use crypto_primitives::{
-        FromWithConfig, crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
-        crypto_bigint_uint::Uint,
+        crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
     };
     use rand::rng;
-    use zinc_poly::univariate::{
-        binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct,
-        dynamic::over_field::DynamicPolynomialF,
-    };
+    use zinc_poly::univariate::{binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct};
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BinaryDecompositionUair, GenerateMultiTypeWitness,
@@ -379,21 +363,6 @@ mod tests {
         type IntLc = RaaCode<Self::IntZt, TestRaaConfig, RAA_REP>;
     }
 
-    /// Helper: project a DensePolynomial scalar to DynamicPolynomialF
-    /// by projecting each coefficient via φ_q.
-    fn project_scalar_fn<R>(
-        scalar: &DensePolynomial<R, 32>,
-        field_cfg: &<F as PrimeField>::Config,
-    ) -> DynamicPolynomialF<F>
-    where
-        F: for<'a> FromWithConfig<&'a R>,
-    {
-        scalar
-            .iter()
-            .map(|coeff| F::from_with_cfg(coeff, field_cfg))
-            .collect()
-    }
-
     /// Set up Zip+ PCS parameters for a given number of MLE variables.
     #[allow(clippy::type_complexity)]
     fn setup_pp<Wzt>(
@@ -422,8 +391,8 @@ mod tests {
 
     /// End-to-end test: TestAirNoMultiplication.
     ///
-    /// UAIR constraint: a + b - c ∈ (X - 2)
-    /// (one constraint, no polynomial multiplication, ideal = ⟨X - 2⟩).
+    /// UAIR constraint: a + b - c \in (X - 2)
+    /// (one constraint, no polynomial multiplication, ideal = <X - 2>).
     #[test]
     fn test_e2e_no_multiplication() {
         let mut rng = rng();
@@ -438,12 +407,11 @@ mod tests {
         let trace = TestUair::generate_witness(num_vars, &mut rng);
 
         // Prover
-        let (proof, prover_aux) =
-            Piop::prove::<CHECKED>(&pp, &[], &trace, &[], num_vars, project_scalar_fn)
-                .expect("Prover failed");
+        let proof = Piop::prove::<CHECKED>(&pp, &[], &trace, &[], num_vars, project_scalar_fn)
+            .expect("Prover failed");
 
         // Verifier
-        let subclaim = Piop::verify::<_, CHECKED>(
+        Piop::verify::<_, CHECKED>(
             &pp,
             proof,
             num_vars,
@@ -451,14 +419,6 @@ mod tests {
             |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
         )
         .expect("Verifier failed");
-
-        // Subclaim resolution (in lieu of PCS)
-        Piop::resolve_subclaim(
-            &subclaim,
-            &prover_aux.projected_trace_f,
-            &prover_aux.field_cfg,
-        )
-        .expect("Subclaim resolution failed");
     }
 
     /// End-to-end test: TestUairSimpleMultiplication.
@@ -471,7 +431,7 @@ mod tests {
     /// Uses RAA code with small num_vars (2) because chained polynomial
     /// multiplication causes exponential growth in both degree and coefficient
     /// magnitude. With num_vars=2 (4 rows), max degree=6 and max coefficient
-    /// ≈ 127^8 ≈ 2^56, which fits in i64.
+    /// ~= 127^8 ~= 2^56, which fits in i64.
     #[test]
     fn test_e2e_simple_multiplication() {
         let mut rng = rng();
@@ -486,12 +446,11 @@ mod tests {
         let trace = TestUair::generate_witness(num_vars, &mut rng);
 
         // Prover
-        let (proof, prover_aux) =
-            Piop::prove::<CHECKED>(&pp, &[], &trace, &[], num_vars, project_scalar_fn)
-                .expect("Prover failed");
+        let proof = Piop::prove::<CHECKED>(&pp, &[], &trace, &[], num_vars, project_scalar_fn)
+            .expect("Prover failed");
 
         // Verifier
-        let subclaim = Piop::verify::<_, CHECKED>(
+        Piop::verify::<_, CHECKED>(
             &pp,
             proof,
             num_vars,
@@ -499,20 +458,12 @@ mod tests {
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
         )
         .expect("Verifier failed");
-
-        // Subclaim resolution (in lieu of PCS)
-        Piop::resolve_subclaim(
-            &subclaim,
-            &prover_aux.projected_trace_f,
-            &prover_aux.field_cfg,
-        )
-        .expect("Subclaim resolution failed");
     }
 
     /// End-to-end test: BinaryDecompositionUair.
     ///
     /// Uses binary_poly (1 col) and int (1 col) trace types.
-    /// UAIR constraint: binary_poly[0] - int[0] ∈ ⟨X - 2⟩
+    /// UAIR constraint: binary_poly[0] - int[0] \in <X - 2>
     #[test]
     fn test_e2e_binary_decomposition() {
         let mut rng = rng();
@@ -527,7 +478,7 @@ mod tests {
         let (binary_trace, arb_trace, int_trace) = TestUair::generate_witness(num_vars, &mut rng);
 
         // Prover
-        let (proof, prover_aux) = Piop::prove::<CHECKED>(
+        let proof = Piop::prove::<CHECKED>(
             &pp,
             &binary_trace,
             &arb_trace,
@@ -538,7 +489,7 @@ mod tests {
         .expect("Prover failed");
 
         // Verifier
-        let subclaim = Piop::verify::<_, CHECKED>(
+        Piop::verify::<_, CHECKED>(
             &pp,
             proof,
             num_vars,
@@ -546,22 +497,14 @@ mod tests {
             |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
         )
         .expect("Verifier failed");
-
-        // Subclaim resolution (in lieu of PCS)
-        Piop::resolve_subclaim(
-            &subclaim,
-            &prover_aux.projected_trace_f,
-            &prover_aux.field_cfg,
-        )
-        .expect("Subclaim resolution failed");
     }
 
     /// End-to-end test: BigLinearUair.
     ///
     /// Uses 16 binary_poly cols and 1 int col.
     /// UAIR constraints:
-    ///   sum(up.binary_poly[0..16]) - up.int[0] ∈ ⟨X - 1⟩
-    ///   down.binary_poly[0] - up.int[0] ∈ ⟨X - 2⟩
+    ///   sum(up.binary_poly[0..16]) - up.int[0] \in <X - 1>
+    ///   down.binary_poly[0] - up.int[0] \in <X - 2>
     ///   up.binary_poly[i] - down.binary_poly[i] = 0, for i=1..15
     #[test]
     fn test_e2e_big_linear() {
@@ -577,7 +520,7 @@ mod tests {
         let (binary_trace, arb_trace, int_trace) = TestUair::generate_witness(num_vars, &mut rng);
 
         // Prover
-        let (proof, prover_aux) = Piop::prove::<CHECKED>(
+        let proof = Piop::prove::<CHECKED>(
             &pp,
             &binary_trace,
             &arb_trace,
@@ -588,7 +531,7 @@ mod tests {
         .expect("Prover failed");
 
         // Verifier
-        let subclaim = Piop::verify::<_, CHECKED>(
+        Piop::verify::<_, CHECKED>(
             &pp,
             proof,
             num_vars,
@@ -596,14 +539,6 @@ mod tests {
             |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
         )
         .expect("Verifier failed");
-
-        // Subclaim resolution (in lieu of PCS)
-        Piop::resolve_subclaim(
-            &subclaim,
-            &prover_aux.projected_trace_f,
-            &prover_aux.field_cfg,
-        )
-        .expect("Subclaim resolution failed");
     }
 
     //
@@ -621,9 +556,8 @@ mod tests {
 
         let (bin, arb, int) = BigLinearUair::<i64>::generate_witness(num_vars, &mut rng);
 
-        let (mut proof, _) =
-            Piop::prove::<CHECKED>(&pp, &bin, &arb, &int, num_vars, project_scalar_fn)
-                .expect("Prover failed");
+        let mut proof = Piop::prove::<CHECKED>(&pp, &bin, &arb, &int, num_vars, project_scalar_fn)
+            .expect("Prover failed");
 
         tamper(&mut proof);
 
