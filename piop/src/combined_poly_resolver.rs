@@ -389,7 +389,7 @@ mod tests {
     use rand::rng;
     use zinc_poly::univariate::dense::DensePolynomial;
     use zinc_test_uair::{
-        GenerateSingleTypeWitness, TestAirNoMultiplication, TestUairSimpleMultiplication,
+        GenerateRandomTrace, TestAirNoMultiplication, TestUairSimpleMultiplication,
     };
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::{
@@ -412,8 +412,8 @@ mod tests {
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
-        U: GenerateSingleTypeWitness<Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
-            + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+        U: Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+            + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<5>, Int = Int<5>>
             + IdealCheckProtocol,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
@@ -423,7 +423,7 @@ mod tests {
         let mut prover_transcript = KeccakTranscript::new();
         let mut verifier_transcript = prover_transcript.clone();
 
-        let trace = U::generate_witness(num_vars, &mut rng);
+        let trace = U::generate_random_trace(num_vars, &mut rng);
 
         let (ic_proof, ic_prover_state, projected_scalars, projected_trace) =
             run_ideal_check_prover_combined::<U, DEGREE_PLUS_ONE>(

@@ -6,13 +6,9 @@ use std::{collections::HashMap, iter};
 use zinc_poly::{
     EvaluationError,
     mle::DenseMultilinearExtension,
-    univariate::{
-        binary::BinaryPoly,
-        dense::DensePolynomial,
-        dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
-    },
+    univariate::dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
 };
-use zinc_uair::{Uair, collect_scalars::collect_scalars};
+use zinc_uair::{Uair, UairTrace, collect_scalars::collect_scalars};
 use zinc_utils::{
     UNCHECKED, cfg_extend, cfg_into_iter, cfg_iter, cfg_iter_mut, inner_product::InnerProduct,
     powers,
@@ -35,31 +31,28 @@ pub type ColumnMajorTrace<F> = Vec<DenseMultilinearExtension<DynamicPolynomialF<
 /// Use this for the combined polynomial approach (non-linear constraints).
 #[allow(clippy::arithmetic_side_effects)]
 pub fn project_trace_coeffs_row_major<F, PolyCoeff, Int, const DEGREE_PLUS_ONE: usize>(
-    binary_poly_trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
-    arbitrary_poly_trace: &[DenseMultilinearExtension<
-        DensePolynomial<PolyCoeff, DEGREE_PLUS_ONE>,
-    >],
-    int_trace: &[DenseMultilinearExtension<Int>],
+    trace: &UairTrace<PolyCoeff, Int, DEGREE_PLUS_ONE>,
     field_cfg: &F::Config,
 ) -> RowMajorTrace<F>
 where
-    F: FromWithConfig<PolyCoeff> + FromWithConfig<Int> + Send + Sync,
+    F: for<'a> FromWithConfig<&'a PolyCoeff> + for<'a> FromWithConfig<&'a Int> + Send + Sync,
     PolyCoeff: Clone + Send + Sync,
     Int: Clone + Send + Sync,
 {
     let zero = F::zero_with_cfg(field_cfg);
     let one = F::one_with_cfg(field_cfg);
 
-    let binary_len = binary_poly_trace.len();
-    let arbitrary_len = arbitrary_poly_trace.len();
-    let num_cols = binary_poly_trace.len() + arbitrary_poly_trace.len() + int_trace.len();
+    let binary_len = trace.binary_poly.len();
+    let arbitrary_len = trace.arbitrary_poly.len();
+    let num_cols = trace.binary_poly.len() + trace.arbitrary_poly.len() + trace.int.len();
 
     // Determine number of rows from the first non-empty column
-    let num_rows = binary_poly_trace
+    let num_rows = trace
+        .binary_poly
         .first()
         .map(|c| c.len())
-        .or_else(|| arbitrary_poly_trace.first().map(|c| c.len()))
-        .or_else(|| int_trace.first().map(|c| c.len()))
+        .or_else(|| trace.arbitrary_poly.first().map(|c| c.len()))
+        .or_else(|| trace.int.first().map(|c| c.len()))
         .unwrap_or(0);
 
     // Preallocate the result matrix with the correct number of rows and columns.
@@ -76,7 +69,7 @@ where
 
             // Binary poly columns
             cfg_iter_mut!(spare[..binary_len])
-                .zip(cfg_iter!(binary_poly_trace))
+                .zip(cfg_iter!(trace.binary_poly))
                 .for_each(|(slot, col)| {
                     let binary_poly = &col.evaluations[row_idx];
                     slot.write(
@@ -95,24 +88,24 @@ where
 
             // Arbitrary poly columns
             cfg_iter_mut!(spare[binary_len..binary_len + arbitrary_len])
-                .zip(cfg_iter!(arbitrary_poly_trace))
+                .zip(cfg_iter!(trace.arbitrary_poly))
                 .for_each(|(slot, col)| {
                     let arbitrary_poly = &col.evaluations[row_idx];
                     slot.write(
                         arbitrary_poly
                             .iter()
-                            .map(|coeff| F::from_with_cfg(coeff.clone(), field_cfg))
+                            .map(|coeff| F::from_with_cfg(coeff, field_cfg))
                             .collect(),
                     );
                 });
 
             // Int columns
             cfg_iter_mut!(spare[binary_len + arbitrary_len..])
-                .zip(cfg_iter!(int_trace))
+                .zip(cfg_iter!(trace.int))
                 .for_each(|(slot, col)| {
                     let int_val = &col.evaluations[row_idx];
                     slot.write(DynamicPolynomialF {
-                        coeffs: vec![F::from_with_cfg(int_val.clone(), field_cfg)],
+                        coeffs: vec![F::from_with_cfg(int_val, field_cfg)],
                     });
                 });
 
@@ -129,11 +122,7 @@ where
 /// Use this for the MLE-first approach (linear constraints only).
 #[allow(clippy::arithmetic_side_effects)]
 pub fn project_trace_coeffs_column_major<F, PolyCoeff, Int, const DEGREE_PLUS_ONE: usize>(
-    binary_poly_trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
-    arbitrary_poly_trace: &[DenseMultilinearExtension<
-        DensePolynomial<PolyCoeff, DEGREE_PLUS_ONE>,
-    >],
-    int_trace: &[DenseMultilinearExtension<Int>],
+    trace: &UairTrace<PolyCoeff, Int, DEGREE_PLUS_ONE>,
     field_cfg: &F::Config,
 ) -> ColumnMajorTrace<F>
 where
@@ -145,9 +134,9 @@ where
     let one = F::one_with_cfg(field_cfg);
 
     let num_vars = [
-        binary_poly_trace.first().map(|c| c.num_vars),
-        arbitrary_poly_trace.first().map(|c| c.num_vars),
-        int_trace.first().map(|c| c.num_vars),
+        trace.binary_poly.first().map(|c| c.num_vars),
+        trace.arbitrary_poly.first().map(|c| c.num_vars),
+        trace.int.first().map(|c| c.num_vars),
     ]
     .into_iter()
     .flatten()
@@ -155,12 +144,12 @@ where
     .unwrap_or(0);
 
     let mut result =
-        Vec::with_capacity(binary_poly_trace.len() + arbitrary_poly_trace.len() + int_trace.len());
+        Vec::with_capacity(trace.binary_poly.len() + trace.arbitrary_poly.len() + trace.int.len());
 
     // Binary poly columns
     cfg_extend!(
         result,
-        cfg_iter!(binary_poly_trace).map(|column| {
+        cfg_iter!(trace.binary_poly).map(|column| {
             let evaluations: Vec<DynamicPolynomialF<F>> = column
                 .iter()
                 .map(|binary_poly| {
@@ -186,7 +175,7 @@ where
     // Arbitrary poly columns
     cfg_extend!(
         result,
-        cfg_iter!(arbitrary_poly_trace).map(|column| {
+        cfg_iter!(trace.arbitrary_poly).map(|column| {
             let evaluations: Vec<DynamicPolynomialF<F>> = column
                 .iter()
                 .map(|arbitrary_poly| {
@@ -206,7 +195,7 @@ where
     // Int columns
     cfg_extend!(
         result,
-        cfg_iter!(int_trace).map(|column| {
+        cfg_iter!(trace.int).map(|column| {
             let evaluations: Vec<DynamicPolynomialF<F>> = column
                 .iter()
                 .map(|int| DynamicPolynomialF {
