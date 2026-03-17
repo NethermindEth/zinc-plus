@@ -258,8 +258,7 @@ pub fn evaluate_trace_to_column_mles<F: PrimeField + 'static>(
             zero.clone(),
         )
         .expect("inner product cannot fail here")
-        .inner()
-        .clone()
+        .into_inner()
     };
 
     match trace {

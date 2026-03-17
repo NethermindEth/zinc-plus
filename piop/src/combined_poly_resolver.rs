@@ -125,6 +125,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             mles
         };
 
+        let sig = U::signature();
+
         let (sumcheck_proof, sumcheck_prover_state) = MLSumcheck::prove_as_subprotocol(
             transcript,
             mles,
@@ -147,14 +149,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
                 U::constrain_general(
                     &mut folder,
-                    TraceRow::from_slice_with_signature(
-                        &mle_values[2..num_cols + 2],
-                        &U::signature(),
-                    ),
-                    TraceRow::from_slice_with_signature(
-                        &mle_values[num_cols + 2..],
-                        &U::signature(),
-                    ),
+                    TraceRow::from_slice_with_signature(&mle_values[2..num_cols + 2], &sig),
+                    TraceRow::from_slice_with_signature(&mle_values[num_cols + 2..], &sig),
                     project,
                     |x, y| Some(project(y) * x),
                     ImpossibleIdeal::from_ref,
@@ -236,7 +232,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         F::Modulus: ConstTranscribable,
         U: Uair,
     {
-        proof.validate_evaluation_sizes(U::signature().total_cols())?;
+        let sig = U::signature();
+        proof.validate_evaluation_sizes(sig.total_cols())?;
 
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
@@ -311,8 +308,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         U::constrain_general(
             &mut folder,
-            TraceRow::from_slice_with_signature(&proof.up_evals, &U::signature()),
-            TraceRow::from_slice_with_signature(&proof.down_evals, &U::signature()),
+            TraceRow::from_slice_with_signature(&proof.up_evals, &sig),
+            TraceRow::from_slice_with_signature(&proof.down_evals, &sig),
             project,
             |x, y| Some(project(y) * x),
             ImpossibleIdeal::from_ref,
