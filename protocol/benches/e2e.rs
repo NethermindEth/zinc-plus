@@ -28,6 +28,7 @@ use zinc_test_uair::{
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
     Uair, UairTrace,
+    degree_counter::count_max_degree,
     ideal::{Ideal, IdealCheck, degree_one::DegreeOneIdeal},
     ideal_collector::IdealOrZero,
 };
@@ -321,20 +322,31 @@ fn bench_prove_verify<Zt, U, IdealOverF>(
         };
     }
 
-    group.bench_function(BenchmarkId::new("Prove", &params), |bench| {
-        bench.iter(|| {
-            black_box(<zinc_plus!()>::prove::<CHECKED>(
-                &pp,
-                &trace,
-                num_vars,
-                project_scalar,
-            ))
-            .expect("Prover failed");
-        });
-    });
+    macro_rules! bench_prove {
+        ($label:literal, $mle_first:expr) => {
+            group.bench_function(BenchmarkId::new($label, &params), |bench| {
+                bench.iter(|| {
+                    black_box(<zinc_plus!()>::prove::<{ $mle_first }, CHECKED>(
+                        &pp,
+                        &trace,
+                        num_vars,
+                        project_scalar,
+                    ))
+                    .expect("Prover failed");
+                });
+            });
+        };
+    }
 
-    let proof: Proof<F> = <zinc_plus!()>::prove::<CHECKED>(&pp, &trace, num_vars, project_scalar)
-        .expect("proof generation for verifier bench");
+    bench_prove!("Prove (Combined)", false);
+
+    if count_max_degree::<U>() <= 1 {
+        bench_prove!("Prove (MLE-first)", true);
+    }
+
+    let proof: Proof<F> =
+        <zinc_plus!()>::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar)
+            .expect("proof generation for verifier bench");
 
     let sig = U::signature();
     let public_trace = trace.public(&sig);

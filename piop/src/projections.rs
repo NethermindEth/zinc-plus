@@ -24,6 +24,13 @@ pub type RowMajorTrace<F> = Vec<Vec<DynamicPolynomialF<F>>>;
 /// Used by `evaluate_combined_polynomials` for linear constraints (MLE-first).
 pub type ColumnMajorTrace<F> = Vec<DenseMultilinearExtension<DynamicPolynomialF<F>>>;
 
+/// Holds the projected trace in either row-major or column-major layout,
+/// depending on which ideal check approach (MLE-first or combined) is used.
+pub enum ProjectedTrace<F: PrimeField> {
+    RowMajor(RowMajorTrace<F>),
+    ColumnMajor(ColumnMajorTrace<F>),
+}
+
 /// Project a multi-typed trace onto F[X], returning a row-indexed (transposed)
 /// matrix. Result: `trace[row][col]` where columns are ordered as binary_poly,
 /// arbitrary_poly, int.
@@ -126,7 +133,7 @@ pub fn project_trace_coeffs_column_major<F, PolyCoeff, Int, const DEGREE_PLUS_ON
     field_cfg: &F::Config,
 ) -> ColumnMajorTrace<F>
 where
-    F: FromWithConfig<PolyCoeff> + FromWithConfig<Int> + Send + Sync,
+    F: for<'a> FromWithConfig<&'a PolyCoeff> + for<'a> FromWithConfig<&'a Int> + Send + Sync,
     PolyCoeff: Clone + Send + Sync,
     Int: Clone + Send + Sync,
 {
@@ -181,7 +188,7 @@ where
                 .map(|arbitrary_poly| {
                     arbitrary_poly
                         .iter()
-                        .map(|coeff| F::from_with_cfg(coeff.clone(), field_cfg))
+                        .map(|coeff| F::from_with_cfg(coeff, field_cfg))
                         .collect()
                 })
                 .collect();
@@ -199,7 +206,7 @@ where
             let evaluations: Vec<DynamicPolynomialF<F>> = column
                 .iter()
                 .map(|int| DynamicPolynomialF {
-                    coeffs: vec![F::from_with_cfg(int.clone(), field_cfg)],
+                    coeffs: vec![F::from_with_cfg(int, field_cfg)],
                 })
                 .collect();
             DenseMultilinearExtension {
@@ -212,54 +219,79 @@ where
     result
 }
 
-/// Evaluate a row-indexed trace along F[X]->F and return column-indexed MLEs.
-/// Takes a `TransposedTrace` (row-indexed) and returns column-indexed
-/// `Vec<DenseMultilinearExtension<F::Inner>>` for sumcheck compatibility.
-/// Each polynomial is evaluated at the projecting element.
+/// Evaluate a projected trace along `F[X] -> F` and return column-indexed
+/// MLEs (`Vec<DenseMultilinearExtension<F::Inner>>`) for sumcheck
+/// compatibility. Dispatches on the trace layout internally.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn evaluate_trace_to_column_mles<F: PrimeField + 'static>(
-    trace: &RowMajorTrace<F>,
+    trace: &ProjectedTrace<F>,
     projecting_element: &F,
 ) -> Vec<DenseMultilinearExtension<F::Inner>> {
-    let num_rows = trace.len();
-    let num_cols = trace.first().map(|r| r.len()).unwrap_or(0);
-    let num_vars = num_rows.next_power_of_two().trailing_zeros() as usize;
     let zero = F::zero_with_cfg(projecting_element.cfg());
     let one = F::one_with_cfg(projecting_element.cfg());
 
-    let max_coeffs_len = trace
-        .iter()
-        .flat_map(|row| row.iter())
-        .map(|poly| poly.degree().map_or(0, |d| d + 1))
-        .max()
-        .unwrap_or(0)
-        .max(1);
+    let max_coeffs_len = {
+        // Iterators have different types, so this is easier
+        macro_rules! common_code {
+            ($v:expr) => {
+                $v.iter()
+                    .flat_map(|row| row.iter())
+                    .map(|poly| poly.degree().map_or(0, |d| d + 1))
+                    .max()
+                    .unwrap_or(0)
+                    .max(1)
+            };
+        }
+        match trace {
+            ProjectedTrace::RowMajor(t) => common_code!(t),
+            ProjectedTrace::ColumnMajor(t) => common_code!(t),
+        }
+    };
+
     let projection_powers: Vec<F> = powers(projecting_element.clone(), one, max_coeffs_len);
 
-    // Build column-indexed MLEs from row-indexed trace
-    cfg_into_iter!(0..num_cols)
-        .map(|col_idx| {
-            let evaluations: Vec<F::Inner> = (0..num_rows)
-                .map(|row_idx| {
-                    let poly = &trace[row_idx][col_idx];
-                    let deg = poly.degree().map_or(0, |d| d + 1);
-                    DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
-                        &poly.coeffs[..deg],
-                        &projection_powers[..deg],
-                        zero.clone(),
+    let evaluate_poly = |poly: &DynamicPolynomialF<F>| -> F::Inner {
+        let deg = poly.degree().map_or(0, |d| d + 1);
+        DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
+            &poly.coeffs[..deg],
+            &projection_powers[..deg],
+            zero.clone(),
+        )
+        .expect("inner product cannot fail here")
+        .inner()
+        .clone()
+    };
+
+    match trace {
+        ProjectedTrace::RowMajor(t) => {
+            let num_rows = t.len();
+            let num_cols = t.first().map(|r| r.len()).unwrap_or(0);
+            let num_vars = num_rows.next_power_of_two().trailing_zeros() as usize;
+
+            cfg_into_iter!(0..num_cols)
+                .map(|col_idx| {
+                    let evaluations: Vec<F::Inner> = (0..num_rows)
+                        .map(|row_idx| evaluate_poly(&t[row_idx][col_idx]))
+                        .collect();
+                    DenseMultilinearExtension::from_evaluations_vec(
+                        num_vars,
+                        evaluations,
+                        zero.inner().clone(),
                     )
-                    .expect("inner product cannot fail here")
-                    .inner()
-                    .clone()
                 })
-                .collect();
-            DenseMultilinearExtension::from_evaluations_vec(
-                num_vars,
-                evaluations,
-                zero.inner().clone(),
-            )
-        })
-        .collect()
+                .collect()
+        }
+        ProjectedTrace::ColumnMajor(t) => cfg_iter!(t)
+            .map(|col_mle| {
+                let evaluations: Vec<F::Inner> = cfg_iter!(col_mle).map(evaluate_poly).collect();
+                DenseMultilinearExtension::from_evaluations_vec(
+                    col_mle.num_vars,
+                    evaluations,
+                    zero.inner().clone(),
+                )
+            })
+            .collect(),
+    }
 }
 
 /// Project scalars of a UAIR onto F[X].

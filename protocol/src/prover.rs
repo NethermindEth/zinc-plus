@@ -6,8 +6,8 @@ use zinc_piop::{
     ideal_check::IdealCheckProtocol,
     multipoint_eval::MultipointEval,
     projections::{
-        evaluate_trace_to_column_mles, project_scalars, project_scalars_to_field,
-        project_trace_coeffs_row_major,
+        ProjectedTrace, evaluate_trace_to_column_mles, project_scalars, project_scalars_to_field,
+        project_trace_coeffs_column_major, project_trace_coeffs_row_major,
     },
 };
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
@@ -50,6 +50,15 @@ where
     /// The trace arrays contain public columns first, then witness columns,
     /// within each type group. The split is derived from `U::signature()`.
     ///
+    /// # Const parameters
+    ///
+    /// - `MLE_FIRST`: when `true`, the ideal check step uses the MLE-first
+    ///   approach (`prove_linear`) with a column-major projected trace; when
+    ///   `false`, the combined polynomial approach (`prove_combined`) with a
+    ///   row-major projected trace is used. MLE-first is only valid for linear
+    ///   UAIRs (no polynomial multiplications in constraints).
+    /// - `CHECK_FOR_OVERFLOW`: propagated to the PCS prover.
+    ///
     /// # Protocol steps
     ///
     /// 0. **Commit**: commit only *witness* columns via Zip+ PCS, absorb roots
@@ -71,7 +80,7 @@ where
     /// 7. **PCS open**: Zip+ prove for each committed *witness* column at
     ///    `r_0`.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-    pub fn prove<const CHECK_FOR_OVERFLOW: bool>(
+    pub fn prove<const MLE_FIRST: bool, const CHECK_FOR_OVERFLOW: bool>(
         (pp_bin, pp_arb, pp_int): &(
             ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
             ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
@@ -126,17 +135,31 @@ where
         let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
         let num_constraints = count_constraints::<U>();
 
-        let projected_trace = project_trace_coeffs_row_major(trace, &field_cfg);
+        let projected_trace = if MLE_FIRST {
+            ProjectedTrace::ColumnMajor(project_trace_coeffs_column_major(trace, &field_cfg))
+        } else {
+            ProjectedTrace::RowMajor(project_trace_coeffs_row_major(trace, &field_cfg))
+        };
 
         // === Step 2: Ideal check ===
-        let (ic_proof, ic_prover_state) = U::prove_combined(
-            &mut pcs_transcript.fs_transcript,
-            &projected_trace,
-            &projected_scalars_fx,
-            num_constraints,
-            num_vars,
-            &field_cfg,
-        )?;
+        let (ic_proof, ic_prover_state) = match &projected_trace {
+            ProjectedTrace::ColumnMajor(t) => U::prove_linear(
+                &mut pcs_transcript.fs_transcript,
+                t,
+                &projected_scalars_fx,
+                num_constraints,
+                num_vars,
+                &field_cfg,
+            ),
+            ProjectedTrace::RowMajor(t) => U::prove_combined(
+                &mut pcs_transcript.fs_transcript,
+                t,
+                &projected_scalars_fx,
+                num_constraints,
+                num_vars,
+                &field_cfg,
+            ),
+        }?;
 
         // === Step 3: Evaluation projection (\psi_a: F_q[X] -> F_q) ===
         let projecting_element: Zt::Chal = pcs_transcript.fs_transcript.get_challenge();
