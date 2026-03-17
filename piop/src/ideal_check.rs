@@ -413,11 +413,11 @@ mod tests {
         let num_vars = 2;
 
         // Linear UAIR - test both approaches
-        test_successful_verification_linear::<TestAirNoMultiplication<5>, _, _, 32>(
+        test_successful_verification_linear::<TestAirNoMultiplication<Int<5>>, _, _, 32>(
             num_vars,
             |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
         );
-        test_successful_verification_combined::<TestAirNoMultiplication<5>, _, _, 32>(
+        test_successful_verification_combined::<TestAirNoMultiplication<Int<5>>, _, _, 32>(
             num_vars,
             |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
         );

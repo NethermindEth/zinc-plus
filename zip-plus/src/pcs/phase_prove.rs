@@ -83,7 +83,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ///   variables than `pp` supports.
     /// - Returns `ZipError::OverflowError` (when `CHECK_FOR_OVERFLOW` is true)
     ///   if intermediate CombR sums exceed the integer precision.
-    #[allow(clippy::arithmetic_side_effects)]
     pub fn prove<F, const CHECK_FOR_OVERFLOW: bool>(
         transcript: &mut PcsProverTranscript,
         pp: &ZipPlusParams<Zt, Lc>,
@@ -95,12 +94,44 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     where
         F: PrimeField
             + for<'a> FromWithConfig<&'a Zt::CombR>
-            + for<'a> FromWithConfig<&'a Zt::Chal>
             + for<'a> FromWithConfig<&'a Zt::Pt>
             + for<'a> MulByScalar<&'a F>
             + FromRef<F>,
         F::Inner: Transcribable,
-        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
+        F::Modulus: Transcribable,
+    {
+        let point = point
+            .iter()
+            .map(|v| v.into_with_cfg(field_cfg))
+            .collect::<Vec<F>>();
+        Self::prove_f::<F, CHECK_FOR_OVERFLOW>(
+            transcript,
+            pp,
+            polys,
+            &point,
+            commit_hint,
+            field_cfg,
+        )
+    }
+
+    /// See [`Self::prove`] for details.
+    /// This version takes the evaluation point already mapped to the field
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn prove_f<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsProverTranscript,
+        pp: &ZipPlusParams<Zt, Lc>,
+        polys: &[DenseMultilinearExtension<Zt::Eval>],
+        point: &[F],
+        commit_hint: &ZipPlusHint<Zt::Cw>,
+        field_cfg: &F::Config,
+    ) -> Result<F, ZipError>
+    where
+        F: PrimeField
+            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> MulByScalar<&'a F>
+            + FromRef<F>,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
     {
         let batch_size = polys.len();
         validate_input::<Zt, Lc, _>("prove", pp.num_vars, batch_size, polys, &[point])?;
@@ -111,11 +142,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         // TODO Lift q0, q1 back to int and take following dot products on ints instead
         // of MBSInnerProduct in field (see comboned row) We prove evaluations
         // over the field, so integers need to be mapped to field elements first
-        let point = point
-            .iter()
-            .map(|v| v.into_with_cfg(field_cfg))
-            .collect::<Vec<F>>();
-        let (q_0, q_1) = point_to_tensor(num_rows, &point, field_cfg)?;
+        let (q_0, q_1) = point_to_tensor(num_rows, point, field_cfg)?;
 
         let degree_bound = Zt::Comb::DEGREE_BOUND;
         let polys_as_comb_r: Vec<Vec<Zt::CombR>> = polys
@@ -299,7 +326,7 @@ mod tests {
     type Zt = TestZipTypes<N, K, M>;
     type C = RaaSignFlippingCode<Zt, TestRaaConfig, 4>;
 
-    type PolyZt = TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>;
+    type PolyZt = TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>;
     type PolyC = RaaCode<PolyZt, TestRaaConfig, 4>;
 
     type TestZip = ZipPlus<Zt, C>;
@@ -316,7 +343,7 @@ mod tests {
         let (hint, comm) = TestZip::commit_single(&pp, &poly).unwrap();
         let point = test_point(num_vars);
 
-        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let result = TestZip::prove_single::<F, CHECKED>(
@@ -337,7 +364,7 @@ mod tests {
         let (hint, comm) = TestPolyZip::commit_single(&pp, &poly).unwrap();
         let point: Vec<i128> = (0..num_vars).map(|i| i as i128 + 2).collect();
 
-        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let result = TestPolyZip::prove_single::<F, CHECKED>(
@@ -371,7 +398,7 @@ mod tests {
 
         let point = test_point(num_vars);
 
-        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let result = TestZip::prove_single::<F, CHECKED>(
@@ -396,7 +423,7 @@ mod tests {
 
         let point = test_point(num_vars);
 
-        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let result = TestZip::prove_single::<F, CHECKED>(
@@ -419,7 +446,7 @@ mod tests {
         let (hint, comm) = TestZip::commit_single(&pp, &poly).unwrap();
         let point = test_point(num_vars);
 
-        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let eval_f = TestZip::prove_single::<F, CHECKED>(
@@ -464,7 +491,7 @@ mod tests {
         let (hint, comm) = TestZip::commit(&pp, &polys).unwrap();
         let point = test_point(num_vars);
 
-        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let result =
@@ -481,7 +508,7 @@ mod tests {
         let (hint, comm) = TestZip::commit(&pp, &polys).unwrap();
         let point = test_point(num_vars);
 
-        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let result =
@@ -507,7 +534,7 @@ mod tests {
 
         let point = test_point(num_vars);
 
-        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let result = TestZip::prove::<F, CHECKED>(
@@ -533,7 +560,7 @@ mod tests {
 
         let point = test_point(num_vars);
 
-        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let result =

@@ -1,8 +1,7 @@
-use crypto_primitives::boolean::Boolean;
+use crate::{from_ref::FromRef, mul_by_scalar::MulByScalar};
+use crypto_primitives::{FromWithConfig, PrimeField, boolean::Boolean};
 use num_traits::CheckedAdd;
 use thiserror::Error;
-
-use crate::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 
 /// A trait for inner product algorithms implementations.
 pub trait InnerProduct<Lhs: ?Sized, Rhs, Output> {
@@ -31,8 +30,7 @@ pub struct MBSInnerProduct;
 
 impl<Lhs, Rhs, Out> InnerProduct<[Lhs], Rhs, Out> for MBSInnerProduct
 where
-    Lhs: for<'a> MulByScalar<&'a Rhs>,
-    Out: FromRef<Lhs> + CheckedAdd,
+    Out: FromRef<Lhs> + for<'a> MulByScalar<&'a Rhs> + CheckedAdd,
 {
     /// The mul-by-scalar inner product.
     #[allow(clippy::arithmetic_side_effects)] // Used in unchecked mode
@@ -48,34 +46,29 @@ where
             });
         }
 
-        lhs.iter()
-            .zip(rhs)
-            .map(|(lhs, rhs)| {
-                lhs.mul_by_scalar::<CHECK>(rhs)
-                    .ok_or(InnerProductError::Overflow)
-            })
-            .try_fold(zero, |acc, product| {
-                let product = Out::from_ref(&product?);
-                if CHECK {
-                    acc.checked_add(&product).ok_or(InnerProductError::Overflow)
-                } else {
-                    Ok(acc + product)
-                }
-            })
+        lhs.iter().zip(rhs).try_fold(zero, |acc, (l, r)| {
+            let widened = Out::from_ref(l);
+            let product = widened
+                .mul_by_scalar::<CHECK>(r)
+                .ok_or(InnerProductError::Overflow)?;
+            if CHECK {
+                acc.checked_add(&product).ok_or(InnerProductError::Overflow)
+            } else {
+                Ok(acc + product)
+            }
+        })
     }
 }
 
 impl MBSInnerProduct {
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn mapped_inner_product<A, Lhs, Rhs, Out, const CHECK: bool>(
-        lhs: &[A],
-        rhs: &[Rhs],
-        zero: Out,
-        map_fn: impl Fn(&A) -> Lhs,
-    ) -> Result<Out, InnerProductError>
+    pub fn inner_product_field<Lhs, F>(
+        lhs: &[Lhs],
+        rhs: &[F],
+        zero: F,
+    ) -> Result<F, InnerProductError>
     where
-        Lhs: for<'a> MulByScalar<&'a Rhs>,
-        Out: FromRef<Lhs> + CheckedAdd,
+        F: PrimeField + for<'a> FromWithConfig<&'a Lhs>,
     {
         if lhs.len() != rhs.len() {
             return Err(InnerProductError::LengthMismatch {
@@ -83,22 +76,12 @@ impl MBSInnerProduct {
                 rhs: rhs.len(),
             });
         }
+        let cfg = zero.cfg().clone();
 
-        lhs.iter()
-            .zip(rhs)
-            .map(|(a, r)| {
-                map_fn(a)
-                    .mul_by_scalar::<CHECK>(r)
-                    .ok_or(InnerProductError::Overflow)
-            })
-            .try_fold(zero, |acc, product| {
-                let product = Out::from_ref(&product?);
-                if CHECK {
-                    acc.checked_add(&product).ok_or(InnerProductError::Overflow)
-                } else {
-                    Ok(acc + product)
-                }
-            })
+        Ok(lhs.iter().zip(rhs).fold(zero, |acc, (a, r)| {
+            let product: F = F::from_with_cfg(a, &cfg) * r;
+            acc + product
+        }))
     }
 }
 

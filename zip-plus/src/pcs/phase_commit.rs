@@ -208,7 +208,7 @@ mod tests {
     type Zt = TestZipTypes<N, K, M>;
     type C = RaaSignFlippingCode<Zt, TestRaaConfig, 4>;
 
-    type PolyZt = TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>;
+    type PolyZt = TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>;
     type PolyC = RaaCode<PolyZt, TestRaaConfig, 4>;
 
     type TestZip = ZipPlus<Zt, C>;
@@ -719,7 +719,7 @@ mod tests {
             .collect();
 
         let (hint, comm) = TestZip::commit_single(&param, &mle).unwrap();
-        let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
 
         let _eval_f = TestZip::prove_single::<F, CHECKED>(

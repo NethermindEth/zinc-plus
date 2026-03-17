@@ -478,7 +478,7 @@ mod tests {
 
         let num_vars = 2;
 
-        test_successful_verification_generic::<TestAirNoMultiplication<5>, _, _, 32>(
+        test_successful_verification_generic::<TestAirNoMultiplication<Int<5>>, _, _, 32>(
             num_vars,
             |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
         );

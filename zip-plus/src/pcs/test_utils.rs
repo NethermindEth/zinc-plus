@@ -3,7 +3,8 @@
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
-    clippy::type_complexity
+    clippy::type_complexity,
+    clippy::unwrap_used
 )]
 
 use crate::{
@@ -63,9 +64,9 @@ impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N
     type ArrCombRDotChal = MBSInnerProduct;
 }
 
-pub struct TestPolyZipTypes<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> {}
+pub struct TestBinPolyZipTypes<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> {}
 impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
-    for TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>
+    for TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>
 {
     const NUM_COLUMN_OPENINGS: usize = 200;
     type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
@@ -107,10 +108,10 @@ pub fn setup_poly_test_params<const K: usize, const M: usize, const DEGREE_PLUS_
     num_vars: usize,
 ) -> (
     ZipPlusParams<
-        TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>,
-        RaaCode<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>, TestRaaConfig, REPETITION_FACTOR>,
+        TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>,
+        RaaCode<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>, TestRaaConfig, REPETITION_FACTOR>,
     >,
-    DenseMultilinearExtension<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Eval>,
+    DenseMultilinearExtension<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Eval>,
 ) {
     setup_test_params_inner(num_vars, |poly_size| {
         let eval_coeffs: Vec<_> = (1..=(poly_size * (DEGREE_PLUS_ONE - 1)) as i8)
@@ -180,8 +181,8 @@ pub fn setup_full_protocol_poly<
     num_vars: usize,
 ) -> (
     ZipPlusParams<
-        TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>,
-        RaaCode<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE>, TestRaaConfig, REPETITION_FACTOR>,
+        TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>,
+        RaaCode<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>, TestRaaConfig, REPETITION_FACTOR>,
     >,
     ZipPlusCommitment,
     Vec<F>,
@@ -190,14 +191,14 @@ pub fn setup_full_protocol_poly<
 )
 where
     F: PrimeField
-        + for<'a> FromWithConfig<&'a <TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Chal>
-        + for<'a> FromWithConfig<&'a <TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Chal>
+        + for<'a> FromWithConfig<&'a <TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::CombR>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>
         + 'static,
     F::Inner: Transcribable,
     F::Modulus:
-        FromRef<<TestPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod> + Transcribable,
+        FromRef<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod> + Transcribable,
 {
     setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_poly_test_params, || {
         (0..num_vars).map(|i| i as i128 + 2).collect()
@@ -231,7 +232,7 @@ where
     let (pp, poly) = setup(num_vars);
     let (hint, comm) = ZipPlus::commit_single(&pp, &poly).unwrap();
 
-    let mut transcript = PcsProverTranscript::new_from_commitment(&comm).unwrap();
+    let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
     let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
     let point: Vec<Zt::Pt> = prepare_evaluation_point();
 

@@ -32,8 +32,7 @@ use zinc_uair::{
 
 const DEGREE_PLUS_ONE: usize = 32;
 
-type WitnessCoeff<const INT_LIMBS: usize> = Int<INT_LIMBS>;
-type Witness<const INT_LIMBS: usize> = DensePolynomial<WitnessCoeff<INT_LIMBS>, DEGREE_PLUS_ONE>;
+type Witness<const INT_LIMBS: usize> = DensePolynomial<Int<INT_LIMBS>, DEGREE_PLUS_ONE>;
 type F<const FIELD_LIMBS: usize> = MontyField<FIELD_LIMBS>;
 
 #[allow(clippy::arithmetic_side_effects)]
@@ -42,7 +41,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     witness_size: usize,
 ) where
     <F<FIELD_LIMBS> as Field>::Inner: ConstIntSemiring + ConstTranscribable,
-    TestAirNoMultiplication<INT_LIMBS>: Uair<Scalar = Witness<INT_LIMBS>, Ideal = DegreeOneIdeal<WitnessCoeff<INT_LIMBS>>>
+    TestAirNoMultiplication<Int<INT_LIMBS>>: Uair<Scalar = Witness<INT_LIMBS>, Ideal = DegreeOneIdeal<Int<INT_LIMBS>>>
         + GenerateSingleTypeWitness<Witness = Witness<INT_LIMBS>>
         + IdealCheckProtocol,
     MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Inner>,
@@ -53,7 +52,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
     let params = format!("NoMult/LIMBS={}/nvars={}", FIELD_LIMBS, num_vars);
 
-    let num_constraints = count_constraints::<TestAirNoMultiplication<INT_LIMBS>>();
+    let num_constraints = count_constraints::<TestAirNoMultiplication<Int<INT_LIMBS>>>();
 
     let prove = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
                  trace: &[_],
@@ -62,7 +61,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         let trace = project_trace_coeffs_row_major::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
 
         let projected_scalars =
-            project_scalars::<F<FIELD_LIMBS>, TestAirNoMultiplication<INT_LIMBS>>(|scalar| {
+            project_scalars::<F<FIELD_LIMBS>, TestAirNoMultiplication<Int<INT_LIMBS>>>(|scalar| {
                 scalar
                     .iter()
                     .map(|coeff| F::from_with_cfg(coeff, field_cfg))
@@ -252,7 +251,7 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
         FIELD_LIMBS, num_vars
     );
 
-    let num_constraints = count_constraints::<BinaryDecompositionUair>();
+    let num_constraints = count_constraints::<BinaryDecompositionUair<u32>>();
 
     let prove = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
                  binary_poly_trace: &[_],
@@ -267,7 +266,7 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
         );
 
         let projected_scalars =
-            project_scalars::<F<FIELD_LIMBS>, BinaryDecompositionUair>(|scalar| {
+            project_scalars::<F<FIELD_LIMBS>, BinaryDecompositionUair<u32>>(|scalar| {
                 scalar
                     .iter()
                     .map(|coeff| F::from_with_cfg(coeff, field_cfg))
@@ -318,7 +317,7 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
             bench.iter_batched(
                 || (proof.clone(), transcript.clone()),
                 |(proof, mut transcript)| {
-                    let _ = black_box(BinaryDecompositionUair::verify_as_subprotocol(
+                    let _ = black_box(BinaryDecompositionUair::<u32>::verify_as_subprotocol(
                         &mut transcript,
                         proof,
                         num_constraints,
@@ -352,19 +351,20 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
 
     let params = format!("BigLinearUair/LIMBS={}/nvars={}", FIELD_LIMBS, num_vars);
 
-    let num_constraints = count_constraints::<BigLinearUair>();
+    let num_constraints = count_constraints::<BigLinearUair<u32>>();
 
     macro_rules! prove {
         ($transcript:expr, $field_cfg:expr, $gen_trace:ident, $prove_fn:ident) => {{
             let trace =
                 $gen_trace::<_, u32, u32, _>(&binary_poly_trace, &[], &int_trace, $field_cfg);
 
-            let projected_scalars = project_scalars::<F<FIELD_LIMBS>, BigLinearUair>(|scalar| {
-                scalar
-                    .iter()
-                    .map(|coeff| F::from_with_cfg(coeff, $field_cfg))
-                    .collect()
-            });
+            let projected_scalars =
+                project_scalars::<F<FIELD_LIMBS>, BigLinearUair<u32>>(|scalar| {
+                    scalar
+                        .iter()
+                        .map(|coeff| F::from_with_cfg(coeff, $field_cfg))
+                        .collect()
+                });
 
             BigLinearUair::$prove_fn(
                 $transcript,
@@ -434,7 +434,7 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
         bench.iter_batched(
             || (proof.clone(), transcript.clone()),
             |(proof, mut transcript)| {
-                let _ = black_box(BigLinearUair::verify_as_subprotocol(
+                let _ = black_box(BigLinearUair::<u32>::verify_as_subprotocol(
                     &mut transcript,
                     proof,
                     num_constraints,

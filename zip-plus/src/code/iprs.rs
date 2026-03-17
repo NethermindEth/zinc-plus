@@ -19,22 +19,18 @@ use std::{
     marker::PhantomData,
     ops::{Add, AddAssign},
 };
-use zinc_utils::{
-    CHECKED,
-    from_ref::FromRef,
-    mul_by_scalar::{MulByScalar, WideningMulByScalar},
-};
+use zinc_utils::{CHECKED, UNCHECKED, from_ref::FromRef, mul_by_scalar::MulByScalar};
 
 /// Pseudo Reed-Solomon encoder over the integers. Internally uses a
 /// radix-8 NTT-style recursion with a base Vandermonde matrix sized
 /// `base_len x base_dim` (defaults to 64x32).
 #[derive(Debug, Clone)]
-pub struct IprsCode<Zt: ZipTypes, Config: PnttConfig, MT, const CHECK_ADDITION: bool> {
+pub struct IprsCode<Zt: ZipTypes, Config: PnttConfig, const CHECK_ADDITION: bool> {
     pntt_params: Radix8PnttParams<Config>,
-    _phantom: PhantomData<(Zt, MT)>,
+    _phantom: PhantomData<Zt>,
 }
 
-impl<Zt, Config, MT, const CHECK_ADDITION: bool> IprsCode<Zt, Config, MT, CHECK_ADDITION>
+impl<Zt, Config, const CHECK_ADDITION: bool> IprsCode<Zt, Config, CHECK_ADDITION>
 where
     Zt: ZipTypes,
     Config: PnttConfig,
@@ -95,14 +91,14 @@ where
     }
 }
 
-impl<Zt: ZipTypes, Config, MT, const CHECK_ADDITION: bool> LinearCode<Zt>
-    for IprsCode<Zt, Config, MT, CHECK_ADDITION>
+impl<Zt: ZipTypes, Config, const CHECK_ADDITION: bool> LinearCode<Zt>
+    for IprsCode<Zt, Config, CHECK_ADDITION>
 where
     Zt: ZipTypes,
     Config: PnttConfig,
+    Zt::Eval: for<'a> MulByScalar<&'a PnttInt, Zt::Cw>,
     Zt::CombR: for<'a> MulByScalar<&'a PnttInt>,
     Zt::Cw: CheckedAdd + for<'a> MulByScalar<&'a PnttInt>,
-    MT: WideningMulByScalar<Zt::Eval, PnttInt, Output = Zt::Cw>,
 {
     const REPETITION_FACTOR: usize = Config::OUTPUT_LEN / Config::INPUT_LEN;
 
@@ -140,7 +136,7 @@ where
             Config::INPUT_LEN
         );
 
-        self.encode_inner::<_, _, WideningMulByTwiddle<MT>>(row)
+        self.encode_inner::<_, _, WideningMulByTwiddle<Zt::Cw, UNCHECKED>>(row)
     }
 
     fn row_len(&self) -> usize {

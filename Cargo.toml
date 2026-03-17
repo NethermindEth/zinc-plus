@@ -1,7 +1,7 @@
 [workspace]
-members = ["piop", "poly", "primality", "test-uair", "transcript", "uair", "utils", "zip-plus"]
+members = ["piop", "poly", "primality", "protocol", "test-uair", "transcript", "uair", "utils", "zip-plus"]
 resolver = "2"
-default-members = ["piop", "poly", "primality", "transcript", "utils", "zip-plus"]
+default-members = ["piop", "poly", "primality", "protocol", "transcript", "utils", "zip-plus"]
 
 [workspace.package]
 version = "0.1.0"
@@ -29,6 +29,8 @@ zinc-transcript = { path = "transcript/" }
 zinc-uair = { path = "uair/" }
 zinc-utils = { path = "utils/" }
 zinc-poly = { path = "poly/" }
+zinc-piop = { path = "piop/" }
+zip-plus = { path = "zip-plus/" }
 
 [workspace.lints.rust]
 missing_docs = "allow"  # TODO(alex): replace with "deny" once code has been more-or-less stabilized

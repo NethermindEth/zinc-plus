@@ -1,0 +1,272 @@
+use super::*;
+use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
+use num_traits::Zero;
+use zinc_piop::{
+    combined_poly_resolver::CombinedPolyResolver,
+    ideal_check::IdealCheckProtocol,
+    projections::{
+        evaluate_trace_to_column_mles, project_scalars, project_scalars_to_field,
+        project_trace_coeffs_row_major,
+    },
+};
+use zinc_poly::{
+    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
+    univariate::dynamic::over_field::DynamicPolynomialF,
+};
+use zinc_transcript::traits::{ConstTranscribable, Transcript};
+use zinc_uair::{Uair, constraint_counter::count_constraints, degree_counter::count_max_degree};
+use zinc_utils::{
+    from_ref::FromRef, inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
+    projectable_to_field::ProjectableToField,
+};
+use zip_plus::{
+    pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
+    pcs_transcript::PcsProverTranscript,
+};
+
+impl<Zt, U, F, const D: usize> ZincPlusPiop<Zt, U, F, D>
+where
+    Zt: ZincTypes<D>,
+    Zt::Int: ProjectableToField<F>,
+    <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    F: InnerTransparentField
+        + FromPrimitiveWithConfig
+        + FromWithConfig<Zt::Int>
+        + for<'a> FromWithConfig<&'a Zt::CombR>
+        + for<'a> FromWithConfig<&'a Zt::Chal>
+        + for<'a> FromWithConfig<&'a Zt::Pt>
+        + for<'a> MulByScalar<&'a F>
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
+    F::Inner:
+        ConstIntSemiring + ConstTranscribable + FromRef<Zt::Fmod> + Send + Sync + Zero + Default,
+    F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
+    U: Uair + 'static,
+{
+    /// Zinc+ full PIOP prover.
+    ///
+    /// # Protocol steps
+    ///
+    /// 0. **Commit**: commit each witness column via Zip+ PCS, absorb roots.
+    /// 1. **Prime projection** (`\phi_q`: `Z[X] -> F_q[X]`): sample random
+    ///    prime q, project trace and scalars.
+    /// 2. **Ideal check**: sample `r in F_q^mu`, prover sends MLE evaluations,
+    ///    verifier checks ideal membership.
+    /// 3. **Evaluation projection** (`\psi_a`: `F_q[X] -> F_q`): sample `a in
+    ///    F_q`, evaluate polynomials at `X = a`.
+    /// 4. **F_q sumcheck**: finite-field sumcheck proving the projected
+    ///    constraint claim. Produces `up_evals` and `down_evals` at point `r'`.
+    /// 5. **Lift-and-project**: compute per-column polynomial MLE evaluations
+    ///    at `r'` (in `F_q[X]`, before `\psi_a`). Absorb into transcript.
+    /// 6. **PCS open**: Zip+ prove for each committed column, proving witness
+    ///    MLE evaluations at the sumcheck challenge point.
+    ///
+    /// Returns the proof and auxiliary data (for subclaim resolution without
+    /// PCS).
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn prove<const CHECK_FOR_OVERFLOW: bool>(
+        (pp_bin, pp_arb, pp_int): &(
+            ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+            ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
+            ZipPlusParams<Zt::IntZt, Zt::IntLc>,
+        ),
+        trace_bin_poly: &[DenseMultilinearExtension<<Zt::BinaryZt as ZipTypes>::Eval>],
+        trace_arb_poly: &[DenseMultilinearExtension<<Zt::ArbitraryZt as ZipTypes>::Eval>],
+        trace_int: &[DenseMultilinearExtension<<Zt::IntZt as ZipTypes>::Eval>],
+        num_vars: usize,
+        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
+    ) -> Result<(Proof<F>, ProverAux<F>), ProtocolError<F, U::Ideal>> {
+        // === Step 0: Commit ===
+        macro_rules! commit_optionally {
+            ($pp:expr, $trace:expr) => {
+                if $trace.is_empty() {
+                    (
+                        None,
+                        ZipPlusCommitment {
+                            root: Default::default(),
+                            batch_size: 0,
+                        },
+                    )
+                } else {
+                    let (hint, commitment) = ZipPlus::commit($pp, $trace)?;
+                    (Some(hint), commitment)
+                }
+            };
+        }
+        let (hint_bin, commitment_bin) = commit_optionally!(pp_bin, trace_bin_poly);
+        let (hint_arb, commitment_arb) = commit_optionally!(pp_arb, trace_arb_poly);
+        let (hint_int, commitment_int) = commit_optionally!(pp_int, trace_int);
+
+        let mut pcs_transcript = PcsProverTranscript::new_from_commitments(
+            [&commitment_bin, &commitment_arb, &commitment_int].into_iter(),
+        );
+        // TODO: Absorb public inputs as well once they are part of the protocol,
+        //       or this will open up a soundness vulnerability!
+
+        // === Step 1: Prime projection (\phi_q: Z[X] -> F_q[X]) ===
+
+        let field_cfg = pcs_transcript
+            .fs_transcript
+            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+
+        let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
+        let num_constraints = count_constraints::<U>();
+
+        let projected_trace = project_trace_coeffs_row_major::<F, Zt::Int, Zt::Int, D>(
+            trace_bin_poly,
+            trace_arb_poly,
+            trace_int,
+            &field_cfg,
+        );
+
+        // === Step 2: Ideal check ===
+        let (ic_proof, ic_prover_state) = U::prove_combined(
+            &mut pcs_transcript.fs_transcript,
+            &projected_trace,
+            &projected_scalars_fx,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )?;
+
+        // === Step 3: Evaluation projection (\psi_a: F_q[X] -> F_q) ===
+        let projecting_element: Zt::Chal = pcs_transcript.fs_transcript.get_challenge();
+        let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
+
+        // Project trace from F_q[X] to F_q by evaluating each polynomial at X = a.
+        let projected_trace_f =
+            evaluate_trace_to_column_mles(&projected_trace, &projecting_element_f);
+
+        // Project scalars from F_q[X] to F_q.
+        let projected_scalars_f =
+            project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
+                .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
+
+        let max_degree = count_max_degree::<U>();
+
+        // === Step 4: Sumcheck over F_q ===
+        let (cpr_proof, cpr_prover_state) = CombinedPolyResolver::prove_as_subprotocol::<U>(
+            &mut pcs_transcript.fs_transcript,
+            projected_trace_f.clone(),
+            &ic_prover_state.evaluation_point,
+            &projected_scalars_f,
+            num_constraints,
+            num_vars,
+            max_degree,
+            &field_cfg,
+        )?;
+
+        // === Step 5: Lift-and-project (oracle evaluations at sumcheck point) ===
+        // Compute per-column unprojected polynomial MLE evaluations at the
+        // sumcheck challenge point. These are in F_q[X] (after \phi_q but before
+        // \psi_a), so the verifier can check \psi_a(lifted_eval_j) == up_eval_j and
+        // supply them to the Zip+ PCS for alpha-projection.
+        //
+        // For each column, we evaluate the MLE coefficient-by-coefficient:
+        //   lifted_eval_j = \sum_{k} (\sum_{b} eq(b, r') * c_{j,b,k}) * X^k
+        // where c_{j,b,k} is the k-th coefficient of the \phi_q-projected entry
+        // at position b.
+        let eval_point = &cpr_prover_state.evaluation_point;
+        let zero_inner = F::zero_with_cfg(&field_cfg).into_inner();
+
+        let num_rows = projected_trace.len();
+        let num_cols = projected_trace.first().map(|r| r.len()).unwrap_or(0);
+
+        let lifted_evals: Vec<DynamicPolynomialF<F>> = (0..num_cols)
+            .map(|col_idx| {
+                let max_degree = (0..num_rows)
+                    .flat_map(|row_idx| projected_trace[row_idx][col_idx].degree())
+                    .max()
+                    .unwrap_or(0);
+
+                let coeffs: Vec<F> = (0..=max_degree)
+                    .map(|l| {
+                        let coeff_mle: DenseMultilinearExtension<F::Inner> = (0..num_rows)
+                            .map(|row_idx| {
+                                projected_trace[row_idx][col_idx]
+                                    .coeffs
+                                    .get(l)
+                                    .map(|f| f.inner().clone())
+                                    .unwrap_or_else(|| zero_inner.clone())
+                            })
+                            .collect();
+
+                        coeff_mle
+                            .evaluate_with_config(eval_point, &field_cfg)
+                            .expect("lifted eval: coefficient MLE evaluation failed")
+                    })
+                    .collect();
+
+                DynamicPolynomialF { coeffs }
+            })
+            .collect();
+
+        // Absorb lifted_evals into the Fiat-Shamir transcript before PCS.
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        for bar_u in &lifted_evals {
+            pcs_transcript
+                .fs_transcript
+                .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
+        }
+
+        // === Step 6: PCS open (prove witness MLE evaluations) ===
+        // The Zip+ PCS proves that the committed polynomial-valued traces
+        // evaluate (under alpha-projection) consistently with the lifted_evals.
+        // The verifier checks \psi_a(lifted_eval_j) == up_eval_j to tie back to
+        // the sumcheck.
+        //
+        // TODO: Once we add public inputs, the verifier will compute public
+        //       input MLE evaluations at the sumcheck point directly from
+        //       public data. The PCS only covers witness columns.
+
+        if let Some(hint_bin) = &hint_bin {
+            let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                &mut pcs_transcript,
+                pp_bin,
+                trace_bin_poly,
+                eval_point,
+                hint_bin,
+                &field_cfg,
+            )?;
+        }
+        if let Some(hint_arb) = &hint_arb {
+            let _ = ZipPlus::<Zt::ArbitraryZt, Zt::ArbitraryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                &mut pcs_transcript,
+                pp_arb,
+                trace_arb_poly,
+                eval_point,
+                hint_arb,
+                &field_cfg,
+            )?;
+        }
+        if let Some(hint_int) = &hint_int {
+            let _ = ZipPlus::<Zt::IntZt, Zt::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                &mut pcs_transcript,
+                pp_int,
+                trace_int,
+                eval_point,
+                hint_int,
+                &field_cfg,
+            )?;
+        }
+
+        let zip_proof = pcs_transcript.stream.into_inner();
+        let commitments = (commitment_bin, commitment_arb, commitment_int);
+
+        Ok((
+            Proof {
+                commitments,
+                ideal_check: ic_proof,
+                resolver: cpr_proof,
+                zip: zip_proof,
+                lifted_evals,
+            },
+            ProverAux {
+                field_cfg,
+                projected_trace_f,
+            },
+        ))
+    }
+}

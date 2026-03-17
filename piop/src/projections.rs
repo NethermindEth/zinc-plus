@@ -119,7 +119,7 @@ where
     result
 }
 
-/// Project a multi-typed trace onto F[X], returning a column-indexed matrix.
+/// Project a multi-typed trace onto `F[X]`, returning a column-indexed matrix.
 /// Result: `trace[col]` is a
 /// `DenseMultilinearExtension<DynamicPolynomialF<F>>`.
 ///
