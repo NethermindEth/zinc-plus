@@ -49,7 +49,7 @@ impl<F: PrimeField> VerifierState<F> {
 
 /// Subclaim when verifier is convinced
 #[derive(Clone, Debug)]
-pub struct SubClaim<F> {
+pub struct Subclaim<F> {
     /// The multi-dimensional point that this multilinear extension is evaluated
     /// at.
     pub point: Vec<F>,
@@ -104,7 +104,7 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
     pub fn check_and_generate_subclaim(
         self,
         asserted_sum: F,
-    ) -> Result<SubClaim<F>, SumCheckError<F>> {
+    ) -> Result<Subclaim<F>, SumCheckError<F>> {
         if !self.finished {
             panic!("Verifier has not finished.");
         }
@@ -140,7 +140,7 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
             expected = reconstructed_poly.evaluate_at_point(&self.randomness[i])?;
         }
 
-        Ok(SubClaim {
+        Ok(Subclaim {
             point: self.randomness,
             expected_evaluation: expected,
         })

@@ -26,7 +26,7 @@
 use std::marker::PhantomData;
 
 use crate::sumcheck::{
-    MLSumcheck, SumCheckError, SumcheckProof, verifier::SubClaim as SumcheckSubclaim,
+    MLSumcheck, SumCheckError, SumcheckProof, verifier::Subclaim as SumcheckSubclaim,
 };
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use num_traits::Zero;
@@ -58,7 +58,7 @@ pub struct ProverState<F: PrimeField> {
 
 /// Verifier subclaim after the multi-point evaluation sumcheck.
 ///
-/// Carries the inner sumcheck [`SubClaim`] plus the intermediate values
+/// Carries the inner sumcheck [`Subclaim`] plus the intermediate values
 /// needed to finalize the check via [`MultipointEval::verify_subclaim`]
 /// once the caller has assembled the `open_evals` (e.g. after computing
 /// public lifted evaluations from public data at `r_0`).
