@@ -48,7 +48,7 @@ impl<F: PrimeField> VerifierState<F> {
 }
 
 /// Subclaim when verifier is convinced
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SubClaim<F> {
     /// The multi-dimensional point that this multilinear extension is evaluated
     /// at.

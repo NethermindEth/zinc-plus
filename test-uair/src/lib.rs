@@ -6,8 +6,8 @@ use std::marker::PhantomData;
 use crypto_primitives::{ConstSemiring, FixedSemiring, Semiring, boolean::Boolean};
 use num_traits::Zero;
 use rand::{
-    Rng,
     distr::{Distribution, StandardUniform},
+    prelude::*,
 };
 use zinc_poly::{
     EvaluatablePolynomial,
@@ -36,9 +36,8 @@ where
 
     fn signature() -> UairSignature {
         UairSignature {
-            binary_poly_cols: 0,
-            arbitrary_poly_cols: 3,
-            int_cols: 0,
+            witness_arbitrary_poly_cols: 3,
+            ..Default::default()
         }
     }
 
@@ -128,7 +127,7 @@ where
     }
 }
 
-pub struct TestAirNoMultiplication<R>(PhantomData<R>);
+pub struct TestAirNoMultiplication<R>(PhantomData<R>); // TODO: Rename to XxxUairXxx
 
 impl<R> Uair for TestAirNoMultiplication<R>
 where
@@ -139,9 +138,8 @@ where
 
     fn signature() -> UairSignature {
         UairSignature {
-            binary_poly_cols: 0,
-            arbitrary_poly_cols: 3,
-            int_cols: 0,
+            witness_arbitrary_poly_cols: 3,
+            ..Default::default()
         }
     }
 
@@ -211,9 +209,8 @@ where
 
     fn signature() -> UairSignature {
         UairSignature {
-            binary_poly_cols: 0,
-            arbitrary_poly_cols: 3,
-            int_cols: 0,
+            witness_arbitrary_poly_cols: 3,
+            ..Default::default()
         }
     }
 
@@ -262,9 +259,9 @@ where
 
     fn signature() -> UairSignature {
         UairSignature {
-            binary_poly_cols: 1,
-            arbitrary_poly_cols: 0,
-            int_cols: 1,
+            witness_binary_poly_cols: 1,
+            witness_int_cols: 1,
+            ..Default::default()
         }
     }
 
@@ -329,9 +326,9 @@ where
 
     fn signature() -> UairSignature {
         UairSignature {
-            binary_poly_cols: 16,
-            arbitrary_poly_cols: 0,
-            int_cols: 1,
+            witness_binary_poly_cols: 16,
+            witness_int_cols: 1,
+            ..Default::default()
         }
     }
 
@@ -429,6 +426,62 @@ where
         );
 
         (binary_poly_cols, vec![], vec![int_col])
+    }
+}
+
+pub struct BigLinearUairWithPublicInput<R>(PhantomData<R>);
+
+impl<R> Uair for BigLinearUairWithPublicInput<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = <BigLinearUair<R> as Uair>::Ideal;
+    type Scalar = <BigLinearUair<R> as Uair>::Scalar;
+
+    fn signature() -> UairSignature {
+        const NUM_PUBLIC_COLS: usize = 4;
+
+        let src_sig = BigLinearUair::<R>::signature();
+        UairSignature {
+            public_binary_poly_cols: NUM_PUBLIC_COLS,
+            witness_binary_poly_cols: src_sig.witness_binary_poly_cols - NUM_PUBLIC_COLS,
+            ..src_sig
+        }
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        down: TraceRow<B::Expr>,
+        from_ref: FromR,
+        mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        BigLinearUair::<R>::constrain_general(b, up, down, from_ref, mbs, ideal_from_ref)
+    }
+}
+
+impl<R> GenerateMultiTypeWitness for BigLinearUairWithPublicInput<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = <BigLinearUair<R> as GenerateMultiTypeWitness>::PolyCoeff;
+    type Int = <BigLinearUair<R> as GenerateMultiTypeWitness>::Int;
+
+    fn generate_witness<Rng: RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> (
+        Vec<DenseMultilinearExtension<BinaryPoly<32>>>,
+        Vec<DenseMultilinearExtension<DensePolynomial<Self::PolyCoeff, 32>>>,
+        Vec<DenseMultilinearExtension<Self::Int>>,
+    ) {
+        BigLinearUair::<R>::generate_witness(num_vars, rng)
     }
 }
 

@@ -37,33 +37,60 @@ pub trait ConstraintBuilder {
 /// each of the types: binary polynomials,
 /// polynomials with arbitrary coefficients,
 /// and integers.
+///
+/// Public columns precede witness columns within each type group.
+/// The flattened trace ordering is:
+/// `[pub_bin, wit_bin, pub_arb, wit_arb, pub_int, wit_int]`.
+#[derive(Default)]
 pub struct UairSignature {
-    /// Number of columns with binary polynomial elements.
-    pub binary_poly_cols: usize,
-    /// Number of columns with arbitrary polynomial elements.
-    pub arbitrary_poly_cols: usize,
-    /// Number of columns with integers.
-    pub int_cols: usize,
+    /// Number of public columns with binary polynomial elements.
+    pub public_binary_poly_cols: usize,
+    /// Number of witness columns with binary polynomial elements.
+    pub witness_binary_poly_cols: usize,
+    /// Number of public columns with arbitrary polynomial elements.
+    pub public_arbitrary_poly_cols: usize,
+    /// Number of witness columns with arbitrary polynomial elements.
+    pub witness_arbitrary_poly_cols: usize,
+    /// Number of public columns with integers.
+    pub public_int_cols: usize,
+    /// Number of witness columns with integers.
+    pub witness_int_cols: usize,
 }
 
+#[allow(clippy::arithmetic_side_effects)]
 impl UairSignature {
-    /// Maximum number of columns across the three types.
+    pub fn total_binary_poly_cols(&self) -> usize {
+        self.public_binary_poly_cols + self.witness_binary_poly_cols
+    }
+
+    pub fn total_arbitrary_poly_cols(&self) -> usize {
+        self.public_arbitrary_poly_cols + self.witness_arbitrary_poly_cols
+    }
+
+    pub fn total_int_cols(&self) -> usize {
+        self.public_int_cols + self.witness_int_cols
+    }
+
+    pub fn total_public_cols(&self) -> usize {
+        self.public_binary_poly_cols + self.public_arbitrary_poly_cols + self.public_int_cols
+    }
+
+    /// Maximum number of columns across the three types (public + witness per
+    /// type).
     pub fn max_cols(&self) -> usize {
         [
-            self.binary_poly_cols,
-            self.arbitrary_poly_cols,
-            self.int_cols,
+            self.total_binary_poly_cols(),
+            self.total_arbitrary_poly_cols(),
+            self.total_int_cols(),
         ]
         .into_iter()
         .max()
         .expect("the iterator is not empty")
     }
 
-    /// The sum of the numbers of columns across
-    /// all types.
-    #[allow(clippy::arithmetic_side_effects)] // we don't have that many columns
+    /// The sum of the numbers of columns across all types (public + witness).
     pub fn total_cols(&self) -> usize {
-        self.binary_poly_cols + self.arbitrary_poly_cols + self.int_cols
+        self.total_binary_poly_cols() + self.total_arbitrary_poly_cols() + self.total_int_cols()
     }
 }
 
@@ -83,11 +110,12 @@ impl<'a, Expr> TraceRow<'a, Expr> {
     /// Subdivides the slice according to the given signature `signature`.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn from_slice_with_signature(row: &'a [Expr], signature: &UairSignature) -> Self {
+        let nb = signature.total_binary_poly_cols();
+        let na = signature.total_arbitrary_poly_cols();
         Self {
-            binary_poly: &row[0..signature.binary_poly_cols],
-            arbitrary_poly: &row[signature.binary_poly_cols
-                ..signature.binary_poly_cols + signature.arbitrary_poly_cols],
-            int: &row[signature.binary_poly_cols + signature.arbitrary_poly_cols..],
+            binary_poly: &row[0..nb],
+            arbitrary_poly: &row[nb..nb + na],
+            int: &row[nb + na..],
         }
     }
 }

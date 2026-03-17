@@ -6,9 +6,12 @@ use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
     multipoint_eval::MultipointEval,
-    projections::{project_scalars, project_scalars_to_field},
+    projections::{project_scalars, project_scalars_to_field, project_trace_coeffs_row_major},
 };
-use zinc_poly::{EvaluatablePolynomial, univariate::dynamic::over_field::DynamicPolynomialF};
+use zinc_poly::{
+    EvaluatablePolynomial, mle::DenseMultilinearExtension,
+    univariate::dynamic::over_field::DynamicPolynomialF,
+};
 use zinc_transcript::{
     KeccakTranscript,
     traits::{ConstTranscribable, Transcript},
@@ -39,6 +42,7 @@ where
     <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
     F: InnerTransparentField
         + FromPrimitiveWithConfig
+        + FromWithConfig<Zt::Int>
         + for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> MulByScalar<&'a F>
@@ -54,10 +58,11 @@ where
     ///
     /// `up_evals` and `down_evals` from the F_q sumcheck (Step 4) are reduced
     /// via the multi-point evaluation sumcheck (Step 5) to a single evaluation
-    /// point `r_0`. The scalar `open_evals` at `r_0` are derived from the
-    /// polynomial-valued `lifted_evals` via `\psi_a`, then used
-    /// to check the sumcheck consistency. A single Zip+ PCS invocation
-    /// (Step 6) confirms the `lifted_evals`.
+    /// point `r_0`. The verifier recomputes public `lifted_evals` from public
+    /// data at `r_0`, interleaves them with the witness `lifted_evals` from
+    /// the proof, derives scalar `open_evals` via `\psi_a`, and checks the
+    /// multipoint eval consistency. A Zip+ PCS invocation (Step 7) confirms
+    /// the witness `lifted_evals`.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn verify<IdealOverF, const CHECK_FOR_OVERFLOW: bool>(
         (vp_bin, vp_arb, vp_int): &(
@@ -66,6 +71,9 @@ where
             ZipPlusParams<Zt::IntZt, Zt::IntLc>,
         ),
         proof: Proof<F>,
+        public_bin: &[DenseMultilinearExtension<<Zt::BinaryZt as ZipTypes>::Eval>],
+        public_arb: &[DenseMultilinearExtension<<Zt::ArbitraryZt as ZipTypes>::Eval>],
+        public_int: &[DenseMultilinearExtension<<Zt::IntZt as ZipTypes>::Eval>],
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
@@ -73,7 +81,7 @@ where
     where
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
     {
-        // === Step 0: Reconstruct transcript from commitments ===
+        // === Step 0: Reconstruct transcript from commitments + public data ===
         let mut pcs_transcript = PcsVerifierTranscript {
             fs_transcript: KeccakTranscript::default(),
             stream: Cursor::new(proof.zip),
@@ -86,6 +94,10 @@ where
             pcs_transcript.fs_transcript.absorb_slice(&comm.root);
         }
 
+        absorb_public_columns(&mut pcs_transcript.fs_transcript, public_bin);
+        absorb_public_columns(&mut pcs_transcript.fs_transcript, public_arb);
+        absorb_public_columns(&mut pcs_transcript.fs_transcript, public_int);
+
         // === Step 1: Prime projection ===
         let field_cfg = pcs_transcript
             .fs_transcript
@@ -94,7 +106,7 @@ where
         let num_constraints = count_constraints::<U>();
 
         // === Step 2: Ideal check ===
-        let ic_subclaim = U::verify_as_subprotocol::<F, IdealOverF, _>(
+        let ic_subclaim = U::verify_as_subprotocol::<_, IdealOverF, _>(
             &mut pcs_transcript.fs_transcript,
             proof.ideal_check,
             num_constraints,
@@ -128,39 +140,72 @@ where
         )?;
 
         // === Step 5: Multi-point evaluation sumcheck ===
-        // Derive scalar open_evals from lifted_evals via \psi_a, then pass
-        // them to the multipoint eval verifier for the consistency check.
-        let open_evals: Vec<F> = proof
-            .lifted_evals
-            .iter()
-            .map(|bar_u| bar_u.evaluate_at_point(&projecting_element_f))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(ProtocolError::LiftedEvalProjection)?;
-
         let mp_subclaim = MultipointEval::verify_as_subprotocol(
             &mut pcs_transcript.fs_transcript,
             proof.multipoint_eval,
             &cpr_subclaim.evaluation_point,
             &cpr_subclaim.up_evals,
             &cpr_subclaim.down_evals,
-            &open_evals,
             num_vars,
             &field_cfg,
         )?;
 
-        // Absorb lifted_evals into transcript
+        let r_0 = &mp_subclaim.sumcheck_subclaim.point;
+
+        // === Step 6: Recompute public lifted_evals, assemble full set ===
+        //
+        // The proof carries only witness lifted_evals. The verifier
+        // independently computes public lifted_evals from public data at r_0,
+        // then interleaves them with the witness portion to reconstruct the
+        // full lifted_evals in canonical order:
+        //   [pub_bin, wit_bin, pub_arb, wit_arb, pub_int, wit_int]
+        let sig = U::signature();
+        let num_pub_bin = sig.public_binary_poly_cols;
+        let num_pub_arb = sig.public_arbitrary_poly_cols;
+        let num_pub_int = sig.public_int_cols;
+
+        let (num_wit_bin, num_wit_arb) = (
+            sig.witness_binary_poly_cols,
+            sig.witness_arbitrary_poly_cols,
+        );
+
+        let public_lifted = if add!(add!(num_pub_bin, num_pub_arb), num_pub_int) > 0 {
+            let projected_public = project_trace_coeffs_row_major::<F, Zt::Int, Zt::Int, D>(
+                public_bin, public_arb, public_int, &field_cfg,
+            );
+            compute_lifted_evals::<F, D>(r_0, public_bin, &projected_public, &field_cfg)
+        } else {
+            Vec::new()
+        };
+
+        let all_lifted_evals: Vec<_> = public_lifted[..num_pub_bin]
+            .iter()
+            .chain(&proof.witness_lifted_evals[..num_wit_bin])
+            .chain(&public_lifted[num_pub_bin..add!(num_pub_bin, num_pub_arb)])
+            .chain(&proof.witness_lifted_evals[num_wit_bin..add!(num_wit_bin, num_wit_arb)])
+            .chain(&public_lifted[add!(num_pub_bin, num_pub_arb)..])
+            .chain(&proof.witness_lifted_evals[add!(num_wit_bin, num_wit_arb)..])
+            .cloned()
+            .collect();
+
+        // Derive scalar open_evals via \psi_a and finalize the multipoint
+        // eval consistency check.
+        let open_evals: Vec<F> = all_lifted_evals
+            .iter()
+            .map(|bar_u| bar_u.evaluate_at_point(&projecting_element_f))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        MultipointEval::<F>::verify_subclaim(&mp_subclaim, &open_evals, &field_cfg)?;
+
+        // Absorb all lifted_evals into transcript (same order as prover).
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
-        for bar_u in &proof.lifted_evals {
+        for bar_u in &all_lifted_evals {
             pcs_transcript
                 .fs_transcript
                 .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
         }
 
-        // === Step 6: PCS verify at r_0 ===
-        //
-        // TODO: Once we add public inputs, compute public input MLE evaluations
-        //       at cpr_subclaim.evaluation_point directly from public data here,
-        //       then include them in the constraint recomputation check.
+        // === Step 7: PCS verify at r_0 (witness columns only) ===
 
         macro_rules! verify_pcs_batch {
             ($Zt:ty, $Lc:ty, $vp:expr, $idx:tt, [$evals_range:expr]) => {{
@@ -171,7 +216,7 @@ where
                         comm.batch_size,
                     );
                     let mut eval_f = F::zero_with_cfg(&field_cfg);
-                    for (bar_u, alphas) in proof.lifted_evals[$evals_range]
+                    for (bar_u, alphas) in all_lifted_evals[$evals_range]
                         .iter()
                         .zip(per_poly_alphas.iter())
                     {
@@ -186,7 +231,7 @@ where
                         $vp,
                         comm,
                         &field_cfg,
-                        &mp_subclaim.eval_point,
+                        r_0,
                         &eval_f,
                         &per_poly_alphas,
                     )
@@ -195,17 +240,29 @@ where
             }};
         }
 
-        let sig = U::signature();
-        let (n_bin, n_arb, _n_int) = (sig.binary_poly_cols, sig.arbitrary_poly_cols, sig.int_cols);
-        verify_pcs_batch!(Zt::BinaryZt, Zt::BinaryLc, vp_bin, 0, [..n_bin]);
+        let num_total_bin = sig.total_binary_poly_cols();
+        let num_total_arb = sig.total_arbitrary_poly_cols();
+        verify_pcs_batch!(
+            Zt::BinaryZt,
+            Zt::BinaryLc,
+            vp_bin,
+            0,
+            [num_pub_bin..num_total_bin]
+        );
         verify_pcs_batch!(
             Zt::ArbitraryZt,
             Zt::ArbitraryLc,
             vp_arb,
             1,
-            [n_bin..add!(n_bin, n_arb)]
+            [add!(num_total_bin, num_pub_arb)..add!(num_total_bin, num_total_arb)]
         );
-        verify_pcs_batch!(Zt::IntZt, Zt::IntLc, vp_int, 2, [add!(n_bin, n_arb)..]);
+        verify_pcs_batch!(
+            Zt::IntZt,
+            Zt::IntLc,
+            vp_int,
+            2,
+            [add!(add!(num_total_bin, num_total_arb), num_pub_int)..]
+        );
 
         Ok(())
     }

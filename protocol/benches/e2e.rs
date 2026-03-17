@@ -23,8 +23,8 @@ use zinc_poly::{
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes};
 use zinc_test_uair::{
-    BigLinearUair, BinaryDecompositionUair, GenerateMultiTypeWitness, GenerateSingleTypeWitness,
-    TestAirNoMultiplication,
+    BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateMultiTypeWitness,
+    GenerateSingleTypeWitness, TestAirNoMultiplication,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
@@ -341,6 +341,11 @@ fn bench_prove_verify<Zt, U, IdealOverF>(
         <zinc_plus!()>::prove::<CHECKED>(&pp, bin, arb, int, num_vars, project_scalar)
             .expect("proof generation for verifier bench");
 
+    let sig = U::signature();
+    let public_bin = &bin[..sig.public_binary_poly_cols];
+    let public_arb = &arb[..sig.public_arbitrary_poly_cols];
+    let public_int = &int[..sig.public_int_cols];
+
     group.bench_function(BenchmarkId::new("Verify", &params), |bench| {
         bench.iter_batched(
             || proof.clone(),
@@ -348,6 +353,9 @@ fn bench_prove_verify<Zt, U, IdealOverF>(
                 black_box(<zinc_plus!()>::verify::<_, CHECKED>(
                     &pp,
                     proof,
+                    public_bin,
+                    public_arb,
+                    public_int,
                     num_vars,
                     project_scalar,
                     project_ideal,
@@ -441,6 +449,10 @@ fn bench_big_linear(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     bench_uair_generic_multi::<BigLinearUair<i64>>(group, "BigLinear", num_vars);
 }
 
+fn bench_big_linear_public_input(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    bench_uair_generic_multi::<BigLinearUairWithPublicInput<i64>>(group, "BigLinearPI", num_vars);
+}
+
 //
 // Criterion entry point
 //
@@ -459,6 +471,10 @@ fn e2e_benches(c: &mut Criterion) {
     bench_big_linear(&mut group, 8);
     bench_big_linear(&mut group, 10);
     bench_big_linear(&mut group, 12);
+
+    bench_big_linear_public_input(&mut group, 8);
+    bench_big_linear_public_input(&mut group, 10);
+    bench_big_linear_public_input(&mut group, 12);
 
     group.finish();
 }

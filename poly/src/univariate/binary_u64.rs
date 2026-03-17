@@ -337,7 +337,7 @@ impl<const DEGREE_PLUS_ONE: usize> Named for BinaryU64Poly<DEGREE_PLUS_ONE> {
 }
 
 impl<const DEGREE_PLUS_ONE: usize> ConstTranscribable for BinaryU64Poly<DEGREE_PLUS_ONE> {
-    const NUM_BYTES: usize = DensePolynomial::<Boolean, DEGREE_PLUS_ONE>::NUM_BYTES;
+    const NUM_BYTES: usize = u64::NUM_BYTES;
 
     #[inline(always)]
     fn read_transcription_bytes(bytes: &[u8]) -> Self {
@@ -693,6 +693,19 @@ mod tests {
             assert_eq!(result, i);
         }
     }
+
+    #[test]
+    fn transcribable() {
+        let original =
+            BinaryU64Poly::<4>::new([true.into(), false.into(), true.into(), false.into()]);
+        let mut bytes = [0u8; BinaryU64Poly::<4>::NUM_BYTES];
+        assert_eq!(bytes.len(), u64::NUM_BYTES);
+
+        original.write_transcription_bytes(&mut bytes);
+        let deserialized = BinaryU64Poly::<4>::read_transcription_bytes(&bytes);
+        assert_eq!(original, deserialized);
+    }
+
     fn widen_ref<const DEGREE_PLUS_ONE: usize>(
         poly: &BinaryU64Poly<DEGREE_PLUS_ONE>,
         scalar: i64,
