@@ -10,9 +10,8 @@ use crate::{
     },
 };
 use crypto_primitives::DenseRowMatrix;
-use itertools::Itertools;
 use uninit::out_ref::Out;
-use zinc_utils::{cfg_chunks, cfg_chunks_mut};
+use zinc_utils::{cfg_chunks, cfg_chunks_mut, cfg_iter};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -72,7 +71,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         validate_input::<Zt, Lc, bool>("commit", pp.num_vars, batch_size, polys, &[])?;
 
         let expected_num_evals = pp.num_rows * row_len;
-        let cw_matrices: Vec<DenseRowMatrix<Zt::Cw>> = polys.iter().map(|poly| {
+        let cw_matrices: Vec<DenseRowMatrix<Zt::Cw>> = cfg_iter!(polys).map(|poly| {
             assert_eq!(
                 poly.len(),
                 expected_num_evals,
@@ -81,8 +80,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 expected_num_evals
             );
 
-            Ok::<_, ZipError>(ZipPlus::<Zt, Lc>::encode_rows(pp, row_len, poly))
-        }).try_collect()?;
+            Self::encode_rows(pp, row_len, poly)
+        }).collect();
 
         let all_rows: Vec<&[Zt::Cw]> = cw_matrices.iter().flat_map(|m| m.as_rows()).collect();
         let merkle_tree = MerkleTree::new(&all_rows);
