@@ -334,7 +334,7 @@ mod tests {
     };
 
     const INT_LIMBS: usize = U64::LIMBS;
-    const FIELD_LIMBS: usize = 4;
+    const FIELD_LIMBS: usize = U64::LIMBS * 3;
     const DEGREE_PLUS_ONE: usize = 32;
 
     // Zip+ type parameters.
@@ -350,7 +350,7 @@ mod tests {
         const NUM_COLUMN_OPENINGS: usize = 200;
         type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
         type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
-        type Fmod = Uint<K>;
+        type Fmod = Uint<FIELD_LIMBS>;
         type PrimeTest = MillerRabin;
         type Chal = i128;
         type Pt = i128;
@@ -372,7 +372,7 @@ mod tests {
         const NUM_COLUMN_OPENINGS: usize = 200;
         type Eval = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
-        type Fmod = Uint<K>;
+        type Fmod = Uint<FIELD_LIMBS>;
         type PrimeTest = MillerRabin;
         type Chal = i128;
         type Pt = i128;
@@ -397,7 +397,7 @@ mod tests {
         const NUM_COLUMN_OPENINGS: usize = 200;
         type Eval = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Cw = DensePolynomial<Int<K>, DEGREE_PLUS_ONE>;
-        type Fmod = Uint<K>;
+        type Fmod = Uint<FIELD_LIMBS>;
         type PrimeTest = MillerRabin;
         type Chal = i128;
         type Pt = i128;
@@ -422,7 +422,7 @@ mod tests {
         const NUM_COLUMN_OPENINGS: usize = 200;
         type Eval = ZtInt;
         type Cw = i128;
-        type Fmod = Uint<K>;
+        type Fmod = Uint<FIELD_LIMBS>;
         type PrimeTest = MillerRabin;
         type Chal = i128;
         type Pt = i128;
@@ -440,7 +440,7 @@ mod tests {
         type Chal = i128;
         type Pt = i128;
         type CombR = Int<M>;
-        type Fmod = Uint<K>;
+        type Fmod = Uint<FIELD_LIMBS>;
         type PrimeTest = MillerRabin;
 
         type BinaryZt = BinPolyZipTypes;
@@ -468,7 +468,7 @@ mod tests {
         type Chal = i128;
         type Pt = i128;
         type CombR = Int<M>;
-        type Fmod = Uint<K>;
+        type Fmod = Uint<FIELD_LIMBS>;
         type PrimeTest = MillerRabin;
 
         type BinaryZt = BinPolyZipTypes;
