@@ -6,18 +6,17 @@ use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
     multipoint_eval::MultipointEval,
-    projections::{project_scalars, project_scalars_to_field, project_trace_coeffs_row_major},
+    projections::{
+        ProjectedTrace, project_scalars, project_scalars_to_field, project_trace_coeffs_row_major,
+    },
 };
-use zinc_poly::{
-    EvaluatablePolynomial, mle::DenseMultilinearExtension,
-    univariate::dynamic::over_field::DynamicPolynomialF,
-};
+use zinc_poly::{EvaluatablePolynomial, univariate::dynamic::over_field::DynamicPolynomialF};
 use zinc_transcript::{
     KeccakTranscript,
     traits::{ConstTranscribable, Transcript},
 };
 use zinc_uair::{
-    Uair,
+    Uair, UairTrace,
     constraint_counter::count_constraints,
     degree_counter::count_max_degree,
     ideal::{Ideal, IdealCheck},
@@ -42,7 +41,7 @@ where
     <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
     F: InnerTransparentField
         + FromPrimitiveWithConfig
-        + FromWithConfig<Zt::Int>
+        + for<'a> FromWithConfig<&'a Zt::Int>
         + for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> MulByScalar<&'a F>
@@ -71,9 +70,7 @@ where
             ZipPlusParams<Zt::IntZt, Zt::IntLc>,
         ),
         proof: Proof<F>,
-        public_bin: &[DenseMultilinearExtension<<Zt::BinaryZt as ZipTypes>::Eval>],
-        public_arb: &[DenseMultilinearExtension<<Zt::ArbitraryZt as ZipTypes>::Eval>],
-        public_int: &[DenseMultilinearExtension<<Zt::IntZt as ZipTypes>::Eval>],
+        public_trace: &UairTrace<Zt::Int, Zt::Int, D>,
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
@@ -94,9 +91,12 @@ where
             pcs_transcript.fs_transcript.absorb_slice(&comm.root);
         }
 
-        absorb_public_columns(&mut pcs_transcript.fs_transcript, public_bin);
-        absorb_public_columns(&mut pcs_transcript.fs_transcript, public_arb);
-        absorb_public_columns(&mut pcs_transcript.fs_transcript, public_int);
+        absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.binary_poly);
+        absorb_public_columns(
+            &mut pcs_transcript.fs_transcript,
+            &public_trace.arbitrary_poly,
+        );
+        absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
 
         // === Step 1: Prime projection ===
         let field_cfg = pcs_transcript
@@ -170,10 +170,14 @@ where
         );
 
         let public_lifted = if add!(add!(num_pub_bin, num_pub_arb), num_pub_int) > 0 {
-            let projected_public = project_trace_coeffs_row_major::<F, Zt::Int, Zt::Int, D>(
-                public_bin, public_arb, public_int, &field_cfg,
-            );
-            compute_lifted_evals::<F, D>(r_0, public_bin, &projected_public, &field_cfg)
+            let projected_public =
+                project_trace_coeffs_row_major::<F, Zt::Int, Zt::Int, D>(public_trace, &field_cfg);
+            compute_lifted_evals::<F, D>(
+                r_0,
+                &public_trace.binary_poly,
+                &ProjectedTrace::RowMajor(projected_public),
+                &field_cfg,
+            )
         } else {
             Vec::new()
         };

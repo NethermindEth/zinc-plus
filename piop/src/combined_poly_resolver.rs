@@ -131,6 +131,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             mles
         };
 
+        let sig = U::signature();
+
         let (sumcheck_proof, sumcheck_prover_state) = MLSumcheck::prove_as_subprotocol(
             transcript,
             mles,
@@ -153,14 +155,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
                 U::constrain_general(
                     &mut folder,
-                    TraceRow::from_slice_with_signature(
-                        &mle_values[2..num_cols + 2],
-                        &U::signature(),
-                    ),
-                    TraceRow::from_slice_with_signature(
-                        &mle_values[num_cols + 2..],
-                        &U::signature(),
-                    ),
+                    TraceRow::from_slice_with_signature(&mle_values[2..num_cols + 2], &sig),
+                    TraceRow::from_slice_with_signature(&mle_values[num_cols + 2..], &sig),
                     project,
                     |x, y| Some(project(y) * x),
                     ImpossibleIdeal::from_ref,
@@ -242,7 +238,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         F::Modulus: ConstTranscribable,
         U: Uair,
     {
-        proof.validate_evaluation_sizes(U::signature().total_cols())?;
+        let sig = U::signature();
+        proof.validate_evaluation_sizes(sig.total_cols())?;
 
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
@@ -317,8 +314,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         U::constrain_general(
             &mut folder,
-            TraceRow::from_slice_with_signature(&proof.up_evals, &U::signature()),
-            TraceRow::from_slice_with_signature(&proof.down_evals, &U::signature()),
+            TraceRow::from_slice_with_signature(&proof.up_evals, &sig),
+            TraceRow::from_slice_with_signature(&proof.down_evals, &sig),
             project,
             |x, y| Some(project(y) * x),
             ImpossibleIdeal::from_ref,
@@ -388,14 +385,14 @@ mod tests {
     use super::*;
     use crate::{
         ideal_check::IdealCheckProtocol,
-        projections::{evaluate_trace_to_column_mles, project_scalars_to_field},
+        projections::{ProjectedTrace, evaluate_trace_to_column_mles, project_scalars_to_field},
         test_utils::{LIMBS, run_ideal_check_prover_combined, test_config},
     };
     use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
     use rand::rng;
     use zinc_poly::univariate::dense::DensePolynomial;
     use zinc_test_uair::{
-        GenerateSingleTypeWitness, TestAirNoMultiplication, TestUairSimpleMultiplication,
+        GenerateRandomTrace, TestAirNoMultiplication, TestUairSimpleMultiplication,
     };
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::{
@@ -418,8 +415,8 @@ mod tests {
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
-        U: GenerateSingleTypeWitness<Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
-            + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+        U: Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+            + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<5>, Int = Int<5>>
             + IdealCheckProtocol,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
@@ -429,7 +426,7 @@ mod tests {
         let mut prover_transcript = KeccakTranscript::new();
         let mut verifier_transcript = prover_transcript.clone();
 
-        let trace = U::generate_witness(num_vars, &mut rng);
+        let trace = U::generate_random_trace(num_vars, &mut rng);
 
         let (ic_proof, ic_prover_state, projected_scalars, projected_trace) =
             run_ideal_check_prover_combined::<U, DEGREE_PLUS_ONE>(
@@ -460,7 +457,10 @@ mod tests {
 
         let (proof, _) = CombinedPolyResolver::prove_as_subprotocol::<U>(
             &mut prover_transcript,
-            evaluate_trace_to_column_mles(&projected_trace, &projecting_element),
+            evaluate_trace_to_column_mles(
+                &ProjectedTrace::RowMajor(projected_trace),
+                &projecting_element,
+            ),
             &ic_prover_state.evaluation_point,
             &projected_scalars,
             num_constraints,

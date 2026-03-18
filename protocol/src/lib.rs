@@ -22,14 +22,14 @@ pub mod verifier;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use crypto_primitives::{ConstIntRing, ConstIntSemiring, FromWithConfig, PrimeField};
+use crypto_primitives::{ConstIntRing, ConstIntSemiring, FromWithConfig, PrimeField, Semiring};
 use std::marker::PhantomData;
 use thiserror::Error;
 use zinc_piop::{
     combined_poly_resolver::{CombinedPolyResolverError, Proof as CombinedPolyResolverProof},
     ideal_check::{IdealCheckError, Proof as IdealCheckProof},
     multipoint_eval::{MultipointEvalError, Proof as MultipointEvalProof},
-    projections::RowMajorTrace,
+    projections::ProjectedTrace,
 };
 use zinc_poly::{
     ConstCoeffBitWidth, EvaluationError as PolyEvaluationError,
@@ -41,7 +41,7 @@ use zinc_poly::{
 use zinc_primality::PrimalityTest;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{Uair, ideal::Ideal};
-use zinc_utils::{cfg_into_iter, cfg_iter, named::Named};
+use zinc_utils::{cfg_extend, cfg_into_iter, cfg_iter, named::Named};
 use zip_plus::{
     ZipError,
     code::LinearCode,
@@ -80,7 +80,15 @@ pub struct Proof<F: PrimeField> {
 pub trait ZincTypes<const DEGREE_PLUS_ONE: usize> {
     /// Main integer type for the protocol, used as a coefficient type for the
     /// arbitrary polynomial trace columns and for the integer trace columns.
-    type Int: ConstTranscribable + ConstCoeffBitWidth + Named + Default + Clone + Send + Sync;
+    type Int: Semiring
+        + ConstTranscribable
+        + ConstCoeffBitWidth
+        + Named
+        + Default
+        + Clone
+        + Send
+        + Sync
+        + 'static;
 
     /// Projecting element to project Zip+ evaluations and UAIR scalars to the
     /// field.
@@ -196,7 +204,8 @@ pub fn absorb_public_columns<T: ConstTranscribable>(
 /// Compute per-column lifted MLE evaluations at `point`.
 ///
 /// For each column j, returns `\sum_b eq(b, point) * v_j(b)` as a polynomial
-/// in `F_q[X]` (coefficient-wise MLE evaluation).
+/// in `F_q[X]` (coefficient-wise MLE evaluation). Dispatches on the trace
+/// layout internally.
 ///
 /// Binary columns exploit the 0/1 structure for conditional additions only.
 /// The `eq(point, *)` table is built once and reused across all columns.
@@ -204,17 +213,17 @@ pub fn absorb_public_columns<T: ConstTranscribable>(
 pub fn compute_lifted_evals<F: PrimeField, const D: usize>(
     point: &[F],
     trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
-    projected_trace: &RowMajorTrace<F>,
+    projected_trace: &ProjectedTrace<F>,
     field_cfg: &F::Config,
 ) -> Vec<DynamicPolynomialF<F>> {
     let eq_table = zinc_poly::utils::build_eq_x_r_vec(point, field_cfg)
         .expect("compute_lifted_evals: eq table build failed");
 
     let n_bin = trace_bin_poly.len();
-    let num_cols = projected_trace.first().map(|r| r.len()).unwrap_or(0);
     let zero = F::zero_with_cfg(field_cfg);
 
-    cfg_iter!(trace_bin_poly)
+    // Binary columns: exploit 0/1 structure for conditional additions.
+    let mut result: Vec<DynamicPolynomialF<F>> = cfg_iter!(trace_bin_poly)
         .map(|col| {
             let mut coeffs = vec![zero.clone(); D];
             for (b, entry) in col.iter().enumerate() {
@@ -224,28 +233,53 @@ pub fn compute_lifted_evals<F: PrimeField, const D: usize>(
                     }
                 }
             }
-            coeffs
+            DynamicPolynomialF::new_trimmed(coeffs)
         })
-        .chain(cfg_into_iter!(n_bin..num_cols).map(|col_idx| {
-            let num_coeffs = projected_trace
-                .iter()
-                .map(|row| row[col_idx].coeffs.len())
-                .max()
-                .unwrap_or(0);
+        .collect();
 
-            let mut coeffs = vec![zero.clone(); num_coeffs];
-            for (b, row) in projected_trace.iter().enumerate() {
-                let entry = &row[col_idx];
-                for (l, coeff) in entry.coeffs.iter().enumerate() {
-                    let mut term = eq_table[b].clone();
-                    term *= coeff;
-                    coeffs[l] += &term;
-                }
+    // Non-binary columns: coefficient-wise eq-weighted sum.
+    fn weighted_eq_sum<'a, F2: PrimeField + 'a>(
+        col: impl Iterator<Item = &'a DynamicPolynomialF<F2>> + Clone,
+        eq_table: &[F2],
+        zero: &F2,
+    ) -> DynamicPolynomialF<F2> {
+        let num_coeffs = col.clone().map(|e| e.coeffs.len()).max().unwrap_or(0);
+        let mut coeffs = vec![zero.clone(); num_coeffs];
+        for (b, entry) in col.enumerate() {
+            for (l, coeff) in entry.coeffs.iter().enumerate() {
+                let mut term = eq_table[b].clone();
+                term *= coeff;
+                coeffs[l] += &term;
             }
-            coeffs
-        }))
-        .map(DynamicPolynomialF::new_trimmed)
-        .collect()
+        }
+        DynamicPolynomialF::new_trimmed(coeffs)
+    }
+
+    match projected_trace {
+        ProjectedTrace::RowMajor(t) => {
+            let num_cols = t.first().map(|r| r.len()).unwrap_or(0);
+            cfg_extend!(
+                result,
+                cfg_into_iter!(n_bin..num_cols).map(|col_idx| weighted_eq_sum(
+                    t.iter().map(|row| &row[col_idx]),
+                    &eq_table,
+                    &zero,
+                ))
+            );
+        }
+        ProjectedTrace::ColumnMajor(t) => {
+            cfg_extend!(
+                result,
+                cfg_iter!(t[n_bin..]).map(|col_mle| weighted_eq_sum(
+                    col_mle.iter(),
+                    &eq_table,
+                    &zero,
+                ))
+            );
+        }
+    }
+
+    result
 }
 
 /// Project a DensePolynomial scalar to DynamicPolynomialF by projecting each
@@ -272,20 +306,24 @@ mod tests {
     use super::*;
     use crypto_bigint::U64;
     use crypto_primitives::{
-        crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
+        Field, crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
     };
     use rand::rng;
     use zinc_poly::univariate::{binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct};
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
-        BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair,
-        GenerateMultiTypeWitness, GenerateSingleTypeWitness, TestAirNoMultiplication,
-        TestUairSimpleMultiplication,
+        BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
+        TestAirNoMultiplication, TestUairSimpleMultiplication,
     };
-    use zinc_uair::{ideal::degree_one::DegreeOneIdeal, ideal_collector::IdealOrZero};
+    use zinc_uair::{
+        degree_counter::count_max_degree, ideal::degree_one::DegreeOneIdeal,
+        ideal_collector::IdealOrZero,
+    };
     use zinc_utils::{
         CHECKED,
+        from_ref::FromRef,
         inner_product::{MBSInnerProduct, ScalarProduct},
+        projectable_to_field::ProjectableToField,
     };
     use zip_plus::{
         code::{
@@ -444,71 +482,96 @@ mod tests {
 
     /// Set up Zip+ PCS parameters for a given number of MLE variables.
     #[allow(clippy::type_complexity)]
-    fn setup_pp<Wzt>(
+    fn setup_pp<Zt>(
         num_vars: usize,
     ) -> (
-        ZipPlusParams<Wzt::BinaryZt, Wzt::BinaryLc>,
-        ZipPlusParams<Wzt::ArbitraryZt, Wzt::ArbitraryLc>,
-        ZipPlusParams<Wzt::IntZt, Wzt::IntLc>,
+        ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
+        ZipPlusParams<Zt::IntZt, Zt::IntLc>,
     )
     where
-        Wzt: ZincTypes<DEGREE_PLUS_ONE>,
+        Zt: ZincTypes<DEGREE_PLUS_ONE>,
     {
         let poly_size = 1 << num_vars;
         (
-            ZipPlus::<Wzt::BinaryZt, Wzt::BinaryLc>::setup(
+            ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::setup(poly_size, Zt::BinaryLc::new(poly_size)),
+            ZipPlus::<Zt::ArbitraryZt, Zt::ArbitraryLc>::setup(
                 poly_size,
-                Wzt::BinaryLc::new(poly_size),
+                Zt::ArbitraryLc::new(poly_size),
             ),
-            ZipPlus::<Wzt::ArbitraryZt, Wzt::ArbitraryLc>::setup(
-                poly_size,
-                Wzt::ArbitraryLc::new(poly_size),
-            ),
-            ZipPlus::<Wzt::IntZt, Wzt::IntLc>::setup(poly_size, Wzt::IntLc::new(poly_size)),
+            ZipPlus::<Zt::IntZt, Zt::IntLc>::setup(poly_size, Zt::IntLc::new(poly_size)),
         )
     }
 
-    fn do_test_multi_witness<U>()
-    where
-        U: Uair<Ideal = DegreeOneIdeal<ZtInt>, Scalar = DensePolynomial<ZtInt, DEGREE_PLUS_ONE>>
-            + GenerateMultiTypeWitness<PolyCoeff = ZtInt, Int = ZtInt>
+    macro_rules! default_project_ideal {
+        () => {
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg))
+        };
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn do_test<Zt, U>(
+        num_vars: usize,
+        project_ideal: impl Fn(
+            &IdealOrZero<U::Ideal>,
+            &<F as PrimeField>::Config,
+        ) -> IdealOrZero<DegreeOneIdeal<F>>
+        + Copy,
+        tamper: impl Fn(&mut Proof<F>),
+        check_verification: impl Fn(Result<(), ProtocolError<F, IdealOrZero<DegreeOneIdeal<F>>>>),
+    ) where
+        Zt: ZincTypes<DEGREE_PLUS_ONE>,
+        <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
+        <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+        <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
+        <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
+        U: Uair<Scalar = DensePolynomial<Zt::Int, DEGREE_PLUS_ONE>>
+            + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Zt::Int, Int = Zt::Int>
             + 'static,
-        F: for<'a> FromWithConfig<&'a ZtInt>,
+        F: for<'a> FromWithConfig<&'a Zt::Int>
+            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> FromWithConfig<&'a Zt::Chal>
+            + for<'a> FromWithConfig<&'a Zt::Pt>,
+        <F as Field>::Inner: FromRef<Zt::Fmod>,
+        <F as Field>::Modulus: FromRef<Zt::Fmod>,
     {
         let mut rng = rng();
-        let num_vars = 8;
-        let pp = setup_pp::<TestZincTypesIprs>(num_vars);
+        let pp = setup_pp::<Zt>(num_vars);
 
-        let (bin_trace, arb_trace, int_trace) = U::generate_witness(num_vars, &mut rng);
+        let trace = U::generate_random_trace(num_vars, &mut rng);
 
         let sig = U::signature();
-        let public_bin = &bin_trace[..sig.public_binary_poly_cols];
-        let public_arb = &arb_trace[..sig.public_arbitrary_poly_cols];
-        let public_int = &int_trace[..sig.public_int_cols];
+        let public_trace = trace.public(&sig);
 
-        // Prover: pass full trace (public first, then witness)
-        let proof = ZincPlusPiop::<TestZincTypesIprs, U, F, DEGREE_PLUS_ONE>::prove::<CHECKED>(
-            &pp,
-            &bin_trace,
-            &arb_trace,
-            &int_trace,
-            num_vars,
-            project_scalar_fn,
-        )
-        .expect("Prover failed");
+        macro_rules! run_protocol {
+            ($mle_first:ident) => {
+                let mut proof = ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::prove::<
+                    { $mle_first },
+                    CHECKED,
+                >(&pp, &trace, num_vars, project_scalar_fn)
+                .expect("Prover failed");
 
-        // Verifier: pass only public columns separately
-        ZincPlusPiop::<TestZincTypesIprs, U, F, DEGREE_PLUS_ONE>::verify::<_, CHECKED>(
-            &pp,
-            proof,
-            public_bin,
-            public_arb,
-            public_int,
-            num_vars,
-            project_scalar_fn,
-            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
-        )
-        .expect("Verifier failed");
+                tamper(&mut proof);
+
+                let verification_result =
+                    ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::verify::<_, CHECKED>(
+                        &pp,
+                        proof,
+                        &public_trace,
+                        num_vars,
+                        project_scalar_fn,
+                        project_ideal,
+                    );
+                check_verification(verification_result);
+            };
+        }
+
+        run_protocol!(false);
+
+        if count_max_degree::<U>() <= 1 {
+            // For linear constraints, also test the MLE-first ideal check approach.
+            run_protocol!(true);
+        }
     }
 
     /// End-to-end test: TestAirNoMultiplication.
@@ -517,33 +580,12 @@ mod tests {
     /// (one constraint, no polynomial multiplication, ideal = <X - 2>).
     #[test]
     fn test_e2e_no_multiplication() {
-        let mut rng = rng();
-        let num_vars = 8;
-        let pp = setup_pp::<TestZincTypesIprs>(num_vars);
-
-        type TestUair = TestAirNoMultiplication<i64>;
-
-        type Piop = ZincPlusPiop<TestZincTypesIprs, TestUair, F, DEGREE_PLUS_ONE>;
-
-        // Generate a valid witness satisfying the UAIR constraints.
-        let trace = TestUair::generate_witness(num_vars, &mut rng);
-
-        // Prover
-        let proof = Piop::prove::<CHECKED>(&pp, &[], &trace, &[], num_vars, project_scalar_fn)
-            .expect("Prover failed");
-
-        // Verifier
-        Piop::verify::<_, CHECKED>(
-            &pp,
-            proof,
-            &[],
-            &[],
-            &[],
-            num_vars,
-            project_scalar_fn,
-            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
-        )
-        .expect("Verifier failed");
+        do_test::<TestZincTypesIprs, TestAirNoMultiplication<ZtInt>>(
+            8,
+            default_project_ideal!(),
+            |_| {},
+            |res| res.unwrap(),
+        );
     }
 
     /// End-to-end test: TestUairSimpleMultiplication.
@@ -559,33 +601,12 @@ mod tests {
     /// ~= 127^8 ~= 2^56, which fits in i64.
     #[test]
     fn test_e2e_simple_multiplication() {
-        let mut rng = rng();
-        let num_vars = 2;
-        let pp = setup_pp::<TestZincTypesRaa>(num_vars);
-
-        type TestUair = TestUairSimpleMultiplication<i64>;
-
-        type Piop = ZincPlusPiop<TestZincTypesRaa, TestUair, F, DEGREE_PLUS_ONE>;
-
-        // Generate a valid witness satisfying the UAIR constraints.
-        let trace = TestUair::generate_witness(num_vars, &mut rng);
-
-        // Prover
-        let proof = Piop::prove::<CHECKED>(&pp, &[], &trace, &[], num_vars, project_scalar_fn)
-            .expect("Prover failed");
-
-        // Verifier
-        Piop::verify::<_, CHECKED>(
-            &pp,
-            proof,
-            &[],
-            &[],
-            &[],
-            num_vars,
-            project_scalar_fn,
+        do_test::<TestZincTypesRaa, TestUairSimpleMultiplication<ZtInt>>(
+            2,
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
-        )
-        .expect("Verifier failed");
+            |_| {},
+            |res| res.unwrap(),
+        );
     }
 
     /// End-to-end test: BinaryDecompositionUair.
@@ -594,40 +615,12 @@ mod tests {
     /// UAIR constraint: binary_poly[0] - int[0] \in <X - 2>
     #[test]
     fn test_e2e_binary_decomposition() {
-        let mut rng = rng();
-        let num_vars = 8;
-        let pp = setup_pp::<TestZincTypesIprs>(num_vars);
-
-        type TestUair = BinaryDecompositionUair<i64>;
-
-        type Piop = ZincPlusPiop<TestZincTypesIprs, TestUair, F, DEGREE_PLUS_ONE>;
-
-        // Generate a valid witness satisfying the UAIR constraints.
-        let (binary_trace, arb_trace, int_trace) = TestUair::generate_witness(num_vars, &mut rng);
-
-        // Prover
-        let proof = Piop::prove::<CHECKED>(
-            &pp,
-            &binary_trace,
-            &arb_trace,
-            &int_trace,
-            num_vars,
-            project_scalar_fn,
-        )
-        .expect("Prover failed");
-
-        // Verifier
-        Piop::verify::<_, CHECKED>(
-            &pp,
-            proof,
-            &[],
-            &[],
-            &[],
-            num_vars,
-            project_scalar_fn,
-            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
-        )
-        .expect("Verifier failed");
+        do_test::<TestZincTypesIprs, BinaryDecompositionUair<ZtInt>>(
+            8,
+            default_project_ideal!(),
+            |_| {},
+            |res| res.unwrap(),
+        );
     }
 
     /// End-to-end test: BigLinearUair.
@@ -639,7 +632,12 @@ mod tests {
     ///   up.binary_poly[i] - down.binary_poly[i] = 0, for i=1..15
     #[test]
     fn test_e2e_big_linear() {
-        do_test_multi_witness::<BigLinearUair<ZtInt>>();
+        do_test::<TestZincTypesIprs, BigLinearUair<ZtInt>>(
+            8,
+            default_project_ideal!(),
+            |_| {},
+            |res| res.unwrap(),
+        );
     }
 
     /// End-to-end test: BigLinearUairWithPublicInput.
@@ -648,74 +646,75 @@ mod tests {
     /// public inputs.
     #[test]
     fn test_e2e_big_linear_with_public_input() {
-        do_test_multi_witness::<BigLinearUairWithPublicInput<ZtInt>>();
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+            8,
+            default_project_ideal!(),
+            |_| {},
+            |res| res.unwrap(),
+        );
     }
 
     //
     // Negative tests for BigLinearUair: verify that proof tampering is detected.
     //
 
-    fn big_linear_verify_tampered(tamper: impl FnOnce(&mut Proof<F>)) {
-        let mut rng = rng();
-        let num_vars = 8;
-        let pp = setup_pp::<TestZincTypesIprs>(num_vars);
-
-        type TestUair = BigLinearUair<i64>;
-
-        type Piop = ZincPlusPiop<TestZincTypesIprs, TestUair, F, DEGREE_PLUS_ONE>;
-
-        let (bin, arb, int) = BigLinearUair::<i64>::generate_witness(num_vars, &mut rng);
-
-        let mut proof = Piop::prove::<CHECKED>(&pp, &bin, &arb, &int, num_vars, project_scalar_fn)
-            .expect("Prover failed");
-
-        tamper(&mut proof);
-
-        Piop::verify::<_, CHECKED>(
-            &pp,
-            proof,
-            &[],
-            &[],
-            &[],
-            num_vars,
-            project_scalar_fn,
-            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
-        )
-        .expect_err("Verifier should have rejected tampered proof");
-    }
-
     #[test]
     fn test_big_linear_tamper_lifted_evals() {
-        big_linear_verify_tampered(|proof| {
-            proof.witness_lifted_evals.swap(0, 1);
-        });
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+            8,
+            default_project_ideal!(),
+            |proof| proof.witness_lifted_evals.swap(0, 1),
+            |res| {
+                res.unwrap_err();
+            },
+        );
     }
 
     #[test]
     fn test_big_linear_tamper_up_evals() {
-        big_linear_verify_tampered(|proof| {
-            proof.resolver.up_evals.swap(0, 1);
-        });
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+            8,
+            default_project_ideal!(),
+            |proof| proof.resolver.up_evals.swap(0, 1),
+            |res| {
+                res.unwrap_err();
+            },
+        );
     }
 
     #[test]
     fn test_big_linear_tamper_down_evals() {
-        big_linear_verify_tampered(|proof| {
-            proof.resolver.down_evals.swap(0, 1);
-        });
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+            8,
+            default_project_ideal!(),
+            |proof| proof.resolver.down_evals.swap(0, 1),
+            |res| {
+                res.unwrap_err();
+            },
+        );
     }
 
     #[test]
     fn test_big_linear_tamper_commitment() {
-        big_linear_verify_tampered(|proof| {
-            proof.commitments.0.root = Default::default();
-        });
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+            8,
+            default_project_ideal!(),
+            |proof| proof.commitments.0.root = Default::default(),
+            |res| {
+                res.unwrap_err();
+            },
+        );
     }
 
     #[test]
     fn test_big_linear_tamper_ideal_check() {
-        big_linear_verify_tampered(|proof| {
-            proof.ideal_check.combined_mle_values.swap(0, 1);
-        });
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+            8,
+            default_project_ideal!(),
+            |proof| proof.ideal_check.combined_mle_values.swap(0, 1),
+            |res| {
+                res.unwrap_err();
+            },
+        );
     }
 }

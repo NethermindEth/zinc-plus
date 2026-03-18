@@ -18,15 +18,15 @@ use zinc_piop::{
 use zinc_poly::univariate::dense::DensePolynomial;
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_test_uair::{
-    BigLinearUair, BinaryDecompositionUair, GenerateMultiTypeWitness, GenerateSingleTypeWitness,
-    TestAirNoMultiplication, TestUairSimpleMultiplication,
+    BigLinearUair, BinaryDecompositionUair, GenerateRandomTrace, TestAirNoMultiplication,
+    TestUairSimpleMultiplication,
 };
 use zinc_transcript::{
     KeccakTranscript,
     traits::{ConstTranscribable, Transcript},
 };
 use zinc_uair::{
-    Uair, constraint_counter::count_constraints, ideal::degree_one::DegreeOneIdeal,
+    Uair, UairTrace, constraint_counter::count_constraints, ideal::degree_one::DegreeOneIdeal,
     ideal_collector::IdealOrZero,
 };
 
@@ -42,23 +42,23 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 ) where
     <F<FIELD_LIMBS> as Field>::Inner: ConstIntSemiring + ConstTranscribable,
     TestAirNoMultiplication<Int<INT_LIMBS>>: Uair<Scalar = Witness<INT_LIMBS>, Ideal = DegreeOneIdeal<Int<INT_LIMBS>>>
-        + GenerateSingleTypeWitness<Witness = Witness<INT_LIMBS>>
+        + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<INT_LIMBS>, Int = Int<INT_LIMBS>>
         + IdealCheckProtocol,
     MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Inner>,
 {
     let mut rng = rng();
     let num_vars = zinc_utils::log2(witness_size) as usize;
-    let trace = TestAirNoMultiplication::generate_witness(num_vars, &mut rng);
+    let trace = TestAirNoMultiplication::generate_random_trace(num_vars, &mut rng);
 
     let params = format!("NoMult/LIMBS={}/nvars={}", FIELD_LIMBS, num_vars);
 
     let num_constraints = count_constraints::<TestAirNoMultiplication<Int<INT_LIMBS>>>();
 
     let prove = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
-                 trace: &[_],
+                 trace: &UairTrace<_, _, DEGREE_PLUS_ONE>,
                  transcript: &mut KeccakTranscript|
      -> Proof<F<FIELD_LIMBS>> {
-        let trace = project_trace_coeffs_row_major::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
+        let trace = project_trace_coeffs_row_major(trace, field_cfg);
 
         let projected_scalars =
             project_scalars::<F<FIELD_LIMBS>, TestAirNoMultiplication<Int<INT_LIMBS>>>(|scalar| {
@@ -82,49 +82,41 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         .0
     };
 
-    group.bench_with_input(
-        BenchmarkId::new("Ideal Check Prover", &params),
-        &trace,
-        |bench, trace| {
-            let mut transcript = KeccakTranscript::new();
-            let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
-            bench.iter_batched(
-                || (trace, transcript.clone()),
-                |(trace, mut transcript)| {
-                    let _ = black_box(prove(&field_cfg, trace, &mut transcript));
-                },
-                BatchSize::SmallInput,
-            );
-        },
-    );
+    group.bench_function(BenchmarkId::new("Ideal Check Prover", &params), |bench| {
+        let mut transcript = KeccakTranscript::new();
+        let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
+        bench.iter_batched(
+            || transcript.clone(),
+            |mut transcript| {
+                let _ = black_box(prove(&field_cfg, &trace, &mut transcript));
+            },
+            BatchSize::SmallInput,
+        );
+    });
 
-    group.bench_with_input(
-        BenchmarkId::new("Ideal Check Verifier", &params),
-        &trace,
-        |bench, trace| {
-            let mut transcript = KeccakTranscript::new();
-            let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
-            let proof = prove(&field_cfg, trace, &mut transcript);
+    group.bench_function(BenchmarkId::new("Ideal Check Verifier", &params), |bench| {
+        let mut transcript = KeccakTranscript::new();
+        let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
+        let proof = prove(&field_cfg, &trace, &mut transcript);
 
-            bench.iter_batched(
-                || (proof.clone(), transcript.clone()),
-                |(proof, mut transcript)| {
-                    let _ = black_box(TestAirNoMultiplication::verify_as_subprotocol(
-                        &mut transcript,
-                        proof,
-                        num_constraints,
-                        num_vars,
-                        |ideal_over_ring| {
-                            ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg))
-                        },
-                        &field_cfg,
-                    ))
-                    .expect("Failed to verify");
-                },
-                BatchSize::SmallInput,
-            );
-        },
-    );
+        bench.iter_batched(
+            || (proof.clone(), transcript.clone()),
+            |(proof, mut transcript)| {
+                let _ = black_box(TestAirNoMultiplication::verify_as_subprotocol(
+                    &mut transcript,
+                    proof,
+                    num_constraints,
+                    num_vars,
+                    |ideal_over_ring| {
+                        ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg))
+                    },
+                    &field_cfg,
+                ))
+                .expect("Failed to verify");
+            },
+            BatchSize::SmallInput,
+        );
+    });
 }
 
 pub fn bench_no_mult_3(group: &mut BenchmarkGroup<WallTime>, witness_size: usize) {
@@ -142,23 +134,23 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 ) where
     <F<FIELD_LIMBS> as Field>::Inner: ConstIntSemiring + ConstTranscribable,
     TestUairSimpleMultiplication<Int<INT_LIMBS>>: Uair<Scalar = Witness<INT_LIMBS>>
-        + GenerateSingleTypeWitness<Witness = Witness<INT_LIMBS>>
+        + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<INT_LIMBS>, Int = Int<INT_LIMBS>>
         + IdealCheckProtocol,
     MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Inner>,
 {
     let mut rng = rng();
     let num_vars = zinc_utils::log2(witness_size) as usize;
-    let trace = TestUairSimpleMultiplication::generate_witness(num_vars, &mut rng);
+    let trace = TestUairSimpleMultiplication::generate_random_trace(num_vars, &mut rng);
 
     let params = format!("SimpleMult/LIMBS={}/nvars={}", FIELD_LIMBS, num_vars);
 
     let num_constraints = count_constraints::<TestUairSimpleMultiplication<Int<INT_LIMBS>>>();
 
     let prove = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
-                 trace: &[_],
+                 trace: &UairTrace<_, _, DEGREE_PLUS_ONE>,
                  transcript: &mut KeccakTranscript|
      -> Proof<F<FIELD_LIMBS>> {
-        let trace = project_trace_coeffs_row_major::<_, _, Int<5>, _>(&[], trace, &[], field_cfg);
+        let trace = project_trace_coeffs_row_major(trace, field_cfg);
 
         let projected_scalars = project_scalars::<
             F<FIELD_LIMBS>,
@@ -182,21 +174,17 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         .0
     };
 
-    group.bench_with_input(
-        BenchmarkId::new("Ideal Check Prover", &params),
-        &trace,
-        |bench, trace| {
-            let mut transcript = KeccakTranscript::new();
-            let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
-            bench.iter_batched(
-                || (trace, transcript.clone()),
-                |(trace, mut transcript)| {
-                    let _ = black_box(prove(&field_cfg, trace, &mut transcript));
-                },
-                BatchSize::SmallInput,
-            );
-        },
-    );
+    group.bench_function(BenchmarkId::new("Ideal Check Prover", &params), |bench| {
+        let mut transcript = KeccakTranscript::new();
+        let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
+        bench.iter_batched(
+            || transcript.clone(),
+            |mut transcript| {
+                let _ = black_box(prove(&field_cfg, &trace, &mut transcript));
+            },
+            BatchSize::SmallInput,
+        );
+    });
 
     group.bench_with_input(
         BenchmarkId::new("Ideal Check Verifier", &params),
@@ -243,8 +231,7 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
 {
     let mut rng = rng();
     let num_vars = zinc_utils::log2(witness_size) as usize;
-    let (binary_poly_trace, _, int_trace) =
-        BinaryDecompositionUair::generate_witness(num_vars, &mut rng);
+    let trace = BinaryDecompositionUair::<u32>::generate_random_trace(num_vars, &mut rng);
 
     let params = format!(
         "BinaryDecomposition/LIMBS={}/nvars={}",
@@ -254,16 +241,10 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
     let num_constraints = count_constraints::<BinaryDecompositionUair<u32>>();
 
     let prove = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
-                 binary_poly_trace: &[_],
-                 int_trace: &[_],
+                 trace: &UairTrace<_, _, DEGREE_PLUS_ONE>,
                  transcript: &mut KeccakTranscript|
      -> Proof<F<FIELD_LIMBS>> {
-        let trace = project_trace_coeffs_row_major::<_, u32, u32, _>(
-            binary_poly_trace,
-            &[],
-            int_trace,
-            field_cfg,
-        );
+        let trace = project_trace_coeffs_row_major(trace, field_cfg);
 
         let projected_scalars =
             project_scalars::<F<FIELD_LIMBS>, BinaryDecompositionUair<u32>>(|scalar| {
@@ -285,56 +266,43 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
         .0
     };
 
-    group.bench_with_input(
-        BenchmarkId::new("Ideal Check Prover", &params),
-        &(&binary_poly_trace, &int_trace),
-        |bench, (binary_poly_trace, int_trace)| {
-            let mut transcript = KeccakTranscript::new();
-            let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
-            bench.iter_batched(
-                || (&field_cfg, binary_poly_trace, int_trace, transcript.clone()),
-                |(field_cfg, binary_poly_trace, int_trace, mut transcript)| {
-                    let _ = black_box(prove(
-                        field_cfg,
-                        binary_poly_trace,
-                        int_trace,
-                        &mut transcript,
-                    ));
-                },
-                BatchSize::SmallInput,
-            );
-        },
-    );
+    group.bench_function(BenchmarkId::new("Ideal Check Prover", &params), |bench| {
+        let mut transcript = KeccakTranscript::new();
+        let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
+        bench.iter_batched(
+            || transcript.clone(),
+            |mut transcript| {
+                let _ = black_box(prove(&field_cfg, &trace, &mut transcript));
+            },
+            BatchSize::SmallInput,
+        );
+    });
 
-    group.bench_with_input(
-        BenchmarkId::new("Ideal Check Verifier", &params),
-        &(&binary_poly_trace, &int_trace),
-        |bench, (binary_poly_trace, int_trace)| {
-            let mut transcript = KeccakTranscript::new();
-            let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
-            let proof = prove(&field_cfg, binary_poly_trace, int_trace, &mut transcript);
+    group.bench_function(BenchmarkId::new("Ideal Check Verifier", &params), |bench| {
+        let mut transcript = KeccakTranscript::new();
+        let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
+        let proof = prove(&field_cfg, &trace, &mut transcript);
 
-            bench.iter_batched(
-                || (proof.clone(), transcript.clone()),
-                |(proof, mut transcript)| {
-                    let _ = black_box(BinaryDecompositionUair::<u32>::verify_as_subprotocol(
-                        &mut transcript,
-                        proof,
-                        num_constraints,
-                        num_vars,
-                        |ideal_over_ring| {
-                            ideal_over_ring.map(|ideal_over_ring| {
-                                DegreeOneIdeal::from_with_cfg(ideal_over_ring, &field_cfg)
-                            })
-                        },
-                        &field_cfg,
-                    ))
-                    .expect("Failed to verify");
-                },
-                BatchSize::SmallInput,
-            );
-        },
-    );
+        bench.iter_batched(
+            || (proof.clone(), transcript.clone()),
+            |(proof, mut transcript)| {
+                let _ = black_box(BinaryDecompositionUair::<u32>::verify_as_subprotocol(
+                    &mut transcript,
+                    proof,
+                    num_constraints,
+                    num_vars,
+                    |ideal_over_ring| {
+                        ideal_over_ring.map(|ideal_over_ring| {
+                            DegreeOneIdeal::from_with_cfg(ideal_over_ring, &field_cfg)
+                        })
+                    },
+                    &field_cfg,
+                ))
+                .expect("Failed to verify");
+            },
+            BatchSize::SmallInput,
+        );
+    });
 }
 
 #[allow(clippy::arithmetic_side_effects)]
@@ -347,7 +315,7 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
 {
     let mut rng = rng();
     let num_vars = zinc_utils::log2(witness_size) as usize;
-    let (binary_poly_trace, _, int_trace) = BigLinearUair::generate_witness(num_vars, &mut rng);
+    let trace = BigLinearUair::generate_random_trace(num_vars, &mut rng);
 
     let params = format!("BigLinearUair/LIMBS={}/nvars={}", FIELD_LIMBS, num_vars);
 
@@ -355,8 +323,7 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
 
     macro_rules! prove {
         ($transcript:expr, $field_cfg:expr, $gen_trace:ident, $prove_fn:ident) => {{
-            let trace =
-                $gen_trace::<_, u32, u32, _>(&binary_poly_trace, &[], &int_trace, $field_cfg);
+            let trace = $gen_trace::<_, u32, u32, _>(&trace, $field_cfg);
 
             let projected_scalars =
                 project_scalars::<F<FIELD_LIMBS>, BigLinearUair<u32>>(|scalar| {
