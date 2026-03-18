@@ -20,7 +20,7 @@ use zinc_utils::{
     mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
-    pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
+    pcs::structs::{ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
     pcs_transcript::PcsProverTranscript,
 };
 
@@ -93,25 +93,48 @@ where
         let witness_int = &trace_int[num_pub_int..];
 
         // === Step 0: Commit only witness columns ===
-        macro_rules! commit_optionally {
-            ($pp:expr, $trace:expr) => {
-                if $trace.is_empty() {
-                    (
-                        None,
-                        ZipPlusCommitment {
-                            root: Default::default(),
-                            batch_size: 0,
-                        },
-                    )
-                } else {
-                    let (hint, commitment) = ZipPlus::commit($pp, $trace)?;
-                    (Some(hint), commitment)
-                }
-            };
+        fn commit_optionally<Zt2: ZipTypes, Lc2: LinearCode<Zt2>>(
+            pp: &ZipPlusParams<Zt2, Lc2>,
+            trace: &[DenseMultilinearExtension<Zt2::Eval>],
+        ) -> Result<
+            (Option<ZipPlusHint<Zt2::Cw>>, ZipPlusCommitment),
+            ZipError,
+        > {
+            if trace.is_empty() {
+                Ok((
+                    None,
+                    ZipPlusCommitment {
+                        root: Default::default(),
+                        batch_size: 0,
+                    },
+                ))
+            } else {
+                let (hint, commitment) = ZipPlus::commit(pp, trace)?;
+                Ok((Some(hint), commitment))
+            }
         }
-        let (hint_bin, commitment_bin) = commit_optionally!(pp_bin, witness_bin);
-        let (hint_arb, commitment_arb) = commit_optionally!(pp_arb, witness_arb);
-        let (hint_int, commitment_int) = commit_optionally!(pp_int, witness_int);
+
+        #[cfg(feature = "parallel")]
+        let ((res_bin, res_arb), res_int) = rayon::join(
+            || {
+                rayon::join(
+                    || commit_optionally(pp_bin, witness_bin),
+                    || commit_optionally(pp_arb, witness_arb),
+                )
+            },
+            || commit_optionally(pp_int, witness_int),
+        );
+
+        #[cfg(not(feature = "parallel"))]
+        let (res_bin, res_arb, res_int) = (
+            commit_optionally(pp_bin, witness_bin),
+            commit_optionally(pp_arb, witness_arb),
+            commit_optionally(pp_int, witness_int),
+        );
+
+        let (hint_bin, commitment_bin) = res_bin?;
+        let (hint_arb, commitment_arb) = res_arb?;
+        let (hint_int, commitment_int) = res_int?;
 
         let mut pcs_transcript = PcsProverTranscript::new_from_commitments(
             [&commitment_bin, &commitment_arb, &commitment_int].into_iter(),

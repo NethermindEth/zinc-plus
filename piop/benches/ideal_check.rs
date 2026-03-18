@@ -464,44 +464,44 @@ pub fn ideal_check_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Ideal check benchmarks");
     group.plot_config(plot_config);
 
-    bench_no_mult_3(&mut group, 1 << 14);
-    bench_no_mult_4(&mut group, 1 << 14);
-    bench_no_mult_3(&mut group, 1 << 15);
-    bench_no_mult_4(&mut group, 1 << 15);
-    bench_no_mult_3(&mut group, 1 << 16);
-    bench_no_mult_4(&mut group, 1 << 16);
-    bench_no_mult_3(&mut group, 1 << 17);
-    bench_no_mult_4(&mut group, 1 << 17);
+    bench_no_mult_3(&mut group, 1 << 9);
+    // bench_no_mult_4(&mut group, 1 << 14);
+    // bench_no_mult_3(&mut group, 1 << 15);
+    // bench_no_mult_4(&mut group, 1 << 15);
+    // bench_no_mult_3(&mut group, 1 << 16);
+    // bench_no_mult_4(&mut group, 1 << 16);
+    // bench_no_mult_3(&mut group, 1 << 17);
+    // bench_no_mult_4(&mut group, 1 << 17);
 
-    bench_simple_mult_3(&mut group, 1 << 2);
-    bench_simple_mult_4(&mut group, 1 << 2);
+    //bench_simple_mult_3(&mut group, 1 << 2);
+    // /bench_simple_mult_4(&mut group, 1 << 2);
 
-    bench_binary_decomposition::<3>(&mut group, 1 << 12);
-    bench_binary_decomposition::<4>(&mut group, 1 << 12);
-    bench_binary_decomposition::<3>(&mut group, 1 << 13);
-    bench_binary_decomposition::<4>(&mut group, 1 << 13);
-    bench_binary_decomposition::<3>(&mut group, 1 << 14);
-    bench_binary_decomposition::<4>(&mut group, 1 << 14);
-    bench_binary_decomposition::<3>(&mut group, 1 << 15);
-    bench_binary_decomposition::<4>(&mut group, 1 << 15);
-    bench_binary_decomposition::<3>(&mut group, 1 << 16);
-    bench_binary_decomposition::<4>(&mut group, 1 << 16);
-    bench_binary_decomposition::<3>(&mut group, 1 << 17);
-    bench_binary_decomposition::<4>(&mut group, 1 << 17);
+    bench_binary_decomposition::<3>(&mut group, 1 << 9);
+    // bench_binary_decomposition::<4>(&mut group, 1 << 12);
+    // bench_binary_decomposition::<3>(&mut group, 1 << 13);
+    // bench_binary_decomposition::<4>(&mut group, 1 << 13);
+    // bench_binary_decomposition::<3>(&mut group, 1 << 14);
+    // bench_binary_decomposition::<4>(&mut group, 1 << 14);
+    // bench_binary_decomposition::<3>(&mut group, 1 << 15);
+    // bench_binary_decomposition::<4>(&mut group, 1 << 15);
+    // bench_binary_decomposition::<3>(&mut group, 1 << 16);
+    // bench_binary_decomposition::<4>(&mut group, 1 << 16);
+    // bench_binary_decomposition::<3>(&mut group, 1 << 17);
+    // bench_binary_decomposition::<4>(&mut group, 1 << 17);
 
-    bench_big_linear_uair::<3>(&mut group, 1 << 12);
-    bench_big_linear_uair::<4>(&mut group, 1 << 12);
-    bench_big_linear_uair::<3>(&mut group, 1 << 13);
-    bench_big_linear_uair::<4>(&mut group, 1 << 13);
-    bench_big_linear_uair::<3>(&mut group, 1 << 14);
-    bench_big_linear_uair::<4>(&mut group, 1 << 14);
-    bench_big_linear_uair::<3>(&mut group, 1 << 15);
-    bench_big_linear_uair::<4>(&mut group, 1 << 15);
-    bench_big_linear_uair::<3>(&mut group, 1 << 16);
-    bench_big_linear_uair::<4>(&mut group, 1 << 16);
-    bench_big_linear_uair::<3>(&mut group, 1 << 17);
-    bench_big_linear_uair::<4>(&mut group, 1 << 17);
-
+    bench_big_linear_uair::<3>(&mut group, 1 << 9);
+    // bench_big_linear_uair::<4>(&mut group, 1 << 12);
+    // bench_big_linear_uair::<3>(&mut group, 1 << 13);
+    // bench_big_linear_uair::<4>(&mut group, 1 << 13);
+    // bench_big_linear_uair::<3>(&mut group, 1 << 14);
+    // bench_big_linear_uair::<4>(&mut group, 1 << 14);
+    // bench_big_linear_uair::<3>(&mut group, 1 << 15);
+    // bench_big_linear_uair::<4>(&mut group, 1 << 15);
+    // bench_big_linear_uair::<3>(&mut group, 1 << 16);
+    // bench_big_linear_uair::<4>(&mut group, 1 << 16);
+    // bench_big_linear_uair::<3>(&mut group, 1 << 17);
+    // bench_big_linear_uair::<4>(&mut group, 1 << 17);
+// 
     group.finish();
 }
 

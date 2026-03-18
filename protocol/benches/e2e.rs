@@ -231,7 +231,7 @@ where
 
 const DEGREE_PLUS_ONE: usize = 32;
 const INT_LIMBS: usize = U64::LIMBS;
-const FIELD_LIMBS: usize = 4;
+const FIELD_LIMBS: usize = 3;
 
 type F = MontyField<FIELD_LIMBS>;
 
@@ -460,21 +460,13 @@ fn bench_big_linear_public_input(group: &mut BenchmarkGroup<WallTime>, num_vars:
 fn e2e_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ E2E");
 
-    bench_no_mult(&mut group, 8);
-    bench_no_mult(&mut group, 10);
-    bench_no_mult(&mut group, 12);
+    bench_no_mult(&mut group, 9);
 
-    bench_binary_decomposition(&mut group, 8);
-    bench_binary_decomposition(&mut group, 10);
-    bench_binary_decomposition(&mut group, 12);
+    bench_binary_decomposition(&mut group, 9);
 
-    bench_big_linear(&mut group, 8);
-    bench_big_linear(&mut group, 10);
-    bench_big_linear(&mut group, 12);
+    bench_big_linear(&mut group, 9);
 
-    bench_big_linear_public_input(&mut group, 8);
-    bench_big_linear_public_input(&mut group, 10);
-    bench_big_linear_public_input(&mut group, 12);
+    bench_big_linear_public_input(&mut group, 9);
 
     group.finish();
 }

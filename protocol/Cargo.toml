@@ -39,3 +39,7 @@ parallel = ["dep:rayon", "zinc-piop/parallel", "zinc-poly/parallel", "zinc-uair/
 [[bench]]
 name = "e2e"
 harness = false
+
+[[bench]]
+name = "e2e_steps"
+harness = false

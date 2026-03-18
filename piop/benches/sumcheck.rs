@@ -133,16 +133,7 @@ pub fn sumcheck_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Sumcheck benchmarks");
     group.plot_config(plot_config);
 
-    bench_simple_product::<MontyField<3>, 3>(&mut group, 1 << 13);
-    bench_simple_product::<MontyField<4>, 4>(&mut group, 1 << 13);
-    bench_simple_product::<MontyField<3>, 3>(&mut group, 1 << 14);
-    bench_simple_product::<MontyField<4>, 4>(&mut group, 1 << 14);
-    bench_simple_product::<MontyField<3>, 3>(&mut group, 1 << 15);
-    bench_simple_product::<MontyField<4>, 4>(&mut group, 1 << 15);
-    bench_simple_product::<MontyField<3>, 3>(&mut group, 1 << 16);
-    bench_simple_product::<MontyField<4>, 4>(&mut group, 1 << 16);
-    bench_simple_product::<MontyField<3>, 3>(&mut group, 1 << 17);
-    bench_simple_product::<MontyField<4>, 4>(&mut group, 1 << 17);
+    bench_simple_product::<MontyField<3>, 3>(&mut group, 1 << 9);
     group.finish();
 }
 

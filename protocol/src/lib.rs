@@ -164,7 +164,7 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     #[error("multi-point evaluation failed: {0}")]
     MultipointEval(#[from] MultipointEvalError<F>),
     #[error("lifted eval psi_a projection failed: {0}")]
-    LiftedEvalProjection(#[from] PolyEvaluationError),
+    LiftedEvalProjection(PolyEvaluationError),
     #[error("PCS error: {0}")]
     Pcs(#[from] ZipError),
     #[error("PCS verification failed at column {0}: {1}")]
@@ -180,7 +180,7 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
 /// Each entry is serialized via `ConstTranscribable::write_transcription_bytes`
 /// and absorbed. This must be called in the same order by both prover and
 /// verifier, after commitments and before the random prime draw.
-fn absorb_public_columns<T: ConstTranscribable>(
+pub fn absorb_public_columns<T: ConstTranscribable>(
     transcript: &mut impl Transcript,
     cols: &[DenseMultilinearExtension<T>],
 ) {
@@ -201,7 +201,7 @@ fn absorb_public_columns<T: ConstTranscribable>(
 /// Binary columns exploit the 0/1 structure for conditional additions only.
 /// The `eq(point, *)` table is built once and reused across all columns.
 #[allow(clippy::arithmetic_side_effects)]
-fn compute_lifted_evals<F: PrimeField, const D: usize>(
+pub fn compute_lifted_evals<F: PrimeField, const D: usize>(
     point: &[F],
     trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
     projected_trace: &RowMajorTrace<F>,

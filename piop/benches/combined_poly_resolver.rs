@@ -346,17 +346,17 @@ pub fn combined_poly_resolver_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Combined poly resolver benchmarks");
     group.plot_config(plot_config);
 
-    bench_no_mult::<3, 4>(&mut group, 1 << 14);
-    bench_no_mult::<4, 5>(&mut group, 1 << 14);
-    bench_no_mult::<3, 4>(&mut group, 1 << 15);
-    bench_no_mult::<4, 5>(&mut group, 1 << 15);
-    bench_no_mult::<3, 4>(&mut group, 1 << 16);
-    bench_no_mult::<4, 5>(&mut group, 1 << 16);
-    bench_no_mult::<3, 4>(&mut group, 1 << 17);
-    bench_no_mult::<4, 5>(&mut group, 1 << 17);
+    bench_no_mult::<3, 4>(&mut group, 1 << 9);
+    // bench_no_mult::<4, 5>(&mut group, 1 << 14);
+    // bench_no_mult::<3, 4>(&mut group, 1 << 15);
+    // bench_no_mult::<4, 5>(&mut group, 1 << 15);
+    // bench_no_mult::<3, 4>(&mut group, 1 << 16);
+    // bench_no_mult::<4, 5>(&mut group, 1 << 16);
+    // bench_no_mult::<3, 4>(&mut group, 1 << 17);
+    // bench_no_mult::<4, 5>(&mut group, 1 << 17);
 
     bench_simple_mult::<3, 4>(&mut group, 1 << 2);
-    bench_simple_mult::<4, 5>(&mut group, 1 << 2);
+    // bench_simple_mult::<4, 5>(&mut group, 1 << 2);
 
     group.finish();
 }
