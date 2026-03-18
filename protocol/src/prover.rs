@@ -81,7 +81,7 @@ where
         trace_arb_poly: &[DenseMultilinearExtension<<Zt::ArbitraryZt as ZipTypes>::Eval>],
         trace_int: &[DenseMultilinearExtension<<Zt::IntZt as ZipTypes>::Eval>],
         num_vars: usize,
-        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
+        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
     ) -> Result<Proof<F>, ProtocolError<F, U::Ideal>> {
         let sig = U::signature();
         let num_pub_bin = sig.public_binary_poly_cols;

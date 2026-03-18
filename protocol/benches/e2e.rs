@@ -291,7 +291,7 @@ fn bench_prove_verify<Zt, U, IdealOverF>(
     bin: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
     arb: &[DenseMultilinearExtension<<Zt::ArbitraryZt as ZipTypes>::Eval>],
     int: &[DenseMultilinearExtension<Zt::Int>],
-    project_scalar: impl Fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F> + Copy,
+    project_scalar: impl Fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F> + Copy + Sync,
     project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
 ) where
     Zt: ZincTypes<DEGREE_PLUS_ONE>,

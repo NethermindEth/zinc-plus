@@ -168,6 +168,36 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             .try_collect()?;
 
         let zero_f = F::zero_with_cfg(field_cfg);
+
+        // Compute per-polynomial row dot products, then sum across polynomials.
+        #[cfg(feature = "parallel")]
+        let b = {
+            let per_poly_b: Vec<Vec<F>> = polys_as_comb_r
+                .par_iter()
+                .map(|poly_comb_r| {
+                    poly_comb_r
+                        .par_chunks(row_len)
+                        .map(|row| {
+                            let row_f: Vec<F> =
+                                row.iter().map(|int| int.into_with_cfg(field_cfg)).collect();
+                            MBSInnerProduct::inner_product::<UNCHECKED>(
+                                &row_f,
+                                &q_1,
+                                zero_f.clone(),
+                            )
+                        })
+                        .collect::<Result<Vec<F>, _>>()
+                })
+                .collect::<Result<_, _>>()?;
+
+            let mut b = vec![zero_f.clone(); num_rows];
+            for poly_b in &per_poly_b {
+                b.iter_mut().zip(poly_b).for_each(|(a, d)| *a += d);
+            }
+            b
+        };
+
+        #[cfg(not(feature = "parallel"))]
         let b = polys_as_comb_r.iter().try_fold(
             vec![zero_f.clone(); num_rows],
             |mut acc, poly_comb_r| -> Result<_, ZipError> {
@@ -201,6 +231,40 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 .get_challenges::<Zt::Chal>(num_rows)
         };
 
+        #[cfg(feature = "parallel")]
+        let combined_row: Vec<Zt::CombR> = {
+            let per_poly_rows: Vec<Vec<Zt::CombR>> = polys_as_comb_r
+                .par_iter()
+                .map(|poly| {
+                    Ok::<_, ZipError>(combine_rows!(
+                        CHECK_FOR_OVERFLOW,
+                        &coeffs,
+                        poly.iter(),
+                        |eval: &Zt::CombR| Ok::<_, ZipError>(eval.clone()),
+                        row_len,
+                        Zt::CombR::ZERO
+                    ))
+                })
+                .collect::<Result<_, _>>()?;
+
+            let mut combined = vec![Zt::CombR::ZERO; row_len];
+            for row in &per_poly_rows {
+                combined.iter_mut().zip(row.iter()).for_each(|(a, r)| {
+                    if CHECK_FOR_OVERFLOW {
+                        *a = zinc_utils::add!(
+                            *a,
+                            r,
+                            "Addition overflow while summing combined rows across polys"
+                        );
+                    } else {
+                        *a += r;
+                    }
+                });
+            }
+            combined
+        };
+
+        #[cfg(not(feature = "parallel"))]
         let combined_row: Vec<Zt::CombR> = polys_as_comb_r.iter().try_fold(
             vec![Zt::CombR::ZERO; row_len],
             |mut acc, poly| -> Result<_, ZipError> {

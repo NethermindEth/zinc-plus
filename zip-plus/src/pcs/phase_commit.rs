@@ -72,6 +72,21 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         validate_input::<Zt, Lc, bool>("commit", pp.num_vars, batch_size, polys, &[])?;
 
         let expected_num_evals = pp.num_rows * row_len;
+
+        #[cfg(feature = "parallel")]
+        let cw_matrices: Vec<DenseRowMatrix<Zt::Cw>> = polys.par_iter().map(|poly| {
+            assert_eq!(
+                poly.len(),
+                expected_num_evals,
+                "Polynomial has an incorrect number of evaluations ({}) for the expected matrix size ({})",
+                poly.len(),
+                expected_num_evals
+            );
+
+            ZipPlus::<Zt, Lc>::encode_rows(pp, row_len, poly)
+        }).collect();
+
+        #[cfg(not(feature = "parallel"))]
         let cw_matrices: Vec<DenseRowMatrix<Zt::Cw>> = polys.iter().map(|poly| {
             assert_eq!(
                 poly.len(),

@@ -83,13 +83,19 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         let one = F::one_with_cfg(field_cfg);
 
         // Shifted trace. Just take the trace, drop the first row
-        // and append 0 to the end. Note, that the latter happens
-        // thanks to the FromIterator implementation for `DenseMultilinearExtension`
-        // as it always pads to the next power of two.
-        // It might lead to a problem when `num_vars = 1` but that is not going to
-        // happen on real world traces.
+        // and append 0 to the end.
         let down: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(trace_matrix)
-            .map(|column| column[1..].iter().cloned().collect())
+            .map(|column| {
+                let size = 1 << num_vars;
+                let mut evaluations = Vec::with_capacity(size);
+                evaluations.extend_from_slice(&column.evaluations[1..]);
+                evaluations.push(Default::default());
+                debug_assert_eq!(evaluations.len(), size);
+                DenseMultilinearExtension {
+                    num_vars,
+                    evaluations,
+                }
+            })
             .collect();
 
         let eq_r = build_eq_x_r_inner(evaluation_point, field_cfg)?;

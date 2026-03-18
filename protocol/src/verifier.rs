@@ -75,7 +75,7 @@ where
         public_arb: &[DenseMultilinearExtension<<Zt::ArbitraryZt as ZipTypes>::Eval>],
         public_int: &[DenseMultilinearExtension<<Zt::IntZt as ZipTypes>::Eval>],
         num_vars: usize,
-        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
+        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
     ) -> Result<(), ProtocolError<F, IdealOverF>>
     where
@@ -193,7 +193,8 @@ where
         let open_evals: Vec<F> = all_lifted_evals
             .iter()
             .map(|bar_u| bar_u.evaluate_at_point(&projecting_element_f))
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProtocolError::LiftedEvalProjection)?;
 
         MultipointEval::<F>::verify_subclaim(&mp_subclaim, &open_evals, &field_cfg)?;
 
