@@ -408,6 +408,75 @@ impl GenerateMultiTypeWitness for BigLinearUair {
     }
 }
 
+/// Same as [`BigLinearUair`] but columns 0–3 are marked as public inputs.
+pub struct BigLinearUairWithPublicInput;
+
+impl Uair for BigLinearUairWithPublicInput {
+    type Ideal = DegreeOneIdeal<u32>;
+    type Scalar = BinaryPoly<32>;
+
+    fn signature() -> UairSignature {
+        UairSignature {
+            binary_poly_cols: 16,
+            arbitrary_poly_cols: 0,
+            int_cols: 1,
+            shifts: vec![],
+            public_columns: vec![0, 1, 2, 3],
+        }
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        let sum_of_binary_polys = up.binary_poly[1..]
+            .iter()
+            .fold(up.binary_poly[0].clone(), |acc, next| acc + next);
+
+        b.assert_in_ideal(
+            sum_of_binary_polys - &up.int[0],
+            &ideal_from_ref(&DegreeOneIdeal::new(1)),
+        );
+
+        b.assert_in_ideal(
+            down.binary_poly[0].clone() - &up.int[0],
+            &ideal_from_ref(&DegreeOneIdeal::new(2)),
+        );
+
+        up.binary_poly[1..]
+            .iter()
+            .zip(&down.binary_poly[1..])
+            .for_each(|(up, down)| {
+                b.assert_zero(up.clone() - down);
+            });
+    }
+}
+
+impl GenerateMultiTypeWitness for BigLinearUairWithPublicInput {
+    type PolyCoeff = u32;
+    type Int = u32;
+
+    fn generate_witness<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> (
+        Vec<DenseMultilinearExtension<BinaryPoly<32>>>,
+        Vec<DenseMultilinearExtension<DensePolynomial<Self::PolyCoeff, 32>>>,
+        Vec<DenseMultilinearExtension<Self::Int>>,
+    ) {
+        BigLinearUair::generate_witness(num_vars, rng)
+    }
+}
+
 /// A simple UAIR with one public column for testing the public-inputs
 /// pipeline.
 ///

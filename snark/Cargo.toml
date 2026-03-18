@@ -81,3 +81,7 @@ harness = false
 [[bench]]
 name = "steps_sha256_8x_uc_folded"
 harness = false
+
+[[bench]]
+name = "steps_big_linear_pi_folded"
+harness = false
