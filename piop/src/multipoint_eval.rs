@@ -5,9 +5,12 @@
 //! `v_j^{down}(r')` - to a single set of standard MLE evaluation claims
 //! `v_j(r_0)` at a new random point `r_0` via one sumcheck.
 //!
-//! The sumcheck proves:
+//! The trace column MLEs are precombined into a single MLE
+//! `precombined(b) = \sum_j \gamma_j * v_j(b)` before entering the sumcheck, so
+//! the prover works with only 3 MLEs (`eq`, `next`, `precombined`) regardless
+//! of the number of columns. The sumcheck proves:
 //! ```text
-//! \sum_b [eq(b, r') + \alpha * next(r', b)] * [\sum_j \gamma_j * v_j(b)]
+//! \sum_b [eq(b, r') + \alpha * next(r', b)] * precombined(b)
 //!   = \sum_j \gamma_j * (up_eval_j + \alpha * down_eval_j)
 //! ```
 //!
@@ -26,7 +29,6 @@ use std::marker::PhantomData;
 
 use crate::sumcheck::{MLSumcheck, SumCheckError, SumcheckProof};
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
-use itertools::Itertools;
 use num_traits::Zero;
 use thiserror::Error;
 use zinc_poly::{mle::DenseMultilinearExtension, utils::ArithErrors};
@@ -121,7 +123,7 @@ where
                         })
                         .into_inner()
                 })
-                .collect_vec();
+                .collect();
             DenseMultilinearExtension::from_evaluations_vec(
                 num_vars,
                 evaluations,

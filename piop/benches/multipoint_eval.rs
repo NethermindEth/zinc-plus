@@ -149,7 +149,7 @@ pub fn multipoint_eval_benches(c: &mut Criterion) {
     }
 
     // Vary column count at fixed size — this is the key axis for the
-    // precombine optimisation: costs become constant (4 MLEs) after precombine
+    // precombine optimisation: costs become constant (3 MLEs) after precombine
     // instead of scaling with J
     for num_cols in [1, 3, 10, 25, 50, 100] {
         bench_multipoint_eval(c, 14, num_cols);
