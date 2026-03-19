@@ -49,3 +49,7 @@ harness = false
 name = "combined_poly_resolver"
 harness = false
 
+[[bench]]
+name = "multipoint_eval"
+harness = false
+
