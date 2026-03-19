@@ -2,11 +2,10 @@
 
 use std::hint::black_box;
 
-use criterion::{
-    BatchSize, BenchmarkId, Criterion, criterion_group,
-    criterion_main,
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
+use crypto_primitives::{
+    FromWithConfig, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
 };
-use crypto_primitives::{FromWithConfig, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint};
 use rand::{Rng, rng};
 use zinc_piop::multipoint_eval::MultipointEval;
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
@@ -22,8 +21,7 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
     let params = format!("nvars={}/cols={}", num_vars, num_cols);
 
     let mut transcript = KeccakTranscript::new();
-    let field_cfg =
-        transcript.get_random_field_cfg::<F, Uint<FIELD_LIMBS>, MillerRabin>();
+    let field_cfg = transcript.get_random_field_cfg::<F, Uint<FIELD_LIMBS>, MillerRabin>();
     let zero_inner = F::from_with_cfg(0u32, &field_cfg).into_inner();
 
     // Build random trace MLEs.
@@ -47,7 +45,7 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
         .map(|mle| {
             mle.clone()
                 .evaluate_with_config(&eval_point, &field_cfg)
-                .unwrap()
+                .expect("up_eval evaluation failed")
         })
         .collect();
 
@@ -61,40 +59,36 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
                 DenseMultilinearExtension::from_evaluations_vec(num_vars, shifted, zero_inner);
             shifted_mle
                 .evaluate_with_config(&eval_point, &field_cfg)
-                .unwrap()
+                .expect("down_eval evaluation failed")
         })
         .collect();
 
     let mut group = c.benchmark_group("Multipoint eval");
 
     // --- Bench prover ---
-    group.bench_with_input(
-        BenchmarkId::new("Prover", &params),
-        &(),
-        |bench, _| {
-            bench.iter_batched(
-                || {
-                    let mut t = KeccakTranscript::new();
-                    t.absorb_slice(b"bench");
-                    t
-                },
-                |mut t| {
-                    let _ = black_box(
-                        MultipointEval::<F>::prove_as_subprotocol(
-                            &mut t,
-                            &trace_mles,
-                            &eval_point,
-                            &up_evals,
-                            &down_evals,
-                            &field_cfg,
-                        )
-                        .expect("prover failed"),
-                    );
-                },
-                BatchSize::SmallInput,
-            );
-        },
-    );
+    group.bench_with_input(BenchmarkId::new("Prover", &params), &(), |bench, _| {
+        bench.iter_batched(
+            || {
+                let mut t = KeccakTranscript::new();
+                t.absorb_slice(b"bench");
+                t
+            },
+            |mut t| {
+                let _ = black_box(
+                    MultipointEval::<F>::prove_as_subprotocol(
+                        &mut t,
+                        &trace_mles,
+                        &eval_point,
+                        &up_evals,
+                        &down_evals,
+                        &field_cfg,
+                    )
+                    .expect("prover failed"),
+                );
+            },
+            BatchSize::SmallInput,
+        );
+    });
 
     // --- Bench verifier ---
     // First produce a valid proof.
@@ -115,39 +109,35 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
         .map(|mle| {
             mle.clone()
                 .evaluate_with_config(&prover_state.eval_point, &field_cfg)
-                .unwrap()
+                .expect("open_eval evaluation failed")
         })
         .collect();
 
-    group.bench_with_input(
-        BenchmarkId::new("Verifier", &params),
-        &(),
-        |bench, _| {
-            bench.iter_batched(
-                || {
-                    let mut t = KeccakTranscript::new();
-                    t.absorb_slice(b"bench");
-                    (t, proof.clone())
-                },
-                |(mut t, proof)| {
-                    let _ = black_box(
-                        MultipointEval::<F>::verify_as_subprotocol(
-                            &mut t,
-                            proof,
-                            &eval_point,
-                            &up_evals,
-                            &down_evals,
-                            &open_evals,
-                            num_vars,
-                            &field_cfg,
-                        )
-                        .expect("verifier failed"),
-                    );
-                },
-                BatchSize::SmallInput,
-            );
-        },
-    );
+    group.bench_with_input(BenchmarkId::new("Verifier", &params), &(), |bench, _| {
+        bench.iter_batched(
+            || {
+                let mut t = KeccakTranscript::new();
+                t.absorb_slice(b"bench");
+                (t, proof.clone())
+            },
+            |(mut t, proof)| {
+                let _ = black_box(
+                    MultipointEval::<F>::verify_as_subprotocol(
+                        &mut t,
+                        proof,
+                        &eval_point,
+                        &up_evals,
+                        &down_evals,
+                        &open_evals,
+                        num_vars,
+                        &field_cfg,
+                    )
+                    .expect("verifier failed"),
+                );
+            },
+            BatchSize::SmallInput,
+        );
+    });
 
     group.finish();
 }

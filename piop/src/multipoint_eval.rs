@@ -107,13 +107,28 @@ where
 
         // Precombine up cols with gammas, precombined[b] = Σ_j γ_j trace[j][b]
         let precombined = {
-            let evaluations = (0..1 << num_vars).map(|b| gammas.iter().enumerate().fold(zero.clone(), |acc, (i, gamma)| {
-                let eval_f = F::new_unchecked_with_cfg(trace_mles[i].evaluations[b].clone(), field_cfg);
-                acc + gamma.clone() * eval_f
-            }).into_inner()).collect_vec();
-            DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations, zero_inner.clone())
+            let evaluations = (0..1 << num_vars)
+                .map(|b| {
+                    gammas
+                        .iter()
+                        .enumerate()
+                        .fold(zero.clone(), |acc, (i, gamma)| {
+                            let eval_f = F::new_unchecked_with_cfg(
+                                trace_mles[i].evaluations[b].clone(),
+                                field_cfg,
+                            );
+                            acc + gamma.clone() * eval_f
+                        })
+                        .into_inner()
+                })
+                .collect_vec();
+            DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                evaluations,
+                zero_inner.clone(),
+            )
         };
-        
+
         // Step 3: Pack MLEs: [eq_r, next_r, precombined]
         let mles = vec![eq_r, next_r, precombined];
 
