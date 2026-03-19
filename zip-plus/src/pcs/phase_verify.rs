@@ -153,7 +153,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         F::Modulus: FromRef<Zt::Fmod> + Transcribable,
     {
         let batch_size = comm.batch_size;
-        validate_input::<Zt, Lc, _>("verify", vp.num_vars, batch_size, &[], &[point_f])?;
+        validate_input::<Zt, Lc, _>(
+            "verify",
+            vp.num_vars,
+            vp.linear_code.row_len(),
+            batch_size,
+            &[],
+            &[point_f],
+        )?;
 
         let num_rows = vp.num_rows;
         let row_len = vp.linear_code.row_len();
@@ -731,9 +738,10 @@ mod tests {
 
     #[test]
     fn verification_fails_if_proximity_check_is_invalid() {
-        let poly_size = 8;
+        let poly_size: usize = 8; // row_len=4, num_rows=2 -> proximity checks are active
 
-        let linear_code = C::new(poly_size);
+        let row_len = poly_size.isqrt().next_power_of_two();
+        let linear_code = C::new(row_len);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let mle: DenseMultilinearExtension<_> = (0..poly_size as i32)
@@ -805,8 +813,9 @@ mod tests {
 
     #[test]
     fn verification_fails_if_evaluation_consistency_check_is_invalid() {
-        let poly_size = 8;
-        let linear_code = C::new(poly_size);
+        let poly_size: usize = 8;
+        let row_len = poly_size.isqrt().next_power_of_two();
+        let linear_code = C::new(row_len);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let mle: DenseMultilinearExtension<_> =
@@ -867,8 +876,9 @@ mod tests {
 
     #[test]
     fn verification_succeeds_for_zero_polynomial() {
-        let poly_size = 8;
-        let linear_code = C::new(poly_size);
+        let poly_size: usize = 8;
+        let row_len = poly_size.isqrt().next_power_of_two();
+        let linear_code = C::new(row_len);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let mle: DenseMultilinearExtension<_> = (0..poly_size).map(|_| Int::ZERO).collect();
@@ -910,8 +920,9 @@ mod tests {
     #[test]
     fn verification_succeeds_at_zero_point() {
         let num_vars = 3;
-        let poly_size = 1 << num_vars;
-        let linear_code = C::new(poly_size);
+        let poly_size: usize = 1 << num_vars;
+        let row_len = poly_size.isqrt().next_power_of_two();
+        let linear_code = C::new(row_len);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let mle: DenseMultilinearExtension<_> =
@@ -1042,8 +1053,9 @@ mod tests {
 
     #[test]
     fn verification_fails_at_proximity_link_check_if_combined_row_is_corrupted() {
-        let poly_size = 8;
-        let linear_code = C::new(poly_size);
+        let poly_size: usize = 8;
+        let row_len = poly_size.isqrt().next_power_of_two();
+        let linear_code = C::new(row_len);
         let pp = TestZip::setup(poly_size, linear_code);
 
         let mle: DenseMultilinearExtension<_> =
@@ -1105,8 +1117,9 @@ mod tests {
         fn inner<const P: usize>() {
             let mut rng = ThreadRng::default();
             // Match the benchmark's transcript usage for linear code construction
-            let poly_size = 1 << P;
-            let linear_code = C::new(poly_size);
+            let poly_size: usize = 1 << P;
+            let row_len = poly_size.isqrt().next_power_of_two();
+            let linear_code = C::new(row_len);
             let pp = TestZip::setup(poly_size, linear_code);
 
             let mle = DenseMultilinearExtension::rand(P, &mut rng);
@@ -1164,8 +1177,9 @@ mod tests {
         fn inner<const P: usize>() {
             let mut rng = ThreadRng::default();
             // Match the benchmark's transcript usage for linear code construction
-            let poly_size = 1 << P;
-            let linear_code = PolyC::new(poly_size);
+            let poly_size: usize = 1 << P;
+            let row_len = poly_size.isqrt().next_power_of_two();
+            let linear_code = PolyC::new(row_len);
             let pp = TestPolyZip::setup(poly_size, linear_code);
 
             let mle = DenseMultilinearExtension::rand(P, &mut rng);

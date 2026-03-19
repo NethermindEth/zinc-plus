@@ -133,7 +133,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         F::Modulus: Transcribable,
     {
         let batch_size = polys.len();
-        validate_input::<Zt, Lc, _>("prove", pp.num_vars, batch_size, polys, &[point])?;
+        validate_input::<Zt, Lc, _>(
+            "prove",
+            pp.num_vars,
+            pp.linear_code.row_len(),
+            batch_size,
+            polys,
+            &[point],
+        )?;
 
         let num_rows = pp.num_rows;
         let row_len = pp.linear_code.row_len();

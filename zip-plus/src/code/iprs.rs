@@ -100,12 +100,12 @@ where
     const REPETITION_FACTOR: usize = Config::OUTPUT_LEN / Config::INPUT_LEN;
 
     #[allow(clippy::arithmetic_side_effects)]
-    fn new(poly_size: usize) -> Self {
+    fn new(row_len: usize) -> Self {
         assert_eq!(
-            poly_size % Config::INPUT_LEN,
-            0,
-            "Polynomial size {} is not a multiple of row length {}",
-            poly_size,
+            row_len,
+            Config::INPUT_LEN,
+            "Row length {} does not match expected row length {}",
+            row_len,
             Config::INPUT_LEN
         );
 

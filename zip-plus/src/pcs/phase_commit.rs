@@ -68,7 +68,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         );
         let batch_size = polys.len();
         let row_len = pp.linear_code.row_len();
-        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, batch_size, polys, &[])?;
+        validate_input::<Zt, Lc, bool>(
+            "commit",
+            pp.num_vars,
+            pp.linear_code.row_len(),
+            batch_size,
+            polys,
+            &[],
+        )?;
 
         let expected_num_evals = pp.num_rows * row_len;
         let cw_matrices: Vec<DenseRowMatrix<Zt::Cw>> = cfg_iter!(polys).map(|poly| {
@@ -113,7 +120,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
     ) -> Result<DenseRowMatrix<Zt::Cw>, ZipError> {
-        validate_input::<Zt, Lc, bool>("commit", pp.num_vars, 1, from_ref(poly), &[])?;
+        validate_input::<Zt, Lc, bool>(
+            "commit",
+            pp.num_vars,
+            pp.linear_code.row_len(),
+            1,
+            from_ref(poly),
+            &[],
+        )?;
 
         let row_len = pp.linear_code.row_len();
 
@@ -251,7 +265,7 @@ mod tests {
 
     #[test]
     fn commit_succeeds_for_small_polynomial() {
-        let code = C::new(16);
+        let code = C::new(4);
         let pp = ZipPlusParams::new(4, 4, code);
 
         let evaluations = vec![Int::from(42); 16];
@@ -263,7 +277,7 @@ mod tests {
 
     #[test]
     fn commit_succeeds_for_two_variables() {
-        let code = C::new(4);
+        let code = C::new(2);
         let pp = ZipPlusParams::new(2, 2, code);
 
         let evaluations = vec![Int::from(1), Int::from(2), Int::from(3), Int::from(4)];
@@ -420,8 +434,9 @@ mod tests {
         let results: Vec<Vec<Vec<Int<4>>>> = (0..10)
             .into_par_iter()
             .map(|_| {
-                let code = C::new(poly_size);
-                let pp = ZipPlusParams::new(num_vars, 8, code);
+                let row_len = 1usize << (num_vars / 2);
+                let code = C::new(row_len);
+                let pp = ZipPlusParams::new(num_vars, poly_size / row_len, code);
 
                 let rows = TestZip::encode_rows(&pp, pp.linear_code.row_len(), &poly.evaluations);
                 let rows: Vec<Vec<_>> = rows
@@ -705,8 +720,9 @@ mod tests {
 
         let mut rng = rng();
         let num_vars = 4;
-        let poly_size = 1 << num_vars;
-        let linear_code = C::new(poly_size);
+        let poly_size: usize = 1 << num_vars;
+        let row_len = poly_size.isqrt().next_power_of_two();
+        let linear_code = C::new(row_len);
         let param = TestZip::setup(poly_size, linear_code);
         let evaluations: Vec<_> = (0..poly_size)
             .map(|_| <Zt as ZipTypes>::Eval::from(rng.random::<i8>()))

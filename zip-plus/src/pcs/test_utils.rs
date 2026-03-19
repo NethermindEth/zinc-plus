@@ -129,9 +129,10 @@ fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     prepare_evaluations: impl FnOnce(usize) -> Vec<Zt::Eval>,
 ) -> (ZipPlusParams<Zt, Lc>, DenseMultilinearExtension<Zt::Eval>) {
     let poly_size = 1 << num_vars;
-    let num_rows = 1 << num_vars.div_ceil(2);
+    let row_len = 1usize << (num_vars / 2);
+    let num_rows = poly_size / row_len;
 
-    let code = Lc::new(poly_size);
+    let code = Lc::new(row_len);
     let pp = ZipPlusParams::new(num_vars, num_rows, code);
 
     let evaluations = prepare_evaluations(poly_size);

@@ -71,9 +71,9 @@ where
 {
     const REPETITION_FACTOR: usize = REP;
 
-    fn new(poly_size: usize) -> Self {
+    fn new(row_len: usize) -> Self {
         Self {
-            raa: RaaCode::new(poly_size),
+            raa: RaaCode::new(row_len),
         }
     }
 
