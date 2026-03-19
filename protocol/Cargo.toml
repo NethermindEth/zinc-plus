@@ -35,6 +35,7 @@ workspace = true
 
 [features]
 parallel = ["dep:rayon", "zinc-piop/parallel", "zinc-poly/parallel", "zinc-uair/parallel", "zinc-utils/parallel"]
+unchecked = []
 
 [[bench]]
 name = "e2e"
