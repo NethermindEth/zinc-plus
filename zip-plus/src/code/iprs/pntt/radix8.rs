@@ -215,9 +215,9 @@ mod tests {
 
     #[test]
     fn compare_to_arkworks_ntt_base_layer_multiply() {
-        compare_to_arkworks_ntt_base_layer_generic::<PnttConfigF2_16_1<1>>();
-        compare_to_arkworks_ntt_base_layer_generic::<PnttConfigF2_16_1<2>>();
-        compare_to_arkworks_ntt_base_layer_generic::<PnttConfigF2_16_1<3>>();
+        compare_to_arkworks_ntt_base_layer_generic::<PnttConfigF65537_32_64<1>>();
+        compare_to_arkworks_ntt_base_layer_generic::<PnttConfigF65537_32_64<2>>();
+        compare_to_arkworks_ntt_base_layer_generic::<PnttConfigF65537_32_64<3>>();
     }
 
     fn pntt_against_arkworks_generic<C: Config>()
@@ -274,8 +274,8 @@ mod tests {
 
     #[test]
     fn pntt_against_arkworks() {
-        pntt_against_arkworks_generic::<PnttConfigF2_16_1<1>>();
-        pntt_against_arkworks_generic::<PnttConfigF2_16_1<2>>();
-        pntt_against_arkworks_generic::<PnttConfigF2_16_1<3>>();
+        pntt_against_arkworks_generic::<PnttConfigF65537_32_64<1>>();
+        pntt_against_arkworks_generic::<PnttConfigF65537_32_64<2>>();
+        pntt_against_arkworks_generic::<PnttConfigF65537_32_64<3>>();
     }
 }
