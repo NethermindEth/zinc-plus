@@ -65,14 +65,14 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
 
     let mut group = c.benchmark_group("Multipoint eval");
 
+    // Prepare a transcript with the seed absorbed once.
+    let mut base_transcript = KeccakTranscript::new();
+    base_transcript.absorb_slice(b"bench");
+
     // --- Bench prover ---
-    group.bench_with_input(BenchmarkId::new("Prover", &params), &(), |bench, _| {
+    group.bench_function(BenchmarkId::new("Prover", &params), |bench| {
         bench.iter_batched(
-            || {
-                let mut t = KeccakTranscript::new();
-                t.absorb_slice(b"bench");
-                t
-            },
+            || base_transcript.clone(),
             |mut t| {
                 let _ = black_box(
                     MultipointEval::<F>::prove_as_subprotocol(
@@ -113,13 +113,9 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
         })
         .collect();
 
-    group.bench_with_input(BenchmarkId::new("Verifier", &params), &(), |bench, _| {
+    group.bench_function(BenchmarkId::new("Verifier", &params), |bench| {
         bench.iter_batched(
-            || {
-                let mut t = KeccakTranscript::new();
-                t.absorb_slice(b"bench");
-                (t, proof.clone())
-            },
+            || (base_transcript.clone(), proof.clone()),
             |(mut t, proof)| {
                 let _ = black_box(
                     MultipointEval::<F>::verify_as_subprotocol(
