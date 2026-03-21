@@ -30,7 +30,14 @@ pub trait Config: Copy + Send + Sync {
     /// The length of the pseudo NTT's input.
     const INPUT_LEN: usize = Self::BASE_LEN * (1 << (3 * Self::DEPTH));
     /// The length of the pseudo NTT's output.
-    const OUTPUT_LEN: usize = Self::BASE_DIM * (1 << (3 * Self::DEPTH));
+    const OUTPUT_LEN: usize = {
+        let value = Self::BASE_DIM * (1 << (3 * Self::DEPTH));
+        assert!(
+            value < Self::FIELD_MODULUS as usize,
+            "Output length is more than the number of elements in the field"
+        );
+        value
+    };
 
     /// A helper to get an integer representation that
     /// lies in the range `[-(p - 1)/2, (p - 1)/2]` from a field element.
@@ -246,6 +253,9 @@ mod tests {
         let expected = precompute::precompute_roots_of_unity::<C>(8);
 
         let our = C::BASE_TWIDDLES.to_vec();
+        let ol = C::OUTPUT_LEN;
+        let field_modulus = C::FIELD_MODULUS as usize;
+        assert!(ol < field_modulus);
 
         assert_eq!(expected, our);
     }
@@ -259,5 +269,6 @@ mod tests {
         check_twiddles_generic::<PnttConfigF65537_16_64<1>>();
         check_twiddles_generic::<PnttConfigF65537_32_128<1>>();
         check_twiddles_generic::<PnttConfigF65537_64_256<1>>();
+        check_twiddles_generic::<PnttConfigF65537_64_256<2>>();
     }
 }
