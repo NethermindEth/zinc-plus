@@ -43,7 +43,7 @@ use zinc_utils::{
 use zip_plus::{
     code::{
         LinearCode,
-        iprs::{IprsCode, PnttConfigF2_16_1},
+        iprs::{IprsCode, PnttConfigF65537_32_128},
     },
     pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
 };
@@ -220,9 +220,9 @@ where
         MBSInnerProduct,
     >;
 
-    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF2_16_1<IPRS_DEPTH>, UNCHECKED>;
-    type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF2_16_1<IPRS_DEPTH>, UNCHECKED>;
-    type IntLc = IprsCode<Self::IntZt, PnttConfigF2_16_1<IPRS_DEPTH>, UNCHECKED>;
+    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537_32_128<IPRS_DEPTH>, UNCHECKED>;
+    type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537_32_128<IPRS_DEPTH>, UNCHECKED>;
+    type IntLc = IprsCode<Self::IntZt, PnttConfigF65537_32_128<IPRS_DEPTH>, UNCHECKED>;
 }
 
 //

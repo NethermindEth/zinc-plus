@@ -30,7 +30,14 @@ pub trait Config: Copy + Send + Sync {
     /// The length of the pseudo NTT's input.
     const INPUT_LEN: usize = Self::BASE_LEN * (1 << (3 * Self::DEPTH));
     /// The length of the pseudo NTT's output.
-    const OUTPUT_LEN: usize = Self::BASE_DIM * (1 << (3 * Self::DEPTH));
+    const OUTPUT_LEN: usize = {
+        let value = Self::BASE_DIM * (1 << (3 * Self::DEPTH));
+        assert!(
+            value < Self::FIELD_MODULUS as usize,
+            "Output length is more than the number of elements in the field"
+        );
+        value
+    };
 
     /// A helper to get an integer representation that
     /// lies in the range `[-(p - 1)/2, (p - 1)/2]` from a field element.
@@ -155,41 +162,86 @@ impl<C: Config> Radix8PnttParams<C> {
     }
 }
 
-/// Pseudo NTT configuration derived from
-/// the field `Fp` for `p = 2^16 + 1`.
-///
-/// Supports `DEPTH` up to `3`.
-#[derive(Clone, Copy)]
-pub struct PnttConfigF2_16_1<const DEPTH: usize>;
-
-mod fq {
+mod f65537 {
     #![allow(non_local_definitions)]
     use ark_ff::{Fp64, MontBackend, MontConfig};
     #[derive(MontConfig)]
     #[modulus = "65537"]
     #[generator = "3"]
-    pub struct FqConfig;
+    pub struct Config;
 
-    pub type FqBackend = MontBackend<FqConfig, 1>;
-    pub type Fq = Fp64<FqBackend>;
+    pub type Backend = MontBackend<Config, 1>;
+    pub type Field = Fp64<Backend>;
 
     #[allow(clippy::cast_possible_truncation)] // We know modulus is small enough.
-    pub const MODULUS: u32 = FqConfig::MODULUS.0[0] as u32;
+    pub const MODULUS: u32 = Config::MODULUS.0[0] as u32;
 }
 
-impl<const DEPTH: usize> Config for PnttConfigF2_16_1<DEPTH> {
-    type Field = fq::Fq;
-    const FIELD_MODULUS: u32 = fq::MODULUS;
-    const BASE_LEN: usize = 32;
-    const BASE_DIM: usize = 64;
-    const DEPTH: usize = DEPTH;
-    const BASE_TWIDDLES: [PnttInt; 8] = [1, 4096, -256, 16, -1, -4096, 256, -16];
+macro_rules! define_configs {
+    ($($(#[$outer:meta])* $name:ident(BASE_LEN=$base_len:literal, BASE_DIM=$base_dim:literal)),* $(,)?) => {
+        $(
+            $(#[$outer])*
+            #[derive(Clone, Copy)]
+            pub struct $name<const DEPTH: usize>;
 
-    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
-        let big_int = fq::FqBackend::into_bigint(x);
+            impl<const DEPTH: usize> Config for $name<DEPTH> {
+                type Field = f65537::Field;
+                const FIELD_MODULUS: u32 = f65537::MODULUS;
+                const BASE_LEN: usize = $base_len;
+                const BASE_DIM: usize = $base_dim;
+                const DEPTH: usize = DEPTH;
+                const BASE_TWIDDLES: [PnttInt; 8] = [1, 4096, -256, 16, -1, -4096, 256, -16];
 
-        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
-    }
+                fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+                    let big_int = f65537::Backend::into_bigint(x);
+
+                    precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+                }
+            }
+        )*
+    };
+}
+
+define_configs! {
+    //
+    // Rate 1/2 configurations
+    //
+
+    /// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=32, BASE_DIM=64 (rate 1/2).
+    ///
+    /// Supports `DEPTH` up to `3`.
+    PnttConfigF65537_32_64(BASE_LEN=32, BASE_DIM=64),
+
+    //
+    // Rate 1/4 configurations
+    //
+
+    /// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=1, BASE_DIM=4 (rate 1/4).
+    /// NTT domain up to 2^16. Row lengths: 8 (D=1), 64 (D=2), 512 (D=3)..
+    PnttConfigF65537_1_4(BASE_LEN=1, BASE_DIM=4),
+
+    /// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=2, BASE_DIM=8 (rate 1/4).
+    /// NTT domain up to 2^16. Row lengths: 16 (D=1), 128 (D=2), 1024 (D=3).
+    PnttConfigF65537_2_8(BASE_LEN=2, BASE_DIM=8),
+
+    /// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=4, BASE_DIM=16 (rate 1/4).
+    /// NTT domain up to 2^16. Row lengths: 32 (D=1), 256 (D=2), 2048 (D=3).
+    PnttConfigF65537_4_16(BASE_LEN=4, BASE_DIM=16),
+
+    /// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=16, BASE_DIM=64 (rate 1/4).
+    /// NTT domain up to 2^16, enabling row lengths up to 2^13.
+    /// Row lengths: 128 (D=1), 1024 (D=2), 8192 (D=3).
+    PnttConfigF65537_16_64(BASE_LEN=16, BASE_DIM=64),
+
+    /// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=32, BASE_DIM=128 (rate 1/4).
+    /// NTT domain up to 2^16, enabling row lengths up to 2^11.
+    /// Row lengths: 256 (D=1), 2048 (D=2).
+    PnttConfigF65537_32_128(BASE_LEN=32, BASE_DIM=128),
+
+    /// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=64, BASE_DIM=256 (rate 1/4).
+    /// NTT domain up to 2^16, enabling row lengths up to 2^12.
+    /// Row lengths: 512 (D=1), 4096 (D=2).
+    PnttConfigF65537_64_256(BASE_LEN=64, BASE_DIM=256),
 }
 
 #[cfg(test)]
@@ -201,12 +253,22 @@ mod tests {
         let expected = precompute::precompute_roots_of_unity::<C>(8);
 
         let our = C::BASE_TWIDDLES.to_vec();
+        let ol = C::OUTPUT_LEN;
+        let field_modulus = C::FIELD_MODULUS as usize;
+        assert!(ol < field_modulus);
 
         assert_eq!(expected, our);
     }
 
     #[test]
-    fn check_twiddles() {
-        check_twiddles_generic::<PnttConfigF2_16_1<1>>();
+    fn check_twiddles_f65537() {
+        check_twiddles_generic::<PnttConfigF65537_32_64<1>>();
+        check_twiddles_generic::<PnttConfigF65537_1_4<1>>();
+        check_twiddles_generic::<PnttConfigF65537_2_8<1>>();
+        check_twiddles_generic::<PnttConfigF65537_4_16<1>>();
+        check_twiddles_generic::<PnttConfigF65537_16_64<1>>();
+        check_twiddles_generic::<PnttConfigF65537_32_128<1>>();
+        check_twiddles_generic::<PnttConfigF65537_64_256<1>>();
+        check_twiddles_generic::<PnttConfigF65537_64_256<2>>();
     }
 }

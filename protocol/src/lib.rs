@@ -212,7 +212,7 @@ mod tests {
     };
     use zip_plus::{
         code::{
-            iprs::{IprsCode, PnttConfigF2_16_1},
+            iprs::{IprsCode, PnttConfigF65537_32_64},
             raa::{RaaCode, RaaConfig},
         },
         pcs::structs::{ZipPlus, ZipPlusParams},
@@ -330,9 +330,9 @@ mod tests {
         type ArbitraryZt = ArbitraryPolyZipTypesIprs;
         type IntZt = IntZipTypes;
 
-        type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF2_16_1<IPRS_DEPTH>, CHECKED>;
-        type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF2_16_1<IPRS_DEPTH>, CHECKED>;
-        type IntLc = IprsCode<Self::IntZt, PnttConfigF2_16_1<IPRS_DEPTH>, CHECKED>;
+        type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537_32_64<IPRS_DEPTH>, CHECKED>;
+        type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537_32_64<IPRS_DEPTH>, CHECKED>;
+        type IntLc = IprsCode<Self::IntZt, PnttConfigF65537_32_64<IPRS_DEPTH>, CHECKED>;
     }
 
     const RAA_REP: usize = 4;

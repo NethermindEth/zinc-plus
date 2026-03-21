@@ -21,7 +21,7 @@ use crypto_primitives::{
 };
 use zip_plus::{
     code::{
-        iprs::{IprsCode, PnttConfigF2_16_1},
+        iprs::{IprsCode, PnttConfigF65537_32_128},
         raa::{RaaCode, RaaConfig},
     },
     pcs::structs::ZipTypes,
@@ -69,7 +69,7 @@ type SomeRaaCode<const D_PLUS_ONE: usize> =
     RaaCode<BenchZipPlusTypes<i32, D_PLUS_ONE>, BenchRaaConfig, 4>;
 
 type SomeIprsCode<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const CHECK: bool> =
-    IprsCode<BenchZipPlusTypes<Twiddle, D_PLUS_ONE>, PnttConfigF2_16_1<DEPTH>, CHECK>;
+    IprsCode<BenchZipPlusTypes<Twiddle, D_PLUS_ONE>, PnttConfigF65537_32_128<DEPTH>, CHECK>;
 
 fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");
