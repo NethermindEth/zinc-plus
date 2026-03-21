@@ -33,7 +33,7 @@ use zinc_uair::{
     ideal_collector::IdealOrZero,
 };
 use zinc_utils::{
-    CHECKED,
+    UNCHECKED,
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProduct, ScalarProduct},
     mul_by_scalar::MulByScalar,
@@ -220,9 +220,9 @@ where
         MBSInnerProduct,
     >;
 
-    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF2_16_1<IPRS_DEPTH>, CHECKED>;
-    type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF2_16_1<IPRS_DEPTH>, CHECKED>;
-    type IntLc = IprsCode<Self::IntZt, PnttConfigF2_16_1<IPRS_DEPTH>, CHECKED>;
+    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF2_16_1<IPRS_DEPTH>, UNCHECKED>;
+    type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF2_16_1<IPRS_DEPTH>, UNCHECKED>;
+    type IntLc = IprsCode<Self::IntZt, PnttConfigF2_16_1<IPRS_DEPTH>, UNCHECKED>;
 }
 
 //
@@ -325,7 +325,7 @@ fn bench_prove_verify<Zt, U, IdealOverF>(
 
     group.bench_function(BenchmarkId::new("Prove", &params), |bench| {
         bench.iter(|| {
-            black_box(<zinc_plus!()>::prove::<CHECKED>(
+            black_box(<zinc_plus!()>::prove::<UNCHECKED>(
                 &pp,
                 bin,
                 arb,
@@ -338,14 +338,14 @@ fn bench_prove_verify<Zt, U, IdealOverF>(
     });
 
     let proof: Proof<F> =
-        <zinc_plus!()>::prove::<CHECKED>(&pp, bin, arb, int, num_vars, project_scalar)
+        <zinc_plus!()>::prove::<UNCHECKED>(&pp, bin, arb, int, num_vars, project_scalar)
             .expect("proof generation for verifier bench");
 
     group.bench_function(BenchmarkId::new("Verify", &params), |bench| {
         bench.iter_batched(
             || proof.clone(),
             |proof| {
-                black_box(<zinc_plus!()>::verify::<_, CHECKED>(
+                black_box(<zinc_plus!()>::verify::<_, UNCHECKED>(
                     &pp,
                     proof,
                     num_vars,

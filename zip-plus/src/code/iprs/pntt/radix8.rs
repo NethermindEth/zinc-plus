@@ -2,7 +2,6 @@
 
 #[macro_use]
 mod butterfly;
-mod mul_by_twiddle;
 mod octet_reversal;
 
 pub mod params;
@@ -18,12 +17,12 @@ use butterfly::*;
 use octet_reversal::*;
 use params::*;
 
-pub(crate) use mul_by_twiddle::*;
-
 /// The main entrypoint of the radix-8 pseudo NTT algorithm.
-pub(crate) fn pntt<In, Out, C, MulInByTwiddle, MulOutByTwiddle, const CHECK_ADDITION: bool>(
+pub(crate) fn pntt<In, Out, C, const CHECK: bool>(
     input: &[In],
     params: &Radix8PnttParams<C>,
+    mul_in_by_twiddle: impl Fn(&In, &PnttInt) -> Out + Copy + Sync,
+    mul_out_by_twiddle: impl Fn(&Out, &PnttInt) -> Out + Copy + Sync,
 ) -> Vec<Out>
 where
     C: Config,
@@ -36,8 +35,6 @@ where
         + Sync
         + Debug
         + for<'a> Add<&'a Out, Output = Out>,
-    MulInByTwiddle: MulByTwiddle<In, PnttInt, Output = Out>,
-    MulOutByTwiddle: MulByTwiddle<Out, PnttInt, Output = Out>,
 {
     assert_eq!(
         C::INPUT_LEN,
@@ -47,10 +44,9 @@ where
         input.len()
     );
 
-    let mut output =
-        base_multiply_into_output::<_, _, _, MulInByTwiddle, CHECK_ADDITION>(input, params);
+    let mut output = base_multiply_into_output::<_, _, _, CHECK>(input, params, mul_in_by_twiddle);
 
-    combine_stages::<_, _, MulOutByTwiddle, CHECK_ADDITION>(&mut output, params);
+    combine_stages::<_, _, CHECK>(&mut output, params, mul_out_by_twiddle);
 
     output
 }
@@ -59,11 +55,13 @@ where
 /// Assumes `out` contains the result of multiplications of the base chunks
 /// with the `base_matrix`.
 #[allow(clippy::arithmetic_side_effects)]
-fn combine_stages<R, C, M, const CHECK_ADDITION: bool>(out: &mut [R], params: &Radix8PnttParams<C>)
-where
+fn combine_stages<R, C, const CHECK: bool>(
+    out: &mut [R],
+    params: &Radix8PnttParams<C>,
+    mul_by_twiddle: impl Fn(&R, &PnttInt) -> R + Copy + Sync,
+) where
     C: Config,
-    R: CheckedAdd + CheckedMul + Clone + Send + Sync + Debug + for<'a> Add<&'a R, Output = R>,
-    M: MulByTwiddle<R, PnttInt, Output = R>,
+    R: CheckedAdd + CheckedMul + for<'a> Add<&'a R, Output = R> + Clone + Send + Sync + Debug,
 {
     for k in 0..C::DEPTH {
         // The length of chunks in the current layer.
@@ -103,10 +101,11 @@ where
                     .expect("We are guaranteed to have the right length here");
 
                 // Perform butterflies.
-                apply_radix_8_butterflies::<_, _, M, CHECK_ADDITION>(
+                apply_radix_8_butterflies::<_, _, CHECK>(
                     ys,
                     &subresults,
                     &layer_twiddles[i],
+                    mul_by_twiddle,
                 );
             }
         });
@@ -115,9 +114,10 @@ where
 
 /// Allocates the output vector and performs base layer multiplications.
 #[allow(clippy::arithmetic_side_effects)]
-fn base_multiply_into_output<In, Out, C, M, const CHECK_ADDITION: bool>(
+fn base_multiply_into_output<In, Out, C, const CHECK: bool>(
     input: &[In],
     params: &Radix8PnttParams<C>,
+    mul_by_twiddle: impl Fn(&In, &PnttInt) -> Out + Copy + Sync,
 ) -> Vec<Out>
 where
     C: Config,
@@ -129,7 +129,6 @@ where
         + Send
         + Sync
         + for<'a> Add<&'a Out, Output = Out>,
-    M: MulByTwiddle<In, PnttInt, Output = Out>,
 {
     cfg_into_iter!(0..C::OUTPUT_LEN)
         .map(|i| {
@@ -149,16 +148,12 @@ where
             params.base_matrix[row][1..].iter().enumerate().fold(
                 Out::from_ref(&input[oct_rev_chunk]),
                 |acc, (col, bm_row_col)| {
-                    let term = M::mul_by_twiddle(
+                    let term = mul_by_twiddle(
                         &input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))],
                         bm_row_col,
                     );
 
-                    if CHECK_ADDITION {
-                        add!(acc, &term)
-                    } else {
-                        acc + &term
-                    }
+                    if CHECK { add!(acc, &term) } else { acc + &term }
                 },
             )
         })
@@ -208,9 +203,9 @@ mod tests {
         let our_res = {
             let params = Radix8PnttParams::<C>::new();
 
-            let output = base_multiply_into_output::<_, _, _, MBSMulByTwiddle<CHECKED>, CHECKED>(
-                &input, &params,
-            );
+            let output = base_multiply_into_output::<_, _, _, CHECKED>(&input, &params, |a, b| {
+                a.mul_by_scalar::<CHECKED>(b).unwrap()
+            });
 
             output.into_iter().map(C::Field::from).collect_vec()
         };
@@ -251,10 +246,12 @@ mod tests {
 
             let params = Radix8PnttParams::<C>::new();
 
-            let res: Vec<Int<4>> =
-                pntt::<_, _, _, MBSMulByTwiddle<CHECKED>, MBSMulByTwiddle<CHECKED>, CHECKED>(
-                    &input, &params,
-                );
+            let res: Vec<Int<4>> = pntt::<_, _, _, CHECKED>(
+                &input,
+                &params,
+                |a, b| a.mul_by_scalar::<CHECKED>(b).unwrap(),
+                |a, b| a.mul_by_scalar::<CHECKED>(b).unwrap(),
+            );
 
             res.into_iter()
                 .map(|x| {
