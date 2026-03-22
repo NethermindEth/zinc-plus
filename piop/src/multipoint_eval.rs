@@ -5,9 +5,12 @@
 //! `v_j^{down}(r')` - to a single set of standard MLE evaluation claims
 //! `v_j(r_0)` at a new random point `r_0` via one sumcheck.
 //!
-//! The sumcheck proves:
+//! The trace column MLEs are precombined into a single MLE
+//! `precombined(b) = \sum_j \gamma_j * v_j(b)` before entering the sumcheck, so
+//! the prover works with only 3 MLEs (`eq`, `next`, `precombined`) regardless
+//! of the number of columns. The sumcheck proves:
 //! ```text
-//! \sum_b [eq(b, r') + \alpha * next(r', b)] * [\sum_j \gamma_j * v_j(b)]
+//! \sum_b [eq(b, r') + \alpha * next(r', b)] * precombined(b)
 //!   = \sum_j \gamma_j * (up_eval_j + \alpha * down_eval_j)
 //! ```
 //!
@@ -91,6 +94,7 @@ where
         let num_cols = trace_mles.len();
         let num_vars = eval_point.len();
         let zero = F::zero_with_cfg(field_cfg);
+        let zero_inner = zero.inner();
 
         // Step 1: Sample multi-point batching coefficient \alpha and column
         // batching coefficients \gamma_1,...,\gamma_J.
@@ -103,18 +107,37 @@ where
         let eq_r = zinc_poly::utils::build_eq_x_r_inner(eval_point, field_cfg)?;
         let next_r = zinc_poly::utils::build_next_r_mle(eval_point, field_cfg)?;
 
-        // Step 3: Pack MLEs: [eq_r, next_r, v_1, ..., v_J]
-        let mut mles: Vec<DenseMultilinearExtension<F::Inner>> = Vec::with_capacity(2 + num_cols);
-        mles.push(eq_r);
-        mles.push(next_r);
-        for col in trace_mles {
-            mles.push(col.clone());
-        }
+        // Precombine up cols with gammas, precombined[b] = Σ_j γ_j trace[j][b]
+        let precombined = {
+            let evaluations = (0..1 << num_vars)
+                .map(|b| {
+                    gammas
+                        .iter()
+                        .enumerate()
+                        .fold(zero.clone(), |acc, (i, gamma)| {
+                            let eval_f = F::new_unchecked_with_cfg(
+                                trace_mles[i].evaluations[b].clone(),
+                                field_cfg,
+                            );
+                            acc + gamma.clone() * eval_f
+                        })
+                        .into_inner()
+                })
+                .collect();
+            DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                evaluations,
+                zero_inner.clone(),
+            )
+        };
+
+        // Step 3: Pack MLEs: [eq_r, next_r, precombined]
+        let mles = vec![eq_r, next_r, precombined];
 
         // Step 4: Run sumcheck with degree=2.
 
-        // comb_fn([eq_r, next_r, v_1, ..., v_J]) =
-        //     (eq_r + \alpha * next_r) * \sum_j(\gamma_j * v_j)
+        // comb_fn([eq_r, next_r, precombined]) =
+        //     (eq_r + \alpha * next_r) * precombined
         let (sumcheck_proof, sumcheck_prover_state) = MLSumcheck::prove_as_subprotocol(
             transcript,
             mles,
@@ -124,11 +147,7 @@ where
                 let eq_val = &mle_values[0];
                 let next_val = &mle_values[1];
                 let selector = eq_val.clone() + alpha.clone() * next_val;
-                let batched = gammas
-                    .iter()
-                    .zip(mle_values[2..].iter())
-                    .fold(zero.clone(), |acc, (g, v)| acc + g.clone() * v);
-                selector * &batched
+                selector * &mle_values[2]
             },
             field_cfg,
         );
