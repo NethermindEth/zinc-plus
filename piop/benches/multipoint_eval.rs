@@ -117,19 +117,18 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
         bench.iter_batched(
             || (base_transcript.clone(), proof.clone()),
             |(mut t, proof)| {
-                let _ = black_box(
-                    MultipointEval::<F>::verify_as_subprotocol(
-                        &mut t,
-                        proof,
-                        &eval_point,
-                        &up_evals,
-                        &down_evals,
-                        &open_evals,
-                        num_vars,
-                        &field_cfg,
-                    )
-                    .expect("verifier failed"),
-                );
+                let subclaim = MultipointEval::<F>::verify_as_subprotocol(
+                    &mut t,
+                    proof,
+                    &eval_point,
+                    &up_evals,
+                    &down_evals,
+                    num_vars,
+                    &field_cfg,
+                )
+                .expect("verifier failed");
+                MultipointEval::<F>::verify_subclaim(&subclaim, &open_evals, &field_cfg)
+                    .expect("verifier failed");
             },
             BatchSize::SmallInput,
         );
