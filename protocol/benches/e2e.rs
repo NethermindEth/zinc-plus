@@ -33,7 +33,6 @@ use zinc_uair::{
     ideal_collector::IdealOrZero,
 };
 use zinc_utils::{
-    UNCHECKED,
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProduct, ScalarProduct},
     mul_by_scalar::MulByScalar,
@@ -51,6 +50,12 @@ use zip_plus::{
 //
 // Type definitions and constants
 //
+
+const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
+    zinc_utils::UNCHECKED
+} else {
+    zinc_utils::CHECKED
+};
 
 const IPRS_DEPTH: usize = 1;
 
@@ -221,9 +226,10 @@ where
         MBSInnerProduct,
     >;
 
-    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537_32_128<IPRS_DEPTH>, UNCHECKED>;
-    type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537_32_128<IPRS_DEPTH>, UNCHECKED>;
-    type IntLc = IprsCode<Self::IntZt, PnttConfigF65537_32_128<IPRS_DEPTH>, UNCHECKED>;
+    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537_32_128<IPRS_DEPTH>, PERFORM_CHECKS>;
+    type ArbitraryLc =
+        IprsCode<Self::ArbitraryZt, PnttConfigF65537_32_128<IPRS_DEPTH>, PERFORM_CHECKS>;
+    type IntLc = IprsCode<Self::IntZt, PnttConfigF65537_32_128<IPRS_DEPTH>, PERFORM_CHECKS>;
 }
 
 //
@@ -326,7 +332,7 @@ fn bench_prove_verify<Zt, U, IdealOverF>(
         ($label:literal, $mle_first:expr) => {
             group.bench_function(BenchmarkId::new($label, &params), |bench| {
                 bench.iter(|| {
-                    black_box(<zinc_plus!()>::prove::<{ $mle_first }, UNCHECKED>(
+                    black_box(<zinc_plus!()>::prove::<{ $mle_first }, PERFORM_CHECKS>(
                         &pp,
                         &trace,
                         num_vars,
@@ -345,7 +351,7 @@ fn bench_prove_verify<Zt, U, IdealOverF>(
     }
 
     let proof: Proof<F> =
-        <zinc_plus!()>::prove::<false, UNCHECKED>(&pp, &trace, num_vars, project_scalar)
+        <zinc_plus!()>::prove::<false, PERFORM_CHECKS>(&pp, &trace, num_vars, project_scalar)
             .expect("proof generation for verifier bench");
 
     let sig = U::signature();
@@ -355,7 +361,7 @@ fn bench_prove_verify<Zt, U, IdealOverF>(
         bench.iter_batched(
             || proof.clone(),
             |proof| {
-                black_box(<zinc_plus!()>::verify::<_, UNCHECKED>(
+                black_box(<zinc_plus!()>::verify::<_, PERFORM_CHECKS>(
                     &pp,
                     proof,
                     &public_trace,

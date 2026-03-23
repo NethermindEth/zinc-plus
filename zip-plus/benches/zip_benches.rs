@@ -10,10 +10,15 @@ use zip_common::*;
 use criterion::{Criterion, criterion_group, criterion_main};
 use crypto_bigint::U64;
 use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_uint::Uint};
-use zinc_utils::UNCHECKED;
 use zip_plus::{
     code::raa::{RaaCode, RaaConfig},
     pcs::structs::ZipTypes,
+};
+
+const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
+    zinc_utils::UNCHECKED
+} else {
+    zinc_utils::CHECKED
 };
 
 const INT_LIMBS: usize = U64::LIMBS;
@@ -38,14 +43,14 @@ impl ZipTypes for BenchZipTypes {
 struct BenchRaaConfig;
 impl RaaConfig for BenchRaaConfig {
     const PERMUTE_IN_PLACE: bool = false;
-    const CHECK_FOR_OVERFLOWS: bool = UNCHECKED;
+    const CHECK_FOR_OVERFLOWS: bool = PERFORM_CHECKS;
 }
 
 type Code = RaaCode<BenchZipTypes, BenchRaaConfig, 4>;
 
 fn zip_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");
-    do_bench::<BenchZipTypes, Code, UNCHECKED>(&mut group);
+    do_bench::<BenchZipTypes, Code, PERFORM_CHECKS>(&mut group);
     group.finish();
 }
 
