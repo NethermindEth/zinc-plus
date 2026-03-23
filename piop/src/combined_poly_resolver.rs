@@ -379,6 +379,7 @@ impl<F: PrimeField> From<SumCheckError<F>> for CombinedPolyResolverError<F> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{
         ideal_check::IdealCheckProtocol,
         projections::{evaluate_trace_to_column_mles, project_scalars_to_field},
@@ -397,8 +398,6 @@ mod tests {
         ideal::{Ideal, IdealCheck, degree_one::DegreeOneIdeal},
         ideal_collector::IdealOrZero,
     };
-
-    use super::*;
 
     // TODO(Ilia): These tests are absolute joke.
     //             Once we have time we need to create a comprehensive test suite

@@ -285,16 +285,27 @@ impl<const DEGREE_PLUS_ONE: usize> Named for BinaryRefPoly<DEGREE_PLUS_ONE> {
 }
 
 impl<const DEGREE_PLUS_ONE: usize> ConstTranscribable for BinaryRefPoly<DEGREE_PLUS_ONE> {
-    const NUM_BYTES: usize = DensePolynomial::<Boolean, DEGREE_PLUS_ONE>::NUM_BYTES;
+    const NUM_BYTES: usize = u64::NUM_BYTES;
 
     #[inline(always)]
     fn read_transcription_bytes(bytes: &[u8]) -> Self {
-        Self(DensePolynomial::read_transcription_bytes(bytes))
+        let value = u64::read_transcription_bytes(bytes);
+        Self(DensePolynomial {
+            coeffs: array::from_fn(|i| Boolean::new(value & (1 << i) != 0)),
+        })
     }
 
     #[inline(always)]
     fn write_transcription_bytes(&self, buf: &mut [u8]) {
-        self.0.write_transcription_bytes(buf);
+        let mut value: u64 = 0;
+
+        self.0.coeffs.iter().enumerate().for_each(|(i, coeff)| {
+            if coeff.inner() {
+                value |= 1 << i;
+            }
+        });
+
+        value.write_transcription_bytes(buf);
     }
 }
 
@@ -412,5 +423,17 @@ mod tests {
 
             assert_eq!(result, i);
         }
+    }
+
+    #[test]
+    fn transcribable() {
+        let original =
+            BinaryRefPoly::<4>::new([true.into(), false.into(), true.into(), false.into()]);
+        let mut bytes = [0u8; BinaryRefPoly::<4>::NUM_BYTES];
+        assert_eq!(bytes.len(), u64::NUM_BYTES);
+
+        original.write_transcription_bytes(&mut bytes);
+        let deserialized = BinaryRefPoly::<4>::read_transcription_bytes(&bytes);
+        assert_eq!(original, deserialized);
     }
 }

@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use crate::{
-    ideal_check::{IdealCheckProtocol, Proof, ProverState},
+    ideal_check::{
+        IdealCheckProtocol, Proof as IdealCheckProof, ProverState as IdealCheckProverState,
+    },
     projections::{
         ColumnMajorTrace, RowMajorTrace, project_scalars, project_trace_coeffs_column_major,
         project_trace_coeffs_row_major,
@@ -38,8 +40,8 @@ pub fn run_ideal_check_prover_linear<U, const DEGREE_PLUS_ONE: usize>(
     trace: &[DenseMultilinearExtension<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>],
     transcript: &mut impl Transcript,
 ) -> (
-    Proof<F>,
-    ProverState<F>,
+    IdealCheckProof<F>,
+    IdealCheckProverState<F>,
     HashMap<U::Scalar, DynamicPolynomialF<F>>,
     ColumnMajorTrace<F>,
 )
@@ -50,7 +52,8 @@ where
     F: FromWithConfig<Int<5>>,
 {
     assert!(
-        U::signature().binary_poly_cols.is_zero() && U::signature().int_cols.is_zero(),
+        U::signature().witness_binary_poly_cols.is_zero()
+            && U::signature().witness_int_cols.is_zero(),
         "the signature should be single typed"
     );
 
@@ -93,8 +96,8 @@ pub fn run_ideal_check_prover_combined<U, const DEGREE_PLUS_ONE: usize>(
     trace: &[DenseMultilinearExtension<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>],
     transcript: &mut impl Transcript,
 ) -> (
-    Proof<F>,
-    ProverState<F>,
+    IdealCheckProof<F>,
+    IdealCheckProverState<F>,
     HashMap<U::Scalar, DynamicPolynomialF<F>>,
     RowMajorTrace<F>,
 )
@@ -105,7 +108,8 @@ where
     F: FromWithConfig<Int<5>>,
 {
     assert!(
-        U::signature().binary_poly_cols.is_zero() && U::signature().int_cols.is_zero(),
+        U::signature().witness_binary_poly_cols.is_zero()
+            && U::signature().witness_int_cols.is_zero(),
         "the signature should be single typed"
     );
 

@@ -15,10 +15,11 @@
 //! ```
 //!
 //! where `\alpha` batches the two evaluation kernels and `\gamma_j` batch
-//! across columns. After the sumcheck reduces to point `r_0`, the caller
-//! provides `open_evals` (the F_q-valued MLE evaluations at `r_0`, typically
-//! derived from polynomial-valued `lifted_evals` via `\psi_a`) and the
-//! verifier checks the sumcheck consistency.
+//! across columns. After the sumcheck reduces to point `r_0`, the verifier
+//! calls [`MultipointEval::verify_subclaim`] with the `open_evals`
+//! (the F_q-valued MLE evaluations at `r_0`, typically derived from
+//! polynomial-valued `lifted_evals` via `\psi_a`) to check the final
+//! consistency equation.
 //!
 //! This corresponds to the T=2 case of Pi_{BMLE} in the paper. Following
 //! the paper, the prover sends only the polynomial-valued lifted evaluations
@@ -27,7 +28,9 @@
 
 use std::marker::PhantomData;
 
-use crate::sumcheck::{MLSumcheck, SumCheckError, SumcheckProof};
+use crate::sumcheck::{
+    MLSumcheck, SumCheckError, SumcheckProof, verifier::Subclaim as SumcheckSubclaim,
+};
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use num_traits::Zero;
 use thiserror::Error;
@@ -56,11 +59,22 @@ pub struct ProverState<F: PrimeField> {
     pub eval_point: Vec<F>,
 }
 
-/// Verifier subclaim after the multi-point evaluation protocol.
+/// Verifier subclaim after the multi-point evaluation sumcheck.
+///
+/// Carries the inner sumcheck [`Subclaim`] plus the intermediate values
+/// needed to finalize the check via [`MultipointEval::verify_subclaim`]
+/// once the caller has assembled the `open_evals` (e.g. after computing
+/// public lifted evaluations from public data at `r_0`).
 #[derive(Clone, Debug)]
 pub struct Subclaim<F: PrimeField> {
-    /// The combined evaluation point r_0.
-    pub eval_point: Vec<F>,
+    /// Inner sumcheck subclaim. Its `point` field is `r_0`; its
+    /// `expected_evaluation` is the value that `verify_subclaim` checks
+    /// against `selector_at_r0 * batched(open_evals)`.
+    pub sumcheck_subclaim: SumcheckSubclaim<F>,
+    /// Column batching coefficients \gamma_j sampled during the protocol.
+    pub gammas: Vec<F>,
+    /// Combined selector value at r_0: `eq(r_0, r') + \alpha * next(r', r_0)`.
+    pub selector_at_r0: F,
 }
 
 //
@@ -166,32 +180,27 @@ where
         ))
     }
 
-    /// Multi-point evaluation protocol verifier.
+    /// Multi-point evaluation protocol verifier (sumcheck phase).
     ///
-    /// Verifies the sumcheck and checks the final-round consistency using
-    /// the caller-provided `open_evals` (typically derived from
-    /// `lifted_evals` via `\psi_a`). Returns the evaluation point `r_0`.
-    #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+    /// Runs the sumcheck verification and computes the intermediate values
+    /// needed for the open-eval consistency check. Returns a [`Subclaim`]
+    /// carrying `r_0`, `gammas`, `selector_at_r0`, and
+    /// `expected_evaluation`. The caller finalizes via
+    /// [`verify_subclaim`](Self::verify_subclaim) once `open_evals` are
+    /// available.
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn verify_as_subprotocol(
         transcript: &mut impl Transcript,
         proof: Proof<F>,
         eval_point: &[F],
         up_evals: &[F],
         down_evals: &[F],
-        open_evals: &[F],
         num_vars: usize,
         field_cfg: &F::Config,
     ) -> Result<Subclaim<F>, MultipointEvalError<F>> {
         let num_cols = up_evals.len();
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
-
-        if open_evals.len() != num_cols {
-            return Err(MultipointEvalError::WrongOpenEvalsNumber {
-                got: open_evals.len(),
-                expected: num_cols,
-            });
-        }
 
         // Step 1: Sample \alpha and \gamma_j (must match prover).
         let alpha: F = transcript.get_field_challenge(field_cfg);
@@ -209,7 +218,7 @@ where
         }
 
         // Step 3: Verify the sumcheck.
-        let subclaim = MLSumcheck::verify_as_subprotocol(
+        let sumcheck_subclaim = MLSumcheck::verify_as_subprotocol(
             transcript,
             num_vars,
             2,
@@ -217,7 +226,7 @@ where
             field_cfg,
         )?;
 
-        let r_0 = &subclaim.point;
+        let r_0 = &sumcheck_subclaim.point;
 
         // Step 4: Recompute the combined selector at r_0.
         //   selector(r_0) = eq(r_0, r') + \alpha * next(r', r_0)
@@ -226,28 +235,54 @@ where
         let mut r_prime_r0 = Vec::with_capacity(2 * num_vars);
         r_prime_r0.extend_from_slice(eval_point);
         r_prime_r0.extend_from_slice(r_0);
-        let next_at_r0 = zinc_poly::utils::next_mle_eval(&r_prime_r0, zero.clone(), one);
+        let next_at_r0 = zinc_poly::utils::next_mle_eval(&r_prime_r0, zero, one);
 
         let selector_at_r0 = eq_at_r0 + alpha * &next_at_r0;
 
-        // Check consistency with provided open_evals.
-        let batched_eval: F = gammas
+        Ok(Subclaim {
+            sumcheck_subclaim,
+            gammas,
+            selector_at_r0,
+        })
+    }
+
+    /// Finalize the multi-point evaluation check given `open_evals`.
+    ///
+    /// Verifies that `selector_at_r0 * \sum_j(gamma_j * open_eval_j)`
+    /// equals the sumcheck's expected evaluation. This is a pure arithmetic
+    /// check with no transcript interaction.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn verify_subclaim(
+        subclaim: &Subclaim<F>,
+        open_evals: &[F],
+        field_cfg: &F::Config,
+    ) -> Result<(), MultipointEvalError<F>> {
+        let num_cols = subclaim.gammas.len();
+
+        if open_evals.len() != num_cols {
+            return Err(MultipointEvalError::WrongOpenEvalsNumber {
+                got: open_evals.len(),
+                expected: num_cols,
+            });
+        }
+
+        let zero = F::zero_with_cfg(field_cfg);
+        let batched_eval: F = subclaim
+            .gammas
             .iter()
             .zip(open_evals.iter())
             .fold(zero, |acc, (g, v)| acc + g.clone() * v);
 
-        let expected_evaluation = selector_at_r0 * &batched_eval;
+        let expected_evaluation = subclaim.selector_at_r0.clone() * &batched_eval;
 
-        if expected_evaluation != subclaim.expected_evaluation {
+        if expected_evaluation != subclaim.sumcheck_subclaim.expected_evaluation {
             return Err(MultipointEvalError::ClaimMismatch {
-                got: subclaim.expected_evaluation,
+                got: subclaim.sumcheck_subclaim.expected_evaluation.clone(),
                 expected: expected_evaluation,
             });
         }
 
-        Ok(Subclaim {
-            eval_point: subclaim.point,
-        })
+        Ok(())
     }
 }
 
@@ -402,16 +437,19 @@ mod tests {
         public: &PublicInput,
         msg: &ProverMessage,
     ) -> Result<Subclaim<F>, MultipointEvalError<F>> {
-        MultipointEval::<F>::verify_as_subprotocol(
+        let subclaim = MultipointEval::<F>::verify_as_subprotocol(
             &mut make_transcript(),
             msg.proof.clone(),
             &public.eval_point,
             &public.up_evals,
             &public.down_evals,
-            &msg.open_evals,
             public.num_vars,
             &(),
-        )
+        )?;
+
+        MultipointEval::<F>::verify_subclaim(&subclaim, &msg.open_evals, &())?;
+
+        Ok(subclaim)
     }
 
     /// Convenience: build trace, prove, return (public, message).
@@ -427,7 +465,7 @@ mod tests {
     fn honest_prove_verify_multi_column() {
         let (public, msg) = honest_interaction(3, 3);
         let subclaim = run_verifier(&public, &msg).unwrap();
-        assert_eq!(subclaim.eval_point.len(), public.num_vars);
+        assert_eq!(subclaim.sumcheck_subclaim.point.len(), public.num_vars);
     }
 
     #[test]

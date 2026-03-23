@@ -14,7 +14,7 @@ use zinc_utils::{
 };
 
 use crate::sumcheck::{
-    MLSumcheck, SumCheckError, SumcheckProof, prover::ProverState, verifier::SubClaim,
+    MLSumcheck, SumCheckError, SumcheckProof, prover::ProverState, verifier::Subclaim,
 };
 
 pub struct RFSumcheck<F, R>(PhantomData<(F, R)>);
@@ -114,7 +114,7 @@ impl<F: FromPrimitiveWithConfig, R: Semiring + ProjectableToField<F>> RFSumcheck
         degree: usize,
         proof: &RFSumcheckProof<F, R>,
         field_cfg: F::Config,
-    ) -> Result<SubClaim<F>, RFSumcheckError<F>>
+    ) -> Result<Subclaim<F>, RFSumcheckError<F>>
     where
         F::Inner: ConstTranscribable + ConstIntSemiring,
         F::Modulus: ConstTranscribable,

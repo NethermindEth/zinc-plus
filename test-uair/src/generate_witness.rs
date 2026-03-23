@@ -7,6 +7,8 @@ use zinc_uair::Uair;
 
 /// A trait for UAIRs for generating single-typed witness,
 /// e.g. consisting of only arbitrary polynomials.
+// TODO(alex): Using this is extremely inconvenient, so maybe just use
+//             multi-type generation and remove this
 pub trait GenerateSingleTypeWitness: Uair {
     type Witness;
 

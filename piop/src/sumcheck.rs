@@ -10,7 +10,7 @@ use zinc_utils::inner_transparent_field::InnerTransparentField;
 
 use crate::sumcheck::{prover::ProverMsg, verifier::VerifierState};
 
-use self::verifier::SubClaim;
+use self::verifier::Subclaim;
 
 pub mod prover;
 // pub mod utils;
@@ -148,7 +148,7 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
     /// $$
     ///
     /// It is designed to be used as a subprotocol within a larger system.
-    /// If successful, it returns a **SubClaim**, a final equation that the
+    /// If successful, it returns a **Subclaim**, a final equation that the
     /// outer protocol must satisfy for the overall proof to be valid.
     ///
     /// ---
@@ -171,8 +171,8 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
     ///
     /// A `Result` which is:
     ///
-    /// * `Ok(SubClaim<F>)`: If the Sumcheck protocol passes successfully, it
-    ///   returns a `SubClaim`. This claim consists of:
+    /// * `Ok(Subclaim<F>)`: If the Sumcheck protocol passes successfully, it
+    ///   returns a `Subclaim`. This claim consists of:
     ///     1. The final random challenge point $r \in
     ///        \text{F}^{\text{num\\_vars}}$.
     ///     2. The expected evaluation $v$ of the combined polynomial $G(r)$ at
@@ -192,7 +192,7 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
         degree: usize,
         proof: &SumcheckProof<F>,
         config: &F::Config,
-    ) -> Result<SubClaim<F>, SumCheckError<F>>
+    ) -> Result<Subclaim<F>, SumCheckError<F>>
     where
         F::Inner: ConstTranscribable,
         F::Modulus: ConstTranscribable,

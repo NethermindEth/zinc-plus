@@ -1,6 +1,3 @@
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
-
 use super::*;
 use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::Zero;
@@ -9,7 +6,7 @@ use zinc_piop::{
     ideal_check::IdealCheckProtocol,
     multipoint_eval::MultipointEval,
     projections::{
-        RowMajorTrace, evaluate_trace_to_column_mles, project_scalars, project_scalars_to_field,
+        evaluate_trace_to_column_mles, project_scalars, project_scalars_to_field,
         project_trace_coeffs_row_major,
     },
 };
@@ -19,7 +16,7 @@ use zinc_poly::{
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{Uair, constraint_counter::count_constraints, degree_counter::count_max_degree};
 use zinc_utils::{
-    cfg_into_iter, cfg_iter, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
+    add, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
     mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
@@ -50,11 +47,15 @@ where
 {
     /// Zinc+ full PIOP prover.
     ///
+    /// The trace arrays contain public columns first, then witness columns,
+    /// within each type group. The split is derived from `U::signature()`.
+    ///
     /// # Protocol steps
     ///
-    /// 0. **Commit**: commit each witness column via Zip+ PCS, absorb roots.
+    /// 0. **Commit**: commit only *witness* columns via Zip+ PCS, absorb roots
+    ///    and public data.
     /// 1. **Prime projection** (`\phi_q`: `Z[X] -> F_q[X]`): sample random
-    ///    prime q, project trace and scalars.
+    ///    prime q, project full trace and scalars.
     /// 2. **Ideal check**: sample `r in F_q^mu`, prover sends MLE evaluations,
     ///    verifier checks ideal membership.
     /// 3. **Evaluation projection** (`\psi_a`: `F_q[X] -> F_q`): sample `a in
@@ -67,7 +68,8 @@ where
     ///    are derived from the polynomial-valued `lifted_evals` in Step 6.
     /// 6. **Lift-and-project**: compute per-column polynomial MLE evaluations
     ///    at `r_0` (in `F_q[X]`, before `\psi_a`). Absorb into transcript.
-    /// 7. **PCS open**: Zip+ prove for each committed column at `r_0`.
+    /// 7. **PCS open**: Zip+ prove for each committed *witness* column at
+    ///    `r_0`.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn prove<const CHECK_FOR_OVERFLOW: bool>(
         (pp_bin, pp_arb, pp_int): &(
@@ -81,7 +83,16 @@ where
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
     ) -> Result<Proof<F>, ProtocolError<F, U::Ideal>> {
-        // === Step 0: Commit ===
+        let sig = U::signature();
+        let num_pub_bin = sig.public_binary_poly_cols;
+        let num_pub_arb = sig.public_arbitrary_poly_cols;
+        let num_pub_int = sig.public_int_cols;
+
+        let witness_bin = &trace_bin_poly[num_pub_bin..];
+        let witness_arb = &trace_arb_poly[num_pub_arb..];
+        let witness_int = &trace_int[num_pub_int..];
+
+        // === Step 0: Commit only witness columns ===
         macro_rules! commit_optionally {
             ($pp:expr, $trace:expr) => {
                 if $trace.is_empty() {
@@ -98,15 +109,23 @@ where
                 }
             };
         }
-        let (hint_bin, commitment_bin) = commit_optionally!(pp_bin, trace_bin_poly);
-        let (hint_arb, commitment_arb) = commit_optionally!(pp_arb, trace_arb_poly);
-        let (hint_int, commitment_int) = commit_optionally!(pp_int, trace_int);
+        let (hint_bin, commitment_bin) = commit_optionally!(pp_bin, witness_bin);
+        let (hint_arb, commitment_arb) = commit_optionally!(pp_arb, witness_arb);
+        let (hint_int, commitment_int) = commit_optionally!(pp_int, witness_int);
 
         let mut pcs_transcript = PcsProverTranscript::new_from_commitments(
             [&commitment_bin, &commitment_arb, &commitment_int].into_iter(),
         );
-        // TODO: Absorb public inputs as well once they are part of the protocol,
-        //       or this will open up a soundness vulnerability!
+
+        absorb_public_columns(
+            &mut pcs_transcript.fs_transcript,
+            &trace_bin_poly[..num_pub_bin],
+        );
+        absorb_public_columns(
+            &mut pcs_transcript.fs_transcript,
+            &trace_arb_poly[..num_pub_arb],
+        );
+        absorb_public_columns(&mut pcs_transcript.fs_transcript, &trace_int[..num_pub_int]);
 
         // === Step 1: Prime projection (\phi_q: Z[X] -> F_q[X]) ===
 
@@ -190,16 +209,12 @@ where
                 .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
         }
 
-        // === Step 7: PCS open at r_0 ===
-        //
-        // TODO: Once we add public inputs, the verifier will compute public
-        //       input MLE evaluations at the sumcheck point directly from
-        //       public data. The PCS only covers witness columns.
+        // === Step 7: PCS open at r_0 (witness columns only) ===
         if let Some(hint_bin) = &hint_bin {
             let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
                 &mut pcs_transcript,
                 pp_bin,
-                trace_bin_poly,
+                witness_bin,
                 r_0,
                 hint_bin,
                 &field_cfg,
@@ -209,7 +224,7 @@ where
             let _ = ZipPlus::<Zt::ArbitraryZt, Zt::ArbitraryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
                 &mut pcs_transcript,
                 pp_arb,
-                trace_arb_poly,
+                witness_arb,
                 r_0,
                 hint_arb,
                 &field_cfg,
@@ -219,7 +234,7 @@ where
             let _ = ZipPlus::<Zt::IntZt, Zt::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
                 &mut pcs_transcript,
                 pp_int,
-                trace_int,
+                witness_int,
                 r_0,
                 hint_int,
                 &field_cfg,
@@ -229,71 +244,26 @@ where
         let zip_proof = pcs_transcript.stream.into_inner();
         let commitments = (commitment_bin, commitment_arb, commitment_int);
 
+        // Remember that the public columns come first in the input trace arrays
+        let num_total_bin = sig.total_binary_poly_cols();
+        let num_total_arb = sig.total_arbitrary_poly_cols();
+        let witness_arb_offset = add!(num_total_bin, num_pub_arb);
+        let witness_arb_end = add!(witness_arb_offset, sig.witness_arbitrary_poly_cols);
+        let witness_int_offset = add!(add!(num_total_bin, num_total_arb), num_pub_int);
+        let witness_lifted_evals: Vec<_> = lifted_evals[num_pub_bin..num_total_bin]
+            .iter()
+            .chain(&lifted_evals[witness_arb_offset..witness_arb_end])
+            .chain(&lifted_evals[witness_int_offset..])
+            .cloned()
+            .collect();
+
         Ok(Proof {
             commitments,
             ideal_check: ic_proof,
             resolver: cpr_proof,
             multipoint_eval: mp_proof,
             zip: zip_proof,
-            lifted_evals,
+            witness_lifted_evals,
         })
     }
-}
-
-/// Compute per-column lifted MLE evaluations at `point`.
-///
-/// For each column j, returns `\sum_b eq(b, point) * v_j(b)` as a polynomial
-/// in `F_q[X]` (coefficient-wise MLE evaluation).
-///
-/// Binary columns exploit the 0/1 structure for conditional additions only.
-/// The `eq(point, *)` table is built once and reused across all columns.
-#[allow(clippy::arithmetic_side_effects)]
-fn compute_lifted_evals<F, const D: usize>(
-    point: &[F],
-    trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
-    projected_trace: &RowMajorTrace<F>,
-    field_cfg: &F::Config,
-) -> Vec<DynamicPolynomialF<F>>
-where
-    F: InnerTransparentField,
-{
-    let eq_table = zinc_poly::utils::build_eq_x_r_vec(point, field_cfg)
-        .expect("compute_lifted_evals: eq table build failed");
-
-    let n_bin = trace_bin_poly.len();
-    let num_cols = projected_trace.first().map(|r| r.len()).unwrap_or(0);
-    let zero = F::zero_with_cfg(field_cfg);
-
-    cfg_iter!(trace_bin_poly)
-        .map(|col| {
-            let mut coeffs = vec![zero.clone(); D];
-            for (b, entry) in col.iter().enumerate() {
-                for (l, coeff) in entry.iter().enumerate() {
-                    if coeff.into_inner() {
-                        coeffs[l] += &eq_table[b];
-                    }
-                }
-            }
-            coeffs
-        })
-        .chain(cfg_into_iter!(n_bin..num_cols).map(|col_idx| {
-            let num_coeffs = projected_trace
-                .iter()
-                .map(|row| row[col_idx].coeffs.len())
-                .max()
-                .unwrap_or(0);
-
-            let mut coeffs = vec![zero.clone(); num_coeffs];
-            for (b, row) in projected_trace.iter().enumerate() {
-                let entry = &row[col_idx];
-                for (l, coeff) in entry.coeffs.iter().enumerate() {
-                    let mut term = eq_table[b].clone();
-                    term *= coeff;
-                    coeffs[l] += &term;
-                }
-            }
-            coeffs
-        }))
-        .map(DynamicPolynomialF::new_trimmed)
-        .collect()
 }
