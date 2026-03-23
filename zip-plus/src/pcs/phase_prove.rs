@@ -1,7 +1,6 @@
 use crate::{
     ZipError,
     code::LinearCode,
-    combine_rows,
     pcs::{
         structs::{ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
         utils::{point_to_tensor, validate_input},
@@ -168,31 +167,34 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             .try_collect()?;
 
         let zero_f = F::zero_with_cfg(field_cfg);
-        let b = polys_as_comb_r.iter().try_fold(
-            vec![zero_f.clone(); num_rows],
-            |mut acc, poly_comb_r| -> Result<_, ZipError> {
-                let row_dots: Vec<F> = cfg_chunks!(poly_comb_r, row_len)
-                    .map(|row| {
-                        let row_f: Vec<F> =
-                            row.iter().map(|int| int.into_with_cfg(field_cfg)).collect();
-                        MBSInnerProduct::inner_product::<UNCHECKED>(&row_f, &q_1, zero_f.clone())
-                    })
-                    .collect::<Result<_, _>>()?;
 
-                acc.iter_mut().zip(row_dots).for_each(|(a, d)| *a += d);
+        // Compute per-polynomial row dot products, then sum across polynomials.
+        let b = {
+            let per_poly_b: Vec<Vec<F>> = cfg_iter!(polys_as_comb_r)
+                .map(|poly_comb_r| {
+                    cfg_chunks!(poly_comb_r, row_len)
+                        .map(|row| MBSInnerProduct::inner_product_field(row, &q_1, zero_f.clone()))
+                        .collect::<Result<Vec<F>, _>>()
+                })
+                .collect::<Result<_, _>>()?;
 
-                Ok(acc)
-            },
-        )?;
+            let mut b = vec![zero_f.clone(); num_rows];
+            for poly_b in &per_poly_b {
+                b.iter_mut().zip(poly_b).for_each(|(a, d)| *a += d);
+            }
+            b
+        };
 
         transcript.write_field_elements(&b)?;
         // Compute eval = <q_0, b> (inner product in field), <q_2, b> in paper
         // It is safe to use inner_product_unchecked because we're in a field.
         let eval = MBSInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())?;
 
-        // combined_row[col] = sum_i( sum_j( s_j * w'_ij[col] ) ) over all polys i, rows
-        // j Inner: combine_rows! computes sum_j(s_j * w'_ij) per poly
-        // Outer: try_fold accumulates across polys
+        // Matrix-vector product over the flat poly_comb_r layout:
+        // Each poly is a row-major (num_rows x row_len) matrix, and coeffs is the
+        // vector.
+        // combined_row[col] = sum_i sum_j (coeffs[j] * poly_i[j * row_len + col])
+
         let coeffs = if pp.num_rows == 1 {
             vec![Zt::Chal::ONE]
         } else {
@@ -201,33 +203,38 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 .get_challenges::<Zt::Chal>(num_rows)
         };
 
-        let combined_row: Vec<Zt::CombR> = polys_as_comb_r.iter().try_fold(
-            vec![Zt::CombR::ZERO; row_len],
-            |mut acc, poly| -> Result<_, ZipError> {
-                let row = combine_rows!(
-                    CHECK_FOR_OVERFLOW,
-                    &coeffs,
-                    poly.iter(),
-                    |eval: &Zt::CombR| Ok::<_, ZipError>(eval.clone()),
-                    row_len,
-                    Zt::CombR::ZERO
-                );
-
-                acc.iter_mut().zip(row.iter()).for_each(|(a, r)| {
-                    if CHECK_FOR_OVERFLOW {
-                        *a = zinc_utils::add!(
-                            *a,
-                            r,
-                            "Addition overflow while summing combined rows across polys"
-                        );
-                    } else {
-                        *a += r;
+        let combined_row: Vec<Zt::CombR> = {
+            let mut combined = vec![Zt::CombR::ZERO; row_len];
+            cfg_iter_mut!(combined).enumerate().try_for_each(
+                |(col, acc)| -> Result<(), ZipError> {
+                    for poly_comb_r in &polys_as_comb_r {
+                        // Strided access: skip to column `col`, then step by `row_len`
+                        // to pick the col-th entry of each logical row.
+                        for (eval, coeff) in poly_comb_r
+                            .iter()
+                            .skip(col)
+                            .step_by(row_len)
+                            .zip(coeffs.iter())
+                        {
+                            let scaled: Zt::CombR = eval
+                                .mul_by_scalar::<CHECK_FOR_OVERFLOW>(coeff)
+                                .expect("Cannot multiply evaluation by coefficient");
+                            if CHECK_FOR_OVERFLOW {
+                                *acc = zinc_utils::add!(
+                                    *acc,
+                                    &scaled,
+                                    "Addition overflow while combining rows across polys"
+                                );
+                            } else {
+                                *acc += scaled;
+                            }
+                        }
                     }
-                });
-
-                Ok(acc)
-            },
-        )?;
+                    Ok(())
+                },
+            )?;
+            combined
+        };
 
         transcript.write_const_many(&combined_row)?;
         for _ in 0..Zt::NUM_COLUMN_OPENINGS {

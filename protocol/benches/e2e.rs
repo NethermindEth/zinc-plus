@@ -232,7 +232,7 @@ where
 
 const DEGREE_PLUS_ONE: usize = 32;
 const INT_LIMBS: usize = U64::LIMBS;
-const FIELD_LIMBS: usize = 4;
+const FIELD_LIMBS: usize = U64::LIMBS * 3;
 
 type F = MontyField<FIELD_LIMBS>;
 
