@@ -16,11 +16,11 @@ use zinc_uair::{
     Uair, UairTrace, constraint_counter::count_constraints, degree_counter::count_max_degree,
 };
 use zinc_utils::{
-    add, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
+    add, cfg_join, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
     mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
-    pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
+    pcs::structs::{ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
     pcs_transcript::PcsProverTranscript,
 };
 
@@ -95,25 +95,14 @@ where
         let witness_trace = trace.witness(&sig);
 
         // === Step 0: Commit only witness columns ===
-        macro_rules! commit_optionally {
-            ($pp:expr, $trace:expr) => {
-                if $trace.is_empty() {
-                    (
-                        None,
-                        ZipPlusCommitment {
-                            root: Default::default(),
-                            batch_size: 0,
-                        },
-                    )
-                } else {
-                    let (hint, commitment) = ZipPlus::commit($pp, $trace)?;
-                    (Some(hint), commitment)
-                }
-            };
-        }
-        let (hint_bin, commitment_bin) = commit_optionally!(pp_bin, &witness_trace.binary_poly);
-        let (hint_arb, commitment_arb) = commit_optionally!(pp_arb, &witness_trace.arbitrary_poly);
-        let (hint_int, commitment_int) = commit_optionally!(pp_int, &witness_trace.int);
+        let (res_bin, (res_arb, res_int)) = cfg_join!(
+            commit_optionally(pp_bin, &witness_trace.binary_poly),
+            commit_optionally(pp_arb, &witness_trace.arbitrary_poly),
+            commit_optionally(pp_int, &witness_trace.int),
+        );
+        let (hint_bin, commitment_bin) = res_bin?;
+        let (hint_arb, commitment_arb) = res_arb?;
+        let (hint_int, commitment_int) = res_int?;
 
         let mut pcs_transcript = PcsProverTranscript::new_from_commitments(
             [&commitment_bin, &commitment_arb, &commitment_int].into_iter(),
@@ -276,5 +265,24 @@ where
             zip: zip_proof,
             witness_lifted_evals,
         })
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn commit_optionally<Zt: ZipTypes, Lc: LinearCode<Zt>>(
+    pp: &ZipPlusParams<Zt, Lc>,
+    trace: &[DenseMultilinearExtension<Zt::Eval>],
+) -> Result<(Option<ZipPlusHint<Zt::Cw>>, ZipPlusCommitment), ZipError> {
+    if trace.is_empty() {
+        Ok((
+            None,
+            ZipPlusCommitment {
+                root: Default::default(),
+                batch_size: 0,
+            },
+        ))
+    } else {
+        let (hint, commitment) = ZipPlus::commit(pp, trace)?;
+        Ok((Some(hint), commitment))
     }
 }
