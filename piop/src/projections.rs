@@ -6,13 +6,9 @@ use std::{collections::HashMap, iter};
 use zinc_poly::{
     EvaluationError,
     mle::DenseMultilinearExtension,
-    univariate::{
-        binary::BinaryPoly,
-        dense::DensePolynomial,
-        dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
-    },
+    univariate::dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
 };
-use zinc_uair::{Uair, collect_scalars::collect_scalars};
+use zinc_uair::{Uair, UairTrace, collect_scalars::collect_scalars};
 use zinc_utils::{
     UNCHECKED, cfg_extend, cfg_into_iter, cfg_iter, cfg_iter_mut, inner_product::InnerProduct,
     powers,
@@ -28,6 +24,13 @@ pub type RowMajorTrace<F> = Vec<Vec<DynamicPolynomialF<F>>>;
 /// Used by `evaluate_combined_polynomials` for linear constraints (MLE-first).
 pub type ColumnMajorTrace<F> = Vec<DenseMultilinearExtension<DynamicPolynomialF<F>>>;
 
+/// Holds the projected trace in either row-major or column-major layout,
+/// depending on which ideal check approach (MLE-first or combined) is used.
+pub enum ProjectedTrace<F: PrimeField> {
+    RowMajor(RowMajorTrace<F>),
+    ColumnMajor(ColumnMajorTrace<F>),
+}
+
 /// Project a multi-typed trace onto F[X], returning a row-indexed (transposed)
 /// matrix. Result: `trace[row][col]` where columns are ordered as binary_poly,
 /// arbitrary_poly, int.
@@ -35,31 +38,28 @@ pub type ColumnMajorTrace<F> = Vec<DenseMultilinearExtension<DynamicPolynomialF<
 /// Use this for the combined polynomial approach (non-linear constraints).
 #[allow(clippy::arithmetic_side_effects)]
 pub fn project_trace_coeffs_row_major<F, PolyCoeff, Int, const DEGREE_PLUS_ONE: usize>(
-    binary_poly_trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
-    arbitrary_poly_trace: &[DenseMultilinearExtension<
-        DensePolynomial<PolyCoeff, DEGREE_PLUS_ONE>,
-    >],
-    int_trace: &[DenseMultilinearExtension<Int>],
+    trace: &UairTrace<PolyCoeff, Int, DEGREE_PLUS_ONE>,
     field_cfg: &F::Config,
 ) -> RowMajorTrace<F>
 where
-    F: FromWithConfig<PolyCoeff> + FromWithConfig<Int> + Send + Sync,
+    F: for<'a> FromWithConfig<&'a PolyCoeff> + for<'a> FromWithConfig<&'a Int> + Send + Sync,
     PolyCoeff: Clone + Send + Sync,
     Int: Clone + Send + Sync,
 {
     let zero = F::zero_with_cfg(field_cfg);
     let one = F::one_with_cfg(field_cfg);
 
-    let binary_len = binary_poly_trace.len();
-    let arbitrary_len = arbitrary_poly_trace.len();
-    let num_cols = binary_poly_trace.len() + arbitrary_poly_trace.len() + int_trace.len();
+    let binary_len = trace.binary_poly.len();
+    let arbitrary_len = trace.arbitrary_poly.len();
+    let num_cols = trace.binary_poly.len() + trace.arbitrary_poly.len() + trace.int.len();
 
     // Determine number of rows from the first non-empty column
-    let num_rows = binary_poly_trace
+    let num_rows = trace
+        .binary_poly
         .first()
         .map(|c| c.len())
-        .or_else(|| arbitrary_poly_trace.first().map(|c| c.len()))
-        .or_else(|| int_trace.first().map(|c| c.len()))
+        .or_else(|| trace.arbitrary_poly.first().map(|c| c.len()))
+        .or_else(|| trace.int.first().map(|c| c.len()))
         .unwrap_or(0);
 
     // Preallocate the result matrix with the correct number of rows and columns.
@@ -76,7 +76,7 @@ where
 
             // Binary poly columns
             cfg_iter_mut!(spare[..binary_len])
-                .zip(cfg_iter!(binary_poly_trace))
+                .zip(cfg_iter!(trace.binary_poly))
                 .for_each(|(slot, col)| {
                     let binary_poly = &col.evaluations[row_idx];
                     slot.write(
@@ -95,24 +95,24 @@ where
 
             // Arbitrary poly columns
             cfg_iter_mut!(spare[binary_len..binary_len + arbitrary_len])
-                .zip(cfg_iter!(arbitrary_poly_trace))
+                .zip(cfg_iter!(trace.arbitrary_poly))
                 .for_each(|(slot, col)| {
                     let arbitrary_poly = &col.evaluations[row_idx];
                     slot.write(
                         arbitrary_poly
                             .iter()
-                            .map(|coeff| F::from_with_cfg(coeff.clone(), field_cfg))
+                            .map(|coeff| F::from_with_cfg(coeff, field_cfg))
                             .collect(),
                     );
                 });
 
             // Int columns
             cfg_iter_mut!(spare[binary_len + arbitrary_len..])
-                .zip(cfg_iter!(int_trace))
+                .zip(cfg_iter!(trace.int))
                 .for_each(|(slot, col)| {
                     let int_val = &col.evaluations[row_idx];
                     slot.write(DynamicPolynomialF {
-                        coeffs: vec![F::from_with_cfg(int_val.clone(), field_cfg)],
+                        coeffs: vec![F::from_with_cfg(int_val, field_cfg)],
                     });
                 });
 
@@ -129,15 +129,11 @@ where
 /// Use this for the MLE-first approach (linear constraints only).
 #[allow(clippy::arithmetic_side_effects)]
 pub fn project_trace_coeffs_column_major<F, PolyCoeff, Int, const DEGREE_PLUS_ONE: usize>(
-    binary_poly_trace: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
-    arbitrary_poly_trace: &[DenseMultilinearExtension<
-        DensePolynomial<PolyCoeff, DEGREE_PLUS_ONE>,
-    >],
-    int_trace: &[DenseMultilinearExtension<Int>],
+    trace: &UairTrace<PolyCoeff, Int, DEGREE_PLUS_ONE>,
     field_cfg: &F::Config,
 ) -> ColumnMajorTrace<F>
 where
-    F: FromWithConfig<PolyCoeff> + FromWithConfig<Int> + Send + Sync,
+    F: for<'a> FromWithConfig<&'a PolyCoeff> + for<'a> FromWithConfig<&'a Int> + Send + Sync,
     PolyCoeff: Clone + Send + Sync,
     Int: Clone + Send + Sync,
 {
@@ -145,9 +141,9 @@ where
     let one = F::one_with_cfg(field_cfg);
 
     let num_vars = [
-        binary_poly_trace.first().map(|c| c.num_vars),
-        arbitrary_poly_trace.first().map(|c| c.num_vars),
-        int_trace.first().map(|c| c.num_vars),
+        trace.binary_poly.first().map(|c| c.num_vars),
+        trace.arbitrary_poly.first().map(|c| c.num_vars),
+        trace.int.first().map(|c| c.num_vars),
     ]
     .into_iter()
     .flatten()
@@ -155,12 +151,12 @@ where
     .unwrap_or(0);
 
     let mut result =
-        Vec::with_capacity(binary_poly_trace.len() + arbitrary_poly_trace.len() + int_trace.len());
+        Vec::with_capacity(trace.binary_poly.len() + trace.arbitrary_poly.len() + trace.int.len());
 
     // Binary poly columns
     cfg_extend!(
         result,
-        cfg_iter!(binary_poly_trace).map(|column| {
+        cfg_iter!(trace.binary_poly).map(|column| {
             let evaluations: Vec<DynamicPolynomialF<F>> = column
                 .iter()
                 .map(|binary_poly| {
@@ -186,13 +182,13 @@ where
     // Arbitrary poly columns
     cfg_extend!(
         result,
-        cfg_iter!(arbitrary_poly_trace).map(|column| {
+        cfg_iter!(trace.arbitrary_poly).map(|column| {
             let evaluations: Vec<DynamicPolynomialF<F>> = column
                 .iter()
                 .map(|arbitrary_poly| {
                     arbitrary_poly
                         .iter()
-                        .map(|coeff| F::from_with_cfg(coeff.clone(), field_cfg))
+                        .map(|coeff| F::from_with_cfg(coeff, field_cfg))
                         .collect()
                 })
                 .collect();
@@ -206,11 +202,11 @@ where
     // Int columns
     cfg_extend!(
         result,
-        cfg_iter!(int_trace).map(|column| {
+        cfg_iter!(trace.int).map(|column| {
             let evaluations: Vec<DynamicPolynomialF<F>> = column
                 .iter()
                 .map(|int| DynamicPolynomialF {
-                    coeffs: vec![F::from_with_cfg(int.clone(), field_cfg)],
+                    coeffs: vec![F::from_with_cfg(int, field_cfg)],
                 })
                 .collect();
             DenseMultilinearExtension {
@@ -223,54 +219,78 @@ where
     result
 }
 
-/// Evaluate a row-indexed trace along F[X]->F and return column-indexed MLEs.
-/// Takes a `TransposedTrace` (row-indexed) and returns column-indexed
-/// `Vec<DenseMultilinearExtension<F::Inner>>` for sumcheck compatibility.
-/// Each polynomial is evaluated at the projecting element.
+/// Evaluate a projected trace along `F[X] -> F` and return column-indexed
+/// MLEs (`Vec<DenseMultilinearExtension<F::Inner>>`) for sumcheck
+/// compatibility. Dispatches on the trace layout internally.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn evaluate_trace_to_column_mles<F: PrimeField + 'static>(
-    trace: &RowMajorTrace<F>,
+    trace: &ProjectedTrace<F>,
     projecting_element: &F,
 ) -> Vec<DenseMultilinearExtension<F::Inner>> {
-    let num_rows = trace.len();
-    let num_cols = trace.first().map(|r| r.len()).unwrap_or(0);
-    let num_vars = num_rows.next_power_of_two().trailing_zeros() as usize;
     let zero = F::zero_with_cfg(projecting_element.cfg());
     let one = F::one_with_cfg(projecting_element.cfg());
 
-    let max_coeffs_len = trace
-        .iter()
-        .flat_map(|row| row.iter())
-        .map(|poly| poly.degree().map_or(0, |d| d + 1))
-        .max()
-        .unwrap_or(0)
-        .max(1);
+    let max_coeffs_len = {
+        // Iterators have different types, so this is easier
+        macro_rules! common_code {
+            ($v:expr) => {
+                $v.iter()
+                    .flat_map(|row| row.iter())
+                    .map(|poly| poly.degree().map_or(0, |d| d + 1))
+                    .max()
+                    .unwrap_or(0)
+                    .max(1)
+            };
+        }
+        match trace {
+            ProjectedTrace::RowMajor(t) => common_code!(t),
+            ProjectedTrace::ColumnMajor(t) => common_code!(t),
+        }
+    };
+
     let projection_powers: Vec<F> = powers(projecting_element.clone(), one, max_coeffs_len);
 
-    // Build column-indexed MLEs from row-indexed trace
-    cfg_into_iter!(0..num_cols)
-        .map(|col_idx| {
-            let evaluations: Vec<F::Inner> = (0..num_rows)
-                .map(|row_idx| {
-                    let poly = &trace[row_idx][col_idx];
-                    let deg = poly.degree().map_or(0, |d| d + 1);
-                    DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
-                        &poly.coeffs[..deg],
-                        &projection_powers[..deg],
-                        zero.clone(),
+    let evaluate_poly = |poly: &DynamicPolynomialF<F>| -> F::Inner {
+        let deg = poly.degree().map_or(0, |d| d + 1);
+        DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
+            &poly.coeffs[..deg],
+            &projection_powers[..deg],
+            zero.clone(),
+        )
+        .expect("inner product cannot fail here")
+        .into_inner()
+    };
+
+    match trace {
+        ProjectedTrace::RowMajor(t) => {
+            let num_rows = t.len();
+            let num_cols = t.first().map(|r| r.len()).unwrap_or(0);
+            let num_vars = num_rows.next_power_of_two().trailing_zeros() as usize;
+
+            cfg_into_iter!(0..num_cols)
+                .map(|col_idx| {
+                    let evaluations: Vec<F::Inner> = (0..num_rows)
+                        .map(|row_idx| evaluate_poly(&t[row_idx][col_idx]))
+                        .collect();
+                    DenseMultilinearExtension::from_evaluations_vec(
+                        num_vars,
+                        evaluations,
+                        zero.inner().clone(),
                     )
-                    .expect("inner product cannot fail here")
-                    .inner()
-                    .clone()
                 })
-                .collect();
-            DenseMultilinearExtension::from_evaluations_vec(
-                num_vars,
-                evaluations,
-                zero.inner().clone(),
-            )
-        })
-        .collect()
+                .collect()
+        }
+        ProjectedTrace::ColumnMajor(t) => cfg_iter!(t)
+            .map(|col_mle| {
+                let evaluations: Vec<F::Inner> = cfg_iter!(col_mle).map(evaluate_poly).collect();
+                DenseMultilinearExtension::from_evaluations_vec(
+                    col_mle.num_vars,
+                    evaluations,
+                    zero.inner().clone(),
+                )
+            })
+            .collect(),
+    }
 }
 
 /// Project scalars of a UAIR onto F[X].

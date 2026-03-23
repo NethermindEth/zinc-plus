@@ -314,7 +314,7 @@ mod tests {
     use rand::rng;
     use zinc_poly::univariate::{dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF};
     use zinc_test_uair::{
-        GenerateSingleTypeWitness, TestAirNoMultiplication, TestUairSimpleMultiplication,
+        GenerateRandomTrace, TestAirNoMultiplication, TestUairSimpleMultiplication,
     };
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::{
@@ -341,8 +341,8 @@ mod tests {
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
-        U: GenerateSingleTypeWitness<Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
-            + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+        U: Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+            + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<5>, Int = Int<5>>
             + IdealCheckProtocol,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
@@ -352,7 +352,7 @@ mod tests {
 
         let (proof, prover_state, ..) = run_ideal_check_prover_linear::<U, DEGREE_PLUS_ONE>(
             num_vars,
-            &U::generate_witness(num_vars, &mut rng),
+            &U::generate_random_trace(num_vars, &mut rng),
             &mut transcript.clone(),
         );
 
@@ -383,8 +383,8 @@ mod tests {
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
-        U: GenerateSingleTypeWitness<Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
-            + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+        U: Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+            + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<5>, Int = Int<5>>
             + IdealCheckProtocol,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
@@ -394,7 +394,7 @@ mod tests {
 
         let (proof, prover_state, ..) = run_ideal_check_prover_combined::<U, DEGREE_PLUS_ONE>(
             num_vars,
-            &U::generate_witness(num_vars, &mut rng),
+            &U::generate_random_trace(num_vars, &mut rng),
             &mut transcript.clone(),
         );
 

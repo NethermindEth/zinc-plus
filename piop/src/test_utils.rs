@@ -12,13 +12,10 @@ use crate::{
 use crypto_bigint::{Odd, modular::MontyParams};
 use crypto_primitives::{FromWithConfig, crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
 use num_traits::Zero;
-use zinc_poly::{
-    mle::DenseMultilinearExtension,
-    univariate::{dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF},
-};
-use zinc_test_uair::GenerateSingleTypeWitness;
+use zinc_poly::univariate::{dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF};
+use zinc_test_uair::GenerateRandomTrace;
 use zinc_transcript::traits::Transcript;
-use zinc_uair::{Uair, constraint_counter::count_constraints};
+use zinc_uair::{Uair, UairTrace, constraint_counter::count_constraints};
 
 pub const LIMBS: usize = 4;
 
@@ -37,7 +34,7 @@ type F = MontyField<4>;
 #[allow(clippy::type_complexity)]
 pub fn run_ideal_check_prover_linear<U, const DEGREE_PLUS_ONE: usize>(
     num_vars: usize,
-    trace: &[DenseMultilinearExtension<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>],
+    trace: &UairTrace<Int<5>, Int<5>, DEGREE_PLUS_ONE>,
     transcript: &mut impl Transcript,
 ) -> (
     IdealCheckProof<F>,
@@ -46,8 +43,8 @@ pub fn run_ideal_check_prover_linear<U, const DEGREE_PLUS_ONE: usize>(
     ColumnMajorTrace<F>,
 )
 where
-    U: GenerateSingleTypeWitness<Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
-        + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+    U: Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+        + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<5>, Int = Int<5>>
         + IdealCheckProtocol,
     F: FromWithConfig<Int<5>>,
 {
@@ -68,12 +65,7 @@ where
             .collect()
     });
 
-    let trace = project_trace_coeffs_column_major::<F, Int<5>, Int<5>, DEGREE_PLUS_ONE>(
-        &[],
-        trace,
-        &[],
-        &field_cfg,
-    );
+    let trace = project_trace_coeffs_column_major::<F, _, _, DEGREE_PLUS_ONE>(trace, &field_cfg);
 
     let (proof, state) = U::prove_linear(
         transcript,
@@ -93,7 +85,7 @@ where
 #[allow(clippy::type_complexity)]
 pub fn run_ideal_check_prover_combined<U, const DEGREE_PLUS_ONE: usize>(
     num_vars: usize,
-    trace: &[DenseMultilinearExtension<DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>],
+    trace: &UairTrace<Int<5>, Int<5>, DEGREE_PLUS_ONE>,
     transcript: &mut impl Transcript,
 ) -> (
     IdealCheckProof<F>,
@@ -102,8 +94,8 @@ pub fn run_ideal_check_prover_combined<U, const DEGREE_PLUS_ONE: usize>(
     RowMajorTrace<F>,
 )
 where
-    U: GenerateSingleTypeWitness<Witness = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
-        + Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+    U: Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
+        + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<5>, Int = Int<5>>
         + IdealCheckProtocol,
     F: FromWithConfig<Int<5>>,
 {
@@ -124,12 +116,7 @@ where
             .collect()
     });
 
-    let trace = project_trace_coeffs_row_major::<F, Int<5>, Int<5>, DEGREE_PLUS_ONE>(
-        &[],
-        trace,
-        &[],
-        &field_cfg,
-    );
+    let trace = project_trace_coeffs_row_major::<F, _, _, DEGREE_PLUS_ONE>(trace, &field_cfg);
 
     let (proof, state) = U::prove_combined(
         transcript,

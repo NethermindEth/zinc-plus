@@ -13,7 +13,6 @@ use rand::rng;
 use std::{hint::black_box, marker::PhantomData, ops::Neg};
 use zinc_poly::{
     ConstCoeffBitWidth, Polynomial,
-    mle::DenseMultilinearExtension,
     univariate::{
         binary::{BinaryPoly, BinaryPolyInnerProduct},
         dense::{DensePolyInnerProduct, DensePolynomial},
@@ -23,12 +22,13 @@ use zinc_poly::{
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes};
 use zinc_test_uair::{
-    BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateMultiTypeWitness,
-    GenerateSingleTypeWitness, TestAirNoMultiplication,
+    BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
+    TestAirNoMultiplication,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
-    Uair,
+    Uair, UairTrace,
+    degree_counter::count_max_degree,
     ideal::{Ideal, IdealCheck, degree_one::DegreeOneIdeal},
     ideal_collector::IdealOrZero,
 };
@@ -147,7 +147,8 @@ where
         + Default
         + Clone
         + Send
-        + Sync,
+        + Sync
+        + 'static,
     CwR: FixedSemiring
         + for<'a> MulByScalar<&'a i64>
         + ConstCoeffBitWidth
@@ -288,9 +289,7 @@ fn bench_prove_verify<Zt, U, IdealOverF>(
     label: &str,
     num_vars: usize,
     setup: impl Fn(usize) -> Pp<Zt>,
-    bin: &[DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>],
-    arb: &[DenseMultilinearExtension<<Zt::ArbitraryZt as ZipTypes>::Eval>],
-    int: &[DenseMultilinearExtension<Zt::Int>],
+    trace: UairTrace<'static, Zt::Int, Zt::Int, DEGREE_PLUS_ONE>,
     project_scalar: impl Fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F> + Copy,
     project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
 ) where
@@ -323,28 +322,34 @@ fn bench_prove_verify<Zt, U, IdealOverF>(
         };
     }
 
-    group.bench_function(BenchmarkId::new("Prove", &params), |bench| {
-        bench.iter(|| {
-            black_box(<zinc_plus!()>::prove::<UNCHECKED>(
-                &pp,
-                bin,
-                arb,
-                int,
-                num_vars,
-                project_scalar,
-            ))
-            .expect("Prover failed");
-        });
-    });
+    macro_rules! bench_prove {
+        ($label:literal, $mle_first:expr) => {
+            group.bench_function(BenchmarkId::new($label, &params), |bench| {
+                bench.iter(|| {
+                    black_box(<zinc_plus!()>::prove::<{ $mle_first }, UNCHECKED>(
+                        &pp,
+                        &trace,
+                        num_vars,
+                        project_scalar,
+                    ))
+                    .expect("Prover failed");
+                });
+            });
+        };
+    }
+
+    bench_prove!("Prove (Combined)", false);
+
+    if count_max_degree::<U>() <= 1 {
+        bench_prove!("Prove (MLE-first)", true);
+    }
 
     let proof: Proof<F> =
-        <zinc_plus!()>::prove::<UNCHECKED>(&pp, bin, arb, int, num_vars, project_scalar)
+        <zinc_plus!()>::prove::<false, UNCHECKED>(&pp, &trace, num_vars, project_scalar)
             .expect("proof generation for verifier bench");
 
     let sig = U::signature();
-    let public_bin = &bin[..sig.public_binary_poly_cols];
-    let public_arb = &arb[..sig.public_arbitrary_poly_cols];
-    let public_int = &int[..sig.public_int_cols];
+    let public_trace = trace.public(&sig);
 
     group.bench_function(BenchmarkId::new("Verify", &params), |bench| {
         bench.iter_batched(
@@ -353,9 +358,7 @@ fn bench_prove_verify<Zt, U, IdealOverF>(
                 black_box(<zinc_plus!()>::verify::<_, UNCHECKED>(
                     &pp,
                     proof,
-                    public_bin,
-                    public_arb,
-                    public_int,
+                    &public_trace,
                     num_vars,
                     project_scalar,
                     project_ideal,
@@ -371,29 +374,20 @@ fn bench_prove_verify<Zt, U, IdealOverF>(
 // Specific benchmarks for each AIR
 //
 
-fn bench_uair<U>(
-    group: &mut BenchmarkGroup<WallTime>,
-    label: &str,
-    num_vars: usize,
-    get_witness: impl Fn(
-        usize,
-    ) -> (
-        Vec<DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>>,
-        Vec<
-            DenseMultilinearExtension<
-                <<BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt as ZipTypes>::Eval,
-            >,
-        >,
-        Vec<DenseMultilinearExtension<<BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int>>,
-    ),
-) where
+fn do_bench_uair<U>(group: &mut BenchmarkGroup<WallTime>, label: &str, num_vars: usize)
+where
     U: Uair<
             Ideal = DegreeOneIdeal<<BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int>,
             Scalar = DensePolynomial<<BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int, 32>,
+        > + GenerateRandomTrace<
+            DEGREE_PLUS_ONE,
+            PolyCoeff = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int,
+            Int = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int,
         > + 'static,
     F: for<'a> FromWithConfig<&'a <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int>,
 {
-    let (bin, arb, int) = get_witness(num_vars);
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
 
     let proj_ideal = |ideal: &IdealOrZero<U::Ideal>, field_cfg: &<F as PrimeField>::Config| {
         ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg))
@@ -404,53 +398,26 @@ fn bench_uair<U>(
         label,
         num_vars,
         setup_pp,
-        &bin,
-        &arb,
-        &int,
+        trace,
         zinc_protocol::project_scalar_fn,
         proj_ideal,
     );
 }
 
-fn bench_uair_generic_multi<U>(group: &mut BenchmarkGroup<WallTime>, label: &str, num_vars: usize)
-where
-    U: Uair<
-            Ideal = DegreeOneIdeal<<BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int>,
-            Scalar = DensePolynomial<<BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int, 32>,
-        > + GenerateMultiTypeWitness<
-            PolyCoeff = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int,
-            Int = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int,
-        > + 'static,
-    F: for<'a> FromWithConfig<&'a <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int>,
-{
-    bench_uair::<U>(group, label, num_vars, |num_vars| {
-        let mut rng = rng();
-        U::generate_witness(num_vars, &mut rng)
-    })
-}
-
 fn bench_no_mult(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
-    bench_uair::<TestAirNoMultiplication<i64>>(group, "NoMult", num_vars, |num_vars| {
-        let mut rng = rng();
-        let witness = TestAirNoMultiplication::generate_witness(num_vars, &mut rng);
-        (vec![], witness, vec![])
-    });
+    do_bench_uair::<TestAirNoMultiplication<i64>>(group, "NoMult", num_vars);
 }
 
 fn bench_binary_decomposition(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
-    bench_uair_generic_multi::<BinaryDecompositionUair<i64>>(
-        group,
-        "BinaryDecomposition",
-        num_vars,
-    );
+    do_bench_uair::<BinaryDecompositionUair<i64>>(group, "BinaryDecomposition", num_vars);
 }
 
 fn bench_big_linear(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
-    bench_uair_generic_multi::<BigLinearUair<i64>>(group, "BigLinear", num_vars);
+    do_bench_uair::<BigLinearUair<i64>>(group, "BigLinear", num_vars);
 }
 
 fn bench_big_linear_public_input(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
-    bench_uair_generic_multi::<BigLinearUairWithPublicInput<i64>>(group, "BigLinearPI", num_vars);
+    do_bench_uair::<BigLinearUairWithPublicInput<i64>>(group, "BigLinearPI", num_vars);
 }
 
 //
