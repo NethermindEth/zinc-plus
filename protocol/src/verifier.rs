@@ -140,12 +140,14 @@ where
         )?;
 
         // === Step 5: Multi-point evaluation sumcheck ===
+        let uair_sig = U::signature();
         let mp_subclaim = MultipointEval::verify_as_subprotocol(
             &mut pcs_transcript.fs_transcript,
             proof.multipoint_eval,
             &cpr_subclaim.evaluation_point,
             &cpr_subclaim.up_evals,
             &cpr_subclaim.down_evals,
+            uair_sig.shifts(),
             num_vars,
             &field_cfg,
         )?;
@@ -159,15 +161,14 @@ where
         // then interleaves them with the witness portion to reconstruct the
         // full lifted_evals in canonical order:
         //   [pub_bin, wit_bin, pub_arb, wit_arb, pub_int, wit_int]
-        let sig = U::signature();
-        let num_pub_bin = sig.public_binary_poly_cols;
-        let num_pub_arb = sig.public_arbitrary_poly_cols;
-        let num_pub_int = sig.public_int_cols;
+        let pub_cols = uair_sig.public_cols();
+        let num_pub_bin = pub_cols.binary_poly_cols();
+        let num_pub_arb = pub_cols.arbitrary_poly_cols();
+        let num_pub_int = pub_cols.int_cols();
 
-        let (num_wit_bin, num_wit_arb) = (
-            sig.witness_binary_poly_cols,
-            sig.witness_arbitrary_poly_cols,
-        );
+        let wit_cols = uair_sig.witness_cols();
+        let num_wit_bin = wit_cols.binary_poly_cols();
+        let num_wit_arb = wit_cols.arbitrary_poly_cols();
 
         let public_lifted = if add!(add!(num_pub_bin, num_pub_arb), num_pub_int) > 0 {
             let projected_public =
@@ -200,7 +201,7 @@ where
             .collect::<Result<Vec<_>, _>>()
             .map_err(ProtocolError::LiftedEvalProjection)?;
 
-        MultipointEval::<F>::verify_subclaim(&mp_subclaim, &open_evals, &field_cfg)?;
+        MultipointEval::verify_subclaim(&mp_subclaim, &open_evals, uair_sig.shifts(), &field_cfg)?;
 
         // Absorb all lifted_evals into transcript (same order as prover).
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
@@ -245,8 +246,9 @@ where
             }};
         }
 
-        let num_total_bin = sig.total_binary_poly_cols();
-        let num_total_arb = sig.total_arbitrary_poly_cols();
+        let total = uair_sig.total_cols();
+        let num_total_bin = total.binary_poly_cols();
+        let num_total_arb = total.arbitrary_poly_cols();
         verify_pcs_batch!(
             Zt::BinaryZt,
             Zt::BinaryLc,

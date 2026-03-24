@@ -11,18 +11,16 @@ use crate::{
 pub fn collect_scalars<U: Uair>() -> HashSet<U::Scalar> {
     let scalars = RefCell::new(HashSet::new());
 
-    let dummy_up_and_down = vec![DummySemiring; U::signature().max_cols()];
-
-    let trace_row = TraceRow {
-        binary_poly: &dummy_up_and_down,
-        arbitrary_poly: &dummy_up_and_down,
-        int: &dummy_up_and_down,
-    };
+    let sig = U::signature();
+    let (up_dummy, down_dummy) = sig.dummy_rows(DummySemiring);
+    let up_row = TraceRow::from_slice_with_layout(&up_dummy, sig.total_cols().as_column_layout());
+    let down_row =
+        TraceRow::from_slice_with_layout(&down_dummy, sig.down_cols().as_column_layout());
 
     U::constrain_general(
         &mut DoNothingBuilder,
-        trace_row,
-        trace_row,
+        up_row,
+        down_row,
         |x| {
             scalars.borrow_mut().insert(x.clone());
             DummySemiring

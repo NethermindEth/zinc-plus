@@ -23,18 +23,16 @@ pub fn count_max_degree<U: Uair>() -> usize {
 pub fn count_constraint_degrees<U: Uair>() -> Vec<usize> {
     let mut dc = ConstraintDegreeCollector::default();
 
-    let up_and_down = vec![DegreeCountingSemiring::var(); U::signature().max_cols()];
-
-    let trace_row = TraceRow {
-        binary_poly: &up_and_down,
-        arbitrary_poly: &up_and_down,
-        int: &up_and_down,
-    };
+    let sig = U::signature();
+    let (up_dummy, down_dummy) = sig.dummy_rows(DegreeCountingSemiring::var());
+    let up_row = TraceRow::from_slice_with_layout(&up_dummy, sig.total_cols().as_column_layout());
+    let down_row =
+        TraceRow::from_slice_with_layout(&down_dummy, sig.down_cols().as_column_layout());
 
     U::constrain_general(
         &mut dc,
-        trace_row,
-        trace_row,
+        up_row,
+        down_row,
         |_| DegreeCountingSemiring::scalar(),
         |x, _| Some(*x),
         |_| ImpossibleIdeal,

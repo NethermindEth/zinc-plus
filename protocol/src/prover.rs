@@ -180,12 +180,14 @@ where
         // === Step 5: Multi-point evaluation sumcheck ===
         // Combines up_evals and down_evals at r' into a single evaluation
         // point r_0 via one sumcheck.
+        let uair_sig = U::signature();
         let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
             &mut pcs_transcript.fs_transcript,
             &projected_trace_f,
             &cpr_prover_state.evaluation_point,
             &cpr_proof.up_evals,
             &cpr_proof.down_evals,
+            uair_sig.shifts(),
             &field_cfg,
         )?;
 
@@ -241,14 +243,17 @@ where
         let zip_proof = pcs_transcript.stream.into_inner();
         let commitments = (commitment_bin, commitment_arb, commitment_int);
 
-        // Remember that the public columns come first in the input trace arrays
-        let num_pub_bin = sig.public_binary_poly_cols;
-        let num_pub_arb = sig.public_arbitrary_poly_cols;
-        let num_pub_int = sig.public_int_cols;
-        let num_total_bin = sig.total_binary_poly_cols();
-        let num_total_arb = sig.total_arbitrary_poly_cols();
+        // Extract witness-only lifted evals (public columns come first in trace).
+        let pub_cols = sig.public_cols();
+        let num_pub_bin = pub_cols.binary_poly_cols();
+        let num_pub_arb = pub_cols.arbitrary_poly_cols();
+        let num_pub_int = pub_cols.int_cols();
+        let total = sig.total_cols();
+        let num_total_bin = total.binary_poly_cols();
+        let num_total_arb = total.arbitrary_poly_cols();
+        let witness = sig.witness_cols();
         let witness_arb_offset = add!(num_total_bin, num_pub_arb);
-        let witness_arb_end = add!(witness_arb_offset, sig.witness_arbitrary_poly_cols);
+        let witness_arb_end = add!(witness_arb_offset, witness.arbitrary_poly_cols());
         let witness_int_offset = add!(add!(num_total_bin, num_total_arb), num_pub_int);
         let witness_lifted_evals: Vec<_> = lifted_evals[num_pub_bin..num_total_bin]
             .iter()
