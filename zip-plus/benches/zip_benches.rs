@@ -11,10 +11,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use crypto_bigint::U64;
 use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_uint::Uint};
 use zip_plus::{
-    code::{
-        LinearCode,
-        raa::{RaaCode, RaaConfig},
-    },
+    code::raa::{RaaCode, RaaConfig},
     pcs::structs::ZipTypes,
 };
 

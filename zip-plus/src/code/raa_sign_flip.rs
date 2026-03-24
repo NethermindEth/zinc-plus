@@ -20,6 +20,12 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> RaaSignFlippingCode<Zt, 
 where
     Zt::Cw: Ring,
 {
+    pub fn new(row_len: usize) -> Self {
+        Self {
+            raa: RaaCode::new(row_len),
+        }
+    }
+
     /// Do the actual encoding, as per RAA spec
     fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
     where
@@ -70,12 +76,6 @@ where
     Zt::Cw: Ring,
 {
     const REPETITION_FACTOR: usize = REP;
-
-    fn new(row_len: usize) -> Self {
-        Self {
-            raa: RaaCode::new(row_len),
-        }
-    }
 
     fn row_len(&self) -> usize {
         self.raa.row_len()

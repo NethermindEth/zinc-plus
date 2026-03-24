@@ -90,7 +90,7 @@ pub fn setup_test_params<const N: usize, const K: usize, const M: usize>(
     ZipPlusParams<TestZipTypes<N, K, M>, IprsCode<TestZipTypes<N, K, M>, TestIprsConfig, CHECKED>>,
     DenseMultilinearExtension<<TestZipTypes<N, K, M> as ZipTypes>::Eval>,
 ) {
-    setup_test_params_inner(num_vars, IprsCode::create(), |poly_size| {
+    setup_test_params_inner(num_vars, IprsCode::default(), |poly_size| {
         (1..=poly_size as i32).map(Int::from).collect()
     })
 }
@@ -105,7 +105,7 @@ pub fn setup_poly_test_params<const K: usize, const M: usize, const DEGREE_PLUS_
     >,
     DenseMultilinearExtension<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Eval>,
 ) {
-    setup_test_params_inner(num_vars, IprsCode::create(), |poly_size| {
+    setup_test_params_inner(num_vars, IprsCode::default(), |poly_size| {
         let degree = DEGREE_PLUS_ONE - 1;
         let eval_coeffs: Vec<_> = (1..=(poly_size * degree) as i64)
             .map(|v| v.is_odd().into())

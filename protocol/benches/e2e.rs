@@ -40,10 +40,7 @@ use zinc_utils::{
     projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
-    code::{
-        LinearCode,
-        iprs::{IprsCode, PnttConfigF65537_32_128},
-    },
+    code::iprs::{IprsCode, PnttConfigF65537_32_128},
     pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
 };
 
@@ -270,18 +267,9 @@ type Pp<Zt> = (
 fn setup_pp(num_vars: usize) -> Pp<BenchZincTypes> {
     let poly_size = 1 << num_vars;
     (
-        ZipPlus::setup(
-            poly_size,
-            <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::BinaryLc::new(poly_size),
-        ),
-        ZipPlus::setup(
-            poly_size,
-            <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc::new(poly_size),
-        ),
-        ZipPlus::setup(
-            poly_size,
-            <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntLc::new(poly_size),
-        ),
+        ZipPlus::setup(poly_size, IprsCode::default()),
+        ZipPlus::setup(poly_size, IprsCode::default()),
+        ZipPlus::setup(poly_size, IprsCode::default()),
     )
 }
 
@@ -290,7 +278,7 @@ fn setup_pp(num_vars: usize) -> Pp<BenchZincTypes> {
 //
 
 #[allow(clippy::too_many_arguments)]
-fn bench_prove_verify<Zt, U, IdealOverF>(
+fn do_bench<Zt, U, IdealOverF>(
     group: &mut BenchmarkGroup<WallTime>,
     label: &str,
     num_vars: usize,
@@ -399,7 +387,7 @@ where
         ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg))
     };
 
-    bench_prove_verify::<BenchZincTypes, U, _>(
+    do_bench::<BenchZincTypes, U, _>(
         group,
         label,
         num_vars,

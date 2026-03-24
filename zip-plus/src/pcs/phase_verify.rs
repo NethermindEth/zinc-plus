@@ -348,11 +348,11 @@ mod tests {
 
     type Zt = TestZipTypes<N, K, M>;
     type C = IprsCode<Zt, TestIprsConfig, CHECKED>;
-    static C: LazyLock<C> = LazyLock::new(C::create);
+    static C: LazyLock<C> = LazyLock::new(C::default);
 
     type PolyZt = TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>;
     type PolyC = IprsCode<PolyZt, TestIprsConfig, CHECKED>;
-    static POLY_C: LazyLock<PolyC> = LazyLock::new(PolyC::create);
+    static POLY_C: LazyLock<PolyC> = LazyLock::new(PolyC::default);
 
     type TestZip = ZipPlus<Zt, C>;
     type TestPolyZip = ZipPlus<PolyZt, PolyC>;

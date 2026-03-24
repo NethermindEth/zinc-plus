@@ -19,6 +19,8 @@ use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 /// Pseudo Reed-Solomon encoder over the integers. Internally uses a
 /// radix-8 NTT-style recursion with a base Vandermonde matrix sized
 /// `base_len x base_dim` (defaults to 64x32).
+///
+/// To create a new instance, use [`IprsCode::default`] method.
 #[derive(Clone)]
 pub struct IprsCode<Zt: ZipTypes, Config: PnttConfig, const CHECK: bool> {
     pntt_params: Radix8PnttParams<Config>,
@@ -33,24 +35,6 @@ where
     Zt::CombR: for<'a> MulByScalar<&'a PnttInt>,
     Zt::Cw: CheckedAdd + for<'a> MulByScalar<&'a PnttInt>,
 {
-    /// Named differently to distinguish from the [`LinearCode::new`]
-    #[allow(clippy::arithmetic_side_effects)]
-    pub fn create() -> Self {
-        assert_eq!(
-            Config::OUTPUT_LEN,
-            Config::INPUT_LEN * Self::REPETITION_FACTOR,
-            "Codeword length {} must equal row length {} times repetition factor {}",
-            Config::OUTPUT_LEN,
-            Config::INPUT_LEN,
-            Self::REPETITION_FACTOR
-        );
-
-        Self {
-            pntt_params: Radix8PnttParams::new(),
-            _phantom: Default::default(),
-        }
-    }
-
     /// Encode without modular reduction, purely over the integers.
     fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
     where
@@ -117,19 +101,6 @@ where
 {
     const REPETITION_FACTOR: usize = Config::OUTPUT_LEN / Config::INPUT_LEN;
 
-    #[allow(clippy::arithmetic_side_effects)]
-    fn new(row_len: usize) -> Self {
-        assert_eq!(
-            row_len,
-            Config::INPUT_LEN,
-            "Row length {} does not match expected row length {}",
-            row_len,
-            Config::INPUT_LEN
-        );
-
-        Self::create()
-    }
-
     fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
         assert_eq!(
             row.len(),
@@ -159,6 +130,32 @@ where
         F: FromPrimitiveWithConfig + FromRef<F>,
     {
         self.encode_inner_f(row)
+    }
+}
+
+impl<Zt, Config, const CHECK: bool> Default for IprsCode<Zt, Config, CHECK>
+where
+    Zt: ZipTypes,
+    Config: PnttConfig,
+    Zt::Eval: for<'a> MulByScalar<&'a PnttInt, Zt::Cw>,
+    Zt::CombR: for<'a> MulByScalar<&'a PnttInt>,
+    Zt::Cw: CheckedAdd + for<'a> MulByScalar<&'a PnttInt>,
+{
+    #[allow(clippy::arithmetic_side_effects)]
+    fn default() -> Self {
+        assert_eq!(
+            Config::OUTPUT_LEN,
+            Config::INPUT_LEN * Self::REPETITION_FACTOR,
+            "Codeword length {} must equal row length {} times repetition factor {}",
+            Config::OUTPUT_LEN,
+            Config::INPUT_LEN,
+            Self::REPETITION_FACTOR
+        );
+
+        Self {
+            pntt_params: Radix8PnttParams::new(),
+            _phantom: Default::default(),
+        }
     }
 }
 

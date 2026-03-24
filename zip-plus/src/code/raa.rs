@@ -35,49 +35,7 @@ pub struct RaaCode<Zt: ZipTypes, Config: RaaConfig, const REP: usize> {
 }
 
 impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> RaaCode<Zt, Config, REP> {
-    /// Do the actual encoding, as per RAA spec
-    fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
-    where
-        Out: CheckedAdd + for<'a> AddAssign<&'a Out> + FromRef<In> + Clone,
-    {
-        debug_assert_eq!(
-            row.len(),
-            self.row_len,
-            "Row length must match the code's row length"
-        );
-
-        let mut result: Vec<Out> = repeat(row, REP);
-        if Config::PERMUTE_IN_PLACE {
-            shuffle_seeded(&mut result, self.perm_1_seed);
-        } else {
-            result = clone_shuffled(&result, &self.perm_1);
-        }
-        if Config::CHECK_FOR_OVERFLOWS {
-            accumulate(&mut result);
-        } else {
-            accumulate_unchecked(&mut result);
-        }
-        if Config::PERMUTE_IN_PLACE {
-            shuffle_seeded(&mut result, self.perm_2_seed);
-        } else {
-            result = clone_shuffled(&result, &self.perm_2);
-        }
-        if Config::CHECK_FOR_OVERFLOWS {
-            accumulate(&mut result);
-        } else {
-            accumulate_unchecked(&mut result);
-        }
-        debug_assert_eq!(result.len(), self.codeword_len());
-        result
-    }
-}
-
-impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> LinearCode<Zt>
-    for RaaCode<Zt, Config, REP>
-{
-    const REPETITION_FACTOR: usize = REP;
-
-    fn new(row_len: usize) -> Self {
+    pub fn new(row_len: usize) -> Self {
         assert!(
             REP.is_power_of_two(),
             "Repetition factor must be a power of two"
@@ -130,6 +88,48 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> LinearCode<Zt>
             phantom: PhantomData,
         }
     }
+
+    /// Do the actual encoding, as per RAA spec
+    fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
+    where
+        Out: CheckedAdd + for<'a> AddAssign<&'a Out> + FromRef<In> + Clone,
+    {
+        debug_assert_eq!(
+            row.len(),
+            self.row_len,
+            "Row length must match the code's row length"
+        );
+
+        let mut result: Vec<Out> = repeat(row, REP);
+        if Config::PERMUTE_IN_PLACE {
+            shuffle_seeded(&mut result, self.perm_1_seed);
+        } else {
+            result = clone_shuffled(&result, &self.perm_1);
+        }
+        if Config::CHECK_FOR_OVERFLOWS {
+            accumulate(&mut result);
+        } else {
+            accumulate_unchecked(&mut result);
+        }
+        if Config::PERMUTE_IN_PLACE {
+            shuffle_seeded(&mut result, self.perm_2_seed);
+        } else {
+            result = clone_shuffled(&result, &self.perm_2);
+        }
+        if Config::CHECK_FOR_OVERFLOWS {
+            accumulate(&mut result);
+        } else {
+            accumulate_unchecked(&mut result);
+        }
+        debug_assert_eq!(result.len(), self.codeword_len());
+        result
+    }
+}
+
+impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> LinearCode<Zt>
+    for RaaCode<Zt, Config, REP>
+{
+    const REPETITION_FACTOR: usize = REP;
 
     fn row_len(&self) -> usize {
         self.row_len

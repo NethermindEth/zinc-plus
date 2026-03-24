@@ -484,6 +484,7 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn setup_pp<Zt>(
         num_vars: usize,
+        linear_codes: (Zt::BinaryLc, Zt::ArbitraryLc, Zt::IntLc),
     ) -> (
         ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
         ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
@@ -494,12 +495,9 @@ mod tests {
     {
         let poly_size = 1 << num_vars;
         (
-            ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::setup(poly_size, Zt::BinaryLc::new(poly_size)),
-            ZipPlus::<Zt::ArbitraryZt, Zt::ArbitraryLc>::setup(
-                poly_size,
-                Zt::ArbitraryLc::new(poly_size),
-            ),
-            ZipPlus::<Zt::IntZt, Zt::IntLc>::setup(poly_size, Zt::IntLc::new(poly_size)),
+            ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::setup(poly_size, linear_codes.0),
+            ZipPlus::<Zt::ArbitraryZt, Zt::ArbitraryLc>::setup(poly_size, linear_codes.1),
+            ZipPlus::<Zt::IntZt, Zt::IntLc>::setup(poly_size, linear_codes.2),
         )
     }
 
@@ -512,6 +510,7 @@ mod tests {
     #[allow(clippy::result_large_err)]
     fn do_test<Zt, U>(
         num_vars: usize,
+        linear_codes: (Zt::BinaryLc, Zt::ArbitraryLc, Zt::IntLc),
         project_ideal: impl Fn(
             &IdealOrZero<U::Ideal>,
             &<F as PrimeField>::Config,
@@ -536,7 +535,7 @@ mod tests {
         <F as Field>::Modulus: FromRef<Zt::Fmod>,
     {
         let mut rng = rng();
-        let pp = setup_pp::<Zt>(num_vars);
+        let pp = setup_pp::<Zt>(num_vars, linear_codes);
 
         let trace = U::generate_random_trace(num_vars, &mut rng);
 
@@ -582,6 +581,7 @@ mod tests {
     fn test_e2e_no_multiplication() {
         do_test::<TestZincTypesIprs, TestAirNoMultiplication<ZtInt>>(
             8,
+            Default::default(),
             default_project_ideal!(),
             |_| {},
             |res| res.unwrap(),
@@ -601,8 +601,14 @@ mod tests {
     /// ~= 127^8 ~= 2^56, which fits in i64.
     #[test]
     fn test_e2e_simple_multiplication() {
+        let num_vars = 2;
         do_test::<TestZincTypesRaa, TestUairSimpleMultiplication<ZtInt>>(
-            2,
+            num_vars,
+            (
+                RaaCode::new(num_vars),
+                RaaCode::new(num_vars),
+                RaaCode::new(num_vars),
+            ),
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
             |_| {},
             |res| res.unwrap(),
@@ -617,6 +623,7 @@ mod tests {
     fn test_e2e_binary_decomposition() {
         do_test::<TestZincTypesIprs, BinaryDecompositionUair<ZtInt>>(
             8,
+            Default::default(),
             default_project_ideal!(),
             |_| {},
             |res| res.unwrap(),
@@ -634,6 +641,7 @@ mod tests {
     fn test_e2e_big_linear() {
         do_test::<TestZincTypesIprs, BigLinearUair<ZtInt>>(
             8,
+            Default::default(),
             default_project_ideal!(),
             |_| {},
             |res| res.unwrap(),
@@ -648,6 +656,7 @@ mod tests {
     fn test_e2e_big_linear_with_public_input() {
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
             8,
+            Default::default(),
             default_project_ideal!(),
             |_| {},
             |res| res.unwrap(),
@@ -662,6 +671,7 @@ mod tests {
     fn test_big_linear_tamper_lifted_evals() {
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
             8,
+            Default::default(),
             default_project_ideal!(),
             |proof| proof.witness_lifted_evals.swap(0, 1),
             |res| {
@@ -674,6 +684,7 @@ mod tests {
     fn test_big_linear_tamper_up_evals() {
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
             8,
+            Default::default(),
             default_project_ideal!(),
             |proof| proof.resolver.up_evals.swap(0, 1),
             |res| {
@@ -686,6 +697,7 @@ mod tests {
     fn test_big_linear_tamper_down_evals() {
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
             8,
+            Default::default(),
             default_project_ideal!(),
             |proof| proof.resolver.down_evals.swap(0, 1),
             |res| {
@@ -698,6 +710,7 @@ mod tests {
     fn test_big_linear_tamper_commitment() {
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
             8,
+            Default::default(),
             default_project_ideal!(),
             |proof| proof.commitments.0.root = Default::default(),
             |res| {
@@ -710,6 +723,7 @@ mod tests {
     fn test_big_linear_tamper_ideal_check() {
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
             8,
+            Default::default(),
             default_project_ideal!(),
             |proof| proof.ideal_check.combined_mle_values.swap(0, 1),
             |res| {

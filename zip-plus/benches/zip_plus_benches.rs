@@ -17,14 +17,19 @@ use zinc_poly::univariate::{
 };
 use zinc_primality::MillerRabin;
 use zinc_transcript::traits::ConstTranscribable;
-use zinc_utils::{UNCHECKED, from_ref::FromRef, inner_product::MBSInnerProduct, named::Named};
+use zinc_utils::{from_ref::FromRef, inner_product::MBSInnerProduct, named::Named};
 use zip_plus::{
     code::{
-        LinearCode,
         iprs::{IprsCode, PnttConfigF65537_32_128},
         raa::{RaaCode, RaaConfig},
     },
     pcs::structs::ZipTypes,
+};
+
+const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
+    zinc_utils::UNCHECKED
+} else {
+    zinc_utils::CHECKED
 };
 
 const INT_LIMBS: usize = U64::LIMBS;
@@ -62,7 +67,7 @@ where
 struct BenchRaaConfig;
 impl RaaConfig for BenchRaaConfig {
     const PERMUTE_IN_PLACE: bool = true;
-    const CHECK_FOR_OVERFLOWS: bool = UNCHECKED;
+    const CHECK_FOR_OVERFLOWS: bool = PERFORM_CHECKS;
 }
 
 type SomeRaaCode<const D_PLUS_ONE: usize> =
@@ -74,12 +79,14 @@ type SomeIprsCode<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const CH
 fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");
 
-    do_bench::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>, UNCHECKED>(&mut group, |poly_size| {
-        RaaCode::new(poly_size.isqrt().next_power_of_two())
-    });
-    do_bench::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>, UNCHECKED>(&mut group, |poly_size| {
-        RaaCode::new(poly_size.isqrt().next_power_of_two())
-    });
+    do_bench::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>, PERFORM_CHECKS>(
+        &mut group,
+        |poly_size| RaaCode::new(poly_size.isqrt().next_power_of_two()),
+    );
+    do_bench::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>, PERFORM_CHECKS>(
+        &mut group,
+        |poly_size| RaaCode::new(poly_size.isqrt().next_power_of_two()),
+    );
 
     group.finish();
 }
@@ -87,13 +94,13 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
 fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS");
 
-    do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, 32, UNCHECKED>, UNCHECKED>(
+    do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, 32, PERFORM_CHECKS>, PERFORM_CHECKS>(
         &mut group,
-        |_poly_size| IprsCode::create(),
+        |_poly_size| IprsCode::default(),
     );
-    do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 1, 64, UNCHECKED>, UNCHECKED>(
+    do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 1, 64, PERFORM_CHECKS>, PERFORM_CHECKS>(
         &mut group,
-        |_poly_size| IprsCode::create(),
+        |_poly_size| IprsCode::default(),
     );
 
     group.finish();
