@@ -56,6 +56,7 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     for lc in [128, 256, 512, 1024]
         .map(make_linear_code)
         .into_iter()
+        // These might be duplicate depending on linear code construction logic
         .dedup()
     {
         encode_single_row::<Zt, Lc>(group, lc)

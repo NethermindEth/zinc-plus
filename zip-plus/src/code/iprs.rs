@@ -3,10 +3,11 @@ mod pntt;
 use crate::{code::LinearCode, pcs::structs::ZipTypes};
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::{CheckedAdd, CheckedMul};
+use pntt::radix8::params::Config as PnttConfig;
 pub use pntt::radix8::params::{
-    Config as PnttConfig, PnttConfigF65537_1_4, PnttConfigF65537_2_8, PnttConfigF65537_4_16,
-    PnttConfigF65537_16_64, PnttConfigF65537_32_64, PnttConfigF65537_32_128,
-    PnttConfigF65537_64_256, PnttInt, Radix8PnttParams,
+    PnttConfigF65537_1_4, PnttConfigF65537_2_8, PnttConfigF65537_4_16, PnttConfigF65537_16_64,
+    PnttConfigF65537_32_64, PnttConfigF65537_32_128, PnttConfigF65537_64_256, PnttInt,
+    Radix8PnttParams,
 };
 use std::{
     fmt::Debug,
@@ -14,7 +15,7 @@ use std::{
     marker::PhantomData,
     ops::{Add, AddAssign},
 };
-use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
+use zinc_utils::{from_ref::FromRef, mul, mul_by_scalar::MulByScalar};
 
 /// Pseudo Reed-Solomon encoder over the integers. Internally uses a
 /// radix-8 NTT-style recursion with a base Vandermonde matrix sized
@@ -31,9 +32,6 @@ impl<Zt, Config, const CHECK: bool> IprsCode<Zt, Config, CHECK>
 where
     Zt: ZipTypes,
     Config: PnttConfig,
-    Zt::Eval: for<'a> MulByScalar<&'a PnttInt, Zt::Cw>,
-    Zt::CombR: for<'a> MulByScalar<&'a PnttInt>,
-    Zt::Cw: CheckedAdd + for<'a> MulByScalar<&'a PnttInt>,
 {
     /// Encode without modular reduction, purely over the integers.
     fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
@@ -141,11 +139,10 @@ where
     Zt::CombR: for<'a> MulByScalar<&'a PnttInt>,
     Zt::Cw: CheckedAdd + for<'a> MulByScalar<&'a PnttInt>,
 {
-    #[allow(clippy::arithmetic_side_effects)]
     fn default() -> Self {
         assert_eq!(
             Config::OUTPUT_LEN,
-            Config::INPUT_LEN * Self::REPETITION_FACTOR,
+            mul!(Config::INPUT_LEN, Self::REPETITION_FACTOR),
             "Codeword length {} must equal row length {} times repetition factor {}",
             Config::OUTPUT_LEN,
             Config::INPUT_LEN,
@@ -171,7 +168,7 @@ where
     }
 }
 
-impl<Zt, Config, const CHECK: bool> PartialEq<Self> for IprsCode<Zt, Config, CHECK>
+impl<Zt, Config, const CHECK: bool> PartialEq for IprsCode<Zt, Config, CHECK>
 where
     Config: PnttConfig,
     Zt: ZipTypes,

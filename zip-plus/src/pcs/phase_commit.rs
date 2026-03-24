@@ -273,7 +273,7 @@ mod tests {
     #[test]
     fn commit_succeeds_for_small_polynomial() {
         let num_vars = 4;
-        let num_rows = (1usize << num_vars).div_ceil(C.row_len());
+        let num_rows = (1_usize << num_vars).div_ceil(C.row_len());
         let pp = ZipPlusParams::new(num_vars, num_rows, C.clone());
 
         let evaluations = vec![Int::from(42); 1 << num_vars];
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn commit_succeeds_for_two_variables() {
         let num_vars = 2;
-        let num_rows = (1usize << num_vars).div_ceil(C.row_len());
+        let num_rows = (1_usize << num_vars).div_ceil(C.row_len());
         let pp = ZipPlusParams::new(num_vars, num_rows, C.clone());
 
         let poly_size = 1 << num_vars;
@@ -459,7 +459,7 @@ mod tests {
         let results: Vec<Vec<Vec<Int<4>>>> = (0..10)
             .into_par_iter()
             .map(|_| {
-                let row_len = 1usize << (num_vars / 2);
+                let row_len = 1 << (num_vars / 2);
                 let pp = ZipPlusParams::new(num_vars, poly_size / row_len, C.clone());
 
                 let rows = TestZip::encode_rows(&pp, &poly.evaluations);
