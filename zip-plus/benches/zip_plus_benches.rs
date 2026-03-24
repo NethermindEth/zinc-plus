@@ -3,15 +3,6 @@
 
 mod zip_common;
 
-use std::marker::PhantomData;
-
-use zinc_poly::univariate::{
-    binary::{BinaryPoly, BinaryPolyInnerProduct},
-    dense::{DensePolyInnerProduct, DensePolynomial},
-};
-use zinc_primality::MillerRabin;
-use zinc_transcript::traits::ConstTranscribable;
-use zinc_utils::{UNCHECKED, from_ref::FromRef, inner_product::MBSInnerProduct, named::Named};
 use zip_common::*;
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -19,8 +10,17 @@ use crypto_bigint::U64;
 use crypto_primitives::{
     FixedSemiring, boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
 };
+use std::marker::PhantomData;
+use zinc_poly::univariate::{
+    binary::{BinaryPoly, BinaryPolyInnerProduct},
+    dense::{DensePolyInnerProduct, DensePolynomial},
+};
+use zinc_primality::MillerRabin;
+use zinc_transcript::traits::ConstTranscribable;
+use zinc_utils::{UNCHECKED, from_ref::FromRef, inner_product::MBSInnerProduct, named::Named};
 use zip_plus::{
     code::{
+        LinearCode,
         iprs::{IprsCode, PnttConfigF65537_32_128},
         raa::{RaaCode, RaaConfig},
     },
@@ -74,8 +74,12 @@ type SomeIprsCode<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const CH
 fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");
 
-    do_bench::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>, UNCHECKED>(&mut group);
-    do_bench::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>, UNCHECKED>(&mut group);
+    do_bench::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>, UNCHECKED>(&mut group, |poly_size| {
+        RaaCode::new(poly_size.isqrt().next_power_of_two())
+    });
+    do_bench::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>, UNCHECKED>(&mut group, |poly_size| {
+        RaaCode::new(poly_size.isqrt().next_power_of_two())
+    });
 
     group.finish();
 }
@@ -85,9 +89,11 @@ fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
 
     do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, 32, UNCHECKED>, UNCHECKED>(
         &mut group,
+        |_poly_size| IprsCode::create(),
     );
     do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 1, 64, UNCHECKED>, UNCHECKED>(
         &mut group,
+        |_poly_size| IprsCode::create(),
     );
 
     group.finish();

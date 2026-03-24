@@ -11,7 +11,10 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use crypto_bigint::U64;
 use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_uint::Uint};
 use zip_plus::{
-    code::raa::{RaaCode, RaaConfig},
+    code::{
+        LinearCode,
+        raa::{RaaCode, RaaConfig},
+    },
     pcs::structs::ZipTypes,
 };
 
@@ -50,7 +53,9 @@ type Code = RaaCode<BenchZipTypes, BenchRaaConfig, 4>;
 
 fn zip_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");
-    do_bench::<BenchZipTypes, Code, PERFORM_CHECKS>(&mut group);
+    do_bench::<BenchZipTypes, Code, PERFORM_CHECKS>(&mut group, |poly_size| {
+        RaaCode::new(poly_size.isqrt().next_power_of_two())
+    });
     group.finish();
 }
 
