@@ -19,7 +19,7 @@ use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 /// Pseudo Reed-Solomon encoder over the integers. Internally uses a
 /// radix-8 NTT-style recursion with a base Vandermonde matrix sized
 /// `base_len x base_dim` (defaults to 64x32).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct IprsCode<Zt: ZipTypes, Config: PnttConfig, const CHECK: bool> {
     pntt_params: Radix8PnttParams<Config>,
     _phantom: PhantomData<Zt>,
@@ -160,4 +160,33 @@ where
     {
         self.encode_inner_f(row)
     }
+}
+
+impl<Zt, Config, const CHECK: bool> Debug for IprsCode<Zt, Config, CHECK>
+where
+    Zt: ZipTypes,
+    Config: PnttConfig,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IprsCode")
+            .field("pntt_params", &self.pntt_params)
+            .finish()
+    }
+}
+
+impl<Zt, Config, const CHECK: bool> PartialEq<Self> for IprsCode<Zt, Config, CHECK>
+where
+    Config: PnttConfig,
+    Zt: ZipTypes,
+{
+    fn eq(&self, _other: &Self) -> bool {
+        true // All IPRS codes with the same config are identical.
+    }
+}
+
+impl<Zt, Config, const CHECK: bool> Eq for IprsCode<Zt, Config, CHECK>
+where
+    Zt: ZipTypes,
+    Config: PnttConfig,
+{
 }

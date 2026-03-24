@@ -4,9 +4,10 @@ pub mod raa_sign_flip;
 
 use crate::pcs::structs::ZipTypes;
 use crypto_primitives::FromPrimitiveWithConfig;
+use std::fmt::Debug;
 use zinc_utils::from_ref::FromRef;
 
-pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
+pub trait LinearCode<Zt: ZipTypes>: Debug + Eq + Sync + Send {
     /// Repetition factor, a.k.a. inverse rate, the ratio of codeword length to
     /// input row length. Has to be at a power of 2.
     ///

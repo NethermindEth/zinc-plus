@@ -35,7 +35,7 @@ type F = MontyField<{ INT_LIMBS * 4 }>;
 
 pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(
     group: &mut BenchmarkGroup<WallTime>,
-    make_linear_code: impl Fn(usize) -> Lc + Copy,
+    make_linear_code: impl Fn(/* poly_size: */ usize) -> Lc + Copy,
 ) where
     StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
     F: FromPrimitiveWithConfig
@@ -53,10 +53,13 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     encode_rows::<Zt, Lc, 15>(group, make_linear_code);
     encode_rows::<Zt, Lc, 16>(group, make_linear_code);
 
-    encode_single_row::<Zt, Lc>(group, make_linear_code(128));
-    encode_single_row::<Zt, Lc>(group, make_linear_code(256));
-    encode_single_row::<Zt, Lc>(group, make_linear_code(512));
-    encode_single_row::<Zt, Lc>(group, make_linear_code(1024));
+    for lc in [128, 256, 512, 1024]
+        .map(make_linear_code)
+        .into_iter()
+        .dedup()
+    {
+        encode_single_row::<Zt, Lc>(group, lc)
+    }
 
     merkle_root::<Zt, 12>(group);
     merkle_root::<Zt, 13>(group);

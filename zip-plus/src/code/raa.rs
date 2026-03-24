@@ -1,7 +1,7 @@
 use crate::{code::LinearCode, pcs::structs::ZipTypes, utils::shuffle_seeded};
 use crypto_primitives::PrimeField;
 use num_traits::CheckedAdd;
-use std::{marker::PhantomData, ops::AddAssign};
+use std::{fmt::Debug, marker::PhantomData, ops::AddAssign};
 use zinc_poly::ConstCoeffBitWidth;
 use zinc_utils::{add, from_ref::FromRef, mul};
 
@@ -16,7 +16,7 @@ pub trait RaaConfig: Copy + Send + Sync {
 
 /// Implementation of a repeat-accumulate-accumulate (RAA) codes over the binary
 /// field, as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RaaCode<Zt: ZipTypes, Config: RaaConfig, const REP: usize> {
     pub(crate) row_len: usize,
     /// Randomness seed for the first permutation
@@ -155,6 +155,26 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> LinearCode<Zt>
         self.encode_inner(row)
     }
 }
+
+impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> Debug for RaaCode<Zt, Config, REP> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RaaCode")
+            .field("row_len", &self.row_len)
+            .field("perm_1_seed", &self.perm_1_seed)
+            .field("perm_2_seed", &self.perm_2_seed)
+            .finish()
+    }
+}
+
+impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> PartialEq for RaaCode<Zt, Config, REP> {
+    fn eq(&self, other: &Self) -> bool {
+        self.row_len == other.row_len
+            && self.perm_1_seed == other.perm_1_seed
+            && self.perm_2_seed == other.perm_2_seed
+    }
+}
+
+impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> Eq for RaaCode<Zt, Config, REP> {}
 
 /// Repeat the given slice N times, e.g `[1,2,3] => [1,2,3,1,2,3]`
 #[allow(clippy::arithmetic_side_effects)]

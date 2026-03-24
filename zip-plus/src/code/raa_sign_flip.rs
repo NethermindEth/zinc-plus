@@ -2,17 +2,17 @@ use super::raa::*;
 use crate::{code::LinearCode, pcs::structs::ZipTypes, utils::shuffle_seeded};
 use crypto_primitives::{PrimeField, Ring};
 use num_traits::{CheckedAdd, CheckedNeg};
-use std::ops::{AddAssign, Neg};
+use std::{
+    fmt::Debug,
+    ops::{AddAssign, Neg},
+};
 use zinc_utils::{from_ref::FromRef, neg};
 
 /// Implementation of a repeat-accumulate-accumulate (RAA) codes.
 /// Flips signs of every second entry in the codeword, starting from the second
 /// one.
-#[derive(Debug, Clone)]
-pub struct RaaSignFlippingCode<Zt: ZipTypes, Config: RaaConfig, const REP: usize>
-where
-    Zt::Cw: Ring,
-{
+#[derive(Clone)]
+pub struct RaaSignFlippingCode<Zt: ZipTypes, Config: RaaConfig, const REP: usize> {
     raa: RaaCode<Zt, Config, REP>,
 }
 
@@ -100,6 +100,31 @@ where
     {
         self.encode_inner(row)
     }
+}
+
+impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> Debug
+    for RaaSignFlippingCode<Zt, Config, REP>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignFlipping")
+            .field("row_len", &self.raa.row_len)
+            .field("perm_1_seed", &self.raa.perm_1_seed)
+            .field("perm_2_seed", &self.raa.perm_2_seed)
+            .finish()
+    }
+}
+
+impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> PartialEq
+    for RaaSignFlippingCode<Zt, Config, REP>
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.raa == other.raa
+    }
+}
+
+impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> Eq
+    for RaaSignFlippingCode<Zt, Config, REP>
+{
 }
 
 /// Flip every other entry in the codeword, starting from the second one.
