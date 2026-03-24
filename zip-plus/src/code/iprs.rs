@@ -1,15 +1,12 @@
 mod pntt;
 
-use crate::{
-    code::{LinearCode, iprs::pntt::radix8::params::Config as PnttConfig},
-    pcs::structs::ZipTypes,
-};
+use crate::{code::LinearCode, pcs::structs::ZipTypes};
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::{CheckedAdd, CheckedMul};
 pub use pntt::radix8::params::{
-    PnttConfigF65537_1_4, PnttConfigF65537_2_8, PnttConfigF65537_4_16, PnttConfigF65537_16_64,
-    PnttConfigF65537_32_64, PnttConfigF65537_32_128, PnttConfigF65537_64_256, PnttInt,
-    Radix8PnttParams,
+    Config as PnttConfig, PnttConfigF65537_1_4, PnttConfigF65537_2_8, PnttConfigF65537_4_16,
+    PnttConfigF65537_16_64, PnttConfigF65537_32_64, PnttConfigF65537_32_128,
+    PnttConfigF65537_64_256, PnttInt, Radix8PnttParams,
 };
 use std::{
     fmt::Debug,
@@ -32,7 +29,28 @@ impl<Zt, Config, const CHECK: bool> IprsCode<Zt, Config, CHECK>
 where
     Zt: ZipTypes,
     Config: PnttConfig,
+    Zt::Eval: for<'a> MulByScalar<&'a PnttInt, Zt::Cw>,
+    Zt::CombR: for<'a> MulByScalar<&'a PnttInt>,
+    Zt::Cw: CheckedAdd + for<'a> MulByScalar<&'a PnttInt>,
 {
+    /// Named differently to distinguish from the [`LinearCode::new`]
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn create() -> Self {
+        assert_eq!(
+            Config::OUTPUT_LEN,
+            Config::INPUT_LEN * Self::REPETITION_FACTOR,
+            "Codeword length {} must equal row length {} times repetition factor {}",
+            Config::OUTPUT_LEN,
+            Config::INPUT_LEN,
+            Self::REPETITION_FACTOR
+        );
+
+        Self {
+            pntt_params: Radix8PnttParams::new(),
+            _phantom: Default::default(),
+        }
+    }
+
     /// Encode without modular reduction, purely over the integers.
     fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
     where
@@ -109,19 +127,7 @@ where
             Config::INPUT_LEN
         );
 
-        assert_eq!(
-            Config::OUTPUT_LEN,
-            Config::INPUT_LEN * Self::REPETITION_FACTOR,
-            "Codeword length {} must equal row length {} times repetition factor {}",
-            Config::OUTPUT_LEN,
-            Config::INPUT_LEN,
-            Self::REPETITION_FACTOR
-        );
-
-        Self {
-            pntt_params: Radix8PnttParams::new(),
-            _phantom: Default::default(),
-        }
+        Self::create()
     }
 
     fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
