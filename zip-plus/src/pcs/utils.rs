@@ -27,7 +27,7 @@ pub(super) fn validate_input<Zt: ZipTypes, Lc: LinearCode<Zt>, Pt>(
         // challenge_bits + eval_elem_bits - 1, where d is the log of the size
         // of the messages being encoded (i.e. log2(row_len)).
         let d = row_len.ilog2() as usize;
-        let codeword_bits = ilog_round_up!(mul!(Lc::REPETITION_FACTOR, d), usize);
+        let codeword_bits = ilog_round_up!(mul!(Lc::REPETITION_FACTOR, d).max(1), usize);
         let mut challenge_bits = Zt::Chal::NUM_BITS;
         if Zt::Comb::DEGREE_BOUND > 0 {
             // This means we also draft alphas (multiplied with coeffs), which
@@ -37,7 +37,7 @@ pub(super) fn validate_input<Zt: ZipTypes, Lc: LinearCode<Zt>, Pt>(
         let max_lc_bits = Zt::CombR::NUM_BITS;
         let actual_lc_bits: usize = add!(
             add!(
-                add!(mul!(codeword_bits, 2), ilog_round_up!(d, usize)),
+                add!(mul!(codeword_bits, 2), ilog_round_up!(d.max(1), usize)),
                 challenge_bits
             ),
             add!(

@@ -11,8 +11,7 @@ pub trait Config: Debug + Copy + Send + Sync {
     type Field: FftField;
     const FIELD_MODULUS: u32;
 
-    /// The number of steps where NTT is performed
-    /// recursivily.
+    /// The number of steps where NTT is performed recursivily.
     const DEPTH: usize;
     /// The number of columns of the base matrix.
     const BASE_LEN: usize;
