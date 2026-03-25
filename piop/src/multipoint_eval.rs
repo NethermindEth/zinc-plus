@@ -397,7 +397,7 @@ mod tests {
 
     /// Data known to both prover and verifier from earlier protocol steps.
     #[derive(Clone)]
-    struct PublicInput {
+    struct SharedSubprotocolInput {
         eval_point: Vec<F>,
         up_evals: Vec<F>,
         down_evals: Vec<F>,
@@ -424,7 +424,7 @@ mod tests {
         shifts: &[ShiftSpec],
     ) -> (
         Vec<DenseMultilinearExtension<<F as crypto_primitives::Field>::Inner>>,
-        PublicInput,
+        SharedSubprotocolInput,
     ) {
         let n = 1usize << num_vars;
         let zero_inner = F::ZERO.into_inner();
@@ -458,7 +458,7 @@ mod tests {
             })
             .collect();
 
-        let public = PublicInput {
+        let public = SharedSubprotocolInput {
             eval_point,
             up_evals,
             down_evals,
@@ -471,7 +471,7 @@ mod tests {
     /// Prover: has access to the trace, produces a proof and open_evals.
     fn run_prover(
         trace_mles: &[DenseMultilinearExtension<<F as crypto_primitives::Field>::Inner>],
-        public: &PublicInput,
+        public: &SharedSubprotocolInput,
     ) -> ProverMessage {
         let mut transcript = make_transcript();
         let (proof, prover_state) = MultipointEval::<F>::prove_as_subprotocol(
@@ -496,7 +496,7 @@ mod tests {
 
     /// Verifier: only receives the proof + open_evals + public data.
     fn run_verifier(
-        public: &PublicInput,
+        public: &SharedSubprotocolInput,
         msg: &ProverMessage,
     ) -> Result<Subclaim<F>, MultipointEvalError<F>> {
         let subclaim = MultipointEval::<F>::verify_as_subprotocol(
@@ -520,7 +520,7 @@ mod tests {
         num_vars: usize,
         num_cols: usize,
         shifts: &[ShiftSpec],
-    ) -> (PublicInput, ProverMessage) {
+    ) -> (SharedSubprotocolInput, ProverMessage) {
         let (trace, public) = build_trace(num_vars, num_cols, shifts);
         let msg = run_prover(&trace, &public);
         (public, msg)
