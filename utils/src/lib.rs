@@ -52,25 +52,3 @@ pub fn powers<R: Semiring>(x: R, one: R, num_pows: usize) -> Vec<R> {
 
     pows
 }
-
-/// Formats a number with spaces as thousands separators, e.g. 1234567 becomes
-/// "1 234 567".
-#[allow(clippy::unwrap_used)]
-pub fn fmt_thousands(n: usize) -> String {
-    let s = n.to_string();
-    s.as_bytes()
-        .rchunks(3)
-        .rev()
-        .map(|c| std::str::from_utf8(c).unwrap())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Prints proof size to stderr in a consistent format across all benchmarks.
-pub fn eprint_proof_size(label: impl std::fmt::Display, size_bytes: usize) {
-    eprintln!(
-        "    Proof size ({label}): {} bytes ({} KiB)",
-        fmt_thousands(size_bytes),
-        size_bytes.div_ceil(1024),
-    );
-}

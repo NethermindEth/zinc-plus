@@ -25,7 +25,7 @@ use zinc_test_uair::{
     BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
     TestAirNoMultiplication,
 };
-use zinc_transcript::traits::{ConstTranscribable, Transcribable};
+use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
     Uair, UairTrace,
     degree_counter::count_max_degree,
@@ -33,7 +33,6 @@ use zinc_uair::{
     ideal_collector::IdealOrZero,
 };
 use zinc_utils::{
-    eprint_proof_size,
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProduct, ScalarProduct},
     mul_by_scalar::MulByScalar,
@@ -43,8 +42,8 @@ use zinc_utils::{
 use zip_plus::{
     code::iprs::{IprsCode, PnttConfigF65537_32_128},
     pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
+    utils::eprint_proof_size,
 };
-
 //
 // Type definitions and constants
 //
@@ -364,7 +363,7 @@ fn do_bench<Zt, U, IdealOverF>(
         );
     });
 
-    eprint_proof_size(&params, proof.get_num_bytes());
+    eprint_proof_size(&params, &proof);
 }
 
 //
