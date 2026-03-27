@@ -618,8 +618,8 @@ mod tests {
     /// Constraints: a[i+1] = a[i] + b[i], c[i] = b[i+2].
     #[test]
     fn test_e2e_mixed_shifts() {
-        do_test::<TestZincTypesRaa, TestUairMixedShifts<ZtInt>>(
-            3,
+        do_test::<TestZincTypesIprs, TestUairMixedShifts<ZtInt>>(
+            8,
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
             |_| {},
             |res| res.unwrap(),

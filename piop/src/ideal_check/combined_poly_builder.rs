@@ -1,3 +1,4 @@
+use num_traits::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -56,7 +57,7 @@ where
                         if row_idx + spec.shift_amount() < num_rows {
                             trace_matrix[row_idx + spec.shift_amount()][spec.source_col()].clone()
                         } else {
-                            DynamicPolynomialF::new([]) // zero padding
+                            DynamicPolynomialF::zero() // zero padding
                         }
                     })
                     .collect();

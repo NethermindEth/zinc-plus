@@ -552,7 +552,7 @@ where
             if i + 2 < n {
                 c_col.push(b_col[i + 2].clone());
             } else {
-                c_col.push(DynamicPolynomialFS::new(vec![]));
+                c_col.push(DynamicPolynomialFS::zero());
             }
         }
 

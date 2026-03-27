@@ -245,15 +245,15 @@ where
 
         // Extract witness-only lifted evals (public columns come first in trace).
         let pub_cols = sig.public_cols();
-        let num_pub_bin = pub_cols.binary_poly_cols();
-        let num_pub_arb = pub_cols.arbitrary_poly_cols();
-        let num_pub_int = pub_cols.int_cols();
+        let num_pub_bin = pub_cols.num_binary_poly_cols();
+        let num_pub_arb = pub_cols.num_arbitrary_poly_cols();
+        let num_pub_int = pub_cols.num_int_cols();
         let total = sig.total_cols();
-        let num_total_bin = total.binary_poly_cols();
-        let num_total_arb = total.arbitrary_poly_cols();
+        let num_total_bin = total.num_binary_poly_cols();
+        let num_total_arb = total.num_arbitrary_poly_cols();
         let witness = sig.witness_cols();
         let witness_arb_offset = add!(num_total_bin, num_pub_arb);
-        let witness_arb_end = add!(witness_arb_offset, witness.arbitrary_poly_cols());
+        let witness_arb_end = add!(witness_arb_offset, witness.num_arbitrary_poly_cols());
         let witness_int_offset = add!(add!(num_total_bin, num_total_arb), num_pub_int);
         let witness_lifted_evals: Vec<_> = lifted_evals[num_pub_bin..num_total_bin]
             .iter()

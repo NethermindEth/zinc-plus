@@ -131,7 +131,7 @@ where
 
         // Step 2: Build the two selector MLEs:
         //   eq_r(b)   = eq(b, r')
-        //   next_r(b) = next_tilde(r', b)
+        //   next_c_r_mle(b) = next_c_mle(r', b)
         let eq_r = build_eq_x_r_inner(eval_point, field_cfg)?;
         let (next_mles, down_cols): (Vec<_>, Vec<_>) = shifts
             .iter()

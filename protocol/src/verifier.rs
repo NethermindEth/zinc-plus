@@ -162,13 +162,13 @@ where
         // full lifted_evals in canonical order:
         //   [pub_bin, wit_bin, pub_arb, wit_arb, pub_int, wit_int]
         let pub_cols = uair_sig.public_cols();
-        let num_pub_bin = pub_cols.binary_poly_cols();
-        let num_pub_arb = pub_cols.arbitrary_poly_cols();
-        let num_pub_int = pub_cols.int_cols();
+        let num_pub_bin = pub_cols.num_binary_poly_cols();
+        let num_pub_arb = pub_cols.num_arbitrary_poly_cols();
+        let num_pub_int = pub_cols.num_int_cols();
 
         let wit_cols = uair_sig.witness_cols();
-        let num_wit_bin = wit_cols.binary_poly_cols();
-        let num_wit_arb = wit_cols.arbitrary_poly_cols();
+        let num_wit_bin = wit_cols.num_binary_poly_cols();
+        let num_wit_arb = wit_cols.num_arbitrary_poly_cols();
 
         let public_lifted = if add!(add!(num_pub_bin, num_pub_arb), num_pub_int) > 0 {
             let projected_public =
@@ -247,8 +247,8 @@ where
         }
 
         let total = uair_sig.total_cols();
-        let num_total_bin = total.binary_poly_cols();
-        let num_total_arb = total.arbitrary_poly_cols();
+        let num_total_bin = total.num_binary_poly_cols();
+        let num_total_arb = total.num_arbitrary_poly_cols();
         verify_pcs_batch!(
             Zt::BinaryZt,
             Zt::BinaryLc,

@@ -9,8 +9,8 @@ use zinc_poly::utils::next_mle_eval;
 /// Evaluate the shift predicate `S_c(x, y)` at arbitrary field points.
 ///
 /// Uses the high/low decomposition:
-///   `S_c(x, y) = L_0(x_lo, y_lo) · eq*(x_hi, y_hi)
-///              + L_1(x_lo, y_lo) · Next*(x_hi, y_hi)`
+///   `S_c(x, y) = L_0(x_lo, y_lo) · eq(x_hi, y_hi)
+///              + L_1(x_lo, y_lo) · next_mle(x_hi, y_hi)`
 ///
 /// where `k = ceil(log2(2c))` determines the split point.
 ///
@@ -22,12 +22,12 @@ pub fn eval_shift_predicate<F: PrimeField>(x: &[F], y: &[F], c: usize, cfg: &F::
     let zero = F::zero_with_cfg(cfg);
     let one = F::one_with_cfg(cfg);
 
-    // S_0(x, y) = eq*(x, y): identity shift.
+    // S_0(x, y) = eq(x, y): identity shift.
     if c == 0 {
         return eval_eq_poly(x, y, &one);
     }
 
-    // S_1(x, y) = Next*(x, y): the successor predicate is exactly shift-by-1.
+    // S_1(x, y) = next_mle(x, y): the successor predicate is exactly shift-by-1.
     if c == 1 {
         return next_mle_eval(x, y, zero, one);
     }
@@ -50,7 +50,7 @@ pub fn eval_shift_predicate<F: PrimeField>(x: &[F], y: &[F], c: usize, cfg: &F::
     l0 * eq + l1 * next
 }
 
-/// `eq*(u, v) = prod_i (u_i * v_i + (1 - u_i)(1 - v_i))`
+/// `eq(u, v) = prod_i (u_i * v_i + (1 - u_i)(1 - v_i))`
 ///
 /// Evaluates the Multilinear polynomial for eq polynomial
 pub(crate) fn eval_eq_poly<F: PrimeField>(u: &[F], v: &[F], one: &F) -> F {
@@ -60,7 +60,7 @@ pub(crate) fn eval_eq_poly<F: PrimeField>(u: &[F], v: &[F], one: &F) -> F {
         .fold(one.clone(), |acc, term| acc * term)
 }
 
-/// `delta_{bin_k(a)}(u) = eq*(u, bin_k(a))`.
+/// `delta_{bin_k(a)}(u) = eq(u, bin_k(a))`.
 ///
 /// Evaluates the Lagrange basis polynomial for the binary encoding of `a`
 /// with `k` bits at the point `u`.
@@ -194,7 +194,7 @@ mod tests {
         }
     }
 
-    /// Verify the Next* successor predicate on all Boolean inputs.
+    /// Verify the next_mle on all Boolean inputs.
     #[test]
     fn test_next_boolean() {
         let cfg = test_config();

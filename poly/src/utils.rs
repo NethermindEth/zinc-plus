@@ -195,14 +195,14 @@ where
     Ok(())
 }
 
-/// Build the shift selector MLE `next_c_tilde(r, *)` with the first `num_vars`
+/// Build the shift selector MLE `next_c_mle(r, *)` with the first `num_vars`
 /// variables fixed to `r`.
 ///
 /// For each `b in {0,1}^{num_vars}`:
-///   next_c_tilde(b) = eq(r, b - c)   if b >= c
-///   next_c_tilde(b) = 0              if b < c
+///   next_c_mle(b) = eq(r, b - c)   if b >= c
+///   next_c_mle(b) = 0              if b < c
 ///
-/// Uses the identity `next_c_tilde(r, b) = eq(r, b - c)` for `b >= c` and
+/// Uses the identity `next_c_mle(r, b) = eq(r, b - c)` for `b >= c` and
 /// `0` for `b < c`.
 pub fn build_next_c_r_mle<F>(
     r: &[F],
@@ -223,9 +223,10 @@ where
         return Ok(eq_r);
     }
 
-    // next_c_tilde(r, 0) = 0 for b < c
-    // next_c_tilde(r, b - c) = eq(r, b - c) for b >= c
-    let mut evaluations = vec![zero_inner; c];
+    // next_c_mle(r, 0) = 0 for b < c
+    // next_c_mle(r, b - c) = eq(r, b - c) for b >= c
+    let mut evaluations = Vec::with_capacity(n);
+    evaluations.resize(c, zero_inner);
     evaluations.extend_from_slice(&eq_r.evaluations[..sub!(n, c)]);
 
     Ok(DenseMultilinearExtension {
@@ -318,7 +319,7 @@ pub fn next_mle_inner<F: Field>(
 ///
 /// Improved from O(n²) approach here: https://github.com/TomWambsgans/Whirlaway/blob/9e3592b/crates/air/src/utils.rs#L92
 ///
-/// `Next*(u, v) = 1` iff `Val(v) = Val(u) + 1` and `Val(u) < 2^n - 1`.
+/// `next_mle(u, v) = 1` iff `Val(v) = Val(u) + 1` and `Val(u) < 2^n - 1`.
 ///
 /// # Arguments
 /// - `u`: first n-bit vector (LE convention: index 0 = LSB).
@@ -326,10 +327,10 @@ pub fn next_mle_inner<F: Field>(
 ///
 /// # Algorithm
 /// Uses prefix/suffix products for O(n) evaluation:
-///   `Next*(u, v) = sum_{j=0}^{n-1}
+///   `next_mle(u, v) = sum_{j=0}^{n-1}
 ///       [prod_{i<j} u_i * (1 - v_i)]      -- bits below j: were 1, flip to 0
 ///     * (1 - u_j) * v_j                   -- bit j: 0 → 1
-///     * [prod_{i>j} eq*(u_i, v_i)]`       -- bits above j: unchanged
+///     * [prod_{i>j} eq(u_i, v_i)]`        -- bits above j: unchanged
 ///
 /// # Panics
 /// Panics if `u.len() != v.len()`.
@@ -341,7 +342,7 @@ pub fn next_mle_eval<R: Semiring>(u: &[R], v: &[R], zero: R, one: R) -> R {
         return zero;
     }
 
-    // suffix_eq[j] = prod_{i=j}^{n-1} eq*(u_i, v_i)
+    // suffix_eq[j] = prod_{i=j}^{n-1} eq(u_i, v_i)
     let mut suffix_eq = vec![one.clone(); n + 1];
     for i in (0..n).rev() {
         suffix_eq[i] = suffix_eq[i + 1].clone()

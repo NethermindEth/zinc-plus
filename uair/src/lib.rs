@@ -14,7 +14,7 @@ use zinc_poly::{
     mle::DenseMultilinearExtension,
     univariate::{binary::BinaryPoly, dense::DensePolynomial},
 };
-use zinc_utils::{UNCHECKED, add, from_ref::FromRef, mul_by_scalar::MulByScalar};
+use zinc_utils::{UNCHECKED, add, from_ref::FromRef, mul_by_scalar::MulByScalar, sub};
 
 use crate::ideal::{Ideal, IdealCheck};
 
@@ -81,38 +81,42 @@ impl ShiftSpec {
 /// Witness)
 #[derive(Clone, Debug, Default)]
 pub struct ColumnLayout {
-    binary_poly_cols: usize,
-    arbitrary_poly_cols: usize,
-    int_cols: usize,
+    num_binary_poly_cols: usize,
+    num_arbitrary_poly_cols: usize,
+    num_int_cols: usize,
 }
 
 impl ColumnLayout {
-    pub fn new(binary_poly_cols: usize, arbitrary_poly_cols: usize, int_cols: usize) -> Self {
+    pub fn new(
+        num_binary_poly_cols: usize,
+        num_arbitrary_poly_cols: usize,
+        num_int_cols: usize,
+    ) -> Self {
         Self {
-            binary_poly_cols,
-            arbitrary_poly_cols,
-            int_cols,
+            num_binary_poly_cols,
+            num_arbitrary_poly_cols,
+            num_int_cols,
         }
     }
 
-    pub fn binary_poly_cols(&self) -> usize {
-        self.binary_poly_cols
+    pub fn num_binary_poly_cols(&self) -> usize {
+        self.num_binary_poly_cols
     }
 
-    pub fn arbitrary_poly_cols(&self) -> usize {
-        self.arbitrary_poly_cols
+    pub fn num_arbitrary_poly_cols(&self) -> usize {
+        self.num_arbitrary_poly_cols
     }
 
-    pub fn int_cols(&self) -> usize {
-        self.int_cols
+    pub fn num_int_cols(&self) -> usize {
+        self.num_int_cols
     }
 
     /// Maximum number of columns across the three types.
     pub fn max_cols(&self) -> usize {
         [
-            self.binary_poly_cols,
-            self.arbitrary_poly_cols,
-            self.int_cols,
+            self.num_binary_poly_cols,
+            self.num_arbitrary_poly_cols,
+            self.num_int_cols,
         ]
         .into_iter()
         .max()
@@ -122,7 +126,7 @@ impl ColumnLayout {
     /// The sum of the numbers of columns across all types.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn cols(&self) -> usize {
-        self.binary_poly_cols + self.arbitrary_poly_cols + self.int_cols
+        self.num_binary_poly_cols + self.num_arbitrary_poly_cols + self.num_int_cols
     }
 }
 
@@ -133,13 +137,13 @@ macro_rules! column_layout_wrapper {
         pub struct $name(ColumnLayout);
 
         impl $name {
-            pub fn new(binary_poly_cols: usize, arbitrary_poly_cols: usize, int_cols: usize) -> Self {
-                Self(ColumnLayout::new(binary_poly_cols, arbitrary_poly_cols, int_cols))
+            pub fn new(num_binary_poly_cols: usize, num_arbitrary_poly_cols: usize, num_int_cols: usize) -> Self {
+                Self(ColumnLayout::new(num_binary_poly_cols, num_arbitrary_poly_cols, num_int_cols))
             }
 
-            pub fn binary_poly_cols(&self) -> usize { self.0.binary_poly_cols() }
-            pub fn arbitrary_poly_cols(&self) -> usize { self.0.arbitrary_poly_cols() }
-            pub fn int_cols(&self) -> usize { self.0.int_cols() }
+            pub fn num_binary_poly_cols(&self) -> usize { self.0.num_binary_poly_cols() }
+            pub fn num_arbitrary_poly_cols(&self) -> usize { self.0.num_arbitrary_poly_cols() }
+            pub fn num_int_cols(&self) -> usize { self.0.num_int_cols() }
             pub fn max_cols(&self) -> usize { self.0.max_cols() }
             pub fn cols(&self) -> usize { self.0.cols() }
             pub fn as_column_layout(&self) -> &ColumnLayout { &self.0 }
@@ -170,6 +174,8 @@ pub struct UairSignature {
     total_cols: TotalColumnLayout,
     /// Public column subset.
     public_cols: PublicColumnLayout,
+    /// Witness column counts (total minus public) per type.
+    witness_cols: WitnessColumnLayout,
     /// Shifted columns info sorted by `source_col`.
     shifts: Vec<ShiftSpec>,
     /// Column-type layout of the shifted (down) row.
@@ -186,15 +192,15 @@ impl UairSignature {
         for (name, pub_n, tot_n) in [
             (
                 "binary_poly",
-                public_cols.binary_poly_cols(),
-                total_cols.binary_poly_cols(),
+                public_cols.num_binary_poly_cols(),
+                total_cols.num_binary_poly_cols(),
             ),
             (
                 "arbitrary_poly",
-                public_cols.arbitrary_poly_cols(),
-                total_cols.arbitrary_poly_cols(),
+                public_cols.num_arbitrary_poly_cols(),
+                total_cols.num_arbitrary_poly_cols(),
             ),
-            ("int", public_cols.int_cols(), total_cols.int_cols()),
+            ("int", public_cols.num_int_cols(), total_cols.num_int_cols()),
         ] {
             assert!(
                 pub_n <= tot_n,
@@ -215,11 +221,24 @@ impl UairSignature {
 
         shifts.sort_by_key(|spec| spec.source_col());
         let down_cols = Self::compute_down_layout(&total_cols, &shifts);
+        let witness_cols = WitnessColumnLayout::new(
+            sub!(
+                total_cols.num_binary_poly_cols(),
+                public_cols.num_binary_poly_cols()
+            ),
+            sub!(
+                total_cols.num_arbitrary_poly_cols(),
+                public_cols.num_arbitrary_poly_cols()
+            ),
+            sub!(total_cols.num_int_cols(), public_cols.num_int_cols()),
+        );
+
         Self {
             total_cols,
             public_cols,
             shifts,
             down_cols,
+            witness_cols,
         }
     }
 
@@ -227,21 +246,21 @@ impl UairSignature {
         total_cols: &TotalColumnLayout,
         shifts: &[ShiftSpec],
     ) -> VirtualColumnLayout {
-        let bp_end = total_cols.binary_poly_cols();
-        let ap_end = add!(bp_end, total_cols.arbitrary_poly_cols());
-        let mut bp = 0usize;
-        let mut ap = 0usize;
-        let mut ic = 0usize;
+        let binary_poly_end = total_cols.num_binary_poly_cols();
+        let arbitrary_poly_end = add!(binary_poly_end, total_cols.num_arbitrary_poly_cols());
+        let mut num_binary_poly = 0usize;
+        let mut num_arbitrary_poly = 0usize;
+        let mut num_int = 0usize;
         for spec in shifts {
-            if spec.source_col() < bp_end {
-                bp = add!(bp, 1);
-            } else if spec.source_col() < ap_end {
-                ap = add!(ap, 1);
+            if spec.source_col() < binary_poly_end {
+                num_binary_poly = add!(num_binary_poly, 1);
+            } else if spec.source_col() < arbitrary_poly_end {
+                num_arbitrary_poly = add!(num_arbitrary_poly, 1);
             } else {
-                ic = add!(ic, 1);
+                num_int = add!(num_int, 1);
             }
         }
-        VirtualColumnLayout::new(bp, ap, ic)
+        VirtualColumnLayout::new(num_binary_poly, num_arbitrary_poly, num_int)
     }
 
     pub fn total_cols(&self) -> &TotalColumnLayout {
@@ -250,6 +269,11 @@ impl UairSignature {
 
     pub fn public_cols(&self) -> &PublicColumnLayout {
         &self.public_cols
+    }
+
+    /// Witness column counts (total minus public) per type.
+    pub fn witness_cols(&self) -> &WitnessColumnLayout {
+        &self.witness_cols
     }
 
     pub fn shifts(&self) -> &[ShiftSpec] {
@@ -269,16 +293,6 @@ impl UairSignature {
         let down_size = self.down_cols.cols();
         (vec![val.clone(); up_size], vec![val; down_size])
     }
-
-    /// Witness column counts (total minus public) per type.
-    #[allow(clippy::arithmetic_side_effects)]
-    pub fn witness_cols(&self) -> WitnessColumnLayout {
-        WitnessColumnLayout::new(
-            self.total_cols.binary_poly_cols() - self.public_cols.binary_poly_cols(),
-            self.total_cols.arbitrary_poly_cols() - self.public_cols.arbitrary_poly_cols(),
-            self.total_cols.int_cols() - self.public_cols.int_cols(),
-        )
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -296,23 +310,25 @@ pub struct UairTrace<'a, PolyCoeff: Clone, Int: Clone, const D: usize> {
 }
 
 impl<PolyCoeff: Clone, Int: Clone, const D: usize> UairTrace<'static, PolyCoeff, Int, D> {
-    /// Returns a layout containing only public columns.
+    /// Returns a sub-trace containing only public columns.
+    /// Returned trace is borrowed from the full trace.
     pub fn public(&self, sig: &UairSignature) -> UairTrace<'_, PolyCoeff, Int, D> {
         let p = sig.public_cols();
         UairTrace {
-            binary_poly: Cow::Borrowed(&self.binary_poly[0..p.binary_poly_cols()]),
-            arbitrary_poly: Cow::Borrowed(&self.arbitrary_poly[0..p.arbitrary_poly_cols()]),
-            int: Cow::Borrowed(&self.int[0..p.int_cols()]),
+            binary_poly: Cow::Borrowed(&self.binary_poly[0..p.num_binary_poly_cols()]),
+            arbitrary_poly: Cow::Borrowed(&self.arbitrary_poly[0..p.num_arbitrary_poly_cols()]),
+            int: Cow::Borrowed(&self.int[0..p.num_int_cols()]),
         }
     }
 
-    /// Returns layout containing only witness columns.
+    /// Returns a sub-trace containing only witness columns.
+    /// Returned trace is borrowed from the full trace.
     pub fn witness(&self, sig: &UairSignature) -> UairTrace<'_, PolyCoeff, Int, D> {
         let p = sig.public_cols();
         UairTrace {
-            binary_poly: Cow::Borrowed(&self.binary_poly[p.binary_poly_cols()..]),
-            arbitrary_poly: Cow::Borrowed(&self.arbitrary_poly[p.arbitrary_poly_cols()..]),
-            int: Cow::Borrowed(&self.int[p.int_cols()..]),
+            binary_poly: Cow::Borrowed(&self.binary_poly[p.num_binary_poly_cols()..]),
+            arbitrary_poly: Cow::Borrowed(&self.arbitrary_poly[p.num_arbitrary_poly_cols()..]),
+            int: Cow::Borrowed(&self.int[p.num_int_cols()..]),
         }
     }
 }
@@ -337,12 +353,12 @@ impl<'a, Expr> TraceRow<'a, Expr> {
     /// Subdivides the slice according to the given column layout.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn from_slice_with_layout(row: &'a [Expr], layout: &ColumnLayout) -> Self {
-        let bp = layout.binary_poly_cols();
-        let ap = layout.arbitrary_poly_cols();
+        let num_binary_poly = layout.num_binary_poly_cols();
+        let num_arbitrary_poly = layout.num_arbitrary_poly_cols();
         Self {
-            binary_poly: &row[0..bp],
-            arbitrary_poly: &row[bp..bp + ap],
-            int: &row[bp + ap..],
+            binary_poly: &row[0..num_binary_poly],
+            arbitrary_poly: &row[num_binary_poly..num_binary_poly + num_arbitrary_poly],
+            int: &row[num_binary_poly + num_arbitrary_poly..],
         }
     }
 }
