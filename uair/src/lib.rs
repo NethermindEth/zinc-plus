@@ -390,6 +390,11 @@ pub trait Uair {
     type Scalar: Semiring;
 
     /// Signature of the UAIR.
+    ///
+    /// TODO: Consider caching the signature to avoid recomputing it at every
+    /// call site. Currently negligible since shifts are small (e.g. ~12 for
+    /// SHA/ECDSA), but may matter if signatures grow more expensive to
+    /// construct.
     fn signature() -> UairSignature;
 
     /// A general method for describing constraints.
