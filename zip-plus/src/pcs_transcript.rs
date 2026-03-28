@@ -168,10 +168,6 @@ impl PcsProverTranscript {
         Ok(())
     }
 
-    pub fn write_const<T: ConstTranscribable>(&mut self, v: &T) -> Result<(), ZipError> {
-        self.write(v)
-    }
-
     // Note(alex):
     // Parallelizing this greatly degrades performance rather than improving it.
     // Maybe we should think of breakpoints for parallelization later.
@@ -208,7 +204,7 @@ impl PcsProverTranscript {
 
     fn write_usize(&mut self, value: usize) -> Result<(), ZipError> {
         let value_u64 = safe_cast!(value, usize, u64)?;
-        self.write_const(&value_u64)
+        self.write(&value_u64)
     }
 
     pub fn write_merkle_proof(&mut self, proof: &MerkleProof) -> Result<(), ZipError> {
@@ -303,10 +299,6 @@ impl PcsVerifierTranscript {
         })
     }
 
-    pub fn read_const<T: ConstTranscribable>(&mut self) -> Result<T, ZipError> {
-        self.read()
-    }
-
     pub fn read_const_many<T: ConstTranscribable>(&mut self, n: usize) -> Result<Vec<T>, ZipError> {
         read_stream_slice(&mut self.stream, mul!(n, T::NUM_BYTES), |slice| {
             Ok(slice
@@ -317,7 +309,7 @@ impl PcsVerifierTranscript {
     }
 
     fn read_usize(&mut self) -> Result<usize, ZipError> {
-        let value = self.read_const::<u64>()?;
+        let value = self.read::<u64>()?;
         safe_cast!(value, u64, usize)
     }
 
@@ -425,7 +417,7 @@ mod tests {
     fn test_pcs_transcript_read_write() {
         // Test hash
         let original_hash = MtHash::default();
-        test_read_write!(write_const, read_const, original_hash, "hash");
+        test_read_write!(write, read, original_hash, "hash");
 
         // Test vector of hashed
         let original_hashes = vec![MtHash::default(); 1024];

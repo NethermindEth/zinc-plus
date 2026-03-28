@@ -47,8 +47,7 @@ where
     F::Modulus: ConstTranscribable,
 {
     fn get_num_bytes(&self) -> usize {
-        // Each sub-field is written as: u32 prefix + data (matching
-        // read_transcription_bytes_subset)
+        // Each sub-field is written as u32 prefix + data
         3 * u32::NUM_BYTES
             + self.sumcheck_proof.get_num_bytes()
             + self.up_evals.get_num_bytes()

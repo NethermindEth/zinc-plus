@@ -40,11 +40,10 @@ where
     fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
         let mod_size = F::Modulus::NUM_BYTES;
         let cfg = zinc_transcript::read_field_cfg::<F>(&bytes[..mod_size]);
-        let mut bytes = &bytes[mod_size..];
+        let bytes = &bytes[mod_size..];
 
-        let (n_msgs, rest) = u32::read_transcription_bytes_subset(bytes);
+        let (n_msgs, mut bytes) = u32::read_transcription_bytes_subset(bytes);
         let n_msgs = usize::try_from(n_msgs).expect("message count must fit into usize");
-        bytes = rest;
 
         let mut messages = Vec::with_capacity(n_msgs);
         for _ in 0..n_msgs {
