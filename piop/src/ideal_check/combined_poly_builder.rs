@@ -1,9 +1,9 @@
-use num_traits::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 use crate::projections::{ColumnMajorTrace, RowMajorTrace};
 use crypto_primitives::PrimeField;
+use num_traits::Zero;
 use std::collections::HashMap;
 use zinc_poly::{
     EvaluationError,
@@ -86,8 +86,7 @@ where
     // thing from the whirlaway.
     // TODO(Ilia): reimplement it using Albert's idea
     //             with selector polynomials.
-    max_degrees_and_combined_poly_rows
-        .push((0, vec![DynamicPolynomialF::new([]); num_constraints]));
+    max_degrees_and_combined_poly_rows.push((0, vec![DynamicPolynomialF::zero(); num_constraints]));
 
     prepare_coefficient_mles(
         num_constraints,

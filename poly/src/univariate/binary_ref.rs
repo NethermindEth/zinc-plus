@@ -15,7 +15,7 @@ use std::{
     marker::PhantomData,
     ops::{Add, AddAssign, Deref, DerefMut, Mul, MulAssign, Sub, SubAssign},
 };
-use zinc_transcript::traits::ConstTranscribable;
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable};
 use zinc_utils::{
     from_ref::FromRef,
     inner_product::{BooleanInnerProductAdd, InnerProduct, InnerProductError},
@@ -284,19 +284,17 @@ impl<const DEGREE_PLUS_ONE: usize> Named for BinaryRefPoly<DEGREE_PLUS_ONE> {
     }
 }
 
-impl<const DEGREE_PLUS_ONE: usize> ConstTranscribable for BinaryRefPoly<DEGREE_PLUS_ONE> {
-    const NUM_BYTES: usize = u64::NUM_BYTES;
-
+impl<const DEGREE_PLUS_ONE: usize> GenTranscribable for BinaryRefPoly<DEGREE_PLUS_ONE> {
     #[inline(always)]
-    fn read_transcription_bytes(bytes: &[u8]) -> Self {
-        let value = u64::read_transcription_bytes(bytes);
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        let value = u64::read_transcription_bytes_exact(bytes);
         Self(DensePolynomial {
             coeffs: array::from_fn(|i| Boolean::new(value & (1 << i) != 0)),
         })
     }
 
     #[inline(always)]
-    fn write_transcription_bytes(&self, buf: &mut [u8]) {
+    fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
         let mut value: u64 = 0;
 
         self.0.coeffs.iter().enumerate().for_each(|(i, coeff)| {
@@ -305,8 +303,12 @@ impl<const DEGREE_PLUS_ONE: usize> ConstTranscribable for BinaryRefPoly<DEGREE_P
             }
         });
 
-        value.write_transcription_bytes(buf);
+        value.write_transcription_bytes_exact(buf);
     }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> ConstTranscribable for BinaryRefPoly<DEGREE_PLUS_ONE> {
+    const NUM_BYTES: usize = u64::NUM_BYTES;
 }
 
 impl<const DEGREE_PLUS_ONE: usize> FromRef<BinaryRefPoly<DEGREE_PLUS_ONE>>
@@ -432,8 +434,8 @@ mod tests {
         let mut bytes = [0u8; BinaryRefPoly::<4>::NUM_BYTES];
         assert_eq!(bytes.len(), u64::NUM_BYTES);
 
-        original.write_transcription_bytes(&mut bytes);
-        let deserialized = BinaryRefPoly::<4>::read_transcription_bytes(&bytes);
+        original.write_transcription_bytes_exact(&mut bytes);
+        let deserialized = BinaryRefPoly::<4>::read_transcription_bytes_exact(&bytes);
         assert_eq!(original, deserialized);
     }
 }

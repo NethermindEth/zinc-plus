@@ -27,21 +27,25 @@
 //! (alpha'_j in F_q[X]); the scalar open_evals are derived by the verifier
 //! via \psi_a rather than being sent as a separate proof element.
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 use crate::{
     shift_predicate::eval_shift_predicate,
     sumcheck::{MLSumcheck, SumCheckError, SumcheckProof, verifier::Subclaim as SumcheckSubclaim},
 };
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use num_traits::Zero;
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
 use std::marker::PhantomData;
 use thiserror::Error;
 use zinc_poly::{
     mle::DenseMultilinearExtension,
     utils::{ArithErrors, build_eq_x_r_inner, build_next_c_r_mle},
 };
-use zinc_transcript::traits::{ConstTranscribable, Transcript};
+use zinc_transcript::{
+    delegate_transcribable,
+    traits::{ConstTranscribable, Transcript},
+};
 use zinc_uair::ShiftSpec;
 use zinc_utils::{cfg_into_iter, inner_transparent_field::InnerTransparentField};
 
@@ -54,11 +58,14 @@ use zinc_utils::{cfg_into_iter, inner_transparent_field::InnerTransparentField};
 /// Contains only the sumcheck proof. The MLE evaluations at `r_0` are
 /// provided externally via `lifted_evals` (in `F_q[X]`), from which the
 /// verifier derives the scalar `open_evals` via `\psi_a`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proof<F: PrimeField> {
     /// The inner sumcheck proof.
     pub sumcheck_proof: SumcheckProof<F>,
 }
+
+delegate_transcribable!(Proof<F> { sumcheck_proof: SumcheckProof<F> }
+    where F: PrimeField, F::Inner: ConstTranscribable, F::Modulus: ConstTranscribable);
 
 /// Prover state after the multi-point evaluation protocol.
 pub struct ProverState<F: PrimeField> {

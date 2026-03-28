@@ -20,7 +20,7 @@ use std::{
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
 use zinc_transcript::traits::{ConstTranscribable, Transcribable, Transcript};
 use zinc_utils::{
-    from_ref::FromRef, mul_by_scalar::MulByScalar, named::Named,
+    eprint_proof_size, from_ref::FromRef, mul_by_scalar::MulByScalar, named::Named,
     projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
@@ -249,6 +249,19 @@ pub fn prove<
 
     let point = vec![Zt::Pt::one(); P];
 
+    macro_rules! do_prove {
+        ($t:expr) => {
+            ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>($t, &params, &polys, &point, &hint, &field_cfg)
+                .expect("Prove failed")
+        };
+    }
+
+    let proof_len = {
+        let mut t = transcript.clone();
+        do_prove!(&mut t);
+        commitment.get_num_bytes() + t.stream.get_ref().len()
+    };
+
     group.bench_function(
         format!(
             "Prove(batch={BATCH}): Eval={}, Cw={}, Comb={}, poly_size=2^{P}, modulus=({} bits)",
@@ -263,15 +276,7 @@ pub fn prove<
                 for _ in 0..iters {
                     let mut transcript = transcript.clone();
                     let timer = Instant::now();
-                    let result = ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>(
-                        &mut transcript,
-                        &params,
-                        &polys,
-                        &point,
-                        &hint,
-                        &field_cfg,
-                    )
-                    .expect("Prove failed");
+                    let result = do_prove!(&mut transcript);
                     total_duration += timer.elapsed();
                     black_box(result);
                 }
@@ -279,6 +284,8 @@ pub fn prove<
             })
         },
     );
+
+    eprint_proof_size(format_args!("batch={BATCH}, poly_size=2^{P}"), proof_len);
 }
 
 pub fn verify<
@@ -331,6 +338,8 @@ pub fn verify<
 
     let transcript = transcript.into_verification_transcript();
 
+    let proof_len = commitment.get_num_bytes() + transcript.stream.get_ref().len();
+
     group.bench_function(
         format!(
             "Verify(batch={BATCH}): Eval={}, Cw={}, Comb={}, poly_size=2^{P}, modulus=({} bits)",
@@ -371,4 +380,6 @@ pub fn verify<
             })
         },
     );
+
+    eprint_proof_size(format_args!("batch={BATCH}, poly_size=2^{P}"), proof_len);
 }
