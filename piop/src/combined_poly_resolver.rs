@@ -82,14 +82,24 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
 
-        // Shifted trace. Just take the trace, drop the first row
-        // and append 0 to the end. Note, that the latter happens
-        // thanks to the FromIterator implementation for `DenseMultilinearExtension`
-        // as it always pads to the next power of two.
-        // It might lead to a problem when `num_vars = 1` but that is not going to
-        // happen on real world traces.
-        let down: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(trace_matrix)
-            .map(|column| column[1..].iter().cloned().collect())
+        // Shifted trace: for each ShiftSpec, take the source column,
+        // drop the first `shift_amount` rows, and zero-pad to the full
+        // domain size so the MLE keeps the correct `num_vars`.
+        // TODO consider working with pointers since down cols are virtual cols until
+        // folded in sumcheck - virtual MLE trait needed in sumcheck.
+        let uair_sig = U::signature();
+        let down_layout = uair_sig.down_cols().as_column_layout();
+        let zero_inner = zero.clone().into_inner();
+        let n = 1usize << num_vars;
+        let down: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(uair_sig.shifts())
+            .map(|spec| {
+                let mut evals = trace_matrix[spec.source_col()][spec.shift_amount()..].to_vec();
+                evals.resize(n, zero_inner.clone());
+                DenseMultilinearExtension {
+                    evaluations: evals,
+                    num_vars,
+                }
+            })
             .collect();
 
         let eq_r = build_eq_x_r_inner(evaluation_point, field_cfg)?;
@@ -112,9 +122,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             powers(folding_challenge, one.clone(), num_constraints);
 
         let num_cols = trace_matrix.len();
-
+        let num_down_cols = down.len();
         let mles: Vec<DenseMultilinearExtension<F::Inner>> = {
-            let mut mles = Vec::with_capacity(2 * num_cols + 2);
+            let mut mles = Vec::with_capacity(2 + num_cols + num_down_cols);
 
             mles.push(last_row_selector);
             mles.push(eq_r);
@@ -125,7 +135,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             mles
         };
 
-        let sig = U::signature();
+        let up_layout = uair_sig.total_cols().as_column_layout();
 
         let (sumcheck_proof, sumcheck_prover_state) = MLSumcheck::prove_as_subprotocol(
             transcript,
@@ -149,8 +159,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
                 U::constrain_general(
                     &mut folder,
-                    TraceRow::from_slice_with_signature(&mle_values[2..num_cols + 2], &sig),
-                    TraceRow::from_slice_with_signature(&mle_values[num_cols + 2..], &sig),
+                    TraceRow::from_slice_with_layout(&mle_values[2..num_cols + 2], up_layout),
+                    TraceRow::from_slice_with_layout(&mle_values[num_cols + 2..], down_layout),
                     project,
                     |x, y| Some(project(y) * x),
                     ImpossibleIdeal::from_ref,
@@ -232,8 +242,10 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         F::Modulus: ConstTranscribable,
         U: Uair,
     {
-        let sig = U::signature();
-        proof.validate_evaluation_sizes(sig.total_cols())?;
+        let uair_sig = U::signature();
+        let down_layout = uair_sig.down_cols().as_column_layout();
+        proof
+            .validate_evaluation_sizes(uair_sig.total_cols().cols(), uair_sig.down_cols().cols())?;
 
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
@@ -308,8 +320,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         U::constrain_general(
             &mut folder,
-            TraceRow::from_slice_with_signature(&proof.up_evals, &sig),
-            TraceRow::from_slice_with_signature(&proof.down_evals, &sig),
+            TraceRow::from_slice_with_layout(
+                &proof.up_evals,
+                uair_sig.total_cols().as_column_layout(),
+            ),
+            TraceRow::from_slice_with_layout(&proof.down_evals, down_layout),
             project,
             |x, y| Some(project(y) * x),
             ImpossibleIdeal::from_ref,

@@ -309,11 +309,14 @@ mod tests {
         Field, crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
     };
     use rand::rng;
+    use zinc_piop::{
+        combined_poly_resolver::CombinedPolyResolverError, multipoint_eval::MultipointEvalError,
+    };
     use zinc_poly::univariate::{binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct};
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-        TestAirNoMultiplication, TestUairSimpleMultiplication,
+        TestAirNoMultiplication, TestUairMixedShifts, TestUairSimpleMultiplication,
     };
     use zinc_uair::{
         degree_counter::count_max_degree, ideal::degree_one::DegreeOneIdeal,
@@ -609,6 +612,20 @@ mod tests {
         );
     }
 
+    /// End-to-end test: TestUairMixedShifts.
+    ///
+    /// Uses mixed shift amounts (col a: shift 1, col b: shift 2).
+    /// Constraints: a[i+1] = a[i] + b[i], c[i] = b[i+2].
+    #[test]
+    fn test_e2e_mixed_shifts() {
+        do_test::<TestZincTypesIprs, TestUairMixedShifts<ZtInt>>(
+            8,
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
     /// End-to-end test: BinaryDecompositionUair.
     ///
     /// Uses binary_poly (1 col) and int (1 col) trace types.
@@ -655,7 +672,8 @@ mod tests {
     }
 
     //
-    // Negative tests for BigLinearUair: verify that proof tampering is detected.
+    // Negative tests for BigLinearUairWithPublicInput: verify that proof
+    // tampering is detected.
     //
 
     #[test]
@@ -665,7 +683,10 @@ mod tests {
             default_project_ideal!(),
             |proof| proof.witness_lifted_evals.swap(0, 1),
             |res| {
-                res.unwrap_err();
+                assert!(matches!(
+                    res.unwrap_err(),
+                    ProtocolError::MultipointEval(MultipointEvalError::ClaimMismatch { .. })
+                ));
             },
         );
     }
@@ -677,7 +698,12 @@ mod tests {
             default_project_ideal!(),
             |proof| proof.resolver.up_evals.swap(0, 1),
             |res| {
-                res.unwrap_err();
+                assert!(matches!(
+                    res.unwrap_err(),
+                    ProtocolError::Resolver(
+                        CombinedPolyResolverError::ClaimValueDoesNotMatch { .. }
+                    )
+                ));
             },
         );
     }
@@ -689,11 +715,19 @@ mod tests {
             default_project_ideal!(),
             |proof| proof.resolver.down_evals.swap(0, 1),
             |res| {
-                res.unwrap_err();
+                assert!(matches!(
+                    res.unwrap_err(),
+                    ProtocolError::Resolver(
+                        CombinedPolyResolverError::ClaimValueDoesNotMatch { .. }
+                    )
+                ));
             },
         );
     }
 
+    // Tampering the commitment root causes the verifier to sample different
+    // challenges. The ideal check fails first because the prover's
+    // combined_mle_values were computed under the original transcript.
     #[test]
     fn test_big_linear_tamper_commitment() {
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
@@ -701,7 +735,7 @@ mod tests {
             default_project_ideal!(),
             |proof| proof.commitments.0.root = Default::default(),
             |res| {
-                res.unwrap_err();
+                assert!(matches!(res.unwrap_err(), ProtocolError::IdealCheck(..)));
             },
         );
     }
@@ -713,7 +747,7 @@ mod tests {
             default_project_ideal!(),
             |proof| proof.ideal_check.combined_mle_values.swap(0, 1),
             |res| {
-                res.unwrap_err();
+                assert!(matches!(res.unwrap_err(), ProtocolError::IdealCheck(..)));
             },
         );
     }

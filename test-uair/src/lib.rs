@@ -19,7 +19,8 @@ use zinc_poly::{
     },
 };
 use zinc_uair::{
-    ConstraintBuilder, TraceRow, Uair, UairSignature, UairTrace,
+    ConstraintBuilder, PublicColumnLayout, ShiftSpec, TotalColumnLayout, TraceRow, Uair,
+    UairSignature, UairTrace,
     ideal::{ImpossibleIdeal, degree_one::DegreeOneIdeal},
 };
 use zinc_utils::from_ref::FromRef;
@@ -34,10 +35,9 @@ where
     type Scalar = DensePolynomial<R, 32>;
 
     fn signature() -> UairSignature {
-        UairSignature {
-            witness_arbitrary_poly_cols: 3,
-            ..Default::default()
-        }
+        let total = TotalColumnLayout::new(0, 3, 0);
+        let shifts = (0..3).map(|i| ShiftSpec::new(i, 1)).collect();
+        UairSignature::new(total, PublicColumnLayout::default(), shifts)
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -142,10 +142,8 @@ where
     type Scalar = DensePolynomial<R, 32>;
 
     fn signature() -> UairSignature {
-        UairSignature {
-            witness_arbitrary_poly_cols: 3,
-            ..Default::default()
-        }
+        let total = TotalColumnLayout::new(0, 3, 0);
+        UairSignature::new(total, PublicColumnLayout::default(), vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -217,10 +215,8 @@ where
     type Scalar = DensePolynomial<R, 32>;
 
     fn signature() -> UairSignature {
-        UairSignature {
-            witness_arbitrary_poly_cols: 3,
-            ..Default::default()
-        }
+        let total = TotalColumnLayout::new(0, 3, 0);
+        UairSignature::new(total, PublicColumnLayout::default(), vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -267,11 +263,8 @@ where
     type Scalar = DensePolynomial<R, 32>;
 
     fn signature() -> UairSignature {
-        UairSignature {
-            witness_binary_poly_cols: 1,
-            witness_int_cols: 1,
-            ..Default::default()
-        }
+        let total = TotalColumnLayout::new(1, 0, 1);
+        UairSignature::new(total, PublicColumnLayout::default(), vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -334,11 +327,9 @@ where
     type Scalar = DensePolynomial<R, 32>;
 
     fn signature() -> UairSignature {
-        UairSignature {
-            witness_binary_poly_cols: 16,
-            witness_int_cols: 1,
-            ..Default::default()
-        }
+        let total = TotalColumnLayout::new(16, 0, 1);
+        let shifts = (0..16).map(|i| ShiftSpec::new(i, 1)).collect();
+        UairSignature::new(total, PublicColumnLayout::default(), shifts)
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -448,14 +439,10 @@ where
     type Scalar = <BigLinearUair<R> as Uair>::Scalar;
 
     fn signature() -> UairSignature {
-        const NUM_PUBLIC_COLS: usize = 4;
-
-        let src_sig = BigLinearUair::<R>::signature();
-        UairSignature {
-            public_binary_poly_cols: NUM_PUBLIC_COLS,
-            witness_binary_poly_cols: src_sig.witness_binary_poly_cols - NUM_PUBLIC_COLS,
-            ..src_sig
-        }
+        let total = TotalColumnLayout::new(16, 0, 1);
+        let public = PublicColumnLayout::new(4, 0, 0);
+        let shifts = (0..16).map(|i| ShiftSpec::new(i, 1)).collect();
+        UairSignature::new(total, public, shifts)
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -490,6 +477,98 @@ where
     }
 }
 
+/// Test UAIR with mixed shift amounts.
+/// 3 columns (a, b, c): column a shifts by 1, column b shifts by 2.
+/// Constraints are linear (degree 1).
+pub struct TestUairMixedShifts<R>(PhantomData<R>);
+
+impl<R> Uair for TestUairMixedShifts<R>
+where
+    R: Semiring + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(0, 3, 0);
+        let shifts = vec![
+            ShiftSpec::new(0, 1), // a shifted by 1
+            ShiftSpec::new(1, 2), // b shifted by 2
+        ];
+        UairSignature::new(total, PublicColumnLayout::default(), shifts)
+    }
+
+    // Constraints:
+    //   a[i+1] = a[i] + b[i]  →  down[0] - up[0] - up[1] = 0
+    //   c[i]   = b[i+2]       →  up[2] - down[1] = 0
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        builder: &mut B,
+        up: TraceRow<B::Expr>,
+        down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        let up = up.arbitrary_poly;
+        let down = down.arbitrary_poly;
+
+        builder.assert_zero(down[0].clone() - &up[0] - &up[1]);
+        builder.assert_zero(up[2].clone() - &down[1]);
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for TestUairMixedShifts<R>
+where
+    R: FixedSemiring + From<i8> + 'static,
+    StandardUniform: Distribution<R>,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    // Witness: random b, derive a from a[i+1] = a[i] + b[i], set c[i] = b[i+2].
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let n = 1 << num_vars;
+
+        // Random b column (degree-0 polynomials to stay under degree 32)
+        let b_col: Vec<DynamicPolynomialFS<R>> = (0..n)
+            .map(|_| DynamicPolynomialFS::new(vec![R::from(rng.random::<i8>())]))
+            .collect();
+
+        // a[0] random, a[i+1] = a[i] + b[i]
+        let mut a_col: Vec<DynamicPolynomialFS<R>> =
+            vec![DynamicPolynomialFS::new(vec![R::from(rng.random::<i8>())])];
+        for i in 0..n - 1 {
+            a_col.push(a_col[i].clone() + &b_col[i]);
+        }
+
+        // c[i] = b[i+2], zero-padded for last 2 entries
+        let mut c_col: Vec<DynamicPolynomialFS<R>> = Vec::with_capacity(n);
+        for i in 0..n {
+            if i + 2 < n {
+                c_col.push(b_col[i + 2].clone());
+            } else {
+                c_col.push(DynamicPolynomialFS::zero());
+            }
+        }
+
+        let to_mle = |col: Vec<DynamicPolynomialFS<R>>| -> DenseMultilinearExtension<DensePolynomial<R, 32>> {
+            col.into_iter()
+                .map(|x| DensePolynomial::new(x.coeffs))
+                .collect()
+        };
+
+        UairTrace {
+            arbitrary_poly: vec![to_mle(a_col), to_mle(b_col), to_mle(c_col)].into(),
+            ..Default::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crypto_primitives::crypto_bigint_int::Int;
@@ -519,6 +598,7 @@ mod tests {
         assert_uair_shape::<TestAirScalarMultiplications<Int<LIMBS>>>(&[1]);
         assert_uair_shape::<BinaryDecompositionUair<u32>>(&[1]);
         assert_uair_shape::<BigLinearUair<u32>>(&[1; 17]);
+        assert_uair_shape::<TestUairMixedShifts<Int<LIMBS>>>(&[1, 1]);
     }
 
     #[test]

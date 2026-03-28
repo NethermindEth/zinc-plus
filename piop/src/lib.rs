@@ -3,6 +3,7 @@ pub mod ideal_check;
 pub mod multipoint_eval;
 pub mod projections;
 pub mod random_field_sumcheck;
+pub mod shift_predicate;
 pub mod sumcheck;
 #[cfg(test)]
 pub mod test_utils;

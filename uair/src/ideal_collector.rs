@@ -29,14 +29,12 @@ impl<I: Ideal> IdealCollector<I> {
 pub fn collect_ideals<U: Uair>(num_constraints: usize) -> IdealCollector<U::Ideal> {
     let mut ideal_collector = IdealCollector::new(num_constraints);
 
-    let dummy_up_and_down = vec![DummySemiring; U::signature().max_cols()];
-
-    let trace_row = TraceRow {
-        binary_poly: &dummy_up_and_down,
-        arbitrary_poly: &dummy_up_and_down,
-        int: &dummy_up_and_down,
-    };
-    U::constrain(&mut ideal_collector, trace_row, trace_row);
+    let sig = U::signature();
+    let (up_dummy, down_dummy) = sig.dummy_rows(DummySemiring);
+    let up_row = TraceRow::from_slice_with_layout(&up_dummy, sig.total_cols().as_column_layout());
+    let down_row =
+        TraceRow::from_slice_with_layout(&down_dummy, sig.down_cols().as_column_layout());
+    U::constrain(&mut ideal_collector, up_row, down_row);
 
     ideal_collector
 }

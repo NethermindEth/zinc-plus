@@ -14,7 +14,7 @@ use zinc_poly::{
     mle::DenseMultilinearExtension,
     univariate::{binary::BinaryPoly, dense::DensePolynomial},
 };
-use zinc_utils::{UNCHECKED, from_ref::FromRef, mul_by_scalar::MulByScalar};
+use zinc_utils::{UNCHECKED, add, from_ref::FromRef, mul_by_scalar::MulByScalar, sub};
 
 use crate::ideal::{Ideal, IdealCheck};
 
@@ -37,67 +37,267 @@ pub trait ConstraintBuilder {
     fn assert_zero(&mut self, expr: Self::Expr);
 }
 
-/// The signature of a UAIR.
-/// Contains the number of columns of
-/// each of the types: binary polynomials,
-/// polynomials with arbitrary coefficients,
-/// and integers.
+/// Specifies a shifted column
+/// `ShiftSpec { source_col: 0, shift_amount: 3 }` means
+/// "virtual column whose row i is the value of column 0 at row i+3
+/// (zero-padded beyond trace length)."
 ///
-/// Public columns precede witness columns within each type group.
-/// The flattened trace ordering is:
-/// `[pub_bin, wit_bin, pub_arb, wit_arb, pub_int, wit_int]`.
-#[derive(Default)]
-pub struct UairSignature {
-    /// Number of public columns with binary polynomial elements.
-    pub public_binary_poly_cols: usize,
-    /// Number of witness columns with binary polynomial elements.
-    pub witness_binary_poly_cols: usize,
-    /// Number of public columns with arbitrary polynomial elements.
-    pub public_arbitrary_poly_cols: usize,
-    /// Number of witness columns with arbitrary polynomial elements.
-    pub witness_arbitrary_poly_cols: usize,
-    /// Number of public columns with integers.
-    pub public_int_cols: usize,
-    /// Number of witness columns with integers.
-    pub witness_int_cols: usize,
+/// Multiple ShiftSpecs may reference the same source_col with
+/// different shift amounts.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ShiftSpec {
+    /// Index of the committed column in the flattened trace
+    /// (binary_poly || arbitrary_poly || int, same indexing as
+    /// TraceRow::from_slice_with_layout).
+    source_col: usize,
+    /// Number of rows to shift by.
+    shift_amount: usize,
 }
 
-#[allow(clippy::arithmetic_side_effects)]
-impl UairSignature {
-    pub fn total_binary_poly_cols(&self) -> usize {
-        self.public_binary_poly_cols + self.witness_binary_poly_cols
+impl ShiftSpec {
+    pub fn new(source_col: usize, shift_amount: usize) -> Self {
+        assert!(shift_amount > 0, "shift must be non-zero");
+        Self {
+            source_col,
+            shift_amount,
+        }
     }
 
-    pub fn total_arbitrary_poly_cols(&self) -> usize {
-        self.public_arbitrary_poly_cols + self.witness_arbitrary_poly_cols
+    pub fn source_col(&self) -> usize {
+        self.source_col
     }
 
-    pub fn total_int_cols(&self) -> usize {
-        self.public_int_cols + self.witness_int_cols
+    pub fn shift_amount(&self) -> usize {
+        self.shift_amount
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Column layout types
+// ---------------------------------------------------------------------------
+
+/// Column counts per type (binary_poly, arbitrary_poly, int).
+/// Shared internals for the semantic newtype wrappers (Total, Public, Virtual,
+/// Witness)
+#[derive(Clone, Debug, Default)]
+pub struct ColumnLayout {
+    num_binary_poly_cols: usize,
+    num_arbitrary_poly_cols: usize,
+    num_int_cols: usize,
+}
+
+impl ColumnLayout {
+    pub fn new(
+        num_binary_poly_cols: usize,
+        num_arbitrary_poly_cols: usize,
+        num_int_cols: usize,
+    ) -> Self {
+        Self {
+            num_binary_poly_cols,
+            num_arbitrary_poly_cols,
+            num_int_cols,
+        }
     }
 
-    pub fn total_public_cols(&self) -> usize {
-        self.public_binary_poly_cols + self.public_arbitrary_poly_cols + self.public_int_cols
+    pub fn num_binary_poly_cols(&self) -> usize {
+        self.num_binary_poly_cols
     }
 
-    /// Maximum number of columns across the three types (public + witness per
-    /// type).
+    pub fn num_arbitrary_poly_cols(&self) -> usize {
+        self.num_arbitrary_poly_cols
+    }
+
+    pub fn num_int_cols(&self) -> usize {
+        self.num_int_cols
+    }
+
+    /// Maximum number of columns across the three types.
     pub fn max_cols(&self) -> usize {
         [
-            self.total_binary_poly_cols(),
-            self.total_arbitrary_poly_cols(),
-            self.total_int_cols(),
+            self.num_binary_poly_cols,
+            self.num_arbitrary_poly_cols,
+            self.num_int_cols,
         ]
         .into_iter()
         .max()
         .expect("the iterator is not empty")
     }
 
-    /// The sum of the numbers of columns across all types (public + witness).
-    pub fn total_cols(&self) -> usize {
-        self.total_binary_poly_cols() + self.total_arbitrary_poly_cols() + self.total_int_cols()
+    /// The sum of the numbers of columns across all types.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn cols(&self) -> usize {
+        self.num_binary_poly_cols + self.num_arbitrary_poly_cols + self.num_int_cols
     }
 }
+
+macro_rules! column_layout_wrapper {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Clone, Debug, Default)]
+        pub struct $name(ColumnLayout);
+
+        impl $name {
+            pub fn new(num_binary_poly_cols: usize, num_arbitrary_poly_cols: usize, num_int_cols: usize) -> Self {
+                Self(ColumnLayout::new(num_binary_poly_cols, num_arbitrary_poly_cols, num_int_cols))
+            }
+
+            pub fn num_binary_poly_cols(&self) -> usize { self.0.num_binary_poly_cols() }
+            pub fn num_arbitrary_poly_cols(&self) -> usize { self.0.num_arbitrary_poly_cols() }
+            pub fn num_int_cols(&self) -> usize { self.0.num_int_cols() }
+            pub fn max_cols(&self) -> usize { self.0.max_cols() }
+            pub fn cols(&self) -> usize { self.0.cols() }
+            pub fn as_column_layout(&self) -> &ColumnLayout { &self.0 }
+        }
+    };
+}
+
+column_layout_wrapper!(/// Layout of all trace columns (public + witness) per type.
+    TotalColumnLayout);
+column_layout_wrapper!(/// Layout of the public column subset.
+    PublicColumnLayout);
+column_layout_wrapper!(/// Layout of the virtual (shifted/down) columns.
+    VirtualColumnLayout);
+column_layout_wrapper!(/// Layout of the witness (total minus public) columns.
+    WitnessColumnLayout);
+
+// ---------------------------------------------------------------------------
+// UairSignature
+// ---------------------------------------------------------------------------
+
+/// The signature of a UAIR.
+///
+/// Public columns precede witness columns within each type group.
+/// The flattened trace ordering is:
+/// `[pub_bin, wit_bin, pub_arb, wit_arb, pub_int, wit_int]`.
+pub struct UairSignature {
+    /// Column-type layout of all (public + witness) columns.
+    total_cols: TotalColumnLayout,
+    /// Public column subset.
+    public_cols: PublicColumnLayout,
+    /// Witness column counts (total minus public) per type.
+    witness_cols: WitnessColumnLayout,
+    /// Shifted columns info sorted by `source_col`.
+    shifts: Vec<ShiftSpec>,
+    /// Column-type layout of the shifted (down) row.
+    down_cols: VirtualColumnLayout,
+}
+
+impl UairSignature {
+    /// Create a new signature, sorting `shifts` by `source_col`.
+    pub fn new(
+        total_cols: TotalColumnLayout,
+        public_cols: PublicColumnLayout,
+        mut shifts: Vec<ShiftSpec>,
+    ) -> Self {
+        for (name, pub_n, tot_n) in [
+            (
+                "binary_poly",
+                public_cols.num_binary_poly_cols(),
+                total_cols.num_binary_poly_cols(),
+            ),
+            (
+                "arbitrary_poly",
+                public_cols.num_arbitrary_poly_cols(),
+                total_cols.num_arbitrary_poly_cols(),
+            ),
+            ("int", public_cols.num_int_cols(), total_cols.num_int_cols()),
+        ] {
+            assert!(
+                pub_n <= tot_n,
+                "public {name}_cols ({pub_n}) > total ({tot_n})"
+            );
+        }
+
+        let num_cols = total_cols.cols();
+        for spec in &shifts {
+            assert!(
+                spec.source_col() < num_cols,
+                "ShiftSpec source_col {} out of range (total_cols = {}). \
+                 source_col uses flat indexing: binary_poly || arbitrary_poly || int.",
+                spec.source_col(),
+                num_cols,
+            );
+        }
+
+        shifts.sort_by_key(|spec| spec.source_col());
+        let down_cols = Self::compute_down_layout(&total_cols, &shifts);
+        let witness_cols = WitnessColumnLayout::new(
+            sub!(
+                total_cols.num_binary_poly_cols(),
+                public_cols.num_binary_poly_cols()
+            ),
+            sub!(
+                total_cols.num_arbitrary_poly_cols(),
+                public_cols.num_arbitrary_poly_cols()
+            ),
+            sub!(total_cols.num_int_cols(), public_cols.num_int_cols()),
+        );
+
+        Self {
+            total_cols,
+            public_cols,
+            shifts,
+            down_cols,
+            witness_cols,
+        }
+    }
+
+    fn compute_down_layout(
+        total_cols: &TotalColumnLayout,
+        shifts: &[ShiftSpec],
+    ) -> VirtualColumnLayout {
+        let binary_poly_end = total_cols.num_binary_poly_cols();
+        let arbitrary_poly_end = add!(binary_poly_end, total_cols.num_arbitrary_poly_cols());
+        let mut num_binary_poly = 0usize;
+        let mut num_arbitrary_poly = 0usize;
+        let mut num_int = 0usize;
+        for spec in shifts {
+            if spec.source_col() < binary_poly_end {
+                num_binary_poly = add!(num_binary_poly, 1);
+            } else if spec.source_col() < arbitrary_poly_end {
+                num_arbitrary_poly = add!(num_arbitrary_poly, 1);
+            } else {
+                num_int = add!(num_int, 1);
+            }
+        }
+        VirtualColumnLayout::new(num_binary_poly, num_arbitrary_poly, num_int)
+    }
+
+    pub fn total_cols(&self) -> &TotalColumnLayout {
+        &self.total_cols
+    }
+
+    pub fn public_cols(&self) -> &PublicColumnLayout {
+        &self.public_cols
+    }
+
+    /// Witness column counts (total minus public) per type.
+    pub fn witness_cols(&self) -> &WitnessColumnLayout {
+        &self.witness_cols
+    }
+
+    pub fn shifts(&self) -> &[ShiftSpec] {
+        &self.shifts
+    }
+
+    /// Column-type layout of the shifted (down) row.
+    pub fn down_cols(&self) -> &VirtualColumnLayout {
+        &self.down_cols
+    }
+
+    /// Build correctly-sized dummy up and down `TraceRow`s for static
+    /// analysis (constraint counting, degree counting, scalar/ideal
+    /// collection).
+    pub fn dummy_rows<T: Clone>(&self, val: T) -> (Vec<T>, Vec<T>) {
+        let up_size = self.total_cols.cols();
+        let down_size = self.down_cols.cols();
+        (vec![val.clone(); up_size], vec![val; down_size])
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UairTrace
+// ---------------------------------------------------------------------------
 
 /// The trace of a UAIR execution (pre-projection).
 /// If owned, it contains the full trace, otherwise it contains a view on the
@@ -113,23 +313,29 @@ impl<PolyCoeff: Clone, Int: Clone, const D: usize> UairTrace<'static, PolyCoeff,
     /// Returns a sub-trace containing only public columns.
     /// Returned trace is borrowed from the full trace.
     pub fn public(&self, sig: &UairSignature) -> UairTrace<'_, PolyCoeff, Int, D> {
+        let p = sig.public_cols();
         UairTrace {
-            binary_poly: Cow::Borrowed(&self.binary_poly[0..sig.public_binary_poly_cols]),
-            arbitrary_poly: Cow::Borrowed(&self.arbitrary_poly[0..sig.public_arbitrary_poly_cols]),
-            int: Cow::Borrowed(&self.int[0..sig.public_int_cols]),
+            binary_poly: Cow::Borrowed(&self.binary_poly[0..p.num_binary_poly_cols()]),
+            arbitrary_poly: Cow::Borrowed(&self.arbitrary_poly[0..p.num_arbitrary_poly_cols()]),
+            int: Cow::Borrowed(&self.int[0..p.num_int_cols()]),
         }
     }
 
     /// Returns a sub-trace containing only witness columns.
     /// Returned trace is borrowed from the full trace.
     pub fn witness(&self, sig: &UairSignature) -> UairTrace<'_, PolyCoeff, Int, D> {
+        let p = sig.public_cols();
         UairTrace {
-            binary_poly: Cow::Borrowed(&self.binary_poly[sig.public_binary_poly_cols..]),
-            arbitrary_poly: Cow::Borrowed(&self.arbitrary_poly[sig.public_arbitrary_poly_cols..]),
-            int: Cow::Borrowed(&self.int[sig.public_int_cols..]),
+            binary_poly: Cow::Borrowed(&self.binary_poly[p.num_binary_poly_cols()..]),
+            arbitrary_poly: Cow::Borrowed(&self.arbitrary_poly[p.num_arbitrary_poly_cols()..]),
+            int: Cow::Borrowed(&self.int[p.num_int_cols()..]),
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// TraceRow
+// ---------------------------------------------------------------------------
 
 /// A view on a row of the trace.
 /// Contains references to cells of the trace
@@ -144,18 +350,22 @@ pub struct TraceRow<'a, Expr> {
 impl<'a, Expr> TraceRow<'a, Expr> {
     /// Given a slice that represents a raw row of the trace,
     /// creates a `TraceRow` from it.
-    /// Subdivides the slice according to the given signature `signature`.
+    /// Subdivides the slice according to the given column layout.
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn from_slice_with_signature(row: &'a [Expr], signature: &UairSignature) -> Self {
-        let nb = signature.total_binary_poly_cols();
-        let na = signature.total_arbitrary_poly_cols();
+    pub fn from_slice_with_layout(row: &'a [Expr], layout: &ColumnLayout) -> Self {
+        let num_binary_poly = layout.num_binary_poly_cols();
+        let num_arbitrary_poly = layout.num_arbitrary_poly_cols();
         Self {
-            binary_poly: &row[0..nb],
-            arbitrary_poly: &row[nb..nb + na],
-            int: &row[nb + na..],
+            binary_poly: &row[0..num_binary_poly],
+            arbitrary_poly: &row[num_binary_poly..num_binary_poly + num_arbitrary_poly],
+            int: &row[num_binary_poly + num_arbitrary_poly..],
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Uair trait
+// ---------------------------------------------------------------------------
 
 /// The trait that a universal AIR description has to implement.
 /// This must include all the constraint description logic of an UAIR.
@@ -180,6 +390,11 @@ pub trait Uair {
     type Scalar: Semiring;
 
     /// Signature of the UAIR.
+    ///
+    /// TODO: Consider caching the signature to avoid recomputing it at every
+    /// call site. Currently negligible since shifts are small (e.g. ~12 for
+    /// SHA/ECDSA), but may matter if signatures grow more expensive to
+    /// construct.
     fn signature() -> UairSignature;
 
     /// A general method for describing constraints.
@@ -190,9 +405,10 @@ pub trait Uair {
     ///   must implement `FromRef<Self::Ideal>` trait.
     /// - `up`: a `TraceRow` of expressions representing the current row of
     ///   UAIR.
-    /// - `down`: a `TraceRow` of expressions representing the next row of UAIR.
-    ///   It is safe to assume all the members have the same lengths as
-    ///   corresponding members of `up`.
+    /// - `down`: a `TraceRow` of expressions representing the shifted (down)
+    ///   row of the UAIR. Its layout matches `UairSignature::down()`, which may
+    ///   have fewer columns than `up` when only a subset of columns are
+    ///   shifted.
     /// - `from_ref`: a closure that turns the underlying ring `R` into
     ///   `B::Expr`. Sometimes (e.g. when dealing with random fields) it is
     ///   convenient to provide a closure instead of a `FromRef` implementation.

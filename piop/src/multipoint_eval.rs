@@ -10,13 +10,14 @@
 //! the prover works with only 3 MLEs (`eq`, `next`, `precombined`) regardless
 //! of the number of columns. The sumcheck proves:
 //! ```text
-//! \sum_b [eq(b, r') + \alpha * next(r', b)] * precombined(b)
-//!   = \sum_j \gamma_j * (up_eval_j + \alpha * down_eval_j)
+//! \sum_b [eq(b, r') * \sum_j \gamma_j * v_j(b)
+//!         + \sum_k \alpha_k * next_{c_k}(r', b) * v_{src_k}(b)]
+//!   = \sum_j \gamma_j * up_eval_j + \sum_k \alpha_k * down_eval_k
 //! ```
 //!
-//! where `\alpha` batches the two evaluation kernels and `\gamma_j` batch
-//! across columns. After the sumcheck reduces to point `r_0`, the verifier
-//! calls [`MultipointEval::verify_subclaim`] with the `open_evals`
+//! where `\alpha_k` batch the per-shift evaluation kernels and `\gamma_j`
+//! batch across columns. After the sumcheck reduces to point `r_0`, the
+//! verifier calls [`MultipointEval::verify_subclaim`] with the `open_evals`
 //! (the F_q-valued MLE evaluations at `r_0`, typically derived from
 //! polynomial-valued `lifted_evals` via `\psi_a`) to check the final
 //! consistency equation.
@@ -26,17 +27,23 @@
 //! (alpha'_j in F_q[X]); the scalar open_evals are derived by the verifier
 //! via \psi_a rather than being sent as a separate proof element.
 
-use std::marker::PhantomData;
-
-use crate::sumcheck::{
-    MLSumcheck, SumCheckError, SumcheckProof, verifier::Subclaim as SumcheckSubclaim,
+use crate::{
+    shift_predicate::eval_shift_predicate,
+    sumcheck::{MLSumcheck, SumCheckError, SumcheckProof, verifier::Subclaim as SumcheckSubclaim},
 };
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use num_traits::Zero;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+use std::marker::PhantomData;
 use thiserror::Error;
-use zinc_poly::{mle::DenseMultilinearExtension, utils::ArithErrors};
+use zinc_poly::{
+    mle::DenseMultilinearExtension,
+    utils::{ArithErrors, build_eq_x_r_inner, build_next_c_r_mle},
+};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_utils::inner_transparent_field::InnerTransparentField;
+use zinc_uair::ShiftSpec;
+use zinc_utils::{cfg_into_iter, inner_transparent_field::InnerTransparentField};
 
 //
 // Data structures
@@ -61,7 +68,7 @@ pub struct ProverState<F: PrimeField> {
 
 /// Verifier subclaim after the multi-point evaluation sumcheck.
 ///
-/// Carries the inner sumcheck [`Subclaim`] plus the intermediate values
+/// Carries the inner sumcheck [`SumcheckSubclaim`] plus the intermediate values
 /// needed to finalize the check via [`MultipointEval::verify_subclaim`]
 /// once the caller has assembled the `open_evals` (e.g. after computing
 /// public lifted evaluations from public data at `r_0`).
@@ -69,12 +76,17 @@ pub struct ProverState<F: PrimeField> {
 pub struct Subclaim<F: PrimeField> {
     /// Inner sumcheck subclaim. Its `point` field is `r_0`; its
     /// `expected_evaluation` is the value that `verify_subclaim` checks
-    /// against `selector_at_r0 * batched(open_evals)`.
+    /// against the batched open_evals.
     pub sumcheck_subclaim: SumcheckSubclaim<F>,
     /// Column batching coefficients \gamma_j sampled during the protocol.
     pub gammas: Vec<F>,
-    /// Combined selector value at r_0: `eq(r_0, r') + \alpha * next(r', r_0)`.
-    pub selector_at_r0: F,
+    /// Per-shift batching coefficients \alpha_k sampled during the protocol.
+    pub alphas: Vec<F>,
+    /// `eq(r_0, r')` — the equality selector at the sumcheck output point.
+    pub eq_at_r0: F,
+    /// Per-shift selector values at r_0:
+    /// `shifts_at_r0[k] = next_{c_k}(r', r_0)`.
+    pub shifts_at_r0: Vec<F>,
 }
 
 //
@@ -92,10 +104,10 @@ where
     /// Multi-point evaluation protocol prover.
     ///
     /// Runs the combined sumcheck over
-    /// `[eq(b, r') + \alpha * next(r', b)] * \sum_j(\gamma_j * v_j(b))`.
-    /// Returns only the sumcheck proof and
-    /// the challenge point `r_0`; the caller is responsible for computing
-    /// and sending `lifted_evals` at `r_0`.
+    /// `eq(b, r') * \sum_j(\gamma_j * v_j(b)) + \sum_k \alpha_k *
+    /// next_{c_k}(r', b) * v_{src_k}(b)`. Returns only the sumcheck proof
+    /// and the challenge point `r_0`; the caller is responsible for
+    /// computing and sending `lifted_evals` at `r_0`.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn prove_as_subprotocol(
         transcript: &mut impl Transcript,
@@ -103,27 +115,38 @@ where
         eval_point: &[F],
         up_evals: &[F],
         down_evals: &[F],
+        shifts: &[ShiftSpec],
         field_cfg: &F::Config,
     ) -> Result<(Proof<F>, ProverState<F>), MultipointEvalError<F>> {
         let num_cols = trace_mles.len();
+        let num_down_cols = shifts.len();
         let num_vars = eval_point.len();
         let zero = F::zero_with_cfg(field_cfg);
         let zero_inner = zero.inner();
 
         // Step 1: Sample multi-point batching coefficient \alpha and column
         // batching coefficients \gamma_1,...,\gamma_J.
-        let alpha: F = transcript.get_field_challenge(field_cfg);
+        let alphas: Vec<F> = transcript.get_field_challenges(num_down_cols, field_cfg);
         let gammas: Vec<F> = transcript.get_field_challenges(num_cols, field_cfg);
 
         // Step 2: Build the two selector MLEs:
         //   eq_r(b)   = eq(b, r')
-        //   next_r(b) = next_tilde(r', b)
-        let eq_r = zinc_poly::utils::build_eq_x_r_inner(eval_point, field_cfg)?;
-        let next_r = zinc_poly::utils::build_next_r_mle(eval_point, field_cfg)?;
+        //   next_c_r_mle(b) = next_c_mle(r', b)
+        let eq_r = build_eq_x_r_inner(eval_point, field_cfg)?;
+        let (next_mles, down_cols): (Vec<_>, Vec<_>) = shifts
+            .iter()
+            .map(|spec| {
+                let next = build_next_c_r_mle(eval_point, spec.shift_amount(), field_cfg)?;
+                let col = trace_mles[spec.source_col()].clone();
+                Ok((next, col))
+            })
+            .collect::<Result<Vec<_>, ArithErrors>>()?
+            .into_iter()
+            .unzip();
 
         // Precombine up cols with gammas, precombined[b] = Σ_j γ_j trace[j][b]
         let precombined = {
-            let evaluations = (0..1 << num_vars)
+            let evaluations: Vec<_> = cfg_into_iter!(0..1 << num_vars)
                 .map(|b| {
                     gammas
                         .iter()
@@ -145,13 +168,17 @@ where
             )
         };
 
-        // Step 3: Pack MLEs: [eq_r, next_r, precombined]
-        let mles = vec![eq_r, next_r, precombined];
+        // Step 3: Pack MLEs: [eq_r, next_mles[..], precombined, down_cols[..]]
+        let mut mles = Vec::with_capacity(2 + 2 * num_down_cols);
+        mles.push(eq_r);
+        mles.extend(next_mles);
+        mles.push(precombined);
+        mles.extend(down_cols);
 
         // Step 4: Run sumcheck with degree=2.
 
-        // comb_fn([eq_r, next_r, precombined]) =
-        //     (eq_r + \alpha * next_r) * precombined
+        // comb_fn([eq_r, next_mles[..], precombined, down_cols[..]]) =
+        //     eq_r * precombined + \alphas[i] * next_mle[i] * down_cols[i]
         let (sumcheck_proof, sumcheck_prover_state) = MLSumcheck::prove_as_subprotocol(
             transcript,
             mles,
@@ -159,9 +186,15 @@ where
             2,
             |mle_values: &[F]| {
                 let eq_val = &mle_values[0];
-                let next_val = &mle_values[1];
-                let selector = eq_val.clone() + alpha.clone() * next_val;
-                selector * &mle_values[2]
+                let precombined = &mle_values[num_down_cols + 1];
+                alphas
+                    .iter()
+                    .enumerate()
+                    .fold(eq_val.clone() * precombined, |acc, (i, alpha)| {
+                        let next = &mle_values[1 + i];
+                        let down_col = &mle_values[num_down_cols + 2 + i];
+                        acc + alpha.clone() * next * down_col
+                    })
             },
             field_cfg,
         );
@@ -169,7 +202,7 @@ where
         // Sanity check
         debug_assert_eq!(
             sumcheck_proof.claimed_sum,
-            compute_expected_sum(up_evals, down_evals, &gammas, &alpha, zero)
+            compute_expected_sum(up_evals, down_evals, &gammas, &alphas, zero)
         );
 
         Ok((
@@ -184,31 +217,33 @@ where
     ///
     /// Runs the sumcheck verification and computes the intermediate values
     /// needed for the open-eval consistency check. Returns a [`Subclaim`]
-    /// carrying `r_0`, `gammas`, `selector_at_r0`, and
-    /// `expected_evaluation`. The caller finalizes via
+    /// carrying `r_0`, `gammas`, `alphas`, `eq_at_r0`, and
+    /// `shifts_at_r0`. The caller finalizes via
     /// [`verify_subclaim`](Self::verify_subclaim) once `open_evals` are
     /// available.
-    #[allow(clippy::arithmetic_side_effects)]
+    #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
     pub fn verify_as_subprotocol(
         transcript: &mut impl Transcript,
         proof: Proof<F>,
         eval_point: &[F],
         up_evals: &[F],
         down_evals: &[F],
+        shifts: &[ShiftSpec],
         num_vars: usize,
         field_cfg: &F::Config,
     ) -> Result<Subclaim<F>, MultipointEvalError<F>> {
         let num_cols = up_evals.len();
+        let num_down_cols = shifts.len();
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
 
-        // Step 1: Sample \alpha and \gamma_j (must match prover).
-        let alpha: F = transcript.get_field_challenge(field_cfg);
+        // Step 1: Sample \alpha_k and \gamma_j (must match prover).
+        let alphas: Vec<F> = transcript.get_field_challenges(num_down_cols, field_cfg);
         let gammas: Vec<F> = transcript.get_field_challenges(num_cols, field_cfg);
 
         // Step 2: Compute expected sum
         let expected_sum: F =
-            compute_expected_sum(up_evals, down_evals, &gammas, &alpha, zero.clone());
+            compute_expected_sum(up_evals, down_evals, &gammas, &alphas, zero.clone());
 
         if proof.sumcheck_proof.claimed_sum != expected_sum {
             return Err(MultipointEvalError::WrongSumcheckSum {
@@ -228,33 +263,34 @@ where
 
         let r_0 = &sumcheck_subclaim.point;
 
-        // Step 4: Recompute the combined selector at r_0.
-        //   selector(r_0) = eq(r_0, r') + \alpha * next(r', r_0)
-        let eq_at_r0 = zinc_poly::utils::eq_eval(r_0, eval_point, one.clone())?;
-
-        let mut r_prime_r0 = Vec::with_capacity(2 * num_vars);
-        r_prime_r0.extend_from_slice(eval_point);
-        r_prime_r0.extend_from_slice(r_0);
-        let next_at_r0 = zinc_poly::utils::next_mle_eval(&r_prime_r0, zero, one);
-
-        let selector_at_r0 = eq_at_r0 + alpha * &next_at_r0;
+        // Step 4: Recompute the selectors at r_0.
+        let eq_at_r0 = zinc_poly::utils::eq_eval(r_0, eval_point, one)?;
+        let shifts_at_r0: Vec<F> = shifts
+            .iter()
+            .map(|spec| eval_shift_predicate(eval_point, r_0, spec.shift_amount(), field_cfg))
+            .collect();
 
         Ok(Subclaim {
             sumcheck_subclaim,
             gammas,
-            selector_at_r0,
+            alphas,
+            eq_at_r0,
+            shifts_at_r0,
         })
     }
 
     /// Finalize the multi-point evaluation check given `open_evals`.
     ///
-    /// Verifies that `selector_at_r0 * \sum_j(gamma_j * open_eval_j)`
-    /// equals the sumcheck's expected evaluation. This is a pure arithmetic
-    /// check with no transcript interaction.
+    /// Verifies that
+    /// `eq_at_r0 * \sum_j(gamma_j * open_eval_j) + \sum_k(alpha_k *
+    /// shift_at_r0_k * open_eval[source_col_k])` equals the sumcheck's
+    /// expected evaluation. This is a pure arithmetic check with no
+    /// transcript interaction.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn verify_subclaim(
         subclaim: &Subclaim<F>,
         open_evals: &[F],
+        shifts: &[ShiftSpec],
         field_cfg: &F::Config,
     ) -> Result<(), MultipointEvalError<F>> {
         let num_cols = subclaim.gammas.len();
@@ -267,13 +303,29 @@ where
         }
 
         let zero = F::zero_with_cfg(field_cfg);
-        let batched_eval: F = subclaim
+
+        let batched_up: F = subclaim
             .gammas
             .iter()
             .zip(open_evals.iter())
-            .fold(zero, |acc, (g, v)| acc + g.clone() * v);
+            .fold(zero.clone(), |acc, (gamma, eval)| {
+                acc + gamma.clone() * eval
+            });
 
-        let expected_evaluation = subclaim.selector_at_r0.clone() * &batched_eval;
+        // open_evals[j] = trace_col_j(r_0) for all committed (up) columns.
+        // Shifted columns reuse the same opening: the shift is captured by
+        // the shift_at_r0 selector, so we index by source_col into open_evals.
+        let batched_down: F = subclaim
+            .alphas
+            .iter()
+            .enumerate()
+            .zip(subclaim.shifts_at_r0.iter())
+            .fold(zero, |acc, ((k, alpha), shift_at_r0)| {
+                let src_col = shifts[k].source_col();
+                acc + alpha.clone() * shift_at_r0 * &open_evals[src_col]
+            });
+
+        let expected_evaluation = subclaim.eq_at_r0.clone() * &batched_up + batched_down;
 
         if expected_evaluation != subclaim.sumcheck_subclaim.expected_evaluation {
             return Err(MultipointEvalError::ClaimMismatch {
@@ -286,20 +338,24 @@ where
     }
 }
 
-/// `expected_sum = \sum_j \gamma_j * (up_eval_j + \alpha * down_eval_j)`
+/// `expected_sum = \sum_j \gamma_j * up_eval_j + \sum_k \alpha_k *
+/// down_eval_k`
 fn compute_expected_sum<F: PrimeField>(
     up_evals: &[F],
     down_evals: &[F],
     gammas: &[F],
-    alpha: &F,
+    alphas: &[F],
     zero: F,
 ) -> F {
-    gammas
+    let up_sum = gammas
         .iter()
-        .zip(up_evals.iter().zip(down_evals.iter()))
-        .fold(zero, |acc, (gamma, (up, down))| {
-            acc + gamma.clone() * &(up.clone() + alpha.clone() * down)
-        })
+        .zip(up_evals.iter())
+        .fold(zero, |acc, (gamma, up)| acc + gamma.clone() * up);
+
+    alphas
+        .iter()
+        .zip(down_evals.iter())
+        .fold(up_sum, |acc, (alpha, down)| acc + alpha.clone() * down)
 }
 
 //
@@ -341,10 +397,11 @@ mod tests {
 
     /// Data known to both prover and verifier from earlier protocol steps.
     #[derive(Clone)]
-    struct PublicInput {
+    struct SharedSubprotocolInput {
         eval_point: Vec<F>,
         up_evals: Vec<F>,
         down_evals: Vec<F>,
+        shifts: Vec<ShiftSpec>,
         num_vars: usize,
     }
 
@@ -364,9 +421,10 @@ mod tests {
     fn build_trace(
         num_vars: usize,
         num_cols: usize,
+        shifts: &[ShiftSpec],
     ) -> (
         Vec<DenseMultilinearExtension<<F as crypto_primitives::Field>::Inner>>,
-        PublicInput,
+        SharedSubprotocolInput,
     ) {
         let n = 1usize << num_vars;
         let zero_inner = F::ZERO.into_inner();
@@ -387,21 +445,24 @@ mod tests {
             .map(|mle| mle.clone().evaluate_with_config(&eval_point, &()).unwrap())
             .collect();
 
-        let down_evals: Vec<F> = trace_mles
+        let down_evals: Vec<F> = shifts
             .iter()
-            .map(|mle| {
-                let mut shifted = mle.evaluations[1..].to_vec();
-                shifted.push(zero_inner);
+            .map(|spec| {
+                let mle = &trace_mles[spec.source_col()];
+                let c = spec.shift_amount();
+                let mut shifted = mle.evaluations[c..].to_vec();
+                shifted.extend(vec![zero_inner; c]);
                 let shifted_mle =
                     DenseMultilinearExtension::from_evaluations_vec(num_vars, shifted, zero_inner);
                 shifted_mle.evaluate_with_config(&eval_point, &()).unwrap()
             })
             .collect();
 
-        let public = PublicInput {
+        let public = SharedSubprotocolInput {
             eval_point,
             up_evals,
             down_evals,
+            shifts: shifts.to_vec(),
             num_vars,
         };
         (trace_mles, public)
@@ -410,7 +471,7 @@ mod tests {
     /// Prover: has access to the trace, produces a proof and open_evals.
     fn run_prover(
         trace_mles: &[DenseMultilinearExtension<<F as crypto_primitives::Field>::Inner>],
-        public: &PublicInput,
+        public: &SharedSubprotocolInput,
     ) -> ProverMessage {
         let mut transcript = make_transcript();
         let (proof, prover_state) = MultipointEval::<F>::prove_as_subprotocol(
@@ -419,6 +480,7 @@ mod tests {
             &public.eval_point,
             &public.up_evals,
             &public.down_evals,
+            &public.shifts,
             &(),
         )
         .expect("prover should succeed");
@@ -434,7 +496,7 @@ mod tests {
 
     /// Verifier: only receives the proof + open_evals + public data.
     fn run_verifier(
-        public: &PublicInput,
+        public: &SharedSubprotocolInput,
         msg: &ProverMessage,
     ) -> Result<Subclaim<F>, MultipointEvalError<F>> {
         let subclaim = MultipointEval::<F>::verify_as_subprotocol(
@@ -443,48 +505,100 @@ mod tests {
             &public.eval_point,
             &public.up_evals,
             &public.down_evals,
+            &public.shifts,
             public.num_vars,
             &(),
         )?;
 
-        MultipointEval::<F>::verify_subclaim(&subclaim, &msg.open_evals, &())?;
+        MultipointEval::<F>::verify_subclaim(&subclaim, &msg.open_evals, &public.shifts, &())?;
 
         Ok(subclaim)
     }
 
     /// Convenience: build trace, prove, return (public, message).
-    fn honest_interaction(num_vars: usize, num_cols: usize) -> (PublicInput, ProverMessage) {
-        let (trace, public) = build_trace(num_vars, num_cols);
+    fn honest_interaction(
+        num_vars: usize,
+        num_cols: usize,
+        shifts: &[ShiftSpec],
+    ) -> (SharedSubprotocolInput, ProverMessage) {
+        let (trace, public) = build_trace(num_vars, num_cols, shifts);
         let msg = run_prover(&trace, &public);
         (public, msg)
+    }
+
+    /// Helper: all-columns shift-by-1
+    fn all_shift_by_1(num_cols: usize) -> Vec<ShiftSpec> {
+        (0..num_cols).map(|i| ShiftSpec::new(i, 1)).collect()
     }
 
     // --- Happy-path ---
 
     #[test]
-    fn honest_prove_verify_multi_column() {
-        let (public, msg) = honest_interaction(3, 3);
-        let subclaim = run_verifier(&public, &msg).unwrap();
-        assert_eq!(subclaim.sumcheck_subclaim.point.len(), public.num_vars);
-    }
-
-    #[test]
     fn honest_prove_verify_single_column() {
-        let (public, msg) = honest_interaction(4, 1);
+        let shifts = all_shift_by_1(1);
+        let (public, msg) = honest_interaction(4, 1, &shifts);
         run_verifier(&public, &msg).unwrap();
     }
 
     #[test]
     fn honest_prove_verify_many_columns() {
-        let (public, msg) = honest_interaction(3, 10);
+        let shifts = all_shift_by_1(10);
+        let (public, msg) = honest_interaction(3, 10, &shifts);
         run_verifier(&public, &msg).unwrap();
+    }
+
+    #[test]
+    fn honest_prove_verify_no_shifts() {
+        let (public, msg) = honest_interaction(3, 3, &[]);
+        run_verifier(&public, &msg).unwrap();
+    }
+
+    #[test]
+    fn honest_prove_verify_mixed_shifts() {
+        let shifts = vec![ShiftSpec::new(0, 1), ShiftSpec::new(1, 3)];
+        let (public, msg) = honest_interaction(4, 3, &shifts);
+        run_verifier(&public, &msg).unwrap();
+    }
+
+    #[test]
+    fn honest_prove_verify_shift_by_3() {
+        let shifts = vec![
+            ShiftSpec::new(0, 3),
+            ShiftSpec::new(1, 3),
+            ShiftSpec::new(2, 3),
+        ];
+        let (public, msg) = honest_interaction(4, 3, &shifts);
+        run_verifier(&public, &msg).unwrap();
+    }
+
+    #[test]
+    fn honest_prove_verify_same_col_different_shifts() {
+        // Column 0 shifted by 2 and by 5
+        let shifts = vec![ShiftSpec::new(0, 2), ShiftSpec::new(0, 5)];
+        let (public, msg) = honest_interaction(4, 3, &shifts);
+        run_verifier(&public, &msg).unwrap();
+    }
+
+    // --- Failure: corrupted down_evals with mixed shifts ---
+
+    #[test]
+    fn bad_down_eval_rejected_mixed_shifts() {
+        let shifts = vec![ShiftSpec::new(0, 1), ShiftSpec::new(1, 3)];
+        let (mut public, msg) = honest_interaction(4, 3, &shifts);
+        public.down_evals[0] += F::ONE;
+        let err = run_verifier(&public, &msg).unwrap_err();
+        assert!(
+            matches!(err, MultipointEvalError::WrongSumcheckSum { .. }),
+            "expected WrongSumcheckSum, got {err:?}",
+        );
     }
 
     // --- Failure: wrong number of open_evals ---
 
     #[test]
     fn wrong_open_evals_count() {
-        let (public, msg) = honest_interaction(3, 3);
+        let shifts = all_shift_by_1(3);
+        let (public, msg) = honest_interaction(3, 3, &shifts);
 
         let mut msg_short = msg.clone();
         msg_short.open_evals.pop();
@@ -508,7 +622,8 @@ mod tests {
 
     #[test]
     fn wrong_claimed_sum_via_corrupted_up_evals() {
-        let (mut public, msg) = honest_interaction(3, 3);
+        let shifts = all_shift_by_1(3);
+        let (mut public, msg) = honest_interaction(3, 3, &shifts);
         public.up_evals[0] += F::ONE;
         let err = run_verifier(&public, &msg).unwrap_err();
         assert!(
@@ -519,7 +634,8 @@ mod tests {
 
     #[test]
     fn wrong_claimed_sum_via_corrupted_down_evals() {
-        let (mut public, msg) = honest_interaction(3, 3);
+        let shifts = all_shift_by_1(3);
+        let (mut public, msg) = honest_interaction(3, 3, &shifts);
         public.down_evals[1] += F::ONE;
         let err = run_verifier(&public, &msg).unwrap_err();
         assert!(
@@ -532,7 +648,8 @@ mod tests {
 
     #[test]
     fn wrong_open_eval_value() {
-        let (public, mut msg) = honest_interaction(3, 3);
+        let shifts = all_shift_by_1(3);
+        let (public, mut msg) = honest_interaction(3, 3, &shifts);
         msg.open_evals[0] += F::ONE;
         let err = run_verifier(&public, &msg).unwrap_err();
         assert!(
@@ -543,7 +660,8 @@ mod tests {
 
     #[test]
     fn all_open_evals_zeroed() {
-        let (public, mut msg) = honest_interaction(3, 3);
+        let shifts = all_shift_by_1(3);
+        let (public, mut msg) = honest_interaction(3, 3, &shifts);
         for e in &mut msg.open_evals {
             *e = F::ZERO;
         }
@@ -554,11 +672,54 @@ mod tests {
         );
     }
 
+    // --- Failure: mixed shifts ---
+
+    fn mixed_shifts() -> Vec<ShiftSpec> {
+        vec![ShiftSpec::new(0, 1), ShiftSpec::new(1, 3)]
+    }
+
+    #[test]
+    fn mixed_shifts_corrupted_up_eval() {
+        let (mut public, msg) = honest_interaction(4, 3, &mixed_shifts());
+        public.up_evals[2] += F::ONE; // corrupt unshifted column
+        let err = run_verifier(&public, &msg).unwrap_err();
+        assert!(
+            matches!(err, MultipointEvalError::WrongSumcheckSum { .. }),
+            "expected WrongSumcheckSum, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn mixed_shifts_wrong_open_eval() {
+        let (public, mut msg) = honest_interaction(4, 3, &mixed_shifts());
+        msg.open_evals[1] += F::ONE; // corrupt a shifted column's opening
+        let err = run_verifier(&public, &msg).unwrap_err();
+        assert!(
+            matches!(err, MultipointEvalError::ClaimMismatch { .. }),
+            "expected ClaimMismatch, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn mixed_shifts_tampered_sumcheck() {
+        let (public, mut msg) = honest_interaction(4, 3, &mixed_shifts());
+        msg.proof.sumcheck_proof.messages[0].0.tail_evaluations[0] += F::ONE;
+        let err = run_verifier(&public, &msg).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MultipointEvalError::SumcheckError(_) | MultipointEvalError::ClaimMismatch { .. }
+            ),
+            "expected sumcheck or consistency error, got {err:?}",
+        );
+    }
+
     // --- Failure: tampered sumcheck round messages ---
 
     #[test]
     fn tampered_sumcheck_round_message() {
-        let (public, mut msg) = honest_interaction(3, 3);
+        let shifts = all_shift_by_1(3);
+        let (public, mut msg) = honest_interaction(3, 3, &shifts);
         msg.proof.sumcheck_proof.messages[0].0.tail_evaluations[0] += F::ONE;
         let err = run_verifier(&public, &msg).unwrap_err();
         assert!(
