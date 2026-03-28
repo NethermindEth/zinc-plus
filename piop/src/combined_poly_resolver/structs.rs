@@ -21,6 +21,7 @@ impl<F: PrimeField> Proof<F> {
     pub fn validate_evaluation_sizes(
         &self,
         num_cols: usize,
+        num_down_cols: usize,
     ) -> Result<(), CombinedPolyResolverError<F>> {
         if self.up_evals.len() != num_cols {
             return Err(CombinedPolyResolverError::WrongUpEvalsNumber {
@@ -29,10 +30,10 @@ impl<F: PrimeField> Proof<F> {
             });
         }
 
-        if self.down_evals.len() != num_cols {
+        if self.down_evals.len() != num_down_cols {
             return Err(CombinedPolyResolverError::WrongDownEvalsNumber {
                 got: self.down_evals.len(),
-                expected: num_cols,
+                expected: num_down_cols,
             });
         }
 

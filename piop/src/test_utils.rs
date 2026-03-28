@@ -49,8 +49,11 @@ where
     F: FromWithConfig<Int<5>>,
 {
     assert!(
-        U::signature().witness_binary_poly_cols.is_zero()
-            && U::signature().witness_int_cols.is_zero(),
+        U::signature()
+            .witness_cols()
+            .num_binary_poly_cols()
+            .is_zero()
+            && U::signature().witness_cols().num_int_cols().is_zero(),
         "the signature should be single typed"
     );
 
@@ -100,8 +103,11 @@ where
     F: FromWithConfig<Int<5>>,
 {
     assert!(
-        U::signature().witness_binary_poly_cols.is_zero()
-            && U::signature().witness_int_cols.is_zero(),
+        U::signature()
+            .witness_cols()
+            .num_binary_poly_cols()
+            .is_zero()
+            && U::signature().witness_cols().num_int_cols().is_zero(),
         "the signature should be single typed"
     );
 

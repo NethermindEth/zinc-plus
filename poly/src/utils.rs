@@ -195,16 +195,18 @@ where
     Ok(())
 }
 
-/// Build the shift selector MLE `next_tilde(r, *)` with the first `num_vars`
+/// Build the shift selector MLE `next_c_mle(r, *)` with the first `num_vars`
 /// variables fixed to `r`.
 ///
-/// For each `b \in {0,1}^{num_vars}`:
-///   `next_r(b) = next_tilde(r, b)`
+/// For each `b in {0,1}^{num_vars}`:
+///   next_c_mle(b) = eq(r, b - c)   if b >= c
+///   next_c_mle(b) = 0              if b < c
 ///
-/// Uses the identity `next_tilde(r, b) = eq(r, b-1)` for `b > 0` and
-/// `0` for `b = 0`.
-pub fn build_next_r_mle<F>(
+/// Uses the identity `next_c_mle(r, b) = eq(r, b - c)` for `b >= c` and
+/// `0` for `b < c`.
+pub fn build_next_c_r_mle<F>(
     r: &[F],
+    c: usize,
     field_cfg: &F::Config,
 ) -> Result<DenseMultilinearExtension<F::Inner>, ArithErrors>
 where
@@ -213,15 +215,19 @@ where
 {
     let num_vars = r.len();
     let n = 1 << num_vars;
+    assert!(c < n, "shift c={c} must be < domain size {n}");
     let zero_inner = F::zero_with_cfg(field_cfg).into_inner();
 
     let eq_r = build_eq_x_r_inner(r, field_cfg)?;
+    if c == 0 {
+        return Ok(eq_r);
+    }
 
-    // next_tilde(r, 0) = 0
-    // next_tilde(r, b) = eq(r, b-1) for b > 0
+    // next_c_mle(r, 0) = 0 for b < c
+    // next_c_mle(r, b - c) = eq(r, b - c) for b >= c
     let mut evaluations = Vec::with_capacity(n);
-    evaluations.push(zero_inner);
-    evaluations.extend_from_slice(&eq_r.evaluations[..sub!(n, 1)]);
+    evaluations.resize(c, zero_inner);
+    evaluations.extend_from_slice(&eq_r.evaluations[..sub!(n, c)]);
 
     Ok(DenseMultilinearExtension {
         num_vars,
@@ -308,79 +314,53 @@ pub fn next_mle_inner<F: Field>(
     Ok(mle)
 }
 
-/// Evaluates the next MLE at the point `point` in log-time.
+/// Evaluates the next MLE in O(n), by reusing suffix equality and prefix carry
+/// products across carry positions.
+///
+/// Improved from O(n²) approach here: https://github.com/TomWambsgans/Whirlaway/blob/9e3592b/crates/air/src/utils.rs#L92
+///
+/// `next_mle(u, v) = 1` iff `Val(v) = Val(u) + 1` and `Val(u) < 2^n - 1`.
 ///
 /// # Arguments
-/// - `point`: A slice of 2n field elements representing two n-bit vectors
-///   concatenated. The first n elements are `x` (original vector), the last n
-///   are `y` (candidate successor).
+/// - `u`: first n-bit vector (LE convention: index 0 = LSB).
+/// - `v`: second n-bit vector. Must have `v.len() == u.len()`.
 ///
-/// # Behavior
-/// Constructs a polynomial P(x, y) such that:
-/// \begin{equation}
-///     P(x, y) = 1 \quad \text{if and only if} \quad y = x + 1.
-/// \end{equation}
-///
-/// The polynomial sums contributions for each possible carry position `k`,
-/// ensuring that:
-/// 1. Bits to the left of `k` (more significant) match.
-/// 2. Bit at position `k` transitions from 0 (in x) to 1 (in y).
-/// 3. Bits to the right of `k` are 1 in x and 0 in y (simulating the carry
-///    propagation).
+/// # Algorithm
+/// Uses prefix/suffix products for O(n) evaluation:
+///   `next_mle(u, v) = sum_{j=0}^{n-1}
+///       [prod_{i<j} u_i * (1 - v_i)]      -- bits below j: were 1, flip to 0
+///     * (1 - u_j) * v_j                   -- bit j: 0 → 1
+///     * [prod_{i>j} eq(u_i, v_i)]`        -- bits above j: unchanged
 ///
 /// # Panics
-/// Panics if `point.len()` is not even.
-///
-/// # Returns
-/// Field element: 1 if y = x + 1, 0 otherwise.
-///
-/// Adapted from <https://github.com/TomWambsgans/Whirlaway/blob/9e3592b5b5c3702fe3a1728be758506a7ee9283b/crates/air/src/utils.rs#L92>
+/// Panics if `u.len() != v.len()`.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn next_mle_eval<R: Semiring>(point: &[R], zero: R, one: R) -> R {
-    // Check that the point length is even: we split into x and y of equal length.
-    assert_eq!(
-        point.len() % 2,
-        0,
-        "Input point must have an even number of variables."
-    );
-    let n = point.len() / 2;
+pub fn next_mle_eval<R: Semiring>(u: &[R], v: &[R], zero: R, one: R) -> R {
+    let n = u.len();
+    assert_eq!(n, v.len(), "u and v must have the same length");
+    if n == 0 {
+        return zero;
+    }
 
-    // Split point into x (first n) and y (last n).
-    let (x, y) = point.split_at(n);
+    // suffix_eq[j] = prod_{i=j}^{n-1} eq(u_i, v_i)
+    let mut suffix_eq = vec![one.clone(); n + 1];
+    for i in (0..n).rev() {
+        suffix_eq[i] = suffix_eq[i + 1].clone()
+            * (u[i].clone() * &v[i] + (one.clone() - &u[i]) * (one.clone() - &v[i]));
+    }
 
-    // Sum contributions for each possible carry position k = 0..n-1.
-    (0..n)
-        .map(|k| {
-            // Term 1: bits to the left of k match
-            //
-            // For i > k, enforce x_i == y_i.
-            // Using equality polynomial: x_i * y_i + (1 - x_i)*(1 - y_i).
-            let eq_high_bits = (k + 1..n)
-                .map(|i| x[i].clone() * &y[i] + (one.clone() - &x[i]) * (one.clone() - &y[i]))
-                .fold(one.clone(), |acc, next| acc * next);
-
-            // Term 2: carry bit at position k
-            //
-            // Enforce x_k = 0 and y_k = 1.
-            // Condition: (1 - x_k) * y_k.
-            let carry_bit = (one.clone() - &x[k]) * &y[k];
-
-            // Term 3: bits to the right of k are 1 in x and 0 in y
-            //
-            // For i < k, enforce x_i = 1 and y_i = 0.
-            // Condition: x_i * (1 - y_i).
-            let low_bits_are_one_zero = (0..k)
-                .map(|i| (one.clone() - &y[i]) * &x[i])
-                .fold(one.clone(), |acc, next| acc * next);
-
-            // Multiply the three terms for this k, representing one "carry pattern".
-            eq_high_bits * carry_bit * low_bits_are_one_zero
-        })
-        // Sum over all carry positions: any valid "k" gives contribution 1.
-        .fold(zero, |acc, next| acc + next)
+    // prefix_carry accumulates prod_{i<j} u_i * (1 - v_i)
+    let mut prefix_carry = one.clone();
+    let mut result = zero;
+    for j in 0..n {
+        result += prefix_carry.clone() * (one.clone() - &u[j]) * &v[j] * &suffix_eq[j + 1];
+        prefix_carry *= u[j].clone() * (one.clone() - &v[j]);
+    }
+    result
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 mod tests {
     use crypto_bigint::{U128, const_monty_params};
     use crypto_primitives::{IntoWithConfig, crypto_bigint_const_monty::ConstMontyField};
@@ -473,9 +453,10 @@ mod tests {
                 }
             }));
 
+            let (u, v) = point.split_at(NUM_VARS as usize / 2);
             assert_eq!(
                 next_mle.clone().evaluate_with_config(&point, &()),
-                Ok(next_mle_eval(&point, F::zero(), F::one()))
+                Ok(next_mle_eval(u, v, F::zero(), F::one()))
             );
         }
     }
@@ -485,10 +466,90 @@ mod tests {
     fn prop_next_mle_eval_coincides_with_next_mle_evaluate_at_point(r in point_n(NUM_VARS as usize)) {
         let next_mle = next_mle_inner(NUM_VARS, F::zero(), F::one()).unwrap();
 
+        let (u, v) = r.split_at(NUM_VARS as usize / 2);
         prop_assert_eq!(
             next_mle.evaluate_with_config(&r, &()),
-            Ok(next_mle_eval(&r, F::zero(), F::one()))
+            Ok(next_mle_eval(u, v, F::zero(), F::one()))
         );
+    }
+    }
+
+    #[test]
+    fn next_c_r_mle_c1_matches_shift_by_1() {
+        // c=1 should give the same result as the original build_next_r_mle
+        let num_vars: usize = 4;
+        let r: Vec<F> = (0..num_vars).map(|i| F::from((i + 3) as u32)).collect();
+
+        let next_1 = build_next_c_r_mle(&r, 1, &()).unwrap();
+
+        // Manually build shift-by-1: evaluations[0] = 0, evaluations[b] = eq(r, b-1)
+        let eq_r = build_eq_x_r_inner(&r, &()).unwrap();
+        let n = 1 << num_vars;
+        let mut expected = vec![F::zero().into_inner(); 1];
+        expected.extend_from_slice(&eq_r.evaluations[..n - 1]);
+
+        assert_eq!(next_1.evaluations, expected);
+    }
+
+    #[test]
+    fn next_c_r_mle_c0_is_eq() {
+        // c=0 should return eq(r, b)
+        let num_vars: usize = 4;
+        let r: Vec<F> = (0..num_vars).map(|i| F::from((i + 7) as u32)).collect();
+
+        let next_0 = build_next_c_r_mle(&r, 0, &()).unwrap();
+        let eq_r = build_eq_x_r_inner(&r, &()).unwrap();
+
+        assert_eq!(next_0.evaluations, eq_r.evaluations);
+    }
+
+    #[test]
+    fn next_c_r_mle_has_correct_structure() {
+        // For any c, evaluations[b] should be:
+        //   0 for b < c
+        //   eq(r, b-c) for b >= c
+        let num_vars: usize = 4;
+        let n = 1 << num_vars;
+        let r: Vec<F> = (0..num_vars).map(|i| F::from((i + 5) as u32)).collect();
+
+        for c in [2, 3, 5, 7] {
+            let next_c = build_next_c_r_mle(&r, c, &()).unwrap();
+            let eq_r = build_eq_x_r_inner(&r, &()).unwrap();
+
+            // First c entries should be zero
+            for b in 0..c {
+                assert!(
+                    next_c.evaluations[b].is_zero(),
+                    "c={c}, b={b}: expected zero"
+                );
+            }
+            // Remaining entries should match eq(r, b-c)
+            for b in c..n {
+                assert_eq!(
+                    next_c.evaluations[b],
+                    eq_r.evaluations[b - c],
+                    "c={c}, b={b}: mismatch"
+                );
+            }
+        }
+    }
+
+    proptest! {
+    #[test]
+    fn prop_next_c_r_mle_evaluates_correctly(r in point_n(4), c in 1..15usize) {
+        // build_next_c_r_mle(r, c) evaluated at random point should equal
+        // the shift-c predicate: sum_b next_c(b) * eq(b, point)
+        let next_c = build_next_c_r_mle(&r, c, &()).unwrap();
+        let eq_r = build_eq_x_r_inner(&r, &()).unwrap();
+
+        // Verify the table structure holds
+        let n = 1 << r.len();
+        for b in 0..c.min(n) {
+            prop_assert!(next_c.evaluations[b].is_zero());
+        }
+        for b in c..n {
+            prop_assert_eq!(&next_c.evaluations[b], &eq_r.evaluations[b - c]);
+        }
     }
     }
 }

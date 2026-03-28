@@ -11,6 +11,7 @@ use zinc_piop::multipoint_eval::MultipointEval;
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
 use zinc_primality::MillerRabin;
 use zinc_transcript::{KeccakTranscript, traits::Transcript};
+use zinc_uair::ShiftSpec;
 
 const FIELD_LIMBS: usize = 4;
 type F = MontyField<FIELD_LIMBS>;
@@ -49,12 +50,17 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
         })
         .collect();
 
+    // All columns shift by 1.
+    let shifts: Vec<ShiftSpec> = (0..num_cols).map(|i| ShiftSpec::new(i, 1)).collect();
+
     // Compute down_evals = v_j^{down}(r') (shift by one position).
-    let down_evals: Vec<F> = trace_mles
+    let down_evals: Vec<F> = shifts
         .iter()
-        .map(|mle| {
-            let mut shifted = mle.evaluations[1..].to_vec();
-            shifted.push(zero_inner);
+        .map(|spec| {
+            let mle = &trace_mles[spec.source_col()];
+            let c = spec.shift_amount();
+            let mut shifted = mle.evaluations[c..].to_vec();
+            shifted.extend(vec![zero_inner; c]);
             let shifted_mle =
                 DenseMultilinearExtension::from_evaluations_vec(num_vars, shifted, zero_inner);
             shifted_mle
@@ -81,6 +87,7 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
                         &eval_point,
                         &up_evals,
                         &down_evals,
+                        &shifts,
                         &field_cfg,
                     )
                     .expect("prover failed"),
@@ -100,6 +107,7 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
         &eval_point,
         &up_evals,
         &down_evals,
+        &shifts,
         &field_cfg,
     )
     .expect("prover failed");
@@ -123,12 +131,13 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
                     &eval_point,
                     &up_evals,
                     &down_evals,
+                    &shifts,
                     num_vars,
                     &field_cfg,
                 )
                 .expect("verifier failed");
-                MultipointEval::<F>::verify_subclaim(&subclaim, &open_evals, &field_cfg)
-                    .expect("verifier failed");
+                MultipointEval::<F>::verify_subclaim(&subclaim, &open_evals, &shifts, &field_cfg)
+                    .expect("subclaim check failed");
             },
             BatchSize::SmallInput,
         );
@@ -144,7 +153,7 @@ pub fn multipoint_eval_benches(c: &mut Criterion) {
     }
 
     // Vary column count at fixed size — this is the key axis for the
-    // precombine optimisation: costs become constant (3 MLEs) after precombine
+    // precombine optimisation: costs become constant (4 MLEs) after precombine
     // instead of scaling with J
     for num_cols in [1, 3, 10, 25, 50, 100] {
         bench_multipoint_eval(c, 14, num_cols);
