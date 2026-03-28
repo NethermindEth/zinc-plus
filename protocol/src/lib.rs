@@ -626,6 +626,7 @@ mod tests {
     fn test_e2e_mixed_shifts() {
         do_test::<TestZincTypesIprs, TestUairMixedShifts<ZtInt>>(
             8,
+            Default::default(),
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
             |_| {},
             |res| res.unwrap(),
