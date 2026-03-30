@@ -1,18 +1,17 @@
 use ark_ff::{FftField, FpConfig};
-use std::marker::PhantomData;
+use std::{fmt::Debug, marker::PhantomData};
 
 /// The integer types of twiddles.
 pub type PnttInt = i64;
 
 /// Configuration of radix-8 pseudo NTT.
-pub trait Config: Copy + Send + Sync {
+pub trait Config: Debug + Copy + Send + Sync {
     /// The field used to generate the twiddle factors
     /// and the base matrix for this pseudo NTT.
     type Field: FftField;
     const FIELD_MODULUS: u32;
 
-    /// The number of steps where NTT is performed
-    /// recursivily.
+    /// The number of steps where NTT is performed recursivily.
     const DEPTH: usize;
     /// The number of columns of the base matrix.
     const BASE_LEN: usize;
@@ -181,7 +180,7 @@ macro_rules! define_configs {
     ($($(#[$outer:meta])* $name:ident(BASE_LEN=$base_len:literal, BASE_DIM=$base_dim:literal)),* $(,)?) => {
         $(
             $(#[$outer])*
-            #[derive(Clone, Copy)]
+            #[derive(Debug, Clone, Copy)]
             pub struct $name<const DEPTH: usize>;
 
             impl<const DEPTH: usize> Config for $name<DEPTH> {

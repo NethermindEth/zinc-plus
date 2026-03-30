@@ -1,11 +1,9 @@
 mod pntt;
 
-use crate::{
-    code::{LinearCode, iprs::pntt::radix8::params::Config as PnttConfig},
-    pcs::structs::ZipTypes,
-};
+use crate::{code::LinearCode, pcs::structs::ZipTypes};
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::{CheckedAdd, CheckedMul};
+use pntt::radix8::params::Config as PnttConfig;
 pub use pntt::radix8::params::{
     PnttConfigF65537_1_4, PnttConfigF65537_2_8, PnttConfigF65537_4_16, PnttConfigF65537_16_64,
     PnttConfigF65537_32_64, PnttConfigF65537_32_128, PnttConfigF65537_64_256, PnttInt,
@@ -17,12 +15,14 @@ use std::{
     marker::PhantomData,
     ops::{Add, AddAssign},
 };
-use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
+use zinc_utils::{from_ref::FromRef, mul, mul_by_scalar::MulByScalar};
 
 /// Pseudo Reed-Solomon encoder over the integers. Internally uses a
 /// radix-8 NTT-style recursion with a base Vandermonde matrix sized
 /// `base_len x base_dim` (defaults to 64x32).
-#[derive(Debug, Clone)]
+///
+/// To create a new instance, use [`IprsCode::default`] method.
+#[derive(Clone)]
 pub struct IprsCode<Zt: ZipTypes, Config: PnttConfig, const CHECK: bool> {
     pntt_params: Radix8PnttParams<Config>,
     _phantom: PhantomData<Zt>,
@@ -99,31 +99,6 @@ where
 {
     const REPETITION_FACTOR: usize = Config::OUTPUT_LEN / Config::INPUT_LEN;
 
-    #[allow(clippy::arithmetic_side_effects)]
-    fn new(poly_size: usize) -> Self {
-        assert_eq!(
-            poly_size % Config::INPUT_LEN,
-            0,
-            "Polynomial size {} is not a multiple of row length {}",
-            poly_size,
-            Config::INPUT_LEN
-        );
-
-        assert_eq!(
-            Config::OUTPUT_LEN,
-            Config::INPUT_LEN * Self::REPETITION_FACTOR,
-            "Codeword length {} must equal row length {} times repetition factor {}",
-            Config::OUTPUT_LEN,
-            Config::INPUT_LEN,
-            Self::REPETITION_FACTOR
-        );
-
-        Self {
-            pntt_params: Radix8PnttParams::new(),
-            _phantom: Default::default(),
-        }
-    }
-
     fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
         assert_eq!(
             row.len(),
@@ -154,4 +129,58 @@ where
     {
         self.encode_inner_f(row)
     }
+}
+
+impl<Zt, Config, const CHECK: bool> Default for IprsCode<Zt, Config, CHECK>
+where
+    Zt: ZipTypes,
+    Config: PnttConfig,
+    Zt::Eval: for<'a> MulByScalar<&'a PnttInt, Zt::Cw>,
+    Zt::CombR: for<'a> MulByScalar<&'a PnttInt>,
+    Zt::Cw: CheckedAdd + for<'a> MulByScalar<&'a PnttInt>,
+{
+    fn default() -> Self {
+        assert_eq!(
+            Config::OUTPUT_LEN,
+            mul!(Config::INPUT_LEN, Self::REPETITION_FACTOR),
+            "Codeword length {} must equal row length {} times repetition factor {}",
+            Config::OUTPUT_LEN,
+            Config::INPUT_LEN,
+            Self::REPETITION_FACTOR
+        );
+
+        Self {
+            pntt_params: Radix8PnttParams::new(),
+            _phantom: Default::default(),
+        }
+    }
+}
+
+impl<Zt, Config, const CHECK: bool> Debug for IprsCode<Zt, Config, CHECK>
+where
+    Zt: ZipTypes,
+    Config: PnttConfig,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IprsCode")
+            .field("pntt_params", &self.pntt_params)
+            .finish()
+    }
+}
+
+impl<Zt, Config, const CHECK: bool> PartialEq for IprsCode<Zt, Config, CHECK>
+where
+    Config: PnttConfig,
+    Zt: ZipTypes,
+{
+    fn eq(&self, _other: &Self) -> bool {
+        true // All IPRS codes with the same config are identical.
+    }
+}
+
+impl<Zt, Config, const CHECK: bool> Eq for IprsCode<Zt, Config, CHECK>
+where
+    Zt: ZipTypes,
+    Config: PnttConfig,
+{
 }

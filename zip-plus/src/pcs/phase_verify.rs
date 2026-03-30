@@ -153,7 +153,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         F::Modulus: FromRef<Zt::Fmod> + Transcribable,
     {
         let batch_size = comm.batch_size;
-        validate_input::<Zt, Lc, _>("verify", vp.num_vars, batch_size, &[], &[point_f])?;
+        validate_input::<Zt, Lc, _>(
+            "verify",
+            vp.num_vars,
+            vp.linear_code.row_len(),
+            batch_size,
+            &[],
+            &[point_f],
+        )?;
 
         let num_rows = vp.num_rows;
         let row_len = vp.linear_code.row_len();
@@ -306,7 +313,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 mod tests {
     use crate::{
         ZipError,
-        code::{LinearCode, raa::RaaCode, raa_sign_flip::RaaSignFlippingCode},
+        code::{LinearCode, iprs::IprsCode},
         merkle::MerkleTree,
         pcs::{
             structs::{ZipPlus, ZipPlusHint, ZipTypes},
@@ -322,7 +329,7 @@ mod tests {
     use itertools::Itertools;
     use num_traits::{ConstOne, ConstZero, Zero};
     use rand::prelude::*;
-    use std::mem::size_of;
+    use std::{mem::size_of, sync::LazyLock};
     use zinc_poly::{
         mle::{DenseMultilinearExtension, MultilinearExtensionRand},
         univariate::binary::BinaryPoly,
@@ -340,17 +347,19 @@ mod tests {
     type F = MontyField<K>;
 
     type Zt = TestZipTypes<N, K, M>;
-    type C = RaaSignFlippingCode<Zt, TestRaaConfig, 4>;
+    type C = IprsCode<Zt, TestIprsConfig, CHECKED>;
+    static C: LazyLock<C> = LazyLock::new(C::default);
 
     type PolyZt = TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>;
-    type PolyC = RaaCode<PolyZt, TestRaaConfig, 4>;
+    type PolyC = IprsCode<PolyZt, TestIprsConfig, CHECKED>;
+    static POLY_C: LazyLock<PolyC> = LazyLock::new(PolyC::default);
 
     type TestZip = ZipPlus<Zt, C>;
     type TestPolyZip = ZipPlus<PolyZt, PolyC>;
 
     #[test]
     fn successful_verification_of_valid_proof() {
-        let num_vars = 4;
+        let num_vars = 10;
         {
             let (pp, comm, point_f, eval_f, mut transcript) =
                 setup_full_protocol::<F, N, K, M>(num_vars);
@@ -386,7 +395,7 @@ mod tests {
 
     #[test]
     fn verification_fails_with_incorrect_evaluation() {
-        let num_vars = 4;
+        let num_vars = 10;
 
         {
             let (pp, comm, point_f, eval_f, mut transcript) =
@@ -442,7 +451,7 @@ mod tests {
 
             proof
         }
-        let num_vars = 4;
+        let num_vars = 10;
 
         {
             let (pp, comm, point_f, eval_f, proof) = setup_full_protocol::<F, N, K, M>(num_vars);
@@ -478,7 +487,7 @@ mod tests {
 
     #[test]
     fn verification_fails_with_wrong_commitment() {
-        let num_vars = 4;
+        let num_vars = 10;
         {
             let (pp, _comm_poly1, point_f, eval_f, mut transcript) =
                 setup_full_protocol::<F, N, K, M>(num_vars);
@@ -507,8 +516,7 @@ mod tests {
             let field_cfg = get_field_cfg::<PolyZt, F>(&mut transcript.fs_transcript);
 
             let different_evals = {
-                let different_eval_coeffs: Vec<_> = (1..=((1 << num_vars)
-                    * (DEGREE_PLUS_ONE - 1) as i8))
+                let different_eval_coeffs: Vec<_> = (1..=((1 << num_vars) * (DEGREE_PLUS_ONE - 1)))
                     .map(|x| (x % 3 == 0).into())
                     .collect_vec();
                 different_eval_coeffs
@@ -539,7 +547,7 @@ mod tests {
 
     #[test]
     fn verification_fails_with_invalid_point_size() {
-        let num_vars = 4;
+        let num_vars = 10;
 
         let make_invalid_point = |cfg: &<F as PrimeField>::Config| {
             let mut invalid_point = vec![];
@@ -588,12 +596,13 @@ mod tests {
 
     #[test]
     fn verification_fails_due_to_incorrect_polynomial() {
-        let num_vars = 4;
+        let num_vars = 10;
         let (pp, mle1) = setup_test_params(num_vars);
+        let poly_size = 1 << num_vars;
 
         let (hint, comm) = TestZip::commit_single(&pp, &mle1).unwrap();
 
-        let mle2: DenseMultilinearExtension<_> = (20..=35).map(Int::from).collect();
+        let mle2: DenseMultilinearExtension<_> = (20..20 + poly_size).map(Int::from).collect();
 
         let point: Vec<<Zt as ZipTypes>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
@@ -635,7 +644,7 @@ mod tests {
 
     #[test]
     fn verification_fails_due_to_a_hint_that_is_not_close() {
-        let num_vars = 4;
+        let num_vars = 10;
         let (pp, mle) = setup_test_params(num_vars);
 
         let (original_hint, comm) = TestZip::commit_single(&pp, &mle).unwrap();
@@ -689,7 +698,7 @@ mod tests {
 
     #[test]
     fn verification_fails_due_to_incorrect_evaluation() {
-        let num_vars = 4;
+        let num_vars = 10;
         let (pp, mle) = setup_test_params(num_vars);
 
         let (hint, comm) = TestZip::commit_single(&pp, &mle).unwrap();
@@ -731,10 +740,10 @@ mod tests {
 
     #[test]
     fn verification_fails_if_proximity_check_is_invalid() {
-        let poly_size = 8;
+        let num_vars = 10;
+        let poly_size: usize = 1 << num_vars;
 
-        let linear_code = C::new(poly_size);
-        let pp = TestZip::setup(poly_size, linear_code);
+        let pp = TestZip::setup(poly_size, C.clone());
 
         let mle: DenseMultilinearExtension<_> = (0..poly_size as i32)
             .map(<Zt as ZipTypes>::Eval::from)
@@ -742,10 +751,7 @@ mod tests {
 
         let (hint, comm) = TestZip::commit_single(&pp, &mle).expect("commit should succeed");
 
-        let point = [0, 0, 0]
-            .into_iter()
-            .map(Int::<1>::from)
-            .collect::<Vec<_>>();
+        let point = vec![ConstOne::ONE; num_vars];
 
         let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut prover_transcript.fs_transcript);
@@ -805,16 +811,16 @@ mod tests {
 
     #[test]
     fn verification_fails_if_evaluation_consistency_check_is_invalid() {
-        let poly_size = 8;
-        let linear_code = C::new(poly_size);
-        let pp = TestZip::setup(poly_size, linear_code);
+        let num_vars = 10;
+        let poly_size: usize = 1 << num_vars;
+        let pp = TestZip::setup(poly_size, C.clone());
 
         let mle: DenseMultilinearExtension<_> =
             (0..poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
 
         let (hint, comm) = TestZip::commit_single(&pp, &mle).expect("commit should succeed");
 
-        let point: Vec<<Zt as ZipTypes>::Pt> = [0, 0, 0].into_iter().map(Int::from).collect_vec();
+        let point: Vec<<Zt as ZipTypes>::Pt> = vec![Zero::zero(); num_vars];
 
         let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut prover_transcript.fs_transcript);
@@ -867,15 +873,15 @@ mod tests {
 
     #[test]
     fn verification_succeeds_for_zero_polynomial() {
-        let poly_size = 8;
-        let linear_code = C::new(poly_size);
-        let pp = TestZip::setup(poly_size, linear_code);
+        let num_vars = 10;
+        let poly_size: usize = 1 << num_vars;
+        let pp = TestZip::setup(poly_size, C.clone());
 
-        let mle: DenseMultilinearExtension<_> = (0..poly_size).map(|_| Int::ZERO).collect();
+        let mle: DenseMultilinearExtension<_> = vec![Zero::zero(); poly_size].into_iter().collect();
 
         let (hint, comm) = TestZip::commit_single(&pp, &mle).expect("commit should succeed");
 
-        let point: Vec<<Zt as ZipTypes>::Pt> = [0, 0, 0].into_iter().map(Int::from).collect_vec();
+        let point: Vec<<Zt as ZipTypes>::Pt> = vec![Zero::zero(); num_vars];
 
         let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut prover_transcript.fs_transcript);
@@ -909,17 +915,16 @@ mod tests {
 
     #[test]
     fn verification_succeeds_at_zero_point() {
-        let num_vars = 3;
-        let poly_size = 1 << num_vars;
-        let linear_code = C::new(poly_size);
-        let pp = TestZip::setup(poly_size, linear_code);
+        let num_vars = 10;
+        let poly_size: usize = 1 << num_vars;
+        let pp = TestZip::setup(poly_size, C.clone());
 
         let mle: DenseMultilinearExtension<_> =
             (1..=poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
 
         let (hint, comm) = TestZip::commit_single(&pp, &mle).expect("commit should succeed");
 
-        let point: Vec<<Zt as ZipTypes>::Pt> = vec![Int::ZERO; num_vars];
+        let point: Vec<<Zt as ZipTypes>::Pt> = vec![Zero::zero(); num_vars];
 
         let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut prover_transcript.fs_transcript);
@@ -953,7 +958,7 @@ mod tests {
 
     #[test]
     fn verification_succeeds_when_polynomial_coefficients_are_max_bit_size() {
-        let num_vars = 4;
+        let num_vars = 10;
         let (pp, _) = setup_test_params(num_vars);
 
         let mut evals: Vec<<Zt as ZipTypes>::Eval> =
@@ -1001,13 +1006,13 @@ mod tests {
     }
 
     #[test]
-    fn verification_succeeds_with_minimal_polynomial_size_mu_is_2() {
-        let num_vars = 2;
+    fn verification_succeeds_with_minimal_polynomial_size_mu_is_8() {
+        let num_vars = 10;
         let (pp, poly) = setup_test_params(num_vars);
 
         let (hint, comm) = TestZip::commit_single(&pp, &poly).unwrap();
 
-        let point: Vec<<Zt as ZipTypes>::Pt> = vec![Int::from(1), Int::from(2)];
+        let point: Vec<<Zt as ZipTypes>::Pt> = (1..=num_vars as i32).map(Int::from).collect_vec();
 
         let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut prover_transcript.fs_transcript);
@@ -1042,16 +1047,15 @@ mod tests {
 
     #[test]
     fn verification_fails_at_proximity_link_check_if_combined_row_is_corrupted() {
-        let poly_size = 8;
-        let linear_code = C::new(poly_size);
-        let pp = TestZip::setup(poly_size, linear_code);
+        let num_vars = 10;
+        let poly_size: usize = 1 << num_vars;
+        let pp = TestZip::setup(poly_size, C.clone());
 
-        let mle: DenseMultilinearExtension<_> =
-            (1..=poly_size as i32).map(Int::<INT_LIMBS>::from).collect();
+        let mle: DenseMultilinearExtension<_> = (1..=poly_size as i32).map(Int::from).collect();
 
         let (hint, comm) = TestZip::commit_single(&pp, &mle).expect("commit should succeed");
 
-        let point: Vec<<Zt as ZipTypes>::Pt> = [0, 0, 0].into_iter().map(Int::from).collect_vec();
+        let point: Vec<<Zt as ZipTypes>::Pt> = vec![Zero::zero(); num_vars];
 
         let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
         let field_cfg = get_field_cfg::<Zt, F>(&mut prover_transcript.fs_transcript);
@@ -1105,9 +1109,8 @@ mod tests {
         fn inner<const P: usize>() {
             let mut rng = ThreadRng::default();
             // Match the benchmark's transcript usage for linear code construction
-            let poly_size = 1 << P;
-            let linear_code = C::new(poly_size);
-            let pp = TestZip::setup(poly_size, linear_code);
+            let poly_size: usize = 1 << P;
+            let pp = TestZip::setup(poly_size, C.clone());
 
             let mle = DenseMultilinearExtension::rand(P, &mut rng);
             let (hint, commitment) = TestZip::commit_single(&pp, &mle).expect("commit");
@@ -1164,9 +1167,8 @@ mod tests {
         fn inner<const P: usize>() {
             let mut rng = ThreadRng::default();
             // Match the benchmark's transcript usage for linear code construction
-            let poly_size = 1 << P;
-            let linear_code = PolyC::new(poly_size);
-            let pp = TestPolyZip::setup(poly_size, linear_code);
+            let poly_size: usize = 1 << P;
+            let pp = TestPolyZip::setup(poly_size, POLY_C.clone());
 
             let mle = DenseMultilinearExtension::rand(P, &mut rng);
             let (hint, comm) = TestPolyZip::commit_single(&pp, &mle).expect("commit");
@@ -1209,8 +1211,7 @@ mod tests {
 
     fn batched_prove_verify_inner<const BATCH: usize>(num_vars: usize) {
         let poly_size = 1 << num_vars;
-        let linear_code = C::new(poly_size);
-        let pp = TestZip::setup(poly_size, linear_code);
+        let pp = TestZip::setup(poly_size, C.clone());
 
         let polys: Vec<DenseMultilinearExtension<_>> = (0..BATCH)
             .map(|b| {
@@ -1260,25 +1261,24 @@ mod tests {
 
     #[test]
     fn batched_prove_verify_batch_2() {
-        batched_prove_verify_inner::<2>(4);
+        batched_prove_verify_inner::<2>(10);
     }
 
     #[test]
     fn batched_prove_verify_batch_5() {
-        batched_prove_verify_inner::<5>(4);
+        batched_prove_verify_inner::<5>(10);
     }
 
     #[test]
     fn batched_prove_verify_batch_1_roundtrip() {
-        batched_prove_verify_inner::<1>(4);
+        batched_prove_verify_inner::<1>(10);
     }
 
     #[test]
     fn batched_verify_fails_with_tampered_eval() {
-        let num_vars = 4;
+        let num_vars = 10;
         let poly_size = 1 << num_vars;
-        let linear_code = C::new(poly_size);
-        let pp = TestZip::setup(poly_size, linear_code);
+        let pp = TestZip::setup(poly_size, C.clone());
 
         let polys: Vec<DenseMultilinearExtension<_>> = vec![
             (1..=poly_size as i32).map(Int::from).collect(),

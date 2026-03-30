@@ -50,7 +50,9 @@ type Code = RaaCode<BenchZipTypes, BenchRaaConfig, 4>;
 
 fn zip_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");
-    do_bench::<BenchZipTypes, Code, PERFORM_CHECKS>(&mut group);
+    do_bench::<BenchZipTypes, Code, PERFORM_CHECKS>(&mut group, |poly_size| {
+        RaaCode::new(poly_size.isqrt().next_power_of_two())
+    });
     group.finish();
 }
 

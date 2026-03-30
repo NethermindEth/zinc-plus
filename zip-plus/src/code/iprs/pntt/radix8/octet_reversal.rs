@@ -4,7 +4,10 @@
 /// `num_octets`.
 #[allow(clippy::arithmetic_side_effects)]
 pub(crate) fn octet_reversal(x: usize, num_octets: usize) -> usize {
-    assert_ne!(num_octets, 0, "The number of octets cannot be zero");
+    if num_octets == 0 {
+        assert_eq!(x, 0, "With zero octets, the only valid input is 0, got {x}");
+        return 0;
+    }
 
     let mut result = 0;
 
@@ -38,9 +41,14 @@ mod tests {
 
     #[test]
     fn octet_reversal_self_inverse() {
-        for num_octets in 1..8 {
+        for num_octets in 0..8 {
             check_octet_reversal_self_inverse(num_octets);
         }
+    }
+
+    #[test]
+    fn octet_reversal_zero_octets() {
+        assert_eq!(octet_reversal(0, 0), 0);
     }
 
     #[test]

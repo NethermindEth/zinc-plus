@@ -4,7 +4,7 @@ use zinc_poly::{
     ConstCoeffBitWidth, Polynomial, mle::DenseMultilinearExtension, utils::build_eq_x_r,
 };
 use zinc_transcript::traits::ConstTranscribable;
-use zinc_utils::{add, div, ilog_round_up, mul, sub};
+use zinc_utils::{add, ilog_round_up, mul, sub};
 
 fn err_too_many_variates(function: &str, upto: usize, got: usize) -> ZipError {
     ZipError::InvalidPcsParam(format!(
@@ -16,17 +16,20 @@ fn err_too_many_variates(function: &str, upto: usize, got: usize) -> ZipError {
 pub(super) fn validate_input<Zt: ZipTypes, Lc: LinearCode<Zt>, Pt>(
     function: &str,
     param_num_vars: usize,
+    row_len: usize,
     batch_size: usize,
     polys: &[DenseMultilinearExtension<Zt::Eval>],
     points: &[&[Pt]],
 ) -> Result<(), ZipError> {
     // Check bit-width of the linear combinations
     {
-        // Inner ring should be at most+ 2*log_2(\rho^{-1}*d) + \log_2(d) +
-        // challenge_bits + eval_elem_bits - 1, where d is the size of the messages
-        // being encoded - so num_vars / 2
-        let d = div!(param_num_vars, 2);
-        let codeword_bits = ilog_round_up!(mul!(Lc::REPETITION_FACTOR, d), usize);
+        // Inner ring should be at most 2*log_2(\rho^{-1}*d) + \log_2(d) +
+        // challenge_bits + eval_elem_bits - 1, where d is the log of the size
+        // of the messages being encoded (i.e. log2(row_len)).
+        // Note that the formula is tweaked a bit to handle a code with row length 1
+        // (i.e. d = 0).
+        let d = row_len.ilog2() as usize;
+        let codeword_bits = ilog_round_up!(mul!(Lc::REPETITION_FACTOR, d).max(1), usize);
         let mut challenge_bits = Zt::Chal::NUM_BITS;
         if Zt::Comb::DEGREE_BOUND > 0 {
             // This means we also draft alphas (multiplied with coeffs), which
@@ -36,7 +39,7 @@ pub(super) fn validate_input<Zt: ZipTypes, Lc: LinearCode<Zt>, Pt>(
         let max_lc_bits = Zt::CombR::NUM_BITS;
         let actual_lc_bits: usize = add!(
             add!(
-                add!(mul!(codeword_bits, 2), ilog_round_up!(d, usize)),
+                add!(mul!(codeword_bits, 2), ilog_round_up!(d.max(1), usize)),
                 challenge_bits
             ),
             add!(
