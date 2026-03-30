@@ -23,8 +23,19 @@ fn fmt_thousands(n: usize) -> String {
         .join(" ")
 }
 
-/// Prints proof size to stderr in a consistent format across all benchmarks.
+/// Prints proof size (before and after compression) to stderr.
 pub fn eprint_proof_size(label: impl std::fmt::Display, proof: &impl Transcribable) {
+    let mut transcript = PcsProverTranscript::new_from_commitments(std::iter::empty());
+    transcript
+        .write(proof)
+        .expect("transcribing proof should not fail");
+    let raw = transcript.stream.into_inner();
+
+    eprint_bytes_size(label, &raw);
+}
+
+/// Prints byte slice size (before and after compression) to stderr.
+pub fn eprint_bytes_size(label: impl std::fmt::Display, raw: &[u8]) {
     macro_rules! print {
         ($details:expr, $size_bytes:expr) => {
             eprintln!(
@@ -35,20 +46,15 @@ pub fn eprint_proof_size(label: impl std::fmt::Display, proof: &impl Transcribab
             );
         };
     }
-    let mut transcript = PcsProverTranscript::new_from_commitments(std::iter::empty());
-    transcript
-        .write(proof)
-        .expect("transcribing proof should not fail");
-    let raw = transcript.stream.into_inner();
     print!("raw", raw.len());
 
     let mut gzip_buf = Vec::new();
     let mut gz = flate2::write::GzEncoder::new(&mut gzip_buf, flate2::Compression::best());
-    gz.write_all(&raw).expect("gzip compression failed");
+    gz.write_all(raw).expect("gzip compression failed");
     gz.finish().expect("gzip compression failed");
     print!("gzip-best", gzip_buf.len());
 
-    let zstd = zstd::encode_all(raw.as_slice(), 22).expect("zstd compression failed");
+    let zstd = zstd::encode_all(raw, 22).expect("zstd compression failed");
     print!("zstd-22", zstd.len());
 
     let brotli_params = brotli::enc::BrotliEncoderParams {
@@ -56,6 +62,7 @@ pub fn eprint_proof_size(label: impl std::fmt::Display, proof: &impl Transcribab
         ..Default::default()
     };
     let mut brotli_buf = Vec::new();
+    let raw = raw.to_vec();
     brotli::BrotliCompress(&mut raw.as_slice(), &mut brotli_buf, &brotli_params)
         .expect("brotli compression failed");
     print!("brotli-11", brotli_buf.len());
