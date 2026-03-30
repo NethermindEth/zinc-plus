@@ -15,7 +15,9 @@ crypto-bigint = { workspace = true }
 zinc-piop = { path = "../piop" }
 zinc-poly = { workspace = true }
 zinc-primality = { workspace = true }
+zinc-chacha20-uair = { workspace = true }
 zinc-ecdsa-uair = { workspace = true }
+zinc-poly1305-uair = { workspace = true }
 zinc-sha256-uair = { workspace = true }
 zinc-transcript = { workspace = true }
 zinc-uair = { workspace = true }
@@ -37,7 +39,7 @@ zinc-test-uair = { workspace = true }
 [features]
 qx-constraints = []
 no-f2x = ["zinc-sha256-uair/no-f2x"]
-true-ideal = ["zinc-sha256-uair/true-ideal"]
+true-ideal = ["zinc-sha256-uair/true-ideal", "zinc-chacha20-uair/true-ideal", "zinc-poly1305-uair/true-ideal"]
 boundary = ["zinc-sha256-uair/boundary"]
 full-fold = []
 parallel = [
@@ -80,6 +82,34 @@ harness = false
 
 [[bench]]
 name = "steps_sha256_8x_uc_folded"
+harness = false
+
+[[bench]]
+name = "steps_sha256_xmss_folded"
+harness = false
+
+[[bench]]
+name = "steps_chacha20_folded"
+harness = false
+
+[[bench]]
+name = "steps_chacha20_8x_folded"
+harness = false
+
+[[bench]]
+name = "steps_chacha20_16x_folded"
+harness = false
+
+[[bench]]
+name = "steps_chacha20_1kb_folded"
+harness = false
+
+[[bench]]
+name = "steps_chacha20_full_folded"
+harness = false
+
+[[bench]]
+name = "steps_poly1305_folded"
 harness = false
 
 [[bench]]

@@ -1,5 +1,5 @@
 [workspace]
-members = ["ecdsa-uair", "piop", "poly", "primality", "sha256-uair", "snark", "test-uair", "transcript", "uair", "utils", "zip-plus"]
+members = ["chacha20-uair", "ecdsa-uair", "piop", "poly", "poly1305-uair", "primality", "sha256-uair", "snark", "test-uair", "transcript", "uair", "utils", "zip-plus"]
 resolver = "2"
 default-members = ["piop", "poly", "primality", "snark", "transcript", "utils", "zip-plus"]
 # NOTE: snark, ecdsa-uair, and sha256-uair are not in members until they are
@@ -25,7 +25,9 @@ rand = "0.9"
 rand_core = "0.9"
 rayon = { version = "1.10" }
 thiserror = "2.0"
+zinc-chacha20-uair = { path = "chacha20-uair/" }
 zinc-ecdsa-uair = { path = "ecdsa-uair/" }
+zinc-poly1305-uair = { path = "poly1305-uair/" }
 zinc-primality = { path = "primality/" }
 zinc-sha256-uair = { path = "sha256-uair/" }
 zinc-test-uair = { path = "test-uair/" }

@@ -127,80 +127,6 @@ mod precompute {
         value.rem_euclid(i64::from(modulus)) as u64
     }
 
-    /// Precompute the full encoding matrix `M[output_idx][input_idx]` such that
-    /// `output = M × input` for the PNTT linear map. The matrix is constructed
-    /// by first filling in the base-layer (Vandermonde) contributions and then
-    /// applying the radix-8 butterfly stages in-place on the matrix columns.
-    ///
-    /// Memory: `OUTPUT_LEN × INPUT_LEN × 8` bytes (e.g. 2048×512×8 = 8 MB).
-    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-    pub(super) fn precompute_encoding_matrix<C: Config>(
-        base_matrix: &[Vec<PnttInt>],
-        butterfly_twiddles: &[Vec<[[PnttInt; 8]; 7]>],
-    ) -> Vec<Vec<PnttInt>> {
-        use crate::code::iprs::pntt::radix8::butterfly::BUTTERFLY_TABLE;
-        use crate::code::iprs::pntt::radix8::octet_reversal::octet_reversal;
-
-        // Use i128 to avoid overflow during butterfly stages, convert to i64 at the end.
-        let mut matrix = vec![vec![0i128; C::INPUT_LEN]; C::OUTPUT_LEN];
-
-        // Step 1: Base layer — each output i depends on BASE_LEN input elements.
-        for i in 0..C::OUTPUT_LEN {
-            let chunk = i >> C::BASE_DIM_LOG2; // i / BASE_DIM
-            let row = i & C::BASE_DIM_MASK; // i % BASE_DIM
-            let oct_rev_chunk = octet_reversal(chunk, C::DEPTH);
-
-            for col in 0..C::BASE_LEN {
-                let j = oct_rev_chunk | (col << (3 * C::DEPTH));
-                matrix[i][j] = i128::from(base_matrix[row][col]);
-            }
-        }
-
-        // Step 2: Apply butterfly stages to each column of the matrix.
-        // The butterfly is a linear in-place transformation of the output vector.
-        for k in 0..C::DEPTH {
-            let sub_chunk_length = C::BASE_DIM * (1 << (3 * k));
-            let layer_twiddles = &butterfly_twiddles[k];
-
-            // For each column (input index), apply the butterfly to the output values.
-            for j in 0..C::INPUT_LEN {
-                // Process super-chunks of 8 × sub_chunk_length
-                let super_chunk_len = 8 * sub_chunk_length;
-                for chunk_start in (0..C::OUTPUT_LEN).step_by(super_chunk_len) {
-                    for i in 0..sub_chunk_length {
-                        // Gather the 8 sub-results
-                        let subresults: [i128; 8] = std::array::from_fn(|s| {
-                            matrix[chunk_start + s * sub_chunk_length + i][j]
-                        });
-
-                        let twiddles = &layer_twiddles[i];
-
-                        // Apply the radix-8 butterfly
-                        for (s, butterfly_row) in BUTTERFLY_TABLE.iter().enumerate() {
-                            let mut val = subresults[0];
-                            for (jj, &twiddle_idx) in butterfly_row.iter().enumerate() {
-                                val += subresults[jj + 1] * i128::from(twiddles[jj][twiddle_idx]);
-                            }
-                            matrix[chunk_start + s * sub_chunk_length + i][j] = val;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Convert to PnttInt (i64)
-        matrix
-            .into_iter()
-            .map(|row| {
-                row.into_iter()
-                    .map(|v| {
-                        PnttInt::try_from(v)
-                            .expect("Encoding matrix value overflows PnttInt (i64)")
-                    })
-                    .collect()
-            })
-            .collect()
-    }
 }
 
 // Precomputed parameters needed for
@@ -213,12 +139,6 @@ pub struct Radix8PnttParams<C: Config> {
     /// root-of-unity factor. This lets the butterfly apply a single
     /// multiplication per term instead of two.
     pub butterfly_twiddles: Vec<Vec<[[PnttInt; 8]; 7]>>,
-    /// Full encoding matrix of shape `[OUTPUT_LEN][INPUT_LEN]`.
-    /// `encoding_matrix[i][j]` is the coefficient mapping `input[j]` to
-    /// `output[i]` in the PNTT linear map. Used by the verifier to compute
-    /// spot-check encodings at opened column positions without running the
-    /// full PNTT.
-    pub encoding_matrix: Vec<Vec<PnttInt>>,
     _phantom: PhantomData<C>,
 }
 
@@ -234,12 +154,9 @@ impl<C: Config> Radix8PnttParams<C> {
         C::assert_depth_valid();
         let base_matrix = precompute::precompute_base_matrix::<C>();
         let butterfly_twiddles = precompute::precompute_butterfly_twiddles::<C>();
-        let encoding_matrix =
-            precompute::precompute_encoding_matrix::<C>(&base_matrix, &butterfly_twiddles);
         Self {
             base_matrix,
             butterfly_twiddles,
-            encoding_matrix,
             _phantom: PhantomData,
         }
     }
@@ -452,6 +369,62 @@ impl<const DEPTH: usize> Config for PnttConfigF2_16R4B64<DEPTH> {
         assert!(
             DEPTH <= 2,
             "DEPTH {DEPTH} exceeds max 2 for F65537 PNTT (BASE_DIM=256)"
+        );
+    }
+}
+
+/// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=128, BASE_DIM=512 (rate 1/4).
+/// NTT domain up to 2^16, enabling row lengths up to 2^13.
+/// Row lengths: 1024 (D=1), 8192 (D=2).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF2_16R4B128<const DEPTH: usize>;
+
+/// Pseudo NTT configuration for F65537 (2^16 + 1) with BASE_LEN=256, BASE_DIM=1024 (rate 1/4).
+/// NTT domain up to 2^16, enabling row lengths up to 2^14.
+/// Row lengths: 2048 (D=1), 16384 (D=2).
+#[derive(Clone, Copy)]
+pub struct PnttConfigF2_16R4B256<const DEPTH: usize>;
+
+impl<const DEPTH: usize> Config for PnttConfigF2_16R4B128<DEPTH> {
+    type Field = fq::Fq;
+    const FIELD_MODULUS: u32 = fq::MODULUS;
+    const BASE_LEN: usize = 128;
+    const BASE_DIM: usize = 512;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 4096, -256, 16, -1, -4096, 256, -16];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq::FqBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+
+    fn assert_depth_valid() {
+        assert!(
+            DEPTH <= 2,
+            "DEPTH {DEPTH} exceeds max 2 for F65537 PNTT (BASE_DIM=512)"
+        );
+    }
+}
+
+impl<const DEPTH: usize> Config for PnttConfigF2_16R4B256<DEPTH> {
+    type Field = fq::Fq;
+    const FIELD_MODULUS: u32 = fq::MODULUS;
+    const BASE_LEN: usize = 256;
+    const BASE_DIM: usize = 1024;
+    const DEPTH: usize = DEPTH;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, 4096, -256, 16, -1, -4096, 256, -16];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = fq::FqBackend::into_bigint(x);
+
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+
+    fn assert_depth_valid() {
+        assert!(
+            DEPTH <= 2,
+            "DEPTH {DEPTH} exceeds max 2 for F65537 PNTT (BASE_DIM=1024)"
         );
     }
 }

@@ -15,6 +15,7 @@
 7. [The Dual-Ring Pipeline](#7-the-dual-ring-pipeline)
 7b. [The Dual-Circuit Pipeline](#7b-the-dual-circuit-pipeline)
 8. [The Split-Trace Architecture](#8-the-split-trace-architecture)
+8b. [The Folding Protocol](#8b-the-folding-protocol)
 9. [Proof Format and Serialization](#9-proof-format-and-serialization)
 10. [Fiat-Shamir Transcript](#10-fiat-shamir-transcript)
 11. [Ideal Types and Membership Checks](#11-ideal-types-and-membership-checks)
@@ -882,6 +883,105 @@ For 8×SHA-256 + ECDSA (512-row trace with `num_vars = 9`):
 
 ---
 
+## 8b. The Folding Protocol
+
+### Overview
+
+Folding is a **proof-size optimization** that reduces the size of PCS column openings by splitting high-degree polynomial entries into narrower components before committing. It sits at the boundary between the PIOP layer and the PCS layer: the PIOP operates on the **original unfolded trace**, while the PCS commits and opens the **split (folded) columns**.
+
+### Column Splitting
+
+Each trace column contains `BinaryPoly<D>` entries (D=32 for SHA-256, i.e. 32 binary coefficients per entry). Folding **splits** each column into two halves of half the degree:
+
+$$v[i] = u[i] + X^{D/2} \cdot w[i]$$
+
+where $u[i]$ contains the low $D/2$ coefficients and $w[i]$ contains the high $D/2$ coefficients. A column of length $n$ with `BinaryPoly<32>` entries becomes a column of length $2n$ with `BinaryPoly<16>` entries. This halves the per-element size in the codeword, reducing proof data for column openings.
+
+Implementation: `zip-plus/src/pcs/folding.rs` — functions `split_column()` and `split_columns()`. The bit-reversal order in `split_column_to_final()` ensures that recursive halving produces the same ordering as chained `split_column()` calls: bit $b$ of entry $i$ ends up at position $i + n \cdot \text{bit\_reverse}(b, \log_2 D)$.
+
+### Mathematical Foundation
+
+The protocol exploits the **MLE factorization property**. For a column $v$ split into $(u, w)$:
+
+$$\text{MLE}[v](r \| x) = (1 - x) \cdot \text{MLE}[u](r) + x \cdot \text{MLE}[w](r)$$
+
+The $\alpha$-projection (evaluating polynomials at $\alpha$) distributes over the split:
+
+$$(u[i] + X^{D/2} \cdot w[i])\big|_{X=\alpha} = u[i](\alpha) + \alpha^{D/2} \cdot w[i](\alpha)$$
+
+This gives the verifier's consistency check: $c_1 + \alpha^{D/2} \cdot c_2 = c$.
+
+### Prover Protocol
+
+Implemented in `fold_claims_prove()` (`zip-plus/src/pcs/folding.rs`). After the PIOP produces evaluation claims $\text{MLE}[v](r) = c$ (projected via $\alpha$):
+
+1. **Compute $c_1$ and $c_2$** — evaluate the MLEs of the projected split halves:
+   - $c_1 = \text{MLE}[u_{\text{proj}}](r)$, $c_2 = \text{MLE}[w_{\text{proj}}](r)$
+   - Optimized via `compute_folding_evals_eq()`, which precomputes $\text{eq}(\text{point}, x)$ for all $x \in \{0,1\}^{\text{num\_vars}}$ once and reuses it across columns, replacing $O(m \cdot n)$ clone/allocate operations with $O(n)$ precomputation.
+2. **Absorb** $c_1$, $c_2$ **into the Fiat-Shamir transcript**, then squeeze random challenges $\beta$ and $\gamma$.
+3. **Compute the new claim** via linear interpolation:
+   - New evaluation point: $(r \| \gamma)$ — append $\gamma$ as an extra dimension.
+   - New claimed value: $d_j = (1 - \gamma) \cdot c_{1,j} + \gamma \cdot c_{2,j}$.
+4. **Output:** `FoldingProverOutput` containing $c_1$, $c_2$ (serialized in proof), the new point, and new evaluations forwarded to the PCS.
+
+### Verifier Protocol
+
+Implemented in `fold_claims_verify()` (`zip-plus/src/pcs/folding.rs`):
+
+1. **Read** $c_1$, $c_2$ from the proof.
+2. **Consistency check:** verify $c_{1,j} + \alpha^{D/2} \cdot c_{2,j} = \text{original\_eval}_j$ for all $j$ — this binds the split values to the original PIOP claim.
+3. **Replay the transcript** (absorb $c_1$/$c_2$, squeeze $\beta$/$\gamma$) to derive the same challenges.
+4. **Reconstruct the new claim** and pass it to PCS verification.
+
+### Pipeline Integration
+
+In `snark/src/pipeline.rs`, the folding protocol fits between PIOP and PCS:
+
+1. **Split columns** — `split_columns::<D, HALF_D>()` on the trace.
+2. **PCS commit** — commit the split (narrower) columns.
+3. **PIOP** — runs on the original unfolded trace (IC, CPR, Lookup).
+4. **Folding protocol** — `fold_claims_prove()` bridges PIOP evaluation claims to PCS claims at the extended point.
+5. **PCS prove** — opens at the extended point $(r \| \gamma_1 [\| \gamma_2 \ldots])$.
+
+### Folding Variants
+
+The codebase implements three folding depths:
+
+| Variant | Function | Splits | PCS element type | Rounds | Proof size savings |
+|---------|----------|--------|------------------|--------|--------------------|
+| **1× fold** | `prove_classic_logup_folded()` | 32→16 | `BinaryPoly<16>` | 1 | ~20% |
+| **4× fold** | `prove_classic_logup_4x_folded()` | 32→16→8 | `BinaryPoly<8>` | 2 | ~40% |
+| **Full fold** | `prove_hybrid_gkr_logup_full_folded()` | 32→...→1 | `BinaryPoly<1>` | $\log_2 D$ | ~50%+ |
+
+Each additional folding round appends one more $\gamma$ to the evaluation point and adds $c_1$/$c_2$ values to the proof, but the PCS column-opening savings far outweigh this overhead.
+
+For the 4× fold, the proof struct (`Folded4xZincProof`) contains `c1s`/`c2s` from the first round and `c3s`/`c4s` from the second round, plus `ring_evals` (individual coefficient evaluations).
+
+### Proof Size Impact
+
+For 8×SHA-256 (512-row trace, `num_vars = 9`, 13 committed BinaryPoly columns):
+
+| Configuration | Column opening size | Approx. compressed |
+|---------------|--------------------|--------------------|
+| Non-folded (32-bit columns) | 131 × 13 × 256 B ≈ 436 KB | ~340 KB |
+| 1× Folded (16-bit columns) | 131 × 13 × 128 B ≈ 218 KB | ~270 KB |
+| 4× Folded (8-bit columns) | 131 × 13 × 64 B ≈ 109 KB | ~200 KB |
+
+### Soundness
+
+The folding protocol is sound because:
+
+1. **Consistency check:** The verifier checks $c_1 + \alpha^{D/2} \cdot c_2 = c$, binding the prover to consistent split values that match the original PIOP claim.
+2. **Linear interpolation:** The new claimed evaluation $d = (1 - \gamma) \cdot c_1 + \gamma \cdot c_2$ is uniquely determined by the split values and the random $\gamma$. Any deviation is caught with probability $1 - 1/|\mathbb{F}|$.
+3. **Fiat-Shamir binding:** All challenges ($\beta$, $\gamma$) flow through the BLAKE3 transcript, preventing the prover from adapting them.
+4. **PCS opening:** The PCS opening at the extended point guarantees the prover's claimed evaluations match a committed polynomial. Since the split columns are committed, and folding soundly reduces original claims to split-column claims, the full proof is sound.
+
+### Feature Flags
+
+The `full-fold` feature flag in `snark/Cargo.toml` exists as a placeholder but does not currently gate behavior — all folding variants are available as separate entry-point functions.
+
+---
+
 ## 9. Proof Format and Serialization
 
 ### `ZincProof` (single-ring)
@@ -1046,8 +1146,8 @@ The implementation provides four LogUp variants, with increasing sophistication:
 | Variant | Module | Key property |
 |---------|--------|-------------|
 | **Core LogUp** | `logup.rs` | Single witness, single table. Proves $\sum_i 1/(\beta - w_i) = \sum_j m_j/(\beta - T_j)$. |
-| **Decomposition + LogUp** | `decomposition.rs` | Large table ($2^{K \cdot c}$) decomposed into $K$ sub-tables of $2^c$. Single sumcheck for consistency + membership. |
-| **Batched Decomposition + LogUp** | `batched_decomposition.rs` | $L$ witnesses, same decomposed table, single degree-2 sumcheck. Precomputed batched identity polynomial $H$. |
+| **Decomposition + LogUp** | `decomposition.rs` | Large table ($2^{K \cdot c}$) decomposed into $K$ sub-tables of $2^c$. Sends chunk vectors explicitly. Single sumcheck for consistency + membership. |
+| **Batched Decomposition + LogUp** | `batched_decomposition.rs` | $L$ witnesses, same decomposed table, single degree-2 sumcheck. **No chunk vectors in proof** — chunks reconstructed from inverse witnesses. Precomputed batched identity polynomial $H$. |
 | **GKR Batched Decomposition + LogUp** | `gkr_batched_decomposition.rs` | $L$ witnesses, GKR fractional sumcheck. **No inverse vectors or chunk vectors in proof.** Available but not currently wired into top-level pipelines. |
 
 ### The Log-Derivative Identity
@@ -1066,26 +1166,445 @@ $$w_i = \sum_{k=0}^{K-1} \text{shifts}[k] \cdot \text{chunks}[k][i]$$
 
 For `BitPoly { width: 32 }`, $K = 4$ chunks of 8 bits each, with shift factors $\text{shifts}[k] = \alpha^{8k}$ where $\alpha$ is the projecting element. Each chunk is looked up in a shared sub-table of $2^8 = 256$ entries, reducing the table size from $2^{32}$ (infeasible) to $2^8$ (trivial).
 
-### Batched Decomposition (Classic)
+**Decomposition functions** (`piop/src/lookup/tables.rs`):
+- `decompose_bitpoly_column(witness, width, projecting_element, field_cfg)` — builds the full `BitPoly(width)` table for reverse-lookup, extracts the integer index $n$ of each entry, then splits $n$ into 8-bit chunks: `sub_idx[k] = (n >> (8k)) & 0xFF`. Each chunk indexes into a `BitPoly(8)` sub-table.
+- `decompose_word_column(witness, width, field_cfg)` — analogous for integer columns: `chunk[k][i] = (n >> (8k)) & 0xFF`, indexing into a `Word(8)` sub-table $\{0, 1, \ldots, 255\} \bmod q$.
+- Both return a `DecompLookupInstance { witness, subtable, shifts, chunks }`.
 
-Given $L$ witnesses looking up into the same decomposed table:
+**Multiplicity computation** (`compute_multiplicities_with_index`): Uses a `TableIndex` — a `HashMap<Vec<u8>, usize>` mapping the byte-representation of each sub-table entry's `F::Inner` to its position. The table index is built once per sub-table via `build_table_index()` and reused across all chunks and witnesses. For each chunk vector, multiplicities count how many times each sub-table entry appears, then are aggregated across chunks: $m_{\text{agg}}[j] = \sum_k m_k[j]$.
 
-1. **Chunks and inverses sent:** For each of $L$ witnesses: $K$ chunk vectors ($L \cdot K \cdot W$ field elements) plus inverse vectors ($L \cdot K$ inverse-witness vectors + 1 inverse-table vector).
-2. **Single sumcheck:** All $L \cdot (K+1)$ identities (one decomposition + $K$ LogUp per witness) are $\gamma$-batched into a single combination function. A precomputed aggregate polynomial $H$ is evaluated pointwise, yielding a degree-2 sumcheck with only 2 MLEs (`eq` and `H`).
-3. **Verification:** The verifier replays the sumcheck, recomputes $H$ at the evaluation point using bucket accumulation (§12b), and checks multiplicity sums.
+### Non-Batched Decomposition + LogUp (Legacy Path)
+
+The non-batched variant (`decomposition.rs`) **sends chunk vectors explicitly** in the proof. Its `DecompLogupProof` struct contains:
+
+```
+DecompLogupProof {
+    chunk_vectors: Vec<Vec<F>>,              // K chunk vectors, each of length W — SENT
+    sumcheck_proof: SumcheckProof<F>,
+    aggregated_multiplicities: Vec<F>,       // |subtable| entries
+    chunk_inverse_witnesses: Vec<Vec<F>>,    // K inverse vectors
+    inverse_table: Vec<F>,                   // |subtable| inverse entries
+}
+```
+
+**Prover transcript flow:**
+
+1. For each chunk $k$: absorb `chunks[k]` into transcript (chunk vectors sent in the clear).
+2. Absorb aggregated multiplicities.
+3. Draw challenge $\beta$.
+4. Compute inverse witnesses: $u_k[j] = 1/(\beta - \text{chunks}[k][j])$ and $v[j] = 1/(\beta - T[j])$ using batch inversion.
+5. Absorb inverse witnesses and inverse table.
+6. Draw challenge $\gamma$.
+7. Build $2K + 3$ MLEs: $\{\text{eq}, d_0, \ldots, d_{K-1}, u_0, \ldots, u_{K-1}, v, m_{\text{agg}}\}$.
+8. Run degree-$(K+1)$ sumcheck over the $K$ inverse-correctness identities + 1 balance identity.
+
+**Identities checked** (combined with $\gamma$ powers):
+- $\gamma^k$: $(\beta - c_k[j]) \cdot u_k[j] - 1 = 0$ for $k = 0, \ldots, K-1$ (inverse correctness)
+- $\gamma^K$: $\sum_{k=0}^{K-1} u_k[j] - m_{\text{agg}}[j] \cdot v[j] = 0$ (log-derivative balance)
+
+### Batched Decomposition + LogUp (Production Path)
+
+The batched variant (`batched_decomposition.rs`) is the production path used by all top-level pipelines. Given $L$ witnesses looking up in the same decomposed table, it **does not send chunk vectors** — instead, the verifier reconstructs chunks from inverse witnesses.
+
+#### Proof Structure
+
+```
+BatchedDecompLogupProof {
+    sumcheck_proof: SumcheckProof<F>,
+    aggregated_multiplicities: Vec<Vec<F>>,         // L vectors, each of |subtable| entries
+    chunk_inverse_witnesses: Vec<Vec<Vec<F>>>,      // [ℓ][k][j] — L × K inverse vectors
+    inverse_table: Vec<F>,                           // |subtable| inverse entries (shared)
+    // NO chunk_vectors field
+}
+```
+
+#### Prover Transcript Flow
+
+```
+Step 1. Bulk-absorb aggregated multiplicities for all L lookups
+          transcript.absorb_random_field_many_slices(&[m_agg[0], ..., m_agg[L-1]])
+
+Step 2. Draw β challenge
+
+Step 3. Compute inverse witnesses:
+          u_k^(ℓ)[j] = 1/(β − c_k^(ℓ)[j])   for all ℓ, k, j
+          v[j] = 1/(β − T[j])                  for all j
+        (Uses batch_inverse_shifted for efficiency — single field inversion,
+         O(n) multiplications via Montgomery's trick.)
+
+Step 4. Bulk-absorb ALL inverse witnesses + inverse table in one call:
+          transcript.absorb_random_field_many_slices(
+              &[u_0_0, u_0_1, ..., u_{L-1}_{K-1}, v_table])
+
+Step 5. Draw γ challenge
+
+Step 6. Draw r for eq polynomial
+
+Step 7. Precompute H[j] pointwise (see below)
+
+Step 8. Run degree-2 sumcheck on [eq(y, r), H(y)]
+```
+
+#### The Precomputed $H$ Polynomial (Degree Reduction)
+
+Without precomputation, the sumcheck would need $2K + 3$ MLEs per lookup (chunks, inverses, multiplicities, table inverse), resulting in degree $K + 1$. The $H$ polynomial collapses all identities into a single precomputed evaluation:
+
+$$H[j] = \sum_{\ell=0}^{L-1} \left[ \sum_{k=0}^{K-1} \gamma^{\ell(K+1)+k} \cdot \left((\beta - c_k^{(\ell)}[j]) \cdot u_k^{(\ell)}[j] - 1\right) + \gamma^{\ell(K+1)+K} \cdot \left(\sum_{k=0}^{K-1} u_k^{(\ell)}[j] - m_{\text{agg}}^{(\ell)}[j] \cdot v[j]\right) \right]$$
+
+This is computed by the prover as a vector of field-element evaluations (not as an MLE materialization). The sumcheck then operates on only 2 MLEs — `eq(y, r)` and `H(y)` — giving **degree 2** regardless of $K$ or $L$.
+
+#### Gamma Stride Structure
+
+The $\gamma$-batching uses a stride of $K+1$ per lookup to separate the $K$ inverse-correctness identities from the 1 balance identity:
+
+- $\gamma^{\ell \cdot (K+1) + k}$ — inverse-correctness of chunk $k$, lookup $\ell$
+- $\gamma^{\ell \cdot (K+1) + K}$ — log-derivative balance of lookup $\ell$
+
+Precomputed helper quantities for the verifier:
+- $s = \sum_{k=0}^{K-1} \gamma^k$ — inverse-correctness gamma sum within one lookup
+- $\gamma_{\text{stride}} = \gamma^{K+1}$ — stride between lookup batching blocks
+- $\text{gamma\_balance\_powers}[\ell] = \gamma^{\ell(K+1)+K}$
+- $\text{inv\_corr\_gamma\_sum} = \sum_{\ell} \gamma^{\ell(K+1)} \cdot s$
+
+#### Padding Correction
+
+When $W < 2^{n_w}$ (the witness is shorter than the MLE domain), padding positions $j \geq W$ have $u_k[j] = 0$ and $c_k[j] = 0$. The inverse-correctness identity evaluates to $-1$ at these positions (since $(\beta - 0) \cdot 0 - 1 = -1$). The MLE evaluation of the identity must account for this:
+
+$$\text{padding correction} = (\text{eq\_sum}_W - 1) \cdot \sum_{\ell, k} \gamma^{\ell(K+1)+k}$$
+
+where $\text{eq\_sum}_W = \sum_{j < W} \text{eq}(j, x^*)$. The verifier adds this correction when reconstructing $\tilde{H}(x^*)$.
+
+#### Verifier: Chunk Reconstruction from Inverse Witnesses
+
+The verifier never sees chunk vectors. Instead, it exploits the fact that each inverse-witness value $u_k^{(\ell)}[j]$ must equal some table entry $v_{\text{table}}[t] = 1/(\beta - T[t])$. The reconstruction proceeds as follows:
+
+1. **Table inverse verification (deterministic):** Before anything else, the verifier checks that $(\beta - T[j]) \cdot v[j] = 1$ for all $j \in [0, |\text{subtable}|)$. This is a direct check, not part of the sumcheck. Failure produces `LookupError::TableInverseIncorrect`.
+
+2. **Build inverse lookup map:** Construct `HashMap<F::Inner, usize>` mapping each $v_{\text{table}}[t]$'s inner representation to index $t$. This requires the `Hash` bound on `F::Inner` (added to the `Field` trait in `crypto-primitives`).
+
+3. **Bucket accumulation:** For each chunk $k$ and lookup $\ell$, classify each $u_k^{(\ell)}[j]$ by its table index $t$ and accumulate:
+   $$\text{bucket}[t] \mathrel{+}= \text{eq}(j, x^*)$$
+   If any $u_k^{(\ell)}[j]$ is not found in the lookup map, the prover has produced an inverse value not in the table — this is a soundness violation, returning `LookupError::DecompositionInconsistent`.
+
+4. **Reconstruct chunk evaluations from buckets:**
+   $$\tilde{c}_k^{(\ell)}(x^*) = \sum_{t=0}^{T-1} \text{subtable}[t] \cdot \text{bucket}[t]$$
+
+5. **Verify decomposition consistency (post-sumcheck):** For each lookup $\ell$:
+   $$\sum_{k=0}^{K-1} \text{shift}_k \cdot \tilde{c}_k^{(\ell)}(x^*) = \text{parent\_eval}^{(\ell)}$$
+   where $\text{parent\_eval}^{(\ell)}$ comes from the CPR's column evaluations (PCS-committed parent column). This check **ties the lookup protocol to the CPR** — it is not part of the sumcheck but a separate post-sumcheck verification step.
+
+**Soundness argument:** The parent witness column is PCS-committed, and the chunks are uniquely determined by the parent column and the decomposition shifts. The chunk-to-inverse correspondence is enforced by requiring all inverse values to lie in $\{v_{\text{table}}\}$. A cheating prover cannot provide inverse witnesses inconsistent with the committed parent column without either (a) breaking PCS binding or (b) failing the decomposition consistency check.
+
+#### Verifier State: `LookupVerifierPreSumcheck`
+
+The verifier's pre-sumcheck state is captured in:
+
+```
+LookupVerifierPreSumcheck {
+    num_vars: usize,
+    r: Vec<F>,              // Sumcheck eval point randomness
+    beta: F,                // LogUp challenge
+    gamma: F,               // Batching challenge
+    num_lookups: usize,     // L
+    num_chunks: usize,      // K
+    witness_len: usize,     // W (actual witness length, may be < 2^num_vars)
+    shifts: Vec<F>,         // K shift factors
+    subtable: Vec<F>,       // Raw sub-table values (NOT inverse-table)
+}
+```
+
+The `subtable` field stores the **raw sub-table values** $T[j]$, not the inverse-table entries $v[j] = 1/(\beta - T[j])$. This avoids recomputing the sub-table during `finalize_verifier`.
 
 ### GKR Batched Decomposition (Available, Not Wired In)
 
-The GKR variant (based on Papini & Haböck, ePrint 2023/1284) eliminates inverse vectors and chunk vectors from the proof:
+The GKR variant (`gkr_batched_decomposition.rs`, based on Papini & Haböck, ePrint 2023/1284) eliminates **both** inverse vectors and chunk vectors from the proof. Only aggregated multiplicities and GKR layer proofs are sent, replacing the $O(L \cdot K \cdot W)$ inverse-witness elements of the classic path with $O(\log^2 \max(K \cdot W, N))$ GKR layer elements.
 
-1. **Only multiplicities sent:** Aggregated multiplicities $m_{\text{agg}}^{(\ell)}$ for each of $L$ witnesses.
-2. **Fraction tree construction:** For each leaf $(ℓ, k, i)$, define numerator $\alpha^\ell$ and denominator $\beta - c_k^{(\ell)}[i]$. Build a binary tree of fraction additions:
-   $$\frac{p_{\text{parent}}}{q_{\text{parent}}} = \frac{p_{\text{left}} \cdot q_{\text{right}} + p_{\text{right}} \cdot q_{\text{left}}}{q_{\text{left}} \cdot q_{\text{right}}}$$
-3. **Two GKR proofs:** One for the witness side (numerator/denominator tree) and one for the table side. At each layer, a sumcheck verifies consistency between parent and child fractions.
-4. **Root cross-check:** $P_w \cdot Q_t = P_t \cdot Q_w$ (the witness and table log-derivative sums are equal).
-5. **Leaf verification:** At the bottom layer, the verifier checks that claimed evaluations match known input polynomials.
+#### Proof Structure
 
-**Proof size savings:** The GKR variant saves $O(W + N)$ field elements (inverse vectors) at the cost of $O(\log^2 \max(W, N))$ GKR layer proof elements. For the 8×SHA-256 workload with 10 lookup columns and $W = 512$ rows each, this is a significant reduction.
+```
+GkrBatchedDecompLogupProof {
+    aggregated_multiplicities: Vec<Vec<F>>,          // L × N (same as classic)
+    witness_gkr: BatchedGkrFractionProof<F>,         // Batched witness-side GKR
+    table_gkr: GkrFractionProof<F>,                  // Single table-side GKR
+}
+
+BatchedGkrFractionProof {
+    roots_p: Vec<F>,                                 // L root numerators
+    roots_q: Vec<F>,                                 // L root denominators
+    layer_proofs: Vec<BatchedGkrLayerProof<F>>,      // One per GKR layer
+}
+
+BatchedGkrLayerProof {
+    sumcheck_proof: Option<SumcheckProof<F>>,         // None for layer 0
+    p_lefts: Vec<F>,  p_rights: Vec<F>,               // L left/right numerator evals
+    q_lefts: Vec<F>,  q_rights: Vec<F>,               // L left/right denominator evals
+}
+
+GkrFractionProof {
+    root_p: F,  root_q: F,                            // Single root fraction
+    layer_proofs: Vec<GkrLayerProof<F>>,              // One per GKR layer
+}
+
+GkrLayerProof {
+    sumcheck_proof: Option<SumcheckProof<F>>,         // None for layer 0
+    p_left: F,  p_right: F,                           // Left/right numerator evals
+    q_left: F,  q_right: F,                           // Left/right denominator evals
+}
+```
+
+#### Fraction Tree Construction
+
+The protocol builds binary trees that recursively compute the log-derivative sum as a single fraction $P/Q$:
+
+$$\frac{P}{Q} = \sum_{j=0}^{2^d - 1} \frac{p_{\text{leaf}}[j]}{q_{\text{leaf}}[j]}$$
+
+**Parent computation** from children at layer $k+1$ to layer $k$:
+
+$$p_k[i] = p_{k+1}[2i] \cdot q_{k+1}[2i+1] + p_{k+1}[2i+1] \cdot q_{k+1}[2i]$$
+$$q_k[i] = q_{k+1}[2i] \cdot q_{k+1}[2i+1]$$
+
+This computes the fraction sum $\frac{p_L}{q_L} + \frac{p_R}{q_R} = \frac{p_L \cdot q_R + p_R \cdot q_L}{q_L \cdot q_R}$.
+
+**Witness trees** (one per lookup $\ell$, $K \cdot W$ leaves padded to $2^{d_w}$):
+- Numerator leaf: $p[j] = 1$ for $j < K \cdot W$, else $0$
+- Denominator leaf: $q[j] = \beta - \text{chunks}[\ell][\lfloor j/W \rfloor][j \bmod W]$ for $j < K \cdot W$, else $1$
+
+The function `build_fraction_tree_ones_leaf()` optimizes for all-ones numerators, saving approximately 2/3 of leaf-level multiplications.
+
+**Table tree** (single tree, $N$ leaves padded to $2^{d_t}$):
+- Numerator leaf: $p[j] = \sum_\ell \alpha^\ell \cdot m_{\text{agg}}^{(\ell)}[j]$ for $j < N$, else $0$
+- Denominator leaf: $q[j] = \beta - T[j]$ for $j < N$, else $1$
+
+The $\alpha$ challenge batches all $L$ lookups into a single table tree, with each lookup weighted by $\alpha^\ell$.
+
+#### Prover Transcript Flow
+
+```
+Step 1. Absorb aggregated multiplicities: m_agg^(ℓ) for ℓ = 0..L
+
+Step 2. Draw challenges β (LogUp shift) and α (lookup batching)
+
+Step 3. Build L witness fraction trees + 1 table fraction tree
+
+Step 4. Run batched_gkr_fraction_prove() on L witness trees
+        → produces BatchedGkrFractionProof (roots + layer proofs)
+
+Step 5. Run gkr_fraction_prove() on the table tree
+        → produces GkrFractionProof (root + layer proofs)
+
+Step 6. Root cross-check (debug assertion on prover side)
+```
+
+#### GKR Layer-by-Layer Sumcheck
+
+The GKR protocol verifies tree consistency layer by layer, from root to leaves. At each layer $k$, the verifier holds a claimed evaluation $(\tilde{v}_p, \tilde{v}_q)$ at a random point, and must verify it against the child MLEs.
+
+**Layer 0** (root, 1 entry, 0 sumcheck variables): Direct algebraic check — the prover sends $(p_L, p_R, q_L, q_R)$ and the verifier checks:
+
+$$\tilde{v}_p + \alpha \cdot \tilde{v}_q = (p_L \cdot q_R + p_R \cdot q_L) + \alpha \cdot (q_L \cdot q_R)$$
+
+The $\alpha$ here is a GKR-internal challenge (distinct from the lookup-batching $\alpha$) that linearly combines the numerator and denominator claims into a single equation. After verification, the verifier draws $\lambda$ and sets:
+
+$$\tilde{v}_p \leftarrow (1 - \lambda) \cdot p_L + \lambda \cdot p_R, \qquad \tilde{v}_q \leftarrow (1 - \lambda) \cdot q_L + \lambda \cdot q_R$$
+
+**Layer $k \geq 1$** ($2^k$ entries, $k$ sumcheck variables): A degree-3 sumcheck over 5 MLEs — $\text{eq}(r_k, \cdot)$, $\tilde{p}_L$, $\tilde{q}_L$, $\tilde{p}_R$, $\tilde{q}_R$ — with combination function:
+
+$$f(\text{eq}, p_L, q_L, p_R, q_R) = \text{eq} \cdot \left((p_L + \alpha \cdot q_L) \cdot q_R + p_R \cdot q_L\right)$$
+
+This formulation saves one multiplication per evaluation point compared to the naïve expansion $\text{eq} \cdot (p_L \cdot q_R + p_R \cdot q_L + \alpha \cdot q_L \cdot q_R)$.
+
+After the sumcheck, the prover sends the child evaluations at the subclaim point, the verifier draws $\lambda$ to interpolate, and the point descends to the next layer.
+
+**Batched witness GKR** ($L$ trees): All $L$ trees share the same depth $d_w$ and the same random evaluation points. At each layer $k \geq 1$, the sumcheck uses $1 + 4L$ MLEs (one `eq` + 4 per tree) with a $\delta$-batched combination function:
+
+$$f = \text{eq} \cdot \sum_{\ell=0}^{L-1} \delta^\ell \cdot \left((p_L^{(\ell)} + \alpha \cdot q_L^{(\ell)}) \cdot q_R^{(\ell)} + p_R^{(\ell)} \cdot q_L^{(\ell)}\right)$$
+
+The challenge $\delta$ is drawn fresh at each layer. The claimed sum is $\sum_\ell \delta^\ell \cdot (\tilde{v}_p^{(\ell)} + \alpha \cdot \tilde{v}_q^{(\ell)})$.
+
+#### Root Cross-Check
+
+The fundamental identity linking the witness and table sides:
+
+$$\sum_{\ell=0}^{L-1} \alpha^\ell \cdot \frac{P_w^{(\ell)}}{Q_w^{(\ell)}} = \frac{P_t}{Q_t}$$
+
+Cross-multiplied to avoid field division:
+
+$$\left(\sum_\ell \alpha^\ell \cdot P_w^{(\ell)} \cdot \prod_{j \neq \ell} Q_w^{(j)}\right) \cdot Q_t = P_t \cdot \prod_\ell Q_w^{(\ell)}$$
+
+The verifier computes $\prod_{j \neq \ell} Q_w^{(j)}$ in $O(L)$ using prefix/suffix product arrays:
+
+$$\text{prefix}[i] = \prod_{j < i} Q_w^{(j)}, \qquad \text{suffix}[i] = \prod_{j > i} Q_w^{(j)}$$
+
+$$\prod_{j \neq \ell} Q_w^{(j)} = \text{prefix}[\ell] \cdot \text{suffix}[\ell]$$
+
+Failure produces `LookupError::GkrRootMismatch`.
+
+#### Leaf Verification
+
+After the GKR descent reaches the leaves, the verifier must check that the claimed leaf MLE evaluations match the known input polynomials.
+
+**Witness-side leaf verification:** The verifier computes the expected leaf evaluations at the GKR evaluation point $r$:
+
+- Numerator: $\tilde{p}^{(\ell)}(r) = \sum_{j < K \cdot W} \text{eq}(j, r)$ — the sum of the equality polynomial over the data region (the all-ones numerator). Computed by `compute_witness_ones_p_eval()`.
+- Denominator: The verifier does **not** have the chunks. Instead, the expected denominator evaluation $\tilde{q}^{(\ell)}(r)$ is verified against PCS-provided chunk MLE openings: the verifier checks $\tilde{q}^{(\ell)}(r) = \beta - \text{combined\_chunks\_eval}(r)$.
+
+**Table-side leaf verification:** At evaluation point $r = (r_1, \ldots, r_{d_t})$:
+
+$$\tilde{p}_t(r) = \sum_{j < N} \text{combined\_mults}[j] \cdot \text{eq}(j, r)$$
+$$\tilde{q}_t(r) = \sum_{j < N} (\beta - T[j]) \cdot \text{eq}(j, r) + \sum_{j \geq N} \text{eq}(j, r)$$
+
+where $\text{combined\_mults}[j] = \sum_\ell \alpha^\ell \cdot m_{\text{agg}}^{(\ell)}[j]$ and the second sum in $\tilde{q}_t$ is the padding correction (padded denominator entries are 1, contributing $\text{eq}(j, r) \cdot 1$ each).
+
+**Multiplicity sum check:** For each lookup $\ell$, the verifier also checks $\sum_j m_{\text{agg}}^{(\ell)}[j] = K \cdot W$ (every chunk entry accounts for exactly one witness row).
+
+#### Padding
+
+Both trees pad to the next power of two:
+- Numerator padding: $0$ (contributes nothing to the fraction sum)
+- Denominator padding: $1$ (neutral for the product $Q$)
+
+The verifier accounts for padding in leaf verification by adding $\sum_{j \geq \text{data\_len}} \text{eq}(j, r)$ to the denominator evaluation.
+
+#### Proof Size Analysis
+
+For $L$ lookups, $K$ chunks, $W$ witness length, $N = 2^8$ sub-table size, $d_w = \lceil \log_2(K \cdot W) \rceil$, $d_t = \lceil \log_2(N) \rceil = 8$:
+
+| Component | Size (field elements) |
+|---|---|
+| Aggregated multiplicities | $L \cdot N$ |
+| Witness roots | $2L$ |
+| Witness layer proofs ($d_w$ layers) | $4L$ per layer + sumcheck elements (degree-3, $k$ variables at layer $k$) |
+| Table root | $2$ |
+| Table layer proofs ($d_t$ layers) | $4$ per layer + sumcheck elements |
+
+**Concrete example** (8×SHA-256, $L = 13$, $K = 4$, $W = 512$, $N = 256$):
+
+- Classic batched proof: $\sim L \cdot K \cdot W + L \cdot N = 13 \cdot 4 \cdot 512 + 13 \cdot 256 = 29{,}952$ field elements (inverse witnesses + multiplicities)
+- GKR proof: $\sim L \cdot N + 4L \cdot d_w + 4 \cdot d_t + \text{sumcheck} = 13 \cdot 256 + 4 \cdot 13 \cdot 11 + 4 \cdot 8 + O(\sum k) \approx 3{,}932$ field elements
+
+The GKR variant saves roughly $\mathbf{7\times}$ on proof size for this workload, at the cost of a more complex prover ($O(K \cdot W \cdot \log(K \cdot W))$ tree-building work) and a higher-degree sumcheck (degree 3 vs. degree 2).
+
+#### Comparison with Classic Batched Variant
+
+| Feature | Classic Batched | GKR Batched |
+|---------|----------------|-------------|
+| Inverse vectors in proof | Yes ($L \cdot K \cdot W$ elements) | No |
+| Chunk vectors in proof | No | No |
+| Multiplicities in proof | Yes ($L \cdot N$) | Yes ($L \cdot N$) |
+| Sumcheck degree | 2 | 3 |
+| Number of sumchecks | 1 | $d_w + d_t$ (layered) |
+| Prover overhead | Batch inversion + $H$ precomputation | Fraction tree building |
+| Verifier chunk access | Reconstructed from inverses (bucket accum.) | PCS openings at GKR eval point |
+| Wired into pipeline | Yes (production) | No (available, not integrated) |
+
+### Hybrid GKR (Configurable Cutoff Depth)
+
+The hybrid GKR variant (`hybrid_gkr.rs`) explores the tradeoff between full GKR (small proof, more verifier work) and sending intermediate fraction values in the clear (larger proof, less verifier work). It is parameterized by a **cutoff depth** $c$ from the root.
+
+#### Core Idea
+
+Given a GKR fraction tree of depth $d$, the hybrid protocol:
+1. Runs only the first $c$ GKR layers (from root → layer $c$), verifying tree consistency for layers $0$ through $c - 1$.
+2. At layer $c$, the prover sends the $2^c$ intermediate fraction values $(p_c[j], q_c[j])$ **in the clear** instead of continuing GKR.
+3. A separate "bottom half" verification checks that these intermediate values are consistent with the committed leaf data (e.g., via a fresh GKR of depth $d - c$, a product argument, or a classic inverse-witness sumcheck).
+
+The tree remains **binary** (fan-in 2) at all levels — $c$ controls only how many layers use GKR verification vs. direct sending.
+
+#### Proof Structure
+
+```
+HybridGkrBatchedDecompLogupProof {
+    aggregated_multiplicities: Vec<Vec<F>>,             // L × N (same as other variants)
+    witness_gkr: HybridBatchedGkrFractionProof<F>,      // Hybrid witness trees
+    table_gkr: GkrFractionProof<F>,                     // Full GKR for table (small depth)
+}
+
+HybridBatchedGkrFractionProof {
+    roots_p: Vec<F>,  roots_q: Vec<F>,                  // L root fractions
+    layer_proofs: Vec<HybridBatchedGkrLayerProof<F>>,   // c layer proofs (0..c-1)
+    cutoff: usize,                                       // c
+    sent_p: Vec<Vec<F>>,                                 // L × 2^c intermediate numerators
+    sent_q: Vec<Vec<F>>,                                 // L × 2^c intermediate denominators
+}
+```
+
+Each `HybridBatchedGkrLayerProof` has the same structure as the full GKR variant: an optional sumcheck proof (None for layer 0) plus per-tree child evaluations $(p_L, p_R, q_L, q_R)$.
+
+#### Prover Transcript Flow
+
+The transcript ordering ensures soundness — the prover commits to intermediate values **before** seeing the GKR challenges:
+
+```
+Step 1. Absorb intermediate values: sent_p[ℓ], sent_q[ℓ] for ℓ = 0..L
+        (Committed BEFORE challenges, so prover can't adapt to r_c)
+
+Step 2. Absorb root values: roots_p[ℓ], roots_q[ℓ] for ℓ = 0..L
+
+Step 3. Run c GKR layers (layers 0..c-1):
+        For each layer k:
+          Draw α, δ challenges
+          If k = 0: Direct algebraic check (no sumcheck)
+          If k ≥ 1: Degree-3 sumcheck with 1 + 4L MLEs
+          Absorb child evaluations, draw λ, interpolate
+
+Step 4. Run full GKR for the table tree (unchanged from full GKR variant)
+```
+
+#### Verifier Steps
+
+1. **Absorb intermediate values** from the proof (same ordering as prover).
+2. **Absorb roots** and derive challenges.
+3. **Verify $c$ GKR layers** — same layer-by-layer degree-3 sumcheck as the full GKR variant, but stopping at layer $c - 1$.
+4. **MLE consistency check at cutoff:** Evaluate the MLE of the sent vectors at the derived point $r_c$:
+   $$\tilde{p}_c^{(\ell)}(r_c) = \sum_{j=0}^{2^c - 1} \text{sent\_p}[\ell][j] \cdot \text{eq}(j, r_c) \stackrel{?}{=} v_p^{(\ell)}$$
+   $$\tilde{q}_c^{(\ell)}(r_c) = \sum_{j=0}^{2^c - 1} \text{sent\_q}[\ell][j] \cdot \text{eq}(j, r_c) \stackrel{?}{=} v_q^{(\ell)}$$
+   This ensures the GKR descent from the root is consistent with the sent intermediate values.
+5. **Root cross-check** and **table leaf verification** — identical to the full GKR variant.
+6. **Bottom-half verification** (application-specific) — verifies that the sent intermediate values are consistent with the committed leaf data. This can be a fresh GKR of depth $d - c$ (with sumcheck variables $1, 2, \ldots, d - c - 1$), or any other method.
+
+#### The "Fresh Bottom GKR" Optimization
+
+A key insight is that the bottom half need not continue the original GKR (which would use sumchecks with $c, c+1, \ldots, d-1$ variables). Instead, a **fresh** GKR of depth $d - c$ can be run over the $2^c$ sub-trees, where the sumchecks have only $1, 2, \ldots, d - c - 1$ variables. This dramatically reduces verifier work:
+
+| Approach | Sumcheck rounds (total variables) |
+|----------|-----------------------------------|
+| Full GKR | $\sum_{k=1}^{d-1} k = \frac{d(d-1)}{2}$ |
+| Continuing from cutoff $c$ | $\sum_{k=c}^{d-1} k = \frac{(d-c)(d+c-1)}{2}$ |
+| Hybrid: top $c$ + fresh bottom $(d-c)$ | $\sum_{k=1}^{c-1} k + \sum_{k=1}^{d-c-1} k = \frac{c(c-1)}{2} + \frac{(d-c)(d-c-1)}{2}$ |
+
+For $d = 12$ and $c = 2$: full GKR = 66 rounds, hybrid = 1 + 45 = 46 rounds — a 30% reduction in sumcheck variables.
+
+#### Cost Tradeoff at Cutoff Depth $c$
+
+| Component | Cost (field elements) |
+|-----------|----------------------|
+| GKR layers saved (vs. continuing) | $\sum_{k=c}^{d-1} k$ sumcheck rounds avoided |
+| Intermediate values sent | $2L \times 2^c$ |
+| Verifier MLE evaluation at cutoff | $O(L \times 2^c)$ operations |
+| Bottom-half fresh GKR | Roots ($2L$) + $(d-c)$ layer proofs + sumcheck messages |
+
+**Concrete example** ($L = 10$, $K = 4$, $W = 512$, $d = 12$, $c = 2$):
+
+| Metric | $c = 0$ | $c = 2$ | $c = 4$ | Full GKR ($c = d$) |
+|--------|---------|---------|---------|---------------------|
+| GKR layers (top) | 0 | 2 | 4 | 12 |
+| Sent intermediates (FE) | 20 | 80 | 320 | 0 |
+| Top sumcheck rounds | 0 | 1 | 6 | 66 |
+| Bottom sumcheck rounds | 55 | 45 | 28 | 0 |
+| Total sumcheck rounds | 55 | 46 | 34 | 66 |
+| MLE eval ops | 10 | 40 | 160 | 0 |
+
+`analyze_hybrid_costs()` computes these metrics for all cutoff depths, enabling systematic selection of the optimal $c$ for a given proof-size/verifier-time budget.
+
+#### Verifier Sub-Claim
+
+After verification, the hybrid protocol produces a `HybridGkrVerifierSubClaim` containing:
+- `witness_eval_point`: the point $r_c \in \mathbb{F}^c$ at the cutoff
+- `expected_witness_p_evals` / `expected_witness_q_evals`: the expected MLE evaluations at $r_c$ (for bottom-half verification)
+- `table_eval_point`: the table-side GKR evaluation point
+- `sent_p` / `sent_q`: the intermediate values (passed through for downstream use)
+
+The bottom-half verifier uses these to verify consistency with the committed chunk data.
 
 ### Lookup Table Types
 
@@ -1102,13 +1621,34 @@ Table generation functions:
 
 The lookup pipeline (`piop/src/lookup/pipeline.rs`) provides high-level orchestration:
 
-- **`prove_batched_lookup()`** / **`prove_batched_lookup_with_indices()`** — group columns by table type, build lookup instances, run the classic protocol. Used by `prove()`, `prove_classic_logup()`, and `prove_generic()`.
+```
+1. Group columns by table_type (BitPoly vs Word)
+2. For each group:
+   → build_lookup_instance() creates BatchedDecompLookupInstance
+   → Decomposes all witness columns for that group
+   → Runs batched prove/verify
+3. Produces one PipelineLookupProof with per-group proofs
+```
+
+Entry points:
+- **`prove_batched_lookup()`** / **`prove_batched_lookup_with_indices()`** — group columns by table type, build lookup instances, run the batched classic protocol. Used by `prove()`, `prove_classic_logup()`, and `prove_generic()`.
 - **`prove_gkr_batched_lookup_with_indices()`** — GKR variant, available but not currently wired into any top-level pipeline.
 - **`verify_batched_lookup()`** / **`verify_gkr_batched_lookup()`** — reconstruct sub-tables from metadata, verify each group (dispatched by proof variant).
 
 Constants:
 - `DEFAULT_CHUNK_WIDTH = 8` (sub-tables of $2^8 = 256$ entries)
-- `DECOMP_THRESHOLD = 8` (tables ≤ $2^8$ entries skip decomposition)
+- `DECOMP_THRESHOLD = 8` (tables $\leq 2^8$ entries skip decomposition)
+
+### What the Prover Sends vs. What Is Committed
+
+| Item | In proof? | PCS-committed? | Purpose |
+|------|-----------|----------------|---------|
+| Parent witness column | No (via PCS) | Yes | Proves witness membership; decomposition consistency anchor |
+| Chunk vectors | No (batched) / Yes (legacy) | No | Uniquely derived from parent + shifts |
+| Inverse witnesses $u_k^{(\ell)}$ | Yes | No | Enables chunk reconstruction; proves inverse correctness |
+| Inverse table $v$ | Yes | No | Proves table inverse correctness |
+| Aggregated multiplicities $m_{\text{agg}}^{(\ell)}$ | Yes | No | Proves table coverage (balance identity) |
+| Sumcheck proof | Yes | N/A | Batches all lookup constraints |
 
 ### Multi-Degree Sumcheck
 

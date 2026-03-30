@@ -557,6 +557,10 @@ where
     F: PrimeField,
     U: Uair,
 {
+    if num_constraints == 0 {
+        return vec![];
+    }
+
     let sig = U::signature();
     let down_sig = sig.down_signature();
     let num_rows = binary_poly_trace[0].len();
@@ -660,6 +664,10 @@ where
     F::Inner: Default + Send + Sync + num_traits::Zero,
     U: Uair,
 {
+    if num_constraints == 0 {
+        return vec![];
+    }
+
     let sig = U::signature();
     let down_sig = sig.down_signature();
     let num_rows = binary_poly_trace[0].len();
