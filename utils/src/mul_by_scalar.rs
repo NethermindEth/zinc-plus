@@ -48,8 +48,8 @@ macro_rules! impl_mul_int_by_primitive_scalar {
             impl<const LIMBS: usize, const LIMBS2: usize> MulByScalar<&$t, Int<LIMBS2>> for Int<LIMBS> {
                 #[allow(clippy::arithmetic_side_effects)] // By design
                 fn mul_by_scalar<const CHECK: bool>(&self, rhs: &$t) -> Option<Int<LIMBS2>> {
-                    if LIMBS2 < LIMBS {
-                        return None; // Cannot multiply if the left operand has fewer limbs than the output
+                    const {
+                        assert!(LIMBS <= LIMBS2, "Cannot multiply if the left operand has more limbs than the output");
                     }
                     let rhs: Int<LIMBS2> = Int::from_ref(rhs);
                     if CHECK {

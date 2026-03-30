@@ -430,7 +430,8 @@ mod tests {
     fn prove_rejects_oversized_polynomial() {
         let num_vars = 10;
         let (pp, _) = setup_test_params(num_vars);
-        let oversized_poly: DenseMultilinearExtension<_> = (0..1 << 5).map(Int::from).collect();
+        let oversized_poly: DenseMultilinearExtension<_> =
+            (0..1 << (num_vars + 1)).map(Int::from).collect();
 
         let (hint, comm) =
             TestZip::commit_single(&pp, &setup_test_params::<N, K, M>(num_vars).1).unwrap();

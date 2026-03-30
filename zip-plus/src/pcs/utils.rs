@@ -26,6 +26,8 @@ pub(super) fn validate_input<Zt: ZipTypes, Lc: LinearCode<Zt>, Pt>(
         // Inner ring should be at most 2*log_2(\rho^{-1}*d) + \log_2(d) +
         // challenge_bits + eval_elem_bits - 1, where d is the log of the size
         // of the messages being encoded (i.e. log2(row_len)).
+        // Note that the formula is tweaked a bit to handle a code with row length 1
+        // (i.e. d = 0).
         let d = row_len.ilog2() as usize;
         let codeword_bits = ilog_round_up!(mul!(Lc::REPETITION_FACTOR, d).max(1), usize);
         let mut challenge_bits = Zt::Chal::NUM_BITS;
