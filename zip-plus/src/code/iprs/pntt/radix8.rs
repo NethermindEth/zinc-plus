@@ -37,10 +37,10 @@ where
         + for<'a> Add<&'a Out, Output = Out>,
 {
     assert_eq!(
-        C::INPUT_LEN,
+        params.row_len,
         input.len(),
         "PNTT expects length = {}, got {}",
-        C::INPUT_LEN,
+        params.row_len,
         input.len()
     );
 
@@ -63,9 +63,9 @@ fn combine_stages<R, C, const CHECK: bool>(
     C: Config,
     R: CheckedAdd + CheckedMul + for<'a> Add<&'a R, Output = R> + Clone + Send + Sync + Debug,
 {
-    for k in 0..C::DEPTH {
+    for k in 0..params.depth {
         // The length of chunks in the current layer.
-        let sub_chunk_length = C::BASE_DIM * (1 << (3 * k));
+        let sub_chunk_length = params.base_dim * (1 << (3 * k));
 
         // On each step of recursive radix-8 NTT
         // we divide the length of the evaluation domain by 8.
@@ -76,8 +76,8 @@ fn combine_stages<R, C, const CHECK: bool>(
         //
         // Since we are going from bottom up we are successively
         // taking
-        //      \omega^(8 ^ (C::DEPTH - 1))
-        //      \omega^(8 ^ (C::DEPTH - 2))
+        //      \omega^(8 ^ (params.depth - 1))
+        //      \omega^(8 ^ (params.depth - 2))
         //      ...
         //      \omega^(8 ^ 0) = \omega
         // These factors are already absorbed into `layer_twiddles`.
@@ -130,18 +130,18 @@ where
         + Sync
         + for<'a> Add<&'a Out, Output = Out>,
 {
-    cfg_into_iter!(0..C::OUTPUT_LEN)
+    cfg_into_iter!(0..params.codeword_len)
         .map(|i| {
-            let chunk = i >> C::BASE_DIM_LOG2; // i / C::BASE_DIM
-            let row = i & C::BASE_DIM_MASK; // i % C::BASE_DIM
+            let chunk = i >> params.base_dim_log2; // i / BASE_DIM
+            let row = i & params.base_dim_mask; // i % BASE_DIM
 
             // If we'd done all the divide steps of the NTT recursively
             // we'd end up with chunks of original indices
-            // combined together according to their `3 * C::DEPTH`
+            // combined together according to their `3 * params.depth`
             // least significant bits. Moreover, the value of these
             // least significant bits correspond to the number of the chunk
             // in octet-reverse order.
-            let oct_rev_chunk = octet_reversal(chunk, C::DEPTH);
+            let oct_rev_chunk = octet_reversal(chunk, params.depth);
 
             // We always know that the first column of the Vandermonde matrix
             // consists of 1's.
@@ -149,7 +149,7 @@ where
                 Out::from_ref(&input[oct_rev_chunk]),
                 |acc, (col, bm_row_col)| {
                     let term = mul_by_twiddle(
-                        &input[oct_rev_chunk | ((col + 1) << (3 * C::DEPTH))],
+                        &input[oct_rev_chunk | ((col + 1) << (3 * params.depth))],
                         bm_row_col,
                     );
 
@@ -172,22 +172,22 @@ mod tests {
 
     use super::*;
 
-    fn compare_to_arkworks_ntt_base_layer_generic<C: Config>()
+    fn compare_to_arkworks_ntt_base_layer_generic<C: Config>(params: &Radix8PnttParams<C>)
     where
         C::Field: From<PnttInt>,
     {
-        let input = (0i64..(32i64 * PnttInt::from(1 << (3 * C::DEPTH)))).collect_vec();
+        let input = (0i64..(32i64 * PnttInt::from(1 << (3 * params.depth)))).collect_vec();
 
         let arkworks_res = {
-            let mut result = Vec::with_capacity(64 * (1 << (3 * C::DEPTH)));
+            let mut result = Vec::with_capacity(64 * (1 << (3 * params.depth)));
             let domain = Radix2EvaluationDomain::<C::Field>::new(64).unwrap();
 
-            for chunk in 0..(1 << (3 * C::DEPTH)) {
+            for chunk in 0..(1 << (3 * params.depth)) {
                 let mut input = input
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| {
-                        i & ((1 << (3 * C::DEPTH)) - 1) == octet_reversal(chunk, C::DEPTH)
+                        i & ((1 << (3 * params.depth)) - 1) == octet_reversal(chunk, params.depth)
                     })
                     .map(|(_, x)| C::Field::from(*x))
                     .collect_vec();
@@ -201,9 +201,7 @@ mod tests {
         };
 
         let our_res = {
-            let params = Radix8PnttParams::<C>::new();
-
-            let output = base_multiply_into_output::<_, _, _, CHECKED>(&input, &params, |a, b| {
+            let output = base_multiply_into_output::<_, _, _, CHECKED>(&input, params, |a, b| {
                 a.mul_by_scalar::<CHECKED>(b).unwrap()
             });
 
@@ -215,26 +213,28 @@ mod tests {
 
     #[test]
     fn compare_to_arkworks_ntt_base_layer_multiply() {
-        compare_to_arkworks_ntt_base_layer_generic::<PnttConfigF65537_32_64<1>>();
-        compare_to_arkworks_ntt_base_layer_generic::<PnttConfigF65537_32_64<2>>();
-        compare_to_arkworks_ntt_base_layer_generic::<PnttConfigF65537_32_64<3>>();
+        for depth in 1..=3 {
+            let row_len = 32 * (1 << (3 * depth));
+            let params = Radix8PnttParams::new(row_len, depth, 2);
+            compare_to_arkworks_ntt_base_layer_generic::<PnttConfigF65537>(&params);
+        }
     }
 
-    fn pntt_against_arkworks_generic<C: Config>()
+    fn pntt_against_arkworks_generic<C: Config>(params: &Radix8PnttParams<C>)
     where
         C::Field: From<PnttInt>,
         Int<4>: From<PnttInt> + for<'a> MulByScalar<&'a PnttInt>,
     {
-        let input: Vec<PnttInt> = (0..C::INPUT_LEN)
+        let input: Vec<PnttInt> = (0..params.row_len)
             .map(|x| PnttInt::try_from(x).unwrap())
             .collect_vec();
 
         let arkworks_res = {
-            let domain = Radix2EvaluationDomain::<C::Field>::new(C::OUTPUT_LEN).unwrap();
+            let domain = Radix2EvaluationDomain::<C::Field>::new(params.codeword_len).unwrap();
 
             let mut input = input.iter().map(|i| C::Field::from(*i)).collect_vec();
 
-            input.resize(C::OUTPUT_LEN, C::Field::zero());
+            input.resize(params.codeword_len, C::Field::zero());
 
             domain.fft_in_place(&mut input);
 
@@ -244,11 +244,9 @@ mod tests {
         let our_res = {
             let input: Vec<Int<4>> = input.into_iter().map(|x| x.into()).collect_vec();
 
-            let params = Radix8PnttParams::<C>::new();
-
             let res: Vec<Int<4>> = pntt::<_, _, _, CHECKED>(
                 &input,
-                &params,
+                params,
                 |a, b| a.mul_by_scalar::<CHECKED>(b).unwrap(),
                 |a, b| a.mul_by_scalar::<CHECKED>(b).unwrap(),
             );
@@ -274,8 +272,12 @@ mod tests {
 
     #[test]
     fn pntt_against_arkworks() {
-        pntt_against_arkworks_generic::<PnttConfigF65537_32_64<1>>();
-        pntt_against_arkworks_generic::<PnttConfigF65537_32_64<2>>();
-        pntt_against_arkworks_generic::<PnttConfigF65537_32_64<3>>();
+        let base_len = 32;
+        for depth in 1..=3 {
+            let row_len = base_len * (1 << (3 * depth));
+            pntt_against_arkworks_generic::<PnttConfigF65537>(&Radix8PnttParams::new(
+                row_len, depth, 2,
+            ));
+        }
     }
 }

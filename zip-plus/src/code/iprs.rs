@@ -4,18 +4,14 @@ use crate::{code::LinearCode, pcs::structs::ZipTypes};
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::{CheckedAdd, CheckedMul};
 use pntt::radix8::params::Config as PnttConfig;
-pub use pntt::radix8::params::{
-    PnttConfigF65537_1_4, PnttConfigF65537_2_8, PnttConfigF65537_4_16, PnttConfigF65537_16_64,
-    PnttConfigF65537_32_64, PnttConfigF65537_32_128, PnttConfigF65537_64_256, PnttInt,
-    Radix8PnttParams,
-};
+pub use pntt::radix8::params::{PnttConfigF65537, PnttInt, Radix8PnttParams};
 use std::{
     fmt::Debug,
     iter::Sum,
     marker::PhantomData,
     ops::{Add, AddAssign},
 };
-use zinc_utils::{from_ref::FromRef, mul, mul_by_scalar::MulByScalar};
+use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 
 /// Pseudo Reed-Solomon encoder over the integers. Internally uses a
 /// radix-8 NTT-style recursion with a base Vandermonde matrix sized
@@ -23,16 +19,23 @@ use zinc_utils::{from_ref::FromRef, mul, mul_by_scalar::MulByScalar};
 ///
 /// To create a new instance, use [`IprsCode::default`] method.
 #[derive(Clone)]
-pub struct IprsCode<Zt: ZipTypes, Config: PnttConfig, const CHECK: bool> {
+pub struct IprsCode<Zt: ZipTypes, Config: PnttConfig, const REP: usize, const CHECK: bool> {
     pntt_params: Radix8PnttParams<Config>,
     _phantom: PhantomData<Zt>,
 }
 
-impl<Zt, Config, const CHECK: bool> IprsCode<Zt, Config, CHECK>
+impl<Zt, Config, const REP: usize, const CHECK: bool> IprsCode<Zt, Config, REP, CHECK>
 where
     Zt: ZipTypes,
     Config: PnttConfig,
 {
+    pub fn new(row_len: usize, depth: usize) -> Self {
+        Self {
+            pntt_params: Radix8PnttParams::new(row_len, depth, REP),
+            _phantom: Default::default(),
+        }
+    }
+
     /// Encode without modular reduction, purely over the integers.
     fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
     where
@@ -51,10 +54,10 @@ where
     {
         assert_eq!(
             row.len(),
-            Config::INPUT_LEN,
+            self.pntt_params.row_len,
             "Input length {} does not match expected row length {}",
             row.len(),
-            Config::INPUT_LEN
+            self.pntt_params.row_len,
         );
 
         macro_rules! mul_fn {
@@ -77,10 +80,10 @@ where
     {
         assert_eq!(
             row.len(),
-            Config::INPUT_LEN,
+            self.pntt_params.row_len,
             "Input length {} does not match expected row length {}",
             row.len(),
-            Config::INPUT_LEN
+            self.pntt_params.row_len,
         );
 
         let mul_fn = |f: &F, tw: &PnttInt| f.clone() * F::from_with_cfg(*tw, f.cfg());
@@ -89,7 +92,8 @@ where
     }
 }
 
-impl<Zt: ZipTypes, Config, const CHECK: bool> LinearCode<Zt> for IprsCode<Zt, Config, CHECK>
+impl<Zt: ZipTypes, Config, const REP: usize, const CHECK: bool> LinearCode<Zt>
+    for IprsCode<Zt, Config, REP, CHECK>
 where
     Zt: ZipTypes,
     Config: PnttConfig,
@@ -97,26 +101,26 @@ where
     Zt::CombR: for<'a> MulByScalar<&'a PnttInt>,
     Zt::Cw: CheckedAdd + for<'a> MulByScalar<&'a PnttInt>,
 {
-    const REPETITION_FACTOR: usize = Config::OUTPUT_LEN / Config::INPUT_LEN;
+    const REPETITION_FACTOR: usize = REP;
 
     fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
         assert_eq!(
             row.len(),
-            Config::INPUT_LEN,
+            self.pntt_params.row_len,
             "Input length {} does not match expected row length {}",
             row.len(),
-            Config::INPUT_LEN
+            self.pntt_params.row_len,
         );
 
         self.encode_inner(row)
     }
 
     fn row_len(&self) -> usize {
-        Config::INPUT_LEN
+        self.pntt_params.row_len
     }
 
     fn codeword_len(&self) -> usize {
-        Config::OUTPUT_LEN
+        self.pntt_params.codeword_len
     }
 
     fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {
@@ -131,32 +135,7 @@ where
     }
 }
 
-impl<Zt, Config, const CHECK: bool> Default for IprsCode<Zt, Config, CHECK>
-where
-    Zt: ZipTypes,
-    Config: PnttConfig,
-    Zt::Eval: for<'a> MulByScalar<&'a PnttInt, Zt::Cw>,
-    Zt::CombR: for<'a> MulByScalar<&'a PnttInt>,
-    Zt::Cw: CheckedAdd + for<'a> MulByScalar<&'a PnttInt>,
-{
-    fn default() -> Self {
-        assert_eq!(
-            Config::OUTPUT_LEN,
-            mul!(Config::INPUT_LEN, Self::REPETITION_FACTOR),
-            "Codeword length {} must equal row length {} times repetition factor {}",
-            Config::OUTPUT_LEN,
-            Config::INPUT_LEN,
-            Self::REPETITION_FACTOR
-        );
-
-        Self {
-            pntt_params: Radix8PnttParams::new(),
-            _phantom: Default::default(),
-        }
-    }
-}
-
-impl<Zt, Config, const CHECK: bool> Debug for IprsCode<Zt, Config, CHECK>
+impl<Zt, Config, const REP: usize, const CHECK: bool> Debug for IprsCode<Zt, Config, REP, CHECK>
 where
     Zt: ZipTypes,
     Config: PnttConfig,
@@ -168,7 +147,7 @@ where
     }
 }
 
-impl<Zt, Config, const CHECK: bool> PartialEq for IprsCode<Zt, Config, CHECK>
+impl<Zt, Config, const REP: usize, const CHECK: bool> PartialEq for IprsCode<Zt, Config, REP, CHECK>
 where
     Config: PnttConfig,
     Zt: ZipTypes,
@@ -178,7 +157,7 @@ where
     }
 }
 
-impl<Zt, Config, const CHECK: bool> Eq for IprsCode<Zt, Config, CHECK>
+impl<Zt, Config, const REP: usize, const CHECK: bool> Eq for IprsCode<Zt, Config, REP, CHECK>
 where
     Zt: ZipTypes,
     Config: PnttConfig,

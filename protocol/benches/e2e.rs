@@ -40,7 +40,7 @@ use zinc_utils::{
     projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
-    code::iprs::{IprsCode, PnttConfigF65537_32_128},
+    code::iprs::{IprsCode, PnttConfigF65537},
     pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
     utils::eprint_proof_size,
 };
@@ -55,6 +55,9 @@ const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
 };
 
 const IPRS_DEPTH: usize = 1;
+
+// FIXME: Use flat matrices, i.e. those having just one row
+const LEGACY_IPRS_ROW_LEN: usize = 32 * (1 << (3 * IPRS_DEPTH));
 
 #[allow(clippy::type_complexity)]
 #[derive(Debug, Clone, Copy)]
@@ -223,10 +226,9 @@ where
         MBSInnerProduct,
     >;
 
-    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537_32_128<IPRS_DEPTH>, PERFORM_CHECKS>;
-    type ArbitraryLc =
-        IprsCode<Self::ArbitraryZt, PnttConfigF65537_32_128<IPRS_DEPTH>, PERFORM_CHECKS>;
-    type IntLc = IprsCode<Self::IntZt, PnttConfigF65537_32_128<IPRS_DEPTH>, PERFORM_CHECKS>;
+    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, 4, PERFORM_CHECKS>;
+    type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, 4, PERFORM_CHECKS>;
+    type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, 4, PERFORM_CHECKS>;
 }
 
 //
@@ -266,10 +268,11 @@ type Pp<Zt> = (
 
 fn setup_pp(num_vars: usize) -> Pp<BenchZincTypes> {
     let poly_size = 1 << num_vars;
+    // FIXME: Use flat matrices, i.e. those having just one row
     (
-        ZipPlus::setup(poly_size, IprsCode::default()),
-        ZipPlus::setup(poly_size, IprsCode::default()),
-        ZipPlus::setup(poly_size, IprsCode::default()),
+        ZipPlus::setup(poly_size, IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH)),
+        ZipPlus::setup(poly_size, IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH)),
+        ZipPlus::setup(poly_size, IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH)),
     )
 }
 

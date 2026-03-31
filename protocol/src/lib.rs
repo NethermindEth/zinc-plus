@@ -420,7 +420,7 @@ mod tests {
     };
     use zip_plus::{
         code::{
-            iprs::{IprsCode, PnttConfigF65537_32_128},
+            iprs::{IprsCode, PnttConfigF65537},
             raa::{RaaCode, RaaConfig},
         },
         pcs::structs::{ZipPlus, ZipPlusParams},
@@ -541,10 +541,9 @@ mod tests {
         type ArbitraryZt = ArbitraryPolyZipTypesIprs;
         type IntZt = IntZipTypes;
 
-        type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537_32_128<IPRS_DEPTH>, CHECKED>;
-        type ArbitraryLc =
-            IprsCode<Self::ArbitraryZt, PnttConfigF65537_32_128<IPRS_DEPTH>, CHECKED>;
-        type IntLc = IprsCode<Self::IntZt, PnttConfigF65537_32_128<IPRS_DEPTH>, CHECKED>;
+        type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, 4, CHECKED>;
+        type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, 4, CHECKED>;
+        type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, 4, CHECKED>;
     }
 
     const RAA_REP: usize = 4;
@@ -574,6 +573,9 @@ mod tests {
         type ArbitraryLc = RaaCode<Self::ArbitraryZt, TestRaaConfig, RAA_REP>;
         type IntLc = RaaCode<Self::IntZt, TestRaaConfig, RAA_REP>;
     }
+
+    // FIXME: Use flat matrices, i.e. those having just one row
+    const LEGACY_IPRS_ROW_LEN: usize = 32 * (1 << (3 * IPRS_DEPTH));
 
     /// Set up Zip+ PCS parameters for a given number of MLE variables.
     #[allow(clippy::type_complexity)]
@@ -685,7 +687,11 @@ mod tests {
     fn test_e2e_no_multiplication() {
         do_test::<TestZincTypesIprs, TestAirNoMultiplication<ZtInt>>(
             8,
-            Default::default(),
+            (
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+            ),
             default_project_ideal!(),
             |_| {},
             |res| res.unwrap(),
@@ -727,7 +733,11 @@ mod tests {
     fn test_e2e_mixed_shifts() {
         do_test::<TestZincTypesIprs, TestUairMixedShifts<ZtInt>>(
             8,
-            Default::default(),
+            (
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+            ),
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
             |_| {},
             |res| res.unwrap(),
@@ -742,7 +752,11 @@ mod tests {
     fn test_e2e_binary_decomposition() {
         do_test::<TestZincTypesIprs, BinaryDecompositionUair<ZtInt>>(
             8,
-            Default::default(),
+            (
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+            ),
             default_project_ideal!(),
             |_| {},
             |res| res.unwrap(),
@@ -760,7 +774,11 @@ mod tests {
     fn test_e2e_big_linear() {
         do_test::<TestZincTypesIprs, BigLinearUair<ZtInt>>(
             8,
-            Default::default(),
+            (
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+            ),
             default_project_ideal!(),
             |_| {},
             |res| res.unwrap(),
@@ -775,7 +793,11 @@ mod tests {
     fn test_e2e_big_linear_with_public_input() {
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
             8,
-            Default::default(),
+            (
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+            ),
             default_project_ideal!(),
             |_| {},
             |res| res.unwrap(),
@@ -791,7 +813,11 @@ mod tests {
     fn test_big_linear_tamper_lifted_evals() {
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
             8,
-            Default::default(),
+            (
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+            ),
             default_project_ideal!(),
             |proof| proof.witness_lifted_evals.swap(0, 1),
             |res| {
@@ -807,7 +833,11 @@ mod tests {
     fn test_big_linear_tamper_up_evals() {
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
             8,
-            Default::default(),
+            (
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+            ),
             default_project_ideal!(),
             |proof| proof.resolver.up_evals.swap(0, 1),
             |res| {
@@ -825,7 +855,11 @@ mod tests {
     fn test_big_linear_tamper_down_evals() {
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
             8,
-            Default::default(),
+            (
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+            ),
             default_project_ideal!(),
             |proof| proof.resolver.down_evals.swap(0, 1),
             |res| {
@@ -846,7 +880,11 @@ mod tests {
     fn test_big_linear_tamper_commitment() {
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
             8,
-            Default::default(),
+            (
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+            ),
             default_project_ideal!(),
             |proof| proof.commitments.0.root = Default::default(),
             |res| {
@@ -859,7 +897,11 @@ mod tests {
     fn test_big_linear_tamper_ideal_check() {
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
             8,
-            Default::default(),
+            (
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+                IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+            ),
             default_project_ideal!(),
             |proof| proof.ideal_check.combined_mle_values.swap(0, 1),
             |res| {

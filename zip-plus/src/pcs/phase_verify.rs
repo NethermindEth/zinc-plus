@@ -347,12 +347,12 @@ mod tests {
     type F = MontyField<K>;
 
     type Zt = TestZipTypes<N, K, M>;
-    type C = IprsCode<Zt, TestIprsConfig, CHECKED>;
-    static C: LazyLock<C> = LazyLock::new(C::default);
+    type C = IprsCode<Zt, TestIprsConfig, REP_FACTOR, CHECKED>;
+    static C: LazyLock<C> = LazyLock::new(|| C::new(IPRS_ROW_LEN, IPRS_DEPTH));
 
     type PolyZt = TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>;
-    type PolyC = IprsCode<PolyZt, TestIprsConfig, CHECKED>;
-    static POLY_C: LazyLock<PolyC> = LazyLock::new(PolyC::default);
+    type PolyC = IprsCode<PolyZt, TestIprsConfig, REP_FACTOR, CHECKED>;
+    static POLY_C: LazyLock<PolyC> = LazyLock::new(|| PolyC::new(IPRS_ROW_LEN, IPRS_DEPTH));
 
     type TestZip = ZipPlus<Zt, C>;
     type TestPolyZip = ZipPlus<PolyZt, PolyC>;
