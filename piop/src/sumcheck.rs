@@ -17,7 +17,7 @@ use std::marker::PhantomData;
 use thiserror::Error;
 use zinc_poly::{EvaluationError, mle::DenseMultilinearExtension, utils::ArithErrors};
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
-use zinc_utils::{add, inner_transparent_field::InnerTransparentField, mul};
+use zinc_utils::{inner_transparent_field::InnerTransparentField, mul};
 
 /// Sumcheck for products of multilinear polynomial.
 pub struct MLSumcheck<F>(PhantomData<F>);
@@ -31,7 +31,6 @@ pub struct SumcheckProof<F> {
     pub claimed_sum: F,
 }
 
-#[allow(clippy::arithmetic_side_effects)]
 impl<F: PrimeField> GenTranscribable for SumcheckProof<F>
 where
     F::Inner: ConstTranscribable,
@@ -90,12 +89,12 @@ where
     }
 }
 
-#[allow(clippy::arithmetic_side_effects)]
 impl<F: PrimeField> Transcribable for SumcheckProof<F>
 where
     F::Inner: ConstTranscribable,
     F::Modulus: ConstTranscribable,
 {
+    #[allow(clippy::arithmetic_side_effects)]
     fn get_num_bytes(&self) -> usize {
         let n_msgs = self.messages.len();
         let total_evals: usize = self
@@ -103,11 +102,11 @@ where
             .iter()
             .map(|m| m.0.tail_evaluations.len())
             .sum();
-        // [Mod][u32: n_msgs][u32: k_0][evals_0]...[u32: k_{n-1}][evals_{n-1}][Inner:
-        // claimed_sum]
         F::Modulus::NUM_BYTES
-            + add!(n_msgs, 1) * u32::NUM_BYTES
-            + add!(total_evals, 1) * F::Inner::NUM_BYTES
+            + u32::NUM_BYTES // n_msgs
+            + n_msgs * u32::NUM_BYTES // n_evals for each message
+            + total_evals * F::Inner::NUM_BYTES // evals
+            + F::Inner::NUM_BYTES // claimed_sum
     }
 }
 

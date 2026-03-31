@@ -441,6 +441,7 @@ where
             result.push(DynamicPolynomialF { coeffs });
             bytes = &bytes[end..];
         }
+        assert!(bytes.is_empty(), "All bytes should be consumed");
         result.into()
     }
 
@@ -465,7 +466,7 @@ where
             };
             buf = zinc_transcript::append_field_vec_inner(buf, &poly.coeffs[0..len]);
         }
-        assert!(buf.is_empty(), "All bytes should be consumed");
+        assert!(buf.is_empty(), "Entire buffer should be used");
     }
 }
 

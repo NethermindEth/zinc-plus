@@ -77,7 +77,6 @@ pub struct Proof<F: PrimeField> {
     pub witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
 }
 
-#[allow(clippy::arithmetic_side_effects)]
 impl<F> GenTranscribable for Proof<F>
 where
     F: PrimeField,
@@ -143,13 +142,13 @@ where
     }
 }
 
-#[allow(clippy::arithmetic_side_effects)]
 impl<F> Transcribable for Proof<F>
 where
     F: PrimeField,
     F::Inner: ConstTranscribable,
     F::Modulus: ConstTranscribable,
 {
+    #[allow(clippy::arithmetic_side_effects)]
     fn get_num_bytes(&self) -> usize {
         let witness_vec = DynamicPolyVecF::reinterpret(&self.witness_lifted_evals);
         3 * ZipPlusCommitment::NUM_BYTES

@@ -36,7 +36,7 @@ where
         let buf = self.sumcheck_proof.write_transcription_bytes_subset(buf);
         let buf = self.up_evals.write_transcription_bytes_subset(buf);
         let buf = self.down_evals.write_transcription_bytes_subset(buf);
-        assert!(buf.is_empty(), "All bytes should be consumed");
+        assert!(buf.is_empty(), "Entire buffer should be used");
     }
 }
 

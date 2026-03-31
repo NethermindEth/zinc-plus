@@ -7,7 +7,6 @@ pub struct Proof<F: PrimeField> {
     pub combined_mle_values: Vec<DynamicPolynomialF<F>>,
 }
 
-/// Only write modulus once
 impl<F> GenTranscribable for Proof<F>
 where
     F: PrimeField,
