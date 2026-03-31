@@ -94,16 +94,14 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
 fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS");
 
-    const IPRS_DEPTH: usize = 1;
-    // FIXME: Use flat matrices, i.e. those having just one row
-    const LEGACY_IPRS_ROW_LEN: usize = 32 * (1 << (3 * IPRS_DEPTH));
+    // Use flat single-row Zip+ matrix
     do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 32, PERFORM_CHECKS>, PERFORM_CHECKS>(
         &mut group,
-        |_poly_size| IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+        IprsCode::new_with_optimal_depth,
     );
     do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 64, PERFORM_CHECKS>, PERFORM_CHECKS>(
         &mut group,
-        |_poly_size| IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH),
+        IprsCode::new_with_optimal_depth,
     );
 
     group.finish();

@@ -36,6 +36,19 @@ where
         }
     }
 
+    /// Create a new IPRS code with the optimal depth heuristics trying to keep
+    /// number of columns in the base matrix small.
+    /// Currently, keeps number of columns <= 2^7 but this might be tweaked in
+    /// the future.
+    pub fn new_with_optimal_depth(row_len: usize) -> Self {
+        const MAX_BASE_COLS_LOG2: usize = 7;
+
+        let target_base_len = 1 << MAX_BASE_COLS_LOG2;
+        let depth = 1.max(((row_len / target_base_len).ilog2() as usize).div_ceil(3));
+
+        Self::new(row_len, depth)
+    }
+
     /// Encode without modular reduction, purely over the integers.
     fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
     where

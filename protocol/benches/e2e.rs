@@ -54,11 +54,6 @@ const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
     zinc_utils::CHECKED
 };
 
-const IPRS_DEPTH: usize = 1;
-
-// FIXME: Use flat matrices, i.e. those having just one row
-const LEGACY_IPRS_ROW_LEN: usize = 32 * (1 << (3 * IPRS_DEPTH));
-
 #[allow(clippy::type_complexity)]
 #[derive(Debug, Clone, Copy)]
 pub struct GenericBenchZipTypes<
@@ -266,13 +261,13 @@ type Pp<Zt> = (
     >,
 );
 
+/// Use row size equal to poly size, resulting in flat single-row matrices
 fn setup_pp(num_vars: usize) -> Pp<BenchZincTypes> {
     let poly_size = 1 << num_vars;
-    // FIXME: Use flat matrices, i.e. those having just one row
     (
-        ZipPlus::setup(poly_size, IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH)),
-        ZipPlus::setup(poly_size, IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH)),
-        ZipPlus::setup(poly_size, IprsCode::new(LEGACY_IPRS_ROW_LEN, IPRS_DEPTH)),
+        ZipPlus::setup(poly_size, IprsCode::new_with_optimal_depth(poly_size)),
+        ZipPlus::setup(poly_size, IprsCode::new_with_optimal_depth(poly_size)),
+        ZipPlus::setup(poly_size, IprsCode::new_with_optimal_depth(poly_size)),
     )
 }
 
