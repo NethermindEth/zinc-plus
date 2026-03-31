@@ -330,7 +330,7 @@ mod tests {
     };
     use zip_plus::{
         code::{
-            iprs::{IprsCode, PnttConfigF65537_32_64},
+            iprs::{IprsCode, PnttConfigF65537_32_128},
             raa::{RaaCode, RaaConfig},
         },
         pcs::structs::{ZipPlus, ZipPlusParams},
@@ -350,7 +350,7 @@ mod tests {
 
     pub struct BinPolyZipTypes {}
     impl ZipTypes for BinPolyZipTypes {
-        const NUM_COLUMN_OPENINGS: usize = 200;
+        const NUM_COLUMN_OPENINGS: usize = 147;
         type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
         type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Fmod = Uint<FIELD_LIMBS>;
@@ -372,7 +372,7 @@ mod tests {
 
     pub struct ArbitraryPolyZipTypesIprs {}
     impl ZipTypes for ArbitraryPolyZipTypesIprs {
-        const NUM_COLUMN_OPENINGS: usize = 200;
+        const NUM_COLUMN_OPENINGS: usize = 147;
         type Eval = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Fmod = Uint<FIELD_LIMBS>;
@@ -397,7 +397,7 @@ mod tests {
     /// RAA accumulation grows the bit-width, so Cw needs more bits than Eval.
     pub struct ArbitraryPolyZipTypesRaa {}
     impl ZipTypes for ArbitraryPolyZipTypesRaa {
-        const NUM_COLUMN_OPENINGS: usize = 200;
+        const NUM_COLUMN_OPENINGS: usize = 147;
         type Eval = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Cw = DensePolynomial<Int<K>, DEGREE_PLUS_ONE>;
         type Fmod = Uint<FIELD_LIMBS>;
@@ -422,7 +422,7 @@ mod tests {
 
     pub struct IntZipTypes {}
     impl ZipTypes for IntZipTypes {
-        const NUM_COLUMN_OPENINGS: usize = 200;
+        const NUM_COLUMN_OPENINGS: usize = 147;
         type Eval = ZtInt;
         type Cw = i128;
         type Fmod = Uint<FIELD_LIMBS>;
@@ -450,9 +450,10 @@ mod tests {
         type ArbitraryZt = ArbitraryPolyZipTypesIprs;
         type IntZt = IntZipTypes;
 
-        type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537_32_64<IPRS_DEPTH>, CHECKED>;
-        type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537_32_64<IPRS_DEPTH>, CHECKED>;
-        type IntLc = IprsCode<Self::IntZt, PnttConfigF65537_32_64<IPRS_DEPTH>, CHECKED>;
+        type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537_32_128<IPRS_DEPTH>, CHECKED>;
+        type ArbitraryLc =
+            IprsCode<Self::ArbitraryZt, PnttConfigF65537_32_128<IPRS_DEPTH>, CHECKED>;
+        type IntLc = IprsCode<Self::IntZt, PnttConfigF65537_32_128<IPRS_DEPTH>, CHECKED>;
     }
 
     const RAA_REP: usize = 4;

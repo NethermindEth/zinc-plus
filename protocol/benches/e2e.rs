@@ -120,7 +120,7 @@ where
     CombDotChal: InnerProduct<Comb, Chal, CombR> + Send + Sync,
     ArrCombRDotChal: InnerProduct<[CombR], Chal, CombR> + Send + Sync,
 {
-    const NUM_COLUMN_OPENINGS: usize = 200;
+    const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = Eval;
     type Cw = Cw;
     type Fmod = Fmod;
