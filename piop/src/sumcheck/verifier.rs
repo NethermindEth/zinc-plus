@@ -61,14 +61,22 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
     /// Run verifier at current round, given prover message.
     ///
     /// Normally, this function should perform actual verification. Instead,
-    /// `verify_round` only samples and stores randomness and perform
-    /// verifications altogether in `check_and_generate_subclaim` at
-    /// the last step.
+    /// `verify_round` only samples a challenge and calls recieve_round to store
+    /// it. While `check_and_generate_subclaim` performs verifications
+    /// altogether at the last step.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn verify_round(&mut self, prover_msg: &ProverMsg<F>, transcript: &mut impl Transcript) -> F
     where
         F::Inner: ConstTranscribable,
     {
+        let challenge: F = transcript.get_field_challenge(&self.config);
+        self.receive_round(prover_msg, challenge.clone());
+        challenge
+    }
+
+    /// Stores a challenge sampled by the verifier.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn receive_round(&mut self, prover_msg: &ProverMsg<F>, challenge: F) {
         if self.finished {
             panic!("Incorrect verifier state: Verifier is already finished.");
         }
@@ -76,9 +84,7 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
         // The constant term is omitted from prover messages. The verifier stores the
         // provided evaluations and will reconstruct the missing value in
         // `check_and_generate_subclaim`.
-
-        let msg: F = transcript.get_field_challenge(&self.config);
-        self.randomness.push(msg.clone());
+        self.randomness.push(challenge);
         self.polynomials_received.push(prover_msg.0.clone());
 
         // Now, verifier should set `expected` to P(r).
@@ -91,7 +97,6 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
         } else {
             self.round += 1;
         }
-        msg
     }
 
     /// Verify the sumcheck phase, and generate the subclaim.

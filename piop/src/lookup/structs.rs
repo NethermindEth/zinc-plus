@@ -12,9 +12,7 @@ use zinc_uair::LookupTableType;
 use crypto_primitives::PrimeField;
 use zinc_poly::mle::DenseMultilinearExtension;
 
-/// Sumcheck combination function: maps MLE evaluations to a single field
-/// element.
-pub type CombFn<F> = Box<dyn Fn(&[F]) -> F + Send + Sync>;
+use crate::CombFn;
 
 // ---------------------------------------------------------------------------
 // Instance types (input to the lookup protocols)

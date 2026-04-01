@@ -12,6 +12,7 @@ use crate::sumcheck::{prover::ProverMsg, verifier::VerifierState};
 
 use self::verifier::Subclaim;
 
+pub mod multi_degree;
 pub mod prover;
 // pub mod utils;
 pub mod verifier;
