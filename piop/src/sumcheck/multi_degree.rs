@@ -326,17 +326,17 @@ mod tests {
 
         let a_vals: Vec<F> = (0u32..8).map(|i| F::from(i + 1)).collect();
         let b_vals: Vec<F> = (0u32..8).map(|i| F::from(i + 10)).collect();
-        let inner_zero = F::from(0u32).inner().clone();
+        let inner_zero = *F::from(0u32).inner();
 
         let a_mle = DenseMultilinearExtension::from_evaluations_vec(
             num_vars,
-            a_vals.iter().map(|x| x.inner().clone()).collect(),
-            inner_zero.clone(),
+            a_vals.iter().map(|x| *x.inner()).collect(),
+            inner_zero,
         );
         let b_mle = DenseMultilinearExtension::from_evaluations_vec(
             num_vars,
-            b_vals.iter().map(|x| x.inner().clone()).collect(),
-            inner_zero.clone(),
+            b_vals.iter().map(|x| *x.inner()).collect(),
+            inner_zero,
         );
 
         let r: Vec<F> = vec![F::from(5u32), F::from(7u32), F::from(11u32)];
@@ -346,14 +346,14 @@ mod tests {
         let g0 = MultiDegreeSumcheckGroup::new(
             2,
             vec![eq_r.clone(), a_mle.clone(), b_mle.clone()],
-            Box::new(|v: &[F]| v[0].clone() * &(v[1].clone() + &v[2])),
+            Box::new(|v: &[F]| v[0] * (v[1] + v[2])),
         );
 
         // Group 1 (degree 3): eq · a · b
         let g1 = MultiDegreeSumcheckGroup::new(
             3,
             vec![eq_r.clone(), a_mle.clone(), b_mle.clone()],
-            Box::new(|v: &[F]| v[0].clone() * &v[1] * &v[2]),
+            Box::new(|v: &[F]| v[0] * v[1] * v[2]),
         );
 
         // Prove
@@ -377,12 +377,9 @@ mod tests {
 
         assert_eq!(
             subclaims.expected_evaluations[0],
-            eq_eval.clone() * &(a_eval.clone() + &b_eval)
+            eq_eval * (a_eval + b_eval)
         );
-        assert_eq!(
-            subclaims.expected_evaluations[1],
-            eq_eval * &a_eval * &b_eval
-        );
+        assert_eq!(subclaims.expected_evaluations[1], eq_eval * a_eval * b_eval);
     }
 
     /// Multi-degree sumcheck with a single group produces a valid subclaim.
@@ -392,10 +389,10 @@ mod tests {
         let cfg = &();
 
         let vals: Vec<F> = (0u32..4).map(|i| F::from(i + 1)).collect();
-        let inner_zero = F::from(0u32).inner().clone();
+        let inner_zero = *F::from(0u32).inner();
         let mle = DenseMultilinearExtension::from_evaluations_vec(
             num_vars,
-            vals.iter().map(|x| x.inner().clone()).collect(),
+            vals.iter().map(|x| *x.inner()).collect(),
             inner_zero,
         );
 
@@ -405,7 +402,7 @@ mod tests {
         let g = MultiDegreeSumcheckGroup::new(
             2,
             vec![eq_r.clone(), mle.clone()],
-            Box::new(|v: &[F]| v[0].clone() * &v[1]),
+            Box::new(|v: &[F]| v[0] * v[1]),
         );
 
         let mut pt = KeccakTranscript::new();
@@ -421,6 +418,6 @@ mod tests {
         let eq_eval = zinc_poly::utils::eq_eval(point, &r, F::from(1u32)).unwrap();
         let a_eval = mle.clone().evaluate_with_config(point, cfg).unwrap();
 
-        assert_eq!(subclaims.expected_evaluations[0], eq_eval * &a_eval);
+        assert_eq!(subclaims.expected_evaluations[0], eq_eval * a_eval);
     }
 }
