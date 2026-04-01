@@ -299,7 +299,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
         let mut verifier_states: Vec<VerifierState<F>> = (0..num_groups)
             .map(|j| {
                 let degree = proof.degrees[j];
-                let degree_field = F::from_with_cfg(proof.degrees[j] as u64, config);
+                let degree_field = F::from_with_cfg(degree as u64, config);
                 transcript.absorb_random_field(&degree_field, &mut buf);
 
                 VerifierState::new(num_vars, degree, config)

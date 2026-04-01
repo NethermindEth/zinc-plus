@@ -227,6 +227,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             })
             .try_collect()?;
 
+        debug_assert_eq!(evals.len(), ancillary.num_cols + ancillary.num_down_cols);
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
         transcript.absorb_random_field_slice(&evals, &mut transcription_buf);
         let (up_evals, down_evals) = (
