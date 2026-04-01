@@ -44,6 +44,7 @@ use zip_plus::{
     pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
     utils::eprint_proof_size,
 };
+
 //
 // Type definitions and constants
 //
@@ -53,6 +54,9 @@ const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
 } else {
     zinc_utils::CHECKED
 };
+
+/// Repetition factor for linear code, an inverse rate.
+const REP: usize = 4;
 
 #[allow(clippy::type_complexity)]
 #[derive(Debug, Clone, Copy)]
@@ -221,9 +225,9 @@ where
         MBSInnerProduct,
     >;
 
-    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, 4, PERFORM_CHECKS>;
-    type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, 4, PERFORM_CHECKS>;
-    type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, 4, PERFORM_CHECKS>;
+    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
+    type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
+    type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
 }
 
 //
