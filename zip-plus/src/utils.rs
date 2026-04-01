@@ -1,7 +1,6 @@
 use crate::pcs_transcript::PcsProverTranscript;
 use rand::{rngs::StdRng, seq::SliceRandom};
 use rand_core::SeedableRng;
-use std::io::Write;
 use zinc_transcript::traits::Transcribable;
 
 /// Reorder the elements in slice using the given randomness seed
@@ -48,22 +47,6 @@ pub fn eprint_bytes_size(label: impl std::fmt::Display, raw: &[u8]) {
     }
     print!("raw", raw.len());
 
-    let mut gzip_buf = Vec::new();
-    let mut gz = flate2::write::GzEncoder::new(&mut gzip_buf, flate2::Compression::best());
-    gz.write_all(raw).expect("gzip compression failed");
-    gz.finish().expect("gzip compression failed");
-    print!("gzip-best", gzip_buf.len());
-
     let zstd = zstd::encode_all(raw, 22).expect("zstd compression failed");
     print!("zstd-22", zstd.len());
-
-    let brotli_params = brotli::enc::BrotliEncoderParams {
-        quality: 11,
-        ..Default::default()
-    };
-    let mut brotli_buf = Vec::new();
-    let raw = raw.to_vec();
-    brotli::BrotliCompress(&mut raw.as_slice(), &mut brotli_buf, &brotli_params)
-        .expect("brotli compression failed");
-    print!("brotli-11", brotli_buf.len());
 }
