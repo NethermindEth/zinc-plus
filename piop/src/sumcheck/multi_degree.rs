@@ -13,11 +13,11 @@
 //!    - All groups fix variable `i` at `r_i`
 //! 3. Each group produces a subclaim at the shared point r = (r_1, ..., r_n)
 
-use std::marker::PhantomData;
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use num_traits::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use std::marker::PhantomData;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_utils::{cfg_iter, cfg_iter_mut, inner_transparent_field::InnerTransparentField};
