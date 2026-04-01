@@ -14,12 +14,13 @@
 //! 3. Each group produces a subclaim at the shared point r = (r_1, ..., r_n)
 
 use std::marker::PhantomData;
-
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use num_traits::Zero;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_utils::inner_transparent_field::InnerTransparentField;
+use zinc_utils::{cfg_iter, cfg_iter_mut, inner_transparent_field::InnerTransparentField};
 
 use crate::CombFn;
 
@@ -61,9 +62,20 @@ impl<F: PrimeField> MultiDegreeSumcheckGroup<F> {
 /// All groups share verifier challenges, common evaluation point.
 #[derive(Clone, Debug)]
 pub struct MultiDegreeSumcheckProof<F> {
+    /// List of prover messages, one for each round per group.
     group_messages: Vec<Vec<ProverMsg<F>>>,
+    // The claimed sum for the first round polynomial per group.
     claimed_sums: Vec<F>,
+    // Max degrees per group.
     degrees: Vec<usize>,
+}
+
+impl<F> MultiDegreeSumcheckProof<F> {
+    /// Needed by the verifier to check against expected
+    /// sums before running the sumcheck.
+    pub fn claimed_sums(&self) -> &[F] {
+        &self.claimed_sums
+    }
 }
 
 /// Sub-claims: shared evaluation point + per-group expected evaluation.
@@ -92,28 +104,44 @@ pub struct MultiDegreeSumcheck<F>(PhantomData<F>);
 impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
     /// Multi-degree sumcheck prover.
     ///
-    /// # Arguments
-    /// - `groups`: Vec of (degree, mles, comb_fn) per degree bucket
-    /// - `num_vars`: number of variables (same for all groups)
+    /// Runs the prover side of the sumcheck protocol for G degree groups
+    /// sharing one verifier challenge per round. Proves the claim:
     ///
-    /// # Algorithm
-    /// 1. Absorb metadata: num_vars (as field), num_groups (as field), each
-    ///    degree (as field)
-    /// 2. Create ProverState per group via ProverState::new(mles, num_vars,
-    ///    degree)
-    /// 3. Main loop (num_vars rounds):
-    ///    - Each group: state.prove_round(&verifier_msg, &comb_fn, config) →
-    ///      ProverMsg
-    ///    - Absorb each group's msg.0.tail_evaluations into transcript
-    ///    - Sample one shared challenge: transcript.get_field_challenge(config)
-    ///    - Absorb the challenge
-    ///    - Set verifier_msg = Some(challenge)
-    /// 4. Collect claimed_sums from each state.asserted_sum
-    /// 5. Push final challenge into each state.randomness
+    /// $$
+    /// \sum_{x \in \{0, 1\}^{\text{num\\_vars}}} G_g(x) =
+    /// \text{claimed\\_sum}_g \quad \forall g
+    /// $$
+    ///
+    /// where $G_g(x) = \text{comb\\_fn}_g(\text{mles}_g(x))$ is the combination
+    /// function for group $g$ applied to its MLEs.
+    ///
+    /// It is designed to be used as a subprotocol within a larger system.
+    /// since it takes the FS transcript (`transcript` argument) as input
+    /// and returns the **internal ProverState** alongside the sumcheck proof.
+    ///
+    /// Claimed sums are derived by the prover during the first round.
+    ///
+    /// # Arguments
+    ///
+    /// * `transcript`: Fiat-Shamir transcript.
+    /// * `groups`: One [`MultiDegreeSumcheckGroup`] per degree bucket, each
+    ///   carrying its MLEs and combination function.
+    /// * `num_vars`: Number of variables (must be consistent across all
+    ///   groups).
+    /// * `config`: Field configuration.
     ///
     /// # Returns
-    /// (MultiDegreeSumcheckProof, Vec<ProverState>) — states needed for MLE
-    /// evals after
+    ///
+    /// A tuple containing:
+    ///
+    /// 1. [`MultiDegreeSumcheckProof<F>`]: The proof (group messages, claimed
+    ///    sums, degrees).
+    /// 2. `Vec<ProverState<F>>`: Per-group prover states — needed by the caller
+    ///    to evaluate MLEs at the shared point after the sumcheck.
+    ///
+    /// # Panics
+    ///
+    /// * Panics if `num_vars == 0` or `groups` is empty.
     #[allow(clippy::type_complexity)]
     pub fn prove_as_subprotocol(
         transcript: &mut impl Transcript,
@@ -159,10 +187,19 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
             .unzip();
 
         for _ in 0..num_vars {
-            for j in 0..num_groups {
-                let prover_msg = prover_states[j].prove_round(&verifier_msg, &comb_fns[j], config);
-                transcript.absorb_random_field_slice(&prover_msg.0.tail_evaluations, &mut buf);
-                group_messages[j].push(prover_msg);
+            // Parallel: each group computes its round polynomial independently
+            let round_msgs: Vec<ProverMsg<F>> = cfg_iter_mut!(prover_states)
+                .zip(cfg_iter!(comb_fns))
+                .map(|(state, comb_fn)| state.prove_round(&verifier_msg, comb_fn, config))
+                .collect();
+
+            // Sequential: absorb in deterministic order, sample one shared challenge
+            for msg in &round_msgs {
+                transcript.absorb_random_field_slice(&msg.0.tail_evaluations, &mut buf);
+            }
+
+            for (j, msg) in round_msgs.into_iter().enumerate() {
+                group_messages[j].push(msg);
             }
 
             let next_verifier_msg = transcript.get_field_challenge(config);
@@ -197,23 +234,44 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
 
     /// Multi-degree sumcheck verifier.
     ///
-    /// # Algorithm
-    /// 1. Absorb metadata (must mirror prover): num_vars, num_groups, per-group
-    ///    degrees
-    /// 2. Create VerifierState per group via VerifierState::new(num_vars,
-    ///    degree, config)
-    /// 3. Validate proof.group_messages[g].len() == num_vars for all g
-    /// 4. Main loop (num_vars rounds):
-    ///    - Absorb each group's round message tail_evaluations
-    ///    - Sample one shared challenge: transcript.get_field_challenge(config)
-    ///    - Absorb the challenge
-    ///    - Each group: verifier_state.receive_round(&msg, challenge)
-    /// 5. Generate subclaims: each
-    ///    state.check_and_generate_subclaim(claimed_sum)
-    /// 6. Assert all subclaim points are equal (shared challenge → same point)
+    /// Runs the verifier side of the sumcheck protocol for G degree groups
+    /// sharing one verifier challenge per round. Verifies the claim:
+    ///
+    /// $$
+    /// \sum_{x \in \{0, 1\}^{\text{num\\_vars}}} G_g(x) =
+    /// \text{claimed\\_sum}_g \quad \forall g
+    /// $$
+    ///
+    /// where $G_g(x) = \text{comb\\_fn}_g(\text{mles}_g(x))$.
+    ///
+    /// It is designed to be used as a subprotocol within a larger system.
+    /// If successful, it returns **Subclaim** for each group, a final equation
+    /// that the outer protocol must satisfy for the overall sumcheck proof
+    /// to be valid.
+    ///
+    /// Mirrors the prover transcript exactly: absorbs metadata, then per-round
+    /// absorbs all group messages, samples one shared challenge, and calls
+    /// [`VerifierState::check_and_generate_subclaim`] per group. Per-group
+    /// degrees are read from the proof — no external degree parameter needed.
+    ///
+    /// # Arguments
+    ///
+    /// * `transcript`: Fiat-Shamir transcript (must match prover state at the
+    ///   start of the sumcheck).
+    /// * `num_vars`: Number of variables (sumcheck rounds).
+    /// * `proof`: The [`MultiDegreeSumcheckProof`] produced by the prover.
+    /// * `config`: Field configuration.
     ///
     /// # Returns
-    /// MultiDegreeSubClaims with shared point + per-group expected_evaluations
+    ///
+    /// * `Ok(MultiDegreeSubClaims<F>)`: Shared evaluation point `r*` and
+    ///   per-group expected evaluations. The caller must verify each group's
+    ///   MLE combination at `r*` equals its expected evaluation.
+    /// * `Err(SumCheckError<F>)`: If any round check fails.
+    ///
+    /// # Panics
+    ///
+    /// * Panics if `num_vars == 0` or the proof has no groups.
     pub fn verify_as_subprotocol(
         transcript: &mut impl Transcript,
         num_vars: usize,
@@ -281,6 +339,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
 
         let mut shared_point: Option<Vec<F>> = None;
         let mut expected_evaluations = Vec::with_capacity(num_groups);
+        // TODO: parallelize when multiple lookup groups exist
         for (j, state) in verifier_states.into_iter().enumerate() {
             let subclaim = state.check_and_generate_subclaim(proof.claimed_sums[j].clone())?;
             if let Some(ref p) = shared_point {

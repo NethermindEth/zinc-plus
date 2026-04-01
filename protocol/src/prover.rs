@@ -9,6 +9,7 @@ use zinc_piop::{
         ProjectedTrace, evaluate_trace_to_column_mles, project_scalars, project_scalars_to_field,
         project_trace_coeffs_column_major, project_trace_coeffs_row_major,
     },
+    sumcheck::multi_degree::MultiDegreeSumcheck,
 };
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
@@ -69,8 +70,11 @@ where
     ///    verifier checks ideal membership.
     /// 3. **Evaluation projection** (`\psi_a`: `F_q[X] -> F_q`): sample `a in
     ///    F_q`, evaluate polynomials at `X = a`.
-    /// 4. **F_q sumcheck**: finite-field sumcheck proving the projected
-    ///    constraint claim. Produces `up_evals` and `down_evals` at point `r'`.
+    /// 4. **Combined CPR + Lookup multi-degree sumcheck**: batches the CPR
+    ///    constraint claim (degree `max_deg+2`) with lookup groups (one per
+    ///    table type) into a single sumcheck sharing one evaluation point `r*`.
+    ///    Produces `up_evals` and `down_evals` (CPR) and lookup auxiliary
+    ///    witnesses at `r*`.
     /// 5. **Multi-point evaluation sumcheck**: single sumcheck combining
     ///    `up_evals` and `down_evals` at `r'` into a single evaluation point
     ///    `r_0`. Only the sumcheck proof is sent; scalar evaluations at `r_0`
@@ -166,7 +170,8 @@ where
         let max_degree = count_max_degree::<U>();
 
         // === Step 4: Sumcheck over F_q ===
-        let (cpr_proof, cpr_prover_state) = CombinedPolyResolver::prove_as_subprotocol::<U>(
+        // 4a: CPR prepare → sumcheck group
+        let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
             &mut pcs_transcript.fs_transcript,
             projected_trace_f.clone(),
             &ic_prover_state.evaluation_point,
@@ -176,6 +181,33 @@ where
             max_degree,
             &field_cfg,
         )?;
+
+        // 4b: Lookup prepare — placeholder
+        let lookup_specs = U::signature();
+        let groups = vec![cpr_group];
+        // TODO: for each LookupGroup from group_lookup_specs(lookup_specs):
+        //   - build BatchedDecompLookupInstance from projected_trace_f
+        //   - call prepare_batched_lookup_group(transcript, instance, &field_cfg)
+        //   - push triple into groups, collect pending proofs + metas
+        let _ = lookup_specs; // suppress unused warning until Phase 4c
+
+        // 4c: Multi-degree sumcheck width CPR group and lookup groups
+        let (combined_sumcheck, md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
+            &mut pcs_transcript.fs_transcript,
+            groups,
+            num_vars,
+            &field_cfg,
+        );
+        // 4c: Finalize up_evals, down_evals
+        let (cpr_proof, cpr_prover_state) = CombinedPolyResolver::finalize_prover(
+            &mut pcs_transcript.fs_transcript,
+            md_states.into_iter().next().expect("one CPR group"),
+            cpr_ancillary,
+            &field_cfg,
+        )?;
+
+        // TODO: build BatchedLookupProof from collected lookup_proofs + lookup_metas
+        let lookup_proof = None;
 
         // === Step 5: Multi-point evaluation sumcheck ===
         // Combines up_evals and down_evals at r' into a single evaluation
@@ -266,9 +298,11 @@ where
             commitments,
             ideal_check: ic_proof,
             resolver: cpr_proof,
+            combined_sumcheck,
             multipoint_eval: mp_proof,
             zip: zip_proof,
             witness_lifted_evals,
+            lookup_proof,
         })
     }
 }
