@@ -5,7 +5,7 @@ use crypto_primitives::{Field, crypto_bigint_const_monty::ConstMontyField};
 use num_traits::{ConstOne, ConstZero, Zero};
 use rand::RngCore;
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
-use zinc_transcript::{KeccakTranscript, traits::Transcript};
+use zinc_transcript::{Blake3Transcript, traits::Transcript};
 use zinc_utils::inner_transparent_field::InnerTransparentField;
 
 use crate::sumcheck::{
@@ -25,7 +25,7 @@ fn generate_sumcheck_proof<Rn: RngCore>(
     num_vars: usize,
     mut rng: &mut Rn,
 ) -> (usize, SumcheckProof<F>) {
-    let mut transcript = KeccakTranscript::default();
+    let mut transcript = Blake3Transcript::default();
 
     let ((poly_mles, poly_degree), products, _) =
         rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
@@ -51,7 +51,7 @@ fn full_sumcheck_protocol_works_correctly() {
     for _ in 0..20 {
         let (poly_degree, proof) = generate_sumcheck_proof(num_vars, &mut rng);
 
-        let mut transcript = KeccakTranscript::default();
+        let mut transcript = Blake3Transcript::default();
         let res =
             MLSumcheck::verify_as_subprotocol(&mut transcript, num_vars, poly_degree, &proof, &());
         assert!(res.is_ok())
@@ -73,7 +73,7 @@ fn subclaim_differs_with_incorrect_claimed_sum() {
     let mut rng = rand::rng();
     let num_vars = 3;
 
-    let mut transcript = KeccakTranscript::default();
+    let mut transcript = Blake3Transcript::default();
     let ((poly_mles, poly_degree), products, _) =
         rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
@@ -91,7 +91,7 @@ fn subclaim_differs_with_incorrect_claimed_sum() {
     let one = F::from(1u32);
     let incorrect_sum = proof.claimed_sum + one;
 
-    let mut clean_verifier_transcript = KeccakTranscript::default();
+    let mut clean_verifier_transcript = Blake3Transcript::default();
     let clean_subclaim = MLSumcheck::verify_as_subprotocol(
         &mut clean_verifier_transcript,
         num_vars,
@@ -103,7 +103,7 @@ fn subclaim_differs_with_incorrect_claimed_sum() {
 
     proof.claimed_sum = incorrect_sum;
 
-    let mut verifier_transcript = KeccakTranscript::default();
+    let mut verifier_transcript = Blake3Transcript::default();
     let res = MLSumcheck::verify_as_subprotocol(
         &mut verifier_transcript,
         num_vars,
@@ -122,7 +122,7 @@ fn subclaim_changes_when_prover_message_is_tampered() {
     let mut rng = rand::rng();
     let num_vars = 3;
 
-    let mut transcript = KeccakTranscript::default();
+    let mut transcript = Blake3Transcript::default();
     let ((poly_mles, poly_degree), products, _) =
         rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
@@ -137,7 +137,7 @@ fn subclaim_changes_when_prover_message_is_tampered() {
         &(),
     );
 
-    let mut clean_verifier_transcript = KeccakTranscript::default();
+    let mut clean_verifier_transcript = Blake3Transcript::default();
     let clean_subclaim = MLSumcheck::verify_as_subprotocol(
         &mut clean_verifier_transcript,
         num_vars,
@@ -151,7 +151,7 @@ fn subclaim_changes_when_prover_message_is_tampered() {
     let one: F = F::from(1u32);
     tampered_proof.messages[0].0[0] += one;
 
-    let mut verifier_transcript = KeccakTranscript::default();
+    let mut verifier_transcript = Blake3Transcript::default();
     let res = MLSumcheck::verify_as_subprotocol(
         &mut verifier_transcript,
         num_vars,
@@ -170,7 +170,7 @@ fn verifier_rejects_proof_with_wrong_degree() {
     let mut rng = rand::rng();
     let num_vars = 3;
 
-    let mut transcript = KeccakTranscript::default();
+    let mut transcript = Blake3Transcript::default();
     let ((poly_mles, poly_degree), products, _) =
         rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
@@ -187,7 +187,7 @@ fn verifier_rejects_proof_with_wrong_degree() {
 
     let incorrect_degree = poly_degree - 1;
 
-    let mut verifier_transcript = KeccakTranscript::default();
+    let mut verifier_transcript = Blake3Transcript::default();
     let res = MLSumcheck::verify_as_subprotocol(
         &mut verifier_transcript,
         num_vars,
@@ -209,7 +209,7 @@ fn protocol_is_deterministic_with_same_transcript() {
 
     let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
 
-    let mut transcript1 = KeccakTranscript::default();
+    let mut transcript1 = Blake3Transcript::default();
     let (proof1, _) = MLSumcheck::prove_as_subprotocol(
         &mut transcript1,
         poly_mles.clone(),
@@ -219,7 +219,7 @@ fn protocol_is_deterministic_with_same_transcript() {
         &(),
     );
 
-    let mut transcript2 = KeccakTranscript::default();
+    let mut transcript2 = Blake3Transcript::default();
     let (proof2, _) = MLSumcheck::prove_as_subprotocol(
         &mut transcript2,
         poly_mles,
@@ -245,7 +245,7 @@ fn different_polynomials_produce_different_proofs() {
         move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) }
     };
 
-    let mut transcript1 = KeccakTranscript::default();
+    let mut transcript1 = Blake3Transcript::default();
     let (proof1, _) = MLSumcheck::prove_as_subprotocol(
         &mut transcript1,
         poly_mles1.clone(),
@@ -261,7 +261,7 @@ fn different_polynomials_produce_different_proofs() {
 
     let comb_fn2 = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products1, ()) };
 
-    let mut transcript2 = KeccakTranscript::default();
+    let mut transcript2 = Blake3Transcript::default();
     let (proof2, _) = MLSumcheck::prove_as_subprotocol(
         &mut transcript2,
         poly_mles2,
@@ -293,7 +293,7 @@ fn sumcheck_with_zero_polynomial() {
 
     let comb_fn = |vals: &[F]| -> F { vals.iter().product() };
 
-    let mut transcript = KeccakTranscript::default();
+    let mut transcript = Blake3Transcript::default();
     let (proof, _) = MLSumcheck::prove_as_subprotocol(
         &mut transcript,
         poly_mles,
@@ -307,7 +307,7 @@ fn sumcheck_with_zero_polynomial() {
 
     assert!(proof.claimed_sum.is_zero());
 
-    let mut verifier_transcript = KeccakTranscript::default();
+    let mut verifier_transcript = Blake3Transcript::default();
     let res = MLSumcheck::verify_as_subprotocol(
         &mut verifier_transcript,
         num_vars,
@@ -342,7 +342,7 @@ fn sumcheck_with_constant_polynomial() {
 
     let comb_fn = |vals: &[F]| -> F { vals.iter().product() };
 
-    let mut transcript = KeccakTranscript::default();
+    let mut transcript = Blake3Transcript::default();
     let (proof, _) = MLSumcheck::prove_as_subprotocol(
         &mut transcript,
         poly_mles,
@@ -354,7 +354,7 @@ fn sumcheck_with_constant_polynomial() {
 
     assert_eq!(proof.claimed_sum, sum);
 
-    let mut verifier_transcript = KeccakTranscript::default();
+    let mut verifier_transcript = Blake3Transcript::default();
     let res = MLSumcheck::verify_as_subprotocol(
         &mut verifier_transcript,
         num_vars,
@@ -371,7 +371,7 @@ fn sumcheck_with_single_variable() {
     let mut rng = rand::rng();
     let num_vars = 1;
 
-    let mut transcript = KeccakTranscript::default();
+    let mut transcript = Blake3Transcript::default();
     let ((poly_mles, poly_degree), products, _) =
         rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
@@ -386,7 +386,7 @@ fn sumcheck_with_single_variable() {
         &(),
     );
 
-    let mut verifier_transcript = KeccakTranscript::default();
+    let mut verifier_transcript = Blake3Transcript::default();
     let res = MLSumcheck::verify_as_subprotocol(
         &mut verifier_transcript,
         num_vars,
@@ -403,7 +403,7 @@ fn subclaim_changes_if_transcript_is_tampered() {
     let mut rng = rand::rng();
     let num_vars = 3;
 
-    let mut prover_transcript = KeccakTranscript::default();
+    let mut prover_transcript = Blake3Transcript::default();
     let ((poly_mles, poly_degree), products, _) =
         rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
@@ -418,7 +418,7 @@ fn subclaim_changes_if_transcript_is_tampered() {
         &(),
     );
 
-    let mut clean_transcript = KeccakTranscript::default();
+    let mut clean_transcript = Blake3Transcript::default();
     let clean_res = MLSumcheck::verify_as_subprotocol(
         &mut clean_transcript,
         num_vars,
@@ -428,7 +428,7 @@ fn subclaim_changes_if_transcript_is_tampered() {
     )
     .unwrap();
 
-    let mut tampered_transcript = KeccakTranscript::default();
+    let mut tampered_transcript = Blake3Transcript::default();
     tampered_transcript.absorb_slice(b"tampering the transcript");
     let tampered_res = MLSumcheck::verify_as_subprotocol(
         &mut tampered_transcript,
@@ -472,7 +472,7 @@ fn verifier_errors_on_incomplete_proof() {
     let mut rng = rand::rng();
     let num_vars = 3;
 
-    let mut transcript = KeccakTranscript::default();
+    let mut transcript = Blake3Transcript::default();
     let ((poly_mles, poly_degree), products, _) =
         rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
 
@@ -490,7 +490,7 @@ fn verifier_errors_on_incomplete_proof() {
     let mut incomplete_proof = proof.clone();
     incomplete_proof.messages.pop(); // Remove last prover message
 
-    let mut verifier_transcript = KeccakTranscript::default();
+    let mut verifier_transcript = Blake3Transcript::default();
 
     let res = MLSumcheck::verify_as_subprotocol(
         &mut verifier_transcript,
@@ -515,7 +515,7 @@ fn prover_handles_empty_mle_list() {
 
     let comb_fn = |_vals: &[F]| -> F { F::ZERO };
 
-    let mut transcript = KeccakTranscript::default();
+    let mut transcript = Blake3Transcript::default();
     let (proof, _) = MLSumcheck::prove_as_subprotocol(
         &mut transcript,
         poly_mles,
@@ -525,7 +525,7 @@ fn prover_handles_empty_mle_list() {
         &(),
     );
 
-    let mut verifier_transcript = KeccakTranscript::default();
+    let mut verifier_transcript = Blake3Transcript::default();
     let res = MLSumcheck::verify_as_subprotocol(
         &mut verifier_transcript,
         num_vars,
@@ -545,7 +545,7 @@ fn verifier_errors_on_mismatched_nvars() {
 
     let (poly_degree, proof) = generate_sumcheck_proof(nvars_prover, &mut rng);
 
-    let mut transcript = KeccakTranscript::default();
+    let mut transcript = Blake3Transcript::default();
     let res = MLSumcheck::verify_as_subprotocol(
         &mut transcript,
         nvars_verifier, // verifier expects more rounds than the proof contains
@@ -566,7 +566,7 @@ fn verifier_produces_correct_subclaim() {
     let mut rng = rand::rng();
     let nvars = 3;
 
-    let mut prover_transcript = KeccakTranscript::default();
+    let mut prover_transcript = Blake3Transcript::default();
     let ((poly_mles, poly_degree), products, _) = rand_poly(nvars, 2..5, 7, &mut rng, &()).unwrap();
 
     let original_mles = poly_mles.clone();
@@ -583,7 +583,7 @@ fn verifier_produces_correct_subclaim() {
         &(),
     );
 
-    let mut verifier_transcript = KeccakTranscript::default();
+    let mut verifier_transcript = Blake3Transcript::default();
     let subclaim = MLSumcheck::verify_as_subprotocol(
         &mut verifier_transcript,
         nvars,
@@ -618,7 +618,7 @@ fn zero_variable_case_returns_correct_subclaim() {
         claimed_sum,
     };
 
-    let mut transcript = KeccakTranscript::default();
+    let mut transcript = Blake3Transcript::default();
     let _subclaim =
         MLSumcheck::verify_as_subprotocol(&mut transcript, num_vars, degree, &proof, &());
 }

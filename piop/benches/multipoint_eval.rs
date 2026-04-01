@@ -10,7 +10,7 @@ use rand::{Rng, rng};
 use zinc_piop::multipoint_eval::MultipointEval;
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
 use zinc_primality::MillerRabin;
-use zinc_transcript::{KeccakTranscript, traits::Transcript};
+use zinc_transcript::{Blake3Transcript, traits::Transcript};
 use zinc_uair::ShiftSpec;
 
 const FIELD_LIMBS: usize = 4;
@@ -21,7 +21,7 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
     let n = 1usize << num_vars;
     let params = format!("nvars={}/cols={}", num_vars, num_cols);
 
-    let mut transcript = KeccakTranscript::new();
+    let mut transcript = Blake3Transcript::new();
     let field_cfg = transcript.get_random_field_cfg::<F, Uint<FIELD_LIMBS>, MillerRabin>();
     let zero_inner = F::from_with_cfg(0u32, &field_cfg).into_inner();
 
@@ -72,7 +72,7 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
     let mut group = c.benchmark_group("Multipoint eval");
 
     // Prepare a transcript with the seed absorbed once.
-    let mut base_transcript = KeccakTranscript::new();
+    let mut base_transcript = Blake3Transcript::new();
     base_transcript.absorb_slice(b"bench");
 
     // --- Bench prover ---
@@ -99,7 +99,7 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
 
     // --- Bench verifier ---
     // First produce a valid proof.
-    let mut prover_transcript = KeccakTranscript::new();
+    let mut prover_transcript = Blake3Transcript::new();
     prover_transcript.absorb_slice(b"bench");
     let (proof, prover_state) = MultipointEval::<F>::prove_as_subprotocol(
         &mut prover_transcript,

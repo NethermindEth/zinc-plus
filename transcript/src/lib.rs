@@ -2,29 +2,28 @@ pub mod traits;
 
 use crate::traits::{ConstTranscribable, GenTranscribable, Transcript};
 use crypto_primitives::{ConstIntSemiring, PrimeField};
-use sha3::{Digest, Keccak256};
 use zinc_primality::PrimalityTest;
 use zinc_utils::add;
 
-/// A cryptographic transcript implementation using the Keccak-256 hash
+/// A cryptographic transcript implementation using the BLAKE3 hash
 /// function. Used for Fiat-Shamir transformations in zero-knowledge proof
 /// systems.
 #[derive(Debug, Clone)]
-pub struct KeccakTranscript {
-    /// The underlying Keccak-256 hasher that maintains the transcript state.
-    hasher: Keccak256,
+pub struct Blake3Transcript {
+    /// The underlying BLAKE3 hasher that maintains the transcript state.
+    hasher: blake3::Hasher,
 }
 
-impl Default for KeccakTranscript {
+impl Default for Blake3Transcript {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl KeccakTranscript {
+impl Blake3Transcript {
     pub fn new() -> Self {
         Self {
-            hasher: Keccak256::new(),
+            hasher: blake3::Hasher::new(),
         }
     }
 
@@ -35,19 +34,7 @@ impl KeccakTranscript {
     /// Note that this does NOT update the internal state of the hasher
     #[allow(clippy::arithmetic_side_effects)]
     fn fill_with_random_bytes(&mut self, buf: &mut [u8]) {
-        let mut counter = 0;
-        let mut filled_length = 0;
-        while filled_length < buf.len() {
-            let mut temp_hasher = self.hasher.clone();
-            temp_hasher.update(i32::to_le_bytes(counter));
-            let hash = temp_hasher.finalize();
-            let start = filled_length;
-            let end = (filled_length + hash.len()).min(buf.len());
-            buf[start..end].copy_from_slice(&hash[0..(end - start)]);
-
-            filled_length += hash.len();
-            counter += 1;
-        }
+        self.hasher.finalize_xof().fill(buf);
     }
 
     fn gen_random<R: ConstTranscribable>(&mut self, buf: &mut [u8]) -> R {
@@ -57,13 +44,13 @@ impl KeccakTranscript {
     }
 }
 
-impl Transcript for KeccakTranscript {
+impl Transcript for Blake3Transcript {
     fn get_challenge<T: ConstTranscribable>(&mut self) -> T {
         let mut buf = vec![0u8; T::NUM_BYTES];
         self.fill_with_random_bytes(&mut buf);
-        self.hasher.update([0x12]);
-        self.hasher.update(&mut buf);
-        self.hasher.update([0x34]);
+        self.hasher.update(&[0x12]);
+        self.hasher.update(&buf);
+        self.hasher.update(&[0x34]);
         T::read_transcription_bytes_exact(&buf)
     }
 

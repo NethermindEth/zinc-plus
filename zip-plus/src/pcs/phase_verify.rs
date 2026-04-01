@@ -14,7 +14,7 @@ use num_traits::{ConstOne, ConstZero, Zero};
 use rayon::prelude::*;
 use zinc_poly::Polynomial;
 use zinc_transcript::{
-    KeccakTranscript,
+    Blake3Transcript,
     traits::{Transcribable, Transcript},
 };
 use zinc_utils::{
@@ -245,7 +245,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     /// alphas, perform alpha-projection externally, and then call
     /// [`Self::verify_with_alphas`].
     pub fn sample_alphas(
-        transcript: &mut KeccakTranscript,
+        transcript: &mut Blake3Transcript,
         batch_size: usize,
     ) -> Vec<Vec<Zt::Chal>> {
         let degree_bound = Zt::Comb::DEGREE_BOUND;
