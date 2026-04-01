@@ -61,7 +61,7 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
     /// Run verifier at current round, given prover message.
     ///
     /// Normally, this function should perform actual verification. Instead,
-    /// `verify_round` only samples a challenge and calls recieve_round to store
+    /// `verify_round` only samples a challenge and calls receive_round to store
     /// it. While `check_and_generate_subclaim` performs verifications
     /// altogether at the last step.
     #[allow(clippy::arithmetic_side_effects)]
