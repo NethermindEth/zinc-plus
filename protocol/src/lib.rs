@@ -18,6 +18,7 @@
 //! - Step 7: Zip+ PCS open/verify at r_0
 
 pub mod prover;
+pub mod stepped;
 pub mod verifier;
 
 #[cfg(feature = "parallel")]
