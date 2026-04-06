@@ -42,8 +42,8 @@ use zinc_utils::{
 use zip_plus::{
     code::iprs::{IprsCode, PnttConfigF65537_32_128},
     pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
+    utils::eprint_proof_size,
 };
-
 //
 // Type definitions and constants
 //
@@ -362,6 +362,8 @@ fn do_bench<Zt, U, IdealOverF>(
             BatchSize::SmallInput,
         );
     });
+
+    eprint_proof_size(&params, &proof);
 }
 
 //

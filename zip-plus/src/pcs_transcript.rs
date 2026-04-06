@@ -4,7 +4,7 @@ use itertools::Itertools;
 use std::io::{Cursor, ErrorKind, Read, Write};
 use zinc_transcript::{
     KeccakTranscript,
-    traits::{ConstTranscribable, Transcribable, Transcript},
+    traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript},
 };
 use zinc_utils::{add, mul, rem};
 
@@ -52,6 +52,8 @@ pub struct PcsProverTranscript {
     pub stream: Cursor<Vec<u8>>,
 }
 
+// TODO(alex): Review this vs Transcribable, there is some overlap that needs to
+//             be resolved
 impl PcsProverTranscript {
     pub fn new_from_commitment(comm: &ZipPlusCommitment) -> Self {
         Self::new_from_commitments(std::slice::from_ref(comm).iter())
@@ -132,25 +134,35 @@ impl PcsProverTranscript {
         F::Modulus: Transcribable,
     {
         self.fs_transcript.absorb_random_field(fe, buf);
-        fe.modulus().write_transcription_bytes(buf);
+        fe.modulus().write_transcription_bytes_exact(buf);
         self.stream.write_all(buf)?;
-        fe.inner().write_transcription_bytes(buf);
+        fe.inner().write_transcription_bytes_exact(buf);
         self.stream.write_all(buf)?;
         Ok(())
     }
 
-    pub fn write_const<T: ConstTranscribable>(&mut self, v: &T) -> Result<(), ZipError> {
+    pub fn write<T: Transcribable>(&mut self, v: &T) -> Result<(), ZipError> {
+        let data_len = v.get_num_bytes();
+
+        // Write the length prefix when it is not known at compile time.
+        if T::LENGTH_NUM_BYTES > 0 {
+            let len_bytes = data_len
+                .to_le_bytes()
+                .into_iter()
+                .take(T::LENGTH_NUM_BYTES)
+                .collect_vec();
+            self.stream.write_all(&len_bytes)?;
+        }
+
         let prev_pos = safe_cast!(self.stream.position(), u64, usize)?;
-        let data_len = T::NUM_BYTES;
         let next_pos = add!(prev_pos, data_len);
 
         let inner = self.stream.get_mut();
-        // Enlarge the inner buffer if needed
         if inner.len() < next_pos {
             inner.resize(next_pos, 0_u8);
         }
 
-        v.write_transcription_bytes(&mut inner[prev_pos..next_pos]);
+        v.write_transcription_bytes_exact(&mut inner[prev_pos..next_pos]);
 
         self.stream.set_position(safe_cast!(next_pos, usize, u64)?);
         Ok(())
@@ -184,7 +196,7 @@ impl PcsProverTranscript {
         inner[prev_pos..next_pos]
             .chunks_mut(T::NUM_BYTES)
             .zip(vs)
-            .for_each(|(chunk, v)| v.write_transcription_bytes(chunk));
+            .for_each(|(chunk, v)| v.write_transcription_bytes_exact(chunk));
 
         self.stream.set_position(next_pos as u64);
         Ok(())
@@ -192,7 +204,7 @@ impl PcsProverTranscript {
 
     fn write_usize(&mut self, value: usize) -> Result<(), ZipError> {
         let value_u64 = safe_cast!(value, usize, u64)?;
-        self.write_const(&value_u64)
+        self.write(&value_u64)
     }
 
     pub fn write_merkle_proof(&mut self, proof: &MerkleProof) -> Result<(), ZipError> {
@@ -261,18 +273,29 @@ impl PcsVerifierTranscript {
         F::Modulus: Transcribable,
     {
         self.stream.read_exact(buf)?;
-        let modulus = F::Modulus::read_transcription_bytes(buf);
+        let modulus = F::Modulus::read_transcription_bytes_exact(buf);
         self.stream.read_exact(buf)?;
-        let inner = F::Inner::read_transcription_bytes(buf);
+        let inner = F::Inner::read_transcription_bytes_exact(buf);
         let field_cfg = F::make_cfg(&modulus)?;
         let fe = F::new_unchecked_with_cfg(inner, &field_cfg);
         self.fs_transcript.absorb_random_field(&fe, buf);
         Ok(fe)
     }
 
-    pub fn read_const<T: ConstTranscribable>(&mut self) -> Result<T, ZipError> {
-        read_stream_slice(&mut self.stream, T::NUM_BYTES, |slice| {
-            Ok(T::read_transcription_bytes(slice))
+    pub fn read<T: Transcribable>(&mut self) -> Result<T, ZipError> {
+        let data_len = if T::LENGTH_NUM_BYTES > 0 {
+            let mut len_buf = vec![0u8; T::LENGTH_NUM_BYTES];
+            self.stream.read_exact(&mut len_buf)?;
+            T::read_num_bytes(&len_buf)
+        } else {
+            // LENGTH_NUM_BYTES == 0 means size is known at compile time via
+            // the ConstTranscribable blanket impl; read_num_bytes accepts an
+            // empty slice in that case.
+            T::read_num_bytes(&[])
+        };
+
+        read_stream_slice(&mut self.stream, data_len, |slice| {
+            Ok(T::read_transcription_bytes_exact(slice))
         })
     }
 
@@ -280,13 +303,13 @@ impl PcsVerifierTranscript {
         read_stream_slice(&mut self.stream, mul!(n, T::NUM_BYTES), |slice| {
             Ok(slice
                 .chunks(T::NUM_BYTES)
-                .map(T::read_transcription_bytes)
+                .map(T::read_transcription_bytes_exact)
                 .collect_vec())
         })
     }
 
     fn read_usize(&mut self) -> Result<usize, ZipError> {
-        let value = self.read_const::<u64>()?;
+        let value = self.read::<u64>()?;
         safe_cast!(value, u64, usize)
     }
 
@@ -394,7 +417,7 @@ mod tests {
     fn test_pcs_transcript_read_write() {
         // Test hash
         let original_hash = MtHash::default();
-        test_read_write!(write_const, read_const, original_hash, "hash");
+        test_read_write!(write, read, original_hash, "hash");
 
         // Test vector of hashed
         let original_hashes = vec![MtHash::default(); 1024];

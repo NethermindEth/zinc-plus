@@ -1,10 +1,10 @@
-use crypto_primitives::PrimeField;
-
 use crate::{combined_poly_resolver::CombinedPolyResolverError, sumcheck::SumcheckProof};
+use crypto_primitives::PrimeField;
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable};
 
 /// The proof type of the combined polynomial resolver
 /// subprotocol.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proof<F: PrimeField> {
     /// A proof of the inner sumcheck subprotocol used
     /// for resolving combined polynomial evaluation claims.
@@ -13,6 +13,46 @@ pub struct Proof<F: PrimeField> {
     pub up_evals: Vec<F>,
     /// The evaluations of the shifted projected trace columns MLEs.
     pub down_evals: Vec<F>,
+}
+
+impl<F: PrimeField> GenTranscribable for Proof<F>
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        let (sumcheck_proof, bytes) = SumcheckProof::<F>::read_transcription_bytes_subset(bytes);
+        let (up_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
+        let (down_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
+        assert!(bytes.is_empty(), "All bytes should be consumed");
+        Self {
+            sumcheck_proof,
+            up_evals,
+            down_evals,
+        }
+    }
+
+    fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
+        let buf = self.sumcheck_proof.write_transcription_bytes_subset(buf);
+        let buf = self.up_evals.write_transcription_bytes_subset(buf);
+        let buf = self.down_evals.write_transcription_bytes_subset(buf);
+        assert!(buf.is_empty(), "Entire buffer should be used");
+    }
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+impl<F: PrimeField> Transcribable for Proof<F>
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    fn get_num_bytes(&self) -> usize {
+        // Each sub-field is written as u32 prefix + data
+        3 * u32::NUM_BYTES
+            + self.sumcheck_proof.get_num_bytes()
+            + self.up_evals.get_num_bytes()
+            + self.down_evals.get_num_bytes()
+    }
 }
 
 impl<F: PrimeField> Proof<F> {

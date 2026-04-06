@@ -35,11 +35,13 @@ use zinc_poly::{
     ConstCoeffBitWidth, EvaluationError as PolyEvaluationError,
     mle::DenseMultilinearExtension,
     univariate::{
-        binary::BinaryPoly, dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF,
+        binary::BinaryPoly,
+        dense::DensePolynomial,
+        dynamic::over_field::{DynamicPolyVecF, DynamicPolynomialF},
     },
 };
 use zinc_primality::PrimalityTest;
-use zinc_transcript::traits::{ConstTranscribable, Transcript};
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
 use zinc_uair::{Uair, ideal::Ideal};
 use zinc_utils::{cfg_extend, cfg_into_iter, cfg_iter, named::Named};
 use zip_plus::{
@@ -53,7 +55,7 @@ use zip_plus::{
 //
 
 /// Full proof produced by the Zinc+ PIOP for UCS.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proof<F: PrimeField> {
     /// Zip+ commitments to the witness columns.
     pub commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
@@ -73,6 +75,94 @@ pub struct Proof<F: PrimeField> {
     /// interleaves them with these, and derives scalar open_evals via
     /// \psi_a for the sumcheck consistency check and Zip+ PCS verify.
     pub witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
+}
+
+impl<F> GenTranscribable for Proof<F>
+where
+    F: PrimeField,
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        let (commit0, bytes) = ZipPlusCommitment::read_transcription_bytes_subset(bytes);
+        let (commit1, bytes) = ZipPlusCommitment::read_transcription_bytes_subset(bytes);
+        let (commit2, bytes) = ZipPlusCommitment::read_transcription_bytes_subset(bytes);
+
+        let (zip_len, bytes) = u32::read_transcription_bytes_subset(bytes);
+        let zip_len = usize::try_from(zip_len).expect("zip length must fit into usize");
+        let (zip_bytes, bytes) = bytes.split_at(zip_len);
+        let zip = zip_bytes.to_vec();
+
+        let (ideal_check, bytes) = IdealCheckProof::<F>::read_transcription_bytes_subset(bytes);
+        let (resolver, bytes) =
+            CombinedPolyResolverProof::<F>::read_transcription_bytes_subset(bytes);
+        let (multipoint_eval, bytes) =
+            MultipointEvalProof::<F>::read_transcription_bytes_subset(bytes);
+
+        let (witness_vec, bytes) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
+        let witness_lifted_evals = witness_vec.0;
+
+        assert!(bytes.is_empty(), "All bytes should be consumed");
+
+        Self {
+            commitments: (commit0, commit1, commit2),
+            zip,
+            ideal_check,
+            resolver,
+            multipoint_eval,
+            witness_lifted_evals,
+        }
+    }
+
+    fn write_transcription_bytes_exact(&self, mut buf: &mut [u8]) {
+        // 3 commitments (ConstTranscribable - no length prefix)
+        buf = self.commitments.0.write_transcription_bytes_subset(buf);
+        buf = self.commitments.1.write_transcription_bytes_subset(buf);
+        buf = self.commitments.2.write_transcription_bytes_subset(buf);
+
+        // zip: u32 length + raw bytes
+        let zip_len = u32::try_from(self.zip.len()).expect("zip length must fit into u32");
+        zip_len.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
+        buf = &mut buf[u32::NUM_BYTES..];
+        buf[..self.zip.len()].copy_from_slice(&self.zip);
+        buf = &mut buf[self.zip.len()..];
+
+        // ideal_check: u32 length prefix + data
+        buf = self.ideal_check.write_transcription_bytes_subset(buf);
+
+        // resolver: u32 length prefix + data
+        buf = self.resolver.write_transcription_bytes_subset(buf);
+
+        // multipoint_eval: u32 length prefix + data
+        buf = self.multipoint_eval.write_transcription_bytes_subset(buf);
+
+        // witness_lifted_evals: u32 length prefix + DynamicPolyVecF encoding
+        DynamicPolyVecF::reinterpret(&self.witness_lifted_evals)
+            .write_transcription_bytes_subset(buf);
+    }
+}
+
+impl<F> Transcribable for Proof<F>
+where
+    F: PrimeField,
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    #[allow(clippy::arithmetic_side_effects)]
+    fn get_num_bytes(&self) -> usize {
+        let witness_vec = DynamicPolyVecF::reinterpret(&self.witness_lifted_evals);
+        3 * ZipPlusCommitment::NUM_BYTES
+            + u32::NUM_BYTES
+            + self.zip.len()
+            + IdealCheckProof::<F>::LENGTH_NUM_BYTES
+            + self.ideal_check.get_num_bytes()
+            + CombinedPolyResolverProof::<F>::LENGTH_NUM_BYTES
+            + self.resolver.get_num_bytes()
+            + MultipointEvalProof::<F>::LENGTH_NUM_BYTES
+            + self.multipoint_eval.get_num_bytes()
+            + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
+            + witness_vec.get_num_bytes()
+    }
 }
 
 /// Trait bundling the various type parameters for the public inputs (NYI),
@@ -195,7 +285,7 @@ fn absorb_public_columns<T: ConstTranscribable>(
     let mut buf = vec![0u8; T::NUM_BYTES];
     for col in cols {
         for entry in col.iter() {
-            entry.write_transcription_bytes(&mut buf);
+            entry.write_transcription_bytes_exact(&mut buf);
             transcript.absorb_slice(&buf);
         }
     }
@@ -334,6 +424,7 @@ mod tests {
             raa::{RaaCode, RaaConfig},
         },
         pcs::structs::{ZipPlus, ZipPlusParams},
+        pcs_transcript::PcsProverTranscript,
     };
 
     const INT_LIMBS: usize = U64::LIMBS;
@@ -553,6 +644,15 @@ mod tests {
                     CHECKED,
                 >(&pp, &trace, num_vars, project_scalar_fn)
                 .expect("Prover failed");
+
+                // Checking that the proof can be properly serialized and deserialized
+                let mut transcript = PcsProverTranscript::new_from_commitments(std::iter::empty());
+                transcript.write(&proof).expect("Failed to serialize proof");
+                let mut transcript = transcript.into_verification_transcript();
+                let proof_2 = transcript
+                    .read()
+                    .expect("Failed to deserialize proof after serialization");
+                assert_eq!(proof, proof_2);
 
                 tamper(&mut proof);
 

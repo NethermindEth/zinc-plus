@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
-use zinc_transcript::traits::{ConstTranscribable, Transcribable, Transcript};
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
 use zinc_utils::{
     from_ref::FromRef, mul_by_scalar::MulByScalar, named::Named,
     projectable_to_field::ProjectableToField,
@@ -26,8 +26,9 @@ use zinc_utils::{
 use zip_plus::{
     code::LinearCode,
     merkle::MerkleTree,
-    pcs::structs::{ZipPlus, ZipTypes},
+    pcs::structs::{ZipPlus, ZipPlusCommitment, ZipTypes},
     pcs_transcript::PcsProverTranscript,
+    utils::eprint_proof_size,
 };
 
 const INT_LIMBS: usize = U64::LIMBS;
@@ -249,6 +250,22 @@ pub fn prove<
 
     let point = vec![Zt::Pt::one(); P];
 
+    macro_rules! do_prove {
+        ($t:expr) => {
+            ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>($t, &params, &polys, &point, &hint, &field_cfg)
+                .expect("Prove failed")
+        };
+    }
+
+    let combined_proof = {
+        let mut t = transcript.clone();
+        do_prove!(&mut t);
+        CombinedProof {
+            comm: commitment.clone(),
+            proof_transcript: t.stream.into_inner(),
+        }
+    };
+
     group.bench_function(
         format!(
             "Prove(batch={BATCH}): Eval={}, Cw={}, Comb={}, poly_size=2^{P}, modulus=({} bits)",
@@ -263,21 +280,18 @@ pub fn prove<
                 for _ in 0..iters {
                     let mut transcript = transcript.clone();
                     let timer = Instant::now();
-                    let result = ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>(
-                        &mut transcript,
-                        &params,
-                        &polys,
-                        &point,
-                        &hint,
-                        &field_cfg,
-                    )
-                    .expect("Prove failed");
+                    let result = do_prove!(&mut transcript);
                     total_duration += timer.elapsed();
                     black_box(result);
                 }
                 total_duration
             })
         },
+    );
+
+    eprint_proof_size(
+        format_args!("batch={BATCH}, poly_size=2^{P}"),
+        &combined_proof,
     );
 }
 
@@ -331,6 +345,11 @@ pub fn verify<
 
     let transcript = transcript.into_verification_transcript();
 
+    let combined_proof = CombinedProof {
+        comm: commitment.clone(),
+        proof_transcript: transcript.stream.get_ref().clone(),
+    };
+
     group.bench_function(
         format!(
             "Verify(batch={BATCH}): Eval={}, Cw={}, Comb={}, poly_size=2^{P}, modulus=({} bits)",
@@ -371,4 +390,36 @@ pub fn verify<
             })
         },
     );
+
+    eprint_proof_size(
+        format_args!("batch={BATCH}, poly_size=2^{P}"),
+        &combined_proof,
+    );
+}
+
+//
+// Helpers
+//
+
+/// Used to calculate total proof size
+struct CombinedProof {
+    comm: ZipPlusCommitment,
+    proof_transcript: Vec<u8>,
+}
+
+impl GenTranscribable for CombinedProof {
+    fn read_transcription_bytes_exact(_bytes: &[u8]) -> Self {
+        unimplemented!("We don't need to read this proof")
+    }
+
+    fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
+        let buf = self.comm.write_transcription_bytes_subset(buf);
+        buf.copy_from_slice(&self.proof_transcript);
+    }
+}
+
+impl Transcribable for CombinedProof {
+    fn get_num_bytes(&self) -> usize {
+        self.comm.get_num_bytes() + self.proof_transcript.len()
+    }
 }

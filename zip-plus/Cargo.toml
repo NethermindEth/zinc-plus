@@ -29,6 +29,9 @@ rayon = { workspace = true, optional = true }
 blake3 = "1.8.2"
 uninit = "0.6.2"
 
+# Compression libraries, used only to estimate compressed proof sizes
+zstd = "0.13"
+
 [dev-dependencies]
 criterion = { workspace = true }
 proptest = { workspace = true }
