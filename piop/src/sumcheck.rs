@@ -74,7 +74,6 @@ where
             &mut buf[u32::NUM_BYTES..]
         };
         for msg in &self.messages {
-            // This allows writing untrimmed polynomials without overhead
             let evals = &msg.0.tail_evaluations;
             buf = {
                 let len = u32::try_from(evals.len()).expect("messages length must fit into u32");

@@ -16,6 +16,7 @@ use zinc_utils::{add, from_ref::FromRef, mul};
 pub trait GenTranscribable: Sized {
     /// Creates a new instance from a byte buffer.
     /// The buffer must be exactly the expected length.
+    // TODO(alex): Return a Result instead of panicking
     fn read_transcription_bytes_exact(bytes: &[u8]) -> Self;
 
     /// Transcribes the current instance into a byte buffer.
@@ -51,6 +52,7 @@ pub trait Transcribable: GenTranscribable {
     fn read_transcription_bytes_subset(bytes: &[u8]) -> (Self, &[u8]) {
         let (bytes_num_bytes, bytes_rem) = bytes.split_at(Self::LENGTH_NUM_BYTES);
         let num_bytes = Self::read_num_bytes(bytes_num_bytes);
+        // TODO(alex): Return a Result instead of panicking
         assert!(
             bytes_rem.len() >= num_bytes,
             "Byte slice length is not sufficient for reading Transcribable"

@@ -416,7 +416,12 @@ where
         if bytes.is_empty() {
             return vec![].into();
         }
-        let modulus_present = bytes[0] == 1;
+
+        let modulus_present = match bytes[0] {
+            0 => false,
+            1 => true,
+            v => panic!("Invalid modulus presence flag: expected 0 or 1, got {v}"),
+        };
         let mut bytes = &bytes[1..];
         let cfg_option = if modulus_present {
             let mod_size = F::Modulus::NUM_BYTES;
