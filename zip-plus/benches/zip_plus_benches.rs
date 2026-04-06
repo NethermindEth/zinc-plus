@@ -20,7 +20,7 @@ use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::{from_ref::FromRef, inner_product::MBSInnerProduct, named::Named};
 use zip_plus::{
     code::{
-        iprs::{IprsCode, PnttConfigF65537_32_128},
+        iprs::{IprsCode, PnttConfigF65537},
         raa::{RaaCode, RaaConfig},
     },
     pcs::structs::ZipTypes,
@@ -73,8 +73,8 @@ impl RaaConfig for BenchRaaConfig {
 type SomeRaaCode<const D_PLUS_ONE: usize> =
     RaaCode<BenchZipPlusTypes<i32, D_PLUS_ONE>, BenchRaaConfig, 4>;
 
-type SomeIprsCode<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const CHECK: bool> =
-    IprsCode<BenchZipPlusTypes<Twiddle, D_PLUS_ONE>, PnttConfigF65537_32_128<DEPTH>, CHECK>;
+type SomeIprsCode<Twiddle, const D_PLUS_ONE: usize, const CHECK: bool> =
+    IprsCode<BenchZipPlusTypes<Twiddle, D_PLUS_ONE>, PnttConfigF65537, 4, CHECK>;
 
 fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");
@@ -94,13 +94,14 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
 fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS");
 
-    do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, 32, PERFORM_CHECKS>, PERFORM_CHECKS>(
+    // Use flat single-row Zip+ matrix
+    do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 32, PERFORM_CHECKS>, PERFORM_CHECKS>(
         &mut group,
-        |_poly_size| IprsCode::default(),
+        |poly_size| IprsCode::new_with_optimal_depth(poly_size).unwrap(),
     );
-    do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 1, 64, PERFORM_CHECKS>, PERFORM_CHECKS>(
+    do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 64, PERFORM_CHECKS>, PERFORM_CHECKS>(
         &mut group,
-        |_poly_size| IprsCode::default(),
+        |poly_size| IprsCode::new_with_optimal_depth(poly_size).unwrap(),
     );
 
     group.finish();

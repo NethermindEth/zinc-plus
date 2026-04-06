@@ -10,7 +10,7 @@
 use crate::{
     code::{
         LinearCode,
-        iprs::{IprsCode, PnttConfigF65537_32_128},
+        iprs::{IprsCode, PnttConfigF65537},
     },
     pcs::structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
     pcs_transcript::{PcsProverTranscript, PcsVerifierTranscript},
@@ -37,9 +37,13 @@ use zinc_utils::{
     projectable_to_field::ProjectableToField,
 };
 
-const IPRS_DEPTH: usize = 1;
+pub const IPRS_DEPTH: usize = 1;
+pub const IPRS_ROW_LEN: usize = 32 * (1 << (3 * IPRS_DEPTH)); // I.e. BASE_DIM = 32
 
-pub type TestIprsConfig = PnttConfigF65537_32_128<IPRS_DEPTH>;
+/// Linear code repetition factor (inverse rate).
+pub const REP_FACTOR: usize = 4;
+
+pub type TestIprsConfig = PnttConfigF65537;
 
 #[derive(Debug, Clone)]
 pub struct TestZipTypes<const N: usize, const K: usize, const M: usize> {}
@@ -87,12 +91,17 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
 pub fn setup_test_params<const N: usize, const K: usize, const M: usize>(
     num_vars: usize,
 ) -> (
-    ZipPlusParams<TestZipTypes<N, K, M>, IprsCode<TestZipTypes<N, K, M>, TestIprsConfig, CHECKED>>,
+    ZipPlusParams<
+        TestZipTypes<N, K, M>,
+        IprsCode<TestZipTypes<N, K, M>, TestIprsConfig, REP_FACTOR, CHECKED>,
+    >,
     DenseMultilinearExtension<<TestZipTypes<N, K, M> as ZipTypes>::Eval>,
 ) {
-    setup_test_params_inner(num_vars, IprsCode::default(), |poly_size| {
-        (1..=poly_size as i32).map(Int::from).collect()
-    })
+    setup_test_params_inner(
+        num_vars,
+        IprsCode::new(IPRS_ROW_LEN, IPRS_DEPTH).unwrap(),
+        |poly_size| (1..=poly_size as i32).map(Int::from).collect(),
+    )
 }
 
 /// Helper function to set up common parameters for tests.
@@ -101,23 +110,27 @@ pub fn setup_poly_test_params<const K: usize, const M: usize, const DEGREE_PLUS_
 ) -> (
     ZipPlusParams<
         TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>,
-        IprsCode<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>, TestIprsConfig, CHECKED>,
+        IprsCode<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>, TestIprsConfig, REP_FACTOR, CHECKED>,
     >,
     DenseMultilinearExtension<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Eval>,
 ) {
-    setup_test_params_inner(num_vars, IprsCode::default(), |poly_size| {
-        let degree = DEGREE_PLUS_ONE - 1;
-        let eval_coeffs: Vec<_> = (1..=(poly_size * degree) as i64)
-            .map(|v| v.is_odd().into())
-            .collect_vec();
-        eval_coeffs
-            .chunks_exact(degree)
-            .map(BinaryPoly::new)
-            .collect_vec()
-    })
+    setup_test_params_inner(
+        num_vars,
+        IprsCode::new(IPRS_ROW_LEN, IPRS_DEPTH).unwrap(),
+        |poly_size| {
+            let degree = DEGREE_PLUS_ONE - 1;
+            let eval_coeffs: Vec<_> = (1..=(poly_size * degree) as i64)
+                .map(|v| v.is_odd().into())
+                .collect_vec();
+            eval_coeffs
+                .chunks_exact(degree)
+                .map(BinaryPoly::new)
+                .collect_vec()
+        },
+    )
 }
 
-fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt>>(
+pub fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     num_vars: usize,
     code: Lc,
     prepare_evaluations: impl FnOnce(usize) -> Vec<Zt::Eval>,
@@ -141,7 +154,10 @@ fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt>>(
 pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
     num_vars: usize,
 ) -> (
-    ZipPlusParams<TestZipTypes<N, K, M>, IprsCode<TestZipTypes<N, K, M>, TestIprsConfig, CHECKED>>,
+    ZipPlusParams<
+        TestZipTypes<N, K, M>,
+        IprsCode<TestZipTypes<N, K, M>, TestIprsConfig, REP_FACTOR, CHECKED>,
+    >,
     ZipPlusCommitment,
     Vec<F>,
     F,
@@ -173,7 +189,7 @@ pub fn setup_full_protocol_poly<
 ) -> (
     ZipPlusParams<
         TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>,
-        IprsCode<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>, TestIprsConfig, CHECKED>,
+        IprsCode<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>, TestIprsConfig, REP_FACTOR, CHECKED>,
     >,
     ZipPlusCommitment,
     Vec<F>,
@@ -196,7 +212,7 @@ where
     })
 }
 
-fn setup_full_protocol_inner<Zt, Lc, F, const N: usize>(
+pub fn setup_full_protocol_inner<Zt, Lc, F, const N: usize>(
     num_vars: usize,
     setup: impl FnOnce(usize) -> (ZipPlusParams<Zt, Lc>, DenseMultilinearExtension<Zt::Eval>),
     prepare_evaluation_point: impl FnOnce() -> Vec<Zt::Pt>,

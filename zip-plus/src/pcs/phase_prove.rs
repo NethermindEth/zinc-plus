@@ -338,10 +338,10 @@ mod tests {
     type F = BoxedMontyField;
 
     type Zt = TestZipTypes<N, K, M>;
-    type C = IprsCode<Zt, TestIprsConfig, CHECKED>;
+    type C = IprsCode<Zt, TestIprsConfig, REP_FACTOR, CHECKED>;
 
     type PolyZt = TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>;
-    type PolyC = IprsCode<PolyZt, TestIprsConfig, CHECKED>;
+    type PolyC = IprsCode<PolyZt, TestIprsConfig, REP_FACTOR, CHECKED>;
 
     type TestZip = ZipPlus<Zt, C>;
     type TestPolyZip = ZipPlus<PolyZt, PolyC>;

@@ -420,7 +420,7 @@ mod tests {
     };
     use zip_plus::{
         code::{
-            iprs::{IprsCode, PnttConfigF65537_32_128},
+            iprs::{IprsCode, PnttConfigF65537},
             raa::{RaaCode, RaaConfig},
         },
         pcs::structs::{ZipPlus, ZipPlusParams},
@@ -435,7 +435,8 @@ mod tests {
 
     const K: usize = INT_LIMBS * 4;
     const M: usize = INT_LIMBS * 8;
-    const IPRS_DEPTH: usize = 1;
+
+    const REP: usize = 4;
 
     type F = MontyField<FIELD_LIMBS>;
 
@@ -541,13 +542,10 @@ mod tests {
         type ArbitraryZt = ArbitraryPolyZipTypesIprs;
         type IntZt = IntZipTypes;
 
-        type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537_32_128<IPRS_DEPTH>, CHECKED>;
-        type ArbitraryLc =
-            IprsCode<Self::ArbitraryZt, PnttConfigF65537_32_128<IPRS_DEPTH>, CHECKED>;
-        type IntLc = IprsCode<Self::IntZt, PnttConfigF65537_32_128<IPRS_DEPTH>, CHECKED>;
+        type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, CHECKED>;
+        type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP, CHECKED>;
+        type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, CHECKED>;
     }
-
-    const RAA_REP: usize = 4;
 
     #[derive(Copy, Clone)]
     struct TestRaaConfig;
@@ -570,9 +568,15 @@ mod tests {
         type ArbitraryZt = ArbitraryPolyZipTypesRaa;
         type IntZt = IntZipTypes;
 
-        type BinaryLc = RaaCode<Self::BinaryZt, TestRaaConfig, RAA_REP>;
-        type ArbitraryLc = RaaCode<Self::ArbitraryZt, TestRaaConfig, RAA_REP>;
-        type IntLc = RaaCode<Self::IntZt, TestRaaConfig, RAA_REP>;
+        type BinaryLc = RaaCode<Self::BinaryZt, TestRaaConfig, REP>;
+        type ArbitraryLc = RaaCode<Self::ArbitraryZt, TestRaaConfig, REP>;
+        type IntLc = RaaCode<Self::IntZt, TestRaaConfig, REP>;
+    }
+
+    /// Use row size equal to poly size, resulting in flat single-row matrices
+    fn make_iprs<Zt: ZipTypes>(num_vars: usize) -> IprsCode<Zt, PnttConfigF65537, REP, CHECKED> {
+        let poly_size = 1 << num_vars;
+        IprsCode::new_with_optimal_depth(poly_size).unwrap()
     }
 
     /// Set up Zip+ PCS parameters for a given number of MLE variables.
@@ -683,9 +687,14 @@ mod tests {
     /// (one constraint, no polynomial multiplication, ideal = <X - 2>).
     #[test]
     fn test_e2e_no_multiplication() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, TestAirNoMultiplication<ZtInt>>(
-            8,
-            Default::default(),
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             default_project_ideal!(),
             |_| {},
             |res| res.unwrap(),
@@ -725,9 +734,14 @@ mod tests {
     /// Constraints: a[i+1] = a[i] + b[i], c[i] = b[i+2].
     #[test]
     fn test_e2e_mixed_shifts() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, TestUairMixedShifts<ZtInt>>(
-            8,
-            Default::default(),
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
             |_| {},
             |res| res.unwrap(),
@@ -740,9 +754,14 @@ mod tests {
     /// UAIR constraint: binary_poly[0] - int[0] \in <X - 2>
     #[test]
     fn test_e2e_binary_decomposition() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, BinaryDecompositionUair<ZtInt>>(
-            8,
-            Default::default(),
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             default_project_ideal!(),
             |_| {},
             |res| res.unwrap(),
@@ -758,9 +777,14 @@ mod tests {
     ///   up.binary_poly[i] - down.binary_poly[i] = 0, for i=1..15
     #[test]
     fn test_e2e_big_linear() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, BigLinearUair<ZtInt>>(
-            8,
-            Default::default(),
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             default_project_ideal!(),
             |_| {},
             |res| res.unwrap(),
@@ -773,9 +797,14 @@ mod tests {
     /// public inputs.
     #[test]
     fn test_e2e_big_linear_with_public_input() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
-            8,
-            Default::default(),
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             default_project_ideal!(),
             |_| {},
             |res| res.unwrap(),
@@ -789,9 +818,14 @@ mod tests {
 
     #[test]
     fn test_big_linear_tamper_lifted_evals() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
-            8,
-            Default::default(),
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             default_project_ideal!(),
             |proof| proof.witness_lifted_evals.swap(0, 1),
             |res| {
@@ -805,9 +839,14 @@ mod tests {
 
     #[test]
     fn test_big_linear_tamper_up_evals() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
-            8,
-            Default::default(),
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             default_project_ideal!(),
             |proof| proof.resolver.up_evals.swap(0, 1),
             |res| {
@@ -823,9 +862,14 @@ mod tests {
 
     #[test]
     fn test_big_linear_tamper_down_evals() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
-            8,
-            Default::default(),
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             default_project_ideal!(),
             |proof| proof.resolver.down_evals.swap(0, 1),
             |res| {
@@ -844,9 +888,14 @@ mod tests {
     // combined_mle_values were computed under the original transcript.
     #[test]
     fn test_big_linear_tamper_commitment() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
-            8,
-            Default::default(),
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             default_project_ideal!(),
             |proof| proof.commitments.0.root = Default::default(),
             |res| {
@@ -857,9 +906,14 @@ mod tests {
 
     #[test]
     fn test_big_linear_tamper_ideal_check() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
-            8,
-            Default::default(),
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             default_project_ideal!(),
             |proof| proof.ideal_check.combined_mle_values.swap(0, 1),
             |res| {
