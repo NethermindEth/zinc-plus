@@ -266,12 +266,22 @@ type Pp<Zt> = (
 );
 
 /// Use row size equal to poly size, resulting in flat single-row matrices
+#[allow(clippy::unwrap_used)]
 fn setup_pp(num_vars: usize) -> Pp<BenchZincTypes> {
     let poly_size = 1 << num_vars;
     (
-        ZipPlus::setup(poly_size, IprsCode::new_with_optimal_depth(poly_size)),
-        ZipPlus::setup(poly_size, IprsCode::new_with_optimal_depth(poly_size)),
-        ZipPlus::setup(poly_size, IprsCode::new_with_optimal_depth(poly_size)),
+        ZipPlus::setup(
+            poly_size,
+            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+        ),
+        ZipPlus::setup(
+            poly_size,
+            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+        ),
+        ZipPlus::setup(
+            poly_size,
+            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+        ),
     )
 }
 

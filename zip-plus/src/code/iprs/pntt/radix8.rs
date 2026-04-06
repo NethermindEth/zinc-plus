@@ -215,7 +215,7 @@ mod tests {
     fn compare_to_arkworks_ntt_base_layer_multiply() {
         for depth in 1..=3 {
             let row_len = 32 * (1 << (3 * depth));
-            let params = Radix8PnttParams::new(row_len, depth, 2);
+            let params = Radix8PnttParams::new(row_len, depth, 2).unwrap();
             compare_to_arkworks_ntt_base_layer_generic::<PnttConfigF65537>(&params);
         }
     }
@@ -275,9 +275,9 @@ mod tests {
         let base_len = 32;
         for depth in 1..=3 {
             let row_len = base_len * (1 << (3 * depth));
-            pntt_against_arkworks_generic::<PnttConfigF65537>(&Radix8PnttParams::new(
-                row_len, depth, 2,
-            ));
+            pntt_against_arkworks_generic::<PnttConfigF65537>(
+                &Radix8PnttParams::new(row_len, depth, 2).unwrap(),
+            );
         }
     }
 }

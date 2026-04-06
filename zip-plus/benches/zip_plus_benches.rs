@@ -97,11 +97,11 @@ fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     // Use flat single-row Zip+ matrix
     do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 32, PERFORM_CHECKS>, PERFORM_CHECKS>(
         &mut group,
-        IprsCode::new_with_optimal_depth,
+        |poly_size| IprsCode::new_with_optimal_depth(poly_size).unwrap(),
     );
     do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 64, PERFORM_CHECKS>, PERFORM_CHECKS>(
         &mut group,
-        IprsCode::new_with_optimal_depth,
+        |poly_size| IprsCode::new_with_optimal_depth(poly_size).unwrap(),
     );
 
     group.finish();

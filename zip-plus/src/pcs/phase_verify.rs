@@ -323,7 +323,7 @@ mod tests {
     };
     use crypto_bigint::U64;
     use crypto_primitives::{
-        Field, FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_int::Int,
+        Field, FromWithConfig, IntSemiring, IntoWithConfig, PrimeField, crypto_bigint_int::Int,
         crypto_bigint_monty::MontyField,
     };
     use itertools::Itertools;
@@ -348,11 +348,12 @@ mod tests {
 
     type Zt = TestZipTypes<N, K, M>;
     type C = IprsCode<Zt, TestIprsConfig, REP_FACTOR, CHECKED>;
-    static C: LazyLock<C> = LazyLock::new(|| C::new(IPRS_ROW_LEN, IPRS_DEPTH));
+    static C: LazyLock<C> = LazyLock::new(|| C::new(IPRS_ROW_LEN, IPRS_DEPTH).unwrap());
 
     type PolyZt = TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>;
     type PolyC = IprsCode<PolyZt, TestIprsConfig, REP_FACTOR, CHECKED>;
-    static POLY_C: LazyLock<PolyC> = LazyLock::new(|| PolyC::new(IPRS_ROW_LEN, IPRS_DEPTH));
+    static POLY_C: LazyLock<PolyC> =
+        LazyLock::new(|| PolyC::new(IPRS_ROW_LEN, IPRS_DEPTH).unwrap());
 
     type TestZip = ZipPlus<Zt, C>;
     type TestPolyZip = ZipPlus<PolyZt, PolyC>;
@@ -1043,6 +1044,69 @@ mod tests {
         );
 
         assert!(verification_result.is_ok());
+    }
+
+    #[test]
+    fn verification_succeeds_for_code_row_length_of_1() {
+        let num_vars = 8;
+        macro_rules! make_code {
+            () => {
+                IprsCode::new(1, 0).unwrap()
+            };
+        }
+        {
+            let (pp, comm, point_f, eval_f, mut transcript) =
+                setup_full_protocol_inner::<Zt, C, F, N>(
+                    num_vars,
+                    |num_vars| {
+                        setup_test_params_inner(num_vars, make_code!(), |poly_size| {
+                            (1..=poly_size as i32).map(Int::from).collect()
+                        })
+                    },
+                    || (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect(),
+                );
+            let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+
+            let result = TestZip::verify::<_, CHECKED>(
+                &mut transcript,
+                &pp,
+                &comm,
+                &field_cfg,
+                &point_f,
+                &eval_f,
+            );
+            assert!(result.is_ok(), "Verification failed: {result:?}")
+        };
+        {
+            let (pp, comm, point_f, eval_f, mut transcript) =
+                setup_full_protocol_inner::<PolyZt, PolyC, F, N>(
+                    num_vars,
+                    |num_vars| {
+                        setup_test_params_inner(num_vars, make_code!(), |poly_size| {
+                            let degree = DEGREE_PLUS_ONE - 1;
+                            let eval_coeffs: Vec<_> = (1..=(poly_size * degree) as i64)
+                                .map(|v| v.is_odd().into())
+                                .collect_vec();
+                            eval_coeffs
+                                .chunks_exact(degree)
+                                .map(BinaryPoly::new)
+                                .collect_vec()
+                        })
+                    },
+                    || (0..num_vars).map(|i| i as i128 + 2).collect(),
+                );
+            let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+
+            let result = TestPolyZip::verify::<_, CHECKED>(
+                &mut transcript,
+                &pp,
+                &comm,
+                &field_cfg,
+                &point_f,
+                &eval_f,
+            );
+            assert!(result.is_ok(), "Verification failed: {result:?}")
+        }
     }
 
     #[test]

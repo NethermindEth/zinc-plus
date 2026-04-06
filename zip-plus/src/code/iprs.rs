@@ -1,6 +1,6 @@
 mod pntt;
 
-use crate::{code::LinearCode, pcs::structs::ZipTypes};
+use crate::{ZipError, code::LinearCode, pcs::structs::ZipTypes};
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::{CheckedAdd, CheckedMul};
 use pntt::radix8::params::Config as PnttConfig;
@@ -16,8 +16,6 @@ use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 /// Pseudo Reed-Solomon encoder over the integers. Internally uses a
 /// radix-8 NTT-style recursion with a base Vandermonde matrix sized
 /// `base_len x base_dim` (defaults to 64x32).
-///
-/// To create a new instance, use [`IprsCode::default`] method.
 #[derive(Clone)]
 pub struct IprsCode<Zt: ZipTypes, Config: PnttConfig, const REP: usize, const CHECK: bool> {
     pntt_params: Radix8PnttParams<Config>,
@@ -29,22 +27,23 @@ where
     Zt: ZipTypes,
     Config: PnttConfig,
 {
-    pub fn new(row_len: usize, depth: usize) -> Self {
-        Self {
-            pntt_params: Radix8PnttParams::new(row_len, depth, REP),
+    pub fn new(row_len: usize, depth: usize) -> Result<Self, ZipError> {
+        Ok(Self {
+            pntt_params: Radix8PnttParams::new(row_len, depth, REP)?,
             _phantom: Default::default(),
-        }
+        })
     }
 
     /// Create a new IPRS code with the optimal depth heuristics trying to keep
     /// number of columns in the base matrix small.
     /// Currently, keeps number of columns <= 2^7 but this might be tweaked in
     /// the future.
-    pub fn new_with_optimal_depth(row_len: usize) -> Self {
+    pub fn new_with_optimal_depth(row_len: usize) -> Result<Self, ZipError> {
         const MAX_BASE_COLS_LOG2: usize = 7;
 
         let target_base_len = 1 << MAX_BASE_COLS_LOG2;
-        let depth = 1.max(((row_len / target_base_len).ilog2() as usize).div_ceil(3));
+        // We want depth to be at least 1.
+        let depth = 1.max(((1.max(row_len / target_base_len)).ilog2() as usize).div_ceil(3));
 
         Self::new(row_len, depth)
     }
@@ -175,4 +174,33 @@ where
     Zt: ZipTypes,
     Config: PnttConfig,
 {
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pcs::test_utils::*;
+    use crypto_bigint::U64;
+    use zinc_utils::CHECKED;
+
+    const INT_LIMBS: usize = U64::LIMBS;
+    const N: usize = INT_LIMBS;
+    const K: usize = INT_LIMBS * 4;
+    const M: usize = INT_LIMBS * 8;
+    type Zt = TestZipTypes<N, K, M>;
+
+    type Code = IprsCode<Zt, PnttConfigF65537, REP_FACTOR, CHECKED>;
+
+    #[test]
+    fn new_with_different_params() {
+        assert!(Code::new(1, 0).is_ok());
+        assert!(Code::new(8, 0).is_ok());
+        assert!(Code::new(1, 1).is_err());
+        assert!(Code::new(8, 1).is_ok());
+
+        assert!(Code::new_with_optimal_depth(1).is_err());
+        assert!(Code::new_with_optimal_depth(8).is_ok());
+        assert!(Code::new_with_optimal_depth(12).is_err());
+        assert!(Code::new_with_optimal_depth(16).is_ok());
+    }
 }

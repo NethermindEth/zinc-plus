@@ -99,7 +99,7 @@ pub fn setup_test_params<const N: usize, const K: usize, const M: usize>(
 ) {
     setup_test_params_inner(
         num_vars,
-        IprsCode::new(IPRS_ROW_LEN, IPRS_DEPTH),
+        IprsCode::new(IPRS_ROW_LEN, IPRS_DEPTH).unwrap(),
         |poly_size| (1..=poly_size as i32).map(Int::from).collect(),
     )
 }
@@ -116,7 +116,7 @@ pub fn setup_poly_test_params<const K: usize, const M: usize, const DEGREE_PLUS_
 ) {
     setup_test_params_inner(
         num_vars,
-        IprsCode::new(IPRS_ROW_LEN, IPRS_DEPTH),
+        IprsCode::new(IPRS_ROW_LEN, IPRS_DEPTH).unwrap(),
         |poly_size| {
             let degree = DEGREE_PLUS_ONE - 1;
             let eval_coeffs: Vec<_> = (1..=(poly_size * degree) as i64)
@@ -130,7 +130,7 @@ pub fn setup_poly_test_params<const K: usize, const M: usize, const DEGREE_PLUS_
     )
 }
 
-fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt>>(
+pub fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     num_vars: usize,
     code: Lc,
     prepare_evaluations: impl FnOnce(usize) -> Vec<Zt::Eval>,
@@ -212,7 +212,7 @@ where
     })
 }
 
-fn setup_full_protocol_inner<Zt, Lc, F, const N: usize>(
+pub fn setup_full_protocol_inner<Zt, Lc, F, const N: usize>(
     num_vars: usize,
     setup: impl FnOnce(usize) -> (ZipPlusParams<Zt, Lc>, DenseMultilinearExtension<Zt::Eval>),
     prepare_evaluation_point: impl FnOnce() -> Vec<Zt::Pt>,

@@ -576,7 +576,7 @@ mod tests {
     /// Use row size equal to poly size, resulting in flat single-row matrices
     fn make_iprs<Zt: ZipTypes>(num_vars: usize) -> IprsCode<Zt, PnttConfigF65537, REP, CHECKED> {
         let poly_size = 1 << num_vars;
-        IprsCode::new_with_optimal_depth(poly_size)
+        IprsCode::new_with_optimal_depth(poly_size).unwrap()
     }
 
     /// Set up Zip+ PCS parameters for a given number of MLE variables.

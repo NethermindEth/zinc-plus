@@ -1,3 +1,4 @@
+use crate::ZipError;
 use ark_ff::{FftField, FpConfig};
 use num_traits::Euclid;
 use std::{fmt::Debug, marker::PhantomData};
@@ -55,33 +56,34 @@ pub struct Radix8PnttParams<C: Config> {
 
 impl<C: Config> Radix8PnttParams<C> {
     /// Precompute pseudo NTT parameters.
-    pub fn new(row_len: usize, depth: usize, rep_factor: usize) -> Self {
+    pub fn new(row_len: usize, depth: usize, rep_factor: usize) -> Result<Self, ZipError> {
         let codeword_len = mul!(row_len, rep_factor);
-        assert!(
-            codeword_len < C::FIELD_MODULUS as usize,
-            "Codeword length is more than the number of elements in the field"
-        );
+        if codeword_len >= C::FIELD_MODULUS as usize {
+            return Err(ZipError::InvalidPcsParam(
+                "Codeword length is more than the number of elements in the field".to_owned(),
+            ));
+        }
 
         let coeff = 1_usize << mul!(3, depth);
         let (base_len, base_len_rem) = row_len.div_rem_euclid(&coeff);
-        assert_eq!(
-            base_len_rem, 0,
-            "Row length must be a multiple of {}",
-            coeff
-        );
+        if base_len_rem != 0 {
+            return Err(ZipError::InvalidPcsParam(format!(
+                "Row length {row_len} must be a multiple of {coeff}"
+            )));
+        }
 
         let base_dim = mul!(base_len, rep_factor);
-        assert!(
-            base_dim.is_power_of_two(),
-            "Base dimension must be a power of 2, got {}",
-            base_dim
-        );
+        if !base_dim.is_power_of_two() {
+            return Err(ZipError::InvalidPcsParam(format!(
+                "Base dimension {base_dim} must be a power of 2"
+            )));
+        }
 
         let base_dim_log2: u32 = base_dim.trailing_zeros();
 
         let base_dim_mask: usize = sub!(base_dim, 1);
 
-        Self {
+        Ok(Self {
             row_len,
             codeword_len,
             depth,
@@ -96,7 +98,7 @@ impl<C: Config> Radix8PnttParams<C> {
                 depth,
             ),
             _phantom: PhantomData,
-        }
+        })
     }
 }
 
