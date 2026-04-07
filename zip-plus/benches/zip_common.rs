@@ -142,9 +142,10 @@ pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     let mut rng = ThreadRng::default();
     let row_len = linear_code.row_len();
     let message: Vec<<Zt as ZipTypes>::Eval> = (0..row_len).map(|_i| rng.random()).collect();
+    let params = linear_code.params_string();
     group.bench_function(
         format!(
-            "EncodeMessage: {} -> {}, row_len = {row_len}",
+            "EncodeMessage: {} -> {}, {params}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name()
         ),

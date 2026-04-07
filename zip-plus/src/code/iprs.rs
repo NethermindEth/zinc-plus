@@ -135,6 +135,14 @@ where
         self.pntt_params.codeword_len
     }
 
+    fn params_string(&self) -> String {
+        format!(
+            "row_len={}, rate=1/{REP}, depth={}",
+            self.row_len(),
+            self.pntt_params.depth
+        )
+    }
+
     fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {
         self.encode_inner(row)
     }
@@ -164,8 +172,8 @@ where
     Config: PnttConfig,
     Zt: ZipTypes,
 {
-    fn eq(&self, _other: &Self) -> bool {
-        true // All IPRS codes with the same config are identical.
+    fn eq(&self, other: &Self) -> bool {
+        self.pntt_params == other.pntt_params
     }
 }
 

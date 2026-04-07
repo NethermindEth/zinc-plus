@@ -86,6 +86,10 @@ where
         self.raa.codeword_len()
     }
 
+    fn params_string(&self) -> String {
+        self.raa.params_string()
+    }
+
     fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
         self.encode_inner(row)
     }

@@ -8,7 +8,7 @@ use zinc_utils::{mul, sub};
 pub type PnttInt = i64;
 
 /// Configuration of radix-8 pseudo NTT.
-pub trait Config: Debug + Copy + Send + Sync {
+pub trait Config: Debug + Copy + PartialEq + Send + Sync {
     /// The field used to generate the twiddle factors
     /// and the base matrix for this pseudo NTT.
     type Field: FftField;
@@ -28,7 +28,7 @@ pub trait Config: Debug + Copy + Send + Sync {
 
 // Precomputed parameters needed for
 // pseudo NTT algorithm.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Radix8PnttParams<C: Config> {
     /// The length of the pseudo NTT's input.
     pub row_len: usize,
@@ -211,7 +211,7 @@ mod f65537 {
 }
 
 /// Pseudo NTT configuration for F65537 (2^16 + 1).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PnttConfigF65537;
 
 impl Config for PnttConfigF65537 {

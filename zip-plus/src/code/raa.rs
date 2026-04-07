@@ -140,6 +140,10 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> LinearCode<Zt>
         self.row_len * REP
     }
 
+    fn params_string(&self) -> String {
+        format!("row_len={}, rate=1/{REP}", self.row_len())
+    }
+
     fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
         self.encode_inner(row)
     }
