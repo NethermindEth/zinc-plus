@@ -80,10 +80,10 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");
 
     do_bench::<BenchZipPlusTypes<i32, 32>, _, PERFORM_CHECKS>(&mut group, |poly_size| {
-        BenchRaaCode::new(poly_size.isqrt().next_power_of_two())
+        Some(BenchRaaCode::new(poly_size.isqrt().next_power_of_two()))
     });
     do_bench::<BenchZipPlusTypes<i32, 64>, _, PERFORM_CHECKS>(&mut group, |poly_size| {
-        BenchRaaCode::new(poly_size.isqrt().next_power_of_two())
+        Some(BenchRaaCode::new(poly_size.isqrt().next_power_of_two()))
     });
 
     group.finish();
@@ -94,14 +94,18 @@ fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
 
     // Use flat single-row Zip+ matrix
     do_bench::<BenchZipPlusTypes<i64, 32>, _, PERFORM_CHECKS>(&mut group, |poly_size| {
-        BenchIprsCode::new_with_optimal_depth(poly_size).unwrap()
+        BenchIprsCode::new_with_optimal_depth(poly_size).ok()
     });
     do_bench::<BenchZipPlusTypes<i64, 64>, _, PERFORM_CHECKS>(&mut group, |poly_size| {
-        BenchIprsCode::new_with_optimal_depth(poly_size).unwrap()
+        BenchIprsCode::new_with_optimal_depth(poly_size).ok()
     });
 
     group.finish();
 }
 
-criterion_group!(benches, zip_plus_benchmarks_raa, zip_plus_benchmarks_iprs);
+criterion_group! {
+    name = benches;
+    config = Criterion::default().sample_size(500);
+    targets = zip_plus_benchmarks_raa, zip_plus_benchmarks_iprs
+}
 criterion_main!(benches);

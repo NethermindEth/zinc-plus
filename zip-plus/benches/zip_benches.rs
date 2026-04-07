@@ -43,10 +43,14 @@ type BenchIprsCode = IprsCode<BenchZipTypes, PnttConfigF65537, 4, PERFORM_CHECKS
 fn zip_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS");
     do_bench::<BenchZipTypes, _, PERFORM_CHECKS>(&mut group, |poly_size| {
-        BenchIprsCode::new_with_optimal_depth(poly_size).unwrap()
+        BenchIprsCode::new_with_optimal_depth(poly_size).ok()
     });
     group.finish();
 }
 
-criterion_group!(benches, zip_benchmarks);
+criterion_group! {
+    name = benches;
+    config = Criterion::default().sample_size(500);
+    targets = zip_benchmarks
+}
 criterion_main!(benches);

@@ -36,7 +36,7 @@ type F = MontyField<{ INT_LIMBS * 4 }>;
 
 pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(
     group: &mut BenchmarkGroup<WallTime>,
-    make_linear_code: impl Fn(/* poly_size: */ usize) -> Lc + Copy,
+    make_linear_code: impl Fn(/* poly_size: */ usize) -> Option<Lc> + Copy,
 ) where
     StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
     F: FromPrimitiveWithConfig
@@ -56,8 +56,8 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
 
     // Using row len > 2^14 exceeds the NTT domain for IPRS codes with F65547 and
     // rate 1/4 that we currently use
-    for lc in (8..=14)
-        .map(|row_len_ilog2| {
+    for lc in (8..=16)
+        .filter_map(|row_len_ilog2| {
             let row_len = 1 << row_len_ilog2;
             make_linear_code(row_len)
         })
@@ -109,10 +109,21 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
 
 pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
-    make_linear_code: impl Fn(usize) -> Lc,
+    make_linear_code: impl Fn(usize) -> Option<Lc>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
 {
+    let mut rng = ThreadRng::default();
+    let poly_size: usize = 1 << P;
+    let Some(linear_code) = make_linear_code(poly_size) else {
+        eprintln!(
+            "Skipping EncodeRows for poly_size=2^{P} as no suitable linear code could be constructed"
+        );
+        return;
+    };
+    let params = ZipPlus::setup(poly_size, linear_code);
+    let poly = DenseMultilinearExtension::<<Zt as ZipTypes>::Eval>::rand(P, &mut rng);
+
     group.bench_function(
         format!(
             "EncodeRows: {} -> {}, poly_size = 2^{P}",
@@ -120,11 +131,6 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
             Zt::Cw::type_name()
         ),
         |b| {
-            let mut rng = ThreadRng::default();
-            let poly_size: usize = 1 << P;
-            let linear_code = make_linear_code(poly_size);
-            let params = ZipPlus::setup(poly_size, linear_code);
-            let poly = DenseMultilinearExtension::<<Zt as ZipTypes>::Eval>::rand(P, &mut rng);
             b.iter(|| {
                 let cw = ZipPlus::encode_rows(&params, &poly);
                 black_box(cw)
@@ -184,13 +190,18 @@ where
 
 pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize, const BATCH: usize>(
     group: &mut BenchmarkGroup<WallTime>,
-    make_linear_code: impl Fn(usize) -> Lc,
+    make_linear_code: impl Fn(usize) -> Option<Lc>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
 {
     let mut rng = ThreadRng::default();
     let poly_size: usize = 1 << P;
-    let linear_code = make_linear_code(poly_size);
+    let Some(linear_code) = make_linear_code(poly_size) else {
+        eprintln!(
+            "Skipping Commit for poly_size=2^{P} as no suitable linear code could be constructed"
+        );
+        return;
+    };
     let params = ZipPlus::setup(poly_size, linear_code);
 
     group.bench_function(
@@ -226,7 +237,7 @@ pub fn prove<
     const BATCH: usize,
 >(
     group: &mut BenchmarkGroup<WallTime>,
-    make_linear_code: impl Fn(usize) -> Lc,
+    make_linear_code: impl Fn(usize) -> Option<Lc>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
     F: for<'a> FromWithConfig<&'a Zt::CombR>
@@ -239,7 +250,12 @@ pub fn prove<
     let mut rng = ThreadRng::default();
 
     let poly_size: usize = 1 << P;
-    let linear_code = make_linear_code(poly_size);
+    let Some(linear_code) = make_linear_code(poly_size) else {
+        eprintln!(
+            "Skipping Prove for poly_size=2^{P} as no suitable linear code could be constructed"
+        );
+        return;
+    };
     let params = ZipPlus::setup(poly_size, linear_code);
 
     let polys: Vec<_> = (0..BATCH)
@@ -307,7 +323,7 @@ pub fn verify<
     const BATCH: usize,
 >(
     group: &mut BenchmarkGroup<WallTime>,
-    make_linear_code: impl Fn(usize) -> Lc,
+    make_linear_code: impl Fn(usize) -> Option<Lc>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
     F: FromPrimitiveWithConfig
@@ -321,7 +337,12 @@ pub fn verify<
 {
     let mut rng = ThreadRng::default();
     let poly_size: usize = 1 << P;
-    let linear_code = make_linear_code(poly_size);
+    let Some(linear_code) = make_linear_code(poly_size) else {
+        eprintln!(
+            "Skipping Verify for poly_size=2^{P} as no suitable linear code could be constructed"
+        );
+        return;
+    };
     let params = ZipPlus::setup(poly_size, linear_code);
 
     let polys: Vec<_> = (0..BATCH)
