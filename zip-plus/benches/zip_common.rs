@@ -54,9 +54,13 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     encode_rows::<Zt, Lc, 15>(group, make_linear_code);
     encode_rows::<Zt, Lc, 16>(group, make_linear_code);
 
-    for lc in [128, 256, 512, 1024]
-        .map(make_linear_code)
-        .into_iter()
+    // Using row len > 2^14 exceeds the NTT domain for IPRS codes with F65547 and
+    // rate 1/4 that we currently use
+    for lc in (8..=14)
+        .map(|row_len_ilog2| {
+            let row_len = 1 << row_len_ilog2;
+            make_linear_code(row_len)
+        })
         // These might be duplicate depending on linear code construction logic
         .dedup()
     {
@@ -137,6 +141,7 @@ pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>>(
 {
     let mut rng = ThreadRng::default();
     let row_len = linear_code.row_len();
+    let message: Vec<<Zt as ZipTypes>::Eval> = (0..row_len).map(|_i| rng.random()).collect();
     group.bench_function(
         format!(
             "EncodeMessage: {} -> {}, row_len = {row_len}",
@@ -144,8 +149,6 @@ pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>>(
             Zt::Cw::type_name()
         ),
         |b| {
-            let message: Vec<<Zt as ZipTypes>::Eval> =
-                (0..row_len).map(|_i| rng.random()).collect();
             b.iter(|| {
                 let encoded_row: Vec<<Zt as ZipTypes>::Cw> = linear_code.encode(&message);
                 black_box(encoded_row);
