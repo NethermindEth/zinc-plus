@@ -10,8 +10,7 @@
 use crate::{
     code::{
         LinearCode,
-        raa::{RaaCode, RaaConfig},
-        raa_sign_flip::RaaSignFlippingCode,
+        iprs::{IprsCode, PnttConfigF65537},
     },
     pcs::structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
     pcs_transcript::{PcsProverTranscript, PcsVerifierTranscript},
@@ -38,19 +37,18 @@ use zinc_utils::{
     projectable_to_field::ProjectableToField,
 };
 
-const REPETITION_FACTOR: usize = 4;
+pub const IPRS_DEPTH: usize = 1;
+pub const IPRS_ROW_LEN: usize = 32 * (1 << (3 * IPRS_DEPTH)); // I.e. BASE_DIM = 32
 
-#[derive(Clone, Copy)]
-pub struct TestRaaConfig;
+/// Linear code repetition factor (inverse rate).
+pub const REP_FACTOR: usize = 4;
 
-impl RaaConfig for TestRaaConfig {
-    const PERMUTE_IN_PLACE: bool = false;
-    const CHECK_FOR_OVERFLOWS: bool = true;
-}
+pub type TestIprsConfig = PnttConfigF65537;
 
+#[derive(Debug, Clone)]
 pub struct TestZipTypes<const N: usize, const K: usize, const M: usize> {}
 impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N, K, M> {
-    const NUM_COLUMN_OPENINGS: usize = 200;
+    const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = Int<N>;
     type Cw = Int<K>;
     type Fmod = Uint<K>;
@@ -64,13 +62,14 @@ impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N
     type ArrCombRDotChal = MBSInnerProduct;
 }
 
+#[derive(Debug, Clone)]
 pub struct TestBinPolyZipTypes<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> {}
 impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
     for TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>
 {
-    const NUM_COLUMN_OPENINGS: usize = 200;
+    const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
-    type Cw = DensePolynomial<i32, DEGREE_PLUS_ONE>;
+    type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
     type Fmod = Uint<K>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
@@ -94,13 +93,15 @@ pub fn setup_test_params<const N: usize, const K: usize, const M: usize>(
 ) -> (
     ZipPlusParams<
         TestZipTypes<N, K, M>,
-        RaaSignFlippingCode<TestZipTypes<N, K, M>, TestRaaConfig, REPETITION_FACTOR>,
+        IprsCode<TestZipTypes<N, K, M>, TestIprsConfig, REP_FACTOR, CHECKED>,
     >,
     DenseMultilinearExtension<<TestZipTypes<N, K, M> as ZipTypes>::Eval>,
 ) {
-    setup_test_params_inner(num_vars, |poly_size| {
-        (1..=poly_size as i32).map(Int::from).collect()
-    })
+    setup_test_params_inner(
+        num_vars,
+        IprsCode::new(IPRS_ROW_LEN, IPRS_DEPTH).unwrap(),
+        |poly_size| (1..=poly_size as i32).map(Int::from).collect(),
+    )
 }
 
 /// Helper function to set up common parameters for tests.
@@ -109,29 +110,35 @@ pub fn setup_poly_test_params<const K: usize, const M: usize, const DEGREE_PLUS_
 ) -> (
     ZipPlusParams<
         TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>,
-        RaaCode<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>, TestRaaConfig, REPETITION_FACTOR>,
+        IprsCode<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>, TestIprsConfig, REP_FACTOR, CHECKED>,
     >,
     DenseMultilinearExtension<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Eval>,
 ) {
-    setup_test_params_inner(num_vars, |poly_size| {
-        let eval_coeffs: Vec<_> = (1..=(poly_size * (DEGREE_PLUS_ONE - 1)) as i8)
-            .map(|v| v.is_odd().into())
-            .collect_vec();
-        eval_coeffs
-            .chunks_exact(DEGREE_PLUS_ONE - 1)
-            .map(BinaryPoly::new)
-            .collect_vec()
-    })
+    setup_test_params_inner(
+        num_vars,
+        IprsCode::new(IPRS_ROW_LEN, IPRS_DEPTH).unwrap(),
+        |poly_size| {
+            let degree = DEGREE_PLUS_ONE - 1;
+            let eval_coeffs: Vec<_> = (1..=(poly_size * degree) as i64)
+                .map(|v| v.is_odd().into())
+                .collect_vec();
+            eval_coeffs
+                .chunks_exact(degree)
+                .map(BinaryPoly::new)
+                .collect_vec()
+        },
+    )
 }
 
-fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt>>(
+pub fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     num_vars: usize,
+    code: Lc,
     prepare_evaluations: impl FnOnce(usize) -> Vec<Zt::Eval>,
 ) -> (ZipPlusParams<Zt, Lc>, DenseMultilinearExtension<Zt::Eval>) {
-    let poly_size = 1 << num_vars;
-    let num_rows = 1 << num_vars.div_ceil(2);
+    let poly_size: usize = 1 << num_vars;
+    let row_len = code.row_len();
+    let num_rows = poly_size.div_ceil(row_len);
 
-    let code = Lc::new(poly_size);
     let pp = ZipPlusParams::new(num_vars, num_rows, code);
 
     let evaluations = prepare_evaluations(poly_size);
@@ -149,7 +156,7 @@ pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
 ) -> (
     ZipPlusParams<
         TestZipTypes<N, K, M>,
-        RaaSignFlippingCode<TestZipTypes<N, K, M>, TestRaaConfig, REPETITION_FACTOR>,
+        IprsCode<TestZipTypes<N, K, M>, TestIprsConfig, REP_FACTOR, CHECKED>,
     >,
     ZipPlusCommitment,
     Vec<F>,
@@ -182,7 +189,7 @@ pub fn setup_full_protocol_poly<
 ) -> (
     ZipPlusParams<
         TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>,
-        RaaCode<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>, TestRaaConfig, REPETITION_FACTOR>,
+        IprsCode<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>, TestIprsConfig, REP_FACTOR, CHECKED>,
     >,
     ZipPlusCommitment,
     Vec<F>,
@@ -205,7 +212,7 @@ where
     })
 }
 
-fn setup_full_protocol_inner<Zt, Lc, F, const N: usize>(
+pub fn setup_full_protocol_inner<Zt, Lc, F, const N: usize>(
     num_vars: usize,
     setup: impl FnOnce(usize) -> (ZipPlusParams<Zt, Lc>, DenseMultilinearExtension<Zt::Eval>),
     prepare_evaluation_point: impl FnOnce() -> Vec<Zt::Pt>,

@@ -4,9 +4,10 @@ pub mod raa_sign_flip;
 
 use crate::pcs::structs::ZipTypes;
 use crypto_primitives::FromPrimitiveWithConfig;
+use std::fmt::Debug;
 use zinc_utils::from_ref::FromRef;
 
-pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
+pub trait LinearCode<Zt: ZipTypes>: Debug + Eq + Sync + Send {
     /// Repetition factor, a.k.a. inverse rate, the ratio of codeword length to
     /// input row length. Has to be at a power of 2.
     ///
@@ -14,8 +15,6 @@ pub trait LinearCode<Zt: ZipTypes>: Sync + Send {
     /// that generic parameters may not be used in const operations, this
     /// makes using it too much of a hassle.
     const REPETITION_FACTOR: usize;
-
-    fn new(poly_size: usize) -> Self;
 
     /// Length of each input row before encoding
     fn row_len(&self) -> usize;

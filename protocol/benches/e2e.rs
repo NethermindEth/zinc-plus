@@ -40,11 +40,9 @@ use zinc_utils::{
     projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
-    code::{
-        LinearCode,
-        iprs::{IprsCode, PnttConfigF65537_32_128},
-    },
+    code::iprs::{IprsCode, PnttConfigF65537},
     pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
+    utils::eprint_proof_size,
 };
 
 //
@@ -57,7 +55,8 @@ const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
     zinc_utils::CHECKED
 };
 
-const IPRS_DEPTH: usize = 1;
+/// Repetition factor for linear code, an inverse rate.
+const REP: usize = 4;
 
 #[allow(clippy::type_complexity)]
 #[derive(Debug, Clone, Copy)]
@@ -123,7 +122,7 @@ where
     CombDotChal: InnerProduct<Comb, Chal, CombR> + Send + Sync,
     ArrCombRDotChal: InnerProduct<[CombR], Chal, CombR> + Send + Sync,
 {
-    const NUM_COLUMN_OPENINGS: usize = 200;
+    const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = Eval;
     type Cw = Cw;
     type Fmod = Fmod;
@@ -226,10 +225,9 @@ where
         MBSInnerProduct,
     >;
 
-    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537_32_128<IPRS_DEPTH>, PERFORM_CHECKS>;
-    type ArbitraryLc =
-        IprsCode<Self::ArbitraryZt, PnttConfigF65537_32_128<IPRS_DEPTH>, PERFORM_CHECKS>;
-    type IntLc = IprsCode<Self::IntZt, PnttConfigF65537_32_128<IPRS_DEPTH>, PERFORM_CHECKS>;
+    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
+    type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
+    type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
 }
 
 //
@@ -267,20 +265,22 @@ type Pp<Zt> = (
     >,
 );
 
+/// Use row size equal to poly size, resulting in flat single-row matrices
+#[allow(clippy::unwrap_used)]
 fn setup_pp(num_vars: usize) -> Pp<BenchZincTypes> {
     let poly_size = 1 << num_vars;
     (
         ZipPlus::setup(
             poly_size,
-            <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::BinaryLc::new(poly_size),
+            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
         ),
         ZipPlus::setup(
             poly_size,
-            <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc::new(poly_size),
+            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
         ),
         ZipPlus::setup(
             poly_size,
-            <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntLc::new(poly_size),
+            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
         ),
     )
 }
@@ -290,7 +290,7 @@ fn setup_pp(num_vars: usize) -> Pp<BenchZincTypes> {
 //
 
 #[allow(clippy::too_many_arguments)]
-fn bench_prove_verify<Zt, U, IdealOverF>(
+fn do_bench<Zt, U, IdealOverF>(
     group: &mut BenchmarkGroup<WallTime>,
     label: &str,
     num_vars: usize,
@@ -374,6 +374,8 @@ fn bench_prove_verify<Zt, U, IdealOverF>(
             BatchSize::SmallInput,
         );
     });
+
+    eprint_proof_size(&params, &proof);
 }
 
 //
@@ -399,7 +401,7 @@ where
         ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg))
     };
 
-    bench_prove_verify::<BenchZincTypes, U, _>(
+    do_bench::<BenchZincTypes, U, _>(
         group,
         label,
         num_vars,

@@ -5,9 +5,11 @@ use std::{
     fmt::Display,
     ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, Rem, Sub, SubAssign},
 };
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable};
 use zinc_utils::{
-    UNCHECKED,
+    UNCHECKED, add,
     inner_product::{InnerProduct, InnerProductError},
+    mul,
 };
 
 use crate::{
@@ -386,6 +388,119 @@ impl<F: PrimeField> FromIterator<F> for DynamicPolynomialF<F> {
         Self {
             coeffs: iter.into_iter().collect(),
         }
+    }
+}
+
+/// Unfortunately, we cannot implement of `GenTranscribable` for
+/// `Vec<DynamicPolynomialF<F>>` since they both are foreign types, so we define
+/// this wrapper as a workaround.
+#[derive(Debug, Default, Clone, From, Hash, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct DynamicPolyVecF<F: PrimeField>(pub Vec<DynamicPolynomialF<F>>);
+
+impl<F: PrimeField> DynamicPolyVecF<F> {
+    pub fn reinterpret(value: &Vec<DynamicPolynomialF<F>>) -> &Self {
+        // Safety: `DynamicPolyVecF<F>` is a transparent wrapper, so the memory layout
+        // is the same.
+        unsafe { &*(value as *const Vec<DynamicPolynomialF<F>> as *const Self) }
+    }
+}
+
+impl<F> GenTranscribable for DynamicPolyVecF<F>
+where
+    F: PrimeField,
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        if bytes.is_empty() {
+            return vec![].into();
+        }
+
+        let modulus_present = match bytes[0] {
+            0 => false,
+            1 => true,
+            v => panic!("Invalid modulus presence flag: expected 0 or 1, got {v}"),
+        };
+        let mut bytes = &bytes[1..];
+        let cfg_option = if modulus_present {
+            let mod_size = F::Modulus::NUM_BYTES;
+            let cfg = zinc_transcript::read_field_cfg::<F>(&bytes[0..mod_size]);
+            bytes = &bytes[mod_size..];
+            Some(cfg)
+        } else {
+            None
+        };
+        let mut result = Vec::new();
+        while !bytes.is_empty() {
+            let (len, rest) = u32::read_transcription_bytes_subset(bytes);
+            let len = usize::try_from(len).expect("polynomial length must fit into usize");
+            bytes = rest;
+            let end = mul!(len, F::Inner::NUM_BYTES);
+            let coeffs = if let Some(ref cfg) = cfg_option {
+                zinc_transcript::read_field_vec_with_cfg(&bytes[..end], cfg)
+            } else {
+                assert_eq!(len, 0, "modulus must be present when poly is non-empty");
+                Vec::new()
+            };
+            result.push(DynamicPolynomialF { coeffs });
+            bytes = &bytes[end..];
+        }
+        assert!(bytes.is_empty(), "All bytes should be consumed");
+        result.into()
+    }
+
+    fn write_transcription_bytes_exact(&self, mut buf: &mut [u8]) {
+        if self.0.is_empty() {
+            return;
+        }
+        if let Some(element) = self.0.iter().find_map(|poly| poly.coeffs.first()) {
+            buf[0] = 1; // Indicate that modulus is present
+            buf = zinc_transcript::append_field_cfg::<F>(&mut buf[1..], &element.modulus());
+        } else {
+            buf[0] = 0;
+            buf = &mut buf[1..];
+        }
+        for poly in self.0.iter() {
+            // This allows writing untrimmed polynomials without overhead
+            let len = poly.degree().map(|d| add!(d, 1)).unwrap_or(0);
+            buf = {
+                let len = u32::try_from(len).expect("polynomial length must fit into u32");
+                len.write_transcription_bytes_exact(&mut buf[0..u32::NUM_BYTES]);
+                &mut buf[u32::NUM_BYTES..]
+            };
+            buf = zinc_transcript::append_field_vec_inner(buf, &poly.coeffs[0..len]);
+        }
+        assert!(buf.is_empty(), "Entire buffer should be used");
+    }
+}
+
+impl<F> Transcribable for DynamicPolyVecF<F>
+where
+    F: PrimeField,
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    fn get_num_bytes(&self) -> usize {
+        if self.0.is_empty() {
+            return 0;
+        }
+        // 1 byte for the modulus presence flag
+        let has_modulus = self.0.iter().any(|p| !p.coeffs.is_empty());
+        let modulus_bytes = if has_modulus {
+            F::Modulus::NUM_BYTES
+        } else {
+            0
+        };
+        let poly_bytes: usize = self
+            .0
+            .iter()
+            .map(|poly| {
+                let len = poly.degree().map(|d| add!(d, 1)).unwrap_or(0);
+                add!(u32::NUM_BYTES, mul!(len, F::Inner::NUM_BYTES))
+            })
+            .sum();
+        add!(add!(1, modulus_bytes), poly_bytes)
     }
 }
 

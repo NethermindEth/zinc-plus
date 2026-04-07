@@ -72,7 +72,7 @@ pub struct BatchedDecompLookupInstance<F> {
 /// Chunk vectors are **not** included — the verifier reconstructs them
 /// from the inverse witnesses: `c_k[j] = β − 1/u_k[j]`. Soundness
 /// follows from the PCS commitment binding the parent column.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BatchedDecompLogupProof<F> {
     /// Per-witness aggregated multiplicity vectors:
     /// `aggregated_multiplicities[l][j] = Σ_k m_k^(l)[j]`.
@@ -92,7 +92,7 @@ pub struct BatchedDecompLogupProof<F> {
 ///
 /// Carried in [`LookupGroupMeta`] so the verifier can reconstruct the
 /// parent evaluation without re-receiving the lookup specs.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LookupWitnessSource {
     /// Standard column lookup: parent eval = `up_evals[column_index]`.
     Column {
@@ -111,7 +111,7 @@ pub enum LookupWitnessSource {
 
 /// Per-group metadata stored in the proof so the verifier can reconstruct
 /// tables and column layout without being passed the original lookup specs.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LookupGroupMeta {
     /// Table type for this group (determines subtable generation).
     pub table_type: LookupTableType,
@@ -131,7 +131,7 @@ pub struct LookupGroupMeta {
 /// (groups formed by batching columns with the same [`LookupTableType`]).
 /// Carries [`LookupGroupMeta`] per group so the verifier needs no
 /// external specs.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BatchedLookupProof<F> {
     /// Per-group proofs, in group order.
     pub group_proofs: Vec<BatchedDecompLogupProof<F>>,

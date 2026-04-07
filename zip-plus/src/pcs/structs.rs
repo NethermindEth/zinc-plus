@@ -7,7 +7,7 @@ use num_traits::CheckedAdd;
 use std::{marker::PhantomData, ops::Neg};
 use zinc_poly::{ConstCoeffBitWidth, Polynomial};
 use zinc_primality::PrimalityTest;
-use zinc_transcript::traits::ConstTranscribable;
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable};
 use zinc_utils::{
     from_ref::FromRef, inner_product::InnerProduct, mul_by_scalar::MulByScalar, named::Named,
 };
@@ -73,7 +73,16 @@ where
     pub fn setup(poly_size: usize, linear_code: Lc) -> ZipPlusParams<Zt, Lc> {
         assert!(poly_size.is_power_of_two());
         let num_vars = poly_size.ilog2() as usize;
-        let num_rows = ((1 << num_vars) / linear_code.row_len()).next_power_of_two();
+        let row_len = linear_code.row_len();
+        assert!(
+            row_len > 0 && poly_size.is_multiple_of(row_len),
+            "poly_size ({poly_size}) must be divisible by row_len ({row_len})"
+        );
+        let num_rows = poly_size / row_len;
+        assert!(
+            num_rows.is_power_of_two(),
+            "num_rows ({num_rows}) must be a power of two"
+        );
         ZipPlusParams::new(num_vars, num_rows, linear_code)
     }
 }
@@ -120,9 +129,28 @@ impl<R> ZipPlusHint<R> {
 
 /// The compact commitment to a multilinear polynomial, consisting of only the
 /// Merkle roots, to be sent to the verifier.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ZipPlusCommitment {
     /// Roots of the merkle tree of entire matrix
     pub root: MtHash,
     pub batch_size: usize,
+}
+
+impl GenTranscribable for ZipPlusCommitment {
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        let root = MtHash::read_transcription_bytes_exact(&bytes[..MtHash::NUM_BYTES]);
+        let batch_size = u64::read_transcription_bytes_exact(&bytes[MtHash::NUM_BYTES..]);
+        let batch_size = usize::try_from(batch_size).expect("num_bytes must fit into usize");
+        Self { root, batch_size }
+    }
+
+    fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
+        let (root_buf, rest) = buf.split_at_mut(MtHash::NUM_BYTES);
+        self.root.write_transcription_bytes_exact(root_buf);
+        (self.batch_size as u64).write_transcription_bytes_exact(rest);
+    }
+}
+
+impl ConstTranscribable for ZipPlusCommitment {
+    const NUM_BYTES: usize = MtHash::NUM_BYTES + u64::NUM_BYTES;
 }

@@ -3,15 +3,6 @@
 
 mod zip_common;
 
-use std::marker::PhantomData;
-
-use zinc_poly::univariate::{
-    binary::{BinaryPoly, BinaryPolyInnerProduct},
-    dense::{DensePolyInnerProduct, DensePolynomial},
-};
-use zinc_primality::MillerRabin;
-use zinc_transcript::traits::ConstTranscribable;
-use zinc_utils::{UNCHECKED, from_ref::FromRef, inner_product::MBSInnerProduct, named::Named};
 use zip_common::*;
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -19,12 +10,26 @@ use crypto_bigint::U64;
 use crypto_primitives::{
     FixedSemiring, boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
 };
+use std::marker::PhantomData;
+use zinc_poly::univariate::{
+    binary::{BinaryPoly, BinaryPolyInnerProduct},
+    dense::{DensePolyInnerProduct, DensePolynomial},
+};
+use zinc_primality::MillerRabin;
+use zinc_transcript::traits::ConstTranscribable;
+use zinc_utils::{from_ref::FromRef, inner_product::MBSInnerProduct, named::Named};
 use zip_plus::{
     code::{
-        iprs::{IprsCode, PnttConfigF65537_32_128},
+        iprs::{IprsCode, PnttConfigF65537},
         raa::{RaaCode, RaaConfig},
     },
     pcs::structs::ZipTypes,
+};
+
+const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
+    zinc_utils::UNCHECKED
+} else {
+    zinc_utils::CHECKED
 };
 
 const INT_LIMBS: usize = U64::LIMBS;
@@ -43,7 +48,7 @@ where
         + Sync,
     Int<5>: FromRef<CwCoeff>,
 {
-    const NUM_COLUMN_OPENINGS: usize = 200;
+    const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = BinaryPoly<D_PLUS_ONE>;
     type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
@@ -62,20 +67,26 @@ where
 struct BenchRaaConfig;
 impl RaaConfig for BenchRaaConfig {
     const PERMUTE_IN_PLACE: bool = true;
-    const CHECK_FOR_OVERFLOWS: bool = UNCHECKED;
+    const CHECK_FOR_OVERFLOWS: bool = PERFORM_CHECKS;
 }
 
 type SomeRaaCode<const D_PLUS_ONE: usize> =
     RaaCode<BenchZipPlusTypes<i32, D_PLUS_ONE>, BenchRaaConfig, 4>;
 
-type SomeIprsCode<Twiddle, const DEPTH: usize, const D_PLUS_ONE: usize, const CHECK: bool> =
-    IprsCode<BenchZipPlusTypes<Twiddle, D_PLUS_ONE>, PnttConfigF65537_32_128<DEPTH>, CHECK>;
+type SomeIprsCode<Twiddle, const D_PLUS_ONE: usize, const CHECK: bool> =
+    IprsCode<BenchZipPlusTypes<Twiddle, D_PLUS_ONE>, PnttConfigF65537, 4, CHECK>;
 
 fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");
 
-    do_bench::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>, UNCHECKED>(&mut group);
-    do_bench::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>, UNCHECKED>(&mut group);
+    do_bench::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>, PERFORM_CHECKS>(
+        &mut group,
+        |poly_size| RaaCode::new(poly_size.isqrt().next_power_of_two()),
+    );
+    do_bench::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>, PERFORM_CHECKS>(
+        &mut group,
+        |poly_size| RaaCode::new(poly_size.isqrt().next_power_of_two()),
+    );
 
     group.finish();
 }
@@ -83,11 +94,14 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
 fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS");
 
-    do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 1, 32, UNCHECKED>, UNCHECKED>(
+    // Use flat single-row Zip+ matrix
+    do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 32, PERFORM_CHECKS>, PERFORM_CHECKS>(
         &mut group,
+        |poly_size| IprsCode::new_with_optimal_depth(poly_size).unwrap(),
     );
-    do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 1, 64, UNCHECKED>, UNCHECKED>(
+    do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 64, PERFORM_CHECKS>, PERFORM_CHECKS>(
         &mut group,
+        |poly_size| IprsCode::new_with_optimal_depth(poly_size).unwrap(),
     );
 
     group.finish();

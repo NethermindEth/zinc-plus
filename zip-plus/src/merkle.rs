@@ -6,7 +6,7 @@ use std::{
     ops::Deref,
 };
 use thiserror::Error;
-use zinc_transcript::traits::ConstTranscribable;
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable};
 use zinc_utils::{add, cfg_into_iter, cfg_iter, sub};
 
 #[cfg(feature = "parallel")]
@@ -39,18 +39,20 @@ impl Display for MtHash {
     }
 }
 
-impl ConstTranscribable for MtHash {
-    const NUM_BYTES: usize = HASH_OUT_LEN;
-
-    fn read_transcription_bytes(buf: &[u8]) -> Self {
+impl GenTranscribable for MtHash {
+    fn read_transcription_bytes_exact(buf: &[u8]) -> Self {
         assert_eq!(buf.len(), HASH_OUT_LEN);
         MtHash(buf.try_into().expect("Invalid buffer length for MtHash"))
     }
 
-    fn write_transcription_bytes(&self, buf: &mut [u8]) {
+    fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
         assert_eq!(buf.len(), HASH_OUT_LEN);
         buf.copy_from_slice(&self.0);
     }
+}
+
+impl ConstTranscribable for MtHash {
+    const NUM_BYTES: usize = HASH_OUT_LEN;
 }
 
 impl<B> From<B> for MtHash
@@ -128,7 +130,7 @@ fn hash_column<S: ConstTranscribable>(values: &[S]) -> MtHash {
     let mut buf = vec![0_u8; values.len() * elem_bytes];
     for (i, v) in values.iter().enumerate() {
         let start = i * elem_bytes;
-        v.write_transcription_bytes(&mut buf[start..start + elem_bytes]);
+        v.write_transcription_bytes_exact(&mut buf[start..start + elem_bytes]);
     }
     let mut hasher = blake3::Hasher::new();
     hasher.update(&buf);
@@ -156,7 +158,7 @@ where
             let mut buf = vec![0_u8; col_bytes];
             for (r, row) in rows.iter().enumerate() {
                 let start = r * elem_bytes;
-                row[i].write_transcription_bytes(&mut buf[start..start + elem_bytes]);
+                row[i].write_transcription_bytes_exact(&mut buf[start..start + elem_bytes]);
             }
             let mut hasher = blake3::Hasher::new();
             hasher.update(&buf);

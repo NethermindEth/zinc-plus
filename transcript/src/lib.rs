@@ -1,9 +1,10 @@
 pub mod traits;
 
-use crate::traits::{ConstTranscribable, Transcript};
-use crypto_primitives::ConstIntSemiring;
+use crate::traits::{ConstTranscribable, GenTranscribable, Transcript};
+use crypto_primitives::{ConstIntSemiring, PrimeField};
 use sha3::{Digest, Keccak256};
 use zinc_primality::PrimalityTest;
+use zinc_utils::add;
 
 /// A cryptographic transcript implementation using the Keccak-256 hash
 /// function. Used for Fiat-Shamir transformations in zero-knowledge proof
@@ -52,7 +53,7 @@ impl KeccakTranscript {
     fn gen_random<R: ConstTranscribable>(&mut self, buf: &mut [u8]) -> R {
         self.fill_with_random_bytes(buf);
         self.absorb_inner(buf);
-        R::read_transcription_bytes(buf)
+        R::read_transcription_bytes_exact(buf)
     }
 }
 
@@ -63,7 +64,7 @@ impl Transcript for KeccakTranscript {
         self.hasher.update([0x12]);
         self.hasher.update(&mut buf);
         self.hasher.update([0x34]);
-        T::read_transcription_bytes(&buf)
+        T::read_transcription_bytes_exact(&buf)
     }
 
     #[allow(clippy::arithmetic_side_effects)]
@@ -86,4 +87,54 @@ impl Transcript for KeccakTranscript {
     fn absorb_inner(&mut self, v: &[u8]) {
         self.hasher.update(v);
     }
+}
+
+pub fn read_field_cfg<F>(bytes: &[u8]) -> F::Config
+where
+    F: PrimeField,
+    F::Modulus: ConstTranscribable,
+{
+    let mod_size = F::Modulus::NUM_BYTES;
+    let modulus = F::Modulus::read_transcription_bytes_exact(&bytes[..mod_size]);
+    F::make_cfg(&modulus).expect("valid field modulus in proof transcription")
+}
+
+pub fn read_field_vec_with_cfg<F>(bytes: &[u8], field_cfg: &F::Config) -> Vec<F>
+where
+    F: PrimeField,
+    F::Inner: ConstTranscribable,
+{
+    let inner_size = F::Inner::NUM_BYTES;
+    bytes
+        .chunks_exact(inner_size)
+        .map(F::Inner::read_transcription_bytes_exact)
+        .map(|inner| F::new_unchecked_with_cfg(inner, field_cfg))
+        .collect()
+}
+
+pub fn append_field_cfg<'a, F>(buf: &'a mut [u8], modulus: &F::Modulus) -> &'a mut [u8]
+where
+    F: PrimeField,
+    F::Modulus: ConstTranscribable,
+{
+    let mod_size = F::Modulus::NUM_BYTES;
+    let (buf, rest) = buf.split_at_mut(mod_size);
+    modulus.write_transcription_bytes_exact(buf);
+    rest
+}
+
+pub fn append_field_vec_inner<'a, F>(buf: &'a mut [u8], slice: &[F]) -> &'a mut [u8]
+where
+    F: PrimeField,
+    F::Inner: ConstTranscribable,
+{
+    let inner_size = F::Inner::NUM_BYTES;
+    let mut offset = 0;
+    for elem in slice {
+        let offset_end = add!(offset, inner_size);
+        elem.inner()
+            .write_transcription_bytes_exact(&mut buf[offset..offset_end]);
+        offset = offset_end;
+    }
+    &mut buf[offset..]
 }

@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
-use zinc_transcript::traits::{ConstTranscribable, Transcribable, Transcript};
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
 use zinc_utils::{
     from_ref::FromRef, mul_by_scalar::MulByScalar, named::Named,
     projectable_to_field::ProjectableToField,
@@ -26,8 +26,9 @@ use zinc_utils::{
 use zip_plus::{
     code::LinearCode,
     merkle::MerkleTree,
-    pcs::structs::{ZipPlus, ZipTypes},
+    pcs::structs::{ZipPlus, ZipPlusCommitment, ZipTypes},
     pcs_transcript::PcsProverTranscript,
+    utils::eprint_proof_size,
 };
 
 const INT_LIMBS: usize = U64::LIMBS;
@@ -35,6 +36,7 @@ type F = MontyField<{ INT_LIMBS * 4 }>;
 
 pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(
     group: &mut BenchmarkGroup<WallTime>,
+    make_linear_code: impl Fn(/* poly_size: */ usize) -> Lc + Copy,
 ) where
     StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
     F: FromPrimitiveWithConfig
@@ -46,16 +48,20 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     <F as Field>::Inner: FromRef<Zt::Fmod> + Transcribable,
     Zt::Eval: ProjectableToField<F>,
 {
-    encode_rows::<Zt, Lc, 12>(group);
-    encode_rows::<Zt, Lc, 13>(group);
-    encode_rows::<Zt, Lc, 14>(group);
-    encode_rows::<Zt, Lc, 15>(group);
-    encode_rows::<Zt, Lc, 16>(group);
+    encode_rows::<Zt, Lc, 12>(group, make_linear_code);
+    encode_rows::<Zt, Lc, 13>(group, make_linear_code);
+    encode_rows::<Zt, Lc, 14>(group, make_linear_code);
+    encode_rows::<Zt, Lc, 15>(group, make_linear_code);
+    encode_rows::<Zt, Lc, 16>(group, make_linear_code);
 
-    encode_single_row::<Zt, Lc, 128>(group);
-    encode_single_row::<Zt, Lc, 256>(group);
-    encode_single_row::<Zt, Lc, 512>(group);
-    encode_single_row::<Zt, Lc, 1024>(group);
+    for lc in [128, 256, 512, 1024]
+        .map(make_linear_code)
+        .into_iter()
+        // These might be duplicate depending on linear code construction logic
+        .dedup()
+    {
+        encode_single_row::<Zt, Lc>(group, lc)
+    }
 
     merkle_root::<Zt, 12>(group);
     merkle_root::<Zt, 13>(group);
@@ -63,42 +69,43 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     merkle_root::<Zt, 15>(group);
     merkle_root::<Zt, 16>(group);
 
-    commit::<Zt, Lc, 12, 1>(group);
-    commit::<Zt, Lc, 13, 1>(group);
-    commit::<Zt, Lc, 14, 1>(group);
-    commit::<Zt, Lc, 15, 1>(group);
-    commit::<Zt, Lc, 16, 1>(group);
+    commit::<Zt, Lc, 12, 1>(group, make_linear_code);
+    commit::<Zt, Lc, 13, 1>(group, make_linear_code);
+    commit::<Zt, Lc, 14, 1>(group, make_linear_code);
+    commit::<Zt, Lc, 15, 1>(group, make_linear_code);
+    commit::<Zt, Lc, 16, 1>(group, make_linear_code);
 
-    commit::<Zt, Lc, 14, 2>(group);
-    commit::<Zt, Lc, 14, 5>(group);
-    commit::<Zt, Lc, 16, 2>(group);
-    commit::<Zt, Lc, 16, 5>(group);
+    commit::<Zt, Lc, 14, 2>(group, make_linear_code);
+    commit::<Zt, Lc, 14, 5>(group, make_linear_code);
+    commit::<Zt, Lc, 16, 2>(group, make_linear_code);
+    commit::<Zt, Lc, 16, 5>(group, make_linear_code);
 
-    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12, 1>(group);
-    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13, 1>(group);
-    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14, 1>(group);
-    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15, 1>(group);
-    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16, 1>(group);
+    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12, 1>(group, make_linear_code);
+    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13, 1>(group, make_linear_code);
+    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14, 1>(group, make_linear_code);
+    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15, 1>(group, make_linear_code);
+    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16, 1>(group, make_linear_code);
 
-    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14, 2>(group);
-    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14, 5>(group);
-    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16, 2>(group);
-    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16, 5>(group);
+    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14, 2>(group, make_linear_code);
+    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14, 5>(group, make_linear_code);
+    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16, 2>(group, make_linear_code);
+    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16, 5>(group, make_linear_code);
 
-    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12, 1>(group);
-    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13, 1>(group);
-    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14, 1>(group);
-    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15, 1>(group);
-    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16, 1>(group);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12, 1>(group, make_linear_code);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13, 1>(group, make_linear_code);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14, 1>(group, make_linear_code);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 15, 1>(group, make_linear_code);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16, 1>(group, make_linear_code);
 
-    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14, 2>(group);
-    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14, 5>(group);
-    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16, 2>(group);
-    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16, 5>(group);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14, 2>(group, make_linear_code);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14, 5>(group, make_linear_code);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16, 2>(group, make_linear_code);
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16, 5>(group, make_linear_code);
 }
 
 pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
     group: &mut BenchmarkGroup<WallTime>,
+    make_linear_code: impl Fn(usize) -> Lc,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
 {
@@ -110,48 +117,35 @@ pub fn encode_rows<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize>(
         ),
         |b| {
             let mut rng = ThreadRng::default();
-            let poly_size = 1 << P;
-            let linear_code = Lc::new(poly_size);
+            let poly_size: usize = 1 << P;
+            let linear_code = make_linear_code(poly_size);
             let params = ZipPlus::setup(poly_size, linear_code);
-            let row_len = params.linear_code.row_len();
             let poly = DenseMultilinearExtension::<<Zt as ZipTypes>::Eval>::rand(P, &mut rng);
             b.iter(|| {
-                let cw = ZipPlus::encode_rows(&params, row_len, &poly);
+                let cw = ZipPlus::encode_rows(&params, &poly);
                 black_box(cw)
             })
         },
     );
 }
 
-pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>, const ROW_LEN: usize>(
+pub fn encode_single_row<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     group: &mut BenchmarkGroup<WallTime>,
+    linear_code: Lc,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
 {
     let mut rng = ThreadRng::default();
-    let poly_size = ROW_LEN * ROW_LEN;
-    let linear_code = Lc::new(poly_size);
-    if linear_code.row_len() != ROW_LEN {
-        // TODO(Ilia): Since IPRS codes require
-        //             the input size to be known at compile time
-        //             this detects IPRS benches.
-        //             Ofc, it's a lame way to handle this and
-        //             one can come up with a more elegant type safe way
-        //             but for the sake of a fast solution it's good enough.
-        //             Once we have time address this pls.
-
-        return;
-    }
-
+    let row_len = linear_code.row_len();
     group.bench_function(
         format!(
-            "EncodeMessage: {} -> {}, row_len = {ROW_LEN}",
+            "EncodeMessage: {} -> {}, row_len = {row_len}",
             Zt::Eval::type_name(),
             Zt::Cw::type_name()
         ),
         |b| {
             let message: Vec<<Zt as ZipTypes>::Eval> =
-                (0..ROW_LEN).map(|_i| rng.random()).collect();
+                (0..row_len).map(|_i| rng.random()).collect();
             b.iter(|| {
                 let encoded_row: Vec<<Zt as ZipTypes>::Cw> = linear_code.encode(&message);
                 black_box(encoded_row);
@@ -186,12 +180,13 @@ where
 
 pub fn commit<Zt: ZipTypes, Lc: LinearCode<Zt>, const P: usize, const BATCH: usize>(
     group: &mut BenchmarkGroup<WallTime>,
+    make_linear_code: impl Fn(usize) -> Lc,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
 {
     let mut rng = ThreadRng::default();
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
+    let poly_size: usize = 1 << P;
+    let linear_code = make_linear_code(poly_size);
     let params = ZipPlus::setup(poly_size, linear_code);
 
     group.bench_function(
@@ -227,6 +222,7 @@ pub fn prove<
     const BATCH: usize,
 >(
     group: &mut BenchmarkGroup<WallTime>,
+    make_linear_code: impl Fn(usize) -> Lc,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
     F: for<'a> FromWithConfig<&'a Zt::CombR>
@@ -238,8 +234,8 @@ pub fn prove<
 {
     let mut rng = ThreadRng::default();
 
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
+    let poly_size: usize = 1 << P;
+    let linear_code = make_linear_code(poly_size);
     let params = ZipPlus::setup(poly_size, linear_code);
 
     let polys: Vec<_> = (0..BATCH)
@@ -253,6 +249,22 @@ pub fn prove<
         .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
 
     let point = vec![Zt::Pt::one(); P];
+
+    macro_rules! do_prove {
+        ($t:expr) => {
+            ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>($t, &params, &polys, &point, &hint, &field_cfg)
+                .expect("Prove failed")
+        };
+    }
+
+    let combined_proof = {
+        let mut t = transcript.clone();
+        do_prove!(&mut t);
+        CombinedProof {
+            comm: commitment.clone(),
+            proof_transcript: t.stream.into_inner(),
+        }
+    };
 
     group.bench_function(
         format!(
@@ -268,21 +280,18 @@ pub fn prove<
                 for _ in 0..iters {
                     let mut transcript = transcript.clone();
                     let timer = Instant::now();
-                    let result = ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>(
-                        &mut transcript,
-                        &params,
-                        &polys,
-                        &point,
-                        &hint,
-                        &field_cfg,
-                    )
-                    .expect("Prove failed");
+                    let result = do_prove!(&mut transcript);
                     total_duration += timer.elapsed();
                     black_box(result);
                 }
                 total_duration
             })
         },
+    );
+
+    eprint_proof_size(
+        format_args!("batch={BATCH}, poly_size=2^{P}"),
+        &combined_proof,
     );
 }
 
@@ -294,6 +303,7 @@ pub fn verify<
     const BATCH: usize,
 >(
     group: &mut BenchmarkGroup<WallTime>,
+    make_linear_code: impl Fn(usize) -> Lc,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
     F: FromPrimitiveWithConfig
@@ -306,8 +316,8 @@ pub fn verify<
     Zt::Eval: ProjectableToField<F>,
 {
     let mut rng = ThreadRng::default();
-    let poly_size = 1 << P;
-    let linear_code = Lc::new(poly_size);
+    let poly_size: usize = 1 << P;
+    let linear_code = make_linear_code(poly_size);
     let params = ZipPlus::setup(poly_size, linear_code);
 
     let polys: Vec<_> = (0..BATCH)
@@ -334,6 +344,11 @@ pub fn verify<
     let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
     let transcript = transcript.into_verification_transcript();
+
+    let combined_proof = CombinedProof {
+        comm: commitment.clone(),
+        proof_transcript: transcript.stream.get_ref().clone(),
+    };
 
     group.bench_function(
         format!(
@@ -375,4 +390,36 @@ pub fn verify<
             })
         },
     );
+
+    eprint_proof_size(
+        format_args!("batch={BATCH}, poly_size=2^{P}"),
+        &combined_proof,
+    );
+}
+
+//
+// Helpers
+//
+
+/// Used to calculate total proof size
+struct CombinedProof {
+    comm: ZipPlusCommitment,
+    proof_transcript: Vec<u8>,
+}
+
+impl GenTranscribable for CombinedProof {
+    fn read_transcription_bytes_exact(_bytes: &[u8]) -> Self {
+        unimplemented!("We don't need to read this proof")
+    }
+
+    fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
+        let buf = self.comm.write_transcription_bytes_subset(buf);
+        buf.copy_from_slice(&self.proof_transcript);
+    }
+}
+
+impl Transcribable for CombinedProof {
+    fn get_num_bytes(&self) -> usize {
+        self.comm.get_num_bytes() + self.proof_transcript.len()
+    }
 }

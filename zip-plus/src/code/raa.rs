@@ -1,7 +1,7 @@
 use crate::{code::LinearCode, pcs::structs::ZipTypes, utils::shuffle_seeded};
 use crypto_primitives::PrimeField;
 use num_traits::CheckedAdd;
-use std::{marker::PhantomData, ops::AddAssign};
+use std::{fmt::Debug, marker::PhantomData, ops::AddAssign};
 use zinc_poly::ConstCoeffBitWidth;
 use zinc_utils::{add, from_ref::FromRef, mul};
 
@@ -16,7 +16,7 @@ pub trait RaaConfig: Copy + Send + Sync {
 
 /// Implementation of a repeat-accumulate-accumulate (RAA) codes over the binary
 /// field, as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RaaCode<Zt: ZipTypes, Config: RaaConfig, const REP: usize> {
     pub(crate) row_len: usize,
     /// Randomness seed for the first permutation
@@ -35,6 +35,60 @@ pub struct RaaCode<Zt: ZipTypes, Config: RaaConfig, const REP: usize> {
 }
 
 impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> RaaCode<Zt, Config, REP> {
+    pub fn new(row_len: usize) -> Self {
+        assert!(
+            REP.is_power_of_two(),
+            "Repetition factor must be a power of two"
+        );
+        assert!(
+            row_len.is_power_of_two(),
+            "Row length must be a power of two"
+        );
+
+        // Width of each entry in codeword vector, in bits.
+        // For RAA it's initial_bits + 2*log2(codeword_len),
+        // where codeword_len = row_len * REP and the factor of 2
+        // comes from the two accumulation steps.
+        let codeword_width_bits = {
+            let initial_bits =
+                u32::try_from(Zt::Eval::COEFF_BIT_WIDTH).expect("Size of EvalR type is too large");
+
+            let row_len_log = row_len.ilog2();
+            let rep_factor_log = REP.ilog2();
+            add!(
+                initial_bits,
+                add!(mul!(row_len_log, 2), mul!(rep_factor_log, 2))
+            )
+        };
+        let codeword_type_bits =
+            u32::try_from(Zt::Cw::COEFF_BIT_WIDTH).expect("Size of CwR type is too large");
+        assert!(
+            codeword_type_bits >= codeword_width_bits,
+            "Cannot fit {codeword_width_bits}-bit wide codeword entries in {} bits entries",
+            codeword_type_bits
+        );
+
+        // We don't need a secure/unpredictable randomness here, so use fixed seeds
+        const PERM_1_SEED: u64 = 1;
+        const PERM_2_SEED: u64 = 2;
+
+        let codeword_len = mul!(row_len, REP);
+
+        let mut perm_1: Vec<usize> = (0..codeword_len).collect();
+        shuffle_seeded(&mut perm_1, PERM_1_SEED);
+        let mut perm_2: Vec<usize> = (0..codeword_len).collect();
+        shuffle_seeded(&mut perm_2, PERM_2_SEED);
+
+        Self {
+            row_len,
+            perm_1_seed: PERM_1_SEED,
+            perm_2_seed: PERM_2_SEED,
+            perm_1,
+            perm_2,
+            phantom: PhantomData,
+        }
+    }
+
     /// Do the actual encoding, as per RAA spec
     fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
     where
@@ -77,65 +131,6 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> LinearCode<Zt>
 {
     const REPETITION_FACTOR: usize = REP;
 
-    fn new(poly_size: usize) -> Self {
-        assert!(
-            REP.is_power_of_two(),
-            "Repetition factor must be a power of two"
-        );
-
-        // Taken from original Zip codes
-        let num_vars = poly_size.ilog2();
-        let two_pow_num_vars = 1_usize
-            .checked_shl(num_vars)
-            .expect("2 ** num_vars overflows");
-        let row_len: usize = two_pow_num_vars
-            .isqrt()
-            .checked_next_power_of_two()
-            .expect("row_len overflow");
-
-        // Width of each entry in codeword vector, in bits.
-        // For RAA it's initial_bits + 2*log(repetition_factor) + num_variables
-        let codeword_width_bits = {
-            let initial_bits =
-                u32::try_from(Zt::Eval::COEFF_BIT_WIDTH).expect("Size of EvalR type is too large");
-
-            let rep_factor_log = REP.ilog2();
-            let num_vars_even = if num_vars.is_multiple_of(2) {
-                num_vars
-            } else {
-                add!(num_vars, 1)
-            };
-            add!(initial_bits, add!(num_vars_even, mul!(rep_factor_log, 2)))
-        };
-        let codeword_type_bits =
-            u32::try_from(Zt::Cw::COEFF_BIT_WIDTH).expect("Size of CwR type is too large");
-        assert!(
-            codeword_type_bits >= codeword_width_bits,
-            "Cannot fit {codeword_width_bits}-bit wide codeword entries in {} bits entries",
-            codeword_type_bits
-        );
-
-        // We don't need a secure/unpredictable randomness here, so use fixed seeds
-        const PERM_1_SEED: u64 = 1;
-        const PERM_2_SEED: u64 = 2;
-
-        let codeword_len = mul!(row_len, REP);
-
-        let mut perm_1: Vec<usize> = (0..codeword_len).collect();
-        shuffle_seeded(&mut perm_1, PERM_1_SEED);
-        let mut perm_2: Vec<usize> = (0..codeword_len).collect();
-        shuffle_seeded(&mut perm_2, PERM_2_SEED);
-
-        Self {
-            row_len,
-            perm_1_seed: PERM_1_SEED,
-            perm_2_seed: PERM_2_SEED,
-            perm_1,
-            perm_2,
-            phantom: PhantomData,
-        }
-    }
-
     fn row_len(&self) -> usize {
         self.row_len
     }
@@ -160,6 +155,26 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> LinearCode<Zt>
         self.encode_inner(row)
     }
 }
+
+impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> Debug for RaaCode<Zt, Config, REP> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RaaCode")
+            .field("row_len", &self.row_len)
+            .field("perm_1_seed", &self.perm_1_seed)
+            .field("perm_2_seed", &self.perm_2_seed)
+            .finish()
+    }
+}
+
+impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> PartialEq for RaaCode<Zt, Config, REP> {
+    fn eq(&self, other: &Self) -> bool {
+        self.row_len == other.row_len
+            && self.perm_1_seed == other.perm_1_seed
+            && self.perm_2_seed == other.perm_2_seed
+    }
+}
+
+impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> Eq for RaaCode<Zt, Config, REP> {}
 
 /// Repeat the given slice N times, e.g `[1,2,3] => [1,2,3,1,2,3]`
 #[allow(clippy::arithmetic_side_effects)]
@@ -253,16 +268,16 @@ mod tests {
     }
 
     macro_rules! test_raa {
-        ($zt:ty, $poly_size:expr, $f:expr) => {
-            test_raa!($zt, $poly_size, $f, RaaConfigGeneric<false, false>);
-            test_raa!($zt, $poly_size, $f, RaaConfigGeneric<false, true>);
-            test_raa!($zt, $poly_size, $f, RaaConfigGeneric<true, false>);
-            test_raa!($zt, $poly_size, $f, RaaConfigGeneric<true, true>);
+        ($zt:ty, $row_len:expr, $f:expr) => {
+            test_raa!($zt, $row_len, $f, RaaConfigGeneric<false, false>);
+            test_raa!($zt, $row_len, $f, RaaConfigGeneric<false, true>);
+            test_raa!($zt, $row_len, $f, RaaConfigGeneric<true, false>);
+            test_raa!($zt, $row_len, $f, RaaConfigGeneric<true, true>);
         };
 
-        ($zt:ty, $poly_size:expr, $f:expr, $config:ty) => {
+        ($zt:ty, $row_len:expr, $f:expr, $config:ty) => {
             {
-                let code = RaaCode::<$zt, $config, REPETITION_FACTOR>::new($poly_size);
+                let code = RaaCode::<$zt, $config, REPETITION_FACTOR>::new($row_len);
                 $f(&code)
             }
         };
@@ -355,7 +370,7 @@ mod tests {
     #[test]
     #[allow(clippy::arithmetic_side_effects)] // False alert
     fn encoding_preserves_linearity() {
-        test_raa!(TestZipTypes<N, K, M>, 16, |code: &RaaCode<_, _, _>| {
+        test_raa!(TestZipTypes<N, K, M>, 4, |code: &RaaCode<_, _, _>| {
             let a: Vec<Int<N>> = (1..=4).map(Int::<N>::from).collect();
             let b: Vec<Int<N>> = (5..=8).map(Int::<N>::from).collect();
             let sum_ab: Vec<Int<N>> = a.iter().zip(b.iter()).map(|(x, y)| *x + y).collect();
@@ -380,7 +395,7 @@ mod tests {
     fn encoding_produces_predictable_results() {
         let a: Vec<Int<N>> = (1..=4).map(Int::<N>::from).collect();
 
-        test_raa!(TestZipTypes<N, K, M>, 16, |code: &RaaCode<_, _, _>| {
+        test_raa!(TestZipTypes<N, K, M>, 4, |code: &RaaCode<_, _, _>| {
             let encode_a: Vec<Int<K>> = code.encode(&a);
             assert_eq!(
                 encode_a,
@@ -395,7 +410,7 @@ mod tests {
 
     #[test]
     fn encoding_zero_vector_results_in_zero_codeword() {
-        test_raa!(TestZipTypes<N, K, M>, 16, |code: &RaaCode<_, _, _>| {
+        test_raa!(TestZipTypes<N, K, M>, 4, |code: &RaaCode<_, _, _>| {
             let zero_vector: Vec<_> = vec![Int::<N>::zero(); code.row_len()];
             let encoded_vector: Vec<Int<K>> = code.encode(&zero_vector);
 
@@ -411,13 +426,13 @@ mod tests {
     #[test]
     fn in_place_permutation_should_not_affect_order() {
         let data: Vec<Int<N>> = (1..=1024).map(Int::<N>::from).collect();
-        let poly_size = data.len() * data.len();
+        let row_len = data.len();
         let codeword_1: Vec<Int<K>> = {
             let code_in_place = RaaCode::<
                 TestZipTypes<N, K, M>,
                 RaaConfigGeneric<true, true>,
                 REPETITION_FACTOR,
-            >::new(poly_size);
+            >::new(row_len);
             code_in_place.encode(&data)
         };
 
@@ -426,7 +441,7 @@ mod tests {
                 TestZipTypes<N, K, M>,
                 RaaConfigGeneric<false, true>,
                 REPETITION_FACTOR,
-            >::new(poly_size);
+            >::new(row_len);
             code_cloning.encode(&data)
         };
         assert_eq!(
@@ -445,14 +460,14 @@ mod tests {
             TestZipTypes<N, K, N>,
             RaaConfigGeneric<false, true>,
             REPETITION_FACTOR,
-        >::new(1 << 30);
+        >::new(1 << 15);
     }
 
     #[test]
     #[should_panic(expected = "Row length must match the code's row length")]
     #[cfg(debug_assertions)]
     fn encode_panics_on_mismatched_row_length() {
-        test_raa!(TestZipTypes<N, K, M>, 16, |code: &RaaCode<_, _, _>| {
+        test_raa!(TestZipTypes<N, K, M>, 4, |code: &RaaCode<_, _, _>| {
             let incorrect_row = vec![Int::<N>::from(1), Int::<N>::from(2), Int::<N>::from(3)];
             let _: Vec<Int<K>> = code.encode(&incorrect_row);
         });

@@ -25,7 +25,7 @@ const INT_LIMBS: usize = U64::LIMBS;
 
 struct BenchZipTypes {}
 impl ZipTypes for BenchZipTypes {
-    const NUM_COLUMN_OPENINGS: usize = 200;
+    const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = i32;
     type Cw = i64;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
@@ -50,7 +50,9 @@ type Code = RaaCode<BenchZipTypes, BenchRaaConfig, 4>;
 
 fn zip_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+");
-    do_bench::<BenchZipTypes, Code, PERFORM_CHECKS>(&mut group);
+    do_bench::<BenchZipTypes, Code, PERFORM_CHECKS>(&mut group, |poly_size| {
+        RaaCode::new(poly_size.isqrt().next_power_of_two())
+    });
     group.finish();
 }
 

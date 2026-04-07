@@ -365,12 +365,13 @@ where
             &ideal_from_ref(&two_ideal),
         );
 
-        // up.binary_poly[i] = down.binary_poly[i], for all i=1,...,15
+        // down.binary_poly[i](1) = up.binary_poly[i](1), for all i=1,...,15
+        // (preserves popcount across rows, but allows the bit pattern to change)
         up.binary_poly[1..]
             .iter()
             .zip(&down.binary_poly[1..])
             .for_each(|(up, down)| {
-                b.assert_zero(up.clone() - down);
+                b.assert_in_ideal(up.clone() - down, &ideal_from_ref(&one_ideal));
             });
     }
 }
@@ -386,6 +387,24 @@ where
         num_vars: usize,
         rng: &mut Rng,
     ) -> UairTrace<'static, R, R, 32> {
+        /// Generate a random binary polynomial with the given number of 1-bits.
+        fn random_binary_poly_with_popcount(
+            popcount: u32,
+            rng: &mut (impl rand::RngCore + ?Sized),
+        ) -> BinaryPoly<32> {
+            let mut positions: [u8; 32] =
+                core::array::from_fn(|i| u8::try_from(i).expect("can't fail"));
+            for i in 0..popcount as usize {
+                let j = i + rng.next_u32() as usize % (32 - i);
+                positions.swap(i, j);
+            }
+            let mut value: u32 = 0;
+            for &pos in &positions[..popcount as usize] {
+                value |= 1u32 << pos;
+            }
+            BinaryPoly::from(value)
+        }
+
         let mut binary_poly_cols: Vec<DenseMultilinearExtension<BinaryPoly<32>>> =
             vec![(0..(1 << num_vars)).map(|_| BinaryPoly::zero()).collect(); 16];
         let mut int_col: DenseMultilinearExtension<Self::Int> =
@@ -404,7 +423,8 @@ where
 
             binary_poly_cols[0][i + 1] = BinaryPoly::from(int);
             binary_poly_cols[1..].iter_mut().for_each(|col| {
-                col[i + 1] = col[i].clone();
+                let popcount = col[i].evaluate_at_point(&1_u32).expect("should be fine");
+                col[i + 1] = random_binary_poly_with_popcount(popcount, rng);
             });
         }
 

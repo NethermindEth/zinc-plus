@@ -1,4 +1,6 @@
 use crypto_primitives::PrimeField;
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable};
+use zinc_utils::add;
 
 use crate::combined_poly_resolver::CombinedPolyResolverError;
 
@@ -6,13 +8,51 @@ use crate::combined_poly_resolver::CombinedPolyResolverError;
 ///
 /// Note: the sumcheck proof now lives at the protocol
 /// level as part of `MultiDegreeSumcheckProof`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proof<F: PrimeField> {
     /// The evaluation of the projected trace columns MLEs at the shared point.
     pub up_evals: Vec<F>,
     /// The evaluations of the shifted projected trace columns MLEs at the
     /// shared point.
     pub down_evals: Vec<F>,
+}
+
+impl<F: PrimeField> GenTranscribable for Proof<F>
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        let (up_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
+        let (down_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
+        assert!(bytes.is_empty(), "All bytes should be consumed");
+        Self {
+            up_evals,
+            down_evals,
+        }
+    }
+
+    fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
+        let buf = self.up_evals.write_transcription_bytes_subset(buf);
+        let buf = self.down_evals.write_transcription_bytes_subset(buf);
+        assert!(buf.is_empty(), "Entire buffer should be used");
+    }
+}
+
+impl<F: PrimeField> Transcribable for Proof<F>
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    fn get_num_bytes(&self) -> usize {
+        add!(
+            2 * u32::NUM_BYTES,
+            add!(
+                self.up_evals.get_num_bytes(),
+                self.down_evals.get_num_bytes()
+            )
+        )
+    }
 }
 
 impl<F: PrimeField> Proof<F> {

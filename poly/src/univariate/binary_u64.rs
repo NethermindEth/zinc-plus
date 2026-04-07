@@ -14,7 +14,7 @@ use std::{
     marker::PhantomData,
     ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
 };
-use zinc_transcript::traits::ConstTranscribable;
+use zinc_transcript::delegate_const_transcribable;
 use zinc_utils::{
     from_ref::FromRef,
     inner_product::{InnerProduct, InnerProductError},
@@ -336,19 +336,7 @@ impl<const DEGREE_PLUS_ONE: usize> Named for BinaryU64Poly<DEGREE_PLUS_ONE> {
     }
 }
 
-impl<const DEGREE_PLUS_ONE: usize> ConstTranscribable for BinaryU64Poly<DEGREE_PLUS_ONE> {
-    const NUM_BYTES: usize = u64::NUM_BYTES;
-
-    #[inline(always)]
-    fn read_transcription_bytes(bytes: &[u8]) -> Self {
-        Self(u64::read_transcription_bytes(bytes))
-    }
-
-    #[inline(always)]
-    fn write_transcription_bytes(&self, buf: &mut [u8]) {
-        self.0.write_transcription_bytes(buf);
-    }
-}
+delegate_const_transcribable!(BinaryU64Poly<const DEGREE_PLUS_ONE: usize>(u64));
 
 impl<const DEGREE_PLUS_ONE: usize> FromRef<BinaryU64Poly<DEGREE_PLUS_ONE>>
     for BinaryU64Poly<DEGREE_PLUS_ONE>
@@ -674,6 +662,7 @@ unsafe fn widen_fill_avx512<const N: usize>(mask_ref: &u64, out_ptr: *mut i64, s
 #[cfg(test)]
 mod tests {
     use crate::univariate::binary_ref::BinaryRefPoly;
+    use zinc_transcript::traits::{ConstTranscribable, GenTranscribable};
     use zinc_utils::CHECKED;
 
     use super::*;
@@ -701,8 +690,8 @@ mod tests {
         let mut bytes = [0u8; BinaryU64Poly::<4>::NUM_BYTES];
         assert_eq!(bytes.len(), u64::NUM_BYTES);
 
-        original.write_transcription_bytes(&mut bytes);
-        let deserialized = BinaryU64Poly::<4>::read_transcription_bytes(&bytes);
+        original.write_transcription_bytes_exact(&mut bytes);
+        let deserialized = BinaryU64Poly::<4>::read_transcription_bytes_exact(&bytes);
         assert_eq!(original, deserialized);
     }
 

@@ -18,7 +18,7 @@ use std::{
     marker::PhantomData,
     ops::{Add, AddAssign, Deref, DerefMut, Mul, MulAssign, Neg, Sub, SubAssign},
 };
-use zinc_transcript::traits::ConstTranscribable;
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable};
 use zinc_utils::{
     from_ref::FromRef,
     inner_product::{InnerProduct, InnerProductError},
@@ -439,13 +439,11 @@ impl<R: Semiring + Named, const DEGREE_PLUS_ONE: usize> Named
     }
 }
 
-impl<R: ConstTranscribable + Default, const DEGREE_PLUS_ONE: usize> ConstTranscribable
+impl<R: ConstTranscribable + Default, const DEGREE_PLUS_ONE: usize> GenTranscribable
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 {
-    const NUM_BYTES: usize = R::NUM_BYTES * DEGREE_PLUS_ONE;
-
     #[allow(clippy::arithmetic_side_effects)]
-    fn read_transcription_bytes(bytes: &[u8]) -> Self {
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
         assert_eq!(
             bytes.len(),
             R::NUM_BYTES * DEGREE_PLUS_ONE,
@@ -458,17 +456,23 @@ impl<R: ConstTranscribable + Default, const DEGREE_PLUS_ONE: usize> ConstTranscr
         // operations.
         let coeffs = bytes
             .chunks_exact(R::NUM_BYTES)
-            .map(R::read_transcription_bytes)
+            .map(R::read_transcription_bytes_exact)
             .collect_array()
             .expect("Unreachable");
         Self { coeffs }
     }
 
-    fn write_transcription_bytes(&self, buf: &mut [u8]) {
+    fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
         for (chunk, coeff) in buf.chunks_exact_mut(R::NUM_BYTES).zip(self.coeffs.iter()) {
-            coeff.write_transcription_bytes(chunk);
+            coeff.write_transcription_bytes_exact(chunk);
         }
     }
+}
+
+impl<R: ConstTranscribable + Default, const DEGREE_PLUS_ONE: usize> ConstTranscribable
+    for DensePolynomial<R, DEGREE_PLUS_ONE>
+{
+    const NUM_BYTES: usize = R::NUM_BYTES * DEGREE_PLUS_ONE;
 }
 
 // Conversions.

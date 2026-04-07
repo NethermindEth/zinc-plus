@@ -133,7 +133,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         F::Modulus: Transcribable,
     {
         let batch_size = polys.len();
-        validate_input::<Zt, Lc, _>("prove", pp.num_vars, batch_size, polys, &[point])?;
+        validate_input::<Zt, Lc, _>(
+            "prove",
+            pp.num_vars,
+            pp.linear_code.row_len(),
+            batch_size,
+            polys,
+            &[point],
+        )?;
 
         let num_rows = pp.num_rows;
         let row_len = pp.linear_code.row_len();
@@ -305,7 +312,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 )]
 mod tests {
     use crate::{
-        code::{raa::RaaCode, raa_sign_flip::RaaSignFlippingCode},
+        code::iprs::IprsCode,
         merkle::MerkleTree,
         pcs::{
             structs::{ZipPlus, ZipPlusHint},
@@ -331,10 +338,10 @@ mod tests {
     type F = BoxedMontyField;
 
     type Zt = TestZipTypes<N, K, M>;
-    type C = RaaSignFlippingCode<Zt, TestRaaConfig, 4>;
+    type C = IprsCode<Zt, TestIprsConfig, REP_FACTOR, CHECKED>;
 
     type PolyZt = TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>;
-    type PolyC = RaaCode<PolyZt, TestRaaConfig, 4>;
+    type PolyC = IprsCode<PolyZt, TestIprsConfig, REP_FACTOR, CHECKED>;
 
     type TestZip = ZipPlus<Zt, C>;
     type TestPolyZip = ZipPlus<PolyZt, PolyC>;
@@ -345,7 +352,7 @@ mod tests {
 
     #[test]
     fn prove_succeeds_for_single_poly() {
-        let num_vars = 4;
+        let num_vars = 10;
         let (pp, poly) = setup_test_params(num_vars);
         let (hint, comm) = TestZip::commit_single(&pp, &poly).unwrap();
         let point = test_point(num_vars);
@@ -366,7 +373,7 @@ mod tests {
 
     #[test]
     fn prove_succeeds_for_poly_type() {
-        let num_vars = 4;
+        let num_vars = 10;
         let (pp, poly) = setup_poly_test_params(num_vars);
         let (hint, comm) = TestPolyZip::commit_single(&pp, &poly).unwrap();
         let point: Vec<i128> = (0..num_vars).map(|i| i as i128 + 2).collect();
@@ -387,7 +394,7 @@ mod tests {
 
     #[test]
     fn prove_succeeds_with_corrupted_codeword() {
-        let num_vars = 4;
+        let num_vars = 10;
         let (pp, poly) = setup_test_params(num_vars);
         let (mut hint, comm) = TestZip::commit_single(&pp, &poly).unwrap();
 
@@ -421,9 +428,10 @@ mod tests {
 
     #[test]
     fn prove_rejects_oversized_polynomial() {
-        let num_vars = 4;
+        let num_vars = 10;
         let (pp, _) = setup_test_params(num_vars);
-        let oversized_poly: DenseMultilinearExtension<_> = (0..1 << 5).map(Int::from).collect();
+        let oversized_poly: DenseMultilinearExtension<_> =
+            (0..1 << (num_vars + 1)).map(Int::from).collect();
 
         let (hint, comm) =
             TestZip::commit_single(&pp, &setup_test_params::<N, K, M>(num_vars).1).unwrap();
@@ -448,7 +456,7 @@ mod tests {
     /// equals poly(point) lifted to F.
     #[test]
     fn prove_returns_correct_evaluation() {
-        let num_vars = 4;
+        let num_vars = 10;
         let (pp, poly) = setup_test_params(num_vars);
         let (hint, comm) = TestZip::commit_single(&pp, &poly).unwrap();
         let point = test_point(num_vars);
@@ -491,7 +499,7 @@ mod tests {
 
     #[test]
     fn prove_succeeds_for_batch() {
-        let num_vars = 4;
+        let num_vars = 10;
         let (pp, _) = setup_test_params(num_vars);
         let polys = make_batch_polys(num_vars, 2);
 
@@ -508,7 +516,7 @@ mod tests {
 
     #[test]
     fn prove_succeeds_for_batch_5() {
-        let num_vars = 4;
+        let num_vars = 10;
         let (pp, _) = setup_test_params(num_vars);
         let polys = make_batch_polys(num_vars, 5);
 
@@ -525,7 +533,7 @@ mod tests {
 
     #[test]
     fn prove_with_corrupted_codeword_for_batch() {
-        let num_vars = 4;
+        let num_vars = 10;
         let (pp, _) = setup_test_params(num_vars);
         let polys = make_batch_polys(num_vars, 2);
 
@@ -557,7 +565,7 @@ mod tests {
 
     #[test]
     fn prove_rejects_oversized_polynomial_in_batch() {
-        let num_vars = 4;
+        let num_vars = 10;
         let (pp, _) = setup_test_params(num_vars);
         let oversized: DenseMultilinearExtension<_> = (0..1 << 5).map(Int::from).collect();
         let normal: DenseMultilinearExtension<_> = (1..=16).map(Int::from).collect();

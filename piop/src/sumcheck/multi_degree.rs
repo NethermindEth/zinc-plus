@@ -19,14 +19,16 @@ use num_traits::Zero;
 use rayon::prelude::*;
 use std::marker::PhantomData;
 use zinc_poly::mle::DenseMultilinearExtension;
-use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_utils::{cfg_iter, cfg_iter_mut, inner_transparent_field::InnerTransparentField};
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
+use zinc_utils::{
+    add, cfg_iter, cfg_iter_mut, inner_transparent_field::InnerTransparentField, mul,
+};
 
 use crate::CombFn;
 
 use super::{
     SumCheckError,
-    prover::{ProverMsg, ProverState},
+    prover::{NatEvaluatedPolyWithoutConstant, ProverMsg, ProverState},
     verifier::VerifierState,
 };
 
@@ -60,7 +62,7 @@ impl<F: PrimeField> MultiDegreeSumcheckGroup<F> {
 ///
 /// `group_messages[g][round]` = prover message for group g in that round.
 /// All groups share verifier challenges, common evaluation point.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MultiDegreeSumcheckProof<F> {
     /// List of prover messages, one for each round per group.
     group_messages: Vec<Vec<ProverMsg<F>>>,
@@ -75,6 +77,114 @@ impl<F> MultiDegreeSumcheckProof<F> {
     /// sums before running the sumcheck.
     pub fn claimed_sums(&self) -> &[F] {
         &self.claimed_sums
+    }
+}
+
+impl<F: PrimeField> GenTranscribable for MultiDegreeSumcheckProof<F>
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        let mod_size = F::Modulus::NUM_BYTES;
+        let cfg = zinc_transcript::read_field_cfg::<F>(&bytes[..mod_size]);
+        let bytes = &bytes[mod_size..];
+
+        let (num_groups, bytes) = u32::read_transcription_bytes_subset(bytes);
+        let num_groups = usize::try_from(num_groups).expect("group count must fit into usize");
+
+        let (num_vars, mut bytes) = u32::read_transcription_bytes_subset(bytes);
+        let num_vars = usize::try_from(num_vars).expect("num_vars must fit into usize");
+
+        let mut degrees = Vec::with_capacity(num_groups);
+        for _ in 0..num_groups {
+            let (deg, rest) = u32::read_transcription_bytes_subset(bytes);
+            degrees.push(usize::try_from(deg).expect("degree must fit into usize"));
+            bytes = rest;
+        }
+
+        let mut group_messages = Vec::with_capacity(num_groups);
+        for &deg in &degrees {
+            let msg_bytes = mul!(deg, F::Inner::NUM_BYTES);
+            let mut msgs = Vec::with_capacity(num_vars);
+            for _ in 0..num_vars {
+                let tail_evaluations =
+                    zinc_transcript::read_field_vec_with_cfg(&bytes[..msg_bytes], &cfg);
+                msgs.push(ProverMsg(NatEvaluatedPolyWithoutConstant {
+                    tail_evaluations,
+                }));
+                bytes = &bytes[msg_bytes..];
+            }
+            group_messages.push(msgs);
+        }
+
+        let mut claimed_sums = Vec::with_capacity(num_groups);
+        for _ in 0..num_groups {
+            let cs = F::Inner::read_transcription_bytes_exact(&bytes[..F::Inner::NUM_BYTES]);
+            let cs = F::new_unchecked_with_cfg(cs, &cfg);
+            claimed_sums.push(cs);
+            bytes = &bytes[F::Inner::NUM_BYTES..];
+        }
+
+        Self {
+            group_messages,
+            claimed_sums,
+            degrees,
+        }
+    }
+
+    fn write_transcription_bytes_exact(&self, mut buf: &mut [u8]) {
+        buf = zinc_transcript::append_field_cfg::<F>(buf, &self.claimed_sums[0].modulus());
+
+        let num_groups =
+            u32::try_from(self.group_messages.len()).expect("num groups must fit into u32");
+        num_groups.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
+        buf = &mut buf[u32::NUM_BYTES..];
+
+        // All groups share the same number of rounds (num_vars).
+        let num_vars =
+            u32::try_from(self.group_messages[0].len()).expect("num_vars must fit into u32");
+        num_vars.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
+        buf = &mut buf[u32::NUM_BYTES..];
+
+        for &deg in &self.degrees {
+            let deg = u32::try_from(deg).expect("degree must fit into u32");
+            deg.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
+            buf = &mut buf[u32::NUM_BYTES..];
+        }
+
+        for group in &self.group_messages {
+            for msg in group {
+                buf = zinc_transcript::append_field_vec_inner(buf, &msg.0.tail_evaluations);
+            }
+        }
+
+        for cs in &self.claimed_sums {
+            cs.inner()
+                .write_transcription_bytes_exact(&mut buf[..F::Inner::NUM_BYTES]);
+            buf = &mut buf[F::Inner::NUM_BYTES..];
+        }
+    }
+}
+
+impl<F: PrimeField> Transcribable for MultiDegreeSumcheckProof<F>
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    fn get_num_bytes(&self) -> usize {
+        let num_groups = self.group_messages.len();
+        let num_vars = self.group_messages[0].len();
+        // total_evals = Σ_g (degree_g × num_vars)
+        let total_evals: usize = self.degrees.iter().map(|&d| mul!(d, num_vars)).sum();
+
+        // [field_cfg][num_groups][num_vars][deg₀..degₙ][evals...][claimed_sums]
+        let header = add!(F::Modulus::NUM_BYTES, add!(u32::NUM_BYTES, u32::NUM_BYTES));
+        let degrees = mul!(num_groups, u32::NUM_BYTES);
+        let eval_data = mul!(total_evals, F::Inner::NUM_BYTES);
+        let claimed = mul!(num_groups, F::Inner::NUM_BYTES);
+
+        add!(header, add!(degrees, add!(eval_data, claimed)))
     }
 }
 

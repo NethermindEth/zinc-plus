@@ -38,11 +38,13 @@ use zinc_poly::{
     ConstCoeffBitWidth, EvaluationError as PolyEvaluationError,
     mle::DenseMultilinearExtension,
     univariate::{
-        binary::BinaryPoly, dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF,
+        binary::BinaryPoly,
+        dense::DensePolynomial,
+        dynamic::over_field::{DynamicPolyVecF, DynamicPolynomialF},
     },
 };
 use zinc_primality::PrimalityTest;
-use zinc_transcript::traits::{ConstTranscribable, Transcript};
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
 use zinc_uair::{Uair, ideal::Ideal};
 use zinc_utils::{cfg_extend, cfg_into_iter, cfg_iter, named::Named};
 use zip_plus::{
@@ -56,7 +58,7 @@ use zip_plus::{
 //
 
 /// Full proof produced by the Zinc+ PIOP for UCS.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proof<F: PrimeField> {
     /// Zip+ commitments to the witness columns.
     pub commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
@@ -80,6 +82,109 @@ pub struct Proof<F: PrimeField> {
     pub witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
     /// Lookup argument proof. `None` when the UAIR has no lookup specs.
     pub lookup_proof: Option<BatchedLookupProof<F>>,
+}
+
+impl<F> GenTranscribable for Proof<F>
+where
+    F: PrimeField,
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        let (commit0, bytes) = ZipPlusCommitment::read_transcription_bytes_subset(bytes);
+        let (commit1, bytes) = ZipPlusCommitment::read_transcription_bytes_subset(bytes);
+        let (commit2, bytes) = ZipPlusCommitment::read_transcription_bytes_subset(bytes);
+
+        let (zip_len, bytes) = u32::read_transcription_bytes_subset(bytes);
+        let zip_len = usize::try_from(zip_len).expect("zip length must fit into usize");
+        let (zip_bytes, bytes) = bytes.split_at(zip_len);
+        let zip = zip_bytes.to_vec();
+
+        let (ideal_check, bytes) = IdealCheckProof::<F>::read_transcription_bytes_subset(bytes);
+        let (resolver, bytes) =
+            CombinedPolyResolverProof::<F>::read_transcription_bytes_subset(bytes);
+        let (combined_sumcheck, bytes) =
+            MultiDegreeSumcheckProof::<F>::read_transcription_bytes_subset(bytes);
+        let (multipoint_eval, bytes) =
+            MultipointEvalProof::<F>::read_transcription_bytes_subset(bytes);
+
+        let (witness_vec, bytes) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
+        let witness_lifted_evals = witness_vec.0;
+
+        // TODO: deserialize lookup_proof once BatchedLookupProof gets
+        // Transcribable impls (lookup is not yet implemented).
+        assert!(bytes.is_empty(), "All bytes should be consumed");
+
+        Self {
+            commitments: (commit0, commit1, commit2),
+            zip,
+            ideal_check,
+            resolver,
+            combined_sumcheck,
+            multipoint_eval,
+            witness_lifted_evals,
+            lookup_proof: None,
+        }
+    }
+
+    fn write_transcription_bytes_exact(&self, mut buf: &mut [u8]) {
+        // 3 commitments (ConstTranscribable - no length prefix)
+        buf = self.commitments.0.write_transcription_bytes_subset(buf);
+        buf = self.commitments.1.write_transcription_bytes_subset(buf);
+        buf = self.commitments.2.write_transcription_bytes_subset(buf);
+
+        // zip: u32 length + raw bytes
+        let zip_len = u32::try_from(self.zip.len()).expect("zip length must fit into u32");
+        zip_len.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
+        buf = &mut buf[u32::NUM_BYTES..];
+        buf[..self.zip.len()].copy_from_slice(&self.zip);
+        buf = &mut buf[self.zip.len()..];
+
+        // ideal_check: u32 length prefix + data
+        buf = self.ideal_check.write_transcription_bytes_subset(buf);
+
+        // resolver: u32 length prefix + data
+        buf = self.resolver.write_transcription_bytes_subset(buf);
+
+        // combined_sumcheck: u32 length prefix + data
+        buf = self.combined_sumcheck.write_transcription_bytes_subset(buf);
+
+        // multipoint_eval: u32 length prefix + data
+        buf = self.multipoint_eval.write_transcription_bytes_subset(buf);
+
+        // witness_lifted_evals: u32 length prefix + DynamicPolyVecF encoding
+        // TODO: serialize lookup_proof once BatchedLookupProof gets
+        // Transcribable impls (lookup is not yet implemented).
+        DynamicPolyVecF::reinterpret(&self.witness_lifted_evals)
+            .write_transcription_bytes_subset(buf);
+    }
+}
+
+impl<F> Transcribable for Proof<F>
+where
+    F: PrimeField,
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    #[allow(clippy::arithmetic_side_effects)]
+    fn get_num_bytes(&self) -> usize {
+        let witness_vec = DynamicPolyVecF::reinterpret(&self.witness_lifted_evals);
+        3 * ZipPlusCommitment::NUM_BYTES
+            + u32::NUM_BYTES
+            + self.zip.len()
+            + IdealCheckProof::<F>::LENGTH_NUM_BYTES
+            + self.ideal_check.get_num_bytes()
+            + CombinedPolyResolverProof::<F>::LENGTH_NUM_BYTES
+            + self.resolver.get_num_bytes()
+            + MultiDegreeSumcheckProof::<F>::LENGTH_NUM_BYTES
+            + self.combined_sumcheck.get_num_bytes()
+            + MultipointEvalProof::<F>::LENGTH_NUM_BYTES
+            + self.multipoint_eval.get_num_bytes()
+            // TODO: add lookup_proof size once BatchedLookupProof gets
+            // Transcribable impls (lookup is not yet implemented).
+            + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
+            + witness_vec.get_num_bytes()
+    }
 }
 
 /// Trait bundling the various type parameters for the public inputs (NYI),
@@ -204,7 +309,7 @@ fn absorb_public_columns<T: ConstTranscribable>(
     let mut buf = vec![0u8; T::NUM_BYTES];
     for col in cols {
         for entry in col.iter() {
-            entry.write_transcription_bytes(&mut buf);
+            entry.write_transcription_bytes_exact(&mut buf);
             transcript.absorb_slice(&buf);
         }
     }
@@ -339,10 +444,11 @@ mod tests {
     };
     use zip_plus::{
         code::{
-            iprs::{IprsCode, PnttConfigF65537_32_64},
+            iprs::{IprsCode, PnttConfigF65537},
             raa::{RaaCode, RaaConfig},
         },
         pcs::structs::{ZipPlus, ZipPlusParams},
+        pcs_transcript::PcsProverTranscript,
     };
 
     const INT_LIMBS: usize = U64::LIMBS;
@@ -353,13 +459,14 @@ mod tests {
 
     const K: usize = INT_LIMBS * 4;
     const M: usize = INT_LIMBS * 8;
-    const IPRS_DEPTH: usize = 1;
+
+    const REP: usize = 4;
 
     type F = MontyField<FIELD_LIMBS>;
 
     pub struct BinPolyZipTypes {}
     impl ZipTypes for BinPolyZipTypes {
-        const NUM_COLUMN_OPENINGS: usize = 200;
+        const NUM_COLUMN_OPENINGS: usize = 147;
         type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
         type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Fmod = Uint<FIELD_LIMBS>;
@@ -381,7 +488,7 @@ mod tests {
 
     pub struct ArbitraryPolyZipTypesIprs {}
     impl ZipTypes for ArbitraryPolyZipTypesIprs {
-        const NUM_COLUMN_OPENINGS: usize = 200;
+        const NUM_COLUMN_OPENINGS: usize = 147;
         type Eval = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Fmod = Uint<FIELD_LIMBS>;
@@ -406,7 +513,7 @@ mod tests {
     /// RAA accumulation grows the bit-width, so Cw needs more bits than Eval.
     pub struct ArbitraryPolyZipTypesRaa {}
     impl ZipTypes for ArbitraryPolyZipTypesRaa {
-        const NUM_COLUMN_OPENINGS: usize = 200;
+        const NUM_COLUMN_OPENINGS: usize = 147;
         type Eval = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Cw = DensePolynomial<Int<K>, DEGREE_PLUS_ONE>;
         type Fmod = Uint<FIELD_LIMBS>;
@@ -431,7 +538,7 @@ mod tests {
 
     pub struct IntZipTypes {}
     impl ZipTypes for IntZipTypes {
-        const NUM_COLUMN_OPENINGS: usize = 200;
+        const NUM_COLUMN_OPENINGS: usize = 147;
         type Eval = ZtInt;
         type Cw = i128;
         type Fmod = Uint<FIELD_LIMBS>;
@@ -459,12 +566,10 @@ mod tests {
         type ArbitraryZt = ArbitraryPolyZipTypesIprs;
         type IntZt = IntZipTypes;
 
-        type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537_32_64<IPRS_DEPTH>, CHECKED>;
-        type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537_32_64<IPRS_DEPTH>, CHECKED>;
-        type IntLc = IprsCode<Self::IntZt, PnttConfigF65537_32_64<IPRS_DEPTH>, CHECKED>;
+        type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, CHECKED>;
+        type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP, CHECKED>;
+        type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, CHECKED>;
     }
-
-    const RAA_REP: usize = 4;
 
     #[derive(Copy, Clone)]
     struct TestRaaConfig;
@@ -487,15 +592,22 @@ mod tests {
         type ArbitraryZt = ArbitraryPolyZipTypesRaa;
         type IntZt = IntZipTypes;
 
-        type BinaryLc = RaaCode<Self::BinaryZt, TestRaaConfig, RAA_REP>;
-        type ArbitraryLc = RaaCode<Self::ArbitraryZt, TestRaaConfig, RAA_REP>;
-        type IntLc = RaaCode<Self::IntZt, TestRaaConfig, RAA_REP>;
+        type BinaryLc = RaaCode<Self::BinaryZt, TestRaaConfig, REP>;
+        type ArbitraryLc = RaaCode<Self::ArbitraryZt, TestRaaConfig, REP>;
+        type IntLc = RaaCode<Self::IntZt, TestRaaConfig, REP>;
+    }
+
+    /// Use row size equal to poly size, resulting in flat single-row matrices
+    fn make_iprs<Zt: ZipTypes>(num_vars: usize) -> IprsCode<Zt, PnttConfigF65537, REP, CHECKED> {
+        let poly_size = 1 << num_vars;
+        IprsCode::new_with_optimal_depth(poly_size).unwrap()
     }
 
     /// Set up Zip+ PCS parameters for a given number of MLE variables.
     #[allow(clippy::type_complexity)]
     fn setup_pp<Zt>(
         num_vars: usize,
+        linear_codes: (Zt::BinaryLc, Zt::ArbitraryLc, Zt::IntLc),
     ) -> (
         ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
         ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
@@ -506,12 +618,9 @@ mod tests {
     {
         let poly_size = 1 << num_vars;
         (
-            ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::setup(poly_size, Zt::BinaryLc::new(poly_size)),
-            ZipPlus::<Zt::ArbitraryZt, Zt::ArbitraryLc>::setup(
-                poly_size,
-                Zt::ArbitraryLc::new(poly_size),
-            ),
-            ZipPlus::<Zt::IntZt, Zt::IntLc>::setup(poly_size, Zt::IntLc::new(poly_size)),
+            ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::setup(poly_size, linear_codes.0),
+            ZipPlus::<Zt::ArbitraryZt, Zt::ArbitraryLc>::setup(poly_size, linear_codes.1),
+            ZipPlus::<Zt::IntZt, Zt::IntLc>::setup(poly_size, linear_codes.2),
         )
     }
 
@@ -524,6 +633,7 @@ mod tests {
     #[allow(clippy::result_large_err)]
     fn do_test<Zt, U>(
         num_vars: usize,
+        linear_codes: (Zt::BinaryLc, Zt::ArbitraryLc, Zt::IntLc),
         project_ideal: impl Fn(
             &IdealOrZero<U::Ideal>,
             &<F as PrimeField>::Config,
@@ -548,7 +658,7 @@ mod tests {
         <F as Field>::Modulus: FromRef<Zt::Fmod>,
     {
         let mut rng = rng();
-        let pp = setup_pp::<Zt>(num_vars);
+        let pp = setup_pp::<Zt>(num_vars, linear_codes);
 
         let trace = U::generate_random_trace(num_vars, &mut rng);
 
@@ -562,6 +672,15 @@ mod tests {
                     CHECKED,
                 >(&pp, &trace, num_vars, project_scalar_fn)
                 .expect("Prover failed");
+
+                // Checking that the proof can be properly serialized and deserialized
+                let mut transcript = PcsProverTranscript::new_from_commitments(std::iter::empty());
+                transcript.write(&proof).expect("Failed to serialize proof");
+                let mut transcript = transcript.into_verification_transcript();
+                let proof_2 = transcript
+                    .read()
+                    .expect("Failed to deserialize proof after serialization");
+                assert_eq!(proof, proof_2);
 
                 tamper(&mut proof);
 
@@ -592,8 +711,14 @@ mod tests {
     /// (one constraint, no polynomial multiplication, ideal = <X - 2>).
     #[test]
     fn test_e2e_no_multiplication() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, TestAirNoMultiplication<ZtInt>>(
-            8,
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             default_project_ideal!(),
             |_| {},
             |res| res.unwrap(),
@@ -613,8 +738,14 @@ mod tests {
     /// ~= 127^8 ~= 2^56, which fits in i64.
     #[test]
     fn test_e2e_simple_multiplication() {
+        let num_vars = 2;
         do_test::<TestZincTypesRaa, TestUairSimpleMultiplication<ZtInt>>(
-            2,
+            num_vars,
+            (
+                RaaCode::new(num_vars),
+                RaaCode::new(num_vars),
+                RaaCode::new(num_vars),
+            ),
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
             |_| {},
             |res| res.unwrap(),
@@ -627,8 +758,14 @@ mod tests {
     /// Constraints: a[i+1] = a[i] + b[i], c[i] = b[i+2].
     #[test]
     fn test_e2e_mixed_shifts() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, TestUairMixedShifts<ZtInt>>(
-            8,
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
             |_| {},
             |res| res.unwrap(),
@@ -641,8 +778,14 @@ mod tests {
     /// UAIR constraint: binary_poly[0] - int[0] \in <X - 2>
     #[test]
     fn test_e2e_binary_decomposition() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, BinaryDecompositionUair<ZtInt>>(
-            8,
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             default_project_ideal!(),
             |_| {},
             |res| res.unwrap(),
@@ -658,8 +801,14 @@ mod tests {
     ///   up.binary_poly[i] - down.binary_poly[i] = 0, for i=1..15
     #[test]
     fn test_e2e_big_linear() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, BigLinearUair<ZtInt>>(
-            8,
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             default_project_ideal!(),
             |_| {},
             |res| res.unwrap(),
@@ -672,8 +821,14 @@ mod tests {
     /// public inputs.
     #[test]
     fn test_e2e_big_linear_with_public_input() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
-            8,
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             default_project_ideal!(),
             |_| {},
             |res| res.unwrap(),
@@ -687,8 +842,14 @@ mod tests {
 
     #[test]
     fn test_big_linear_tamper_lifted_evals() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
-            8,
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             default_project_ideal!(),
             |proof| proof.witness_lifted_evals.swap(0, 1),
             |res| {
@@ -702,8 +863,14 @@ mod tests {
 
     #[test]
     fn test_big_linear_tamper_up_evals() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
-            8,
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             default_project_ideal!(),
             |proof| proof.resolver.up_evals.swap(0, 1),
             |res| {
@@ -719,8 +886,14 @@ mod tests {
 
     #[test]
     fn test_big_linear_tamper_down_evals() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
-            8,
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             default_project_ideal!(),
             |proof| proof.resolver.down_evals.swap(0, 1),
             |res| {
@@ -739,8 +912,14 @@ mod tests {
     // combined_mle_values were computed under the original transcript.
     #[test]
     fn test_big_linear_tamper_commitment() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
-            8,
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             default_project_ideal!(),
             |proof| proof.commitments.0.root = Default::default(),
             |res| {
@@ -751,8 +930,14 @@ mod tests {
 
     #[test]
     fn test_big_linear_tamper_ideal_check() {
+        let num_vars = 8;
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
-            8,
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
             default_project_ideal!(),
             |proof| proof.ideal_check.combined_mle_values.swap(0, 1),
             |res| {
