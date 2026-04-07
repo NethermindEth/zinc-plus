@@ -26,7 +26,7 @@ struct BenchZipTypes {}
 impl ZipTypes for BenchZipTypes {
     const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = i32;
-    type Cw = i64;
+    type Cw = i128;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
