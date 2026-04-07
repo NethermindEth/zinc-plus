@@ -78,6 +78,19 @@ where
     }
 }
 
+impl MulByScalar<&i64, i64> for i32 {
+    #[inline(always)]
+    #[allow(clippy::arithmetic_side_effects)] // By design
+    fn mul_by_scalar<const CHECK: bool>(&self, rhs: &i64) -> Option<i64> {
+        let lhs = i64::from(*self);
+        if CHECK {
+            lhs.checked_mul(*rhs)
+        } else {
+            Some(lhs * rhs)
+        }
+    }
+}
+
 impl MulByScalar<&i64> for i128 {
     #[inline(always)]
     #[allow(clippy::arithmetic_side_effects)] // By design
