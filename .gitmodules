@@ -1,0 +1,3 @@
+[submodule "crypto-primitives"]
+	path = crypto-primitives
+	url = https://github.com/NethermindEth/crypto-primitives.git
