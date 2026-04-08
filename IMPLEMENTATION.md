@@ -889,6 +889,8 @@ For 8×SHA-256 + ECDSA (512-row trace with `num_vars = 9`):
 
 Folding is a **proof-size optimization** that reduces the size of PCS column openings by splitting high-degree polynomial entries into narrower components before committing. It sits at the boundary between the PIOP layer and the PCS layer: the PIOP operates on the **original unfolded trace**, while the PCS commits and opens the **split (folded) columns**.
 
+The core idea: a `BinaryPoly<32>` entry occupies 256 bytes in a Zip+ codeword, while a `BinaryPoly<16>` entry occupies only 128 bytes. By splitting each 32-bit polynomial column into two 16-bit columns (doubling the row count but halving the element size), the total codeword data per column opening is halved. The folding protocol then provides a cryptographic bridge that reduces evaluation claims on the original wide columns to claims on the split narrow columns, so the PCS only ever opens the smaller committed data.
+
 ### Column Splitting
 
 Each trace column contains `BinaryPoly<D>` entries (D=32 for SHA-256, i.e. 32 binary coefficients per entry). Folding **splits** each column into two halves of half the degree:
@@ -897,51 +899,120 @@ $$v[i] = u[i] + X^{D/2} \cdot w[i]$$
 
 where $u[i]$ contains the low $D/2$ coefficients and $w[i]$ contains the high $D/2$ coefficients. A column of length $n$ with `BinaryPoly<32>` entries becomes a column of length $2n$ with `BinaryPoly<16>` entries. This halves the per-element size in the codeword, reducing proof data for column openings.
 
-Implementation: `zip-plus/src/pcs/folding.rs` — functions `split_column()` and `split_columns()`. The bit-reversal order in `split_column_to_final()` ensures that recursive halving produces the same ordering as chained `split_column()` calls: bit $b$ of entry $i$ ends up at position $i + n \cdot \text{bit\_reverse}(b, \log_2 D)$.
+#### `split_column<D, HALF_D>` (`zip-plus/src/pcs/folding.rs:76`)
+
+The implementation iterates over each entry, extracts the low `HALF_D` and high `HALF_D` coefficients into separate `BinaryPoly<HALF_D>` values, and concatenates them:
+
+```
+Input:  column v of length n, each entry BinaryPoly<D>
+Output: column v' of length 2n, each entry BinaryPoly<HALF_D>
+        v'[0..n]   = u[0..n]   (low halves)
+        v'[n..2n]  = w[0..n]   (high halves)
+```
+
+The returned MLE has `num_vars + 1` variables — the extra variable selects between the low half (0) and the high half (1). `split_columns()` applies this in parallel across all columns when the `parallel` feature is enabled.
+
+#### `split_column_to_final<D>` (`zip-plus/src/pcs/folding.rs:141`)
+
+For full folding (D → 1), rather than chaining $\log_2 D$ intermediate `split_column` calls, this function extracts all $D$ individual bits of each entry in a single pass, producing a column of length $D \cdot n$ with `BinaryPoly<1>` entries.
+
+The key subtlety is the **bit-reversal ordering**. Each recursive `split_column` puts low bits in the first half and high bits in the second half. After $\log_2 D$ levels of this tree structure, bit $b$ of entry $i$ ends up at position:
+
+$$i + n \cdot \text{bit\_reverse}(b, \log_2 D)$$
+
+where $\text{bit\_reverse}$ reverses the $\log_2 D$ least-significant bits (e.g., for $D=32$: `bit_reverse(0b10110, 5) = 0b01101`). This ordering ensures that `split_column_to_final` produces the exact same result as $\log_2 D$ chained `split_column` calls, which is necessary for the MLE factorization property to hold at each level.
 
 ### Mathematical Foundation
 
-The protocol exploits the **MLE factorization property**. For a column $v$ split into $(u, w)$:
+The protocol exploits the **MLE factorization property**. For a column $v$ split into $(u, w)$, the concatenated column $v' = u \| w$ has one extra variable, and its MLE factors as:
 
-$$\text{MLE}[v](r \| x) = (1 - x) \cdot \text{MLE}[u](r) + x \cdot \text{MLE}[w](r)$$
+$$\text{MLE}[v'](r \| x) = (1 - x) \cdot \text{MLE}[u](r) + x \cdot \text{MLE}[w](r)$$
 
-The $\alpha$-projection (evaluating polynomials at $\alpha$) distributes over the split:
+This is because the last variable $x$ selects between the first half ($u$, when $x=0$) and the second half ($w$, when $x=1$), which is exactly the MLE interpolation formula applied to the extra dimension.
+
+The $\alpha$-projection (evaluating polynomials at $\alpha$) distributes over the split because evaluation is a ring homomorphism:
 
 $$(u[i] + X^{D/2} \cdot w[i])\big|_{X=\alpha} = u[i](\alpha) + \alpha^{D/2} \cdot w[i](\alpha)$$
 
-This gives the verifier's consistency check: $c_1 + \alpha^{D/2} \cdot c_2 = c$.
+Applying MLE evaluation to both sides and using linearity of MLE:
+
+$$\text{MLE}[v_{\text{proj}}](r) = \text{MLE}[u_{\text{proj}}](r) + \alpha^{D/2} \cdot \text{MLE}[w_{\text{proj}}](r)$$
+
+Defining $c_1 = \text{MLE}[u_{\text{proj}}](r)$ and $c_2 = \text{MLE}[w_{\text{proj}}](r)$, this gives the verifier's consistency check: $c_1 + \alpha^{D/2} \cdot c_2 = c$.
 
 ### Prover Protocol
 
-Implemented in `fold_claims_prove()` (`zip-plus/src/pcs/folding.rs`). After the PIOP produces evaluation claims $\text{MLE}[v](r) = c$ (projected via $\alpha$):
+Implemented in `fold_claims_prove()` (`zip-plus/src/pcs/folding.rs:376`). After the PIOP produces evaluation claims $\text{MLE}[v_j](r) = c_j$ (projected via $\alpha$) for each committed column $j$:
 
-1. **Compute $c_1$ and $c_2$** — evaluate the MLEs of the projected split halves:
-   - $c_1 = \text{MLE}[u_{\text{proj}}](r)$, $c_2 = \text{MLE}[w_{\text{proj}}](r)$
-   - Optimized via `compute_folding_evals_eq()`, which precomputes $\text{eq}(\text{point}, x)$ for all $x \in \{0,1\}^{\text{num\_vars}}$ once and reuses it across columns, replacing $O(m \cdot n)$ clone/allocate operations with $O(n)$ precomputation.
-2. **Absorb** $c_1$, $c_2$ **into the Fiat-Shamir transcript**, then squeeze random challenges $\beta$ and $\gamma$.
-3. **Compute the new claim** via linear interpolation:
-   - New evaluation point: $(r \| \gamma)$ — append $\gamma$ as an extra dimension.
-   - New claimed value: $d_j = (1 - \gamma) \cdot c_{1,j} + \gamma \cdot c_{2,j}$.
-4. **Output:** `FoldingProverOutput` containing $c_1$, $c_2$ (serialized in proof), the new point, and new evaluations forwarded to the PCS.
+1. **Compute $c_1$ and $c_2$ for each column** — evaluate the MLEs of the projected split halves:
+   - $c_{1,j} = \text{MLE}[u_{j,\text{proj}}](r)$, $c_{2,j} = \text{MLE}[w_{j,\text{proj}}](r)$
+   - **Standard path** (`compute_folding_evals`, `folding.rs:225`): For each column, project both halves to field elements via $\alpha$, build two field-valued MLEs, and evaluate each at point $r$. Parallelized across columns.
+   - **Optimized path** (`compute_folding_evals_eq`, `pipeline.rs:521`): Exploits the binary structure of `BinaryPoly` entries to avoid allocating projected MLEs entirely. See [Optimized Evaluation via Eq-Polynomial](#optimized-evaluation-via-eq-polynomial) below.
+
+2. **Absorb** $c_{1,j}$, $c_{2,j}$ **into the Fiat-Shamir transcript** (all $c_1$ values first, then all $c_2$ values).
+
+3. **Squeeze challenges**: derive $\beta \in \mathbb{F}_q$ and $\gamma \in \mathbb{F}_q$ from the transcript. ($\beta$ appears in the formal protocol definition as part of $h(Y) = (1 - Y + \beta Y) \cdot ((1-Y) c_1 + Y c_2)$ but cancels in the final formula; it is squeezed for transcript consistency but not used in computation.)
+
+4. **Compute the new claim** via linear interpolation:
+   - New evaluation point: $(r \| \gamma)$ — append $\gamma$ as an extra MLE variable.
+   - New claimed value per column: $d_j = (1 - \gamma) \cdot c_{1,j} + \gamma \cdot c_{2,j}$.
+   - This equals $\text{MLE}[v'_{j,\text{proj}}](r \| \gamma)$ by the MLE factorization property.
+
+5. **Output:** `FoldingProverOutput` containing `c1s`, `c2s` (serialized in the proof for the verifier), `new_point = (r || γ)`, and `new_evals` forwarded to the PCS.
 
 ### Verifier Protocol
 
-Implemented in `fold_claims_verify()` (`zip-plus/src/pcs/folding.rs`):
+Implemented in `fold_claims_verify()` (`zip-plus/src/pcs/folding.rs:472`):
 
-1. **Read** $c_1$, $c_2$ from the proof.
-2. **Consistency check:** verify $c_{1,j} + \alpha^{D/2} \cdot c_{2,j} = \text{original\_eval}_j$ for all $j$ — this binds the split values to the original PIOP claim.
-3. **Replay the transcript** (absorb $c_1$/$c_2$, squeeze $\beta$/$\gamma$) to derive the same challenges.
-4. **Reconstruct the new claim** and pass it to PCS verification.
+1. **Read** $c_{1,j}$, $c_{2,j}$ from the proof for each committed column $j$.
+
+2. **Consistency check:** For every column $j$, verify:
+   $$c_{1,j} + \alpha^{D/2} \cdot c_{2,j} = \text{original\_eval}_j$$
+   This binds the prover's claimed split values to the original PIOP evaluation claims. If any column fails, the verifier rejects with `InvalidPcsOpen`. The value $\alpha^{D/2}$ is precomputed via repeated squaring in `compute_alpha_power()` (`folding.rs:565`).
+
+3. **Replay the transcript:** Absorb $c_{1,j}$/$c_{2,j}$ in the same order as the prover, then squeeze $\beta$ and $\gamma$ to derive identical challenges.
+
+4. **Reconstruct the new claim:** Compute `new_point = (r || γ)` and `new_evals[j] = (1−γ)·c₁[j] + γ·c₂[j]`, then pass these to PCS verification. The PCS verifier checks that the committed split columns, when evaluated at `(r || γ)`, match the claimed values — closing the proof.
+
+### Optimized Evaluation via Eq-Polynomial
+
+The standard `compute_folding_evals` path projects each column's halves to field elements ($O(n)$ field multiplications per column), builds two separate MLEs, and evaluates each — requiring $O(n)$ memory and $O(n)$ field operations per column, with each column independently allocating its own vectors.
+
+The optimized `compute_folding_evals_eq` (`pipeline.rs:521`) eliminates these per-column allocations by exploiting the structure of `BinaryPoly` entries:
+
+**Phase 1 — Precompute the eq-polynomial tensor** ($O(n)$ once, shared across all columns):
+
+$$\text{eq}(r, x) = \prod_{i=0}^{\text{nv}-1} \bigl((1-r_i)(1-x_i) + r_i \cdot x_i\bigr)$$
+
+Built for all $x \in \{0,1\}^{\text{nv}}$ using the standard tensor recurrence: starting from $\text{eq}[0] = 1$, at each level $i$ split each entry into two branches weighted by $(1-r_i)$ and $r_i$.
+
+**Phase 2 — Precompute $\alpha$ powers**: $\alpha^0, \alpha^1, \ldots, \alpha^{D/2-1}$ ($O(D)$ once).
+
+**Phase 3 — Per-column bit-accumulation** (parallel across columns):
+
+Since each entry of a `BinaryPoly<HALF_D>` is a vector of binary coefficients, the MLE evaluation $c_1 = \sum_{x \in \{0,1\}^{\text{nv}}} \text{eq}(r,x) \cdot u_{\text{proj}}[x]$ can be decomposed by coefficient:
+
+$$c_1 = \sum_{k=0}^{D/2-1} \alpha^k \cdot \underbrace{\sum_{\substack{i : \text{bit}_k(u[i]) = 1}} \text{eq}(r, i)}_{\text{accum\_lo}[k]}$$
+
+The inner sum is computed by iterating over entries, packing each entry's binary coefficients into a `u64` bitmask, and using `trailing_zeros()` to efficiently iterate over only the set bits — skipping zero entries entirely. This avoids $O(n \cdot D)$ field multiplications, replacing them with $O(n \cdot \text{popcount})$ field additions plus $O(D)$ final multiplications by the precomputed $\alpha$ powers.
+
+The same accumulation is performed for the high-half (`accum_hi`), then:
+
+$$c_1 = \sum_k \alpha^k \cdot \text{accum\_lo}[k], \qquad c_2 = \sum_k \alpha^k \cdot \text{accum\_hi}[k]$$
+
+All operations use `Field::Inner` (raw Montgomery form) to avoid wrapping overhead.
 
 ### Pipeline Integration
 
-In `snark/src/pipeline.rs`, the folding protocol fits between PIOP and PCS:
+In `snark/src/pipeline.rs`, the folding protocol fits between PIOP and PCS. The proving pipeline for the 1× folded case (`prove_classic_logup_folded`):
 
-1. **Split columns** — `split_columns::<D, HALF_D>()` on the trace.
-2. **PCS commit** — commit the split (narrower) columns.
-3. **PIOP** — runs on the original unfolded trace (IC, CPR, Lookup).
-4. **Folding protocol** — `fold_claims_prove()` bridges PIOP evaluation claims to PCS claims at the extended point.
-5. **PCS prove** — opens at the extended point $(r \| \gamma_1 [\| \gamma_2 \ldots])$.
+1. **Split columns** — `split_columns::<D, HALF_D>()` transforms the original trace columns of `BinaryPoly<32>` into columns of `BinaryPoly<16>` (doubling row count, halving element width).
+2. **PCS commit** — commit the split (narrower) columns. The Merkle tree is built over the smaller codeword elements, so the commitment is cheaper.
+3. **PIOP** — runs on the **original unfolded trace** (Ideal Check, CPR, Lookup). The PIOP is unaware of folding — it produces evaluation claims on the original `BinaryPoly<32>` columns at point $r$.
+4. **Folding protocol** — `fold_claims_prove()` bridges the PIOP's evaluation claims to PCS claims: it computes $c_1$/$c_2$ for each column, absorbs them into the transcript, and produces the extended point $(r \| \gamma)$ and new evaluation claims.
+5. **PCS prove** — opens the committed split columns at the extended point $(r \| \gamma_1 [\| \gamma_2 \ldots])$.
+
+The verifier follows the same structure in reverse: PIOP verify → folding verify (consistency check + transcript replay) → PCS verify at the extended point.
 
 ### Folding Variants
 
@@ -955,7 +1026,26 @@ The codebase implements three folding depths:
 
 Each additional folding round appends one more $\gamma$ to the evaluation point and adds $c_1$/$c_2$ values to the proof, but the PCS column-opening savings far outweigh this overhead.
 
-For the 4× fold, the proof struct (`Folded4xZincProof`) contains `c1s`/`c2s` from the first round and `c3s`/`c4s` from the second round, plus `ring_evals` (individual coefficient evaluations).
+#### 1× Fold (Single Round)
+
+The simplest variant. The proof struct `FoldedZincProof` contains `folding_c1s_bytes` and `folding_c2s_bytes` (one field element per committed column per list). The PCS commits and opens `BinaryPoly<16>` columns at point $(r \| \gamma)$.
+
+#### 4× Fold (Two Rounds)
+
+Performs two consecutive folding rounds:
+
+1. **Round 1** at PIOP point $r$: splits `BinaryPoly<32>` → `BinaryPoly<16>`, computes $c_1$/$c_2$, derives $\gamma_1$, produces claims at $(r \| \gamma_1)$.
+2. **Round 2** at point $(r \| \gamma_1)$: splits `BinaryPoly<16>` → `BinaryPoly<8>`, computes $c_3$/$c_4$, derives $\gamma_2$, produces claims at $(r \| \gamma_1 \| \gamma_2)$.
+
+The proof struct `Folded4xZincProof` contains `c1s`/`c2s` from round 1 and `c3s`/`c4s` from round 2, plus `ring_evals` (individual coefficient evaluations used in the ring-eval bridge).
+
+The verifier chains two `fold_claims_verify` calls. Round 1 checks $c_1 + \alpha^{16} \cdot c_2 = \text{original}$ and derives the intermediate claims. Round 2 checks $c_3 + \alpha^{8} \cdot c_4 = \text{round1\_claims}$ and produces the final PCS claims. Note that the $\alpha$ power changes at each round: $\alpha^{D/2}$ for round 1, $\alpha^{D/4}$ for round 2.
+
+#### Full Fold ($\log_2 D$ Rounds)
+
+Iterates through all splitting levels down to `BinaryPoly<1>`. Uses `split_column_to_final` for the column splitting (single-pass bit extraction with bit-reversal ordering). The proof struct `FullFoldedZincProof` contains a `Vec<FoldingRoundBytes>`, where each entry holds one round's `c1s_bytes` and `c2s_bytes`.
+
+The verifier processes folding rounds in a loop with a runtime `fold_half_sizes` array (e.g., `[16, 8, 4, 2, 1]` for $D=32$), calling `fold_claims_verify` at each level with the appropriate $\alpha^{\text{half\_d}}$ and chaining the output claims to the next round's input.
 
 ### Proof Size Impact
 
@@ -967,14 +1057,43 @@ For 8×SHA-256 (512-row trace, `num_vars = 9`, 13 committed BinaryPoly columns):
 | 1× Folded (16-bit columns) | 131 × 13 × 128 B ≈ 218 KB | ~270 KB |
 | 4× Folded (8-bit columns) | 131 × 13 × 64 B ≈ 109 KB | ~200 KB |
 
+The overhead per folding round is $2m$ field elements ($c_1$ and $c_2$ for each of the $m$ committed columns), which is typically $2 \times 13 \times 16\text{ B} = 416\text{ B}$ per round — negligible compared to the column-opening savings of tens of kilobytes.
+
 ### Soundness
 
 The folding protocol is sound because:
 
-1. **Consistency check:** The verifier checks $c_1 + \alpha^{D/2} \cdot c_2 = c$, binding the prover to consistent split values that match the original PIOP claim.
-2. **Linear interpolation:** The new claimed evaluation $d = (1 - \gamma) \cdot c_1 + \gamma \cdot c_2$ is uniquely determined by the split values and the random $\gamma$. Any deviation is caught with probability $1 - 1/|\mathbb{F}|$.
-3. **Fiat-Shamir binding:** All challenges ($\beta$, $\gamma$) flow through the BLAKE3 transcript, preventing the prover from adapting them.
-4. **PCS opening:** The PCS opening at the extended point guarantees the prover's claimed evaluations match a committed polynomial. Since the split columns are committed, and folding soundly reduces original claims to split-column claims, the full proof is sound.
+1. **Consistency check:** The verifier checks $c_1 + \alpha^{D/2} \cdot c_2 = c$, which is the $\alpha$-projection of the polynomial identity $v[i] = u[i] + X^{D/2} \cdot w[i]$ applied to the MLE evaluation. This binds the prover to split values that are algebraically consistent with the original PIOP claim. A cheating prover would need to find $c_1', c_2'$ satisfying the check but not corresponding to the actual column data — which is infeasible because the PCS opening at the extended point independently verifies the claimed evaluations against the committed polynomials.
+
+2. **Linear interpolation:** The new claimed evaluation $d = (1 - \gamma) \cdot c_1 + \gamma \cdot c_2$ equals $\text{MLE}[v'](r \| \gamma)$ by the MLE factorization property. Since $\gamma$ is chosen after the prover commits to $c_1$ and $c_2$, any inconsistency between the claimed $d$ and the actual MLE value is caught with probability $1 - 1/|\mathbb{F}|$ by the Schwartz-Zippel lemma.
+
+3. **Fiat-Shamir binding:** All challenges ($\beta$, $\gamma$) are derived from the BLAKE3 transcript, which includes all prior proof elements. The prover cannot adaptively choose challenges because they are deterministically derived from the transcript state.
+
+4. **PCS opening:** The PCS opening at the extended point guarantees the prover's claimed evaluations match a committed polynomial. Since the split columns are committed, and folding soundly reduces original claims to split-column claims, the full proof is sound. For multi-round folding, soundness composes: each round independently binds the prover via its own consistency check and random $\gamma$, and the final PCS opening anchors the chain.
+
+### Data Structures
+
+```rust
+/// Output of prover-side folding (one round).
+pub struct FoldingProverOutput<F> {
+    pub c1s: Vec<F>,       // c₁[j] = MLE[u_j](r) for each column j
+    pub c2s: Vec<F>,       // c₂[j] = MLE[w_j](r) for each column j
+    pub new_point: Vec<F>,  // (r₀, …, r_{nv−1}, γ)
+    pub new_evals: Vec<F>,  // d[j] = (1−γ)·c₁[j] + γ·c₂[j]
+}
+
+/// Output of verifier-side folding (one round).
+pub struct FoldingVerifierOutput<F> {
+    pub new_point: Vec<F>,  // (r₀, …, r_{nv−1}, γ)
+    pub new_evals: Vec<F>,  // d[j] = (1−γ)·c₁[j] + γ·c₂[j]
+}
+
+/// Serialized folding data for one round (used in multi-round proofs).
+pub struct FoldingRoundBytes {
+    pub c1s_bytes: Vec<Vec<u8>>,
+    pub c2s_bytes: Vec<Vec<u8>>,
+}
+```
 
 ### Feature Flags
 
