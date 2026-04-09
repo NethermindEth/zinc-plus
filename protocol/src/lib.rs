@@ -406,10 +406,15 @@ mod tests {
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-        TestAirNoMultiplication, TestUairMixedShifts, TestUairSimpleMultiplication,
+        MixedIdealTestUair, TestAirNoMultiplication, TestUairMixedShifts,
+        TestUairSimpleMultiplication, XnMinusOneTestUair,
     };
     use zinc_uair::{
-        degree_counter::count_max_degree, ideal::degree_one::DegreeOneIdeal,
+        degree_counter::count_max_degree,
+        ideal::{
+            IdealCheck, degree_one::DegreeOneIdeal, mixed::MixedDegreeOneOrXnMinusOne,
+            xn_minus_one::XnMinusOneIdeal,
+        },
         ideal_collector::IdealOrZero,
     };
     use zinc_utils::{
@@ -607,16 +612,13 @@ mod tests {
     }
 
     #[allow(clippy::result_large_err)]
-    fn do_test<Zt, U>(
+    fn do_test<Zt, U, IdealOverF>(
         num_vars: usize,
         linear_codes: (Zt::BinaryLc, Zt::ArbitraryLc, Zt::IntLc),
-        project_ideal: impl Fn(
-            &IdealOrZero<U::Ideal>,
-            &<F as PrimeField>::Config,
-        ) -> IdealOrZero<DegreeOneIdeal<F>>
+        project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF
         + Copy,
         tamper: impl Fn(&mut Proof<F>),
-        check_verification: impl Fn(Result<(), ProtocolError<F, IdealOrZero<DegreeOneIdeal<F>>>>),
+        check_verification: impl Fn(Result<(), ProtocolError<F, IdealOverF>>),
     ) where
         Zt: ZincTypes<DEGREE_PLUS_ONE>,
         <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
@@ -632,6 +634,7 @@ mod tests {
             + for<'a> FromWithConfig<&'a Zt::Pt>,
         <F as Field>::Inner: FromRef<Zt::Fmod>,
         <F as Field>::Modulus: FromRef<Zt::Fmod>,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
     {
         let mut rng = rng();
         let pp = setup_pp::<Zt>(num_vars, linear_codes);
@@ -688,7 +691,7 @@ mod tests {
     #[test]
     fn test_e2e_no_multiplication() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, TestAirNoMultiplication<ZtInt>>(
+        do_test::<TestZincTypesIprs, TestAirNoMultiplication<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -696,6 +699,50 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// End-to-end test: XnMinusOneTestUair.
+    ///
+    /// UAIR constraint: a + b - c ∈ (X^32 - 1).
+    /// Honest trace satisfies c = a + b, so the expression is identically
+    /// zero and trivially belongs to the ideal.
+    #[test]
+    fn test_e2e_xn_minus_one() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, XnMinusOneTestUair<ZtInt>, _>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |ideal, _field_cfg| ideal.map(|_| XnMinusOneIdeal::<32>),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// End-to-end test: MixedIdealTestUair.
+    ///
+    /// Two constraints exercising the mixed ideal type:
+    /// - a + b - c ∈ (X - 2)
+    /// - a + b - c ∈ (X^32 - 1)
+    #[test]
+    fn test_e2e_mixed_ideal() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, MixedIdealTestUair<ZtInt>, _>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |ideal, field_cfg| {
+                ideal.map(|i| MixedDegreeOneOrXnMinusOne::from_with_cfg(i, field_cfg))
+            },
             |_| {},
             |res| res.unwrap(),
         );
@@ -715,7 +762,7 @@ mod tests {
     #[test]
     fn test_e2e_simple_multiplication() {
         let num_vars = 2;
-        do_test::<TestZincTypesRaa, TestUairSimpleMultiplication<ZtInt>>(
+        do_test::<TestZincTypesRaa, TestUairSimpleMultiplication<ZtInt>, _>(
             num_vars,
             (
                 RaaCode::new(num_vars),
@@ -735,7 +782,7 @@ mod tests {
     #[test]
     fn test_e2e_mixed_shifts() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, TestUairMixedShifts<ZtInt>>(
+        do_test::<TestZincTypesIprs, TestUairMixedShifts<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -755,7 +802,7 @@ mod tests {
     #[test]
     fn test_e2e_binary_decomposition() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BinaryDecompositionUair<ZtInt>>(
+        do_test::<TestZincTypesIprs, BinaryDecompositionUair<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -778,7 +825,7 @@ mod tests {
     #[test]
     fn test_e2e_big_linear() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUair<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUair<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -798,7 +845,7 @@ mod tests {
     #[test]
     fn test_e2e_big_linear_with_public_input() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -819,7 +866,7 @@ mod tests {
     #[test]
     fn test_big_linear_tamper_lifted_evals() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -840,7 +887,7 @@ mod tests {
     #[test]
     fn test_big_linear_tamper_up_evals() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -863,7 +910,7 @@ mod tests {
     #[test]
     fn test_big_linear_tamper_down_evals() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -889,7 +936,7 @@ mod tests {
     #[test]
     fn test_big_linear_tamper_commitment() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -907,7 +954,7 @@ mod tests {
     #[test]
     fn test_big_linear_tamper_ideal_check() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),

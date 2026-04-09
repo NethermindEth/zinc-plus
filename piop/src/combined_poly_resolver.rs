@@ -510,7 +510,7 @@ mod tests {
         );
         test_successful_verification_generic::<TestUairSimpleMultiplication<Int<5>>, _, _, 32>(
             num_vars,
-            |_ideal_over_ring| IdealOrZero::zero(),
+            |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<MontyField<LIMBS>>>::zero(),
         );
     }
 }

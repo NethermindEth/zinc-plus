@@ -1,4 +1,6 @@
 pub mod degree_one;
+pub mod mixed;
+pub mod xn_minus_one;
 
 use crypto_primitives::Semiring;
 use std::fmt::Debug;

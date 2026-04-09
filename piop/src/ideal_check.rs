@@ -314,12 +314,16 @@ mod tests {
     use rand::rng;
     use zinc_poly::univariate::{dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF};
     use zinc_test_uair::{
-        GenerateRandomTrace, TestAirNoMultiplication, TestUairSimpleMultiplication,
+        GenerateRandomTrace, MixedIdealTestUair, TestAirNoMultiplication,
+        TestUairSimpleMultiplication, XnMinusOneTestUair,
     };
     use zinc_transcript::KeccakTranscript;
     use zinc_uair::{
         constraint_counter::count_constraints,
-        ideal::{Ideal, IdealCheck, degree_one::DegreeOneIdeal},
+        ideal::{
+            Ideal, IdealCheck, degree_one::DegreeOneIdeal, mixed::MixedDegreeOneOrXnMinusOne,
+            xn_minus_one::XnMinusOneIdeal,
+        },
     };
 
     use crate::test_utils::{
@@ -435,7 +439,35 @@ mod tests {
         // Non-linear UAIR - only combined approach works
         test_successful_verification_combined::<TestUairSimpleMultiplication<Int<5>>, _, _, 32>(
             num_vars,
-            |_ideal_over_ring| IdealOrZero::zero(),
+            |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<MontyField<LIMBS>>>::zero(),
+        );
+
+        // UAIR with (X^32 - 1) ideal - both approaches work since it is linear.
+        // The projection is trivial because XnMinusOneIdeal carries no
+        // ring-dependent data.
+        test_successful_verification_linear::<XnMinusOneTestUair<Int<5>>, _, _, 32>(
+            num_vars,
+            |ideal_over_ring| ideal_over_ring.map(|_| XnMinusOneIdeal::<32>),
+        );
+        test_successful_verification_combined::<XnMinusOneTestUair<Int<5>>, _, _, 32>(
+            num_vars,
+            |ideal_over_ring| ideal_over_ring.map(|_| XnMinusOneIdeal::<32>),
+        );
+
+        // UAIR mixing (X - 2) and (X^32 - 1) constraints in the same UAIR.
+        test_successful_verification_linear::<MixedIdealTestUair<Int<5>>, _, _, 32>(
+            num_vars,
+            |ideal_over_ring| {
+                ideal_over_ring
+                    .map(|i| MixedDegreeOneOrXnMinusOne::from_with_cfg(i, &field_cfg))
+            },
+        );
+        test_successful_verification_combined::<MixedIdealTestUair<Int<5>>, _, _, 32>(
+            num_vars,
+            |ideal_over_ring| {
+                ideal_over_ring
+                    .map(|i| MixedDegreeOneOrXnMinusOne::from_with_cfg(i, &field_cfg))
+            },
         );
     }
 }

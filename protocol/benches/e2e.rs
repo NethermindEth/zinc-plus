@@ -22,14 +22,14 @@ use zinc_poly::{
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes};
 use zinc_test_uair::{
-    BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-    TestAirNoMultiplication,
+    BigLinearUair, SHAProxy, BigLinearUairWithPublicInput, BinaryDecompositionUair,
+    GenerateRandomTrace, TestAirNoMultiplication,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
     Uair, UairTrace,
     degree_counter::count_max_degree,
-    ideal::{Ideal, IdealCheck, degree_one::DegreeOneIdeal},
+    ideal::{Ideal, IdealCheck, degree_one::DegreeOneIdeal, mixed::MixedDegreeOneOrXnMinusOne},
     ideal_collector::IdealOrZero,
 };
 use zinc_utils::{
@@ -424,6 +424,43 @@ fn bench_big_linear(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     do_bench_uair::<BigLinearUair<i64>>(group, "BigLinear", num_vars);
 }
 
+/// SHAProxy uses the mixed `(X-2) | (X^32 - 1)` ideal type, so it can't go
+/// through `do_bench_uair` (which is hardcoded to `DegreeOneIdeal`). This
+/// helper mirrors `do_bench_uair` but with the mixed-ideal projector.
+fn do_bench_sha_proxy<U>(group: &mut BenchmarkGroup<WallTime>, label: &str, num_vars: usize)
+where
+    U: Uair<
+            Ideal = MixedDegreeOneOrXnMinusOne<<BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int, 32>,
+            Scalar = DensePolynomial<<BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int, 32>,
+        > + GenerateRandomTrace<
+            DEGREE_PLUS_ONE,
+            PolyCoeff = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int,
+            Int = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int,
+        > + 'static,
+    F: for<'a> FromWithConfig<&'a <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int>,
+{
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+
+    let proj_ideal = |ideal: &IdealOrZero<U::Ideal>, field_cfg: &<F as PrimeField>::Config| {
+        ideal.map(|i| MixedDegreeOneOrXnMinusOne::<F, 32>::from_with_cfg(i, field_cfg))
+    };
+
+    do_bench::<BenchZincTypes, U, _>(
+        group,
+        label,
+        num_vars,
+        setup_pp,
+        trace,
+        zinc_protocol::project_scalar_fn,
+        proj_ideal,
+    );
+}
+
+fn bench_sha_proxy(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    do_bench_sha_proxy::<SHAProxy<i64>>(group, "SHAProxy", num_vars);
+}
+
 fn bench_big_linear_public_input(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     do_bench_uair::<BigLinearUairWithPublicInput<i64>>(group, "BigLinearPI", num_vars);
 }
@@ -435,21 +472,27 @@ fn bench_big_linear_public_input(group: &mut BenchmarkGroup<WallTime>, num_vars:
 fn e2e_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ E2E");
 
-    bench_no_mult(&mut group, 8);
-    bench_no_mult(&mut group, 10);
-    bench_no_mult(&mut group, 12);
+    // bench_no_mult(&mut group, 8);
+    // bench_no_mult(&mut group, 10);
+    // bench_no_mult(&mut group, 12);
 
-    bench_binary_decomposition(&mut group, 8);
-    bench_binary_decomposition(&mut group, 10);
-    bench_binary_decomposition(&mut group, 12);
+    // bench_binary_decomposition(&mut group, 8);
+    // bench_binary_decomposition(&mut group, 10);
+    // bench_binary_decomposition(&mut group, 12);
 
-    bench_big_linear(&mut group, 8);
-    bench_big_linear(&mut group, 10);
-    bench_big_linear(&mut group, 12);
+    // bench_big_linear(&mut group, 8);
+    // bench_big_linear(&mut group, 10);
+    // bench_big_linear(&mut group, 12);
+    bench_big_linear(&mut group, 9);
 
-    bench_big_linear_public_input(&mut group, 8);
-    bench_big_linear_public_input(&mut group, 10);
-    bench_big_linear_public_input(&mut group, 12);
+    // bench_sha_proxy(&mut group, 8);
+    // bench_sha_proxy(&mut group, 10);
+    // bench_sha_proxy(&mut group, 12);
+    bench_sha_proxy(&mut group, 9);
+
+    // bench_big_linear_public_input(&mut group, 8);
+    // bench_big_linear_public_input(&mut group, 10);
+    // bench_big_linear_public_input(&mut group, 12);
 
     group.finish();
 }
