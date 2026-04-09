@@ -497,6 +497,232 @@ where
     }
 }
 
+/// A second "big linear" UAIR with 14 binary-poly columns and 4 int columns,
+/// used as a benchmarking shape distinct from `BigLinearUair`.
+///
+/// Constraints (0-based; `bp = up.binary_poly`, `int = up.int`,
+/// `dbp = down.binary_poly`):
+///
+/// - `dbp[0] - bp[1] - bp[2] - bp[3] - int[0] - int[1] - int[2] ∈ (X-2)`
+/// - `dbp[4] - bp[5] - bp[6] - bp[7] - int[1] - int[2] - int[3] ∈ (X-2)`
+/// - `bp[8] - int[0] ∈ (X-2)`
+/// - `bp[9] - int[1] ∈ (X-2)`
+/// - `bp[10] - X * bp[11] ∈ (X-1)`
+/// - `bp[12] - X * bp[13] ∈ (X-1)`
+pub struct SHAProxy<R>(PhantomData<R>);
+
+impl<R> Uair for SHAProxy<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        // 14 binary_poly cols, 0 arbitrary_poly cols, 4 int cols.
+        let total = TotalColumnLayout::new(14, 0, 4);
+        // Only c_1 (bp[0]) and c_5 (bp[4]) are referenced as `down`, shifted by 1.
+        let shifts = vec![ShiftSpec::new(0, 1), ShiftSpec::new(4, 1)];
+        UairSignature::new(total, PublicColumnLayout::default(), shifts)
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        let one_ideal = DegreeOneIdeal::new(R::from(1));
+        let two_ideal = DegreeOneIdeal::new(R::from(2));
+        // The polynomial X = 0 + 1*X, used to express `X * c_k` via `mbs`.
+        let x_scalar = DensePolynomial::<R, 32>::new([R::ZERO, R::from(1)]);
+
+        // `down.binary_poly` is indexed by ShiftSpec position, not source col.
+        // Our shifts vec is [ShiftSpec::new(0, 1), ShiftSpec::new(4, 1)], so
+        // down.binary_poly[0] = bp[0][t+1], down.binary_poly[1] = bp[4][t+1].
+        let dbp_c1 = &down.binary_poly[0];
+        let dbp_c5 = &down.binary_poly[1];
+
+        // (C1) dbp[0] - bp[1] - bp[2] - bp[3] - int[0] - int[1] - int[2] ∈ (X-2)
+        b.assert_in_ideal(
+            dbp_c1.clone()
+                - &up.binary_poly[1]
+                - &up.binary_poly[2]
+                - &up.binary_poly[3]
+                - &up.int[0]
+                - &up.int[1]
+                - &up.int[2],
+            &ideal_from_ref(&two_ideal),
+        );
+
+        // (C2) dbp[4] - bp[5] - bp[6] - bp[7] - int[1] - int[2] - int[3] ∈ (X-2)
+        b.assert_in_ideal(
+            dbp_c5.clone()
+                - &up.binary_poly[5]
+                - &up.binary_poly[6]
+                - &up.binary_poly[7]
+                - &up.int[1]
+                - &up.int[2]
+                - &up.int[3],
+            &ideal_from_ref(&two_ideal),
+        );
+
+        // (C3) bp[8] - int[0] ∈ (X-2)
+        b.assert_in_ideal(
+            up.binary_poly[8].clone() - &up.int[0],
+            &ideal_from_ref(&two_ideal),
+        );
+
+        // (C4) bp[9] - int[1] ∈ (X-2)
+        b.assert_in_ideal(
+            up.binary_poly[9].clone() - &up.int[1],
+            &ideal_from_ref(&two_ideal),
+        );
+
+        // (C5) bp[10] - X * bp[11] ∈ (X-1)
+        b.assert_in_ideal(
+            up.binary_poly[10].clone()
+                - &mbs(&up.binary_poly[11], &x_scalar).expect("mul-by-X overflow"),
+            &ideal_from_ref(&one_ideal),
+        );
+
+        // (C6) bp[12] - X * bp[13] ∈ (X-1)
+        b.assert_in_ideal(
+            up.binary_poly[12].clone()
+                - &mbs(&up.binary_poly[13], &x_scalar).expect("mul-by-X overflow"),
+            &ideal_from_ref(&one_ideal),
+        );
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for SHAProxy<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        /// Generate a random binary polynomial with the given number of 1-bits.
+        fn random_binary_poly_with_popcount(
+            popcount: u32,
+            rng: &mut (impl rand::RngCore + ?Sized),
+        ) -> BinaryPoly<32> {
+            let mut positions: [u8; 32] =
+                core::array::from_fn(|i| u8::try_from(i).expect("can't fail"));
+            for i in 0..popcount as usize {
+                let j = i + rng.next_u32() as usize % (32 - i);
+                positions.swap(i, j);
+            }
+            let mut value: u32 = 0;
+            for &pos in &positions[..popcount as usize] {
+                value |= 1u32 << pos;
+            }
+            BinaryPoly::from(value)
+        }
+
+        // Bits used by the "small" binary polys that feed into C1/C2 sums.
+        // Capping at 10 bits keeps each `eval(2)` value below 2^10 - 1, so the
+        // sum used to construct `bp[0]` / `bp[4]` at the next row stays in u32.
+        const SMALL_MASK: u32 = (1u32 << 10) - 1;
+        // Range of values for the int columns (small non-negative).
+        const INT_MAX_EXCL: u32 = 32;
+
+        let len = 1usize << num_vars;
+
+        let mut bp_cols: Vec<DenseMultilinearExtension<BinaryPoly<32>>> =
+            vec![(0..len).map(|_| BinaryPoly::zero()).collect(); 14];
+        let mut int_cols: Vec<DenseMultilinearExtension<R>> =
+            vec![(0..len).map(|_| R::ZERO).collect(); 4];
+
+        // Row 0: pick the two "down-shifted" columns freely (their values at
+        // row 0 are unconstrained because the shift is zero-padded beyond the
+        // start of the trace).
+        bp_cols[0][0] = BinaryPoly::from(rng.next_u32() & SMALL_MASK);
+        bp_cols[4][0] = BinaryPoly::from(rng.next_u32() & SMALL_MASK);
+
+        for i in 0..len {
+            // bp[1..=3], bp[5..=7]: small random binary polys (10-bit values).
+            for k in [1usize, 2, 3, 5, 6, 7] {
+                bp_cols[k][i] = BinaryPoly::from(rng.next_u32() & SMALL_MASK);
+            }
+
+            // int[0..=3]: small non-negative i64 values.
+            let int_vals: [u32; 4] = [
+                rng.next_u32() % INT_MAX_EXCL,
+                rng.next_u32() % INT_MAX_EXCL,
+                rng.next_u32() % INT_MAX_EXCL,
+                rng.next_u32() % INT_MAX_EXCL,
+            ];
+            for (k, v) in int_vals.iter().enumerate() {
+                int_cols[k][i] = R::from(*v);
+            }
+
+            // (C3)/(C4): bp[8] = BinaryPoly::from(int[0]); bp[9] = BinaryPoly::from(int[1]).
+            // Since `BinaryPoly::from(n).evaluate_at_point(2) == n`, this makes
+            // `bp[k] - int[k]` vanish at X=2, satisfying the (X-2) ideal check.
+            bp_cols[8][i] = BinaryPoly::from(int_vals[0]);
+            bp_cols[9][i] = BinaryPoly::from(int_vals[1]);
+
+            // (C5): popcount(bp[10]) == popcount(bp[11]).
+            let bp11: BinaryPoly<32> = rng.random();
+            let popcount11 = bp11
+                .evaluate_at_point(&1_u32)
+                .expect("popcount eval should fit in u32");
+            bp_cols[11][i] = bp11;
+            bp_cols[10][i] = random_binary_poly_with_popcount(popcount11, rng);
+
+            // (C6): popcount(bp[12]) == popcount(bp[13]).
+            let bp13: BinaryPoly<32> = rng.random();
+            let popcount13 = bp13
+                .evaluate_at_point(&1_u32)
+                .expect("popcount eval should fit in u32");
+            bp_cols[13][i] = bp13;
+            bp_cols[12][i] = random_binary_poly_with_popcount(popcount13, rng);
+
+            // Set bp[0][i+1] and bp[4][i+1] so C1/C2 hold at row i.
+            // Each summand fits in u32, so the sum (≤ ~3*1023 + 3*31 ≈ 3162) does too.
+            if i + 1 < len {
+                let eval_at_2 = |bp: &BinaryPoly<32>| -> u32 {
+                    bp.evaluate_at_point(&2_u32)
+                        .expect("10-bit binary poly eval at 2 fits in u32")
+                };
+                let s1 = eval_at_2(&bp_cols[1][i])
+                    + eval_at_2(&bp_cols[2][i])
+                    + eval_at_2(&bp_cols[3][i])
+                    + int_vals[0]
+                    + int_vals[1]
+                    + int_vals[2];
+                bp_cols[0][i + 1] = BinaryPoly::from(s1);
+
+                let s2 = eval_at_2(&bp_cols[5][i])
+                    + eval_at_2(&bp_cols[6][i])
+                    + eval_at_2(&bp_cols[7][i])
+                    + int_vals[1]
+                    + int_vals[2]
+                    + int_vals[3];
+                bp_cols[4][i + 1] = BinaryPoly::from(s2);
+            }
+        }
+
+        UairTrace {
+            binary_poly: bp_cols.into(),
+            arbitrary_poly: vec![].into(),
+            int: int_cols.into(),
+        }
+    }
+}
+
 /// Test UAIR with mixed shift amounts.
 /// 3 columns (a, b, c): column a shifts by 1, column b shifts by 2.
 /// Constraints are linear (degree 1).
