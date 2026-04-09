@@ -28,6 +28,8 @@ where
     Config: PnttConfig,
 {
     pub fn new(row_len: usize, depth: usize) -> Result<Self, ZipError> {
+        // TODO(alex): Calculate max expected Zt::Cw::COEFF_BIT_WIDTH to ensure in
+        //             advance that the encoding will not overflow
         Ok(Self {
             pntt_params: Radix8PnttParams::new(row_len, depth, REP)?,
             _phantom: Default::default(),
