@@ -1,0 +1,24 @@
+name: UB (undefined behavior) detection
+
+on: push
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # Make sure CI fails on all warnings, including Clippy lints
+  RUSTFLAGS: "-Dwarnings"
+
+jobs:
+  ub-detection:
+    if: github.event.pull_request.draft == false
+    name: Check for undefined behaviour (UB)
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          rustup +nightly component add miri
+          cargo +nightly miri setup
+          PROPTEST_DISABLE_FAILURE_PERSISTENCE=true \
+            MIRIFLAGS="-Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE -Zmiri-strict-provenance" \
+            cargo +nightly miri test --lib

@@ -1,0 +1,63 @@
+{
+  "projectName": "crypto-primitives",
+  "projectOwner": "NethermindEth",
+  "repoType": "github",
+  "repoHost": "https://github.com",
+  "files": [
+    "README.md"
+  ],
+  "imageSize": 100,
+  "commit": true,
+  "commitConvention": "none",
+  "contributors": [
+    {
+      "login": "maksimryndin",
+      "name": "maksimryndin",
+      "avatar_url": "https://avatars.githubusercontent.com/u/16288656?v=4",
+      "profile": "https://maksimryndin.github.io/",
+      "contributions": [
+        "projectManagement",
+        "review"
+      ]
+    },
+    {
+      "login": "frozenspider",
+      "name": "Alex Abdugafarov",
+      "avatar_url": "https://avatars.githubusercontent.com/u/2077017?v=4",
+      "profile": "https://github.com/frozenspider",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "cupicmarko",
+      "name": "Marko Cupic",
+      "avatar_url": "https://avatars.githubusercontent.com/u/71461781?v=4",
+      "profile": "https://github.com/cupicmarko",
+      "contributions": [
+        "review"
+      ]
+    },
+    {
+      "login": "NiDimi",
+      "name": "Nick Dimitriou",
+      "avatar_url": "https://avatars.githubusercontent.com/u/81875532?v=4",
+      "profile": "https://github.com/NiDimi",
+      "contributions": [
+        "review"
+      ]
+    },
+    {
+      "login": "ElijahVlasov",
+      "name": "Ilia Vlasov",
+      "avatar_url": "https://avatars.githubusercontent.com/u/5365540?v=4",
+      "profile": "https://github.com/ElijahVlasov",
+      "contributions": [
+        "code"
+      ]
+    }
+  ],
+  "contributorsPerLine": 7,
+  "linkToUsage": true,
+  "commitType": "docs"
+}

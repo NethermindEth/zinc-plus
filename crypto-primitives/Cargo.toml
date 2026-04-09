@@ -1,0 +1,102 @@
+[package]
+name = "crypto-primitives"
+publish = false
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Internal
+crypto-primitives-proc-macros = { workspace = true }
+
+# Core
+num-traits = { workspace = true }
+pastey = "0"
+thiserror = "2"
+
+# Wrapped crates
+crypto-bigint = { version = ">= 0.7.0-rc.0, <= 0.7.0-rc.9", default-features = false, optional = true }
+ark-std = { version = "0.5", default-features = false, optional = true }
+ark-ff = { version = "0.5", default-features = false, optional = true }
+ark-serialize = { version = "0.5", default-features = false, optional = true }
+num-bigint = { version = "0.4", default-features = false, optional = true }
+
+# Optional utility for which implementations are provided
+rand = { workspace = true, optional = true }
+rayon = { version = "1", optional = true }
+serde = { version = "1", default-features = false, optional = true }
+zeroize = { version = "1", default-features = false, optional = true }
+
+[dev-dependencies]
+crypto-primitives = { workspace = true, features = ["crypto_bigint"] }
+criterion = { workspace = true }
+proptest = { workspace = true }
+rand = { workspace = true, features = ["std_rng"] }
+
+[features]
+default = ["std"]
+
+parallel = ["dep:rayon"]
+rand = ["dep:rand", "crypto-bigint/rand_core"]
+serde = ["dep:serde", "crypto-bigint/serde"]
+zeroize = ["dep:zeroize", "crypto-bigint/zeroize"]
+
+std = ["num-traits/std", "ark-std/std", "ark-ff/std", "serde/std", "rand/std", "zeroize/std"]
+ark_std = ["dep:ark-std"]
+ark_ff = ["ark_std", "num_bigint", "zeroize", "dep:ark-ff", "dep:ark-serialize"]
+crypto_bigint = ["dep:crypto-bigint", "crypto-bigint/alloc"]
+num_bigint = ["dep:num-bigint"]
+
+[[bench]]
+name = "boxed_monty_field_benches"
+harness = false
+
+[[bench]]
+name = "const_monty_field_benches"
+harness = false
+
+[[bench]]
+name = "monty_field_benches"
+harness = false
+
+#
+# Workspace configuration
+#
+
+[workspace]
+members = ["proc-macros"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/NethermindEth/crypto-primitives"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+crypto-primitives = { path = "." }
+crypto-primitives-proc-macros = { path = "proc-macros" }
+num-traits = { version = "0.2", default-features = false }
+proptest = { version = "1", default-features = false, features = ["alloc"] }
+rand = { version = "~0.9", default-features = false }
+criterion = "0.7.0"
+
+[workspace.lints.rust]
+missing_docs = "allow" # FIXME
+unsafe_code = "allow" # We do use unsafe code for performance reasons
+
+[workspace.lints.clippy]
+arithmetic_side_effects = "deny"
+cast_lossless = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_precision_loss = "deny"
+cast_sign_loss = "deny"
+needless_return = "deny"
+panicking_overflow_checks = "deny"
+unwrap_used = "deny"
