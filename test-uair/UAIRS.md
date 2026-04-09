@@ -50,10 +50,10 @@ not to `bp[j]`. Concrete examples:
 - `BigLinearUair` uses `(0..16).map(|i| ShiftSpec::new(i, 1))`. The shift
   vector is in source-column order, so `down.binary_poly[i]` happens to
   equal `bp[i][t+1]` here.
-- `SHAProxy` uses `vec![ShiftSpec::new(0, 1), ShiftSpec::new(4, 1)]`. Only
+- `SHAProxy` uses `vec![ShiftSpec::new(0, 1), ShiftSpec::new(4, 4)]`. Only
   columns `0` and `4` are shifted, and `down.binary_poly[0]` is
-  `bp[0][t+1]` while `down.binary_poly[1]` is `bp[4][t+1]` — *not*
-  `bp[1][t+1]`.
+  `bp[0][t+1]` while `down.binary_poly[1]` is `bp[4][t+4]` — *not*
+  `bp[1][t+1]`. The two shift amounts are also different (1 and 4).
 
 Shifts are zero-padded beyond the trace boundary: the "virtual" row past
 the last real row reads as all zeros.
@@ -144,20 +144,21 @@ plumbing on the same constraint shape.
 ### `SHAProxy<R>`
 
 A second large linear UAIR with a different shape from `BigLinearUair`:
-14 binary-polynomial columns, 4 integer columns, only 2 shifted columns,
-and constraints that mix binary-polynomial and integer summations plus a
-multiply-by-`X` relation. The name reflects the inspiration — it has a
-similar high-level shape to bit/integer constraints found in proxies for
-SHA-style hash circuits — even though it does not actually compute a SHA
-round.
+14 binary-polynomial columns, 4 integer columns, only 2 shifted columns
+(with *different* shift amounts: 1 and 4), and constraints that mix
+binary-polynomial and integer summations plus a multiply-by-`X` relation.
+The name reflects the inspiration — it has a similar high-level shape to
+bit/integer constraints found in proxies for SHA-style hash circuits —
+even though it does not actually compute a SHA round.
 
 - **Layout:** `(14 bp, 0 ap, 4 int)`
-- **Shifts:** `bp[0]` shifted by 1, `bp[4]` shifted by 1
+- **Shifts:** `bp[0]` shifted by 1, `bp[4]` shifted by 4
   - so `down.binary_poly[0] = bp[0][t+1]` and
-    `down.binary_poly[1] = bp[4][t+1]` (note the index gap — see the
-    Conventions section's warning)
+    `down.binary_poly[1] = bp[4][t+4]` (note both the index gap *and*
+    the asymmetric shift amounts — see the Conventions section's
+    warning)
 - **Ideal:** `(X - 1)` and `(X - 2)`
-- **Constraints (per row `t`; let `dbp_c1 = bp[0][t+1]` and `dbp_c5 = bp[4][t+1]`):**
+- **Constraints (per row `t`; let `dbp_c1 = bp[0][t+1]` and `dbp_c5 = bp[4][t+4]`):**
   ```
   C1:  dbp_c1 - bp[1] - bp[2] - bp[3] - int[0] - int[1] - int[2]   ∈ (X - 2)
   C2:  dbp_c5 - bp[5] - bp[6] - bp[7] - int[1] - int[2] - int[3]   ∈ (X - 2)
@@ -183,12 +184,27 @@ round.
   - **C1/C2.** The summands `bp[1..=3]` and `bp[5..=7]` are random binary
     polynomials capped at 28 coefficient bits (so each `eval(2) ≤ 2^28 −
     1`); `int[0..=3]` are small `u32`s in `0..32`. The cap guarantees
-    that the row-`t` sum
-    `S₁ = bp[1].eval(2) + bp[2].eval(2) + bp[3].eval(2) + int[0] + int[1] + int[2]`
-    fits in a `u32` (worst case `≈ 8 × 10⁸`, well below `2³² − 1`), so
-    the constraint can be discharged by setting
-    `bp[0][t+1] := BinaryPoly::from(S₁ as u32)`. The same construction is
-    used for `bp[4][t+1]` from `S₂`.
+    that the row-`t` sums (e.g.
+    `S₁ = bp[1].eval(2) + bp[2].eval(2) + bp[3].eval(2) + int[0] + int[1] + int[2]`)
+    fit in a `u32` (worst case `≈ 8 × 10⁸`, well below `2³² − 1`), so
+    each constraint can be discharged by setting
+    `bp[0][t+1] := BinaryPoly::from(S₁ as u32)` (and analogously
+    `bp[4][t+4] := BinaryPoly::from(S₂ as u32)`).
+  - **C2 boundary handling.** Because C2's shift is 4, the rows
+    `i ∈ {len−4, len−3, len−2}` would otherwise read `bp[4][i+4]` past
+    the trace boundary as zero-padding. To still satisfy C2 at those
+    rows, the trace generator zeros out `bp[5..=7]` and `int[1..=3]` on
+    those three rows so the C2 RHS sum becomes `0 − 0 = 0` and the
+    constraint vanishes trivially. (Row `len − 1` is exempt from
+    constraint checking by the protocol's last-row selector and so does
+    not need any special handling.) This mirrors the boundary trick used
+    by `TestUairMixedShifts` for its `c[i] = b[i+2]` relation.
+  - **`bp[4]` head rows.** Symmetrically, since `bp[4]` is shifted by 4,
+    the C2 fix-up at iteration `i` writes `bp[4][i+4]` — so
+    `bp[4][0..4]` are never written by the loop. The generator
+    initializes those four head rows to small random binary polynomials
+    up front; their values are unconstrained because the protocol does
+    not check virtual rows before the start of the trace either.
 
 > **Note on `(X^32 - 1)`:** the original specification of `SHAProxy`
 > wrote C5/C6 against the cyclotomic ideal `(X^32 - 1)`, where multiplying
@@ -212,4 +228,4 @@ Column counts are listed as `BinPoly / ArbPoly / Int`, matching the
 |---|---:|---:|---:|---|---:|---|---|
 | `BigLinearUair`                 | 16 | 0 | 1 | 16×1      | 1 | `(X-1), (X-2)`    | Wide linear benchmark (popcount-preserving) |
 | `BigLinearUairWithPublicInput`  | 16 | 0 | 1 | 16×1      | 1 | `(X-1), (X-2)`    | Same as above + 4 public bp columns |
-| `SHAProxy`                      | 14 | 0 | 4 | 2×1       | 1 | `(X-1), (X-2)`    | Alternate-shape linear benchmark with `mbs`-by-`X` |
+| `SHAProxy`                      | 14 | 0 | 4 | 1×1, 1×4  | 1 | `(X-1), (X-2)`    | Alternate-shape linear benchmark with `mbs`-by-`X` and asymmetric shifts |
