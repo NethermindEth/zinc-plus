@@ -632,9 +632,10 @@ where
         }
 
         // Bits used by the "small" binary polys that feed into C1/C2 sums.
-        // Capping at 10 bits keeps each `eval(2)` value below 2^10 - 1, so the
-        // sum used to construct `bp[0]` / `bp[4]` at the next row stays in u32.
-        const SMALL_MASK: u32 = (1u32 << 10) - 1;
+        // Capping at 28 bits keeps each `eval(2)` value below 2^28 - 1, so the
+        // sum used to construct `bp[0]` / `bp[4]` at the next row stays in u32:
+        //     3 * (2^28 - 1) + 3 * 31  ≈  8.05 * 10^8  <  2^32 - 1.
+        const SMALL_MASK: u32 = (1u32 << 28) - 1;
         // Range of values for the int columns (small non-negative).
         const INT_MAX_EXCL: u32 = 32;
 
@@ -652,7 +653,7 @@ where
         bp_cols[4][0] = BinaryPoly::from(rng.next_u32() & SMALL_MASK);
 
         for i in 0..len {
-            // bp[1..=3], bp[5..=7]: small random binary polys (10-bit values).
+            // bp[1..=3], bp[5..=7]: small random binary polys (28-bit values).
             for k in [1usize, 2, 3, 5, 6, 7] {
                 bp_cols[k][i] = BinaryPoly::from(rng.next_u32() & SMALL_MASK);
             }
@@ -691,11 +692,12 @@ where
             bp_cols[12][i] = random_binary_poly_with_popcount(popcount13, rng);
 
             // Set bp[0][i+1] and bp[4][i+1] so C1/C2 hold at row i.
-            // Each summand fits in u32, so the sum (≤ ~3*1023 + 3*31 ≈ 3162) does too.
+            // Each summand fits in u32 (bp eval ≤ 2^28 - 1, ints ≤ 31), so
+            // the sum (≤ 3 * (2^28 - 1) + 3 * 31 ≈ 8.05e8) stays well below 2^32.
             if i + 1 < len {
                 let eval_at_2 = |bp: &BinaryPoly<32>| -> u32 {
                     bp.evaluate_at_point(&2_u32)
-                        .expect("10-bit binary poly eval at 2 fits in u32")
+                        .expect("28-bit binary poly eval at 2 fits in u32")
                 };
                 let s1 = eval_at_2(&bp_cols[1][i])
                     + eval_at_2(&bp_cols[2][i])
