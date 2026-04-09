@@ -22,7 +22,7 @@ use zinc_poly::univariate::dense::DensePolynomial;
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_test_uair::{GenerateRandomTrace, TestAirNoMultiplication, TestUairSimpleMultiplication};
 use zinc_transcript::{
-    KeccakTranscript,
+    Blake3Transcript,
     traits::{ConstTranscribable, Transcript},
 };
 use zinc_uair::{
@@ -57,7 +57,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
     let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
                      trace: &UairTrace<_, _, DEGREE_PLUS_ONE>,
-                     transcript: &mut KeccakTranscript| {
+                     transcript: &mut Blake3Transcript| {
         let projected_trace = project_trace_coeffs_row_major(trace, field_cfg);
 
         let projected_scalars =
@@ -127,7 +127,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     };
 
     group.bench_function(BenchmarkId::new("CPR Prover", &params), |bench| {
-        let mut transcript = KeccakTranscript::new();
+        let mut transcript = Blake3Transcript::new();
         let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
         bench.iter_batched(
             || transcript.clone(),
@@ -139,7 +139,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     });
 
     group.bench_function(BenchmarkId::new("CPR Verifier", &params), |bench| {
-        let mut prover_transcript = KeccakTranscript::new();
+        let mut prover_transcript = Blake3Transcript::new();
         let mut verifier_transcript = prover_transcript.clone();
         let field_cfg = prover_transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
         let _ = verifier_transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
@@ -236,7 +236,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
     let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
                      trace: &UairTrace<_, _, DEGREE_PLUS_ONE>,
-                     transcript: &mut KeccakTranscript| {
+                     transcript: &mut Blake3Transcript| {
         let projected_trace = project_trace_coeffs_row_major(trace, field_cfg);
 
         let projected_scalars = project_scalars::<
@@ -309,7 +309,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     };
 
     group.bench_function(BenchmarkId::new("CPR Prover", &params), |bench| {
-        let mut transcript = KeccakTranscript::new();
+        let mut transcript = Blake3Transcript::new();
         let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
         bench.iter_batched(
             || transcript.clone(),
@@ -323,7 +323,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     group.bench_function(
         BenchmarkId::new("CPR Verifier", &params),
         |bench| {
-            let mut prover_transcript = KeccakTranscript::new();
+            let mut prover_transcript = Blake3Transcript::new();
             let mut verifier_transcript = prover_transcript.clone();
             let field_cfg =
                 prover_transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();

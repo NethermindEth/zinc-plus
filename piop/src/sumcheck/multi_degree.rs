@@ -483,7 +483,7 @@ mod tests {
     use crypto_bigint::{U128, const_monty_params};
     use crypto_primitives::crypto_bigint_const_monty::ConstMontyField;
     use zinc_poly::{mle::MultilinearExtensionWithConfig, utils::build_eq_x_r_inner};
-    use zinc_transcript::KeccakTranscript;
+    use zinc_transcript::Blake3Transcript;
 
     const N: usize = 2;
     const_monty_params!(TestParams, U128, "00000000b933426489189cb5b47d567f");
@@ -531,12 +531,12 @@ mod tests {
         );
 
         // Prove
-        let mut pt = KeccakTranscript::new();
+        let mut pt = Blake3Transcript::new();
         let (proof, _states) =
             MultiDegreeSumcheck::<F>::prove_as_subprotocol(&mut pt, vec![g0, g1], num_vars, cfg);
 
         // Verify
-        let mut vt = KeccakTranscript::new();
+        let mut vt = Blake3Transcript::new();
         let subclaims =
             MultiDegreeSumcheck::<F>::verify_as_subprotocol(&mut vt, num_vars, &proof, cfg)
                 .expect("verification should succeed");
@@ -579,11 +579,11 @@ mod tests {
             Box::new(|v: &[F]| v[0] * v[1]),
         );
 
-        let mut pt = KeccakTranscript::new();
+        let mut pt = Blake3Transcript::new();
         let (proof, _) =
             MultiDegreeSumcheck::<F>::prove_as_subprotocol(&mut pt, vec![g], num_vars, cfg);
 
-        let mut vt = KeccakTranscript::new();
+        let mut vt = Blake3Transcript::new();
         let subclaims =
             MultiDegreeSumcheck::<F>::verify_as_subprotocol(&mut vt, num_vars, &proof, cfg)
                 .expect("verification should succeed");

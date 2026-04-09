@@ -13,7 +13,7 @@ use zinc_piop::{
 };
 use zinc_poly::{EvaluatablePolynomial, univariate::dynamic::over_field::DynamicPolynomialF};
 use zinc_transcript::{
-    KeccakTranscript,
+    Blake3Transcript,
     traits::{ConstTranscribable, Transcript},
 };
 use zinc_uair::{
@@ -81,7 +81,7 @@ where
     {
         // === Step 0: Reconstruct transcript from commitments + public data ===
         let mut pcs_transcript = PcsVerifierTranscript {
-            fs_transcript: KeccakTranscript::default(),
+            fs_transcript: Blake3Transcript::default(),
             stream: Cursor::new(proof.zip),
         };
         for comm in [

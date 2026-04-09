@@ -26,7 +26,7 @@ num-traits = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }
 rayon = { workspace = true, optional = true }
-blake3 = "1.8.2"
+blake3 = { workspace = true }
 uninit = "0.6.2"
 
 # Compression libraries, used only to estimate compressed proof sizes
@@ -41,7 +41,6 @@ workspace = true
 
 [features]
 parallel = ["dep:rayon", "zinc-utils/parallel", "zinc-poly/parallel", "ark-ff/parallel", "ark-poly/parallel"]
-asm = ["zinc-transcript/asm"]
 simd = ["zinc-poly/simd"]
 unchecked = []
 

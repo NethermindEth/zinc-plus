@@ -3,7 +3,7 @@ use crypto_primitives::PrimeField;
 use itertools::Itertools;
 use std::io::{Cursor, ErrorKind, Read, Write};
 use zinc_transcript::{
-    KeccakTranscript,
+    Blake3Transcript,
     traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript},
 };
 use zinc_utils::{add, mul, rem};
@@ -45,7 +45,7 @@ pub struct PcsProverTranscript {
     /// Handles Fiat-Shamir transformations for non-interactive zero-knowledge
     /// proofs. Used to absorb field elements and generate cryptographic
     /// challenges.
-    pub fs_transcript: KeccakTranscript,
+    pub fs_transcript: Blake3Transcript,
 
     /// Manages serialization and deserialization of proof data as a byte
     /// stream.
@@ -61,7 +61,7 @@ impl PcsProverTranscript {
 
     pub fn new_from_commitments<'a>(comms: impl Iterator<Item = &'a ZipPlusCommitment>) -> Self {
         let mut result = Self {
-            fs_transcript: KeccakTranscript::default(),
+            fs_transcript: Blake3Transcript::default(),
             stream: Cursor::default(),
         };
 
@@ -82,7 +82,7 @@ impl PcsProverTranscript {
     /// this allows us more flexibility in how we use the transcript.
     pub fn into_verification_transcript(self) -> PcsVerifierTranscript {
         let mut result = PcsVerifierTranscript {
-            fs_transcript: KeccakTranscript::default(),
+            fs_transcript: Blake3Transcript::default(),
             stream: self.stream,
         };
         result.stream.set_position(0);
@@ -227,7 +227,7 @@ pub struct PcsVerifierTranscript {
     /// Handles Fiat-Shamir transformations for non-interactive zero-knowledge
     /// proofs. Used to absorb field elements and generate cryptographic
     /// challenges.
-    pub fs_transcript: KeccakTranscript,
+    pub fs_transcript: Blake3Transcript,
 
     /// Manages serialization and deserialization of proof data as a byte
     /// stream.

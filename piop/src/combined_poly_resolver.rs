@@ -474,7 +474,7 @@ mod tests {
     use zinc_test_uair::{
         GenerateRandomTrace, TestAirNoMultiplication, TestUairSimpleMultiplication,
     };
-    use zinc_transcript::KeccakTranscript;
+    use zinc_transcript::Blake3Transcript;
     use zinc_uair::{
         constraint_counter::count_constraints,
         degree_counter::count_max_degree,
@@ -503,7 +503,7 @@ mod tests {
     {
         let mut rng = rng();
 
-        let mut prover_transcript = KeccakTranscript::new();
+        let mut prover_transcript = Blake3Transcript::new();
         let mut verifier_transcript = prover_transcript.clone();
 
         let trace = U::generate_random_trace(num_vars, &mut rng);

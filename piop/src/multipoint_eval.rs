@@ -396,7 +396,7 @@ mod tests {
     use crypto_primitives::crypto_bigint_const_monty::ConstMontyField;
     use num_traits::{ConstOne, ConstZero};
     use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
-    use zinc_transcript::KeccakTranscript;
+    use zinc_transcript::Blake3Transcript;
 
     const N: usize = 2;
     const_monty_params!(Params, U128, "00000000b933426489189cb5b47d567f");
@@ -419,8 +419,8 @@ mod tests {
         open_evals: Vec<F>,
     }
 
-    fn make_transcript() -> KeccakTranscript {
-        let mut t = KeccakTranscript::default();
+    fn make_transcript() -> Blake3Transcript {
+        let mut t = Blake3Transcript::default();
         t.absorb_slice(b"Lorem ipsum");
         t
     }

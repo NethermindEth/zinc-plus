@@ -316,7 +316,7 @@ mod tests {
     use zinc_test_uair::{
         GenerateRandomTrace, TestAirNoMultiplication, TestUairSimpleMultiplication,
     };
-    use zinc_transcript::KeccakTranscript;
+    use zinc_transcript::Blake3Transcript;
     use zinc_uair::{
         constraint_counter::count_constraints,
         ideal::{Ideal, IdealCheck, degree_one::DegreeOneIdeal},
@@ -348,7 +348,7 @@ mod tests {
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
         let mut rng = rng();
-        let transcript = KeccakTranscript::new();
+        let transcript = Blake3Transcript::new();
 
         let (proof, prover_state, ..) = run_ideal_check_prover_linear::<U, DEGREE_PLUS_ONE>(
             num_vars,
@@ -390,7 +390,7 @@ mod tests {
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
         let mut rng = rng();
-        let transcript = KeccakTranscript::new();
+        let transcript = Blake3Transcript::new();
 
         let (proof, prover_state, ..) = run_ideal_check_prover_combined::<U, DEGREE_PLUS_ONE>(
             num_vars,
