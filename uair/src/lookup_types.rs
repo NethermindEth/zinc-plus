@@ -9,10 +9,10 @@
 /// Describes the type of lookup table a column should be checked against.
 /// Full table size = `2^width` for each type; decomposed into chunks of
 /// `chunk_width`
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LookupTableType {
-    /// Binary polynomials of degree less than `width`, projected at element
-    /// `a`.
+    /// Binary polynomials of degree less than `width`, projected into the prime
+    /// field.
     BitPoly {
         width: usize,
         chunk_width: Option<usize>,

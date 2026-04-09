@@ -3,6 +3,7 @@
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use zinc_poly::{EvaluatablePolynomial, univariate::nat_evaluation::NatEvaluatedPoly};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
+use zinc_utils::add;
 
 use crate::sumcheck::prover::{NatEvaluatedPolyWithoutConstant, ProverMsg};
 
@@ -60,23 +61,22 @@ pub struct Subclaim<F> {
 impl<F: FromPrimitiveWithConfig> VerifierState<F> {
     /// Run verifier at current round, given prover message.
     ///
-    /// Normally, this function should perform actual verification. Instead,
-    /// `verify_round` only samples a challenge and calls receive_round to store
-    /// it. While `check_and_generate_subclaim` performs verifications
-    /// altogether at the last step.
-    #[allow(clippy::arithmetic_side_effects)]
+    /// Samples a Fiat-Shamir challenge from the transcript and delegates to
+    /// [`Self::verify_round_with_challenge`]. Returns the sampled challenge.
     pub fn verify_round(&mut self, prover_msg: &ProverMsg<F>, transcript: &mut impl Transcript) -> F
     where
         F::Inner: ConstTranscribable,
     {
         let challenge: F = transcript.get_field_challenge(&self.config);
-        self.receive_round(prover_msg, challenge.clone());
+        self.verify_round_with_challenge(prover_msg, challenge.clone());
         challenge
     }
 
-    /// Stores a challenge sampled by the verifier.
-    #[allow(clippy::arithmetic_side_effects)]
-    pub fn receive_round(&mut self, prover_msg: &ProverMsg<F>, challenge: F) {
+    /// Processes one round of the sumcheck protocol given an explicit
+    /// challenge. Stores the prover's round polynomial and the challenge, then
+    /// advances the round counter. Actual consistency checks are deferred
+    /// to [`Self::check_and_generate_subclaim`].
+    pub fn verify_round_with_challenge(&mut self, prover_msg: &ProverMsg<F>, challenge: F) {
         if self.finished {
             panic!("Incorrect verifier state: Verifier is already finished.");
         }
@@ -95,7 +95,7 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
             // accept and close
             self.finished = true;
         } else {
-            self.round += 1;
+            self.round = add!(self.round, 1);
         }
     }
 
@@ -137,7 +137,7 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
                 expected.clone() - p1.clone()
             };
             let mut reconstructed_evaluations =
-                Vec::with_capacity(evaluations_without_constant.len() + 1);
+                Vec::with_capacity(add!(evaluations_without_constant.len(), 1));
             reconstructed_evaluations.push(constant_term);
             reconstructed_evaluations.extend_from_slice(evaluations_without_constant);
 

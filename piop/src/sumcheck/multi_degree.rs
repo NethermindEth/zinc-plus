@@ -28,7 +28,10 @@ use crate::CombFn;
 
 use super::{
     SumCheckError,
-    prover::{NatEvaluatedPolyWithoutConstant, ProverMsg, ProverState},
+    prover::{
+        NatEvaluatedPolyWithoutConstant, ProverMsg as SumcheckProverMsg,
+        ProverState as SumcheckProverState,
+    },
     verifier::VerifierState,
 };
 
@@ -65,7 +68,7 @@ impl<F: PrimeField> MultiDegreeSumcheckGroup<F> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MultiDegreeSumcheckProof<F> {
     /// List of prover messages, one for each round per group.
-    group_messages: Vec<Vec<ProverMsg<F>>>,
+    group_messages: Vec<Vec<SumcheckProverMsg<F>>>,
     // The claimed sum for the first round polynomial per group.
     claimed_sums: Vec<F>,
     // Max degrees per group.
@@ -110,7 +113,7 @@ where
             for _ in 0..num_vars {
                 let tail_evaluations =
                     zinc_transcript::read_field_vec_with_cfg(&bytes[..msg_bytes], &cfg);
-                msgs.push(ProverMsg(NatEvaluatedPolyWithoutConstant {
+                msgs.push(SumcheckProverMsg(NatEvaluatedPolyWithoutConstant {
                     tail_evaluations,
                 }));
                 bytes = &bytes[msg_bytes..];
@@ -258,7 +261,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
         groups: Vec<MultiDegreeSumcheckGroup<F>>,
         num_vars: usize,
         config: &F::Config,
-    ) -> (MultiDegreeSumcheckProof<F>, Vec<ProverState<F>>)
+    ) -> (MultiDegreeSumcheckProof<F>, Vec<SumcheckProverState<F>>)
     where
         F: InnerTransparentField + Send + Sync,
         F::Inner: ConstTranscribable + Zero,
@@ -278,7 +281,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
         transcript.absorb_random_field(&ngroups_field, &mut buf);
 
         let mut verifier_msg = None;
-        let mut group_messages: Vec<Vec<ProverMsg<F>>> = (0..num_groups)
+        let mut group_messages: Vec<Vec<SumcheckProverMsg<F>>> = (0..num_groups)
             .map(|_| Vec::with_capacity(num_vars))
             .collect();
         let mut claimed_sums = Vec::with_capacity(num_groups);
@@ -290,7 +293,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
                 transcript.absorb_random_field(&degree_field, &mut buf);
 
                 (
-                    ProverState::new(group.poly, num_vars, group.degree),
+                    SumcheckProverState::new(group.poly, num_vars, group.degree),
                     group.comb_fn,
                 )
             })
@@ -298,7 +301,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
 
         for _ in 0..num_vars {
             // Parallel: each group computes its round polynomial independently
-            let round_msgs: Vec<ProverMsg<F>> = cfg_iter_mut!(prover_states)
+            let round_msgs: Vec<SumcheckProverMsg<F>> = cfg_iter_mut!(prover_states)
                 .zip(cfg_iter!(comb_fns))
                 .map(|(state, comb_fn)| state.prove_round(&verifier_msg, comb_fn, config))
                 .collect();
@@ -444,7 +447,9 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
             verifier_states
                 .iter_mut()
                 .zip(proof.group_messages.iter())
-                .for_each(|(state, msg)| state.receive_round(&msg[i], shared_challenge.clone()));
+                .for_each(|(state, msg)| {
+                    state.verify_round_with_challenge(&msg[i], shared_challenge.clone())
+                });
         }
 
         let mut shared_point: Option<Vec<F>> = None;

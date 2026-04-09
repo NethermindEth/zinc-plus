@@ -186,10 +186,9 @@ where
         let lookup_specs = U::signature();
         let groups = vec![cpr_group];
         // TODO: for each LookupGroup from group_lookup_specs(lookup_specs):
-        //   - build BatchedDecompLookupInstance from projected_trace_f
         //   - call prepare_batched_lookup_group(transcript, instance, &field_cfg)
         //   - push triple into groups, collect pending proofs + metas
-        let _ = lookup_specs; // suppress unused warning until Phase 4c
+        let _ = lookup_specs; // suppress unused warning until logup is implemented
 
         // 4c: Multi-degree sumcheck width CPR group and lookup groups
         let (combined_sumcheck, md_states) = MultiDegreeSumcheck::prove_as_subprotocol(

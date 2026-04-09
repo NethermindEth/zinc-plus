@@ -286,7 +286,7 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     #[error("lifted eval psi_a projection failed: {0}")]
     LiftedEvalProjection(PolyEvaluationError),
     #[error("lookup argument failed: {0}")]
-    Lookup(#[from] LookupError<F>),
+    Lookup(#[from] LookupError),
     #[error("PCS error: {0}")]
     Pcs(#[from] ZipError),
     #[error("PCS verification failed at column {0}: {1}")]

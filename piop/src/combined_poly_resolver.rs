@@ -12,7 +12,10 @@ use crate::{
         structs::{Proof as CprProof, ProverState as CprProverState},
     },
     ideal_check,
-    sumcheck::{SumCheckError, multi_degree::MultiDegreeSumcheckGroup},
+    sumcheck::{
+        SumCheckError, multi_degree::MultiDegreeSumcheckGroup,
+        prover::ProverState as SumcheckProverState,
+    },
 };
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use itertools::Itertools;
@@ -194,7 +197,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     #[allow(clippy::arithmetic_side_effects)]
     pub fn finalize_prover(
         transcript: &mut impl Transcript,
-        sumcheck_prover_state: crate::sumcheck::prover::ProverState<F>,
+        sumcheck_prover_state: SumcheckProverState<F>,
         ancillary: CprProverAncillary,
         field_cfg: &F::Config,
     ) -> Result<(CprProof<F>, CprProverState<F>), CombinedPolyResolverError<F>>

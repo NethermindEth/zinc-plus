@@ -5,58 +5,9 @@
 //! `LookupColumnSpec`) live in `zinc-uair` and are re-exported from the
 //! parent module.
 
-use std::marker::PhantomData;
+use std::collections::BTreeMap;
 use thiserror::Error;
 use zinc_uair::LookupTableType;
-
-use crypto_primitives::PrimeField;
-use zinc_poly::mle::DenseMultilinearExtension;
-
-use crate::CombFn;
-
-// ---------------------------------------------------------------------------
-// Instance types (input to the lookup protocols)
-// ---------------------------------------------------------------------------
-
-/// Single-witness decomposition lookup instance (Phase 4a).
-///
-/// The witness is decomposed as:
-/// `w[i] = shifts[0]*chunks[0][i] + … + shifts[K-1]*chunks[K-1][i]`
-///
-/// All chunks look up into the same sub-table.
-#[derive(Clone, Debug)]
-pub struct DecompLookupInstance<F> {
-    /// The witness column (projected trace column).
-    pub witness: Vec<F>,
-    /// The sub-table entries (e.g. projected BitPoly(8) or Word(8)).
-    pub subtable: Vec<F>,
-    /// Shift factors, one per chunk.
-    /// For `BitPoly(32)` with 4 chunks of width 8: `[1, a^8, a^16, a^24]`.
-    pub shifts: Vec<F>,
-    /// Precomputed decomposition chunks.
-    /// `chunks[k][i]` is the k-th chunk of witness entry `i`.
-    pub chunks: Vec<Vec<F>>,
-}
-
-/// Batched decomposition lookup instance (Phase 4b).
-///
-/// L witness vectors (all the same length) all look up into the same
-/// decomposed table. Shifts and sub-table are shared; each witness
-/// has its own chunk decomposition.
-///
-/// `witnesses[l][i] = Σ_k shifts[k] · chunks[l][k][i]`
-#[derive(Clone, Debug)]
-pub struct BatchedDecompLookupInstance<F> {
-    /// L witness vectors, each of the same length.
-    pub witnesses: Vec<Vec<F>>,
-    /// The shared sub-table entries.
-    pub subtable: Vec<F>,
-    /// Shift factors (K entries, same for every witness).
-    pub shifts: Vec<F>,
-    /// Per-witness chunk decompositions.
-    /// `chunks[l][k][i]` = k-th chunk of the l-th witness, entry i.
-    pub chunks: Vec<Vec<Vec<F>>>,
-}
 
 // ---------------------------------------------------------------------------
 // Per-group proof (BatchedDecompLogup)
@@ -65,7 +16,7 @@ pub struct BatchedDecompLookupInstance<F> {
 /// Proof for one lookup group (columns sharing the same table type).
 ///
 /// Does **not** contain a sumcheck proof — the sumcheck is shared via
-/// the protocol-level multi-degree sumcheck (Phase 2a). This struct
+/// the protocol-level multi-degree sumcheck. This struct
 /// carries only the auxiliary vectors the verifier needs to reconstruct
 /// evaluations at the shared point.
 ///
@@ -100,7 +51,7 @@ pub enum LookupWitnessSource {
         column_index: usize,
     },
     /// Affine-combination lookup: parent eval = `Σ coeff·up_evals[col] +
-    /// offset`.
+    /// offset`. Currently only needed for BitPoly
     Affine {
         /// `(column_index, coefficient)` pairs.
         terms: Vec<(usize, i64)>,
@@ -131,78 +82,12 @@ pub struct LookupGroupMeta {
 /// (groups formed by batching columns with the same [`LookupTableType`]).
 /// Carries [`LookupGroupMeta`] per group so the verifier needs no
 /// external specs.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct BatchedLookupProof<F> {
     /// Per-group proofs, in group order.
     pub group_proofs: Vec<BatchedDecompLogupProof<F>>,
     /// Per-group metadata needed by the verifier.
     pub group_meta: Vec<LookupGroupMeta>,
-}
-
-impl<F> BatchedLookupProof<F> {
-    /// Construct an empty proof (no lookup groups).
-    pub fn empty() -> Self {
-        Self {
-            group_proofs: Vec::new(),
-            group_meta: Vec::new(),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Sumcheck group (prepare → multi-degree sumcheck → finalize)
-// ---------------------------------------------------------------------------
-
-/// A prepared lookup sumcheck group for one table type.
-///
-/// Produced by `prepare_batched_lookup_group` (Phase 4b), consumed by
-/// `MultiDegreeSumcheck::prove` (Phase 2a). Holds the sumcheck MLEs
-/// and combination function *plus* the ancillary data needed to assemble
-/// the final [`BatchedDecompLogupProof`] after the shared sumcheck.
-pub struct LookupSumcheckGroup<F: PrimeField> {
-    /// Sumcheck degree (always 2 for the precomputed-H variant).
-    pub degree: usize,
-    /// MLEs: `[eq_r, H]`.
-    pub mles: Vec<DenseMultilinearExtension<F::Inner>>,
-    /// Combination function: `|vals| vals[0] * vals[1]`.
-    pub comb_fn: CombFn<F>,
-    /// Number of sumcheck variables for this group.
-    pub num_vars: usize,
-    /// Ancillary proof data (multiplicities, inverses) carried through
-    /// to the final [`BatchedDecompLogupProof`].
-    pub proof: BatchedDecompLogupProof<F>,
-    /// Group metadata carried into [`BatchedLookupProof::group_meta`].
-    pub meta: LookupGroupMeta,
-}
-
-// ---------------------------------------------------------------------------
-// Verifier pre-sumcheck state
-// ---------------------------------------------------------------------------
-
-/// Pre-sumcheck verification data for batched LogUp.
-///
-/// Holds the transcript challenges and dimensions computed before the
-/// multi-degree sumcheck that are needed by `finalize_verifier`.
-pub struct LookupVerifierPreSumcheck<F> {
-    /// Number of sumcheck variables.
-    pub num_vars: usize,
-    /// The random evaluation point `r` drawn for `eq(y, r)`.
-    pub r: Vec<F>,
-    /// The β challenge used for shifted inversions.
-    pub beta: F,
-    /// The γ batching challenge.
-    pub gamma: F,
-    /// Number of lookups (L).
-    pub num_lookups: usize,
-    /// Number of chunks (K).
-    pub num_chunks: usize,
-    /// Witness vector length.
-    pub witness_len: usize,
-    /// Shift factors (K entries) — needed for decomposition check.
-    pub shifts: Vec<F>,
-    /// Raw subtable values — needed for the decomposition consistency
-    /// check without `batch_inverse` in the verifier.
-    pub subtable: Vec<F>,
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +97,7 @@ pub struct LookupVerifierPreSumcheck<F> {
 /// A group of columns that all look up into the same decomposed table.
 ///
 /// Produced by [`group_lookup_specs`] and consumed by the pipeline.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct LookupGroup {
     /// The shared table type.
     pub table_type: LookupTableType,
@@ -226,17 +111,13 @@ pub struct LookupGroup {
 /// Columns with the same `LookupTableType` are batched into a single
 /// `BatchedDecompLogupProtocol` instance.
 pub fn group_lookup_specs(specs: &[zinc_uair::LookupColumnSpec]) -> Vec<LookupGroup> {
-    use std::collections::BTreeMap;
-
-    let mut map: BTreeMap<String, (LookupTableType, Vec<usize>)> = BTreeMap::new();
+    let mut map: BTreeMap<LookupTableType, Vec<usize>> = BTreeMap::new();
     for spec in specs {
-        let key = format!("{:?}", spec.table_type);
-        map.entry(key)
-            .or_insert_with(|| (spec.table_type.clone(), Vec::new()))
-            .1
+        map.entry(spec.table_type.clone())
+            .or_default()
             .push(spec.column_index);
     }
-    map.into_values()
+    map.into_iter()
         .map(|(table_type, column_indices)| LookupGroup {
             table_type,
             column_indices,
@@ -250,7 +131,7 @@ pub fn group_lookup_specs(specs: &[zinc_uair::LookupColumnSpec]) -> Vec<LookupGr
 
 /// Errors from the lookup protocol.
 #[derive(Debug, Error)]
-pub enum LookupError<F> {
+pub enum LookupError {
     #[error("lookup not implemented")]
     NotImplemented,
 
@@ -268,8 +149,4 @@ pub enum LookupError<F> {
 
     #[error("final evaluation check failed")]
     FinalEvaluationMismatch,
-
-    #[doc(hidden)]
-    #[error("internal")]
-    _Marker(PhantomData<F>),
 }
