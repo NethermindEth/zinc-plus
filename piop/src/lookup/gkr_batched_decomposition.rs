@@ -79,6 +79,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
     >
     where
         F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+        F::Modulus: ConstTranscribable,
         F::Config: Sync,
     {
         let witnesses = &instance.witnesses;
@@ -282,6 +283,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
     ) -> Result<GkrBatchedDecompLogupVerifierSubClaim<F>, LookupError<F>>
     where
         F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+        F::Modulus: ConstTranscribable,
         F::Config: Sync,
     {
         let zero = F::zero_with_cfg(field_cfg);

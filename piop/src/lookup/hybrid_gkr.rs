@@ -205,6 +205,7 @@ fn hybrid_batched_gkr_fraction_prove<F>(
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Modulus: ConstTranscribable,
     F::Config: Sync,
 {
     let num_trees = all_layers.len(); // L
@@ -496,6 +497,7 @@ fn hybrid_batched_gkr_fraction_verify<F>(
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: ConstTranscribable + Zero,
+    F::Modulus: ConstTranscribable,
 {
     let d = num_vars;
     let c = proof.cutoff.min(d);
@@ -707,6 +709,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
     >
     where
         F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+        F::Modulus: ConstTranscribable,
         F::Config: Sync,
     {
         let witnesses = &instance.witnesses;
@@ -875,6 +878,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
     ) -> Result<HybridGkrVerifierSubClaim<F>, LookupError<F>>
     where
         F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+        F::Modulus: ConstTranscribable,
         F::Config: Sync,
     {
         let zero = F::zero_with_cfg(field_cfg);

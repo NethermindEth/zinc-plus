@@ -91,6 +91,7 @@ impl Transcript for Blake3Transcript {
     where
         F: PrimeField,
         F::Inner: Transcribable,
+        F::Modulus: Transcribable,
     {
         let n = buf.len();
         // Layout: [0x3] || modulus (n bytes) || [0x5] || [0x1] || inner (n bytes) || [0x3]
@@ -116,6 +117,7 @@ impl Transcript for Blake3Transcript {
     where
         F: PrimeField,
         F::Inner: Transcribable,
+        F::Modulus: Transcribable,
     {
         if v.is_empty() {
             return;
@@ -147,6 +149,7 @@ impl Transcript for Blake3Transcript {
     where
         F: PrimeField,
         F::Inner: Transcribable,
+        F::Modulus: Transcribable,
     {
         let n = buf.len();
         let per_elem = 2 * n + 4;

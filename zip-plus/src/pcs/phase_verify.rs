@@ -39,6 +39,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + for<'a> FromWithConfig<&'a Zt::Chal>
             + for<'a> MulByScalar<&'a F>,
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
+        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
     {
         let mut transcript: PcsTranscript = proof.clone().into();
         let field_cfg = transcript
@@ -72,6 +73,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + for<'a> FromWithConfig<&'a Zt::Chal>
             + for<'a> MulByScalar<&'a F>,
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
+        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
     {
         let batch_size = comm.batch_size;
         validate_input::<Zt, Lc, _>("verify", vp.num_vars, batch_size, &[], &[point_f])?;

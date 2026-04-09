@@ -28,4 +28,4 @@ workspace = true
 
 [features]
 parallel = ["dep:rayon"]
-simd = ["crypto-primitives/simd128"]
+simd = []

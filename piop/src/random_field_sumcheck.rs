@@ -73,6 +73,7 @@ impl<F: FromPrimitiveWithConfig, R: Semiring + ProjectableToField<F>> RFSumcheck
     ) -> (RFSumcheckProof<F, R>, RFProverState<F, R>)
     where
         F::Inner: ConstTranscribable + ConstIntSemiring + FromRef<F::Inner>,
+        F::Modulus: ConstTranscribable,
         F: InnerTransparentField,
     {
         let projecting_element: F = transcript.get_field_challenge(field_cfg);
@@ -116,6 +117,7 @@ impl<F: FromPrimitiveWithConfig, R: Semiring + ProjectableToField<F>> RFSumcheck
     ) -> Result<SubClaim<F>, RFSumcheckError<F>>
     where
         F::Inner: ConstTranscribable + ConstIntSemiring,
+        F::Modulus: ConstTranscribable,
     {
         // Simulate getting the projecting element
         // Verifier does not use that element as it verifies only over RC,

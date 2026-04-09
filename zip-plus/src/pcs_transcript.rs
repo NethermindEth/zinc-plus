@@ -57,6 +57,7 @@ impl PcsTranscript {
     where
         F: PrimeField,
         F::Inner: Transcribable,
+        F::Modulus: Transcribable,
     {
         if !elems.is_empty() {
             let num_bytes = F::Inner::get_num_bytes(elems[0].inner());
@@ -84,6 +85,7 @@ impl PcsTranscript {
     where
         F: PrimeField,
         F::Inner: Transcribable,
+        F::Modulus: Transcribable,
     {
         if n > 0 {
             let mut buf = vec![0; F::Inner::LENGTH_NUM_BYTES];
@@ -115,6 +117,7 @@ impl PcsTranscript {
     where
         F: PrimeField,
         F::Inner: Transcribable,
+        F::Modulus: Transcribable,
     {
         self.stream.read_exact(buf)?;
         let inner = F::Inner::read_transcription_bytes(buf);
@@ -135,6 +138,7 @@ impl PcsTranscript {
     where
         F: PrimeField,
         F::Inner: Transcribable,
+        F::Modulus: Transcribable,
     {
         self.fs_transcript.absorb_random_field(fe, buf);
         fe.inner().write_transcription_bytes(buf);

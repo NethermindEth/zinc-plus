@@ -71,6 +71,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ) -> Result<(Proof<F>, ProverState<F>), CombinedPolyResolverError<F>>
     where
         F::Inner: ConstTranscribable + Send + Sync + Zero + Default,
+        F::Modulus: ConstTranscribable,
         U: Uair,
     {
         debug_assert_ne!(
@@ -236,6 +237,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     where
         F: 'static,
         F::Inner: ConstTranscribable + Send + Sync + Zero + Default,
+        F::Modulus: ConstTranscribable,
         U: Uair,
         U::Scalar: 'static,
     {
@@ -342,6 +344,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ) -> Result<(Vec<F>, Vec<F>, ProverState<F>), CombinedPolyResolverError<F>>
     where
         F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
     {
         debug_assert!(
             sumcheck_prover_state
@@ -393,6 +396,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ) -> Result<CprVerifierPreSumcheck<F>, CombinedPolyResolverError<F>>
     where
         F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
         U: Uair,
     {
         let _ = projected_scalars; // Used in finalize_verifier, not here.
@@ -458,6 +462,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ) -> Result<VerifierSubclaim<F>, CombinedPolyResolverError<F>>
     where
         F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
         U: Uair,
     {
         let zero = F::zero_with_cfg(field_cfg);
@@ -556,6 +561,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ) -> Result<VerifierSubclaim<F>, CombinedPolyResolverError<F>>
     where
         F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
         U: Uair,
     {
         let sig = U::signature();

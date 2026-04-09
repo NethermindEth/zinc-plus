@@ -383,6 +383,7 @@ pub fn fold_claims_prove<F, T, const HALF_D: usize>(
 where
     F: PrimeField + zinc_utils::from_ref::FromRef<F> + for<'a> MulByScalar<&'a F> + 'static,
     F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
     BinaryPoly<HALF_D>: ProjectableToField<F>,
     T: Transcript,
 {
@@ -481,6 +482,7 @@ pub fn fold_claims_verify<F, T>(
 where
     F: PrimeField + zinc_utils::from_ref::FromRef<F>,
     F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
     T: Transcript,
 {
     let num_cols = c1s.len();

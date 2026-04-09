@@ -61,6 +61,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> LogupProt
     ) -> Result<(LogupProof<F>, LogupProverState<F>), LookupError<F>>
     where
         F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+        F::Modulus: ConstTranscribable,
     {
         let witness_len = witness.len();
         let zero = F::zero_with_cfg(field_cfg);
@@ -226,6 +227,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> LogupProt
     ) -> Result<LogupVerifierSubClaim<F>, LookupError<F>>
     where
         F::Inner: ConstTranscribable + Zero,
+        F::Modulus: ConstTranscribable,
     {
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);

@@ -39,6 +39,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + for<'a> MulByScalar<&'a F>
             + FromRef<F>,
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
+        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
     {
         Self::prove_with_seed::<F, CHECK_FOR_OVERFLOW>(pp, polys, point, commit_hint, &[])
     }
@@ -63,6 +64,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + for<'a> MulByScalar<&'a F>
             + FromRef<F>,
         F::Inner: FromRef<Zt::Fmod> + Transcribable,
+        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
     {
         let batch_size = polys.len();
         validate_input::<Zt, Lc, _>(

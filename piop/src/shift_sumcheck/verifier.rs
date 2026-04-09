@@ -48,6 +48,7 @@ pub fn shift_sumcheck_verify<F>(
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: ConstTranscribable + Send + Sync + num_traits::Zero,
+    F::Modulus: ConstTranscribable,
 {
     let k = claims.len();
     if proof.rounds.len() != num_vars {
@@ -169,6 +170,7 @@ pub fn shift_sumcheck_verify_pre<F>(
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: ConstTranscribable + Send + Sync + num_traits::Zero,
+    F::Modulus: ConstTranscribable,
 {
     let k = claims.len();
     if proof.rounds.len() != num_vars {
@@ -236,6 +238,7 @@ pub fn shift_sumcheck_verify_finalize<F>(
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: ConstTranscribable + Send + Sync + num_traits::Zero,
+    F::Modulus: ConstTranscribable,
 {
     let k = claims.len();
     if v_finals.len() != k {

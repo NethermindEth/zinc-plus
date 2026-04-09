@@ -61,6 +61,7 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
     where
         U: Uair,
         F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
     {
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
@@ -144,6 +145,7 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
     where
         U: Uair,
         F::Inner: ConstTranscribable + Default + Send + Sync + num_traits::Zero,
+        F::Modulus: ConstTranscribable,
     {
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
@@ -187,6 +189,7 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
     where
         U: Uair,
         F::Inner: ConstTranscribable + Default + Send + Sync + num_traits::Zero,
+        F::Modulus: ConstTranscribable,
     {
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
@@ -246,6 +249,7 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
     where
         U: Uair,
         F::Inner: ConstTranscribable + Default + Send + Sync + num_traits::Zero,
+        F::Modulus: ConstTranscribable,
     {
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
@@ -313,6 +317,7 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
     where
         U: Uair,
         F::Inner: ConstTranscribable + Default + Send + Sync + num_traits::Zero,
+        F::Modulus: ConstTranscribable,
     {
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
@@ -374,6 +379,7 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
     where
         U: Uair,
         F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
     {
         let max_constraint_degree = count_max_degree::<U>();
 
@@ -435,6 +441,7 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
     where
         U: Uair,
         F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
@@ -478,6 +485,7 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
     ) -> VerifierSubClaim<F>
     where
         F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
     {
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
@@ -529,6 +537,7 @@ impl<F: InnerTransparentField> IdealCheckProtocol<F> {
     where
         U: Uair,
         F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {

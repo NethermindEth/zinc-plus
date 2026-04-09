@@ -90,6 +90,7 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
     pub fn verify_round(&mut self, prover_msg: &ProverMsg<F>, transcript: &mut impl Transcript) -> F
     where
         F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
     {
         if self.finished {
             panic!("Incorrect verifier state: Verifier is already finished.");

@@ -159,6 +159,7 @@ pub fn prove_batched_lookup<F>(
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Modulus: ConstTranscribable,
     F::Config: Sync,
 {
     let groups = group_lookup_specs(specs);
@@ -234,6 +235,7 @@ pub fn prove_batched_lookup_with_indices<F>(
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Modulus: ConstTranscribable,
     F::Config: Sync,
 {
     let groups = group_lookup_specs(specs);
@@ -366,6 +368,7 @@ pub fn prove_gkr_batched_lookup_with_indices<F>(
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Modulus: ConstTranscribable,
     F::Config: Sync,
 {
     let groups = group_lookup_specs(specs);
@@ -431,6 +434,7 @@ pub fn verify_batched_lookup<F>(
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Modulus: ConstTranscribable,
     F::Config: Sync,
 {
     let mut subclaims = Vec::with_capacity(proof.group_proofs.len());
@@ -473,6 +477,7 @@ pub fn verify_gkr_batched_lookup<F>(
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Modulus: ConstTranscribable,
     F::Config: Sync,
 {
     let mut subclaims = Vec::with_capacity(proof.group_proofs.len());
@@ -528,6 +533,7 @@ pub fn prove_hybrid_gkr_batched_lookup_with_indices<F>(
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Modulus: ConstTranscribable,
     F::Config: Sync,
 {
     let groups = group_lookup_specs(specs);
@@ -588,6 +594,7 @@ pub fn verify_hybrid_gkr_batched_lookup<F>(
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Modulus: ConstTranscribable,
     F::Config: Sync,
 {
     let mut subclaims = Vec::with_capacity(proof.group_proofs.len());

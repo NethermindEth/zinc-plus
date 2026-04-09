@@ -271,6 +271,7 @@ pub(super) fn gkr_fraction_prove<F>(
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Modulus: ConstTranscribable,
     F::Config: Sync,
 {
     let d = layers.len() - 1; // number of GKR levels
@@ -468,6 +469,7 @@ pub(super) fn gkr_fraction_verify<F>(
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: ConstTranscribable + Zero,
+    F::Modulus: ConstTranscribable,
 {
     let d = num_vars;
     let one = F::one_with_cfg(field_cfg);
@@ -617,6 +619,7 @@ pub(super) fn batched_gkr_fraction_prove<F>(
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Modulus: ConstTranscribable,
     F::Config: Sync,
 {
     let num_trees = all_layers.len(); // L
@@ -889,6 +892,7 @@ pub(super) fn batched_gkr_fraction_verify<F>(
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: ConstTranscribable + Zero,
+    F::Modulus: ConstTranscribable,
 {
     let d = num_vars;
     let num_trees = proof.roots_p.len();

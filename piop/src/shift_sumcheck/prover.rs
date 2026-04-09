@@ -57,6 +57,7 @@ pub fn shift_sumcheck_prove<F>(
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: ConstTranscribable + Send + Sync + Zero,
+    F::Modulus: ConstTranscribable,
 {
     assert!(!claims.is_empty(), "need at least one shift claim");
     let k = claims.len();

@@ -82,6 +82,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
     >
     where
         F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+        F::Modulus: ConstTranscribable,
     {
         let witnesses = &instance.witnesses;
         let subtable = &instance.subtable;
@@ -296,6 +297,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
     ) -> Result<LookupSumcheckGroup<F>, LookupError<F>>
     where
         F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+        F::Modulus: ConstTranscribable,
     {
         let witnesses = &instance.witnesses;
         let subtable = &instance.subtable;
@@ -513,6 +515,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
     ) -> Result<LookupVerifierPreSumcheck<F>, LookupError<F>>
     where
         F::Inner: ConstTranscribable + Zero + Default,
+        F::Modulus: ConstTranscribable,
     {
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
@@ -618,7 +621,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
         field_cfg: &F::Config,
     ) -> Result<BatchedDecompLogupVerifierSubClaim<F>, LookupError<F>>
     where
-        F::Inner: ConstTranscribable + Zero + Default,
+        F::Inner: ConstTranscribable + Zero + Default + std::hash::Hash,
+        F::Modulus: ConstTranscribable,
     {
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
@@ -920,7 +924,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
         field_cfg: &F::Config,
     ) -> Result<BatchedDecompLogupVerifierSubClaim<F>, LookupError<F>>
     where
-        F::Inner: ConstTranscribable + Zero + Default,
+        F::Inner: ConstTranscribable + Zero + Default + std::hash::Hash,
+        F::Modulus: ConstTranscribable,
     {
         let eq_at_point = build_eq_x_r_vec(subclaim_point, field_cfg)?;
         Self::finalize_verifier_with_precomputed_eq(
@@ -951,6 +956,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync>
     ) -> Result<BatchedDecompLogupVerifierSubClaim<F>, LookupError<F>>
     where
         F::Inner: ConstTranscribable + Zero + Default,
+        F::Modulus: ConstTranscribable,
     {
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);

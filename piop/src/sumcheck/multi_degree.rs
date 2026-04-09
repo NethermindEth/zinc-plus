@@ -109,6 +109,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
     where
         F: InnerTransparentField + Send + Sync,
         F::Inner: ConstTranscribable + Zero,
+        F::Modulus: ConstTranscribable,
     {
         assert!(!groups.is_empty(), "need at least one degree group");
         assert!(num_vars > 0, "num_vars must be > 0");
@@ -214,6 +215,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
     where
         F: InnerTransparentField,
         F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
     {
         let num_groups = proof.group_messages.len();
         assert!(num_groups > 0, "need at least one degree group");

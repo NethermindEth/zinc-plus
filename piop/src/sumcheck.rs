@@ -92,6 +92,7 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
     ) -> (SumcheckProof<F>, ProverState<F>)
     where
         F::Inner: ConstTranscribable + Zero,
+        F::Modulus: ConstTranscribable,
         F: InnerTransparentField,
     {
         if nvars == 0 {
@@ -195,6 +196,7 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
     ) -> Result<SubClaim<F>, SumCheckError<F>>
     where
         F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
     {
         if num_vars == 0 {
             panic!("Attempt to verify a sumcheck claim for 0 variables")

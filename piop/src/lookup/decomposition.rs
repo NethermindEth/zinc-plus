@@ -56,6 +56,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> DecompLog
     ) -> Result<(DecompLogupProof<F>, DecompLogupProverState<F>), LookupError<F>>
     where
         F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+        F::Modulus: ConstTranscribable,
     {
         let witness = &instance.witness;
         let subtable = &instance.subtable;
@@ -285,6 +286,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> DecompLog
     ) -> Result<DecompLogupVerifierSubClaim<F>, LookupError<F>>
     where
         F::Inner: ConstTranscribable + Zero + Default,
+        F::Modulus: ConstTranscribable,
     {
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);

@@ -1035,11 +1035,13 @@ where
     rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<D>>,
     PiopField: FromPrimitiveWithConfig,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     Zt::Eval: ProjectableToField<PiopField>,
     Zt::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::CombR>,
     <PiopField as Field>::Inner: FromRef<Zt::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<Zt::Fmod>,
 {
     let total_start = Instant::now();
     let sig = U::signature();
@@ -1295,11 +1297,13 @@ where
     BinaryPoly<D>: From<u32>,
     PiopField: FromPrimitiveWithConfig,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     Zt::Eval: ProjectableToField<PiopField>,
     Zt::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::CombR>,
     <PiopField as Field>::Inner: FromRef<Zt::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<Zt::Fmod>,
 {
     let total_start = Instant::now();
     let sig = U::signature();
@@ -1675,11 +1679,13 @@ where
     BinaryPoly<HALF_D>: ProjectableToField<PiopField>,
     PiopField: FromPrimitiveWithConfig,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     PcsZt::Eval: ProjectableToField<PiopField>,
     PcsZt::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a PcsZt::Chal> + for<'a> FromWithConfig<&'a PcsZt::CombR>,
     <PiopField as Field>::Inner: FromRef<PcsZt::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<PcsZt::Fmod>,
     PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
 {
     let total_start = Instant::now();
@@ -2096,11 +2102,13 @@ where
     BinaryPoly<QUARTER_D>: ProjectableToField<PiopField>,
     PiopField: FromPrimitiveWithConfig + FromWithConfig<i64>,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     PcsZt::Eval: ProjectableToField<PiopField>,
     PcsZt::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a PcsZt::Chal> + for<'a> FromWithConfig<&'a PcsZt::CombR>,
     <PiopField as Field>::Inner: FromRef<PcsZt::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<PcsZt::Fmod>,
     PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
 {
     let total_start = Instant::now();
@@ -2827,11 +2835,13 @@ where
     BinaryPoly<HALF_D>: ProjectableToField<PiopField>,
     PiopField: FromPrimitiveWithConfig,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     PcsZt::Eval: ProjectableToField<PiopField>,
     PcsZt::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a PcsZt::Chal> + for<'a> FromWithConfig<&'a PcsZt::CombR>,
     <PiopField as Field>::Inner: FromRef<PcsZt::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<PcsZt::Fmod>,
     PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
 {
     let total_start = Instant::now();
@@ -3118,11 +3128,13 @@ where
     BinaryPoly<QUARTER_D>: ProjectableToField<PiopField>,
     PiopField: FromPrimitiveWithConfig + FromWithConfig<i64>,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     PcsZt::Eval: ProjectableToField<PiopField>,
     PcsZt::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a PcsZt::Chal> + for<'a> FromWithConfig<&'a PcsZt::CombR>,
     <PiopField as Field>::Inner: FromRef<PcsZt::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<PcsZt::Fmod>,
     PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
 {
     let total_start = Instant::now();
@@ -3796,11 +3808,13 @@ where
     BinaryPoly<HALF_D>: ProjectableToField<PiopField>,
     PiopField: FromPrimitiveWithConfig,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     PcsZt::Eval: ProjectableToField<PiopField>,
     PcsZt::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a PcsZt::Chal> + for<'a> FromWithConfig<&'a PcsZt::CombR>,
     <PiopField as Field>::Inner: FromRef<PcsZt::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<PcsZt::Fmod>,
     PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<PiopField>>,
     IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
@@ -4477,11 +4491,13 @@ where
     BinaryPoly<QUARTER_D>: ProjectableToField<PiopField>,
     PiopField: FromPrimitiveWithConfig + FromWithConfig<i64>,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     PcsZt::Eval: ProjectableToField<PiopField>,
     PcsZt::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a PcsZt::Chal> + for<'a> FromWithConfig<&'a PcsZt::CombR>,
     <PiopField as Field>::Inner: FromRef<PcsZt::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<PcsZt::Fmod>,
     PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<PiopField>>,
     IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
@@ -5807,11 +5823,13 @@ where
     BinaryPoly<FINAL>: ProjectableToField<PiopField>,
     PiopField: FromPrimitiveWithConfig + FromWithConfig<i64>,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     PcsZt::Eval: ProjectableToField<PiopField>,
     PcsZt::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a PcsZt::Chal> + for<'a> FromWithConfig<&'a PcsZt::CombR>,
     <PiopField as Field>::Inner: FromRef<PcsZt::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<PcsZt::Fmod>,
     PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
 {
     let total_start = Instant::now();
@@ -6181,11 +6199,13 @@ where
     BinaryPoly<FINAL>: ProjectableToField<PiopField>,
     PiopField: FromPrimitiveWithConfig + FromWithConfig<i64>,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     PcsZt::Eval: ProjectableToField<PiopField>,
     PcsZt::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a PcsZt::Chal> + for<'a> FromWithConfig<&'a PcsZt::CombR>,
     <PiopField as Field>::Inner: FromRef<PcsZt::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<PcsZt::Fmod>,
     PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
 {
     let total_start = Instant::now();
@@ -6566,11 +6586,13 @@ where
     BinaryPoly<FINAL>: ProjectableToField<PiopField>,
     PiopField: FromPrimitiveWithConfig + FromWithConfig<i64>,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     PcsZt::Eval: ProjectableToField<PiopField>,
     PcsZt::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a PcsZt::Chal> + for<'a> FromWithConfig<&'a PcsZt::CombR>,
     <PiopField as Field>::Inner: FromRef<PcsZt::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<PcsZt::Fmod>,
     PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
 {
     let total_start = Instant::now();
@@ -6948,11 +6970,13 @@ where
     BinaryPoly<FINAL>: ProjectableToField<PiopField>,
     PiopField: FromPrimitiveWithConfig + FromWithConfig<i64>,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     PcsZt::Eval: ProjectableToField<PiopField>,
     PcsZt::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a PcsZt::Chal> + for<'a> FromWithConfig<&'a PcsZt::CombR>,
     <PiopField as Field>::Inner: FromRef<PcsZt::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<PcsZt::Fmod>,
     PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<PiopField>>,
     IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
@@ -7464,6 +7488,7 @@ where
     Lc: LinearCode<Zt>,
     PiopField: FromPrimitiveWithConfig + FromWithConfig<R>,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     // PCS field (may be wider than PiopField when Zt::Fmod > 128 bits)
     PcsF: PrimeField
@@ -7474,6 +7499,7 @@ where
         + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF>
         + FromRef<PcsF>,
     PcsF::Inner: FromRef<Zt::Fmod> + ConstTranscribable,
+    PcsF::Modulus: FromRef<Zt::Fmod> + ConstTranscribable,
     Zt::Eval: ProjectableToField<PcsF>,
 {
     let total_start = Instant::now();
@@ -7758,6 +7784,7 @@ where
     Lc: LinearCode<Zt>,
     PiopField: FromPrimitiveWithConfig + FromWithConfig<R>,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     // PCS field (may be wider than PiopField when Zt::Fmod > 128 bits)
     PcsF: PrimeField
@@ -7768,6 +7795,7 @@ where
         + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF>
         + FromRef<PcsF>,
     PcsF::Inner: FromRef<Zt::Fmod> + ConstTranscribable,
+    PcsF::Modulus: FromRef<Zt::Fmod> + ConstTranscribable,
     Zt::Eval: ProjectableToField<PcsF>,
     Zt::Cw: ProjectableToField<PcsF>,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<PiopField>>,
@@ -8147,10 +8175,12 @@ where
     rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<D>>,
     PiopField: FromPrimitiveWithConfig,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner>,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     Zt::Eval: ProjectableToField<PiopField>,
     Zt::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::CombR>,
     <PiopField as Field>::Inner: FromRef<Zt::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<Zt::Fmod>,
 {
     let total_start = Instant::now();
 
@@ -8232,6 +8262,7 @@ where
     Zt::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::CombR>,
     <PiopField as Field>::Inner: FromRef<Zt::Fmod> + ConstTranscribable,
+    <PiopField as Field>::Modulus: FromRef<Zt::Fmod> + ConstTranscribable,
 {
     let total_start = Instant::now();
 
@@ -8321,11 +8352,13 @@ where
     BinaryPoly<D>: From<u32>,
     PiopField: FromPrimitiveWithConfig,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     Zt::Eval: ProjectableToField<PiopField>,
     Zt::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::CombR>,
     <PiopField as Field>::Inner: FromRef<Zt::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<Zt::Fmod>,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<PiopField>>,
     IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
 {
@@ -9222,11 +9255,13 @@ where
     rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<D1>>,
     PiopField: FromPrimitiveWithConfig + FromWithConfig<i64>,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     Zt::Eval: ProjectableToField<PiopField>,
     Zt::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::CombR>,
     <PiopField as Field>::Inner: FromRef<Zt::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<Zt::Fmod>,
     ConvertFn: Fn(&[DenseMultilinearExtension<BinaryPoly<D1>>]) -> Vec<DenseMultilinearExtension<DensePolynomial<i64, D2>>>,
 
 {
@@ -9577,11 +9612,13 @@ where
     Lc: LinearCode<Zt>,
     PiopField: FromPrimitiveWithConfig + FromWithConfig<i64>,
     <PiopField as Field>::Inner: ConstTranscribable + FromRef<<PiopField as Field>::Inner> + Send + Sync + Default + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
     Zt::Eval: ProjectableToField<PiopField>,
     Zt::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a Zt::Chal> + for<'a> FromWithConfig<&'a Zt::CombR>,
     <PiopField as Field>::Inner: FromRef<Zt::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<Zt::Fmod>,
     QxIdealOverF: Ideal + IdealCheck<DynamicPolynomialF<PiopField>>,
     QxIdealFromRef: Fn(&IdealOrZero<U2::Ideal>) -> QxIdealOverF,
 {
@@ -10223,6 +10260,7 @@ where
     Zt1::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a Zt1::Chal> + for<'a> FromWithConfig<&'a Zt1::CombR>,
     <PiopField as Field>::Inner: FromRef<Zt1::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<Zt1::Fmod>,
     // Circuit 2 (generic ring R2):
     R2: ProjectableToField<PiopField>
         + crypto_primitives::Semiring
@@ -10243,6 +10281,7 @@ where
         + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF2>
         + FromRef<PcsF2>,
     PcsF2::Inner: FromRef<Zt2::Fmod> + ConstTranscribable,
+    PcsF2::Modulus: FromRef<Zt2::Fmod> + ConstTranscribable,
     Zt2::Eval: ProjectableToField<PcsF2>,
     // Shared:
     PiopField: FromPrimitiveWithConfig,
@@ -10252,6 +10291,7 @@ where
         + Sync
         + Default
         + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
 {
     let total_start = Instant::now();
@@ -10830,6 +10870,7 @@ where
     PcsZt1::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a PcsZt1::Chal> + for<'a> FromWithConfig<&'a PcsZt1::CombR>,
     <PiopField as Field>::Inner: FromRef<PcsZt1::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<PcsZt1::Fmod>,
     PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
     // Circuit 2 (generic ring R2):
     R2: ProjectableToField<PiopField>
@@ -10851,6 +10892,7 @@ where
         + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF2>
         + FromRef<PcsF2>,
     PcsF2::Inner: FromRef<Zt2::Fmod> + ConstTranscribable,
+    PcsF2::Modulus: FromRef<Zt2::Fmod> + ConstTranscribable,
     Zt2::Eval: ProjectableToField<PcsF2>,
     // Shared:
     PiopField: FromPrimitiveWithConfig,
@@ -10860,6 +10902,7 @@ where
         + Sync
         + Default
         + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
 {
     let total_start = Instant::now();
@@ -11440,6 +11483,7 @@ where
     PcsZt1::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a PcsZt1::Chal> + for<'a> FromWithConfig<&'a PcsZt1::CombR>,
     <PiopField as Field>::Inner: FromRef<PcsZt1::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<PcsZt1::Fmod>,
     PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
     // Circuit 2 (generic ring R2):
     R2: ProjectableToField<PiopField>
@@ -11461,6 +11505,7 @@ where
         + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF2>
         + FromRef<PcsF2>,
     PcsF2::Inner: FromRef<Zt2::Fmod> + ConstTranscribable,
+    PcsF2::Modulus: FromRef<Zt2::Fmod> + ConstTranscribable,
     Zt2::Eval: ProjectableToField<PcsF2>,
     // Shared:
     PiopField: FromPrimitiveWithConfig,
@@ -11470,6 +11515,7 @@ where
         + Sync
         + Default
         + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
 {
     let total_start = Instant::now();
@@ -12075,6 +12121,7 @@ where
     PcsZt1::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a PcsZt1::Chal> + for<'a> FromWithConfig<&'a PcsZt1::CombR>,
     <PiopField as Field>::Inner: FromRef<PcsZt1::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<PcsZt1::Fmod>,
     PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
     // Circuit 2 (generic ring R2):
     R2: ProjectableToField<PiopField>
@@ -12096,6 +12143,7 @@ where
         + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF2>
         + FromRef<PcsF2>,
     PcsF2::Inner: FromRef<Zt2::Fmod> + ConstTranscribable,
+    PcsF2::Modulus: FromRef<Zt2::Fmod> + ConstTranscribable,
     Zt2::Eval: ProjectableToField<PcsF2>,
     // Shared:
     PiopField: FromPrimitiveWithConfig,
@@ -12105,6 +12153,7 @@ where
         + Sync
         + Default
         + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
 {
     let total_start = Instant::now();
@@ -12632,6 +12681,7 @@ where
     Zt1::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a Zt1::Chal> + for<'a> FromWithConfig<&'a Zt1::CombR>,
     <PiopField as Field>::Inner: FromRef<Zt1::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<Zt1::Fmod>,
     IdealOverF1: Ideal + IdealCheck<DynamicPolynomialF<PiopField>>,
     IdealFromRef1: Fn(&IdealOrZero<U1::Ideal>) -> IdealOverF1,
     // Circuit 2 (generic ring R2):
@@ -12654,6 +12704,7 @@ where
         + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF2>
         + FromRef<PcsF2>,
     PcsF2::Inner: FromRef<Zt2::Fmod> + ConstTranscribable,
+    PcsF2::Modulus: FromRef<Zt2::Fmod> + ConstTranscribable,
     Zt2::Eval: ProjectableToField<PcsF2>,
     Zt2::Cw: ProjectableToField<PcsF2>,
     IdealOverF2: Ideal + IdealCheck<DynamicPolynomialF<PiopField>>,
@@ -12666,6 +12717,7 @@ where
         + Sync
         + Default
         + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
 {
     let total_start = Instant::now();
@@ -13531,6 +13583,7 @@ where
     PcsZt1::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a PcsZt1::Chal> + for<'a> FromWithConfig<&'a PcsZt1::CombR>,
     <PiopField as Field>::Inner: FromRef<PcsZt1::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<PcsZt1::Fmod>,
     PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
     rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<HALF_D>>,
     // Circuit 2 (generic ring R2):
@@ -13553,6 +13606,7 @@ where
         + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF2>
         + FromRef<PcsF2>,
     PcsF2::Inner: FromRef<Zt2::Fmod> + ConstTranscribable,
+    PcsF2::Modulus: FromRef<Zt2::Fmod> + ConstTranscribable,
     Zt2::Eval: ProjectableToField<PcsF2>,
     Zt2::Cw: ProjectableToField<PcsF2>,
     IdealOverF2: Ideal + IdealCheck<DynamicPolynomialF<PiopField>>,
@@ -13565,6 +13619,7 @@ where
         + Sync
         + Default
         + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
 {
     let total_start = Instant::now();
@@ -14479,6 +14534,7 @@ where
     PcsZt1::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a PcsZt1::Chal> + for<'a> FromWithConfig<&'a PcsZt1::CombR>,
     <PiopField as Field>::Inner: FromRef<PcsZt1::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<PcsZt1::Fmod>,
     PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
     rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<HALF_D>>,
     rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<QUARTER_D>>,
@@ -14502,6 +14558,7 @@ where
         + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF2>
         + FromRef<PcsF2>,
     PcsF2::Inner: FromRef<Zt2::Fmod> + ConstTranscribable,
+    PcsF2::Modulus: FromRef<Zt2::Fmod> + ConstTranscribable,
     Zt2::Eval: ProjectableToField<PcsF2>,
     Zt2::Cw: ProjectableToField<PcsF2>,
     IdealOverF2: Ideal + IdealCheck<DynamicPolynomialF<PiopField>>,
@@ -14514,6 +14571,7 @@ where
         + Sync
         + Default
         + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
 {
     let total_start = Instant::now();
@@ -15512,6 +15570,7 @@ where
     PcsZt1::Cw: ProjectableToField<PiopField>,
     PiopField: for<'a> FromWithConfig<&'a PcsZt1::Chal> + for<'a> FromWithConfig<&'a PcsZt1::CombR>,
     <PiopField as Field>::Inner: FromRef<PcsZt1::Fmod>,
+    <PiopField as Field>::Modulus: FromRef<PcsZt1::Fmod>,
     PiopField: for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PiopField>,
     rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<HALF_D>>,
     rand::distr::StandardUniform: rand::distr::Distribution<BinaryPoly<QUARTER_D>>,
@@ -15535,6 +15594,7 @@ where
         + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a PcsF2>
         + FromRef<PcsF2>,
     PcsF2::Inner: FromRef<Zt2::Fmod> + ConstTranscribable,
+    PcsF2::Modulus: FromRef<Zt2::Fmod> + ConstTranscribable,
     Zt2::Eval: ProjectableToField<PcsF2>,
     Zt2::Cw: ProjectableToField<PcsF2>,
     IdealOverF2: Ideal + IdealCheck<DynamicPolynomialF<PiopField>>,
@@ -15547,6 +15607,7 @@ where
         + Sync
         + Default
         + num_traits::Zero,
+    <PiopField as Field>::Modulus: ConstTranscribable,
     MillerRabin: PrimalityTest<<PiopField as Field>::Inner>,
 {
     let total_start = Instant::now();
