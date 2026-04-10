@@ -9,16 +9,16 @@ use zinc_piop::{
     projections::{
         ProjectedTrace, project_scalars, project_scalars_to_field, project_trace_coeffs_row_major,
     },
+    sumcheck::multi_degree::MultiDegreeSumcheck,
 };
 use zinc_poly::{EvaluatablePolynomial, univariate::dynamic::over_field::DynamicPolynomialF};
 use zinc_transcript::{
-    KeccakTranscript,
+    Blake3Transcript,
     traits::{ConstTranscribable, Transcript},
 };
 use zinc_uair::{
     Uair, UairTrace,
     constraint_counter::count_constraints,
-    degree_counter::count_max_degree,
     ideal::{Ideal, IdealCheck},
     ideal_collector::IdealOrZero,
 };
@@ -55,12 +55,13 @@ where
 {
     /// Zinc+ full PIOP verifier.
     ///
-    /// `up_evals` and `down_evals` from the F_q sumcheck (Step 4) are reduced
-    /// via the multi-point evaluation sumcheck (Step 5) to a single evaluation
-    /// point `r_0`. The verifier recomputes public `lifted_evals` from public
-    /// data at `r_0`, interleaves them with the witness `lifted_evals` from
-    /// the proof, derives scalar `open_evals` via `\psi_a`, and checks the
-    /// multipoint eval consistency. A Zip+ PCS invocation (Step 7) confirms
+    /// `up_evals` and `down_evals` from the combined CPR+Lookup multi-degree
+    /// sumcheck (Step 4) are reduced via the multi-point evaluation
+    /// sumcheck (Step 5) to a single evaluation point `r_0`. The verifier
+    /// recomputes public `lifted_evals` from public data at `r_0`,
+    /// interleaves them with the witness `lifted_evals` from the proof,
+    /// derives scalar `open_evals` via `\psi_a`, and checks the multipoint
+    /// eval consistency. A Zip+ PCS invocation (Step 7) confirms
     /// the witness `lifted_evals`.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn verify<IdealOverF, const CHECK_FOR_OVERFLOW: bool>(
@@ -80,7 +81,7 @@ where
     {
         // === Step 0: Reconstruct transcript from commitments + public data ===
         let mut pcs_transcript = PcsVerifierTranscript {
-            fs_transcript: KeccakTranscript::default(),
+            fs_transcript: Blake3Transcript::default(),
             stream: Cursor::new(proof.zip),
         };
         for comm in [
@@ -124,20 +125,45 @@ where
             project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
                 .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
-        let max_degree = count_max_degree::<U>();
-
         // === Step 4: Sumcheck over F_q ===
-        let cpr_subclaim = CombinedPolyResolver::verify_as_subprotocol::<U>(
+        // 4a: CPR prepare_verifier (samples folding challenge, checks claimed sum)
+        let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
             &mut pcs_transcript.fs_transcript,
-            proof.resolver,
+            &proof.resolver,
+            proof.combined_sumcheck.claimed_sums()[0].clone(),
+            &ic_subclaim,
             num_constraints,
             num_vars,
-            max_degree,
             &projecting_element_f,
-            &projected_scalars_f,
-            ic_subclaim,
             &field_cfg,
         )?;
+
+        // 4b: Multi-degree sumcheck verify
+        let md_subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
+            &mut pcs_transcript.fs_transcript,
+            num_vars,
+            &proof.combined_sumcheck,
+            &field_cfg,
+        )
+        .map_err(CombinedPolyResolverError::SumcheckError)?;
+
+        // 4c: CPR finalize_verifier generates subclaim
+        let cpr_subclaim = CombinedPolyResolver::finalize_verifier::<U>(
+            &mut pcs_transcript.fs_transcript,
+            proof.resolver,
+            md_subclaims.point().to_vec(),
+            md_subclaims.expected_evaluations()[0].clone(),
+            cpr_verifier_ancillary,
+            &projected_scalars_f,
+            &field_cfg,
+        )?;
+
+        // 4d: Lookup verify — placeholder
+        // TODO: if proof.lookup_proof.is_some():
+        //   - call verify_batched_lookup(transcript, proof.lookup_proof,
+        //     &projecting_element_f, &field_cfg)
+        //   - check md_subclaims.expected_evaluations()[1..] against lookup group evals
+        let _ = &proof.lookup_proof;
 
         // === Step 5: Multi-point evaluation sumcheck ===
         let uair_sig = U::signature();

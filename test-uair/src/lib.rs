@@ -37,7 +37,7 @@ where
     fn signature() -> UairSignature {
         let total = TotalColumnLayout::new(0, 3, 0);
         let shifts = (0..3).map(|i| ShiftSpec::new(i, 1)).collect();
-        UairSignature::new(total, PublicColumnLayout::default(), shifts)
+        UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -143,7 +143,7 @@ where
 
     fn signature() -> UairSignature {
         let total = TotalColumnLayout::new(0, 3, 0);
-        UairSignature::new(total, PublicColumnLayout::default(), vec![])
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -216,7 +216,7 @@ where
 
     fn signature() -> UairSignature {
         let total = TotalColumnLayout::new(0, 3, 0);
-        UairSignature::new(total, PublicColumnLayout::default(), vec![])
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -264,7 +264,7 @@ where
 
     fn signature() -> UairSignature {
         let total = TotalColumnLayout::new(1, 0, 1);
-        UairSignature::new(total, PublicColumnLayout::default(), vec![])
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -329,7 +329,7 @@ where
     fn signature() -> UairSignature {
         let total = TotalColumnLayout::new(16, 0, 1);
         let shifts = (0..16).map(|i| ShiftSpec::new(i, 1)).collect();
-        UairSignature::new(total, PublicColumnLayout::default(), shifts)
+        UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -462,7 +462,7 @@ where
         let total = TotalColumnLayout::new(16, 0, 1);
         let public = PublicColumnLayout::new(4, 0, 0);
         let shifts = (0..16).map(|i| ShiftSpec::new(i, 1)).collect();
-        UairSignature::new(total, public, shifts)
+        UairSignature::new(total, public, shifts, vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -782,7 +782,7 @@ where
             ShiftSpec::new(0, 1), // a shifted by 1
             ShiftSpec::new(1, 2), // b shifted by 2
         ];
-        UairSignature::new(total, PublicColumnLayout::default(), shifts)
+        UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![])
     }
 
     // Constraints:

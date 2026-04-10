@@ -16,12 +16,13 @@ use zinc_piop::{
         ProjectedTrace, evaluate_trace_to_column_mles, project_scalars, project_scalars_to_field,
         project_trace_coeffs_row_major,
     },
+    sumcheck::multi_degree::MultiDegreeSumcheck,
 };
 use zinc_poly::univariate::dense::DensePolynomial;
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_test_uair::{GenerateRandomTrace, TestAirNoMultiplication, TestUairSimpleMultiplication};
 use zinc_transcript::{
-    KeccakTranscript,
+    Blake3Transcript,
     traits::{ConstTranscribable, Transcript},
 };
 use zinc_uair::{
@@ -56,7 +57,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
     let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
                      trace: &UairTrace<_, _, DEGREE_PLUS_ONE>,
-                     transcript: &mut KeccakTranscript| {
+                     transcript: &mut Blake3Transcript| {
         let projected_trace = project_trace_coeffs_row_major(trace, field_cfg);
 
         let projected_scalars =
@@ -87,8 +88,8 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         let scalars_f = project_scalars_to_field(projected_scalars, &projecting_element)
             .expect("failed to project scalars to field");
 
-        let (cpr_proof, cpr_state) =
-            CombinedPolyResolver::prove_as_subprotocol::<TestAirNoMultiplication<_>>(
+        let (cpr_group, cpr_ancillary) =
+            CombinedPolyResolver::prepare_sumcheck_group::<TestAirNoMultiplication<_>>(
                 transcript,
                 trace_f,
                 &ic_prover_state.evaluation_point,
@@ -98,11 +99,27 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 max_degree,
                 field_cfg,
             )
-            .expect("CPR Prover failed");
+            .expect("CPR prepare failed");
+
+        let (md_proof, md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
+            transcript,
+            vec![cpr_group],
+            num_vars,
+            field_cfg,
+        );
+
+        let (cpr_proof, cpr_state) = CombinedPolyResolver::finalize_prover(
+            transcript,
+            md_states.into_iter().next().expect("one CPR group"),
+            cpr_ancillary,
+            field_cfg,
+        )
+        .expect("CPR finalize failed");
 
         (
             ic_proof,
             cpr_proof,
+            md_proof,
             cpr_state,
             scalars_f,
             projecting_element,
@@ -110,7 +127,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     };
 
     group.bench_function(BenchmarkId::new("CPR Prover", &params), |bench| {
-        let mut transcript = KeccakTranscript::new();
+        let mut transcript = Blake3Transcript::new();
         let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
         bench.iter_batched(
             || transcript.clone(),
@@ -122,12 +139,12 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     });
 
     group.bench_function(BenchmarkId::new("CPR Verifier", &params), |bench| {
-        let mut prover_transcript = KeccakTranscript::new();
+        let mut prover_transcript = Blake3Transcript::new();
         let mut verifier_transcript = prover_transcript.clone();
         let field_cfg = prover_transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
         let _ = verifier_transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
 
-        let (ic_proof, cpr_proof, _, scalars_f, _) =
+        let (ic_proof, cpr_proof, md_proof, _, scalars_f, _) =
             prove_cpr(&field_cfg, &trace, &mut prover_transcript);
 
         let ic_check_subclaim =
@@ -159,20 +176,39 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 )
             },
             |(proof, subclaim, mut transcript)| {
-                let _ = black_box(CombinedPolyResolver::verify_as_subprotocol::<
-                    TestAirNoMultiplication<_>,
-                >(
+                let ancillary =
+                    CombinedPolyResolver::prepare_verifier::<TestAirNoMultiplication<_>>(
+                        &mut transcript,
+                        &proof,
+                        md_proof.claimed_sums()[0].clone(),
+                        &subclaim,
+                        num_constraints,
+                        num_vars,
+                        &verifier_projecting_element,
+                        &field_cfg,
+                    )
+                    .expect("CPR prepare_verifier failed");
+
+                let md_subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
                     &mut transcript,
-                    proof,
-                    num_constraints,
                     num_vars,
-                    max_degree,
-                    &verifier_projecting_element,
-                    &scalars_f,
-                    subclaim,
+                    &md_proof,
                     &field_cfg,
-                ))
-                .expect("CPR Verifier failed");
+                )
+                .expect("MultiDegreeSumcheck verify failed");
+
+                let _ = black_box(
+                    CombinedPolyResolver::finalize_verifier::<TestAirNoMultiplication<_>>(
+                        &mut transcript,
+                        proof,
+                        md_subclaims.point().to_vec(),
+                        md_subclaims.expected_evaluations()[0].clone(),
+                        ancillary,
+                        &scalars_f,
+                        &field_cfg,
+                    )
+                    .expect("CPR finalize_verifier failed"),
+                );
             },
             BatchSize::SmallInput,
         );
@@ -200,7 +236,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
     let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
                      trace: &UairTrace<_, _, DEGREE_PLUS_ONE>,
-                     transcript: &mut KeccakTranscript| {
+                     transcript: &mut Blake3Transcript| {
         let projected_trace = project_trace_coeffs_row_major(trace, field_cfg);
 
         let projected_scalars = project_scalars::<
@@ -233,7 +269,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         let scalars_f = project_scalars_to_field(projected_scalars, &projecting_element)
             .expect("failed to project scalars to field");
 
-        let (cpr_proof, cpr_state) = CombinedPolyResolver::prove_as_subprotocol::<
+        let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<
             TestUairSimpleMultiplication<Int<INT_LIMBS>>,
         >(
             transcript,
@@ -245,11 +281,27 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             max_degree,
             field_cfg,
         )
-        .expect("CPR Prover failed");
+        .expect("CPR prepare failed");
+
+        let (md_proof, md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
+            transcript,
+            vec![cpr_group],
+            num_vars,
+            field_cfg,
+        );
+
+        let (cpr_proof, cpr_state) = CombinedPolyResolver::finalize_prover(
+            transcript,
+            md_states.into_iter().next().expect("one CPR group"),
+            cpr_ancillary,
+            field_cfg,
+        )
+        .expect("CPR finalize failed");
 
         (
             ic_proof,
             cpr_proof,
+            md_proof,
             cpr_state,
             scalars_f,
             projecting_element,
@@ -257,7 +309,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     };
 
     group.bench_function(BenchmarkId::new("CPR Prover", &params), |bench| {
-        let mut transcript = KeccakTranscript::new();
+        let mut transcript = Blake3Transcript::new();
         let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
         bench.iter_batched(
             || transcript.clone(),
@@ -271,13 +323,13 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     group.bench_function(
         BenchmarkId::new("CPR Verifier", &params),
         |bench| {
-            let mut prover_transcript = KeccakTranscript::new();
+            let mut prover_transcript = Blake3Transcript::new();
             let mut verifier_transcript = prover_transcript.clone();
             let field_cfg =
                 prover_transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
             let _ = verifier_transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
 
-            let (ic_proof, cpr_proof, _, scalars_f, _) =
+            let (ic_proof, cpr_proof, md_proof, _, scalars_f, _) =
                 prove_cpr(&field_cfg, &trace, &mut prover_transcript);
 
             let ic_check_subclaim =
@@ -307,20 +359,42 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                     )
                 },
                 |(proof, subclaim, mut transcript)| {
-                    let _ = black_box(CombinedPolyResolver::verify_as_subprotocol::<
+                    let ancillary = CombinedPolyResolver::prepare_verifier::<
                         TestUairSimpleMultiplication<Int<INT_LIMBS>>,
                     >(
                         &mut transcript,
-                        proof,
+                        &proof,
+                        md_proof.claimed_sums()[0].clone(),
+                        &subclaim,
                         num_constraints,
                         num_vars,
-                        max_degree,
                         &verifier_projecting_element,
-                        &scalars_f,
-                        subclaim,
                         &field_cfg,
-                    ))
-                    .expect("CPR Verifier failed");
+                    )
+                    .expect("CPR prepare_verifier failed");
+
+                    let md_subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
+                        &mut transcript,
+                        num_vars,
+                        &md_proof,
+                        &field_cfg,
+                    )
+                    .expect("MultiDegreeSumcheck verify failed");
+
+                    let _ = black_box(
+                        CombinedPolyResolver::finalize_verifier::<
+                            TestUairSimpleMultiplication<Int<INT_LIMBS>>,
+                        >(
+                            &mut transcript,
+                            proof,
+                            md_subclaims.point().to_vec(),
+                            md_subclaims.expected_evaluations()[0].clone(),
+                            ancillary,
+                            &scalars_f,
+                            &field_cfg,
+                        )
+                        .expect("CPR finalize_verifier failed"),
+                    );
                 },
                 BatchSize::SmallInput,
             );

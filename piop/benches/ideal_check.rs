@@ -22,7 +22,7 @@ use zinc_test_uair::{
     TestUairSimpleMultiplication,
 };
 use zinc_transcript::{
-    KeccakTranscript,
+    Blake3Transcript,
     traits::{ConstTranscribable, Transcript},
 };
 use zinc_uair::{
@@ -56,7 +56,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
     let prove = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
                  trace: &UairTrace<_, _, DEGREE_PLUS_ONE>,
-                 transcript: &mut KeccakTranscript|
+                 transcript: &mut Blake3Transcript|
      -> Proof<F<FIELD_LIMBS>> {
         let trace = project_trace_coeffs_row_major(trace, field_cfg);
 
@@ -83,7 +83,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     };
 
     group.bench_function(BenchmarkId::new("Ideal Check Prover", &params), |bench| {
-        let mut transcript = KeccakTranscript::new();
+        let mut transcript = Blake3Transcript::new();
         let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
         bench.iter_batched(
             || transcript.clone(),
@@ -95,7 +95,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     });
 
     group.bench_function(BenchmarkId::new("Ideal Check Verifier", &params), |bench| {
-        let mut transcript = KeccakTranscript::new();
+        let mut transcript = Blake3Transcript::new();
         let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
         let proof = prove(&field_cfg, &trace, &mut transcript);
 
@@ -148,7 +148,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
     let prove = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
                  trace: &UairTrace<_, _, DEGREE_PLUS_ONE>,
-                 transcript: &mut KeccakTranscript|
+                 transcript: &mut Blake3Transcript|
      -> Proof<F<FIELD_LIMBS>> {
         let trace = project_trace_coeffs_row_major(trace, field_cfg);
 
@@ -175,7 +175,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     };
 
     group.bench_function(BenchmarkId::new("Ideal Check Prover", &params), |bench| {
-        let mut transcript = KeccakTranscript::new();
+        let mut transcript = Blake3Transcript::new();
         let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
         bench.iter_batched(
             || transcript.clone(),
@@ -190,7 +190,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         BenchmarkId::new("Ideal Check Verifier", &params),
         &trace,
         |bench, trace| {
-            let mut transcript = KeccakTranscript::new();
+            let mut transcript = Blake3Transcript::new();
             let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
             let proof = prove(&field_cfg, trace, &mut transcript);
 
@@ -242,7 +242,7 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
 
     let prove = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
                  trace: &UairTrace<_, _, DEGREE_PLUS_ONE>,
-                 transcript: &mut KeccakTranscript|
+                 transcript: &mut Blake3Transcript|
      -> Proof<F<FIELD_LIMBS>> {
         let trace = project_trace_coeffs_row_major(trace, field_cfg);
 
@@ -267,7 +267,7 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
     };
 
     group.bench_function(BenchmarkId::new("Ideal Check Prover", &params), |bench| {
-        let mut transcript = KeccakTranscript::new();
+        let mut transcript = Blake3Transcript::new();
         let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
         bench.iter_batched(
             || transcript.clone(),
@@ -279,7 +279,7 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
     });
 
     group.bench_function(BenchmarkId::new("Ideal Check Verifier", &params), |bench| {
-        let mut transcript = KeccakTranscript::new();
+        let mut transcript = Blake3Transcript::new();
         let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
         let proof = prove(&field_cfg, &trace, &mut transcript);
 
@@ -349,7 +349,7 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
     group.bench_function(
         BenchmarkId::new("Ideal Check Prover (MLE-first)", &params),
         |bench| {
-            let mut transcript = KeccakTranscript::new();
+            let mut transcript = Blake3Transcript::new();
             let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
             bench.iter_batched(
                 || (&field_cfg, transcript.clone()),
@@ -370,7 +370,7 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
     group.bench_function(
         BenchmarkId::new("Ideal Check Prover (Combined)", &params),
         |bench| {
-            let mut transcript = KeccakTranscript::new();
+            let mut transcript = Blake3Transcript::new();
             let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
             bench.iter_batched(
                 || (&field_cfg, transcript.clone()),
@@ -388,7 +388,7 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
         },
     );
 
-    let mut transcript = KeccakTranscript::new();
+    let mut transcript = Blake3Transcript::new();
     let field_cfg = transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
     let proof = prove!(
         &mut transcript,

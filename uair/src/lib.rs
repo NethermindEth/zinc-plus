@@ -7,6 +7,7 @@ pub mod do_nothing_builder;
 pub mod dummy_semiring;
 pub mod ideal;
 pub mod ideal_collector;
+pub mod lookup_types;
 
 use crypto_primitives::Semiring;
 use std::borrow::Cow;
@@ -17,6 +18,8 @@ use zinc_poly::{
 use zinc_utils::{UNCHECKED, add, from_ref::FromRef, mul_by_scalar::MulByScalar, sub};
 
 use crate::ideal::{Ideal, IdealCheck};
+
+pub use lookup_types::{LookupColumnSpec, LookupTableType};
 
 /// The abstract interface to constraint building logic.
 /// In essence it allows to create constraints modulo ideals.
@@ -180,6 +183,9 @@ pub struct UairSignature {
     shifts: Vec<ShiftSpec>,
     /// Column-type layout of the shifted (down) row.
     down_cols: VirtualColumnLayout,
+    /// Lookup specifications: which trace columns are constrained against
+    /// which table types.
+    lookup_specs: Vec<LookupColumnSpec>,
 }
 
 impl UairSignature {
@@ -188,6 +194,7 @@ impl UairSignature {
         total_cols: TotalColumnLayout,
         public_cols: PublicColumnLayout,
         mut shifts: Vec<ShiftSpec>,
+        lookup_specs: Vec<LookupColumnSpec>,
     ) -> Self {
         for (name, pub_n, tot_n) in [
             (
@@ -239,7 +246,12 @@ impl UairSignature {
             shifts,
             down_cols,
             witness_cols,
+            lookup_specs,
         }
+    }
+
+    pub fn lookup_specs(&self) -> &[LookupColumnSpec] {
+        &self.lookup_specs
     }
 
     fn compute_down_layout(

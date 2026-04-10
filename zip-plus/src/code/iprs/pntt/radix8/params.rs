@@ -16,7 +16,7 @@ pub trait Config: Debug + Copy + Send + Sync {
 
     /// The coefficients used to combine subresults.
     /// They are the 8-th roots of unity from the field `Self::Field`
-    /// lifted to `Self::Int`.
+    /// lifted to `PnttInt`.
     const BASE_TWIDDLES: [PnttInt; 8];
 
     /// A helper to get an integer representation that
