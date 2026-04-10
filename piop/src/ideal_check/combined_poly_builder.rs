@@ -1,10 +1,9 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use crate::projections::{ColumnMajorTrace, RowMajorTrace};
+use crate::projections::{ColumnMajorTrace, RowMajorTrace, ScalarMap};
 use crypto_primitives::PrimeField;
 use num_traits::Zero;
-use std::collections::HashMap;
 use zinc_poly::{
     EvaluationError,
     mle::{
@@ -30,7 +29,7 @@ use zinc_utils::{
 #[allow(clippy::arithmetic_side_effects)]
 pub fn compute_combined_polynomials<F, U>(
     trace_matrix: &RowMajorTrace<F>,
-    projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
     num_constraints: usize,
     field_cfg: &F::Config,
     skip_constraints: &[bool],
@@ -105,7 +104,7 @@ fn combine_rows_and_get_max_degree<F, U>(
     up: &[DynamicPolynomialF<F>],
     down: &[DynamicPolynomialF<F>],
     num_constraints: usize,
-    projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
     down_layout: &ColumnLayout,
 ) -> (usize, Vec<DynamicPolynomialF<F>>)
 where
@@ -194,7 +193,7 @@ fn prepare_coefficient_mles<F: PrimeField>(
 #[allow(clippy::arithmetic_side_effects)]
 pub fn evaluate_combined_polynomials<F, U>(
     trace_matrix: &ColumnMajorTrace<F>,
-    projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
     num_constraints: usize,
     evaluation_point: &[F],
     field_cfg: &F::Config,

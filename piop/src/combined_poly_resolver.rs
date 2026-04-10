@@ -15,7 +15,8 @@ use itertools::Itertools;
 use num_traits::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::{collections::HashMap, marker::PhantomData, slice};
+use crate::projections::ScalarMap;
+use std::{marker::PhantomData, slice};
 use thiserror::Error;
 use zinc_poly::{
     EvaluationError,
@@ -63,7 +64,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         transcript: &mut impl Transcript,
         trace_matrix: Vec<DenseMultilinearExtension<F::Inner>>,
         evaluation_point: &[F],
-        projected_scalars: &HashMap<U::Scalar, F>,
+        projected_scalars: &ScalarMap<U::Scalar, F>,
         num_constraints: usize,
         num_vars: usize,
         max_degree: usize,
@@ -233,7 +234,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         num_vars: usize,
         max_degree: usize,
         projecting_element: &F,
-        projected_scalars: &HashMap<U::Scalar, F>,
+        projected_scalars: &ScalarMap<U::Scalar, F>,
         ic_check_subclaim: ideal_check::VerifierSubclaim<F>,
         field_cfg: &F::Config,
     ) -> Result<VerifierSubclaim<F>, CombinedPolyResolverError<F>>
