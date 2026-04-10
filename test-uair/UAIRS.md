@@ -294,6 +294,337 @@ coefficients) is preserved exactly. Maximum forward shift in the
     which fits. For `s ∈ [len-16, len-14]` (where `bp[6]` is OOB), C1
     relies on the bp[0]/bp[1] zeroing from the C2 fix.
 
+### `EcdsaUair`
+
+A 14-column / 258-row arithmetization of one secp256k1 ECDSA signature
+verification using **Shamir's trick** for the simultaneous scalar
+multiplication `u₁·G + u₂·Q`. The constraint shape is inspired by §6 of
+the agentic-approach-v1 `IMPLEMENTATION.md`: it stresses the prover with a
+**non-linear, multi-shift** constraint set over **256-bit signed integers**
+— the only UAIR in this crate that uses `Int<4>` as the trace cell type
+instead of `BinaryPoly<32>` or a small ring.
+
+The doubling/addition formulas for short Weierstrass `a = 0` (secp256k1)
+naturally produce a constraint with a degree-10 sub-expression (`R_a²`,
+where `R_a = T_y·Z_mid³ − Y_mid` is the chord-slope numerator). To keep
+the maximum constraint degree low, this UAIR commits **three wire
+columns** (`R_a`, `H²`, `H³`) so the addition-step constraints can read
+those quantities at degree 1 instead of recomputing them inline. The
+final maximum degree is **5**.
+
+Unlike every other UAIR in this crate, **this one is not generic over `R`**.
+It is hard-coded to `Int<4>` (256-bit signed) because the secp256k1 base
+field constants (`p`, `Gx`, `Gy`, `Q = 2G`, `G+Q = 3G`) only fit in 256
+bits. The trace cells are stored as `Int<4>` via the bit-pattern reinterpret
+of `Uint<4>` field elements (values in `[2³¹⁵, 2³⁵⁶)` appear as negative
+`Int<4>` values, which is harmless because the witness is non-satisfying —
+see below).
+
+- **Layout:** `(0 bp, 0 ap, 14 int)`
+- **Public layout:** `(0 bp, 0 ap, 4 int)` — `b₁`, `b₂`, `sel_init`,
+  `sel_final` are public; the verifier scans them directly. The
+  public-columns-precede-witness convention forces this exact int ordering:
+
+  | int idx | Name        | Public | Description                                       |
+  |--------:|-------------|:------:|---------------------------------------------------|
+  |       0 | `b₁`        |   ✓    | Bit of `u₁ = e·s⁻¹ mod n` (selected for the row)  |
+  |       1 | `b₂`        |   ✓    | Bit of `u₂ = r·s⁻¹ mod n`                         |
+  |       2 | `sel_init`  |   ✓    | `1` at row 0, `0` elsewhere                       |
+  |       3 | `sel_final` |   ✓    | `1` at row 257, `0` elsewhere                     |
+  |       4 | `X`         |        | Accumulator x (Jacobian) — shift source           |
+  |       5 | `Y`         |        | Accumulator y (Jacobian) — shift source           |
+  |       6 | `Z`         |        | Accumulator z (Jacobian) — shift source           |
+  |       7 | `X_mid`     |        | Result of doubling step                           |
+  |       8 | `Y_mid`     |        |                                                   |
+  |       9 | `Z_mid`     |        |                                                   |
+  |      10 | `H`         |        | Addition scratch (`T_x · Z_mid² − X_mid`)         |
+  |      11 | `R_a`       |        | **Wire**: `T_y · Z_mid³ − Y_mid` (chord numerator) |
+  |      12 | `H_sq`      |        | **Wire**: `H²`                                    |
+  |      13 | `H_cu`      |        | **Wire**: `H³`                                    |
+
+- **Shifts:** 3 forward shifts of amount 1 on the accumulator coordinates
+  `X`, `Y`, `Z` (flat indices 4, 5, 6). After `UairSignature::new`'s
+  stable sort by `source_col`, `down.int[0..3]` map to `X[t+1]`, `Y[t+1]`,
+  `Z[t+1]` respectively (in source-column order, like
+  `BigLinearUair`).
+- **Ideal:** `ImpossibleIdeal` — every constraint is `assert_zero`, no
+  ideal-membership check is ever performed. This is the placeholder pattern
+  used by `TestUairSimpleMultiplication`.
+- **Selectors and gating.** All 12 constraints are unconditional from the
+  framework's perspective; per-row activation for the *boundary* checks is
+  encoded *inside the expressions* via the public selector columns:
+  - `sel_init` is `1` at row 0 and `0` elsewhere — used to make B3 fire
+    only at the first row.
+  - `sel_final` is `1` at row 257 (the last "real" row) and `0`
+    elsewhere — used to make B4 fire only at the boundary.
+  The step constraints C5–C7 are **not** gated by `sel_final` (an earlier
+  draft did this to drop one degree, but the resulting witness is
+  non-satisfying anyway, so the gate was removed in favour of cleaner
+  degree-5 expressions).
+- **Inlined sub-expressions still used inside the constraints.** Two
+  quantities are written directly into the constraint expressions instead
+  of being committed as columns, because their natural degrees (1 and 2)
+  do not threaten the max-degree budget:
+  - **Shamir indicator** `s = b₁ + b₂ − b₁·b₂` — equals `1` iff at least
+    one of `b₁, b₂` is set. Degree 2 in the public bit columns.
+  - **Table point** `(T_x, T_y)` selected from `{O, G, Q, G+Q}` by
+    `(b₁, b₂)`:
+    ```
+    T_x = (1−b₁) b₂ · Qx + b₁ (1−b₂) · Gx + b₁ b₂ · GQx
+    T_y = (1−b₁) b₂ · Qy + b₁ (1−b₂) · Gy + b₁ b₂ · GQy
+    ```
+    (the `(1−b₁)(1−b₂) → identity` case contributes 0 to both). Degree 2
+    in `(b₁, b₂)`.
+
+  Three other quantities — `R_a`, `H²`, `H³` — used to be inlined too
+  (and pushed the max constraint degree to 13 because of `R_a²`). They
+  are now committed as wire columns instead, and W1/W2/W3 below tie them
+  to their definitions.
+
+  The secp256k1 base-field constants `Gx, Gy, Qx, Qy, GQx, GQy, R_SIG` are
+  injected via `from_ref` as degree-0 `DensePolynomial<Int<4>, 32>`
+  scalars. Note that this UAIR's `Self::Scalar = DensePolynomial<Int<4>, 32>`
+  is an artifact of the `Uair` trait — the polynomial structure is unused;
+  every constant is a degree-0 polynomial (scalar `Int<4>`).
+
+- **Constraints (12 total — 4 doubling + 3 wire + 3 addition + 2 boundary):**
+  ```
+  // Doubling (a = 0 short Weierstrass formulas):
+  C1: Z_mid − 2·Y·Z                                              = 0
+  C2: X_mid − (9·X⁴ − 8·X·Y²)                                    = 0
+  C3: Y_mid − (12·X³·Y² − 3·X²·X_mid − 8·Y⁴)                     = 0
+
+  // Addition scratch and the three wire columns:
+  C4: H    − (T_x · Z_mid² − X_mid)                              = 0
+  W1: H_sq − H · H                                               = 0   // wires H²
+  W2: H_cu − H_sq · H                                            = 0   // wires H³ (chained, degree 2 not 3)
+  W3: R_a  − (T_y · Z_mid³ − Y_mid)                              = 0   // wires the chord numerator
+
+  // Conditional add of T = table[(b₁, b₂)] using the wire columns:
+  C5: Z[t+1] − ((1−s)·Z_mid + s · Z_mid · H)                     = 0
+  C6: X[t+1] − ((1−s)·X_mid + s · (R_a² − H_cu − 2·X_mid·H_sq))  = 0
+  C7: Y[t+1] − ((1−s)·Y_mid + s · (R_a·(X_mid·H_sq − X[t+1])
+                                    − Y_mid·H_cu))               = 0
+
+  // Boundary checks:
+  B3: sel_init · Z                                               = 0   // accumulator = O at row 0
+  B4: sel_final · Z · (X − R_SIG · Z²)                           = 0   // affine x-coord = R_SIG at row 257
+  ```
+  Per-constraint degrees (as reported by
+  `count_constraint_degrees::<EcdsaUair>()` and asserted in the test):
+  `[2, 4, 5, 4, 2, 2, 5, 4, 4, 5, 2, 4]`. Maximum is **5**, set jointly
+  by C3 (`12·X³·Y²` from the doubling formula) and W3/C7 (the chord-slope
+  path through `T_y · Z_mid³`). C6's `R_a²` is now degree 2 instead of
+  10 because `R_a` is wired.
+
+- **Trace generator.** A **real MSB-first double-and-add walk** over
+  secp256k1 for random scalars `u₁, u₂`. For each row `r ∈ [0, 256)`:
+  1. Read `(b₁[r], b₂[r])` = the `r`-th MSB of each scalar.
+  2. Double the current accumulator over `F_p` to get `(X_mid, Y_mid, Z_mid)`.
+  3. If at least one bit is set, point-add the table point
+     `T = {O, G, Q, G+Q}[(b₁, b₂)]` to produce the next-row accumulator;
+     otherwise pass `(X_mid, Y_mid, Z_mid)` through unchanged. `H` is
+     stored in either case for self-consistency with C4.
+  4. Compute the wire values from the field arithmetic: `R_a = T_y·Z_mid³
+     − Y_mid (mod p)`, `H_sq = H² (mod p)`, `H_cu = H³ (mod p)`.
+  5. Write all 12 data cells plus `b₁`, `b₂` into the trace.
+
+  Row 256 holds the final accumulator (= `u₁·G + u₂·Q`) with junk
+  doubling/H cells; row 257 is the boundary row holding the same
+  accumulator and `sel_final = 1`. Rows 258 and beyond are padded with
+  zeros to reach `1 << num_vars` total length. `num_vars ≥ 9` is
+  required (since `258 ≤ 512 = 2⁹`).
+
+- **The witness intentionally does NOT satisfy the constraints.** This is
+  the critical thing to know about `EcdsaUair` and the reason it is the
+  *only* UAIR in this crate where running the IC prover or the Zinc+
+  verifier will reject the trace. The constraints (e.g. C1: `Z_mid −
+  2·Y·Z = 0`) are **exact integer equality** over `Int<4>`. The walk
+  produces values that are reduced mod `p ≈ 2²⁵⁶`, so `2·Y·Z` and `Z_mid`
+  agree only modulo `p`, not exactly — and `2·Y·Z` overflows `Int<4>`
+  before the implicit reduction even occurs. A satisfying witness for
+  this exact constraint set would need either auxiliary quotient/carry
+  columns (not present) or the trivial all-zero fixed-point trace (which
+  would defeat the purpose of stressing the prover with realistic data).
+
+  As a result, **this UAIR is intended for prover-only benchmarking**.
+  See the `bench_ecdsa` function in [protocol/benches/e2e.rs](../protocol/benches/e2e.rs)
+  for the prover-only criterion harness; do not run the verifier or the
+  IC prover on this trace.
+
+- **Why it exists:** stresses the prover on a realistic ECDSA-shaped
+  constraint set — 12 constraints, max degree 5, 256-bit `Int<4>` trace
+  cells, 4 public columns, 3 forward shifts on the accumulator. It is
+  the first UAIR in this crate to use `Int<4>` as the trace type, the
+  first to combine non-linear constraints with selector-gated boundary
+  conditions, and the only one that uses *wire columns* to flatten
+  high-degree sub-expressions.
+
+### `EcdsaUairLimbs`
+
+A **limb-decomposed variant of `EcdsaUair`** where each 256-bit Jacobian
+coordinate is split into **8 little-endian u32 limbs** stored in 8
+separate witness columns. The constraint set mirrors `EcdsaUair`
+one-for-one — every `Int<4>` constraint is emitted as **8 per-limb
+constraints** — and uses the same wire columns (`R_a`, `H_sq`, `H_cu`)
+to keep the maximum degree at 5. There are **no carry columns**: high
+partial-product limbs are silently discarded, matching `Int<4>`'s
+mod-`2²⁵⁶` wrap-around. The witness inherits `EcdsaUair`'s
+non-satisfaction property.
+
+The cell type is `i64` (matching the existing `BenchZincTypes::Int =
+i64`) so that a single `i32 * i32` partial product fits without wrapping
+inside one cell. Limb *values* are u32-range (0..2³²) but the *storage*
+is 64-bit. The bench reuses the existing infrastructure with no new
+ZincTypes scaffolding.
+
+- **Layout:** `(0 bp, 0 ap, 84 int)` — 4 public + 80 witness limb cells.
+- **Public layout:** `(0, 0, 4)` — `b₁`, `b₂`, `sel_init`, `sel_final`,
+  same as `EcdsaUair`.
+- **Int column ordering** (each labelled run is the 8 little-endian limbs
+  of one 256-bit value):
+
+  | Range | Logical value | Public? |
+  |---:|---|:---:|
+  | `0..4` | `b₁, b₂, sel_init, sel_final` | ✓ |
+  | `4..12` | `X` (shift source) | |
+  | `12..20` | `Y` (shift source) | |
+  | `20..28` | `Z` (shift source) | |
+  | `28..36` | `X_mid` | |
+  | `36..44` | `Y_mid` | |
+  | `44..52` | `Z_mid` | |
+  | `52..60` | `H` | |
+  | `60..68` | `R_a` (wire) | |
+  | `68..76` | `H_sq` (wire) | |
+  | `76..84` | `H_cu` (wire) | |
+
+- **Shifts:** **24** specs — `X[k]`, `Y[k]`, `Z[k]` each shifted by 1 for
+  `k = 0..8`. After `UairSignature::new`'s stable sort by `source_col`:
+  `down.int[0..8] = X[t+1]`, `down.int[8..16] = Y[t+1]`, `down.int[16..24]
+  = Z[t+1]`, all little-endian.
+- **Ideal:** `DegreeOneIdeal<i64>` — never used (every constraint is
+  `assert_zero`). Picked for compatibility with `do_bench_uair`'s
+  hard-coded ideal type, not because the UAIR ever calls `assert_in_ideal`.
+- **Scalar:** `DensePolynomial<i64, 32>` — matches `BenchZincTypes`.
+- **Constraint code structure.** The body uses **inline closure helpers**
+  on `[B::Expr; 8]` arrays:
+  - `add(a, b)`, `sub(a, b)` — limb-wise sum / difference.
+  - `scalar_mul(k_expr, a)` — multiply each limb by a `B::Expr`
+    scalar (used for constants and for the Shamir indicator `s`).
+  - `mul(a, b)` — schoolbook multi-limb multiplication, **truncated to
+    limbs `0..7`**: output `[k] = sum_{i+j=k, i+j<8} a[i] * b[j]`.
+  - The 8-limb decompositions of the secp256k1 constants `Gx, Gy, Qx, Qy,
+    GQx, GQy, R_SIG` are precomputed at constraint-build time and
+    injected via the standard `cst` closure (`from_ref` of a degree-0
+    `DensePolynomial<i64, 32>`).
+
+  `s = b₁ + b₂ − b₁·b₂` is built once as a single `B::Expr` (degree 2 in
+  the bit columns) and broadcast across the 8 limbs of any expression it
+  multiplies. The same is done for `1 − s`, `sel_init`, `sel_final`, and
+  the `T_x`, `T_y` table-point limbs (each limb of which is a degree-2
+  expression in `(b₁, b₂)`).
+
+- **Constraints:** **96** total — exactly the 12 logical `EcdsaUair`
+  constraints expanded to 8 per-limb assertions each, in the same order:
+  `C1, C2, C3, C4, W1 (H_sq), W2 (H_cu), W3 (R_a), C5, C6, C7, B3, B4`.
+  The per-limb constraint at position `k` for each logical constraint has
+  **the same degree** as the corresponding `EcdsaUair` constraint, since
+  the limb cells substitute for `Int<4>` cells one-for-one inside the same
+  algebraic shape:
+
+  ```text
+  per-constraint degree array =
+    [2 × 8, 4 × 8, 5 × 8, 4 × 8, 2 × 8, 2 × 8, 5 × 8,
+     4 × 8, 4 × 8, 5 × 8, 2 × 8, 4 × 8]   // 96 entries total
+  ```
+
+  **Max degree: 5** — same as current `EcdsaUair`.
+- **Trace generator.** Same secp256k1 walk as `EcdsaUair` (reusing
+  `point_double`, `point_add_affine`, `select_table_point`, `IDENTITY`,
+  `fp_mul`, `fp_sub` from the `ecdsa_secp256k1` helper module). After
+  computing each `Uint<4>` value, decompose it into 8 little-endian u32
+  limbs via `uint4_to_u32_limbs` and store each as `i64`. `num_vars ≥ 9`
+  is required (inherited 258-row minimum).
+- **The witness intentionally does NOT satisfy the constraint system** —
+  same caveat as `EcdsaUair`. Use only for prover-only benchmarking. See
+  `bench_ecdsa_limbs` in [protocol/benches/e2e.rs](../protocol/benches/e2e.rs).
+- **Why it exists:** measures prover throughput on a *production-shape*
+  multi-limb arithmetization of secp256k1 — the column count is 6× wider
+  than `EcdsaUair` (84 vs 14), the constraint count is 8× higher (96 vs
+  12), and each per-limb constraint expands to a much larger expression
+  tree (cross-limb partial-product sums). The max degree and per-limb
+  constraint shape are deliberately preserved so the comparison isolates
+  the cost of "many narrow-cell multi-limb constraints" vs. "few
+  wide-cell single-shot constraints".
+
+### `ShaProxyEcdsaUair`
+
+A **heterogeneous combined UAIR** that runs both `SHAProxy<Int<4>>` and
+`EcdsaUair` on a single 32-column trace, with both constraint sets active
+on every row. Designed to stress the prover on a trace whose shape is
+representative of stitching multiple sub-circuits together (e.g. SHA-256
++ ECDSA-verify in a real Zinc+ application).
+
+The implementation **reuses both component UAIRs' `constrain_general`
+implementations unchanged** by constructing sliced sub-views of the
+incoming `up`/`down` `TraceRow`s and forwarding them. This is the same
+delegation pattern used by `BigLinearUairWithPublicInput`, extended to
+two distinct component UAIRs that operate on disjoint slices of the same
+trace row.
+
+- **Layout:** `(14 bp, 0 ap, 18 int)` — 32 columns total.
+  - `bp[0..14]` — SHAProxy's 14 binary-poly columns (unchanged).
+  - `int[0..14]` — `EcdsaUair`'s 14 int columns, contiguous so the
+    EcdsaUair constraint code's hard-coded indices `B1=0 .. H_CU=13`
+    work without any re-indexing.
+  - `int[14..18]` — SHAProxy's 4 int columns.
+- **Public layout:** `(0, 0, 4)` — same 4 public ECDSA int columns
+  (`b₁`, `b₂`, `sel_init`, `sel_final`) at `int[0..4]`.
+- **Shifts:** **24** specs total, built by concatenating
+  `SHAProxy::<Int<4>>::signature().shifts()` and
+  `EcdsaUair::signature().shifts()` and bumping each `source_col` to its
+  combined-trace flat index:
+  - 17 SHAProxy bp shifts on flat 0..11 (no offset).
+  - 4 SHAProxy int shifts on flat 28..31 (originally 14..17, +14 because
+    SHAProxy's int cells now sit after 14 ECDSA int cells in the
+    combined int group).
+  - 3 ECDSA int shifts on flat 18..20 (originally 4..6, +14 because the
+    combined trace has a 14-column bp prefix).
+  After `UairSignature::new`'s stable sort by `source_col`:
+  - `down.binary_poly[0..17]` — SHAProxy's bp shifts.
+  - `down.int[0..3]` — ECDSA's `X[t+1]`, `Y[t+1]`, `Z[t+1]` (source_col
+    18, 19, 20 — sorted before SHAProxy's int shifts).
+  - `down.int[3..7]` — SHAProxy's 4 int shifts (source_col 28..31).
+- **Ideal:** `MixedDegreeOneOrXnMinusOne<Int<4>, 32>` — same as
+  `SHAProxy<Int<4>>`. EcdsaUair contributes only `assert_zero` calls,
+  so its `Self::Ideal = ImpossibleIdeal` is bridged with an
+  `unreachable!()`-bodied closure that the framework never calls (verified
+  in `degree_counter` and `constraint_counter`).
+- **Scalar:** `DensePolynomial<Int<4>, 32>` — matches both component
+  UAIRs when SHAProxy is specialized to `R = Int<4>`.
+- **Constraints:** **19** total — 12 from EcdsaUair (delegation order:
+  ECDSA first, SHAProxy second) followed by 7 from SHAProxy. Per-constraint
+  degree array (as asserted in the test):
+  ```text
+  [ 2, 4, 5, 4, 2, 2, 5, 4, 4, 5, 2, 4,   // ECDSA: C1, C2, C3, C4, W1, W2, W3, C5, C6, C7, B3, B4
+    1, 1, 1, 1, 1, 1, 1 ]                  // SHAProxy: 7 linear constraints
+  ```
+  **Max degree: 5** (inherited from EcdsaUair).
+- **Trace generator.** Calls `SHAProxy::<Int<4>>::generate_random_trace`
+  and `EcdsaUair::generate_random_trace` with the same `num_vars` and rng,
+  then concatenates: 14 SHAProxy bp cols + (14 ECDSA int + 4 SHAProxy int)
+  cols. `num_vars ≥ 9` is required (inherited from `EcdsaUair`'s 258-row
+  minimum).
+- **The witness intentionally does NOT satisfy the constraint system.**
+  SHAProxy's sub-witness is satisfying, but the ECDSA sub-witness is not
+  (real secp256k1 walk vs. integer-equality constraints — same caveat as
+  `EcdsaUair`). Use only for prover-only benchmarking. See `bench_sha_ecdsa`
+  in [protocol/benches/e2e.rs](../protocol/benches/e2e.rs).
+- **Why it exists:** measures combined prover throughput on a realistic
+  multi-circuit trace shape — the most heterogeneous UAIR in the crate
+  (binary-poly + int cells side by side, mixed ideals, both linear and
+  high-degree non-linear constraints in the same row).
+
 ---
 
 ## Quick reference
@@ -307,3 +638,6 @@ Column counts are listed as `BinPoly / ArbPoly / Int`, matching the
 | `BigLinearUair`                 | 16 | 0 | 1 | 16×1      | 1 | `(X-1), (X-2)`    | Wide linear benchmark (popcount-preserving) |
 | `BigLinearUairWithPublicInput`  | 16 | 0 | 1 | 16×1      | 1 | `(X-1), (X-2)`    | Same as above + 4 public bp columns |
 | `SHAProxy`                      | 14 | 0 | 4 | 21 specs (9, 13, 16, 17) | 1 | `(X-2), (X^32-1)` | Wide-shift mixed-ideal benchmark with multi-term `mbs` scalars |
+| `EcdsaUair`                     |  0 | 0 |14 | 3×1                      | 5 | `Impossible` (all `assert_zero`) | secp256k1 ECDSA via Shamir's trick over `Int<4>` — non-linear, 3 wire columns, **non-satisfying** witness, prover-only bench |
+| `EcdsaUairLimbs`                |  0 | 0 |84 | 24×1                     | 5 | `DegreeOneIdeal<i64>` (unused; all `assert_zero`) | Limb-decomposed `EcdsaUair`: 8 little-endian u32 limbs per 256-bit value, 96 per-limb constraints, no carries, **non-satisfying** witness, prover-only bench |
+| `ShaProxyEcdsaUair`             | 14 | 0 |18 | 24 specs (1, 9, 13, 16, 17) | 5 | `(X-2), (X^32-1)` | `SHAProxy<Int<4>>` + `EcdsaUair` on one trace — heterogeneous combined fixture, **non-satisfying** witness, prover-only bench |

@@ -3,8 +3,11 @@ mod generate_trace;
 
 pub use generate_trace::*;
 
-use crypto_primitives::{ConstSemiring, FixedSemiring, Semiring, boolean::Boolean};
-use num_traits::Zero;
+use crypto_primitives::{
+    ConstSemiring, FixedSemiring, Semiring, boolean::Boolean,
+    crypto_bigint_int::Int as CbInt, crypto_bigint_uint::Uint as CbUint,
+};
+use num_traits::{ConstOne, ConstZero, Zero};
 use rand::{
     distr::{Distribution, StandardUniform},
     prelude::*,
@@ -1186,6 +1189,1110 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// EcdsaUair: 11-column / 258-row arithmetization of secp256k1 ECDSA
+// signature verification using Shamir's trick for u1·G + u2·Q.
+//
+// Constraint set follows §6 of the Zinc+ IMPLEMENTATION.md (agentic-approach-v1
+// branch). All constraints are `assert_zero` over `Int<4>` exact-integer
+// equality. Selectors gate the boundary constraints (B3 at row 0, B4 at row
+// 257) and disable the addition step at the final row (C5–C7 are gated by
+// `(1 − sel_final)`).
+//
+// IMPORTANT: the witness produced by `generate_random_trace` is a *real*
+// double-and-add walk over secp256k1's base field. Because the constraints
+// express integer equality (not equality mod p), the resulting cell values
+// only satisfy the doubling/addition relations modulo p, not exactly. The
+// witness therefore does NOT satisfy the constraint system. It exists as a
+// realistic-shape benchmark fixture for prover/verifier throughput numbers
+// where soundness is not required. A satisfying witness for this exact
+// constraint set would need auxiliary quotient/carry columns (not included
+// here) or the all-zero fixed-point trace.
+// ---------------------------------------------------------------------------
+
+mod ecdsa_secp256k1 {
+    //! Minimal secp256k1 helpers used by `EcdsaUair`'s witness generator.
+    //! All field arithmetic widens to `Uint<8>` so additions and the schoolbook
+    //! multiplication never overflow before the modular reduction.
+
+    use super::{CbInt, CbUint};
+    use num_traits::ConstZero;
+
+    pub type U4 = CbUint<4>;
+    pub type U8 = CbUint<8>;
+    pub type I4 = CbInt<4>;
+
+    /// secp256k1 base field prime: p = 2^256 − 2^32 − 977.
+    pub const P: U4 = U4::from_be_hex(
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F",
+    );
+
+    /// Standard secp256k1 generator.
+    pub const GX: U4 = U4::from_be_hex(
+        "79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798",
+    );
+    pub const GY: U4 = U4::from_be_hex(
+        "483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8",
+    );
+
+    /// `Q = 2·G` (the chosen "public key" for this benchmark fixture).
+    pub const QX: U4 = U4::from_be_hex(
+        "C6047F9441ED7D6D3045406E95C07CD85C778E4B8CEF3CA7ABAC09B95C709EE5",
+    );
+    pub const QY: U4 = U4::from_be_hex(
+        "1AE168FEA63DC339A3C58419466CEAEEF7F632653266D0E1236431A950CFE52A",
+    );
+
+    /// `G + Q = 3·G`.
+    pub const GQX: U4 = U4::from_be_hex(
+        "F9308A019258C31049344F85F89D5229B531C845836F99B08601F113BCE036F9",
+    );
+    pub const GQY: U4 = U4::from_be_hex(
+        "388F7B0F632DE8140FE337E62A37F3566500A99934C2231B6CB9FD7584B8E672",
+    );
+
+    /// Boundary-check x-coordinate (any fixed value is fine — the witness
+    /// intentionally violates B4 anyway).
+    pub const R_SIG: U4 = GX;
+
+    fn p_wide() -> U8 {
+        P.resize::<8>()
+    }
+
+    fn fp_reduce(v: U8) -> U4 {
+        (v % p_wide()).resize::<4>()
+    }
+
+    pub fn fp_sub(a: U4, b: U4) -> U4 {
+        let p8 = p_wide();
+        fp_reduce(a.resize::<8>() + p8 - b.resize::<8>())
+    }
+
+    pub fn fp_mul(a: U4, b: U4) -> U4 {
+        fp_reduce(a.resize::<8>() * b.resize::<8>())
+    }
+
+    /// Reinterpret a `Uint<4>` bit pattern as `Int<4>` (two's complement).
+    /// Values in `[2^255, 2^256)` become negative; this is fine because the
+    /// witness is intentionally non-satisfying.
+    pub fn to_int4(v: U4) -> I4 {
+        *v.as_int()
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct Point {
+        pub x: U4,
+        pub y: U4,
+        pub z: U4,
+    }
+
+    pub const IDENTITY: Point = Point {
+        x: U4::from_words([0, 0, 0, 0]),
+        y: U4::from_words([1, 0, 0, 0]),
+        z: U4::from_words([0, 0, 0, 0]),
+    };
+
+    /// Doubling for short Weierstrass curves with `a = 0` (secp256k1).
+    /// Matches the spec used by C1/C2/C3:
+    ///     Z3 = 2 Y Z
+    ///     X3 = 9 X^4 − 8 X Y^2
+    ///     Y3 = 12 X^3 Y^2 − 3 X^2 X3 − 8 Y^4
+    pub fn point_double(p: Point) -> Point {
+        let two = U4::from(2u32);
+        let three = U4::from(3u32);
+        let eight = U4::from(8u32);
+        let nine = U4::from(9u32);
+        let twelve = U4::from(12u32);
+
+        let z3 = fp_mul(two, fp_mul(p.y, p.z));
+        let x_sq = fp_mul(p.x, p.x);
+        let y_sq = fp_mul(p.y, p.y);
+        let x_4 = fp_mul(x_sq, x_sq);
+        let y_4 = fp_mul(y_sq, y_sq);
+        let x3 = fp_sub(fp_mul(nine, x_4), fp_mul(eight, fp_mul(p.x, y_sq)));
+        let term1 = fp_mul(twelve, fp_mul(fp_mul(x_sq, p.x), y_sq));
+        let term2 = fp_mul(three, fp_mul(x_sq, x3));
+        let term3 = fp_mul(eight, y_4);
+        let y3 = fp_sub(fp_sub(term1, term2), term3);
+        Point { x: x3, y: y3, z: z3 }
+    }
+
+    /// Addition of a Jacobian point `mid` and an affine point `(t_x, t_y)`,
+    /// matching the spec used by C4–C7. Returns the new Jacobian point and
+    /// the scratch value `H` (stored in trace column `H`).
+    pub fn point_add_affine(mid: Point, t_x: U4, t_y: U4) -> (Point, U4) {
+        let two = U4::from(2u32);
+        let z_mid_sq = fp_mul(mid.z, mid.z);
+        let z_mid_cu = fp_mul(z_mid_sq, mid.z);
+        let h = fp_sub(fp_mul(t_x, z_mid_sq), mid.x);
+        let r_a = fp_sub(fp_mul(t_y, z_mid_cu), mid.y);
+        let h_sq = fp_mul(h, h);
+        let h_cu = fp_mul(h_sq, h);
+        let r_a_sq = fp_mul(r_a, r_a);
+        let x3 = fp_sub(fp_sub(r_a_sq, h_cu), fp_mul(two, fp_mul(mid.x, h_sq)));
+        let y3 = fp_sub(
+            fp_mul(r_a, fp_sub(fp_mul(mid.x, h_sq), x3)),
+            fp_mul(mid.y, h_cu),
+        );
+        let z3 = fp_mul(mid.z, h);
+        (Point { x: x3, y: y3, z: z3 }, h)
+    }
+
+    /// Selects the table point T = {O, G, Q, G+Q}[b1 + 2·b2].
+    /// Returns (T_x, T_y). The (false, false) → identity case returns (0, 0)
+    /// because s = 0 there and the addition step is skipped anyway.
+    pub fn select_table_point(b1: bool, b2: bool) -> (U4, U4) {
+        match (b1, b2) {
+            (false, false) => (U4::ZERO, U4::ZERO),
+            (true, false) => (GX, GY),
+            (false, true) => (QX, QY),
+            (true, true) => (GQX, GQY),
+        }
+    }
+}
+
+/// Column indices in the flat int-column group (no binary_poly or
+/// arbitrary_poly columns). Public columns precede witness columns within
+/// the int group.
+///
+/// `R_A`, `H_SQ`, `H_CU` are *wire* columns: their values are constrained
+/// to equal the inlined sub-expressions `T_y·Z_mid³ − Y_mid`, `H²`, `H³`
+/// respectively, so the addition-step constraints C5–C7 can reference them
+/// at degree 1 instead of recomputing high-degree expressions inline. This
+/// drops the maximum constraint degree from 13 to 5.
+#[allow(dead_code)]
+mod ecdsa_cols {
+    pub const B1: usize = 0;
+    pub const B2: usize = 1;
+    pub const SEL_INIT: usize = 2;
+    pub const SEL_FINAL: usize = 3;
+    pub const X: usize = 4;
+    pub const Y: usize = 5;
+    pub const Z: usize = 6;
+    pub const X_MID: usize = 7;
+    pub const Y_MID: usize = 8;
+    pub const Z_MID: usize = 9;
+    pub const H: usize = 10;
+    pub const R_A: usize = 11;
+    pub const H_SQ: usize = 12;
+    pub const H_CU: usize = 13;
+
+    pub const NUM_INT_COLS: usize = 14;
+
+    /// `down.int[*]` indices after `UairSignature::new`'s stable sort by
+    /// `source_col` (X < Y < Z).
+    pub const DOWN_X: usize = 0;
+    pub const DOWN_Y: usize = 1;
+    pub const DOWN_Z: usize = 2;
+}
+
+/// Number of "real" rows in the ECDSA trace: 1 init row + 256 walk rows +
+/// 1 final row. The witness is padded out to `1 << num_vars` ≥ 258, so
+/// `num_vars ≥ 9`.
+pub const ECDSA_NUM_REAL_ROWS: usize = 258;
+
+pub struct EcdsaUair;
+
+impl Uair for EcdsaUair {
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<CbInt<4>, 32>;
+
+    fn signature() -> UairSignature {
+        // 0 binary-poly, 0 arbitrary-poly, 14 int columns
+        // (4 public + 10 witness; the last three witness columns wire R_a,
+        // H², H³ to keep the addition-step constraints at low degree).
+        let total = TotalColumnLayout::new(0, 0, ecdsa_cols::NUM_INT_COLS);
+        // 4 public int columns: b1, b2, sel_init, sel_final.
+        let public = PublicColumnLayout::new(0, 0, 4);
+        // X, Y, Z each shifted by 1 (next-row accumulator).
+        let shifts = vec![
+            ShiftSpec::new(ecdsa_cols::X, 1),
+            ShiftSpec::new(ecdsa_cols::Y, 1),
+            ShiftSpec::new(ecdsa_cols::Z, 1),
+        ];
+        UairSignature::new(total, public, shifts)
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        down: TraceRow<B::Expr>,
+        from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+    {
+        use ecdsa_cols::*;
+        use ecdsa_secp256k1::{GQX, GQY, GX, GY, QX, QY, R_SIG, to_int4};
+
+        // Inject an Int<4> constant as a degree-0 scalar polynomial expression.
+        let cst = |k: CbInt<4>| -> B::Expr {
+            let mut coeffs = [CbInt::<4>::ZERO; 32];
+            coeffs[0] = k;
+            from_ref(&DensePolynomial::<CbInt<4>, 32>::new(coeffs))
+        };
+        let cst_uint = |k: ecdsa_secp256k1::U4| cst(to_int4(k));
+
+        // Column expression aliases (current row).
+        let b1 = &up.int[B1];
+        let b2 = &up.int[B2];
+        let sel_init = &up.int[SEL_INIT];
+        let sel_final = &up.int[SEL_FINAL];
+        let x = &up.int[X];
+        let y = &up.int[Y];
+        let z = &up.int[Z];
+        let x_mid = &up.int[X_MID];
+        let y_mid = &up.int[Y_MID];
+        let z_mid = &up.int[Z_MID];
+        let h = &up.int[H];
+        let r_a_col = &up.int[R_A];
+        let h_sq_col = &up.int[H_SQ];
+        let h_cu_col = &up.int[H_CU];
+
+        // Shifted (next-row) accumulator coordinates.
+        let x_next = &down.int[DOWN_X];
+        let y_next = &down.int[DOWN_Y];
+        let z_next = &down.int[DOWN_Z];
+
+        let one = || cst(CbInt::<4>::ONE);
+        let two = || cst(CbInt::<4>::from_i8(2));
+        let three = || cst(CbInt::<4>::from_i8(3));
+        let eight = || cst(CbInt::<4>::from_i8(8));
+        let nine = || cst(CbInt::<4>::from_i8(9));
+        let twelve = || cst(CbInt::<4>::from_i8(12));
+
+        // Shamir indicator: s = b1 + b2 − b1·b2  (= 1 iff any bit set).
+        let s = || b1.clone() + b2 - &(b1.clone() * b2);
+        let one_minus_s = || one() - &s();
+
+        // Inlined table-point sub-expressions:
+        //   T_x = (1−b1)b2·Qx + b1(1−b2)·Gx + b1·b2·GQx
+        //   T_y = (1−b1)b2·Qy + b1(1−b2)·Gy + b1·b2·GQy
+        // (the (1−b1)(1−b2) → identity case contributes 0 to both)
+        let t_x = || {
+            let s_g = b1.clone() * &(one() - b2);
+            let s_q = (one() - b1) * b2;
+            let s_gq = b1.clone() * b2;
+            s_g * &cst_uint(GX) + &(s_q * &cst_uint(QX)) + &(s_gq * &cst_uint(GQX))
+        };
+        let t_y = || {
+            let s_g = b1.clone() * &(one() - b2);
+            let s_q = (one() - b1) * b2;
+            let s_gq = b1.clone() * b2;
+            s_g * &cst_uint(GY) + &(s_q * &cst_uint(QY)) + &(s_gq * &cst_uint(GQY))
+        };
+
+        // -- C1: Z_mid − 2·Y·Z = 0 -------------------------------------------
+        b.assert_zero(z_mid.clone() - &(two() * y * z));
+
+        // -- C2: X_mid − (9·X^4 − 8·X·Y^2) = 0 -------------------------------
+        let x_sq = || x.clone() * x;
+        let y_sq = || y.clone() * y;
+        let x_4 = || x_sq() * &x_sq();
+        let y_4 = || y_sq() * &y_sq();
+        b.assert_zero(x_mid.clone() - &(nine() * &x_4()) + &(eight() * x * &y_sq()));
+
+        // -- C3: Y_mid − (12·X^3·Y^2 − 3·X^2·X_mid − 8·Y^4) = 0 ---------------
+        let x_cu = || x_sq() * x;
+        b.assert_zero(
+            y_mid.clone() - &(twelve() * &x_cu() * &y_sq())
+                + &(three() * &x_sq() * x_mid)
+                + &(eight() * &y_4()),
+        );
+
+        // -- C4: H − (T_x · Z_mid^2 − X_mid) = 0 -----------------------------
+        let z_mid_sq = || z_mid.clone() * z_mid;
+        b.assert_zero(h.clone() - &(t_x() * &z_mid_sq()) + x_mid);
+
+        // -- W1: H_sq − H·H = 0  (wire H² so C6/C7 can read it at degree 1) -
+        b.assert_zero(h_sq_col.clone() - &(h.clone() * h));
+
+        // -- W2: H_cu − H_sq·H = 0 (chained wire so C6/C7 read H³ as degree 1)
+        b.assert_zero(h_cu_col.clone() - &(h_sq_col.clone() * h));
+
+        // -- W3: R_a − (T_y·Z_mid^3 − Y_mid) = 0 -----------------------------
+        let z_mid_cu = z_mid_sq() * z_mid;
+        b.assert_zero(r_a_col.clone() - &(t_y() * &z_mid_cu) + y_mid);
+
+        // The previous (1 − sel_final) gating on C5–C7 is dropped: at the
+        // final boundary row the addition step would otherwise read
+        // out-of-bounds zero-padded down cells, which is benign here because
+        // the witness is non-satisfying anyway. Removing the gate strips
+        // one degree off each of C5/C6/C7.
+
+        // -- C5: Z[t+1] − ((1−s)·Z_mid + s·Z_mid·H) = 0 ----------------------
+        b.assert_zero(
+            z_next.clone() - &(one_minus_s() * z_mid) - &(s() * z_mid * h),
+        );
+
+        // -- C6: X[t+1] − ((1−s)·X_mid
+        //                  + s·(R_a^2 − H^3 − 2·X_mid·H^2)) = 0 -------------
+        let r_a_sq = r_a_col.clone() * r_a_col;
+        let c6_addend = r_a_sq - h_cu_col - &(two() * x_mid * h_sq_col);
+        b.assert_zero(
+            x_next.clone() - &(one_minus_s() * x_mid) - &(s() * &c6_addend),
+        );
+
+        // -- C7: Y[t+1] − ((1−s)·Y_mid
+        //                  + s·(R_a·(X_mid·H^2 − X[t+1]) − Y_mid·H^3)) = 0 --
+        let c7_addend =
+            r_a_col.clone() * &(x_mid.clone() * h_sq_col - x_next)
+                - &(y_mid.clone() * h_cu_col);
+        b.assert_zero(
+            y_next.clone() - &(one_minus_s() * y_mid) - &(s() * &c7_addend),
+        );
+
+        // -- B3: sel_init · Z = 0 (force identity at row 0) -------------------
+        b.assert_zero(sel_init.clone() * z);
+
+        // -- B4: sel_final · Z · (X − R_SIG · Z^2) = 0 ------------------------
+        let z_sq = z.clone() * z;
+        b.assert_zero(sel_final.clone() * z * &(x.clone() - &(cst_uint(R_SIG) * &z_sq)));
+    }
+}
+
+impl GenerateRandomTrace<32> for EcdsaUair {
+    type PolyCoeff = CbInt<4>;
+    type Int = CbInt<4>;
+
+    /// Builds a real Shamir's-trick walk over secp256k1 for fixed scalars
+    /// `u1`, `u2` derived deterministically from `rng`. The 256 walk rows
+    /// (rows 0..256) each hold the accumulator state, the doubled state,
+    /// and the addition scratch `H` for that step. Row 0 is initialised
+    /// from the point at infinity. Row 257 is the boundary row holding the
+    /// final accumulator. Padding rows beyond row 257 are zero.
+    ///
+    /// **The witness intentionally does NOT satisfy the constraint
+    /// system.** See the module-level note above.
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, CbInt<4>, CbInt<4>, 32> {
+        use ecdsa_cols::*;
+        use ecdsa_secp256k1::{
+            IDENTITY, Point, fp_mul, fp_sub, point_add_affine, point_double, select_table_point,
+            to_int4,
+        };
+
+        let len = 1usize << num_vars;
+        assert!(
+            len >= ECDSA_NUM_REAL_ROWS,
+            "ECDSA UAIR requires num_vars >= 9 (got {num_vars}, len = {len})"
+        );
+
+        // ---- Step 1: pick deterministic scalars u1, u2 -----------------
+        // Sample 32 random bytes per scalar; the constraint system does not
+        // depend on the scalars matching any particular signature.
+        let mut u1_bytes = [0u8; 32];
+        let mut u2_bytes = [0u8; 32];
+        rng.fill_bytes(&mut u1_bytes);
+        rng.fill_bytes(&mut u2_bytes);
+
+        // Bit `i` of u_k (0 ≤ i < 256) at row position `i`, processed MSB-first
+        // so the standard double-and-add walk produces u_k · base.
+        let bit_msb_first = |bytes: &[u8; 32], i: usize| -> bool {
+            // i = 0 → MSB of bytes[0]; i = 255 → LSB of bytes[31].
+            let byte = bytes[i / 8];
+            ((byte >> (7 - (i % 8))) & 1) == 1
+        };
+
+        // ---- Step 2: allocate columns ---------------------------------
+        let zero = CbInt::<4>::ZERO;
+        let mut int_cols: Vec<DenseMultilinearExtension<CbInt<4>>> =
+            (0..NUM_INT_COLS).map(|_| (0..len).map(|_| zero).collect()).collect();
+
+        // Helper: given a row's mid-point and the chosen table point T,
+        // compute the H scratch and the wired R_a / H_sq / H_cu values.
+        let aux_at_row = |mid: Point, t_x, t_y| {
+            let z_mid_sq = fp_mul(mid.z, mid.z);
+            let z_mid_cu = fp_mul(z_mid_sq, mid.z);
+            let h = fp_sub(fp_mul(t_x, z_mid_sq), mid.x);
+            let r_a = fp_sub(fp_mul(t_y, z_mid_cu), mid.y);
+            let h_sq = fp_mul(h, h);
+            let h_cu = fp_mul(h_sq, h);
+            (h, r_a, h_sq, h_cu)
+        };
+
+        // ---- Step 3: walk -------------------------------------------------
+        let mut acc: Point = IDENTITY;
+        for row in 0..256usize {
+            let b1 = bit_msb_first(&u1_bytes, row);
+            let b2 = bit_msb_first(&u2_bytes, row);
+            let mid = point_double(acc);
+            let (t_x, t_y) = select_table_point(b1, b2);
+            let s = b1 || b2;
+            let (h, r_a, h_sq, h_cu) = aux_at_row(mid, t_x, t_y);
+            let next = if s {
+                point_add_affine(mid, t_x, t_y).0
+            } else {
+                // s = 0 → addition step is a no-op; the next-row accumulator
+                // is just the doubled point.
+                mid
+            };
+
+            int_cols[B1][row] = to_int4(if b1 { ecdsa_secp256k1::U4::ONE } else { ecdsa_secp256k1::U4::ZERO });
+            int_cols[B2][row] = to_int4(if b2 { ecdsa_secp256k1::U4::ONE } else { ecdsa_secp256k1::U4::ZERO });
+            int_cols[X][row] = to_int4(acc.x);
+            int_cols[Y][row] = to_int4(acc.y);
+            int_cols[Z][row] = to_int4(acc.z);
+            int_cols[X_MID][row] = to_int4(mid.x);
+            int_cols[Y_MID][row] = to_int4(mid.y);
+            int_cols[Z_MID][row] = to_int4(mid.z);
+            int_cols[H][row] = to_int4(h);
+            int_cols[R_A][row] = to_int4(r_a);
+            int_cols[H_SQ][row] = to_int4(h_sq);
+            int_cols[H_CU][row] = to_int4(h_cu);
+
+            acc = next;
+        }
+
+        // ---- Step 4: row 256 — first "tail" row holding the result --------
+        // This row stores the final accumulator (= u1·G + u2·Q in Jacobian).
+        // The doubled / H / wire cells are computed from the spec for
+        // self-consistent shape; they still won't satisfy the constraint
+        // system exactly, since arithmetic is modular.
+        {
+            let mid = point_double(acc);
+            let (t_x, t_y) = (ecdsa_secp256k1::U4::ZERO, ecdsa_secp256k1::U4::ZERO);
+            let (h, r_a, h_sq, h_cu) = aux_at_row(mid, t_x, t_y);
+            int_cols[X][256] = to_int4(acc.x);
+            int_cols[Y][256] = to_int4(acc.y);
+            int_cols[Z][256] = to_int4(acc.z);
+            int_cols[X_MID][256] = to_int4(mid.x);
+            int_cols[Y_MID][256] = to_int4(mid.y);
+            int_cols[Z_MID][256] = to_int4(mid.z);
+            int_cols[H][256] = to_int4(h);
+            int_cols[R_A][256] = to_int4(r_a);
+            int_cols[H_SQ][256] = to_int4(h_sq);
+            int_cols[H_CU][256] = to_int4(h_cu);
+        }
+
+        // ---- Step 5: row 257 — final boundary row -----------------------
+        // sel_final fires here. B4 fires; C1–C7 will read mostly zero cells
+        // and be violated as documented.
+        int_cols[X][257] = to_int4(acc.x);
+        int_cols[Y][257] = to_int4(acc.y);
+        int_cols[Z][257] = to_int4(acc.z);
+
+        // ---- Step 6: selectors -------------------------------------------
+        int_cols[SEL_INIT][0] = to_int4(ecdsa_secp256k1::U4::ONE);
+        int_cols[SEL_FINAL][257] = to_int4(ecdsa_secp256k1::U4::ONE);
+
+        UairTrace {
+            binary_poly: vec![].into(),
+            arbitrary_poly: vec![].into(),
+            int: int_cols.into(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ShaProxyEcdsaUair: SHAProxy<Int<4>> + EcdsaUair on a single heterogeneous
+// trace, with both constraint sets active per row.
+//
+// Layout (14 binary_poly + 0 arbitrary_poly + 18 int):
+//   bp[0..14]   = SHAProxy's 14 binary_poly columns
+//   int[0..14]  = EcdsaUair's 14 int columns (4 public, 10 witness),
+//                 contiguous so EcdsaUair's hard-coded indices still work.
+//   int[14..18] = SHAProxy's 4 int columns.
+//
+// Both component UAIRs' `constrain_general` impls are reused unchanged via
+// sliced sub-views of the incoming `up`/`down` rows. The Ideal type is
+// SHAProxy's mixed ideal; EcdsaUair only emits `assert_zero` calls so its
+// `IFromR` closure is supplied as an unreachable stub.
+//
+// IMPORTANT: the witness inherits EcdsaUair's non-satisfaction (real
+// secp256k1 walk vs. integer-equality constraints). This UAIR is intended
+// for prover-only benchmarking, just like `EcdsaUair`.
+// ---------------------------------------------------------------------------
+
+pub struct ShaProxyEcdsaUair;
+
+impl Uair for ShaProxyEcdsaUair {
+    type Ideal = MixedDegreeOneOrXnMinusOne<CbInt<4>, 32>;
+    type Scalar = DensePolynomial<CbInt<4>, 32>;
+
+    fn signature() -> UairSignature {
+        // 14 bp + 0 ap + 18 int. The 18 int cols are arranged as
+        // [4 ECDSA public, 10 ECDSA witness, 4 SHAProxy witness].
+        let total = TotalColumnLayout::new(14, 0, 18);
+        // Same 4 public ECDSA int cols as `EcdsaUair`.
+        let public = PublicColumnLayout::new(0, 0, 4);
+
+        // Combined shift list. Source-col indices are flat (bp || ap || int),
+        // so the int prefix in this layout starts at flat index 14, and
+        // SHAProxy's int cells start at int position 14 (= flat 28). ECDSA's
+        // int shifts (originally on flat 4..6 in EcdsaUair alone) get bumped
+        // by +14 because of the new bp prefix; SHAProxy's int shifts
+        // (originally on flat 14..17 in SHAProxy alone) also get bumped by
+        // +14 because SHAProxy's int cells now sit after 14 ECDSA int cells.
+        let mut shifts: Vec<ShiftSpec> = SHAProxy::<CbInt<4>>::signature()
+            .shifts()
+            .iter()
+            .map(|s| {
+                if s.source_col() < 14 {
+                    // SHAProxy bp shift — flat index unchanged.
+                    ShiftSpec::new(s.source_col(), s.shift_amount())
+                } else {
+                    // SHAProxy int shift — bump by +14 because SHAProxy's
+                    // int cells are at combined int[14..18] (flat 28..32).
+                    ShiftSpec::new(s.source_col() + 14, s.shift_amount())
+                }
+            })
+            .collect();
+        for s in EcdsaUair::signature().shifts() {
+            // ECDSA int shift — bump by +14 (the bp prefix in the combined
+            // layout). EcdsaUair has no bp cells of its own, so all of its
+            // shifts are int shifts.
+            shifts.push(ShiftSpec::new(s.source_col() + 14, s.shift_amount()));
+        }
+        UairSignature::new(total, public, shifts)
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        down: TraceRow<B::Expr>,
+        from_ref: FromR,
+        mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        // ---- ECDSA sub-view ---------------------------------------------
+        // EcdsaUair reads up.int[0..14] and down.int[0..3]. Combined int
+        // cells [0..14] are exactly EcdsaUair's, contiguous. Combined down
+        // int cells [0..3] are exactly EcdsaUair's X/Y/Z shifts (sorted
+        // before SHAProxy's int shifts because their flat source_col
+        // indices 18,19,20 are smaller than SHAProxy's 28..31).
+        let ecdsa_up = TraceRow {
+            binary_poly: &[],
+            arbitrary_poly: &[],
+            int: &up.int[0..14],
+        };
+        let ecdsa_down = TraceRow {
+            binary_poly: &[],
+            arbitrary_poly: &[],
+            int: &down.int[0..3],
+        };
+        EcdsaUair::constrain_general(
+            b,
+            ecdsa_up,
+            ecdsa_down,
+            &from_ref,
+            &mbs,
+            // EcdsaUair never calls this — it only emits `assert_zero`.
+            |_: &ImpossibleIdeal| -> B::Ideal { unreachable!() },
+        );
+
+        // ---- SHAProxy sub-view ------------------------------------------
+        // SHAProxy reads up.binary_poly[0..14], up.int[0..4],
+        // down.binary_poly[0..17], and down.int[0..4]. Combined bp cells are
+        // unchanged, combined int[14..18] are SHAProxy's 4 int cells, and
+        // combined down int[3..7] are SHAProxy's 4 int shifts.
+        let sha_up = TraceRow {
+            binary_poly: up.binary_poly,
+            arbitrary_poly: up.arbitrary_poly,
+            int: &up.int[14..18],
+        };
+        let sha_down = TraceRow {
+            binary_poly: down.binary_poly,
+            arbitrary_poly: down.arbitrary_poly,
+            int: &down.int[3..7],
+        };
+        SHAProxy::<CbInt<4>>::constrain_general(
+            b,
+            sha_up,
+            sha_down,
+            &from_ref,
+            &mbs,
+            &ideal_from_ref,
+        );
+    }
+}
+
+impl GenerateRandomTrace<32> for ShaProxyEcdsaUair {
+    type PolyCoeff = CbInt<4>;
+    type Int = CbInt<4>;
+
+    /// Concatenates `SHAProxy::<Int<4>>::generate_random_trace` and
+    /// `EcdsaUair::generate_random_trace` into a single combined trace.
+    /// `num_vars ≥ 9` is required (inherited from `EcdsaUair`).
+    ///
+    /// **The witness intentionally does NOT satisfy the combined constraint
+    /// system**: SHAProxy's part is satisfying, but EcdsaUair's part
+    /// violates exact-integer equality (modular vs. integer arithmetic).
+    /// Use only for prover-only benchmarking.
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, CbInt<4>, CbInt<4>, 32> {
+        let sha_trace = SHAProxy::<CbInt<4>>::generate_random_trace(num_vars, rng);
+        let ecdsa_trace = EcdsaUair::generate_random_trace(num_vars, rng);
+
+        // ECDSA int cols first (so they're contiguous at int[0..14]),
+        // then SHAProxy int cols (at int[14..18]).
+        let mut int_cols = ecdsa_trace.int.into_owned();
+        int_cols.extend(sha_trace.int.into_owned());
+
+        UairTrace {
+            binary_poly: sha_trace.binary_poly,
+            arbitrary_poly: vec![].into(),
+            int: int_cols.into(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EcdsaUairLimbs: limb-decomposed variant of EcdsaUair.
+//
+// Each 256-bit Jacobian coordinate is stored as 8 little-endian u32 limbs in
+// 8 separate witness columns of i64 cells. The constraint set mirrors
+// EcdsaUair one-for-one, but each Int<4> constraint is emitted as 8
+// per-limb constraints. There are no carry columns: high partial-product
+// limbs are silently discarded (matches Int<4>'s mod-2^256 wrap-around).
+// The witness inherits EcdsaUair's non-satisfaction property.
+//
+// Cell type is i64 (matching `BenchZincTypes::Int = i64`) so the bench
+// reuses `do_bench_uair` infrastructure with no new ZincTypes.
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+mod ecdsa_limbs_cols {
+    pub const NUM_INT_COLS: usize = 84;
+
+    pub const B1: usize = 0;
+    pub const B2: usize = 1;
+    pub const SEL_INIT: usize = 2;
+    pub const SEL_FINAL: usize = 3;
+
+    // Each 8-cell run is one logical 256-bit value, little-endian limbs.
+    pub const X: usize = 4;
+    pub const Y: usize = 12;
+    pub const Z: usize = 20;
+    pub const X_MID: usize = 28;
+    pub const Y_MID: usize = 36;
+    pub const Z_MID: usize = 44;
+    pub const H: usize = 52;
+    pub const R_A: usize = 60;
+    pub const H_SQ: usize = 68;
+    pub const H_CU: usize = 76;
+
+    /// `down.int[*]` index of the start of each shifted-source value's 8
+    /// limbs, after `UairSignature::new`'s stable sort by `source_col`.
+    pub const DOWN_X: usize = 0;
+    pub const DOWN_Y: usize = 8;
+    pub const DOWN_Z: usize = 16;
+}
+
+/// Decompose a 256-bit `Uint<4>` into 8 little-endian u32 limbs.
+fn uint4_to_u32_limbs(v: ecdsa_secp256k1::U4) -> [u32; 8] {
+    let w = v.to_words(); // [u64; 4]
+    [
+        w[0] as u32,
+        (w[0] >> 32) as u32,
+        w[1] as u32,
+        (w[1] >> 32) as u32,
+        w[2] as u32,
+        (w[2] >> 32) as u32,
+        w[3] as u32,
+        (w[3] >> 32) as u32,
+    ]
+}
+
+pub struct EcdsaUairLimbs;
+
+impl Uair for EcdsaUairLimbs {
+    type Ideal = DegreeOneIdeal<i64>;
+    type Scalar = DensePolynomial<i64, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(0, 0, ecdsa_limbs_cols::NUM_INT_COLS);
+        let public = PublicColumnLayout::new(0, 0, 4);
+
+        // 24 shift specs: X[k], Y[k], Z[k] each shifted by 1, for k = 0..8.
+        let mut shifts = Vec::with_capacity(24);
+        for k in 0..8 {
+            shifts.push(ShiftSpec::new(ecdsa_limbs_cols::X + k, 1));
+        }
+        for k in 0..8 {
+            shifts.push(ShiftSpec::new(ecdsa_limbs_cols::Y + k, 1));
+        }
+        for k in 0..8 {
+            shifts.push(ShiftSpec::new(ecdsa_limbs_cols::Z + k, 1));
+        }
+        UairSignature::new(total, public, shifts)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        down: TraceRow<B::Expr>,
+        from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+    {
+        use ecdsa_limbs_cols::*;
+        use ecdsa_secp256k1::{GQX, GQY, GX, GY, QX, QY, R_SIG};
+        use std::array;
+
+        // Inject an i64 constant as a degree-0 scalar polynomial expression.
+        let cst = |k: i64| -> B::Expr {
+            let mut coeffs = [0i64; 32];
+            coeffs[0] = k;
+            from_ref(&DensePolynomial::<i64, 32>::new(coeffs))
+        };
+        let zero = cst(0);
+
+        // ---- Limb-array helpers ----------------------------------------
+        let limbs_at = |start: usize| -> [B::Expr; 8] {
+            array::from_fn(|i| up.int[start + i].clone())
+        };
+        let down_limbs_at = |start: usize| -> [B::Expr; 8] {
+            array::from_fn(|i| down.int[start + i].clone())
+        };
+        let const_limbs = |c: ecdsa_secp256k1::U4| -> [B::Expr; 8] {
+            let limbs = uint4_to_u32_limbs(c);
+            array::from_fn(|i| cst(limbs[i] as i64))
+        };
+
+        let add = |a: &[B::Expr; 8], bb: &[B::Expr; 8]| -> [B::Expr; 8] {
+            array::from_fn(|i| a[i].clone() + &bb[i])
+        };
+        let sub = |a: &[B::Expr; 8], bb: &[B::Expr; 8]| -> [B::Expr; 8] {
+            array::from_fn(|i| a[i].clone() - &bb[i])
+        };
+        let scalar_mul = |k_expr: &B::Expr, a: &[B::Expr; 8]| -> [B::Expr; 8] {
+            array::from_fn(|i| k_expr.clone() * &a[i])
+        };
+        // Schoolbook multi-limb multiplication, truncated to limbs 0..7.
+        // Output[k] = sum over (i, j) with i + j = k and i + j < 8 of a[i] * b[j].
+        let mul = |a: &[B::Expr; 8], bb: &[B::Expr; 8]| -> [B::Expr; 8] {
+            let mut out: [B::Expr; 8] = array::from_fn(|_| zero.clone());
+            for i in 0..8 {
+                for j in 0..8 {
+                    if i + j < 8 {
+                        out[i + j] = out[i + j].clone() + &(a[i].clone() * &bb[j]);
+                    }
+                }
+            }
+            out
+        };
+
+        // ---- Column views ----------------------------------------------
+        let b1 = up.int[B1].clone();
+        let b2 = up.int[B2].clone();
+        let sel_init = up.int[SEL_INIT].clone();
+        let sel_final = up.int[SEL_FINAL].clone();
+
+        let x = limbs_at(X);
+        let y = limbs_at(Y);
+        let z = limbs_at(Z);
+        let x_mid = limbs_at(X_MID);
+        let y_mid = limbs_at(Y_MID);
+        let z_mid = limbs_at(Z_MID);
+        let h = limbs_at(H);
+        let r_a = limbs_at(R_A);
+        let h_sq = limbs_at(H_SQ);
+        let h_cu = limbs_at(H_CU);
+
+        let x_next = down_limbs_at(DOWN_X);
+        let y_next = down_limbs_at(DOWN_Y);
+        let z_next = down_limbs_at(DOWN_Z);
+
+        // ---- Inlined sub-expressions ------------------------------------
+        // Shamir indicator s = b1 + b2 - b1*b2 (a single B::Expr, degree 2).
+        let s = b1.clone() + &b2 - &(b1.clone() * &b2);
+        let one_minus_s = cst(1) - &s;
+
+        // Table-point limbs: T_x = (1-b1)·b2·Qx + b1·(1-b2)·Gx + b1·b2·GQx
+        // (and same for T_y). Each limb is a degree-2 expression in (b1, b2).
+        let one_minus_b1 = cst(1) - &b1;
+        let one_minus_b2 = cst(1) - &b2;
+        let s_g = b1.clone() * &one_minus_b2; // b1·(1-b2)
+        let s_q = one_minus_b1 * &b2; // (1-b1)·b2
+        let s_gq = b1.clone() * &b2; // b1·b2
+
+        let gx_limbs = const_limbs(GX);
+        let gy_limbs = const_limbs(GY);
+        let qx_limbs = const_limbs(QX);
+        let qy_limbs = const_limbs(QY);
+        let gqx_limbs = const_limbs(GQX);
+        let gqy_limbs = const_limbs(GQY);
+        let r_sig_limbs = const_limbs(R_SIG);
+
+        let t_x: [B::Expr; 8] = array::from_fn(|i| {
+            s_g.clone() * &gx_limbs[i]
+                + &(s_q.clone() * &qx_limbs[i])
+                + &(s_gq.clone() * &gqx_limbs[i])
+        });
+        let t_y: [B::Expr; 8] = array::from_fn(|i| {
+            s_g.clone() * &gy_limbs[i]
+                + &(s_q.clone() * &qy_limbs[i])
+                + &(s_gq.clone() * &gqy_limbs[i])
+        });
+
+        // ---- C1: Z_mid - 2·Y·Z = 0 -------------------------------------
+        let yz = mul(&y, &z);
+        let two = cst(2);
+        let two_yz = scalar_mul(&two, &yz);
+        let c1 = sub(&z_mid, &two_yz);
+        for k in 0..8 {
+            b.assert_zero(c1[k].clone());
+        }
+
+        // ---- C2: X_mid - (9·X^4 - 8·X·Y^2) = 0 -------------------------
+        let x_sq = mul(&x, &x);
+        let x_4 = mul(&x_sq, &x_sq);
+        let y_sq = mul(&y, &y);
+        let x_y_sq = mul(&x, &y_sq);
+        let nine = cst(9);
+        let eight = cst(8);
+        let nine_x_4 = scalar_mul(&nine, &x_4);
+        let eight_x_y_sq = scalar_mul(&eight, &x_y_sq);
+        // X_mid - 9*X^4 + 8*X*Y^2
+        let c2 = add(&sub(&x_mid, &nine_x_4), &eight_x_y_sq);
+        for k in 0..8 {
+            b.assert_zero(c2[k].clone());
+        }
+
+        // ---- C3: Y_mid - (12·X^3·Y^2 - 3·X^2·X_mid - 8·Y^4) = 0 ---------
+        let x_cu = mul(&x_sq, &x);
+        let y_4 = mul(&y_sq, &y_sq);
+        let twelve = cst(12);
+        let three = cst(3);
+        let x_cu_y_sq = mul(&x_cu, &y_sq);
+        let twelve_x3_y2 = scalar_mul(&twelve, &x_cu_y_sq);
+        let x_sq_x_mid = mul(&x_sq, &x_mid);
+        let three_x2_xmid = scalar_mul(&three, &x_sq_x_mid);
+        let eight_y4 = scalar_mul(&eight, &y_4);
+        // Y_mid - 12*X^3*Y^2 + 3*X^2*X_mid + 8*Y^4
+        let c3 = add(
+            &add(&sub(&y_mid, &twelve_x3_y2), &three_x2_xmid),
+            &eight_y4,
+        );
+        for k in 0..8 {
+            b.assert_zero(c3[k].clone());
+        }
+
+        // ---- C4: H - (T_x · Z_mid^2 - X_mid) = 0 ------------------------
+        let z_mid_sq = mul(&z_mid, &z_mid);
+        let t_x_z_mid_sq = mul(&t_x, &z_mid_sq);
+        // H - T_x*Z_mid^2 + X_mid
+        let c4 = add(&sub(&h, &t_x_z_mid_sq), &x_mid);
+        for k in 0..8 {
+            b.assert_zero(c4[k].clone());
+        }
+
+        // ---- W1: H_sq - H·H = 0 ----------------------------------------
+        let h_h = mul(&h, &h);
+        let w1 = sub(&h_sq, &h_h);
+        for k in 0..8 {
+            b.assert_zero(w1[k].clone());
+        }
+
+        // ---- W2: H_cu - H_sq·H = 0 -------------------------------------
+        let h_sq_h = mul(&h_sq, &h);
+        let w2 = sub(&h_cu, &h_sq_h);
+        for k in 0..8 {
+            b.assert_zero(w2[k].clone());
+        }
+
+        // ---- W3: R_a - (T_y · Z_mid^3 - Y_mid) = 0 ---------------------
+        let z_mid_cu = mul(&z_mid_sq, &z_mid);
+        let t_y_z_mid_cu = mul(&t_y, &z_mid_cu);
+        // R_a - T_y*Z_mid^3 + Y_mid
+        let w3 = add(&sub(&r_a, &t_y_z_mid_cu), &y_mid);
+        for k in 0..8 {
+            b.assert_zero(w3[k].clone());
+        }
+
+        // ---- C5: Z[t+1] - ((1-s)·Z_mid + s·Z_mid·H) = 0 ----------------
+        let z_mid_h = mul(&z_mid, &h);
+        let one_minus_s_z_mid = scalar_mul(&one_minus_s, &z_mid);
+        let s_z_mid_h = scalar_mul(&s, &z_mid_h);
+        let c5 = sub(&sub(&z_next, &one_minus_s_z_mid), &s_z_mid_h);
+        for k in 0..8 {
+            b.assert_zero(c5[k].clone());
+        }
+
+        // ---- C6: X[t+1] - ((1-s)·X_mid + s·(R_a^2 - H_cu - 2·X_mid·H_sq)) = 0
+        let r_a_sq = mul(&r_a, &r_a);
+        let x_mid_h_sq = mul(&x_mid, &h_sq);
+        let two_x_mid_h_sq = scalar_mul(&two, &x_mid_h_sq);
+        // R_a^2 - H_cu - 2*X_mid*H_sq
+        let c6_addend = sub(&sub(&r_a_sq, &h_cu), &two_x_mid_h_sq);
+        let one_minus_s_x_mid = scalar_mul(&one_minus_s, &x_mid);
+        let s_c6_addend = scalar_mul(&s, &c6_addend);
+        let c6 = sub(&sub(&x_next, &one_minus_s_x_mid), &s_c6_addend);
+        for k in 0..8 {
+            b.assert_zero(c6[k].clone());
+        }
+
+        // ---- C7: Y[t+1] - ((1-s)·Y_mid
+        //          + s·(R_a·(X_mid·H_sq - X[t+1]) - Y_mid·H_cu)) = 0 ------
+        let x_mid_h_sq_minus_x_next = sub(&x_mid_h_sq, &x_next);
+        let r_a_times = mul(&r_a, &x_mid_h_sq_minus_x_next);
+        let y_mid_h_cu = mul(&y_mid, &h_cu);
+        let c7_addend = sub(&r_a_times, &y_mid_h_cu);
+        let one_minus_s_y_mid = scalar_mul(&one_minus_s, &y_mid);
+        let s_c7_addend = scalar_mul(&s, &c7_addend);
+        let c7 = sub(&sub(&y_next, &one_minus_s_y_mid), &s_c7_addend);
+        for k in 0..8 {
+            b.assert_zero(c7[k].clone());
+        }
+
+        // ---- B3: sel_init · Z = 0 (per limb) ----------------------------
+        let sel_init_z = scalar_mul(&sel_init, &z);
+        for k in 0..8 {
+            b.assert_zero(sel_init_z[k].clone());
+        }
+
+        // ---- B4: sel_final · Z · (X - R_SIG · Z^2) = 0 (per limb) -------
+        let z_sq_b4 = mul(&z, &z);
+        let r_sig_z_sq = mul(&r_sig_limbs, &z_sq_b4);
+        let x_minus_r_sig_z_sq = sub(&x, &r_sig_z_sq);
+        let z_times = mul(&z, &x_minus_r_sig_z_sq);
+        let b4 = scalar_mul(&sel_final, &z_times);
+        for k in 0..8 {
+            b.assert_zero(b4[k].clone());
+        }
+    }
+}
+
+impl GenerateRandomTrace<32> for EcdsaUairLimbs {
+    type PolyCoeff = i64;
+    type Int = i64;
+
+    /// Real Shamir's-trick walk over secp256k1, decomposed into 8 u32
+    /// limbs per 256-bit value. Reuses the existing `ecdsa_secp256k1`
+    /// helpers (point doubling/addition, table-point selection). The
+    /// witness intentionally does NOT satisfy the constraint system —
+    /// see the module-level note above.
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, i64, i64, 32> {
+        use ecdsa_limbs_cols::*;
+        use ecdsa_secp256k1::{
+            IDENTITY, Point, fp_mul, fp_sub, point_add_affine, point_double, select_table_point,
+        };
+
+        let len = 1usize << num_vars;
+        assert!(
+            len >= ECDSA_NUM_REAL_ROWS,
+            "EcdsaUairLimbs requires num_vars >= 9 (got {num_vars}, len = {len})"
+        );
+
+        let mut u1_bytes = [0u8; 32];
+        let mut u2_bytes = [0u8; 32];
+        rng.fill_bytes(&mut u1_bytes);
+        rng.fill_bytes(&mut u2_bytes);
+
+        let bit_msb_first = |bytes: &[u8; 32], i: usize| -> bool {
+            let byte = bytes[i / 8];
+            ((byte >> (7 - (i % 8))) & 1) == 1
+        };
+
+        let mut int_cols: Vec<DenseMultilinearExtension<i64>> =
+            (0..NUM_INT_COLS).map(|_| (0..len).map(|_| 0i64).collect()).collect();
+
+        // Helper: write the 8 u32 limbs of `v` into columns
+        // [base, base+8) at row `row`.
+        let write_limbs = |cols: &mut [DenseMultilinearExtension<i64>],
+                               base: usize,
+                               row: usize,
+                               v: ecdsa_secp256k1::U4| {
+            let limbs = uint4_to_u32_limbs(v);
+            for k in 0..8 {
+                cols[base + k][row] = limbs[k] as i64;
+            }
+        };
+
+        // Aux: from a (mid, t_x, t_y) compute (h, r_a, h_sq, h_cu).
+        let aux_at_row = |mid: Point, t_x, t_y| {
+            let z_mid_sq = fp_mul(mid.z, mid.z);
+            let z_mid_cu = fp_mul(z_mid_sq, mid.z);
+            let h = fp_sub(fp_mul(t_x, z_mid_sq), mid.x);
+            let r_a = fp_sub(fp_mul(t_y, z_mid_cu), mid.y);
+            let h_sq = fp_mul(h, h);
+            let h_cu = fp_mul(h_sq, h);
+            (h, r_a, h_sq, h_cu)
+        };
+
+        let mut acc: Point = IDENTITY;
+        for row in 0..256usize {
+            let bit1 = bit_msb_first(&u1_bytes, row);
+            let bit2 = bit_msb_first(&u2_bytes, row);
+            let mid = point_double(acc);
+            let (t_x, t_y) = select_table_point(bit1, bit2);
+            let s = bit1 || bit2;
+            let (h, r_a, h_sq, h_cu) = aux_at_row(mid, t_x, t_y);
+            let next = if s {
+                point_add_affine(mid, t_x, t_y).0
+            } else {
+                mid
+            };
+
+            int_cols[B1][row] = if bit1 { 1 } else { 0 };
+            int_cols[B2][row] = if bit2 { 1 } else { 0 };
+            write_limbs(&mut int_cols, X, row, acc.x);
+            write_limbs(&mut int_cols, Y, row, acc.y);
+            write_limbs(&mut int_cols, Z, row, acc.z);
+            write_limbs(&mut int_cols, X_MID, row, mid.x);
+            write_limbs(&mut int_cols, Y_MID, row, mid.y);
+            write_limbs(&mut int_cols, Z_MID, row, mid.z);
+            write_limbs(&mut int_cols, H, row, h);
+            write_limbs(&mut int_cols, R_A, row, r_a);
+            write_limbs(&mut int_cols, H_SQ, row, h_sq);
+            write_limbs(&mut int_cols, H_CU, row, h_cu);
+
+            acc = next;
+        }
+
+        // Row 256: tail row holding the final accumulator.
+        {
+            let mid = point_double(acc);
+            let (t_x, t_y) = (ecdsa_secp256k1::U4::ZERO, ecdsa_secp256k1::U4::ZERO);
+            let (h, r_a, h_sq, h_cu) = aux_at_row(mid, t_x, t_y);
+            write_limbs(&mut int_cols, X, 256, acc.x);
+            write_limbs(&mut int_cols, Y, 256, acc.y);
+            write_limbs(&mut int_cols, Z, 256, acc.z);
+            write_limbs(&mut int_cols, X_MID, 256, mid.x);
+            write_limbs(&mut int_cols, Y_MID, 256, mid.y);
+            write_limbs(&mut int_cols, Z_MID, 256, mid.z);
+            write_limbs(&mut int_cols, H, 256, h);
+            write_limbs(&mut int_cols, R_A, 256, r_a);
+            write_limbs(&mut int_cols, H_SQ, 256, h_sq);
+            write_limbs(&mut int_cols, H_CU, 256, h_cu);
+        }
+
+        // Row 257: final boundary row.
+        write_limbs(&mut int_cols, X, 257, acc.x);
+        write_limbs(&mut int_cols, Y, 257, acc.y);
+        write_limbs(&mut int_cols, Z, 257, acc.z);
+
+        // Selectors.
+        int_cols[SEL_INIT][0] = 1;
+        int_cols[SEL_FINAL][257] = 1;
+
+        UairTrace {
+            binary_poly: vec![].into(),
+            arbitrary_poly: vec![].into(),
+            int: int_cols.into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crypto_primitives::crypto_bigint_int::Int;
@@ -1218,6 +2325,76 @@ mod tests {
         assert_uair_shape::<TestUairMixedShifts<Int<LIMBS>>>(&[1, 1]);
         assert_uair_shape::<XnMinusOneTestUair<Int<LIMBS>>>(&[1]);
         assert_uair_shape::<MixedIdealTestUair<Int<LIMBS>>>(&[1, 1]);
+
+        // EcdsaUair: 12 constraints in the order they are asserted —
+        // C1, C2, C3, C4, W1 (H_sq), W2 (H_cu), W3 (R_a),
+        // C5, C6, C7, B3, B4. The wire columns (R_a, H_sq, H_cu) drop the
+        // max constraint degree from 13 to 5.
+        assert_uair_shape::<EcdsaUair>(&[2, 4, 5, 4, 2, 2, 5, 4, 4, 5, 2, 4]);
+
+        // ShaProxyEcdsaUair: 19 constraints. The first 12 entries are the
+        // ECDSA degrees (delegation order matches the impl: ECDSA first,
+        // then SHAProxy), followed by SHAProxy's 7 linear constraints.
+        // Filled in from the first run; adjust if the counter disagrees.
+        assert_uair_shape::<ShaProxyEcdsaUair>(&[
+            2, 4, 5, 4, 2, 2, 5, 4, 4, 5, 2, 4, // ECDSA (12)
+            1, 1, 1, 1, 1, 1, 1, // SHAProxy (7)
+        ]);
+
+        // EcdsaUairLimbs: 96 constraints (12 logical × 8 limbs each), in
+        // the same order as `EcdsaUair`. Each per-limb constraint has the
+        // same degree as the corresponding `EcdsaUair` constraint, since
+        // limb cells substitute for Int<4> cells one-for-one inside the
+        // same algebraic shape.
+        let ecdsa_limbs_expected: Vec<usize> = [
+            2, 4, 5, 4, 2, 2, 5, 4, 4, 5, 2, 4,
+        ]
+        .iter()
+        .flat_map(|d| std::iter::repeat(*d).take(8))
+        .collect();
+        assert_uair_shape::<EcdsaUairLimbs>(&ecdsa_limbs_expected);
+    }
+
+    #[test]
+    fn ecdsa_uair_limbs_generate_random_trace_smoke() {
+        let mut rng = StdRng::seed_from_u64(0xEC05A_11);
+        let trace = EcdsaUairLimbs::generate_random_trace(9, &mut rng);
+        assert_eq!(trace.binary_poly.len(), 0);
+        assert_eq!(trace.arbitrary_poly.len(), 0);
+        assert_eq!(trace.int.len(), 84);
+        for col in trace.int.iter() {
+            assert_eq!(col.len(), 1 << 9);
+        }
+    }
+
+    #[test]
+    fn sha_proxy_ecdsa_uair_generate_random_trace_smoke() {
+        let mut rng = StdRng::seed_from_u64(0x5_4A_EC);
+        let trace = ShaProxyEcdsaUair::generate_random_trace(9, &mut rng);
+        assert_eq!(trace.binary_poly.len(), 14);
+        assert_eq!(trace.arbitrary_poly.len(), 0);
+        assert_eq!(trace.int.len(), 18);
+        for col in trace.binary_poly.iter() {
+            assert_eq!(col.len(), 1 << 9);
+        }
+        for col in trace.int.iter() {
+            assert_eq!(col.len(), 1 << 9);
+        }
+    }
+
+    #[test]
+    fn ecdsa_uair_generate_random_trace_smoke() {
+        // 1 << 9 = 512 ≥ 258 (the number of real ECDSA rows). The witness
+        // is intentionally non-satisfying — this test only checks that the
+        // walk runs without panicking and yields the right column shape.
+        let mut rng = StdRng::seed_from_u64(0xEC05A);
+        let trace = EcdsaUair::generate_random_trace(9, &mut rng);
+        assert_eq!(trace.binary_poly.len(), 0);
+        assert_eq!(trace.arbitrary_poly.len(), 0);
+        assert_eq!(trace.int.len(), 14);
+        for col in trace.int.iter() {
+            assert_eq!(col.len(), 1 << 9);
+        }
     }
 
     #[test]

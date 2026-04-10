@@ -22,8 +22,8 @@ use zinc_poly::{
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes};
 use zinc_test_uair::{
-    BigLinearUair, SHAProxy, BigLinearUairWithPublicInput, BinaryDecompositionUair,
-    GenerateRandomTrace, TestAirNoMultiplication,
+    BigLinearUair, SHAProxy, BigLinearUairWithPublicInput, BinaryDecompositionUair, EcdsaUair,
+    EcdsaUairLimbs, GenerateRandomTrace, ShaProxyEcdsaUair, TestAirNoMultiplication,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
@@ -466,6 +466,126 @@ fn bench_big_linear_public_input(group: &mut BenchmarkGroup<WallTime>, num_vars:
 }
 
 //
+// ECDSA prover-only bench
+//
+// `EcdsaUair`'s trace cells are `Int<4>` (256-bit signed). The witness is a
+// real Shamir's-trick walk over secp256k1, but it intentionally does not
+// satisfy the integer-equality constraints (the field arithmetic is mod p).
+// Therefore we **only** time the prover here — running the verifier on this
+// trace would correctly reject it. This bench exists to measure prover
+// throughput on the realistic ECDSA constraint shape (9 constraints, max
+// degree 13).
+//
+
+type EcdsaInt = Int<{ INT_LIMBS * 4 }>;
+
+type EcdsaBenchZincTypes = GenericBenchZincTypes<
+    /* Int = */ EcdsaInt,
+    /* CwR = */ Int<{ INT_LIMBS * 8 }>,
+    /* Chal = */ i128,
+    /* Pt = */ i128,
+    /* CombR = */ Int<{ INT_LIMBS * 16 }>,
+    /* Fmod = */ Uint<FIELD_LIMBS>,
+    MillerRabin,
+    DEGREE_PLUS_ONE,
+>;
+
+#[allow(clippy::unwrap_used)]
+fn setup_pp_ecdsa(num_vars: usize) -> Pp<EcdsaBenchZincTypes> {
+    let poly_size = 1 << num_vars;
+    (
+        ZipPlus::setup(
+            poly_size,
+            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+        ),
+        ZipPlus::setup(
+            poly_size,
+            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+        ),
+        ZipPlus::setup(
+            poly_size,
+            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+        ),
+    )
+}
+
+fn bench_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    let mut rng = rng();
+    let trace = EcdsaUair::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_pp_ecdsa(num_vars);
+    let params = format!("Ecdsa/nvars={num_vars}");
+
+    group.bench_function(BenchmarkId::new("Prove (Combined)", &params), |bench| {
+        bench.iter(|| {
+            black_box(
+                ZincPlusPiop::<EcdsaBenchZincTypes, EcdsaUair, F, DEGREE_PLUS_ONE>::prove::<
+                    false,
+                    PERFORM_CHECKS,
+                >(
+                    &pp,
+                    &trace,
+                    num_vars,
+                    zinc_protocol::project_scalar_fn,
+                ),
+            )
+            .expect("Prover failed");
+        });
+    });
+}
+
+fn bench_sha_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    let mut rng = rng();
+    let trace = ShaProxyEcdsaUair::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_pp_ecdsa(num_vars);
+    let params = format!("ShaEcdsa/nvars={num_vars}");
+
+    group.bench_function(BenchmarkId::new("Prove (Combined)", &params), |bench| {
+        bench.iter(|| {
+            black_box(
+                ZincPlusPiop::<EcdsaBenchZincTypes, ShaProxyEcdsaUair, F, DEGREE_PLUS_ONE>::prove::<
+                    false,
+                    PERFORM_CHECKS,
+                >(
+                    &pp,
+                    &trace,
+                    num_vars,
+                    zinc_protocol::project_scalar_fn,
+                ),
+            )
+            .expect("Prover failed");
+        });
+    });
+}
+
+// Prover-only bench for `EcdsaUairLimbs`. Cell type is i64, matching the
+// existing `BenchZincTypes`, so we reuse `setup_pp` directly. The witness
+// is non-satisfying (inherits the same caveat as `EcdsaUair`), so the
+// verifier is intentionally not run.
+fn bench_ecdsa_limbs(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    let mut rng = rng();
+    let trace = EcdsaUairLimbs::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_pp(num_vars);
+    let params = format!("EcdsaLimbs/nvars={num_vars}");
+
+    group.bench_function(BenchmarkId::new("Prove (Combined)", &params), |bench| {
+        bench.iter(|| {
+            black_box(
+                ZincPlusPiop::<BenchZincTypes, EcdsaUairLimbs, F, DEGREE_PLUS_ONE>::prove::<
+                    false,
+                    PERFORM_CHECKS,
+                >(
+                    &pp,
+                    &trace,
+                    num_vars,
+                    zinc_protocol::project_scalar_fn,
+                ),
+            )
+            .expect("Prover failed");
+        });
+    });
+}
+
+//
 // Criterion entry point
 //
 
@@ -489,6 +609,12 @@ fn e2e_benches(c: &mut Criterion) {
     // bench_sha_proxy(&mut group, 10);
     // bench_sha_proxy(&mut group, 12);
     bench_sha_proxy(&mut group, 9);
+
+    bench_ecdsa(&mut group, 9);
+
+    bench_sha_ecdsa(&mut group, 9);
+
+    bench_ecdsa_limbs(&mut group, 9);
 
     // bench_big_linear_public_input(&mut group, 8);
     // bench_big_linear_public_input(&mut group, 10);
