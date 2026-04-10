@@ -526,7 +526,7 @@ where
         // c_1 (bp[0]) is shifted by 1 (used by C1 as bp[0][t+1]); c_5 (bp[4])
         // is shifted by 4 (used by C2 as bp[4][t+4]).
         let shifts = vec![ShiftSpec::new(0, 1), ShiftSpec::new(4, 4)];
-        UairSignature::new(total, PublicColumnLayout::default(), shifts)
+        UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(

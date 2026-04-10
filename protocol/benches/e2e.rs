@@ -451,13 +451,13 @@ fn e2e_benches(c: &mut Criterion) {
     bench_big_linear(&mut group, 10);
     bench_big_linear(&mut group, 12);
 
-    bench_sha_proxy(&mut group, 8);
-    bench_sha_proxy(&mut group, 10);
-    bench_sha_proxy(&mut group, 12);
-
     bench_big_linear_public_input(&mut group, 8);
     bench_big_linear_public_input(&mut group, 10);
     bench_big_linear_public_input(&mut group, 12);
+
+    bench_sha_proxy(&mut group, 8);
+    bench_sha_proxy(&mut group, 10);
+    bench_sha_proxy(&mut group, 12);
 
     group.finish();
 }

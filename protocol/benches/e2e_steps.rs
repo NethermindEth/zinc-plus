@@ -21,10 +21,7 @@ use zinc_poly::{
 };
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes, stepped::ProverStepTimings};
-use zinc_test_uair::{
-    BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-    TestAirNoMultiplication,
-};
+use zinc_test_uair::{BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace, SHAProxy, TestAirNoMultiplication};
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
     Uair, UairTrace,
@@ -264,9 +261,9 @@ type Pp<Zt> = (
 fn setup_pp(num_vars: usize) -> Pp<BenchZincTypes> {
     let poly_size = 1 << num_vars;
     (
-        ZipPlus::setup(poly_size, IprsCode::new_with_optimal_depth(poly_size)),
-        ZipPlus::setup(poly_size, IprsCode::new_with_optimal_depth(poly_size)),
-        ZipPlus::setup(poly_size, IprsCode::new_with_optimal_depth(poly_size)),
+        ZipPlus::setup(poly_size, IprsCode::new_with_optimal_depth(poly_size).unwrap()),
+        ZipPlus::setup(poly_size, IprsCode::new_with_optimal_depth(poly_size).unwrap()),
+        ZipPlus::setup(poly_size, IprsCode::new_with_optimal_depth(poly_size).unwrap()),
     )
 }
 
@@ -487,6 +484,10 @@ fn bench_big_linear_public_input(group: &mut BenchmarkGroup<WallTime>, num_vars:
     do_bench_steps_uair::<BigLinearUairWithPublicInput<i64>>(group, "BigLinearPI", num_vars);
 }
 
+fn bench_sha_proxy(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    do_bench_steps_uair::<SHAProxy<i64>>(group, "SHAProxy", num_vars);
+}
+
 //
 // Criterion entry point
 //
@@ -509,6 +510,10 @@ fn e2e_steps_benches(c: &mut Criterion) {
     bench_big_linear_public_input(&mut group, 8);
     bench_big_linear_public_input(&mut group, 10);
     bench_big_linear_public_input(&mut group, 12);
+
+    bench_sha_proxy(&mut group, 8);
+    bench_sha_proxy(&mut group, 10);
+    bench_sha_proxy(&mut group, 12);
 
     group.finish();
 }
