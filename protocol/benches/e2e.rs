@@ -10,7 +10,7 @@ use crypto_primitives::{
     crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
 };
 use rand::rng;
-use std::{hint::black_box, marker::PhantomData, ops::Neg};
+use std::{hint::black_box, marker::PhantomData, ops::Neg, time::Duration};
 use zinc_poly::{
     ConstCoeffBitWidth, Polynomial,
     univariate::{
@@ -20,7 +20,7 @@ use zinc_poly::{
     },
 };
 use zinc_primality::{MillerRabin, PrimalityTest};
-use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes};
+use zinc_protocol::{Proof, StepTimings, ZincPlusPiop, ZincTypes};
 use zinc_test_uair::{
     BigLinearUair, SHAProxy, BigLinearUairWithPublicInput, BinaryDecompositionUair, EcdsaUair,
     EcdsaUairLimbs, GenerateRandomTrace, ShaProxyEcdsaUair, TestAirNoMultiplication,
@@ -57,6 +57,22 @@ const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
 
 /// Repetition factor for linear code, an inverse rate.
 const REP: usize = 4;
+
+/// Names and selectors for the eight per-step prover sub-benches used by all
+/// "Prove (Combined)" benches in this file. Each entry is
+/// `(bench_label, |&StepTimings| -> Duration)`; the label is passed to
+/// `BenchmarkId::new` and the closure picks that step's field out of the
+/// `StepTimings` returned by `prove_with_step_timings`.
+const STEP_PICKS: [(&str, fn(&StepTimings) -> Duration); 8] = [
+    ("Step 0: Commit", |t| t.commit),
+    ("Step 1: Prime Projection", |t| t.prime_projection),
+    ("Step 2: Ideal Check", |t| t.ideal_check),
+    ("Step 3: Eval Projection", |t| t.eval_projection),
+    ("Step 4: Fq Sumcheck", |t| t.fq_sumcheck),
+    ("Step 5: Multipoint Eval", |t| t.multipoint_eval),
+    ("Step 6: Lift-and-Project", |t| t.lift_and_project),
+    ("Step 7: PCS Open", |t| t.pcs_open),
+];
 
 #[allow(clippy::type_complexity)]
 #[derive(Debug, Clone, Copy)]
@@ -344,9 +360,45 @@ fn do_bench<Zt, U, IdealOverF>(
         };
     }
 
-    bench_prove!("Prove (Combined)", false);
+    // Replaces the single "Prove (Combined)" bench with eight per-step
+    // sub-benches. Each sample still runs the full prover once; only the
+    // targeted step's duration is accumulated.
+    //
+    // When the UAIR is linear (max constraint degree <= 1), use the
+    // MLE-first path for the step-timing breakdown so the reported
+    // per-step costs reflect the faster code path that production would
+    // actually use.
+    let use_mle_first = count_max_degree::<U>() <= 1;
+    for (name, pick) in STEP_PICKS {
+        group.bench_function(BenchmarkId::new(name, &params), |bench| {
+            bench.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let (proof, timings) = if use_mle_first {
+                        <zinc_plus!()>::prove_with_step_timings::<true, PERFORM_CHECKS>(
+                            &pp,
+                            &trace,
+                            num_vars,
+                            project_scalar,
+                        )
+                    } else {
+                        <zinc_plus!()>::prove_with_step_timings::<false, PERFORM_CHECKS>(
+                            &pp,
+                            &trace,
+                            num_vars,
+                            project_scalar,
+                        )
+                    }
+                    .expect("Prover failed");
+                    total += pick(&timings);
+                    black_box(proof);
+                }
+                total
+            });
+        });
+    }
 
-    if count_max_degree::<U>() <= 1 {
+    if use_mle_first {
         bench_prove!("Prove (MLE-first)", true);
     }
 
@@ -513,24 +565,34 @@ fn bench_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     let mut rng = rng();
     let trace = EcdsaUair::generate_random_trace(num_vars, &mut rng);
     let pp = setup_pp_ecdsa(num_vars);
-    let params = format!("Ecdsa/nvars={num_vars}");
+    let params = format!("ECDSA/nvars={num_vars}");
 
-    group.bench_function(BenchmarkId::new("Prove (Combined)", &params), |bench| {
-        bench.iter(|| {
-            black_box(
-                ZincPlusPiop::<EcdsaBenchZincTypes, EcdsaUair, F, DEGREE_PLUS_ONE>::prove::<
-                    false,
-                    PERFORM_CHECKS,
-                >(
-                    &pp,
-                    &trace,
-                    num_vars,
-                    zinc_protocol::project_scalar_fn,
-                ),
-            )
-            .expect("Prover failed");
+    // Eight per-step sub-benches replacing the single "Prove (Combined)"
+    // bench. See STEP_PICKS for the step layout and trade-off notes.
+    for (name, pick) in STEP_PICKS {
+        group.bench_function(BenchmarkId::new(name, &params), |bench| {
+            bench.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let (proof, timings) = ZincPlusPiop::<
+                        EcdsaBenchZincTypes,
+                        EcdsaUair,
+                        F,
+                        DEGREE_PLUS_ONE,
+                    >::prove_with_step_timings::<false, PERFORM_CHECKS>(
+                        &pp,
+                        &trace,
+                        num_vars,
+                        zinc_protocol::project_scalar_fn,
+                    )
+                    .expect("Prover failed");
+                    total += pick(&timings);
+                    black_box(proof);
+                }
+                total
+            });
         });
-    });
+    }
 }
 
 fn bench_sha_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
@@ -539,22 +601,33 @@ fn bench_sha_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     let pp = setup_pp_ecdsa(num_vars);
     let params = format!("ShaEcdsa/nvars={num_vars}");
 
-    group.bench_function(BenchmarkId::new("Prove (Combined)", &params), |bench| {
-        bench.iter(|| {
-            black_box(
-                ZincPlusPiop::<EcdsaBenchZincTypes, ShaProxyEcdsaUair, F, DEGREE_PLUS_ONE>::prove::<
-                    false,
-                    PERFORM_CHECKS,
-                >(
-                    &pp,
-                    &trace,
-                    num_vars,
-                    zinc_protocol::project_scalar_fn,
-                ),
-            )
-            .expect("Prover failed");
+    // Every sample runs the full prover once; only the targeted step's
+    // duration is accumulated into Criterion's measurement, so this bench is
+    // ~8x more expensive than a single monolithic "Prove (Combined)" sample.
+    for (name, pick) in STEP_PICKS {
+        group.bench_function(BenchmarkId::new(name, &params), |bench| {
+            bench.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let (_proof, timings) = ZincPlusPiop::<
+                        EcdsaBenchZincTypes,
+                        ShaProxyEcdsaUair,
+                        F,
+                        DEGREE_PLUS_ONE,
+                    >::prove_with_step_timings::<false, PERFORM_CHECKS>(
+                        &pp,
+                        &trace,
+                        num_vars,
+                        zinc_protocol::project_scalar_fn,
+                    )
+                    .expect("Prover failed");
+                    total += pick(&timings);
+                    black_box(_proof);
+                }
+                total
+            });
         });
-    });
+    }
 }
 
 // Prover-only bench for `EcdsaUairLimbs`. Cell type is i64, matching the

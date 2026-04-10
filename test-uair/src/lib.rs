@@ -1428,12 +1428,31 @@ impl Uair for EcdsaUair {
         use ecdsa_secp256k1::{GQX, GQY, GX, GY, QX, QY, R_SIG, to_int4};
 
         // Inject an Int<4> constant as a degree-0 scalar polynomial expression.
+        // Each call materializes a `DensePolynomial<CbInt<4>, 32>` and goes
+        // through `from_ref`, which in the hot sumcheck path is a HashMap
+        // lookup keyed on the full polynomial. Every value produced here is
+        // cached in a `let` binding below and reused via `.clone()`.
         let cst = |k: CbInt<4>| -> B::Expr {
             let mut coeffs = [CbInt::<4>::ZERO; 32];
             coeffs[0] = k;
             from_ref(&DensePolynomial::<CbInt<4>, 32>::new(coeffs))
         };
         let cst_uint = |k: ecdsa_secp256k1::U4| cst(to_int4(k));
+
+        // Project numeric and curve constants once.
+        let one = cst(CbInt::<4>::ONE);
+        let two = cst(CbInt::<4>::from_i8(2));
+        let three = cst(CbInt::<4>::from_i8(3));
+        let eight = cst(CbInt::<4>::from_i8(8));
+        let nine = cst(CbInt::<4>::from_i8(9));
+        let twelve = cst(CbInt::<4>::from_i8(12));
+        let gx = cst_uint(GX);
+        let qx = cst_uint(QX);
+        let gqx = cst_uint(GQX);
+        let gy = cst_uint(GY);
+        let qy = cst_uint(QY);
+        let gqy = cst_uint(GQY);
+        let r_sig = cst_uint(R_SIG);
 
         // Column expression aliases (current row).
         let b1 = &up.int[B1];
@@ -1456,55 +1475,57 @@ impl Uair for EcdsaUair {
         let y_next = &down.int[DOWN_Y];
         let z_next = &down.int[DOWN_Z];
 
-        let one = || cst(CbInt::<4>::ONE);
-        let two = || cst(CbInt::<4>::from_i8(2));
-        let three = || cst(CbInt::<4>::from_i8(3));
-        let eight = || cst(CbInt::<4>::from_i8(8));
-        let nine = || cst(CbInt::<4>::from_i8(9));
-        let twelve = || cst(CbInt::<4>::from_i8(12));
+        // Shared row-level sub-expressions, each computed exactly once.
+        //   b1_b2 = b1 · b2
+        //   s     = b1 + b2 − b1·b2   (Shamir indicator, 1 iff any bit set)
+        //   1 − s, 1 − b1, 1 − b2     (used in t_x, t_y and C5/C6/C7)
+        let b1_b2 = b1.clone() * b2;
+        let s = b1.clone() + b2 - &b1_b2;
+        let one_minus_s = one.clone() - &s;
+        let one_minus_b1 = one.clone() - b1;
+        let one_minus_b2 = one.clone() - b2;
 
-        // Shamir indicator: s = b1 + b2 − b1·b2  (= 1 iff any bit set).
-        let s = || b1.clone() + b2 - &(b1.clone() * b2);
-        let one_minus_s = || one() - &s();
+        // Powers of x, y, z_mid used across C2/C3/C4/W3.
+        let x_sq = x.clone() * x;
+        let y_sq = y.clone() * y;
+        let x_cu = x_sq.clone() * x;
+        let x_4 = x_sq.clone() * &x_sq;
+        let y_4 = y_sq.clone() * &y_sq;
+        let z_mid_sq = z_mid.clone() * z_mid;
+        let z_mid_cu = z_mid_sq.clone() * z_mid;
 
         // Inlined table-point sub-expressions:
-        //   T_x = (1−b1)b2·Qx + b1(1−b2)·Gx + b1·b2·GQx
-        //   T_y = (1−b1)b2·Qy + b1(1−b2)·Gy + b1·b2·GQy
+        //   T_x = (1−b1)·b2·Qx + b1·(1−b2)·Gx + b1·b2·GQx
+        //   T_y = (1−b1)·b2·Qy + b1·(1−b2)·Gy + b1·b2·GQy
         // (the (1−b1)(1−b2) → identity case contributes 0 to both)
-        let t_x = || {
-            let s_g = b1.clone() * &(one() - b2);
-            let s_q = (one() - b1) * b2;
-            let s_gq = b1.clone() * b2;
-            s_g * &cst_uint(GX) + &(s_q * &cst_uint(QX)) + &(s_gq * &cst_uint(GQX))
+        let t_x = {
+            let s_g = b1.clone() * &one_minus_b2;
+            let s_q = one_minus_b1.clone() * b2;
+            let s_gq = b1_b2.clone();
+            s_g * &gx + &(s_q * &qx) + &(s_gq * &gqx)
         };
-        let t_y = || {
-            let s_g = b1.clone() * &(one() - b2);
-            let s_q = (one() - b1) * b2;
-            let s_gq = b1.clone() * b2;
-            s_g * &cst_uint(GY) + &(s_q * &cst_uint(QY)) + &(s_gq * &cst_uint(GQY))
+        let t_y = {
+            let s_g = b1.clone() * &one_minus_b2;
+            let s_q = one_minus_b1 * b2;
+            let s_gq = b1_b2;
+            s_g * &gy + &(s_q * &qy) + &(s_gq * &gqy)
         };
 
         // -- C1: Z_mid − 2·Y·Z = 0 -------------------------------------------
-        b.assert_zero(z_mid.clone() - &(two() * y * z));
+        b.assert_zero(z_mid.clone() - &(two.clone() * y * z));
 
         // -- C2: X_mid − (9·X^4 − 8·X·Y^2) = 0 -------------------------------
-        let x_sq = || x.clone() * x;
-        let y_sq = || y.clone() * y;
-        let x_4 = || x_sq() * &x_sq();
-        let y_4 = || y_sq() * &y_sq();
-        b.assert_zero(x_mid.clone() - &(nine() * &x_4()) + &(eight() * x * &y_sq()));
+        b.assert_zero(x_mid.clone() - &(nine * &x_4) + &(eight.clone() * x * &y_sq));
 
         // -- C3: Y_mid − (12·X^3·Y^2 − 3·X^2·X_mid − 8·Y^4) = 0 ---------------
-        let x_cu = || x_sq() * x;
         b.assert_zero(
-            y_mid.clone() - &(twelve() * &x_cu() * &y_sq())
-                + &(three() * &x_sq() * x_mid)
-                + &(eight() * &y_4()),
+            y_mid.clone() - &(twelve * &x_cu * &y_sq)
+                + &(three * &x_sq * x_mid)
+                + &(eight * &y_4),
         );
 
         // -- C4: H − (T_x · Z_mid^2 − X_mid) = 0 -----------------------------
-        let z_mid_sq = || z_mid.clone() * z_mid;
-        b.assert_zero(h.clone() - &(t_x() * &z_mid_sq()) + x_mid);
+        b.assert_zero(h.clone() - &(t_x * &z_mid_sq) + x_mid);
 
         // -- W1: H_sq − H·H = 0  (wire H² so C6/C7 can read it at degree 1) -
         b.assert_zero(h_sq_col.clone() - &(h.clone() * h));
@@ -1513,8 +1534,7 @@ impl Uair for EcdsaUair {
         b.assert_zero(h_cu_col.clone() - &(h_sq_col.clone() * h));
 
         // -- W3: R_a − (T_y·Z_mid^3 − Y_mid) = 0 -----------------------------
-        let z_mid_cu = z_mid_sq() * z_mid;
-        b.assert_zero(r_a_col.clone() - &(t_y() * &z_mid_cu) + y_mid);
+        b.assert_zero(r_a_col.clone() - &(t_y * &z_mid_cu) + y_mid);
 
         // The previous (1 − sel_final) gating on C5–C7 is dropped: at the
         // final boundary row the addition step would otherwise read
@@ -1524,15 +1544,15 @@ impl Uair for EcdsaUair {
 
         // -- C5: Z[t+1] − ((1−s)·Z_mid + s·Z_mid·H) = 0 ----------------------
         b.assert_zero(
-            z_next.clone() - &(one_minus_s() * z_mid) - &(s() * z_mid * h),
+            z_next.clone() - &(one_minus_s.clone() * z_mid) - &(s.clone() * z_mid * h),
         );
 
         // -- C6: X[t+1] − ((1−s)·X_mid
         //                  + s·(R_a^2 − H^3 − 2·X_mid·H^2)) = 0 -------------
         let r_a_sq = r_a_col.clone() * r_a_col;
-        let c6_addend = r_a_sq - h_cu_col - &(two() * x_mid * h_sq_col);
+        let c6_addend = r_a_sq - h_cu_col - &(two * x_mid * h_sq_col);
         b.assert_zero(
-            x_next.clone() - &(one_minus_s() * x_mid) - &(s() * &c6_addend),
+            x_next.clone() - &(one_minus_s.clone() * x_mid) - &(s.clone() * &c6_addend),
         );
 
         // -- C7: Y[t+1] − ((1−s)·Y_mid
@@ -1541,7 +1561,7 @@ impl Uair for EcdsaUair {
             r_a_col.clone() * &(x_mid.clone() * h_sq_col - x_next)
                 - &(y_mid.clone() * h_cu_col);
         b.assert_zero(
-            y_next.clone() - &(one_minus_s() * y_mid) - &(s() * &c7_addend),
+            y_next.clone() - &(one_minus_s * y_mid) - &(s * &c7_addend),
         );
 
         // -- B3: sel_init · Z = 0 (force identity at row 0) -------------------
@@ -1549,7 +1569,7 @@ impl Uair for EcdsaUair {
 
         // -- B4: sel_final · Z · (X − R_SIG · Z^2) = 0 ------------------------
         let z_sq = z.clone() * z;
-        b.assert_zero(sel_final.clone() * z * &(x.clone() - &(cst_uint(R_SIG) * &z_sq)));
+        b.assert_zero(sel_final.clone() * z * &(x.clone() - &(r_sig * &z_sq)));
     }
 }
 

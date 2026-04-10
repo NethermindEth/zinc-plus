@@ -1,6 +1,7 @@
 use super::*;
 use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::Zero;
+use std::time::{Duration, Instant};
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
@@ -23,6 +24,19 @@ use zip_plus::{
     pcs::structs::{ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
     pcs_transcript::PcsProverTranscript,
 };
+
+/// Per-step wall-clock durations collected by [`ZincPlusPiop::prove_with_step_timings`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StepTimings {
+    pub commit: Duration,
+    pub prime_projection: Duration,
+    pub ideal_check: Duration,
+    pub eval_projection: Duration,
+    pub fq_sumcheck: Duration,
+    pub multipoint_eval: Duration,
+    pub lift_and_project: Duration,
+    pub pcs_open: Duration,
+}
 
 impl<Zt, U, F, const D: usize> ZincPlusPiop<Zt, U, F, D>
 where
@@ -81,7 +95,7 @@ where
     ///    `r_0`.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn prove<const MLE_FIRST: bool, const CHECK_FOR_OVERFLOW: bool>(
-        (pp_bin, pp_arb, pp_int): &(
+        pp: &(
             ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
             ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
             ZipPlusParams<Zt::IntZt, Zt::IntLc>,
@@ -90,11 +104,38 @@ where
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
     ) -> Result<Proof<F>, ProtocolError<F, U::Ideal>> {
+        Self::prove_with_step_timings::<MLE_FIRST, CHECK_FOR_OVERFLOW>(
+            pp,
+            trace,
+            num_vars,
+            project_scalar,
+        )
+        .map(|(proof, _)| proof)
+    }
+
+    /// Same as [`Self::prove`] but also returns per-step wall-clock durations.
+    ///
+    /// Intended for benchmarks and profiling. The timings correspond to the
+    /// eight protocol steps documented on [`Self::prove`].
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn prove_with_step_timings<const MLE_FIRST: bool, const CHECK_FOR_OVERFLOW: bool>(
+        (pp_bin, pp_arb, pp_int): &(
+            ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+            ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
+            ZipPlusParams<Zt::IntZt, Zt::IntLc>,
+        ),
+        trace: &UairTrace<'static, Zt::Int, Zt::Int, D>,
+        num_vars: usize,
+        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
+    ) -> Result<(Proof<F>, StepTimings), ProtocolError<F, U::Ideal>> {
+        let mut timings = StepTimings::default();
+
         let sig = U::signature();
         let public_trace = trace.public(&sig);
         let witness_trace = trace.witness(&sig);
 
         // === Step 0: Commit only witness columns ===
+        let step_start = Instant::now();
         let (res_bin, (res_arb, res_int)) = cfg_join!(
             commit_optionally(pp_bin, &witness_trace.binary_poly),
             commit_optionally(pp_arb, &witness_trace.arbitrary_poly),
@@ -114,8 +155,10 @@ where
             &public_trace.arbitrary_poly,
         );
         absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
+        timings.commit = step_start.elapsed();
 
         // === Step 1: Prime projection (\phi_q: Z[X] -> F_q[X]) ===
+        let step_start = Instant::now();
 
         let field_cfg = pcs_transcript
             .fs_transcript
@@ -129,8 +172,10 @@ where
         } else {
             ProjectedTrace::RowMajor(project_trace_coeffs_row_major(trace, &field_cfg))
         };
+        timings.prime_projection = step_start.elapsed();
 
         // === Step 2: Ideal check ===
+        let step_start = Instant::now();
         let (ic_proof, ic_prover_state) = match &projected_trace {
             ProjectedTrace::ColumnMajor(t) => U::prove_linear(
                 &mut pcs_transcript.fs_transcript,
@@ -149,8 +194,10 @@ where
                 &field_cfg,
             ),
         }?;
+        timings.ideal_check = step_start.elapsed();
 
         // === Step 3: Evaluation projection (\psi_a: F_q[X] -> F_q) ===
+        let step_start = Instant::now();
         let projecting_element: Zt::Chal = pcs_transcript.fs_transcript.get_challenge();
         let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
 
@@ -164,8 +211,10 @@ where
                 .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
         let max_degree = count_max_degree::<U>();
+        timings.eval_projection = step_start.elapsed();
 
         // === Step 4: Sumcheck over F_q ===
+        let step_start = Instant::now();
         let (cpr_proof, cpr_prover_state) = CombinedPolyResolver::prove_as_subprotocol::<U>(
             &mut pcs_transcript.fs_transcript,
             projected_trace_f.clone(),
@@ -176,10 +225,12 @@ where
             max_degree,
             &field_cfg,
         )?;
+        timings.fq_sumcheck = step_start.elapsed();
 
         // === Step 5: Multi-point evaluation sumcheck ===
         // Combines up_evals and down_evals at r' into a single evaluation
         // point r_0 via one sumcheck.
+        let step_start = Instant::now();
         let uair_sig = U::signature();
         let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
             &mut pcs_transcript.fs_transcript,
@@ -190,12 +241,14 @@ where
             uair_sig.shifts(),
             &field_cfg,
         )?;
+        timings.multipoint_eval = step_start.elapsed();
 
         // === Step 6: Lift-and-project at r_0 ===
         // Compute per-column polynomial MLE evaluations at r_0 in F_q[X]
         // (after \phi_q but before \psi_a). The verifier derives the scalar
         // open_evals via \psi_a for the sumcheck consistency check, and
         // supplies these to the Zip+ PCS for alpha-projection.
+        let step_start = Instant::now();
         let r_0 = &mp_prover_state.eval_point;
 
         let lifted_evals =
@@ -207,8 +260,10 @@ where
                 .fs_transcript
                 .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
         }
+        timings.lift_and_project = step_start.elapsed();
 
         // === Step 7: PCS open at r_0 (witness columns only) ===
+        let step_start = Instant::now();
         if let Some(hint_bin) = &hint_bin {
             let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
                 &mut pcs_transcript,
@@ -241,6 +296,8 @@ where
         }
 
         let zip_proof = pcs_transcript.stream.into_inner();
+        timings.pcs_open = step_start.elapsed();
+
         let commitments = (commitment_bin, commitment_arb, commitment_int);
 
         // Extract witness-only lifted evals (public columns come first in trace).
@@ -262,14 +319,17 @@ where
             .cloned()
             .collect();
 
-        Ok(Proof {
-            commitments,
-            ideal_check: ic_proof,
-            resolver: cpr_proof,
-            multipoint_eval: mp_proof,
-            zip: zip_proof,
-            witness_lifted_evals,
-        })
+        Ok((
+            Proof {
+                commitments,
+                ideal_check: ic_proof,
+                resolver: cpr_proof,
+                multipoint_eval: mp_proof,
+                zip: zip_proof,
+                witness_lifted_evals,
+            },
+            timings,
+        ))
     }
 }
 
