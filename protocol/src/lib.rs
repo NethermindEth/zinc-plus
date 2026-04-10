@@ -10,8 +10,9 @@
 //!
 //! After the three compiler steps, the protocol continues with:
 //!
-//! - Step 4: finite-field sumcheck over F_q
-//! - Step 5: multi-point evaluation sumcheck (combines up/down evals at r' into
+//! - Step 4: combined CPR + Lookup multi-degree sumcheck (CPR group at degree
+//!   `max_deg+2`, one lookup group per table type; shared eval point `r*`)
+//! - Step 5: multi-point evaluation sumcheck (combines up/down evals at r* into
 //!   a single evaluation point r_0)
 //! - Step 6: lift-and-project (unprojected MLE evaluations at r_0)
 //! - Step 7: Zip+ PCS open/verify at r_0
@@ -28,8 +29,10 @@ use thiserror::Error;
 use zinc_piop::{
     combined_poly_resolver::{CombinedPolyResolverError, Proof as CombinedPolyResolverProof},
     ideal_check::{IdealCheckError, Proof as IdealCheckProof},
+    lookup::{BatchedLookupProof, LookupError},
     multipoint_eval::{MultipointEvalError, Proof as MultipointEvalProof},
     projections::ProjectedTrace,
+    sumcheck::multi_degree::MultiDegreeSumcheckProof,
 };
 use zinc_poly::{
     ConstCoeffBitWidth, EvaluationError as PolyEvaluationError,
@@ -63,8 +66,10 @@ pub struct Proof<F: PrimeField> {
     pub zip: Vec<u8>,
     /// Randomized ideal check proof.
     pub ideal_check: IdealCheckProof<F>,
-    /// Combined polynomial resolver proof (F_q sumcheck).
+    /// Combined polynomial resolver proof (up_evals + down_evals).
     pub resolver: CombinedPolyResolverProof<F>,
+    /// Multi-degree sumcheck proof (CPR group + future lookup groups).
+    pub combined_sumcheck: MultiDegreeSumcheckProof<F>,
     /// Multi-point evaluation sumcheck proof (combines up_evals and
     /// down_evals at r' into a single evaluation point r_0).
     pub multipoint_eval: MultipointEvalProof<F>,
@@ -75,6 +80,8 @@ pub struct Proof<F: PrimeField> {
     /// interleaves them with these, and derives scalar open_evals via
     /// \psi_a for the sumcheck consistency check and Zip+ PCS verify.
     pub witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
+    /// Lookup argument proof. `None` when the UAIR has no lookup specs.
+    pub lookup_proof: Option<BatchedLookupProof<F>>,
 }
 
 impl<F> GenTranscribable for Proof<F>
@@ -96,12 +103,16 @@ where
         let (ideal_check, bytes) = IdealCheckProof::<F>::read_transcription_bytes_subset(bytes);
         let (resolver, bytes) =
             CombinedPolyResolverProof::<F>::read_transcription_bytes_subset(bytes);
+        let (combined_sumcheck, bytes) =
+            MultiDegreeSumcheckProof::<F>::read_transcription_bytes_subset(bytes);
         let (multipoint_eval, bytes) =
             MultipointEvalProof::<F>::read_transcription_bytes_subset(bytes);
 
         let (witness_vec, bytes) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
         let witness_lifted_evals = witness_vec.0;
 
+        // TODO: deserialize lookup_proof once BatchedLookupProof gets
+        // Transcribable impls (lookup is not yet implemented).
         assert!(bytes.is_empty(), "All bytes should be consumed");
 
         Self {
@@ -109,8 +120,10 @@ where
             zip,
             ideal_check,
             resolver,
+            combined_sumcheck,
             multipoint_eval,
             witness_lifted_evals,
+            lookup_proof: None,
         }
     }
 
@@ -133,10 +146,15 @@ where
         // resolver: u32 length prefix + data
         buf = self.resolver.write_transcription_bytes_subset(buf);
 
+        // combined_sumcheck: u32 length prefix + data
+        buf = self.combined_sumcheck.write_transcription_bytes_subset(buf);
+
         // multipoint_eval: u32 length prefix + data
         buf = self.multipoint_eval.write_transcription_bytes_subset(buf);
 
         // witness_lifted_evals: u32 length prefix + DynamicPolyVecF encoding
+        // TODO: serialize lookup_proof once BatchedLookupProof gets
+        // Transcribable impls (lookup is not yet implemented).
         DynamicPolyVecF::reinterpret(&self.witness_lifted_evals)
             .write_transcription_bytes_subset(buf);
     }
@@ -158,8 +176,12 @@ where
             + self.ideal_check.get_num_bytes()
             + CombinedPolyResolverProof::<F>::LENGTH_NUM_BYTES
             + self.resolver.get_num_bytes()
+            + MultiDegreeSumcheckProof::<F>::LENGTH_NUM_BYTES
+            + self.combined_sumcheck.get_num_bytes()
             + MultipointEvalProof::<F>::LENGTH_NUM_BYTES
             + self.multipoint_eval.get_num_bytes()
+            // TODO: add lookup_proof size once BatchedLookupProof gets
+            // Transcribable impls (lookup is not yet implemented).
             + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
             + witness_vec.get_num_bytes()
     }
@@ -263,6 +285,8 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     MultipointEval(#[from] MultipointEvalError<F>),
     #[error("lifted eval psi_a projection failed: {0}")]
     LiftedEvalProjection(PolyEvaluationError),
+    #[error("lookup argument failed: {0}")]
+    Lookup(#[from] LookupError),
     #[error("PCS error: {0}")]
     Pcs(#[from] ZipError),
     #[error("PCS verification failed at column {0}: {1}")]

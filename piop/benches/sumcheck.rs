@@ -18,7 +18,7 @@ use zinc_poly::{
 };
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_transcript::{
-    KeccakTranscript,
+    Blake3Transcript,
     traits::{ConstTranscribable, Transcript},
 };
 use zinc_utils::{from_ref::FromRef, inner_transparent_field::InnerTransparentField};
@@ -64,9 +64,9 @@ pub fn bench_simple_product<F, const LIMBS: usize>(
             BinaryPoly::zero(),
         );
 
-    let transcript = KeccakTranscript::new();
+    let transcript = Blake3Transcript::new();
 
-    let prove = |(a, b, c, mut transcript):(_,_,_,KeccakTranscript)| -> RFSumcheckProof<F, BinaryPoly<32>> {
+    let prove = |(a, b, c, mut transcript): (_, _, _, Blake3Transcript)| -> RFSumcheckProof<F, BinaryPoly<32>> {
         let field_cfg = transcript.get_random_field_cfg::<F, <F as Field>::Modulus, MillerRabin>();
 
         let eq_r = build_eq_x_r_inner(&vec![F::from_with_cfg(2u32, &field_cfg); nvars], &field_cfg)

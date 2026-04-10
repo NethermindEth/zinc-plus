@@ -152,7 +152,7 @@ mod tests {
         mle::DenseMultilinearExtension, univariate::binary::BinaryPoly, utils::build_eq_x_r_inner,
     };
     use zinc_primality::MillerRabin;
-    use zinc_transcript::{KeccakTranscript, traits::Transcript};
+    use zinc_transcript::{Blake3Transcript, traits::Transcript};
 
     use crate::random_field_sumcheck::RFSumcheck;
 
@@ -191,7 +191,7 @@ mod tests {
                 BinaryPoly::zero(),
             );
 
-        let mut transcript = KeccakTranscript::new();
+        let mut transcript = Blake3Transcript::new();
 
         let field_cfg = transcript.get_random_field_cfg::<F, <F as Field>::Inner, MillerRabin>();
 

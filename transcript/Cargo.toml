@@ -16,12 +16,9 @@ zinc-utils = { workspace = true }
 
 itertools = { workspace = true }
 crypto-bigint = { workspace = true }
-sha3 = "0.10"
+blake3 = { workspace = true }
 num-traits = { workspace = true }
 
 [lints]
 workspace = true
-
-[features]
-asm = ["sha3/asm"]
 
