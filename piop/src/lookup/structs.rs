@@ -1,12 +1,13 @@
 //! Data structures for the lookup protocol.
 //!
-//! Proof types, prover/verifier intermediates, instance types, and error
+//! Proof types, prover/verifier intermediates and error
 //! definitions live here. Specification types (`LookupTableType`,
 //! `LookupColumnSpec`) live in `zinc-uair` and are re-exported from the
 //! parent module.
 
 use std::collections::BTreeMap;
 use thiserror::Error;
+use zinc_poly::utils::ArithErrors;
 use zinc_uair::LookupTableType;
 
 // ---------------------------------------------------------------------------
@@ -78,7 +79,7 @@ pub struct LookupGroupMeta {
 // Complete lookup proof
 // ---------------------------------------------------------------------------
 
-/// Top-level proof: one [`BatchedDecompLogupProof`] per lookup group
+/// Top-level proof: one [`LogupProof`] per lookup group
 /// (groups formed by batching columns with the same [`LookupTableType`]).
 /// Carries [`LookupGroupMeta`] per group so the verifier needs no
 /// external specs.
@@ -88,6 +89,73 @@ pub struct BatchedLookupProof<F> {
     pub group_proofs: Vec<BatchedDecompLogupProof<F>>,
     /// Per-group metadata needed by the verifier.
     pub group_meta: Vec<LookupGroupMeta>,
+}
+
+// ---------------------------------------------------------------------------
+// Core LogUp types
+// ---------------------------------------------------------------------------
+
+/// Verifier subclaim from the LogUp protocol.
+#[derive(Clone, Debug)]
+pub struct LogupVerifierSubClaim<F> {
+    /// Evaluation point from the sumcheck subclaim.
+    pub evaluation_point: Vec<F>,
+    /// Expected evaluation at the subclaim point.
+    pub expected_evaluation: F,
+}
+
+/// Ancillary prover data for LogUp sumcheck group construction.
+///
+/// Borrows the pre-computed auxiliary vectors needed by
+/// [`LogupProtocol::build_sumcheck_groups`].
+#[derive(Clone, Debug)]
+pub struct LogupProverAncillary<'a, F> {
+    /// Multiplicity vector.
+    pub multiplicities: &'a [F],
+    /// Inverse witness vector `u = 1/(β − w)`.
+    pub inverse_witness: &'a [F],
+    /// Inverse table vector `v = 1/(β − T)`.
+    pub inverse_table: &'a [F],
+}
+
+/// Pre-sumcheck verifier data for the core LogUp protocol.
+///
+/// Produced by `build_verifier_pre_sumcheck`, holds the transcript
+/// challenges needed for `finalize_verifier`.
+#[derive(Clone, Debug)]
+pub struct LogupVerifierPreSumcheckData<F> {
+    /// Random evaluation point `r` for `eq(y, r)`.
+    pub r: Vec<F>,
+    /// The β challenge for LogUp.
+    pub beta: F,
+}
+
+/// Scalar MLE evaluations of lookup auxiliary columns at the subclaim
+/// point x*, obtained from PCS openings via MultipointEval.
+///
+/// Used by `finalize_verifier` to check the LogUp identities
+#[derive(Clone, Debug)]
+pub struct LookupAuxEvals<F> {
+    pub u_eval: F,
+    pub m_eval: F,
+}
+
+/// Bundle of per-column evaluation data passed to
+/// [`LogupProtocol::finalize_verifier`].
+///
+/// Groups the subclaim outputs and PCS-opened evaluations that vary
+/// per lookup column.
+#[derive(Clone, Debug)]
+pub struct LogupFinalizerInput<'a, F> {
+    /// The multi-degree sumcheck subclaim point (x*).
+    pub subclaim_point: &'a [F],
+    /// Expected evaluations from the sumcheck subclaim for this
+    /// column's two groups.
+    pub expected_evaluations: &'a [F],
+    /// Evaluation of the witness column polynomial at x*.
+    pub w_eval: &'a F,
+    /// Auxiliary evaluations (u, m) at x*.
+    pub aux_evals: &'a LookupAuxEvals<F>,
 }
 
 // ---------------------------------------------------------------------------
@@ -129,7 +197,6 @@ pub fn group_lookup_specs(specs: &[zinc_uair::LookupColumnSpec]) -> Vec<LookupGr
 // Errors
 // ---------------------------------------------------------------------------
 
-/// Errors from the lookup protocol.
 #[derive(Debug, Error)]
 pub enum LookupError {
     #[error("lookup not implemented")]
@@ -149,4 +216,7 @@ pub enum LookupError {
 
     #[error("final evaluation check failed")]
     FinalEvaluationMismatch,
+
+    #[error("arithmetic error: {0}")]
+    Arith(#[from] ArithErrors),
 }

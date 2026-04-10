@@ -134,6 +134,33 @@ macro_rules! cfg_extend {
     }};
 }
 
+/// Compute chunk size for parallel/sequential dispatch.
+///
+/// When the "parallel" feature is enabled and `$len >= $threshold`,
+/// returns `$len / num_threads`. Otherwise returns `$len` (one chunk =
+/// sequential).
+///
+/// ```ignore
+/// let chunk_size = cfg_chunk_size!(n, 4096);
+/// cfg_chunks_mut!(result, chunk_size).zip(cfg_chunks!(values, chunk_size)).for_each(|..| ..);
+/// ```
+#[macro_export]
+macro_rules! cfg_chunk_size {
+    ($len:expr, $threshold:expr) => {{
+        #[cfg(feature = "parallel")]
+        let _cs = if $len >= $threshold {
+            $len.div_ceil(rayon::current_num_threads())
+        } else {
+            $len
+        };
+
+        #[cfg(not(feature = "parallel"))]
+        let _cs = $len;
+
+        _cs
+    }};
+}
+
 /// Conditionally fork expressions into parallel tasks using `rayon::join`.
 ///
 /// When the "parallel" feature is enabled, uses right-leaning nested
