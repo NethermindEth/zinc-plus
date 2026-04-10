@@ -1,16 +1,16 @@
 use super::*;
 use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::Zero;
-use std::{collections::HashMap, fmt::Debug};
+use std::fmt::Debug;
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
     lookup::logup_gkr::{LookupArgument, LookupArgumentSubclaim},
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
     projections::{
-        ColumnMajorTrace, ProjectedTrace, RowMajorTrace, evaluate_trace_to_column_mles,
-        project_scalars, project_scalars_to_field, project_trace_coeffs_column_major,
-        project_trace_coeffs_row_major,
+        ColumnMajorTrace, ProjectedTrace, RowMajorTrace, ScalarMap,
+        evaluate_trace_to_column_mles, project_scalars, project_scalars_to_field,
+        project_trace_coeffs_column_major, project_trace_coeffs_row_major,
     },
     sumcheck::multi_degree::MultiDegreeSumcheck,
 };
@@ -69,7 +69,7 @@ pub struct ProverProjectedCombined<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField,
     base: ProverBase<'a, Zt, U, F, D>,
     field_cfg: F::Config,
     projected_trace: RowMajorTrace<F>,
-    projected_scalars_fx: HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    projected_scalars_fx: ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
 }
 
 /// After step 1 via [`step1_mle_first`](ProverCommitted::step1_mle_first)
@@ -79,7 +79,7 @@ pub struct ProverProjectedMleFirst<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField,
     base: ProverBase<'a, Zt, U, F, D>,
     field_cfg: F::Config,
     projected_trace: ColumnMajorTrace<F>,
-    projected_scalars_fx: HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    projected_scalars_fx: ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
 }
 
 /// After step 2 (ideal check).
@@ -88,7 +88,7 @@ pub struct ProverIdealChecked<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, cons
     base: ProverBase<'a, Zt, U, F, D>,
     field_cfg: F::Config,
     projected_trace: ProjectedTrace<F>,
-    projected_scalars_fx: HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    projected_scalars_fx: ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
 
     // New
     ic_proof: IdealCheckProof<F>,
@@ -106,7 +106,7 @@ pub struct ProverEvalProjected<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, con
 
     // New
     projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
-    projected_scalars_f: HashMap<U::Scalar, F>,
+    projected_scalars_f: ScalarMap<U::Scalar, F>,
     /// Projecting element `a` used for ψ_a (persisted across later
     /// steps so lookup-table construction for `BitPoly` lookups can
     /// project bit-polys into the same field element).
@@ -290,7 +290,7 @@ impl_with_type_bounds!(ProverBase
     fn project_common<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
         &mut self,
         project_scalar: S,
-    ) -> Result<(F::Config, HashMap<U::Scalar, DynamicPolynomialF<F>>), ProtocolError<F, U::Ideal>>
+    ) -> Result<(F::Config, ScalarMap<U::Scalar, DynamicPolynomialF<F>>), ProtocolError<F, U::Ideal>>
     {
         let field_cfg = self
             .pcs_transcript

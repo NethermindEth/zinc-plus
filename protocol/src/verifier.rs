@@ -1,14 +1,15 @@
 use super::*;
 use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::Zero;
-use std::{collections::HashMap, io::Cursor};
+use std::io::Cursor;
 use zinc_piop::{
     combined_poly_resolver::{self, CombinedPolyResolver},
     ideal_check::{self, IdealCheckProtocol},
     lookup::logup_gkr::{LookupArgument, LookupArgumentSubclaim},
     multipoint_eval::{self, MultipointEval},
     projections::{
-        ProjectedTrace, project_scalars, project_scalars_to_field, project_trace_coeffs_row_major,
+        ProjectedTrace, ScalarMap, project_scalars, project_scalars_to_field,
+        project_trace_coeffs_row_major,
     },
     sumcheck::multi_degree::MultiDegreeSumcheck,
 };
@@ -143,7 +144,7 @@ pub struct VerifierEvalProjected<
     field_cfg: F::Config,
     ic_subclaim: ideal_check::VerifierSubclaim<F>,
     projecting_element_f: F,
-    projected_scalars_f: HashMap<U::Scalar, F>,
+    projected_scalars_f: ScalarMap<U::Scalar, F>,
 
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),

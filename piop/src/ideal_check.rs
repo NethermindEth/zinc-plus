@@ -8,11 +8,10 @@ pub use structs::*;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use crate::projections::{ColumnMajorTrace, RowMajorTrace};
+use crate::projections::{ColumnMajorTrace, RowMajorTrace, ScalarMap};
 use batched_ideal_check::*;
 use crypto_primitives::PrimeField;
 use num_traits::ConstZero;
-use std::collections::HashMap;
 use thiserror::Error;
 use zinc_poly::{
     EvaluationError,
@@ -49,7 +48,7 @@ pub trait IdealCheckProtocol: Uair {
     fn prove_linear<F>(
         transcript: &mut impl Transcript,
         trace_matrix: &ColumnMajorTrace<F>,
-        projected_scalars: &HashMap<Self::Scalar, DynamicPolynomialF<F>>,
+        projected_scalars: &ScalarMap<Self::Scalar, DynamicPolynomialF<F>>,
         num_constraints: usize,
         num_vars: usize,
         field_cfg: &F::Config,
@@ -78,7 +77,7 @@ pub trait IdealCheckProtocol: Uair {
     fn prove_combined<F>(
         transcript: &mut impl Transcript,
         trace_matrix: &RowMajorTrace<F>,
-        projected_scalars: &HashMap<Self::Scalar, DynamicPolynomialF<F>>,
+        projected_scalars: &ScalarMap<Self::Scalar, DynamicPolynomialF<F>>,
         num_constraints: usize,
         num_vars: usize,
         field_cfg: &F::Config,
@@ -137,7 +136,7 @@ where
     fn prove_linear<F>(
         transcript: &mut impl Transcript,
         trace_matrix: &ColumnMajorTrace<F>,
-        projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+        projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
         num_constraints: usize,
         num_vars: usize,
         field_cfg: &F::Config,
@@ -199,7 +198,7 @@ where
     fn prove_combined<F>(
         transcript: &mut impl Transcript,
         trace_matrix: &RowMajorTrace<F>,
-        projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+        projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
         num_constraints: usize,
         num_vars: usize,
         field_cfg: &F::Config,
