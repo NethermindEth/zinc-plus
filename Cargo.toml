@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 crypto-primitives = { git = "https://github.com/NethermindEth/crypto-primitives.git", branch = "main", features = ["std", "crypto_bigint", "rand"] }
 
+ahash = { version = "0.8", default-features = false, features = ["std"] }
 blake3 = "1.8"
 crypto-bigint = { version = "= 0.7.0-rc.9", features = ["zeroize"] }
 criterion = "0.7.0"

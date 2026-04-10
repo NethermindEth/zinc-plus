@@ -1,8 +1,9 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+use ahash::AHasher;
 use crypto_primitives::{FromWithConfig, PrimeField, Semiring};
-use std::{collections::HashMap, iter};
+use std::{collections::HashMap, hash::BuildHasherDefault, iter};
 use zinc_poly::{
     EvaluationError,
     mle::DenseMultilinearExtension,
@@ -13,6 +14,17 @@ use zinc_utils::{
     UNCHECKED, cfg_extend, cfg_into_iter, cfg_iter, cfg_iter_mut, inner_product::InnerProduct,
     powers,
 };
+
+/// HashMap specialization used for every `projected_scalars` lookup in the
+/// hot prover path. `U::Scalar` is commonly a `DensePolynomial<_, 32>` (≈512
+/// bytes of key material), and the default `std::collections::HashMap` hasher
+/// (SipHash 1-3) spends hundreds of nanoseconds hashing each key. `ahash` is
+/// ~5–10× faster on that key size. The map is populated once per prove/verify
+/// call and is never exposed to untrusted input, so the HashDoS resistance of
+/// SipHash is irrelevant here. `BuildHasherDefault` gives a deterministic
+/// seed without requiring ahash's `runtime-rng` feature and crucially
+/// provides `Default`, which `collect()` needs.
+pub type ScalarMap<K, V> = HashMap<K, V, BuildHasherDefault<AHasher>>;
 
 /// Row-indexed trace matrix: `trace[row][col]`.
 /// Each row contains all column values for that row.
@@ -297,7 +309,7 @@ pub fn evaluate_trace_to_column_mles<F: PrimeField + 'static>(
 /// Project scalars of a UAIR onto F[X].
 pub fn project_scalars<F: PrimeField, U: Uair>(
     project: impl Fn(&U::Scalar) -> DynamicPolynomialF<F>,
-) -> HashMap<U::Scalar, DynamicPolynomialF<F>> {
+) -> ScalarMap<U::Scalar, DynamicPolynomialF<F>> {
     let uair_scalars = collect_scalars::<U>();
 
     // TODO(Ilia): if there's a lot of scalars
@@ -319,9 +331,9 @@ pub fn project_scalars<F: PrimeField, U: Uair>(
 /// Project scalars of a UAIR along F[X] -> F.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
-    scalars: HashMap<R, DynamicPolynomialF<F>>,
+    scalars: ScalarMap<R, DynamicPolynomialF<F>>,
     projecting_element: &F,
-) -> Result<HashMap<R, F>, (R, F, EvaluationError)> {
+) -> Result<ScalarMap<R, F>, (R, F, EvaluationError)> {
     // TODO(Ilia): Parallelising this might be good for big UAIRs.
     //             We'd conditionally route between sequential and parallel
     //             projection depending on how many scalars the UAIR has.

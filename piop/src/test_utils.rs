@@ -1,12 +1,10 @@
-use std::collections::HashMap;
-
 use crate::{
     ideal_check::{
         IdealCheckProtocol, Proof as IdealCheckProof, ProverState as IdealCheckProverState,
     },
     projections::{
-        ColumnMajorTrace, RowMajorTrace, project_scalars, project_trace_coeffs_column_major,
-        project_trace_coeffs_row_major,
+        ColumnMajorTrace, RowMajorTrace, ScalarMap, project_scalars,
+        project_trace_coeffs_column_major, project_trace_coeffs_row_major,
     },
 };
 use crypto_bigint::{Odd, modular::MontyParams};
@@ -39,7 +37,7 @@ pub fn run_ideal_check_prover_linear<U, const DEGREE_PLUS_ONE: usize>(
 ) -> (
     IdealCheckProof<F>,
     IdealCheckProverState<F>,
-    HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
     ColumnMajorTrace<F>,
 )
 where
@@ -93,7 +91,7 @@ pub fn run_ideal_check_prover_combined<U, const DEGREE_PLUS_ONE: usize>(
 ) -> (
     IdealCheckProof<F>,
     IdealCheckProverState<F>,
-    HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
     RowMajorTrace<F>,
 )
 where
