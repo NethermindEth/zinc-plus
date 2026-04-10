@@ -10,6 +10,7 @@ license.workspace = true
 bench = false
 
 [dependencies]
+ahash = { workspace = true }
 crypto-primitives = { workspace = true }
 
 derive_more = { workspace = true }
