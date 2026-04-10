@@ -50,7 +50,7 @@ not to `bp[j]`. Concrete examples:
 - `BigLinearUair` uses `(0..16).map(|i| ShiftSpec::new(i, 1))`. The shift
   vector is in source-column order, so `down.binary_poly[i]` happens to
   equal `bp[i][t+1]` here.
-- `SHAProxy` uses `vec![ShiftSpec::new(0, 1), ShiftSpec::new(4, 4)]`. Only
+- `ShaProxy` uses `vec![ShiftSpec::new(0, 1), ShiftSpec::new(4, 4)]`. Only
   columns `0` and `4` are shifted, and `down.binary_poly[0]` is
   `bp[0][t+1]` while `down.binary_poly[1]` is `bp[4][t+4]` — *not*
   `bp[1][t+1]`. The two shift amounts are also different (1 and 4).
@@ -141,7 +141,7 @@ plumbing on the same constraint shape.
 - **Public layout:** `(4 bp, 0 ap, 0 int)` — first 4 bp columns are public
 - **Shifts / ideal / constraints / trace:** delegated to `BigLinearUair`
 
-### `SHAProxy<R>`
+### `ShaProxy<R>`
 
 A second large linear UAIR with a different shape from `BigLinearUair`:
 14 binary-polynomial columns, 4 integer columns, only 2 shifted columns
@@ -206,7 +206,7 @@ even though it does not actually compute a SHA round.
     up front; their values are unconstrained because the protocol does
     not check virtual rows before the start of the trace either.
 
-> **Note on `(X^32 - 1)`:** the original specification of `SHAProxy`
+> **Note on `(X^32 - 1)`:** the original specification of `ShaProxy`
 > wrote C5/C6 against the cyclotomic ideal `(X^32 - 1)`, where multiplying
 > by `X` corresponds to a cyclic shift of coefficients. The codebase
 > currently only ships `DegreeOneIdeal`, so we substituted `(X - 1)`.
@@ -224,8 +224,8 @@ Column counts are listed as `BinPoly / ArbPoly / Int`, matching the
 `(binary_poly, arbitrary_poly, int)` ordering used by
 `TotalColumnLayout::new`. "Shifts" are written as `count × amount`.
 
-| UAIR | BinPoly | ArbPoly | Int | Shifts | Max degree | Ideal | Role |
-|---|---:|---:|---:|---|---:|---|---|
-| `BigLinearUair`                 | 16 | 0 | 1 | 16×1      | 1 | `(X-1), (X-2)`    | Wide linear benchmark (popcount-preserving) |
-| `BigLinearUairWithPublicInput`  | 16 | 0 | 1 | 16×1      | 1 | `(X-1), (X-2)`    | Same as above + 4 public bp columns |
-| `SHAProxy`                      | 14 | 0 | 4 | 1×1, 1×4  | 1 | `(X-1), (X-2)`    | Alternate-shape linear benchmark with `mbs`-by-`X` and asymmetric shifts |
+| UAIR                           | BinPoly | ArbPoly | Int | Shifts | Max degree | Ideal | Role |
+|--------------------------------|---:|---:|---:|---|---:|---|---|
+| `BigLinearUair`                | 16 | 0 | 1 | 16×1      | 1 | `(X-1), (X-2)`    | Wide linear benchmark (popcount-preserving) |
+| `BigLinearUairWithPublicInput` | 16 | 0 | 1 | 16×1      | 1 | `(X-1), (X-2)`    | Same as above + 4 public bp columns |
+| `ShaProxy`                     | 14 | 0 | 4 | 1×1, 1×4  | 1 | `(X-1), (X-2)`    | Alternate-shape linear benchmark with `mbs`-by-`X` and asymmetric shifts |

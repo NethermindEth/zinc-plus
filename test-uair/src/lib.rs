@@ -511,9 +511,9 @@ where
 ///
 /// Note the asymmetric shift amounts: `bp[0]` is shifted by 1 (used by C1)
 /// and `bp[4]` is shifted by 4 (used by C2).
-pub struct SHAProxy<R>(PhantomData<R>);
+pub struct ShaProxy<R>(PhantomData<R>);
 
-impl<R> Uair for SHAProxy<R>
+impl<R> Uair for ShaProxy<R>
 where
     R: ConstSemiring + From<u32> + 'static,
 {
@@ -526,7 +526,7 @@ where
         // c_1 (bp[0]) is shifted by 1 (used by C1 as bp[0][t+1]); c_5 (bp[4])
         // is shifted by 4 (used by C2 as bp[4][t+4]).
         let shifts = vec![ShiftSpec::new(0, 1), ShiftSpec::new(4, 4)];
-        UairSignature::new(total, PublicColumnLayout::default(), shifts)
+        UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -542,76 +542,69 @@ where
         MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
         IFromR: Fn(&Self::Ideal) -> B::Ideal,
     {
-        let one_ideal = DegreeOneIdeal::new(R::from(1));
-        let two_ideal = DegreeOneIdeal::new(R::from(2));
+        let one_ideal = ideal_from_ref(&DegreeOneIdeal::new(R::ONE));
+        let two_ideal = ideal_from_ref(&DegreeOneIdeal::new(R::from(2)));
         // The polynomial X = 0 + 1*X, used to express `X * c_k` via `mbs`.
         let x_scalar = DensePolynomial::<R, 32>::new([R::ZERO, R::from(1)]);
 
         // `down.binary_poly` is indexed by ShiftSpec position, not source col.
         // Our shifts vec is [ShiftSpec::new(0, 1), ShiftSpec::new(4, 1)], so
         // down.binary_poly[0] = bp[0][t+1], down.binary_poly[1] = bp[4][t+1].
-        let dbp_c1 = &down.binary_poly[0];
-        let dbp_c5 = &down.binary_poly[1];
 
         // (C1) dbp[0] - bp[1] - bp[2] - bp[3] - int[0] - int[1] - int[2] ∈ (X-2)
         b.assert_in_ideal(
-            dbp_c1.clone()
+            down.binary_poly[0].clone()
                 - &up.binary_poly[1]
                 - &up.binary_poly[2]
                 - &up.binary_poly[3]
                 - &up.int[0]
                 - &up.int[1]
                 - &up.int[2],
-            &ideal_from_ref(&two_ideal),
+            &two_ideal,
         );
 
         // (C2) dbp[4] - bp[5] - bp[6] - bp[7] - int[1] - int[2] - int[3] ∈ (X-2)
         b.assert_in_ideal(
-            dbp_c5.clone()
+            down.binary_poly[1].clone()
                 - &up.binary_poly[5]
                 - &up.binary_poly[6]
                 - &up.binary_poly[7]
                 - &up.int[1]
                 - &up.int[2]
                 - &up.int[3],
-            &ideal_from_ref(&two_ideal),
+            &two_ideal,
         );
 
         // (C3) bp[8] - int[0] ∈ (X-2)
-        b.assert_in_ideal(
-            up.binary_poly[8].clone() - &up.int[0],
-            &ideal_from_ref(&two_ideal),
-        );
+        b.assert_in_ideal(up.binary_poly[8].clone() - &up.int[0], &two_ideal);
 
         // (C4) bp[9] - int[1] ∈ (X-2)
-        b.assert_in_ideal(
-            up.binary_poly[9].clone() - &up.int[1],
-            &ideal_from_ref(&two_ideal),
-        );
+        b.assert_in_ideal(up.binary_poly[9].clone() - &up.int[1], &two_ideal);
 
         // (C5) bp[10] - X * bp[11] ∈ (X-1)
         b.assert_in_ideal(
             up.binary_poly[10].clone()
                 - &mbs(&up.binary_poly[11], &x_scalar).expect("mul-by-X overflow"),
-            &ideal_from_ref(&one_ideal),
+            &one_ideal,
         );
 
         // (C6) bp[12] - X * bp[13] ∈ (X-1)
         b.assert_in_ideal(
             up.binary_poly[12].clone()
                 - &mbs(&up.binary_poly[13], &x_scalar).expect("mul-by-X overflow"),
-            &ideal_from_ref(&one_ideal),
+            &one_ideal,
         );
     }
 }
 
-impl<R> GenerateRandomTrace<32> for SHAProxy<R>
+impl<R> GenerateRandomTrace<32> for ShaProxy<R>
 where
     R: ConstSemiring + From<u32> + 'static,
 {
     type PolyCoeff = R;
     type Int = R;
 
+    #[allow(clippy::needless_range_loop)]
     fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
@@ -629,7 +622,7 @@ where
             }
             let mut value: u32 = 0;
             for &pos in &positions[..popcount as usize] {
-                value |= 1u32 << pos;
+                value |= 1_u32 << pos;
             }
             BinaryPoly::from(value)
         }
@@ -638,11 +631,11 @@ where
         // Capping at 28 bits keeps each `eval(2)` value below 2^28 - 1, so the
         // sum used to construct `bp[0]` / `bp[4]` at the next row stays in u32:
         //     3 * (2^28 - 1) + 3 * 31  ≈  8.05 * 10^8  <  2^32 - 1.
-        const SMALL_MASK: u32 = (1u32 << 28) - 1;
+        const SMALL_MASK: u32 = (1 << 28) - 1;
         // Range of values for the int columns (small non-negative).
         const INT_MAX_EXCL: u32 = 32;
 
-        let len = 1usize << num_vars;
+        let len = 1 << num_vars;
 
         let mut bp_cols: Vec<DenseMultilinearExtension<BinaryPoly<32>>> =
             vec![(0..len).map(|_| BinaryPoly::zero()).collect(); 14];
@@ -652,9 +645,9 @@ where
         // Row 0 / "head row" init for the columns whose value at the head of
         // the trace is unconstrained:
         //   - `bp[0]` is shifted by 1, so only `bp[0][0]` is unconstrained.
-        //   - `bp[4]` is shifted by 4, so `bp[4][0..4]` are unconstrained
-        //     (the C2 fix-up at iteration `i` writes `bp[4][i+4]`, so the
-        //     first 4 indices are never written by the loop).
+        //   - `bp[4]` is shifted by 4, so `bp[4][0..4]` are unconstrained (the C2
+        //     fix-up at iteration `i` writes `bp[4][i+4]`, so the first 4 indices are
+        //     never written by the loop).
         bp_cols[0][0] = BinaryPoly::from(rng.next_u32() & SMALL_MASK);
         for k in 0..4.min(len) {
             bp_cols[4][k] = BinaryPoly::from(rng.next_u32() & SMALL_MASK);
@@ -662,7 +655,7 @@ where
 
         for i in 0..len {
             // bp[1..=3]: always small random binary polys (28-bit values).
-            for k in [1usize, 2, 3] {
+            for k in 1..=3 {
                 bp_cols[k][i] = BinaryPoly::from(rng.next_u32() & SMALL_MASK);
             }
 
@@ -676,7 +669,7 @@ where
             // rows `len - 4 ..= len - 2`.
             let c2_target_oob = i + 4 >= len;
 
-            for k in [5usize, 6, 7] {
+            for k in 5..=7 {
                 bp_cols[k][i] = if c2_target_oob {
                     BinaryPoly::zero()
                 } else {
@@ -701,9 +694,10 @@ where
                 int_cols[k][i] = R::from(*v);
             }
 
-            // (C3)/(C4): bp[8] = BinaryPoly::from(int[0]); bp[9] = BinaryPoly::from(int[1]).
-            // Since `BinaryPoly::from(n).evaluate_at_point(2) == n`, this makes
-            // `bp[k] - int[k]` vanish at X=2, satisfying the (X-2) ideal check.
+            // (C3)/(C4): bp[8] = BinaryPoly::from(int[0]);
+            // bp[9] = BinaryPoly::from(int[1]).
+            // Since `BinaryPoly::from(n).evaluate_at_point(2) == n`,
+            // this makes `bp[k] - int[k]` vanish at X=2, satisfying the (X-2) ideal check.
             bp_cols[8][i] = BinaryPoly::from(int_vals[0]);
             bp_cols[9][i] = BinaryPoly::from(int_vals[1]);
 

@@ -23,7 +23,7 @@ use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes};
 use zinc_test_uair::{
     BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-    SHAProxy, TestAirNoMultiplication,
+    ShaProxy, TestAirNoMultiplication,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
@@ -425,7 +425,7 @@ fn bench_big_linear(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
 }
 
 fn bench_sha_proxy(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
-    do_bench_uair::<SHAProxy<i64>>(group, "SHAProxy", num_vars);
+    do_bench_uair::<ShaProxy<i64>>(group, "ShaProxy", num_vars);
 }
 
 fn bench_big_linear_public_input(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
@@ -450,14 +450,13 @@ fn e2e_benches(c: &mut Criterion) {
     bench_big_linear(&mut group, 8);
     bench_big_linear(&mut group, 10);
     bench_big_linear(&mut group, 12);
+    bench_big_linear_public_input(&mut group, 8);
+    bench_big_linear_public_input(&mut group, 10);
+    bench_big_linear_public_input(&mut group, 12);
 
     bench_sha_proxy(&mut group, 8);
     bench_sha_proxy(&mut group, 10);
     bench_sha_proxy(&mut group, 12);
-
-    bench_big_linear_public_input(&mut group, 8);
-    bench_big_linear_public_input(&mut group, 10);
-    bench_big_linear_public_input(&mut group, 12);
 
     group.finish();
 }
