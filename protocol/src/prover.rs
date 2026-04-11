@@ -14,7 +14,8 @@ use zinc_piop::{
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
-    Uair, UairTrace, constraint_counter::count_constraints, degree_counter::count_max_degree,
+    Uair, UairTrace, constraint_counter::count_constraints,
+    degree_counter::count_effective_max_degree,
 };
 use zinc_utils::{
     add, cfg_join, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
@@ -210,7 +211,10 @@ where
             project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
                 .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
-        let max_degree = count_max_degree::<U>();
+        // The fq_sumcheck's combined polynomial skips zero-ideal constraints
+        // (see `ConstraintFolder::assert_zero`), so its effective degree is
+        // the max degree among non-zero-ideal constraints only.
+        let max_degree = count_effective_max_degree::<U>();
         timings.eval_projection = step_start.elapsed();
 
         // === Step 4: Sumcheck over F_q ===

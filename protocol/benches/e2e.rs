@@ -28,7 +28,7 @@ use zinc_test_uair::{
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
     Uair, UairTrace,
-    degree_counter::count_max_degree,
+    degree_counter::count_effective_max_degree,
     ideal::{Ideal, IdealCheck, degree_one::DegreeOneIdeal, mixed::MixedDegreeOneOrXnMinusOne},
     ideal_collector::IdealOrZero,
 };
@@ -364,11 +364,12 @@ fn do_bench<Zt, U, IdealOverF>(
     // sub-benches. Each sample still runs the full prover once; only the
     // targeted step's duration is accumulated.
     //
-    // When the UAIR is linear (max constraint degree <= 1), use the
-    // MLE-first path for the step-timing breakdown so the reported
-    // per-step costs reflect the faster code path that production would
-    // actually use.
-    let use_mle_first = count_max_degree::<U>() <= 1;
+    // Effective max degree excludes zero-ideal (assert_zero) constraints,
+    // which are skipped in the fq_sumcheck fold and discarded in
+    // prove_linear. So MLE-first is valid for any UAIR whose *non*-zero-
+    // ideal constraints are all linear, even if some assert_zero
+    // constraints have higher degree (e.g. ShaEcdsa).
+    let use_mle_first = count_effective_max_degree::<U>() <= 1;
     for (name, pick) in STEP_PICKS {
         group.bench_function(BenchmarkId::new(name, &params), |bench| {
             bench.iter_custom(|iters| {
@@ -399,7 +400,9 @@ fn do_bench<Zt, U, IdealOverF>(
     }
 
     if use_mle_first {
-        bench_prove!("Prove (MLE-first)", true);
+        bench_prove!("Prove (E2E)", true);
+    } else {
+        bench_prove!("Prove (E2E)", false);
     }
 
     let proof: Proof<F> =
@@ -567,6 +570,45 @@ fn bench_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     let pp = setup_pp_ecdsa(num_vars);
     let params = format!("ECDSA/nvars={num_vars}");
 
+    // Every ECDSA constraint is asserted via `assert_zero`, so its
+    // effective max degree (over non-zero-ideal constraints) is 0, and
+    // the MLE-first path is valid. See `do_bench` for the same gating.
+    let use_mle_first = count_effective_max_degree::<EcdsaUair>() <= 1;
+
+    macro_rules! bench_prove_ecdsa {
+        ($label:literal, $mle_first:expr) => {
+            group.bench_function(BenchmarkId::new($label, &params), |bench| {
+                bench.iter(|| {
+                    black_box(ZincPlusPiop::<
+                        EcdsaBenchZincTypes,
+                        EcdsaUair,
+                        F,
+                        DEGREE_PLUS_ONE,
+                    >::prove::<{ $mle_first }, PERFORM_CHECKS>(
+                        &pp,
+                        &trace,
+                        num_vars,
+                        zinc_protocol::project_scalar_fn,
+                    ))
+                    .expect("Prover failed");
+                });
+            });
+        };
+    }
+    if use_mle_first {
+        bench_prove_ecdsa!("Prove (E2E)", true);
+    } else {
+        bench_prove_ecdsa!("Prove (E2E)", false);
+    }
+
+    let proof: Proof<F> =
+        ZincPlusPiop::<EcdsaBenchZincTypes, EcdsaUair, F, DEGREE_PLUS_ONE>::prove::<
+            false,
+            PERFORM_CHECKS,
+        >(&pp, &trace, num_vars, zinc_protocol::project_scalar_fn)
+        .expect("proof generation for size logging");
+    eprint_proof_size(&params, &proof);
+
     // Eight per-step sub-benches replacing the single "Prove (Combined)"
     // bench. See STEP_PICKS for the step layout and trade-off notes.
     for (name, pick) in STEP_PICKS {
@@ -574,17 +616,31 @@ fn bench_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
             bench.iter_custom(|iters| {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
-                    let (proof, timings) = ZincPlusPiop::<
-                        EcdsaBenchZincTypes,
-                        EcdsaUair,
-                        F,
-                        DEGREE_PLUS_ONE,
-                    >::prove_with_step_timings::<false, PERFORM_CHECKS>(
-                        &pp,
-                        &trace,
-                        num_vars,
-                        zinc_protocol::project_scalar_fn,
-                    )
+                    let (proof, timings) = if use_mle_first {
+                        ZincPlusPiop::<
+                            EcdsaBenchZincTypes,
+                            EcdsaUair,
+                            F,
+                            DEGREE_PLUS_ONE,
+                        >::prove_with_step_timings::<true, PERFORM_CHECKS>(
+                            &pp,
+                            &trace,
+                            num_vars,
+                            zinc_protocol::project_scalar_fn,
+                        )
+                    } else {
+                        ZincPlusPiop::<
+                            EcdsaBenchZincTypes,
+                            EcdsaUair,
+                            F,
+                            DEGREE_PLUS_ONE,
+                        >::prove_with_step_timings::<false, PERFORM_CHECKS>(
+                            &pp,
+                            &trace,
+                            num_vars,
+                            zinc_protocol::project_scalar_fn,
+                        )
+                    }
                     .expect("Prover failed");
                     total += pick(&timings);
                     black_box(proof);
@@ -601,6 +657,47 @@ fn bench_sha_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     let pp = setup_pp_ecdsa(num_vars);
     let params = format!("ShaEcdsa/nvars={num_vars}");
 
+    // Raw max_degree = 5 (from ECDSA's deepest assert_zero), but every
+    // ECDSA constraint is asserted via `assert_zero` and so skipped in
+    // the fq_sumcheck fold. The only surviving constraints are SHAProxy's
+    // linear ideal-check ones, so effective max degree = 1 and MLE-first
+    // is valid.
+    let use_mle_first = count_effective_max_degree::<ShaProxyEcdsaUair>() <= 1;
+
+    macro_rules! bench_prove_sha_ecdsa {
+        ($label:literal, $mle_first:expr) => {
+            group.bench_function(BenchmarkId::new($label, &params), |bench| {
+                bench.iter(|| {
+                    black_box(ZincPlusPiop::<
+                        EcdsaBenchZincTypes,
+                        ShaProxyEcdsaUair,
+                        F,
+                        DEGREE_PLUS_ONE,
+                    >::prove::<{ $mle_first }, PERFORM_CHECKS>(
+                        &pp,
+                        &trace,
+                        num_vars,
+                        zinc_protocol::project_scalar_fn,
+                    ))
+                    .expect("Prover failed");
+                });
+            });
+        };
+    }
+    if use_mle_first {
+        bench_prove_sha_ecdsa!("Prove (E2E)", true);
+    } else {
+        bench_prove_sha_ecdsa!("Prove (E2E)", false);
+    }
+
+    let proof: Proof<F> =
+        ZincPlusPiop::<EcdsaBenchZincTypes, ShaProxyEcdsaUair, F, DEGREE_PLUS_ONE>::prove::<
+            false,
+            PERFORM_CHECKS,
+        >(&pp, &trace, num_vars, zinc_protocol::project_scalar_fn)
+        .expect("proof generation for size logging");
+    eprint_proof_size(&params, &proof);
+
     // Every sample runs the full prover once; only the targeted step's
     // duration is accumulated into Criterion's measurement, so this bench is
     // ~8x more expensive than a single monolithic "Prove (Combined)" sample.
@@ -609,17 +706,31 @@ fn bench_sha_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
             bench.iter_custom(|iters| {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
-                    let (_proof, timings) = ZincPlusPiop::<
-                        EcdsaBenchZincTypes,
-                        ShaProxyEcdsaUair,
-                        F,
-                        DEGREE_PLUS_ONE,
-                    >::prove_with_step_timings::<false, PERFORM_CHECKS>(
-                        &pp,
-                        &trace,
-                        num_vars,
-                        zinc_protocol::project_scalar_fn,
-                    )
+                    let (_proof, timings) = if use_mle_first {
+                        ZincPlusPiop::<
+                            EcdsaBenchZincTypes,
+                            ShaProxyEcdsaUair,
+                            F,
+                            DEGREE_PLUS_ONE,
+                        >::prove_with_step_timings::<true, PERFORM_CHECKS>(
+                            &pp,
+                            &trace,
+                            num_vars,
+                            zinc_protocol::project_scalar_fn,
+                        )
+                    } else {
+                        ZincPlusPiop::<
+                            EcdsaBenchZincTypes,
+                            ShaProxyEcdsaUair,
+                            F,
+                            DEGREE_PLUS_ONE,
+                        >::prove_with_step_timings::<false, PERFORM_CHECKS>(
+                            &pp,
+                            &trace,
+                            num_vars,
+                            zinc_protocol::project_scalar_fn,
+                        )
+                    }
                     .expect("Prover failed");
                     total += pick(&timings);
                     black_box(_proof);

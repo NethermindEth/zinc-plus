@@ -18,7 +18,7 @@ use zinc_transcript::{
 use zinc_uair::{
     Uair, UairTrace,
     constraint_counter::count_constraints,
-    degree_counter::count_max_degree,
+    degree_counter::count_effective_max_degree,
     ideal::{Ideal, IdealCheck},
     ideal_collector::IdealOrZero,
 };
@@ -124,7 +124,10 @@ where
             project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
                 .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
-        let max_degree = count_max_degree::<U>();
+        // Use the effective max degree (excluding zero-ideal constraints),
+        // which matches the prover's degree choice for the fq_sumcheck and
+        // the ConstraintFolder's skip-assert_zero fold.
+        let max_degree = count_effective_max_degree::<U>();
 
         // === Step 4: Sumcheck over F_q ===
         let cpr_subclaim = CombinedPolyResolver::verify_as_subprotocol::<U>(

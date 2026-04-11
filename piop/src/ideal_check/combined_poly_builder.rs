@@ -13,7 +13,7 @@ use zinc_poly::{
 };
 use zinc_uair::{
     ColumnLayout, ConstraintBuilder, TraceRow, Uair,
-    degree_counter::{count_constraint_degrees, count_max_degree},
+    degree_counter::{count_constraint_degrees, count_effective_max_degree},
     ideal::ImpossibleIdeal,
 };
 use zinc_utils::{
@@ -207,8 +207,11 @@ where
     let num_rows = trace_matrix.first().map(|c| c.len()).unwrap_or(0);
     let num_vars = evaluation_point.len();
 
-    // Sanity check: this approach only works for linear constraints
-    if count_max_degree::<U>() > 1 {
+    // Sanity check: this approach only works for linear constraints among
+    // those that actually contribute to the combined polynomial. Zero-ideal
+    // (assert_zero) constraints are discarded downstream in `prove_linear`,
+    // so their declared degree does not have to obey the linear constraint.
+    if count_effective_max_degree::<U>() > 1 {
         return Err(EvaluationError::UnsupportedConstraintDegrees {
             degrees: count_constraint_degrees::<U>(),
         });
