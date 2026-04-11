@@ -37,13 +37,14 @@ impl<const LIMBS: usize, const LIMBS2: usize> MulByScalar<&Int<LIMBS2>> for Int<
         if CHECK {
             self.checked_mul(&rhs.resize())
         } else {
-            Some(*self * rhs.resize())
+            // Make use of an optimized wrapping_mul in the crypto-bigint library.
+            Some(widening_wrapping_mul(self, rhs))
         }
     }
 }
 
 macro_rules! impl_mul_int_by_primitive_scalar {
-    ($($t:ty),*) => {
+    ($(($t:ty, $rhs_limbs:expr)),*) => {
         $(
             impl<const LIMBS: usize, const LIMBS2: usize> MulByScalar<&$t, Int<LIMBS2>> for Int<LIMBS> {
                 #[allow(clippy::arithmetic_side_effects)] // By design
@@ -51,11 +52,12 @@ macro_rules! impl_mul_int_by_primitive_scalar {
                     const {
                         assert!(LIMBS <= LIMBS2, "Cannot multiply if the left operand has more limbs than the output");
                     }
-                    let rhs: Int<LIMBS2> = Int::from_ref(rhs);
                     if CHECK {
+                        let rhs: Int<LIMBS2> = Int::from_ref(rhs);
                         rhs.checked_mul(&self.resize())
                     } else {
-                        Some(rhs * self.resize())
+                        let rhs_short: Int<{ $rhs_limbs }> = Int::from(*rhs);
+                        Some(widening_wrapping_mul(&self.resize::<LIMBS2>(), &rhs_short))
                     }
                 }
             }
@@ -63,7 +65,13 @@ macro_rules! impl_mul_int_by_primitive_scalar {
     };
 }
 
-impl_mul_int_by_primitive_scalar!(i8, i16, i32, i64, i128);
+impl_mul_int_by_primitive_scalar!(
+    (i8, crypto_bigint::U64::LIMBS),
+    (i16, crypto_bigint::U64::LIMBS),
+    (i32, crypto_bigint::U64::LIMBS),
+    (i64, crypto_bigint::U64::LIMBS),
+    (i128, crypto_bigint::U128::LIMBS)
+);
 
 impl<T> MulByScalar<&Boolean> for T
 where
@@ -97,4 +105,14 @@ impl MulByScalar<&i64, i128> for i64 {
     fn mul_by_scalar<const CHECK: bool>(&self, rhs: &i64) -> Option<i128> {
         Some(i128::from(*self) * i128::from(*rhs))
     }
+}
+
+/// Helper function, make use of the crypto-bigint inner workings in order to
+/// multiply two ints of different number of limbs in `O(LIMBS_1 * LIMBS_2)`
+/// rather than in `O(MAX_LIMBS^2)` time.
+fn widening_wrapping_mul<const LIMBS: usize, const LIMBS2: usize>(
+    lhs: &Int<LIMBS>,
+    rhs: &Int<LIMBS2>,
+) -> Int<LIMBS> {
+    Int::new(lhs.inner().wrapping_mul(rhs.inner()))
 }
