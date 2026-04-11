@@ -95,6 +95,122 @@ Two ideal implementations ship today:
 
 ---
 
+## Why every ECDSA UAIR in this crate is non-satisfying
+
+`EcdsaUair`, `EcdsaUairLimbs`, and `ShaProxyEcdsaUair` all encode their
+constraints as **exact integer equalities** (every constraint is
+`assert_zero` over the cell type) and generate witnesses by performing a
+real Shamir's-trick walk over secp256k1 with **modular** F_p arithmetic.
+The two are inconsistent on purpose, and the resulting witnesses fail to
+satisfy the constraint system. The benches are therefore **prover-only**
+— running the verifier on any of these traces would correctly reject it.
+
+This document records why we never closed that gap, because it looks
+like an obvious bug at first glance and will keep looking like one to
+future readers. Two distinct issues block a "real walk + satisfying
+witness" combination, and **both** would have to be solved together.
+
+### Issue 1: integer arithmetic is not modular arithmetic
+
+The constraint `C1: Z_mid − 2·Y·Z = 0` says, as written, that the cell
+`Z_mid` equals the integer `2·Y·Z` exactly. The witness builds `Z_mid`
+via `fp_mul`, so `Z_mid = (2·Y·Z) mod P` where `P` is the secp256k1
+base prime (`≈ 2²⁵⁶`). For Y, Z near P, the integer product `2·Y·Z` is
+close to `2·P²` and the modular reduction is non-trivial: `Z_mid` and
+`2·Y·Z` differ by some multiple of P, not by zero. The constraint as
+written checks integer equality, the witness checks modular equality,
+and these are different relations.
+
+The standard fix for this kind of arithmetization gap is to add a
+**quotient column** `q` per constraint, rewriting `lhs = 0 (mod P)` as
+`lhs − q·P = 0 (as exact integers)`. The witness sets `q = lhs/P` so
+the equation holds exactly, and the prover (which evaluates over a
+random PIOP field `F`) sees the integer identity preserved because
+projection from ℤ to `F` is a ring homomorphism. This is well-known and
+straightforward in principle. In practice, see Issue 2.
+
+### Issue 2: `Int<4>` projects to `MontyField` with sign-aware semantics
+
+The trace cells are `Int<4>` (256-bit signed integers), and the prover
+projects them to its PIOP field `F` (a `MontyField`) via
+`FromWithConfig<&Int<N>>`. That impl, in
+[`crypto-primitives`](https://github.com/NethermindEth/crypto-primitives.git),
+literally does:
+
+```rust
+let mut abs = value.inner().abs();
+// ... compute MontyField representation of |value| ...
+if value.is_negative() { -result } else { result }
+```
+
+It takes the **absolute value** of the underlying `Int<4>` and negates
+if `is_negative()` (which checks the bit-255 sign bit). This is
+mathematically correct for integers but fights us when we want to use
+`Int<4>` as a *256-bit container* for canonical F_p representatives in
+`[0, P)`.
+
+Concretely: roughly **half** of all canonical F_p elements have bit
+255 set (since `P ≈ 2²⁵⁶ − 2³² − 977 > 2²⁵⁵`). For each such element,
+the bit pattern stored in the `Int<4>` cell looks "negative" to
+`MontyField`. For instance, the canonical value `P − 1 ≈ 2²⁵⁶ − 2³² −
+978` projects to `MontyField(−(2³² + 978))`, **not** to `MontyField(P −
+1)`. These are different field elements (they agree mod `P`, but not
+mod the PIOP field's modulus, which is what `MontyField` actually
+checks).
+
+Consequence: even if we add quotient columns to fix Issue 1, the
+resulting "satisfying" integer identity does not project to a
+satisfying `F`-identity, because the sign of about half of the cell
+projections is wrong relative to what the witness intended. The
+quotient trick produces an integer identity that's only satisfied
+under one interpretation of the bit pattern (unsigned ℤ embedded in
+ℤ), and `MontyField` uses a different one (signed `Int<4>` interpreted
+in two's complement and then sign-extended into `F`).
+
+### So why did we ever try?
+
+The first version of `EcdsaUair` was designed before we understood this
+projection behavior. At the time, the question seemed to be a simple
+choice between "real walk, accept non-satisfying" and "all-zero fixed
+point, satisfying but trivial" — and the user picked the real walk for
+trace-shape realism. The plan was always that we could later add
+quotient columns to make the real walk satisfying.
+
+That later attempt is what produced this document. Discovering Issue 2
+mid-design made it clear that closing the gap requires more than
+quotient columns:
+
+- **Switch to limb form** (`i64` cells holding 32-bit u32 limbs, like
+  [`EcdsaUairLimbs`](#ecdsauairlimbs)) so that every cell is small and
+  positive and the sign-aware projection is unambiguous. Then add
+  **quotient + carry columns** to do per-limb modular reduction. This
+  is essentially the production approach used by real ECDSA UAIRs in
+  other zk libraries; estimated cost is hundreds of new columns and
+  ~1000+ lines of constraint code.
+- **Switch to `Int<8>` cells** so the canonical 256-bit values fit as
+  positive 512-bit signed integers (sign bit is bit 511, never set for
+  values in `[0, 2²⁵⁶)`). This solves Issue 2 cleanly with one cell per
+  field element, but requires a new `ZincTypes` config and bench
+  helper, and pays a per-cell PCS cost penalty.
+- **Toy curve over a small prime** (e.g. F₁₀₁): all field elements
+  trivially fit in `i64`, both issues vanish, and the constraint shape
+  is preserved. This is the approach taken by v1's `EcdsaUairDp`. The
+  downside is that it stops being secp256k1.
+
+Each of these is its own substantial project; none is a small patch on
+the existing UAIRs. We chose to leave the current ECDSA UAIRs as
+**prover-only benchmark fixtures** with an explicit "non-satisfying
+witness" caveat in their per-UAIR sections, rather than fix the gap
+in-place.
+
+The prover-only benches (`bench_ecdsa`, `bench_ecdsa_limbs`,
+`bench_sha_ecdsa`) still measure realistic prover throughput on
+realistic constraint shapes — they just don't exercise the verifier.
+For verifier-running benches we use the satisfying UAIRs in this crate
+(`BigLinearUair`, `BigLinearUairWithPublicInput`, `SHAProxy`, etc.).
+
+---
+
 ## Benchmark UAIRs
 
 These UAIRs are sized for the end-to-end criterion benchmark in
