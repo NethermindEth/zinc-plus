@@ -39,8 +39,12 @@ use zinc_utils::{
     named::Named,
     projectable_to_field::ProjectableToField,
 };
+#[cfg(feature = "bench-rate-1-16")]
+use zip_plus::code::iprs::PnttConfigF65537;
+#[cfg(not(feature = "bench-rate-1-16"))]
+use zip_plus::code::iprs::PnttConfigF12289;
 use zip_plus::{
-    code::iprs::{IprsCode, PnttConfigF65537},
+    code::iprs::IprsCode,
     pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
     utils::eprint_proof_size,
 };
@@ -75,6 +79,14 @@ const RATE_TAG: &str = match REP {
 /// For higher inverse rates (1/8, 1/16) we bump the IPRS tree depth by one
 /// beyond `new_with_optimal_depth`'s default heuristic.
 const EXTRA_DEPTH: usize = if REP >= 8 { 1 } else { 0 };
+
+/// Base field for the IPRS PNTT. Rates 1/4 and 1/8 use F12289; rate 1/16
+/// stays on F65537 since its codewords would overflow F12289 for bench
+/// polynomial sizes.
+#[cfg(not(feature = "bench-rate-1-16"))]
+type BenchPnttConfig = PnttConfigF12289;
+#[cfg(feature = "bench-rate-1-16")]
+type BenchPnttConfig = PnttConfigF65537;
 
 /// Mirrors `IprsCode::new_with_optimal_depth`'s formula, then adds
 /// `EXTRA_DEPTH`. Kept in sync with zip-plus/src/code/iprs.rs.
@@ -272,9 +284,9 @@ where
         MBSInnerProduct,
     >;
 
-    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
-    type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
-    type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
+    type BinaryLc = IprsCode<Self::BinaryZt, BenchPnttConfig, REP, PERFORM_CHECKS>;
+    type ArbitraryLc = IprsCode<Self::ArbitraryZt, BenchPnttConfig, REP, PERFORM_CHECKS>;
+    type IntLc = IprsCode<Self::IntZt, BenchPnttConfig, REP, PERFORM_CHECKS>;
 }
 
 //

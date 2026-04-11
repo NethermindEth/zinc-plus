@@ -195,6 +195,36 @@ mod precompute {
     }
 }
 
+mod f12289 {
+    #![allow(non_local_definitions)]
+    use ark_ff::{Fp64, MontBackend, MontConfig};
+    #[derive(MontConfig)]
+    #[modulus = "12289"]
+    #[generator = "11"]
+    pub struct Config;
+
+    pub type Backend = MontBackend<Config, 1>;
+    pub type Field = Fp64<Backend>;
+
+    #[allow(clippy::cast_possible_truncation)]
+    pub const MODULUS: u32 = Config::MODULUS.0[0] as u32;
+}
+
+/// Pseudo NTT configuration for F12289 (3 * 2^12 + 1).
+#[derive(Debug, Clone, Copy)]
+pub struct PnttConfigF12289;
+
+impl Config for PnttConfigF12289 {
+    type Field = f12289::Field;
+    const FIELD_MODULUS: u32 = f12289::MODULUS;
+    const BASE_TWIDDLES: [PnttInt; 8] = [1, -4043, 1479, 5146, -1, 4043, -1479, -5146];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = f12289::Backend::into_bigint(x);
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
 mod f65537 {
     #![allow(non_local_definitions)]
     use ark_ff::{Fp64, MontBackend, MontConfig};
@@ -239,5 +269,6 @@ mod tests {
     #[test]
     fn check_twiddles() {
         check_twiddles_generic::<PnttConfigF65537>();
+        check_twiddles_generic::<PnttConfigF12289>();
     }
 }
