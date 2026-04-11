@@ -11,8 +11,98 @@ use zinc_poly::utils::ArithErrors;
 use zinc_uair::LookupTableType;
 
 // ---------------------------------------------------------------------------
+// Per-group proof (BatchedDecompLogup)
+// ---------------------------------------------------------------------------
+
+/// Proof for one lookup group (columns sharing the same table type).
+///
+/// Does **not** contain a sumcheck proof — the sumcheck is shared via
+/// the protocol-level multi-degree sumcheck. This struct
+/// carries only the auxiliary vectors the verifier needs to reconstruct
+/// evaluations at the shared point.
+///
+/// Chunk vectors are **not** included — the verifier reconstructs them
+/// from the inverse witnesses: `c_k[j] = β − 1/u_k[j]`. Soundness
+/// follows from the PCS commitment binding the parent column.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BatchedDecompLogupProof<F> {
+    /// Per-witness aggregated multiplicity vectors:
+    /// `aggregated_multiplicities[l][j] = Σ_k m_k^(l)[j]`.
+    pub aggregated_multiplicities: Vec<Vec<F>>,
+    /// Per-witness per-chunk inverse witness vectors:
+    /// `chunk_inverse_witnesses[l][k][i] = 1 / (β − chunk[l][k][i])`.
+    pub chunk_inverse_witnesses: Vec<Vec<Vec<F>>>,
+    /// Shared inverse table vector: `inverse_table[j] = 1 / (β − T[j])`.
+    pub inverse_table: Vec<F>,
+}
+
+// ---------------------------------------------------------------------------
+// Per-group metadata (carried in the proof for the verifier)
+// ---------------------------------------------------------------------------
+
+/// Describes how a lookup witness column was derived from the trace.
+///
+/// Carried in [`LookupGroupMeta`] so the verifier can reconstruct the
+/// parent evaluation without re-receiving the lookup specs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LookupWitnessSource {
+    /// Standard column lookup: parent eval = `up_evals[column_index]`.
+    Column {
+        /// Original trace column index.
+        column_index: usize,
+    },
+    /// Affine-combination lookup: parent eval = `Σ coeff·up_evals[col] +
+    /// offset`. Currently only needed for BitPoly
+    Affine {
+        /// `(column_index, coefficient)` pairs.
+        terms: Vec<(usize, i64)>,
+        /// Constant bit-polynomial offset encoded as a u32 bit pattern.
+        constant_offset_bits: u32,
+    },
+}
+
+/// Per-group metadata stored in the proof so the verifier can reconstruct
+/// tables and column layout without being passed the original lookup specs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LookupGroupMeta {
+    /// Table type for this group (determines subtable generation).
+    pub table_type: LookupTableType,
+    /// Number of witness columns batched into this group (L).
+    pub num_columns: usize,
+    /// Number of rows in each witness vector (trace length).
+    pub witness_len: usize,
+    /// Per-witness source descriptors.
+    pub witness_sources: Vec<LookupWitnessSource>,
+}
+
+// ---------------------------------------------------------------------------
+// Complete lookup proof
+// ---------------------------------------------------------------------------
+
+/// Top-level proof: one [`BatchedDecompLogupProof`] per lookup group
+/// (groups formed by batching columns with the same [`LookupTableType`]).
+/// Carries [`LookupGroupMeta`] per group so the verifier needs no
+/// external specs.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub struct BatchedLookupProof<F> {
+    /// Per-group proofs, in group order.
+    pub group_proofs: Vec<BatchedDecompLogupProof<F>>,
+    /// Per-group metadata needed by the verifier.
+    pub group_meta: Vec<LookupGroupMeta>,
+}
+
+// ---------------------------------------------------------------------------
 // Core LogUp types
 // ---------------------------------------------------------------------------
+
+/// Verifier subclaim from the LogUp protocol.
+#[derive(Clone, Debug)]
+pub struct LogupVerifierSubClaim<F> {
+    /// Evaluation point from the sumcheck subclaim.
+    pub evaluation_point: Vec<F>,
+    /// Expected evaluation at the subclaim point.
+    pub expected_evaluation: F,
+}
 
 /// Ancillary prover data for LogUp sumcheck group construction.
 ///
