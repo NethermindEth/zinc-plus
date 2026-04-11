@@ -561,6 +561,98 @@ where
 
 fn bench_sha_proxy(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     do_bench_sha_proxy::<SHAProxy<i64>>(group, "SHAProxy", num_vars);
+    bench_sha_proxy_verify_full_run::<SHAProxy<i64>>(group, "SHAProxy", num_vars);
+}
+
+/// Verifier-only bench for SHAProxy-shaped UAIRs whose witness is **not
+/// satisfying**. Uses `ZincPlusPiop::verify_full_run` so that every check
+/// runs end-to-end on the proof and the final accept/reject verdict is
+/// produced (and printed once before the timing loop) but does not abort
+/// the bench. Mirrors the prove-side `do_bench_sha_proxy` setup.
+fn bench_sha_proxy_verify_full_run<U>(
+    group: &mut BenchmarkGroup<WallTime>,
+    label: &str,
+    num_vars: usize,
+) where
+    U: Uair<
+            Ideal = MixedDegreeOneOrXnMinusOne<<BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int, 32>,
+            Scalar = DensePolynomial<<BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int, 32>,
+        > + GenerateRandomTrace<
+            DEGREE_PLUS_ONE,
+            PolyCoeff = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int,
+            Int = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int,
+        > + 'static,
+    F: for<'a> FromWithConfig<&'a <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int>,
+{
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_pp(num_vars);
+    let params = format!("{label}/nvars={num_vars}{RATE_TAG}");
+
+    let proj_ideal = |ideal: &IdealOrZero<U::Ideal>, field_cfg: &<F as PrimeField>::Config| {
+        ideal.map(|i| MixedDegreeOneOrXnMinusOne::<F, 32>::from_with_cfg(i, field_cfg))
+    };
+
+    let proof: Proof<F> = ZincPlusPiop::<BenchZincTypes, U, F, DEGREE_PLUS_ONE>::prove::<
+        false,
+        PERFORM_CHECKS,
+    >(
+        &pp,
+        &trace,
+        num_vars,
+        zinc_protocol::project_scalar_fn,
+    )
+    .expect("proof generation for verifier-full-run bench");
+
+    let sig = U::signature();
+    let public_trace = trace.public(&sig);
+
+    // Run once outside the timing loop to print accept/reject. The witness
+    // is intentionally non-satisfying for these UAIRs, so we expect Err.
+    let verdict = ZincPlusPiop::<BenchZincTypes, U, F, DEGREE_PLUS_ONE>::verify_full_run::<
+        _,
+        PERFORM_CHECKS,
+    >(
+        &pp,
+        proof.clone(),
+        &public_trace,
+        num_vars,
+        zinc_protocol::project_scalar_fn,
+        proj_ideal,
+    );
+    match &verdict {
+        Ok(()) => eprintln!("[verify_full_run] {params}: accept"),
+        Err(e) => {
+            // Truncate the Debug dump to just the top-level variant name —
+            // the full dump pretty-prints MontyForm internals which run to
+            // hundreds of lines.
+            let dbg = format!("{e:?}");
+            let short = dbg.split('(').next().unwrap_or(&dbg);
+            eprintln!("[verify_full_run] {params}: reject ({short})");
+        }
+    }
+
+    group.bench_function(BenchmarkId::new("Verify (full run)", &params), |bench| {
+        bench.iter_batched(
+            || proof.clone(),
+            |proof| {
+                let _ = black_box(
+                    ZincPlusPiop::<BenchZincTypes, U, F, DEGREE_PLUS_ONE>::verify_full_run::<
+                        _,
+                        PERFORM_CHECKS,
+                    >(
+                        &pp,
+                        proof,
+                        &public_trace,
+                        num_vars,
+                        zinc_protocol::project_scalar_fn,
+                        proj_ideal,
+                    ),
+                );
+            },
+            BatchSize::SmallInput,
+        );
+    });
 }
 
 fn bench_big_linear_public_input(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
@@ -699,6 +791,8 @@ fn bench_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
 }
 
 fn bench_sha_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    bench_sha_ecdsa_verify_full_run(group, num_vars);
+
     let mut rng = rng();
     let trace = ShaProxyEcdsaUair::generate_random_trace(num_vars, &mut rng);
     let pp = setup_pp_ecdsa(num_vars);
@@ -786,6 +880,80 @@ fn bench_sha_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
             });
         });
     }
+}
+
+/// Verifier-only bench for `ShaProxyEcdsaUair`. Mirrors the SHAProxy
+/// verifier-only bench but uses `EcdsaBenchZincTypes` and the mixed-ideal
+/// projector for `Int<4>`. The witness intentionally does not satisfy the
+/// constraint system, so we use `verify_full_run` and print the verdict
+/// once before the timing loop.
+fn bench_sha_ecdsa_verify_full_run(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    let mut rng = rng();
+    let trace = ShaProxyEcdsaUair::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_pp_ecdsa(num_vars);
+    let params = format!("ShaEcdsa/nvars={num_vars}{RATE_TAG}");
+
+    let proj_ideal = |ideal: &IdealOrZero<<ShaProxyEcdsaUair as Uair>::Ideal>,
+                      field_cfg: &<F as PrimeField>::Config| {
+        ideal.map(|i| MixedDegreeOneOrXnMinusOne::<F, 32>::from_with_cfg(i, field_cfg))
+    };
+
+    let proof: Proof<F> =
+        ZincPlusPiop::<EcdsaBenchZincTypes, ShaProxyEcdsaUair, F, DEGREE_PLUS_ONE>::prove::<
+            false,
+            PERFORM_CHECKS,
+        >(&pp, &trace, num_vars, zinc_protocol::project_scalar_fn)
+        .expect("proof generation for verifier-full-run bench");
+
+    let sig = ShaProxyEcdsaUair::signature();
+    let public_trace = trace.public(&sig);
+
+    let verdict = ZincPlusPiop::<
+        EcdsaBenchZincTypes,
+        ShaProxyEcdsaUair,
+        F,
+        DEGREE_PLUS_ONE,
+    >::verify_full_run::<_, PERFORM_CHECKS>(
+        &pp,
+        proof.clone(),
+        &public_trace,
+        num_vars,
+        zinc_protocol::project_scalar_fn,
+        proj_ideal,
+    );
+    match &verdict {
+        Ok(()) => eprintln!("[verify_full_run] {params}: accept"),
+        Err(e) => {
+            // Truncate the Debug dump to just the top-level variant name —
+            // the full dump pretty-prints MontyForm internals which run to
+            // hundreds of lines.
+            let dbg = format!("{e:?}");
+            let short = dbg.split('(').next().unwrap_or(&dbg);
+            eprintln!("[verify_full_run] {params}: reject ({short})");
+        }
+    }
+
+    group.bench_function(BenchmarkId::new("Verify (full run)", &params), |bench| {
+        bench.iter_batched(
+            || proof.clone(),
+            |proof| {
+                let _ = black_box(ZincPlusPiop::<
+                    EcdsaBenchZincTypes,
+                    ShaProxyEcdsaUair,
+                    F,
+                    DEGREE_PLUS_ONE,
+                >::verify_full_run::<_, PERFORM_CHECKS>(
+                    &pp,
+                    proof,
+                    &public_trace,
+                    num_vars,
+                    zinc_protocol::project_scalar_fn,
+                    proj_ideal,
+                ));
+            },
+            BatchSize::SmallInput,
+        );
+    });
 }
 
 // Prover-only bench for `EcdsaUairLimbs`. Cell type is i64, matching the

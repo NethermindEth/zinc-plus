@@ -126,6 +126,30 @@ pub trait IdealCheckProtocol: Uair {
         F::Modulus: ConstTranscribable,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
         IdealOverFFromRef: Fn(&IdealOrZero<Self::Ideal>) -> IdealOverF;
+
+    /// Like [`Self::verify_as_subprotocol`], but never short-circuits on
+    /// failure: returns a `(VerifierSubclaim, Result)` pair so that callers
+    /// running the verifier in "force-full-run" mode can continue with the
+    /// subclaim and surface the original error at the end.
+    ///
+    /// The subclaim is built purely from proof data (and a transcript
+    /// challenge), so it is always valid even when `batched_ideal_check`
+    /// rejects.
+    #[allow(clippy::type_complexity)]
+    fn verify_as_subprotocol_full_run<F, IdealOverF, IdealOverFFromRef>(
+        transcript: &mut impl Transcript,
+        proof: Proof<F>,
+        num_constraints: usize,
+        num_vars: usize,
+        ideal_over_f_from_ref: IdealOverFFromRef,
+        field_cfg: &F::Config,
+    ) -> (VerifierSubclaim<F>, Result<(), IdealCheckError<F, IdealOverF>>)
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+        IdealOverFFromRef: Fn(&IdealOrZero<Self::Ideal>) -> IdealOverF;
 }
 
 impl<U> IdealCheckProtocol for U
@@ -314,6 +338,53 @@ where
             evaluation_point,
             values: combined_mle_values,
         })
+    }
+
+    fn verify_as_subprotocol_full_run<F, IdealOverF, IdealOverFFromRef>(
+        transcript: &mut impl Transcript,
+        proof: Proof<F>,
+        num_constraints: usize,
+        num_vars: usize,
+        ideal_over_f_from_ref: IdealOverFFromRef,
+        field_cfg: &F::Config,
+    ) -> (VerifierSubclaim<F>, Result<(), IdealCheckError<F, IdealOverF>>)
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+        IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
+    {
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+
+        let combined_mle_values = proof.combined_mle_values;
+
+        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+
+        for mle_value in &combined_mle_values {
+            transcript.absorb_random_field_slice(&mle_value.coeffs, &mut transcription_buf);
+        }
+
+        let ideal_collector = collect_ideals::<U>(num_constraints);
+
+        let (non_trivial_ideals, non_trivial_values): (Vec<_>, Vec<_>) = ideal_collector
+            .ideals
+            .iter()
+            .zip(combined_mle_values.iter())
+            .filter(|(ideal, _)| !ideal.is_zero_ideal())
+            .map(|(ideal, value)| (ideal_over_f_from_ref(ideal), value.clone()))
+            .unzip();
+
+        let check_result = batched_ideal_check(&non_trivial_ideals, &non_trivial_values)
+            .map_err(IdealCheckError::from);
+
+        (
+            VerifierSubclaim {
+                evaluation_point,
+                values: combined_mle_values,
+            },
+            check_result,
+        )
     }
 }
 

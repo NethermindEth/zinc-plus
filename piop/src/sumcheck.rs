@@ -308,6 +308,39 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
 
         verifier_state.check_and_generate_subclaim(proof.claimed_sum.clone())
     }
+
+    /// Like [`Self::verify_as_subprotocol`], but never short-circuits on
+    /// failure: returns a `(Subclaim, Result)` pair so that callers running
+    /// the verifier in "force-full-run" mode can keep going on a synthetic
+    /// subclaim and report the original error at the end.
+    ///
+    /// On success the returned subclaim is identical to what
+    /// `verify_as_subprotocol` would return. On failure the subclaim is a
+    /// placeholder built from zero-valued field elements with the right
+    /// `num_vars`/`config`; downstream computations will produce nonsense
+    /// values but will not panic.
+    pub fn verify_as_subprotocol_full_run(
+        transcript: &mut impl Transcript,
+        num_vars: usize,
+        degree: usize,
+        proof: &SumcheckProof<F>,
+        config: &F::Config,
+    ) -> (Subclaim<F>, Result<(), SumCheckError<F>>)
+    where
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
+    {
+        match Self::verify_as_subprotocol(transcript, num_vars, degree, proof, config) {
+            Ok(sc) => (sc, Ok(())),
+            Err(e) => (
+                Subclaim {
+                    point: vec![F::zero_with_cfg(config); num_vars],
+                    expected_evaluation: F::zero_with_cfg(config),
+                },
+                Err(e),
+            ),
+        }
+    }
 }
 
 #[derive(Error, Debug)]

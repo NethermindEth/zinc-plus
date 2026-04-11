@@ -238,6 +238,135 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         Ok(())
     }
 
+    /// Like [`Self::verify_with_alphas`], but never short-circuits on
+    /// failure: runs every check end-to-end and returns the first error
+    /// encountered (or `Ok(())`). Used by the Zinc+ verifier's
+    /// `verify_full_run` mode for benchmarking on non-satisfying witnesses.
+    ///
+    /// Differs from the strict version in that the per-column proximity +
+    /// Merkle loop runs all `NUM_COLUMN_OPENINGS` iterations regardless of
+    /// individual failures, and the eval-consistency / coherence checks
+    /// before it are also captured rather than propagated immediately.
+    #[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
+    pub fn verify_with_alphas_full_run<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsVerifierTranscript,
+        vp: &ZipPlusParams<Zt, Lc>,
+        comm: &ZipPlusCommitment,
+        field_cfg: &F::Config,
+        point_f: &[F],
+        eval_f: &F,
+        per_poly_alphas: &[Vec<Zt::Chal>],
+    ) -> Result<(), ZipError>
+    where
+        F: FromPrimitiveWithConfig
+            + FromRef<F>
+            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> FromWithConfig<&'a Zt::Chal>
+            + for<'a> MulByScalar<&'a F>,
+        F::Inner: Transcribable,
+        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
+    {
+        let batch_size = comm.batch_size;
+        validate_input::<Zt, Lc, _>(
+            "verify",
+            vp.num_vars,
+            vp.linear_code.row_len(),
+            batch_size,
+            &[],
+            &[point_f],
+        )?;
+
+        let num_rows = vp.num_rows;
+        let row_len = vp.linear_code.row_len();
+
+        let (q_0, q_1) = point_to_tensor(vp.num_rows, point_f, field_cfg)?;
+        let zero_f = F::zero_with_cfg(field_cfg);
+
+        let b: Vec<F> = transcript.read_field_elements(num_rows)?;
+
+        let mut deferred: Option<ZipError> = None;
+        let capture = |slot: &mut Option<ZipError>, err: ZipError| {
+            if slot.is_none() {
+                *slot = Some(err);
+            }
+        };
+
+        // Check 1: <q_0, b> == eval_f
+        if MBSInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())? != *eval_f {
+            capture(
+                &mut deferred,
+                ZipError::InvalidPcsOpen("Evaluation consistency failure".into()),
+            );
+        }
+
+        let coeffs: Vec<Zt::Chal> = if num_rows == 1 {
+            vec![Zt::Chal::ONE]
+        } else {
+            transcript.fs_transcript.get_challenges(num_rows)
+        };
+
+        let combined_row: Vec<Zt::CombR> = transcript.read_const_many(row_len)?;
+        let encoded_combined_row: Vec<Zt::CombR> = vp.linear_code.encode_wide(&combined_row);
+
+        // Check 2: <w, q_1> == <s, b>
+        let lhs = MBSInnerProduct::inner_product_field(&combined_row, &q_1, zero_f.clone())?;
+        let rhs = MBSInnerProduct::inner_product_field(&coeffs, &b, zero_f.clone())?;
+
+        if lhs != rhs {
+            capture(
+                &mut deferred,
+                ZipError::InvalidPcsOpen("Coherence failure".into()),
+            );
+        }
+
+        let columns_and_proofs: Vec<_> = (0..Zt::NUM_COLUMN_OPENINGS)
+            .map(|_| -> Result<_, ZipError> {
+                let column_idx = transcript.squeeze_challenge_idx(vp.linear_code.codeword_len());
+                let column_values = transcript.read_const_many(batch_size * vp.num_rows)?;
+                let proof = transcript.read_merkle_proof().map_err(|e| {
+                    ZipError::InvalidPcsOpen(format!("Failed to read Merkle a proof: {e}"))
+                })?;
+
+                Ok((column_idx, column_values, proof))
+            })
+            .try_collect()?;
+
+        // Run every column iteration regardless of failures, recording the
+        // first error in `column_errors` and continuing.
+        let column_errors: Vec<ZipError> = cfg_into_iter!(columns_and_proofs)
+            .filter_map(|(column_idx, column_values, proof)| -> Option<ZipError> {
+                if let Err(e) = Self::verify_column_testing_batched::<CHECK_FOR_OVERFLOW>(
+                    per_poly_alphas,
+                    &coeffs,
+                    &encoded_combined_row,
+                    &column_values,
+                    column_idx,
+                    vp.num_rows,
+                    batch_size,
+                ) {
+                    return Some(e);
+                }
+
+                if let Err(e) = proof.verify(&comm.root, &column_values, column_idx) {
+                    return Some(ZipError::InvalidPcsOpen(format!(
+                        "Column opening verification failed: {e}"
+                    )));
+                }
+
+                None
+            })
+            .collect();
+
+        if let Some(first) = column_errors.into_iter().next() {
+            capture(&mut deferred, first);
+        }
+
+        match deferred {
+            None => Ok(()),
+            Some(e) => Err(e),
+        }
+    }
+
     /// Samples per-polynomial alpha challenges from the transcript.
     ///
     /// This is the same sampling logic used internally by [`Self::verify`].

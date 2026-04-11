@@ -350,6 +350,55 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             evaluation_point: sumcheck_point,
         })
     }
+
+    /// Like [`Self::verify_as_subprotocol`], but never short-circuits on
+    /// failure: returns a `(VerifierSubclaim, Result)` pair so that callers
+    /// running the verifier in "force-full-run" mode can keep going on a
+    /// synthetic subclaim and surface the original error at the end.
+    ///
+    /// On failure the synthetic subclaim takes `up_evals` and `down_evals`
+    /// from the proof and uses an all-zero `evaluation_point`. Downstream
+    /// computations will produce nonsense values but will not panic.
+    #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+    pub fn verify_as_subprotocol_full_run<U>(
+        transcript: &mut impl Transcript,
+        proof: Proof<F>,
+        num_constraints: usize,
+        num_vars: usize,
+        max_degree: usize,
+        projecting_element: &F,
+        projected_scalars: &ScalarMap<U::Scalar, F>,
+        ic_check_subclaim: ideal_check::VerifierSubclaim<F>,
+        field_cfg: &F::Config,
+    ) -> (VerifierSubclaim<F>, Result<(), CombinedPolyResolverError<F>>)
+    where
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
+        U: Uair,
+    {
+        let proof_snapshot = proof.clone();
+        match Self::verify_as_subprotocol::<U>(
+            transcript,
+            proof,
+            num_constraints,
+            num_vars,
+            max_degree,
+            projecting_element,
+            projected_scalars,
+            ic_check_subclaim,
+            field_cfg,
+        ) {
+            Ok(sc) => (sc, Ok(())),
+            Err(e) => (
+                VerifierSubclaim {
+                    up_evals: proof_snapshot.up_evals,
+                    down_evals: proof_snapshot.down_evals,
+                    evaluation_point: vec![F::zero_with_cfg(field_cfg); num_vars],
+                },
+                Err(e),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Error)]

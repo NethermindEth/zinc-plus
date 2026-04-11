@@ -276,4 +276,266 @@ where
 
         Ok(())
     }
+
+    /// Like [`Self::verify`], but never short-circuits on failure: every
+    /// step runs end-to-end, errors are buffered into a deferred
+    /// [`ProtocolError`], and the first such error (if any) is returned at
+    /// the very end. Used for **prover-only / verifier-only benchmarking on
+    /// non-satisfying witnesses** (e.g. SHAProxy and ShaProxyEcdsaUair):
+    /// the bench wants to measure the verifier's full computational cost
+    /// regardless of whether the proof is actually accepted.
+    ///
+    /// **Not for production use.** A verifier in this mode does not give
+    /// the usual soundness guarantees on a per-step basis: downstream
+    /// steps may run on synthetic placeholder values produced by the
+    /// `_full_run` siblings of each sub-protocol when an upstream check
+    /// fails. The final accept/reject verdict (the returned `Result`) is
+    /// still meaningful — it reports whether *any* of the buffered checks
+    /// failed.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn verify_full_run<IdealOverF, const CHECK_FOR_OVERFLOW: bool>(
+        (vp_bin, vp_arb, vp_int): &(
+            ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+            ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
+            ZipPlusParams<Zt::IntZt, Zt::IntLc>,
+        ),
+        proof: Proof<F>,
+        public_trace: &UairTrace<Zt::Int, Zt::Int, D>,
+        num_vars: usize,
+        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
+        project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
+    ) -> Result<(), ProtocolError<F, IdealOverF>>
+    where
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+    {
+        let mut deferred: Option<ProtocolError<F, IdealOverF>> = None;
+        let stash = |slot: &mut Option<ProtocolError<F, IdealOverF>>,
+                     err: ProtocolError<F, IdealOverF>| {
+            if slot.is_none() {
+                *slot = Some(err);
+            }
+        };
+
+        // === Step 0: Reconstruct transcript ===
+        let mut pcs_transcript = PcsVerifierTranscript {
+            fs_transcript: KeccakTranscript::default(),
+            stream: Cursor::new(proof.zip),
+        };
+        for comm in [
+            &proof.commitments.0,
+            &proof.commitments.1,
+            &proof.commitments.2,
+        ] {
+            pcs_transcript.fs_transcript.absorb_slice(&comm.root);
+        }
+
+        absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.binary_poly);
+        absorb_public_columns(
+            &mut pcs_transcript.fs_transcript,
+            &public_trace.arbitrary_poly,
+        );
+        absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
+
+        // === Step 1: Prime projection ===
+        let field_cfg = pcs_transcript
+            .fs_transcript
+            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+
+        let num_constraints = count_constraints::<U>();
+
+        // === Step 2: Ideal check (deferred) ===
+        let (ic_subclaim, ic_result) = U::verify_as_subprotocol_full_run::<_, IdealOverF, _>(
+            &mut pcs_transcript.fs_transcript,
+            proof.ideal_check,
+            num_constraints,
+            num_vars,
+            |ideal| project_ideal(ideal, &field_cfg),
+            &field_cfg,
+        );
+        if let Err(e) = ic_result {
+            stash(&mut deferred, ProtocolError::from(e));
+        }
+
+        // === Step 3: Evaluation projection (\psi_a) ===
+        let projecting_element: Zt::Chal = pcs_transcript.fs_transcript.get_challenge();
+        let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
+
+        let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
+        let projected_scalars_f =
+            match project_scalars_to_field(projected_scalars_fx, &projecting_element_f) {
+                Ok(v) => v,
+                Err((_s, _f, e)) => {
+                    stash(&mut deferred, ProtocolError::ScalarProjection(e));
+                    Default::default()
+                }
+            };
+
+        let max_degree = count_effective_max_degree::<U>();
+
+        // === Step 4: Sumcheck over F_q (deferred) ===
+        let (cpr_subclaim, cpr_result) =
+            CombinedPolyResolver::verify_as_subprotocol_full_run::<U>(
+                &mut pcs_transcript.fs_transcript,
+                proof.resolver,
+                num_constraints,
+                num_vars,
+                max_degree,
+                &projecting_element_f,
+                &projected_scalars_f,
+                ic_subclaim,
+                &field_cfg,
+            );
+        if let Err(e) = cpr_result {
+            stash(&mut deferred, ProtocolError::from(e));
+        }
+
+        // === Step 5: Multi-point evaluation sumcheck (deferred) ===
+        let uair_sig = U::signature();
+        let (mp_subclaim, mp_result) = MultipointEval::verify_as_subprotocol_full_run(
+            &mut pcs_transcript.fs_transcript,
+            proof.multipoint_eval,
+            &cpr_subclaim.evaluation_point,
+            &cpr_subclaim.up_evals,
+            &cpr_subclaim.down_evals,
+            uair_sig.shifts(),
+            num_vars,
+            &field_cfg,
+        );
+        if let Err(e) = mp_result {
+            stash(&mut deferred, ProtocolError::from(e));
+        }
+
+        let r_0 = &mp_subclaim.sumcheck_subclaim.point;
+
+        // === Step 6: Recompute public lifted_evals, assemble full set ===
+        let pub_cols = uair_sig.public_cols();
+        let num_pub_bin = pub_cols.num_binary_poly_cols();
+        let num_pub_arb = pub_cols.num_arbitrary_poly_cols();
+        let num_pub_int = pub_cols.num_int_cols();
+
+        let wit_cols = uair_sig.witness_cols();
+        let num_wit_bin = wit_cols.num_binary_poly_cols();
+        let num_wit_arb = wit_cols.num_arbitrary_poly_cols();
+
+        let public_lifted = if add!(add!(num_pub_bin, num_pub_arb), num_pub_int) > 0 {
+            let projected_public =
+                project_trace_coeffs_row_major::<F, Zt::Int, Zt::Int, D>(public_trace, &field_cfg);
+            compute_lifted_evals::<F, D>(
+                r_0,
+                &public_trace.binary_poly,
+                &ProjectedTrace::RowMajor(projected_public),
+                &field_cfg,
+            )
+        } else {
+            Vec::new()
+        };
+
+        let all_lifted_evals: Vec<_> = public_lifted[..num_pub_bin]
+            .iter()
+            .chain(&proof.witness_lifted_evals[..num_wit_bin])
+            .chain(&public_lifted[num_pub_bin..add!(num_pub_bin, num_pub_arb)])
+            .chain(&proof.witness_lifted_evals[num_wit_bin..add!(num_wit_bin, num_wit_arb)])
+            .chain(&public_lifted[add!(num_pub_bin, num_pub_arb)..])
+            .chain(&proof.witness_lifted_evals[add!(num_wit_bin, num_wit_arb)..])
+            .cloned()
+            .collect();
+
+        // Derive open_evals via \psi_a (deferred).
+        let open_evals: Vec<F> = match all_lifted_evals
+            .iter()
+            .map(|bar_u| bar_u.evaluate_at_point(&projecting_element_f))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(v) => v,
+            Err(e) => {
+                stash(&mut deferred, ProtocolError::LiftedEvalProjection(e));
+                vec![F::zero_with_cfg(&field_cfg); all_lifted_evals.len()]
+            }
+        };
+
+        if let Err(e) = MultipointEval::verify_subclaim(
+            &mp_subclaim,
+            &open_evals,
+            uair_sig.shifts(),
+            &field_cfg,
+        ) {
+            stash(&mut deferred, ProtocolError::from(e));
+        }
+
+        // Absorb all lifted_evals into transcript (same order as prover).
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        for bar_u in &all_lifted_evals {
+            pcs_transcript
+                .fs_transcript
+                .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
+        }
+
+        // === Step 7: PCS verify at r_0 (deferred per-batch) ===
+        macro_rules! verify_pcs_batch_full_run {
+            ($Zt:ty, $Lc:ty, $vp:expr, $idx:tt, [$evals_range:expr]) => {{
+                let comm = &proof.commitments.$idx;
+                if comm.batch_size > 0 {
+                    let per_poly_alphas = ZipPlus::<$Zt, $Lc>::sample_alphas(
+                        &mut pcs_transcript.fs_transcript,
+                        comm.batch_size,
+                    );
+                    let mut eval_f = F::zero_with_cfg(&field_cfg);
+                    for (bar_u, alphas) in all_lifted_evals[$evals_range]
+                        .iter()
+                        .zip(per_poly_alphas.iter())
+                    {
+                        for (coeff, alpha) in bar_u.coeffs.iter().zip(alphas.iter()) {
+                            let mut term = F::from_with_cfg(alpha, &field_cfg);
+                            term *= coeff;
+                            eval_f += &term;
+                        }
+                    }
+                    if let Err(e) = ZipPlus::<$Zt, $Lc>::verify_with_alphas_full_run::<
+                        F,
+                        CHECK_FOR_OVERFLOW,
+                    >(
+                        &mut pcs_transcript,
+                        $vp,
+                        comm,
+                        &field_cfg,
+                        r_0,
+                        &eval_f,
+                        &per_poly_alphas,
+                    ) {
+                        stash(&mut deferred, ProtocolError::PcsVerification($idx, e));
+                    }
+                }
+            }};
+        }
+
+        let total = uair_sig.total_cols();
+        let num_total_bin = total.num_binary_poly_cols();
+        let num_total_arb = total.num_arbitrary_poly_cols();
+        verify_pcs_batch_full_run!(
+            Zt::BinaryZt,
+            Zt::BinaryLc,
+            vp_bin,
+            0,
+            [num_pub_bin..num_total_bin]
+        );
+        verify_pcs_batch_full_run!(
+            Zt::ArbitraryZt,
+            Zt::ArbitraryLc,
+            vp_arb,
+            1,
+            [add!(num_total_bin, num_pub_arb)..add!(num_total_bin, num_total_arb)]
+        );
+        verify_pcs_batch_full_run!(
+            Zt::IntZt,
+            Zt::IntLc,
+            vp_int,
+            2,
+            [add!(add!(num_total_bin, num_total_arb), num_pub_int)..]
+        );
+
+        match deferred {
+            None => Ok(()),
+            Some(e) => Err(e),
+        }
+    }
 }

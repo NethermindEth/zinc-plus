@@ -320,6 +320,56 @@ where
         })
     }
 
+    /// Like [`Self::verify_as_subprotocol`], but never short-circuits on
+    /// failure: returns a `(Subclaim, Result)` pair so that callers running
+    /// the verifier in "force-full-run" mode can keep going on a synthetic
+    /// subclaim and surface the original error at the end.
+    ///
+    /// On failure the synthetic subclaim contains zero-valued field
+    /// elements with the right shapes (`gammas`, `alphas`, `shifts_at_r0`,
+    /// `sumcheck_subclaim.point` of length `num_vars`). Downstream
+    /// computations will produce nonsense values but will not panic.
+    #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+    pub fn verify_as_subprotocol_full_run(
+        transcript: &mut impl Transcript,
+        proof: Proof<F>,
+        eval_point: &[F],
+        up_evals: &[F],
+        down_evals: &[F],
+        shifts: &[ShiftSpec],
+        num_vars: usize,
+        field_cfg: &F::Config,
+    ) -> (Subclaim<F>, Result<(), MultipointEvalError<F>>) {
+        match Self::verify_as_subprotocol(
+            transcript,
+            proof,
+            eval_point,
+            up_evals,
+            down_evals,
+            shifts,
+            num_vars,
+            field_cfg,
+        ) {
+            Ok(sc) => (sc, Ok(())),
+            Err(e) => {
+                let zero = || F::zero_with_cfg(field_cfg);
+                let num_cols = up_evals.len();
+                let num_down_cols = shifts.len();
+                let synth = Subclaim {
+                    sumcheck_subclaim: SumcheckSubclaim {
+                        point: vec![zero(); num_vars],
+                        expected_evaluation: zero(),
+                    },
+                    gammas: vec![zero(); num_cols],
+                    alphas: vec![zero(); num_down_cols],
+                    eq_at_r0: zero(),
+                    shifts_at_r0: vec![zero(); num_down_cols],
+                };
+                (synth, Err(e))
+            }
+        }
+    }
+
     /// Finalize the multi-point evaluation check given `open_evals`.
     ///
     /// Verifies that
