@@ -77,7 +77,11 @@ const RATE_TAG: &str = match REP {
 };
 
 /// For higher inverse rates (1/8, 1/16) we bump the IPRS tree depth by one
-/// beyond `new_with_optimal_depth`'s default heuristic.
+/// beyond `new_with_optimal_depth`'s default heuristic. Enable
+/// `bench-extra-depth-rate-1-4` to force the same +1 on rate 1/4.
+#[cfg(feature = "bench-extra-depth-rate-1-4")]
+const EXTRA_DEPTH: usize = 1;
+#[cfg(not(feature = "bench-extra-depth-rate-1-4"))]
 const EXTRA_DEPTH: usize = if REP >= 8 { 1 } else { 0 };
 
 /// Base field for the IPRS PNTT. Rates 1/4 and 1/8 use F12289; rate 1/16
