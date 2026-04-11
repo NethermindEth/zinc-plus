@@ -6,7 +6,10 @@ use std::{
 use crypto_primitives::Semiring;
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub};
 
-use crate::{ConstraintBuilder, TraceRow, Uair, ideal::ImpossibleIdeal};
+use crate::{
+    ConstraintBuilder, TraceRow, Uair, constraint_counter::count_constraints,
+    ideal::ImpossibleIdeal, ideal_collector::collect_ideals,
+};
 
 /// Compute the maximum number of multiplicands
 /// in products of witness elements in the UAIR `U`.
@@ -15,6 +18,46 @@ pub fn count_max_degree<U: Uair>() -> usize {
         .into_iter()
         .max()
         .unwrap_or(0)
+}
+
+/// Like [`count_max_degree`], but excludes constraints asserted via
+/// `assert_zero` (equivalently: constraints whose ideal is the zero
+/// ideal). For an honest prover, such constraints are identically zero on
+/// the hypercube, so their contribution to the combined polynomial is
+/// zero and their degree does not constrain the downstream sumcheck.
+///
+/// Used to drive the MLE-first vs combined path selection and the
+/// `fq_sumcheck` degree parameter when zero-ideal constraints can be
+/// skipped.
+pub fn count_effective_max_degree<U: Uair>() -> usize {
+    let degrees = count_constraint_degrees::<U>();
+    let ideals = collect_ideals::<U>(count_constraints::<U>()).ideals;
+    debug_assert_eq!(
+        degrees.len(),
+        ideals.len(),
+        "degree collector and ideal collector should visit constraints in the same order"
+    );
+    degrees
+        .into_iter()
+        .zip(ideals.iter())
+        .filter_map(|(deg, ideal)| (!ideal.is_zero_ideal()).then_some(deg))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Per-constraint mask of "linear" constraints — those with degree at most
+/// 1 in the trace MLEs. Used by the hybrid ideal-check dispatch in
+/// `protocol::prove` to route linear constraints through the MLE-first lane
+/// while non-linear constraints stay on the combined-polynomial lane.
+///
+/// Mask order matches the constraint order produced by
+/// [`count_constraint_degrees`] and the ideal collector — both walk the
+/// UAIR's `constrain_general` in declaration order.
+pub fn linear_constraint_mask<U: Uair>() -> Vec<bool> {
+    count_constraint_degrees::<U>()
+        .into_iter()
+        .map(|d| d <= 1)
+        .collect()
 }
 
 /// Compute the degree of each individual constraint in the UAIR `U`.

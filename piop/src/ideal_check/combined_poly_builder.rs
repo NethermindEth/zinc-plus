@@ -14,7 +14,7 @@ use zinc_poly::{
 };
 use zinc_uair::{
     ColumnLayout, ConstraintBuilder, TraceRow, Uair,
-    degree_counter::{count_constraint_degrees, count_max_degree},
+    degree_counter::{count_constraint_degrees, count_effective_max_degree},
     ideal::ImpossibleIdeal,
 };
 use zinc_utils::{
@@ -191,8 +191,48 @@ fn prepare_coefficient_mles<F: PrimeField>(
 ///
 /// Does `(num_columns + num_shifted_columns) * max_num_coeffs` evaluations of
 /// MLEs.
-#[allow(clippy::arithmetic_side_effects)]
+///
+/// Validates that the UAIR is fully linear (any non-zero-ideal constraint
+/// has degree ≤ 1). For mixed-degree UAIRs, use
+/// [`evaluate_combined_polynomials_unchecked`] and have the caller
+/// guarantee that values for non-linear slots are discarded — see
+/// `IdealCheckProtocol::prove_hybrid`.
 pub fn evaluate_combined_polynomials<F, U>(
+    trace_matrix: &ColumnMajorTrace<F>,
+    projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    num_constraints: usize,
+    evaluation_point: &[F],
+    field_cfg: &F::Config,
+) -> Result<Vec<DynamicPolynomialF<F>>, EvaluationError>
+where
+    F: InnerTransparentField,
+    U: Uair,
+{
+    if count_effective_max_degree::<U>() > 1 {
+        return Err(EvaluationError::UnsupportedConstraintDegrees {
+            degrees: count_constraint_degrees::<U>(),
+        });
+    }
+    evaluate_combined_polynomials_unchecked::<F, U>(
+        trace_matrix,
+        projected_scalars,
+        num_constraints,
+        evaluation_point,
+        field_cfg,
+    )
+}
+
+/// Like [`evaluate_combined_polynomials`] but skips the global linearity
+/// check. The caller is responsible for guaranteeing that values returned
+/// for any non-linear, non-zero-ideal slot are discarded — they would
+/// otherwise corrupt the transcript and break soundness.
+///
+/// Used by the hybrid ideal-check dispatch to compute MLE-first values for
+/// the linear subset of a mixed-degree UAIR; the non-linear subset's
+/// values are computed via [`compute_combined_polynomials`] and overwrite
+/// the corresponding slots before transcript absorption.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn evaluate_combined_polynomials_unchecked<F, U>(
     trace_matrix: &ColumnMajorTrace<F>,
     projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
     num_constraints: usize,
@@ -207,13 +247,6 @@ where
     let zero_inner = field_zero.inner().clone();
     let num_rows = trace_matrix.first().map(|c| c.len()).unwrap_or(0);
     let num_vars = evaluation_point.len();
-
-    // Sanity check: this approach only works for linear constraints
-    if count_max_degree::<U>() > 1 {
-        return Err(EvaluationError::UnsupportedConstraintDegrees {
-            degrees: count_constraint_degrees::<U>(),
-        });
-    }
 
     // Maximum number of coefficients across all trace entries
     let max_num_coeffs = trace_matrix

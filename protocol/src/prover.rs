@@ -15,10 +15,7 @@ use zinc_piop::{
 };
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_uair::{
-    Uair, UairSignature, UairTrace, constraint_counter::count_constraints,
-    degree_counter::count_max_degree,
-};
+use zinc_uair::{Uair, UairSignature, UairTrace, constraint_counter::count_constraints};
 use zinc_utils::{
     add, cfg_join, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
     mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
@@ -77,6 +74,20 @@ pub struct ProverProjectedMleFirst<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField,
     base: ProverBase<'a, Zt, U, F, D>,
     field_cfg: F::Config,
     projected_trace: ColumnMajorTrace<F>,
+    projected_scalars_fx: HashMap<U::Scalar, DynamicPolynomialF<F>>,
+}
+
+/// After step 1 via [`step1_hybrid`](ProverCommitted::step1_hybrid). Carries
+/// **both** layouts because the hybrid ideal-check feeds linear constraints
+/// through the MLE-first lane (column-major) and non-linear constraints
+/// through the combined-poly lane (row-major). `project_scalar` has been
+/// consumed.
+#[derive(Clone, Debug)]
+pub struct ProverProjectedHybrid<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize> {
+    base: ProverBase<'a, Zt, U, F, D>,
+    field_cfg: F::Config,
+    row_major_trace: RowMajorTrace<F>,
+    column_major_trace: ColumnMajorTrace<F>,
     projected_scalars_fx: HashMap<U::Scalar, DynamicPolynomialF<F>>,
 }
 
@@ -321,6 +332,28 @@ impl_with_type_bounds!(ProverBase
             projected_scalars_fx,
         })
     }
+
+    /// Step 1 (hybrid): Prime projection that produces **both** layouts.
+    /// Used when the UAIR has a mix of linear and non-linear constraints,
+    /// so the ideal-check can route them through their respective fast/slow
+    /// lanes. Costs roughly the sum of `step1_combined` and
+    /// `step1_mle_first` projection times.
+    pub fn step1_hybrid<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
+        mut self,
+        project_scalar: S,
+    ) -> Result<ProverProjectedHybrid<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+        let (field_cfg, projected_scalars_fx) = self.project_common(project_scalar)?;
+
+        let row_major_trace = project_trace_coeffs_row_major(self.trace, &field_cfg);
+        let column_major_trace = project_trace_coeffs_column_major(self.trace, &field_cfg);
+        Ok(ProverProjectedHybrid {
+            base: self,
+            field_cfg,
+            row_major_trace,
+            column_major_trace,
+            projected_scalars_fx,
+        })
+    }
 });
 
 impl_with_type_bounds!(ProverProjectedCombined
@@ -381,6 +414,42 @@ impl_with_type_bounds!(ProverProjectedMleFirst
     }
 });
 
+impl_with_type_bounds!(ProverProjectedHybrid
+{
+    /// Step 2 (hybrid): Ideal check via `prove_hybrid`, which routes linear
+    /// constraints through the MLE-first lane and non-linear constraints
+    /// through the combined-poly lane, merging into a single per-constraint
+    /// claim list. Works for any UAIR; useful when the UAIR has a mix of
+    /// linear and non-linear constraints.
+    pub fn step2_ideal_check(
+        mut self,
+    ) -> Result<ProverIdealChecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+        let num_constraints = count_constraints::<U>();
+
+        let (ic_proof, ic_prover_state) = U::prove_hybrid(
+            &mut self.base.pcs_transcript.fs_transcript,
+            &self.row_major_trace,
+            &self.column_major_trace,
+            &self.projected_scalars_fx,
+            num_constraints,
+            self.base.num_vars,
+            &self.field_cfg,
+        )?;
+
+        // Downstream Steps 3-7 work generically over `ProjectedTrace`. Pass
+        // the row-major arm — it's what step3_eval_projection's
+        // `evaluate_trace_to_column_mles` consumes most directly.
+        Ok(ProverIdealChecked {
+            base: self.base,
+            field_cfg: self.field_cfg,
+            projected_trace: ProjectedTrace::RowMajor(self.row_major_trace),
+            projected_scalars_fx: self.projected_scalars_fx,
+            ic_proof,
+            ic_eval_point: ic_prover_state.evaluation_point,
+        })
+    }
+});
+
 impl_with_type_bounds!(ProverIdealChecked
 {
     /// Step 3: Evaluation projection (`\psi_a`: `F_q[X] -> F_q`). Samples
@@ -420,7 +489,16 @@ impl_with_type_bounds!(ProverEvalProjected
         mut self,
     ) -> Result<ProverSumchecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
         let num_constraints = count_constraints::<U>();
-        let max_degree = count_max_degree::<U>();
+        // Sumcheck protocol degree must accommodate the actual fold
+        // polynomial's per-variable degree, including `assert_zero`
+        // constraints. Although their values are identically zero on the
+        // hypercube for an honest prover, the polynomial expression has
+        // non-trivial per-variable degree (e.g. `b·(b-1)·s_accum` is
+        // degree 3), and it appears in the fold via
+        // `ConstraintFolder::assert_zero`. Their inclusion is what binds
+        // the committed witness to the assert_zero claims (otherwise a
+        // dishonest prover could violate them undetected).
+        let max_degree = zinc_uair::degree_counter::count_max_degree::<U>();
 
         let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
             &mut self.base.pcs_transcript.fs_transcript,
@@ -673,6 +751,22 @@ where
     /// Runs all protocol steps in sequence and returns the assembled proof.
     /// For per-step control, start with [`Self::step0_commit`] and chain the
     /// individual `stepN_*` methods.
+    ///
+    /// # Path selection
+    ///
+    /// - `MLE_FIRST = false`: always uses the Combined path (row-major,
+    ///   `prove_combined`). Works for any UAIR.
+    /// - `MLE_FIRST = true`: dispatches at runtime based on per-constraint
+    ///   degree:
+    ///   - All non-zero-ideal constraints linear → MLE-first lane
+    ///     (`prove_linear`).
+    ///   - All non-zero-ideal constraints non-linear → falls back to
+    ///     Combined.
+    ///   - Mixed → Hybrid lane (`prove_hybrid`), which routes linear
+    ///     constraints through MLE-first and non-linear through Combined,
+    ///     merging into a single per-constraint claim list.
+    ///   So `MLE_FIRST = true` is always safe and picks the cheapest
+    ///   applicable path automatically.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn prove<const MLE_FIRST: bool, const CHECK_FOR_OVERFLOW: bool>(
         pp: &(
@@ -687,9 +781,31 @@ where
         let committed = Self::step0_commit(pp, trace, num_vars)?;
 
         let ideal_checked = if MLE_FIRST {
-            committed
-                .step1_mle_first(project_scalar)?
-                .step2_ideal_check()?
+            // Classify constraints by degree, ignoring zero-ideal (their
+            // value is substituted with ZERO regardless of lane).
+            let mask = zinc_uair::degree_counter::linear_constraint_mask::<U>();
+            let ideals = zinc_uair::ideal_collector::collect_ideals::<U>(
+                zinc_uair::constraint_counter::count_constraints::<U>(),
+            )
+            .ideals;
+            let (mut any_linear, mut any_nonlinear) = (false, false);
+            for (m, i) in mask.iter().zip(ideals.iter()) {
+                if i.is_zero_ideal() {
+                    continue;
+                }
+                if *m { any_linear = true } else { any_nonlinear = true }
+            }
+            match (any_linear, any_nonlinear) {
+                (true, false) => committed
+                    .step1_mle_first(project_scalar)?
+                    .step2_ideal_check()?,
+                (false, _) => committed
+                    .step1_combined(project_scalar)?
+                    .step2_ideal_check()?,
+                (true, true) => committed
+                    .step1_hybrid(project_scalar)?
+                    .step2_ideal_check()?,
+            }
         } else {
             committed
                 .step1_combined(project_scalar)?

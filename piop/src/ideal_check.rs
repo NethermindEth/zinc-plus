@@ -22,6 +22,7 @@ use zinc_poly::{
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     Uair,
+    degree_counter::linear_constraint_mask,
     ideal::{Ideal, IdealCheck},
     ideal_collector::{IdealOrZero, collect_ideals},
 };
@@ -78,6 +79,45 @@ pub trait IdealCheckProtocol: Uair {
     fn prove_combined<F>(
         transcript: &mut impl Transcript,
         trace_matrix: &RowMajorTrace<F>,
+        projected_scalars: &HashMap<Self::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, Self::Ideal>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable;
+
+    /// Prover for mixed-degree UAIRs: routes each constraint through the
+    /// MLE-first lane (degree ≤ 1, non-zero-ideal) or the combined-poly
+    /// lane (degree > 1, non-zero-ideal). Zero-ideal constraints are
+    /// substituted with `ZERO` as in the other paths.
+    ///
+    /// Both lanes evaluate against the same Fiat-Shamir-sampled IC point,
+    /// so the merged per-constraint values are mathematically identical to
+    /// what the all-Combined path would produce — the verifier sees the
+    /// same `Proof` shape and runs unchanged.
+    ///
+    /// Takes both layouts because the MLE-first lane requires column-major
+    /// while the combined-poly lane requires row-major. Step 1 of the
+    /// protocol projects the trace twice for this path.
+    ///
+    /// # Parameters
+    /// - `transcript`: the Fiat-Shamir transcript.
+    /// - `row_major_trace` / `column_major_trace`: same projected trace in
+    ///   both layouts.
+    /// - `projected_scalars`: UAIR scalars projected to
+    ///   `DynamicPolynomialF<F>`.
+    /// - `num_constraints`: number of constraints this UAIR encodes.
+    /// - `num_vars`: number of variables in trace MLEs.
+    /// - `field_cfg`: random field configuration sampled on the previous
+    ///   steps of the overall protocol.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn prove_hybrid<F>(
+        transcript: &mut impl Transcript,
+        row_major_trace: &RowMajorTrace<F>,
+        column_major_trace: &ColumnMajorTrace<F>,
         projected_scalars: &HashMap<Self::Scalar, DynamicPolynomialF<F>>,
         num_constraints: usize,
         num_vars: usize,
@@ -147,17 +187,38 @@ where
         F::Inner: ConstTranscribable,
         F::Modulus: ConstTranscribable,
     {
+        // Zero-ideal constraints (assert_zero) are identically zero on the
+        // hypercube for an honest prover. They are allowed to have degree
+        // > 1 even in the MLE-first path because we discard their evaluated
+        // values below and substitute `ZERO`: the MLE-first evaluation of a
+        // nonlinear constraint produces a meaningless value, but it is only
+        // meaningless for assert_zero constraints whose "true" MLE value is
+        // known to be zero anyway.
+        let is_zero_ideal: Vec<bool> = collect_ideals::<U>(num_constraints)
+            .ideals
+            .iter()
+            .map(|i| i.is_zero_ideal())
+            .collect();
+
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
         // Evaluate combined polynomials using MLE-first approach:
         // evaluate trace columns at the point, then apply constraints.
-        let combined_mle_values = combined_poly_builder::evaluate_combined_polynomials::<_, U>(
+        let mut combined_mle_values = combined_poly_builder::evaluate_combined_polynomials::<_, U>(
             trace_matrix,
             projected_scalars,
             num_constraints,
             &evaluation_point,
             field_cfg,
         )?;
+
+        // Overwrite the (possibly garbage) values for zero-ideal
+        // constraints with zero before they hit the transcript.
+        for (i, v) in combined_mle_values.iter_mut().enumerate() {
+            if is_zero_ideal[i] {
+                *v = DynamicPolynomialF::ZERO;
+            }
+        }
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
@@ -235,6 +296,102 @@ where
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
+        combined_mle_values.iter().for_each(|combined_mle_value| {
+            transcript
+                .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
+        });
+
+        Ok((
+            Proof {
+                combined_mle_values,
+            },
+            ProverState { evaluation_point },
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn prove_hybrid<F>(
+        transcript: &mut impl Transcript,
+        row_major_trace: &RowMajorTrace<F>,
+        column_major_trace: &ColumnMajorTrace<F>,
+        projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
+    {
+        // Per-constraint classification: linear vs non-linear (by degree),
+        // and zero-ideal vs non-zero-ideal. The three buckets get filled
+        // from different sources — see comment below.
+        let linear_mask = linear_constraint_mask::<U>();
+        let is_zero_ideal: Vec<bool> = collect_ideals::<U>(num_constraints)
+            .ideals
+            .iter()
+            .map(|i| i.is_zero_ideal())
+            .collect();
+        debug_assert_eq!(linear_mask.len(), num_constraints);
+        debug_assert_eq!(is_zero_ideal.len(), num_constraints);
+
+        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+
+        // MLE-first lane: produces correct values for linear non-zero-ideal
+        // slots (and garbage for the rest, which we discard).
+        let linear_values = combined_poly_builder::evaluate_combined_polynomials_unchecked::<_, U>(
+            column_major_trace,
+            projected_scalars,
+            num_constraints,
+            &evaluation_point,
+            field_cfg,
+        )?;
+
+        // Combined-poly lane: build coefficient MLEs only for the
+        // non-linear, non-zero-ideal slots (skip linear and zero-ideal —
+        // those come from the other sources). Reuses the existing
+        // `skip_constraints` plumbing.
+        let skip_combined: Vec<bool> = linear_mask
+            .iter()
+            .zip(is_zero_ideal.iter())
+            .map(|(&lin, &zero_ideal)| lin || zero_ideal)
+            .collect();
+        let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
+            row_major_trace,
+            projected_scalars,
+            num_constraints,
+            field_cfg,
+            &skip_combined,
+        );
+
+        let eq_table = build_eq_x_r_vec(&evaluation_point, field_cfg)?;
+
+        // Merge: zero-ideal → ZERO; linear → MLE-first value;
+        // non-linear → combined-poly value evaluated at the IC point.
+        let combined_mle_values: Vec<DynamicPolynomialF<F>> = cfg_into_iter!(0..num_constraints)
+            .map(|i| {
+                if is_zero_ideal[i] {
+                    DynamicPolynomialF::ZERO
+                } else if linear_mask[i] {
+                    linear_values[i].clone()
+                } else {
+                    let coeffs = combined_mles[i]
+                        .iter()
+                        .map(|coeff_mle| {
+                            zinc_poly::utils::mle_eval_with_eq_table(
+                                &coeff_mle.evaluations,
+                                &eq_table,
+                                field_cfg,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    DynamicPolynomialF::new_trimmed(coeffs)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
         combined_mle_values.iter().for_each(|combined_mle_value| {
             transcript
                 .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
