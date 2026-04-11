@@ -715,6 +715,227 @@ trace row.
 
 ---
 
+## Benchmarks around ECDSA, SHAProxy, and ShaEcdsa
+
+All four ECDSA/SHA-family UAIRs are wired into the criterion harness in
+[protocol/benches/e2e.rs](../protocol/benches/e2e.rs) under the benchmark
+group `"Zinc+ E2E"`. Every bench ID is formatted as
+`<sub-label>/<uair-tag>/nvars=<N>/rate=<R>`, where `<uair-tag>` is one of
+`ECDSA`, `EcdsaLimbs`, `SHAProxy`, `ShaEcdsa`, and `rate=<R>` is the IPRS
+inverse rate tag appended from `RATE_TAG` (`1_4` / `1_8` / `1_16`).
+
+The criterion entry point `e2e_benches` currently activates each of these
+UAIRs at a single `num_vars = 9` (the minimum for the ECDSA UAIRs, since
+their real walk produces 258 rows and `258 ≤ 512 = 2⁹`). Calling the per-
+UAIR functions with other `num_vars` values is supported and only requires
+editing [protocol/benches/e2e.rs:1007-1016](../protocol/benches/e2e.rs#L1007-L1016).
+
+### Per-UAIR bench functions
+
+Four driver functions, one per UAIR. Each registers a family of sub-benches
+against the same `params` string, so all sub-benches for one UAIR share a
+group in the criterion output.
+
+| Driver | UAIR | UAIR tag | Setup type | Verifier bench? |
+|---|---|---|---|:---:|
+| [`bench_ecdsa`](../protocol/benches/e2e.rs#L706)           | `EcdsaUair`         | `ECDSA`      | `EcdsaBenchZincTypes` + `setup_pp_ecdsa`        |   |
+| [`bench_ecdsa_limbs`](../protocol/benches/e2e.rs#L963)     | `EcdsaUairLimbs`    | `EcdsaLimbs` | `BenchZincTypes` + `setup_pp` (i64 cells)       |   |
+| [`bench_sha_proxy`](../protocol/benches/e2e.rs#L562)       | `SHAProxy<i64>`     | `SHAProxy`   | `BenchZincTypes` + `setup_pp` via `do_bench_sha_proxy` | ✓ |
+| [`bench_sha_ecdsa`](../protocol/benches/e2e.rs#L793)       | `ShaProxyEcdsaUair` | `ShaEcdsa`   | `EcdsaBenchZincTypes` + `setup_pp_ecdsa`        | ✓ |
+
+`bench_ecdsa` and `bench_ecdsa_limbs` are prover-only: `EcdsaUairLimbs`
+because it inherits `EcdsaUair`'s non-satisfying witness, and `EcdsaUair`
+because running the verifier on its `Int<4>` integer-equality trace would
+reject it (see the ["Why every ECDSA UAIR in this crate is
+non-satisfying"](#why-every-ecdsa-uair-in-this-crate-is-non-satisfying)
+section). `bench_sha_proxy` and `bench_sha_ecdsa` ship with a verifier
+bench that uses `ZincPlusPiop::verify_full_run`, which runs every step of
+the verifier end-to-end and defers the final accept/reject verdict so the
+timing is not short-circuited by the first check that fails.
+
+### Sub-benches registered per UAIR
+
+For each driver, the following sub-benches are registered against that
+UAIR's `params` string. "Path" refers to the prover's MLE-first vs.
+classical-first fold; `use_mle_first` is computed at runtime from
+`count_effective_max_degree::<U>()`, which *ignores zero-ideal
+(`assert_zero`) constraints* — these are skipped in the `fq_sumcheck`
+fold and discarded in `prove_linear`. The practical consequence is that
+every UAIR in this family runs MLE-first: `SHAProxy` is effectively
+linear over its ideal-check constraints, and all non-linear ECDSA work
+is behind `assert_zero`.
+
+| Sub-bench ID            | `bench_ecdsa` | `bench_ecdsa_limbs` | `bench_sha_proxy` | `bench_sha_ecdsa` | What it measures |
+|---|:---:|:---:|:---:|:---:|---|
+| `Prove (E2E)`           | ✓ | — | ✓ | ✓ | Full prover wall-clock, single shot per iter |
+| `Prove (Combined)`      | — | ✓ | — | — | Legacy single-shot prover bench (the limbs driver has not been migrated to per-step) |
+| `Step 0: Commit`        | ✓ | — | ✓ | ✓ | PCS commit phase (`StepTimings::commit`) |
+| `Step 1: Prime Projection` | ✓ | — | ✓ | ✓ | `StepTimings::prime_projection` |
+| `Step 2: Ideal Check`   | ✓ | — | ✓ | ✓ | `StepTimings::ideal_check` |
+| `Step 3: Eval Projection` | ✓ | — | ✓ | ✓ | `StepTimings::eval_projection` |
+| `Step 4: Fq Sumcheck`   | ✓ | — | ✓ | ✓ | `StepTimings::fq_sumcheck` |
+| `Step 5: Multipoint Eval` | ✓ | — | ✓ | ✓ | `StepTimings::multipoint_eval` |
+| `Step 6: Lift-and-Project` | ✓ | — | ✓ | ✓ | `StepTimings::lift_and_project` |
+| `Step 7: PCS Open`      | ✓ | — | ✓ | ✓ | `StepTimings::pcs_open` |
+| `Verify`                | — | — | ✓ (`SHAProxy` only, via `do_bench`) | — | Soundness-path verifier. `do_bench_sha_proxy` routes through `do_bench`, which registers a `Verify` bench; on SHAProxy's non-satisfying witness this measures the time until the verifier bails on the first failed check. Not registered for the ECDSA drivers. |
+| `Verify (full run)`     | — | — | ✓ | ✓ | `ZincPlusPiop::verify_full_run` — runs every sub-protocol (sumcheck, ideal check, multipoint eval, PCS) to completion and defers the error. Prints `accept`/`reject (<variant>)` once before the timing loop. Expected reject reason for both: `IdealCheck`. Observed wall-clock at nvars=9 / rate=1/4: ~10 ms (SHAProxy), ~44 ms (ShaEcdsa). |
+
+The per-step mechanism comes from
+[`STEP_PICKS`](../protocol/benches/e2e.rs#L109-L118): each sample still
+runs the full prover once via `prove_with_step_timings`, then accumulates
+only the selected field of `StepTimings` into criterion's measurement.
+This means the per-step bench is ~8× more expensive than a monolithic
+`Prove (E2E)` sample, but it attributes wall-clock to individual phases
+without needing eight separate prover runs per sample.
+
+`bench_ecdsa_limbs` is deliberately the odd one out: it registers only a
+single `Prove (Combined)` bench at [protocol/benches/e2e.rs:969](../protocol/benches/e2e.rs#L969)
+and has not been split into per-step sub-benches. The limbs trace is the
+most expensive to prove (84 columns, 96 constraints), so running the
+prover eight times per sample would inflate the bench runtime beyond the
+point at which it's useful.
+
+### Proof-size logging
+
+`bench_ecdsa`, `bench_sha_ecdsa`, and `do_bench` call `eprint_proof_size`
+once after generating a reference proof for the verifier. This prints
+proof sizes to stderr and is not a criterion measurement. `bench_sha_proxy`
+inherits this from `do_bench_sha_proxy → do_bench`. `bench_ecdsa_limbs`
+does not log proof size.
+
+### Bench-time feature flags
+
+The same four drivers can be run under several crate-feature combinations,
+which affect the setup and the `RATE_TAG` appended to every `params`
+string but do *not* change which sub-benches are registered:
+
+| Feature | Effect | RATE_TAG |
+|---|---|---|
+| *(default)*                    | IPRS inverse rate 1/4, `PnttConfigF12289`, no extra tree depth                                              | `rate=1_4`  |
+| `bench-rate-1-8`               | `REP = 8`, +1 IPRS tree depth (`EXTRA_DEPTH = 1` because `REP >= 8`), still `PnttConfigF12289`              | `rate=1_8`  |
+| `bench-rate-1-16`              | `REP = 16`, +1 IPRS tree depth, switches base field to `PnttConfigF65537` (codewords would overflow F12289 otherwise). Takes precedence over `bench-rate-1-8` | `rate=1_16` |
+| `bench-extra-depth-rate-1-4`   | Forces `EXTRA_DEPTH = 1` on rate 1/4 so the IPRS tree matches the 1/8 shape at the smaller inverse rate     | `rate=1_4`  |
+| `unchecked`                    | Sets `PERFORM_CHECKS = zinc_utils::UNCHECKED`, disabling the prover/verifier's internal consistency checks. Affects the body of every sub-bench above | (unchanged) |
+
+The relevant source is
+[protocol/benches/e2e.rs:42-93](../protocol/benches/e2e.rs#L42-L93); the
+feature declarations live in [protocol/Cargo.toml:39-43](../protocol/Cargo.toml#L39-L43).
+
+### Benchmark matrix — total sub-benches per run
+
+At the current `num_vars = 9` activation, one `cargo bench -p protocol
+--bench e2e` run registers the following sub-benches for this UAIR family
+(one row per bench ID):
+
+- **ECDSA** (`bench_ecdsa`): 1 × `Prove (E2E)` + 8 × `Step N: ...` = **9**
+- **EcdsaLimbs** (`bench_ecdsa_limbs`): 1 × `Prove (Combined)` = **1**
+- **SHAProxy** (`bench_sha_proxy` → `do_bench_sha_proxy` + `bench_sha_proxy_verify_full_run`): 1 × `Prove (E2E)` + 8 × `Step N: ...` + 1 × `Verify` + 1 × `Verify (full run)` = **11**
+- **ShaEcdsa** (`bench_sha_ecdsa`): 1 × `Prove (E2E)` + 8 × `Step N: ...` + 1 × `Verify (full run)` = **10**
+
+Total: **31** sub-benches across the four UAIRs at a single
+`(num_vars, rate)` point. Multiply by the chosen rate feature to sweep
+`rate=1_4 / 1_8 / 1_16`, and by each `num_vars` value you wire into
+`e2e_benches` if you extend the harness beyond the default `9`.
+
+### Running the benchmarks
+
+The harness is the `e2e` bench in the `zinc-protocol` crate (`name =
+"e2e", harness = false` in [protocol/Cargo.toml:46-47](../protocol/Cargo.toml#L46-L47)),
+so everything goes through `cargo bench -p zinc-protocol --bench e2e`.
+Arguments after `--` are passed to criterion; criterion treats the first
+positional argument as a regex filter on the full bench ID
+(`<sub-label>/<uair-tag>/nvars=<N>/rate=<R>`).
+
+**Run everything (all four UAIRs, default rate 1/4):**
+```bash
+cargo bench -p zinc-protocol --bench e2e
+```
+
+**Restrict to one UAIR** — filter by the UAIR tag anchored with `/` so
+`ECDSA` does not also match `ShaEcdsa`:
+```bash
+# EcdsaUair only
+cargo bench -p zinc-protocol --bench e2e -- '/ECDSA/'
+
+# EcdsaUairLimbs only
+cargo bench -p zinc-protocol --bench e2e -- '/EcdsaLimbs/'
+
+# SHAProxy only
+cargo bench -p zinc-protocol --bench e2e -- '/SHAProxy/'
+
+# ShaProxyEcdsaUair only
+cargo bench -p zinc-protocol --bench e2e -- '/ShaEcdsa/'
+```
+
+**Restrict to one sub-bench across all UAIRs:**
+```bash
+# Full prover wall-clock only
+cargo bench -p zinc-protocol --bench e2e -- 'Prove \(E2E\)'
+
+# Only the PCS commit phase
+cargo bench -p zinc-protocol --bench e2e -- 'Step 0: Commit'
+
+# Only the Fq sumcheck phase
+cargo bench -p zinc-protocol --bench e2e -- 'Step 4: Fq Sumcheck'
+
+# Both verifier-full-run benches (SHAProxy + ShaEcdsa)
+cargo bench -p zinc-protocol --bench e2e -- 'Verify \(full run\)'
+```
+
+**Pin a specific (sub-bench, UAIR) pair:**
+```bash
+# ShaEcdsa's PCS-open step only
+cargo bench -p zinc-protocol --bench e2e -- 'Step 7: PCS Open/ShaEcdsa/'
+
+# SHAProxy soundness-path Verify only (not Verify (full run))
+cargo bench -p zinc-protocol --bench e2e -- '^Verify/SHAProxy/'
+```
+
+**Switch IPRS rate via crate features** — these are mutually exclusive
+in spirit; `bench-rate-1-16` takes precedence if both 1/8 and 1/16 are
+passed:
+```bash
+# Rate 1/8 (F12289, +1 tree depth)
+cargo bench -p zinc-protocol --bench e2e --features bench-rate-1-8
+
+# Rate 1/16 (F65537, +1 tree depth)
+cargo bench -p zinc-protocol --bench e2e --features bench-rate-1-16
+
+# Rate 1/4 with forced +1 tree depth (match rate=1/8's IPRS shape)
+cargo bench -p zinc-protocol --bench e2e --features bench-extra-depth-rate-1-4
+```
+
+**Skip internal consistency checks** — `PERFORM_CHECKS =
+zinc_utils::UNCHECKED` inside every prover/verifier call. Combine with
+a rate feature to get an "unchecked rate=1/8" run, etc.:
+```bash
+cargo bench -p zinc-protocol --bench e2e --features unchecked
+cargo bench -p zinc-protocol --bench e2e --features 'unchecked,bench-rate-1-8'
+```
+
+**Quick smoke run** — skip the statistical phase so each bench ID runs
+just long enough to register and print once (useful for `Verify (full
+run)` to see the `accept/reject (<variant>)` eprintln without waiting
+for a full criterion sample):
+```bash
+cargo bench -p zinc-protocol --bench e2e -- '/ShaEcdsa/' --profile-time 1
+```
+
+**Save and compare baselines** — criterion baseline flags flow through
+the same `--` passthrough:
+```bash
+cargo bench -p zinc-protocol --bench e2e -- --save-baseline before
+# ... make a change ...
+cargo bench -p zinc-protocol --bench e2e -- --baseline before
+```
+
+To sweep `num_vars` beyond the default `9`, edit the calls in
+[protocol/benches/e2e.rs:1007-1016](../protocol/benches/e2e.rs#L1007-L1016)
+— there is no runtime flag for this; the value is passed directly into
+each `bench_*` call.
+
+---
+
 ## Quick reference
 
 Column counts are listed as `BinPoly / ArbPoly / Int`, matching the
