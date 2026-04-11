@@ -17,7 +17,7 @@ use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     Uair, UairSignature, UairTrace, constraint_counter::count_constraints,
-    degree_counter::count_max_degree,
+    degree_counter::count_effective_max_degree,
 };
 use zinc_utils::{
     add, cfg_join, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
@@ -420,7 +420,11 @@ impl_with_type_bounds!(ProverEvalProjected
         mut self,
     ) -> Result<ProverSumchecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
         let num_constraints = count_constraints::<U>();
-        let max_degree = count_max_degree::<U>();
+        // Skip zero-ideal constraints in the fq_sumcheck — their values are
+        // identically zero on the hypercube, and ConstraintFolder::assert_zero
+        // is a no-op. The effective max degree is the max over remaining
+        // (non-zero-ideal) constraints only.
+        let max_degree = count_effective_max_degree::<U>();
 
         let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
             &mut self.base.pcs_transcript.fs_transcript,

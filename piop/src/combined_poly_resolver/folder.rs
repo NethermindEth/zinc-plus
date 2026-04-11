@@ -56,8 +56,17 @@ impl<'a, F: PrimeField> ConstraintBuilder for ConstraintFolder<'a, F> {
         self.fold_constraint(expr);
     }
 
+    /// For an honest prover, an `assert_zero` constraint is identically
+    /// zero on the hypercube, so its contribution to the folded RLC is 0
+    /// and can be skipped. We still advance `current_constraint` so that
+    /// the challenge-power indexing remains aligned with the raw
+    /// constraint count seen by the non-folding paths (e.g. the ideal
+    /// check's coefficient-MLE builder, which also assigns powers in
+    /// declaration order). The prover and verifier both use this folder,
+    /// so the skip is symmetric.
     #[inline(always)]
-    fn assert_zero(&mut self, expr: Self::Expr) {
-        self.fold_constraint(expr);
+    #[allow(clippy::arithmetic_side_effects)]
+    fn assert_zero(&mut self, _expr: Self::Expr) {
+        self.current_constraint += 1;
     }
 }
