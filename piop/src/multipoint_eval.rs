@@ -136,20 +136,54 @@ where
         let alphas: Vec<F> = transcript.get_field_challenges(num_down_cols, field_cfg);
         let gammas: Vec<F> = transcript.get_field_challenges(num_cols, field_cfg);
 
-        // Step 2: Build the two selector MLEs:
-        //   eq_r(b)   = eq(b, r')
-        //   next_c_r_mle(b) = next_c_mle(r', b)
+        // Step 2: Build the eq selector MLE
+        //   eq_r(b) = eq(b, r')
         let eq_r = build_eq_x_r_inner(eval_point, field_cfg)?;
-        let (next_mles, down_cols): (Vec<_>, Vec<_>) = shifts
+
+        // Group shifts by source column (first-encounter order) so that
+        // shifts sharing a source column collapse into a single product term
+        // `next_combo_s(b) * v_s(b)` in the sumcheck, where
+        //   next_combo_s(b) = Σ_{k: src(k)=s} α_k * next_{c_k}(r', b)
+        // is a linear combination of MLEs (itself multilinear).
+        let mut unique_sources: Vec<usize> = Vec::new();
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for (k, spec) in shifts.iter().enumerate() {
+            let src = spec.source_col();
+            if let Some(pos) = unique_sources.iter().position(|&s| s == src) {
+                groups[pos].push(k);
+            } else {
+                unique_sources.push(src);
+                groups.push(vec![k]);
+            }
+        }
+
+        // Build one `next_combo_s` MLE per unique source column, and clone
+        // each source column MLE once.
+        let mut next_combo_mles: Vec<DenseMultilinearExtension<F::Inner>> =
+            Vec::with_capacity(unique_sources.len());
+        for group in &groups {
+            let mut acc: Vec<F::Inner> = vec![zero_inner.clone(); 1 << num_vars];
+            for &k in group {
+                let next = build_next_c_r_mle(eval_point, shifts[k].shift_amount(), field_cfg)?;
+                let alpha_k = &alphas[k];
+                // acc[b] += alpha_k * next[b]  (in F domain, written back to inner)
+                for (acc_b, next_b) in acc.iter_mut().zip(next.evaluations.iter()) {
+                    let next_f = F::new_unchecked_with_cfg(next_b.clone(), field_cfg);
+                    let acc_f = F::new_unchecked_with_cfg(acc_b.clone(), field_cfg);
+                    *acc_b = (acc_f + alpha_k.clone() * next_f).into_inner();
+                }
+            }
+            next_combo_mles.push(DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                acc,
+                zero_inner.clone(),
+            ));
+        }
+        let down_cols: Vec<DenseMultilinearExtension<F::Inner>> = unique_sources
             .iter()
-            .map(|spec| {
-                let next = build_next_c_r_mle(eval_point, spec.shift_amount(), field_cfg)?;
-                let col = trace_mles[spec.source_col()].clone();
-                Ok((next, col))
-            })
-            .collect::<Result<Vec<_>, ArithErrors>>()?
-            .into_iter()
-            .unzip();
+            .map(|&s| trace_mles[s].clone())
+            .collect();
+        let num_unique_sources = unique_sources.len();
 
         // Precombine up cols with gammas, precombined[b] = Σ_j γ_j trace[j][b]
         let precombined = {
@@ -175,17 +209,20 @@ where
             )
         };
 
-        // Step 3: Pack MLEs: [eq_r, next_mles[..], precombined, down_cols[..]]
-        let mut mles = Vec::with_capacity(2 + 2 * num_down_cols);
+        // Step 3: Pack MLEs: [eq_r, next_combo[..], precombined, down_cols[..]]
+        // where next_combo/down_cols are indexed by unique source column.
+        let mut mles = Vec::with_capacity(2 + 2 * num_unique_sources);
         mles.push(eq_r);
-        mles.extend(next_mles);
+        mles.extend(next_combo_mles);
         mles.push(precombined);
         mles.extend(down_cols);
 
         // Step 4: Run sumcheck with degree=2.
 
-        // comb_fn([eq_r, next_mles[..], precombined, down_cols[..]]) =
-        //     eq_r * precombined + \alphas[i] * next_mle[i] * down_cols[i]
+        // comb_fn([eq_r, next_combo[..], precombined, down_cols[..]]) =
+        //     eq_r * precombined + Σ_s next_combo[s] * down_cols[s]
+        // The α_k batching factors are already absorbed into next_combo, so
+        // the closure no longer references `alphas`.
         let (sumcheck_proof, sumcheck_prover_state) = MLSumcheck::prove_as_subprotocol(
             transcript,
             mles,
@@ -193,15 +230,12 @@ where
             2,
             |mle_values: &[F]| {
                 let eq_val = &mle_values[0];
-                let precombined = &mle_values[num_down_cols + 1];
-                alphas
-                    .iter()
-                    .enumerate()
-                    .fold(eq_val.clone() * precombined, |acc, (i, alpha)| {
-                        let next = &mle_values[1 + i];
-                        let down_col = &mle_values[num_down_cols + 2 + i];
-                        acc + alpha.clone() * next * down_col
-                    })
+                let precombined = &mle_values[num_unique_sources + 1];
+                (0..num_unique_sources).fold(eq_val.clone() * precombined, |acc, s| {
+                    let next = &mle_values[1 + s];
+                    let down_col = &mle_values[num_unique_sources + 2 + s];
+                    acc + next.clone() * down_col
+                })
             },
             field_cfg,
         );
