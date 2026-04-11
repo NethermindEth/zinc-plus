@@ -56,7 +56,34 @@ const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
 };
 
 /// Repetition factor for linear code, an inverse rate.
+/// Enable `bench-rate-1-8` or `bench-rate-1-16` to switch from the default
+/// rate 1/4 to rate 1/8 or rate 1/16. `bench-rate-1-16` takes precedence
+/// if both are set.
+#[cfg(feature = "bench-rate-1-16")]
+const REP: usize = 16;
+#[cfg(all(feature = "bench-rate-1-8", not(feature = "bench-rate-1-16")))]
+const REP: usize = 8;
+#[cfg(not(any(feature = "bench-rate-1-8", feature = "bench-rate-1-16")))]
 const REP: usize = 4;
+
+const RATE_TAG: &str = match REP {
+    16 => "/rate=1_16",
+    8 => "/rate=1_8",
+    _ => "/rate=1_4",
+};
+
+/// For higher inverse rates (1/8, 1/16) we bump the IPRS tree depth by one
+/// beyond `new_with_optimal_depth`'s default heuristic.
+const EXTRA_DEPTH: usize = if REP >= 8 { 1 } else { 0 };
+
+/// Mirrors `IprsCode::new_with_optimal_depth`'s formula, then adds
+/// `EXTRA_DEPTH`. Kept in sync with zip-plus/src/code/iprs.rs.
+fn iprs_depth(row_len: usize) -> usize {
+    const MAX_BASE_COLS_LOG2: usize = 7;
+    let target_base_len = 1usize << MAX_BASE_COLS_LOG2;
+    let base = 1.max(((1.max(row_len / target_base_len)).ilog2() as usize).div_ceil(3));
+    base + EXTRA_DEPTH
+}
 
 /// Names and selectors for the eight per-step prover sub-benches used by all
 /// "Prove (Combined)" benches in this file. Each entry is
@@ -138,7 +165,11 @@ where
     CombDotChal: InnerProduct<Comb, Chal, CombR> + Send + Sync,
     ArrCombRDotChal: InnerProduct<[CombR], Chal, CombR> + Send + Sync,
 {
-    const NUM_COLUMN_OPENINGS: usize = 147;
+    const NUM_COLUMN_OPENINGS: usize = match REP {
+        16 => 72,
+        8 => 96,
+        _ => 144,
+    };
     type Eval = Eval;
     type Cw = Cw;
     type Fmod = Fmod;
@@ -288,15 +319,15 @@ fn setup_pp(num_vars: usize) -> Pp<BenchZincTypes> {
     (
         ZipPlus::setup(
             poly_size,
-            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+            IprsCode::new(poly_size, iprs_depth(poly_size)).unwrap(),
         ),
         ZipPlus::setup(
             poly_size,
-            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+            IprsCode::new(poly_size, iprs_depth(poly_size)).unwrap(),
         ),
         ZipPlus::setup(
             poly_size,
-            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+            IprsCode::new(poly_size, iprs_depth(poly_size)).unwrap(),
         ),
     )
 }
@@ -336,7 +367,7 @@ fn do_bench<Zt, U, IdealOverF>(
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
 {
     let pp = setup(num_vars);
-    let params = format!("{label}/nvars={num_vars}");
+    let params = format!("{label}/nvars={num_vars}{RATE_TAG}");
 
     macro_rules! zinc_plus {
         () => {
@@ -551,15 +582,15 @@ fn setup_pp_ecdsa(num_vars: usize) -> Pp<EcdsaBenchZincTypes> {
     (
         ZipPlus::setup(
             poly_size,
-            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+            IprsCode::new(poly_size, iprs_depth(poly_size)).unwrap(),
         ),
         ZipPlus::setup(
             poly_size,
-            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+            IprsCode::new(poly_size, iprs_depth(poly_size)).unwrap(),
         ),
         ZipPlus::setup(
             poly_size,
-            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+            IprsCode::new(poly_size, iprs_depth(poly_size)).unwrap(),
         ),
     )
 }
@@ -568,7 +599,7 @@ fn bench_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     let mut rng = rng();
     let trace = EcdsaUair::generate_random_trace(num_vars, &mut rng);
     let pp = setup_pp_ecdsa(num_vars);
-    let params = format!("ECDSA/nvars={num_vars}");
+    let params = format!("ECDSA/nvars={num_vars}{RATE_TAG}");
 
     // Every ECDSA constraint is asserted via `assert_zero`, so its
     // effective max degree (over non-zero-ideal constraints) is 0, and
@@ -655,7 +686,7 @@ fn bench_sha_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     let mut rng = rng();
     let trace = ShaProxyEcdsaUair::generate_random_trace(num_vars, &mut rng);
     let pp = setup_pp_ecdsa(num_vars);
-    let params = format!("ShaEcdsa/nvars={num_vars}");
+    let params = format!("ShaEcdsa/nvars={num_vars}{RATE_TAG}");
 
     // Raw max_degree = 5 (from ECDSA's deepest assert_zero), but every
     // ECDSA constraint is asserted via `assert_zero` and so skipped in
@@ -749,7 +780,7 @@ fn bench_ecdsa_limbs(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     let mut rng = rng();
     let trace = EcdsaUairLimbs::generate_random_trace(num_vars, &mut rng);
     let pp = setup_pp(num_vars);
-    let params = format!("EcdsaLimbs/nvars={num_vars}");
+    let params = format!("EcdsaLimbs/nvars={num_vars}{RATE_TAG}");
 
     group.bench_function(BenchmarkId::new("Prove (Combined)", &params), |bench| {
         bench.iter(|| {
