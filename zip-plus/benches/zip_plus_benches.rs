@@ -70,23 +70,21 @@ impl RaaConfig for BenchRaaConfig {
     const CHECK_FOR_OVERFLOWS: bool = PERFORM_CHECKS;
 }
 
-type SomeRaaCode<const D_PLUS_ONE: usize> =
+type BenchRaaCode<const D_PLUS_ONE: usize> =
     RaaCode<BenchZipPlusTypes<i32, D_PLUS_ONE>, BenchRaaConfig, 4>;
 
-type SomeIprsCode<Twiddle, const D_PLUS_ONE: usize, const CHECK: bool> =
-    IprsCode<BenchZipPlusTypes<Twiddle, D_PLUS_ONE>, PnttConfigF65537, 4, CHECK>;
+type BenchIprsCode<Twiddle, const D_PLUS_ONE: usize> =
+    IprsCode<BenchZipPlusTypes<Twiddle, D_PLUS_ONE>, PnttConfigF65537, 4, PERFORM_CHECKS>;
 
 fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");
 
-    do_bench::<BenchZipPlusTypes<i32, 32>, SomeRaaCode<_>, PERFORM_CHECKS>(
-        &mut group,
-        |poly_size| RaaCode::new(poly_size.isqrt().next_power_of_two()),
-    );
-    do_bench::<BenchZipPlusTypes<i32, 64>, SomeRaaCode<_>, PERFORM_CHECKS>(
-        &mut group,
-        |poly_size| RaaCode::new(poly_size.isqrt().next_power_of_two()),
-    );
+    do_bench::<BenchZipPlusTypes<i32, 32>, _, PERFORM_CHECKS>(&mut group, |poly_size| {
+        Some(BenchRaaCode::new(poly_size.isqrt().next_power_of_two()))
+    });
+    do_bench::<BenchZipPlusTypes<i32, 64>, _, PERFORM_CHECKS>(&mut group, |poly_size| {
+        Some(BenchRaaCode::new(poly_size.isqrt().next_power_of_two()))
+    });
 
     group.finish();
 }
@@ -95,17 +93,19 @@ fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS");
 
     // Use flat single-row Zip+ matrix
-    do_bench::<BenchZipPlusTypes<i64, 32>, SomeIprsCode<i64, 32, PERFORM_CHECKS>, PERFORM_CHECKS>(
-        &mut group,
-        |poly_size| IprsCode::new_with_optimal_depth(poly_size).unwrap(),
-    );
-    do_bench::<BenchZipPlusTypes<i64, 64>, SomeIprsCode<i64, 64, PERFORM_CHECKS>, PERFORM_CHECKS>(
-        &mut group,
-        |poly_size| IprsCode::new_with_optimal_depth(poly_size).unwrap(),
-    );
+    do_bench::<BenchZipPlusTypes<i64, 32>, _, PERFORM_CHECKS>(&mut group, |poly_size| {
+        BenchIprsCode::new_with_optimal_depth(poly_size).ok()
+    });
+    do_bench::<BenchZipPlusTypes<i64, 64>, _, PERFORM_CHECKS>(&mut group, |poly_size| {
+        BenchIprsCode::new_with_optimal_depth(poly_size).ok()
+    });
 
     group.finish();
 }
 
-criterion_group!(benches, zip_plus_benchmarks_raa, zip_plus_benchmarks_iprs);
+criterion_group! {
+    name = benches;
+    config = Criterion::default().sample_size(500);
+    targets = zip_plus_benchmarks_raa, zip_plus_benchmarks_iprs
+}
 criterion_main!(benches);

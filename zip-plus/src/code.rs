@@ -22,6 +22,10 @@ pub trait LinearCode<Zt: ZipTypes>: Debug + Eq + Sync + Send {
     /// Length of each encoded codeword (output length after encoding)
     fn codeword_len(&self) -> usize;
 
+    /// String representation of the parameters of this linear code, used for
+    /// benchmarks. Should start with "row_len=X".
+    fn params_string(&self) -> String;
+
     /// Encodes a row of cryptographic integers using this linear encoding
     /// scheme.
     ///

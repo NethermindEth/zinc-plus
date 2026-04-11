@@ -28,6 +28,8 @@ where
     Config: PnttConfig,
 {
     pub fn new(row_len: usize, depth: usize) -> Result<Self, ZipError> {
+        // TODO(alex): Calculate max expected Zt::Cw::COEFF_BIT_WIDTH to ensure in
+        //             advance that the encoding will not overflow
         Ok(Self {
             pntt_params: Radix8PnttParams::new(row_len, depth, REP)?,
             _phantom: Default::default(),
@@ -36,10 +38,10 @@ where
 
     /// Create a new IPRS code with the optimal depth heuristics trying to keep
     /// number of columns in the base matrix small.
-    /// Currently, keeps number of columns <= 2^7 but this might be tweaked in
+    /// Currently, keeps number of columns <= 2^8 but this might be tweaked in
     /// the future.
     pub fn new_with_optimal_depth(row_len: usize) -> Result<Self, ZipError> {
-        const MAX_BASE_COLS_LOG2: usize = 7;
+        const MAX_BASE_COLS_LOG2: usize = 8;
 
         let target_base_len = 1 << MAX_BASE_COLS_LOG2;
         // We want depth to be at least 1.
@@ -135,6 +137,14 @@ where
         self.pntt_params.codeword_len
     }
 
+    fn params_string(&self) -> String {
+        format!(
+            "row_len={}, rate=1/{REP}, depth={}",
+            self.row_len(),
+            self.pntt_params.depth
+        )
+    }
+
     fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {
         self.encode_inner(row)
     }
@@ -164,8 +174,8 @@ where
     Config: PnttConfig,
     Zt: ZipTypes,
 {
-    fn eq(&self, _other: &Self) -> bool {
-        true // All IPRS codes with the same config are identical.
+    fn eq(&self, other: &Self) -> bool {
+        self.pntt_params == other.pntt_params
     }
 }
 
@@ -179,9 +189,29 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pcs::test_utils::*;
+    use crate::pcs::{structs::ZipPlus, test_utils::*};
     use crypto_bigint::U64;
-    use zinc_utils::CHECKED;
+    use crypto_primitives::{
+        FixedSemiring, boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
+    };
+    use rand::{
+        distr::{Distribution, StandardUniform},
+        prelude::ThreadRng,
+    };
+    use zinc_poly::{
+        mle::{DenseMultilinearExtension, MultilinearExtensionRand},
+        univariate::{
+            binary::{BinaryPoly, BinaryPolyInnerProduct},
+            dense::{DensePolyInnerProduct, DensePolynomial},
+        },
+    };
+    use zinc_primality::MillerRabin;
+    use zinc_transcript::traits::ConstTranscribable;
+    use zinc_utils::{
+        CHECKED,
+        inner_product::{MBSInnerProduct, ScalarProduct},
+        named::Named,
+    };
 
     const INT_LIMBS: usize = U64::LIMBS;
     const N: usize = INT_LIMBS;
@@ -202,5 +232,87 @@ mod tests {
         assert!(Code::new_with_optimal_depth(8).is_ok());
         assert!(Code::new_with_optimal_depth(12).is_err());
         assert!(Code::new_with_optimal_depth(16).is_ok());
+    }
+
+    fn do_encode<Zt, const REP: usize>(num_vars: usize)
+    where
+        Zt: ZipTypes,
+        Zt::Eval: for<'a> MulByScalar<&'a PnttInt, Zt::Cw>,
+        Zt::CombR: for<'a> MulByScalar<&'a PnttInt>,
+        Zt::Cw: CheckedAdd + for<'a> MulByScalar<&'a PnttInt>,
+        StandardUniform: Distribution<Zt::Eval>,
+    {
+        let mut rng = ThreadRng::default();
+        let poly_size: usize = 1 << num_vars;
+        let mle = DenseMultilinearExtension::rand(num_vars, &mut rng);
+
+        let code = IprsCode::<Zt, PnttConfigF65537, 4, CHECKED>::new_with_optimal_depth(poly_size)
+            .unwrap();
+        let pp = ZipPlus::setup(poly_size, code);
+        ZipPlus::<Zt, _>::encode_rows(&pp, &mle.evaluations);
+    }
+
+    /// Test the widest integer encoding used in benchmarks
+    #[test]
+    fn encode_bench_int() {
+        struct BenchZipTypes {}
+        impl ZipTypes for BenchZipTypes {
+            const NUM_COLUMN_OPENINGS: usize = 147;
+            type Eval = i32;
+            type Cw = i128;
+            type Fmod = Uint<{ INT_LIMBS * 4 }>;
+            type PrimeTest = MillerRabin;
+            type Chal = i128;
+            type Pt = i128;
+            type CombR = Int<{ INT_LIMBS * 3 }>;
+            type Comb = Self::CombR;
+            type EvalDotChal = ScalarProduct;
+            type CombDotChal = ScalarProduct;
+            type ArrCombRDotChal = MBSInnerProduct;
+        }
+
+        do_encode::<BenchZipTypes, 4>(14);
+    }
+
+    /// Test the widest binary polynomial encoding used in benchmarks
+    #[test]
+    fn encode_bench_poly() {
+        const D_PLUS_ONE: usize = 32;
+
+        struct BenchZipPlusTypes<CwCoeff>(PhantomData<CwCoeff>);
+
+        impl<CwCoeff> ZipTypes for BenchZipPlusTypes<CwCoeff>
+        where
+            CwCoeff: ConstTranscribable
+                + Copy
+                + Default
+                + FromRef<Boolean>
+                + Named
+                + FixedSemiring
+                + Send
+                + Sync,
+            Int<5>: FromRef<CwCoeff>,
+        {
+            const NUM_COLUMN_OPENINGS: usize = 147;
+            type Eval = BinaryPoly<D_PLUS_ONE>;
+            type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
+            type Fmod = Uint<{ INT_LIMBS * 4 }>;
+            type PrimeTest = MillerRabin;
+            type Chal = i128;
+            type Pt = i128;
+            type CombR = Int<{ INT_LIMBS * 5 }>;
+            type Comb = DensePolynomial<Self::CombR, D_PLUS_ONE>;
+            type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, D_PLUS_ONE>;
+            type CombDotChal = DensePolyInnerProduct<
+                Self::CombR,
+                Self::Chal,
+                Self::CombR,
+                MBSInnerProduct,
+                D_PLUS_ONE,
+            >;
+            type ArrCombRDotChal = MBSInnerProduct;
+        }
+
+        do_encode::<BenchZipPlusTypes<i64>, 4>(14);
     }
 }
