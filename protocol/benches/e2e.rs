@@ -30,7 +30,7 @@ use zinc_test_uair::{
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
     Uair, UairTrace,
-    degree_counter::count_max_degree,
+    degree_counter::count_effective_max_degree,
     ideal::{DegreeOneIdeal, Ideal, IdealCheck, ImpossibleIdeal, rotation::RotationIdeal},
     ideal_collector::IdealOrZero,
 };
@@ -348,7 +348,11 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
 
     bench_prove!("Prove (Combined)", false);
 
-    if count_max_degree::<U>() <= 1 {
+    // Effective max degree excludes zero-ideal (assert_zero) constraints,
+    // which are skipped in the fq_sumcheck fold. So MLE-first is valid for
+    // any UAIR whose *non*-zero-ideal constraints are all linear, even if
+    // some assert_zero constraints have higher degree (e.g. ShaEcdsa).
+    if count_effective_max_degree::<U>() <= 1 {
         bench_prove!("Prove (MLE-first)", true);
     }
 
@@ -471,7 +475,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
         run = |s| s.step1_combined(project_scalar),
     );
 
-    if count_max_degree::<U>() <= 1 {
+    if count_effective_max_degree::<U>() <= 1 {
         step_bench!(
             "Prove" / "1: Prime projection (MLE-first)",
             setup = || p_committed.clone(),
@@ -485,7 +489,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
         run = |s| s.step2_ideal_check(),
     );
 
-    if count_max_degree::<U>() <= 1 {
+    if count_effective_max_degree::<U>() <= 1 {
         let p_projected_mle = p_committed.clone().step1_mle_first(project_scalar).unwrap();
         step_bench!(
             "Prove" / "2: Ideal check (MLE-first)",
