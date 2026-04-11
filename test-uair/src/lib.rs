@@ -557,7 +557,7 @@ where
     fn signature() -> UairSignature {
         // 14 binary_poly cols, 0 arbitrary_poly cols, 4 int cols.
         let total = TotalColumnLayout::new(14, 0, 4);
-        // 17 binary-poly shifts + 4 int shifts = 21 shifts total.
+        // 21 binary-poly shifts + 4 int shifts = 25 shifts total.
         // Multiple shifts per source_col are supported and `UairSignature::new`
         // sorts them stably by source_col. We write them in source_col order so
         // the table-vs-code mapping is obvious.
@@ -573,10 +573,12 @@ where
             // bp[2], bp[3]: shift 16    -> down.binary_poly[6..8]
             ShiftSpec::new(2, 16),
             ShiftSpec::new(3, 16),
-            // bp[4]: shifts 9, 16       -> down.binary_poly[8..10]
+            // bp[4]: shifts 1, 9, 14, 16  -> down.binary_poly[8..12]
+            ShiftSpec::new(4, 1),
             ShiftSpec::new(4, 9),
+            ShiftSpec::new(4, 14),
             ShiftSpec::new(4, 16),
-            // bp[5..=11]: shift 16      -> down.binary_poly[10..17]
+            // bp[5..=13]: shift 16      -> down.binary_poly[12..21]
             ShiftSpec::new(5, 16),
             ShiftSpec::new(6, 16),
             ShiftSpec::new(7, 16),
@@ -584,6 +586,8 @@ where
             ShiftSpec::new(9, 16),
             ShiftSpec::new(10, 16),
             ShiftSpec::new(11, 16),
+            ShiftSpec::new(12, 16),
+            ShiftSpec::new(13, 16),
             // int[0..=3]: shift 16      -> down.int[0..4]
             // (flat indices 14..=17 since we have 14 bp + 0 ap before int)
             ShiftSpec::new(14, 16),
@@ -611,11 +615,10 @@ where
         let xn_ideal: MixedDegreeOneOrXnMinusOne<R, 32> =
             MixedDegreeOneOrXnMinusOne::XnMinusOne(XnMinusOneIdeal::<32>::new());
 
-        // Scalar polynomials for C4 and C5: X^25 + X^14 and X^25 + X^13.
-        // The DensePolynomial<R, 32> coefficient at index k is the coefficient
-        // of X^k. The product `bp[k] * scalar` produces a degree-≤56 expression
-        // in the underlying `DynamicPolynomialF`, which is fine because the
-        // expression type grows dynamically.
+        // Scalar polynomials. The DensePolynomial<R, 32> coefficient at index
+        // k is the coefficient of X^k. The product `bp[k] * scalar` produces a
+        // degree-≤56 expression in the underlying `DynamicPolynomialF`, which
+        // is fine because the expression type grows dynamically.
         let mut x25_x14 = [R::ZERO; 32];
         x25_x14[14] = R::from(1);
         x25_x14[25] = R::from(1);
@@ -625,6 +628,24 @@ where
         x25_x13[13] = R::from(1);
         x25_x13[25] = R::from(1);
         let x25_plus_x13 = DensePolynomial::<R, 32>::new(x25_x13);
+
+        let mut x25_x24 = [R::ZERO; 32];
+        x25_x24[24] = R::from(1);
+        x25_x24[25] = R::from(1);
+        let x25_plus_x24 = DensePolynomial::<R, 32>::new(x25_x24);
+
+        let mut x25_x23 = [R::ZERO; 32];
+        x25_x23[23] = R::from(1);
+        x25_x23[25] = R::from(1);
+        let x25_plus_x23 = DensePolynomial::<R, 32>::new(x25_x23);
+
+        let mut x3_arr = [R::ZERO; 32];
+        x3_arr[3] = R::from(1);
+        let x3 = DensePolynomial::<R, 32>::new(x3_arr);
+
+        let mut x10_arr = [R::ZERO; 32];
+        x10_arr[10] = R::from(1);
+        let x10 = DensePolynomial::<R, 32>::new(x10_arr);
 
         // Convenience aliases for shifted columns. Indices match the shifts
         // vec above (after `UairSignature::new`'s stable sort by source_col).
@@ -636,39 +657,40 @@ where
         let bp1_s17 = &down.binary_poly[5];
         let bp2_s16 = &down.binary_poly[6];
         let bp3_s16 = &down.binary_poly[7];
-        let bp4_s9 = &down.binary_poly[8];
-        let bp4_s16 = &down.binary_poly[9];
-        let bp5_s16 = &down.binary_poly[10];
-        let bp6_s16 = &down.binary_poly[11];
-        let bp7_s16 = &down.binary_poly[12];
-        let bp8_s16 = &down.binary_poly[13];
-        let bp9_s16 = &down.binary_poly[14];
-        let bp10_s16 = &down.binary_poly[15];
-        let bp11_s16 = &down.binary_poly[16];
+        let bp4_s1 = &down.binary_poly[8];
+        let bp4_s9 = &down.binary_poly[9];
+        let bp4_s14 = &down.binary_poly[10];
+        let bp4_s16 = &down.binary_poly[11];
+        let bp5_s16 = &down.binary_poly[12];
+        let bp6_s16 = &down.binary_poly[13];
+        let bp7_s16 = &down.binary_poly[14];
+        let bp8_s16 = &down.binary_poly[15];
+        let bp9_s16 = &down.binary_poly[16];
+        let bp10_s16 = &down.binary_poly[17];
+        let bp11_s16 = &down.binary_poly[18];
+        let bp12_s16 = &down.binary_poly[19];
+        let bp13_s16 = &down.binary_poly[20];
         let int0_s16 = &down.int[0];
         let int1_s16 = &down.int[1];
         let int2_s16 = &down.int[2];
         let int3_s16 = &down.int[3];
 
-        // (C1) bp[0][s+17] + bp[1][s+13] - bp[2..=6][s+16] - int[0..=1][s+16] ∈ (X-2)
-        // The PLUS sign on `bp1_s13` (which is `bp[1][t-3]` in the t-frame)
-        // is intentional: it lets `bp[6]` serve as a non-negative slack at
-        // the boundary row s = len-17, where the LHS `bp[0][s+17]` reads as
-        // OOB zero. Without the flip, the slack would have to be negative
-        // there, which a `BinaryPoly<32>` cannot represent.
+        // (C1) bp[0][s+17] - bp[1][s+13] - bp[2..=7][s+16] - int[0..=1][s+16] ∈ (X-2)
         b.assert_in_ideal(
-            bp0_s17.clone() + bp1_s13
+            bp0_s17.clone()
+                - bp1_s13
                 - bp2_s16
                 - bp3_s16
                 - bp4_s16
                 - bp5_s16
                 - bp6_s16
+                - bp7_s16
                 - int0_s16
                 - int1_s16,
             &ideal_from_ref(&two_ideal),
         );
 
-        // (C2) bp[1][s+17] - bp[0][s+13] - bp[1][s+13] - bp[2,3,7][s+16]
+        // (C2) bp[1][s+17] - bp[0][s+13] - bp[1][s+13] - bp[2,3,4][s+16]
         //      - int[0][s+16] - int[2][s+16] ∈ (X-2)
         b.assert_in_ideal(
             bp1_s17.clone()
@@ -676,7 +698,7 @@ where
                 - bp1_s13
                 - bp2_s16
                 - bp3_s16
-                - bp7_s16
+                - bp4_s16
                 - int0_s16
                 - int2_s16,
             &ideal_from_ref(&two_ideal),
@@ -697,20 +719,14 @@ where
         );
 
         // (C4) bp[0][s+16] * (X^25 + X^14) - bp[5][s+16] ∈ (X^32 - 1)
-        // In the ring R[X]/(X^32 - 1), multiplying by X is a cyclic shift.
-        // So this constraint forces `bp[5]` to be the sum of `bp[0]` cyclically
-        // shifted by 25 positions and by 14 positions. For binary polys, the
-        // sum is well-defined (avoids carry) iff `bp[0]` has no two 1-bits at
-        // positions 11 apart (mod 32), where 11 = 25 - 14.
         b.assert_in_ideal(
             mbs(bp0_s16, &x25_plus_x14).expect("mul-by-scalar overflow") - bp5_s16,
             &ideal_from_ref(&xn_ideal),
         );
 
-        // (C5) bp[1][s+16] * (X^25 + X^13) - bp[3][s+16] ∈ (X^32 - 1)
-        // Same idea as C4 but with the bit-gap constraint at 12 = 25 - 13.
+        // (C5) bp[1][s+16] * (X^25 + X^13) - bp[2][s+16] ∈ (X^32 - 1)
         b.assert_in_ideal(
-            mbs(bp1_s16, &x25_plus_x13).expect("mul-by-scalar overflow") - bp3_s16,
+            mbs(bp1_s16, &x25_plus_x13).expect("mul-by-scalar overflow") - bp2_s16,
             &ideal_from_ref(&xn_ideal),
         );
 
@@ -719,6 +735,30 @@ where
 
         // (C7) bp[11][s+16] - int[1][s+16] ∈ (X-2)
         b.assert_in_ideal(bp11_s16.clone() - int1_s16, &ideal_from_ref(&two_ideal));
+
+        // (C8) bp[4][s+1] * (X^25 + X^24) + bp[10][s+16] - bp[8][s+16] ∈ (X^32 - 1)
+        b.assert_in_ideal(
+            mbs(bp4_s1, &x25_plus_x24).expect("mul-by-scalar overflow") + bp10_s16
+                - bp8_s16,
+            &ideal_from_ref(&xn_ideal),
+        );
+
+        // (C9) bp[4][s+14] * (X^25 + X^23) + bp[11][s+16] - bp[9][s+16] ∈ (X^32 - 1)
+        b.assert_in_ideal(
+            mbs(bp4_s14, &x25_plus_x23).expect("mul-by-scalar overflow") + bp11_s16
+                - bp9_s16,
+            &ideal_from_ref(&xn_ideal),
+        );
+
+        // (C10) bp[4][s+1] - bp[12][s+16] + X^3 * bp[10][s+16] = 0  (zero ideal)
+        b.assert_zero(
+            mbs(bp10_s16, &x3).expect("mul-by-scalar overflow") + bp4_s1 - bp12_s16,
+        );
+
+        // (C11) bp[4][s+14] - bp[13][s+16] + X^10 * bp[11][s+16] = 0  (zero ideal)
+        b.assert_zero(
+            mbs(bp11_s16, &x10).expect("mul-by-scalar overflow") + bp4_s14 - bp13_s16,
+        );
     }
 }
 
@@ -729,36 +769,23 @@ where
     type PolyCoeff = R;
     type Int = R;
 
-    /// Constructs a non-trivial witness using the **slack columns** in the
-    /// constraint set:
+    /// **The witness produced by this generator is NOT satisfying.** The
+    /// constraint set was extended (C8..C11) and three existing constraints
+    /// (C1, C2, C5) were modified after this generator was written; the
+    /// per-row slack engineering described below no longer holds. SHAProxy
+    /// is now a **prover-only benchmark fixture**, in the same vein as
+    /// `ShaProxyEcdsaUair` — use it for measuring prover throughput on a
+    /// realistic shift-heavy / mixed-ideal trace shape, not for end-to-end
+    /// verification tests.
     ///
-    /// - **`int[2]` is a free slack for C2** (it only appears in C2). At
-    ///   each row, we set `int[2]` to whatever signed `i64` value makes C2
-    ///   hold.
-    /// - **`int[3]` is a free slack for C3** (same idea).
-    /// - **`bp[6]` is a `BinaryPoly` slack for C1** (it only appears in C1).
-    ///   Its `eval(2)` must land in `[0, 2^32 - 1]`, which we engineer by
-    ///   pinning `bp[0]` to `2^31` and `bp[1]` to `2^30`, so `bp[0][s+17] +
-    ///   bp[1][s+13]` dominates the other (small) RHS terms.
+    /// The body below is left unchanged and reflects the *original* slack
+    /// strategy for documentation / benchmark-shape purposes:
     ///
-    /// **C4/C5 (cyclic shifts mod X^32 - 1).** With `bp[0] = 2^31` (single
-    /// bit at position 31), `bp[5]` is forced by C4 to be the cyclic shifts
-    /// of bp[0] by 25 and 14 positions: bits at `(31+25) mod 32 = 24` and
-    /// `(31+14) mod 32 = 13`, i.e., `bp[5] = 2^24 + 2^13`. Same for C5 with
-    /// `bp[1] = 2^30` ⟹ `bp[3] = 2^23 + 2^11`. The single-bit pattern
-    /// trivially satisfies both bit-gap constraints (no two bits to be
-    /// 11 or 12 apart when there's only one bit).
-    ///
-    /// **C1 boundary cascade and the bp[1] sign flip.** At row `s = len-17`,
-    /// the constraint LHS `bp[0][s+17]` reads as zero (out-of-bounds). With
-    /// every C1 RHS term having a minus sign, the slack `bp[6][len-1]`
-    /// would have to absorb a *negative* value, which a `BinaryPoly<32>`
-    /// cannot represent. Flipping `bp[1]` to a plus sign makes
-    /// `bp[6][len-1] = bp[1][len-4] - small ≈ 2^30 > 0`, so the slack is
-    /// representable. For boundary rows `s ∈ [len-16, len-14]` where bp[6]
-    /// itself is OOB, we zero out `bp[1][r]` for `r ∈ [len-3, len-1]` so
-    /// that the constraint becomes `0 = 0` trivially. C5 then forces
-    /// `bp[3][r] = 0` at those same rows.
+    /// - `int[2]` was a free slack for the original C2.
+    /// - `int[3]` was a free slack for C3.
+    /// - `bp[6]` was a `BinaryPoly` slack for the original C1.
+    /// - `bp[0]` pinned to `2^31`, `bp[1]` pinned to `2^30`, with `bp[5]` /
+    ///   `bp[3]` derived as cyclic shifts to satisfy the original C4/C5.
     fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
@@ -1812,7 +1839,7 @@ impl Uair for ShaProxyEcdsaUair {
 
         // ---- SHAProxy sub-view ------------------------------------------
         // SHAProxy reads up.binary_poly[0..14], up.int[0..4],
-        // down.binary_poly[0..17], and down.int[0..4]. Combined bp cells are
+        // down.binary_poly[0..21], and down.int[0..4]. Combined bp cells are
         // unchanged, combined int[14..18] are SHAProxy's 4 int cells, and
         // combined down int[3..7] are SHAProxy's 4 int shifts.
         let sha_up = TraceRow {
@@ -2352,13 +2379,12 @@ mod tests {
         // max constraint degree from 13 to 5.
         assert_uair_shape::<EcdsaUair>(&[2, 4, 5, 4, 2, 2, 5, 4, 4, 5, 2, 4]);
 
-        // ShaProxyEcdsaUair: 19 constraints. The first 12 entries are the
+        // ShaProxyEcdsaUair: 23 constraints. The first 12 entries are the
         // ECDSA degrees (delegation order matches the impl: ECDSA first,
-        // then SHAProxy), followed by SHAProxy's 7 linear constraints.
-        // Filled in from the first run; adjust if the counter disagrees.
+        // then SHAProxy), followed by SHAProxy's 11 linear constraints.
         assert_uair_shape::<ShaProxyEcdsaUair>(&[
             2, 4, 5, 4, 2, 2, 5, 4, 4, 5, 2, 4, // ECDSA (12)
-            1, 1, 1, 1, 1, 1, 1, // SHAProxy (7)
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // SHAProxy (11)
         ]);
 
         // EcdsaUairLimbs: 96 constraints (12 logical × 8 limbs each), in
