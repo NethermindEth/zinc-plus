@@ -250,6 +250,9 @@ pub enum LookupError {
     #[error("malformed proof: w_evals length ({w}) != aux_evals length ({aux})")]
     EvalLengthMismatch { w: usize, aux: usize },
 
+    #[error("malformed proof: missing chunk commitment for decomposed group")]
+    MissingChunkCommitment,
+
     #[error("arithmetic error: {0}")]
     Arith(#[from] ArithErrors),
 }

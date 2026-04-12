@@ -249,12 +249,14 @@ where
         let lookup_chunk_evals = eval_inner_mles(&lookup_chunk_inner_mles, r_star, &field_cfg);
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        let all_lookup_evals: Vec<F> = lookup_aux_evals
+            .iter()
+            .chain(lookup_chunk_evals.iter())
+            .cloned()
+            .collect();
         pcs_transcript
             .fs_transcript
-            .absorb_random_field_slice(&lookup_aux_evals, &mut transcription_buf);
-        pcs_transcript
-            .fs_transcript
-            .absorb_random_field_slice(&lookup_chunk_evals, &mut transcription_buf);
+            .absorb_random_field_slice(&all_lookup_evals, &mut transcription_buf);
 
         // === Step 5: Multi-point evaluation sumcheck ===
         // Extend trace_mles and up_evals with lookup (aux + chunks).
@@ -476,7 +478,7 @@ where
             };
 
         for group_info in &lookup_groups_info {
-            let (witnesses, _full_table) = LogupProtocol::<F>::extract_witnesses_and_table(
+            let (witnesses, full_table) = LogupProtocol::<F>::extract_witnesses_and_table(
                 projected_trace_f,
                 group_info,
                 projecting_element_f,
@@ -499,7 +501,7 @@ where
                     .flat_map(|per_col| per_col.iter().cloned())
                     .collect();
 
-                // Commit L*K chunk columns (Round LC — before β)
+                // Commit L*K chunk columns
                 let chunk_mles: Vec<_> = virtual_cols.iter().map(|c| mk_lookup_mle(c)).collect();
                 let (h_chunk, c_chunk) =
                     ZipPlus::<Zt::LookupZt, Zt::LookupLc>::commit(pp_lookup, &chunk_mles)?;
@@ -512,7 +514,7 @@ where
                 };
                 (virtual_cols, decomp.subtable.clone(), Some(chunk_pcs))
             } else {
-                (witnesses.clone(), _full_table, None)
+                (witnesses.clone(), full_table, None)
             };
 
             // Compute multiplicities against effective table, commit in one batch
@@ -586,7 +588,7 @@ where
                 )?;
                 all_groups.extend(recon_grps);
 
-                // Collect chunk F vectors for eval at r* / lifted eval / PCS
+                // Collect chunk F vectors for eval at r*
                 for per_col in &decomp.chunks {
                     for chunk in per_col {
                         all_chunk_f.push(chunk.clone());

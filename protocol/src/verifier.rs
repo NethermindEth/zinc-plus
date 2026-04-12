@@ -372,7 +372,9 @@ where
                 pcs_verify!(Zt::LookupZt, Zt::LookupLc, vp_lookup, comm_m, 3);
                 pcs_verify!(Zt::LookupZt, Zt::LookupLc, vp_lookup, comm_u, 4);
                 if gi.table_type.is_decomposed() {
-                    let comm_chunk = chunk_comm_iter.next().expect("chunk commitment");
+                    let comm_chunk = chunk_comm_iter
+                        .next()
+                        .ok_or(LookupError::MissingChunkCommitment)?;
                     pcs_verify!(Zt::LookupZt, Zt::LookupLc, vp_lookup, comm_chunk, 5);
                 }
             }
