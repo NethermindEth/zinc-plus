@@ -279,7 +279,18 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> LogupProt
         } = input;
         let LogupVerifierPreSumcheckData { r, beta, gamma } = pre_sumcheck_data;
         let num_cols = w_evals.len();
-        assert_eq!(num_cols, aux_evals.len());
+        if num_cols != aux_evals.len() {
+            return Err(LookupError::EvalLengthMismatch {
+                w: num_cols,
+                aux: aux_evals.len(),
+            });
+        }
+        if expected_evaluations.len() < 2 {
+            return Err(LookupError::WrongEvaluationCount {
+                expected: 2,
+                got: expected_evaluations.len(),
+            });
+        }
 
         // Evaluate eq(x*, r)
         let eq_val = eq_eval(subclaim_point, r, one.clone())?;
@@ -295,6 +306,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> LogupProt
         let eq_at_point = build_eq_x_r_vec(subclaim_point, field_cfg)?;
         let zero = F::zero_with_cfg(field_cfg);
 
+        // Panics if β equals a table entry. β is a Fiat-Shamir challenge,
+        // so collision probability is ~1/q (negligible for ≥128-bit fields).
         let v = batch_inverse_shifted(beta, &table);
         let v_eval: F = v
             .iter()

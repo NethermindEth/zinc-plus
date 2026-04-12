@@ -218,6 +218,12 @@ pub enum LookupError {
     #[error("final evaluation check failed")]
     FinalEvaluationMismatch,
 
+    #[error("malformed proof: expected {expected} evaluations, got {got}")]
+    WrongEvaluationCount { expected: usize, got: usize },
+
+    #[error("malformed proof: w_evals length ({w}) != aux_evals length ({aux})")]
+    EvalLengthMismatch { w: usize, aux: usize },
+
     #[error("arithmetic error: {0}")]
     Arith(#[from] ArithErrors),
 }
