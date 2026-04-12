@@ -632,28 +632,35 @@ where
     }
 }
 
-impl<R> GenerateRandomTrace<32> for SimpleLookupUair<R>
-where
-    R: ConstSemiring + From<u32> + 'static,
-{
-    type PolyCoeff = R;
-    type Int = R;
+/// Generate a `GenerateRandomTrace` impl for a UAIR with 2 int columns where
+/// column 0 = column 1, values drawn uniformly from `0..modulus`.
+macro_rules! impl_int_copy_trace {
+    ($name:ident, $modulus:expr) => {
+        impl<R> GenerateRandomTrace<32> for $name<R>
+        where
+            R: ConstSemiring + From<u32> + 'static,
+        {
+            type PolyCoeff = R;
+            type Int = R;
 
-    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
-        num_vars: usize,
-        rng: &mut Rng,
-    ) -> UairTrace<'static, R, R, 32> {
-        let n = 1 << num_vars;
-        let vals: Vec<R> = (0..n).map(|_| R::from(rng.next_u32() % 16)).collect();
-        let a: DenseMultilinearExtension<R> = vals.clone().into_iter().collect();
-        let b: DenseMultilinearExtension<R> = vals.into_iter().collect();
-
-        UairTrace {
-            int: vec![a, b].into(),
-            ..Default::default()
+            fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+                num_vars: usize,
+                rng: &mut Rng,
+            ) -> UairTrace<'static, R, R, 32> {
+                let n = 1 << num_vars;
+                let vals: Vec<R> = (0..n).map(|_| R::from(rng.next_u32() % $modulus)).collect();
+                let a: DenseMultilinearExtension<R> = vals.clone().into_iter().collect();
+                let b: DenseMultilinearExtension<R> = vals.into_iter().collect();
+                UairTrace {
+                    int: vec![a, b].into(),
+                    ..Default::default()
+                }
+            }
         }
-    }
+    };
 }
+
+impl_int_copy_trace!(SimpleLookupUair, 16);
 
 /// UAIR with two int columns both looked up against the same `Word(4)` table.
 /// Tests L>1 (multi-column) lookup within a single group.
@@ -707,35 +714,42 @@ where
     }
 }
 
-impl<R> GenerateRandomTrace<32> for MultiColLookupUair<R>
-where
-    R: ConstSemiring + From<u32> + 'static,
-{
-    type PolyCoeff = R;
-    type Int = R;
+/// Generate a `GenerateRandomTrace` impl for a UAIR with 3 int columns where
+/// `c = a + b`, with `a` in `0..range_a` and `b` in `0..range_b`.
+macro_rules! impl_sum_pair_trace {
+    ($name:ident, $range_a:expr, $range_b:expr) => {
+        impl<R> GenerateRandomTrace<32> for $name<R>
+        where
+            R: ConstSemiring + From<u32> + 'static,
+        {
+            type PolyCoeff = R;
+            type Int = R;
 
-    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
-        num_vars: usize,
-        rng: &mut Rng,
-    ) -> UairTrace<'static, R, R, 32> {
-        let n = 1 << num_vars;
-        let a_vals: Vec<R> = (0..n).map(|_| R::from(rng.next_u32() % 16)).collect();
-        let b_vals: Vec<R> = (0..n).map(|_| R::from(rng.next_u32() % 16)).collect();
-        let c_vals: Vec<R> = a_vals
-            .iter()
-            .zip(b_vals.iter())
-            .map(|(a, b)| a.clone() + b)
-            .collect();
-        let a: DenseMultilinearExtension<R> = a_vals.into_iter().collect();
-        let b: DenseMultilinearExtension<R> = b_vals.into_iter().collect();
-        let c: DenseMultilinearExtension<R> = c_vals.into_iter().collect();
-
-        UairTrace {
-            int: vec![a, b, c].into(),
-            ..Default::default()
+            fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+                num_vars: usize,
+                rng: &mut Rng,
+            ) -> UairTrace<'static, R, R, 32> {
+                let n = 1 << num_vars;
+                let a_vals: Vec<R> = (0..n).map(|_| R::from(rng.next_u32() % $range_a)).collect();
+                let b_vals: Vec<R> = (0..n).map(|_| R::from(rng.next_u32() % $range_b)).collect();
+                let c_vals: Vec<R> = a_vals
+                    .iter()
+                    .zip(b_vals.iter())
+                    .map(|(a, b)| a.clone() + b)
+                    .collect();
+                let a: DenseMultilinearExtension<R> = a_vals.into_iter().collect();
+                let b: DenseMultilinearExtension<R> = b_vals.into_iter().collect();
+                let c: DenseMultilinearExtension<R> = c_vals.into_iter().collect();
+                UairTrace {
+                    int: vec![a, b, c].into(),
+                    ..Default::default()
+                }
+            }
         }
-    }
+    };
 }
+
+impl_sum_pair_trace!(MultiColLookupUair, 16, 16);
 
 /// UAIR with two columns looking up different table types:
 /// column 0 → Word(4), column 1 → Word(8). Tests multiple lookup groups.
@@ -789,35 +803,7 @@ where
     }
 }
 
-impl<R> GenerateRandomTrace<32> for MultiGroupLookupUair<R>
-where
-    R: ConstSemiring + From<u32> + 'static,
-{
-    type PolyCoeff = R;
-    type Int = R;
-
-    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
-        num_vars: usize,
-        rng: &mut Rng,
-    ) -> UairTrace<'static, R, R, 32> {
-        let n = 1 << num_vars;
-        let a_vals: Vec<R> = (0..n).map(|_| R::from(rng.next_u32() % 16)).collect();
-        let b_vals: Vec<R> = (0..n).map(|_| R::from(rng.next_u32() % 256)).collect();
-        let c_vals: Vec<R> = a_vals
-            .iter()
-            .zip(b_vals.iter())
-            .map(|(a, b)| a.clone() + b)
-            .collect();
-        let a: DenseMultilinearExtension<R> = a_vals.into_iter().collect();
-        let b: DenseMultilinearExtension<R> = b_vals.into_iter().collect();
-        let c: DenseMultilinearExtension<R> = c_vals.into_iter().collect();
-
-        UairTrace {
-            int: vec![a, b, c].into(),
-            ..Default::default()
-        }
-    }
-}
+impl_sum_pair_trace!(MultiGroupLookupUair, 16, 256);
 
 /// UAIR with a BitPoly lookup: one binary_poly column looked up against
 /// `BitPoly(8)`. Tests the BitPoly table type.
@@ -867,31 +853,37 @@ where
     }
 }
 
-impl<R> GenerateRandomTrace<32> for BitPolyLookupUair<R>
-where
-    R: ConstSemiring + From<u32> + 'static,
-{
-    type PolyCoeff = R;
-    type Int = R;
+/// Generate a `GenerateRandomTrace` impl for a UAIR with 1 binary_poly column
+/// and 1 int column, both carrying the same values in `0..modulus`.
+macro_rules! impl_bitpoly_int_trace {
+    ($name:ident, $modulus:expr) => {
+        impl<R> GenerateRandomTrace<32> for $name<R>
+        where
+            R: ConstSemiring + From<u32> + 'static,
+        {
+            type PolyCoeff = R;
+            type Int = R;
 
-    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
-        num_vars: usize,
-        rng: &mut Rng,
-    ) -> UairTrace<'static, R, R, 32> {
-        let n = 1 << num_vars;
-        let values: Vec<u32> = (0..n).map(|_| rng.next_u32() % 256).collect();
-
-        let binary_poly_col: DenseMultilinearExtension<BinaryPoly<32>> =
-            values.iter().map(|&v| BinaryPoly::from(v)).collect();
-        let int_col: DenseMultilinearExtension<R> = values.into_iter().map(R::from).collect();
-
-        UairTrace {
-            binary_poly: vec![binary_poly_col].into(),
-            int: vec![int_col].into(),
-            ..Default::default()
+            fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+                num_vars: usize,
+                rng: &mut Rng,
+            ) -> UairTrace<'static, R, R, 32> {
+                let n = 1 << num_vars;
+                let values: Vec<u32> = (0..n).map(|_| rng.next_u32() % $modulus).collect();
+                let bp: DenseMultilinearExtension<BinaryPoly<32>> =
+                    values.iter().map(|&v| BinaryPoly::from(v)).collect();
+                let int: DenseMultilinearExtension<R> = values.into_iter().map(R::from).collect();
+                UairTrace {
+                    binary_poly: vec![bp].into(),
+                    int: vec![int].into(),
+                    ..Default::default()
+                }
+            }
         }
-    }
+    };
 }
+
+impl_bitpoly_int_trace!(BitPolyLookupUair, 256);
 
 #[cfg(test)]
 mod tests {

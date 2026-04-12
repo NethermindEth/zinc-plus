@@ -157,6 +157,7 @@ fn reduce_chunk_products<F: PrimeField>(prefixes: &[Vec<F>], one: &F) -> Vec<F> 
     };
 
     if k == 1 {
+        // Panics if the sole chunk product is zero (i.e. a zero input element).
         return vec![one.clone() / last(0)];
     }
 
@@ -167,6 +168,9 @@ fn reduce_chunk_products<F: PrimeField>(prefixes: &[Vec<F>], one: &F) -> Vec<F> 
         global_prefix.push(prev * last(i));
     }
 
+    // Single field inversion — panics here if any input to
+    // `batch_inverse` / `batch_inverse_shifted` was zero (or β − v_i = 0),
+    // since the global prefix product will be zero.
     let mut inv_acc = one.clone() / &global_prefix[k - 1];
     let mut accs = vec![F::zero_with_cfg(one.cfg()); k];
     for i in (1..k).rev() {
@@ -235,6 +239,8 @@ where
                 };
                 match table_index.get(bytes) {
                     Some(&idx) => counts[idx] += 1,
+                    // Empty vec: valid counts always have
+                    // length table_len ≥ 1, so is_empty() detects this below.
                     None => return vec![],
                 }
             }

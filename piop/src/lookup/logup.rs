@@ -86,20 +86,21 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> LogupProt
         F: 'static,
     {
         let num_cols = witnesses.len();
+        assert!(num_cols > 0, "at least one witness column is required");
         assert_eq!(
             num_cols,
             auxs.len(),
             "witnesses and auxs must have same length"
         );
+        assert!(
+            witnesses.iter().all(|w| w.len() == witnesses[0].len()),
+            "all witness columns must have the same length"
+        );
 
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
 
-        let w_num_vars = if num_cols > 0 {
-            log2(witnesses[0].len().next_power_of_two()) as usize
-        } else {
-            0
-        };
+        let w_num_vars = log2(witnesses[0].len().next_power_of_two()) as usize;
         let t_num_vars = log2(table.len().next_power_of_two()) as usize;
         let num_vars = w_num_vars.max(t_num_vars);
 
@@ -144,28 +145,28 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> LogupProt
         group1_mles.push(mk_mle(auxs[0].inverse_table));
 
         // group0: (d_l·u_l − 1) · eq where d_l = (β − w_l)
-        let one0 = one.clone();
-        let zero0 = zero.clone();
-        let gamma_powers_copy0 = gamma_pows.clone();
+        let one_g0 = one.clone();
+        let zero_g0 = zero.clone();
+        let gamma_powers_g0 = gamma_pows.clone();
         let l0 = num_cols;
         let group_0 = MultiDegreeSumcheckGroup::new(
             3,
             group0_mles,
             Box::new(move |v: &[F]| {
                 // v[0] = eq, v[1+2l] = d_l, v[2+2l] = u_l
-                let mut sum = zero0.clone();
+                let mut sum = zero_g0.clone();
                 for l in 0..l0 {
                     let d = &v[1 + 2 * l];
                     let u = &v[2 + 2 * l];
-                    let term = d.clone() * u - &one0;
-                    sum += &(gamma_powers_copy0[l].clone() * &term);
+                    let term = d.clone() * u - &one_g0;
+                    sum += &(gamma_powers_g0[l].clone() * &term);
                 }
                 sum * &v[0]
             }),
         );
 
         // group1: (u − m·v)
-        let zero1 = zero;
+        let zero_g1 = zero;
         let gp1 = gamma_pows;
         let l1 = num_cols;
         let group_1 = MultiDegreeSumcheckGroup::new(
@@ -174,7 +175,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> LogupProt
             Box::new(move |v: &[F]| {
                 // v[2l] = u_l, v[2l+1] = m_l, v[2*L] = v (shared)
                 let v_shared = &v[2 * l1];
-                let mut sum = zero1.clone();
+                let mut sum = zero_g1.clone();
                 for l in 0..l1 {
                     let u = &v[2 * l];
                     let m = &v[2 * l + 1];
