@@ -36,6 +36,10 @@ where
 }
 
 impl<const LIMBS: usize> InnerTransparentField for MontyField<LIMBS> {
+    fn retrieve_canonical(&self) -> Self::Inner {
+        self.retrieve()
+    }
+
     fn add_inner(lhs: &Self::Inner, rhs: &Self::Inner, config: &Self::Config) -> Self::Inner {
         Uint::new(
             lhs.inner()

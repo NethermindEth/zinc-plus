@@ -6,6 +6,8 @@
 //! of [`UairSignature`] via `UairSignature::new(..., lookup_specs)`, the
 //! same way shifts are declared.
 
+use zinc_utils::div;
+
 /// Describes the type of lookup table a column should be checked against.
 /// Full table size = `2^width` for each type; decomposed into chunks of
 /// `chunk_width`
@@ -22,6 +24,32 @@ pub enum LookupTableType {
         width: usize,
         chunk_width: Option<usize>,
     },
+}
+
+impl LookupTableType {
+    pub fn width(&self) -> usize {
+        match self {
+            Self::BitPoly { width, .. } | Self::Word { width, .. } => *width,
+        }
+    }
+
+    pub fn chunk_width(&self) -> Option<usize> {
+        match self {
+            Self::BitPoly { chunk_width, .. } | Self::Word { chunk_width, .. } => *chunk_width,
+        }
+    }
+
+    pub fn is_decomposed(&self) -> bool {
+        self.chunk_width().is_some()
+    }
+
+    /// Number of chunks per column. Returns 1 for non-decomposed.
+    pub fn num_chunks(&self) -> usize {
+        match self.chunk_width() {
+            Some(cw) => div!(self.width(), cw),
+            None => 1,
+        }
+    }
 }
 
 /// Specifies that a trace column should be looked up against a prescribed

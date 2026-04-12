@@ -133,7 +133,7 @@ pub struct LogupVerifierPreSumcheckData<F> {
 }
 
 /// Scalar MLE evaluations of lookup auxiliary columns at the subclaim
-/// point x*, obtained from PCS openings via MultipointEval.
+/// point r*, obtained from PCS openings via MultipointEval.
 ///
 /// Used by `finalize_verifier` to check the LogUp identities
 #[derive(Clone, Debug)]
@@ -145,18 +145,44 @@ pub struct LookupAuxEvals<F> {
 /// Bundle of per-group evaluation data passed to
 /// [`LogupProtocol::finalize_verifier`].
 ///
-/// Carries L columns' evaluation data for the two γ-batched groups.
+/// Carries evaluation data for the 2 batched LogUp groups.
+/// For non-decomposed lookups, `w_evals` and `aux_evals` have L entries.
+/// For decomposed lookups (K chunks per column), both have L*K entries
+///
+/// The reconstruction check for decomposed lookups is handled at the
+/// protocol level (verifier.rs), not here.
 #[derive(Clone, Debug)]
 pub struct LogupFinalizerInput<'a, F> {
-    /// The multi-degree sumcheck subclaim point (x*).
+    /// The multi-degree sumcheck subclaim point (r*).
     pub subclaim_point: &'a [F],
-    /// Expected evaluations from the sumcheck subclaim (len=2, one
-    /// per γ-batched group).
+    /// Expected evaluations from the sumcheck subclaim for the 2
+    /// batched LogUp groups.
     pub expected_evaluations: &'a [F],
-    /// Evaluations of the L witness column polynomials at x*.
+    /// Evaluations of the witness column polynomials at r*.
+    /// L entries for non-decomposed, L*K chunk evals for decomposed.
     pub w_evals: &'a [F],
-    /// Per-column auxiliary evaluations (u, m) at x*.
+    /// Per-column auxiliary evaluations (u, m) at r*.
+    /// Length L for non-decomposed, L*K for decomposed.
     pub aux_evals: &'a [LookupAuxEvals<F>],
+}
+
+// ---------------------------------------------------------------------------
+// Decomposition info
+// ---------------------------------------------------------------------------
+
+/// Bundle of decomposition data for a single lookup group with
+/// `chunk_width.is_some()`.
+///
+/// Produced by [`LogupProtocol::extract_decomposed`] and consumed by the
+/// prover to build reconstruction sumcheck groups and commit chunk columns.
+#[derive(Clone, Debug)]
+pub struct DecompInfo<F> {
+    /// The smaller subtable (2^chunk_width entries) used for LogUp.
+    pub subtable: Vec<F>,
+    /// Positional bases `[1, base, base^2, …]` of length K.
+    pub decomp_bases: Vec<F>,
+    /// Decomposed chunk columns. `chunks[l][k]` is chunk k of column l.
+    pub chunks: Vec<Vec<Vec<F>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +249,9 @@ pub enum LookupError {
 
     #[error("malformed proof: w_evals length ({w}) != aux_evals length ({aux})")]
     EvalLengthMismatch { w: usize, aux: usize },
+
+    #[error("malformed proof: missing chunk commitment for decomposed group")]
+    MissingChunkCommitment,
 
     #[error("arithmetic error: {0}")]
     Arith(#[from] ArithErrors),

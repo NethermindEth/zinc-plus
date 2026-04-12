@@ -63,6 +63,10 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize>
 impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> InnerTransparentField
     for ConstMontyField<Mod, LIMBS>
 {
+    fn retrieve_canonical(&self) -> Self::Inner {
+        self.retrieve()
+    }
+
     fn add_inner(lhs: &Self::Inner, rhs: &Self::Inner, _config: &Self::Config) -> Self::Inner {
         Uint::new(
             lhs.inner()

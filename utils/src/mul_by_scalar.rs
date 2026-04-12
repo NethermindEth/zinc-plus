@@ -63,7 +63,20 @@ macro_rules! impl_mul_int_by_primitive_scalar {
     };
 }
 
-impl_mul_int_by_primitive_scalar!(i8, i16, i32, i64, i128);
+impl_mul_int_by_primitive_scalar!(i8, i16, i32, i128);
+
+impl<const LIMBS: usize, const LIMBS_OUT: usize> MulByScalar<&i64, Int<LIMBS_OUT>> for Int<LIMBS> {
+    #[allow(clippy::arithmetic_side_effects)] // By design
+    fn mul_by_scalar<const CHECK: bool>(&self, rhs: &i64) -> Option<Int<LIMBS_OUT>> {
+        let wide_self: Int<LIMBS_OUT> = self.resize();
+        let wide_rhs: Int<LIMBS_OUT> = Int::from(*rhs);
+        if CHECK {
+            wide_self.checked_mul(&wide_rhs)
+        } else {
+            Some(wide_self * wide_rhs)
+        }
+    }
+}
 
 impl<T> MulByScalar<&Boolean> for T
 where

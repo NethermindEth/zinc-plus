@@ -66,3 +66,10 @@ impl<const LIMBS: usize, const LIMBS2: usize> FromRef<Uint<LIMBS2>> for Uint<LIM
         Self::try_from(value.inner()).expect("Destination Uint type is too small")
     }
 }
+
+impl<const LIMBS: usize, const LIMBS2: usize> FromRef<Uint<LIMBS2>> for Int<LIMBS> {
+    #[inline]
+    fn from_ref(value: &Uint<LIMBS2>) -> Self {
+        Self::try_from(value.inner()).expect("value doesn't fit in destination Int type")
+    }
+}

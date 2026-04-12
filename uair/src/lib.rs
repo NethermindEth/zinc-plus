@@ -10,7 +10,7 @@ pub mod ideal_collector;
 pub mod lookup_types;
 
 use crypto_primitives::Semiring;
-use std::borrow::Cow;
+use std::{borrow::Cow, ops::Range};
 use zinc_poly::{
     mle::DenseMultilinearExtension,
     univariate::{binary::BinaryPoly, dense::DensePolynomial},
@@ -127,9 +127,25 @@ impl ColumnLayout {
     }
 
     /// The sum of the numbers of columns across all types.
-    #[allow(clippy::arithmetic_side_effects)]
     pub fn cols(&self) -> usize {
-        self.num_binary_poly_cols + self.num_arbitrary_poly_cols + self.num_int_cols
+        add!(
+            add!(self.num_binary_poly_cols, self.num_arbitrary_poly_cols),
+            self.num_int_cols
+        )
+    }
+
+    /// Returns the three (bin, arb, int) witness ranges within a flat
+    /// `[all_bin | all_arb | all_int]` array, given the public prefix counts.
+    pub fn witness_ranges(&self, public: &ColumnLayout) -> [Range<usize>; 3] {
+        let total_bin = self.num_binary_poly_cols;
+        let total_arb = self.num_arbitrary_poly_cols;
+        let arb_offset = add!(total_bin, public.num_arbitrary_poly_cols);
+        let int_offset = add!(add!(total_bin, total_arb), public.num_int_cols);
+        [
+            public.num_binary_poly_cols..total_bin,
+            arb_offset..add!(arb_offset, sub!(total_arb, public.num_arbitrary_poly_cols)),
+            int_offset..add!(int_offset, sub!(self.num_int_cols, public.num_int_cols)),
+        ]
     }
 }
 
@@ -150,6 +166,14 @@ macro_rules! column_layout_wrapper {
             pub fn max_cols(&self) -> usize { self.0.max_cols() }
             pub fn cols(&self) -> usize { self.0.cols() }
             pub fn as_column_layout(&self) -> &ColumnLayout { &self.0 }
+        }
+
+        impl From<$name> for ColumnLayout {
+            fn from(w: $name) -> Self { w.0 }
+        }
+
+        impl<'a> From<&'a $name> for &'a ColumnLayout {
+            fn from(w: &'a $name) -> Self { &w.0 }
         }
     };
 }

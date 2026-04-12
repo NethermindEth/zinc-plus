@@ -7,7 +7,7 @@ use crypto_primitives::{
     FromWithConfig, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
 };
 use rand::{Rng, rng};
-use zinc_piop::multipoint_eval::MultipointEval;
+use zinc_piop::multipoint_eval::{MultipointEval, MultipointEvalData};
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
 use zinc_primality::MillerRabin;
 use zinc_transcript::{Blake3Transcript, traits::Transcript};
@@ -84,10 +84,13 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
                     MultipointEval::<F>::prove_as_subprotocol(
                         &mut t,
                         &trace_mles,
-                        &eval_point,
-                        &up_evals,
-                        &down_evals,
-                        &shifts,
+                        &[],
+                        MultipointEvalData {
+                            eval_point: &eval_point,
+                            up_evals: &up_evals,
+                            down_evals: &down_evals,
+                            shifts: &shifts,
+                        },
                         &field_cfg,
                     )
                     .expect("prover failed"),
@@ -104,10 +107,13 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
     let (proof, prover_state) = MultipointEval::<F>::prove_as_subprotocol(
         &mut prover_transcript,
         &trace_mles,
-        &eval_point,
-        &up_evals,
-        &down_evals,
-        &shifts,
+        &[],
+        MultipointEvalData {
+            eval_point: &eval_point,
+            up_evals: &up_evals,
+            down_evals: &down_evals,
+            shifts: &shifts,
+        },
         &field_cfg,
     )
     .expect("prover failed");
@@ -128,11 +134,13 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
                 let subclaim = MultipointEval::<F>::verify_as_subprotocol(
                     &mut t,
                     proof,
-                    &eval_point,
-                    &up_evals,
-                    &down_evals,
-                    &shifts,
-                    num_vars,
+                    &[],
+                    MultipointEvalData {
+                        eval_point: &eval_point,
+                        up_evals: &up_evals,
+                        down_evals: &down_evals,
+                        shifts: &shifts,
+                    },
                     &field_cfg,
                 )
                 .expect("verifier failed");

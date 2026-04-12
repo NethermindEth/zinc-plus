@@ -23,7 +23,7 @@ use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes};
 use zinc_test_uair::{
     BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-    TestAirNoMultiplication,
+    RangeCheck8Uair, SimpleLookupUair, TestAirNoMultiplication, Word8LookupUair,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
@@ -136,12 +136,13 @@ where
     type ArrCombRDotChal = ArrCombRDotChal;
 }
 
-struct GenericBenchZincTypes<Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest, const D: usize>(
-    PhantomData<(Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest)>,
+#[allow(clippy::type_complexity)]
+struct GenericBenchZincTypes<Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest, LkEval, const D: usize>(
+    PhantomData<(Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest, LkEval)>,
 );
 
-impl<Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest, const D: usize> ZincTypes<D>
-    for GenericBenchZincTypes<Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest, D>
+impl<Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest, LkEval, const D: usize> ZincTypes<D>
+    for GenericBenchZincTypes<Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest, LkEval, D>
 where
     Int: ConstIntSemiring
         + for<'a> MulByScalar<&'a i64, CwR>
@@ -164,12 +165,14 @@ where
     Chal: ConstIntRing + ConstTranscribable + Named,
     Pt: ConstIntRing,
     CombR: ConstIntRing
+        + ConstCoeffBitWidth
         + Polynomial<CombR>
         + Neg<Output = CombR>
         + for<'a> MulByScalar<&'a i64>
         + for<'a> MulByScalar<&'a Chal>
         + ConstTranscribable
         + Named
+        + Copy
         + FromRef<i64>
         + FromRef<Int>
         + FromRef<CwR>
@@ -177,6 +180,18 @@ where
         + FromRef<CombR>,
     Fmod: ConstIntSemiring + ConstTranscribable + Named,
     PrimeTest: PrimalityTest<Fmod> + Send + Sync,
+    LkEval: ConstIntSemiring
+        + ConstCoeffBitWidth
+        + ConstTranscribable
+        + Named
+        + Default
+        + Copy
+        + for<'a> MulByScalar<&'a i64, CombR>
+        + Send
+        + Sync
+        + 'static,
+    CombR: FromRef<LkEval>,
+    LkEval: FromRef<CombR>,
 {
     type Int = Int;
     type Chal = Chal;
@@ -225,9 +240,24 @@ where
         MBSInnerProduct,
     >;
 
+    type LookupZt = GenericBenchZipTypes<
+        LkEval,
+        CombR,
+        Fmod,
+        PrimeTest,
+        Chal,
+        Pt,
+        CombR,
+        CombR,
+        ScalarProduct,
+        ScalarProduct,
+        MBSInnerProduct,
+    >;
+
     type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
     type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
     type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
+    type LookupLc = IprsCode<Self::LookupZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
 }
 
 //
@@ -237,6 +267,11 @@ where
 const DEGREE_PLUS_ONE: usize = 32;
 const INT_LIMBS: usize = U64::LIMBS;
 const FIELD_LIMBS: usize = U64::LIMBS * 3;
+/// Lookup evals are field-element-sized Uint→Int conversions, so we need
+/// FIELD_LIMBS+1 (the sign bit of Int<FIELD_LIMBS> can't hold a full
+/// field element). CombR is widened to Int<7> (448 bits) to accommodate:
+///   actual_lc_bits ≈ 145 + 256 = 401  ≤  448
+const LOOKUP_EVAL_LIMBS: usize = FIELD_LIMBS + 1;
 
 type F = MontyField<FIELD_LIMBS>;
 
@@ -245,9 +280,11 @@ type BenchZincTypes = GenericBenchZincTypes<
     /* CwR = */ i128,
     /* Chal = */ i128,
     /* Pt = */ i128,
-    /* CombR = */ Int<{ INT_LIMBS * 6 }>,
+    /* CombR — widened to 7 limbs (448 bits) for lookup LC budget */
+    Int<{ INT_LIMBS * 7 }>,
     /* Fmod = */ Uint<FIELD_LIMBS>,
     MillerRabin,
+    /* LkEval = */ Int<LOOKUP_EVAL_LIMBS>,
     DEGREE_PLUS_ONE,
 >;
 type Pp<Zt> = (
@@ -263,24 +300,38 @@ type Pp<Zt> = (
         <Zt as ZincTypes<DEGREE_PLUS_ONE>>::IntZt,
         <Zt as ZincTypes<DEGREE_PLUS_ONE>>::IntLc,
     >,
+    ZipPlusParams<
+        <Zt as ZincTypes<DEGREE_PLUS_ONE>>::LookupZt,
+        <Zt as ZincTypes<DEGREE_PLUS_ONE>>::LookupLc,
+    >,
 );
 
 /// Use row size equal to poly size, resulting in flat single-row matrices
 #[allow(clippy::unwrap_used)]
 fn setup_pp(num_vars: usize) -> Pp<BenchZincTypes> {
     let poly_size = 1 << num_vars;
+    macro_rules! mk {
+        ($Zt:ty, $Lc:ty) => {
+            ZipPlus::<$Zt, $Lc>::setup(poly_size, <$Lc>::new_with_optimal_depth(poly_size).unwrap())
+        };
+    }
+    type Zt = BenchZincTypes;
     (
-        ZipPlus::setup(
-            poly_size,
-            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+        mk!(
+            <Zt as ZincTypes<DEGREE_PLUS_ONE>>::BinaryZt,
+            <Zt as ZincTypes<DEGREE_PLUS_ONE>>::BinaryLc
         ),
-        ZipPlus::setup(
-            poly_size,
-            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+        mk!(
+            <Zt as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt,
+            <Zt as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc
         ),
-        ZipPlus::setup(
-            poly_size,
-            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+        mk!(
+            <Zt as ZincTypes<DEGREE_PLUS_ONE>>::IntZt,
+            <Zt as ZincTypes<DEGREE_PLUS_ONE>>::IntLc
+        ),
+        mk!(
+            <Zt as ZincTypes<DEGREE_PLUS_ONE>>::LookupZt,
+            <Zt as ZincTypes<DEGREE_PLUS_ONE>>::LookupLc
         ),
     )
 }
@@ -316,6 +367,7 @@ fn do_bench<Zt, U, IdealOverF>(
         + 'static,
     F: for<'a> FromWithConfig<&'a Zt::Int>,
     <F as Field>::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
+    <Zt::LookupZt as ZipTypes>::Eval: FromRef<<F as Field>::Inner>,
     U: Uair + 'static,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
 {
@@ -428,6 +480,20 @@ fn bench_big_linear_public_input(group: &mut BenchmarkGroup<WallTime>, num_vars:
     do_bench_uair::<BigLinearUairWithPublicInput<i64>>(group, "BigLinearPI", num_vars);
 }
 
+fn bench_simple_lookup(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    let mut rng = rng();
+    let trace = SimpleLookupUair::<i64>::generate_random_trace(num_vars, &mut rng);
+    do_bench::<BenchZincTypes, SimpleLookupUair<i64>, _>(
+        group,
+        "SimpleLookup",
+        num_vars,
+        setup_pp,
+        trace,
+        zinc_protocol::project_scalar_fn,
+        |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+    );
+}
+
 //
 // Criterion entry point
 //
@@ -451,6 +517,57 @@ fn e2e_benches(c: &mut Criterion) {
     bench_big_linear_public_input(&mut group, 10);
     bench_big_linear_public_input(&mut group, 12);
 
+    bench_simple_lookup(&mut group, 8);
+    bench_simple_lookup(&mut group, 10);
+    bench_simple_lookup(&mut group, 12);
+
+    group.finish();
+}
+
+/// Lookup vs constraint comparison: 8-bit range check two ways.
+fn lookup_vs_constraint(c: &mut Criterion) {
+    let mut group = c.benchmark_group("8-bit Range Check: Lookup vs Constraint");
+
+    for num_vars in [8, 10, 12] {
+        let mut rng = rng();
+        let params = format!("nvars={num_vars}");
+        let pp = setup_pp(num_vars);
+
+        macro_rules! zinc_plus {
+            ($U:ty) => {
+                ZincPlusPiop::<BenchZincTypes, $U, F, DEGREE_PLUS_ONE>
+            };
+        }
+
+        // Word(8) lookup
+        let trace_lk = Word8LookupUair::<i64>::generate_random_trace(num_vars, &mut rng);
+        group.bench_function(BenchmarkId::new("Prove (Lookup)", &params), |bench| {
+            bench.iter(|| {
+                black_box(<zinc_plus!(Word8LookupUair<i64>)>::prove::<
+                    false,
+                    PERFORM_CHECKS,
+                >(
+                    &pp, &trace_lk, num_vars, zinc_protocol::project_scalar_fn
+                ))
+                .expect("lookup prove");
+            });
+        });
+
+        // Binary decomposition (no lookup)
+        let trace_rc = RangeCheck8Uair::<i64>::generate_random_trace(num_vars, &mut rng);
+        group.bench_function(BenchmarkId::new("Prove (Constraint)", &params), |bench| {
+            bench.iter(|| {
+                black_box(<zinc_plus!(RangeCheck8Uair<i64>)>::prove::<
+                    false,
+                    PERFORM_CHECKS,
+                >(
+                    &pp, &trace_rc, num_vars, zinc_protocol::project_scalar_fn
+                ))
+                .expect("constraint prove");
+            });
+        });
+    }
+
     group.finish();
 }
 
@@ -459,4 +576,9 @@ criterion_group! {
     config = Criterion::default().sample_size(500);
     targets = e2e_benches
 }
-criterion_main!(benches);
+criterion_group! {
+    name = comparison;
+    config = Criterion::default().sample_size(10);
+    targets = lookup_vs_constraint
+}
+criterion_main!(benches, comparison);
