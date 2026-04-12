@@ -11,7 +11,7 @@
 //! `u = 1/(β − w)` via Zip+ PCS. The table inverse `v = 1/(β − T)` is
 //! NOT committed — the verifier computes it from the public table.
 //!
-//! ## γ-Batched sumcheck groups
+//! ## Batched sumcheck groups
 //!
 //! For L witness columns sharing the same table, a random challenge γ
 //! collapses 2·L individual groups into exactly **2 groups**:
@@ -41,7 +41,7 @@ use zinc_poly::{
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::LookupTableType;
-use zinc_utils::{cfg_iter, inner_transparent_field::InnerTransparentField, log2};
+use zinc_utils::{cfg_iter, div, inner_transparent_field::InnerTransparentField, log2, powers};
 
 use crate::{
     lookup::{
@@ -51,15 +51,19 @@ use crate::{
 };
 
 use super::{
-    structs::{LogupVerifierPreSumcheckData, LookupError},
-    utils::{generate_bitpoly_table, generate_word_table},
+    structs::{DecompInfo, LogupVerifierPreSumcheckData, LookupError},
+    utils::{
+        bitpoly_decomp_base, decompose_bitpoly_column, decompose_word_column,
+        generate_bitpoly_subtable, generate_bitpoly_table, generate_word_subtable,
+        generate_word_table, word_decomp_base,
+    },
 };
 
 /// LogUp sumcheck group builder and verifier finalizer.
 pub struct LogupProtocol<F: InnerTransparentField>(PhantomData<F>);
 
 impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> LogupProtocol<F> {
-    /// Build two γ-batched LogUp sumcheck groups from L columns.
+    /// Build two batched LogUp sumcheck groups from L columns.
     ///
     /// Takes L witnesses and their auxiliary vectors. Returns exactly
     /// 2 groups regardless of L: `[group_0, group_1]`
@@ -189,6 +193,103 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> LogupProt
         Ok(vec![group_0, group_1])
     }
 
+    /// Build a single batched reconstruction zerocheck group for
+    /// decomposed lookups.
+    ///
+    /// Combines L reconstruction identities into one degree-2 group:
+    /// `(Σ_l γ^l · (w_l(y) − Σ_k decomp_bases[k] · chunk_{l,k}(y))) · eq(r, y)
+    /// = 0`
+    ///
+    /// Returns a `Vec` with exactly 1 group (empty if L=0).
+    ///
+    /// MLE layout: `[eq, w_0, chunk_{0,0}, …, chunk_{0,K-1}, w_1, …]`
+    /// Total: `1 + L·(K+1)` MLEs, degree 2.
+    ///
+    /// # Arguments
+    ///
+    /// - `witnesses`: L original witness columns.
+    /// - `chunks`: `chunks[l]` is K chunk columns for witness l.
+    /// - `decomp_bases`: K positional bases `[1, base, base^2, …]`.
+    /// - `gamma`: the same γ challenge used for LogUp batching.
+    /// - `r`: random evaluation point for eq.
+    /// - `field_cfg`: field configuration.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn build_reconstruction_group(
+        witnesses: &[&[F]],
+        chunks: &[Vec<Vec<F>>],
+        decomp_bases: &[F],
+        gamma: &F,
+        r: &[F],
+        field_cfg: &F::Config,
+    ) -> Result<Vec<MultiDegreeSumcheckGroup<F>>, LookupError>
+    where
+        F::Inner: Zero + Default + Send + Sync,
+        F: 'static,
+    {
+        let num_cols = witnesses.len();
+        if num_cols == 0 {
+            return Ok(Vec::new());
+        }
+        assert_eq!(num_cols, chunks.len());
+        let k = decomp_bases.len();
+
+        let zero = F::zero_with_cfg(field_cfg);
+        let one = F::one_with_cfg(field_cfg);
+        let inner_zero = zero.inner().clone();
+
+        let num_vars = log2(witnesses[0].len().next_power_of_two()) as usize;
+
+        let eq_r = build_eq_x_r_inner(r, field_cfg)?;
+
+        let mk_mle = |data: &[F]| -> DenseMultilinearExtension<F::Inner> {
+            DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                cfg_iter!(data).map(|x| x.inner().clone()).collect(),
+                inner_zero.clone(),
+            )
+        };
+
+        // MLEs: [eq, w_0, chunk_{0,0..K-1}, w_1, chunk_{1,0..K-1}, ...]
+        let mut mles = Vec::with_capacity(1 + num_cols * (k + 1));
+        mles.push(eq_r);
+        for l in 0..num_cols {
+            assert_eq!(chunks[l].len(), k);
+            mles.push(mk_mle(witnesses[l]));
+            for chunk in &chunks[l] {
+                mles.push(mk_mle(chunk));
+            }
+        }
+
+        let gamma_pows = powers(gamma.clone(), one, num_cols);
+        let bases = decomp_bases.to_vec();
+        let zero_c = zero;
+        let stride = k + 1; // w + K chunks per column
+
+        let group = MultiDegreeSumcheckGroup::new(
+            2,
+            mles,
+            Box::new(move |v: &[F]| {
+                // v[0] = eq
+                // v[1 + l*stride] = w_l
+                // v[1 + l*stride + 1 .. 1 + l*stride + K] = chunk_{l,0..K-1}
+                let eq_val = &v[0];
+                let mut sum = zero_c.clone();
+                for l in 0..gamma_pows.len() {
+                    let w_val = &v[1 + l * stride];
+                    let mut recon = zero_c.clone();
+                    for (idx, base) in bases.iter().enumerate() {
+                        recon += &(base.clone() * &v[1 + l * stride + 1 + idx]);
+                    }
+                    let diff = w_val.clone() - &recon;
+                    sum += &(gamma_pows[l].clone() * &diff);
+                }
+                sum * eq_val
+            }),
+        );
+
+        Ok(vec![group])
+    }
+
     /// Extract witness columns and the shared lookup table for a group.
     ///
     /// Returns `(witnesses, table)` where `witnesses[i]` corresponds to
@@ -221,6 +322,76 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> LogupProt
         (witnesses, table)
     }
 
+    /// Extract decomposition data for a lookup group with `chunk_width`.
+    ///
+    /// Returns `None` when the table type has no `chunk_width` set.
+    /// Otherwise returns the subtable, positional bases, and decomposed
+    /// chunk columns for all L witnesses.
+    ///
+    /// The prover uses the returned subtable (instead of the full table)
+    /// for LogUp, commits the chunk columns via PCS, and builds a
+    /// reconstruction sumcheck group from the chunks + bases.
+    pub fn extract_decomposed(
+        witnesses: &[Vec<F>],
+        group_info: &super::LookupGroup,
+        projecting_element_f: &F,
+        field_cfg: &F::Config,
+    ) -> Option<DecompInfo<F>>
+    where
+        F::Inner: ConstTranscribable,
+    {
+        let (width, chunk_width) = match &group_info.table_type {
+            LookupTableType::BitPoly {
+                width,
+                chunk_width: Some(cw),
+            } => (*width, *cw),
+            LookupTableType::Word {
+                width,
+                chunk_width: Some(cw),
+            } => (*width, *cw),
+            _ => return None,
+        };
+
+        let k = div!(width, chunk_width);
+
+        let subtable = match &group_info.table_type {
+            LookupTableType::BitPoly { .. } => {
+                generate_bitpoly_subtable(chunk_width, projecting_element_f, field_cfg)
+            }
+            LookupTableType::Word { .. } => generate_word_subtable(chunk_width, field_cfg),
+            // unreachable given the match above, but keeps the compiler happy
+        };
+
+        let base = match &group_info.table_type {
+            LookupTableType::BitPoly { .. } => {
+                bitpoly_decomp_base(chunk_width, projecting_element_f)
+            }
+            LookupTableType::Word { .. } => word_decomp_base(chunk_width, field_cfg),
+        };
+        let one = F::one_with_cfg(field_cfg);
+        let decomp_bases = powers(base, one, k);
+
+        let chunks: Vec<Vec<Vec<F>>> = witnesses
+            .iter()
+            .map(|w| match &group_info.table_type {
+                LookupTableType::BitPoly { .. } => {
+                    decompose_bitpoly_column(w, width, chunk_width, projecting_element_f, &subtable)
+                        .expect("bitpoly decomposition failed")
+                }
+                LookupTableType::Word { .. } => {
+                    decompose_word_column(w, width, chunk_width, field_cfg)
+                        .expect("word decomposition failed")
+                }
+            })
+            .collect();
+
+        Some(DecompInfo {
+            subtable,
+            decomp_bases,
+            chunks,
+        })
+    }
+
     /// Pre-sumcheck transcript sync for LogUp.
     ///
     /// Absorbs PCS commitment roots into the transcript
@@ -249,10 +420,10 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> LogupProt
         LogupVerifierPreSumcheckData { r, beta, gamma }
     }
 
-    /// Post-sumcheck finalization for the γ-batched LogUp verifier.
+    /// Post-sumcheck finalization for the batched LogUp verifier.
     ///
-    /// Given the subclaim point `x*` and two expected evaluations (one
-    /// per γ-batched group), checks:
+    /// Given the subclaim point `r*` and two expected evaluations (one
+    /// per batched group), checks:
     ///
     /// - Group 0: `Σ_l γ^l · (d_l·u_l − 1) · eq_val == expected[0]` where d_l =
     ///   (β − w_l)
@@ -292,15 +463,20 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> LogupProt
             });
         }
 
-        // Evaluate eq(x*, r)
+        // Evaluate eq(r*, r)
         let eq_val = eq_eval(subclaim_point, r, one.clone())?;
 
-        // Compute v_eval from public table
+        // Compute v_eval from the lookup table. For decomposed groups the
+        // LogUp identities operate over the subtable (size 2^chunk_width).
         let table: Vec<F> = match &group_info.table_type {
-            LookupTableType::BitPoly { width, .. } => {
-                generate_bitpoly_table(*width, projecting_element_f, field_cfg)
-            }
-            LookupTableType::Word { width, .. } => generate_word_table(*width, field_cfg),
+            LookupTableType::BitPoly { width, chunk_width } => match chunk_width {
+                Some(cw) => generate_bitpoly_subtable(*cw, projecting_element_f, field_cfg),
+                None => generate_bitpoly_table(*width, projecting_element_f, field_cfg),
+            },
+            LookupTableType::Word { width, chunk_width } => match chunk_width {
+                Some(cw) => generate_word_subtable(*cw, field_cfg),
+                None => generate_word_table(*width, field_cfg),
+            },
         };
 
         let eq_at_point = build_eq_x_r_vec(subclaim_point, field_cfg)?;
@@ -490,7 +666,7 @@ mod tests {
         }
     }
 
-    /// Full γ-batched LogUp pipeline: `setup_logup_harness` then honest
+    /// Full batched LogUp pipeline: `setup_logup_harness` then honest
     /// finalize.
     fn run_logup_roundtrip(witnesses: &[Vec<F>], table: &[F]) {
         setup_logup_harness(witnesses, table)

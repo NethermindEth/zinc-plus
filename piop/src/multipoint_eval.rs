@@ -38,6 +38,8 @@ use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use num_traits::Zero;
 use std::marker::PhantomData;
 use thiserror::Error;
+#[cfg(debug_assertions)]
+use zinc_poly::mle::MultilinearExtensionWithConfig;
 use zinc_poly::{
     mle::DenseMultilinearExtension,
     utils::{ArithErrors, build_eq_x_r_inner, build_next_c_r_mle},
@@ -96,6 +98,18 @@ pub struct Subclaim<F: PrimeField> {
     pub shifts_at_r0: Vec<F>,
 }
 
+/// Shared evaluation data for [`MultipointEval`] — common to both prover and
+/// verifier.
+///
+/// Represents the evaluation claims produced by the CPR step: the shared
+/// evaluation point, the up/down evaluations, and the shift specifications.
+pub struct MultipointEvalData<'a, F: PrimeField> {
+    pub eval_point: &'a [F],
+    pub up_evals: &'a [F],
+    pub down_evals: &'a [F],
+    pub shifts: &'a [ShiftSpec],
+}
+
 //
 // Protocol
 //
@@ -119,13 +133,18 @@ where
     pub fn prove_as_subprotocol(
         transcript: &mut impl Transcript,
         trace_mles: &[DenseMultilinearExtension<F::Inner>],
-        eval_point: &[F],
-        up_evals: &[F],
-        down_evals: &[F],
-        shifts: &[ShiftSpec],
+        lookup_aux_mles: &[DenseMultilinearExtension<F::Inner>],
+        data: MultipointEvalData<'_, F>,
         field_cfg: &F::Config,
     ) -> Result<(Proof<F>, ProverState<F>), MultipointEvalError<F>> {
+        let MultipointEvalData {
+            eval_point,
+            up_evals: _up_evals,
+            down_evals: _down_evals,
+            shifts,
+        } = data;
         let num_cols = trace_mles.len();
+        let num_lookup_cols = lookup_aux_mles.len();
         let num_down_cols = shifts.len();
         let num_vars = eval_point.len();
         let zero = F::zero_with_cfg(field_cfg);
@@ -134,7 +153,7 @@ where
         // Step 1: Sample multi-point batching coefficient \alpha and column
         // batching coefficients \gamma_1,...,\gamma_J.
         let alphas: Vec<F> = transcript.get_field_challenges(num_down_cols, field_cfg);
-        let gammas: Vec<F> = transcript.get_field_challenges(num_cols, field_cfg);
+        let gammas: Vec<F> = transcript.get_field_challenges(num_cols + num_lookup_cols, field_cfg);
 
         // Step 2: Build the two selector MLEs:
         //   eq_r(b)   = eq(b, r')
@@ -151,7 +170,7 @@ where
             .into_iter()
             .unzip();
 
-        // Precombine up cols with gammas, precombined[b] = Σ_j γ_j trace[j][b]
+        // Precombine all up cols (trace + lookup aux) with gammas
         let precombined = {
             let evaluations: Vec<_> = cfg_into_iter!(0..1 << num_vars)
                 .map(|b| {
@@ -159,10 +178,12 @@ where
                         .iter()
                         .enumerate()
                         .fold(zero.clone(), |acc, (i, gamma)| {
-                            let eval_f = F::new_unchecked_with_cfg(
-                                trace_mles[i].evaluations[b].clone(),
-                                field_cfg,
-                            );
+                            let eval_inner = if i < num_cols {
+                                trace_mles[i].evaluations[b].clone()
+                            } else {
+                                lookup_aux_mles[i - num_cols].evaluations[b].clone()
+                            };
+                            let eval_f = F::new_unchecked_with_cfg(eval_inner, field_cfg);
                             acc + gamma.clone() * eval_f
                         })
                         .into_inner()
@@ -206,11 +227,23 @@ where
             field_cfg,
         );
 
-        // Sanity check
-        debug_assert_eq!(
-            sumcheck_proof.claimed_sum,
-            compute_expected_sum(up_evals, down_evals, &gammas, &alphas, zero)
-        );
+        // Sanity check: the claimed sum needs extended up_evals (trace + lookup aux).
+        // Lookup aux evals at eval_point are computed from the MLEs.
+        #[cfg(debug_assertions)]
+        {
+            let mut all_up = _up_evals.to_vec();
+            for mle in lookup_aux_mles {
+                all_up.push(
+                    mle.clone()
+                        .evaluate_with_config(eval_point, field_cfg)
+                        .expect("MLE evaluation should succeed"),
+                );
+            }
+            debug_assert_eq!(
+                sumcheck_proof.claimed_sum,
+                compute_expected_sum(&all_up, _down_evals, &gammas, &alphas, zero)
+            );
+        }
 
         Ok((
             Proof { sumcheck_proof },
@@ -228,29 +261,39 @@ where
     /// `shifts_at_r0`. The caller finalizes via
     /// [`verify_subclaim`](Self::verify_subclaim) once `open_evals` are
     /// available.
-    #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn verify_as_subprotocol(
         transcript: &mut impl Transcript,
         proof: Proof<F>,
-        eval_point: &[F],
-        up_evals: &[F],
-        down_evals: &[F],
-        shifts: &[ShiftSpec],
-        num_vars: usize,
+        lookup_aux_evals: &[F],
+        data: MultipointEvalData<'_, F>,
         field_cfg: &F::Config,
     ) -> Result<Subclaim<F>, MultipointEvalError<F>> {
+        let MultipointEvalData {
+            eval_point,
+            up_evals,
+            down_evals,
+            shifts,
+        } = data;
+        let num_vars = eval_point.len();
         let num_cols = up_evals.len();
+        let num_lookup_cols = lookup_aux_evals.len();
         let num_down_cols = shifts.len();
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
 
         // Step 1: Sample \alpha_k and \gamma_j (must match prover).
         let alphas: Vec<F> = transcript.get_field_challenges(num_down_cols, field_cfg);
-        let gammas: Vec<F> = transcript.get_field_challenges(num_cols, field_cfg);
+        let gammas: Vec<F> = transcript.get_field_challenges(num_cols + num_lookup_cols, field_cfg);
 
-        // Step 2: Compute expected sum
+        // Step 2: Compute expected sum (trace up_evals + lookup_aux_evals)
+        let all_up_evals: Vec<F> = up_evals
+            .iter()
+            .chain(lookup_aux_evals.iter())
+            .cloned()
+            .collect();
         let expected_sum: F =
-            compute_expected_sum(up_evals, down_evals, &gammas, &alphas, zero.clone());
+            compute_expected_sum(&all_up_evals, down_evals, &gammas, &alphas, zero.clone());
 
         if proof.sumcheck_proof.claimed_sum != expected_sum {
             return Err(MultipointEvalError::WrongSumcheckSum {
@@ -409,7 +452,6 @@ mod tests {
         up_evals: Vec<F>,
         down_evals: Vec<F>,
         shifts: Vec<ShiftSpec>,
-        num_vars: usize,
     }
 
     /// What the prover sends to the verifier.
@@ -470,7 +512,6 @@ mod tests {
             up_evals,
             down_evals,
             shifts: shifts.to_vec(),
-            num_vars,
         };
         (trace_mles, public)
     }
@@ -484,10 +525,13 @@ mod tests {
         let (proof, prover_state) = MultipointEval::<F>::prove_as_subprotocol(
             &mut transcript,
             trace_mles,
-            &public.eval_point,
-            &public.up_evals,
-            &public.down_evals,
-            &public.shifts,
+            &[],
+            MultipointEvalData {
+                eval_point: &public.eval_point,
+                up_evals: &public.up_evals,
+                down_evals: &public.down_evals,
+                shifts: &public.shifts,
+            },
             &(),
         )
         .expect("prover should succeed");
@@ -509,11 +553,13 @@ mod tests {
         let subclaim = MultipointEval::<F>::verify_as_subprotocol(
             &mut make_transcript(),
             msg.proof.clone(),
-            &public.eval_point,
-            &public.up_evals,
-            &public.down_evals,
-            &public.shifts,
-            public.num_vars,
+            &[],
+            MultipointEvalData {
+                eval_point: &public.eval_point,
+                up_evals: &public.up_evals,
+                down_evals: &public.down_evals,
+                shifts: &public.shifts,
+            },
             &(),
         )?;
 
@@ -584,6 +630,171 @@ mod tests {
         let shifts = vec![ShiftSpec::new(0, 2), ShiftSpec::new(0, 5)];
         let (public, msg) = honest_interaction(4, 3, &shifts);
         run_verifier(&public, &msg).unwrap();
+    }
+
+    // --- Happy-path: with lookup aux columns ---
+
+    fn build_lookup_aux(
+        num_vars: usize,
+        num_aux: usize,
+    ) -> Vec<DenseMultilinearExtension<<F as crypto_primitives::Field>::Inner>> {
+        let n = 1usize << num_vars;
+        let zero_inner = F::ZERO.into_inner();
+        (0..num_aux)
+            .map(|col| {
+                let evals: Vec<_> = (0..n)
+                    .map(|i| F::from(((col + 10) * n + i + 42) as u32).into_inner())
+                    .collect();
+                DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, zero_inner)
+            })
+            .collect()
+    }
+
+    fn run_prover_with_lookup(
+        trace_mles: &[DenseMultilinearExtension<<F as crypto_primitives::Field>::Inner>],
+        lookup_aux_mles: &[DenseMultilinearExtension<<F as crypto_primitives::Field>::Inner>],
+        public: &SharedSubprotocolInput,
+    ) -> ProverMessage {
+        let mut transcript = make_transcript();
+        let (proof, prover_state) = MultipointEval::<F>::prove_as_subprotocol(
+            &mut transcript,
+            trace_mles,
+            lookup_aux_mles,
+            MultipointEvalData {
+                eval_point: &public.eval_point,
+                up_evals: &public.up_evals,
+                down_evals: &public.down_evals,
+                shifts: &public.shifts,
+            },
+            &(),
+        )
+        .expect("prover should succeed");
+
+        let r_0 = &prover_state.eval_point;
+        let mut open_evals: Vec<F> = trace_mles
+            .iter()
+            .map(|mle| mle.clone().evaluate_with_config(r_0, &()).unwrap())
+            .collect();
+        for mle in lookup_aux_mles {
+            open_evals.push(mle.clone().evaluate_with_config(r_0, &()).unwrap());
+        }
+
+        ProverMessage { proof, open_evals }
+    }
+
+    fn run_verifier_with_lookup(
+        public: &SharedSubprotocolInput,
+        lookup_aux_evals: &[F],
+        msg: &ProverMessage,
+    ) -> Result<Subclaim<F>, MultipointEvalError<F>> {
+        let subclaim = MultipointEval::<F>::verify_as_subprotocol(
+            &mut make_transcript(),
+            msg.proof.clone(),
+            lookup_aux_evals,
+            MultipointEvalData {
+                eval_point: &public.eval_point,
+                up_evals: &public.up_evals,
+                down_evals: &public.down_evals,
+                shifts: &public.shifts,
+            },
+            &(),
+        )?;
+
+        MultipointEval::<F>::verify_subclaim(&subclaim, &msg.open_evals, &public.shifts, &())?;
+
+        Ok(subclaim)
+    }
+
+    #[test]
+    fn honest_prove_verify_with_lookup_aux() {
+        let num_vars = 4;
+        let num_cols = 3;
+        let shifts = all_shift_by_1(num_cols);
+        let (trace_mles, public) = build_trace(num_vars, num_cols, &shifts);
+        let lookup_aux = build_lookup_aux(num_vars, 3);
+
+        let lookup_aux_evals: Vec<F> = lookup_aux
+            .iter()
+            .map(|mle| {
+                mle.clone()
+                    .evaluate_with_config(&public.eval_point, &())
+                    .unwrap()
+            })
+            .collect();
+
+        let msg = run_prover_with_lookup(&trace_mles, &lookup_aux, &public);
+        run_verifier_with_lookup(&public, &lookup_aux_evals, &msg).unwrap();
+    }
+
+    #[test]
+    fn honest_prove_verify_with_lookup_aux_no_shifts() {
+        let num_vars = 3;
+        let (trace_mles, public) = build_trace(num_vars, 2, &[]);
+        let lookup_aux = build_lookup_aux(num_vars, 5);
+
+        let lookup_aux_evals: Vec<F> = lookup_aux
+            .iter()
+            .map(|mle| {
+                mle.clone()
+                    .evaluate_with_config(&public.eval_point, &())
+                    .unwrap()
+            })
+            .collect();
+
+        let msg = run_prover_with_lookup(&trace_mles, &lookup_aux, &public);
+        run_verifier_with_lookup(&public, &lookup_aux_evals, &msg).unwrap();
+    }
+
+    #[test]
+    fn wrong_lookup_aux_eval_rejected() {
+        let num_vars = 4;
+        let shifts = all_shift_by_1(3);
+        let (trace_mles, public) = build_trace(num_vars, 3, &shifts);
+        let lookup_aux = build_lookup_aux(num_vars, 3);
+
+        let mut lookup_aux_evals: Vec<F> = lookup_aux
+            .iter()
+            .map(|mle| {
+                mle.clone()
+                    .evaluate_with_config(&public.eval_point, &())
+                    .unwrap()
+            })
+            .collect();
+
+        let msg = run_prover_with_lookup(&trace_mles, &lookup_aux, &public);
+
+        // Corrupt one lookup aux eval
+        lookup_aux_evals[1] += F::ONE;
+        let err = run_verifier_with_lookup(&public, &lookup_aux_evals, &msg).unwrap_err();
+        assert!(
+            matches!(err, MultipointEvalError::WrongSumcheckSum { .. }),
+            "expected WrongSumcheckSum, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn wrong_lookup_open_eval_rejected() {
+        let num_vars = 3;
+        let (trace_mles, public) = build_trace(num_vars, 2, &[]);
+        let lookup_aux = build_lookup_aux(num_vars, 2);
+
+        let lookup_aux_evals: Vec<F> = lookup_aux
+            .iter()
+            .map(|mle| {
+                mle.clone()
+                    .evaluate_with_config(&public.eval_point, &())
+                    .unwrap()
+            })
+            .collect();
+
+        let mut msg = run_prover_with_lookup(&trace_mles, &lookup_aux, &public);
+        // Corrupt the lookup portion of open_evals (index 2 = first lookup col)
+        msg.open_evals[2] += F::ONE;
+        let err = run_verifier_with_lookup(&public, &lookup_aux_evals, &msg).unwrap_err();
+        assert!(
+            matches!(err, MultipointEvalError::ClaimMismatch { .. }),
+            "expected ClaimMismatch, got {err:?}",
+        );
     }
 
     // --- Failure: corrupted down_evals with mixed shifts ---

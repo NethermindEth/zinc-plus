@@ -885,6 +885,188 @@ macro_rules! impl_bitpoly_int_trace {
 
 impl_bitpoly_int_trace!(BitPolyLookupUair, 256);
 
+/// Decomposed Word lookup: Word(8) with chunk_width=4, K=2.
+/// 2 int columns: a looked up (decomposed), b = a (trivial constraint).
+pub struct DecomposedWordUair<R>(PhantomData<R>);
+
+impl<R> Uair for DecomposedWordUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        UairSignature::new(
+            TotalColumnLayout::new(0, 0, 2),
+            PublicColumnLayout::default(),
+            vec![],
+            vec![LookupColumnSpec {
+                column_index: 0,
+                table_type: LookupTableType::Word {
+                    width: 8,
+                    chunk_width: Some(4),
+                },
+            }],
+        )
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        b.assert_zero(up.int[0].clone() - &up.int[1]);
+    }
+}
+
+impl_int_copy_trace!(DecomposedWordUair, 256);
+
+/// Decomposed BitPoly lookup: BitPoly(8) with chunk_width=4, K=2.
+/// 1 binary_poly column looked up (decomposed) + 1 int column.
+/// Constraint: binary_poly[0] - int[0] ∈ <X-2>.
+pub struct DecomposedBitPolyUair<R>(PhantomData<R>);
+
+impl<R> Uair for DecomposedBitPolyUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        UairSignature::new(
+            TotalColumnLayout::new(1, 0, 1),
+            PublicColumnLayout::default(),
+            vec![],
+            vec![LookupColumnSpec {
+                column_index: 0,
+                table_type: LookupTableType::BitPoly {
+                    width: 8,
+                    chunk_width: Some(4),
+                },
+            }],
+        )
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        b.assert_in_ideal(
+            up.binary_poly[0].clone() - &up.int[0],
+            &ideal_from_ref(&DegreeOneIdeal::new(R::from(2))),
+        );
+    }
+}
+
+impl_bitpoly_int_trace!(DecomposedBitPolyUair, 256);
+
+// ---------------------------------------------------------------------------
+// Comparison UAIRs: lookup vs pure-constraint for the same 8-bit range check
+// ---------------------------------------------------------------------------
+
+/// 8-bit range check via lookup: Word(8), 2 int columns, a=b.
+/// Compare against `RangeCheck8Uair` to measure lookup vs constraint cost.
+pub struct Word8LookupUair<R>(PhantomData<R>);
+
+impl<R> Uair for Word8LookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        UairSignature::new(
+            TotalColumnLayout::new(0, 0, 2),
+            PublicColumnLayout::default(),
+            vec![],
+            vec![LookupColumnSpec {
+                column_index: 0,
+                table_type: LookupTableType::Word {
+                    width: 8,
+                    chunk_width: None,
+                },
+            }],
+        )
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        b.assert_zero(up.int[0].clone() - &up.int[1]);
+    }
+}
+
+impl_int_copy_trace!(Word8LookupUair, 256);
+
+/// 8-bit range check via binary decomposition (no lookup):
+/// 1 binary_poly column (8-bit values) + 1 int column, constraint mod 2.
+/// Compare against `Word8LookupUair` to measure constraint vs lookup cost.
+pub struct RangeCheck8Uair<R>(PhantomData<R>);
+
+impl<R> Uair for RangeCheck8Uair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        UairSignature::new(
+            TotalColumnLayout::new(1, 0, 1),
+            PublicColumnLayout::default(),
+            vec![],
+            vec![],
+        )
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        b.assert_in_ideal(
+            up.binary_poly[0].clone() - &up.int[0],
+            &ideal_from_ref(&DegreeOneIdeal::new(R::from(2))),
+        );
+    }
+}
+
+impl_bitpoly_int_trace!(RangeCheck8Uair, 256);
+
 #[cfg(test)]
 mod tests {
     use crypto_primitives::crypto_bigint_int::Int;
@@ -919,6 +1101,10 @@ mod tests {
         assert_uair_shape::<MultiColLookupUair<u32>>(&[1]);
         assert_uair_shape::<MultiGroupLookupUair<u32>>(&[1]);
         assert_uair_shape::<BitPolyLookupUair<u32>>(&[1]);
+        assert_uair_shape::<DecomposedWordUair<u32>>(&[1]);
+        assert_uair_shape::<DecomposedBitPolyUair<u32>>(&[1]);
+        assert_uair_shape::<Word8LookupUair<u32>>(&[1]);
+        assert_uair_shape::<RangeCheck8Uair<u32>>(&[1]);
     }
 
     #[test]

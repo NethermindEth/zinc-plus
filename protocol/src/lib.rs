@@ -29,7 +29,7 @@ use thiserror::Error;
 use zinc_piop::{
     combined_poly_resolver::{CombinedPolyResolverError, Proof as CombinedPolyResolverProof},
     ideal_check::{IdealCheckError, Proof as IdealCheckProof},
-    lookup::{BatchedLookupProof, LookupError},
+    lookup::LookupError,
     multipoint_eval::{MultipointEvalError, Proof as MultipointEvalProof},
     projections::ProjectedTrace,
     sumcheck::multi_degree::MultiDegreeSumcheckProof,
@@ -57,6 +57,34 @@ use zip_plus::{
 // Data structures
 //
 
+/// Lookup-specific proof data (commitments, evaluations, lifted evals).
+///
+/// Present only when the UAIR has lookup specs (`Proof::lookup` is `Some`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LookupProofData<F: PrimeField> {
+    /// Zip+ commitments for lookup auxiliary columns.
+    /// One pair `(comm_m, comm_u)` per lookup group.
+    pub commitments: Vec<(ZipPlusCommitment, ZipPlusCommitment)>,
+    /// Lookup auxiliary column evaluations at the shared sumcheck point r*.
+    /// Order: per group `[m_0..m_{L-1}, u_0..u_{L-1}]`.
+    pub aux_evals: Vec<F>,
+    /// Lookup auxiliary column lifted MLE evaluations at r_0.
+    /// Each is a `DynamicPolynomialF` (single field element).
+    /// Same ordering as `aux_evals`.
+    pub lifted_evals: Vec<DynamicPolynomialF<F>>,
+    /// Zip+ commitments for decomposed chunk columns.
+    /// One commitment per decomposed lookup group (batching L·K chunk MLEs).
+    /// Empty when no lookup group uses decomposition.
+    pub chunk_commitments: Vec<ZipPlusCommitment>,
+    /// Chunk column evaluations at the shared sumcheck point r*.
+    /// Order: per decomposed group, flattened `[chunk_{0,0}, ...,
+    /// chunk_{L-1,K-1}]`.
+    pub chunk_evals: Vec<F>,
+    /// Chunk column lifted MLE evaluations at r_0 for PCS opening.
+    /// Same ordering as `chunk_evals`.
+    pub chunk_lifted_evals: Vec<DynamicPolynomialF<F>>,
+}
+
 /// Full proof produced by the Zinc+ PIOP for UCS.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proof<F: PrimeField> {
@@ -80,8 +108,8 @@ pub struct Proof<F: PrimeField> {
     /// interleaves them with these, and derives scalar open_evals via
     /// \psi_a for the sumcheck consistency check and Zip+ PCS verify.
     pub witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    /// Lookup argument proof. `None` when the UAIR has no lookup specs.
-    pub lookup_proof: Option<BatchedLookupProof<F>>,
+    /// Lookup argument proof data. `None` when the UAIR has no lookup specs.
+    pub lookup: Option<LookupProofData<F>>,
 }
 
 impl<F> GenTranscribable for Proof<F>
@@ -111,8 +139,52 @@ where
         let (witness_vec, bytes) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
         let witness_lifted_evals = witness_vec.0;
 
-        // TODO: deserialize lookup_proof once BatchedLookupProof gets
-        // Transcribable impls (lookup is not yet implemented).
+        // Lookup data: u8 flag (0 = None, 1 = Some) then fields
+        let (has_lookup, mut bytes) = u8::read_transcription_bytes_subset(bytes);
+        let lookup = if has_lookup == 0 {
+            None
+        } else {
+            let (aux_evals, rest) = Vec::<F>::read_transcription_bytes_subset(bytes);
+            let (lifted_vec, rest) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(rest);
+
+            let (num_comms, rest) = u32::read_transcription_bytes_subset(rest);
+            let num_comms =
+                usize::try_from(num_comms).expect("lookup comm count must fit into usize");
+            let mut commitments = Vec::with_capacity(num_comms);
+            let mut rest = rest;
+            for _ in 0..num_comms {
+                let (c1, r) = ZipPlusCommitment::read_transcription_bytes_subset(rest);
+                let (c2, r) = ZipPlusCommitment::read_transcription_bytes_subset(r);
+                commitments.push((c1, c2));
+                rest = r;
+            }
+
+            let (num_chunk_comms, rest) = u32::read_transcription_bytes_subset(rest);
+            let num_chunk_comms =
+                usize::try_from(num_chunk_comms).expect("chunk comm count must fit into usize");
+            let mut chunk_commitments = Vec::with_capacity(num_chunk_comms);
+            let mut rest = rest;
+            for _ in 0..num_chunk_comms {
+                let (c, r) = ZipPlusCommitment::read_transcription_bytes_subset(rest);
+                chunk_commitments.push(c);
+                rest = r;
+            }
+
+            let (chunk_evals, rest) = Vec::<F>::read_transcription_bytes_subset(rest);
+            let (chunk_lifted_vec, rest) =
+                DynamicPolyVecF::<F>::read_transcription_bytes_subset(rest);
+            bytes = rest;
+
+            Some(LookupProofData {
+                commitments,
+                aux_evals,
+                lifted_evals: lifted_vec.0,
+                chunk_commitments,
+                chunk_evals,
+                chunk_lifted_evals: chunk_lifted_vec.0,
+            })
+        };
+
         assert!(bytes.is_empty(), "All bytes should be consumed");
 
         Self {
@@ -123,7 +195,7 @@ where
             combined_sumcheck,
             multipoint_eval,
             witness_lifted_evals,
-            lookup_proof: None,
+            lookup,
         }
     }
 
@@ -153,10 +225,41 @@ where
         buf = self.multipoint_eval.write_transcription_bytes_subset(buf);
 
         // witness_lifted_evals: u32 length prefix + DynamicPolyVecF encoding
-        // TODO: serialize lookup_proof once BatchedLookupProof gets
-        // Transcribable impls (lookup is not yet implemented).
-        DynamicPolyVecF::reinterpret(&self.witness_lifted_evals)
+        buf = DynamicPolyVecF::reinterpret(&self.witness_lifted_evals)
             .write_transcription_bytes_subset(buf);
+
+        // Lookup data: u8 flag + fields
+        let has_lookup: u8 = u8::from(self.lookup.is_some());
+        has_lookup.write_transcription_bytes_exact(&mut buf[..u8::NUM_BYTES]);
+        buf = &mut buf[u8::NUM_BYTES..];
+
+        if let Some(ref lk) = self.lookup {
+            buf = lk.aux_evals.write_transcription_bytes_subset(buf);
+            buf = DynamicPolyVecF::reinterpret(&lk.lifted_evals)
+                .write_transcription_bytes_subset(buf);
+
+            let num_comms = u32::try_from(lk.commitments.len()).expect("comms count fits u32");
+            num_comms.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
+            buf = &mut buf[u32::NUM_BYTES..];
+            for (c1, c2) in &lk.commitments {
+                buf = c1.write_transcription_bytes_subset(buf);
+                buf = c2.write_transcription_bytes_subset(buf);
+            }
+
+            let num_chunk_comms =
+                u32::try_from(lk.chunk_commitments.len()).expect("chunk comms count fits u32");
+            num_chunk_comms.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
+            buf = &mut buf[u32::NUM_BYTES..];
+            for c in &lk.chunk_commitments {
+                buf = c.write_transcription_bytes_subset(buf);
+            }
+
+            buf = lk.chunk_evals.write_transcription_bytes_subset(buf);
+            buf = DynamicPolyVecF::reinterpret(&lk.chunk_lifted_evals)
+                .write_transcription_bytes_subset(buf);
+        }
+
+        let _ = buf;
     }
 }
 
@@ -180,10 +283,23 @@ where
             + self.combined_sumcheck.get_num_bytes()
             + MultipointEvalProof::<F>::LENGTH_NUM_BYTES
             + self.multipoint_eval.get_num_bytes()
-            // TODO: add lookup_proof size once BatchedLookupProof gets
-            // Transcribable impls (lookup is not yet implemented).
             + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
             + witness_vec.get_num_bytes()
+            + u8::NUM_BYTES
+            + self.lookup.as_ref().map_or(0, |lk| {
+                Vec::<F>::LENGTH_NUM_BYTES
+                    + lk.aux_evals.get_num_bytes()
+                    + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
+                    + DynamicPolyVecF::reinterpret(&lk.lifted_evals).get_num_bytes()
+                    + u32::NUM_BYTES
+                    + lk.commitments.len() * 2 * ZipPlusCommitment::NUM_BYTES
+                    + u32::NUM_BYTES
+                    + lk.chunk_commitments.len() * ZipPlusCommitment::NUM_BYTES
+                    + Vec::<F>::LENGTH_NUM_BYTES
+                    + lk.chunk_evals.get_num_bytes()
+                    + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
+                    + DynamicPolyVecF::reinterpret(&lk.chunk_lifted_evals).get_num_bytes()
+            })
     }
 }
 
@@ -257,6 +373,19 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize> {
 
     /// Linear code used in Zip+ for the integer trace columns.
     type IntLc: LinearCode<Self::IntZt>;
+
+    /// Zip+ types for lookup auxiliary columns (m, u, v) — field-element-sized
+    /// integers.
+    type LookupZt: ZipTypes<
+            Chal = Self::Chal,
+            Pt = Self::Pt,
+            CombR = Self::CombR,
+            Fmod = Self::Fmod,
+            PrimeTest = Self::PrimeTest,
+        >;
+
+    /// Linear code for lookup auxiliary columns.
+    type LookupLc: LinearCode<Self::LookupZt>;
 }
 
 /// Main struct for the Zinc+ PIOP. The protocol is implemented as associated
@@ -429,8 +558,10 @@ mod tests {
     use zinc_poly::univariate::{binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct};
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
-        BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-        TestAirNoMultiplication, TestUairMixedShifts, TestUairSimpleMultiplication,
+        BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, BitPolyLookupUair,
+        DecomposedBitPolyUair, DecomposedWordUair, GenerateRandomTrace, MultiColLookupUair,
+        MultiGroupLookupUair, RangeCheck8Uair, SimpleLookupUair, TestAirNoMultiplication,
+        TestUairMixedShifts, TestUairSimpleMultiplication, Word8LookupUair,
     };
     use zinc_uair::{
         degree_counter::count_max_degree, ideal::degree_one::DegreeOneIdeal,
@@ -552,6 +683,28 @@ mod tests {
         type ArrCombRDotChal = MBSInnerProduct;
     }
 
+    /// Zip+ types for lookup auxiliary columns (m, u, v).
+    /// Eval = Int<LOOKUP_EVAL_LIMBS> holds any element of F_q.
+    /// FIELD_LIMBS + 1 because Int is signed: Int<3> maxes at 2^191-1,
+    /// but field elements can be up to q-1 ≈ 2^192-1.
+    const LOOKUP_EVAL_LIMBS: usize = FIELD_LIMBS + 1;
+
+    pub struct LookupZipTypes {}
+    impl ZipTypes for LookupZipTypes {
+        const NUM_COLUMN_OPENINGS: usize = 200;
+        type Eval = Int<LOOKUP_EVAL_LIMBS>;
+        type Cw = Int<M>;
+        type Fmod = Uint<FIELD_LIMBS>;
+        type PrimeTest = MillerRabin;
+        type Chal = i128;
+        type Pt = i128;
+        type CombR = Int<M>;
+        type Comb = Self::CombR;
+        type EvalDotChal = ScalarProduct;
+        type CombDotChal = ScalarProduct;
+        type ArrCombRDotChal = MBSInnerProduct;
+    }
+
     struct TestZincTypesIprs;
 
     impl ZincTypes<DEGREE_PLUS_ONE> for TestZincTypesIprs {
@@ -565,10 +718,12 @@ mod tests {
         type BinaryZt = BinPolyZipTypes;
         type ArbitraryZt = ArbitraryPolyZipTypesIprs;
         type IntZt = IntZipTypes;
+        type LookupZt = LookupZipTypes;
 
         type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, CHECKED>;
         type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP, CHECKED>;
         type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, CHECKED>;
+        type LookupLc = IprsCode<Self::LookupZt, PnttConfigF65537, REP, CHECKED>;
     }
 
     #[derive(Copy, Clone)]
@@ -591,10 +746,12 @@ mod tests {
         type BinaryZt = BinPolyZipTypes;
         type ArbitraryZt = ArbitraryPolyZipTypesRaa;
         type IntZt = IntZipTypes;
+        type LookupZt = LookupZipTypes;
 
         type BinaryLc = RaaCode<Self::BinaryZt, TestRaaConfig, REP>;
         type ArbitraryLc = RaaCode<Self::ArbitraryZt, TestRaaConfig, REP>;
         type IntLc = RaaCode<Self::IntZt, TestRaaConfig, REP>;
+        type LookupLc = RaaCode<Self::LookupZt, TestRaaConfig, REP>;
     }
 
     /// Use row size equal to poly size, resulting in flat single-row matrices
@@ -607,11 +764,12 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn setup_pp<Zt>(
         num_vars: usize,
-        linear_codes: (Zt::BinaryLc, Zt::ArbitraryLc, Zt::IntLc),
+        linear_codes: (Zt::BinaryLc, Zt::ArbitraryLc, Zt::IntLc, Zt::LookupLc),
     ) -> (
         ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
         ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
         ZipPlusParams<Zt::IntZt, Zt::IntLc>,
+        ZipPlusParams<Zt::LookupZt, Zt::LookupLc>,
     )
     where
         Zt: ZincTypes<DEGREE_PLUS_ONE>,
@@ -621,6 +779,7 @@ mod tests {
             ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::setup(poly_size, linear_codes.0),
             ZipPlus::<Zt::ArbitraryZt, Zt::ArbitraryLc>::setup(poly_size, linear_codes.1),
             ZipPlus::<Zt::IntZt, Zt::IntLc>::setup(poly_size, linear_codes.2),
+            ZipPlus::<Zt::LookupZt, Zt::LookupLc>::setup(poly_size, linear_codes.3),
         )
     }
 
@@ -633,7 +792,7 @@ mod tests {
     #[allow(clippy::result_large_err)]
     fn do_test<Zt, U>(
         num_vars: usize,
-        linear_codes: (Zt::BinaryLc, Zt::ArbitraryLc, Zt::IntLc),
+        linear_codes: (Zt::BinaryLc, Zt::ArbitraryLc, Zt::IntLc, Zt::LookupLc),
         project_ideal: impl Fn(
             &IdealOrZero<U::Ideal>,
             &<F as PrimeField>::Config,
@@ -656,6 +815,7 @@ mod tests {
             + for<'a> FromWithConfig<&'a Zt::Pt>,
         <F as Field>::Inner: FromRef<Zt::Fmod>,
         <F as Field>::Modulus: FromRef<Zt::Fmod>,
+        <Zt::LookupZt as ZipTypes>::Eval: FromRef<<F as Field>::Inner>,
     {
         let mut rng = rng();
         let pp = setup_pp::<Zt>(num_vars, linear_codes);
@@ -718,6 +878,7 @@ mod tests {
                 make_iprs(num_vars),
                 make_iprs(num_vars),
                 make_iprs(num_vars),
+                make_iprs(num_vars),
             ),
             default_project_ideal!(),
             |_| {},
@@ -745,6 +906,7 @@ mod tests {
                 RaaCode::new(num_vars),
                 RaaCode::new(num_vars),
                 RaaCode::new(num_vars),
+                RaaCode::new(num_vars),
             ),
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
             |_| {},
@@ -765,6 +927,7 @@ mod tests {
                 make_iprs(num_vars),
                 make_iprs(num_vars),
                 make_iprs(num_vars),
+                make_iprs(num_vars),
             ),
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
             |_| {},
@@ -782,6 +945,7 @@ mod tests {
         do_test::<TestZincTypesIprs, BinaryDecompositionUair<ZtInt>>(
             num_vars,
             (
+                make_iprs(num_vars),
                 make_iprs(num_vars),
                 make_iprs(num_vars),
                 make_iprs(num_vars),
@@ -808,6 +972,7 @@ mod tests {
                 make_iprs(num_vars),
                 make_iprs(num_vars),
                 make_iprs(num_vars),
+                make_iprs(num_vars),
             ),
             default_project_ideal!(),
             |_| {},
@@ -828,10 +993,335 @@ mod tests {
                 make_iprs(num_vars),
                 make_iprs(num_vars),
                 make_iprs(num_vars),
+                make_iprs(num_vars),
             ),
             default_project_ideal!(),
             |_| {},
             |res| res.unwrap(),
+        );
+    }
+
+    /// End-to-end test: SimpleLookupUair.
+    ///
+    /// 2 int cols, constraint: a - b = 0, column 0 looked up against Word(4).
+    #[test]
+    fn test_e2e_simple_lookup() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SimpleLookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// End-to-end test: Word8LookupUair (Word(8) lookup, no decomp).
+    #[test]
+    fn test_e2e_word8_lookup() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, Word8LookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// End-to-end test: RangeCheck8Uair (8-bit binary decomp, no lookup).
+    #[test]
+    fn test_e2e_range_check_8() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, RangeCheck8Uair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    //
+    // Negative tests for SimpleLookupUair
+    //
+
+    #[test]
+    fn test_lookup_tamper_aux_evals() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SimpleLookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                let lk = proof.lookup.as_mut().unwrap();
+                let cfg = *lk.aux_evals[0].cfg();
+                lk.aux_evals[0] += &F::from_with_cfg(1u64, &cfg);
+            },
+            |res| {
+                assert!(res.is_err(), "tampered lookup_aux_evals should be rejected");
+            },
+        );
+    }
+
+    #[test]
+    fn test_lookup_tamper_lifted_evals() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SimpleLookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                let lk = proof.lookup.as_mut().unwrap();
+                if let Some(c) = lk.lifted_evals[0].coeffs.first_mut() {
+                    let one = F::from_with_cfg(1u64, &c.cfg().clone());
+                    *c += &one;
+                }
+            },
+            |res| {
+                assert!(
+                    res.is_err(),
+                    "tampered lookup_lifted_evals should be rejected"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_lookup_tamper_commitment() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SimpleLookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                if let Some(ref mut lk) = proof.lookup {
+                    lk.commitments[0].0.root = Default::default();
+                }
+            },
+            |res| {
+                assert!(
+                    res.is_err(),
+                    "tampered lookup commitment should be rejected"
+                );
+            },
+        );
+    }
+
+    /// End-to-end test: MultiColLookupUair (L=2, same Word(4) table).
+    #[test]
+    fn test_e2e_multi_col_lookup() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, MultiColLookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// End-to-end test: MultiGroupLookupUair (Word(4) + Word(8), two groups).
+    #[test]
+    fn test_e2e_multi_group_lookup() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, MultiGroupLookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// End-to-end test: BitPolyLookupUair (BitPoly(8) table type).
+    #[test]
+    fn test_e2e_bitpoly_lookup() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, BitPolyLookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    //
+    // Decomposed lookup tests
+    //
+
+    /// E2E: DecomposedWordUair — Word(8) with chunk_width=4, K=2.
+    #[test]
+    fn test_e2e_decomposed_word_lookup() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, DecomposedWordUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// E2E: DecomposedBitPolyUair — BitPoly(8) with chunk_width=4, K=2.
+    #[test]
+    fn test_e2e_decomposed_bitpoly_lookup() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, DecomposedBitPolyUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_decomposed_word_tamper_chunk_evals() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, DecomposedWordUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                let lk = proof.lookup.as_mut().unwrap();
+                let cfg = *lk.chunk_evals[0].cfg();
+                lk.chunk_evals[0] += &F::from_with_cfg(1u64, &cfg);
+            },
+            |res| {
+                assert!(res.is_err(), "tampered chunk_evals should be rejected");
+            },
+        );
+    }
+
+    #[test]
+    fn test_decomposed_word_tamper_chunk_commitment() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, DecomposedWordUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                if let Some(ref mut lk) = proof.lookup {
+                    lk.chunk_commitments[0].root = Default::default();
+                }
+            },
+            |res| {
+                assert!(res.is_err(), "tampered chunk commitment should be rejected");
+            },
+        );
+    }
+
+    #[test]
+    #[allow(clippy::arithmetic_side_effects)]
+    fn test_decomposed_bitpoly_tamper_chunk_evals() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, DecomposedBitPolyUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |proof| {
+                let lk = proof.lookup.as_mut().unwrap();
+                let cfg = *lk.chunk_evals[0].cfg();
+                lk.chunk_evals[0] += &F::from_with_cfg(1u64, &cfg);
+            },
+            |res| {
+                assert!(res.is_err(), "tampered chunk_evals should be rejected");
+            },
+        );
+    }
+
+    #[test]
+    fn test_decomposed_bitpoly_tamper_chunk_commitment() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, DecomposedBitPolyUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |proof| {
+                if let Some(ref mut lk) = proof.lookup {
+                    lk.chunk_commitments[0].root = Default::default();
+                }
+            },
+            |res| {
+                assert!(res.is_err(), "tampered chunk commitment should be rejected");
+            },
         );
     }
 
@@ -846,6 +1336,7 @@ mod tests {
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
             num_vars,
             (
+                make_iprs(num_vars),
                 make_iprs(num_vars),
                 make_iprs(num_vars),
                 make_iprs(num_vars),
@@ -870,6 +1361,7 @@ mod tests {
                 make_iprs(num_vars),
                 make_iprs(num_vars),
                 make_iprs(num_vars),
+                make_iprs(num_vars),
             ),
             default_project_ideal!(),
             |proof| proof.resolver.up_evals.swap(0, 1),
@@ -890,6 +1382,7 @@ mod tests {
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
             num_vars,
             (
+                make_iprs(num_vars),
                 make_iprs(num_vars),
                 make_iprs(num_vars),
                 make_iprs(num_vars),
@@ -919,6 +1412,7 @@ mod tests {
                 make_iprs(num_vars),
                 make_iprs(num_vars),
                 make_iprs(num_vars),
+                make_iprs(num_vars),
             ),
             default_project_ideal!(),
             |proof| proof.commitments.0.root = Default::default(),
@@ -934,6 +1428,7 @@ mod tests {
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
             num_vars,
             (
+                make_iprs(num_vars),
                 make_iprs(num_vars),
                 make_iprs(num_vars),
                 make_iprs(num_vars),
