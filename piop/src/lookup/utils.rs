@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable};
 use zinc_utils::{cfg_chunk_size, cfg_chunks, cfg_chunks_mut, cfg_into_iter};
 
 /// A precomputed table index mapping byte representations of table entries
@@ -187,16 +188,17 @@ fn reduce_chunk_products<F: PrimeField>(prefixes: &[Vec<F>], one: &F) -> Vec<F> 
 /// Use with [`compute_multiplicities_with_index`] to avoid rebuilding
 /// the hash map when computing multiplicities for multiple witnesses
 /// against the same table.
-pub fn build_table_index<F: PrimeField>(table: &[F]) -> TableIndex {
-    let elem_size = std::mem::size_of::<F::Inner>();
+pub fn build_table_index<F: PrimeField>(table: &[F]) -> TableIndex
+where
+    F::Inner: ConstTranscribable,
+{
     table
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let bytes = unsafe {
-                std::slice::from_raw_parts(t.inner() as *const F::Inner as *const u8, elem_size)
-            };
-            (bytes.to_vec(), i)
+            let mut bytes = vec![0u8; F::Inner::NUM_BYTES];
+            t.inner().write_transcription_bytes_exact(&mut bytes);
+            (bytes, i)
         })
         .collect()
 }
@@ -218,6 +220,7 @@ pub fn compute_multiplicities_with_index<F: PrimeField + FromPrimitiveWithConfig
 ) -> Option<Vec<F>>
 where
     F::Config: Sync,
+    F::Inner: ConstTranscribable,
 {
     if witness.is_empty() {
         return Some(
@@ -227,17 +230,15 @@ where
         );
     }
 
-    let elem_size = std::mem::size_of::<F::Inner>();
     let chunk_size = cfg_chunk_size!(witness.len(), 4096);
 
     let local_counts: Vec<Vec<u64>> = cfg_chunks!(witness, chunk_size)
         .map(|chunk| {
             let mut counts = vec![0u64; table_len];
+            let mut bytes = vec![0u8; F::Inner::NUM_BYTES];
             for w in chunk {
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(w.inner() as *const F::Inner as *const u8, elem_size)
-                };
-                match table_index.get(bytes) {
+                w.inner().write_transcription_bytes_exact(&mut bytes);
+                match table_index.get(&bytes) {
                     Some(&idx) => counts[idx] += 1,
                     // Empty vec: valid counts always have
                     // length table_len ≥ 1, so is_empty() detects this below.
@@ -283,6 +284,7 @@ pub fn compute_multiplicities<F: PrimeField + FromPrimitiveWithConfig + Send + S
 ) -> Option<Vec<F>>
 where
     F::Config: Sync,
+    F::Inner: ConstTranscribable,
 {
     let index = build_table_index(table);
     compute_multiplicities_with_index(witness, &index, table.len(), field_cfg)
