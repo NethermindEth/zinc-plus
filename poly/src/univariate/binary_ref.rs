@@ -357,6 +357,7 @@ impl<const DEGREE_PLUS_ONE: usize> DerefMut for BinaryRefPoly<DEGREE_PLUS_ONE> {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct BinaryRefPolyInnerProduct<R, const DEGREE_PLUS_ONE: usize>(PhantomData<R>);
 
 impl<Rhs, Out, const DEGREE_PLUS_ONE: usize> InnerProduct<BinaryRefPoly<DEGREE_PLUS_ONE>, Rhs, Out>

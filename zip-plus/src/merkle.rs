@@ -64,7 +64,7 @@ where
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct MerkleTree {
     /// First vector is leaves, last vector is root
     layers: Vec<Vec<MtHash>>,

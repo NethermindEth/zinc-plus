@@ -172,6 +172,7 @@ column_layout_wrapper!(/// Layout of the witness (total minus public) columns.
 /// Public columns precede witness columns within each type group.
 /// The flattened trace ordering is:
 /// `[pub_bin, wit_bin, pub_arb, wit_arb, pub_int, wit_int]`.
+#[derive(Clone, Debug)]
 pub struct UairSignature {
     /// Column-type layout of all (public + witness) columns.
     total_cols: TotalColumnLayout,
@@ -384,7 +385,7 @@ impl<'a, Expr> TraceRow<'a, Expr> {
 ///
 /// One type might implement different UAIR logics for different underlying
 /// semirings hence the generic type parameter.
-pub trait Uair {
+pub trait Uair: Clone {
     /// The ideal type the AIR operates with.
     /// Since a `ConstraintBuilder` is "opaque" for a `Uair`
     /// a `Uair` has to have a means to create ideals

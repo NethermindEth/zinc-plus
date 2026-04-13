@@ -1,7 +1,7 @@
 use crypto_bigint::Odd;
 use crypto_primitives::crypto_bigint_uint::Uint;
 
-pub trait PrimalityTest<R> {
+pub trait PrimalityTest<R>: Clone {
     fn is_probably_prime(candidate: &R) -> bool;
 }
 

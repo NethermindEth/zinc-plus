@@ -255,6 +255,7 @@ mod tests {
     /// Test the widest integer encoding used in benchmarks
     #[test]
     fn encode_bench_int() {
+        #[derive(Clone, Debug)]
         struct BenchZipTypes {}
         impl ZipTypes for BenchZipTypes {
             const NUM_COLUMN_OPENINGS: usize = 147;
@@ -279,8 +280,8 @@ mod tests {
     fn encode_bench_poly() {
         const D_PLUS_ONE: usize = 32;
 
+        #[derive(Clone, Debug)]
         struct BenchZipPlusTypes<CwCoeff>(PhantomData<CwCoeff>);
-
         impl<CwCoeff> ZipTypes for BenchZipPlusTypes<CwCoeff>
         where
             CwCoeff: ConstTranscribable

@@ -18,14 +18,13 @@
 //! - Step 7: Zip+ PCS open/verify at r_0
 
 pub mod prover;
-pub mod stepped;
 pub mod verifier;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 use crypto_primitives::{ConstIntRing, ConstIntSemiring, FromWithConfig, PrimeField, Semiring};
-use std::marker::PhantomData;
+use std::{fmt::Debug, marker::PhantomData};
 use thiserror::Error;
 use zinc_piop::{
     combined_poly_resolver::{CombinedPolyResolverError, Proof as CombinedPolyResolverProof},
@@ -190,7 +189,7 @@ where
 
 /// Trait bundling the various type parameters for the public inputs (NYI),
 /// witness and Zinc+ PIOP.
-pub trait ZincTypes<const DEGREE_PLUS_ONE: usize> {
+pub trait ZincTypes<const DEGREE_PLUS_ONE: usize>: Clone {
     /// Main integer type for the protocol, used as a coefficient type for the
     /// arbitrary polynomial trace columns and for the integer trace columns.
     type Int: Semiring
@@ -228,7 +227,7 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize> {
             CombR = Self::CombR,
             Fmod = Self::Fmod,
             PrimeTest = Self::PrimeTest,
-        >;
+        > + Debug;
 
     /// Zip+ types for the arbitrary polynomial trace columns.
     type ArbitraryZt: ZipTypes<
@@ -238,7 +237,7 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize> {
             CombR = Self::CombR,
             Fmod = Self::Fmod,
             PrimeTest = Self::PrimeTest,
-        >;
+        > + Debug;
 
     /// Zip+ types for the integer trace columns.
     type IntZt: ZipTypes<
@@ -248,7 +247,7 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize> {
             CombR = Self::CombR,
             Fmod = Self::Fmod,
             PrimeTest = Self::PrimeTest,
-        >;
+        > + Debug;
 
     /// Linear code used in Zip+ for the binary polynomial trace columns.
     type BinaryLc: LinearCode<Self::BinaryZt>;
@@ -465,6 +464,7 @@ mod tests {
 
     type F = MontyField<FIELD_LIMBS>;
 
+    #[derive(Debug, Clone)]
     pub struct BinPolyZipTypes {}
     impl ZipTypes for BinPolyZipTypes {
         const NUM_COLUMN_OPENINGS: usize = 147;
@@ -487,6 +487,7 @@ mod tests {
         type ArrCombRDotChal = MBSInnerProduct;
     }
 
+    #[derive(Debug, Clone)]
     pub struct ArbitraryPolyZipTypesIprs {}
     impl ZipTypes for ArbitraryPolyZipTypesIprs {
         const NUM_COLUMN_OPENINGS: usize = 147;
@@ -512,6 +513,7 @@ mod tests {
 
     /// Arbitrary poly ZipTypes with wider codewords for RAA encoding.
     /// RAA accumulation grows the bit-width, so Cw needs more bits than Eval.
+    #[derive(Debug, Clone)]
     pub struct ArbitraryPolyZipTypesRaa {}
     impl ZipTypes for ArbitraryPolyZipTypesRaa {
         const NUM_COLUMN_OPENINGS: usize = 147;
@@ -537,6 +539,7 @@ mod tests {
 
     type ZtInt = i64;
 
+    #[derive(Debug, Clone)]
     pub struct IntZipTypes {}
     impl ZipTypes for IntZipTypes {
         const NUM_COLUMN_OPENINGS: usize = 147;
@@ -553,6 +556,7 @@ mod tests {
         type ArrCombRDotChal = MBSInnerProduct;
     }
 
+    #[derive(Clone, Debug)]
     struct TestZincTypesIprs;
 
     impl ZincTypes<DEGREE_PLUS_ONE> for TestZincTypesIprs {
@@ -579,6 +583,7 @@ mod tests {
         const CHECK_FOR_OVERFLOWS: bool = true;
     }
 
+    #[derive(Clone, Debug)]
     struct TestZincTypesRaa;
 
     impl ZincTypes<DEGREE_PLUS_ONE> for TestZincTypesRaa {

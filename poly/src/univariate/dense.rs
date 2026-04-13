@@ -656,6 +656,7 @@ impl<R, const DEGREE_PLUS_ONE: usize> DerefMut for DensePolynomial<R, DEGREE_PLU
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct DensePolyInnerProduct<
     R,
     Rhs,

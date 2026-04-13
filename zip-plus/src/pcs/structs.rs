@@ -4,7 +4,7 @@ use crate::{
 };
 use crypto_primitives::{ConstIntRing, ConstIntSemiring, DenseRowMatrix, FixedSemiring};
 use num_traits::CheckedAdd;
-use std::{marker::PhantomData, ops::Neg};
+use std::{fmt::Debug, marker::PhantomData, ops::Neg};
 use zinc_poly::{ConstCoeffBitWidth, Polynomial};
 use zinc_primality::PrimalityTest;
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable};
@@ -12,7 +12,7 @@ use zinc_utils::{
     from_ref::FromRef, inner_product::InnerProduct, mul_by_scalar::MulByScalar, named::Named,
 };
 
-pub trait ZipTypes: Send + Sync {
+pub trait ZipTypes: Clone + Send + Sync {
     const NUM_COLUMN_OPENINGS: usize;
 
     /// Semiring of witness/polynomial evaluations on boolean hypercube
@@ -109,7 +109,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlusParams<Zt, Lc> {
 
 /// Full data of zip commitment to a multilinear polynomial, including encoded
 /// rows and Merkle tree, kept by the prover for the testing phase.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ZipPlusHint<R> {
     /// The encoded rows of the polynomial matrix representation, referred to as
     /// "u-hat" in the Zinc paper
