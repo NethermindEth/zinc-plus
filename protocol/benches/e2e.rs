@@ -20,7 +20,7 @@ use zinc_poly::{
     },
 };
 use zinc_primality::{MillerRabin, PrimalityTest};
-use zinc_protocol::{Proof, StepTimings, ZincPlusPiop, ZincTypes};
+use zinc_protocol::{Proof, StepTimings, VerifyStepTimings, ZincPlusPiop, ZincTypes};
 use zinc_test_uair::{
     BigLinearUair, SHAProxy, BigLinearUairWithPublicInput, BinaryDecompositionUair, EcdsaUair,
     EcdsaUairLimbs, GenerateRandomTrace, ShaProxyEcdsaUair, TestAirNoMultiplication,
@@ -115,6 +115,20 @@ const STEP_PICKS: [(&str, fn(&StepTimings) -> Duration); 8] = [
     ("Step 5: Multipoint Eval", |t| t.multipoint_eval),
     ("Step 6: Lift-and-Project", |t| t.lift_and_project),
     ("Step 7: PCS Open", |t| t.pcs_open),
+];
+
+/// Per-step verifier sub-benches, mirroring [`STEP_PICKS`] for the
+/// `verify_full_run_with_step_timings` entry point. Each label parallels a
+/// prover step so bench IDs line up one-for-one across prove/verify.
+const VERIFY_STEP_PICKS: [(&str, fn(&VerifyStepTimings) -> Duration); 8] = [
+    ("Verify Step 0: Reconstruct Transcript", |t| t.reconstruct_transcript),
+    ("Verify Step 1: Prime Projection", |t| t.prime_projection),
+    ("Verify Step 2: Ideal Check", |t| t.ideal_check),
+    ("Verify Step 3: Eval Projection", |t| t.eval_projection),
+    ("Verify Step 4: Fq Sumcheck", |t| t.fq_sumcheck),
+    ("Verify Step 5: Multipoint Eval", |t| t.multipoint_eval),
+    ("Verify Step 6: Lift-and-Project", |t| t.lift_and_project),
+    ("Verify Step 7: PCS Verify", |t| t.pcs_verify),
 ];
 
 #[allow(clippy::type_complexity)]
@@ -653,6 +667,37 @@ fn bench_sha_proxy_verify_full_run<U>(
             BatchSize::SmallInput,
         );
     });
+
+    // Per-step verifier sub-benches. Each sample still runs the full
+    // verifier once via `verify_full_run_with_step_timings`, then
+    // accumulates only the selected field of `VerifyStepTimings` into
+    // Criterion's measurement — ~8x more expensive than one monolithic
+    // `Verify (full run)` sample, but attributes wall-clock per phase.
+    for (name, pick) in VERIFY_STEP_PICKS {
+        group.bench_function(BenchmarkId::new(name, &params), |bench| {
+            bench.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let (_verdict, timings) = ZincPlusPiop::<
+                        BenchZincTypes,
+                        U,
+                        F,
+                        DEGREE_PLUS_ONE,
+                    >::verify_full_run_with_step_timings::<_, PERFORM_CHECKS>(
+                        &pp,
+                        proof.clone(),
+                        &public_trace,
+                        num_vars,
+                        zinc_protocol::project_scalar_fn,
+                        proj_ideal,
+                    );
+                    total += pick(&timings);
+                    let _ = black_box(_verdict);
+                }
+                total
+            });
+        });
+    }
 }
 
 fn bench_big_linear_public_input(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
@@ -954,6 +999,35 @@ fn bench_sha_ecdsa_verify_full_run(group: &mut BenchmarkGroup<WallTime>, num_var
             BatchSize::SmallInput,
         );
     });
+
+    // Per-step verifier sub-benches — same pattern as the prover's
+    // `STEP_PICKS` loop, but routed through
+    // `verify_full_run_with_step_timings`.
+    for (name, pick) in VERIFY_STEP_PICKS {
+        group.bench_function(BenchmarkId::new(name, &params), |bench| {
+            bench.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let (_verdict, timings) = ZincPlusPiop::<
+                        EcdsaBenchZincTypes,
+                        ShaProxyEcdsaUair,
+                        F,
+                        DEGREE_PLUS_ONE,
+                    >::verify_full_run_with_step_timings::<_, PERFORM_CHECKS>(
+                        &pp,
+                        proof.clone(),
+                        &public_trace,
+                        num_vars,
+                        zinc_protocol::project_scalar_fn,
+                        proj_ideal,
+                    );
+                    total += pick(&timings);
+                    let _ = black_box(_verdict);
+                }
+                total
+            });
+        });
+    }
 }
 
 // Prover-only bench for `EcdsaUairLimbs`. Cell type is i64, matching the

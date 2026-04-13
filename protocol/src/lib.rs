@@ -20,6 +20,7 @@ pub mod prover;
 pub mod verifier;
 
 pub use prover::StepTimings;
+pub use verifier::VerifyStepTimings;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;

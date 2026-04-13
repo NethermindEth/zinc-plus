@@ -786,6 +786,14 @@ is behind `assert_zero`.
 | `Step 7: PCS Open`      | ✓ | — | ✓ | ✓ | `StepTimings::pcs_open` |
 | `Verify`                | — | — | ✓ (`SHAProxy` only, via `do_bench`) | — | Soundness-path verifier. `do_bench_sha_proxy` routes through `do_bench`, which registers a `Verify` bench; on SHAProxy's non-satisfying witness this measures the time until the verifier bails on the first failed check. Not registered for the ECDSA drivers. |
 | `Verify (full run)`     | — | — | ✓ | ✓ | `ZincPlusPiop::verify_full_run` — runs every sub-protocol (sumcheck, ideal check, multipoint eval, PCS) to completion and defers the error. Prints `accept`/`reject (<variant>)` once before the timing loop. Expected reject reason for both: `IdealCheck`. Observed wall-clock at nvars=9 / rate=1/4: ~10 ms (SHAProxy), ~44 ms (ShaEcdsa). |
+| `Verify Step 0: Reconstruct Transcript` | — | — | ✓ | ✓ | `VerifyStepTimings::reconstruct_transcript` — `PcsVerifierTranscript` setup + absorb of the three PCS roots and all public columns. |
+| `Verify Step 1: Prime Projection` | — | — | ✓ | ✓ | `VerifyStepTimings::prime_projection` — sampling `field_cfg` (random prime q) via `get_random_field_cfg`. |
+| `Verify Step 2: Ideal Check`    | — | — | ✓ | ✓ | `VerifyStepTimings::ideal_check` — `U::verify_as_subprotocol_full_run` (deferred). |
+| `Verify Step 3: Eval Projection` | — | — | ✓ | ✓ | `VerifyStepTimings::eval_projection` — sample `projecting_element`, project scalars, compute `max_degree`. |
+| `Verify Step 4: Fq Sumcheck`    | — | — | ✓ | ✓ | `VerifyStepTimings::fq_sumcheck` — `CombinedPolyResolver::verify_as_subprotocol_full_run` (deferred). |
+| `Verify Step 5: Multipoint Eval` | — | — | ✓ | ✓ | `VerifyStepTimings::multipoint_eval` — `MultipointEval::verify_as_subprotocol_full_run` (deferred). |
+| `Verify Step 6: Lift-and-Project` | — | — | ✓ | ✓ | `VerifyStepTimings::lift_and_project` — recompute public `lifted_evals` at `r_0`, interleave with witness evals, derive `open_evals` via `ψ_a`, run `MultipointEval::verify_subclaim`, absorb all lifted evals into the transcript. |
+| `Verify Step 7: PCS Verify`     | — | — | ✓ | ✓ | `VerifyStepTimings::pcs_verify` — three `ZipPlus::verify_with_alphas_full_run` invocations (binary / arbitrary / int batches). |
 
 The per-step mechanism comes from
 [`STEP_PICKS`](../protocol/benches/e2e.rs#L109-L118): each sample still
@@ -794,6 +802,16 @@ only the selected field of `StepTimings` into criterion's measurement.
 This means the per-step bench is ~8× more expensive than a monolithic
 `Prove (E2E)` sample, but it attributes wall-clock to individual phases
 without needing eight separate prover runs per sample.
+
+The verifier uses an identical pattern via
+[`VERIFY_STEP_PICKS`](../protocol/benches/e2e.rs#L121-L132): each sample
+runs the full verifier once via
+`ZincPlusPiop::verify_full_run_with_step_timings` (which returns
+`(Result, VerifyStepTimings)` — the accept/reject verdict is still
+produced, just deferred), then accumulates only the selected field into
+criterion's measurement. Same ~8× overhead trade-off as the prover side.
+Registered for `bench_sha_proxy` and `bench_sha_ecdsa`; the ECDSA-only
+drivers (`bench_ecdsa`, `bench_ecdsa_limbs`) do not have verifier benches.
 
 `bench_ecdsa_limbs` is deliberately the odd one out: it registers only a
 single `Prove (Combined)` bench at [protocol/benches/e2e.rs:969](../protocol/benches/e2e.rs#L969)
@@ -836,10 +854,10 @@ At the current `num_vars = 9` activation, one `cargo bench -p protocol
 
 - **ECDSA** (`bench_ecdsa`): 1 × `Prove (E2E)` + 8 × `Step N: ...` = **9**
 - **EcdsaLimbs** (`bench_ecdsa_limbs`): 1 × `Prove (Combined)` = **1**
-- **SHAProxy** (`bench_sha_proxy` → `do_bench_sha_proxy` + `bench_sha_proxy_verify_full_run`): 1 × `Prove (E2E)` + 8 × `Step N: ...` + 1 × `Verify` + 1 × `Verify (full run)` = **11**
-- **ShaEcdsa** (`bench_sha_ecdsa`): 1 × `Prove (E2E)` + 8 × `Step N: ...` + 1 × `Verify (full run)` = **10**
+- **SHAProxy** (`bench_sha_proxy` → `do_bench_sha_proxy` + `bench_sha_proxy_verify_full_run`): 1 × `Prove (E2E)` + 8 × `Step N: ...` + 1 × `Verify` + 1 × `Verify (full run)` + 8 × `Verify Step N: ...` = **19**
+- **ShaEcdsa** (`bench_sha_ecdsa`): 1 × `Prove (E2E)` + 8 × `Step N: ...` + 1 × `Verify (full run)` + 8 × `Verify Step N: ...` = **18**
 
-Total: **31** sub-benches across the four UAIRs at a single
+Total: **47** sub-benches across the four UAIRs at a single
 `(num_vars, rate)` point. Multiply by the chosen rate feature to sweep
 `rate=1_4 / 1_8 / 1_16`, and by each `num_vars` value you wire into
 `e2e_benches` if you extend the harness beyond the default `9`.
@@ -957,3 +975,9 @@ Column counts are listed as `BinPoly / ArbPoly / Int`, matching the
 | `EcdsaUair`                     |  0 | 0 |14 | 3×1                      | 5 | `Impossible` (all `assert_zero`) | secp256k1 ECDSA via Shamir's trick over `Int<4>` — non-linear, 3 wire columns, **non-satisfying** witness, prover-only bench |
 | `EcdsaUairLimbs`                |  0 | 0 |84 | 24×1                     | 5 | `DegreeOneIdeal<i64>` (unused; all `assert_zero`) | Limb-decomposed `EcdsaUair`: 8 little-endian u32 limbs per 256-bit value, 96 per-limb constraints, no carries, **non-satisfying** witness, prover-only bench |
 | `ShaProxyEcdsaUair`             | 14 | 0 |18 | 28 specs (1, 9, 13, 14, 16, 17) | 5 | `(X-2), (X^32-1)`, zero | `SHAProxy<Int<4>>` + `EcdsaUair` on one trace — heterogeneous combined fixture, public columns: `bp[0]` (W) + `int[0..4]` (ECDSA), **non-satisfying** witness, prover-only bench |
+
+
+
+
+
+RUSTFLAGS="-C target-cpu=native" cargo bench -p zinc-protocol --bench e2e --features "simd parallel unchecked bench-rate-1-8" -- '/ShaEcdsa/'

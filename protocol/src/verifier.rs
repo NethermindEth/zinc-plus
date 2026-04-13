@@ -2,6 +2,23 @@ use super::*;
 use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::Zero;
 use std::io::Cursor;
+use std::time::{Duration, Instant};
+
+/// Per-step wall-clock durations collected by
+/// [`ZincPlusPiop::verify_full_run_with_step_timings`]. Each field mirrors
+/// the prover's [`crate::StepTimings`] so per-step benches can be compared
+/// across the prove/verify boundary.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VerifyStepTimings {
+    pub reconstruct_transcript: Duration,
+    pub prime_projection: Duration,
+    pub ideal_check: Duration,
+    pub eval_projection: Duration,
+    pub fq_sumcheck: Duration,
+    pub multipoint_eval: Duration,
+    pub lift_and_project: Duration,
+    pub pcs_verify: Duration,
+}
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
@@ -294,7 +311,7 @@ where
     /// failed.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn verify_full_run<IdealOverF, const CHECK_FOR_OVERFLOW: bool>(
-        (vp_bin, vp_arb, vp_int): &(
+        pp: &(
             ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
             ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
             ZipPlusParams<Zt::IntZt, Zt::IntLc>,
@@ -308,6 +325,38 @@ where
     where
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
     {
+        Self::verify_full_run_with_step_timings::<IdealOverF, CHECK_FOR_OVERFLOW>(
+            pp,
+            proof,
+            public_trace,
+            num_vars,
+            project_scalar,
+            project_ideal,
+        )
+        .0
+    }
+
+    /// Same as [`Self::verify_full_run`] but also returns per-step
+    /// wall-clock durations. Intended for benchmarks and profiling: the
+    /// eight fields of [`VerifyStepTimings`] mirror the prover's eight
+    /// protocol steps.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn verify_full_run_with_step_timings<IdealOverF, const CHECK_FOR_OVERFLOW: bool>(
+        (vp_bin, vp_arb, vp_int): &(
+            ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+            ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
+            ZipPlusParams<Zt::IntZt, Zt::IntLc>,
+        ),
+        proof: Proof<F>,
+        public_trace: &UairTrace<Zt::Int, Zt::Int, D>,
+        num_vars: usize,
+        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
+        project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
+    ) -> (Result<(), ProtocolError<F, IdealOverF>>, VerifyStepTimings)
+    where
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+    {
+        let mut timings = VerifyStepTimings::default();
         let mut deferred: Option<ProtocolError<F, IdealOverF>> = None;
         let stash = |slot: &mut Option<ProtocolError<F, IdealOverF>>,
                      err: ProtocolError<F, IdealOverF>| {
@@ -317,6 +366,7 @@ where
         };
 
         // === Step 0: Reconstruct transcript ===
+        let step_start = Instant::now();
         let mut pcs_transcript = PcsVerifierTranscript {
             fs_transcript: KeccakTranscript::default(),
             stream: Cursor::new(proof.zip),
@@ -335,15 +385,19 @@ where
             &public_trace.arbitrary_poly,
         );
         absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
+        timings.reconstruct_transcript = step_start.elapsed();
 
         // === Step 1: Prime projection ===
+        let step_start = Instant::now();
         let field_cfg = pcs_transcript
             .fs_transcript
             .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
 
         let num_constraints = count_constraints::<U>();
+        timings.prime_projection = step_start.elapsed();
 
         // === Step 2: Ideal check (deferred) ===
+        let step_start = Instant::now();
         let (ic_subclaim, ic_result) = U::verify_as_subprotocol_full_run::<_, IdealOverF, _>(
             &mut pcs_transcript.fs_transcript,
             proof.ideal_check,
@@ -355,8 +409,10 @@ where
         if let Err(e) = ic_result {
             stash(&mut deferred, ProtocolError::from(e));
         }
+        timings.ideal_check = step_start.elapsed();
 
         // === Step 3: Evaluation projection (\psi_a) ===
+        let step_start = Instant::now();
         let projecting_element: Zt::Chal = pcs_transcript.fs_transcript.get_challenge();
         let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
 
@@ -371,8 +427,10 @@ where
             };
 
         let max_degree = count_effective_max_degree::<U>();
+        timings.eval_projection = step_start.elapsed();
 
         // === Step 4: Sumcheck over F_q (deferred) ===
+        let step_start = Instant::now();
         let (cpr_subclaim, cpr_result) =
             CombinedPolyResolver::verify_as_subprotocol_full_run::<U>(
                 &mut pcs_transcript.fs_transcript,
@@ -388,8 +446,10 @@ where
         if let Err(e) = cpr_result {
             stash(&mut deferred, ProtocolError::from(e));
         }
+        timings.fq_sumcheck = step_start.elapsed();
 
         // === Step 5: Multi-point evaluation sumcheck (deferred) ===
+        let step_start = Instant::now();
         let uair_sig = U::signature();
         let (mp_subclaim, mp_result) = MultipointEval::verify_as_subprotocol_full_run(
             &mut pcs_transcript.fs_transcript,
@@ -404,10 +464,12 @@ where
         if let Err(e) = mp_result {
             stash(&mut deferred, ProtocolError::from(e));
         }
+        timings.multipoint_eval = step_start.elapsed();
 
         let r_0 = &mp_subclaim.sumcheck_subclaim.point;
 
         // === Step 6: Recompute public lifted_evals, assemble full set ===
+        let step_start = Instant::now();
         let pub_cols = uair_sig.public_cols();
         let num_pub_bin = pub_cols.num_binary_poly_cols();
         let num_pub_arb = pub_cols.num_arbitrary_poly_cols();
@@ -469,8 +531,10 @@ where
                 .fs_transcript
                 .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
         }
+        timings.lift_and_project = step_start.elapsed();
 
         // === Step 7: PCS verify at r_0 (deferred per-batch) ===
+        let step_start = Instant::now();
         macro_rules! verify_pcs_batch_full_run {
             ($Zt:ty, $Lc:ty, $vp:expr, $idx:tt, [$evals_range:expr]) => {{
                 let comm = &proof.commitments.$idx;
@@ -532,10 +596,12 @@ where
             2,
             [add!(add!(num_total_bin, num_total_arb), num_pub_int)..]
         );
+        timings.pcs_verify = step_start.elapsed();
 
-        match deferred {
+        let verdict = match deferred {
             None => Ok(()),
             Some(e) => Err(e),
-        }
+        };
+        (verdict, timings)
     }
 }
