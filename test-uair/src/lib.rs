@@ -516,16 +516,23 @@ where
 /// shift in `s`. The constraint *shape* (which columns interact, with what
 /// coefficients) is preserved exactly. Maximum forward shift is 17.
 ///
+/// `bp[0]` is the **public "W" column** (SHA-style message-schedule
+/// analogue): it is the single column with multiple non-`16` shifts
+/// (1, 9, 14, 16) and the only column whose unshifted value is read via
+/// `up.binary_poly[0]` (in C3). It is marked public so the benchmark
+/// shape matches a real SHA-like circuit where the message schedule is
+/// public input.
+///
 /// Constraints in the user `t`-frame:
 ///
 /// ```text
-/// C1: bp[0][t+1] + bp[1][t-3] - bp[2][t]   - bp[3][t]  - bp[4][t]
+/// C1: bp[4][t+1] + bp[1][t-3] - bp[2][t]   - bp[3][t]  - bp[0][t]
 ///                - bp[5][t]   - bp[6][t]   - int[0][t] - int[1][t]    ∈ (X-2)
-/// C2: bp[1][t+1] - bp[0][t-3] - bp[1][t-3] - bp[2][t]  - bp[3][t]
+/// C2: bp[1][t+1] - bp[4][t-3] - bp[1][t-3] - bp[2][t]  - bp[3][t]
 ///                - bp[7][t]   - int[0][t]  - int[2][t]                 ∈ (X-2)
-/// C3: bp[4][t]   - bp[4][t-16]- bp[4][t-7] - bp[8][t]  - bp[9][t]
+/// C3: bp[0][t]   - bp[0][t-16]- bp[0][t-7] - bp[8][t]  - bp[9][t]
 ///                - int[3][t]                                            ∈ (X-2)
-/// C4: bp[0][t] * (X^25 + X^14) - bp[5][t]                              ∈ (X^32 - 1)
+/// C4: bp[4][t] * (X^25 + X^14) - bp[5][t]                              ∈ (X^32 - 1)
 /// C5: bp[1][t] * (X^25 + X^13) - bp[3][t]                              ∈ (X^32 - 1)
 /// C6: bp[10][t] - int[0][t]                                            ∈ (X-2)
 /// C7: bp[11][t] - int[1][t]                                            ∈ (X-2)
@@ -541,7 +548,7 @@ where
 /// - `int[3]` only appears in C3 → free slack for C3's recurrence.
 /// - `bp[6]` only appears in C1 → free `BinaryPoly` slack for C1's
 ///   recurrence (constrained to non-negative `u32` values, made viable
-///   by the bp[1] sign flip + bp[0]/bp[1] pinned to large values).
+///   by the bp[1] sign flip + bp[4]/bp[1] pinned to large values).
 ///
 /// `bp[12]` and `bp[13]` are unused by any constraint and exist purely as
 /// random fillers.
@@ -557,27 +564,31 @@ where
     fn signature() -> UairSignature {
         // 14 binary_poly cols, 0 arbitrary_poly cols, 4 int cols.
         let total = TotalColumnLayout::new(14, 0, 4);
+        // bp[0] is the public "W" column — its values are part of the
+        // public input. Public bp cols precede witness bp cols in the flat
+        // trace layout, so bp[0] is the natural slot for it.
+        let public = PublicColumnLayout::new(1, 0, 0);
         // 21 binary-poly shifts + 4 int shifts = 25 shifts total.
         // Multiple shifts per source_col are supported and `UairSignature::new`
         // sorts them stably by source_col. We write them in source_col order so
         // the table-vs-code mapping is obvious.
         let shifts = vec![
-            // bp[0]: shifts 13, 16, 17  -> down.binary_poly[0..3]
-            ShiftSpec::new(0, 13),
+            // bp[0] (W): shifts 1, 9, 14, 16  -> down.binary_poly[0..4]
+            ShiftSpec::new(0, 1),
+            ShiftSpec::new(0, 9),
+            ShiftSpec::new(0, 14),
             ShiftSpec::new(0, 16),
-            ShiftSpec::new(0, 17),
-            // bp[1]: shifts 13, 16, 17  -> down.binary_poly[3..6]
+            // bp[1]: shifts 13, 16, 17  -> down.binary_poly[4..7]
             ShiftSpec::new(1, 13),
             ShiftSpec::new(1, 16),
             ShiftSpec::new(1, 17),
-            // bp[2], bp[3]: shift 16    -> down.binary_poly[6..8]
+            // bp[2], bp[3]: shift 16    -> down.binary_poly[7..9]
             ShiftSpec::new(2, 16),
             ShiftSpec::new(3, 16),
-            // bp[4]: shifts 1, 9, 14, 16  -> down.binary_poly[8..12]
-            ShiftSpec::new(4, 1),
-            ShiftSpec::new(4, 9),
-            ShiftSpec::new(4, 14),
+            // bp[4]: shifts 13, 16, 17  -> down.binary_poly[9..12]
+            ShiftSpec::new(4, 13),
             ShiftSpec::new(4, 16),
+            ShiftSpec::new(4, 17),
             // bp[5..=13]: shift 16      -> down.binary_poly[12..21]
             ShiftSpec::new(5, 16),
             ShiftSpec::new(6, 16),
@@ -595,7 +606,7 @@ where
             ShiftSpec::new(16, 16),
             ShiftSpec::new(17, 16),
         ];
-        UairSignature::new(total, PublicColumnLayout::default(), shifts)
+        UairSignature::new(total, public, shifts)
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -649,18 +660,20 @@ where
 
         // Convenience aliases for shifted columns. Indices match the shifts
         // vec above (after `UairSignature::new`'s stable sort by source_col).
-        let bp0_s13 = &down.binary_poly[0];
-        let bp0_s16 = &down.binary_poly[1];
-        let bp0_s17 = &down.binary_poly[2];
-        let bp1_s13 = &down.binary_poly[3];
-        let bp1_s16 = &down.binary_poly[4];
-        let bp1_s17 = &down.binary_poly[5];
-        let bp2_s16 = &down.binary_poly[6];
-        let bp3_s16 = &down.binary_poly[7];
-        let bp4_s1 = &down.binary_poly[8];
-        let bp4_s9 = &down.binary_poly[9];
-        let bp4_s14 = &down.binary_poly[10];
-        let bp4_s16 = &down.binary_poly[11];
+        // bp[0] is the public W column (shifts 1, 9, 14, 16); bp[4] holds
+        // the 13/16/17-shifted column pair with bp[1].
+        let bp0_s1 = &down.binary_poly[0];
+        let bp0_s9 = &down.binary_poly[1];
+        let bp0_s14 = &down.binary_poly[2];
+        let bp0_s16 = &down.binary_poly[3];
+        let bp1_s13 = &down.binary_poly[4];
+        let bp1_s16 = &down.binary_poly[5];
+        let bp1_s17 = &down.binary_poly[6];
+        let bp2_s16 = &down.binary_poly[7];
+        let bp3_s16 = &down.binary_poly[8];
+        let bp4_s13 = &down.binary_poly[9];
+        let bp4_s16 = &down.binary_poly[10];
+        let bp4_s17 = &down.binary_poly[11];
         let bp5_s16 = &down.binary_poly[12];
         let bp6_s16 = &down.binary_poly[13];
         let bp7_s16 = &down.binary_poly[14];
@@ -675,13 +688,14 @@ where
         let int2_s16 = &down.int[2];
         let int3_s16 = &down.int[3];
 
-        // (C1) bp[0][s+17] - bp[1][s+13] - bp[2..=7][s+16] - int[0..=1][s+16] ∈ (X-2)
+        // (C1) bp[4][s+17] - bp[1][s+13] - bp[2,3][s+16] - bp[0][s+16]
+        //      - bp[5,6,7][s+16] - int[0,1][s+16] ∈ (X-2)
         b.assert_in_ideal(
-            bp0_s17.clone()
+            bp4_s17.clone()
                 - bp1_s13
                 - bp2_s16
                 - bp3_s16
-                - bp4_s16
+                - bp0_s16
                 - bp5_s16
                 - bp6_s16
                 - bp7_s16
@@ -690,37 +704,37 @@ where
             &ideal_from_ref(&two_ideal),
         );
 
-        // (C2) bp[1][s+17] - bp[0][s+13] - bp[1][s+13] - bp[2,3,4][s+16]
-        //      - int[0][s+16] - int[2][s+16] ∈ (X-2)
+        // (C2) bp[1][s+17] - bp[4][s+13] - bp[1][s+13] - bp[2,3][s+16]
+        //      - bp[0][s+16] - int[0][s+16] - int[2][s+16] ∈ (X-2)
         b.assert_in_ideal(
             bp1_s17.clone()
-                - bp0_s13
+                - bp4_s13
                 - bp1_s13
                 - bp2_s16
                 - bp3_s16
-                - bp4_s16
+                - bp0_s16
                 - int0_s16
                 - int2_s16,
             &ideal_from_ref(&two_ideal),
         );
 
-        // (C3) bp[4][s+16] - bp[4][s] - bp[4][s+9] - bp[8][s+16] - bp[9][s+16]
+        // (C3) bp[0][s+16] - bp[0][s] - bp[0][s+9] - bp[8][s+16] - bp[9][s+16]
         //      - int[3][s+16] ∈ (X-2)
-        // The "bp[4][s]" term is the only reference at the unshifted current
-        // row, so it comes from `up.binary_poly[4]` instead of `down`.
+        // The "bp[0][s]" term is the only reference at the unshifted current
+        // row, so it comes from `up.binary_poly[0]` instead of `down`.
         b.assert_in_ideal(
-            bp4_s16.clone()
-                - &up.binary_poly[4]
-                - bp4_s9
+            bp0_s16.clone()
+                - &up.binary_poly[0]
+                - bp0_s9
                 - bp8_s16
                 - bp9_s16
                 - int3_s16,
             &ideal_from_ref(&two_ideal),
         );
 
-        // (C4) bp[0][s+16] * (X^25 + X^14) - bp[5][s+16] ∈ (X^32 - 1)
+        // (C4) bp[4][s+16] * (X^25 + X^14) - bp[5][s+16] ∈ (X^32 - 1)
         b.assert_in_ideal(
-            mbs(bp0_s16, &x25_plus_x14).expect("mul-by-scalar overflow") - bp5_s16,
+            mbs(bp4_s16, &x25_plus_x14).expect("mul-by-scalar overflow") - bp5_s16,
             &ideal_from_ref(&xn_ideal),
         );
 
@@ -736,28 +750,28 @@ where
         // (C7) bp[11][s+16] - int[1][s+16] ∈ (X-2)
         b.assert_in_ideal(bp11_s16.clone() - int1_s16, &ideal_from_ref(&two_ideal));
 
-        // (C8) bp[4][s+1] * (X^25 + X^24) + bp[10][s+16] - bp[8][s+16] ∈ (X^32 - 1)
+        // (C8) bp[0][s+1] * (X^25 + X^24) + bp[10][s+16] - bp[8][s+16] ∈ (X^32 - 1)
         b.assert_in_ideal(
-            mbs(bp4_s1, &x25_plus_x24).expect("mul-by-scalar overflow") + bp10_s16
+            mbs(bp0_s1, &x25_plus_x24).expect("mul-by-scalar overflow") + bp10_s16
                 - bp8_s16,
             &ideal_from_ref(&xn_ideal),
         );
 
-        // (C9) bp[4][s+14] * (X^25 + X^23) + bp[11][s+16] - bp[9][s+16] ∈ (X^32 - 1)
+        // (C9) bp[0][s+14] * (X^25 + X^23) + bp[11][s+16] - bp[9][s+16] ∈ (X^32 - 1)
         b.assert_in_ideal(
-            mbs(bp4_s14, &x25_plus_x23).expect("mul-by-scalar overflow") + bp11_s16
+            mbs(bp0_s14, &x25_plus_x23).expect("mul-by-scalar overflow") + bp11_s16
                 - bp9_s16,
             &ideal_from_ref(&xn_ideal),
         );
 
-        // (C10) bp[4][s+1] - bp[12][s+16] + X^3 * bp[10][s+16] = 0  (zero ideal)
+        // (C10) bp[0][s+1] - bp[12][s+16] + X^3 * bp[10][s+16] = 0  (zero ideal)
         b.assert_zero(
-            mbs(bp10_s16, &x3).expect("mul-by-scalar overflow") + bp4_s1 - bp12_s16,
+            mbs(bp10_s16, &x3).expect("mul-by-scalar overflow") + bp0_s1 - bp12_s16,
         );
 
-        // (C11) bp[4][s+14] - bp[13][s+16] + X^10 * bp[11][s+16] = 0  (zero ideal)
+        // (C11) bp[0][s+14] - bp[13][s+16] + X^10 * bp[11][s+16] = 0  (zero ideal)
         b.assert_zero(
-            mbs(bp11_s16, &x10).expect("mul-by-scalar overflow") + bp4_s14 - bp13_s16,
+            mbs(bp11_s16, &x10).expect("mul-by-scalar overflow") + bp0_s14 - bp13_s16,
         );
     }
 }
@@ -784,8 +798,11 @@ where
     /// - `int[2]` was a free slack for the original C2.
     /// - `int[3]` was a free slack for C3.
     /// - `bp[6]` was a `BinaryPoly` slack for the original C1.
-    /// - `bp[0]` pinned to `2^31`, `bp[1]` pinned to `2^30`, with `bp[5]` /
+    /// - `bp[4]` pinned to `2^31`, `bp[1]` pinned to `2^30`, with `bp[5]` /
     ///   `bp[3]` derived as cyclic shifts to satisfy the original C4/C5.
+    ///   (Before `bp[0]` was promoted to the public W column, these roles
+    ///   were played by `bp[0]` and `bp[4]` respectively; the two columns
+    ///   were swapped so W lands at the public slot `bp[0]`.)
     fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
@@ -804,51 +821,52 @@ where
         let mut int_cols: Vec<DenseMultilinearExtension<R>> =
             vec![(0..len).map(|_| R::ZERO).collect(); 4];
 
-        // ---- Step 2: fill bp[0], bp[1], bp[5], bp[3] (C4/C5 pinned) ----
-        // bp[0] = 2^31, bp[1] = 2^30 at every row except the last 3 of each
+        // ---- Step 2: fill bp[4], bp[1], bp[5], bp[3] (C4/C5 pinned) ----
+        // bp[4] = 2^31, bp[1] = 2^30 at every row except the last 3 of each
         // (which must be zero so the C1/C2 boundary cascade is trivially
         // satisfied at rows s ∈ [len-16, len-14], where the slack columns
         // bp[6] / int[2] are out of bounds).
-        let bp0_value: u32 = 1u32 << 31; // single bit at position 31
+        let bp4_value: u32 = 1u32 << 31; // single bit at position 31
         let bp1_value: u32 = 1u32 << 30; // single bit at position 30
-        // bp[5] = cyclic shifts of bp[0] by 25 and 14 in R[X]/(X^32-1):
+        // bp[5] = cyclic shifts of bp[4] by 25 and 14 in R[X]/(X^32-1):
         //   (31+25) mod 32 = 24, (31+14) mod 32 = 13 → bp[5] = 2^24 | 2^13
         let bp5_value: u32 = (1u32 << 24) | (1u32 << 13);
         // bp[3] = cyclic shifts of bp[1] by 25 and 13:
         //   (30+25) mod 32 = 23, (30+13) mod 32 = 11 → bp[3] = 2^23 | 2^11
         let bp3_value: u32 = (1u32 << 23) | (1u32 << 11);
 
-        // Zero the last 3 rows of bp[0]/bp[1] (and dependents bp[5]/bp[3]).
+        // Zero the last 3 rows of bp[4]/bp[1] (and dependents bp[5]/bp[3]).
         // This makes the C1/C2 boundary cases at s ∈ [len-16, len-14]
-        // (where bp[0..1][s+13] is in-bounds but the slack columns are OOB)
+        // (where bp[4,1][s+13] is in-bounds but the slack columns are OOB)
         // satisfiable because every constraint term vanishes there.
         let pair_zero_start = len.saturating_sub(3);
         for r in 0..pair_zero_start {
-            bp_cols[0][r] = BinaryPoly::from(bp0_value);
+            bp_cols[4][r] = BinaryPoly::from(bp4_value);
             bp_cols[1][r] = BinaryPoly::from(bp1_value);
             bp_cols[5][r] = BinaryPoly::from(bp5_value);
             bp_cols[3][r] = BinaryPoly::from(bp3_value);
         }
-        // (rows pair_zero_start..len of bp[0]/bp[1]/bp[3]/bp[5] are already
+        // (rows pair_zero_start..len of bp[4]/bp[1]/bp[3]/bp[5] are already
         // initialized to BinaryPoly::zero())
 
-        // ---- Step 3: fill bp[2], bp[4], bp[7], bp[8], bp[9], bp[10], bp[11]
+        // ---- Step 3: fill bp[2], bp[0] (W), bp[7], bp[8], bp[9], bp[10], bp[11]
         // ---- with small random values ----
-        // Special handling for bp[4]: zero out the last 16 rows. C3's slack
-        // (int[3], shifted by 16) is OOB at s ∈ [len-16, len-2], so C3 at
-        // those rows reads `0 - bp[4][s] - bp[4][s+9] = 0`, which forces
-        // both bp[4][s] and bp[4][s+9] to zero whenever in-bounds. The
-        // combined zero range is r ∈ [len-16, len-1].
-        let bp4_zero_start = len.saturating_sub(16);
+        // Special handling for bp[0] (the public W column): zero out the
+        // last 16 rows. C3's slack (int[3], shifted by 16) is OOB at
+        // s ∈ [len-16, len-2], so C3 at those rows reads
+        // `0 - bp[0][s] - bp[0][s+9] = 0`, which forces both bp[0][s] and
+        // bp[0][s+9] to zero whenever in-bounds. Combined zero range:
+        // r ∈ [len-16, len-1].
+        let bp0_zero_start = len.saturating_sub(16);
         for k in [2usize, 7, 8, 9, 10, 11] {
             for r in 0..len {
                 bp_cols[k][r] = BinaryPoly::from(rng.next_u32() & SMALL_MASK);
             }
         }
-        for r in 0..bp4_zero_start {
-            bp_cols[4][r] = BinaryPoly::from(rng.next_u32() & SMALL_MASK);
+        for r in 0..bp0_zero_start {
+            bp_cols[0][r] = BinaryPoly::from(rng.next_u32() & SMALL_MASK);
         }
-        // (rows bp4_zero_start..len of bp[4] are already zero from initialization)
+        // (rows bp0_zero_start..len of bp[0] are already zero from initialization)
 
         // ---- Step 4: fill bp[12], bp[13] (unconstrained random fillers) ----
         for k in [12usize, 13] {
@@ -875,25 +893,25 @@ where
         }
 
         // ---- Step 6: fill int[3] from C3 slack ----
-        // C3: bp[4][t] - bp[4][t-16] - bp[4][t-7] - bp[8][t] - bp[9][t] - int[3][t] ∈ (X-2)
-        // ⟹ int[3][t] = bp[4][t].eval(2) - bp[4][t-16].eval(2) - bp[4][t-7].eval(2)
+        // C3: bp[0][t] - bp[0][t-16] - bp[0][t-7] - bp[8][t] - bp[9][t] - int[3][t] ∈ (X-2)
+        // ⟹ int[3][t] = bp[0][t].eval(2) - bp[0][t-16].eval(2) - bp[0][t-7].eval(2)
         //               - bp[8][t].eval(2) - bp[9][t].eval(2)
-        // For r < 7, bp[4][r-7] reads as 0 (zero-padded).
-        // For r < 16, bp[4][r-16] reads as 0 too.
+        // For r < 7, bp[0][r-7] reads as 0 (zero-padded).
+        // For r < 16, bp[0][r-16] reads as 0 too.
         // int[3] is i64-typed, so it can be negative or large.
         for r in 0..len {
-            let bp4_t = bp_cols[4][r]
+            let bp0_t = bp_cols[0][r]
                 .evaluate_at_point(&2_u32)
                 .expect("24-bit binary poly eval at 2 fits in u32") as i64;
-            let bp4_t_minus_16 = if r >= 16 {
-                bp_cols[4][r - 16]
+            let bp0_t_minus_16 = if r >= 16 {
+                bp_cols[0][r - 16]
                     .evaluate_at_point(&2_u32)
                     .expect("24-bit binary poly eval at 2 fits in u32") as i64
             } else {
                 0
             };
-            let bp4_t_minus_7 = if r >= 7 {
-                bp_cols[4][r - 7]
+            let bp0_t_minus_7 = if r >= 7 {
+                bp_cols[0][r - 7]
                     .evaluate_at_point(&2_u32)
                     .expect("24-bit binary poly eval at 2 fits in u32") as i64
             } else {
@@ -905,14 +923,14 @@ where
             let bp9_t = bp_cols[9][r]
                 .evaluate_at_point(&2_u32)
                 .expect("24-bit binary poly eval at 2 fits in u32") as i64;
-            let int3_val: i64 = bp4_t - bp4_t_minus_16 - bp4_t_minus_7 - bp8_t - bp9_t;
+            let int3_val: i64 = bp0_t - bp0_t_minus_16 - bp0_t_minus_7 - bp8_t - bp9_t;
             int_cols[3][r] = R::from(int3_val);
         }
 
         // ---- Step 7: fill int[2] from C2 slack ----
-        // C2: bp[1][t+1] - bp[0][t-3] - bp[1][t-3] - bp[2][t] - bp[3][t]
+        // C2: bp[1][t+1] - bp[4][t-3] - bp[1][t-3] - bp[2][t] - bp[3][t]
         //     - bp[7][t] - int[0][t] - int[2][t] ∈ (X-2)
-        // ⟹ int[2][t] = bp[1][t+1].eval(2) - bp[0][t-3].eval(2) - bp[1][t-3].eval(2)
+        // ⟹ int[2][t] = bp[1][t+1].eval(2) - bp[4][t-3].eval(2) - bp[1][t-3].eval(2)
         //               - bp[2][t].eval(2) - bp[3][t].eval(2) - bp[7][t].eval(2) - int[0][t]
         // For boundary cases (t+1 ≥ len or t-3 < 0), the OOB cells read as 0.
         let eval2 = |bp: &BinaryPoly<32>| -> i64 {
@@ -921,23 +939,23 @@ where
         };
         for r in 0..len {
             let bp1_t_plus_1 = if r + 1 < len { eval2(&bp_cols[1][r + 1]) } else { 0 };
-            let bp0_t_minus_3 = if r >= 3 { eval2(&bp_cols[0][r - 3]) } else { 0 };
+            let bp4_t_minus_3 = if r >= 3 { eval2(&bp_cols[4][r - 3]) } else { 0 };
             let bp1_t_minus_3 = if r >= 3 { eval2(&bp_cols[1][r - 3]) } else { 0 };
             let bp2_t = eval2(&bp_cols[2][r]);
             let bp3_t = eval2(&bp_cols[3][r]);
             let bp7_t = eval2(&bp_cols[7][r]);
             let int0_t = eval2(&bp_cols[10][r]); // int[0] = bp[10].eval(2) (C6)
             let int2_val: i64 =
-                bp1_t_plus_1 - bp0_t_minus_3 - bp1_t_minus_3 - bp2_t - bp3_t - bp7_t - int0_t;
+                bp1_t_plus_1 - bp4_t_minus_3 - bp1_t_minus_3 - bp2_t - bp3_t - bp7_t - int0_t;
             int_cols[2][r] = R::from(int2_val);
         }
 
         // ---- Step 8: fill bp[6] from C1 slack ----
-        // C1: bp[0][t+1] + bp[1][t-3] - bp[2][t] - bp[3][t] - bp[4][t]
+        // C1: bp[4][t+1] + bp[1][t-3] - bp[2][t] - bp[3][t] - bp[0][t]
         //     - bp[5][t] - bp[6][t] - int[0][t] - int[1][t] ∈ (X-2)
         // Note the + on bp[1][t-3] (sign flip from the all-minus form).
-        // ⟹ bp[6][t].eval(2) = bp[0][t+1].eval(2) + bp[1][t-3].eval(2)
-        //                       - bp[2][t].eval(2) - bp[3][t].eval(2) - bp[4][t].eval(2)
+        // ⟹ bp[6][t].eval(2) = bp[4][t+1].eval(2) + bp[1][t-3].eval(2)
+        //                       - bp[2][t].eval(2) - bp[3][t].eval(2) - bp[0][t].eval(2)
         //                       - bp[5][t].eval(2) - int[0][t] - int[1][t]
         //
         // The protocol reads bp[6][r] at every s ∈ [0, len-2] via the +16
@@ -945,25 +963,25 @@ where
         // r ∈ [16, len-1]. We iterate r over [0, len-1] and just compute the
         // formula at every row; the values for r < 16 are unused but harmless.
         for r in 0..len {
-            let bp0_t_plus_1 = if r + 1 < len { eval2(&bp_cols[0][r + 1]) } else { 0 };
+            let bp4_t_plus_1 = if r + 1 < len { eval2(&bp_cols[4][r + 1]) } else { 0 };
             let bp1_t_minus_3 = if r >= 3 { eval2(&bp_cols[1][r - 3]) } else { 0 };
             let bp2_t = eval2(&bp_cols[2][r]);
             let bp3_t = eval2(&bp_cols[3][r]);
-            let bp4_t = eval2(&bp_cols[4][r]);
+            let bp0_t = eval2(&bp_cols[0][r]);
             let bp5_t = eval2(&bp_cols[5][r]);
             let int0_t = eval2(&bp_cols[10][r]); // int[0] = bp[10].eval(2) (C6)
             let int1_t = eval2(&bp_cols[11][r]); // int[1] = bp[11].eval(2) (C7)
             let bp6_val: i64 =
-                bp0_t_plus_1 + bp1_t_minus_3 - bp2_t - bp3_t - bp4_t - bp5_t - int0_t - int1_t;
+                bp4_t_plus_1 + bp1_t_minus_3 - bp2_t - bp3_t - bp0_t - bp5_t - int0_t - int1_t;
             // bp[6][r] needs to be a non-negative u32 for `BinaryPoly::from`.
             // Our parameter choices guarantee this for r ∈ [16, len-1]:
-            // bp[0][r+1] = 2^31 (always, except r+1 ≥ len at r = len-1) and
+            // bp[4][r+1] = 2^31 (always, except r+1 ≥ len at r = len-1) and
             // bp[1][r-3] = 2^30 (always, except bp[1] zeroed at len-3..len-1
             // and r < 3); the dominant positives sum to ≥ 2^30 ≈ 10^9, which
             // dwarfs the small subtracted terms (each ≤ 2^24).
             let bp6_u32: u32 = u32::try_from(bp6_val).unwrap_or_else(|_| {
                 // Fallback for any row where the formula goes negative (e.g.
-                // rows where bp[0][r+1] is OOB AND bp[1][r-3] vanishes). The
+                // rows where bp[4][r+1] is OOB AND bp[1][r-3] vanishes). The
                 // protocol may still read this value at some s, but only if
                 // the corresponding constraint already vanishes trivially via
                 // OOB-zero on the LHS.
@@ -1765,8 +1783,9 @@ impl Uair for ShaProxyEcdsaUair {
         // 14 bp + 0 ap + 18 int. The 18 int cols are arranged as
         // [4 ECDSA public, 10 ECDSA witness, 4 SHAProxy witness].
         let total = TotalColumnLayout::new(14, 0, 18);
-        // Same 4 public ECDSA int cols as `EcdsaUair`.
-        let public = PublicColumnLayout::new(0, 0, 4);
+        // Public columns: same 4 ECDSA public int cols, plus SHAProxy's
+        // public `W` column at bp[0].
+        let public = PublicColumnLayout::new(1, 0, 4);
 
         // Combined shift list. Source-col indices are flat (bp || ap || int),
         // so the int prefix in this layout starts at flat index 14, and

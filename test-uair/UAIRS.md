@@ -302,12 +302,17 @@ coefficients) is preserved exactly. Maximum forward shift in the
 `s`-frame is 17.
 
 - **Layout:** `(14 bp, 0 ap, 4 int)`
+- **Public layout:** `(1 bp, 0 ap, 0 int)` — `bp[0]` is the **public
+  "W" column** (SHA-style message-schedule analogue, the column with
+  multi-shift pattern `1, 9, 14, 16` and the only unshifted `up` read in
+  C3). Making W public matches the shape of a real SHA-like circuit
+  where the message schedule is public input.
 - **Shifts:** 25 specs total (21 binary-poly + 4 int), with shift
   amounts of 1, 9, 13, 14, 16, and 17. Multiple shifts per source column:
-  - `bp[0]`: shifts 13, 16, 17 → `down.binary_poly[0..3]`
-  - `bp[1]`: shifts 13, 16, 17 → `down.binary_poly[3..6]`
-  - `bp[2]`, `bp[3]`: shift 16 → `down.binary_poly[6..8]`
-  - `bp[4]`: shifts 1, 9, 14, 16 → `down.binary_poly[8..12]`
+  - `bp[0]` (W): shifts 1, 9, 14, 16 → `down.binary_poly[0..4]`
+  - `bp[1]`: shifts 13, 16, 17 → `down.binary_poly[4..7]`
+  - `bp[2]`, `bp[3]`: shift 16 → `down.binary_poly[7..9]`
+  - `bp[4]`: shifts 13, 16, 17 → `down.binary_poly[9..12]`
   - `bp[5..=13]`: shift 16 → `down.binary_poly[12..21]`
   - `int[0..=3]`: shift 16 → `down.int[0..4]`
 - **Ideals:** `MixedDegreeOneOrXnMinusOne<R, 32>` is `Self::Ideal`, so
@@ -317,42 +322,42 @@ coefficients) is preserved exactly. Maximum forward shift in the
   the zero ideal — direct equality of the polynomial expression.
   This is the only UAIR in the codebase that mixes three ideal regimes
   within a single constraint system.
-- **Constraints (user `t`-frame):**
+- **Constraints (user `t`-frame):** `bp[0]` is the public "W" column.
   ```text
-  C1: bp[0][t+1] - bp[1][t-3] - bp[2][t]   - bp[3][t]  - bp[4][t]
+  C1: bp[4][t+1] - bp[1][t-3] - bp[2][t]   - bp[3][t]  - bp[0][t]
                 - bp[5][t]    - bp[6][t]   - bp[7][t]  - int[0][t] - int[1][t]   ∈ (X - 2)
-  C2: bp[1][t+1] - bp[0][t-3] - bp[1][t-3] - bp[2][t]  - bp[3][t]
-                - bp[4][t]    - int[0][t]  - int[2][t]                            ∈ (X - 2)
-  C3: bp[4][t]   - bp[4][t-16]- bp[4][t-7] - bp[8][t]  - bp[9][t]
+  C2: bp[1][t+1] - bp[4][t-3] - bp[1][t-3] - bp[2][t]  - bp[3][t]
+                - bp[0][t]    - int[0][t]  - int[2][t]                            ∈ (X - 2)
+  C3: bp[0][t]   - bp[0][t-16]- bp[0][t-7] - bp[8][t]  - bp[9][t]
                 - int[3][t]                                                       ∈ (X - 2)
-  C4: bp[0][t] * (X^25 + X^14) - bp[5][t]                                         ∈ (X^32 - 1)
+  C4: bp[4][t] * (X^25 + X^14) - bp[5][t]                                         ∈ (X^32 - 1)
   C5: bp[1][t] * (X^25 + X^13) - bp[2][t]                                         ∈ (X^32 - 1)
   C6: bp[10][t] - int[0][t]                                                       ∈ (X - 2)
   C7: bp[11][t] - int[1][t]                                                       ∈ (X - 2)
-  C8: bp[4][t-15] * (X^25 + X^24) + bp[10][t] - bp[8][t]                          ∈ (X^32 - 1)
-  C9: bp[4][t-2]  * (X^25 + X^23) + bp[11][t] - bp[9][t]                          ∈ (X^32 - 1)
-  C10: bp[4][t-15] - bp[12][t] + X^3  * bp[10][t]                                 = 0
-  C11: bp[4][t-2]  - bp[13][t] + X^10 * bp[11][t]                                 = 0
+  C8: bp[0][t-15] * (X^25 + X^24) + bp[10][t] - bp[8][t]                          ∈ (X^32 - 1)
+  C9: bp[0][t-2]  * (X^25 + X^23) + bp[11][t] - bp[9][t]                          ∈ (X^32 - 1)
+  C10: bp[0][t-15] - bp[12][t] + X^3  * bp[10][t]                                 = 0
+  C11: bp[0][t-2]  - bp[13][t] + X^10 * bp[11][t]                                 = 0
   ```
 - **Constraints (protocol `s`-frame, after `s = t - 16`):** every
   reference is now a forward shift. The only unshifted reference is
-  `bp[4][s]` in C3 (it comes from `up.binary_poly[4]`); everything else
+  `bp[0][s]` in C3 (it comes from `up.binary_poly[0]`); everything else
   goes through `down`.
   ```text
-  C1: bp[0][s+17] - bp[1][s+13] - bp[2][s+16] - bp[3][s+16] - bp[4][s+16]
+  C1: bp[4][s+17] - bp[1][s+13] - bp[2][s+16] - bp[3][s+16] - bp[0][s+16]
                  - bp[5][s+16]  - bp[6][s+16] - bp[7][s+16] - int[0][s+16] - int[1][s+16] ∈ (X-2)
-  C2: bp[1][s+17] - bp[0][s+13] - bp[1][s+13] - bp[2][s+16] - bp[3][s+16]
-                 - bp[4][s+16]  - int[0][s+16] - int[2][s+16]                              ∈ (X-2)
-  C3: bp[4][s+16] - bp[4][s]    - bp[4][s+9]  - bp[8][s+16] - bp[9][s+16]
+  C2: bp[1][s+17] - bp[4][s+13] - bp[1][s+13] - bp[2][s+16] - bp[3][s+16]
+                 - bp[0][s+16]  - int[0][s+16] - int[2][s+16]                              ∈ (X-2)
+  C3: bp[0][s+16] - bp[0][s]    - bp[0][s+9]  - bp[8][s+16] - bp[9][s+16]
                  - int[3][s+16]                                                            ∈ (X-2)
-  C4: bp[0][s+16] * (X^25 + X^14) - bp[5][s+16]                                            ∈ (X^32 - 1)
+  C4: bp[4][s+16] * (X^25 + X^14) - bp[5][s+16]                                            ∈ (X^32 - 1)
   C5: bp[1][s+16] * (X^25 + X^13) - bp[2][s+16]                                            ∈ (X^32 - 1)
   C6: bp[10][s+16] - int[0][s+16]                                                          ∈ (X-2)
   C7: bp[11][s+16] - int[1][s+16]                                                          ∈ (X-2)
-  C8: bp[4][s+1]  * (X^25 + X^24) + bp[10][s+16] - bp[8][s+16]                             ∈ (X^32 - 1)
-  C9: bp[4][s+14] * (X^25 + X^23) + bp[11][s+16] - bp[9][s+16]                             ∈ (X^32 - 1)
-  C10: bp[4][s+1]  - bp[12][s+16] + X^3  * bp[10][s+16]                                    = 0
-  C11: bp[4][s+14] - bp[13][s+16] + X^10 * bp[11][s+16]                                    = 0
+  C8: bp[0][s+1]  * (X^25 + X^24) + bp[10][s+16] - bp[8][s+16]                             ∈ (X^32 - 1)
+  C9: bp[0][s+14] * (X^25 + X^23) + bp[11][s+16] - bp[9][s+16]                             ∈ (X^32 - 1)
+  C10: bp[0][s+1]  - bp[12][s+16] + X^3  * bp[10][s+16]                                    = 0
+  C11: bp[0][s+14] - bp[13][s+16] + X^10 * bp[11][s+16]                                    = 0
   ```
   C4/C5/C8/C9 are encoded via `mbs(&down.binary_poly[k], &scalar)` where
   the scalars are `DensePolynomial<R, 32>` values with non-zero
@@ -368,11 +373,11 @@ coefficients) is preserved exactly. Maximum forward shift in the
 - **Witness is intentionally non-satisfying** (prover-only benchmark
   fixture). After C8..C11 were added and C1/C2/C5 were modified, the
   original slack-engineered trace generator (which carefully balanced
-  C1/C2/C3 via `bp[6]`/`int[2]`/`int[3]` slacks and pinned `bp[0]`/`bp[1]`
+  C1/C2/C3 via `bp[6]`/`int[2]`/`int[3]` slacks and pinned `bp[4]`/`bp[1]`
   to single-bit constants for C4/C5) no longer satisfies the new
   constraint set: C5 now references `bp[2]` (random) instead of the
   derived `bp[3]`, and the new `(X^32-1)` and zero-ideal constraints
-  C8..C11 mix random `bp[4]`/`bp[10]`/`bp[11]`/`bp[12]`/`bp[13]` values
+  C8..C11 mix random `bp[0]`/`bp[10]`/`bp[11]`/`bp[12]`/`bp[13]` values
   with cyclic-shift / linear identities that won't generally hold. The
   trace generator is left unchanged (matching the same "fill columns,
   let constraints fail" pattern used by `ShaProxyEcdsaUair` and
@@ -663,8 +668,10 @@ trace row.
     EcdsaUair constraint code's hard-coded indices `B1=0 .. H_CU=13`
     work without any re-indexing.
   - `int[14..18]` — SHAProxy's 4 int columns.
-- **Public layout:** `(0, 0, 4)` — same 4 public ECDSA int columns
-  (`b₁`, `b₂`, `sel_init`, `sel_final`) at `int[0..4]`.
+- **Public layout:** `(1, 0, 4)` — the 4 public ECDSA int columns
+  (`b₁`, `b₂`, `sel_init`, `sel_final`) at `int[0..4]`, plus SHAProxy's
+  public `W` column at `bp[0]` (inherited from `SHAProxy<Int<4>>`'s
+  own public layout).
 - **Shifts:** **28** specs total, built by concatenating
   `SHAProxy::<Int<4>>::signature().shifts()` and
   `EcdsaUair::signature().shifts()` and bumping each `source_col` to its
@@ -946,7 +953,7 @@ Column counts are listed as `BinPoly / ArbPoly / Int`, matching the
 |---|---:|---:|---:|---|---:|---|---|
 | `BigLinearUair`                 | 16 | 0 | 1 | 16×1      | 1 | `(X-1), (X-2)`    | Wide linear benchmark (popcount-preserving) |
 | `BigLinearUairWithPublicInput`  | 16 | 0 | 1 | 16×1      | 1 | `(X-1), (X-2)`    | Same as above + 4 public bp columns |
-| `SHAProxy`                      | 14 | 0 | 4 | 25 specs (1, 9, 13, 14, 16, 17) | 1 | `(X-2), (X^32-1)`, zero | Wide-shift mixed-ideal benchmark with multi-term `mbs` scalars, **non-satisfying** witness |
+| `SHAProxy`                      | 14 | 0 | 4 | 25 specs (1, 9, 13, 14, 16, 17) | 1 | `(X-2), (X^32-1)`, zero | Wide-shift mixed-ideal benchmark with multi-term `mbs` scalars, `bp[0]` is public "W" column, **non-satisfying** witness |
 | `EcdsaUair`                     |  0 | 0 |14 | 3×1                      | 5 | `Impossible` (all `assert_zero`) | secp256k1 ECDSA via Shamir's trick over `Int<4>` — non-linear, 3 wire columns, **non-satisfying** witness, prover-only bench |
 | `EcdsaUairLimbs`                |  0 | 0 |84 | 24×1                     | 5 | `DegreeOneIdeal<i64>` (unused; all `assert_zero`) | Limb-decomposed `EcdsaUair`: 8 little-endian u32 limbs per 256-bit value, 96 per-limb constraints, no carries, **non-satisfying** witness, prover-only bench |
-| `ShaProxyEcdsaUair`             | 14 | 0 |18 | 28 specs (1, 9, 13, 14, 16, 17) | 5 | `(X-2), (X^32-1)`, zero | `SHAProxy<Int<4>>` + `EcdsaUair` on one trace — heterogeneous combined fixture, **non-satisfying** witness, prover-only bench |
+| `ShaProxyEcdsaUair`             | 14 | 0 |18 | 28 specs (1, 9, 13, 14, 16, 17) | 5 | `(X-2), (X^32-1)`, zero | `SHAProxy<Int<4>>` + `EcdsaUair` on one trace — heterogeneous combined fixture, public columns: `bp[0]` (W) + `int[0..4]` (ECDSA), **non-satisfying** witness, prover-only bench |
