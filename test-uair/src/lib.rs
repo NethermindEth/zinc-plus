@@ -19,8 +19,8 @@ use zinc_poly::{
     },
 };
 use zinc_uair::{
-    ConstraintBuilder, PublicColumnLayout, ShiftSpec, TotalColumnLayout, TraceRow, Uair,
-    UairSignature, UairTrace,
+    ConstraintBuilder, LookupColumnSpec, LookupTableType, PublicColumnLayout, ShiftSpec,
+    TotalColumnLayout, TraceRow, Uair, UairSignature, UairTrace,
     ideal::{ImpossibleIdeal, degree_one::DegreeOneIdeal},
 };
 use zinc_utils::from_ref::FromRef;
@@ -850,6 +850,302 @@ where
     }
 }
 
+/// Minimal UAIR with a lookup constraint: one int column looked up
+/// against `Word(4)` (values in {0, ..., 15}). Two int columns total,
+/// with a trivial constraint `a - b = 0` to keep the CPR non-degenerate.
+pub struct SimpleLookupUair<R>(PhantomData<R>);
+
+impl<R> Uair for SimpleLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(0, 0, 2);
+        UairSignature::new(
+            total,
+            PublicColumnLayout::default(),
+            vec![],
+            vec![LookupColumnSpec {
+                column_index: 0,
+                table_type: LookupTableType::Word {
+                    width: 4,
+                    chunk_width: None,
+                },
+            }],
+        )
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        b.assert_zero(up.int[0].clone() - &up.int[1]);
+    }
+}
+
+/// Generate a `GenerateRandomTrace` impl for a UAIR with 2 int columns where
+/// column 0 = column 1, values drawn uniformly from `0..modulus`.
+macro_rules! impl_int_copy_trace {
+    ($name:ident, $modulus:expr) => {
+        impl<R> GenerateRandomTrace<32> for $name<R>
+        where
+            R: ConstSemiring + From<u32> + 'static,
+        {
+            type PolyCoeff = R;
+            type Int = R;
+
+            fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+                num_vars: usize,
+                rng: &mut Rng,
+            ) -> UairTrace<'static, R, R, 32> {
+                let n = 1 << num_vars;
+                let vals: Vec<R> = (0..n).map(|_| R::from(rng.next_u32() % $modulus)).collect();
+                let a: DenseMultilinearExtension<R> = vals.clone().into_iter().collect();
+                let b: DenseMultilinearExtension<R> = vals.into_iter().collect();
+                UairTrace {
+                    int: vec![a, b].into(),
+                    ..Default::default()
+                }
+            }
+        }
+    };
+}
+
+impl_int_copy_trace!(SimpleLookupUair, 16);
+
+/// UAIR with two int columns both looked up against the same `Word(4)` table.
+/// Tests L>1 (multi-column) lookup within a single group.
+/// 3 int columns total: a, b looked up; c = a + b (trivial constraint).
+pub struct MultiColLookupUair<R>(PhantomData<R>);
+
+impl<R> Uair for MultiColLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(0, 0, 3);
+        UairSignature::new(
+            total,
+            PublicColumnLayout::default(),
+            vec![],
+            vec![
+                LookupColumnSpec {
+                    column_index: 0,
+                    table_type: LookupTableType::Word {
+                        width: 4,
+                        chunk_width: None,
+                    },
+                },
+                LookupColumnSpec {
+                    column_index: 1,
+                    table_type: LookupTableType::Word {
+                        width: 4,
+                        chunk_width: None,
+                    },
+                },
+            ],
+        )
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        b.assert_zero(up.int[0].clone() + &up.int[1] - &up.int[2]);
+    }
+}
+
+/// Generate a `GenerateRandomTrace` impl for a UAIR with 3 int columns where
+/// `c = a + b`, with `a` in `0..range_a` and `b` in `0..range_b`.
+macro_rules! impl_sum_pair_trace {
+    ($name:ident, $range_a:expr, $range_b:expr) => {
+        impl<R> GenerateRandomTrace<32> for $name<R>
+        where
+            R: ConstSemiring + From<u32> + 'static,
+        {
+            type PolyCoeff = R;
+            type Int = R;
+
+            fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+                num_vars: usize,
+                rng: &mut Rng,
+            ) -> UairTrace<'static, R, R, 32> {
+                let n = 1 << num_vars;
+                let a_vals: Vec<R> = (0..n).map(|_| R::from(rng.next_u32() % $range_a)).collect();
+                let b_vals: Vec<R> = (0..n).map(|_| R::from(rng.next_u32() % $range_b)).collect();
+                let c_vals: Vec<R> = a_vals
+                    .iter()
+                    .zip(b_vals.iter())
+                    .map(|(a, b)| a.clone() + b)
+                    .collect();
+                let a: DenseMultilinearExtension<R> = a_vals.into_iter().collect();
+                let b: DenseMultilinearExtension<R> = b_vals.into_iter().collect();
+                let c: DenseMultilinearExtension<R> = c_vals.into_iter().collect();
+                UairTrace {
+                    int: vec![a, b, c].into(),
+                    ..Default::default()
+                }
+            }
+        }
+    };
+}
+
+impl_sum_pair_trace!(MultiColLookupUair, 16, 16);
+
+/// UAIR with two columns looking up different table types:
+/// column 0 → Word(4), column 1 → Word(8). Tests multiple lookup groups.
+/// 3 int columns: a in {0..15}, b in {0..255}, c = a + b.
+pub struct MultiGroupLookupUair<R>(PhantomData<R>);
+
+impl<R> Uair for MultiGroupLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(0, 0, 3);
+        UairSignature::new(
+            total,
+            PublicColumnLayout::default(),
+            vec![],
+            vec![
+                LookupColumnSpec {
+                    column_index: 0,
+                    table_type: LookupTableType::Word {
+                        width: 4,
+                        chunk_width: None,
+                    },
+                },
+                LookupColumnSpec {
+                    column_index: 1,
+                    table_type: LookupTableType::Word {
+                        width: 8,
+                        chunk_width: None,
+                    },
+                },
+            ],
+        )
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        b.assert_zero(up.int[0].clone() + &up.int[1] - &up.int[2]);
+    }
+}
+
+impl_sum_pair_trace!(MultiGroupLookupUair, 16, 256);
+
+/// UAIR with a BitPoly lookup: one binary_poly column looked up against
+/// `BitPoly(8)`. Tests the BitPoly table type.
+/// 1 binary_poly column + 1 int column, constraint: binary_poly - int ∈ <X-2>.
+pub struct BitPolyLookupUair<R>(PhantomData<R>);
+
+impl<R> Uair for BitPolyLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(1, 0, 1);
+        UairSignature::new(
+            total,
+            PublicColumnLayout::default(),
+            vec![],
+            vec![LookupColumnSpec {
+                column_index: 0,
+                table_type: LookupTableType::BitPoly {
+                    width: 8,
+                    chunk_width: None,
+                },
+            }],
+        )
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        b.assert_in_ideal(
+            up.binary_poly[0].clone() - &up.int[0],
+            &ideal_from_ref(&DegreeOneIdeal::new(R::from(2))),
+        );
+    }
+}
+
+/// Generate a `GenerateRandomTrace` impl for a UAIR with 1 binary_poly column
+/// and 1 int column, both carrying the same values in `0..modulus`.
+macro_rules! impl_bitpoly_int_trace {
+    ($name:ident, $modulus:expr) => {
+        impl<R> GenerateRandomTrace<32> for $name<R>
+        where
+            R: ConstSemiring + From<u32> + 'static,
+        {
+            type PolyCoeff = R;
+            type Int = R;
+
+            fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+                num_vars: usize,
+                rng: &mut Rng,
+            ) -> UairTrace<'static, R, R, 32> {
+                let n = 1 << num_vars;
+                let values: Vec<u32> = (0..n).map(|_| rng.next_u32() % $modulus).collect();
+                let bp: DenseMultilinearExtension<BinaryPoly<32>> =
+                    values.iter().map(|&v| BinaryPoly::from(v)).collect();
+                let int: DenseMultilinearExtension<R> = values.into_iter().map(R::from).collect();
+                UairTrace {
+                    binary_poly: vec![bp].into(),
+                    int: vec![int].into(),
+                    ..Default::default()
+                }
+            }
+        }
+    };
+}
+
+impl_bitpoly_int_trace!(BitPolyLookupUair, 256);
+
 #[cfg(test)]
 mod tests {
     use crypto_primitives::crypto_bigint_int::Int;
@@ -880,6 +1176,10 @@ mod tests {
         assert_uair_shape::<BinaryDecompositionUair<u32>>(&[1]);
         assert_uair_shape::<BigLinearUair<u32>>(&[1; 17]);
         assert_uair_shape::<TestUairMixedShifts<Int<LIMBS>>>(&[1, 1]);
+        assert_uair_shape::<SimpleLookupUair<u32>>(&[1]);
+        assert_uair_shape::<MultiColLookupUair<u32>>(&[1]);
+        assert_uair_shape::<MultiGroupLookupUair<u32>>(&[1]);
+        assert_uair_shape::<BitPolyLookupUair<u32>>(&[1]);
     }
 
     #[test]

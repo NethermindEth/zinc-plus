@@ -1,12 +1,13 @@
 //! Data structures for the lookup protocol.
 //!
-//! Proof types, prover/verifier intermediates, instance types, and error
+//! Proof types, prover/verifier intermediates and error
 //! definitions live here. Specification types (`LookupTableType`,
 //! `LookupColumnSpec`) live in `zinc-uair` and are re-exported from the
 //! parent module.
 
 use std::collections::BTreeMap;
 use thiserror::Error;
+use zinc_poly::utils::ArithErrors;
 use zinc_uair::LookupTableType;
 
 // ---------------------------------------------------------------------------
@@ -91,6 +92,74 @@ pub struct BatchedLookupProof<F> {
 }
 
 // ---------------------------------------------------------------------------
+// Core LogUp types
+// ---------------------------------------------------------------------------
+
+/// Verifier subclaim from the LogUp protocol.
+#[derive(Clone, Debug)]
+pub struct LogupVerifierSubClaim<F> {
+    /// Evaluation point from the sumcheck subclaim.
+    pub evaluation_point: Vec<F>,
+    /// Expected evaluation at the subclaim point.
+    pub expected_evaluation: F,
+}
+
+/// Ancillary prover data for LogUp sumcheck group construction.
+///
+/// Borrows the pre-computed auxiliary vectors needed by
+/// [`LogupProtocol::build_sumcheck_groups`].
+#[derive(Clone, Debug)]
+pub struct LogupProverAncillary<'a, F> {
+    /// Multiplicity vector.
+    pub multiplicities: &'a [F],
+    /// Inverse witness vector `u = 1/(β − w)`.
+    pub inverse_witness: &'a [F],
+    /// Inverse table vector `v = 1/(β − T)`.
+    pub inverse_table: &'a [F],
+}
+
+/// Pre-sumcheck verifier data for the core LogUp protocol.
+///
+/// Produced by `build_verifier_pre_sumcheck`, holds the transcript
+/// challenges needed for `finalize_verifier`.
+#[derive(Clone, Debug)]
+pub struct LogupVerifierPreSumcheckData<F> {
+    /// Random evaluation point `r` for `eq(y, r)`.
+    pub r: Vec<F>,
+    /// The β challenge for LogUp.
+    pub beta: F,
+    /// The γ challenge for batching multiple lookup columns.
+    pub gamma: F,
+}
+
+/// Scalar MLE evaluations of lookup auxiliary columns at the subclaim
+/// point x*, obtained from PCS openings via MultipointEval.
+///
+/// Used by `finalize_verifier` to check the LogUp identities
+#[derive(Clone, Debug)]
+pub struct LookupAuxEvals<F> {
+    pub u_eval: F,
+    pub m_eval: F,
+}
+
+/// Bundle of per-group evaluation data passed to
+/// [`LogupProtocol::finalize_verifier`].
+///
+/// Carries L columns' evaluation data for the two γ-batched groups.
+#[derive(Clone, Debug)]
+pub struct LogupFinalizerInput<'a, F> {
+    /// The multi-degree sumcheck subclaim point (x*).
+    pub subclaim_point: &'a [F],
+    /// Expected evaluations from the sumcheck subclaim (len=2, one
+    /// per γ-batched group).
+    pub expected_evaluations: &'a [F],
+    /// Evaluations of the L witness column polynomials at x*.
+    pub w_evals: &'a [F],
+    /// Per-column auxiliary evaluations (u, m) at x*.
+    pub aux_evals: &'a [LookupAuxEvals<F>],
+}
+
+// ---------------------------------------------------------------------------
 // Grouping utility
 // ---------------------------------------------------------------------------
 
@@ -129,7 +198,6 @@ pub fn group_lookup_specs(specs: &[zinc_uair::LookupColumnSpec]) -> Vec<LookupGr
 // Errors
 // ---------------------------------------------------------------------------
 
-/// Errors from the lookup protocol.
 #[derive(Debug, Error)]
 pub enum LookupError {
     #[error("lookup not implemented")]
@@ -149,4 +217,13 @@ pub enum LookupError {
 
     #[error("final evaluation check failed")]
     FinalEvaluationMismatch,
+
+    #[error("malformed proof: expected {expected} evaluations, got {got}")]
+    WrongEvaluationCount { expected: usize, got: usize },
+
+    #[error("malformed proof: w_evals length ({w}) != aux_evals length ({aux})")]
+    EvalLengthMismatch { w: usize, aux: usize },
+
+    #[error("arithmetic error: {0}")]
+    Arith(#[from] ArithErrors),
 }
