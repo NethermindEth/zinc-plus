@@ -20,7 +20,7 @@ use zinc_piop::{
 };
 use zinc_poly::univariate::dense::DensePolynomial;
 use zinc_primality::{MillerRabin, PrimalityTest};
-use zinc_test_uair::{GenerateRandomTrace, TestAirNoMultiplication, TestUairSimpleMultiplication};
+use zinc_test_uair::{GenerateRandomTrace, TestUairNoMultiplication, TestUairSimpleMultiplication};
 use zinc_transcript::{
     Blake3Transcript,
     traits::{ConstTranscribable, Transcript},
@@ -42,18 +42,18 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     witness_size: usize,
 ) where
     <F<FIELD_LIMBS> as Field>::Inner: ConstIntSemiring + ConstTranscribable,
-    TestAirNoMultiplication<Int<INT_LIMBS>>: Uair<Scalar = Witness<INT_LIMBS>, Ideal = DegreeOneIdeal<WitnessCoeff<INT_LIMBS>>>
+    TestUairNoMultiplication<Int<INT_LIMBS>>: Uair<Scalar = Witness<INT_LIMBS>, Ideal = DegreeOneIdeal<WitnessCoeff<INT_LIMBS>>>
         + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<INT_LIMBS>, Int = Int<INT_LIMBS>>,
     MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Inner>,
 {
     let mut rng = rng();
     let num_vars = zinc_utils::log2(witness_size) as usize;
-    let trace = TestAirNoMultiplication::generate_random_trace(num_vars, &mut rng);
+    let trace = TestUairNoMultiplication::generate_random_trace(num_vars, &mut rng);
 
     let params = format!("NoMult/LIMBS={}/nvars={}", FIELD_LIMBS, num_vars);
 
-    let num_constraints = count_constraints::<TestAirNoMultiplication<Int<INT_LIMBS>>>();
-    let max_degree = count_max_degree::<TestAirNoMultiplication<Int<INT_LIMBS>>>();
+    let num_constraints = count_constraints::<TestUairNoMultiplication<Int<INT_LIMBS>>>();
+    let max_degree = count_max_degree::<TestUairNoMultiplication<Int<INT_LIMBS>>>();
 
     let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
                      trace: &UairTrace<_, _, DEGREE_PLUS_ONE>,
@@ -61,7 +61,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         let projected_trace = project_trace_coeffs_row_major(trace, field_cfg);
 
         let projected_scalars =
-            project_scalars::<F<FIELD_LIMBS>, TestAirNoMultiplication<_>>(|scalar| {
+            project_scalars::<F<FIELD_LIMBS>, TestUairNoMultiplication<_>>(|scalar| {
                 scalar
                     .iter()
                     .map(|coeff| F::from_with_cfg(coeff, field_cfg))
@@ -69,7 +69,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             });
 
         let (ic_proof, ic_prover_state) =
-            <TestAirNoMultiplication<_> as IdealCheckProtocol>::prove_combined(
+            <TestUairNoMultiplication<_> as IdealCheckProtocol>::prove_combined(
                 transcript,
                 &projected_trace,
                 &projected_scalars,
@@ -89,7 +89,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             .expect("failed to project scalars to field");
 
         let (cpr_group, cpr_ancillary) =
-            CombinedPolyResolver::prepare_sumcheck_group::<TestAirNoMultiplication<_>>(
+            CombinedPolyResolver::prepare_sumcheck_group::<TestUairNoMultiplication<_>>(
                 transcript,
                 trace_f,
                 &ic_prover_state.evaluation_point,
@@ -148,7 +148,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             prove_cpr(&field_cfg, &trace, &mut prover_transcript);
 
         let ic_check_subclaim =
-            <TestAirNoMultiplication<_> as IdealCheckProtocol>::verify_as_subprotocol::<
+            <TestUairNoMultiplication<_> as IdealCheckProtocol>::verify_as_subprotocol::<
                 F<FIELD_LIMBS>,
                 _,
                 _,
@@ -177,7 +177,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             },
             |(proof, subclaim, mut transcript)| {
                 let ancillary =
-                    CombinedPolyResolver::prepare_verifier::<TestAirNoMultiplication<_>>(
+                    CombinedPolyResolver::prepare_verifier::<TestUairNoMultiplication<_>>(
                         &mut transcript,
                         &proof,
                         md_proof.claimed_sums()[0].clone(),
@@ -198,7 +198,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 .expect("MultiDegreeSumcheck verify failed");
 
                 let _ = black_box(
-                    CombinedPolyResolver::finalize_verifier::<TestAirNoMultiplication<_>>(
+                    CombinedPolyResolver::finalize_verifier::<TestUairNoMultiplication<_>>(
                         &mut transcript,
                         proof,
                         md_subclaims.point().to_vec(),

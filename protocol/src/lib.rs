@@ -189,7 +189,7 @@ where
 
 /// Trait bundling the various type parameters for the public inputs (NYI),
 /// witness and Zinc+ PIOP.
-pub trait ZincTypes<const DEGREE_PLUS_ONE: usize>: Clone {
+pub trait ZincTypes<const DEGREE_PLUS_ONE: usize>: Clone + Debug {
     /// Main integer type for the protocol, used as a coefficient type for the
     /// arbitrary polynomial trace columns and for the integer trace columns.
     type Int: Semiring
@@ -227,7 +227,7 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize>: Clone {
             CombR = Self::CombR,
             Fmod = Self::Fmod,
             PrimeTest = Self::PrimeTest,
-        > + Debug;
+        >;
 
     /// Zip+ types for the arbitrary polynomial trace columns.
     type ArbitraryZt: ZipTypes<
@@ -237,7 +237,7 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize>: Clone {
             CombR = Self::CombR,
             Fmod = Self::Fmod,
             PrimeTest = Self::PrimeTest,
-        > + Debug;
+        >;
 
     /// Zip+ types for the integer trace columns.
     type IntZt: ZipTypes<
@@ -247,7 +247,7 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize>: Clone {
             CombR = Self::CombR,
             Fmod = Self::Fmod,
             PrimeTest = Self::PrimeTest,
-        > + Debug;
+        >;
 
     /// Linear code used in Zip+ for the binary polynomial trace columns.
     type BinaryLc: LinearCode<Self::BinaryZt>;
@@ -430,7 +430,7 @@ mod tests {
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-        TestAirNoMultiplication, TestUairMixedShifts, TestUairSimpleMultiplication,
+        TestUairMixedShifts, TestUairNoMultiplication, TestUairSimpleMultiplication,
     };
     use zinc_uair::{
         degree_counter::count_max_degree, ideal::degree_one::DegreeOneIdeal,
@@ -711,14 +711,14 @@ mod tests {
         }
     }
 
-    /// End-to-end test: TestAirNoMultiplication.
+    /// End-to-end test: TestUairNoMultiplication.
     ///
     /// UAIR constraint: a + b - c \in (X - 2)
     /// (one constraint, no polynomial multiplication, ideal = <X - 2>).
     #[test]
     fn test_e2e_no_multiplication() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, TestAirNoMultiplication<ZtInt>>(
+        do_test::<TestZincTypesIprs, TestUairNoMultiplication<ZtInt>>(
             num_vars,
             (
                 make_iprs(num_vars),

@@ -1,7 +1,8 @@
 use crypto_bigint::Odd;
 use crypto_primitives::crypto_bigint_uint::Uint;
+use std::fmt::Debug;
 
-pub trait PrimalityTest<R>: Clone {
+pub trait PrimalityTest<R>: Debug + Clone {
     fn is_probably_prime(candidate: &R) -> bool;
 }
 

@@ -12,21 +12,22 @@ use zinc_utils::{
     from_ref::FromRef, inner_product::InnerProduct, mul_by_scalar::MulByScalar, named::Named,
 };
 
-pub trait ZipTypes: Clone + Send + Sync {
+pub trait ZipTypes: Clone + Debug + Send + Sync {
     const NUM_COLUMN_OPENINGS: usize;
 
     /// Semiring of witness/polynomial evaluations on boolean hypercube
-    type Eval: Named + ConstCoeffBitWidth + Default + Clone + Send + Sync;
+    type Eval: ConstCoeffBitWidth + Default + Named + Clone + Debug + Send + Sync;
 
     /// Semiring of codeword elements, at least as wide as the evaluation ring
     type Cw: FixedSemiring
         + ConstCoeffBitWidth
         + ConstTranscribable
         + FromRef<Self::Eval>
+        + CheckedAdd
         + Named
         // TODO(Ilia): Find out if the Copy can be avoided.
         + Copy
-        + CheckedAdd;
+        + Debug;
 
     /// Semiring type used to draft field modulus elements, natural numbers
     type Fmod: ConstIntSemiring + ConstTranscribable + Named;
@@ -53,9 +54,9 @@ pub trait ZipTypes: Clone + Send + Sync {
         + FromRef<Self::Cw>
         + Named;
 
-    type EvalDotChal: InnerProduct<Self::Eval, Self::Chal, Self::CombR>;
-    type CombDotChal: InnerProduct<Self::Comb, Self::Chal, Self::CombR>;
-    type ArrCombRDotChal: InnerProduct<[Self::CombR], Self::Chal, Self::CombR>;
+    type EvalDotChal: InnerProduct<Self::Eval, Self::Chal, Self::CombR> + Debug;
+    type CombDotChal: InnerProduct<Self::Comb, Self::Chal, Self::CombR> + Debug;
+    type ArrCombRDotChal: InnerProduct<[Self::CombR], Self::Chal, Self::CombR> + Debug;
 }
 
 /// Zip is a Polynomial Commitment Scheme (PCS) that supports committing to

@@ -134,9 +134,9 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub struct TestAirNoMultiplication<R>(PhantomData<R>); // TODO: Rename to XxxUairXxx
+pub struct TestUairNoMultiplication<R>(PhantomData<R>);
 
-impl<R> Uair for TestAirNoMultiplication<R>
+impl<R> Uair for TestUairNoMultiplication<R>
 where
     R: ConstSemiring + From<i32> + 'static,
 {
@@ -168,7 +168,7 @@ where
     }
 }
 
-impl<R> GenerateRandomTrace<32> for TestAirNoMultiplication<R>
+impl<R> GenerateRandomTrace<32> for TestUairNoMultiplication<R>
 where
     R: ConstSemiring + From<i32> + 'static,
 {
@@ -208,9 +208,9 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub struct TestAirScalarMultiplications<R>(PhantomData<R>);
+pub struct TestUairScalarMultiplications<R>(PhantomData<R>);
 
-impl<R> Uair for TestAirScalarMultiplications<R>
+impl<R> Uair for TestUairScalarMultiplications<R>
 where
     R: ConstSemiring + From<i8> + 'static,
 {
@@ -883,8 +883,8 @@ mod tests {
         }
 
         assert_uair_shape::<TestUairSimpleMultiplication<Int<LIMBS>>>(&[2, 2, 2]);
-        assert_uair_shape::<TestAirNoMultiplication<Int<LIMBS>>>(&[1]);
-        assert_uair_shape::<TestAirScalarMultiplications<Int<LIMBS>>>(&[1]);
+        assert_uair_shape::<TestUairNoMultiplication<Int<LIMBS>>>(&[1]);
+        assert_uair_shape::<TestUairScalarMultiplications<Int<LIMBS>>>(&[1]);
         assert_uair_shape::<BinaryDecompositionUair<u32>>(&[1]);
         assert_uair_shape::<BigLinearUair<u32>>(&[1; 17]);
         assert_uair_shape::<TestUairMixedShifts<Int<LIMBS>>>(&[1, 1]);
@@ -893,7 +893,7 @@ mod tests {
     #[test]
     fn test_air_scalar_multiplications_correct_collect_scalars() {
         assert_eq!(
-            collect_scalars::<TestAirScalarMultiplications<Int<LIMBS>>>(),
+            collect_scalars::<TestUairScalarMultiplications<Int<LIMBS>>>(),
             (vec![
                 DensePolynomial::new([Int::from_i8(-1), Int::from_i8(0), Int::from_i8(1)]),
                 DensePolynomial::new([

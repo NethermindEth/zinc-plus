@@ -184,6 +184,7 @@ macro_rules! impl_with_type_bounds {
             Zt: ZincTypes<D>,
             Zt::Int: ProjectableToField<F>,
             <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+            U: Uair + 'static,
             F: InnerTransparentField
                 + FromPrimitiveWithConfig
                 + for<'b> FromWithConfig<&'b Zt::Int>
@@ -197,7 +198,6 @@ macro_rules! impl_with_type_bounds {
             F::Inner:
                 ConstIntSemiring + ConstTranscribable + FromRef<Zt::Fmod> + Send + Sync + Zero + Default,
             F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
-            U: Uair + 'static,
         {
             $($code)*
         }
@@ -207,11 +207,12 @@ macro_rules! impl_with_type_bounds {
 impl<Zt, U, F, const D: usize> ZincPlusPiop<Zt, U, F, D>
 where
     Zt: ZincTypes<D>,
+    U: Uair,
     F: PrimeField,
     F::Inner: ConstTranscribable,
-    U: Uair,
 {
-    /// Step 0: Commit witness columns via Zip+ PCS, absorb roots and public
+    /// Step 0: Prover entry point.
+    /// Commit *witness* columns via Zip+ PCS, absorb roots and public
     /// data into the Fiat-Shamir transcript.
     #[allow(clippy::type_complexity)]
     pub fn step0_commit<'a>(
@@ -285,8 +286,8 @@ impl_with_type_bounds!(ProverBase
 
     /// Step 1 (combined / row-major): Prime projection
     /// (`\phi_q`: `Z[X] -> F_q[X]`). Samples a random prime, projects the
-    /// full trace and scalars using the row-major layout suited for non-linear
-    /// constraints. Consumes `project_scalar`.
+    /// full trace and scalars using the row-major layout.
+    /// Works for both linear and non-linear constraints.
     pub fn step1_combined<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
         mut self,
         project_scalar: S,
@@ -304,8 +305,8 @@ impl_with_type_bounds!(ProverBase
 
     /// Step 1 (MLE-first / column-major): Prime projection
     /// (`\phi_q`: `Z[X] -> F_q[X]`). Samples a random prime, projects the
-    /// full trace and scalars using the column-major layout suited for linear
-    /// constraints. Consumes `project_scalar`.
+    /// full trace and scalars using the column-major layout.
+    /// Only suitable for linear constraints.
     pub fn step1_mle_first<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
         mut self,
         project_scalar: S,
@@ -325,7 +326,7 @@ impl_with_type_bounds!(ProverBase
 impl_with_type_bounds!(ProverProjectedCombined
 {
     /// Step 2 (combined): Ideal check via `prove_combined` on the row-major
-    /// trace.
+    /// trace. Works for both linear and non-linear constraints.
     pub fn step2_ideal_check(
         mut self,
     ) -> Result<ProverIdealChecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
@@ -354,7 +355,7 @@ impl_with_type_bounds!(ProverProjectedCombined
 impl_with_type_bounds!(ProverProjectedMleFirst
 {
     /// Step 2 (MLE-first): Ideal check via `prove_linear` on the column-major
-    /// trace.
+    /// trace. Only suitable for linear constraints.
     pub fn step2_ideal_check(
         mut self,
     ) -> Result<ProverIdealChecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
@@ -383,8 +384,7 @@ impl_with_type_bounds!(ProverProjectedMleFirst
 impl_with_type_bounds!(ProverIdealChecked
 {
     /// Step 3: Evaluation projection (`\psi_a`: `F_q[X] -> F_q`). Samples
-    /// `a in F_q`, evaluates polynomials at `X = a`. Consumes
-    /// `projected_scalars_fx`.
+    /// `a in F_q`, evaluates polynomials at `X = a`.
     pub fn step3_eval_projection(
         mut self,
     ) -> Result<ProverEvalProjected<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
@@ -413,6 +413,9 @@ impl_with_type_bounds!(ProverIdealChecked
 impl_with_type_bounds!(ProverEvalProjected
 {
     /// Step 4: Combined CPR + Lookup multi-degree sumcheck over F_q.
+    /// Batches the CPR constraint claim (degree `max_deg+2`) with lookup groups
+    /// (one per table type) into a single sumcheck sharing one evaluation point `r*`.
+    /// Produces `up_evals` and `down_evals` (CPR) and lookup auxiliary witnesses at `r*`.
     pub fn step4_sumcheck(
         mut self,
     ) -> Result<ProverSumchecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
@@ -472,8 +475,10 @@ impl_with_type_bounds!(ProverEvalProjected
 
 impl_with_type_bounds!(ProverSumchecked
 {
-    /// Step 5: Multi-point evaluation sumcheck. Combines up_evals and
-    /// down_evals into a single evaluation point `r_0`.
+    /// Step 5: Multi-point evaluation sumcheck. Combines `up_evals` and
+    /// `down_evals` at `r'` into a single evaluation point `r_0`.
+    /// 0nly the sumcheck proof is sent; scalar evaluations at `r_0` are derived from the
+    /// polynomial-valued `lifted_evals` in Step 6
     pub fn step5_multipoint_eval(
         mut self,
     ) -> Result<ProverMultipointEvaled<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
@@ -666,8 +671,8 @@ where
     /// Zinc+ full PIOP prover.
     ///
     /// Runs all protocol steps in sequence and returns the assembled proof.
-    /// For per-step control, construct a [`ProverInit`] and chain the
-    /// individual `step_N_*` methods.
+    /// For per-step control, start with [`Self::step0_commit`] and chain the
+    /// individual `stepN_*` methods.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn prove<const MLE_FIRST: bool, const CHECK_FOR_OVERFLOW: bool>(
         pp: &(

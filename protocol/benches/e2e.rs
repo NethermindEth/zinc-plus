@@ -20,10 +20,10 @@ use zinc_poly::{
     },
 };
 use zinc_primality::{MillerRabin, PrimalityTest};
-use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes, verifier::VerifierBase};
+use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes};
 use zinc_test_uair::{
     BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-    ShaProxy, TestAirNoMultiplication,
+    ShaProxy, TestUairNoMultiplication,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
@@ -106,7 +106,7 @@ impl<Eval, Cw, Fmod, PrimeTest, Chal, Pt, CombR, Comb, EvalDotChal, CombDotChal,
         ArrCombRDotChal,
     >
 where
-    Eval: Named + ConstCoeffBitWidth + Default + Clone + Send + Sync,
+    Eval: ConstCoeffBitWidth + Default + Named + Clone + Debug + Send + Sync,
     Cw: FixedSemiring + ConstCoeffBitWidth + ConstTranscribable + FromRef<Eval> + Named + Copy,
     Fmod: ConstIntSemiring + ConstTranscribable + Named,
     PrimeTest: PrimalityTest<Fmod> + Send + Sync,
@@ -118,9 +118,9 @@ where
         + FromRef<CombR>
         + for<'a> MulByScalar<&'a Chal>,
     Comb: FixedSemiring + Polynomial<CombR> + FromRef<Eval> + FromRef<Cw> + Named,
-    EvalDotChal: InnerProduct<Eval, Chal, CombR> + Clone + Send + Sync,
-    CombDotChal: InnerProduct<Comb, Chal, CombR> + Clone + Send + Sync,
-    ArrCombRDotChal: InnerProduct<[CombR], Chal, CombR> + Clone + Send + Sync,
+    EvalDotChal: InnerProduct<Eval, Chal, CombR> + Clone + Debug + Send + Sync,
+    CombDotChal: InnerProduct<Comb, Chal, CombR> + Clone + Debug + Send + Sync,
+    ArrCombRDotChal: InnerProduct<[CombR], Chal, CombR> + Clone + Debug + Send + Sync,
 {
     const NUM_COLUMN_OPENINGS: usize = 147;
     type Eval = Eval;
@@ -438,7 +438,10 @@ fn do_bench_steps<Zt, U, IdealOverF>(
         };
     }
 
-    // --- Prover per-step benchmarks ---
+    //
+    // Prover per-step benchmarks
+    //
+
     // Build the chain once; each bench clones the cached state.
 
     let p_committed = <piop!()>::step0_commit(pp, trace, num_vars).unwrap();
@@ -514,7 +517,9 @@ fn do_bench_steps<Zt, U, IdealOverF>(
         run = |s| s.step7_pcs_open::<PERFORM_CHECKS>(),
     );
 
-    // --- Verifier per-step benchmarks ---
+    //
+    // Verifier per-step benchmarks
+    //
 
     macro_rules! zinc_plus {
         () => {
@@ -529,9 +534,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     let sig = U::signature();
     let public_trace = trace.public(&sig);
 
-    let v_transcript = VerifierBase::<Zt, DEGREE_PLUS_ONE>::step0_reconstruct_transcript::<
-        U,
-        _,
+    let v_transcript = ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::step0_reconstruct_transcript::<
         IdealOverF,
     >(pp, proof.clone(), &public_trace, num_vars)
     .unwrap();
@@ -551,9 +554,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     step_bench!(
         "Verify" / "0: Transcript reconstruct",
         setup = || proof.clone(),
-        run = |proof| VerifierBase::<Zt, DEGREE_PLUS_ONE>::step0_reconstruct_transcript::<
-            U,
-            _,
+        run = |proof| ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::step0_reconstruct_transcript::<
             IdealOverF,
         >(pp, proof, &public_trace, num_vars,),
     );
@@ -670,7 +671,7 @@ where
 }
 
 fn bench_no_mult_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
-    do_bench_uair::<TestAirNoMultiplication<i64>>(group, "NoMult", num_vars);
+    do_bench_uair::<TestUairNoMultiplication<i64>>(group, "NoMult", num_vars);
 }
 fn bench_binary_decomposition_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     do_bench_uair::<BinaryDecompositionUair<i64>>(group, "BinaryDecomposition", num_vars);
@@ -686,7 +687,7 @@ fn bench_big_linear_public_input_e2e(group: &mut BenchmarkGroup<WallTime>, num_v
 }
 
 fn bench_no_mult_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
-    do_bench_steps_uair::<TestAirNoMultiplication<i64>>(group, "NoMult", num_vars);
+    do_bench_steps_uair::<TestUairNoMultiplication<i64>>(group, "NoMult", num_vars);
 }
 fn bench_binary_decomposition_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     do_bench_steps_uair::<BinaryDecompositionUair<i64>>(group, "BinaryDecomposition", num_vars);

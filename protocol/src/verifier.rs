@@ -214,14 +214,17 @@ pub struct VerifierPcsVerified<IdealOverF> {
 // Step implementations
 //
 
-impl<'a, Zt, const D: usize> VerifierBase<'a, Zt, D>
+impl<Zt, U, F, const D: usize> ZincPlusPiop<Zt, U, F, D>
 where
     Zt: ZincTypes<D>,
+    U: Uair,
+    F: PrimeField,
+    F::Inner: ConstTranscribable,
 {
-    /// Step 0: Reconstruct Fiat-Shamir transcript from commitments and public
-    /// data.
+    /// Step 0: Verifier entry point.
+    /// Reconstruct Fiat-Shamir transcript from commitments and public data.
     #[allow(clippy::type_complexity)]
-    pub fn step0_reconstruct_transcript<U, F, IdealOverF>(
+    pub fn step0_reconstruct_transcript<'a, IdealOverF>(
         (vp_bin, vp_arb, vp_int): &'a (
             ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
             ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
@@ -235,9 +238,6 @@ where
         ProtocolError<F, IdealOverF>,
     >
     where
-        U: Uair,
-        F: PrimeField,
-        F::Inner: ConstTranscribable,
         IdealOverF: Ideal,
     {
         let zip_proof = std::mem::take(&mut proof.zip);
@@ -764,8 +764,9 @@ where
     /// Zinc+ full PIOP verifier.
     ///
     /// Runs all verification steps in sequence and returns `Ok(())` on
-    /// success. For per-step control, construct a [`VerifierInit`] and chain
-    /// the individual `step_N_*` methods.
+    /// success. For per-step control, starts with
+    /// [`Self::step0_reconstruct_transcript`] and chain the individual
+    /// `stepN_*` methods.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn verify<IdealOverF, const CHECK_FOR_OVERFLOW: bool>(
         vp: &(
@@ -782,7 +783,7 @@ where
     where
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
     {
-        VerifierBase::<Zt, D>::step0_reconstruct_transcript::<U, F, IdealOverF>(
+        ZincPlusPiop::<Zt, U, F, D>::step0_reconstruct_transcript::<IdealOverF>(
             vp,
             proof,
             public_trace,
