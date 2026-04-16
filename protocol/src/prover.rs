@@ -477,7 +477,7 @@ impl_with_type_bounds!(ProverSumchecked
 {
     /// Step 5: Multi-point evaluation sumcheck. Combines `up_evals` and
     /// `down_evals` at `r'` into a single evaluation point `r_0`.
-    /// 0nly the sumcheck proof is sent; scalar evaluations at `r_0` are derived from the
+    /// Only the sumcheck proof is sent; scalar evaluations at `r_0` are derived from the
     /// polynomial-valued `lifted_evals` in Step 6
     pub fn step5_multipoint_eval(
         mut self,
