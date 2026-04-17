@@ -5,9 +5,6 @@ mod structs;
 
 pub use structs::*;
 
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
-
 use crate::projections::{ColumnMajorTrace, RowMajorTrace};
 use batched_ideal_check::*;
 use crypto_primitives::PrimeField;
@@ -15,9 +12,8 @@ use num_traits::ConstZero;
 use std::collections::HashMap;
 use thiserror::Error;
 use zinc_poly::{
-    EvaluationError,
-    univariate::dynamic::over_field::DynamicPolynomialF,
-    utils::{ArithErrors as PolyArithErrors, build_eq_x_r_vec},
+    EvaluationError, univariate::dynamic::over_field::DynamicPolynomialF,
+    utils::ArithErrors as PolyArithErrors,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
@@ -25,7 +21,7 @@ use zinc_uair::{
     ideal::{Ideal, IdealCheck},
     ideal_collector::{IdealOrZero, collect_ideals},
 };
-use zinc_utils::{cfg_into_iter, inner_transparent_field::InnerTransparentField};
+use zinc_utils::inner_transparent_field::InnerTransparentField;
 
 /// Ideal-check subprotocol.
 pub trait IdealCheckProtocol: Uair {
@@ -196,48 +192,30 @@ where
         // Collect ideals to identify assert_zero constraints whose
         // combined polynomial is zero by construction (for honest provers).
         let ideal_collector = collect_ideals::<U>(num_constraints);
-        let is_zero_ideal: Vec<bool> = ideal_collector
+        let non_zero_indices: Vec<usize> = ideal_collector
             .ideals
             .iter()
-            .map(|i| i.is_zero_ideal())
+            .enumerate()
+            .filter(|(_, i)| !i.is_zero_ideal())
+            .map(|(idx, _)| idx)
             .collect();
 
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
-        let combined_mle_values = if is_zero_ideal.iter().all(|&z| z) {
-            vec![DynamicPolynomialF::ZERO; num_constraints]
-        } else {
-            let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
+        let mut combined_mle_values = vec![DynamicPolynomialF::ZERO; num_constraints];
+        if !non_zero_indices.is_empty() {
+            let computed = combined_poly_builder::evaluate_for_constraints::<_, U>(
                 trace_matrix,
                 projected_scalars,
                 num_constraints,
                 field_cfg,
-                &is_zero_ideal,
-            );
+                &non_zero_indices,
+                &evaluation_point,
+            )?;
 
-            let eq_table = build_eq_x_r_vec(&evaluation_point, field_cfg)?;
-
-            cfg_into_iter!(combined_mles)
-                .enumerate()
-                .map(|(i, coeff_mles)| {
-                    // Skip zero-ideal constraints: their combined polynomial
-                    // is zero for an honest prover.
-                    if is_zero_ideal[i] {
-                        return DynamicPolynomialF::ZERO;
-                    }
-                    let coeffs = coeff_mles
-                        .into_iter()
-                        .map(|coeff_mle| {
-                            zinc_poly::utils::mle_eval_with_eq_table(
-                                &coeff_mle.evaluations,
-                                &eq_table,
-                                field_cfg,
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    DynamicPolynomialF::new_trimmed(coeffs)
-                })
-                .collect::<Vec<_>>()
+            for (&ci, val) in non_zero_indices.iter().zip(computed) {
+                combined_mle_values[ci] = val;
+            }
         };
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];

@@ -345,10 +345,7 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
     }
 
     bench_prove!("Prove (Combined)", false);
-
-    if count_max_degree::<U>() <= 1 {
-        bench_prove!("Prove (MLE-first)", true);
-    }
+    bench_prove!("Prove (MLE-first)", true);
 
     let proof: Proof<F> =
         <zinc_plus!()>::prove::<false, PERFORM_CHECKS>(pp, trace, num_vars, project_scalar)
@@ -446,6 +443,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
 
     let p_committed = <piop!()>::step0_commit(pp, trace, num_vars).unwrap();
     let p_projected = p_committed.clone().step1_combined(project_scalar).unwrap();
+    let p_projected_mle = p_committed.clone().step1_mle_first(project_scalar).unwrap();
     let p_ideal_checked = p_projected.clone().step2_ideal_check().unwrap();
     let p_eval_projected = p_ideal_checked.clone().step3_eval_projection().unwrap();
     let p_sumchecked = p_eval_projected.clone().step4_sumcheck().unwrap();
@@ -464,13 +462,11 @@ fn do_bench_steps<Zt, U, IdealOverF>(
         run = |s| s.step1_combined(project_scalar),
     );
 
-    if count_max_degree::<U>() <= 1 {
-        step_bench!(
-            "Prove" / "1: Prime projection (MLE-first)",
-            setup = || p_committed.clone(),
-            run = |s| s.step1_mle_first(project_scalar),
-        );
-    }
+    step_bench!(
+        "Prove" / "1: Prime projection (MLE-first)",
+        setup = || p_committed.clone(),
+        run = |s| s.step1_mle_first(project_scalar),
+    );
 
     step_bench!(
         "Prove" / "2: Ideal check (Combined)",
@@ -478,14 +474,11 @@ fn do_bench_steps<Zt, U, IdealOverF>(
         run = |s| s.step2_ideal_check(),
     );
 
-    if count_max_degree::<U>() <= 1 {
-        let p_projected_mle = p_committed.clone().step1_mle_first(project_scalar).unwrap();
-        step_bench!(
-            "Prove" / "2: Ideal check (MLE-first)",
-            setup = || p_projected_mle.clone(),
-            run = |s| s.step2_ideal_check(),
-        );
-    }
+    step_bench!(
+        "Prove" / "2: Ideal check (MLE-first)",
+        setup = || p_projected_mle.clone(),
+        run = |s| s.step2_ideal_check(),
+    );
 
     step_bench!(
         "Prove" / "3: Eval projection",

@@ -433,7 +433,7 @@ mod tests {
         TestUairMixedShifts, TestUairNoMultiplication, TestUairSimpleMultiplication,
     };
     use zinc_uair::{
-        degree_counter::count_max_degree, ideal::DegreeOneIdeal, ideal_collector::IdealOrZero,
+        ideal::DegreeOneIdeal, ideal_collector::IdealOrZero,
     };
     use zinc_utils::{
         CHECKED,
@@ -704,10 +704,7 @@ mod tests {
 
         run_protocol!(false);
 
-        if count_max_degree::<U>() <= 1 {
-            // For linear constraints, also test the MLE-first ideal check approach.
-            run_protocol!(true);
-        }
+        run_protocol!(true);
     }
 
     /// End-to-end test: TestUairNoMultiplication.

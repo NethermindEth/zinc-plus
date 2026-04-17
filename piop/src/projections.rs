@@ -16,7 +16,7 @@ use zinc_utils::{
 
 /// Row-indexed trace matrix: `trace[row][col]`.
 /// Each row contains all column values for that row.
-/// Used by `compute_combined_polynomials` for non-linear constraints.
+/// Used by `evaluate_for_constraints` for non-linear constraints.
 pub type RowMajorTrace<F> = Vec<Vec<DynamicPolynomialF<F>>>;
 
 /// Column-indexed trace matrix: `trace[col][row]`.
