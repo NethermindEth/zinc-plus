@@ -41,7 +41,3 @@ unchecked = []
 [[bench]]
 name = "e2e"
 harness = false
-
-[[bench]]
-name = "e2e_steps"
-harness = false

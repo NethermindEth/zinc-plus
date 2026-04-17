@@ -26,6 +26,7 @@ pub type ColumnMajorTrace<F> = Vec<DenseMultilinearExtension<DynamicPolynomialF<
 
 /// Holds the projected trace in either row-major or column-major layout,
 /// depending on which ideal check approach (MLE-first or combined) is used.
+#[derive(Clone, Debug)]
 pub enum ProjectedTrace<F: PrimeField> {
     RowMajor(RowMajorTrace<F>),
     ColumnMajor(ColumnMajorTrace<F>),

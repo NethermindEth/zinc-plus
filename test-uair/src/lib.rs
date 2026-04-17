@@ -25,6 +25,7 @@ use zinc_uair::{
 };
 use zinc_utils::from_ref::FromRef;
 
+#[derive(Clone, Debug)]
 pub struct TestUairSimpleMultiplication<R>(PhantomData<R>);
 
 impl<R> Uair for TestUairSimpleMultiplication<R>
@@ -132,9 +133,10 @@ where
     }
 }
 
-pub struct TestAirNoMultiplication<R>(PhantomData<R>); // TODO: Rename to XxxUairXxx
+#[derive(Clone, Debug)]
+pub struct TestUairNoMultiplication<R>(PhantomData<R>);
 
-impl<R> Uair for TestAirNoMultiplication<R>
+impl<R> Uair for TestUairNoMultiplication<R>
 where
     R: ConstSemiring + From<i32> + 'static,
 {
@@ -166,7 +168,7 @@ where
     }
 }
 
-impl<R> GenerateRandomTrace<32> for TestAirNoMultiplication<R>
+impl<R> GenerateRandomTrace<32> for TestUairNoMultiplication<R>
 where
     R: ConstSemiring + From<i32> + 'static,
 {
@@ -205,9 +207,10 @@ where
     }
 }
 
-pub struct TestAirScalarMultiplications<R>(PhantomData<R>);
+#[derive(Clone, Debug)]
+pub struct TestUairScalarMultiplications<R>(PhantomData<R>);
 
-impl<R> Uair for TestAirScalarMultiplications<R>
+impl<R> Uair for TestUairScalarMultiplications<R>
 where
     R: ConstSemiring + From<i8> + 'static,
 {
@@ -253,6 +256,7 @@ where
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct BinaryDecompositionUair<R>(PhantomData<R>);
 
 impl<R> Uair for BinaryDecompositionUair<R>
@@ -317,6 +321,7 @@ where
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct BigLinearUair<R>(PhantomData<R>);
 
 impl<R> Uair for BigLinearUair<R>
@@ -449,6 +454,7 @@ where
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct BigLinearUairWithPublicInput<R>(PhantomData<R>);
 
 impl<R> Uair for BigLinearUairWithPublicInput<R>
@@ -511,6 +517,7 @@ where
 ///
 /// Note the asymmetric shift amounts: `bp[0]` is shifted by 1 (used by C1)
 /// and `bp[4]` is shifted by 4 (used by C2).
+#[derive(Clone, Debug)]
 pub struct ShaProxy<R>(PhantomData<R>);
 
 impl<R> Uair for ShaProxy<R>
@@ -761,6 +768,7 @@ where
 /// Test UAIR with mixed shift amounts.
 /// 3 columns (a, b, c): column a shifts by 1, column b shifts by 2.
 /// Constraints are linear (degree 1).
+#[derive(Clone, Debug)]
 pub struct TestUairMixedShifts<R>(PhantomData<R>);
 
 impl<R> Uair for TestUairMixedShifts<R>
@@ -875,8 +883,8 @@ mod tests {
         }
 
         assert_uair_shape::<TestUairSimpleMultiplication<Int<LIMBS>>>(&[2, 2, 2]);
-        assert_uair_shape::<TestAirNoMultiplication<Int<LIMBS>>>(&[1]);
-        assert_uair_shape::<TestAirScalarMultiplications<Int<LIMBS>>>(&[1]);
+        assert_uair_shape::<TestUairNoMultiplication<Int<LIMBS>>>(&[1]);
+        assert_uair_shape::<TestUairScalarMultiplications<Int<LIMBS>>>(&[1]);
         assert_uair_shape::<BinaryDecompositionUair<u32>>(&[1]);
         assert_uair_shape::<BigLinearUair<u32>>(&[1; 17]);
         assert_uair_shape::<TestUairMixedShifts<Int<LIMBS>>>(&[1, 1]);
@@ -885,7 +893,7 @@ mod tests {
     #[test]
     fn test_air_scalar_multiplications_correct_collect_scalars() {
         assert_eq!(
-            collect_scalars::<TestAirScalarMultiplications<Int<LIMBS>>>(),
+            collect_scalars::<TestUairScalarMultiplications<Int<LIMBS>>>(),
             (vec![
                 DensePolynomial::new([Int::from_i8(-1), Int::from_i8(0), Int::from_i8(1)]),
                 DensePolynomial::new([

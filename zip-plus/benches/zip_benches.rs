@@ -22,6 +22,7 @@ const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
 
 const INT_LIMBS: usize = U64::LIMBS;
 
+#[derive(Debug, Clone)]
 struct BenchZipTypes {}
 impl ZipTypes for BenchZipTypes {
     const NUM_COLUMN_OPENINGS: usize = 147;

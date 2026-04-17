@@ -34,6 +34,7 @@ const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
 
 const INT_LIMBS: usize = U64::LIMBS;
 
+#[derive(Debug, Clone)]
 struct BenchZipPlusTypes<CwCoeff, const D_PLUS_ONE: usize>(PhantomData<CwCoeff>);
 
 impl<CwCoeff, const D_PLUS_ONE: usize> ZipTypes for BenchZipPlusTypes<CwCoeff, D_PLUS_ONE>

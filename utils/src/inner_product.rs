@@ -26,6 +26,7 @@ pub enum InnerProductError {
 /// on the `MulByScalar` and `CheckedAdd` traits.
 /// It does `mul_by_scalar` for products of terms
 /// and then combines the results using either `add` or `checked_add`.
+#[derive(Clone, Debug)]
 pub struct MBSInnerProduct;
 
 impl<Lhs, Rhs, Out> InnerProduct<[Lhs], Rhs, Out> for MBSInnerProduct
@@ -88,6 +89,7 @@ impl MBSInnerProduct {
 /// The inner product for vectors of length 1 (a.k.a. scalars).
 /// Uses `mul_by_scalar` to multiply the only components of vectors
 /// to get the result.
+#[derive(Clone, Debug)]
 pub struct ScalarProduct;
 
 impl<Lhs, Rhs, Out> InnerProduct<Lhs, Rhs, Out> for ScalarProduct
