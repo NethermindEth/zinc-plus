@@ -485,9 +485,8 @@ mod tests {
     use zinc_poly::{mle::MultilinearExtensionWithConfig, utils::build_eq_x_r_inner};
     use zinc_transcript::Blake3Transcript;
 
-    const N: usize = 2;
     const_monty_params!(TestParams, U128, "00000000b933426489189cb5b47d567f");
-    type F = ConstMontyField<TestParams, N>;
+    type F = ConstMontyField<TestParams, { U128::LIMBS }>;
 
     /// Two degree groups sharing the same evaluation point.
     ///

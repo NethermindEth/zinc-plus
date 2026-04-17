@@ -55,33 +55,29 @@ where
     }
 }
 
-/// A type implementing ideal trait
-/// that is either stores inner
-/// ideal type `I` or zero ideal.
+/// Either a non-trivial ideal (from `assert_in_ideal`) or the zero ideal
+/// (from `assert_zero`).
 #[derive(Clone, Copy, Debug)]
-pub struct IdealOrZero<I: Ideal> {
-    pub ideal_or_zero: Option<I>,
+pub enum IdealOrZero<I: Ideal> {
+    NonZero(I),
+    Zero,
 }
 
 impl<I: Ideal> IdealOrZero<I> {
     pub fn zero() -> Self {
-        IdealOrZero {
-            ideal_or_zero: None,
-        }
+        IdealOrZero::Zero
     }
 
     /// Returns `true` if this is the zero ideal
     /// (i.e., the ideal used by `assert_zero` constraints).
     pub fn is_zero_ideal(&self) -> bool {
-        self.ideal_or_zero.is_none()
+        matches!(self, IdealOrZero::Zero)
     }
 
     pub fn map<I2: Ideal>(&self, f: impl FnOnce(&I) -> I2) -> IdealOrZero<I2> {
-        match &self.ideal_or_zero {
-            Some(ideal) => IdealOrZero {
-                ideal_or_zero: Some(f(ideal)),
-            },
-            None => IdealOrZero::zero(),
+        match self {
+            IdealOrZero::NonZero(ideal) => IdealOrZero::NonZero(f(ideal)),
+            IdealOrZero::Zero => IdealOrZero::Zero,
         }
     }
 }
@@ -96,9 +92,7 @@ impl<I: Ideal> FromRef<IdealOrZero<I>> for IdealOrZero<I> {
 
 impl<I: Ideal> FromRef<I> for IdealOrZero<I> {
     fn from_ref(value: &I) -> Self {
-        Self {
-            ideal_or_zero: Some(value.clone()),
-        }
+        IdealOrZero::NonZero(value.clone())
     }
 }
 
