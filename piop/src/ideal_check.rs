@@ -319,7 +319,7 @@ mod tests {
     use zinc_transcript::Blake3Transcript;
     use zinc_uair::{
         constraint_counter::count_constraints,
-        ideal::{Ideal, IdealCheck, degree_one::DegreeOneIdeal},
+        ideal::{DegreeOneIdeal, Ideal, IdealCheck},
     };
 
     use crate::test_utils::{
@@ -435,7 +435,7 @@ mod tests {
         // Non-linear UAIR - only combined approach works
         test_successful_verification_combined::<TestUairSimpleMultiplication<Int<5>>, _, _, 32>(
             num_vars,
-            |_ideal_over_ring| IdealOrZero::zero(),
+            |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<_>>::zero(),
         );
     }
 }

@@ -1,4 +1,4 @@
-pub mod degree_one;
+pub mod rotation;
 
 use crypto_primitives::Semiring;
 use std::fmt::Debug;
@@ -36,3 +36,7 @@ impl<I: Ideal> FromRef<I> for ImpossibleIdeal {
         ImpossibleIdeal
     }
 }
+
+/// A type alias for [`RotationIdeal`][`rotation::RotationIdeal`] with `W = 1`,
+/// i.e. ideals of the form `(X - a)`.
+pub type DegreeOneIdeal<F> = rotation::RotationIdeal<F, 1>;

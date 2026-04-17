@@ -29,7 +29,7 @@ use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
     Uair, UairTrace,
     degree_counter::count_max_degree,
-    ideal::{Ideal, IdealCheck, degree_one::DegreeOneIdeal},
+    ideal::{DegreeOneIdeal, Ideal, IdealCheck},
     ideal_collector::IdealOrZero,
 };
 use zinc_utils::{
