@@ -149,15 +149,20 @@ where
     {
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
-        // Evaluate combined polynomials using MLE-first approach:
-        // evaluate trace columns at the point, then apply constraints.
-        let combined_mle_values = combined_poly_builder::evaluate_combined_polynomials::<_, U>(
-            trace_matrix,
-            projected_scalars,
-            num_constraints,
-            &evaluation_point,
-            field_cfg,
-        )?;
+        let ideal_collector = collect_ideals::<U>(num_constraints);
+
+        let all_zero = ideal_collector.ideals.iter().all(|i| i.is_zero_ideal());
+        let combined_mle_values = if all_zero {
+            vec![DynamicPolynomialF::ZERO; num_constraints]
+        } else {
+            combined_poly_builder::evaluate_combined_polynomials::<_, U>(
+                trace_matrix,
+                projected_scalars,
+                num_constraints,
+                &evaluation_point,
+                field_cfg,
+            )?
+        };
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
@@ -199,39 +204,41 @@ where
 
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
-        // Build combined polynomial MLEs row-by-row and evaluate them.
-        let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
-            trace_matrix,
-            projected_scalars,
-            num_constraints,
-            field_cfg,
-            &is_zero_ideal,
-        );
+        let combined_mle_values = if is_zero_ideal.iter().all(|&z| z) {
+            vec![DynamicPolynomialF::ZERO; num_constraints]
+        } else {
+            let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
+                trace_matrix,
+                projected_scalars,
+                num_constraints,
+                field_cfg,
+                &is_zero_ideal,
+            );
 
-        let eq_table = build_eq_x_r_vec(&evaluation_point, field_cfg)?;
+            let eq_table = build_eq_x_r_vec(&evaluation_point, field_cfg)?;
 
-        // Evaluate coefficient MLEs at the evaluation point.
-        let combined_mle_values: Vec<DynamicPolynomialF<F>> = cfg_into_iter!(combined_mles)
-            .enumerate()
-            .map(|(i, coeff_mles)| {
-                // Skip zero-ideal constraints: their combined polynomial
-                // is zero for an honest prover.
-                if is_zero_ideal[i] {
-                    return DynamicPolynomialF::ZERO;
-                }
-                let coeffs = coeff_mles
-                    .into_iter()
-                    .map(|coeff_mle| {
-                        zinc_poly::utils::mle_eval_with_eq_table(
-                            &coeff_mle.evaluations,
-                            &eq_table,
-                            field_cfg,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                DynamicPolynomialF::new_trimmed(coeffs)
-            })
-            .collect::<Vec<_>>();
+            cfg_into_iter!(combined_mles)
+                .enumerate()
+                .map(|(i, coeff_mles)| {
+                    // Skip zero-ideal constraints: their combined polynomial
+                    // is zero for an honest prover.
+                    if is_zero_ideal[i] {
+                        return DynamicPolynomialF::ZERO;
+                    }
+                    let coeffs = coeff_mles
+                        .into_iter()
+                        .map(|coeff_mle| {
+                            zinc_poly::utils::mle_eval_with_eq_table(
+                                &coeff_mle.evaluations,
+                                &eq_table,
+                                field_cfg,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    DynamicPolynomialF::new_trimmed(coeffs)
+                })
+                .collect::<Vec<_>>()
+        };
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
