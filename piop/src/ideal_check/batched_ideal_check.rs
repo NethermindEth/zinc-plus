@@ -1,7 +1,7 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use thiserror::Error;
-use zinc_uair::ideal::{Ideal, IdealCheck};
+use zinc_uair::ideal::{Ideal, IdealCheck, IdealCheckError};
 use zinc_utils::cfg_iter;
 
 /// Checks if the collected ideals contain a slice
@@ -22,8 +22,8 @@ pub fn batched_ideal_check<I: Ideal + IdealCheck<R>, R: Clone + Send + Sync>(
     cfg_iter!(ideals)
         .zip(cfg_iter!(values))
         .try_for_each(|(ideal, value)| {
-            if !ideal.contains(value) {
-                Err(BatchedIdealCheckError::IdealCheckFailed(
+            if !ideal.contains(value)? {
+                Err(BatchedIdealCheckError::NotInIdeal(
                     value.clone(),
                     ideal.clone(),
                 ))
@@ -43,5 +43,7 @@ pub enum BatchedIdealCheckError<R, I> {
         provided_values: usize,
     },
     #[error("{0} does not belong to the ideal {1}")]
-    IdealCheckFailed(R, I),
+    NotInIdeal(R, I),
+    #[error("Ideal check failed: {}", 0.0)]
+    IdealCheckFailed(#[from] IdealCheckError),
 }

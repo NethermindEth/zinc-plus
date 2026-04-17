@@ -3,7 +3,7 @@ use zinc_utils::from_ref::FromRef;
 use crate::{
     ConstraintBuilder, TraceRow, Uair,
     dummy_semiring::DummySemiring,
-    ideal::{Ideal, IdealCheck},
+    ideal::{Ideal, IdealCheck, IdealCheckError},
 };
 
 /// A `ConstraintBuilder` that collects
@@ -97,8 +97,8 @@ impl<I: Ideal> FromRef<I> for IdealOrZero<I> {
 }
 
 impl<I: Ideal> IdealCheck<DummySemiring> for IdealOrZero<I> {
-    fn contains(&self, _value: &DummySemiring) -> bool {
+    fn contains(&self, _value: &DummySemiring) -> Result<bool, IdealCheckError> {
         // Do nothing.
-        true
+        Ok(true)
     }
 }

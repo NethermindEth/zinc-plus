@@ -473,10 +473,13 @@ mod tests {
             })
             .collect();
 
-        assert!(
-            results.windows(2).all(|w| w[0] == w[1]),
-            "Parallel encoding runs produced inconsistent results"
-        );
+        for w in results.windows(2) {
+            assert_eq!(
+                w[0], w[1],
+                "Parallel encoding runs produced inconsistent results: {:?} vs {:?}",
+                w[0], w[1]
+            );
+        }
     }
 
     #[test]

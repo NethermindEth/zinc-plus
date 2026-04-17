@@ -1,5 +1,5 @@
 use crate::{
-    ideal::{Ideal, IdealCheck},
+    ideal::{Ideal, IdealCheck, IdealCheckError},
     ideal_collector::IdealOrZero,
 };
 use crypto_primitives::{FromWithConfig, PrimeField, Semiring};
@@ -53,27 +53,37 @@ impl<F: PrimeField, const W: usize> RotationIdeal<F, W> {
 impl<F: PrimeField, const W: usize> IdealCheck<DynamicPolynomialF<F>>
     for IdealOrZero<RotationIdeal<F, W>>
 {
-    fn contains(&self, value: &DynamicPolynomialF<F>) -> bool {
+    fn contains(&self, value: &DynamicPolynomialF<F>) -> Result<bool, IdealCheckError> {
         if value.is_zero() {
-            return true;
+            return Ok(true);
         }
 
         match self {
             IdealOrZero::NonZero(RotationIdeal { generating_root }) => {
-                let field_cfg = value.coeffs[0].cfg();
-                let root_in_field = F::from_with_cfg(generating_root.clone(), field_cfg);
+                if !value.coeffs.is_empty() {
+                    // We could technically do the conversion here, but this is not expected
+                    // to happen and likely signifies a bug.
+                    let coeffs_modulus = value.coeffs[0].modulus();
+                    if coeffs_modulus != generating_root.modulus() {
+                        return Err(IdealCheckError(format!(
+                            "Coefficient modulus {:?} doesn not match generating root modulus {:?}",
+                            coeffs_modulus,
+                            generating_root.modulus()
+                        )));
+                    }
+                }
 
                 if W == 1 {
-                    F::is_zero(
+                    Ok(F::is_zero(
                         &value
-                            .evaluate_at_point(&root_in_field)
+                            .evaluate_at_point(generating_root)
                             .expect("arithmetic overflow"),
-                    )
+                    ))
                 } else {
-                    remainder_is_zero::<F, W>(&value.coeffs, &root_in_field)
+                    Ok(remainder_is_zero::<F, W>(&value.coeffs, generating_root))
                 }
             }
-            IdealOrZero::Zero => value.is_zero(),
+            IdealOrZero::Zero => Ok(value.is_zero()),
         }
     }
 }
@@ -136,14 +146,14 @@ mod tests {
         // (X - 2): polynomial X - 2 should be in ideal (X-2) since eval at 2 is 0.
         let ideal = IdealOrZero::NonZero(RotationIdeal::<F, 1>::new(F::from(2)));
         let p = poly(&[-2, 1]); // X - 2
-        assert!(ideal.contains(&p));
+        assert!(ideal.contains(&p).unwrap());
     }
 
     #[test]
     fn w1_ideal_rejects_nonmember() {
         let ideal = IdealOrZero::NonZero(RotationIdeal::<F, 1>::new(F::from(2)));
         let p = poly(&[1, 1]); // X + 1, eval at 2 = 3 ≠ 0
-        assert!(!ideal.contains(&p));
+        assert!(!ideal.contains(&p).unwrap());
     }
 
     #[test]
@@ -151,7 +161,7 @@ mod tests {
         // (X^2 - 1): the polynomial X^2 - 1 should be in this ideal.
         let ideal = IdealOrZero::NonZero(RotationIdeal::<F, 2>::new(F::from(1)));
         let p = poly(&[-1, 0, 1]); // X^2 - 1
-        assert!(ideal.contains(&p));
+        assert!(ideal.contains(&p).unwrap());
     }
 
     #[test]
@@ -159,14 +169,14 @@ mod tests {
         // (X^2 - 1): X * (X^2 - 1) = X^3 - X should be in the ideal.
         let ideal = IdealOrZero::NonZero(RotationIdeal::<F, 2>::new(F::from(1)));
         let p = poly(&[0, -1, 0, 1]); // X^3 - X
-        assert!(ideal.contains(&p));
+        assert!(ideal.contains(&p).unwrap());
     }
 
     #[test]
     fn w2_ideal_rejects_nonmember() {
         let ideal = IdealOrZero::NonZero(RotationIdeal::<F, 2>::new(F::from(1)));
         let p = poly(&[1, 1]); // X + 1
-        assert!(!ideal.contains(&p));
+        assert!(!ideal.contains(&p).unwrap());
     }
 
     #[test]
@@ -174,27 +184,27 @@ mod tests {
         // (X^3 - 2): the polynomial X^3 - 2 should be in the ideal.
         let ideal = IdealOrZero::NonZero(RotationIdeal::<F, 3>::new(F::from(2)));
         let p = poly(&[-2, 0, 0, 1]); // X^3 - 2
-        assert!(ideal.contains(&p));
+        assert!(ideal.contains(&p).unwrap());
     }
 
     #[test]
     fn w3_ideal_rejects_nonmember() {
         let ideal = IdealOrZero::NonZero(RotationIdeal::<F, 3>::new(F::from(2)));
         let p = poly(&[1, 0, 0, 1]); // X^3 + 1 (not in (X^3 - 2))
-        assert!(!ideal.contains(&p));
+        assert!(!ideal.contains(&p).unwrap());
     }
 
     #[test]
     fn zero_polynomial_always_in_ideal() {
         let ideal = IdealOrZero::NonZero(RotationIdeal::<F, 4>::new(F::from(5)));
-        assert!(ideal.contains(&DynamicPolynomialF::<F>::ZERO));
+        assert!(ideal.contains(&DynamicPolynomialF::<F>::ZERO).unwrap());
     }
 
     #[test]
     fn zero_ideal_only_contains_zero() {
         let zero_ideal = IdealOrZero::<RotationIdeal<F, 2>>::zero();
-        assert!(zero_ideal.contains(&DynamicPolynomialF::<F>::ZERO));
-        assert!(!zero_ideal.contains(&poly(&[1])));
+        assert!(zero_ideal.contains(&DynamicPolynomialF::<F>::ZERO).unwrap());
+        assert!(!zero_ideal.contains(&poly(&[1])).unwrap());
     }
 
     #[test]
@@ -215,7 +225,7 @@ mod tests {
             rem_trimmed.trim();
             let is_member_by_divrem = rem_trimmed.is_zero();
             assert_eq!(
-                ideal.contains(&p),
+                ideal.contains(&p).unwrap(),
                 is_member_by_divrem,
                 "Mismatch for polynomial: {p}"
             );
