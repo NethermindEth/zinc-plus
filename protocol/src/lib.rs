@@ -433,8 +433,7 @@ mod tests {
         TestUairMixedShifts, TestUairNoMultiplication, TestUairSimpleMultiplication,
     };
     use zinc_uair::{
-        degree_counter::count_max_degree, ideal::degree_one::DegreeOneIdeal,
-        ideal_collector::IdealOrZero,
+        degree_counter::count_max_degree, ideal::DegreeOneIdeal, ideal_collector::IdealOrZero,
     };
     use zinc_utils::{
         CHECKED,

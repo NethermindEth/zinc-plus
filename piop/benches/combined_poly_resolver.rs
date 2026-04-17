@@ -27,7 +27,7 @@ use zinc_transcript::{
 };
 use zinc_uair::{
     Uair, UairTrace, constraint_counter::count_constraints, degree_counter::count_max_degree,
-    ideal::degree_one::DegreeOneIdeal, ideal_collector::IdealOrZero,
+    ideal::DegreeOneIdeal, ideal_collector::IdealOrZero,
 };
 
 const DEGREE_PLUS_ONE: usize = 32;
@@ -342,7 +342,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                     ic_proof,
                     num_constraints,
                     num_vars,
-                    |_ideal_over_ring| IdealOrZero::zero(),
+                    |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<_>>::zero(),
                     &field_cfg,
                 )
                 .expect("IC Verifier failed");

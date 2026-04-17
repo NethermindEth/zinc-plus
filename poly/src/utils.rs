@@ -371,11 +371,9 @@ mod tests {
 
     use super::*;
 
-    const N: usize = 2;
-
     const_monty_params!(Params, U128, "00000000b933426489189cb5b47d567f");
 
-    type F = ConstMontyField<Params, N>;
+    type F = ConstMontyField<Params, { U128::LIMBS }>;
 
     const NUM_VARS: u32 = 8;
 

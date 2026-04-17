@@ -398,9 +398,8 @@ mod tests {
     use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
     use zinc_transcript::Blake3Transcript;
 
-    const N: usize = 2;
     const_monty_params!(Params, U128, "00000000b933426489189cb5b47d567f");
-    type F = ConstMontyField<Params, N>;
+    type F = ConstMontyField<Params, { U128::LIMBS }>;
 
     /// Data known to both prover and verifier from earlier protocol steps.
     #[derive(Clone)]

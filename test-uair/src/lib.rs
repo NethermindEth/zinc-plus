@@ -21,7 +21,7 @@ use zinc_poly::{
 use zinc_uair::{
     ConstraintBuilder, PublicColumnLayout, ShiftSpec, TotalColumnLayout, TraceRow, Uair,
     UairSignature, UairTrace,
-    ideal::{ImpossibleIdeal, degree_one::DegreeOneIdeal},
+    ideal::{DegreeOneIdeal, ImpossibleIdeal},
 };
 use zinc_utils::from_ref::FromRef;
 
