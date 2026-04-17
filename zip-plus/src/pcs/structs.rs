@@ -4,7 +4,7 @@ use crate::{
 };
 use crypto_primitives::{ConstIntRing, ConstIntSemiring, DenseRowMatrix, FixedSemiring};
 use num_traits::CheckedAdd;
-use std::{marker::PhantomData, ops::Neg};
+use std::{fmt::Debug, marker::PhantomData, ops::Neg};
 use zinc_poly::{ConstCoeffBitWidth, Polynomial};
 use zinc_primality::PrimalityTest;
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable};
@@ -12,21 +12,22 @@ use zinc_utils::{
     from_ref::FromRef, inner_product::InnerProduct, mul_by_scalar::MulByScalar, named::Named,
 };
 
-pub trait ZipTypes: Send + Sync {
+pub trait ZipTypes: Clone + Debug + Send + Sync {
     const NUM_COLUMN_OPENINGS: usize;
 
     /// Semiring of witness/polynomial evaluations on boolean hypercube
-    type Eval: Named + ConstCoeffBitWidth + Default + Clone + Send + Sync;
+    type Eval: ConstCoeffBitWidth + Default + Named + Clone + Debug + Send + Sync;
 
     /// Semiring of codeword elements, at least as wide as the evaluation ring
     type Cw: FixedSemiring
         + ConstCoeffBitWidth
         + ConstTranscribable
         + FromRef<Self::Eval>
+        + CheckedAdd
         + Named
         // TODO(Ilia): Find out if the Copy can be avoided.
         + Copy
-        + CheckedAdd;
+        + Debug;
 
     /// Semiring type used to draft field modulus elements, natural numbers
     type Fmod: ConstIntSemiring + ConstTranscribable + Named;
@@ -53,9 +54,9 @@ pub trait ZipTypes: Send + Sync {
         + FromRef<Self::Cw>
         + Named;
 
-    type EvalDotChal: InnerProduct<Self::Eval, Self::Chal, Self::CombR>;
-    type CombDotChal: InnerProduct<Self::Comb, Self::Chal, Self::CombR>;
-    type ArrCombRDotChal: InnerProduct<[Self::CombR], Self::Chal, Self::CombR>;
+    type EvalDotChal: InnerProduct<Self::Eval, Self::Chal, Self::CombR> + Debug;
+    type CombDotChal: InnerProduct<Self::Comb, Self::Chal, Self::CombR> + Debug;
+    type ArrCombRDotChal: InnerProduct<[Self::CombR], Self::Chal, Self::CombR> + Debug;
 }
 
 /// Zip is a Polynomial Commitment Scheme (PCS) that supports committing to
@@ -109,7 +110,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlusParams<Zt, Lc> {
 
 /// Full data of zip commitment to a multilinear polynomial, including encoded
 /// rows and Merkle tree, kept by the prover for the testing phase.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ZipPlusHint<R> {
     /// The encoded rows of the polynomial matrix representation, referred to as
     /// "u-hat" in the Zinc paper

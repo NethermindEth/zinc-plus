@@ -18,14 +18,13 @@
 //! - Step 7: Zip+ PCS open/verify at r_0
 
 pub mod prover;
-pub mod stepped;
 pub mod verifier;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 use crypto_primitives::{ConstIntRing, ConstIntSemiring, FromWithConfig, PrimeField, Semiring};
-use std::marker::PhantomData;
+use std::{fmt::Debug, marker::PhantomData};
 use thiserror::Error;
 use zinc_piop::{
     combined_poly_resolver::{CombinedPolyResolverError, Proof as CombinedPolyResolverProof},
@@ -190,7 +189,7 @@ where
 
 /// Trait bundling the various type parameters for the public inputs (NYI),
 /// witness and Zinc+ PIOP.
-pub trait ZincTypes<const DEGREE_PLUS_ONE: usize> {
+pub trait ZincTypes<const DEGREE_PLUS_ONE: usize>: Clone + Debug {
     /// Main integer type for the protocol, used as a coefficient type for the
     /// arbitrary polynomial trace columns and for the integer trace columns.
     type Int: Semiring
@@ -431,7 +430,7 @@ mod tests {
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-        TestAirNoMultiplication, TestUairMixedShifts, TestUairSimpleMultiplication,
+        TestUairMixedShifts, TestUairNoMultiplication, TestUairSimpleMultiplication,
     };
     use zinc_uair::{
         degree_counter::count_max_degree, ideal::DegreeOneIdeal, ideal_collector::IdealOrZero,
@@ -464,6 +463,7 @@ mod tests {
 
     type F = MontyField<FIELD_LIMBS>;
 
+    #[derive(Debug, Clone)]
     pub struct BinPolyZipTypes {}
     impl ZipTypes for BinPolyZipTypes {
         const NUM_COLUMN_OPENINGS: usize = 147;
@@ -486,6 +486,7 @@ mod tests {
         type ArrCombRDotChal = MBSInnerProduct;
     }
 
+    #[derive(Debug, Clone)]
     pub struct ArbitraryPolyZipTypesIprs {}
     impl ZipTypes for ArbitraryPolyZipTypesIprs {
         const NUM_COLUMN_OPENINGS: usize = 147;
@@ -511,6 +512,7 @@ mod tests {
 
     /// Arbitrary poly ZipTypes with wider codewords for RAA encoding.
     /// RAA accumulation grows the bit-width, so Cw needs more bits than Eval.
+    #[derive(Debug, Clone)]
     pub struct ArbitraryPolyZipTypesRaa {}
     impl ZipTypes for ArbitraryPolyZipTypesRaa {
         const NUM_COLUMN_OPENINGS: usize = 147;
@@ -536,6 +538,7 @@ mod tests {
 
     type ZtInt = i64;
 
+    #[derive(Debug, Clone)]
     pub struct IntZipTypes {}
     impl ZipTypes for IntZipTypes {
         const NUM_COLUMN_OPENINGS: usize = 147;
@@ -552,6 +555,7 @@ mod tests {
         type ArrCombRDotChal = MBSInnerProduct;
     }
 
+    #[derive(Clone, Debug)]
     struct TestZincTypesIprs;
 
     impl ZincTypes<DEGREE_PLUS_ONE> for TestZincTypesIprs {
@@ -578,6 +582,7 @@ mod tests {
         const CHECK_FOR_OVERFLOWS: bool = true;
     }
 
+    #[derive(Clone, Debug)]
     struct TestZincTypesRaa;
 
     impl ZincTypes<DEGREE_PLUS_ONE> for TestZincTypesRaa {
@@ -705,14 +710,14 @@ mod tests {
         }
     }
 
-    /// End-to-end test: TestAirNoMultiplication.
+    /// End-to-end test: TestUairNoMultiplication.
     ///
     /// UAIR constraint: a + b - c \in (X - 2)
     /// (one constraint, no polynomial multiplication, ideal = <X - 2>).
     #[test]
     fn test_e2e_no_multiplication() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, TestAirNoMultiplication<ZtInt>>(
+        do_test::<TestZincTypesIprs, TestUairNoMultiplication<ZtInt>>(
             num_vars,
             (
                 make_iprs(num_vars),

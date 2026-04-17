@@ -314,7 +314,7 @@ mod tests {
     use rand::rng;
     use zinc_poly::univariate::{dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF};
     use zinc_test_uair::{
-        GenerateRandomTrace, TestAirNoMultiplication, TestUairSimpleMultiplication,
+        GenerateRandomTrace, TestUairNoMultiplication, TestUairSimpleMultiplication,
     };
     use zinc_transcript::Blake3Transcript;
     use zinc_uair::{
@@ -423,11 +423,11 @@ mod tests {
         let num_vars = 2;
 
         // Linear UAIR - test both approaches
-        test_successful_verification_linear::<TestAirNoMultiplication<Int<5>>, _, _, 32>(
+        test_successful_verification_linear::<TestUairNoMultiplication<Int<5>>, _, _, 32>(
             num_vars,
             |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
         );
-        test_successful_verification_combined::<TestAirNoMultiplication<Int<5>>, _, _, 32>(
+        test_successful_verification_combined::<TestUairNoMultiplication<Int<5>>, _, _, 32>(
             num_vars,
             |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
         );

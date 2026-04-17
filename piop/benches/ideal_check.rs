@@ -18,7 +18,7 @@ use zinc_piop::{
 use zinc_poly::univariate::dense::DensePolynomial;
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_test_uair::{
-    BigLinearUair, BinaryDecompositionUair, GenerateRandomTrace, TestAirNoMultiplication,
+    BigLinearUair, BinaryDecompositionUair, GenerateRandomTrace, TestUairNoMultiplication,
     TestUairSimpleMultiplication,
 };
 use zinc_transcript::{
@@ -41,18 +41,18 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     witness_size: usize,
 ) where
     <F<FIELD_LIMBS> as Field>::Inner: ConstIntSemiring + ConstTranscribable,
-    TestAirNoMultiplication<Int<INT_LIMBS>>: Uair<Scalar = Witness<INT_LIMBS>, Ideal = DegreeOneIdeal<Int<INT_LIMBS>>>
+    TestUairNoMultiplication<Int<INT_LIMBS>>: Uair<Scalar = Witness<INT_LIMBS>, Ideal = DegreeOneIdeal<Int<INT_LIMBS>>>
         + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<INT_LIMBS>, Int = Int<INT_LIMBS>>
         + IdealCheckProtocol,
     MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Inner>,
 {
     let mut rng = rng();
     let num_vars = zinc_utils::log2(witness_size) as usize;
-    let trace = TestAirNoMultiplication::generate_random_trace(num_vars, &mut rng);
+    let trace = TestUairNoMultiplication::generate_random_trace(num_vars, &mut rng);
 
     let params = format!("NoMult/LIMBS={}/nvars={}", FIELD_LIMBS, num_vars);
 
-    let num_constraints = count_constraints::<TestAirNoMultiplication<Int<INT_LIMBS>>>();
+    let num_constraints = count_constraints::<TestUairNoMultiplication<Int<INT_LIMBS>>>();
 
     let prove = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
                  trace: &UairTrace<_, _, DEGREE_PLUS_ONE>,
@@ -61,7 +61,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         let trace = project_trace_coeffs_row_major(trace, field_cfg);
 
         let projected_scalars =
-            project_scalars::<F<FIELD_LIMBS>, TestAirNoMultiplication<Int<INT_LIMBS>>>(|scalar| {
+            project_scalars::<F<FIELD_LIMBS>, TestUairNoMultiplication<Int<INT_LIMBS>>>(|scalar| {
                 scalar
                     .iter()
                     .map(|coeff| F::from_with_cfg(coeff, field_cfg))
@@ -70,7 +70,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
         // Even though this UAIR is linear, using prove_combined yields much better
         // prover performance for it.
-        TestAirNoMultiplication::prove_combined(
+        TestUairNoMultiplication::prove_combined(
             transcript,
             &trace,
             &projected_scalars,
@@ -102,7 +102,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         bench.iter_batched(
             || (proof.clone(), transcript.clone()),
             |(proof, mut transcript)| {
-                let _ = black_box(TestAirNoMultiplication::verify_as_subprotocol(
+                let _ = black_box(TestUairNoMultiplication::verify_as_subprotocol(
                     &mut transcript,
                     proof,
                     num_constraints,
