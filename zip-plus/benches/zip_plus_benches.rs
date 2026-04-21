@@ -34,6 +34,8 @@ const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
 
 const INT_LIMBS: usize = U64::LIMBS;
 
+const REP_FACTOR: usize = 8;
+
 #[derive(Debug, Clone)]
 struct BenchZipPlusTypes<CwCoeff, const D_PLUS_ONE: usize>(PhantomData<CwCoeff>);
 
@@ -49,7 +51,7 @@ where
         + Sync,
     Int<5>: FromRef<CwCoeff>,
 {
-    const NUM_COLUMN_OPENINGS: usize = 147;
+    const NUM_COLUMN_OPENINGS: usize = 96;
     type Eval = BinaryPoly<D_PLUS_ONE>;
     type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
@@ -72,10 +74,10 @@ impl RaaConfig for BenchRaaConfig {
 }
 
 type BenchRaaCode<const D_PLUS_ONE: usize> =
-    RaaCode<BenchZipPlusTypes<i32, D_PLUS_ONE>, BenchRaaConfig, 4>;
+    RaaCode<BenchZipPlusTypes<i32, D_PLUS_ONE>, BenchRaaConfig, REP_FACTOR>;
 
 type BenchIprsCode<Twiddle, const D_PLUS_ONE: usize> =
-    IprsCode<BenchZipPlusTypes<Twiddle, D_PLUS_ONE>, PnttConfigF65537, 4, PERFORM_CHECKS>;
+    IprsCode<BenchZipPlusTypes<Twiddle, D_PLUS_ONE>, PnttConfigF65537, REP_FACTOR, PERFORM_CHECKS>;
 
 fn zip_plus_benchmarks_raa(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA");

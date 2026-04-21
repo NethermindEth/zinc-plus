@@ -432,9 +432,7 @@ mod tests {
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
         TestUairMixedShifts, TestUairNoMultiplication, TestUairSimpleMultiplication,
     };
-    use zinc_uair::{
-        ideal::DegreeOneIdeal, ideal_collector::IdealOrZero,
-    };
+    use zinc_uair::{ideal::DegreeOneIdeal, ideal_collector::IdealOrZero};
     use zinc_utils::{
         CHECKED,
         from_ref::FromRef,
@@ -459,14 +457,14 @@ mod tests {
     const K: usize = INT_LIMBS * 4;
     const M: usize = INT_LIMBS * 8;
 
-    const REP: usize = 4;
+    const REP: usize = 8;
 
     type F = MontyField<FIELD_LIMBS>;
 
     #[derive(Debug, Clone)]
     pub struct BinPolyZipTypes {}
     impl ZipTypes for BinPolyZipTypes {
-        const NUM_COLUMN_OPENINGS: usize = 147;
+        const NUM_COLUMN_OPENINGS: usize = 96;
         type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
         type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Fmod = Uint<FIELD_LIMBS>;
@@ -489,7 +487,7 @@ mod tests {
     #[derive(Debug, Clone)]
     pub struct ArbitraryPolyZipTypesIprs {}
     impl ZipTypes for ArbitraryPolyZipTypesIprs {
-        const NUM_COLUMN_OPENINGS: usize = 147;
+        const NUM_COLUMN_OPENINGS: usize = 96;
         type Eval = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Fmod = Uint<FIELD_LIMBS>;
@@ -515,7 +513,7 @@ mod tests {
     #[derive(Debug, Clone)]
     pub struct ArbitraryPolyZipTypesRaa {}
     impl ZipTypes for ArbitraryPolyZipTypesRaa {
-        const NUM_COLUMN_OPENINGS: usize = 147;
+        const NUM_COLUMN_OPENINGS: usize = 96;
         type Eval = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Cw = DensePolynomial<Int<K>, DEGREE_PLUS_ONE>;
         type Fmod = Uint<FIELD_LIMBS>;
@@ -541,7 +539,7 @@ mod tests {
     #[derive(Debug, Clone)]
     pub struct IntZipTypes {}
     impl ZipTypes for IntZipTypes {
-        const NUM_COLUMN_OPENINGS: usize = 147;
+        const NUM_COLUMN_OPENINGS: usize = 96;
         type Eval = ZtInt;
         type Cw = i128;
         type Fmod = Uint<FIELD_LIMBS>;

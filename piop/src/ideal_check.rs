@@ -42,7 +42,7 @@ pub trait IdealCheckProtocol: Uair {
     /// - `field_cfg`: random field configuration sampled on the previous steps
     ///   of the overall protocol.
     #[allow(clippy::type_complexity)]
-    fn prove_linear<F>(
+    fn prove_mle_first<F>(
         transcript: &mut impl Transcript,
         trace_matrix: &ColumnMajorTrace<F>,
         projected_scalars: &HashMap<Self::Scalar, DynamicPolynomialF<F>>,
@@ -130,7 +130,7 @@ where
     U: Uair,
 {
     #[allow(clippy::type_complexity)]
-    fn prove_linear<F>(
+    fn prove_mle_first<F>(
         transcript: &mut impl Transcript,
         trace_matrix: &ColumnMajorTrace<F>,
         projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,

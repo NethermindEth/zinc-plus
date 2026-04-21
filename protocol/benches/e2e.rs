@@ -28,7 +28,6 @@ use zinc_test_uair::{
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
     Uair, UairTrace,
-    degree_counter::count_max_degree,
     ideal::{DegreeOneIdeal, Ideal, IdealCheck},
     ideal_collector::IdealOrZero,
 };
@@ -56,7 +55,7 @@ const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
 };
 
 /// Repetition factor for linear code, an inverse rate.
-const REP: usize = 4;
+const REP_FACTOR: usize = 8;
 
 #[allow(clippy::type_complexity)]
 #[derive(Debug, Clone, Copy)]
@@ -122,7 +121,7 @@ where
     CombDotChal: InnerProduct<Comb, Chal, CombR> + Clone + Debug + Send + Sync,
     ArrCombRDotChal: InnerProduct<[CombR], Chal, CombR> + Clone + Debug + Send + Sync,
 {
-    const NUM_COLUMN_OPENINGS: usize = 147;
+    const NUM_COLUMN_OPENINGS: usize = 96;
     type Eval = Eval;
     type Cw = Cw;
     type Fmod = Fmod;
@@ -226,9 +225,9 @@ where
         MBSInnerProduct,
     >;
 
-    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
-    type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
-    type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
+    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP_FACTOR, PERFORM_CHECKS>;
+    type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP_FACTOR, PERFORM_CHECKS>;
+    type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP_FACTOR, PERFORM_CHECKS>;
 }
 
 //

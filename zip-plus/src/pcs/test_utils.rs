@@ -41,14 +41,14 @@ pub const IPRS_DEPTH: usize = 1;
 pub const IPRS_ROW_LEN: usize = 32 * (1 << (3 * IPRS_DEPTH)); // I.e. BASE_DIM = 32
 
 /// Linear code repetition factor (inverse rate).
-pub const REP_FACTOR: usize = 4;
+pub const REP_FACTOR: usize = 8;
 
 pub type TestIprsConfig = PnttConfigF65537;
 
 #[derive(Debug, Clone)]
 pub struct TestZipTypes<const N: usize, const K: usize, const M: usize> {}
 impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N, K, M> {
-    const NUM_COLUMN_OPENINGS: usize = 147;
+    const NUM_COLUMN_OPENINGS: usize = 96;
     type Eval = Int<N>;
     type Cw = Int<K>;
     type Fmod = Uint<K>;
@@ -67,7 +67,7 @@ pub struct TestBinPolyZipTypes<const K: usize, const M: usize, const DEGREE_PLUS
 impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
     for TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>
 {
-    const NUM_COLUMN_OPENINGS: usize = 147;
+    const NUM_COLUMN_OPENINGS: usize = 96;
     type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
     type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
     type Fmod = Uint<K>;

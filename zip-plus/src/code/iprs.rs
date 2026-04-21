@@ -258,7 +258,7 @@ mod tests {
         #[derive(Clone, Debug)]
         struct BenchZipTypes {}
         impl ZipTypes for BenchZipTypes {
-            const NUM_COLUMN_OPENINGS: usize = 147;
+            const NUM_COLUMN_OPENINGS: usize = 96;
             type Eval = i32;
             type Cw = i128;
             type Fmod = Uint<{ INT_LIMBS * 4 }>;
@@ -294,7 +294,7 @@ mod tests {
                 + Sync,
             Int<5>: FromRef<CwCoeff>,
         {
-            const NUM_COLUMN_OPENINGS: usize = 147;
+            const NUM_COLUMN_OPENINGS: usize = 96;
             type Eval = BinaryPoly<D_PLUS_ONE>;
             type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
             type Fmod = Uint<{ INT_LIMBS * 4 }>;
