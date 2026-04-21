@@ -457,7 +457,7 @@ mod tests {
     const K: usize = INT_LIMBS * 4;
     const M: usize = INT_LIMBS * 8;
 
-    const REP: usize = 8;
+    const REP_FACTOR: usize = 8;
 
     type F = MontyField<FIELD_LIMBS>;
 
@@ -568,9 +568,9 @@ mod tests {
         type ArbitraryZt = ArbitraryPolyZipTypesIprs;
         type IntZt = IntZipTypes;
 
-        type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, CHECKED>;
-        type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP, CHECKED>;
-        type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, CHECKED>;
+        type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP_FACTOR, CHECKED>;
+        type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP_FACTOR, CHECKED>;
+        type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP_FACTOR, CHECKED>;
     }
 
     #[derive(Copy, Clone)]
@@ -595,13 +595,15 @@ mod tests {
         type ArbitraryZt = ArbitraryPolyZipTypesRaa;
         type IntZt = IntZipTypes;
 
-        type BinaryLc = RaaCode<Self::BinaryZt, TestRaaConfig, REP>;
-        type ArbitraryLc = RaaCode<Self::ArbitraryZt, TestRaaConfig, REP>;
-        type IntLc = RaaCode<Self::IntZt, TestRaaConfig, REP>;
+        type BinaryLc = RaaCode<Self::BinaryZt, TestRaaConfig, REP_FACTOR>;
+        type ArbitraryLc = RaaCode<Self::ArbitraryZt, TestRaaConfig, REP_FACTOR>;
+        type IntLc = RaaCode<Self::IntZt, TestRaaConfig, REP_FACTOR>;
     }
 
     /// Use row size equal to poly size, resulting in flat single-row matrices
-    fn make_iprs<Zt: ZipTypes>(num_vars: usize) -> IprsCode<Zt, PnttConfigF65537, REP, CHECKED> {
+    fn make_iprs<Zt: ZipTypes>(
+        num_vars: usize,
+    ) -> IprsCode<Zt, PnttConfigF65537, REP_FACTOR, CHECKED> {
         let poly_size = 1 << num_vars;
         IprsCode::new_with_optimal_depth(poly_size).unwrap()
     }
