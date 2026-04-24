@@ -585,20 +585,26 @@ impl_with_type_bounds!(ProverSumchecked
         // Step 5b: if the UAIR declared lookups, run MultiPointReducer to
         // fold (r_0, witness_evals_at_r_0) with each (ρ_row_g,
         // witness_evals_at_ρ_row_g) into a fresh r_final.
+        //
+        // The reducer operates on the *witness-only* column subset so
+        // that its `r_final` eval claims are directly verifiable by the
+        // PCS opening (which only commits witness columns). The verifier
+        // re-derives public evaluations from the public trace and
+        // splices them in when closing the mp_subclaim.
         let (opening_point, lookup_reducer) = if self.lookup_subclaims.is_empty() {
             (r_0, None)
         } else {
             use zinc_piop::multipoint_reducer::{MultiClaim, MultiPointReducer};
             use zinc_poly::mle::MultilinearExtensionWithConfig;
 
-            assert_eq!(
-                self.base.uair_signature.public_cols().cols(),
-                0,
-                "Phase 2f lookup wiring currently requires UAIRs with no public columns"
-            );
+            let witness_full_indices =
+                crate::witness_full_col_indices(&self.base.uair_signature);
+            let witness_mles: Vec<DenseMultilinearExtension<F::Inner>> = witness_full_indices
+                .iter()
+                .map(|&idx| self.projected_trace_f[idx].clone())
+                .collect();
 
-            let witness_evals_at_r_0: Vec<F> = self
-                .projected_trace_f
+            let witness_evals_at_r_0: Vec<F> = witness_mles
                 .iter()
                 .map(|mle| {
                     mle.clone()
@@ -615,8 +621,7 @@ impl_with_type_bounds!(ProverSumchecked
 
             let mut witness_evals_at_rho_row = Vec::with_capacity(self.lookup_subclaims.len());
             for sub in &self.lookup_subclaims {
-                let evals: Vec<F> = self
-                    .projected_trace_f
+                let evals: Vec<F> = witness_mles
                     .iter()
                     .map(|mle| {
                         mle.clone()
@@ -633,7 +638,7 @@ impl_with_type_bounds!(ProverSumchecked
 
             let (reducer_proof, reducer_sub) = MultiPointReducer::<F>::prove(
                 &mut self.base.pcs_transcript.fs_transcript,
-                &self.projected_trace_f,
+                &witness_mles,
                 &claims,
                 &self.field_cfg,
             )

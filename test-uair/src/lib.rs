@@ -1118,6 +1118,122 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// IntLookupWithPublicUair: `IntLookupUair` shape, but prepended with one
+// public int column. Exercises the Phase 2g path that reconstructs public
+// per-column evaluations at the multipoint-eval / reducer opening points
+// and splices them with witness evals from the reducer proof.
+//
+// Layout: 3 int columns (1 public + 2 witness); the witness columns mirror
+// `IntLookupUair`.
+//   col[0] (public):  `p` — public data, no constraints refer to it.
+//   col[1] (witness): `v` — looks up into `Word { width: 8 }`.
+//   col[2] (witness): `m` — multiplicity column (last-col convention).
+//
+// `num_vars >= INT_LOOKUP_TABLE_WIDTH` is required (same as `IntLookupUair`).
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct IntLookupWithPublicUair<R>(PhantomData<R>);
+
+impl<R> Uair for IntLookupWithPublicUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        // Layout: 1 public int col + 2 witness int cols (v, m).
+        let total = TotalColumnLayout::new(0, 0, 3);
+        let public = PublicColumnLayout::new(0, 0, 1);
+        // `v` sits at full-trace index 1 (public col is index 0).
+        let lookup_specs = vec![LookupColumnSpec {
+            column_index: 1,
+            table_type: LookupTableType::Word {
+                width: INT_LOOKUP_TABLE_WIDTH,
+                chunk_width: None,
+            },
+        }];
+        UairSignature::new(total, public, vec![], lookup_specs)
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        // Trivially-satisfied constraint on `v` (witness col, up.int[1]).
+        let v = &up.int[1];
+        b.assert_in_ideal(
+            v.clone() - v,
+            &ideal_from_ref(&DegreeOneIdeal::new(R::from(2))),
+        );
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for IntLookupWithPublicUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        assert!(
+            num_vars >= INT_LOOKUP_TABLE_WIDTH,
+            "IntLookupWithPublicUair requires num_vars >= {INT_LOOKUP_TABLE_WIDTH}"
+        );
+        let row_count = 1usize << num_vars;
+        let table_size = 1usize << INT_LOOKUP_TABLE_WIDTH;
+
+        // Public column: arbitrary u32-valued data, no constraint coupling.
+        let public_raw: Vec<u32> = (0..row_count).map(|_| rng.random::<u32>()).collect();
+
+        // Lookup witness.
+        let witness_raw: Vec<u32> = (0..row_count)
+            .map(|_| (rng.random::<u32>()) % (table_size as u32))
+            .collect();
+
+        let mut mults_raw = vec![0u32; row_count];
+        for &v in &witness_raw {
+            mults_raw[v as usize] += 1;
+        }
+
+        let zero = R::from(0u32);
+        let p_col = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            public_raw.into_iter().map(R::from).collect(),
+            zero.clone(),
+        );
+        let v_col = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            witness_raw.into_iter().map(R::from).collect(),
+            zero.clone(),
+        );
+        let m_col = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            mults_raw.into_iter().map(R::from).collect(),
+            zero,
+        );
+
+        UairTrace {
+            binary_poly: vec![].into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![p_col, v_col, m_col].into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crypto_primitives::crypto_bigint_int::Int;

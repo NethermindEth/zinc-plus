@@ -524,7 +524,14 @@ where
 impl<'a, Zt, F, IdealOverF, const D: usize> VerifierSumchecked<'a, Zt, F, IdealOverF, D>
 where
     Zt: ZincTypes<D>,
-    F: InnerTransparentField + FromPrimitiveWithConfig + FromRef<F> + Send + Sync + 'static,
+    Zt::Int: ProjectableToField<F>,
+    F: InnerTransparentField
+        + FromPrimitiveWithConfig
+        + for<'b> FromWithConfig<&'b Zt::Int>
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
     F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
     F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
     IdealOverF: Ideal,
@@ -620,38 +627,56 @@ where
         {
             use zinc_piop::multipoint_reducer::{MultiClaim, MultiPointReducer};
 
-            // Phase 2f restriction: only UAIRs with no public columns are
-            // supported. A general public/witness split needs extra work.
-            if self.base.uair_signature.public_cols().cols() != 0 {
+            let sig = &self.base.uair_signature;
+            let num_full_cols = sig.total_cols().cols();
+            let num_wit_cols = sig.witness_cols().cols();
+            let num_vars = self.base.num_vars;
+            let r_0 = mp_subclaim.sumcheck_subclaim.point.clone();
+
+            if reducer.witness_evals_at_r_0.len() != num_wit_cols {
                 return Err(ProtocolError::Lookup(
                     zinc_piop::lookup::LookupError::NotImplemented,
                 ));
             }
 
-            let num_cols = self.base.uair_signature.total_cols().cols();
-            let num_vars = self.base.num_vars;
-            let r_0 = mp_subclaim.sumcheck_subclaim.point.clone();
-
-            // 1. Use prover-supplied witness_evals_at_r_0 to close the mp_subclaim.
+            // 1. Close the mp_subclaim, which consumes the *full*
+            //    per-column eval list (public + witness) at r_0.
+            //    Public evals come from the public trace; witness evals
+            //    come from the prover-supplied reducer payload and are
+            //    soundness-bound to committed data via the reducer
+            //    sumcheck + the PCS opening at r_final (step6/step7).
+            let public_evals_at_r_0 =
+                public_open_evals_at::<F, Zt, D>(
+                    &r_0,
+                    self.base.public_trace,
+                    sig,
+                    &self.projecting_element_f,
+                    &self.field_cfg,
+                );
+            let full_evals_at_r_0 =
+                splice_public_witness::<F>(
+                    &public_evals_at_r_0,
+                    &reducer.witness_evals_at_r_0,
+                    sig,
+                );
             MultipointEval::verify_subclaim(
                 &mp_subclaim,
-                &reducer.witness_evals_at_r_0,
-                self.base.uair_signature.shifts(),
+                &full_evals_at_r_0,
+                sig.shifts(),
                 &self.field_cfg,
             )?;
 
-            // 2. Cross-check reducer's witness_evals_at_rho_row against LookupArgument's
-            //    component_evals. These must match — otherwise the prover could lie about
-            //    the lookup's component_evals.
-            //
-            //    For each group g:
-            //      * witness_evals[l] (one per witness column in the group) must equal
-            //        reducer.witness_evals_at_rho_row[g][group.column_indices[l]].
-            //      * multiplicity_eval must equal
-            //        reducer.witness_evals_at_rho_row[g][mult_col_g].
-            let lookup_specs = self.base.uair_signature.lookup_specs().to_vec();
-            let groups =
-                zinc_piop::lookup::group_lookup_specs(&lookup_specs);
+            // 2. Cross-check reducer's witness_evals_at_rho_row against
+            //    LookupArgument's component_evals. Column indices in
+            //    `lookup_specs` / `column_indices` / the multiplicity
+            //    column convention are in full-trace space — translate
+            //    them to witness-only space (where the reducer operates).
+            //    Public lookup targets are disallowed: the identity
+            //    "column value lies in the table" is meaningful only for
+            //    witness columns, and the multiplicity column is
+            //    auto-generated witness by convention.
+            let lookup_specs = sig.lookup_specs().to_vec();
+            let groups = zinc_piop::lookup::group_lookup_specs(&lookup_specs);
             let num_groups = groups.len();
             if reducer.witness_evals_at_rho_row.len() != num_groups
                 || self.lookup_subclaims.len() != num_groups
@@ -670,7 +695,7 @@ where
                 )
                 .enumerate()
             {
-                if group_evals.len() != num_cols {
+                if group_evals.len() != num_wit_cols {
                     return Err(ProtocolError::Lookup(
                         zinc_piop::lookup::LookupError::NotImplemented,
                     ));
@@ -680,15 +705,22 @@ where
                         zinc_piop::lookup::LookupError::NotImplemented,
                     ));
                 }
-                for (l, &col_idx) in group.column_indices.iter().enumerate() {
-                    if group_evals[col_idx] != sub.component_evals.witness_evals[l] {
+                for (l, &full_col_idx) in group.column_indices.iter().enumerate() {
+                    let wit_idx = crate::full_to_witness_col(full_col_idx, sig)
+                        .ok_or(ProtocolError::Lookup(
+                            zinc_piop::lookup::LookupError::NotImplemented,
+                        ))?;
+                    if group_evals[wit_idx] != sub.component_evals.witness_evals[l] {
                         return Err(ProtocolError::Lookup(
                             zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
                         ));
                     }
                 }
-                let mult_col = num_cols - num_groups + g;
-                if group_evals[mult_col] != sub.component_evals.multiplicity_eval {
+                let mult_full_idx = num_full_cols - num_groups + g;
+                let mult_wit_idx = crate::full_to_witness_col(mult_full_idx, sig).ok_or(
+                    ProtocolError::Lookup(zinc_piop::lookup::LookupError::NotImplemented),
+                )?;
+                if group_evals[mult_wit_idx] != sub.component_evals.multiplicity_eval {
                     return Err(ProtocolError::Lookup(
                         zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
                     ));
@@ -712,7 +744,7 @@ where
                 &mut self.base.pcs_transcript.fs_transcript,
                 &reducer.reducer_proof,
                 &claims,
-                num_cols,
+                num_wit_cols,
                 num_vars,
                 &self.field_cfg,
             )
@@ -832,14 +864,18 @@ where
             }
             Some(tail_evals) => {
                 // Lookup path: mp_subclaim was already closed in step5
-                // (with witness_evals_at_r_0). Here we bind
-                // open_evals@r_final (derived from the proof's
-                // witness_lifted_evals at r_final) to the reducer's
-                // tail_evals (trusted via the reducer sumcheck).
-                //
-                // Phase 2f restriction: no public cols, so open_evals
-                // and tail_evals are equal length.
-                if open_evals != *tail_evals {
+                // (with the spliced public + witness evals at r_0).
+                // Here we bind the *witness* portion of open_evals at
+                // r_final to the reducer's tail_evals (trusted via the
+                // reducer sumcheck). Public columns aren't part of the
+                // reducer's claim set because they're not PCS-committed.
+                let witness_open_evals: Vec<F> = self
+                    .proof_witness_lifted_evals
+                    .iter()
+                    .map(|bar_u| bar_u.evaluate_at_point(&self.projecting_element_f))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(ProtocolError::LiftedEvalProjection)?;
+                if witness_open_evals != *tail_evals {
                     return Err(ProtocolError::Lookup(
                         zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
                     ));
@@ -977,6 +1013,85 @@ impl<IdealOverF: Ideal> VerifierPcsVerified<IdealOverF> {
     pub fn finish<F: PrimeField>(self) -> Result<(), ProtocolError<F, IdealOverF>> {
         Ok(())
     }
+}
+
+// ── Public/witness splicing helpers (Phase 2g) ─────────────────────────
+
+/// Compute the scalar evaluations at `point` of every *public* column
+/// of the trace. Returned in public-column order:
+/// `[pub_bin_0, …, pub_bin_Pb-1, pub_arb_0, …, pub_int_Pi-1]`.
+///
+/// This is the public half of the full per-column eval list the
+/// multipoint-eval sumcheck's `verify_subclaim` consumes: the verifier
+/// can compute it directly from public data without any prover input.
+#[allow(clippy::arithmetic_side_effects)]
+fn public_open_evals_at<'a, F, Zt, const D: usize>(
+    point: &[F],
+    public_trace: &UairTrace<'a, Zt::Int, Zt::Int, D>,
+    sig: &UairSignature,
+    projecting_element_f: &F,
+    field_cfg: &F::Config,
+) -> Vec<F>
+where
+    F: PrimeField + for<'b> FromWithConfig<&'b Zt::Int>,
+    Zt: ZincTypes<D>,
+    Zt::Int: ProjectableToField<F>,
+{
+    let pub_cols = sig.public_cols();
+    if add!(
+        add!(pub_cols.num_binary_poly_cols(), pub_cols.num_arbitrary_poly_cols()),
+        pub_cols.num_int_cols()
+    ) == 0
+    {
+        return Vec::new();
+    }
+    let projected_public =
+        project_trace_coeffs_row_major::<F, Zt::Int, Zt::Int, D>(public_trace, field_cfg);
+    let public_lifted = compute_lifted_evals::<F, D>(
+        point,
+        &public_trace.binary_poly,
+        &ProjectedTrace::RowMajor(projected_public),
+        field_cfg,
+    );
+    public_lifted
+        .iter()
+        .map(|bar_u| {
+            bar_u
+                .evaluate_at_point(projecting_element_f)
+                .expect("psi_a projection of lifted eval")
+        })
+        .collect()
+}
+
+/// Interleave public and witness per-column evaluations into the
+/// full-trace ordering
+/// `[pub_bin..wit_bin..pub_arb..wit_arb..pub_int..wit_int]`.
+///
+/// Used to splice the prover-supplied witness evals (from the lookup
+/// reducer) with verifier-derived public evals for the multipoint-eval
+/// `verify_subclaim` check.
+#[allow(clippy::arithmetic_side_effects)]
+fn splice_public_witness<F: Clone>(
+    public_evals: &[F],
+    witness_evals: &[F],
+    sig: &UairSignature,
+) -> Vec<F> {
+    let pub_cols = sig.public_cols();
+    let wit_cols = sig.witness_cols();
+    let num_pub_bin = pub_cols.num_binary_poly_cols();
+    let num_pub_arb = pub_cols.num_arbitrary_poly_cols();
+    let num_wit_bin = wit_cols.num_binary_poly_cols();
+    let num_wit_arb = wit_cols.num_arbitrary_poly_cols();
+
+    public_evals[..num_pub_bin]
+        .iter()
+        .chain(&witness_evals[..num_wit_bin])
+        .chain(&public_evals[num_pub_bin..num_pub_bin + num_pub_arb])
+        .chain(&witness_evals[num_wit_bin..num_wit_bin + num_wit_arb])
+        .chain(&public_evals[num_pub_bin + num_pub_arb..])
+        .chain(&witness_evals[num_wit_bin + num_wit_arb..])
+        .cloned()
+        .collect()
 }
 
 // ── verify() wrapper ───────────────────────────────────────────────────

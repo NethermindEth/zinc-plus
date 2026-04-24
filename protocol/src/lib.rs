@@ -92,19 +92,22 @@ pub struct Proof<F: PrimeField> {
 /// Auxiliary data for the lookup reducer step.
 ///
 /// The reducer binds prover-claimed scalar evaluations at r_0 and at
-/// each lookup group's ρ_row to the true column MLEs, producing a
-/// fresh r_final at which the PCS is opened.
+/// each lookup group's ρ_row to the true witness column MLEs, producing
+/// a fresh r_final at which the PCS is opened.
 ///
-/// Currently supports only UAIRs with zero public columns (asserted at
-/// prove/verify entry points).
+/// The per-column eval lists carry only the *witness* columns. Public
+/// column evaluations at r_0 are re-derived by the verifier from the
+/// public trace and spliced in when closing the multipoint-eval
+/// sub-claim.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LookupReducerProof<F> {
-    /// Witness column evals at r_0 (one per witness column). Used by
-    /// the verifier as inputs to both the mp_subclaim check and the
-    /// reducer's claimed-sum check.
+    /// Witness column evals at r_0, in witness-only order. The verifier
+    /// splices these with locally-computed public evals to close the
+    /// multipoint-eval sumcheck, and also uses them as the reducer's
+    /// claimed-sum inputs.
     pub witness_evals_at_r_0: Vec<F>,
     /// Per lookup group: witness column evals at ρ_row_g (one vec per
-    /// group, one F per witness column).
+    /// group, one F per witness column in witness-only order).
     pub witness_evals_at_rho_row: Vec<Vec<F>>,
     /// MultiPointReducer proof.
     pub reducer_proof: MultiPointReduceProof<F>,
@@ -528,6 +531,43 @@ fn compute_lifted_evals<F: PrimeField, const D: usize>(
     result
 }
 
+/// Full-trace column indices of the witness columns, in trace order.
+///
+/// The full trace is laid out as `[pub_bin..wit_bin..pub_arb..wit_arb..pub_int..wit_int]`;
+/// this returns the concrete indices of the witness columns in that layout.
+/// The *position* of a given full-trace index in the returned vector is the
+/// witness-only column index (suitable for the multipoint reducer).
+#[allow(clippy::arithmetic_side_effects)]
+pub(crate) fn witness_full_col_indices(sig: &zinc_uair::UairSignature) -> Vec<usize> {
+    let pub_cols = sig.public_cols();
+    let total = sig.total_cols();
+    let num_pub_bin = pub_cols.num_binary_poly_cols();
+    let num_pub_arb = pub_cols.num_arbitrary_poly_cols();
+    let num_pub_int = pub_cols.num_int_cols();
+    let num_total_bin = total.num_binary_poly_cols();
+    let num_total_arb = total.num_arbitrary_poly_cols();
+
+    let arb_offset = num_total_bin;
+    let int_offset = num_total_bin + num_total_arb;
+
+    let mut out = Vec::new();
+    out.extend(num_pub_bin..num_total_bin);
+    out.extend((arb_offset + num_pub_arb)..(arb_offset + num_total_arb));
+    out.extend((int_offset + num_pub_int)..(int_offset + total.num_int_cols()));
+    out
+}
+
+/// Convert a full-trace column index to a witness-only column index.
+/// Returns `None` if the full-trace index refers to a public column.
+pub(crate) fn full_to_witness_col(
+    full_idx: usize,
+    sig: &zinc_uair::UairSignature,
+) -> Option<usize> {
+    witness_full_col_indices(sig)
+        .iter()
+        .position(|&x| x == full_idx)
+}
+
 /// Project a DensePolynomial scalar to DynamicPolynomialF by projecting each
 /// coefficient via \phi_q.
 pub fn project_scalar_fn<R, F, const D: usize>(
@@ -562,8 +602,8 @@ mod tests {
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-        INT_LOOKUP_TABLE_WIDTH, IntLookupMultiUair, IntLookupUair, Sha256CompressionSliceUair,
-        Sha256Ideal, TestUairMixedShifts, TestUairNoMultiplication,
+        INT_LOOKUP_TABLE_WIDTH, IntLookupMultiUair, IntLookupUair, IntLookupWithPublicUair,
+        Sha256CompressionSliceUair, Sha256Ideal, TestUairMixedShifts, TestUairNoMultiplication,
         TestUairSimpleMultiplication,
     };
     use zinc_uair::{
@@ -1610,6 +1650,82 @@ mod tests {
         assert!(
             matches!(result.unwrap_err(), ProtocolError::Lookup(_)),
             "verifier must reject swapped witness_evals via per-column cross-check"
+        );
+    }
+
+    // Phase 2g: a UAIR with a public column AND a lookup exercises the
+    // public/witness splice path in step5 (mp_subclaim closure) and the
+    // witness-only `open_evals == tail_evals` comparison in step6.
+    #[test]
+    fn test_int_lookup_with_public_uair_protocol_runs() {
+        let num_vars = INT_LOOKUP_TABLE_WIDTH;
+        let mut rng = rng();
+
+        let trace = IntLookupWithPublicUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        let sig = IntLookupWithPublicUair::<ZtInt>::signature();
+        let public_trace = trace.public(&sig);
+
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+        let proof = ZincPlusPiop::<
+            TestZincTypesIprs,
+            IntLookupWithPublicUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+        >::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("protocol prove must succeed on IntLookupWithPublicUair");
+        ZincPlusPiop::<TestZincTypesIprs, IntLookupWithPublicUair<ZtInt>, F, DEGREE_PLUS_ONE>::verify::<
+            _, CHECKED,
+        >(&pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!())
+            .expect("protocol verify must succeed on IntLookupWithPublicUair");
+    }
+
+    // Phase 2g soundness: tampering a witness eval in the reducer proof
+    // (which claims the lookup column's value at r_0) must be caught by
+    // the spliced mp_subclaim check in step5 — even though the public
+    // half of the open-evals comes from the verifier's own computation.
+    #[test]
+    fn test_int_lookup_with_public_uair_tampered_reducer_witness_rejected() {
+        let num_vars = INT_LOOKUP_TABLE_WIDTH;
+        let mut rng = rng();
+
+        let trace = IntLookupWithPublicUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        let sig = IntLookupWithPublicUair::<ZtInt>::signature();
+        let public_trace = trace.public(&sig);
+
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+        let mut proof = ZincPlusPiop::<
+            TestZincTypesIprs,
+            IntLookupWithPublicUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+        >::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("prove should succeed with honest trace");
+
+        // Tamper witness_evals_at_r_0[0] (the lookup column's claimed eval).
+        let reducer = proof
+            .lookup_reducer
+            .as_mut()
+            .expect("reducer should be present for a UAIR with lookups");
+        reducer.witness_evals_at_r_0[0] = reducer.witness_evals_at_r_0[0].clone()
+            + F::from_with_cfg(1u64, &sample_field_cfg());
+
+        let result = ZincPlusPiop::<
+            TestZincTypesIprs,
+            IntLookupWithPublicUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+        >::verify::<_, CHECKED>(
+            &pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!(),
+        );
+        assert!(
+            result.is_err(),
+            "verifier must reject tampered reducer witness_evals_at_r_0"
         );
     }
 }
