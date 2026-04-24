@@ -767,27 +767,15 @@ fn bench_sha256_slice_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usiz
 // products of secp256k1-sized values).
 // ---------------------------------------------------------------------------
 
-// 768-bit (12 limbs) random prime field for the ECDSA ideal check.
-//
-// Sizing is a **completeness** requirement, not soundness: the prover
-// computes constraint values in `CombR = Int<20>` (1280 bits) and then
-// projects them to F via random-point evaluation. If any prover-side
-// intermediate `V` exceeds `P = |F|`, it wraps mod P and the verifier's
-// F-side recomputation disagrees — honest proofs fail verification.
-//
-// For the ECDSA scalar slice, the worst-case intermediate is the scalar
-// inverse constraint `s · w − 1 − q_sw · n` where `s, w, q_sw < n ≈ 2^256`,
-// giving `V_per_constraint ≤ ~2^512`. After the random-linear-combination
-// of ~7 constraints weighted by α-powers (α = i128 challenge ≤ 2^128) plus
-// coefficient-widening into CombR, realized `V` reaches `~2^640`. With
-// `P ≈ 2^768` we have `V < P` with ~128 bits of margin.
-//
-// A previous 6-limb sizing (~2^384) passed this bench empirically, but only
-// because typical random inputs don't realize the worst-case V. The merged
-// SHA+ECDSA UAIR adds more constraints to the RLC and consistently trips
-// the wrap at 6 limbs — the same completeness argument applies here too,
-// so bump to 12 limbs. This matches the protocol-level e2e test.
-const ECDSA_BENCH_FIELD_LIMBS: usize = 12;
+// 192-bit (3 limbs) random prime field — matches the module-level `F` used
+// by the Sha256Slice bench. Every ECDSA constraint is `assert_zero` and is
+// skipped in the fq_sumcheck fold by the `ConstraintFolder::assert_zero`
+// no-op, so the large intermediates from (e.g.) the scalar inverse
+// `s · w − 1 − q_sw · n` never enter the combined polynomial. The
+// non-zero-ideal constraints that *do* enter fq_sumcheck are SHA-side
+// rotation/schedule constraints with small-integer coefficients, for
+// which a narrower field is sufficient.
+const ECDSA_BENCH_FIELD_LIMBS: usize = 3;
 const ECDSA_BENCH_K: usize = ECDSA_INT_LIMBS * 2;
 const ECDSA_BENCH_M: usize = ECDSA_INT_LIMBS * 4;
 
