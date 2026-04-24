@@ -1233,6 +1233,35 @@ mod tests {
         );
     }
 
+    /// End-to-end test: merged SHA-256 + ECDSA UAIR (side-by-side).
+    ///
+    /// Runs the SHA-256 compression slice and the ECDSA scalar slice in a
+    /// single trace / single proof. The two sections live on disjoint
+    /// columns and are not cross-bound (no digest → `pa_e` constraint yet).
+    /// Uses `EcdsaZincTypes` (Int<5> + 768-bit random field) since the
+    /// ECDSA side needs wider integers; SHA-256's 32-bit values fit.
+    #[test]
+    fn test_e2e_sha_ecdsa() {
+        use zinc_test_uair::ShaEcdsaUair;
+        use zinc_uair::ideal::rotation::RotationIdeal;
+        let num_vars = 9; // 512 rows; ECDSA uses 257, SHA uses all.
+        do_test_f::<EcdsaF, EcdsaZincTypes, ShaEcdsaUair<EcdsaInt>, Sha256Ideal<EcdsaF>>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+            |ideal_or_zero, field_cfg| match ideal_or_zero {
+                IdealOrZero::NonZero(Sha256Ideal::RotX2(r)) => {
+                    Sha256Ideal::RotX2(RotationIdeal::from_with_cfg(r, field_cfg))
+                }
+                IdealOrZero::NonZero(Sha256Ideal::RotXw1) => Sha256Ideal::RotXw1,
+                IdealOrZero::Zero => {
+                    unreachable!("zero ideals are filtered before this closure runs")
+                }
+            },
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
     /// End-to-end test: BinaryDecompositionUair.
     ///
     /// Uses binary_poly (1 col) and int (1 col) trace types.
