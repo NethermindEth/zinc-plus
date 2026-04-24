@@ -1482,6 +1482,117 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// BitPolyLookupUair: first UAIR exercising Phase-2i BitPoly-table
+// semantics. A single bit-poly<32> witness column `v` holds 8-bit
+// bit-polys (bits 0..8 populated; bits 8..32 zero). The lookup spec
+// asserts `v ∈ BitPoly { width: 8 }` — i.e., `v`'s ψ_a-projected
+// scalar must lie in the 256-entry set `{Σ_{i=0..8} b_i · a^i : b ∈ {0,1}^8}`.
+//
+// This is the only UAIR today whose `LookupTableType` is `BitPoly`
+// rather than `Word`: it pins down that `build_table_mle`'s Horner
+// path produces ψ_a-consistent table entries, and that any witness
+// with a nonzero bit past position 7 is rejected.
+//
+// Layout:
+//   binary_poly col[0]: `v` — random `BinaryPoly<32>` with value in [0, 256)
+//   int col[0]:         `m` — multiplicity for the 256-entry table
+//
+// `num_vars >= 8` (so the 256-entry table fits with zero-padding).
+// ---------------------------------------------------------------------------
+
+/// Table width for `BitPolyLookupUair` — 8 bits (256 entries).
+pub const BIT_POLY_LOOKUP_WIDTH: usize = 8;
+
+#[derive(Clone, Debug)]
+pub struct BitPolyLookupUair<R>(PhantomData<R>);
+
+impl<R> Uair for BitPolyLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        // 1 bit-poly witness col (v), 1 int witness col (m).
+        let total = TotalColumnLayout::new(1, 0, 1);
+        // Flat indices: 0 = v (binary_poly), 1 = m (int).
+        let lookup_specs = vec![LookupColumnSpec {
+            expression: AffineExpr::single(0),
+            table_type: LookupTableType::BitPoly {
+                width: BIT_POLY_LOOKUP_WIDTH,
+                chunk_width: None,
+            },
+        }];
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], lookup_specs)
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        // Trivially-satisfied constraint (same pattern as IntLookupUair).
+        let v = &up.binary_poly[0];
+        b.assert_in_ideal(
+            v.clone() - v,
+            &ideal_from_ref(&DegreeOneIdeal::new(R::from(2u32))),
+        );
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for BitPolyLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        assert!(
+            num_vars >= BIT_POLY_LOOKUP_WIDTH,
+            "BitPolyLookupUair requires num_vars >= {BIT_POLY_LOOKUP_WIDTH}"
+        );
+        let row_count = 1usize << num_vars;
+        let table_size = 1u32 << BIT_POLY_LOOKUP_WIDTH;
+
+        let v_raw: Vec<u32> = (0..row_count)
+            .map(|_| rng.random::<u32>() & (table_size - 1))
+            .collect();
+        let v_col: DenseMultilinearExtension<BinaryPoly<32>> =
+            v_raw.iter().copied().map(BinaryPoly::<32>::from).collect();
+
+        // m counts occurrences of each value in [0, 256); higher indices
+        // stay 0 (and map to the zero-padded table slots).
+        let mut mults_raw = vec![0u32; row_count];
+        for &v in &v_raw {
+            mults_raw[v as usize] += 1;
+        }
+        let zero = R::from(0u32);
+        let m_col = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            mults_raw.into_iter().map(R::from).collect(),
+            zero,
+        );
+
+        UairTrace {
+            binary_poly: vec![v_col].into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![m_col].into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crypto_primitives::crypto_bigint_int::Int;

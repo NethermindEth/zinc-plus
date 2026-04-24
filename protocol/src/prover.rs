@@ -974,15 +974,21 @@ where
 
 /// Build the canonical table MLE for a lookup group's table type.
 ///
-/// The MLE has `num_vars` variables (so `2^num_vars` entries). The first
-/// `2^table_width` entries encode the table; any remaining entries are
-/// padded with 0 (which, since 0 is ψ_a of the zero bit-poly and also
-/// the integer 0, is a valid "padded" table value in both variants).
+/// The MLE has `num_vars` variables (so `2^num_vars` entries). The
+/// table's effective width is `chunk_width.unwrap_or(width)`: when a
+/// non-`None` `chunk_width` is present, the table shrinks to match
+/// the chunk, so a 32-bit parent value can be range-checked in
+/// 2^chunk_width-sized slices (UAIR author supplies the chunk-column
+/// decomposition + per-chunk lookup specs; the framework just sizes
+/// the table accordingly). The first `2^effective_width` entries
+/// encode the table; any remaining entries are padded with 0.
 ///
-/// * `Word { width }`: entry `j = j as F` (integer in `[0, 2^width)`).
-/// * `BitPoly { width }`: entry `j = ψ_a(bit-poly of j) = Σ_i bit_i(j)·a^i`,
-///   where `a = *projecting_element_f`. Required for the protocol's
-///   ψ_a-projected view of bit-poly columns to line up with the table.
+/// * `Word { width, chunk_width }`: entry `j = j as F` (integer in
+///   `[0, 2^effective_width)`).
+/// * `BitPoly { width, chunk_width }`: entry
+///   `j = ψ_a(bit-poly of j) = Σ_i bit_i(j)·a^i`, summed to
+///   `effective_width` bits. Required for the protocol's ψ_a-projected
+///   view of bit-poly columns to line up with the table.
 #[allow(clippy::arithmetic_side_effects)]
 pub(crate) fn build_table_mle<F>(
     table_type: &LookupTableType,
@@ -996,15 +1002,16 @@ where
         + FromPrimitiveWithConfig
         + for<'a> MulByScalar<&'a F>,
 {
-    let width = match table_type {
-        LookupTableType::Word { width, .. } | LookupTableType::BitPoly { width, .. } => *width,
+    let effective_width = match table_type {
+        LookupTableType::Word { width, chunk_width }
+        | LookupTableType::BitPoly { width, chunk_width } => chunk_width.unwrap_or(*width),
     };
     assert!(
-        width <= num_vars,
-        "table width {width} exceeds num_vars {num_vars}"
+        effective_width <= num_vars,
+        "table width {effective_width} exceeds num_vars {num_vars}"
     );
     let row_count = 1usize << num_vars;
-    let table_size = 1usize << width;
+    let table_size = 1usize << effective_width;
     let zero_inner = F::zero_with_cfg(cfg).into_inner();
 
     let entry_at = |j: u64| -> F::Inner {
@@ -1013,16 +1020,16 @@ where
                 F::from_with_cfg(j, cfg).into_inner()
             }
             LookupTableType::BitPoly { .. } => {
-                // Horner: Σ_{i=0..width} bit_i(j) · a^i, evaluated
-                // bottom-up so each step adds a bit times the running
-                // power of `a`.
+                // Horner: Σ_{i=0..effective_width} bit_i(j) · a^i,
+                // evaluated bottom-up so each step adds a bit times
+                // the running power of `a`.
                 let mut acc = F::zero_with_cfg(cfg);
                 let mut pow = F::from_with_cfg(1u64, cfg);
-                for i in 0..width {
+                for i in 0..effective_width {
                     if (j >> i) & 1 == 1 {
                         acc = acc + pow.clone();
                     }
-                    if i + 1 < width {
+                    if i + 1 < effective_width {
                         pow = pow * projecting_element_f;
                     }
                 }

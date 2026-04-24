@@ -653,10 +653,11 @@ mod tests {
     use zinc_poly::univariate::{binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct};
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
-        AffineSumLookupUair, BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair,
-        ByteDecompLookupUair, GenerateRandomTrace, INT_LOOKUP_TABLE_WIDTH, IntLookupMultiUair,
-        IntLookupUair, IntLookupWithPublicUair, Sha256CompressionSliceUair, Sha256Ideal,
-        TestUairMixedShifts, TestUairNoMultiplication, TestUairSimpleMultiplication,
+        AffineSumLookupUair, BIT_POLY_LOOKUP_WIDTH, BigLinearUair, BigLinearUairWithPublicInput,
+        BinaryDecompositionUair, BitPolyLookupUair, ByteDecompLookupUair, GenerateRandomTrace,
+        INT_LOOKUP_TABLE_WIDTH, IntLookupMultiUair, IntLookupUair, IntLookupWithPublicUair,
+        Sha256CompressionSliceUair, Sha256Ideal, TestUairMixedShifts, TestUairNoMultiplication,
+        TestUairSimpleMultiplication,
     };
     use zinc_uair::{
         degree_counter::count_max_degree,
@@ -2018,6 +2019,82 @@ mod tests {
         assert!(
             result.is_err(),
             "verifier must reject a tampered witness_evals_at_rho_row entry"
+        );
+    }
+
+    // Phase 2i: first end-to-end test of `LookupTableType::BitPoly`.
+    // `BitPolyLookupUair` declares `v ∈ BitPoly { width: 8 }` on a
+    // bit-poly<32> column populated with values in [0, 256). The
+    // verifier's table is `{ψ_a(bit-poly(j)) : j ∈ 0..256}`, so the
+    // honest witness projects into that set.
+    #[test]
+    fn test_e2e_bit_poly_lookup() {
+        let num_vars = BIT_POLY_LOOKUP_WIDTH;
+        let mut rng = rng();
+
+        let trace = BitPolyLookupUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        let sig = BitPolyLookupUair::<ZtInt>::signature();
+        let public_trace = trace.public(&sig);
+
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+        let proof = ZincPlusPiop::<
+            TestZincTypesIprs,
+            BitPolyLookupUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+        >::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("honest prove must succeed on BitPolyLookupUair");
+        ZincPlusPiop::<TestZincTypesIprs, BitPolyLookupUair<ZtInt>, F, DEGREE_PLUS_ONE>::verify::<
+            _, CHECKED,
+        >(&pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!())
+            .expect("honest verify must succeed on BitPolyLookupUair");
+    }
+
+    // Soundness: if the prover tampers a bit past position 7 in `v`'s
+    // bit-poly (e.g., sets bit 9), `v`'s ψ_a value is no longer in
+    // the 256-entry BitPoly{8} table, so the lookup argument rejects.
+    #[test]
+    fn test_e2e_bit_poly_lookup_out_of_range_rejected() {
+        use zinc_poly::univariate::binary::BinaryPoly;
+
+        let num_vars = BIT_POLY_LOOKUP_WIDTH;
+        let mut rng = rng();
+
+        let mut trace = BitPolyLookupUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        // Set `v[0]` to a 9-bit pattern: bits 0..8 random, bit 8 = 1.
+        // Now `v[0]`'s ψ_a projection contains an `a^8` term — no entry
+        // of BitPoly{8} produces that.
+        let bin_cols = trace.binary_poly.to_mut();
+        bin_cols[0].evaluations[0] = BinaryPoly::<32>::from(0x1FFu32);
+
+        let sig = BitPolyLookupUair::<ZtInt>::signature();
+        let public_trace = trace.public(&sig);
+
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+        let proof = ZincPlusPiop::<
+            TestZincTypesIprs,
+            BitPolyLookupUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+        >::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("prover accepts an (unsound) out-of-range witness");
+        let result = ZincPlusPiop::<
+            TestZincTypesIprs,
+            BitPolyLookupUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+        >::verify::<_, CHECKED>(
+            &pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!(),
+        );
+        assert!(
+            result.is_err(),
+            "verifier must reject a bit-poly witness with a nonzero bit past the table width"
         );
     }
 }
