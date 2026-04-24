@@ -43,8 +43,8 @@ use zinc_poly::{
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
     utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
 };
-use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_utils::{cfg_into_iter, inner_transparent_field::InnerTransparentField};
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
+use zinc_utils::{add, cfg_into_iter, inner_transparent_field::InnerTransparentField};
 
 use crate::sumcheck::{MLSumcheck, SumCheckError, SumcheckProof};
 
@@ -64,6 +64,46 @@ pub struct MultiPointReduceProof<F> {
     /// `v_j(r_final)` for each column j. Carried in the proof since
     /// the verifier needs them to finalize the reduction check.
     pub tail_evals: Vec<F>,
+}
+
+// Wire format: SumcheckProof (Transcribable) + Vec<F> (Transcribable).
+impl<F: PrimeField> GenTranscribable for MultiPointReduceProof<F>
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        let (sumcheck_proof, bytes) = SumcheckProof::<F>::read_transcription_bytes_subset(bytes);
+        let (tail_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
+        assert!(bytes.is_empty(), "trailing bytes");
+        Self {
+            sumcheck_proof,
+            tail_evals,
+        }
+    }
+
+    fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
+        let buf = self.sumcheck_proof.write_transcription_bytes_subset(buf);
+        let buf = self.tail_evals.write_transcription_bytes_subset(buf);
+        assert!(buf.is_empty(), "buffer size mismatch");
+    }
+}
+
+impl<F: PrimeField> Transcribable for MultiPointReduceProof<F>
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    #[allow(clippy::arithmetic_side_effects)]
+    fn get_num_bytes(&self) -> usize {
+        add!(
+            SumcheckProof::<F>::LENGTH_NUM_BYTES,
+            add!(
+                self.sumcheck_proof.get_num_bytes(),
+                add!(Vec::<F>::LENGTH_NUM_BYTES, self.tail_evals.get_num_bytes())
+            )
+        )
+    }
 }
 
 /// Subclaim returned to the caller after a successful verification.

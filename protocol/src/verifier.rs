@@ -74,6 +74,7 @@ pub struct VerifierTranscriptReconstructed<
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
     proof_lookup_proof: Vec<LookupArgumentProof<F>>,
+    proof_lookup_reducer: Option<crate::LookupReducerProof<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -98,6 +99,7 @@ pub struct VerifierPrimeProjected<
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
     proof_lookup_proof: Vec<LookupArgumentProof<F>>,
+    proof_lookup_reducer: Option<crate::LookupReducerProof<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -122,6 +124,7 @@ pub struct VerifierIdealChecked<
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
     proof_lookup_proof: Vec<LookupArgumentProof<F>>,
+    proof_lookup_reducer: Option<crate::LookupReducerProof<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -148,6 +151,7 @@ pub struct VerifierEvalProjected<
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
     proof_lookup_proof: Vec<LookupArgumentProof<F>>,
+    proof_lookup_reducer: Option<crate::LookupReducerProof<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -164,10 +168,17 @@ pub struct VerifierSumchecked<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOverF, c
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
     proof_lookup_proof: Vec<LookupArgumentProof<F>>,
+    proof_lookup_reducer: Option<crate::LookupReducerProof<F>>,
+    /// Subclaims produced by step4b_lookup_verify. Empty when the
+    /// UAIR declares no lookups.
+    lookup_subclaims: Vec<LookupArgumentSubclaim<F>>,
     _phantom: PhantomData<IdealOverF>,
 }
 
-/// After step 5 (multi-point eval).
+/// After step 5 (multi-point eval + optional reducer). The
+/// `opening_point` field holds the final PCS-opening point —
+/// `mp_subclaim.sumcheck_subclaim.point` (= r_0) when there are no
+/// lookups, else `r_final` from `MultiPointReducer`.
 #[derive(Clone, Debug)]
 pub struct VerifierMultipointEvaled<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOverF, const D: usize>
 {
@@ -175,11 +186,17 @@ pub struct VerifierMultipointEvaled<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOv
     field_cfg: F::Config,
     projecting_element_f: F,
     mp_subclaim: multipoint_eval::Subclaim<F>,
+    opening_point: Vec<F>,
+    /// `v_j(r_final)` per witness column — prover-claimed via the
+    /// reducer and already trust-bound by the reducer's sumcheck.
+    /// `None` when no lookups.
+    reducer_tail_evals: Option<Vec<F>>,
 
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
     proof_lookup_proof: Vec<LookupArgumentProof<F>>,
+    proof_lookup_reducer: Option<crate::LookupReducerProof<F>>,
     _phantom: PhantomData<IdealOverF>,
 }
 
@@ -196,11 +213,13 @@ pub struct VerifierLiftedEvalsChecked<
     base: VerifierBase<'a, Zt, D>,
     field_cfg: F::Config,
     mp_subclaim: multipoint_eval::Subclaim<F>,
+    opening_point: Vec<F>,
     all_lifted_evals: Vec<DynamicPolynomialF<F>>,
 
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     proof_lookup_proof: Vec<LookupArgumentProof<F>>,
+    proof_lookup_reducer: Option<crate::LookupReducerProof<F>>,
     _phantom: PhantomData<IdealOverF>,
 }
 
@@ -285,6 +304,7 @@ where
             proof_multipoint_eval: proof.multipoint_eval,
             proof_witness_lifted_evals: proof.witness_lifted_evals,
             proof_lookup_proof: proof.lookup_proof,
+            proof_lookup_reducer: proof.lookup_reducer,
             _phantom: PhantomData,
         })
     }
@@ -322,6 +342,7 @@ where
             proof_multipoint_eval: self.proof_multipoint_eval,
             proof_witness_lifted_evals: self.proof_witness_lifted_evals,
             proof_lookup_proof: self.proof_lookup_proof,
+            proof_lookup_reducer: self.proof_lookup_reducer,
             _phantom: PhantomData,
         })
     }
@@ -375,6 +396,7 @@ where
             proof_multipoint_eval: self.proof_multipoint_eval,
             proof_witness_lifted_evals: self.proof_witness_lifted_evals,
             proof_lookup_proof: self.proof_lookup_proof,
+            proof_lookup_reducer: self.proof_lookup_reducer,
             _phantom: PhantomData,
         })
     }
@@ -420,6 +442,7 @@ where
             proof_multipoint_eval: self.proof_multipoint_eval,
             proof_witness_lifted_evals: self.proof_witness_lifted_evals,
             proof_lookup_proof: self.proof_lookup_proof,
+            proof_lookup_reducer: self.proof_lookup_reducer,
             _phantom: PhantomData,
         })
     }
@@ -491,6 +514,8 @@ where
             proof_multipoint_eval: self.proof_multipoint_eval,
             proof_witness_lifted_evals: self.proof_witness_lifted_evals,
             proof_lookup_proof: self.proof_lookup_proof,
+            proof_lookup_reducer: self.proof_lookup_reducer,
+            lookup_subclaims: Vec::new(),
             _phantom: PhantomData,
         })
     }
@@ -515,7 +540,7 @@ where
     /// No-op for UAIRs with no lookup specs.
     pub fn step4b_lookup_verify(
         mut self,
-    ) -> Result<(Self, Vec<LookupArgumentSubclaim<F>>), ProtocolError<F, IdealOverF>> {
+    ) -> Result<Self, ProtocolError<F, IdealOverF>> {
         let lookup_specs = self.base.uair_signature.lookup_specs().to_vec();
         if lookup_specs.is_empty() {
             if !self.proof_lookup_proof.is_empty() {
@@ -523,7 +548,7 @@ where
                     zinc_piop::lookup::LookupError::NotImplemented,
                 ));
             }
-            return Ok((self, Vec::new()));
+            return Ok(self);
         }
 
         if self.proof_lookup_proof.len() != lookup_specs.len() {
@@ -549,10 +574,29 @@ where
             subclaims.push(sub);
         }
 
-        Ok((self, subclaims))
+        self.lookup_subclaims = subclaims;
+        Ok(self)
     }
 
-    /// Step 5: Multi-point evaluation sumcheck.
+    /// Step 5: Multi-point evaluation sumcheck; when lookups are
+    /// present, also runs the step5b reducer verification inline.
+    ///
+    /// When lookups are present, this method:
+    /// 1. Verifies the multipoint-eval sumcheck normally.
+    /// 2. Uses the prover-supplied `witness_evals_at_r_0` from the
+    ///    reducer proof to execute `MultipointEval::verify_subclaim`
+    ///    at `r_0` (binding those scalar claims to the mp sumcheck).
+    /// 3. Runs `MultiPointReducer::verify` with claims at `r_0` and
+    ///    each `ρ_row_g` → obtains `r_final` + trusted `tail_evals`.
+    /// 4. Cross-checks that `witness_evals_at_ρ_row_g` matches the
+    ///    `component_evals` the LookupArgument already verified.
+    /// The resulting `opening_point = r_final` is threaded into
+    /// step6/step7 in place of `r_0`.
+    ///
+    /// When no lookups are present, the standard single-point flow
+    /// runs unchanged — `opening_point == r_0` and
+    /// `reducer_tail_evals == None`.
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn step5_multipoint_eval<U: Uair>(
         mut self,
     ) -> Result<VerifierMultipointEvaled<'a, Zt, F, IdealOverF, D>, ProtocolError<F, IdealOverF>>
@@ -568,14 +612,107 @@ where
             &self.field_cfg,
         )?;
 
+        let (opening_point, reducer_tail_evals) = if let Some(reducer) =
+            &self.proof_lookup_reducer
+        {
+            use zinc_piop::multipoint_reducer::{MultiClaim, MultiPointReducer};
+
+            // Phase 2f restriction: only UAIRs with no public columns are
+            // supported. A general public/witness split needs extra work.
+            if self.base.uair_signature.public_cols().cols() != 0 {
+                return Err(ProtocolError::Lookup(
+                    zinc_piop::lookup::LookupError::NotImplemented,
+                ));
+            }
+
+            let num_cols = self.base.uair_signature.total_cols().cols();
+            let num_vars = self.base.num_vars;
+            let r_0 = mp_subclaim.sumcheck_subclaim.point.clone();
+
+            // 1. Use prover-supplied witness_evals_at_r_0 to close the mp_subclaim.
+            MultipointEval::verify_subclaim(
+                &mp_subclaim,
+                &reducer.witness_evals_at_r_0,
+                self.base.uair_signature.shifts(),
+                &self.field_cfg,
+            )?;
+
+            // 2. Cross-check reducer's witness_evals_at_rho_row against LookupArgument's
+            //    component_evals. These must match — otherwise the prover could lie about
+            //    the lookup's component_evals.
+            let lookup_specs = self.base.uair_signature.lookup_specs().to_vec();
+            let num_groups = self.lookup_subclaims.len();
+            if reducer.witness_evals_at_rho_row.len() != num_groups
+                || lookup_specs.len() != num_groups
+            {
+                return Err(ProtocolError::Lookup(
+                    zinc_piop::lookup::LookupError::NotImplemented,
+                ));
+            }
+            for (g, (group_evals, sub)) in reducer
+                .witness_evals_at_rho_row
+                .iter()
+                .zip(self.lookup_subclaims.iter())
+                .enumerate()
+            {
+                if group_evals.len() != num_cols {
+                    return Err(ProtocolError::Lookup(
+                        zinc_piop::lookup::LookupError::NotImplemented,
+                    ));
+                }
+                let spec = &lookup_specs[g];
+                let lookup_col = spec.column_index;
+                let mult_col = num_cols - num_groups + g;
+                if group_evals[lookup_col] != sub.component_evals.witness_evals[0]
+                    || group_evals[mult_col] != sub.component_evals.multiplicity_eval
+                {
+                    return Err(ProtocolError::Lookup(
+                        zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
+                    ));
+                }
+            }
+
+            // 3. Build MultiClaim list and verify the reducer.
+            let mut claims: Vec<MultiClaim<F>> = Vec::with_capacity(1 + num_groups);
+            claims.push(MultiClaim {
+                point: r_0.clone(),
+                evals: reducer.witness_evals_at_r_0.clone(),
+            });
+            for (g, group_evals) in reducer.witness_evals_at_rho_row.iter().enumerate() {
+                claims.push(MultiClaim {
+                    point: self.lookup_subclaims[g].rho_row.clone(),
+                    evals: group_evals.clone(),
+                });
+            }
+
+            let reducer_sub = MultiPointReducer::<F>::verify(
+                &mut self.base.pcs_transcript.fs_transcript,
+                &reducer.reducer_proof,
+                &claims,
+                num_cols,
+                num_vars,
+                &self.field_cfg,
+            )
+            .map_err(|_| {
+                ProtocolError::Lookup(zinc_piop::lookup::LookupError::FinalEvaluationMismatch)
+            })?;
+
+            (reducer_sub.r_final, Some(reducer_sub.evals))
+        } else {
+            (mp_subclaim.sumcheck_subclaim.point.clone(), None)
+        };
+
         Ok(VerifierMultipointEvaled {
             base: self.base,
             field_cfg: self.field_cfg,
             projecting_element_f: self.projecting_element_f,
             mp_subclaim,
+            opening_point,
+            reducer_tail_evals,
             proof_commitments: self.proof_commitments,
             proof_witness_lifted_evals: self.proof_witness_lifted_evals,
             proof_lookup_proof: self.proof_lookup_proof,
+            proof_lookup_reducer: self.proof_lookup_reducer,
             _phantom: PhantomData,
         })
     }
@@ -599,13 +736,24 @@ where
     F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
     IdealOverF: Ideal,
 {
-    /// Step 6: Recompute public lifted_evals, assemble full set, verify
-    /// multipoint eval subclaim, and absorb all lifted_evals into transcript.
+    /// Step 6: Recompute public lifted_evals at the opening point,
+    /// assemble the full set from witness lifted_evals in the proof,
+    /// and verify the remaining sub-claim.
+    ///
+    /// * When no lookups: opening_point == r_0, so the
+    ///   `MultipointEval::verify_subclaim` check binds open_evals to
+    ///   the mp sumcheck here (existing behavior).
+    /// * When lookups: opening_point == r_final. The mp_subclaim
+    ///   check already ran in step5 using `witness_evals_at_r_0`;
+    ///   here we instead check that the derived `open_evals` at
+    ///   r_final equal the reducer's `tail_evals` (which are bound
+    ///   to actual committed data by the reducer's sumcheck + the
+    ///   PCS opening in step7).
     pub fn step6_lifted_evals<U: Uair>(
         mut self,
     ) -> Result<VerifierLiftedEvalsChecked<'a, Zt, F, IdealOverF, D>, ProtocolError<F, IdealOverF>>
     {
-        let r_0 = &self.mp_subclaim.sumcheck_subclaim.point;
+        let opening_point = &self.opening_point;
 
         let pub_cols = self.base.uair_signature.public_cols();
         let num_pub_bin = pub_cols.num_binary_poly_cols();
@@ -622,7 +770,7 @@ where
                 &self.field_cfg,
             );
             compute_lifted_evals::<F, D>(
-                r_0,
+                opening_point,
                 &self.base.public_trace.binary_poly,
                 &ProjectedTrace::RowMajor(projected_public),
                 &self.field_cfg,
@@ -649,12 +797,32 @@ where
             .collect::<Result<Vec<_>, _>>()
             .map_err(ProtocolError::LiftedEvalProjection)?;
 
-        MultipointEval::verify_subclaim(
-            &self.mp_subclaim,
-            &open_evals,
-            self.base.uair_signature.shifts(),
-            &self.field_cfg,
-        )?;
+        match &self.reducer_tail_evals {
+            None => {
+                // No-lookup path: bind open_evals@r_0 to the mp sumcheck.
+                MultipointEval::verify_subclaim(
+                    &self.mp_subclaim,
+                    &open_evals,
+                    self.base.uair_signature.shifts(),
+                    &self.field_cfg,
+                )?;
+            }
+            Some(tail_evals) => {
+                // Lookup path: mp_subclaim was already closed in step5
+                // (with witness_evals_at_r_0). Here we bind
+                // open_evals@r_final (derived from the proof's
+                // witness_lifted_evals at r_final) to the reducer's
+                // tail_evals (trusted via the reducer sumcheck).
+                //
+                // Phase 2f restriction: no public cols, so open_evals
+                // and tail_evals are equal length.
+                if open_evals != *tail_evals {
+                    return Err(ProtocolError::Lookup(
+                        zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
+                    ));
+                }
+            }
+        }
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
         for bar_u in &all_lifted_evals {
@@ -668,9 +836,11 @@ where
             base: self.base,
             field_cfg: self.field_cfg,
             mp_subclaim: self.mp_subclaim,
+            opening_point: self.opening_point,
             all_lifted_evals,
             proof_commitments: self.proof_commitments,
             proof_lookup_proof: self.proof_lookup_proof,
+            proof_lookup_reducer: self.proof_lookup_reducer,
             _phantom: PhantomData,
         })
     }
@@ -702,7 +872,7 @@ where
     pub fn step7_pcs_verify<U: Uair, const CHECK_FOR_OVERFLOW: bool>(
         mut self,
     ) -> Result<VerifierPcsVerified<IdealOverF>, ProtocolError<F, IdealOverF>> {
-        let r_0 = &self.mp_subclaim.sumcheck_subclaim.point;
+        let r_0 = &self.opening_point;
         let commitments = &self.proof_commitments;
 
         let pub_cols = self.base.uair_signature.public_cols();
@@ -843,9 +1013,8 @@ where
         .step3_eval_projection(project_scalar)?
         .step4_sumcheck_verify()?;
 
-        let (after_step4b, _lookup_subclaims) = after_step4.step4b_lookup_verify()?;
-
-        after_step4b
+        after_step4
+            .step4b_lookup_verify()?
             .step5_multipoint_eval::<U>()?
             .step6_lifted_evals::<U>()?
             .step7_pcs_verify::<U, CHECK_FOR_OVERFLOW>()?

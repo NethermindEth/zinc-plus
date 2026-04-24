@@ -128,7 +128,10 @@ pub struct ProverSumchecked<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const 
     lookup_subclaims: Vec<LookupArgumentSubclaim<F>>,
 }
 
-/// After step 5 (multipoint eval).
+/// After step 5 (multipoint eval + optional reducer). The `r_0` field
+/// holds the *final opening point*: it is the multipoint-eval output
+/// when there are no lookups, and the `MultiPointReducer` output
+/// `r_final` when there are.
 #[derive(Clone, Debug)]
 pub struct ProverMultipointEvaled<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize> {
     base: ProverBase<'a, Zt, U, F, D>,
@@ -142,6 +145,7 @@ pub struct ProverMultipointEvaled<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, 
     // New
     mp_proof: MultipointEvalProof<F>,
     r_0: Vec<F>,
+    lookup_reducer: Option<crate::LookupReducerProof<F>>,
 }
 
 /// After step 6 (lift-and-project).
@@ -155,6 +159,7 @@ pub struct ProverLifted<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: u
     lookup_proof: Vec<LookupArgumentProof<F>>,
     mp_proof: MultipointEvalProof<F>,
     r_0: Vec<F>,
+    lookup_reducer: Option<crate::LookupReducerProof<F>>,
 
     // New
     lifted_evals: Vec<DynamicPolynomialF<F>>,
@@ -173,6 +178,7 @@ pub struct ProverPcsOpened<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D
     lookup_proof: Vec<LookupArgumentProof<F>>,
     mp_proof: MultipointEvalProof<F>,
     lifted_evals: Vec<DynamicPolynomialF<F>>,
+    lookup_reducer: Option<crate::LookupReducerProof<F>>,
 }
 
 //
@@ -544,8 +550,14 @@ impl_with_type_bounds!(ProverSumchecked
 
     /// Step 5: Multi-point evaluation sumcheck. Combines `up_evals` and
     /// `down_evals` at `r'` into a single evaluation point `r_0`.
-    /// Only the sumcheck proof is sent; scalar evaluations at `r_0` are derived from the
-    /// polynomial-valued `lifted_evals` in Step 6
+    ///
+    /// Then, when there are lookup groups, runs `MultiPointReducer` as
+    /// step 5b to fold the lookup `ρ_row_g` claims alongside `r_0` into
+    /// a fresh `r_final`, which replaces `r_0` as the final opening
+    /// point consumed by step6 / step7.
+    ///
+    /// When no lookups are present, the flow is unchanged (`r_final == r_0`
+    /// and `lookup_reducer == None`).
     pub fn step5_multipoint_eval(
         mut self,
     ) -> Result<ProverMultipointEvaled<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
@@ -558,6 +570,74 @@ impl_with_type_bounds!(ProverSumchecked
             self.base.uair_signature.shifts(),
             &self.field_cfg,
         )?;
+        let r_0 = mp_prover_state.eval_point;
+
+        // Step 5b: if the UAIR declared lookups, run MultiPointReducer to
+        // fold (r_0, witness_evals_at_r_0) with each (ρ_row_g,
+        // witness_evals_at_ρ_row_g) into a fresh r_final.
+        let (opening_point, lookup_reducer) = if self.lookup_subclaims.is_empty() {
+            (r_0, None)
+        } else {
+            use zinc_piop::multipoint_reducer::{MultiClaim, MultiPointReducer};
+            use zinc_poly::mle::MultilinearExtensionWithConfig;
+
+            assert_eq!(
+                self.base.uair_signature.public_cols().cols(),
+                0,
+                "Phase 2f lookup wiring currently requires UAIRs with no public columns"
+            );
+
+            let witness_evals_at_r_0: Vec<F> = self
+                .projected_trace_f
+                .iter()
+                .map(|mle| {
+                    mle.clone()
+                        .evaluate_with_config(&r_0, &self.field_cfg)
+                        .expect("witness MLE eval at r_0")
+                })
+                .collect();
+
+            let mut claims = Vec::with_capacity(1 + self.lookup_subclaims.len());
+            claims.push(MultiClaim {
+                point: r_0.clone(),
+                evals: witness_evals_at_r_0.clone(),
+            });
+
+            let mut witness_evals_at_rho_row = Vec::with_capacity(self.lookup_subclaims.len());
+            for sub in &self.lookup_subclaims {
+                let evals: Vec<F> = self
+                    .projected_trace_f
+                    .iter()
+                    .map(|mle| {
+                        mle.clone()
+                            .evaluate_with_config(&sub.rho_row, &self.field_cfg)
+                            .expect("witness MLE eval at ρ_row_g")
+                    })
+                    .collect();
+                witness_evals_at_rho_row.push(evals.clone());
+                claims.push(MultiClaim {
+                    point: sub.rho_row.clone(),
+                    evals,
+                });
+            }
+
+            let (reducer_proof, reducer_sub) = MultiPointReducer::<F>::prove(
+                &mut self.base.pcs_transcript.fs_transcript,
+                &self.projected_trace_f,
+                &claims,
+                &self.field_cfg,
+            )
+            .expect("MultiPointReducer::prove on honest claims");
+
+            (
+                reducer_sub.r_final,
+                Some(crate::LookupReducerProof {
+                    witness_evals_at_r_0,
+                    witness_evals_at_rho_row,
+                    reducer_proof,
+                }),
+            )
+        };
 
         Ok(ProverMultipointEvaled {
             base: self.base,
@@ -568,7 +648,8 @@ impl_with_type_bounds!(ProverSumchecked
             combined_sumcheck: self.combined_sumcheck,
             lookup_proof: self.lookup_proof,
             mp_proof,
-            r_0: mp_prover_state.eval_point,
+            r_0: opening_point,
+            lookup_reducer,
         })
     }
 });
@@ -608,6 +689,7 @@ impl_with_type_bounds!(ProverMultipointEvaled
             lookup_proof: self.lookup_proof,
             mp_proof: self.mp_proof,
             r_0: self.r_0,
+            lookup_reducer: self.lookup_reducer,
             lifted_evals,
         })
     }
@@ -660,6 +742,7 @@ impl_with_type_bounds!(ProverLifted
             lookup_proof: self.lookup_proof,
             mp_proof: self.mp_proof,
             lifted_evals: self.lifted_evals,
+            lookup_reducer: self.lookup_reducer,
         })
     }
 });
@@ -706,6 +789,7 @@ impl_with_type_bounds!(ProverPcsOpened
             zip: zip_proof,
             witness_lifted_evals,
             lookup_proof: self.lookup_proof,
+            lookup_reducer: self.lookup_reducer,
         })
     }
 });

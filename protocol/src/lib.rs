@@ -31,6 +31,7 @@ use zinc_piop::{
     ideal_check::{IdealCheckError, Proof as IdealCheckProof},
     lookup::{LookupError, logup_gkr::LookupArgumentProof},
     multipoint_eval::{MultipointEvalError, Proof as MultipointEvalProof},
+    multipoint_reducer::MultiPointReduceProof,
     projections::ProjectedTrace,
     sumcheck::multi_degree::MultiDegreeSumcheckProof,
 };
@@ -82,6 +83,92 @@ pub struct Proof<F: PrimeField> {
     pub witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
     /// Lookup argument proof. `None` when the UAIR has no lookup specs.
     pub lookup_proof: Vec<LookupArgumentProof<F>>,
+    /// Phase 2f: reducer that folds (r_0, witness_evals) + each
+    /// (ρ_row_g, witness_evals) into r_final. `None` when there are
+    /// no lookups (opening stays at r_0).
+    pub lookup_reducer: Option<LookupReducerProof<F>>,
+}
+
+/// Auxiliary data for the lookup reducer step.
+///
+/// The reducer binds prover-claimed scalar evaluations at r_0 and at
+/// each lookup group's ρ_row to the true column MLEs, producing a
+/// fresh r_final at which the PCS is opened.
+///
+/// Currently supports only UAIRs with zero public columns (asserted at
+/// prove/verify entry points).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LookupReducerProof<F> {
+    /// Witness column evals at r_0 (one per witness column). Used by
+    /// the verifier as inputs to both the mp_subclaim check and the
+    /// reducer's claimed-sum check.
+    pub witness_evals_at_r_0: Vec<F>,
+    /// Per lookup group: witness column evals at ρ_row_g (one vec per
+    /// group, one F per witness column).
+    pub witness_evals_at_rho_row: Vec<Vec<F>>,
+    /// MultiPointReducer proof.
+    pub reducer_proof: MultiPointReduceProof<F>,
+}
+
+impl<F: PrimeField> zinc_transcript::traits::GenTranscribable for LookupReducerProof<F>
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        let (witness_evals_at_r_0, bytes) =
+            Vec::<F>::read_transcription_bytes_subset(bytes);
+        let (n_groups, mut bytes) = u32::read_transcription_bytes_subset(bytes);
+        let n_groups = usize::try_from(n_groups).expect("group count fits usize");
+        let mut witness_evals_at_rho_row = Vec::with_capacity(n_groups);
+        for _ in 0..n_groups {
+            let (v, rest) = Vec::<F>::read_transcription_bytes_subset(bytes);
+            witness_evals_at_rho_row.push(v);
+            bytes = rest;
+        }
+        let (reducer_proof, bytes) =
+            MultiPointReduceProof::<F>::read_transcription_bytes_subset(bytes);
+        assert!(bytes.is_empty(), "trailing bytes");
+        Self {
+            witness_evals_at_r_0,
+            witness_evals_at_rho_row,
+            reducer_proof,
+        }
+    }
+
+    fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
+        let buf = self.witness_evals_at_r_0.write_transcription_bytes_subset(buf);
+        let n_groups = u32::try_from(self.witness_evals_at_rho_row.len())
+            .expect("group count fits u32");
+        n_groups.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
+        let mut buf = &mut buf[u32::NUM_BYTES..];
+        for v in &self.witness_evals_at_rho_row {
+            buf = v.write_transcription_bytes_subset(buf);
+        }
+        let buf = self.reducer_proof.write_transcription_bytes_subset(buf);
+        assert!(buf.is_empty(), "buffer size mismatch");
+    }
+}
+
+impl<F: PrimeField> zinc_transcript::traits::Transcribable for LookupReducerProof<F>
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    #[allow(clippy::arithmetic_side_effects)]
+    fn get_num_bytes(&self) -> usize {
+        let per_group_bytes: usize = self
+            .witness_evals_at_rho_row
+            .iter()
+            .map(|v| Vec::<F>::LENGTH_NUM_BYTES + v.get_num_bytes())
+            .sum();
+        Vec::<F>::LENGTH_NUM_BYTES
+            + self.witness_evals_at_r_0.get_num_bytes()
+            + u32::NUM_BYTES
+            + per_group_bytes
+            + MultiPointReduceProof::<F>::LENGTH_NUM_BYTES
+            + self.reducer_proof.get_num_bytes()
+    }
 }
 
 impl<F> GenTranscribable for Proof<F>
@@ -120,6 +207,17 @@ where
             lookup_proof.push(p);
             bytes = rest;
         }
+
+        // lookup_reducer: u8 tag (1=Some, 0=None) + optional payload.
+        let has_reducer = bytes[0];
+        let bytes = &bytes[1..];
+        let (lookup_reducer, bytes) = if has_reducer == 0 {
+            (None, bytes)
+        } else {
+            let (r, rest) = LookupReducerProof::<F>::read_transcription_bytes_subset(bytes);
+            (Some(r), rest)
+        };
+
         assert!(bytes.is_empty(), "All bytes should be consumed");
 
         Self {
@@ -131,6 +229,7 @@ where
             multipoint_eval,
             witness_lifted_evals,
             lookup_proof,
+            lookup_reducer,
         }
     }
 
@@ -170,6 +269,14 @@ where
         for p in &self.lookup_proof {
             buf = p.write_transcription_bytes_subset(buf);
         }
+
+        // lookup_reducer: u8 tag + optional payload.
+        buf[0] = u8::from(self.lookup_reducer.is_some());
+        buf = &mut buf[1..];
+        if let Some(r) = &self.lookup_reducer {
+            buf = r.write_transcription_bytes_subset(buf);
+        }
+
         assert!(buf.is_empty(), "Entire buffer should be used");
     }
 }
@@ -188,6 +295,10 @@ where
             .iter()
             .map(|p| LookupArgumentProof::<F>::LENGTH_NUM_BYTES + p.get_num_bytes())
             .sum();
+        let reducer_bytes = match &self.lookup_reducer {
+            None => 0,
+            Some(r) => LookupReducerProof::<F>::LENGTH_NUM_BYTES + r.get_num_bytes(),
+        };
         3 * ZipPlusCommitment::NUM_BYTES
             + u32::NUM_BYTES
             + self.zip.len()
@@ -203,6 +314,8 @@ where
             + witness_vec.get_num_bytes()
             + u32::NUM_BYTES // lookup count
             + lookup_bytes
+            + 1 // reducer tag
+            + reducer_bytes
     }
 }
 
@@ -624,6 +737,109 @@ mod tests {
         type IntLc = RaaCode<Self::IntZt, TestRaaConfig, REP>;
     }
 
+    // -----------------------------------------------------------------
+    // Wider parameterization for UAIRs that need 256-bit trace integers
+    // (e.g. ECDSA over secp256k1). Uses `Int<5>` for the trace int type and
+    // a 768-bit random prime field for the ideal check.
+    // -----------------------------------------------------------------
+
+    const ECDSA_INT_LIMBS: usize = zinc_test_uair::ECDSA_INT_LIMBS;
+    const ECDSA_K: usize = ECDSA_INT_LIMBS * 2; // codeword widening
+    const ECDSA_M: usize = ECDSA_INT_LIMBS * 4; // CombR widening
+    const ECDSA_FIELD_LIMBS: usize = 12; // 768-bit random prime field
+
+    type EcdsaInt = Int<ECDSA_INT_LIMBS>;
+    type EcdsaF = MontyField<ECDSA_FIELD_LIMBS>;
+
+    #[derive(Debug, Clone)]
+    pub struct EcdsaBinPolyZipTypes {}
+    impl ZipTypes for EcdsaBinPolyZipTypes {
+        const NUM_COLUMN_OPENINGS: usize = 147;
+        type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
+        type Cw = DensePolynomial<Int<ECDSA_K>, DEGREE_PLUS_ONE>;
+        type Fmod = Uint<ECDSA_FIELD_LIMBS>;
+        type PrimeTest = MillerRabin;
+        type Chal = i128;
+        type Pt = i128;
+        type CombR = Int<ECDSA_M>;
+        type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
+        type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, DEGREE_PLUS_ONE>;
+        type CombDotChal = DensePolyInnerProduct<
+            Self::CombR,
+            Self::Chal,
+            Self::CombR,
+            MBSInnerProduct,
+            DEGREE_PLUS_ONE,
+        >;
+        type ArrCombRDotChal = MBSInnerProduct;
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct EcdsaArbPolyZipTypes {}
+    impl ZipTypes for EcdsaArbPolyZipTypes {
+        const NUM_COLUMN_OPENINGS: usize = 147;
+        type Eval = DensePolynomial<EcdsaInt, DEGREE_PLUS_ONE>;
+        type Cw = DensePolynomial<Int<ECDSA_K>, DEGREE_PLUS_ONE>;
+        type Fmod = Uint<ECDSA_FIELD_LIMBS>;
+        type PrimeTest = MillerRabin;
+        type Chal = i128;
+        type Pt = i128;
+        type CombR = Int<ECDSA_M>;
+        type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
+        type EvalDotChal = DensePolyInnerProduct<
+            EcdsaInt,
+            Self::Chal,
+            Self::CombR,
+            MBSInnerProduct,
+            DEGREE_PLUS_ONE,
+        >;
+        type CombDotChal = DensePolyInnerProduct<
+            Self::CombR,
+            Self::Chal,
+            Self::CombR,
+            MBSInnerProduct,
+            DEGREE_PLUS_ONE,
+        >;
+        type ArrCombRDotChal = MBSInnerProduct;
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct EcdsaIntZipTypes {}
+    impl ZipTypes for EcdsaIntZipTypes {
+        const NUM_COLUMN_OPENINGS: usize = 147;
+        type Eval = EcdsaInt;
+        type Cw = Int<ECDSA_K>;
+        type Fmod = Uint<ECDSA_FIELD_LIMBS>;
+        type PrimeTest = MillerRabin;
+        type Chal = i128;
+        type Pt = i128;
+        type CombR = Int<ECDSA_M>;
+        type Comb = Self::CombR;
+        type EvalDotChal = ScalarProduct;
+        type CombDotChal = ScalarProduct;
+        type ArrCombRDotChal = MBSInnerProduct;
+    }
+
+    #[derive(Clone, Debug)]
+    struct EcdsaZincTypes;
+
+    impl ZincTypes<DEGREE_PLUS_ONE> for EcdsaZincTypes {
+        type Int = EcdsaInt;
+        type Chal = i128;
+        type Pt = i128;
+        type CombR = Int<ECDSA_M>;
+        type Fmod = Uint<ECDSA_FIELD_LIMBS>;
+        type PrimeTest = MillerRabin;
+
+        type BinaryZt = EcdsaBinPolyZipTypes;
+        type ArbitraryZt = EcdsaArbPolyZipTypes;
+        type IntZt = EcdsaIntZipTypes;
+
+        type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, CHECKED>;
+        type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP, CHECKED>;
+        type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, CHECKED>;
+    }
+
     /// Use row size equal to poly size, resulting in flat single-row matrices
     fn make_iprs<Zt: ZipTypes>(num_vars: usize) -> IprsCode<Zt, PnttConfigF65537, REP, CHECKED> {
         let poly_size = 1 << num_vars;
@@ -657,31 +873,50 @@ mod tests {
         };
     }
 
-    #[allow(clippy::result_large_err)]
-    fn do_test<Zt, U, IdealOverF>(
+    /// F-generic harness. Threads an explicit `FF` field through the prove /
+    /// verify loop. Callers pick FF to match their UAIR's value-range needs.
+    /// The existing [`do_test`] is a thin wrapper that hard-codes
+    /// `FF = MontyField<FIELD_LIMBS>` (the 192-bit default).
+    #[allow(clippy::result_large_err, clippy::too_many_arguments)]
+    fn do_test_f<FF, Zt, U, IdealOverF>(
         num_vars: usize,
         linear_codes: (Zt::BinaryLc, Zt::ArbitraryLc, Zt::IntLc),
-        project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF
+        project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<FF as PrimeField>::Config) -> IdealOverF
         + Copy,
-        tamper: impl Fn(&mut Proof<F>),
-        check_verification: impl Fn(Result<(), ProtocolError<F, IdealOverF>>),
+        tamper: impl Fn(&mut Proof<FF>),
+        check_verification: impl Fn(Result<(), ProtocolError<FF, IdealOverF>>),
     ) where
         Zt: ZincTypes<DEGREE_PLUS_ONE>,
-        <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
-        <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
-        <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
-        <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
+        Zt::Int: ProjectableToField<FF>,
+        <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<FF>,
+        <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<FF>,
+        <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<FF>,
+        <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<FF>,
         U: Uair<Scalar = DensePolynomial<Zt::Int, DEGREE_PLUS_ONE>>
             + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Zt::Int, Int = Zt::Int>
             + 'static,
-        F: for<'a> FromWithConfig<&'a Zt::Int>
+        FF: zinc_utils::inner_transparent_field::InnerTransparentField
+            + crypto_primitives::FromPrimitiveWithConfig
+            + FromRef<FF>
+            + Send
+            + Sync
+            + 'static
+            + for<'a> FromWithConfig<&'a Zt::Int>
             + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> FromWithConfig<&'a Zt::Chal>
-            + for<'a> FromWithConfig<&'a Zt::Pt>,
-        <F as Field>::Inner: FromRef<Zt::Fmod>,
-        <F as Field>::Modulus: FromRef<Zt::Fmod>,
+            + for<'a> FromWithConfig<&'a Zt::Pt>
+            + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a FF>,
+        <FF as Field>::Inner: FromRef<Zt::Fmod>
+            + ConstIntSemiring
+            + zinc_transcript::traits::ConstTranscribable
+            + Send
+            + Sync
+            + num_traits::Zero
+            + Default,
+        <FF as Field>::Modulus: FromRef<Zt::Fmod>
+            + zinc_transcript::traits::ConstTranscribable,
         IdealOverF: zinc_uair::ideal::Ideal
-            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<F>>,
+            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<FF>>,
     {
         let mut rng = rng();
         let pp = setup_pp::<Zt>(num_vars, linear_codes);
@@ -693,7 +928,7 @@ mod tests {
 
         macro_rules! run_protocol {
             ($mle_first:ident) => {
-                let mut proof = ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::prove::<
+                let mut proof = ZincPlusPiop::<Zt, U, FF, DEGREE_PLUS_ONE>::prove::<
                     { $mle_first },
                     CHECKED,
                 >(&pp, &trace, num_vars, project_scalar_fn)
@@ -711,7 +946,7 @@ mod tests {
                 tamper(&mut proof);
 
                 let verification_result =
-                    ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::verify::<_, CHECKED>(
+                    ZincPlusPiop::<Zt, U, FF, DEGREE_PLUS_ONE>::verify::<_, CHECKED>(
                         &pp,
                         proof,
                         &public_trace,
@@ -729,6 +964,45 @@ mod tests {
             // For linear constraints, also test the MLE-first ideal check approach.
             run_protocol!(true);
         }
+    }
+
+    /// Default F-parameterized harness used by all existing tests (F is the
+    /// module-level `MontyField<FIELD_LIMBS>` = 192-bit). For tests that need
+    /// a wider F (e.g. ECDSA over secp256k1), call [`do_test_f`] directly.
+    #[allow(clippy::result_large_err)]
+    fn do_test<Zt, U, IdealOverF>(
+        num_vars: usize,
+        linear_codes: (Zt::BinaryLc, Zt::ArbitraryLc, Zt::IntLc),
+        project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF
+        + Copy,
+        tamper: impl Fn(&mut Proof<F>),
+        check_verification: impl Fn(Result<(), ProtocolError<F, IdealOverF>>),
+    ) where
+        Zt: ZincTypes<DEGREE_PLUS_ONE>,
+        Zt::Int: ProjectableToField<F>,
+        <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
+        <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+        <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
+        <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
+        U: Uair<Scalar = DensePolynomial<Zt::Int, DEGREE_PLUS_ONE>>
+            + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Zt::Int, Int = Zt::Int>
+            + 'static,
+        F: for<'a> FromWithConfig<&'a Zt::Int>
+            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> FromWithConfig<&'a Zt::Chal>
+            + for<'a> FromWithConfig<&'a Zt::Pt>,
+        <F as Field>::Inner: FromRef<Zt::Fmod>,
+        <F as Field>::Modulus: FromRef<Zt::Fmod>,
+        IdealOverF: zinc_uair::ideal::Ideal
+            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<F>>,
+    {
+        do_test_f::<F, Zt, U, IdealOverF>(
+            num_vars,
+            linear_codes,
+            project_ideal,
+            tamper,
+            check_verification,
+        );
     }
 
     /// End-to-end test: TestUairNoMultiplication.
@@ -1101,6 +1375,45 @@ mod tests {
             _, CHECKED,
         >(&pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!())
             .expect("protocol verify must succeed on IntLookupUair");
+    }
+
+    // Phase 2f soundness test: tampering the LookupArgument's component_evals
+    // (post-prove) must be caught by the reducer's cross-check in step5
+    // (witness_evals_at_rho_row vs component_evals).
+    #[test]
+    fn test_int_lookup_uair_tampered_component_evals_rejected() {
+        let num_vars = INT_LOOKUP_TABLE_WIDTH;
+        let mut rng = rng();
+
+        let trace = IntLookupUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        let sig = IntLookupUair::<ZtInt>::signature();
+        let public_trace = trace.public(&sig);
+
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+        let mut proof = ZincPlusPiop::<TestZincTypesIprs, IntLookupUair<ZtInt>, F, DEGREE_PLUS_ONE>::prove::<
+            false, CHECKED,
+        >(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("prove should succeed with honest trace");
+
+        // Tamper: swap witness_evals[0] and multiplicity_eval in the
+        // (single) lookup proof. With overwhelming probability the
+        // two are distinct, so the reducer's cross-check catches the
+        // mismatch.
+        let w0 = proof.lookup_proof[0].component_evals.witness_evals[0].clone();
+        let m = proof.lookup_proof[0].component_evals.multiplicity_eval.clone();
+        proof.lookup_proof[0].component_evals.witness_evals[0] = m;
+        proof.lookup_proof[0].component_evals.multiplicity_eval = w0;
+
+        let result = ZincPlusPiop::<TestZincTypesIprs, IntLookupUair<ZtInt>, F, DEGREE_PLUS_ONE>::verify::<
+            _, CHECKED,
+        >(&pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!());
+        assert!(
+            matches!(result.unwrap_err(), ProtocolError::Lookup(_)),
+            "verifier must reject tampered component_evals via reducer cross-check"
+        );
     }
 
     // Tampering the multiplicity column in the trace makes the lookup
