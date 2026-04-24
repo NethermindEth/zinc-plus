@@ -22,9 +22,10 @@ use zinc_poly::{
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes};
 use zinc_test_uair::{
-    BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, ECDSA_INT_LIMBS,
-    EcdsaScalarSliceUair, GenerateRandomTrace, INT_LOOKUP_TABLE_WIDTH, IntLookupUair,
-    Sha256CompressionSliceUair, Sha256Ideal, ShaProxy, TestUairNoMultiplication,
+    BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, ByteDecompLookupUair,
+    ECDSA_INT_LIMBS, EcdsaScalarSliceUair, GenerateRandomTrace, INT_LOOKUP_TABLE_WIDTH,
+    IntLookupMultiUair, IntLookupUair, IntLookupWithPublicUair, Sha256CompressionSliceUair,
+    Sha256Ideal, ShaProxy, TestUairNoMultiplication,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
@@ -762,7 +763,15 @@ fn bench_sha256_slice_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usiz
 // products of secp256k1-sized values).
 // ---------------------------------------------------------------------------
 
-const ECDSA_BENCH_FIELD_LIMBS: usize = 12; // 768-bit field for ECDSA ideal check
+// 384-bit random prime field for the ECDSA ideal check. Max constraint value
+// is `n² ≈ 2^512` (post-i128 challenge: ~2^640); ideal-check soundness only
+// needs `log V · log P / P ≪ 2^-λ`, easily satisfied at P ≈ 2^384 (~2^-374).
+// The prior 12 limbs / 768 bits was ~2× overkill and drove step-1 prime
+// generation (Miller-Rabin on 12-limb candidates) and per-cell
+// `Int<5> → MontyField<12>` projection to ~54 ms at num_vars=9 — dropping to
+// 6 limbs yields ~87% reduction on both Prove/1 and Verify/1. PCS-verify time
+// is Merkle-dominated (147 column openings) and unaffected by F size.
+const ECDSA_BENCH_FIELD_LIMBS: usize = 6;
 const ECDSA_BENCH_K: usize = ECDSA_INT_LIMBS * 2;
 const ECDSA_BENCH_M: usize = ECDSA_INT_LIMBS * 4;
 
@@ -1101,6 +1110,94 @@ fn bench_int_lookup_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize)
     do_bench_steps_uair::<IntLookupUair<i64>>(group, "IntLookup", num_vars);
 }
 
+/// Benchmarks for `IntLookupMultiUair` — two int witness columns
+/// sharing one `Word { width: 8 }` lookup group and one multiplicity
+/// column. Compared to `IntLookupUair` the interesting per-step
+/// deltas are:
+///
+/// * **Step 4b (logup-GKR)**: the leaf MLE now has `L + 1 = 3`
+///   interaction slots (two witness columns + the table), so
+///   `slot_vars = 2` and the GKR binary tree is one layer deeper.
+///   The per-layer sumcheck shape is unchanged (degree 3 over
+///   `eq · [λ(n0 d1 + n1 d0) + d0 d1]`).
+/// * **Step 5 reducer**: `witness_evals_at_rho_row` is a single vec
+///   with two entries (one per witness column); the per-column
+///   cross-check in `step5_multipoint_eval` walks
+///   `group.column_indices = [0, 1]` instead of just `[0]`.
+/// * **Steps 6/7**: one extra int column committed and opened.
+fn bench_int_lookup_multi_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    assert!(
+        num_vars >= INT_LOOKUP_TABLE_WIDTH,
+        "IntLookupMultiUair requires num_vars >= {INT_LOOKUP_TABLE_WIDTH}",
+    );
+    do_bench_uair::<IntLookupMultiUair<i64>>(group, "IntLookupMulti", num_vars);
+}
+
+fn bench_int_lookup_multi_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    assert!(
+        num_vars >= INT_LOOKUP_TABLE_WIDTH,
+        "IntLookupMultiUair requires num_vars >= {INT_LOOKUP_TABLE_WIDTH}",
+    );
+    do_bench_steps_uair::<IntLookupMultiUair<i64>>(group, "IntLookupMulti", num_vars);
+}
+
+/// Benchmarks for `IntLookupWithPublicUair` — one public int column
+/// prepended to the `IntLookupUair` shape. Exercises the Phase 2g
+/// public/witness splice: the verifier re-derives public column
+/// evaluations at `r_0` from the public trace, splices them with the
+/// prover-supplied witness evals, and runs
+/// `MultipointEval::verify_subclaim` against the full list. Step 6
+/// compares the *witness subset* of `open_evals` at `r_final` to the
+/// reducer's `tail_evals`.
+fn bench_int_lookup_with_public_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    assert!(
+        num_vars >= INT_LOOKUP_TABLE_WIDTH,
+        "IntLookupWithPublicUair requires num_vars >= {INT_LOOKUP_TABLE_WIDTH}",
+    );
+    do_bench_uair::<IntLookupWithPublicUair<i64>>(group, "IntLookupWithPublic", num_vars);
+}
+
+fn bench_int_lookup_with_public_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    assert!(
+        num_vars >= INT_LOOKUP_TABLE_WIDTH,
+        "IntLookupWithPublicUair requires num_vars >= {INT_LOOKUP_TABLE_WIDTH}",
+    );
+    do_bench_steps_uair::<IntLookupWithPublicUair<i64>>(group, "IntLookupWithPublic", num_vars);
+}
+
+/// Benchmarks for `ByteDecompLookupUair` — 16-bit witness `v`
+/// decomposed into two byte chunks, each range-checked by a
+/// `Word { width: 8 }` lookup. First UAIR where the ideal check and
+/// lookup argument jointly enforce a trace invariant, so:
+///
+/// * **Step 2 (ideal check)**: covers a real degree-1 constraint
+///   (`v - c_low - 256·c_high`), unlike the trivially-satisfied
+///   `v - v` in `IntLookup*`. Per-row work is still linear but the
+///   combined polynomial has a non-trivial structure.
+/// * **Step 4 (CPR sumcheck)**: one degree-≥1 multi-degree group
+///   (CPR) over a non-zero expression; timing should differ from
+///   `IntLookup` at the same `num_vars`.
+/// * **Step 4b (logup-GKR)**: same shape as `IntLookupMulti` —
+///   `L + 1 = 3` interaction slots, since `c_low` and `c_high` share
+///   a group.
+/// * **Steps 6/7**: four int columns committed (`v`, `c_low`,
+///   `c_high`, `m`) instead of two or three.
+fn bench_byte_decomp_lookup_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    assert!(
+        num_vars >= INT_LOOKUP_TABLE_WIDTH,
+        "ByteDecompLookupUair requires num_vars >= {INT_LOOKUP_TABLE_WIDTH}",
+    );
+    do_bench_uair::<ByteDecompLookupUair<i64>>(group, "ByteDecompLookup", num_vars);
+}
+
+fn bench_byte_decomp_lookup_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    assert!(
+        num_vars >= INT_LOOKUP_TABLE_WIDTH,
+        "ByteDecompLookupUair requires num_vars >= {INT_LOOKUP_TABLE_WIDTH}",
+    );
+    do_bench_steps_uair::<ByteDecompLookupUair<i64>>(group, "ByteDecompLookup", num_vars);
+}
+
 //
 // Criterion entry points
 //
@@ -1128,9 +1225,14 @@ fn e2e_benches(c: &mut Criterion) {
     // bench_sha_proxy_e2e(&mut group, 10);
     // bench_sha_proxy_e2e(&mut group, 9);
     // bench_sha256_slice_e2e(&mut group, 9);
+    // bench_ecdsa_slice_e2e(&mut group, 9);
+
     // Lookup UAIR — exercises step4b (logup-GKR) + step5b
     // (MultiPointReducer) inside the full Zinc+ pipeline.
     bench_int_lookup_e2e(&mut group, 9);
+    bench_int_lookup_multi_e2e(&mut group, 9);
+    bench_int_lookup_with_public_e2e(&mut group, 9);
+    bench_byte_decomp_lookup_e2e(&mut group, 9);
     group.finish();
 }
 
@@ -1163,6 +1265,9 @@ fn e2e_steps_benches(c: &mut Criterion) {
     // Lookup UAIR — exercises step4b (logup-GKR) + step5b
     // (MultiPointReducer) inside the full Zinc+ pipeline.
     bench_int_lookup_steps(&mut group, 9);
+    bench_int_lookup_multi_steps(&mut group, 9);
+    bench_int_lookup_with_public_steps(&mut group, 9);
+    bench_byte_decomp_lookup_steps(&mut group, 9);
 
     group.finish();
 }
