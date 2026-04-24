@@ -23,13 +23,13 @@ use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes};
 use zinc_test_uair::{
     BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-    ShaProxy, TestUairNoMultiplication,
+    Sha256CompressionSliceUair, Sha256Ideal, ShaProxy, TestUairNoMultiplication,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
     Uair, UairTrace,
     degree_counter::count_max_degree,
-    ideal::{DegreeOneIdeal, Ideal, IdealCheck},
+    ideal::{DegreeOneIdeal, Ideal, IdealCheck, rotation::RotationIdeal},
     ideal_collector::IdealOrZero,
 };
 use zinc_utils::{
@@ -686,6 +686,64 @@ fn bench_big_linear_public_input_e2e(group: &mut BenchmarkGroup<WallTime>, num_v
     do_bench_uair::<BigLinearUairWithPublicInput<i64>>(group, "BigLinearPI", num_vars);
 }
 
+/// Shared projection closure for `Sha256CompressionSliceUair`'s custom ideal
+/// enum. Factored out so `_e2e` and `_steps` benches wire the same logic.
+fn sha256_slice_project_ideal(
+    ideal: &IdealOrZero<Sha256Ideal<<BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int>>,
+    field_cfg: &<F as PrimeField>::Config,
+) -> Sha256Ideal<F> {
+    // Zero ideals are filtered out upstream of this closure (see
+    // piop/src/ideal_check.rs), so we only receive NonZero.
+    match ideal {
+        IdealOrZero::NonZero(Sha256Ideal::RotX2(r)) => {
+            Sha256Ideal::RotX2(RotationIdeal::from_with_cfg(r, field_cfg))
+        }
+        IdealOrZero::NonZero(Sha256Ideal::RotXw1) => Sha256Ideal::RotXw1,
+        IdealOrZero::Zero => {
+            unreachable!("zero ideals are filtered before this closure runs")
+        }
+    }
+}
+
+fn bench_sha256_slice_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    // `Sha256CompressionSliceUair` uses the custom `Sha256Ideal` enum rather
+    // than the `DegreeOneIdeal` that `do_bench_uair` hard-codes, so we wire
+    // the projection closure by hand.
+    type U = Sha256CompressionSliceUair<<BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_pp(num_vars);
+
+    do_bench_e2e::<BenchZincTypes, U, _>(
+        group,
+        "Sha256Slice",
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        sha256_slice_project_ideal,
+    );
+}
+
+fn bench_sha256_slice_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = Sha256CompressionSliceUair<<BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_pp(num_vars);
+
+    do_bench_steps::<BenchZincTypes, U, _>(
+        group,
+        "Sha256Slice",
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        sha256_slice_project_ideal,
+    );
+}
+
 fn bench_no_mult_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     do_bench_steps_uair::<TestUairNoMultiplication<i64>>(group, "NoMult", num_vars);
 }
@@ -709,51 +767,54 @@ fn bench_big_linear_public_input_steps(group: &mut BenchmarkGroup<WallTime>, num
 fn e2e_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ E2E");
 
-    bench_no_mult_e2e(&mut group, 8);
-    bench_no_mult_e2e(&mut group, 10);
-    bench_no_mult_e2e(&mut group, 12);
-
-    bench_binary_decomposition_e2e(&mut group, 8);
-    bench_binary_decomposition_e2e(&mut group, 10);
-    bench_binary_decomposition_e2e(&mut group, 12);
-
-    bench_big_linear_e2e(&mut group, 8);
-    bench_big_linear_e2e(&mut group, 10);
-    bench_big_linear_e2e(&mut group, 12);
-
-    bench_big_linear_public_input_e2e(&mut group, 8);
-    bench_big_linear_public_input_e2e(&mut group, 10);
-    bench_big_linear_public_input_e2e(&mut group, 12);
-
-    bench_sha_proxy_e2e(&mut group, 8);
-    bench_sha_proxy_e2e(&mut group, 10);
-    bench_sha_proxy_e2e(&mut group, 12);
-
+    // bench_no_mult_e2e(&mut group, 8);
+    // bench_no_mult_e2e(&mut group, 10);
+    // bench_no_mult_e2e(&mut group, 12);
+// 
+    // bench_binary_decomposition_e2e(&mut group, 8);
+    // bench_binary_decomposition_e2e(&mut group, 10);
+    // bench_binary_decomposition_e2e(&mut group, 12);
+// 
+    // bench_big_linear_e2e(&mut group, 8);
+    // bench_big_linear_e2e(&mut group, 10);
+    // bench_big_linear_e2e(&mut group, 12);
+// 
+    // bench_big_linear_public_input_e2e(&mut group, 8);
+    // bench_big_linear_public_input_e2e(&mut group, 10);
+    // bench_big_linear_public_input_e2e(&mut group, 12);
+// 
+    // bench_sha_proxy_e2e(&mut group, 8);
+    // bench_sha_proxy_e2e(&mut group, 10);
+    // bench_sha_proxy_e2e(&mut group, 9);
+    bench_sha256_slice_e2e(&mut group, 9);
     group.finish();
 }
 
 fn e2e_steps_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ E2E Steps");
 
-    bench_no_mult_steps(&mut group, 8);
-    bench_no_mult_steps(&mut group, 10);
-    bench_no_mult_steps(&mut group, 12);
+    // bench_no_mult_steps(&mut group, 8);
+    // bench_no_mult_steps(&mut group, 10);
+    // bench_no_mult_steps(&mut group, 12);
+// 
+    // bench_binary_decomposition_steps(&mut group, 8);
+    // bench_binary_decomposition_steps(&mut group, 10);
+    // bench_binary_decomposition_steps(&mut group, 12);
+// 
+    // bench_big_linear_steps(&mut group, 8);
+    // bench_big_linear_steps(&mut group, 10);
+    // bench_big_linear_steps(&mut group, 12);
+// 
+    // bench_big_linear_public_input_steps(&mut group, 8);
+    // bench_big_linear_public_input_steps(&mut group, 10);
+    // bench_big_linear_public_input_steps(&mut group, 12);
 
-    bench_binary_decomposition_steps(&mut group, 8);
-    bench_binary_decomposition_steps(&mut group, 10);
-    bench_binary_decomposition_steps(&mut group, 12);
+    // bench_sha_proxy_steps(&mut group, 9);
+    // bench_sha_proxy_steps(&mut group, 10);
+    // bench_sha_proxy_steps(&mut group, 12);
 
-    bench_big_linear_steps(&mut group, 8);
-    bench_big_linear_steps(&mut group, 10);
-    bench_big_linear_steps(&mut group, 12);
-
-    bench_big_linear_public_input_steps(&mut group, 8);
-    bench_big_linear_public_input_steps(&mut group, 10);
-    bench_big_linear_public_input_steps(&mut group, 12);
-
-    bench_sha_proxy_steps(&mut group, 8);
-    bench_sha_proxy_steps(&mut group, 10);
-    bench_sha_proxy_steps(&mut group, 12);
+    //
+    bench_sha256_slice_steps(&mut group, 9);
 
     group.finish();
 }

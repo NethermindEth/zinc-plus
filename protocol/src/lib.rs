@@ -449,11 +449,13 @@ mod tests {
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-        INT_LOOKUP_TABLE_WIDTH, IntLookupUair, TestUairMixedShifts, TestUairNoMultiplication,
-        TestUairSimpleMultiplication,
+        INT_LOOKUP_TABLE_WIDTH, IntLookupUair, Sha256CompressionSliceUair, Sha256Ideal,
+        TestUairMixedShifts, TestUairNoMultiplication, TestUairSimpleMultiplication,
     };
     use zinc_uair::{
-        degree_counter::count_max_degree, ideal::DegreeOneIdeal, ideal_collector::IdealOrZero,
+        degree_counter::count_max_degree,
+        ideal::{DegreeOneIdeal, rotation::RotationIdeal},
+        ideal_collector::IdealOrZero,
     };
     use zinc_utils::{
         CHECKED,
@@ -656,16 +658,13 @@ mod tests {
     }
 
     #[allow(clippy::result_large_err)]
-    fn do_test<Zt, U>(
+    fn do_test<Zt, U, IdealOverF>(
         num_vars: usize,
         linear_codes: (Zt::BinaryLc, Zt::ArbitraryLc, Zt::IntLc),
-        project_ideal: impl Fn(
-            &IdealOrZero<U::Ideal>,
-            &<F as PrimeField>::Config,
-        ) -> IdealOrZero<DegreeOneIdeal<F>>
+        project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF
         + Copy,
         tamper: impl Fn(&mut Proof<F>),
-        check_verification: impl Fn(Result<(), ProtocolError<F, IdealOrZero<DegreeOneIdeal<F>>>>),
+        check_verification: impl Fn(Result<(), ProtocolError<F, IdealOverF>>),
     ) where
         Zt: ZincTypes<DEGREE_PLUS_ONE>,
         <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
@@ -681,6 +680,8 @@ mod tests {
             + for<'a> FromWithConfig<&'a Zt::Pt>,
         <F as Field>::Inner: FromRef<Zt::Fmod>,
         <F as Field>::Modulus: FromRef<Zt::Fmod>,
+        IdealOverF: zinc_uair::ideal::Ideal
+            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<F>>,
     {
         let mut rng = rng();
         let pp = setup_pp::<Zt>(num_vars, linear_codes);
@@ -737,7 +738,7 @@ mod tests {
     #[test]
     fn test_e2e_no_multiplication() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, TestUairNoMultiplication<ZtInt>>(
+        do_test::<TestZincTypesIprs, TestUairNoMultiplication<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -764,7 +765,7 @@ mod tests {
     #[test]
     fn test_e2e_simple_multiplication() {
         let num_vars = 2;
-        do_test::<TestZincTypesRaa, TestUairSimpleMultiplication<ZtInt>>(
+        do_test::<TestZincTypesRaa, TestUairSimpleMultiplication<ZtInt>, _>(
             num_vars,
             (
                 RaaCode::new(num_vars),
@@ -784,7 +785,7 @@ mod tests {
     #[test]
     fn test_e2e_mixed_shifts() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, TestUairMixedShifts<ZtInt>>(
+        do_test::<TestZincTypesIprs, TestUairMixedShifts<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -797,6 +798,44 @@ mod tests {
         );
     }
 
+    /// End-to-end test: SHA-256 compression slice.
+    ///
+    /// UAIR constraints (see `test-uair/src/sha256.rs`):
+    ///   1. s_sigma · (a_hat · rho_0(X) - sigma_0_hat) ∈ (X^32 - 1) mod 2
+    ///   2. s_init  · (a_hat - y_a_public) == 0
+    ///
+    /// Exercises the new mod-2 (X^W - 1) ideal check at the verifier via
+    /// `Sha256Ideal::RotXw1Mod2`, whose `contains` reduces remainder
+    /// coefficients mod 2 (canonical parity) before accepting. See the
+    /// module doc in `test-uair/src/sha256.rs` for the soundness caveat.
+    #[test]
+    fn test_e2e_sha256_slice() {
+        let num_vars = 7; // 128 rows
+        do_test::<TestZincTypesIprs, Sha256CompressionSliceUair<ZtInt>, Sha256Ideal<F>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |ideal_or_zero, field_cfg| {
+                // Zero ideals are filtered out upstream of this closure (see
+                // `piop/src/ideal_check.rs`), so we only receive NonZero.
+                match ideal_or_zero {
+                    IdealOrZero::NonZero(Sha256Ideal::RotX2(r)) => {
+                        Sha256Ideal::RotX2(RotationIdeal::from_with_cfg(r, field_cfg))
+                    }
+                    IdealOrZero::NonZero(Sha256Ideal::RotXw1) => Sha256Ideal::RotXw1,
+                    IdealOrZero::Zero => {
+                        unreachable!("zero ideals are filtered before this closure runs")
+                    }
+                }
+            },
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
     /// End-to-end test: BinaryDecompositionUair.
     ///
     /// Uses binary_poly (1 col) and int (1 col) trace types.
@@ -804,7 +843,7 @@ mod tests {
     #[test]
     fn test_e2e_binary_decomposition() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BinaryDecompositionUair<ZtInt>>(
+        do_test::<TestZincTypesIprs, BinaryDecompositionUair<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -827,7 +866,7 @@ mod tests {
     #[test]
     fn test_e2e_big_linear() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUair<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUair<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -847,7 +886,7 @@ mod tests {
     #[test]
     fn test_e2e_big_linear_with_public_input() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -868,7 +907,7 @@ mod tests {
     #[test]
     fn test_big_linear_tamper_lifted_evals() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -889,7 +928,7 @@ mod tests {
     #[test]
     fn test_big_linear_tamper_up_evals() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -912,7 +951,7 @@ mod tests {
     #[test]
     fn test_big_linear_tamper_down_evals() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -938,7 +977,7 @@ mod tests {
     #[test]
     fn test_big_linear_tamper_commitment() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -956,7 +995,7 @@ mod tests {
     #[test]
     fn test_big_linear_tamper_ideal_check() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>, _>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -971,6 +1010,23 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // IntLookupUair: exercises the protocol alongside a standalone lookup
+    // argument on the same committed trace.
+    //
+    // The existing protocol pipeline currently *ignores* lookup_specs in
+    // `UairSignature`, so Step 1–7 run as if no lookup were present. The
+    // lookup is validated separately by LookupArgument::prove/verify on
+    // the same witness/multiplicity int columns.
+    //
+    // This does not yet bind the LookupArgument's component evals to the
+    // committed trace via the PCS opening — that binding is the remaining
+    // protocol-wiring work (Phase 2d). What this test DOES validate:
+    //   * The test UAIR (with a lookup spec declared) runs cleanly through
+    //     the full protocol.
+    //   * LookupArgument accepts an honest trace generated by the UAIR.
+    //   * LookupArgument rejects when the multiplicity column is tampered.
+    // -----------------------------------------------------------------------
     // Build a dynamic `F::Config` fresh from a blank transcript — any
     // valid cfg works for the standalone LookupArgument, since the
     // lookup argument uses a transcript disjoint from the protocol.
@@ -1022,8 +1078,31 @@ mod tests {
     //
     // This does not yet bind the LookupArgument's component evals to the
     // committed trace via the PCS opening — that binding is the remaining
-    // protocol-wiring work (Phase 2e).
+    // protocol-wiring work (Phase 2d).
     // -----------------------------------------------------------------------
+    #[test]
+    fn test_int_lookup_uair_protocol_runs() {
+        let num_vars = INT_LOOKUP_TABLE_WIDTH;
+        let mut rng = rng();
+
+        let trace = IntLookupUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        let sig = IntLookupUair::<ZtInt>::signature();
+        let public_trace = trace.public(&sig);
+
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+        let proof = ZincPlusPiop::<TestZincTypesIprs, IntLookupUair<ZtInt>, F, DEGREE_PLUS_ONE>::prove::<
+            false, CHECKED,
+        >(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("protocol prove must succeed on IntLookupUair");
+        ZincPlusPiop::<TestZincTypesIprs, IntLookupUair<ZtInt>, F, DEGREE_PLUS_ONE>::verify::<
+            _, CHECKED,
+        >(&pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!())
+            .expect("protocol verify must succeed on IntLookupUair");
+    }
+
     // Tampering the multiplicity column in the trace makes the lookup
     // identity fail. This exercises step4b_lookup inside the full
     // protocol pipeline.
@@ -1058,29 +1137,6 @@ mod tests {
             matches!(result.unwrap_err(), ProtocolError::Lookup(_)),
             "verifier must reject tampered multiplicities via step4b"
         );
-    }
-
-    #[test]
-    fn test_int_lookup_uair_protocol_runs() {
-        let num_vars = INT_LOOKUP_TABLE_WIDTH;
-        let mut rng = rng();
-
-        let trace = IntLookupUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
-        let sig = IntLookupUair::<ZtInt>::signature();
-        let public_trace = trace.public(&sig);
-
-        let pp = setup_pp::<TestZincTypesIprs>(
-            num_vars,
-            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
-        );
-        let proof = ZincPlusPiop::<TestZincTypesIprs, IntLookupUair<ZtInt>, F, DEGREE_PLUS_ONE>::prove::<
-            false, CHECKED,
-        >(&pp, &trace, num_vars, project_scalar_fn)
-            .expect("protocol prove must succeed on IntLookupUair");
-        ZincPlusPiop::<TestZincTypesIprs, IntLookupUair<ZtInt>, F, DEGREE_PLUS_ONE>::verify::<
-            _, CHECKED,
-        >(&pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!())
-            .expect("protocol verify must succeed on IntLookupUair");
     }
 
     #[test]

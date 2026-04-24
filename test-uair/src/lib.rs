@@ -1,7 +1,9 @@
 #![allow(clippy::arithmetic_side_effects)] // UAIRs should not care about overflows
 mod generate_trace;
+pub mod sha256;
 
 pub use generate_trace::*;
+pub use sha256::{Sha256CompressionSliceUair, Sha256Ideal};
 
 use crypto_primitives::{ConstSemiring, FixedSemiring, Semiring, boolean::Boolean};
 use num_traits::Zero;
