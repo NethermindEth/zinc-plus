@@ -264,24 +264,36 @@ pub mod cols {
     // int columns. Public selectors come first (required by PublicColumnLayout
     // prefix convention), witness columns last.
     pub const S_INIT: usize = 0; // public: 1 at trace row 0, else 0
-    pub const S_SCHED_ANCH: usize = 1; // public: 1 where the message-schedule anchor fits
-    pub const S_UPD_ANCH: usize = 2; // public: 1 where the register-update anchor fits
-    pub const S_FINAL: usize = 3; // public: 1 on the final 4 rows (n−4 .. n−1), else 0
-    pub const PA_K: usize = 4; // public: round constants column (free for this slice)
-    pub const W_MU_W: usize = 5; // witness: integer carry for the modular-sum constraint
-    pub const W_MU_A: usize = 6; // witness: integer carry for the a-update
-    pub const W_MU_E: usize = 7; // witness: integer carry for the e-update
+    pub const S_FINAL: usize = 1; // public: 1 on the final 4 rows (n−4 .. n−1), else 0
+    pub const PA_K: usize = 2; // public: round constants column (free for this slice)
+    // Public compensator columns: zero on rows where the corresponding
+    // constraint is honestly satisfied (the "active" range), non-zero on
+    // inactive rows so that `inner + compensator ∈ (X − 2)` everywhere.
+    // Replaces the old `s_sched_anch` / `s_upd_anch` selector gates,
+    // dropping C7-C9 from degree 2 to degree 1.
+    //
+    // TODO(verifier): the verifier must check `pa_c_c{7,8,9}` is zero on the
+    // active row range (the rows where the corresponding constraint is
+    // intended to bind). Without that check, a malicious prover could put a
+    // nonzero compensator on active rows and absorb arbitrary `inner`,
+    // breaking the SHA round binding. Tracked as a follow-up.
+    pub const PA_C_C7: usize = 3; // compensator for C7 (sched_anch)
+    pub const PA_C_C8: usize = 4; // compensator for C8 (upd_anch a)
+    pub const PA_C_C9: usize = 5; // compensator for C9 (upd_anch e)
+    pub const W_MU_W: usize = 6; // witness: integer carry for the modular-sum constraint
+    pub const W_MU_A: usize = 7; // witness: integer carry for the a-update
+    pub const W_MU_E: usize = 8; // witness: integer carry for the e-update
     // Lookup multiplicity columns (one per group, placed at the end per the
     // protocol's "last N int cols = multiplicities" convention). Group order
     // is the BTreeMap sort over `LookupTableType`:
     //   group 0 = Word{ width: 2 }  covers mu_W     ∈ [0, 3]
     //   group 1 = Word{ width: 3 }  covers mu_a/mu_e ∈ [0, 6]/[0, 5]
-    pub const W_M_W2: usize = 8; // multiplicity column for group 0
-    pub const W_M_W3: usize = 9; // multiplicity column for group 1
+    pub const W_M_W2: usize = 9; // multiplicity column for group 0
+    pub const W_M_W3: usize = 10; // multiplicity column for group 1
     /// Total number of int columns.
-    pub const NUM_INT: usize = 10;
+    pub const NUM_INT: usize = 11;
     /// Number of public int columns (prefix).
-    pub const NUM_INT_PUB: usize = 5;
+    pub const NUM_INT_PUB: usize = 6;
 
     /// Flat trace indices for ShiftSpec (binary_poly || arbitrary_poly || int).
     pub const FLAT_W_A: usize = W_A;
@@ -417,9 +429,10 @@ where
         let w_ov_lsig1 = &bp[cols::W_OV_LSIG1];
 
         let s_init = &sel[cols::S_INIT];
-        let s_sched_anch = &sel[cols::S_SCHED_ANCH];
-        let s_upd_anch = &sel[cols::S_UPD_ANCH];
         let s_final = &sel[cols::S_FINAL];
+        let pa_c_c7 = &sel[cols::PA_C_C7];
+        let pa_c_c8 = &sel[cols::PA_C_C8];
+        let pa_c_c9 = &sel[cols::PA_C_C9];
 
         // `down` slot layout (mirrors the ShiftSpec order in signature()).
         // bin slots:
@@ -515,8 +528,8 @@ where
         );
 
         // Constraint 7: Message-schedule modular sum, anchored at k = t − 16.
-        //   s_sched_anch · (W[k+16] − W[k] − sigma_0(W[k+1]_row) − W[k+9] − sigma_1(W[k+14]_row)
-        //                   + 2·X^31 · mu_W[k+16]) ∈ (X − 2)
+        //   (W[k+16] − W[k] − sigma_0(W[k+1]_row) − W[k+9] − sigma_1(W[k+14]_row)
+        //                   + 2·X^31 · mu_W[k+16] + pa_c_c7) ∈ (X − 2)
         //
         // Notes:
         // - Our σ_0/σ_1 columns are row-local (lsig0[r] = σ_0(W[r])), so the
@@ -524,6 +537,10 @@ where
         //   "sigma_1(W[t-2])" is our lsig1 at row k+14.
         // - `2·X^31` stands in for `X^32` — they coincide when evaluated at
         //   X = 2, which is where the (X − 2) ideal check lives.
+        // - `pa_c_c7` is a public compensator column: zero on the active
+        //   range (rows 0..=n−17), and equal to `−inner(2)` mod p on inactive
+        //   rows so the sum lies in (X − 2) everywhere. See the
+        //   `cols::PA_C_C7` doc for the verifier-side TODO.
         let two_x31_mu_w = mbs(down_w_mu_w_sh16, &two_times_x31)
             .expect("2·X^31 · mu_W overflow");
         let sched_inner = down_w_w_sh16.clone()
@@ -532,12 +549,12 @@ where
             - down_w_w_sh9
             - down_w_lsig1_sh14
             + &two_x31_mu_w;
-        b.assert_in_ideal(s_sched_anch.clone() * &sched_inner, &ideal_rot_x2);
+        b.assert_in_ideal(sched_inner + pa_c_c7, &ideal_rot_x2);
 
         // Constraint 8: Register-update for `a`, anchored at k = t − 3.
-        //   s_upd_anch · (a[t+1] − (h[t] + Sigma_1(e[t]) + Ch[t] + K[t] + W[t]
-        //                           + Sigma_0(a[t]) + Maj[t])
-        //                + 2·X^31 · mu_a[t]) ∈ (X − 2)
+        //   (a[t+1] − (h[t] + Sigma_1(e[t]) + Ch[t] + K[t] + W[t]
+        //              + Sigma_0(a[t]) + Maj[t])
+        //    + 2·X^31 · mu_a[t] + pa_c_c8) ∈ (X − 2)
         //
         // With the shift-register aliasing h[t] = e[t-3] = up.w_e.
         // References at anchor k:
@@ -546,6 +563,7 @@ where
         //   Sigma_0(a[t]) = down.w_sig0^↓3 Ch[t]         = down.w_ch^↓3
         //   Maj[t]       = down.w_maj^↓3   W[t]         = down.w_W^↓3
         //   K[t]         = down.pa_K^↓3   mu_a[t]       = down.w_mu_a^↓3
+        // pa_c_c8 is the public compensator (see C7 note).
         let two_x31_mu_a = mbs(down_w_mu_a_sh3, &two_times_x31)
             .expect("2·X^31 · mu_a overflow");
         let a_update_inner = down_w_a_sh4.clone()
@@ -557,11 +575,11 @@ where
             - down_w_sig0_sh3             // Sigma_0(a[t])
             - down_w_maj_sh3              // Maj[t]
             + &two_x31_mu_a;
-        b.assert_in_ideal(s_upd_anch.clone() * &a_update_inner, &ideal_rot_x2);
+        b.assert_in_ideal(a_update_inner + pa_c_c8, &ideal_rot_x2);
 
         // Constraint 9: Register-update for `e`, anchored at k = t − 3.
-        //   s_upd_anch · (e[t+1] − (d[t] + h[t] + Sigma_1(e[t]) + Ch[t] + K[t] + W[t])
-        //                + 2·X^31 · mu_e[t]) ∈ (X − 2)
+        //   (e[t+1] − (d[t] + h[t] + Sigma_1(e[t]) + Ch[t] + K[t] + W[t])
+        //    + 2·X^31 · mu_e[t] + pa_c_c9) ∈ (X − 2)
         //
         // With d[t] = a[t-3] = up.w_a and h[t] = e[t-3] = up.w_e.
         let two_x31_mu_e = mbs(down_w_mu_e_sh3, &two_times_x31)
@@ -574,7 +592,7 @@ where
             - down_pa_k_sh3
             - down_w_w_sh3
             + &two_x31_mu_e;
-        b.assert_in_ideal(s_upd_anch.clone() * &e_update_inner, &ideal_rot_x2);
+        b.assert_in_ideal(e_update_inner + pa_c_c9, &ideal_rot_x2);
 
         // Constraint 10: Init boundary — at trace row 0, a_hat equals y_a_public.
         //   s_init · (a_hat − y_a) == 0
@@ -952,25 +970,9 @@ where
             to_bin_mle(to_bits(&maj_vals)),
         ];
 
-        // Selectors.
+        // Selectors (kept: s_init, s_final).
         let mut s_init_col: Vec<R> = (0..n).map(|_| R::ZERO).collect();
         s_init_col[0] = R::ONE;
-        // Message-schedule anchor is valid when the forward shifts (up to 16)
-        // stay in-trace, i.e. anchor row k ∈ [0, n − 17]. Beyond that,
-        // shifts read zero-padded entries and the constraint would be
-        // spurious — gate with the selector.
-        let sched_anch_last = n - 17;
-        let s_sched_anch_col: Vec<R> = (0..n)
-            .map(|i| if i <= sched_anch_last { R::ONE } else { R::ZERO })
-            .collect();
-        // Register-update anchor k = t − 3 references rows k..=k+4, so
-        // k + 4 ≤ n − 1 ⇒ k ≤ n − 5. Also, Ch[t] and Maj[t] at spec row
-        // t = k + 3 depend on rows t − 2 = k + 1, t − 1 = k + 2, which are
-        // valid iff k ≥ 0 (always). So active range is k ∈ [0, n − 5].
-        let upd_anch_last = n - 5;
-        let s_upd_anch_col: Vec<R> = (0..n)
-            .map(|i| if i <= upd_anch_last { R::ONE } else { R::ZERO })
-            .collect();
         // Final-boundary selector: 1 on the final 4 rows (rows n−4 through n−1).
         let s_final_col: Vec<R> = (0..n)
             .map(|i| if i + 4 >= n { R::ONE } else { R::ZERO })
@@ -979,6 +981,91 @@ where
         let mu_w_col: Vec<R> = mu_w_vals.iter().copied().map(R::from).collect();
         let mu_a_col: Vec<R> = mu_a_vals.iter().copied().map(R::from).collect();
         let mu_e_col: Vec<R> = mu_e_vals.iter().copied().map(R::from).collect();
+
+        // ----- Compensator columns (replace s_sched_anch / s_upd_anch). -----
+        //
+        // For each constraint Cᵢ ∈ {C7, C8, C9}, we publish a public column
+        // `pa_c_cᵢ[k]` with the property that (innerᵢ + pa_c_cᵢ) ∈ (X − 2)
+        // on every row k. Concretely we pick `pa_c_cᵢ[k] = −innerᵢ(2)` mod
+        // R's modulus; the protocol projects R into the random field, so
+        // the negation lands as `−innerᵢ(2) mod p` — exactly the value
+        // needed for the constraint to lie in (X − 2).
+        //
+        // On the corresponding active range (where the original selector
+        // was 1), the SHA recurrence makes `innerᵢ(2) = 0` for an honest
+        // prover, so `pa_c_cᵢ[k] = 0` automatically. On inactive rows the
+        // compensator absorbs whatever `innerᵢ(2)` happens to be.
+        let two_to_32: R = R::from(0x10000u32) * &R::from(0x10000u32);
+        let load = |arr: &[u32], idx: usize| -> R {
+            if idx < n { R::from(arr[idx]) } else { R::ZERO }
+        };
+
+        // C7: inner(2) = w_W[k+16] − w_W[k] − lsig0[k+1] − w_W[k+9]
+        //               − lsig1[k+14] + 2^32 · mu_W[k+16]
+        let pa_c_c7_col: Vec<R> = (0..n)
+            .map(|k| {
+                let w_k16 = load(&w_vals, k + 16);
+                let w_k = load(&w_vals, k);
+                let lsig0_k1 = load(&lsig0_vals, k + 1);
+                let w_k9 = load(&w_vals, k + 9);
+                let lsig1_k14 = load(&lsig1_vals, k + 14);
+                let mu_k16 = load(&mu_w_vals, k + 16);
+                let two32_mu = two_to_32.clone() * &mu_k16;
+                // comp = −inner(2) = w_k + lsig0_k1 + w_k9 + lsig1_k14
+                //                    − 2^32·mu_k16 − w_k16
+                w_k + &lsig0_k1 + &w_k9 + &lsig1_k14 - &two32_mu - &w_k16
+            })
+            .collect();
+
+        // C8: inner(2) = w_a[k+4] − w_e[k] − sig1[k+3] − ch[k+3] − K[k+3]
+        //               − W[k+3] − sig0[k+3] − maj[k+3] + 2^32 · mu_a[k+3]
+        let pa_c_c8_col: Vec<R> = (0..n)
+            .map(|k| {
+                let w_a_k4 = load(&a_vals, k + 4);
+                let w_e_k = load(&e_vals, k);
+                let sig1_k3 = load(&sig1_vals, k + 3);
+                let ch_k3 = load(&ch_vals, k + 3);
+                let k_k3 = load(&k_vals, k + 3);
+                let w_k3 = load(&w_vals, k + 3);
+                let sig0_k3 = load(&sig0_vals, k + 3);
+                let maj_k3 = load(&maj_vals, k + 3);
+                let mu_a_k3 = load(&mu_a_vals, k + 3);
+                let two32_mu = two_to_32.clone() * &mu_a_k3;
+                w_e_k
+                    + &sig1_k3
+                    + &ch_k3
+                    + &k_k3
+                    + &w_k3
+                    + &sig0_k3
+                    + &maj_k3
+                    - &two32_mu
+                    - &w_a_k4
+            })
+            .collect();
+
+        // C9: inner(2) = w_e[k+4] − w_a[k] − w_e[k] − sig1[k+3] − ch[k+3]
+        //               − K[k+3] − W[k+3] + 2^32 · mu_e[k+3]
+        let pa_c_c9_col: Vec<R> = (0..n)
+            .map(|k| {
+                let w_e_k4 = load(&e_vals, k + 4);
+                let w_a_k = load(&a_vals, k);
+                let w_e_k = load(&e_vals, k);
+                let sig1_k3 = load(&sig1_vals, k + 3);
+                let ch_k3 = load(&ch_vals, k + 3);
+                let k_k3 = load(&k_vals, k + 3);
+                let w_k3 = load(&w_vals, k + 3);
+                let mu_e_k3 = load(&mu_e_vals, k + 3);
+                let two32_mu = two_to_32.clone() * &mu_e_k3;
+                w_a_k
+                    + &w_e_k
+                    + &sig1_k3
+                    + &ch_k3
+                    + &k_k3
+                    + &w_k3
+                    - &two32_mu
+                    - &w_e_k4
+            })
+            .collect();
 
         // Lookup-argument multiplicity columns. Length = n (trace length);
         // entries at table indices j < 2^width carry counts, indices past
@@ -1005,10 +1092,11 @@ where
         };
         let int = vec![
             to_int_mle(s_init_col),
-            to_int_mle(s_sched_anch_col),
-            to_int_mle(s_upd_anch_col),
             to_int_mle(s_final_col),
             to_int_mle(k_col),
+            to_int_mle(pa_c_c7_col),
+            to_int_mle(pa_c_c8_col),
+            to_int_mle(pa_c_c9_col),
             to_int_mle(mu_w_col),
             to_int_mle(mu_a_col),
             to_int_mle(mu_e_col),
