@@ -1234,6 +1234,148 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// ByteDecompLookupUair: decompose a 16-bit witness into two byte chunks,
+// each constrained to live in `Word { width: 8 }`. Exercises the canonical
+// lookup use case — range-checking chunks of a larger value — with real
+// constraint coupling between the witness columns (as opposed to the
+// trivially-satisfied constraints in `IntLookupUair` / `IntLookupMultiUair`).
+//
+// Layout: 4 int witness columns.
+//   col[0]: `v`      — 16-bit value, row-wise uniform in [0, 2^16).
+//   col[1]: `c_low`  — low byte of v: `c_low[i] = v[i] mod 256`.
+//   col[2]: `c_high` — high byte of v: `c_high[i] = v[i] / 256`.
+//   col[3]: `m`      — shared multiplicity of both lookups into
+//                      `Word { width: 8 }` (group_lookup_specs collapses
+//                      c_low and c_high into one group).
+//
+// Constraint: `v[i] - c_low[i] - 256 * c_high[i]  ∈  ⟨X - 2⟩`
+//   (enforced per-row by the ideal check — on the trace, this forces
+//    the left-hand side to be exactly 0).
+//
+// Together with the lookup (c_low, c_high ∈ [0, 256)), this is a real
+// range check: any byte outside [0, 256) would have to break either a
+// lookup identity or the decomposition constraint.
+//
+// `num_vars >= INT_LOOKUP_TABLE_WIDTH` is required (same as IntLookupUair).
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct ByteDecompLookupUair<R>(PhantomData<R>);
+
+impl<R> Uair for ByteDecompLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        // 4 int witness columns: v, c_low, c_high, m.
+        let total = TotalColumnLayout::new(0, 0, 4);
+        let lookup_specs = vec![
+            LookupColumnSpec {
+                column_index: 1,
+                table_type: LookupTableType::Word {
+                    width: INT_LOOKUP_TABLE_WIDTH,
+                    chunk_width: None,
+                },
+            },
+            LookupColumnSpec {
+                column_index: 2,
+                table_type: LookupTableType::Word {
+                    width: INT_LOOKUP_TABLE_WIDTH,
+                    chunk_width: None,
+                },
+            },
+        ];
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], lookup_specs)
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        let v = &up.int[0];
+        let c_low = &up.int[1];
+        let c_high = &up.int[2];
+
+        // 2^chunk_width = 256 (the "base" of the decomposition).
+        let base: DensePolynomial<R, 32> =
+            DensePolynomial::new([R::from(1u32 << INT_LOOKUP_TABLE_WIDTH)]);
+
+        // v - c_low - 256 * c_high  ∈  ⟨X - 2⟩
+        b.assert_in_ideal(
+            v.clone() - c_low - &mbs(c_high, &base).expect("256 * c_high"),
+            &ideal_from_ref(&DegreeOneIdeal::new(R::from(2))),
+        );
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for ByteDecompLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        assert!(
+            num_vars >= INT_LOOKUP_TABLE_WIDTH,
+            "ByteDecompLookupUair requires num_vars >= {INT_LOOKUP_TABLE_WIDTH}"
+        );
+        let row_count = 1usize << num_vars;
+        let table_size = 1u32 << INT_LOOKUP_TABLE_WIDTH;
+
+        // 16-bit values uniform in [0, 2^16). Chunks are derived.
+        let v_raw: Vec<u32> = (0..row_count)
+            .map(|_| rng.random::<u32>() & 0xFFFF)
+            .collect();
+        let c_low_raw: Vec<u32> = v_raw.iter().map(|x| x & 0xFF).collect();
+        let c_high_raw: Vec<u32> = v_raw.iter().map(|x| (x >> 8) & 0xFF).collect();
+
+        // Shared multiplicity: count across BOTH chunk columns.
+        let mut mults_raw = vec![0u32; row_count];
+        for &c in c_low_raw.iter().chain(c_high_raw.iter()) {
+            debug_assert!(c < table_size, "chunk must lie in the byte table");
+            mults_raw[c as usize] += 1;
+        }
+
+        let zero = R::from(0u32);
+        let build_col = |raw: Vec<u32>| -> DenseMultilinearExtension<R> {
+            DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                raw.into_iter().map(R::from).collect(),
+                zero.clone(),
+            )
+        };
+
+        UairTrace {
+            binary_poly: vec![].into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![
+                build_col(v_raw),
+                build_col(c_low_raw),
+                build_col(c_high_raw),
+                build_col(mults_raw),
+            ]
+            .into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crypto_primitives::crypto_bigint_int::Int;

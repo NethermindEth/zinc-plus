@@ -601,10 +601,10 @@ mod tests {
     use zinc_poly::univariate::{binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct};
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
-        BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-        INT_LOOKUP_TABLE_WIDTH, IntLookupMultiUair, IntLookupUair, IntLookupWithPublicUair,
-        Sha256CompressionSliceUair, Sha256Ideal, TestUairMixedShifts, TestUairNoMultiplication,
-        TestUairSimpleMultiplication,
+        BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, ByteDecompLookupUair,
+        GenerateRandomTrace, INT_LOOKUP_TABLE_WIDTH, IntLookupMultiUair, IntLookupUair,
+        IntLookupWithPublicUair, Sha256CompressionSliceUair, Sha256Ideal, TestUairMixedShifts,
+        TestUairNoMultiplication, TestUairSimpleMultiplication,
     };
     use zinc_uair::{
         degree_counter::count_max_degree,
@@ -1726,6 +1726,141 @@ mod tests {
         assert!(
             result.is_err(),
             "verifier must reject tampered reducer witness_evals_at_r_0"
+        );
+    }
+
+    // Phase 2h: `ByteDecompLookupUair` combines a real chunk-decomposition
+    // constraint (`v = c_low + 256 * c_high`, ideal-checked per row) with
+    // lookups that range-check the chunks against `Word { width: 8 }`.
+    // The two lookup specs collapse into a single group, so this also
+    // exercises the Phase 2f multi-column path and the Phase 2g splice.
+    #[test]
+    fn test_e2e_byte_decomp_lookup() {
+        let num_vars = INT_LOOKUP_TABLE_WIDTH;
+        let mut rng = rng();
+
+        let trace = ByteDecompLookupUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        let sig = ByteDecompLookupUair::<ZtInt>::signature();
+        let public_trace = trace.public(&sig);
+
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+        let proof = ZincPlusPiop::<
+            TestZincTypesIprs,
+            ByteDecompLookupUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+        >::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("honest prove must succeed on ByteDecompLookupUair");
+        ZincPlusPiop::<TestZincTypesIprs, ByteDecompLookupUair<ZtInt>, F, DEGREE_PLUS_ONE>::verify::<
+            _, CHECKED,
+        >(&pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!())
+            .expect("honest verify must succeed on ByteDecompLookupUair");
+    }
+
+    // Tampering the high chunk so v != c_low + 256 * c_high must be
+    // caught by the *ideal check* (step2), not by the lookup — since
+    // c_high values are still in [0, 256) individually.
+    #[test]
+    fn test_e2e_byte_decomp_tampered_decomposition_rejected() {
+        let num_vars = INT_LOOKUP_TABLE_WIDTH;
+        let mut rng = rng();
+
+        let mut trace = ByteDecompLookupUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        // Bump c_high[0] by 1 to break v = c_low + 256 * c_high on row 0.
+        // Adjust the multiplicity column accordingly so the lookup stays
+        // satisfied — the only constraint that should fail is the
+        // decomposition identity.
+        let int_cols = trace.int.to_mut();
+        let old_high = int_cols[2].evaluations[0];
+        let new_high = old_high + 1;
+        int_cols[2].evaluations[0] = new_high;
+        // Rebalance multiplicities: old_high occurs once less, new_high once more.
+        {
+            let mult = &mut int_cols[3].evaluations;
+            let old_idx: usize = <ZtInt as Into<i64>>::into(old_high) as usize;
+            let new_idx: usize = <ZtInt as Into<i64>>::into(new_high) as usize;
+            mult[old_idx] = mult[old_idx] - 1;
+            mult[new_idx] = mult[new_idx] + 1;
+        }
+
+        let sig = ByteDecompLookupUair::<ZtInt>::signature();
+        let public_trace = trace.public(&sig);
+
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+        // The prover still builds a proof — it just proves the wrong trace.
+        let proof = ZincPlusPiop::<
+            TestZincTypesIprs,
+            ByteDecompLookupUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+        >::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("prover accepts (unsound) proof on tampered trace");
+
+        let result = ZincPlusPiop::<
+            TestZincTypesIprs,
+            ByteDecompLookupUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+        >::verify::<_, CHECKED>(
+            &pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!(),
+        );
+        assert!(
+            result.is_err(),
+            "verifier must reject a trace that violates the byte-decomposition constraint"
+        );
+    }
+
+    // Tampering c_low to a value outside [0, 256) with multiplicities
+    // faked to match must be caught by the lookup argument (step4b),
+    // not by the decomposition constraint — since we simultaneously
+    // adjust v to keep `v = c_low + 256 * c_high` satisfied.
+    #[test]
+    fn test_e2e_byte_decomp_out_of_range_chunk_rejected() {
+        let num_vars = INT_LOOKUP_TABLE_WIDTH;
+        let mut rng = rng();
+
+        let mut trace = ByteDecompLookupUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        let int_cols = trace.int.to_mut();
+        // Push c_low[0] out of [0, 256): add 256, and compensate v[0] by
+        // also adding 256 so the decomposition identity still holds.
+        int_cols[0].evaluations[0] = int_cols[0].evaluations[0] + 256;
+        int_cols[1].evaluations[0] = int_cols[1].evaluations[0] + 256;
+        // Multiplicity column is unchanged — the new c_low value (>= 256)
+        // is outside the table, so the lookup identity will reject
+        // regardless of what we put in the multiplicity column.
+
+        let sig = ByteDecompLookupUair::<ZtInt>::signature();
+        let public_trace = trace.public(&sig);
+
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+        let proof = ZincPlusPiop::<
+            TestZincTypesIprs,
+            ByteDecompLookupUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+        >::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("prover accepts (unsound) proof on tampered trace");
+
+        let result = ZincPlusPiop::<
+            TestZincTypesIprs,
+            ByteDecompLookupUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+        >::verify::<_, CHECKED>(
+            &pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!(),
+        );
+        assert!(
+            result.is_err(),
+            "verifier must reject an out-of-range chunk via the lookup argument"
         );
     }
 }
