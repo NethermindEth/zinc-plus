@@ -541,6 +541,8 @@ where
     pub fn step4b_lookup_verify(
         mut self,
     ) -> Result<Self, ProtocolError<F, IdealOverF>> {
+        use zinc_piop::lookup::group_lookup_specs;
+
         let lookup_specs = self.base.uair_signature.lookup_specs().to_vec();
         if lookup_specs.is_empty() {
             if !self.proof_lookup_proof.is_empty() {
@@ -551,18 +553,20 @@ where
             return Ok(self);
         }
 
-        if self.proof_lookup_proof.len() != lookup_specs.len() {
+        let groups = group_lookup_specs(&lookup_specs);
+        if self.proof_lookup_proof.len() != groups.len() {
             return Err(ProtocolError::Lookup(
                 zinc_piop::lookup::LookupError::NotImplemented,
             ));
         }
 
-        let mut subclaims = Vec::with_capacity(lookup_specs.len());
-        for (spec_idx, spec) in lookup_specs.iter().enumerate() {
-            let proof = &self.proof_lookup_proof[spec_idx];
+        let mut subclaims = Vec::with_capacity(groups.len());
+        for (group_idx, group) in groups.iter().enumerate() {
+            let proof = &self.proof_lookup_proof[group_idx];
+            let num_witness_columns = group.column_indices.len();
             let sub = LookupArgument::<F>::verify(
                 &mut self.base.pcs_transcript.fs_transcript,
-                1,
+                num_witness_columns,
                 self.base.num_vars,
                 proof,
                 &self.field_cfg,
@@ -570,7 +574,6 @@ where
             .map_err(|_| {
                 ProtocolError::Lookup(zinc_piop::lookup::LookupError::FinalEvaluationMismatch)
             })?;
-            let _ = spec;
             subclaims.push(sub);
         }
 
@@ -640,19 +643,31 @@ where
             // 2. Cross-check reducer's witness_evals_at_rho_row against LookupArgument's
             //    component_evals. These must match — otherwise the prover could lie about
             //    the lookup's component_evals.
+            //
+            //    For each group g:
+            //      * witness_evals[l] (one per witness column in the group) must equal
+            //        reducer.witness_evals_at_rho_row[g][group.column_indices[l]].
+            //      * multiplicity_eval must equal
+            //        reducer.witness_evals_at_rho_row[g][mult_col_g].
             let lookup_specs = self.base.uair_signature.lookup_specs().to_vec();
-            let num_groups = self.lookup_subclaims.len();
+            let groups =
+                zinc_piop::lookup::group_lookup_specs(&lookup_specs);
+            let num_groups = groups.len();
             if reducer.witness_evals_at_rho_row.len() != num_groups
-                || lookup_specs.len() != num_groups
+                || self.lookup_subclaims.len() != num_groups
             {
                 return Err(ProtocolError::Lookup(
                     zinc_piop::lookup::LookupError::NotImplemented,
                 ));
             }
-            for (g, (group_evals, sub)) in reducer
-                .witness_evals_at_rho_row
+            for (g, (group, (group_evals, sub))) in groups
                 .iter()
-                .zip(self.lookup_subclaims.iter())
+                .zip(
+                    reducer
+                        .witness_evals_at_rho_row
+                        .iter()
+                        .zip(self.lookup_subclaims.iter()),
+                )
                 .enumerate()
             {
                 if group_evals.len() != num_cols {
@@ -660,12 +675,20 @@ where
                         zinc_piop::lookup::LookupError::NotImplemented,
                     ));
                 }
-                let spec = &lookup_specs[g];
-                let lookup_col = spec.column_index;
+                if sub.component_evals.witness_evals.len() != group.column_indices.len() {
+                    return Err(ProtocolError::Lookup(
+                        zinc_piop::lookup::LookupError::NotImplemented,
+                    ));
+                }
+                for (l, &col_idx) in group.column_indices.iter().enumerate() {
+                    if group_evals[col_idx] != sub.component_evals.witness_evals[l] {
+                        return Err(ProtocolError::Lookup(
+                            zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
+                        ));
+                    }
+                }
                 let mult_col = num_cols - num_groups + g;
-                if group_evals[lookup_col] != sub.component_evals.witness_evals[0]
-                    || group_evals[mult_col] != sub.component_evals.multiplicity_eval
-                {
+                if group_evals[mult_col] != sub.component_evals.multiplicity_eval {
                     return Err(ProtocolError::Lookup(
                         zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
                     ));

@@ -1,7 +1,9 @@
 #![allow(clippy::arithmetic_side_effects)] // UAIRs should not care about overflows
+pub mod ecdsa;
 mod generate_trace;
 pub mod sha256;
 
+pub use ecdsa::{ECDSA_INT_LIMBS, EcdsaScalarRing, EcdsaScalarSliceUair};
 pub use generate_trace::*;
 pub use sha256::{Sha256CompressionSliceUair, Sha256Ideal};
 
@@ -982,6 +984,136 @@ where
             binary_poly: vec![].into(),
             arbitrary_poly: vec![].into(),
             int: vec![v_col, m_col].into(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IntLookupMultiUair: two int witness columns sharing a single lookup
+// group against a `Word { width: 8 }` table.
+//
+// Layout: 3 int witness columns (no binary_poly, no arbitrary_poly, no
+// shifts).
+//   col[0]: `v_0` — first lookup witness column
+//   col[1]: `v_1` — second lookup witness column (same table type, so
+//                   grouped together by `group_lookup_specs`)
+//   col[2]: `m`   — shared multiplicity column (one per group)
+//
+// Constraint: trivially-satisfied `0 ∈ ⟨X - 2⟩` (same workaround as
+// `IntLookupUair`).
+//
+// `num_vars` must satisfy `num_vars >= INT_LOOKUP_TABLE_WIDTH`.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct IntLookupMultiUair<R>(PhantomData<R>);
+
+impl<R> Uair for IntLookupMultiUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        // 3 int witness columns. Both v_0 and v_1 look up into the
+        // same `Word { width: 8 }` table — `group_lookup_specs` will
+        // produce a single group with column_indices = [0, 1].
+        let total = TotalColumnLayout::new(0, 0, 3);
+        let lookup_specs = vec![
+            LookupColumnSpec {
+                column_index: 0,
+                table_type: LookupTableType::Word {
+                    width: INT_LOOKUP_TABLE_WIDTH,
+                    chunk_width: None,
+                },
+            },
+            LookupColumnSpec {
+                column_index: 1,
+                table_type: LookupTableType::Word {
+                    width: INT_LOOKUP_TABLE_WIDTH,
+                    chunk_width: None,
+                },
+            },
+        ];
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], lookup_specs)
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        // Trivially-satisfied constraint (same as IntLookupUair).
+        let v = &up.int[0];
+        b.assert_in_ideal(
+            v.clone() - v,
+            &ideal_from_ref(&DegreeOneIdeal::new(R::from(2))),
+        );
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for IntLookupMultiUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        assert!(
+            num_vars >= INT_LOOKUP_TABLE_WIDTH,
+            "IntLookupMultiUair requires num_vars >= {INT_LOOKUP_TABLE_WIDTH}"
+        );
+        let row_count = 1usize << num_vars;
+        let table_size = 1usize << INT_LOOKUP_TABLE_WIDTH;
+
+        // Two independent witness columns, each uniform in [0, table_size).
+        let gen_col = |rng: &mut Rng| -> Vec<u32> {
+            (0..row_count)
+                .map(|_| (rng.random::<u32>()) % (table_size as u32))
+                .collect()
+        };
+        let v0_raw: Vec<u32> = gen_col(rng);
+        let v1_raw: Vec<u32> = gen_col(rng);
+
+        // Shared multiplicities: count occurrences of each table entry
+        // across BOTH witness columns.
+        let mut mults_raw = vec![0u32; row_count];
+        for &v in v0_raw.iter().chain(v1_raw.iter()) {
+            mults_raw[v as usize] += 1;
+        }
+
+        let zero = R::from(0u32);
+        let v0_col = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            v0_raw.into_iter().map(R::from).collect(),
+            zero.clone(),
+        );
+        let v1_col = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            v1_raw.into_iter().map(R::from).collect(),
+            zero.clone(),
+        );
+        let m_col = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            mults_raw.into_iter().map(R::from).collect(),
+            zero,
+        );
+
+        UairTrace {
+            binary_poly: vec![].into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![v0_col, v1_col, m_col].into(),
         }
     }
 }

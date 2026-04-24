@@ -562,8 +562,9 @@ mod tests {
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-        INT_LOOKUP_TABLE_WIDTH, IntLookupUair, Sha256CompressionSliceUair, Sha256Ideal,
-        TestUairMixedShifts, TestUairNoMultiplication, TestUairSimpleMultiplication,
+        INT_LOOKUP_TABLE_WIDTH, IntLookupMultiUair, IntLookupUair, Sha256CompressionSliceUair,
+        Sha256Ideal, TestUairMixedShifts, TestUairNoMultiplication,
+        TestUairSimpleMultiplication,
     };
     use zinc_uair::{
         degree_counter::count_max_degree,
@@ -756,7 +757,9 @@ mod tests {
     impl ZipTypes for EcdsaBinPolyZipTypes {
         const NUM_COLUMN_OPENINGS: usize = 147;
         type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
-        type Cw = DensePolynomial<Int<ECDSA_K>, DEGREE_PLUS_ONE>;
+        // Placeholder only: this UAIR has zero binary_poly cols, so Cw is
+        // type-level dead code. Must be i64 to satisfy MulByScalar bounds.
+        type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Fmod = Uint<ECDSA_FIELD_LIMBS>;
         type PrimeTest = MillerRabin;
         type Chal = i128;
@@ -1504,5 +1507,109 @@ mod tests {
             Err(LookupArgumentError::NonzeroRootNumerator) => {}
             other => panic!("expected NonzeroRootNumerator, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-column lookup: IntLookupMultiUair declares two int columns
+    // (v_0, v_1) against the same Word{width:8} table; `group_lookup_specs`
+    // collapses them into ONE group with column_indices = [0, 1]. The
+    // multiplicity column (v_2) is shared.
+    //
+    // These tests exercise the `L > 1` path in step4b on both sides,
+    // plus the per-column cross-check in step5.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_int_lookup_multi_uair_protocol_runs() {
+        let num_vars = INT_LOOKUP_TABLE_WIDTH + 1; // 512 rows, 2 witness cols
+        let mut rng = rng();
+
+        let trace = IntLookupMultiUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        let sig = IntLookupMultiUair::<ZtInt>::signature();
+        let public_trace = trace.public(&sig);
+
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+        let proof = ZincPlusPiop::<TestZincTypesIprs, IntLookupMultiUair<ZtInt>, F, DEGREE_PLUS_ONE>::prove::<
+            false, CHECKED,
+        >(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("protocol prove must succeed on IntLookupMultiUair");
+        ZincPlusPiop::<TestZincTypesIprs, IntLookupMultiUair<ZtInt>, F, DEGREE_PLUS_ONE>::verify::<
+            _, CHECKED,
+        >(&pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!())
+            .expect("protocol verify must succeed on IntLookupMultiUair");
+    }
+
+    // Tampering v_0 only (leave v_1 and m honest) breaks the shared-group
+    // cumulative sum: v_0's fake entry isn't covered by m. The verifier
+    // must reject at step4b.
+    #[test]
+    fn test_int_lookup_multi_uair_tampered_v0_rejected() {
+        let num_vars = INT_LOOKUP_TABLE_WIDTH + 1;
+        let mut rng = rng();
+
+        let mut trace = IntLookupMultiUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        // Push v_0[0] to a value that makes the multiplicity wrong.
+        let int_cols = trace.int.to_mut();
+        int_cols[0].evaluations[0] = int_cols[0].evaluations[0] + 1;
+
+        let sig = IntLookupMultiUair::<ZtInt>::signature();
+        let public_trace = trace.public(&sig);
+
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+        let proof = ZincPlusPiop::<TestZincTypesIprs, IntLookupMultiUair<ZtInt>, F, DEGREE_PLUS_ONE>::prove::<
+            false, CHECKED,
+        >(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("tampered prove should still produce a (soundness-invalid) proof");
+
+        let result = ZincPlusPiop::<TestZincTypesIprs, IntLookupMultiUair<ZtInt>, F, DEGREE_PLUS_ONE>::verify::<
+            _, CHECKED,
+        >(&pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!());
+        assert!(
+            matches!(result.unwrap_err(), ProtocolError::Lookup(_)),
+            "verifier must reject tampered v_0 via step4b"
+        );
+    }
+
+    // Tampering the second witness column's component_eval entry
+    // post-prove must be caught by the reducer's per-column cross-check
+    // (witness_evals[1] vs reducer.witness_evals_at_rho_row[g][1]).
+    #[test]
+    fn test_int_lookup_multi_uair_tampered_second_component_eval_rejected() {
+        let num_vars = INT_LOOKUP_TABLE_WIDTH + 1;
+        let mut rng = rng();
+
+        let trace = IntLookupMultiUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        let sig = IntLookupMultiUair::<ZtInt>::signature();
+        let public_trace = trace.public(&sig);
+
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+        let mut proof = ZincPlusPiop::<TestZincTypesIprs, IntLookupMultiUair<ZtInt>, F, DEGREE_PLUS_ONE>::prove::<
+            false, CHECKED,
+        >(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("honest prove should succeed");
+
+        // Swap witness_evals[0] and witness_evals[1] in the (single)
+        // lookup proof. With overwhelming probability they are distinct,
+        // so the step5 per-column cross-check catches the mismatch on [1].
+        let w0 = proof.lookup_proof[0].component_evals.witness_evals[0].clone();
+        let w1 = proof.lookup_proof[0].component_evals.witness_evals[1].clone();
+        proof.lookup_proof[0].component_evals.witness_evals[0] = w1;
+        proof.lookup_proof[0].component_evals.witness_evals[1] = w0;
+
+        let result = ZincPlusPiop::<TestZincTypesIprs, IntLookupMultiUair<ZtInt>, F, DEGREE_PLUS_ONE>::verify::<
+            _, CHECKED,
+        >(&pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!());
+        assert!(
+            matches!(result.unwrap_err(), ProtocolError::Lookup(_)),
+            "verifier must reject swapped witness_evals via per-column cross-check"
+        );
     }
 }

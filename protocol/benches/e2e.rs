@@ -22,15 +22,15 @@ use zinc_poly::{
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes};
 use zinc_test_uair::{
-    BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-    INT_LOOKUP_TABLE_WIDTH, IntLookupUair, Sha256CompressionSliceUair, Sha256Ideal, ShaProxy,
-    TestUairNoMultiplication,
+    BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, ECDSA_INT_LIMBS,
+    EcdsaScalarSliceUair, GenerateRandomTrace, INT_LOOKUP_TABLE_WIDTH, IntLookupUair,
+    Sha256CompressionSliceUair, Sha256Ideal, ShaProxy, TestUairNoMultiplication,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
     Uair, UairTrace,
     degree_counter::count_max_degree,
-    ideal::{DegreeOneIdeal, Ideal, IdealCheck, rotation::RotationIdeal},
+    ideal::{DegreeOneIdeal, Ideal, IdealCheck, ImpossibleIdeal, rotation::RotationIdeal},
     ideal_collector::IdealOrZero,
 };
 use zinc_utils::{
@@ -755,6 +755,277 @@ fn bench_sha256_slice_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usiz
     );
 }
 
+// ---------------------------------------------------------------------------
+// ECDSA scalar-slice benches (standalone — does not reuse do_bench_e2e /
+// do_bench_steps because those hard-code the module-level `F` =
+// MontyField<3> = 192 bits, whereas ECDSA needs a 768-bit field to hold
+// products of secp256k1-sized values).
+// ---------------------------------------------------------------------------
+
+const ECDSA_BENCH_FIELD_LIMBS: usize = 12; // 768-bit field for ECDSA ideal check
+const ECDSA_BENCH_K: usize = ECDSA_INT_LIMBS * 2;
+const ECDSA_BENCH_M: usize = ECDSA_INT_LIMBS * 4;
+
+type EcdsaBenchInt = Int<ECDSA_INT_LIMBS>;
+type EcdsaBenchF = MontyField<ECDSA_BENCH_FIELD_LIMBS>;
+
+type EcdsaBenchZincTypes = GenericBenchZincTypes<
+    /* Int = */ EcdsaBenchInt,
+    /* CwR = */ Int<ECDSA_BENCH_K>,
+    /* Chal = */ i128,
+    /* Pt = */ i128,
+    /* CombR = */ Int<ECDSA_BENCH_M>,
+    /* Fmod = */ Uint<ECDSA_BENCH_FIELD_LIMBS>,
+    MillerRabin,
+    DEGREE_PLUS_ONE,
+>;
+
+#[allow(clippy::unwrap_used)]
+fn setup_ecdsa_pp(num_vars: usize) -> Pp<EcdsaBenchZincTypes> {
+    let poly_size = 1 << num_vars;
+    (
+        ZipPlus::setup(
+            poly_size,
+            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+        ),
+        ZipPlus::setup(
+            poly_size,
+            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+        ),
+        ZipPlus::setup(
+            poly_size,
+            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+        ),
+    )
+}
+
+fn bench_ecdsa_slice_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = EcdsaScalarSliceUair<EcdsaBenchInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_ecdsa_pp(num_vars);
+    let sig = U::signature();
+    let public_trace = trace.public(&sig);
+
+    let proj_ideal = |_ideal: &IdealOrZero<ImpossibleIdeal>,
+                      _field_cfg: &<EcdsaBenchF as PrimeField>::Config|
+     -> ImpossibleIdeal {
+        unreachable!("ECDSA scalar slice uses only assert_zero; no non-trivial ideals")
+    };
+
+    let params = format!("EcdsaSlice/nvars={num_vars}");
+
+    group.bench_function(BenchmarkId::new("Prove (Combined)", &params), |bench| {
+        bench.iter(|| {
+            black_box(
+                ZincPlusPiop::<EcdsaBenchZincTypes, U, EcdsaBenchF, DEGREE_PLUS_ONE>::prove::<
+                    false,
+                    PERFORM_CHECKS,
+                >(&pp, &trace, num_vars, zinc_protocol::project_scalar_fn),
+            )
+            .expect("Prover failed");
+        });
+    });
+
+    let proof: Proof<EcdsaBenchF> =
+        ZincPlusPiop::<EcdsaBenchZincTypes, U, EcdsaBenchF, DEGREE_PLUS_ONE>::prove::<
+            false,
+            PERFORM_CHECKS,
+        >(&pp, &trace, num_vars, zinc_protocol::project_scalar_fn)
+        .expect("proof generation for verifier bench");
+
+    group.bench_function(BenchmarkId::new("Verify", &params), |bench| {
+        bench.iter_batched(
+            || proof.clone(),
+            |proof| {
+                black_box(
+                    ZincPlusPiop::<EcdsaBenchZincTypes, U, EcdsaBenchF, DEGREE_PLUS_ONE>::verify::<
+                        _,
+                        PERFORM_CHECKS,
+                    >(
+                        &pp,
+                        proof,
+                        &public_trace,
+                        num_vars,
+                        zinc_protocol::project_scalar_fn,
+                        proj_ideal,
+                    ),
+                )
+                .expect("Verifier failed");
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    eprint_proof_size(&params, &proof);
+}
+
+/// Per-step bench for ECDSA scalar slice. Mirrors `do_bench_steps` but with
+/// `EcdsaBenchF` / `EcdsaBenchZincTypes` wired by hand. ECDSA max constraint
+/// degree is 3 (from `b · (b − 1)` and `k · (k − 1)`), so the MLE-first
+/// variants are skipped — they only apply when max degree ≤ 1.
+#[allow(clippy::unwrap_used)]
+fn bench_ecdsa_slice_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = EcdsaScalarSliceUair<EcdsaBenchInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_ecdsa_pp(num_vars);
+    let sig = U::signature();
+    let public_trace = trace.public(&sig);
+
+    let proj_ideal = |_ideal: &IdealOrZero<ImpossibleIdeal>,
+                      _field_cfg: &<EcdsaBenchF as PrimeField>::Config|
+     -> ImpossibleIdeal {
+        unreachable!("ECDSA scalar slice uses only assert_zero; no non-trivial ideals")
+    };
+    let project_scalar = zinc_protocol::project_scalar_fn;
+
+    let params = format!("EcdsaSlice/nvars={num_vars}");
+
+    macro_rules! step_bench {
+        ($side:literal / $step_name:literal, setup = || $setup:expr, run = |$s:ident| $run:expr $(,)?) => {
+            group.bench_function(
+                BenchmarkId::new(format!("{}/{}", $side, $step_name), &params),
+                |b| {
+                    b.iter_batched(
+                        || $setup,
+                        |$s| {
+                            black_box($run).expect("step failed");
+                        },
+                        BatchSize::SmallInput,
+                    );
+                },
+            );
+        };
+    }
+
+    macro_rules! piop {
+        () => {
+            ZincPlusPiop::<EcdsaBenchZincTypes, U, EcdsaBenchF, DEGREE_PLUS_ONE>
+        };
+    }
+
+    // Prover per-step benchmarks
+    let p_committed = <piop!()>::step0_commit(&pp, &trace, num_vars).unwrap();
+    let p_projected = p_committed.clone().step1_combined(project_scalar).unwrap();
+    let p_ideal_checked = p_projected.clone().step2_ideal_check().unwrap();
+    let p_eval_projected = p_ideal_checked.clone().step3_eval_projection().unwrap();
+    let p_sumchecked = p_eval_projected.clone().step4_sumcheck().unwrap();
+    let p_mp_evaled = p_sumchecked.clone().step5_multipoint_eval().unwrap();
+    let p_lifted = p_mp_evaled.clone().step6_lift_and_project().unwrap();
+
+    step_bench!(
+        "Prove" / "0: Commit",
+        setup = || {},
+        run = |_s| <piop!()>::step0_commit(&pp, &trace, num_vars),
+    );
+    step_bench!(
+        "Prove" / "1: Prime projection (Combined)",
+        setup = || p_committed.clone(),
+        run = |s| s.step1_combined(project_scalar),
+    );
+    step_bench!(
+        "Prove" / "2: Ideal check (Combined)",
+        setup = || p_projected.clone(),
+        run = |s| s.step2_ideal_check(),
+    );
+    step_bench!(
+        "Prove" / "3: Eval projection",
+        setup = || p_ideal_checked.clone(),
+        run = |s| s.step3_eval_projection(),
+    );
+    step_bench!(
+        "Prove" / "4: Combined sumcheck",
+        setup = || p_eval_projected.clone(),
+        run = |s| s.step4_sumcheck(),
+    );
+    step_bench!(
+        "Prove" / "5: Multi-point eval",
+        setup = || p_sumchecked.clone(),
+        run = |s| s.step5_multipoint_eval(),
+    );
+    step_bench!(
+        "Prove" / "6: Lift-and-project",
+        setup = || p_mp_evaled.clone(),
+        run = |s| s.step6_lift_and_project(),
+    );
+    step_bench!(
+        "Prove" / "7: PCS open",
+        setup = || p_lifted.clone(),
+        run = |s| s.step7_pcs_open::<PERFORM_CHECKS>(),
+    );
+
+    // Verifier per-step benchmarks
+    let proof: Proof<EcdsaBenchF> =
+        <piop!()>::prove::<false, PERFORM_CHECKS>(&pp, &trace, num_vars, project_scalar)
+            .expect("proof generation for verifier bench");
+
+    let v_transcript = <piop!()>::step0_reconstruct_transcript::<ImpossibleIdeal>(
+        &pp,
+        proof.clone(),
+        &public_trace,
+        num_vars,
+    )
+    .unwrap();
+    let v_prime_projected = v_transcript.clone().step1_prime_projection().unwrap();
+    let v_ideal_checked = v_prime_projected.clone().step2_ideal_check(proj_ideal).unwrap();
+    let v_eval_projected = v_ideal_checked
+        .clone()
+        .step3_eval_projection(project_scalar)
+        .unwrap();
+    let v_sumchecked = v_eval_projected.clone().step4_sumcheck_verify().unwrap();
+    let v_mp_evaled = v_sumchecked.clone().step5_multipoint_eval::<U>().unwrap();
+    let v_lifted = v_mp_evaled.clone().step6_lifted_evals::<U>().unwrap();
+
+    step_bench!(
+        "Verify" / "0: Transcript reconstruct",
+        setup = || proof.clone(),
+        run = |proof| <piop!()>::step0_reconstruct_transcript::<ImpossibleIdeal>(
+            &pp,
+            proof,
+            &public_trace,
+            num_vars,
+        ),
+    );
+    step_bench!(
+        "Verify" / "1: Prime projection",
+        setup = || v_transcript.clone(),
+        run = |s| s.step1_prime_projection(),
+    );
+    step_bench!(
+        "Verify" / "2: Ideal check",
+        setup = || v_prime_projected.clone(),
+        run = |s| s.step2_ideal_check(proj_ideal),
+    );
+    step_bench!(
+        "Verify" / "3: Eval projection",
+        setup = || v_ideal_checked.clone(),
+        run = |s| s.step3_eval_projection(project_scalar),
+    );
+    step_bench!(
+        "Verify" / "4: Sumcheck verify",
+        setup = || v_eval_projected.clone(),
+        run = |s| s.step4_sumcheck_verify(),
+    );
+    step_bench!(
+        "Verify" / "5: Multi-point eval",
+        setup = || v_sumchecked.clone(),
+        run = |s| s.step5_multipoint_eval::<U>(),
+    );
+    step_bench!(
+        "Verify" / "6: Lifted evals",
+        setup = || v_mp_evaled.clone(),
+        run = |s| s.step6_lifted_evals::<U>(),
+    );
+    step_bench!(
+        "Verify" / "7: PCS verify",
+        setup = || v_lifted.clone(),
+        run = |s| s.step7_pcs_verify::<U, PERFORM_CHECKS>(),
+    );
+}
+
 fn bench_no_mult_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     do_bench_steps_uair::<TestUairNoMultiplication<i64>>(group, "NoMult", num_vars);
 }
@@ -856,7 +1127,7 @@ fn e2e_benches(c: &mut Criterion) {
     // bench_sha_proxy_e2e(&mut group, 8);
     // bench_sha_proxy_e2e(&mut group, 10);
     // bench_sha_proxy_e2e(&mut group, 9);
-    bench_sha256_slice_e2e(&mut group, 9);
+    // bench_sha256_slice_e2e(&mut group, 9);
     // Lookup UAIR — exercises step4b (logup-GKR) + step5b
     // (MultiPointReducer) inside the full Zinc+ pipeline.
     bench_int_lookup_e2e(&mut group, 9);
@@ -887,8 +1158,8 @@ fn e2e_steps_benches(c: &mut Criterion) {
     // bench_sha_proxy_steps(&mut group, 12);
 
     //
-    bench_sha256_slice_steps(&mut group, 9);
-
+    //bench_sha256_slice_steps(&mut group, 9);
+    bench_ecdsa_slice_steps(&mut group, 9);
     // Lookup UAIR — exercises step4b (logup-GKR) + step5b
     // (MultiPointReducer) inside the full Zinc+ pipeline.
     bench_int_lookup_steps(&mut group, 9);

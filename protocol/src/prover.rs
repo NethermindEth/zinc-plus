@@ -490,52 +490,62 @@ impl_with_type_bounds!(ProverSumchecked
 {
     /// Step 4b: Per-lookup-group logup-GKR argument.
     ///
-    /// For each `LookupColumnSpec` declared in the UAIR signature, runs
-    /// `LookupArgument::prove` against the corresponding projected witness
-    /// column and its committed multiplicity column. The resulting proofs
-    /// are placed into `self.lookup_proof` and threaded through into the
-    /// final `Proof<F>` via `finish()`; the subclaims (trace-level eval
+    /// Groups the UAIR's `LookupColumnSpec`s by `LookupTableType` via
+    /// [`group_lookup_specs`], then runs one `LookupArgument::prove`
+    /// per group — batching all `L >= 1` witness columns in the group
+    /// under a single logup-GKR call. The resulting proofs are placed
+    /// into `self.lookup_proof` and threaded through into the final
+    /// `Proof<F>` via `finish()`; the subclaims (trace-level eval
     /// point ρ_row_g and claimed component evals) are kept as
-    /// prover-only state for a later binding step (step5b, NYI).
+    /// prover-only state for the step5/step5b binding.
     ///
     /// No-op for UAIRs with no lookup specs.
     ///
     /// # Multiplicity column convention (temporary)
     ///
-    /// For this first integration pass the multiplicity column is taken
-    /// to be the committed int column at *flat* index
-    /// `total_cols - num_lookup_groups + group_idx`. That is, the last
-    /// `num_lookup_groups` int columns are treated as multiplicities.
-    /// A future iteration will let the UAIR declare them explicitly.
+    /// For this integration the multiplicity column for group `g` is
+    /// taken to be the committed int column at *flat* index
+    /// `total_cols - num_groups + g`. That is, the last `num_groups`
+    /// int columns are treated as multiplicities, one per group. A
+    /// future iteration will let the UAIR declare them explicitly.
     pub fn step4b_lookup(
         mut self,
     ) -> Result<Self, ProtocolError<F, U::Ideal>> {
+        use zinc_piop::lookup::group_lookup_specs;
+
         let lookup_specs = self.base.uair_signature.lookup_specs().to_vec();
         if lookup_specs.is_empty() {
             return Ok(self);
         }
 
+        let groups = group_lookup_specs(&lookup_specs);
         let num_cols = self.projected_trace_f.len();
-        let num_groups = lookup_specs.len();
+        let num_groups = groups.len();
 
-        for (group_idx, spec) in lookup_specs.iter().enumerate() {
-            let wit_idx = spec.column_index;
+        for (group_idx, group) in groups.iter().enumerate() {
             let mult_idx = num_cols
                 .checked_sub(num_groups)
                 .and_then(|n| n.checked_add(group_idx))
                 .expect("trace must contain one multiplicity col per lookup group");
-            assert_ne!(
-                wit_idx, mult_idx,
-                "lookup witness and multiplicity columns must differ"
-            );
+            for &wit_idx in &group.column_indices {
+                assert_ne!(
+                    wit_idx, mult_idx,
+                    "lookup witness and multiplicity columns must differ"
+                );
+            }
 
-            let wit_mle = &self.projected_trace_f[wit_idx];
+            let wit_mles: Vec<&DenseMultilinearExtension<F::Inner>> = group
+                .column_indices
+                .iter()
+                .map(|&idx| &self.projected_trace_f[idx])
+                .collect();
             let mul_mle = &self.projected_trace_f[mult_idx];
-            let table_mle = build_table_mle::<F>(&spec.table_type, self.base.num_vars, &self.field_cfg);
+            let table_mle =
+                build_table_mle::<F>(&group.table_type, self.base.num_vars, &self.field_cfg);
 
             let (proof, subclaim) = LookupArgument::<F>::prove(
                 &mut self.base.pcs_transcript.fs_transcript,
-                &[wit_mle],
+                &wit_mles,
                 &table_mle,
                 mul_mle,
                 &self.field_cfg,
