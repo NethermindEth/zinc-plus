@@ -25,7 +25,7 @@ use zinc_test_uair::{
     BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, ByteDecompLookupUair,
     ECDSA_INT_LIMBS, EcdsaScalarSliceUair, GenerateRandomTrace, INT_LOOKUP_TABLE_WIDTH,
     IntLookupMultiUair, IntLookupUair, IntLookupWithPublicUair, Sha256CompressionSliceUair,
-    Sha256Ideal, ShaProxy, TestUairNoMultiplication,
+    Sha256Ideal, ShaEcdsaUair, ShaProxy, TestUairNoMultiplication,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
@@ -763,15 +763,27 @@ fn bench_sha256_slice_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usiz
 // products of secp256k1-sized values).
 // ---------------------------------------------------------------------------
 
-// 384-bit random prime field for the ECDSA ideal check. Max constraint value
-// is `n² ≈ 2^512` (post-i128 challenge: ~2^640); ideal-check soundness only
-// needs `log V · log P / P ≪ 2^-λ`, easily satisfied at P ≈ 2^384 (~2^-374).
-// The prior 12 limbs / 768 bits was ~2× overkill and drove step-1 prime
-// generation (Miller-Rabin on 12-limb candidates) and per-cell
-// `Int<5> → MontyField<12>` projection to ~54 ms at num_vars=9 — dropping to
-// 6 limbs yields ~87% reduction on both Prove/1 and Verify/1. PCS-verify time
-// is Merkle-dominated (147 column openings) and unaffected by F size.
-const ECDSA_BENCH_FIELD_LIMBS: usize = 6;
+// 768-bit (12 limbs) random prime field for the ECDSA ideal check.
+//
+// Sizing is a **completeness** requirement, not soundness: the prover
+// computes constraint values in `CombR = Int<20>` (1280 bits) and then
+// projects them to F via random-point evaluation. If any prover-side
+// intermediate `V` exceeds `P = |F|`, it wraps mod P and the verifier's
+// F-side recomputation disagrees — honest proofs fail verification.
+//
+// For the ECDSA scalar slice, the worst-case intermediate is the scalar
+// inverse constraint `s · w − 1 − q_sw · n` where `s, w, q_sw < n ≈ 2^256`,
+// giving `V_per_constraint ≤ ~2^512`. After the random-linear-combination
+// of ~7 constraints weighted by α-powers (α = i128 challenge ≤ 2^128) plus
+// coefficient-widening into CombR, realized `V` reaches `~2^640`. With
+// `P ≈ 2^768` we have `V < P` with ~128 bits of margin.
+//
+// A previous 6-limb sizing (~2^384) passed this bench empirically, but only
+// because typical random inputs don't realize the worst-case V. The merged
+// SHA+ECDSA UAIR adds more constraints to the RLC and consistently trips
+// the wrap at 6 limbs — the same completeness argument applies here too,
+// so bump to 12 limbs. This matches the protocol-level e2e test.
+const ECDSA_BENCH_FIELD_LIMBS: usize = 12;
 const ECDSA_BENCH_K: usize = ECDSA_INT_LIMBS * 2;
 const ECDSA_BENCH_M: usize = ECDSA_INT_LIMBS * 4;
 
@@ -1035,6 +1047,273 @@ fn bench_ecdsa_slice_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize
     );
 }
 
+// ---------------------------------------------------------------------------
+// Merged SHA-256 + ECDSA UAIR benches. Reuses `EcdsaBenchZincTypes` /
+// `EcdsaBenchF` — same Int width and F width as the ECDSA-only slice, since
+// the completeness requirement (V < P for the worst-case RLC intermediate)
+// is driven by the ECDSA inverse constraint in both cases.
+// ---------------------------------------------------------------------------
+
+/// Ideal projector for the merged UAIR. `ShaEcdsaUair` reuses
+/// `Sha256Ideal<R>` as its ideal (ECDSA emits only `assert_zero`, so SHA's
+/// ideal set is a superset).
+fn sha_ecdsa_project_ideal(
+    ideal: &IdealOrZero<Sha256Ideal<EcdsaBenchInt>>,
+    field_cfg: &<EcdsaBenchF as PrimeField>::Config,
+) -> Sha256Ideal<EcdsaBenchF> {
+    match ideal {
+        IdealOrZero::NonZero(Sha256Ideal::RotX2(r)) => {
+            Sha256Ideal::RotX2(RotationIdeal::from_with_cfg(r, field_cfg))
+        }
+        IdealOrZero::NonZero(Sha256Ideal::RotXw1) => Sha256Ideal::RotXw1,
+        IdealOrZero::Zero => {
+            unreachable!("zero ideals are filtered before this closure runs")
+        }
+    }
+}
+
+fn bench_sha_ecdsa_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = ShaEcdsaUair<EcdsaBenchInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_ecdsa_pp(num_vars);
+    let sig = U::signature();
+    let public_trace = trace.public(&sig);
+
+    let params = format!("ShaEcdsa/nvars={num_vars}");
+
+    group.bench_function(BenchmarkId::new("Prove (Combined)", &params), |bench| {
+        bench.iter(|| {
+            black_box(
+                ZincPlusPiop::<EcdsaBenchZincTypes, U, EcdsaBenchF, DEGREE_PLUS_ONE>::prove::<
+                    false,
+                    PERFORM_CHECKS,
+                >(&pp, &trace, num_vars, zinc_protocol::project_scalar_fn),
+            )
+            .expect("Prover failed");
+        });
+    });
+
+    let proof: Proof<EcdsaBenchF> =
+        ZincPlusPiop::<EcdsaBenchZincTypes, U, EcdsaBenchF, DEGREE_PLUS_ONE>::prove::<
+            false,
+            PERFORM_CHECKS,
+        >(&pp, &trace, num_vars, zinc_protocol::project_scalar_fn)
+        .expect("proof generation for verifier bench");
+
+    group.bench_function(BenchmarkId::new("Verify", &params), |bench| {
+        bench.iter_batched(
+            || proof.clone(),
+            |proof| {
+                black_box(
+                    ZincPlusPiop::<
+                        EcdsaBenchZincTypes,
+                        U,
+                        EcdsaBenchF,
+                        DEGREE_PLUS_ONE,
+                    >::verify::<_, PERFORM_CHECKS>(
+                        &pp,
+                        proof,
+                        &public_trace,
+                        num_vars,
+                        zinc_protocol::project_scalar_fn,
+                        sha_ecdsa_project_ideal,
+                    ),
+                )
+                .expect("Verifier failed");
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    eprint_proof_size(&params, &proof);
+}
+
+/// Per-step bench for the merged SHA+ECDSA UAIR. Mirrors
+/// `bench_ecdsa_slice_steps` with `ShaEcdsaUair` in place of the scalar
+/// slice and the `Sha256Ideal` projector wired in.
+#[allow(clippy::unwrap_used)]
+fn bench_sha_ecdsa_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = ShaEcdsaUair<EcdsaBenchInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_ecdsa_pp(num_vars);
+    let sig = U::signature();
+    let public_trace = trace.public(&sig);
+
+    let project_scalar = zinc_protocol::project_scalar_fn;
+
+    let params = format!("ShaEcdsa/nvars={num_vars}");
+
+    macro_rules! step_bench {
+        ($side:literal / $step_name:literal, setup = || $setup:expr, run = |$s:ident| $run:expr $(,)?) => {
+            group.bench_function(
+                BenchmarkId::new(format!("{}/{}", $side, $step_name), &params),
+                |b| {
+                    b.iter_batched(
+                        || $setup,
+                        |$s| {
+                            black_box($run).expect("step failed");
+                        },
+                        BatchSize::SmallInput,
+                    );
+                },
+            );
+        };
+    }
+
+    macro_rules! piop {
+        () => {
+            ZincPlusPiop::<EcdsaBenchZincTypes, U, EcdsaBenchF, DEGREE_PLUS_ONE>
+        };
+    }
+
+    // Prover per-step benchmarks. The merged UAIR declares lookup specs
+    // (SHA's carry-range checks), so step4 must be followed by step4b
+    // before step5 — otherwise the transcript diverges from the verifier's.
+    let p_committed = <piop!()>::step0_commit(&pp, &trace, num_vars).unwrap();
+    let p_projected = p_committed.clone().step1_combined(project_scalar).unwrap();
+    let p_ideal_checked = p_projected.clone().step2_ideal_check().unwrap();
+    let p_eval_projected = p_ideal_checked.clone().step3_eval_projection().unwrap();
+    let p_sumchecked = p_eval_projected
+        .clone()
+        .step4_sumcheck()
+        .unwrap()
+        .step4b_lookup()
+        .unwrap();
+    let p_mp_evaled = p_sumchecked.clone().step5_multipoint_eval().unwrap();
+    let p_lifted = p_mp_evaled.clone().step6_lift_and_project().unwrap();
+
+    step_bench!(
+        "Prove" / "0: Commit",
+        setup = || {},
+        run = |_s| <piop!()>::step0_commit(&pp, &trace, num_vars),
+    );
+    step_bench!(
+        "Prove" / "1: Prime projection (Combined)",
+        setup = || p_committed.clone(),
+        run = |s| s.step1_combined(project_scalar),
+    );
+    step_bench!(
+        "Prove" / "2: Ideal check (Combined)",
+        setup = || p_projected.clone(),
+        run = |s| s.step2_ideal_check(),
+    );
+    step_bench!(
+        "Prove" / "3: Eval projection",
+        setup = || p_ideal_checked.clone(),
+        run = |s| s.step3_eval_projection(),
+    );
+    step_bench!(
+        "Prove" / "4: Combined sumcheck",
+        setup = || p_eval_projected.clone(),
+        run = |s| s.step4_sumcheck(),
+    );
+    step_bench!(
+        "Prove" / "4b: Lookup (logup-GKR)",
+        setup = || p_eval_projected.clone().step4_sumcheck().unwrap(),
+        run = |s| s.step4b_lookup(),
+    );
+    step_bench!(
+        "Prove" / "5: Multi-point eval",
+        setup = || p_sumchecked.clone(),
+        run = |s| s.step5_multipoint_eval(),
+    );
+    step_bench!(
+        "Prove" / "6: Lift-and-project",
+        setup = || p_mp_evaled.clone(),
+        run = |s| s.step6_lift_and_project(),
+    );
+    step_bench!(
+        "Prove" / "7: PCS open",
+        setup = || p_lifted.clone(),
+        run = |s| s.step7_pcs_open::<PERFORM_CHECKS>(),
+    );
+
+    // Verifier per-step benchmarks
+    let proof: Proof<EcdsaBenchF> =
+        <piop!()>::prove::<false, PERFORM_CHECKS>(&pp, &trace, num_vars, project_scalar)
+            .expect("proof generation for verifier bench");
+
+    let v_transcript = <piop!()>::step0_reconstruct_transcript::<Sha256Ideal<EcdsaBenchF>>(
+        &pp,
+        proof.clone(),
+        &public_trace,
+        num_vars,
+    )
+    .unwrap();
+    let v_prime_projected = v_transcript.clone().step1_prime_projection().unwrap();
+    let v_ideal_checked = v_prime_projected
+        .clone()
+        .step2_ideal_check(sha_ecdsa_project_ideal)
+        .unwrap();
+    let v_eval_projected = v_ideal_checked
+        .clone()
+        .step3_eval_projection(project_scalar)
+        .unwrap();
+    let v_sumchecked = v_eval_projected
+        .clone()
+        .step4_sumcheck_verify()
+        .unwrap()
+        .step4b_lookup_verify()
+        .unwrap();
+    let v_mp_evaled = v_sumchecked.clone().step5_multipoint_eval::<U>().unwrap();
+    let v_lifted = v_mp_evaled.clone().step6_lifted_evals::<U>().unwrap();
+
+    step_bench!(
+        "Verify" / "0: Transcript reconstruct",
+        setup = || proof.clone(),
+        run = |proof| <piop!()>::step0_reconstruct_transcript::<Sha256Ideal<EcdsaBenchF>>(
+            &pp,
+            proof,
+            &public_trace,
+            num_vars,
+        ),
+    );
+    step_bench!(
+        "Verify" / "1: Prime projection",
+        setup = || v_transcript.clone(),
+        run = |s| s.step1_prime_projection(),
+    );
+    step_bench!(
+        "Verify" / "2: Ideal check",
+        setup = || v_prime_projected.clone(),
+        run = |s| s.step2_ideal_check(sha_ecdsa_project_ideal),
+    );
+    step_bench!(
+        "Verify" / "3: Eval projection",
+        setup = || v_ideal_checked.clone(),
+        run = |s| s.step3_eval_projection(project_scalar),
+    );
+    step_bench!(
+        "Verify" / "4: Sumcheck verify",
+        setup = || v_eval_projected.clone(),
+        run = |s| s.step4_sumcheck_verify(),
+    );
+    step_bench!(
+        "Verify" / "4b: Lookup verify",
+        setup = || v_eval_projected.clone().step4_sumcheck_verify().unwrap(),
+        run = |s| s.step4b_lookup_verify(),
+    );
+    step_bench!(
+        "Verify" / "5: Multi-point eval",
+        setup = || v_sumchecked.clone(),
+        run = |s| s.step5_multipoint_eval::<U>(),
+    );
+    step_bench!(
+        "Verify" / "6: Lifted evals",
+        setup = || v_mp_evaled.clone(),
+        run = |s| s.step6_lifted_evals::<U>(),
+    );
+    step_bench!(
+        "Verify" / "7: PCS verify",
+        setup = || v_lifted.clone(),
+        run = |s| s.step7_pcs_verify::<U, PERFORM_CHECKS>(),
+    );
+}
+
 fn bench_no_mult_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     do_bench_steps_uair::<TestUairNoMultiplication<i64>>(group, "NoMult", num_vars);
 }
@@ -1224,15 +1503,16 @@ fn e2e_benches(c: &mut Criterion) {
     // bench_sha_proxy_e2e(&mut group, 8);
     // bench_sha_proxy_e2e(&mut group, 10);
     // bench_sha_proxy_e2e(&mut group, 9);
-    // bench_sha256_slice_e2e(&mut group, 9);
-    // bench_ecdsa_slice_e2e(&mut group, 9);
+    bench_sha256_slice_e2e(&mut group, 9);
+    bench_ecdsa_slice_e2e(&mut group, 9);
+    bench_sha_ecdsa_e2e(&mut group, 9);
 
     // Lookup UAIR — exercises step4b (logup-GKR) + step5b
     // (MultiPointReducer) inside the full Zinc+ pipeline.
-    bench_int_lookup_e2e(&mut group, 9);
-    bench_int_lookup_multi_e2e(&mut group, 9);
-    bench_int_lookup_with_public_e2e(&mut group, 9);
-    bench_byte_decomp_lookup_e2e(&mut group, 9);
+    // bench_int_lookup_e2e(&mut group, 9);
+    // bench_int_lookup_multi_e2e(&mut group, 9);
+    // bench_int_lookup_with_public_e2e(&mut group, 9);
+    // bench_byte_decomp_lookup_e2e(&mut group, 9);
     group.finish();
 }
 
@@ -1260,14 +1540,15 @@ fn e2e_steps_benches(c: &mut Criterion) {
     // bench_sha_proxy_steps(&mut group, 12);
 
     //
-    //bench_sha256_slice_steps(&mut group, 9);
+    bench_sha256_slice_steps(&mut group, 9);
     bench_ecdsa_slice_steps(&mut group, 9);
+    bench_sha_ecdsa_steps(&mut group, 9);
     // Lookup UAIR — exercises step4b (logup-GKR) + step5b
     // (MultiPointReducer) inside the full Zinc+ pipeline.
-    bench_int_lookup_steps(&mut group, 9);
-    bench_int_lookup_multi_steps(&mut group, 9);
-    bench_int_lookup_with_public_steps(&mut group, 9);
-    bench_byte_decomp_lookup_steps(&mut group, 9);
+    // bench_int_lookup_steps(&mut group, 9);
+    // bench_int_lookup_multi_steps(&mut group, 9);
+    // bench_int_lookup_with_public_steps(&mut group, 9);
+    // bench_byte_decomp_lookup_steps(&mut group, 9);
 
     group.finish();
 }
