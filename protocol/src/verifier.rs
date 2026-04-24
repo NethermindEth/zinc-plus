@@ -570,7 +570,7 @@ where
         let mut subclaims = Vec::with_capacity(groups.len());
         for (group_idx, group) in groups.iter().enumerate() {
             let proof = &self.proof_lookup_proof[group_idx];
-            let num_witness_columns = group.column_indices.len();
+            let num_witness_columns = group.expressions.len();
             let sub = LookupArgument::<F>::verify(
                 &mut self.base.pcs_transcript.fs_transcript,
                 num_witness_columns,
@@ -700,17 +700,31 @@ where
                         zinc_piop::lookup::LookupError::NotImplemented,
                     ));
                 }
-                if sub.component_evals.witness_evals.len() != group.column_indices.len() {
+                if sub.component_evals.witness_evals.len() != group.expressions.len() {
                     return Err(ProtocolError::Lookup(
                         zinc_piop::lookup::LookupError::NotImplemented,
                     ));
                 }
-                for (l, &full_col_idx) in group.column_indices.iter().enumerate() {
-                    let wit_idx = crate::full_to_witness_col(full_col_idx, sig)
-                        .ok_or(ProtocolError::Lookup(
-                            zinc_piop::lookup::LookupError::NotImplemented,
-                        ))?;
-                    if group_evals[wit_idx] != sub.component_evals.witness_evals[l] {
+                // Evaluate each AffineExpr at ρ_row by combining the
+                // reducer's witness-only evals via MLE linearity:
+                //   expr(ρ_row) = Σ c_k · MLE[col_k](ρ_row) + constant
+                // and cross-check against the lookup argument's
+                // component_evals.witness_evals[l].
+                //
+                // All columns referenced by the expression must be
+                // witness columns (phase 2i first-iteration restriction).
+                for (l, expr) in group.expressions.iter().enumerate() {
+                    let mut derived = crate::i64_to_field::<F>(expr.constant, &self.field_cfg);
+                    for (full_col_idx, coeff) in expr.terms.iter() {
+                        let wit_idx = crate::full_to_witness_col(*full_col_idx, sig).ok_or(
+                            ProtocolError::Lookup(
+                                zinc_piop::lookup::LookupError::NotImplemented,
+                            ),
+                        )?;
+                        let c = crate::i64_to_field::<F>(*coeff, &self.field_cfg);
+                        derived = derived + c * &group_evals[wit_idx];
+                    }
+                    if derived != sub.component_evals.witness_evals[l] {
                         return Err(ProtocolError::Lookup(
                             zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
                         ));

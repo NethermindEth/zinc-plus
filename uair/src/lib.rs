@@ -19,7 +19,7 @@ use zinc_utils::{UNCHECKED, add, from_ref::FromRef, mul_by_scalar::MulByScalar, 
 
 use crate::ideal::{Ideal, IdealCheck};
 
-pub use lookup_types::{LookupColumnSpec, LookupTableType};
+pub use lookup_types::{AffineExpr, LookupColumnSpec, LookupTableType};
 
 /// The abstract interface to constraint building logic.
 /// In essence it allows to create constraints modulo ideals.

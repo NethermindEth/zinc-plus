@@ -152,7 +152,7 @@ use zinc_poly::{
     },
 };
 use zinc_uair::{
-    ConstraintBuilder, LookupColumnSpec, LookupTableType, PublicColumnLayout, ShiftSpec,
+    AffineExpr, ConstraintBuilder, LookupColumnSpec, LookupTableType, PublicColumnLayout, ShiftSpec,
     TotalColumnLayout, TraceRow, Uair, UairSignature, UairTrace,
     ideal::{Ideal, IdealCheck, IdealCheckError, rotation::RotationIdeal},
 };
@@ -358,21 +358,21 @@ where
         //   mu_e ∈ [0, 5] — 6-term register-update carry       → Word{width:3}
         let lookup_specs = vec![
             LookupColumnSpec {
-                column_index: cols::FLAT_W_MU_W,
+                expression: AffineExpr::single(cols::FLAT_W_MU_W),
                 table_type: LookupTableType::Word {
                     width: 2,
                     chunk_width: None,
                 },
             },
             LookupColumnSpec {
-                column_index: cols::FLAT_W_MU_A,
+                expression: AffineExpr::single(cols::FLAT_W_MU_A),
                 table_type: LookupTableType::Word {
                     width: 3,
                     chunk_width: None,
                 },
             },
             LookupColumnSpec {
-                column_index: cols::FLAT_W_MU_E,
+                expression: AffineExpr::single(cols::FLAT_W_MU_E),
                 table_type: LookupTableType::Word {
                     width: 3,
                     chunk_width: None,

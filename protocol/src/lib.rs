@@ -568,6 +568,58 @@ pub(crate) fn full_to_witness_col(
         .position(|&x| x == full_idx)
 }
 
+/// Lift a signed `i64` coefficient into the target prime field `F`.
+///
+/// Used when materialising [`zinc_uair::AffineExpr`] combinations into
+/// field-valued MLE evaluations (prover) or closing-out claims
+/// (verifier). Negative values are reduced modulo `F`'s prime via
+/// `0 - |v|`, so the result is the unique representative in `[0, p)`
+/// that matches the integer's residue class.
+#[allow(clippy::arithmetic_side_effects)]
+pub(crate) fn i64_to_field<F>(v: i64, cfg: &F::Config) -> F
+where
+    F: PrimeField + crypto_primitives::FromPrimitiveWithConfig,
+{
+    if v >= 0 {
+        F::from_with_cfg(v as u64, cfg)
+    } else {
+        // `v < 0` means `v.unsigned_abs()` fits a u64 iff v > i64::MIN;
+        // the clamp at MIN is fine because no AffineExpr coefficient in
+        // practice exceeds a handful of bits.
+        let mag: u64 = v.unsigned_abs();
+        F::zero_with_cfg(cfg) - &F::from_with_cfg(mag, cfg)
+    }
+}
+
+/// Evaluate an [`AffineExpr`] against a slice of per-column field values
+/// at a fixed row. Returns `Σ c_k · values[col_k] + constant` as an `F`.
+///
+/// * `values[col_k]` must be the eval of the k-th referenced column at
+///   the same row/point (e.g., all from `projected_trace_f` at a fixed
+///   hypercube index, or all from the reducer's `witness_evals_at_rho_row`
+///   after witness-index translation).
+/// * Used by prover step 4b (when synthesising the combined MLE) and by
+///   verifier step 5 (when cross-checking the lookup argument's
+///   component evals against the reducer claims).
+#[allow(clippy::arithmetic_side_effects)]
+pub(crate) fn evaluate_affine_expr<F>(
+    expr: &zinc_uair::AffineExpr,
+    values: &[F],
+    cfg: &F::Config,
+) -> F
+where
+    F: PrimeField
+        + crypto_primitives::FromPrimitiveWithConfig
+        + for<'a> zinc_utils::mul_by_scalar::MulByScalar<&'a F>,
+{
+    let mut acc = i64_to_field::<F>(expr.constant, cfg);
+    for (col_idx, coeff) in &expr.terms {
+        let c = i64_to_field::<F>(*coeff, cfg);
+        acc = acc + c * &values[*col_idx];
+    }
+    acc
+}
+
 /// Project a DensePolynomial scalar to DynamicPolynomialF by projecting each
 /// coefficient via \phi_q.
 pub fn project_scalar_fn<R, F, const D: usize>(
@@ -1147,6 +1199,32 @@ mod tests {
                         unreachable!("zero ideals are filtered before this closure runs")
                     }
                 }
+            },
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// End-to-end test: ECDSA scalar slice + F_p doubling at row 0.
+    ///
+    /// Step 2 of the F_p / EC-operation slice: exercises the F_n
+    /// quotient-witness lift (scalar accumulation, bit range, inverse,
+    /// signature modular check) and the F_p quotient-witness lift on
+    /// Jacobian doubling at row 0 only (`s_init`-gated). Step 3 will
+    /// extend doubling to all 256 accumulation rows and wire the
+    /// Shamir-trick addition.
+    #[test]
+    fn test_e2e_ecdsa_slice() {
+        use zinc_test_uair::EcdsaScalarSliceUair;
+        use zinc_uair::ideal::ImpossibleIdeal;
+        let num_vars = 9; // 512 rows; slice uses 257 (rows 0..=256)
+        do_test_f::<EcdsaF, EcdsaZincTypes, EcdsaScalarSliceUair<EcdsaInt>, ImpossibleIdeal>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+            |_ideal, _field_cfg| {
+                unreachable!(
+                    "ECDSA slice uses only assert_zero; no non-trivial ideals"
+                )
             },
             |_| {},
             |res| res.unwrap(),

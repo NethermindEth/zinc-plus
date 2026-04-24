@@ -527,18 +527,34 @@ impl_with_type_bounds!(ProverSumchecked
                 .checked_sub(num_groups)
                 .and_then(|n| n.checked_add(group_idx))
                 .expect("trace must contain one multiplicity col per lookup group");
-            for &wit_idx in &group.column_indices {
-                assert_ne!(
-                    wit_idx, mult_idx,
-                    "lookup witness and multiplicity columns must differ"
-                );
+            // Multiplicity must not appear in any lookup expression within
+            // the group (the GKR argument would double-count).
+            for expr in &group.expressions {
+                for (wit_idx, _) in expr.terms.iter() {
+                    assert_ne!(
+                        *wit_idx, mult_idx,
+                        "lookup expression cannot reference the multiplicity column"
+                    );
+                }
             }
 
-            let wit_mles: Vec<&DenseMultilinearExtension<F::Inner>> = group
-                .column_indices
+            // Synthesize one dense MLE per affine expression. For
+            // `AffineExpr::single(idx)` this is just a clone of
+            // `projected_trace_f[idx]`. For real combos it computes
+            // `Σ c_k · col_k + constant` row-by-row.
+            let synthesized: Vec<DenseMultilinearExtension<F::Inner>> = group
+                .expressions
                 .iter()
-                .map(|&idx| &self.projected_trace_f[idx])
+                .map(|expr| {
+                    synthesize_affine_mle::<F>(
+                        expr,
+                        &self.projected_trace_f,
+                        &self.field_cfg,
+                    )
+                })
                 .collect();
+            let wit_mles: Vec<&DenseMultilinearExtension<F::Inner>> =
+                synthesized.iter().collect();
             let mul_mle = &self.projected_trace_f[mult_idx];
             let table_mle =
                 build_table_mle::<F>(&group.table_type, self.base.num_vars, &self.field_cfg);
@@ -890,6 +906,57 @@ fn commit_optionally<Zt: ZipTypes, Lc: LinearCode<Zt>>(
         let (hint, commitment) = ZipPlus::commit(pp, trace)?;
         Ok((Some(hint), commitment))
     }
+}
+
+/// Materialise one dense MLE from an [`AffineExpr`] over the projected
+/// trace. At each hypercube index `b` the returned MLE stores
+///
+/// ```text
+///   Σ_{(k, c) in expr.terms} c · projected_trace_f[k].evaluations[b] + constant
+/// ```
+///
+/// lifted from `i64` coefficients to the target field via
+/// [`i64_to_field`](crate::i64_to_field). Used by step 4b to feed the
+/// logup-GKR argument with a synthesized witness column per lookup spec.
+#[allow(clippy::arithmetic_side_effects)]
+pub(crate) fn synthesize_affine_mle<F>(
+    expr: &zinc_uair::AffineExpr,
+    projected_trace_f: &[DenseMultilinearExtension<F::Inner>],
+    cfg: &F::Config,
+) -> DenseMultilinearExtension<F::Inner>
+where
+    F: PrimeField + InnerTransparentField + FromPrimitiveWithConfig,
+    F::Inner: ConstIntSemiring + Send + Sync + Zero + Default,
+{
+    assert!(!projected_trace_f.is_empty(), "empty trace in synthesize_affine_mle");
+    let num_vars = projected_trace_f[0].num_vars;
+    let row_count = 1usize << num_vars;
+    let zero_inner = F::zero_with_cfg(cfg).into_inner();
+
+    // Precompute lifted coefficients once; the row loop is dominated by
+    // per-row adds/muls in F so this avoids `i64_to_field` per cell.
+    let f_terms: Vec<(usize, F)> = expr
+        .terms
+        .iter()
+        .map(|(idx, c)| (*idx, crate::i64_to_field::<F>(*c, cfg)))
+        .collect();
+    let f_constant: F = crate::i64_to_field::<F>(expr.constant, cfg);
+
+    let evals: Vec<F::Inner> = (0..row_count)
+        .map(|b| {
+            let mut acc = f_constant.clone();
+            for (col_idx, coeff) in &f_terms {
+                let v = F::new_unchecked_with_cfg(
+                    projected_trace_f[*col_idx].evaluations[b].clone(),
+                    cfg,
+                );
+                acc = acc + coeff.clone() * &v;
+            }
+            acc.into_inner()
+        })
+        .collect();
+
+    DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, zero_inner)
 }
 
 /// Build the canonical table MLE for a lookup group's table type.

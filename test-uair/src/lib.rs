@@ -23,7 +23,7 @@ use zinc_poly::{
     },
 };
 use zinc_uair::{
-    ConstraintBuilder, LookupColumnSpec, LookupTableType, PublicColumnLayout, ShiftSpec,
+    AffineExpr, ConstraintBuilder, LookupColumnSpec, LookupTableType, PublicColumnLayout, ShiftSpec,
     TotalColumnLayout, TraceRow, Uair, UairSignature, UairTrace,
     ideal::{DegreeOneIdeal, ImpossibleIdeal},
 };
@@ -897,7 +897,7 @@ where
         // 2 int witness columns: v (index 0) and m (index 1).
         let total = TotalColumnLayout::new(0, 0, 2);
         let lookup_specs = vec![LookupColumnSpec {
-            column_index: 0,
+            expression: AffineExpr::single(0),
             table_type: LookupTableType::Word {
                 width: INT_LOOKUP_TABLE_WIDTH,
                 chunk_width: None,
@@ -1022,14 +1022,14 @@ where
         let total = TotalColumnLayout::new(0, 0, 3);
         let lookup_specs = vec![
             LookupColumnSpec {
-                column_index: 0,
+                expression: AffineExpr::single(0),
                 table_type: LookupTableType::Word {
                     width: INT_LOOKUP_TABLE_WIDTH,
                     chunk_width: None,
                 },
             },
             LookupColumnSpec {
-                column_index: 1,
+                expression: AffineExpr::single(1),
                 table_type: LookupTableType::Word {
                     width: INT_LOOKUP_TABLE_WIDTH,
                     chunk_width: None,
@@ -1149,7 +1149,7 @@ where
         let public = PublicColumnLayout::new(0, 0, 1);
         // `v` sits at full-trace index 1 (public col is index 0).
         let lookup_specs = vec![LookupColumnSpec {
-            column_index: 1,
+            expression: AffineExpr::single(1),
             table_type: LookupTableType::Word {
                 width: INT_LOOKUP_TABLE_WIDTH,
                 chunk_width: None,
@@ -1275,14 +1275,14 @@ where
         let total = TotalColumnLayout::new(0, 0, 4);
         let lookup_specs = vec![
             LookupColumnSpec {
-                column_index: 1,
+                expression: AffineExpr::single(1),
                 table_type: LookupTableType::Word {
                     width: INT_LOOKUP_TABLE_WIDTH,
                     chunk_width: None,
                 },
             },
             LookupColumnSpec {
-                column_index: 2,
+                expression: AffineExpr::single(2),
                 table_type: LookupTableType::Word {
                     width: INT_LOOKUP_TABLE_WIDTH,
                     chunk_width: None,

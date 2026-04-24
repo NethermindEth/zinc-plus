@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use thiserror::Error;
-use zinc_uair::LookupTableType;
+use zinc_uair::{AffineExpr, LookupTableType};
 
 // ---------------------------------------------------------------------------
 // Per-group proof (BatchedDecompLogup)
@@ -94,33 +94,38 @@ pub struct BatchedLookupProof<F> {
 // Grouping utility
 // ---------------------------------------------------------------------------
 
-/// A group of columns that all look up into the same decomposed table.
+/// A group of lookup expressions that all target the same table.
 ///
-/// Produced by [`group_lookup_specs`] and consumed by the pipeline.
+/// Produced by [`group_lookup_specs`] and consumed by the pipeline. Each
+/// `expression` is an affine combination of committed trace columns that
+/// the prover synthesizes row-by-row; the verifier reconstructs its
+/// evaluation at `rho_row` via MLE linearity.
 #[derive(Debug)]
 pub struct LookupGroup {
     /// The shared table type.
     pub table_type: LookupTableType,
-    /// Indices of all columns in this group.
-    pub column_indices: Vec<usize>,
+    /// Affine combinations whose per-row values lie in the table.
+    pub expressions: Vec<AffineExpr>,
 }
 
 /// Groups a list of [`LookupColumnSpec`](zinc_uair::LookupColumnSpec)s
 /// by their table type.
 ///
-/// Columns with the same `LookupTableType` are batched into a single
-/// `BatchedDecompLogupProtocol` instance.
+/// Specs with the same `LookupTableType` are batched into a single
+/// `LookupArgument` invocation. Each spec contributes one expression to
+/// the group; the per-spec order within the group matches the order of
+/// specs in the input (within a given table type).
 pub fn group_lookup_specs(specs: &[zinc_uair::LookupColumnSpec]) -> Vec<LookupGroup> {
-    let mut map: BTreeMap<LookupTableType, Vec<usize>> = BTreeMap::new();
+    let mut map: BTreeMap<LookupTableType, Vec<AffineExpr>> = BTreeMap::new();
     for spec in specs {
         map.entry(spec.table_type.clone())
             .or_default()
-            .push(spec.column_index);
+            .push(spec.expression.clone());
     }
     map.into_iter()
-        .map(|(table_type, column_indices)| LookupGroup {
+        .map(|(table_type, expressions)| LookupGroup {
             table_type,
-            column_indices,
+            expressions,
         })
         .collect()
 }
