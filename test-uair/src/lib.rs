@@ -1376,6 +1376,112 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// AffineSumLookupUair: demonstrates Phase 2i's AffineExpr lookup spec.
+//
+// Single lookup group with one non-trivial affine expression — `x + y`,
+// range-checked into `Word { width: 2 }`. This exercises:
+//   * prover step4b synthesizing the combined MLE from the two input
+//     column MLEs (not just reading a single committed column);
+//   * verifier step5 reconstructing the combined value at `ρ_row` via
+//     MLE linearity (`eval[x+y](ρ) = eval[x](ρ) + eval[y](ρ)`), then
+//     cross-checking against the lookup argument's `witness_evals[0]`.
+//
+// Layout (3 int witness columns):
+//   col[0]: `x` — row-wise in `{0, 1}`
+//   col[1]: `y` — row-wise in `{0, 1}`
+//   col[2]: `m` — multiplicity for Word{width:2} (table entries 0..3)
+//
+// `num_vars >= 2` is required so the 4-entry table fits with zero-padding.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct AffineSumLookupUair<R>(PhantomData<R>);
+
+impl<R> Uair for AffineSumLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(0, 0, 3);
+        // x + y ∈ Word{2}, column 0 = x, column 1 = y.
+        let lookup_specs = vec![LookupColumnSpec {
+            expression: AffineExpr {
+                terms: vec![(0, 1), (1, 1)],
+                constant: 0,
+            },
+            table_type: LookupTableType::Word {
+                width: 2,
+                chunk_width: None,
+            },
+        }];
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], lookup_specs)
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        // Trivially-satisfied constraint (same pattern as IntLookupUair).
+        let x = &up.int[0];
+        b.assert_in_ideal(
+            x.clone() - x,
+            &ideal_from_ref(&DegreeOneIdeal::new(R::from(2u32))),
+        );
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for AffineSumLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        assert!(num_vars >= 2, "AffineSumLookupUair requires num_vars >= 2");
+        let row_count = 1usize << num_vars;
+
+        let x_raw: Vec<u32> = (0..row_count).map(|_| rng.next_u32() & 1).collect();
+        let y_raw: Vec<u32> = (0..row_count).map(|_| rng.next_u32() & 1).collect();
+
+        // m counts occurrences of x[r] + y[r] ∈ {0, 1, 2} in the table
+        // domain (index 3 stays 0 since 3 never appears). Indices past
+        // the 4-entry table are naturally 0 as well.
+        let mut mults_raw = vec![0u32; row_count];
+        for (&x, &y) in x_raw.iter().zip(y_raw.iter()) {
+            mults_raw[(x + y) as usize] += 1;
+        }
+
+        let zero = R::from(0u32);
+        let build = |raw: Vec<u32>| -> DenseMultilinearExtension<R> {
+            DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                raw.into_iter().map(R::from).collect(),
+                zero.clone(),
+            )
+        };
+        UairTrace {
+            binary_poly: vec![].into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![build(x_raw), build(y_raw), build(mults_raw)].into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crypto_primitives::crypto_bigint_int::Int;

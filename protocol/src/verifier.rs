@@ -528,6 +528,7 @@ where
     F: InnerTransparentField
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Zt::Int>
+        + for<'b> MulByScalar<&'b F>
         + FromRef<F>
         + Send
         + Sync
@@ -581,6 +582,30 @@ where
             .map_err(|_| {
                 ProtocolError::Lookup(zinc_piop::lookup::LookupError::FinalEvaluationMismatch)
             })?;
+
+            // Bind the prover-claimed `table_eval` to the canonical
+            // table MLE the verifier independently constructs from
+            // `group.table_type`. Without this check the prover could
+            // substitute an arbitrary table; the existing witness/
+            // multiplicity bindings don't close this gap because the
+            // logup identity `Σ 1/(α-v) = Σ m/(α-T)` admits many (T, m)
+            // pairs for a given (v, α).
+            let table_mle = crate::prover::build_table_mle::<F>(
+                &group.table_type,
+                self.base.num_vars,
+                &self.field_cfg,
+                &self.projecting_element_f,
+            );
+            use zinc_poly::mle::MultilinearExtensionWithConfig;
+            let expected_table_eval = table_mle
+                .evaluate_with_config(&sub.rho_row, &self.field_cfg)
+                .expect("table MLE num_vars matches protocol num_vars");
+            if expected_table_eval != sub.component_evals.table_eval {
+                return Err(ProtocolError::Lookup(
+                    zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
+                ));
+            }
+
             subclaims.push(sub);
         }
 

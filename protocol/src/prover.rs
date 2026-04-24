@@ -107,6 +107,10 @@ pub struct ProverEvalProjected<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, con
     // New
     projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
     projected_scalars_f: HashMap<U::Scalar, F>,
+    /// Projecting element `a` used for ψ_a (persisted across later
+    /// steps so lookup-table construction for `BitPoly` lookups can
+    /// project bit-polys into the same field element).
+    projecting_element_f: F,
 }
 
 /// After step 4 (sumcheck).
@@ -118,6 +122,9 @@ pub struct ProverSumchecked<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const 
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
     projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
+    /// Carried through from step3 for step4b's BitPoly lookup-table
+    /// construction.
+    projecting_element_f: F,
 
     // New
     cpr_proof: CombinedPolyResolverProof<F>,
@@ -416,6 +423,7 @@ impl_with_type_bounds!(ProverIdealChecked
             ic_eval_point: self.ic_eval_point,
             projected_trace_f,
             projected_scalars_f,
+            projecting_element_f,
         })
     }
 });
@@ -477,6 +485,7 @@ impl_with_type_bounds!(ProverEvalProjected
             projected_trace: self.projected_trace,
             ic_proof: self.ic_proof,
             projected_trace_f: self.projected_trace_f,
+            projecting_element_f: self.projecting_element_f,
             cpr_proof,
             cpr_eval_point: cpr_prover_state.evaluation_point,
             combined_sumcheck,
@@ -556,8 +565,12 @@ impl_with_type_bounds!(ProverSumchecked
             let wit_mles: Vec<&DenseMultilinearExtension<F::Inner>> =
                 synthesized.iter().collect();
             let mul_mle = &self.projected_trace_f[mult_idx];
-            let table_mle =
-                build_table_mle::<F>(&group.table_type, self.base.num_vars, &self.field_cfg);
+            let table_mle = build_table_mle::<F>(
+                &group.table_type,
+                self.base.num_vars,
+                &self.field_cfg,
+                &self.projecting_element_f,
+            );
 
             let (proof, subclaim) = LookupArgument::<F>::prove(
                 &mut self.base.pcs_transcript.fs_transcript,
@@ -962,15 +975,26 @@ where
 /// Build the canonical table MLE for a lookup group's table type.
 ///
 /// The MLE has `num_vars` variables (so `2^num_vars` entries). The first
-/// `2^table_width` entries are the identity table `0..2^table_width`;
-/// any remaining entries are padded with 0.
+/// `2^table_width` entries encode the table; any remaining entries are
+/// padded with 0 (which, since 0 is ψ_a of the zero bit-poly and also
+/// the integer 0, is a valid "padded" table value in both variants).
+///
+/// * `Word { width }`: entry `j = j as F` (integer in `[0, 2^width)`).
+/// * `BitPoly { width }`: entry `j = ψ_a(bit-poly of j) = Σ_i bit_i(j)·a^i`,
+///   where `a = *projecting_element_f`. Required for the protocol's
+///   ψ_a-projected view of bit-poly columns to line up with the table.
+#[allow(clippy::arithmetic_side_effects)]
 pub(crate) fn build_table_mle<F>(
     table_type: &LookupTableType,
     num_vars: usize,
     cfg: &F::Config,
+    projecting_element_f: &F,
 ) -> DenseMultilinearExtension<F::Inner>
 where
-    F: PrimeField + InnerTransparentField + FromPrimitiveWithConfig,
+    F: PrimeField
+        + InnerTransparentField
+        + FromPrimitiveWithConfig
+        + for<'a> MulByScalar<&'a F>,
 {
     let width = match table_type {
         LookupTableType::Word { width, .. } | LookupTableType::BitPoly { width, .. } => *width,
@@ -982,10 +1006,35 @@ where
     let row_count = 1usize << num_vars;
     let table_size = 1usize << width;
     let zero_inner = F::zero_with_cfg(cfg).into_inner();
+
+    let entry_at = |j: u64| -> F::Inner {
+        match table_type {
+            LookupTableType::Word { .. } => {
+                F::from_with_cfg(j, cfg).into_inner()
+            }
+            LookupTableType::BitPoly { .. } => {
+                // Horner: Σ_{i=0..width} bit_i(j) · a^i, evaluated
+                // bottom-up so each step adds a bit times the running
+                // power of `a`.
+                let mut acc = F::zero_with_cfg(cfg);
+                let mut pow = F::from_with_cfg(1u64, cfg);
+                for i in 0..width {
+                    if (j >> i) & 1 == 1 {
+                        acc = acc + pow.clone();
+                    }
+                    if i + 1 < width {
+                        pow = pow * projecting_element_f;
+                    }
+                }
+                acc.into_inner()
+            }
+        }
+    };
+
     let mut evals = Vec::with_capacity(row_count);
     for j in 0..row_count {
         if j < table_size {
-            evals.push(F::from_with_cfg(j as u64, cfg).into_inner());
+            evals.push(entry_at(j as u64));
         } else {
             evals.push(zero_inner.clone());
         }

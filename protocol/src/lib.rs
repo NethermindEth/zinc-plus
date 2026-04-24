@@ -653,10 +653,10 @@ mod tests {
     use zinc_poly::univariate::{binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct};
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
-        BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, ByteDecompLookupUair,
-        GenerateRandomTrace, INT_LOOKUP_TABLE_WIDTH, IntLookupMultiUair, IntLookupUair,
-        IntLookupWithPublicUair, Sha256CompressionSliceUair, Sha256Ideal, TestUairMixedShifts,
-        TestUairNoMultiplication, TestUairSimpleMultiplication,
+        AffineSumLookupUair, BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair,
+        ByteDecompLookupUair, GenerateRandomTrace, INT_LOOKUP_TABLE_WIDTH, IntLookupMultiUair,
+        IntLookupUair, IntLookupWithPublicUair, Sha256CompressionSliceUair, Sha256Ideal,
+        TestUairMixedShifts, TestUairNoMultiplication, TestUairSimpleMultiplication,
     };
     use zinc_uair::{
         degree_counter::count_max_degree,
@@ -1939,6 +1939,85 @@ mod tests {
         assert!(
             result.is_err(),
             "verifier must reject an out-of-range chunk via the lookup argument"
+        );
+    }
+
+    // Phase 2i: first UAIR that uses a non-trivial AffineExpr in its
+    // LookupColumnSpec. The spec asserts `x + y ∈ Word{width:2}`; the
+    // prover synthesises the combined MLE, the verifier cross-checks
+    // the lookup argument's `witness_evals[0]` against
+    // `reducer_witness_evals_at_rho_row[x] + reducer_witness_evals_at_rho_row[y]`.
+    #[test]
+    fn test_e2e_affine_sum_lookup() {
+        let num_vars = 4;
+        let mut rng = rng();
+
+        let trace = AffineSumLookupUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        let sig = AffineSumLookupUair::<ZtInt>::signature();
+        let public_trace = trace.public(&sig);
+
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+        let proof = ZincPlusPiop::<
+            TestZincTypesIprs,
+            AffineSumLookupUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+        >::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("honest prove must succeed on AffineSumLookupUair");
+        ZincPlusPiop::<TestZincTypesIprs, AffineSumLookupUair<ZtInt>, F, DEGREE_PLUS_ONE>::verify::<
+            _, CHECKED,
+        >(&pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!())
+            .expect("honest verify must succeed on AffineSumLookupUair");
+    }
+
+    // Soundness for the AffineExpr cross-check: tampering one of the
+    // reducer's witness_evals_at_rho_row entries makes the verifier's
+    // reconstructed `x + y` at ρ_row diverge from the lookup argument's
+    // claimed `witness_evals[0]`, triggering FinalEvaluationMismatch.
+    #[test]
+    fn test_e2e_affine_sum_lookup_tampered_rho_eval_rejected() {
+        let num_vars = 4;
+        let mut rng = rng();
+
+        let trace = AffineSumLookupUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        let sig = AffineSumLookupUair::<ZtInt>::signature();
+        let public_trace = trace.public(&sig);
+
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+        let mut proof = ZincPlusPiop::<
+            TestZincTypesIprs,
+            AffineSumLookupUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+        >::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("prove should succeed with honest trace");
+
+        // Tamper the reducer's claimed eval of column x at ρ_row
+        // (witness_evals_at_rho_row[0][0]).
+        let reducer = proof
+            .lookup_reducer
+            .as_mut()
+            .expect("reducer present for a UAIR with lookups");
+        reducer.witness_evals_at_rho_row[0][0] = reducer.witness_evals_at_rho_row[0][0].clone()
+            + F::from_with_cfg(1u64, &sample_field_cfg());
+
+        let result = ZincPlusPiop::<
+            TestZincTypesIprs,
+            AffineSumLookupUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+        >::verify::<_, CHECKED>(
+            &pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!(),
+        );
+        assert!(
+            result.is_err(),
+            "verifier must reject a tampered witness_evals_at_rho_row entry"
         );
     }
 }
