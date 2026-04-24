@@ -111,41 +111,40 @@ pub mod cols {
     // `protocol::prover::step4b_lookup`. We have 2 groups → int[25] and
     // int[26] must be the multiplicity columns.
     //
-    // SHA publics (0..6):
+    // SHA publics (0..5):
     pub const SHA_S_INIT: usize = 0;
-    pub const SHA_S_ACTIVE: usize = 1;
-    pub const SHA_S_SCHED_ANCH: usize = 2;
-    pub const SHA_S_UPD_ANCH: usize = 3;
-    pub const SHA_S_FINAL: usize = 4;
-    pub const SHA_PA_K: usize = 5;
-    // ECDSA publics (6..12):
-    pub const ECDSA_S_INIT: usize = 6;
-    pub const ECDSA_S_ACCUM: usize = 7;
-    pub const ECDSA_S_FINAL: usize = 8;
-    pub const ECDSA_PA_E: usize = 9;
-    pub const ECDSA_PA_R: usize = 10;
-    pub const ECDSA_PA_S: usize = 11;
-    pub const NUM_INT_PUB: usize = 12;
+    pub const SHA_S_SCHED_ANCH: usize = 1;
+    pub const SHA_S_UPD_ANCH: usize = 2;
+    pub const SHA_S_FINAL: usize = 3;
+    pub const SHA_PA_K: usize = 4;
+    // ECDSA publics (5..11):
+    pub const ECDSA_S_INIT: usize = 5;
+    pub const ECDSA_S_ACCUM: usize = 6;
+    pub const ECDSA_S_FINAL: usize = 7;
+    pub const ECDSA_PA_E: usize = 8;
+    pub const ECDSA_PA_R: usize = 9;
+    pub const ECDSA_PA_S: usize = 10;
+    pub const NUM_INT_PUB: usize = 11;
 
-    // SHA witnesses (12..15): carry-range values.
-    pub const SHA_W_MU_W: usize = 12;
-    pub const SHA_W_MU_A: usize = 13;
-    pub const SHA_W_MU_E: usize = 14;
-    // ECDSA witnesses (15..25):
-    pub const ECDSA_W_B1: usize = 15;
-    pub const ECDSA_W_B2: usize = 16;
-    pub const ECDSA_W_U1: usize = 17;
-    pub const ECDSA_W_U2: usize = 18;
-    pub const ECDSA_W_W_INV: usize = 19;
-    pub const ECDSA_W_XHAT: usize = 20;
-    pub const ECDSA_W_K: usize = 21;
-    pub const ECDSA_W_Q_U1: usize = 22;
-    pub const ECDSA_W_Q_U2: usize = 23;
-    pub const ECDSA_W_Q_SW: usize = 24;
-    // Multiplicity columns (25..27) — MUST be the last two int cols.
-    pub const SHA_W_M_W2: usize = 25; // group 0 (Word{width:2}, for mu_W)
-    pub const SHA_W_M_W3: usize = 26; // group 1 (Word{width:3}, for mu_a/mu_e)
-    pub const NUM_INT: usize = 27;
+    // SHA witnesses (11..14): carry-range values.
+    pub const SHA_W_MU_W: usize = 11;
+    pub const SHA_W_MU_A: usize = 12;
+    pub const SHA_W_MU_E: usize = 13;
+    // ECDSA witnesses (14..24):
+    pub const ECDSA_W_B1: usize = 14;
+    pub const ECDSA_W_B2: usize = 15;
+    pub const ECDSA_W_U1: usize = 16;
+    pub const ECDSA_W_U2: usize = 17;
+    pub const ECDSA_W_W_INV: usize = 18;
+    pub const ECDSA_W_XHAT: usize = 19;
+    pub const ECDSA_W_K: usize = 20;
+    pub const ECDSA_W_Q_U1: usize = 21;
+    pub const ECDSA_W_Q_U2: usize = 22;
+    pub const ECDSA_W_Q_SW: usize = 23;
+    // Multiplicity columns (24..26) — MUST be the last two int cols.
+    pub const SHA_W_M_W2: usize = 24; // group 0 (Word{width:2}, for mu_W)
+    pub const SHA_W_M_W3: usize = 25; // group 1 (Word{width:3}, for mu_a/mu_e)
+    pub const NUM_INT: usize = 26;
 
     // ===== Flat indices ====================================================
     // Binary-poly flats coincide with the bp-section indices (bp section
@@ -280,9 +279,11 @@ where
         let w_t1 = &bp[cols::W_T1];
         let w_ov_lsig1 = &bp[cols::W_OV_LSIG1];
 
-        // SHA selectors.
+        // SHA selectors. `s_active` was dropped — C1–C6 are row-local
+        // rotation identities that apply on every row unconditionally, so
+        // the identically-1 selector was removed for a degree reduction
+        // (2 → 1 for C1–C6, though C7–C12 keep their selectors).
         let sha_s_init = &ints[cols::SHA_S_INIT];
-        let sha_s_active = &ints[cols::SHA_S_ACTIVE];
         let sha_s_sched_anch = &ints[cols::SHA_S_SCHED_ANCH];
         let sha_s_upd_anch = &ints[cols::SHA_S_UPD_ANCH];
         let sha_s_final = &ints[cols::SHA_S_FINAL];
@@ -327,46 +328,31 @@ where
             DensePolynomial::<R, 32>::new(coeffs)
         };
 
-        // C1: Sigma_0 rotation (Q[X]-lifted).
+        // C1–C6: row-local rotation identities, no selector.
         b.assert_in_ideal(
-            sha_s_active.clone()
-                * &(mbs(w_a, &rho_sig0).expect("a · rho_sig0 overflow") - w_sig0
-                    - &mbs(w_ov_sig0, &two_scalar).expect("2 · ov_sig0 overflow")),
+            mbs(w_a, &rho_sig0).expect("a · rho_sig0 overflow") - w_sig0
+                - &mbs(w_ov_sig0, &two_scalar).expect("2 · ov_sig0 overflow"),
             &ideal_rot_xw1,
         );
-        // C2: Sigma_1 rotation.
         b.assert_in_ideal(
-            sha_s_active.clone()
-                * &(mbs(w_e, &rho_sig1).expect("e · rho_sig1 overflow") - w_sig1
-                    - &mbs(w_ov_sig1, &two_scalar).expect("2 · ov_sig1 overflow")),
+            mbs(w_e, &rho_sig1).expect("e · rho_sig1 overflow") - w_sig1
+                - &mbs(w_ov_sig1, &two_scalar).expect("2 · ov_sig1 overflow"),
             &ideal_rot_xw1,
         );
-        // C3: sigma_0 right-shift decomposition (exact).
         b.assert_zero(
-            sha_s_active.clone()
-                * &(w_big_w.clone() - w_t0
-                    - &mbs(w_s0, &x_pow_3).expect("X^3 · S_0 overflow")),
+            w_big_w.clone() - w_t0 - &mbs(w_s0, &x_pow_3).expect("X^3 · S_0 overflow"),
         );
-        // C4: sigma_0 rotation.
         b.assert_in_ideal(
-            sha_s_active.clone()
-                * &(mbs(w_big_w, &rho_lsig0).expect("W · rho_lsig0 overflow") + w_s0
-                    - w_lsig0
-                    - &mbs(w_ov_lsig0, &two_scalar).expect("2 · ov_lsig0 overflow")),
+            mbs(w_big_w, &rho_lsig0).expect("W · rho_lsig0 overflow") + w_s0 - w_lsig0
+                - &mbs(w_ov_lsig0, &two_scalar).expect("2 · ov_lsig0 overflow"),
             &ideal_rot_xw1,
         );
-        // C5: sigma_1 right-shift decomposition.
         b.assert_zero(
-            sha_s_active.clone()
-                * &(w_big_w.clone() - w_t1
-                    - &mbs(w_s1, &x_pow_10).expect("X^10 · S_1 overflow")),
+            w_big_w.clone() - w_t1 - &mbs(w_s1, &x_pow_10).expect("X^10 · S_1 overflow"),
         );
-        // C6: sigma_1 rotation.
         b.assert_in_ideal(
-            sha_s_active.clone()
-                * &(mbs(w_big_w, &rho_lsig1).expect("W · rho_lsig1 overflow") + w_s1
-                    - w_lsig1
-                    - &mbs(w_ov_lsig1, &two_scalar).expect("2 · ov_lsig1 overflow")),
+            mbs(w_big_w, &rho_lsig1).expect("W · rho_lsig1 overflow") + w_s1 - w_lsig1
+                - &mbs(w_ov_lsig1, &two_scalar).expect("2 · ov_lsig1 overflow"),
             &ideal_rot_xw1,
         );
 
@@ -791,10 +777,9 @@ where
             to_bin_mle(to_bits(&maj_vals)),
         ];
 
-        // SHA selectors.
+        // SHA selectors. `s_active` dropped — was identically 1.
         let mut sha_s_init_col: Vec<R> = (0..n).map(|_| R::ZERO).collect();
         sha_s_init_col[0] = R::ONE;
-        let sha_s_active_col: Vec<R> = (0..n).map(|_| R::ONE).collect();
         let sched_anch_last = n - 17;
         let sha_s_sched_anch_col: Vec<R> = (0..n)
             .map(|i| if i <= sched_anch_last { R::ONE } else { R::ZERO })
@@ -926,25 +911,24 @@ where
             |col: Vec<R>| -> DenseMultilinearExtension<R> { col.into_iter().collect() };
 
         let int = vec![
-            // SHA publics (0..6):
+            // SHA publics (0..5):
             to_int_mle(sha_s_init_col),
-            to_int_mle(sha_s_active_col),
             to_int_mle(sha_s_sched_anch_col),
             to_int_mle(sha_s_upd_anch_col),
             to_int_mle(sha_s_final_col),
             to_int_mle(sha_pa_k_col),
-            // ECDSA publics (6..12):
+            // ECDSA publics (5..11):
             to_int_mle(e_s_init_col),
             to_int_mle(e_s_accum_col),
             to_int_mle(e_s_final_col),
             to_int_mle(e_pa_e_col),
             to_int_mle(e_pa_r_col),
             to_int_mle(e_pa_s_col),
-            // SHA witnesses (12..15):
+            // SHA witnesses (11..14):
             to_int_mle(sha_mu_w_col),
             to_int_mle(sha_mu_a_col),
             to_int_mle(sha_mu_e_col),
-            // ECDSA witnesses (15..25):
+            // ECDSA witnesses (14..24):
             to_int_mle(e_b1_col),
             to_int_mle(e_b2_col),
             to_int_mle(e_u1_col),
@@ -955,7 +939,7 @@ where
             to_int_mle(e_q_u1_col),
             to_int_mle(e_q_u2_col),
             to_int_mle(e_q_sw_col),
-            // Multiplicity cols (25..27) — last N int cols by convention:
+            // Multiplicity cols (24..26) — last N int cols by convention:
             to_int_mle(sha_m_w2_col),
             to_int_mle(sha_m_w3_col),
         ];
