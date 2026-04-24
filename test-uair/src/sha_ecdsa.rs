@@ -111,40 +111,45 @@ pub mod cols {
     // `protocol::prover::step4b_lookup`. We have 2 groups → int[25] and
     // int[26] must be the multiplicity columns.
     //
-    // SHA publics (0..5):
+    // SHA publics (0..6):
     pub const SHA_S_INIT: usize = 0;
-    pub const SHA_S_SCHED_ANCH: usize = 1;
-    pub const SHA_S_UPD_ANCH: usize = 2;
-    pub const SHA_S_FINAL: usize = 3;
-    pub const SHA_PA_K: usize = 4;
-    // ECDSA publics (5..11):
-    pub const ECDSA_S_INIT: usize = 5;
-    pub const ECDSA_S_ACCUM: usize = 6;
-    pub const ECDSA_S_FINAL: usize = 7;
-    pub const ECDSA_PA_E: usize = 8;
-    pub const ECDSA_PA_R: usize = 9;
-    pub const ECDSA_PA_S: usize = 10;
-    pub const NUM_INT_PUB: usize = 11;
+    pub const SHA_S_FINAL: usize = 1;
+    pub const SHA_PA_K: usize = 2;
+    // SHA public compensator columns: replace the old `s_sched_anch` /
+    // `s_upd_anch` selectors. Zero on the active range, `−inner(2)`
+    // elsewhere so `inner + compensator ∈ (X − 2)` everywhere.
+    // TODO(verifier): verify these are zero on the active rows.
+    pub const SHA_PA_C_C7: usize = 3;
+    pub const SHA_PA_C_C8: usize = 4;
+    pub const SHA_PA_C_C9: usize = 5;
+    // ECDSA publics (6..12):
+    pub const ECDSA_S_INIT: usize = 6;
+    pub const ECDSA_S_ACCUM: usize = 7;
+    pub const ECDSA_S_FINAL: usize = 8;
+    pub const ECDSA_PA_E: usize = 9;
+    pub const ECDSA_PA_R: usize = 10;
+    pub const ECDSA_PA_S: usize = 11;
+    pub const NUM_INT_PUB: usize = 12;
 
-    // SHA witnesses (11..14): carry-range values.
-    pub const SHA_W_MU_W: usize = 11;
-    pub const SHA_W_MU_A: usize = 12;
-    pub const SHA_W_MU_E: usize = 13;
-    // ECDSA witnesses (14..24):
-    pub const ECDSA_W_B1: usize = 14;
-    pub const ECDSA_W_B2: usize = 15;
-    pub const ECDSA_W_U1: usize = 16;
-    pub const ECDSA_W_U2: usize = 17;
-    pub const ECDSA_W_W_INV: usize = 18;
-    pub const ECDSA_W_XHAT: usize = 19;
-    pub const ECDSA_W_K: usize = 20;
-    pub const ECDSA_W_Q_U1: usize = 21;
-    pub const ECDSA_W_Q_U2: usize = 22;
-    pub const ECDSA_W_Q_SW: usize = 23;
-    // Multiplicity columns (24..26) — MUST be the last two int cols.
-    pub const SHA_W_M_W2: usize = 24; // group 0 (Word{width:2}, for mu_W)
-    pub const SHA_W_M_W3: usize = 25; // group 1 (Word{width:3}, for mu_a/mu_e)
-    pub const NUM_INT: usize = 26;
+    // SHA witnesses (12..15): carry-range values.
+    pub const SHA_W_MU_W: usize = 12;
+    pub const SHA_W_MU_A: usize = 13;
+    pub const SHA_W_MU_E: usize = 14;
+    // ECDSA witnesses (15..25):
+    pub const ECDSA_W_B1: usize = 15;
+    pub const ECDSA_W_B2: usize = 16;
+    pub const ECDSA_W_U1: usize = 17;
+    pub const ECDSA_W_U2: usize = 18;
+    pub const ECDSA_W_W_INV: usize = 19;
+    pub const ECDSA_W_XHAT: usize = 20;
+    pub const ECDSA_W_K: usize = 21;
+    pub const ECDSA_W_Q_U1: usize = 22;
+    pub const ECDSA_W_Q_U2: usize = 23;
+    pub const ECDSA_W_Q_SW: usize = 24;
+    // Multiplicity columns (25..27) — MUST be the last two int cols.
+    pub const SHA_W_M_W2: usize = 25; // group 0 (Word{width:2}, for mu_W)
+    pub const SHA_W_M_W3: usize = 26; // group 1 (Word{width:3}, for mu_a/mu_e)
+    pub const NUM_INT: usize = 27;
 
     // ===== Flat indices ====================================================
     // Binary-poly flats coincide with the bp-section indices (bp section
@@ -279,14 +284,16 @@ where
         let w_t1 = &bp[cols::W_T1];
         let w_ov_lsig1 = &bp[cols::W_OV_LSIG1];
 
-        // SHA selectors. `s_active` was dropped — C1–C6 are row-local
-        // rotation identities that apply on every row unconditionally, so
-        // the identically-1 selector was removed for a degree reduction
-        // (2 → 1 for C1–C6, though C7–C12 keep their selectors).
+        // SHA selectors. `s_active`, `s_sched_anch`, `s_upd_anch` were dropped:
+        // C1–C6 are row-local identities, and C7–C9 now use additive public
+        // compensator columns instead of selector multiplication, taking
+        // them from degree 2 to degree 1. C10–C12 keep their boundary
+        // selectors (s_init / s_final).
         let sha_s_init = &ints[cols::SHA_S_INIT];
-        let sha_s_sched_anch = &ints[cols::SHA_S_SCHED_ANCH];
-        let sha_s_upd_anch = &ints[cols::SHA_S_UPD_ANCH];
         let sha_s_final = &ints[cols::SHA_S_FINAL];
+        let sha_pa_c_c7 = &ints[cols::SHA_PA_C_C7];
+        let sha_pa_c_c8 = &ints[cols::SHA_PA_C_C8];
+        let sha_pa_c_c9 = &ints[cols::SHA_PA_C_C9];
 
         // Down slots for SHA — order follows the stable sort-by-source_col.
         // bp slots (11 shifts in source_col order):
@@ -357,6 +364,8 @@ where
         );
 
         // C7: Message-schedule modular sum (anchor k = t − 16).
+        // Additive compensator pa_c_c7 absorbs inner(2) on inactive rows so
+        // (sched_inner + pa_c_c7) ∈ (X − 2) everywhere.
         let two_x31_mu_w =
             mbs(down_w_mu_w_sh16, &two_times_x31).expect("2·X^31 · mu_W overflow");
         let sched_inner = down_w_w_sh16.clone()
@@ -365,7 +374,7 @@ where
             - down_w_w_sh9
             - down_w_lsig1_sh14
             + &two_x31_mu_w;
-        b.assert_in_ideal(sha_s_sched_anch.clone() * &sched_inner, &ideal_rot_x2);
+        b.assert_in_ideal(sched_inner + sha_pa_c_c7, &ideal_rot_x2);
 
         // C8: Register-update for `a` (anchor k = t − 3).
         let two_x31_mu_a =
@@ -379,7 +388,7 @@ where
             - down_w_sig0_sh3
             - down_w_maj_sh3
             + &two_x31_mu_a;
-        b.assert_in_ideal(sha_s_upd_anch.clone() * &a_update_inner, &ideal_rot_x2);
+        b.assert_in_ideal(a_update_inner + sha_pa_c_c8, &ideal_rot_x2);
 
         // C9: Register-update for `e` (anchor k = t − 3).
         let two_x31_mu_e =
@@ -392,7 +401,7 @@ where
             - down_pa_k_sh3
             - down_w_w_sh3
             + &two_x31_mu_e;
-        b.assert_in_ideal(sha_s_upd_anch.clone() * &e_update_inner, &ideal_rot_x2);
+        b.assert_in_ideal(e_update_inner + sha_pa_c_c9, &ideal_rot_x2);
 
         // C10: Init boundary — a_hat[0] = pa_a[0].
         b.assert_zero(sha_s_init.clone() * &(w_a.clone() - pa_a));
@@ -1022,17 +1031,11 @@ where
             to_bin_mle(to_bits(&maj_vals)),
         ];
 
-        // SHA selectors. `s_active` dropped — was identically 1.
+        // SHA selectors (kept: s_init, s_final). `s_active`, `s_sched_anch`,
+        // and `s_upd_anch` were dropped: C7-C9 now use additive public
+        // compensator columns (see SHA_PA_C_C{7,8,9} below).
         let mut sha_s_init_col: Vec<R> = (0..n).map(|_| R::ZERO).collect();
         sha_s_init_col[0] = R::ONE;
-        let sched_anch_last = n - 17;
-        let sha_s_sched_anch_col: Vec<R> = (0..n)
-            .map(|i| if i <= sched_anch_last { R::ONE } else { R::ZERO })
-            .collect();
-        let upd_anch_last = n - 5;
-        let sha_s_upd_anch_col: Vec<R> = (0..n)
-            .map(|i| if i <= upd_anch_last { R::ONE } else { R::ZERO })
-            .collect();
         let sha_s_final_col: Vec<R> = (0..n)
             .map(|i| if i + 4 >= n { R::ONE } else { R::ZERO })
             .collect();
@@ -1040,6 +1043,76 @@ where
         let sha_mu_w_col: Vec<R> = mu_w_vals.iter().copied().map(R::from).collect();
         let sha_mu_a_col: Vec<R> = mu_a_vals.iter().copied().map(R::from).collect();
         let sha_mu_e_col: Vec<R> = mu_e_vals.iter().copied().map(R::from).collect();
+
+        // SHA compensator columns: zero on the constraint's active range,
+        // `−inner(2)` on inactive rows so `(inner + comp) ∈ (X − 2)`
+        // everywhere. See `cols::SHA_PA_C_C7` doc.
+        let two_to_32: R = R::from(0x10000u32) * &R::from(0x10000u32);
+        let load = |arr: &[u32], idx: usize| -> R {
+            if idx < n { R::from(arr[idx]) } else { R::ZERO }
+        };
+
+        // C7 compensator: −(inner(2)) for sched_inner.
+        let sha_pa_c_c7_col: Vec<R> = (0..n)
+            .map(|k| {
+                let w_k16 = load(&w_vals, k + 16);
+                let w_k = load(&w_vals, k);
+                let lsig0_k1 = load(&lsig0_vals, k + 1);
+                let w_k9 = load(&w_vals, k + 9);
+                let lsig1_k14 = load(&lsig1_vals, k + 14);
+                let mu_k16 = load(&mu_w_vals, k + 16);
+                let two32_mu = two_to_32.clone() * &mu_k16;
+                w_k + &lsig0_k1 + &w_k9 + &lsig1_k14 - &two32_mu - &w_k16
+            })
+            .collect();
+
+        // C8 compensator: −(inner(2)) for a_update_inner.
+        let sha_pa_c_c8_col: Vec<R> = (0..n)
+            .map(|k| {
+                let w_a_k4 = load(&a_vals, k + 4);
+                let w_e_k = load(&e_vals, k);
+                let sig1_k3 = load(&sig1_vals, k + 3);
+                let ch_k3 = load(&ch_vals, k + 3);
+                let k_k3 = load(&k_vals, k + 3);
+                let w_k3 = load(&w_vals, k + 3);
+                let sig0_k3 = load(&sig0_vals, k + 3);
+                let maj_k3 = load(&maj_vals, k + 3);
+                let mu_a_k3 = load(&mu_a_vals, k + 3);
+                let two32_mu = two_to_32.clone() * &mu_a_k3;
+                w_e_k
+                    + &sig1_k3
+                    + &ch_k3
+                    + &k_k3
+                    + &w_k3
+                    + &sig0_k3
+                    + &maj_k3
+                    - &two32_mu
+                    - &w_a_k4
+            })
+            .collect();
+
+        // C9 compensator: −(inner(2)) for e_update_inner.
+        let sha_pa_c_c9_col: Vec<R> = (0..n)
+            .map(|k| {
+                let w_e_k4 = load(&e_vals, k + 4);
+                let w_a_k = load(&a_vals, k);
+                let w_e_k = load(&e_vals, k);
+                let sig1_k3 = load(&sig1_vals, k + 3);
+                let ch_k3 = load(&ch_vals, k + 3);
+                let k_k3 = load(&k_vals, k + 3);
+                let w_k3 = load(&w_vals, k + 3);
+                let mu_e_k3 = load(&mu_e_vals, k + 3);
+                let two32_mu = two_to_32.clone() * &mu_e_k3;
+                w_a_k
+                    + &w_e_k
+                    + &sig1_k3
+                    + &ch_k3
+                    + &k_k3
+                    + &w_k3
+                    - &two32_mu
+                    - &w_e_k4
+            })
+            .collect();
 
         // SHA multiplicity columns.
         let mut m_w2_raw = vec![0u32; n];
@@ -1156,24 +1229,25 @@ where
             |col: Vec<R>| -> DenseMultilinearExtension<R> { col.into_iter().collect() };
 
         let int = vec![
-            // SHA publics (0..5):
+            // SHA publics (0..6):
             to_int_mle(sha_s_init_col),
-            to_int_mle(sha_s_sched_anch_col),
-            to_int_mle(sha_s_upd_anch_col),
             to_int_mle(sha_s_final_col),
             to_int_mle(sha_pa_k_col),
-            // ECDSA publics (5..11):
+            to_int_mle(sha_pa_c_c7_col),
+            to_int_mle(sha_pa_c_c8_col),
+            to_int_mle(sha_pa_c_c9_col),
+            // ECDSA publics (6..12):
             to_int_mle(e_s_init_col),
             to_int_mle(e_s_accum_col),
             to_int_mle(e_s_final_col),
             to_int_mle(e_pa_e_col),
             to_int_mle(e_pa_r_col),
             to_int_mle(e_pa_s_col),
-            // SHA witnesses (11..14):
+            // SHA witnesses (12..15):
             to_int_mle(sha_mu_w_col),
             to_int_mle(sha_mu_a_col),
             to_int_mle(sha_mu_e_col),
-            // ECDSA witnesses (14..24):
+            // ECDSA witnesses (15..25):
             to_int_mle(e_b1_col),
             to_int_mle(e_b2_col),
             to_int_mle(e_u1_col),
@@ -1184,7 +1258,7 @@ where
             to_int_mle(e_q_u1_col),
             to_int_mle(e_q_u2_col),
             to_int_mle(e_q_sw_col),
-            // Multiplicity cols (24..26) — last N int cols by convention:
+            // Multiplicity cols (25..27) — last N int cols by convention:
             to_int_mle(sha_m_w2_col),
             to_int_mle(sha_m_w3_col),
         ];

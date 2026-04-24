@@ -17,10 +17,7 @@ use zinc_piop::{
 use zinc_uair::LookupTableType;
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_uair::{
-    Uair, UairSignature, UairTrace, constraint_counter::count_constraints,
-    degree_counter::count_effective_max_degree,
-};
+use zinc_uair::{Uair, UairSignature, UairTrace, constraint_counter::count_constraints};
 use zinc_utils::{
     add, cfg_join, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
     mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
