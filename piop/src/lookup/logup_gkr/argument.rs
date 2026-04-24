@@ -28,8 +28,8 @@ use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use num_traits::Zero;
 use std::marker::PhantomData;
 use zinc_poly::mle::DenseMultilinearExtension;
-use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_utils::inner_transparent_field::InnerTransparentField;
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
+use zinc_utils::{add, inner_transparent_field::InnerTransparentField};
 
 use super::{
     circuit::GrandSumCircuit,
@@ -46,6 +46,51 @@ use super::{
 pub struct LookupArgumentProof<F> {
     pub gkr_proof: LogupGkrProof<F>,
     pub component_evals: LeafComponentEvals<F>,
+}
+
+// Wire format: LogupGkrProof (Transcribable) + LeafComponentEvals
+// (Transcribable), each with their own length prefix.
+impl<F: PrimeField> GenTranscribable for LookupArgumentProof<F>
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        let (gkr_proof, bytes) = LogupGkrProof::<F>::read_transcription_bytes_subset(bytes);
+        let (component_evals, bytes) =
+            LeafComponentEvals::<F>::read_transcription_bytes_subset(bytes);
+        assert!(bytes.is_empty(), "trailing bytes");
+        Self {
+            gkr_proof,
+            component_evals,
+        }
+    }
+
+    fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
+        let buf = self.gkr_proof.write_transcription_bytes_subset(buf);
+        let buf = self.component_evals.write_transcription_bytes_subset(buf);
+        assert!(buf.is_empty(), "buffer size mismatch");
+    }
+}
+
+impl<F: PrimeField> Transcribable for LookupArgumentProof<F>
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    #[allow(clippy::arithmetic_side_effects)]
+    fn get_num_bytes(&self) -> usize {
+        add!(
+            LogupGkrProof::<F>::LENGTH_NUM_BYTES,
+            add!(
+                self.gkr_proof.get_num_bytes(),
+                add!(
+                    LeafComponentEvals::<F>::LENGTH_NUM_BYTES,
+                    self.component_evals.get_num_bytes()
+                )
+            )
+        )
+    }
 }
 
 /// Subclaim the verifier returns; the caller must validate that the

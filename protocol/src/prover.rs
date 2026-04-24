@@ -5,6 +5,7 @@ use std::{collections::HashMap, fmt::Debug};
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
+    lookup::logup_gkr::{LookupArgument, LookupArgumentSubclaim},
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
     projections::{
         ColumnMajorTrace, ProjectedTrace, RowMajorTrace, evaluate_trace_to_column_mles,
@@ -13,6 +14,7 @@ use zinc_piop::{
     },
     sumcheck::multi_degree::MultiDegreeSumcheck,
 };
+use zinc_uair::LookupTableType;
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
@@ -121,7 +123,9 @@ pub struct ProverSumchecked<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const 
     cpr_proof: CombinedPolyResolverProof<F>,
     cpr_eval_point: Vec<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
-    lookup_proof: Option<BatchedLookupProof<F>>,
+    lookup_proof: Vec<LookupArgumentProof<F>>,
+    /// Prover-only state from step4b for later binding (step5b, NYI).
+    lookup_subclaims: Vec<LookupArgumentSubclaim<F>>,
 }
 
 /// After step 5 (multipoint eval).
@@ -133,7 +137,7 @@ pub struct ProverMultipointEvaled<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, 
     ic_proof: IdealCheckProof<F>,
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
-    lookup_proof: Option<BatchedLookupProof<F>>,
+    lookup_proof: Vec<LookupArgumentProof<F>>,
 
     // New
     mp_proof: MultipointEvalProof<F>,
@@ -148,7 +152,7 @@ pub struct ProverLifted<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: u
     ic_proof: IdealCheckProof<F>,
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
-    lookup_proof: Option<BatchedLookupProof<F>>,
+    lookup_proof: Vec<LookupArgumentProof<F>>,
     mp_proof: MultipointEvalProof<F>,
     r_0: Vec<F>,
 
@@ -166,7 +170,7 @@ pub struct ProverPcsOpened<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D
     ic_proof: IdealCheckProof<F>,
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
-    lookup_proof: Option<BatchedLookupProof<F>>,
+    lookup_proof: Vec<LookupArgumentProof<F>>,
     mp_proof: MultipointEvalProof<F>,
     lifted_evals: Vec<DynamicPolynomialF<F>>,
 }
@@ -456,8 +460,10 @@ impl_with_type_bounds!(ProverEvalProjected
             &self.field_cfg,
         )?;
 
-        // TODO: build BatchedLookupProof from collected lookup_proofs + lookup_metas
-        let lookup_proof = None;
+        // Lookup argument is wired separately in step4b_lookup. For UAIRs
+        // without lookup specs these stay empty.
+        let lookup_proof: Vec<LookupArgumentProof<F>> = Vec::new();
+        let lookup_subclaims: Vec<LookupArgumentSubclaim<F>> = Vec::new();
 
         Ok(ProverSumchecked {
             base: self.base,
@@ -469,12 +475,73 @@ impl_with_type_bounds!(ProverEvalProjected
             cpr_eval_point: cpr_prover_state.evaluation_point,
             combined_sumcheck,
             lookup_proof,
+            lookup_subclaims,
         })
     }
 });
 
 impl_with_type_bounds!(ProverSumchecked
 {
+    /// Step 4b: Per-lookup-group logup-GKR argument.
+    ///
+    /// For each `LookupColumnSpec` declared in the UAIR signature, runs
+    /// `LookupArgument::prove` against the corresponding projected witness
+    /// column and its committed multiplicity column. The resulting proofs
+    /// are placed into `self.lookup_proof` and threaded through into the
+    /// final `Proof<F>` via `finish()`; the subclaims (trace-level eval
+    /// point ρ_row_g and claimed component evals) are kept as
+    /// prover-only state for a later binding step (step5b, NYI).
+    ///
+    /// No-op for UAIRs with no lookup specs.
+    ///
+    /// # Multiplicity column convention (temporary)
+    ///
+    /// For this first integration pass the multiplicity column is taken
+    /// to be the committed int column at *flat* index
+    /// `total_cols - num_lookup_groups + group_idx`. That is, the last
+    /// `num_lookup_groups` int columns are treated as multiplicities.
+    /// A future iteration will let the UAIR declare them explicitly.
+    pub fn step4b_lookup(
+        mut self,
+    ) -> Result<Self, ProtocolError<F, U::Ideal>> {
+        let lookup_specs = self.base.uair_signature.lookup_specs().to_vec();
+        if lookup_specs.is_empty() {
+            return Ok(self);
+        }
+
+        let num_cols = self.projected_trace_f.len();
+        let num_groups = lookup_specs.len();
+
+        for (group_idx, spec) in lookup_specs.iter().enumerate() {
+            let wit_idx = spec.column_index;
+            let mult_idx = num_cols
+                .checked_sub(num_groups)
+                .and_then(|n| n.checked_add(group_idx))
+                .expect("trace must contain one multiplicity col per lookup group");
+            assert_ne!(
+                wit_idx, mult_idx,
+                "lookup witness and multiplicity columns must differ"
+            );
+
+            let wit_mle = &self.projected_trace_f[wit_idx];
+            let mul_mle = &self.projected_trace_f[mult_idx];
+            let table_mle = build_table_mle::<F>(&spec.table_type, self.base.num_vars, &self.field_cfg);
+
+            let (proof, subclaim) = LookupArgument::<F>::prove(
+                &mut self.base.pcs_transcript.fs_transcript,
+                &[wit_mle],
+                &table_mle,
+                mul_mle,
+                &self.field_cfg,
+            );
+
+            self.lookup_proof.push(proof);
+            self.lookup_subclaims.push(subclaim);
+        }
+
+        Ok(self)
+    }
+
     /// Step 5: Multi-point evaluation sumcheck. Combines `up_evals` and
     /// `down_evals` at `r'` into a single evaluation point `r_0`.
     /// Only the sumcheck proof is sent; scalar evaluations at `r_0` are derived from the
@@ -699,6 +766,7 @@ where
         ideal_checked
             .step3_eval_projection()?
             .step4_sumcheck()?
+            .step4b_lookup()?
             .step5_multipoint_eval()?
             .step6_lift_and_project()?
             .step7_pcs_open::<CHECK_FOR_OVERFLOW>()?
@@ -723,4 +791,38 @@ fn commit_optionally<Zt: ZipTypes, Lc: LinearCode<Zt>>(
         let (hint, commitment) = ZipPlus::commit(pp, trace)?;
         Ok((Some(hint), commitment))
     }
+}
+
+/// Build the canonical table MLE for a lookup group's table type.
+///
+/// The MLE has `num_vars` variables (so `2^num_vars` entries). The first
+/// `2^table_width` entries are the identity table `0..2^table_width`;
+/// any remaining entries are padded with 0.
+pub(crate) fn build_table_mle<F>(
+    table_type: &LookupTableType,
+    num_vars: usize,
+    cfg: &F::Config,
+) -> DenseMultilinearExtension<F::Inner>
+where
+    F: PrimeField + InnerTransparentField + FromPrimitiveWithConfig,
+{
+    let width = match table_type {
+        LookupTableType::Word { width, .. } | LookupTableType::BitPoly { width, .. } => *width,
+    };
+    assert!(
+        width <= num_vars,
+        "table width {width} exceeds num_vars {num_vars}"
+    );
+    let row_count = 1usize << num_vars;
+    let table_size = 1usize << width;
+    let zero_inner = F::zero_with_cfg(cfg).into_inner();
+    let mut evals = Vec::with_capacity(row_count);
+    for j in 0..row_count {
+        if j < table_size {
+            evals.push(F::from_with_cfg(j as u64, cfg).into_inner());
+        } else {
+            evals.push(zero_inner.clone());
+        }
+    }
+    DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, zero_inner)
 }

@@ -5,6 +5,7 @@ use std::{collections::HashMap, io::Cursor};
 use zinc_piop::{
     combined_poly_resolver::{self, CombinedPolyResolver},
     ideal_check::{self, IdealCheckProtocol},
+    lookup::logup_gkr::{LookupArgument, LookupArgumentSubclaim},
     multipoint_eval::{self, MultipointEval},
     projections::{
         ProjectedTrace, project_scalars, project_scalars_to_field, project_trace_coeffs_row_major,
@@ -72,7 +73,7 @@ pub struct VerifierTranscriptReconstructed<
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: Vec<LookupArgumentProof<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -96,7 +97,7 @@ pub struct VerifierPrimeProjected<
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: Vec<LookupArgumentProof<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -120,7 +121,7 @@ pub struct VerifierIdealChecked<
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: Vec<LookupArgumentProof<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -146,7 +147,7 @@ pub struct VerifierEvalProjected<
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: Vec<LookupArgumentProof<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -162,7 +163,7 @@ pub struct VerifierSumchecked<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOverF, c
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: Vec<LookupArgumentProof<F>>,
     _phantom: PhantomData<IdealOverF>,
 }
 
@@ -178,7 +179,7 @@ pub struct VerifierMultipointEvaled<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOv
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: Vec<LookupArgumentProof<F>>,
     _phantom: PhantomData<IdealOverF>,
 }
 
@@ -199,7 +200,7 @@ pub struct VerifierLiftedEvalsChecked<
 
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: Vec<LookupArgumentProof<F>>,
     _phantom: PhantomData<IdealOverF>,
 }
 
@@ -503,6 +504,54 @@ where
     F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
     IdealOverF: Ideal,
 {
+    /// Step 4b: Per-lookup-group logup-GKR verification.
+    ///
+    /// Mirrors the prover's `step4b_lookup`: for each `LookupColumnSpec`
+    /// in the UAIR signature, runs `LookupArgument::verify` against the
+    /// corresponding proof. The returned subclaims (ρ_row_g,
+    /// claimed-component-evals) are collected for the later binding
+    /// step (step5b, NYI).
+    ///
+    /// No-op for UAIRs with no lookup specs.
+    pub fn step4b_lookup_verify(
+        mut self,
+    ) -> Result<(Self, Vec<LookupArgumentSubclaim<F>>), ProtocolError<F, IdealOverF>> {
+        let lookup_specs = self.base.uair_signature.lookup_specs().to_vec();
+        if lookup_specs.is_empty() {
+            if !self.proof_lookup_proof.is_empty() {
+                return Err(ProtocolError::Lookup(
+                    zinc_piop::lookup::LookupError::NotImplemented,
+                ));
+            }
+            return Ok((self, Vec::new()));
+        }
+
+        if self.proof_lookup_proof.len() != lookup_specs.len() {
+            return Err(ProtocolError::Lookup(
+                zinc_piop::lookup::LookupError::NotImplemented,
+            ));
+        }
+
+        let mut subclaims = Vec::with_capacity(lookup_specs.len());
+        for (spec_idx, spec) in lookup_specs.iter().enumerate() {
+            let proof = &self.proof_lookup_proof[spec_idx];
+            let sub = LookupArgument::<F>::verify(
+                &mut self.base.pcs_transcript.fs_transcript,
+                1,
+                self.base.num_vars,
+                proof,
+                &self.field_cfg,
+            )
+            .map_err(|_| {
+                ProtocolError::Lookup(zinc_piop::lookup::LookupError::FinalEvaluationMismatch)
+            })?;
+            let _ = spec;
+            subclaims.push(sub);
+        }
+
+        Ok((self, subclaims))
+    }
+
     /// Step 5: Multi-point evaluation sumcheck.
     pub fn step5_multipoint_eval<U: Uair>(
         mut self,
@@ -783,7 +832,7 @@ where
     where
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
     {
-        ZincPlusPiop::<Zt, U, F, D>::step0_reconstruct_transcript::<IdealOverF>(
+        let after_step4 = ZincPlusPiop::<Zt, U, F, D>::step0_reconstruct_transcript::<IdealOverF>(
             vp,
             proof,
             public_trace,
@@ -792,10 +841,14 @@ where
         .step1_prime_projection()?
         .step2_ideal_check(project_ideal)?
         .step3_eval_projection(project_scalar)?
-        .step4_sumcheck_verify()?
-        .step5_multipoint_eval::<U>()?
-        .step6_lifted_evals::<U>()?
-        .step7_pcs_verify::<U, CHECK_FOR_OVERFLOW>()?
-        .finish::<F>()
+        .step4_sumcheck_verify()?;
+
+        let (after_step4b, _lookup_subclaims) = after_step4.step4b_lookup_verify()?;
+
+        after_step4b
+            .step5_multipoint_eval::<U>()?
+            .step6_lifted_evals::<U>()?
+            .step7_pcs_verify::<U, CHECK_FOR_OVERFLOW>()?
+            .finish::<F>()
     }
 }

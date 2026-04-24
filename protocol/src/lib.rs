@@ -29,7 +29,7 @@ use thiserror::Error;
 use zinc_piop::{
     combined_poly_resolver::{CombinedPolyResolverError, Proof as CombinedPolyResolverProof},
     ideal_check::{IdealCheckError, Proof as IdealCheckProof},
-    lookup::{BatchedLookupProof, LookupError},
+    lookup::{LookupError, logup_gkr::LookupArgumentProof},
     multipoint_eval::{MultipointEvalError, Proof as MultipointEvalProof},
     projections::ProjectedTrace,
     sumcheck::multi_degree::MultiDegreeSumcheckProof,
@@ -81,7 +81,7 @@ pub struct Proof<F: PrimeField> {
     /// \psi_a for the sumcheck consistency check and Zip+ PCS verify.
     pub witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
     /// Lookup argument proof. `None` when the UAIR has no lookup specs.
-    pub lookup_proof: Option<BatchedLookupProof<F>>,
+    pub lookup_proof: Vec<LookupArgumentProof<F>>,
 }
 
 impl<F> GenTranscribable for Proof<F>
@@ -111,8 +111,15 @@ where
         let (witness_vec, bytes) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
         let witness_lifted_evals = witness_vec.0;
 
-        // TODO: deserialize lookup_proof once BatchedLookupProof gets
-        // Transcribable impls (lookup is not yet implemented).
+        // lookup_proof: u32 count + each LookupArgumentProof length-prefixed.
+        let (n_lookup, mut bytes) = u32::read_transcription_bytes_subset(bytes);
+        let n_lookup = usize::try_from(n_lookup).expect("lookup count fits usize");
+        let mut lookup_proof = Vec::with_capacity(n_lookup);
+        for _ in 0..n_lookup {
+            let (p, rest) = LookupArgumentProof::<F>::read_transcription_bytes_subset(bytes);
+            lookup_proof.push(p);
+            bytes = rest;
+        }
         assert!(bytes.is_empty(), "All bytes should be consumed");
 
         Self {
@@ -123,7 +130,7 @@ where
             combined_sumcheck,
             multipoint_eval,
             witness_lifted_evals,
-            lookup_proof: None,
+            lookup_proof,
         }
     }
 
@@ -153,10 +160,17 @@ where
         buf = self.multipoint_eval.write_transcription_bytes_subset(buf);
 
         // witness_lifted_evals: u32 length prefix + DynamicPolyVecF encoding
-        // TODO: serialize lookup_proof once BatchedLookupProof gets
-        // Transcribable impls (lookup is not yet implemented).
-        DynamicPolyVecF::reinterpret(&self.witness_lifted_evals)
+        buf = DynamicPolyVecF::reinterpret(&self.witness_lifted_evals)
             .write_transcription_bytes_subset(buf);
+
+        // lookup_proof: u32 count + each LookupArgumentProof length-prefixed.
+        let n_lookup = u32::try_from(self.lookup_proof.len()).expect("lookup count fits u32");
+        n_lookup.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
+        buf = &mut buf[u32::NUM_BYTES..];
+        for p in &self.lookup_proof {
+            buf = p.write_transcription_bytes_subset(buf);
+        }
+        assert!(buf.is_empty(), "Entire buffer should be used");
     }
 }
 
@@ -169,6 +183,11 @@ where
     #[allow(clippy::arithmetic_side_effects)]
     fn get_num_bytes(&self) -> usize {
         let witness_vec = DynamicPolyVecF::reinterpret(&self.witness_lifted_evals);
+        let lookup_bytes: usize = self
+            .lookup_proof
+            .iter()
+            .map(|p| LookupArgumentProof::<F>::LENGTH_NUM_BYTES + p.get_num_bytes())
+            .sum();
         3 * ZipPlusCommitment::NUM_BYTES
             + u32::NUM_BYTES
             + self.zip.len()
@@ -180,10 +199,10 @@ where
             + self.combined_sumcheck.get_num_bytes()
             + MultipointEvalProof::<F>::LENGTH_NUM_BYTES
             + self.multipoint_eval.get_num_bytes()
-            // TODO: add lookup_proof size once BatchedLookupProof gets
-            // Transcribable impls (lookup is not yet implemented).
             + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
             + witness_vec.get_num_bytes()
+            + u32::NUM_BYTES // lookup count
+            + lookup_bytes
     }
 }
 
@@ -1005,6 +1024,42 @@ mod tests {
     // committed trace via the PCS opening — that binding is the remaining
     // protocol-wiring work (Phase 2e).
     // -----------------------------------------------------------------------
+    // Tampering the multiplicity column in the trace makes the lookup
+    // identity fail. This exercises step4b_lookup inside the full
+    // protocol pipeline.
+    #[test]
+    fn test_int_lookup_uair_tampered_trace_rejected_by_protocol() {
+        let num_vars = INT_LOOKUP_TABLE_WIDTH;
+        let mut rng = rng();
+
+        let mut trace = IntLookupUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        // Tamper the multiplicity column (col index 1 of the int bucket).
+        let int_cols = trace.int.to_mut();
+        int_cols[1].evaluations[0] = int_cols[1].evaluations[0] + 1;
+
+        let sig = IntLookupUair::<ZtInt>::signature();
+        let public_trace = trace.public(&sig);
+
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+        // The prover still builds a proof (it just proves the wrong thing).
+        let proof = ZincPlusPiop::<TestZincTypesIprs, IntLookupUair<ZtInt>, F, DEGREE_PLUS_ONE>::prove::<
+            false, CHECKED,
+        >(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("tampered-trace prove should still produce a (soundness-invalid) proof");
+
+        // Verifier must reject at step4b_lookup_verify.
+        let result = ZincPlusPiop::<TestZincTypesIprs, IntLookupUair<ZtInt>, F, DEGREE_PLUS_ONE>::verify::<
+            _, CHECKED,
+        >(&pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!());
+        assert!(
+            matches!(result.unwrap_err(), ProtocolError::Lookup(_)),
+            "verifier must reject tampered multiplicities via step4b"
+        );
+    }
+
     #[test]
     fn test_int_lookup_uair_protocol_runs() {
         let num_vars = INT_LOOKUP_TABLE_WIDTH;

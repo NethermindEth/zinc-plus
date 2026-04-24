@@ -20,7 +20,8 @@
 
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use zinc_poly::mle::DenseMultilinearExtension;
-use zinc_utils::inner_transparent_field::InnerTransparentField;
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable};
+use zinc_utils::{add, inner_transparent_field::InnerTransparentField};
 
 /// Output of [`build_lookup_leaves`]: the leaf MLEs plus shape metadata
 /// that the verifier uses to split the final GKR point.
@@ -241,4 +242,56 @@ where
         buf = next;
     }
     buf
+}
+
+// ---------------------------------------------------------------------------
+// Transcribable for LeafComponentEvals
+//
+// Wire format: Vec<F>(witness_evals) + Vec<F>(len 2: [table_eval, mul_eval]).
+// ---------------------------------------------------------------------------
+
+impl<F: PrimeField> GenTranscribable for LeafComponentEvals<F>
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        let (witness_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
+        let (tm_pair, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
+        assert!(bytes.is_empty(), "trailing bytes");
+        assert_eq!(tm_pair.len(), 2, "expected table+mul pair");
+        let mut it = tm_pair.into_iter();
+        let table_eval = it.next().unwrap();
+        let multiplicity_eval = it.next().unwrap();
+        Self {
+            witness_evals,
+            table_eval,
+            multiplicity_eval,
+        }
+    }
+
+    fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
+        let buf = self.witness_evals.write_transcription_bytes_subset(buf);
+        let pair = vec![self.table_eval.clone(), self.multiplicity_eval.clone()];
+        let buf = pair.write_transcription_bytes_subset(buf);
+        assert!(buf.is_empty(), "buffer size mismatch");
+    }
+}
+
+impl<F: PrimeField> Transcribable for LeafComponentEvals<F>
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    #[allow(clippy::arithmetic_side_effects)]
+    fn get_num_bytes(&self) -> usize {
+        let pair = vec![self.table_eval.clone(), self.multiplicity_eval.clone()];
+        add!(
+            Vec::<F>::LENGTH_NUM_BYTES,
+            add!(
+                self.witness_evals.get_num_bytes(),
+                add!(Vec::<F>::LENGTH_NUM_BYTES, pair.get_num_bytes())
+            )
+        )
+    }
 }

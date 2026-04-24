@@ -503,6 +503,34 @@ fn lookup_wrong_multiplicity_root_nonzero() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn argument_proof_serialization_roundtrip() {
+    use zinc_transcript::traits::{GenTranscribable, Transcribable};
+
+    let cfg = ();
+    let row_vars = 3;
+    let witness_values = vec![vec![0u64, 2, 5, 5, 1, 7, 3, 2]];
+    let (wit_mles, table_mle, mult_mle) = make_valid_lookup(row_vars, 1, &witness_values);
+    let wit_refs: Vec<_> = wit_mles.iter().collect();
+
+    let mut p_ts = Blake3Transcript::new();
+    let (proof, _) = LookupArgument::<F>::prove(
+        &mut p_ts,
+        &wit_refs,
+        &table_mle,
+        &mult_mle,
+        &cfg,
+    );
+
+    // Round-trip the proof through its Transcribable impl.
+    let n = proof.get_num_bytes();
+    let mut buf = vec![0u8; n];
+    proof.write_transcription_bytes_exact(&mut buf);
+    let reread =
+        crate::lookup::logup_gkr::LookupArgumentProof::<F>::read_transcription_bytes_exact(&buf);
+    assert_eq!(proof, reread);
+}
+
+#[test]
 fn argument_valid_lookup_roundtrip() {
     let cfg = ();
     let row_vars = 3;
