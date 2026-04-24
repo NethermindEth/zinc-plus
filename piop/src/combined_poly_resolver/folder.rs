@@ -56,17 +56,19 @@ impl<'a, F: PrimeField> ConstraintBuilder for ConstraintFolder<'a, F> {
         self.fold_constraint(expr);
     }
 
-    /// For an honest prover, an `assert_zero` constraint is identically
-    /// zero on the hypercube, so its contribution to the folded RLC is 0
-    /// and can be skipped. We still advance `current_constraint` so that
-    /// the challenge-power indexing remains aligned with the raw
-    /// constraint count seen by the non-folding paths (e.g. the ideal
-    /// check's coefficient-MLE builder, which also assigns powers in
-    /// declaration order). The prover and verifier both use this folder,
-    /// so the skip is symmetric.
+    /// `assert_zero` constraints contribute to the folded RLC like any
+    /// other constraint. For an honest prover they evaluate to zero on
+    /// every row of the hypercube, so their fold-sum is 0 — but the
+    /// polynomial expression itself can have per-variable degree > 1
+    /// (e.g. `b·(b-1)·s_accum`), so the sumcheck protocol must run at
+    /// `count_max_degree::<U>() + 2`, NOT `count_effective_max_degree`.
+    /// A previous version of this method was a no-op coupled with
+    /// `count_effective_max_degree` for the protocol degree; that
+    /// combination silently dropped the binding between assert_zero
+    /// constraints and the witness, breaking soundness for every UAIR
+    /// with assert_zero constraints.
     #[inline(always)]
-    #[allow(clippy::arithmetic_side_effects)]
-    fn assert_zero(&mut self, _expr: Self::Expr) {
-        self.current_constraint += 1;
+    fn assert_zero(&mut self, expr: Self::Expr) {
+        self.fold_constraint(expr);
     }
 }
