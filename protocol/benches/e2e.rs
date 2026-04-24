@@ -23,7 +23,8 @@ use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes};
 use zinc_test_uair::{
     BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-    Sha256CompressionSliceUair, Sha256Ideal, ShaProxy, TestUairNoMultiplication,
+    INT_LOOKUP_TABLE_WIDTH, IntLookupUair, Sha256CompressionSliceUair, Sha256Ideal, ShaProxy,
+    TestUairNoMultiplication,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
@@ -448,7 +449,12 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     let p_projected = p_committed.clone().step1_combined(project_scalar).unwrap();
     let p_ideal_checked = p_projected.clone().step2_ideal_check().unwrap();
     let p_eval_projected = p_ideal_checked.clone().step3_eval_projection().unwrap();
-    let p_sumchecked = p_eval_projected.clone().step4_sumcheck().unwrap();
+    let p_sumchecked = p_eval_projected
+        .clone()
+        .step4_sumcheck()
+        .unwrap()
+        .step4b_lookup()
+        .unwrap();
     let p_mp_evaled = p_sumchecked.clone().step5_multipoint_eval().unwrap();
     let p_lifted = p_mp_evaled.clone().step6_lift_and_project().unwrap();
 
@@ -547,7 +553,12 @@ fn do_bench_steps<Zt, U, IdealOverF>(
         .clone()
         .step3_eval_projection(project_scalar)
         .unwrap();
-    let v_sumchecked = v_eval_projected.clone().step4_sumcheck_verify().unwrap();
+    let v_sumchecked = v_eval_projected
+        .clone()
+        .step4_sumcheck_verify()
+        .unwrap()
+        .step4b_lookup_verify()
+        .unwrap();
     let v_mp_evaled = v_sumchecked.clone().step5_multipoint_eval::<U>().unwrap();
     let v_lifted = v_mp_evaled.clone().step6_lifted_evals::<U>().unwrap();
 
@@ -760,6 +771,32 @@ fn bench_big_linear_public_input_steps(group: &mut BenchmarkGroup<WallTime>, num
     do_bench_steps_uair::<BigLinearUairWithPublicInput<i64>>(group, "BigLinearPI", num_vars);
 }
 
+/// End-to-end benchmark for `IntLookupUair` — a minimal UAIR that
+/// declares a single `LookupColumnSpec` against a `Word { width: 8 }`
+/// table. Exercises the lookup pipeline: step4b (LookupArgument) +
+/// step5b (MultiPointReducer) + component-eval cross-check + PCS open
+/// at `r_final`.
+///
+/// `IntLookupUair::generate_random_trace` asserts
+/// `num_vars == INT_LOOKUP_TABLE_WIDTH`, so `num_vars` is fixed at 8.
+/// The `num_vars` parameter is kept for API uniformity with the other
+/// bench helpers.
+fn bench_int_lookup_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    assert_eq!(
+        num_vars, INT_LOOKUP_TABLE_WIDTH,
+        "IntLookupUair requires num_vars = {INT_LOOKUP_TABLE_WIDTH}",
+    );
+    do_bench_uair::<IntLookupUair<i64>>(group, "IntLookup", num_vars);
+}
+
+fn bench_int_lookup_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    assert_eq!(
+        num_vars, INT_LOOKUP_TABLE_WIDTH,
+        "IntLookupUair requires num_vars = {INT_LOOKUP_TABLE_WIDTH}",
+    );
+    do_bench_steps_uair::<IntLookupUair<i64>>(group, "IntLookup", num_vars);
+}
+
 //
 // Criterion entry points
 //
@@ -787,6 +824,7 @@ fn e2e_benches(c: &mut Criterion) {
     // bench_sha_proxy_e2e(&mut group, 10);
     // bench_sha_proxy_e2e(&mut group, 9);
     bench_sha256_slice_e2e(&mut group, 9);
+    // bench_int_lookup_e2e(&mut group, INT_LOOKUP_TABLE_WIDTH);
     group.finish();
 }
 
@@ -815,6 +853,10 @@ fn e2e_steps_benches(c: &mut Criterion) {
 
     //
     bench_sha256_slice_steps(&mut group, 9);
+
+    // Lookup UAIR — exercises step4b (logup-GKR) + step5b
+    // (MultiPointReducer) inside the full Zinc+ pipeline.
+    bench_int_lookup_steps(&mut group, INT_LOOKUP_TABLE_WIDTH);
 
     group.finish();
 }
