@@ -653,7 +653,8 @@ mod tests {
     use zinc_poly::univariate::{binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct};
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
-        AffineSumLookupUair, BIT_POLY_LOOKUP_WIDTH, BigLinearUair, BigLinearUairWithPublicInput,
+        AND_GATE_CHUNK_WIDTH, AffineSumLookupUair, AndGateChunkedLookupUair,
+        BIT_POLY_LOOKUP_WIDTH, BigLinearUair, BigLinearUairWithPublicInput,
         BinaryDecompositionUair, BitPolyLookupUair, ByteDecompLookupUair, GenerateRandomTrace,
         INT_LOOKUP_TABLE_WIDTH, IntLookupMultiUair, IntLookupUair, IntLookupWithPublicUair,
         Sha256CompressionSliceUair, Sha256Ideal, TestUairMixedShifts, TestUairNoMultiplication,
@@ -2095,6 +2096,81 @@ mod tests {
         assert!(
             result.is_err(),
             "verifier must reject a bit-poly witness with a nonzero bit past the table width"
+        );
+    }
+
+    // Phase 2i: end-to-end test of chunked affine-combo lookups — the
+    // pattern SHA-256 Ch/Maj will eventually use. `AndGateChunkedLookupUair`
+    // enforces `u = x AND y` bitwise on 32-bit bit-polys by committing
+    // 4 × 8-bit chunks per parent and running four `x_k + y_k - 2·u_k ∈
+    // BitPoly{32, chunk_width:8}` lookup specs in a single group.
+    #[test]
+    fn test_e2e_and_gate_chunked_lookup() {
+        let num_vars = AND_GATE_CHUNK_WIDTH;
+        let mut rng = rng();
+
+        let trace =
+            AndGateChunkedLookupUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        let sig = AndGateChunkedLookupUair::<ZtInt>::signature();
+        let public_trace = trace.public(&sig);
+
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+        let proof = ZincPlusPiop::<
+            TestZincTypesIprs,
+            AndGateChunkedLookupUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+        >::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("honest prove must succeed on AndGateChunkedLookupUair");
+        ZincPlusPiop::<TestZincTypesIprs, AndGateChunkedLookupUair<ZtInt>, F, DEGREE_PLUS_ONE>::verify::<
+            _, CHECKED,
+        >(&pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!())
+            .expect("honest verify must succeed on AndGateChunkedLookupUair");
+    }
+
+    // Soundness: if the prover tampers the multiplicity column, the
+    // four chunked lookup sub-identities no longer balance and the
+    // logup-GKR root_numerator becomes nonzero. Mirrors the
+    // multiplicity-tamper test pattern used in `IntLookupUair`.
+    #[test]
+    fn test_e2e_and_gate_chunked_lookup_tampered_multiplicity_rejected() {
+        let num_vars = AND_GATE_CHUNK_WIDTH;
+        let mut rng = rng();
+        let mut trace =
+            AndGateChunkedLookupUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+
+        // Multiplicity column is the sole int column (flat index 15 in
+        // the full trace, bucket index 0 of the int slot).
+        let int_cols = trace.int.to_mut();
+        int_cols[0].evaluations[0] = int_cols[0].evaluations[0] + 1;
+
+        let sig = AndGateChunkedLookupUair::<ZtInt>::signature();
+        let public_trace = trace.public(&sig);
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+        let proof = ZincPlusPiop::<
+            TestZincTypesIprs,
+            AndGateChunkedLookupUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+        >::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("prover accepts a tampered (unsound) trace");
+        let result = ZincPlusPiop::<
+            TestZincTypesIprs,
+            AndGateChunkedLookupUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+        >::verify::<_, CHECKED>(
+            &pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!(),
+        );
+        assert!(
+            result.is_err(),
+            "verifier must reject a tampered multiplicity column"
         );
     }
 }

@@ -1593,6 +1593,207 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// AndGateChunkedLookupUair: end-to-end exercise of Phase-2i's chunked
+// affine-combo lookup pattern.
+//
+// Enforces `u = x AND y` (bitwise) on 32-bit bit-poly columns by:
+//   1. committing `x, y, u` as parent bit-poly<32> columns;
+//   2. committing 4 × 8-bit chunk columns per parent (x_0..x_3, y_0..y_3,
+//      u_0..u_3), each a `BinaryPoly<32>` whose bits 8..32 are zero;
+//   3. asserting per-parent chunk-decomposition at X=2 via the
+//      `(X - 2)` ideal: `p == p_0 + X^8·p_1 + X^16·p_2 + X^24·p_3`;
+//   4. running four lookup specs in a single group with table type
+//      `BitPoly { width: 32, chunk_width: Some(8) }` — each spec
+//      asserts `x_k + y_k - 2·u_k ∈ BitPoly{8}` (256-entry table),
+//      which forces `u_k_i = x_k_i · y_k_i` at every coefficient
+//      position `i ∈ [0, 8)` and also constrains bits 8..32 of each
+//      chunk to be zero (any nonzero bit past position 7 lifts the
+//      ψ_a value out of the table).
+//
+// Together with the `X = 2` decomposition, the chunk lookups uniquely
+// determine each chunk from the parent, and the AND relation is
+// enforced at every bit position — the same pattern SHA-256 Ch/Maj
+// integration will use (see SHA_ECDSA_UAIRS notes for how the same
+// affine-combo form generalises to `a + b + c - 2·Maj ∈ BitPoly{32}`).
+//
+// Layout (15 bit-poly witness cols + 1 int witness col):
+//   binary_poly (flat 0..15):
+//     0:     x  (parent)
+//     1:     y  (parent)
+//     2:     u  (parent)
+//     3..7:  x_0, x_1, x_2, x_3  (chunks of x, bits 8..32 = 0)
+//     7..11: y_0, y_1, y_2, y_3
+//     11..15: u_0, u_1, u_2, u_3
+//   int (flat 15):
+//     0:     m  (shared multiplicity for all four chunk-k lookups)
+// ---------------------------------------------------------------------------
+
+/// Chunk-width for `AndGateChunkedLookupUair` — 8 bits per chunk.
+pub const AND_GATE_CHUNK_WIDTH: usize = 8;
+/// Number of chunks per 32-bit parent.
+pub const AND_GATE_NUM_CHUNKS: usize = 32 / AND_GATE_CHUNK_WIDTH;
+
+#[derive(Clone, Debug)]
+pub struct AndGateChunkedLookupUair<R>(PhantomData<R>);
+
+impl<R> Uair for AndGateChunkedLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        // 15 bit-poly witness cols + 1 int witness col (multiplicity).
+        let total = TotalColumnLayout::new(15, 0, 1);
+
+        // Flat indices: x=0, y=1, u=2; x_0..x_3=3..7; y_0..y_3=7..11;
+        // u_0..u_3=11..15; m=15 (int).
+        let mut lookup_specs = Vec::with_capacity(AND_GATE_NUM_CHUNKS);
+        for k in 0..AND_GATE_NUM_CHUNKS {
+            let x_k = 3 + k;
+            let y_k = 7 + k;
+            let u_k = 11 + k;
+            lookup_specs.push(LookupColumnSpec {
+                expression: AffineExpr {
+                    terms: vec![(x_k, 1), (y_k, 1), (u_k, -2)],
+                    constant: 0,
+                },
+                table_type: LookupTableType::BitPoly {
+                    width: 32,
+                    chunk_width: Some(AND_GATE_CHUNK_WIDTH),
+                },
+            });
+        }
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], lookup_specs)
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        // Chunk-decomposition at X = 2 for each of x, y, u:
+        //   `p - p_0 - X^8·p_1 - X^16·p_2 - X^24·p_3 ∈ (X - 2)`.
+        // At X=2 this reduces to `p(2) = p_0(2) + 256·p_1(2) + 65536·p_2(2)
+        // + 16M·p_3(2)`, which uniquely determines each chunk in [0, 256)
+        // from the parent (combined with the lookup forcing chunks into
+        // that range).
+        let x_pow_8 = mono_x_pow_local::<R>(8);
+        let x_pow_16 = mono_x_pow_local::<R>(16);
+        let x_pow_24 = mono_x_pow_local::<R>(24);
+        let ideal_x2 = ideal_from_ref(&DegreeOneIdeal::new(R::from(2u32)));
+
+        let bp = up.binary_poly;
+        let parents = [&bp[0], &bp[1], &bp[2]]; // x, y, u
+        let chunk_bases = [3usize, 7, 11]; // base indices of x_0, y_0, u_0 in bp
+        for (parent, &base) in parents.iter().zip(chunk_bases.iter()) {
+            let recomposed = bp[base].clone()
+                + &mbs(&bp[base + 1], &x_pow_8).expect("X^8 chunk overflow")
+                + &mbs(&bp[base + 2], &x_pow_16).expect("X^16 chunk overflow")
+                + &mbs(&bp[base + 3], &x_pow_24).expect("X^24 chunk overflow");
+            b.assert_in_ideal((*parent).clone() - &recomposed, &ideal_x2);
+        }
+    }
+}
+
+/// Build the monomial `X^k` as a `DensePolynomial<R, 32>`. Local copy
+/// to avoid a cross-module dependency on the SHA helper.
+fn mono_x_pow_local<R: ConstSemiring>(k: usize) -> DensePolynomial<R, 32> {
+    let mut coeffs = [R::ZERO; 32];
+    coeffs[k] = R::ONE;
+    DensePolynomial::<R, 32>::new(coeffs)
+}
+
+impl<R> GenerateRandomTrace<32> for AndGateChunkedLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        // Need at least 8 num_vars to accommodate the 256-entry lookup
+        // table's zero-padding.
+        assert!(
+            num_vars >= AND_GATE_CHUNK_WIDTH,
+            "AndGateChunkedLookupUair requires num_vars >= {AND_GATE_CHUNK_WIDTH}"
+        );
+        let row_count = 1usize << num_vars;
+
+        let x_raw: Vec<u32> = (0..row_count).map(|_| rng.next_u32()).collect();
+        let y_raw: Vec<u32> = (0..row_count).map(|_| rng.next_u32()).collect();
+        let u_raw: Vec<u32> = x_raw.iter().zip(&y_raw).map(|(&x, &y)| x & y).collect();
+
+        let to_bin = |raw: &[u32]| -> DenseMultilinearExtension<BinaryPoly<32>> {
+            raw.iter().copied().map(BinaryPoly::<32>::from).collect()
+        };
+
+        // Chunks: k-th chunk of v picks byte k (bits 8k..8k+8) and places
+        // it in the low 8 bits of a BinaryPoly<32> (bits 8..32 = 0).
+        let chunk_raw = |src: &[u32], k: usize| -> Vec<u32> {
+            src.iter().map(|&v| (v >> (8 * k)) & 0xFF).collect()
+        };
+
+        let x_bin = to_bin(&x_raw);
+        let y_bin = to_bin(&y_raw);
+        let u_bin = to_bin(&u_raw);
+        let x_chunks: Vec<_> = (0..AND_GATE_NUM_CHUNKS)
+            .map(|k| to_bin(&chunk_raw(&x_raw, k)))
+            .collect();
+        let y_chunks: Vec<_> = (0..AND_GATE_NUM_CHUNKS)
+            .map(|k| to_bin(&chunk_raw(&y_raw, k)))
+            .collect();
+        let u_chunks: Vec<_> = (0..AND_GATE_NUM_CHUNKS)
+            .map(|k| to_bin(&chunk_raw(&u_raw, k)))
+            .collect();
+
+        // Multiplicity counts: for each (row, chunk k), the lookup value
+        // is `x_k XOR y_k` (since u_k = x_k AND y_k, so
+        // x_k + y_k - 2·u_k = x_k XOR y_k per bit — an 8-bit value, so
+        // j = XOR integer ∈ [0, 256)).
+        let mut mults_raw = vec![0u32; row_count];
+        for row in 0..row_count {
+            for k in 0..AND_GATE_NUM_CHUNKS {
+                let xor_k = ((x_raw[row] ^ y_raw[row]) >> (8 * k)) & 0xFF;
+                mults_raw[xor_k as usize] += 1;
+            }
+        }
+        let zero = R::from(0u32);
+        let m_col = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            mults_raw.into_iter().map(R::from).collect(),
+            zero,
+        );
+
+        let mut binary_poly = Vec::with_capacity(15);
+        binary_poly.push(x_bin);
+        binary_poly.push(y_bin);
+        binary_poly.push(u_bin);
+        binary_poly.extend(x_chunks);
+        binary_poly.extend(y_chunks);
+        binary_poly.extend(u_chunks);
+
+        UairTrace {
+            binary_poly: binary_poly.into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![m_col].into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crypto_primitives::crypto_bigint_int::Int;
