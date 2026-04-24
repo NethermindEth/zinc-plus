@@ -461,6 +461,251 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Linearized variant — prover-only benchmark helper.
+//
+// Drops SHA's row-dependent selectors (`s_sched_anch`, `s_upd_anch`,
+// `s_init`, `s_final`) from C7–C12. With those gates gone, every surviving
+// non-assert_zero constraint is degree 1 in the trace MLEs, so
+// `count_effective_max_degree` returns 1 and the prover unlocks the
+// MLE-first fq_sumcheck path.
+//
+// This is **prover-only**: the dropped constraints no longer hold at their
+// inactive rows (C7 fails on the last ~16 rows where shifts straddle the
+// zero-padding boundary, C10/C11/C12 fail everywhere outside row 0 / the
+// last 4), so the resulting proof **does not verify**. The point of this
+// variant is to measure how much faster the prover would be if Step 2 of
+// the selector-removal plan (zero-padding + boundary-opening) were in
+// place. Do not call `verify()` on proofs from this UAIR.
+//
+// Signature and trace are identical to `ShaEcdsaUair`; only
+// `constrain_general` differs.
+#[derive(Clone, Debug)]
+pub struct ShaEcdsaLinearizedUair<R>(PhantomData<R>);
+
+impl<R> Uair for ShaEcdsaLinearizedUair<R>
+where
+    R: EcdsaScalarRing + From<u32>,
+{
+    type Ideal = Sha256Ideal<R>;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        <ShaEcdsaUair<R> as Uair>::signature()
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        let bp = up.binary_poly;
+        let ints = up.int;
+
+        let pa_a = &bp[cols::PA_A];
+        let pa_e = &bp[cols::PA_E];
+        let w_a = &bp[cols::W_A];
+        let w_sig0 = &bp[cols::W_SIG0];
+        let w_ov_sig0 = &bp[cols::W_OV_SIG0];
+        let w_e = &bp[cols::W_E];
+        let w_sig1 = &bp[cols::W_SIG1];
+        let w_ov_sig1 = &bp[cols::W_OV_SIG1];
+        let w_big_w = &bp[cols::W_W];
+        let w_lsig0 = &bp[cols::W_LSIG0];
+        let w_s0 = &bp[cols::W_S0];
+        let w_t0 = &bp[cols::W_T0];
+        let w_ov_lsig0 = &bp[cols::W_OV_LSIG0];
+        let w_lsig1 = &bp[cols::W_LSIG1];
+        let w_s1 = &bp[cols::W_S1];
+        let w_t1 = &bp[cols::W_T1];
+        let w_ov_lsig1 = &bp[cols::W_OV_LSIG1];
+
+        let down_w_a_sh4 = &down.binary_poly[0];
+        let down_w_sig0_sh3 = &down.binary_poly[1];
+        let down_w_e_sh4 = &down.binary_poly[2];
+        let down_w_sig1_sh3 = &down.binary_poly[3];
+        let down_w_w_sh3 = &down.binary_poly[4];
+        let down_w_w_sh9 = &down.binary_poly[5];
+        let down_w_w_sh16 = &down.binary_poly[6];
+        let down_w_lsig0_sh1 = &down.binary_poly[7];
+        let down_w_lsig1_sh14 = &down.binary_poly[8];
+        let down_w_ch_sh3 = &down.binary_poly[9];
+        let down_w_maj_sh3 = &down.binary_poly[10];
+        let down_pa_k_sh3 = &down.int[0];
+        let down_w_mu_w_sh16 = &down.int[1];
+        let down_w_mu_a_sh3 = &down.int[2];
+        let down_w_mu_e_sh3 = &down.int[3];
+        let down_ecdsa_u_1_sh1 = &down.int[4];
+        let down_ecdsa_u_2_sh1 = &down.int[5];
+
+        let ideal_rot_xw1 = ideal_from_ref(&Sha256Ideal::<R>::RotXw1);
+        let ideal_rot_x2 = ideal_from_ref(&Sha256Ideal::<R>::RotX2(RotationIdeal::new(
+            R::ONE + R::ONE,
+        )));
+
+        let rho_sig0 = rho_poly::<R>(&[10, 19, 30]);
+        let rho_sig1 = rho_poly::<R>(&[7, 21, 26]);
+        let rho_lsig0 = rho_poly::<R>(&[14, 25]);
+        let rho_lsig1 = rho_poly::<R>(&[13, 15]);
+        let two_scalar = const_scalar::<R>(R::ONE + R::ONE);
+        let x_pow_3 = mono_x_pow::<R>(3);
+        let x_pow_10 = mono_x_pow::<R>(10);
+        let two_times_x31 = {
+            let mut coeffs = [R::ZERO; 32];
+            coeffs[31] = R::ONE + R::ONE;
+            DensePolynomial::<R, 32>::new(coeffs)
+        };
+
+        // ============ SHA — all selectors dropped ============
+
+        // C1–C6: already selector-free in ShaEcdsaUair.
+        b.assert_in_ideal(
+            mbs(w_a, &rho_sig0).expect("a · rho_sig0 overflow") - w_sig0
+                - &mbs(w_ov_sig0, &two_scalar).expect("2 · ov_sig0 overflow"),
+            &ideal_rot_xw1,
+        );
+        b.assert_in_ideal(
+            mbs(w_e, &rho_sig1).expect("e · rho_sig1 overflow") - w_sig1
+                - &mbs(w_ov_sig1, &two_scalar).expect("2 · ov_sig1 overflow"),
+            &ideal_rot_xw1,
+        );
+        b.assert_zero(
+            w_big_w.clone() - w_t0 - &mbs(w_s0, &x_pow_3).expect("X^3 · S_0 overflow"),
+        );
+        b.assert_in_ideal(
+            mbs(w_big_w, &rho_lsig0).expect("W · rho_lsig0 overflow") + w_s0 - w_lsig0
+                - &mbs(w_ov_lsig0, &two_scalar).expect("2 · ov_lsig0 overflow"),
+            &ideal_rot_xw1,
+        );
+        b.assert_zero(
+            w_big_w.clone() - w_t1 - &mbs(w_s1, &x_pow_10).expect("X^10 · S_1 overflow"),
+        );
+        b.assert_in_ideal(
+            mbs(w_big_w, &rho_lsig1).expect("W · rho_lsig1 overflow") + w_s1 - w_lsig1
+                - &mbs(w_ov_lsig1, &two_scalar).expect("2 · ov_lsig1 overflow"),
+            &ideal_rot_xw1,
+        );
+
+        // C7: message schedule — selector dropped.
+        let two_x31_mu_w =
+            mbs(down_w_mu_w_sh16, &two_times_x31).expect("2·X^31 · mu_W overflow");
+        let sched_inner = down_w_w_sh16.clone()
+            - w_big_w
+            - down_w_lsig0_sh1
+            - down_w_w_sh9
+            - down_w_lsig1_sh14
+            + &two_x31_mu_w;
+        b.assert_in_ideal(sched_inner, &ideal_rot_x2);
+
+        // C8: register update for a — selector dropped.
+        let two_x31_mu_a =
+            mbs(down_w_mu_a_sh3, &two_times_x31).expect("2·X^31 · mu_a overflow");
+        let a_update_inner = down_w_a_sh4.clone()
+            - w_e
+            - down_w_sig1_sh3
+            - down_w_ch_sh3
+            - down_pa_k_sh3
+            - down_w_w_sh3
+            - down_w_sig0_sh3
+            - down_w_maj_sh3
+            + &two_x31_mu_a;
+        b.assert_in_ideal(a_update_inner, &ideal_rot_x2);
+
+        // C9: register update for e — selector dropped.
+        let two_x31_mu_e =
+            mbs(down_w_mu_e_sh3, &two_times_x31).expect("2·X^31 · mu_e overflow");
+        let e_update_inner = down_w_e_sh4.clone()
+            - w_a
+            - w_e
+            - down_w_sig1_sh3
+            - down_w_ch_sh3
+            - down_pa_k_sh3
+            - down_w_w_sh3
+            + &two_x31_mu_e;
+        b.assert_in_ideal(e_update_inner, &ideal_rot_x2);
+
+        // C10: init boundary — selector dropped, always checked.
+        b.assert_zero(w_a.clone() - pa_a);
+        // C11: final boundary (a) — selector dropped.
+        b.assert_zero(w_a.clone() - pa_a);
+        // C12: final boundary (e) — selector dropped.
+        b.assert_zero(w_e.clone() - pa_e);
+
+        // ============ ECDSA — unchanged ============
+        let e_s_init = &ints[cols::ECDSA_S_INIT];
+        let e_s_accum = &ints[cols::ECDSA_S_ACCUM];
+        let e_s_final = &ints[cols::ECDSA_S_FINAL];
+        let e_pa_r = &ints[cols::ECDSA_PA_R];
+        let e_pa_s = &ints[cols::ECDSA_PA_S];
+        let e_b_1 = &ints[cols::ECDSA_W_B1];
+        let e_b_2 = &ints[cols::ECDSA_W_B2];
+        let e_u_1 = &ints[cols::ECDSA_W_U1];
+        let e_u_2 = &ints[cols::ECDSA_W_U2];
+        let e_w_inv = &ints[cols::ECDSA_W_W_INV];
+        let e_x_hat = &ints[cols::ECDSA_W_XHAT];
+        let e_k = &ints[cols::ECDSA_W_K];
+        let e_q_u1 = &ints[cols::ECDSA_W_Q_U1];
+        let e_q_u2 = &ints[cols::ECDSA_W_Q_U2];
+        let e_q_sw = &ints[cols::ECDSA_W_Q_SW];
+
+        let n_scalar = const_scalar::<R>(R::secp256k1_n());
+
+        let b1_sq_minus_b1 = e_b_1.clone() * e_b_1 - e_b_1;
+        b.assert_zero(e_s_accum.clone() * &b1_sq_minus_b1);
+        let b2_sq_minus_b2 = e_b_2.clone() * e_b_2 - e_b_2;
+        b.assert_zero(e_s_accum.clone() * &b2_sq_minus_b2);
+
+        let q_u1_times_n = mbs(e_q_u1, &n_scalar).expect("q_U1 · n overflow");
+        let accum1_inner =
+            e_u_1.clone() + e_u_1 + e_b_1 - down_ecdsa_u_1_sh1 - &q_u1_times_n;
+        b.assert_zero(e_s_accum.clone() * &accum1_inner);
+
+        let q_u2_times_n = mbs(e_q_u2, &n_scalar).expect("q_U2 · n overflow");
+        let accum2_inner =
+            e_u_2.clone() + e_u_2 + e_b_2 - down_ecdsa_u_2_sh1 - &q_u2_times_n;
+        b.assert_zero(e_s_accum.clone() * &accum2_inner);
+
+        b.assert_zero(e_s_init.clone() * e_u_1);
+        b.assert_zero(e_s_init.clone() * e_u_2);
+
+        let s_times_w = e_pa_s.clone() * e_w_inv;
+        let s_final_sw = e_s_final.clone() * &s_times_w;
+        let q_sw_times_n = mbs(e_q_sw, &n_scalar).expect("q_sw · n overflow");
+        let s_final_q_sw_n = e_s_final.clone() * &q_sw_times_n;
+        let inv_expr = s_final_sw - e_s_final - &s_final_q_sw_n;
+        b.assert_zero(inv_expr);
+
+        let k_sq_minus_k = e_k.clone() * e_k - e_k;
+        b.assert_zero(e_s_final.clone() * &k_sq_minus_k);
+        let k_times_n = mbs(e_k, &n_scalar).expect("k · n overflow");
+        let sig_inner = e_x_hat.clone() - e_pa_r - &k_times_n;
+        b.assert_zero(e_s_final.clone() * &sig_inner);
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for ShaEcdsaLinearizedUair<R>
+where
+    R: EcdsaScalarRing + From<u32> + From<Int<ECDSA_INT_LIMBS>>,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        <ShaEcdsaUair<R> as GenerateRandomTrace<32>>::generate_random_trace(num_vars, rng)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Scalar helpers (shared with the two sub-UAIRs but reimplemented here to
 // avoid inter-module pub-vs-private friction).
 // ---------------------------------------------------------------------------
