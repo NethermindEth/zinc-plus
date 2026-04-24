@@ -777,6 +777,99 @@ mod tests {
         );
     }
 
+    /// End-to-end test: SHA-256 compression slice.
+    ///
+    /// UAIR constraints (see `test-uair/src/sha256.rs`):
+    ///   1. s_sigma · (a_hat · rho_0(X) - sigma_0_hat) ∈ (X^32 - 1) mod 2
+    ///   2. s_init  · (a_hat - y_a_public) == 0
+    ///
+    /// Exercises the new mod-2 (X^W - 1) ideal check at the verifier via
+    /// `Sha256Ideal::RotXw1Mod2`, whose `contains` reduces remainder
+    /// coefficients mod 2 (canonical parity) before accepting. See the
+    /// module doc in `test-uair/src/sha256.rs` for the soundness caveat.
+    #[test]
+    fn test_e2e_sha256_slice() {
+        let num_vars = 7; // 128 rows
+        do_test::<TestZincTypesIprs, Sha256CompressionSliceUair<ZtInt>, Sha256Ideal<F>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |ideal_or_zero, field_cfg| {
+                // Zero ideals are filtered out upstream of this closure (see
+                // `piop/src/ideal_check.rs`), so we only receive NonZero.
+                match ideal_or_zero {
+                    IdealOrZero::NonZero(Sha256Ideal::RotX2(r)) => {
+                        Sha256Ideal::RotX2(RotationIdeal::from_with_cfg(r, field_cfg))
+                    }
+                    IdealOrZero::NonZero(Sha256Ideal::RotXw1) => Sha256Ideal::RotXw1,
+                    IdealOrZero::Zero => {
+                        unreachable!("zero ideals are filtered before this closure runs")
+                    }
+                }
+            },
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// End-to-end test: ECDSA scalar slice + F_p doubling at row 0.
+    ///
+    /// Step 2 of the F_p / EC-operation slice: exercises the F_n
+    /// quotient-witness lift (scalar accumulation, bit range, inverse,
+    /// signature modular check) and the F_p quotient-witness lift on
+    /// Jacobian doubling at row 0 only (`s_init`-gated). Step 3 will
+    /// extend doubling to all 256 accumulation rows and wire the
+    /// Shamir-trick addition.
+    #[test]
+    fn test_e2e_ecdsa_slice() {
+        use zinc_test_uair::EcdsaScalarSliceUair;
+        use zinc_uair::ideal::ImpossibleIdeal;
+        let num_vars = 9; // 512 rows; slice uses 257 (rows 0..=256)
+        do_test_f::<EcdsaF, EcdsaZincTypes, EcdsaScalarSliceUair<EcdsaInt>, ImpossibleIdeal>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+            |_ideal, _field_cfg| {
+                unreachable!(
+                    "ECDSA slice uses only assert_zero; no non-trivial ideals"
+                )
+            },
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// End-to-end test: merged SHA-256 + ECDSA UAIR (side-by-side).
+    ///
+    /// Runs the SHA-256 compression slice and the ECDSA scalar slice in a
+    /// single trace / single proof. The two sections live on disjoint
+    /// columns and are not cross-bound (no digest → `pa_e` constraint yet).
+    /// Uses `EcdsaZincTypes` (Int<5> + 768-bit random field) since the
+    /// ECDSA side needs wider integers; SHA-256's 32-bit values fit.
+    #[test]
+    fn test_e2e_sha_ecdsa() {
+        use zinc_test_uair::ShaEcdsaUair;
+        use zinc_uair::ideal::rotation::RotationIdeal;
+        let num_vars = 9; // 512 rows; ECDSA uses 257, SHA uses all.
+        do_test_f::<EcdsaF, EcdsaZincTypes, ShaEcdsaUair<EcdsaInt>, Sha256Ideal<EcdsaF>>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+            |ideal_or_zero, field_cfg| match ideal_or_zero {
+                IdealOrZero::NonZero(Sha256Ideal::RotX2(r)) => {
+                    Sha256Ideal::RotX2(RotationIdeal::from_with_cfg(r, field_cfg))
+                }
+                IdealOrZero::NonZero(Sha256Ideal::RotXw1) => Sha256Ideal::RotXw1,
+                IdealOrZero::Zero => {
+                    unreachable!("zero ideals are filtered before this closure runs")
+                }
+            },
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
     /// End-to-end test: BinaryDecompositionUair.
     ///
     /// Uses binary_poly (1 col) and int (1 col) trace types.
