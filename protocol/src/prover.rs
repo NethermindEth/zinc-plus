@@ -438,11 +438,16 @@ impl_with_type_bounds!(ProverEvalProjected
         mut self,
     ) -> Result<ProverSumchecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
         let num_constraints = count_constraints::<U>();
-        // Skip zero-ideal constraints in the fq_sumcheck — their values are
-        // identically zero on the hypercube, and ConstraintFolder::assert_zero
-        // is a no-op. The effective max degree is the max over remaining
-        // (non-zero-ideal) constraints only.
-        let max_degree = count_effective_max_degree::<U>();
+        // Sumcheck protocol degree must accommodate the actual fold
+        // polynomial's per-variable degree, including `assert_zero`
+        // constraints. Although their values are identically zero on the
+        // hypercube for an honest prover, the polynomial expression has
+        // non-trivial per-variable degree (e.g. `b·(b-1)·s_accum` is
+        // degree 3), and it appears in the fold via
+        // `ConstraintFolder::assert_zero`. Their inclusion is what binds
+        // the committed witness to the assert_zero claims (otherwise a
+        // dishonest prover could violate them undetected).
+        let max_degree = zinc_uair::degree_counter::count_max_degree::<U>();
 
         let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
             &mut self.base.pcs_transcript.fs_transcript,
