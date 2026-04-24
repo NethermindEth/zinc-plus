@@ -2,6 +2,7 @@ pub mod combined_poly_resolver;
 pub mod ideal_check;
 pub mod lookup;
 pub mod multipoint_eval;
+pub mod multipoint_reducer;
 pub mod projections;
 pub mod random_field_sumcheck;
 pub mod shift_predicate;

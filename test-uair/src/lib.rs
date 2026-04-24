@@ -19,8 +19,8 @@ use zinc_poly::{
     },
 };
 use zinc_uair::{
-    ConstraintBuilder, PublicColumnLayout, ShiftSpec, TotalColumnLayout, TraceRow, Uair,
-    UairSignature, UairTrace,
+    ConstraintBuilder, LookupColumnSpec, LookupTableType, PublicColumnLayout, ShiftSpec,
+    TotalColumnLayout, TraceRow, Uair, UairSignature, UairTrace,
     ideal::{DegreeOneIdeal, ImpossibleIdeal},
 };
 use zinc_utils::from_ref::FromRef;
@@ -854,6 +854,115 @@ where
         UairTrace {
             arbitrary_poly: vec![to_mle(a_col), to_mle(b_col), to_mle(c_col)].into(),
             ..Default::default()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IntLookupUair: minimal UAIR declaring a lookup argument.
+//
+// Layout: 2 int witness columns (no binary_poly, no arbitrary_poly, no shifts).
+//   col[0]: `v`, the witness column whose values must all lie in
+//           `T = {0, 1, …, 255}` (Word table with `width = 8`).
+//   col[1]: `m`, the multiplicity column — `m[j]` is the count of
+//           occurrences of `T[j]` in `v`.
+//
+// Constraint: a trivially-satisfied `0 ∈ ⟨X - 2⟩`, so that the ideal
+// check has exactly one (no-op) constraint — required by the protocol
+// infrastructure but unrelated to the lookup.
+//
+// The trace has `2^num_vars` rows. The caller must pass `num_vars = 8`
+// so that the row count matches the table size (`2^width = 256`). No
+// chunking is used in this test UAIR.
+// ---------------------------------------------------------------------------
+
+/// Fixed table width for `IntLookupUair` — rows are 8-bit words.
+pub const INT_LOOKUP_TABLE_WIDTH: usize = 8;
+
+#[derive(Clone, Debug)]
+pub struct IntLookupUair<R>(PhantomData<R>);
+
+impl<R> Uair for IntLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        // 2 int witness columns: v (index 0) and m (index 1).
+        let total = TotalColumnLayout::new(0, 0, 2);
+        let lookup_specs = vec![LookupColumnSpec {
+            column_index: 0,
+            table_type: LookupTableType::Word {
+                width: INT_LOOKUP_TABLE_WIDTH,
+                chunk_width: None,
+            },
+        }];
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], lookup_specs)
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        // Trivially-satisfied constraint: (v - v) ∈ ⟨X - 2⟩.
+        // Needed because the existing protocol infrastructure expects
+        // at least one constraint. The actual lookup is proved outside
+        // the ideal-check path.
+        let v = &up.int[0];
+        b.assert_in_ideal(
+            v.clone() - v,
+            &ideal_from_ref(&DegreeOneIdeal::new(R::from(2))),
+        );
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for IntLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        assert_eq!(
+            num_vars, INT_LOOKUP_TABLE_WIDTH,
+            "IntLookupUair requires num_vars = {INT_LOOKUP_TABLE_WIDTH} (table size matches row count)"
+        );
+        let row_count = 1usize << num_vars;
+        let table_size = 1usize << INT_LOOKUP_TABLE_WIDTH;
+
+        // Witness values: each entry uniform in [0, table_size).
+        let witness_raw: Vec<u32> = (0..row_count)
+            .map(|_| (rng.random::<u32>()) % (table_size as u32))
+            .collect();
+
+        // Multiplicities: m[j] = count of j in witness_raw.
+        let mut mults_raw = vec![0u32; table_size];
+        for &v in &witness_raw {
+            mults_raw[v as usize] += 1;
+        }
+
+        let v_col: DenseMultilinearExtension<R> =
+            witness_raw.iter().map(|&v| R::from(v)).collect();
+        let m_col: DenseMultilinearExtension<R> =
+            mults_raw.iter().map(|&m| R::from(m)).collect();
+
+        UairTrace {
+            binary_poly: vec![].into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![v_col, m_col].into(),
         }
     }
 }

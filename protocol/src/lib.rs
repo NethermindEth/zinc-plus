@@ -430,7 +430,8 @@ mod tests {
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-        TestUairMixedShifts, TestUairNoMultiplication, TestUairSimpleMultiplication,
+        INT_LOOKUP_TABLE_WIDTH, IntLookupUair, TestUairMixedShifts, TestUairNoMultiplication,
+        TestUairSimpleMultiplication,
     };
     use zinc_uair::{
         degree_counter::count_max_degree, ideal::DegreeOneIdeal, ideal_collector::IdealOrZero,
@@ -949,5 +950,135 @@ mod tests {
                 assert!(matches!(res.unwrap_err(), ProtocolError::IdealCheck(..)));
             },
         );
+    }
+
+    // Build a dynamic `F::Config` fresh from a blank transcript — any
+    // valid cfg works for the standalone LookupArgument, since the
+    // lookup argument uses a transcript disjoint from the protocol.
+    fn sample_field_cfg() -> <F as crypto_primitives::PrimeField>::Config {
+        use zinc_transcript::{Blake3Transcript, traits::Transcript};
+        let mut ts = Blake3Transcript::new();
+        ts.get_random_field_cfg::<F, crypto_primitives::crypto_bigint_uint::Uint<FIELD_LIMBS>, MillerRabin>()
+    }
+
+    fn lift_int_col(
+        col: &zinc_poly::mle::DenseMultilinearExtension<ZtInt>,
+        cfg: &<F as crypto_primitives::PrimeField>::Config,
+    ) -> zinc_poly::mle::DenseMultilinearExtension<<F as crypto_primitives::Field>::Inner> {
+        use crypto_primitives::{FromWithConfig, PrimeField};
+        let zero_inner = F::zero_with_cfg(cfg).into_inner();
+        let evals: Vec<_> = col
+            .evaluations
+            .iter()
+            .map(|v| {
+                let signed: i64 = *v;
+                assert!(signed >= 0, "witness/multiplicity must be non-negative");
+                F::from_with_cfg(signed as u64, cfg).into_inner()
+            })
+            .collect();
+        zinc_poly::mle::DenseMultilinearExtension::from_evaluations_vec(col.num_vars, evals, zero_inner)
+    }
+
+    fn build_identity_table(
+        width: usize,
+        cfg: &<F as crypto_primitives::PrimeField>::Config,
+    ) -> zinc_poly::mle::DenseMultilinearExtension<<F as crypto_primitives::Field>::Inner> {
+        use crypto_primitives::{FromWithConfig, PrimeField};
+        let size = 1usize << width;
+        let zero_inner = F::zero_with_cfg(cfg).into_inner();
+        let evals: Vec<_> = (0..size as u64)
+            .map(|x| F::from_with_cfg(x, cfg).into_inner())
+            .collect();
+        zinc_poly::mle::DenseMultilinearExtension::from_evaluations_vec(width, evals, zero_inner)
+    }
+
+    // -----------------------------------------------------------------------
+    // IntLookupUair: exercises the protocol alongside a standalone lookup
+    // argument on the same committed trace.
+    //
+    // The existing protocol pipeline currently *ignores* lookup_specs in
+    // `UairSignature`, so Step 1–7 run as if no lookup were present. The
+    // lookup is validated separately by LookupArgument::prove/verify on
+    // the same witness/multiplicity int columns.
+    //
+    // This does not yet bind the LookupArgument's component evals to the
+    // committed trace via the PCS opening — that binding is the remaining
+    // protocol-wiring work (Phase 2e).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_int_lookup_uair_protocol_runs() {
+        let num_vars = INT_LOOKUP_TABLE_WIDTH;
+        let mut rng = rng();
+
+        let trace = IntLookupUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        let sig = IntLookupUair::<ZtInt>::signature();
+        let public_trace = trace.public(&sig);
+
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+        let proof = ZincPlusPiop::<TestZincTypesIprs, IntLookupUair<ZtInt>, F, DEGREE_PLUS_ONE>::prove::<
+            false, CHECKED,
+        >(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("protocol prove must succeed on IntLookupUair");
+        ZincPlusPiop::<TestZincTypesIprs, IntLookupUair<ZtInt>, F, DEGREE_PLUS_ONE>::verify::<
+            _, CHECKED,
+        >(&pp, proof, &public_trace, num_vars, project_scalar_fn, default_project_ideal!())
+            .expect("protocol verify must succeed on IntLookupUair");
+    }
+
+    #[test]
+    fn test_int_lookup_uair_lookup_argument_accepts_honest_trace() {
+        use zinc_piop::lookup::logup_gkr::LookupArgument;
+        use zinc_transcript::Blake3Transcript;
+
+        let num_vars = INT_LOOKUP_TABLE_WIDTH;
+        let mut rng = rng();
+        let trace = IntLookupUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+
+        let cfg = sample_field_cfg();
+        let wit_col = lift_int_col(&trace.int[0], &cfg);
+        let mul_col = lift_int_col(&trace.int[1], &cfg);
+        let table_mle = build_identity_table(INT_LOOKUP_TABLE_WIDTH, &cfg);
+
+        let mut p_ts = Blake3Transcript::new();
+        let (lookup_proof, _) =
+            LookupArgument::<F>::prove(&mut p_ts, &[&wit_col], &table_mle, &mul_col, &cfg);
+
+        let mut v_ts = Blake3Transcript::new();
+        LookupArgument::<F>::verify(&mut v_ts, 1, INT_LOOKUP_TABLE_WIDTH, &lookup_proof, &cfg)
+            .expect("honest lookup must verify");
+    }
+
+    #[test]
+    fn test_int_lookup_uair_tampered_multiplicity_rejected() {
+        use zinc_piop::lookup::logup_gkr::{LookupArgument, LookupArgumentError};
+        use zinc_transcript::Blake3Transcript;
+
+        let num_vars = INT_LOOKUP_TABLE_WIDTH;
+        let mut rng = rng();
+        let mut trace = IntLookupUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+
+        // Tamper: increment the first multiplicity count.
+        let tampered = trace.int.to_mut();
+        tampered[1].evaluations[0] = tampered[1].evaluations[0] + 1;
+
+        let cfg = sample_field_cfg();
+        let wit_col = lift_int_col(&trace.int[0], &cfg);
+        let mul_col = lift_int_col(&trace.int[1], &cfg);
+        let table_mle = build_identity_table(INT_LOOKUP_TABLE_WIDTH, &cfg);
+
+        let mut p_ts = Blake3Transcript::new();
+        let (lookup_proof, _) =
+            LookupArgument::<F>::prove(&mut p_ts, &[&wit_col], &table_mle, &mul_col, &cfg);
+
+        let mut v_ts = Blake3Transcript::new();
+        let result =
+            LookupArgument::<F>::verify(&mut v_ts, 1, INT_LOOKUP_TABLE_WIDTH, &lookup_proof, &cfg);
+        match result {
+            Err(LookupArgumentError::NonzeroRootNumerator) => {}
+            other => panic!("expected NonzeroRootNumerator, got {other:?}"),
+        }
     }
 }
