@@ -264,25 +264,24 @@ pub mod cols {
     // int columns. Public selectors come first (required by PublicColumnLayout
     // prefix convention), witness columns last.
     pub const S_INIT: usize = 0; // public: 1 at trace row 0, else 0
-    pub const S_ACTIVE: usize = 1; // public: 1 on every row (row-local rotation constraints)
-    pub const S_SCHED_ANCH: usize = 2; // public: 1 where the message-schedule anchor fits
-    pub const S_UPD_ANCH: usize = 3; // public: 1 where the register-update anchor fits
-    pub const S_FINAL: usize = 4; // public: 1 on the final 4 rows (n−4 .. n−1), else 0
-    pub const PA_K: usize = 5; // public: round constants column (free for this slice)
-    pub const W_MU_W: usize = 6; // witness: integer carry for the modular-sum constraint
-    pub const W_MU_A: usize = 7; // witness: integer carry for the a-update
-    pub const W_MU_E: usize = 8; // witness: integer carry for the e-update
+    pub const S_SCHED_ANCH: usize = 1; // public: 1 where the message-schedule anchor fits
+    pub const S_UPD_ANCH: usize = 2; // public: 1 where the register-update anchor fits
+    pub const S_FINAL: usize = 3; // public: 1 on the final 4 rows (n−4 .. n−1), else 0
+    pub const PA_K: usize = 4; // public: round constants column (free for this slice)
+    pub const W_MU_W: usize = 5; // witness: integer carry for the modular-sum constraint
+    pub const W_MU_A: usize = 6; // witness: integer carry for the a-update
+    pub const W_MU_E: usize = 7; // witness: integer carry for the e-update
     // Lookup multiplicity columns (one per group, placed at the end per the
     // protocol's "last N int cols = multiplicities" convention). Group order
     // is the BTreeMap sort over `LookupTableType`:
     //   group 0 = Word{ width: 2 }  covers mu_W     ∈ [0, 3]
     //   group 1 = Word{ width: 3 }  covers mu_a/mu_e ∈ [0, 6]/[0, 5]
-    pub const W_M_W2: usize = 9; // multiplicity column for group 0
-    pub const W_M_W3: usize = 10; // multiplicity column for group 1
+    pub const W_M_W2: usize = 8; // multiplicity column for group 0
+    pub const W_M_W3: usize = 9; // multiplicity column for group 1
     /// Total number of int columns.
-    pub const NUM_INT: usize = 11;
+    pub const NUM_INT: usize = 10;
     /// Number of public int columns (prefix).
-    pub const NUM_INT_PUB: usize = 6;
+    pub const NUM_INT_PUB: usize = 5;
 
     /// Flat trace indices for ShiftSpec (binary_poly || arbitrary_poly || int).
     pub const FLAT_W_A: usize = W_A;
@@ -418,7 +417,6 @@ where
         let w_ov_lsig1 = &bp[cols::W_OV_LSIG1];
 
         let s_init = &sel[cols::S_INIT];
-        let s_active = &sel[cols::S_ACTIVE];
         let s_sched_anch = &sel[cols::S_SCHED_ANCH];
         let s_upd_anch = &sel[cols::S_UPD_ANCH];
         let s_final = &sel[cols::S_FINAL];
@@ -464,57 +462,55 @@ where
             DensePolynomial::<R, 32>::new(coeffs)
         };
 
+        // C1–C6 apply on every row unconditionally — no selector needed, the
+        // rotation identities are row-local and honest values satisfy them on
+        // every row. Dropping the `s_active` gate (identically 1 in the
+        // trace) takes these constraints from degree 2 to degree 1 in the
+        // trace MLEs.
+
         // Constraint 1: Sigma_0 rotation, Q[X]-lifted.
-        //   s_active · (a_hat · rho_sig0 − sig0_hat − 2 · ov_sig0) ∈ (X^32 − 1)
+        //   (a_hat · rho_sig0 − sig0_hat − 2 · ov_sig0) ∈ (X^32 − 1)
         b.assert_in_ideal(
-            s_active.clone()
-                * &(mbs(w_a, &rho_sig0).expect("a · rho_sig0 overflow") - w_sig0
-                    - &mbs(w_ov_sig0, &two_scalar).expect("2 · ov_sig0 overflow")),
+            mbs(w_a, &rho_sig0).expect("a · rho_sig0 overflow") - w_sig0
+                - &mbs(w_ov_sig0, &two_scalar).expect("2 · ov_sig0 overflow"),
             &ideal_rot_xw1,
         );
 
         // Constraint 2: Sigma_1 rotation, Q[X]-lifted.
-        //   s_active · (e_hat · rho_sig1 − sig1_hat − 2 · ov_sig1) ∈ (X^32 − 1)
+        //   (e_hat · rho_sig1 − sig1_hat − 2 · ov_sig1) ∈ (X^32 − 1)
         b.assert_in_ideal(
-            s_active.clone()
-                * &(mbs(w_e, &rho_sig1).expect("e · rho_sig1 overflow") - w_sig1
-                    - &mbs(w_ov_sig1, &two_scalar).expect("2 · ov_sig1 overflow")),
+            mbs(w_e, &rho_sig1).expect("e · rho_sig1 overflow") - w_sig1
+                - &mbs(w_ov_sig1, &two_scalar).expect("2 · ov_sig1 overflow"),
             &ideal_rot_xw1,
         );
 
         // Constraint 3: sigma_0 right-shift decomposition (exact Z[X] equality,
         // not an ideal check — both sides are bit-polynomials).
-        //   s_active · (W_hat − T_0 − X^3 · S_0) == 0
+        //   W_hat − T_0 − X^3 · S_0 == 0
         b.assert_zero(
-            s_active.clone()
-                * &(w_big_w.clone() - w_t0
-                    - &mbs(w_s0, &x_pow_3).expect("X^3 · S_0 overflow")),
+            w_big_w.clone() - w_t0 - &mbs(w_s0, &x_pow_3).expect("X^3 · S_0 overflow"),
         );
 
         // Constraint 4: sigma_0 rotation (with the shift piece pre-split into
         // S_0), Q[X]-lifted.
-        //   s_active · (W_hat · rho_lsig0 + S_0 − lsig0_hat − 2 · ov_lsig0) ∈ (X^32 − 1)
+        //   (W_hat · rho_lsig0 + S_0 − lsig0_hat − 2 · ov_lsig0) ∈ (X^32 − 1)
         b.assert_in_ideal(
-            s_active.clone()
-                * &(mbs(w_big_w, &rho_lsig0).expect("W · rho_lsig0 overflow") + w_s0 - w_lsig0
-                    - &mbs(w_ov_lsig0, &two_scalar).expect("2 · ov_lsig0 overflow")),
+            mbs(w_big_w, &rho_lsig0).expect("W · rho_lsig0 overflow") + w_s0 - w_lsig0
+                - &mbs(w_ov_lsig0, &two_scalar).expect("2 · ov_lsig0 overflow"),
             &ideal_rot_xw1,
         );
 
         // Constraint 5: sigma_1 right-shift decomposition.
-        //   s_active · (W_hat − T_1 − X^10 · S_1) == 0
+        //   W_hat − T_1 − X^10 · S_1 == 0
         b.assert_zero(
-            s_active.clone()
-                * &(w_big_w.clone() - w_t1
-                    - &mbs(w_s1, &x_pow_10).expect("X^10 · S_1 overflow")),
+            w_big_w.clone() - w_t1 - &mbs(w_s1, &x_pow_10).expect("X^10 · S_1 overflow"),
         );
 
         // Constraint 6: sigma_1 rotation, Q[X]-lifted.
-        //   s_active · (W_hat · rho_lsig1 + S_1 − lsig1_hat − 2 · ov_lsig1) ∈ (X^32 − 1)
+        //   (W_hat · rho_lsig1 + S_1 − lsig1_hat − 2 · ov_lsig1) ∈ (X^32 − 1)
         b.assert_in_ideal(
-            s_active.clone()
-                * &(mbs(w_big_w, &rho_lsig1).expect("W · rho_lsig1 overflow") + w_s1 - w_lsig1
-                    - &mbs(w_ov_lsig1, &two_scalar).expect("2 · ov_lsig1 overflow")),
+            mbs(w_big_w, &rho_lsig1).expect("W · rho_lsig1 overflow") + w_s1 - w_lsig1
+                - &mbs(w_ov_lsig1, &two_scalar).expect("2 · ov_lsig1 overflow"),
             &ideal_rot_xw1,
         );
 
@@ -959,7 +955,6 @@ where
         // Selectors.
         let mut s_init_col: Vec<R> = (0..n).map(|_| R::ZERO).collect();
         s_init_col[0] = R::ONE;
-        let s_active_col: Vec<R> = (0..n).map(|_| R::ONE).collect();
         // Message-schedule anchor is valid when the forward shifts (up to 16)
         // stay in-trace, i.e. anchor row k ∈ [0, n − 17]. Beyond that,
         // shifts read zero-padded entries and the constraint would be
@@ -1010,7 +1005,6 @@ where
         };
         let int = vec![
             to_int_mle(s_init_col),
-            to_int_mle(s_active_col),
             to_int_mle(s_sched_anch_col),
             to_int_mle(s_upd_anch_col),
             to_int_mle(s_final_col),
