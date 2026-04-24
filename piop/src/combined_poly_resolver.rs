@@ -12,6 +12,7 @@ use crate::{
         structs::{Proof as CprProof, ProverState as CprProverState},
     },
     ideal_check,
+    scalar_proj_cache::ScalarProjCache,
     sumcheck::{
         SumCheckError, multi_degree::MultiDegreeSumcheckGroup,
         prover::ProverState as SumcheckProverState,
@@ -22,7 +23,7 @@ use itertools::Itertools;
 use num_traits::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::{collections::HashMap, marker::PhantomData, slice};
+use std::{cell::RefCell, collections::HashMap, marker::PhantomData, slice};
 use thiserror::Error;
 use zinc_poly::{
     EvaluationError,
@@ -276,11 +277,26 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
             let mut folder = ConstraintFolder::new(&folding_challenge_powers, &zero);
 
-            let project = |scalar: &U::Scalar| {
-                projected_scalars
+            // Per-call cache: dedup projections of the same scalar reference
+            // within a single `constrain_general` walk. See
+            // `scalar_proj_cache` for details. Lazily initialized — UAIRs
+            // that never invoke `from_ref`/`mbs` pay only the Option's
+            // discriminant write per call.
+            let cache: RefCell<Option<ScalarProjCache<U::Scalar, F>>> =
+                RefCell::new(None);
+            let project = |scalar: &U::Scalar| -> F {
+                if let Some(v) = cache.borrow().as_ref().and_then(|c| c.get(scalar)) {
+                    return v;
+                }
+                let v = projected_scalars
                     .get(scalar)
                     .cloned()
-                    .expect("all scalars should have been projected at this point")
+                    .expect("all scalars should have been projected at this point");
+                cache
+                    .borrow_mut()
+                    .get_or_insert_with(ScalarProjCache::new)
+                    .push(scalar, v.clone());
+                v
             };
 
             U::constrain_general(
@@ -524,11 +540,23 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         let mut folder = ConstraintFolder::new(&ancillary.folding_challenge_powers, &zero);
 
-        let project = |scalar: &U::Scalar| {
-            projected_scalars
+        // Same per-call projection cache as the prover comb_fn. See
+        // `scalar_proj_cache`; the verifier invokes `constrain_general`
+        // once, so the win here is only the within-call dedup.
+        let cache: RefCell<Option<ScalarProjCache<U::Scalar, F>>> = RefCell::new(None);
+        let project = |scalar: &U::Scalar| -> F {
+            if let Some(v) = cache.borrow().as_ref().and_then(|c| c.get(scalar)) {
+                return v;
+            }
+            let v = projected_scalars
                 .get(scalar)
                 .cloned()
-                .expect("all scalars should have been projected at this point")
+                .expect("all scalars should have been projected at this point");
+            cache
+                .borrow_mut()
+                .get_or_insert_with(ScalarProjCache::new)
+                .push(scalar, v.clone());
+            v
         };
 
         // Build the down trace row including the bit-op virtual column
