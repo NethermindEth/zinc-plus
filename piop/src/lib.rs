@@ -5,6 +5,7 @@ pub mod multipoint_eval;
 pub mod multipoint_reducer;
 pub mod projections;
 pub mod random_field_sumcheck;
+pub mod scalar_proj_cache;
 pub mod shift_predicate;
 pub mod sumcheck;
 #[cfg(test)]

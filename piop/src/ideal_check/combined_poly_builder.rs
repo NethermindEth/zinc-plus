@@ -1,10 +1,13 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use crate::projections::{ColumnMajorTrace, RowMajorTrace};
+use crate::{
+    projections::{ColumnMajorTrace, RowMajorTrace},
+    scalar_proj_cache::ScalarProjCache,
+};
 use crypto_primitives::PrimeField;
 use num_traits::Zero;
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap};
 use zinc_poly::{
     EvaluationError,
     mle::{
@@ -114,11 +117,26 @@ where
 {
     let mut constraint_builder = CombinedPolyRowBuilder::new(num_constraints);
 
-    let project = |x: &U::Scalar| {
-        projected_scalars
+    // Per-call cache — see `scalar_proj_cache`. This site is called once per
+    // trace row (2^num_vars - 1 times per proof) and projects scalars into a
+    // `DynamicPolynomialF` (wider than just F), so the HashMap lookup is
+    // expensive enough that even modest reuse pays for the cache. Lazy init
+    // keeps the overhead at zero for UAIRs that never call project.
+    let cache: RefCell<Option<ScalarProjCache<U::Scalar, DynamicPolynomialF<F>>>> =
+        RefCell::new(None);
+    let project = |x: &U::Scalar| -> DynamicPolynomialF<F> {
+        if let Some(v) = cache.borrow().as_ref().and_then(|c| c.get(x)) {
+            return v;
+        }
+        let v = projected_scalars
             .get(x)
             .cloned()
-            .expect("all scalars should have been projected at this point")
+            .expect("all scalars should have been projected at this point");
+        cache
+            .borrow_mut()
+            .get_or_insert_with(ScalarProjCache::new)
+            .push(x, v.clone());
+        v
     };
 
     U::constrain_general(
@@ -281,11 +299,23 @@ where
     // Apply UAIR constraints to the evaluated trace values
     let mut constraint_builder = CombinedPolyRowBuilder::new(num_constraints);
 
-    let project = |x: &U::Scalar| {
-        projected_scalars
+    // See `scalar_proj_cache` module. This site is called once (linear-UAIR
+    // fast path), so the win is purely within-call dedup.
+    let cache: RefCell<Option<ScalarProjCache<U::Scalar, DynamicPolynomialF<F>>>> =
+        RefCell::new(None);
+    let project = |x: &U::Scalar| -> DynamicPolynomialF<F> {
+        if let Some(v) = cache.borrow().as_ref().and_then(|c| c.get(x)) {
+            return v;
+        }
+        let v = projected_scalars
             .get(x)
             .cloned()
-            .expect("all scalars should have been projected at this point")
+            .expect("all scalars should have been projected at this point");
+        cache
+            .borrow_mut()
+            .get_or_insert_with(ScalarProjCache::new)
+            .push(x, v.clone());
+        v
     };
 
     U::constrain_general(
