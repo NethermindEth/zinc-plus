@@ -771,28 +771,61 @@ fn bench_big_linear_public_input_steps(group: &mut BenchmarkGroup<WallTime>, num
     do_bench_steps_uair::<BigLinearUairWithPublicInput<i64>>(group, "BigLinearPI", num_vars);
 }
 
-/// End-to-end benchmark for `IntLookupUair` — a minimal UAIR that
-/// declares a single `LookupColumnSpec` against a `Word { width: 8 }`
-/// table. Exercises the lookup pipeline: step4b (LookupArgument) +
-/// step5b (MultiPointReducer) + component-eval cross-check + PCS open
-/// at `r_final`.
+/// Benchmarks for `IntLookupUair` — a minimal UAIR that declares a
+/// single `LookupColumnSpec` against a `Word { width: 8 }` table and
+/// two int witness columns: `v` (the values being looked up) and `m`
+/// (their multiplicities in the table's domain).
 ///
-/// `IntLookupUair::generate_random_trace` asserts
-/// `num_vars == INT_LOOKUP_TABLE_WIDTH`, so `num_vars` is fixed at 8.
-/// The `num_vars` parameter is kept for API uniformity with the other
-/// bench helpers.
+/// # What is measured
+///
+/// Running the full Zinc+ pipeline on this UAIR exercises the
+/// lookup-specific machinery end-to-end:
+///
+/// * **Step 0 (Commit)**: Zip+ PCS commits to the two witness int
+///   columns (`v` and `m`). Size grows with `2^num_vars`.
+/// * **Step 1–3 (Projection + ideal check + eval projection)**: same
+///   cost structure as any other UAIR; the ideal check here is the
+///   trivial `(v - v) ∈ ⟨X - 2⟩` so it has negligible per-row work.
+/// * **Step 4 (CPR multi-degree sumcheck)**: one sumcheck round per
+///   variable at degree 1 (linear constraint).
+/// * **Step 4b (logup-GKR)**: for the single lookup group, runs the
+///   `LookupArgument` — builds the leaf `(N, D)` MLEs of size
+///   `2^(num_vars + slot_vars)` (slot_vars = 1 here since `L + 1 = 2`),
+///   folds up the grand-sum circuit, runs one per-layer sumcheck of
+///   degree 3, and sends the 4 tail values per layer.
+/// * **Step 5 (Multi-point eval)**: the normal CPR+shifts sumcheck of
+///   degree 2, *followed by* the new **step 5b reducer**: a single
+///   degree-2 sumcheck that folds `(r_0, witness_evals)` +
+///   `(ρ_row_g, witness_evals)` into `r_final`. For this UAIR the
+///   reducer has 2 claim groups × 2 witness columns = 4 coefficients.
+/// * **Step 6 (Lift-and-project)**: computes the polynomial-valued
+///   MLE evaluations at `r_final`.
+/// * **Step 7 (PCS open)**: Zip+ opening at `r_final`.
+///
+/// Verifier side mirrors the same steps. Both the per-step breakdown
+/// (`bench_int_lookup_steps`) and the wall-time E2E
+/// (`bench_int_lookup_e2e`) point at the same pipeline.
+///
+/// # num_vars
+///
+/// `IntLookupUair` fixes the table width at `INT_LOOKUP_TABLE_WIDTH`
+/// (= 8). `generate_random_trace` requires
+/// `num_vars >= INT_LOOKUP_TABLE_WIDTH`; when strictly greater, the
+/// multiplicity column is padded with zeros past the table, which
+/// contributes zero to the logup cumulative sum. `num_vars = 9` gives
+/// 512 trace rows with witness values drawn from `{0, …, 255}`.
 fn bench_int_lookup_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
-    assert_eq!(
-        num_vars, INT_LOOKUP_TABLE_WIDTH,
-        "IntLookupUair requires num_vars = {INT_LOOKUP_TABLE_WIDTH}",
+    assert!(
+        num_vars >= INT_LOOKUP_TABLE_WIDTH,
+        "IntLookupUair requires num_vars >= {INT_LOOKUP_TABLE_WIDTH}",
     );
     do_bench_uair::<IntLookupUair<i64>>(group, "IntLookup", num_vars);
 }
 
 fn bench_int_lookup_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
-    assert_eq!(
-        num_vars, INT_LOOKUP_TABLE_WIDTH,
-        "IntLookupUair requires num_vars = {INT_LOOKUP_TABLE_WIDTH}",
+    assert!(
+        num_vars >= INT_LOOKUP_TABLE_WIDTH,
+        "IntLookupUair requires num_vars >= {INT_LOOKUP_TABLE_WIDTH}",
     );
     do_bench_steps_uair::<IntLookupUair<i64>>(group, "IntLookup", num_vars);
 }
@@ -824,7 +857,9 @@ fn e2e_benches(c: &mut Criterion) {
     // bench_sha_proxy_e2e(&mut group, 10);
     // bench_sha_proxy_e2e(&mut group, 9);
     bench_sha256_slice_e2e(&mut group, 9);
-    // bench_int_lookup_e2e(&mut group, INT_LOOKUP_TABLE_WIDTH);
+    // Lookup UAIR — exercises step4b (logup-GKR) + step5b
+    // (MultiPointReducer) inside the full Zinc+ pipeline.
+    bench_int_lookup_e2e(&mut group, 9);
     group.finish();
 }
 
@@ -856,7 +891,7 @@ fn e2e_steps_benches(c: &mut Criterion) {
 
     // Lookup UAIR — exercises step4b (logup-GKR) + step5b
     // (MultiPointReducer) inside the full Zinc+ pipeline.
-    bench_int_lookup_steps(&mut group, INT_LOOKUP_TABLE_WIDTH);
+    bench_int_lookup_steps(&mut group, 9);
 
     group.finish();
 }

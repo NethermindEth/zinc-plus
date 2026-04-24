@@ -938,9 +938,14 @@ where
         num_vars: usize,
         rng: &mut Rng,
     ) -> UairTrace<'static, R, R, 32> {
-        assert_eq!(
-            num_vars, INT_LOOKUP_TABLE_WIDTH,
-            "IntLookupUair requires num_vars = {INT_LOOKUP_TABLE_WIDTH} (table size matches row count)"
+        // `num_vars >= table_width` is required so every column MLE has
+        // `2^num_vars` rows. When `num_vars > table_width` the
+        // multiplicity column is padded with zeros for indices past the
+        // table (those slots in the logup leaf layout contribute
+        // `0 / (α - padded_table_val)` == 0 to the cumulative sum).
+        assert!(
+            num_vars >= INT_LOOKUP_TABLE_WIDTH,
+            "IntLookupUair requires num_vars >= {INT_LOOKUP_TABLE_WIDTH}"
         );
         let row_count = 1usize << num_vars;
         let table_size = 1usize << INT_LOOKUP_TABLE_WIDTH;
@@ -950,16 +955,28 @@ where
             .map(|_| (rng.random::<u32>()) % (table_size as u32))
             .collect();
 
-        // Multiplicities: m[j] = count of j in witness_raw.
-        let mut mults_raw = vec![0u32; table_size];
+        // Multiplicities: m[j] = count of j in witness_raw for
+        // j in 0..table_size; 0 for the padding slots j >= table_size.
+        let mut mults_raw = vec![0u32; row_count];
         for &v in &witness_raw {
             mults_raw[v as usize] += 1;
         }
 
-        let v_col: DenseMultilinearExtension<R> =
-            witness_raw.iter().map(|&v| R::from(v)).collect();
-        let m_col: DenseMultilinearExtension<R> =
-            mults_raw.iter().map(|&m| R::from(m)).collect();
+        // Build MLEs explicitly at `num_vars` variables (relying on the
+        // `FromIterator` pad-to-next-power-of-two would pick the wrong
+        // number of variables when `row_count` happens to already be a
+        // power of two but smaller than `2^num_vars`).
+        let zero = R::from(0u32);
+        let v_col = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            witness_raw.into_iter().map(R::from).collect(),
+            zero.clone(),
+        );
+        let m_col = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            mults_raw.into_iter().map(R::from).collect(),
+            zero,
+        );
 
         UairTrace {
             binary_poly: vec![].into(),
