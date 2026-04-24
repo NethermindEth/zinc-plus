@@ -25,7 +25,7 @@ use zinc_test_uair::{
     BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, ByteDecompLookupUair,
     ECDSA_INT_LIMBS, EcdsaScalarSliceUair, GenerateRandomTrace, INT_LOOKUP_TABLE_WIDTH,
     IntLookupMultiUair, IntLookupUair, IntLookupWithPublicUair, Sha256CompressionSliceUair,
-    Sha256Ideal, ShaEcdsaUair, ShaProxy, TestUairNoMultiplication,
+    Sha256Ideal, ShaEcdsaLinearizedUair, ShaEcdsaUair, ShaProxy, TestUairNoMultiplication,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
@@ -1306,6 +1306,56 @@ fn bench_sha_ecdsa_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) 
     );
 }
 
+// ---------------------------------------------------------------------------
+// TEMPORARY: prover-only bench of the selector-free `ShaEcdsaLinearizedUair`.
+//
+// Drops SHA's row-dependent selectors (s_sched_anch, s_upd_anch, s_init,
+// s_final). This makes C7–C12 degree 1 instead of 2, effective max degree
+// drops to 1, and the MLE-first path unlocks. The proof produced here
+// does NOT verify — the dropped constraints fail on their formerly-inactive
+// rows — so we only time the prover. This is a "what-if" measurement for
+// the perf ceiling of Step 2 of the selector-removal plan.
+fn bench_sha_ecdsa_linearized_prover_only(
+    group: &mut BenchmarkGroup<WallTime>,
+    num_vars: usize,
+) {
+    type U = ShaEcdsaLinearizedUair<EcdsaBenchInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_ecdsa_pp(num_vars);
+
+    let params = format!("ShaEcdsaLinearized/nvars={num_vars}");
+
+    // Combined path (same path the real `ShaEcdsaUair` bench uses).
+    group.bench_function(BenchmarkId::new("Prove (Combined)", &params), |bench| {
+        bench.iter(|| {
+            black_box(
+                ZincPlusPiop::<EcdsaBenchZincTypes, U, EcdsaBenchF, DEGREE_PLUS_ONE>::prove::<
+                    false,
+                    PERFORM_CHECKS,
+                >(&pp, &trace, num_vars, zinc_protocol::project_scalar_fn),
+            )
+            .expect("Prover failed");
+        });
+    });
+
+    // MLE-first path — only valid when effective max degree ≤ 1, which is
+    // precisely why we care about this variant. Compare against Combined
+    // to see the algorithmic-path speedup.
+    group.bench_function(BenchmarkId::new("Prove (MLE-first)", &params), |bench| {
+        bench.iter(|| {
+            black_box(
+                ZincPlusPiop::<EcdsaBenchZincTypes, U, EcdsaBenchF, DEGREE_PLUS_ONE>::prove::<
+                    true,
+                    PERFORM_CHECKS,
+                >(&pp, &trace, num_vars, zinc_protocol::project_scalar_fn),
+            )
+            .expect("Prover failed");
+        });
+    });
+}
+
 fn bench_no_mult_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     do_bench_steps_uair::<TestUairNoMultiplication<i64>>(group, "NoMult", num_vars);
 }
@@ -1498,6 +1548,7 @@ fn e2e_benches(c: &mut Criterion) {
     bench_sha256_slice_e2e(&mut group, 9);
     bench_ecdsa_slice_e2e(&mut group, 9);
     bench_sha_ecdsa_e2e(&mut group, 9);
+    bench_sha_ecdsa_linearized_prover_only(&mut group, 9);
 
     // Lookup UAIR — exercises step4b (logup-GKR) + step5b
     // (MultiPointReducer) inside the full Zinc+ pipeline.

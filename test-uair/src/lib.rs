@@ -7,7 +7,7 @@ pub mod sha_ecdsa;
 pub use ecdsa::{ECDSA_INT_LIMBS, EcdsaScalarRing, EcdsaScalarSliceUair};
 pub use generate_trace::*;
 pub use sha256::{Sha256CompressionSliceUair, Sha256Ideal};
-pub use sha_ecdsa::ShaEcdsaUair;
+pub use sha_ecdsa::{ShaEcdsaLinearizedUair, ShaEcdsaUair};
 
 use crypto_primitives::{ConstSemiring, FixedSemiring, Semiring, boolean::Boolean};
 use num_traits::Zero;
