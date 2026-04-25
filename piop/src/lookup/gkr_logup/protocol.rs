@@ -243,10 +243,13 @@ where
     );
     let r_inner: Vec<F> = r_full[..n_vars].to_vec();
 
-    let chunk_lifts: Vec<Vec<DynamicPolynomialF<F>>> = (0..num_lookups)
-        .map(|ell| {
-            let parent_lifted =
-                compute_binary_poly_lift::<F, D>(&instance.parent_columns[ell], &r_inner, field_cfg);
+    // Batch the L parent lifts so the eq(·, r_inner) table is built
+    // once and the bit walks run in parallel across the L parents.
+    let parent_lifts =
+        compute_binary_poly_lifts::<F, D>(&instance.parent_columns, &r_inner, field_cfg);
+    let chunk_lifts: Vec<Vec<DynamicPolynomialF<F>>> = parent_lifts
+        .into_iter()
+        .map(|parent_lifted| {
             (0..num_chunks)
                 .map(|k| {
                     let lo = k * chunk_width;
@@ -525,28 +528,66 @@ where
 /// column at `point ∈ F_q^{n_vars}`. Returns a `DynamicPolynomialF<F>`
 /// of degree `< D` whose coefficient `p` equals
 /// `Σ_i eq(i, point) · bit_p(parent[i])`.
-#[allow(clippy::arithmetic_side_effects)]
+///
+/// Convenience wrapper around [`compute_binary_poly_lifts`] for the
+/// single-column case. Callers with multiple columns at the same
+/// `point` should call [`compute_binary_poly_lifts`] directly to share
+/// the eq-table build and parallelize across columns.
 pub fn compute_binary_poly_lift<F, const D: usize>(
     parent: &DenseMultilinearExtension<BinaryPoly<D>>,
     point: &[F],
     field_cfg: &F::Config,
 ) -> DynamicPolynomialF<F>
 where
-    F: InnerTransparentField + FromPrimitiveWithConfig,
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Inner: Send + Sync,
+    F::Config: Sync,
+{
+    compute_binary_poly_lifts::<F, D>(&[parent], point, field_cfg)
+        .into_iter()
+        .next()
+        .expect("single-col lift")
+}
+
+/// Compute polynomial-valued MLE evaluations of a batch of
+/// `binary_poly<D>` columns at a shared `point ∈ F_q^{n_vars}`.
+///
+/// Builds the `eq(·, point)` table ONCE (an O(2^n_vars) operation),
+/// then parallelizes the per-column bit-conditional sum across rayon
+/// threads. Each column's inner accumulation uses `+=` on `coeffs[p]`
+/// (no per-add allocation).
+///
+/// Drop-in replacement for calling [`compute_binary_poly_lift`] N
+/// times in a serial loop — saves N-1 redundant eq builds plus N-fold
+/// parallelism on the `O(N · 2^n_vars · D)` bit walk.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn compute_binary_poly_lifts<F, const D: usize>(
+    cols: &[&DenseMultilinearExtension<BinaryPoly<D>>],
+    point: &[F],
+    field_cfg: &F::Config,
+) -> Vec<DynamicPolynomialF<F>>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Inner: Send + Sync,
+    F::Config: Sync,
 {
     let zero = F::zero_with_cfg(field_cfg);
     let eq_table = build_eq_x_r_vec(point, field_cfg)
-        .expect("compute_binary_poly_lift: eq table build failed");
-    let mut coeffs = vec![zero; D];
-    for (i, entry) in parent.iter().enumerate() {
-        let bits = entry.inner();
-        for (p, c) in bits.coeffs.iter().enumerate() {
-            if c.into_inner() {
-                coeffs[p] = coeffs[p].clone() + &eq_table[i];
+        .expect("compute_binary_poly_lifts: eq table build failed");
+    cfg_iter!(cols)
+        .map(|col| {
+            let mut coeffs = vec![zero.clone(); D];
+            for (i, entry) in col.iter().enumerate() {
+                let bits = entry.inner();
+                for (p, c) in bits.coeffs.iter().enumerate() {
+                    if c.into_inner() {
+                        coeffs[p] += &eq_table[i];
+                    }
+                }
             }
-        }
-    }
-    DynamicPolynomialF::new_trimmed(coeffs)
+            DynamicPolynomialF::new_trimmed(coeffs)
+        })
+        .collect()
 }
 
 /// Combine K chunk lifts into the parent's combined polynomial:

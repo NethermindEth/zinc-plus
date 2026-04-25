@@ -13,7 +13,8 @@ pub mod structs;
 pub mod tables;
 
 pub use protocol::{
-    BinaryPolyLookupInstance, combine_chunks, compute_binary_poly_lift, prove_group, verify_group,
+    BinaryPolyLookupInstance, combine_chunks, compute_binary_poly_lift,
+    compute_binary_poly_lifts, prove_group, verify_group,
 };
 pub use structs::{
     BatchedGkrFractionProof, BatchedGkrLayerProof, GkrFractionProof, GkrLayerProof,

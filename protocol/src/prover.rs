@@ -10,7 +10,7 @@ use zinc_piop::{
     ideal_check::IdealCheckProtocol,
     lookup::gkr_logup::{
         BinaryPolyLookupInstance, GkrLogupGroupSubclaim, GkrLogupLookupProof, combine_chunks,
-        compute_binary_poly_lift, prove_group,
+        compute_binary_poly_lifts, prove_group,
     },
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
     projections::{
@@ -595,14 +595,13 @@ impl_with_type_bounds!(ProverSumchecked
                 // Per-witness-bin-col polynomial-valued evals at this group's
                 // r_inner. The verifier alpha-projects these for the dedicated
                 // Zip+ opening; entries for parent columns must additionally
-                // match the chunk-derived combined polynomial.
-                let bin_lifts: Vec<DynamicPolynomialF<F>> = witness_trace
-                    .binary_poly
-                    .iter()
-                    .map(|col| {
-                        compute_binary_poly_lift::<F, D>(col, &sub.r_inner, &self.field_cfg)
-                    })
-                    .collect();
+                // match the chunk-derived combined polynomial. Batched so the
+                // eq(·, r_inner) table is built once and the per-col bit walks
+                // run in parallel across rayon threads.
+                let cols_ref: Vec<&DenseMultilinearExtension<BinaryPoly<D>>> =
+                    witness_trace.binary_poly.iter().collect();
+                let bin_lifts: Vec<DynamicPolynomialF<F>> =
+                    compute_binary_poly_lifts::<F, D>(&cols_ref, &sub.r_inner, &self.field_cfg);
                 debug_assert!({
                     // Cross-check: combined chunk lifts == direct parent lifts.
                     let cw = meta.chunk_width;
@@ -814,12 +813,13 @@ impl_with_type_bounds!(ProverLifted
                 ProtocolError::Lookup(zinc_piop::lookup::LookupError::FinalEvaluationMismatch)
             })?;
 
-            // Polynomial-valued bin evals at r*.
-            let bin_lifts_r_star: Vec<DynamicPolynomialF<F>> = witness_trace
-                .binary_poly
-                .iter()
-                .map(|col| compute_binary_poly_lift::<F, D>(col, &reduced.point, &self.field_cfg))
-                .collect();
+            // Polynomial-valued bin evals at r* — batched: eq(·, r*) is
+            // built once and the per-col bit walks parallelize across
+            // rayon threads.
+            let cols_ref: Vec<&DenseMultilinearExtension<BinaryPoly<D>>> =
+                witness_trace.binary_poly.iter().collect();
+            let bin_lifts_r_star: Vec<DynamicPolynomialF<F>> =
+                compute_binary_poly_lifts::<F, D>(&cols_ref, &reduced.point, &self.field_cfg);
             assert_eq!(bin_lifts_r_star.len(), num_wit_bin);
 
             // ONE Zip+ open at r*.
