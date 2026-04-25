@@ -1464,7 +1464,7 @@ impl FoldedZincTypes<DEGREE_PLUS_ONE, HALF_DEGREE_PLUS_ONE> for BenchFoldedZincT
     type ArbitraryZt = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt;
     type IntZt = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntZt;
 
-    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
+    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF12289, REP, PERFORM_CHECKS>;
     type ArbitraryLc = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc;
     type IntLc = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntLc;
 }
@@ -1629,12 +1629,269 @@ fn bench_sha_proxy_e2e_folded(group: &mut BenchmarkGroup<WallTime>, num_vars: us
     do_bench_uair_folded::<ShaProxy<i64>>(group, "ShaProxy", num_vars);
 }
 
+// ---------------------------------------------------------------------------
+// SHA-256 compression-slice folded bench. Reuses `BenchFoldedZincTypes`
+// (i64-based) — same field as `bench_sha256_slice_e2e`.
+// ---------------------------------------------------------------------------
+
+fn bench_sha256_slice_e2e_folded(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = Sha256CompressionSliceUair<i64>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_folded_pp(num_vars);
+
+    do_bench_e2e_folded::<U, _>(
+        group,
+        "Sha256Slice",
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        sha256_slice_project_ideal,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ECDSA + SHA+ECDSA folded benches. ECDSA uses `EcdsaBenchZincTypes` with
+// `Int<ECDSA_INT_LIMBS>` instead of `i64`, so we need a parallel
+// `FoldedZincTypes` impl whose ArbitraryZt/IntZt match `EcdsaBenchZincTypes`.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct EcdsaBenchFoldedZincTypes;
+
+impl FoldedZincTypes<DEGREE_PLUS_ONE, HALF_DEGREE_PLUS_ONE> for EcdsaBenchFoldedZincTypes {
+    type Int = EcdsaBenchInt;
+    type Chal = i128;
+    type Pt = i128;
+    type CombR = Int<ECDSA_BENCH_M>;
+    type Fmod = Uint<ECDSA_BENCH_FIELD_LIMBS>;
+    type PrimeTest = MillerRabin;
+
+    type BinaryZt = GenericBenchZipTypes<
+        BinaryPoly<HALF_DEGREE_PLUS_ONE>,
+        DensePolynomial<i64, HALF_DEGREE_PLUS_ONE>,
+        Self::Fmod,
+        Self::PrimeTest,
+        Self::Chal,
+        Self::Pt,
+        Self::CombR,
+        DensePolynomial<Self::CombR, HALF_DEGREE_PLUS_ONE>,
+        BinaryPolyInnerProduct<Self::Chal, HALF_DEGREE_PLUS_ONE>,
+        DensePolyInnerProduct<
+            Self::CombR,
+            Self::Chal,
+            Self::CombR,
+            MBSInnerProduct,
+            HALF_DEGREE_PLUS_ONE,
+        >,
+        MBSInnerProduct,
+    >;
+
+    type ArbitraryZt = <EcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt;
+    type IntZt = <EcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntZt;
+
+    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF12289, REP, PERFORM_CHECKS>;
+    type ArbitraryLc = <EcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc;
+    type IntLc = <EcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntLc;
+}
+
+type EcdsaFoldedPp = (
+    ZipPlusParams<
+        <EcdsaBenchFoldedZincTypes as FoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+        >>::BinaryZt,
+        <EcdsaBenchFoldedZincTypes as FoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+        >>::BinaryLc,
+    >,
+    ZipPlusParams<
+        <EcdsaBenchFoldedZincTypes as FoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+        >>::ArbitraryZt,
+        <EcdsaBenchFoldedZincTypes as FoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+        >>::ArbitraryLc,
+    >,
+    ZipPlusParams<
+        <EcdsaBenchFoldedZincTypes as FoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+        >>::IntZt,
+        <EcdsaBenchFoldedZincTypes as FoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+        >>::IntLc,
+    >,
+);
+
+#[allow(clippy::unwrap_used)]
+fn setup_ecdsa_folded_pp(num_vars: usize) -> EcdsaFoldedPp {
+    let split_size = 1 << (num_vars + 1);
+    let normal_size = 1 << num_vars;
+    (
+        ZipPlus::setup(
+            split_size,
+            IprsCode::new(split_size, iprs_depth(split_size)).unwrap(),
+        ),
+        ZipPlus::setup(
+            normal_size,
+            IprsCode::new(normal_size, iprs_depth(normal_size)).unwrap(),
+        ),
+        ZipPlus::setup(
+            normal_size,
+            IprsCode::new(normal_size, iprs_depth(normal_size)).unwrap(),
+        ),
+    )
+}
+
+#[allow(clippy::unwrap_used)]
+fn bench_ecdsa_slice_e2e_folded(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = EcdsaScalarSliceUair<EcdsaBenchInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_ecdsa_folded_pp(num_vars);
+    let sig = U::signature();
+    let public_trace = trace.public(&sig);
+
+    let proj_ideal = |_ideal: &IdealOrZero<ImpossibleIdeal>,
+                      _field_cfg: &<EcdsaBenchF as PrimeField>::Config|
+     -> ImpossibleIdeal {
+        unreachable!("ECDSA scalar slice uses only assert_zero; no non-trivial ideals")
+    };
+
+    let params = format!("EcdsaSlice/nvars={num_vars}{RATE_TAG}");
+
+    group.bench_function(BenchmarkId::new("Prove (folded)", &params), |bench| {
+        bench.iter(|| {
+            black_box(zinc_protocol::prover::prove_folded::<
+                EcdsaBenchFoldedZincTypes,
+                U,
+                EcdsaBenchF,
+                DEGREE_PLUS_ONE,
+                HALF_DEGREE_PLUS_ONE,
+                PERFORM_CHECKS,
+            >(&pp, &trace, num_vars, zinc_protocol::project_scalar_fn))
+            .expect("Folded prover failed");
+        });
+    });
+
+    let proof: Proof<EcdsaBenchF> = zinc_protocol::prover::prove_folded::<
+        EcdsaBenchFoldedZincTypes,
+        U,
+        EcdsaBenchF,
+        DEGREE_PLUS_ONE,
+        HALF_DEGREE_PLUS_ONE,
+        PERFORM_CHECKS,
+    >(&pp, &trace, num_vars, zinc_protocol::project_scalar_fn)
+    .expect("proof generation for folded verifier bench");
+
+    group.bench_function(BenchmarkId::new("Verify (folded)", &params), |bench| {
+        bench.iter_batched(
+            || proof.clone(),
+            |proof| {
+                black_box(zinc_protocol::verifier::verify_folded::<
+                    EcdsaBenchFoldedZincTypes,
+                    U,
+                    EcdsaBenchF,
+                    ImpossibleIdeal,
+                    DEGREE_PLUS_ONE,
+                    HALF_DEGREE_PLUS_ONE,
+                    PERFORM_CHECKS,
+                >(
+                    &pp,
+                    proof,
+                    &public_trace,
+                    num_vars,
+                    zinc_protocol::project_scalar_fn,
+                    proj_ideal,
+                ))
+                .expect("Folded verifier failed");
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    eprint_proof_size(&params, &proof);
+}
+
+#[allow(clippy::unwrap_used)]
+fn bench_sha_ecdsa_e2e_folded(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = ShaEcdsaUair<EcdsaBenchInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_ecdsa_folded_pp(num_vars);
+    let sig = U::signature();
+    let public_trace = trace.public(&sig);
+
+    let params = format!("ShaEcdsa/nvars={num_vars}{RATE_TAG}");
+
+    group.bench_function(BenchmarkId::new("Prove (folded)", &params), |bench| {
+        bench.iter(|| {
+            black_box(zinc_protocol::prover::prove_folded::<
+                EcdsaBenchFoldedZincTypes,
+                U,
+                EcdsaBenchF,
+                DEGREE_PLUS_ONE,
+                HALF_DEGREE_PLUS_ONE,
+                PERFORM_CHECKS,
+            >(&pp, &trace, num_vars, zinc_protocol::project_scalar_fn))
+            .expect("Folded prover failed");
+        });
+    });
+
+    let proof: Proof<EcdsaBenchF> = zinc_protocol::prover::prove_folded::<
+        EcdsaBenchFoldedZincTypes,
+        U,
+        EcdsaBenchF,
+        DEGREE_PLUS_ONE,
+        HALF_DEGREE_PLUS_ONE,
+        PERFORM_CHECKS,
+    >(&pp, &trace, num_vars, zinc_protocol::project_scalar_fn)
+    .expect("proof generation for folded verifier bench");
+
+    group.bench_function(BenchmarkId::new("Verify (folded)", &params), |bench| {
+        bench.iter_batched(
+            || proof.clone(),
+            |proof| {
+                black_box(zinc_protocol::verifier::verify_folded::<
+                    EcdsaBenchFoldedZincTypes,
+                    U,
+                    EcdsaBenchF,
+                    Sha256Ideal<EcdsaBenchF>,
+                    DEGREE_PLUS_ONE,
+                    HALF_DEGREE_PLUS_ONE,
+                    PERFORM_CHECKS,
+                >(
+                    &pp,
+                    proof,
+                    &public_trace,
+                    num_vars,
+                    zinc_protocol::project_scalar_fn,
+                    sha_ecdsa_project_ideal,
+                ))
+                .expect("Folded verifier failed");
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    eprint_proof_size(&params, &proof);
+}
+
 fn e2e_folded_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ E2E Folded");
 
-    bench_sha_proxy_e2e_folded(&mut group, 8);
-    bench_sha_proxy_e2e_folded(&mut group, 10);
-    bench_sha_proxy_e2e_folded(&mut group, 12);
+    bench_sha256_slice_e2e_folded(&mut group, 9);
+    bench_ecdsa_slice_e2e_folded(&mut group, 9);
+    bench_sha_ecdsa_e2e_folded(&mut group, 9);
 
     group.finish();
 }
