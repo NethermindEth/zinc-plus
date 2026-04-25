@@ -746,10 +746,17 @@ impl_with_type_bounds!(ProverMultipointEvaled
 
 impl_with_type_bounds!(ProverLifted
 {
-    /// Step 7: PCS open. When the UAIR has lookup groups, runs the bin
-    /// multi-point reducer over (per-group r_inner + r_0) bin claims
-    /// and emits ONE Zip+ open at the reduced point r* — saving G
-    /// Zip+ opens. Without lookup groups, opens bin at r_0 directly.
+    /// Step 7: PCS open. The bin commitment open path branches on G,
+    /// the number of lookup groups:
+    ///   - G = 0 (no lookups)   → open bin at r_0 only.
+    ///   - G = 1 (single group) → open bin at r_inner^(0) AND at r_0,
+    ///     directly. The reducer is skipped because it would only fold
+    ///     2 claims, costing more (sumcheck + P-MLE build) than the
+    ///     extra Zip+ open it saves.
+    ///   - G ≥ 2                → multi-point reducer folds the G + 1
+    ///     bin claims into ONE Zip+ open at the reduced point r*,
+    ///     saving G - 1 Zip+ opens net.
+    ///
     /// Arbitrary-poly and int are always opened at r_0.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn step7_pcs_open<const CHECK_FOR_OVERFLOW: bool>(
@@ -763,10 +770,11 @@ impl_with_type_bounds!(ProverLifted
         let num_total_bin = total.num_binary_poly_cols();
         let num_wit_bin = num_total_bin - num_pub_bin;
 
-        let (bin_reducer_proof, bin_lifts_at_r_star) = if self.lookup_proof.groups.is_empty()
+        let n_groups = self.lookup_proof.groups.len();
+        let (bin_reducer_proof, bin_lifts_at_r_star) = if n_groups == 0
             || self.base.hint_bin.is_none()
         {
-            // Original path: open bin at r_0.
+            // No-lookup (or no-bin-batch) path: open bin at r_0 only.
             if let Some(hint_bin) = &self.base.hint_bin {
                 let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
                     &mut self.base.pcs_transcript,
@@ -777,6 +785,35 @@ impl_with_type_bounds!(ProverLifted
                     &self.field_cfg,
                 )?;
             }
+            (None, Vec::new())
+        } else if n_groups == 1 {
+            // G=1 fast path: open bin at r_inner^(0) and r_0 directly,
+            // skipping the reducer's sumcheck + P-MLE build (which for
+            // T=2 claims costs more than the one Zip+ open it would
+            // save). Verifier mirrors with two `verify_with_alphas`
+            // calls plus the existing chunk-↔-lift binding from step 4b.
+            let hint_bin = self
+                .base
+                .hint_bin
+                .as_ref()
+                .expect("checked above");
+            let r_inner = &self.lookup_r_inners[0];
+            let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                &mut self.base.pcs_transcript,
+                self.base.pp_bin,
+                &witness_trace.binary_poly,
+                r_inner,
+                hint_bin,
+                &self.field_cfg,
+            )?;
+            let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                &mut self.base.pcs_transcript,
+                self.base.pp_bin,
+                &witness_trace.binary_poly,
+                &self.r_0,
+                hint_bin,
+                &self.field_cfg,
+            )?;
             (None, Vec::new())
         } else {
             // Build claim list: G groups + 1 step-7 r_0 claim.
