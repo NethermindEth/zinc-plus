@@ -758,6 +758,225 @@ fn e2e_steps_benches(c: &mut Criterion) {
     group.finish();
 }
 
+//
+// Folded Zip+ (1× fold) — total prove/verify benchmark.
+//
+// Mirrors the unfolded e2e bench but commits binary witness columns as
+// BinaryPoly<HALF_DEGREE_PLUS_ONE> halves of length 2n and verifies
+// the binary PCS opening at the extended point (r_0 ‖ γ).
+//
+
+const HALF_DEGREE_PLUS_ONE: usize = DEGREE_PLUS_ONE / 2;
+
+#[derive(Clone, Debug)]
+struct BenchFoldedZincTypes;
+
+impl FoldedZincTypes<DEGREE_PLUS_ONE, HALF_DEGREE_PLUS_ONE> for BenchFoldedZincTypes {
+    type Int = i64;
+    type Chal = i128;
+    type Pt = i128;
+    type CombR = Int<{ INT_LIMBS * 6 }>;
+    type Fmod = Uint<FIELD_LIMBS>;
+    type PrimeTest = MillerRabin;
+
+    type BinaryZt = GenericBenchZipTypes<
+        BinaryPoly<HALF_DEGREE_PLUS_ONE>,
+        DensePolynomial<i64, HALF_DEGREE_PLUS_ONE>,
+        Self::Fmod,
+        Self::PrimeTest,
+        Self::Chal,
+        Self::Pt,
+        Self::CombR,
+        DensePolynomial<Self::CombR, HALF_DEGREE_PLUS_ONE>,
+        BinaryPolyInnerProduct<Self::Chal, HALF_DEGREE_PLUS_ONE>,
+        DensePolyInnerProduct<
+            Self::CombR,
+            Self::Chal,
+            Self::CombR,
+            MBSInnerProduct,
+            HALF_DEGREE_PLUS_ONE,
+        >,
+        MBSInnerProduct,
+    >;
+
+    type ArbitraryZt = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt;
+    type IntZt = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntZt;
+
+    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
+    type ArbitraryLc = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc;
+    type IntLc = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntLc;
+}
+
+type FoldedPp = (
+    ZipPlusParams<
+        <BenchFoldedZincTypes as FoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+        >>::BinaryZt,
+        <BenchFoldedZincTypes as FoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+        >>::BinaryLc,
+    >,
+    ZipPlusParams<
+        <BenchFoldedZincTypes as FoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+        >>::ArbitraryZt,
+        <BenchFoldedZincTypes as FoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+        >>::ArbitraryLc,
+    >,
+    ZipPlusParams<
+        <BenchFoldedZincTypes as FoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+        >>::IntZt,
+        <BenchFoldedZincTypes as FoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+        >>::IntLc,
+    >,
+);
+
+#[allow(clippy::unwrap_used)]
+fn setup_folded_pp(num_vars: usize) -> FoldedPp {
+    // Binary commitment is over the split column (length 2n with
+    // BinaryPoly<HALF_D> entries), so its num_vars is num_vars + 1.
+    let split_size = 1 << (num_vars + 1);
+    let normal_size = 1 << num_vars;
+    (
+        ZipPlus::setup(
+            split_size,
+            IprsCode::new_with_optimal_depth(split_size).unwrap(),
+        ),
+        ZipPlus::setup(
+            normal_size,
+            IprsCode::new_with_optimal_depth(normal_size).unwrap(),
+        ),
+        ZipPlus::setup(
+            normal_size,
+            IprsCode::new_with_optimal_depth(normal_size).unwrap(),
+        ),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn do_bench_e2e_folded<U, IdealOverF>(
+    group: &mut BenchmarkGroup<WallTime>,
+    label: &str,
+    num_vars: usize,
+    pp: &FoldedPp,
+    trace: &UairTrace<'static, i64, i64, DEGREE_PLUS_ONE>,
+    project_scalar: impl Fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F>
+    + Copy
+    + Sync,
+    project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
+) where
+    U: Uair + 'static,
+    IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+{
+    let params = format!("{label}/nvars={num_vars}");
+
+    group.bench_function(BenchmarkId::new("Prove (folded)", &params), |bench| {
+        bench.iter(|| {
+            black_box(zinc_protocol::prover::prove_folded::<
+                BenchFoldedZincTypes,
+                U,
+                F,
+                DEGREE_PLUS_ONE,
+                HALF_DEGREE_PLUS_ONE,
+                PERFORM_CHECKS,
+            >(pp, trace, num_vars, project_scalar))
+            .expect("Folded prover failed");
+        });
+    });
+
+    let proof: Proof<F> = zinc_protocol::prover::prove_folded::<
+        BenchFoldedZincTypes,
+        U,
+        F,
+        DEGREE_PLUS_ONE,
+        HALF_DEGREE_PLUS_ONE,
+        PERFORM_CHECKS,
+    >(pp, trace, num_vars, project_scalar)
+    .expect("proof generation for folded verifier bench");
+
+    let sig = U::signature();
+    let public_trace = trace.public(&sig);
+
+    group.bench_function(BenchmarkId::new("Verify (folded)", &params), |bench| {
+        bench.iter_batched(
+            || proof.clone(),
+            |proof| {
+                black_box(zinc_protocol::verifier::verify_folded::<
+                    BenchFoldedZincTypes,
+                    U,
+                    F,
+                    IdealOverF,
+                    DEGREE_PLUS_ONE,
+                    HALF_DEGREE_PLUS_ONE,
+                    PERFORM_CHECKS,
+                >(
+                    pp,
+                    proof,
+                    &public_trace,
+                    num_vars,
+                    project_scalar,
+                    project_ideal,
+                ))
+                .expect("Folded verifier failed");
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    eprint_proof_size(&params, &proof);
+}
+
+#[allow(clippy::unwrap_used)]
+fn do_bench_uair_folded<U>(group: &mut BenchmarkGroup<WallTime>, label: &str, num_vars: usize)
+where
+    U: Uair<
+            Ideal = DegreeOneIdeal<i64>,
+            Scalar = DensePolynomial<i64, DEGREE_PLUS_ONE>,
+        > + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = i64, Int = i64>
+        + 'static,
+{
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_folded_pp(num_vars);
+
+    let proj_ideal = |ideal: &IdealOrZero<U::Ideal>, field_cfg: &<F as PrimeField>::Config| {
+        ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg))
+    };
+
+    do_bench_e2e_folded::<U, _>(
+        group,
+        label,
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        proj_ideal,
+    );
+}
+
+fn bench_sha_proxy_e2e_folded(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    do_bench_uair_folded::<ShaProxy<i64>>(group, "ShaProxy", num_vars);
+}
+
+fn e2e_folded_benches(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zinc+ E2E Folded");
+
+    bench_sha_proxy_e2e_folded(&mut group, 8);
+    bench_sha_proxy_e2e_folded(&mut group, 10);
+    bench_sha_proxy_e2e_folded(&mut group, 12);
+
+    group.finish();
+}
+
 criterion_group! {
     name = e2e;
     config = Criterion::default().sample_size(500);
@@ -768,4 +987,9 @@ criterion_group! {
     config = Criterion::default().sample_size(100);
     targets = e2e_steps_benches
 }
-criterion_main!(e2e, e2e_steps);
+criterion_group! {
+    name = e2e_folded;
+    config = Criterion::default().sample_size(500);
+    targets = e2e_folded_benches
+}
+criterion_main!(e2e, e2e_steps, e2e_folded);
