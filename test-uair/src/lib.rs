@@ -19,8 +19,8 @@ use zinc_poly::{
     },
 };
 use zinc_uair::{
-    ConstraintBuilder, PublicColumnLayout, ShiftSpec, TotalColumnLayout, TraceRow, Uair,
-    UairSignature, UairTrace,
+    ConstraintBuilder, LookupColumnSpec, LookupTableType, PublicColumnLayout, ShiftSpec,
+    TotalColumnLayout, TraceRow, Uair, UairSignature, UairTrace,
     ideal::{DegreeOneIdeal, ImpossibleIdeal},
 };
 use zinc_utils::from_ref::FromRef;
@@ -854,6 +854,81 @@ where
         UairTrace {
             arbitrary_poly: vec![to_mle(a_col), to_mle(b_col), to_mle(c_col)].into(),
             ..Default::default()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BinPolyLookupUair: minimal demonstrator of the GKR-LogUp lookup
+// argument with chunks-in-clear polynomial-valued lift.
+//
+// Layout: 1 binary_poly<32> witness column with random `BinaryPoly<32>`
+// entries (full 32-bit patterns, by construction in {0,1}^{<32}[X]).
+//
+// Lookup spec: `column 0 ∈ BitPoly { width: 32, chunk_width: Some(8) }`
+// — 4 chunks of 8 bits, each looked up against the 256-entry projected
+// `BitPoly(8)` subtable. The lookup is the SOLE soundness check (no
+// ideal-check constraints declared). Since every BinaryPoly<32> is by
+// construction a bit-poly, a normal random witness always satisfies the
+// lookup; soundness violations require deliberate tampering.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct BinPolyLookupUair<R>(PhantomData<R>);
+
+impl<R> Uair for BinPolyLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(1, 0, 0); // 1 binary_poly witness col
+        let lookup_specs = vec![LookupColumnSpec {
+            column_index: 0,
+            table_type: LookupTableType::BitPoly { width: 32, chunk_width: Some(8) },
+        }];
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], lookup_specs)
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        // Trivially-satisfied constraint (`v - v == 0`), required because
+        // the protocol asserts at least one constraint. The lookup
+        // argument is the actual soundness check.
+        let v = &up.binary_poly[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for BinPolyLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let row_count = 1usize << num_vars;
+        let bin_col: DenseMultilinearExtension<BinaryPoly<32>> = (0..row_count)
+            .map(|_| BinaryPoly::<32>::from(rng.next_u32()))
+            .collect();
+        UairTrace {
+            binary_poly: vec![bin_col].into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![].into(),
         }
     }
 }
