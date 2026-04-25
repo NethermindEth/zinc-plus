@@ -286,6 +286,7 @@ where
         aggregated_multiplicities: agg_mults,
         witness_gkr: witness_result.proof,
         table_gkr,
+        bin_lifts_at_r_inner: Vec::new(),
     };
     let subclaim = GkrLogupGroupSubclaim {
         r_inner,
@@ -525,7 +526,7 @@ where
 /// of degree `< D` whose coefficient `p` equals
 /// `Σ_i eq(i, point) · bit_p(parent[i])`.
 #[allow(clippy::arithmetic_side_effects)]
-fn compute_binary_poly_lift<F, const D: usize>(
+pub fn compute_binary_poly_lift<F, const D: usize>(
     parent: &DenseMultilinearExtension<BinaryPoly<D>>,
     point: &[F],
     field_cfg: &F::Config,
@@ -551,7 +552,7 @@ where
 /// Combine K chunk lifts into the parent's combined polynomial:
 ///   `combined = Σ_k X^{k · chunk_width} · chunks[k]`
 /// where the result has `width` coefficients (`width = K · chunk_width`).
-fn combine_chunks<F: PrimeField>(
+pub fn combine_chunks<F: PrimeField>(
     chunks: &[DynamicPolynomialF<F>],
     chunk_width: usize,
     width: usize,

@@ -432,8 +432,8 @@ mod tests {
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, BinPolyLookupUair,
-        GenerateRandomTrace, TestUairMixedShifts, TestUairNoMultiplication,
-        TestUairSimpleMultiplication,
+        GenerateRandomTrace, MultiGroupBinPolyLookupUair, TestUairMixedShifts,
+        TestUairNoMultiplication, TestUairSimpleMultiplication,
     };
     use zinc_uair::{
         degree_counter::count_max_degree, ideal::DegreeOneIdeal, ideal_collector::IdealOrZero,
@@ -1019,6 +1019,90 @@ mod tests {
             },
             |res| {
                 assert!(res.is_err(), "verifier must reject tampered multiplicity");
+            },
+        );
+    }
+
+    /// Multi-group + multi-bin-col + L>1 e2e:
+    /// 3 binary_poly witness cols with two distinct lookup groups (one of
+    /// `chunk_width=8` covering cols 0 and 2, one of `chunk_width=16`
+    /// covering col 1). Exercises GKR-LogUp's per-witness-bin-col
+    /// `bin_lifts_at_r_inner` binding and per-group Zip+ open paths.
+    #[test]
+    fn test_e2e_multi_group_bin_poly_lookup() {
+        let num_vars = 6;
+        do_test::<TestZincTypesIprs, MultiGroupBinPolyLookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// Soundness: with multi-bin-col, tampering a non-parent column's
+    /// `bin_lifts_at_r_inner` entry must be caught by the dedicated Zip+
+    /// verify (the non-parent eval is bound transitively via
+    /// alpha-projection). For this test we tamper a **parent** column's
+    /// entry — caught at the parent-binding equality before Zip+ even
+    /// runs. The non-parent variant is covered by the equivalent
+    /// soundness test on chunk_lifts (test_bin_poly_lookup_tamper_chunk_lift_rejected).
+    #[test]
+    fn test_multi_group_bin_poly_lookup_tamper_bin_lift_rejected() {
+        let num_vars = 6;
+        do_test::<TestZincTypesIprs, MultiGroupBinPolyLookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                // Swap two coefficients of the first group's parent-col
+                // bin_lifts entry. `combined_polynomial` (derived from
+                // chunk_lifts) will no longer match → parent-binding fails.
+                proof.lookup_proof.groups[0].bin_lifts_at_r_inner[0]
+                    .coeffs
+                    .swap(0, 1);
+            },
+            |res| {
+                assert!(res.is_err(), "verifier must reject tampered bin_lifts");
+            },
+        );
+    }
+
+    /// Soundness: tamper a non-parent column's bin_lifts entry. This is
+    /// not constrained by parent-binding, so it must be caught by the
+    /// Zip+ alpha-projection verify.
+    #[test]
+    fn test_multi_group_bin_poly_lookup_tamper_nonparent_bin_lift_rejected() {
+        let num_vars = 6;
+        do_test::<TestZincTypesIprs, MultiGroupBinPolyLookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                // Group B (index 1) has a single parent col 1; cols 0 and
+                // 2 are non-parents in group B. Tamper bin_lifts entry
+                // for col 0 (index 0 within witness bin batch) of group B.
+                proof.lookup_proof.groups[1].bin_lifts_at_r_inner[0]
+                    .coeffs
+                    .swap(0, 1);
+            },
+            |res| {
+                assert!(
+                    res.is_err(),
+                    "verifier must reject tampered non-parent bin_lift"
+                );
             },
         );
     }

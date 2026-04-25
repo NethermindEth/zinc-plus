@@ -6,7 +6,8 @@ use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
     lookup::gkr_logup::{
-        BinaryPolyLookupInstance, GkrLogupGroupSubclaim, GkrLogupLookupProof, prove_group,
+        BinaryPolyLookupInstance, GkrLogupGroupSubclaim, GkrLogupLookupProof, combine_chunks,
+        compute_binary_poly_lift, prove_group,
     },
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
     projections::{
@@ -563,7 +564,7 @@ impl_with_type_bounds!(ProverSumchecked
                     projecting_element_f: &self.projecting_element_f,
                     n_vars: self.base.num_vars,
                 };
-                let (group_proof, meta, sub) = prove_group::<F, D>(
+                let (mut group_proof, meta, sub) = prove_group::<F, D>(
                     &mut self.base.pcs_transcript.fs_transcript,
                     &instance,
                     &self.field_cfg,
@@ -571,6 +572,36 @@ impl_with_type_bounds!(ProverSumchecked
                 .map_err(|_| {
                     ProtocolError::Lookup(zinc_piop::lookup::LookupError::FinalEvaluationMismatch)
                 })?;
+
+                // Per-witness-bin-col polynomial-valued evals at this group's
+                // r_inner. The verifier alpha-projects these for the dedicated
+                // Zip+ opening; entries for parent columns must additionally
+                // match the chunk-derived combined polynomial.
+                let bin_lifts: Vec<DynamicPolynomialF<F>> = witness_trace
+                    .binary_poly
+                    .iter()
+                    .map(|col| {
+                        compute_binary_poly_lift::<F, D>(col, &sub.r_inner, &self.field_cfg)
+                    })
+                    .collect();
+                debug_assert!({
+                    // Cross-check: combined chunk lifts == direct parent lifts.
+                    let cw = meta.chunk_width;
+                    let w = cw * meta.num_chunks;
+                    let zero = F::zero_with_cfg(&self.field_cfg);
+                    sub.parent_columns.iter().enumerate().all(|(ell, &col_idx)| {
+                        let wit_idx = col_idx - num_pub_bin;
+                        let combined = combine_chunks::<F>(
+                            &group_proof.chunk_lifts[ell],
+                            cw,
+                            w,
+                            &zero,
+                        );
+                        combined == bin_lifts[wit_idx]
+                    })
+                });
+                group_proof.bin_lifts_at_r_inner = bin_lifts;
+
                 groups.push(group_proof);
                 group_meta.push(meta);
                 subclaims.push(sub);

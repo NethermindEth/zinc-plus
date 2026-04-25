@@ -933,6 +933,88 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// MultiGroupBinPolyLookupUair: exercises GKR-LogUp's multi-group + multi-
+// column + multi-bin-col paths.
+//
+// Layout: 3 binary_poly<32> witness columns, all randomly populated.
+// Lookup specs:
+//   - column 0: BitPoly { width: 32, chunk_width: Some(8) }   (group A)
+//   - column 1: BitPoly { width: 32, chunk_width: Some(16) }  (group B — different chunk_width → distinct group)
+//   - column 2: BitPoly { width: 32, chunk_width: Some(8) }   (group A, second column → L=2 inside group A)
+// Group A then has L=2 (cols 0 and 2); group B has L=1 (col 1).
+// Column 0/1/2 all witness binary_poly cols; the bin commitment batch
+// has size 3, exercising the multi-bin-col path in step4b_lookup_verify.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct MultiGroupBinPolyLookupUair<R>(PhantomData<R>);
+
+impl<R> Uair for MultiGroupBinPolyLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(3, 0, 0); // 3 binary_poly witness cols
+        let lookup_specs = vec![
+            LookupColumnSpec {
+                column_index: 0,
+                table_type: LookupTableType::BitPoly { width: 32, chunk_width: Some(8) },
+            },
+            LookupColumnSpec {
+                column_index: 1,
+                table_type: LookupTableType::BitPoly { width: 32, chunk_width: Some(16) },
+            },
+            LookupColumnSpec {
+                column_index: 2,
+                table_type: LookupTableType::BitPoly { width: 32, chunk_width: Some(8) },
+            },
+        ];
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], lookup_specs)
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        // Trivially-satisfied constraint (lookups carry the soundness work).
+        let v = &up.binary_poly[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for MultiGroupBinPolyLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let row_count = 1usize << num_vars;
+        let mk_col = |rng: &mut Rng| -> DenseMultilinearExtension<BinaryPoly<32>> {
+            (0..row_count).map(|_| BinaryPoly::<32>::from(rng.next_u32())).collect()
+        };
+        UairTrace {
+            binary_poly: vec![mk_col(rng), mk_col(rng), mk_col(rng)].into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![].into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crypto_primitives::crypto_bigint_int::Int;

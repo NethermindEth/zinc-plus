@@ -118,6 +118,15 @@ pub struct GkrLogupGroupProof<F: PrimeField> {
     pub witness_gkr: BatchedGkrFractionProof<F>,
     /// Single-tree table-side GKR fractional sumcheck.
     pub table_gkr: GkrFractionProof<F>,
+    /// Polynomial-valued MLE evals of every witness binary_poly column at
+    /// this group's `r_inner`, in witness-bin-col index order. Length
+    /// equals the bin commitment's batch size. The verifier alpha-projects
+    /// these for the dedicated Zip+ opening at `r_inner`. Parent columns'
+    /// entries are cross-bound by `chunk_lifts` (verifier checks
+    /// `bin_lifts_at_r_inner[parent_wit_idx] == Σ_k X^{k·cw} · chunk_lifts[ell][k]`),
+    /// non-parent columns' entries get bound transitively via the same
+    /// alpha-projection (any tampering breaks the Zip+ verify).
+    pub bin_lifts_at_r_inner: Vec<DynamicPolynomialF<F>>,
 }
 
 /// Static metadata for one lookup group, ported alongside the proof so
@@ -671,11 +680,19 @@ where
             add!(u32::NUM_BYTES, mul!(per_lookup.len(), F::Inner::NUM_BYTES))
         );
     }
+    let bin_lifts_v = DynamicPolyVecF::reinterpret(&g.bin_lifts_at_r_inner);
+    let bin_lifts_bytes = add!(
+        DynamicPolyVecF::<F>::LENGTH_NUM_BYTES,
+        bin_lifts_v.get_num_bytes()
+    );
     add!(
         chunk_lifts_bytes,
         add!(
             mults_bytes,
-            add!(batched_fraction_num_bytes(&g.witness_gkr), fraction_num_bytes(&g.table_gkr))
+            add!(
+                batched_fraction_num_bytes(&g.witness_gkr),
+                add!(fraction_num_bytes(&g.table_gkr), bin_lifts_bytes)
+            )
         )
     )
 }
@@ -701,7 +718,9 @@ where
         buf = write_f_inner_slice(buf, mults);
     }
     buf = write_batched_fraction(buf, &g.witness_gkr);
-    write_fraction(buf, &g.table_gkr)
+    buf = write_fraction(buf, &g.table_gkr);
+    DynamicPolyVecF::reinterpret(&g.bin_lifts_at_r_inner)
+        .write_transcription_bytes_subset(buf)
 }
 
 #[allow(clippy::arithmetic_side_effects)]
@@ -740,12 +759,14 @@ where
     }
     let (witness_gkr, bytes) = read_batched_fraction::<F>(bytes, cfg);
     let (table_gkr, bytes) = read_fraction::<F>(bytes, cfg);
+    let (bin_lifts_v, bytes) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
     (
         GkrLogupGroupProof {
             chunk_lifts,
             aggregated_multiplicities,
             witness_gkr,
             table_gkr,
+            bin_lifts_at_r_inner: bin_lifts_v.0,
         },
         bytes,
     )

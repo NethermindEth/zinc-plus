@@ -565,16 +565,12 @@ where
             }
         }
 
-        // For each (group, lookup) sub-claim, run Zip+ `verify_with_alphas`
-        // at `r_inner` and check the combined alpha-projected eval
-        // matches the verifier-reconstructed combined_polynomial.
-        //
-        // MVP RESTRICTION: assumes the binary_poly batch contains
-        // exactly one column == the lookup parent (single-bin-col
-        // UAIR). Multi-bin-col UAIRs need either: (a) extra non-parent
-        // polynomial-valued evals in the lookup proof so the verifier
-        // can compute the full combined eval, or (b) a multi-point
-        // reducer to fold r_0 and r_inner — both deferred.
+        // For each group, alpha-project all witness-bin-col polynomial-
+        // valued evals at this group's `r_inner`, then verify the Zip+
+        // opening on the bin commitment. Parent columns are bound by a
+        // direct equality with the chunk-derived combined polynomial; all
+        // other columns are bound transitively via the same alpha-projected
+        // Zip+ verify (any tampering breaks the linear combination).
         let pub_cols = self.base.uair_signature.public_cols();
         let num_pub_bin = pub_cols.num_binary_poly_cols();
         let total_cols = self.base.uair_signature.total_cols();
@@ -586,17 +582,28 @@ where
             ));
         }
 
-        for sub in &subclaims {
-            // MVP single-bin-col-per-group restriction: verify the
-            // group has exactly one parent column matching the binary
-            // batch's single witness column.
-            if sub.parent_columns.len() != 1
-                || bin_batch_size != 1
-                || sub.parent_columns[0] != num_pub_bin
-            {
+        for (sub, group_proof) in
+            subclaims.iter().zip(self.proof_lookup_proof.groups.iter())
+        {
+            if group_proof.bin_lifts_at_r_inner.len() != bin_batch_size {
                 return Err(ProtocolError::Lookup(
                     zinc_piop::lookup::LookupError::NotImplemented,
                 ));
+            }
+
+            // Parent-column binding: combined_polynomial[ell] == bin_lifts[wit_idx].
+            for (ell, &full_col_idx) in sub.parent_columns.iter().enumerate() {
+                if full_col_idx < num_pub_bin || full_col_idx >= num_total_bin {
+                    return Err(ProtocolError::Lookup(
+                        zinc_piop::lookup::LookupError::NotImplemented,
+                    ));
+                }
+                let wit_idx = full_col_idx - num_pub_bin;
+                if sub.combined_polynomial[ell] != group_proof.bin_lifts_at_r_inner[wit_idx] {
+                    return Err(ProtocolError::Lookup(
+                        zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
+                    ));
+                }
             }
 
             let per_poly_alphas = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::sample_alphas(
@@ -604,14 +611,16 @@ where
                 bin_batch_size,
             );
             let mut eval_f = F::zero_with_cfg(&self.field_cfg);
-            for (coeff, alpha) in sub.combined_polynomial[0]
-                .coeffs
+            for (col_lift, alphas) in group_proof
+                .bin_lifts_at_r_inner
                 .iter()
-                .zip(per_poly_alphas[0].iter())
+                .zip(per_poly_alphas.iter())
             {
-                let mut term = F::from_with_cfg(alpha, &self.field_cfg);
-                term = term * coeff;
-                eval_f = eval_f + &term;
+                for (coeff, alpha) in col_lift.coeffs.iter().zip(alphas.iter()) {
+                    let mut term = F::from_with_cfg(alpha, &self.field_cfg);
+                    term = term * coeff;
+                    eval_f = eval_f + &term;
+                }
             }
             ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::verify_with_alphas::<F, false>(
                 &mut self.base.pcs_transcript,
