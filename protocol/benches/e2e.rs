@@ -22,14 +22,14 @@ use zinc_poly::{
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes};
 use zinc_test_uair::{
-    BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-    ShaProxy, TestUairNoMultiplication,
+    BigLinearUair, BigLinearUairWithPublicInput, BinLookup16MultiGroupUair, BinLookup16Uair,
+    BinaryDecompositionUair, GenerateRandomTrace, ShaProxy, TestUairNoMultiplication,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
     Uair, UairTrace,
     degree_counter::count_max_degree,
-    ideal::{DegreeOneIdeal, Ideal, IdealCheck},
+    ideal::{DegreeOneIdeal, Ideal, IdealCheck, ImpossibleIdeal},
     ideal_collector::IdealOrZero,
 };
 use zinc_utils::{
@@ -449,7 +449,8 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     let p_ideal_checked = p_projected.clone().step2_ideal_check().unwrap();
     let p_eval_projected = p_ideal_checked.clone().step3_eval_projection().unwrap();
     let p_sumchecked = p_eval_projected.clone().step4_sumcheck().unwrap();
-    let p_mp_evaled = p_sumchecked.clone().step5_multipoint_eval().unwrap();
+    let p_lookup_proved = p_sumchecked.clone().step4b_lookup().unwrap();
+    let p_mp_evaled = p_lookup_proved.clone().step5_multipoint_eval().unwrap();
     let p_lifted = p_mp_evaled.clone().step6_lift_and_project().unwrap();
 
     step_bench!(
@@ -500,8 +501,14 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     );
 
     step_bench!(
-        "Prove" / "5: Multi-point eval",
+        "Prove" / "4b: GKR-LogUp lookup",
         setup = || p_sumchecked.clone(),
+        run = |s| s.step4b_lookup(),
+    );
+
+    step_bench!(
+        "Prove" / "5: Multi-point eval",
+        setup = || p_lookup_proved.clone(),
         run = |s| s.step5_multipoint_eval(),
     );
 
@@ -548,7 +555,11 @@ fn do_bench_steps<Zt, U, IdealOverF>(
         .step3_eval_projection(project_scalar)
         .unwrap();
     let v_sumchecked = v_eval_projected.clone().step4_sumcheck_verify().unwrap();
-    let v_mp_evaled = v_sumchecked.clone().step5_multipoint_eval::<U>().unwrap();
+    let v_lookup_verified = v_sumchecked.clone().step4b_lookup_verify::<U>().unwrap();
+    let v_mp_evaled = v_lookup_verified
+        .clone()
+        .step5_multipoint_eval::<U>()
+        .unwrap();
     let v_lifted = v_mp_evaled.clone().step6_lifted_evals::<U>().unwrap();
 
     step_bench!(
@@ -584,8 +595,14 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     );
 
     step_bench!(
-        "Verify" / "5: Multi-point eval",
+        "Verify" / "4b: GKR-LogUp lookup",
         setup = || v_sumchecked.clone(),
+        run = |s| s.step4b_lookup_verify::<U>(),
+    );
+
+    step_bench!(
+        "Verify" / "5: Multi-point eval",
+        setup = || v_lookup_verified.clone(),
         run = |s| s.step5_multipoint_eval::<U>(),
     );
 
@@ -670,6 +687,75 @@ where
     );
 }
 
+/// E2E bench for lookup-bearing UAIRs whose `Ideal = ImpossibleIdeal`
+/// (the lookup is the sole soundness check). The proj_ideal closure
+/// returns `IdealOrZero::zero()` since there are no ideal-check
+/// constraints to project.
+fn do_bench_uair_lookup<U>(group: &mut BenchmarkGroup<WallTime>, label: &str, num_vars: usize)
+where
+    U: Uair<
+            Ideal = ImpossibleIdeal,
+            Scalar = DensePolynomial<<BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int, 32>,
+        > + GenerateRandomTrace<
+            DEGREE_PLUS_ONE,
+            PolyCoeff = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int,
+            Int = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int,
+        > + 'static,
+    F: for<'a> FromWithConfig<&'a <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int>,
+{
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_pp(num_vars);
+
+    let proj_ideal = |_ideal: &IdealOrZero<U::Ideal>, _field_cfg: &<F as PrimeField>::Config| {
+        IdealOrZero::<DegreeOneIdeal<F>>::zero()
+    };
+
+    do_bench_e2e::<BenchZincTypes, U, _>(
+        group,
+        label,
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        proj_ideal,
+    );
+}
+
+fn do_bench_steps_uair_lookup<U>(
+    group: &mut BenchmarkGroup<WallTime>,
+    label: &str,
+    num_vars: usize,
+) where
+    U: Uair<
+            Ideal = ImpossibleIdeal,
+            Scalar = DensePolynomial<<BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int, 32>,
+        > + GenerateRandomTrace<
+            DEGREE_PLUS_ONE,
+            PolyCoeff = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int,
+            Int = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int,
+        > + 'static,
+    F: for<'a> FromWithConfig<&'a <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int>,
+{
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_pp(num_vars);
+
+    let proj_ideal = |_ideal: &IdealOrZero<U::Ideal>, _field_cfg: &<F as PrimeField>::Config| {
+        IdealOrZero::<DegreeOneIdeal<F>>::zero()
+    };
+
+    do_bench_steps::<BenchZincTypes, U, _>(
+        group,
+        label,
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        proj_ideal,
+    );
+}
+
 fn bench_no_mult_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     do_bench_uair::<TestUairNoMultiplication<i64>>(group, "NoMult", num_vars);
 }
@@ -684,6 +770,16 @@ fn bench_sha_proxy_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
 }
 fn bench_big_linear_public_input_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     do_bench_uair::<BigLinearUairWithPublicInput<i64>>(group, "BigLinearPI", num_vars);
+}
+fn bench_bin_lookup16_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    do_bench_uair_lookup::<BinLookup16Uair<i64>>(group, "BinLookup16", num_vars);
+}
+fn bench_bin_lookup16_multigroup_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    do_bench_uair_lookup::<BinLookup16MultiGroupUair<i64>>(
+        group,
+        "BinLookup16MultiGroup",
+        num_vars,
+    );
 }
 
 fn bench_no_mult_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
@@ -700,6 +796,16 @@ fn bench_sha_proxy_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) 
 }
 fn bench_big_linear_public_input_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     do_bench_steps_uair::<BigLinearUairWithPublicInput<i64>>(group, "BigLinearPI", num_vars);
+}
+fn bench_bin_lookup16_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    do_bench_steps_uair_lookup::<BinLookup16Uair<i64>>(group, "BinLookup16", num_vars);
+}
+fn bench_bin_lookup16_multigroup_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    do_bench_steps_uair_lookup::<BinLookup16MultiGroupUair<i64>>(
+        group,
+        "BinLookup16MultiGroup",
+        num_vars,
+    );
 }
 
 //
@@ -729,6 +835,14 @@ fn e2e_benches(c: &mut Criterion) {
     bench_sha_proxy_e2e(&mut group, 10);
     bench_sha_proxy_e2e(&mut group, 12);
 
+    bench_bin_lookup16_e2e(&mut group, 8);
+    bench_bin_lookup16_e2e(&mut group, 10);
+    bench_bin_lookup16_e2e(&mut group, 12);
+
+    bench_bin_lookup16_multigroup_e2e(&mut group, 8);
+    bench_bin_lookup16_multigroup_e2e(&mut group, 10);
+    bench_bin_lookup16_multigroup_e2e(&mut group, 12);
+
     group.finish();
 }
 
@@ -754,6 +868,14 @@ fn e2e_steps_benches(c: &mut Criterion) {
     bench_sha_proxy_steps(&mut group, 8);
     bench_sha_proxy_steps(&mut group, 10);
     bench_sha_proxy_steps(&mut group, 12);
+
+    bench_bin_lookup16_steps(&mut group, 8);
+    bench_bin_lookup16_steps(&mut group, 10);
+    bench_bin_lookup16_steps(&mut group, 12);
+
+    bench_bin_lookup16_multigroup_steps(&mut group, 8);
+    bench_bin_lookup16_multigroup_steps(&mut group, 10);
+    bench_bin_lookup16_multigroup_steps(&mut group, 12);
 
     group.finish();
 }

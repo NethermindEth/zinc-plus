@@ -1015,6 +1015,154 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// Realistic lookup UAIRs for benchmarking
+// ---------------------------------------------------------------------------
+//
+// Modeled on SHA/ECDSA-like workloads: a few dozen binary_poly<32>
+// witness columns where most are range-checked via BitPoly{32,
+// chunk_width:8}. Stresses the multi-bin-col + L>1 paths in
+// `step4b_lookup` and the multi-point reducer at step 7.
+//
+// Two configurations:
+//   * `BinLookup16Uair`  — 16 cols, all 16 in a single BitPoly{32,8}
+//     group (L=16, K=4, single-group reducer T=2 at step 7).
+//   * `BinLookup16MultiGroupUair` — 16 cols, split 12/4 across
+//     BitPoly{32,8} (L=12) and BitPoly{32,16} (L=4) groups
+//     (multi-group reducer T=3 at step 7).
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct BinLookup16Uair<R>(PhantomData<R>);
+
+impl<R> Uair for BinLookup16Uair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(16, 0, 0);
+        let lookup_specs: Vec<LookupColumnSpec> = (0..16)
+            .map(|i| LookupColumnSpec {
+                column_index: i,
+                table_type: LookupTableType::BitPoly { width: 32, chunk_width: Some(8) },
+            })
+            .collect();
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], lookup_specs)
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        // Trivially-satisfied constraint (lookups carry the soundness work).
+        let v = &up.binary_poly[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for BinLookup16Uair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let row_count = 1usize << num_vars;
+        let cols: Vec<DenseMultilinearExtension<BinaryPoly<32>>> = (0..16)
+            .map(|_| {
+                (0..row_count)
+                    .map(|_| BinaryPoly::<32>::from(rng.next_u32()))
+                    .collect::<DenseMultilinearExtension<BinaryPoly<32>>>()
+            })
+            .collect();
+        UairTrace {
+            binary_poly: cols.into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![].into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BinLookup16MultiGroupUair<R>(PhantomData<R>);
+
+impl<R> Uair for BinLookup16MultiGroupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(16, 0, 0);
+        let mut lookup_specs: Vec<LookupColumnSpec> = (0..12)
+            .map(|i| LookupColumnSpec {
+                column_index: i,
+                table_type: LookupTableType::BitPoly { width: 32, chunk_width: Some(8) },
+            })
+            .collect();
+        lookup_specs.extend((12..16).map(|i| LookupColumnSpec {
+            column_index: i,
+            table_type: LookupTableType::BitPoly { width: 32, chunk_width: Some(16) },
+        }));
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], lookup_specs)
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        let v = &up.binary_poly[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for BinLookup16MultiGroupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let row_count = 1usize << num_vars;
+        let cols: Vec<DenseMultilinearExtension<BinaryPoly<32>>> = (0..16)
+            .map(|_| {
+                (0..row_count)
+                    .map(|_| BinaryPoly::<32>::from(rng.next_u32()))
+                    .collect::<DenseMultilinearExtension<BinaryPoly<32>>>()
+            })
+            .collect();
+        UairTrace {
+            binary_poly: cols.into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![].into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crypto_primitives::crypto_bigint_int::Int;
