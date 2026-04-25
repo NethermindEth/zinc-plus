@@ -27,6 +27,7 @@ use crypto_primitives::{ConstIntRing, ConstIntSemiring, FromWithConfig, PrimeFie
 use std::{fmt::Debug, marker::PhantomData};
 use thiserror::Error;
 use zinc_piop::{
+    bin_multipoint_reducer::Proof as BinReducerProof,
     combined_poly_resolver::{CombinedPolyResolverError, Proof as CombinedPolyResolverProof},
     ideal_check::{IdealCheckError, Proof as IdealCheckProof},
     lookup::{LookupError, gkr_logup::GkrLogupLookupProof},
@@ -83,6 +84,19 @@ pub struct Proof<F: PrimeField> {
     /// GKR-LogUp lookup proof. `groups: vec![]` (default) when the UAIR
     /// has no lookup specs.
     pub lookup_proof: GkrLogupLookupProof<F>,
+    /// Multi-point reducer proof for the binary_poly batch — `Some` iff
+    /// the UAIR has at least one lookup spec. Reduces all (per-group
+    /// `r_inner^(g)` + step-7 `r_0`) bin claims into ONE Zip+ opening
+    /// at the reduced point `r*`. `None` when there are no lookup
+    /// groups; in that case step 7 opens the bin commitment at `r_0`
+    /// directly.
+    pub bin_reducer_proof: Option<BinReducerProof<F>>,
+    /// Polynomial-valued MLE evals at `r*` for each witness binary_poly
+    /// column, in column order. Empty when `bin_reducer_proof` is
+    /// `None`. Used for cross-checking the reducer's `P(r*)` and
+    /// computing the alpha-projected eval for the single bin Zip+
+    /// open at `r*`.
+    pub bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
 }
 
 impl<F> GenTranscribable for Proof<F>
@@ -114,6 +128,19 @@ where
 
         let (lookup_proof, bytes) =
             GkrLogupLookupProof::<F>::read_transcription_bytes_subset(bytes);
+
+        // [reducer_present: u8] [reducer_proof? : subset] [bin_lifts? : subset]
+        let reducer_present = bytes[0];
+        let bytes = &bytes[1..];
+        let (bin_reducer_proof, bin_lifts_at_r_star, bytes) = match reducer_present {
+            0 => (None, Vec::new(), bytes),
+            1 => {
+                let (rp, rest) = BinReducerProof::<F>::read_transcription_bytes_subset(bytes);
+                let (bv, rest) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(rest);
+                (Some(rp), bv.0, rest)
+            }
+            v => panic!("invalid bin_reducer_proof presence flag: {v}"),
+        };
         assert!(bytes.is_empty(), "All bytes should be consumed");
 
         Self {
@@ -125,6 +152,8 @@ where
             multipoint_eval,
             witness_lifted_evals,
             lookup_proof,
+            bin_reducer_proof,
+            bin_lifts_at_r_star,
         }
     }
 
@@ -158,7 +187,25 @@ where
             .write_transcription_bytes_subset(buf);
 
         // lookup_proof: u32 length prefix + GkrLogupLookupProof encoding
-        self.lookup_proof.write_transcription_bytes_subset(buf);
+        let mut buf = self.lookup_proof.write_transcription_bytes_subset(buf);
+
+        // [reducer_present: u8] then optional reducer_proof + bin_lifts.
+        match &self.bin_reducer_proof {
+            None => {
+                assert!(
+                    self.bin_lifts_at_r_star.is_empty(),
+                    "bin_lifts_at_r_star must be empty when reducer is absent"
+                );
+                buf[0] = 0;
+            }
+            Some(rp) => {
+                buf[0] = 1;
+                let buf = &mut buf[1..];
+                let buf = rp.write_transcription_bytes_subset(buf);
+                DynamicPolyVecF::reinterpret(&self.bin_lifts_at_r_star)
+                    .write_transcription_bytes_subset(buf);
+            }
+        }
     }
 }
 
@@ -186,6 +233,17 @@ where
             + witness_vec.get_num_bytes()
             + GkrLogupLookupProof::<F>::LENGTH_NUM_BYTES
             + self.lookup_proof.get_num_bytes()
+            + 1 // reducer_present flag
+            + match &self.bin_reducer_proof {
+                None => 0,
+                Some(rp) => {
+                    let bv = DynamicPolyVecF::reinterpret(&self.bin_lifts_at_r_star);
+                    BinReducerProof::<F>::LENGTH_NUM_BYTES
+                        + rp.get_num_bytes()
+                        + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
+                        + bv.get_num_bytes()
+                }
+            }
     }
 }
 
