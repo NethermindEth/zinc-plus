@@ -151,7 +151,11 @@ where
             .into_iter()
             .unzip();
 
-        // Precombine up cols with gammas, precombined[b] = Σ_j γ_j trace[j][b]
+        // Precombine up cols with gammas, precombined[b] = Σ_j γ_j trace[j][b].
+        // Multiplying eval_f by &gamma uses `Mul<&Self, Output=Self>` from
+        // Semiring, so no per-iteration `gamma.clone()` is needed (saves
+        // ~num_rows * num_cols clones — for SHA+ECDSA at num_vars=9 that's
+        // ~23K clones avoided per call).
         let precombined = {
             let evaluations: Vec<_> = cfg_into_iter!(0..1 << num_vars)
                 .map(|b| {
@@ -163,7 +167,7 @@ where
                                 trace_mles[i].evaluations[b].clone(),
                                 field_cfg,
                             );
-                            acc + gamma.clone() * eval_f
+                            acc + eval_f * gamma
                         })
                         .into_inner()
                 })
