@@ -1175,4 +1175,161 @@ mod tests {
         )
         .expect("Folded verifier rejected a valid proof");
     }
+
+    //
+    // Folded Zip+ (4× fold) — round-trip test
+    //
+
+    /// Quarter-degree binary Zip+ types for the doubly-split commitment side
+    /// of the 4× folded path. Mirrors [`BinPolyZipTypesHalf`] but with
+    /// `Eval = BinaryPoly<8>` and 8-coeff codewords.
+    const QUARTER_DEGREE_PLUS_ONE: usize = 8;
+
+    #[derive(Debug, Clone)]
+    pub struct BinPolyZipTypesQuarter {}
+    impl ZipTypes for BinPolyZipTypesQuarter {
+        const NUM_COLUMN_OPENINGS: usize = 147;
+        type Eval = BinaryPoly<QUARTER_DEGREE_PLUS_ONE>;
+        type Cw = DensePolynomial<i64, QUARTER_DEGREE_PLUS_ONE>;
+        type Fmod = Uint<FIELD_LIMBS>;
+        type PrimeTest = MillerRabin;
+        type Chal = i128;
+        type Pt = i128;
+        type CombR = Int<M>;
+        type Comb = DensePolynomial<Self::CombR, QUARTER_DEGREE_PLUS_ONE>;
+        type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, QUARTER_DEGREE_PLUS_ONE>;
+        type CombDotChal = DensePolyInnerProduct<
+            Self::CombR,
+            Self::Chal,
+            Self::CombR,
+            MBSInnerProduct,
+            QUARTER_DEGREE_PLUS_ONE,
+        >;
+        type ArrCombRDotChal = MBSInnerProduct;
+    }
+
+    #[derive(Clone, Debug)]
+    struct TestFoldedZincTypesIprs4x;
+
+    impl FoldedZincTypes<DEGREE_PLUS_ONE, QUARTER_DEGREE_PLUS_ONE> for TestFoldedZincTypesIprs4x {
+        type Int = ZtInt;
+        type Chal = i128;
+        type Pt = i128;
+        type CombR = Int<M>;
+        type Fmod = Uint<FIELD_LIMBS>;
+        type PrimeTest = MillerRabin;
+
+        type BinaryZt = BinPolyZipTypesQuarter;
+        type ArbitraryZt = ArbitraryPolyZipTypesIprs;
+        type IntZt = IntZipTypes;
+
+        type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, CHECKED>;
+        type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP, CHECKED>;
+        type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, CHECKED>;
+    }
+
+    /// Set up Zip+ params for the 4× folded path. The binary commitment is
+    /// over the twice-split column (length `4n` with `BinaryPoly<8>`
+    /// entries), so its `num_vars` is `num_vars + 2`. Arbitrary and int
+    /// commitments are sized normally.
+    #[allow(clippy::type_complexity)]
+    fn setup_folded_4x_pp(
+        num_vars: usize,
+    ) -> (
+        ZipPlusParams<
+            <TestFoldedZincTypesIprs4x as FoldedZincTypes<
+                DEGREE_PLUS_ONE,
+                QUARTER_DEGREE_PLUS_ONE,
+            >>::BinaryZt,
+            <TestFoldedZincTypesIprs4x as FoldedZincTypes<
+                DEGREE_PLUS_ONE,
+                QUARTER_DEGREE_PLUS_ONE,
+            >>::BinaryLc,
+        >,
+        ZipPlusParams<
+            <TestFoldedZincTypesIprs4x as FoldedZincTypes<
+                DEGREE_PLUS_ONE,
+                QUARTER_DEGREE_PLUS_ONE,
+            >>::ArbitraryZt,
+            <TestFoldedZincTypesIprs4x as FoldedZincTypes<
+                DEGREE_PLUS_ONE,
+                QUARTER_DEGREE_PLUS_ONE,
+            >>::ArbitraryLc,
+        >,
+        ZipPlusParams<
+            <TestFoldedZincTypesIprs4x as FoldedZincTypes<
+                DEGREE_PLUS_ONE,
+                QUARTER_DEGREE_PLUS_ONE,
+            >>::IntZt,
+            <TestFoldedZincTypesIprs4x as FoldedZincTypes<
+                DEGREE_PLUS_ONE,
+                QUARTER_DEGREE_PLUS_ONE,
+            >>::IntLc,
+        >,
+    ) {
+        let split2_size = 1 << (num_vars + 2);
+        let normal_size = 1 << num_vars;
+        (
+            ZipPlus::setup(
+                split2_size,
+                IprsCode::new_with_optimal_depth(split2_size).unwrap(),
+            ),
+            ZipPlus::setup(
+                normal_size,
+                IprsCode::new_with_optimal_depth(normal_size).unwrap(),
+            ),
+            ZipPlus::setup(
+                normal_size,
+                IprsCode::new_with_optimal_depth(normal_size).unwrap(),
+            ),
+        )
+    }
+
+    /// End-to-end test: BinaryDecompositionUair via the **4× folded**
+    /// prover/verifier. Same UAIR, same trace generator, same field — the
+    /// binary commitment is over `BinaryPoly<8>` columns of length `4n`,
+    /// opened at the doubly-extended point `(r_0 ‖ γ₁ ‖ γ₂)`.
+    #[test]
+    fn test_e2e_folded_4x_binary_decomposition() {
+        use crate::prover::prove_folded_4x;
+        use crate::verifier::verify_folded_4x;
+
+        let num_vars = 8;
+        let mut rng = rng();
+        let pp = setup_folded_4x_pp(num_vars);
+
+        let trace = BinaryDecompositionUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        let sig = <BinaryDecompositionUair<ZtInt> as Uair>::signature();
+        let public_trace = trace.public(&sig);
+
+        let proof = prove_folded_4x::<
+            TestFoldedZincTypesIprs4x,
+            BinaryDecompositionUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            QUARTER_DEGREE_PLUS_ONE,
+            CHECKED,
+        >(&pp, &trace, num_vars, project_scalar_fn)
+        .expect("Folded 4× prover failed");
+
+        verify_folded_4x::<
+            TestFoldedZincTypesIprs4x,
+            BinaryDecompositionUair<ZtInt>,
+            F,
+            IdealOrZero<DegreeOneIdeal<F>>,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            QUARTER_DEGREE_PLUS_ONE,
+            CHECKED,
+        >(
+            &pp,
+            proof,
+            &public_trace,
+            num_vars,
+            project_scalar_fn,
+            default_project_ideal!(),
+        )
+        .expect("Folded 4× verifier rejected a valid proof");
+    }
 }
