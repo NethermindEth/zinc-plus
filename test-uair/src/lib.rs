@@ -5,11 +5,13 @@ pub mod ecdsa_affine;
 pub mod ecdsa_doubling;
 mod generate_trace;
 pub mod sha256;
+pub mod sha_ecdsa;
 
 pub use ecdsa::EcdsaUair;
 pub use ecdsa_addition::JacobianAdditionUair;
 pub use ecdsa_affine::AffineConversionUair;
 pub use ecdsa_doubling::{EC_FP_INT_LIMBS, EcdsaFpRing, JacobianDoublingUair};
+pub use sha_ecdsa::ShaEcdsaUair;
 pub use generate_trace::*;
 pub use sha256::{Sha256CompressionSliceUair, Sha256Ideal};
 
