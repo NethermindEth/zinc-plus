@@ -41,7 +41,7 @@ use zinc_utils::{
     projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
-    code::iprs::{IprsCode, PnttConfigF12289},
+    code::iprs::{IprsCode, PnttConfigF12289, PnttConfigF65537},
     pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
     utils::eprint_proof_size,
 };
@@ -1464,7 +1464,11 @@ impl FoldedZincTypes<DEGREE_PLUS_ONE, HALF_DEGREE_PLUS_ONE> for BenchFoldedZincT
     type ArbitraryZt = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt;
     type IntZt = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntZt;
 
-    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF12289, REP, PERFORM_CHECKS>;
+    // Use F65537 for the folded binary code: split columns are length 2n,
+    // so the row is 2× wider than unfolded. At rate 1/8 the codeword length
+    // (= 2n · 8) can exceed PnttConfigF12289's 2^12 NTT domain (4096) — for
+    // example nvars=9 folded gives 8192. F65537 supports NTT up to 2^16.
+    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
     type ArbitraryLc = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc;
     type IntLc = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntLc;
 }
@@ -1692,7 +1696,8 @@ impl FoldedZincTypes<DEGREE_PLUS_ONE, HALF_DEGREE_PLUS_ONE> for EcdsaBenchFolded
     type ArbitraryZt = <EcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt;
     type IntZt = <EcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntZt;
 
-    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF12289, REP, PERFORM_CHECKS>;
+    // F65537 for the folded binary code — see comment on BenchFoldedZincTypes.
+    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
     type ArbitraryLc = <EcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc;
     type IntLc = <EcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntLc;
 }
