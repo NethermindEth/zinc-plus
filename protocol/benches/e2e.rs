@@ -20,7 +20,7 @@ use zinc_poly::{
     },
 };
 use zinc_primality::{MillerRabin, PrimalityTest};
-use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes};
+use zinc_protocol::{FoldedZincTypes, Proof, ZincPlusPiop, ZincTypes};
 use zinc_test_uair::{
     BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
     ShaProxy, TestUairNoMultiplication,

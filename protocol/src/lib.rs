@@ -259,6 +259,76 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize>: Clone + Debug {
     type IntLc: LinearCode<Self::IntZt>;
 }
 
+/// Type bundle for the **folded** Zinc+ PIOP (1× fold, 2× column splitting).
+///
+/// The PIOP runs at trace degree `D` (so the trace and UAIR are unchanged
+/// from the unfolded path), but the binary commitment is over `BinaryPoly<HALF_D>`
+/// — each `BinaryPoly<D>` witness column is split into two `BinaryPoly<HALF_D>`
+/// halves before commit. This decouples the trace's `BinaryPoly<D>` from the
+/// PCS's `BinaryPoly<HALF_D>`, which `ZincTypes<D>` would otherwise force to
+/// be the same (`BinaryZt::Eval = BinaryPoly<DEGREE_PLUS_ONE>`).
+///
+/// Arbitrary and integer commitments are unchanged.
+pub trait FoldedZincTypes<const D: usize, const HALF_D: usize>: Clone + Debug {
+    type Int: Semiring
+        + ConstTranscribable
+        + ConstCoeffBitWidth
+        + Named
+        + Default
+        + Clone
+        + Send
+        + Sync
+        + 'static;
+
+    type Chal: ConstIntRing + ConstTranscribable + Named;
+
+    type Pt: ConstIntRing;
+
+    type CombR;
+
+    type Fmod: ConstIntSemiring + ConstTranscribable + Named;
+
+    type PrimeTest: PrimalityTest<Self::Fmod>;
+
+    /// Zip+ types for the **split** binary trace columns.
+    /// `Eval = BinaryPoly<HALF_D>` — one round of 2× folding.
+    type BinaryZt: ZipTypes<
+            Eval = BinaryPoly<HALF_D>,
+            Chal = Self::Chal,
+            Pt = Self::Pt,
+            CombR = Self::CombR,
+            Fmod = Self::Fmod,
+            PrimeTest = Self::PrimeTest,
+        >;
+
+    /// Zip+ types for the arbitrary polynomial trace columns (unchanged from
+    /// the unfolded path: degree-`D` polynomials).
+    type ArbitraryZt: ZipTypes<
+            Eval = DensePolynomial<Self::Int, D>,
+            Chal = Self::Chal,
+            Pt = Self::Pt,
+            CombR = Self::CombR,
+            Fmod = Self::Fmod,
+            PrimeTest = Self::PrimeTest,
+        >;
+
+    /// Zip+ types for the integer trace columns (unchanged).
+    type IntZt: ZipTypes<
+            Eval = Self::Int,
+            Chal = Self::Chal,
+            Pt = Self::Pt,
+            CombR = Self::CombR,
+            Fmod = Self::Fmod,
+            PrimeTest = Self::PrimeTest,
+        >;
+
+    type BinaryLc: LinearCode<Self::BinaryZt>;
+
+    type ArbitraryLc: LinearCode<Self::ArbitraryZt>;
+
+    type IntLc: LinearCode<Self::IntZt>;
+}
+
 /// Main struct for the Zinc+ PIOP. The protocol is implemented as associated
 /// functions on it.
 ///
@@ -949,5 +1019,160 @@ mod tests {
                 assert!(matches!(res.unwrap_err(), ProtocolError::IdealCheck(..)));
             },
         );
+    }
+
+    //
+    // Folded Zip+ (1× fold) — round-trip test
+    //
+
+    /// Half-degree binary Zip+ types for the split commitment side of the
+    /// folded path. Mirrors [`BinPolyZipTypes`] but with `Eval = BinaryPoly<16>`
+    /// and `Cw` over `DensePolynomial<i64, 16>`, so the PCS commits the
+    /// post-split BinaryPoly<16> witnesses.
+    const HALF_DEGREE_PLUS_ONE: usize = 16;
+
+    #[derive(Debug, Clone)]
+    pub struct BinPolyZipTypesHalf {}
+    impl ZipTypes for BinPolyZipTypesHalf {
+        const NUM_COLUMN_OPENINGS: usize = 147;
+        type Eval = BinaryPoly<HALF_DEGREE_PLUS_ONE>;
+        type Cw = DensePolynomial<i64, HALF_DEGREE_PLUS_ONE>;
+        type Fmod = Uint<FIELD_LIMBS>;
+        type PrimeTest = MillerRabin;
+        type Chal = i128;
+        type Pt = i128;
+        type CombR = Int<M>;
+        type Comb = DensePolynomial<Self::CombR, HALF_DEGREE_PLUS_ONE>;
+        type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, HALF_DEGREE_PLUS_ONE>;
+        type CombDotChal = DensePolyInnerProduct<
+            Self::CombR,
+            Self::Chal,
+            Self::CombR,
+            MBSInnerProduct,
+            HALF_DEGREE_PLUS_ONE,
+        >;
+        type ArrCombRDotChal = MBSInnerProduct;
+    }
+
+    #[derive(Clone, Debug)]
+    struct TestFoldedZincTypesIprs;
+
+    impl FoldedZincTypes<DEGREE_PLUS_ONE, HALF_DEGREE_PLUS_ONE> for TestFoldedZincTypesIprs {
+        type Int = ZtInt;
+        type Chal = i128;
+        type Pt = i128;
+        type CombR = Int<M>;
+        type Fmod = Uint<FIELD_LIMBS>;
+        type PrimeTest = MillerRabin;
+
+        type BinaryZt = BinPolyZipTypesHalf;
+        type ArbitraryZt = ArbitraryPolyZipTypesIprs;
+        type IntZt = IntZipTypes;
+
+        type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, CHECKED>;
+        type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP, CHECKED>;
+        type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, CHECKED>;
+    }
+
+    /// Set up Zip+ params for the folded path. The binary commitment is over
+    /// the split column (length `2n` with `BinaryPoly<HALF_D>` entries), so
+    /// its `num_vars` is `num_vars + 1`. Arbitrary and int are sized normally.
+    #[allow(clippy::type_complexity)]
+    fn setup_folded_pp(
+        num_vars: usize,
+    ) -> (
+        ZipPlusParams<
+            <TestFoldedZincTypesIprs as FoldedZincTypes<
+                DEGREE_PLUS_ONE,
+                HALF_DEGREE_PLUS_ONE,
+            >>::BinaryZt,
+            <TestFoldedZincTypesIprs as FoldedZincTypes<
+                DEGREE_PLUS_ONE,
+                HALF_DEGREE_PLUS_ONE,
+            >>::BinaryLc,
+        >,
+        ZipPlusParams<
+            <TestFoldedZincTypesIprs as FoldedZincTypes<
+                DEGREE_PLUS_ONE,
+                HALF_DEGREE_PLUS_ONE,
+            >>::ArbitraryZt,
+            <TestFoldedZincTypesIprs as FoldedZincTypes<
+                DEGREE_PLUS_ONE,
+                HALF_DEGREE_PLUS_ONE,
+            >>::ArbitraryLc,
+        >,
+        ZipPlusParams<
+            <TestFoldedZincTypesIprs as FoldedZincTypes<
+                DEGREE_PLUS_ONE,
+                HALF_DEGREE_PLUS_ONE,
+            >>::IntZt,
+            <TestFoldedZincTypesIprs as FoldedZincTypes<
+                DEGREE_PLUS_ONE,
+                HALF_DEGREE_PLUS_ONE,
+            >>::IntLc,
+        >,
+    ) {
+        let split_size = 1 << (num_vars + 1);
+        let normal_size = 1 << num_vars;
+        (
+            ZipPlus::setup(
+                split_size,
+                IprsCode::new_with_optimal_depth(split_size).unwrap(),
+            ),
+            ZipPlus::setup(
+                normal_size,
+                IprsCode::new_with_optimal_depth(normal_size).unwrap(),
+            ),
+            ZipPlus::setup(
+                normal_size,
+                IprsCode::new_with_optimal_depth(normal_size).unwrap(),
+            ),
+        )
+    }
+
+    /// End-to-end test: BinaryDecompositionUair via the **folded** prover/
+    /// verifier. Same UAIR, same trace generator, same field — only the
+    /// binary commitment is over `BinaryPoly<16>` split columns, opened at
+    /// the extended point `(r_0 ‖ γ)`.
+    #[test]
+    fn test_e2e_folded_binary_decomposition() {
+        use crate::prover::prove_folded;
+        use crate::verifier::verify_folded;
+
+        let num_vars = 8;
+        let mut rng = rng();
+        let pp = setup_folded_pp(num_vars);
+
+        let trace = BinaryDecompositionUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        let sig = <BinaryDecompositionUair<ZtInt> as Uair>::signature();
+        let public_trace = trace.public(&sig);
+
+        let proof = prove_folded::<
+            TestFoldedZincTypesIprs,
+            BinaryDecompositionUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            CHECKED,
+        >(&pp, &trace, num_vars, project_scalar_fn)
+        .expect("Folded prover failed");
+
+        verify_folded::<
+            TestFoldedZincTypesIprs,
+            BinaryDecompositionUair<ZtInt>,
+            F,
+            IdealOrZero<DegreeOneIdeal<F>>,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            CHECKED,
+        >(
+            &pp,
+            proof,
+            &public_trace,
+            num_vars,
+            project_scalar_fn,
+            default_project_ideal!(),
+        )
+        .expect("Folded verifier rejected a valid proof");
     }
 }

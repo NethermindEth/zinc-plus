@@ -724,3 +724,243 @@ fn commit_optionally<Zt: ZipTypes, Lc: LinearCode<Zt>>(
         Ok((Some(hint), commitment))
     }
 }
+
+//
+// Folded prover (1× fold, 2× column splitting on binary witness columns).
+//
+// The PIOP runs on the original `BinaryPoly<D>` trace; only the binary
+// commit (step 0) and the binary PCS open (step 7) differ from the
+// unfolded path. Steps 1–6 are inlined here so we don't duplicate the
+// entire type-state chain on a separate `FoldedZincTypes` parameter.
+//
+
+/// Folded counterpart of [`ZincPlusPiop::prove`]. Runs the unfolded PIOP
+/// on the original `BinaryPoly<D>` trace, but commits and opens binary
+/// witness columns as `BinaryPoly<HALF_D>` halves of length `2n`. Returns
+/// the same [`Proof<F>`] shape — the only difference visible to the
+/// verifier is the binary PCS sub-proof.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn prove_folded<
+    ZtF,
+    U,
+    F,
+    const D: usize,
+    const HALF_D: usize,
+    const CHECK_FOR_OVERFLOW: bool,
+>(
+    pp: &(
+        ZipPlusParams<ZtF::BinaryZt, ZtF::BinaryLc>,
+        ZipPlusParams<ZtF::ArbitraryZt, ZtF::ArbitraryLc>,
+        ZipPlusParams<ZtF::IntZt, ZtF::IntLc>,
+    ),
+    trace: &UairTrace<'static, ZtF::Int, ZtF::Int, D>,
+    num_vars: usize,
+    project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
+) -> Result<Proof<F>, ProtocolError<F, U::Ideal>>
+where
+    ZtF: crate::FoldedZincTypes<D, HALF_D>,
+    ZtF::Int: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    BinaryPoly<HALF_D>: ProjectableToField<F>,
+    U: Uair + 'static,
+    F: InnerTransparentField
+        + FromPrimitiveWithConfig
+        + for<'a> FromWithConfig<&'a ZtF::Int>
+        + for<'a> FromWithConfig<&'a ZtF::CombR>
+        + for<'a> FromWithConfig<&'a ZtF::Chal>
+        + for<'a> FromWithConfig<&'a ZtF::Pt>
+        + for<'a> MulByScalar<&'a F>
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
+    F::Inner:
+        ConstIntSemiring + ConstTranscribable + FromRef<ZtF::Fmod> + Send + Sync + Zero + Default,
+    F::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+{
+    let (pp_bin_split, pp_arb, pp_int) = pp;
+    let uair_signature = U::signature();
+    let public_trace = trace.public(&uair_signature);
+    let witness_trace = trace.witness(&uair_signature);
+
+    // ── Step 0: Commit (split binary, regular arb/int) ──────────────────
+    let split_binary_witness: Vec<DenseMultilinearExtension<BinaryPoly<HALF_D>>> =
+        zip_plus::pcs::folding::split_columns::<D, HALF_D>(&witness_trace.binary_poly);
+
+    let (res_bin, (res_arb, res_int)) = cfg_join!(
+        commit_optionally(pp_bin_split, &split_binary_witness),
+        commit_optionally(pp_arb, &witness_trace.arbitrary_poly),
+        commit_optionally(pp_int, &witness_trace.int),
+    );
+    let (hint_bin_split, commitment_bin) = res_bin?;
+    let (hint_arb, commitment_arb) = res_arb?;
+    let (hint_int, commitment_int) = res_int?;
+
+    let mut pcs_transcript = PcsProverTranscript::new_from_commitments(
+        [&commitment_bin, &commitment_arb, &commitment_int].into_iter(),
+    );
+
+    absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.binary_poly);
+    absorb_public_columns(
+        &mut pcs_transcript.fs_transcript,
+        &public_trace.arbitrary_poly,
+    );
+    absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
+
+    // ── Step 1 (combined): Prime projection ─────────────────────────────
+    let field_cfg = pcs_transcript
+        .fs_transcript
+        .get_random_field_cfg::<F, ZtF::Fmod, ZtF::PrimeTest>();
+
+    let (projected_trace_rm, projected_scalars_fx) = cfg_join!(
+        project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg),
+        project_scalars::<F, U>(|s| project_scalar(s, &field_cfg)),
+    );
+
+    // ── Step 2 (combined): Ideal check ──────────────────────────────────
+    let num_constraints = count_constraints::<U>();
+    let (ic_proof, ic_prover_state) = U::prove_combined(
+        &mut pcs_transcript.fs_transcript,
+        &projected_trace_rm,
+        &projected_scalars_fx,
+        num_constraints,
+        num_vars,
+        &field_cfg,
+    )?;
+    let ic_eval_point = ic_prover_state.evaluation_point;
+    let projected_trace = ProjectedTrace::RowMajor(projected_trace_rm);
+
+    // ── Step 3: Eval projection (ψ_a) ───────────────────────────────────
+    let projecting_element: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();
+    let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
+
+    let projected_trace_f =
+        evaluate_trace_to_column_mles(&projected_trace, &projecting_element_f);
+    let projected_scalars_f =
+        project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
+            .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
+
+    // ── Step 4: CPR + multi-degree sumcheck ─────────────────────────────
+    let max_degree = count_max_degree::<U>();
+    let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
+        &mut pcs_transcript.fs_transcript,
+        projected_trace_f.clone(),
+        &ic_eval_point,
+        &projected_scalars_f,
+        num_constraints,
+        num_vars,
+        max_degree,
+        &field_cfg,
+    )?;
+    let groups = vec![cpr_group];
+    let (combined_sumcheck, md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
+        &mut pcs_transcript.fs_transcript,
+        groups,
+        num_vars,
+        &field_cfg,
+    );
+    let (cpr_proof, cpr_prover_state) = CombinedPolyResolver::finalize_prover(
+        &mut pcs_transcript.fs_transcript,
+        md_states.into_iter().next().expect("one CPR group"),
+        cpr_ancillary,
+        &field_cfg,
+    )?;
+    let lookup_proof: Option<BatchedLookupProof<F>> = None;
+
+    // ── Step 5: Multi-point evaluation sumcheck ─────────────────────────
+    let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
+        &mut pcs_transcript.fs_transcript,
+        &projected_trace_f,
+        &cpr_prover_state.evaluation_point,
+        &cpr_proof.up_evals,
+        &cpr_proof.down_evals,
+        uair_signature.shifts(),
+        &field_cfg,
+    )?;
+    let r_0 = mp_prover_state.eval_point;
+
+    // ── Step 6: Lift-and-project + sample γ for folding ─────────────────
+    let lifted_evals =
+        compute_lifted_evals::<F, D>(&r_0, &trace.binary_poly, &projected_trace, &field_cfg);
+    let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+    for bar_u in &lifted_evals {
+        pcs_transcript
+            .fs_transcript
+            .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
+    }
+    // After absorbing lifted_evals, sample the folding challenge γ. The
+    // verifier replays this exact step before any PCS verify.
+    let gamma: F = {
+        let g_chal: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();
+        F::from_with_cfg(&g_chal, &field_cfg)
+    };
+
+    // ── Step 7: PCS open. Binary uses split columns at extended point ───
+    let mut r0_ext = r_0.clone();
+    r0_ext.push(gamma);
+
+    if let Some(hint_bin) = &hint_bin_split {
+        let _ = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+            &mut pcs_transcript,
+            pp_bin_split,
+            &split_binary_witness,
+            &r0_ext,
+            hint_bin,
+            &field_cfg,
+        )?;
+    }
+    if let Some(hint_arb) = &hint_arb {
+        let _ =
+            ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                &mut pcs_transcript,
+                pp_arb,
+                &witness_trace.arbitrary_poly,
+                &r_0,
+                hint_arb,
+                &field_cfg,
+            )?;
+    }
+    if let Some(hint_int) = &hint_int {
+        let _ = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+            &mut pcs_transcript,
+            pp_int,
+            &witness_trace.int,
+            &r_0,
+            hint_int,
+            &field_cfg,
+        )?;
+    }
+
+    // ── Assemble the proof ──────────────────────────────────────────────
+    let zip_proof = pcs_transcript.stream.into_inner();
+    let commitments = (commitment_bin, commitment_arb, commitment_int);
+
+    let pub_cols = uair_signature.public_cols();
+    let num_pub_bin = pub_cols.num_binary_poly_cols();
+    let num_pub_arb = pub_cols.num_arbitrary_poly_cols();
+    let num_pub_int = pub_cols.num_int_cols();
+    let total = uair_signature.total_cols();
+    let num_total_bin = total.num_binary_poly_cols();
+    let num_total_arb = total.num_arbitrary_poly_cols();
+    let witness = uair_signature.witness_cols();
+    let witness_arb_offset = add!(num_total_bin, num_pub_arb);
+    let witness_arb_end = add!(witness_arb_offset, witness.num_arbitrary_poly_cols());
+    let witness_int_offset = add!(add!(num_total_bin, num_total_arb), num_pub_int);
+    let witness_lifted_evals: Vec<_> = lifted_evals[num_pub_bin..num_total_bin]
+        .iter()
+        .chain(&lifted_evals[witness_arb_offset..witness_arb_end])
+        .chain(&lifted_evals[witness_int_offset..])
+        .cloned()
+        .collect();
+
+    Ok(Proof {
+        commitments,
+        ideal_check: ic_proof,
+        resolver: cpr_proof,
+        combined_sumcheck,
+        multipoint_eval: mp_proof,
+        zip: zip_proof,
+        witness_lifted_evals,
+        lookup_proof,
+    })
+}
