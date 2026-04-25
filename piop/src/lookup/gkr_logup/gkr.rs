@@ -773,22 +773,30 @@ where
                 mles.push(mk_mle(qr_vals));
             }
 
-            let alpha_clone = alpha.clone();
-            let delta_powers_clone = delta_powers.clone();
+            // Capture α + δ-powers by move; the closure body uses
+            // them by reference (no per-evaluation clones). At L = 16
+            // trees and depth d ≈ 18, the prior `delta_powers[ell].clone()`
+            // and `alpha.clone()` ran ~4·2^d·L ≈ 17M times per layer
+            // and dominated the comb_fn cost.
+            let alpha_ref = alpha.clone();
+            let delta_powers_ref = delta_powers.clone();
             let nt = num_trees;
+            let zero_template = F::zero_with_cfg(field_cfg);
             let comb_fn = move |vals: &[F]| -> F {
                 let eq_val = &vals[0];
-                let mut acc = vals[0].clone() - eq_val; // zero, preserves type
+                let mut acc = zero_template.clone();
                 for ell in 0..nt {
                     let base = 1 + 4 * ell;
                     let pl_val = &vals[base];
                     let ql_val = &vals[base + 1];
                     let pr_val = &vals[base + 2];
                     let qr_val = &vals[base + 3];
-                    let pl_plus_alpha_ql =
-                        pl_val.clone() + &(alpha_clone.clone() * ql_val);
-                    let inner = pl_plus_alpha_ql * qr_val + &(pr_val.clone() * ql_val);
-                    acc += &(delta_powers_clone[ell].clone() * &inner);
+                    // pl + α·ql, then (pl + α·ql)·qr + pr·ql, weighted by δ^ell.
+                    let alpha_ql = ql_val.clone() * &alpha_ref;
+                    let pl_plus_alpha_ql = pl_val.clone() + &alpha_ql;
+                    let inner =
+                        pl_plus_alpha_ql * qr_val + &(pr_val.clone() * ql_val);
+                    acc += &(inner * &delta_powers_ref[ell]);
                 }
                 eq_val.clone() * &acc
             };

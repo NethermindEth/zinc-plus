@@ -64,7 +64,7 @@ use zinc_transcript::{
     delegate_transcribable,
     traits::{ConstTranscribable, Transcript},
 };
-use zinc_utils::{cfg_into_iter, inner_transparent_field::InnerTransparentField};
+use zinc_utils::{cfg_into_iter, cfg_iter, inner_transparent_field::InnerTransparentField};
 
 use crate::sumcheck::{MLSumcheck, SumCheckError, SumcheckProof};
 
@@ -178,15 +178,32 @@ where
             zero_inner.clone(),
         );
 
-        // Build M(x) = Σ_t β_t · eq(x, r^(t)) at hypercube.
-        let mut m_evals_f: Vec<F> = vec![zero.clone(); 1usize << num_vars];
-        for (t, claim) in claims.iter().enumerate() {
-            let eq_t = build_eq_x_r_inner::<F>(&claim.point, field_cfg)?;
-            for (acc, e) in m_evals_f.iter_mut().zip(eq_t.evaluations.iter()) {
-                let e_f = F::new_unchecked_with_cfg(e.clone(), field_cfg);
-                *acc = acc.clone() + &(betas[t].clone() * &e_f);
-            }
-        }
+        // Build M(x) = Σ_t β_t · eq(x, r^(t)) at hypercube. For each
+        // claim we (a) build the eq table O(2^num_vars) and (b) fold
+        // it into the running sum. Both phases are parallelizable;
+        // build the per-claim eq tables in parallel, then fold serial
+        // (ordering matters for FS-free numeric reproducibility).
+        let n_hyper = 1usize << num_vars;
+        let eq_tables: Vec<DenseMultilinearExtension<F::Inner>> =
+            cfg_iter!(claims)
+                .map(|c| {
+                    build_eq_x_r_inner::<F>(&c.point, field_cfg)
+                        .expect("eq build")
+                })
+                .collect();
+        let m_evals_f: Vec<F> = cfg_into_iter!(0..n_hyper)
+            .map(|x_idx| {
+                let mut s = zero.clone();
+                for (t, eq_t) in eq_tables.iter().enumerate() {
+                    let e_f = F::new_unchecked_with_cfg(
+                        eq_t.evaluations[x_idx].clone(),
+                        field_cfg,
+                    );
+                    s = s + &(betas[t].clone() * &e_f);
+                }
+                s
+            })
+            .collect();
         let m_evals: Vec<F::Inner> = m_evals_f.into_iter().map(F::into_inner).collect();
         let m_mle = DenseMultilinearExtension::from_evaluations_vec(
             num_vars,

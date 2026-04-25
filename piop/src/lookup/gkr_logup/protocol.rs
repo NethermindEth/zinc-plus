@@ -208,7 +208,10 @@ where
         .map(|s| beta.clone() - s)
         .collect();
 
-    let witness_trees: Vec<_> = (0..num_lookups)
+    // L witness fraction trees built in parallel — each tree's
+    // construction is independent (different ell), and `build_fraction_tree`
+    // itself is the heavy part (O(K·W) field ops per tree).
+    let witness_trees: Vec<_> = cfg_into_iter!(0..num_lookups)
         .map(|ell| {
             let mut leaf_q = Vec::with_capacity(w_size);
             for k in 0..num_chunks {
