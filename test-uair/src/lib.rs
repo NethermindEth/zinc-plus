@@ -1096,6 +1096,69 @@ where
     }
 }
 
+/// Control variant of [`BinLookup16Uair`] with the SAME column layout
+/// and trivial constraint but **no lookup specs** declared. Use it to
+/// isolate the per-step cost of the lookup machinery: with this UAIR,
+/// step 4b (prove + verify) early-returns and the bin multi-point
+/// reducer is skipped, so a side-by-side comparison with the lookup-
+/// bearing variants gives the lookup overhead at each step.
+#[derive(Clone, Debug)]
+pub struct BinLookup16NoLookupUair<R>(PhantomData<R>);
+
+impl<R> Uair for BinLookup16NoLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(16, 0, 0);
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![])
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        let v = &up.binary_poly[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for BinLookup16NoLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let row_count = 1usize << num_vars;
+        let cols: Vec<DenseMultilinearExtension<BinaryPoly<32>>> = (0..16)
+            .map(|_| {
+                (0..row_count)
+                    .map(|_| BinaryPoly::<32>::from(rng.next_u32()))
+                    .collect::<DenseMultilinearExtension<BinaryPoly<32>>>()
+            })
+            .collect();
+        UairTrace {
+            binary_poly: cols.into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![].into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BinLookup16MultiGroupUair<R>(PhantomData<R>);
 

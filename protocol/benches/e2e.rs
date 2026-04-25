@@ -22,8 +22,9 @@ use zinc_poly::{
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes};
 use zinc_test_uair::{
-    BigLinearUair, BigLinearUairWithPublicInput, BinLookup16MultiGroupUair, BinLookup16Uair,
-    BinaryDecompositionUair, GenerateRandomTrace, ShaProxy, TestUairNoMultiplication,
+    BigLinearUair, BigLinearUairWithPublicInput, BinLookup16MultiGroupUair,
+    BinLookup16NoLookupUair, BinLookup16Uair, BinaryDecompositionUair, GenerateRandomTrace,
+    ShaProxy, TestUairNoMultiplication,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
@@ -774,6 +775,15 @@ fn bench_big_linear_public_input_e2e(group: &mut BenchmarkGroup<WallTime>, num_v
 fn bench_bin_lookup16_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     do_bench_uair_lookup::<BinLookup16Uair<i64>>(group, "BinLookup16", num_vars);
 }
+/// Control: 16 binary_poly cols with NO lookup specs. Same column
+/// layout as `BinLookup16` so step-by-step deltas isolate lookup cost.
+fn bench_bin_lookup16_no_lookup_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    do_bench_uair_lookup::<BinLookup16NoLookupUair<i64>>(
+        group,
+        "BinLookup16NoLookup",
+        num_vars,
+    );
+}
 fn bench_bin_lookup16_multigroup_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     do_bench_uair_lookup::<BinLookup16MultiGroupUair<i64>>(
         group,
@@ -799,6 +809,13 @@ fn bench_big_linear_public_input_steps(group: &mut BenchmarkGroup<WallTime>, num
 }
 fn bench_bin_lookup16_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     do_bench_steps_uair_lookup::<BinLookup16Uair<i64>>(group, "BinLookup16", num_vars);
+}
+fn bench_bin_lookup16_no_lookup_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    do_bench_steps_uair_lookup::<BinLookup16NoLookupUair<i64>>(
+        group,
+        "BinLookup16NoLookup",
+        num_vars,
+    );
 }
 fn bench_bin_lookup16_multigroup_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     do_bench_steps_uair_lookup::<BinLookup16MultiGroupUair<i64>>(
@@ -835,6 +852,10 @@ fn e2e_benches(c: &mut Criterion) {
     bench_sha_proxy_e2e(&mut group, 10);
     bench_sha_proxy_e2e(&mut group, 12);
 
+    bench_bin_lookup16_no_lookup_e2e(&mut group, 8);
+    bench_bin_lookup16_no_lookup_e2e(&mut group, 10);
+    bench_bin_lookup16_no_lookup_e2e(&mut group, 12);
+
     bench_bin_lookup16_e2e(&mut group, 8);
     bench_bin_lookup16_e2e(&mut group, 10);
     bench_bin_lookup16_e2e(&mut group, 12);
@@ -868,6 +889,10 @@ fn e2e_steps_benches(c: &mut Criterion) {
     bench_sha_proxy_steps(&mut group, 8);
     bench_sha_proxy_steps(&mut group, 10);
     bench_sha_proxy_steps(&mut group, 12);
+
+    bench_bin_lookup16_no_lookup_steps(&mut group, 8);
+    bench_bin_lookup16_no_lookup_steps(&mut group, 10);
+    bench_bin_lookup16_no_lookup_steps(&mut group, 12);
 
     bench_bin_lookup16_steps(&mut group, 8);
     bench_bin_lookup16_steps(&mut group, 10);
