@@ -322,7 +322,7 @@ where
 impl_with_type_bounds!(ProverBase
 {
     #[allow(clippy::type_complexity)]
-    fn project_common<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
+    fn project_common<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync>(
         &mut self,
         project_scalar: S,
     ) -> Result<(F::Config, ScalarMap<U::Scalar, DynamicPolynomialF<F>>), ProtocolError<F, U::Ideal>>
@@ -340,7 +340,7 @@ impl_with_type_bounds!(ProverBase
     /// (`\phi_q`: `Z[X] -> F_q[X]`). Samples a random prime, projects the
     /// full trace and scalars using the row-major layout.
     /// Works for both linear and non-linear constraints.
-    pub fn step1_combined<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
+    pub fn step1_combined<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync>(
         mut self,
         project_scalar: S,
     ) -> Result<ProverProjectedCombined<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
@@ -359,7 +359,7 @@ impl_with_type_bounds!(ProverBase
     /// (`\phi_q`: `Z[X] -> F_q[X]`). Samples a random prime, projects the
     /// full trace and scalars using the column-major layout.
     /// Only suitable for linear constraints.
-    pub fn step1_mle_first<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
+    pub fn step1_mle_first<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync>(
         mut self,
         project_scalar: S,
     ) -> Result<ProverProjectedMleFirst<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
@@ -379,7 +379,7 @@ impl_with_type_bounds!(ProverBase
     /// so the ideal-check can route them through their respective fast/slow
     /// lanes. Costs roughly the sum of `step1_combined` and
     /// `step1_mle_first` projection times.
-    pub fn step1_hybrid<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
+    pub fn step1_hybrid<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync>(
         mut self,
         project_scalar: S,
     ) -> Result<ProverProjectedHybrid<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
@@ -975,7 +975,7 @@ where
         ),
         trace: &UairTrace<'static, Zt::Int, Zt::Int, D>,
         num_vars: usize,
-        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
+        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
     ) -> Result<Proof<F>, ProtocolError<F, U::Ideal>> {
         let committed = Self::step0_commit(pp, trace, num_vars)?;
 
