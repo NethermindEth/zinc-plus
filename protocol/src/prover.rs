@@ -5,6 +5,9 @@ use std::{collections::HashMap, fmt::Debug};
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
+    lookup::gkr_logup::{
+        BinaryPolyLookupInstance, GkrLogupGroupSubclaim, GkrLogupLookupProof, prove_group,
+    },
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
     projections::{
         ColumnMajorTrace, ProjectedTrace, RowMajorTrace, evaluate_trace_to_column_mles,
@@ -13,6 +16,7 @@ use zinc_piop::{
     },
     sumcheck::multi_degree::MultiDegreeSumcheck,
 };
+use zinc_uair::LookupTableType;
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
@@ -105,6 +109,9 @@ pub struct ProverEvalProjected<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, con
     // New
     projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
     projected_scalars_f: HashMap<U::Scalar, F>,
+    /// `a` from step 3, threaded forward so step 4b's GKR-LogUp lookup
+    /// can ψ_a-project chunk values without resampling.
+    projecting_element_f: F,
 }
 
 /// After step 4 (sumcheck).
@@ -116,12 +123,30 @@ pub struct ProverSumchecked<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const 
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
     projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
+    projecting_element_f: F,
 
     // New
     cpr_proof: CombinedPolyResolverProof<F>,
     cpr_eval_point: Vec<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
-    lookup_proof: Option<BatchedLookupProof<F>>,
+}
+
+/// After step 4b (GKR-LogUp lookup). Carries the lookup proof and the
+/// per-group sub-claims (one per parent column) that step 4b's
+/// dedicated Zip+ opening at `r_inner` will discharge.
+#[allow(clippy::type_complexity)]
+#[derive(Clone, Debug)]
+pub struct ProverLookupProved<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize> {
+    base: ProverBase<'a, Zt, U, F, D>,
+    field_cfg: F::Config,
+    projected_trace: ProjectedTrace<F>,
+    ic_proof: IdealCheckProof<F>,
+    projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
+    projecting_element_f: F,
+    cpr_proof: CombinedPolyResolverProof<F>,
+    cpr_eval_point: Vec<F>,
+    combined_sumcheck: MultiDegreeSumcheckProof<F>,
+    lookup_proof: GkrLogupLookupProof<F>,
 }
 
 /// After step 5 (multipoint eval).
@@ -133,7 +158,7 @@ pub struct ProverMultipointEvaled<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, 
     ic_proof: IdealCheckProof<F>,
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
-    lookup_proof: Option<BatchedLookupProof<F>>,
+    lookup_proof: GkrLogupLookupProof<F>,
 
     // New
     mp_proof: MultipointEvalProof<F>,
@@ -148,7 +173,7 @@ pub struct ProverLifted<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: u
     ic_proof: IdealCheckProof<F>,
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
-    lookup_proof: Option<BatchedLookupProof<F>>,
+    lookup_proof: GkrLogupLookupProof<F>,
     mp_proof: MultipointEvalProof<F>,
     r_0: Vec<F>,
 
@@ -166,7 +191,7 @@ pub struct ProverPcsOpened<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D
     ic_proof: IdealCheckProof<F>,
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
-    lookup_proof: Option<BatchedLookupProof<F>>,
+    lookup_proof: GkrLogupLookupProof<F>,
     mp_proof: MultipointEvalProof<F>,
     lifted_evals: Vec<DynamicPolynomialF<F>>,
 }
@@ -406,6 +431,7 @@ impl_with_type_bounds!(ProverIdealChecked
             ic_eval_point: self.ic_eval_point,
             projected_trace_f,
             projected_scalars_f,
+            projecting_element_f,
         })
     }
 });
@@ -433,15 +459,12 @@ impl_with_type_bounds!(ProverEvalProjected
             &self.field_cfg,
         )?;
 
-        // 4b: Lookup prepare — placeholder
-        let lookup_specs = &self.base.uair_signature;
+        // GKR-LogUp lookup is run as a self-contained sub-protocol in
+        // step4b (between step4 and step5), so step4 only handles the
+        // CPR multi-degree sumcheck.
         let groups = vec![cpr_group];
-        // TODO: for each LookupGroup from group_lookup_specs(lookup_specs):
-        //   - call prepare_batched_lookup_group(transcript, instance, &field_cfg)
-        //   - push triple into groups, collect pending proofs + metas
-        let _ = lookup_specs; // suppress unused warning until logup is implemented
 
-        // 4c: Multi-degree sumcheck width CPR group and lookup groups
+        // 4c: Multi-degree sumcheck on the CPR group only.
         let (combined_sumcheck, md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
             groups,
@@ -456,24 +479,156 @@ impl_with_type_bounds!(ProverEvalProjected
             &self.field_cfg,
         )?;
 
-        // TODO: build BatchedLookupProof from collected lookup_proofs + lookup_metas
-        let lookup_proof = None;
-
         Ok(ProverSumchecked {
             base: self.base,
             field_cfg: self.field_cfg,
             projected_trace: self.projected_trace,
             ic_proof: self.ic_proof,
             projected_trace_f: self.projected_trace_f,
+            projecting_element_f: self.projecting_element_f,
             cpr_proof,
             cpr_eval_point: cpr_prover_state.evaluation_point,
             combined_sumcheck,
-            lookup_proof,
         })
     }
 });
 
 impl_with_type_bounds!(ProverSumchecked
+{
+    /// Step 4b: GKR-LogUp lookup with chunks-in-clear poly-lift.
+    ///
+    /// For each lookup group declared in the UAIR signature
+    /// (currently restricted to **binary_poly parents** with
+    /// `LookupTableType::BitPoly { width, chunk_width: Some(cw) }`),
+    /// runs the GKR fractional sumcheck and produces per-group
+    /// chunk lifts plus a sub-claim binding each parent column's
+    /// polynomial-valued MLE at the GKR descent row-half `r_inner`.
+    ///
+    /// The sub-claim is discharged at the end of this step by
+    /// invoking Zip+ `prove_f` on the binary_poly witness column at
+    /// `r_inner` — a SECOND opening, distinct from the step-7
+    /// opening at `r_0`. Both openings flow through the shared
+    /// `pcs_transcript`.
+    ///
+    /// No-op (returns an empty `lookup_proof`) when the UAIR
+    /// declares no lookup specs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step4b_lookup(
+        mut self,
+    ) -> Result<ProverLookupProved<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+        let lookup_specs = self.base.uair_signature.lookup_specs().to_vec();
+        let mut groups = Vec::new();
+        let mut group_meta = Vec::new();
+        let mut subclaims: Vec<GkrLogupGroupSubclaim<F>> = Vec::new();
+
+        if !lookup_specs.is_empty() {
+            // MVP: group all specs sharing the same BitPoly{width,chunk_width}
+            // table type. The first commit only exercises a single group.
+            use std::collections::BTreeMap;
+            let mut grouped: BTreeMap<LookupTableType, Vec<usize>> = BTreeMap::new();
+            for spec in &lookup_specs {
+                grouped
+                    .entry(spec.table_type.clone())
+                    .or_default()
+                    .push(spec.column_index);
+            }
+
+            // Witness-trace binary_poly columns are the prover's source of
+            // bit data (chunks are derived from the parent's bit pattern).
+            let witness_trace = self.base.trace.witness(&self.base.uair_signature);
+            // Public columns precede witness columns within each type group;
+            // map full-trace flat index → witness binary_poly index.
+            let pub_cols = self.base.uair_signature.public_cols();
+            let num_pub_bin = pub_cols.num_binary_poly_cols();
+
+            for (table_type, parent_indices) in grouped {
+                // Validate: all parent indices must be witness binary_poly.
+                let total = self.base.uair_signature.total_cols();
+                let num_total_bin = total.num_binary_poly_cols();
+                let mut parent_refs = Vec::with_capacity(parent_indices.len());
+                for &idx in &parent_indices {
+                    if idx >= num_total_bin || idx < num_pub_bin {
+                        return Err(ProtocolError::Lookup(
+                            zinc_piop::lookup::LookupError::NotImplemented,
+                        ));
+                    }
+                    let bin_idx = idx - num_pub_bin;
+                    parent_refs.push(&witness_trace.binary_poly[bin_idx]);
+                }
+
+                let instance = BinaryPolyLookupInstance::<'_, F, D> {
+                    parent_columns: parent_refs,
+                    parent_column_indices: parent_indices.clone(),
+                    table_type,
+                    projecting_element_f: &self.projecting_element_f,
+                    n_vars: self.base.num_vars,
+                };
+                let (group_proof, meta, sub) = prove_group::<F, D>(
+                    &mut self.base.pcs_transcript.fs_transcript,
+                    &instance,
+                    &self.field_cfg,
+                )
+                .map_err(|_| {
+                    ProtocolError::Lookup(zinc_piop::lookup::LookupError::FinalEvaluationMismatch)
+                })?;
+                groups.push(group_proof);
+                group_meta.push(meta);
+                subclaims.push(sub);
+            }
+
+            // Absorb chunk_lifts and aggregated multiplicities from each
+            // group's proof into the FS transcript so the dedicated Zip+
+            // opening at `r_inner` (below) draws challenges that depend on
+            // the lookup payload. (`prove_group` itself only absorbs
+            // multiplicities + GKR roots/sumchecks; chunk_lifts are
+            // computed AFTER the GKR descent and so are absorbed here.)
+            let mut buf = vec![0u8; F::Inner::NUM_BYTES];
+            for group_proof in &groups {
+                for lift_per_lookup in &group_proof.chunk_lifts {
+                    for c in lift_per_lookup {
+                        self.base
+                            .pcs_transcript
+                            .fs_transcript
+                            .absorb_random_field_slice(&c.coeffs, &mut buf);
+                    }
+                }
+            }
+
+            // Discharge sub-claims by opening Zip+ at each group's r_inner
+            // for the binary_poly witness commitment. The bytes are
+            // appended to `pcs_transcript.stream` and end up in
+            // `Proof::zip` at finalize. The verifier mirrors with
+            // `verify_f` at the same r_inner.
+            if let Some(hint_bin) = self.base.hint_bin.as_ref() {
+                for sub in &subclaims {
+                    let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, false>(
+                        &mut self.base.pcs_transcript,
+                        self.base.pp_bin,
+                        &witness_trace.binary_poly,
+                        &sub.r_inner,
+                        hint_bin,
+                        &self.field_cfg,
+                    )?;
+                }
+            }
+        }
+
+        Ok(ProverLookupProved {
+            base: self.base,
+            field_cfg: self.field_cfg,
+            projected_trace: self.projected_trace,
+            ic_proof: self.ic_proof,
+            projected_trace_f: self.projected_trace_f,
+            projecting_element_f: self.projecting_element_f,
+            cpr_proof: self.cpr_proof,
+            cpr_eval_point: self.cpr_eval_point,
+            combined_sumcheck: self.combined_sumcheck,
+            lookup_proof: GkrLogupLookupProof { groups, group_meta },
+        })
+    }
+});
+
+impl_with_type_bounds!(ProverLookupProved
 {
     /// Step 5: Multi-point evaluation sumcheck. Combines `up_evals` and
     /// `down_evals` at `r'` into a single evaluation point `r_0`.
@@ -699,6 +854,7 @@ where
         ideal_checked
             .step3_eval_projection()?
             .step4_sumcheck()?
+            .step4b_lookup()?
             .step5_multipoint_eval()?
             .step6_lift_and_project()?
             .step7_pcs_open::<CHECK_FOR_OVERFLOW>()?

@@ -29,7 +29,7 @@ use thiserror::Error;
 use zinc_piop::{
     combined_poly_resolver::{CombinedPolyResolverError, Proof as CombinedPolyResolverProof},
     ideal_check::{IdealCheckError, Proof as IdealCheckProof},
-    lookup::{BatchedLookupProof, LookupError},
+    lookup::{LookupError, gkr_logup::GkrLogupLookupProof},
     multipoint_eval::{MultipointEvalError, Proof as MultipointEvalProof},
     projections::ProjectedTrace,
     sumcheck::multi_degree::MultiDegreeSumcheckProof,
@@ -80,8 +80,9 @@ pub struct Proof<F: PrimeField> {
     /// interleaves them with these, and derives scalar open_evals via
     /// \psi_a for the sumcheck consistency check and Zip+ PCS verify.
     pub witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    /// Lookup argument proof. `None` when the UAIR has no lookup specs.
-    pub lookup_proof: Option<BatchedLookupProof<F>>,
+    /// GKR-LogUp lookup proof. `groups: vec![]` (default) when the UAIR
+    /// has no lookup specs.
+    pub lookup_proof: GkrLogupLookupProof<F>,
 }
 
 impl<F> GenTranscribable for Proof<F>
@@ -111,8 +112,10 @@ where
         let (witness_vec, bytes) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
         let witness_lifted_evals = witness_vec.0;
 
-        // TODO: deserialize lookup_proof once BatchedLookupProof gets
-        // Transcribable impls (lookup is not yet implemented).
+        // Stage C: lookup_proof serialization is deferred — no-lookup
+        // UAIRs round-trip cleanly (empty groups), but lookup-UAIR
+        // round-trip is not yet supported. Stage D will add full
+        // Transcribable impls for `GkrLogupLookupProof<F>`.
         assert!(bytes.is_empty(), "All bytes should be consumed");
 
         Self {
@@ -123,7 +126,7 @@ where
             combined_sumcheck,
             multipoint_eval,
             witness_lifted_evals,
-            lookup_proof: None,
+            lookup_proof: GkrLogupLookupProof { groups: Vec::new(), group_meta: Vec::new() },
         }
     }
 

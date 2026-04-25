@@ -5,6 +5,7 @@ use std::{collections::HashMap, io::Cursor};
 use zinc_piop::{
     combined_poly_resolver::{self, CombinedPolyResolver},
     ideal_check::{self, IdealCheckProtocol},
+    lookup::gkr_logup::{GkrLogupGroupSubclaim, GkrLogupLookupProof, verify_group},
     multipoint_eval::{self, MultipointEval},
     projections::{
         ProjectedTrace, project_scalars, project_scalars_to_field, project_trace_coeffs_row_major,
@@ -72,7 +73,7 @@ pub struct VerifierTranscriptReconstructed<
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: GkrLogupLookupProof<F>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -96,7 +97,7 @@ pub struct VerifierPrimeProjected<
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: GkrLogupLookupProof<F>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -120,7 +121,7 @@ pub struct VerifierIdealChecked<
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: GkrLogupLookupProof<F>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -146,7 +147,7 @@ pub struct VerifierEvalProjected<
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: GkrLogupLookupProof<F>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -162,7 +163,7 @@ pub struct VerifierSumchecked<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOverF, c
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: GkrLogupLookupProof<F>,
     _phantom: PhantomData<IdealOverF>,
 }
 
@@ -178,7 +179,7 @@ pub struct VerifierMultipointEvaled<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOv
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: GkrLogupLookupProof<F>,
     _phantom: PhantomData<IdealOverF>,
 }
 
@@ -199,7 +200,7 @@ pub struct VerifierLiftedEvalsChecked<
 
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: GkrLogupLookupProof<F>,
     _phantom: PhantomData<IdealOverF>,
 }
 
@@ -503,6 +504,130 @@ where
     F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
     IdealOverF: Ideal,
 {
+    /// Step 4b: GKR-LogUp lookup verify with chunks-in-clear poly-lift.
+    ///
+    /// For each lookup group:
+    ///   1. Calls `verify_group` to verify the GKR + leaf check via the
+    ///      polynomial-valued chunk lifts → returns a sub-claim
+    ///      `(r_inner, combined_polynomial)`.
+    ///   2. Absorbs the chunk lifts into the FS transcript (mirrors
+    ///      what the prover did before issuing the second Zip+ open).
+    ///   3. Runs `ZipPlus::verify_f` on the binary_poly commitment at
+    ///      `r_inner` to recover the parent's polynomial-valued MLE
+    ///      eval, and checks it equals `combined_polynomial[ell]`.
+    ///
+    /// No-op when the proof carries no lookup groups.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step4b_lookup_verify<U: Uair>(
+        mut self,
+    ) -> Result<Self, ProtocolError<F, IdealOverF>>
+    where
+        F: for<'b> FromWithConfig<&'b Zt::CombR>
+            + for<'b> FromWithConfig<&'b Zt::Chal>
+            + for<'b> MulByScalar<&'b F>,
+    {
+        if self.proof_lookup_proof.groups.is_empty() {
+            return Ok(self);
+        }
+
+        let mut subclaims: Vec<GkrLogupGroupSubclaim<F>> = Vec::with_capacity(
+            self.proof_lookup_proof.groups.len(),
+        );
+        for (group_proof, meta) in self
+            .proof_lookup_proof
+            .groups
+            .iter()
+            .zip(self.proof_lookup_proof.group_meta.iter())
+        {
+            let sub = verify_group::<F>(
+                &mut self.base.pcs_transcript.fs_transcript,
+                group_proof,
+                meta,
+                &self.projecting_element_f,
+                &self.field_cfg,
+            )
+            .map_err(|_| {
+                ProtocolError::Lookup(zinc_piop::lookup::LookupError::FinalEvaluationMismatch)
+            })?;
+            subclaims.push(sub);
+        }
+
+        // Absorb chunk_lifts (must mirror prover's order).
+        let mut buf = vec![0u8; F::Inner::NUM_BYTES];
+        for group_proof in &self.proof_lookup_proof.groups {
+            for lift_per_lookup in &group_proof.chunk_lifts {
+                for c in lift_per_lookup {
+                    self.base
+                        .pcs_transcript
+                        .fs_transcript
+                        .absorb_random_field_slice(&c.coeffs, &mut buf);
+                }
+            }
+        }
+
+        // For each (group, lookup) sub-claim, run Zip+ `verify_with_alphas`
+        // at `r_inner` and check the combined alpha-projected eval
+        // matches the verifier-reconstructed combined_polynomial.
+        //
+        // MVP RESTRICTION: assumes the binary_poly batch contains
+        // exactly one column == the lookup parent (single-bin-col
+        // UAIR). Multi-bin-col UAIRs need either: (a) extra non-parent
+        // polynomial-valued evals in the lookup proof so the verifier
+        // can compute the full combined eval, or (b) a multi-point
+        // reducer to fold r_0 and r_inner — both deferred.
+        let pub_cols = self.base.uair_signature.public_cols();
+        let num_pub_bin = pub_cols.num_binary_poly_cols();
+        let total_cols = self.base.uair_signature.total_cols();
+        let num_total_bin = total_cols.num_binary_poly_cols();
+        let bin_batch_size = self.proof_commitments.0.batch_size;
+        if bin_batch_size != num_total_bin - num_pub_bin {
+            return Err(ProtocolError::Lookup(
+                zinc_piop::lookup::LookupError::NotImplemented,
+            ));
+        }
+
+        for sub in &subclaims {
+            // MVP single-bin-col-per-group restriction: verify the
+            // group has exactly one parent column matching the binary
+            // batch's single witness column.
+            if sub.parent_columns.len() != 1
+                || bin_batch_size != 1
+                || sub.parent_columns[0] != num_pub_bin
+            {
+                return Err(ProtocolError::Lookup(
+                    zinc_piop::lookup::LookupError::NotImplemented,
+                ));
+            }
+
+            let per_poly_alphas = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::sample_alphas(
+                &mut self.base.pcs_transcript.fs_transcript,
+                bin_batch_size,
+            );
+            let mut eval_f = F::zero_with_cfg(&self.field_cfg);
+            for (coeff, alpha) in sub.combined_polynomial[0]
+                .coeffs
+                .iter()
+                .zip(per_poly_alphas[0].iter())
+            {
+                let mut term = F::from_with_cfg(alpha, &self.field_cfg);
+                term = term * coeff;
+                eval_f = eval_f + &term;
+            }
+            ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::verify_with_alphas::<F, false>(
+                &mut self.base.pcs_transcript,
+                self.base.vp_bin,
+                &self.proof_commitments.0,
+                &self.field_cfg,
+                &sub.r_inner,
+                &eval_f,
+                &per_poly_alphas,
+            )
+            .map_err(|e| ProtocolError::PcsVerification(0, e))?;
+        }
+
+        Ok(self)
+    }
+
     /// Step 5: Multi-point evaluation sumcheck.
     pub fn step5_multipoint_eval<U: Uair>(
         mut self,
@@ -793,6 +918,7 @@ where
         .step2_ideal_check(project_ideal)?
         .step3_eval_projection(project_scalar)?
         .step4_sumcheck_verify()?
+        .step4b_lookup_verify::<U>()?
         .step5_multipoint_eval::<U>()?
         .step6_lifted_evals::<U>()?
         .step7_pcs_verify::<U, CHECK_FOR_OVERFLOW>()?
