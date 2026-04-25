@@ -8,9 +8,13 @@
 use crypto_primitives::PrimeField;
 use thiserror::Error;
 use zinc_poly::{
-    EvaluationError, univariate::dynamic::over_field::DynamicPolynomialF, utils::ArithErrors,
+    EvaluationError,
+    univariate::dynamic::over_field::{DynamicPolyVecF, DynamicPolynomialF},
+    utils::ArithErrors,
 };
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable};
 use zinc_uair::LookupTableType;
+use zinc_utils::{add, mul};
 
 use crate::sumcheck::{SumCheckError, SumcheckProof};
 
@@ -232,5 +236,621 @@ impl<F: PrimeField> From<ArithErrors> for GkrLogupError<F> {
 impl<F: PrimeField> From<EvaluationError> for GkrLogupError<F> {
     fn from(e: EvaluationError) -> Self {
         Self::MleEvaluationError(e)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Transcribable / GenTranscribable
+//
+// Encoding strategy: each composite proof type writes the field modulus
+// once at its top, then encodes inner field elements as raw `F::Inner`
+// bytes. Nested `SumcheckProof`s reuse their existing Transcribable impl
+// (which independently embeds a modulus); the per-layer redundancy is
+// O(num_layers · F::Modulus::NUM_BYTES) bytes — small and tractable.
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::arithmetic_side_effects)]
+fn write_f_inner_slice<'a, F: PrimeField>(buf: &'a mut [u8], xs: &[F]) -> &'a mut [u8]
+where
+    F::Inner: ConstTranscribable,
+{
+    let n = xs.len();
+    let total = mul!(n, F::Inner::NUM_BYTES);
+    let (head, rest) = buf.split_at_mut(total);
+    for (i, x) in xs.iter().enumerate() {
+        let off = mul!(i, F::Inner::NUM_BYTES);
+        x.inner().write_transcription_bytes_exact(&mut head[off..add!(off, F::Inner::NUM_BYTES)]);
+    }
+    rest
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn read_f_inner_slice<'a, F: PrimeField>(
+    bytes: &'a [u8],
+    n: usize,
+    cfg: &F::Config,
+) -> (Vec<F>, &'a [u8])
+where
+    F::Inner: ConstTranscribable,
+{
+    let total = mul!(n, F::Inner::NUM_BYTES);
+    let (head, rest) = bytes.split_at(total);
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let off = mul!(i, F::Inner::NUM_BYTES);
+        let inner = F::Inner::read_transcription_bytes_exact(&head[off..add!(off, F::Inner::NUM_BYTES)]);
+        out.push(F::new_unchecked_with_cfg(inner, cfg));
+    }
+    (out, rest)
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn write_u32_prefix<'a>(buf: &'a mut [u8], val: usize) -> &'a mut [u8] {
+    let v = u32::try_from(val).expect("length must fit in u32");
+    v.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
+    &mut buf[u32::NUM_BYTES..]
+}
+
+fn read_u32_prefix(bytes: &[u8]) -> (usize, &[u8]) {
+    let (v, rest) = u32::read_transcription_bytes_subset(bytes);
+    (
+        usize::try_from(v).expect("u32 must fit in usize"),
+        rest,
+    )
+}
+
+// ---------- GkrLayerProof ----------
+
+#[allow(clippy::arithmetic_side_effects)]
+fn gkr_layer_num_bytes<F: PrimeField>(p: &GkrLayerProof<F>) -> usize
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    let sc = match &p.sumcheck_proof {
+        Some(sc) => add!(SumcheckProof::<F>::LENGTH_NUM_BYTES, sc.get_num_bytes()),
+        None => 0,
+    };
+    add!(1usize, add!(sc, mul!(4, F::Inner::NUM_BYTES)))
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn write_gkr_layer<'a, F: PrimeField>(
+    buf: &'a mut [u8],
+    p: &GkrLayerProof<F>,
+) -> &'a mut [u8]
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    let mut buf = buf;
+    if let Some(sc) = &p.sumcheck_proof {
+        buf[0] = 1;
+        buf = &mut buf[1..];
+        buf = sc.write_transcription_bytes_subset(buf);
+    } else {
+        buf[0] = 0;
+        buf = &mut buf[1..];
+    }
+    write_f_inner_slice(buf, &[p.p_left.clone(), p.p_right.clone(), p.q_left.clone(), p.q_right.clone()])
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn read_gkr_layer<'a, F: PrimeField>(
+    bytes: &'a [u8],
+    cfg: &F::Config,
+) -> (GkrLayerProof<F>, &'a [u8])
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    let flag = bytes[0];
+    let mut bytes = &bytes[1..];
+    let sumcheck_proof = match flag {
+        0 => None,
+        1 => {
+            let (sc, rest) = SumcheckProof::<F>::read_transcription_bytes_subset(bytes);
+            bytes = rest;
+            Some(sc)
+        }
+        v => panic!("invalid sumcheck-presence flag: {v}"),
+    };
+    let (xs, rest) = read_f_inner_slice::<F>(bytes, 4, cfg);
+    let mut it = xs.into_iter();
+    (
+        GkrLayerProof {
+            sumcheck_proof,
+            p_left: it.next().expect("p_left"),
+            p_right: it.next().expect("p_right"),
+            q_left: it.next().expect("q_left"),
+            q_right: it.next().expect("q_right"),
+        },
+        rest,
+    )
+}
+
+// ---------- BatchedGkrLayerProof ----------
+
+#[allow(clippy::arithmetic_side_effects)]
+fn batched_layer_num_bytes<F: PrimeField>(p: &BatchedGkrLayerProof<F>) -> usize
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    let sc = match &p.sumcheck_proof {
+        Some(sc) => add!(SumcheckProof::<F>::LENGTH_NUM_BYTES, sc.get_num_bytes()),
+        None => 0,
+    };
+    let l = p.p_lefts.len();
+    add!(
+        1usize,
+        add!(sc, add!(u32::NUM_BYTES, mul!(mul!(4, l), F::Inner::NUM_BYTES)))
+    )
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn write_batched_layer<'a, F: PrimeField>(
+    buf: &'a mut [u8],
+    p: &BatchedGkrLayerProof<F>,
+) -> &'a mut [u8]
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    let mut buf = buf;
+    if let Some(sc) = &p.sumcheck_proof {
+        buf[0] = 1;
+        buf = &mut buf[1..];
+        buf = sc.write_transcription_bytes_subset(buf);
+    } else {
+        buf[0] = 0;
+        buf = &mut buf[1..];
+    }
+    let l = p.p_lefts.len();
+    buf = write_u32_prefix(buf, l);
+    buf = write_f_inner_slice(buf, &p.p_lefts);
+    buf = write_f_inner_slice(buf, &p.p_rights);
+    buf = write_f_inner_slice(buf, &p.q_lefts);
+    write_f_inner_slice(buf, &p.q_rights)
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn read_batched_layer<'a, F: PrimeField>(
+    bytes: &'a [u8],
+    cfg: &F::Config,
+) -> (BatchedGkrLayerProof<F>, &'a [u8])
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    let flag = bytes[0];
+    let mut bytes = &bytes[1..];
+    let sumcheck_proof = match flag {
+        0 => None,
+        1 => {
+            let (sc, rest) = SumcheckProof::<F>::read_transcription_bytes_subset(bytes);
+            bytes = rest;
+            Some(sc)
+        }
+        v => panic!("invalid batched sumcheck-presence flag: {v}"),
+    };
+    let (l, rest) = read_u32_prefix(bytes);
+    bytes = rest;
+    let (p_lefts, rest) = read_f_inner_slice::<F>(bytes, l, cfg);
+    bytes = rest;
+    let (p_rights, rest) = read_f_inner_slice::<F>(bytes, l, cfg);
+    bytes = rest;
+    let (q_lefts, rest) = read_f_inner_slice::<F>(bytes, l, cfg);
+    bytes = rest;
+    let (q_rights, rest) = read_f_inner_slice::<F>(bytes, l, cfg);
+    (
+        BatchedGkrLayerProof {
+            sumcheck_proof,
+            p_lefts,
+            p_rights,
+            q_lefts,
+            q_rights,
+        },
+        rest,
+    )
+}
+
+// ---------- GkrFractionProof ----------
+
+#[allow(clippy::arithmetic_side_effects)]
+fn fraction_num_bytes<F: PrimeField>(p: &GkrFractionProof<F>) -> usize
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    let layers: usize = p.layer_proofs.iter().map(gkr_layer_num_bytes).sum();
+    add!(
+        mul!(2, F::Inner::NUM_BYTES),
+        add!(u32::NUM_BYTES, layers)
+    )
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn write_fraction<'a, F: PrimeField>(
+    buf: &'a mut [u8],
+    p: &GkrFractionProof<F>,
+) -> &'a mut [u8]
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    let mut buf = write_f_inner_slice(buf, &[p.root_p.clone(), p.root_q.clone()]);
+    buf = write_u32_prefix(buf, p.layer_proofs.len());
+    for layer in &p.layer_proofs {
+        buf = write_gkr_layer(buf, layer);
+    }
+    buf
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn read_fraction<'a, F: PrimeField>(
+    bytes: &'a [u8],
+    cfg: &F::Config,
+) -> (GkrFractionProof<F>, &'a [u8])
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    let (roots, rest) = read_f_inner_slice::<F>(bytes, 2, cfg);
+    let mut it = roots.into_iter();
+    let root_p = it.next().expect("root_p");
+    let root_q = it.next().expect("root_q");
+    let (n_layers, mut bytes) = read_u32_prefix(rest);
+    let mut layer_proofs = Vec::with_capacity(n_layers);
+    for _ in 0..n_layers {
+        let (layer, rest) = read_gkr_layer::<F>(bytes, cfg);
+        bytes = rest;
+        layer_proofs.push(layer);
+    }
+    (
+        GkrFractionProof {
+            root_p,
+            root_q,
+            layer_proofs,
+        },
+        bytes,
+    )
+}
+
+// ---------- BatchedGkrFractionProof ----------
+
+#[allow(clippy::arithmetic_side_effects)]
+fn batched_fraction_num_bytes<F: PrimeField>(p: &BatchedGkrFractionProof<F>) -> usize
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    let l = p.roots_p.len();
+    let layers: usize = p.layer_proofs.iter().map(batched_layer_num_bytes).sum();
+    add!(
+        u32::NUM_BYTES,
+        add!(
+            mul!(mul!(2, l), F::Inner::NUM_BYTES),
+            add!(u32::NUM_BYTES, layers)
+        )
+    )
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn write_batched_fraction<'a, F: PrimeField>(
+    buf: &'a mut [u8],
+    p: &BatchedGkrFractionProof<F>,
+) -> &'a mut [u8]
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    let l = p.roots_p.len();
+    let mut buf = write_u32_prefix(buf, l);
+    buf = write_f_inner_slice(buf, &p.roots_p);
+    buf = write_f_inner_slice(buf, &p.roots_q);
+    buf = write_u32_prefix(buf, p.layer_proofs.len());
+    for layer in &p.layer_proofs {
+        buf = write_batched_layer(buf, layer);
+    }
+    buf
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn read_batched_fraction<'a, F: PrimeField>(
+    bytes: &'a [u8],
+    cfg: &F::Config,
+) -> (BatchedGkrFractionProof<F>, &'a [u8])
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    let (l, bytes) = read_u32_prefix(bytes);
+    let (roots_p, bytes) = read_f_inner_slice::<F>(bytes, l, cfg);
+    let (roots_q, bytes) = read_f_inner_slice::<F>(bytes, l, cfg);
+    let (n_layers, mut bytes) = read_u32_prefix(bytes);
+    let mut layer_proofs = Vec::with_capacity(n_layers);
+    for _ in 0..n_layers {
+        let (layer, rest) = read_batched_layer::<F>(bytes, cfg);
+        bytes = rest;
+        layer_proofs.push(layer);
+    }
+    (
+        BatchedGkrFractionProof {
+            roots_p,
+            roots_q,
+            layer_proofs,
+        },
+        bytes,
+    )
+}
+
+// ---------- GkrLogupGroupMeta ----------
+
+#[allow(clippy::arithmetic_side_effects)]
+fn meta_num_bytes(meta: &GkrLogupGroupMeta) -> usize {
+    add!(
+        LookupTableType::NUM_BYTES,
+        add!(
+            mul!(4, u32::NUM_BYTES), // num_lookups, num_chunks, chunk_width, witness_len
+            add!(u32::NUM_BYTES, mul!(meta.parent_columns.len(), u32::NUM_BYTES))
+        )
+    )
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn write_meta<'a>(buf: &'a mut [u8], meta: &GkrLogupGroupMeta) -> &'a mut [u8] {
+    meta.table_type
+        .write_transcription_bytes_exact(&mut buf[..LookupTableType::NUM_BYTES]);
+    let mut buf = &mut buf[LookupTableType::NUM_BYTES..];
+    buf = write_u32_prefix(buf, meta.num_lookups);
+    buf = write_u32_prefix(buf, meta.num_chunks);
+    buf = write_u32_prefix(buf, meta.chunk_width);
+    buf = write_u32_prefix(buf, meta.witness_len);
+    buf = write_u32_prefix(buf, meta.parent_columns.len());
+    for &c in &meta.parent_columns {
+        buf = write_u32_prefix(buf, c);
+    }
+    buf
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn read_meta(bytes: &[u8]) -> (GkrLogupGroupMeta, &[u8]) {
+    let table_type =
+        LookupTableType::read_transcription_bytes_exact(&bytes[..LookupTableType::NUM_BYTES]);
+    let bytes = &bytes[LookupTableType::NUM_BYTES..];
+    let (num_lookups, bytes) = read_u32_prefix(bytes);
+    let (num_chunks, bytes) = read_u32_prefix(bytes);
+    let (chunk_width, bytes) = read_u32_prefix(bytes);
+    let (witness_len, bytes) = read_u32_prefix(bytes);
+    let (n_parents, mut bytes) = read_u32_prefix(bytes);
+    let mut parent_columns = Vec::with_capacity(n_parents);
+    for _ in 0..n_parents {
+        let (c, rest) = read_u32_prefix(bytes);
+        bytes = rest;
+        parent_columns.push(c);
+    }
+    (
+        GkrLogupGroupMeta {
+            table_type,
+            num_lookups,
+            num_chunks,
+            chunk_width,
+            witness_len,
+            parent_columns,
+        },
+        bytes,
+    )
+}
+
+// ---------- GkrLogupGroupProof ----------
+
+#[allow(clippy::arithmetic_side_effects)]
+fn group_num_bytes<F: PrimeField>(g: &GkrLogupGroupProof<F>) -> usize
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    // chunk_lifts: u32 L, then per-lookup: u32 K, then DynamicPolyVecF subset.
+    let mut chunk_lifts_bytes = u32::NUM_BYTES;
+    for per_lookup in &g.chunk_lifts {
+        let v = DynamicPolyVecF::reinterpret(per_lookup);
+        chunk_lifts_bytes = add!(
+            chunk_lifts_bytes,
+            add!(
+                u32::NUM_BYTES,
+                add!(DynamicPolyVecF::<F>::LENGTH_NUM_BYTES, v.get_num_bytes())
+            )
+        );
+    }
+    // aggregated_multiplicities: u32 L, then per-lookup u32 N, then N × F::Inner.
+    let mut mults_bytes = u32::NUM_BYTES;
+    for per_lookup in &g.aggregated_multiplicities {
+        mults_bytes = add!(
+            mults_bytes,
+            add!(u32::NUM_BYTES, mul!(per_lookup.len(), F::Inner::NUM_BYTES))
+        );
+    }
+    add!(
+        chunk_lifts_bytes,
+        add!(
+            mults_bytes,
+            add!(batched_fraction_num_bytes(&g.witness_gkr), fraction_num_bytes(&g.table_gkr))
+        )
+    )
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn write_group<'a, F: PrimeField>(
+    buf: &'a mut [u8],
+    g: &GkrLogupGroupProof<F>,
+) -> &'a mut [u8]
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    let mut buf = write_u32_prefix(buf, g.chunk_lifts.len());
+    for per_lookup in &g.chunk_lifts {
+        buf = write_u32_prefix(buf, per_lookup.len());
+        let v = DynamicPolyVecF::reinterpret(per_lookup);
+        buf = v.write_transcription_bytes_subset(buf);
+    }
+    buf = write_u32_prefix(buf, g.aggregated_multiplicities.len());
+    for mults in &g.aggregated_multiplicities {
+        buf = write_u32_prefix(buf, mults.len());
+        buf = write_f_inner_slice(buf, mults);
+    }
+    buf = write_batched_fraction(buf, &g.witness_gkr);
+    write_fraction(buf, &g.table_gkr)
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn read_group<'a, F: PrimeField>(
+    bytes: &'a [u8],
+    cfg: &F::Config,
+) -> (GkrLogupGroupProof<F>, &'a [u8])
+where
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    let (l1, mut bytes) = read_u32_prefix(bytes);
+    let mut chunk_lifts = Vec::with_capacity(l1);
+    for _ in 0..l1 {
+        let (k, rest) = read_u32_prefix(bytes);
+        bytes = rest;
+        let (v, rest) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
+        bytes = rest;
+        let polys = v.0;
+        assert_eq!(
+            polys.len(),
+            k,
+            "chunk_lifts inner length mismatch: expected {k}, got {}",
+            polys.len()
+        );
+        chunk_lifts.push(polys);
+    }
+    let (l2, mut bytes) = read_u32_prefix(bytes);
+    let mut aggregated_multiplicities = Vec::with_capacity(l2);
+    for _ in 0..l2 {
+        let (n, rest) = read_u32_prefix(bytes);
+        bytes = rest;
+        let (mults, rest) = read_f_inner_slice::<F>(bytes, n, cfg);
+        bytes = rest;
+        aggregated_multiplicities.push(mults);
+    }
+    let (witness_gkr, bytes) = read_batched_fraction::<F>(bytes, cfg);
+    let (table_gkr, bytes) = read_fraction::<F>(bytes, cfg);
+    (
+        GkrLogupGroupProof {
+            chunk_lifts,
+            aggregated_multiplicities,
+            witness_gkr,
+            table_gkr,
+        },
+        bytes,
+    )
+}
+
+// ---------- GkrLogupLookupProof ----------
+//
+// Encoding:
+//   [num_groups: u32]
+//   if num_groups > 0:
+//     [modulus]
+//     for g in 0..num_groups:
+//         GkrLogupGroupMeta bytes
+//         GkrLogupGroupProof bytes (uses the modulus above for inner F)
+
+impl<F> GenTranscribable for GkrLogupLookupProof<F>
+where
+    F: PrimeField,
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        if bytes.is_empty() {
+            return Self {
+                groups: Vec::new(),
+                group_meta: Vec::new(),
+            };
+        }
+        let (n, bytes) = read_u32_prefix(bytes);
+        if n == 0 {
+            assert!(bytes.is_empty(), "trailing bytes after empty lookup proof");
+            return Self {
+                groups: Vec::new(),
+                group_meta: Vec::new(),
+            };
+        }
+        let mod_size = F::Modulus::NUM_BYTES;
+        let cfg = zinc_transcript::read_field_cfg::<F>(&bytes[..mod_size]);
+        let mut bytes = &bytes[mod_size..];
+        let mut group_meta = Vec::with_capacity(n);
+        let mut groups = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (m, rest) = read_meta(bytes);
+            bytes = rest;
+            group_meta.push(m);
+            let (g, rest) = read_group::<F>(bytes, &cfg);
+            bytes = rest;
+            groups.push(g);
+        }
+        assert!(
+            bytes.is_empty(),
+            "trailing bytes after GkrLogupLookupProof"
+        );
+        Self { groups, group_meta }
+    }
+
+    fn write_transcription_bytes_exact(&self, mut buf: &mut [u8]) {
+        let n = self.groups.len();
+        assert_eq!(n, self.group_meta.len(), "groups/group_meta length mismatch");
+        if buf.is_empty() {
+            assert_eq!(n, 0, "empty buffer requires no groups");
+            return;
+        }
+        buf = write_u32_prefix(buf, n);
+        if n == 0 {
+            assert!(buf.is_empty(), "empty proof should not need extra bytes");
+            return;
+        }
+        // Modulus comes from the first group's first multiplicity element,
+        // chunk_lift coefficient, or GKR root — at least one F field is
+        // present for any non-empty group. Probe in order.
+        let modulus = self.groups[0]
+            .aggregated_multiplicities
+            .iter()
+            .find_map(|v| v.first().map(|f| f.modulus()))
+            .or_else(|| Some(self.groups[0].witness_gkr.roots_p[0].modulus()))
+            .expect("non-empty group must contain at least one F element");
+        buf = zinc_transcript::append_field_cfg::<F>(buf, &modulus);
+        for (meta, group) in self.group_meta.iter().zip(self.groups.iter()) {
+            buf = write_meta(buf, meta);
+            buf = write_group(buf, group);
+        }
+        assert!(
+            buf.is_empty(),
+            "GkrLogupLookupProof leftover buffer (encoding underflow)"
+        );
+    }
+}
+
+impl<F> Transcribable for GkrLogupLookupProof<F>
+where
+    F: PrimeField,
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    #[allow(clippy::arithmetic_side_effects)]
+    fn get_num_bytes(&self) -> usize {
+        if self.groups.is_empty() {
+            return u32::NUM_BYTES;
+        }
+        let mut total = add!(u32::NUM_BYTES, F::Modulus::NUM_BYTES);
+        for (meta, group) in self.group_meta.iter().zip(self.groups.iter()) {
+            total = add!(total, meta_num_bytes(meta));
+            total = add!(total, group_num_bytes(group));
+        }
+        total
     }
 }

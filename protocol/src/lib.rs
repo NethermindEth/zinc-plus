@@ -112,10 +112,8 @@ where
         let (witness_vec, bytes) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
         let witness_lifted_evals = witness_vec.0;
 
-        // Stage C: lookup_proof serialization is deferred — no-lookup
-        // UAIRs round-trip cleanly (empty groups), but lookup-UAIR
-        // round-trip is not yet supported. Stage D will add full
-        // Transcribable impls for `GkrLogupLookupProof<F>`.
+        let (lookup_proof, bytes) =
+            GkrLogupLookupProof::<F>::read_transcription_bytes_subset(bytes);
         assert!(bytes.is_empty(), "All bytes should be consumed");
 
         Self {
@@ -126,7 +124,7 @@ where
             combined_sumcheck,
             multipoint_eval,
             witness_lifted_evals,
-            lookup_proof: GkrLogupLookupProof { groups: Vec::new(), group_meta: Vec::new() },
+            lookup_proof,
         }
     }
 
@@ -156,10 +154,11 @@ where
         buf = self.multipoint_eval.write_transcription_bytes_subset(buf);
 
         // witness_lifted_evals: u32 length prefix + DynamicPolyVecF encoding
-        // TODO: serialize lookup_proof once BatchedLookupProof gets
-        // Transcribable impls (lookup is not yet implemented).
-        DynamicPolyVecF::reinterpret(&self.witness_lifted_evals)
+        let buf = DynamicPolyVecF::reinterpret(&self.witness_lifted_evals)
             .write_transcription_bytes_subset(buf);
+
+        // lookup_proof: u32 length prefix + GkrLogupLookupProof encoding
+        self.lookup_proof.write_transcription_bytes_subset(buf);
     }
 }
 
@@ -183,10 +182,10 @@ where
             + self.combined_sumcheck.get_num_bytes()
             + MultipointEvalProof::<F>::LENGTH_NUM_BYTES
             + self.multipoint_eval.get_num_bytes()
-            // TODO: add lookup_proof size once BatchedLookupProof gets
-            // Transcribable impls (lookup is not yet implemented).
             + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
             + witness_vec.get_num_bytes()
+            + GkrLogupLookupProof::<F>::LENGTH_NUM_BYTES
+            + self.lookup_proof.get_num_bytes()
     }
 }
 
@@ -960,45 +959,22 @@ mod tests {
     /// binary_poly<32> witness column, lookup spec
     /// `BitPoly { width: 32, chunk_width: Some(8) }`) through the full
     /// protocol pipeline including step 4b's GKR fractional sumcheck +
-    /// dedicated Zip+ opening at `r_inner`.
-    ///
-    /// Bypasses the proof-serialization round-trip used by `do_test`
-    /// because `Proof::lookup_proof` Transcribable is deferred (Stage C
-    /// note); will be enabled once full Transcribable lands.
+    /// dedicated Zip+ opening at `r_inner`. Uses `do_test` so the proof
+    /// is round-tripped through Transcribable as part of the test.
     #[test]
     fn test_e2e_bin_poly_lookup() {
         let num_vars = 6;
-        let mut rng = rng();
-        let pp = setup_pp::<TestZincTypesIprs>(
+        do_test::<TestZincTypesIprs, BinPolyLookupUair<ZtInt>>(
             num_vars,
             (
                 make_iprs(num_vars),
                 make_iprs(num_vars),
                 make_iprs(num_vars),
             ),
-        );
-        let trace = BinPolyLookupUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
-        let sig = BinPolyLookupUair::<ZtInt>::signature();
-        let public_trace = trace.public(&sig);
-
-        let proof = ZincPlusPiop::<
-            TestZincTypesIprs,
-            BinPolyLookupUair<ZtInt>,
-            F,
-            DEGREE_PLUS_ONE,
-        >::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn)
-            .expect("prover failed");
-        ZincPlusPiop::<TestZincTypesIprs, BinPolyLookupUair<ZtInt>, F, DEGREE_PLUS_ONE>::verify::<
-            _, CHECKED,
-        >(
-            &pp,
-            proof,
-            &public_trace,
-            num_vars,
-            project_scalar_fn,
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
-        )
-        .expect("verifier failed");
+            |_| {},
+            |res| res.unwrap(),
+        );
     }
 
     /// Soundness: tamper a chunk-lift coefficient and confirm the
@@ -1006,49 +982,23 @@ mod tests {
     #[test]
     fn test_bin_poly_lookup_tamper_chunk_lift_rejected() {
         let num_vars = 6;
-        let mut rng = rng();
-        let pp = setup_pp::<TestZincTypesIprs>(
+        do_test::<TestZincTypesIprs, BinPolyLookupUair<ZtInt>>(
             num_vars,
             (
                 make_iprs(num_vars),
                 make_iprs(num_vars),
                 make_iprs(num_vars),
             ),
-        );
-        let trace = BinPolyLookupUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
-        let sig = BinPolyLookupUair::<ZtInt>::signature();
-        let public_trace = trace.public(&sig);
-
-        let mut proof = ZincPlusPiop::<
-            TestZincTypesIprs,
-            BinPolyLookupUair<ZtInt>,
-            F,
-            DEGREE_PLUS_ONE,
-        >::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn)
-            .expect("prover failed");
-
-        // Tamper a chunk lift coefficient by swapping two adjacent
-        // coefficients within the same chunk. Generically changes the
-        // polynomial unless the two coefficients happen to be equal,
-        // which is overwhelmingly unlikely for random witness data.
-        proof.lookup_proof.groups[0].chunk_lifts[0][0]
-            .coeffs
-            .swap(0, 1);
-
-        let res = ZincPlusPiop::<
-            TestZincTypesIprs,
-            BinPolyLookupUair<ZtInt>,
-            F,
-            DEGREE_PLUS_ONE,
-        >::verify::<_, CHECKED>(
-            &pp,
-            proof,
-            &public_trace,
-            num_vars,
-            project_scalar_fn,
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                proof.lookup_proof.groups[0].chunk_lifts[0][0]
+                    .coeffs
+                    .swap(0, 1);
+            },
+            |res| {
+                assert!(res.is_err(), "verifier must reject tampered chunk lift");
+            },
         );
-        assert!(res.is_err(), "verifier must reject tampered chunk lift");
     }
 
     /// Soundness: tamper a multiplicity entry and confirm the verifier
@@ -1056,45 +1006,20 @@ mod tests {
     #[test]
     fn test_bin_poly_lookup_tamper_multiplicity_rejected() {
         let num_vars = 6;
-        let mut rng = rng();
-        let pp = setup_pp::<TestZincTypesIprs>(
+        do_test::<TestZincTypesIprs, BinPolyLookupUair<ZtInt>>(
             num_vars,
             (
                 make_iprs(num_vars),
                 make_iprs(num_vars),
                 make_iprs(num_vars),
             ),
-        );
-        let trace = BinPolyLookupUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
-        let sig = BinPolyLookupUair::<ZtInt>::signature();
-        let public_trace = trace.public(&sig);
-
-        let mut proof = ZincPlusPiop::<
-            TestZincTypesIprs,
-            BinPolyLookupUair<ZtInt>,
-            F,
-            DEGREE_PLUS_ONE,
-        >::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn)
-            .expect("prover failed");
-
-        // Reverse the multiplicity vector — generically perturbs the
-        // distribution unless multiplicities happen to be palindromic
-        // (overwhelmingly unlikely for random witness data).
-        proof.lookup_proof.groups[0].aggregated_multiplicities[0].reverse();
-
-        let res = ZincPlusPiop::<
-            TestZincTypesIprs,
-            BinPolyLookupUair<ZtInt>,
-            F,
-            DEGREE_PLUS_ONE,
-        >::verify::<_, CHECKED>(
-            &pp,
-            proof,
-            &public_trace,
-            num_vars,
-            project_scalar_fn,
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                proof.lookup_proof.groups[0].aggregated_multiplicities[0].reverse();
+            },
+            |res| {
+                assert!(res.is_err(), "verifier must reject tampered multiplicity");
+            },
         );
-        assert!(res.is_err(), "verifier must reject tampered multiplicity");
     }
 }
