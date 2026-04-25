@@ -148,9 +148,9 @@ pub mod cols {
 
 /// Shamir scalar-multiplication UAIR. See module docs for scope.
 #[derive(Clone, Debug)]
-pub struct EcdsaShamirUair<R>(PhantomData<R>);
+pub struct EcdsaUair<R>(PhantomData<R>);
 
-impl<R> Uair for EcdsaShamirUair<R>
+impl<R> Uair for EcdsaUair<R>
 where
     R: EcdsaFpRing,
 {
@@ -577,7 +577,7 @@ fn compute_step(
 // Witness generator.
 // ---------------------------------------------------------------------------
 
-impl<R> GenerateRandomTrace<32> for EcdsaShamirUair<R>
+impl<R> GenerateRandomTrace<32> for EcdsaUair<R>
 where
     R: EcdsaFpRing + From<Int<EC_FP_INT_LIMBS>>,
 {
@@ -793,7 +793,7 @@ mod tests {
     /// the doubling slice's `Y_pa` constraint).
     #[test]
     fn shamir_constraint_shape() {
-        type U = EcdsaShamirUair<Int<EC_FP_INT_LIMBS>>;
+        type U = EcdsaUair<Int<EC_FP_INT_LIMBS>>;
         assert_eq!(count_constraints::<U>(), 28);
         assert_eq!(count_max_degree::<U>(), 5);
         // Spot-check: doubling block contributes [3, 3, 5, 5];
@@ -811,7 +811,7 @@ mod tests {
     fn witness_satisfies_constraints_mod_p() {
         let num_vars = 9; // 512 rows ≥ FINAL_ROW + 1 = 257
         let mut r = rng();
-        let trace = <EcdsaShamirUair<Int<EC_FP_INT_LIMBS>> as GenerateRandomTrace<32>>::
+        let trace = <EcdsaUair<Int<EC_FP_INT_LIMBS>> as GenerateRandomTrace<32>>::
             generate_random_trace(num_vars, &mut r);
         let n_rows = 1 << num_vars;
         assert_eq!(trace.int.len(), cols::NUM_INT);
