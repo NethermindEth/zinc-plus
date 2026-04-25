@@ -100,9 +100,10 @@ const SECP256K1_P_HEX: &str = concat!(
 pub const SECP256K1_P_UINT: CbUint<EC_FP_INT_LIMBS> = CbUint::from_be_hex(SECP256K1_P_HEX);
 
 /// Trait knob: a `ConstSemiring` whose representation can hold a
-/// secp256k1 base-field element. Marker only — implemented for
-/// `Int<EC_FP_INT_LIMBS>`.
-pub trait EcdsaFpRing: ConstSemiring + 'static {}
+/// secp256k1 base-field element. The `From<u32>` bound lets the UAIR
+/// build small constant scalars (3, 8, 9, 12) for `mul_by_scalar`.
+/// Implemented for `Int<EC_FP_INT_LIMBS>`.
+pub trait EcdsaFpRing: ConstSemiring + From<u32> + 'static {}
 
 impl EcdsaFpRing for Int<EC_FP_INT_LIMBS> {}
 
@@ -152,7 +153,7 @@ where
         up: TraceRow<B::Expr>,
         _down: TraceRow<B::Expr>,
         _from_ref: FromR,
-        _mbs: MulByScalar,
+        mbs: MulByScalar,
         _ideal_from_ref: IFromR,
     ) where
         B: ConstraintBuilder,
@@ -170,6 +171,16 @@ where
         let y_mid = &int[cols::W_Y_MID];
         let z_mid = &int[cols::W_Z_MID];
 
+        // Small-integer scalar constants. `mul_by_scalar` against a
+        // degree-0 scalar polynomial costs one polynomial scaling vs.
+        // the (k − 1) polynomial additions a `k·t` repeated-add chain
+        // would need.
+        let two_scalar = const_scalar::<R>(R::from(2_u32));
+        let three_scalar = const_scalar::<R>(R::from(3_u32));
+        let eight_scalar = const_scalar::<R>(R::from(8_u32));
+        let nine_scalar = const_scalar::<R>(R::from(9_u32));
+        let twelve_scalar = const_scalar::<R>(R::from(12_u32));
+
         // -----------------------------------------------------------
         // (1)  S − Y² = 0  (mod p),  gated by s_active.
         // -----------------------------------------------------------
@@ -181,26 +192,19 @@ where
         // (2)  Z_mid − 2·Y·Z = 0  (mod p)
         // -----------------------------------------------------------
         let yz = y.clone() * z;
-        let c2_inner = z_mid.clone() - &yz - &yz;
+        let two_yz = mbs(&yz, &two_scalar).expect("2·Y·Z overflow");
+        let c2_inner = z_mid.clone() - &two_yz;
         b.assert_zero(s_active.clone() * &c2_inner);
 
         // -----------------------------------------------------------
         // (3)  X_mid − (9·X⁴ − 8·X·S) = 0  (mod p)
-        //      Expanded as `X_mid − 9·X⁴ + 8·X·S = 0`. Powers of small
-        //      integer constants use repeated addition (e.g. `9·t = t+…+t`)
-        //      to avoid relying on `From<i32>` on R.
+        //      Expanded as `X_mid − 9·X⁴ + 8·X·S = 0`.
         // -----------------------------------------------------------
         let x_sq = x.clone() * x;
         let x_pow4 = x_sq.clone() * &x_sq;
-        let mut nine_x4 = x_pow4.clone();
-        for _ in 0..8 {
-            nine_x4 = nine_x4 + &x_pow4;
-        }
+        let nine_x4 = mbs(&x_pow4, &nine_scalar).expect("9·X⁴ overflow");
         let xs = x.clone() * s_w;
-        let mut eight_xs = xs.clone();
-        for _ in 0..7 {
-            eight_xs = eight_xs + &xs;
-        }
+        let eight_xs = mbs(&xs, &eight_scalar).expect("8·X·S overflow");
         let c3_inner = x_mid.clone() - &nine_x4 + &eight_xs;
         b.assert_zero(s_active.clone() * &c3_inner);
 
@@ -210,21 +214,13 @@ where
         //        Y_mid − 12·X³·S + 3·X²·X_mid + 8·S² = 0.
         // -----------------------------------------------------------
         let x_sq_x_s = x_sq.clone() * &xs; // X²·X·S = X³·S
-        let mut twelve_term = x_sq_x_s.clone();
-        for _ in 0..11 {
-            twelve_term = twelve_term + &x_sq_x_s;
-        }
+        let twelve_x3s = mbs(&x_sq_x_s, &twelve_scalar).expect("12·X³·S overflow");
         let x_sq_xmid = x_sq.clone() * x_mid;
-        let mut three_xsq_xmid = x_sq_xmid.clone();
-        for _ in 0..2 {
-            three_xsq_xmid = three_xsq_xmid + &x_sq_xmid;
-        }
+        let three_xsq_xmid =
+            mbs(&x_sq_xmid, &three_scalar).expect("3·X²·X_mid overflow");
         let s_sq = s_w.clone() * s_w;
-        let mut eight_s_sq = s_sq.clone();
-        for _ in 0..7 {
-            eight_s_sq = eight_s_sq + &s_sq;
-        }
-        let c4_inner = y_mid.clone() - &twelve_term + &three_xsq_xmid + &eight_s_sq;
+        let eight_s_sq = mbs(&s_sq, &eight_scalar).expect("8·S² overflow");
+        let c4_inner = y_mid.clone() - &twelve_x3s + &three_xsq_xmid + &eight_s_sq;
         b.assert_zero(s_active.clone() * &c4_inner);
     }
 }
@@ -302,6 +298,17 @@ where
             ..Default::default()
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Scalar helpers.
+// ---------------------------------------------------------------------------
+
+/// Build a constant-polynomial (degree 0) `c` as a `DensePolynomial<R, 32>`.
+fn const_scalar<R: ConstSemiring>(c: R) -> DensePolynomial<R, 32> {
+    let mut coeffs = [R::ZERO; 32];
+    coeffs[0] = c;
+    DensePolynomial::<R, 32>::new(coeffs)
 }
 
 // ---------------------------------------------------------------------------
