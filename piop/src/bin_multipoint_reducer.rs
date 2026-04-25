@@ -163,9 +163,8 @@ where
                 let mut s = zero.clone();
                 for j in 0..n_cols {
                     let bp = &bin_cols[j].evaluations[x_idx];
-                    let coeffs = bp.inner().coeffs;
-                    for l in 0..D {
-                        if coeffs[l].into_inner() {
+                    for (l, c) in bp.iter().enumerate() {
+                        if c.into_inner() {
                             s = s + &gammas_flat[j * D + l];
                         }
                     }
@@ -346,7 +345,7 @@ mod tests {
         let eq = zinc_poly::utils::build_eq_x_r_vec(point, cfg).unwrap();
         let mut coeffs = vec![zero; D];
         for (i, entry) in col.iter().enumerate() {
-            for (l, c) in entry.inner().coeffs.iter().enumerate() {
+            for (l, c) in entry.iter().enumerate() {
                 if c.into_inner() {
                     coeffs[l] = coeffs[l].clone() + &eq[i];
                 }

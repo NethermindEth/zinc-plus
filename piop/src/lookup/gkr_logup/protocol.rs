@@ -122,19 +122,32 @@ where
 
     let chunks_idx: Vec<Vec<Vec<u32>>> = cfg_iter!(instance.parent_columns)
         .map(|parent| {
+            // For each row, pack the entry's bits into a u32 once via
+            // the BinaryPoly iter abstraction (works under both the
+            // `Vec<Boolean>` and packed-u64 representations). Then
+            // extract per-chunk indices by shifting.
+            let row_packed: Vec<u32> = (0..witness_len)
+                .map(|i| {
+                    let mut packed: u32 = 0;
+                    for (idx, b) in parent.evaluations[i].iter().enumerate() {
+                        if b.into_inner() {
+                            packed |= 1u32 << idx;
+                        }
+                    }
+                    packed
+                })
+                .collect();
+            let chunk_mask: u32 = if chunk_width == 32 {
+                u32::MAX
+            } else {
+                (1u32 << chunk_width) - 1
+            };
             (0..num_chunks)
                 .map(|k| {
-                    (0..witness_len)
-                        .map(|i| {
-                            let coeffs = parent.evaluations[i].inner().coeffs;
-                            let mut n: u32 = 0;
-                            for p in 0..chunk_width {
-                                if coeffs[k * chunk_width + p].into_inner() {
-                                    n |= 1u32 << p;
-                                }
-                            }
-                            n
-                        })
+                    let shift = (k * chunk_width) as u32;
+                    row_packed
+                        .iter()
+                        .map(|&p| (p >> shift) & chunk_mask)
                         .collect()
                 })
                 .collect()
@@ -585,8 +598,7 @@ where
         .map(|col| {
             let mut coeffs = vec![zero.clone(); D];
             for (i, entry) in col.iter().enumerate() {
-                let bits = entry.inner();
-                for (p, c) in bits.coeffs.iter().enumerate() {
+                for (p, c) in entry.iter().enumerate() {
                     if c.into_inner() {
                         coeffs[p] += &eq_table[i];
                     }
