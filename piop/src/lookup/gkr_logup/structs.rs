@@ -875,3 +875,154 @@ where
         total
     }
 }
+
+// ---------------------------------------------------------------------------
+// Diagnostic: per-field byte breakdown for a GkrLogupLookupProof.
+// Useful for understanding where lookup proof bytes come from.
+// ---------------------------------------------------------------------------
+
+/// Per-component byte breakdown of a GKR-LogUp lookup proof — sums field
+/// sizes the same way `Transcribable::get_num_bytes` does, but exposes
+/// the breakdown rather than the total. Intended for diagnostics; not
+/// part of the protocol surface.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn dump_size_breakdown<F>(proof: &GkrLogupLookupProof<F>) -> String
+where
+    F: PrimeField,
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    use std::fmt::Write;
+    let mut s = String::new();
+
+    if proof.groups.is_empty() {
+        let _ = writeln!(s, "(empty lookup proof — {} bytes)", u32::NUM_BYTES);
+        return s;
+    }
+
+    let _ = writeln!(
+        s,
+        "GkrLogupLookupProof (F::Inner = {} bytes, F::Modulus = {} bytes)",
+        F::Inner::NUM_BYTES,
+        F::Modulus::NUM_BYTES,
+    );
+    let _ = writeln!(
+        s,
+        "  num_groups u32 prefix:                        {}",
+        u32::NUM_BYTES
+    );
+    let _ = writeln!(
+        s,
+        "  modulus header:                              {}",
+        F::Modulus::NUM_BYTES
+    );
+
+    for (g_idx, (meta, g)) in proof.group_meta.iter().zip(proof.groups.iter()).enumerate() {
+        let _ = writeln!(
+            s,
+            "  Group {} (L={}, K={}, cw={}, W={}, table_len={}):",
+            g_idx,
+            meta.num_lookups,
+            meta.num_chunks,
+            meta.chunk_width,
+            meta.witness_len,
+            g.aggregated_multiplicities.first().map(|v| v.len()).unwrap_or(0),
+        );
+
+        let m_bytes = meta_num_bytes(meta);
+        let _ = writeln!(s, "    meta:                                      {}", m_bytes);
+
+        // chunk_lifts
+        let mut chunk_lifts_bytes = u32::NUM_BYTES;
+        for per_lookup in &g.chunk_lifts {
+            let v = DynamicPolyVecF::reinterpret(per_lookup);
+            chunk_lifts_bytes = add!(
+                chunk_lifts_bytes,
+                add!(
+                    u32::NUM_BYTES,
+                    add!(DynamicPolyVecF::<F>::LENGTH_NUM_BYTES, v.get_num_bytes())
+                )
+            );
+        }
+        let _ = writeln!(
+            s,
+            "    chunk_lifts ({} × {} polys × cw):           {}",
+            meta.num_lookups, meta.num_chunks, chunk_lifts_bytes
+        );
+
+        // aggregated_multiplicities
+        let mut mults_bytes = u32::NUM_BYTES;
+        for per_lookup in &g.aggregated_multiplicities {
+            mults_bytes = add!(
+                mults_bytes,
+                add!(u32::NUM_BYTES, mul!(per_lookup.len(), F::Inner::NUM_BYTES))
+            );
+        }
+        let _ = writeln!(
+            s,
+            "    aggregated_multiplicities (L × table_len):  {}",
+            mults_bytes
+        );
+
+        // witness_gkr (batched)
+        let wgkr = batched_fraction_num_bytes(&g.witness_gkr);
+        let n_layers = g.witness_gkr.layer_proofs.len();
+        let _ = writeln!(
+            s,
+            "    witness_gkr (batched, {} layers, L={}):     {}",
+            n_layers,
+            g.witness_gkr.roots_p.len(),
+            wgkr
+        );
+        // Per-layer breakdown for the witness GKR (where the bulk lives).
+        for (k, layer) in g.witness_gkr.layer_proofs.iter().enumerate() {
+            let lb = batched_layer_num_bytes(layer);
+            let sc = match &layer.sumcheck_proof {
+                Some(sc) => add!(SumcheckProof::<F>::LENGTH_NUM_BYTES, sc.get_num_bytes()),
+                None => 0,
+            };
+            let evals = mul!(mul!(4, layer.p_lefts.len()), F::Inner::NUM_BYTES);
+            let _ = writeln!(
+                s,
+                "      layer k={:2}: {:6} = sumcheck {:6} + 4·L evals {:5} + framing {:3}",
+                k,
+                lb,
+                sc,
+                evals,
+                add!(lb, 0).saturating_sub(sc).saturating_sub(evals)
+            );
+        }
+
+        // table_gkr (single)
+        let tgkr = fraction_num_bytes(&g.table_gkr);
+        let n_t_layers = g.table_gkr.layer_proofs.len();
+        let _ = writeln!(
+            s,
+            "    table_gkr (single, {} layers):             {}",
+            n_t_layers, tgkr
+        );
+
+        // bin_lifts_at_r_inner
+        let bin_lifts_v = DynamicPolyVecF::reinterpret(&g.bin_lifts_at_r_inner);
+        let bin_lifts_bytes = add!(
+            DynamicPolyVecF::<F>::LENGTH_NUM_BYTES,
+            bin_lifts_v.get_num_bytes()
+        );
+        let _ = writeln!(
+            s,
+            "    bin_lifts_at_r_inner ({} polys × ≤D coeffs):{}",
+            g.bin_lifts_at_r_inner.len(),
+            bin_lifts_bytes
+        );
+
+        let group_total = group_num_bytes(g);
+        let _ = writeln!(
+            s,
+            "    GROUP TOTAL:                               {} bytes",
+            group_total
+        );
+    }
+
+    let _ = writeln!(s, "  PROOF TOTAL: {} bytes", proof.get_num_bytes());
+    s
+}

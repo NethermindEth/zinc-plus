@@ -19,5 +19,5 @@ pub use protocol::{
 pub use structs::{
     BatchedGkrFractionProof, BatchedGkrLayerProof, GkrFractionProof, GkrLayerProof,
     GkrLogupError, GkrLogupGroupMeta, GkrLogupGroupProof, GkrLogupGroupSubclaim,
-    GkrLogupLookupProof,
+    GkrLogupLookupProof, dump_size_breakdown,
 };

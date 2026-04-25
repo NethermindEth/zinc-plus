@@ -1012,6 +1012,121 @@ mod tests {
         );
     }
 
+    /// Diagnostic: run a `BinLookup16` proof and print the per-field
+    /// breakdown of the lookup proof bytes alongside the total `Proof<F>`
+    /// size. Use `cargo test … print_bin_lookup16_size_breakdown -- --nocapture`.
+    #[test]
+    fn print_bin_lookup16_size_breakdown() {
+        use std::cell::RefCell;
+        use zinc_piop::lookup::gkr_logup::dump_size_breakdown;
+        use zinc_test_uair::{BinLookup16NoLookupUair, BinLookup16Uair};
+        let num_vars = 10;
+
+        let proof_with: RefCell<Option<Proof<F>>> = RefCell::new(None);
+        do_test::<TestZincTypesIprs, BinLookup16Uair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                *proof_with.borrow_mut() = Some(proof.clone());
+            },
+            |res| res.unwrap(),
+        );
+
+        let proof_no: RefCell<Option<Proof<F>>> = RefCell::new(None);
+        do_test::<TestZincTypesIprs, BinLookup16NoLookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                *proof_no.borrow_mut() = Some(proof.clone());
+            },
+            |res| res.unwrap(),
+        );
+
+        let with_proof = proof_with.into_inner().expect("with-lookup proof captured");
+        let no_proof = proof_no.into_inner().expect("no-lookup proof captured");
+        let total_with = with_proof.get_num_bytes();
+        let total_no = no_proof.get_num_bytes();
+
+        println!("=== BinLookup16 vs BinLookup16NoLookup at nvars={num_vars} ===");
+        println!("  Proof<F>      WITH lookup: {} bytes", total_with);
+        println!("  Proof<F>     NO lookup: {} bytes", total_no);
+        println!(
+            "  delta:                     {} bytes",
+            total_with as i64 - total_no as i64
+        );
+        println!();
+        println!("Lookup-proof breakdown (WITH-lookup case):");
+        print!("{}", dump_size_breakdown(&with_proof.lookup_proof));
+
+        // bin_reducer + bin_lifts_at_r_star (separate Proof<F> fields, also
+        // only present in the WITH-lookup case).
+        println!();
+        println!("Other Proof<F> fields impacted by lookups:");
+        println!(
+            "  bin_reducer_proof:        {:?} (Some = reducer ran)",
+            with_proof.bin_reducer_proof.is_some()
+        );
+        println!(
+            "  bin_lifts_at_r_star.len:  {}",
+            with_proof.bin_lifts_at_r_star.len()
+        );
+
+        // Per-field byte sizes for both proofs to find where the
+        // hidden delta lives (PCS opens at the second point, etc.).
+        println!();
+        println!("Proof<F> field-by-field bytes (WITH vs NO):");
+        let f = |with_b: usize, no_b: usize, name: &str| {
+            println!(
+                "  {:32} WITH={:9}  NO={:9}  Δ={:+9}",
+                name,
+                with_b,
+                no_b,
+                with_b as i64 - no_b as i64
+            );
+        };
+        f(with_proof.zip.len(), no_proof.zip.len(), "zip (PCS bytes)");
+        f(
+            with_proof.lookup_proof.get_num_bytes(),
+            no_proof.lookup_proof.get_num_bytes(),
+            "lookup_proof",
+        );
+        f(
+            with_proof.ideal_check.get_num_bytes(),
+            no_proof.ideal_check.get_num_bytes(),
+            "ideal_check",
+        );
+        f(
+            with_proof.resolver.get_num_bytes(),
+            no_proof.resolver.get_num_bytes(),
+            "resolver",
+        );
+        f(
+            with_proof.combined_sumcheck.get_num_bytes(),
+            no_proof.combined_sumcheck.get_num_bytes(),
+            "combined_sumcheck",
+        );
+        f(
+            with_proof.multipoint_eval.get_num_bytes(),
+            no_proof.multipoint_eval.get_num_bytes(),
+            "multipoint_eval",
+        );
+        let with_lifted: usize =
+            with_proof.witness_lifted_evals.iter().map(|p| p.coeffs.len() * 24 + 4).sum();
+        let no_lifted: usize =
+            no_proof.witness_lifted_evals.iter().map(|p| p.coeffs.len() * 24 + 4).sum();
+        f(with_lifted, no_lifted, "witness_lifted_evals (approx)");
+    }
+
     /// End-to-end test of the GKR-LogUp lookup with chunks-in-clear
     /// polynomial-valued lift. Runs `BinPolyLookupUair` (single
     /// binary_poly<32> witness column, lookup spec
