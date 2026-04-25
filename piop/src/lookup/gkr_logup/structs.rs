@@ -7,7 +7,10 @@
 
 use crypto_primitives::PrimeField;
 use thiserror::Error;
-use zinc_poly::{EvaluationError, utils::ArithErrors};
+use zinc_poly::{
+    EvaluationError, univariate::dynamic::over_field::DynamicPolynomialF, utils::ArithErrors,
+};
+use zinc_uair::LookupTableType;
 
 use crate::sumcheck::{SumCheckError, SumcheckProof};
 
@@ -79,6 +82,81 @@ pub struct BatchedGkrLayerProof<F: PrimeField> {
     pub q_lefts: Vec<F>,
     /// Per-tree right-child denominator evaluations: `q_rights[ℓ]`.
     pub q_rights: Vec<F>,
+}
+
+// ---------------------------------------------------------------------------
+// Top-level lookup proof + group payload (chunks-in-clear poly-lift design)
+// ---------------------------------------------------------------------------
+
+/// Per-group proof for one [`LookupTableType`] in the new GKR-LogUp
+/// protocol.
+///
+/// **Chunks are neither sent nor committed.** The prover sends only:
+///   1. polynomial-valued **chunk lifts** `c_k'^(ell) = MLE[v_k^(ell)](r_inner) ∈ F_q[X]_{<chunk_width}`,
+///      one per `(ell, k)` — `chunk_width` field elements each;
+///   2. aggregated multiplicities `m_agg^(ell)[j]`;
+///   3. the witness-side and table-side GKR fractional sumcheck proofs.
+///
+/// The protocol layer (caller of `verify_group`) receives a
+/// [`GkrLogupGroupSubclaim`] containing the verifier-reconstructed
+/// combined polynomial `c^(ell) = Σ_k X^{k·chunk_width} · c_k'^(ell)`
+/// at the GKR descent row-half `r_inner`. The caller binds that
+/// polynomial to the parent column's PCS commitment via a Zip+ opening
+/// at `r_inner`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GkrLogupGroupProof<F: PrimeField> {
+    /// `chunk_lifts[ell][k]` is the polynomial-valued chunk MLE
+    /// `c_k'^(ell) = MLE[v_k^(ell)](r_inner) ∈ F_q[X]_{<chunk_width}`.
+    pub chunk_lifts: Vec<Vec<DynamicPolynomialF<F>>>,
+    /// `aggregated_multiplicities[ell]` of length `subtable_size`.
+    pub aggregated_multiplicities: Vec<Vec<F>>,
+    /// Batched witness-side GKR fractional sumcheck (L trees).
+    pub witness_gkr: BatchedGkrFractionProof<F>,
+    /// Single-tree table-side GKR fractional sumcheck.
+    pub table_gkr: GkrFractionProof<F>,
+}
+
+/// Static metadata for one lookup group, ported alongside the proof so
+/// the verifier can rebuild the subtable, shifts, and column locations
+/// without having the original `LookupColumnSpec`s on hand.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GkrLogupGroupMeta {
+    pub table_type: LookupTableType,
+    pub num_lookups: usize,
+    pub num_chunks: usize,
+    pub chunk_width: usize,
+    pub witness_len: usize,
+    /// Full-trace column indices of the L parent columns in this group.
+    pub parent_columns: Vec<usize>,
+}
+
+/// Per-lookup verifier sub-claim emitted by `verify_group` for the
+/// protocol layer's Zip+ binding.
+///
+/// For each lookup `ell`, the protocol must verify a Zip+ opening of
+/// the parent column `parent_columns[ell]` at point `r_inner`, expecting
+/// the polynomial-valued evaluation `combined_polynomial[ell]`.
+#[derive(Clone, Debug)]
+pub struct GkrLogupGroupSubclaim<F: PrimeField> {
+    /// Row-half of the GKR descent point — the point at which the
+    /// parent column's MLE must be opened (length = `n_vars`).
+    pub r_inner: Vec<F>,
+    /// Per-lookup combined polynomial-valued claim at `r_inner`.
+    /// `combined_polynomial[ell] ∈ F_q[X]_{<width}` should equal
+    /// `MLE[v^(ell)](r_inner)` if all chunk lifts are honest.
+    pub combined_polynomial: Vec<DynamicPolynomialF<F>>,
+    /// Pass-through of `GkrLogupGroupMeta::parent_columns` for caller
+    /// convenience.
+    pub parent_columns: Vec<usize>,
+}
+
+/// Top-level GKR-LogUp lookup proof: one per-group payload + per-group
+/// metadata, in group order. Empty (`groups: vec![]`) when the UAIR
+/// declares no lookup specs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GkrLogupLookupProof<F: PrimeField> {
+    pub groups: Vec<GkrLogupGroupProof<F>>,
+    pub group_meta: Vec<GkrLogupGroupMeta>,
 }
 
 // ---------------------------------------------------------------------------
