@@ -736,12 +736,19 @@ where
 
             let lambda: F = transcript.get_field_challenge(field_cfg);
             let one_minus_lambda = one.clone() - &lambda;
-            for ell in 0..num_trees {
-                v_ps[ell] = one_minus_lambda.clone() * &p_lefts[ell]
-                    + &(lambda.clone() * &p_rights[ell]);
-                v_qs[ell] = one_minus_lambda.clone() * &q_lefts[ell]
-                    + &(lambda.clone() * &q_rights[ell]);
-            }
+            // Per-tree post-absorb fold — independent across ell.
+            v_ps = cfg_into_iter!(0..num_trees)
+                .map(|ell| {
+                    one_minus_lambda.clone() * &p_lefts[ell]
+                        + &(lambda.clone() * &p_rights[ell])
+                })
+                .collect();
+            v_qs = cfg_into_iter!(0..num_trees)
+                .map(|ell| {
+                    one_minus_lambda.clone() * &q_lefts[ell]
+                        + &(lambda.clone() * &q_rights[ell])
+                })
+                .collect();
             r_k = vec![lambda];
         } else {
             // Round k ≥ 1: batched sumcheck over k variables.
@@ -856,12 +863,18 @@ where
 
             let lambda: F = transcript.get_field_challenge(field_cfg);
             let one_minus_lambda = one.clone() - &lambda;
-            for ell in 0..num_trees {
-                v_ps[ell] = one_minus_lambda.clone() * &p_lefts[ell]
-                    + &(lambda.clone() * &p_rights[ell]);
-                v_qs[ell] = one_minus_lambda.clone() * &q_lefts[ell]
-                    + &(lambda.clone() * &q_rights[ell]);
-            }
+            v_ps = cfg_into_iter!(0..num_trees)
+                .map(|ell| {
+                    one_minus_lambda.clone() * &p_lefts[ell]
+                        + &(lambda.clone() * &p_rights[ell])
+                })
+                .collect();
+            v_qs = cfg_into_iter!(0..num_trees)
+                .map(|ell| {
+                    one_minus_lambda.clone() * &q_lefts[ell]
+                        + &(lambda.clone() * &q_rights[ell])
+                })
+                .collect();
             r_k = s.clone();
             r_k.push(lambda);
         }
