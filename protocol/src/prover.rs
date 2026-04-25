@@ -594,30 +594,68 @@ impl_with_type_bounds!(ProverSumchecked
 
                 // Per-witness-bin-col polynomial-valued evals at this group's
                 // r_inner. The verifier alpha-projects these for the dedicated
-                // Zip+ opening; entries for parent columns must additionally
-                // match the chunk-derived combined polynomial. Batched so the
-                // eq(·, r_inner) table is built once and the per-col bit walks
-                // run in parallel across rayon threads.
-                let cols_ref: Vec<&DenseMultilinearExtension<BinaryPoly<D>>> =
-                    witness_trace.binary_poly.iter().collect();
-                let bin_lifts: Vec<DynamicPolynomialF<F>> =
-                    compute_binary_poly_lifts::<F, D>(&cols_ref, &sub.r_inner, &self.field_cfg);
-                debug_assert!({
-                    // Cross-check: combined chunk lifts == direct parent lifts.
-                    let cw = meta.chunk_width;
-                    let w = cw * meta.num_chunks;
-                    let zero = F::zero_with_cfg(&self.field_cfg);
-                    sub.parent_columns.iter().enumerate().all(|(ell, &col_idx)| {
-                        let wit_idx = col_idx - num_pub_bin;
-                        let combined = combine_chunks::<F>(
+                // Zip+ opening; entries for parent columns must match the
+                // chunk-derived combined polynomial.
+                //
+                // Optimization: parent cols already had their full lift
+                // computed inside `prove_group` (then sliced into chunks).
+                // Reassemble those via `combine_chunks` (a coefficient-copy,
+                // no eq build, no bit walk) and only call
+                // `compute_binary_poly_lifts` for the truly-non-parent cols.
+                // For BinLookup16 (every bin col is a parent), this avoids
+                // a redundant 16-col eq + bit-walk pass entirely.
+                let num_wit_bin = self
+                    .base
+                    .uair_signature
+                    .total_cols()
+                    .num_binary_poly_cols()
+                    - num_pub_bin;
+                let cw = meta.chunk_width;
+                let w = cw * meta.num_chunks;
+                let zero = F::zero_with_cfg(&self.field_cfg);
+
+                // Mark which witness-bin columns are parents in this group.
+                let mut parent_for_wit: Vec<Option<usize>> = vec![None; num_wit_bin];
+                for (ell, &col_idx) in sub.parent_columns.iter().enumerate() {
+                    let wit_idx = col_idx - num_pub_bin;
+                    parent_for_wit[wit_idx] = Some(ell);
+                }
+
+                // Compute lifts only for non-parent witness bin cols.
+                let non_parent_wit: Vec<usize> = (0..num_wit_bin)
+                    .filter(|i| parent_for_wit[*i].is_none())
+                    .collect();
+                let non_parent_lifts: Vec<DynamicPolynomialF<F>> = if non_parent_wit
+                    .is_empty()
+                {
+                    Vec::new()
+                } else {
+                    let np_cols: Vec<&DenseMultilinearExtension<BinaryPoly<D>>> =
+                        non_parent_wit
+                            .iter()
+                            .map(|&i| &witness_trace.binary_poly[i])
+                            .collect();
+                    compute_binary_poly_lifts::<F, D>(
+                        &np_cols,
+                        &sub.r_inner,
+                        &self.field_cfg,
+                    )
+                };
+
+                let mut bin_lifts: Vec<DynamicPolynomialF<F>> =
+                    Vec::with_capacity(num_wit_bin);
+                let mut np_iter = non_parent_lifts.into_iter();
+                for wit_idx in 0..num_wit_bin {
+                    match parent_for_wit[wit_idx] {
+                        Some(ell) => bin_lifts.push(combine_chunks::<F>(
                             &group_proof.chunk_lifts[ell],
                             cw,
                             w,
                             &zero,
-                        );
-                        combined == bin_lifts[wit_idx]
-                    })
-                });
+                        )),
+                        None => bin_lifts.push(np_iter.next().expect("non-parent lift")),
+                    }
+                }
                 group_proof.bin_lifts_at_r_inner = bin_lifts;
 
                 groups.push(group_proof);

@@ -351,6 +351,13 @@ where
             r_k = vec![lambda];
         } else {
             // Round k ≥ 1: sumcheck over k variables.
+            //
+            // Algebraic re-arrangement (mirrors batched path): precompute
+            // `pla = pl + α·ql` ONCE per layer and feed pla in place of
+            // pl into the sumcheck. Comb_fn drops the per-evaluation
+            // `pl + α·ql`, saving 1 add + 1 mul per hypercube/eval point.
+            // After sumcheck `pl(s) = pla(s) - α·ql(s)` is recovered for
+            // the layer-output absorbed into the transcript.
             let eq_r = build_eq_x_r_inner(&r_k, field_cfg)
                 .expect("eq polynomial construction should succeed");
 
@@ -362,28 +369,29 @@ where
                 )
             };
 
-            let pl_mle = mk_mle(p_left_vals);
+            let alpha_ref = alpha.clone();
+            let pla_vals: Vec<F> = p_left_vals
+                .iter()
+                .zip(q_left_vals.iter())
+                .map(|(pl, ql)| pl.clone() + &(ql.clone() * &alpha_ref))
+                .collect();
+
+            let pla_mle = mk_mle(&pla_vals);
             let pr_mle = mk_mle(p_right_vals);
             let ql_mle = mk_mle(q_left_vals);
             let qr_mle = mk_mle(q_right_vals);
 
-            let mles = vec![eq_r, pl_mle, ql_mle, pr_mle, qr_mle];
+            let mles = vec![eq_r, pla_mle, ql_mle, pr_mle, qr_mle];
 
-            // Optimized combination function: rewrite
-            //   eq * (pl*qr + pr*ql + α*ql*qr)
-            // as
-            //   eq * ((pl + α*ql)*qr + pr*ql)
-            // saving one multiplication per evaluation point.
-            let alpha_clone = alpha.clone();
+            // comb_fn = eq · (pla · qr + pr · ql)
             let comb_fn = move |vals: &[F]| -> F {
                 let eq_val = &vals[0];
-                let pl_val = &vals[1];
+                let pla_val = &vals[1];
                 let ql_val = &vals[2];
                 let pr_val = &vals[3];
                 let qr_val = &vals[4];
 
-                let pl_plus_alpha_ql = pl_val.clone() + &(alpha_clone.clone() * ql_val);
-                let inner = pl_plus_alpha_ql * qr_val + &(pr_val.clone() * ql_val);
+                let inner = pla_val.clone() * qr_val + &(pr_val.clone() * ql_val);
                 eq_val.clone() * &inner
             };
 
@@ -411,10 +419,12 @@ where
                 let v1 = F::new_unchecked_with_cfg(mle[1].clone(), field_cfg);
                 one_minus_last.clone() * &v0 + &(last_r.clone() * &v1)
             };
-            let pl_at_s = interp_mle(&sumcheck_prover_state.mles[1]);
+            // mles[1] holds pla(s) = pl(s) + α·ql(s); recover pl(s).
+            let pla_at_s = interp_mle(&sumcheck_prover_state.mles[1]);
             let ql_at_s = interp_mle(&sumcheck_prover_state.mles[2]);
             let pr_at_s = interp_mle(&sumcheck_prover_state.mles[3]);
             let qr_at_s = interp_mle(&sumcheck_prover_state.mles[4]);
+            let pl_at_s = pla_at_s - &(ql_at_s.clone() * &alpha);
 
             transcript.absorb_random_field(&pl_at_s, &mut buf);
             transcript.absorb_random_field(&pr_at_s, &mut buf);
@@ -754,9 +764,16 @@ where
             // Round k ≥ 1: batched sumcheck over k variables.
             // The combined claim = Σ_ℓ δ^ℓ · (v_p[ℓ] + α · v_q[ℓ])
             //
-            // The combination function for the batched sumcheck with 1 + 4L MLEs:
-            //   f(eq, pl_0, ql_0, pr_0, qr_0, ..., pl_{L-1}, ql_{L-1}, pr_{L-1}, qr_{L-1})
-            //     = eq · Σ_ℓ δ^ℓ · ((pl_ℓ + α·ql_ℓ)·qr_ℓ + pr_ℓ·ql_ℓ)
+            // Algebraic re-arrangement: we precompute `pla = pl + α·ql`
+            // ONCE per layer and feed pla (instead of pl) into the
+            // sumcheck. The comb_fn then drops the per-evaluation
+            // `pl + α·ql` computation:
+            //   f(eq, pla_0, ql_0, pr_0, qr_0, ..., pla_{L-1}, ql_{L-1}, pr_{L-1}, qr_{L-1})
+            //     = eq · Σ_ℓ δ^ℓ · (pla_ℓ · qr_ℓ + pr_ℓ · ql_ℓ)
+            // Saves 1 add + 1 mul per (ell, hypercube point, eval point) ≈
+            // 25 % of comb_fn flops at L = 16. After sumcheck the prover
+            // recovers `pl(s) = pla(s) - α · ql(s)` for the layer-output
+            // (pl, ql, pr, qr) absorbed into the transcript.
 
             let eq_r = build_eq_x_r_inner(&r_k, field_cfg)
                 .expect("eq polynomial construction should succeed");
@@ -769,23 +786,35 @@ where
                 )
             };
 
-            // Build MLEs: [eq, pl_0, ql_0, pr_0, qr_0, ..., pl_{L-1}, ql_{L-1}, pr_{L-1}, qr_{L-1}]
+            // Build MLEs: [eq, pla_0, ql_0, pr_0, qr_0, ..., pla_{L-1}, ql_{L-1}, pr_{L-1}, qr_{L-1}]
+            //
+            // The pla precomputation (`pl + α·ql` per leaf) is per-tree
+            // and embarrassingly parallel across L trees.
+            let alpha_ref = alpha.clone();
+            let pla_per_tree: Vec<Vec<F>> = cfg_into_iter!(0..num_trees)
+                .map(|ell| {
+                    let (pl_vals, _pr_vals, ql_vals, _qr_vals) = per_tree[ell];
+                    pl_vals
+                        .iter()
+                        .zip(ql_vals.iter())
+                        .map(|(pl, ql)| pl.clone() + &(ql.clone() * &alpha_ref))
+                        .collect()
+                })
+                .collect();
+
             let mut mles = Vec::with_capacity(1 + 4 * num_trees);
             mles.push(eq_r);
             for ell in 0..num_trees {
-                let (pl_vals, pr_vals, ql_vals, qr_vals) = per_tree[ell];
-                mles.push(mk_mle(pl_vals));
+                let (_pl_vals, pr_vals, ql_vals, qr_vals) = per_tree[ell];
+                mles.push(mk_mle(&pla_per_tree[ell]));
                 mles.push(mk_mle(ql_vals));
                 mles.push(mk_mle(pr_vals));
                 mles.push(mk_mle(qr_vals));
             }
 
-            // Capture α + δ-powers by move; the closure body uses
-            // them by reference (no per-evaluation clones). At L = 16
-            // trees and depth d ≈ 18, the prior `delta_powers[ell].clone()`
-            // and `alpha.clone()` ran ~4·2^d·L ≈ 17M times per layer
-            // and dominated the comb_fn cost.
-            let alpha_ref = alpha.clone();
+            // Capture δ-powers by move; α is folded into pla and is no
+            // longer referenced in the comb_fn (one fewer mul + add per
+            // (ell, eval-point)).
             let delta_powers_ref = delta_powers.clone();
             let nt = num_trees;
             let zero_template = F::zero_with_cfg(field_cfg);
@@ -794,15 +823,12 @@ where
                 let mut acc = zero_template.clone();
                 for ell in 0..nt {
                     let base = 1 + 4 * ell;
-                    let pl_val = &vals[base];
+                    let pla_val = &vals[base];
                     let ql_val = &vals[base + 1];
                     let pr_val = &vals[base + 2];
                     let qr_val = &vals[base + 3];
-                    // pl + α·ql, then (pl + α·ql)·qr + pr·ql, weighted by δ^ell.
-                    let alpha_ql = ql_val.clone() * &alpha_ref;
-                    let pl_plus_alpha_ql = pl_val.clone() + &alpha_ql;
-                    let inner =
-                        pl_plus_alpha_ql * qr_val + &(pr_val.clone() * ql_val);
+                    // pla · qr + pr · ql, weighted by δ^ell.
+                    let inner = pla_val.clone() * qr_val + &(pr_val.clone() * ql_val);
                     acc += &(inner * &delta_powers_ref[ell]);
                 }
                 eq_val.clone() * &acc
@@ -837,10 +863,16 @@ where
 
             for ell in 0..num_trees {
                 let base = 1 + 4 * ell;
-                let pl = interp_mle(&sumcheck_prover_state.mles[base]);
+                // Index `base` holds pla(s) = pl(s) + α·ql(s); recover
+                // pl(s) = pla(s) - α·ql(s) since the (pl, pr, ql, qr)
+                // absorbed are the per-tree layer-transition evals (pla
+                // is an internal sumcheck artifact, never sent in the
+                // proof and never absorbed).
+                let pla = interp_mle(&sumcheck_prover_state.mles[base]);
                 let ql = interp_mle(&sumcheck_prover_state.mles[base + 1]);
                 let pr = interp_mle(&sumcheck_prover_state.mles[base + 2]);
                 let qr = interp_mle(&sumcheck_prover_state.mles[base + 3]);
+                let pl = pla - &(ql.clone() * &alpha);
 
                 transcript.absorb_random_field(&pl, &mut buf);
                 transcript.absorb_random_field(&pr, &mut buf);
