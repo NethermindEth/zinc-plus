@@ -17,6 +17,7 @@
 //! - Step 6: lift-and-project (unprojected MLE evaluations at r_0)
 //! - Step 7: Zip+ PCS open/verify at r_0
 
+pub mod fixed_prime;
 pub mod prover;
 pub mod verifier;
 
@@ -520,7 +521,9 @@ mod tests {
     };
 
     const INT_LIMBS: usize = U64::LIMBS;
-    const FIELD_LIMBS: usize = U64::LIMBS * 3;
+    // `fixed-prime` branch: 256-bit field modulus (4 × u64 limbs) so the
+    // hardcoded secp256k1 base prime fits in `Fmod = Uint<FIELD_LIMBS>`.
+    const FIELD_LIMBS: usize = U64::LIMBS * 4;
     const DEGREE_PLUS_ONE: usize = 32;
 
     // Zip+ type parameters.
@@ -1008,9 +1011,12 @@ mod tests {
         );
     }
 
-    // Tampering the commitment root causes the verifier to sample different
-    // challenges. The ideal check fails first because the prover's
-    // combined_mle_values were computed under the original transcript.
+    // Tampering the commitment root causes the verifier to derive different
+    // challenges from the Fiat–Shamir transcript. On the `fixed-prime`
+    // branch the projecting prime `q` is hardcoded (not transcript-derived),
+    // so prover and verifier still agree on `q` after the tamper; the first
+    // observable divergence is at the combined-poly resolver, which catches
+    // it as a sumcheck-sum mismatch.
     #[test]
     fn test_big_linear_tamper_commitment() {
         let num_vars = 8;
@@ -1024,7 +1030,12 @@ mod tests {
             default_project_ideal!(),
             |proof| proof.commitments.0.root = Default::default(),
             |res| {
-                assert!(matches!(res.unwrap_err(), ProtocolError::IdealCheck(..)));
+                assert!(matches!(
+                    res.unwrap_err(),
+                    ProtocolError::Resolver(
+                        CombinedPolyResolverError::WrongSumcheckSum { .. }
+                    )
+                ));
             },
         );
     }
