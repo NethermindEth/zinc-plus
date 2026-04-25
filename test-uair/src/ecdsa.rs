@@ -5,39 +5,45 @@
 //! where the verifier-supplied addend is one of `{O, G, Q, G+Q}` chosen
 //! by the `(b_1[t], b_2[t])` bit pair. Implements:
 //!
-//! - **Row chaining**: `R_{t+1}.X1 ← R_t.X_out`, etc., via shifts of
-//!   the `W_X1 / W_Y1 / W_Z1` columns.
-//! - **Init boundary**: row 0's `(X1, Y1, Z1) = (PA_R_INIT_X, _Y, _Z)`,
+//! - **Row chaining**: a single chained `(W_X, W_Y, W_Z)` triple where
+//!   `up.X[t] = R_t` (the row's input) and `down.X[t] = R_{t+1}` (the
+//!   next row's input, written by this row's output-selection
+//!   constraint). No separate input/output columns.
+//! - **Init boundary**: row 0's `(X, Y, Z) = (PA_R_INIT_X, _Y, _Z)`,
 //!   the verifier-supplied starting point.
 //! - **Final boundary**: at the final row, Jacobian → affine
 //!   conversion, exposing `R_x_aff` for the verifier's
 //!   off-protocol `R_x mod n == r` check.
-//! - **Conditional add** via `S_ADD` selector: the addition formula
-//!   always runs and produces `(X_add, Y_add, Z_add)`, but the row
-//!   output `(X_out, Y_out, Z_out)` selects between the
-//!   doubled-only `(X_pa, Y_pa, Z_pa)` and the doubled-then-added
-//!   value based on `S_ADD`.
+//! - **Conditional add** via `S_ADD` selector: the addition formula is
+//!   inlined into the output-selection constraints — when `S_ADD = 1`,
+//!   `down.(X,Y,Z) = added`; when `S_ADD = 0`, `down.(X,Y,Z) =
+//!   doubled`.
+//!
+//! ## Constraint shape
+//!
+//! 22 constraints, max degree 5 (inherited from the doubling
+//! sub-UAIR's `Y_pa` constraint and matched by the inlined Y output
+//! selection's `D³` term).
+//!
+//! Breakdown:
+//! - 4 doubling (degrees `[3, 3, 5, 5]`)
+//! - 7 addition intermediates (Z_pa², Z_pa³, C, D, E, F, G — all deg 3)
+//! - 3 output-selection-and-chaining (X: deg 4, Y: deg 5, Z: deg 4)
+//! - 3 init-boundary (deg 2)
+//! - 5 final-row affine conversion (deg 3)
 //!
 //! ## What's deferred
 //!
 //! - **Identity-aware initial step.** Starting from the Jacobian
 //!   identity `O = (1, 1, 0)` breaks the mixed addition formulas
-//!   (Z1=0 makes A=B=0, leading to `(0, 0, 0)` output for `O + G`
-//!   instead of `G`). For now the verifier supplies a non-identity
-//!   `R_init` (e.g., a precomputed Shamir-friendly offset point).
-//!   Adding unified addition formulas to handle the identity input
-//!   is a follow-up.
+//!   (Z1=0 makes A=B=0). The verifier supplies a non-identity
+//!   `R_init`. Adding unified addition formulas to handle the
+//!   identity input is a follow-up.
 //! - **Bit columns and addend coordinates as derived publics.**
-//!   This slice expects the verifier to supply both `(B_1, B_2)`
-//!   bits and the corresponding `(PA_X_ADDEND, PA_Y_ADDEND)` per
-//!   row directly. No in-circuit constraint binds the addend to
-//!   the bits — that's a verifier-side check (and it's trivial:
-//!   the verifier knows both because both derive from `u_1, u_2`).
-//!
-//! ## Constraint shape
-//!
-//! 28 constraints, max degree 5 (inherited from the doubling
-//! sub-UAIR's `Y_mid` constraint).
+//!   The verifier supplies both `(B_1, B_2)` bits (encoded as
+//!   `S_ADD`) and the corresponding `(PA_X_ADDEND, PA_Y_ADDEND)` per
+//!   row. No in-circuit constraint binds the addend to the bits —
+//!   that's a verifier-side check.
 
 use core::marker::PhantomData;
 
@@ -70,22 +76,16 @@ pub const FINAL_ROW: usize = NUM_SHAMIR_ROUNDS;
 pub mod cols {
     // === Public columns (verifier-supplied) ===
 
-    /// `1` at row 0; `0` elsewhere. Drives the initial-state binding.
+    /// `1` at row 0; `0` elsewhere.
     pub const S_INIT: usize = 0;
-    /// `1` for `t ∈ 0..NUM_SHAMIR_ROUNDS`; `0` elsewhere. Gates every
-    /// per-step constraint (doubling, addition, output selection,
-    /// row chaining).
+    /// `1` for `t ∈ 0..NUM_SHAMIR_ROUNDS`; `0` elsewhere.
     pub const S_ACTIVE: usize = 1;
-    /// `1` at `FINAL_ROW`; `0` elsewhere. Drives the affine-conversion
-    /// and output-exposure constraints.
+    /// `1` at `FINAL_ROW`; `0` elsewhere.
     pub const S_FINAL: usize = 2;
-    /// `1` if the row's bit pair is non-zero (i.e., addition should
-    /// take effect); `0` otherwise. Verifier supplies this since
-    /// `(b_1, b_2)` are known to the verifier.
+    /// `1` if the row's bit pair is non-zero (addition takes effect);
+    /// `0` otherwise. Verifier-derivable from `(b_1, b_2)`.
     pub const S_ADD: usize = 3;
-    /// X-coordinate of the affine addend at this row. Verifier picks
-    /// one of `{G_x, Q_x, (G+Q)_x}` based on `(b_1, b_2)`. When
-    /// `S_ADD = 0`, this is unused (we recommend setting it to 0).
+    /// X-coordinate of the affine addend at this row.
     pub const PA_X_ADDEND: usize = 4;
     /// Y-coordinate of the affine addend.
     pub const PA_Y_ADDEND: usize = 5;
@@ -97,56 +97,50 @@ pub mod cols {
 
     // === Witness columns ===
 
-    // Per-row Jacobian input `R_t` (chained from previous row's output).
-    pub const W_X1: usize = 9;
-    pub const W_Y1: usize = 10;
-    pub const W_Z1: usize = 11;
+    // Chained Jacobian state. up.X[t] = R_t (input), down.X[t] =
+    // R_{t+1} (output, written by the output-selection constraint at
+    // row t).
+    pub const W_X: usize = 9;
+    pub const W_Y: usize = 10;
+    pub const W_Z: usize = 11;
 
-    // Doubling intermediates (Y1², 9X1⁴-8X1S etc.) and outputs.
-    pub const W_S: usize = 12; // = Y1²
-    pub const W_X_PA: usize = 13; // = 9·X1⁴ - 8·X1·S    (= "X_pre_add")
-    pub const W_Y_PA: usize = 14; // = 3·X1²·(4·X1·S - X_pa) - 8·S²
-    pub const W_Z_PA: usize = 15; // = 2·Y1·Z1
+    // Doubling intermediates and outputs (S = Y², X_pa/Y_pa/Z_pa =
+    // doubled point pre-add).
+    pub const W_S: usize = 12;
+    pub const W_X_PA: usize = 13;
+    pub const W_Y_PA: usize = 14;
+    pub const W_Z_PA: usize = 15;
 
-    // Addition intermediates (using doubled point + addend).
-    pub const W_Z_PA_SQ: usize = 16; // Z_pa²
-    pub const W_Z_PA_CUBE: usize = 17; // Z_pa³
-    pub const W_C: usize = 18; // = X_addend·Z_pa_sq − X_pa  (= H)
-    pub const W_D: usize = 19; // = Y_addend·Z_pa_cube − Y_pa (= r)
-    pub const W_E: usize = 20; // = C²
-    pub const W_F: usize = 21; // = C·E
-    pub const W_G: usize = 22; // = X_pa·E
-
-    // Addition output (= 2R + addend, before s_add selection).
-    pub const W_X_ADD: usize = 23;
-    pub const W_Y_ADD: usize = 24;
-    pub const W_Z_ADD: usize = 25;
-
-    // Per-row final output (selected: doubled or added).
-    pub const W_X_OUT: usize = 26;
-    pub const W_Y_OUT: usize = 27;
-    pub const W_Z_OUT: usize = 28;
+    // Addition intermediates (Z_pa², Z_pa³, C=H, D=r, E=H², F=H³,
+    // G=X_pa·H²). The addition outputs (X_add, Y_add, Z_add) are NOT
+    // stored — they're inlined into the output-selection constraints.
+    pub const W_Z_PA_SQ: usize = 16;
+    pub const W_Z_PA_CUBE: usize = 17;
+    pub const W_C: usize = 18;
+    pub const W_D: usize = 19;
+    pub const W_E: usize = 20;
+    pub const W_F: usize = 21;
+    pub const W_G: usize = 22;
 
     // Final-row affine conversion (only meaningful at FINAL_ROW).
-    pub const W_Z_INV: usize = 29;
-    pub const W_Z_INV_SQ: usize = 30;
-    pub const W_Z_INV_CUBE: usize = 31;
-    pub const W_X_AFF: usize = 32;
-    pub const W_Y_AFF: usize = 33;
+    pub const W_Z_INV: usize = 23;
+    pub const W_Z_INV_SQ: usize = 24;
+    pub const W_Z_INV_CUBE: usize = 25;
+    pub const W_X_AFF: usize = 26;
+    pub const W_Y_AFF: usize = 27;
 
-    pub const NUM_INT: usize = 34;
+    pub const NUM_INT: usize = 28;
 
-    // Flat indices for shift specs (no bin/poly columns, so flat = int).
-    pub const FLAT_W_X1: usize = W_X1;
-    pub const FLAT_W_Y1: usize = W_Y1;
-    pub const FLAT_W_Z1: usize = W_Z1;
+    // Flat indices for shift specs (no bin/poly columns; flat = int).
+    pub const FLAT_W_X: usize = W_X;
+    pub const FLAT_W_Y: usize = W_Y;
+    pub const FLAT_W_Z: usize = W_Z;
 }
 
 // ---------------------------------------------------------------------------
 // The UAIR.
 // ---------------------------------------------------------------------------
 
-/// Shamir scalar-multiplication UAIR. See module docs for scope.
 #[derive(Clone, Debug)]
 pub struct EcdsaUair<R>(PhantomData<R>);
 
@@ -160,11 +154,11 @@ where
     fn signature() -> UairSignature {
         let total = TotalColumnLayout::new(0, 0, cols::NUM_INT);
         let public = PublicColumnLayout::new(0, 0, cols::NUM_INT_PUB);
-        // Shift X1, Y1, Z1 by 1 so we can constrain `down.X1[t] = up.X_out[t]`.
+        // Shift X, Y, Z by 1 so down.X[t] = X[t+1] = R_{t+1}.
         let shifts: Vec<ShiftSpec> = vec![
-            ShiftSpec::new(cols::FLAT_W_X1, 1),
-            ShiftSpec::new(cols::FLAT_W_Y1, 1),
-            ShiftSpec::new(cols::FLAT_W_Z1, 1),
+            ShiftSpec::new(cols::FLAT_W_X, 1),
+            ShiftSpec::new(cols::FLAT_W_Y, 1),
+            ShiftSpec::new(cols::FLAT_W_Z, 1),
         ];
         UairSignature::new(total, public, shifts, vec![])
     }
@@ -192,9 +186,9 @@ where
         let pa_r_init_x = &int[cols::PA_R_INIT_X];
         let pa_r_init_y = &int[cols::PA_R_INIT_Y];
         let pa_r_init_z = &int[cols::PA_R_INIT_Z];
-        let x1 = &int[cols::W_X1];
-        let y1 = &int[cols::W_Y1];
-        let z1 = &int[cols::W_Z1];
+        let x = &int[cols::W_X];
+        let y = &int[cols::W_Y];
+        let z = &int[cols::W_Z];
         let s_w = &int[cols::W_S];
         let x_pa = &int[cols::W_X_PA];
         let y_pa = &int[cols::W_Y_PA];
@@ -206,22 +200,16 @@ where
         let e = &int[cols::W_E];
         let f = &int[cols::W_F];
         let g = &int[cols::W_G];
-        let x_add = &int[cols::W_X_ADD];
-        let y_add = &int[cols::W_Y_ADD];
-        let z_add = &int[cols::W_Z_ADD];
-        let x_out = &int[cols::W_X_OUT];
-        let y_out = &int[cols::W_Y_OUT];
-        let z_out = &int[cols::W_Z_OUT];
         let z_inv = &int[cols::W_Z_INV];
         let z_inv_sq = &int[cols::W_Z_INV_SQ];
         let z_inv_cube = &int[cols::W_Z_INV_CUBE];
         let x_aff = &int[cols::W_X_AFF];
         let y_aff = &int[cols::W_Y_AFF];
 
-        // down.int[i] in source-col-ascending order: X1, Y1, Z1.
-        let down_x1 = &down.int[0];
-        let down_y1 = &down.int[1];
-        let down_z1 = &down.int[2];
+        // down.int[i] in source-col-ascending order: X, Y, Z.
+        let down_x = &down.int[0];
+        let down_y = &down.int[1];
+        let down_z = &down.int[2];
 
         let two_scalar = const_scalar::<R>(R::from(2_u32));
         let three_scalar = const_scalar::<R>(R::from(3_u32));
@@ -231,44 +219,44 @@ where
         let one_expr = from_ref(&const_scalar::<R>(R::ONE));
 
         // ===================================================================
-        // Doubling block (4 constraints, max degree 5; copied from
-        // ecdsa_doubling slice but operating on (X1,Y1,Z1) → (X_pa,Y_pa,Z_pa)).
+        // Doubling block (4 constraints, max degree 5). Operates on
+        // (X, Y, Z) → (X_pa, Y_pa, Z_pa).
         // ===================================================================
 
-        // C-D1: S − Y1² = 0
-        let d1_inner = s_w.clone() - &(y1.clone() * y1);
+        // C-D1: S − Y² = 0
+        let d1_inner = s_w.clone() - &(y.clone() * y);
         b.assert_zero(s_active.clone() * &d1_inner);
 
-        // C-D2: Z_pa − 2·Y1·Z1 = 0
-        let yz = y1.clone() * z1;
-        let two_yz = mbs(&yz, &two_scalar).expect("2·Y1·Z1 overflow");
+        // C-D2: Z_pa − 2·Y·Z = 0
+        let yz = y.clone() * z;
+        let two_yz = mbs(&yz, &two_scalar).expect("2·Y·Z overflow");
         let d2_inner = z_pa.clone() - &two_yz;
         b.assert_zero(s_active.clone() * &d2_inner);
 
-        // C-D3: X_pa − 9·X1⁴ + 8·X1·S = 0
-        let x_sq = x1.clone() * x1;
+        // C-D3: X_pa − 9·X⁴ + 8·X·S = 0
+        let x_sq = x.clone() * x;
         let x_pow4 = x_sq.clone() * &x_sq;
-        let nine_x4 = mbs(&x_pow4, &nine_scalar).expect("9·X1⁴ overflow");
-        let xs = x1.clone() * s_w;
-        let eight_xs = mbs(&xs, &eight_scalar).expect("8·X1·S overflow");
+        let nine_x4 = mbs(&x_pow4, &nine_scalar).expect("9·X⁴ overflow");
+        let xs = x.clone() * s_w;
+        let eight_xs = mbs(&xs, &eight_scalar).expect("8·X·S overflow");
         let d3_inner = x_pa.clone() - &nine_x4 + &eight_xs;
         b.assert_zero(s_active.clone() * &d3_inner);
 
-        // C-D4: Y_pa − 12·X1³·S + 3·X1²·X_pa + 8·S² = 0
+        // C-D4: Y_pa − 12·X³·S + 3·X²·X_pa + 8·S² = 0
         let x3s = x_sq.clone() * &xs;
-        let twelve_x3s = mbs(&x3s, &twelve_scalar).expect("12·X1³·S overflow");
+        let twelve_x3s = mbs(&x3s, &twelve_scalar).expect("12·X³·S overflow");
         let x_sq_x_pa = x_sq.clone() * x_pa;
         let three_x2_xpa =
-            mbs(&x_sq_x_pa, &three_scalar).expect("3·X1²·X_pa overflow");
+            mbs(&x_sq_x_pa, &three_scalar).expect("3·X²·X_pa overflow");
         let s_sq = s_w.clone() * s_w;
         let eight_s_sq = mbs(&s_sq, &eight_scalar).expect("8·S² overflow");
         let d4_inner = y_pa.clone() - &twelve_x3s + &three_x2_xpa + &eight_s_sq;
         b.assert_zero(s_active.clone() * &d4_inner);
 
         // ===================================================================
-        // Addition block (10 constraints, max degree 3; mirrors the
-        // ecdsa_addition slice but using (X_pa,Y_pa,Z_pa) as the Jacobian
-        // input and (PA_X_ADDEND, PA_Y_ADDEND) as the affine addend).
+        // Addition intermediates (7 constraints, max degree 3). The
+        // addition outputs (X_add, Y_add, Z_add) are inlined into the
+        // output-selection constraints below — no columns for them.
         // ===================================================================
 
         // C-A1: Z_pa_sq − Z_pa·Z_pa = 0
@@ -299,68 +287,65 @@ where
         let a7_inner = g.clone() - &(x_pa.clone() * e);
         b.assert_zero(s_active.clone() * &a7_inner);
 
-        // C-A8: X_add − D² + F + 2·G = 0
+        // ===================================================================
+        // Output-selection-and-chaining (3 constraints).
+        // Combines the s_add selection with the row chaining (down.X is
+        // the next row's input). Addition outputs are inlined:
+        //
+        //   X_add = D² − F − 2·G
+        //   Y_add = D·(G − X_add) − Y_pa·F
+        //         = D·(3G − D² + F) − Y_pa·F
+        //         = 3·D·G + D·F − D³ − Y_pa·F        (after expansion)
+        //   Z_add = Z_pa·C
+        //
+        //   down.X = X_pa + S_ADD·(X_add − X_pa)        (deg 4 with selector)
+        //   down.Y = Y_pa + S_ADD·(Y_add − Y_pa)        (deg 5 with selector)
+        //   down.Z = Z_pa + S_ADD·(Z_add − Z_pa)        (deg 4 with selector)
+        // ===================================================================
+
+        // X output: down.X − X_pa − S_ADD·(D² − F − 2·G − X_pa) = 0
         let d_sq = d.clone() * d;
         let two_g = mbs(g, &two_scalar).expect("2·G overflow");
-        let a8_inner = x_add.clone() - &d_sq + f + &two_g;
-        b.assert_zero(s_active.clone() * &a8_inner);
-
-        // C-A9: Y_add − D·(G − X_add) + Y_pa·F = 0
-        let g_minus_xadd = g.clone() - x_add;
-        let d_times = d.clone() * &g_minus_xadd;
-        let y_pa_f = y_pa.clone() * f;
-        let a9_inner = y_add.clone() - &d_times + &y_pa_f;
-        b.assert_zero(s_active.clone() * &a9_inner);
-
-        // C-A10: Z_add − Z_pa·C = 0
-        let a10_inner = z_add.clone() - &(z_pa.clone() * c);
-        b.assert_zero(s_active.clone() * &a10_inner);
-
-        // ===================================================================
-        // Output selection (3 constraints, degree 3).
-        //   X_out = s_add ? X_add : X_pa
-        //   ⟺ X_out − X_pa − s_add·(X_add − X_pa) = 0
-        // ===================================================================
-
-        let x_diff = x_add.clone() - x_pa;
-        let s_add_xdiff = s_add.clone() * &x_diff;
-        let o1_inner = x_out.clone() - x_pa - &s_add_xdiff;
+        let x_add_minus_x_pa = d_sq.clone() - f - &two_g - x_pa;
+        let s_add_x = s_add.clone() * &x_add_minus_x_pa;
+        let o1_inner = down_x.clone() - x_pa - &s_add_x;
         b.assert_zero(s_active.clone() * &o1_inner);
 
-        let y_diff = y_add.clone() - y_pa;
-        let s_add_ydiff = s_add.clone() * &y_diff;
-        let o2_inner = y_out.clone() - y_pa - &s_add_ydiff;
+        // Y output: down.Y − Y_pa − S_ADD·(3·D·G + D·F − D³ − Y_pa·F − Y_pa) = 0
+        let d_cube = d.clone() * &d_sq;
+        let dg = d.clone() * g;
+        let three_dg = mbs(&dg, &three_scalar).expect("3·D·G overflow");
+        let df = d.clone() * f;
+        let y_pa_f = y_pa.clone() * f;
+        let y_add_minus_y_pa =
+            three_dg + &df - &d_cube - &y_pa_f - y_pa;
+        let s_add_y = s_add.clone() * &y_add_minus_y_pa;
+        let o2_inner = down_y.clone() - y_pa - &s_add_y;
         b.assert_zero(s_active.clone() * &o2_inner);
 
-        let z_diff = z_add.clone() - z_pa;
-        let s_add_zdiff = s_add.clone() * &z_diff;
-        let o3_inner = z_out.clone() - z_pa - &s_add_zdiff;
+        // Z output: down.Z − Z_pa − S_ADD·(Z_pa·C − Z_pa) = 0
+        let z_pa_c = z_pa.clone() * c;
+        let z_add_minus_z_pa = z_pa_c - z_pa;
+        let s_add_z = s_add.clone() * &z_add_minus_z_pa;
+        let o3_inner = down_z.clone() - z_pa - &s_add_z;
         b.assert_zero(s_active.clone() * &o3_inner);
 
         // ===================================================================
         // Init boundary: at row 0, R = (PA_R_INIT_X, PA_R_INIT_Y, PA_R_INIT_Z).
         // ===================================================================
 
-        b.assert_zero(s_init.clone() * &(x1.clone() - pa_r_init_x));
-        b.assert_zero(s_init.clone() * &(y1.clone() - pa_r_init_y));
-        b.assert_zero(s_init.clone() * &(z1.clone() - pa_r_init_z));
-
-        // ===================================================================
-        // Row chaining: down.X1[t] = up.X_out[t] for active rows.
-        // ===================================================================
-
-        b.assert_zero(s_active.clone() * &(down_x1.clone() - x_out));
-        b.assert_zero(s_active.clone() * &(down_y1.clone() - y_out));
-        b.assert_zero(s_active.clone() * &(down_z1.clone() - z_out));
+        b.assert_zero(s_init.clone() * &(x.clone() - pa_r_init_x));
+        b.assert_zero(s_init.clone() * &(y.clone() - pa_r_init_y));
+        b.assert_zero(s_init.clone() * &(z.clone() - pa_r_init_z));
 
         // ===================================================================
         // Final-row affine conversion (5 constraints, gated by s_final).
-        // Uses the FINAL_ROW's (X1, Y1, Z1) (which equal R_NUM_SHAMIR_ROUNDS
-        // via the chaining at the last active row).
+        // Uses the FINAL_ROW's (X, Y, Z) (which equal R_NUM_SHAMIR_ROUNDS
+        // by virtue of the chaining at the last active row).
         // ===================================================================
 
-        // F1: Z1·Z_inv − 1 = 0
-        let f1_inner = z1.clone() * z_inv - &one_expr;
+        // F1: Z·Z_inv − 1 = 0
+        let f1_inner = z.clone() * z_inv - &one_expr;
         b.assert_zero(s_final.clone() * &f1_inner);
 
         // F2: Z_inv_sq − Z_inv² = 0
@@ -371,12 +356,12 @@ where
         let f3_inner = z_inv_cube.clone() - &(z_inv.clone() * z_inv_sq);
         b.assert_zero(s_final.clone() * &f3_inner);
 
-        // F4: X_aff − X1·Z_inv_sq = 0
-        let f4_inner = x_aff.clone() - &(x1.clone() * z_inv_sq);
+        // F4: X_aff − X·Z_inv_sq = 0
+        let f4_inner = x_aff.clone() - &(x.clone() * z_inv_sq);
         b.assert_zero(s_final.clone() * &f4_inner);
 
-        // F5: Y_aff − Y1·Z_inv_cube = 0
-        let f5_inner = y_aff.clone() - &(y1.clone() * z_inv_cube);
+        // F5: Y_aff − Y·Z_inv_cube = 0
+        let f5_inner = y_aff.clone() - &(y.clone() * z_inv_cube);
         b.assert_zero(s_final.clone() * &f5_inner);
     }
 }
@@ -473,8 +458,10 @@ fn uint_to_int(u: CbUint<EC_FP_INT_LIMBS>) -> Int<EC_FP_INT_LIMBS> {
 // Reference per-step computation (for witness gen and tests).
 // ---------------------------------------------------------------------------
 
-/// One Shamir step: doubled-then-conditionally-added Jacobian point.
-/// All the per-row F_p scratch values are returned.
+/// One Shamir step: Jacobian state R_t plus the per-row scratch.
+/// The "addition output" (X_add, Y_add, Z_add) is computed but not
+/// returned as a column — only the selected `(x_out, y_out, z_out)` is
+/// emitted (which equals R_{t+1}).
 struct StepValues {
     s: CbUint<EC_FP_INT_LIMBS>,
     x_pa: CbUint<EC_FP_INT_LIMBS>,
@@ -487,12 +474,10 @@ struct StepValues {
     e: CbUint<EC_FP_INT_LIMBS>,
     f: CbUint<EC_FP_INT_LIMBS>,
     g: CbUint<EC_FP_INT_LIMBS>,
-    x_add: CbUint<EC_FP_INT_LIMBS>,
-    y_add: CbUint<EC_FP_INT_LIMBS>,
-    z_add: CbUint<EC_FP_INT_LIMBS>,
-    x_out: CbUint<EC_FP_INT_LIMBS>,
-    y_out: CbUint<EC_FP_INT_LIMBS>,
-    z_out: CbUint<EC_FP_INT_LIMBS>,
+    /// `R_{t+1}` (= `down.X[t]` etc., constraints' chosen output).
+    next_x: CbUint<EC_FP_INT_LIMBS>,
+    next_y: CbUint<EC_FP_INT_LIMBS>,
+    next_z: CbUint<EC_FP_INT_LIMBS>,
 }
 
 fn compute_step(
@@ -523,7 +508,7 @@ fn compute_step(
     let eight_s_sq = small_mul_mod_p(&s_sq, 8);
     let y_pa = sub_mod_p(&big_term, &eight_s_sq);
 
-    // --- Addition (always computed; output selection happens after) ---
+    // --- Addition (computed inline, not stored as columns) ---
     let z_pa_sq = mul_mod_p(&z_pa, &z_pa);
     let z_pa_cube = mul_mod_p(&z_pa, &z_pa_sq);
     let a_val = mul_mod_p(pa_x, &z_pa_sq);
@@ -546,8 +531,8 @@ fn compute_step(
     let z_add = mul_mod_p(&z_pa, &c);
 
     // --- Output selection ---
-    let (x_out, y_out, z_out) = if s_add_bit {
-        (x_add.clone(), y_add.clone(), z_add.clone())
+    let (next_x, next_y, next_z) = if s_add_bit {
+        (x_add, y_add, z_add)
     } else {
         (x_pa.clone(), y_pa.clone(), z_pa.clone())
     };
@@ -564,12 +549,9 @@ fn compute_step(
         e,
         f,
         g,
-        x_add,
-        y_add,
-        z_add,
-        x_out,
-        y_out,
-        z_out,
+        next_x,
+        next_y,
+        next_z,
     }
 }
 
@@ -595,53 +577,48 @@ where
         );
 
         // Pick a non-identity initial point and a non-identity addend.
-        // (The mixed addition formulas don't handle identity inputs.)
         let r_init_x = rand_fp(rng);
         let r_init_y = rand_fp(rng);
         let r_init_z = rand_nonzero_fp(rng);
         let pa_x = rand_fp(rng);
         let pa_y = rand_fp(rng);
 
-        // Sample all bits as 1 (s_add = 1 every row) to keep the test
-        // simple and exercise the addition path. (s_add = 0 is also
-        // covered by the constraint structure, just not by this trace.)
-
         // Build the per-row state by simulating the Shamir loop.
-        let mut x1_seq: Vec<CbUint<EC_FP_INT_LIMBS>> = Vec::with_capacity(n_rows);
-        let mut y1_seq: Vec<CbUint<EC_FP_INT_LIMBS>> = Vec::with_capacity(n_rows);
-        let mut z1_seq: Vec<CbUint<EC_FP_INT_LIMBS>> = Vec::with_capacity(n_rows);
-        x1_seq.push(r_init_x.clone());
-        y1_seq.push(r_init_y.clone());
-        z1_seq.push(r_init_z.clone());
+        // x_seq[t] = R_t. x_seq[0] = R_init.
+        let mut x_seq: Vec<CbUint<EC_FP_INT_LIMBS>> = Vec::with_capacity(n_rows);
+        let mut y_seq: Vec<CbUint<EC_FP_INT_LIMBS>> = Vec::with_capacity(n_rows);
+        let mut z_seq: Vec<CbUint<EC_FP_INT_LIMBS>> = Vec::with_capacity(n_rows);
+        x_seq.push(r_init_x.clone());
+        y_seq.push(r_init_y.clone());
+        z_seq.push(r_init_z.clone());
 
         let mut steps: Vec<StepValues> = Vec::with_capacity(NUM_SHAMIR_ROUNDS);
         for t in 0..NUM_SHAMIR_ROUNDS {
-            let step = compute_step(&x1_seq[t], &y1_seq[t], &z1_seq[t], &pa_x, &pa_y, true);
-            x1_seq.push(step.x_out.clone());
-            y1_seq.push(step.y_out.clone());
-            z1_seq.push(step.z_out.clone());
+            let step = compute_step(&x_seq[t], &y_seq[t], &z_seq[t], &pa_x, &pa_y, true);
+            x_seq.push(step.next_x.clone());
+            y_seq.push(step.next_y.clone());
+            z_seq.push(step.next_z.clone());
             steps.push(step);
         }
 
-        // Pad the chained-input sequence to n_rows.
+        // Pad the chained state sequence to n_rows.
         let zero_uint = CbUint::<EC_FP_INT_LIMBS>::ZERO;
-        while x1_seq.len() < n_rows {
-            x1_seq.push(zero_uint.clone());
-            y1_seq.push(zero_uint.clone());
-            z1_seq.push(zero_uint.clone());
+        while x_seq.len() < n_rows {
+            x_seq.push(zero_uint.clone());
+            y_seq.push(zero_uint.clone());
+            z_seq.push(zero_uint.clone());
         }
 
         // Affine conversion at FINAL_ROW.
-        let z_final = z1_seq[FINAL_ROW].clone();
+        let z_final = z_seq[FINAL_ROW].clone();
         let z_inv_v = inv_mod_p(&z_final);
         let z_inv_sq_v = mul_mod_p(&z_inv_v, &z_inv_v);
         let z_inv_cube_v = mul_mod_p(&z_inv_v, &z_inv_sq_v);
-        let x_aff_v = mul_mod_p(&x1_seq[FINAL_ROW], &z_inv_sq_v);
-        let y_aff_v = mul_mod_p(&y1_seq[FINAL_ROW], &z_inv_cube_v);
+        let x_aff_v = mul_mod_p(&x_seq[FINAL_ROW], &z_inv_sq_v);
+        let y_aff_v = mul_mod_p(&y_seq[FINAL_ROW], &z_inv_cube_v);
 
         // ---- Populate columns. ----
-        let zero_r = || R::ZERO;
-        let mk_col = || vec![zero_r(); n_rows];
+        let mk_col = || vec![R::ZERO; n_rows];
 
         let mut s_init_col: Vec<R> = mk_col();
         let mut s_active_col: Vec<R> = mk_col();
@@ -652,9 +629,9 @@ where
         let mut pa_r_init_x_col: Vec<R> = mk_col();
         let mut pa_r_init_y_col: Vec<R> = mk_col();
         let mut pa_r_init_z_col: Vec<R> = mk_col();
-        let mut x1_col: Vec<R> = mk_col();
-        let mut y1_col: Vec<R> = mk_col();
-        let mut z1_col: Vec<R> = mk_col();
+        let mut x_col: Vec<R> = mk_col();
+        let mut y_col: Vec<R> = mk_col();
+        let mut z_col: Vec<R> = mk_col();
         let mut s_col: Vec<R> = mk_col();
         let mut x_pa_col: Vec<R> = mk_col();
         let mut y_pa_col: Vec<R> = mk_col();
@@ -666,19 +643,13 @@ where
         let mut e_col: Vec<R> = mk_col();
         let mut f_col: Vec<R> = mk_col();
         let mut g_col: Vec<R> = mk_col();
-        let mut x_add_col: Vec<R> = mk_col();
-        let mut y_add_col: Vec<R> = mk_col();
-        let mut z_add_col: Vec<R> = mk_col();
-        let mut x_out_col: Vec<R> = mk_col();
-        let mut y_out_col: Vec<R> = mk_col();
-        let mut z_out_col: Vec<R> = mk_col();
         let mut z_inv_col: Vec<R> = mk_col();
         let mut z_inv_sq_col: Vec<R> = mk_col();
         let mut z_inv_cube_col: Vec<R> = mk_col();
         let mut x_aff_col: Vec<R> = mk_col();
         let mut y_aff_col: Vec<R> = mk_col();
 
-        // Selectors.
+        // Selectors and addend.
         s_init_col[0] = R::ONE;
         for t in 0..NUM_SHAMIR_ROUNDS {
             s_active_col[t] = R::ONE;
@@ -688,20 +659,19 @@ where
         }
         s_final_col[FINAL_ROW] = R::ONE;
 
-        // PA_R_INIT is constant per row 0 (but harmless to fill all rows
-        // — we only constrain it at row 0 via S_INIT).
+        // PA_R_INIT only matters at row 0 (gated by S_INIT).
         pa_r_init_x_col[0] = R::from(uint_to_int(r_init_x));
         pa_r_init_y_col[0] = R::from(uint_to_int(r_init_y));
         pa_r_init_z_col[0] = R::from(uint_to_int(r_init_z));
 
-        // Chained input columns.
+        // Chained state: X[t] = R_t.
         for t in 0..n_rows {
-            x1_col[t] = R::from(uint_to_int(x1_seq[t].clone()));
-            y1_col[t] = R::from(uint_to_int(y1_seq[t].clone()));
-            z1_col[t] = R::from(uint_to_int(z1_seq[t].clone()));
+            x_col[t] = R::from(uint_to_int(x_seq[t].clone()));
+            y_col[t] = R::from(uint_to_int(y_seq[t].clone()));
+            z_col[t] = R::from(uint_to_int(z_seq[t].clone()));
         }
 
-        // Per-step intermediate / output columns (rows 0..NUM_SHAMIR_ROUNDS).
+        // Per-step intermediates (rows 0..NUM_SHAMIR_ROUNDS).
         for (t, step) in steps.iter().enumerate() {
             s_col[t] = R::from(uint_to_int(step.s.clone()));
             x_pa_col[t] = R::from(uint_to_int(step.x_pa.clone()));
@@ -714,12 +684,6 @@ where
             e_col[t] = R::from(uint_to_int(step.e.clone()));
             f_col[t] = R::from(uint_to_int(step.f.clone()));
             g_col[t] = R::from(uint_to_int(step.g.clone()));
-            x_add_col[t] = R::from(uint_to_int(step.x_add.clone()));
-            y_add_col[t] = R::from(uint_to_int(step.y_add.clone()));
-            z_add_col[t] = R::from(uint_to_int(step.z_add.clone()));
-            x_out_col[t] = R::from(uint_to_int(step.x_out.clone()));
-            y_out_col[t] = R::from(uint_to_int(step.y_out.clone()));
-            z_out_col[t] = R::from(uint_to_int(step.z_out.clone()));
         }
 
         // Final-row affine cells.
@@ -741,9 +705,9 @@ where
             to_mle(pa_r_init_x_col),
             to_mle(pa_r_init_y_col),
             to_mle(pa_r_init_z_col),
-            to_mle(x1_col),
-            to_mle(y1_col),
-            to_mle(z1_col),
+            to_mle(x_col),
+            to_mle(y_col),
+            to_mle(z_col),
             to_mle(s_col),
             to_mle(x_pa_col),
             to_mle(y_pa_col),
@@ -755,12 +719,6 @@ where
             to_mle(e_col),
             to_mle(f_col),
             to_mle(g_col),
-            to_mle(x_add_col),
-            to_mle(y_add_col),
-            to_mle(z_add_col),
-            to_mle(x_out_col),
-            to_mle(y_out_col),
-            to_mle(z_out_col),
             to_mle(z_inv_col),
             to_mle(z_inv_sq_col),
             to_mle(z_inv_cube_col),
@@ -789,27 +747,25 @@ mod tests {
         degree_counter::{count_constraint_degrees, count_max_degree},
     };
 
-    /// Sanity: 28 constraints. Max degree is 5 (inherited from
-    /// the doubling slice's `Y_pa` constraint).
+    /// Sanity: 22 constraints, max degree 5.
     #[test]
     fn shamir_constraint_shape() {
         type U = EcdsaUair<Int<EC_FP_INT_LIMBS>>;
-        assert_eq!(count_constraints::<U>(), 28);
+        assert_eq!(count_constraints::<U>(), 22);
         assert_eq!(count_max_degree::<U>(), 5);
-        // Spot-check: doubling block contributes [3, 3, 5, 5];
-        // addition block all 3s; output selection 3s; init 2s;
-        // chaining 2s; final 3s.
         let degrees = count_constraint_degrees::<U>();
+        // Spot-checks: doubling deg-5; addition intermediates deg-3;
+        // output sel mixes deg-4 and deg-5 (Y has D³); init deg-2;
+        // final affine deg-3.
         assert!(degrees.iter().any(|&d| d == 5), "expected at least one deg-5");
-        assert!(degrees.iter().filter(|&&d| d == 2).count() >= 6, "init+chain ≥ 6 deg-2");
+        assert_eq!(degrees.iter().filter(|&&d| d == 2).count(), 3, "init = 3 deg-2");
     }
 
     /// Witness gen produces a trace where every constraint vanishes
-    /// mod p. Exercises the active-row block (doubling+addition+
-    /// selection+chaining) and the final-row affine conversion.
+    /// mod p. Exercises the active block + final affine conversion.
     #[test]
     fn witness_satisfies_constraints_mod_p() {
-        let num_vars = 9; // 512 rows ≥ FINAL_ROW + 1 = 257
+        let num_vars = 9;
         let mut r = rng();
         let trace = <EcdsaUair<Int<EC_FP_INT_LIMBS>> as GenerateRandomTrace<32>>::
             generate_random_trace(num_vars, &mut r);
@@ -831,18 +787,19 @@ mod tests {
             let init = s_init_int == Int::ONE;
             let final_row = s_final_int == Int::ONE;
 
-            // Active rows: doubling + addition + selection + chaining.
+            // Active rows: doubling + addition intermediates +
+            // chained-output (= R_{t+1}).
             if active {
                 let s_add_int = trace.int[cols::S_ADD][t].clone();
                 let s_add_bit = s_add_int == Int::ONE;
 
                 let pa_x = read_uint(cols::PA_X_ADDEND, t);
                 let pa_y = read_uint(cols::PA_Y_ADDEND, t);
-                let x1 = read_uint(cols::W_X1, t);
-                let y1 = read_uint(cols::W_Y1, t);
-                let z1 = read_uint(cols::W_Z1, t);
+                let x = read_uint(cols::W_X, t);
+                let y = read_uint(cols::W_Y, t);
+                let z = read_uint(cols::W_Z, t);
 
-                let expected = compute_step(&x1, &y1, &z1, &pa_x, &pa_y, s_add_bit);
+                let expected = compute_step(&x, &y, &z, &pa_x, &pa_y, s_add_bit);
 
                 assert_eq!(read_uint(cols::W_S, t), expected.s, "S at row {t}");
                 assert_eq!(read_uint(cols::W_X_PA, t), expected.x_pa, "X_pa at row {t}");
@@ -855,66 +812,44 @@ mod tests {
                 assert_eq!(read_uint(cols::W_E, t), expected.e, "E at row {t}");
                 assert_eq!(read_uint(cols::W_F, t), expected.f, "F at row {t}");
                 assert_eq!(read_uint(cols::W_G, t), expected.g, "G at row {t}");
-                assert_eq!(read_uint(cols::W_X_ADD, t), expected.x_add, "X_add at row {t}");
-                assert_eq!(read_uint(cols::W_Y_ADD, t), expected.y_add, "Y_add at row {t}");
-                assert_eq!(read_uint(cols::W_Z_ADD, t), expected.z_add, "Z_add at row {t}");
-                assert_eq!(read_uint(cols::W_X_OUT, t), expected.x_out, "X_out at row {t}");
-                assert_eq!(read_uint(cols::W_Y_OUT, t), expected.y_out, "Y_out at row {t}");
-                assert_eq!(read_uint(cols::W_Z_OUT, t), expected.z_out, "Z_out at row {t}");
 
-                // Chaining: row t+1 input = row t output.
+                // Output: down.X = next R = expected.next_x.
                 if t + 1 < n_rows {
-                    assert_eq!(read_uint(cols::W_X1, t + 1), expected.x_out, "chain X at {t}");
-                    assert_eq!(read_uint(cols::W_Y1, t + 1), expected.y_out, "chain Y at {t}");
-                    assert_eq!(read_uint(cols::W_Z1, t + 1), expected.z_out, "chain Z at {t}");
+                    assert_eq!(read_uint(cols::W_X, t + 1), expected.next_x, "next X at {t}");
+                    assert_eq!(read_uint(cols::W_Y, t + 1), expected.next_y, "next Y at {t}");
+                    assert_eq!(read_uint(cols::W_Z, t + 1), expected.next_z, "next Z at {t}");
                 }
             }
 
-            // Init boundary: row 0 input = PA_R_INIT.
+            // Init boundary: row 0's R = PA_R_INIT.
             if init {
-                assert_eq!(
-                    read_uint(cols::W_X1, t),
-                    read_uint(cols::PA_R_INIT_X, t),
-                    "init X at {t}",
-                );
-                assert_eq!(
-                    read_uint(cols::W_Y1, t),
-                    read_uint(cols::PA_R_INIT_Y, t),
-                    "init Y at {t}",
-                );
-                assert_eq!(
-                    read_uint(cols::W_Z1, t),
-                    read_uint(cols::PA_R_INIT_Z, t),
-                    "init Z at {t}",
-                );
+                assert_eq!(read_uint(cols::W_X, t), read_uint(cols::PA_R_INIT_X, t), "init X at {t}");
+                assert_eq!(read_uint(cols::W_Y, t), read_uint(cols::PA_R_INIT_Y, t), "init Y at {t}");
+                assert_eq!(read_uint(cols::W_Z, t), read_uint(cols::PA_R_INIT_Z, t), "init Z at {t}");
             }
 
-            // Final boundary: affine conversion of (X1, Y1, Z1).
+            // Final boundary: affine conversion of (X, Y, Z) at FINAL_ROW.
             if final_row {
-                let x1 = read_uint(cols::W_X1, t);
-                let y1 = read_uint(cols::W_Y1, t);
-                let z1 = read_uint(cols::W_Z1, t);
+                let x = read_uint(cols::W_X, t);
+                let y = read_uint(cols::W_Y, t);
+                let z = read_uint(cols::W_Z, t);
                 let z_inv = read_uint(cols::W_Z_INV, t);
                 let z_inv_sq = read_uint(cols::W_Z_INV_SQ, t);
                 let z_inv_cube = read_uint(cols::W_Z_INV_CUBE, t);
                 let x_aff = read_uint(cols::W_X_AFF, t);
                 let y_aff = read_uint(cols::W_Y_AFF, t);
 
-                assert_eq!(mul_mod_p(&z1, &z_inv), one_uint, "F1 (Z·Z_inv=1) at {t}");
+                assert_eq!(mul_mod_p(&z, &z_inv), one_uint, "F1 (Z·Z_inv=1) at {t}");
                 assert_eq!(z_inv_sq, mul_mod_p(&z_inv, &z_inv), "F2 (Z_inv²) at {t}");
-                assert_eq!(
-                    z_inv_cube,
-                    mul_mod_p(&z_inv, &z_inv_sq),
-                    "F3 (Z_inv³) at {t}",
-                );
-                assert_eq!(x_aff, mul_mod_p(&x1, &z_inv_sq), "F4 (X_aff) at {t}");
-                assert_eq!(y_aff, mul_mod_p(&y1, &z_inv_cube), "F5 (Y_aff) at {t}");
+                assert_eq!(z_inv_cube, mul_mod_p(&z_inv, &z_inv_sq), "F3 (Z_inv³) at {t}");
+                assert_eq!(x_aff, mul_mod_p(&x, &z_inv_sq), "F4 (X_aff) at {t}");
+                assert_eq!(y_aff, mul_mod_p(&y, &z_inv_cube), "F5 (Y_aff) at {t}");
             }
 
-            // Padding rows: chained inputs are zero (uninitialized but
-            // unconstrained — sanity check only).
+            // Padding rows past row NUM_SHAMIR_ROUNDS: chained X is zero
+            // (uninitialized but unconstrained).
             if !active && !final_row {
-                assert_eq!(read_uint(cols::W_X1, t), zero_uint, "pad X1 at {t}");
+                assert_eq!(read_uint(cols::W_X, t), zero_uint, "pad X at {t}");
             }
         }
     }

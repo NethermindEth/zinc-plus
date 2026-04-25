@@ -29,15 +29,15 @@
 //!   (rotation-ideal overflow witnesses, made public)
 //! - `[6..19]` witness: SHA's remaining witness bit-polys
 //!
-//! **int section** (45 cols total, 15 pubs + 28 witness + 2
+//! **int section** (39 cols total, 15 pubs + 22 witness + 2
 //!   multiplicities):
 //! - `[0..6]` public: SHA pubs (S_INIT, S_FINAL, PA_K, PA_C_C7/8/9)
 //! - `[6..15]` public: ECDSA pubs (S_INIT, S_ACTIVE, S_FINAL, S_ADD,
 //!   PA_X_ADDEND, PA_Y_ADDEND, PA_R_INIT_X/Y/Z)
 //! - `[15..18]` witness: SHA `mu_W, mu_a, mu_e`
-//! - `[18..43]` witness: ECDSA chained-input + intermediates +
-//!   outputs + affine cells (25 cols)
-//! - `[43..45]` witness: SHA lookup multiplicities (`M_W2, M_W3`) —
+//! - `[18..37]` witness: ECDSA chained Jacobian state + intermediates
+//!   + affine cells (19 cols)
+//! - `[37..39]` witness: SHA lookup multiplicities (`M_W2, M_W3`) —
 //!   per-protocol convention, multiplicity columns are the last N
 //!   ints (one per lookup group).
 //!
@@ -142,11 +142,13 @@ pub mod cols {
     pub const SHA_W_MU_A: usize = 16;
     pub const SHA_W_MU_E: usize = 17;
 
-    // ECDSA witnesses (18..43): chained input + doubling/addition
-    // intermediates + outputs + affine cells.
-    pub const ECDSA_W_X1: usize = 18;
-    pub const ECDSA_W_Y1: usize = 19;
-    pub const ECDSA_W_Z1: usize = 20;
+    // ECDSA witnesses (18..37): chained Jacobian state + doubling/
+    // addition intermediates + affine cells. Down from 25 to 19 by
+    // collapsing X1/X_OUT into a single chained X (and same for Y,
+    // Z) and inlining X_ADD/Y_ADD/Z_ADD into the output selection.
+    pub const ECDSA_W_X: usize = 18;
+    pub const ECDSA_W_Y: usize = 19;
+    pub const ECDSA_W_Z: usize = 20;
     pub const ECDSA_W_S: usize = 21;
     pub const ECDSA_W_X_PA: usize = 22;
     pub const ECDSA_W_Y_PA: usize = 23;
@@ -158,23 +160,17 @@ pub mod cols {
     pub const ECDSA_W_E: usize = 29;
     pub const ECDSA_W_F: usize = 30;
     pub const ECDSA_W_G: usize = 31;
-    pub const ECDSA_W_X_ADD: usize = 32;
-    pub const ECDSA_W_Y_ADD: usize = 33;
-    pub const ECDSA_W_Z_ADD: usize = 34;
-    pub const ECDSA_W_X_OUT: usize = 35;
-    pub const ECDSA_W_Y_OUT: usize = 36;
-    pub const ECDSA_W_Z_OUT: usize = 37;
-    pub const ECDSA_W_Z_INV: usize = 38;
-    pub const ECDSA_W_Z_INV_SQ: usize = 39;
-    pub const ECDSA_W_Z_INV_CUBE: usize = 40;
-    pub const ECDSA_W_X_AFF: usize = 41;
-    pub const ECDSA_W_Y_AFF: usize = 42;
+    pub const ECDSA_W_Z_INV: usize = 32;
+    pub const ECDSA_W_Z_INV_SQ: usize = 33;
+    pub const ECDSA_W_Z_INV_CUBE: usize = 34;
+    pub const ECDSA_W_X_AFF: usize = 35;
+    pub const ECDSA_W_Y_AFF: usize = 36;
 
-    // SHA multiplicities (43..45) — MUST be the last N int cols.
-    pub const SHA_W_M_W2: usize = 43;
-    pub const SHA_W_M_W3: usize = 44;
+    // SHA multiplicities (37..39) — MUST be the last N int cols.
+    pub const SHA_W_M_W2: usize = 37;
+    pub const SHA_W_M_W3: usize = 38;
 
-    pub const NUM_INT: usize = 45;
+    pub const NUM_INT: usize = 39;
 
     // Flat indices (binary_poly || arbitrary_poly || int).
     pub const FLAT_W_A: usize = W_A;
@@ -190,9 +186,9 @@ pub mod cols {
     pub const FLAT_SHA_W_MU_W: usize = NUM_BIN + SHA_W_MU_W;
     pub const FLAT_SHA_W_MU_A: usize = NUM_BIN + SHA_W_MU_A;
     pub const FLAT_SHA_W_MU_E: usize = NUM_BIN + SHA_W_MU_E;
-    pub const FLAT_ECDSA_W_X1: usize = NUM_BIN + ECDSA_W_X1;
-    pub const FLAT_ECDSA_W_Y1: usize = NUM_BIN + ECDSA_W_Y1;
-    pub const FLAT_ECDSA_W_Z1: usize = NUM_BIN + ECDSA_W_Z1;
+    pub const FLAT_ECDSA_W_X: usize = NUM_BIN + ECDSA_W_X;
+    pub const FLAT_ECDSA_W_Y: usize = NUM_BIN + ECDSA_W_Y;
+    pub const FLAT_ECDSA_W_Z: usize = NUM_BIN + ECDSA_W_Z;
 }
 
 // ---------------------------------------------------------------------------
@@ -233,10 +229,10 @@ where
             ShiftSpec::new(cols::FLAT_SHA_W_MU_W, 16),
             ShiftSpec::new(cols::FLAT_SHA_W_MU_A, 3),
             ShiftSpec::new(cols::FLAT_SHA_W_MU_E, 3),
-            // === ECDSA int shifts (X1, Y1, Z1 by 1 each for chaining) ===
-            ShiftSpec::new(cols::FLAT_ECDSA_W_X1, 1),
-            ShiftSpec::new(cols::FLAT_ECDSA_W_Y1, 1),
-            ShiftSpec::new(cols::FLAT_ECDSA_W_Z1, 1),
+            // === ECDSA int shifts (X, Y, Z by 1 each: down.X[t] = R_{t+1}) ===
+            ShiftSpec::new(cols::FLAT_ECDSA_W_X, 1),
+            ShiftSpec::new(cols::FLAT_ECDSA_W_Y, 1),
+            ShiftSpec::new(cols::FLAT_ECDSA_W_Z, 1),
         ];
 
         // Lookup specs: SHA's three carry range checks. (ECDSA has none
@@ -330,9 +326,9 @@ where
         let down_w_mu_w_sh16 = &down.int[1];
         let down_w_mu_a_sh3 = &down.int[2];
         let down_w_mu_e_sh3 = &down.int[3];
-        let down_ecdsa_x1_sh1 = &down.int[4];
-        let down_ecdsa_y1_sh1 = &down.int[5];
-        let down_ecdsa_z1_sh1 = &down.int[6];
+        let down_ecdsa_x_sh1 = &down.int[4];
+        let down_ecdsa_y_sh1 = &down.int[5];
+        let down_ecdsa_z_sh1 = &down.int[6];
 
         let ideal_rot_xw1 = ideal_from_ref(&Sha256Ideal::<R>::RotXw1);
         let ideal_rot_x2 = ideal_from_ref(&Sha256Ideal::<R>::RotX2(RotationIdeal::new(
@@ -448,9 +444,9 @@ where
         let e_pa_r_init_x = &int[cols::ECDSA_PA_R_INIT_X];
         let e_pa_r_init_y = &int[cols::ECDSA_PA_R_INIT_Y];
         let e_pa_r_init_z = &int[cols::ECDSA_PA_R_INIT_Z];
-        let e_x1 = &int[cols::ECDSA_W_X1];
-        let e_y1 = &int[cols::ECDSA_W_Y1];
-        let e_z1 = &int[cols::ECDSA_W_Z1];
+        let e_x = &int[cols::ECDSA_W_X];
+        let e_y = &int[cols::ECDSA_W_Y];
+        let e_z = &int[cols::ECDSA_W_Z];
         let e_s_w = &int[cols::ECDSA_W_S];
         let e_x_pa = &int[cols::ECDSA_W_X_PA];
         let e_y_pa = &int[cols::ECDSA_W_Y_PA];
@@ -462,12 +458,6 @@ where
         let e_e = &int[cols::ECDSA_W_E];
         let e_f = &int[cols::ECDSA_W_F];
         let e_g = &int[cols::ECDSA_W_G];
-        let e_x_add = &int[cols::ECDSA_W_X_ADD];
-        let e_y_add = &int[cols::ECDSA_W_Y_ADD];
-        let e_z_add = &int[cols::ECDSA_W_Z_ADD];
-        let e_x_out = &int[cols::ECDSA_W_X_OUT];
-        let e_y_out = &int[cols::ECDSA_W_Y_OUT];
-        let e_z_out = &int[cols::ECDSA_W_Z_OUT];
         let e_z_inv = &int[cols::ECDSA_W_Z_INV];
         let e_z_inv_sq = &int[cols::ECDSA_W_Z_INV_SQ];
         let e_z_inv_cube = &int[cols::ECDSA_W_Z_INV_CUBE];
@@ -482,33 +472,33 @@ where
         let one_expr = from_ref(&const_scalar::<R>(R::ONE));
 
         // === Doubling block (4 constraints, max degree 5) ===
-        let d1_inner = e_s_w.clone() - &(e_y1.clone() * e_y1);
+        let d1_inner = e_s_w.clone() - &(e_y.clone() * e_y);
         b.assert_zero(e_s_active.clone() * &d1_inner);
 
-        let yz = e_y1.clone() * e_z1;
-        let two_yz = mbs(&yz, &two_scalar).expect("2·Y1·Z1 overflow");
+        let yz = e_y.clone() * e_z;
+        let two_yz = mbs(&yz, &two_scalar).expect("2·Y·Z overflow");
         let d2_inner = e_z_pa.clone() - &two_yz;
         b.assert_zero(e_s_active.clone() * &d2_inner);
 
-        let x_sq = e_x1.clone() * e_x1;
+        let x_sq = e_x.clone() * e_x;
         let x_pow4 = x_sq.clone() * &x_sq;
-        let nine_x4 = mbs(&x_pow4, &nine_scalar).expect("9·X1⁴ overflow");
-        let xs = e_x1.clone() * e_s_w;
-        let eight_xs = mbs(&xs, &eight_scalar).expect("8·X1·S overflow");
+        let nine_x4 = mbs(&x_pow4, &nine_scalar).expect("9·X⁴ overflow");
+        let xs = e_x.clone() * e_s_w;
+        let eight_xs = mbs(&xs, &eight_scalar).expect("8·X·S overflow");
         let d3_inner = e_x_pa.clone() - &nine_x4 + &eight_xs;
         b.assert_zero(e_s_active.clone() * &d3_inner);
 
         let x3s = x_sq.clone() * &xs;
-        let twelve_x3s = mbs(&x3s, &twelve_scalar).expect("12·X1³·S overflow");
+        let twelve_x3s = mbs(&x3s, &twelve_scalar).expect("12·X³·S overflow");
         let x_sq_x_pa = x_sq.clone() * e_x_pa;
         let three_x2_xpa =
-            mbs(&x_sq_x_pa, &three_scalar).expect("3·X1²·X_pa overflow");
+            mbs(&x_sq_x_pa, &three_scalar).expect("3·X²·X_pa overflow");
         let s_sq = e_s_w.clone() * e_s_w;
         let eight_s_sq = mbs(&s_sq, &eight_scalar).expect("8·S² overflow");
         let d4_inner = e_y_pa.clone() - &twelve_x3s + &three_x2_xpa + &eight_s_sq;
         b.assert_zero(e_s_active.clone() * &d4_inner);
 
-        // === Addition block (10 constraints, max degree 3) ===
+        // === Addition intermediates (7 constraints, deg 3) ===
         let a1_inner = e_z_pa_sq.clone() - &(e_z_pa.clone() * e_z_pa);
         b.assert_zero(e_s_active.clone() * &a1_inner);
 
@@ -530,48 +520,43 @@ where
         let a7_inner = e_g.clone() - &(e_x_pa.clone() * e_e);
         b.assert_zero(e_s_active.clone() * &a7_inner);
 
+        // === Output-selection-and-chaining (3 constraints, with
+        //    addition formulas inlined into the selection) ===
+
+        // X: down.X − X_pa − S_ADD·(D² − F − 2G − X_pa) = 0
         let d_sq = e_d.clone() * e_d;
         let two_g = mbs(e_g, &two_scalar).expect("2·G overflow");
-        let a8_inner = e_x_add.clone() - &d_sq + e_f + &two_g;
-        b.assert_zero(e_s_active.clone() * &a8_inner);
-
-        let g_minus_xadd = e_g.clone() - e_x_add;
-        let d_times = e_d.clone() * &g_minus_xadd;
-        let y_pa_f = e_y_pa.clone() * e_f;
-        let a9_inner = e_y_add.clone() - &d_times + &y_pa_f;
-        b.assert_zero(e_s_active.clone() * &a9_inner);
-
-        let a10_inner = e_z_add.clone() - &(e_z_pa.clone() * e_c);
-        b.assert_zero(e_s_active.clone() * &a10_inner);
-
-        // === Output selection (3 constraints) ===
-        let x_diff = e_x_add.clone() - e_x_pa;
-        let s_add_xdiff = e_s_add.clone() * &x_diff;
-        let o1_inner = e_x_out.clone() - e_x_pa - &s_add_xdiff;
+        let x_add_minus_x_pa = d_sq.clone() - e_f - &two_g - e_x_pa;
+        let s_add_x = e_s_add.clone() * &x_add_minus_x_pa;
+        let o1_inner = down_ecdsa_x_sh1.clone() - e_x_pa - &s_add_x;
         b.assert_zero(e_s_active.clone() * &o1_inner);
 
-        let y_diff = e_y_add.clone() - e_y_pa;
-        let s_add_ydiff = e_s_add.clone() * &y_diff;
-        let o2_inner = e_y_out.clone() - e_y_pa - &s_add_ydiff;
+        // Y: down.Y − Y_pa − S_ADD·(3DG + DF − D³ − Y_pa·F − Y_pa) = 0
+        let d_cube = e_d.clone() * &d_sq;
+        let dg = e_d.clone() * e_g;
+        let three_dg = mbs(&dg, &three_scalar).expect("3·D·G overflow");
+        let df = e_d.clone() * e_f;
+        let y_pa_f = e_y_pa.clone() * e_f;
+        let y_add_minus_y_pa =
+            three_dg + &df - &d_cube - &y_pa_f - e_y_pa;
+        let s_add_y = e_s_add.clone() * &y_add_minus_y_pa;
+        let o2_inner = down_ecdsa_y_sh1.clone() - e_y_pa - &s_add_y;
         b.assert_zero(e_s_active.clone() * &o2_inner);
 
-        let z_diff = e_z_add.clone() - e_z_pa;
-        let s_add_zdiff = e_s_add.clone() * &z_diff;
-        let o3_inner = e_z_out.clone() - e_z_pa - &s_add_zdiff;
+        // Z: down.Z − Z_pa − S_ADD·(Z_pa·C − Z_pa) = 0
+        let z_pa_c = e_z_pa.clone() * e_c;
+        let z_add_minus_z_pa = z_pa_c - e_z_pa;
+        let s_add_z = e_s_add.clone() * &z_add_minus_z_pa;
+        let o3_inner = down_ecdsa_z_sh1.clone() - e_z_pa - &s_add_z;
         b.assert_zero(e_s_active.clone() * &o3_inner);
 
         // === Init boundary (3 constraints) ===
-        b.assert_zero(e_s_init.clone() * &(e_x1.clone() - e_pa_r_init_x));
-        b.assert_zero(e_s_init.clone() * &(e_y1.clone() - e_pa_r_init_y));
-        b.assert_zero(e_s_init.clone() * &(e_z1.clone() - e_pa_r_init_z));
-
-        // === Row chaining (3 constraints) ===
-        b.assert_zero(e_s_active.clone() * &(down_ecdsa_x1_sh1.clone() - e_x_out));
-        b.assert_zero(e_s_active.clone() * &(down_ecdsa_y1_sh1.clone() - e_y_out));
-        b.assert_zero(e_s_active.clone() * &(down_ecdsa_z1_sh1.clone() - e_z_out));
+        b.assert_zero(e_s_init.clone() * &(e_x.clone() - e_pa_r_init_x));
+        b.assert_zero(e_s_init.clone() * &(e_y.clone() - e_pa_r_init_y));
+        b.assert_zero(e_s_init.clone() * &(e_z.clone() - e_pa_r_init_z));
 
         // === Final-row affine conversion (5 constraints) ===
-        let f1_inner = e_z1.clone() * e_z_inv - &one_expr;
+        let f1_inner = e_z.clone() * e_z_inv - &one_expr;
         b.assert_zero(e_s_final.clone() * &f1_inner);
 
         let f2_inner = e_z_inv_sq.clone() - &(e_z_inv.clone() * e_z_inv);
@@ -580,10 +565,10 @@ where
         let f3_inner = e_z_inv_cube.clone() - &(e_z_inv.clone() * e_z_inv_sq);
         b.assert_zero(e_s_final.clone() * &f3_inner);
 
-        let f4_inner = e_x_aff.clone() - &(e_x1.clone() * e_z_inv_sq);
+        let f4_inner = e_x_aff.clone() - &(e_x.clone() * e_z_inv_sq);
         b.assert_zero(e_s_final.clone() * &f4_inner);
 
-        let f5_inner = e_y_aff.clone() - &(e_y1.clone() * e_z_inv_cube);
+        let f5_inner = e_y_aff.clone() - &(e_y.clone() * e_z_inv_cube);
         b.assert_zero(e_s_final.clone() * &f5_inner);
     }
 }
@@ -668,9 +653,9 @@ where
         int.extend(ecdsa_ints[0..9].iter().cloned());
         // [15..18] SHA witnesses (sha[6..9])
         int.extend(sha_ints[6..9].iter().cloned());
-        // [18..43] ECDSA witnesses (ecdsa[9..34])
-        int.extend(ecdsa_ints[9..34].iter().cloned());
-        // [43..45] SHA multiplicities (sha[9..11])
+        // [18..37] ECDSA witnesses (ecdsa[9..28] — was 25 cols, now 19)
+        int.extend(ecdsa_ints[9..28].iter().cloned());
+        // [37..39] SHA multiplicities (sha[9..11])
         int.extend(sha_ints[9..11].iter().cloned());
 
         debug_assert_eq!(int.len(), cols::NUM_INT);
@@ -696,12 +681,12 @@ mod tests {
         degree_counter::{count_constraint_degrees, count_max_degree},
     };
 
-    /// Sanity: 12 SHA + 28 ECDSA = 40 constraints. Max degree from
-    /// either half (5 from ECDSA's doubling block).
+    /// Sanity: 12 SHA + 22 ECDSA = 34 constraints. Max degree 5 from
+    /// either half (doubling's `Y_pa` and the inlined Y output sel).
     #[test]
     fn sha_ecdsa_constraint_shape() {
         type U = ShaEcdsaUair<Int<EC_FP_INT_LIMBS>>;
-        assert_eq!(count_constraints::<U>(), 40);
+        assert_eq!(count_constraints::<U>(), 34);
         assert_eq!(count_max_degree::<U>(), 5);
         let degrees = count_constraint_degrees::<U>();
         // Spot checks: at least one deg-5 (doubling Y_pa), some deg-2
