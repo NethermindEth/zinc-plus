@@ -39,9 +39,7 @@ use super::gkr::{
 use super::structs::{
     GkrLogupError, GkrLogupGroupMeta, GkrLogupGroupProof, GkrLogupGroupSubclaim,
 };
-use super::tables::{
-    build_table_index, compute_multiplicities_with_index, generate_bitpoly_table,
-};
+use super::tables::generate_bitpoly_table;
 
 // ---------------------------------------------------------------------------
 // Public input shape for `prove_group`.
@@ -105,35 +103,37 @@ where
     let n_vars = instance.n_vars;
     let witness_len = 1usize << n_vars;
 
-    // ---- Step 1: ψ_a-project chunks for the GKR ----
-    // chunks_psi[ell][k][i] = Σ_{p=0..chunk_width} bit_{k·cw + p}(v^(ell)[i]) · a^p
+    // ---- Step 1: Extract integer chunk indices directly from BitPoly bits ----
+    //
+    // For each (ell, k, i), the chunk's value is the integer
+    //   n_{k,i} = Σ_{p=0..chunk_width} bit_{k·cw+p}(v^(ell)[i]) · 2^p
+    // and the ψ_a-projected scalar is `subtable[n_{k,i}]` (where the
+    // subtable is laid out so position `n` ↔ ψ_a of the BitPoly with
+    // bit pattern `n`). This skips all field arithmetic for the
+    // chunk-projection step — bit walks dominate.
+    //
+    // `chunks_idx[ell][k][i] ∈ [0, 2^chunk_width)` and is reused below
+    // for both the multiplicity histogram (Step 3) and the witness
+    // fraction tree's `leaf_q` construction (Step 5), avoiding any
+    // intermediate `chunks_psi: Vec<Vec<Vec<F>>>` materialization.
     let a = instance.projecting_element_f.clone();
     let one = F::one_with_cfg(field_cfg);
     let zero = F::zero_with_cfg(field_cfg);
 
-    // Precompute powers of `a` of length `chunk_width`.
-    let mut a_powers_chunk = Vec::with_capacity(chunk_width);
-    let mut acc = one.clone();
-    for _ in 0..chunk_width {
-        a_powers_chunk.push(acc.clone());
-        acc = acc * &a;
-    }
-
-    let chunks_psi: Vec<Vec<Vec<F>>> = cfg_iter!(instance.parent_columns)
+    let chunks_idx: Vec<Vec<Vec<u32>>> = cfg_iter!(instance.parent_columns)
         .map(|parent| {
             (0..num_chunks)
                 .map(|k| {
                     (0..witness_len)
                         .map(|i| {
-                            let bp = &parent.evaluations[i];
-                            let coeffs = bp.inner().coeffs;
-                            let mut sum = zero.clone();
+                            let coeffs = parent.evaluations[i].inner().coeffs;
+                            let mut n: u32 = 0;
                             for p in 0..chunk_width {
                                 if coeffs[k * chunk_width + p].into_inner() {
-                                    sum = sum + &a_powers_chunk[p];
+                                    n |= 1u32 << p;
                                 }
                             }
-                            sum
+                            n
                         })
                         .collect()
                 })
@@ -144,28 +144,27 @@ where
     // ---- Step 2: Build subtable T = ψ_a({0,1}^{<chunk_width}[X]) ----
     let subtable: Vec<F> = generate_bitpoly_table(chunk_width, &a, field_cfg);
     let table_len = subtable.len();
-    let table_index = build_table_index::<F>(&subtable);
 
-    // ---- Step 3: Multiplicities ----
-    let agg_mults: Vec<Vec<F>> = chunks_psi
+    // ---- Step 3: Multiplicities via per-ell histogram ----
+    //
+    // Direct array tally on integer chunk indices — no hashmap. Saves
+    // L·K·W hashmap lookups (~2M at typical sizes) and frees the
+    // table-index hashmap allocation.
+    let agg_mults: Vec<Vec<F>> = chunks_idx
         .iter()
         .map(|lookup_chunks| {
-            let mut agg = vec![zero.clone(); table_len];
+            let mut counts = vec![0u64; table_len];
             for chunk in lookup_chunks {
-                let m = compute_multiplicities_with_index(
-                    chunk,
-                    &table_index,
-                    table_len,
-                    field_cfg,
-                )
-                .ok_or(GkrLogupError::WitnessNotInTable)?;
-                for (a, mk) in agg.iter_mut().zip(m.iter()) {
-                    *a = a.clone() + mk;
+                for &n in chunk {
+                    counts[n as usize] += 1;
                 }
             }
-            Ok::<Vec<F>, GkrLogupError<F>>(agg)
+            counts
+                .into_iter()
+                .map(|c| F::from_with_cfg(c, field_cfg))
+                .collect()
         })
-        .collect::<Result<_, _>>()?;
+        .collect();
 
     // ---- Step 4: Absorb agg multiplicities, sample β, α ----
     let mut buf = vec![0u8; F::Inner::NUM_BYTES];
@@ -189,12 +188,20 @@ where
     let w_size = 1usize << w_num_vars;
     let leaves_already_pow2 = per_lookup_leaves == w_size;
 
+    // Pre-compute β − subtable[n] for each n ∈ [0, table_len). Per-leaf
+    // construction below becomes a single index + clone (no field op).
+    let beta_minus_subtable: Vec<F> = subtable
+        .iter()
+        .map(|s| beta.clone() - s)
+        .collect();
+
     let witness_trees: Vec<_> = (0..num_lookups)
         .map(|ell| {
             let mut leaf_q = Vec::with_capacity(w_size);
             for k in 0..num_chunks {
                 for i in 0..witness_len {
-                    leaf_q.push(beta.clone() - &chunks_psi[ell][k][i]);
+                    let n = chunks_idx[ell][k][i] as usize;
+                    leaf_q.push(beta_minus_subtable[n].clone());
                 }
             }
             if leaves_already_pow2 {
