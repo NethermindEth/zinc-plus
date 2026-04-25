@@ -43,12 +43,11 @@
 //! ## Required Int width
 //!
 //! Trace cells store F_p elements in `[0, p)` (so `< 2^256`). Constraint
-//! expressions evaluated in the prover are reduced mod `p` (the proving
+//! expressions evaluated by the prover are reduced mod `p` (the proving
 //! field) so wide intermediate Z values never appear in protocol
-//! arithmetic. We keep `Int<22>` (1408 bits) as the storage type for
-//! continuity with the wider-Int infrastructure that will be needed once
-//! we add range arguments via lookup; the upper limbs are always zero
-//! for honest witnesses.
+//! arithmetic. We use `Int<5>` (320 bits, signed): four limbs hold the
+//! F_p value, and the top limb's sign bit accommodates any signed
+//! intermediates.
 //!
 //! ## Out of scope
 //!
@@ -79,23 +78,16 @@ use crate::GenerateRandomTrace;
 
 /// Number of 64-bit limbs used by the int columns of this slice.
 ///
-/// `Int<22>` = 1408 bits. With direct F_p constraints (no quotient
-/// witnesses) all stored values are `< p < 2^256`, so most limbs are
-/// always zero; the wide width is preserved for compatibility with the
-/// future range-argument infrastructure.
-pub const EC_FP_INT_LIMBS: usize = 22;
-
-/// Width of the base-field arithmetic helpers. We use `Uint<5>` for
-/// modular multiplication / reduction because `crypto_bigint`'s
-/// `widening_mul` requires `ConcatMixed`, which is implemented for small
-/// limb counts (5, 10) but not arbitrary widths like 22. Values from the
-/// arithmetic side are widened to `Int<EC_FP_INT_LIMBS>` when stored in
-/// the trace.
-pub const FP_ARITH_LIMBS: usize = 5;
+/// `Int<5>` = 320 bits, signed. Trace cells hold F_p elements (`< p < 2^256`)
+/// so 4 unsigned limbs would suffice for the *value*; we use 5 so that
+/// (a) the unsigned arithmetic helpers' `widening_mul → Uint<10>` pair
+/// works (`ConcatMixed` is impl'd for the (5, 10) widths), and (b) the
+/// top bit can serve as a sign for any signed intermediates.
+pub const EC_FP_INT_LIMBS: usize = 5;
 
 /// secp256k1 base-field prime `p = 2^256 − 2^32 − 977`, as a 5-limb
-/// `Uint`.
-const SECP256K1_P_HEX_5: &str = concat!(
+/// `Uint` (top limb zero-padded).
+const SECP256K1_P_HEX: &str = concat!(
     "0000000000000000",
     "FFFFFFFFFFFFFFFF",
     "FFFFFFFFFFFFFFFF",
@@ -105,10 +97,11 @@ const SECP256K1_P_HEX_5: &str = concat!(
 
 /// `p` as a `crypto_bigint::Uint<5>`. Arithmetic helpers operate at this
 /// width.
-pub const SECP256K1_P_UINT: CbUint<FP_ARITH_LIMBS> = CbUint::from_be_hex(SECP256K1_P_HEX_5);
+pub const SECP256K1_P_UINT: CbUint<EC_FP_INT_LIMBS> = CbUint::from_be_hex(SECP256K1_P_HEX);
 
-/// Trait knob: a `ConstSemiring` exposing secp256k1's base-field prime.
-/// Implemented only for `Int<EC_FP_INT_LIMBS>`.
+/// Trait knob: a `ConstSemiring` whose representation can hold a
+/// secp256k1 base-field element. Marker only — implemented for
+/// `Int<EC_FP_INT_LIMBS>`.
 pub trait EcdsaFpRing: ConstSemiring + 'static {}
 
 impl EcdsaFpRing for Int<EC_FP_INT_LIMBS> {}
@@ -282,9 +275,9 @@ where
                 z_mid,
             } = compute_doubling_witness(&x_in, &y_in, &z_in);
 
-            x_col[row] = R::from(uint_to_int_22(x_in));
-            y_col[row] = R::from(uint_to_int_22(y_in));
-            z_col[row] = R::from(uint_to_int_22(z_in));
+            x_col[row] = R::from(uint_to_int(x_in));
+            y_col[row] = R::from(uint_to_int(y_in));
+            z_col[row] = R::from(uint_to_int(z_in));
             s_col[row] = R::from(s);
             x_mid_col[row] = R::from(x_mid);
             y_mid_col[row] = R::from(y_mid);
@@ -316,33 +309,33 @@ where
 // ---------------------------------------------------------------------------
 
 /// Sample a uniformly-random base-field element `[0, p)`.
-fn rand_fp<Rng: RngCore + ?Sized>(rng: &mut Rng) -> CbUint<FP_ARITH_LIMBS> {
+fn rand_fp<Rng: RngCore + ?Sized>(rng: &mut Rng) -> CbUint<EC_FP_INT_LIMBS> {
     let p_nz = NonZero::new(SECP256K1_P_UINT).expect("p is nonzero");
-    let mut limbs = [0u64; FP_ARITH_LIMBS];
+    let mut limbs = [0u64; EC_FP_INT_LIMBS];
     for limb in &mut limbs {
         *limb = rng.next_u64();
     }
-    limbs[FP_ARITH_LIMBS - 1] = 0;
-    let raw = CbUint::<FP_ARITH_LIMBS>::from_words(limbs);
+    limbs[EC_FP_INT_LIMBS - 1] = 0;
+    let raw = CbUint::<EC_FP_INT_LIMBS>::from_words(limbs);
     raw.rem_vartime(&p_nz)
 }
 
 /// `(a · b) mod p`.
 fn mul_mod_p(
-    a: &CbUint<FP_ARITH_LIMBS>,
-    b: &CbUint<FP_ARITH_LIMBS>,
-) -> CbUint<FP_ARITH_LIMBS> {
-    let wide: CbUint<{ FP_ARITH_LIMBS * 2 }> = a.widening_mul(b).into();
-    let p_wide: CbUint<{ FP_ARITH_LIMBS * 2 }> = SECP256K1_P_UINT.resize();
+    a: &CbUint<EC_FP_INT_LIMBS>,
+    b: &CbUint<EC_FP_INT_LIMBS>,
+) -> CbUint<EC_FP_INT_LIMBS> {
+    let wide: CbUint<{ EC_FP_INT_LIMBS * 2 }> = a.widening_mul(b).into();
+    let p_wide: CbUint<{ EC_FP_INT_LIMBS * 2 }> = SECP256K1_P_UINT.resize();
     let p_wide_nz = NonZero::new(p_wide).expect("p is nonzero");
     let (_, rem) = wide.div_rem_vartime(&p_wide_nz);
     rem.resize()
 }
 
 /// `(a · k) mod p` for small integer `k` via repeated addition.
-fn small_mul_mod_p(a: &CbUint<FP_ARITH_LIMBS>, k: u32) -> CbUint<FP_ARITH_LIMBS> {
+fn small_mul_mod_p(a: &CbUint<EC_FP_INT_LIMBS>, k: u32) -> CbUint<EC_FP_INT_LIMBS> {
     let p_nz = NonZero::new(SECP256K1_P_UINT).expect("p is nonzero");
-    let mut acc = CbUint::<FP_ARITH_LIMBS>::ZERO;
+    let mut acc = CbUint::<EC_FP_INT_LIMBS>::ZERO;
     for _ in 0..k {
         acc = acc.wrapping_add(a);
         if p_geq(&acc) {
@@ -353,15 +346,15 @@ fn small_mul_mod_p(a: &CbUint<FP_ARITH_LIMBS>, k: u32) -> CbUint<FP_ARITH_LIMBS>
 }
 
 #[inline]
-fn p_geq(a: &CbUint<FP_ARITH_LIMBS>) -> bool {
+fn p_geq(a: &CbUint<EC_FP_INT_LIMBS>) -> bool {
     a.checked_sub(&SECP256K1_P_UINT).is_some().into()
 }
 
 /// `(a − b) mod p`, allowing `a < b`.
 fn sub_mod_p(
-    a: &CbUint<FP_ARITH_LIMBS>,
-    b: &CbUint<FP_ARITH_LIMBS>,
-) -> CbUint<FP_ARITH_LIMBS> {
+    a: &CbUint<EC_FP_INT_LIMBS>,
+    b: &CbUint<EC_FP_INT_LIMBS>,
+) -> CbUint<EC_FP_INT_LIMBS> {
     let p_nz = NonZero::new(SECP256K1_P_UINT).expect("p is nonzero");
     if a.checked_sub(b).is_some().into() {
         a.wrapping_sub(b).rem_vartime(&p_nz)
@@ -382,9 +375,9 @@ struct DoublingWitness {
 /// `(X, Y, Z)`. All arithmetic is in `Uint<5>` mod p; outputs are then
 /// widened to `Int<22>` for trace storage.
 fn compute_doubling_witness(
-    x: &CbUint<FP_ARITH_LIMBS>,
-    y: &CbUint<FP_ARITH_LIMBS>,
-    z: &CbUint<FP_ARITH_LIMBS>,
+    x: &CbUint<EC_FP_INT_LIMBS>,
+    y: &CbUint<EC_FP_INT_LIMBS>,
+    z: &CbUint<EC_FP_INT_LIMBS>,
 ) -> DoublingWitness {
     let s_u = mul_mod_p(y, y); // S = Y² mod p
     let x_sq_u = mul_mod_p(x, x);
@@ -406,25 +399,26 @@ fn compute_doubling_witness(
     let y_mid_u = sub_mod_p(&big_term_u, &eight_s_sq_u);
 
     DoublingWitness {
-        s: uint_to_int_22(s_u),
-        x_mid: uint_to_int_22(x_mid_u),
-        y_mid: uint_to_int_22(y_mid_u),
-        z_mid: uint_to_int_22(z_mid_u),
+        s: uint_to_int(s_u),
+        x_mid: uint_to_int(x_mid_u),
+        y_mid: uint_to_int(y_mid_u),
+        z_mid: uint_to_int(z_mid_u),
     }
 }
 
 // ---------------------------------------------------------------------------
-// Int<22> bridge for trace construction.
+// Uint ↔ Int bridge for trace construction.
 // ---------------------------------------------------------------------------
 
-/// Widen a non-negative `Uint<5>` to `Int<22>` via zero-padding.
-fn uint_to_int_22(u: CbUint<FP_ARITH_LIMBS>) -> Int<EC_FP_INT_LIMBS> {
-    let widened: CbUint<EC_FP_INT_LIMBS> = u.resize();
+/// Reinterpret a non-negative `Uint<5>` as `Int<5>`. Honest values are
+/// always in `[0, p)` with `p < 2^256`, so the top bit is zero and the
+/// reinterpretation is the identity as an integer.
+fn uint_to_int(u: CbUint<EC_FP_INT_LIMBS>) -> Int<EC_FP_INT_LIMBS> {
     debug_assert!(
-        widened.bits() <= 64 * EC_FP_INT_LIMBS as u32 - 1,
+        u.bits() <= 64 * EC_FP_INT_LIMBS as u32 - 1,
         "uint top bit must be 0 to reinterpret as signed"
     );
-    Int::new(*widened.as_int())
+    Int::new(*u.as_int())
 }
 
 // ---------------------------------------------------------------------------
@@ -434,7 +428,7 @@ fn uint_to_int_22(u: CbUint<FP_ARITH_LIMBS>) -> Int<EC_FP_INT_LIMBS> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crypto_bigint::{ConstOne, Zero as CbZero};
+    use crypto_bigint::ConstOne;
     use rand::rng;
     use zinc_uair::{
         constraint_counter::count_constraints,
@@ -458,8 +452,8 @@ mod tests {
     }
 
     /// The witness generator produces a trace where every constraint
-    /// vanishes mod p per row. Catches doubling-formula bugs without
-    /// needing the full PIOP wiring.
+    /// vanishes mod p per row. Each step is computed in `Uint<5>` mod-p
+    /// arithmetic, matching what the prover's F_p projection produces.
     #[test]
     fn witness_satisfies_constraints_mod_p() {
         let num_vars = 2;
@@ -469,40 +463,17 @@ mod tests {
         let n_rows = 1 << num_vars;
         assert_eq!(trace.int.len(), cols::NUM_INT);
 
-        // Check `expr_in_z ≡ 0 (mod p)` by reducing the Z value via
-        // crypto_bigint's modular div. We work in `Int<22>` for the
-        // intermediate Z arithmetic (large enough for Y_mid expressions
-        // up to ~2^1027).
-        let p_uint22: CbUint<EC_FP_INT_LIMBS> = SECP256K1_P_UINT.resize();
-        let p_uint22_nz = NonZero::new(p_uint22).expect("p nonzero");
-
-        let assert_zero_mod_p = |val: Int<EC_FP_INT_LIMBS>, name: &str, row: usize| {
-            // Convert signed Int<22> to non-negative residue mod p.
-            // For honest values, `val` is a multiple of p (positive or
-            // negative); reduce its absolute value mod p then either
-            // compare to 0 directly.
-            let inner: crypto_bigint::Int<EC_FP_INT_LIMBS> = *val.inner();
-            let is_neg = inner.is_negative();
-            let abs_uint: CbUint<EC_FP_INT_LIMBS> = if bool::from(is_neg) {
-                // -inner = (!inner).wrapping_add(1) reinterpreted as Uint
-                let neg = inner.wrapping_neg();
-                *neg.as_uint()
-            } else {
-                *inner.as_uint()
-            };
-            let (_, rem) = abs_uint.div_rem_vartime(&p_uint22_nz);
-            assert!(
-                bool::from(<CbUint<EC_FP_INT_LIMBS> as CbZero>::is_zero(&rem)),
-                "{name} not ≡ 0 mod p at row {row}: residue = {:?}",
-                rem.to_words(),
-            );
+        // Honest trace cells are non-negative (F_p elements in [0, p)),
+        // so the Int → Uint reinterpret is the identity as an integer.
+        let int_to_uint = |v: &Int<EC_FP_INT_LIMBS>| -> CbUint<EC_FP_INT_LIMBS> {
+            *v.inner().as_uint()
         };
 
         for row in 0..n_rows {
-            let read = |c: usize| trace.int[c][row].clone();
-            let s_active = read(cols::S_ACTIVE);
+            let s_active = trace.int[cols::S_ACTIVE][row].clone();
             assert_eq!(s_active, Int::ONE);
 
+            let read = |c: usize| int_to_uint(&trace.int[c][row]);
             let x = read(cols::W_X);
             let y = read(cols::W_Y);
             let z = read(cols::W_Z);
@@ -511,49 +482,40 @@ mod tests {
             let y_mid = read(cols::W_Y_MID);
             let z_mid = read(cols::W_Z_MID);
 
-            // C1: S − Y² ≡ 0 (mod p)
-            let y_sq = y.clone() * &y;
-            assert_zero_mod_p(s.clone() - &y_sq, "C1 (S = Y² mod p)", row);
+            // C1: S = Y² (mod p)
+            assert_eq!(s, mul_mod_p(&y, &y), "C1 (S = Y²) at row {row}");
 
-            // C2: Z_mid − 2YZ ≡ 0 (mod p)
-            let yz = y.clone() * &z;
-            let two_yz = yz.clone() + &yz;
-            assert_zero_mod_p(z_mid.clone() - &two_yz, "C2 (Z_mid = 2YZ mod p)", row);
+            // C2: Z_mid = 2·Y·Z (mod p)
+            let yz = mul_mod_p(&y, &z);
+            assert_eq!(
+                z_mid,
+                small_mul_mod_p(&yz, 2),
+                "C2 (Z_mid = 2YZ) at row {row}",
+            );
 
-            // C3: X_mid − 9X⁴ + 8XS ≡ 0 (mod p)
-            let x_sq = x.clone() * &x;
-            let x_quad = x_sq.clone() * &x_sq;
-            let mut nine_x4 = x_quad.clone();
-            for _ in 0..8 {
-                nine_x4 = nine_x4 + &x_quad;
-            }
-            let xs = x.clone() * &s;
-            let mut eight_xs = xs.clone();
-            for _ in 0..7 {
-                eight_xs = eight_xs + &xs;
-            }
-            assert_zero_mod_p(x_mid.clone() - &nine_x4 + &eight_xs, "C3 (X_mid)", row);
+            // C3: X_mid = 9·X⁴ − 8·X·S (mod p)
+            let x_sq = mul_mod_p(&x, &x);
+            let x_quad = mul_mod_p(&x_sq, &x_sq);
+            let nine_x4 = small_mul_mod_p(&x_quad, 9);
+            let xs = mul_mod_p(&x, &s);
+            let eight_xs = small_mul_mod_p(&xs, 8);
+            assert_eq!(
+                x_mid,
+                sub_mod_p(&nine_x4, &eight_xs),
+                "C3 (X_mid) at row {row}",
+            );
 
-            // C4: Y_mid − 12·X³·S + 3·X²·X_mid + 8·S² ≡ 0 (mod p)
-            let x3s = x_sq.clone() * &xs;
-            let mut twelve = x3s.clone();
-            for _ in 0..11 {
-                twelve = twelve + &x3s;
-            }
-            let xsq_xmid = x_sq.clone() * &x_mid;
-            let mut three_xsq_xmid = xsq_xmid.clone();
-            for _ in 0..2 {
-                three_xsq_xmid = three_xsq_xmid + &xsq_xmid;
-            }
-            let s_sq = s.clone() * &s;
-            let mut eight_s_sq = s_sq.clone();
-            for _ in 0..7 {
-                eight_s_sq = eight_s_sq + &s_sq;
-            }
-            assert_zero_mod_p(
-                y_mid.clone() - &twelve + &three_xsq_xmid + &eight_s_sq,
-                "C4 (Y_mid)",
-                row,
+            // C4: Y_mid = 3·X²·(4·X·S − X_mid) − 8·S² (mod p)
+            let four_xs = small_mul_mod_p(&xs, 4);
+            let four_xs_minus_xmid = sub_mod_p(&four_xs, &x_mid);
+            let three_xsq = small_mul_mod_p(&x_sq, 3);
+            let big_term = mul_mod_p(&three_xsq, &four_xs_minus_xmid);
+            let s_sq = mul_mod_p(&s, &s);
+            let eight_s_sq = small_mul_mod_p(&s_sq, 8);
+            assert_eq!(
+                y_mid,
+                sub_mod_p(&big_term, &eight_s_sq),
+                "C4 (Y_mid) at row {row}",
             );
         }
     }
