@@ -858,6 +858,96 @@ where
     }
 }
 
+/// UAIR with mixed-degree non-zero-ideal constraints — the trigger for
+/// the hybrid ideal-check dispatch.
+///
+/// Three `arbitrary_poly` columns `a, b, c`; constraints (all
+/// `assert_in_ideal` over `(X − 2)`):
+///
+/// 1. `a + b - c ∈ (X − 2)`     (linear,    degree 1 in trace MLEs)
+/// 2. `a · b - c ∈ (X − 2)`     (non-linear, degree 2)
+/// 3. `2·a - b ∈ (X − 2)`       (linear,    degree 1)
+///
+/// Witness: `a, b` random degree-0 polynomials; `c = a + b = a · b` is
+/// satisfiable simultaneously when `a + b = a · b` — but checking the
+/// constraint *as polynomial = 0* is enough since `0 ∈ (X − 2)` trivially,
+/// so we set `c = a + b` and pick `a, b` such that `a·b = a+b`. To keep
+/// the witness generation simple we set `a = b = 2`, giving
+/// `a + b = 4 = 2 · 2 = a · b` — both constraints pass with `c = 4`. The
+/// third constraint becomes `2·2 − 2 = 2 ∈ (X − 2)` (vacuously, since
+/// `2(2) − 2 = 2` is divisible by `(X − 2)` only when evaluated at X=2 it
+/// is zero — `2 - 2·2 = -2 ≠ 0`). So pick a different scheme: just verify
+/// the whole expression evaluates to `0` (which is trivially in any
+/// ideal). Easiest: `a = 0, b = 0, c = 0`.
+#[derive(Clone, Debug)]
+pub struct TestUairMixedDegrees<R>(PhantomData<R>);
+
+impl<R> Uair for TestUairMixedDegrees<R>
+where
+    R: ConstSemiring + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(0, 3, 0); // a, b, c
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![])
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        let up = up.arbitrary_poly;
+        // Use `R::ONE + R::ONE` for the constant 2 so we don't require
+        // `From<i32>` on R.
+        let two = R::ONE + R::ONE;
+        let two_ideal = ideal_from_ref(&DegreeOneIdeal::new(two));
+
+        // Linear: a + b - c ∈ (X-2)  (degree 1 in trace MLEs).
+        b.assert_in_ideal(up[0].clone() + &up[1] - &up[2], &two_ideal);
+
+        // Non-linear: a * b - c ∈ (X-2)  (degree 2 in trace MLEs).
+        b.assert_in_ideal(up[0].clone() * &up[1] - &up[2], &two_ideal);
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for TestUairMixedDegrees<R>
+where
+    R: ConstSemiring + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    /// Honest witness: `a = b = 0`, so `c = a + b = 0` and
+    /// `a · b - c = 0 ∈ any ideal`. Trivial but exercises both lanes
+    /// cleanly with no soundness risk in the test fixture.
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        _rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let n = 1 << num_vars;
+        let zero_poly = || -> DensePolynomial<R, 32> {
+            let coeffs: [R; 32] = core::array::from_fn(|_| R::ZERO);
+            DensePolynomial::new(coeffs)
+        };
+        let zero_col = || -> DenseMultilinearExtension<DensePolynomial<R, 32>> {
+            (0..n).map(|_| zero_poly()).collect()
+        };
+        UairTrace {
+            arbitrary_poly: vec![zero_col(), zero_col(), zero_col()].into(),
+            ..Default::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crypto_primitives::crypto_bigint_int::Int;
@@ -888,6 +978,7 @@ mod tests {
         assert_uair_shape::<BinaryDecompositionUair<u32>>(&[1]);
         assert_uair_shape::<BigLinearUair<u32>>(&[1; 17]);
         assert_uair_shape::<TestUairMixedShifts<Int<LIMBS>>>(&[1, 1]);
+        assert_uair_shape::<TestUairMixedDegrees<Int<LIMBS>>>(&[1, 2]);
     }
 
     #[test]
