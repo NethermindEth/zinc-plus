@@ -1,10 +1,12 @@
 #![allow(clippy::arithmetic_side_effects)] // UAIRs should not care about overflows
 pub mod ecdsa;
+pub mod ecdsa_doubling;
 mod generate_trace;
 pub mod sha256;
 pub mod sha_ecdsa;
 
 pub use ecdsa::{ECDSA_INT_LIMBS, EcdsaScalarRing, EcdsaScalarSliceUair};
+pub use ecdsa_doubling::{EC_FP_INT_LIMBS, EcdsaFpRing, JacobianDoublingUair};
 pub use generate_trace::*;
 pub use sha256::{Sha256CompressionSliceUair, Sha256Ideal};
 pub use sha_ecdsa::{ShaEcdsaLinearizedUair, ShaEcdsaUair};
