@@ -237,7 +237,9 @@ where
 
 const DEGREE_PLUS_ONE: usize = 32;
 const INT_LIMBS: usize = U64::LIMBS;
-const FIELD_LIMBS: usize = U64::LIMBS * 3;
+// `fixed-prime` branch: 256-bit field modulus (4 × u64 limbs) so that the
+// fixed secp256k1 base prime fits in `Fmod = Uint<FIELD_LIMBS>`.
+const FIELD_LIMBS: usize = U64::LIMBS * 4;
 
 type F = MontyField<FIELD_LIMBS>;
 

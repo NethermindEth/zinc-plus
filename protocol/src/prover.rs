@@ -289,10 +289,10 @@ impl_with_type_bounds!(ProverBase
         project_scalar: S,
     ) -> Result<(F::Config, HashMap<U::Scalar, DynamicPolynomialF<F>>), ProtocolError<F, U::Ideal>>
     {
-        let field_cfg = self
-            .pcs_transcript
-            .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+        // `fixed-prime` branch: use the secp256k1 base field prime as the
+        // projecting prime instead of drawing one from the transcript.
+        // See `crate::fixed_prime` for the soundness caveat.
+        let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, Zt::Fmod>();
 
         let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
         Ok((field_cfg, projected_scalars_fx))

@@ -299,17 +299,17 @@ where
     U: Uair,
     IdealOverF: Ideal,
 {
-    /// Step 1: Prime projection. Samples the random field configuration.
+    /// Step 1: Prime projection. Builds the field configuration from the
+    /// fixed projecting prime (secp256k1 base prime; see `crate::fixed_prime`).
     #[allow(clippy::type_complexity)]
     pub fn step1_prime_projection(
-        mut self,
+        self,
     ) -> Result<VerifierPrimeProjected<'a, Zt, U, F, IdealOverF, D>, ProtocolError<F, IdealOverF>>
     {
-        let field_cfg = self
-            .base
-            .pcs_transcript
-            .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+        // `fixed-prime` branch: use the secp256k1 base field prime as the
+        // projecting prime instead of drawing one from the transcript.
+        // See `crate::fixed_prime` for the soundness caveat.
+        let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, Zt::Fmod>();
 
         Ok(VerifierPrimeProjected {
             base: self.base,
