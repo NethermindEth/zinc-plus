@@ -1511,15 +1511,15 @@ fn setup_folded_pp(num_vars: usize) -> FoldedPp {
     (
         ZipPlus::setup(
             split_size,
-            IprsCode::new_with_optimal_depth(split_size).unwrap(),
+            IprsCode::new(split_size, iprs_depth(split_size)).unwrap(),
         ),
         ZipPlus::setup(
             normal_size,
-            IprsCode::new_with_optimal_depth(normal_size).unwrap(),
+            IprsCode::new(normal_size, iprs_depth(normal_size)).unwrap(),
         ),
         ZipPlus::setup(
             normal_size,
-            IprsCode::new_with_optimal_depth(normal_size).unwrap(),
+            IprsCode::new(normal_size, iprs_depth(normal_size)).unwrap(),
         ),
     )
 }
@@ -1539,7 +1539,7 @@ fn do_bench_e2e_folded<U, IdealOverF>(
     U: Uair + 'static,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
 {
-    let params = format!("{label}/nvars={num_vars}");
+    let params = format!("{label}/nvars={num_vars}{RATE_TAG}");
 
     group.bench_function(BenchmarkId::new("Prove (folded)", &params), |bench| {
         bench.iter(|| {
