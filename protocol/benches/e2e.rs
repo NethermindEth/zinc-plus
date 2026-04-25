@@ -41,7 +41,7 @@ use zinc_utils::{
     projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
-    code::iprs::{IprsCode, PnttConfigF65537},
+    code::iprs::{IprsCode, PnttConfigF12289},
     pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
     utils::eprint_proof_size,
 };
@@ -57,7 +57,29 @@ const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
 };
 
 /// Repetition factor for linear code, an inverse rate.
+/// Enable `bench-rate-1-8` to switch from the default rate 1/4 to rate 1/8.
+#[cfg(feature = "bench-rate-1-8")]
+const REP: usize = 8;
+#[cfg(not(feature = "bench-rate-1-8"))]
 const REP: usize = 4;
+
+const RATE_TAG: &str = match REP {
+    8 => "/rate=1_8",
+    _ => "/rate=1_4",
+};
+
+/// At rate 1/8 we bump the IPRS tree depth by one beyond
+/// `new_with_optimal_depth`'s default heuristic.
+const EXTRA_DEPTH: usize = if REP >= 8 { 1 } else { 0 };
+
+/// Mirrors `IprsCode::new_with_optimal_depth`'s formula, then adds
+/// `EXTRA_DEPTH`. Kept in sync with zip-plus/src/code/iprs.rs.
+fn iprs_depth(row_len: usize) -> usize {
+    const MAX_BASE_COLS_LOG2: usize = 7;
+    let target_base_len = 1usize << MAX_BASE_COLS_LOG2;
+    let base = 1.max(((1.max(row_len / target_base_len)).ilog2() as usize).div_ceil(3));
+    base + EXTRA_DEPTH
+}
 
 #[allow(clippy::type_complexity)]
 #[derive(Debug, Clone, Copy)]
@@ -123,7 +145,10 @@ where
     CombDotChal: InnerProduct<Comb, Chal, CombR> + Clone + Debug + Send + Sync,
     ArrCombRDotChal: InnerProduct<[CombR], Chal, CombR> + Clone + Debug + Send + Sync,
 {
-    const NUM_COLUMN_OPENINGS: usize = 147;
+    const NUM_COLUMN_OPENINGS: usize = match REP {
+        8 => 96,
+        _ => 144,
+    };
     type Eval = Eval;
     type Cw = Cw;
     type Fmod = Fmod;
@@ -227,9 +252,9 @@ where
         MBSInnerProduct,
     >;
 
-    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
-    type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
-    type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
+    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF12289, REP, PERFORM_CHECKS>;
+    type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF12289, REP, PERFORM_CHECKS>;
+    type IntLc = IprsCode<Self::IntZt, PnttConfigF12289, REP, PERFORM_CHECKS>;
 }
 
 //
@@ -274,15 +299,15 @@ fn setup_pp(num_vars: usize) -> Pp<BenchZincTypes> {
     (
         ZipPlus::setup(
             poly_size,
-            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+            IprsCode::new(poly_size, iprs_depth(poly_size)).unwrap(),
         ),
         ZipPlus::setup(
             poly_size,
-            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+            IprsCode::new(poly_size, iprs_depth(poly_size)).unwrap(),
         ),
         ZipPlus::setup(
             poly_size,
-            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+            IprsCode::new(poly_size, iprs_depth(poly_size)).unwrap(),
         ),
     )
 }
@@ -319,15 +344,15 @@ fn setup_ecdsa_pp(num_vars: usize) -> Pp<EcdsaBenchZincTypes> {
     (
         ZipPlus::setup(
             poly_size,
-            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+            IprsCode::new(poly_size, iprs_depth(poly_size)).unwrap(),
         ),
         ZipPlus::setup(
             poly_size,
-            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+            IprsCode::new(poly_size, iprs_depth(poly_size)).unwrap(),
         ),
         ZipPlus::setup(
             poly_size,
-            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+            IprsCode::new(poly_size, iprs_depth(poly_size)).unwrap(),
         ),
     )
 }
@@ -366,7 +391,7 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
     U: Uair + 'static,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
 {
-    let params = format!("{label}/nvars={num_vars}");
+    let params = format!("{label}/nvars={num_vars}{RATE_TAG}");
 
     macro_rules! zinc_plus {
         () => {
@@ -463,7 +488,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     U: Uair + 'static,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
 {
-    let params = format!("{label}/nvars={num_vars}");
+    let params = format!("{label}/nvars={num_vars}{RATE_TAG}");
 
     macro_rules! step_bench {
         ($side:literal / $step_name:literal, setup = || $setup:expr, run = |$s:ident| $run:expr $(,)?) => {
@@ -834,7 +859,7 @@ fn bench_ecdsa_slice_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) 
         unreachable!("ECDSA scalar slice uses only assert_zero; no non-trivial ideals")
     };
 
-    let params = format!("EcdsaSlice/nvars={num_vars}");
+    let params = format!("EcdsaSlice/nvars={num_vars}{RATE_TAG}");
 
     group.bench_function(BenchmarkId::new("Prove (Combined)", &params), |bench| {
         bench.iter(|| {
@@ -902,7 +927,7 @@ fn bench_ecdsa_slice_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize
     };
     let project_scalar = zinc_protocol::project_scalar_fn;
 
-    let params = format!("EcdsaSlice/nvars={num_vars}");
+    let params = format!("EcdsaSlice/nvars={num_vars}{RATE_TAG}");
 
     macro_rules! step_bench {
         ($side:literal / $step_name:literal, setup = || $setup:expr, run = |$s:ident| $run:expr $(,)?) => {
@@ -1077,7 +1102,7 @@ fn bench_sha_ecdsa_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     let sig = U::signature();
     let public_trace = trace.public(&sig);
 
-    let params = format!("ShaEcdsa/nvars={num_vars}");
+    let params = format!("ShaEcdsa/nvars={num_vars}{RATE_TAG}");
 
     group.bench_function(BenchmarkId::new("Prove (Combined)", &params), |bench| {
         bench.iter(|| {
@@ -1141,7 +1166,7 @@ fn bench_sha_ecdsa_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) 
 
     let project_scalar = zinc_protocol::project_scalar_fn;
 
-    let params = format!("ShaEcdsa/nvars={num_vars}");
+    let params = format!("ShaEcdsa/nvars={num_vars}{RATE_TAG}");
 
     macro_rules! step_bench {
         ($side:literal / $step_name:literal, setup = || $setup:expr, run = |$s:ident| $run:expr $(,)?) => {
@@ -1303,7 +1328,7 @@ fn bench_sha_ecdsa_linearized_prover_only(
     let trace = U::generate_random_trace(num_vars, &mut rng);
     let pp = setup_ecdsa_pp(num_vars);
 
-    let params = format!("ShaEcdsaLinearized/nvars={num_vars}");
+    let params = format!("ShaEcdsaLinearized/nvars={num_vars}{RATE_TAG}");
 
     group.bench_function(BenchmarkId::new("Prove (Combined)", &params), |bench| {
         bench.iter(|| {

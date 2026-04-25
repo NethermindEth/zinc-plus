@@ -37,6 +37,7 @@ workspace = true
 parallel = ["dep:rayon", "zinc-piop/parallel", "zinc-poly/parallel", "zinc-uair/parallel", "zinc-utils/parallel"]
 simd = ["zinc-poly/simd", "zinc-piop/simd", "zip-plus/simd"]
 unchecked = []
+bench-rate-1-8 = []
 
 [[bench]]
 name = "e2e"

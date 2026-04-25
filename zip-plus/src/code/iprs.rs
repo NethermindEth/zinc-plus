@@ -4,7 +4,7 @@ use crate::{ZipError, code::LinearCode, pcs::structs::ZipTypes};
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::{CheckedAdd, CheckedMul};
 use pntt::radix8::params::Config as PnttConfig;
-pub use pntt::radix8::params::{PnttConfigF65537, PnttInt, Radix8PnttParams};
+pub use pntt::radix8::params::{PnttConfigF12289, PnttConfigF65537, PnttInt, Radix8PnttParams};
 use std::{
     fmt::Debug,
     iter::Sum,
