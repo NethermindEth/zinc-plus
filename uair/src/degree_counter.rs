@@ -45,6 +45,21 @@ pub fn count_effective_max_degree<U: Uair>() -> usize {
         .unwrap_or(0)
 }
 
+/// Per-constraint mask of "linear" constraints — those with degree at most
+/// 1 in the trace MLEs. Used by the hybrid ideal-check dispatch in
+/// `protocol::prove` to route linear constraints through the MLE-first lane
+/// while non-linear constraints stay on the combined-polynomial lane.
+///
+/// Mask order matches the constraint order produced by
+/// [`count_constraint_degrees`] and the ideal collector — both walk the
+/// UAIR's `constrain_general` in declaration order.
+pub fn linear_constraint_mask<U: Uair>() -> Vec<bool> {
+    count_constraint_degrees::<U>()
+        .into_iter()
+        .map(|d| d <= 1)
+        .collect()
+}
+
 /// Compute the degree of each individual constraint in the UAIR `U`.
 /// Returns a `Vec<usize>` where the i-th element is the degree
 /// of the i-th constraint.

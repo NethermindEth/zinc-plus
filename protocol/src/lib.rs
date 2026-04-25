@@ -500,11 +500,10 @@ mod tests {
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-        TestUairMixedShifts, TestUairNoMultiplication, TestUairSimpleMultiplication,
+        TestUairMixedDegrees, TestUairMixedShifts, TestUairNoMultiplication,
+        TestUairSimpleMultiplication,
     };
-    use zinc_uair::{
-        degree_counter::count_max_degree, ideal::DegreeOneIdeal, ideal_collector::IdealOrZero,
-    };
+    use zinc_uair::{ideal::DegreeOneIdeal, ideal_collector::IdealOrZero};
     use zinc_utils::{
         CHECKED,
         from_ref::FromRef,
@@ -774,10 +773,10 @@ mod tests {
 
         run_protocol!(false);
 
-        if count_max_degree::<U>() <= 1 {
-            // For linear constraints, also test the MLE-first ideal check approach.
-            run_protocol!(true);
-        }
+        // `MLE_FIRST = true` is now safe for any UAIR: it dispatches at
+        // runtime to MLE-first (all-linear), Combined (all-non-linear), or
+        // Hybrid (mixed). Always exercise it.
+        run_protocol!(true);
     }
 
     /// End-to-end test: TestUairNoMultiplication.
@@ -822,6 +821,33 @@ mod tests {
                 RaaCode::new(num_vars),
             ),
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// End-to-end test: TestUairMixedDegrees.
+    ///
+    /// Two non-zero-ideal `assert_in_ideal` constraints — one linear
+    /// (degree 1), one quadratic (degree 2). Exercises the hybrid
+    /// ideal-check dispatch (`prove_hybrid`), which routes the linear
+    /// constraint through the MLE-first lane and the quadratic constraint
+    /// through the combined-poly lane, merging the per-constraint values
+    /// into a single proof. Honest witness is the all-zero trace, which
+    /// trivially satisfies both constraints.
+    #[test]
+    fn test_e2e_mixed_degrees() {
+        // Use TestZincTypesRaa because the quadratic constraint with
+        // arbitrary_poly column multiplication needs an RAA-style code.
+        let num_vars = 2;
+        do_test::<TestZincTypesRaa, TestUairMixedDegrees<ZtInt>>(
+            num_vars,
+            (
+                RaaCode::new(num_vars),
+                RaaCode::new(num_vars),
+                RaaCode::new(num_vars),
+            ),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
             |_| {},
             |res| res.unwrap(),
         );
