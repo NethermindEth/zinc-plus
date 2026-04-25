@@ -229,29 +229,35 @@ pub struct Sha256CompressionSliceUair<R>(PhantomData<R>);
 /// All polynomial columns are bit-polynomials (stored as `binary_poly`);
 /// the int slot carries 0/1-valued selectors.
 pub mod cols {
-    // binary_poly, public prefix of length 2:
+    // binary_poly, public prefix of length 6.
+    //
+    // The 4 PA_OV_* columns are the per-coefficient mod-2 overflow
+    // witnesses for the rotation-ideal constraints (C1, C2, C4, C6).
+    // They're "quotient witnesses" for the F_2[X] → Q[X] lift —
+    // verifier-supplied, since the verifier can derive them from the
+    // bit-poly values when shadow-running the SHA computation.
     pub const PA_A: usize = 0;
     pub const PA_E: usize = 1;
+    pub const PA_OV_SIG0: usize = 2;
+    pub const PA_OV_SIG1: usize = 3;
+    pub const PA_OV_LSIG0: usize = 4;
+    pub const PA_OV_LSIG1: usize = 5;
     // binary_poly, witness suffix. Grouped by constraint family for clarity.
     // Sigma_0:
-    pub const W_A: usize = 2;
-    pub const W_SIG0: usize = 3;
-    pub const W_OV_SIG0: usize = 4;
+    pub const W_A: usize = 6;
+    pub const W_SIG0: usize = 7;
     // Sigma_1:
-    pub const W_E: usize = 5;
-    pub const W_SIG1: usize = 6;
-    pub const W_OV_SIG1: usize = 7;
+    pub const W_E: usize = 8;
+    pub const W_SIG1: usize = 9;
     // sigma_0 (with right-shift decomposition) — shares W_W with sigma_1:
-    pub const W_W: usize = 8;
-    pub const W_LSIG0: usize = 9;
-    pub const W_S0: usize = 10;
-    pub const W_T0: usize = 11;
-    pub const W_OV_LSIG0: usize = 12;
+    pub const W_W: usize = 10;
+    pub const W_LSIG0: usize = 11;
+    pub const W_S0: usize = 12;
+    pub const W_T0: usize = 13;
     // sigma_1 (with right-shift decomposition):
-    pub const W_LSIG1: usize = 13;
-    pub const W_S1: usize = 14;
-    pub const W_T1: usize = 15;
-    pub const W_OV_LSIG1: usize = 16;
+    pub const W_LSIG1: usize = 14;
+    pub const W_S1: usize = 15;
+    pub const W_T1: usize = 16;
     // Register update (free-witness Ch and Maj — see module doc):
     pub const W_CH: usize = 17;
     pub const W_MAJ: usize = 18;
@@ -259,7 +265,7 @@ pub mod cols {
     /// Total number of binary_poly columns.
     pub const NUM_BIN: usize = 19;
     /// Number of public binary_poly columns (prefix).
-    pub const NUM_BIN_PUB: usize = 2;
+    pub const NUM_BIN_PUB: usize = 6;
 
     // int columns. Public selectors come first (required by PublicColumnLayout
     // prefix convention), witness columns last.
@@ -412,21 +418,21 @@ where
         // Columns.
         let pa_a = &bp[cols::PA_A];
         let pa_e = &bp[cols::PA_E];
+        let pa_ov_sig0 = &bp[cols::PA_OV_SIG0];
+        let pa_ov_sig1 = &bp[cols::PA_OV_SIG1];
+        let pa_ov_lsig0 = &bp[cols::PA_OV_LSIG0];
+        let pa_ov_lsig1 = &bp[cols::PA_OV_LSIG1];
         let w_a = &bp[cols::W_A];
         let w_sig0 = &bp[cols::W_SIG0];
-        let w_ov_sig0 = &bp[cols::W_OV_SIG0];
         let w_e = &bp[cols::W_E];
         let w_sig1 = &bp[cols::W_SIG1];
-        let w_ov_sig1 = &bp[cols::W_OV_SIG1];
         let w_big_w = &bp[cols::W_W];
         let w_lsig0 = &bp[cols::W_LSIG0];
         let w_s0 = &bp[cols::W_S0];
         let w_t0 = &bp[cols::W_T0];
-        let w_ov_lsig0 = &bp[cols::W_OV_LSIG0];
         let w_lsig1 = &bp[cols::W_LSIG1];
         let w_s1 = &bp[cols::W_S1];
         let w_t1 = &bp[cols::W_T1];
-        let w_ov_lsig1 = &bp[cols::W_OV_LSIG1];
 
         let s_init = &sel[cols::S_INIT];
         let s_final = &sel[cols::S_FINAL];
@@ -485,7 +491,7 @@ where
         //   (a_hat · rho_sig0 − sig0_hat − 2 · ov_sig0) ∈ (X^32 − 1)
         b.assert_in_ideal(
             mbs(w_a, &rho_sig0).expect("a · rho_sig0 overflow") - w_sig0
-                - &mbs(w_ov_sig0, &two_scalar).expect("2 · ov_sig0 overflow"),
+                - &mbs(pa_ov_sig0, &two_scalar).expect("2 · ov_sig0 overflow"),
             &ideal_rot_xw1,
         );
 
@@ -493,7 +499,7 @@ where
         //   (e_hat · rho_sig1 − sig1_hat − 2 · ov_sig1) ∈ (X^32 − 1)
         b.assert_in_ideal(
             mbs(w_e, &rho_sig1).expect("e · rho_sig1 overflow") - w_sig1
-                - &mbs(w_ov_sig1, &two_scalar).expect("2 · ov_sig1 overflow"),
+                - &mbs(pa_ov_sig1, &two_scalar).expect("2 · ov_sig1 overflow"),
             &ideal_rot_xw1,
         );
 
@@ -509,7 +515,7 @@ where
         //   (W_hat · rho_lsig0 + S_0 − lsig0_hat − 2 · ov_lsig0) ∈ (X^32 − 1)
         b.assert_in_ideal(
             mbs(w_big_w, &rho_lsig0).expect("W · rho_lsig0 overflow") + w_s0 - w_lsig0
-                - &mbs(w_ov_lsig0, &two_scalar).expect("2 · ov_lsig0 overflow"),
+                - &mbs(pa_ov_lsig0, &two_scalar).expect("2 · ov_lsig0 overflow"),
             &ideal_rot_xw1,
         );
 
@@ -523,7 +529,7 @@ where
         //   (W_hat · rho_lsig1 + S_1 − lsig1_hat − 2 · ov_lsig1) ∈ (X^32 − 1)
         b.assert_in_ideal(
             mbs(w_big_w, &rho_lsig1).expect("W · rho_lsig1 overflow") + w_s1 - w_lsig1
-                - &mbs(w_ov_lsig1, &two_scalar).expect("2 · ov_lsig1 overflow"),
+                - &mbs(pa_ov_lsig1, &two_scalar).expect("2 · ov_lsig1 overflow"),
             &ideal_rot_xw1,
         );
 
@@ -948,24 +954,26 @@ where
             BinaryPoly<32>,
         > { col.into_iter().collect() };
 
+        // Layout: 6 public bin_poly cols (PA_A, PA_E, PA_OV_SIG0,
+        // PA_OV_SIG1, PA_OV_LSIG0, PA_OV_LSIG1) + 13 witness cols.
         let binary_poly = vec![
             to_bin_mle(pa_a_col),
             to_bin_mle(pa_e_col),
+            to_bin_mle(to_bits(&ov_sig0_vals)),
+            to_bin_mle(to_bits(&ov_sig1_vals)),
+            to_bin_mle(to_bits(&ov_lsig0_vals)),
+            to_bin_mle(to_bits(&ov_lsig1_vals)),
             to_bin_mle(to_bits(&a_vals)),
             to_bin_mle(to_bits(&sig0_vals)),
-            to_bin_mle(to_bits(&ov_sig0_vals)),
             to_bin_mle(to_bits(&e_vals)),
             to_bin_mle(to_bits(&sig1_vals)),
-            to_bin_mle(to_bits(&ov_sig1_vals)),
             to_bin_mle(to_bits(&w_vals)),
             to_bin_mle(to_bits(&lsig0_vals)),
             to_bin_mle(to_bits(&s0_vals)),
             to_bin_mle(to_bits(&t0_vals)),
-            to_bin_mle(to_bits(&ov_lsig0_vals)),
             to_bin_mle(to_bits(&lsig1_vals)),
             to_bin_mle(to_bits(&s1_vals)),
             to_bin_mle(to_bits(&t1_vals)),
-            to_bin_mle(to_bits(&ov_lsig1_vals)),
             to_bin_mle(to_bits(&ch_vals)),
             to_bin_mle(to_bits(&maj_vals)),
         ];

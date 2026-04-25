@@ -24,9 +24,10 @@
 //! Flat trace = `binary_poly || arbitrary_poly || int` (no
 //! arbitrary_poly columns).
 //!
-//! **binary_poly section** (19 cols, unchanged from SHA standalone):
-//! - `[0..2]` public: `PA_A`, `PA_E`
-//! - `[2..19]` witness: SHA's witness bit-polys
+//! **binary_poly section** (19 cols, mirrors SHA standalone):
+//! - `[0..6]` public: `PA_A`, `PA_E`, `PA_OV_SIG0/SIG1/LSIG0/LSIG1`
+//!   (rotation-ideal overflow witnesses, made public)
+//! - `[6..19]` witness: SHA's remaining witness bit-polys
 //!
 //! **int section** (45 cols total, 15 pubs + 28 witness + 2
 //!   multiplicities):
@@ -91,28 +92,30 @@ pub use crate::ecdsa::FINAL_ROW;
 // ---------------------------------------------------------------------------
 
 pub mod cols {
-    // ===== binary_poly (unchanged from SHA standalone) =====
+    // ===== binary_poly (mirrors sha256.rs: 6 pub + 13 witness) =====
+    // OV cols are public — overflow witnesses for the rotation-ideal
+    // constraints (C1, C2, C4, C6) are verifier-derivable.
     pub const PA_A: usize = 0;
     pub const PA_E: usize = 1;
-    pub const W_A: usize = 2;
-    pub const W_SIG0: usize = 3;
-    pub const W_OV_SIG0: usize = 4;
-    pub const W_E: usize = 5;
-    pub const W_SIG1: usize = 6;
-    pub const W_OV_SIG1: usize = 7;
-    pub const W_W: usize = 8;
-    pub const W_LSIG0: usize = 9;
-    pub const W_S0: usize = 10;
-    pub const W_T0: usize = 11;
-    pub const W_OV_LSIG0: usize = 12;
-    pub const W_LSIG1: usize = 13;
-    pub const W_S1: usize = 14;
-    pub const W_T1: usize = 15;
-    pub const W_OV_LSIG1: usize = 16;
+    pub const PA_OV_SIG0: usize = 2;
+    pub const PA_OV_SIG1: usize = 3;
+    pub const PA_OV_LSIG0: usize = 4;
+    pub const PA_OV_LSIG1: usize = 5;
+    pub const W_A: usize = 6;
+    pub const W_SIG0: usize = 7;
+    pub const W_E: usize = 8;
+    pub const W_SIG1: usize = 9;
+    pub const W_W: usize = 10;
+    pub const W_LSIG0: usize = 11;
+    pub const W_S0: usize = 12;
+    pub const W_T0: usize = 13;
+    pub const W_LSIG1: usize = 14;
+    pub const W_S1: usize = 15;
+    pub const W_T1: usize = 16;
     pub const W_CH: usize = 17;
     pub const W_MAJ: usize = 18;
     pub const NUM_BIN: usize = 19;
-    pub const NUM_BIN_PUB: usize = 2;
+    pub const NUM_BIN_PUB: usize = 6;
 
     // ===== int section =====
     // SHA publics (0..6)
@@ -287,21 +290,21 @@ where
 
         let pa_a = &bp[cols::PA_A];
         let pa_e = &bp[cols::PA_E];
+        let pa_ov_sig0 = &bp[cols::PA_OV_SIG0];
+        let pa_ov_sig1 = &bp[cols::PA_OV_SIG1];
+        let pa_ov_lsig0 = &bp[cols::PA_OV_LSIG0];
+        let pa_ov_lsig1 = &bp[cols::PA_OV_LSIG1];
         let w_a = &bp[cols::W_A];
         let w_sig0 = &bp[cols::W_SIG0];
-        let w_ov_sig0 = &bp[cols::W_OV_SIG0];
         let w_e = &bp[cols::W_E];
         let w_sig1 = &bp[cols::W_SIG1];
-        let w_ov_sig1 = &bp[cols::W_OV_SIG1];
         let w_big_w = &bp[cols::W_W];
         let w_lsig0 = &bp[cols::W_LSIG0];
         let w_s0 = &bp[cols::W_S0];
         let w_t0 = &bp[cols::W_T0];
-        let w_ov_lsig0 = &bp[cols::W_OV_LSIG0];
         let w_lsig1 = &bp[cols::W_LSIG1];
         let w_s1 = &bp[cols::W_S1];
         let w_t1 = &bp[cols::W_T1];
-        let w_ov_lsig1 = &bp[cols::W_OV_LSIG1];
 
         let sha_s_init = &int[cols::SHA_S_INIT];
         let sha_s_final = &int[cols::SHA_S_FINAL];
@@ -352,14 +355,14 @@ where
         // C1: Sigma_0 rotation
         b.assert_in_ideal(
             mbs(w_a, &rho_sig0).expect("a · rho_sig0 overflow") - w_sig0
-                - &mbs(w_ov_sig0, &two_scalar_sha).expect("2 · ov_sig0 overflow"),
+                - &mbs(pa_ov_sig0, &two_scalar_sha).expect("2 · ov_sig0 overflow"),
             &ideal_rot_xw1,
         );
 
         // C2: Sigma_1 rotation
         b.assert_in_ideal(
             mbs(w_e, &rho_sig1).expect("e · rho_sig1 overflow") - w_sig1
-                - &mbs(w_ov_sig1, &two_scalar_sha).expect("2 · ov_sig1 overflow"),
+                - &mbs(pa_ov_sig1, &two_scalar_sha).expect("2 · ov_sig1 overflow"),
             &ideal_rot_xw1,
         );
 
@@ -371,7 +374,7 @@ where
         // C4: sigma_0 rotation
         b.assert_in_ideal(
             mbs(w_big_w, &rho_lsig0).expect("W · rho_lsig0 overflow") + w_s0 - w_lsig0
-                - &mbs(w_ov_lsig0, &two_scalar_sha).expect("2 · ov_lsig0 overflow"),
+                - &mbs(pa_ov_lsig0, &two_scalar_sha).expect("2 · ov_lsig0 overflow"),
             &ideal_rot_xw1,
         );
 
@@ -383,7 +386,7 @@ where
         // C6: sigma_1 rotation
         b.assert_in_ideal(
             mbs(w_big_w, &rho_lsig1).expect("W · rho_lsig1 overflow") + w_s1 - w_lsig1
-                - &mbs(w_ov_lsig1, &two_scalar_sha).expect("2 · ov_lsig1 overflow"),
+                - &mbs(pa_ov_lsig1, &two_scalar_sha).expect("2 · ov_lsig1 overflow"),
             &ideal_rot_xw1,
         );
 
