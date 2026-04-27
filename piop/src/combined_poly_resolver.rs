@@ -60,12 +60,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// # Parameters
     /// - `transcript`: FS-transcript.
     /// - `trace_matrix`: The trace that have been projected to F.
-    /// - `bit_slices`: Bit-slice MLEs for each binary_poly trace column. Flat
-    ///   layout `[col0_bit0, col0_bit1, ..., col0_bit_{D-1}, col1_bit0, ...]`.
-    ///   Length must equal `num_binary_poly_cols * D`. Empty when no
-    ///   binary_poly columns are present. Each MLE evaluates to 0/1 on the
-    ///   hypercube; this is enforced by an algebraic booleanity term added to
-    ///   `comb_fn`.
     /// - `evaluation_point`: The evaluation point for the claims.
     /// - `projected_scalars`: The UAIR scalars projected to `F`.
     /// - `num_constraints`: The number of constraint polynomials in the UAIR
@@ -77,7 +71,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     pub fn prepare_sumcheck_group<U>(
         transcript: &mut impl Transcript,
         trace_matrix: Vec<DenseMultilinearExtension<F::Inner>>,
-        bit_slices: Vec<DenseMultilinearExtension<F::Inner>>,
         evaluation_point: &[F],
         projected_scalars: &HashMap<U::Scalar, F>,
         num_constraints: usize,
@@ -132,30 +125,22 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             },
         };
 
-        // The challenge '\alpha' to batch multiple evaluation claims.
-        // The booleanity terms reuse this α via additional powers; one
-        // power per bit-slice MLE.
+        // The challenge '\alpha' to batch multiple evaluation claims
         let folding_challenge: F = transcript.get_field_challenge(field_cfg);
 
-        let num_bit_slices = bit_slices.len();
-        let folding_challenge_powers: Vec<F> = powers(
-            folding_challenge,
-            one.clone(),
-            num_constraints + num_bit_slices,
-        );
+        let folding_challenge_powers: Vec<F> =
+            powers(folding_challenge, one.clone(), num_constraints);
 
         let num_cols = trace_matrix.len();
         let num_down_cols = down.len();
         let mles: Vec<DenseMultilinearExtension<F::Inner>> = {
-            let mut mles =
-                Vec::with_capacity(2 + num_cols + num_down_cols + num_bit_slices);
+            let mut mles = Vec::with_capacity(2 + num_cols + num_down_cols);
 
             mles.push(last_row_selector);
             mles.push(eq_r);
 
             mles.extend(trace_matrix);
             mles.extend(down);
-            mles.extend(bit_slices);
 
             mles
         };
@@ -169,10 +154,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             let selector = &mle_values[0];
             let eq_r = &mle_values[1];
 
-            let mut folder = ConstraintFolder::new(
-                &folding_challenge_powers[..num_constraints],
-                &zero,
-            );
+            let mut folder = ConstraintFolder::new(&folding_challenge_powers, &zero);
 
             let project = |scalar: &U::Scalar| {
                 projected_scalars
@@ -183,47 +165,21 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
             U::constrain_general(
                 &mut folder,
-                TraceRow::from_slice_with_layout(
-                    &mle_values[2..num_cols + 2],
-                    up_layout,
-                ),
-                TraceRow::from_slice_with_layout(
-                    &mle_values[num_cols + 2..num_cols + 2 + num_down_cols],
-                    down_layout,
-                ),
+                TraceRow::from_slice_with_layout(&mle_values[2..num_cols + 2], up_layout),
+                TraceRow::from_slice_with_layout(&mle_values[num_cols + 2..], down_layout),
                 project,
                 |x, y| Some(project(y) * x),
                 ImpossibleIdeal::from_ref,
             );
 
-            // Σ_k α^{C+k} · v_k · (v_k - 1).
-            // Booleanity must hold on every row including the last padding
-            // row, so this is *not* multiplied by `(1 - selector)` — only
-            // by `eq_r` (the zerocheck randomness factor).
-            let bool_offset = num_cols + 2 + num_down_cols;
-            let mut bool_folded = zero.clone();
-            for k in 0..num_bit_slices {
-                let v = mle_values[bool_offset + k].clone();
-                let coeff = folding_challenge_powers[num_constraints + k].clone();
-                bool_folded = bool_folded + coeff * v.clone() * (v - one.clone());
-            }
-
-            folder.folded_constraints * (one.clone() - selector) * eq_r.clone()
-                + bool_folded * eq_r.clone()
+            folder.folded_constraints * (one.clone() - selector) * eq_r
         });
 
-        // The booleanity term is degree 3 in each variable
-        // (v · (v - 1) · eq_r). The UAIR-constraint term is degree
-        // `max_degree + 2`. For honest UAIRs in this codebase
-        // `max_degree ≥ 1`, but defensively bump to `max(_, 3)`.
-        let group_degree = (max_degree + 2).max(3);
-
         Ok((
-            MultiDegreeSumcheckGroup::new(group_degree, mles, comb_fn),
+            MultiDegreeSumcheckGroup::new(max_degree + 2, mles, comb_fn),
             CprProverAncillary {
                 num_cols,
                 num_down_cols,
-                num_bit_slices,
                 num_vars,
             },
         ))
@@ -274,24 +230,21 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             })
             .try_collect()?;
 
-        debug_assert_eq!(
-            evals.len(),
-            ancillary.num_cols + ancillary.num_down_cols + ancillary.num_bit_slices
-        );
+        debug_assert_eq!(evals.len(), ancillary.num_cols + ancillary.num_down_cols);
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
         transcript.absorb_random_field_slice(&evals, &mut transcription_buf);
-        let cols_end = ancillary.num_cols;
-        let down_end = cols_end + ancillary.num_down_cols;
-        let (up_evals, down_evals, bit_slice_evals) = (
-            evals[..cols_end].to_vec(),
-            evals[cols_end..down_end].to_vec(),
-            evals[down_end..].to_vec(),
+        let (up_evals, down_evals) = (
+            evals[0..ancillary.num_cols].to_vec(),
+            evals[ancillary.num_cols..].to_vec(),
         );
         Ok((
             CprProof {
                 up_evals,
                 down_evals,
-                bit_slice_evals,
+                // Filled by `booleanity::finalize_booleanity_prover` when
+                // a separate booleanity sumcheck group is run alongside
+                // the CPR group; left empty here.
+                bit_slice_evals: Vec::new(),
             },
             CprProverState {
                 evaluation_point: sumcheck_prover_state.randomness,
@@ -356,24 +309,15 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         let folding_challenge: F = transcript.get_field_challenge(field_cfg);
 
-        // Same α-power layout as the prover:
-        //   [α^0 .. α^{C-1}]                : UAIR constraints
-        //   [α^C .. α^{C+B-1}]              : per-bit-slice booleanity terms
-        // Bit-slice claims sum to 0 for an honest prover, so the
-        // booleanity contribution to `expected_sum` is identically 0 and
-        // the `expected_sum` formula below is unchanged.
-        let folding_challenge_powers: Vec<F> = powers(
-            folding_challenge,
-            one.clone(),
-            num_constraints + num_bit_slices,
-        );
+        let folding_challenge_powers: Vec<F> =
+            powers(folding_challenge, one.clone(), num_constraints);
 
         // TODO(Alex): investigate if parallelising this is beneficial.
         // Compute v_0 + \alpha * v_1 + ... + \alpha ^ k * v_k.
         let expected_sum = ic_check_subclaim
             .values
             .iter()
-            .zip(&folding_challenge_powers[..num_constraints])
+            .zip(&folding_challenge_powers)
             .map(|(claimed_value, random_coeff)| {
                 let deg = claimed_value.degree().map_or(0, |d| add!(d, 1));
                 DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
@@ -395,8 +339,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         Ok(CprVerifierAncillary {
             folding_challenge_powers,
-            num_constraints,
-            num_bit_slices,
             ic_evaluation_point: ic_check_subclaim.evaluation_point.clone(),
             num_vars,
         })
@@ -445,10 +387,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             one.clone(),
         )?;
 
-        let mut folder = ConstraintFolder::new(
-            &ancillary.folding_challenge_powers[..ancillary.num_constraints],
-            &zero,
-        );
+        let mut folder = ConstraintFolder::new(&ancillary.folding_challenge_powers, &zero);
 
         let project = |scalar: &U::Scalar| {
             projected_scalars
@@ -469,25 +408,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             ImpossibleIdeal::from_ref,
         );
 
-        // Booleanity contribution: Σ_k α^{C+k} · v_k · (v_k - 1) · eq_r.
-        // Note: no `(1 - selector)` factor — booleanity must hold on every
-        // row, including the last padding row (a malicious prover could
-        // otherwise stash a non-binary value in the last row of a
-        // binary_poly column).
-        let bool_folded = proof
-            .bit_slice_evals
-            .iter()
-            .zip(
-                &ancillary.folding_challenge_powers
-                    [ancillary.num_constraints..ancillary.num_constraints + ancillary.num_bit_slices],
-            )
-            .fold(zero.clone(), |acc, (v, coeff)| {
-                acc + coeff.clone() * v.clone() * (v.clone() - one.clone())
-            });
-
-        let expected_claim_value =
-            eq_r_value.clone() * (one - selector_value) * folder.folded_constraints
-                + eq_r_value * bool_folded;
+        let expected_claim_value = eq_r_value * (one - selector_value) * folder.folded_constraints;
 
         if expected_claim_value != expected_evaluation {
             return Err(CombinedPolyResolverError::ClaimValueDoesNotMatch {
@@ -499,7 +420,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
         transcript.absorb_random_field_slice(&proof.up_evals, &mut transcription_buf);
         transcript.absorb_random_field_slice(&proof.down_evals, &mut transcription_buf);
-        transcript.absorb_random_field_slice(&proof.bit_slice_evals, &mut transcription_buf);
 
         Ok(VerifierSubclaim {
             up_evals: proof.up_evals,
@@ -627,14 +547,12 @@ mod tests {
             project_scalars_to_field(projected_scalars, &projecting_element).unwrap();
 
         // Prover: prepare → MultiDegreeSumcheck → finalize
-        // Test UAIRs here have no binary_poly columns, so bit_slices is empty.
         let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
             &mut prover_transcript,
             evaluate_trace_to_column_mles(
                 &ProjectedTrace::RowMajor(projected_trace),
                 &projecting_element,
             ),
-            Vec::new(),
             &ic_prover_state.evaluation_point,
             &projected_scalars,
             num_constraints,

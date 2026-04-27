@@ -92,7 +92,6 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             CombinedPolyResolver::prepare_sumcheck_group::<TestUairNoMultiplication<_>>(
                 transcript,
                 trace_f,
-                vec![], // TestUairNoMultiplication has no binary_poly cols
                 &ic_prover_state.evaluation_point,
                 &scalars_f,
                 num_constraints,
@@ -276,7 +275,6 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         >(
             transcript,
             trace_f,
-            vec![], // TestUairSimpleMultiplication has no binary_poly cols
             &ic_prover_state.evaluation_point,
             &scalars_f,
             num_constraints,

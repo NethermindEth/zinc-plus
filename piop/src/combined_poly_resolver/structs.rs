@@ -15,9 +15,11 @@ pub struct Proof<F: PrimeField> {
     /// The evaluations of the shifted projected trace columns MLEs at the
     /// shared point.
     pub down_evals: Vec<F>,
-    /// Evaluations of the per-binary_poly-column bit-slice MLEs at the shared
-    /// point, flattened column-major-then-bit-major: index `col*D + bit`.
-    /// Empty when no binary_poly columns are present.
+    /// Evaluations of the per-binary_poly-column bit-slice MLEs at the
+    /// shared point, flat layout `col*D + bit`. Populated by the
+    /// algebraic booleanity sumcheck (a separate degree-3 group running
+    /// alongside the CPR group); empty when no binary_poly columns are
+    /// present.
     pub bit_slice_evals: Vec<F>,
 }
 
@@ -66,8 +68,8 @@ where
 }
 
 impl<F: PrimeField> Proof<F> {
-    /// Check that `up_evals`, `down_evals`, and `bit_slice_evals` have the
-    /// expected lengths.
+    /// Check that `up_evals`, `down_evals`, and `bit_slice_evals` have
+    /// the expected lengths.
     pub fn validate_evaluation_sizes(
         &self,
         num_cols: usize,
@@ -112,8 +114,6 @@ pub struct CprProverAncillary {
     pub num_cols: usize,
     /// Number of shifted (down) columns.
     pub num_down_cols: usize,
-    /// Number of bit-slice virtual MLEs (= num_binary_poly_cols * D).
-    pub num_bit_slices: usize,
     /// Number of variables — used to index the last challenge.
     pub num_vars: usize,
 }
@@ -122,15 +122,8 @@ pub struct CprProverAncillary {
 /// `finalize_verifier`. Holds state that bridges the pre-sumcheck and
 /// post-sumcheck halves of the CPR verifier.
 pub struct CprVerifierAncillary<F: PrimeField> {
-    /// Powers of the folding challenge α: [1, α, α², ..., α^{k-1}], extended
-    /// to cover both UAIR constraints and per-bit-slice booleanity terms.
+    /// Powers of the folding challenge α: [1, α, α², ..., α^{k-1}].
     pub folding_challenge_powers: Vec<F>,
-    /// Number of UAIR constraints (the prefix of `folding_challenge_powers`
-    /// that is consumed by `ConstraintFolder`; the remainder is for the
-    /// booleanity terms).
-    pub num_constraints: usize,
-    /// Number of bit-slice virtual MLEs (= num_binary_poly_cols * D).
-    pub num_bit_slices: usize,
     /// Evaluation point from the ideal check subclaim (for eq_r computation).
     pub ic_evaluation_point: Vec<F>,
     /// Number of variables (for selector computation).
@@ -148,7 +141,6 @@ pub struct VerifierSubclaim<F: PrimeField> {
     pub up_evals: Vec<F>,
     /// Evaluation claims about the shifted trace columns.
     pub down_evals: Vec<F>,
-    /// Evaluation claims about the per-binary_poly-column bit-slice MLEs.
-    /// Flattened column-major-then-bit-major: index `col*D + bit`.
+    /// Bit-slice MLE evaluation claims (flat `col*D + bit`).
     pub bit_slice_evals: Vec<F>,
 }
