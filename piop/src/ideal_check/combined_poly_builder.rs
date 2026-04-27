@@ -1,10 +1,13 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use crate::projections::{ColumnMajorTrace, RowMajorTrace};
+use crate::{
+    projections::{ColumnMajorTrace, RowMajorTrace, ScalarMap},
+    scalar_proj_cache::ScalarProjCache,
+};
 use crypto_primitives::PrimeField;
 use num_traits::Zero;
-use std::collections::HashMap;
+use std::cell::RefCell;
 use zinc_poly::{
     EvaluationError,
     mle::{
@@ -30,7 +33,7 @@ use zinc_utils::{
 #[allow(clippy::arithmetic_side_effects)]
 pub fn compute_combined_polynomials<F, U>(
     trace_matrix: &RowMajorTrace<F>,
-    projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
     num_constraints: usize,
     field_cfg: &F::Config,
     skip_constraints: &[bool],
@@ -105,7 +108,7 @@ fn combine_rows_and_get_max_degree<F, U>(
     up: &[DynamicPolynomialF<F>],
     down: &[DynamicPolynomialF<F>],
     num_constraints: usize,
-    projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
     down_layout: &ColumnLayout,
 ) -> (usize, Vec<DynamicPolynomialF<F>>)
 where
@@ -114,11 +117,26 @@ where
 {
     let mut constraint_builder = CombinedPolyRowBuilder::new(num_constraints);
 
-    let project = |x: &U::Scalar| {
-        projected_scalars
+    // Per-call cache — see `scalar_proj_cache`. This site is called once per
+    // trace row (2^num_vars - 1 times per proof) and projects scalars into a
+    // `DynamicPolynomialF` (wider than just F), so the HashMap lookup is
+    // expensive enough that even modest reuse pays for the cache. Lazy init
+    // keeps the overhead at zero for UAIRs that never call project.
+    let cache: RefCell<Option<ScalarProjCache<U::Scalar, DynamicPolynomialF<F>>>> =
+        RefCell::new(None);
+    let project = |x: &U::Scalar| -> DynamicPolynomialF<F> {
+        if let Some(v) = cache.borrow().as_ref().and_then(|c| c.get(x)) {
+            return v;
+        }
+        let v = projected_scalars
             .get(x)
             .cloned()
-            .expect("all scalars should have been projected at this point")
+            .expect("all scalars should have been projected at this point");
+        cache
+            .borrow_mut()
+            .get_or_insert_with(ScalarProjCache::new)
+            .push(x, v.clone());
+        v
     };
 
     U::constrain_general(
@@ -199,7 +217,7 @@ fn prepare_coefficient_mles<F: PrimeField>(
 /// `IdealCheckProtocol::prove_hybrid`.
 pub fn evaluate_combined_polynomials<F, U>(
     trace_matrix: &ColumnMajorTrace<F>,
-    projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
     num_constraints: usize,
     evaluation_point: &[F],
     field_cfg: &F::Config,
@@ -234,7 +252,7 @@ where
 #[allow(clippy::arithmetic_side_effects)]
 pub fn evaluate_combined_polynomials_unchecked<F, U>(
     trace_matrix: &ColumnMajorTrace<F>,
-    projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
     num_constraints: usize,
     evaluation_point: &[F],
     field_cfg: &F::Config,
@@ -314,11 +332,23 @@ where
     // Apply UAIR constraints to the evaluated trace values
     let mut constraint_builder = CombinedPolyRowBuilder::new(num_constraints);
 
-    let project = |x: &U::Scalar| {
-        projected_scalars
+    // See `scalar_proj_cache` module. This site is called once (linear-UAIR
+    // fast path), so the win is purely within-call dedup.
+    let cache: RefCell<Option<ScalarProjCache<U::Scalar, DynamicPolynomialF<F>>>> =
+        RefCell::new(None);
+    let project = |x: &U::Scalar| -> DynamicPolynomialF<F> {
+        if let Some(v) = cache.borrow().as_ref().and_then(|c| c.get(x)) {
+            return v;
+        }
+        let v = projected_scalars
             .get(x)
             .cloned()
-            .expect("all scalars should have been projected at this point")
+            .expect("all scalars should have been projected at this point");
+        cache
+            .borrow_mut()
+            .get_or_insert_with(ScalarProjCache::new)
+            .push(x, v.clone());
+        v
     };
 
     U::constrain_general(

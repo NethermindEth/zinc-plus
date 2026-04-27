@@ -1,18 +1,34 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+use ahash::AHasher;
 use crypto_primitives::{FromWithConfig, PrimeField, Semiring};
-use std::{collections::HashMap, iter};
+use std::{collections::HashMap, hash::BuildHasherDefault, iter};
 use zinc_poly::{
     EvaluationError,
     mle::DenseMultilinearExtension,
-    univariate::dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
+    univariate::{
+        binary::BinaryPoly,
+        dense::DensePolynomial,
+        dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
+    },
 };
 use zinc_uair::{Uair, UairTrace, collect_scalars::collect_scalars};
 use zinc_utils::{
-    UNCHECKED, cfg_extend, cfg_into_iter, cfg_iter, cfg_iter_mut, inner_product::InnerProduct,
-    powers,
+    UNCHECKED, cfg_extend, cfg_into_iter, cfg_iter, cfg_iter_mut, from_ref::FromRef,
+    inner_product::InnerProduct, powers, projectable_to_field::ProjectableToField,
 };
+
+/// HashMap specialization used for every `projected_scalars` lookup in the
+/// hot prover path. `U::Scalar` is commonly a `DensePolynomial<_, 32>` (≈512
+/// bytes of key material), and the default `std::collections::HashMap` hasher
+/// (SipHash 1-3) spends hundreds of nanoseconds hashing each key. `ahash` is
+/// ~5–10× faster on that key size. The map is populated once per prove/verify
+/// call and is never exposed to untrusted input, so the HashDoS resistance of
+/// SipHash is irrelevant here. `BuildHasherDefault` gives a deterministic
+/// seed without requiring ahash's `runtime-rng` feature and crucially
+/// provides `Default`, which `collect()` needs.
+pub type ScalarMap<K, V> = HashMap<K, V, BuildHasherDefault<AHasher>>;
 
 /// Row-indexed trace matrix: `trace[row][col]`.
 /// Each row contains all column values for that row.
@@ -294,24 +310,98 @@ pub fn evaluate_trace_to_column_mles<F: PrimeField + 'static>(
     }
 }
 
+/// Type-dispatched fast path equivalent to `evaluate_trace_to_column_mles`,
+/// but reads the original (un-prejected) `UairTrace` directly so each column
+/// type can use its optimal projection:
+///
+/// * `binary_poly`: `BinaryPoly::prepare_projection` — D conditional adds of
+///   precomputed `r^i`, no F multiplications.
+/// * `arbitrary_poly`: `DensePolynomial::prepare_projection` — Horner-style.
+/// * `int`: lift the constant to F directly (no inner product).
+///
+/// Avoids the bit→F blow-up done by `project_trace_coeffs_*` followed by a
+/// generic D-element inner product over `DynamicPolynomialF<F>` per cell.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn evaluate_trace_to_column_mles_fast<F, PolyCoeff, Int, const D: usize>(
+    trace: &UairTrace<PolyCoeff, Int, D>,
+    projecting_element: &F,
+    field_cfg: &F::Config,
+) -> Vec<DenseMultilinearExtension<F::Inner>>
+where
+    F: PrimeField + FromRef<F> + 'static,
+    F: for<'a> FromWithConfig<&'a Int>,
+    F::Inner: Default,
+    PolyCoeff: Clone + Send + Sync,
+    Int: Clone + Send + Sync,
+    DensePolynomial<PolyCoeff, D>: ProjectableToField<F>,
+{
+    let zero_inner = F::Inner::default();
+
+    let mut result = Vec::with_capacity(
+        trace.binary_poly.len() + trace.arbitrary_poly.len() + trace.int.len(),
+    );
+
+    let bin_proj = BinaryPoly::<D>::prepare_projection(projecting_element);
+    cfg_extend!(
+        result,
+        cfg_iter!(trace.binary_poly).map(|column| {
+            let evaluations: Vec<F::Inner> = column
+                .iter()
+                .map(|poly| bin_proj(poly).inner().clone())
+                .collect();
+            DenseMultilinearExtension::from_evaluations_vec(
+                column.num_vars,
+                evaluations,
+                zero_inner.clone(),
+            )
+        })
+    );
+
+    let arb_proj = DensePolynomial::<PolyCoeff, D>::prepare_projection(projecting_element);
+    cfg_extend!(
+        result,
+        cfg_iter!(trace.arbitrary_poly).map(|column| {
+            let evaluations: Vec<F::Inner> = column
+                .iter()
+                .map(|poly| arb_proj(poly).inner().clone())
+                .collect();
+            DenseMultilinearExtension::from_evaluations_vec(
+                column.num_vars,
+                evaluations,
+                zero_inner.clone(),
+            )
+        })
+    );
+
+    cfg_extend!(
+        result,
+        cfg_iter!(trace.int).map(|column| {
+            let evaluations: Vec<F::Inner> = column
+                .iter()
+                .map(|i| F::from_with_cfg(i, field_cfg).inner().clone())
+                .collect();
+            DenseMultilinearExtension::from_evaluations_vec(
+                column.num_vars,
+                evaluations,
+                zero_inner.clone(),
+            )
+        })
+    );
+
+    result
+}
+
 /// Project scalars of a UAIR onto F[X].
 pub fn project_scalars<F: PrimeField, U: Uair>(
-    project: impl Fn(&U::Scalar) -> DynamicPolynomialF<F>,
-) -> HashMap<U::Scalar, DynamicPolynomialF<F>> {
+    project: impl Fn(&U::Scalar) -> DynamicPolynomialF<F> + Sync,
+) -> ScalarMap<U::Scalar, DynamicPolynomialF<F>> {
     let uair_scalars = collect_scalars::<U>();
 
-    // TODO(Ilia): if there's a lot of scalars
-    //             we should do this in parallel probably.
-    uair_scalars
-        .into_iter()
+    cfg_into_iter!(uair_scalars)
         .map(|scalar| {
-            (scalar.clone(), {
-                let mut dynamic_poly = project(&scalar);
-
-                dynamic_poly.trim();
-
-                dynamic_poly
-            })
+            let mut dynamic_poly = project(&scalar);
+            dynamic_poly.trim();
+            (scalar, dynamic_poly)
         })
         .collect()
 }
@@ -319,12 +409,9 @@ pub fn project_scalars<F: PrimeField, U: Uair>(
 /// Project scalars of a UAIR along F[X] -> F.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
-    scalars: HashMap<R, DynamicPolynomialF<F>>,
+    scalars: ScalarMap<R, DynamicPolynomialF<F>>,
     projecting_element: &F,
-) -> Result<HashMap<R, F>, (R, F, EvaluationError)> {
-    // TODO(Ilia): Parallelising this might be good for big UAIRs.
-    //             We'd conditionally route between sequential and parallel
-    //             projection depending on how many scalars the UAIR has.
+) -> Result<ScalarMap<R, F>, (R, F, EvaluationError)> {
     let one = F::one_with_cfg(projecting_element.cfg());
     let zero = F::zero_with_cfg(projecting_element.cfg());
 
@@ -337,8 +424,7 @@ pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
 
     let projection_powers: Vec<F> = powers(projecting_element.clone(), one, max_coeffs_len);
 
-    Ok(scalars
-        .into_iter()
+    Ok(cfg_into_iter!(scalars)
         .map(|(scalar, value)| {
             let deg = value.degree().map_or(0, |d| d + 1);
             (

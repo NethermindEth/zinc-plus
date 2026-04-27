@@ -1,15 +1,15 @@
 use super::*;
 use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::Zero;
-use std::{collections::HashMap, fmt::Debug};
+use std::fmt::Debug;
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
     projections::{
-        ColumnMajorTrace, ProjectedTrace, RowMajorTrace, evaluate_trace_to_column_mles,
-        project_scalars, project_scalars_to_field, project_trace_coeffs_column_major,
-        project_trace_coeffs_row_major,
+        ColumnMajorTrace, ProjectedTrace, RowMajorTrace, ScalarMap,
+        evaluate_trace_to_column_mles_fast, project_scalars, project_scalars_to_field,
+        project_trace_coeffs_column_major, project_trace_coeffs_row_major,
     },
     sumcheck::multi_degree::MultiDegreeSumcheck,
 };
@@ -64,7 +64,7 @@ pub struct ProverProjectedCombined<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField,
     base: ProverBase<'a, Zt, U, F, D>,
     field_cfg: F::Config,
     projected_trace: RowMajorTrace<F>,
-    projected_scalars_fx: HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    projected_scalars_fx: ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
 }
 
 /// After step 1 via [`step1_mle_first`](ProverCommitted::step1_mle_first)
@@ -74,7 +74,7 @@ pub struct ProverProjectedMleFirst<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField,
     base: ProverBase<'a, Zt, U, F, D>,
     field_cfg: F::Config,
     projected_trace: ColumnMajorTrace<F>,
-    projected_scalars_fx: HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    projected_scalars_fx: ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
 }
 
 /// After step 1 via [`step1_hybrid`](ProverCommitted::step1_hybrid). Carries
@@ -88,7 +88,7 @@ pub struct ProverProjectedHybrid<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, c
     field_cfg: F::Config,
     row_major_trace: RowMajorTrace<F>,
     column_major_trace: ColumnMajorTrace<F>,
-    projected_scalars_fx: HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    projected_scalars_fx: ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
 }
 
 /// After step 2 (ideal check).
@@ -97,7 +97,7 @@ pub struct ProverIdealChecked<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, cons
     base: ProverBase<'a, Zt, U, F, D>,
     field_cfg: F::Config,
     projected_trace: ProjectedTrace<F>,
-    projected_scalars_fx: HashMap<U::Scalar, DynamicPolynomialF<F>>,
+    projected_scalars_fx: ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
 
     // New
     ic_proof: IdealCheckProof<F>,
@@ -115,7 +115,7 @@ pub struct ProverEvalProjected<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, con
 
     // New
     projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
-    projected_scalars_f: HashMap<U::Scalar, F>,
+    projected_scalars_f: ScalarMap<U::Scalar, F>,
 }
 
 /// After step 4 (sumcheck).
@@ -281,10 +281,10 @@ where
 impl_with_type_bounds!(ProverBase
 {
     #[allow(clippy::type_complexity)]
-    fn project_common<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
+    fn project_common<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync>(
         &mut self,
         project_scalar: S,
-    ) -> Result<(F::Config, HashMap<U::Scalar, DynamicPolynomialF<F>>), ProtocolError<F, U::Ideal>>
+    ) -> Result<(F::Config, ScalarMap<U::Scalar, DynamicPolynomialF<F>>), ProtocolError<F, U::Ideal>>
     {
         // `fixed-prime` branch: use the secp256k1 base field prime as the
         // projecting prime instead of drawing one from the transcript.
@@ -299,7 +299,7 @@ impl_with_type_bounds!(ProverBase
     /// (`\phi_q`: `Z[X] -> F_q[X]`). Samples a random prime, projects the
     /// full trace and scalars using the row-major layout.
     /// Works for both linear and non-linear constraints.
-    pub fn step1_combined<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
+    pub fn step1_combined<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync>(
         mut self,
         project_scalar: S,
     ) -> Result<ProverProjectedCombined<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
@@ -318,7 +318,7 @@ impl_with_type_bounds!(ProverBase
     /// (`\phi_q`: `Z[X] -> F_q[X]`). Samples a random prime, projects the
     /// full trace and scalars using the column-major layout.
     /// Only suitable for linear constraints.
-    pub fn step1_mle_first<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
+    pub fn step1_mle_first<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync>(
         mut self,
         project_scalar: S,
     ) -> Result<ProverProjectedMleFirst<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
@@ -338,7 +338,7 @@ impl_with_type_bounds!(ProverBase
     /// so the ideal-check can route them through their respective fast/slow
     /// lanes. Costs roughly the sum of `step1_combined` and
     /// `step1_mle_first` projection times.
-    pub fn step1_hybrid<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
+    pub fn step1_hybrid<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync>(
         mut self,
         project_scalar: S,
     ) -> Result<ProverProjectedHybrid<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
@@ -460,8 +460,11 @@ impl_with_type_bounds!(ProverIdealChecked
         let projecting_element: Zt::Chal = self.base.pcs_transcript.fs_transcript.get_challenge();
         let projecting_element_f: F = F::from_with_cfg(&projecting_element, &self.field_cfg);
 
-        let projected_trace_f =
-            evaluate_trace_to_column_mles(&self.projected_trace, &projecting_element_f);
+        let projected_trace_f = evaluate_trace_to_column_mles_fast(
+            self.base.trace,
+            &projecting_element_f,
+            &self.field_cfg,
+        );
 
         let projected_scalars_f =
             project_scalars_to_field(self.projected_scalars_fx, &projecting_element_f)
@@ -776,7 +779,7 @@ where
         ),
         trace: &UairTrace<'static, Zt::Int, Zt::Int, D>,
         num_vars: usize,
-        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
+        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
     ) -> Result<Proof<F>, ProtocolError<F, U::Ideal>> {
         let committed = Self::step0_commit(pp, trace, num_vars)?;
 
@@ -951,13 +954,13 @@ where
     let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
 
     let projected_trace_f =
-        evaluate_trace_to_column_mles(&projected_trace, &projecting_element_f);
+        evaluate_trace_to_column_mles_fast(trace, &projecting_element_f, &field_cfg);
     let projected_scalars_f =
         project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
             .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
     // ── Step 4: CPR + multi-degree sumcheck ─────────────────────────────
-    let max_degree = count_max_degree::<U>();
+    let max_degree = zinc_uair::degree_counter::count_max_degree::<U>();
     let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
         &mut pcs_transcript.fs_transcript,
         projected_trace_f.clone(),
@@ -1198,13 +1201,13 @@ where
     let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
 
     let projected_trace_f =
-        evaluate_trace_to_column_mles(&projected_trace, &projecting_element_f);
+        evaluate_trace_to_column_mles_fast(trace, &projecting_element_f, &field_cfg);
     let projected_scalars_f =
         project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
             .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
     // ── Step 4: CPR + multi-degree sumcheck ─────────────────────────────
-    let max_degree = count_max_degree::<U>();
+    let max_degree = zinc_uair::degree_counter::count_max_degree::<U>();
     let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
         &mut pcs_transcript.fs_transcript,
         projected_trace_f.clone(),

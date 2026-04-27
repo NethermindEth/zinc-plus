@@ -408,14 +408,30 @@ fn compute_lifted_evals<F: PrimeField, const D: usize>(
     let zero = F::zero_with_cfg(field_cfg);
 
     // Binary columns: exploit 0/1 structure for conditional additions.
+    // Pack each entry's up-to-64 boolean coefficients into a u64 so we
+    // can (a) skip entries that are identically zero, and (b) walk only
+    // the SET bits via `trailing_zeros` + Brian Kernighan's clear-lowest
+    // instead of branching on every slot.
+    debug_assert!(D <= 64, "compute_lifted_evals: bitmask packing assumes D <= 64");
     let mut result: Vec<DynamicPolynomialF<F>> = cfg_iter!(trace_bin_poly)
         .map(|col| {
             let mut coeffs = vec![zero.clone(); D];
             for (b, entry) in col.iter().enumerate() {
-                for (l, coeff) in entry.iter().enumerate() {
+                let mut bits: u64 = 0;
+                for (l, coeff) in entry.iter().enumerate().take(D) {
                     if coeff.into_inner() {
-                        coeffs[l] += &eq_table[b];
+                        bits |= 1u64 << l;
                     }
+                }
+                if bits == 0 {
+                    continue;
+                }
+                let eq_b = &eq_table[b];
+                let mut remaining = bits;
+                while remaining != 0 {
+                    let l = remaining.trailing_zeros() as usize;
+                    coeffs[l] += eq_b;
+                    remaining &= remaining - 1;
                 }
             }
             DynamicPolynomialF::new_trimmed(coeffs)

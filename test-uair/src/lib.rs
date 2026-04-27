@@ -1,7 +1,19 @@
 #![allow(clippy::arithmetic_side_effects)] // UAIRs should not care about overflows
+pub mod ecdsa;
+pub mod ecdsa_addition;
+pub mod ecdsa_affine;
+pub mod ecdsa_doubling;
 mod generate_trace;
+pub mod sha256;
+pub mod sha_ecdsa;
 
+pub use ecdsa::EcdsaUair;
+pub use ecdsa_addition::JacobianAdditionUair;
+pub use ecdsa_affine::AffineConversionUair;
+pub use ecdsa_doubling::{EC_FP_INT_LIMBS, EcdsaFpRing, JacobianDoublingUair};
 pub use generate_trace::*;
+pub use sha256::{Sha256CompressionSliceUair, Sha256Ideal};
+pub use sha_ecdsa::ShaEcdsaUair;
 
 use crypto_primitives::{ConstSemiring, FixedSemiring, Semiring, boolean::Boolean};
 use num_traits::Zero;

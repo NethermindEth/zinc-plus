@@ -22,14 +22,15 @@ use zinc_poly::{
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_protocol::{FoldedZincTypes, Proof, ZincPlusPiop, ZincTypes};
 use zinc_test_uair::{
-    BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
+    BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, EC_FP_INT_LIMBS,
+    EcdsaUair, GenerateRandomTrace, Sha256CompressionSliceUair, Sha256Ideal, ShaEcdsaUair,
     ShaProxy, TestUairNoMultiplication,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
     Uair, UairTrace,
     degree_counter::count_effective_max_degree,
-    ideal::{DegreeOneIdeal, Ideal, IdealCheck},
+    ideal::{DegreeOneIdeal, Ideal, IdealCheck, ImpossibleIdeal, rotation::RotationIdeal},
     ideal_collector::IdealOrZero,
 };
 use zinc_utils::{
@@ -289,6 +290,64 @@ fn setup_pp(num_vars: usize) -> Pp<BenchZincTypes> {
 }
 
 //
+// Real-UAIR bench types — wired for the EcdsaUair / Sha256CompressionSliceUair
+// / ShaEcdsaUair ports from main-gamma. Cell type is `Int<EC_FP_INT_LIMBS>`
+// (= `Int<5>`, 320-bit); CwR and CombR scale 2× and 4× respectively. F is
+// shared with `BenchZincTypes` (256-bit MontyField, holds the secp256k1
+// base prime used by `fixed_prime::secp256k1_field_cfg`).
+//
+
+type RealEcdsaInt = Int<EC_FP_INT_LIMBS>;
+
+type RealEcdsaBenchZincTypes = GenericBenchZincTypes<
+    /* Int = */ RealEcdsaInt,
+    /* CwR = */ Int<{ EC_FP_INT_LIMBS * 2 }>,
+    /* Chal = */ i128,
+    /* Pt = */ i128,
+    /* CombR = */ Int<{ EC_FP_INT_LIMBS * 4 }>,
+    /* Fmod = */ Uint<FIELD_LIMBS>,
+    MillerRabin,
+    DEGREE_PLUS_ONE,
+>;
+
+#[allow(clippy::unwrap_used)]
+fn setup_pp_real_ecdsa(num_vars: usize) -> Pp<RealEcdsaBenchZincTypes> {
+    let poly_size = 1 << num_vars;
+    (
+        ZipPlus::setup(
+            poly_size,
+            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+        ),
+        ZipPlus::setup(
+            poly_size,
+            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+        ),
+        ZipPlus::setup(
+            poly_size,
+            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+        ),
+    )
+}
+
+/// Project an `IdealOrZero<Sha256Ideal<RealEcdsaInt>>` to `Sha256Ideal<F>`
+/// for the verifier. Zero ideals are filtered upstream of this closure (see
+/// piop's ideal_check), so the `Zero` arm is unreachable.
+fn sha256_real_project_ideal(
+    ideal: &IdealOrZero<Sha256Ideal<RealEcdsaInt>>,
+    field_cfg: &<F as PrimeField>::Config,
+) -> Sha256Ideal<F> {
+    match ideal {
+        IdealOrZero::NonZero(Sha256Ideal::RotX2(r)) => {
+            Sha256Ideal::RotX2(RotationIdeal::from_with_cfg(r, field_cfg))
+        }
+        IdealOrZero::NonZero(Sha256Ideal::RotXw1) => Sha256Ideal::RotXw1,
+        IdealOrZero::Zero => {
+            unreachable!("zero ideals are filtered before this closure runs")
+        }
+    }
+}
+
+//
 // End-to-end benchmarks (total prove/verify time)
 //
 
@@ -299,7 +358,9 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
     num_vars: usize,
     pp: &Pp<Zt>,
     trace: &UairTrace<'static, Zt::Int, Zt::Int, DEGREE_PLUS_ONE>,
-    project_scalar: impl Fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F> + Copy,
+    project_scalar: impl Fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F>
+    + Copy
+    + Sync,
     project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
 ) where
     Zt: ZincTypes<DEGREE_PLUS_ONE>,
@@ -676,6 +737,134 @@ where
     );
 }
 
+//
+// Real-UAIR benches (ECDSA / SHA-256 / SHA+ECDSA from main-gamma).
+//
+// Each pair (`_e2e` and `_steps`) delegates to the generic `do_bench_e2e` /
+// `do_bench_steps` helpers above with `RealEcdsaBenchZincTypes` (Int<5>),
+// matching the eight-step taxonomy used by every other bench in this file.
+//
+
+fn bench_real_ecdsa_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = EcdsaUair<RealEcdsaInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_pp_real_ecdsa(num_vars);
+
+    let proj_ideal = |_: &IdealOrZero<<U as Uair>::Ideal>,
+                      _: &<F as PrimeField>::Config|
+     -> ImpossibleIdeal {
+        unreachable!("EcdsaUair has only assert_zero constraints")
+    };
+
+    do_bench_e2e::<RealEcdsaBenchZincTypes, U, _>(
+        group,
+        "RealEcdsa",
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        proj_ideal,
+    );
+}
+
+fn bench_real_ecdsa_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = EcdsaUair<RealEcdsaInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_pp_real_ecdsa(num_vars);
+
+    let proj_ideal = |_: &IdealOrZero<<U as Uair>::Ideal>,
+                      _: &<F as PrimeField>::Config|
+     -> ImpossibleIdeal {
+        unreachable!("EcdsaUair has only assert_zero constraints")
+    };
+
+    do_bench_steps::<RealEcdsaBenchZincTypes, U, _>(
+        group,
+        "RealEcdsa",
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        proj_ideal,
+    );
+}
+
+fn bench_real_sha256_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = Sha256CompressionSliceUair<RealEcdsaInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_pp_real_ecdsa(num_vars);
+
+    do_bench_e2e::<RealEcdsaBenchZincTypes, U, _>(
+        group,
+        "RealSha256",
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        sha256_real_project_ideal,
+    );
+}
+
+fn bench_real_sha256_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = Sha256CompressionSliceUair<RealEcdsaInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_pp_real_ecdsa(num_vars);
+
+    do_bench_steps::<RealEcdsaBenchZincTypes, U, _>(
+        group,
+        "RealSha256",
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        sha256_real_project_ideal,
+    );
+}
+
+fn bench_real_sha_ecdsa_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = ShaEcdsaUair<RealEcdsaInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_pp_real_ecdsa(num_vars);
+
+    do_bench_e2e::<RealEcdsaBenchZincTypes, U, _>(
+        group,
+        "RealShaEcdsa",
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        sha256_real_project_ideal,
+    );
+}
+
+fn bench_real_sha_ecdsa_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = ShaEcdsaUair<RealEcdsaInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_pp_real_ecdsa(num_vars);
+
+    do_bench_steps::<RealEcdsaBenchZincTypes, U, _>(
+        group,
+        "RealShaEcdsa",
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        sha256_real_project_ideal,
+    );
+}
+
 fn bench_no_mult_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     do_bench_uair::<TestUairNoMultiplication<i64>>(group, "NoMult", num_vars);
 }
@@ -735,6 +924,12 @@ fn e2e_benches(c: &mut Criterion) {
     bench_sha_proxy_e2e(&mut group, 10);
     bench_sha_proxy_e2e(&mut group, 12);
 
+    // Real UAIRs ported from main-gamma. Trace size for ECDSA needs >= 256
+    // rows (Shamir loop), so num_vars=9 is the smallest meaningful size.
+    bench_real_ecdsa_e2e(&mut group, 9);
+    bench_real_sha256_e2e(&mut group, 9);
+    bench_real_sha_ecdsa_e2e(&mut group, 9);
+
     group.finish();
 }
 
@@ -760,6 +955,12 @@ fn e2e_steps_benches(c: &mut Criterion) {
     bench_sha_proxy_steps(&mut group, 8);
     bench_sha_proxy_steps(&mut group, 10);
     bench_sha_proxy_steps(&mut group, 12);
+
+    // Real UAIRs ported from main-gamma. See `e2e_benches` for the
+    // num_vars=9 lower-bound rationale.
+    bench_real_ecdsa_steps(&mut group, 9);
+    bench_real_sha256_steps(&mut group, 9);
+    bench_real_sha_ecdsa_steps(&mut group, 9);
 
     group.finish();
 }

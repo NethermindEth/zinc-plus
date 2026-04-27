@@ -1,13 +1,14 @@
 use super::*;
 use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::Zero;
-use std::{collections::HashMap, io::Cursor};
+use std::io::Cursor;
 use zinc_piop::{
     combined_poly_resolver::{self, CombinedPolyResolver},
     ideal_check::{self, IdealCheckProtocol},
     multipoint_eval::{self, MultipointEval},
     projections::{
-        ProjectedTrace, project_scalars, project_scalars_to_field, project_trace_coeffs_row_major,
+        ProjectedTrace, ScalarMap, project_scalars, project_scalars_to_field,
+        project_trace_coeffs_row_major,
     },
     sumcheck::multi_degree::MultiDegreeSumcheck,
 };
@@ -138,7 +139,7 @@ pub struct VerifierEvalProjected<
     field_cfg: F::Config,
     ic_subclaim: ideal_check::VerifierSubclaim<F>,
     projecting_element_f: F,
-    projected_scalars_f: HashMap<U::Scalar, F>,
+    projected_scalars_f: ScalarMap<U::Scalar, F>,
 
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
@@ -396,7 +397,7 @@ where
     /// Step 3: Evaluation projection. Consumes `project_scalar`.
     pub fn step3_eval_projection(
         mut self,
-        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
+        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
     ) -> Result<VerifierEvalProjected<'a, Zt, U, F, IdealOverF, D>, ProtocolError<F, IdealOverF>>
     {
         let projecting_element: Zt::Chal = self.base.pcs_transcript.fs_transcript.get_challenge();
@@ -777,7 +778,7 @@ where
         proof: Proof<F>,
         public_trace: &UairTrace<Zt::Int, Zt::Int, D>,
         num_vars: usize,
-        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
+        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
     ) -> Result<(), ProtocolError<F, IdealOverF>>
     where
@@ -830,7 +831,7 @@ pub fn verify_folded<
     mut proof: Proof<F>,
     public_trace: &UairTrace<ZtF::Int, ZtF::Int, D>,
     num_vars: usize,
-    project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
+    project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
     project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
 ) -> Result<(), ProtocolError<F, IdealOverF>>
 where
