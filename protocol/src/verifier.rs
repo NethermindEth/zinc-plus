@@ -5,6 +5,7 @@ use std::{collections::HashMap, io::Cursor};
 use zinc_piop::{
     combined_poly_resolver::{self, CombinedPolyResolver},
     ideal_check::{self, IdealCheckProtocol},
+    lookup::booleanity::verify_bit_decomposition_consistency,
     multipoint_eval::{self, MultipointEval},
     projections::{
         ProjectedTrace, project_scalars, project_scalars_to_field, project_trace_coeffs_row_major,
@@ -444,11 +445,14 @@ where
     U: Uair + 'static,
     IdealOverF: Ideal,
 {
-    /// Step 4: Sumcheck verification (CPR + lookup groups).
+    /// Step 4: Sumcheck verification (CPR + algebraic booleanity).
     pub fn step4_sumcheck_verify(
         mut self,
     ) -> Result<VerifierSumchecked<'a, Zt, F, IdealOverF, D>, ProtocolError<F, IdealOverF>> {
         let num_constraints = count_constraints::<U>();
+        let num_binary_poly_cols =
+            self.base.uair_signature.total_cols().num_binary_poly_cols();
+        let num_bit_slices = num_binary_poly_cols * D;
 
         let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
             &mut self.base.pcs_transcript.fs_transcript,
@@ -456,6 +460,7 @@ where
             self.proof_combined_sumcheck.claimed_sums()[0].clone(),
             &self.ic_subclaim,
             num_constraints,
+            num_bit_slices,
             self.base.num_vars,
             &self.projecting_element_f,
             &self.field_cfg,
@@ -478,6 +483,17 @@ where
             &self.projected_scalars_f,
             &self.field_cfg,
         )?;
+
+        // Bit-decomposition consistency: each binary_poly column's
+        // F-projected MLE eval at r* must equal Σ_i a^i · bit_slice_eval[i],
+        // where `a` is the projecting element used in step 3 (ψ_a).
+        verify_bit_decomposition_consistency(
+            &cpr_subclaim.up_evals[..num_binary_poly_cols],
+            &cpr_subclaim.bit_slice_evals,
+            &self.projecting_element_f,
+            D,
+        )
+        .map_err(ProtocolError::Booleanity)?;
 
         let _ = &self.proof_lookup_proof;
 
@@ -902,13 +918,16 @@ where
         project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
             .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
-    // ── Step 4: Sumcheck verify (CPR) ───────────────────────────────────
+    // ── Step 4: Sumcheck verify (CPR + algebraic booleanity) ────────────
+    let num_binary_poly_cols = uair_signature.total_cols().num_binary_poly_cols();
+    let num_bit_slices = num_binary_poly_cols * D;
     let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
         &mut pcs_transcript.fs_transcript,
         &proof.resolver,
         proof.combined_sumcheck.claimed_sums()[0].clone(),
         &ic_subclaim,
         num_constraints,
+        num_bit_slices,
         num_vars,
         &projecting_element_f,
         &field_cfg,
@@ -929,6 +948,14 @@ where
         &projected_scalars_f,
         &field_cfg,
     )?;
+
+    verify_bit_decomposition_consistency(
+        &cpr_subclaim.up_evals[..num_binary_poly_cols],
+        &cpr_subclaim.bit_slice_evals,
+        &projecting_element_f,
+        D,
+    )
+    .map_err(ProtocolError::Booleanity)?;
 
     // ── Step 5: Multipoint eval ─────────────────────────────────────────
     let mp_subclaim = MultipointEval::verify_as_subprotocol(
@@ -1276,13 +1303,16 @@ where
         project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
             .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
-    // ── Step 4: Sumcheck verify (CPR) ───────────────────────────────────
+    // ── Step 4: Sumcheck verify (CPR + algebraic booleanity) ────────────
+    let num_binary_poly_cols = uair_signature.total_cols().num_binary_poly_cols();
+    let num_bit_slices = num_binary_poly_cols * D;
     let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
         &mut pcs_transcript.fs_transcript,
         &proof.resolver,
         proof.combined_sumcheck.claimed_sums()[0].clone(),
         &ic_subclaim,
         num_constraints,
+        num_bit_slices,
         num_vars,
         &projecting_element_f,
         &field_cfg,
@@ -1303,6 +1333,14 @@ where
         &projected_scalars_f,
         &field_cfg,
     )?;
+
+    verify_bit_decomposition_consistency(
+        &cpr_subclaim.up_evals[..num_binary_poly_cols],
+        &cpr_subclaim.bit_slice_evals,
+        &projecting_element_f,
+        D,
+    )
+    .map_err(ProtocolError::Booleanity)?;
 
     // ── Step 5: Multipoint eval ─────────────────────────────────────────
     let mp_subclaim = MultipointEval::verify_as_subprotocol(

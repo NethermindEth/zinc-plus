@@ -5,6 +5,7 @@ use std::{collections::HashMap, fmt::Debug};
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
+    lookup::booleanity::compute_bit_slices_flat,
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
     projections::{
         ColumnMajorTrace, ProjectedTrace, RowMajorTrace, evaluate_trace_to_column_mles,
@@ -503,9 +504,15 @@ impl_with_type_bounds!(ProverEvalProjected
         // dishonest prover could violate them undetected).
         let max_degree = count_max_degree::<U>();
 
+        let bit_slices = compute_bit_slices_flat::<F, D>(
+            &self.base.trace.binary_poly,
+            &self.field_cfg,
+        );
+
         let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
             &mut self.base.pcs_transcript.fs_transcript,
             self.projected_trace_f.clone(),
+            bit_slices,
             &self.ic_eval_point,
             &self.projected_scalars_f,
             num_constraints,
@@ -961,9 +968,11 @@ where
 
     // ── Step 4: CPR + multi-degree sumcheck ─────────────────────────────
     let max_degree = count_max_degree::<U>();
+    let bit_slices = compute_bit_slices_flat::<F, D>(&trace.binary_poly, &field_cfg);
     let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
         &mut pcs_transcript.fs_transcript,
         projected_trace_f.clone(),
+        bit_slices,
         &ic_eval_point,
         &projected_scalars_f,
         num_constraints,
@@ -1208,9 +1217,11 @@ where
 
     // ── Step 4: CPR + multi-degree sumcheck ─────────────────────────────
     let max_degree = count_max_degree::<U>();
+    let bit_slices = compute_bit_slices_flat::<F, D>(&trace.binary_poly, &field_cfg);
     let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
         &mut pcs_transcript.fs_transcript,
         projected_trace_f.clone(),
+        bit_slices,
         &ic_eval_point,
         &projected_scalars_f,
         num_constraints,
