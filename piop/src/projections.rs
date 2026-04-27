@@ -7,12 +7,16 @@ use std::{collections::HashMap, hash::BuildHasherDefault, iter};
 use zinc_poly::{
     EvaluationError,
     mle::DenseMultilinearExtension,
-    univariate::dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
+    univariate::{
+        binary::BinaryPoly,
+        dense::DensePolynomial,
+        dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
+    },
 };
 use zinc_uair::{Uair, UairTrace, collect_scalars::collect_scalars};
 use zinc_utils::{
-    UNCHECKED, cfg_extend, cfg_into_iter, cfg_iter, cfg_iter_mut, inner_product::InnerProduct,
-    powers,
+    UNCHECKED, cfg_extend, cfg_into_iter, cfg_iter, cfg_iter_mut, from_ref::FromRef,
+    inner_product::InnerProduct, powers, projectable_to_field::ProjectableToField,
 };
 
 /// HashMap specialization used for every `projected_scalars` lookup in the
@@ -304,6 +308,87 @@ pub fn evaluate_trace_to_column_mles<F: PrimeField + 'static>(
             })
             .collect(),
     }
+}
+
+/// Type-dispatched fast path equivalent to `evaluate_trace_to_column_mles`,
+/// but reads the original (un-prejected) `UairTrace` directly so each column
+/// type can use its optimal projection:
+///
+/// * `binary_poly`: `BinaryPoly::prepare_projection` — D conditional adds of
+///   precomputed `r^i`, no F multiplications.
+/// * `arbitrary_poly`: `DensePolynomial::prepare_projection` — Horner-style.
+/// * `int`: lift the constant to F directly (no inner product).
+///
+/// Avoids the bit→F blow-up done by `project_trace_coeffs_*` followed by a
+/// generic D-element inner product over `DynamicPolynomialF<F>` per cell.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn evaluate_trace_to_column_mles_fast<F, PolyCoeff, Int, const D: usize>(
+    trace: &UairTrace<PolyCoeff, Int, D>,
+    projecting_element: &F,
+    field_cfg: &F::Config,
+) -> Vec<DenseMultilinearExtension<F::Inner>>
+where
+    F: PrimeField + FromRef<F> + 'static,
+    F: for<'a> FromWithConfig<&'a Int>,
+    F::Inner: Default,
+    PolyCoeff: Clone + Send + Sync,
+    Int: Clone + Send + Sync,
+    DensePolynomial<PolyCoeff, D>: ProjectableToField<F>,
+{
+    let zero_inner = F::Inner::default();
+
+    let mut result = Vec::with_capacity(
+        trace.binary_poly.len() + trace.arbitrary_poly.len() + trace.int.len(),
+    );
+
+    let bin_proj = BinaryPoly::<D>::prepare_projection(projecting_element);
+    cfg_extend!(
+        result,
+        cfg_iter!(trace.binary_poly).map(|column| {
+            let evaluations: Vec<F::Inner> = column
+                .iter()
+                .map(|poly| bin_proj(poly).inner().clone())
+                .collect();
+            DenseMultilinearExtension::from_evaluations_vec(
+                column.num_vars,
+                evaluations,
+                zero_inner.clone(),
+            )
+        })
+    );
+
+    let arb_proj = DensePolynomial::<PolyCoeff, D>::prepare_projection(projecting_element);
+    cfg_extend!(
+        result,
+        cfg_iter!(trace.arbitrary_poly).map(|column| {
+            let evaluations: Vec<F::Inner> = column
+                .iter()
+                .map(|poly| arb_proj(poly).inner().clone())
+                .collect();
+            DenseMultilinearExtension::from_evaluations_vec(
+                column.num_vars,
+                evaluations,
+                zero_inner.clone(),
+            )
+        })
+    );
+
+    cfg_extend!(
+        result,
+        cfg_iter!(trace.int).map(|column| {
+            let evaluations: Vec<F::Inner> = column
+                .iter()
+                .map(|i| F::from_with_cfg(i, field_cfg).inner().clone())
+                .collect();
+            DenseMultilinearExtension::from_evaluations_vec(
+                column.num_vars,
+                evaluations,
+                zero_inner.clone(),
+            )
+        })
+    );
+
+    result
 }
 
 /// Project scalars of a UAIR onto F[X].
